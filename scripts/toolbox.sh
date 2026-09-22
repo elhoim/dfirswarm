@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# toolbox: what the forensic tools on this host are, before any money is spent.
+#
+#   scripts/toolbox.sh <sandbox> dfir[,crypto,linux] [--required]
+#
+# Writes <sandbox>/toolbox.json: {"preset", "checked_at", "present": [{name,
+# version, use}], "missing": [{name, use, install}]}. Missing tools are a WARN
+# line, or a BLOCKER (exit 3) with --required. swarm.sh renders the same into
+# SWARM.md so the agents start knowing what they have.
+set -euo pipefail
+
+sandbox="${1:-}"
+preset="${2:-dfir}"
+required=0
+[[ "${3:-}" == "--required" ]] && required=1
+[[ -n "$sandbox" && -d "$sandbox" ]] || { echo "toolbox: usage: toolbox.sh <sandbox> dfir[,crypto,linux] [--required]" >&2; exit 2; }
+# One case is not another: an encryption case wants aescrypt and dislocker,
+# a Linux case wants the journal readers, and neither is worth checking for
+# on a Windows disk. Sets are comma-separated; dfir is what every case gets.
+IFS="," read -r -a PRESETS <<< "$preset"
+for one in "${PRESETS[@]}"; do
+  case "$one" in
+    dfir|crypto|linux) ;;
+    *) echo "toolbox: unknown set $one (dfir, crypto, linux)" >&2; exit 2 ;;
+  esac
+done
+
+# name | how to get a version | what it is for | how to install it
+TOOLS=(
+  "mmls|mmls -V 2>&1 | head -1|partition table of a disk image (The Sleuth Kit)|brew install sleuthkit"
+  "fls|fls -V 2>&1 | head -1|file listing and body file of a filesystem (The Sleuth Kit)|brew install sleuthkit"
+  "icat|icat -V 2>&1 | head -1|extract a file by inode (The Sleuth Kit)|brew install sleuthkit"
+  "mactime|mactime -V 2>&1 | head -1|timeline from a body file (The Sleuth Kit)|brew install sleuthkit"
+  "vol|vol --help 2>&1 | head -1|memory forensics (Volatility 3)|pipx install volatility3"
+  "regipy-dump|python3 -c 'import regipy; print(getattr(regipy, \"__version__\", \"ok\"))'|registry hives (regipy, python)|python3 -m pip install --user regipy"
+  "evtx_dump|python3 -c 'import Evtx; print(\"python-evtx ok\")'|Windows event logs (python-evtx)|python3 -m pip install --user python-evtx"
+  "esedbexport|esedbexport -V 2>&1 | head -1|ESE databases: WebCacheV01.dat, SRUDB.dat, spartan.edb (libesedb)|brew install libesedb; apt-get install libesedb-utils"
+  "yara|yara --version 2>&1 | head -1|pattern sweeps over files and memory|brew install yara"
+  "exiftool|exiftool -ver 2>&1 | head -1|file metadata|brew install exiftool"
+  "sqlite3|sqlite3 -version 2>&1 | head -1|browser and application databases|preinstalled on macOS; apt-get install sqlite3"
+  "strings|strings --version 2>&1 | head -1 || echo bsd|printable strings in binaries|preinstalled"
+  "python3|python3 --version 2>&1|scripts and forged tools|https://python.org"
+)
+
+# What a case about encryption needs, and what a Linux image needs. Added to
+# the list only when the kickoff asks for them, so a Windows disk case is not
+# told it is missing dislocker.
+#
+# The crypto set is arranged around one distinction, learned on BelkaCTF #6:
+# **mounting is privileged, reading is not.** `dislocker`, `bdemount` and
+# `vhdimount` are FUSE tools — they want a mount point, which on macOS means
+# a kernel extension and on Linux a setuid helper, and neither is available
+# inside this sandbox. `pybde`, `pyvhdi`, `pytsk3` and `dfvfs` open the same
+# formats as files, decrypt in user space and hand back a byte stream. A run
+# with no root can still read a BitLocker volume inside a VHDX inside an
+# alternate data stream — but only if those libraries are there.
+CRYPTO_TOOLS=(
+  "aescrypt|python3 -c 'import pyAesCrypt; print(\"pyAesCrypt ok\")'|AES Crypt containers (pyAesCrypt)|python3 -m pip install --user pyAesCrypt"
+  "dislocker|dislocker -V 2>&1 | head -1|BitLocker volumes|brew install dislocker"
+  "bdeinfo|bdeinfo -V 2>&1 | head -1|BitLocker volume headers and protectors, without mounting (libbde)|brew install libbde; apt-get install libbde-utils"
+  "pybde|python3 -c 'import pybde; print(pybde.get_version())'|unlock and read a BitLocker volume in place, no root and no mount (libbde python bindings)|python3 -m pip install --user libbde-python"
+  "vhdiinfo|vhdiinfo -V 2>&1 | head -1|VHD and VHDX virtual disks, without mounting (libvhdi)|brew install libvhdi; apt-get install libvhdi-utils"
+  "pyvhdi|python3 -c 'import pyvhdi; print(pyvhdi.get_version())'|read a VHD/VHDX in place (libvhdi python bindings)|python3 -m pip install --user libvhdi-python"
+  "luksdeinfo|luksdeinfo -V 2>&1 | head -1|LUKS volumes, without mounting (libluksde)|brew install libluksde; apt-get install libluksde-utils"
+  "qemu-img|qemu-img --version 2>&1 | head -1|convert VHDX, VMDK, QCOW2 to raw so the rest of the toolbox can read them|brew install qemu; apt-get install qemu-utils"
+  "pytsk3|python3 -c 'import pytsk3; print(pytsk3.get_version())'|read a filesystem from a byte stream instead of a mount point (The Sleuth Kit python bindings)|python3 -m pip install --user pytsk3"
+  "dfvfs|python3 -c 'import dfvfs; print(dfvfs.__version__)'|stack the layers — EWF, VHDX, BitLocker, LUKS, NTFS — in one process, no mount and no root|python3 -m pip install --user dfvfs"
+  "openssl|openssl version 2>&1|keys, certificates, raw ciphers|preinstalled"
+  "gpg|gpg --version 2>&1 | head -1|OpenPGP keys and messages|brew install gnupg"
+  "john|john --list=build-info 2>&1 | head -1|passphrases on recovered key material|brew install john-jumbo"
+)
+LINUX_TOOLS=(
+  "ext4fuse|ext4fuse --version 2>&1 | head -1|reading ext4 without root|brew install ext4fuse"
+  "journalctl|journalctl --version 2>&1 | head -1|systemd journals from a mounted root|apt-get install systemd"
+  "bulk_extractor|bulk_extractor -V 2>&1 | head -1|carving features out of a raw image|brew install bulk_extractor"
+)
+for one in "${PRESETS[@]}"; do
+  case "$one" in
+    crypto) TOOLS+=("${CRYPTO_TOOLS[@]}") ;;
+    linux) TOOLS+=("${LINUX_TOOLS[@]}") ;;
+  esac
+done
+
+present=()
+missing=()
+warn=()
+for spec in "${TOOLS[@]}"; do
+  name="${spec%%|*}"; rest="${spec#*|}"
+  probe="${rest%%|*}"; rest="${rest#*|}"
+  use="${rest%%|*}"; install="${rest#*|}"
+  case "$name" in
+    regipy-dump|evtx_dump|aescrypt)
+      if version="$(bash -c "$probe" 2>/dev/null | head -1)" && [[ -n "$version" ]]; then ok=1; else ok=0; version=""; fi ;;
+    *) if command -v "$name" >/dev/null 2>&1; then ok=1; version="$(bash -c "$probe" 2>/dev/null | head -1 | tr -d '\r' || true)"; else ok=0; version=""; fi ;;
+  esac
+  if [[ "$ok" -eq 1 ]]; then
+    present+=("$(jq -cn --arg n "$name" --arg v "${version:-present}" --arg u "$use" '{name: $n, version: $v, use: $u}')")
+  else
+    missing+=("$(jq -cn --arg n "$name" --arg u "$use" --arg i "$install" '{name: $n, use: $u, install: $i}')")
+    warn+=("$name")
+  fi
+done
+
+printf '%s\n' "${present[@]+"${present[@]}"}" | jq -s --arg preset "$preset" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --argjson missing "$(printf '%s\n' "${missing[@]+"${missing[@]}"}" | jq -s '.')" \
+  '{preset: $preset, checked_at: $at, present: ., missing: $missing}' > "$sandbox/toolbox.json"
+
+if [[ "${#warn[@]}" -gt 0 ]]; then
+  if [[ "$required" -eq 1 ]]; then
+    echo "BLOCKER: --toolbox-required and these tools are missing: ${warn[*]}. See toolbox.json for the install commands." >&2
+    exit 3
+  fi
+  echo "WARN: toolbox: missing ${warn[*]} (install commands in toolbox.json)" >&2
+fi
+echo "toolbox: $(( ${#present[@]} )) present, ${#missing[@]} missing -> $sandbox/toolbox.json"

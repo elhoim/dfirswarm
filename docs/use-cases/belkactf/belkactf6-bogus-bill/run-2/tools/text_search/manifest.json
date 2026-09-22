@@ -1,0 +1,35 @@
+{
+  "name": "text_search",
+  "description": "Search a text file for regex patterns and return matching lines with line numbers",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "File to search",
+      "required": true
+    },
+    "pattern": {
+      "type": "string",
+      "description": "Regex",
+      "required": true
+    },
+    "ignore_case": {
+      "type": "boolean",
+      "description": "Case insensitive (default true)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Max lines to return"
+    },
+    "context": {
+      "type": "integer",
+      "description": "Context lines around each hit"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "by": "s83fd02",
+  "at": "2026-09-21T11:24:34.702Z",
+  "version": 1,
+  "sha256": "bbbc1ebad44d648a2270a9252d9b3d11de7570e599b0bdcd8398ca64c3ce96f2"
+}

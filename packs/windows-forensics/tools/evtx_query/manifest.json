@@ -1,0 +1,41 @@
+{
+  "name": "evtx_query",
+  "description": "Parse an EVTX file and return filtered events with timestamp, event_id, channel, computer, record_id, and named data fields.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Path to the EVTX file"
+    },
+    "event_ids": {
+      "type": "array",
+      "description": "Optional list of numeric event IDs to include"
+    },
+    "contains": {
+      "type": "string",
+      "description": "Optional case-insensitive substring that must appear in the XML"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum number of events to return",
+      "required": false
+    },
+    "start_record": {
+      "type": "integer",
+      "description": "Optional minimum EventRecordID",
+      "required": false
+    },
+    "end_record": {
+      "type": "integer",
+      "description": "Optional maximum EventRecordID",
+      "required": false
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"path\":\"work/extracted/evtx/Security.evtx\",\"event_ids\":[4624,4672],\"limit\":5}",
+  "by": "sbe1801",
+  "at": "2026-09-18T12:56:43.858Z",
+  "version": 1,
+  "sha256": "275a1c768e5e92907eca29d73ff94ad6f8fd4578d60605342f89d1816dd88416"
+}

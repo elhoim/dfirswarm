@@ -1,0 +1,79 @@
+{
+  "name": "dfirswarm",
+  "version": "0.3.0",
+  "private": true,
+  "description": "DFIR Swarm: an agent swarm for digital forensics and incident response. Local, observable peer agents on Herdr + Pi: a sanctioned file board, enforced write leases, read-only evidence guarded at the kernel, a shared ledger, a harness-owned stop sentinel, spend, token and wall-clock caps, an egress allowlist and a live LAN console.",
+  "license": "AGPL-3.0-or-later",
+  "author": "Halil Öztürkci",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/halilozturkci/dfirswarm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/halilozturkci/dfirswarm/issues"
+  },
+  "homepage": "https://github.com/halilozturkci/dfirswarm#readme",
+  "keywords": [
+    "dfirswarm",
+    "forensics",
+    "incident-response",
+    "digital-forensics",
+    "dfir",
+    "agent-swarm",
+    "multi-agent",
+    "ai-agents",
+    "coding-agents",
+    "ai-safety",
+    "pi",
+    "herdr"
+  ],
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/dry-run.test.ts tests/plan.test.ts tests/summary.test.ts tests/ui-server.test.ts tests/extension-imports.test.ts tests/pi-load.test.ts tests/tool-library.test.ts tests/tool-library-parsers.test.ts tests/live-version.test.ts tests/overview-status.test.ts tests/artifacts.test.ts tests/report.test.ts tests/dossier.test.ts tests/thinking.test.ts tests/board.test.ts tests/trace-record.test.ts tests/pager.test.ts tests/sandbox-phase0.test.ts tests/sandbox-phase1.test.ts tests/nudge-broker.test.ts tests/model-caps.test.ts tests/turn-error.test.ts tests/finish-line.test.ts tests/append-only-watch.test.ts tests/library.test.ts tests/self-compact.test.ts tests/self-compact-e2e.test.ts tests/context-series.test.ts tests/context-audit.test.ts",
+    "test:server": "node --experimental-strip-types --test tests/ui-server.test.ts",
+    "dry-run": "bash scripts/dry-run.sh",
+    "typecheck": "tsc -p tsconfig.json && tsc -p ui/tsconfig.json",
+    "spawn": "bash scripts/spawn.sh",
+    "swarm": "bash scripts/swarm.sh",
+    "watch": "bash scripts/watch.sh",
+    "ui": "bash scripts/swarm.sh ui",
+    "ui:server": "node --experimental-strip-types scripts/ui-server.ts",
+    "ui:dev": "vite --config ui/vite.config.ts",
+    "ui:build": "vite build --config ui/vite.config.ts",
+    "ui:preview": "vite preview --config ui/vite.config.ts",
+    "ui:fixture": "node --experimental-strip-types scripts/seed-fixture.ts",
+    "summary": "node --experimental-strip-types scripts/summary.ts",
+    "test:bash": "bash scripts/test-bash.sh"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "dependencies": {
+    "typebox": "^1.3.33"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "@radix-ui/react-dialog": "^1.1.23",
+    "@radix-ui/react-label": "^2.1.15",
+    "@radix-ui/react-slot": "^1.3.3",
+    "@radix-ui/react-switch": "^1.3.7",
+    "@radix-ui/react-tooltip": "^1.2.16",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^22.20.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.46.0",
+    "playwright": "^1.63.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-router-dom": "^7.18.4",
+    "tailwind-merge": "^3.7.0",
+    "tailwindcss": "^4.3.3",
+    "tw-animate-css": "^1.4.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0"
+  }
+}

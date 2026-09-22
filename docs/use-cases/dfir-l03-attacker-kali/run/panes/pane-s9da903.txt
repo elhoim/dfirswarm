@@ -1,0 +1,80 @@
+ echo 'syslog' $(shasum -a 256 work/extracted/s9da903/syslog | awk '{print $1}')
+  (timeout 15s)
+
+ eb473c7ed12fcc94d6ff6d5789256abf4d3073ce7d5c0c194281d8c217f7655c  work/extracted/s9da906/root_bash_history
+ 1545759b506187d118fc7c1b43f31b87982df8faeafe898aba23a5692fafbcdd  work/extracted/s9da903/wtmp
+ dd3c587f7fd67db61af3929f6b28eaaf36fa6c707a24a58dc2da25a3fb52837c  work/extracted/s9da903/hostname
+ 5dfcacb896c93ee13cc4725db4893c77dfe533eae5515ed110777966cfed6db3  work/extracted/s9da903/passwd
+ syslog 26afc7b618de9bcb9a5d59261897346b013c524608060dae1f0e39aa0299a368
+
+ Took 0.5s
+
+
+
+ claim_file
+ {
+   "ok": true,
+   "path": "work/report.md",
+   "owner": "s9da903",
+   "reason": "Timezone correction: syslog/apt/msf logs are EDT not UTC; add wtmp/Q5 hashes",
+   "seconds": 180,
+   "expires_at": "2026-09-18T23:58:55.869Z",
+   "refreshed": false,
+   "note": "Claimed 'work/report.md' for 180s. Make your edit, then release_file(\"work/report.md\"). Re-call
+ claim_file to renew."
+ }
+ ... (1 more lines, ctrl+o to expand)
+
+
+
+ claim_file
+ {
+   "ok": true,
+   "path": "work/timeline.md",
+   "owner": "s9da903",
+   "reason": "Convert syslog-derived rows from EDT wall-clock to true UTC",
+   "seconds": 180,
+   "expires_at": "2026-09-18T23:58:55.849Z",
+   "refreshed": false,
+   "note": "Claimed 'work/timeline.md' for 180s. Make your edit, then release_file(\"work/timeline.md\"). Re-call
+ claim_file to renew."
+ }
+ ... (1 more lines, ctrl+o to expand)
+
+
+
+ write work/timeline.md
+
+ # Attacker Timeline — Kali Linux System (AH-L03)
+
+ **Time zones.** `wtmp` `ut_tv` and catalog `timeline.csv` (mactime `-y`) are true **UTC**. Guest **syslog / auth.log /
+ apt / Metasploit framework.log** wall-clock in Sep 3–8 is **America/New_York EDT (UTC−4)** — proven by NetworkManager
+ epoch `1567913860` at syslog `Sep  7 23:37:40 Loki` (= 2019-09-08T03:37:40Z) and wtmp `BOOT_TIME` 2019-09-06T22:53:27Z
+ matching syslog `Sep  6 18:53`. Table below is **UTC**. Oct 12 acquisition-day syslog already matches UTC.
+
+ Sources cited by inode from `catalog/workshop-kali.E01/p2048/`. Ledger: `ledger/ledger.md`.
+
+ | # | Timestamp (UTC) | Event | Source | Evidence |
+ |---|---|---|---|---|
+ | 1 | 2019-05-17T16:14:51Z | Kali 4.19 image first boot (workshop OS build; not this intrusion) | wtmp inode 274890 |
+ parse_utmp BOOT_TIME host=4.19.0-kali4-amd64 |
+ | 2 | 2019-09-04T00:48:30Z | Attacker VM boots; DHCP 192.168.11.133 (syslog local Sep 3 20:48) | wtmp 274890; syslog
+ 272753 | BOOT_TIME; `DHCPACK of 192.168.11.133 from 192.168.11.254` |
+ ... (34 more lines, 44 total, ctrl+o to expand)
+
+ Operation aborted
+
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+The swarm is finished: done/SWARM_DONE exists (All deliverables complete: work/report.md (6 sections, all questions
+answered with cited evidence), work/timeline.md (37 rows), ledger (63 events), sign-off posted by s9da905 verifying
+hashes, content, and structural checks. Inputs verified unchanged.). Call done now and stop.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9da9 • s9da903
+↑1.2M ↓15k R769k $2.809 27.3%/500k (auto)                                              (azure-foundry) grok-4.6 • medium
+swarm:s9da903
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9da9/.pi-sessions/s9da903
+--session 01a0b6e0-13ff-7393-b1d4-e748889dbaa9
+    ~/DF/Sa/AliHadi-s/s9da9                                                    ✔  took 21m 31s   at 02:57:04 

@@ -1,0 +1,80 @@
+ }
+
+
+
+
+ post
+ {
+   "ok": true,
+   "id": 223,
+   "path": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s69d3/threads/main/000223-s69d302.md",
+   "tag": "result"
+ }
+
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s69d3/work/report.md:1-80
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s69d3/work/timeline.md
+
+
+
+ claims
+ {
+   "n": 2,
+   "claims": [
+     {
+       "path": "work/report.md",
+       "owner": "s69d305",
+       "reason": "Fixing report per peer veto: remove filecrypt.sys as RansomCare, correct note attribution",
+       "seconds": 300,
+       "claimed_at": "2026-09-18T22:04:32.889Z",
+       "expires_at": "2026-09-18T22:09:59.499Z",
+ ... (14 more lines, ctrl+o to expand)
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s69d3/work/report.md:80-329
+
+
+
+ budget
+ {
+   "budget": {
+     "cap_usd": 90,
+     "spent_usd": 25.131507,
+     "tokens": 19870338,
+     "calls": 229,
+     "wall_clock_minutes": 240,
+     "started_at": "2026-09-18T21:44:31Z",
+     "source": "pi.sessionManager.getEntries",
+     "hard_kill": false,
+ ... (101 more lines, ctrl+o to expand)
+
+
+
+ post
+ Operation aborted
+
+
+
+ wait
+ This operation was aborted
+
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+The swarm is finished: done/SWARM_DONE exists (All definition-of-done checks pass: report.md with 6 sections exists,
+timeline.md with 24 rows built, ledger has 88 events, inputs verified, sign-off posted. RansomCare (Tocrypt)
+identified and documented across both dumps.). Call done now and stop.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s69d3 • s69d302
+↑1.1M ↓11k R519k $2.452 28.3%/500k (auto)                                              (azure-foundry) grok-4.6 • medium
+swarm:s69d302
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s69d3/.pi-sessions/s69d302
+--session 01a0b67a-9069-7048-9f2c-6ce168f8815d
+    ~/DF/Sa/AliHadi-s/s69d3                                                    ✔  took 22m 46s   at 01:07:26 

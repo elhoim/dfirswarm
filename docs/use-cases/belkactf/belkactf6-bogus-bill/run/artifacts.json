@@ -1,0 +1,3242 @@
+{
+  "generated_at": "2026-09-20T19:17:48.181Z",
+  "files": [
+    {
+      "path": "work/dependencies.md",
+      "bytes": 6732,
+      "mtime": "2026-09-20T18:34:56.822Z",
+      "sha256": "08d9785a58a19149af3d5cd99726cf81f81e4439720b91ee3cb25870b36b7a15",
+      "kind": "text",
+      "packaged": true,
+      "revisions": 10,
+      "last_written_by": "s821c07"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/containers/Data/System/23801560-4E89-4EBB-B41C-A73FF3AF4FE8/Library/activation_records/activation_record.plist",
+      "bytes": 7929,
+      "mtime": "2023-08-24T21:19:19.000Z",
+      "sha256": "f6ea9ea48b8fe4c7b57b58c45c68d95697da46f77b1df079281d17409d4e76af",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/containers/Data/System/23801560-4E89-4EBB-B41C-A73FF3AF4FE8/Library/internal/data_ark.plist",
+      "bytes": 8252,
+      "mtime": "2024-04-05T21:10:54.000Z",
+      "sha256": "34fc21b352e8f849087dc5f638cba203da4435cadf4961fc129c884c7950a736",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Containers/Shared/AppGroup/AF67BA79-B4B6-4F89-AD78-9054620F3322/NoteStore.sqlite",
+      "bytes": 299008,
+      "mtime": "2024-03-24T23:38:08.000Z",
+      "sha256": "1d9d7ae5f11d86bf253b011d4dd894dc06b7f31614dae4d546de8eac43540f8c",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Containers/Shared/AppGroup/AF67BA79-B4B6-4F89-AD78-9054620F3322/NoteStore.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:32:49.918Z",
+      "sha256": "80b8fdb856cf75bf1a99fec5fec2d2080438d9a2c8da5db184ea50a8f1f4013b",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Containers/Shared/AppGroup/AF67BA79-B4B6-4F89-AD78-9054620F3322/NoteStore.sqlite-wal",
+      "bytes": 333752,
+      "mtime": "2024-03-24T23:39:33.000Z",
+      "sha256": "09df7af2ea9a05a13817181e53bc6d27d6b0c071a4081f7b31b4098b5760a066",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Accounts/Accounts3.sqlite",
+      "bytes": 225280,
+      "mtime": "2026-09-20T18:06:00.409Z",
+      "sha256": "2d684e7cda89e7e20687ba2c39c995cb0a227d48ce1e4b26c4f2d7ea50ce416f",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Accounts/Accounts3.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:06:57.303Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Accounts/Accounts3.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:06:00.410Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Accounts/persona.cache",
+      "bytes": 413,
+      "mtime": "2023-08-24T21:18:14.000Z",
+      "sha256": "b2e5f4dc34b66ba0995b01bd46db81947e7a525973b51e86a1dd564e47affa6f",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/AddressBook/AddressBook.sqlitedb",
+      "bytes": 307200,
+      "mtime": "2026-09-20T18:06:00.303Z",
+      "sha256": "18d9f22371f4cddfdd7babfa4ed18a75fd834bec1fbf1aa3daa4072a686454dc",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/AddressBook/AddressBook.sqlitedb-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:34:12.154Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/AddressBook/AddressBook.sqlitedb-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:06:00.305Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Caches/com.apple.routined/Cache.sqlite",
+      "bytes": 4096,
+      "mtime": "2024-04-04T05:13:29.000Z",
+      "sha256": "b3f176fd152631e986aff7544248fc5be8e9d9ff55b80c11cfe240b09c2bd379",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Caches/com.apple.routined/Cache.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:13:23.106Z",
+      "sha256": "70b4d7d31aea6b52fc8ae6bc6f85342eb957ae0a2d66c26ab33551662fab8e8b",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Caches/com.apple.routined/Cache.sqlite-wal",
+      "bytes": 898192,
+      "mtime": "2024-04-05T21:11:30.000Z",
+      "sha256": "ec8a96f82fbc49c90e40753a9d37768825128b7e26790764cd1d519dbf902a46",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Caches/com.apple.routined/Cloud-V2.sqlite",
+      "bytes": 4096,
+      "mtime": "2024-04-04T05:13:29.000Z",
+      "sha256": "b3f176fd152631e986aff7544248fc5be8e9d9ff55b80c11cfe240b09c2bd379",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Caches/com.apple.routined/Cloud-V2.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:12:50.079Z",
+      "sha256": "ec62423c4e5f3fcdf4e3dcf4ec5d4408bb3cc7cabaa7f191dbf733ab1a07bb8f",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Caches/com.apple.routined/Cloud-V2.sqlite-wal",
+      "bytes": 605672,
+      "mtime": "2024-03-18T19:06:24.000Z",
+      "sha256": "2006216f4ff9ff261f6e149229017ecd9f520a94fe9ceab7efd8da550d827d3b",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Caches/com.apple.routined/Local.sqlite",
+      "bytes": 4096,
+      "mtime": "2024-04-04T05:13:30.000Z",
+      "sha256": "b3f176fd152631e986aff7544248fc5be8e9d9ff55b80c11cfe240b09c2bd379",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Caches/com.apple.routined/Local.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:12:50.077Z",
+      "sha256": "698f617a09347bb9b03837bfc33cfbec4cc033667399c7038ddc6f1d9363dd63",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Caches/com.apple.routined/Local.sqlite-wal",
+      "bytes": 486192,
+      "mtime": "2024-03-18T19:06:23.000Z",
+      "sha256": "82f89b13e729237ac3f75142752c69c312536304e43c78167416e32c825ea335",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Calendar/Calendar.sqlitedb",
+      "bytes": 966656,
+      "mtime": "2024-04-05T21:10:53.000Z",
+      "sha256": "bc81cf8f143af310fd3e3cd126f68df11101eaa80273b70c0c8663e5e2317257",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Calendar/Calendar.sqlitedb-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:35:14.820Z",
+      "sha256": "c0fae851f86c7f081d4b1519fa965259cb3a68747005fa4313be249b3e20bca3",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Calendar/Calendar.sqlitedb-wal",
+      "bytes": 16512,
+      "mtime": "2024-04-05T21:11:02.000Z",
+      "sha256": "4c0ede7d71fa6c382741529f054694a75b13120c6b898a6b783e32364ca2d6f2",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Maps/navd.cache",
+      "bytes": 4096,
+      "mtime": "2024-04-05T21:10:55.000Z",
+      "sha256": "3d1e98365599c0aadf69ebddee20431cd8525432f9306c8b0e82a09f9ef2b76d",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Maps/navd.cache-wal",
+      "bytes": 78312,
+      "mtime": "2024-04-05T21:10:56.000Z",
+      "sha256": "26e9fe1f42aba789d0af4f0595547eaa640824a2735e2f3cf30de3087c18e5ac",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Notes/notes.sqlite",
+      "bytes": 143360,
+      "mtime": "2023-08-24T22:24:01.000Z",
+      "sha256": "29dfe2b4bfb8d1753c3f04e52a1e61459d265ac45031c2b4c6ffe88c19a96e76",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Notes/notes.sqlite-wal",
+      "bytes": 131872,
+      "mtime": "2023-09-19T21:51:29.000Z",
+      "sha256": "859632f4b3ba0847c81511002a17c6385ed99fd4e5a7df2d2946743e63a42654",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Reminders/Container_v1/Stores/Data-local.sqlite",
+      "bytes": 593920,
+      "mtime": "2023-08-24T21:18:17.000Z",
+      "sha256": "bc4fab078e5b443efcd8df03f5760a85fb3bea38d28616c819735fd1104e68c8",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Reminders/Container_v1/Stores/Data-local.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:15:42.001Z",
+      "sha256": "704be124a05031fedb32e3fe15b983102c7776807eaf2844ff51543685cae1ce",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Reminders/Container_v1/Stores/Data-local.sqlite-wal",
+      "bytes": 12392,
+      "mtime": "2023-08-24T21:19:13.000Z",
+      "sha256": "0d6c70551e22eb0c4022e6f3284609092a5d6bd8e0410aa65ded0d479b89d22d",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Safari/Bookmarks.db",
+      "bytes": 4096,
+      "mtime": "2023-08-24T21:18:21.000Z",
+      "sha256": "3d1e98365599c0aadf69ebddee20431cd8525432f9306c8b0e82a09f9ef2b76d",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Safari/Bookmarks.db-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:21:53.954Z",
+      "sha256": "416954cdeb6ab9c50418195f76ee4e351a717d7ec4cf9761f7c22bcc074d136f",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Safari/Bookmarks.db-wal",
+      "bytes": 1854032,
+      "mtime": "2024-02-06T02:24:21.000Z",
+      "sha256": "2431d273e0479a182f0653f95bc63ba7bf5f239515a9c31ea8b910428d8ac516",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Safari/BrowserState.db",
+      "bytes": 1773568,
+      "mtime": "2024-04-04T05:12:23.000Z",
+      "sha256": "a150be61f01879db94c907ec343c49ee8f9907602eb0abde41608edbc2d94e8d",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Safari/BrowserState.db-wal",
+      "bytes": 2855192,
+      "mtime": "2024-04-03T07:28:19.000Z",
+      "sha256": "ea1fd544732f100e8676bc0387f6a7cebbb686d71f3ecb742d78815382dd2db4",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Safari/History.db",
+      "bytes": 139264,
+      "mtime": "2026-09-20T18:26:11.083Z",
+      "sha256": "f2f561e23cdd537ae2c3479286d5e368428ea117033bc4b23d0997df0bf4a1e8",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Safari/History.db-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:34:26.784Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Safari/History.db-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:26:11.084Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/Shortcuts/Shortcuts.sqlite",
+      "bytes": 335872,
+      "mtime": "2026-09-20T18:23:45.571Z",
+      "sha256": "b0701ed59bd3c26bf7980b0c95ba1fc7efa385fef411f89fd743ce2479ec959d",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/SMS/sms.db",
+      "bytes": 294912,
+      "mtime": "2024-04-05T21:07:04.000Z",
+      "sha256": "93099ce2ad3eb5fdbf41ad41c43e6828c191c119362e8278d8656ed12fb95788",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/SMS/sms.db-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:13:23.114Z",
+      "sha256": "46af2ea017e322730310f0f9052c1be2fa9b2c053649da171fde1a94084d8647",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Library/SMS/sms.db-wal",
+      "bytes": 601552,
+      "mtime": "2024-04-05T21:07:04.000Z",
+      "sha256": "bd852d9189f60a941b2c70580f9f760df44c86b2df32cc081cdd770ad0c6461a",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/DCIM/100APPLE/IMG_0002.PNG",
+      "bytes": 562023,
+      "mtime": "2023-08-26T18:44:21.000Z",
+      "sha256": "4c334a4ec37c067df411c7efe5c7c1ceb6cb55960ac9ac1b5c01190c92706ca6",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/DCIM/100APPLE/IMG_0008.PNG",
+      "bytes": 1079931,
+      "mtime": "2023-09-28T22:43:32.000Z",
+      "sha256": "0521a07dfe9e85b3afb3506550b84bc1f79678e7d91229d094ce384155f8fc44",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/DCIM/100APPLE/IMG_0009.JPG",
+      "bytes": 36550,
+      "mtime": "2023-09-28T22:45:06.000Z",
+      "sha256": "59a88579efaecf29dc2451e07bc22e3543faca3f492530d473ddd9aadd88c820",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/DCIM/100APPLE/IMG_0010.JPG",
+      "bytes": 34911,
+      "mtime": "2023-09-28T22:45:09.000Z",
+      "sha256": "f27f3c0d3ce343a1e9bf6fe8e982a97a38a84fff31ba8138028dfb41ea7d7f99",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/DCIM/100APPLE/IMG_0011.PNG",
+      "bytes": 2009548,
+      "mtime": "2023-10-08T17:25:05.000Z",
+      "sha256": "cb2f54b58e68808d40841ffa657fc7c3557a34fef057684a33d6979a7abfc5e1",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/DCIM/100APPLE/IMG_0027.JPG",
+      "bytes": 29535,
+      "mtime": "2023-12-24T16:36:38.000Z",
+      "sha256": "281c8f1da11f2fe4ce61143ddf0849ce4b15886a65b538260528a07835198b10",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/DCIM/100APPLE/IMG_0028.JPG",
+      "bytes": 24607,
+      "mtime": "2023-12-24T16:36:48.000Z",
+      "sha256": "36b6842bd40fd1f19db90b64fc271e99e67054b84d94a0ae0616bc314cf09989",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/DCIM/100APPLE/IMG_0029.WEBP",
+      "bytes": 73154,
+      "mtime": "2024-02-06T02:23:23.000Z",
+      "sha256": "89ecbc006da076a961ad25afcf3f28a5ea7315ea5efe081d0eeb817d804cc84e",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/DCIM/100APPLE/IMG_0030.WEBP",
+      "bytes": 73154,
+      "mtime": "2024-02-06T02:23:26.000Z",
+      "sha256": "89ecbc006da076a961ad25afcf3f28a5ea7315ea5efe081d0eeb817d804cc84e",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/DCIM/100APPLE/IMG_0032.PNG",
+      "bytes": 87524,
+      "mtime": "2024-03-01T21:34:17.000Z",
+      "sha256": "2d52b1ffbbfdddb856db9bd8e288f77dda382ecc1c2667e7f754eed365d66906",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/PhotoData/Photos.sqlite",
+      "bytes": 2310144,
+      "mtime": "2024-04-03T06:33:27.000Z",
+      "sha256": "f12447874e81e402a46b09d896fc2e22713fa4f1554e1fd05452acf4cee2350b",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/PhotoData/Photos.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:33:02.058Z",
+      "sha256": "62500681fa35c18a84e889f04341db55d01e0c93cfc5891c6d7aac42440ef61f",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/mobile/Media/PhotoData/Photos.sqlite-wal",
+      "bytes": 3588552,
+      "mtime": "2024-04-05T21:20:47.000Z",
+      "sha256": "33efa55a155317909a0d3cc4be2a80d061d31e366eb798bcbae718763420e727",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/preferences/com.apple.wifi.known-networks.plist",
+      "bytes": 1317,
+      "mtime": "2024-04-03T07:41:30.000Z",
+      "sha256": "cd0e19bb93e2787f00ac9112ac66361f3e1318a58621ba27c9091c5f7a6347ca",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/preferences/SystemConfiguration/com.apple.wifi-networks.plist",
+      "bytes": 42,
+      "mtime": "2023-08-24T21:19:19.000Z",
+      "sha256": "9261ecceda608ef174256e5fdc774c1e6e3dcf533409c1bc393d490d01c713f1",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/root/Library/Caches/locationd/consolidated.db",
+      "bytes": 65536,
+      "mtime": "2024-03-18T18:47:10.000Z",
+      "sha256": "8d8fc41be8f965c13e2b5d544a5c823f19d76f3821b564ee47b1a0e05d4d3acb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/root/Library/Caches/locationd/consolidated.db-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:13:59.437Z",
+      "sha256": "f6a09483b9352c21289c3213082ce3625fe2948e6ebecafeff89881b3acccb36",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/root/Library/Caches/locationd/consolidated.db-wal",
+      "bytes": 32992,
+      "mtime": "2024-04-05T21:10:56.000Z",
+      "sha256": "0ba30a3501f65747f9d3f6fa2ba97730cd6ff61b4f3df00e52485213fd2cd323",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/private/var/root/Library/Preferences/com.apple.wifi.manager.plist",
+      "bytes": 2971,
+      "mtime": "2024-04-03T07:41:30.000Z",
+      "sha256": "e82ac829fce2107733783242fcf112b1b3ac875d1fcf8a9ba5aef5f7689b5147",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/sms/private/var/mobile/Containers/Data/Application/C77DAB23-6182-42FB-A253-9F4CC57338EF/Library/Preferences/com.spotify.client.plist",
+      "bytes": 117,
+      "mtime": "2024-01-19T20:12:33.000Z",
+      "sha256": "8b0b4c9273b8fd1f381caac6252fb17cc5155bf67c8f75c718e1d2e66cc1f2d5",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c00/sms/private/var/mobile/Library/SMS/sms.db",
+      "bytes": 294912,
+      "mtime": "2024-04-05T21:07:04.000Z",
+      "sha256": "93099ce2ad3eb5fdbf41ad41c43e6828c191c119362e8278d8656ed12fb95788",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/sms/private/var/mobile/Library/SMS/sms.db-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:37:35.101Z",
+      "sha256": "46af2ea017e322730310f0f9052c1be2fa9b2c053649da171fde1a94084d8647",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c00/sms/private/var/mobile/Library/SMS/sms.db-wal",
+      "bytes": 601552,
+      "mtime": "2024-04-05T21:07:04.000Z",
+      "sha256": "bd852d9189f60a941b2c70580f9f760df44c86b2df32cc081cdd770ad0c6461a",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c01/776AR-04U.PDF.lnk",
+      "bytes": 474,
+      "mtime": "2026-09-20T18:07:57.484Z",
+      "sha256": "4c5b7ff1666e9a38f9429d6e16ed191624514880577d22f7adc6b7613809fb69",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/B500_ATM.PDF.lnk",
+      "bytes": 567,
+      "mtime": "2026-09-20T18:07:58.339Z",
+      "sha256": "c27dd34f5845c1433c057dbea5ccd567e6bca5949c0020a6c7765822de1a530c",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/BitLockerRecovery.lnk",
+      "bytes": 2191,
+      "mtime": "2026-09-20T18:07:59.107Z",
+      "sha256": "8564021f6f898a485fa5badfdb2aa0420d5f12034ca817b1039756de557c95b7",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/browser/edge_History",
+      "bytes": 262144,
+      "mtime": "2026-09-20T18:09:55.105Z",
+      "sha256": "8fc410100297f3c83d7ed466e2fe21794c8f68c210c253da48194e59cc8013ac",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/browser/places.sqlite",
+      "bytes": 5242880,
+      "mtime": "2026-09-20T18:09:55.002Z",
+      "sha256": "913c25074e7e9a34f5fd0fb7f64a763f177148b20f07638aabcdeaef6c94cfb6",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/Capture.png",
+      "bytes": 121335,
+      "mtime": "2026-09-20T18:08:15.119Z",
+      "sha256": "5e4cbf6922ed4faf461db8e179dd59ac2e74d5e0f0dff3cc7ae30e1e6c0faeca",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/Capture2.png",
+      "bytes": 407336,
+      "mtime": "2026-09-20T18:08:15.884Z",
+      "sha256": "9fdd876c20af75637cf2e9a09bebf60e51b0a225634ed31918baea83e2008810",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/Capture31231.lnk",
+      "bytes": 2004,
+      "mtime": "2026-09-20T18:08:06.858Z",
+      "sha256": "896c4aea1fe03ed561b6cb7258eb3f1c7b8fda95e9eb6e83abd753e06ba994b1",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/blobs/2",
+      "bytes": 474227,
+      "mtime": "2026-09-20T18:12:30.830Z",
+      "sha256": "dffea9f39082c6280e99cbde3460510eb40d29eec35ad66ec3f73a7163b82867",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/blobs/3",
+      "bytes": 567721,
+      "mtime": "2026-09-20T18:12:30.978Z",
+      "sha256": "1eb8dd9916db068ffff2f3da07645f2ab537dc4dbf64e2e25c550070cee5aa96",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/blobs/4",
+      "bytes": 643030,
+      "mtime": "2026-09-20T18:12:31.111Z",
+      "sha256": "275386aea6e0505f845d48a4eed18d9ff906f035cc9c8e667dfa8cc31a460086",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/blobs/5",
+      "bytes": 394333,
+      "mtime": "2026-09-20T18:12:31.229Z",
+      "sha256": "5d3c3bd2275573482e8b89ea0315e190efe036c53104318557d97114050d6426",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/blobs/6",
+      "bytes": 590620,
+      "mtime": "2026-09-20T18:12:31.349Z",
+      "sha256": "4b2303f5194052c0c09a2ea85634daab3a1d4045e9b0f97f10767f921c050275",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/blobs/7",
+      "bytes": 627529,
+      "mtime": "2026-09-20T18:12:31.487Z",
+      "sha256": "e3e85a65058323490342db5e81f88c4a9dfe5b3df16298a7b91439b26bde658a",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/blobs/8",
+      "bytes": 517395,
+      "mtime": "2026-09-20T18:12:31.603Z",
+      "sha256": "e5eb79a032522fa473fe846a559e06079623498a30668264dd751c139dd587f6",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/blobs/9",
+      "bytes": 496817,
+      "mtime": "2026-09-20T18:12:31.712Z",
+      "sha256": "7b1b00ce24f2a4558d8f70c62183cbad159ddec2dd9ee2d9013c711b4fa389c2",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/blobs/a",
+      "bytes": 545219,
+      "mtime": "2026-09-20T18:12:31.846Z",
+      "sha256": "8f4e4c471110a64b8706af0908635710982698b9f3e76aa4e3c33d02aabf7032",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/blobs/b",
+      "bytes": 518960,
+      "mtime": "2026-09-20T18:12:31.948Z",
+      "sha256": "51eae62c3cb800b643901586db76193665845784b6e180cd59f3decd4e7fa6ad",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/blobs/c",
+      "bytes": 652450,
+      "mtime": "2026-09-20T18:12:32.134Z",
+      "sha256": "52fa877fc0b1e5739dcc9261a166e76ea4b03358bbe57889a2e5982809c5b1d8",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/blobs/d",
+      "bytes": 230436,
+      "mtime": "2026-09-20T18:12:32.233Z",
+      "sha256": "1e0e5e05b81e5a47480e043f758c5dd43db01f462c6b71298638ab21f9b4b9e0",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/electron-config.json",
+      "bytes": 26,
+      "mtime": "2026-09-20T18:09:55.318Z",
+      "sha256": "b879191fc75182bb2d2620afe16cb04948e87f6f041f1a75dea6acfc74de3f04",
+      "kind": "json",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/events.db",
+      "bytes": 81920,
+      "mtime": "2026-09-20T18:09:55.433Z",
+      "sha256": "b30cb8a470cd6843bc663854e3fa28d647752bae8d776c1dcff241af0ccbace2",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/events.db-wal",
+      "bytes": 337872,
+      "mtime": "2026-09-20T18:09:55.583Z",
+      "sha256": "d729da6f9d7d0486a6f6d8da16272cc4daf017ab32ecfa04f9987f664a3d9d9d",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/idb_000098.ldb",
+      "bytes": 61703,
+      "mtime": "2026-09-20T18:09:55.862Z",
+      "sha256": "6b3480b29be9a3fe6a912f37515d21904a6742443e42c156a49afc73f12f1999",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/idb_000099.log",
+      "bytes": 1003605,
+      "mtime": "2026-09-20T18:09:55.776Z",
+      "sha256": "1952949f0ef31bd466d944cbead33456b12c4321d4a873651af9618e8c15ef21",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/idb_000100.ldb",
+      "bytes": 1856815,
+      "mtime": "2026-09-20T18:09:55.978Z",
+      "sha256": "34e4f16d38785d35c969138b08f612902859c1985a72135b21b16497df36f6b9",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/element/localstorage_000003.log",
+      "bytes": 4622,
+      "mtime": "2026-09-20T18:09:55.676Z",
+      "sha256": "0b660482c5c01b479da0b155e365d0ca73dd9a8808e4615aa49fcb752486efa1",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/files/keychain-backup.plist",
+      "bytes": 405284,
+      "mtime": "2026-09-20T18:13:59.492Z",
+      "sha256": "245c954e3e02d951ff7d638dc5017597e831c229e43d0d9e74185bbbd4668102",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/files/notes.sqlite",
+      "bytes": 143360,
+      "mtime": "2026-09-20T18:13:59.327Z",
+      "sha256": "3555fa0200b9b815897cc00fe7b2f16d847780ea597cb6437a815bd736478bfd",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/files/notes.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:14:24.301Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/files/notes.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:14:24.300Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/files/NoteStore.sqlite",
+      "bytes": 299008,
+      "mtime": "2026-09-20T18:13:59.243Z",
+      "sha256": "f79f3df6a98a1c9350fe9b5c7f5f3bcb1c5ef3e1f300876934f159ff08670fd1",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/files/NoteStore.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:32:10.472Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/files/NoteStore.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:14:24.296Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/files/Photos.sqlite",
+      "bytes": 1966080,
+      "mtime": "2026-09-20T18:13:59.699Z",
+      "sha256": "500bfb139713fe57e71f3d3ecffdd08bdc2aa06ecfffd58e3895e9dc2b74d595",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/files/Photos.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:16:18.825Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/files/Photos.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:14:53.564Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/files/telegram.plist",
+      "bytes": 192,
+      "mtime": "2026-09-20T18:13:59.593Z",
+      "sha256": "1ee0b5745a8fdca630cbd7e5fcead732f7198e21bdd6105c0560aaa1bdb1cb00",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/Info.plist",
+      "bytes": 116399,
+      "mtime": "2026-09-20T18:12:30.637Z",
+      "sha256": "f9a5a6a6baa1825c70bd147905e19c7640d623dc62326ed2dfe8abc3d6ec0ae0",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/Manifest.db",
+      "bytes": 4067328,
+      "mtime": "2026-09-20T18:12:30.534Z",
+      "sha256": "26f6bb195dd71f045eee220d1a52b1a2fd04ff42206b6f4ff1962f3dbbbce832",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/Manifest.db-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:13:43.380Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/Manifest.db-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:12:58.733Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/itunes/Manifest.plist",
+      "bytes": 115558,
+      "mtime": "2026-09-20T18:12:30.724Z",
+      "sha256": "1393772f04beb6b9cba0c454c1b2d701a756b89372985b0e2305becf1b2d5a32",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/ituneslib/private/var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb",
+      "bytes": 4096,
+      "mtime": "2023-08-24T21:19:16.000Z",
+      "sha256": "3d1e98365599c0aadf69ebddee20431cd8525432f9306c8b0e82a09f9ef2b76d",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/ready.lnk",
+      "bytes": 1975,
+      "mtime": "2026-09-20T18:08:06.242Z",
+      "sha256": "896ccde14d0e3ced8839b67a544a998f09c7977e67ccf18af8e0f16dc8c4e558",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/registrymodifications.xcu",
+      "bytes": 193966,
+      "mtime": "2026-09-20T18:09:55.238Z",
+      "sha256": "2fea8c94bf32904962707af202709db4d218824244805bbafa6471b4f3b3ef33",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/sms/private/var/mobile/Library/SMS/sms.db",
+      "bytes": 294912,
+      "mtime": "2024-04-05T21:07:04.000Z",
+      "sha256": "93099ce2ad3eb5fdbf41ad41c43e6828c191c119362e8278d8656ed12fb95788",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c01/sms/private/var/mobile/Library/SMS/sms.db-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:37:49.129Z",
+      "sha256": "46af2ea017e322730310f0f9052c1be2fa9b2c053649da171fde1a94084d8647",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/sms/private/var/mobile/Library/SMS/sms.db-wal",
+      "bytes": 601552,
+      "mtime": "2024-04-05T21:07:04.000Z",
+      "sha256": "bd852d9189f60a941b2c70580f9f760df44c86b2df32cc081cdd770ad0c6461a",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/extracted/s821c01/Spending.xlsx.lnk",
+      "bytes": 474,
+      "mtime": "2026-09-20T18:08:00.048Z",
+      "sha256": "032d86587cdd4d8188f7ccf88c0dae6fb5d81f8dc519aa79fb59272c74499aa2",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/splitwise/private/var/mobile/Containers/Data/Application/E951DC58-CF30-4518-9482-3E076D89A20B/Library/Caches/com.Splitwise.SplitwiseMobile/Cache.db",
+      "bytes": 49152,
+      "mtime": "2024-04-02T22:26:09.000Z",
+      "sha256": "52a89bf04cacb69b3d1ccddbddd1ddc9999e53a0c967ac333b202cb0c6fba9d6",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/splitwise/private/var/mobile/Containers/Data/Application/E951DC58-CF30-4518-9482-3E076D89A20B/Library/Caches/com.Splitwise.SplitwiseMobile/Cache.db-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:37:49.129Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/splitwise/private/var/mobile/Containers/Data/Application/E951DC58-CF30-4518-9482-3E076D89A20B/Library/Caches/com.Splitwise.SplitwiseMobile/Cache.db-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:37:32.992Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/splitwise/private/var/mobile/Containers/Data/Application/E951DC58-CF30-4518-9482-3E076D89A20B/Library/Caches/com.Splitwise.SplitwiseMobile/fsCachedData/451CBB40-753F-4FBB-A569-F0B6DDAC56BF",
+      "bytes": 6145,
+      "mtime": "2024-04-04T10:26:19.000Z",
+      "sha256": "8602dbddf3fd5fb9de93526e13fa1bafbe752af4403ff3a10d4e051f39009c24",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/splitwise/private/var/mobile/Containers/Data/Application/E951DC58-CF30-4518-9482-3E076D89A20B/Library/Caches/com.Splitwise.SplitwiseMobile/fsCachedData/CA396F86-E7A8-4209-9F19-637CB2BCAD08",
+      "bytes": 5442,
+      "mtime": "2024-04-02T22:26:16.000Z",
+      "sha256": "73f3adfb4389fbe4989c88054b1f1a73a9a298eff847b2507029dc234a452cb0",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/splitwise/private/var/mobile/Containers/Data/Application/E951DC58-CF30-4518-9482-3E076D89A20B/Library/HTTPStorages/com.Splitwise.SplitwiseMobile/httpstorages.sqlite",
+      "bytes": 4096,
+      "mtime": "2024-04-02T22:26:06.000Z",
+      "sha256": "b3f176fd152631e986aff7544248fc5be8e9d9ff55b80c11cfe240b09c2bd379",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/splitwise/private/var/mobile/Containers/Data/Application/E951DC58-CF30-4518-9482-3E076D89A20B/Library/Preferences/com.Splitwise.SplitwiseMobile.plist",
+      "bytes": 8538,
+      "mtime": "2024-04-02T10:26:07.000Z",
+      "sha256": "36926e9080770127b5f645f4aaaae39c725e88bc93a6e92a74e726c360712b16",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0003.HEIC/5003.JPG",
+      "bytes": 18034,
+      "mtime": "2023-09-25T19:03:51.000Z",
+      "sha256": "028d2fcf53004d5ee467633d769a0e4450ad70483b34bd7e1673745e2c393518",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0004.HEIC/5003.JPG",
+      "bytes": 22200,
+      "mtime": "2023-09-25T19:03:56.000Z",
+      "sha256": "f374d51bb358a8dbe70661fd33e97a2859007942c8005c653b9e0481cd7fc221",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0005.HEIC/5003.JPG",
+      "bytes": 18286,
+      "mtime": "2023-09-25T19:03:59.000Z",
+      "sha256": "06ed22b8124ce9e3701b42ed18972ddf408f701169d8d6cde43863d0777af233",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0006.HEIC/5003.JPG",
+      "bytes": 24834,
+      "mtime": "2023-09-25T19:04:03.000Z",
+      "sha256": "0465a9a6b8754b9b517e6dd1bffc40f57fad291a9e30689dde882b31f48e6312",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0007.HEIC/5003.JPG",
+      "bytes": 22953,
+      "mtime": "2023-09-25T19:04:08.000Z",
+      "sha256": "56eb4f00d73cc6d3a6801bb027b44dff1e9360d0be8447bd29758f82ae9cf0ec",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0012.HEIC/5003.JPG",
+      "bytes": 42516,
+      "mtime": "2023-11-09T15:38:13.000Z",
+      "sha256": "23e5cc07d21d12d51cb03c89c4c5e8754b8e1768b4a61e691b729eb5e8b60386",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0013.HEIC/5003.JPG",
+      "bytes": 45391,
+      "mtime": "2023-11-09T15:38:19.000Z",
+      "sha256": "464d854db4172a26e6bd73ec2c9cf1d5d49d8c901b3a6ed4383e580383e73610",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0014.HEIC/5003.JPG",
+      "bytes": 42689,
+      "mtime": "2023-11-09T15:38:30.000Z",
+      "sha256": "ff155a902609a855468dca5719777967a8cf19616cfd0b208e9608ad7262d8b2",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0015.HEIC/5003.JPG",
+      "bytes": 44753,
+      "mtime": "2023-11-09T15:38:37.000Z",
+      "sha256": "8eb75962cc1e27339befc3569920c8f315e77003d79edaac2d02f0a7083b81bf",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0016.HEIC/5003.JPG",
+      "bytes": 45168,
+      "mtime": "2023-11-09T15:38:52.000Z",
+      "sha256": "df6a280717fd13f8809abc513e9f9aac14b04a9783908fa8eb727d6c94ffd5f4",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0017.HEIC/5003.JPG",
+      "bytes": 45471,
+      "mtime": "2023-11-09T15:38:54.000Z",
+      "sha256": "4fcccb07d8fa7614e4317758d323ba07d96713096c53f5408677d2ef092aaa90",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0018.HEIC/5003.JPG",
+      "bytes": 45629,
+      "mtime": "2023-11-09T15:38:56.000Z",
+      "sha256": "00d7835ac0c252b2e4372f8b4a3401350a9e8dfad81e4c496cd282cb4d581164",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0019.HEIC/5003.JPG",
+      "bytes": 45492,
+      "mtime": "2023-11-09T15:38:58.000Z",
+      "sha256": "f5bb20759e4395c1f42cc32800534ca8c806d26f57a51f300c842291e841943a",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0020.HEIC/5003.JPG",
+      "bytes": 44211,
+      "mtime": "2023-11-09T15:39:00.000Z",
+      "sha256": "2a9a004b4dc3678952999db42740a392d358fd896c01b16ea5e37fbe76e7385f",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0021.HEIC/5003.JPG",
+      "bytes": 41702,
+      "mtime": "2023-11-09T15:39:07.000Z",
+      "sha256": "5bc02bb79ace63cf78f3c6a6faa8ec3d586ec33312c990ddfc1559e0d9330445",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0022.HEIC/5003.JPG",
+      "bytes": 44249,
+      "mtime": "2023-11-09T15:39:09.000Z",
+      "sha256": "2be74e9a90fd13afa3586890f694be9295e1367f491af165d7564e8dbd13588a",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0023.HEIC/5003.JPG",
+      "bytes": 45066,
+      "mtime": "2023-11-09T15:39:10.000Z",
+      "sha256": "f3825b4e7ec8dfcc1e8c5cfcf1fbc802f288ac130b7414c8ecc844c9e82dd4b9",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0024.HEIC/5003.JPG",
+      "bytes": 43500,
+      "mtime": "2023-11-09T15:39:12.000Z",
+      "sha256": "de178c02a76df81eb91e716007c72a08f5728b202b4c37194281fcffc8aabdd4",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0025.HEIC/5003.JPG",
+      "bytes": 41306,
+      "mtime": "2023-11-09T15:39:14.000Z",
+      "sha256": "25ef435b259fc7d7f21328d92028b775aa20cd1299733db5c94491cfc594e27a",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0026.HEIC/5003.JPG",
+      "bytes": 28724,
+      "mtime": "2023-11-09T15:39:37.000Z",
+      "sha256": "d7f9f1d3bc56c16204da6428d9ffa82c71303594158d7ae90eac76f6392e1faa",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/thumbs/private/var/mobile/Media/PhotoData/Thumbnails/V2/DCIM/100APPLE/IMG_0036.HEIC/5003.JPG",
+      "bytes": 10292,
+      "mtime": "2024-04-03T06:33:40.000Z",
+      "sha256": "5818c65ac43d82b2565f7eeacb65e4d4054ea48a8ffbe8e78fe6e5c9910129f6",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/tiktok/private/var/mobile/Containers/Data/Application/25D6FC89-3F45-4C53-8502-110948744484/Library/AWEStorage/UnifyStorage.sqlite",
+      "bytes": 9805824,
+      "mtime": "2024-01-16T17:11:03.000Z",
+      "sha256": "4809ccb83a1dd7b2cdd297420c78333bd11864e5854b7033b51884ad4628b819",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/tiktok/private/var/mobile/Containers/Data/Application/25D6FC89-3F45-4C53-8502-110948744484/Library/Preferences/com.zhiliaoapp.musically.plist",
+      "bytes": 167371,
+      "mtime": "2024-01-16T17:11:06.000Z",
+      "sha256": "70260524bda15e732123f9f08ca4045dbe56c5cf283afe71178441e8b0308f21",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c01/Vault_Y.lnk",
+      "bytes": 349,
+      "mtime": "2026-09-20T18:08:00.719Z",
+      "sha256": "a3a5662c961299c12cb1bfbffaf2a96570662c40f638fb165e3aa8b65c8aa920",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c01/vault/vault_head.bin",
+      "bytes": 81920,
+      "mtime": "2026-09-20T18:09:56.048Z",
+      "sha256": "4f3cc5b009114ebe367d9e5f5e29878bca2656e4c8a81a3d791ec29f39891e4c",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/extracted/s821c02/el/electron-config.json",
+      "bytes": 26,
+      "mtime": "2026-09-20T18:08:46.733Z",
+      "sha256": "b879191fc75182bb2d2620afe16cb04948e87f6f041f1a75dea6acfc74de3f04",
+      "kind": "json",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/events.db",
+      "bytes": 81920,
+      "mtime": "2026-09-20T18:09:16.250Z",
+      "sha256": "2f1883e3c6ce185f319169d01523a2d331418f3e74225ea2d2916eef27a06800",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/idb/103085.bin",
+      "bytes": 496817,
+      "mtime": "2026-09-20T18:09:49.900Z",
+      "sha256": "7b1b00ce24f2a4558d8f70c62183cbad159ddec2dd9ee2d9013c711b4fa389c2",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/idb/103153.bin",
+      "bytes": 567721,
+      "mtime": "2026-09-20T18:09:49.250Z",
+      "sha256": "1eb8dd9916db068ffff2f3da07645f2ab537dc4dbf64e2e25c550070cee5aa96",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/idb/103154.bin",
+      "bytes": 590620,
+      "mtime": "2026-09-20T18:09:49.578Z",
+      "sha256": "4b2303f5194052c0c09a2ea85634daab3a1d4045e9b0f97f10767f921c050275",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/idb/103155.bin",
+      "bytes": 643030,
+      "mtime": "2026-09-20T18:09:49.356Z",
+      "sha256": "275386aea6e0505f845d48a4eed18d9ff906f035cc9c8e667dfa8cc31a460086",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/idb/103186.bin",
+      "bytes": 474227,
+      "mtime": "2026-09-20T18:09:49.157Z",
+      "sha256": "dffea9f39082c6280e99cbde3460510eb40d29eec35ad66ec3f73a7163b82867",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/idb/103195.bin",
+      "bytes": 627529,
+      "mtime": "2026-09-20T18:09:49.687Z",
+      "sha256": "e3e85a65058323490342db5e81f88c4a9dfe5b3df16298a7b91439b26bde658a",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/idb/103196.bin",
+      "bytes": 545219,
+      "mtime": "2026-09-20T18:09:50.001Z",
+      "sha256": "8f4e4c471110a64b8706af0908635710982698b9f3e76aa4e3c33d02aabf7032",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/idb/103197.bin",
+      "bytes": 394333,
+      "mtime": "2026-09-20T18:09:49.485Z",
+      "sha256": "5d3c3bd2275573482e8b89ea0315e190efe036c53104318557d97114050d6426",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/idb/103220.bin",
+      "bytes": 518960,
+      "mtime": "2026-09-20T18:09:50.122Z",
+      "sha256": "51eae62c3cb800b643901586db76193665845784b6e180cd59f3decd4e7fa6ad",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/idb/103221.bin",
+      "bytes": 652450,
+      "mtime": "2026-09-20T18:09:50.246Z",
+      "sha256": "52fa877fc0b1e5739dcc9261a166e76ea4b03358bbe57889a2e5982809c5b1d8",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/idb/103226.bin",
+      "bytes": 230436,
+      "mtime": "2026-09-20T18:09:50.336Z",
+      "sha256": "1e0e5e05b81e5a47480e043f758c5dd43db01f462c6b71298638ab21f9b4b9e0",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/idb/34898.bin",
+      "bytes": 517395,
+      "mtime": "2026-09-20T18:09:49.795Z",
+      "sha256": "e5eb79a032522fa473fe846a559e06079623498a30668264dd751c139dd587f6",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/el/meta.json",
+      "bytes": 1833,
+      "mtime": "2026-09-20T18:08:47.228Z",
+      "sha256": "9edaf066d50b31ac3133ad0da621160e42d93bf4bde6b2dbf88ac5c591a66da1",
+      "kind": "json",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/ff/cookies.sqlite",
+      "bytes": 524288,
+      "mtime": "2026-09-20T18:08:46.393Z",
+      "sha256": "5039a0cba1327c3868c588bfe6fe06f9fdc57f6340d48c8e1d0eaaa34fa1ab14",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/ff/formhistory.sqlite",
+      "bytes": 262144,
+      "mtime": "2026-09-20T18:08:46.512Z",
+      "sha256": "e6bc05b01ef9ab2198a4c2187a42f7e5c58ac79134e723f9f058627fa4a3d5a4",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/ff/places.sqlite",
+      "bytes": 5242880,
+      "mtime": "2026-09-20T18:08:46.106Z",
+      "sha256": "913c25074e7e9a34f5fd0fb7f64a763f177148b20f07638aabcdeaef6c94cfb6",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/extracted/s821c02/lnks/776AR-04U.PDF.lnk",
+      "bytes": 474,
+      "mtime": "2026-09-20T18:06:36.109Z",
+      "sha256": "4c5b7ff1666e9a38f9429d6e16ed191624514880577d22f7adc6b7613809fb69",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/lnks/B500_ATM.lnk",
+      "bytes": 567,
+      "mtime": "2026-09-20T18:06:33.163Z",
+      "sha256": "c27dd34f5845c1433c057dbea5ccd567e6bca5949c0020a6c7765822de1a530c",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/lnks/BitLocker_Recovery.lnk",
+      "bytes": 2191,
+      "mtime": "2026-09-20T18:06:32.309Z",
+      "sha256": "8564021f6f898a485fa5badfdb2aa0420d5f12034ca817b1039756de557c95b7",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/lnks/ready.lnk",
+      "bytes": 1975,
+      "mtime": "2026-09-20T18:06:36.345Z",
+      "sha256": "896ccde14d0e3ced8839b67a544a998f09c7977e67ccf18af8e0f16dc8c4e558",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/lnks/Spending.xlsx.lnk",
+      "bytes": 474,
+      "mtime": "2026-09-20T18:06:33.623Z",
+      "sha256": "032d86587cdd4d8188f7ccf88c0dae6fb5d81f8dc519aa79fb59272c74499aa2",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/lnks/Vault_Y.lnk",
+      "bytes": 349,
+      "mtime": "2026-09-20T18:06:32.128Z",
+      "sha256": "a3a5662c961299c12cb1bfbffaf2a96570662c40f638fb165e3aa8b65c8aa920",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/lo/Module1.xba",
+      "bytes": 1124,
+      "mtime": "2026-09-20T18:13:51.927Z",
+      "sha256": "b434faf21386064e2e81af758f307ae8bea72c0cb6c8510d55b1bc1bb38f8612",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/photos/private/var/mobile/Media/DCIM/100APPLE/IMG_0002.PNG",
+      "bytes": 562023,
+      "mtime": "2023-08-26T18:44:21.000Z",
+      "sha256": "4c334a4ec37c067df411c7efe5c7c1ceb6cb55960ac9ac1b5c01190c92706ca6",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c02/photos/private/var/mobile/Media/DCIM/100APPLE/IMG_0008.PNG",
+      "bytes": 1079931,
+      "mtime": "2023-09-28T22:43:32.000Z",
+      "sha256": "0521a07dfe9e85b3afb3506550b84bc1f79678e7d91229d094ce384155f8fc44",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c02/photos/private/var/mobile/Media/DCIM/100APPLE/IMG_0009.JPG",
+      "bytes": 36550,
+      "mtime": "2023-09-28T22:45:06.000Z",
+      "sha256": "59a88579efaecf29dc2451e07bc22e3543faca3f492530d473ddd9aadd88c820",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c02/photos/private/var/mobile/Media/DCIM/100APPLE/IMG_0010.JPG",
+      "bytes": 34911,
+      "mtime": "2023-09-28T22:45:09.000Z",
+      "sha256": "f27f3c0d3ce343a1e9bf6fe8e982a97a38a84fff31ba8138028dfb41ea7d7f99",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c02/photos/private/var/mobile/Media/DCIM/100APPLE/IMG_0011.PNG",
+      "bytes": 2009548,
+      "mtime": "2023-10-08T17:25:05.000Z",
+      "sha256": "cb2f54b58e68808d40841ffa657fc7c3557a34fef057684a33d6979a7abfc5e1",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c02/photos/private/var/mobile/Media/DCIM/100APPLE/IMG_0027.JPG",
+      "bytes": 29535,
+      "mtime": "2023-12-24T16:36:38.000Z",
+      "sha256": "281c8f1da11f2fe4ce61143ddf0849ce4b15886a65b538260528a07835198b10",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c02/photos/private/var/mobile/Media/DCIM/100APPLE/IMG_0028.JPG",
+      "bytes": 24607,
+      "mtime": "2023-12-24T16:36:48.000Z",
+      "sha256": "36b6842bd40fd1f19db90b64fc271e99e67054b84d94a0ae0616bc314cf09989",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c02/photos/private/var/mobile/Media/DCIM/100APPLE/IMG_0029.WEBP",
+      "bytes": 73154,
+      "mtime": "2024-02-06T02:23:23.000Z",
+      "sha256": "89ecbc006da076a961ad25afcf3f28a5ea7315ea5efe081d0eeb817d804cc84e",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c02/photos/private/var/mobile/Media/DCIM/100APPLE/IMG_0030.WEBP",
+      "bytes": 73154,
+      "mtime": "2024-02-06T02:23:26.000Z",
+      "sha256": "89ecbc006da076a961ad25afcf3f28a5ea7315ea5efe081d0eeb817d804cc84e",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c02/photos/private/var/mobile/Media/DCIM/100APPLE/IMG_0032.PNG",
+      "bytes": 87524,
+      "mtime": "2024-03-01T21:34:17.000Z",
+      "sha256": "2d52b1ffbbfdddb856db9bd8e288f77dda382ecc1c2667e7f754eed365d66906",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c02/pic/Capture.png",
+      "bytes": 121335,
+      "mtime": "2026-09-20T18:08:47.360Z",
+      "sha256": "5e4cbf6922ed4faf461db8e179dd59ac2e74d5e0f0dff3cc7ae30e1e6c0faeca",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/pic/Capture2.png",
+      "bytes": 407336,
+      "mtime": "2026-09-20T18:08:47.489Z",
+      "sha256": "9fdd876c20af75637cf2e9a09bebf60e51b0a225634ed31918baea83e2008810",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/powder/powder.pref",
+      "bytes": 437,
+      "mtime": "2026-09-20T18:08:47.623Z",
+      "sha256": "fc14b1e02ee607e91caf3ee5cd5c43a5b201e53d51ddce75377694b38469205e",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c02/reg/NTUSER.DAT",
+      "bytes": 1310720,
+      "mtime": "2026-09-20T18:13:51.886Z",
+      "sha256": "feeb91311dde4e5d14691a3740925d4b2252033aa71bf86003a20e1c87fd7a3f",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/accounts/private/var/mobile/Library/Accounts/Accounts3.sqlite",
+      "bytes": 225280,
+      "mtime": "2024-03-18T18:52:47.000Z",
+      "sha256": "47ae70b9445b566b7a658c14366f0ef8945f172f2a6a66ff59f60b1b19a4ae50",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/accounts/private/var/mobile/Library/Accounts/Accounts3.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:05:40.371Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/accounts/private/var/mobile/Library/Accounts/Accounts3.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:05:31.450Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/addressbook/private/var/mobile/Library/AddressBook/AddressBook.sqlitedb",
+      "bytes": 4096,
+      "mtime": "2024-04-04T09:14:51.000Z",
+      "sha256": "3d1e98365599c0aadf69ebddee20431cd8525432f9306c8b0e82a09f9ef2b76d",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/addressbook/private/var/mobile/Library/AddressBook/AddressBook.sqlitedb-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:05:55.811Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/addressbook/private/var/mobile/Library/AddressBook/AddressBook.sqlitedb-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:05:49.343Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/accounts-metadata/atomic-state",
+      "bytes": 2491,
+      "mtime": "2023-10-30T23:16:36.000Z",
+      "sha256": "06e70c26b61d9273ac5cd5aac7745c9a919e3701023223cb79208472ddabc07a",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/accounts-metadata/db/db_sqlite",
+      "bytes": 4096,
+      "mtime": "2023-10-30T23:16:06.000Z",
+      "sha256": "4b0f372cf45fcdb0a93e0de44d25c2a6334e7f89b94cc3e4c4e0588f89314fe2",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/accounts-metadata/spotlight/p:36891850763/avatar.png",
+      "bytes": 35308,
+      "mtime": "2023-10-30T23:16:51.000Z",
+      "sha256": "9c23adc61d76fc42408bee49cc91002b371457620a60de4aae890cb070bad2a4",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/accounts-metadata/spotlight/p:36891850763/data.json",
+      "bytes": 170,
+      "mtime": "2023-10-30T23:16:51.000Z",
+      "sha256": "3d4065574e5b3faf04e05a89cfd505a32e48f514c6c8b3c41049403370c45332",
+      "kind": "json",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Containers/Shared/AppGroup/AF67BA79-B4B6-4F89-AD78-9054620F3322/NoteStore.sqlite",
+      "bytes": 299008,
+      "mtime": "2024-03-24T23:38:08.000Z",
+      "sha256": "1d9d7ae5f11d86bf253b011d4dd894dc06b7f31614dae4d546de8eac43540f8c",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Containers/Shared/AppGroup/AF67BA79-B4B6-4F89-AD78-9054620F3322/NoteStore.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:12:44.735Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Containers/Shared/AppGroup/AF67BA79-B4B6-4F89-AD78-9054620F3322/NoteStore.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:12:30.173Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Library/AddressBook/AddressBook.sqlitedb",
+      "bytes": 4096,
+      "mtime": "2024-04-04T09:14:51.000Z",
+      "sha256": "3d1e98365599c0aadf69ebddee20431cd8525432f9306c8b0e82a09f9ef2b76d",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Library/AddressBook/AddressBook.sqlitedb-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:07:32.386Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Library/AddressBook/AddressBook.sqlitedb-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:07:32.386Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Library/Notes/notes.sqlite",
+      "bytes": 143360,
+      "mtime": "2023-08-24T22:24:01.000Z",
+      "sha256": "29dfe2b4bfb8d1753c3f04e52a1e61459d265ac45031c2b4c6ffe88c19a96e76",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Library/Notes/notes.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:13:14.041Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Library/Notes/notes.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:12:07.423Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Library/PersonalizationPortrait/Contacts/me_card.pb",
+      "bytes": 120,
+      "mtime": "2024-04-03T07:26:18.000Z",
+      "sha256": "0522c30b410b7a0b7aa9fc46f137bb57e7ad5818198dba8fc2a8568fe1e56857",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Library/Safari/History.db",
+      "bytes": 135168,
+      "mtime": "2023-12-03T23:32:36.000Z",
+      "sha256": "e6659ab7ab81baec31821d98071d9d25237329fb08127f4d286173d03915d5e3",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Library/Safari/History.db-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:32:39.928Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Library/Safari/History.db-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:29:39.997Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Media/PhotoData/Photos.sqlite",
+      "bytes": 2310144,
+      "mtime": "2024-04-03T06:33:27.000Z",
+      "sha256": "f12447874e81e402a46b09d896fc2e22713fa4f1554e1fd05452acf4cee2350b",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Media/PhotoData/Photos.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:20:23.033Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/mobile/Media/PhotoData/Photos.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:16:08.873Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/preferences/com.apple.wifi.known-networks.plist",
+      "bytes": 1317,
+      "mtime": "2024-04-03T07:41:30.000Z",
+      "sha256": "cd0e19bb93e2787f00ac9112ac66361f3e1318a58621ba27c9091c5f7a6347ca",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/preferences/SystemConfiguration/com.apple.wifi-networks.plist",
+      "bytes": 42,
+      "mtime": "2023-08-24T21:19:19.000Z",
+      "sha256": "9261ecceda608ef174256e5fdc774c1e6e3dcf533409c1bc393d490d01c713f1",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/preferences/SystemConfiguration/com.apple.wifi.plist",
+      "bytes": 1253,
+      "mtime": "2024-04-05T21:10:56.000Z",
+      "sha256": "473d986e6bc4dfe0fb4bbe075fa2cc3a55d406574efbfa2670f90b6db523bbb4",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/private/var/root/Library/Caches/locationd/cache.plist",
+      "bytes": 8957,
+      "mtime": "2024-04-05T21:20:56.000Z",
+      "sha256": "37b9023a66c6aaab0b19cf333ee05dc6a6e4b1589fc752e4f216e224ebf5cf40",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/sms/private/var/mobile/Library/SMS/sms.db",
+      "bytes": 294912,
+      "mtime": "2024-04-05T21:07:04.000Z",
+      "sha256": "93099ce2ad3eb5fdbf41ad41c43e6828c191c119362e8278d8656ed12fb95788",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/sms/private/var/mobile/Library/SMS/sms.db-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:12:00.415Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/sms/private/var/mobile/Library/SMS/sms.db-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:05:31.450Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/telegram/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/account-112545592466388074/postbox/db/db_sqlite",
+      "bytes": 7561216,
+      "mtime": "2024-04-04T09:26:42.000Z",
+      "sha256": "040304c487e41f4f64a24d5777662488b0e78cad0c4f69d1550bdd29f8bffcc1",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/telegram/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/account-112545592466388074/postbox/db/db_sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:06:07.409Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/telegram/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/account-112545592466388074/postbox/db/db_sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:05:31.450Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/telegram/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/accounts-metadata/db/db_sqlite",
+      "bytes": 4096,
+      "mtime": "2023-10-30T23:16:06.000Z",
+      "sha256": "4b0f372cf45fcdb0a93e0de44d25c2a6334e7f89b94cc3e4c4e0588f89314fe2",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c03/iphone/tg_strings.txt",
+      "bytes": 704499,
+      "mtime": "2026-09-20T18:09:47.179Z",
+      "sha256": "1fc4fc7f736934ae6dc97cb92885b09eb4dd5ac432116d1286533cbbe9ec34c4",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/backup_addressbook.sqlitedb",
+      "bytes": 307200,
+      "mtime": "2026-09-20T18:24:22.358Z",
+      "sha256": "415108c843d8a2a1eb8a9669d16c396dab8d8fa564b9c14a0762147af62de488",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/backup_addressbook.sqlitedb-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:25:17.685Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/backup_addressbook.sqlitedb-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:24:22.432Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/Capture2.png",
+      "bytes": 407336,
+      "mtime": "2026-09-20T18:46:39.436Z",
+      "sha256": "9fdd876c20af75637cf2e9a09bebf60e51b0a225634ed31918baea83e2008810",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/elem_store1",
+      "bytes": 348,
+      "mtime": "2026-09-20T18:18:38.904Z",
+      "sha256": "b87a8272f5281942fa933d9f42b01494d81f4478121f3606349528b0c5675853",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/elem_store2",
+      "bytes": 348,
+      "mtime": "2026-09-20T18:18:38.971Z",
+      "sha256": "da1b0af63c58e8648add11288f95fe7b351568bb099387930c70699f52c01501",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/elem_store3",
+      "bytes": 249,
+      "mtime": "2026-09-20T18:18:39.035Z",
+      "sha256": "3de681d73263b910f03e6f75f915e86547d753df21ea9c7f7beabb2dec25fff6",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/events.db",
+      "bytes": 81920,
+      "mtime": "2026-09-20T18:18:20.267Z",
+      "sha256": "b30cb8a470cd6843bc663854e3fa28d647752bae8d776c1dcff241af0ccbace2",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/Manifest.db",
+      "bytes": 4067328,
+      "mtime": "2026-09-20T18:22:11.349Z",
+      "sha256": "26f6bb195dd71f045eee220d1a52b1a2fd04ff42206b6f4ff1962f3dbbbce832",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/Manifest.db-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:22:15.581Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/Manifest.db-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:22:15.581Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/places.sqlite",
+      "bytes": 5242880,
+      "mtime": "2026-09-20T18:13:16.261Z",
+      "sha256": "913c25074e7e9a34f5fd0fb7f64a763f177148b20f07638aabcdeaef6c94cfb6",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/places.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:13:25.372Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/places.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:13:19.935Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/SOFTWARE",
+      "bytes": 76021760,
+      "mtime": "2026-09-20T18:40:28.255Z",
+      "sha256": "ca6be5578b78fa362a871f52e344b1ebc3de2c11ca782b2a6aa020e7276d35d8",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c03/laptop/vault.vhdx",
+      "bytes": 608174080,
+      "mtime": "2026-09-20T18:35:18.084Z",
+      "sha256": "877fff02e22383cccd511e9e94a77c83f7acbcc789e0ed9d2343e1c89234da3f",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c03"
+    },
+    {
+      "path": "work/extracted/s821c04/776AR-04U.PDF.lnk",
+      "bytes": 474,
+      "mtime": "2026-09-20T18:08:46.926Z",
+      "sha256": "4c5b7ff1666e9a38f9429d6e16ed191624514880577d22f7adc6b7613809fb69",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/B500 ATM Technical Documentation.pdf.lnk",
+      "bytes": 567,
+      "mtime": "2026-09-20T18:08:47.546Z",
+      "sha256": "c27dd34f5845c1433c057dbea5ccd567e6bca5949c0020a6c7765822de1a530c",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/BitLocker_Recovery_Key.lnk",
+      "bytes": 2191,
+      "mtime": "2026-09-20T18:08:46.507Z",
+      "sha256": "8564021f6f898a485fa5badfdb2aa0420d5f12034ca817b1039756de557c95b7",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/Capture_ocr.txt",
+      "bytes": 237,
+      "mtime": "2026-09-20T18:09:24.841Z",
+      "sha256": "e292051feea1e2599886ab3622d27483564558ffa7ac5fa4b5a82d669d91ff02",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/Capture.png",
+      "bytes": 121335,
+      "mtime": "2026-09-20T18:05:54.270Z",
+      "sha256": "5e4cbf6922ed4faf461db8e179dd59ac2e74d5e0f0dff3cc7ae30e1e6c0faeca",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/Capture2_ocr.txt",
+      "bytes": 98,
+      "mtime": "2026-09-20T18:09:25.239Z",
+      "sha256": "0808d076bf0c985b45d54720e09ece188d5783ae8a66fe730470cc2638a4a5ca",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/Capture2.png",
+      "bytes": 407336,
+      "mtime": "2026-09-20T18:05:54.371Z",
+      "sha256": "9fdd876c20af75637cf2e9a09bebf60e51b0a225634ed31918baea83e2008810",
+      "kind": "image",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/Edge_History.db",
+      "bytes": 262144,
+      "mtime": "2026-09-20T18:06:41.155Z",
+      "sha256": "8fc410100297f3c83d7ed466e2fe21794c8f68c210c253da48194e59cc8013ac",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/Edge_Login_Data.db",
+      "bytes": 57344,
+      "mtime": "2026-09-20T18:07:52.003Z",
+      "sha256": "8297a7698f19bb81539a18363db100c55e357fa73f773c2b883d2c4161f6a259",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/Element_Databases.db",
+      "bytes": 28672,
+      "mtime": "2026-09-20T18:06:42.164Z",
+      "sha256": "08eb1696d053f29f3e063ec63fc6087d69836a7a9b3f742d2ccc5799c2c5363b",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/Element_events.db",
+      "bytes": 81920,
+      "mtime": "2026-09-20T18:07:17.255Z",
+      "sha256": "b30cb8a470cd6843bc663854e3fa28d647752bae8d776c1dcff241af0ccbace2",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/firefox_cookies.sqlite",
+      "bytes": 524288,
+      "mtime": "2026-09-20T18:23:57.402Z",
+      "sha256": "5039a0cba1327c3868c588bfe6fe06f9fdc57f6340d48c8e1d0eaaa34fa1ab14",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/firefox_cookies.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:23:57.418Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/firefox_cookies.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:23:57.417Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/firefox_places.sqlite",
+      "bytes": 5242880,
+      "mtime": "2026-09-20T18:10:32.193Z",
+      "sha256": "913c25074e7e9a34f5fd0fb7f64a763f177148b20f07638aabcdeaef6c94cfb6",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/firefox_places.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:25:54.156Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/firefox_places.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:10:32.240Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/iphone/private/var/mobile/Library/Notes/notes.sqlite",
+      "bytes": 143360,
+      "mtime": "2023-08-24T22:24:01.000Z",
+      "sha256": "29dfe2b4bfb8d1753c3f04e52a1e61459d265ac45031c2b4c6ffe88c19a96e76",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/iphone/private/var/mobile/Library/Notes/notes.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:15:17.440Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c04/iphone/private/var/mobile/Library/Notes/notes.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:11:27.397Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/extracted/s821c04/SOFTWARE",
+      "bytes": 76021760,
+      "mtime": "2026-09-20T18:10:23.123Z",
+      "sha256": "ca6be5578b78fa362a871f52e344b1ebc3de2c11ca782b2a6aa020e7276d35d8",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/SOFTWARE_hive",
+      "bytes": 76021760,
+      "mtime": "2026-09-20T18:09:02.381Z",
+      "sha256": "ca6be5578b78fa362a871f52e344b1ebc3de2c11ca782b2a6aa020e7276d35d8",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/Spending.xlsx.lnk",
+      "bytes": 474,
+      "mtime": "2026-09-20T18:09:01.106Z",
+      "sha256": "032d86587cdd4d8188f7ccf88c0dae6fb5d81f8dc519aa79fb59272c74499aa2",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/tg_leveldb_log",
+      "bytes": 209795,
+      "mtime": "2026-09-20T18:07:34.260Z",
+      "sha256": "f398066a34d7f36c64eca5c08e3ecda149f53d71fa09b00d9662ec35c40d0c24",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/Vault_Y.lnk",
+      "bytes": 349,
+      "mtime": "2026-09-20T18:09:01.225Z",
+      "sha256": "a3a5662c961299c12cb1bfbffaf2a96570662c40f638fb165e3aa8b65c8aa920",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c04/vault.vhdx",
+      "bytes": 608174080,
+      "mtime": "2026-09-20T18:06:12.336Z",
+      "sha256": "877fff02e22383cccd511e9e94a77c83f7acbcc789e0ed9d2343e1c89234da3f",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 3,
+      "last_written_by": "s821c04"
+    },
+    {
+      "path": "work/extracted/s821c05/telegram/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/account-112545592466388074/postbox/db/db_sqlite",
+      "bytes": 7561216,
+      "mtime": "2024-04-04T09:26:42.000Z",
+      "sha256": "040304c487e41f4f64a24d5777662488b0e78cad0c4f69d1550bdd29f8bffcc1",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c05/telegram/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/account-112545592466388074/postbox/db/db_sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:39:10.887Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c05/telegram/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/account-112545592466388074/postbox/db/db_sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:05:48.372Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c05/telegram/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/accounts-metadata/db/db_sqlite",
+      "bytes": 1187840,
+      "mtime": "2026-09-20T18:05:57.770Z",
+      "sha256": "0aeb3b3dd1e8ab2cb299033f2dd41b2f2295353d6f3daf3b46d90a0a586e53d2",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c05/telegram/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/accounts-metadata/db/db_sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:09:00.758Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c05/telegram/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/accounts-metadata/db/db_sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:05:57.774Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c05/telegram/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/accounts-metadata/spotlight/p:36891850763/data.json",
+      "bytes": 170,
+      "mtime": "2023-10-30T23:16:51.000Z",
+      "sha256": "3d4065574e5b3faf04e05a89cfd505a32e48f514c6c8b3c41049403370c45332",
+      "kind": "json",
+      "packaged": false,
+      "revisions": 0,
+      "last_written_by": null
+    },
+    {
+      "path": "work/extracted/s821c06/err1.txt",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:06:51.738Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/err2.txt",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:06:51.954Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/err3.txt",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:06:52.266Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/err4.txt",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:06:52.385Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/err5.txt",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:06:55.302Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/err6.txt",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:06:55.505Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/err7.txt",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:06:55.900Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/NTUSER.DAT",
+      "bytes": 1310720,
+      "mtime": "2026-09-20T18:06:51.918Z",
+      "sha256": "feeb91311dde4e5d14691a3740925d4b2252033aa71bf86003a20e1c87fd7a3f",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/places.sqlite",
+      "bytes": 5242880,
+      "mtime": "2026-09-20T18:06:56.326Z",
+      "sha256": "913c25074e7e9a34f5fd0fb7f64a763f177148b20f07638aabcdeaef6c94cfb6",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/Powder.exe",
+      "bytes": 6686720,
+      "mtime": "2026-09-20T18:06:55.848Z",
+      "sha256": "0c67ea27c37b2b5382a8420ec6f4adf1a777890ef8327a37fbdf4c3e5dfaf181",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/powder.zip",
+      "bytes": 3034627,
+      "mtime": "2026-09-20T18:06:55.501Z",
+      "sha256": "37e0915aaf29d38fd28067d0d90e54c48ed1f8a00a095e31a375eba913ec82a3",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/SAM",
+      "bytes": 65536,
+      "mtime": "2026-09-20T18:06:52.350Z",
+      "sha256": "9a766022db1ee7768ad50aef130a85403f520d0ac829af8eef94a2db8ed14fcd",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/SOFTWARE",
+      "bytes": 76021760,
+      "mtime": "2026-09-20T18:06:55.282Z",
+      "sha256": "ca6be5578b78fa362a871f52e344b1ebc3de2c11ca782b2a6aa020e7276d35d8",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c06/SYSTEM",
+      "bytes": 11534336,
+      "mtime": "2026-09-20T18:06:52.246Z",
+      "sha256": "c22c5ecd3baca745d382fcfaddc03860a49319910fc12172d7e59187c6f35bc9",
+      "kind": "text",
+      "packaged": false,
+      "revisions": 2,
+      "last_written_by": "s821c06"
+    },
+    {
+      "path": "work/extracted/s821c08/vault.vhdx",
+      "bytes": 608174080,
+      "mtime": "2026-09-20T18:05:47.524Z",
+      "sha256": "877fff02e22383cccd511e9e94a77c83f7acbcc789e0ed9d2343e1c89234da3f",
+      "kind": "binary",
+      "packaged": false,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/flags.md",
+      "bytes": 3906,
+      "mtime": "2026-09-20T18:53:43.253Z",
+      "sha256": "c4740c263871ad64069687c140f1078411aed7634c373b807139a092dc6d186f",
+      "kind": "text",
+      "packaged": true,
+      "revisions": 8,
+      "last_written_by": "s821c07"
+    },
+    {
+      "path": "work/report.md",
+      "bytes": 7973,
+      "mtime": "2026-09-20T18:54:08.953Z",
+      "sha256": "86108db9478003f92b08313fdecef505bc51b61feed892c60b7768f352f893f0",
+      "kind": "text",
+      "packaged": true,
+      "revisions": 8,
+      "last_written_by": "s821c07"
+    },
+    {
+      "path": "work/s821c00/q1_q2.md",
+      "bytes": 1759,
+      "mtime": "2026-09-20T18:08:16.691Z",
+      "sha256": "4343e7818b8d75257f4edd087c71968019e6516fc3b4cb9dd70079c359e70936",
+      "kind": "text",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/s821c00/secudecrypt.bin",
+      "bytes": 3499,
+      "mtime": "2026-09-20T18:23:45.581Z",
+      "sha256": "6299403b05752e3cd35c9ee92e0d55c4191dfcfaf164f0505fa9acf1c8c846ba",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/s821c00/secuencrypt.bin",
+      "bytes": 3020,
+      "mtime": "2026-09-20T18:23:45.569Z",
+      "sha256": "9701a6f328e6bb3b7a22b83429de5f689aa48315147b8f59bb4ef87ae6dde950",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c00"
+    },
+    {
+      "path": "work/s821c01/browser/edge_History",
+      "bytes": 262144,
+      "mtime": "2026-09-20T18:11:14.927Z",
+      "sha256": "8fc410100297f3c83d7ed466e2fe21794c8f68c210c253da48194e59cc8013ac",
+      "kind": "text",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/s821c01/browser/places.sqlite",
+      "bytes": 5242880,
+      "mtime": "2026-09-20T18:10:19.146Z",
+      "sha256": "913c25074e7e9a34f5fd0fb7f64a763f177148b20f07638aabcdeaef6c94cfb6",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/s821c01/browser/places.sqlite-shm",
+      "bytes": 32768,
+      "mtime": "2026-09-20T18:10:19.147Z",
+      "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/s821c01/browser/places.sqlite-wal",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:10:19.146Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/s821c01/element/events.db",
+      "bytes": 81920,
+      "mtime": "2026-09-20T18:11:49.663Z",
+      "sha256": "2f1883e3c6ce185f319169d01523a2d331418f3e74225ea2d2916eef27a06800",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c01"
+    },
+    {
+      "path": "work/s821c02/tg_messages.txt",
+      "bytes": 29190,
+      "mtime": "2026-09-20T18:16:22.369Z",
+      "sha256": "3a83d3466ee673bc44ce9b243ef4940ac559aa03e98033925042eb4ad590353c",
+      "kind": "text",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c02"
+    },
+    {
+      "path": "work/s821c05/postbox.strings",
+      "bytes": 1310211,
+      "mtime": "2026-09-20T18:06:02.057Z",
+      "sha256": "67a94a906dd71229a9a3aa7cb5bd88f330587fc092826fcca69328ab5152b9b9",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c05"
+    },
+    {
+      "path": "work/s821c05/tarfilelist.txt",
+      "bytes": 17698144,
+      "mtime": "2026-09-20T18:04:50.134Z",
+      "sha256": "4d3cb44a6c1fe4997f39392841eb7039b495fe5e8e916ccf0982d121fabab0e6",
+      "kind": "text",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c05"
+    },
+    {
+      "path": "work/s821c05/tarlist.err",
+      "bytes": 0,
+      "mtime": "2026-09-20T18:04:47.941Z",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c05"
+    },
+    {
+      "path": "work/s821c08/776AR-04U.PDF.lnk",
+      "bytes": 474,
+      "mtime": "2026-09-20T18:09:12.310Z",
+      "sha256": "4c5b7ff1666e9a38f9429d6e16ed191624514880577d22f7adc6b7613809fb69",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/B500_ATM_Technical_Documentation.pdf.lnk",
+      "bytes": 567,
+      "mtime": "2026-09-20T18:05:43.209Z",
+      "sha256": "c27dd34f5845c1433c057dbea5ccd567e6bca5949c0020a6c7765822de1a530c",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/BitLocker_Recovery_Key.lnk",
+      "bytes": 2191,
+      "mtime": "2026-09-20T18:10:37.347Z",
+      "sha256": "8564021f6f898a485fa5badfdb2aa0420d5f12034ca817b1039756de557c95b7",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/Capture.png",
+      "bytes": 121335,
+      "mtime": "2026-09-20T18:07:12.179Z",
+      "sha256": "5e4cbf6922ed4faf461db8e179dd59ac2e74d5e0f0dff3cc7ae30e1e6c0faeca",
+      "kind": "image",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/Capture2.png",
+      "bytes": 407336,
+      "mtime": "2026-09-20T18:07:12.280Z",
+      "sha256": "9fdd876c20af75637cf2e9a09bebf60e51b0a225634ed31918baea83e2008810",
+      "kind": "image",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/Capture31231.lnk",
+      "bytes": 2004,
+      "mtime": "2026-09-20T18:09:45.828Z",
+      "sha256": "896c4aea1fe03ed561b6cb7258eb3f1c7b8fda95e9eb6e83abd753e06ba994b1",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/Edge_History.db",
+      "bytes": 262144,
+      "mtime": "2026-09-20T18:05:43.114Z",
+      "sha256": "8fc410100297f3c83d7ed466e2fe21794c8f68c210c253da48194e59cc8013ac",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/ext_manifest.json",
+      "bytes": 2397,
+      "mtime": "2026-09-20T18:09:27.215Z",
+      "sha256": "db3991c5788fc6968df25180898ef42ad974192dfe0aed4e12969219a1eb8565",
+      "kind": "json",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/firefox_places.sqlite",
+      "bytes": 5242880,
+      "mtime": "2026-09-20T18:08:45.282Z",
+      "sha256": "913c25074e7e9a34f5fd0fb7f64a763f177148b20f07638aabcdeaef6c94cfb6",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/NTUSER.DAT",
+      "bytes": 1310720,
+      "mtime": "2026-09-20T18:06:56.980Z",
+      "sha256": "feeb91311dde4e5d14691a3740925d4b2252033aa71bf86003a20e1c87fd7a3f",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/ready.lnk",
+      "bytes": 1975,
+      "mtime": "2026-09-20T18:09:45.914Z",
+      "sha256": "896ccde14d0e3ced8839b67a544a998f09c7977e67ccf18af8e0f16dc8c4e558",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/Spending.xlsx.lnk",
+      "bytes": 474,
+      "mtime": "2026-09-20T18:05:43.284Z",
+      "sha256": "032d86587cdd4d8188f7ccf88c0dae6fb5d81f8dc519aa79fb59272c74499aa2",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/tg/000003.log",
+      "bytes": 209795,
+      "mtime": "2026-09-20T18:09:51.438Z",
+      "sha256": "f398066a34d7f36c64eca5c08e3ecda149f53d71fa09b00d9662ec35c40d0c24",
+      "kind": "text",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/tg/blob3",
+      "bytes": 449172,
+      "mtime": "2026-09-20T18:09:51.539Z",
+      "sha256": "9bf3bfd3a432ce0f295b13c8d9c82766c7f1930aa56a36dc000c209764d3fbd2",
+      "kind": "text",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/tg/blob6",
+      "bytes": 610542,
+      "mtime": "2026-09-20T18:09:51.632Z",
+      "sha256": "44617808b089d9257b5c6314a9aa7ca3eb95aaf42468100d38f05156daffd74c",
+      "kind": "text",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/tg/blob7",
+      "bytes": 92074,
+      "mtime": "2026-09-20T18:09:51.718Z",
+      "sha256": "beca481aa299c4ceac05db49dd725571b382a62b02ddeef76da69cfdbf67c12e",
+      "kind": "text",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/UsrClass.dat",
+      "bytes": 3670016,
+      "mtime": "2026-09-20T18:06:57.410Z",
+      "sha256": "fc40d91017e39e728700c34b6383e5a4e68e90b9ec9e3f813fc129d55a28d75b",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/s821c08/VaultY.lnk",
+      "bytes": 349,
+      "mtime": "2026-09-20T18:05:43.362Z",
+      "sha256": "a3a5662c961299c12cb1bfbffaf2a96570662c40f638fb165e3aa8b65c8aa920",
+      "kind": "binary",
+      "packaged": true,
+      "revisions": 1,
+      "last_written_by": "s821c08"
+    },
+    {
+      "path": "work/timeline.md",
+      "bytes": 6523,
+      "mtime": "2026-09-20T18:28:34.467Z",
+      "sha256": "e63f2449c3d27e0ef8ca4d7f768ae001de75ec41e1871e67dc9e23b5ffe4a2bd",
+      "kind": "text",
+      "packaged": true,
+      "revisions": 11,
+      "last_written_by": "s821c07"
+    }
+  ],
+  "bytes": 2309327880,
+  "packaged_bytes": 37077114,
+  "unpackaged_dirs": [
+    "extracted",
+    "quarantine"
+  ],
+  "skipped": []
+}

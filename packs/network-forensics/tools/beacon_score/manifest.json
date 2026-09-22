@@ -1,0 +1,26 @@
+{
+  "name": "beacon_score",
+  "description": "Score a list of connection times for periodicity: median interval, jitter, how tightly the intervals cluster, and whether the pattern stopped. Takes times from pcap_summary, a proxy log, a firewall log or anywhere else.",
+  "params": {
+    "timestamps": {
+      "type": "array",
+      "description": "Connection start times: epoch seconds, or ISO 8601 strings"
+    },
+    "label": {
+      "type": "string",
+      "description": "What this series is, carried into the result"
+    },
+    "min_events": {
+      "type": "integer",
+      "description": "Refuse to score fewer than this many (default 6)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"timestamps\": [1771070000, 1771070060, 1771070121, 1771070179, 1771070240, 1771070301], \"label\": \"10.0.0.5 -> 203.0.113.7:443\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T19:00:00.000Z",
+  "version": 1,
+  "sha256": "aface6b389b2414a49d2a3fdd51052669e94c3119fd40e009d8b44dcb47eb523"
+}

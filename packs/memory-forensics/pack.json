@@ -1,0 +1,47 @@
+{
+  "id": "memory-forensics",
+  "name": "Memory Forensics Pack",
+  "version": "1.0.0",
+  "description": "Method and tooling for a memory image: what the container is before anything else, what can be read with no framework at all, processes and injection, network state, credential material, and the discipline that keeps a string in memory from becoming a claim about behaviour.",
+  "licence": "AGPL-3.0-or-later",
+  "authors": [
+    "DFIR Swarm"
+  ],
+  "depends": [
+    "computer-forensics-base>=1.2.0"
+  ],
+  "requires": {
+    "host": "requires/host.json",
+    "python": "requires/python.txt"
+  },
+  "secrets": [],
+  "checksums": {
+    "sha256": {
+      "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
+      "README.md": "dbcbf62f0db2a7df208ee56f72d57f4e08e346ddc993926b3608116b0c9857a4",
+      "tools/mem_carve/manifest.json": "257f5dd53246c58ba69901752aa8e6a591d96e268f88bed80317c5819b706726",
+      "tools/mem_carve/run.py": "5e51b5ebde843e9c4e2fc120c95cdcc2df4307bed7d2f637e9b2ddd899773914",
+      "tools/mem_profile/manifest.json": "6a1eeeaa707f0798eda712ba6df73dc9487738128ba1478ed5f2588cfe912dd2",
+      "tools/mem_profile/run.py": "7db7f599712a43d4dda6d87e9ea4d2d1b724bd038ec4bee5624122ac5e47cfc2",
+      "tools/mem_fs/manifest.json": "f84b9fdac8e08e046de407774b3c9e8bd8313a8ef8bb8260e2ac5e35aa38279e",
+      "tools/mem_fs/run.py": "2573511a5b6f4bdb9733c9f0a409e64b128a4fc2210362e61b7cd3f961e7c1c9",
+      "goals/memory-triage.md": "cfb58f77f963642cb9effff81e0b622008ae29486625e4a7cd8349dba8012655",
+      "skills/strings/discipline.md": "0514bdcd974e43c094df4c2020dc70509a8b1e8e179a4de4a23e559dd91285b2",
+      "skills/processes/injection.md": "97323de52a6486b7ccd13f522dd282576dd2603c872701630aa88b9838a8ea2b",
+      "skills/network/state.md": "5bf4ff19ce13916b22ead18ac62e7f05519824515d988c3a12834e52e58d9dce",
+      "skills/triage/no-framework.md": "00a5bfa0bea38e39746573c058156b07bb329e8063bc35a8b00cabc51e6e2849",
+      "skills/triage/what-you-have.md": "c3f0df6f83609d15b3f1e0d92ca9ba1ac0e76939f9aefe27feb8315749900999",
+      "skills/acquire/images.md": "218d10809d98de96adf1133e9144f69ffc316b20bbf1ce7d787968d12179ad62",
+      "skills/credentials/material.md": "6fbf10ab5f4e6b86d04aac1ecf97d559cd5ea75c32c487280a55853caa6ae064",
+      "requires/host.json": "33215d74131ff9d557cc7f2d31bbfc22c057e1f8461d5fc3918c6e22b34a3106",
+      "requires/python.txt": "a0587a37c3cf6bfaf2947f4b8c6f56ba6f79a2e83f7141cfb1de950bb23a2fd0",
+      "skills/INDEX.md": "9e76c4fb4f22773fd066d4b17b6ec66da1972df72b533939a5c69561d8311489"
+    }
+  },
+  "tools": [
+    "mem_carve",
+    "mem_fs",
+    "mem_profile"
+  ],
+  "skills": 7
+}

@@ -1,0 +1,28 @@
+{
+  "names": [
+    {
+      "id": "sd8ee00",
+      "name": "Memory hunter",
+      "doing": "Taking the memory forensics slice: processes, injections, network activity, and shellcode identification.",
+      "at": "2026-09-22T10:57:25.988Z"
+    },
+    {
+      "id": "sd8ee01",
+      "name": "Registry and timeline",
+      "doing": "I’m taking accounts, registry, and event-log triage, and I’ll feed verified timestamps into the master timeline.",
+      "at": "2026-09-22T10:57:32.892Z"
+    },
+    {
+      "id": "sd8ee02",
+      "name": "Software provenance checker",
+      "doing": "I will verify installed software on the disk image and separate attacker-installed software from baseline installs, then supply citations for the report.",
+      "at": "2026-09-22T10:57:38.517Z"
+    },
+    {
+      "id": "sd8ee03",
+      "name": "Disk & timeline",
+      "doing": "I am taking the disk triage and master timeline slice, including filesystem enumeration and bonus-file inventory.",
+      "at": "2026-09-22T10:57:32.810Z"
+    }
+  ]
+}

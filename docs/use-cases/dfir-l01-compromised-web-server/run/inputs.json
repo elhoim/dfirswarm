@@ -1,0 +1,58 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/linux-01-compromised-web-server",
+  "copied_at": "2026-09-18T22:38:18Z",
+  "files": [
+    {
+      "path": "inputs/CASE-manual.txt",
+      "bytes": 21456,
+      "sha256": "7f3f9d3653f747f60020992db8678717c69e55ce69701e0d7974afbf6d96307c",
+      "mtime_ms": 1789732563406,
+      "ctime_ms": 1789771097587
+    },
+    {
+      "path": "inputs/Case1-Workshop-Manual.pdf",
+      "bytes": 728797,
+      "sha256": "04420d994a77e60a6cd67bcd18ba71415d7a3d146e34eeda52e59aa2f0059ed7",
+      "mtime_ms": 1789730964442,
+      "ctime_ms": 1789771097587
+    },
+    {
+      "path": "inputs/README",
+      "bytes": 86,
+      "sha256": "ccaade8e878891e3a6627831a539f61271390605793f26e4e840e9606807e52d",
+      "mtime_ms": 1789730964840,
+      "ctime_ms": 1789771097587
+    },
+    {
+      "path": "inputs/Webserver.E01",
+      "bytes": 1169172006,
+      "sha256": "0975892d0a8edc8ff1ef42c15115928edcfbe8b7ba2e600b70399e07eca280ca",
+      "mtime_ms": 1571290423000,
+      "ctime_ms": 1789771097587
+    },
+    {
+      "path": "inputs/Webserver.E01.csv",
+      "bytes": 32167134,
+      "sha256": "7bf62d8ab8fd55bb457ccfb5d0251bf0f3b43de371584441f1359f1ef8143388",
+      "mtime_ms": 1571287735000,
+      "ctime_ms": 1789771097587
+    },
+    {
+      "path": "inputs/Webserver.E01.txt",
+      "bytes": 1268,
+      "sha256": "10ab10f708e6412be8e0bc06a0b28815d34ac09c3f1c43a7126405aca05a5a8e",
+      "mtime_ms": 1571287665000,
+      "ctime_ms": 1789771097587
+    },
+    {
+      "path": "inputs/index.md",
+      "bytes": 88,
+      "sha256": "d11563b7d3e4a54679e460e2e54f57bcca154ff99948e6662652d5a24373daaa",
+      "mtime_ms": 1789730965033,
+      "ctime_ms": 1789771097587
+    }
+  ],
+  "bytes": 1202090835,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

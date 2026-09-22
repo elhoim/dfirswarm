@@ -1,0 +1,32 @@
+Left in the sandbox, not in this package
+========================================
+
+Binary files over 256 KB under work/. A handover is the record of
+the run; these are the material it was made from, and they are still in
+/Users/halilozturkci/DFIR/SwarmRuns/s83fd/work/ with the hashes below to match them by. artifacts.json
+carries a hash for every one of them as well.
+
+sha256                                                            bytes  path
+edbc63c715179864fe3e1390b69bc3ce02bad643688788e5283a515dc96ae2c4       2097152  work/s83fd01/vault_bde_head.bin
+35a378cd72b266ef1d51232ed0ceac31e250141d817b536e178886da6b0055e2        387983  work/s83fd07/vaultcheck/776AR-04U.PDF
+327f108c60d95877671f31125c728dc803591d355a28c5c7ef52537d6f5e918c    2078277632  work/s83fd07/vault/1.Basic data partition.img
+35a378cd72b266ef1d51232ed0ceac31e250141d817b536e178886da6b0055e2        387983  work/s83fd05/776AR-04U.PDF
+279d4304a8a08c7bdab7825e3985ea2ccc395f9c168a689942ff8207c3e8824d       9692488  work/s83fd05/B500_ATM.pdf
+deffbf547765a283f9686fb28ebf1f1d70578b88d1fc5f351c302b739470beb4       3611573  work/s83fd05/ICAIP8720.pdf
+de52f52bb65b541bd053a69ff42a8be2ed72c28bdfbd62924d93b5b5faf7988d        380282  work/s83fd05/Laserjet_Color_3.pdf
+877fff02e22383cccd511e9e94a77c83f7acbcc789e0ed9d2343e1c89234da3f     608174080  work/s83fd05/vault.vhdx
+b5a24b755bdd550374de9e61fcb90fe568d66385bc51f694c9c3959d1d682926    2078277632  work/s83fd05/vault_decrypted.img
+1d9d7ae5f11d86bf253b011d4dd894dc06b7f31614dae4d546de8eac43540f8c        299008  work/s83fd05/iphone_extracts/private/var/mobile/Containers/Shared/AppGroup/AF67BA79-B4B6-4F89-AD78-9054620F3322/NoteStore.sqlite
+040304c487e41f4f64a24d5777662488b0e78cad0c4f69d1550bdd29f8bffcc1       7561216  work/s83fd05/iphone_extracts/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/account-112545592466388074/postbox/db/db_sqlite
+f8cbd0873b27f7386baf106df9690b17702da270008a9d139cd16a8965c8a32f      16759808  work/s83fd05/vault_parts/0.Microsoft reserved partition.img
+327f108c60d95877671f31125c728dc803591d355a28c5c7ef52537d6f5e918c    2078277632  work/s83fd05/vault_parts/1.Basic data partition.img
+18d9f22371f4cddfdd7babfa4ed18a75fd834bec1fbf1aa3daa4072a686454dc        307200  work/s83fd02/AddressBook.sqlitedb
+3e74f41408b8580da6501b72c59a1e807b9528724acd3796e633e0273d3e7c57       1419560  work/.toolchain/lib/python/site-packages/pybde.cpython-312-darwin.so
+52cf9c6bde7161df55c315657b20e17e761b31c518429f67c248b18c01330760       1153616  work/.toolchain/lib/python/site-packages/pyvhdi.cpython-312-darwin.so
+c92a498e2127a2956c85b24a7d14a48af6105d66cff87440ab8be8a3dbf991bb        295344  work/.toolchain/.cache/p10k-dump-halilozturkci.zsh.zwc
+5ffefa6747048134110eaf4aa638929bdb79dbc4db9cb983f8de50bfeed6f057        558099  work/.toolchain/.cache/pip/http/4/0/5/1/4/405142f74e02a2cd64981dafdf33ddc6f302a096f357f8c35c8216b4
+35b7b5425de0262f5747726ac1d6c791a3f03ef027804598e1134832e13c23f6        476776  work/.toolchain/.cache/pip/http/3/9/f/5/4/39f542c6e9bf6e28c13ff38ce74eccee4160e51bb46155f1c8c39c5e
+2a04838261540f0d1c84f36899ba6b8a325faa6ab7042f1323a8faaca9933b22       2129184  work/.toolchain/.cache/gitstatus/gitstatusd-darwin-arm64
+93099ce2ad3eb5fdbf41ad41c43e6828c191c119362e8278d8656ed12fb95788        294912  work/s83fd04/extracted/private/var/mobile/Library/SMS/sms.db
+1d9d7ae5f11d86bf253b011d4dd894dc06b7f31614dae4d546de8eac43540f8c        299008  work/s83fd04/extracted/private/var/mobile/Containers/Shared/AppGroup/AF67BA79-B4B6-4F89-AD78-9054620F3322/NoteStore.sqlite
+040304c487e41f4f64a24d5777662488b0e78cad0c4f69d1550bdd29f8bffcc1       7561216  work/s83fd04/extracted/private/var/mobile/Containers/Shared/AppGroup/A667456A-6F8F-48C7-A8CF-37EFCC6BD644/telegram-data/account-112545592466388074/postbox/db/db_sqlite

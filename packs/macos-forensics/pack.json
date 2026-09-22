@@ -1,0 +1,51 @@
+{
+  "id": "macos-forensics",
+  "name": "macOS Forensics Pack",
+  "version": "1.0.0",
+  "description": "Artefact-by-artefact method and tooling for a macOS host: the system profile, property lists, the unified log, FSEvents, the KnowledgeC and biome activity databases, launch items and other persistence, accounts and TCC, and what APFS keeps that HFS+ did not.",
+  "licence": "AGPL-3.0-or-later",
+  "authors": [
+    "DFIR Swarm"
+  ],
+  "depends": [
+    "computer-forensics-base>=1.2.0"
+  ],
+  "requires": {
+    "host": "requires/host.json",
+    "python": "requires/python.txt"
+  },
+  "secrets": [],
+  "checksums": {
+    "sha256": {
+      "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
+      "README.md": "ba584a8f780cc21951df98ed6bb8e7dc3dd5dced5919047eda3ee4189c0061ce",
+      "tools/plist_read/manifest.json": "6ebef69c13a3bfc4a4216739ae2049f4305e0c8731214e6b8c7eba3b432d08a0",
+      "tools/plist_read/run.py": "959d83395cadacdaa4f43392b41916b1c765b9b978c2ffaf3d3d4af6dca2f58b",
+      "tools/knowledgec_query/manifest.json": "1786d2173d37879ea617820bb168b2349a66c58fc980916bb4b73d0bf63efeed",
+      "tools/knowledgec_query/run.py": "a9f0a4001e31b94d4f6fa583a82367417387e22035bc59b507806ea3b093e90f",
+      "tools/fsevents_parse/manifest.json": "fa4470cc2dc22eb6601a1e6a05cdd62392ed5de9d51ce3ba01cd4dac65f67e8e",
+      "tools/fsevents_parse/run.py": "00bef7be780b17f2e5c3f923bc7445cac7ba60efa4bafcc14f619a5ce09609f2",
+      "tools/unified_log/manifest.json": "305223e032eb79e2f9ee9dbd5575dc8ed1345e5c6a0705675894e3c79817383b",
+      "tools/unified_log/run.py": "e7673020106c47525adb4d30c36f4699977c1a5a3a585fb745b31ec7e2838871",
+      "goals/mac-compromise.md": "5ce08be5772f268238887f822f32ef16e53b837337b74915d747f503196e963b",
+      "skills/artifacts/fsevents.md": "5fc19d683448eb7214fd34172bed2377827f70281ea0440162d962366263547b",
+      "skills/artifacts/knowledgec.md": "447ac0c2b030e0d366c3ccc7c5915f3923ee15ea84aa954e4dda132329d3e326",
+      "skills/artifacts/plists.md": "250b02728347f4e33ec8fa068b1213651b8dfdf481a1c74451840979e695e2be",
+      "skills/triage/system-profile.md": "415eb76262570296e1b4962499ec867906180c796d658f6c92651b47f5c8b5fa",
+      "skills/filesystem/apfs.md": "ba11f6cef7723eee6fcef84800274ccdc9495c781b544bd683755cabf95f1e24",
+      "skills/logs/unified.md": "e1d5e22470ae8ecff86f79e86b564a5031f0598363d00413ecf0ceabec67d0d7",
+      "skills/accounts/users.md": "f5caccc6923ae53ec68c3039477498559ef0a5d513684e8bd718ae92852c43c5",
+      "skills/persistence/mechanisms.md": "736140b00e53fbb7d3c53790f79a40757c9ec1dafe3f491c0e55a8f1897f6888",
+      "requires/host.json": "b9cb71e430b7f4172791e00ab683ff1625219a9a423d2ee68833f2c980494f45",
+      "requires/python.txt": "45bf903d28379de232cca57282d4dfba38654cd026f95243752642caaa333461",
+      "skills/INDEX.md": "d97f983c4e2816df653a5652eed3b81bd69471eefbd0f5d54602a224d5ff7d10"
+    }
+  },
+  "tools": [
+    "fsevents_parse",
+    "knowledgec_query",
+    "plist_read",
+    "unified_log"
+  ],
+  "skills": 8
+}

@@ -1,0 +1,64 @@
+{
+  "binaries": [
+    {
+      "name": "journalctl",
+      "package": "systemd",
+      "optional": true,
+      "why": "Read a systemd journal from a file or directory. The journal is a binary format and nothing else reads it reliably.",
+      "install": {
+        "brew": "not available on macOS; analyse on a Linux host",
+        "apt": "apt-get install -y systemd"
+      },
+      "licence": "LGPL-2.1-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "debsums",
+      "package": "debsums",
+      "optional": true,
+      "why": "Compare every packaged file on a Debian host against the distribution's own hashes: the fastest way to find a replaced binary.",
+      "install": {
+        "brew": "not available on macOS",
+        "apt": "apt-get install -y debsums"
+      },
+      "licence": "GPL-2.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "rpm",
+      "package": "rpm",
+      "optional": true,
+      "why": "rpm -Va does the same job on a Red Hat family host, and reports which attribute changed.",
+      "install": {
+        "brew": "brew install rpm",
+        "apt": "apt-get install -y rpm"
+      },
+      "licence": "GPL-2.0-only",
+      "redistributable": false
+    },
+    {
+      "name": "ausearch",
+      "package": "auditd",
+      "optional": true,
+      "why": "Read the kernel audit log, where the estate had auditd on: execve with arguments, and file access by rule.",
+      "install": {
+        "brew": "not available on macOS",
+        "apt": "apt-get install -y auditd"
+      },
+      "licence": "GPL-2.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "debugfs",
+      "package": "e2fsprogs",
+      "optional": true,
+      "why": "Read ext2/3/4 internals the Sleuth Kit does not surface: the inode's creation time, extent trees, and the journal.",
+      "install": {
+        "brew": "brew install e2fsprogs",
+        "apt": "apt-get install -y e2fsprogs"
+      },
+      "licence": "GPL-2.0-only",
+      "redistributable": false
+    }
+  ]
+}

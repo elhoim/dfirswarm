@@ -1,0 +1,28 @@
+{
+  "binaries": [
+    {
+      "name": "pwsh",
+      "package": "PowerShell",
+      "optional": true,
+      "why": "The Microsoft-Extractor-Suite and most Microsoft 365 acquisition tooling is PowerShell, and it runs on Linux and macOS.",
+      "install": {
+        "brew": "brew install --cask powershell",
+        "apt": "apt-get install -y powershell"
+      },
+      "licence": "MIT",
+      "redistributable": false
+    },
+    {
+      "name": "aws",
+      "package": "awscli",
+      "optional": true,
+      "why": "Pull CloudTrail, Config and GuardDuty records from the account under investigation, where the operator has credentials.",
+      "install": {
+        "brew": "brew install awscli",
+        "apt": "apt-get install -y awscli"
+      },
+      "licence": "Apache-2.0",
+      "redistributable": false
+    }
+  ]
+}

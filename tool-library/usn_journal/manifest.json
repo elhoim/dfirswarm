@@ -1,0 +1,26 @@
+{
+  "name": "usn_journal",
+  "description": "Parse an NTFS change journal ($UsnJrnl:$J) into records: name, USN, timestamp, reason bits and file reference. Skips the sparse front and says where the first record was.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "The $J stream, extracted with icat"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum records to return (default 500)"
+    },
+    "name": {
+      "type": "string",
+      "description": "Only records whose file name contains this, case-insensitive"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"work/extracted/UsnJrnl_J\", \"name\": \".aspx\", \"limit\": 200}",
+  "by": "maintainer",
+  "at": "2026-09-20T12:00:00.000Z",
+  "version": 1,
+  "sha256": "91227cf2e3e1d024c20fec6be1e16784b1c389c9dcacc9f0ea5a720e1b6c9846"
+}

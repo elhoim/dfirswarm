@@ -1,0 +1,2 @@
+# The reverse engineering pack's tools use the standard library only. The host
+# binaries above are optional and each one widens what can be established.

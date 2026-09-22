@@ -1,0 +1,42 @@
+{
+  "name": "mem_carve",
+  "description": "Sweep a memory image, page file or hibernation file for the structures that carry time and identity — registry hives, event log chunks, prefetch records, PE headers, SQLite databases, MFT and INDX records — and return each hit with its offset, optionally cutting it out for the parser that reads it.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A memory image, pagefile.sys, hiberfil.sys or any blob"
+    },
+    "kinds": {
+      "type": "array",
+      "description": "Only these kinds, e.g. [\"registry hive\",\"event log chunk\"]"
+    },
+    "extract_to": {
+      "type": "string",
+      "description": "Cut each hit out to this directory, under work/"
+    },
+    "max_extract": {
+      "type": "integer",
+      "description": "How many hits to cut out (default 25)"
+    },
+    "start": {
+      "type": "integer",
+      "description": "Byte offset to start the sweep at"
+    },
+    "max_bytes": {
+      "type": "integer",
+      "description": "Stop after this many bytes"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum hits to return (default 2000)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 900,
+  "example": "{\"path\": \"inputs/memory.raw\", \"kinds\": [\"registry hive\"], \"extract_to\": \"work/carved\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T17:00:00.000Z",
+  "version": 1,
+  "sha256": "5e51b5ebde843e9c4e2fc120c95cdcc2df4307bed7d2f637e9b2ddd899773914"
+}

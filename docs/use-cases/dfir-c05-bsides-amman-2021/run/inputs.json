@@ -1,0 +1,30 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/challenge-05-bsides-amman-2021",
+  "copied_at": "2026-09-18T13:10:59Z",
+  "files": [
+    {
+      "path": "inputs/BSidesAmman21.E01",
+      "bytes": 5689687451,
+      "sha256": "2b830de50a198b50bdd677098331270956ba41633710629923131cf8e1fbd02a",
+      "mtime_ms": 1596032992000,
+      "ctime_ms": 1789737056439
+    },
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 2293,
+      "sha256": "06e84c9d3caa35666221025a64bd493952a68d904825c5413394784824b73c51",
+      "mtime_ms": 1789730983405,
+      "ctime_ms": 1789737056439
+    },
+    {
+      "path": "inputs/README.rtf",
+      "bytes": 8228,
+      "sha256": "1231e255fa53c61b71cf720d7db841ba80de9fac656b8bb3ab8a569568f17885",
+      "mtime_ms": 1625520528000,
+      "ctime_ms": 1789737056439
+    }
+  ],
+  "bytes": 5689697972,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

@@ -1,0 +1,28 @@
+{
+  "name": "reg_hive_query",
+  "description": "Query a Windows registry hive file (regipy) and return a key's values and subkey names as JSON.",
+  "params": {
+    "hive": {
+      "type": "string",
+      "description": "Path to the extracted hive file (SOFTWARE, SYSTEM, NTUSER.DAT, ...)",
+      "required": true
+    },
+    "key": {
+      "type": "string",
+      "description": "Registry key path, e.g. Microsoft\\Windows NT\\CurrentVersion",
+      "required": true
+    },
+    "list_subkeys": {
+      "type": "boolean",
+      "description": "Also list immediate subkey names (default true)",
+      "required": false
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "by": "sbe1805",
+  "at": "2026-09-18T13:02:45.444Z",
+  "version": 1,
+  "sha256": "1864a737d68f93271e71392a2e1b99ce77cce81673d63a6c2d84d60704c1a4df"
+}

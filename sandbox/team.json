@@ -1,0 +1,8 @@
+{
+  "swarm_id": "hello-n2",
+  "n": 2,
+  "agents": [
+    { "id": "agent00", "role": "worker" },
+    { "id": "agent01", "role": "worker" }
+  ]
+}

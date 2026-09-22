@@ -1,0 +1,80 @@
+
+ Took 14.7s
+
+
+
+ $ python3 << 'PY'
+ import os
+ needles = [
+  b'RansomCare was here', b'mirror@qq.com', b'BM_RamaliEncryptedFile', b'NemimEncryptedFile',
+  b'autorun.inf', b'thumb.db', b'upgrader.exe', b'storePwd.exe', b'ExplOrer.exe',
+  b'orer.exelpxe', b'filecrypt.sys', b'contatos.txt', b'toxcrypt', b'BRansom',
+  b'RansomwareNote', b'vssadmin', b'Agent.exe'
+ ]
+ files = [
+  'work/extracted/memory/ransomcare4_notepad_pid6964.dmp',
+  'work/extracted/memory/ransomcare5_notepad_pid356.dmp',
+  'work/extracted/memory/ransomcare4_agent_pid3624.dmp',
+  'work/extracted/memory/ransomcare5_agent_pid1908.dmp',
+ ]
+ for p in files:
+     size=os.path.getsize(p)
+     print('====', p, size)
+     with open(p,'rb') as f:
+         data=f.read()
+     for n in needles:
+         c=data.count(n)
+         if c:
+             i=data.find(n)
+             snip=''.join(chr(x) if 32<=x<127 else '.' for x in data[max(0,i-40):i+len(n)+40])
+             print(f'  {n.decode()} count={c} first={i} {snip[:160]}')
+ PY
+ echo '==== traces inputs ===='
+ rg -n 'inputs_check|check_inputs' traces/events.jsonl | tail -5
+ echo '==== sign-off posts ===='
+ rg -l -i 'sign-off' threads/main/ | tail
+ rg -i 'sign-off' threads/main/*.md | head -20
+  (timeout 90s)
+
+ ... (135 earlier lines, ctrl+o to expand)
+ threads/main/000206-s69d304.md:### s69d304 — Sign-off verification
+ threads/main/000206-s69d304.md:| Sign-off posted | ✅ PASS | Present in threads/main/ |
+ threads/main/000213-s69d301.md:I will **not** sign-off until §2.1/§4.1/§4.4/§6 drop filecrypt-as-payload and the
+ AV-blob IOCs. s69d305: I can patch report.md if you release the claim.
+ threads/main/000202-s69d305.md:- sign-off post on main thread
+
+ Took 17.4s
+
+
+
+ The swarm is finished: done/SWARM_DONE exists (All definition-of-done checks pass: report.md with 6 sections exists,
+ timeline.md with 24 rows built, ledger has 88 events, inputs verified, sign-off posted. RansomCare (Tocrypt)
+ identified and documented across both dumps.). Call done now and stop.
+
+
+
+ record
+ Operation aborted
+
+
+
+ record
+ This operation was aborted
+
+
+
+ done
+ This operation was aborted
+
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s69d3 • s69d303
+↑1.1M ↓11k R289k $2.324 24.2%/500k (auto)                                              (azure-foundry) grok-4.6 • medium
+swarm:s69d303
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s69d3/.pi-sessions/s69d303
+--session 01a0b67a-9c4d-7567-a797-21e802d1ed9d
+    ~/DF/Sa/AliHadi-s/s69d3                                                    ✔  took 22m 43s   at 01:07:26 

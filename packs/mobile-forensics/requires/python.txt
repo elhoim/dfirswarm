@@ -1,0 +1,2 @@
+# The mobile pack's tools use the standard library only: sqlite3 and plistlib are
+# in it, and the protobuf reader here is a wire-format decoder rather than a library.

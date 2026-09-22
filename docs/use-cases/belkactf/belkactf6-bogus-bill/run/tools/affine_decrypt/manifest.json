@@ -1,0 +1,27 @@
+{
+  "name": "affine_decrypt",
+  "description": "Decrypt SecuEncrypt hex (Telegram secret chat) with key string or key char-sum",
+  "params": {
+    "hex": {
+      "type": "string",
+      "description": "ciphertext as hex",
+      "required": true
+    },
+    "key": {
+      "type": "string",
+      "description": "passphrase (optional)"
+    },
+    "sum": {
+      "type": "integer",
+      "description": "char-code sum of key (optional; omit both key and sum to brute)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "{\"hex\": \"1965dc82eda62f00eddc82ed77a60bed\", \"sum\": 1703}",
+  "by": "s821c01",
+  "at": "2026-09-20T18:33:57.615Z",
+  "version": 1,
+  "sha256": "39a6267766eaa463e59567333e4ea3a7fc1ea26d2fdb4bf7b6661170ffd5a01a"
+}

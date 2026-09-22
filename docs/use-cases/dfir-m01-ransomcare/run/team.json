@@ -1,0 +1,45 @@
+{
+  "swarm_id": "s69d3",
+  "n": 7,
+  "agents": [
+    {
+      "id": "s69d300",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6"
+    },
+    {
+      "id": "s69d301",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6"
+    },
+    {
+      "id": "s69d302",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6"
+    },
+    {
+      "id": "s69d303",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6"
+    },
+    {
+      "id": "s69d304",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro"
+    },
+    {
+      "id": "s69d305",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro"
+    },
+    {
+      "id": "s69d306",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro"
+    }
+  ],
+  "models": [
+    "azure-foundry/DeepSeek-V4-Pro",
+    "azure-foundry/grok-4.6"
+  ]
+}

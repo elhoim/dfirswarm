@@ -1,0 +1,34 @@
+{
+  "name": "hdfs_node_icat",
+  "description": "Extract an inode from a cluster node's image with icat and hash what it wrote. node picks one of the HDFS case's three images; image names any other.",
+  "params": {
+    "node": {
+      "type": "string",
+      "description": "master | slave1 | slave2, or use image"
+    },
+    "inode": {
+      "type": "string",
+      "description": "Inode to extract"
+    },
+    "output": {
+      "type": "string",
+      "description": "Where to write it"
+    },
+    "image": {
+      "type": "string",
+      "description": "Image to read, instead of a node name"
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Sector offset (default 2048)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"node\":\"slave2\",\"inode\":2229804,\"output\":\"work/s9a5f03/s2_cluster.service\"}",
+  "by": "s9a5f03",
+  "at": "2026-09-18T23:22:00.773Z",
+  "version": 2,
+  "sha256": "2eb13cc2c9b9dfbe83c2105fbfc9ecbd8431c4567c16dce80e1264aa4394a066"
+}

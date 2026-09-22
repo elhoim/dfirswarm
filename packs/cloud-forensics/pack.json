@@ -1,0 +1,46 @@
+{
+  "id": "cloud-forensics",
+  "name": "Cloud and SaaS Forensics Pack",
+  "version": "1.0.0",
+  "description": "Method and tooling for logs that belong to somebody else's computer: what each provider keeps and for how long, the Microsoft 365 unified audit log, Entra sign-ins and the tokens behind them, AWS CloudTrail, Google Workspace, and the mailbox rules and application consents that are how a cloud account is actually kept.",
+  "licence": "AGPL-3.0-or-later",
+  "authors": [
+    "DFIR Swarm"
+  ],
+  "depends": [
+    "computer-forensics-base>=1.2.0"
+  ],
+  "requires": {
+    "host": "requires/host.json",
+    "python": "requires/python.txt"
+  },
+  "secrets": [],
+  "checksums": {
+    "sha256": {
+      "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
+      "README.md": "c77e302d8f7a803c23d84297a57a5ce6c20d506138b435eb6de58cd70fdbfcfd",
+      "tools/ual_parse/manifest.json": "a78530cbeb058a0e00c9334223e84fd740a79539c1eaab25526dbe6342db71ed",
+      "tools/ual_parse/run.py": "d8a9061ec0f0ebe791b79bbcf67ba99e5a75c8d4cedc180d20fbf5e188d603bb",
+      "tools/signin_analyse/manifest.json": "b33319efc12a9c02b00b0587b7e54ce55f4e3c96734c6fb682571f9c59e993b8",
+      "tools/signin_analyse/run.py": "c85ba811bdcccb63506e5104b1fe080ca7fc1bebf16a5541156c92e6363da8cf",
+      "tools/cloudtrail_parse/manifest.json": "7a97ef59f737050d2761e54d48743eddf315aaa546506ee0b9421d32e0701f0c",
+      "tools/cloudtrail_parse/run.py": "f42e0f82d5ad42f3390830378657a06cb4b6c8da64b8d7f635fb9034f3ce7871",
+      "goals/tenant-compromise.md": "86a2d93ae7e7cbc0c85262bad4cb9fc3e19c2622792a2ddbc73ef29c6ec850d9",
+      "skills/identity/tokens.md": "508d85af814f22ecc68dad4dd59815ec17dcead6b36d4e25c9bb404c32e0a277",
+      "skills/google/workspace.md": "829eda2d9b7c49f091fcfe60eb5d0a27ae6e7250776cf494e3eefa37717eff33",
+      "skills/logs/what-exists.md": "f2d460d1abbb89a03f6475c6ea31fa8eb10c78820abd6143b7bf2fb8cef5a68b",
+      "skills/m365/unified-audit-log.md": "0a383c97395c67d23e3c52101b042feee2e5d9dd6d555eedc329ee2b4ab4294c",
+      "skills/aws/cloudtrail.md": "ebabbd35e18df011cbfbde33623dc45fab9bfc983760bf199d0e6d250f34f13d",
+      "skills/entra/signins.md": "e8ffd61841b26c2dfb7fe679cdcfcea58b62e63a5915e4e15bb843974ce9df27",
+      "requires/host.json": "e0def2a69a18c5173af4f3d3fd55c4d31a9257ec5212650893a6fd695b534843",
+      "requires/python.txt": "eb9148a62031d80af4795335b759dbe15552ed2df3b5b97648fbcda6b32b64de",
+      "skills/INDEX.md": "fe953eb77754f23b01157513c95d322c7830162cc0224ea2729b6361163a3a21"
+    }
+  },
+  "tools": [
+    "cloudtrail_parse",
+    "signin_analyse",
+    "ual_parse"
+  ],
+  "skills": 6
+}

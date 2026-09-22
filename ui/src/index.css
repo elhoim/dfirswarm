@@ -1,0 +1,137 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/*
+ * DFIR Swarm design tokens — "field notebook".
+ * Warm paper surfaces, ink text, one primary (kelp), one budget colour
+ * (saffron), one danger (brick), one info (slate). Mono only for ids, paths,
+ * and trace payloads. See docs/ui-design.md.
+ */
+@theme {
+  --color-paper: #f4f1ea;
+  --color-paper-2: #efece4;
+  --color-paper-3: #e6e1d6;
+  --color-card: #fffdf9;
+  --color-ink: #1c1b1a;
+  --color-ink-2: #55524c;
+  --color-ink-3: #6b675f;
+  /* The dark "vitals" band: the four numbers that say whether anything is wrong. */
+  --color-band: #1c1b1a;
+  --color-band-2: #2e2c29;
+  --color-band-line: #3a3835;
+  --color-band-ink: #f4f1ea;
+  --color-band-ink-2: #b8b3a8;
+  --color-band-brick: #f0a5ae;
+  --color-line: #ddd8cc;
+  --color-line-2: #ccc6b8;
+
+  --color-kelp: #0e7c7b;
+  --color-kelp-ink: #0a5d5c;
+  --color-kelp-soft: #dcefee;
+  --color-saffron: #e09f3e;
+  --color-saffron-ink: #9a5f0c;
+  --color-saffron-soft: #fbebd3;
+  --color-brick: #b23a48;
+  --color-brick-ink: #8b2532;
+  --color-brick-soft: #f5dade;
+  --color-slate: #3e5c76;
+  --color-slate-ink: #2c4660;
+  --color-slate-soft: #dce4ec;
+  --color-moss: #4c7a34;
+  --color-moss-ink: #2f5a1c;
+  --color-moss-soft: #e1edd8;
+
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", sans-serif;
+  --font-serif: "Instrument Serif", Georgia, "Times New Roman", serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  --shadow-card: 0 1px 0 rgba(28, 27, 26, 0.04), 0 1px 2px rgba(28, 27, 26, 0.06);
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    font-feature-settings: "cv11", "ss01", "tnum";
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    @apply bg-paper text-ink text-[14px] leading-[1.45];
+  }
+  ::selection {
+    background: var(--color-kelp-soft);
+  }
+  code,
+  kbd,
+  pre,
+  .mono {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-kelp);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-card border border-line rounded-lg shadow-card;
+  }
+  .hairline {
+    @apply border-line;
+  }
+  .label-caps {
+    @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-3;
+  }
+  /* Display face: headings and the big numbers in the vitals band. */
+  .serif {
+    font-family: var(--font-serif);
+    font-weight: 400;
+    letter-spacing: -0.005em;
+  }
+  /* A row on the list that reads as a sentence, not a table cell. */
+  .console-row {
+    @apply grid items-center gap-5 rounded-[10px] border border-line bg-card px-6 py-[18px] text-ink transition-colors;
+    grid-template-columns: 28px minmax(0, 1fr) 200px 180px 88px 32px;
+  }
+  .console-row:hover {
+    @apply border-kelp no-underline;
+  }
+  @media (max-width: 900px) {
+    .console-row {
+      grid-template-columns: 22px minmax(0, 1fr);
+    }
+    .console-row > .console-cell {
+      display: none;
+    }
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  /* A thread that went dark: still readable, clearly asleep. */
+  .thread-dark {
+    background:
+      repeating-linear-gradient(135deg, transparent 0 6px, rgba(28, 27, 26, 0.035) 6px 7px),
+      var(--color-paper-2);
+    color: var(--color-ink-2);
+  }
+  .thread-dark .thread-title {
+    color: var(--color-ink-2);
+  }
+  /* A post that just landed: a green wash that fades as you read it. */
+  .post-fresh {
+    animation: post-fresh 4s ease-out 1;
+  }
+  @keyframes post-fresh {
+    from {
+      background: var(--color-moss-soft);
+    }
+    to {
+      background: transparent;
+    }
+  }
+}

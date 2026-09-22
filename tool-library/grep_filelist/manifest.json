@@ -1,0 +1,18 @@
+{
+  "name": "grep_filelist",
+  "description": "Search the catalog filelist for a pattern (case-insensitive). Returns matching lines as JSON array.",
+  "params": {
+    "pattern": {
+      "type": "string",
+      "description": "Pattern to search for (case-insensitive regex)",
+      "required": true
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "by": "s864a08",
+  "at": "2026-09-18T16:09:29.146Z",
+  "version": 3,
+  "sha256": "feeb2b7474e1a55001051e36e697dc47990db2a6eb37c7f8e6c562c9c96ab3d6"
+}

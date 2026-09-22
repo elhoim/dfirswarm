@@ -1,0 +1,67 @@
+{
+  "preset": "dfir",
+  "checked_at": "2026-09-18T16:04:30Z",
+  "present": [
+    {
+      "name": "mmls",
+      "version": "The Sleuth Kit ver 4.15.0",
+      "use": " head -1"
+    },
+    {
+      "name": "fls",
+      "version": "The Sleuth Kit ver 4.15.0",
+      "use": " head -1"
+    },
+    {
+      "name": "icat",
+      "version": "The Sleuth Kit ver 4.15.0",
+      "use": " head -1"
+    },
+    {
+      "name": "mactime",
+      "version": "The Sleuth Kit ver 4.15.0",
+      "use": " head -1"
+    },
+    {
+      "name": "vol",
+      "version": "Volatility 3 Framework 2.28.2",
+      "use": " head -1"
+    },
+    {
+      "name": "regipy-dump",
+      "version": "6.3.0",
+      "use": "registry hives (regipy, python)"
+    },
+    {
+      "name": "evtx_dump",
+      "version": "python-evtx ok",
+      "use": "Windows event logs (python-evtx)"
+    },
+    {
+      "name": "yara",
+      "version": "4.5.8",
+      "use": " head -1"
+    },
+    {
+      "name": "exiftool",
+      "version": "12.92",
+      "use": " head -1"
+    },
+    {
+      "name": "sqlite3",
+      "version": "3.54.0 2026-04-09 12:25:13 8fa8248e303219400c646a885e36dfc52eae33d83f4412e3f369b2be5373aapl (64-bit)",
+      "use": " head -1"
+    },
+    {
+      "name": "strings",
+      "version": "error: /Library/Developer/CommandLineTools/usr/bin/strings: unknown flag: --version",
+      "use": " head -1 "
+    },
+    {
+      "name": "python3",
+      "version": "Python 3.12.1",
+      "use": "scripts and forged tools"
+    }
+  ],
+  "missing": []
+}

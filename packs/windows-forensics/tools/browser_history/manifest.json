@@ -1,0 +1,30 @@
+{
+  "name": "browser_history",
+  "description": "Query a browser history database, copying it and any -wal beside it first so the write-ahead log is replayed rather than ignored. Named queries for Chrome, Edge and Firefox, or your own SELECT.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Path to History, places.sqlite or another SQLite database"
+    },
+    "query": {
+      "type": "string",
+      "description": "chrome_history | chrome_downloads | firefox_history | firefox_downloads | tables"
+    },
+    "sql": {
+      "type": "string",
+      "description": "Your own SELECT, WITH or PRAGMA, instead of a named query"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum rows to return (default 200, cap 20000)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 90,
+  "example": "{\"path\": \"work/extracted/History\", \"query\": \"chrome_history\", \"limit\": 100}",
+  "by": "maintainer",
+  "at": "2026-09-20T12:00:00.000Z",
+  "version": 1,
+  "sha256": "70c51cfeb7cd6132dac80cf5791699d1f95d667e8964d1471ae1b7ec67c92f7d"
+}

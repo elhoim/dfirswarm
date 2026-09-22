@@ -1,0 +1,40 @@
+{
+  "binaries": [
+    {
+      "name": "uac",
+      "package": "UAC",
+      "optional": true,
+      "why": "Collect from a live Unix-like host \u2014 Linux, macOS, ESXi, BSD, Solaris \u2014 driven by YAML artefact definitions, with no agent and no dependencies.",
+      "install": {
+        "brew": "https://github.com/tclahr/uac",
+        "apt": "https://github.com/tclahr/uac"
+      },
+      "licence": "Apache-2.0",
+      "redistributable": false
+    },
+    {
+      "name": "velociraptor",
+      "package": "Velociraptor",
+      "optional": true,
+      "why": "Build an offline collector with a chosen artefact set baked in, and read the container it produces. AGPL-3.0, the same licence as this harness.",
+      "install": {
+        "brew": "https://github.com/Velocidex/velociraptor/releases",
+        "apt": "https://github.com/Velocidex/velociraptor/releases"
+      },
+      "licence": "AGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "CyLR",
+      "package": "CyLR",
+      "optional": true,
+      "why": "Pull NTFS artefacts off a live Windows host through the raw handle, including files that are locked.",
+      "install": {
+        "brew": "https://github.com/orlikoski/CyLR/releases",
+        "apt": "https://github.com/orlikoski/CyLR/releases"
+      },
+      "licence": "GPL-3.0-or-later",
+      "redistributable": false
+    }
+  ]
+}

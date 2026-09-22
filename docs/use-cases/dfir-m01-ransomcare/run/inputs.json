@@ -1,0 +1,30 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/memory-01-ransomcare",
+  "copied_at": "2026-09-18T21:42:59Z",
+  "files": [
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 717,
+      "sha256": "c02c1e74c6396e1cd75d569fac838533aa9e57c27dba753b45bdd56831efd8e4",
+      "mtime_ms": 1789730983406,
+      "ctime_ms": 1789767771497
+    },
+    {
+      "path": "inputs/ransomcare4.raw",
+      "bytes": 9663676416,
+      "sha256": "875990d37b4ef3c877c1c16ec44552741888c948730e777985c1456751ea306b",
+      "mtime_ms": 1684650227000,
+      "ctime_ms": 1789767771497
+    },
+    {
+      "path": "inputs/ransomcare5.dmp",
+      "bytes": 8588951552,
+      "sha256": "078a7fa5dd01c8af4401c3e9d98b63ca0edd3dccd92f5bba80ecf3515494c0e1",
+      "mtime_ms": 1685041656000,
+      "ctime_ms": 1789767771497
+    }
+  ],
+  "bytes": 18252628685,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

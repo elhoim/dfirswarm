@@ -1,0 +1,30 @@
+{
+  "name": "utmp_parse",
+  "description": "Parse the binary login databases — wtmp, btmp, utmp and lastlog — into records: type, user, terminal, source host and address, PID and time. The counterweight to text logs, and the file an attacker who cleans auth.log usually forgets.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A wtmp, btmp or utmp file"
+    },
+    "types": {
+      "type": "array",
+      "description": "Keep only these record types, e.g. [\"USER_PROCESS\",\"BOOT_TIME\"]"
+    },
+    "user": {
+      "type": "string",
+      "description": "Case-insensitive regex over the user name"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum records to return (default 1000)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"path\": \"work/extracted/wtmp\", \"types\": [\"USER_PROCESS\", \"BOOT_TIME\"]}",
+  "by": "maintainer",
+  "at": "2026-09-22T15:00:00.000Z",
+  "version": 1,
+  "sha256": "edf1e6c1a8f614a97d95f6189e2a0a2c029dea73283f3b6caa44d2c429f45446"
+}

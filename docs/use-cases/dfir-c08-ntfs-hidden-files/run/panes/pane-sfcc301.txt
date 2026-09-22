@@ -1,0 +1,80 @@
+
+ Took 0.3s
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/sfcc3/work/report.md:70-149
+
+
+
+ $ grep -n 'timestomp\|No timestomp\|originally' work/report.md
+ # done checks
+ echo '--- checks ---'
+ test -f work/report.md && echo report_ok
+ for n in 1 2 3 4 5 6; do grep -q "^## $n\." work/report.md && echo heading_$n_ok || echo heading_$n_FAIL; done
+ test -f work/timeline.md && echo timeline_ok
+ echo -n 'timeline rows '; grep -c '^| ' work/timeline.md
+ echo -n 'events '; grep -c '"kind":"event"' ledger/entries.jsonl
+ grep -rqi 'sign-off' threads/main/ && echo signoff_ok
+ grep -q '"tool":"inputs_check"' traces/events.jsonl && echo inputs_check_ok || echo inputs_check_FAIL
+ grep -q '"tool":"check_inputs"' traces/events.jsonl && echo check_inputs_present (timeout 10s)
+
+ ... (17 earlier lines, ctrl+o to expand)
+ timeline rows 28
+ events 28
+ signoff_ok
+ inputs_check_FAIL
+ check_inputs_present
+
+ Took 0.4s
+
+
+
+ post
+ {
+   "ok": true,
+   "id": 28,
+   "path": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/sfcc3/threads/main/000028-sfcc301.md",
+   "tag": "result"
+ }
+
+
+
+
+ $ for n in 1 2 3 4 5 6; do grep -q "^## $n\." work/report.md && echo OK $n || echo FAIL $n; done
+ grep '^## ' work/report.md (timeout 10s)
+
+ ... (7 earlier lines, ctrl+o to expand)
+ ## 2. Hidden item 2: flag1.jpg (Alternate Data Stream on a directory)
+ ## 3. Hidden item 3: flag2.jpg (Alternate Data Stream on a directory, with binary obfuscation)
+ ## 4. Hidden item 4: $Quota (MFT attribute manipulation + index entry deletion)
+ ## 5. Hidden item 5: Hash for flag2 (MFT entry slack space + attribute ID manipulation)
+ ## 6. The five hiding techniques
+
+ Took 0.4s
+
+
+
+ wait
+ {
+   "reason": "post",
+   "waited_ms": 9,
+   "detail": "New posts in: main. Call inbox.",
+   "swarm_done": false,
+   "posts": [
+     {
+       "id": 27,
+       "thread": "main",
+       "from": "sfcc300",
+ ... (15 more lines, ctrl+o to expand)
+
+
+ Steering: The swarm is finished: done/SWARM_DONE exists (All 5 hidden items identified, timeline built (28 rows, 28...
+ ↳ Option+Up to edit all queued messages
+
+── ⠦ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/sfcc3 • sfcc301
+↑3.0M ↓22k R455k CH0.0% $6.425 27.2%/500k (auto)                                       (azure-foundry) grok-4.6 • medium
+swarm:sfcc301

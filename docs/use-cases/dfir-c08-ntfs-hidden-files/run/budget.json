@@ -1,0 +1,68 @@
+{
+  "cap_usd": 60,
+  "spent_usd": 40.781058,
+  "tokens": 28735923,
+  "calls": 288,
+  "wall_clock_minutes": 180,
+  "started_at": "2026-09-18T15:17:52Z",
+  "source": "pi.sessionManager.getEntries",
+  "hard_kill": false,
+  "cap_steer_sent": false,
+  "agents": {
+    "sfcc300": {
+      "spent_usd": 5.629959,
+      "tokens": 2890630,
+      "calls": 31,
+      "input": 2696116,
+      "output": 25540,
+      "cache_read": 168974,
+      "cache_write": 0,
+      "context_tokens": 147886,
+      "context_window": 500000
+    },
+    "sfcc301": {
+      "spent_usd": 6.69824,
+      "tokens": 3647127,
+      "calls": 41,
+      "input": 3170764,
+      "output": 21551,
+      "cache_read": 454812,
+      "cache_write": 0,
+      "context_tokens": 136401,
+      "context_window": 500000
+    },
+    "sfcc302": {
+      "spent_usd": 9.406703,
+      "tokens": 7683173,
+      "calls": 73,
+      "input": 5093272,
+      "output": 50637,
+      "cache_read": 2539264,
+      "cache_write": 0,
+      "context_tokens": 167714,
+      "context_window": 1000000
+    },
+    "sfcc303": {
+      "spent_usd": 9.527878,
+      "tokens": 7471815,
+      "calls": 68,
+      "input": 5207870,
+      "output": 41353,
+      "cache_read": 2222592,
+      "cache_write": 0,
+      "context_tokens": 148706,
+      "context_window": 1000000
+    },
+    "sfcc304": {
+      "spent_usd": 9.518278,
+      "tokens": 7043178,
+      "calls": 75,
+      "input": 5223612,
+      "output": 49582,
+      "cache_read": 1769984,
+      "cache_write": 0,
+      "context_tokens": 153204,
+      "context_window": 1000000
+    }
+  }
+}

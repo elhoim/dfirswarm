@@ -1,0 +1,16 @@
+Left in the sandbox, not in this package
+========================================
+
+Binary files over 256 KB under work/. A handover is the record of
+the run; these are the material it was made from, and they are still in
+/Users/halilozturkci/DFIR/dfirswarm-runs/s821c/work/ with the hashes below to match them by. artifacts.json
+carries a hash for every one of them as well.
+
+sha256                                                            bytes  path
+913c25074e7e9a34f5fd0fb7f64a763f177148b20f07638aabcdeaef6c94cfb6       5242880  work/s821c01/browser/places.sqlite
+9fdd876c20af75637cf2e9a09bebf60e51b0a225634ed31918baea83e2008810        407336  work/s821c08/Capture2.png
+feeb91311dde4e5d14691a3740925d4b2252033aa71bf86003a20e1c87fd7a3f       1310720  work/s821c08/NTUSER.DAT
+fc40d91017e39e728700c34b6383e5a4e68e90b9ec9e3f813fc129d55a28d75b       3670016  work/s821c08/UsrClass.dat
+913c25074e7e9a34f5fd0fb7f64a763f177148b20f07638aabcdeaef6c94cfb6       5242880  work/s821c08/firefox_places.sqlite
+9bf3bfd3a432ce0f295b13c8d9c82766c7f1930aa56a36dc000c209764d3fbd2        449172  work/s821c08/tg/blob3
+44617808b089d9257b5c6314a9aa7ca3eb95aaf42468100d38f05156daffd74c        610542  work/s821c08/tg/blob6

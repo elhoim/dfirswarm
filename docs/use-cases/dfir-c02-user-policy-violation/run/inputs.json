@@ -1,0 +1,30 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/challenge-02-user-policy-violation",
+  "copied_at": "2026-09-18T12:28:03Z",
+  "files": [
+    {
+      "path": "inputs/4orensics.001",
+      "bytes": 26474446848,
+      "sha256": "44d7e017fc023490c19729a63e25ce79ad2fdc0c69b31a765fb1a737cc5e1eea",
+      "mtime_ms": 1466515849000,
+      "ctime_ms": 1789734471626
+    },
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 1456,
+      "sha256": "11219efd24923afe7bd551384543f8489183e66ca0c46ec6dc6d05efd67cb69c",
+      "mtime_ms": 1789730983404,
+      "ctime_ms": 1789734471626
+    },
+    {
+      "path": "inputs/README.txt",
+      "bytes": 156,
+      "sha256": "9dee2f0374c00b51e6da05c8b606676a87c596cfa4f1ce2f5b8a97b9d6829d2a",
+      "mtime_ms": 1583474557000,
+      "ctime_ms": 1789734471626
+    }
+  ],
+  "bytes": 26474448460,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

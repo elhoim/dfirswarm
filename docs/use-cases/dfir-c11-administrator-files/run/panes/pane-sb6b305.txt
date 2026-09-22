@@ -1,0 +1,80 @@
+ - 97 | 12. Shutdown | 06:03:14 | — | EventLog service shutdown (EID 1100) — *ledger seq 23* |
+ + 93 | 1. Admin login | 05:40:19 | VMware console (ProfileList LoadTime) | ProfileList SID-500 LocalProfileLoadTime —
+ *Post #38* |
+ + 94 | 2. Defender tampering | 05:27:11 | — | Defender definition files deleted; Scheduled Scan task deleted at
+ 05:38:38Z — *ledger seq 25, 26* |
+ + 95 | 3. User enumeration | 05:51:58 | net.exe / net1.exe (Admin session) | Prefetch NET.EXE-DF44F913.pf,
+ NET1.EXE-849DA590.pf — *ledger seq 5, 17, 48* |
+ + 96 | 4. Admin logoff | 05:52:07 | Administrator profile unloaded | ProfileList SID-500 LocalProfileUnloadTime —
+ *Post #38* |
+ + 97 | 5. NTDS tampering | 05:52:41 | — | WMI ETW traces deleted, NTDS temp.edb wiped — *ledger seq 32 (Post #32)* |
+ + 98 | 6. jdoe first login | 05:55:30 | VMware console (ProfileList FirstLogonTime) | ProfileList SID-1103; NTUSER
+ LogonStats — *Post #38* |
+ + 99 | 7. jdoe creates files | 05:55:57 | hello.txt, info.txt in Documents | inodes 49010, 48855 — *Post #38* |
+ +100 | 8. SDelete execution | 05:57:01 | dark_knight.c5w (SDelete64) via CONHOST console | Prefetch
+ DARK_KNIGHT.C5W-A45BCA91.pf + CONHOST.EXE-1F3E9D7E.pf (run 4 at 05:57:01.640Z) — *ledger seq 1, 10, 13, 24, 37; Post
+ #38* |
+ +101 | 9. Profile wiped | 05:57:08 | SDelete | Administrator directory MAC updated, $I30 emptied — *ledger seq 3, 9* |
+ +102 | 10. UAC consent | 06:02:18 | consent.exe (for wevtutil elevation) | Prefetch CONSENT.EXE-531BD9EA.pf — *Post
+ #38* |
+ +103 | 11. PowerShell | 06:02:33 | powershell.exe | Prefetch POWERSHELL.EXE-920BBA2A.pf — *ledger seq 2, 15, 47* |
+ +104 | 12. Log clearing | 06:02:34 | wevtutil.exe × 11 | Prefetch WEVTUTIL.EXE-EF5861C4.pf — *ledger seq 6, 14, 42,
+ 45* |
+ +105 | 13. Logs cleared | 06:02:56 | — | Security EID 1102, System EID 104 — *ledger seq 16, 23, 27* |
+ +106 | 14. jdoe initiates shutdown | 06:03:12 | SystemSettingsAdminFlows.exe | System EID 1074 param7=simlab\jdoe —
+ *Post #38* |
+ +107 | 15. Sessions logoff | 06:03:07–06:03:13 | — | Administrator (EID 4634, Type 3), jdoe (EID 4647, LSM 23
+ SessionID=1) — *ledger seq 23, 32; Post #38* |
+ +108 | 16. System shutdown | 06:03:14 | — | EventLog service shutdown (EID 1100) — *ledger seq 23* |
+   98
+   99 ### Log Clearing Detail
+  100 All event log channels were cleared via `wevtutil cl`:
+  101 - Security.evtx: cleared, 2 post-clear events remain
+      ...
+  121 | 2022-06-17T18:08:17 | Suspicious scheduled task "User_Feed_Synchronization" created by Administrator on
+ WIN-NPNJQ3D5QCQ |
+  122 | 2024-07-27T05:26:50 | LSA/SAM log files created (system startup) |
+  123 | 2024-07-27T05:27:08 | Windows Defender definitions deleted, Dfsr log rotated |
+  124 | 2024-07-27T05:38:38 | Windows Defender Scheduled Scan task deleted |
+ -125 | 2024-07-27T05:40:32 | Administrator VMware console session started |
+ +136 | 2024-07-27T05:40:19 | Administrator profile loaded (ProfileList LocalProfileLoadTime) |
+  126 | 2024-07-27T05:51:58 | net.exe/net1.exe executed (user enumeration) |
+  127 | 2024-07-27T05:52:41 | WMI ETW trace logs deleted, NTDS temp.edb wiped |
+ -128 | 2024-07-27T05:55:48 | jdoe VMware console session started |
+ -129 | 2024-07-27T05:57:01 | **dark_knight.c5w (SDelete64) executed** |
+ +139 | 2024-07-27T05:52:07 | Administrator profile unloaded — logged off BEFORE SDelete |
+ +140 | 2024-07-27T05:55:30 | **jdoe first-ever logon** on this install (ProfileList FirstLogonTime) |
+ +141 | 2024-07-27T05:55:57 | jdoe creates hello.txt, info.txt in Documents |
+ +142 | 2024-07-27T05:57:01 | **dark_knight.c5w (SDelete64) executed** by jdoe via CONHOST console |
+  130 | 2024-07-27T05:57:08 | Administrator directory metadata updated (files wiped) |
+  131 | 2024-07-27T06:02:33 | PowerShell executed |
+  132 | 2024-07-27T06:02:34 | wevtutil.exe executed 8+ times (log clearing) |
+  133 | 2024-07-27T06:02:56 | Security and System event logs cleared |
+ -134 | 2024-07-27T06:03:07 | Administrator network session logoff |
+ +147 | 2024-07-27T06:02:18 | consent.exe UAC prompt for wevtutil elevation |
+ +148 | 2024-07-27T06:03:07 | Administrator network session logoff (Type 3 — residual, not console) |
+ +149 | 2024-07-27T06:03:12 | jdoe initiates system shutdown via SystemSettingsAdminFlows.exe (System EID 1074) |
+  135 | 2024-07-27T06:03:14 | EventLog service shutdown, system shutdown |
+  136
+  137 ---
+  138
+      ...
+
+
+ Operation aborted
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+The swarm is finished: done/SWARM_DONE exists (All definition-of-done checks pass: work/report.md (7 sections),
+work/timeline.md (39 rows), ledger (47 events), sign-off posted and verified, inputs unchanged, traces complete. The
+case is solved: Administrator files were securely wiped by SDelete64 (disguised as dark_knight.c5w) executed on
+2024-07-27, with evidence tampering via wevtutil log clearing. Recovery is impossible due to SDelete's secure
+overwrite.). Call done now and stop.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/sb6b3 • sb6b305
+↑2.7M ↓30k R1.0M $4.962 14.2%/1.0M (auto)                                       (azure-foundry) DeepSeek-V4-Pro • medium
+swarm:sb6b305
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/sb6b3/.pi-sessions/sb6b305
+--session 01a0b668-7b41-72c7-8ea9-099f5cc58d33
+    ~/DF/Sa/AliHadi-s/sb6b3                                                    ✔  took 15m 11s   at 00:40:06 

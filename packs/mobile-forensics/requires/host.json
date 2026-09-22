@@ -1,0 +1,52 @@
+{
+  "binaries": [
+    {
+      "name": "ileapp",
+      "package": "iLEAPP",
+      "optional": true,
+      "why": "Several hundred iOS artefact parsers over a file-system extraction or a backup, with a report per artefact.",
+      "install": {
+        "brew": "python3 -m pip install ileapp",
+        "apt": "python3 -m pip install ileapp"
+      },
+      "licence": "MIT",
+      "redistributable": false
+    },
+    {
+      "name": "aleapp",
+      "package": "ALEAPP",
+      "optional": true,
+      "why": "The same for Android: app data, accounts, usage, and the protobuf-heavy newer artefacts.",
+      "install": {
+        "brew": "python3 -m pip install aleapp",
+        "apt": "python3 -m pip install aleapp"
+      },
+      "licence": "MIT",
+      "redistributable": false
+    },
+    {
+      "name": "idevicebackup2",
+      "package": "libimobiledevice",
+      "optional": true,
+      "why": "Read and convert an iTunes or Finder backup, including one that is encrypted where the password is known.",
+      "install": {
+        "brew": "brew install libimobiledevice",
+        "apt": "apt-get install -y libimobiledevice-utils"
+      },
+      "licence": "LGPL-2.1-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "mac_apt.py",
+      "package": "mac_apt",
+      "optional": true,
+      "why": "ios_apt, inside mac_apt, reads a full file-system iOS extraction with the same plugin model as the macOS side.",
+      "install": {
+        "brew": "https://github.com/ydkhatri/mac_apt",
+        "apt": "https://github.com/ydkhatri/mac_apt"
+      },
+      "licence": "MIT",
+      "redistributable": false
+    }
+  ]
+}

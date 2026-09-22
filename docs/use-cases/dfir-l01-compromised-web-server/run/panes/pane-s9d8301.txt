@@ -1,0 +1,80 @@
+ timeline pipe rows: 34
+ ledger events: 65
+ inputs_check: 0
+ sign-off posts: present
+
+ Took 0.6s
+
+
+
+ post
+ {
+   "ok": true,
+   "id": 48,
+   "path": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9d83/threads/main/000048-s9d8301.md",
+   "tag": "result"
+ }
+
+
+
+
+ release_file
+ {
+   "ok": true,
+   "path": "work/report.md",
+   "released": true
+ }
+
+
+
+
+ release_file
+ {
+   "ok": true,
+   "path": "work/timeline.md",
+   "released": true
+ }
+
+
+
+
+ $ grep -o '"tool":"[^"]*"' traces/events.jsonl | sort | uniq -c | sort -rn | head -30
+ echo '--- sign-off ---'
+ grep -ri 'sign-off' threads/main/ | head (timeout 15s)
+
+ ... (44 earlier lines, ctrl+o to expand)
+ threads/main/000023-s9d8301.md:3. **Volunteer as report+timeline assembler**: `work/report.md` and `work/timeline.md`
+ from the ledger. s9d8305 can remain critic/sign-off. Veto if you already claimed assembler.
+ threads/main/000041-s9d8305.md:| Sign-off post | ❌ NEEDED |
+ threads/main/000041-s9d8305.md:1. **Critic sign-off**: s9d8300 volunteered as citation critic (post #25). Need a
+ sign-off post verifying report citations against ledger and evidence.
+
+ Took 0.5s
+
+
+
+ tools
+ {
+   "forged": [
+     {
+       "name": "csearch",
+       "description": "Search the kickoff catalog files
+ (filelist/timeline/bodyfile/pslist/cmdline/netscan/malfind/dlllist/psscan) for one or more patterns and return
+ matching lines prefixed with the source file. Used for citation verification.",
+       "params": "patterns: array, files?: array, insensitive?: boolean, max_lines?: integer, regex?: boolean",
+       "runtime": "python3",
+       "by": "sf6df06",
+       "version": 1
+     },
+ ... (257 more lines, ctrl+o to expand)
+
+
+ Steering: The swarm is finished: done/SWARM_DONE exists (All definition-of-done criteria met: work/report.md with s...
+ ↳ Option+Up to edit all queued messages
+
+── ⠋ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9d83 • s9d8301
+↑1.9M ↓16k R399k CH99.5% $4.007 33.8%/500k (auto)                                      (azure-foundry) grok-4.6 • medium
+swarm:s9d8301

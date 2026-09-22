@@ -1,0 +1,45 @@
+{
+  "name": "sigscan_e01",
+  "description": "Scan an E01/raw image for a byte signature via TSK img_cat (logical media, not the EWF wrapper). Returns offsets and context, the media size it used and any range it could not read.",
+  "params": {
+    "image": {
+      "type": "string",
+      "description": "Path to E01 or raw image"
+    },
+    "needle_ascii": {
+      "type": "string",
+      "description": "ASCII signature"
+    },
+    "needle_hex": {
+      "type": "string",
+      "description": "Hex signature (spaces ok)"
+    },
+    "start": {
+      "type": "integer",
+      "description": "Start byte offset"
+    },
+    "length": {
+      "type": "integer",
+      "description": "Max bytes to scan"
+    },
+    "max_hits": {
+      "type": "integer",
+      "description": "Max hits"
+    },
+    "chunk": {
+      "type": "integer",
+      "description": "Read chunk size"
+    },
+    "context": {
+      "type": "integer",
+      "description": "Context bytes"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "by": "s5d1001",
+  "at": "2026-09-18T18:56:41.306Z",
+  "version": 3,
+  "sha256": "563ede3958e247a1868fdd9b17290d2b974b54eb403e1205ed5458a99cfb5865"
+}

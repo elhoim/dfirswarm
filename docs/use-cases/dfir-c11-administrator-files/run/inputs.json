@@ -1,0 +1,23 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/challenge-11-where-did-administrator-go",
+  "copied_at": "2026-09-18T21:22:34Z",
+  "files": [
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 628,
+      "sha256": "67938d5b9824d6dfd84b2110682a0750ab20a9ed810991cf72d054b1b1fef15d",
+      "mtime_ms": 1789730983406,
+      "ctime_ms": 1789766539227
+    },
+    {
+      "path": "inputs/ThreatSimServer.E01",
+      "bytes": 35200628447,
+      "sha256": "6634fb1a399ca69f74390a775bc11415726c0e826fd8a7c486bfbfa41a043443",
+      "mtime_ms": 1722106835000,
+      "ctime_ms": 1789766539227
+    }
+  ],
+  "bytes": 35200629075,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

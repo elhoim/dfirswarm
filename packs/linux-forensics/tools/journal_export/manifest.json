@@ -1,0 +1,42 @@
+{
+  "name": "journal_export",
+  "description": "Read a systemd journal from an evidence directory with journalctl and return records as JSON, with the fields the text logs do not carry: the binary, the command line, the unit, the login session and the boot id.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A .journal file, or a journal directory such as var/log/journal"
+    },
+    "unit": {
+      "type": "string",
+      "description": "Only this systemd unit"
+    },
+    "since": {
+      "type": "string",
+      "description": "A journalctl time, e.g. '2026-02-14 00:00:00'"
+    },
+    "until": {
+      "type": "string",
+      "description": "A journalctl time"
+    },
+    "grep": {
+      "type": "string",
+      "description": "A journalctl --grep pattern over the message"
+    },
+    "priority": {
+      "type": "string",
+      "description": "Maximum priority, e.g. 'warning'"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum records to return (default 500)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 300,
+  "example": "{\"path\": \"work/extracted/var/log/journal\", \"grep\": \"sudo\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T15:00:00.000Z",
+  "version": 1,
+  "sha256": "7377300fca0244ae5bdbc15eefeddec41356a3ac0ea5f919544baef47f6ce627"
+}

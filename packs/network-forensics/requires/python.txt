@@ -1,0 +1,2 @@
+# The network pack's tools use the standard library only: the capture parser is
+# written here rather than taken from a library, so a host with no tshark still works.

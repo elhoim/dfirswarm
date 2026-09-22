@@ -1,0 +1,79 @@
+# Everything here runs without a model, a provider key, Herdr or Pi: the
+# protocol suite works on files, the web API suite on a local server, the
+# shell suites on the scripts themselves and a scripted provider.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: typecheck · node tests · shell suites · ui build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # actions/checkout runs `git init` on the runner, and git prints its
+      # init.defaultBranch hint unless one is configured.
+      - run: git config --global init.defaultBranch main
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Tools the shell suites use
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q jq python3 zsh bubblewrap util-linux iproute2 sqlite3
+          jq --version && python3 --version && bash --version | head -1
+      # Ubuntu 24.04 switches unprivileged user namespaces off for programs
+      # without an AppArmor profile, and the guard suites then test nothing:
+      # fsguard falls back to Landlock alone and says so. Switch them on here so
+      # CI exercises the namespace modes; the second job below covers the
+      # Landlock-only host on purpose.
+      - name: What this host can enforce
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "userns: $(unshare -rm true 2>/dev/null && echo yes || echo no)"
+          echo "netns:  $(unshare -rn true 2>/dev/null && echo yes || echo no)"
+          echo "landlock ABI: $(python3 scripts/landlock.py --dry-run -- true | sed -n 's/^abi: //p')"
+          echo "bwrap:  $(bwrap --version 2>/dev/null || echo none)"
+          bash scripts/fsguard.sh --rw "$PWD" --dry-run -- true | head -4
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:bash
+      - run: npm run ui:build
+      - name: Nothing from a run is tracked
+        run: |
+          if git ls-files | grep -E '^(runs/|sandbox-runs/|sandbox/\.pi|sandbox/traces/)' ; then
+            echo "run state is tracked" >&2; exit 1
+          fi
+
+  guards-without-namespaces:
+    # The host a run meets inside an ordinary container, or on an Ubuntu with
+    # its AppArmor restriction left on: no user namespaces, Landlock only.
+    # The guard suites must pass there too, with the record saying what the
+    # host could not enforce rather than the guard pretending.
+    name: guard suites · Landlock only
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - run: git config --global init.defaultBranch main
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q jq python3 zsh sqlite3
+          sudo sysctl -w user.max_user_namespaces=0
+          echo "userns: $(unshare -rm true 2>/dev/null && echo yes || echo no) (expected: no)"
+          echo "landlock ABI: $(python3 scripts/landlock.py --dry-run -- true | sed -n 's/^abi: //p')"
+      - run: npm ci
+      - run: bash scripts/test-bash.sh write-guard herdr-seal inputs netguard trace-gate

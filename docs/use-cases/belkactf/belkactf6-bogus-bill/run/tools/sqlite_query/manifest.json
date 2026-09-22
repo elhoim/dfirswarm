@@ -1,0 +1,29 @@
+{
+  "name": "sqlite_query",
+  "description": "Run a read-only SQL query against a SQLite database and return JSON rows",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Path to sqlite database",
+      "required": true
+    },
+    "sql": {
+      "type": "string",
+      "description": "SQL statement",
+      "required": true
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Max rows to return",
+      "required": false
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "{\"path\": \"work/extracted/s821c01/itunes/files/NoteStore.sqlite\", \"sql\": \"SELECT ZTITLE1, ZSNIPPET FROM ZICCLOUDSYNCINGOBJECT WHERE ZTITLE1 IS NOT NULL\"}",
+  "by": "s821c01",
+  "at": "2026-09-20T18:17:58.856Z",
+  "version": 1,
+  "sha256": "c02dc05a69c42a0c1b14668c05c8732b88ba36523f42426f05394612c685f7fa"
+}

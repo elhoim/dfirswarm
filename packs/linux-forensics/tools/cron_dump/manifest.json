@@ -1,0 +1,26 @@
+{
+  "name": "cron_dump",
+  "description": "Collect every scheduled job on a Linux host into one list: /etc/crontab, /etc/cron.d, the per-user spool, the hourly to monthly drop directories, and systemd timers with the unit each one triggers.",
+  "params": {
+    "root": {
+      "type": "string",
+      "description": "The root of an extracted file system, or / on a live host"
+    },
+    "contains": {
+      "type": "string",
+      "description": "Case-insensitive regex over the command or unit"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum entries to return (default 500)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"root\": \"work/extracted\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T15:00:00.000Z",
+  "version": 1,
+  "sha256": "7e596e3eb2f29b37fc25c6ed5f470a123e946586d71770b4c783951e43c7a09b"
+}

@@ -1,0 +1,61 @@
+DFIR Swarm
+Copyright 2026 Halil Öztürkci
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version. See LICENSE.
+
+Source: https://github.com/halilozturkci/dfirswarm
+
+The AGPL's section 13 asks anyone who runs a modified version as a network
+service to offer its users that version's source. The console carries the
+link above so an unmodified run already does; if you modify this program and
+run the console where others can reach it, point that link at your own
+source.
+
+A commercial licence is available for use that the AGPL does not suit. See
+COMMERCIAL-LICENSE.md.
+
+This program depends on, and does not include, Herdr (Apache License 2.0)
+and Pi (MIT). Their terms are their own. The npm packages it builds against
+are not in this repository either; each carries its own licence.
+
+
+Third-party material in this repository
+---------------------------------------
+
+The licence above covers this program. It cannot cover work somebody else
+wrote, and some of that is here. Nothing in this section is licensed under
+the AGPL, and redistributing this repository passes on no right its authors
+have not themselves given.
+
+Fonts. `.design-sync/fonts/` holds IBM Plex Sans and IBM Plex Mono
+(Copyright IBM Corp., https://github.com/IBM/plex) and Instrument Serif
+(published by Instrument, https://github.com/Instrument/instrument-serif),
+Latin subsets taken from Google Fonts. All three are under the SIL Open Font
+License 1.1, whose text is in each project named above. They are shipped so
+that a design built from the component bundle renders in the console's real
+faces rather than in a fallback; the console itself names the families and
+embeds nothing.
+
+Case material. The runs under `docs/use-cases/` were worked on public
+forensic challenges other people made:
+
+  - Ali Hadi's Digital Forensic Challenge Images, for every `dfir-*` case.
+    https://www.ashemery.com/dfir.html
+  - Belkasoft's BelkaCTF series, for the `belkactf` cases. The task text in
+    an edition's `challenges.md` is quoted from the challenge board as the
+    site states it. https://belkasoft.com/ctf
+
+No evidence file from either source is in this repository, and none should be
+added: the images are large, their authors publish them, and each case README
+says where to get them. What is here is the swarm's own record of working
+them — the board, the ledger, the trace, the report and the screenshots. That
+record is this project's work and the licence above covers it. The scenarios,
+the questions and the challenge text it quotes are not, and stay with the
+authors named here.
+
+Brand. The marks in `brand/` and the name "DFIR Swarm" are not licensed
+under the AGPL. TRADEMARK.md sets out what you may do with them without
+asking, which is most things.

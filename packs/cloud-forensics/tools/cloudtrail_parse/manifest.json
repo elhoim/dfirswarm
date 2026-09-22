@@ -1,0 +1,38 @@
+{
+  "name": "cloudtrail_parse",
+  "description": "Read AWS CloudTrail records — a file, a directory, or gzipped batches — and normalise them: who, what, from where, and whether it was refused. Resolves an assumed role back to the session that issued it, and counts the denials that are the shape of enumeration.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A CloudTrail .json or .json.gz file, or a directory of them"
+    },
+    "events": {
+      "type": "array",
+      "description": "Keep only these eventName values"
+    },
+    "identity": {
+      "type": "string",
+      "description": "Case-insensitive regex over the identity ARN or user name"
+    },
+    "errors_only": {
+      "type": "boolean",
+      "description": "Only records that were refused"
+    },
+    "notable_only": {
+      "type": "boolean",
+      "description": "Only the API calls this tool flags"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum records to return (default 500)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 600,
+  "example": "{\"path\": \"inputs/cloudtrail\", \"notable_only\": true}",
+  "by": "maintainer",
+  "at": "2026-09-22T22:00:00.000Z",
+  "version": 1,
+  "sha256": "f42e0f82d5ad42f3390830378657a06cb4b6c8da64b8d7f635fb9034f3ce7871"
+}

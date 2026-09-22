@@ -1,0 +1,30 @@
+{
+  "name": "plist_read",
+  "description": "Read a property list — binary, XML or JSON — and return it as JSON, with Apple date values converted to ISO 8601 UTC and binary blobs summarised rather than dumped. Reads one file or every plist under a directory.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A .plist file, or a directory to walk"
+    },
+    "key": {
+      "type": "string",
+      "description": "Return only this top-level key, or a dotted path into the structure"
+    },
+    "max_blob": {
+      "type": "integer",
+      "description": "Bytes of a binary value to include, base64 (default 64)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum files when walking a directory (default 200)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"work/extracted/Library/LaunchDaemons\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T16:00:00.000Z",
+  "version": 1,
+  "sha256": "959d83395cadacdaa4f43392b41916b1c765b9b978c2ffaf3d3d4af6dca2f58b"
+}

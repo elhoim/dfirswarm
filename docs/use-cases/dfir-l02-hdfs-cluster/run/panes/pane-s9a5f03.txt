@@ -1,0 +1,80 @@
+ read ~/DFIR/SampleCases/AliHadi-swarm/s9a5f/work/report.md
+
+
+
+ file_history
+ {
+   "path": "work/report.md",
+   "versions": [
+     {
+       "rev": 1,
+       "ts": "2026-09-18T23:27:54.545Z",
+       "agent": "s9a5f00",
+       "path": "work/report.md",
+       "bytes": 11720,
+       "sha256": "6bad437ab31c3a4fe668afa2df3a24636ae52e1eecadd35fa7ed3ff7841947a7"
+ ... (12 more lines, ctrl+o to expand)
+
+
+
+ $ echo '=== heading check ==='; for n in 1 2 3 4 5 6; do grep -n "^## $n\." work/report.md || echo "MISSING $n"; done
+ echo '=== sign-off in threads ==='; rg -l -i 'sign-off' threads/main/ || true
+ echo '=== inputs_check ==='; rg '"tool":"inputs_check"' traces/events.jsonl | tail -3 || true
+
+ ... (14 earlier lines, ctrl+o to expand)
+ threads/main/000019-s9a5f03.md
+ threads/main/000023-s9a5f00.md
+ threads/main/000037-s9a5f01.md
+ threads/main/000028-s9a5f03.md
+ === inputs_check ===
+
+ Took 0.3s
+
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s9a5f/inputs/HDFS-Master.E01.txt:1-40
+
+ Operation aborted
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s9a5f/inputs/HDFS-Slave1.E01.txt:1-40
+
+ This operation was aborted
+
+
+
+ $ # verify grep counts for done checks
+ echo "timeline rows: $(grep -c '^| ' work/timeline.md)"
+ echo "events: $(grep -c '"kind":"event"' ledger/entries.jsonl)"
+ grep -c '^## [1-6]\.' work/report.md
+ # sudoers extract quick
+ icat -o 2048 inputs/HDFS-Master.E01 2230316 | rg 'sudo' | head -10
+ # rc.local
+ rg 'etc/rc.local$' catalog/HDFS-Master.E01/p2048/filelist.txt catalog/HDFS-Slave2.E01/p2048/filelist.txt
+
+ This operation was aborted
+
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+The swarm is finished: done/SWARM_DONE exists (Cross-node IOC work complete: extracts hashed, ledger events recorded
+(UTC-corrected access, CVE-2017-16995, PHP/ncat persistence, log-wipe and sshd_config corrections). Citation sign-off
+posted for work/report.md and work/timeline.md.). Call done now and stop.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9a5f • s9a5f03
+↑1.2M ↓12k R341k $2.679 26.4%/500k (auto)                                              (azure-foundry) grok-4.6 • medium
+swarm:s9a5f03
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9a5f/.pi-sessions/s9a5f03
+--session 01a0b6c7-7ac7-74b4-b72a-e540c4537c5b
+    ~/DF/Sa/AliHadi-s/s9a5f                                                    ✔  took 24m 14s   at 02:32:55 

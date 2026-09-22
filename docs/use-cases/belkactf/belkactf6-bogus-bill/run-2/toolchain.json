@@ -1,0 +1,20 @@
+{
+  "checked_at": "2026-09-21T11:39:54.308Z",
+  "dir": "work/.toolchain",
+  "packages": [
+    {
+      "name": "libbde-python",
+      "version": "20260916",
+      "installer": "pip",
+      "record_sha256": "46d281c36e61080fa83beb218852173a3754850890f0dc8ef92fec73a6185338",
+      "path": "work/.toolchain/lib/python/site-packages/libbde_python-20260916.dist-info"
+    },
+    {
+      "name": "libvhdi-python",
+      "version": "20260901",
+      "installer": "pip",
+      "record_sha256": "63782ffb4555b79e5cd7c0ca5b76a7bd76480a325c0b6448c23d4dd773f2cdf9",
+      "path": "work/.toolchain/lib/python/site-packages/libvhdi_python-20260901.dist-info"
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "swarm_id": "sfcc3",
+  "n": 5,
+  "agents": [
+    {
+      "id": "sfcc300",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6",
+      "seat": "Disk and file system: partitions, $MFT, every file and stream the catalog lists, deleted and unallocated content; owns `work/disk.md`."
+    },
+    {
+      "id": "sfcc301",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6",
+      "seat": "Artifacts and execution: registry hives, event logs, prefetch, LNK, jump lists, shimcache, amcache, browser and application traces; owns `work/artifacts.md`."
+    },
+    {
+      "id": "sfcc302",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro",
+      "seat": "Recovery and analysis: carving, decoding, hashing and reading whatever the other seats pull out, with strings and parsers; owns `work/analysis.md`."
+    },
+    {
+      "id": "sfcc303",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro",
+      "seat": "Timeline and ledger: records every dated event peers report with `record kind=event` and writes `work/timeline.md` from `ledger/ledger.md`."
+    },
+    {
+      "id": "sfcc304",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro",
+      "seat": "Critic and editor: verifies every citation, challenges weak claims on the board, assembles `work/report.md` and posts the sign-off."
+    }
+  ],
+  "models": [
+    "azure-foundry/DeepSeek-V4-Pro",
+    "azure-foundry/grok-4.6"
+  ]
+}

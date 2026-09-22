@@ -1,0 +1,37 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/challenge-01-web-server",
+  "copied_at": "2026-09-18T12:01:38Z",
+  "files": [
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 1950,
+      "sha256": "b03677701e43db61b2ea7d0b20b3e3d3b3b6226f614f50bc086390a9ea75fbdc",
+      "mtime_ms": 1789730983404,
+      "ctime_ms": 1789732885817
+    },
+    {
+      "path": "inputs/hashes.txt",
+      "bytes": 289,
+      "sha256": "c81d39818eadf65f98a21c4a592359926b7de3bee85b1bb7fd68c4d026d855dd",
+      "mtime_ms": 1789730622053,
+      "ctime_ms": 1789732885817
+    },
+    {
+      "path": "inputs/memdump.mem",
+      "bytes": 1073676288,
+      "sha256": "ce6af78989ff959b0e25fec79f20942b036c82d7ba929aa36d528567e155b8fc",
+      "mtime_ms": 1441274650514,
+      "ctime_ms": 1789732885817
+    },
+    {
+      "path": "inputs/s4a-challenge4",
+      "bytes": 26843545600,
+      "sha256": "a584de7f06bc99cc7bf8248ed31771c181035e2b7907a9493c5bfa4ec0cce6f9",
+      "mtime_ms": 1442083257000,
+      "ctime_ms": 1789732885817
+    }
+  ],
+  "bytes": 27917224127,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

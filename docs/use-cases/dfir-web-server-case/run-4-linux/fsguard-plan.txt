@@ -1,0 +1,8 @@
+mode: landlock
+read-only: /home/swarm/swarm-runs/s3096/traces
+read-only: /home/swarm/evidence/challenge-01
+writable: /home/swarm/swarm-runs/s3096
+writable: /home/swarm/.pi/agent
+landlock abi: 4
+landlock rules: 79
+command:   true

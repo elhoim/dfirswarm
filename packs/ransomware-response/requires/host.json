@@ -1,0 +1,16 @@
+{
+  "binaries": [
+    {
+      "name": "yara",
+      "package": "yara",
+      "optional": true,
+      "why": "Match the encryptor and its loader against family rules, where a sample survived.",
+      "install": {
+        "brew": "brew install yara",
+        "apt": "apt-get install -y yara"
+      },
+      "licence": "BSD-3-Clause",
+      "redistributable": false
+    }
+  ]
+}

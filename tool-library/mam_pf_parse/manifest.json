@@ -1,0 +1,18 @@
+{
+  "name": "mam_pf_parse",
+  "description": "Decompress a MAM-wrapped Windows prefetch file and return executable name, version, run count, and non-zero last-run timestamps for v26/v30 layouts.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Path to the .pf file to parse"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "{\"path\":\"work/s2f6600/DD.EXE-0C303FDD.pf\"}",
+  "by": "s2f6600",
+  "at": "2026-09-18T13:22:40.696Z",
+  "version": 1,
+  "sha256": "4f09c7b1c04040fe361177d6bcce045e6b50935e34c08698c8c013e9e5930bfb"
+}

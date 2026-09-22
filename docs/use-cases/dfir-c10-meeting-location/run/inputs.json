@@ -1,0 +1,23 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/challenge-10-meeting-location",
+  "copied_at": "2026-09-18T18:43:29Z",
+  "files": [
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 1886,
+      "sha256": "6205903fbbb36f86b5a7aa1d2daa0214972c60f55582821543dacf721afd67d4",
+      "mtime_ms": 1789730983406,
+      "ctime_ms": 1789757002023
+    },
+    {
+      "path": "inputs/Case4.E01",
+      "bytes": 16272730481,
+      "sha256": "66ea8389867f4f17dd925444b7adc7b235b30e726c7b06eff5deeae8f36ec2f4",
+      "mtime_ms": 1681191779000,
+      "ctime_ms": 1789757002023
+    }
+  ],
+  "bytes": 16272732367,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

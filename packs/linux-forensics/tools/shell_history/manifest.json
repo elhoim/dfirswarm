@@ -1,0 +1,30 @@
+{
+  "name": "shell_history",
+  "description": "Collect every shell and client history file under a tree — bash, zsh, sh, python, mysql, psql, redis — and return the commands in order, with timestamps where the shell recorded them. Not a log, so clearing the logs does not touch it.",
+  "params": {
+    "root": {
+      "type": "string",
+      "description": "A home directory, /home, or the root of an extracted file system"
+    },
+    "contains": {
+      "type": "string",
+      "description": "Case-insensitive regex over the command"
+    },
+    "user": {
+      "type": "string",
+      "description": "Only histories under this user's home"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum commands to return (default 2000)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"root\": \"work/extracted/home\", \"contains\": \"curl|wget|base64\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T15:00:00.000Z",
+  "version": 1,
+  "sha256": "10bf40f9b24250ada1ed2179222510f64993337d7a01e1940028f93fd5d34fe9"
+}

@@ -1,0 +1,26 @@
+{
+  "name": "crypto_id",
+  "description": "Say which encryption scheme a volume or a file uses, from its header: BitLocker and BitLocker To Go, LUKS1 and LUKS2 with their key slots, FileVault, APFS, VeraCrypt's deliberate lack of a signature, and the encrypted-archive and encrypted-document flags.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A volume image, a partition, or a file"
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Byte offset of the volume within the image"
+    },
+    "entropy_sample": {
+      "type": "integer",
+      "description": "Bytes to sample for the no-signature case (default 65536)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"inputs/disk.raw\", \"offset\": 1048576}",
+  "by": "maintainer",
+  "at": "2026-09-22T21:00:00.000Z",
+  "version": 1,
+  "sha256": "fa3952a5f83112baeab2eb1e0c2e5b8883378c92e136e38fbabfc40a6583d4b2"
+}

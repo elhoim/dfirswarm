@@ -1,0 +1,38 @@
+{
+  "name": "evtx_filter",
+  "description": "Parse an EVTX file and return filtered records with core system fields and EventData values.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Path to the EVTX file"
+    },
+    "event_ids": {
+      "type": "array",
+      "description": "Optional list of numeric event IDs to keep",
+      "required": false
+    },
+    "provider": {
+      "type": "string",
+      "description": "Optional provider name to match exactly",
+      "required": false
+    },
+    "contains": {
+      "type": "string",
+      "description": "Optional case-insensitive substring that must appear in rendered XML",
+      "required": false
+    },
+    "max_records": {
+      "type": "integer",
+      "description": "Maximum records to return, default 200",
+      "required": false
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"path\":\"work/extracted/Security.evtx\",\"event_ids\":[4720,4732],\"max_records\":20}",
+  "by": "s2cb903",
+  "at": "2026-09-18T10:35:35.021Z",
+  "version": 1,
+  "sha256": "6af7ea4f142fd6ab51d4b34e9013aae54c8d84616c8df7f47b764f9662d2c0fe"
+}

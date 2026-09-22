@@ -1,0 +1,52 @@
+{
+  "binaries": [
+    {
+      "name": "fsapfsinfo",
+      "package": "libfsapfs",
+      "optional": true,
+      "why": "Read an APFS container and its volumes, snapshots included, which the Sleuth Kit does not.",
+      "install": {
+        "brew": "python3 -m pip install libfsapfs-python",
+        "apt": "apt-get install -y libfsapfs-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "log",
+      "package": "macOS",
+      "optional": true,
+      "why": "Apple's own reader for the unified log. Only present on macOS, and the only tool that resolves the format strings properly.",
+      "install": {
+        "brew": "part of macOS",
+        "apt": "not available on Linux; use UnifiedLogReader"
+      },
+      "licence": "Apple system software",
+      "redistributable": false
+    },
+    {
+      "name": "mac_apt.py",
+      "package": "mac_apt",
+      "optional": true,
+      "why": "Fifty-odd artefact plugins over a macOS or iOS image, and it reads UAC and Velociraptor collections as well as E01, DMG and sparse images.",
+      "install": {
+        "brew": "https://github.com/ydkhatri/mac_apt",
+        "apt": "https://github.com/ydkhatri/mac_apt"
+      },
+      "licence": "MIT",
+      "redistributable": false
+    },
+    {
+      "name": "UnifiedLogReader.py",
+      "package": "UnifiedLogReader",
+      "optional": true,
+      "why": "Read a unified log archive on a host that is not a Mac, where Apple's own log command does not exist.",
+      "install": {
+        "brew": "python3 -m pip install UnifiedLogReader",
+        "apt": "python3 -m pip install UnifiedLogReader"
+      },
+      "licence": "MIT",
+      "redistributable": false
+    }
+  ]
+}

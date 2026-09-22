@@ -1,0 +1,26 @@
+{
+  "name": "yara_scan",
+  "description": "Sweep a file or directory with a YARA rule file and report every match with its offset. No rules ship with this; the caller names the ones it trusts.",
+  "params": {
+    "rules": {
+      "type": "string",
+      "description": "Path to a .yar or .yara file"
+    },
+    "target": {
+      "type": "string",
+      "description": "File or directory to scan"
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "description": "How long to let yara run (default 60, cap 110)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"rules\": \"work/rules/webshells.yar\", \"target\": \"work/extracted\"}",
+  "by": "maintainer",
+  "at": "2026-09-20T12:00:00.000Z",
+  "version": 1,
+  "sha256": "10d52eb0ea10c50a26587f32e3b2d123c6c1ed29c87b4086b3c63ceb4e74d8c1"
+}

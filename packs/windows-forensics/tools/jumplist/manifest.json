@@ -1,0 +1,26 @@
+{
+  "name": "jumplist",
+  "description": "Read a jump list: the DestList entries of an automaticDestinations-ms (target path, the host it was on, access count, last access, pinned), and every embedded link structure written out for lnk_parse. Also splits a customDestinations-ms into its link structures.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A .automaticDestinations-ms or .customDestinations-ms file, or a directory of them"
+    },
+    "out_dir": {
+      "type": "string",
+      "description": "Write each embedded link structure here, under work/, for lnk_parse to read"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum entries to return per file (default 500)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"work/extracted/AutomaticDestinations\", \"out_dir\": \"work/extracted/jumplinks\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T09:00:00.000Z",
+  "version": 1,
+  "sha256": "6ef890d011950781e0be0e74d6932635ce6eedc07f5c09508d5133f763644e5b"
+}

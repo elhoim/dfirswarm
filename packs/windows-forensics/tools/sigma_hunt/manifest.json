@@ -1,0 +1,42 @@
+{
+  "name": "sigma_hunt",
+  "description": "Run a Sigma ruleset over event logs with whichever engine the host has (Zircolite or Hayabusa) and return normalised detections: rule, level, time, event id, channel and the matching record. A detection is a hypothesis; the record it points at is the evidence.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "An .evtx file or a directory of them"
+    },
+    "engine": {
+      "type": "string",
+      "description": "auto (default), zircolite or hayabusa"
+    },
+    "rules": {
+      "type": "string",
+      "description": "A ruleset file or directory; the engine's bundled rules are used when omitted"
+    },
+    "min_level": {
+      "type": "string",
+      "description": "informational, low, medium, high or critical (default medium)"
+    },
+    "out_dir": {
+      "type": "string",
+      "description": "Where the engine's own output is kept, under work/"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum detections to return (default 200)"
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "description": "Give up after this long (default 900)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 1200,
+  "example": "{\"path\": \"work/extracted/winevt\", \"min_level\": \"high\", \"out_dir\": \"work/hunt\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T14:00:00.000Z",
+  "version": 1,
+  "sha256": "c8c7030b7efd814642203e44f46231ac1917bb91a692b32b772fad844e49aada"
+}

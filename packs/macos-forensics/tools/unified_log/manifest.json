@@ -1,0 +1,42 @@
+{
+  "name": "unified_log",
+  "description": "Read a unified log archive or a .logarchive with whichever reader the host has — Apple's own log command, or UnifiedLogReader off a Mac — and return entries as JSON. Always asks for info and debug level, which the default hides.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A .logarchive, or a directory holding diagnostics and uuidtext"
+    },
+    "predicate": {
+      "type": "string",
+      "description": "An NSPredicate, e.g. 'process == \"sudo\"'"
+    },
+    "start": {
+      "type": "string",
+      "description": "Start time, e.g. '2026-02-14 00:00:00'"
+    },
+    "end": {
+      "type": "string",
+      "description": "End time"
+    },
+    "out_dir": {
+      "type": "string",
+      "description": "Where the reader's own output is kept, under work/"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum entries to return (default 500)"
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "description": "Give up after this long (default 900)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 1200,
+  "example": "{\"path\": \"work/extracted/system_logs.logarchive\", \"predicate\": \"process == \\\"sudo\\\"\", \"out_dir\": \"work/ulog\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T16:00:00.000Z",
+  "version": 1,
+  "sha256": "e7673020106c47525adb4d30c36f4699977c1a5a3a585fb745b31ec7e2838871"
+}

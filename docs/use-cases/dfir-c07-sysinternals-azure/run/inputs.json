@@ -1,0 +1,30 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/challenge-07-sysinternals",
+  "copied_at": "2026-09-18T14:10:43Z",
+  "files": [
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 822,
+      "sha256": "318f2742db973756c52701a4f873808cb3e60b4fb19e812def07e44ce5dca57d",
+      "mtime_ms": 1789730983405,
+      "ctime_ms": 1789740640135
+    },
+    {
+      "path": "inputs/SysInternalsCase.E01",
+      "bytes": 7777754345,
+      "sha256": "d6c85c6eb38f2fbe157e5ede8d6528bccd64a3e190ab5aed3acdf86091880d4a",
+      "mtime_ms": 1668885528000,
+      "ctime_ms": 1789740640135
+    },
+    {
+      "path": "inputs/SysInternalsCase.E01.txt",
+      "bytes": 1073,
+      "sha256": "a3db7c7b9471486bdf5aa2824ba8f3979a1cdbe961c80b3995f674bfc1f58d8a",
+      "mtime_ms": 1668882608000,
+      "ctime_ms": 1789740640135
+    }
+  ],
+  "bytes": 7777756240,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

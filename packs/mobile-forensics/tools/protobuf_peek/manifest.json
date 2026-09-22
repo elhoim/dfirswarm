@@ -1,0 +1,34 @@
+{
+  "name": "protobuf_peek",
+  "description": "Decode a protobuf blob without its schema: field numbers, wire types and values, with nested messages unwrapped and length-delimited fields read as text where they are text. For the Android and iOS artefacts that stopped being SQLite.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A file holding one protobuf message"
+    },
+    "hex": {
+      "type": "string",
+      "description": "The message as hex, instead of a file"
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Start decoding at this byte offset"
+    },
+    "max_depth": {
+      "type": "integer",
+      "description": "How deep to unwrap nested messages (default 6)"
+    },
+    "max_fields": {
+      "type": "integer",
+      "description": "Maximum fields to return (default 500)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"path\": \"work/extracted/usagestats/0/daily/1771070000\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T20:00:00.000Z",
+  "version": 1,
+  "sha256": "98e99381f32f3226e24c484202286fb0331cf22e013554e760b647e6095b5c84"
+}

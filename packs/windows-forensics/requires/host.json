@@ -1,0 +1,263 @@
+{
+  "binaries": [
+    {
+      "name": "esedbexport",
+      "package": "libesedb",
+      "why": "Read the ESE databases Windows keeps: WebCacheV01.dat for browsing, SRUDB.dat for application and network use.",
+      "install": {
+        "brew": "brew install libesedb",
+        "apt": "apt-get install -y libesedb-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "yara",
+      "package": "yara",
+      "why": "Sweep an extract or a directory against rules and report every match with its offset.",
+      "install": {
+        "brew": "brew install yara",
+        "apt": "apt-get install -y yara"
+      },
+      "licence": "BSD-3-Clause",
+      "redistributable": false
+    },
+    {
+      "name": "strings",
+      "package": "binutils",
+      "why": "First pass over a binary before a parser is chosen.",
+      "install": {
+        "brew": "brew install binutils",
+        "apt": "apt-get install -y binutils"
+      },
+      "licence": "GPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "vshadowinfo",
+      "package": "libvshadow",
+      "why": "List the volume shadow copies on an image, with each store's creation time: the volume as it was before a cleanup.",
+      "install": {
+        "brew": "brew install libvshadow",
+        "apt": "apt-get install -y libvshadow-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "vshadowmount",
+      "package": "libvshadow",
+      "why": "Expose a shadow copy as a volume the ordinary toolkit can list and extract from. Needs FUSE on the host.",
+      "install": {
+        "brew": "brew install libvshadow",
+        "apt": "apt-get install -y libvshadow-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "vol",
+      "package": "volatility3",
+      "optional": true,
+      "why": "Memory analysis, when the host has it. Not shipped with this pack: the Volatility Software License and AGPL-3.0 do not combine in one work, so it is invoked as an executable or not at all.",
+      "install": {
+        "brew": "python3 -m pip install volatility3",
+        "apt": "python3 -m pip install volatility3"
+      },
+      "licence": "Volatility Software License 1.0",
+      "redistributable": false
+    },
+    {
+      "name": "fsntfsinfo",
+      "package": "libfsntfs",
+      "optional": true,
+      "why": "Read $MFT, named streams and the USN journal with an independent parser: a finding two parsers agree on survives review that one does not.",
+      "install": {
+        "brew": "python3 -m pip install libfsntfs-python",
+        "apt": "apt-get install -y libfsntfs-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "sccainfo",
+      "package": "libscca",
+      "optional": true,
+      "why": "An independent read of a prefetch file, compressed or not, to check prefetch_mam against.",
+      "install": {
+        "brew": "python3 -m pip install libscca-python",
+        "apt": "apt-get install -y libscca-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "fwsiinfo",
+      "package": "libfwsi",
+      "optional": true,
+      "why": "Decode a shell item from its documented layout, which is what shellbags falls back to searching for.",
+      "install": {
+        "brew": "python3 -m pip install libfwsi-python",
+        "apt": "apt-get install -y libfwsi-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "olecfexport",
+      "package": "libolecf",
+      "optional": true,
+      "why": "Take a jump list apart as the compound file it is.",
+      "install": {
+        "brew": "python3 -m pip install libolecf-python",
+        "apt": "apt-get install -y libolecf-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "lnkinfo",
+      "package": "liblnk",
+      "optional": true,
+      "why": "An independent read of a link file's target, volume serial and timestamps.",
+      "install": {
+        "brew": "python3 -m pip install liblnk-python",
+        "apt": "apt-get install -y liblnk-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "regfexport",
+      "package": "libregf",
+      "optional": true,
+      "why": "Export a registry hive with a parser that is not regipy.",
+      "install": {
+        "brew": "python3 -m pip install libregf-python",
+        "apt": "apt-get install -y libregf-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "evtxexport",
+      "package": "libevtx",
+      "optional": true,
+      "why": "Export event records with a parser that is not python-evtx.",
+      "install": {
+        "brew": "python3 -m pip install libevtx-python",
+        "apt": "apt-get install -y libevtx-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "msiecfexport",
+      "package": "libmsiecf",
+      "optional": true,
+      "why": "Read an Internet Explorer index.dat cache, which no other tool here covers.",
+      "install": {
+        "brew": "python3 -m pip install libmsiecf-python",
+        "apt": "apt-get install -y libmsiecf-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "pffexport",
+      "package": "libpff",
+      "optional": true,
+      "why": "Read a PST or OST mailbox: the mail on a Windows machine, which nothing else in this pack touches.",
+      "install": {
+        "brew": "python3 -m pip install libpff-python",
+        "apt": "apt-get install -y libpff-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "memprocfs",
+      "package": "MemProcFS",
+      "optional": true,
+      "why": "Mount a memory image as a file system: processes, handles, registry and network state as files. AGPL-3.0, so unlike Volatility its licence and this project's do combine.",
+      "install": {
+        "brew": "https://github.com/ufrisk/MemProcFS/releases",
+        "apt": "https://github.com/ufrisk/MemProcFS/releases"
+      },
+      "licence": "AGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "zircolite",
+      "package": "Zircolite",
+      "optional": true,
+      "why": "Run thousands of Sigma rules over EVTX and return the detections. The fastest of the three engines and the lightest on memory.",
+      "install": {
+        "brew": "https://github.com/wagga40/Zircolite/releases",
+        "apt": "https://github.com/wagga40/Zircolite/releases"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "hayabusa",
+      "package": "hayabusa",
+      "optional": true,
+      "why": "Sigma detections plus a forensic timeline over EVTX, in one Rust binary.",
+      "install": {
+        "brew": "https://github.com/Yamato-Security/hayabusa/releases",
+        "apt": "https://github.com/Yamato-Security/hayabusa/releases"
+      },
+      "licence": "GPL-3.0-only",
+      "redistributable": false
+    },
+    {
+      "name": "MFTECmd",
+      "package": "Eric Zimmerman's tools",
+      "optional": true,
+      "why": "The $MFT, $J, $Boot and $SDS parser most reports cite. Needs the .NET runtime; MIT licensed.",
+      "install": {
+        "brew": "https://ericzimmerman.github.io/",
+        "apt": "https://ericzimmerman.github.io/"
+      },
+      "licence": "MIT",
+      "redistributable": false
+    },
+    {
+      "name": "EvtxECmd",
+      "package": "Eric Zimmerman's tools",
+      "optional": true,
+      "why": "Event log parser with maps that normalise the payload differences between event ids. Needs the .NET runtime.",
+      "install": {
+        "brew": "https://ericzimmerman.github.io/",
+        "apt": "https://ericzimmerman.github.io/"
+      },
+      "licence": "MIT",
+      "redistributable": false
+    },
+    {
+      "name": "RECmd",
+      "package": "Eric Zimmerman's tools",
+      "optional": true,
+      "why": "Registry hive search and export with batch files for whole artefact families. Needs the .NET runtime.",
+      "install": {
+        "brew": "https://ericzimmerman.github.io/",
+        "apt": "https://ericzimmerman.github.io/"
+      },
+      "licence": "MIT",
+      "redistributable": false
+    },
+    {
+      "name": "rip",
+      "package": "RegRipper3.0",
+      "optional": true,
+      "why": "Hundreds of registry plugins, each written for one question. Perl; invoked as an executable.",
+      "install": {
+        "brew": "https://github.com/keydet89/RegRipper3.0",
+        "apt": "https://github.com/keydet89/RegRipper3.0"
+      },
+      "licence": "GPL",
+      "redistributable": false
+    }
+  ]
+}

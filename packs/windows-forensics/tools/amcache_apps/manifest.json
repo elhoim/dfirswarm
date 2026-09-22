@@ -1,0 +1,22 @@
+{
+  "name": "amcache_apps",
+  "description": "Program execution from Amcache.hve: path, SHA-1, publisher and link date, from whichever of the Windows 7/8 and Windows 10 layouts the hive has.",
+  "params": {
+    "hive": {
+      "type": "string",
+      "description": "Path to Amcache.hve"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum entries to return (default 500)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 90,
+  "example": "{\"hive\": \"work/extracted/Amcache.hve\", \"limit\": 200}",
+  "by": "maintainer",
+  "at": "2026-09-20T12:00:00.000Z",
+  "version": 1,
+  "sha256": "c99e8d9c5dd11304191e8db9b3996e8bf992debe3adb126fec48fe1b50718882"
+}

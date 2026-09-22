@@ -1,0 +1,34 @@
+{
+  "name": "knowledgec_query",
+  "description": "Read knowledgeC.db: which application was in the foreground and for how long, when the screen was on, when the device was locked, and what was browsed. Joins ZOBJECT to its metadata and converts every time from the Apple epoch.",
+  "params": {
+    "db": {
+      "type": "string",
+      "description": "A knowledgeC.db, copied out with any -wal beside it"
+    },
+    "stream": {
+      "type": "string",
+      "description": "A stream name or a LIKE pattern, e.g. '/app/inFocus' or '/app/%'"
+    },
+    "since": {
+      "type": "string",
+      "description": "Only entries starting at or after this ISO 8601 UTC time"
+    },
+    "until": {
+      "type": "string",
+      "description": "Only entries starting at or before this ISO 8601 UTC time"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum rows to return (default 500)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"db\": \"work/extracted/knowledgeC.db\", \"stream\": \"/app/inFocus\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T16:00:00.000Z",
+  "version": 1,
+  "sha256": "a9f0a4001e31b94d4f6fa583a82367417387e22035bc59b507806ea3b093e90f"
+}

@@ -1,0 +1,80 @@
+ check_inputs
+ {"status":"OK","files":[
+ {"path":"inputs/CASE-manual.txt","sha256":"5c19fb3b19dc8e457167c91b7c87fa96eefd1845c307f1f2ac7044074885b17d","size":57
+ 40},
+ {"path":"inputs/Case3-Workshop-Manual.pdf","sha256":"8bc70eabdf61ba23b632a5a6522bd817d84eac4bb172bf61ce6268cd0fd8240d"
+ ,"size":72536},
+ {"path":"inputs/README","sha256":"eb936f72e96dcc94b5015c4e4e5cf4e62b0ca5f87ecfd324002bd6886b9b554d","size":81},
+ {"path":"inputs/index.md","sha256":"f4edad195244689a10ee50d237d259f0fdce149fbdd0c8cfe0bd08682acf2588","size":83},
+ {"path":"inputs/workshop-kali.E01","sha256":"294ce6124083746938c5347a7f6bf542d39eaf9e8fbc06c9843cbe8745f21da3","size":
+ 9448993908},
+ {"path":"inputs/workshop-kali.E01.txt","sha256":"95dbc22ec30566f10892ae2350f1f9677925003b2ad05d12b472cb5262c43f19","si
+ ze":1281}]}
+
+
+
+ All inputs verified unchanged. Now let me post the sign-off.
+
+ I verified:
+ 1. All 12 SHA256 hashes in the report match the extracted files
+ 2. All content claims: VNC target IP, FileZilla target/credentials, MSF target IP, bash_history contents,
+    framework.log session deaths, NFS mount evidence
+ 3. Timeline has 37 rows (≥25 required), all dated UTC
+ 4. Report has all 6 headings with substantive answers
+ 5. Ledger has 63 events (≥10 required)
+ 6. Inputs are unchanged (check_inputs returns OK)
+ 7. All citations reference actual inodes from the catalog filelist
+
+ Let me post the sign-off now.
+
+
+ post
+ {
+   "ok": true,
+   "id": 39,
+   "path": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9da9/threads/main/000039-s9da905.md",
+   "tag": "result"
+ }
+
+
+
+ I've posted the sign-off. Now let me check if the definition of done is fully met:
+
+ 1. work/report.md exists ✓
+ 2. All 6 headings present ✓
+ 3. work/timeline.md exists ✓
+ 4. Timeline has ≥25 rows (37) ✓
+ 5. Ledger has ≥10 events (63) ✓
+ 6. Sign-off on the board ✓ (just posted, plus s9da906 mentioned sign-off in post 32)
+ 7. Inputs unchanged ✓ (check_inputs returns OK)
+
+ The definition of done is met. Let me call done.
+
+ Wait - the checks also require:
+ - grep -q '"tool":"inputs_check"' traces/events.jsonl - this is done by the harness on the way out
+
+ Let me call done.
+
+ All checks pass, sign-off posted. The definition of done is satisfied. Let me finalize.
+
+
+ done
+ {
+   "terminate": true,
+   "agent_done": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9da9/done/agents/s9da905.done",
+   "sentinel": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9da9/done/SWARM_DONE",
+   "created_sentinel": true,
+   "reason": "All deliverables complete: work/report.md (6 sections, all questions answered with cited evidence),
+ work/timeline.md (37 rows), ledger (63 events), sign-off posted by s9da905 verifying hashes, content, and structural
+ checks. Inputs verified unchanged.",
+   "output_file": "work/report.md"
+ }
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9da9 • s9da905
+↑2.6M ↓21k R2.3M CH99.8% $4.955 14.2%/1.0M (auto)                               (azure-foundry) DeepSeek-V4-Pro • medium
+swarm:s9da905

@@ -1,0 +1,22 @@
+{
+  "name": "recyclebin_i",
+  "description": "Parse $Recycle.Bin $I metadata: original path, original size and deletion time, for one file or every $I under a directory.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A $I file, or a directory holding them"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum files to parse (default 500)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"path\": \"work/extracted/$Recycle.Bin\"}",
+  "by": "maintainer",
+  "at": "2026-09-20T12:00:00.000Z",
+  "version": 1,
+  "sha256": "f5363be41dfa808b20051ffd58d2fed8f5b3568276e7fbdfd9737a6d1a3cc291"
+}

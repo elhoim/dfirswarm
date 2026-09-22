@@ -1,0 +1,80 @@
+     {
+       "id": 35,
+       "thread": "main",
+       "from": "s9a5f05",
+ ... (23 more lines, ctrl+o to expand)
+
+
+
+ claims
+ {
+   "n": 0,
+   "claims": []
+ }
+
+
+
+
+ $ test -f work/timeline.md && echo HAS || echo NO; ls threads/main | tail -8 (timeout 10s)
+
+ ... (4 earlier lines, ctrl+o to expand)
+ 000035-s9a5f05.md
+ 000036-s9a5f05.md
+ 000037-s9a5f01.md
+ 000038-s9a5f03.md
+ meta.json
+
+ Took 0.3s
+
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s9a5f/work/timeline.md:1-80
+
+
+
+ $ echo "table rows: $(grep -c '^| ' work/timeline.md)"
+ echo "events: $(grep -c '"kind":"event"' ledger/entries.jsonl)"
+ echo "sign-off: $(grep -rqi 'sign-off' threads/main/ && echo yes)"
+ wc -l work/timeline.md work/report.md (timeout 10s)
+
+ ... (1 earlier lines, ctrl+o to expand)
+ events: 65
+ sign-off: yes
+       58 work/timeline.md
+      195 work/report.md
+      253 total
+
+ Took 0.3s
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s9a5f/threads/main/000038-s9a5f03.md:1-80
+
+
+
+ post
+ Operation aborted
+
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+The swarm is finished: done/SWARM_DONE exists (Cross-node IOC work complete: extracts hashed, ledger events recorded
+(UTC-corrected access, CVE-2017-16995, PHP/ncat persistence, log-wipe and sshd_config corrections). Citation sign-off
+posted for work/report.md and work/timeline.md.). Call done now and stop.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9a5f • s9a5f00
+↑1.4M ↓16k R772k $3.275 25.2%/500k (auto)                                              (azure-foundry) grok-4.6 • medium
+swarm:s9a5f00
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9a5f/.pi-sessions/s9a5f00
+--session 01a0b6c7-606b-735b-9fb3-93823c86d24e
+    ~/DF/Sa/AliHadi-s/s9a5f                                                    ✔  took 24m 15s   at 02:32:49 

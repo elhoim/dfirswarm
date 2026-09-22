@@ -1,0 +1,34 @@
+{
+  "name": "guest_syslog",
+  "description": "Extract unique syslog-like lines from a binary (Kali/rsyslog) matching a month-day prefix; drop kernel lines.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Binary to scan",
+      "required": true
+    },
+    "prefix": {
+      "type": "string",
+      "description": "Month-day prefix like 'Apr  6'"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Max unique lines"
+    },
+    "skip_kernel": {
+      "type": "boolean",
+      "description": "Drop kernel: lines"
+    },
+    "hour_re": {
+      "type": "string",
+      "description": "Optional regex on the line (e.g. 0[89]:)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "by": "s5d1001",
+  "at": "2026-09-18T19:17:35.376Z",
+  "version": 1,
+  "sha256": "4ab59b89e646359c8c35068947553c5406a9d1620d385627389bd61a94f8dfd9"
+}

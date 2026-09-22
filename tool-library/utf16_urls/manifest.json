@@ -1,0 +1,27 @@
+{
+  "name": "utf16_urls",
+  "description": "Extract UTF-16LE and ASCII URL/Visited strings from a local file; filter optional substrings. Returns unique strings.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "File to scan",
+      "required": true
+    },
+    "contains": {
+      "type": "string",
+      "description": "Optional substring filter (case-insensitive)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Max URLs to return (default 200)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"path\": \"work/s5d1006/WebCacheV01.dat\", \"contains\": \"192.168\"}",
+  "by": "s5d1003",
+  "at": "2026-09-18T19:10:07.881Z",
+  "version": 1,
+  "sha256": "a7a83040d582b70c0b4cec3fb0e2b3aeadbfd9d7ce44d7f135c716bd730e0e19"
+}

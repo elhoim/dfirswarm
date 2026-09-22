@@ -1,0 +1,80 @@
+ 2. ✅ All 6 question headings present (## 1. through ## 6.)
+ 3. ✅ work/timeline.md exists with ≥30 rows (40 rows)
+ 4. ✅ ≥10 events in ledger (56 events)
+ 5. Need sign-off post with "sign-off" keyword
+ 6. inputs_check will happen automatically
+
+ Let me check if the sign-off is in the main thread already. s9a5f01 posted a verification but did they explicitly say
+ "sign-off"? Let me check.
+
+ From post #37: "sign-off (report.md content): questions ## 1–6, UTC conversion, IOCs, and the three corrections ...
+ match my extracts."
+
+ That's a sign-off! But it also says "I will sign-off the timeline after it lands with ≥30 dated rows." Let me check if
+ there's a follow up post.
+
+ Let me wait for the final sign-off or check if s9a5f01 has posted one.
+
+ Timeline is done — 40 rows! Let me check for sign
+
+
+ inbox
+ {
+   "swarm_done": false,
+   "seen": 39,
+   "threads": [
+     "main"
+   ],
+   "cursors": {
+     "main": 39
+   },
+   "posts": [
+ ... (21 more lines, ctrl+o to expand)
+
+
+ s9a5f02 has posted a comprehensive sign-off! This confirms all the done conditions:
+
+ 1. ✅ work/report.md exists
+ 2. ✅ All 6 question headings (## 1. through ## 6.)
+ 3. ✅ work/timeline.md exists with ≥30 rows (40 rows)
+ 4. ✅ ≥10 events in ledger (56 events)
+ 5. ✅ Sign-off post with "sign-off" keyword (post #39 from s9a5f02)
+ 6. inputs_check will happen automatically by the harness when done() is called
+
+ Now let me verify the checks myself before calling done:
+
+ - test -f work/report.md ✅
+ - for n in 1 2 3 4 5 6; do grep -q "^## $n\." work/report.md || exit 1; done ✅
+ - test -f work/timeline.md ✅
+ - test "$(grep -c '^| ' work/timeline.md)" -ge 30 ✅ (40 rows)
+ - test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10 ✅ (56)
+ - grep -rqi 'sign-off' threads/main/ ✅ (post #39)
+ - grep -q '"tool":"inputs_check"' traces/events.jsonl - AUTO
+
+ All checks pass! I should not call done() since any one agent can call it. Let me post that I'm done with my work and
+ ready for the swarm to complete.
+
+ Actually, wait - the definition of done says we need these conditions met. And there's already a sign-off. Let me post
+ my confirmation and then I can call done if needed. But actually, the question is whether I should call done or just
+ post that I'm done.
+
+ Looking at the done tool description: "Write done/agents/<id>.done, create done/SWARM_DONE if missing (idempotent),
+ drop this worker's locks, and terminate the session."
+
+ The swarm is done - all conditions are met. Let me call done for my agent.
+
+ All done conditions are met. Let me call
+
+
+ done
+
+
+ Steering: The swarm is finished: done/SWARM_DONE exists (Cross-node IOC work complete: extracts hashed, ledger even...
+ ↳ Option+Up to edit all queued messages
+
+── ⠸ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9a5f • s9a5f04
+↑4.3M ↓33k R3.4M CH98.1% $8.124 17.2%/1.0M (auto)                               (azure-foundry) DeepSeek-V4-Pro • medium
+swarm:s9a5f04

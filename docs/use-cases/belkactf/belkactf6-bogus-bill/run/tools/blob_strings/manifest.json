@@ -1,0 +1,27 @@
+{
+  "name": "blob_strings",
+  "description": "Extract printable ASCII/UTF-8 strings from a SQLite BLOB column",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "sqlite path",
+      "required": true
+    },
+    "sql": {
+      "type": "string",
+      "description": "SQL returning key then blob columns",
+      "required": true
+    },
+    "minlen": {
+      "type": "integer",
+      "description": "minimum string length"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "by": "s821c00",
+  "at": "2026-09-20T18:22:24.371Z",
+  "version": 1,
+  "sha256": "7440006823c4f6f88069edc24710cd01dc002f00106650bd9e97b74b66e6ba1f"
+}

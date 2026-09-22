@@ -1,0 +1,30 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/challenge-06-browser-policy-violation",
+  "copied_at": "2026-09-18T13:27:08Z",
+  "files": [
+    {
+      "path": "inputs/Browser_Policy_Violation.E01",
+      "bytes": 6308012554,
+      "sha256": "4baa6b57745bacc5a9d6fba37016044a3b15fff51a63e13c51fc08e10f862576",
+      "mtime_ms": 1631636934000,
+      "ctime_ms": 1789738025974
+    },
+    {
+      "path": "inputs/Browser_Policy_Violation.txt",
+      "bytes": 1171,
+      "sha256": "deb9586bce46325f64a93eb55b48672f21cdfa0e64c7f227293a4a816764a717",
+      "mtime_ms": 1631634903000,
+      "ctime_ms": 1789738025974
+    },
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 428,
+      "sha256": "b4c14d3afe5c34106f1fd9f1085d5bc131e146fff67885ebdc021362c6c84113",
+      "mtime_ms": 1789730983405,
+      "ctime_ms": 1789738025974
+    }
+  ],
+  "bytes": 6308014153,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

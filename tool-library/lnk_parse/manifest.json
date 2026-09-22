@@ -1,0 +1,42 @@
+{
+  "name": "lnk_parse",
+  "description": "Parse a Windows LNK (or a dump slice) and return flags, FILETIME timestamps, local/common paths, arguments, and UTF-16 strings.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "LNK file or dump path"
+    },
+    "dump": {
+      "type": "string",
+      "description": "Alias for path (image/dump)"
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Byte offset to start reading"
+    },
+    "size": {
+      "type": "integer",
+      "description": "Bytes to read (default 4096)"
+    },
+    "scan": {
+      "type": "boolean",
+      "description": "Scan the slice for multiple LNK headers"
+    },
+    "each": {
+      "type": "integer",
+      "description": "Bytes per LNK when scanning"
+    },
+    "max": {
+      "type": "integer",
+      "description": "Max LNKs when scanning"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "{\"dump\": \"inputs/[UNALLOCATED]\", \"offset\": 313125516, \"size\": 2048}",
+  "by": "s183902",
+  "at": "2026-09-18T22:18:47.468Z",
+  "version": 1,
+  "sha256": "4a213a61605c266d22aac50515e004ae8cbfe7bd6ac0e687f242c61d0e2ce84d"
+}

@@ -1,0 +1,30 @@
+{
+  "name": "catalog_grep",
+  "description": "Grep catalog/AF-Case2.E01/p0/filelist.txt for a pattern; return matching lines.",
+  "params": {
+    "pattern": {
+      "type": "string",
+      "description": "regex to search"
+    },
+    "ignore_case": {
+      "type": "boolean",
+      "description": "case-insensitive (default true)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "max lines (default 200)"
+    },
+    "path": {
+      "type": "string",
+      "description": "catalog file path"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "{\"pattern\": \"posts\\\\[.*\\\\]\\\\.json\", \"limit\": 50}",
+  "by": "s864a02",
+  "at": "2026-09-18T16:10:29.357Z",
+  "version": 1,
+  "sha256": "2f51b214c66d859d73bd6004befb21ba8e615290a4e2dbf37bad5cbb49ac3bbd"
+}

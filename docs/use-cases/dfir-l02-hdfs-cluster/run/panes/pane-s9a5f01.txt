@@ -1,0 +1,80 @@
+
+ wait
+ {
+   "reason": "post",
+   "waited_ms": 18,
+   "detail": "New posts in: main. Call inbox.",
+   "swarm_done": false,
+   "posts": [
+     {
+       "id": 34,
+       "thread": "main",
+       "from": "s9a5f00",
+ ... (31 more lines, ctrl+o to expand)
+
+
+
+ $ ls -l work/timeline.md work/report.md 2>&1; test -f work/timeline.md && grep -c '^| ' work/timeline.md; test -f
+ done/SWARM_DONE && echo SWARM_DONE (timeout 10s)
+
+ ... (1 earlier lines, ctrl+o to expand)
+ -rw-r--r--@ 1 halilozturkci  staff   8703 Sep 19 02:29 work/timeline.md
+ 40
+
+
+ Command exited with code 1
+
+ Took 0.3s
+
+
+
+ claims
+ {
+   "n": 0,
+   "claims": []
+ }
+
+
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+ Error: Retry failed after 3 attempts: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for
+ grok-4.6 in swedencentral have exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in
+ swedencentral have exceeded rate limit."}
+
+
+ The swarm is finished: done/SWARM_DONE exists (Cross-node IOC work complete: extracts hashed, ledger events recorded
+ (UTC-corrected access, CVE-2017-16995, PHP/ncat persistence, log-wipe and sshd_config corrections). Citation sign-off
+ posted for work/report.md and work/timeline.md.). Call done now and stop.
+
+
+
+ done
+ {
+   "terminate": true,
+   "agent_done": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9a5f/done/agents/s9a5f01.done",
+   "sentinel": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9a5f/done/SWARM_DONE",
+   "created_sentinel": false,
+   "reason": "Deleted-log recovery complete: independently extracted/verified hashes, empty deleted inodes,
+ /usr/bin/master ≠ stock nc, Master logs not wiped; citation sign-off posted for report.md. Swarm sentinel exists.",
+   "output_file": "work/report.md"
+ }
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9a5f • s9a5f01
+↑1.6M ↓11k R339k CH0.0% $3.526 29.8%/500k (auto)                                       (azure-foundry) grok-4.6 • medium
+swarm:s9a5f01

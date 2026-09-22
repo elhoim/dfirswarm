@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# Packs: seal, install, verify, tamper, zip, dependencies and refusals.
+#
+# A pack is the unit an operator imports, so the refusals matter as much as the
+# happy path: a pack that does not match its checksums, whose dependency is
+# missing, whose skill points at a tool it does not carry, or whose zip holds
+# anything above the pack directory, must not install.
+set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PACK="$ROOT/scripts/pack.sh"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+pass() { echo "ok - $*"; }
+
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+export DFIRSWARM_HOME="$WORK/home"
+
+# A minimal pack we build by hand, so the suite does not depend on the shipped ones.
+mk_pack() { # <dir> <id> [depends]
+  local d="$1/$2" id="$2" dep="${3:-}"
+  mkdir -p "$d/skills/alpha" "$d/tools/echo_tool" "$d/requires"
+  cat > "$d/LICENCE" <<'EOF'
+Test pack.
+EOF
+  cat > "$d/skills/alpha/first.md" <<'EOF'
+---
+id: alpha/first
+title: The first skill
+when: Whenever the suite asks for it.
+needs: []
+tools: [echo_tool]
+requires_host: []
+---
+
+A body, so the validator has something to accept.
+EOF
+  cat > "$d/tools/echo_tool/manifest.json" <<'EOF'
+{
+  "name": "echo_tool",
+  "description": "Echo a string back, so a pack has a tool that runs anywhere.",
+  "params": { "text": { "type": "string", "description": "What to echo" } },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 10
+}
+EOF
+  cat > "$d/tools/echo_tool/run.py" <<'EOF'
+import json, sys
+d = json.loads(sys.stdin.read() or "{}")
+print(json.dumps({"ok": True, "text": d.get("text", "")}))
+EOF
+  cat > "$d/requires/host.json" <<'EOF'
+{ "binaries": [] }
+EOF
+  python3 - "$d/pack.json" "$id" "$dep" <<'EOF'
+import json, sys
+path, pid, dep = sys.argv[1], sys.argv[2], sys.argv[3]
+m = {"id": pid, "name": pid, "version": "1.0.0", "description": "A pack for the suite.",
+     "licence": "AGPL-3.0-or-later", "depends": [dep] if dep else [],
+     "requires": {"host": "requires/host.json"}, "secrets": []}
+json.dump(m, open(path, "w"), indent=2)
+EOF
+}
+
+mkdir -p "$WORK/src"
+mk_pack "$WORK/src" base-pack
+"$PACK" seal "$WORK/src/base-pack" >/dev/null || fail "seal should succeed on a well-formed pack"
+pass "seal writes checksums and the skill index"
+[[ -f "$WORK/src/base-pack/skills/INDEX.md" ]] || fail "seal should generate skills/INDEX.md"
+grep -q 'alpha/first' "$WORK/src/base-pack/skills/INDEX.md" || fail "the index should name every skill"
+pass "the index is generated from the skills' own front matter"
+
+"$PACK" install "$WORK/src/base-pack" --no-secrets >/dev/null || fail "install should accept a sealed pack"
+"$PACK" verify base-pack >/dev/null || fail "a freshly installed pack should verify"
+pass "install and verify"
+
+"$PACK" list | grep -q 'base-pack' || fail "list should show an installed pack"
+[[ "$("$PACK" path base-pack)" == "$DFIRSWARM_HOME/packs/base-pack" ]] || fail "path should print the install directory"
+pass "list and path"
+
+# A tampered file must be caught by the checksums.
+echo "extra" >> "$DFIRSWARM_HOME/packs/base-pack/skills/alpha/first.md"
+"$PACK" verify base-pack >/dev/null 2>&1 && fail "verify should refuse a tampered skill"
+pass "a tampered file is refused"
+"$PACK" install "$WORK/src/base-pack" --no-secrets >/dev/null || fail "re-install should repair"
+
+# An unsealed pack has no checksums and must not install.
+mk_pack "$WORK/src" unsealed-pack
+"$PACK" install "$WORK/src/unsealed-pack" --no-secrets >/dev/null 2>&1 && fail "an unsealed pack should not install"
+pass "a pack with no checksums is refused"
+
+# A skill may name a tool a dependency carries, so this is a warning and not a
+# refusal. What must not happen is silence: the name has to be reported.
+mk_pack "$WORK/src" broken-pack
+sed -i.bak 's/tools: \[echo_tool\]/tools: [no_such_tool]/' "$WORK/src/broken-pack/skills/alpha/first.md"
+rm -f "$WORK/src/broken-pack/skills/alpha/first.md.bak"
+warn="$("$PACK" seal "$WORK/src/broken-pack" 2>&1 >/dev/null)" || fail "seal should accept a skill naming a dependency's tool"
+grep -q "no_such_tool" <<<"$warn" || fail "seal should name the tool it could not find, got: $warn"
+pass "a tool a pack does not carry is reported, and left to a dependency"
+
+# A skill with no body at all is still a broken pack.
+mk_pack "$WORK/src" empty-pack
+cat > "$WORK/src/empty-pack/skills/alpha/first.md" <<'EOF'
+---
+id: alpha/first
+title: The first skill
+when: Whenever the suite asks for it.
+needs: []
+tools: [echo_tool]
+requires_host: []
+---
+EOF
+"$PACK" seal "$WORK/src/empty-pack" >/dev/null 2>&1 && fail "seal should refuse a skill with no body"
+pass "a skill with no body is refused"
+
+# Dependencies resolve, and a missing one is named.
+mk_pack "$WORK/src" child-pack base-pack
+"$PACK" seal "$WORK/src/child-pack" >/dev/null || fail "seal child"
+"$PACK" install "$WORK/src/child-pack" --no-secrets >/dev/null || fail "install should accept a pack whose dependency is present"
+out="$("$PACK" resolve child-pack)"
+[[ "$(head -1 <<<"$out")" == *"base-pack" ]] || fail "resolve should put the dependency first, got: $out"
+[[ "$(sed -n 2p <<<"$out")" == *"child-pack" ]] || fail "resolve should then give the pack itself"
+pass "dependencies resolve, in order"
+
+"$PACK" remove base-pack >/dev/null
+"$PACK" resolve child-pack >/dev/null 2>&1 && fail "resolve should refuse when a dependency is gone"
+pass "a missing dependency is refused"
+"$PACK" install "$WORK/src/base-pack" --no-secrets >/dev/null
+
+mk_pack "$WORK/src" orphan-pack absent-pack
+"$PACK" seal "$WORK/src/orphan-pack" >/dev/null || fail "seal orphan"
+"$PACK" install "$WORK/src/orphan-pack" --no-secrets >/dev/null 2>&1 && fail "install should refuse a pack whose dependency is not installed"
+pass "install refuses a pack whose dependency is missing"
+
+# The zip is the import format, and its shape is checked.
+if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+  ( cd "$WORK/src" && zip -qr "$WORK/base-pack.zip" base-pack )
+  "$PACK" remove base-pack >/dev/null
+  "$PACK" install "$WORK/base-pack.zip" --no-secrets >/dev/null || fail "install should accept a zip holding one pack directory"
+  "$PACK" verify base-pack >/dev/null || fail "a pack installed from a zip should verify"
+  pass "a pack imports from a zip"
+  ( cd "$WORK/src" && zip -qr "$WORK/bad.zip" base-pack child-pack )
+  "$PACK" install "$WORK/bad.zip" --no-secrets >/dev/null 2>&1 && fail "a zip with two directories at its top should be refused"
+  pass "a zip must hold exactly one pack directory"
+else
+  echo "skip - zip/unzip are not on this host"
+fi
+
+# A secret is stored 0600 and never in the pack's own tree.
+mk_pack "$WORK/src" secret-pack
+python3 - "$WORK/src/secret-pack/pack.json" <<'EOF'
+import json, sys
+m = json.load(open(sys.argv[1]))
+m["secrets"] = [{"name": "TEST_API_KEY", "title": "A key", "why": "So the suite can check the store.", "required": False}]
+json.dump(m, open(sys.argv[1], "w"), indent=2)
+EOF
+"$PACK" seal "$WORK/src/secret-pack" >/dev/null || fail "seal secret pack"
+TEST_API_KEY=hunter2 "$PACK" install "$WORK/src/secret-pack" >/dev/null 2>&1 || fail "install should take a secret from the environment"
+env_file="$DFIRSWARM_HOME/packs/secret-pack/secrets.env"
+[[ -f "$env_file" ]] || fail "the secret should be stored"
+grep -q 'TEST_API_KEY=hunter2' "$env_file" || fail "the stored secret should hold the value"
+# GNU stat first: its -f means --file-system, so asking BSD-style first prints a
+# block of filesystem text on Linux before it fails, and that lands in perm.
+perm="$(stat -c '%a' "$env_file" 2>/dev/null || stat -f '%Lp' "$env_file")"
+[[ "$perm" == "600" ]] || fail "secrets.env should be 0600, got $perm"
+pass "a declared secret is stored 0600, outside the pack's sealed files"
+
+# Every shipped pack must be sealed, must install and must verify. Install in
+# dependency order rather than alphabetically: a pack whose dependency is not
+# installed yet is refused, which is the behaviour the tests above assert.
+remaining=()
+for p in "$ROOT"/packs/*/; do
+  [[ -f "$p/pack.json" ]] && remaining+=("$p")
+done
+installed=0
+while ((${#remaining[@]})); do
+  progress=0
+  left=()
+  for p in "${remaining[@]}"; do
+    id="$(basename "$p")"
+    if "$PACK" install "$p" --no-secrets >/dev/null 2>&1; then
+      "$PACK" verify "$id" >/dev/null || fail "the shipped pack $id does not verify"
+      pass "shipped pack $id installs and verifies"
+      progress=1
+      installed=$((installed + 1))
+    else
+      left+=("$p")
+    fi
+  done
+  if ((progress == 0)); then
+    for p in "${left[@]}"; do
+      id="$(basename "$p")"
+      "$PACK" install "$p" --no-secrets >/dev/null || true
+    done
+    fail "these shipped packs never became installable: ${left[*]}"
+  fi
+  remaining=(${left[@]+"${left[@]}"})
+done
+[[ "$installed" -ge 2 ]] || fail "expected at least the two original packs, installed $installed"
+pass "all $installed shipped packs install in dependency order and verify"
+
+echo "packs: all checks passed"

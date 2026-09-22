@@ -1,0 +1,65 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SwarmInputs/belkactf6",
+  "copied_at": "2026-09-21T11:06:04Z",
+  "files": [
+    {
+      "path": "inputs/BelkaCTF_6_CASE240405_D201AP.tar",
+      "bytes": 5134817280,
+      "sha256": "4ef69a6292cdffd63fc4d0a5bc47ca98fa47ad59cc7846140e24cf1e30214aff",
+      "mtime_ms": 1712233285756,
+      "ctime_ms": 1789988756933
+    },
+    {
+      "path": "inputs/BelkaCTF_6_CASE240405_LAPTOP.E01",
+      "bytes": 1572760540,
+      "sha256": "5528361e35f711f1f3056404dc1649f1c6d6ae099037b47217c73ee18d83e56e",
+      "mtime_ms": 1712244214000,
+      "ctime_ms": 1789988756933
+    },
+    {
+      "path": "inputs/BelkaCTF_6_CASE240405_LAPTOP.E02",
+      "bytes": 1572789996,
+      "sha256": "05a9b653f35864c997362afb7f9d8152a57ea0f9ad3c18bed8e315a5d859a405",
+      "mtime_ms": 1712244238000,
+      "ctime_ms": 1789988756933
+    },
+    {
+      "path": "inputs/BelkaCTF_6_CASE240405_LAPTOP.E03",
+      "bytes": 1572786181,
+      "sha256": "e6561b9f0e633b744d5454131613a5bf0c69f7d0bb6b61c15845419fc43f2a2f",
+      "mtime_ms": 1712244260000,
+      "ctime_ms": 1789988756933
+    },
+    {
+      "path": "inputs/BelkaCTF_6_CASE240405_LAPTOP.E04",
+      "bytes": 1572784241,
+      "sha256": "384de0059098db8312f6f6b52b43f509569eaec99b77cf3b6703021461b08ed2",
+      "mtime_ms": 1712244294000,
+      "ctime_ms": 1789988756933
+    },
+    {
+      "path": "inputs/BelkaCTF_6_CASE240405_LAPTOP.E05",
+      "bytes": 1572699571,
+      "sha256": "a7d826d58aa1548c37e7483a19e6b0f404d72564a010160947ecf764b6b5319a",
+      "mtime_ms": 1712244322000,
+      "ctime_ms": 1789988756933
+    },
+    {
+      "path": "inputs/BelkaCTF_6_CASE240405_LAPTOP.E06",
+      "bytes": 1470470243,
+      "sha256": "8adb8259c2df9c984741b07ee35b888c3d43193a882039747a08a5e9de2406b6",
+      "mtime_ms": 1712244494000,
+      "ctime_ms": 1789988756933
+    },
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 1561,
+      "sha256": "e01f34a4d7be3dfe4c16084ed3ea195ee7b4f572c14232a742aa9a1b4d5dcef7",
+      "mtime_ms": 1789927033371,
+      "ctime_ms": 1789988756933
+    }
+  ],
+  "bytes": 14469109613,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

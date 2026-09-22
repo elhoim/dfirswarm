@@ -1,0 +1,50 @@
+{
+  "name": "mft_records",
+  "description": "Parse $MFT records: both time sets ($STANDARD_INFORMATION and $FILE_NAME) side by side, allocation, resident data, every named stream, and the parent path. Filters by name, by entry, to deleted records only, or to records whose two time sets disagree.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "An extracted $MFT (or a slice of one)"
+    },
+    "name": {
+      "type": "string",
+      "description": "Case-insensitive regex over the record's file names"
+    },
+    "entry": {
+      "type": "integer",
+      "description": "One record number, ignoring the other filters"
+    },
+    "deleted_only": {
+      "type": "boolean",
+      "description": "Only records the volume no longer marks in use"
+    },
+    "streams_only": {
+      "type": "boolean",
+      "description": "Only records carrying a named $DATA stream (an ADS)"
+    },
+    "timestomp_only": {
+      "type": "boolean",
+      "description": "Only records whose two time sets disagree in a way worth reporting"
+    },
+    "with_resident": {
+      "type": "boolean",
+      "description": "Include the bytes of a resident $DATA, base64 encoded"
+    },
+    "record_size": {
+      "type": "integer",
+      "description": "Record size in bytes when it is not the usual 1024"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum records to return (default 200)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 300,
+  "example": "{\"path\": \"work/extracted/$MFT\", \"name\": \"\\\\.docx$\", \"limit\": 50}",
+  "by": "maintainer",
+  "at": "2026-09-22T09:00:00.000Z",
+  "version": 1,
+  "sha256": "a064b38788f294971e1ef8657507f5dd30abaa4150631eab940274c980ba0916"
+}

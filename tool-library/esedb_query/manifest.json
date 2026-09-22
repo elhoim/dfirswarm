@@ -1,0 +1,26 @@
+{
+  "name": "esedb_query",
+  "description": "Read an ESE database (WebCacheV01.dat, SRUDB.dat, spartan.edb) as tables via esedbexport. Lists the tables, or returns the rows of one.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Path to the .dat or .edb file"
+    },
+    "table": {
+      "type": "string",
+      "description": "Table to read; omit to list the tables"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum rows to return (default 200, cap 20000)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"work/extracted/WebCacheV01.dat\", \"table\": \"Containers\", \"limit\": 50}",
+  "by": "maintainer",
+  "at": "2026-09-20T12:00:00.000Z",
+  "version": 1,
+  "sha256": "22a2f5e8803750340cc85f13ebac9b6c36d18cd1a1350c1a87f084ab5cebcc48"
+}

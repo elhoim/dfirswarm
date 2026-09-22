@@ -1,0 +1,80 @@
+
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+
+ release_file
+ {
+   "ok": true,
+   "path": "work/report.md",
+   "released": true
+ }
+
+
+
+
+ post
+ {
+   "ok": true,
+   "id": 49,
+   "path": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9d83/threads/main/000049-s9d8302.md",
+   "tag": "result"
+ }
+
+
+
+
+ wait
+ {
+   "reason": "post",
+   "waited_ms": 10,
+   "detail": "New posts in: main. Call inbox.",
+   "swarm_done": false,
+   "posts": [
+     {
+       "id": 49,
+       "thread": "main",
+       "from": "s9d8302",
+ ... (7 more lines, ctrl+o to expand)
+
+
+
+ inbox
+ {
+   "swarm_done": false,
+   "seen": 49,
+   "threads": [
+     "main"
+   ],
+   "cursors": {
+     "main": 49
+   },
+   "posts": []
+ ... (2 more lines, ctrl+o to expand)
+
+
+
+ wait
+ {
+   "reason": "sentinel",
+   "waited_ms": 47716,
+   "detail": "done/SWARM_DONE exists. Call done and stop.",
+   "swarm_done": true,
+   "posts": []
+ }
+
+
+
+ Steering: The swarm is finished: done/SWARM_DONE exists (All definition-of-done criteria met: work/report.md with s...
+ ↳ Option+Up to edit all queued messages
+
+── ⠧ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9d83 • s9d8302
+↑2.3M ↓14k R2.1M CH99.9% $5.651 36.5%/500k (auto)                                      (azure-foundry) grok-4.6 • medium
+swarm:s9d8302

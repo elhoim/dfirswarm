@@ -1,0 +1,34 @@
+{
+  "name": "indx_carve",
+  "description": "Recover file names a directory no longer lists. Parses INDX blocks ($INDEX_ALLOCATION, the $I30 stream) and, past the end of the live entries, carves the slack where entries for deleted files survive with their $FILE_NAME times and sizes. Also sweeps a raw blob for INDX blocks.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "An extracted $I30 / $INDEX_ALLOCATION stream, or a raw blob to sweep"
+    },
+    "slack_only": {
+      "type": "boolean",
+      "description": "Return only entries carved from slack: the ones the directory no longer lists"
+    },
+    "name": {
+      "type": "string",
+      "description": "Case-insensitive regex over the recovered names"
+    },
+    "block_size": {
+      "type": "integer",
+      "description": "INDX block size in bytes (default 4096)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum entries to return (default 500)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 300,
+  "example": "{\"path\": \"work/extracted/I30-64\", \"slack_only\": true}",
+  "by": "maintainer",
+  "at": "2026-09-22T14:00:00.000Z",
+  "version": 1,
+  "sha256": "6e301dd8d6e23491608d72e288a7265c97340bc612ce9b251db4360a43bcba4a"
+}

@@ -1,0 +1,80 @@
+   "id": 34,
+   "path": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9da9/threads/main/000034-s9da900.md",
+   "tag": "result"
+ }
+
+
+
+
+ $ ls -la work/report.md work/timeline.md 2>/dev/null; ls work/ | head; ls done 2>/dev/null (timeout 10s)
+
+ ... (7 earlier lines, ctrl+o to expand)
+ s9da903
+ s9da904
+ s9da905
+ timeline.md
+ agents
+
+ Took 0.4s
+
+
+
+ budget
+ {
+   "budget": {
+     "cap_usd": 80,
+     "spent_usd": 18.751734,
+     "tokens": 15514351,
+     "calls": 286,
+     "wall_clock_minutes": 240,
+     "started_at": "2026-09-18T23:35:18Z",
+     "source": "pi.sessionManager.getEntries",
+     "hard_kill": false,
+ ... (101 more lines, ctrl+o to expand)
+
+
+ Report and timeline are already on disk. I'll citation-check them and post the sign-off.
+
+
+ name
+ name refused: s9da902 already answers to "Critic". Pick another.
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s9da9/work/report.md
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s9da9/work/timeline.md
+
+
+
+ $ echo '=== checks ==='
+ test -f work/report.md && echo report_ok
+ for n in 1 2 3 4 5 6; do grep -q "^## $n\." work/report.md && echo "h$n ok" || echo "h$n FAIL"; done
+ test -f work/timeline.md && echo timeline_ok
+ echo "timeline pipes: $(grep -c '^| ' work/timeline.md)"
+ echo "ledger events: $(grep -c '"kind":"event"' ledger/entries.jsonl)"
+ echo "sign-off posts:"
+ grep -rqi 'sign-off' threads/main/ && echo has_signoff || echo no_signoff
+  (timeout 10s)
+
+ ... (8 earlier lines, ctrl+o to expand)
+ timeline_ok
+ timeline pipes: 37
+ ledger events: 72
+ sign-off posts:
+ has_signoff
+
+ Took 0.5s
+
+
+ Steering: The swarm is finished: done/SWARM_DONE exists (All deliverables complete: work/report.md (6 sections, all...
+ ↳ Option+Up to edit all queued messages
+
+── ⠧ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9da9 • s9da900
+↑1.0M ↓11k R453k CH0.0% $2.355 24.5%/500k (auto)                                       (azure-foundry) grok-4.6 • medium
+swarm:s9da900

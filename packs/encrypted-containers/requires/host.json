@@ -1,0 +1,76 @@
+{
+  "binaries": [
+    {
+      "name": "bdeinfo",
+      "package": "libbde",
+      "optional": true,
+      "why": "Read a BitLocker volume header and every key protector on it, before any key is known.",
+      "install": {
+        "brew": "python3 -m pip install libbde-python",
+        "apt": "apt-get install -y libbde-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "bdemount",
+      "package": "libbde",
+      "optional": true,
+      "why": "Expose an unlocked BitLocker volume as a file the toolkit can read.",
+      "install": {
+        "brew": "python3 -m pip install libbde-python",
+        "apt": "apt-get install -y libbde-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "dislocker",
+      "package": "dislocker",
+      "optional": true,
+      "why": "Unlock a BitLocker volume to a file with a recovery password, a key file, or no secret at all where a clear key is present.",
+      "install": {
+        "brew": "brew install dislocker",
+        "apt": "apt-get install -y dislocker"
+      },
+      "licence": "GPL-2.0-only",
+      "redistributable": false
+    },
+    {
+      "name": "cryptsetup",
+      "package": "cryptsetup",
+      "optional": true,
+      "why": "Dump a LUKS header, list its key slots, and open the volume when a key is known.",
+      "install": {
+        "brew": "brew install cryptsetup",
+        "apt": "apt-get install -y cryptsetup-bin"
+      },
+      "licence": "GPL-2.0-or-later with an OpenSSL exception",
+      "redistributable": false
+    },
+    {
+      "name": "fvdeinfo",
+      "package": "libfvde",
+      "optional": true,
+      "why": "Read a FileVault volume's encryption metadata and its key material references.",
+      "install": {
+        "brew": "python3 -m pip install libfvde-python",
+        "apt": "apt-get install -y libfvde-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "john",
+      "package": "john-the-ripper",
+      "optional": true,
+      "why": "Turn a header into a hash a password attempt can be made against, with the *2john helpers. Only where the operator has authorised it.",
+      "install": {
+        "brew": "brew install john-jumbo",
+        "apt": "apt-get install -y john"
+      },
+      "licence": "GPL-2.0-or-later",
+      "redistributable": false
+    }
+  ]
+}

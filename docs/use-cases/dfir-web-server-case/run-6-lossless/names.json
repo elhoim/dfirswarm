@@ -1,0 +1,28 @@
+{
+  "names": [
+    {
+      "id": "s50bb00",
+      "name": "Software & leftovers",
+      "doing": "I’m taking installed-software provenance and attacker leftovers from the disk side, avoiding the partition/file-list triage that others already started.",
+      "at": "2026-09-22T14:40:17.639Z"
+    },
+    {
+      "id": "s50bb01",
+      "name": "Memory & timeline",
+      "doing": "Triage the memory dump and build the case timeline, while leaving disk/account/software slices to peers.",
+      "at": "2026-09-22T14:39:52.897Z"
+    },
+    {
+      "id": "s50bb02",
+      "name": "accounts and registry",
+      "doing": "I am taking user accounts, registry artifacts, and attacker-added persistence evidence.",
+      "at": "2026-09-22T14:40:01.515Z"
+    },
+    {
+      "id": "s50bb03",
+      "name": "Scout for disk and memory",
+      "doing": "I am taking initial triage of the disk image and memory dump, starting with partitions, filesystem layout, and a first pass at memory/process evidence.",
+      "at": "2026-09-22T14:39:54.405Z"
+    }
+  ]
+}

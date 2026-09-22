@@ -1,0 +1,80 @@
+      ...
+   33 ## 2. Finding RansomCare
+   34
+   35 ### 2.1 The RansomCare Architecture
+   36
+ - 37 RansomCare is a two-component ransomware:
+ + 37 RansomCare is a **user-mode ransomware** operating via process injection:
+   38
+ - 39 1. **User-mode dropper: `Agent.exe`** — downloaded to `C:\Users\user1\Downloads\Agent.exe`. Launched by
+ explorer.exe (user double-click), it performs process injection into notepad.exe and exits within ~1 second.
+ + 39 1. **Dropper: `Agent.exe`** — downloaded to `C:\Users\user1\Downloads\Agent.exe`. Launched by explorer.exe (user
+ double-click), it performs process injection into notepad.exe and exits within ~1 second.
+   40
+ - 41 2. **Kernel minifilter driver: `filecrypt.sys`** — loaded at boot as a Windows service (`FileCrypt`,
+ SERVICE_SYSTEM_START).It is a file-system minifilter that uses Windows CNG/BCrypt APIs (BCryptEncrypt, BCryptDecrypt,
+ BCryptGenerateSymmetricKey, BCryptGenRandom) to encrypt files on the fly as they are accessed. Size: 0x14000 (80 KB).
+ + 41 2. **Injected payload: notepad.exe** — the ransomware logic runs within the hollowed/injected notepad.exe
+ process. It performs file encryption, network communication (UDP sockets), and drops the ransom note.
+   42
+ + 43 **Note:** `filecrypt.sys` (loaded as SERVICE_SYSTEM_START on both systems) is the **stock Microsoft Windows
+ EFS/StorageSec minifilter** (`filecrypt.pdb`, `PicturesChamber`,
+ `\Registry\Machine\Software\Microsoft\StorageSec\Encrypt`). It is NOT part of RansomCare. This was confirmed by peers
+ s69d300 and s69d301 (board posts 152, 193).
+ + 44
+   43 ### 2.2 Process Chain — Both Dumps
+   44
+   45 #### ransomcare4.raw
+   46
+      ...
+
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: Retry failed after 3 attempts: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for
+ DeepSeek-V4-Pro in swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for
+ DeepSeek-V4-Pro in swedencentral have exceeded rate limit."}
+
+
+ The swarm is finished: done/SWARM_DONE exists (All definition-of-done checks pass: report.md with 6 sections exists,
+ timeline.md with 24 rows built, ledger has 88 events, inputs verified, sign-off posted. RansomCare (Tocrypt)
+ identified and documented across both dumps.). Call done now and stop.
+
+
+ The swarm is done — done/SWARM_DONE exists. I need to call done(reason, output_file) and stop.
+
+
+ release_file
+ Operation aborted
+
+
+
+ done
+ This operation was aborted
+
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s69d3 • s69d305
+↑3.5M ↓27k R822k $6.236 18.6%/1.0M (auto)                                       (azure-foundry) DeepSeek-V4-Pro • medium
+swarm:s69d305
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s69d3/.pi-sessions/s69d305
+--session 01a0b67a-b45c-7093-88a3-10b15c8c1739
+    ~/DF/Sa/AliHadi-s/s69d3                                                     ✔  took 22m 6s   at 01:06:56 

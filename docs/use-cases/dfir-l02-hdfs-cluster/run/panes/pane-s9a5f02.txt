@@ -1,0 +1,80 @@
+ {
+   "reason": "post",
+   "waited_ms": 19,
+   "detail": "New posts in: main. Call inbox.",
+   "swarm_done": false,
+   "posts": [
+     {
+       "id": 37,
+       "thread": "main",
+       "from": "s9a5f01",
+ ... (7 more lines, ctrl+o to expand)
+
+
+
+ $ test -f work/timeline.md && wc -l work/timeline.md && grep -c '^| ' work/timeline.md || echo NO_TIMELINE (timeout
+ 10s)
+
+ 58 work/timeline.md
+ 40
+
+ Took 0.3s
+
+
+
+ wait
+ {
+   "reason": "post",
+   "waited_ms": 7552,
+   "detail": "New posts in: main. Call inbox.",
+   "swarm_done": false,
+   "posts": [
+     {
+       "id": 38,
+       "thread": "main",
+       "from": "s9a5f03",
+ ... (7 more lines, ctrl+o to expand)
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s9a5f/work/timeline.md
+
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to grok-4.6 for grok-4.6 in swedencentral have
+ exceeded rate limit.","details":"Your requests to grok-4.6 for grok-4.6 in swedencentral have exceeded rate limit."}
+
+
+ post
+ {
+   "ok": true,
+   "id": 39,
+   "path": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9a5f/threads/main/000039-s9a5f02.md",
+   "tag": "result"
+ }
+
+
+
+
+ done
+ {
+   "terminate": true,
+   "agent_done": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9a5f/done/agents/s9a5f02.done",
+   "sentinel": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9a5f/done/SWARM_DONE",
+   "created_sentinel": true,
+   "reason": "Cross-node IOC work complete: extracts hashed, ledger events recorded (UTC-corrected access,
+ CVE-2017-16995, PHP/ncat persistence, log-wipe and sshd_config corrections). Citation sign-off posted for
+ work/report.md and work/timeline.md.",
+   "output_file": "work/report.md"
+ }
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9a5f • s9a5f02
+↑1.5M ↓15k R1.8M CH3.2% $3.977 29.4%/500k (auto)                                       (azure-foundry) grok-4.6 • medium
+swarm:s9a5f02

@@ -1,0 +1,62 @@
+{
+  "swarm_id": "s83fd",
+  "n": 10,
+  "agents": [
+    {
+      "id": "s83fd00",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6"
+    },
+    {
+      "id": "s83fd01",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6"
+    },
+    {
+      "id": "s83fd02",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6"
+    },
+    {
+      "id": "s83fd03",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro"
+    },
+    {
+      "id": "s83fd04",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro"
+    },
+    {
+      "id": "s83fd05",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro"
+    },
+    {
+      "id": "s83fd06",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro"
+    },
+    {
+      "id": "s83fd07",
+      "role": "worker",
+      "model": "openai/gpt-5.4"
+    },
+    {
+      "id": "s83fd08",
+      "role": "worker",
+      "model": "openai/gpt-5.4"
+    },
+    {
+      "id": "s83fd09",
+      "role": "worker",
+      "model": "lmstudio/qwen3.8-27b-uncensored"
+    }
+  ],
+  "models": [
+    "azure-foundry/DeepSeek-V4-Pro",
+    "azure-foundry/grok-4.6",
+    "lmstudio/qwen3.8-27b-uncensored",
+    "openai/gpt-5.4"
+  ]
+}

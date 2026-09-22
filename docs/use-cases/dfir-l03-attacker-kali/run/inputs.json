@@ -1,0 +1,51 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/linux-03-attacker-kali-system",
+  "copied_at": "2026-09-18T23:34:46Z",
+  "files": [
+    {
+      "path": "inputs/CASE-manual.txt",
+      "bytes": 5740,
+      "sha256": "5c19fb3b19dc8e457167c91b7c87fa96eefd1845c307f1f2ac7044074885b17d",
+      "mtime_ms": 1789734198023,
+      "ctime_ms": 1789774482546
+    },
+    {
+      "path": "inputs/Case3-Workshop-Manual.pdf",
+      "bytes": 72536,
+      "sha256": "8bc70eabdf61ba23b632a5a6522bd817d84eac4bb172bf61ce6268cd0fd8240d",
+      "mtime_ms": 1789732642136,
+      "ctime_ms": 1789774482546
+    },
+    {
+      "path": "inputs/README",
+      "bytes": 81,
+      "sha256": "eb936f72e96dcc94b5015c4e4e5cf4e62b0ca5f87ecfd324002bd6886b9b554d",
+      "mtime_ms": 1789732642502,
+      "ctime_ms": 1789774482546
+    },
+    {
+      "path": "inputs/index.md",
+      "bytes": 83,
+      "sha256": "f4edad195244689a10ee50d237d259f0fdce149fbdd0c8cfe0bd08682acf2588",
+      "mtime_ms": 1789732642827,
+      "ctime_ms": 1789774482546
+    },
+    {
+      "path": "inputs/workshop-kali.E01",
+      "bytes": 9448993908,
+      "sha256": "294ce6124083746938c5347a7f6bf542d39eaf9e8fbc06c9843cbe8745f21da3",
+      "mtime_ms": 1571315451000,
+      "ctime_ms": 1789774482546
+    },
+    {
+      "path": "inputs/workshop-kali.E01.txt",
+      "bytes": 1281,
+      "sha256": "95dbc22ec30566f10892ae2350f1f9677925003b2ad05d12b472cb5262c43f19",
+      "mtime_ms": 1571315480000,
+      "ctime_ms": 1789774482546
+    }
+  ],
+  "bytes": 9449073629,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

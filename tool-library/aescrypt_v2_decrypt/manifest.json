@@ -1,0 +1,29 @@
+{
+  "name": "aescrypt_v2_decrypt",
+  "description": "Decrypt AES Crypt 3.10 Windows GUI v2 files (KDF: SHA256(IV||zeros16||UTF16LE pw)\u00d78192). Returns plaintext path, sha256, hmac_ok.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Path to .aes file",
+      "required": true
+    },
+    "password": {
+      "type": "string",
+      "description": "Password (UTF-16LE internally)",
+      "required": true
+    },
+    "output": {
+      "type": "string",
+      "description": "Where to write plaintext (default work/extracted/$AGENT_ID/<stem>; never under inputs/)",
+      "required": false
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "{\"path\": \"work/extracted/s864a02/README.txt.aes\", \"password\": \"<the password, from the case notes>\", \"output\": \"work/s864a02/README.txt\"}",
+  "by": "s864a02",
+  "at": "2026-09-18T17:25:44.818Z",
+  "version": 3,
+  "sha256": "7f8bfc37397d0c3504c7ca7cd58daf027f30cc985290e044790d5750b3e5091e"
+}

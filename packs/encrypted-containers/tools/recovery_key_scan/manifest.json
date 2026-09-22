@@ -1,0 +1,26 @@
+{
+  "name": "recovery_key_scan",
+  "description": "Sweep a directory tree or a blob for key material a case can use: BitLocker 48-digit recovery passwords, BitLocker key files, LUKS and SSH private keys, keychain and key database files, and the file names people save a recovery key under.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A directory to walk, or a single blob to sweep"
+    },
+    "max_bytes_per_file": {
+      "type": "integer",
+      "description": "How much of each file to read (default 8388608)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum findings to return (default 200)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 600,
+  "example": "{\"path\": \"work/extracted/Users\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T21:00:00.000Z",
+  "version": 1,
+  "sha256": "cc92d2df4e4ca82ff29180fc654ff8cb9b9258435598e6d59e4203bdd1dc1e63"
+}

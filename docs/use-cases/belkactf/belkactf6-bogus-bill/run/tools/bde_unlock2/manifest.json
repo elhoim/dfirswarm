@@ -1,0 +1,25 @@
+{
+  "name": "bde_unlock2",
+  "description": "BitLocker FVE parser that tries nonce+MAC+data CCM layout (libbde) plus stretch variants; prints VMK/FVEK",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Path to VHDX or raw BitLocker image"
+    },
+    "recovery": {
+      "type": "string",
+      "description": "BitLocker recovery password 8x6 digits"
+    },
+    "meta_off": {
+      "type": "string",
+      "description": "FVE metadata file offset (hex ok)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "by": "s821c00",
+  "at": "2026-09-20T18:49:06.600Z",
+  "version": 3,
+  "sha256": "2b12cfbea16de46f96ae720781a3f5e7fdd3456791ebd07c604a3576523b8e43"
+}

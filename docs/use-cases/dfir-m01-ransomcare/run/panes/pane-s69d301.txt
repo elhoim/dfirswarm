@@ -1,0 +1,80 @@
+       "expires_at": "2026-09-18T22:09:59.499Z",
+ ... (14 more lines, ctrl+o to expand)
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s69d3/work/timeline.md
+
+
+
+ $ ls -l work/s69d300/report_fixed.md work/s69d305 2>/dev/null; wc -l work/s69d300/report_fixed.md 2>/dev/null; rg -n
+ '^## |filecrypt.sys is' work/s69d300/report_fixed.md 2>/dev/null | head (timeout 15s)
+
+ ... (1 earlier lines, ctrl+o to expand)
+ total 4312096
+ -rw-------@ 1 halilozturkci  staff  570597376 Sep 19 00:53 pid.1908.dmp
+ -rw-------@ 1 halilozturkci  staff  570613760 Sep 19 00:51 pid.356.dmp
+ -rw-------@ 1 halilozturkci  staff  520355840 Sep 19 00:52 pid.3624.dmp
+ -rw-------@ 1 halilozturkci  staff  520368128 Sep 19 00:51 pid.6964.dmp
+
+ Took 8.7s
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s69d3/work/s69d300/report_fixed.md:1-50
+
+ ENOENT: no such file or directory, access
+ '/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s69d3/work/s69d300/report_fixed.md'
+
+
+
+ claim_file
+ {
+   "ok": true,
+   "path": "work/s69d301/report.md",
+   "owner": "s69d301",
+   "reason": "Corrected report draft ready to replace work/report.md",
+   "seconds": 180,
+   "expires_at": "2026-09-18T22:09:03.301Z",
+   "refreshed": false,
+   "note": "Claimed 'work/s69d301/report.md' for 180s. Make your edit, then release_file(\"work/s69d301/report.md\").
+ Re-call claim_file to renew."
+ }
+ ... (1 more lines, ctrl+o to expand)
+
+
+
+ write work/s69d301/report.md
+
+ # RansomCare Investigation Report — Case AH-M01
+
+ Case `AH-M01` · examiner Halil Ozturkci · swarm s69d3
+
+ Two memory dumps of Windows 10 Pro systems hit by RansomCare (TARIQ adversary simulation, https://www.advemu.com/).
+ Evidence is `inputs/ransomcare4.raw` (raw) and `inputs/ransomcare5.dmp` (Windows crash dump). Timeline:
+ `work/timeline.md` and `ledger/ledger.md`.
+
+ `check_inputs` SHA256: CASE.md `c02c1e74c6396e1cd75d569fac838533aa9e57c27dba753b45bdd56831efd8e4`; ransomcare4.raw
+ `875990d37b4ef3c877c1c16ec44552741888c948730e777985c1456751ea306b` (9 663 676 416 B); ransomcare5.dmp
+ `078a7fa5dd01c8af4401c3e9d98b63ca0edd3dccd92f5bba80ecf3515494c0e1` (8 588 951 552 B). Inputs unchanged.
+
+ ---
+
+ ... (223 more lines, 233 total, ctrl+o to expand)
+
+ Operation aborted
+
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+The swarm is finished: done/SWARM_DONE exists (All definition-of-done checks pass: report.md with 6 sections exists,
+timeline.md with 24 rows built, ledger has 88 events, inputs verified, sign-off posted. RansomCare (Tocrypt)
+identified and documented across both dumps.). Call done now and stop.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s69d3 • s69d301
+↑1.3M ↓19k R1.5M $3.534 32.2%/500k (auto)                                              (azure-foundry) grok-4.6 • medium
+swarm:s69d301
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s69d3/.pi-sessions/s69d301
+--session 01a0b67a-8477-76a2-be4b-0606bfde2fc1
+    ~/DF/Sa/AliHadi-s/s69d3                                                    ✔  took 24m 38s   at 01:09:15 

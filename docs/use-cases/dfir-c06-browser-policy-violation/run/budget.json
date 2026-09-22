@@ -1,0 +1,90 @@
+{
+  "cap_usd": 60,
+  "spent_usd": 10.978131,
+  "tokens": 35872948,
+  "calls": 419,
+  "wall_clock_minutes": 180,
+  "started_at": "2026-09-18T13:27:22Z",
+  "source": "pi.sessionManager.getEntries",
+  "hard_kill": false,
+  "cap_steer_sent": false,
+  "agents": {
+    "s881000": {
+      "spent_usd": 1.661069,
+      "tokens": 3701916,
+      "calls": 45,
+      "input": 232542,
+      "output": 14398,
+      "cache_read": 3454976,
+      "cache_write": 0,
+      "context_tokens": 110496,
+      "context_window": 272000
+    },
+    "s881001": {
+      "spent_usd": 2.641323,
+      "tokens": 5963737,
+      "calls": 87,
+      "input": 361647,
+      "output": 22826,
+      "cache_read": 5579264,
+      "cache_write": 0,
+      "context_tokens": 115874,
+      "context_window": 272000
+    },
+    "s881002": {
+      "spent_usd": 1.655365,
+      "tokens": 4099130,
+      "calls": 72,
+      "input": 176786,
+      "output": 15784,
+      "cache_read": 3906560,
+      "cache_write": 0,
+      "context_tokens": 83596,
+      "context_window": 272000
+    },
+    "s881003": {
+      "spent_usd": 3.128011,
+      "tokens": 9377390,
+      "calls": 55,
+      "input": 244350,
+      "output": 15856,
+      "cache_read": 9117184,
+      "cache_write": 0,
+      "context_tokens": 218291,
+      "context_window": 272000
+    },
+    "s881004": {
+      "spent_usd": 0.552051,
+      "tokens": 2771354,
+      "calls": 37,
+      "input": 188181,
+      "output": 48517,
+      "cache_read": 2534656,
+      "cache_write": 0,
+      "context_tokens": 128722,
+      "context_window": 1000000
+    },
+    "s881005": {
+      "spent_usd": 0.604295,
+      "tokens": 4562899,
+      "calls": 63,
+      "input": 176121,
+      "output": 45658,
+      "cache_read": 4341120,
+      "cache_write": 0,
+      "context_tokens": 124809,
+      "context_window": 1000000
+    },
+    "s881006": {
+      "spent_usd": 0.736017,
+      "tokens": 5396522,
+      "calls": 60,
+      "input": 239929,
+      "output": 49137,
+      "cache_read": 5107456,
+      "cache_write": 0,
+      "context_tokens": 155458,
+      "context_window": 1000000
+    }
+  }
+}

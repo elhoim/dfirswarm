@@ -1,0 +1,30 @@
+{
+  "name": "signin_analyse",
+  "description": "Read an Entra or Workspace sign-in export and surface what decides a cloud case: failures before a success, a success that satisfied only one factor on an account that has more, sign-ins from an address or a client seen nowhere else, and pairs whose implied travel speed is impossible.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A sign-in log export, CSV or JSON"
+    },
+    "user": {
+      "type": "string",
+      "description": "Case-insensitive regex over the account"
+    },
+    "max_speed_kmh": {
+      "type": "number",
+      "description": "Implied speed above which a pair is flagged (default 900)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum records to return (default 500)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 300,
+  "example": "{\"path\": \"inputs/signins.json\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T22:00:00.000Z",
+  "version": 1,
+  "sha256": "c85ba811bdcccb63506e5104b1fe080ca7fc1bebf16a5541156c92e6363da8cf"
+}

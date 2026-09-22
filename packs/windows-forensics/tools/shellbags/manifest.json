@@ -1,0 +1,34 @@
+{
+  "name": "shellbags",
+  "description": "Walk BagMRU in UsrClass.dat or NTUSER.DAT and return the folders a user browsed: the reconstructed path, the key's last-write time, the shell item's own DOS timestamps, and the MRU order. Reaches folders on devices and shares that are long gone.",
+  "params": {
+    "hive": {
+      "type": "string",
+      "description": "An extracted UsrClass.dat (or NTUSER.DAT for the older location)"
+    },
+    "key": {
+      "type": "string",
+      "description": "Override the BagMRU root when the hive puts it somewhere unusual"
+    },
+    "contains": {
+      "type": "string",
+      "description": "Keep only paths containing this string, case-insensitive"
+    },
+    "max_depth": {
+      "type": "integer",
+      "description": "How deep to walk (default 24)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum entries to return (default 500)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"hive\": \"work/extracted/UsrClass.dat\", \"contains\": \"usb\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T09:00:00.000Z",
+  "version": 1,
+  "sha256": "c739ce8b7eef0415f751f16527e9f2e74e8f68d412f042a6de82d488f208d267"
+}

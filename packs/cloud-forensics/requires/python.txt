@@ -1,0 +1,2 @@
+# The cloud pack's tools use the standard library only: these logs are CSV, JSON
+# and gzipped JSON, and the parsing that matters is the nested audit payload.

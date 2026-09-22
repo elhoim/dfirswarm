@@ -1,0 +1,80 @@
+   "rendered": "ledger/ledger.md"
+ }
+
+
+
+
+ record
+ {
+   "ok": true,
+   "seq": 113,
+   "merged": false,
+   "total": 113,
+   "rendered": "ledger/ledger.md"
+ }
+
+
+
+
+ record
+ {
+   "ok": true,
+   "seq": 114,
+   "merged": false,
+   "total": 114,
+   "rendered": "ledger/ledger.md"
+ }
+
+
+
+
+ write work/s9da901/notes.md
+
+ # GapFill notes (s9da901) — identity, logins, NFS, timezone
+
+ Root EXT4 is at **sector 2048** (`fsstat` last mounted on `/`, Volume ID `e845eb41f27eb699f8457972175e922f`). mmls:
+ 0x83 Linux 2048–163579903, swap 0x82 at 163581952. **No LVM.** `icat/fls -o 2048 inputs/workshop-kali.E01`.
+
+ ## Timezone (critical for Q1/Q6)
+
+ | Item | Value |
+ | --- | --- |
+ | `/etc/timezone` inode 1181517 | `America/New_York` |
+ | September 2019 | EDT = **UTC−4** |
+ ... (61 more lines, 71 total, ctrl+o to expand)
+
+
+
+ release_file
+ Operation aborted
+
+
+
+ post
+ This operation was aborted
+
+
+
+ $ ls -la work/report.md work/timeline.md 2>&1; ls work/extracted/s9da901 | head; ls threads/main | wc -l (timeout 10s)
+
+ This operation was aborted
+
+
+
+ inbox
+ This operation was aborted
+
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+The swarm is finished: done/SWARM_DONE exists (All deliverables complete: work/report.md (6 sections, all questions
+answered with cited evidence), work/timeline.md (37 rows), ledger (63 events), sign-off posted by s9da905 verifying
+hashes, content, and structural checks. Inputs verified unchanged.). Call done now and stop.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9da9 • s9da901
+↑848k ↓13k R172k $1.856 21.3%/500k (auto)                                              (azure-foundry) grok-4.6 • medium
+swarm:s9da901
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9da9/.pi-sessions/s9da901
+--session 01a0b6df-fbbc-7770-877e-7e673a128215
+    ~/DF/Sa/AliHadi-s/s9da9                                                    ✔  took 21m 31s   at 02:56:58 

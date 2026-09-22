@@ -1,0 +1,52 @@
+{
+  "swarm_id": "s8810",
+  "n": 7,
+  "agents": [
+    {
+      "id": "s881000",
+      "role": "worker",
+      "model": "openai/gpt-5.4",
+      "seat": "Disk triage: partitions and filesystems from the catalog (or `mmls`/`fls` if there is none), the file list, what was added or changed in the attack window, the bonus list of attacker-added paths with inode proof; owns `work/disk_triage.md`."
+    },
+    {
+      "id": "s881001",
+      "role": "worker",
+      "model": "openai/gpt-5.4",
+      "seat": "Accounts and event logs: SAM/SYSTEM/SECURITY hives and NTUSER.DAT, user creation and group changes, logons, the Windows event logs (4720/4732/4624/4672/7045); owns `work/accounts-registry-findings.md`."
+    },
+    {
+      "id": "s881002",
+      "role": "worker",
+      "model": "openai/gpt-5.4",
+      "seat": "Memory forensics: the memory image with Volatility 3 (processes, command lines, handles, DLLs, network, injections, the shellcode question), dumps under `work/extracted/memory/`; owns `work/memory-findings.md`."
+    },
+    {
+      "id": "s881003",
+      "role": "worker",
+      "model": "openai/gpt-5.4",
+      "seat": "Leftovers and malware: web roots, temp and profile directories, prefetch, scheduled tasks, services, dropped tools and web shells; hashes for everything extracted; owns `work/leftovers.md`. Samples are for reading, not running."
+    },
+    {
+      "id": "s881004",
+      "role": "worker",
+      "model": "deepseek/deepseek-v4-pro",
+      "seat": "Timeline and ledger: records every dated event peers report with `record kind=event`, keeps the timeline coherent across sources and time zones, and writes `work/timeline.md` from `ledger/ledger.md`."
+    },
+    {
+      "id": "s881005",
+      "role": "worker",
+      "model": "deepseek/deepseek-v4-pro",
+      "seat": "Installed software and provenance: Uninstall keys, Program Files, installers on disk, service and driver installs, who installed what and when; owns `work/software.md`."
+    },
+    {
+      "id": "s881006",
+      "role": "worker",
+      "model": "deepseek/deepseek-v4-pro",
+      "seat": "Critic and editor: verifies every citation before it goes into the report, challenges weak claims on the board, assembles `work/report.md` from the seats' notes and the ledger, and posts the sign-off the definition of done requires."
+    }
+  ],
+  "models": [
+    "deepseek/deepseek-v4-pro",
+    "openai/gpt-5.4"
+  ]
+}

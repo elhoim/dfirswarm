@@ -1,0 +1,30 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/challenge-08-ntfs-hidden-files",
+  "copied_at": "2026-09-18T15:17:51Z",
+  "files": [
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 653,
+      "sha256": "2b30af4bc493bfea15d606a8fe20eea44bdddd57be05a95b132067662c48046a",
+      "mtime_ms": 1789730983405,
+      "ctime_ms": 1789744671763
+    },
+    {
+      "path": "inputs/NTFS-HiddenFiles.E01",
+      "bytes": 473520,
+      "sha256": "0f043bb8da0efdbd750a5127e1d9ff194b2a4116f8dd38cf8029d46710bb5ddd",
+      "mtime_ms": 1679365890000,
+      "ctime_ms": 1789744671763
+    },
+    {
+      "path": "inputs/NTFS-HiddenFiles.E01.txt",
+      "bytes": 1139,
+      "sha256": "f23ac5f0611de252af83f131b381de35c32b7b503bce02bfae4df398a619c023",
+      "mtime_ms": 1679365874000,
+      "ctime_ms": 1789744671763
+    }
+  ],
+  "bytes": 475312,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

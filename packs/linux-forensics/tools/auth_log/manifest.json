@@ -1,0 +1,34 @@
+{
+  "name": "auth_log",
+  "description": "Parse auth.log or secure, including the rotated and gzipped files, into structured records: ssh acceptances and failures with the source address and key fingerprint, sudo commands with the working directory, su, session open and close, and account changes.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "An auth.log or secure file, or a directory of them (rotated files are followed)"
+    },
+    "kinds": {
+      "type": "array",
+      "description": "Keep only these kinds, e.g. [\"ssh_accepted\",\"sudo\"]"
+    },
+    "contains": {
+      "type": "string",
+      "description": "Case-insensitive substring over the whole line"
+    },
+    "year": {
+      "type": "integer",
+      "description": "The year to apply to traditional syslog lines, which carry no year"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum records to return (default 1000)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"work/extracted/var/log\", \"kinds\": [\"ssh_accepted\", \"sudo\"]}",
+  "by": "maintainer",
+  "at": "2026-09-22T15:00:00.000Z",
+  "version": 1,
+  "sha256": "e83364a5af9dcf48a141bd3b63c296495fd68f2f424dce203144fc03a218a1c0"
+}

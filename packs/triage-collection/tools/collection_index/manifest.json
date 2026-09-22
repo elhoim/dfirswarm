@@ -1,0 +1,30 @@
+{
+  "name": "collection_index",
+  "description": "Build the index the rest of the work needs: every file in a collection with its size, its sha256, the path it has now and the path it had on the machine, undoing the rewrites collectors make — a drive letter turned into a directory, a named stream's colon replaced, a reserved name escaped.",
+  "params": {
+    "root": {
+      "type": "string",
+      "description": "The collection directory"
+    },
+    "contains": {
+      "type": "string",
+      "description": "Case-insensitive regex over either path"
+    },
+    "hash": {
+      "type": "boolean",
+      "description": "Hash every file (default true; false is much faster on a large tree)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum entries to return (default 2000)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 900,
+  "example": "{\"root\": \"inputs/collection\", \"contains\": \"NTUSER\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T23:30:00.000Z",
+  "version": 1,
+  "sha256": "6d6e215f1520d4bfe7729201663367674937b4297d7959c7fbb969973c0d621a"
+}

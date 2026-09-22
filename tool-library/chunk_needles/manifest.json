@@ -1,0 +1,47 @@
+{
+  "name": "chunk_needles",
+  "description": "Scan a local file (or icat an inode from the E01) for ASCII/UTF-16 needles; return hit counts and nearby snippets",
+  "params": {
+    "needles": {
+      "type": "string",
+      "description": "Pipe-separated strings to search (ASCII and UTF-16LE)",
+      "required": true
+    },
+    "path": {
+      "type": "string",
+      "description": "Local file to scan",
+      "required": false
+    },
+    "inode": {
+      "type": "integer",
+      "description": "If set, icat this inode from the E01",
+      "required": false
+    },
+    "image": {
+      "type": "string",
+      "description": "E01/raw image for inode extraction (default inputs/SysInternalsCase.E01)"
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Optional volume offset in sectors for icat -o"
+    },
+    "context": {
+      "type": "integer",
+      "description": "Snippet context bytes (default 60)",
+      "required": false
+    },
+    "max_hits": {
+      "type": "integer",
+      "description": "Max snippets per needle (default 20)",
+      "required": false
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"work/sd1d102/SRUDB.dat\", \"needles\": \"vmtoolsIO|SysInternals|malware430\"}",
+  "by": "sd1d102",
+  "at": "2026-09-18T14:26:18.665Z",
+  "version": 2,
+  "sha256": "1e519efcb82ca06ebd4d8b31ce7b61954fae86c8372a7e7cadfbf7a401a73c97"
+}

@@ -1,0 +1,26 @@
+{
+  "name": "ransom_note_scan",
+  "description": "Find the ransom notes across a tree and pull out what identifies the campaign: onion addresses, contact emails and portals, the victim identifier a negotiator needs, wallet addresses, and where each copy of the note was dropped and when.",
+  "params": {
+    "root": {
+      "type": "string",
+      "description": "A directory to sweep"
+    },
+    "max_size": {
+      "type": "integer",
+      "description": "Largest file to treat as a note (default 200000)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum notes to return (default 100)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 600,
+  "example": "{\"root\": \"work/extracted\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T23:00:00.000Z",
+  "version": 1,
+  "sha256": "f0c7af4b40b348f0d0b3be3c03d08115e011a1b4cd9233de151ab7f7610e2f24"
+}

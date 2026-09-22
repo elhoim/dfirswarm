@@ -1,0 +1,45 @@
+{
+  "swarm_id": "s2cb9",
+  "n": 7,
+  "agents": [
+    {
+      "id": "s2cb900",
+      "role": "worker",
+      "model": "openai/gpt-5.4"
+    },
+    {
+      "id": "s2cb901",
+      "role": "worker",
+      "model": "openai/gpt-5.4"
+    },
+    {
+      "id": "s2cb902",
+      "role": "worker",
+      "model": "openai/gpt-5.4"
+    },
+    {
+      "id": "s2cb903",
+      "role": "worker",
+      "model": "openai/gpt-5.4"
+    },
+    {
+      "id": "s2cb904",
+      "role": "worker",
+      "model": "deepseek/deepseek-v4-pro"
+    },
+    {
+      "id": "s2cb905",
+      "role": "worker",
+      "model": "deepseek/deepseek-v4-pro"
+    },
+    {
+      "id": "s2cb906",
+      "role": "worker",
+      "model": "deepseek/deepseek-v4-pro"
+    }
+  ],
+  "models": [
+    "deepseek/deepseek-v4-pro",
+    "openai/gpt-5.4"
+  ]
+}

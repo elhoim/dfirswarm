@@ -1,0 +1,30 @@
+{
+  "name": "mem_fs",
+  "description": "Mount a memory image with MemProcFS and return what it exposes: the process list with parents and paths, and the file tree the ordinary tools can then read. Says plainly when MemProcFS is not on the host rather than implying the memory was examined.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "The memory image"
+    },
+    "mount": {
+      "type": "string",
+      "description": "Where to mount it, under work/"
+    },
+    "list": {
+      "type": "string",
+      "description": "A path inside the mount to list, e.g. 'sys/proc' (default: the process list)"
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "description": "Give up after this long (default 300)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 600,
+  "example": "{\"path\": \"inputs/memory.raw\", \"mount\": \"work/mem\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T17:00:00.000Z",
+  "version": 1,
+  "sha256": "2573511a5b6f4bdb9733c9f0a409e64b128a4fc2210362e61b7cd3f961e7c1c9"
+}

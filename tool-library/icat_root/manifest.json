@@ -1,0 +1,30 @@
+{
+  "name": "icat_root",
+  "description": "Extract an inode from an EXT4 volume with icat. The Webserver case's image and its 503808-byte offset are the defaults; image and offset name any other.",
+  "params": {
+    "inode": {
+      "type": "integer",
+      "description": "Inode to extract"
+    },
+    "output": {
+      "type": "string",
+      "description": "Where to write it; omit to get the bytes on stdout"
+    },
+    "image": {
+      "type": "string",
+      "description": "Image to read (default inputs/Webserver.E01)"
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Volume offset in bytes (default 503808)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "{\"inode\": 1835260, \"output\": \"work/extracted/passwd\"}",
+  "by": "s9d8306",
+  "at": "2026-09-18T22:47:31.683Z",
+  "version": 5,
+  "sha256": "10cb7707da643fb9ea246a0bf406d92d24cea79f86f5a9909d255f4174a354d0"
+}

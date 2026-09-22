@@ -1,0 +1,80 @@
+ -19 | 13 | 2023-04-06T15:35:19 | Microsoft Edge (UWP) last run on host; prefetch run_count=8 |
+ MICROSOFTEDGE.EXE-0F2B3493.pf (inode 83075) | mam_pf_parse: last_run[0]=2023-04-06T15:35:19Z |
+ -20 | 14 | 2023-04-06T15:35:57 | Kali VM imported from OVA file on VMware shared folder (`\\vmware-host\Shared
+ Folders\Cases\kali.f22.ova`, 2,340,791,296 bytes) | kali.f22.ova.lnk (inode 84553); TypedPaths/UserAssist in
+ NTUSER.DAT | LNK target: \\vmware-host\Shared Folders\Cases\kali.f22.ova |
+ -21 | 15 | 2023-04-06T15:36:09 | KALI VirtualBox VM (7.0.6 r155176) started: Ubuntu_64 guest, 4 GiB RAM, bridged NIC
+ MAC 08:00:27:71:E0:8B, 40 GiB SCSI disk UUID {22e12260-0b83-4b74-ac12-67a56199bd0e} | VBox.log (inode 84824) | Log
+ opened 2023-04-06T15:36:09.527Z |
+ -22 | 16 | 2023-04-06T15:36:09–15:50:51 | KALI VM active: guest disk I/O 726,490,624 bytes read, 261,464,064 bytes
+ written; NIC RX 40,054,219 bytes (~40 MB), TX 2,175,965 bytes | VBox.log statistics (inode 84824) | VBox.log VM
+ statistics section; 14m42s runtime |
+ -23 | 17 | 2023-04-06T15:49:21 | KALI VM powered off; lastStateChange recorded in KALI.vbox | KALI.vbox (inode 32739)
+ | lastStateChange=2023-04-06T15:49:21Z |
+ -24 | 18 | 2023-04-06T15:50:51 | KALI VM fully powered off after ~14m42s runtime | VBox.log (inode 84824) |
+ PDMR3PowerOff at 00:14:42.043427 |
+ -25 | 19 | 2023-04-06T16:28:00 | Second system boot after KALI session (EventRecordID 4217, smss.exe) | Security.evtx
+ (inode 80826) | Event 4688 smss.exe 2023-04-06T16:28:00Z |
+ -26 | 20 | 2023-04-06T16:31:00 | Host browser recorded visits to `https://192.168.137.129/` (www.ccdfir.local),
+ `http://192.168.137.139/`, and `file://vmware-host/Shared Folders/Cases/kali.f22.ova` | WebCacheV01.dat (inode 83835)
+ | UTF-16 URLs in WebCache; TypedPaths last_modified 2023-04-06T16:31:00Z |
+ -27 | 21 | 2023-04-06T16:31:28 | kali.f22_disk0.vdi deleted — MFT entry unallocated, $DATA truncated to 0 bytes, no
+ recoverable cluster runs | MFT inode 124773 (istat) | Not Allocated; Allocated Size=0; Actual Size=0; $DATA size=0
+ init_size=0 |
+ +17 | 11 | 2023-04-06T13:45:56 | Kali guest Firefox stored Google `sb_wiz.pq` typed query **is gmail secure**;
+ related-search theme gmail / protonmail / tutanota / hotmail / outlook / yahoo encryption. Also youtube.com and
+ wired.com. Guest local 09:45–09:46 EDT (NTP UTC-4). Host VBox.log is ~2 h later — treat guest unix as inside-VM time.
+ | `work/s5d1000/webappsstore2.sqlite` carved from VDI tail offset 2322985064 | ASCII `sb_wiz.pqis gmail secure`;
+ `pq_tm_hp` 1680788788411 = 2023-04-06T13:46:28Z |
+ +18 | 12 | 2023-04-06T13:54:44 | Disk image acquired by FTK Imager ADI 4.7.1.2; host nested VMware VM running Windows
+ 10; EWF MD5 36f01044022b6d32e5a992b1b7cb9027 | ewfinfo inputs/Case4.E01 | Acquisition: Thu Apr 6 13:54:44 2023; 40
+ GiB, 83886080 sectors |
+ +19 | 13 | 2023-04-06T15:34:58 | System boot (EventRecordID 4596, smss.exe) | Security.evtx (inode 80826) | Event 4688
+ smss.exe 2023-04-06T15:34:59Z |
+ +20 | 14 | 2023-04-06T15:35:19 | Microsoft Edge (UWP) last run on host; prefetch run_count=8 |
+ MICROSOFTEDGE.EXE-0F2B3493.pf (inode 83075) | mam_pf_parse: last_run[0]=2023-04-06T15:35:19Z |
+ +21 | 15 | 2023-04-06T15:35:57 | Kali VM imported from OVA file on VMware shared folder (`\\vmware-host\Shared
+ Folders\Cases\kali.f22.ova`, 2,340,791,296 bytes) | kali.f22.ova.lnk (inode 84553); TypedPaths/UserAssist in
+ NTUSER.DAT | LNK target: \\vmware-host\Shared Folders\Cases\kali.f22.ova |
+ +22 | 16 | 2023-04-06T15:36:09 | KALI VirtualBox VM (7.0.6 r155176) started: Ubuntu_64 guest, 4 GiB RAM, bridged NIC
+ MAC 08:00:27:71:E0:8B, 40 GiB SCSI disk UUID {22e12260-0b83-4b74-ac12-67a56199bd0e} | VBox.log (inode 84824) | Log
+ opened 2023-04-06T15:36:09.527Z |
+ +23 | 17 | 2023-04-06T15:36:09–15:50:51 | KALI VM active: guest disk I/O 726,490,624 bytes read, 261,464,064 bytes
+ written; NIC RX 40,054,219 bytes (~40 MB), TX 2,175,965 bytes | VBox.log statistics (inode 84824) | VBox.log VM
+ statistics section; 14m42s runtime |
+ +24 | 18 | 2023-04-06T15:49:21 | KALI VM powered off; lastStateChange recorded in KALI.vbox | KALI.vbox (inode 32739)
+ | lastStateChange=2023-04-06T15:49:21Z |
+ +25 | 19 | 2023-04-06T15:50:51 | KALI VM fully powered off after ~14m42s runtime | VBox.log (inode 84824) |
+ PDMR3PowerOff at 00:14:42.043427 |
+ +26 | 20 | 2023-04-06T16:28:00 | Second system boot after KALI session (EventRecordID 4217, smss.exe) | Security.evtx
+ (inode 80826) | Event 4688 smss.exe 2023-04-06T16:28:00Z |
+ +27 | 21 | 2023-04-06T16:31:00 | Host browser recorded visits to `https://192.168.137.129/` (www.ccdfir.local),
+ `http://192.168.137.139/`, and `file://vmware-host/Shared Folders/Cases/kali.f22.ova` | WebCacheV01.dat (inode 83835)
+ | UTF-16 URLs in WebCache; TypedPaths last_modified 2023-04-06T16:31:00Z |
+ +28 | 22 | 2023-04-06T16:31:28 | kali.f22_disk0.vdi deleted — MFT entry unallocated, $DATA truncated to 0 bytes, no
+ recoverable cluster runs | MFT inode 124773 (istat) | Not Allocated; Allocated Size=0; Actual Size=0; $DATA size=0
+ init_size=0 |
+  28
+ -29 ## De-duplicated events count: 21 rows
+ +30 ## De-duplicated events count: 22 rows
+  30
+ -31 Source: `ledger/ledger.md` (64 entries merged and deduplicated by s5d1005).
+ +32 Source: `ledger/ledger.md` (merged by s5d1005; Q3 Firefox row added by s5d1003).
+
+
+ Operation aborted
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+The swarm is finished: done/SWARM_DONE exists (All checks met: work/report.md with 6 sections, work/timeline.md with
+23 rows, ledger 53+ events, sign-offs from s5d1003/s5d1002/s5d1004, inputs verified unchanged. Q4 meeting location
+remains unresolved after VDI reconstruction effort — report honestly documents this as unknown with ccdfir.local
+hypothesis and SSH alternative.). Call done now and stop.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s5d10 • s5d1003
+↑5.4M ↓27k R1.7M $11.872 15.9%/500k (auto)                                             (azure-foundry) grok-4.6 • medium
+swarm:s5d1003
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s5d10/.pi-sessions/s5d1003
+--session 01a0b5d5-2d1b-7503-bbdf-dab44a84f416
+    ~/DF/Sa/AliHadi-s/s5d10                                                     ✔  took 48m 6s   at 22:32:08 

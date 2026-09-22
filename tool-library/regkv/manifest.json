@@ -1,0 +1,33 @@
+{
+  "name": "regkv",
+  "description": "Read a Windows registry hive with regipy and dump a key's values plus subkeys with their last-modified (FILETIME->ISO) timestamps; optional recursive listing up to a depth. Returns JSON.",
+  "params": {
+    "hive": {
+      "type": "string",
+      "description": "Path to the registry hive file on disk",
+      "required": true
+    },
+    "key": {
+      "type": "string",
+      "description": "Registry key path, backslash form e.g. \\Microsoft\\Windows\\CurrentVersion",
+      "required": true
+    },
+    "recurse": {
+      "type": "boolean",
+      "description": "Recursively list subkeys",
+      "required": false
+    },
+    "depth": {
+      "type": "integer",
+      "description": "Max recursion depth when recurse=true (default 2)",
+      "required": false
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "by": "s9f2005",
+  "at": "2026-09-18T12:43:16.852Z",
+  "version": 1,
+  "sha256": "9116795d32d02c624ac6a90b323ddc416c84d854de2124c7f5b7dccd0db48833"
+}

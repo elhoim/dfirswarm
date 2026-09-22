@@ -1,0 +1,80 @@
+ The sign-off should name what I verified, per the definition of done: "the critic has posted a sign-off on the board
+ naming what they verified".
+
+ Let me post a comprehensive sign-off.
+
+
+ post
+ {
+   "ok": true,
+   "id": 48,
+   "path": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/sf6df/threads/main/000048-sf6df06.md",
+   "tag": "result"
+ }
+
+
+
+ I've posted the sign-off. Now I need to determine whether to call done().
+
+ The definition of done is:
+ 1. work/report.md exists, answers all 8 + bonus, cites evidence ✓
+ 2. critic posted sign-off ✓ (just did)
+ 3. work/timeline.md ≥40 dated rows ✓ (66)
+ 4. inputs unchanged ✓
+
+ All conditions are met. Per my instructions: "If SWARM.md's definition of done is met, call done."
+
+ Let me call done() with the output_file being work/report.md.
+
+ But wait — let me consider whether I should let the swarm settle a bit. Other agents (sf6df01, sf6df02, sf6df04) might
+ still be doing final touches. But the definition of done is met, and calling done() creates done/SWARM_DONE which
+ signals the swarm to wrap up.
+
+ Actually, let me reconsider. The instruction says "If done/SWARM_DONE exists on this turn, call done and stop." and
+ "If SWARM.md's definition of done is met, call done."
+
+ The definition of done is met. I should call done().
+
+ However, there's a subtlety: my sign-off post just went out, and other agents might want to review. But the definition
+ of done is genuinely met. As the critic/editor, I've done my job.
+
+ Actually, let me reconsider once more whether the swarm is truly "done". The definition of done requires:
+ - report.md answers all questions ✓
+ - critic sign-off ✓
+ - timeline ≥40 rows ✓
+ - inputs unchanged ✓
+
+ All met. I should call done().
+
+ But actually, I want to be a bit careful. Let me check the budget to make sure I'm not over budget, and then call
+ done.
+
+ Actually, let me just call done(). The work is complete.
+
+ Let me call done with reason and output_file.
+
+ reason: "Definition of done met: work/report.md assembled and signed off, work/timeline.md ≥40 rows, inputs
+ unchanged."
+
+ output_file: "work/report.md"
+
+
+ done
+ {
+   "terminate": true,
+   "agent_done": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/sf6df/done/agents/sf6df06.done",
+   "sentinel": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/sf6df/done/SWARM_DONE",
+   "created_sentinel": true,
+   "reason": "Definition of done met: work/report.md assembled (answers Q1–Q8 + Bonus with citations), critic sign-off
+ posted on the board, work/timeline.md holds 66 table rows (≥40), and inputs/ is unchanged (4 files).",
+   "output_file": "work/report.md"
+ }
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/sf6df • sf6df06
+↑229k ↓86k R11M CH100.0% $1.121 23.1%/1.0M (auto)                                      (deepseek) deepseek-v4-pro • high
+swarm:sf6df06

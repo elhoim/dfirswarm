@@ -1,0 +1,30 @@
+{
+  "name": "fls_root",
+  "description": "Run fls on an EXT4 volume (default offset 503808, image inputs/Webserver.E01). Reads inode/recursive/image/offset from JSON stdin. Fails if the image is missing.",
+  "params": {
+    "inode": {
+      "type": "integer",
+      "description": "Directory inode to list (default: root=2)"
+    },
+    "recursive": {
+      "type": "boolean",
+      "description": "Use fls -r for recursive listing (default: false)"
+    },
+    "image": {
+      "type": "string",
+      "description": "E01/raw image path (default inputs/Webserver.E01)"
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Volume offset in sectors for fls -o (default 503808)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "{\"inode\": 1831425, \"recursive\": false}",
+  "by": "s9d8306",
+  "at": "2026-09-18T22:47:14.023Z",
+  "version": 2,
+  "sha256": "e398dae373a6eb728690bbfaf05dde700674f86392e713471ed62924542329a9"
+}

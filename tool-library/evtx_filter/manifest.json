@@ -1,0 +1,35 @@
+{
+  "name": "evtx_filter",
+  "description": "Parse a local EVTX; return EventID/TimeCreated/EventData for matching IDs or a time prefix",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Local .evtx path",
+      "required": true
+    },
+    "event_ids": {
+      "type": "string",
+      "description": "Comma-separated EventIDs (e.g. 7045,7040,4624)"
+    },
+    "time_prefix": {
+      "type": "string",
+      "description": "Keep events whose TimeCreated starts with this (e.g. 2022-11-15T21:)"
+    },
+    "contains": {
+      "type": "string",
+      "description": "Substring filter on XML/JSON (case-insensitive)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Max events to return (default 200)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"path\": \"work/sd1d101/evtx/System.evtx\", \"event_ids\": \"7045,7040\", \"time_prefix\": \"2022-11-15\"}",
+  "by": "sd1d101",
+  "at": "2026-09-18T14:34:20.344Z",
+  "version": 1,
+  "sha256": "6b0de9cb3d56828cc8c4d7b5f7e21c3114f003f8fd8668390c6cf45b25fc0532"
+}

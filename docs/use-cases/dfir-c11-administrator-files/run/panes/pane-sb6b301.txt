@@ -1,0 +1,80 @@
+   "path": "work/extracted/hives/jdoe_NTUSER.DAT",
+   "released": true
+ }
+
+
+
+
+ release_file
+ {
+   "ok": true,
+   "path": "work/extracted/hives/SAM",
+   "released": true
+ }
+
+
+
+
+ release_file
+ {
+   "ok": true,
+   "path": "work/extracted/hives/SYSTEM",
+   "released": true
+ }
+
+
+
+
+ release_file
+ {
+   "ok": true,
+   "path": "work/extracted/hives/SOFTWARE",
+   "released": true
+ }
+
+
+
+
+ release_file
+ {
+   "ok": true,
+   "path": "work/extracted/hives/SECURITY",
+   "released": true
+ }
+
+
+
+
+ $ ls -la work/report.md work/timeline.md ledger/ledger.md 2>/dev/null; wc -l ledger/entries.jsonl 2>/dev/null; ls
+ work/sb6b305 2>/dev/null | head (timeout 15s)
+
+ Operation aborted
+
+ Took 0.0s
+
+
+
+ budget
+ This operation was aborted
+
+
+
+ wait
+ This operation was aborted
+
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+The swarm is finished: done/SWARM_DONE exists (All definition-of-done checks pass: work/report.md (7 sections),
+work/timeline.md (39 rows), ledger (47 events), sign-off posted and verified, inputs unchanged, traces complete. The
+case is solved: Administrator files were securely wiped by SDelete64 (disguised as dark_knight.c5w) executed on
+2024-07-27, with evidence tampering via wevtutil log clearing. Recovery is impossible due to SDelete's secure
+overwrite.). Call done now and stop.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/sb6b3 • sb6b301
+↑838k ↓12k R518k $2.006 22.5%/500k (auto)                                              (azure-foundry) grok-4.6 • medium
+swarm:sb6b301
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/sb6b3/.pi-sessions/sb6b301
+--session 01a0b668-4b1f-7275-91f0-50007f70139d
+    ~/DF/Sa/AliHadi-s/sb6b3                                                    ✔  took 15m 44s   at 00:40:27 

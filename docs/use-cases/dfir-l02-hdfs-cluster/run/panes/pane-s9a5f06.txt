@@ -1,0 +1,80 @@
+   "threads": [
+     "main"
+   ],
+   "cursors": {
+     "main": 34
+   },
+   "posts": [
+ ... (48 more lines, ctrl+o to expand)
+
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: Retry failed after 3 attempts: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for
+ DeepSeek-V4-Pro in swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for
+ DeepSeek-V4-Pro in swedencentral have exceeded rate limit."}
+
+
+ The swarm is finished: done/SWARM_DONE exists (Cross-node IOC work complete: extracts hashed, ledger events recorded
+ (UTC-corrected access, CVE-2017-16995, PHP/ncat persistence, log-wipe and sshd_config corrections). Citation sign-off
+ posted for work/report.md and work/timeline.md.). Call done now and stop.
+
+
+ The swarm is done. Let me check that done/SWARM_DONE exists and then call done.
+
+ But wait - let me also check: s9a5f00 says "work/report.md written" and the definition of done requires:
+ - work/report.md exists, answers every question under headings ## 1. through ## 6.
+ - Every answer cites evidence
+ - The critic has posted a sign-off
+ - work/timeline.md holds merged timeline ≥30 dated rows
+ - Ledger holds ≥10 dated events
+ - inputs/ is unchanged
+
+ s9a5f00 wrote report.md. s9a5f03 was supposed to do timeline.md. s9a5f04 did Slave1. I've been doing Master. s9a5f05
+ was doing Slave2. s9a5f02 did cross-node IOC.
+
+ The system says "The swarm is finished: done/SWARM_DONE exists" and tells me to call done. Let me do that.
+
+ But first, let me verify:
+ - I should call done(reason, output_file) with the output file being the main deliverable: work/report.md
+
+ Actually, let me just call done as instructed.
+
+ The swarm is finished. Let me call done.
+
+
+ done
+ {
+   "terminate": true,
+   "agent_done": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9a5f/done/agents/s9a5f06.done",
+   "sentinel": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9a5f/done/SWARM_DONE",
+   "created_sentinel": false,
+   "reason": "Swarm complete. done/SWARM_DONE exists. Master investigation complete: identified intrusion vector (SSH
+ brute-force from 192.168.2.129 against hadoop), privilege escalation (CVE-2017-16995 BPF exploit via
+ /home/hadoop/45010), modifications (PHP installed, cluster.php backdoor on UDP/17001, cluster.service persistence,
+ logs manipulated), and all findings recorded in ledger (100+ entries). Report assembled by peers.",
+   "output_file": "work/report.md"
+ }
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9a5f • s9a5f06
+↑1.8M ↓18k R903k CH0.0% $3.401 12.6%/1.0M (auto)                                (azure-foundry) DeepSeek-V4-Pro • medium
+swarm:s9a5f06

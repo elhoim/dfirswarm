@@ -1,0 +1,30 @@
+{
+  "name": "entropy_map",
+  "description": "Shannon entropy across a file in windows, so packed, compressed or encrypted regions show up before anything is disassembled. Returns the profile, the high-entropy runs with their offsets, and the overall figure.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "The file to measure"
+    },
+    "window": {
+      "type": "integer",
+      "description": "Window size in bytes (default 4096)"
+    },
+    "threshold": {
+      "type": "number",
+      "description": "Bits per byte above which a window counts as high (default 7.2)"
+    },
+    "max_windows": {
+      "type": "integer",
+      "description": "Maximum windows to return in the profile (default 256)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 300,
+  "example": "{\"path\": \"work/extracted/sample.exe\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T18:00:00.000Z",
+  "version": 1,
+  "sha256": "1f39cad7200e59eff1a2e7764b30addb455b92ea254c955dcb014a310293ba53"
+}

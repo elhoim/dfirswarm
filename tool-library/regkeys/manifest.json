@@ -1,0 +1,32 @@
+{
+  "name": "regkeys",
+  "description": "Dump a registry key's values and subkeys from a hive with regipy. Text values are decoded, REG_BINARY comes back as hex, and each value says which.",
+  "params": {
+    "hive": {
+      "type": "string",
+      "description": "Path to the hive file (e.g. work/sf4b205/SOFTWARE)",
+      "required": true
+    },
+    "key": {
+      "type": "string",
+      "description": "Key path inside the hive, e.g. \\Microsoft\\Windows\\CurrentVersion\\Uninstall (empty/omit for root)",
+      "required": false
+    },
+    "recurse": {
+      "type": "integer",
+      "description": "Max subkey recursion depth (0 = subkeys only, default 0)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Optional max number of subkeys returned"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"hive\":\"work/sf4b205/SOFTWARE\",\"key\":\"\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\",\"recurse\":0}",
+  "by": "sf4b205",
+  "at": "2026-09-18T12:09:13.969Z",
+  "version": 2,
+  "sha256": "1a6311999b0d2f0f125be556ebae63668bd203c9faef647eb6a931e8ee34f00b"
+}

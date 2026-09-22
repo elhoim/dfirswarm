@@ -1,0 +1,29 @@
+Isolation proof — 2026-09-21T11:07:41Z
+profile: the pane's own, via fsguard
+
+-- the previous run on this case must be out of reach --
+read its answer table (work/flags.md)                      OK (deny)
+read its report                                            OK (deny)
+read its ledger                                            OK (deny)
+read its board                                             OK (deny)
+read the tools it forged                                   OK (deny)
+read the published questions                               OK (deny)
+list the directory at all                                  OK (deny)
+find it by name                                            OK (deny)
+
+-- the work of the run must be reachable --
+read the evidence                                          OK (allow)
+write in the sandbox                                       OK (allow)
+read the contract                                          OK (allow)
+
+-- parity with the previous run: what it could see, this one still can --
+read the repository README                                 OK (allow)
+read the saved tool library                                OK (allow)
+read another case's notes                                  OK (allow)
+
+-- the guards that were already there --
+write outside the sandbox                                  OK (deny)
+write the trace the collector owns                         OK (deny)
+reach the terminal's control socket                        OK (deny)
+
+RESULT: isolation holds on every check

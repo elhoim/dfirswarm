@@ -1,0 +1,23 @@
+{
+  "name": "fve_metadata",
+  "description": "Parse a BitLocker -FVE-FS- volume (raw image or VHD partition) and return metadata: GUID, encryption method, recovery key needed. Pass raw_offset to specify where the FVE partition starts.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Path to raw image or VHD file"
+    },
+    "raw_offset": {
+      "type": "integer",
+      "description": "Byte offset where the FVE partition starts (e.g., 65536 for VHD at LBA 128)",
+      "required": false
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "{\"path\": \"work/extracted/R2D2.vhd\", \"raw_offset\": 65536}",
+  "by": "s864a05",
+  "at": "2026-09-18T17:23:46.006Z",
+  "version": 2,
+  "sha256": "22e4603f8e6ab143e93018c1be27a0b4dbf941966f75ab610176bf8b7170675e"
+}

@@ -1,0 +1,42 @@
+{
+  "name": "mam_scan",
+  "description": "Scan a raw dump for MAM\\x04 prefetch, decompress LZXPRESS Huffman, return name, run count, last-run FILETIMEs, volume paths.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Path to the raw dump or image region to scan for prefetch records"
+    },
+    "start": {
+      "type": "integer",
+      "description": "Start offset"
+    },
+    "length": {
+      "type": "integer",
+      "description": "Max bytes to scan"
+    },
+    "max_hits": {
+      "type": "integer",
+      "description": "Max MAM records"
+    },
+    "chunk": {
+      "type": "integer",
+      "description": "Read chunk size"
+    },
+    "parse": {
+      "type": "boolean",
+      "description": "Decompress and parse SCCA (default true)"
+    },
+    "name_filter": {
+      "type": "string",
+      "description": "Keep hits whose name/paths contain this (case-insensitive)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"work/extracted/unallocated.bin\", \"start\": 0, \"length\": 2000000, \"max_hits\": 20}",
+  "by": "s183901",
+  "at": "2026-09-18T22:25:52.497Z",
+  "version": 1,
+  "sha256": "5a3b1e5bbce75bf5a497cb39a044110da6995fac59a2b555fc0cc05767dba090"
+}

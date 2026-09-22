@@ -1,0 +1,28 @@
+{
+  "name": "volrun",
+  "description": "Run a Volatility 3 plugin against a memory image with typed arguments. Returns stdout/stderr.",
+  "params": {
+    "image": {
+      "type": "string",
+      "description": "Memory image path",
+      "required": true
+    },
+    "plugin": {
+      "type": "string",
+      "description": "Volatility 3 plugin name, e.g. windows.pslist",
+      "required": true
+    },
+    "args": {
+      "type": "array",
+      "description": "Extra argv after the plugin (each element is one argument, not shell-split)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"image\":\"inputs/ransomcare5.dmp\",\"plugin\":\"windows.pslist\",\"args\":[\"--pid\",\"356\"]}",
+  "by": "s69d306",
+  "at": "2026-09-18T21:58:14.314Z",
+  "version": 2,
+  "sha256": "fb0bc73d2b96bf3d4029e0597e40dda02b4ba5cbfe28cd4aba534db0ed55cbd3"
+}

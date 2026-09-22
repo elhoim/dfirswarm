@@ -1,0 +1,18 @@
+{
+  "name": "timeline_render",
+  "description": "Render work/timeline.md table rows (sorted by ts) from ledger/entries.jsonl kind:event entries; returns event count + markdown rows.",
+  "params": {
+    "ledger_path": {
+      "type": "string",
+      "description": "Path to ledger entries jsonl (default ledger/entries.jsonl)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "timeline_render {}",
+  "by": "s83fd09",
+  "at": "2026-09-21T11:45:34.743Z",
+  "version": 1,
+  "sha256": "ba35ac79fcf7158073dfe9a8722a3441fcfa5c9c62d8d764ff5e142afc21ab16"
+}

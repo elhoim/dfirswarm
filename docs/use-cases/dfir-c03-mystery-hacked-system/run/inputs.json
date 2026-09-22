@@ -1,0 +1,30 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/challenge-03-mystery-hacked-system",
+  "copied_at": "2026-09-18T12:39:13Z",
+  "files": [
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 1231,
+      "sha256": "61669baa866eb4b7dd1fee7e83922a998e0d9d271b817570b07edd2bd1913539",
+      "mtime_ms": 1789730983405,
+      "ctime_ms": 1789735142086
+    },
+    {
+      "path": "inputs/README.txt",
+      "bytes": 214,
+      "sha256": "44265e33eb3d19e6c63eda113e087213a225c70918fc65599a6bd3e6eb34c11a",
+      "mtime_ms": 1583656257000,
+      "ctime_ms": 1789735142086
+    },
+    {
+      "path": "inputs/Windows8.1-Challenge3.001",
+      "bytes": 26474446848,
+      "sha256": "708d969d542ce2607b0b7c54f42801807f9d8f619a25bdc1a7beb38110cb98a5",
+      "mtime_ms": 1449856039000,
+      "ctime_ms": 1789735142086
+    }
+  ],
+  "bytes": 26474448293,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

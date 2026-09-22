@@ -1,0 +1,13 @@
+# A security problem must not arrive as a public issue, and the two questions
+# people ask most have written answers. Both are one click from here.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/halilozturkci/dfirswarm/security/policy
+    about: Never open a public issue for a vulnerability. Read SECURITY.md and use private reporting.
+  - name: Using the name, or forking
+    url: https://github.com/halilozturkci/dfirswarm/blob/main/TRADEMARK.md
+    about: The code is AGPL v3, the name is not. What you may call your own work, and when a commercial licence is needed.
+  - name: Contributing
+    url: https://github.com/halilozturkci/dfirswarm/blob/main/CONTRIBUTING.md
+    about: House rules, how to run the suites, and the contributor agreement.

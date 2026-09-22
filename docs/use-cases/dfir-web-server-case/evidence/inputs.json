@@ -1,0 +1,30 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi",
+  "copied_at": "2026-09-18T10:32:41Z",
+  "files": [
+    {
+      "path": "inputs/.DS_Store",
+      "bytes": 6148,
+      "sha256": "7a3d3160649cc4cd500d8bd16a018c32ca2514501539da3be7bffd418235ea4d",
+      "mtime_ms": 1789726911996,
+      "ctime_ms": 1789727549035
+    },
+    {
+      "path": "inputs/memdump.mem",
+      "bytes": 1073676288,
+      "sha256": "ce6af78989ff959b0e25fec79f20942b036c82d7ba929aa36d528567e155b8fc",
+      "mtime_ms": 1441274650514,
+      "ctime_ms": 1789727549035
+    },
+    {
+      "path": "inputs/s4a-challenge4",
+      "bytes": 26843545600,
+      "sha256": "a584de7f06bc99cc7bf8248ed31771c181035e2b7907a9493c5bfa4ec0cce6f9",
+      "mtime_ms": 1442083257000,
+      "ctime_ms": 1789727549035
+    }
+  ],
+  "bytes": 27917228036,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

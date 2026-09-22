@@ -1,0 +1,26 @@
+{
+  "name": "extract_stream",
+  "description": "Extract a data stream from an NTFS E01 image using icat. Returns the raw bytes (base64-encoded); a failure comes back as JSON with icat's status, never as base64 error text.",
+  "params": {
+    "image": {
+      "type": "string",
+      "description": "Path to E01 image"
+    },
+    "inode": {
+      "type": "string",
+      "description": "Inode or inode-attr_id to extract, e.g. 168 or 168-128-4"
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Sector offset (0 for logical volume without partition table)"
+    }
+  },
+  "runtime": "bash",
+  "entry": "run.sh",
+  "timeout_seconds": 30,
+  "example": "{\"image\": \"inputs/<the image>.E01\", \"inode\": \"168-128-4\", \"offset\": 0}",
+  "by": "sfcc303",
+  "at": "2026-09-18T15:28:35.370Z",
+  "version": 2,
+  "sha256": "17e945d2adfc2b537895e85e64be8ea7c436b20d4db78c1eb8f7e1f8f0033fe4"
+}

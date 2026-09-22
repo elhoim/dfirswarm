@@ -1,0 +1,30 @@
+{
+  "name": "fsevents_parse",
+  "description": "Read /.fseventsd record files: the per-volume log of file creations, deletions, renames and modifications that macOS writes whether anyone wants it or not. Returns each path with its event id and decoded flags. Order, not time.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "An /.fseventsd directory, or one record file"
+    },
+    "contains": {
+      "type": "string",
+      "description": "Case-insensitive regex over the path"
+    },
+    "flags": {
+      "type": "array",
+      "description": "Keep only records carrying these flags, e.g. [\"Removed\",\"Renamed\"]"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum records to return (default 2000)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 300,
+  "example": "{\"path\": \"work/extracted/.fseventsd\", \"flags\": [\"Removed\"]}",
+  "by": "maintainer",
+  "at": "2026-09-22T16:00:00.000Z",
+  "version": 1,
+  "sha256": "00bef7be780b17f2e5c3f923bc7445cac7ba60efa4bafcc14f619a5ce09609f2"
+}

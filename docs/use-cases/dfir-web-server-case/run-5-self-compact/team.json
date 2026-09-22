@@ -1,0 +1,29 @@
+{
+  "swarm_id": "sd8ee",
+  "n": 4,
+  "agents": [
+    {
+      "id": "sd8ee00",
+      "role": "worker",
+      "model": "openai/gpt-5.4-mini"
+    },
+    {
+      "id": "sd8ee01",
+      "role": "worker",
+      "model": "openai/gpt-5.4-mini"
+    },
+    {
+      "id": "sd8ee02",
+      "role": "worker",
+      "model": "openai/gpt-5.4-mini"
+    },
+    {
+      "id": "sd8ee03",
+      "role": "worker",
+      "model": "openai/gpt-5.4-mini"
+    }
+  ],
+  "models": [
+    "openai/gpt-5.4-mini"
+  ]
+}

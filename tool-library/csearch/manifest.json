@@ -1,0 +1,42 @@
+{
+  "name": "csearch",
+  "description": "Search the kickoff catalog files (filelist/timeline/bodyfile/pslist/cmdline/netscan/malfind/dlllist/psscan) for one or more patterns and return matching lines prefixed with the source file. Used for citation verification.",
+  "params": {
+    "patterns": {
+      "type": "array",
+      "description": "List of substrings/regexes to search for",
+      "required": true
+    },
+    "files": {
+      "type": "array",
+      "description": "Catalog files to search, subset of filelist,timeline,bodyfile,pslist,psscan,cmdline,netscan,malfind,dlllist (default filelist,timeline)",
+      "required": false
+    },
+    "insensitive": {
+      "type": "boolean",
+      "description": "Case-insensitive matching (default true)",
+      "required": false
+    },
+    "max_lines": {
+      "type": "integer",
+      "description": "Cap on total output lines (default 200)",
+      "required": false
+    },
+    "regex": {
+      "type": "boolean",
+      "description": "Treat patterns as regex (default false)",
+      "required": false
+    },
+    "catalog_root": {
+      "type": "string",
+      "description": "Directory of catalog text files; when set, keys resolve to <catalog_root>/<basename> instead of the baked s4a-challenge4 paths"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "by": "sf6df06",
+  "at": "2026-09-18T11:42:28.351Z",
+  "version": 2,
+  "sha256": "27b2754427ec7c2739609d44733318c73b41a2e45959c0862d51948e6e346117"
+}

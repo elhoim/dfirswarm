@@ -1,0 +1,64 @@
+{
+  "swarm_id": "s864a",
+  "n": 9,
+  "agents": [
+    {
+      "id": "s864a00",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6",
+      "seat": "Disk and file system: partitions and volumes (including the R2D2 volume and any BitLocker metadata `mmls`/`fsstat` reveal), $MFT, the file list, deleted entries; owns `work/disk.md`."
+    },
+    {
+      "id": "s864a01",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6",
+      "seat": "Recovery from file system journals: $LogFile, $UsnJrnl, volume shadow copies and unallocated space, for earlier copies of anything encrypted later; owns `work/recovery.md`."
+    },
+    {
+      "id": "s864a02",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6",
+      "seat": "Browser and application caches: browsers, mail, messaging and cloud clients, their caches, histories and databases, for the communication behind part 1; owns `work/caches.md`."
+    },
+    {
+      "id": "s864a03",
+      "role": "worker",
+      "model": "azure-foundry/grok-4.6",
+      "seat": "Registry and execution: SYSTEM/SOFTWARE/SAM/NTUSER, prefetch, shimcache, amcache, jump lists, LNK, scheduled tasks and services, to say what was run and when; owns `work/artifacts.md`."
+    },
+    {
+      "id": "s864a04",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro",
+      "seat": "Shell and user activity: PowerShell and cmd history, console host history, RunMRU, typed paths, recent documents, the Downloads and Documents folders as the user left them; owns `work/user-activity.md`."
+    },
+    {
+      "id": "s864a05",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro",
+      "seat": "BitLocker and volume encryption (part 2): the R2D2 volume, its recovery key or password wherever it was kept (registry, a printed key file, the user's own notes, Active Directory artefacts), the decryption itself, and what is inside; says exactly what this host cannot do; owns `work/bitlocker.md`."
+    },
+    {
+      "id": "s864a06",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro",
+      "seat": "Key material and cryptography (parts 1 and 3): the key pair and the keys file in Downloads, AES and OpenSSL/GPG artefacts, the decryption of the README and of the message, with the commands that prove each; owns `work/crypto.md`."
+    },
+    {
+      "id": "s864a07",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro",
+      "seat": "Timeline and ledger: records every dated event peers report with `record kind=event` and writes `work/timeline.md` from `ledger/ledger.md`."
+    },
+    {
+      "id": "s864a08",
+      "role": "worker",
+      "model": "azure-foundry/DeepSeek-V4-Pro",
+      "seat": "Critic and editor: verifies every citation, challenges weak claims on the board, assembles `work/report.md` and posts the sign-off."
+    }
+  ],
+  "models": [
+    "azure-foundry/DeepSeek-V4-Pro",
+    "azure-foundry/grok-4.6"
+  ]
+}

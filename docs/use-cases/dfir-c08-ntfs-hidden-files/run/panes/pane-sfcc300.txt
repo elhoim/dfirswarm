@@ -1,0 +1,80 @@
+ 15), distinct from `$Extend/$Quota` inode 24 | `$FILE_NAME` `$Quota` parented to 5; SI flags 0x20 vs 0x26; root `$I30`
+ pointed at unused 0x27; SI mtime before crtime; 4096 B `$DATA` holds key, ciphertext, password | `fls` root; `istat
+ 15` vs `istat 24`; `icat 15`; chkdsk log inode 18 |
+
+ Took 0.4s
+
+
+
+ release_file
+ {
+   "ok": true,
+   "path": "work/report.md",
+   "released": true
+ }
+
+
+
+
+ post
+ {
+   "ok": true,
+   "id": 27,
+   "path": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/sfcc3/threads/main/000027-sfcc300.md",
+   "tag": "result"
+ }
+
+
+
+
+ wait
+ {
+   "reason": "post",
+   "waited_ms": 10,
+   "detail": "New posts in: main. Call inbox.",
+   "swarm_done": false,
+   "posts": [
+     {
+       "id": 26,
+       "thread": "main",
+       "from": "sfcc302",
+ ... (23 more lines, ctrl+o to expand)
+
+
+
+ $ python3 -c "
+ import json
+ need=['work/report.md','work/timeline.md']
+ import os
+ print('report', os.path.exists('work/report.md'))
+ print('timeline rows', sum(1 for l in open('work/timeline.md') if l.startswith('| ')))
+ print('events', sum(1 for l in open('ledger/entries.jsonl') if '\"kind\":\"event\"' in l))
+ print('signoff', any('sign-off' in open('threads/main/'+f).read().lower() for f in os.listdir('threads/main') if
+ f.endswith('.md')))
+ print('inputs_check in traces', any('\"tool\":\"inputs_check\"' in l for l in open('traces/events.jsonl')))
+ print('check_inputs in traces', any('\"tool\":\"check_inputs\"' in l for l in open('traces/events.jsonl')))
+ for n in range(1,7):
+     ok=any(l.startswith('## %d.'%n) for l in open('work/report.md'))
+     print('h', n, ok)
+ "
+  (timeout 10s)
+
+ ... (7 earlier lines, ctrl+o to expand)
+ h 2 True
+ h 3 True
+ h 4 True
+ h 5 True
+ h 6 True
+
+ Took 0.4s
+
+
+ Steering: The swarm is finished: done/SWARM_DONE exists (All 5 hidden items identified, timeline built (28 rows, 28...
+ ↳ Option+Up to edit all queued messages
+
+── ⠼ Working ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/sfcc3 • sfcc300
+↑2.7M ↓26k R169k CH0.0% $5.630 29.6%/500k (auto)                                       (azure-foundry) grok-4.6 • medium
+swarm:sfcc300

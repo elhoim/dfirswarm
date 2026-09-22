@@ -1,0 +1,37 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/challenge-04-alternate-data-streams",
+  "copied_at": "2026-09-18T12:54:45Z",
+  "files": [
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 928,
+      "sha256": "42da40f871bfb1774bb8bc334cce77b6af29b6ac34bc04096d793659997a1e91",
+      "mtime_ms": 1789730983405,
+      "ctime_ms": 1789736081877
+    },
+    {
+      "path": "inputs/StealthyADS.E01",
+      "bytes": 7277449570,
+      "sha256": "52ffe320cf12c27550834094ff136ad7d8f6d5e74f88b8dc62ae3f116fc34312",
+      "mtime_ms": 1558929440000,
+      "ctime_ms": 1789736081877
+    },
+    {
+      "path": "inputs/StealthyADS.E01.csv",
+      "bytes": 147748802,
+      "sha256": "707f6f59ddeced9d6dc6112cc1811598d812e785770c0eba427870a4f572d161",
+      "mtime_ms": 1558910742000,
+      "ctime_ms": 1789736081877
+    },
+    {
+      "path": "inputs/StealthyADS.E01.txt",
+      "bytes": 1239,
+      "sha256": "a9156ec0430b54140c0d429097ab4f84e5a8e60982bbb67d0ea4cc56e864ad28",
+      "mtime_ms": 1558910593000,
+      "ctime_ms": 1789736081877
+    }
+  ],
+  "bytes": 7425200539,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

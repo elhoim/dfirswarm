@@ -1,0 +1,39 @@
+{
+  "name": "catalog_search",
+  "description": "Search catalog filelist/timeline/bodyfile with a regex; returns matching lines (capped).",
+  "params": {
+    "pattern": {
+      "type": "string",
+      "description": "Regex to search",
+      "required": true
+    },
+    "which": {
+      "type": "string",
+      "description": "filelist|timeline|bodyfile|fsstat|partitions",
+      "required": false
+    },
+    "ignore_case": {
+      "type": "boolean",
+      "description": "Case-insensitive (default true)",
+      "required": false
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Max lines to return (default 200)",
+      "required": false
+    },
+    "exclude": {
+      "type": "string",
+      "description": "Regex of lines to drop",
+      "required": false
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "{\"pattern\": \"SysInternal\", \"which\": \"filelist\"}",
+  "by": "sd1d100",
+  "at": "2026-09-18T14:14:47.839Z",
+  "version": 1,
+  "sha256": "423889ba6fbc4d60f808a7f0303f62aa1a87fb73788fef7c138c2fd6608cdd3e"
+}

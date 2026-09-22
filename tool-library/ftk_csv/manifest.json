@@ -1,0 +1,37 @@
+{
+  "name": "ftk_csv",
+  "description": "Query the UTF-16 FTK Imager CSV for path/date/deleted filters; return matching rows as JSON.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "CSV path (default inputs/Webserver.E01.csv)"
+    },
+    "contains": {
+      "type": "string",
+      "description": "Pipe-separated case-insensitive substrings; match if any in path/name"
+    },
+    "regex": {
+      "type": "string",
+      "description": "Optional regex on path/name"
+    },
+    "date_contains": {
+      "type": "string",
+      "description": "Substring that must appear in Created/Modified/Accessed"
+    },
+    "deleted": {
+      "type": "string",
+      "description": "Filter Is Deleted: yes or no"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Max rows (default 80)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "by": "s9d8303",
+  "at": "2026-09-18T22:41:52.900Z",
+  "version": 1,
+  "sha256": "1d6dc060c653b42a836abe751647a7bb27091219d4b2d6e549890852f4809ae4"
+}

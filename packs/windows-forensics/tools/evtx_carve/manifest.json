@@ -1,0 +1,46 @@
+{
+  "name": "evtx_carve",
+  "description": "Recover event records from a blob with no event log file: sweeps for ElfChnk chunk headers in unallocated space, a pagefile, a memory image or a truncated .evtx, verifies each chunk's checksums and parses the records inside it. This is how a cleared log is read.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A raw blob: unallocated output, pagefile.sys, a memory image, or a damaged .evtx"
+    },
+    "event_ids": {
+      "type": "array",
+      "description": "Keep only these event ids"
+    },
+    "contains": {
+      "type": "string",
+      "description": "Keep only records whose XML contains this string, case-insensitive"
+    },
+    "start": {
+      "type": "integer",
+      "description": "Byte offset to start the sweep at (default 0)"
+    },
+    "max_bytes": {
+      "type": "integer",
+      "description": "Stop the sweep after this many bytes"
+    },
+    "chunk_limit": {
+      "type": "integer",
+      "description": "Maximum chunks to parse (default 200)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum records to return (default 300)"
+    },
+    "with_xml": {
+      "type": "boolean",
+      "description": "Include each record's full XML"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 600,
+  "example": "{\"path\": \"work/unallocated.bin\", \"event_ids\": [4624, 4688, 1102]}",
+  "by": "maintainer",
+  "at": "2026-09-22T09:00:00.000Z",
+  "version": 1,
+  "sha256": "a64709827e40ac2ced81da0a44c3f4715956433adb6c65f2e06ec36697dfcfe6"
+}

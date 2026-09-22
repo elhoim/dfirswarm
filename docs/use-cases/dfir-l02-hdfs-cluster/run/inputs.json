@@ -1,0 +1,100 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/linux-02-compromised-hdfs-cluster",
+  "copied_at": "2026-09-18T23:08:02Z",
+  "files": [
+    {
+      "path": "inputs/CASE-manual.txt",
+      "bytes": 1340,
+      "sha256": "0a7b5f557438ec2d50c42ebde74e6d4a75f169a2636b69cce6ee9ef780f37019",
+      "mtime_ms": 1789732563431,
+      "ctime_ms": 1789772877880
+    },
+    {
+      "path": "inputs/Case2-Workshop-Manual.pdf",
+      "bytes": 59061,
+      "sha256": "275b5aa695273c3070a70987c02da65ed91782a4caf82b94bfa047b6f3199af3",
+      "mtime_ms": 1789731146576,
+      "ctime_ms": 1789772877880
+    },
+    {
+      "path": "inputs/HDFS-Master.E01",
+      "bytes": 3324279151,
+      "sha256": "c61c50a8532e26140999f781cf811c9eca1125689175410b08c9c7a26aa4542d",
+      "mtime_ms": 1571307376000,
+      "ctime_ms": 1789772877880
+    },
+    {
+      "path": "inputs/HDFS-Master.E01.csv",
+      "bytes": 50312000,
+      "sha256": "6465ed6d4ad0a156ff2e16ec3be79541926c508779d4ff7a96eef78738f270f5",
+      "mtime_ms": 1571299680000,
+      "ctime_ms": 1789772877880
+    },
+    {
+      "path": "inputs/HDFS-Master.E01.txt",
+      "bytes": 1169,
+      "sha256": "b8e7477dd87fa5d8e984d0a11ac762ed75ae746427a6c7c15e501960c6e6b82a",
+      "mtime_ms": 1571291640000,
+      "ctime_ms": 1789772877880
+    },
+    {
+      "path": "inputs/HDFS-Slave1.E01",
+      "bytes": 3160115976,
+      "sha256": "652697d2ea78b7cc0639a6c977ec6f3e1180dd77b1c61bdd633a1bac3197a4ea",
+      "mtime_ms": 1571299551000,
+      "ctime_ms": 1789772877880
+    },
+    {
+      "path": "inputs/HDFS-Slave1.E01.csv",
+      "bytes": 50140364,
+      "sha256": "472bf67a37cc96186d9aee3ce8260b18dcc98024de77b81065c8ef67b36e9e66",
+      "mtime_ms": 1571291743000,
+      "ctime_ms": 1789772877880
+    },
+    {
+      "path": "inputs/HDFS-Slave1.E01.txt",
+      "bytes": 1167,
+      "sha256": "0b436af9e2445e42c6af2159d7d4699f4d5742c6da00c1fc1ef6cb8b61f4fa14",
+      "mtime_ms": 1571291636000,
+      "ctime_ms": 1789772877880
+    },
+    {
+      "path": "inputs/HDFS-Slave2.E01",
+      "bytes": 3159445015,
+      "sha256": "69f6a7b09820d2950e0b8936176a187a0cd664510a04e382b2d9d728cd6c7228",
+      "mtime_ms": 1571315145000,
+      "ctime_ms": 1789772877880
+    },
+    {
+      "path": "inputs/HDFS-Slave2.E01.csv",
+      "bytes": 50138048,
+      "sha256": "56f3ae3f2850ea86747e7a96b6cc2bcf902a67f22f1b64c31fe5cf42b58ab67d",
+      "mtime_ms": 1571307490000,
+      "ctime_ms": 1789772877880
+    },
+    {
+      "path": "inputs/HDFS-Slave2.E01.txt",
+      "bytes": 1169,
+      "sha256": "06456109c2b449a38b96c01a0db39922237d98d6b2926d9e22518a7767e69144",
+      "mtime_ms": 1571291612000,
+      "ctime_ms": 1789772877880
+    },
+    {
+      "path": "inputs/README",
+      "bytes": 81,
+      "sha256": "dbe0ee7e1a9e4434313524799256eaf0f25dacda44a535e632cdb4b4b9a53c6f",
+      "mtime_ms": 1789731146923,
+      "ctime_ms": 1789772877880
+    },
+    {
+      "path": "inputs/index.md",
+      "bytes": 83,
+      "sha256": "d2d3b12c1d7751a7e32453ad8654eb9b66ffef6355fa8def89ba600eb3be05c7",
+      "mtime_ms": 1789731147282,
+      "ctime_ms": 1789772877880
+    }
+  ],
+  "bytes": 9794494624,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

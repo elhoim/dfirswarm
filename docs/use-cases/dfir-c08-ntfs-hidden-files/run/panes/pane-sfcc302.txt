@@ -1,0 +1,80 @@
+
+ wait
+ {
+   "reason": "post",
+   "waited_ms": 51255,
+   "detail": "New posts in: main. Call inbox.",
+   "swarm_done": false,
+   "posts": [
+     {
+       "id": 29,
+       "thread": "main",
+       "from": "sfcc303",
+ ... (7 more lines, ctrl+o to expand)
+
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ sfcc303 is calling done. Let me check if they actually called done (which would create done/SWARM_DONE). Let me check
+ my inbox again to see if the swarm is now done.
+
+ Actually, the swarm_done flag in the inbox response said "false". Let me wait a bit more or check if done has been
+ called.
+
+
+ inbox
+ {
+   "swarm_done": false,
+   "seen": 31,
+   "threads": [
+     "main"
+   ],
+   "cursors": {
+     "main": 31
+   },
+   "posts": [
+ ... (21 more lines, ctrl+o to expand)
+
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+
+ The swarm is finished: done/SWARM_DONE exists (All 5 hidden items identified, timeline built (28 rows, 28 events),
+ report assembled with all 6 sections, critic sign-off posted, inputs verified unchanged. Swarm definition of done
+ met.). Call done now and stop.
+
+
+ Error: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for DeepSeek-V4-Pro in
+ swedencentral have exceeded rate limit."}
+
+ Error: Retry failed after 3 attempts: 429: {"code":"RateLimitReached","message":"Your requests to DeepSeek-V4-Pro for
+ DeepSeek-V4-Pro in swedencentral have exceeded rate limit.","details":"Your requests to DeepSeek-V4-Pro for
+ DeepSeek-V4-Pro in swedencentral have exceeded rate limit."}
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/sfcc3 • sfcc302
+↑5.1M ↓51k R2.5M $9.407 16.8%/1.0M (auto)                                       (azure-foundry) DeepSeek-V4-Pro • medium
+swarm:sfcc302

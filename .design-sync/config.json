@@ -1,0 +1,227 @@
+{
+  "pkg": "dfirswarm",
+  "globalName": "DfirSwarm",
+  "projectId": "43073482-9a11-43fe-b062-f266d99134eb",
+  "shape": "package",
+  "entry": "ui/src/design-system.ts",
+  "buildCmd": "npm run ui:build",
+  "srcDir": "ui/src",
+  "tsconfig": "ui/tsconfig.json",
+  "cssEntry": "ui/dist/assets/index-DLXRDMcg.css",
+  "componentSrcMap": {
+    "ActivityStrip": "ui/src/components/activity-strip.tsx",
+    "AgentMark": "ui/src/components/swarm-bits.tsx",
+    "AppShell": null,
+    "ArtifactTable": "ui/src/components/report.tsx",
+    "AuthorList": "ui/src/components/report.tsx",
+    "AuthorMark": "ui/src/components/report.tsx",
+    "Badge": "ui/src/components/ui/badge.tsx",
+    "BudgetBar": "ui/src/components/swarm-bits.tsx",
+    "Button": "ui/src/components/ui/button.tsx",
+    "Chip": "ui/src/components/console.tsx",
+    "Claim": "ui/src/components/report.tsx",
+    "ConfidenceMark": "ui/src/components/report.tsx",
+    "CustodyRecord": "ui/src/components/report.tsx",
+    "DarkThreadMark": "ui/src/components/swarm-bits.tsx",
+    "Dialog": "ui/src/components/ui/dialog.tsx",
+    "DialogClose": "ui/src/components/ui/dialog.tsx",
+    "DialogContent": "ui/src/components/ui/dialog.tsx",
+    "DialogDescription": "ui/src/components/ui/dialog.tsx",
+    "DialogTitle": "ui/src/components/ui/dialog.tsx",
+    "DialogTrigger": "ui/src/components/ui/dialog.tsx",
+    "DownloadRow": "ui/src/components/evidence.tsx",
+    "EmptyState": "ui/src/components/states.tsx",
+    "ErrorState": "ui/src/components/states.tsx",
+    "EvidenceRow": "ui/src/components/evidence.tsx",
+    "Excerpt": "ui/src/components/report.tsx",
+    "Exhibit": "ui/src/components/report.tsx",
+    "ExhibitNo": "ui/src/components/report.tsx",
+    "FileFacts": "ui/src/components/evidence.tsx",
+    "FindingCard": "ui/src/components/report.tsx",
+    "FinishMeter": "ui/src/components/console.tsx",
+    "GoalLibrary": null,
+    "HashChip": "ui/src/components/evidence.tsx",
+    "IndicatorTable": "ui/src/components/report.tsx",
+    "InlineNote": "ui/src/components/states.tsx",
+    "Input": "ui/src/components/ui/input.tsx",
+    "JobCard": null,
+    "JobStatusIcon": null,
+    "JobsDrawer": null,
+    "Label": "ui/src/components/ui/label.tsx",
+    "Limitation": "ui/src/components/report.tsx",
+    "LoadingState": "ui/src/components/states.tsx",
+    "Meter": "ui/src/components/console.tsx",
+    "MethodList": "ui/src/components/report.tsx",
+    "MethodStep": "ui/src/components/report.tsx",
+    "ModelTeamEditor": null,
+    "NativeSelect": "ui/src/components/ui/input.tsx",
+    "NotRecorded": "ui/src/components/report.tsx",
+    "PhaseHead": "ui/src/components/console.tsx",
+    "PrintSheet": "ui/src/components/evidence.tsx",
+    "Provenance": "ui/src/components/report.tsx",
+    "ReadyDot": "ui/src/components/model-team.tsx",
+    "ReportContents": "ui/src/components/report.tsx",
+    "ReportCounts": "ui/src/components/report.tsx",
+    "ReportCover": "ui/src/components/report.tsx",
+    "ReportSection": "ui/src/components/report.tsx",
+    "SerifH": "ui/src/components/console.tsx",
+    "StatusDot": "ui/src/components/console.tsx",
+    "Switch": "ui/src/components/ui/switch.tsx",
+    "TagChip": "ui/src/components/console.tsx",
+    "Textarea": "ui/src/components/ui/input.tsx",
+    "ThreadPulse": "ui/src/components/activity-strip.tsx",
+    "Timeline": "ui/src/components/report.tsx",
+    "TimelineTable": "ui/src/components/report.tsx",
+    "Tooltip": "ui/src/components/ui/tooltip.tsx",
+    "TooltipContent": "ui/src/components/ui/tooltip.tsx",
+    "TooltipProvider": "ui/src/components/ui/tooltip.tsx",
+    "TooltipTrigger": "ui/src/components/ui/tooltip.tsx",
+    "Verdict": "ui/src/components/report.tsx",
+    "Vital": "ui/src/components/console.tsx",
+    "VitalsBand": "ui/src/components/console.tsx"
+  },
+  "docsDir": ".design-sync/component-docs",
+  "guidelinesGlob": [
+    "docs/ui-design.md",
+    "docs/ui-coverage.md"
+  ],
+  "extraFonts": [
+    ".design-sync/fonts/fonts.css"
+  ],
+  "overrides": {
+    "ActivityStrip": {
+      "cardMode": "column"
+    },
+    "ArtifactTable": {
+      "cardMode": "column"
+    },
+    "BudgetBar": {
+      "cardMode": "column"
+    },
+    "Claim": {
+      "cardMode": "column"
+    },
+    "CustodyRecord": {
+      "cardMode": "column"
+    },
+    "Dialog": {
+      "cardMode": "single",
+      "viewport": "680x440"
+    },
+    "DialogClose": {
+      "cardMode": "single",
+      "viewport": "680x440"
+    },
+    "DialogContent": {
+      "cardMode": "single",
+      "viewport": "680x440"
+    },
+    "DialogDescription": {
+      "cardMode": "single",
+      "viewport": "680x440"
+    },
+    "DialogTitle": {
+      "cardMode": "single",
+      "viewport": "680x440"
+    },
+    "DialogTrigger": {
+      "cardMode": "single",
+      "viewport": "680x440"
+    },
+    "DownloadRow": {
+      "cardMode": "column"
+    },
+    "EvidenceRow": {
+      "cardMode": "column"
+    },
+    "Excerpt": {
+      "cardMode": "column"
+    },
+    "Exhibit": {
+      "cardMode": "column"
+    },
+    "FileFacts": {
+      "cardMode": "column"
+    },
+    "FindingCard": {
+      "cardMode": "column"
+    },
+    "FinishMeter": {
+      "cardMode": "column"
+    },
+    "IndicatorTable": {
+      "cardMode": "column"
+    },
+    "Limitation": {
+      "cardMode": "column"
+    },
+    "Meter": {
+      "cardMode": "column"
+    },
+    "MethodList": {
+      "cardMode": "column"
+    },
+    "MethodStep": {
+      "cardMode": "column"
+    },
+    "NotRecorded": {
+      "cardMode": "column"
+    },
+    "PhaseHead": {
+      "cardMode": "column"
+    },
+    "PrintSheet": {
+      "cardMode": "column"
+    },
+    "Provenance": {
+      "cardMode": "column"
+    },
+    "ReportContents": {
+      "cardMode": "column"
+    },
+    "ReportCounts": {
+      "cardMode": "column"
+    },
+    "ReportCover": {
+      "cardMode": "column"
+    },
+    "ReportSection": {
+      "cardMode": "column"
+    },
+    "TagChip": {
+      "cardMode": "column"
+    },
+    "Timeline": {
+      "cardMode": "column"
+    },
+    "TimelineTable": {
+      "cardMode": "column"
+    },
+    "Tooltip": {
+      "cardMode": "single",
+      "viewport": "460x240"
+    },
+    "TooltipContent": {
+      "cardMode": "single",
+      "viewport": "460x240"
+    },
+    "TooltipProvider": {
+      "cardMode": "single",
+      "viewport": "460x240"
+    },
+    "TooltipTrigger": {
+      "cardMode": "single",
+      "viewport": "460x240"
+    },
+    "Verdict": {
+      "cardMode": "column"
+    },
+    "Vital": {
+      "cardMode": "column"
+    },
+    "VitalsBand": {
+      "cardMode": "column"
+    }
+  },
+  "readmeHeader": ".design-sync/conventions.md"
+}

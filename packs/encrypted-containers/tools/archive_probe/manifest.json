@@ -1,0 +1,22 @@
+{
+  "name": "archive_probe",
+  "description": "Say whether an archive or a document is password protected, with which scheme, and — the part that decides a case — whether the file names are readable without the password.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A ZIP, 7-Zip, RAR, PDF or OLE document"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum entries to list (default 200)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"work/extracted/archive.zip\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T21:00:00.000Z",
+  "version": 1,
+  "sha256": "0e50b5c4ba5e9f3b173ab09794e01e1672e3c9acec80861c0d665f0f43b7a8d8"
+}

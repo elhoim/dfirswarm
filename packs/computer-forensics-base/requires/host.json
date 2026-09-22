@@ -1,0 +1,225 @@
+{
+  "binaries": [
+    {
+      "name": "fls",
+      "package": "sleuthkit",
+      "why": "List files, deleted entries and named streams in an image. Invoked as an executable: CPL and IPL cannot be combined with AGPL in one work.",
+      "install": {
+        "brew": "brew install sleuthkit",
+        "apt": "apt-get install -y sleuthkit"
+      },
+      "licence": "CPL-1.0 core, IPL-1.0 in the TCT-derived parts",
+      "redistributable": false
+    },
+    {
+      "name": "icat",
+      "package": "sleuthkit",
+      "why": "Extract a file by inode, including a named stream. Invoked as an executable: CPL and IPL cannot be combined with AGPL in one work.",
+      "install": {
+        "brew": "brew install sleuthkit",
+        "apt": "apt-get install -y sleuthkit"
+      },
+      "licence": "CPL-1.0 core, IPL-1.0 in the TCT-derived parts",
+      "redistributable": false
+    },
+    {
+      "name": "istat",
+      "package": "sleuthkit",
+      "why": "Confirm an inode's size, timestamps and allocation before trusting an extract. Invoked as an executable: CPL and IPL cannot be combined with AGPL in one work.",
+      "install": {
+        "brew": "brew install sleuthkit",
+        "apt": "apt-get install -y sleuthkit"
+      },
+      "licence": "CPL-1.0 core, IPL-1.0 in the TCT-derived parts",
+      "redistributable": false
+    },
+    {
+      "name": "fsstat",
+      "package": "sleuthkit",
+      "why": "Volume serial, cluster size and file system type. Invoked as an executable: CPL and IPL cannot be combined with AGPL in one work.",
+      "install": {
+        "brew": "brew install sleuthkit",
+        "apt": "apt-get install -y sleuthkit"
+      },
+      "licence": "CPL-1.0 core, IPL-1.0 in the TCT-derived parts",
+      "redistributable": false
+    },
+    {
+      "name": "mmls",
+      "package": "sleuthkit",
+      "why": "Partition table, and the sector offset every other command needs. Invoked as an executable: CPL and IPL cannot be combined with AGPL in one work.",
+      "install": {
+        "brew": "brew install sleuthkit",
+        "apt": "apt-get install -y sleuthkit"
+      },
+      "licence": "CPL-1.0 core, IPL-1.0 in the TCT-derived parts",
+      "redistributable": false
+    },
+    {
+      "name": "ewfinfo",
+      "package": "libewf",
+      "why": "Read an E01's acquisition record and its stored digests.",
+      "install": {
+        "brew": "brew install libewf",
+        "apt": "apt-get install -y libewf-dev ewf-tools"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "tsk_recover",
+      "package": "sleuthkit",
+      "why": "Bulk recovery of deleted files from an image. Invoked as an executable.",
+      "install": {
+        "brew": "brew install sleuthkit",
+        "apt": "apt-get install -y sleuthkit"
+      },
+      "licence": "CPL-1.0 core, IPL-1.0 in the TCT-derived parts",
+      "redistributable": false
+    },
+    {
+      "name": "bdeinfo",
+      "package": "libbde",
+      "optional": true,
+      "why": "Read a BitLocker volume header: encryption method and every key protector, before any key is known.",
+      "install": {
+        "brew": "brew install libbde",
+        "apt": "apt-get install -y libbde-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "dislocker",
+      "package": "dislocker",
+      "optional": true,
+      "why": "Unlock a BitLocker volume to a file once a key or a clear-key protector is in hand. Invoked as an executable.",
+      "install": {
+        "brew": "brew install dislocker",
+        "apt": "apt-get install -y dislocker"
+      },
+      "licence": "GPL-2.0-only",
+      "redistributable": false
+    },
+    {
+      "name": "cryptsetup",
+      "package": "cryptsetup",
+      "optional": true,
+      "why": "Read a LUKS header and its key slots, and open the volume when a key is known.",
+      "install": {
+        "brew": "brew install cryptsetup",
+        "apt": "apt-get install -y cryptsetup-bin"
+      },
+      "licence": "GPL-2.0-or-later with an OpenSSL exception",
+      "redistributable": false
+    },
+    {
+      "name": "qemu-img",
+      "package": "qemu",
+      "optional": true,
+      "why": "Convert a VHD, VHDX, VMDK or QCOW2 disk to raw, which is what the toolkit reads.",
+      "install": {
+        "brew": "brew install qemu",
+        "apt": "apt-get install -y qemu-utils"
+      },
+      "licence": "GPL-2.0-only",
+      "redistributable": false
+    },
+    {
+      "name": "log2timeline",
+      "package": "plaso",
+      "optional": true,
+      "why": "Build a super timeline from a whole image in one pass: every parser Plaso carries, into one storage file. Older packages install it as log2timeline.py; the tool accepts either.",
+      "install": {
+        "brew": "python3 -m pip install plaso",
+        "apt": "apt-get install -y plaso-tools"
+      },
+      "licence": "Apache-2.0",
+      "redistributable": false
+    },
+    {
+      "name": "psort",
+      "package": "plaso",
+      "optional": true,
+      "why": "Filter, sort and export a Plaso storage file. The half of a super timeline an examiner actually reads. Older packages install it as psort.py; the tool accepts either.",
+      "install": {
+        "brew": "python3 -m pip install plaso",
+        "apt": "apt-get install -y plaso-tools"
+      },
+      "licence": "Apache-2.0",
+      "redistributable": false
+    },
+    {
+      "name": "bulk_extractor",
+      "package": "bulk_extractor",
+      "optional": true,
+      "why": "Sweep a whole image for features at scale: addresses, URLs, card numbers, EXIF, and carved records, without a file system.",
+      "install": {
+        "brew": "brew install bulk_extractor",
+        "apt": "apt-get install -y bulk-extractor"
+      },
+      "licence": "MIT",
+      "redistributable": false
+    },
+    {
+      "name": "photorec",
+      "package": "testdisk",
+      "optional": true,
+      "why": "Signature recovery over unallocated space, and a partition table a damaged disk no longer has.",
+      "install": {
+        "brew": "brew install testdisk",
+        "apt": "apt-get install -y testdisk"
+      },
+      "licence": "GPL-2.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "target-query",
+      "package": "dissect.target",
+      "optional": true,
+      "why": "One query interface over E01, VMDK, QCOW and a triage collection, with a plugin per artefact family. AGPL-3.0, the same licence as this harness.",
+      "install": {
+        "brew": "python3 -m pip install dissect",
+        "apt": "python3 -m pip install dissect"
+      },
+      "licence": "AGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "luksdeinfo",
+      "package": "libluksde",
+      "optional": true,
+      "why": "Read a LUKS header and its key slots without unlocking the volume.",
+      "install": {
+        "brew": "python3 -m pip install libluksde-python",
+        "apt": "apt-get install -y libluksde-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "fvdeinfo",
+      "package": "libfvde",
+      "optional": true,
+      "why": "Read a FileVault volume's encryption metadata and its key material references.",
+      "install": {
+        "brew": "python3 -m pip install libfvde-python",
+        "apt": "apt-get install -y libfvde-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "fsapfsinfo",
+      "package": "libfsapfs",
+      "optional": true,
+      "why": "Read an APFS container and its volumes, which the Sleuth Kit does not.",
+      "install": {
+        "brew": "python3 -m pip install libfsapfs-python",
+        "apt": "apt-get install -y libfsapfs-utils"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
+    }
+  ]
+}

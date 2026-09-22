@@ -1,0 +1,80 @@
+   "entries": [
+     {
+       "seq": 64,
+       "kind": "event",
+       "ts": "2019-03-19T13:00:16.000Z",
+       "value": "PowerShell used to disable Windows Defender, disable auto-updates, add hosts entry (192.168.137.129
+ www.ccdfir.local), and verify connectivity via ping",
+       "source": "ConsoleHost_history.txt (inode 88493)",
+       "evidence": "Commands: Add-MpPreference -ExclusionPath 'C:', Set-MpPreference -DisableRealtimeMonitoring $true,
+ Add-Content hosts \"192.168.137.129 www.ccdfir.local\", ping www.ccdfir.local",
+       "by": "s5d1005",
+ ... (275 more lines, ctrl+o to expand)
+
+
+
+ wait
+ {
+   "reason": "post",
+   "waited_ms": 17,
+   "detail": "New posts in: main. Call inbox.",
+   "swarm_done": false,
+   "posts": [
+     {
+       "id": 64,
+       "thread": "main",
+       "from": "s5d1003",
+ ... (15 more lines, ctrl+o to expand)
+
+
+
+ wait
+ {
+   "reason": "sentinel",
+   "waited_ms": 3034,
+   "detail": "done/SWARM_DONE exists. Call done and stop.",
+   "swarm_done": true,
+   "posts": []
+ }
+
+
+
+
+ done
+ {
+   "terminate": true,
+   "agent_done": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s5d10/done/agents/s5d1002.done",
+   "sentinel": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s5d10/done/SWARM_DONE",
+   "created_sentinel": false,
+   "reason": "Swarm sentinel present; Q1/Q2 inventory signed off; Q4 remains unknown",
+   "output_file": "work/report.md"
+ }
+
+
+
+
+ The swarm is finished: done/SWARM_DONE exists (All checks met: work/report.md with 6 sections, work/timeline.md with
+ 23 rows, ledger 53+ events, sign-offs from s5d1003/s5d1002/s5d1004, inputs verified unchanged. Q4 meeting location
+ remains unresolved after VDI reconstruction effort — report honestly documents this as unknown with ccdfir.local
+ hypothesis and SSH alternative.). Call done now and stop.
+
+
+
+ done
+ {
+   "terminate": true,
+   "agent_done": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s5d10/done/agents/s5d1002.done",
+   "sentinel": "/Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s5d10/done/SWARM_DONE",
+   "created_sentinel": false,
+   "reason": "SWARM_DONE already present; Q1/Q2 signed off",
+   "output_file": "work/report.md"
+ }
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s5d10 • s5d1002
+↑5.6M ↓22k R2.6M CH7.0% $12.577 12.2%/500k (auto)                                      (azure-foundry) grok-4.6 • medium
+swarm:s5d1002

@@ -1,0 +1,112 @@
+{
+  "cap_usd": 110,
+  "spent_usd": 108.481895,
+  "tokens": 73099077,
+  "calls": 746,
+  "wall_clock_minutes": 240,
+  "started_at": "2026-09-18T16:04:48Z",
+  "source": "pi.sessionManager.getEntries",
+  "hard_kill": false,
+  "cap_steer_sent": false,
+  "agents": {
+    "s864a00": {
+      "spent_usd": 14.083711,
+      "tokens": 7444931,
+      "calls": 64,
+      "input": 6835458,
+      "output": 19647,
+      "cache_read": 589826,
+      "cache_write": 0,
+      "context_tokens": 145676,
+      "context_window": 500000
+    },
+    "s864a01": {
+      "spent_usd": 14.593083,
+      "tokens": 7515049,
+      "calls": 61,
+      "input": 7129861,
+      "output": 25594,
+      "cache_read": 359594,
+      "cache_write": 0,
+      "context_tokens": 174698,
+      "context_window": 500000
+    },
+    "s864a02": {
+      "spent_usd": 14.865722,
+      "tokens": 7860377,
+      "calls": 62,
+      "input": 7187194,
+      "output": 28135,
+      "cache_read": 645048,
+      "cache_write": 0,
+      "context_tokens": 74470,
+      "context_window": 500000
+    },
+    "s864a03": {
+      "spent_usd": 11.98554,
+      "tokens": 6329318,
+      "calls": 55,
+      "input": 5774628,
+      "output": 28898,
+      "cache_read": 525792,
+      "cache_write": 0,
+      "context_tokens": 162033,
+      "context_window": 500000
+    },
+    "s864a04": {
+      "spent_usd": 8.950102,
+      "tokens": 6187724,
+      "calls": 87,
+      "input": 4996234,
+      "output": 25154,
+      "cache_read": 1166336,
+      "cache_write": 0,
+      "context_tokens": 136636,
+      "context_window": 1000000
+    },
+    "s864a05": {
+      "spent_usd": 2.417894,
+      "tokens": 2768914,
+      "calls": 50,
+      "input": 1214538,
+      "output": 23752,
+      "cache_read": 1530624,
+      "cache_write": 0,
+      "context_tokens": 88121,
+      "context_window": 1000000
+    },
+    "s864a06": {
+      "spent_usd": 16.260698,
+      "tokens": 14032786,
+      "calls": 125,
+      "input": 8735767,
+      "output": 87675,
+      "cache_read": 5209344,
+      "cache_write": 0,
+      "context_tokens": 234783,
+      "context_window": 1000000
+    },
+    "s864a07": {
+      "spent_usd": 14.832903,
+      "tokens": 10956305,
+      "calls": 109,
+      "input": 8234481,
+      "output": 33056,
+      "cache_read": 2688768,
+      "cache_write": 0,
+      "context_tokens": 156623,
+      "context_window": 1000000
+    },
+    "s864a08": {
+      "spent_usd": 10.492242,
+      "tokens": 10003673,
+      "calls": 133,
+      "input": 5557482,
+      "output": 53231,
+      "cache_read": 4392960,
+      "cache_write": 0,
+      "context_tokens": 174155,
+      "context_window": 1000000
+    }
+  }
+}

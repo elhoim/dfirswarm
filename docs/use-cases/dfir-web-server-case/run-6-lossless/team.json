@@ -1,0 +1,29 @@
+{
+  "swarm_id": "s50bb",
+  "n": 4,
+  "agents": [
+    {
+      "id": "s50bb00",
+      "role": "worker",
+      "model": "openai/gpt-5.4-mini"
+    },
+    {
+      "id": "s50bb01",
+      "role": "worker",
+      "model": "openai/gpt-5.4-mini"
+    },
+    {
+      "id": "s50bb02",
+      "role": "worker",
+      "model": "openai/gpt-5.4-mini"
+    },
+    {
+      "id": "s50bb03",
+      "role": "worker",
+      "model": "openai/gpt-5.4-mini"
+    }
+  ],
+  "models": [
+    "openai/gpt-5.4-mini"
+  ]
+}

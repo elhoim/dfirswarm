@@ -1,0 +1,52 @@
+{
+  "binaries": [
+    {
+      "name": "memprocfs",
+      "package": "MemProcFS",
+      "optional": true,
+      "why": "Mount a memory image as a file system: processes, handles, modules, registry and network state become files the ordinary tools read. AGPL-3.0, so its licence and this project's combine where Volatility's do not.",
+      "install": {
+        "brew": "https://github.com/ufrisk/MemProcFS/releases",
+        "apt": "https://github.com/ufrisk/MemProcFS/releases"
+      },
+      "licence": "AGPL-3.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "vol",
+      "package": "volatility3",
+      "optional": true,
+      "why": "The plugin framework most reports cite. Not shipped here and not wrapped: the Volatility Software License and AGPL-3.0 do not combine in one work, so it is invoked as an executable or not at all.",
+      "install": {
+        "brew": "python3 -m pip install volatility3",
+        "apt": "python3 -m pip install volatility3"
+      },
+      "licence": "Volatility Software License 1.0",
+      "redistributable": false
+    },
+    {
+      "name": "avml",
+      "package": "AVML",
+      "optional": true,
+      "why": "Acquire memory from a live Linux host into a portable format, without building a kernel module.",
+      "install": {
+        "brew": "https://github.com/microsoft/avml/releases",
+        "apt": "https://github.com/microsoft/avml/releases"
+      },
+      "licence": "MIT",
+      "redistributable": false
+    },
+    {
+      "name": "strings",
+      "package": "binutils",
+      "optional": true,
+      "why": "A first pass over a region before a parser is chosen. Always search UTF-16LE as well, which strings -el does.",
+      "install": {
+        "brew": "brew install binutils",
+        "apt": "apt-get install -y binutils"
+      },
+      "licence": "GPL-3.0-or-later",
+      "redistributable": false
+    }
+  ]
+}

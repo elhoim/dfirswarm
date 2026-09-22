@@ -1,0 +1,12 @@
+{
+  "name": "check_inputs",
+  "description": "Diff inputs/ against inputs.json (size and sha256). Fails if the manifest is missing or any file differs.",
+  "params": {},
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "by": "sfcc304",
+  "at": "2026-09-18T15:41:47.088Z",
+  "version": 2,
+  "sha256": "87d89f2904098f2e3b4b72497d07bff648f8ad603ee9dacfb911abbcd8ee1473"
+}

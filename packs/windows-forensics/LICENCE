@@ -1,0 +1,6 @@
+This pack is part of DFIR Swarm and is published under the GNU Affero General
+Public License, version 3 or later. See the LICENSE file at the root of the
+DFIR Swarm repository for the full text.
+
+The tools in this pack were written by agents during the published runs under
+docs/use-cases/ and were generalised so that they belong to no single case.

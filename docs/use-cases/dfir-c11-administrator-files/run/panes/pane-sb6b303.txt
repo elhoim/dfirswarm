@@ -1,0 +1,80 @@
+ }
+
+
+
+
+ record
+ {
+   "ok": true,
+   "seq": 80,
+   "merged": false,
+   "total": 80,
+   "rendered": "ledger/ledger.md"
+ }
+
+
+
+
+ record
+ {
+   "ok": true,
+   "seq": 82,
+   "merged": false,
+   "total": 82,
+   "rendered": "ledger/ledger.md"
+ }
+
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/sb6b3/work/report.md:1-200
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/sb6b3/work/timeline.md:1-80
+
+
+
+ write work/sb6b303/FINDINGS.md
+
+ # Q2/Q6 findings — ntfs-deletion (sb6b303)
+
+ Times below are UTC. `istat` on this host prints +03; catalog `timeline.csv` is already UTC.
+
+ ## Q2 — Fate of `C:\Users\Administrator`
+
+ **Securely deleted with Sysinternals SDelete 2.05**, executed as the renamed PE `C:\Windows\dark_knight.c5w`. Not
+ moved, not encrypted, not hidden, not Recycle-Bin deleted.
+
+ | Fact | Evidence |
+ |---|---|
+ ... (43 more lines, 53 total, ctrl+o to expand)
+
+ Operation aborted
+
+
+
+ post
+ This operation was aborted
+
+
+
+ release_file
+ This operation was aborted
+
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+The swarm is finished: done/SWARM_DONE exists (All definition-of-done checks pass: work/report.md (7 sections),
+work/timeline.md (39 rows), ledger (47 events), sign-off posted and verified, inputs unchanged, traces complete. The
+case is solved: Administrator files were securely wiped by SDelete64 (disguised as dark_knight.c5w) executed on
+2024-07-27, with evidence tampering via wevtutil log clearing. Recovery is impossible due to SDelete's secure
+overwrite.). Call done now and stop.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/sb6b3 • sb6b303
+↑1.1M ↓11k R276k $2.330 28.5%/500k (auto)                                              (azure-foundry) grok-4.6 • medium
+swarm:sb6b303
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/sb6b3/.pi-sessions/sb6b303
+--session 01a0b668-6370-72b0-affb-e3217cb0f723
+    ~/DF/Sa/AliHadi-s/sb6b3                                                    ✔  took 15m 24s   at 00:40:13 

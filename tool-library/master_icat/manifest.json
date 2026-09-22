@@ -1,0 +1,30 @@
+{
+  "name": "master_icat",
+  "description": "Extract a file by inode from an E01 with icat. The HDFS master image and sector offset 2048 are the defaults; image and offset name any other.",
+  "params": {
+    "inode": {
+      "type": "integer",
+      "description": "Inode to extract"
+    },
+    "output": {
+      "type": "string",
+      "description": "Relative path to write to; omit to get the bytes on stdout"
+    },
+    "image": {
+      "type": "string",
+      "description": "Image to read (default inputs/HDFS-Master.E01)"
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Sector offset (default 2048)"
+    }
+  },
+  "runtime": "bash",
+  "entry": "run.sh",
+  "timeout_seconds": 30,
+  "example": "{\"inode\": 2229261, \"output\": \"work/passwd\"}",
+  "by": "s9a5f06",
+  "at": "2026-09-18T23:14:42.007Z",
+  "version": 3,
+  "sha256": "5185f4cd2680910c2544e01bc6c20826371e1c64b99815029efb48b17449a15f"
+}

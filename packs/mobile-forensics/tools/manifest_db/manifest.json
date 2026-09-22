@@ -1,0 +1,30 @@
+{
+  "name": "manifest_db",
+  "description": "Read an iOS backup's Manifest.db and turn the flat directory of hash-named files back into a file system: domain, relative path, size, flags and the file each hash actually is. Reports whether the backup is encrypted before anything else.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "The backup directory, or its Manifest.db"
+    },
+    "contains": {
+      "type": "string",
+      "description": "Case-insensitive regex over the relative path"
+    },
+    "domain": {
+      "type": "string",
+      "description": "Only this domain, e.g. HomeDomain or AppDomain-com.example"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum entries to return (default 500)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"inputs/backup\", \"contains\": \"sms\\\\.db$\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T20:00:00.000Z",
+  "version": 1,
+  "sha256": "50354e0a88791ab3a9297094c47b852c0ea89cdfd04be8bec7176446550dfde7"
+}

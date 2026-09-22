@@ -1,0 +1,76 @@
+{
+  "binaries": [
+    {
+      "name": "capa",
+      "package": "capa",
+      "optional": true,
+      "why": "Map a binary's behaviour to named capabilities and ATT&CK techniques from its code, not from its strings.",
+      "install": {
+        "brew": "python3 -m pip install flare-capa",
+        "apt": "python3 -m pip install flare-capa"
+      },
+      "licence": "Apache-2.0",
+      "redistributable": false
+    },
+    {
+      "name": "floss",
+      "package": "flare-floss",
+      "optional": true,
+      "why": "Recover strings a sample deobfuscates at runtime, by emulation, without running the sample.",
+      "install": {
+        "brew": "python3 -m pip install flare-floss",
+        "apt": "python3 -m pip install flare-floss"
+      },
+      "licence": "Apache-2.0",
+      "redistributable": false
+    },
+    {
+      "name": "olevba",
+      "package": "oletools",
+      "optional": true,
+      "why": "Extract and deobfuscate VBA macros from an Office document, and say which of them auto-run.",
+      "install": {
+        "brew": "python3 -m pip install oletools",
+        "apt": "python3 -m pip install oletools"
+      },
+      "licence": "BSD-2-Clause",
+      "redistributable": false
+    },
+    {
+      "name": "r2",
+      "package": "radare2",
+      "optional": true,
+      "why": "Disassembly, cross-references and function discovery from the command line, scriptable.",
+      "install": {
+        "brew": "brew install radare2",
+        "apt": "apt-get install -y radare2"
+      },
+      "licence": "LGPL-3.0-only",
+      "redistributable": false
+    },
+    {
+      "name": "yara",
+      "package": "yara",
+      "optional": true,
+      "why": "Match a sample against a rule set and report every hit with its offset.",
+      "install": {
+        "brew": "brew install yara",
+        "apt": "apt-get install -y yara"
+      },
+      "licence": "BSD-3-Clause",
+      "redistributable": false
+    },
+    {
+      "name": "strings",
+      "package": "binutils",
+      "optional": true,
+      "why": "A first pass over a binary before a parser is chosen. Always search UTF-16LE as well, which strings -el does.",
+      "install": {
+        "brew": "brew install binutils",
+        "apt": "apt-get install -y binutils"
+      },
+      "licence": "GPL-3.0-or-later",
+      "redistributable": false
+    }
+  ]
+}

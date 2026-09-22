@@ -1,0 +1,23 @@
+{
+  "source": "/Users/halilozturkci/DFIR/SampleCases/AliHadi/challenge-09-encrypt-them-all",
+  "copied_at": "2026-09-18T16:04:29Z",
+  "files": [
+    {
+      "path": "inputs/AF-Case2.E01",
+      "bytes": 7912229414,
+      "sha256": "d35a3bdfa1c12198f16fa2a98fa5c90a0ae408e0d983ba46213bb9bafcb1d6b0",
+      "mtime_ms": 1679644931000,
+      "ctime_ms": 1789747466258
+    },
+    {
+      "path": "inputs/CASE.md",
+      "bytes": 1721,
+      "sha256": "b340260cb30ccc5e070f01d84932c35d888a4655f4121542f101b45a227c2763",
+      "mtime_ms": 1789730983405,
+      "ctime_ms": 1789747466258
+    }
+  ],
+  "bytes": 7912231135,
+  "enforce": "auto",
+  "guard": "seatbelt"
+}

@@ -1,0 +1,80 @@
+
+
+ $ test -f work/report.md && echo HAS_REPORT || echo NO_REPORT; test -f work/timeline.md && echo HAS_TL || echo NO_TL;
+ wc -l ledger/entries.jsonl (timeout 10s)
+
+ HAS_REPORT
+ HAS_TL
+      100 ledger/entries.jsonl
+
+ Took 0.4s
+
+
+ Report and timeline exist; I’ll verify citations and post the critic sign-off.
+
+
+ name
+ {
+   "ok": true,
+   "name": "critic",
+   "previous": "msf-sessions",
+   "peers": [
+     {
+       "id": "s9da900",
+       "name": "TeethLoot",
+       "doing": "Q4 loot: /opt/Teeth cache (emails, nmap, sqlmap), MSF loot/sessions dirs, nmap XML, known_hosts,
+ hashes; publish inode map; skip NFS and bash/msf-history already claimed."
+     },
+ ... (28 more lines, ctrl+o to expand)
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s9da9/work/report.md
+
+
+
+ read ~/DFIR/SampleCases/AliHadi-swarm/s9da9/work/timeline.md
+
+
+
+ claims
+ Operation aborted
+
+
+
+ $ sha256sum work/extracted/s9da906/root_bash_history work/extracted/s9da906/msf4_history
+ work/extracted/s9da906/msf4_framework.log work/extracted/s9da906/vnc_default.tigervnc
+ work/extracted/s9da906/filezilla.xml work/extracted/s9da906/filezilla_recentservers.xml
+ work/extracted/s9da906/ssh_known_hosts work/extracted/s9da906/syslog work/extracted/s9da906/auth.log
+ work/extracted/s9da906/messages work/extracted/s9da906/etc_exports work/extracted/s9da906/etc_fstab
+ work/extracted/s9da906/msf4_development.log 2>/dev/null
+ echo '--- grep checks ---'
+ grep -c '^## [1-6]\.' work/report.md
+ grep -c '^| ' work/timeline.md
+ grep -c '"kind":"event"' ledger/entries.jsonl
+ echo '--- filezilla.xml times ---'
+ # recentservers Host
+ rg -n 'Host|Port|User|RemotePath|connected' work/extracted/s9da906/filezilla.xml
+ work/extracted/s9da906/filezilla_recentservers.xml | head
+ echo '--- dhcp ---'
+ rg -n 'DHCPACK|192.168.11.2' work/extracted/s9da903/syslog | head -10
+ echo '--- known_hosts hash ---'
+ sha256sum work/extracted/s9da900/known_hosts work/extracted/s9da901/known_hosts work/extracted/s9da906/ssh_known_hosts
+  (timeout 20s)
+
+ This operation was aborted
+
+
+ Error: This operation was aborted
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+The swarm is finished: done/SWARM_DONE exists (All deliverables complete: work/report.md (6 sections, all questions
+answered with cited evidence), work/timeline.md (37 rows), ledger (63 events), sign-off posted by s9da905 verifying
+hashes, content, and structural checks. Inputs verified unchanged.). Call done now and stop.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/DFIR/SampleCases/AliHadi-swarm/s9da9 • s9da902
+↑965k ↓7.9k R207k $2.081 21.6%/500k (auto)                                             (azure-foundry) grok-4.6 • medium
+swarm:s9da902
+To resume this session: pi --session-dir /Users/halilozturkci/DFIR/SampleCases/AliHadi-swarm/s9da9/.pi-sessions/s9da902
+--session 01a0b6e0-07cd-755a-ae4c-993ce001dc0d
+    ~/DF/Sa/AliHadi-s/s9da9                                                    ✔  took 21m 32s   at 02:57:02 

@@ -1,0 +1,18 @@
+{
+  "name": "gzip_note",
+  "description": "Gzip-decompress ZICNOTEDATA blobs from Apple NoteStore.sqlite and print note plaintext",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "Path to NoteStore.sqlite",
+      "required": true
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "by": "s821c01",
+  "at": "2026-09-20T18:17:58.857Z",
+  "version": 1,
+  "sha256": "cd226d236046ade4224421a43ec0eac385fc662458d55a8b664c5697e4d83d23"
+}

@@ -1,0 +1,22 @@
+{
+  "name": "collection_id",
+  "description": "Recognise which collector produced a tree — KAPE, UAC, Velociraptor, CyLR or none — read its own log and manifest, and report the artefact families present, the targets that failed, and what a logical acquisition of this shape cannot contain.",
+  "params": {
+    "root": {
+      "type": "string",
+      "description": "The collection directory"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum failed targets to list (default 200)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 300,
+  "example": "{\"root\": \"inputs/collection\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T23:30:00.000Z",
+  "version": 1,
+  "sha256": "40f121d56eb0b021fd516249674cd53a4b7ac7076214ff4efff6c2f223f7c7a1"
+}

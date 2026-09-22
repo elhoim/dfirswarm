@@ -1,0 +1,42 @@
+{
+  "name": "pcap_summary",
+  "description": "Read a pcap or pcapng with no external dependency and return the shape of it: link type, snap length, time range, conversations with bytes and packets each way, grouped per session or per endpoint, top talkers, ports and protocols, and the connection start times a beacon check needs.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A .pcap or .pcapng file"
+    },
+    "top": {
+      "type": "integer",
+      "description": "How many conversations to return (default 40)"
+    },
+    "host": {
+      "type": "string",
+      "description": "Only conversations involving this address"
+    },
+    "port": {
+      "type": "integer",
+      "description": "Only conversations involving this port"
+    },
+    "max_packets": {
+      "type": "integer",
+      "description": "Stop after this many packets (default 2000000)"
+    },
+    "with_starts": {
+      "type": "boolean",
+      "description": "Include each conversation's connection start times, for beacon_score"
+    },
+    "group": {
+      "type": "string",
+      "description": "session (default, one row per TCP session) or endpoint (one row per source, destination and service port, which is what a beacon check needs)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 600,
+  "example": "{\"path\": \"inputs/capture.pcap\", \"top\": 20, \"with_starts\": true}",
+  "by": "maintainer",
+  "at": "2026-09-22T19:00:00.000Z",
+  "version": 1,
+  "sha256": "6a3df3a03177a816e89b7ff6e9fe3ff84b073a35954199f67a4af7e1cb49bbeb"
+}

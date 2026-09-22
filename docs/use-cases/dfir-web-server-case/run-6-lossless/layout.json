@@ -1,0 +1,13 @@
+{
+  "n": 4,
+  "tabs": 1,
+  "extra_workspaces": 0,
+  "split_failures": 0,
+  "panes_per_tab_cap": 30,
+  "panes": [
+    "w6:p1",
+    "w6:p2",
+    "w6:p3",
+    "w6:p4"
+  ]
+}

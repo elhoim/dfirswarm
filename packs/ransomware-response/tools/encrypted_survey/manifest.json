@@ -1,0 +1,30 @@
+{
+  "name": "encrypted_survey",
+  "description": "Walk a tree and measure what was actually encrypted: which files, by what proportion, with the appended extension, the entropy at the head and across the file, the trailing bytes that often identify the family, and the clustering of modification times that brackets when the encryption ran.",
+  "params": {
+    "root": {
+      "type": "string",
+      "description": "A directory to survey"
+    },
+    "sample": {
+      "type": "integer",
+      "description": "How many files to read in full for the entropy profile (default 200)"
+    },
+    "tail_bytes": {
+      "type": "integer",
+      "description": "Trailing bytes to report per sampled file (default 32)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum files to list individually (default 200)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 900,
+  "example": "{\"root\": \"work/extracted/Users\"}",
+  "by": "maintainer",
+  "at": "2026-09-22T23:00:00.000Z",
+  "version": 1,
+  "sha256": "809f930421f062e39340b6d8e4b2f7c729f51e518aa56adceac024e46f3ca838"
+}
