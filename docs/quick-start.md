@@ -10,7 +10,7 @@ command line. About five minutes if Herdr and Pi are already installed.
 | Need | Why | Check |
 | --- | --- | --- |
 | **Node ≥ 22.6** | `--experimental-strip-types` runs the `.ts` scripts and tests without a build step. Node ≥ 22.21 (or 24) is needed for `NODE_USE_ENV_PROXY` if your `pi` is a Node build (see [Safety](safety.md)). | `node --version` |
-| **bash 4+, zsh, jq 1.6+, python3, curl** | `swarm.sh` renders the contract with python3 and manages the registry with jq; the pane hook runs in zsh and the kickoff refuses a host without it; `netcheck` uses curl. | `zsh --version && jq --version && python3 --version` |
+| **bash 4+, jq 1.6+, python3, curl; zsh if it is the login shell** | `swarm.sh` renders the contract with python3 and manages the registry with jq; the pane hook runs in the login shell, which has to be zsh or bash; `netcheck` uses curl. | `jq --version && python3 --version && getent passwd "$(id -un)" \| cut -d: -f7` |
 | **Herdr** | Panes, workspaces, `herdr agent start --kind pi`. Live runs used Herdr 0.9.0. There is **no** `herdr swarm` command; do not install `pi-herdsman`, `pi-herdr` or `@gjczone/pi-swarm` expecting this demo. | `herdr --version` |
 | **Pi** (`@earendil-works/pi-coding-agent`) | The agent harness. Verified against 0.85.1; the extension APIs it uses date from 0.74. | `pi --version` |
 | **A provider login for Pi** | `pi /login` once: an API key **or a Claude / ChatGPT subscription**; see [Credentials](usage.md#credentials). `swarm.sh start` passes no credential to the panes; Pi reads its own store. On a host with no persistent home, export the key and pass `--key-from-env` instead (see [ADR 0003](adr/0003-the-provider-key-comes-from-pis-own-store.md)). | `pi auth check --model <provider/id>` |

@@ -467,4 +467,23 @@ else
   echo "skip - keyless local provider cases (pi is not installed)"
 fi
 
+# --- the write guard's login-shell check: zsh and bash carry a hook, others do not ---
+# getent is stubbed so the account database says what the case needs; the
+# check runs before anything that needs herdr or pi.
+mkdir -p "$TMP/getent-bin"
+login_shell_out() { # login_shell_out <shell> -> the kickoff's output with that login shell
+  printf '#!/bin/sh\necho "u:x:1000:1000::/home/u:%s"\n' "$1" > "$TMP/getent-bin/getent"
+  chmod +x "$TMP/getent-bin/getent"
+  PATH="$TMP/getent-bin:$PATH" SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" start --model solo/model \
+    --n 1 --cap-usd 1 --goal-file "$ROOT/prompts/goals/hello.md" --label "shell-$(basename "$1")" 2>&1 || true
+}
+out="$(login_shell_out /usr/bin/fish)"
+printf '%s\n' "$out" | grep -q "BLOCKER: this account's login shell is /usr/bin/fish, and the write guard is a hook that only a zsh or a bash reads" \
+  || fail "a login shell that is neither zsh nor bash should be refused: $out"
+pass "a login shell with no pane hook (fish) is refused while the write guard is on"
+out="$(login_shell_out /bin/bash)"
+printf '%s\n' "$out" | grep -q "BLOCKER: this account's login shell" \
+  && fail "a bash login shell should pass the write guard's shell check: $out"
+pass "a bash login shell passes the write guard's shell check"
+
 echo "all swarm preflight cases passed"

@@ -113,6 +113,28 @@ else
   fi
   grep -q "^mode: $guard" "$sb/.fsguard/plan.txt" || fail "the plan does not match the guard"
   pass "the pane hook and the plan name the guard ($guard)"
+
+  # The bash side: the pane is given HOME=<sandbox>/.bash, where a bash reads
+  # .bashrc (interactive) or .bash_profile (login). Both carry the same guard.
+  for rc in .bashrc .bash_profile; do
+    [[ -f "$sb/.bash/$rc" ]] || fail "no bash pane hook $rc written for guard $guard"
+    grep -q "fsguard.sh" "$sb/.bash/$rc" || fail "the bash hook $rc does not run fsguard"
+    grep -q -- "--ro $sb/inputs" "$sb/.bash/$rc" || fail "the bash hook $rc does not make inputs/ read-only"
+    grep -q -- "--mode $guard" "$sb/.bash/$rc" || fail "the bash hook $rc does not name the guard"
+  done
+  grep -q "^export HOME=$(printf '%q' "$HOME")\$" "$sb/.zsh/.zshenv" || fail "the zsh hook does not put HOME back"
+  # Run it the way Herdr starts a pane: an interactive bash, and a login one,
+  # whose HOME is the hook's directory. Each must end up under the guard with
+  # the real HOME; the command arrives on stdin after the re-exec. The value is
+  # picked out of the line because a login profile may print terminal escapes
+  # (a prompt, OSC 3008) in front of it.
+  for how in -i "-l -i"; do
+    got="$(cd "$sb" && printf 'echo "guard=${SWARM_FSGUARD:-} home=$HOME"\n' \
+      | HOME="$sb/.bash" bash $how 2>/dev/null | grep -ao 'guard=[a-z]* home=[^[:space:][:cntrl:]]*' | tail -1 || true)"
+    [[ "$got" == "guard=$guard home=$HOME" ]] \
+      || fail "a bash pane started with 'bash $how' did not come up guarded with its HOME back: '$got'"
+  done
+  pass "a bash pane (interactive or login) re-runs itself under the guard and gets its HOME back"
 fi
 
 # --- a swarm without inputs is untouched ----------------------------------------
