@@ -77,3 +77,36 @@ jobs:
           echo "landlock ABI: $(python3 scripts/landlock.py --dry-run -- true | sed -n 's/^abi: //p')"
       - run: npm ci
       - run: bash scripts/test-bash.sh write-guard herdr-seal inputs netguard trace-gate
+
+  microvm:
+    # Agents in microVMs (--isolation microvm), on real VMs: GitHub's Linux
+    # runners expose /dev/kvm. The base image is built here from
+    # images/base.Dockerfile rather than pulled, so a pull request that changes
+    # it is tested with the change; images.yml tests the pushed one.
+    name: microVM · integration tests (KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - run: git config --global init.defaultBranch main
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: KVM for this user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+      - run: npm ci
+      - name: The base image, built and loaded into msb
+        run: |
+          docker build -f images/base.Dockerfile -t dfirswarm-base:dev-amd64 images
+          docker save dfirswarm-base:dev-amd64 -o "$RUNNER_TEMP/base.tar"
+          msb="$(node --experimental-strip-types --no-warnings scripts/vm.ts msb-path)"
+          "$msb" doctor
+          "$msb" load -i "$RUNNER_TEMP/base.tar"
+      - name: VM integration tests
+        env:
+          DFIRSWARM_VM_TESTS: "1"
+        run: npm run test:vm
