@@ -83,6 +83,18 @@ All notable changes to this project. The format follows
   model wrote it, the largest climb in one turn, the outputs kept under
   `tool-output/`, the deliveries paged; then one sentence per thing the
   record says about the lines. What the defaults are revisited from.
+- **The write guard reaches a pane whose login shell is bash.** The only
+  hook was `$ZDOTDIR/.zshenv`, so a bash account was refused at kickoff (or,
+  before that check, ran every pane unguarded). On such an account the panes
+  are now given `HOME=<sandbox>/.bash`, whose `.bashrc` and `.bash_profile`
+  put the panes' `HOME` back (an `--env HOME` if one was given), re-run the
+  same bash under `fsguard.sh`, and then read the user's own configuration.
+  `HOME` is moved for a bash account only, so a shell that reads neither
+  hook keeps its own. The login-shell check now runs whenever a hook is
+  written, `--no-write-guard` with `--inputs` or `--quarantine` included: a
+  shell that is neither zsh nor bash is refused while the write guard or
+  `--inputs-enforce on` depends on it, and warned about otherwise. Verified
+  live on Ubuntu with Herdr 0.9.1 (`s5038` in `docs/verified-runs.md`).
 
 ### Changed
 

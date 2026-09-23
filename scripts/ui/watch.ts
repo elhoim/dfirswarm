@@ -99,6 +99,7 @@ function kindOf(second: string, third: string): ChangeKind {
     case ".inputs-pristine":
     case ".fsguard":
     case ".zsh":
+    case ".bash":
     case "bin":
     case "package":
     case "netguard.pid":
