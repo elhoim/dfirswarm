@@ -37,11 +37,15 @@ before running the same commands again.
    (`/etc/localtime`, `/etc/timezone`, the journal's own UTC stamps against
    the syslog line for the same event), and its skew where the evidence
    allows (NTP, chrony and timesyncd lines such as `/var/log/chrony/` or
-   the journal's "Synchronized to time server", ntpd step messages; the
-   acquisition record's system time against the examiner's in `ewfinfo`;
-   SSH hops whose client-side and server-side records of one session
-   disagree), saying "skew not measurable" where none holds; whether the
-   images were cloned from a common template, and the date each diverged;
+   the journal's "Synchronized to time server", ntpd step messages; a
+   BIOS or system clock the examiner recorded against a reference at
+   imaging, in the case notes or the EWF case or description field, since
+   the acquisition and system dates `ewfinfo` shows both come from the
+   imaging workstation's clock and say nothing of the host's; SSH hops
+   whose client-side and server-side records of one session disagree),
+   saying "skew not measurable" where none holds; which image file each
+   profile came from; whether the images were cloned from a common
+   template, and the date each diverged;
    the users, groups and SSH material (`/etc/passwd`, `/etc/group`,
    `/etc/shadow` as metadata only, every `authorized_keys` and
    `known_hosts`).
@@ -174,6 +178,8 @@ naming what they verified, `work/timeline.md` holds the merged cross-host
 timeline as a table with at least 30 dated rows built from the ledger,
 `work/indicators.md` holds one table of every indicator (type, value, hosts
 seen, first seen, confidence; one row saying so if none was found), the
+report names every image it read by its file name (without the extension;
+by its directory when two images share a name) beside the host it holds, the
 ledger holds the dated events the timeline rests on, and `inputs/` is
 unchanged.
 
@@ -187,10 +193,13 @@ unchanged.
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 15`
-- `grep -qi 'hosts seen' work/indicators.md`
-- `imgs=$(jq -r '.files[].path | select(test("\\.(e01|raw|dd|img|001)$"; "i"))' inputs.json); test -n "$imgs" || exit 1; printf '%s\n' "$imgs" | while IFS= read -r f; do b=$(basename "$f"); grep -qF "${b%.*}" work/report.md || exit 1; done`
-  (every image `inputs.json` lists is named in the report by its file name
-  without the extension, so no host goes unread.)
+- `awk 'tolower(p) ~ /host/ && /^ *[|]? *:?-+:? *[|]/ {m=1} {p=$0} END {exit !m}' work/indicators.md`
+  (the indicators table's header has a hosts column.)
+- `python3 -c 'import json,os,re,collections;fs=[f["path"] for f in json.load(open("inputs.json"))["files"] if re.search(r"[.](e01|ex01|s01|001|raw|dd|img|bin|vmdk|vhdx?|qcow2|aff4)$",f["path"],re.I)];st={(os.path.dirname(p),re.sub(r"(?i)(-(flat|s[0-9]{3}))?[.]vmdk$|([.](raw|dd|img|bin))?[.][^.]+$","",os.path.basename(p))) for p in fs};n=collections.Counter(s for d,s in st);t=open("work/report.md",errors="replace").read();raise SystemExit(any(not re.search(r"(?<![\w-])"+re.escape(os.path.basename(d) if n[s]>1 else s)+r"(?![\w-])",t,re.I) for d,s in st))'`
+  (every disk image `inputs.json` lists is named in the report as a whole
+  word: by its file name without the extension or split suffix, or by its
+  directory when two images share a file name. With no recognised image in
+  the manifest there is nothing to match, and the check passes.)
 - `grep -rqi 'sign-off' threads/main/`
 - `grep -q '"tool":"inputs_check"' traces/events.jsonl`
   (`inputs_check` is an event the harness writes itself when `done` verifies
