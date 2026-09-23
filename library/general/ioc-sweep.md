@@ -159,13 +159,13 @@ the report cannot be the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, every answer cites evidence,
-the critic has posted a sign-off on the board naming what they verified (a
-sample of hits re-run with the matcher, a sample of misses re-run by hand),
-`work/indicators-normalised.csv` holds every indicator the inputs supplied
-with its type and source, `work/hits.md` holds one table of every hit
-(indicator, type, input, location, context, meaning, confidence; one row
-saying so if nothing was found, and why), `work/timeline.md` holds the
-merged timeline as a table with at least 10 dated rows built from the
+the critic has posted a sign-off on the board as a `result` post naming what
+they verified (a sample of hits re-run with the matcher, a sample of misses
+re-run by hand), `work/indicators-normalised.csv` holds every indicator the
+inputs supplied with its type and source, `work/hits.md` holds one table of
+every hit (indicator, type, input, location, context, meaning, confidence;
+one row saying so if nothing was found, and why), `work/timeline.md` holds
+the merged timeline as a table with at least 10 dated rows built from the
 ledger, the ledger holds the dated events the timeline rests on, and
 `inputs/` is unchanged.
 
@@ -181,8 +181,8 @@ ledger, the ledger holds the dated events the timeline rests on, and
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 12`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 5`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `test -n "$(grep -l '^tag: result' threads/main/*.md | xargs -r grep -li 'sign-off')"`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

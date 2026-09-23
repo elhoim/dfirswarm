@@ -155,16 +155,16 @@ the report cannot be the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, every answer
-cites evidence (file, line, field), the critic has posted a sign-off on
-the board naming what they verified against the ledger, `work/timeline.md`
-holds the merged timeline as a table with at least 25 dated rows built
-from the ledger, each row naming the device it came from, `work/hosts.md`
-holds one table of the internal hosts to collect next (address, name where
-known, what implicates it, rank; one row saying so if none was found),
-`work/indicators.md` holds one table of every indicator (type, value,
-first seen, device, confidence; one row saying so if none was found), the
-ledger holds the dated events the timeline rests on, and `inputs/` is
-unchanged.
+cites evidence (file, line, field), the critic has posted a sign-off on the
+board as a `result` post naming what they verified against the ledger,
+`work/timeline.md` holds the merged timeline as a table with at least 25
+dated rows built from the ledger, each row naming the device it came from,
+`work/hosts.md` holds one table of the internal hosts to collect next
+(address, name where known, what implicates it, rank; one row saying so if
+none was found), `work/indicators.md` holds one table of every indicator
+(type, value, first seen, device, confidence; one row saying so if none was
+found), the ledger holds the dated events the timeline rests on, and
+`inputs/` is unchanged.
 
 ## Checks
 
@@ -178,8 +178,8 @@ unchanged.
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `test -n "$(grep -l '^tag: result' threads/main/*.md | xargs -r grep -li 'sign-off')"`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

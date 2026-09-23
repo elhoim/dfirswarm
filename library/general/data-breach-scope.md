@@ -172,13 +172,14 @@ environment" row re-derived from its two artefacts.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified, `work/data-affected.md` holds one table with a row per item or
-record set (item, type, action, actor, time, channel, certainty, evidence;
-one row saying so if nothing was established, and why), the counts in the
-report say what they rest on, `work/timeline.md` holds the merged timeline
-as a table with at least 25 dated rows built from the ledger, the ledger
-holds the dated events the timeline rests on, and `inputs/` is unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+naming what they verified, `work/data-affected.md` holds one table with a
+row per item or record set (item, type, action, actor, time, channel,
+certainty, evidence; one row saying so if nothing was established, and why),
+the counts in the report say what they rest on, `work/timeline.md` holds the
+merged timeline as a table with at least 25 dated rows built from the
+ledger, the ledger holds the dated events the timeline rests on, and
+`inputs/` is unchanged.
 
 ## Checks
 
@@ -191,8 +192,8 @@ holds the dated events the timeline rests on, and `inputs/` is unchanged.
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 27`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `test -n "$(grep -l '^tag: result' threads/main/*.md | xargs -r grep -li 'sign-off')"`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

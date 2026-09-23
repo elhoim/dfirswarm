@@ -149,12 +149,12 @@ the check is the two artefacts under the verdict, re-read.
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, every answer cites evidence, the report
 states the verdict (compromised, not compromised, or cannot tell) with the
 two independent artefacts it rests on or the reason it rests on fewer, the
-critic has posted a sign-off on the board naming what they verified,
-`work/timeline.md` holds the merged timeline as a table with at least 10
-dated rows built from the ledger, `work/collect-next.md` holds one table
-of what to collect next (artefact, from where, what it would resolve; one
-row saying so if nothing more is needed), the ledger holds the dated events
-the timeline rests on, and `inputs/` is unchanged.
+critic has posted a sign-off on the board as a `result` post naming what
+they verified, `work/timeline.md` holds the merged timeline as a table with
+at least 10 dated rows built from the ledger, `work/collect-next.md` holds
+one table of what to collect next (artefact, from where, what it would
+resolve; one row saying so if nothing more is needed), the ledger holds the
+dated events the timeline rests on, and `inputs/` is unchanged.
 
 ## Checks
 
@@ -167,8 +167,8 @@ the timeline rests on, and `inputs/` is unchanged.
 - `test -f work/collect-next.md`
 - `test "$(grep -c '^| ' work/collect-next.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 5`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `test -n "$(grep -l '^tag: result' threads/main/*.md | xargs -r grep -li 'sign-off')"`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

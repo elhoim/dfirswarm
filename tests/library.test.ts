@@ -217,7 +217,7 @@ test("every entry that ships keeps the library's contract", async () => {
       if (!divide.includes(must)) bad(id, `division of work does not say: ${must}`);
     }
     const dod = flat(section(body, /^##\s+Definition of done\s*$/));
-    for (const must of ["work/report.md", "sign-off", "work/timeline.md", "inputs/` is unchanged"]) {
+    for (const must of ["work/report.md", "sign-off", "`result` post", "work/timeline.md", "inputs/` is unchanged"]) {
       if (!dod.includes(must)) bad(id, `definition of done does not mention ${must}`);
     }
 
@@ -226,7 +226,7 @@ test("every entry that ships keeps the library's contract", async () => {
     if (checks.length < 6) bad(id, `${checks.length} checks; the standard set alone is seven`);
     if (countChecks(body) !== checks.length) bad(id, "the console would count the checks differently from this test");
     const text = checks.join("\n");
-    for (const must of ["test -f work/report.md", "test -f work/timeline.md", "ledger/entries.jsonl", "grep -rqi 'sign-off' threads/main/", `grep -q '"tool":"inputs_check"' traces/events.jsonl`]) {
+    for (const must of ["test -f work/report.md", "test -f work/timeline.md", "ledger/entries.jsonl", `test -n "$(grep -l '^tag: result' threads/main/*.md | xargs -r grep -li 'sign-off')"`, `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`]) {
       if (!text.includes(must)) bad(id, `standard check missing: ${must}`);
     }
     if (/find +inputs\b/.test(text) && !/find -[HL] inputs/.test(text)) bad(id, "a check walks inputs/ with a bare find");
