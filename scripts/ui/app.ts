@@ -175,15 +175,26 @@ async function sendFile(
   const info = await stat(abs);
   if (!info.isFile()) throw new HttpError(404, "not a file");
   const type = MIME[extname(abs).toLowerCase()] ?? "application/octet-stream";
-  const name = basename(abs).replace(/["\\]/g, "_");
+  // Names under work/ come from evidence and can be in any script. Node
+  // refuses a header value above U+00FF (and mangles some that pass), so the
+  // quoted filename is an ASCII stand-in and the real name goes in the
+  // RFC 5987 filename*, which browsers prefer when both are present.
+  const name = basename(abs);
+  const fallback = name.replace(/[^\x20-\x7e]|["\\]/g, "_");
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
   res.writeHead(200, {
     "content-type": type,
     "content-length": String(info.size),
     "cache-control": "no-store",
-    "content-disposition": `${download ? "attachment" : "inline"}; filename="${name}"`,
+    "content-disposition": `${download ? "attachment" : "inline"}; filename="${fallback}"; filename*=UTF-8''${encoded}`,
     ...extraHeaders,
   });
-  createReadStream(abs).pipe(res);
+  // The headers are out, so a file removed or made unreadable since the stat
+  // can only cut the response short; without a listener the stream's error
+  // is an uncaught exception and takes the whole console down with it.
+  const stream = createReadStream(abs);
+  stream.on("error", () => res.destroy());
+  stream.pipe(res);
 }
 
 export function createUiApp(options: UiAppOptions): UiApp {
