@@ -4426,11 +4426,13 @@ vm_arch() {
 }
 
 # The image a run's VMs boot: the smallest profile that holds the run's packs
-# (images/recipe.py profile-for), by the reference images/images.lock.json
-# pins for this architecture — a digest, so a run names exactly what it ran.
-# Without a lock entry, the local development build of that profile.
+# (images/recipe.py profile-for), by the reference a lock file pins for this
+# architecture — a digest, so a run names exactly what it ran. The lock is
+# SWARM_IMAGES_LOCK (the pro edition's prebuilt images), else
+# images/images.lock.json. Without a lock entry, the local build of that
+# profile (images/README.md).
 vm_default_image() { # <pack dirs, one per line>
-  local ids=() d profile ref="" lock="$ROOT/images/images.lock.json"
+  local ids=() d profile ref="" lock="${SWARM_IMAGES_LOCK:-$ROOT/images/images.lock.json}"
   while read -r d; do
     [[ -n "$d" ]] && ids+=("$(basename "$d")")
   done <<< "$1"
