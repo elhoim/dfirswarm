@@ -30,12 +30,16 @@ the same commands again.
 ### Questions the report has to answer
 
 1. System profile and which tools were present and run: the acquisition
-   record (`ewfinfo`) and whether the image still verifies against it
-   (`ewfverify`, or the recorded hash against `inputs.json`); the
-   distribution and release (`/etc/os-release`), the kernel, the hostname,
-   the time zone, the users, and the toolset — what was installed (the
-   package logs `dpkg.log`, `/var/lib/dpkg/status`, the `apt` history, the
-   rpm or dnf history) and what was actually run, from every user's shell
+   record and the media hash it holds (`ewfinfo`), and whether the image
+   still verifies against it (`ewfverify` reads the whole image, a long
+   run, so say on the board before starting it; `inputs.json` holds the
+   SHA-256 of the container files as copied, not the media hash, so it
+   shows only that the files have not changed since and cannot stand in
+   for the acquisition hash); the distribution and release
+   (`/etc/os-release`), the kernel, the hostname, the time zone, the
+   users, and the toolset — what was installed (the package logs
+   `dpkg.log`, `/var/lib/dpkg/status`, the `apt` history, the rpm or dnf
+   history) and what was actually run, from every user's shell
    histories (`.bash_history`, `.zsh_history`), the tools' own logs and
    databases (`~/.msf4/history`, `~/.msf4/logs/framework.log`,
    `~/.msf4/loot/` and the Metasploit PostgreSQL data directory; the netexec
@@ -84,12 +88,13 @@ the same commands again.
   `tsk_recover`; E01 is read natively, as is EXT4; XFS is not, so a RHEL-family root
   needs a forged superblock and inode B+tree reader, or a logical export
   from the operator — say which on the board), libewf
-  (`ewfinfo` for the acquisition record and hashes), `strings`, `sqlite3`,
-  `python3` (3.12), `openssl`, `gpg` (`gpg --show-keys` or
-  `gpg --list-packets` on an extracted key file; never `--homedir` on the
-  extract itself, which writes into it), `ssh-keygen -l -f` for key
-  fingerprints. Read the journal with `journalctl --file` if the host
-  has it, else forge a parser for the binary journal; read the package
+  (`ewfinfo` for the acquisition record and hashes, `ewfverify` to check
+  them), `strings`, `sqlite3`, `python3` (3.12), `openssl`, `gpg`
+  (`gpg --show-keys` or `gpg --list-packets` on an extracted key file;
+  never `--homedir` on the extract itself, which writes into it),
+  `ssh-keygen -l -f` for key fingerprints. Read the journal with
+  `journalctl --file` if the host has it, else forge a parser for the
+  binary journal; read the package
   databases (`/var/lib/dpkg`, `/var/lib/rpm`) from the extracts. There is no
   root: no mounting, no `sudo`.
 - If the root file system sits inside an LVM physical volume (partition type

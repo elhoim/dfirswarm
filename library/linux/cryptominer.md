@@ -58,7 +58,9 @@ before running the same commands again.
    the library it names, watchdog scripts that restart the miner, scripts
    that stop competing miners or security agents, firewall and `hosts`
    changes, hugepages set for the miner (`vm.nr_hugepages` in
-   `/etc/sysctl.conf` or `/etc/sysctl.d`), and immutable attributes on its
+   `/etc/sysctl.conf` or `/etc/sysctl.d`), the `msr` module loaded for the
+   miner's MSR tuning (`modprobe msr` in its scripts or histories, `msr` in
+   `/etc/modules-load.d`, kernel log lines), and immutable attributes on its
    files (the inode flags from `istat` on the image; an extracted copy does
    not carry them).
 5. Resource and network evidence: the connections to the pool in the logs

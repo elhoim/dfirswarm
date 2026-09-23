@@ -30,10 +30,15 @@ commands again.
 
 1. System profile: distribution and release (`/etc/os-release`), kernel
    (`/boot`, `/lib/modules`), hostname, the time zone the host kept
-   (`/etc/localtime`, `/etc/timezone`), the install date (the crtime of
-   inode 2 or 11 from `istat`, `fsstat`'s last-checked time as a proxy,
-   `/var/log/installer/` or `/root/anaconda-ks.cfg`, the oldest package log
-   entry, rotated `.gz` included), every user and group with uid, home,
+   (`/etc/localtime`, `/etc/timezone`), the install date (on ext4, the
+   crtime of inode 2 or 11 from `istat`; ext3 has no crtime, and on XFS the
+   root inode is the superblock's `sb_rootino`, often 128, read with the
+   forged reader; `fsstat`'s last-checked time as a proxy;
+   `/var/log/installer/` or `/root/anaconda-ks.cfg`; the oldest package log
+   entry, rotated `.gz` included; on a cloud or template image the file
+   system dates are the template's build, so take deployment from
+   cloud-init's first boot in `/var/log/cloud-init.log` and
+   `/var/lib/cloud/instances/`), every user and group with uid, home,
    shell, account state and password-change date (`/etc/passwd`,
    `/etc/group`, `/etc/shadow` as metadata), the sudoers policy
    (`/etc/sudoers`, `/etc/sudoers.d/`), the SSH server's configuration and
@@ -55,7 +60,9 @@ commands again.
    compiled binaries in `/tmp`, `/dev/shm`, `/var/tmp` or a home; module
    loads and taint messages in `kern.log` and the journal;
    `/etc/ld.so.preload`; the first command run as root (audit EXECVE and
-   SYSCALL records where `auditd` ran).
+   SYSCALL records, which exist only where an execve rule was loaded, not
+   the default: read `/etc/audit/rules.d/` and `/etc/audit/audit.rules`
+   first).
 4. What was modified? Packages installed, removed or downgraded
    (`dpkg.log`, `/var/lib/dpkg/status`, `yum.log`, the `dnf` history
    database, the rpm database); binaries whose hash differs from what the
@@ -65,6 +72,8 @@ commands again.
    leave out; the rpm database is `rpmdb.sqlite` (`sqlite3`) on RHEL 9 and
    Fedora 33 onward, and Berkeley DB (`/var/lib/rpm/Packages`) on older
    releases, which `sqlite3` cannot read (forge a reader or record the gap);
+   on Fedora 36 onward it lives in `/usr/lib/sysimage/rpm/`, and
+   `/var/lib/rpm` is a symlink that `icat` does not follow;
    configuration files changed inside the window; users and keys added or
    altered; logs truncated, rotated early or edited (a gap, a size of zero,
    a change time after the last line).

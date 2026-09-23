@@ -55,19 +55,22 @@ before running the same commands again.
    as read, and every access-log request that called it. Grep the roots for
    `eval(`, `assert(`, `base64_decode`, `gzinflate`, `system(`, `passthru`,
    `shell_exec`, `preg_replace` with `/e` and `move_uploaded_file`; read the
-   PHP session files (`/var/lib/php/sessions`) and the php-fpm log and slow
-   log for the requests that used them.
+   PHP session files (`/var/lib/php/sessions` on Debian and Ubuntu,
+   `/var/lib/php/session` on RHEL) and the php-fpm log and slow log for the
+   requests that used them.
 4. The database: the data directory (`/var/lib/mysql`,
    `/var/lib/postgresql/<ver>/main`); the engine's own logs (error log,
    general or slow log and the `general_log` or `log_statement` settings
-   that enabled them, the binary log `*-bin.NNNNNN` or `pg_wal/` as far as
-   `strings` and a forged reader get: `mysqlbinlog` is not in the toolbox,
-   say so); the accounts and grants as the data files hold them
-   (`mysql/user.MYD` on MySQL 5.x, `strings` of `mysql.ibd` on 8.x,
-   `global/1260` on PostgreSQL); the `secure_file_priv` directory
-   (`/var/lib/mysql-files`) and any `INTO OUTFILE` result; `.mysql_history`
-   and `.psql_history`; dumps and export files left on disk (`.sql` files,
-   the engine's export directory, archives in temp); rows the application's
+   that enabled them, the binary log `*-bin.NNNNNN` or `binlog.NNNNNN`
+   (the MySQL 8 default name) or `pg_wal/` as far as `strings` and a
+   forged reader get: `mysqlbinlog` is not in the toolbox, say so); the
+   accounts and grants as the data files hold them (`mysql/user.MYD` on
+   MySQL 5.x, `strings` of `mysql.ibd` on 8.x, `mysql/global_priv.MAD` on
+   MariaDB 10.4 onward, `global/1260` on PostgreSQL); the
+   `secure_file_priv` directory (`/var/lib/mysql-files`) and any
+   `INTO OUTFILE` result; `.mysql_history` and `.psql_history`; dumps and
+   export files left on disk (`.sql` files, the engine's export directory,
+   archives in temp); rows the application's
    own audit or user tables show as added or changed in the window; and the
    application's own log of logins and actions.
 5. The host after the foothold: commands the web server's account ran

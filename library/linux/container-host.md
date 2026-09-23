@@ -67,13 +67,14 @@ first pass (partition table, file list, body file, MAC timeline); read
    own layers say the container was meant to run.
 4. Did a container reach the host? Binds of the host root, the runtime's
    socket or a device into a container; the privileged flag, host
-   namespaces (`PidMode`, `NetworkMode`, `IpcMode` set to host),
-   capabilities beyond the default (`CapAdd` with `SYS_ADMIN`, `SYS_PTRACE`
-   or `SYS_MODULE`), `Devices`, and `SecurityOpt` turning AppArmor or
-   seccomp off (`unconfined`) in `hostconfig.json`; host files whose change
-   time and content match a container's activity; kernel, audit and daemon
-   lines (`kern.log`, `audit.log`, the journal) that show a container's
-   process on host paths; and a file on the host that a container's layer
+   namespaces (`PidMode`, `NetworkMode`, `IpcMode`, `UsernsMode` set to
+   host), capabilities beyond the default (`CapAdd` with `SYS_ADMIN`,
+   `SYS_PTRACE`, `SYS_MODULE` or `DAC_READ_SEARCH`), `Devices`, and
+   `SecurityOpt` turning AppArmor or seccomp off (`unconfined`) in
+   `hostconfig.json`; host files whose change time and content match a
+   container's activity; kernel, audit and daemon lines (`kern.log`,
+   `audit.log`, the journal) that show a container's process on host
+   paths; and a file on the host that a container's layer
    explains.
 5. Persistence on the host and in the images: cron entries and systemd
    units that start or recreate a container, containers with a restart
