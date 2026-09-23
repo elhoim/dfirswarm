@@ -33,7 +33,7 @@
  * `E-<seq>` and the console, the ledger and this document cite the same
  * thing.
  */
-import { readFile, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -479,6 +479,8 @@ export function writeGuardLine(mode: string | undefined): string {
       return "enforced (Landlock, no namespace: the panes could write inside this run and Pi's agent directory, and nowhere else)";
     case "mountns":
       return "enforced (bubblewrap: a read-only root with this run and Pi's agent directory bound back writable)";
+    case "microvm":
+      return "enforced (microVM: each agent could write work/, its own tool-output/ and its own Pi session; the rest of the run was read-only in its VM, the board was written by the hub on the host, and nothing else of the host was in the VM)";
     case "none":
       return "NONE — a pane could write anywhere this user can, including outside the run";
     default:
@@ -503,6 +505,8 @@ export function herdrSocketLine(state: string | undefined): string {
       return "hidden from the panes (an empty tmpfs over the socket's directory in their mount namespace)";
     case "open":
       return "REACHABLE — --no-seal-herdr was passed; a pane could start a process outside the write guard";
+    case "unreachable":
+      return "out of reach: the agents ran in microVMs, and no host socket but each one's own hub link was in its VM";
     case "unenforced":
       // Not always the host's fault: `--no-write-guard` turns the whole
       // profile off, and a run with nothing to point the rule at emits none
@@ -548,6 +552,8 @@ export function attributionLine(state: string | undefined): string {
       return "by process ancestry (the gate reads the sender's pid from the kernel and walks up to the pane; a token alone does not attribute)";
     case "token-exposed":
       return "BY TOKEN, EXPOSED — this host lets a pane read a peer's environment and the gate was not running; a line could carry a peer's token";
+    case "channel":
+      return "by channel (each agent's VM reached the hub on its own vsock port, and the hub named the sender from the port a line came in on; no agent held a token)";
     default:
       return "not recorded (this run predates the field)";
   }
@@ -568,6 +574,9 @@ export function anchorGuarded(writeGuard: string | undefined, hostCaps: Record<s
       return true;
     case "mountns":
       return hostCaps?.bwrap === true;
+    case "microvm":
+      // Beside the run on the host, and the host was not in any VM.
+      return true;
     default:
       return false;
   }
@@ -590,6 +599,8 @@ export function measuredGuardLine(state: string | undefined): string {
       return "not measured (no pane reported a probe in time)";
     case "not-applicable":
       return "no write guard on this run";
+    case "microvm":
+      return "every agent's VM was probed at kickoff (vm/<id>.json): the run's floor read-only, its own directories writable, the evidence read-only, the hub reachable";
     default:
       return "not recorded (this run predates the field)";
   }
@@ -689,9 +700,84 @@ export function egressLine(mode: string | undefined): string {
       return "ADVISORY (proxy environment only: it holds for anything that reads HTTP(S)_PROXY, not for a raw socket)";
     case "off":
       return "none (netguard was off for this run)";
+    case "microvm":
+      return "enforced (microVM network policy on the host: deny by default, each VM's allowed hosts only; a denied name does not resolve and a hard-coded address has no route)";
     default:
       return "not recorded (this run predates the field)";
   }
+}
+
+/**
+ * How the evidence reached the agents: copied into the run, used in place
+ * behind a host guard, or mounted read-only into each agent's microVM.
+ */
+export function evidenceArrival(inputs: { source?: string; copied_at?: string; guard?: string; held?: string; bound?: boolean }): string {
+  const source = `<code>${escapeHtml(inputs.source || "the operator")}</code>`;
+  const at = escapeHtml(inputs.copied_at || "—");
+  if (inputs.guard === "microvm") {
+    return `<p>Used in place from ${source} (manifest taken ${at}), with no copy: each agent's microVM had it mounted read-only as <code>inputs/</code>, and the host refused every write through that mount. The harness also refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it.</p>`;
+  }
+  if (inputs.held === "bind" || inputs.bound) {
+    return `<p>Used in place from ${source} (manifest taken ${at}), with no copy: <code>inputs/</code> linked to it, and the kernel held the source read-only in every pane. The harness refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it.</p>`;
+  }
+  return `<p>Copied from ${source} at ${at} into <code>inputs/</code>, which no agent may write. The harness refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it, restores a shell write from a pristine copy, and where the host allows it runs each pane with <code>inputs/</code> read-only at the kernel.</p>`;
+}
+
+/** What the VM manager recorded about one agent's VM (scripts/vm.ts, vm/<id>.json). */
+export type VmRecordView = {
+  agent: string;
+  name?: string;
+  runtime?: { name?: string; version?: string };
+  image?: { ref?: string; manifest_digest?: string | null };
+  cpus?: number;
+  memory_mib?: number;
+  mounts?: Array<{ host?: string; guest?: string; mode?: string; noexec?: boolean }>;
+  network?: { default?: string; allow_hosts?: string[]; host_ports?: number[] };
+  secrets?: Array<{ name?: string; hosts?: string[] }>;
+  snapshot?: { path?: string; sha256?: string; bytes?: number } | { error?: string };
+  created_at?: string;
+  stopped_at?: string;
+};
+
+/**
+ * The custody rows a microVM run adds: what the agents ran in, and each
+ * agent's VM as the host recorded it. Whole — a reader checking a digest or
+ * a mount needs all of it.
+ */
+export function vmRows(records: VmRecordView[]): Array<[string, string]> {
+  if (!records.length) return [];
+  const first = records[0];
+  const images = [...new Set(records.map((r) => `${r.image?.ref ?? "?"} (${r.image?.manifest_digest ?? "digest not recorded"})`))];
+  const rows: Array<[string, string]> = [
+    ["Isolation", `one microVM per agent (${first.runtime?.name ?? "microsandbox"} ${first.runtime?.version ?? ""}`.trimEnd() + `), image ${images.join("; ")}`],
+  ];
+  for (const r of records) {
+    const writable = (r.mounts ?? []).filter((m) => m.mode === "rw").map((m) => `${m.guest ?? m.host}${m.noexec ? " (no-exec)" : ""}`);
+    const net = r.network?.default === "public"
+      ? "every public host (--no-netguard)"
+      : [...(r.network?.allow_hosts ?? []).map((h) => `${h}:443`), ...(r.network?.host_ports ?? []).map((p) => `the host gateway :${p}`)].join(", ") || "nothing";
+    const secrets = (r.secrets ?? []).map((s) => `${s.name ?? "?"} → ${(s.hosts ?? []).join(", ")}`).join("; ") || "none";
+    const snap = !r.snapshot
+      ? "not kept"
+      : "error" in r.snapshot && r.snapshot.error
+        ? `NOT KEPT — ${r.snapshot.error}`
+        : `kept, sha256 ${(r.snapshot as { sha256?: string }).sha256 ?? "?"} (${(r.snapshot as { path?: string }).path ?? "?"})`;
+    rows.push([
+      `VM ${r.agent}`,
+      `${r.name ?? "?"}: ${r.cpus ?? "?"} vCPU, ${r.memory_mib ?? "?"} MiB; writable: ${writable.join(", ") || "nothing"}; everything else mounted read-only; could reach: ${net}; secrets swapped in on the way out: ${secrets}; disk at stop: ${snap}`,
+    ]);
+  }
+  return rows;
+}
+
+async function readVmRecords(sandbox: string): Promise<VmRecordView[]> {
+  const dir = join(sandbox, "vm");
+  const out: VmRecordView[] = [];
+  for (const name of (await readdir(dir).catch(() => [])).filter((n) => n.endsWith(".json")).sort()) {
+    const rec = await readJson<VmRecordView>(join(dir, name));
+    if (rec?.agent) out.push(rec);
+  }
+  return out;
 }
 
 export async function renderReport(sandboxArg: string, options: ReportOptions = {}): Promise<string> {
@@ -711,6 +797,8 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   const sentinel = sentinelText === null ? null : parseFrontMatter(sentinelText);
   const ledger = await readLedger(sandbox);
   const inputs = await readInputsManifest(sandbox);
+  const vmRecords = await readVmRecords(sandbox);
+  const hostCustody = await readJson<{ summary?: string; at?: string }>(join(sandbox, "custody.json"));
   // The manifest says what was copied; the trace says what each pane measured
   // and what the final check found. The console joins them the same way in
   // `inputsView`, and the report must not state a guard the panes did not
@@ -833,7 +921,7 @@ ${verdictGroups(findings)}`
     title: "Scope and evidence",
     count: inputs ? `${inputs.files.length} file${inputs.files.length === 1 ? "" : "s"} · ${bytesHuman(inputs.bytes ?? 0)}` : "none given",
     html: inputs
-      ? `<p>Copied from <code>${escapeHtml(inputs.source || "the operator")}</code> at ${escapeHtml(inputs.copied_at || "—")} into <code>inputs/</code>, which no agent may write. The harness refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it, restores a shell write from a pristine copy, and where the host allows it runs each pane with <code>inputs/</code> read-only at the kernel.</p>
+      ? `${evidenceArrival(inputs as { source?: string; copied_at?: string; guard?: string; held?: string; bound?: boolean })}
 <p>Guard requested <code>${escapeHtml(inputs.enforce || "auto")}</code>, set up as <code>${escapeHtml(inputs.guard || "none")}</code>; measured per pane: ${
           enforcedSeen.length
             ? Object.entries(enforced)
@@ -989,7 +1077,9 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ],
     [
       "Network",
-      allowHosts
+      vmRecords.length
+        ? `each agent's VM, deny by default: ${[...new Set(vmRecords.flatMap((r) => r.network?.default === "public" ? ["every public host"] : [...(r.network?.allow_hosts ?? []), ...(r.network?.host_ports ?? []).map((p) => `host gateway :${p}`)]))].join(", ") || "nothing"}`
+        : allowHosts
         ? `netguard allowlist: ${allowHosts.split("\n").filter(Boolean).join(", ")}`
         : allowFromLog.length
           ? `netguard allowlist not kept; the proxy log shows it allowed ${allowFromLog.join(", ")}`
@@ -1003,6 +1093,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ["Pi extensions", piExtensionsLine(run?.pi_extensions as string | undefined)],
     ["Attribution", attributionLine(run?.attribution as string | undefined)],
     ["Guard measured", measuredGuardLine(run?.write_guard_measured as string | undefined)],
+    ...vmRows(vmRecords),
     [
       "Trace integrity",
       chainLine(chain, Boolean(anchorPoint), anchorGuarded(run?.write_guard as string | undefined, run?.host_caps as Record<string, unknown> | undefined)),
@@ -1016,6 +1107,12 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
         : "nothing",
     ],
     ["Ledger", `${ledger.length} entries (${timeline.length} events, ${iocs.length} indicators, ${findings.length} findings)`],
+    [
+      "Host custody check",
+      hostCustody?.summary
+        ? `${hostCustody.summary} (taken on the host after the run, ${hostCustody.at ?? "time not recorded"}; custody.json)`
+        : "not taken (swarm.sh stop takes it)",
+    ],
     ["Trace", `${events.length} tool calls`],
   ];
   sections.push({
