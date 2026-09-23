@@ -62,8 +62,8 @@ ran the first pass; read `catalog/` before running the same commands again.
    (module logging) and 4104 (script block, with the scripts reassembled
    from their parts and hashed) and 400, 403 and 600 in
    `Windows PowerShell`; WMI activity 5857 to 5861; and Sysmon 1, 3, 7, 8,
-   10, 11, 12, 13, 14, 19 to 22 (WMI persistence and DNS), 23 and 26
-   (file deletes, archived or only logged) and 25 (process tampering)
+   10, 11, 12, 13, 14, 19 to 22 (WMI persistence and DNS), 23 (file
+   delete archived), 25 (process tampering) and 26 (FileDeleteDetected)
    where the channel is present; each with user, time, host and the
    record that holds it.
 5. Defence tampering: Defender 5001, 5004, 5007, 5010 and 5012 (protection
