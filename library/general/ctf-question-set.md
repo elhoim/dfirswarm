@@ -160,14 +160,14 @@ the answers from the cited artefacts rather than re-reading the table.
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, with every question of the
 brief answered under `## 2.` in the brief's order and format and every
 answer citing the artefact it came from, the critic has posted a sign-off on
-the board as a `result` post naming what they verified, `work/flags.md`
-holds one row per question of the brief (number, short name, answer,
-confidence, evidence path) and has at least as many rows as the brief has
-numbered questions, `work/dependencies.md` holds the dependency map the team
-inferred as a table (one row saying so if every question was independent),
-`work/timeline.md` holds the merged timeline as a table with at least 15
-dated rows built from the ledger, the ledger holds the dated events the
-timeline rests on, and `inputs/` is unchanged.
+the board as a `result` post that starts a line with `SIGN-OFF:` and names
+what they verified, `work/flags.md` holds one row per question of the brief
+(number, short name, answer, confidence, evidence path) and has at least as
+many rows as the brief has numbered questions, `work/dependencies.md` holds
+the dependency map the team inferred as a table (one row saying so if every
+question was independent), `work/timeline.md` holds the merged timeline as a
+table with at least 15 dated rows built from the ledger, the ledger holds
+the dated events the timeline rests on, and `inputs/` is unchanged.
 
 ## Checks
 
@@ -182,7 +182,7 @@ timeline rests on, and `inputs/` is unchanged.
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 17`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`
-- `test -n "$(grep -l '^tag: result' threads/main/*.md | xargs -r grep -li 'sign-off')"`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for

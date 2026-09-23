@@ -206,10 +206,10 @@ Verbatim across the cases, with the tool list adapted to the evidence:
 
 > `work/report.md` exists, answers every question under headings `## 1.` …
 > `## N.`, every answer cites evidence, the critic has posted a sign-off on
-> the board as a `result` post naming what they verified, `work/timeline.md`
-> holds the merged timeline as a table with at least X dated rows built from
-> the ledger, the ledger holds the dated events the timeline rests on, and
-> `inputs/` is unchanged.
+> the board as a `result` post that starts a line with `SIGN-OFF:` and names
+> what they verified, `work/timeline.md` holds the merged timeline as a
+> table with at least X dated rows built from the ledger, the ledger holds
+> the dated events the timeline rests on, and `inputs/` is unchanged.
 
 X is what the evidence can honestly yield: 40 for a full host intrusion, 10
 for a single-artefact puzzle. `grep -c '^| '` counts the table's header and
@@ -223,7 +223,7 @@ separator too, so the threshold is two more than the rows you mean.
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 25`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`
-- `test -n "$(grep -l '^tag: result' threads/main/*.md | xargs -r grep -li 'sign-off')"`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
@@ -234,15 +234,18 @@ The last two read a verdict, not a mention. `done` writes `inputs_check`
 every time, whatever it found, so a bare grep for the event could never
 fail; the check reads the latest one and asks for `"content_ok":true` (no
 file modified, missing or added) rather than `ok`, which also turns false
-when only a file's mode or link count drifted. The sign-off check looks only
-at posts tagged `result`, so the early "who takes the sign-off?" posts the
-division paragraph asks for no longer satisfy it; it tests the list of files
-with `test -n` because `xargs -r` exits 0 when it has nothing to run, and
-because the checks run under `pipefail`, where a `grep -q` that stops
-reading early can fail the pipe. It is still a heuristic: a result post that
-only mentions a sign-off passes, and nothing a shell can read proves that
-the certifier is not the agent who wrote the report. That rule rests on the
-division paragraph.
+when only a file's mode or link count drifted; `tail -1` reads all of its
+input before the last `grep -q` sees a line, so `pipefail` cannot fail it
+early. The sign-off check wants a post tagged `result` with a line that
+starts `SIGN-OFF:` (bold stars in front are fine), so the early "who takes
+the sign-off?" posts the division paragraph asks for, and a result post
+saying "I will not sign-off until 4.1 is fixed", do not satisfy it. One
+`awk` reads every post, with no pipe for `pipefail` to fail and no process
+per post, so a board of thousands of posts still checks in well under the
+time limit. It is still a heuristic: a result post opening `SIGN-OFF:
+withheld` passes, and nothing a shell can read proves that the certifier is
+not the agent who wrote the report. That rule rests on the division
+paragraph.
 
 Add what the kind of case can promise: an indicators table for an intrusion
 or a malware case (`test "$(grep -c '^| ' work/indicators.md)" -ge 3` — one
