@@ -2122,6 +2122,21 @@ cmd_start() {
       # Held by the host: every VM mounts it read-only (virtio-fs, enforced
       # on the host side), so no pane-side guard is needed or asked for.
       inputs_guard="microvm"
+      # A VM sees only what is mounted into it: a link inside the evidence
+      # directory that leads out of it (`ln -s /mnt/evidence/case.E01 ./`)
+      # would be a dangling name in every VM. Said now, not found by an agent.
+      local link target outside=()
+      while IFS= read -r link; do
+        [[ -n "$link" ]] || continue
+        target="$(perl -MCwd=abs_path -le 'print abs_path(shift) // ""' "$link")"
+        [[ -n "$target" && "$target" != "$inputs_dir" && "$target" != "$inputs_dir/"* ]] && outside+=("${link#"$inputs_dir"/} -> $target")
+      done < <(find "$inputs_dir" -type l)
+      if [[ ${#outside[@]} -gt 0 ]]; then
+        echo "BLOCKER: under --isolation microvm, --inputs $inputs_dir is mounted into each VM as it is, and these links lead out of it, so no VM could read them:" >&2
+        printf '  %s\n' "${outside[@]}" >&2
+        echo "Point --inputs at the directory that holds the files, or put the files themselves (not links) in $inputs_dir." >&2
+        exit 2
+      fi
     else
       inputs_guard="$(fsguard_mode "$inputs_dir" "$inputs_enforce")"
     fi
@@ -2484,8 +2499,13 @@ STRIP
     [[ "$toolbox_required" -eq 1 ]] && toolbox_args+=(--required)
     bash "$ROOT/scripts/toolbox.sh" "$sandbox" "$toolbox" ${toolbox_args[@]+"${toolbox_args[@]}"} || exit $?
   fi
-  if [[ "$catalog" -eq 1 ]]; then
-    bash "$ROOT/scripts/evidence-catalog.sh" "$sandbox" || exit $?
+  if [[ "$catalog" -eq 1 && "$isolation" == "microvm" && "$start_agents" -eq 1 ]]; then
+    # In a throwaway VM of the run's image, like the toolbox: the tools the
+    # first pass calls are the image's, not this host's.
+    local catalog_evidence=()
+    [[ -L "$sandbox/inputs" ]] && catalog_evidence+=(--evidence "$(cd "$sandbox/inputs" && pwd -P)")
+    [[ -f "$sandbox/inputs.device" ]] && catalog_evidence+=(--evidence "$sandbox/inputs")
+    vm_cli catalog --image "$vm_image" --sandbox "$sandbox" --memory "$vm_memory" ${catalog_evidence[@]+"${catalog_evidence[@]}"} || exit $?
     warn_on_catalog_signatures "$sandbox" "$toolbox"
     chmod -R a-w "$sandbox/catalog" 2>/dev/null || true
   fi

@@ -41,6 +41,22 @@ out="$(start --isolation microvm --vm-memory 100 --label bad-mem)"; rc=$?
   || fail "a refused kickoff left a run in the registry"
 pass "an isolation that does not exist, a probe with no guard to probe, and a VM with no CPU or too little memory are refused before anything is written"
 
+# A link in the evidence that leads out of it would dangle in every VM.
+mkdir -p "$TMP/ev-link" "$TMP/elsewhere"
+printf 'image' > "$TMP/elsewhere/case.E01"
+printf 'notes\n' > "$TMP/ev-link/notes.txt"
+ln -s "$TMP/elsewhere/case.E01" "$TMP/ev-link/case.E01"
+ln -s notes.txt "$TMP/ev-link/inside-link.txt"
+out="$(start --isolation microvm --inputs "$TMP/ev-link" --label bad-link)"; rc=$?
+[[ $rc -eq 2 ]] || fail "evidence with a link out of it exited $rc under microvm, wanted 2: $out"
+printf '%s\n' "$out" | grep -q 'case.E01 -> ' || fail "the refusal does not name the link: $out"
+printf '%s\n' "$out" | grep -q 'inside-link' && fail "a link that stays inside the evidence was refused: $out"
+[[ -z "$(jq -r '.runs[]? | select(.label == "bad-link") | .id' "$TMP/runs/registry.json" 2>/dev/null)" ]] || fail "the refused kickoff left a run"
+rm "$TMP/ev-link/case.E01"
+out="$(start --isolation microvm --inputs "$TMP/ev-link" --label vm-inside-link)"; rc=$?
+[[ $rc -eq 0 ]] || fail "evidence whose only link stays inside it was refused: $out"
+pass "evidence with a link leading out of it is refused under microvm, naming the link; a link that stays inside is fine"
+
 # --- the evidence is used in place and held by the VM ----------------------------
 out="$(start --isolation microvm --inputs "$TMP/ev" --label vm-ev)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a microvm --no-start kickoff exited $rc: $out"

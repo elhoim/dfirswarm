@@ -37,6 +37,7 @@
  *   node --experimental-strip-types scripts/vm.ts reap   [--run ID] [--registry FILE]
  *   node --experimental-strip-types scripts/vm.ts list   [--run ID]
  *   node --experimental-strip-types scripts/vm.ts toolbox --image REF --out FILE [--preset SETS] [--required]
+ *   node --experimental-strip-types scripts/vm.ts catalog --image REF --sandbox DIR [--evidence DIR]... [--memory MIB]
  *   node --experimental-strip-types scripts/vm.ts msb-path
  */
 import { execFile } from "node:child_process";
@@ -765,6 +766,44 @@ export async function imageToolbox(image: string, preset: string, required: bool
   }
 }
 
+/**
+ * The evidence catalog (scripts/evidence-catalog.sh) run in a throwaway VM of
+ * the run's image, before any agent starts: the tools it calls are the
+ * image's, and a host that holds no forensic tools (by design) still gets a
+ * first pass. The sandbox is mounted writable for this one harness step; the
+ * evidence read-only; the network off.
+ */
+export async function imageCatalog(
+  image: string,
+  sandbox: string,
+  evidence: string[],
+  options: { cpus?: number; memoryMib?: number } = {},
+): Promise<{ code: number; output: string }> {
+  const M = await sdk();
+  const name = `dfs-catalog-${randomBytes(6).toString("hex")}`;
+  try {
+    let builder = M.Sandbox.builder(name)
+      .image(image)
+      .pullPolicy("if-missing")
+      .cpus(options.cpus ?? 2)
+      .memory(options.memoryMib ?? 2048)
+      .disableNetwork()
+      .detached(true)
+      .replace()
+      .workdir(sandbox)
+      .envs({ SWARM_CATALOG_STEP_TIMEOUT: process.env.SWARM_CATALOG_STEP_TIMEOUT ?? "900" })
+      .volume(sandbox, (v) => v.bind(realpathSync(sandbox)))
+      .volume(join(ROOT, "scripts"), (v) => v.bind(realpathSync(join(ROOT, "scripts"))).readonly());
+    for (const e of evidence) builder = builder.volume(e, (v) => v.bind(realpathSync(e)).readonly().noexec());
+    const vm = await builder.create();
+    const out = await vm.exec("bash", [join(ROOT, "scripts", "evidence-catalog.sh"), sandbox]);
+    return { code: out.code, output: `${out.stdout()}${out.stderr()}` };
+  } finally {
+    await run(msbBinary(), ["stop", name], { timeoutMs: 120_000 });
+    await run(msbBinary(), ["rm", name], { timeoutMs: 60_000 });
+  }
+}
+
 /** Can this host run a VM at all, and is the image here? */
 export async function probeHost(image?: string): Promise<{ ok: boolean; msb: string; version: string; reasons: string[]; image_present?: boolean }> {
   const msb = msbBinary();
@@ -827,6 +866,18 @@ async function main(): Promise<void> {
       if (r.json) await writeFile(out, r.json);
       process.stderr.write(r.output);
       process.exit(r.json ? r.code : 1);
+    }
+    case "catalog": {
+      const image = opt("--image");
+      const sandbox = opt("--sandbox");
+      if (!image || !sandbox) throw new Error("catalog needs --image REF --sandbox DIR [--evidence DIR]... [--memory MIB]");
+      const evidence: string[] = [];
+      rest.forEach((a, i) => {
+        if (a === "--evidence" && rest[i + 1]) evidence.push(rest[i + 1]);
+      });
+      const r = await imageCatalog(image, resolve(sandbox), evidence, { memoryMib: opt("--memory") ? Number(opt("--memory")) : undefined });
+      process.stdout.write(r.output);
+      process.exit(r.code);
     }
     case "list": {
       console.log(JSON.stringify({ ok: true, vms: await runVms(opt("--run")) }));

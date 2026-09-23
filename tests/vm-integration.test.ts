@@ -20,7 +20,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -29,7 +29,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { initSandbox, readLedger } from "../extensions/protocol.ts";
 import { Hub } from "../scripts/vm-hub.ts";
-import { createVms, finishRun, msbBinary, probeHost, reapVms, registryLabel, runVms, vmName, type VmSpec } from "../scripts/vm.ts";
+import { createVms, finishRun, imageCatalog, msbBinary, probeHost, reapVms, registryLabel, runVms, vmName, type VmSpec } from "../scripts/vm.ts";
 import { execFileSync } from "node:child_process";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -330,4 +330,64 @@ test("finish keeps each disk and removes the VMs; reap touches only its own regi
   assert.equal((await runVms("vmt6")).length, 1);
   assert.deepEqual(await reapVms({ run: "vmt6" }), [vmName("vmt6", "vmt600")], "named outright, it is reaped");
   assert.equal((await runVms("vmt6")).length, 0);
+});
+
+/** A 1.44 MB FAT12 volume holding HELLO.TXT: a disk image the catalog knows, made here. */
+function floppy(): Buffer {
+  const img = Buffer.alloc(2880 * 512);
+  img.set([0xeb, 0x3c, 0x90], 0);
+  img.write("MSWIN4.1", 3, "ascii");
+  img.writeUInt16LE(512, 11); // bytes per sector
+  img[13] = 1; // sectors per cluster
+  img.writeUInt16LE(1, 14); // reserved sectors
+  img[16] = 2; // FATs
+  img.writeUInt16LE(224, 17); // root entries
+  img.writeUInt16LE(2880, 19); // sectors
+  img[21] = 0xf0;
+  img.writeUInt16LE(9, 22); // sectors per FAT
+  img.writeUInt16LE(18, 24);
+  img.writeUInt16LE(2, 26);
+  img[38] = 0x29;
+  img.writeUInt32LE(0x1234abcd, 39);
+  img.write("SYNTHETIC  FAT12   ", 43, "ascii");
+  img.writeUInt16LE(0xaa55, 510);
+  for (const fat of [1, 10]) img.set([0xf0, 0xff, 0xff, 0xff, 0x0f, 0x00], fat * 512);
+  const root = 19 * 512;
+  img.write("SYNTHETIC  ", root, "ascii");
+  img[root + 11] = 0x08; // volume label
+  img.write("HELLO   TXT", root + 32, "ascii");
+  img[root + 32 + 11] = 0x20;
+  img.writeUInt16LE(2, root + 32 + 26); // first cluster
+  img.writeUInt32LE(6, root + 32 + 28); // size
+  img.write("hello\n", 33 * 512, "ascii");
+  return img;
+}
+
+test("the catalog runs in a throwaway VM of the image, with the image's tools, and leaves the evidence and no VM behind", async (t) => {
+  if (skip) return t.skip(skip);
+  const r = await rig("vmt7", ["vmt700"]);
+  await writeFile(join(r.evidence, "floppy.img"), floppy());
+  const sandbox = realpathSync(r.sandbox);
+  // Mounted where inputs/ points, as the kickoff does (it links the real path).
+  const evidence = readlinkSync(join(sandbox, "inputs"));
+  const evidenceBefore = await fingerprint(evidence, []);
+  const floorBefore = await fingerprint(sandbox, ["catalog"]);
+
+  // What the image holds decides what the catalog can build; the host's own
+  // tools must not show through.
+  assert.deepEqual((await createVms(r.spec)).failures, []);
+  const imageHasTsk = inVm(vmName(r.run, "vmt700"), "command -v fsstat >/dev/null && command -v fls >/dev/null && echo yes || echo no").trim() === "yes";
+
+  const result = await imageCatalog(IMAGE, sandbox, [evidence], { memoryMib: 1024 });
+  assert.equal(result.code, 0, result.output);
+  const readme = await readFile(join(sandbox, "catalog", "README.md"), "utf8");
+  if (imageHasTsk) {
+    assert.match(readme, /^Summary: 1 disk image\(s\)/, readme);
+    assert.match(await readFile(join(sandbox, "catalog", "floppy.img", "p0", "filelist.txt"), "utf8"), /HELLO\.TXT/);
+  } else {
+    assert.match(readme, /^Summary: 0 disk image\(s\)/, `an image without The Sleuth Kit catalogued a disk: the host's tools showed through\n${readme}`);
+  }
+  assert.deepEqual([...(await fingerprint(evidence, []))], [...evidenceBefore], "the evidence did not change");
+  assert.deepEqual([...(await fingerprint(sandbox, ["catalog", "vm"]))], [...floorBefore].filter(([k]) => !k.startsWith("vm/")), "the catalog wrote nothing but catalog/");
+  assert.doesNotMatch(msb("list"), /dfs-catalog-/, "the catalog's VM is gone");
 });

@@ -23,8 +23,12 @@ All notable changes to this project. The format follows
   clock and the caps from outside the VMs and stops them once the sentinel
   has stood for the grace period. Images come from the packs
   (`images/recipe.py`, `images/README.md`), and a run records the digest it
-  booted. The console's kickoff has the switch; the report and the run page
-  say what each VM could write, reach and was given. ADR 0005.
+  booted. `--toolbox` and `--catalog` run in a throwaway VM of the same
+  image, so a host with no forensic tools still gets its first pass, and
+  evidence whose links lead out of the `--inputs` directory is refused,
+  naming them, since no VM could follow them. The console's kickoff has the
+  switch; the report and the run page say what each VM could write, reach
+  and was given. ADR 0005.
 - **Host custody at stop** (`scripts/custody.ts` → `custody.json`, printed by
   `stop` and carried by the report): the evidence re-hashed in full, every
   session file sealed, every kept output the trace names checked against its
