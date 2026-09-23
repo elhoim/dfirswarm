@@ -170,15 +170,15 @@ the report cannot be the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified (the rows sampled per source and the offsets re-checked),
-`work/timeline.md` is the product: the merged timeline as one table with
-at least 100 dated rows (the ISO 8601 UTC time in the first column, after
-any `#` index), every row with source, artefact and confidence, built from
-the per-source extractions and anchored in the ledger, `work/sources.md`
-holds one table with a row per source (source, rows, offset, coverage), the
-ledger holds the dated events the narrative rests on, and `inputs/` is
-unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified (the rows
+sampled per source and the offsets re-checked), `work/timeline.md` is the
+product: the merged timeline as one table with at least 100 dated rows (the
+ISO 8601 UTC time in the first column, after any `#` index), every row with
+source, artefact and confidence, built from the per-source extractions and
+anchored in the ledger, `work/sources.md` holds one table with a row per
+source (source, rows, offset, coverage), the ledger holds the dated events
+the narrative rests on, and `inputs/` is unchanged.
 
 ## Checks
 
@@ -190,8 +190,8 @@ unchanged.
 - `test -f work/sources.md`
 - `test "$(grep -c '^| ' work/sources.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 15`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)
