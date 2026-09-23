@@ -2289,6 +2289,10 @@ STRIP
 
   clear_inputs "$sandbox"
   stop_sandbox_daemons "$sandbox"
+  # The trace was just emptied for the new run, so the previous run's anchor
+  # goes with it. A collector keeps any anchor it finds — an anchor must not
+  # drop to match a shortened file — and would read the new run as cut short.
+  rm -f "$(trace_anchor_path "$sandbox")"
   rm -rf "${sandbox:?}/catalog" "${sandbox:?}/ledger" "$sandbox/toolbox.json"
   if [[ -n "$inputs_dir" ]]; then
     if [[ "$inputs_bind" -eq 1 ]]; then
@@ -3868,6 +3872,11 @@ trace_token_for() {
   printf ''
 }
 
+# Where a sandbox's trace anchor lives: beside it, outside the panes' reach.
+trace_anchor_path() {
+  printf '%s/%s.trace-anchor.json' "$(cd "$(dirname "$1")" && pwd -P)" "$(basename "$1")"
+}
+
 start_trace_collector() {
   local sandbox="$1" pid
   mkdir -p "$sandbox/traces"
@@ -3888,7 +3897,7 @@ start_trace_collector() {
   # report found none and said the record was intact without ever consulting
   # it. Still outside the sandbox, so the write guard keeps it out of reach.
   local anchor
-  anchor="$(cd "$(dirname "$sandbox")" && pwd -P)/$(basename "$sandbox").trace-anchor.json"
+  anchor="$(trace_anchor_path "$sandbox")"
   # Keyed only when the gate is up: a collector keyed for a gate that is not
   # there would write every pane's line unverified.
   local shape="open"

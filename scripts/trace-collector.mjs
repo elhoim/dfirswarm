@@ -101,9 +101,21 @@ function sizeOf(file) {
   }
 }
 
+/**
+ * The file's whole lines. A fragment at the end — no closing newline, left by
+ * a writer killed or starved of disk mid-append — is not one of them: it was
+ * never acknowledged, and counting it or chaining onto it would make it part
+ * of the record.
+ */
+function wholeLines(text) {
+  const all = text.split("\n");
+  all.pop();
+  return all.filter(Boolean);
+}
+
 function countLines(file) {
   try {
-    return readFileSync(file, "utf8").split("\n").filter(Boolean).length;
+    return wholeLines(readFileSync(file, "utf8")).length;
   } catch {
     return 0;
   }
@@ -115,12 +127,40 @@ function countLines(file) {
  */
 function lastHashOf(file) {
   try {
-    const text = readFileSync(file, "utf8");
-    const all = text.split("\n").filter(Boolean);
+    const all = wholeLines(readFileSync(file, "utf8"));
     if (!all.length) return "";
     return lineHash(all[all.length - 1]);
   } catch {
     return "";
+  }
+}
+
+/** Whether the file ends partway through a line. */
+function endsMidLine(file) {
+  try {
+    const text = readFileSync(file, "utf8");
+    return text.length > 0 && !text.endsWith("\n");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * How many lines the anchor this collector finds on startup already
+ * committed to. A restarted collector used to count the file instead, so a
+ * trace cut short while no collector was running came back with an anchor
+ * lowered to match, and verified as intact. A `pending` anchor names a line
+ * that may never have reached the file, so it commits to one fewer.
+ */
+function anchoredLines() {
+  if (!anchorPath) return 0;
+  try {
+    const anchor = JSON.parse(readFileSync(anchorPath, "utf8"));
+    const lines = Number(anchor?.lines);
+    if (!Number.isInteger(lines) || lines < 0) return 0;
+    return anchor.pending === true ? Math.max(0, lines - 1) : lines;
+  } catch {
+    return 0;
   }
 }
 
@@ -134,9 +174,12 @@ let previous = lastHashOf(eventsFile);
  * count and the record verified as intact. An anchor that forgets is not an
  * anchor: this only ever goes up.
  */
-let lineCount = countLines(eventsFile);
-/** Bytes in the file after this process's last write, to notice other writers. */
-let lastSize = sizeOf(eventsFile);
+let lineCount = Math.max(countLines(eventsFile), anchoredLines());
+/**
+ * Bytes in the file after this process's last write, to notice other writers.
+ * Unknown until the first write, so that write reads the tail it finds.
+ */
+let lastSize = -1;
 /**
  * Where the file ended before an append that failed partway and could not be
  * cut back, or -1. A full disk fails an append after part of the line is on
@@ -186,6 +229,14 @@ function write(record) {
   // because the next such writer should not be a corruption report either.
   const size = sizeOf(eventsFile);
   if (size !== lastSize) {
+    // A fragment this process did not write — an earlier collector killed
+    // mid-append, another writer — is not cut off: it is not ours to discard.
+    // Nor is anything appended onto it, which would fuse the next line into
+    // it and leave the record unparseable from there on. The line is
+    // refused, the sender spills it, as a pane's own fallback does.
+    if (endsMidLine(eventsFile)) {
+      throw new Error("the trace ends in a partial line this collector did not write; not appending onto it");
+    }
     previous = lastHashOf(eventsFile);
     // Only upwards. A file that shrank under the collector is a record that
     // lost lines, and the anchor has to keep saying how long it was.

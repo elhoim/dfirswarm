@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFile, mkdtemp, mkdir, readFile, stat } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, readFile, rm, stat } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -638,4 +638,79 @@ test("a line cut short by a full disk is taken back out of the trace", async () 
   assert.equal(recorded.lines, 2);
   const chain = verifyEventChain(`${written.join("\n")}\n`, recorded);
   assert.equal(chain.ok, true, `the record verifies after a torn append (${chain.reason ?? ""})`);
+});
+
+/** Send one event and wait for the collector's verdict on it. */
+function sendForReply(socket: string, payload: unknown): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve, reject) => {
+    const s = connect(socket);
+    let got = "";
+    s.on("error", reject);
+    s.on("data", (chunk) => {
+      got += chunk.toString("utf8");
+      if (got.includes("\n")) {
+        s.end();
+        resolve(JSON.parse(got.slice(0, got.indexOf("\n"))) as { ok: boolean; error?: string });
+      }
+    });
+    s.on("connect", () => s.write(`${JSON.stringify(payload)}\n`));
+  });
+}
+
+/**
+ * Kill the collector started last, as a crash would, and clear the socket it
+ * leaves behind, as the kickoff does before it starts the next one.
+ */
+async function killLastCollector(root: string): Promise<void> {
+  const proc = started[started.length - 1];
+  const gone = new Promise((r) => proc.once("exit", r));
+  proc.kill("SIGKILL");
+  await gone;
+  await rm(join(root, COLLECTOR_SOCKET_REL), { force: true });
+}
+
+test("a restarted collector refuses to append onto a partial line it finds", async () => {
+  // A collector killed mid-append leaves a fragment with no newline. The next
+  // collector used to take the fragment as the last line, chain onto it and
+  // write the next line straight after it: the sender was told `ok`, and the
+  // line was fused into the fragment and lost from the record.
+  const root = await mkdtemp(join(tmpdir(), "swarm-restart-torn-"));
+  const anchor = join(root, "anchor.json");
+  let socket = await collectorWithTokens(root, { t: "a0" }, anchor);
+  for (let i = 1; i <= 2; i += 1) {
+    assert.equal((await sendForReply(socket, { ts: `t${i}`, agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" })).ok, true);
+  }
+  await killLastCollector(root);
+  const events = join(root, "traces", "events.jsonl");
+  await appendFile(events, '{"ts":"t3","agent":"a0","tool":"bash","args":{"cmd":"cut sh', "utf8");
+  const before = await readFile(events, "utf8");
+
+  socket = await collectorWithTokens(root, { t: "a0" }, anchor);
+  const reply = await sendForReply(socket, { ts: "t4", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" });
+  assert.equal(reply.ok, false, "the sender is told the line was not written, so it spills it");
+  assert.equal(await readFile(events, "utf8"), before, "nothing is appended onto the fragment");
+});
+
+test("a collector restarted over a shortened trace keeps the anchor it found", async () => {
+  // A restarted collector used to count the file for its anchor. Lines cut
+  // from the trace while no collector ran lowered the anchor to match, and
+  // the shortened record then verified as intact.
+  const root = await mkdtemp(join(tmpdir(), "swarm-restart-anchor-"));
+  const anchor = join(root, "anchor.json");
+  let socket = await collectorWithTokens(root, { t: "a0" }, anchor);
+  for (let i = 1; i <= 4; i += 1) {
+    assert.equal((await sendForReply(socket, { ts: `t${i}`, agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" })).ok, true);
+  }
+  await killLastCollector(root);
+  assert.equal(JSON.parse(await readFile(anchor, "utf8")).lines, 4);
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(join(root, "traces", "events.jsonl"), `${(await lines(root)).slice(0, 2).join("\n")}\n`, "utf8");
+
+  socket = await collectorWithTokens(root, { t: "a0" }, anchor);
+  await new Promise((r) => setTimeout(r, 200));
+  const recorded = JSON.parse(await readFile(anchor, "utf8")) as { lines: number; head: string; prev_head: string };
+  assert.equal(recorded.lines, 4, "the anchor still says how long the record was");
+  const chain = verifyEventChain(`${(await lines(root)).join("\n")}\n`, recorded);
+  assert.equal(chain.ok, false, "and the shortened record does not verify");
+  assert.equal(chain.reason, "shortened");
 });
