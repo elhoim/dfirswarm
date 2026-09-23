@@ -25,22 +25,32 @@ The evidence is under `inputs/` (read-only; call `inputs` to list it, and
 read `inputs.json` for the manifest). If the operator left a brief beside
 it (`inputs/CASE.md`, the alert, the kernel version, why and when the
 capture was taken), its questions come first and the ones below fill in
-what it did not ask. If `SWARM. For a
-Linux capture it holds only the note that `windows.info` failed: run
-`banners.Banners` yourselves, once, and post the result.
+what it did not ask. If `SWARM.md` has an "Evidence catalog" section,
+know that the kickoff's memory pass is Windows-only: a Linux capture fails
+its `windows.info` probe and is left out of `catalog/` without a note (the
+summary counts 0 memory images). Nothing has been run on it yet: one agent
+runs `vol -f <image> banners.Banners` once and posts the result before
+anyone else starts.
 
 ### Questions the report has to answer
 
 1. The capture and the symbols: the format (a LiME file opens every range
    with its `EMiL` header and the range's physical addresses; AVML writes
-   LiME format by default and may compress it; a raw dump has neither),
+   LiME format by default and may compress it; a raw dump has neither; a
+   compressed AVML capture is read directly only if Volatility's AVML
+   layer finds the `libsnappy` library, otherwise it is converted once
+   into `work/extracted/<your id>/`, at full size, so check free space
+   first, then hashed, posted, and used by everybody),
    the ranges and the total, the acquisition tool's own traces (a `lime`
    module in the module list, an `avml` process in the process list, both
    named and set aside), the kernel banner (`banners.Banners`), the distribution and hostname as strings show them,
    the boot time and uptime (`linux.boottime`, the ring buffer through
    `linux.kmsg`), and whether a symbol table matches: the ISF's banner
    must equal the dump's banner byte for byte, from one under `inputs/`
-   or one Volatility can fetch from the host the kickoff allowed. If
+   or one Volatility can fetch from the host the kickoff allowed.
+   Volatility does not look in `inputs/` by itself: copy or link the ISF
+   into `work/<your id>/symbols/linux/`, pass
+   `vol -s work/<your id>/symbols`, and confirm the match. If
    there is none, say so first; say that building one needs this
    kernel's debug symbols (the distribution's `dbgsym` or `debuginfo`
    package, or a `vmlinux` with DWARF), which the kickoff has to provide
@@ -67,14 +77,20 @@ Linux capture it holds only the note that `windows.info` failed: run
    connections with local and remote address and state, files open but
    deleted, the mounted file systems (`linux.mountinfo`: a `tmpfs` or an
    overlay where none belongs, a bind mount over a system path), and
-   which of it is the host's ordinary traffic and which is not.
+   which of it is the host's ordinary traffic and which is not; the files
+   held in the page cache (`linux.pagecache.Files`, recovered with
+   `linux.pagecache.InodePages --dump`), `/etc/ld.so.preload`, crontabs
+   and systemd units among them.
 5. The kernel: loaded modules against the module list and the memory that
    holds them (`linux.lsmod`, `linux.check_modules`,
    `linux.hidden_modules`), the system call table, the interrupt table and
    the network information hooks (`linux.check_syscall`,
    `linux.check_idt`, `linux.check_afinfo`), credentials that do not add
    up (`linux.check_creds`), keyboard and TTY hooks
-   (`linux.keyboard_notifiers`, `linux.tty_check`), taint and module
+   (`linux.keyboard_notifiers`, `linux.tty_check`), netfilter hooks
+   (`linux.netfilter`), loaded eBPF programs (`linux.ebpf`) and ftrace
+   hooks (`linux.tracing.ftrace`), where the installed Volatility has them
+   (say which it lacks), taint and module
    messages in the ring buffer (`linux.kmsg`), and the capture tool's own
    module told apart from everything else; each hooked entry with the
    address it points to and the module that owns that address.
@@ -165,22 +181,25 @@ agent who wrote the report cannot be the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the report says in its first answer whether a symbol table
-matched and what was done without one, the critic has posted a sign-off on
-the board naming what they verified, `work/timeline.md` holds the merged
-timeline as a table with at least 10 dated rows built from the ledger,
-`work/indicators.md` holds one table of every indicator (type, value,
-where seen, confidence; one row saying so if none was found), every region
-or module dumped is under `work/extracted/` with its hash in the report,
-the ledger holds the dated events the timeline rests on, and `inputs/` is
-unchanged.
+evidence, the report quotes the kernel banner and says in its first
+answer whether a symbol table matched and what was done without one, the
+critic has posted a sign-off on the board naming what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 10
+dated rows built from the ledger, `work/indicators.md` holds one table of
+every indicator (type, value, where seen, confidence; one row saying so if
+none was found), every region or module dumped is under `work/extracted/`
+with its hash in the report (or the report says nothing was dumped and
+why), the ledger holds the dated events the timeline rests on, and
+`inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
-- `grep -qi 'symbol' work/report.md`
+- `awk '/^## 1\./{f=1;next} /^## 2\./{f=0} f' work/report.md | grep -qi 'symbol'`
+- `awk '/^## 1\./{f=1;next} /^## 2\./{f=0} f' work/report.md | grep -q 'Linux version'`
+- `test "$(find work/extracted -type f 2>/dev/null | wc -l)" -ge 1 || grep -qiE 'nothing (was )?dumped|no region' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 12`
 - `test -f work/indicators.md`

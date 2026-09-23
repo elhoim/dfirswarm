@@ -47,8 +47,14 @@ scan, `malfind` and `dlllist` into `catalog/`; read those before running them ag
    or a command channel rather than the host's ordinary traffic.
 5. Persistence and tampering seen from memory: autostart entries in the
    cached hives (`windows.registry.printkey` on the Run keys, Services and
-   Winlogon), services (`svcscan`) and drivers (`modules`, `driverscan`)
-   that are not signed or not on disk, scheduled-task and WMI remnants in
+   Winlogon), services (`svcscan`), drivers (`modules`, `driverscan`,
+   `windows.modscan`) that appear in one list and not another, whose path
+   is outside `\SystemRoot\System32\drivers`, whose version information
+   (`windows.verinfo`) is missing or odd, or whose IRP table, callbacks or
+   SSDT entries point outside a known module (`windows.driverirp`,
+   `windows.callbacks`, `windows.ssdt`), with a note that a signature and
+   presence on disk need the disk and go under what to collect next,
+   scheduled-task and WMI remnants in
    process memory, unusual handles to other processes (`handles`), and
    evidence that security tooling was stopped or that a sensitive system
    process was opened by something that had no business opening it.
@@ -132,14 +138,16 @@ verified, `work/timeline.md` holds the merged timeline as a table with at
 least 15 dated rows built from the ledger, `work/indicators.md` holds one
 table of every indicator (type, value, where seen, confidence; one row
 saying so if none was found), every region or module dumped is under
-`work/extracted/` with its hash in the report, the ledger holds the dated
-events the timeline rests on, and `inputs/` is unchanged.
+`work/extracted/` with its hash in the report (or the report says nothing
+was dumped and why), the ledger holds the dated events the timeline rests
+on, and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
+- `test "$(find work/extracted -type f 2>/dev/null | wc -l)" -ge 1 || grep -qiE 'nothing (was )?dumped|no region' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 17`
 - `test -f work/indicators.md`
