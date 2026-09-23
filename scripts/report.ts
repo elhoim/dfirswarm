@@ -596,6 +596,45 @@ export function measuredGuardLine(state: string | undefined): string {
 }
 
 /** What the trace's hash chain says, for the custody section. */
+/**
+ * What the run tried to reach and was refused. "Nothing was refused" is a
+ * claim only a log can back: without one the line used to say it anyway, and
+ * a run whose egress was enforced by something that keeps no log (or not
+ * enforced at all) read as if it had been watched and was clean.
+ */
+export function egressRefusedLine(
+  denied: Array<[string, number]>,
+  logPresent: boolean,
+  run: { netguard?: unknown; isolation?: { mode?: string } } | null | undefined,
+): string {
+  if (denied.length) return denied.map(([host, n]) => `${host}${n > 1 ? ` (${n})` : ""}`).join(", ");
+  if (logPresent) return "nothing was refused";
+  if (run?.isolation?.mode === "microvm") {
+    return "not observable: each agent's microVM refused everything outside its rules, and that refusal leaves no log";
+  }
+  if (run?.netguard === false) return "not observable: no egress control was running";
+  return "not observable: no netguard log was kept";
+}
+
+/**
+ * Where the evidence went. Every byte an agent reads is sent to its model's
+ * provider; on BelkaCTF #6 that included a BitLocker recovery key, sent to
+ * four providers. That is a case-acceptance decision, and this line is what
+ * lets a reader check it was made.
+ */
+export function providersLine(run: { providers?: unknown } | null | undefined): string {
+  const list = Array.isArray(run?.providers)
+    ? (run!.providers as Array<{ model?: string; hosts?: string[]; local?: boolean }>)
+    : [];
+  if (!list.length) return "not recorded";
+  return list
+    .map((p) => {
+      const where = p.local ? "this machine (local model)" : p.hosts?.length ? p.hosts.join(", ") : "its provider (host not recorded)";
+      return `${p.model ?? "?"} → ${where}`;
+    })
+    .join("; ");
+}
+
 export function chainLine(
   chain: {
     ok: boolean;
@@ -749,10 +788,8 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   // `bit.ly` — an agent resolving a shortened link it had read inside the
   // seized phone. A custody section that prints only what was allowed cannot
   // show the reader that it happened.
-  const deniedHosts = countHosts(
-    await readFile(join(sandbox, "traces", "netguard.log"), "utf8").catch(() => ""),
-    "DENY",
-  );
+  const netguardLog = await readFile(join(sandbox, "traces", "netguard.log"), "utf8").catch(() => null);
+  const deniedHosts = countHosts(netguardLog ?? "", "DENY");
   const names = await readNames(sandbox).catch(() => []);
   const chosen = new Map(names.map((n) => [n.id, n.doing ? `${n.name} — ${n.doing}` : n.name]));
 
@@ -970,12 +1007,8 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
       "Trace integrity",
       chainLine(chain, Boolean(anchorPoint), anchorGuarded(run?.write_guard as string | undefined, run?.host_caps as Record<string, unknown> | undefined)),
     ],
-    [
-      "Egress refused",
-      deniedHosts.length
-        ? deniedHosts.map(([host, n]) => `${host}${n > 1 ? ` (${n})` : ""}`).join(", ")
-        : "nothing was refused",
-    ],
+    ["Egress refused", egressRefusedLine(deniedHosts, netguardLog !== null, run)],
+    ["Content sent to", providersLine(run)],
     [
       "Installed during the run",
       toolchain?.packages?.length

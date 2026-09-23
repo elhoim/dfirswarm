@@ -39,6 +39,12 @@ export type RegistryRun = {
   host_caps?: Record<string, unknown>;
   /** The packs this run carried, with the checksum of each manifest. */
   packs?: Array<{ id: string; version: string; manifest_sha256: string }>;
+  /** Per pack with secrets: their names and how the panes got them (exposed · injected · withheld · not-set). */
+  pack_secrets?: Record<string, { names: string[]; mode: string }>;
+  /** Where each model's traffic went: every byte an agent read went there too. */
+  providers?: Array<{ model: string; hosts: string[]; local: boolean }>;
+  /** How the agents were isolated, and what each agent's VM was built from. */
+  isolation?: { mode?: string; [key: string]: unknown };
   /** "token", "ancestry" or "token-exposed": how the collector decided whose line each one was. */
   attribution?: string;
   /** "kernel", "partial", "none" or "unmeasured": what the panes' own probes said the guard was. */

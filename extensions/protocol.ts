@@ -2362,15 +2362,25 @@ export async function appendEvent(
   sandboxRoot: string,
   event: Omit<SwarmEvent, "ts"> & { ts?: string },
 ): Promise<SwarmEvent> {
-  const record: SwarmEvent = {
-    ts: event.ts ?? new Date().toISOString(),
-    agent: event.agent,
-    tool: event.tool,
-    args: event.args ?? {},
-    result: event.result ?? {},
-  };
-  const file = join(sandboxRoot, EVENTS_REL);
   const token = traceToken();
+  // The token that attributes this line, and the console's mutation token,
+  // are credentials. A shell's `env`, a tool that prints its environment, and
+  // the whole output now kept in the trace would otherwise publish them to
+  // every reader of the trace — and one pane's token lets another speak as it.
+  const credentials: Record<string, string> = {};
+  if (token) credentials.SWARM_TRACE_TOKEN = token;
+  if (process.env.SWARM_UI_TOKEN) credentials.SWARM_UI_TOKEN = process.env.SWARM_UI_TOKEN;
+  const record: SwarmEvent = redactSecrets(
+    {
+      ts: event.ts ?? new Date().toISOString(),
+      agent: event.agent,
+      tool: event.tool,
+      args: event.args ?? {},
+      result: event.result ?? {},
+    },
+    credentials,
+  );
+  const file = join(sandboxRoot, EVENTS_REL);
   const line = `${JSON.stringify(token ? { ...record, token } : record)}\n`;
   // The collector, when this run has one: a process outside the pane's
   // sandbox profile, holding the only writable handle to the trace. The pane
@@ -3978,6 +3988,11 @@ const FORGED_ENV_KEEP = new Set([
   "REQUESTS_CA_BUNDLE",
   "CURL_CA_BUNDLE",
   "NODE_EXTRA_CA_CERTS",
+  // Where an agent's own installs live. Without these a forged tool could not
+  // import a package the same agent had just installed with pip.
+  "PYTHONUSERBASE",
+  "PYTHONPATH",
+  "VIRTUAL_ENV",
 ]);
 
 /**
@@ -3998,6 +4013,89 @@ export function forgedToolEnv(
     if (FORGED_ENV_KEEP.has(key) || key.startsWith("SWARM_")) env[key] = value;
   }
   return { ...env, ...extra };
+}
+
+/**
+ * A pack's secrets, for that pack's own tools and nothing else
+ * (docs/packs.md §4).
+ *
+ * The kickoff describes them in SWARM_PACK_SECRETS as JSON:
+ * `{"<pack id>": {"names": ["VT_API_KEY"], "file": "<secrets.env>"}}`.
+ * - In a microVM the names are enough: each is already in the VM's
+ *   environment as a placeholder that the host swaps for the real value on
+ *   the way to the host the secret is bound to, so the value never enters the
+ *   VM. `file` is absent.
+ * - On the host, `file` is present only when the operator accepted, with
+ *   --allow-pack-secrets, that a pane can read what its own extension can;
+ *   the value is read at call time and handed to the tool's child process.
+ *
+ * A tool forged during the run has no pack and gets nothing.
+ */
+export type PackSecretsSpec = Record<string, { names?: string[]; file?: string }>;
+
+export function packSecretsSpec(env: NodeJS.ProcessEnv = process.env): PackSecretsSpec {
+  const raw = env.SWARM_PACK_SECRETS;
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as PackSecretsSpec) : {};
+  } catch {
+    return {};
+  }
+}
+
+const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/** KEY=VALUE lines, as `pack install` writes them; anything else is ignored. */
+export function parseSecretsEnv(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split(/\r?\n/)) {
+    const at = line.indexOf("=");
+    if (at <= 0) continue;
+    const key = line.slice(0, at).trim();
+    if (SECRET_NAME_RE.test(key)) out[key] = line.slice(at + 1);
+  }
+  return out;
+}
+
+export async function packSecretsFor(
+  manifest: { pack?: string },
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Record<string, string>> {
+  if (!manifest.pack) return {};
+  const spec = packSecretsSpec(env)[manifest.pack];
+  if (!spec) return {};
+  const out: Record<string, string> = {};
+  for (const name of spec.names ?? []) {
+    if (SECRET_NAME_RE.test(name) && typeof env[name] === "string") out[name] = env[name] as string;
+  }
+  if (spec.file) {
+    const text = await readFile(spec.file, "utf8").catch(() => "");
+    Object.assign(out, parseSecretsEnv(text));
+  }
+  return out;
+}
+
+/**
+ * Put `[secret NAME]` where a secret's value appears. The trace keeps every
+ * character an agent produced — except these, which the pack's author and the
+ * operator did not give to the record. Values shorter than 6 characters are
+ * left alone: they are not credentials, and replacing them would mangle text.
+ */
+export function redactSecrets<T>(value: T, secrets: Record<string, string>): T {
+  const pairs = Object.entries(secrets).filter(([, v]) => typeof v === "string" && v.length >= 6);
+  if (!pairs.length) return value;
+  const walk = (v: unknown): unknown => {
+    if (typeof v === "string") {
+      let t = v;
+      for (const [name, secret] of pairs) t = t.split(secret).join(`[secret ${name}]`);
+      return t;
+    }
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  return walk(value) as T;
 }
 
 /** The hash make_tool (or sealForgedTools) recorded, not whatever is on disk now. */
@@ -4140,8 +4238,6 @@ export async function runForgedTool(
 export const INPUTS_DIR = "inputs";
 export const INPUTS_MANIFEST = "inputs.json";
 export const INPUTS_PRISTINE_DIR = ".inputs-pristine";
-/** How many files under inputs/ the watch and the check will look at. */
-export const INPUTS_MAX_FILES = 5000;
 
 export type InputFile = {
   path: string;
@@ -4251,26 +4347,28 @@ export async function readInputsManifest(sandboxRoot: string): Promise<InputsMan
 
 /**
  * Every regular file and symlink under inputs/, as sandbox-relative keys, in
- * byte order, capped at INPUTS_MAX_FILES (the kickoff refuses a larger
- * directory, so the cap and the manifest agree). A symlink can only be
- * foreign — the kickoff dereferenced every one it copied — so it is listed
- * to be found as an addition and removed.
+ * byte order. A symlink can only be foreign — the kickoff dereferenced every
+ * one it copied — so it is listed to be found as an addition and removed.
+ *
+ * There is no ceiling on the count or the depth. There used to be one, 5,000
+ * files and 12 levels, left behind when the kickoff dropped its own: every
+ * manifest file past the ceiling then read as "missing", and a KAPE-style
+ * triage set failed its custody check on every sweep while nothing had
+ * changed. The manifest lists every file, so the walk does too.
  */
 export async function listInputFiles(sandboxRoot: string): Promise<string[]> {
   const out: string[] = [];
-  async function walk(dir: string, depth: number): Promise<void> {
-    if (out.length >= INPUTS_MAX_FILES || depth > 12) return;
+  async function walk(dir: string): Promise<void> {
     const entries = (await readdir(dir, { withFileTypes: true }).catch(() => [])).sort((a, b) =>
       a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
     );
     for (const entry of entries) {
-      if (out.length >= INPUTS_MAX_FILES) return;
       const abs = join(dir, entry.name);
-      if (entry.isDirectory()) await walk(abs, depth + 1);
+      if (entry.isDirectory()) await walk(abs);
       else if (entry.isFile() || entry.isSymbolicLink()) out.push(claimKey(sandboxRoot, abs));
     }
   }
-  await walk(join(sandboxRoot, INPUTS_DIR), 0);
+  await walk(join(sandboxRoot, INPUTS_DIR));
   return out;
 }
 
@@ -4663,6 +4761,9 @@ export function isSharedScratch(path: string): boolean {
   return (SHARED_WORK_DIRS as readonly string[]).some((dir) => path === `work/${dir}` || path.startsWith(`work/${dir}/`));
 }
 
+/** Where await-done.sh may read a finish line that certifies a run: the operator's copy. */
+export const FINISH_LINE_TRUSTED_SOURCES = new Set(["registry"]);
+
 /** What await-done.sh --checks-json prints: the finish line, run once, right now. */
 export type FinishLineRun = {
   total: number;
@@ -4690,6 +4791,25 @@ export function finishLineVerdict(
 ): { proceed: true; note?: string; reasonPrefix?: string } | { proceed: false; reason: string; failing: string } {
   if (!run) return { proceed: true, note: "the finish line could not be run; done proceeds unchecked" };
   if (run.error) return { proceed: true, note: `the finish line could not be run (${run.error}); done proceeds unchecked` };
+  // A finish line that is met, or has nothing to meet, proves something only
+  // if the checks are the operator's. Read from anywhere else they are checks
+  // an agent could have rewritten — on the host SWARM.md is writable from a
+  // shell — so passing them certifies nothing. The harness hands every pane
+  // the registry (SWARM_RUNS_DIR), and a microVM a read-only view of it, so a
+  // different source means something is wrong. A failing finish line is a
+  // refusal either way, and the check that fails is the useful thing to say.
+  const untrusted = Boolean(run.source) && !FINISH_LINE_TRUSTED_SOURCES.has(run.source as string);
+  if (untrusted && run.passed >= run.total) {
+    // Abandoning claims nothing, so it is still the way out.
+    if (abandon) return { proceed: true, reasonPrefix: "ABANDONED: ", note: `checks read from the ${run.source} were not trusted; abandoned on purpose` };
+    return {
+      proceed: false,
+      failing: `(checks read from ${run.source})`,
+      reason:
+        `The finish line was read from the ${run.source}, which agents can edit, not from the operator's registry, so it cannot certify the run. ` +
+        `This is the harness's problem, not yours: say so on the board and wait for the operator. If the goal cannot be met at all, call done again with abandon: true and say why.`,
+    };
+  }
   if (run.total === 0) return { proceed: true, note: "the goal has no checks" };
   if (run.passed >= run.total) return { proceed: true };
   if (abandon) return { proceed: true, reasonPrefix: "ABANDONED: ", note: `${run.passed} of ${run.total} checks pass; abandoned on purpose` };

@@ -142,11 +142,12 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   minute forty.
 
 - **Playwright is off by default** and refuses remote http(s) targets unless `SWARM_BROWSER_REMOTE=1`; under netguard the browser has no egress anyway.
-- **The web app gates what costs money.** It binds `0.0.0.0` and anyone on the
-  LAN can watch — but start, stop, reap and restore need the
-  token the server prints in its URL (in the fragment, so it never reaches a
-  proxy log). `SWARM_UI_TOKEN=` turns that off deliberately. Still LAN only: do
-  not port-forward it.
+- **The web app gates what costs money, and keeps case data on this machine.**
+  It binds `127.0.0.1`; reads need no token and show case data, so opening it
+  to the LAN (`--host 0.0.0.0`) is the operator's explicit choice. Start, stop,
+  reap and restore need the token the server prints in its URL (in the
+  fragment, so it never reaches a proxy log). `SWARM_UI_TOKEN=` turns that off
+  deliberately. Never port-forward it; use an SSH tunnel.
 
 **Settled**: claims are short leases with a reason and a `seconds` argument,
 renewed by re-claiming (120 s); the trace shows `thinking` rows and a duration

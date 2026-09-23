@@ -55,7 +55,7 @@ flowchart TB
   PW --> CHROME --> WORK
   UI -->|fs.watch recursive| FS
   UI -->|bash scripts/swarm.sh start / stop / reap| CLI
-  BROWSER <-->|HTTP + SSE, port 43173, 0.0.0.0<br/>reads open, mutations need the token| UI
+  BROWSER <-->|HTTP + SSE, port 43173, 127.0.0.1 by default<br/>reads open, mutations need the token| UI
   TAIL --> FS
   TAIL -->|polls| REAP
   TAIL -->|runs the goal's ## Checks| FS

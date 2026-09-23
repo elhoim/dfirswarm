@@ -80,6 +80,8 @@ import {
   forgeTool,
   listForgedTools,
   runForgedTool,
+  packSecretsFor,
+  redactSecrets,
   healInputs,
   type InputsHeal,
   readInputsManifest,
@@ -2075,9 +2077,13 @@ export default function (pi: ExtensionAPI) {
         // gets the same treatment: a snapshot of every watched path before,
         // a diff after, and the same reports (claims, harness files, inputs).
         const before = await watchedPathHashes(toolCtx.cwd).catch(() => null);
+        // A pack tool gets its pack's secrets in its own environment; the
+        // trace row below has their values replaced by their names.
+        const secrets = await packSecretsFor(manifest);
         const run = await runForgedTool(toolCtx.cwd, manifest, (params ?? {}) as Record<string, unknown>, {
           signal: signal as AbortSignal | undefined,
           agentId,
+          env: secrets,
         });
         if (before && agentId) {
           try {
@@ -2092,8 +2098,8 @@ export default function (pi: ExtensionAPI) {
           toolCtx.cwd,
           agentId,
           manifest.name,
-          (params ?? {}) as Record<string, unknown>,
-          {
+          redactSecrets((params ?? {}) as Record<string, unknown>, secrets),
+          redactSecrets({
             ok: run.ok,
             forged: true,
             by: manifest.by,
@@ -2110,9 +2116,14 @@ export default function (pi: ExtensionAPI) {
             ...(run.full_output ? { full_output: run.full_output } : {}),
             ...(run.full_stderr ? { full_stderr: run.full_stderr } : {}),
             ...(run.ok ? {} : { error: run.stderr.trim() || `exit ${run.exit_code ?? "?"}` }),
-          },
+            ...(Object.keys(secrets).length ? { secrets: Object.keys(secrets) } : {}),
+          }, secrets),
           run.duration_ms,
         );
+        if (Object.keys(secrets).length) {
+          run.stdout = redactSecrets(run.stdout, secrets);
+          run.stderr = redactSecrets(run.stderr, secrets);
+        }
         if (run.ok) {
           return {
             content: [{ type: "text" as const, text: run.stdout || "(no output)" }],
@@ -2136,8 +2147,15 @@ export default function (pi: ExtensionAPI) {
    * turn end — so a peer's forge reaches everyone within one turn. Returns
    * what was new, for the caller to tell the model.
    */
+  // Seeded tools — a pack's, or a library handed over with --tools-from —
+  // are registered whether or not forging is on: the contract lists them as
+  // ready, and a run with packs but no forging used to get none of them.
+  // Without forging nothing can add a tool mid-run, so after the first load
+  // the wake points have nothing to pick up.
+  let seededLoaded = false;
   async function loadForgedTools(cwd: string): Promise<ForgedToolManifest[]> {
-    if (!forging) return [];
+    if (!forging && seededLoaded) return [];
+    seededLoaded = true;
     const fresh: ForgedToolManifest[] = [];
     for (const manifest of await listForgedTools(cwd).catch(() => [] as ForgedToolManifest[])) {
       const key = `${manifest.version}:${manifest.sha256}`;
@@ -2159,6 +2177,14 @@ export default function (pi: ExtensionAPI) {
       new_tools: fresh.map((m) => ({ name: m.name, by: m.by, version: m.version, description: m.description, params: paramSummary(m) })),
       note: "These forged tools are now in your tool list. Call them directly.",
     };
+  }
+
+  if (!forging) {
+    pi.on("session_start", async (_event, ctx) => {
+      // swarm.sh named every seeded tool in --tools, so registering them is
+      // all it takes for them to be in the list from the first turn.
+      await loadForgedTools(ctx.cwd);
+    });
   }
 
   if (forging) {

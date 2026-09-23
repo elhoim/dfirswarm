@@ -175,6 +175,12 @@ for s in man.get("secrets", []) or []:
             errors.append("a secret entry is missing %s" % key)
     if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", s.get("name", "")):
         errors.append("a secret name must be upper case with underscores: %r" % s.get("name"))
+    # The hosts the secret is for. Under --isolation microvm a secret is only
+    # ever injected on the way to these; without them it cannot be used there.
+    hosts = s.get("hosts")
+    if hosts is not None and (not isinstance(hosts, list) or not all(
+            isinstance(h, str) and re.fullmatch(r"(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+", h) for h in hosts)):
+        errors.append("secret %s: hosts must be a list of host names" % s.get("name"))
 
 # --- checksums --------------------------------------------------------------
 def walk_files():

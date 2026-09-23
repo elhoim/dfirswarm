@@ -320,6 +320,12 @@ Tools the agents write
                       the run, the inventory), the network refuses the index, and
                       the contract tells the agents so instead of inviting them to
                       try. The run record carries install_hosts.
+  --allow-pack-secrets  Hand a pack's secrets (pack install stored them) to that
+                      pack's own tools on the host. A pane can read whatever its
+                      extension can, so the agents can read them too; without this
+                      flag a pack that requires a secret is refused on the host.
+                      Under --isolation microvm it is not needed: the value never
+                      enters the VM. The run record carries pack_secrets.
   --pack ID[,ID]      Use installed packs. Each brings method the agents fetch with
                       the skill tool, tools seeded into the run, and host binaries
                       added to the toolbox check. Dependencies resolve first and
@@ -1184,6 +1190,50 @@ start_agent_when_shell_ready() {
 }
 
 
+# Which pack secrets the panes' pack tools may use, and how (docs/packs.md
+# §4). Sets PACK_SECRETS_ENV (JSON for SWARM_PACK_SECRETS) and
+# PACK_SECRETS_RECORD (JSON for the run record). Never reads a value.
+#
+# In a microVM a secret reaches the VM only as a placeholder bound to the
+# hosts its pack declares, so the names are all the pane needs. On the host a
+# pane can read anything its own extension can, so handing a pack tool its
+# secret means handing it to the agent too: that takes --allow-pack-secrets,
+# and a pack that *requires* one is refused without it.
+pack_secrets_plan() { # <pack dirs, one per line> <isolation> <allow 0|1>
+  local pack_dirs="$1" isolation="$2" allow="$3" pd id names required file
+  PACK_SECRETS_ENV='{}'
+  PACK_SECRETS_RECORD='{}'
+  while read -r pd; do
+    [[ -n "$pd" && -f "$pd/pack.json" ]] || continue
+    names="$(jq -r '[.secrets[]?.name] | join(",")' "$pd/pack.json")"
+    [[ -n "$names" ]] || continue
+    id="$(jq -r '.id' "$pd/pack.json")"
+    required="$(jq -r '[.secrets[]? | select(.required == true) | .name] | join(",")' "$pd/pack.json")"
+    file="$pd/secrets.env"
+    local mode
+    if [[ ! -s "$file" ]]; then
+      mode="not-set"
+    elif [[ "$isolation" == "microvm" ]]; then
+      mode="injected"
+    elif [[ "$allow" -eq 1 ]]; then
+      mode="exposed"
+    else
+      if [[ -n "$required" ]]; then
+        echo "BLOCKER: pack $id requires secret(s) $required. On the host a pane can read whatever its own extension can, so its pack tools cannot have them without the agents having them too. Pass --allow-pack-secrets to accept that, or run with --isolation microvm, where the value never enters the VM." >&2
+        exit 2
+      fi
+      mode="withheld"
+      echo "WARN: pack $id has secret(s) $names; they are withheld from the panes (pass --allow-pack-secrets, or use --isolation microvm)." >&2
+    fi
+    PACK_SECRETS_RECORD="$(jq -c --arg id "$id" --arg n "$names" --arg m "$mode" \
+      '. + {($id): {names: ($n | split(",")), mode: $m}}' <<<"$PACK_SECRETS_RECORD")"
+    case "$mode" in
+      injected) PACK_SECRETS_ENV="$(jq -c --arg id "$id" --arg n "$names" '. + {($id): {names: ($n | split(","))}}' <<<"$PACK_SECRETS_ENV")" ;;
+      exposed) PACK_SECRETS_ENV="$(jq -c --arg id "$id" --arg n "$names" --arg f "$file" '. + {($id): {names: ($n | split(",")), file: $f}}' <<<"$PACK_SECRETS_ENV")" ;;
+    esac
+  done <<< "$pack_dirs"
+}
+
 install_tools_from() { # sandbox library-dir [pack-id]
   # The pack id, when given, is written into the copy's manifest so the console
   # can say which method a tool call came from rather than attributing it to an
@@ -1207,6 +1257,22 @@ install_tools_from() { # sandbox library-dir [pack-id]
       continue
     fi
     mkdir -p "$sandbox/tools"
+    # A pack's copy wins over a library's of the same name: the pack is the
+    # reviewed path, and its manifest carries which pack it came from. The
+    # same bytes are simply the same tool; different bytes are said out loud
+    # rather than overwritten, which is what used to happen.
+    if [[ -z "$pack_id" && -f "$sandbox/tools/$tool_name/manifest.json" ]]; then
+      local held_pack held_hash
+      held_pack="$(jq -r '.pack // empty' "$sandbox/tools/$tool_name/manifest.json" 2>/dev/null || true)"
+      held_hash="$(jq -r '.sha256 // empty' "$sandbox/tools/$tool_name/manifest.json" 2>/dev/null || true)"
+      if [[ -n "$held_pack" ]]; then
+        if [[ "$held_hash" != "$hash" ]]; then
+          echo "WARN: $from/$tool_name differs from pack $held_pack's $tool_name; the pack's version is kept." >&2
+        fi
+        skipped=$(( skipped + 1 ))
+        continue
+      fi
+    fi
     rm -rf "${sandbox:?}/tools/$tool_name"
     cp -R "${tool%/}" "$sandbox/tools/$tool_name"
     if [[ -n "$pack_id" ]]; then
@@ -1796,7 +1862,7 @@ cmd_start() {
   MODEL_SUMMARY=""
   MODEL_CAPS=()
   local sandbox="" label="" wall=8 wall_set=0 hard=0 start_agents=1 playwright=0 probe=0
-  local use_netguard=1 key_from_env=0 forging=0 allow_install=0 install_hosts=1
+  local use_netguard=1 key_from_env=0 forging=0 allow_install=0 install_hosts=1 allow_pack_secrets=0
   local inputs_dir="" inputs_image="" inputs_enforce="auto" inputs_bind=0 inputs_max_mb="${SWARM_INPUTS_MAX_MB:-}" inputs_max_files="${SWARM_INPUTS_MAX_FILES:-}" inputs_guard="none"
   local allow_hosts="" tools_from="" catalog=0 toolbox="off" toolbox_required=0 quarantine=0 cap_per_agent="" case_id="" examiner=""
   local packs=""
@@ -1858,6 +1924,7 @@ cmd_start() {
       --hard-kill) hard=1; shift ;;
       --allow-tool-forging) forging=1; shift ;;
       --allow-install) allow_install=1; shift ;;
+      --allow-pack-secrets) allow_pack_secrets=1; shift ;;
       --no-pypi) install_hosts=0; shift ;;
       --inputs) inputs_dir="$2"; shift 2 ;;
       --inputs-bind) inputs_bind=1; shift ;;
@@ -2051,6 +2118,11 @@ STRIP
       "$ROOT/scripts/pack.sh" verify "$(basename "$_pd")" >/dev/null || {
         echo "BLOCKER: pack $(basename "$_pd") does not verify; install it again." >&2; exit 1; }
     done <<< "$pack_dirs"
+  fi
+  PACK_SECRETS_ENV='{}'
+  PACK_SECRETS_RECORD='{}'
+  if [[ -n "$pack_dirs" ]]; then
+    pack_secrets_plan "$pack_dirs" "${isolation:-host}" "$allow_pack_secrets"
   fi
   if [[ -n "$tools_from" && ! -d "$tools_from" ]]; then
     echo "BLOCKER: --tools-from $tools_from is not a directory." >&2
@@ -2575,6 +2647,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --arg local_models "$local_models_csv" \
     --argjson local_only "$local_only" \
     --argjson packs "$packs_json" \
+    --argjson pack_secrets "$PACK_SECRETS_RECORD" \
+    --argjson providers "$(providers_json)" \
     --argjson agents "$(printf '%s\n' "${agent_ids[@]}" | jq -R . | jq -s .)" \
     --argjson agent_models "$(printf '%s\n' ${AGENT_MODELS[@]+"${AGENT_MODELS[@]}"} | jq -R . | jq -s .)" \
     '{
@@ -2606,6 +2680,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       herdr_socket: $herdr_socket,
       pi_extensions: $pi_extensions,
       packs: $packs,
+      pack_secrets: $pack_secrets,
+      providers: $providers,
       attribution: $attribution,
       host_caps: $host_caps,
       no_read: $no_read,
@@ -2732,6 +2808,10 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   fi
 
   if [[ "$start_agents" -eq 0 ]]; then
+    # Nothing will talk to the collector, the gate or the broker until a real
+    # start, which starts its own; left running they outlived every prepared
+    # run (the console's "Prepare only" included).
+    stop_sandbox_daemons "$sandbox"
     echo "Sandbox ready. Skipping Herdr/Pi start (--no-start)."
     echo "SANDBOX=$sandbox"
     return 0
@@ -2796,6 +2876,16 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # invisible until it is named here. The skill tool exists only when the run
   # carries packs.
   [[ -n "$pack_dirs" ]] && PI_TOOLS+=",skill"
+  # Seeded tools by name, when forging is off: with forging on the extension
+  # enforces the list itself and --tools is dropped.
+  if [[ "$forging" -eq 0 && -d "$sandbox/tools" ]]; then
+    local _tm _tn
+    for _tm in "$sandbox"/tools/*/manifest.json; do
+      [[ -f "$_tm" ]] || continue
+      _tn="$(jq -r '.name // empty' "$_tm" 2>/dev/null || true)"
+      [[ "$_tn" =~ ^[a-z][a-z0-9_]{2,31}$ ]] && PI_TOOLS+=",$_tn"
+    done
+  fi
   if [[ "$playwright" -eq 1 ]]; then
     PI_TOOLS+=",playwright,browser_check"
   fi
@@ -2804,6 +2894,11 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   fi
   local provider_env=()
   provider_env+=(${extra_env[@]+"${extra_env[@]}"})
+  # Where the registry is, so the finish line `done` runs in a pane reads the
+  # operator's checks and not the agent-writable SWARM.md (await-done.sh
+  # otherwise looks beside the sandbox, which under --sandbox DIR is not
+  # where the registry lives).
+  provider_env+=(--env "SWARM_RUNS_DIR=$RUNS_DIR")
   # Scratch belongs to the run. With the write guard on, the per-user temp
   # area is closed; with it off, this still keeps a case's temporary files
   # inside the case instead of in a directory shared with every other run.
@@ -2818,6 +2913,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       _joined="${_joined:+$_joined:}$_pd"
     done <<< "$pack_dirs"
     provider_env+=(--env "SWARM_PACK_DIRS=$_joined")
+    [[ "$PACK_SECRETS_ENV" != "{}" ]] && provider_env+=(--env "SWARM_PACK_SECRETS=$PACK_SECRETS_ENV")
   fi
   if [[ -n "$trace_gate" ]]; then
     provider_env+=(--env "SWARM_TRACE_SOCKET=$trace_gate")
@@ -2856,6 +2952,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     provider_env+=(--env "SWARM_ALLOW_INSTALL=1" \
                    --env "PYTHONUSERBASE=$sandbox/work/.toolchain" \
                    --env "PIP_DISABLE_PIP_VERSION_CHECK=1" \
+                   --env "PIP_BREAK_SYSTEM_PACKAGES=1" \
                    --env "PIP_CACHE_DIR=$sandbox/work/.toolchain/.cache/pip" \
                    --env "XDG_CACHE_HOME=$sandbox/work/.toolchain/.cache" \
                    --env "PATH=$sandbox/work/.toolchain/bin:$PATH")
@@ -3247,7 +3344,7 @@ cmd_status() {
 }
 
 cmd_ui() {
-  local port="${SWARM_UI_PORT:-43173}" host="${SWARM_UI_HOST:-0.0.0.0}" build=1
+  local port="${SWARM_UI_PORT:-43173}" host="${SWARM_UI_HOST:-127.0.0.1}" build=1
   local inputs_roots="${SWARM_INPUTS_ROOT:-}" roots_from_ui="${SWARM_INPUTS_ROOT_FROM_UI:-}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -3662,6 +3759,22 @@ PY
 # Every model in the team contributes its provider's hosts. Allowing only the
 # first one would leave the other agents unable to reach their own provider,
 # which looks exactly like a hung swarm.
+# Where each model's traffic goes, for the record: whatever an agent reads is
+# sent to its model's provider, and the report says so in the custody
+# section. A model served on this machine is marked local.
+providers_json() {
+  local one hosts out='[]' is_local
+  while IFS= read -r one; do
+    [[ -n "$one" ]] || continue
+    hosts="$(provider_hosts_for_model "$one")"
+    is_local=false
+    if [[ ",${local_models_csv:-}," == *",$one,"* ]]; then is_local=true; fi
+    out="$(jq -c --arg m "$one" --arg h "$hosts" --argjson l "$is_local" \
+      '. + [{model: $m, hosts: ($h | split(",") | map(select(. != ""))), local: $l}]' <<<"$out")"
+  done < <(distinct_models)
+  printf '%s\n' "$out"
+}
+
 provider_hosts_for_models() {
   local one hosts all=""
   while IFS= read -r one; do

@@ -50,8 +50,7 @@ function metadataField(text: string, field: string): string {
   return match ? match[1].trim() : "";
 }
 
-/** Every `site-packages` under the toolchain, whatever python version made it. */
-async function sitePackageDirs(root: string): Promise<string[]> {
+async function prefixSitePackages(root: string): Promise<string[]> {
   const out: string[] = [];
   const lib = join(root, "lib");
   for (const entry of await readdir(lib, { withFileTypes: true }).catch(() => [])) {
@@ -62,6 +61,25 @@ async function sitePackageDirs(root: string): Promise<string[]> {
   // Some layouts put it directly under the prefix.
   const flat = join(root, "site-packages");
   if (await stat(flat).then((s) => s.isDirectory()).catch(() => false)) out.push(flat);
+  return out;
+}
+
+/**
+ * Every `site-packages` under the toolchain, whatever python version made it:
+ * the user base itself, and any virtual environment an agent made one level
+ * down (`work/.toolchain/venv`). Agents on PEP 668 systems did exactly that
+ * when `pip install --user` was refused, and those installs were missing
+ * from the record.
+ */
+async function sitePackageDirs(root: string): Promise<string[]> {
+  const out = await prefixSitePackages(root);
+  for (const entry of await readdir(root, { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isDirectory() || entry.name === "lib" || entry.name.startsWith(".")) continue;
+    const child = join(root, entry.name);
+    if (await stat(join(child, "pyvenv.cfg")).then((s) => s.isFile()).catch(() => false)) {
+      out.push(...(await prefixSitePackages(child)));
+    }
+  }
   return out;
 }
 

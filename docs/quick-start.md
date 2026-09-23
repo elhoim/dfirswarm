@@ -141,10 +141,13 @@ A live N=2 hello run costs about **$0.02–0.06** on DeepSeek V4 Pro and finishe
 
 ```bash
 npm run ui:build                     # once; swarm.sh ui also builds when ui/dist is missing
-scripts/swarm.sh ui                  # http://<this-machine-ip>:43173 (SWARM_UI_PORT changes it)
+scripts/swarm.sh ui                  # http://127.0.0.1:43173 (SWARM_UI_PORT changes it)
 ```
 
-Binds `0.0.0.0`, LAN only by design. **Watching is open; starting, stopping,
+Binds `127.0.0.1`: this machine only. From another machine, use an SSH
+tunnel (`ssh -N -L 43173:127.0.0.1:43173 you@host`); `--host 0.0.0.0` opens
+it to the LAN, where anyone who can reach the port can read the board, the
+trace and what came out of the evidence. **Watching is open; starting, stopping,
 reaping and restoring need a token.** The server mints one at startup and
 prints it in the URL it hosts (in the fragment, so it never reaches a proxy
 log); open that URL once and the browser keeps it. `SWARM_UI_TOKEN=...` pins

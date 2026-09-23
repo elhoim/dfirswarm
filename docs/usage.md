@@ -107,7 +107,7 @@ Per-pane environment: `AGENT_ID`, `SWARM_ID`, `SWARM_HARD_KILL`, `PATH=<sandbox>
 
 #### `ui`
 
-`ui [--port N] [--host H] [--no-build] [--inputs-root DIR]... [--allow-inputs-root-from-ui]`. `--inputs-root` names where the evidence sets live (or `SWARM_INPUTS_ROOT`, `:`-separated); `--allow-inputs-root-from-ui` lets the token holder add one from the kickoff form, off by default (see docs/inputs.md). Defaults `SWARM_UI_PORT=43173`, `SWARM_UI_HOST=0.0.0.0`, runs dir `SWARM_RUNS_DIR` (default `runs/`). Builds `ui/dist` when missing and `node_modules/vite` exists; `--no-build` skips that. Then `exec node --experimental-strip-types scripts/ui-server.ts`.
+`ui [--port N] [--host H] [--no-build] [--inputs-root DIR]... [--allow-inputs-root-from-ui]`. `--inputs-root` names where the evidence sets live (or `SWARM_INPUTS_ROOT`, `:`-separated); `--allow-inputs-root-from-ui` lets the token holder add one from the kickoff form, off by default (see docs/inputs.md). Defaults `SWARM_UI_PORT=43173`, `SWARM_UI_HOST=127.0.0.1` (this machine only; `--host 0.0.0.0` opens reads to the LAN — they need no token and show case data), runs dir `SWARM_RUNS_DIR` (default `runs/`). Builds `ui/dist` when missing and `node_modules/vite` exists; `--no-build` skips that. Then `exec node --experimental-strip-types scripts/ui-server.ts`.
 
 #### `reap`
 

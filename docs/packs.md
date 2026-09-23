@@ -156,6 +156,25 @@ A pack that declares a required secret on a host that cannot deny the read is
 refused at kickoff unless the operator says to go ahead, and the record names
 the gap.
 
+How this is implemented:
+
+- A secret entry may name the `hosts` its value is for:
+  `{"name": "VT_API_KEY", "title": "…", "why": "…", "hosts": ["www.virustotal.com"]}`.
+- On the host the extension cannot be kept from what its own pane can read, so
+  a pack tool gets its pack's secrets only when the operator passes
+  `--allow-pack-secrets`, and a pack that requires one is refused without it.
+  The run record's `pack_secrets` says, per pack, `exposed`, `withheld` or
+  `not-set`.
+- Under `--isolation microvm` the value never enters the VM. Each secret is
+  given to the VM as a placeholder bound to the pack's `hosts`; the host swaps
+  the real value in on the way to those hosts only, and a placeholder sent
+  anywhere else is refused. The record says `injected`. A secret with no
+  `hosts` cannot be bound, and is withheld.
+- Only the pack's own tools get the secret, in their child process's
+  environment. A tool forged during the run gets none.
+- The trace row of the call, and the output handed back to the model, carry
+  `[secret NAME]` where the value would have been.
+
 ---
 
 ## 5. Third-party tools and licences
