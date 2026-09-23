@@ -55,8 +55,8 @@ anything that is not a plain directory right there.
 - The original directory is safe by construction: no layer has to hold for
   it, only for the copy. The cost is disk (the copy plus the clone, which is
   free where the filesystem clones) and a size cap (`--inputs-max-mb`).
-- Kernel enforcement depends on the pane being a zsh on macOS, or a zsh on a
-  Linux host with unprivileged user namespaces. Elsewhere the run still
+- Kernel enforcement depends on the pane being a zsh or a bash on macOS, or
+  on a Linux host with unprivileged user namespaces. Elsewhere the run still
   starts, says so, and relies on layers 1–2; the trace shows which depth each
   pane actually got, so a claim of "read-only" is never stronger than the
   evidence.
@@ -66,5 +66,8 @@ anything that is not a plain directory right there.
   threat model (exfiltration rather than corruption), and netguard already
   bounds where anything read could go.
 - The hook rewrites `ZDOTDIR` for the pane; the user's own zsh configuration
-  is loaded by the re-executed shell exactly as before. A bash pane ignores
-  the hook and reports `enforced: none`.
+  is loaded by the re-executed shell exactly as before. On an account whose
+  login shell is bash, the pane is given the hook's directory as `HOME`
+  instead, and the hook puts the real one back before reading the user's
+  own bash configuration. Any other shell ignores both and reports
+  `enforced: none`.

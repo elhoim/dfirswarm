@@ -78,10 +78,10 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   reads those probes back into the record as `write_guard_measured`
   (`kernel`, `partial`, `none`, `unmeasured`), with a WARN and a custody row
   when it is not `kernel`. A guard that never reached a pane — the pane's
-  login shell was not zsh, the multiplexer started the agent elsewhere — used
-  to be invisible in a run that said it was guarded. On a Linux host the
-  pane's shell must be zsh for the hook to run at all, and the kickoff
-  refuses to start otherwise.
+  login shell was neither zsh nor bash, the multiplexer started the agent
+  elsewhere — used to be invisible in a run that said it was guarded. On a
+  Linux host the pane's shell must be zsh or bash for the hook to run at
+  all, and the kickoff refuses to start otherwise.
 - **The finish line is checked, not asserted.** `await-done.sh` runs the goal's
   own `## Checks` and reads them from the run registry, outside the sandbox — a
   swarm that could rewrite its contract could otherwise certify itself.

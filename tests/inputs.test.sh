@@ -12,7 +12,17 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/inputs.XXXXXX")"
-trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
+# A kickoff starts the run's daemons (the collector, the gate, the nudge
+# broker) before it stops at --no-start or a BLOCKER; stop them with the
+# script's own helper before the directory goes.
+eval "$(sed -n '/^stop_sandbox_daemons()/,/^}/p' "$ROOT/scripts/swarm.sh")"
+cleanup() {
+  local d
+  for d in "$TMP"/runs/*/; do [[ -d "$d" ]] && stop_sandbox_daemons "${d%/}" 2>/dev/null; done
+  chmod -R u+w "$TMP" 2>/dev/null
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 start() { # start <args...> -> prints stdout+stderr, never fails the suite
@@ -113,6 +123,57 @@ else
   fi
   grep -q "^mode: $guard" "$sb/.fsguard/plan.txt" || fail "the plan does not match the guard"
   pass "the pane hook and the plan name the guard ($guard)"
+
+  # The bash side: on an account whose login shell is bash the pane is given
+  # HOME=<sandbox>/.bash, where a bash reads .bashrc (interactive) or
+  # .bash_profile (login). Both carry the same guard.
+  for rc in .bashrc .bash_profile; do
+    [[ -f "$sb/.bash/$rc" ]] || fail "no bash pane hook $rc written for guard $guard"
+    grep -q "fsguard.sh" "$sb/.bash/$rc" || fail "the bash hook $rc does not run fsguard"
+    grep -q -- "--ro $sb/inputs" "$sb/.bash/$rc" || fail "the bash hook $rc does not make inputs/ read-only"
+    grep -q -- "--mode $guard" "$sb/.bash/$rc" || fail "the bash hook $rc does not name the guard"
+  done
+  grep -q "^export HOME=$(printf '%q' "$HOME")\$" "$sb/.zsh/.zshenv" || fail "the zsh hook does not put HOME back"
+  # Run it the way Herdr starts a pane: an interactive bash, and a login one,
+  # whose HOME is the hook's directory. Each must end up under the guard with
+  # the real HOME; the command arrives on stdin after the re-exec. The value is
+  # picked out of the line because a login profile may print terminal escapes
+  # (a prompt, OSC 3008) in front of it.
+  for how in -i "-l -i"; do
+    got="$(cd "$sb" && printf 'echo "guard=${SWARM_FSGUARD:-} home=$HOME"\n' \
+      | HOME="$sb/.bash" bash $how 2>/dev/null | grep -ao 'guard=[a-z]* home=[^[:space:][:cntrl:]]*' | tail -1 || true)"
+    [[ "$got" == "guard=$guard home=$HOME" ]] \
+      || fail "a bash pane started with 'bash $how' did not come up guarded with its HOME back: '$got'"
+  done
+  pass "a bash pane (interactive or login) re-runs itself under the guard and gets its HOME back"
+
+  # The shell re-run is the one Herdr started ($BASH), not the first bash on
+  # the kickoff's PATH: on macOS that is Homebrew's bash 5, not /bin/bash.
+  mkdir -p "$TMP/altbash"
+  cp "$(command -v bash)" "$TMP/altbash/bash"
+  got="$(cd "$sb" && printf 'echo "guard=${SWARM_FSGUARD:-} shell=$BASH"\n' \
+    | HOME="$sb/.bash" "$TMP/altbash/bash" -i 2>/dev/null | grep -ao 'guard=[a-z]* shell=[^[:space:][:cntrl:]]*' | tail -1 || true)"
+  [[ "$got" == "guard=$guard shell=$TMP/altbash/bash" ]] \
+    || fail "the bash hook should re-run the bash that read it, not another one: '$got'"
+  pass "the bash hook re-runs the same bash under the guard"
+  [[ -f "$sb/.bash/.hushlogin" ]] || fail "the bash hook's HOME has no .hushlogin, so Debian's bash.bashrc prints its sudo hint in every pane"
+  pass "the bash hook's HOME carries a .hushlogin"
+
+  # An operator's --env HOME is the panes' HOME: the hooks put that one back,
+  # not the kickoff's, so Pi reads the agent dir the preflight granted.
+  mkdir -p "$TMP/opshome"
+  out="$(start --model solo/model --n 1 --cap-usd 1 --no-start \
+    --goal-file "$ROOT/prompts/goals/hello.md" --label opshome --inputs "$TMP/src" --env "HOME=$TMP/opshome")"
+  sbh="$(sandbox_of "$out")"
+  [[ -n "$sbh" && -f "$sbh/.bash/.bashrc" ]] || fail "no bash hook for the --env HOME run: $out"
+  for hook in "$sbh/.zsh/.zshenv" "$sbh/.bash/.bashrc" "$sbh/.bash/.bash_profile"; do
+    grep -q "^export HOME=$(printf '%q' "$TMP/opshome")\$" "$hook" || fail "$hook does not put the operator's --env HOME back"
+  done
+  got="$(cd "$sbh" && printf 'echo "guard=${SWARM_FSGUARD:-} home=$HOME"\n' \
+    | HOME="$sbh/.bash" bash -i 2>/dev/null | grep -ao 'guard=[a-z]* home=[^[:space:][:cntrl:]]*' | tail -1 || true)"
+  [[ "$got" == "guard=$guard home=$TMP/opshome" ]] \
+    || fail "a bash pane should come up with the operator's --env HOME: '$got'"
+  pass "an operator's --env HOME is the one the pane hooks put back"
 fi
 
 # --- a swarm without inputs is untouched ----------------------------------------

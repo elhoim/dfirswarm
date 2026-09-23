@@ -16,7 +16,17 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/swarm-preflight.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+# A kickoff that stops at a BLOCKER after its daemons are up (the collector,
+# the gate, the nudge broker) leaves them running; stop them with the
+# script's own helper before the directory goes.
+eval "$(sed -n '/^stop_sandbox_daemons()/,/^}/p' "$ROOT/scripts/swarm.sh")"
+cleanup() {
+  local d
+  for d in "$TMP"/runs/*/; do [[ -d "$d" ]] && stop_sandbox_daemons "${d%/}" 2>/dev/null; done
+  chmod -R u+w "$TMP" 2>/dev/null
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
@@ -40,6 +50,7 @@ emit_env_array() {
 # Lift the helpers out of swarm.sh rather than re-implementing them here.
 HELPERS="$TMP/helpers.sh"
 {
+  sed -n '/^pane_home() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^pi_agent_dir() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^pi_auth_file() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^models_json_has_key() {/,/^}/p' "$ROOT/scripts/swarm.sh"
@@ -382,7 +393,7 @@ PY
 FAKE_PORT="$(bash -c 'source "$1"; pick_free_port 27000' _ "$HELPERS")"
 python3 "$TMP/fake-ollama.py" "$FAKE_PORT" &
 FAKE_PID=$!
-trap 'kill "$FAKE_PID" 2>/dev/null; wait "$FAKE_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
+trap 'kill "$FAKE_PID" 2>/dev/null; wait "$FAKE_PID" 2>/dev/null; cleanup' EXIT
 for _ in $(seq 1 50); do
   if curl -sf -m 1 "http://127.0.0.1:$FAKE_PORT/v1/models" >/dev/null 2>&1; then break; fi
   sleep 0.1
@@ -466,5 +477,128 @@ if command -v pi >/dev/null 2>&1; then
 else
   echo "skip - keyless local provider cases (pi is not installed)"
 fi
+
+# --- the write guard's login-shell check: zsh and bash carry a hook, others do not ---
+# getent is stubbed so the account database says what the case needs, and so
+# are pi (whose auth check always says invalid) and herdr (a no-op): a case
+# that passes the shell check stops at the next BLOCKER, the credential one,
+# before any pane could open.
+mkdir -p "$TMP/getent-bin" "$TMP/shell-inputs"
+printf 'evidence\n' > "$TMP/shell-inputs/a.txt"
+cat > "$TMP/getent-bin/pi" <<'SH'
+#!/bin/sh
+echo '{"status":"invalid","reason":"stub"}'
+exit 1
+SH
+printf '#!/bin/sh\nexit 0\n' > "$TMP/getent-bin/herdr"
+chmod +x "$TMP/getent-bin/pi" "$TMP/getent-bin/herdr"
+login_shell_out() { # login_shell_out <shell> [start args...] -> the kickoff's output with that login shell
+  local shell="$1"; shift
+  printf '#!/bin/sh\necho "u:x:1000:1000::/home/u:%s"\n' "$shell" > "$TMP/getent-bin/getent"
+  chmod +x "$TMP/getent-bin/getent"
+  PATH="$TMP/getent-bin:$PATH" SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" start --model solo/model \
+    --n 1 --cap-usd 1 --goal-file "$ROOT/prompts/goals/hello.md" --label "shell-$(basename "$shell")" "$@" 2>&1 || true
+}
+past_shell_check='BLOCKER: Pi cannot authenticate solo/model'
+out="$(login_shell_out /usr/bin/fish)"
+grep -q "BLOCKER: this account's login shell is /usr/bin/fish, and the kernel guard is a hook that only a zsh or a bash reads" <<<"$out" \
+  || fail "a login shell that is neither zsh nor bash should be refused: $out"
+pass "a login shell with no pane hook (fish) is refused while the write guard is on"
+out="$(login_shell_out /bin/bash)"
+grep -q "BLOCKER: this account's login shell" <<<"$out" \
+  && fail "a bash login shell should pass the write guard's shell check: $out"
+grep -q "$past_shell_check" <<<"$out" || fail "a bash login shell should get past the shell check to the credential one: $out"
+pass "a bash login shell passes the write guard's shell check and the kickoff goes on"
+# An account database that does not answer is not taken for zsh: the kickoff
+# says so and leaves the panes' HOME alone.
+printf '#!/bin/sh\nexit 2\n' > "$TMP/getent-bin/getent"
+chmod +x "$TMP/getent-bin/getent"
+out="$(PATH="$TMP/getent-bin:$PATH" SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" start --model solo/model \
+  --n 1 --cap-usd 1 --goal-file "$ROOT/prompts/goals/hello.md" --label shell-unknown 2>&1 || true)"
+grep -q "WARN: this account's login shell could not be read" <<<"$out" \
+  || fail "a login shell nobody can read should be warned about, not assumed to be zsh: $out"
+pass "a login shell the account database does not give is warned about, not assumed"
+if command -v zsh >/dev/null 2>&1; then
+  echo "skip - a zsh login shell with no zsh installed (zsh is on PATH here)"
+else
+  out="$(login_shell_out /usr/bin/zsh)"
+  grep -q "BLOCKER: missing .*zsh (the pane hook runs in it)" <<<"$out" \
+    || fail "a zsh login shell on a host with no zsh should be refused as missing zsh: $out"
+  pass "a zsh login shell with no zsh installed is refused as a missing tool"
+fi
+# --no-write-guard still writes a hook for --inputs. The shell check has to run
+# then too: the bash hook moves the panes' HOME, and a fish pane would keep it.
+guard_here="$(bash "$ROOT/scripts/fsguard.sh" --ro "$TMP/shell-inputs" --dry-run -- true 2>/dev/null | sed -n 's/^mode: //p')"
+if [[ -z "$guard_here" || "$guard_here" == "none" ]]; then
+  echo "skip - the login-shell check with --no-write-guard --inputs (no kernel guard on this host, so no hook)"
+else
+  out="$(login_shell_out /usr/bin/fish --no-write-guard --inputs "$TMP/shell-inputs")"
+  grep -q "WARN: this account's login shell is /usr/bin/fish, which reads neither pane hook" <<<"$out" \
+    || fail "--no-write-guard --inputs with a fish login shell should warn that the hook will not be read: $out"
+  grep -q "$past_shell_check" <<<"$out" || fail "--no-write-guard --inputs with fish should still start, as on main: $out"
+  pass "--no-write-guard --inputs with a fish login shell warns and goes on ($guard_here)"
+  out="$(login_shell_out /usr/bin/fish --no-write-guard --inputs "$TMP/shell-inputs" --inputs-enforce on)"
+  grep -q "BLOCKER: this account's login shell is /usr/bin/fish" <<<"$out" \
+    || fail "--inputs-enforce on with a fish login shell should be refused before any pane opens: $out"
+  pass "--inputs-enforce on with a fish login shell is refused at the shell check"
+fi
+
+# --- what Herdr is handed: HOME=<sandbox>/.bash for a bash login shell only ---
+# Here pi's auth check says ready, so the kickoff builds the panes' env and
+# hands it to `herdr workspace create`; the stub herdr writes that argv to a
+# file and returns nothing, which stops the kickoff before any pane.
+mkdir -p "$TMP/pane-env-bin"
+cat > "$TMP/pane-env-bin/pi" <<'SH'
+#!/bin/sh
+echo '{"status":"ready","authType":"api_key","provider":"solo"}'
+SH
+cat > "$TMP/pane-env-bin/herdr" <<'SH'
+#!/bin/sh
+if [ "$1" = workspace ] && [ "$2" = create ]; then printf '%s\n' "$@" > "$HERDR_ARGV"; fi
+exit 0
+SH
+chmod +x "$TMP/pane-env-bin/pi" "$TMP/pane-env-bin/herdr"
+pane_env_argv() { # pane_env_argv <getent body> [start args...] -> the argv Herdr got, one per line
+  local body="$1"; shift
+  printf '#!/bin/sh\n%s\n' "$body" > "$TMP/pane-env-bin/getent"
+  chmod +x "$TMP/pane-env-bin/getent"
+  rm -f "$TMP/herdr-argv"
+  HERDR_ARGV="$TMP/herdr-argv" PATH="$TMP/pane-env-bin:$PATH" SWARM_RUNS_DIR="$TMP/runs" \
+    bash "$ROOT/scripts/swarm.sh" start --model solo/model --n 1 --cap-usd 1 --no-netguard \
+    --goal-file "$ROOT/prompts/goals/hello.md" --label pane-env "$@" > "$TMP/pane-env.out" 2>&1 || true
+  [[ -f "$TMP/herdr-argv" ]] || fail "the kickoff never reached herdr workspace create: $(cat "$TMP/pane-env.out")"
+  cat "$TMP/herdr-argv"
+}
+env_values() { # env_values <argv> <KEY> -> each value passed as --env KEY=..., one per line
+  awk -v key="$2=" 'prev == "--env" && index($0, key) == 1 { print substr($0, length(key) + 1) } { prev = $0 }' <<<"$1"
+}
+argv="$(pane_env_argv 'echo "u:x:1000:1000::/home/u:/bin/bash"' --env HOME=/x)"
+sandbox_dir="$(awk 'prev == "--cwd" { print; exit } { prev = $0 }' <<<"$argv")"
+[[ -n "$sandbox_dir" ]] || fail "herdr workspace create got no --cwd: $argv"
+expect "a bash login shell's panes get HOME=<sandbox>/.bash, once, in place of an operator's --env HOME" \
+  "$sandbox_dir/.bash" "$(env_values "$argv" HOME)"
+if [[ -z "$guard_here" || "$guard_here" == "none" ]]; then
+  echo "skip - Herdr's env with --no-write-guard --inputs (no kernel guard on this host, so no hook)"
+else
+  argv="$(pane_env_argv 'echo "u:x:1000:1000::/home/u:/usr/bin/fish"' --no-write-guard --inputs "$TMP/shell-inputs")"
+  [[ -n "$(env_values "$argv" ZDOTDIR)" ]] || fail "--inputs should still write the pane hook: $argv"
+  expect "a fish login shell's panes keep their HOME (--no-write-guard --inputs)" "" "$(env_values "$argv" HOME)"
+  argv="$(pane_env_argv 'exit 2' --no-write-guard --inputs "$TMP/shell-inputs")"
+  expect "panes keep their HOME when the account database does not answer (getent exits 2)" "" "$(env_values "$argv" HOME)"
+fi
+
+# --- the panes' HOME: moved for a bash hook only, and never passed twice ---
+BASH_ENV_HELPERS="$TMP/bash-hook-env.sh"
+sed -n '/^bash_hook_env() {/,/^}/p' "$ROOT/scripts/swarm.sh" > "$BASH_ENV_HELPERS"
+grep -q "^bash_hook_env()" "$BASH_ENV_HELPERS" || fail "could not lift bash_hook_env out of swarm.sh"
+hook_env() { # hook_env <provider_env...> -> provider_env after bash_hook_env, one per line
+  bash -c 'set -u; source "$1"; shift; provider_env=("$@"); bash_hook_env /sb; printf "%s\n" "${provider_env[@]}"' _ "$BASH_ENV_HELPERS" "$@"
+}
+got="$(hook_env --env "TMPDIR=/t" | tr '\n' ' ')"
+expect "the bash hook's HOME is added to the panes' env" "--env TMPDIR=/t --env HOME=/sb/.bash " "$got"
+got="$(hook_env --env "HOME=/x" --env "TMPDIR=/t" --env "HOME=/y" | tr '\n' ' ')"
+expect "an operator's --env HOME is taken out, so Herdr gets HOME once" "--env TMPDIR=/t --env HOME=/sb/.bash " "$got"
+got="$(hook_env | tr '\n' ' ')"
+expect "an empty env still gets the hook's HOME" "--env HOME=/sb/.bash " "$got"
 
 echo "all swarm preflight cases passed"

@@ -32,7 +32,7 @@ runs/<id>/
   work/<agent id>/             an agent's own scratch and extracted evidence (no claim needed)
   work/extracted/, work/quarantine/   --quarantine: no-exec at the kernel, execute bits stripped
   package/                     `swarm.sh package`: the hand-over with MANIFEST.txt
-  .zsh/.zshenv, .fsguard/      the pane hook and plan for the kernel guard (when one is available)
+  .zsh/, .bash/, .fsguard/     the pane hooks (zsh, bash) and plan for the kernel guard (when one is available)
   threads/main/000001-<id>.md  posts, append-only, one file each
   threads/<name>/meta.json     {name, purpose, created_by, created_at, members}
   inbox/<id>/cursors.json      per-agent, per-thread: highest post id read

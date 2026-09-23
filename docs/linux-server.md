@@ -19,17 +19,21 @@ what a case needs, inside the run.
 
 ## The account the swarm runs as
 
-**Not root, and its login shell must be zsh.** Herdr starts every pane with
-the login shell from the account database, and the write guard is a hook that
-only a zsh reads. With bash there, every pane comes up unguarded — the
+**Not root, and its login shell must be zsh or bash.** Herdr starts every
+pane with a login shell, and the write guard is a hook that shell reads at
+startup: a zsh reads `$ZDOTDIR/.zshenv`, and a bash reads the `.bashrc` (or,
+as a login shell, `.bash_profile`) under the `HOME` the pane is given. The
+kickoff reads the login shell from the account database and moves the panes'
+`HOME` only for bash; both hooks put it back before anything else runs. Any
+other shell reads neither, and every pane would come up unguarded, so the
 kickoff refuses to start rather than let that happen silently.
 
 ```
-useradd -m -s /usr/bin/zsh swarm
-chsh -s /usr/bin/zsh swarm    # for an account that already exists
+useradd -m -s /bin/bash swarm   # or /usr/bin/zsh
+chsh -s /usr/bin/zsh swarm      # to change an account that already exists
 ```
 
-Give the account a `~/.zshrc`, even an empty one. Ubuntu's zsh opens its
+With zsh, give the account a `~/.zshrc`, even an empty one. Ubuntu's zsh opens its
 new-user wizard in every interactive shell whose home has none, and the
 wizard reads the first line typed into the pane as its menu answer: the
 `pi` command, which then never runs, and the kickoff times out "waiting for
@@ -42,7 +46,10 @@ touch /home/swarm/.zshrc
 ```
 
 Herdr passes **its own** `SHELL` to the panes, so start its server after the
-shell is set, and set it explicitly if you are unsure:
+shell is set, and set it explicitly if you are unsure. It has to be the
+account's login shell: the kickoff cannot see the server's `SHELL`, and a
+pane shell that differs from the account's is unguarded (the record says so),
+or, on a bash account, keeps the hook's `HOME`:
 
 ```
 SHELL=/usr/bin/zsh tmux new-session -d -s herdr 'SHELL=/usr/bin/zsh herdr server'

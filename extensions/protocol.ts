@@ -82,6 +82,7 @@ export const PROTECTED_PREFIXES = [
   ".inputs-pristine/",
   ".fsguard/",
   ".zsh/",
+  ".bash/",
   // The findings ledger and the evidence catalog are written by the harness
   // (through `record`, and at kickoff) and read by everyone.
   "ledger/",
