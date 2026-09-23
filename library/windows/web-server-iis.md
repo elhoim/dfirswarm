@@ -111,20 +111,20 @@ Read `catalog/` before running the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the hives (SYSTEM, SOFTWARE, SAM, SECURITY, every NTUSER.DAT),
-  the event logs (`Security`, `System`, `Application`,
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts: the hives (SYSTEM, SOFTWARE, SAM, SECURITY,
+  every NTUSER.DAT), the event logs (`Security`, `System`, `Application`,
   `Microsoft-Windows-TerminalServices-*`, `-PowerShell/Operational`,
   `-Sysmon/Operational`, `-TaskScheduler/Operational`,
   `-Windows Defender/Operational`), the web logs, `applicationHost.config`
   and every `web.config`, `httpd.conf`, `php.ini`, `$MFT`, `$UsnJrnl:$J`,
   Prefetch, Amcache.hve, SRUDB.dat, the database logs, and every file the
-  attacker placed. A web shell, an upload or a script pulled from the
-  image is for reading, parsing and hashing, never running; the report
-  describes what it does, not its code. Copy into the shared
-  `work/extracted/` only what peers must read, and claim it first. Your
-  own scratch goes under `work/<your id>/`.
+  attacker placed. A web shell, an upload or a script pulled from the image
+  is for reading, parsing and hashing, never running; the report describes
+  what it does, not its code. Copy into the shared `work/extracted/` only
+  what peers must read, and claim it first. Your own scratch goes under
+  `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite

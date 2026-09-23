@@ -123,15 +123,14 @@ first pass (partition table, file list, body file, MAC timeline); read
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the runtime's metadata, each container's configuration and
-  log, the writable layers, the image configurations, the kubelet tree,
-  `/etc`, `/var/log`, the homes and temp directories. A binary from a
-  layer is for reading, never running; an image is never loaded or
-  started. Copy into the shared `work/extracted/`
-  only what peers must read, and claim it first. Your own scratch goes
-  under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts: the runtime's metadata, each container's
+  configuration and log, the writable layers, the image configurations, the
+  kubelet tree, `/etc`, `/var/log`, the homes and temp directories. A binary
+  from a layer is for reading, never running; an image is never loaded or
+  started. Copy into the shared `work/extracted/` only what peers must read,
+  and claim it first. Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite

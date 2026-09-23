@@ -108,11 +108,11 @@ ran the first pass; read `catalog/` before running the same commands again.
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
 - Anything you write out of the logs goes under `work/extracted/<your id>/`
-  (quarantined: nothing there can execute; hash everything you pull out):
-  a reassembled 4104 script block, a command line, an encoded argument
-  decoded is for reading, never running. Copy into the shared
-  `work/extracted/` only what peers must read, and claim it first. Your
-  own scratch goes under `work/<your id>/`.
+  (nothing there is run; it is no-exec only under `--quarantine`; hash
+  everything you pull out): a reassembled 4104 script block, a command line,
+  an encoded argument decoded is for reading, never running. Copy into the
+  shared `work/extracted/` only what peers must read, and claim it first.
+  Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite

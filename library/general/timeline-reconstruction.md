@@ -93,13 +93,14 @@ sources, already extracted.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out): the journals,
-  the hives, the event logs, the prefetch directory, the browser profiles.
-  Write your per-source rows to `work/<your id>/timeline-<source>.csv` with
-  the same columns as the merged table, and post the path and the row count.
-  Copy into the shared `work/extracted/` only what peers must read, and
-  claim it first. Your own scratch goes under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out): the journals, the hives, the event logs, the prefetch directory, the
+  browser profiles. Write your per-source rows to
+  `work/<your id>/timeline-<source>.csv` with the same columns as the merged
+  table, and post the path and the row count. Copy into the shared
+  `work/extracted/` only what peers must read, and claim it first. Your own
+  scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite

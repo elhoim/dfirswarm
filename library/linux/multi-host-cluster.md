@@ -101,16 +101,16 @@ before running the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts, keeping each host's material in its own subdirectory: `/etc`,
-  `/var/log` whole, the systemd and cron directories, every home and `/root`
-  with their dot files, the temp directories. Every binary, script, stream,
-  document and download that comes out of the images is for reading,
-  parsing, hashing and disassembling, never running — not in the sandbox and
-  not anywhere else; what a file does is what the static reading shows. Copy
-  into the shared `work/extracted/` only what peers must read, and claim it
-  first. Your own scratch goes under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull out)
+  and analyse the extracts, keeping each host's material in its own
+  subdirectory: `/etc`, `/var/log` whole, the systemd and cron directories,
+  every home and `/root` with their dot files, the temp directories. Every
+  binary, script, stream, document and download that comes out of the images
+  is for reading, parsing, hashing and disassembling, never running — not in
+  the sandbox and not anywhere else; what a file does is what the static
+  reading shows. Copy into the shared `work/extracted/` only what peers must
+  read, and claim it first. Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence, and which host); indicators
   as kind=ioc, conclusions as kind=finding. The timeline and the report cite

@@ -95,11 +95,11 @@ not recognise, because that is where this run begins.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and keep it
-  small: a hive, a configuration file, an archive's listing, the first
-  megabyte of a log. An unknown binary or script is for reading, parsing and
-  hashing, never running, quarantined or not. Copy into the shared
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull out)
+  and keep it small: a hive, a configuration file, an archive's listing, the
+  first megabyte of a log. An unknown binary or script is for reading, parsing
+  and hashing, never running, quarantined or not. Copy into the shared
   `work/extracted/` only what peers must read, and claim it first. Your own
   scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`

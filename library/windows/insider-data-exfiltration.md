@@ -104,10 +104,10 @@ before running the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the hives (SYSTEM, SOFTWARE, SAM, the user's NTUSER.DAT and
-  UsrClass.dat), the event logs (`Security`, `System`,
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts: the hives (SYSTEM, SOFTWARE, SAM, the
+  user's NTUSER.DAT and UsrClass.dat), the event logs (`Security`, `System`,
   `Microsoft-Windows-DriverFrameworks-UserMode/Operational`,
   `-PrintService/Operational`, `-TerminalServices-*`), `$MFT`, `$LogFile`,
   `$UsnJrnl:$J`, Prefetch, SRUDB.dat, `setupapi.dev.log`, the jump lists

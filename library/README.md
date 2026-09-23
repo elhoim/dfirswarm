@@ -10,6 +10,12 @@ scripts/swarm.sh start --goal-file library/windows/host-intrusion.md \
   --inputs /cases/host-01 --pack windows-forensics --catalog --n 5 --cap-usd 30
 ```
 
+`--catalog` also turns on `--quarantine`, which strips execute bits under
+`work/extracted/` and `work/quarantine/` and makes both no-exec where the
+host has a kernel guard. A case that pulls samples, carvings or decoded
+stages out of loose files is launched with `--quarantine` whether or not it
+takes the catalog; without either flag nothing there is protected.
+
 Every entry is a starting point, not a script. Load it, name the evidence it
 should read where the document says so, tighten or drop the questions the
 case does not need, and save the result under `prompts/goals/` as yours. The
@@ -124,7 +130,12 @@ eighteen published runs converged on:
    read-only, `inputs` lists it; `inputs.json` is the manifest; `catalog/`
    holds the kickoff's first pass when the run had `--catalog`); and that a
    brief the operator dropped beside the evidence (`inputs/CASE.md`, a
-   `README`, a ticket) sets the questions before the ones below do.
+   `README`, a ticket) sets the questions before the ones below do. A
+   question never takes file times from the manifest: `inputs.json`'s
+   `mtime_ms` is the kickoff's copy time unless the manifest says
+   `"held": "bind"` or `"attached": true`, and even then it is the
+   operator's copy, never a timeline row on its own. File times come from
+   the brief or the acquisition record.
 2. `### Questions the report has to answer` — numbered `1.` to `N.`, each a
    real question with the artefacts that answer it named in the question.
    The last one is always the timeline, the hypothesis and approach, and
@@ -163,10 +174,11 @@ Verbatim across the cases, with the tool list adapted to the evidence:
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts; copy into the shared `work/extracted/` only what peers must
-  read, and claim it first. Your own scratch goes under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts; copy into the shared `work/extracted/` only
+  what peers must read, and claim it first. Your own scratch goes under
+  `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -251,6 +263,10 @@ Add what the kind of case can promise: an indicators table for an intrusion
 or a malware case (`test "$(grep -c '^| ' work/indicators.md)" -ge 3` — one
 row at least, and a row may say that nothing was found and why), a flags
 table for a question set, an extracted-artefact directory for a memory dump.
+A case that extracts samples, carvings or decoded stages adds
+`test -z "$(find work -path work/.toolchain -prune -o -type f \( -perm -u+x -o -perm -g+x -o -perm -o+x \) -print 2>/dev/null | head -1)"`:
+no file under `work/` carries an execute bit (pip's `work/.toolchain/`
+aside), which is the part of the quarantine a check can see.
 
 ### What an entry must not do
 

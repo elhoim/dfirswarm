@@ -33,6 +33,9 @@ Volatility's symbol tables for this case come from
 (`--allow-host isf-server.techanarchy.net`, as the published memory runs
 did) unless the operator put the tables under `inputs/`.
 
+Launch this case with `--quarantine` (`--catalog` turns it on): what is
+dumped out of memory is only kept from executing under that flag.
+
 ### Questions the report has to answer
 
 1. System profile per dump: the image's format and size, the Windows build
@@ -125,12 +128,20 @@ did) unless the operator put the tables under `inputs/`.
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
 - Everything dumped from memory goes under `work/extracted/<your id>/`
-  (quarantined: nothing there can execute; hash everything you pull out);
-  a dumped process, module or region is for reading, parsing and
-  disassembling, never running, and the key material inside one is an
-  indicator to describe, not a value to post. Copy into the shared
-  `work/extracted/` only what peers must read, and claim it first. Your
-  own scratch goes under `work/<your id>/`.
+  (nothing there is run; it is no-exec only under `--quarantine`; hash
+  everything you pull out); a dumped process, module or region is for
+  reading, parsing and disassembling, never running, and the key material
+  inside one is an indicator to describe, not a value to post. Copy into the
+  shared `work/extracted/` only what peers must read, and claim it first.
+  Your own scratch goes under `work/<your id>/`.
+- Before your first extraction, check that `echo $SWARM_QUARANTINE` prints
+  `1`. If it does not, the kickoff ran without `--quarantine`: post a `hold`
+  naming the missing flag, and until the operator answers extract only text
+  (listings, decoded strings, configuration), never a binary or a script.
+  Dumped processes, modules and regions go only under
+  `work/extracted/<your id>/`, never under `work/<your id>/`, which is never
+  no-exec; nothing under `work/` keeps an execute bit (`chmod a-x` whatever
+  an archive restored with one).
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -200,6 +211,9 @@ is unchanged.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
+- `test -z "$(find work -path work/.toolchain -prune -o -type f \( -perm -u+x -o -perm -g+x -o -perm -o+x \) -print 2>/dev/null | head -1)"`
+  (no file under `work/` keeps an execute bit; pip's `work/.toolchain/` is
+  the one exception.)
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 18`
 - `test -f work/indicators.md`
