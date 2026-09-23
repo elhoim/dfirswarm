@@ -220,6 +220,7 @@ separator too, so the threshold is two more than the rows you mean.
 ```markdown
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk '/^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~/inputs\/|work\/|catalog\/|ledger\/|seq[ #=]*[0-9]|hypothesis|inode|offset|record ?id|[a-z]:\\|\/[^ \/]+\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php)/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 25`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`
@@ -230,10 +231,30 @@ separator too, so the threshold is two more than the rows you mean.
   it, and `make_tool` will refuse that name.)
 ```
 
+The awk line holds "every answer cites evidence" to something a script can
+see: each numbered section must carry a citation token (a path under
+`inputs/`, `work/`, `catalog/` or `ledger/`, a host path, an artefact file
+name, an inode, an offset, a record id, a `seq` number) or say
+`hypothesis`. One section in four may go without, for a closing answer
+that rests on the ones before it; an empty report fails. It passes all
+nineteen published reports that answer every question, and fails the one
+left with answers of `TBD.`.
+
 Add what the kind of case can promise: an indicators table for an intrusion
 or a malware case (`test "$(grep -c '^| ' work/indicators.md)" -ge 3` — one
 row at least, and a row may say that nothing was found and why), a flags
 table for a question set, an extracted-artefact directory for a memory dump.
+Where the definition of done promises extracted files with their hashes,
+name the manifest (`sha256sum` output in a `SHA256SUMS` file beside them)
+and check it, not the directory: `test "$(find work/extracted -name
+SHA256SUMS -exec cat {} + 2>/dev/null | grep -cE '^[0-9a-f]{64} ')" -ge 1`.
+Where it promises a YARA rule, check that a file holds a rule declaration
+(`find work/rules -name '*.yar*' -exec grep -lE ... {} + | grep -q .`; the
+trailing `grep -q .` is what fails an empty directory) and, in a second
+check, that every rule compiles: `command -v yara >/dev/null || exit 0;`
+then `yara "$r" /dev/null` over each file. The guard lets a run started
+without the dfir toolbox pass the compile check; the declaration check
+still holds it.
 
 ### What an entry must not do
 

@@ -230,6 +230,14 @@ test("every entry that ships keeps the library's contract", async () => {
       if (!text.includes(must)) bad(id, `standard check missing: ${must}`);
     }
     if (/find +inputs\b/.test(text) && !/find -[HL] inputs/.test(text)) bad(id, "a check walks inputs/ with a bare find");
+    // "Every answer cites evidence", held per numbered section (library/README.md).
+    if (!checks.some((c) => c.startsWith("awk '/^## /") && c.includes("4*b>n") && c.endsWith("work/report.md"))) {
+      bad(id, "no per-section citation check over work/report.md");
+    }
+    // A count of files passes on an empty rule or a stray extract; check what the file holds.
+    if (/find work\/rules -name '\*\.yar\*' 2>\/dev\/null \| wc -l/.test(text)) bad(id, "counts YARA files instead of checking a rule is declared");
+    if (text.includes("work/rules") && !checks.some((c) => c.startsWith("command -v yara >/dev/null || exit 0;"))) bad(id, "checks work/rules without the guarded compile check");
+    if (/find work\/extracted -type f/.test(text)) bad(id, "counts extracted files instead of reading work/extracted/**/SHA256SUMS");
     for (const c of checks) {
       if (c.includes("`")) bad(id, `a check holds a backtick: ${c}`);
       try {

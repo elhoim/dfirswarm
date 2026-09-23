@@ -179,13 +179,15 @@ per process, connection and persistence entry (memory evidence, disk
 evidence, match or gap, explanation, confidence), `work/indicators.md`
 holds one table of every indicator (type, value, first seen, source,
 confidence; one row saying so if none was found), every dump and extract
-is under `work/extracted/` with its hash in the report, the ledger holds
+is under `work/extracted/` with its hash in the report and in a
+`SHA256SUMS` file beside it (`sha256sum` output), the ledger holds
 the dated events the timeline rests on, and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk '/^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~/inputs\/|work\/|catalog\/|ledger\/|seq[ #=]*[0-9]|hypothesis|inode|offset|record ?id|[a-z]:\\|\/[^ \/]+\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php)/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 30`
@@ -193,7 +195,7 @@ the dated events the timeline rests on, and `inputs/` is unchanged.
 - `test "$(grep -c '^| ' work/reconciliation.md)" -ge 5`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
-- `test "$(find work/extracted -type f 2>/dev/null | wc -l)" -ge 1`
+- `test "$(find work/extracted -name SHA256SUMS -exec cat {} + 2>/dev/null | grep -cE '^[0-9a-f]{64} ')" -ge 1`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 15`
 - `grep -rqi 'sign-off' threads/main/`
 - `grep -q '"tool":"inputs_check"' traces/events.jsonl`
