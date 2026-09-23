@@ -124,6 +124,14 @@ export type StartParams = {
   case_id?: string;
   /** Who is running it, recorded alongside the case. */
   examiner?: string;
+  /** Where the agents live: host processes (the default), or one microVM each. */
+  isolation?: "host" | "microvm";
+  /** The VM image, when not the one the packs pick. */
+  image?: string;
+  vm_cpus?: number;
+  vm_memory?: number;
+  /** false: remove each VM at stop without keeping its disk. */
+  vm_snapshot?: boolean;
 };
 
 /** guarded: the providers' hosts · hosts: plus named ones · open: no guard · local: the local endpoints and nothing else. */
@@ -488,6 +496,27 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
     if (!Number.isInteger(n) || n < 0 || n > 999_999_999) return { ok: false, error: "inbox_page_chars must be a whole number of characters (0 for no bound)" };
     inboxPageChars = n;
   }
+  // Isolation: host unless the form asks for a microVM per agent. The image
+  // is an OCI reference; the harness checks the host can boot it.
+  const isolation = body.isolation === "microvm" ? "microvm" : body.isolation === undefined || body.isolation === null || body.isolation === "" || body.isolation === "host" ? "host" : null;
+  if (!isolation) return { ok: false, error: "isolation must be host or microvm" };
+  const image = typeof body.image === "string" ? body.image.trim() : "";
+  if (image && !/^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$/.test(image)) return { ok: false, error: "image must be an OCI reference (registry/name:tag or name@sha256:...)" };
+  if (image && isolation !== "microvm") return { ok: false, error: "image names a VM image; it needs isolation microvm" };
+  const vmNumber = (key: "vm_cpus" | "vm_memory", min: number, max: number): number | undefined | { error: string } => {
+    const raw = body[key];
+    if (raw === undefined || raw === null || raw === "") return undefined;
+    const v = Number(raw);
+    if (!Number.isInteger(v) || v < min || v > max) return { error: `${key} must be a whole number from ${min} to ${max}` };
+    if (isolation !== "microvm") return { error: `${key} needs isolation microvm` };
+    return v;
+  };
+  const vmCpus = vmNumber("vm_cpus", 1, 64);
+  if (vmCpus && typeof vmCpus === "object") return { ok: false, error: vmCpus.error };
+  const vmMemory = vmNumber("vm_memory", 512, 262144);
+  if (vmMemory && typeof vmMemory === "object") return { ok: false, error: vmMemory.error };
+  const vmSnapshot = body.vm_snapshot === false ? false : undefined;
+  if (vmSnapshot === false && isolation !== "microvm") return { ok: false, error: "vm_snapshot needs isolation microvm" };
   return {
     ok: true,
     params: {
@@ -528,6 +557,11 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
       quarantine: quarantine || undefined,
       case_id: caseId || undefined,
       examiner: examiner || undefined,
+      isolation: isolation === "microvm" ? "microvm" : undefined,
+      image: image || undefined,
+      vm_cpus: vmCpus as number | undefined,
+      vm_memory: vmMemory as number | undefined,
+      vm_snapshot: vmSnapshot,
     },
   };
 }
@@ -578,6 +612,13 @@ export function startArgv(p: StartParams): string[] {
   if (p.quarantine) argv.push("--quarantine");
   if (p.case_id) argv.push("--case-id", p.case_id);
   if (p.examiner) argv.push("--examiner", p.examiner);
+  if (p.isolation === "microvm") {
+    argv.push("--isolation", "microvm");
+    if (p.image) argv.push("--image", p.image);
+    if (p.vm_cpus) argv.push("--vm-cpus", String(p.vm_cpus));
+    if (p.vm_memory) argv.push("--vm-memory", String(p.vm_memory));
+    if (p.vm_snapshot === false) argv.push("--no-vm-snapshot");
+  }
   if (p.no_start) argv.push("--no-start");
   return argv;
 }

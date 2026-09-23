@@ -124,6 +124,48 @@ Fixture kickoff from the web app test.
 - \`test -f work/fixture.txt\`
 `;
 
+test("a microVM kickoff reaches the command line, and a VM option without it is refused", () => {
+  const host = validateStart({ n: 2, cap_usd: 1, model: "openai/gpt-5.4", no_start: true });
+  assert.equal(host.ok, true);
+  if (!host.ok) return;
+  assert.ok(!startArgv(host.params).includes("--isolation"), "host is the default and adds nothing");
+
+  const vm = validateStart({
+    n: 2,
+    cap_usd: 1,
+    model: "openai/gpt-5.4",
+    no_start: true,
+    isolation: "microvm",
+    image: "ghcr.io/halilozturkci/dfirswarm-pro-disk@sha256:" + "a".repeat(64),
+    vm_cpus: 1,
+    vm_memory: 1024,
+    vm_snapshot: false,
+  });
+  assert.equal(vm.ok, true);
+  if (!vm.ok) return;
+  const argv = startArgv(vm.params);
+  const at = argv.indexOf("--isolation");
+  assert.deepEqual(argv.slice(at, at + 9), [
+    "--isolation", "microvm",
+    "--image", "ghcr.io/halilozturkci/dfirswarm-pro-disk@sha256:" + "a".repeat(64),
+    "--vm-cpus", "1",
+    "--vm-memory", "1024",
+    "--no-vm-snapshot",
+  ]);
+
+  for (const bad of [
+    { isolation: "docker" },
+    { image: "dfirswarm-disk:dev" },
+    { isolation: "microvm", image: "not an image; rm -rf /" },
+    { isolation: "microvm", vm_cpus: 0 },
+    { isolation: "microvm", vm_memory: 64 },
+    { vm_cpus: 2 },
+    { vm_snapshot: false },
+  ]) {
+    assert.equal(validateStart({ n: 2, cap_usd: 1, model: "x/y", no_start: true, ...bad }).ok, false, JSON.stringify(bad));
+  }
+});
+
 test("the network setting reaches the command line, and a bad one is refused", () => {
   // Guarded is the default and adds nothing: netguard is already on.
   const guarded = validateStart({ n: 2, cap_usd: 1, model: "openai/gpt-5.4", no_start: true });

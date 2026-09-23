@@ -35,6 +35,17 @@ function frameFacts(view: SwarmView): Fact[] {
     const tabs = typeof layout.tabs === "number" ? `${layout.tabs} tab${layout.tabs === 1 ? "" : "s"} · ` : "";
     out.push({ label: "Panes", value: `${s.workspace_id} · ${tabs}${s.n} panes`, title: "The Herdr workspace this run's agents live in" });
   }
+  // Where the agents lived: on this host, or one microVM each.
+  const iso = (r.isolation ?? {}) as { mode?: string; image?: string; cpus?: number; memory_mib?: number; snapshot?: boolean };
+  if (iso.mode === "microvm") {
+    out.push({
+      label: "Isolation",
+      value: `microVM per agent · ${iso.image ?? "image not recorded"}${iso.cpus ? ` · ${iso.cpus} vCPU` : ""}${iso.memory_mib ? ` · ${iso.memory_mib} MiB` : ""}${iso.snapshot === false ? " · disks not kept" : ""}`,
+      title: "Each agent ran Pi in its own microVM: the run read-only but for work/ and its own outputs, the board written by the hub on the host, no credential inside. vm/<id>.json holds each VM's record.",
+    });
+  } else {
+    out.push({ label: "Isolation", value: "host processes", title: "Each agent ran as a Pi process on this host, held by the write guard, the tool guard and netguard" });
+  }
   if (view.inputs) {
     out.push({
       label: "Inputs",
@@ -47,7 +58,7 @@ function frameFacts(view: SwarmView): Fact[] {
     value:
       r.net === "open" ? "open" : r.net === "local" ? "local endpoints only" : r.net === "hosts" ? `allowlist + ${String(r.allow_hosts ?? "")}` : "allowlist only",
     tone: r.net === "open" ? "warn" : undefined,
-    title: "What the panes could reach through netguard",
+    title: iso.mode === "microvm" ? "What each agent's VM could reach: msb's network policy, deny by default" : "What the panes could reach through netguard",
   });
   if (r.toolbox && r.toolbox !== "off") out.push({ label: "Toolbox", value: String(r.toolbox), title: "The tool sets checked on this host before the run started" });
   if (r.catalog === true) out.push({ label: "Catalog", value: "first pass done", title: "The standard first pass over the evidence ran before any agent" });
