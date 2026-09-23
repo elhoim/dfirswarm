@@ -135,6 +135,32 @@ test("a pane that cannot reach the collector or the file spills rather than losi
   }
 });
 
+test("a pane that loses the collector mid-run spills rather than appending an unchained line to the chain", async () => {
+  // With no write guard, traces/ stays writable to the pane, so the fallback
+  // append succeeds — and an unchained line after a chained one is exactly
+  // what the verifier reports as "appended": a tamper alarm the harness would
+  // raise against itself. The shell watchdogs already spill in this case.
+  const root = await mkdtemp(join(tmpdir(), "swarm-lostcollector-"));
+  const socket = await collectorOn(root);
+  process.env.SWARM_TRACE_SOCKET = socket;
+  try {
+    for (let i = 0; i < 2; i += 1) await appendEvent(root, { agent: "a0", tool: "read", args: { n: i }, result: { ok: true } });
+    await new Promise((r) => setTimeout(r, 250));
+    assert.equal(verifyEventChain(`${(await lines(root)).join("\n")}\n`).chained, 2);
+    // The collector stops answering: a socket nothing listens on.
+    process.env.SWARM_TRACE_SOCKET = join(root, "nothing-listening.sock");
+    await appendEvent(root, { agent: "a0", tool: "bash", args: { prev: "not a chain" }, result: { ok: true } });
+    const written = await lines(root);
+    assert.equal(written.length, 2, "the chained record is not appended to");
+    const chain = verifyEventChain(`${written.join("\n")}\n`);
+    assert.equal(chain.ok, true, `the record still verifies (${chain.reason ?? ""} at ${chain.broken_at ?? ""})`);
+    const spill = await readFile(join(root, "work", ".trace-spill.jsonl"), "utf8").catch(() => "");
+    assert.equal(spill.split("\n").filter(Boolean).length, 1, "the line is in the spill, not gone");
+  } finally {
+    delete process.env.SWARM_TRACE_SOCKET;
+  }
+});
+
 test("the socket lives under traces/, which the write guard denies to the panes", () => {
   // A socket in the sandbox root is one an agent can unlink — and then bind
   // its own, becoming the writer of the record of what it did. Measured under
