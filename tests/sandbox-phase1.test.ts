@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, mkdir, readFile, stat } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, readFile, stat } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -154,6 +154,30 @@ test("a pane that loses the collector mid-run spills rather than appending an un
     assert.equal(written.length, 2, "the chained record is not appended to");
     const chain = verifyEventChain(`${written.join("\n")}\n`);
     assert.equal(chain.ok, true, `the record still verifies (${chain.reason ?? ""} at ${chain.broken_at ?? ""})`);
+    const spill = await readFile(join(root, "work", ".trace-spill.jsonl"), "utf8").catch(() => "");
+    assert.equal(spill.split("\n").filter(Boolean).length, 1, "the line is in the spill, not gone");
+  } finally {
+    delete process.env.SWARM_TRACE_SOCKET;
+  }
+});
+
+test("a pane that finds a torn line at the end of the trace spills rather than fusing onto it", async () => {
+  // A collector killed mid-append leaves a fragment with no newline after the
+  // chained records. A line appended there would join the fragment into one
+  // unparseable line, and the record could never verify again.
+  const root = await mkdtemp(join(tmpdir(), "swarm-torntail-"));
+  const socket = await collectorOn(root);
+  process.env.SWARM_TRACE_SOCKET = socket;
+  try {
+    for (let i = 0; i < 2; i += 1) await appendEvent(root, { agent: "a0", tool: "read", args: { n: i }, result: { ok: true } });
+    await new Promise((r) => setTimeout(r, 250));
+    const events = join(root, "traces", "events.jsonl");
+    const before = await readFile(events, "utf8");
+    await appendFile(events, '{"ts":"2026-01-01T00:00:00Z","agent":"a0","tool":"bash","args":{"cmd":"cut sh', "utf8");
+    process.env.SWARM_TRACE_SOCKET = join(root, "nothing-listening.sock");
+    await appendEvent(root, { agent: "a0", tool: "bash", args: { n: 3 }, result: { ok: true } });
+    const after = await readFile(events, "utf8");
+    assert.ok(after.startsWith(before) && !after.slice(before.length).includes("\n"), "nothing is appended onto the fragment");
     const spill = await readFile(join(root, "work", ".trace-spill.jsonl"), "utf8").catch(() => "");
     assert.equal(spill.split("\n").filter(Boolean).length, 1, "the line is in the spill, not gone");
   } finally {

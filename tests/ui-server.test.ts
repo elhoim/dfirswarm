@@ -579,7 +579,7 @@ test("artifacts: a name outside Latin-1 is served, with an ASCII fallback and a 
   }
 });
 
-test("artifacts: a file that cannot be opened after stat fails the request, not the server", async () => {
+test("artifacts: a file that cannot be opened after stat fails the request, not the server", { skip: process.getuid?.() === 0 && "root ignores file modes" }, async () => {
   // stat succeeds and the headers go out; the open fails afterwards. Without
   // an error listener on the read stream that failure is an unhandled 'error'
   // event and takes the whole console down.

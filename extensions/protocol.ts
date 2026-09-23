@@ -2305,10 +2305,13 @@ function traceToken(): string {
 }
 
 /**
- * Whether the trace's last line carries the collector's `prev`, read from the
- * end of the file so a long trace is not loaded whole on every fallback.
+ * Whether the trace's tail refuses a direct append, read from the end of the
+ * file so a long trace is not loaded whole on every fallback: its last line
+ * carries the collector's `prev`, or it is a fragment (no closing newline, or
+ * not JSON) that a collector killed mid-append left behind. A line appended
+ * onto a fragment would fuse with it and corrupt the record for good.
  */
-async function lastLineIsChained(file: string): Promise<boolean> {
+async function tailRefusesAppend(file: string): Promise<boolean> {
   let handle;
   try {
     handle = await open(file, "r");
@@ -2317,6 +2320,10 @@ async function lastLineIsChained(file: string): Promise<boolean> {
   }
   try {
     const { size } = await handle.stat();
+    if (size === 0) return false;
+    const lastByte = Buffer.alloc(1);
+    await handle.read(lastByte, 0, 1, size - 1);
+    if (lastByte[0] !== 0x0a) return true;
     const CHUNK = 65536;
     const chunks: Buffer[] = [];
     let end = size;
@@ -2337,7 +2344,7 @@ async function lastLineIsChained(file: string): Promise<boolean> {
           const record = JSON.parse(last) as { prev?: unknown };
           return typeof record?.prev === "string";
         } catch {
-          return false;
+          return true;
         }
       }
     }
@@ -2379,7 +2386,8 @@ export async function appendEvent(
   // harness raises against itself. This is a collector that stopped answering
   // with no write guard to make traces/ read-only. The line goes to the spill
   // file, as the shell watchdogs do; only an unchained record takes the append.
-  if (await lastLineIsChained(file)) {
+  // So does a torn tail, which the appended line would fuse with.
+  if (await tailRefusesAppend(file)) {
     await mkdir(dirname(join(sandboxRoot, TRACE_SPILL_REL)), { recursive: true }).catch(() => undefined);
     await appendFile(join(sandboxRoot, TRACE_SPILL_REL), plain, "utf8");
     return record;
