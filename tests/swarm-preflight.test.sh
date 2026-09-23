@@ -543,6 +543,50 @@ else
   pass "--inputs-enforce on with a fish login shell is refused at the shell check"
 fi
 
+# --- what Herdr is handed: HOME=<sandbox>/.bash for a bash login shell only ---
+# Here pi's auth check says ready, so the kickoff builds the panes' env and
+# hands it to `herdr workspace create`; the stub herdr writes that argv to a
+# file and returns nothing, which stops the kickoff before any pane.
+mkdir -p "$TMP/pane-env-bin"
+cat > "$TMP/pane-env-bin/pi" <<'SH'
+#!/bin/sh
+echo '{"status":"ready","authType":"api_key","provider":"solo"}'
+SH
+cat > "$TMP/pane-env-bin/herdr" <<'SH'
+#!/bin/sh
+if [ "$1" = workspace ] && [ "$2" = create ]; then printf '%s\n' "$@" > "$HERDR_ARGV"; fi
+exit 0
+SH
+chmod +x "$TMP/pane-env-bin/pi" "$TMP/pane-env-bin/herdr"
+pane_env_argv() { # pane_env_argv <getent body> [start args...] -> the argv Herdr got, one per line
+  local body="$1"; shift
+  printf '#!/bin/sh\n%s\n' "$body" > "$TMP/pane-env-bin/getent"
+  chmod +x "$TMP/pane-env-bin/getent"
+  rm -f "$TMP/herdr-argv"
+  HERDR_ARGV="$TMP/herdr-argv" PATH="$TMP/pane-env-bin:$PATH" SWARM_RUNS_DIR="$TMP/runs" \
+    bash "$ROOT/scripts/swarm.sh" start --model solo/model --n 1 --cap-usd 1 --no-netguard \
+    --goal-file "$ROOT/prompts/goals/hello.md" --label pane-env "$@" > "$TMP/pane-env.out" 2>&1 || true
+  [[ -f "$TMP/herdr-argv" ]] || fail "the kickoff never reached herdr workspace create: $(cat "$TMP/pane-env.out")"
+  cat "$TMP/herdr-argv"
+}
+env_values() { # env_values <argv> <KEY> -> each value passed as --env KEY=..., one per line
+  awk -v key="$2=" 'prev == "--env" && index($0, key) == 1 { print substr($0, length(key) + 1) } { prev = $0 }' <<<"$1"
+}
+argv="$(pane_env_argv 'echo "u:x:1000:1000::/home/u:/bin/bash"' --env HOME=/x)"
+sandbox_dir="$(awk 'prev == "--cwd" { print; exit } { prev = $0 }' <<<"$argv")"
+[[ -n "$sandbox_dir" ]] || fail "herdr workspace create got no --cwd: $argv"
+expect "a bash login shell's panes get HOME=<sandbox>/.bash, once, in place of an operator's --env HOME" \
+  "$sandbox_dir/.bash" "$(env_values "$argv" HOME)"
+if [[ -z "$guard_here" || "$guard_here" == "none" ]]; then
+  echo "skip - Herdr's env with --no-write-guard --inputs (no kernel guard on this host, so no hook)"
+else
+  argv="$(pane_env_argv 'echo "u:x:1000:1000::/home/u:/usr/bin/fish"' --no-write-guard --inputs "$TMP/shell-inputs")"
+  [[ -n "$(env_values "$argv" ZDOTDIR)" ]] || fail "--inputs should still write the pane hook: $argv"
+  expect "a fish login shell's panes keep their HOME (--no-write-guard --inputs)" "" "$(env_values "$argv" HOME)"
+  argv="$(pane_env_argv 'exit 2' --no-write-guard --inputs "$TMP/shell-inputs")"
+  expect "panes keep their HOME when the account database does not answer (getent exits 2)" "" "$(env_values "$argv" HOME)"
+fi
+
 # --- the panes' HOME: moved for a bash hook only, and never passed twice ---
 BASH_ENV_HELPERS="$TMP/bash-hook-env.sh"
 sed -n '/^bash_hook_env() {/,/^}/p' "$ROOT/scripts/swarm.sh" > "$BASH_ENV_HELPERS"
