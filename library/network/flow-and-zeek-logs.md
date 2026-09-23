@@ -49,10 +49,15 @@ reads that.
    intervals close to the median), the count, the durations and the byte
    counts; the pairs whose regularity and persistence read as a scheduled
    channel, ranked; and the destinations in the long tail that only one
-   host reaches and reaches often. Before scoring, merge flow records that
-   continue one session (same five-tuple, start within the exporter's
-   active timeout of the previous end, which you state), so an exporter's
-   re-exports of a long session are not read as a beacon; for Zeek, score
+   host reaches and reaches often. Before scoring, merge a flow record
+   into the previous one only when it continues that session: same
+   five-tuple, the previous record lasted about the exporter's active
+   timeout (it was cut, not ended), the gap is under the inactive timeout,
+   and for TCP the previous record has no FIN or RST. State both timeouts
+   (for AWS VPC flow logs the 1- or 10-minute aggregation interval plays
+   the active timeout's part). Anything else is a new connection, however
+   close, so a long session's re-exports are not read as a beacon and a
+   fixed-port, UDP or ICMP beacon is not merged away; for Zeek, score
    connection starts (`ts`), not log lines. Forge one periodicity tool and
    share it, so every pair is measured the same way.
 4. Scanning: hosts whose distinct destination or port count stands out,
@@ -103,8 +108,10 @@ reads that.
   time, with time in UTC, source, destination, ports, protocol, service,
   duration, bytes and packets in each direction, state, and the file and
   line it came from. That loader is forged with `make_tool` and shared,
-  its row counts per table are posted against the `wc -l` or `#close`
-  counts, and peers open the database read-only (`sqlite3 -readonly`).
+  its row counts per table are posted against the source's record count
+  (`grep -vc '^#'`, through `zcat` for a compressed log; Zeek's `#close`
+  line holds only the close time, and JSON logs have no `#` lines), and
+  peers open the database read-only (`sqlite3 -readonly`).
   Everyone else waits for that post or works a log the loader has not
   reached. There is no root.
 - The evidence catalog holds nothing for logs; the inventory posted for

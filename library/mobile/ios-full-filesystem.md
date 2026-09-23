@@ -100,8 +100,11 @@ that file instead of listing again.
 - Extract what you need into `work/extracted/<your id>/` (quarantined:
   nothing there can execute; hash everything you pull out), batching your
   paths so the archive is streamed once, not once per file:
-  `tar -xf <archive> -C work/extracted/<your id>/ --no-same-owner --no-same-permissions -T work/<your id>/paths.txt`
-  (for a zip, `unzip -n <archive> -d work/extracted/<your id>/ <path>...`).
+  `tar -xf <archive> -C work/extracted/<your id>/ --no-same-owner --no-same-permissions --verbatim-files-from -T work/<your id>/paths.txt`
+  (`--verbatim-files-from` is GNU tar's: without it a line starting with
+  `-` is read as an option; for a zip,
+  `unzip -n <archive> -d work/extracted/<your id>/ <path>...`, where
+  `unzip` reads each path as a wildcard, so escape a `[` as `\[`).
   Quote paths exactly as the listing prints them; tools prefix them
   differently (`private/var/...`, `/private/var/...`, `filesystem1/...`).
   Analyse the extracts. Copy a SQLite database together with its `-wal`

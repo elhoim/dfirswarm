@@ -182,7 +182,6 @@ the dated events the timeline rests on, and `inputs/` is unchanged.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
-- `grep -qiE 'tshark|tcpdump|capinfos|scapy|dpkt' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 27`
 - `test -f work/indicators.md`

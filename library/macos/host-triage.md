@@ -34,7 +34,9 @@ exists, and before running the same commands again.
    `SystemConfiguration` preferences), the time zone, every user with its
    home directory and uid (the local directory records under
    `/var/db/dslocal/nodes/Default/users`) and role (admin or standard, from
-   the `GroupMembership` of `groups/admin.plist` beside them), and the
+   `groups/admin.plist` beside them: its `users` key holds short names,
+   `groupmembers` holds GeneratedUIDs, and `nestedgroups` holds the
+   GeneratedUIDs of groups whose members are admins too), and the
    FileVault state as far as the readable metadata shows it (the volume's
    encryption flag in `pstat` and `fsstat`, on pre-APFS systems the
    CoreStorage `EncryptedRoot.plist.wipekey`, whether a recovery key is
@@ -51,9 +53,9 @@ exists, and before running the same commands again.
    where it can be read, and the file times.
 3. Program execution and user activity: what the unified log shows where
    it is readable (or via a forged reader): `/private/var/db/diagnostics/`
-   (Persist, Special, Signpost and `timesync`) together with
+   (Persist, Special, Signpost, HighVolume and `timesync`) together with
    `/private/var/db/uuidtext/`, which a reader needs to render messages;
-   `KnowledgeC.db` (`/private/var/db/CoreDuet/Knowledge/` and
+   `knowledgeC.db` (`/private/var/db/CoreDuet/Knowledge/` and
    `~/Library/Application Support/Knowledge/`) for app usage and focus
    intervals and, on macOS 13 and later, the Biome streams under
    `/private/var/db/biome/` and `~/Library/Biome/`; login and session
@@ -103,13 +105,14 @@ exists, and before running the same commands again.
   pool: `pstat -o <sector> <img>` lists its volumes and their superblock
   blocks, and one volume is addressed with `-o <sector> -P apfs -B <block>`
   (the same flags for `fls`, `fsstat`, `istat` and `icat`). Since 10.15 the
-  user data lives on the "<name> - Data" volume (role Data), not the sealed
-  System volume. One agent builds the Data volume's body file with
-  `fls -m / -r -P apfs -B ...` and shares it under `work/extracted/`. Where
-  this TSK build cannot read the APFS container, say so on the board and
-  reach the files with a forged `pyapfs`-style reader or `dfvfs` over the
-  raw image, and prove which volume you addressed with `fsstat`. There is
-  no root: no mounting, no `sudo`.
+  user data lives on the "<name> - Data" volume (role Data), not the
+  System volume (read-only from 10.15, sealed from macOS 11). One agent
+  builds the Data volume's body file with `fls -m / -r -P apfs -B ...` and
+  shares it under `work/extracted/`. Where this TSK build cannot read the
+  APFS container, say so on the board and reach the files with a forged
+  `pyapfs`-style reader or `dfvfs` over the raw image, and prove which
+  volume you addressed with `fsstat`. There is no root: no mounting, no
+  `sudo`.
 - If the APFS Data volume is encrypted (FileVault; `pstat` and `fsstat`
   report it), say so on the board at once. That is a finding, not a
   failure: report which volumes are readable (Preboot, Recovery, an
@@ -125,7 +128,7 @@ exists, and before running the same commands again.
   loaded, and every fetch is on the trace for the report to cite.
 - Extract what you need into `work/extracted/<your id>/` (quarantined:
   nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the launchd and profile plists, the databases (`KnowledgeC.db`,
+  extracts: the launchd and profile plists, the databases (`knowledgeC.db`,
   `TCC.db`, `QuarantineEventsV2`, the browser stores), the `.fseventsd`
   records, the shell histories, the diagnostics and `uuidtext`
   directories. Copy into the
@@ -136,7 +139,7 @@ exists, and before running the same commands again.
   conclusions as kind=finding. The timeline and the report cite
   `ledger/ledger.md`. APFS and the unified log keep time in UTC already; say
   so, and say when a local-time artefact (a shell history with no zone) was
-  converted and how. Most Apple SQLite stores (`KnowledgeC.db`,
+  converted and how. Most Apple SQLite stores (`knowledgeC.db`,
   `QuarantineEventsV2`, Safari's `History.db`) count Mac Absolute Time,
   seconds since 2001-01-01 UTC (add 978307200 for Unix time); say which
   epoch each column used.
@@ -168,7 +171,7 @@ a post. Say so again when you change course.
 
 The work falls along the artefact families, not the questions: the launchd
 and profile inventory that is persistence; the execution-and-activity
-databases (the unified log, `KnowledgeC.db`, `TCC.db`, the shell histories);
+databases (the unified log, `knowledgeC.db`, `TCC.db`, the shell histories);
 the file system and provenance (the body file, FSEvents, Spotlight, the
 quarantine attributes and the downloads); and the network and browser
 artefacts. One agent per family avoids two readers grinding the same

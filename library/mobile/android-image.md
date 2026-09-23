@@ -28,12 +28,14 @@ it (`inputs/CASE.md`, a ticket, the requester's questions), its questions
 come first and the ones below fill in what it did not ask. If `SWARM.md`
 has an "Evidence catalog" section, the kickoff already ran `mmls` on a raw
 image into `catalog/`; Android partition names (`userdata`, `system_a`,
-`metadata`) do not match the catalog's file-system filter, so expect no
-body file, and let the partition agent run `fsstat -o` on `userdata` and
-post the result. The catalog does not open archives: list one once with
-`tar tvf` (or `unzip -Z -l`), save it as `work/listing.txt` (claim it
-first), post that path on the board, and grep that file instead of
-listing again.
+`metadata`) do not match the catalog's file-system filter, so a full-flash
+GPT image gets no body file, and the partition agent runs `fsstat -o` on
+`userdata` and posts the result. A lone file-system image with no
+partition table (a bare ext4 `userdata.img`) is cataloged at `p0` with its
+full body file; read `catalog/README.md` for which case you have. The
+catalog does not open archives: list one once with `tar tvf` (or
+`unzip -Z -l`), save it as `work/listing.txt` (claim it first), post that
+path on the board, and grep that file instead of listing again.
 
 ### Questions the report has to answer
 
@@ -48,8 +50,8 @@ listing again.
    security patch level (`/system/build.prop`, `/vendor/build.prop`; where
    system sits inside the `super` dynamic partition or is EROFS, which The
    Sleuth Kit cannot read, take the fingerprint and SDK from the `version`
-   element of `/data/system/packages.xml` and from
-   `/data/property/persistent_properties`), the
+   element of `/data/system/packages.xml`; `userdata` has no dependable
+   copy of the patch level, so report it as unread rather than guess), the
    serial, IMEI and SIM details as recorded (the telephony databases,
    `settings_global.xml` and `settings_secure.xml` or `settings.db`), the
    device name and time zone, every account on the device
@@ -145,9 +147,11 @@ listing again.
   Check with `xxd -l 4` before parsing, and forge one ABX-to-XML decoder
   and share it; "no packages found" from a text parser is not a finding.
   `/data/system/usagestats/` is protobuf from Android 9, not XML.
-- An `.ab` backup is not a tar: read its header lines (`head -c 64`); if
-  the encryption line says `none`, the rest after the 24-byte header is a
-  zlib stream, listed with `tail -c +25 f.ab | python3 -c 'import zlib,sys;sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))' | tar tf -`.
+- An `.ab` backup is not a tar: read its four header lines (`head -n 4`:
+  magic, version, compression flag, encryption). If the encryption line
+  says `none`, the rest is a tar, zlib-compressed only when the
+  compression flag is `1`; stream it rather than load it whole:
+  `python3 -c 'import sys,zlib;f=open(sys.argv[1],"rb");h=[f.readline().strip() for _ in range(4)];h[3]==b"none" or sys.exit("encrypted");d=zlib.decompressobj() if h[2]==b"1" else None;o=sys.stdout.buffer;[o.write(d.decompress(c) if d else c) for c in iter(lambda:f.read(1<<20),b"")];d and o.write(d.flush())' f.ab | tar tf -`.
   If it is encrypted, report it and stop. An `.ab` is a logical backup of
   the apps that allow one, not a file system; say which questions it
   cannot answer.
@@ -205,7 +209,7 @@ in the report, the ledger holds the dated events the timeline rests on, and
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
-- `awk '/^## 1\./{f=1;next}/^## 2\./{f=0}f' work/report.md | grep -qiE 'readable|encrypt|f2fs|ext4'`
+- `awk '/^## 1\./{f=1;next}/^## 2\./{f=0} f && tolower($0) ~ /readable|encrypt|f2fs|ext4/ {m=1} END{exit !m}' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 27`
 - `test -f work/identifiers.md`
