@@ -31,6 +31,9 @@ import { registerSelfCompact, type HandoffFacts, type SelfCompactHandle } from "
 import {
   type FinishLineRun,
   isSharedScratch,
+  agentDeadPath,
+  agentDonePath,
+  leadingCommand,
   finishLineVerdict,
   classifyTurnError,
   CAP_STEER,
@@ -49,7 +52,6 @@ import {
   guardWrite,
   harnessStop,
   inboxLogResult,
-  inboxPageChars,
   keepToolOutputFromFile,
   toolOutputRel,
   type FullOutputRef,
@@ -228,17 +230,7 @@ export function isPeersScratch(pathKey: string, agentId: string, peers?: Readonl
   return peers ? peers.has(owner) : true;
 }
 
-/** The first command word of a shell line, past env assignments and `cd x &&`. */
-export function leadingCommand(command: string): string {
-  let text = command.trim();
-  // drop a leading `cd … &&` or `cd … ;`
-  text = text.replace(/^cd\s+[^&;|\n]+(&&|;|\n)\s*/, "");
-  // drop VAR=value prefixes
-  text = text.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)+/, "");
-  const word = text.split(/\s+/)[0] ?? "";
-  const base = word.split("/").pop() ?? word;
-  return /^[A-Za-z0-9_.+-]{1,40}$/.test(base) ? base : "";
-}
+export { leadingCommand } from "./protocol.ts";
 
 function ctxFrom(cwd: string, agentId?: string): SwarmContext {
   return createContext(cwd, agentId ?? resolveAgentId());
@@ -498,8 +490,8 @@ export default function (pi: ExtensionAPI) {
     const peers: string[] = [];
     for (const a of team.agents) {
       if (a.id === agentId) continue;
-      const marked = await stat(join(cwd, "done", "agents", `${a.id}.done`)).then(() => true).catch(() => false);
-      const dead = await stat(join(cwd, "done", "agents", `${a.id}.dead`)).then(() => true).catch(() => false);
+      const marked = await stat(agentDonePath(cwd, a.id)).then(() => true).catch(() => false);
+      const dead = await stat(agentDeadPath(cwd, a.id)).then(() => true).catch(() => false);
       if (!marked && !dead) peers.push(a.id);
     }
     if (!peers.length) return;
@@ -837,8 +829,14 @@ export default function (pi: ExtensionAPI) {
     const idLine = agentId
       ? `Your assigned id is ${agentId}. Use it on every post and claim.`
       : "AGENT_ID is unset. Refuse to claim or post until the spawner sets it.";
-    const done = await swarmDoneExists(cwd);
-    const status = await readBudgetStatus(ctxFrom(cwd, agentId || "agent00")).catch(() => null);
+    // Independent reads of the sandbox: issue them together.
+    const [done, status, mine, inputs, onDisk] = await Promise.all([
+      swarmDoneExists(cwd),
+      readBudgetStatus(ctxFrom(cwd, agentId || "agent00")).catch(() => null),
+      agentId ? nameOf(cwd, agentId).catch(() => undefined) : undefined,
+      readInputsManifest(cwd),
+      forging ? listForgedTools(cwd).catch(() => [] as ForgedToolManifest[]) : ([] as ForgedToolManifest[]),
+    ]);
     const capLine =
       status?.over_budget
         ? `\n\nSwarm spend cap hit (spent_usd=${status.budget.spent_usd} cap_usd=${status.budget.cap_usd}). Call done(reason=cannot_complete) now.`
@@ -848,8 +846,6 @@ export default function (pi: ExtensionAPI) {
       : `\n\n${idLine}\n\nIf done/SWARM_DONE exists on this turn, call done and stop.`;
     let nameLine = "";
     if (agentId) {
-      const team = await listTeam(ctxFrom(cwd, agentId)).catch(() => null);
-      const mine = await nameOf(cwd, agentId).catch(() => undefined);
       if (mine) {
         nameLine = `\n\nYou call yourself "${mine}". Change it with name() whenever what you are doing changes.`;
       } else {
@@ -858,7 +854,6 @@ export default function (pi: ExtensionAPI) {
       }
     }
     let inputsLine = "";
-    const inputs = await readInputsManifest(cwd);
     if (inputs) {
       const kb = Math.max(1, Math.round(inputs.bytes / 1024));
       const consequence = inputsEnforced === "kernel" ? "refused by the kernel" : "refused, or detected and undone";
@@ -869,7 +864,6 @@ export default function (pi: ExtensionAPI) {
     }
     let forgeLine = "";
     if (forging) {
-      const onDisk = await listForgedTools(cwd).catch(() => [] as ForgedToolManifest[]);
       const have = onDisk.length ? ` Forged so far: ${onDisk.map((m) => `${m.name} (by ${m.by}, v${m.version})`).join(", ")}.` : " Nothing has been forged yet.";
       forgeLine =
         "\n\nTool forging is on for this swarm. If the goal needs a tool nobody has — a parser, a checker, a converter — write it once with make_tool (python3, node or bash; the arguments arrive as one JSON object on stdin; print the result to stdout) and it becomes a real tool for every agent after their next inbox or wait. Call `tools` first to see what peers have forged. A forged tool runs in this directory with the same limits as bash; keep it small and free of network calls." +
