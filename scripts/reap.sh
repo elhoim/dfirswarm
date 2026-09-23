@@ -82,27 +82,36 @@ NOW="$(date +%s)"
 
 max() { if [[ "$1" -ge "$2" ]]; then echo "$1"; else echo "$2"; fi; }
 
-# Same table lock as protocol.ts: exclusive mkdir locks/.table.lock, 10s wait,
-# break stale (>15s) locks whose pid is gone.
+# Same table lock as protocol.ts: exclusive mkdir locks/.table.lock, 10s wait.
+# A lock older than 15s has no live holder (protocol.ts refreshes its lock's
+# mtime while it holds it; holders here are brief). It is broken under
+# locks/.table.lock.break and judged again there, so two waiters cannot both
+# break it. The pid is not consulted: a pane's pid is its own namespace's.
 TABLE_LOCK="$SANDBOX/locks/.table.lock"
+TABLE_LOCK_TOKEN="$$.$RANDOM$RANDOM"
+lock_stale() { [[ -d "$1" ]] && (( $(date +%s) - $(mtime "$1") >= 15 )); }
 table_lock() {
   mkdir -p "$SANDBOX/locks"
   local deadline=$((SECONDS + 10))
   while ! mkdir "$TABLE_LOCK" 2>/dev/null; do
-    if [[ -d "$TABLE_LOCK" ]]; then
-      local age=$(( $(date +%s) - $(mtime "$TABLE_LOCK") ))
-      local pid; pid="$(cat "$TABLE_LOCK/pid" 2>/dev/null || true)"
-      if [[ "$age" -ge 15 ]] && { [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; }; then
-        rm -rf "$TABLE_LOCK"
+    if lock_stale "$TABLE_LOCK"; then
+      if mkdir "$TABLE_LOCK.break" 2>/dev/null; then
+        if lock_stale "$TABLE_LOCK"; then rm -rf "$TABLE_LOCK"; fi
+        rm -rf "$TABLE_LOCK.break"
         continue
       fi
+      if lock_stale "$TABLE_LOCK.break"; then rm -rf "$TABLE_LOCK.break"; fi
     fi
     if (( SECONDS >= deadline )); then echo "Timed out waiting for locks/.table.lock" >&2; return 1; fi
     sleep 0.05
   done
   echo $$ > "$TABLE_LOCK/pid"
+  echo "$TABLE_LOCK_TOKEN" > "$TABLE_LOCK/owner"
 }
-table_unlock() { rm -rf "$TABLE_LOCK"; }
+# Only our own lock: one broken while we stalled may be someone else's now.
+table_unlock() {
+  if [[ "$(cat "$TABLE_LOCK/owner" 2>/dev/null || true)" == "$TABLE_LOCK_TOKEN" ]]; then rm -rf "$TABLE_LOCK"; fi
+}
 
 # A long `vol` / `fls` writes nothing to the session or the trace until it
 # returns. Herdr already knows the pane is working; idle-nudge.sh asks it

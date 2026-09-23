@@ -4290,20 +4290,28 @@ import("'"$ROOT"'/extensions/protocol.ts").then((m) => {
 }
 
 # The lock-table mutex protocol.ts and reap.sh use: an exclusive mkdir of
-# locks/.table.lock, a 10 s wait, and a stale lock (older than 15 s, its pid
-# gone) broken. Post ids are allocated under it too, so a post written from
-# here cannot take the same id as one an agent is writing at the same moment.
+# locks/.table.lock and a 10 s wait. A lock older than 15 s has no live holder
+# (protocol.ts refreshes its lock's mtime while it holds it; holders here are
+# brief); it is broken under locks/.table.lock.break and judged again there,
+# so two waiters cannot both break it. The pid is not consulted: a pane's pid
+# is its own namespace's. Post ids are allocated under it too, so a post
+# written from here cannot take the same id as one an agent is writing at the
+# same moment.
+TABLE_LOCK_TOKEN="$$.$RANDOM$RANDOM"
+table_lock_stale() {
+  [[ -d "$1" ]] && (( $(date +%s) - $(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0) >= 15 ))
+}
 table_lock() {
-  local sandbox="$1" dir="$1/locks/.table.lock" deadline=$((SECONDS + 10)) age pid
+  local sandbox="$1" dir="$1/locks/.table.lock" deadline=$((SECONDS + 10))
   mkdir -p "$sandbox/locks"
   while ! mkdir "$dir" 2>/dev/null; do
-    if [[ -d "$dir" ]]; then
-      age=$(( $(date +%s) - $(stat -c %Y "$dir" 2>/dev/null || stat -f %m "$dir" 2>/dev/null || echo 0) ))
-      pid="$(cat "$dir/pid" 2>/dev/null || true)"
-      if [[ "$age" -ge 15 ]] && { [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; }; then
-        rm -rf "$dir"
+    if table_lock_stale "$dir"; then
+      if mkdir "$dir.break" 2>/dev/null; then
+        if table_lock_stale "$dir"; then rm -rf "$dir"; fi
+        rm -rf "$dir.break"
         continue
       fi
+      if table_lock_stale "$dir.break"; then rm -rf "$dir.break"; fi
     fi
     if (( SECONDS >= deadline )); then
       echo "Timed out waiting for locks/.table.lock" >&2
@@ -4312,8 +4320,14 @@ table_lock() {
     sleep 0.05
   done
   echo $$ > "$dir/pid"
+  echo "$TABLE_LOCK_TOKEN" > "$dir/owner"
 }
-table_unlock() { rm -rf "$1/locks/.table.lock"; }
+# Only our own lock: one broken while we stalled may be someone else's now.
+table_unlock() {
+  if [[ "$(cat "$1/locks/.table.lock/owner" 2>/dev/null || true)" == "$TABLE_LOCK_TOKEN" ]]; then
+    rm -rf "$1/locks/.table.lock"
+  fi
+}
 
 # A message from the examiner to a swarm that is already running.
 #

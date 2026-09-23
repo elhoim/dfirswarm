@@ -11,7 +11,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, createReadStream, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
 import { connect } from "node:net";
 import {
@@ -28,6 +28,7 @@ import {
   rename,
   rm,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
@@ -42,6 +43,8 @@ export const DEFAULT_CLAIM_SECONDS = 120;
 export const MAX_CLAIM_SECONDS = 600;
 export const TABLE_LOCK_WAIT_MS = 10_000;
 export const TABLE_LOCK_STALE_MS = 15_000;
+/** How often a holder refreshes its table lock; well inside the stale window. */
+export const TABLE_LOCK_HEARTBEAT_MS = 3_000;
 export const DEFAULT_SWARM_ID = "hello-n2";
 export const DEFAULT_AGENT_IDS = ["agent00", "agent01"] as const;
 export const SENTINEL_REL = "done/SWARM_DONE";
@@ -503,24 +506,41 @@ export async function swarmDoneExists(sandboxRoot: string): Promise<boolean> {
   }
 }
 
+async function lockIsStale(dir: string): Promise<boolean> {
+  const info = await stat(dir).catch(() => null);
+  return info !== null && Date.now() - info.mtimeMs >= TABLE_LOCK_STALE_MS;
+}
+
+/**
+ * Break a lock whose holder has stopped: one older than TABLE_LOCK_STALE_MS.
+ *
+ * Age alone decides. A holder refreshes its lock's mtime every
+ * TABLE_LOCK_HEARTBEAT_MS, so an old lock has no live holder. The recorded
+ * pid used to decide instead, and cannot: under fsguard's pid namespaces each
+ * pane numbers its own processes, so a live holder in another pane looked
+ * dead and lost its lock after 15 s, and an unrelated live pid could keep a
+ * dead lock standing.
+ *
+ * Breaking takes a second mkdir lock, `<lock>.break`, and judges the age again
+ * under it. Two waiters could otherwise both judge one dead lock stale: the
+ * first removed it and took the lock, and the second's rm then removed that
+ * live lock, putting both in the critical section.
+ */
 async function maybeBreakStaleTableLock(lockDir: string): Promise<void> {
+  if (!(await lockIsStale(lockDir))) return;
+  const breakDir = `${lockDir}.break`;
   try {
-    const info = await stat(lockDir);
-    const age = Date.now() - info.mtimeMs;
-    if (age < TABLE_LOCK_STALE_MS) return;
-    const pidRaw = await readFile(join(lockDir, "pid"), "utf8").catch(() => "");
-    const pid = Number.parseInt(pidRaw.trim(), 10);
-    if (Number.isFinite(pid)) {
-      try {
-        process.kill(pid, 0);
-        return;
-      } catch {
-        // process is gone
-      }
-    }
-    await rm(lockDir, { recursive: true, force: true });
+    await mkdir(breakDir);
   } catch {
-    // lock vanished
+    // Someone else is breaking it. One that died mid-break leaves its own
+    // lock behind, cleared here once that is stale too.
+    if (await lockIsStale(breakDir)) await rm(breakDir, { recursive: true, force: true });
+    return;
+  }
+  try {
+    if (await lockIsStale(lockDir)) await rm(lockDir, { recursive: true, force: true });
+  } finally {
+    await rm(breakDir, { recursive: true, force: true });
   }
 }
 
@@ -548,10 +568,12 @@ export async function withNamedLock<T>(
   const lockDir = join(sandboxRoot, "locks", name);
   await mkdir(join(sandboxRoot, "locks"), { recursive: true });
   const deadline = Date.now() + TABLE_LOCK_WAIT_MS;
+  const token = `${process.pid}-${randomUUID()}`;
   while (true) {
     try {
       await mkdir(lockDir);
       await writeFile(join(lockDir, "pid"), String(process.pid), "utf8");
+      await writeFile(join(lockDir, "owner"), token, "utf8");
       break;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
@@ -563,10 +585,20 @@ export async function withNamedLock<T>(
       await sleep(20);
     }
   }
+  // The heartbeat that keeps a held lock from ever looking stale.
+  const heartbeat = setInterval(() => {
+    const now = new Date();
+    utimes(lockDir, now, now).catch(() => undefined);
+  }, TABLE_LOCK_HEARTBEAT_MS);
+  heartbeat.unref();
   try {
     return await fn();
   } finally {
-    await rm(lockDir, { recursive: true, force: true });
+    clearInterval(heartbeat);
+    // Remove only our own lock. One broken while its holder stalled may
+    // already belong to someone else.
+    const owner = await readFile(join(lockDir, "owner"), "utf8").catch(() => "");
+    if (owner === token) await rm(lockDir, { recursive: true, force: true });
   }
 }
 
