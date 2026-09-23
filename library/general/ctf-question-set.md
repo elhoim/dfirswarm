@@ -20,14 +20,19 @@ profile of the evidence, one table of answers in the brief's order and
 format, the map of which questions depend on which, and the timeline the
 answers rest on. The run is graded the way the challenge is: on the
 answers, in the format asked, each traceable to an artefact in `inputs/`. The brief must be
-`inputs/CASE.md`, and in it only the questions may be numbered `N.` at the
-start of a line: a numbered evidence list there is renumbered or indented
-before the run, or the flags check counts it as questions.
+`inputs/CASE.md`, and the checks take the number of its questions to be
+the number of distinct numbers that open a line there (`1.`, `1)`, `1:`,
+`Q1`, `Question 1`, `**1.**`, or a heading such as `### 1.`): a numbered
+rule or evidence list that runs past the last question is indented or
+unnumbered before the run, since `inputs/` cannot be changed once it has
+started. Before launch, run the count (the `awk` in the check after
+`test -f inputs/CASE.md`) with the brief at `inputs/CASE.md` and compare
+it with the brief's questions.
 
 The evidence is under `inputs/` (read-only; call `inputs` to list it, and
 read `inputs.json` for the manifest). The brief must be at `inputs/CASE.md`
-with its questions numbered `1.`, `2.` and so on at the start of a line,
-because the checks count them there; its questions come first and are the
+with its questions numbered at the start of a line as above, because the
+checks count them there; its questions come first and are the
 case, and the ones below are the questions this report is organised
 around. If `SWARM.md` has an "Evidence catalog" section, the kickoff
 already ran the partition tables, file lists, body files and memory scans
@@ -38,21 +43,25 @@ into `catalog/`; read those before running the same commands again.
 1. The evidence profile: every input with its type, size and hash, what
    each image holds (partition table, file systems, operating system and
    version, host name, time zone, users; for a phone the model, iOS or
-   Android version and the owner as recorded; for a memory dump the format
-   and profile), the acquisition records, and what the brief says about the
+   Android version and the owner as recorded; for a memory dump the format,
+   the OS and kernel build (`banners.Banners`; `windows.info` when the
+   kickoff allowed the symbol server) and the symbol table a full analysis
+   would need), the acquisition records, and what the brief says about the
    scenario, the persons and the period.
 2. The answers: every question of `inputs/CASE.md`, in its order and under
    its number, with the answer in the exact format the question asks for,
    the confidence, and the citation to the artefact it came from (path,
    inode, table and row, offset, registry key, plugin output), each under
-   its own sub-heading of `## 2.`; `work/flags.md` holds the same as one
+   its own sub-heading of `## 2.` numbered after the brief (`### 2.1`,
+   `### 2.2`, …); `work/flags.md` holds the same as one
    table with one row per question (number, short name, answer, confidence,
    evidence path), kept current as answers land.
 3. The dependency map: which questions could only be answered once another
    was (a name that finds a contact, a place that dates a photo, a device
    that names a user), which were independent, and the order the team
    actually solved them in, written to `work/dependencies.md` as a table
-   (question, depends on, why).
+   with one row per question (question number, depends on or `none`,
+   why).
 4. Corroboration: for every answer given with high confidence, the second,
    independent artefact that agrees with it; for every answer given with
    medium or low confidence, what was found, what was missing, and the
@@ -134,6 +143,14 @@ into `catalog/`; read those before running the same commands again.
   name in the case the brief uses, a path with its drive letter, a
   timestamp in the given form: what the grader would accept is what the
   report carries.
+- Name the epoch of every timestamp you convert (Unix seconds or
+  milliseconds, Mac Absolute Time from 2001-01-01, WebKit microseconds from
+  1601, Windows FILETIME in 100 ns from 1601) in the evidence cell of its
+  flags row, and forge one shared converter rather than converting by hand.
+  For an iOS backup, map files through `Manifest.db` (`sqlite3`) before
+  opening them. APFS is read with The Sleuth Kit (4.7 and later) or
+  `fsapfsinfo`; a file system no tool here reads (F2FS) is said so in
+  `## 5.`.
 
 ## How to divide the work
 
@@ -169,11 +186,12 @@ the board as a `result` post that starts a line with `SIGN-OFF:` and names
 what they verified, `work/flags.md` holds one row per question of the brief
 (number, short name, answer, confidence, evidence path) and has at least as
 many rows as the brief has numbered questions, `work/dependencies.md` holds
-the dependency map the team inferred as a table (one row saying so if every
-question was independent), `work/timeline.md` holds the merged timeline as a
-table with at least 15 dated rows (the ISO 8601 UTC time in the first
-column, after any `#` index) built from the ledger, the ledger holds the
-dated events the timeline rests on, and `inputs/` is unchanged.
+the dependency map the team inferred as a table with one row per question of
+the brief (`none` where a question was independent), `work/timeline.md`
+holds the merged timeline as a table with at least 15 dated rows (the ISO
+8601 UTC time in the first column, after any `#` index) built from the
+ledger, the ledger holds the dated events the timeline rests on, and
+`inputs/` is unchanged.
 
 ## Checks
 
@@ -182,10 +200,16 @@ dated events the timeline rests on, and `inputs/` is unchanged.
 - `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f inputs/CASE.md`
+- `test "$(awk 'match($0,/^(#+ *)?(\*\* *)?([Qq](uestion)? *[0-9]+|[0-9]+[.):]([ *]|$))/){s=substr($0,RSTART,RLENGTH);gsub(/[^0-9]/,"",s);if(!(s in n))c++;n[s]}END{print c+0}' inputs/CASE.md)" -ge 1`
+  (fails when no line of the brief opens with a question number, which
+  would let every count below pass on zero; the count is of distinct
+  numbers, so a numbered list of rules beside the questions does not add
+  to it.)
 - `test -f work/flags.md`
-- `test "$(grep -c '^| *[0-9]' work/flags.md)" -ge "$(grep -cE '^[0-9]+\.' inputs/CASE.md)"`
+- `test "$(grep -cE '^\| *(\*\* *)?[Qq]?[0-9]' work/flags.md)" -ge "$(awk 'match($0,/^(#+ *)?(\*\* *)?([Qq](uestion)? *[0-9]+|[0-9]+[.):]([ *]|$))/){s=substr($0,RSTART,RLENGTH);gsub(/[^0-9]/,"",s);if(!(s in n))c++;n[s]}END{print c+0}' inputs/CASE.md)"`
 - `test -f work/dependencies.md`
-- `test "$(grep -c '^| ' work/dependencies.md)" -ge 3`
+- `test "$(grep -cE '^\| *(\*\* *)?[Qq]?[0-9]' work/dependencies.md)" -ge "$(awk 'match($0,/^(#+ *)?(\*\* *)?([Qq](uestion)? *[0-9]+|[0-9]+[.):]([ *]|$))/){s=substr($0,RSTART,RLENGTH);gsub(/[^0-9]/,"",s);if(!(s in n))c++;n[s]}END{print c+0}' inputs/CASE.md)"`
+- `test "$(grep -cE '^### +2\.[0-9]+' work/report.md)" -ge "$(awk 'match($0,/^(#+ *)?(\*\* *)?([Qq](uestion)? *[0-9]+|[0-9]+[.):]([ *]|$))/){s=substr($0,RSTART,RLENGTH);gsub(/[^0-9]/,"",s);if(!(s in n))c++;n[s]}END{print c+0}' inputs/CASE.md)"`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 15`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 12`
@@ -195,4 +219,4 @@ dated events the timeline rests on, and `inputs/` is unchanged.
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name. The flags check counts the
   brief's numbered questions in `inputs/CASE.md`, which is why the brief
-  has to be there and numbered `1.`, `2.`, … at the start of a line.)
+  has to be there with a number opening each question's line.)

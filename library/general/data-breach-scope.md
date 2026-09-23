@@ -41,12 +41,20 @@ image into `catalog/`; read those before running the same commands again.
    without sizes, a cloud export without data events).
 2. What was accessed and read: every file, folder, share, record set,
    mailbox and database the actor's accounts or sessions opened, from the
-   file system access times and journals (`$MFT`, `$UsnJrnl:$J`, the
-   `$STANDARD_INFORMATION` and `$FILE_NAME` times of the items and their
-   parents), the share and file-server audit events (4663 with the access
-   mask, 5145 with the relative target name, 4656 and 4658 for the handle),
+   file system (the `$STANDARD_INFORMATION` access time only after
+   `NtfsDisableLastAccessUpdate` in the SYSTEM hive shows access updates
+   were on — an even value; from Windows 10 1803 it lies in 0x80000000 to
+   0x80000003 and the system may set it itself — and even then written
+   lazily, about once an hour, so never as proof on its own;
+   `$UsnJrnl:$J` and the `$FILE_NAME` times speak to changes, not reads),
+   from user-level open artefacts (LNK files, Jump Lists, RecentDocs,
+   OpenSaveMRU, Office MRU, shellbags), the share and file-server audit
+   events (4663 with the access mask, 5145 with the relative target name,
+   4656 and 4658 for the handle),
    the database query logs, the mailbox audit (MailItemsAccessed,
-   FolderBind, the item ids and the counts), and the cloud data events
+   FolderBind, the item ids and the counts; a MailItemsAccessed Sync record
+   means a whole folder was synced, not each item read, and the report says
+   whether throttling cut the window short), and the cloud data events
    (object reads, downloads, exports, shares created); by whom, when and
    from where.
 3. What was copied or staged: archives created and their contents (ZIP,
@@ -54,15 +62,22 @@ image into `catalog/`; read those before running the same commands again.
    archive is present), copies to removable media or to another host
    (the `USBSTOR` and mounted-device keys, the shell bags, the LNK files,
    4663 writes on a new path, `rsync` or `scp` in shell histories),
-   downloads from the cloud store, mailbox exports and forwarding rules,
-   database dumps written to disk; each with the source item, the
-   destination, the actor and the time.
+   downloads from the cloud store, mailbox exports and forwarding rules
+   (the audit operations New-InboxRule, Set-InboxRule, UpdateInboxRules,
+   Set-Mailbox with ForwardingSmtpAddress, New-MailboxExportRequest, and
+   eDiscovery searches), database dumps written to disk; each with the
+   source item, the destination, the actor and the time.
 4. What left the environment: the channel and the volume for every
    transfer outward (the proxy and firewall logs by client, destination,
    bytes and time; the cloud service's outbound sharing and download
    events; a mail forward's messages; an upload the browser history and
-   the web cache record), matched to the staged items by size and time
-   where possible, and the transfers that cannot be matched to a source.
+   the web cache record; SRUM network usage per application and user from
+   `SRUDB.dat` through `esedb_query`; the configs and logs of sync and
+   transfer tools such as `rclone.conf`, cloud-sync clients and BITS jobs
+   in `ProgramData\Microsoft\Network\Downloader\qmgr.db` on Windows 10
+   and later, `qmgr0.dat` and `qmgr1.dat` beside it on older systems),
+   matched to the staged items by size and time where possible, and the
+   transfers that cannot be matched to a source.
 5. Classification and counts: for every item or record set touched, what
    kind of data it is as the evidence names it (personal data, credentials
    by presence, financial, health, intellectual property, internal), the
@@ -142,7 +157,8 @@ image into `catalog/`; read those before running the same commands again.
   quotes a credential, a token or a secret it finds, only that one was
   present and where.
 - Certainty is a ladder and every item stands on one rung: accessed (an
-  open or a read in a log, an access time), copied (a write elsewhere, an
+  open or a read in a log, an open artefact; an access time alone is
+  "possible", not "accessed"), copied (a write elsewhere, an
   archive, a download event), left the environment (an outbound transfer
   matched to it). A row never climbs a rung without the artefact for that
   rung, and a row for which only the actor's presence on the host is known
@@ -180,12 +196,13 @@ environment" row re-derived from its two artefacts.
 evidence, the critic has posted a sign-off on the board as a `result` post
 that starts a line with `SIGN-OFF:` and names what they verified,
 `work/data-affected.md` holds one table with a row per item or record set
-(item, type, action, actor, time, channel, certainty, evidence; one row
-saying so if nothing was established, and why), the counts in the report say
-what they rest on, `work/timeline.md` holds the merged timeline as a table
-with at least 25 dated rows (the ISO 8601 UTC time in the first column,
-after any `#` index) built from the ledger, the ledger holds the dated
-events the timeline rests on, and `inputs/` is unchanged.
+(item, type, action, actor, time, channel, certainty, evidence; the
+certainty one of possible, accessed, copied, left, or none; one row saying
+so if nothing was established, and why), the counts in the report say what
+they rest on, `work/timeline.md` holds the merged timeline as a table with
+at least 25 dated rows (the ISO 8601 UTC time in the first column, after any
+`#` index) built from the ledger, the ledger holds the dated events the
+timeline rests on, and `inputs/` is unchanged.
 
 ## Checks
 
@@ -194,8 +211,11 @@ events the timeline rests on, and `inputs/` is unchanged.
 - `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/data-affected.md`
-- `test "$(grep -c '^| ' work/data-affected.md)" -ge 3`
-- `grep -qi 'certainty' work/data-affected.md`
+- `awk -F'|' '!/^ *\|/{c=0;next} !c{for(i=2;i<NF;i++)if(tolower($i)~/certainty/)c=i;next} /^ *\|[ :|-]*-[ :|-]*$/{next} {m++;if(tolower($c)!~/^[ *]*(possible|accessed|copied|left|none)([ *]|$)/)b++} END{exit !(m&&!b)}' work/data-affected.md`
+  (every data row of a table with a certainty column starts its certainty
+  cell with a rung of the ladder or `none`, and there is at least one such
+  row; the column is found by its header, whatever the separator's form,
+  so this is also the table's row count.)
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 25`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 19`
