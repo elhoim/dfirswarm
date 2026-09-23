@@ -212,7 +212,7 @@ the dated events the timeline rests on, and `inputs/` is unchanged.
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 30`
 - `test -f work/reconciliation.md`
 - `for k in process connection persistence; do grep -qiE "^[|] *$k[^|]*[|]" work/reconciliation.md || exit 1; done`
-- `awk -F'|' 'BEGIN{r="^[|] *([0-9]+ *[|] *)?[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"} /^[|: -]+$/{next} /^[|]/&&$0!~r{c=0;for(i=2;i<=NF;i++){h=tolower($i);gsub(/ /,"",h);if(h~/^source/)c=i}next} $0~r{s=c?tolower($c):"";if(s~/disk/)d=1;if(s~/memory/)m=1;if(s!~/disk|memory/)b=1} END{exit !(d&&m&&!b)}' work/timeline.md`
+- `awk -F'|' 'function hc(s,  a,n,i,h){n=split(s,a,"|");for(i=2;i<=n;i++){h=tolower(a[i]);gsub(/[ \t]/,"",h);if(h~/^source/)return i}return 0} BEGIN{r="^[|] *([0-9]+ *[|] *)?[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"} !/^[|]/{c=0;p="";next} /^[|: -]+$/{if(p!="")c=hc(p);p="";next} $0~r{s=c?tolower($c):"";if(s~/disk/)d=1;if(s~/memory/)m=1;if(s!~/disk|memory/)b=1;p=$0;next} {if(!c)c=hc($0);p=$0} END{exit !(d&&m&&!b)}' work/timeline.md`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(find work/extracted -type f 2>/dev/null | wc -l)" -ge 1`
