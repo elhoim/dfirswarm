@@ -141,4 +141,51 @@ PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$LOCAL_SB" -
 [[ "$(grep -c '^L0	' "$PROMPT_LOG")" -eq 1 ]] || fail "a local seat that has worked is nudged like any other"
 pass "the first-turn grace is for the first turn only"
 
+# --- agents in microVMs: the hub, not Herdr ----------------------------------
+# A VM's pane runs `msb exec`: Herdr can neither read Pi's state off it nor
+# type a prompt Pi takes. The watchdog asks the hub instead, which hears each
+# agent's state up its link and puts the words down it.
+VM_SB="$TMP/vm"
+mkdir -p "$VM_SB"/{traces,done/agents,threads/main,inbox/v0,.pi-sessions/v0,locks}
+printf '{"swarm_id": "v", "n": 1, "agents": [{"id": "v0", "role": "worker"}]}\n' > "$VM_SB/team.json"
+: > "$VM_SB/traces/events.jsonl"
+printf -- '---\nid: 1\nthread: main\nfrom: system\nto: all\ntag: result\n---\n\nnews\n' > "$VM_SB/threads/main/000001-system.md"
+printf '{"main": 0}\n' > "$VM_SB/inbox/v0/cursors.json"
+: > "$VM_SB/.pi-sessions/v0/session.jsonl"
+touch -t "$old" "$VM_SB/.pi-sessions/v0/session.jsonl"
+HUB_DIR="$(mktemp -d "/tmp/dfh.XXXXXX")"
+printf '{"agents":["v0"],"tokens":{},"collector":"%s/none.sock"}' "$HUB_DIR" \
+  | node --experimental-strip-types --no-warnings "$ROOT/scripts/vm-hub.ts" "$VM_SB" --dir "$HUB_DIR" --quiet >"$TMP/hub.log" 2>&1 &
+HUB_PID=$!
+trap 'kill "$HUB_PID" "${LINK_PID:-}" 2>/dev/null; rm -rf "$TMP" "$HUB_DIR"' EXIT
+for _ in $(seq 50); do [[ -S "$HUB_DIR/admin.sock" ]] && break; sleep 0.1; done
+[[ -S "$HUB_DIR/admin.sock" ]] || fail "the hub did not come up: $(cat "$TMP/hub.log")"
+# v0's link: says it is idle, writes down every prompt it is given.
+node -e '
+const net = require("node:net"); const fs = require("node:fs");
+const s = net.connect(process.argv[1]); let b = "";
+s.on("connect", () => s.write(JSON.stringify({ t: "hello" }) + "\n" + JSON.stringify({ t: "state", state: "idle" }) + "\n"));
+s.on("data", (d) => { b += d; let i; while ((i = b.indexOf("\n")) >= 0) { const m = JSON.parse(b.slice(0, i)); b = b.slice(i + 1); if (m.t === "prompt") fs.appendFileSync(process.argv[2], m.text + "\n"); } });
+' "$HUB_DIR/v0.sock" "$TMP/vm-prompts.txt" &
+LINK_PID=$!
+sleep 0.5
+printf '#!/usr/bin/env bash\necho "$@" >> "%s"\nexit 1\n' "$TMP/herdr-used.txt" > "$TMP/bin/herdr-broken"
+chmod +x "$TMP/bin/herdr-broken"
+HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HUB_STATUS="$HUB_DIR/status.json" \
+  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$VM_SB" --once --news-sec 45 --idle-sec 180 >/dev/null 2>&1
+sleep 0.3
+grep -q '1 post(s) you have not read' "$TMP/vm-prompts.txt" 2>/dev/null || fail "a VM agent's nudge did not arrive through the hub: $(cat "$TMP/vm-prompts.txt" 2>/dev/null)"
+[[ ! -s "$TMP/herdr-used.txt" ]] || fail "the watchdog asked Herdr about a VM agent: $(cat "$TMP/herdr-used.txt")"
+grep -q '"tool":"idle_nudge"' "$VM_SB/traces/events.jsonl" "$VM_SB/work/.trace-spill.jsonl" 2>/dev/null || fail "the VM nudge is not recorded"
+pass "an agent in a microVM is nudged through the hub, and Herdr is never asked"
+
+printf '{"agents":{"v0":{"state":"working","connected":true}}}\n' > "$TMP/working.json"
+: > "$TMP/vm-prompts.txt"
+: > "$VM_SB/traces/idle-nudge.state"
+HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HUB_STATUS="$TMP/working.json" \
+  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$VM_SB" --once --news-sec 45 --idle-sec 180 >/dev/null 2>&1
+sleep 0.3
+[[ ! -s "$TMP/vm-prompts.txt" ]] || fail "a VM agent the hub says is working was nudged"
+pass "an agent the hub says is working is left to work"
+
 echo "idle-nudge.test.sh: all checks passed"

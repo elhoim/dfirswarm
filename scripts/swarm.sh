@@ -1388,6 +1388,8 @@ render_contract() {
   SWARM_CONTRACT_HOST_CAPS="${HOST_CAPS_FOR_CONTRACT:-}" \
   SWARM_CONTRACT_WRITE_GUARD="${WRITE_GUARD_FOR_CONTRACT:-}" \
   SWARM_CONTRACT_ATTRIBUTION="${ATTRIBUTION_FOR_CONTRACT:-}" \
+  SWARM_CONTRACT_ISOLATION="${ISOLATION_FOR_CONTRACT:-host}" \
+  SWARM_CONTRACT_VM_HOSTS="${VM_HOSTS_FOR_CONTRACT:-}" \
   SWARM_CONTRACT_ALLOW_INSTALL="${ALLOW_INSTALL_FOR_CONTRACT:-0}" \
   SWARM_CONTRACT_INSTALL_HOSTS="${INSTALL_HOSTS_FOR_CONTRACT:-1}" \
   python3 - "$TEMPLATE" "$tmp" "$goal_file" "$id_list" "$cap" "$wall" "$n" "$swarm_id" "$sandbox" <<'PY'
@@ -1421,11 +1423,18 @@ if os.path.isfile(manifest_path):
         guard_line = "the pane runs with `inputs/` read-only at the kernel (Linux: a read-only bind in its mount namespace, and Landlock beneath it)"
     elif guard == "landlock":
         guard_line = "the pane runs with `inputs/` read-only at the kernel (Linux Landlock)"
+    elif guard == "microvm":
+        guard_line = "your VM mounts `inputs/` read-only from the host, which refuses every write"
     elif m.get("held") == "bind":
         guard_line = "the kernel refuses every write"
     else:
         guard_line = "a shell write is detected after the fact and undone from a pristine copy"
-    if m.get("held") == "bind":
+    if m.get("held") == "bind" and guard == "microvm":
+        arrival = (
+            f"{len(files)} file(s), {kb} KB, from `{m.get('source', '')}`, mounted into your VM in place: "
+            "there is no copy, and the host holds the source read-only for every agent. "
+        )
+    elif m.get("held") == "bind":
         arrival = (
             f"{len(files)} file(s), {kb} KB, from `{m.get('source', '')}`, which `inputs/` links to in place: "
             "there is no copy, and the kernel holds the source itself read-only in every pane. "
@@ -1568,20 +1577,39 @@ if caps:
         "linux": "Linux, a read-only root in your mount namespace with Landlock beneath it: writes are refused everywhere but this run and Pi's agent directory",
         "landlock": "Linux Landlock: writes are refused everywhere but this run and Pi's agent directory",
         "mountns": "Linux mount namespace: the evidence is read-only; the rest of the filesystem is as the host has it",
+        "microvm": "your own microVM: you can write `work/`, your own `tool-output/` and your Pi session; the rest of the run is read-only, and nothing of the host outside the run is in your VM",
         "none": "none — nothing at the kernel refuses a write; the tool guard and the sweep are what there is",
     }.get(write_guard, "not recorded")
     attribution_words = {
         "token": "your token, which no other process on this host can read",
         "ancestry": "the kernel: a gate in front of the collector reads the sender's pid and walks up to the pane, whatever token the line carries",
         "token-exposed": "your token — and on this host another pane can read it from `/proc`, so a line may carry a peer's",
+        "channel": "the link your VM has to the host: your lines arrive on it and nobody else's can",
     }.get(attribution, "not recorded")
     gaps = []
     if caps.get("os") == "Linux" and not caps.get("userns"):
         gaps.append("No user namespace on this host: nothing is hidden from you, only refused (Landlock), and the terminal's socket is reachable")
     if caps.get("os") == "Linux" and not caps.get("pidns"):
         gaps.append("No pid namespace: you can see your peers' processes")
-    if caps.get("os") == "Darwin":
+    isolation = os.environ.get("SWARM_CONTRACT_ISOLATION", "host")
+    if caps.get("os") == "Darwin" and isolation != "microvm":
         gaps.append("The network guard is advisory here (a proxy you are pointed at); a Linux host refuses the route")
+    if isolation == "microvm":
+        gaps = [g for g in gaps if "namespace" not in g]
+        vm_hosts = os.environ.get("SWARM_CONTRACT_VM_HOSTS", "").strip()
+        gaps.append(
+            "Each agent is in its own microVM. The board — post, inbox, claims, names, the ledger, done — is written for you "
+            "by the harness on the host, through your tools; those files are read-only in your VM and you never need to write them"
+        )
+        gaps.append(
+            "Your peers write `work/` from their own VMs. A file a peer has just written can take up to five seconds to look "
+            "current in yours: read a peer's file after they post about it, and `claim_file` before you change one — "
+            "a claim on a file a peer just wrote waits that window out for you"
+        )
+        gaps.append(
+            ("Your VM reaches " + vm_hosts + " and nothing else: another name does not resolve, and an address has no route")
+            if vm_hosts else "Your VM reaches no network host but your model's"
+        )
     host_section = "\n".join([
         "## This host",
         "",
@@ -2676,9 +2704,24 @@ STRIP
   # same machine, and the probes run once.
   local host_caps_json
   host_caps_json="$(host_caps)"
+  # What a VM will be able to reach, said to the agents in the words they
+  # will meet it in: the model hosts, --allow-host, the package index.
+  local vm_hosts=""
+  if [[ "$isolation" == "microvm" ]]; then
+    if [[ "$use_netguard" -eq 0 ]]; then
+      vm_hosts="every public host"
+    elif [[ "$local_only" -eq 1 ]]; then
+      vm_hosts="your local model through the host gateway"
+    else
+      vm_hosts="$(provider_hosts_for_models 2>/dev/null || true)"
+      [[ -n "$allow_hosts" ]] && vm_hosts="${vm_hosts}${vm_hosts:+,}$allow_hosts"
+      [[ "$allow_install" -eq 1 && "$install_hosts" -eq 1 ]] && vm_hosts="${vm_hosts}${vm_hosts:+,}pypi.org,files.pythonhosted.org"
+      vm_hosts="$(printf '%s' "$vm_hosts" | tr ',' '\n' | awk 'NF && !seen[$0]++' | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g')"
+    fi
+  fi
   CASE_ID_FOR_CONTRACT="$case_id" EXAMINER_FOR_CONTRACT="$examiner" ALLOW_INSTALL_FOR_CONTRACT="$allow_install" INSTALL_HOSTS_FOR_CONTRACT="$install_hosts" \
     HOST_CAPS_FOR_CONTRACT="$host_caps_json" WRITE_GUARD_FOR_CONTRACT="$write_guard_mode" \
-    ATTRIBUTION_FOR_CONTRACT="$attribution" \
+    ATTRIBUTION_FOR_CONTRACT="$attribution" ISOLATION_FOR_CONTRACT="$isolation" VM_HOSTS_FOR_CONTRACT="$vm_hosts" \
     render_contract "$sandbox" "$swarm_id" "$n" "$cap" "$wall" "$goal_file" "${agent_ids[@]}"
   mkdir -p "$sandbox/.pi"
   cp "$ROOT/prompts/worker-system.md" "$sandbox/.pi/SYSTEM.md"
