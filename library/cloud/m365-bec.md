@@ -4,7 +4,7 @@ summary: Unified audit, Entra sign-in, mailbox audit and message trace exports; 
 evidence: cloud-export
 os: any
 tags: m365, office365, exchange-online, entra, bec, inbox-rules, forwarding, oauth, consent, mfa, sharepoint, onedrive, message-trace, timeline
-inputs: the tenant's exports for the window as CSV or JSON (the unified audit log, Entra sign-in logs interactive and non-interactive, Entra audit logs, mailbox audit records, message trace, and if taken the SharePoint and OneDrive activity and the risk detections), and a brief naming the mailboxes that raised the alarm
+inputs: the tenant's exports for the window and a baseline period before it (at least 14 to 30 days of Entra sign-ins for the affected accounts) as CSV or JSON (the unified audit log, Entra sign-in logs interactive and non-interactive, Entra audit logs, mailbox audit records, message trace, and if taken the SharePoint and OneDrive activity and the risk detections), and a brief naming the mailboxes that raised the alarm
 seats: 5
 cap_usd: 25
 wall_clock: 75
@@ -32,25 +32,37 @@ ran the first pass; read `catalog/` before running the same commands again.
 1. Inventory: every export with its format and schema (the unified audit
    log's `AuditData` column is JSON inside CSV: explode it), the workloads
    and operations present with their counts, the tenant, the users and
-   mailboxes it covers, the exact window and the gaps in it, whether
-   mailbox auditing was on for the mailboxes that matter and since when,
-   and the time zone each export carries.
+   mailboxes it covers, the exact window and the gaps in it, whether any
+   export stops at exactly 50,000 or 5,000 rows (a truncated search), the
+   duplicates across overlapping exports removed on the `AuditData` `Id`,
+   the baseline period and whether it is long enough to call a sign-in
+   new, whether mailbox auditing was on for the mailboxes that matter and
+   since when, and the time zone each export carries.
 2. The compromised accounts and how they were first seen: for every
    account, the sign-ins by address, recorded location, device, operating
    system, browser and user agent, application and client, MFA result and
    method, conditional access outcome and risk state; the first sign-in
    from a place, device or client the account had never used; sign-ins
    that continue a session from a new address or without a fresh
-   authentication as the logs record it; failures then success; and the
-   consent grants and application sign-ins that follow.
+   authentication as the logs record it; device-code and legacy-protocol
+   sign-ins (`authenticationProtocol`, `clientAppUsed`); failures then
+   success, from the unified log's `UserLoggedIn` and `UserLoginFailed`
+   where the Entra sign-ins are missing; and the consent grants and
+   application sign-ins that follow.
 3. What the intruder did in the mailbox: inbox rules created or changed
    (`New-InboxRule`, `Set-InboxRule`, `UpdateInboxRules`) with their
    conditions and actions, forwarding set on the mailbox or in a rule,
-   folder moves and deletions, searches run, items read (`MailItemsAccessed`
-   with the folders, the counts and the sync sessions), mail sent and by
+   folder moves and deletions, searches run (only if
+   `SearchQueryInitiatedExchange` was enabled), items read
+   (`MailItemsAccessed` with the folders, the counts and the sync sessions;
+   whether the record exists for the mailbox at all, and whether any
+   carries `IsThrottled`, which makes the counts a floor), mail sent and by
    which path (`Send`, `SendAs`, `SendOnBehalf`) with recipients and
    subjects, delegate and permission changes (`Add-MailboxPermission`,
-   `Add-RecipientPermission`, `Set-Mailbox`), and the OAuth applications
+   `Add-RecipientPermission`, `Add-MailboxFolderPermission`,
+   `Set-MailboxFolderPermission`, `Set-Mailbox`), transport rules
+   redirecting or copying mail (`New-TransportRule`, `Set-TransportRule`),
+   IMAP, POP or EWS enabled (`Set-CASMailbox`), and the OAuth applications
    consented to with their permissions; each with the client, the address
    and the session that did it.
 4. What left: the message trace for mail from the compromised mailboxes
@@ -67,7 +79,10 @@ ran the first pass; read `catalog/` before running the same commands again.
    received a message from a compromised one and then showed a sign-in
    anomaly of their own.
 6. Persistence: rules and forwarding still in place, applications and
-   service principals still consented, MFA methods and phone numbers added
+   service principals still consented (`Consent to application`, `Add
+   delegated permission grant`, `Add app role assignment to service
+   principal`, `Add service principal credentials`), transport rules and
+   folder permissions still in place, MFA methods and phone numbers added
    (`User registered security info`, `Update user`), devices registered or
    joined, passwords and recovery details changed, mailbox permissions and
    delegates still granted, and licences or roles assigned; each with when
