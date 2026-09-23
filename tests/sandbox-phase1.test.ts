@@ -221,13 +221,15 @@ test("a socket path past the kernel's limit still works", async () => {
 });
 
 /** A collector with a token map and an anchor, the way the kickoff starts one. */
-async function collectorWithTokens(root: string, map: Record<string, unknown>, anchor: string): Promise<string> {
+async function collectorWithTokens(root: string, map: Record<string, unknown>, anchor: string, fileLimitKb = 0): Promise<string> {
   await mkdir(join(root, "traces"), { recursive: true });
-  const proc = spawn(
-    "node",
-    [join(ROOT, "scripts", "trace-collector.mjs"), root, "--tokens", "--anchor", anchor, "--quiet"],
-    { stdio: ["pipe", "ignore", "ignore"] },
-  );
+  const args = [join(ROOT, "scripts", "trace-collector.mjs"), root, "--tokens", "--anchor", anchor, "--quiet"];
+  // A file-size limit stands in for a full disk: an append that crosses it
+  // writes up to the limit and then fails, as ENOSPC does, with no tmpfs and
+  // no root. SIGXFSZ is ignored so the write fails instead of killing it.
+  const proc = fileLimitKb
+    ? spawn("bash", ["-c", `trap '' XFSZ; ulimit -f ${fileLimitKb}; exec node "$@"`, "bash", ...args], { stdio: ["pipe", "ignore", "ignore"] })
+    : spawn("node", args, { stdio: ["pipe", "ignore", "ignore"] });
   started.push(proc);
   // The one line the kickoff writes: `{tokens, gate}`. A bare map here is a
   // token map with no gate; a map that already has the shape is passed as is.
@@ -502,4 +504,88 @@ test("a multibyte character split across two socket reads is written whole", asy
   const written = await lines(root);
   assert.equal(written.length, 1);
   assert.equal((JSON.parse(written[0]!) as { result: { output: string } }).result.output, text);
+});
+
+test("a line the collector could not append leaves the chain where it was", { skip: process.getuid?.() === 0 && "root ignores file modes" }, async () => {
+  // The chain head and the line count used to move before the append. When
+  // the append threw — a full disk, a file gone read-only — the sender was
+  // told ok:false and spilled the line, but the collector's head now named a
+  // line that was never written. The next real line carried that phantom as
+  // its parent, and the harness reported its own record as edited.
+  const root = await mkdtemp(join(tmpdir(), "swarm-failed-append-"));
+  const anchor = join(root, "anchor.json");
+  const socket = await collectorWithTokens(root, { t: "a0" }, anchor);
+  const send = (payload: unknown) =>
+    new Promise<{ ok: boolean }>((resolve, reject) => {
+      const s = connect(socket);
+      let got = "";
+      s.on("error", reject);
+      s.on("data", (chunk) => {
+        got += chunk.toString("utf8");
+        if (got.includes("\n")) {
+          s.end();
+          resolve(JSON.parse(got.slice(0, got.indexOf("\n"))) as { ok: boolean });
+        }
+      });
+      s.on("connect", () => s.write(`${JSON.stringify(payload)}\n`));
+    });
+  const events = join(root, "traces", "events.jsonl");
+  const { chmod } = await import("node:fs/promises");
+
+  assert.equal((await send({ ts: "t1", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" })).ok, true);
+  await chmod(events, 0o444);
+  try {
+    const refused = await send({ ts: "t2", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" });
+    assert.equal(refused.ok, false, "a line that could not be written is not reported as written");
+  } finally {
+    await chmod(events, 0o644);
+  }
+  const between = JSON.parse(await readFile(anchor, "utf8")) as { lines: number; pending: boolean };
+  assert.deepEqual({ lines: between.lines, pending: between.pending }, { lines: 1, pending: false }, "the anchor still names the last line written");
+  assert.equal((await send({ ts: "t3", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" })).ok, true);
+
+  const recorded = JSON.parse(await readFile(anchor, "utf8")) as { lines: number; head: string; prev_head: string };
+  assert.equal((await lines(root)).length, 2);
+  assert.equal(recorded.lines, 2);
+  const chain = verifyEventChain(`${(await lines(root)).join("\n")}\n`, recorded);
+  assert.equal(chain.ok, true, `the record verifies after a failed append (${chain.reason ?? ""})`);
+});
+
+test("a line cut short by a full disk is taken back out of the trace", async () => {
+  // A full disk fails an append partway: part of the line is on disk when it
+  // throws. Rolling back only the head left that fragment, with no newline,
+  // at the end of the file; the next line was written onto it, the anchor
+  // counted a line the file did not have, and the record read as edited.
+  const root = await mkdtemp(join(tmpdir(), "swarm-torn-append-"));
+  const anchor = join(root, "anchor.json");
+  const socket = await collectorWithTokens(root, { t: "a0" }, anchor, 64);
+  const send = (payload: unknown) =>
+    new Promise<{ ok: boolean }>((resolve, reject) => {
+      const s = connect(socket);
+      let got = "";
+      s.on("error", reject);
+      s.on("data", (chunk) => {
+        got += chunk.toString("utf8");
+        if (got.includes("\n")) {
+          s.end();
+          resolve(JSON.parse(got.slice(0, got.indexOf("\n"))) as { ok: boolean });
+        }
+      });
+      s.on("connect", () => s.write(`${JSON.stringify(payload)}\n`));
+    });
+  const events = join(root, "traces", "events.jsonl");
+
+  assert.equal((await send({ ts: "t1", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" })).ok, true);
+  const before = (await stat(events)).size;
+  const big = await send({ ts: "t2", agent: "a0", tool: "bash", args: { out: "x".repeat(200_000) }, result: { ok: true }, token: "t" });
+  assert.equal(big.ok, false, "a line that did not fit is not reported as written");
+  assert.equal((await stat(events)).size, before, "no fragment of it is left in the file");
+  assert.equal((await send({ ts: "t3", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" })).ok, true);
+
+  const recorded = JSON.parse(await readFile(anchor, "utf8")) as { lines: number; head: string; prev_head: string };
+  const written = await lines(root);
+  assert.deepEqual(written.map((l) => (JSON.parse(l) as { ts: string }).ts), ["t1", "t3"]);
+  assert.equal(recorded.lines, 2);
+  const chain = verifyEventChain(`${written.join("\n")}\n`, recorded);
+  assert.equal(chain.ok, true, `the record verifies after a torn append (${chain.reason ?? ""})`);
 });

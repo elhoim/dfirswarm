@@ -41,7 +41,7 @@
  * event is refused rather than written: this file is the record.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, existsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, existsSync, statSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -137,6 +137,13 @@ let previous = lastHashOf(eventsFile);
 let lineCount = countLines(eventsFile);
 /** Bytes in the file after this process's last write, to notice other writers. */
 let lastSize = sizeOf(eventsFile);
+/**
+ * Where the file ended before an append that failed partway and could not be
+ * cut back, or -1. A full disk fails an append after part of the line is on
+ * disk; left there, that fragment has no newline and the next line would be
+ * written onto the end of it.
+ */
+let tornAt = -1;
 
 /**
  * The head of the chain, written where the panes cannot reach it.
@@ -160,6 +167,16 @@ function writeAnchor(head = previous, prevHead = "", pending = false) {
 }
 
 function write(record) {
+  if (tornAt >= 0) {
+    // Nothing is appended onto a fragment. Until it can be cut off, every
+    // line is refused, and the sender spills it as it would any failure.
+    try {
+      truncateSync(eventsAbs, tornAt);
+    } catch (err) {
+      throw new Error(`the trace ends in a partial line that could not be cut off: ${err.message}`);
+    }
+    tornAt = -1;
+  }
   // Anything that appends directly is noticed here and the chain picks up
   // from what is actually in the file. `idle-nudge.sh` and `reap.sh` used to
   // do that — they run outside every pane, so the read-only guard does not
@@ -198,7 +215,29 @@ function write(record) {
   // `pending` says which moment this is. Between these two writes a reader
   // may see either length; outside them the anchor names exactly one.
   writeAnchor(head, behind, true);
-  appendFileSync(eventsAbs, line, "utf8");
+  try {
+    appendFileSync(eventsAbs, line, "utf8");
+  } catch (err) {
+    // The line never reached the file whole — a full disk, a file gone
+    // read-only. The sender is told so and spills it; the chain must not name
+    // it, or the next line written would carry a parent that does not exist
+    // and the record would read as edited. A full disk usually fails partway,
+    // with part of the line already written: cut the file back to where it
+    // ended, or the fragment becomes the head and the next line is glued onto
+    // it. Then put the head and the anchor back; with `pending` false a reader
+    // never consults `prev_head`.
+    if (sizeOf(eventsFile) > size) {
+      try {
+        truncateSync(eventsAbs, size);
+      } catch {
+        tornAt = size;
+      }
+    }
+    lineCount -= 1;
+    previous = behind;
+    writeAnchor(behind, "", false);
+    throw err;
+  }
   writeAnchor(head, behind, false);
   lastSize = sizeOf(eventsFile);
   return true;
@@ -283,11 +322,21 @@ function start() {
         const line = buffer.slice(0, cut);
         buffer = buffer.slice(cut + 1);
         if (!line.trim()) continue;
+        let record;
         try {
           if (line.length > MAX_LINE_BYTES) throw new Error(`${line.length} bytes is past the limit`);
-          const record = JSON.parse(line);
+          record = JSON.parse(line);
           if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("not an object");
           if (typeof record.tool !== "string" || typeof record.ts !== "string") throw new Error("not an event");
+        } catch (err) {
+          // A malformed message is the sender's bug. It is not written: this
+          // file is what a case rests on, and a half-line in it is worse than
+          // a missing one.
+          if (!quiet) console.error(`trace-collector: refused a malformed message: ${err.message}`);
+          reply(socket, { ok: false, error: err.message });
+          continue;
+        }
+        try {
           write(attribute(record));
           // The sender is told the line was *written*, not that it was sent.
           // Without this, a refused line — over the size limit, missing
@@ -296,10 +345,9 @@ function start() {
           // failure this file cannot have.
           reply(socket, { ok: true });
         } catch (err) {
-          // A malformed message is the sender's bug. It is not written: this
-          // file is what a case rests on, and a half-line in it is worse than
-          // a missing one.
-          if (!quiet) console.error(`trace-collector: refused a malformed message: ${err.message}`);
+          // Not the sender's bug but this side's: the disk, the file. Said
+          // apart from a malformed message, because the fix is somewhere else.
+          if (!quiet) console.error(`trace-collector: could not write a line: ${err.message}`);
           reply(socket, { ok: false, error: err.message });
         }
       }
