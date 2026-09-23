@@ -38,13 +38,17 @@ sources, already extracted.
    offset, the capture host's clock for a memory image), the offset applied
    to bring it to UTC and how that offset was established, the window each
    source covers and its resolution; all of it in `work/sources.md` as one
-   table (source, rows, offset, coverage). Artefacts stored in UTC (NTFS
-   `$STANDARD_INFORMATION` and `$FILE_NAME`, EVTX, registry last-write,
-   Prefetch, browser databases, Volatility times) take offset 0; the host's
-   time zone applies only to sources written in local time (text logs, some
-   application databases), and the table says which those are. `mactime`
-   renders in the analysis host's zone unless given `-z UTC`: check which
-   zone a `catalog/` MAC timeline was rendered in before merging it.
+   table (source, rows, offset, coverage). The offset has two parts: the
+   time zone, and the skew of the clock that wrote the source against real
+   time. Artefacts stored in UTC (NTFS `$STANDARD_INFORMATION` and
+   `$FILE_NAME`, EVTX, registry last-write, Prefetch, browser databases,
+   Volatility times) need no time-zone conversion, but still take the
+   host's skew; the time zone applies only to sources written in local
+   time (FAT entries, ZIP entries and other DOS date-times, text logs,
+   some application databases), and the table says which those are.
+   `mactime` renders in the analysis host's zone unless given `-z UTC`:
+   check which zone a `catalog/` MAC timeline was rendered in before
+   merging it.
 2. The extraction per source: how each was turned into dated rows — body
    files and `$MFT` through `fls -m` and `mactime`, `$UsnJrnl:$J` through
    `usn_journal` (set `limit` high enough and state the record count; the

@@ -20,14 +20,19 @@ profile of the evidence, one table of answers in the brief's order and
 format, the map of which questions depend on which, and the timeline the
 answers rest on. The run is graded the way the challenge is: on the
 answers, in the format asked, each traceable to an artefact in `inputs/`. The brief must be
-`inputs/CASE.md`, and in it only the questions may be numbered `N.` at the
-start of a line: a numbered evidence list there is renumbered or indented
-before the run, or the flags check counts it as questions.
+`inputs/CASE.md`, and the checks take the number of its questions to be
+the number of distinct numbers that open a line there (`1.`, `1)`, `1:`,
+`Q1`, `Question 1`, `**1.**`, or a heading such as `### 1.`): a numbered
+rule or evidence list that runs past the last question is indented or
+unnumbered before the run, since `inputs/` cannot be changed once it has
+started. Before launch, run the count (the `awk` in the check after
+`test -f inputs/CASE.md`) with the brief at `inputs/CASE.md` and compare
+it with the brief's questions.
 
 The evidence is under `inputs/` (read-only; call `inputs` to list it, and
 read `inputs.json` for the manifest). The brief must be at `inputs/CASE.md`
-with its questions numbered `1.`, `2.` and so on at the start of a line,
-because the checks count them there; its questions come first and are the
+with its questions numbered at the start of a line as above, because the
+checks count them there; its questions come first and are the
 case, and the ones below are the questions this report is organised
 around. If `SWARM.md` has an "Evidence catalog" section, the kickoff
 already ran the partition tables, file lists, body files and memory scans
@@ -138,8 +143,9 @@ into `catalog/`; read those before running the same commands again.
   1601, Windows FILETIME in 100 ns from 1601) in the evidence cell of its
   flags row, and forge one shared converter rather than converting by hand.
   For an iOS backup, map files through `Manifest.db` (`sqlite3`) before
-  opening them; a file system nobody here can read (APFS, F2FS) is said so
-  in `## 5.`.
+  opening them. APFS is read with The Sleuth Kit (4.7 and later) or
+  `fsapfsinfo`; a file system no tool here reads (F2FS) is said so in
+  `## 5.`.
 
 ## How to divide the work
 
@@ -187,15 +193,16 @@ timeline rests on, and `inputs/` is unchanged.
 - `for n in 1 2 3 4 5 6; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f inputs/CASE.md`
-- `test "$(grep -cE '^[0-9]+\.' inputs/CASE.md)" -ge 1`
-  (fails when the brief's questions are not numbered `1.`, `2.`, … at the
-  start of a line, which would let every count below pass on zero;
-  renumber the brief before the run.)
+- `test "$(awk 'match($0,/^(#+ *)?(\*\* *)?([Qq](uestion)? *[0-9]+|[0-9]+[.):]([ *]|$))/){s=substr($0,RSTART,RLENGTH);gsub(/[^0-9]/,"",s);if(!(s in n))c++;n[s]}END{print c+0}' inputs/CASE.md)" -ge 1`
+  (fails when no line of the brief opens with a question number, which
+  would let every count below pass on zero; the count is of distinct
+  numbers, so a numbered list of rules beside the questions does not add
+  to it.)
 - `test -f work/flags.md`
-- `test "$(grep -c '^| *[0-9]' work/flags.md)" -ge "$(grep -cE '^[0-9]+\.' inputs/CASE.md)"`
+- `test "$(grep -cE '^\| *(\*\* *)?[Qq]?[0-9]' work/flags.md)" -ge "$(awk 'match($0,/^(#+ *)?(\*\* *)?([Qq](uestion)? *[0-9]+|[0-9]+[.):]([ *]|$))/){s=substr($0,RSTART,RLENGTH);gsub(/[^0-9]/,"",s);if(!(s in n))c++;n[s]}END{print c+0}' inputs/CASE.md)"`
 - `test -f work/dependencies.md`
-- `test "$(grep -c '^| *[0-9]' work/dependencies.md)" -ge "$(grep -cE '^[0-9]+\.' inputs/CASE.md)"`
-- `test "$(grep -cE '^### +2\.[0-9]+' work/report.md)" -ge "$(grep -cE '^[0-9]+\.' inputs/CASE.md)"`
+- `test "$(grep -cE '^\| *(\*\* *)?[Qq]?[0-9]' work/dependencies.md)" -ge "$(awk 'match($0,/^(#+ *)?(\*\* *)?([Qq](uestion)? *[0-9]+|[0-9]+[.):]([ *]|$))/){s=substr($0,RSTART,RLENGTH);gsub(/[^0-9]/,"",s);if(!(s in n))c++;n[s]}END{print c+0}' inputs/CASE.md)"`
+- `test "$(grep -cE '^### +2\.[0-9]+' work/report.md)" -ge "$(awk 'match($0,/^(#+ *)?(\*\* *)?([Qq](uestion)? *[0-9]+|[0-9]+[.):]([ *]|$))/){s=substr($0,RSTART,RLENGTH);gsub(/[^0-9]/,"",s);if(!(s in n))c++;n[s]}END{print c+0}' inputs/CASE.md)"`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 17`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`
@@ -205,4 +212,4 @@ timeline rests on, and `inputs/` is unchanged.
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name. The flags check counts the
   brief's numbered questions in `inputs/CASE.md`, which is why the brief
-  has to be there and numbered `1.`, `2.`, … at the start of a line.)
+  has to be there with a number opening each question's line.)

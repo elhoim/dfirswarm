@@ -39,9 +39,10 @@ not recognise, because that is where this run begins.
    manifest, a tool's own log beside the data) with the acquisition date and
    examiner it records; written to `work/inventory.md` as one table (file,
    type, what it is, hosts and period, readable by, notes). A row is a
-   file, except that a split image's segments (`.E01`, `.E02`, …) are one
-   row, and so is a collector's output tree in its own directory (KAPE,
-   Velociraptor, UAC, an extracted archive), with its file count.
+   file, except that a split image's segments (`.E01`, `.E02`, …,
+   `.Ex01`, `.L01`, `.001`, `-s001.vmdk`) are one row, and so is a
+   collector's output tree in its own directory (KAPE, Velociraptor, UAC,
+   an extracted archive), with its file count.
 2. What each piece is, one level down: for a disk image the partition table,
    the file systems, the operating system and version, the host name, the
    time zone, the users and the install date (`mmls`, `fsstat`, `fls` to the
@@ -178,9 +179,11 @@ and `inputs/` is unchanged.
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/inventory.md`
-- `test "$(grep -c '^| ' work/inventory.md)" -ge "$(python3 -c 'import json,re;f=json.load(open("inputs.json"))["files"];s={re.sub(r"[.]([Ee][0-9][0-9]|[0-9]{3})$","",p["path"].split("/")[1]) for p in f};print(min(len(s),20)+2)')"`
-  (one data row at least per top-level piece of `inputs.json`, a split
-  image's segments counted once, up to twenty.)
+- `test "$(awk '/^ *\|/{if($0~/^ *\|[ :|-]*-[ :|-]*$/){if(p)r--;p=0}else{r++;p=1};next}{p=0}END{print r+0}' work/inventory.md)" -ge "$(python3 -c 'import json,re;f=json.load(open("inputs.json"))["files"];s={re.sub(r"(?i)[.]([el]x?[0-9]{2}|[0-9]{3})$|-(s[0-9]{3}|f[0-9]{3}|flat)(?=[.]vmdk$)","",re.sub(r"^inputs/","",p["path"]).split("/")[0]) for p in f};print(min(len(s),20))')"`
+  (one data row at least per top-level piece of `inputs.json`, up to
+  twenty: a split image's segments (`.E01`, `.Ex01`, `.L01`, `.001`,
+  `-s001.vmdk`, `-flat.vmdk`) count once, and the header and separator
+  rows are not counted, whether the separator is `| --- |` or `|---|`.)
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 12`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 5`

@@ -52,10 +52,11 @@ before touching the images.
    files and the raw image where rules were given (`yara_scan`); domains,
    addresses and URLs over logs and captures (`grep`, `zcat`, `tshark` where
    present, `python3`; over a capture, the DNS query names, TLS SNI and
-   HTTP Host fields, `tshark -r X -T fields -e dns.qry.name -e
-   tls.handshake.extensions_server_name -e http.host`, matching a domain
-   and its subdomains); over memory, strings and YARA rather than file
-   hashes, since a mapped image does not hash like its file on disk;
+   HTTP Host and HTTP/2 `:authority` fields, `tshark -r X -T fields -e
+   dns.qry.name -e tls.handshake.extensions_server_name -e http.host -e
+   http2.headers.authority`, matching a domain and its subdomains); over
+   memory, strings and YARA rather than file hashes, since a mapped image
+   does not hash like its file on disk;
    registry keys over the hives (`regkv`) — and what could not be searched
    (an encrypted volume, a format nobody could parse, a capture without a
    reader) and why.
@@ -78,10 +79,10 @@ before touching the images.
    execution artefacts, the connection in the logs, the process in memory).
 6. The timeline the sweep covers and the hits form, from
    `ledger/ledger.md` in order: every swept source's first and last
-   timestamp (a log's window, the image's acquisition start and end from
-   `ewfinfo`, the memory capture time, the file system's earliest and
-   latest entry), the indicator list's own dates, and every dated hit, with
-   the gaps between them; the hypothesis the hits support and how it was
+   timestamp (a log's window, the image's acquisition date from `ewfinfo`,
+   which records no end time, the memory capture time, the file system's
+   earliest and latest entry), the indicator list's own dates, and every
+   dated hit, with the gaps between them; the hypothesis the hits support and how it was
    tested; what remains uncertain and what evidence would resolve it;
    recommendations for containment, for widening the sweep to other hosts,
    and for the indicators this run found that the list lacked.

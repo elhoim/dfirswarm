@@ -43,11 +43,14 @@ image into `catalog/`; read those before running the same commands again.
    mailbox and database the actor's accounts or sessions opened, from the
    file system (the `$STANDARD_INFORMATION` access time only after
    `NtfsDisableLastAccessUpdate` in the SYSTEM hive shows access updates
-   were on, and never as proof on its own; `$UsnJrnl:$J` and the
-   `$FILE_NAME` times speak to changes, not reads), from user-level open
-   artefacts (LNK files, Jump Lists, RecentDocs, OpenSaveMRU, Office MRU,
-   shellbags), the share and file-server audit events (4663 with the access
-   mask, 5145 with the relative target name, 4656 and 4658 for the handle),
+   were on — an even value; from Windows 10 1803 it lies in 0x80000000 to
+   0x80000003 and the system may set it itself — and even then written
+   lazily, about once an hour, so never as proof on its own;
+   `$UsnJrnl:$J` and the `$FILE_NAME` times speak to changes, not reads),
+   from user-level open artefacts (LNK files, Jump Lists, RecentDocs,
+   OpenSaveMRU, Office MRU, shellbags), the share and file-server audit
+   events (4663 with the access mask, 5145 with the relative target name,
+   4656 and 4658 for the handle),
    the database query logs, the mailbox audit (MailItemsAccessed,
    FolderBind, the item ids and the counts; a MailItemsAccessed Sync record
    means a whole folder was synced, not each item read, and the report says
@@ -70,7 +73,9 @@ image into `catalog/`; read those before running the same commands again.
    events; a mail forward's messages; an upload the browser history and
    the web cache record; SRUM network usage per application and user from
    `SRUDB.dat` through `esedb_query`; the configs and logs of sync and
-   transfer tools such as `rclone.conf`, cloud-sync clients and BITS jobs),
+   transfer tools such as `rclone.conf`, cloud-sync clients and BITS jobs
+   in `ProgramData\Microsoft\Network\Downloader\qmgr.db` on Windows 10
+   and later, `qmgr0.dat` and `qmgr1.dat` beside it on older systems),
    matched to the staged items by size and time where possible, and the
    transfers that cannot be matched to a source.
 5. Classification and counts: for every item or record set touched, what
@@ -198,10 +203,11 @@ holds the dated events the timeline rests on, and `inputs/` is unchanged.
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/data-affected.md`
-- `test "$(grep -c '^| ' work/data-affected.md)" -ge 3`
-- `! grep '^| ' work/data-affected.md | tail -n +3 | grep -viE 'possible|accessed|copied|left|none'`
-  (every data row, after the header and separator, carries a rung of the
-  certainty ladder or `none`.)
+- `awk -F'|' '!/^ *\|/{c=0;next} !c{for(i=2;i<NF;i++)if(tolower($i)~/certainty/)c=i;next} /^ *\|[ :|-]*-[ :|-]*$/{next} {m++;if(tolower($c)!~/^[ *]*(possible|accessed|copied|left|none)([ *]|$)/)b++} END{exit !(m&&!b)}' work/data-affected.md`
+  (every data row of a table with a certainty column starts its certainty
+  cell with a rung of the ladder or `none`, and there is at least one such
+  row; the column is found by its header, whatever the separator's form,
+  so this is also the table's row count.)
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 27`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`
