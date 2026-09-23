@@ -38,12 +38,19 @@ did) unless the operator put the tables under `inputs/`.
 ### Questions the report has to answer
 
 1. System profile, and proof that the two images are one host: computer
-   name, machine SID, install date, network adapters and their addresses
-   from the SYSTEM and SOFTWARE hives on disk against the cached hives in
-   memory (`windows.registry.hivelist`, `printkey`), the boot time and
-   uptime in memory against the last boot the System log records, the
-   capture time of each image and the gap between them, the time zone the
-   host kept, whether either image is incomplete, and the acquisition tool's
+   name (SYSTEM `ControlSet00x\Control\ComputerName`), machine SID (SAM
+   `Domains\Account`, its `V` value, or SECURITY `Policy\PolAcDmS`; the
+   local account SIDs `windows.getsids` shows share it), install date
+   (SOFTWARE `Microsoft\Windows NT\CurrentVersion`, `InstallDate`; on
+   Windows 10 and 11 it is reset by every feature update, so it dates the
+   last one, and the original install date is under SYSTEM `Setup\Source OS
+   (Updated on ...)`),
+   network adapters and their addresses (SYSTEM
+   `Services\Tcpip\Parameters\Interfaces`) on disk against the cached
+   hives in memory (`windows.registry.hivelist`, `printkey`), the boot time
+   and uptime in memory against the last boot the System log records
+   (EventLog 6005 and 6009, Kernel-General 12), the capture time of each
+   image and the gap between them, the time zone the host kept, whether either image is incomplete, and the acquisition tool's
    own traces (its process, its driver in `modules`/`driverscan`, its handle
    to `\Device\PhysicalMemory`, and on disk its file, service and Prefetch),
    named and set aside.
@@ -72,13 +79,20 @@ did) unless the operator put the tables under `inputs/`.
    from memory (a dumped image differs from its file: relocations applied,
    imports resolved, sections in memory layout; compare import hash,
    section hashes, resources and strings, and say which you compared);
-   the processes with no file (deleted, hollowed, memory-only)
+   and each process matched to its creation record on disk, Security 4688
+   (4689 for the exit) and Sysmon 1, on PID, parent PID, image path,
+   command line and creation time (a PID reused after a reboot is not a
+   match); the processes with no file (deleted, hollowed, memory-only)
    and the files with no process (set to run but not running).
 5. Each connection to a log line: every entry in `netscan` matched to
-   Sysmon 3, the Windows Filtering Platform events 5156 and 5157, the
-   firewall log, the DNS client log, SRUM's network usage, the browser
-   history and the web cache; the connections no log recorded and the
-   logged connections no longer in memory, with the time each was made.
+   Sysmon 3 and 22 (the DNS query), the Windows Filtering Platform events
+   5156 and 5157, the firewall log, the DNS client log, SRUM's network
+   usage, the browser history and the web cache; which of those logs were
+   enabled at all (audit policy in SECURITY `Policy\PolAdtEv`, the firewall
+   profiles' logging keys, the DNS-Client Operational channel is off by
+   default), so an empty log is read as not collected rather than as
+   nothing happened; the connections no log recorded and the logged
+   connections no longer in memory, with the time each was made.
 6. Each persistence entry to its running instance: every Run key, service,
    task, WMI subscription and startup item on disk matched to the process
    or thread it produced in memory (`svcscan` states against the SYSTEM
@@ -192,15 +206,20 @@ cites evidence and names the image it came from, the critic has posted a
 sign-off on the board as a `result` post that starts a line with `SIGN-OFF:`
 and names what they verified, `work/timeline.md` holds the merged timeline
 as a table with at least 28 dated rows (the ISO 8601 UTC time in the first
-column, after any `#` index) built from the ledger with a source column that
-names disk or memory on every row, `work/reconciliation.md` holds one table
-with a row per process, connection and persistence entry (memory evidence,
-disk evidence, match or gap, explanation, confidence), `work/indicators.md`
-holds one table of every indicator (type, value, first seen, source,
-confidence; one row saying so if none was found), every dump and extract is
-under `work/extracted/` with its hash in the report and in a `SHA256SUMS`
-file beside it (`sha256sum` output), the ledger holds the dated events the
-timeline rests on, and `inputs/` is unchanged.
+column, after any `#` index) built from the ledger with a `Source` column
+that names disk or memory on every row, `work/reconciliation.md` holds one
+table whose first column is the kind (process, connection or persistence),
+then memory evidence, disk evidence, match or gap, explanation, confidence,
+with a row for every process outside the baseline (the suspect tree, every
+process with no file, every process whose path, parent or signer is
+unusual), one row for the baseline processes with their count, a row for
+every non-loopback connection and a row for every persistence entry that is
+not Microsoft's (a kind with nothing in it gets one row saying so),
+`work/indicators.md` holds one table of every indicator (type, value, first
+seen, source, confidence; one row saying so if none was found), every dump
+and extract is under `work/extracted/` with its hash in the report and in a
+`SHA256SUMS` file beside it (`sha256sum` output), the ledger holds the dated
+events the timeline rests on, and `inputs/` is unchanged.
 
 ## Checks
 
@@ -211,7 +230,8 @@ timeline rests on, and `inputs/` is unchanged.
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 28`
 - `test -f work/reconciliation.md`
-- `test "$(grep -c '^| ' work/reconciliation.md)" -ge 5`
+- `for k in process connection persistence; do grep -qiE "^[|] *$k[^|]*[|]" work/reconciliation.md || exit 1; done`
+- `awk -F'|' 'function hc(s,  a,n,i,h){n=split(s,a,"|");for(i=2;i<=n;i++){h=tolower(a[i]);gsub(/[ \t]/,"",h);if(h~/^source/)return i}return 0} BEGIN{r="^[|] *([0-9]+ *[|] *)?[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"} !/^[|]/{c=0;p="";next} /^[|: -]+$/{if(p!="")c=hc(p);p="";next} $0~r{s=c?tolower($c):"";if(s~/disk/)d=1;if(s~/memory/)m=1;if(s!~/disk|memory/)b=1;p=$0;next} {if(!c)c=hc($0);p=$0} END{exit !(d&&m&&!b)}' work/timeline.md`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(find work/extracted -name SHA256SUMS -exec cat {} + 2>/dev/null | grep -cE '^[0-9a-fA-F]{64} |^SHA256 ?\(.*\) ?= ?[0-9a-fA-F]{64}')" -ge 1`

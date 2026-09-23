@@ -71,7 +71,14 @@ dumped out of memory is only kept from executing under that flag.
    directories and extensions it skips, the command lines it carries, the
    services it names, embedded addresses, and key material as an indicator
    (type, offset, length and hash of the blob; never its bytes on the
-   board or in the report).
+   board or in the report); and, for a capture taken mid-encryption, the
+   ransomware process's private memory searched for recoverable keys (AES
+   key schedules, CryptoAPI and BCrypt key objects and handles; a forged
+   scanner is fine), the scheme the imports imply (a per-file key wrapped
+   by an embedded public key is usually gone; a key still in memory is
+   not), and each candidate stored under `work/extracted/<your id>/keys/`
+   with offset, length and SHA-256 for the operator's decryption test, the
+   bytes kept out of posts and the report.
 5. What happened to the victim, from memory alone: the file handles the
    ransomware held and the files it had open (`handles` of type File), the
    renamed and re-extended names cached in memory (`filescan`, `strings`),
