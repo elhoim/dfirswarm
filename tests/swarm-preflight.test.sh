@@ -452,7 +452,7 @@ if command -v pi >/dev/null 2>&1; then
 
   if command -v herdr >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     out="$(PI_CODING_AGENT_DIR="$local_dir" SWARM_RUNS_DIR="$TMP/runs" SWARM_LOCAL_PROBE_TIMEOUT=2 \
-      bash "$ROOT/scripts/swarm.sh" start --model localmock/qwen3:8b --n 1 --cap-tokens 1000 \
+      bash "$ROOT/scripts/swarm.sh" start --model localmock/qwen3:8b --n 1 --cap-tokens 1000 --no-write-guard \
       --goal-file "$ROOT/prompts/goals/hello.md" --label keyless --env "PI_CODING_AGENT_DIR=$local_dir" 2>&1)"
     printf '%s\n' "$out" | grep -q 'BLOCKER: Pi will not use localmock/qwen3:8b without a credential, and a local server has none' \
       || fail "a keyless local provider should get the local BLOCKER: $out"

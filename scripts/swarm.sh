@@ -2665,7 +2665,12 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   command -v herdr >/dev/null 2>&1 || missing+=("herdr")
   command -v pi >/dev/null 2>&1 || missing+=("pi")
   command -v jq >/dev/null 2>&1 || missing+=("jq")
-  command -v zsh >/dev/null 2>&1 || missing+=("zsh (the pane hook runs in it)")
+  # zsh runs the write guard's pane hook and nothing else: a run with
+  # --no-write-guard writes no hook, and the panes start whatever login shell
+  # the account has.
+  if [[ "$write_guard" -eq 1 ]]; then
+    command -v zsh >/dev/null 2>&1 || missing+=("zsh (the pane hook runs in it)")
+  fi
   # Installed is not enough. Herdr starts each pane with the *login* shell
   # from /etc/passwd, and the guard hook is a $ZDOTDIR/.zshenv that only a zsh
   # reads. Measured on an Ubuntu server whose account had bash: every pane

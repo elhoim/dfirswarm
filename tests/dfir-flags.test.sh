@@ -166,7 +166,7 @@ sb="$(sandbox_of "$out")"
 printf '%s\n' "$out" | grep -q '^Tools: *2 from ' || fail "the kickoff does not say what it seeded: $out"
 hist_n="$(SWARM_SEAL_ROOT="$sb" node --experimental-strip-types -e '
 import("'"$ROOT"'/extensions/protocol.ts").then((m) =>
-  m.listFileHistory(process.env.SWARM_SEAL_ROOT, "tools/evtx_filter/manifest.json").then((h) => console.log(h.length))
+  m.listFileHistory(process.env.SWARM_SEAL_ROOT, "tools/evtx_filter/manifest.json").then((h) => console.log(String(h.length)))
 );
 ' | tr -d "[:space:]")"
 [[ "$hist_n" =~ ^[1-9][0-9]*$ ]] || fail "seeded tools were not sealed into history: $hist_n"
