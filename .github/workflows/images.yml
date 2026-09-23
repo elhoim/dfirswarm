@@ -184,7 +184,9 @@ jobs:
           ref="$(jq -r '.ref' digests/base-amd64.json)"
           msb="$(node --experimental-strip-types --no-warnings scripts/vm.ts msb-path)"
           "$msb" doctor
-          echo "${{ secrets.GITHUB_TOKEN }}" | "$msb" registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+          # msb reads Docker's credentials; its own `registry login` wants an
+          # OS keyring, which a runner does not have.
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           "$msb" pull "$ref"
           "$msb" image ls
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
