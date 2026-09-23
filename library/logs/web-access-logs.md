@@ -30,7 +30,10 @@ questions come first and the ones below fill in what it did not ask. If
    format, the fields, the signatures in the error log), the time zone and
    the exact window covered, gaps and rotations, the request volume per day,
    and every distinct client address with its request count, user agents,
-   and first and last seen.
+   and first and last seen; whether the server sat behind a proxy, load
+   balancer or CDN (the same few addresses carrying most traffic; an
+   X-Forwarded-For or equivalent field), which field is the real client,
+   and where that field can be forged by the client.
 2. Reconnaissance: which clients probed the site before anything else
    happened (path enumeration, scanner user agents, forced browsing,
    parameter fuzzing), when, and what the responses told them (status codes,
@@ -64,8 +67,8 @@ questions come first and the ones below fill in what it did not ask. If
   logs with `grep`, `awk`, `zcat`, `sort`, `uniq`, `sqlite3` and `python3`;
   do not decompress or copy them wholesale. Parse once into a table you can
   query (`work/<your id>/requests.sqlite` or a CSV with client, time,
-  method, path, query, status, size, referrer, user agent) and forge that
-  parser with `make_tool` so every peer uses the same one.
+  method, path, query, status, size, referrer, user agent, forwarded-for)
+  and forge that parser with `make_tool` so every peer uses the same one.
 - If `SWARM.md` has an "Evidence catalog" section, the first pass is already
   done: read `catalog/` instead of rebuilding it.
 - If `skill` is in your tool list, this run carries packs: call it once with
@@ -80,8 +83,11 @@ questions come first and the ones below fill in what it did not ask. If
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
-  `ledger/ledger.md`. Convert every timestamp to UTC and say what the
-  server's offset was.
+  `ledger/ledger.md`. Convert every timestamp to UTC and say how: Apache
+  and nginx lines carry their own offset; IIS W3C `date time` is already
+  UTC (do not apply the host offset); note that Apache logs the request's
+  start and nginx its completion, and use `%D`, `$request_time` or
+  `time-taken` where present to place long transfers.
 - Every claim in the report cites its evidence: the log file, the line
   number or the exact line, the request as logged, the command that produced
   the count. A claim without evidence is a hypothesis and is labelled as

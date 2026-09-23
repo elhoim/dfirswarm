@@ -3,8 +3,8 @@ title: Firewall, VPN, proxy and DNS logs
 summary: The perimeter's logs without any host; who came in over the VPN, what went out through the proxy and the firewall, what the resolver saw, which hosts beacon, and which hosts to collect next
 evidence: logs
 os: any
-tags: firewall, vpn, proxy, dns, egress, beaconing, tunnelling, exfiltration, impossible-travel, perimeter, timeline
-inputs: the perimeter's logs for the window (firewall connection logs, VPN session and authentication logs, web proxy access logs, DNS resolver query logs; plain, gzipped or rotated, one directory per device), and a brief if there is one
+tags: firewall, vpn, proxy, dns, egress, beaconing, tunnelling, exfiltration, impossible-travel, perimeter, edge-device, appliance, timeline
+inputs: the perimeter's logs for the window (firewall connection logs, VPN session and authentication logs, web proxy access logs, DNS resolver query logs, and the devices' own system, admin and configuration-audit logs where kept; plain, gzipped or rotated, one directory per device), and a brief if there is one
 seats: 5
 cap_usd: 25
 wall_clock: 75
@@ -44,38 +44,49 @@ ran the first pass; read `catalog/` before running the same commands again.
    not keep; two sessions for one account from two places closer in time
    than travel allows; concurrent sessions for one account; and the
    accounts and sources that appear for the first time in the window.
-3. Proxy and web egress: destinations by request count and by bytes, per
+3. The devices themselves: administrative logins to each device's
+   management interface (account, source, method), configuration changes
+   and who made them, new local accounts or certificates, firmware or
+   package changes, crashes, restarts and core dumps, requests to the
+   management or VPN portal paths that read as exploitation, and gaps in
+   the device's own logging; and whether any device should itself be
+   collected (running config, integrity-check tool output, a disk image).
+4. Proxy and web egress: destinations by request count and by bytes, per
    internal host and per account where the proxy has one; the user agents
    seen and the rare ones with the hosts that sent them; requests whose
    method and size say something was uploaded, by destination and by host;
    the categories the proxy assigned and the requests it denied, and the
    destinations that were denied and then allowed or reached another way;
    and destinations first seen in the window.
-4. Firewall: inbound hits on exposed services by source, port and
+5. Firewall: inbound hits on exposed services by source, port and
    outcome; outbound connections to rare ports and to addresses no other
    host uses; sessions whose duration or byte count stands out, per
    internal host and per destination; the internal hosts that connect to
    one another where the policy did not expect it; and the rule that
    allowed or denied each connection of interest.
-5. DNS: domains resolved by few hosts or once; names whose length,
+6. DNS: domains resolved by few hosts or once; names whose length,
    character distribution or label count read as generated; long or
    frequent TXT queries and query volumes per domain and host that read as
    a channel rather than name resolution; domains first seen in the
    window; runs of NXDOMAIN from one host; and the answers, where the log
    has them, that map a name to the addresses the firewall and the proxy
-   saw.
-6. Beaconing: for every internal host and destination pair, the intervals
+   saw; and the name resolution the resolver never saw: outbound 53/udp
+   and 53/tcp from any host other than the resolvers, 853/tcp (DoT), and
+   proxy or firewall connections to known public DoH endpoints (by SNI or
+   the URL path `/dns-query`), per host.
+7. Beaconing: for every internal host and destination pair, the intervals
    between connections, their regularity (median, spread, the share of
    intervals within a few percent of the median), the count, the duration
    and the sizes; the pairs whose regularity and persistence say a
    scheduled channel rather than a person, ranked; and the hosts behind
    them. Forge a periodicity tool for this and share it, so every pair is
    measured the same way.
-7. The hosts to collect next: every internal address and account the
-   answers above implicate, with what implicates it, mapped to a host name
-   where the VPN or DHCP records allow, ranked by what the evidence says
-   and by what a collection would settle; and the accounts to reset.
-8. The timeline across the devices from the first record of interest to
+8. The hosts to collect next: every internal address, perimeter device
+   and account the answers above implicate, with what implicates it,
+   mapped to a host name where the VPN or DHCP records allow, ranked by
+   what the evidence says and by what a collection would settle; and the
+   accounts to reset.
+9. The timeline across the devices from the first record of interest to
    the last; the hypothesis for what crossed the perimeter and how it was
    tested; what the perimeter cannot answer and what evidence would (the
    hosts, the identity provider's logs, full captures); the indicators
@@ -127,7 +138,7 @@ ran the first pass; read `catalog/` before running the same commands again.
   step needs a tool this host does not have, say exactly what is missing
   and what you established up to that point; forge a tool with `make_tool`
   where a small script closes the gap (a parser per log format, the
-  periodicity tool for question 6, a name entropy and label scorer, a
+  periodicity tool for question 7, a name entropy and label scorer, a
   session joiner across devices), and share it.
 
 ## How to divide the work
@@ -154,13 +165,14 @@ the report cannot be the one who certifies it.
 ## Definition of done
 
 `work/report.md` exists, answers every question under headings `## 1.`,
-`## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, every answer
-cites evidence (file, line, field), the critic has posted a sign-off on
-the board naming what they verified against the ledger, `work/timeline.md`
-holds the merged timeline as a table with at least 25 dated rows built
-from the ledger, each row naming the device it came from, `work/hosts.md`
-holds one table of the internal hosts to collect next (address, name where
-known, what implicates it, rank; one row saying so if none was found),
+`## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, `## 9.`,
+every answer cites evidence (file, line, field), the critic has posted a
+sign-off on the board naming what they verified against the ledger,
+`work/timeline.md` holds the merged timeline as a table with at least 25
+dated rows built from the ledger, each row naming the device it came
+from, `work/hosts.md` holds one table of the internal hosts and devices to
+collect next (address, name where known, what implicates it, rank; one
+row saying so if none was found),
 `work/indicators.md` holds one table of every indicator (type, value,
 first seen, device, confidence; one row saying so if none was found), the
 ledger holds the dated events the timeline rests on, and `inputs/` is
@@ -169,12 +181,14 @@ unchanged.
 ## Checks
 
 - `test -f work/report.md`
-- `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `for n in 1 2 3 4 5 6 7 8 9; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 27`
+- `grep -m1 '^| ' work/timeline.md | grep -qi 'device'`
 - `test -f work/hosts.md`
 - `test "$(grep -c '^| ' work/hosts.md)" -ge 3`
+- `grep -m1 '^| ' work/hosts.md | grep -qi 'rank'`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`

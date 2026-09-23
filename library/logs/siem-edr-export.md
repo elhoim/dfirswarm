@@ -147,13 +147,18 @@ the report cannot be the one who certifies it.
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
 evidence (file, record id, field), every alert in the export has a verdict
-in the report, the critic has posted a sign-off on the board naming what
-they verified against the ledger, `work/timeline.md` holds the merged
-timeline as a table with at least 30 dated rows built from the ledger,
-each row naming the host, `work/indicators.md` holds one table of every
-indicator (type, value, first seen, hosts, source record, confidence; one
-row saying so if none was found), the ledger holds the dated events the
-timeline rests on, and `inputs/` is unchanged.
+in the report, `work/alerts.md` holds one table with a row per alert in
+the export (alert id, host, rule, severity, verdict: true positive, benign
+or undecidable, the record it rests on; one row saying so if the export
+holds no alerts) and its first line states the alert count the parser
+found, the critic has posted a sign-off on the board naming what they
+verified against the ledger and stating that the table's row count equals
+the parser's alert count, `work/timeline.md` holds the merged timeline as
+a table with at least 30 dated rows built from the ledger, each row naming
+the host, `work/indicators.md` holds one table of every indicator (type,
+value, first seen, hosts, source record, confidence; one row saying so if
+none was found), the ledger holds the dated events the timeline rests on,
+and `inputs/` is unchanged.
 
 ## Checks
 
@@ -161,6 +166,9 @@ timeline rests on, and `inputs/` is unchanged.
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
 - `grep -qi 'verdict' work/report.md`
+- `test -f work/alerts.md`
+- `test "$(grep -c '^| ' work/alerts.md)" -ge 3`
+- `grep -Eqi 'true positive|benign|undecidable|no alerts' work/alerts.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 32`
 - `head -3 work/timeline.md | grep -qi 'host'`

@@ -62,19 +62,27 @@ ran the first pass; read `catalog/` before running the same commands again.
    (module logging) and 4104 (script block, with the scripts reassembled
    from their parts and hashed) and 400, 403 and 600 in
    `Windows PowerShell`; WMI activity 5857 to 5861; and Sysmon 1, 3, 7, 8,
-   10, 11 and 13 where the channel is present; each with user, time, host
-   and the record that holds it.
+   10, 11, 12, 13, 14, 19 to 22 (WMI persistence and DNS) and 23 where
+   the channel is present; each with user, time, host and the record that
+   holds it.
 5. Defence tampering: Defender 5001, 5004, 5007, 5010 and 5012 (protection
    turned off, exclusions or settings changed), 1116 and 1117 (what was
    detected and what was done about it), audit policy changes 4719 and
    4907, the log clears from question 1, the event log service stopping
-   (System 6005/6006 out of place), and the services or tasks that stopped
-   security tooling; each with the account and the moment.
+   (System 6005/6006 out of place), Security 1100 and 1104 (logging shut
+   down, log full), System 7036 and 7040 for the security services,
+   Sysmon 16 (configuration change) and Defender 5013, and the services
+   or tasks that stopped security tooling; each with the account and the
+   moment.
 6. Lateral movement between the hosts in the bundle: for every pair of
    hosts, the logons on one whose source is the other (4624 types 3 and 10,
    4648, 4776 with the workstation name), the service installs and tasks
    that follow within minutes, the shares and files opened (5140, 5145)
-   and the named pipes in Sysmon 17 and 18 where present, and the account
+   and the named pipes in Sysmon 17 and 18 where present,
+   `TerminalServices-RDPClient/Operational` 1024 and 1102 on the source,
+   `WinRM/Operational` 6 on the source and 91 on the target, 7045 names
+   such as `PSEXESVC` or random-looking services, 4624 type 3 followed by
+   a 4688 whose parent is `WmiPrvSE.exe` on the target, and the account
    each hop used; the graph of who reached what from where, in order.
 7. A per-account, per-host timeline: for each account of interest, every
    host it appeared on and what it did there in sequence, from the logs'
