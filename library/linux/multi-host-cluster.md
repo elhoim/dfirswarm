@@ -4,7 +4,7 @@ summary: Two or more related Linux images; where it started, how it spread betwe
 evidence: disk-image
 os: linux
 tags: intrusion, lateral-movement, ssh, cluster, multi-host, cross-host-timeline, ext4, lvm, timeline
-inputs: two or more disk images of related Linux hosts (a cluster, a web tier and its database, a jump host and its targets; E01 or raw), their acquisition records, and if available a brief
+inputs: two or more disk images of related Linux hosts (a cluster, a web tier and its database, a jump host and its targets; E01 or raw), their acquisition records, and if available a brief; the suggested seats, cap and wall clock fit three images and grow with the count
 seats: 6
 cap_usd: 40
 wall_clock: 120
@@ -31,12 +31,24 @@ before running the same commands again.
 
 1. Per-host profile and clock offset: for each image, the distribution and
    release (`/etc/os-release`), the kernel (`/boot`, `/lib/modules`), the
-   hostname (`/etc/hostname`), the time zone the host kept (`/etc/localtime`,
-   `/etc/timezone`), and the offset of its clock — say how each host's local
-   time was corrected to UTC so the cross-host order is not an artefact of
-   several machines' clocks disagreeing; the users, groups and SSH material
-   (`/etc/passwd`, `/etc/group`, `/etc/shadow` as metadata only, every
-   `authorized_keys` and `known_hosts`).
+   hostname (`/etc/hostname`), and how each host's local time was corrected
+   to UTC so the cross-host order is not an artefact of several machines'
+   clocks disagreeing, in two parts: the zone the host kept
+   (`/etc/localtime`, `/etc/timezone`, the journal's own UTC stamps against
+   the syslog line for the same event), and its skew where the evidence
+   allows (NTP, chrony and timesyncd lines such as `/var/log/chrony/` or
+   the journal's "Synchronized to time server", ntpd step messages; a
+   BIOS or system clock the examiner recorded against a reference at
+   imaging, in the case notes or the EWF case or description field, since
+   the acquisition and system dates `ewfinfo` shows both come from the
+   imaging workstation's clock and say nothing of the host's; SSH hops
+   whose client-side and server-side records of one session disagree),
+   saying "skew not measurable" where none holds; which image file each
+   profile came from; whether the images were cloned from a common
+   template, and the date each diverged;
+   the users, groups and SSH material (`/etc/passwd`, `/etc/group`,
+   `/etc/shadow` as metadata only, every `authorized_keys` and
+   `known_hosts`).
 2. The entry host and the order of compromise: which host was reached first
    and how (accepted and failed logins in `auth.log` or `secure` and the
    journal, with source, user and method; the first foreign session; the
@@ -54,8 +66,12 @@ before running the same commands again.
    copied), and what that host could still reach with what was taken.
 5. Shared indicators: the addresses, hostnames, file hashes, tool names,
    ports and account names that appear on more than one host, with the hosts
-   and times each was seen, so the estate reads as one campaign and not as
-   several unrelated events; and the indicators unique to a single host.
+   and times each was seen; separate what the hosts share because they were
+   built from one template (an identical `/etc/machine-id`, SSH host keys,
+   log lines from before deployment, the image's own users and packages)
+   from what they share because of the intrusion, and say whether the
+   evidence supports one campaign or several; and the indicators unique to
+   a single host.
 6. The merged cross-host timeline in UTC, from the first contact on the entry
    host to the last observed activity anywhere; the hypothesis for how the
    estate was taken and how it was tested; what remains uncertain and what
@@ -156,7 +172,12 @@ per image, each owning that host's profile, logs, persistence and losses;
 plus one agent who carries indicators between the images — matching the
 addresses, keys, hashes and account names across hosts and posting where a
 thing seen on one appears on another; plus one who merges the per-host
-findings into the single cross-host timeline. Somebody has to keep that
+findings into the single cross-host timeline. The team this wants is one
+seat per image plus three (indicators, timeline, critic), so the suggested
+seats, cap and wall clock fit three images and grow with the count (roughly
+$10 to $13 of cap per image); with more images than the seats allow, one
+agent takes two quiet hosts once the catalog shows which they are, and says
+so on the board. Somebody has to keep that
 timeline from `ledger/ledger.md`, and somebody has to verify every citation
 and assemble `work/report.md` and post the sign-off the definition of done
 requires — agree between you who does, early, because the run is not finished
@@ -176,8 +197,10 @@ verified, `work/timeline.md` holds the merged cross-host timeline as a table
 with at least 30 dated rows (the ISO 8601 UTC time in the first column,
 after any `#` index) built from the ledger, `work/indicators.md` holds one
 table of every indicator (type, value, hosts seen, first seen, confidence;
-one row saying so if none was found), the ledger holds the dated events the
-timeline rests on, and `inputs/` is unchanged.
+one row saying so if none was found), the report names every image it read
+by its file name (without the extension; by its directory when two images
+share a name) beside the host it holds, the ledger holds the dated events
+the timeline rests on, and `inputs/` is unchanged.
 
 ## Checks
 
@@ -190,6 +213,13 @@ timeline rests on, and `inputs/` is unchanged.
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 23`
+- `awk 'tolower(p) ~ /host/ && /^ *[|]? *:?-+:? *[|]/ {m=1} {p=$0} END {exit !m}' work/indicators.md`
+  (the indicators table's header has a hosts column.)
+- `python3 -c 'import json,os,re,collections;fs=[f["path"] for f in json.load(open("inputs.json"))["files"] if re.search(r"[.](e01|ex01|s01|001|raw|dd|img|bin|vmdk|vhdx?|qcow2|aff4)$",f["path"],re.I)];st={(os.path.dirname(p),re.sub(r"(?i)(-(flat|s[0-9]{3}))?[.]vmdk$|([.](raw|dd|img|bin))?[.][^.]+$","",os.path.basename(p))) for p in fs};n=collections.Counter(s for d,s in st);t=open("work/report.md",errors="replace").read();raise SystemExit(any(not re.search(r"(?<![\w-])"+re.escape(os.path.basename(d) if n[s]>1 else s)+r"(?![\w-])",t,re.I) for d,s in st))'`
+  (every disk image `inputs.json` lists is named in the report as a whole
+  word: by its file name without the extension or split suffix, or by its
+  directory when two images share a file name. With no recognised image in
+  the manifest there is nothing to match, and the check passes.)
 - `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
