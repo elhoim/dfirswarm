@@ -287,6 +287,21 @@ test("a shell write is attributed by what the command names, and a peer's scratc
   assert.ok(!isPeersScratch("work/report.md", "a00"));
 });
 
+test("a forged tool's writes are attributed by what its arguments name, like a shell's", async () => {
+  // se31100's icat_extract ran while se31102's icat_extract wrote into
+  // work/extracted/se31102/; the forged-tool path skipped attribution, and
+  // six of se31102's files became se31100's claim violations.
+  const args = JSON.stringify({ inode: 94592, output: "work/a00/prefetch/CHROME.EXE-5349D2DE.pf", offset: 0 });
+  assert.ok(commandNamesPath(args, "work/a00/prefetch/CHROME.EXE-5349D2DE.pf"), "the call's own output is named by its arguments");
+  assert.ok(!commandNamesPath(args, "work/extracted/a01/MICROSOFTEDGE.pf"), "a peer's parallel extraction is not named");
+  assert.ok(isPeersScratch("work/extracted/a01/MICROSOFTEDGE.pf", "a00", new Set(["a00", "a01"])));
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../extensions/agent-swarm.ts", import.meta.url), "utf8");
+  const forged = source.slice(source.indexOf("function registerForged("), source.indexOf("function registerForged(") + 4000);
+  assert.match(forged, /attributeToThisCall\(/, "the forged-tool path filters its diff the way bash does");
+  assert.doesNotMatch(source, /reason: `bash write to \$\{report\.path\}/, "a violation names the tool that made it, not always bash");
+});
+
 test("a forged tool cannot take the name of a harness event, and is told who writes it", () => {
   for (const name of ["inputs_check", "claim_violation", "idle_nudge", "record", "sentinel_nudge"]) {
     const result = validateToolSpec({ name, description: "x", params: {}, runtime: "python3", script: "print(1)" });

@@ -1359,15 +1359,15 @@ export default function (pi: ExtensionAPI) {
         cwd,
         agentId,
         "claim_violation",
-        { tool: "bash", path: report.path },
+        { tool: via, path: report.path },
         {
           blocked: false,
           detected: true,
-          via: "bash",
+          via,
           owner: report.owner,
           protected: report.protected,
           rev: version?.rev ?? null,
-          reason: `bash write to ${report.path}${held}`,
+          reason: `${via} write to ${report.path}${held}`,
         },
       );
       const recovery = report.recoverable
@@ -1383,7 +1383,7 @@ export default function (pi: ExtensionAPI) {
       claimViolationPostedAt.set(report.path, Date.now());
       await systemPost(cwd, {
         tag: "veto",
-        body: `CLAIM VIOLATION: ${agentId}'s bash call modified \`${report.path}\`${held}.${
+        body: `CLAIM VIOLATION: ${agentId}'s ${via} call modified \`${report.path}\`${held}.${
           version ? ` The result was snapshotted as rev ${version.rev} (${shortHash(version.sha256)}).` : ""
         } ${recovery}${repeats ? ` (${repeats} more write${repeats === 1 ? "" : "s"} to this path since the last notice, each on the trace as claim_violation.)` : ""}`,
       }).catch(() => undefined);
@@ -2117,7 +2117,16 @@ export default function (pi: ExtensionAPI) {
         if (before && agentId) {
           try {
             await new Promise((resolve) => setTimeout(resolve, BASH_SETTLE_MS));
-            const reports = await diffWatchedPaths(toolCtx.cwd, before, agentId);
+            // The same attribution a shell call gets: a change this call's
+            // arguments do not name, in a peer's own directory, is the peer's
+            // concurrent work. Without it, every file a peer's parallel
+            // icat_extract wrote showed up as this agent's claim violation
+            // (six on the first microVM case run, and on host runs before it).
+            const reports = await attributeToThisCall(
+              toolCtx.cwd,
+              await diffWatchedPaths(toolCtx.cwd, before, agentId),
+              JSON.stringify(params ?? {}),
+            );
             if (reports.length) await reportBashWrites(toolCtx.cwd, reports, manifest.name, before);
           } catch {
             // the run's own result still goes back; a missed diff is not a reason to fail it
