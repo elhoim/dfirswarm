@@ -39,8 +39,11 @@ anyone else starts.
    LiME format by default and may compress it; a raw dump has neither; a
    compressed AVML capture is read directly only if Volatility's AVML
    layer finds the `libsnappy` library, otherwise it is converted once
-   into `work/extracted/<your id>/`, at full size, so check free space
-   first, then hashed, posted, and used by everybody),
+   (AVML's `avml-convert`, if the host has it) into
+   `work/extracted/<your id>/`, at full size, so check free space first,
+   then hashed, posted, and used by everybody; if neither works,
+   `banners.Banners` finds nothing, and the answer says no kernel banner
+   was found and why),
    the ranges and the total, the acquisition tool's own traces (a `lime`
    module in the module list, an `avml` process in the process list, both
    named and set aside), the kernel banner (`banners.Banners`), the distribution and hostname as strings show them,
@@ -78,9 +81,10 @@ anyone else starts.
    deleted, the mounted file systems (`linux.mountinfo`: a `tmpfs` or an
    overlay where none belongs, a bind mount over a system path), and
    which of it is the host's ordinary traffic and which is not; the files
-   held in the page cache (`linux.pagecache.Files`, recovered with
-   `linux.pagecache.InodePages --dump`), `/etc/ld.so.preload`, crontabs
-   and systemd units among them.
+   held in the page cache (`linux.pagecache.Files`, one recovered with
+   `linux.pagecache.InodePages --find <path> --dump` or `--inode`, the
+   whole cached tree with `linux.pagecache.RecoverFs`),
+   `/etc/ld.so.preload`, crontabs and systemd units among them.
 5. The kernel: loaded modules against the module list and the memory that
    holds them (`linux.lsmod`, `linux.check_modules`,
    `linux.hidden_modules`), the system call table, the interrupt table and
@@ -181,8 +185,8 @@ agent who wrote the report cannot be the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the report quotes the kernel banner and says in its first
-answer whether a symbol table matched and what was done without one, the
+evidence, the report quotes the kernel banner (or says no kernel banner
+was found and why) and says in its first answer whether a symbol table matched and what was done without one, the
 critic has posted a sign-off on the board naming what they verified,
 `work/timeline.md` holds the merged timeline as a table with at least 10
 dated rows built from the ledger, `work/indicators.md` holds one table of
@@ -197,9 +201,9 @@ why), the ledger holds the dated events the timeline rests on, and
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
-- `awk '/^## 1\./{f=1;next} /^## 2\./{f=0} f' work/report.md | grep -qi 'symbol'`
-- `awk '/^## 1\./{f=1;next} /^## 2\./{f=0} f' work/report.md | grep -q 'Linux version'`
-- `test "$(find work/extracted -type f 2>/dev/null | wc -l)" -ge 1 || grep -qiE 'nothing (was )?dumped|no region' work/report.md`
+- `awk '/^## 1\./{f=1;next} /^## [0-9]/{f=0} f&&tolower($0)~/symbol/{x=1} END{exit !x}' work/report.md`
+- `awk '/^## 1\./{f=1;next} /^## [0-9]/{f=0} f&&(/Linux version/||tolower($0)~/no kernel banner/){x=1} END{exit !x}' work/report.md`
+- `test "$(find work/extracted -type f 2>/dev/null | wc -l)" -ge 1 || grep -qiE 'nothing (was )?dumped' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 12`
 - `test -f work/indicators.md`

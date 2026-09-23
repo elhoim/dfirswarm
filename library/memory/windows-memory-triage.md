@@ -49,7 +49,9 @@ scan, `malfind` and `dlllist` into `catalog/`; read those before running them ag
    cached hives (`windows.registry.printkey` on the Run keys, Services and
    Winlogon), services (`svcscan`), drivers (`modules`, `driverscan`,
    `windows.modscan`) that appear in one list and not another, whose path
-   is outside `\SystemRoot\System32\drivers`, whose version information
+   is outside `\SystemRoot\System32\drivers` and
+   `System32\DriverStore\FileRepository` (where most inbox and vendor
+   drivers load from), whose version information
    (`windows.verinfo`) is missing or odd, or whose IRP table, callbacks or
    SSDT entries point outside a known module (`windows.driverirp`,
    `windows.callbacks`, `windows.ssdt`), with a note that a signature and
@@ -147,7 +149,7 @@ on, and `inputs/` is unchanged.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
-- `test "$(find work/extracted -type f 2>/dev/null | wc -l)" -ge 1 || grep -qiE 'nothing (was )?dumped|no region' work/report.md`
+- `test "$(find work/extracted -type f 2>/dev/null | wc -l)" -ge 1 || grep -qiE 'nothing (was )?dumped' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 17`
 - `test -f work/indicators.md`

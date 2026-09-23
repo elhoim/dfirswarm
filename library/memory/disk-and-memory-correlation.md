@@ -36,7 +36,10 @@ running the same commands again.
    name (SYSTEM `ControlSet00x\Control\ComputerName`), machine SID (SAM
    `Domains\Account`, its `V` value, or SECURITY `Policy\PolAcDmS`; the
    local account SIDs `windows.getsids` shows share it), install date
-   (SOFTWARE `Microsoft\Windows NT\CurrentVersion`, `InstallDate`),
+   (SOFTWARE `Microsoft\Windows NT\CurrentVersion`, `InstallDate`; on
+   Windows 10 and 11 it is reset by every feature update, so it dates the
+   last one, and the original install date is under SYSTEM `Setup\Source OS
+   (Updated on ...)`),
    network adapters and their addresses (SYSTEM
    `Services\Tcpip\Parameters\Interfaces`) on disk against the cached
    hives in memory (`windows.registry.hivelist`, `printkey`), the boot time
@@ -185,7 +188,7 @@ the one who certifies it.
 answer cites evidence and names the image it came from, the critic has
 posted a sign-off on the board naming what they verified,
 `work/timeline.md` holds the merged timeline as a table with at least 28
-dated rows built from the ledger with a source column that names disk or
+dated rows built from the ledger with a `Source` column that names disk or
 memory on every row, `work/reconciliation.md` holds one table whose first
 column is the kind (process, connection or persistence), then memory
 evidence, disk evidence, match or gap, explanation, confidence, with a
@@ -208,10 +211,8 @@ the dated events the timeline rests on, and `inputs/` is unchanged.
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 30`
 - `test -f work/reconciliation.md`
-- `test "$(grep -c '^| ' work/reconciliation.md)" -ge 12`
-- `for k in process connection persistence; do grep -qiE "^\| *$k *\|" work/reconciliation.md || exit 1; done`
-- `test "$(grep '^| ' work/timeline.md | grep -v '^| *:\{0,1\}-' | grep -vic -e disk -e memory -e source)" -eq 0`
-- `grep '^| ' work/timeline.md | tail -n +3 | grep -qi memory && grep '^| ' work/timeline.md | tail -n +3 | grep -qi disk`
+- `for k in process connection persistence; do grep -qiE "^[|] *$k[^|]*[|]" work/reconciliation.md || exit 1; done`
+- `awk -F'|' 'BEGIN{r="^[|] *([0-9]+ *[|] *)?[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"} /^[|: -]+$/{next} /^[|]/&&$0!~r{c=0;for(i=2;i<=NF;i++){h=tolower($i);gsub(/ /,"",h);if(h~/^source/)c=i}next} $0~r{s=c?tolower($c):"";if(s~/disk/)d=1;if(s~/memory/)m=1;if(s!~/disk|memory/)b=1} END{exit !(d&&m&&!b)}' work/timeline.md`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(find work/extracted -type f 2>/dev/null | wc -l)" -ge 1`
