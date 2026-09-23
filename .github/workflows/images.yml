@@ -1,19 +1,17 @@
-# The agents' VM images: built from the packs, pushed to GitHub's container
-# registry by digest, then pulled back and booted by the VM integration tests
-# on a runner with KVM. Nothing here holds a secret beyond the job's own
-# GITHUB_TOKEN, which may write this repository's packages and nothing else.
+# The agents' VM images, built from the packs and booted — never pushed from
+# here. A package published from this public repository becomes public
+# (measured: the first push of these images could be pulled anonymously),
+# and an image bundles separately licensed programs that are not ours to
+# redistribute until each licence has been reviewed. Prebuilt images are
+# published from the private dfirswarm-pro repository, to private packages.
 #
-# Each architecture builds on its own kind of runner (no emulation: the
-# profiles compile Python wheels, and under QEMU that takes hours), and the
-# per-architecture pushes are joined into one multi-arch tag at the end. The
-# digests are written to images.lock.json, the file a kickoff reads to boot
-# exactly what was built here; it is uploaded as an artifact and printed in
-# the job summary for the operator to commit.
+# What this does instead: builds the base and every profile for amd64 from
+# the recipes, as a community user would (images/README.md), and prints what
+# each image holds. CI's microVM job boots the base on a runner with KVM.
 name: images
 
 on:
-  push:
-    branches: [main, claude/microvm-isolation]
+  pull_request:
     paths:
       - images/**
       - packs/*/requires/**
@@ -23,175 +21,24 @@ on:
 
 permissions:
   contents: read
-  packages: write
-
-concurrency:
-  group: images-${{ github.ref }}
-  cancel-in-progress: false
-
-env:
-  REGISTRY: ghcr.io
-  PI_VERSION: 0.87.0
 
 jobs:
-  base:
-    name: base · ${{ matrix.arch }}
-    strategy:
-      matrix:
-        include:
-          - { arch: amd64, runner: ubuntu-latest }
-          - { arch: arm64, runner: ubuntu-24.04-arm }
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    steps:
-      - run: git config --global init.defaultBranch main
-      - uses: actions/checkout@v7
-      - name: Tag
-        id: tag
-        run: |
-          echo "owner=$(echo '${{ github.repository_owner }}' | tr 'A-Z' 'a-z')" >> "$GITHUB_OUTPUT"
-          echo "tag=sha-$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Log in to ghcr.io
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Build and push
-        id: push
-        run: |
-          ref="$REGISTRY/${{ steps.tag.outputs.owner }}/dfirswarm-base:${{ steps.tag.outputs.tag }}-${{ matrix.arch }}"
-          docker build --build-arg PI_VERSION="$PI_VERSION" -f images/base.Dockerfile -t "$ref" images
-          docker push "$ref"
-          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$ref")"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          mkdir -p digests && printf '{"profile":"base","arch":"%s","ref":"%s"}\n' "${{ matrix.arch }}" "$digest" > "digests/base-${{ matrix.arch }}.json"
-          docker run --rm "$ref" cat /etc/dfirswarm/image.json
-      - uses: actions/upload-artifact@v5
-        with:
-          name: digest-base-${{ matrix.arch }}
-          path: digests/
-
-  profiles:
-    name: ${{ matrix.profile }} · ${{ matrix.arch }}
-    needs: base
+  build:
+    name: build · ${{ matrix.profile }}
     strategy:
       fail-fast: false
       matrix:
-        profile: [re, memory, disk, network, linux, mobile]
-        arch: [amd64, arm64]
-        include:
-          - { arch: amd64, runner: ubuntu-latest }
-          - { arch: arm64, runner: ubuntu-24.04-arm }
-    runs-on: ${{ matrix.runner }}
+        profile: [base, re, memory, disk, network, linux, mobile]
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - run: git config --global init.defaultBranch main
       - uses: actions/checkout@v7
-      - name: Tag
-        id: tag
+      - name: Build
         run: |
-          echo "owner=$(echo '${{ github.repository_owner }}' | tr 'A-Z' 'a-z')" >> "$GITHUB_OUTPUT"
-          echo "tag=sha-$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Log in to ghcr.io
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Recipe from the packs
-        run: |
-          base="$REGISTRY/${{ steps.tag.outputs.owner }}/dfirswarm-base:${{ steps.tag.outputs.tag }}-${{ matrix.arch }}"
-          python3 images/recipe.py build "${{ matrix.profile }}" --out ctx --base "$base"
-          jq -c '{profile, packs, apt: (.apt | length), pip: (.pip | length), manual: (.manual | length)}' ctx/spec.json
-      - name: Build and push
-        run: |
-          ref="$REGISTRY/${{ steps.tag.outputs.owner }}/dfirswarm-${{ matrix.profile }}:${{ steps.tag.outputs.tag }}-${{ matrix.arch }}"
-          docker build -t "$ref" ctx
-          docker push "$ref"
-          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$ref")"
-          mkdir -p digests && printf '{"profile":"%s","arch":"%s","ref":"%s"}\n' "${{ matrix.profile }}" "${{ matrix.arch }}" "$digest" > "digests/${{ matrix.profile }}-${{ matrix.arch }}.json"
-          docker run --rm "$ref" python3 -c 'import json; r = json.load(open("/etc/dfirswarm/image.json")); print(json.dumps({"profile": r.get("profile"), "packs": r.get("packs"), "binaries_found": sum(1 for v in (r.get("binaries") or {}).values() if v), "binaries": len(r.get("binaries") or {}), "not_installed": r.get("not_installed")}))'
-      - uses: actions/upload-artifact@v5
-        with:
-          name: digest-${{ matrix.profile }}-${{ matrix.arch }}
-          path: digests/
-
-  lock:
-    name: multi-arch tags · images.lock.json
-    needs: [base, profiles]
-    if: always() && needs.base.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - run: git config --global init.defaultBranch main
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v5
-        with:
-          pattern: digest-*
-          merge-multiple: true
-          path: digests
-      - name: Log in to ghcr.io
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: One tag per profile, both architectures
-        run: |
-          owner="$(echo '${{ github.repository_owner }}' | tr 'A-Z' 'a-z')"
-          tag="sha-$(git rev-parse --short=12 HEAD)"
-          for profile in $(jq -r '.profile' digests/*.json | sort -u); do
-            refs=$(jq -r --arg p "$profile" 'select(.profile == $p) | .ref' digests/*.json)
-            docker buildx imagetools create -t "$REGISTRY/$owner/dfirswarm-$profile:$tag" $refs
-          done
-      - name: images.lock.json
-        run: |
-          jq -s --arg commit "$(git rev-parse HEAD)" --arg pi "$PI_VERSION" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-            {built_from: $commit, built_at: $at, pi: $pi,
-             images: (reduce .[] as $d ({}; .[$d.profile][$d.arch] = $d.ref))}' digests/*.json > images.lock.json
-          cat images.lock.json
-          { echo '### images.lock.json'; echo; echo '```json'; cat images.lock.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v5
-        with:
-          name: images-lock
-          path: images.lock.json
-      - name: Who can pull them
-        run: |
-          owner="$(echo '${{ github.repository_owner }}' | tr 'A-Z' 'a-z')"
-          docker logout ghcr.io
-          if docker manifest inspect "$REGISTRY/$owner/dfirswarm-base:sha-$(git rev-parse --short=12 HEAD)" >/dev/null 2>&1; then
-            echo "::warning::the images are PUBLIC: an anonymous pull works" | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            echo "The images are private: an anonymous pull is refused." | tee -a "$GITHUB_STEP_SUMMARY"
+          docker build -f images/base.Dockerfile -t dfirswarm-base:dev-amd64 images
+          if [ "${{ matrix.profile }}" != base ]; then
+            python3 images/recipe.py build "${{ matrix.profile }}" --out ctx --base dfirswarm-base:dev-amd64
+            docker build -t "dfirswarm-${{ matrix.profile }}:dev-amd64" ctx
           fi
-
-  pull-and-boot:
-    # The loop closed: pull what was pushed, by digest, and boot the VM
-    # integration tests on it. GitHub's Linux runners expose /dev/kvm.
-    name: pull back · boot · VM integration tests
-    needs: base
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - run: git config --global init.defaultBranch main
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - uses: actions/download-artifact@v5
-        with:
-          name: digest-base-amd64
-          path: digests
-      - name: KVM for this user
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
-          ls -la /dev/kvm
-      - run: npm ci
-      - name: Pull the base image back from ghcr.io
-        id: pull
-        run: |
-          ref="$(jq -r '.ref' digests/base-amd64.json)"
-          msb="$(node --experimental-strip-types --no-warnings scripts/vm.ts msb-path)"
-          "$msb" doctor
-          # msb reads Docker's credentials; its own `registry login` wants an
-          # OS keyring, which a runner does not have.
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          "$msb" pull "$ref"
-          "$msb" image ls
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-      - name: Boot it
-        env:
-          DFIRSWARM_VM_TESTS: "1"
-          VM_TEST_IMAGE: ${{ steps.pull.outputs.ref }}
-        run: npm run test:vm
+          docker run --rm "dfirswarm-${{ matrix.profile }}:dev-amd64" python3 -c 'import json; r = json.load(open("/etc/dfirswarm/image.json")); print(json.dumps({"profile": r.get("profile"), "packs": r.get("packs"), "binaries_found": sum(1 for v in (r.get("binaries") or {}).values() if v), "binaries": len(r.get("binaries") or {}), "not_installed": r.get("not_installed")}))'
