@@ -217,6 +217,28 @@ test("a VM reaches its allowed host, and no other name or address", async (t) =>
   assert.match(out, /resolved=no/, "a name outside the rules does not resolve");
 });
 
+test("a local model's port on the host is reachable through the host gateway, and no other port", async (t) => {
+  if (skip) return t.skip(skip);
+  // In its own process: inVm() blocks this one while the guest calls it.
+  const { spawn } = await import("node:child_process");
+  const port = 18000 + Math.floor(Math.random() * 1000);
+  const srv = spawn(process.execPath, ["-e", `require("node:http").createServer((q, s) => s.end("local model here\\n")).listen(${port}, "127.0.0.1")`], { stdio: "ignore" });
+  cleanups.push(async () => srv.kill());
+  await new Promise((r) => setTimeout(r, 500));
+  const r = await rig("vmt7", ["vmt700"], { providers: [{ provider: "lmstudio", kind: "local", hosts: [], port }] });
+  assert.deepEqual((await createVms(r.spec)).failures, []);
+  const out = inVm(vmName(r.run, "vmt700"), `
+    curl -s -m 5 http://host.microsandbox.internal:${port}/ || echo refused-model
+    curl -s -m 5 http://host.microsandbox.internal:${port + 1}/ || echo refused-other-port
+    curl -s -m 5 https://example.com/ >/dev/null && echo reached-public || echo refused-public
+  `);
+  assert.match(out, /local model here/, out);
+  assert.match(out, /refused-other-port/, "only the model's port is open on the host");
+  assert.match(out, /refused-public/);
+  const record = JSON.parse(await readFile(join(r.sandbox, "vm", "vmt700.json"), "utf8"));
+  assert.deepEqual(record.network.host_ports, [port]);
+});
+
 test("a secret never enters the guest: the VM holds its placeholder", async (t) => {
   if (skip) return t.skip(skip);
   const base = await mkdtemp(join(tmpdir(), "vmsec-"));

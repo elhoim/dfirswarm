@@ -681,6 +681,16 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
         if (record) record.snapshot = { error: entry.error };
       }
     }
+    // The VM's own logs (the runtime's, the guest kernel's, its execs) go
+    // with it when it is removed; keep them beside the disk.
+    const logs = join(process.env.MSB_HOME || join(process.env.HOME || "", ".microsandbox"), "sandboxes", vm.name, "logs");
+    if (existsSync(logs)) {
+      const keep = join(snapDir, `${agent}.logs`);
+      await mkdir(keep, { recursive: true });
+      const { readdir: ls, copyFile } = await import("node:fs/promises");
+      for (const f of await ls(logs).catch(() => [])) await copyFile(join(logs, f), join(keep, f)).catch(() => undefined);
+      if (record) (record as VmRecord & { logs?: string }).logs = keep;
+    }
     await run(msb, ["rm", vm.name], { timeoutMs: 60_000 });
     if (record) {
       record.stopped_at = new Date().toISOString();
