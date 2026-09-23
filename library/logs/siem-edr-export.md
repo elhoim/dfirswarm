@@ -167,8 +167,9 @@ and `inputs/` is unchanged.
 - `grep -qi 'hypothesis' work/report.md`
 - `grep -qi 'verdict' work/report.md`
 - `test -f work/alerts.md`
-- `test "$(grep -c '^| ' work/alerts.md)" -ge 3`
-- `grep -Eqi 'true positive|benign|undecidable|no alerts' work/alerts.md`
+- `head -1 work/alerts.md | grep -Eq '[0-9]'`
+- `test "$(grep '^|' work/alerts.md | grep -vcE '^[|: -]+$')" -ge 2`
+- `grep '^|' work/alerts.md | grep -vE '^[|: -]+$' | sed 1d | grep -Eqi 'true positive|benign|undecidable|no alerts'`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 32`
 - `head -3 work/timeline.md | grep -qi 'host'`

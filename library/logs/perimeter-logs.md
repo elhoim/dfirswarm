@@ -17,9 +17,10 @@ concentrator's sessions and authentications, the web proxy's requests, the
 resolver's queries. No host has been collected yet. Reconstruct from these
 alone who came in and from where, what went out and to whom, which internal
 hosts talk to the outside on a clock, what the resolver saw that a resolver
-should not, and rank the internal hosts the next collection should take.
-This entry is for the devices' own logs; flow records and Zeek logs alone
-are the flow entry's case, and the two share one periodicity tool.
+should not, whether a perimeter device was itself the way in, and rank
+the internal hosts and devices the next collection should take. This entry
+is for the devices' own logs; flow records and Zeek logs alone are the
+flow entry's case, and the two share one periodicity tool.
 
 The evidence is under `inputs/` (read-only; call `inputs` to list it, and
 read `inputs.json` for the manifest). If the operator left a brief beside
@@ -151,9 +152,10 @@ a post. Say so again when you change course.
 
 Parse first, together: one parser per device, the tables and the clock
 offsets posted before anyone counts. Then the work falls by device, which
-is also by question: the VPN; the proxy; the firewall; the resolver; and
-the beaconing and cross-device pass, which reads every table at once and
-is one agent's job. The usual mistake is four agents ranking destinations
+is also by question: the VPN; the proxy; the firewall; the resolver; the
+devices' own system, admin and audit logs (question 3); and the
+beaconing and cross-device pass, which reads every table at once and is
+one agent's job. The usual mistake is four agents ranking destinations
 in four different ways and nobody joining a VPN session to the internal
 address it was given. Somebody has to keep the timeline from
 `ledger/ledger.md`, and somebody has to verify every citation and assemble
@@ -169,10 +171,11 @@ the report cannot be the one who certifies it.
 every answer cites evidence (file, line, field), the critic has posted a
 sign-off on the board naming what they verified against the ledger,
 `work/timeline.md` holds the merged timeline as a table with at least 25
-dated rows built from the ledger, each row naming the device it came
-from, `work/hosts.md` holds one table of the internal hosts and devices to
-collect next (address, name where known, what implicates it, rank; one
-row saying so if none was found),
+dated rows built from the ledger and a column headed `Device` naming the
+device each row came from, `work/hosts.md` holds one table of the
+internal hosts and devices to collect next (address, name where known,
+what implicates it, and a column headed `Rank`; one row saying so if none
+was found),
 `work/indicators.md` holds one table of every indicator (type, value,
 first seen, device, confidence; one row saying so if none was found), the
 ledger holds the dated events the timeline rests on, and `inputs/` is
