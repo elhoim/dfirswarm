@@ -106,7 +106,15 @@ table_unlock() { rm -rf "$TABLE_LOCK"; }
 # returns. Herdr already knows the pane is working; idle-nudge.sh asks it
 # before nudging, and the reaper must ask before declaring the seat dead.
 agent_working() {
-  local id="$1" status
+  local id="$1" status hub
+  # An agent in a microVM is not a Herdr agent: its pane runs `msb exec`. Its
+  # own extension reports working/idle to the hub, which writes status.json.
+  if [[ -f "$SANDBOX/hub.dir" ]]; then
+    hub="$(cat "$SANDBOX/hub.dir" 2>/dev/null)"
+    status="$(jq -r --arg id "$id" '.agents[$id].state // empty' "$hub/status.json" 2>/dev/null || true)"
+    [[ "$status" == "working" ]]
+    return
+  fi
   status="$("$HERDR" agent get "$id" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)"
   [[ "$status" == "working" ]]
 }
@@ -213,6 +221,14 @@ EOF
       # pane_id anywhere in the result.
       local pane
       pane="$(herdr agent get "$id" 2>/dev/null | jq -r '[.. | objects | .pane_id? // empty] | first // empty' 2>/dev/null || true)"
+      # A microVM agent's pane is not known to Herdr as an agent; layout.json
+      # says which pane is whose. Closing it ends the `msb exec`, and `stop`
+      # puts the VM away.
+      if [[ -z "$pane" && -f "$SANDBOX/hub.dir" && -f "$SANDBOX/layout.json" ]]; then
+        local idx
+        idx="$(jq -r --arg id "$id" '[.agents[].id] | index($id) // empty' "$SANDBOX/team.json" 2>/dev/null || true)"
+        [[ -n "$idx" ]] && pane="$(jq -r --argjson i "$idx" '.panes[$i] // empty' "$SANDBOX/layout.json" 2>/dev/null || true)"
+      fi
       if [[ -n "$pane" ]] && herdr pane close "$pane" >/dev/null 2>&1; then
         log "  herdr pane close $pane ($id): ok"
       else

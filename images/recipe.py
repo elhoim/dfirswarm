@@ -32,7 +32,9 @@ PIP = re.compile(r"^python3\s+-m\s+pip\s+install\s+(.+)$")
 
 
 def profiles() -> dict:
-    return json.loads((HERE / "profiles.json").read_text())["profiles"]
+    """name -> {"packs": [...], "apt": [...]}; a bare list is the packs alone."""
+    raw = json.loads((HERE / "profiles.json").read_text())["profiles"]
+    return {name: (v if isinstance(v, dict) else {"packs": v}) for name, v in raw.items()}
 
 
 def depends(packs: Path, name: str) -> list:
@@ -109,8 +111,10 @@ def profile_for(packs: Path, wanted: list) -> str:
     if not need:
         return "base"
     best = None
-    for name, members in profiles().items():
-        have = set(resolve(packs, members))
+    for name, prof in profiles().items():
+        if prof.get("apt"):
+            continue  # a profile with extra packages is chosen by name, never by its packs
+        have = set(resolve(packs, prof["packs"]))
         if need <= have and (best is None or len(have) < best[1]):
             best = (name, len(have))
     return best[0] if best else "full"
@@ -121,13 +125,16 @@ def build(a) -> int:
     if a.profile not in table:
         print(f"recipe: no profile {a.profile}; one of {', '.join(sorted(table))}", file=sys.stderr)
         return 2
-    members = table[a.profile]
+    members = table[a.profile]["packs"]
+    extra_apt = table[a.profile].get("apt", [])
     missing = [p for p in members if not (a.packs / p).is_dir()]
     if missing:
         print(f"recipe: no such pack(s): {', '.join(missing)}", file=sys.stderr)
         return 2
     packs = resolve(a.packs, members)
     spec = merge([read_pack(a.packs, p) for p in packs])
+    for pkg in extra_apt:
+        spec["apt"][pkg] = True
     spec = {"profile": a.profile, "packs": packs, **spec}
 
     a.out.mkdir(parents=True, exist_ok=True)
@@ -168,7 +175,7 @@ def main() -> int:
     if a.cmd == "profile-for":
         print(profile_for(a.packs_dir, a.packs))
         return 0
-    print(json.dumps({name: resolve(a.packs_dir, members) for name, members in profiles().items()}, indent=1))
+    print(json.dumps({name: {"packs": resolve(a.packs_dir, prof["packs"]), "apt": prof.get("apt", [])} for name, prof in profiles().items()}, indent=1))
     return 0
 
 

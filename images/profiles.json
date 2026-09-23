@@ -1,14 +1,45 @@
 {
   "profiles": {
     "base": [],
-    "disk": ["computer-forensics-base", "encrypted-containers", "windows-forensics"],
-    "memory": ["memory-forensics"],
-    "re": ["reverse-engineering"],
-    "network": ["network-forensics"],
-    "linux": ["linux-forensics"],
-    "mobile": ["mobile-forensics"],
-    "full": ["cloud-forensics", "encrypted-containers", "linux-forensics", "macos-forensics", "memory-forensics",
-             "mobile-forensics", "network-forensics", "ransomware-response", "reverse-engineering",
-             "triage-collection", "windows-forensics"]
+    "disk": [
+      "computer-forensics-base",
+      "encrypted-containers",
+      "windows-forensics"
+    ],
+    "memory": [
+      "memory-forensics"
+    ],
+    "re": [
+      "reverse-engineering"
+    ],
+    "network": [
+      "network-forensics"
+    ],
+    "linux": [
+      "linux-forensics"
+    ],
+    "mobile": [
+      "mobile-forensics"
+    ],
+    "full": [
+      "cloud-forensics",
+      "encrypted-containers",
+      "linux-forensics",
+      "macos-forensics",
+      "memory-forensics",
+      "mobile-forensics",
+      "network-forensics",
+      "ransomware-response",
+      "reverse-engineering",
+      "triage-collection",
+      "windows-forensics"
+    ],
+    "web": {
+      "packs": [],
+      "apt": [
+        "chromium",
+        "fonts-liberation"
+      ]
+    }
   }
 }

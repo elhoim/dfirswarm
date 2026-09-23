@@ -8,7 +8,7 @@ read-only at boot, so one image outlives any number of harness changes.
 | File | What it is |
 |---|---|
 | `base.Dockerfile` | The agent runtime every seat boots: Node, Pi, Python with venv, and the small tools an examiner's shell has (`strings`, `hexdump`, `file`, `xxd`, `sqlite3`, `jq`, the archive tools), plus `socat` for the hub link. |
-| `profiles.json` | A profile is a set of packs: `disk`, `memory`, `re`, `network`, `linux`, `mobile`, `full`. |
+| `profiles.json` | A profile is a set of packs: `disk`, `memory`, `re`, `network`, `linux`, `mobile`, `full` — and `web`, the base with Chromium, which `--playwright` boots (the browser tools drive it with this repository's Playwright, mounted read-only). |
 | `recipe.py` | Turns a profile's packs — every `requires/host.json` and `requires/python.txt`, with each pack's dependencies — into a Dockerfile and a spec. `profile-for PACK...` names the smallest profile that holds a run's packs. |
 | `install.py` | Runs inside the build: installs what the spec names, fails on a required package it cannot install, and writes `/etc/dfirswarm/image.json` — every binary it found, every package version, and what it could not install. That file is recorded in each VM's `vm/<id>.json`. |
 

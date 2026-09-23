@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [base, re, memory, disk, network, linux, mobile]
+        profile: [base, re, memory, disk, network, linux, mobile, web]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

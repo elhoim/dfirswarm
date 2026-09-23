@@ -2379,7 +2379,7 @@ STRIP
   # cannot boot a VM: an operator asked for isolation and must not get a run
   # that quietly has none.
   if [[ "$isolation" == "microvm" ]]; then
-    [[ -n "$vm_image" ]] || vm_image="$(vm_default_image "$pack_dirs")"
+    [[ -n "$vm_image" ]] || vm_image="$(vm_default_image "$pack_dirs" "$playwright")"
     if [[ "$start_agents" -eq 1 ]]; then
       local vm_probe
       if ! vm_probe="$(vm_cli probe --image "$vm_image")"; then
@@ -4437,12 +4437,20 @@ vm_arch() {
 # SWARM_IMAGES_LOCK (the pro edition's prebuilt images), else
 # images/images.lock.json. Without a lock entry, the local build of that
 # profile (images/README.md).
-vm_default_image() { # <pack dirs, one per line>
+vm_default_image() { # <pack dirs, one per line> [playwright 0|1]
   local ids=() d profile ref="" lock="${SWARM_IMAGES_LOCK:-$ROOT/images/images.lock.json}"
   while read -r d; do
     [[ -n "$d" ]] && ids+=("$(basename "$d")")
   done <<< "$1"
   profile="$(python3 "$ROOT/images/recipe.py" profile-for ${ids[@]+"${ids[@]}"} 2>/dev/null || echo base)"
+  # The browser tools need a browser: the web profile is the base with Chromium.
+  if [[ "${2:-0}" -eq 1 ]]; then
+    if [[ "$profile" == "base" ]]; then
+      profile="web"
+    else
+      echo "WARN: --playwright with packs: the $profile image has no browser, so browser_check will say so; pass --image with one that has both." >&2
+    fi
+  fi
   if [[ -f "$lock" ]]; then
     ref="$(jq -r --arg p "$profile" --arg a "$(vm_arch)" '.images[$p][$a] // empty' "$lock" 2>/dev/null || true)"
   fi
@@ -4556,6 +4564,13 @@ launch_vm_agents() {
   for d in "$ROOT/extensions" "$ROOT/scripts" "$ROOT/prompts" "$ROOT/node_modules/typebox" "$hub_dir/runs"; do
     mounts+=("$(jq -nc --arg h "$d" '{host: $h, readonly: true}')")
   done
+  # The browser tools: this repository's Playwright (plain JavaScript) drives
+  # the image's own Chromium.
+  if [[ "$playwright" -eq 1 ]]; then
+    for d in "$ROOT/node_modules/playwright" "$ROOT/node_modules/playwright-core"; do
+      [[ -d "$d" ]] && mounts+=("$(jq -nc --arg h "$d" '{host: $h, readonly: true}')")
+    done
+  fi
   if [[ -n "$pack_dirs" ]]; then
     while read -r d; do
       [[ -n "$d" && -d "$d" ]] && mounts+=("$(jq -nc --arg h "$d" '{host: $h, readonly: true}')")
@@ -4581,9 +4596,12 @@ launch_vm_agents() {
   # The environment of every agent's Pi. Host-only settings — a PATH, a
   # proxy, the host's Pi directory — do not cross.
   local env_json
+  # TMPDIR is the VM's own /tmp: nobody else's, not shared through the host,
+  # and short — under the run's path, Chromium's singleton socket did not fit
+  # a Unix socket address and the browser would not start (measured).
   env_json="$(jq -nc --arg id "$swarm_id" --arg hard "$hard" --arg runs "$hub_dir/runs" \
-    --arg tmp "$sandbox/work/.tmp" --arg kick "$sandbox/.kickoff" \
-    '{SWARM_ID: $id, SWARM_HARD_KILL: $hard, SWARM_RUNS_DIR: $runs, TMPDIR: $tmp, SWARM_KICKOFF: $kick}')"
+    --arg kick "$sandbox/.kickoff" \
+    '{SWARM_ID: $id, SWARM_HARD_KILL: $hard, SWARM_RUNS_DIR: $runs, TMPDIR: "/tmp", SWARM_KICKOFF: $kick}')"
   add_env() { env_json="$(jq -c --arg k "$1" --arg v "$2" '. + {($k): $v}' <<<"$env_json")"; }
   if [[ -n "$pack_dirs" ]]; then
     add_env SWARM_PACK_DIRS "$(paste -sd: - <<< "$pack_dirs")"
@@ -4600,6 +4618,7 @@ launch_vm_agents() {
   fi
   [[ -n "$inbox_page_chars" ]] && add_env SWARM_INBOX_PAGE_CHARS "$inbox_page_chars"
   [[ "$quarantine" -eq 1 ]] && add_env SWARM_QUARANTINE 1
+  [[ "$playwright" -eq 1 ]] && add_env BROWSER_CHECK_EXECUTABLE /usr/bin/chromium
   [[ "$local_only" -eq 1 ]] && add_env PI_OFFLINE 1
   if [[ "$allow_install" -eq 1 ]]; then
     # pip installs into the run, as on the host: the launcher points the
@@ -5166,9 +5185,15 @@ PY
   copy_tree "$sandbox/tools" "$out/tools"
   [[ -f "$sandbox/ledger/ledger.md" ]] && cp "$sandbox/ledger/ledger.md" "$out/ledger.md"
   [[ -f "$sandbox/ledger/entries.jsonl" ]] && cp "$sandbox/ledger/entries.jsonl" "$out/ledger.jsonl"
-  for f in inputs.json toolbox.json toolchain.json team.json budget.json layout.json netguard.allow SWARM.md; do
+  for f in inputs.json toolbox.json toolchain.json team.json budget.json layout.json netguard.allow SWARM.md custody.json; do
     [[ -f "$sandbox/$f" ]] && cp "$sandbox/$f" "$out/"
   done
+  # What each agent's VM was, as the VM manager recorded it (image digest,
+  # mounts, network, the secrets' names and hosts, the kept disk's sha256).
+  if [[ -d "$sandbox/vm" ]]; then
+    mkdir -p "$out/vm"
+    cp "$sandbox"/vm/*.json "$out/vm/" 2>/dev/null || true
+  fi
   [[ -f "$sandbox/catalog/README.md" ]] && cp "$sandbox/catalog/README.md" "$out/catalog-README.md"
   cp "$sandbox/traces/events.jsonl" "$out/trace/events.jsonl"
   local t
