@@ -285,7 +285,7 @@ export const BRIDGE_SCRIPT = `#!/bin/sh
 set -e
 mkdir -p /run/dfirswarm
 if [ ! -S ${GUEST_HUB_SOCKET} ]; then
-  setsid socat UNIX-LISTEN:${GUEST_HUB_SOCKET},fork,mode=600 VSOCK-CONNECT:2:${HUB_PORT} </dev/null >>/run/dfirswarm/bridge.log 2>&1 &
+  setsid socat UNIX-LISTEN:${GUEST_HUB_SOCKET},fork,mode=600,backlog=256 VSOCK-CONNECT:2:${HUB_PORT} </dev/null >>/run/dfirswarm/bridge.log 2>&1 &
   i=0
   while [ ! -S ${GUEST_HUB_SOCKET} ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
 fi
@@ -609,9 +609,10 @@ export async function createVms(spec: VmSpec): Promise<{ records: VmRecord[]; fa
 
 /** This run's VMs, from msb's own list by label. */
 export async function runVms(runId?: string): Promise<Array<{ name: string; status: string; run: string; agent: string; registry: string }>> {
+  // A bare-key label filter matches nothing in msb 0.7.2; without a run,
+  // every VM is listed and its labels decide.
   const args = ["list", "--format", "json"];
   if (runId) args.push("--label", `${LABEL_RUN}=${runId}`);
-  else args.push("--label", LABEL_RUN);
   const r = await run(msbBinary(), args, { timeoutMs: 30_000 });
   if (r.code !== 0) return [];
   let rows: unknown;
@@ -621,11 +622,26 @@ export async function runVms(runId?: string): Promise<Array<{ name: string; stat
     return [];
   }
   const list = Array.isArray(rows) ? rows : Array.isArray((rows as { sandboxes?: unknown[] })?.sandboxes) ? (rows as { sandboxes: unknown[] }).sandboxes : [];
-  return list.map((row) => {
+  const out: Array<{ name: string; status: string; run: string; agent: string; registry: string }> = [];
+  for (const row of list) {
     const o = row as Record<string, unknown>;
-    const labels = (o.labels ?? (o.config as Record<string, unknown> | undefined)?.labels ?? {}) as Record<string, string>;
-    return { name: String(o.name ?? ""), status: String(o.status ?? ""), run: labels[LABEL_RUN] ?? "", agent: labels[LABEL_AGENT] ?? "", registry: labels[LABEL_REGISTRY] ?? "" };
-  }).filter((v) => v.name && (!runId || v.run === runId || v.name.startsWith(`dfs-${runId}-`)));
+    const name = String(o.name ?? "");
+    if (!name) continue;
+    // `msb list` filters by label and does not print them (0.7.2); a VM's
+    // labels are in its own configuration.
+    let labels = (o.labels ?? {}) as Record<string, string>;
+    if (!Object.keys(labels).length) {
+      const inspect = await run(msbBinary(), ["inspect", name, "--format", "json"], { timeoutMs: 30_000 });
+      try {
+        labels = (JSON.parse(inspect.stdout) as { config?: { labels?: Record<string, string> } }).config?.labels ?? {};
+      } catch {
+        labels = {};
+      }
+    }
+    const vm = { name, status: String(o.status ?? "").toLowerCase(), run: labels[LABEL_RUN] ?? "", agent: labels[LABEL_AGENT] ?? "", registry: labels[LABEL_REGISTRY] ?? "" };
+    if (vm.run && (!runId || vm.run === runId)) out.push(vm);
+  }
+  return out;
 }
 
 /**

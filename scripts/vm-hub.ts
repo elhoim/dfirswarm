@@ -186,6 +186,8 @@ export class Hub {
   readonly cfg: HubConfig;
   readonly roster: string[];
   private servers: Server[] = [];
+  /** Every open connection, so stopping does not wait on a held one. */
+  private sockets = new Set<Socket>();
   private links = new Map<string, Socket>();
   private queued = new Map<string, { text: string; deliver?: string; kind?: string }[]>();
   private status = new Map<string, AgentState>();
@@ -243,7 +245,11 @@ export class Hub {
       } catch {
         // the bind says whether it matters
       }
-      const server = createServer(onSocket);
+      const server = createServer((socket) => {
+        this.sockets.add(socket);
+        socket.once("close", () => this.sockets.delete(socket));
+        onSocket(socket);
+      });
       server.on("error", reject);
       server.listen(path, () => {
         try {
@@ -261,6 +267,8 @@ export class Hub {
     if (this.backstopTimer) clearInterval(this.backstopTimer);
     for (const link of this.links.values()) link.destroy();
     this.links.clear();
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
     await Promise.all(this.servers.map((s) => new Promise((r) => s.close(() => r(undefined)))));
     this.servers = [];
   }
@@ -300,6 +308,12 @@ export class Hub {
   }
 
   private serveAgent(agent: string, socket: Socket): void {
+    // Calls in flight on this connection, so a cancel or a hang-up ends them.
+    const running = new Map<number, AbortController>();
+    socket.once("close", () => {
+      for (const c of running.values()) c.abort();
+      running.clear();
+    });
     this.lines(socket, async (line) => {
       let msg: unknown;
       try {
@@ -320,6 +334,25 @@ export class Hub {
         this.setState(agent, String(msg.state ?? "unknown"), typeof msg.detail === "string" ? msg.detail : undefined);
         return true;
       }
+      if (msg.t === "rpc" && typeof msg.id === "number") {
+        // Many calls on one held connection, each answered when it finishes:
+        // a VM makes one connection for its board calls instead of one per
+        // call, which under load the vsock path refused (measured: 20 of 80
+        // concurrent one-shot calls never reached the host).
+        socket.setTimeout(0);
+        const id = msg.id;
+        const controller = new AbortController();
+        running.set(id, controller);
+        void this.call(agent, String(msg.fn ?? ""), msg.args, controller.signal).then((result) => {
+          running.delete(id);
+          this.reply(socket, { t: "rpc", id, ...result }, false);
+        });
+        return true;
+      }
+      if (msg.t === "cancel" && typeof msg.id === "number") {
+        running.get(msg.id)?.abort();
+        return true;
+      }
       if (msg.t === "rpc") {
         const controller = new AbortController();
         socket.setTimeout(0);
@@ -334,6 +367,7 @@ export class Hub {
         return false;
       }
       if (typeof msg.tool === "string" && typeof msg.ts === "string") {
+        socket.setTimeout(0);
         const ok = await this.forwardTrace(agent, msg);
         this.reply(socket, ok ? { ok: true } : { ok: false, error: "the collector did not take the line" }, false);
         return true;

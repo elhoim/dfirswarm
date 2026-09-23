@@ -13,7 +13,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, createReadStream, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
-import { connect } from "node:net";
+import { connect, type Socket } from "node:net";
 import {
   appendFile,
   chmod,
@@ -2186,9 +2186,81 @@ let collectorGaveUpAt = 0;
 /** Which socket those failures were against: a different one is a fresh start. */
 let collectorFailuresFor = "";
 
+/**
+ * In a microVM the trace goes to the hub on one held connection, line after
+ * line, each answered in order. A connection per line is what a pane on the
+ * host does; through a VM's vsock path, connections opened in a burst were
+ * refused (measured on the board's calls, extensions/board.ts), and a refused
+ * trace line lands in the spill instead of the chain.
+ */
+type HeldTrace = { socket: Socket; waiting: Array<(ok: boolean) => void>; buffer: string };
+let heldTrace: HeldTrace | null = null;
+let heldTraceOpening: Promise<HeldTrace> | null = null;
+
+function openHeldTrace(socketPath: string): Promise<HeldTrace> {
+  if (heldTrace && !heldTrace.socket.destroyed) return Promise.resolve(heldTrace);
+  if (heldTraceOpening) return heldTraceOpening;
+  heldTraceOpening = new Promise<HeldTrace>((resolve, reject) => {
+    const socket = connect(socketPath);
+    socket.once("error", reject);
+    socket.once("connect", () => {
+      const ch: HeldTrace = { socket, waiting: [], buffer: "" };
+      socket.setEncoding("utf8");
+      socket.unref();
+      socket.on("data", (chunk: string) => {
+        ch.buffer += chunk;
+        let cut;
+        while ((cut = ch.buffer.indexOf("\n")) >= 0) {
+          const answer = ch.buffer.slice(0, cut);
+          ch.buffer = ch.buffer.slice(cut + 1);
+          let ok = false;
+          try {
+            ok = JSON.parse(answer)?.ok === true;
+          } catch {
+            ok = false;
+          }
+          ch.waiting.shift()?.(ok);
+        }
+      });
+      socket.on("close", () => {
+        if (heldTrace === ch) heldTrace = null;
+        for (const settle of ch.waiting.splice(0)) settle(false);
+      });
+      socket.on("error", () => undefined);
+      heldTrace = ch;
+      resolve(ch);
+    });
+  }).finally(() => {
+    heldTraceOpening = null;
+  });
+  return heldTraceOpening;
+}
+
+async function sendHeldTrace(socketPath: string, line: string): Promise<boolean> {
+  let ch: HeldTrace;
+  try {
+    ch = await openHeldTrace(socketPath);
+  } catch {
+    return false;
+  }
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => ch.socket.destroy(), COLLECTOR_TIMEOUT_MS * 5);
+    ch.waiting.push((ok) => {
+      clearTimeout(timer);
+      resolve(ok);
+    });
+    try {
+      ch.socket.write(line);
+    } catch {
+      ch.socket.destroy();
+    }
+  });
+}
+
 async function sendToCollector(sandboxRoot: string, line: string): Promise<boolean> {
   const configured = process.env.SWARM_TRACE_SOCKET || "";
   if (!configured) return false;
+  if (process.env.SWARM_ISOLATION === "microvm") return sendHeldTrace(configured, line);
   if (configured !== collectorFailuresFor) {
     collectorFailuresFor = configured;
     collectorFailures = 0;

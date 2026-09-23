@@ -21,7 +21,7 @@
  * does not change at a single call site.
  */
 
-import { connect } from "node:net";
+import { connect, type Socket } from "node:net";
 import * as P from "./protocol.ts";
 import * as T from "./toolchain.ts";
 
@@ -45,9 +45,151 @@ export class BoardError extends Error {
   }
 }
 
+/** A connect the bridge's queue turned away, or a bridge not up yet: nothing was sent. */
+function refused(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code;
+  return code === "EAGAIN" || code === "ECONNREFUSED" || code === "ENOENT";
+}
+
+type Pending = { fn: string; resolve: (value: unknown) => void; reject: (err: Error) => void };
+
 /**
- * One request, one reply, one connection. `undefined` arguments travel as
- * null, and the hub turns them back, so a default parameter still applies.
+ * One held connection to the hub per process, carrying every board call:
+ * each request has an id, each answer names it, and they come back in the
+ * order they finish. A VM that opened a connection per call lost a quarter of
+ * them under load — the vsock path refused 20 of 80 concurrent connects
+ * (measured) — and a held connection is also what lets a `wait` be
+ * cancelled without closing anything else.
+ */
+class HubClient {
+  private socket: Socket | null = null;
+  private opening: Promise<Socket> | null = null;
+  private pending = new Map<number, Pending>();
+  private next = 1;
+  private buffer = "";
+  private readonly path: string;
+
+  constructor(path: string) {
+    this.path = path;
+  }
+
+  private open(): Promise<Socket> {
+    if (this.socket && !this.socket.destroyed) return Promise.resolve(this.socket);
+    if (this.opening) return this.opening;
+    this.opening = (async () => {
+      const deadline = Date.now() + 10_000;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const socket = await new Promise<Socket>((resolve, reject) => {
+            const s = connect(this.path);
+            s.once("connect", () => resolve(s));
+            s.once("error", reject);
+          });
+          this.attach(socket);
+          return socket;
+        } catch (err) {
+          if (!refused(err) || Date.now() > deadline) throw new BoardError(`the hub is unreachable: ${(err as Error).message}`, true);
+          await new Promise((r) => setTimeout(r, Math.min(25 * 2 ** attempt, 500)));
+        }
+      }
+    })().finally(() => {
+      this.opening = null;
+    });
+    return this.opening;
+  }
+
+  private attach(socket: Socket): void {
+    this.socket = socket;
+    this.buffer = "";
+    socket.setEncoding("utf8");
+    socket.unref();
+    socket.on("data", (chunk: string) => {
+      this.buffer += chunk;
+      if (this.buffer.length > MAX_REPLY_BYTES) {
+        socket.destroy(new Error("an answer past the limit"));
+        return;
+      }
+      let cut;
+      while ((cut = this.buffer.indexOf("\n")) >= 0) {
+        const line = this.buffer.slice(0, cut);
+        this.buffer = this.buffer.slice(cut + 1);
+        let msg: { t?: string; id?: number; ok?: boolean; result?: unknown; error?: string };
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const call = typeof msg.id === "number" ? this.pending.get(msg.id) : undefined;
+        if (!call) continue;
+        this.pending.delete(msg.id as number);
+        if (msg.ok) call.resolve(msg.result);
+        else call.reject(new BoardError(msg.error || `${call.fn} failed on the hub`));
+      }
+    });
+    const lost = () => {
+      if (this.socket === socket) this.socket = null;
+      for (const [id, call] of this.pending) {
+        this.pending.delete(id);
+        call.reject(new BoardError(`the hub link closed during ${call.fn}`, true));
+      }
+    };
+    socket.on("close", lost);
+    socket.on("error", () => undefined);
+  }
+
+  async call(fn: string, args: unknown[], options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<unknown> {
+    if (options.signal?.aborted) throw new BoardError("aborted");
+    const socket = await this.open();
+    const id = this.next++;
+    const timeoutMs = options.timeoutMs ?? CALL_TIMEOUT_MS;
+    return new Promise((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onAbort);
+      };
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        done();
+        reject(new BoardError(`the hub did not answer ${fn} within ${Math.round(timeoutMs / 1000)}s`, true));
+      }, timeoutMs);
+      const onAbort = () => {
+        this.pending.delete(id);
+        done();
+        try {
+          socket.write(`${JSON.stringify({ t: "cancel", id })}\n`);
+        } catch {
+          // the link is gone, and the call with it
+        }
+        reject(new BoardError("aborted"));
+      };
+      options.signal?.addEventListener("abort", onAbort);
+      this.pending.set(id, {
+        fn,
+        resolve: (value) => {
+          done();
+          resolve(value);
+        },
+        reject: (err) => {
+          done();
+          reject(err);
+        },
+      });
+      socket.write(`${JSON.stringify({ t: "rpc", id, fn, args: args.map((a) => (a === undefined ? null : a)) })}\n`);
+    });
+  }
+
+  close(): void {
+    this.socket?.destroy();
+    this.socket = null;
+  }
+}
+
+const clients = new Map<string, HubClient>();
+
+/**
+ * One board call on the process's held connection to the hub at
+ * `socketPath`. `undefined` arguments travel as null, and the hub turns them
+ * back, so a default parameter still applies.
  */
 export function callBoard(
   socketPath: string,
@@ -55,47 +197,18 @@ export function callBoard(
   args: unknown[],
   options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let answer = "";
-    const socket = connect(socketPath);
-    const finish = (err: Error | null, value?: unknown) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      options.signal?.removeEventListener("abort", onAbort);
-      socket.destroy();
-      if (err) reject(err);
-      else resolve(value);
-    };
-    const onAbort = () => finish(new BoardError("aborted"));
-    const timer = setTimeout(
-      () => finish(new BoardError(`the hub did not answer ${fn} within ${Math.round((options.timeoutMs ?? CALL_TIMEOUT_MS) / 1000)}s`, true)),
-      options.timeoutMs ?? CALL_TIMEOUT_MS,
-    );
-    if (options.signal?.aborted) return onAbort();
-    options.signal?.addEventListener("abort", onAbort);
-    socket.setEncoding("utf8");
-    socket.on("error", (err) => finish(new BoardError(`the hub is unreachable: ${err.message}`, true)));
-    socket.on("close", () => finish(new BoardError(`the hub closed the connection during ${fn}`, true)));
-    socket.on("data", (chunk: string) => {
-      answer += chunk;
-      if (answer.length > MAX_REPLY_BYTES) return finish(new BoardError(`the hub's answer to ${fn} is past the limit`));
-      const cut = answer.indexOf("\n");
-      if (cut < 0) return;
-      let reply: { ok?: boolean; result?: unknown; error?: string };
-      try {
-        reply = JSON.parse(answer.slice(0, cut));
-      } catch {
-        return finish(new BoardError(`the hub's answer to ${fn} is not JSON`));
-      }
-      if (reply.ok) finish(null, reply.result);
-      else finish(new BoardError(reply.error || `${fn} failed on the hub`));
-    });
-    socket.on("connect", () => {
-      socket.write(`${JSON.stringify({ t: "rpc", fn, args: args.map((a) => (a === undefined ? null : a)) })}\n`);
-    });
-  });
+  let client = clients.get(socketPath);
+  if (!client) {
+    client = new HubClient(socketPath);
+    clients.set(socketPath, client);
+  }
+  return client.call(fn, args, options);
+}
+
+/** Close every held connection (tests; a process that is about to exit). */
+export function closeBoardClients(): void {
+  for (const c of clients.values()) c.close();
+  clients.clear();
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
