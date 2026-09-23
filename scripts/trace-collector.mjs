@@ -198,7 +198,19 @@ function write(record) {
   // `pending` says which moment this is. Between these two writes a reader
   // may see either length; outside them the anchor names exactly one.
   writeAnchor(head, behind, true);
-  appendFileSync(eventsAbs, line, "utf8");
+  try {
+    appendFileSync(eventsAbs, line, "utf8");
+  } catch (err) {
+    // The line never reached the file — a full disk, a file gone read-only.
+    // The sender is told so and spills it; the chain must not name it, or
+    // the next line written would carry a parent that does not exist and the
+    // record would read as edited. Put the head and the anchor back; with
+    // `pending` false a reader never consults `prev_head`.
+    lineCount -= 1;
+    previous = behind;
+    writeAnchor(behind, "", false);
+    throw err;
+  }
   writeAnchor(head, behind, false);
   lastSize = sizeOf(eventsFile);
   return true;

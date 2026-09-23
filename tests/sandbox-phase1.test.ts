@@ -476,3 +476,48 @@ test("a message that is not an event is refused, whatever shape it has", async (
   assert.equal(written.length, 1, "only the event lands");
   assert.equal((JSON.parse(written[0]) as { tool: string }).tool, "post");
 });
+
+test("a line the collector could not append leaves the chain where it was", async () => {
+  // The chain head and the line count used to move before the append. When
+  // the append threw — a full disk, a file gone read-only — the sender was
+  // told ok:false and spilled the line, but the collector's head now named a
+  // line that was never written. The next real line carried that phantom as
+  // its parent, and the harness reported its own record as edited.
+  const root = await mkdtemp(join(tmpdir(), "swarm-failed-append-"));
+  const anchor = join(root, "anchor.json");
+  const socket = await collectorWithTokens(root, { t: "a0" }, anchor);
+  const send = (payload: unknown) =>
+    new Promise<{ ok: boolean }>((resolve, reject) => {
+      const s = connect(socket);
+      let got = "";
+      s.on("error", reject);
+      s.on("data", (chunk) => {
+        got += chunk.toString("utf8");
+        if (got.includes("\n")) {
+          s.end();
+          resolve(JSON.parse(got.slice(0, got.indexOf("\n"))) as { ok: boolean });
+        }
+      });
+      s.on("connect", () => s.write(`${JSON.stringify(payload)}\n`));
+    });
+  const events = join(root, "traces", "events.jsonl");
+  const { chmod } = await import("node:fs/promises");
+
+  assert.equal((await send({ ts: "t1", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" })).ok, true);
+  await chmod(events, 0o444);
+  try {
+    const refused = await send({ ts: "t2", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" });
+    assert.equal(refused.ok, false, "a line that could not be written is not reported as written");
+  } finally {
+    await chmod(events, 0o644);
+  }
+  const between = JSON.parse(await readFile(anchor, "utf8")) as { lines: number; pending: boolean };
+  assert.deepEqual({ lines: between.lines, pending: between.pending }, { lines: 1, pending: false }, "the anchor still names the last line written");
+  assert.equal((await send({ ts: "t3", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" })).ok, true);
+
+  const recorded = JSON.parse(await readFile(anchor, "utf8")) as { lines: number; head: string; prev_head: string };
+  assert.equal((await lines(root)).length, 2);
+  assert.equal(recorded.lines, 2);
+  const chain = verifyEventChain(`${(await lines(root)).join("\n")}\n`, recorded);
+  assert.equal(chain.ok, true, `the record verifies after a failed append (${chain.reason ?? ""})`);
+});
