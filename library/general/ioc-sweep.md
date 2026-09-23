@@ -39,7 +39,10 @@ before touching the images.
    IPv4, IPv6, URL, e-mail, file name, path, registry key, mutex, YARA
    rule), the entries that could not be typed, and the normalised table at
    `work/indicators-normalised.csv` (type, value, source file, line, note)
-   that the forged matcher produced and every peer swept with.
+   that the forged matcher produced and every peer swept with. The
+   normaliser refangs (`hxxp` to `http`, `[.]` and `(.)` to `.`, `[:]` to
+   `:`), lower-cases domains, keeps the original in `note`, and writes a
+   CIDR range as a range rather than a list of addresses.
 2. Coverage: for every other input, what was searchable and how — file
    names and paths over the catalog's file lists, `$MFT` and body files
    (`fls -m`, `catalog_search`, `grep_filelist`); hashes over files that
@@ -48,9 +51,14 @@ before touching the images.
    `chunk_needles`, `strings` in ASCII and UTF-16LE); YARA over extracted
    files and the raw image where rules were given (`yara_scan`); domains,
    addresses and URLs over logs and captures (`grep`, `zcat`, `tshark` where
-   present, `python3`); registry keys over the hives (`regkv`) — and what
-   could not be searched (an encrypted volume, a format nobody could parse,
-   a capture without a reader) and why.
+   present, `python3`; over a capture, the DNS query names, TLS SNI and
+   HTTP Host fields, `tshark -r X -T fields -e dns.qry.name -e
+   tls.handshake.extensions_server_name -e http.host`, matching a domain
+   and its subdomains); over memory, strings and YARA rather than file
+   hashes, since a mapped image does not hash like its file on disk;
+   registry keys over the hives (`regkv`) — and what could not be searched
+   (an encrypted volume, a format nobody could parse, a capture without a
+   reader) and why.
 3. Hits: every match with the indicator, the input, the exact location
    (path and inode, byte offset, line number, record id, packet number), the
    context around it (the surrounding bytes, the whole log line, the process
@@ -68,11 +76,15 @@ before touching the images.
    evidence of the activity the list describes; the confidence, the second
    artefact that agrees, and what confirming it would take (the file's
    execution artefacts, the connection in the logs, the process in memory).
-6. The timeline the hits form: each dated hit from `ledger/ledger.md`, in
-   order, with the gaps between them; the hypothesis the hits support and
-   how it was tested; what remains uncertain and what evidence would
-   resolve it; recommendations for containment, for widening the sweep to
-   other hosts, and for the indicators this run found that the list lacked.
+6. The timeline the sweep covers and the hits form, from
+   `ledger/ledger.md` in order: every swept source's first and last
+   timestamp (a log's window, the image's acquisition start and end from
+   `ewfinfo`, the memory capture time, the file system's earliest and
+   latest entry), the indicator list's own dates, and every dated hit, with
+   the gaps between them; the hypothesis the hits support and how it was
+   tested; what remains uncertain and what evidence would resolve it;
+   recommendations for containment, for widening the sweep to other hosts,
+   and for the indicators this run found that the list lacked.
 
 ### Ground rules
 
@@ -102,8 +114,9 @@ before touching the images.
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
   `ledger/ledger.md`. A hit with a timestamp (a file's creation time, a log
-  line, a connection) is an event; the indicator that hit is a kind=ioc
-  entry with the location it hit in.
+  line, a connection) is an event, and so is each swept source's first and
+  last timestamp, which is what a clean sweep's timeline is made of; the
+  indicator that hit is a kind=ioc entry with the location it hit in.
 - Every claim in the report cites its evidence: the input, the path and
   inode, the offset, the line, the record, the packet, the command that
   produced the hit. A claim without evidence is a hypothesis and is

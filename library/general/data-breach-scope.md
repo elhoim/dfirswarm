@@ -41,12 +41,17 @@ image into `catalog/`; read those before running the same commands again.
    without sizes, a cloud export without data events).
 2. What was accessed and read: every file, folder, share, record set,
    mailbox and database the actor's accounts or sessions opened, from the
-   file system access times and journals (`$MFT`, `$UsnJrnl:$J`, the
-   `$STANDARD_INFORMATION` and `$FILE_NAME` times of the items and their
-   parents), the share and file-server audit events (4663 with the access
+   file system (the `$STANDARD_INFORMATION` access time only after
+   `NtfsDisableLastAccessUpdate` in the SYSTEM hive shows access updates
+   were on, and never as proof on its own; `$UsnJrnl:$J` and the
+   `$FILE_NAME` times speak to changes, not reads), from user-level open
+   artefacts (LNK files, Jump Lists, RecentDocs, OpenSaveMRU, Office MRU,
+   shellbags), the share and file-server audit events (4663 with the access
    mask, 5145 with the relative target name, 4656 and 4658 for the handle),
    the database query logs, the mailbox audit (MailItemsAccessed,
-   FolderBind, the item ids and the counts), and the cloud data events
+   FolderBind, the item ids and the counts; a MailItemsAccessed Sync record
+   means a whole folder was synced, not each item read, and the report says
+   whether throttling cut the window short), and the cloud data events
    (object reads, downloads, exports, shares created); by whom, when and
    from where.
 3. What was copied or staged: archives created and their contents (ZIP,
@@ -54,15 +59,20 @@ image into `catalog/`; read those before running the same commands again.
    archive is present), copies to removable media or to another host
    (the `USBSTOR` and mounted-device keys, the shell bags, the LNK files,
    4663 writes on a new path, `rsync` or `scp` in shell histories),
-   downloads from the cloud store, mailbox exports and forwarding rules,
-   database dumps written to disk; each with the source item, the
-   destination, the actor and the time.
+   downloads from the cloud store, mailbox exports and forwarding rules
+   (the audit operations New-InboxRule, Set-InboxRule, UpdateInboxRules,
+   Set-Mailbox with ForwardingSmtpAddress, New-MailboxExportRequest, and
+   eDiscovery searches), database dumps written to disk; each with the
+   source item, the destination, the actor and the time.
 4. What left the environment: the channel and the volume for every
    transfer outward (the proxy and firewall logs by client, destination,
    bytes and time; the cloud service's outbound sharing and download
    events; a mail forward's messages; an upload the browser history and
-   the web cache record), matched to the staged items by size and time
-   where possible, and the transfers that cannot be matched to a source.
+   the web cache record; SRUM network usage per application and user from
+   `SRUDB.dat` through `esedb_query`; the configs and logs of sync and
+   transfer tools such as `rclone.conf`, cloud-sync clients and BITS jobs),
+   matched to the staged items by size and time where possible, and the
+   transfers that cannot be matched to a source.
 5. Classification and counts: for every item or record set touched, what
    kind of data it is as the evidence names it (personal data, credentials
    by presence, financial, health, intellectual property, internal), the
@@ -137,7 +147,8 @@ image into `catalog/`; read those before running the same commands again.
   quotes a credential, a token or a secret it finds, only that one was
   present and where.
 - Certainty is a ladder and every item stands on one rung: accessed (an
-  open or a read in a log, an access time), copied (a write elsewhere, an
+  open or a read in a log, an open artefact; an access time alone is
+  "possible", not "accessed"), copied (a write elsewhere, an
   archive, a download event), left the environment (an outbound transfer
   matched to it). A row never climbs a rung without the artefact for that
   rung, and a row for which only the actor's presence on the host is known
@@ -175,7 +186,8 @@ environment" row re-derived from its two artefacts.
 evidence, the critic has posted a sign-off on the board naming what they
 verified, `work/data-affected.md` holds one table with a row per item or
 record set (item, type, action, actor, time, channel, certainty, evidence;
-one row saying so if nothing was established, and why), the counts in the
+the certainty one of possible, accessed, copied, left, or none; one row
+saying so if nothing was established, and why), the counts in the
 report say what they rest on, `work/timeline.md` holds the merged timeline
 as a table with at least 25 dated rows built from the ledger, the ledger
 holds the dated events the timeline rests on, and `inputs/` is unchanged.
@@ -187,7 +199,9 @@ holds the dated events the timeline rests on, and `inputs/` is unchanged.
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/data-affected.md`
 - `test "$(grep -c '^| ' work/data-affected.md)" -ge 3`
-- `grep -qi 'certainty' work/data-affected.md`
+- `! grep '^| ' work/data-affected.md | tail -n +3 | grep -viE 'possible|accessed|copied|left|none'`
+  (every data row, after the header and separator, carries a rung of the
+  certainty ladder or `none`.)
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 27`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`

@@ -39,16 +39,22 @@ there, because the budget does not allow a second pass.
    collection was made relative to the alert.
 2. Compromised or not: the strongest evidence for and the strongest
    evidence against, each named (a logon from an unexpected source in
-   4624/4625, a process with no business on this host in Prefetch, Amcache
-   or the process list, a persistence entry in the Run keys, services or
-   scheduled tasks, an executable under a user or temp path, a beacon in
-   the connection list, an alert the antivirus log confirms or contradicts,
-   the `auth.log` and `wtmp` on Linux), and the verdict — yes, no, or cannot
-   tell — with the two independent artefacts it rests on or the statement
-   that only one was found.
+   4624/4625, a cleared log (1102, 104), a service or task created (7045,
+   4698), a process with its command line (4688, PowerShell 4104), a
+   Defender detection (1116, 1117), a process with no business on this host
+   in Prefetch or the process list, ShimCache and Amcache entries (presence,
+   not proof of execution: pair them with Prefetch or a 4688), a
+   persistence entry in the Run keys, services or scheduled tasks, an
+   executable under a user or temp path, a beacon in the connection list,
+   an alert the antivirus log confirms or contradicts, the `auth.log` and
+   `wtmp` on Linux), and the verdict with the two independent artefacts it
+   rests on or the statement that only one was found. The verdict stands
+   on its own line as `Verdict: compromised`, `Verdict: not compromised` or
+   `Verdict: cannot tell`.
 3. Scope: if compromised, the blast radius as far as this package shows it
    — the accounts used and created (4720, 4728, 4732, 4672, `sudo` and
-   `useradd` lines), the other hosts reached or reaching in (4648, 4776, RDP
+   `useradd` lines), the other hosts reached or reaching in (4648; the NTLM
+   validations this host performed (4776), to be read against the DC; RDP
    and SMB client traces, `netscan`, known-hosts and shell histories), the
    data touched (files opened, archives created, shares mapped, 4663 and
    5145 where audited); if not, what the package rules out and what it
@@ -58,10 +64,12 @@ there, because the budget does not allow a second pass.
    controller's Security log, the proxy or firewall logs for the window,
    the other hosts named in 3), in order of what each would resolve, and
    the containment step that is safe on what is known.
-5. The timeline of what is known, from the ledger, however short; the
-   hypothesis and how far it was tested within the budget; what remains
-   uncertain and what evidence would resolve it; the recommendation: which
-   library entry runs next on what.
+5. The timeline of what is known, from the ledger: the collection time,
+   the alert time, the host's install date and last boot and shutdown, the
+   first and last record of each log collected, and every event the
+   verdict and the scope rest on; the hypothesis and how far it was tested
+   within the budget; what remains uncertain and what evidence would
+   resolve it; the recommendation: which library entry runs next on what.
 
 ### Ground rules
 
@@ -161,7 +169,8 @@ the timeline rests on, and `inputs/` is unchanged.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
-- `grep -qiE 'compromised|cannot tell' work/report.md`
+- `grep -qiE '^\**verdict\**: *\** *(compromised|not compromised|cannot tell)' work/report.md`
+  (the verdict line's format, not its answer: any of the three passes.)
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 12`
 - `test -f work/collect-next.md`

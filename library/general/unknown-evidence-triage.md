@@ -38,13 +38,19 @@ not recognise, because that is where this run begins.
    `ewfinfo`, the AD1 header, the AFF metadata, a KAPE or Velociraptor
    manifest, a tool's own log beside the data) with the acquisition date and
    examiner it records; written to `work/inventory.md` as one table (file,
-   type, what it is, hosts and period, readable by, notes).
+   type, what it is, hosts and period, readable by, notes). A row is a
+   file, except that a split image's segments (`.E01`, `.E02`, …) are one
+   row, and so is a collector's output tree in its own directory (KAPE,
+   Velociraptor, UAC, an extracted archive), with its file count.
 2. What each piece is, one level down: for a disk image the partition table,
    the file systems, the operating system and version, the host name, the
    time zone, the users and the install date (`mmls`, `fsstat`, `fls` to the
    root, the SYSTEM and SOFTWARE hives, or `/etc/hostname`, `/etc/timezone`
-   and `/var/log/installer/`); for a memory dump the format, the size and
-   the profile (`windows.info` or `banners.Banners`); for a log its format,
+   and `/var/log/installer/`); for a memory dump the format, the size, the
+   OS and kernel build (`banners.Banners`; `windows.info` when the kickoff
+   allowed the symbol server) and the symbol table a full analysis would
+   need (a Windows PDB GUID, or for Linux and macOS the exact kernel banner
+   an ISF must be built for); for a log its format,
    fields, time zone, and first and last timestamp; for an archive its
    listing and what the listing says it is; for a document or an export its
    origin and date range.
@@ -158,8 +164,9 @@ agent who wrote the report cannot be the one who certifies it.
 evidence, the critic has posted a sign-off on the board naming what they
 verified (every file in the inventory opened by them, at least by
 signature), `work/inventory.md` holds one table with a row for every file
-under `inputs/` (file, type, what it is, hosts and period, readable by,
-notes; an unrecognised file is a row that says so), `work/timeline.md`
+under `inputs/` (a split image or a collector's tree as one row; file,
+type, what it is, hosts and period, readable by, notes; an unrecognised
+file is a row that says so), `work/timeline.md`
 holds the merged timeline as a table with at least 10 dated rows built from
 the ledger, the report's plan names a library entry or says why none fits
 for every piece, the ledger holds the dated events the timeline rests on,
@@ -171,7 +178,9 @@ and `inputs/` is unchanged.
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/inventory.md`
-- `test "$(grep -c '^| ' work/inventory.md)" -ge 3`
+- `test "$(grep -c '^| ' work/inventory.md)" -ge "$(python3 -c 'import json,re;f=json.load(open("inputs.json"))["files"];s={re.sub(r"[.]([Ee][0-9][0-9]|[0-9]{3})$","",p["path"].split("/")[1]) for p in f};print(min(len(s),20)+2)')"`
+  (one data row at least per top-level piece of `inputs.json`, a split
+  image's segments counted once, up to twenty.)
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 12`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 5`

@@ -38,21 +38,25 @@ into `catalog/`; read those before running the same commands again.
 1. The evidence profile: every input with its type, size and hash, what
    each image holds (partition table, file systems, operating system and
    version, host name, time zone, users; for a phone the model, iOS or
-   Android version and the owner as recorded; for a memory dump the format
-   and profile), the acquisition records, and what the brief says about the
+   Android version and the owner as recorded; for a memory dump the format,
+   the OS and kernel build (`banners.Banners`; `windows.info` when the
+   kickoff allowed the symbol server) and the symbol table a full analysis
+   would need), the acquisition records, and what the brief says about the
    scenario, the persons and the period.
 2. The answers: every question of `inputs/CASE.md`, in its order and under
    its number, with the answer in the exact format the question asks for,
    the confidence, and the citation to the artefact it came from (path,
    inode, table and row, offset, registry key, plugin output), each under
-   its own sub-heading of `## 2.`; `work/flags.md` holds the same as one
+   its own sub-heading of `## 2.` numbered after the brief (`### 2.1`,
+   `### 2.2`, …); `work/flags.md` holds the same as one
    table with one row per question (number, short name, answer, confidence,
    evidence path), kept current as answers land.
 3. The dependency map: which questions could only be answered once another
    was (a name that finds a contact, a place that dates a photo, a device
    that names a user), which were independent, and the order the team
    actually solved them in, written to `work/dependencies.md` as a table
-   (question, depends on, why).
+   with one row per question (question number, depends on or `none`,
+   why).
 4. Corroboration: for every answer given with high confidence, the second,
    independent artefact that agrees with it; for every answer given with
    medium or low confidence, what was found, what was missing, and the
@@ -129,6 +133,13 @@ into `catalog/`; read those before running the same commands again.
   name in the case the brief uses, a path with its drive letter, a
   timestamp in the given form: what the grader would accept is what the
   report carries.
+- Name the epoch of every timestamp you convert (Unix seconds or
+  milliseconds, Mac Absolute Time from 2001-01-01, WebKit microseconds from
+  1601, Windows FILETIME in 100 ns from 1601) in the evidence cell of its
+  flags row, and forge one shared converter rather than converting by hand.
+  For an iOS backup, map files through `Manifest.db` (`sqlite3`) before
+  opening them; a file system nobody here can read (APFS, F2FS) is said so
+  in `## 5.`.
 
 ## How to divide the work
 
@@ -164,7 +175,8 @@ on the board naming what they verified, `work/flags.md` holds one row per
 question of the brief (number, short name, answer, confidence, evidence
 path) and has at least as many rows as the brief has numbered questions,
 `work/dependencies.md` holds the dependency map the team inferred as a
-table (one row saying so if every question was independent),
+table with one row per question of the brief (`none` where a question was
+independent),
 `work/timeline.md` holds the merged timeline as a table with at least 15
 dated rows built from the ledger, the ledger holds the dated events the
 timeline rests on, and `inputs/` is unchanged.
@@ -175,10 +187,15 @@ timeline rests on, and `inputs/` is unchanged.
 - `for n in 1 2 3 4 5 6; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f inputs/CASE.md`
+- `test "$(grep -cE '^[0-9]+\.' inputs/CASE.md)" -ge 1`
+  (fails when the brief's questions are not numbered `1.`, `2.`, … at the
+  start of a line, which would let every count below pass on zero;
+  renumber the brief before the run.)
 - `test -f work/flags.md`
 - `test "$(grep -c '^| *[0-9]' work/flags.md)" -ge "$(grep -cE '^[0-9]+\.' inputs/CASE.md)"`
 - `test -f work/dependencies.md`
-- `test "$(grep -c '^| ' work/dependencies.md)" -ge 3`
+- `test "$(grep -c '^| *[0-9]' work/dependencies.md)" -ge "$(grep -cE '^[0-9]+\.' inputs/CASE.md)"`
+- `test "$(grep -cE '^### +2\.[0-9]+' work/report.md)" -ge "$(grep -cE '^[0-9]+\.' inputs/CASE.md)"`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 17`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`

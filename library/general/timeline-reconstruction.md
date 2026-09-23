@@ -38,21 +38,33 @@ sources, already extracted.
    offset, the capture host's clock for a memory image), the offset applied
    to bring it to UTC and how that offset was established, the window each
    source covers and its resolution; all of it in `work/sources.md` as one
-   table (source, rows, offset, coverage).
+   table (source, rows, offset, coverage). Artefacts stored in UTC (NTFS
+   `$STANDARD_INFORMATION` and `$FILE_NAME`, EVTX, registry last-write,
+   Prefetch, browser databases, Volatility times) take offset 0; the host's
+   time zone applies only to sources written in local time (text logs, some
+   application databases), and the table says which those are. `mactime`
+   renders in the analysis host's zone unless given `-z UTC`: check which
+   zone a `catalog/` MAC timeline was rendered in before merging it.
 2. The extraction per source: how each was turned into dated rows — body
-   files and `$MFT` through `fls -m` and `mactime`, `$UsnJrnl:$J` and
-   `$LogFile` through `usn_journal` or a forged reader, event logs through
+   files and `$MFT` through `fls -m` and `mactime`, `$UsnJrnl:$J` through
+   `usn_journal` (set `limit` high enough and state the record count; the
+   default is 500), `$LogFile` through a forged reader, event logs through
    `evtx_query` or `python-evtx`, registry last-write times through `regkv`,
    prefetch through `prefetch_mam`, browser histories through
    `browser_history`, memory through `pslist`, `psscan`, `netscan` and
    `timeliner.Timeliner`, log lines through a parser per format, or everything at
-   once through `plaso` where it is present — the row count from each, and
-   what could not be extracted and why.
+   once through `plaso` where it is present — the row count from each,
+   compared with the source's own count where it has one, and what could
+   not be extracted and why.
 3. The merged timeline: `work/timeline.md`, every row with time in UTC,
    source, artefact, the event, the actor or object, and the confidence,
    sorted, deduplicated where two sources report one event (both cited on
-   the row), and verified: a sample of rows from every source re-derived
-   from the artefact by somebody other than the one who extracted it.
+   the row), and filtered: the brief's window, or the incident window the
+   team agrees on the board, with file-system noise (updates, antivirus
+   scans) collapsed to one row per burst, the full per-source CSVs left in
+   `work/<your id>/timeline-<source>.csv`, and the filter stated in the
+   report; and verified: a sample of rows from every source re-derived from
+   the artefact by somebody other than the one who extracted it.
 4. The phases: the stretches of the timeline that belong together (before
    the incident, first contact, establishment, activity, clean-up, the
    response), each with its start and end, the sources that speak in it,
@@ -78,11 +90,12 @@ sources, already extracted.
 - `inputs/` is read-only and stays byte-for-byte what it was. Never `cat`
   or `read` an image whole. Work on images in place with The Sleuth Kit
   (`mmls`, `fsstat`, `fls -m` for a body file, `icat` for `$MFT`,
-  `$LogFile` and `$UsnJrnl:$J`, `mactime` to render a body file; E01 files
-  are read natively), Volatility 3 (`vol`, when the kickoff allowed the
-  symbol server) on memory, `plaso` (`log2timeline.py`, `psort.py`) where
-  it is installed, `regipy` and `python-evtx` (Python 3.12), `grep`,
-  `zcat`, `awk`, `sort`, `sqlite3` and `python3` on logs; a peer may find
+  `$LogFile` and `$UsnJrnl:$J`, `mactime -z UTC -d -y` to render a body
+  file; E01 files are read natively), Volatility 3 (`vol`, when the
+  kickoff allowed the symbol server) on memory, `plaso`
+  (`log2timeline.py`, `psort.py`) where it is installed, `regipy` and
+  `python-evtx` (Python 3.12), `grep`, `zcat`, `awk`, `sort`, `sqlite3`
+  and `python3` on logs; a peer may find
   `usn_journal`, `evtx_query`, `regkv`, `prefetch_mam`, `amcache_apps`,
   `browser_history`, `lnk_parse` and `volrun` already seeded from the tool
   library. There is no root: no mounting, no `sudo`.
