@@ -54,17 +54,23 @@ before running the same commands again.
 4. Persistence and self-protection: every mechanism found, with the file,
    the time it was set and what it launches: cron (`/etc/crontab`,
    `/etc/cron.*`, `/var/spool/cron`), systemd units and timers, rc scripts,
-   shell profiles, `authorized_keys` entries added, `/etc/ld.so.preload`
-   and the library it names, watchdog scripts that restart the miner,
-   scripts that stop competing miners or security agents, firewall and
-   `hosts` changes, and immutable attributes on its files (the inode flags from `istat` on the image; an
-   extracted copy does not carry them).
+   shell profiles, `authorized_keys` entries added, `/etc/ld.so.preload` and
+   the library it names, watchdog scripts that restart the miner, scripts
+   that stop competing miners or security agents, firewall and `hosts`
+   changes, hugepages set for the miner (`vm.nr_hugepages` in
+   `/etc/sysctl.conf` or `/etc/sysctl.d`), and immutable attributes on its
+   files (the inode flags from `istat` on the image; an extracted copy does
+   not carry them).
 5. Resource and network evidence: the connections to the pool in the logs
    and configuration (addresses, ports, the protocol named), kernel and
    syslog lines about CPU, temperature, out-of-memory kills and killed
-   processes, monitoring and cron mail that recorded the load, the process
-   names seen in `wtmp`-adjacent accounting if `psacct` was on, and the
-   window in which the host was mining.
+   processes, monitoring that recorded the load, cron mail
+   (`/var/mail/<user>`, `/var/spool/mail`), process accounting if it was on
+   (`/var/account/pacct` or `/var/log/account/pacct`: `lastcomm -f` or
+   `dump-acct` on the extract if this host has them, else forge a reader),
+   the sysstat CPU history (`/var/log/sa/saDD` or `/var/log/sysstat/saDD`:
+   `sadf -d` on the extract, else forge a reader), and the window in which
+   the host was mining.
 6. What else was the access used for? Commands in the histories beyond the
    miner, other tools downloaded, keys and users added, data read or
    archived, other hosts reached from here (`known_hosts`, histories,

@@ -29,19 +29,26 @@ the same commands again.
 
 ### Questions the report has to answer
 
-1. System profile and which tools were present and run: the distribution and
-   release (`/etc/os-release`), the kernel, the hostname, the time zone, the
-   users, and the toolset — what was installed (the package logs `dpkg.log`,
-   `/var/lib/dpkg/status`, the `apt` history, the rpm or dnf history) and
-   what was actually run, from every user's shell histories
-   (`.bash_history`, `.zsh_history`), the tools' own logs and databases (a
-   framework's session and workspace database, its log files), and the output
-   and report files left behind. Report that a tool was used and when, not
-   how the tool works.
-2. The targets: the addresses and hostnames this machine acted against, from
-   the shell histories, configuration and output files, `known_hosts`, the
-   frameworks' workspaces, and the browser history; each target with the
-   artefacts that name it and the first and last time it appears.
+1. System profile and which tools were present and run: the acquisition
+   record (`ewfinfo`) and whether the image still verifies against it
+   (`ewfverify`, or the recorded hash against `inputs.json`); the
+   distribution and release (`/etc/os-release`), the kernel, the hostname,
+   the time zone, the users, and the toolset — what was installed (the
+   package logs `dpkg.log`, `/var/lib/dpkg/status`, the `apt` history, the
+   rpm or dnf history) and what was actually run, from every user's shell
+   histories (`.bash_history`, `.zsh_history`), the tools' own logs and
+   databases (`~/.msf4/history`, `~/.msf4/logs/framework.log`,
+   `~/.msf4/loot/` and the Metasploit PostgreSQL data directory; the netexec
+   and crackmapexec workspaces `~/.nxc/workspaces` and `~/.cme/workspaces`
+   (SQLite); the sqlmap output directories; Responder logs; john and hashcat
+   potfiles, by path and hash only), and the output and report files left
+   behind. Report that a tool was used and when, not how the tool works.
+2. The targets: the addresses and hostnames this machine acted against,
+   from the shell histories, configuration and output files, `known_hosts`,
+   `~/.ssh/config`, `/etc/hosts`, `~/.wget-hsts`,
+   `~/.local/share/recently-used.xbel`, the frameworks' workspaces, the
+   sqlmap output directory names, and the browser history; each target with
+   the artefacts that name it and the first and last time it appears.
 3. The time range of activity: when the active account's work began and
    ended, from logins (`auth.log` or `secure`, `wtmp`, `lastlog`), the
    shell-history time marks where present, and the file modification times on
@@ -58,8 +65,11 @@ the same commands again.
 6. Operational-security mistakes and attribution clues: the accounts, user
    and real names, email addresses, locales, keyboard layouts, time zones,
    SSH and PGP keys, and the reused identifiers that point at who used this
-   machine; each an indicator recorded as one, never a lead to chase over the
-   network.
+   machine; the egress the operator hid behind (VPN profiles, NetworkManager
+   `system-connections`, `proxychains` and `torrc`); and the anti-forensics
+   (histories linked to `/dev/null`, `HISTFILE` unset, `shred` or
+   `bleachbit` in histories or packages); each an indicator recorded as one,
+   never a lead to chase over the network.
 7. The timeline of the operator's activity across every source in UTC; the
    hypothesis for what this machine was used for and how it was tested; what
    the machine cannot tell you about the targets themselves and what evidence
@@ -75,7 +85,10 @@ the same commands again.
   needs a forged superblock and inode B+tree reader, or a logical export
   from the operator — say which on the board), libewf
   (`ewfinfo` for the acquisition record and hashes), `strings`, `sqlite3`,
-  `python3` (3.12). Read the journal with `journalctl --file` if the host
+  `python3` (3.12), `openssl`, `gpg` (`gpg --show-keys` or
+  `gpg --list-packets` on an extracted key file; never `--homedir` on the
+  extract itself, which writes into it), `ssh-keygen -l -f` for key
+  fingerprints. Read the journal with `journalctl --file` if the host
   has it, else forge a parser for the binary journal; read the package
   databases (`/var/lib/dpkg`, `/var/lib/rpm`) from the extracts. There is no
   root: no mounting, no `sudo`.

@@ -30,33 +30,44 @@ commands again.
 
 1. System profile: distribution and release (`/etc/os-release`), kernel
    (`/boot`, `/lib/modules`), hostname, the time zone the host kept
-   (`/etc/localtime`, `/etc/timezone`), the install date (`fsstat`, the
-   oldest package log entry), every user and group with uid, home, shell,
-   account state and password-change date
-   (`/etc/passwd`, `/etc/group`, `/etc/shadow` as metadata), the sudoers
-   policy (`/etc/sudoers`, `/etc/sudoers.d/`), the SSH server's
-   configuration and every `authorized_keys` and `known_hosts` file.
+   (`/etc/localtime`, `/etc/timezone`), the install date (the crtime of
+   inode 2 or 11 from `istat`, `fsstat`'s last-checked time as a proxy,
+   `/var/log/installer/` or `/root/anaconda-ks.cfg`, the oldest package log
+   entry, rotated `.gz` included), every user and group with uid, home,
+   shell, account state and password-change date (`/etc/passwd`,
+   `/etc/group`, `/etc/shadow` as metadata), the sudoers policy
+   (`/etc/sudoers`, `/etc/sudoers.d/`), the SSH server's configuration and
+   every `authorized_keys` and `known_hosts` file.
 2. How was access gained? State the hypothesis (a guessed password, a
-   stolen key, a vulnerable service or web application, a poisoned
-   package) and the evidence: `auth.log` or `secure` and the
-   journal for accepted and failed logins with source, user and method;
-   `wtmp`, `btmp` and `lastlog` (utmp records; forge a parser); the
-   web or service logs where the entry was through a service; the first
-   foreign session, its source, and what preceded it.
+   stolen key, a vulnerable service or web application, a poisoned package)
+   and the evidence: `auth.log` or `secure` and the journal for accepted and
+   failed logins with source, user and method; `wtmp` and `btmp` (utmp
+   records: `utmpdump` or `last -f` on the extract if this host has them,
+   else forge a parser); `lastlog` (a UID-indexed array of `struct lastlog`,
+   not utmp records); on newer systems `/var/lib/wtmpdb/wtmp.db` and
+   `/var/lib/lastlog/lastlog2.db` (SQLite: `sqlite3`);
+   `/var/log/audit/audit.log` (USER_LOGIN, USER_AUTH, CRED_ACQ; its epoch
+   timestamps are UTC); the web or service logs where the entry was through
+   a service; the first foreign session, its source, and what preceded it.
 3. What privileges were obtained, and how? `sudo` and `su` lines in the auth
    log and the journal; SUID and SGID binaries whose change time postdates
    the install; writable cron and service files; exploit sources and
    compiled binaries in `/tmp`, `/dev/shm`, `/var/tmp` or a home; module
    loads and taint messages in `kern.log` and the journal;
-   `/etc/ld.so.preload`; the first command run as root.
-4. What was modified? Packages installed, removed or downgraded (`dpkg.log`,
-   `/var/lib/dpkg/status`, `yum.log`, the `dnf` history database, the rpm
-   database); binaries whose hash differs from what the package database
-   records (`/var/lib/dpkg/info/*.md5sums` or the rpm database; the shells,
-   `sshd`, `ps` and `ss` first); configuration files changed inside
-   the window; users and keys added or altered; logs truncated, rotated
-   early or edited (a gap, a size of zero, a change time after the last
-   line).
+   `/etc/ld.so.preload`; the first command run as root (audit EXECVE and
+   SYSCALL records where `auditd` ran).
+4. What was modified? Packages installed, removed or downgraded
+   (`dpkg.log`, `/var/lib/dpkg/status`, `yum.log`, the `dnf` history
+   database, the rpm database); binaries whose hash differs from what the
+   package database records (`/var/lib/dpkg/info/*.md5sums` or the rpm
+   database; the shells, `sshd`, `ps` and `ss` first); conffiles against the
+   `Conffiles:` hashes in `/var/lib/dpkg/status`, which the md5sums files
+   leave out; the rpm database is `rpmdb.sqlite` (`sqlite3`) on RHEL 9 and
+   Fedora 33 onward, and Berkeley DB (`/var/lib/rpm/Packages`) on older
+   releases, which `sqlite3` cannot read (forge a reader or record the gap);
+   configuration files changed inside the window; users and keys added or
+   altered; logs truncated, rotated early or edited (a gap, a size of zero,
+   a change time after the last line).
 5. What persistence is in place? Every mechanism found, with file, inode,
    time set and what it launches: cron (`/etc/crontab`,
    `/etc/cron.*`, `/var/spool/cron`), systemd units, timers and drop-ins
@@ -64,7 +75,15 @@ commands again.
    shell profiles (`/etc/profile.d`, `/etc/bash.bashrc`, every `.bashrc`
    and `.profile`), SSH keys and `sshd_config` changes, PAM (`/etc/pam.d`
    and its modules), `ld.so.preload` and altered libraries, kernel modules
-   no package owns, and listening services the packages do not explain.
+   no package owns, and listening services the packages do not explain;
+   and the less obvious ones: at jobs (`/var/spool/cron/atjobs`,
+   `/var/spool/at`), `/etc/rc.local` and `/etc/init.d`, udev `RUN+=` rules
+   (`/etc/udev/rules.d`), XDG autostart (`~/.config/autostart`,
+   `/etc/xdg/autostart`), package-manager hooks (`/etc/apt/apt.conf.d`,
+   dnf and yum plugins), `/etc/ld.so.conf.d`, `/etc/modules-load.d` and
+   `install` lines in `/etc/modprobe.d`, `~/.ssh/rc`, `command=` in
+   `authorized_keys`, `AuthorizedKeysCommand`, `/etc/update-motd.d`, and
+   user units under `~/.config/systemd/user`.
 6. What was done and what was taken? Shell histories (`.bash_history`,
    `.zsh_history`, `.mysql_history`, `.viminfo`) with their time marks if
    any; tools downloaded (`wget-log`, package installs,
@@ -122,7 +141,8 @@ commands again.
   conclusions as kind=finding. The timeline and the report cite
   `ledger/ledger.md`. Log lines carry the host's local time and often no
   year: convert every timestamp to UTC, say which time zone the host kept,
-  and say how the year was fixed.
+  and say how the year was fixed (`audit.log` epoch times and the journal's
+  full timestamps fix the year and the offset for syslog lines).
 - Every claim in the report cites its evidence: the path, the inode, the
   offset, the log line, the record in the package database, the command that
   produced it. A claim without evidence is a hypothesis and is labelled as

@@ -43,20 +43,33 @@ before running the same commands again.
    the static tree, with the status and size of the response that says
    whether each one worked; the first request that succeeded where it
    should not have; and the error-log or application-log line beside each.
+   The access log records no POST body, and where a proxy sits in front the
+   client field is the proxy's: look for `X-Forwarded-For` in a custom log
+   format, and for the body in `modsec_audit.log` where ModSecurity ran.
 3. Files added to the document roots and to the temp directories: scripts
    that were not part of the application, uploads whose content is not
    what their extension says, application files whose hash differs from the
    upstream copy, and files owned by the web server's account
    outside the roots (`/tmp`, `/var/tmp`, `/dev/shm`, the upload and cache
    directories); for each the path, inode, hash, size, times, what it does
-   as read, and every access-log request that called it.
-4. The database: the engine's own logs (error log, general or slow log,
-   binary or write-ahead log as far as readable); the accounts and grants
-   as the data files hold them; dumps and export files left on disk (`.sql`
-   files, the engine's export directory, archives in temp);
-   rows the application's own audit or user tables show as added or
-   changed in the window; and the application's own log of logins and
-   actions.
+   as read, and every access-log request that called it. Grep the roots for
+   `eval(`, `assert(`, `base64_decode`, `gzinflate`, `system(`, `passthru`,
+   `shell_exec`, `preg_replace` with `/e` and `move_uploaded_file`; read the
+   PHP session files (`/var/lib/php/sessions`) and the php-fpm log and slow
+   log for the requests that used them.
+4. The database: the data directory (`/var/lib/mysql`,
+   `/var/lib/postgresql/<ver>/main`); the engine's own logs (error log,
+   general or slow log and the `general_log` or `log_statement` settings
+   that enabled them, the binary log `*-bin.NNNNNN` or `pg_wal/` as far as
+   `strings` and a forged reader get: `mysqlbinlog` is not in the toolbox,
+   say so); the accounts and grants as the data files hold them
+   (`mysql/user.MYD` on MySQL 5.x, `strings` of `mysql.ibd` on 8.x,
+   `global/1260` on PostgreSQL); the `secure_file_priv` directory
+   (`/var/lib/mysql-files`) and any `INTO OUTFILE` result; `.mysql_history`
+   and `.psql_history`; dumps and export files left on disk (`.sql` files,
+   the engine's export directory, archives in temp); rows the application's
+   own audit or user tables show as added or changed in the window; and the
+   application's own log of logins and actions.
 5. The host after the foothold: commands the web server's account ran
    (histories under its home or the roots, error-log lines that show a
    shell being spawned by the interpreter), the auth log and `wtmp` for a
