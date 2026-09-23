@@ -70,7 +70,13 @@ run_guarded "python3 -c 'import tempfile; f = tempfile.NamedTemporaryFile(); f.w
   || fail "python cannot make a temp file under the guard"
 ok "python, /dev/null and the temp directory still work"
 
-run_guarded "cd '$SANDBOX/work' && sqlite3 t.db 'create table a(b);'" || fail "sqlite3 cannot write in work/"
+if command -v sqlite3 >/dev/null 2>&1; then
+  run_guarded "cd '$SANDBOX/work' && sqlite3 t.db 'create table a(b);'" || fail "sqlite3 cannot write in work/"
+else
+  # No sqlite3 CLI on this host: the same write through Python's own module.
+  run_guarded "cd '$SANDBOX/work' && python3 -c 'import sqlite3; sqlite3.connect(\"t.db\").execute(\"create table a(b)\")'" \
+    || fail "sqlite3 (python) cannot write in work/"
+fi
 ok "a tool that writes its own files in work/ still works"
 
 # --- what it must refuse --------------------------------------------------
