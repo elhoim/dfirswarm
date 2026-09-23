@@ -151,6 +151,14 @@ else
   # the kickoff's PATH: on macOS that is Homebrew's bash 5, not /bin/bash.
   mkdir -p "$TMP/altbash"
   cp "$(command -v bash)" "$TMP/altbash/bash"
+  # macOS will not run a copy of its own /bin/bash from elsewhere (a platform
+  # binary outside the system paths runs nothing, silently), so where the copy
+  # is dead a link stands in: it is still a bash at another path, which is
+  # what $BASH has to name.
+  if ! "$TMP/altbash/bash" -c 'exit 0' 2>/dev/null; then
+    rm -f "$TMP/altbash/bash"
+    ln -s "$(command -v bash)" "$TMP/altbash/bash"
+  fi
   got="$(cd "$sb" && printf 'echo "guard=${SWARM_FSGUARD:-} shell=$BASH"\n' \
     | HOME="$sb/.bash" "$TMP/altbash/bash" -i 2>/dev/null | grep -ao 'guard=[a-z]* shell=[^[:space:][:cntrl:]]*' | tail -1 || true)"
   [[ "$got" == "guard=$guard shell=$TMP/altbash/bash" ]] \
