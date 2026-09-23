@@ -168,6 +168,7 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
       [--quarantine] [--case-id ID] [--examiner NAME] [--allow-host HOST]...
       [--no-netguard] [--local-only] [--playwright] [--probe-violation]
       [--key-from-env] [--env KEY=VALUE]...
+      [--isolation host|microvm] [--image REF] [--vm-cpus N] [--vm-memory MIB] [--no-vm-snapshot]
 
 The team
   --model P/ID        One model for every agent.
@@ -335,6 +336,28 @@ Tools the agents write
                       each a directory with manifest.json and its script. They are
                       in every agent's list from the first turn, author and version
                       kept. "swarm.sh tools <id> --save DIR" fills such a library.
+
+Isolation
+  --isolation MODE    host (default): every agent is a Pi process on this machine,
+                      held by the write guard, the tool guard and netguard.
+                      microvm: every agent is a Pi process in its own microVM
+                      (microsandbox), brought up by this kickoff and put away by
+                      stop. The run is mounted read-only in each VM except work/,
+                      the agent's own tool-output/ and its own Pi session; the
+                      evidence is mounted read-only from the host with no copy;
+                      the board is written by the hub on the host
+                      (scripts/vm-hub.ts), the only writer; a VM reaches only the
+                      hosts its models and --allow-host name; no credential
+                      enters a VM — Pi on the host resolves each one and msb swaps
+                      it in on the way out, to that provider's hosts only.
+                      SWARM_ISOLATION sets the default.
+  --image REF         The VM image (SWARM_VM_IMAGE). Default: the image for the
+                      packs in images/images.lock.json, else the base image.
+  --vm-cpus N         vCPUs per agent VM (default 2).
+  --vm-memory MIB     Memory per agent VM in MiB (default 2048).
+  --no-vm-snapshot    At stop, remove each VM without keeping its disk. By default
+                      the disk is kept beside the run (<sandbox>.vm-snapshots/)
+                      with msb's integrity record, and its sha256 is in vm/<id>.json.
 
 Network
   --allow-host HOST   Add one host to netguard's allowlist; repeatable. For a
@@ -781,6 +804,7 @@ inputs_guard_label() {
     mountns) echo "mountns (Linux mount namespace, through the pane's shell)" ;;
     linux) echo "linux (Landlock inside a user namespace, through the pane's shell)" ;;
     landlock) echo "landlock (Linux Landlock, no namespace, through the pane's shell)" ;;
+    microvm) echo "microvm (each agent's VM mounts it read-only; the host refuses every write)" ;;
     *) echo "none (detect + heal only)" ;;
   esac
 }
@@ -1867,6 +1891,8 @@ cmd_start() {
   local allow_hosts="" tools_from="" catalog=0 toolbox="off" toolbox_required=0 quarantine=0 cap_per_agent="" case_id="" examiner=""
   local packs=""
   local write_guard=1
+  # Where the agents live: host processes, or one microVM each.
+  local isolation="${SWARM_ISOLATION:-host}" vm_image="${SWARM_VM_IMAGE:-}" vm_cpus=2 vm_memory=2048 vm_snapshot=1
   local seal_herdr=1
   # Directories the panes may not read. Reads are open by design, so this is
   # narrow on purpose: material about the case the agents must derive rather
@@ -1961,11 +1987,35 @@ cmd_start() {
       --net-allow) use_netguard=1; shift ;;
       --no-netguard|--open-net) use_netguard=0; shift ;;
       --no-start) start_agents=0; shift ;;
+      --isolation) isolation="$2"; shift 2 ;;
+      --image) vm_image="$2"; shift 2 ;;
+      --vm-cpus) vm_cpus="$2"; shift 2 ;;
+      --vm-memory) vm_memory="$2"; shift 2 ;;
+      --no-vm-snapshot) vm_snapshot=0; shift ;;
       -h|--help) usage_start; exit 0 ;;
       *) die_usage "start: unknown option $1" ;;
     esac
   done
   require_absolute_agent_dir
+
+  case "$isolation" in
+    host|microvm) ;;
+    *) echo "BLOCKER: --isolation must be host or microvm (got $isolation)." >&2; exit 2 ;;
+  esac
+  if [[ "$isolation" == "microvm" ]]; then
+    [[ "$vm_cpus" =~ ^[1-9][0-9]?$ ]] || { echo "BLOCKER: --vm-cpus must be 1..99 (got $vm_cpus)." >&2; exit 2; }
+    [[ "$vm_memory" =~ ^[0-9]+$ && "$vm_memory" -ge 512 ]] || { echo "BLOCKER: --vm-memory is MiB, at least 512 (got $vm_memory)." >&2; exit 2; }
+    if [[ "$probe" -eq 1 ]]; then
+      echo "BLOCKER: --probe-violation checks the host's write guard; under --isolation microvm there is none to probe (the VM's own probe runs at kickoff)." >&2
+      exit 2
+    fi
+    if [[ -n "$inputs_dir" && "$inputs_bind" -eq 0 ]]; then
+      # A VM mounts the evidence read-only from the host, and the host
+      # refuses every write through that mount: a copy buys nothing but time
+      # and disk. The directory is used in place.
+      inputs_bind=1
+    fi
+  fi
 
   # The pane hook skips fsguard when SWARM_FSGUARD is already set. An operator
   # --env would switch the kernel guard off, including --quarantine without
@@ -2040,7 +2090,13 @@ cmd_start() {
         exit 2
       fi
     fi
-    inputs_guard="$(fsguard_mode "$inputs_dir" "$inputs_enforce")"
+    if [[ "$isolation" == "microvm" ]]; then
+      # Held by the host: every VM mounts it read-only (virtio-fs, enforced
+      # on the host side), so no pane-side guard is needed or asked for.
+      inputs_guard="microvm"
+    else
+      inputs_guard="$(fsguard_mode "$inputs_dir" "$inputs_enforce")"
+    fi
     if [[ "$inputs_enforce" == "on" && "$inputs_guard" == "none" ]]; then
       echo "BLOCKER: --inputs-enforce on, but this host has no kernel read-only mechanism (macOS sandbox-exec or Linux unprivileged user namespaces). Use --inputs-enforce auto to run with detect + heal only." >&2
       exit 3
@@ -2291,6 +2347,23 @@ STRIP
     fi
   fi
 
+  # A VM run is refused here, before anything is written, when this host
+  # cannot boot a VM: an operator asked for isolation and must not get a run
+  # that quietly has none.
+  if [[ "$isolation" == "microvm" ]]; then
+    [[ -n "$vm_image" ]] || vm_image="$(vm_default_image "$pack_dirs")"
+    if [[ "$start_agents" -eq 1 ]]; then
+      local vm_probe
+      if ! vm_probe="$(vm_cli probe --image "$vm_image")"; then
+        echo "BLOCKER: this host cannot run the agents' VMs: $(jq -r '.reasons | join("; ")' <<<"$vm_probe" 2>/dev/null || printf '%s' "$vm_probe")" >&2
+        exit 3
+      fi
+      if [[ "$(jq -r '.image_present' <<<"$vm_probe" 2>/dev/null)" != "true" ]]; then
+        echo "NOTE: $vm_image is not on this host yet; msb pulls it when the first VM starts (a private registry needs: msb registry login)." >&2
+      fi
+    fi
+  fi
+
   ensure_registry
   local swarm_id
   swarm_id="$(alloc_prefix)"
@@ -2388,14 +2461,20 @@ STRIP
   # to exist before the collector starts.
   mint_trace_tokens "${agent_ids[@]}"
   local nudge_socket=""
-  start_nudge_broker "$sandbox" ${agent_ids[@]+"${agent_ids[@]}"} && nudge_socket="$SWARM_NUDGE_SOCKET"
+  # In a VM the hub delivers nudges itself (scripts/vm-hub.ts): Herdr cannot
+  # type into a pane that runs `msb exec` and have Pi see it as a prompt.
+  if [[ "$isolation" != "microvm" ]]; then
+    start_nudge_broker "$sandbox" ${agent_ids[@]+"${agent_ids[@]}"} && nudge_socket="$SWARM_NUDGE_SOCKET"
+  fi
   # The gate before the collector: the collector is told on stdin whether a
   # gate stands in front, and a collector keyed for a gate that then failed
   # to come up would write every pane's line unverified.
   local trace_socket="" trace_gate="" attribution="token"
-  if start_trace_gate "$sandbox"; then
+  # No gate for VMs: a VM cannot read a peer's environment, and the hub
+  # attributes by the channel a line arrives on.
+  if [[ "$isolation" != "microvm" ]] && start_trace_gate "$sandbox"; then
     trace_gate="$SWARM_TRACE_GATE"
-  elif trace_gate_wanted; then
+  elif [[ "$isolation" != "microvm" ]] && trace_gate_wanted; then
     # Linux without a gate: the token still attributes, and a pane can read
     # a peer's from /proc. The record says so.
     attribution="token-exposed"
@@ -2403,6 +2482,7 @@ STRIP
   if start_trace_collector "$sandbox"; then
     trace_socket="$SWARM_TRACE_SOCKET"
     [[ -n "$trace_gate" ]] && attribution="ancestry"
+    [[ "$isolation" == "microvm" ]] && attribution="channel"
   fi
 
   local guard_args=()
@@ -2418,7 +2498,13 @@ STRIP
   # to land. macOS only; fsguard says so on a host where it cannot apply.
   local write_guard_mode="none" pi_extensions="not-applicable"
   SWARM_GUARD_MEASURED="not-applicable"
-  if [[ "$write_guard" -eq 1 ]]; then
+  if [[ "$isolation" == "microvm" ]]; then
+    # The VM is the guard: the run is mounted read-only in it except the
+    # agent's own writable directories, and nothing else of this host is
+    # there at all. Pi's agent directory is the VM's own.
+    write_guard_mode="microvm"
+    pi_extensions="read-only"
+  elif [[ "$write_guard" -eq 1 ]]; then
     write_guard_mode="$(fsguard_mode "$sandbox" "auto")"
     if fsguard_rw_capable "$write_guard_mode" "$sandbox"; then
       guard_args+=(--rw "$sandbox")
@@ -2462,6 +2548,9 @@ STRIP
       guard_args+=(--no-read "$nr")
       no_read_applied=1
     done
+  elif [[ ${#no_read[@]} -gt 0 && "$isolation" == "microvm" ]]; then
+    # A VM sees only what is mounted into it, and these never are.
+    no_read_applied=1
   elif [[ ${#no_read[@]} -gt 0 ]]; then
     echo "WARN: --no-read needs a kernel write guard; on this host the panes can read those paths." >&2
   fi
@@ -2528,6 +2617,7 @@ STRIP
   fi
   if [[ "$quarantine" -eq 1 ]]; then
     mkdir -p "$sandbox/work/extracted" "$sandbox/work/quarantine"
+    if [[ "$inputs_guard" == "none" && "$isolation" == "microvm" ]]; then inputs_guard="microvm"; fi
     if [[ "$inputs_guard" == "none" ]]; then inputs_guard="$(fsguard_mode "$sandbox" "$inputs_enforce")"; fi
     if [[ "$inputs_guard" != "none" ]]; then
       guard_args+=(--noexec "$sandbox/work/extracted" --noexec "$sandbox/work/quarantine")
@@ -2539,7 +2629,15 @@ STRIP
   # directories cannot be made lazily by the panes. Harmless everywhere else.
   mkdir -p "$sandbox/work" "$sandbox/threads" "$sandbox/inbox" "$sandbox/locks" "$sandbox/done/agents" \
     "$sandbox/ledger" "$sandbox/history" "$sandbox/tools" "$sandbox/traces" "$sandbox/.pi-sessions" "$sandbox/.pi" "$sandbox/bin"
-  if [[ "${#guard_args[@]}" -gt 0 ]]; then
+  # A VM's writable holes are mounted over directories that must already
+  # exist in the read-only floor: one tool-output/ and one session directory
+  # per agent.
+  if [[ "$isolation" == "microvm" ]]; then
+    for id in "${agent_ids[@]}"; do
+      mkdir -p "$sandbox/tool-output/$id" "$sandbox/.pi-sessions/$id"
+    done
+  fi
+  if [[ "${#guard_args[@]}" -gt 0 && "$isolation" != "microvm" ]]; then
     # `--mode` is an fsguard mechanism (seatbelt / mountns / none), not the
     # label the manifest uses for how the evidence is held. `--inputs-image`
     # records `guard: "image"`, and passing that through here produced
@@ -2625,11 +2723,11 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --arg examiner "$examiner" \
     --arg allow_hosts "$allow_hosts" \
     --argjson netguard "$use_netguard" \
-    --arg netguard_mode "$(if [[ "$use_netguard" -eq 1 ]]; then netguard_mode; else echo off; fi)" \
+    --arg netguard_mode "$(if [[ "$isolation" == "microvm" ]]; then echo microvm; elif [[ "$use_netguard" -eq 1 ]]; then netguard_mode; else echo off; fi)" \
     --arg write_guard "$write_guard_mode" \
     --argjson no_read "$(printf '%s\n' ${no_read[@]+"${no_read[@]}"} | jq -R . | jq -c -s 'map(select(. != ""))')" \
     --argjson no_read_applied "$no_read_applied" \
-    --arg herdr_socket "$(if [[ "$herdr_sealed" -eq 1 && "$write_guard_mode" == "seatbelt" ]]; then echo sealed; elif [[ "$herdr_sealed" -eq 1 ]]; then echo masked; elif [[ "$seal_herdr" -eq 0 ]]; then echo open; else echo unenforced; fi)" \
+    --arg herdr_socket "$(if [[ "$isolation" == "microvm" ]]; then echo unreachable; elif [[ "$herdr_sealed" -eq 1 && "$write_guard_mode" == "seatbelt" ]]; then echo sealed; elif [[ "$herdr_sealed" -eq 1 ]]; then echo masked; elif [[ "$seal_herdr" -eq 0 ]]; then echo open; else echo unenforced; fi)" \
     --arg pi_extensions "$pi_extensions" \
     --arg attribution "$attribution" \
     --argjson host_caps "$host_caps_json" \
@@ -2651,6 +2749,11 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson providers "$(providers_json)" \
     --argjson agents "$(printf '%s\n' "${agent_ids[@]}" | jq -R . | jq -s .)" \
     --argjson agent_models "$(printf '%s\n' ${AGENT_MODELS[@]+"${AGENT_MODELS[@]}"} | jq -R . | jq -s .)" \
+    --arg isolation "$isolation" \
+    --arg vm_image "$vm_image" \
+    --argjson vm_cpus "$vm_cpus" \
+    --argjson vm_memory "$vm_memory" \
+    --argjson vm_snapshot "$vm_snapshot" \
     '{
       id: $id,
       "label": $run_label,
@@ -2704,6 +2807,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       goal: $goal,
       agents: $agents,
       agent_models: $agent_models,
+      isolation: (if $isolation == "microvm"
+        then {mode: "microvm", runtime: "microsandbox", image: $vm_image, cpus: $vm_cpus, memory_mib: $vm_memory, snapshot: ($vm_snapshot == 1)}
+        else {mode: "host"} end),
       started_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
       state: "prepared"
     }')"
@@ -2769,12 +2875,15 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       echo "WARN: --tools-from $tools_from holds no tool (a tool is a directory with manifest.json)." >&2
     fi
   fi
-  if [[ -n "$trace_socket" ]]; then
+  if [[ -n "$trace_socket" && "$isolation" == "microvm" ]]; then
+    echo "Trace:        written by the collector, hash-chained; each line attributed by the VM channel it came in on"
+  elif [[ -n "$trace_socket" ]]; then
     echo "Trace:        written by the collector, hash-chained; traces/ is read-only to the panes"
   else
     echo "Trace:        appended by the panes themselves (no collector, no hash chain)" >&2
   fi
   case "$write_guard_mode" in
+    microvm) echo "Write guard:  microvm: each agent writes work/, its own tool-output/ and its own Pi session; the rest of the run is read-only in its VM, the board is written by the hub, and nothing else of this host is in the VM" ;;
     seatbelt) echo "Write guard:  on (seatbelt): panes write inside $sandbox and Pi's agent dir, nowhere else" ;;
     linux) echo "Write guard:  on (Landlock inside a user namespace): panes write inside $sandbox and Pi's agent dir, nowhere else; the previous run's paths and the terminal's socket are masked" ;;
     landlock) echo "Write guard:  on (Landlock, no namespace): panes write inside $sandbox and Pi's agent dir, nowhere else; a socket cannot be masked on this host, and Pi's extensions/ stays writable" ;;
@@ -2821,6 +2930,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   command -v herdr >/dev/null 2>&1 || missing+=("herdr")
   command -v pi >/dev/null 2>&1 || missing+=("pi")
   command -v jq >/dev/null 2>&1 || missing+=("jq")
+  if [[ "$isolation" == "microvm" ]]; then
+    command -v node >/dev/null 2>&1 || missing+=("node (the VM manager and the hub run in it)")
+  fi
   # Installed is not enough. Herdr starts each pane with the account's login
   # shell, and the guard is a hook that shell reads at startup: a zsh reads
   # $ZDOTDIR/.zshenv, a bash the .bashrc or .bash_profile under the HOME the
@@ -2830,8 +2942,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # write guard was on. The check runs whenever a hook is written, which
   # --inputs and --quarantine do even with --no-write-guard: the bash hook
   # moves the panes' HOME, and a shell that reads no hook would keep it.
+  # A microVM run writes no hook: the pane only runs `msb exec`.
   local login_shell=""
-  if [[ "$write_guard" -eq 1 || -f "$sandbox/.zsh/.zshenv" ]]; then
+  if [[ "$isolation" != "microvm" ]] && [[ "$write_guard" -eq 1 || -f "$sandbox/.zsh/.zshenv" ]]; then
     # From the account database, never from $SHELL: $SHELL is the shell that
     # launched the kickoff, and Herdr asks the system what this account's
     # login shell is. Where neither source answers, the check is skipped
@@ -2960,7 +3073,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   local auth_file models_json
   auth_file="$(pi_auth_file)"
   models_json="$(pi_agent_dir)/models.json"
-  if [[ "$key_from_env" -eq 1 ]]; then
+  # In a VM no key travels at all: Pi on this host resolves each one, from
+  # its store or from the environment, and msb swaps it in on the way out.
+  if [[ "$key_from_env" -eq 1 && "$isolation" != "microvm" ]]; then
     # One key per provider on the team. Handing the panes whichever key the
     # scan happened to find first leaves the other half of a mixed swarm
     # unable to authenticate at all.
@@ -3111,7 +3226,18 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     if [[ -n "${!azure_var:-}" ]]; then provider_env+=(--env "$azure_var=${!azure_var}"); fi
   done
   local netguard_allow=""
-  if [[ "$use_netguard" -eq 1 ]]; then
+  if [[ "$isolation" == "microvm" ]]; then
+    # The VM's own network policy, enforced by msb on the host: deny by
+    # default, the providers' hosts and --allow-host on 443, a local model's
+    # port through the host gateway. There is no proxy to be pointed at.
+    if [[ "$use_netguard" -eq 0 ]]; then
+      echo "Net:          open (--no-netguard): every public host is reachable from the VMs" >&2
+    elif [[ "$local_only" -eq 1 ]]; then
+      echo "Net:          local only: each VM reaches the local model through the host gateway and nothing else"
+    else
+      echo "Net:          each VM reaches its models' hosts${allow_hosts:+, $allow_hosts}$( [[ "$allow_install" -eq 1 && "$install_hosts" -eq 1 ]] && printf ', pypi.org, files.pythonhosted.org') and nothing else (msb, deny by default)"
+    fi
+  elif [[ "$use_netguard" -eq 1 ]]; then
     netguard_allow="$(provider_hosts_for_models)"
     if distinct_models | grep -q '^azure-openai-responses/' && [[ -z "$(provider_hosts_for_model azure-openai-responses/x)" && -z "$allow_hosts" ]]; then
       echo "WARN: the Azure OpenAI host is not known (no AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME in the shell or in Pi's credential store); pass --allow-host <resource>.openai.azure.com or the panes cannot reach it." >&2
@@ -3172,6 +3298,10 @@ EOF
   local created root_pane workspace_id
   local split_failures=0 tab_count=1 extra_workspaces=0
   local workspace_ids=()
+  local panes=()
+  if [[ "$isolation" == "microvm" ]]; then
+    launch_vm_agents
+  else
   created="$(herdr workspace create --cwd "$sandbox" --label "$label" --no-focus \
     --env "AGENT_ID=${agent_ids[0]}" --env "SWARM_ID=$swarm_id" --env "SWARM_HARD_KILL=$hard" \
     --env "SWARM_TRACE_TOKEN=$(trace_token_for "${agent_ids[0]}")" \
@@ -3185,7 +3315,7 @@ EOF
   fi
   workspace_ids=("$workspace_id")
 
-  local panes=("$root_pane")
+  panes=("$root_pane")
   if [[ "$n" -gt 1 ]]; then
     layout_agent_panes "$n"
   fi
@@ -3240,6 +3370,7 @@ EOF
     herdr agent prompt "$probe_id" "$probe_prompt"
     rec="$(jq --arg p "$probe_id" '.probe_agent = $p' <<<"$rec")"
   fi
+  fi
   rm -f "$kickoff"
 
   rec="$(jq --arg ws "$workspace_id" --arg state "running" \
@@ -3262,7 +3393,11 @@ EOF
     # kickoff's memory, so its lines stay unverified. That is the honest
     # answer rather than a wrong one: a token on disk would be readable by
     # every pane, since the guard denies writes and leaves reads open.
-    detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" \
+    local hub_env=()
+    if [[ "$isolation" == "microvm" && -f "$sandbox/hub.dir" ]]; then
+      hub_env=(SWARM_HUB_ADMIN="$(cat "$sandbox/hub.dir")/admin.sock" SWARM_HUB_STATUS="$(cat "$sandbox/hub.dir")/status.json")
+    fi
+    detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" ${hub_env[@]+"${hub_env[@]}"} \
       bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
       >"$sandbox/traces/idle-nudge.log" 2>&1 &
     echo $! > "$sandbox/idle-nudge.pid"
@@ -3275,7 +3410,7 @@ EOF
     # watchdog sits idle until the wall clock, which is what run 6 showed.
     sleep 2
     if ! kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
-      detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" \
+      detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" ${hub_env[@]+"${hub_env[@]}"} \
         bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
         >>"$sandbox/traces/idle-nudge.log" 2>&1 </dev/null &
       echo $! > "$sandbox/idle-nudge.pid"
@@ -3331,7 +3466,7 @@ cmd_status() {
   # idle watchdog dead while every line the kickoff printed said it was on;
   # whether each one is alive is a question status should answer.
   local daemon pid
-  for daemon in idle-nudge nudge collector gate netguard; do
+  for daemon in idle-nudge nudge collector gate netguard hub; do
     pid="$(cat "$sandbox/$daemon.pid" 2>/dev/null || true)"
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       echo "daemon $daemon: alive (pid $pid)"
@@ -3339,6 +3474,14 @@ cmd_status() {
       echo "daemon $daemon: not running${pid:+ (pid $pid gone)}"
     fi
   done
+  if [[ "$(jq -r '.isolation.mode // "host"' <<<"$rec")" == "microvm" ]]; then
+    echo
+    vm_cli list --run "$id" 2>/dev/null | jq -r '.vms[]? | "vm \(.agent): \(.name) \(.status)"' || true
+    if [[ -f "$sandbox/hub.dir" && -S "$(cat "$sandbox/hub.dir")/admin.sock" ]]; then
+      hub_send "$(cat "$sandbox/hub.dir")/admin.sock" '{"op":"status"}' 2>/dev/null \
+        | jq -r '.agents | to_entries[] | "agent \(.key): \(.value.state)\(if .value.connected then "" else " (not linked)" end) since \(.value.since)"' || true
+    fi
+  fi
   echo
   SWARM_SANDBOX="$sandbox" bash "$ROOT/scripts/watch.sh" --once || true
 }
@@ -3900,6 +4043,12 @@ stop_sandbox_daemons() {
       done
     fi
   fi
+  if [[ -f "$sandbox/hub.pid" ]]; then
+    pid="$(cat "$sandbox/hub.pid" || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  fi
   if [[ -f "$sandbox/idle-nudge.pid" ]]; then
     pid="$(cat "$sandbox/idle-nudge.pid" || true)"
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
@@ -3913,7 +4062,7 @@ stop_sandbox_daemons() {
   rm -f "$sandbox/netguard.pid" "$sandbox/netguard.port" "$sandbox/netguard.only" "$sandbox/idle-nudge.pid" \
         "$sandbox/collector.pid" "$sandbox/traces/.collector.sock" \
         "$sandbox/nudge.pid" "$sandbox/traces/.nudge.sock" \
-        "$sandbox/gate.pid" "$sandbox/traces/.collector-gate.sock"
+        "$sandbox/gate.pid" "$sandbox/traces/.collector-gate.sock" "$sandbox/hub.pid"
   # `netguard.allow` is not a runtime file, it is the record of what this run
   # could reach — a chain-of-custody line the report prints. Teardown used to
   # delete it with the pid and the port, so every report written after
@@ -4212,6 +4361,340 @@ start_netguard_sidecar() {
   SWARM_PROXY_URL="http://127.0.0.1:${port}"
 }
 
+# ---------------------------------------------------------------------------
+# Agents in microVMs (--isolation microvm)
+#
+# One VM per agent, with Pi inside, created by scripts/vm.ts through the
+# microsandbox SDK; the board written by one host process, scripts/vm-hub.ts,
+# which each VM reaches over its own vsock port; the trace through the same
+# collector as on the host. docs/adr/0005-agents-live-in-microvms.md.
+# ---------------------------------------------------------------------------
+
+vm_cli() {
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" "$@"
+}
+
+vm_arch() {
+  case "$(uname -m)" in
+    arm64|aarch64) echo arm64 ;;
+    x86_64|amd64) echo amd64 ;;
+    *) uname -m ;;
+  esac
+}
+
+# The image a run's VMs boot: the smallest profile that holds the run's packs
+# (images/recipe.py profile-for), by the reference images/images.lock.json
+# pins for this architecture — a digest, so a run names exactly what it ran.
+# Without a lock entry, the local development build of that profile.
+vm_default_image() { # <pack dirs, one per line>
+  local ids=() d profile ref="" lock="$ROOT/images/images.lock.json"
+  while read -r d; do
+    [[ -n "$d" ]] && ids+=("$(basename "$d")")
+  done <<< "$1"
+  profile="$(python3 "$ROOT/images/recipe.py" profile-for ${ids[@]+"${ids[@]}"} 2>/dev/null || echo base)"
+  if [[ -f "$lock" ]]; then
+    ref="$(jq -r --arg p "$profile" --arg a "$(vm_arch)" '.images[$p][$a] // empty' "$lock" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "${ref:-dfirswarm-$profile:dev-$(vm_arch)}"
+}
+
+# The hub's sockets live in a short directory: a Unix socket path must fit in
+# 104 bytes on macOS, and msb refuses a longer one (ENAMETOOLONG, measured).
+vm_hub_dir() { # <run id>
+  local dir
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/dfs-$1.XXXXXX")"
+  chmod 700 "$dir"
+  # Resolved: macOS's temp directory is under /var, a symlink.
+  (cd "$dir" && pwd -P)
+}
+
+hub_send() { # <admin socket> <json>
+  node "$ROOT/scripts/vm-hub-send.mjs" "$1" "$2"
+}
+
+# The hub: the board's only writer for the VMs, the trace's door, and the
+# harness's voice in each pane. Tokens reach it the way they reach the
+# collector — on stdin, from the environment, never on argv.
+start_vm_hub() { # <sandbox> <hub dir> <run id> <collector socket> <agent ids...>
+  local sandbox="$1" dir="$2" run="$3" collector="$4"
+  shift 4
+  local roster input
+  roster="$(printf '%s\n' "$@" | jq -R . | jq -c -s .)"
+  input="$(SWARM_TOKENS="$TRACE_TOKENS_JSON" SWARM_ROSTER="$roster" SWARM_COLLECTOR="$collector" jq -nc \
+    '{agents: ($ENV.SWARM_ROSTER | fromjson),
+      tokens: ($ENV.SWARM_TOKENS | fromjson | to_entries | map({key: .value, value: .key}) | from_entries),
+      collector: $ENV.SWARM_COLLECTOR}')"
+  printf '%s' "$input" | detach_exec node --experimental-strip-types --no-warnings "$ROOT/scripts/vm-hub.ts" \
+    "$sandbox" --dir "$dir" --run "$run" --quiet >"$sandbox/traces/vm-hub.log" 2>&1 &
+  echo $! > "$sandbox/hub.pid"
+  printf '%s\n' "$dir" > "$sandbox/hub.dir"
+  local i
+  for ((i = 0; i < 100; i++)); do
+    [[ -S "$dir/admin.sock" ]] && return 0
+    sleep 0.1
+  done
+  echo "BLOCKER: the VM hub did not come up; see $sandbox/traces/vm-hub.log" >&2
+  return 1
+}
+
+# Every provider the team's models need, as the VM manager wants them: how
+# the credential is held (a key, a subscription, or none for a local server)
+# and the hosts it may go to. Never a value.
+vm_providers_json() {
+  local model provider kind hosts port auth_file seen=""
+  auth_file="$(pi_auth_file)"
+  while IFS= read -r model; do
+    [[ -n "$model" ]] || continue
+    provider="${model%%/*}"
+    case " $seen " in *" $provider "*) continue ;; esac
+    seen+=" $provider"
+    port=""
+    if provider_is_local "$model"; then
+      kind="local"
+      port="$(python3 -c 'import sys, urllib.parse; u = urllib.parse.urlsplit(sys.argv[1]); print(u.port or (443 if u.scheme == "https" else 80))' "$(provider_base_url "$model")")"
+    elif [[ -f "$auth_file" ]] && [[ "$(jq -r --arg p "$provider" '.[$p].type // empty' "$auth_file" 2>/dev/null)" == "oauth" ]]; then
+      kind="oauth"
+    else
+      kind="api_key"
+    fi
+    hosts="$(provider_hosts_for_model "$model")"
+    jq -nc --arg p "$provider" --arg k "$kind" --arg h "$hosts" --arg port "$port" \
+      '{provider: $p, kind: $k, hosts: ($h | split(",") | map(select(. != ""))), port: (if $port == "" then null else ($port | tonumber) end)}'
+  done < <(credential_models) | jq -s -c .
+}
+
+# Put a run's VMs away, then its hub: snapshot (unless told not to), stop and
+# remove every VM carrying the run's label. Safe to run twice.
+stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>
+  local sandbox="$1" run="$2" snap="${3:-1}" args=() pid dir
+  [[ "$snap" -eq 1 ]] || args+=(--no-snapshot)
+  vm_cli finish --run "$run" --sandbox "$sandbox" ${args[@]+"${args[@]}"} >"$sandbox/traces/vm-finish.log" 2>&1 || true
+  if [[ -f "$sandbox/hub.pid" ]]; then
+    pid="$(cat "$sandbox/hub.pid" 2>/dev/null || true)"
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    rm -f "$sandbox/hub.pid"
+  fi
+  if [[ -f "$sandbox/hub.dir" ]]; then
+    dir="$(cat "$sandbox/hub.dir" 2>/dev/null || true)"
+    # Only a directory this run could have made.
+    [[ "$dir" == */dfs-"$run".* && -d "$dir" ]] && rm -rf "$dir"
+    rm -f "$sandbox/hub.dir"
+  fi
+}
+
+# The agents' VMs, their panes and their hub. Called by cmd_start in the
+# place where a host run starts Pi in each pane, and reads cmd_start's own
+# variables (bash scope is dynamic): the run, the team, the options. Sets
+# what the rest of cmd_start records: workspace_id, workspace_ids, panes,
+# tab_count, split_failures, extra_workspaces, SWARM_GUARD_MEASURED.
+launch_vm_agents() {
+  local hub_dir
+  hub_dir="$(vm_hub_dir "$swarm_id")"
+  # The finish line inside a VM reads the registry the way await-done.sh
+  # always has, from SWARM_RUNS_DIR: here, a directory holding this run's
+  # record and nothing else. The real registry — every other case on this
+  # machine — is never mounted.
+  mkdir -p "$hub_dir/runs"
+  jq -n --argjson r "$rec" '{runs: [$r]}' > "$hub_dir/runs/registry.json"
+  cp "$kickoff" "$sandbox/.kickoff"
+  start_vm_hub "$sandbox" "$hub_dir" "$swarm_id" "$trace_socket" "${agent_ids[@]}" || { stop_vm_run "$sandbox" "$swarm_id" 0; exit 1; }
+
+  # What every VM gets: the harness code read-only at its own path, the
+  # packs, the registry view, the evidence in place.
+  local mounts=() d real
+  for d in "$ROOT/extensions" "$ROOT/scripts" "$ROOT/prompts" "$ROOT/node_modules/typebox" "$hub_dir/runs"; do
+    mounts+=("$(jq -nc --arg h "$d" '{host: $h, readonly: true}')")
+  done
+  if [[ -n "$pack_dirs" ]]; then
+    while read -r d; do
+      [[ -n "$d" && -d "$d" ]] && mounts+=("$(jq -nc --arg h "$d" '{host: $h, readonly: true}')")
+    done <<< "$pack_dirs"
+  fi
+  if [[ -n "$compact_prompt" && "$compact_prompt" != "$ROOT/prompts/"* ]]; then
+    mounts+=("$(jq -nc --arg h "$(dirname "$compact_prompt")" '{host: $h, readonly: true}')")
+  fi
+  if [[ -L "$sandbox/inputs" ]]; then
+    real="$(cd "$sandbox/inputs" && pwd -P)"
+    mounts+=("$(jq -nc --arg h "$real" '{host: $h, readonly: true, noexec: true}')")
+  elif [[ -f "$sandbox/inputs.device" ]]; then
+    # An attached image is its own filesystem on the host; it is shared as
+    # itself rather than trusted to show through the sandbox's share.
+    mounts+=("$(jq -nc --arg h "$sandbox/inputs" '{host: $h, readonly: true, noexec: true}')")
+  fi
+  local late=()
+  if [[ "$quarantine" -eq 1 ]]; then
+    late+=("$(jq -nc --arg h "$sandbox/work/extracted" '{host: $h, noexec: true}')")
+    late+=("$(jq -nc --arg h "$sandbox/work/quarantine" '{host: $h, noexec: true}')")
+  fi
+
+  # The environment of every agent's Pi. Host-only settings — a PATH, a
+  # proxy, the host's Pi directory — do not cross.
+  local env_json
+  env_json="$(jq -nc --arg id "$swarm_id" --arg hard "$hard" --arg runs "$hub_dir/runs" \
+    --arg tmp "$sandbox/work/.tmp" --arg kick "$sandbox/.kickoff" \
+    '{SWARM_ID: $id, SWARM_HARD_KILL: $hard, SWARM_RUNS_DIR: $runs, TMPDIR: $tmp, SWARM_KICKOFF: $kick}')"
+  add_env() { env_json="$(jq -c --arg k "$1" --arg v "$2" '. + {($k): $v}' <<<"$env_json")"; }
+  if [[ -n "$pack_dirs" ]]; then
+    add_env SWARM_PACK_DIRS "$(paste -sd: - <<< "$pack_dirs")"
+    [[ "$PACK_SECRETS_ENV" != "{}" ]] && add_env SWARM_PACK_SECRETS "$PACK_SECRETS_ENV"
+  fi
+  [[ "$forging" -eq 1 ]] && { add_env SWARM_TOOL_FORGING 1; add_env SWARM_TOOLS "$PI_TOOLS"; }
+  if [[ "$self_compact" -eq 1 ]]; then
+    add_env SWARM_SELF_COMPACT 1
+    [[ -n "$compact_notice_at" ]] && add_env SWARM_COMPACT_NOTICE_AT "$compact_notice_at"
+    [[ -n "$compact_warn_at" ]] && add_env SWARM_COMPACT_WARN_AT "$compact_warn_at"
+    [[ -n "$compact_at" ]] && add_env SWARM_COMPACT_AT "$compact_at"
+    [[ -n "$compact_prompt" ]] && add_env SWARM_COMPACT_PROMPT "$compact_prompt"
+    [[ -n "$compact_model" ]] && add_env SWARM_COMPACT_MODEL "$compact_model"
+  fi
+  [[ -n "$inbox_page_chars" ]] && add_env SWARM_INBOX_PAGE_CHARS "$inbox_page_chars"
+  [[ "$quarantine" -eq 1 ]] && add_env SWARM_QUARANTINE 1
+  [[ "$local_only" -eq 1 ]] && add_env PI_OFFLINE 1
+  if [[ "$allow_install" -eq 1 ]]; then
+    # pip installs into the run, as on the host: the launcher points the
+    # image's pip at work/.toolchain and puts it on the import path.
+    add_env SWARM_ALLOW_INSTALL 1
+    add_env SWARM_TOOLCHAIN "$sandbox/work/.toolchain"
+    add_env PIP_DISABLE_PIP_VERSION_CHECK 1
+    add_env PIP_CACHE_DIR "$sandbox/work/.toolchain/.cache/pip"
+    mkdir -p "$sandbox/work/.toolchain"
+  fi
+  local e
+  for e in ${extra_env[@]+"${extra_env[@]}"}; do
+    [[ "$e" == --env ]] && continue
+    case "${e%%=*}" in
+      PATH|HOME|PI_CODING_AGENT_DIR|ZDOTDIR|HTTPS_PROXY|HTTP_PROXY|ALL_PROXY|TMPDIR) continue ;;
+    esac
+    add_env "${e%%=*}" "${e#*=}"
+  done
+  local azure_var
+  for azure_var in AZURE_OPENAI_BASE_URL AZURE_OPENAI_RESOURCE_NAME AZURE_OPENAI_API_VERSION AZURE_OPENAI_DEPLOYMENT_NAME_MAP; do
+    [[ -n "${!azure_var:-}" ]] && add_env "$azure_var" "${!azure_var}"
+  done
+
+  local allow_json='[]' h
+  if [[ "$local_only" -ne 1 ]]; then
+    for h in ${allow_hosts//,/ }; do
+      allow_json="$(jq -c --arg h "$(printf '%s' "$h" | tr 'A-Z' 'a-z')" '. + [$h]' <<<"$allow_json")"
+    done
+    if [[ "$allow_install" -eq 1 && "$install_hosts" -eq 1 ]]; then
+      allow_json="$(jq -c '. + ["pypi.org", "files.pythonhosted.org"]' <<<"$allow_json")"
+    fi
+  fi
+  local agents_json='[]' i
+  for ((i = 0; i < n; i++)); do
+    agents_json="$(jq -c --arg id "${agent_ids[$i]}" --arg m "${AGENT_MODELS[$i]}" '. + [{id: $id, model: $m}]' <<<"$agents_json")"
+  done
+  local providers
+  providers="$(vm_providers_json)"
+  if [[ "$local_only" -eq 1 ]]; then providers="$(jq -c 'map(select(.kind == "local"))' <<<"$providers")"; fi
+  local spec="$hub_dir/vm-spec.json"
+  jq -n \
+    --arg run "$swarm_id" --arg sandbox "$sandbox" --arg image "$vm_image" --arg hub "$hub_dir" \
+    --argjson cpus "$vm_cpus" --argjson mem "$vm_memory" --argjson wall "$wall" \
+    --argjson mounts "$(printf '%s\n' ${mounts[@]+"${mounts[@]}"} | jq -s -c .)" \
+    --argjson late "$(printf '%s\n' ${late[@]+"${late[@]}"} | jq -s -c .)" \
+    --argjson env "$env_json" --argjson agents "$agents_json" --argjson allow "$allow_json" \
+    --argjson providers "$providers" --argjson open "$([[ "$use_netguard" -eq 0 ]] && echo true || echo false)" \
+    --arg pi "$(command -v pi)" --arg pidir "$(pi_agent_dir)" --arg registry "$REGISTRY" \
+    '{run: $run, sandbox: $sandbox, image: $image, pull: "if-missing", cpus: $cpus, memory_mib: $mem,
+      max_duration_sec: (($wall + 30) * 60), hub_dir: $hub, mounts: $mounts, late_mounts: $late,
+      env: $env, agents: $agents, allow_hosts: $allow, open_net: $open, providers: $providers,
+      pi_bin: $pi, pi_agent_dir: $pidir, min_token_validity: "\($wall + 60)m",
+      records_dir: ($sandbox + "/vm"), registry: $registry}' > "$spec"
+  chmod 600 "$spec"
+
+  echo "VMs:          creating ${n} on $vm_image (${vm_cpus} vCPU, ${vm_memory} MiB each)..."
+  local vm_out
+  if ! vm_out="$(vm_cli create --spec "$spec" 2>"$sandbox/traces/vm-create.log")"; then
+    {
+      echo "BLOCKER: the agents' VMs did not come up as this run needs them."
+      jq -r '(.error // empty), (.failures[]? | "  \(.agent): \(.reasons | join("; "))")' <<<"$vm_out" 2>/dev/null || printf '%s\n' "$vm_out"
+      echo "  (details: $sandbox/traces/vm-create.log)"
+    } >&2
+    stop_vm_run "$sandbox" "$swarm_id" 0
+    stop_sandbox_daemons "$sandbox" keep-record
+    registry_update_state "$swarm_id" "failed"
+    exit 1
+  fi
+  local rec_file
+  for rec_file in "$sandbox"/vm/*.json; do
+    [[ -f "$rec_file" ]] || continue
+    jq -r '"              \(.agent) -> \(.name) · image \(.image.manifest_digest // "?" | .[0:19]) · inputs \(.probe.inputs) · work \(.probe.work) · floor \(.probe.base) · hub \(if .probe.hub then "linked" else "NO" end)"' "$rec_file"
+  done
+  echo "Secrets:      $(jq -r '[.secrets[]?.name] | unique | join(", ") | if . == "" then "none" else . end' "$sandbox/vm/${agent_ids[0]}.json") — resolved on this host, swapped in by msb on the way out; the VMs hold placeholders"
+
+  # The panes: a quiet zsh that runs `msb exec` into its agent's VM, where
+  # the launcher bridges the hub link and starts Pi with the kickoff.
+  mkdir -p "$hub_dir/zdot"
+  : > "$hub_dir/zdot/.zshenv"
+  printf 'PROMPT="%%1~ %%# "\n' > "$hub_dir/zdot/.zshrc"
+  created="$(herdr workspace create --cwd "$sandbox" --label "$label" --no-focus --env "ZDOTDIR=$hub_dir/zdot")"
+  root_pane="$(printf '%s\n' "$created" | jq -r '.result.root_pane.pane_id // empty')"
+  workspace_id="$(printf '%s\n' "$created" | jq -r '.result.workspace.workspace_id // .result.workspace.id // empty')"
+  if [[ -z "$root_pane" ]]; then
+    echo "herdr workspace create did not return root_pane.pane_id:" >&2
+    printf '%s\n' "$created" >&2
+    stop_vm_run "$sandbox" "$swarm_id" 0
+    exit 1
+  fi
+  workspace_ids=("$workspace_id")
+  panes=("$root_pane")
+  if [[ "$n" -gt 1 ]]; then
+    layout_agent_panes "$n"
+  fi
+  if [[ "${#panes[@]}" -ne "$n" ]]; then
+    echo "Pane layout produced ${#panes[@]} panes for N=$n" >&2
+    stop_vm_run "$sandbox" "$swarm_id" 0
+    exit 1
+  fi
+  write_layout_record "$sandbox"
+  echo "Layout:       tabs=${tab_count} split_failures=${split_failures} extra_workspaces=${extra_workspaces}"
+
+  local msb ext="$ROOT/extensions/agent-swarm.ts" launch panes_json='{}' idx
+  msb="$(vm_cli msb-path)"
+  local vm_tools=(--tools "$PI_TOOLS")
+  [[ "$forging" -eq 1 ]] && vm_tools=()
+  for ((idx = 0; idx < n; idx++)); do
+    launch="$hub_dir/launch-${agent_ids[$idx]}.sh"
+    {
+      printf '#!/bin/sh\n# %s in its microVM\nexec %q exec -t %q --' "${agent_ids[$idx]}" "$msb" "dfs-${swarm_id}-${agent_ids[$idx]}"
+      printf ' %q' /.msb/scripts/dfirswarm-pi --approve --name "${agent_ids[$idx]}" \
+        --session-dir "$sandbox/.pi-sessions/${agent_ids[$idx]}" -e "$ext" \
+        ${vm_tools[@]+"${vm_tools[@]}"} --model "${AGENT_MODELS[$idx]}"
+      printf '\n'
+    } > "$launch"
+    chmod 700 "$launch"
+    panes_json="$(jq -c --arg a "${agent_ids[$idx]}" --arg p "${panes[$idx]}" '. + {($a): $p}' <<<"$panes_json")"
+  done
+  hub_send "$hub_dir/admin.sock" "$(jq -nc --argjson p "$panes_json" '{op: "panes", panes: $p}')" >/dev/null || true
+  # A pane's shell may still be starting when it is asked; the hub knows who
+  # has linked up, and whoever has not is asked once more.
+  sleep 1
+  for ((idx = 0; idx < n; idx++)); do
+    herdr pane run "${panes[$idx]}" "sh $hub_dir/launch-${agent_ids[$idx]}.sh" >/dev/null 2>&1 || true
+  done
+  local linked=0 tries
+  for ((tries = 0; tries < 60; tries++)); do
+    linked="$(hub_send "$hub_dir/admin.sock" '{"op":"status"}' 2>/dev/null | jq '[.agents[] | select(.connected)] | length' 2>/dev/null || echo 0)"
+    [[ "$linked" -ge "$n" ]] && break
+    if [[ "$tries" -eq 20 ]]; then
+      for ((idx = 0; idx < n; idx++)); do
+        if ! hub_send "$hub_dir/admin.sock" '{"op":"status"}' 2>/dev/null | jq -e --arg a "${agent_ids[$idx]}" '.agents[$a].connected' >/dev/null 2>&1; then
+          herdr pane run "${panes[$idx]}" "sh $hub_dir/launch-${agent_ids[$idx]}.sh" >/dev/null 2>&1 || true
+        fi
+      done
+    fi
+    sleep 1
+  done
+  if [[ "$linked" -lt "$n" ]]; then
+    echo "WARN: $linked of $n agents linked to the hub within a minute; the others' panes may still be starting Pi (swarm.sh status $swarm_id)." >&2
+  else
+    echo "Agents:       $n Pi sessions up in their VMs, each linked to the hub"
+  fi
+  SWARM_GUARD_MEASURED="microvm"
+}
+
 cmd_reap() {
   local id="" stall="${REAP_TIMEOUT:-960}" stop=0
   while [[ $# -gt 0 ]]; do
@@ -4223,6 +4706,11 @@ cmd_reap() {
     esac
   done
   ensure_registry
+  # VMs no running run owns: a kickoff that died between creating them and
+  # recording itself, or a stop that never came. By label, never by name.
+  local reaped
+  reaped="$(vm_cli reap --registry "$REGISTRY" 2>/dev/null | jq -r '.removed | length' 2>/dev/null || echo 0)"
+  [[ "${reaped:-0}" -gt 0 ]] && echo "Reaped $reaped VM(s) whose run is not running."
   local sandboxes=()
   if [[ -n "$id" ]]; then
     local rec
@@ -4311,10 +4799,25 @@ cmd_stop() {
   fi
   local sandbox
   sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  # The VMs before the daemons: an agent's last lines reach the trace through
+  # the hub and the collector, so those stay up until the VMs are down.
+  if [[ -n "$sandbox" && "$(jq -r '.isolation.mode // "host"' <<<"$rec")" == "microvm" ]]; then
+    local snap
+    snap="$(jq -r 'if .isolation.snapshot == false then 0 else 1 end' <<<"$rec")"
+    echo "VMs:          stopping$( [[ "$snap" -eq 1 ]] && printf ', each disk kept as a snapshot beside the run')"
+    stop_vm_run "$sandbox" "$id" "$snap"
+  fi
   stop_sandbox_daemons "$sandbox" keep-record
   # An attached evidence image would otherwise outlive the run that needed it,
   # and the next kickoff on the same sandbox cannot clear a mount point.
   [[ -n "$sandbox" ]] && detach_inputs_image "$sandbox"
+  # What the host can say about the run once nothing is running any more:
+  # the evidence re-hashed, the sessions sealed, every kept output checked.
+  if [[ -n "$sandbox" && -d "$sandbox" ]]; then
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/custody.ts" "$sandbox" >/dev/null 2>"$sandbox/traces/custody.log" \
+      && echo "Custody:      $(jq -r '.summary' "$sandbox/custody.json" 2>/dev/null)" \
+      || echo "WARN: the custody check did not finish; see $sandbox/traces/custody.log" >&2
+  fi
   if [[ -n "$sandbox" && -f "$sandbox/done/SWARM_DONE" ]]; then
     registry_update_state "$id" "done"
     echo "Stopped $id (the sentinel was present; recorded as done)"

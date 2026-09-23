@@ -92,6 +92,9 @@ export const PROTECTED_PREFIXES = [
   // page's text past what browser_check delivers). Written by the harness,
   // named from the trace with its size and hash; the record, not scratch.
   "tool-output/",
+  // What each agent's VM was (--isolation microvm): its image, its mounts,
+  // its network and its snapshot, written by the VM manager on the host.
+  "vm/",
 ] as const;
 
 export const PROTECTED_FILES = [
@@ -116,6 +119,14 @@ export const PROTECTED_FILES = [
   // What each agent calls itself, written only through the `name` tool: a
   // peer that could rewrite it could rename everyone else.
   "names.json",
+  // Read by `swarm.sh stop` outside every agent's reach, as the examiner:
+  // which process is the hub, and which directory is its to delete.
+  "hub.pid",
+  "hub.dir",
+  // The harness's own verdict on the run, taken on the host after it ended.
+  "custody.json",
+  // The kickoff each agent's Pi starts with.
+  ".kickoff",
 ] as const;
 
 /**
@@ -239,6 +250,19 @@ export const EVENTS_REL = "traces/events.jsonl";
  * file. A run should never have one; a run that does must be able to say so.
  */
 export const TRACE_SPILL_REL = "work/.trace-spill.jsonl";
+
+/**
+ * Where this process spills a trace line it could not hand to the collector.
+ * On the host, one shared file under work/. In a microVM a file two VMs
+ * append to loses lines (virtio-fs keeps no O_APPEND promise between guests:
+ * a spill shared by two agents was found torn at line 24, measured), so each
+ * agent spills into its own tool-output/ directory, which only its VM writes.
+ */
+export function traceSpillRel(env: NodeJS.ProcessEnv = process.env): string {
+  const agent = env.AGENT_ID?.trim() ?? "";
+  if (env.SWARM_ISOLATION === "microvm" && /^[a-z][a-z0-9_-]{0,31}$/.test(agent)) return `tool-output/${agent}/trace-spill.jsonl`;
+  return TRACE_SPILL_REL;
+}
 export const HISTORY_REL = "history";
 export const CAP_STEER =
   "Swarm spend cap hit. Call done with reason cannot_complete and stop. Do not start new work.";
@@ -281,6 +305,11 @@ export type PostRecord = {
   path: string;
   /** What the author calls itself, if it has said. */
   name?: string;
+  /**
+   * A harness post sent from inside an agent's VM: the agent whose harness
+   * hook said it. The hub sets it; nothing an agent passes can.
+   */
+  via?: string;
 };
 
 /** `threads/<name>/meta.json`. Membership decides who a no-arg `inbox` serves. */
@@ -1046,6 +1075,7 @@ export async function readPost(file: string): Promise<PostRecord> {
     body,
     path: file,
     ...(attrs.name ? { name: attrs.name } : {}),
+    ...(attrs.via ? { via: attrs.via } : {}),
   };
 }
 
@@ -1150,7 +1180,7 @@ export async function listThreadNames(sandboxRoot: string): Promise<string[]> {
 
 export async function postMessage(
   ctx: SwarmContext,
-  args: { thread?: string; to?: string; tag: string; body: string },
+  args: { thread?: string; to?: string; tag: string; body: string; via?: string },
 ): Promise<PostRecord> {
   if (!isPostTag(args.tag)) {
     throw new Error(`Unknown tag "${args.tag}". Use: ${POST_TAGS.join(", ")}`);
@@ -1169,13 +1199,14 @@ export async function postMessage(
     const filename = `${String(id).padStart(6, "0")}-${ctx.agentId}.md`;
     const path = join(dir, filename);
     const name = yamlOneLine((await nameOf(ctx.sandboxRoot, ctx.agentId).catch(() => undefined)) ?? "");
+    const via = yamlOneLine(args.via ?? "");
     const text = `---
 id: ${id}
 thread: ${thread}
 from: ${ctx.agentId}
 to: ${to}
 tag: ${tag}
-${name ? `name: ${name}\n` : ""}---
+${name ? `name: ${name}\n` : ""}${via ? `via: ${via}\n` : ""}---
 
 ${body}
 `;
@@ -1193,6 +1224,7 @@ ${body}
       body,
       path,
       ...(name ? { name } : {}),
+      ...(via ? { via } : {}),
     };
   });
 }
@@ -1200,7 +1232,7 @@ ${body}
 /** Harness announcement on the board. Never joins a thread, never claims. */
 export async function systemPost(
   sandboxRoot: string,
-  args: { tag: string; body: string; thread?: string; to?: string },
+  args: { tag: string; body: string; thread?: string; to?: string; via?: string },
 ): Promise<PostRecord> {
   return postMessage(systemContext(sandboxRoot), args);
 }
@@ -2390,6 +2422,12 @@ export async function appendEvent(
   // The fallback writes the file itself, and the token is a secret, not a
   // field: it goes to the collector and nowhere else.
   const plain = `${JSON.stringify(record)}\n`;
+  // In a VM the trace directory is read-only and shared: the spill is the
+  // only place a line can go.
+  if (process.env.SWARM_ISOLATION === "microvm") {
+    await appendFile(join(sandboxRoot, traceSpillRel()), plain, "utf8").catch(() => undefined);
+    return record;
+  }
   await mkdir(dirname(file), { recursive: true }).catch(() => undefined);
   // A chained record must not take an unchained line: the verifier reports it
   // as "appended" by something other than the collector — a tamper alarm the
@@ -2421,7 +2459,7 @@ export async function appendEvent(
     // the point — so a failed send leaves nowhere to write the line. Losing it
     // in silence is the one outcome a record cannot have: it goes to a spill
     // file in `work/`, which the report and the package name.
-    await appendFile(join(sandboxRoot, TRACE_SPILL_REL), plain, "utf8").catch(() => undefined);
+    await appendFile(join(sandboxRoot, traceSpillRel()), plain, "utf8").catch(() => undefined);
     throw err;
   }
   return record;
@@ -3109,6 +3147,11 @@ async function listWorkFiles(sandboxRoot: string): Promise<{ files: string[]; tr
         }
         await walk(abs, depth + 1);
       } else if (entry.isFile()) {
+        // The harness's own spill of trace lines the collector did not take:
+        // it grows during a shell call because the harness writes it, and a
+        // watch that counted it blamed the agent's command (measured: a false
+        // CLAIM VIOLATION on the first microVM run).
+        if (depth === 0 && entry.name === ".trace-spill.jsonl") continue;
         if (out.length >= BASH_WATCH_MAX_WORK_FILES) {
           truncated = true;
           return;

@@ -49,6 +49,7 @@
     "node": ">=22.6"
   },
   "dependencies": {
+    "microsandbox": "0.7.2",
     "typebox": "^1.3.34"
   },
   "devDependencies": {

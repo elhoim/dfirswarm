@@ -14,7 +14,7 @@
  * that package installed. An entry nobody can produce by claiming it.
  */
 import { createHash } from "node:crypto";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 /** Where `--allow-install` points pip, relative to the sandbox. */
@@ -130,4 +130,23 @@ export function packageKeys(record: ToolchainRecord): string[] {
 export function newPackages(before: ToolchainRecord | null, after: ToolchainRecord): InstalledPackage[] {
   const had = new Set(before ? packageKeys(before) : []);
   return after.packages.filter((p) => !had.has(`${p.name}@${p.version}`));
+}
+
+/**
+ * Read what is installed, write `toolchain.json` when it changed, and say
+ * which packages are new since the last record. `toolchain.json` is at the
+ * sandbox's root, which an agent in a VM cannot write, so there this runs on
+ * the hub (extensions/board.ts).
+ */
+export async function updateToolchainRecord(sandboxRoot: string): Promise<{ fresh: InstalledPackage[]; total: number }> {
+  const record = await readToolchain(sandboxRoot);
+  const file = join(sandboxRoot, TOOLCHAIN_REL);
+  const before = await readFile(file, "utf8")
+    .then((text) => JSON.parse(text) as ToolchainRecord)
+    .catch(() => null);
+  const fresh = newPackages(before, record);
+  if (!before || fresh.length || before.packages.length !== record.packages.length) {
+    await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+  }
+  return { fresh, total: record.packages.length };
 }

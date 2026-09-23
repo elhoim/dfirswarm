@@ -42,6 +42,12 @@ MAX_NUDGES=3
 LOCAL_FIRST_TURN_SEC="${SWARM_LOCAL_FIRST_TURN_SEC:-600}"
 ONCE=0
 HERDR="${HERDR_BIN:-herdr}"
+# Agents in microVMs (--isolation microvm): the pane runs `msb exec`, so
+# Herdr can neither see Pi's state on the screen nor type a prompt Pi will
+# take. The hub has both — each agent's extension reports working/idle up its
+# link, and a prompt goes down it as a user message.
+HUB_ADMIN="${SWARM_HUB_ADMIN:-}"
+HUB_STATUS="${SWARM_HUB_STATUS:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -180,6 +186,16 @@ log_event() { # log_event <agent> <idle> <ok> <count>
 # "id n idle_at_last_nudge" lines. The count is per silence: if the agent has
 # done anything since we last nudged it — its idle clock is shorter than it was
 # then — this is a new silence and the budget starts again.
+# Words in front of an agent: through the hub for a VM, through Herdr otherwise.
+prompt_agent() { # <agent id> <text>
+  if [[ -n "$HUB_ADMIN" ]]; then
+    node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_ADMIN" \
+      "$(jq -nc --arg a "$1" --arg t "$2" '{op: "prompt", agent: $a, text: $t, kind: "idle_nudge"}')" >/dev/null 2>&1
+  else
+    "$HERDR" agent prompt "$1" "$2" >/dev/null 2>&1
+  fi
+}
+
 STATE="$SANDBOX/traces/idle-nudge.state"
 [[ -f "$STATE" ]] || : > "$STATE"
 count_of() { awk -v id="$1" '$1 == id { print $2; found = 1 } END { if (!found) print 0 }' "$STATE"; }
@@ -207,7 +223,11 @@ while :; do
     fi
     # A long tool call writes nothing to the session or the trace until it
     # ends; Herdr knows the pane is still working, so ask it before nudging.
-    status="$("$HERDR" agent get "$id" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)"
+    if [[ -n "$HUB_STATUS" ]]; then
+      status="$(jq -r --arg id "$id" '.agents[$id].state // empty' "$HUB_STATUS" 2>/dev/null || true)"
+    else
+      status="$("$HERDR" agent get "$id" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)"
+    fi
     [[ "$status" == "working" ]] && continue
     # An agent whose last turn ended in a provider error is not idle, it is
     # finished: every nudge buys another identical failure. Both DeepSeek
@@ -246,7 +266,7 @@ while :; do
     # "0 posts you have not read" is worse than saying nothing.
     news_line=""
     [[ "$unread" -gt 0 ]] 2>/dev/null && news_line="You have ${unread} post(s) you have not read. "
-    if "$HERDR" agent prompt "$id" "You ended your turn ${minutes} minutes ago and the swarm is not done. Ending a turn is not waiting: nothing prompts you again. ${news_line}Read inbox, see what your peers have taken, and get on with what you said you were doing (name() if that has changed); when there is nothing left to take, call the wait tool and keep it open, and call it again each time it returns. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.} Nudge ${n} of ${MAX_NUDGES}." >/dev/null 2>&1; then
+    if prompt_agent "$id" "You ended your turn ${minutes} minutes ago and the swarm is not done. Ending a turn is not waiting: nothing prompts you again. ${news_line}Read inbox, see what your peers have taken, and get on with what you said you were doing (name() if that has changed); when there is nothing left to take, call the wait tool and keep it open, and call it again each time it returns. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.} Nudge ${n} of ${MAX_NUDGES}." >/dev/null 2>&1; then
       log_event "$id" "$idle" true "$n"
       echo "idle-nudge: prompted $id after ${idle}s (nudge $n/$MAX_NUDGES)"
     else

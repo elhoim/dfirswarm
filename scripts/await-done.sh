@@ -123,14 +123,26 @@ for agent in team.get("agents", []):
 # Herdr missing or a pane already gone is not an error: the harness's own
 # nudge and the sentinel hook still cover them.
 nudge_unfinished() {
-  local sandbox="$1" aid
+  local sandbox="$1" aid hub=""
   [[ "$NUDGE" -eq 1 ]] || return 0
-  command -v "${HERDR_BIN:-herdr}" >/dev/null 2>&1 || { say "  nudge: herdr is not on PATH"; NUDGE=0; return 0; }
+  # Agents in microVMs are reached through the hub, which delivers the words
+  # to Pi itself; Herdr can only type into a pane that runs `msb exec`.
+  [[ -f "$sandbox/hub.dir" ]] && hub="$(cat "$sandbox/hub.dir")/admin.sock"
+  if [[ -z "$hub" ]]; then
+    command -v "${HERDR_BIN:-herdr}" >/dev/null 2>&1 || { say "  nudge: herdr is not on PATH"; NUDGE=0; return 0; }
+  fi
+  local words="The swarm is finished: done/SWARM_DONE exists. Call done now and stop."
   while IFS= read -r aid; do
     [[ -n "$aid" ]] || continue
     case " $NUDGED " in *" $aid "*) continue ;; esac
     NUDGED="$NUDGED $aid"
-    if "${HERDR_BIN:-herdr}" agent prompt "$aid" "The swarm is finished: done/SWARM_DONE exists. Call done now and stop." >/dev/null 2>&1; then
+    local reached=0
+    if [[ -n "$hub" ]]; then
+      node "$ROOT/scripts/vm-hub-send.mjs" "$hub" "$(jq -nc --arg a "$aid" --arg t "$words" '{op: "prompt", agent: $a, text: $t, deliver: "steer", kind: "swarm_done"}')" >/dev/null 2>&1 && reached=1
+    else
+      "${HERDR_BIN:-herdr}" agent prompt "$aid" "$words" >/dev/null 2>&1 && reached=1
+    fi
+    if [[ "$reached" -eq 1 ]]; then
       say "  nudged $aid"
     else
       say "  could not nudge $aid (pane gone?)"

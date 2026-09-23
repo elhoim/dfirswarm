@@ -191,7 +191,9 @@ function write(record) {
     // lost lines, and the anchor has to keep saying how long it was.
     lineCount = Math.max(lineCount, countLines(eventsFile));
   }
-  const withChain = { ...record, prev: previous };
+  // When the line reached the host, by the host's clock. `ts` is the
+  // sender's, and a sender in a VM has its own clock — one it controls.
+  const withChain = { ...record, recv_ts: new Date().toISOString(), prev: previous };
   const line = `${JSON.stringify(withChain)}\n`;
   const head = lineHash(line.slice(0, -1));
   // The anchor goes first, naming the line that is about to exist and the one
@@ -254,12 +256,12 @@ function write(record) {
  */
 export function attribute(record, map = tokens, key = gateKey) {
   // `agent_unverified` and `claimed_agent` are this function's verdict on the
-  // sender. A sender that supplies them decides its own verdict: it can stamp
+  // sender, and `recv_ts` is the collector's own clock. A sender that supplies them decides its own verdict: it can stamp
   // its own lines "could not be attributed" and repudiate them later, or
   // spray `claimed_agent` to bury a real forgery in noise. They are dropped
   // from the input for the same reason `prev` is — the record says what the
   // collector found, not what the line asked it to say.
-  const { token, gate, agent_unverified: _u, claimed_agent: _c, prev: _p, ...rest } = record;
+  const { token, gate, agent_unverified: _u, claimed_agent: _c, prev: _p, recv_ts: _r, ...rest } = record;
   if (!map.size) return rest;
   const claimed = typeof rest.agent === "string" ? rest.agent : "";
   // With a gate in front, a token counts only when the gate vouched for it.

@@ -38,47 +38,21 @@ import {
   overCap,
   STOP_GRACE_MS,
   appendEvent,
-  applySessionUsage,
   budgetPressure,
-  claimFile,
-  clearStopSteer,
   createContext,
   diffWatchedPaths,
   extractWritePath,
-  fileDiff,
-  guardWrite,
-  harnessStop,
   inboxLogResult,
   inboxPageChars,
   keepToolOutputFromFile,
   toolOutputRel,
   type FullOutputRef,
-  listClaims,
-  listFileHistory,
-  listTeam,
-  markDone,
-  markStopSteer,
-  postMessage,
-  readBudget,
-  readBudgetStatus,
-  readInbox,
-  recordFileVersion,
-  releaseAllOwned,
-  releaseFile,
   resolveAgentId,
-  restoreFileVersion,
   shortHash,
   stopNetguardSidecarIfOver,
   summarizeArgs,
-  swarmDoneExists,
-  systemPost,
-  threadJoin,
-  threadOpen,
   toolText,
   usageFromSessionEntries,
-  waitForSwarmChange,
-  forgeTool,
-  listForgedTools,
   runForgedTool,
   packSecretsFor,
   redactSecrets,
@@ -89,8 +63,6 @@ import {
   INPUTS_DIR,
   agentPressure,
   modelPressure,
-  listLedger,
-  recordEntry,
   LEDGER_KINDS,
   LEDGER_CONFIDENCE,
   LEDGER_MD,
@@ -108,15 +80,50 @@ import {
   type SwarmContext,
   type WatchSnapshot,
   isOwnScratch,
+  nudgePeerViaBroker,
+} from "./protocol.ts";
+// The board: protocol.ts on the host, the hub on the other side of a VM's wall (board.ts says why).
+import {
+  applySessionUsage,
+  claimFile,
+  clearStopSteer,
+  fileDiff,
+  guardWrite,
+  harnessStop,
+  listClaims,
+  listFileHistory,
+  listTeam,
+  markDone,
+  markStopSteer,
+  postMessage,
+  readBudget,
+  readBudgetStatus,
+  readInbox,
+  recordFileVersion,
+  releaseAllOwned,
+  releaseFile,
+  restoreFileVersion,
+  swarmDoneExists,
+  systemPost,
+  threadJoin,
+  threadOpen,
+  waitForSwarmChange,
+  forgeTool,
+  listForgedTools,
+  listLedger,
+  recordEntry,
   heldBy,
   claimName,
   correctionsAfter,
   nameOf,
   readNames,
-  nudgePeerViaBroker,
-} from "./protocol.ts";
+  updateToolchainRecord,
+  boardSocket,
+  openHubLink,
+  type HubLink,
+} from "./board.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
-import { newPackages, readToolchain, TOOLCHAIN_DIR, TOOLCHAIN_REL, type ToolchainRecord } from "./toolchain.ts";
+import { TOOLCHAIN_DIR } from "./toolchain.ts";
 
 type ToolCtx = { cwd: string };
 
@@ -299,6 +306,8 @@ export default function (pi: ExtensionAPI) {
   /** Limits this process has already steered on; the clock itself is shared. */
   const steeredHere = new Set<string>();
   let capTimer: ReturnType<typeof setInterval> | null = null;
+  /** The hub's link, when this agent lives in a microVM; null on the host. */
+  let hubLink: HubLink | null = null;
   /** Forged tools: on when the spawner said so (see the block near the end). */
   const forging = process.env.SWARM_TOOL_FORGING === "1";
   /**
@@ -642,6 +651,30 @@ export default function (pi: ExtensionAPI) {
     await logEvent(ctx.cwd, agentId, "agent_start", {}, { ok: true });
     await logInputsGuard(ctx.cwd);
     watchCaps(ctx);
+    // In a microVM the harness can neither type into this pane nor read its
+    // screen — the pane runs `msb exec`, and Herdr sees only that. The hub
+    // keeps a link instead: its prompts arrive here as user messages, and
+    // this agent's working/idle state goes back up it (board.ts).
+    const hubSocket = boardSocket();
+    if (hubSocket && !hubLink) {
+      const cwd = ctx.cwd;
+      hubLink = openHubLink(hubSocket, (message) => {
+        try {
+          pi.sendUserMessage(message.text, { deliverAs: message.deliver ?? "followUp" });
+        } catch {
+          steer(message.text);
+        }
+        void logEvent(cwd, agentId, "hub_prompt", { kind: message.kind ?? "prompt" }, { ok: true });
+      });
+    }
+  });
+
+  pi.on("agent_start", async () => {
+    hubLink?.state("working");
+  });
+
+  pi.on("agent_end", async () => {
+    hubLink?.state("idle");
   });
 
   /**
@@ -774,15 +807,7 @@ export default function (pi: ExtensionAPI) {
     if (Date.now() - lastToolchainAt < TOOLCHAIN_INTERVAL_MS) return;
     lastToolchainAt = Date.now();
     try {
-      const record = await readToolchain(cwd);
-      const file = join(cwd, TOOLCHAIN_REL);
-      const before = await readFile(file, "utf8")
-        .then((text) => JSON.parse(text) as ToolchainRecord)
-        .catch(() => null);
-      const fresh = newPackages(before, record);
-      if (!before || fresh.length || before.packages.length !== record.packages.length) {
-        await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, "utf8");
-      }
+      const { fresh } = await updateToolchainRecord(cwd);
       for (const pkg of fresh) {
         await logEvent(cwd, agentId, "toolchain", { name: pkg.name, version: pkg.version }, {
           ok: true,
@@ -991,9 +1016,13 @@ export default function (pi: ExtensionAPI) {
         // best-effort reap
       }
       await logStop(ctx.cwd, "shutdown");
-      // The last agent out ends the egress proxy this swarm was given.
-      await stopNetguardSidecarIfOver(ctx.cwd).catch(() => false);
+      // The last agent out ends the egress proxy this swarm was given. A VM
+      // has none: its pid file would name a process on the host.
+      if (!boardSocket()) await stopNetguardSidecarIfOver(ctx.cwd).catch(() => false);
     }
+    hubLink?.state("idle", "session ended");
+    hubLink?.close();
+    hubLink = null;
   });
 
   // Layer B: harness blocks edit/write without a live claim.
@@ -2537,7 +2566,7 @@ export default function (pi: ExtensionAPI) {
       await logStop(toolCtx.cwd, "done", result.reason);
       // `terminate` ends the session without a session_shutdown, so the
       // last agent out has to turn the proxy off from here.
-      await stopNetguardSidecarIfOver(toolCtx.cwd).catch(() => false);
+      if (!boardSocket()) await stopNetguardSidecarIfOver(toolCtx.cwd).catch(() => false);
       return okResult(result, { terminate: true });
     },
   });
