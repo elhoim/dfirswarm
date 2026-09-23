@@ -250,6 +250,21 @@ test("every entry that ships keeps the library's contract", async () => {
     }
     if (/grep -c '\^\| ' work\/timeline\.md/.test(text)) bad(id, "counts every table line in work/timeline.md, not dated rows");
     if (/head -\d+ work\/timeline\.md/.test(text)) bad(id, "looks for the timeline's header in the file's first lines, not its header row");
+    // "Every answer cites evidence", held per numbered section (library/README.md).
+    if (!checks.some((c) => c.startsWith("awk 'BEGIN{") && c.includes("4*b>n") && c.endsWith("work/report.md"))) {
+      bad(id, "no per-section citation check over work/report.md");
+    }
+    // A bare word in prose is not a citation: "offset" needs its number, a hypothesis its label.
+    const cite = checks.find((c) => c.includes("4*b>n")) ?? "";
+    if (/\|hypothesis[|/]/.test(cite) || !cite.includes("offset|record ?id|event ?id)[ #:=]*[0-9]")) bad(id, "the citation check counts a bare word as a citation");
+    // A count of files passes on an empty rule or a stray extract; check what the file holds.
+    if (/find work\/rules -name '\*\.yar\*' 2>\/dev\/null \| wc -l/.test(text)) bad(id, "counts YARA files instead of checking a rule is declared");
+    if (text.includes("work/rules") && !checks.some((c) => c.startsWith("command -v yara >/dev/null || exit 0;"))) bad(id, "checks work/rules without the guarded compile check");
+    if (/find work\/extracted -type f/.test(text)) bad(id, "counts extracted files instead of reading work/extracted/**/SHA256SUMS");
+    if (text.includes("SHA256SUMS") && !/sha256sum -c.*shasum -a 256 -c/.test(text)) bad(id, "counts SHA256SUMS lines without verifying them");
+    if (/find work\/rules -name /.test(text)) bad(id, "finds YARA files with -name, which misses .YAR");
+    // Under pipefail, grep -q ending a pipe can fail a check that matched (SIGPIPE upstream).
+    if (checks.some((c) => /\| *grep -q \.$/.test(c))) bad(id, "a check ends a pipe with grep -q");
     for (const c of checks) {
       if (c.includes("`")) bad(id, `a check holds a backtick: ${c}`);
       try {

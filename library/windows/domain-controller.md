@@ -204,6 +204,7 @@ unchanged.
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `grep -qi 'blast radius' work/report.md`
 - `test -f work/timeline.md`
