@@ -11,12 +11,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import {
+  egressRules,
   guestPiConfig,
   hostGatewayUrl,
   mountsFor,
   placeholderFor,
   probeVerdict,
   registryLabel,
+  tlsBypass,
   vmName,
   type ResolvedSecret,
   type VmSpec,
@@ -150,4 +152,15 @@ test("a VM's name and its registry label are stable, and two registries never sh
   assert.equal(registryLabel("/a/runs/registry.json"), registryLabel("/a/runs/../runs/registry.json"));
   assert.notEqual(registryLabel("/a/runs/registry.json"), registryLabel("/b/runs/registry.json"));
   assert.match(registryLabel("/a/runs/registry.json"), /^[0-9a-f]{16}$/);
+});
+
+test("a VM's allowlist reads the host allowlist's syntax (netguard-proxy.mjs): suffixes, ports and addresses become their own rules", () => {
+  const hosts = ["api.openai.com", "*.blob.core.windows.net", ".googleapis.com", "mirror.example.org:8443", "10.0.0.5:3128", "PyPI.org"];
+  const rules = egressRules(hosts);
+  assert.deepEqual(rules, [
+    { port: 443, domains: ["api.openai.com", "pypi.org"], suffixes: [".blob.core.windows.net", ".googleapis.com"], ips: [] },
+    { port: 3128, domains: [], suffixes: [], ips: ["10.0.0.5"] },
+    { port: 8443, domains: ["mirror.example.org"], suffixes: [], ips: [] },
+  ]);
+  assert.deepEqual(tlsBypass(hosts), ["api.openai.com", "pypi.org", "*.blob.core.windows.net", "*.googleapis.com", "mirror.example.org"]);
 });

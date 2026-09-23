@@ -198,20 +198,22 @@ test("guest root cannot change the run's floor, the evidence or the trace, by an
   assert.ok(!existsSync(join(r.sandbox, ".pi-sessions", "vmt100", "planted")), "a write after unmounting the session hole never reached the host");
 });
 
-test("a VM reaches its allowed host, and no other name or address", async (t) => {
+test("a VM reaches its allowed host and the names under an allowed suffix, and no other name or address", async (t) => {
   if (skip) return t.skip(skip);
-  const r = await rig("vmt2", ["vmt200"], { allow_hosts: ["registry.npmjs.org"] });
+  const r = await rig("vmt2", ["vmt200"], { allow_hosts: ["registry.npmjs.org", "*.github.com"] });
   const created = await createVms(r.spec);
   assert.deepEqual(created.failures, []);
   const name = vmName(r.run, "vmt200");
   const out = inVm(name, `
     code() { curl -s -o /dev/null -m 15 -w '%{http_code}' "$1" 2>/dev/null || echo fail; }
     echo "allowed=$(code https://registry.npmjs.org/)"
+    echo "suffix=$(code https://api.github.com/)"
     echo "denied=$(code https://example.com/)"
     echo "ip=$(code https://1.1.1.1/)"
     getent hosts example.com >/dev/null 2>&1 && echo "resolved=yes" || echo "resolved=no"
   `);
   assert.match(out, /allowed=(200|301|302|304)/, out);
+  assert.match(out, /suffix=(200|301|302|304|403)/, `a name under an allowed *.suffix is reachable\n${out}`);
   assert.match(out, /denied=(000|fail)/, out);
   assert.match(out, /ip=(000|fail)/, out);
   assert.match(out, /resolved=no/, "a name outside the rules does not resolve");

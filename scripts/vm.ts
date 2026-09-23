@@ -463,7 +463,11 @@ async function createOne(
 
   const policy = new M.NetworkPolicyBuilder().defaultDeny();
   if (spec.open_net) policy.egress((r) => r.allowPublic());
-  if (allowHosts.length) policy.egress((r) => r.tcp().port(443).allowDomains(allowHosts));
+  for (const rule of egressRules(allowHosts)) {
+    if (rule.domains.length) policy.egress((r) => r.tcp().port(rule.port).allowDomains(rule.domains));
+    if (rule.suffixes.length) policy.egress((r) => r.tcp().port(rule.port).allowDomainSuffixes(rule.suffixes));
+    for (const ip of rule.ips) policy.egress((r) => r.tcp().port(rule.port).allow((d) => d.ip(ip)));
+  }
   for (const port of hostPorts) policy.egress((r) => r.tcp().port(port).allowHost());
 
   const env: Record<string, string> = {
@@ -508,7 +512,7 @@ async function createOne(
       if (secretHosts.size) {
         n.tls((t: TlsB) => {
           t.interceptedPorts([443]);
-          for (const h of allowHosts) if (!secretHosts.has(h)) t.bypass(h);
+          for (const h of tlsBypass(allowHosts)) if (!secretHosts.has(h)) t.bypass(h);
           return t;
         });
       }
@@ -802,6 +806,40 @@ export async function imageCatalog(
     await run(msbBinary(), ["stop", name], { timeoutMs: 120_000 });
     await run(msbBinary(), ["rm", name], { timeoutMs: 60_000 });
   }
+}
+
+/**
+ * The host allowlist's own syntax (scripts/netguard-proxy.mjs: an exact host,
+ * `.suffix` or `*.suffix` for the names under it, `host:port`, an address) as
+ * msb egress rules, one per port. Without this a `--allow-host
+ * '*.blob.core.windows.net'` that works on the host would match nothing in a
+ * VM.
+ */
+export function egressRules(hosts: string[]): Array<{ port: number; domains: string[]; suffixes: string[]; ips: string[] }> {
+  const byPort = new Map<number, { port: number; domains: string[]; suffixes: string[]; ips: string[] }>();
+  for (const raw of hosts) {
+    const entry = raw.trim().toLowerCase();
+    if (!entry) continue;
+    let host = entry;
+    let port = 443;
+    const m = entry.match(/^(.*):(\d+)$/);
+    if (m && !entry.startsWith("[")) {
+      host = m[1];
+      port = Number.parseInt(m[2], 10);
+    }
+    if (host.startsWith("*.")) host = host.slice(1);
+    const rule = byPort.get(port) ?? { port, domains: [], suffixes: [], ips: [] };
+    byPort.set(port, rule);
+    if (host.startsWith(".")) rule.suffixes.push(host);
+    else if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":")) rule.ips.push(host.replace(/^\[|\]$/g, ""));
+    else rule.domains.push(host);
+  }
+  return [...byPort.values()].sort((a, b) => a.port - b.port);
+}
+
+/** The same allowlist as TLS bypass patterns: a suffix is `*.suffix` to msb. */
+export function tlsBypass(hosts: string[]): string[] {
+  return egressRules(hosts).flatMap((r) => [...r.domains, ...r.suffixes.map((s) => `*${s}`)]);
 }
 
 /** Can this host run a VM at all, and is the image here? */

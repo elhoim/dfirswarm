@@ -26,7 +26,9 @@ All notable changes to this project. The format follows
   booted. `--toolbox` and `--catalog` run in a throwaway VM of the same
   image, so a host with no forensic tools still gets its first pass, and
   evidence whose links lead out of the `--inputs` directory is refused,
-  naming them, since no VM could follow them. The console's kickoff has the
+  naming them, since no VM could follow them. `--allow-host` means in a VM
+  what it means to netguard (`*.suffix`, `.suffix`, `host:port`, an
+  address). The console's kickoff has the
   switch; the report and the run page say what each VM could write, reach
   and was given. ADR 0005.
 - **Host custody at stop** (`scripts/custody.ts` → `custody.json`, printed by
