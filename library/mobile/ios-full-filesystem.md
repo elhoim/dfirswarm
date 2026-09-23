@@ -21,10 +21,11 @@ The archive is the phone; nothing in this report comes from anywhere else.
 The evidence is under `inputs/` (read-only; call `inputs` to list it, and
 read `inputs.json` for the manifest). If the operator left a brief beside
 it (`inputs/CASE.md`, a ticket, the requester's questions), its questions
-come first and the ones below fill in what it did not ask. If `SWARM.md`
-has an "Evidence catalog" section, know that the catalog covers disk and memory images only, not an
-archive: list it once with `tar tf`, post the listing to the shared
-`work/extracted/`, and read that instead of listing it again.
+come first and the ones below fill in what it did not ask. The evidence
+catalog, if `SWARM.md` has one, covers disk and memory images only, not an
+archive: list it once with `tar tvf` (or `unzip -Z -l`), save it as
+`work/listing.txt` (claim it first), post that path on the board, and grep
+that file instead of listing again.
 
 ### Questions the report has to answer
 
@@ -52,7 +53,12 @@ archive: list it once with `tar tf`, post the listing to the shared
    timestamp.
 4. Applications and their use: what was installed, when, and how it was
    used, from `KnowledgeC.db` (app in-focus intervals, notifications,
-   Safari, Bluetooth and charging streams), `ApplicationState.db`, the
+   Safari, Bluetooth and charging streams) and, on iOS 16 and later, the
+   Biome streams beside it (`/private/var/mobile/Library/Biome/streams/`,
+   SEGB files that need a forged reader), `DataUsage.sqlite` under
+   `/private/var/wireless/Library/Databases/` for per-process network use,
+   the powerlog (`CurrentPowerlog.PLSQL`) for app and screen state,
+   `ApplicationState.db`, the
    installed-application plists and the `MobileInstallation` logs, Screen
    Time, `interactionC.db`, and the app containers themselves; the
    applications that matter to the case, and the ones removed.
@@ -85,27 +91,33 @@ archive: list it once with `tar tf`, post the listing to the shared
   plists), `exiftool`, `strings`, `file` and `python3`; a peer may find
   `browser_history` and `sqlite_query` already seeded from the tool library.
   There is no root: no mounting, no `sudo`.
-- If `SWARM.md` has an "Evidence catalog" section, the first pass is already
-  done: read `catalog/` instead of rebuilding it.
+- The evidence catalog does not open archives; the listing above
+  replaces it.
 - If `skill` is in your tool list, this run carries packs: call it once with
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
 - Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) with
-  `tar xf <archive> -C work/extracted/<your id>/ <path>`, and analyse the
-  extracts. Copy a SQLite database together with its `-wal` and `-shm`
-  files and open the copy, never the original, so the write-ahead log is
-  replayed into what you query. Copy into the shared `work/extracted/` only
-  what peers must read (`sms.db`, `KnowledgeC.db`, the routined caches), and
-  claim it first. Your own scratch goes under `work/<your id>/`.
+  nothing there can execute; hash everything you pull out), batching your
+  paths so the archive is streamed once, not once per file:
+  `tar -xf <archive> -C work/extracted/<your id>/ --no-same-owner --no-same-permissions -T work/<your id>/paths.txt`
+  (for a zip, `unzip -n <archive> -d work/extracted/<your id>/ <path>...`).
+  Quote paths exactly as the listing prints them; tools prefix them
+  differently (`private/var/...`, `/private/var/...`, `filesystem1/...`).
+  Analyse the extracts. Copy a SQLite database together with its `-wal`
+  and `-shm` files and open the copy, never the original, so the
+  write-ahead log is replayed into what you query. Copy into the shared
+  `work/extracted/` only what peers must read (`sms.db`, `KnowledgeC.db`,
+  the routined caches), and claim it first. Your own scratch goes under
+  `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
   `ledger/ledger.md`. iOS keeps several epochs: Cocoa seconds from 2001 in
-  most databases, nanoseconds since 2001 in `sms.db`, Unix seconds
-  elsewhere; convert each to UTC, say which epoch the column used, and say
-  which time zone the device kept.
+  most databases, nanoseconds since 2001 in `sms.db` from iOS 11 (seconds
+  before it; test the magnitude of the value), Unix seconds elsewhere;
+  convert each to UTC, say which epoch the column used, and say which
+  time zone the device kept.
 - Every claim in the report cites its evidence: the path inside the
   archive, the database, the table and the row id, the plist key, the hash
   of a media file, the command that produced it. A claim without evidence

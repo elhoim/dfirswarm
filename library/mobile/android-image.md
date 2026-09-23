@@ -26,11 +26,14 @@ The evidence is under `inputs/` (read-only; call `inputs` to list it, and
 read `inputs.json` for the manifest). If the operator left a brief beside
 it (`inputs/CASE.md`, a ticket, the requester's questions), its questions
 come first and the ones below fill in what it did not ask. If `SWARM.md`
-has an "Evidence catalog" section, the kickoff already ran the partition
-table and the file listing of a raw image into `catalog/` (an archive is not
-cataloged: list it once with `tar tf` and share the listing); read those
-before running
-`mmls` or `tar tf` again.
+has an "Evidence catalog" section, the kickoff already ran `mmls` on a raw
+image into `catalog/`; Android partition names (`userdata`, `system_a`,
+`metadata`) do not match the catalog's file-system filter, so expect no
+body file, and let the partition agent run `fsstat -o` on `userdata` and
+post the result. The catalog does not open archives: list one once with
+`tar tvf` (or `unzip -Z -l`), save it as `work/listing.txt` (claim it
+first), post that path on the board, and grep that file instead of
+listing again.
 
 ### Questions the report has to answer
 
@@ -42,7 +45,11 @@ before running
    (full-disk, file-based, or decrypted by the tool) and what that leaves
    unreadable, and the acquisition record if the tool wrote one.
 2. Device and accounts: manufacturer, model, Android version, build and
-   security patch level (`/system/build.prop`, `/vendor/build.prop`), the
+   security patch level (`/system/build.prop`, `/vendor/build.prop`; where
+   system sits inside the `super` dynamic partition or is EROFS, which The
+   Sleuth Kit cannot read, take the fingerprint and SDK from the `version`
+   element of `/data/system/packages.xml` and from
+   `/data/property/persistent_properties`), the
    serial, IMEI and SIM details as recorded (the telephony databases,
    `settings_global.xml` and `settings_secure.xml` or `settings.db`), the
    device name and time zone, every account on the device
@@ -92,8 +99,9 @@ before running
   `exiftool`, `file` and `python3`; a peer may find `sqlite_query`,
   `browser_history`, `sig_carve` and `chunk_needles` already seeded from
   the tool library. There is no root: no mounting, no `sudo`.
-- If `SWARM.md` has an "Evidence catalog" section, the first pass is already
-  done: read `catalog/` instead of rebuilding it.
+- If `SWARM.md` has an "Evidence catalog" section, read `catalog/` for the
+  partition table instead of rebuilding it; for an archive, the listing
+  above replaces it.
 - If `skill` is in your tool list, this run carries packs: call it once with
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
@@ -128,8 +136,21 @@ before running
 - Write every post and file in English. Use tables where they help. If a
   step needs a tool this host does not have, say exactly what is missing
   and what you established up to that point; forge a tool with `make_tool`
-  where a small script closes the gap (an epoch converter, a `packages.xml`
-  reader, a usagestats parser, a messenger schema reader), and share it.
+  where a small script closes the gap (an epoch converter, an ABX decoder
+  and `packages.xml` reader, a usagestats protobuf parser, a messenger
+  schema reader), and share it.
+- On Android 12 and later, `packages.xml`, `packages-warnings.xml` and the
+  `settings_*.xml` files are Android Binary XML (ABX: the first bytes are
+  `41 42 58 00`), which `grep`, `xmllint` and ElementTree cannot read.
+  Check with `xxd -l 4` before parsing, and forge one ABX-to-XML decoder
+  and share it; "no packages found" from a text parser is not a finding.
+  `/data/system/usagestats/` is protobuf from Android 9, not XML.
+- An `.ab` backup is not a tar: read its header lines (`head -c 64`); if
+  the encryption line says `none`, the rest after the 24-byte header is a
+  zlib stream, listed with `tail -c +25 f.ab | python3 -c 'import zlib,sys;sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))' | tar tf -`.
+  If it is encrypted, report it and stop. An `.ab` is a logical backup of
+  the apps that allow one, not a file system; say which questions it
+  cannot answer.
 - f2fs is not readable by The Sleuth Kit. If `fsstat` fails on `userdata`
   and the magic at byte 1024 says f2fs, say so on the board at once: either
   forge a reader for the parts you need with `make_tool` (the superblock,
@@ -184,6 +205,7 @@ in the report, the ledger holds the dated events the timeline rests on, and
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
+- `awk '/^## 1\./{f=1;next}/^## 2\./{f=0}f' work/report.md | grep -qiE 'readable|encrypt|f2fs|ext4'`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 27`
 - `test -f work/identifiers.md`

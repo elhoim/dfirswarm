@@ -65,7 +65,11 @@ commands again.
    the protocol gave it, the size, the type by magic and the hash — for
    reading, parsing and disassembling, never running; and every
    authentication in the clear reported by protocol, account name, client
-   and server only, never the secret itself.
+   and server only, never the secret itself. The secret includes anything
+   crackable offline: NTLM and NetNTLMv1/v2 responses, Kerberos pre-auth
+   timestamps and AS-REP or TGS-REP encrypted parts, HTTP Digest and CHAP
+   responses. Never build or write a hashcat or john line from them;
+   record only that one exists, with its frame number.
 6. Lateral movement inside the capture: SMB sessions, tree connects and
    file operations, RDP, SSH, WinRM, RPC and WMI sessions between internal
    hosts, with the account where the protocol shows it, the source, the
@@ -178,6 +182,7 @@ the dated events the timeline rests on, and `inputs/` is unchanged.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
+- `grep -qiE 'tshark|tcpdump|capinfos|scapy|dpkt' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 27`
 - `test -f work/indicators.md`

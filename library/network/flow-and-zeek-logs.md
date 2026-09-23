@@ -19,15 +19,16 @@ internal hosts talk to the outside on a clock, which ones sweep the
 network, what volume left and to where, what the resolver and the TLS
 handshakes reveal about the destinations, which files crossed by hash, and
 which hosts the next collection should take first. Firewall, VPN, proxy
-and DNS server logs are the perimeter entry's case; the two share one
-periodicity tool.
+and DNS server logs are the perimeter entry's case; the periodicity tool
+one of you forges here can be saved to the tool library for it.
 
 The evidence is under `inputs/` (read-only; call `inputs` to list it, and
 read `inputs.json` for the manifest). If the operator left a brief beside
 it (`inputs/CASE.md`, an alert, the addresses or the window they care
 about), its questions come first and the ones below fill in what it did not
-ask. If `SWARM.md` has an "Evidence catalog" section, the kickoff already
-ran the first pass; read `catalog/` before running the same commands again.
+ask. The evidence catalog covers disk and memory images only; it holds
+nothing for logs. One agent posts the inventory (question 1) and everyone
+reads that.
 
 ### Questions the report has to answer
 
@@ -48,8 +49,12 @@ ran the first pass; read `catalog/` before running the same commands again.
    intervals close to the median), the count, the durations and the byte
    counts; the pairs whose regularity and persistence read as a scheduled
    channel, ranked; and the destinations in the long tail that only one
-   host reaches and reaches often. Forge one periodicity tool and share
-   it, so every pair is measured the same way.
+   host reaches and reaches often. Before scoring, merge flow records that
+   continue one session (same five-tuple, start within the exporter's
+   active timeout of the previous end, which you state), so an exporter's
+   re-exports of a long session are not read as a beacon; for Zeek, score
+   connection starts (`ts`), not log lines. Forge one periodicity tool and
+   share it, so every pair is measured the same way.
 4. Scanning: hosts whose distinct destination or port count stands out,
    the connections that failed or were rejected (`conn_state` S0, REJ,
    RSTO and their flow equivalents in flags and packet counts), the sweeps
@@ -60,6 +65,10 @@ ran the first pass; read `catalog/` before running the same commands again.
    volume out stands out against the host's history in the window; the
    protocol and port they used; and the files Zeek saw leaving with their
    hashes, types and sizes (`files.log` joined to `conn.log` by `uid`).
+   Multiply sampled flow bytes and packets by the sampling rate from
+   question 1 and say so; for Zeek, use `orig_bytes` and `resp_bytes`
+   (payload), and report a non-zero `missed_bytes` as a capture-loss
+   caveat.
 6. Names, certificates and notices: `dns.log` queries by host with the
    rare names, the generated-looking names, the TXT and unusual types, the
    NXDOMAIN runs and the names first seen in the window; `ssl.log` and
@@ -87,15 +96,19 @@ ran the first pass; read `catalog/` before running the same commands again.
   `sqlite3` and `python3`; read flow exports the same way, and binary
   `nfcapd` files with `nfdump` if it is installed — if it is not, say so on
   the board and work from whatever text export came with them. Do not
-  decompress or copy the logs wholesale. Load once into a table you can
-  query (`work/<your id>/flows.sqlite`: one table per log type keyed by
-  Zeek's `uid` or by the flow's five-tuple and start time, with time in
-  UTC, source, destination, ports, protocol, service, duration, bytes and
-  packets in each direction, state, and the file and line it came from)
-  and forge that loader with `make_tool` so every peer reads the same
-  tables. There is no root.
-- If `SWARM.md` has an "Evidence catalog" section, the first pass is already
-  done: read `catalog/` instead of rebuilding it.
+  decompress or copy the logs wholesale. One agent loads them once into a
+  database at `work/extracted/flows.sqlite` (claimed first; stream with
+  `zcat file | loader`, never write decompressed copies): one table per
+  log type keyed by Zeek's `uid` or by the flow's five-tuple and start
+  time, with time in UTC, source, destination, ports, protocol, service,
+  duration, bytes and packets in each direction, state, and the file and
+  line it came from. That loader is forged with `make_tool` and shared,
+  its row counts per table are posted against the `wc -l` or `#close`
+  counts, and peers open the database read-only (`sqlite3 -readonly`).
+  Everyone else waits for that post or works a log the loader has not
+  reached. There is no root.
+- The evidence catalog holds nothing for logs; the inventory posted for
+  question 1 replaces it.
 - If `skill` is in your tool list, this run carries packs: call it once with
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
