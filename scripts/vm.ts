@@ -36,6 +36,7 @@
  *   node --experimental-strip-types scripts/vm.ts finish --run ID --sandbox DIR [--no-snapshot]
  *   node --experimental-strip-types scripts/vm.ts reap   [--run ID] [--registry FILE]
  *   node --experimental-strip-types scripts/vm.ts list   [--run ID]
+ *   node --experimental-strip-types scripts/vm.ts toolbox --image REF --out FILE [--preset SETS] [--required]
  *   node --experimental-strip-types scripts/vm.ts msb-path
  */
 import { execFile } from "node:child_process";
@@ -720,6 +721,40 @@ export async function reapVms(options: { run?: string; registry?: string } = {})
   return removed;
 }
 
+/**
+ * The toolbox check (scripts/toolbox.sh) run where the agents will run: in
+ * a throwaway VM of the run's image, offline. On the host it described the
+ * host, which an agent in a VM never touches. Returns the check's exit code
+ * (3: a required tool is missing) and the toolbox.json it wrote.
+ */
+export async function imageToolbox(image: string, preset: string, required: boolean): Promise<{ code: number; json: string; output: string }> {
+  const M = await sdk();
+  const { mkdtemp, copyFile } = await import("node:fs/promises");
+  const tmp = await mkdtemp("/tmp/dfs-tb-");
+  const name = `dfs-toolbox-${randomBytes(6).toString("hex")}`;
+  try {
+    await copyFile(join(ROOT, "scripts", "toolbox.sh"), join(tmp, "toolbox.sh"));
+    await mkdir(join(tmp, "sbx"), { recursive: true });
+    const sandbox = await M.Sandbox.builder(name)
+      .image(image)
+      .pullPolicy("if-missing")
+      .cpus(1)
+      .memory(1024)
+      .disableNetwork()
+      .detached(true)
+      .replace()
+      .volume("/tb", (v) => v.bind(realpathSync(tmp)))
+      .create();
+    const out = await sandbox.exec("bash", ["/tb/toolbox.sh", "/tb/sbx", preset, ...(required ? ["--required"] : [])]);
+    const json = await readFile(join(tmp, "sbx", "toolbox.json"), "utf8").catch(() => "");
+    return { code: out.code, json, output: `${out.stdout()}${out.stderr()}` };
+  } finally {
+    await run(msbBinary(), ["stop", name], { timeoutMs: 60_000 });
+    await run(msbBinary(), ["rm", name], { timeoutMs: 60_000 });
+    await rm(tmp, { recursive: true, force: true });
+  }
+}
+
 /** Can this host run a VM at all, and is the image here? */
 export async function probeHost(image?: string): Promise<{ ok: boolean; msb: string; version: string; reasons: string[]; image_present?: boolean }> {
   const msb = msbBinary();
@@ -772,6 +807,16 @@ async function main(): Promise<void> {
       const out = await finishRun(runId, resolve(sandbox), { snapshot: !rest.includes("--no-snapshot") });
       console.log(JSON.stringify({ ok: out.every((o) => !o.error), vms: out }));
       return;
+    }
+    case "toolbox": {
+      const image = opt("--image");
+      const preset = opt("--preset") ?? "dfir";
+      const out = opt("--out");
+      if (!image || !out) throw new Error("toolbox needs --image REF --out FILE [--preset SETS] [--required]");
+      const r = await imageToolbox(image, preset, rest.includes("--required"));
+      if (r.json) await writeFile(out, r.json);
+      process.stderr.write(r.output);
+      process.exit(r.json ? r.code : 1);
     }
     case "list": {
       console.log(JSON.stringify({ ok: true, vms: await runVms(opt("--run")) }));

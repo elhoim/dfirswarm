@@ -8,6 +8,32 @@ All notable changes to this project. The format follows
 
 ### Added
 
+- **Agents in microVMs (`--isolation microvm`).** Every agent runs Pi inside
+  its own microVM (microsandbox 0.7.2; macOS on Apple silicon, Linux with
+  KVM), created at kickoff through the SDK (`scripts/vm.ts`) and put away by
+  `stop` with each disk kept as a snapshot with msb's integrity record. The
+  run is a read-only floor in each VM with `work/`, the agent's own
+  `tool-output/` and its own Pi session writable on top, everything at its
+  host path; `--inputs DIR` is used in place and mounted read-only. The board
+  has one writer, the hub (`scripts/vm-hub.ts`): the extension's board calls
+  (`extensions/board.ts`, the protocol's own names) go to it over one held
+  connection, and who is asking is the vsock port the call came in on. A VM
+  reaches only its models' hosts; no credential enters a VM (Pi on the host
+  resolves it, msb swaps it in on the way out). The hub enforces the wall
+  clock and the caps from outside the VMs and stops them once the sentinel
+  has stood for the grace period. Images come from the packs
+  (`images/recipe.py`, `images/README.md`), and a run records the digest it
+  booted. The console's kickoff has the switch; the report and the run page
+  say what each VM could write, reach and was given. ADR 0005.
+- **Host custody at stop** (`scripts/custody.ts` → `custody.json`, printed by
+  `stop` and carried by the report): the evidence re-hashed in full, every
+  session file sealed, every kept output the trace names checked against its
+  hash, every kept VM disk checked against its record.
+- **`recv_ts` on every trace line**, stamped by the collector with the host's
+  clock.
+- **VM integration tests** (`npm run test:vm`, `tests/vm-integration.test.ts`)
+  on real VMs, and a CI job that runs them on a KVM runner.
+
 - **Agents compact their own context.** On by default at kickoff
   (`--no-self-compact` turns it off): each agent watches its context against
   an effective ceiling the harness sets per model (`extensions/context-ceiling.ts`:

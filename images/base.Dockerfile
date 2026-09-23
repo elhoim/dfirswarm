@@ -23,7 +23,7 @@ RUN npm install -g --no-audit --no-fund "@earendil-works/pi-coding-agent@${PI_VE
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates python3 python3-venv jq sqlite3 file xxd socat procps \
-      binutils bsdextrautils less unzip p7zip-full xz-utils bzip2 zstd curl \
+      binutils bsdextrautils less unzip p7zip-full xz-utils bzip2 zstd curl libimage-exiftool-perl \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /etc/dfirswarm \
  && printf '{"profile":"base","pi":"%s","node":"%s","python":"%s"}\n' \

@@ -141,6 +141,19 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   set now names them so a kickoff finds out before the run rather than at
   minute forty.
 
+- **With `--isolation microvm`, the agent is inside a VM and the guards are
+  the host's.** Measured, and held by `tests/vm-integration.test.ts` on a KVM
+  runner: guest root cannot change the run's floor, the evidence or the trace
+  by writing, remounting (its kernel flips the flag; the host still refuses
+  every write) or unmounting a writable hole; a VM reaches its allowed hosts
+  and nothing else, by name or by address; a secret is only a placeholder in
+  the guest; two VMs posting at once through the hub lose nothing. What stays
+  true about a VM: a peer's write to `work/` can take five seconds to look
+  current in another VM (a claim on such a file waits that out; a plain read
+  does not), the guest's TLS is intercepted for the hosts that receive a
+  secret (and only those), and the host's Pi resolves the credentials at
+  kickoff, so a subscription token must outlive the run (`--min-expiry` asks
+  Pi for one that does). [ADR 0005](adr/0005-agents-live-in-microvms.md).
 - **Playwright is off by default** and refuses remote http(s) targets unless `SWARM_BROWSER_REMOTE=1`; under netguard the browser has no egress anyway.
 - **The web app gates what costs money, and keeps case data on this machine.**
   It binds `127.0.0.1`; reads need no token and show case data, so opening it

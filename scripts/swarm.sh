@@ -2473,7 +2473,13 @@ STRIP
     attach_inputs_image "$sandbox" "$inputs_image" >/dev/null
     manifest_attached_inputs "$sandbox" "$inputs_image"
   fi
-  if [[ "$toolbox" != "off" ]]; then
+  if [[ "$toolbox" != "off" && "$isolation" == "microvm" && "$start_agents" -eq 1 ]]; then
+    # The same check, run in a throwaway VM of the run's image: the agents'
+    # tools are the image's, and this host's are none of theirs.
+    local toolbox_args=()
+    [[ "$toolbox_required" -eq 1 ]] && toolbox_args+=(--required)
+    vm_cli toolbox --image "$vm_image" --preset "$toolbox" --out "$sandbox/toolbox.json" ${toolbox_args[@]+"${toolbox_args[@]}"} || exit $?
+  elif [[ "$toolbox" != "off" ]]; then
     local toolbox_args=()
     [[ "$toolbox_required" -eq 1 ]] && toolbox_args+=(--required)
     bash "$ROOT/scripts/toolbox.sh" "$sandbox" "$toolbox" ${toolbox_args[@]+"${toolbox_args[@]}"} || exit $?
