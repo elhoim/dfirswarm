@@ -65,10 +65,13 @@ Read `catalog/` before running the same commands again.
 5. Copies of the directory and the hives: VSS activity (Application 8222,
    8193 and 8224; `vssadmin`, `diskshadow`, `wbadmin`, `ntdsutil` and
    `esentutl` in 4688 and Sysmon 1 command lines; backup logs for a
-   snapshot in the window), the Prefetch and Amcache entries for those
-   tools, files named like the directory database or the hives in places
-   they do not belong (temp paths, a share, an archive), with their
-   journal history and their hashes.
+   snapshot in the window), ESENT 216, 325, 326 and 327 in the Application
+   log naming a copy of the directory database outside `NTDS\` (the trace
+   that survives when process auditing was off), System 7036 for the
+   Volume Shadow Copy service starting in the window, the Prefetch and
+   Amcache entries for those tools, files named like the directory
+   database or the hives in places they do not belong (temp paths, a
+   share, an archive), with their journal history and their hashes.
 6. GPO and SYSVOL: the policies as SYSVOL holds them (`Policies\{GUID}`,
    `gpt.ini` versions), what changed in the window (`$MFT` and `$UsnJrnl`
    under `SYSVOL`, 5136/5137/5141 on groupPolicyContainer objects,
@@ -123,11 +126,19 @@ Read `catalog/` before running the same commands again.
   SYSVOL, and any file the intruder left. The directory database and the hives
   are read for structure, timestamps and membership, never for password
   material: no hash, key, ticket or stored password is extracted, decoded or
-  posted. Every binary, script, stream, document and download that comes out
-  of the image is for reading, parsing, hashing and disassembling, never
-  running — not in the sandbox and not anywhere else; what a file does is what
-  the static reading shows. Copy into the shared `work/extracted/` only what
-  peers must read, and claim it first. Your own scratch goes under
+  posted. Do not export `ntds.dit` whole and do not run `esedb_query` or
+  `esedbexport` on its `datatable`: both write every column, the password
+  blobs included. Read the directory through the event logs, SYSVOL and the
+  replication metadata; if a table read is essential, forge a reader that
+  selects only named columns (`sAMAccountName`, `objectSid`, `whenCreated`,
+  `whenChanged`, `pwdLastSet`, `userAccountControl`, `adminCount`, and
+  `link_table` for membership) and say which it reads. SYSTEM is read for its
+  own keys; its boot key is never derived or combined with the directory.
+  Every binary, script, stream, document and download that comes out of the
+  image is for reading, parsing, hashing and disassembling, never running —
+  not in the sandbox and not anywhere else; what a file does is what the
+  static reading shows. Copy into the shared `work/extracted/` only what peers
+  must read, and claim it first. Your own scratch goes under
   `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,

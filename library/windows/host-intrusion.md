@@ -53,9 +53,12 @@ Read `catalog/` before running the same commands again.
    features, log clearing 1102/104, timestomping), with the artefact and the
    time it was set.
 6. Lateral movement and data: which other hosts, shares and accounts were
-   reached from here (4648, 4776, SMB and RDP client traces, PsExec and
-   WMI remnants, mapped drives, the remote session hives), what data was
-   staged, archived or taken, and by what channel.
+   reached from here (outbound: 4648 explicit credentials, the RDP client
+   `Terminal Server Client\Servers` MRU and bitmap cache, `MountPoints2`
+   and `Map Network Drive MRU`, PsExec and WMI client remnants, the remote
+   session hives; inbound from peers: 4624 type 3 and 10 with source, 4776
+   for local-account NTLM validation), what data was staged, archived or
+   taken, and by what channel.
 7. Leftovers and indicators: every file, tool, script, binary, web shell,
    configuration and network indicator the intruder brought or created, with
    path, hash, size, timestamps and what it does; and what the antivirus saw.

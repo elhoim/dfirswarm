@@ -44,7 +44,12 @@ same commands again.
    a script file — evidenced by the Mark-of-the-Web / `Zone.Identifier`
    stream, Office trust records (Trusted Documents, the file MRUs), recent
    files and jump lists, and Explorer or mount events (4663 and
-   `Microsoft-Windows-VHDMP-Operational` for a mounted image).
+   `Microsoft-Windows-VHDMP-Operational` for a mounted image); the Outlook
+   SecureTemp folder (`OutlookSecureTempFolder` in NTUSER, files under
+   `INetCache\Content.Outlook\`); a browser history or download row whose
+   URL matches a link from question 2 (the click); OneNote, HTA and
+   Windows Script Host lures; and for an ISO/IMG, whether the inner file
+   carried MOTW (it did not before the November 2022 update).
 4. The first execution: the first process that ran from what was opened,
    from Prefetch, Amcache, ShimCache, event 4688, an Office application
    spawning a child process, PowerShell 4103/4104 and its console history,
@@ -71,11 +76,14 @@ same commands again.
 - `inputs/` is read-only and stays byte-for-byte what it was. Never `cat` or
   `read` an image whole. Work on images in place with The Sleuth Kit
   (`mmls`, `fsstat`, `fls`, `istat`, `icat`, `ifind`, `blkls`,
-  `tsk_recover`; E01 files are read natively), libewf (`ewfinfo`), `libpff`
-  / `pffexport` for the Outlook store, `regipy` and `python-evtx`
-  (Python 3.12), `strings`, `sqlite3`, `exiftool`, `oledump` and
-  `olevba`-style parsing for Office documents. There is no root: no mounting,
-  no `sudo`.
+  `tsk_recover`; E01 files are read natively), libewf (`ewfinfo`), `regipy`
+  and `python-evtx` (Python 3.12), `strings`, `sqlite3`, `exiftool`.
+  `pffexport` (libpff) for the Outlook store and `olevba`/`oledump`
+  (oletools) for Office documents are not in the default toolbox: if they
+  are missing, say so on the board, read `.eml` files and the webmail cache
+  with Python's `email` module, read OLE streams with a forged
+  `olefile`-style reader, and record that the PST/OST could not be parsed.
+  The kickoff decides installs. There is no root: no mounting, no `sudo`.
 - If `SWARM.md` has an "Evidence catalog" section, the first pass is already
   done: read `catalog/` instead of rebuilding it.
 - If `skill` is in your tool list, this run carries packs: call it once with
@@ -114,8 +122,8 @@ same commands again.
 - Write every post and file in English. Use tables where they help. If a
   step needs a tool this host does not have, say exactly what is missing and
   what you established up to that point; forge a tool with `make_tool` where
-  a small script closes the gap — a PST/OST message extractor, an LNK
-  parser, a macro-stream dumper, a `Zone.Identifier` reader — and share it.
+  a small script closes the gap — an `.eml` header reader, an LNK parser,
+  a macro-stream dumper, a `Zone.Identifier` reader — and share it.
 
 ## How to divide the work
 

@@ -74,9 +74,14 @@ same commands again.
   `tsk_recover`; E01 files are read natively), libewf (`ewfinfo`), `regipy`
   and `python-evtx` (Python 3.12), `strings`, `sqlite3`, `exiftool`, and the
   crypto toolbox — `pybde`/`bdeinfo`, `pyvhdi`, `openssl`, `gpg`,
-  `pyAesCrypt`. Those come with `--toolbox crypto`; if one is missing the run
-  was not started with it, and you say exactly that and stop at what you
-  established. There is no root: no mounting, no `sudo`.
+  `pyAesCrypt`, and `pytsk3` and `dfvfs` to read the file system inside an
+  unlocked volume as a byte stream. Those come with `--toolbox crypto`; if
+  one is missing the run was not started with it, and you say exactly that
+  and stop at what you established. There is no root: no mounting, no
+  `sudo`. No decrypted volume is written to disk whole: extract only the
+  files the questions need. VeraCrypt and TrueCrypt have no user-space
+  opener here: report the container, its mount traces and any key material
+  the evidence holds, and stop there.
 - If `SWARM.md` has an "Evidence catalog" section, the first pass is already
   done: read `catalog/` instead of rebuilding it.
 - If `skill` is in your tool list, this run carries packs: call it once with
@@ -116,7 +121,8 @@ same commands again.
   step needs a tool this host does not have, say exactly what is missing and
   what you established up to that point; forge a tool with `make_tool` where
   a small script closes the gap — an entropy scanner, a container-signature
-  detector, a BitLocker or VHD metadata reader — and share it.
+  detector, a BitLocker or VHD metadata reader — and share it; a peer may
+  find `fve_metadata` and `aescrypt_v2_decrypt` already seeded.
 
 ## How to divide the work
 

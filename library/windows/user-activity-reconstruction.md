@@ -33,8 +33,9 @@ before running the same commands again.
 
 1. System profile and the account: Windows edition and build, computer
    name, domain or workgroup, the time zone the host kept and whether it
-   changed in the window (SYSTEM `TimeZoneInformation`, System log
-   Kernel-General 1 for clock changes); the account of interest with its
+   changed in the window (SYSTEM `TimeZoneInformation`, System
+   Kernel-General 1 and Security 4616 for clock changes, with the account
+   that made them); the account of interest with its
    SID, profile path, creation time, last logon, password last set and
    group membership (SAM, SOFTWARE `ProfileList`); and every other account
    that logged on in the window, so this account's actions can be told
@@ -49,13 +50,16 @@ before running the same commands again.
 3. Program execution: every program the account ran with first and last
    run and count — Prefetch with its run times, Amcache, ShimCache (an
    order on newer builds, not a time of execution), UserAssist, BAM/DAM,
-   SRUM application usage, `RunMRU`, `MUICache`, jump lists and LNK files
+   SRUM application usage, `ActivitiesCache.db` (Windows Timeline, under
+   `%LOCALAPPDATA%\ConnectedDevicesPlatform\<id>\`) for application focus
+   and duration, `RunMRU`, `MUICache`, jump lists and LNK files
    for what was launched through a document, `ConsoleHost_history.txt` and
    PowerShell 4103/4104, Security 4688 where process auditing was on — and
    for each artefact what it can and cannot say about the time.
 4. Files and folders: what was opened, saved, created, moved and deleted —
    NTUSER `RecentDocs`, `OpenSavePidlMRU`, `LastVisitedPidlMRU`, the Office
-   MRU and trusted-document keys, jump lists and LNK files (target path,
+   MRU and trusted-document keys, NTUSER `WordWheelQuery` (Explorer
+   searches) and `TypedPaths`, jump lists and LNK files (target path,
    volume serial, MAC times), shellbags in UsrClass.dat for every folder
    browsed on local, removable and UNC paths, thumbcache for what was
    viewed, the recycle bin `$I` and `$R` pairs for what was deleted and

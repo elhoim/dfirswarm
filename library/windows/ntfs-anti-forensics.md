@@ -46,8 +46,12 @@ same commands again.
 3. Data hidden in the structures themselves: resident data held inside an
    `$MFT` record, bytes sitting in record slack and in file slack, entries
    that were unlinked or renamed to pass as ordinary, extended attributes
-   (`$EA`) and reparse points used as containers, and directories or
-   `$Extend` children carrying more than their listing shows.
+   (`$EA`) and reparse points used as containers, directories or
+   `$Extend` children carrying more than their listing shows, names left
+   in `$I30` index slack (INDX buffers read with `icat` on the directory's
+   `$INDEX_ALLOCATION`), data parked in `$BadClus:$Bad`, and space between
+   the end of the file system (`fsstat`) and the end of the partition
+   (`mmls`).
 4. Wiping and volume shadow copies: traces that a wiping tool ran (SDelete,
    `cipher /w`, a cleaner) read from its own files, from Prefetch and
    Amcache, and from the pattern it left in `$MFT` and the journals; volume
@@ -58,14 +62,16 @@ same commands again.
    with a bumped sequence number, what `icat`, `blkls` and signature carving
    bring back from the unallocated area, and what is gone because it was
    overwritten rather than merely deleted.
-6. Every hidden item as one table: what it is, where it sits (inode, stream,
-   offset), how it was hidden, the exact command that reveals it, and its
-   hash — one row per item, and a row that says so if a suspected hiding
-   place turned out to hold nothing.
+6. Every hidden item as one table in `work/hidden-items.md`: what it is,
+   where it sits (inode, stream, offset), how it was hidden, the exact
+   command that reveals it, and its SHA-256 — one row per item, and a row
+   that says so if a suspected hiding place turned out to hold nothing.
 7. Timestamp tampering and every technique, then the timeline: files whose
    `$STANDARD_INFORMATION` times disagree with their `$FILE_NAME` times or
-   with the `$UsnJrnl`/`$LogFile` sequence, times with zeroed sub-second
-   precision or an impossible order, and the artefact that dates each; every
+   with the `$UsnJrnl`/`$LogFile` sequence (where `$FILE_NAME` disagrees
+   with that sequence too, say it was rewritten as well, by a move or
+   rename after the stomp), times with zeroed sub-second precision or an
+   impossible order, and the artefact that dates each; every
    tampering technique with the structure it touched and how it was detected;
    what was recovered and what was not; the timeline of the concealment from
    first to last across every source; the hypothesis and how it was tested;
@@ -163,9 +169,9 @@ evidence, the critic has posted a sign-off on the board as a `result` post
 that starts a line with `SIGN-OFF:` and names what they verified,
 `work/timeline.md` holds the merged timeline as a table with at least 23
 dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
-built from the ledger, the report's table of hidden items gives each a hash
-and the command that reveals it, the ledger holds the dated events the
-timeline rests on, and `inputs/` is unchanged.
+built from the ledger, `work/hidden-items.md` holds the table of hidden
+items with each one's SHA-256 and the command that reveals it, the ledger
+holds the dated events the timeline rests on, and `inputs/` is unchanged.
 
 ## Checks
 
@@ -173,6 +179,9 @@ timeline rests on, and `inputs/` is unchanged.
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
+- `test -f work/hidden-items.md`
+- `test "$(grep -c '^| ' work/hidden-items.md)" -ge 3`
+- `grep -qiE 'sha-?256' work/hidden-items.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 23`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 18`

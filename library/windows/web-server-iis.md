@@ -40,8 +40,9 @@ Read `catalog/` before running the same commands again.
    and modules, the application (ASP.NET or PHP, with `php.ini`), the
    database behind it (SQL Server, MySQL or MariaDB with its data directory
    and logs), and where each keeps its logs.
-2. The web logs: IIS `u_ex*.log` under `inetpub\logs\LogFiles\W3SVC<n>` and
-   the `HTTPERR` log (W3C fields, UTC), or Apache `access.log` and
+2. The web logs: IIS `u_ex*.log` under `inetpub\logs\LogFiles\W3SVC<n>`
+   (W3C fields, UTC) and the HTTP.sys `HTTPERR` log under
+   `System32\LogFiles\HTTPERR`, or Apache `access.log` and
    `error.log` (local time); the window they cover and the gaps; the
    requests that read as attempts against the application rather than a
    use of it (a parameter carrying code, a path escaping its directory, a
@@ -52,7 +53,9 @@ Read `catalog/` before running the same commands again.
    upload directories and temp paths created or modified in the window
    (web shells, uploads, scripts, renamed executables — from `$MFT`,
    `$UsnJrnl:$J` and the body file), with path, hash, size, SI and FN
-   timestamps, the content read as text and what it does as read, and the
+   timestamps, the content read as text and what it does as read, the
+   compiled `App_Web_*.dll` and `.compiled` files under `Temporary ASP.NET
+   Files` whose creation time dates a shell's first request, and the
    requests in the logs that reached it (the first, the count, the
    parameters as logged, the response sizes).
 4. Accounts and privilege: the identity the web process ran as (the pool
@@ -66,7 +69,11 @@ Read `catalog/` before running the same commands again.
    services, scheduled tasks, WMI subscriptions, a handler mapping or
    `web.config` that routes to a shell, an IIS module or ISAPI filter
    added, a changed `global.asax`, a PHP `auto_prepend_file`, a second
-   account), with the artefact and the time it was set; every tool and
+   account), with the artefact and the time it was set — the
+   `inetpub\history\CFGHISTORY_*` snapshots diffed against the current
+   `applicationHost.config`, `Microsoft-IIS-Configuration/Operational` 29,
+   ASP.NET 1309/1310 in the Application log, and `FailedReqLogFiles` where
+   tracing was on; every tool and
    script dropped elsewhere (temp paths, `ProgramData`, the profiles) with
    path, hash, size, timestamps and strings; and what the antivirus saw
    (`Windows Defender/Operational` 1116/1117).

@@ -41,8 +41,12 @@ same commands again.
    shadow copies.
 3. The tools and the clearing: traces that a wiping or clearing tool ran —
    SDelete, `cipher /w`, `wevtutil`, a cleaner — from Prefetch, Amcache and
-   event 4688; the log clears themselves (1102 in Security, 104 in System)
-   and exactly what remains in each log before the clear.
+   event 4688; the log clears (Security 1102, System 104 per channel
+   cleared, Security 1100 for a stopped EventLog service, gaps in
+   EventRecordID), what each log holds after the clear, and pre-clear
+   records recovered by carving `ElfChnk` chunks from unallocated space,
+   slack, shadow copies and `pagefile.sys` (a signature carve with `blkls`
+   and a forged chunk parser), each carved record with offset and hash.
 4. Who, from where and when: the account that carried out the destruction,
    the logon type and source that placed it there (4624/4778 for a local or
    an RDP session), and the time of each destructive act tied to the
@@ -150,7 +154,11 @@ that starts a line with `SIGN-OFF:` and names what they verified,
 `work/timeline.md` holds the merged timeline as a table with at least 23
 dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
 built from the ledger, every recovered file is named with its hash in the
-report, the ledger holds the dated events the timeline rests on, and
+report, `work/recovered.md` holds one table of every file recovered or
+declared unrecoverable (original path, source: USN/LogFile/VSS/carve/slack,
+inode or offset, SHA-256 or the reason it is unrecoverable),
+`work/indicators.md` holds the indicators (one row saying so if none was
+found), the ledger holds the dated events the timeline rests on, and
 `inputs/` is unchanged.
 
 ## Checks
@@ -159,6 +167,10 @@ report, the ledger holds the dated events the timeline rests on, and
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
+- `test -f work/recovered.md`
+- `test "$(grep -c '^| ' work/recovered.md)" -ge 3`
+- `test -f work/indicators.md`
+- `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 23`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 18`
