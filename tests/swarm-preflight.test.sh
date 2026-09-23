@@ -509,6 +509,15 @@ grep -q "BLOCKER: this account's login shell" <<<"$out" \
   && fail "a bash login shell should pass the write guard's shell check: $out"
 grep -q "$past_shell_check" <<<"$out" || fail "a bash login shell should get past the shell check to the credential one: $out"
 pass "a bash login shell passes the write guard's shell check and the kickoff goes on"
+# An account database that does not answer is not taken for zsh: the kickoff
+# says so and leaves the panes' HOME alone.
+printf '#!/bin/sh\nexit 2\n' > "$TMP/getent-bin/getent"
+chmod +x "$TMP/getent-bin/getent"
+out="$(PATH="$TMP/getent-bin:$PATH" SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" start --model solo/model \
+  --n 1 --cap-usd 1 --goal-file "$ROOT/prompts/goals/hello.md" --label shell-unknown 2>&1 || true)"
+grep -q "WARN: this account's login shell could not be read" <<<"$out" \
+  || fail "a login shell nobody can read should be warned about, not assumed to be zsh: $out"
+pass "a login shell the account database does not give is warned about, not assumed"
 if command -v zsh >/dev/null 2>&1; then
   echo "skip - a zsh login shell with no zsh installed (zsh is on PATH here)"
 else

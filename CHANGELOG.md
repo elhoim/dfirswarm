@@ -93,7 +93,11 @@ All notable changes to this project. The format follows
   hook keeps its own. The login-shell check now runs whenever a hook is
   written, `--no-write-guard` with `--inputs` or `--quarantine` included: a
   shell that is neither zsh nor bash is refused while the write guard or
-  `--inputs-enforce on` depends on it, and warned about otherwise. Verified
+  `--inputs-enforce on` depends on it, and warned about otherwise. A login
+  shell the account database does not give is warned about rather than
+  taken for zsh; before, a `getent` that exited non-zero (as it does for a
+  user it does not know) ended the kickoff under `pipefail` with no message.
+  Verified
   live on Ubuntu with Herdr 0.9.1 (`s5038` in `docs/verified-runs.md`).
 
 ### Changed

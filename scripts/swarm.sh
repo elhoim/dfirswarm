@@ -2752,9 +2752,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     # rather than guessed at — a false BLOCKER here stops a good run — and
     # the panes' HOME is left alone, so only a zsh pane gets the hook.
     if command -v getent >/dev/null 2>&1; then
-      login_shell="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)"
+      login_shell="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)" || login_shell=""
     elif command -v dscl >/dev/null 2>&1; then
-      login_shell="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk '{print $2}')"
+      login_shell="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk '{print $2}')" || login_shell=""
     fi
     case "$(basename "${login_shell:-unknown}")" in
       zsh) command -v zsh >/dev/null 2>&1 || missing+=("zsh (the pane hook runs in it)") ;;
