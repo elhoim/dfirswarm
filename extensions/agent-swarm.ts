@@ -372,7 +372,16 @@ export default function (pi: ExtensionAPI) {
         // the level is decoration too
       }
     }
-    const applied = await applySessionUsage(cwd, agentId, slice);
+    let applied: Awaited<ReturnType<typeof applySessionUsage>>;
+    try {
+      applied = await applySessionUsage(cwd, agentId, slice);
+    } catch (err) {
+      // budget.json could not be read and there was no earlier copy to fold
+      // into. Leave the file and the stop clock as they are: a fold over
+      // defaults would have dropped every cap.
+      await logEvent(cwd, agentId, "budget_unreadable", {}, { error: (err as Error).message }).catch(() => undefined);
+      return;
+    }
     lastStopCheck = Date.now();
     await enforceAllCaps(cwd, applied.budget, ctx);
   }

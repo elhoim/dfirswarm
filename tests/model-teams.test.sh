@@ -342,6 +342,10 @@ pass "a team with one paid model is metered, and the token cap rides along as a 
 
 refuses "a --cap-usd that is not a number is refused" "must be a number of USD" \
   --model solo/model --n 1 --cap-usd abc --no-start
+refuses "a --cap-usd of zero is refused for a team that bills" "--cap-usd must be above zero" \
+  --model solo/model --n 1 --cap-usd 0 --no-start
+refuses "a --cap-usd of 0.00 is refused for a team that bills" "--cap-usd must be above zero" \
+  --model solo/model --n 1 --cap-usd 0.00 --no-start
 refuses "a --cap-tokens of zero is refused" "above zero" \
   --model solo/model --n 1 --cap-usd 1 --cap-tokens 0 --no-start
 refuses "a --cap-tokens that is not a number is refused" "above zero" \

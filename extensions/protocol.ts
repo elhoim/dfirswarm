@@ -182,7 +182,23 @@ export type AgentBudget = {
   /** The seat's model, `provider/id`, as the kickoff assigned it. It rides
    *  here so a per-model cap can be summed from this record alone. */
   model?: string;
+  /** What the seat's earlier Pi sessions spent, carried forward when a new
+   *  session (a restart, `/new`) starts reporting from zero again. The
+   *  counters above are the seat's whole run: this plus the live session. */
+  earlier_sessions?: SessionCounters;
 };
+
+/** The counters a Pi session reports and a fold adds up. */
+export const SESSION_COUNTERS = [
+  "spent_usd",
+  "tokens",
+  "calls",
+  "input",
+  "output",
+  "cache_read",
+  "cache_write",
+] as const;
+export type SessionCounters = Record<(typeof SESSION_COUNTERS)[number], number>;
 
 export type BudgetRecord = {
   cap_usd: number;
@@ -650,17 +666,62 @@ function perModelCaps(raw: unknown): Record<string, number> {
   return caps;
 }
 
+/**
+ * The last budget this process read or wrote, per sandbox. A fold that finds
+ * budget.json unreadable (a write cut short by a crash or a full disk) folds
+ * into this rather than into `normalizeBudget`'s defaults: those have no USD
+ * cap, no token cap, no per-agent or per-model cap and a 15-minute clock, and
+ * writing them back would take every brake off the run for good.
+ */
+const lastGoodBudget = new Map<string, BudgetRecord>();
+
+function rememberBudget(sandboxRoot: string, budget: BudgetRecord): void {
+  lastGoodBudget.set(resolve(sandboxRoot), structuredClone(budget));
+}
+
 export async function readBudget(sandboxRoot: string): Promise<BudgetRecord> {
   const raw = await readFile(join(sandboxRoot, "budget.json"), "utf8");
-  return normalizeBudget(JSON.parse(raw) as Partial<BudgetRecord>);
+  const budget = normalizeBudget(JSON.parse(raw) as Partial<BudgetRecord>);
+  rememberBudget(sandboxRoot, budget);
+  return budget;
 }
 
 export async function writeBudget(sandboxRoot: string, budget: BudgetRecord): Promise<void> {
-  await writeFile(
-    join(sandboxRoot, "budget.json"),
-    `${JSON.stringify(normalizeBudget(budget), null, 2)}\n`,
-    "utf8",
-  );
+  const normalized = normalizeBudget(budget);
+  await writeFile(join(sandboxRoot, "budget.json"), `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+  rememberBudget(sandboxRoot, normalized);
+}
+
+/**
+ * A seat's slice after a fold, never smaller than before it. Pi reports a
+ * session's own totals, so a pane whose session restarts reports from zero
+ * again; replacing the slice with that would hand back money already spent
+ * and could lift a swarm over its cap back under it. The report carries no
+ * session id, so a counter going down is what says a new session began: the
+ * seat's totals so far are carried forward and the new session adds to them.
+ */
+export function foldSessionSlice(previous: AgentBudget | undefined, slice: SessionUsageSlice): AgentBudget {
+  const carried: SessionCounters = { spent_usd: 0, tokens: 0, calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  if (previous) {
+    const before = previous.earlier_sessions;
+    // What the live session had reported at the last fold.
+    const live = (key: (typeof SESSION_COUNTERS)[number]) => (Number(previous[key]) || 0) - (Number(before?.[key]) || 0);
+    const restarted = SESSION_COUNTERS.some((key) => (Number(slice[key]) || 0) < live(key) - 1e-9);
+    for (const key of SESSION_COUNTERS) {
+      carried[key] = restarted ? Number(previous[key]) || 0 : Number(before?.[key]) || 0;
+    }
+  }
+  const row: AgentBudget = { ...emptyAgentBudget(), ...slice };
+  delete row.earlier_sessions;
+  if (SESSION_COUNTERS.some((key) => carried[key] > 0)) {
+    for (const key of SESSION_COUNTERS) {
+      row[key] = key === "spent_usd"
+        ? Number((carried[key] + (Number(slice[key]) || 0)).toFixed(6))
+        : carried[key] + (Number(slice[key]) || 0);
+    }
+    row.earlier_sessions = carried;
+  }
+  return row;
 }
 
 /**
@@ -2479,13 +2540,18 @@ export async function applySessionUsage(
   first_over: boolean;
 }> {
   return withTableLock(sandboxRoot, async () => {
-    const budget = await readBudget(sandboxRoot).catch(() =>
-      normalizeBudget({ started_at: new Date().toISOString() }),
-    );
+    // An unreadable budget.json is folded into the last one this process
+    // saw, which carries the caps. With none to fall back on the fold is
+    // refused: writing defaults over the file would drop every cap.
+    const budget = await readBudget(sandboxRoot).catch((err: unknown) => {
+      const last = lastGoodBudget.get(resolve(sandboxRoot));
+      if (last) return structuredClone(last);
+      throw new Error(`budget.json is unreadable and no earlier copy is known; not folding over it (${(err as Error).message})`);
+    });
     // The kickoff wrote the seat's model once; a fold that dropped it would
     // take the seat out of its model's cap after the first provider call.
     const model = budget.agents[agentId]?.model ?? slice.model;
-    budget.agents[agentId] = { ...emptyAgentBudget(), ...slice, ...(model ? { model } : {}) };
+    budget.agents[agentId] = { ...foldSessionSlice(budget.agents[agentId], slice), ...(model ? { model } : {}) };
     let spent = 0;
     let tokens = 0;
     let calls = 0;

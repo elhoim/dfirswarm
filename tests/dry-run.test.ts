@@ -1423,6 +1423,84 @@ test("budget: the per-agent cap survives every fold of session usage", async () 
   });
 });
 
+test("budget: a seat whose Pi session restarts keeps what it already spent", async () => {
+  await withSandbox(async (root) => {
+    const seeded = await readBudget(root);
+    seeded.cap_usd = 1;
+    await writeBudget(root, seeded);
+    const usage = (spent_usd: number, calls: number) => ({
+      spent_usd,
+      tokens: calls * 100,
+      calls,
+      input: calls * 100,
+      output: 0,
+      cache_read: 0,
+      cache_write: 0,
+    });
+
+    await applySessionUsage(root, "agent00", usage(0.7, 7));
+    const over = await applySessionUsage(root, "agent01", usage(0.4, 4));
+    assert.equal(over.over_budget, true, "$1.10 of a $1 cap is over it");
+
+    // agent01's pane starts a new Pi session, which reports from zero again.
+    const reset = await applySessionUsage(root, "agent01", usage(0.005, 1));
+    assert.equal(reset.over_budget, true, "a new session does not hand back money already spent");
+    assert.equal(reset.budget.agents.agent01.spent_usd, 0.405);
+    assert.equal(reset.budget.agents.agent01.calls, 5);
+    assert.equal(reset.budget.spent_usd, 1.105);
+
+    // Later folds of the new session add to the carried total once, not again.
+    const later = await applySessionUsage(root, "agent01", usage(0.02, 2));
+    assert.equal(later.budget.agents.agent01.spent_usd, 0.42);
+    assert.equal(later.budget.agents.agent01.calls, 6);
+    assert.equal((await readBudget(root)).spent_usd, 1.12);
+  });
+});
+
+test("budget: an unreadable budget.json does not take the caps off the run", async () => {
+  await withSandbox(async (root) => {
+    const seeded = await readBudget(root);
+    seeded.cap_usd = 1;
+    seeded.cap_tokens = 5000;
+    seeded.cap_per_agent_usd = 0.5;
+    seeded.wall_clock_minutes = 90;
+    await writeBudget(root, seeded);
+    await applySessionUsage(root, "agent00", { spent_usd: 0.1, tokens: 10, calls: 1, input: 10, output: 0, cache_read: 0, cache_write: 0 });
+
+    // A write cut short by a crash or a full disk.
+    await writeFile(join(root, "budget.json"), "{ this is not json", "utf8");
+    const applied = await applySessionUsage(root, "agent00", {
+      spent_usd: 2,
+      tokens: 20,
+      calls: 2,
+      input: 20,
+      output: 0,
+      cache_read: 0,
+      cache_write: 0,
+    });
+    assert.equal(applied.over_budget, true, "$2 is over the $1 cap the run was started with");
+    const reread = await readBudget(root);
+    assert.equal(reread.cap_usd, 1);
+    assert.equal(reread.cap_tokens, 5000);
+    assert.equal(reread.cap_per_agent_usd, 0.5);
+    assert.equal(reread.wall_clock_minutes, 90);
+  });
+
+  // With no earlier copy to fold into, the fold is refused and the file left alone.
+  const root = await mkdtemp(join(tmpdir(), "dfirswarm-budget-"));
+  try {
+    await mkdir(join(root, "locks"), { recursive: true });
+    await writeFile(join(root, "budget.json"), "{ this is not json", "utf8");
+    await assert.rejects(
+      applySessionUsage(root, "agent00", { spent_usd: 2, tokens: 20, calls: 2, input: 20, output: 0, cache_read: 0, cache_write: 0 }),
+      /unreadable/,
+    );
+    assert.equal(await readFile(join(root, "budget.json"), "utf8"), "{ this is not json", "defaults are not written over it");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a bash write that changes the caps is reported", async () => {
   await withSandbox(async (root) => {
     const before = await watchedPathHashes(root);
