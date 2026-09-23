@@ -220,7 +220,7 @@ separator too, so the threshold is two more than the rows you mean.
 ```markdown
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6; do grep -q "^## $n\." work/report.md || exit 1; done`
-- `awk '/^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~/inputs\/|work\/|catalog\/|ledger\/|seq[ #=]*[0-9]|hypothesis|inode|offset|record ?id|[a-z]:\\|\/[^ \/]+\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php)/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 25`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`
@@ -232,13 +232,16 @@ separator too, so the threshold is two more than the rows you mean.
 ```
 
 The awk line holds "every answer cites evidence" to something a script can
-see: each numbered section must carry a citation token (a path under
-`inputs/`, `work/`, `catalog/` or `ledger/`, a host path, an artefact file
-name, an inode, an offset, a record id, a `seq` number) or say
-`hypothesis`. One section in four may go without, for a closing answer
-that rests on the ones before it; an empty report fails. It passes all
-nineteen published reports that answer every question, and fails the one
-left with answers of `TBD.`.
+see: each numbered section must carry a citation (a path under `inputs/`,
+`work/`, `catalog/` or `ledger/`, a host path, a registry key, an artefact
+file name, a hash, an IP address, a `seq`, ledger entry, inode, offset,
+record id or event id with its number) or be labelled `Hypothesis:`. A
+word on its own, such as "offset" or "hypothesis" in a sentence, is not a
+citation. One section in four may go without, for a closing answer that
+rests on the ones before it; an empty report fails. Of the 22 published
+reports under `docs/use-cases/`, it passes 20 and fails two:
+belkactf6-bogus-bill `run-2`, left with answers of `TBD.`, and
+dfir-web-server-case `run-4-linux`, where 7 of 8 sections cite nothing.
 
 Add what the kind of case can promise: an indicators table for an intrusion
 or a malware case (`test "$(grep -c '^| ' work/indicators.md)" -ge 3` — one
@@ -246,15 +249,25 @@ row at least, and a row may say that nothing was found and why), a flags
 table for a question set, an extracted-artefact directory for a memory dump.
 Where the definition of done promises extracted files with their hashes,
 name the manifest (`sha256sum` output in a `SHA256SUMS` file beside them)
-and check it, not the directory: `test "$(find work/extracted -name
-SHA256SUMS -exec cat {} + 2>/dev/null | grep -cE '^[0-9a-f]{64} ')" -ge 1`.
-Where it promises a YARA rule, check that a file holds a rule declaration
-(`find work/rules -name '*.yar*' -exec grep -lE ... {} + | grep -q .`; the
-trailing `grep -q .` is what fails an empty directory) and, in a second
-check, that every rule compiles: `command -v yara >/dev/null || exit 0;`
-then `yara "$r" /dev/null` over each file. The guard lets a run started
-without the dfir toolbox pass the compile check; the declaration check
-still holds it.
+and check it, not the directory: one check counts manifest lines (either
+case of hex, and the BSD `SHA256 (file) = ...` form), `test "$(find
+work/extracted -name SHA256SUMS -exec cat {} + 2>/dev/null | grep -cE
+'^[0-9a-fA-F]{64} |^SHA256 ?\(.*\) ?= ?[0-9a-fA-F]{64}')" -ge 1`, and a
+second runs `sha256sum -c` (or `shasum -a 256 -c`) on every manifest, so a
+hash of a file that is not there fails. Where it promises a YARA rule,
+check that a file declares a rule outside a comment (`test -n "$(find
+work/rules -iname '*.yar*' -exec awk ... {} + 2>/dev/null)"`, the awk
+dropping `/* */` and `//` text and printing the file name on a `rule`
+line) and, in a second check, that every rule compiles: `command -v yara
+>/dev/null || exit 0;` then `yara "$r" /dev/null` over each file. The
+guard lets a run started without the dfir toolbox pass the compile check;
+the declaration check still holds it.
+
+Checks run under `set -euo pipefail`, so never end a pipe with `grep -q`:
+it exits on the first match, the command feeding it dies of SIGPIPE, and
+the check fails although it matched, more often the bigger the input.
+Count instead (`test "$(... | grep -c PATTERN)" -ge 1`), test the output
+(`test -n "$(...)"`), or do it in one `awk` with `END{exit !m}`.
 
 ### What an entry must not do
 
