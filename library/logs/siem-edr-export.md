@@ -150,15 +150,16 @@ evidence (file, record id, field), every alert in the export has a verdict
 in the report, `work/alerts.md` holds one table with a row per alert in
 the export (alert id, host, rule, severity, verdict: true positive, benign
 or undecidable, the record it rests on; one row saying so if the export
-holds no alerts) and its first line states the alert count the parser
-found, the critic has posted a sign-off on the board naming what they
-verified against the ledger and stating that the table's row count equals
-the parser's alert count, `work/timeline.md` holds the merged timeline as
-a table with at least 30 dated rows built from the ledger, each row naming
-the host, `work/indicators.md` holds one table of every indicator (type,
-value, first seen, hosts, source record, confidence; one row saying so if
-none was found), the ledger holds the dated events the timeline rests on,
-and `inputs/` is unchanged.
+holds no alerts) and one of its first five lines states the alert count
+the parser found (`1000 alerts` or `Alerts: 1000`), the critic has posted
+a sign-off on the board naming what they verified against the ledger and
+stating that the table's row count equals the parser's alert count,
+`work/timeline.md` holds the merged timeline as a table with at least 30
+dated rows built from the ledger, each row naming the host,
+`work/indicators.md` holds one table of every indicator (type, value,
+first seen, hosts, source record, confidence; one row saying so if none
+was found), the ledger holds the dated events the timeline rests on, and
+`inputs/` is unchanged.
 
 ## Checks
 
@@ -167,9 +168,9 @@ and `inputs/` is unchanged.
 - `grep -qi 'hypothesis' work/report.md`
 - `grep -qi 'verdict' work/report.md`
 - `test -f work/alerts.md`
-- `head -1 work/alerts.md | grep -Eq '[0-9]'`
+- `test "$(head -5 work/alerts.md | grep -Eci '(^|[^[:alnum:]])[0-9]+ alerts?|alerts?( count)?: *[0-9]+')" -ge 1`
 - `test "$(grep '^|' work/alerts.md | grep -vcE '^[|: -]+$')" -ge 2`
-- `grep '^|' work/alerts.md | grep -vE '^[|: -]+$' | sed 1d | grep -Eqi 'true positive|benign|undecidable|no alerts'`
+- `test "$(grep '^|' work/alerts.md | grep -vE '^[|: -]+$' | sed 1d | grep -Eci 'true positive|benign|undecidable|no alerts')" -ge 1`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 32`
 - `head -3 work/timeline.md | grep -qi 'host'`

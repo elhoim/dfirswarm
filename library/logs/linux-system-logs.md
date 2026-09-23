@@ -52,9 +52,14 @@ ran the first pass; read `catalog/` before running the same commands again.
    and who did each; `USER_CMD` and `EXECVE`/`PROCTITLE` records (their
    arguments are hex-encoded when they hold spaces or special characters,
    so decode them; `ausearch -if <file> -i` does this where installed),
-   tied by `auid` and `ses` to the login that started them.
+   tied by `auid` and `ses` to the login that started them; `EXECVE` and
+   `PROCTITLE` exist only if a syscall rule such as `-S execve` was loaded,
+   which is not the default, so say whether one was active (the rules
+   file, a `CONFIG_CHANGE` adding it) before reading anything into their
+   absence.
 4. Persistence and change: cron jobs run and edited (`CRON[pid]: (user)
-   CMD (…)` in syslog, `cron.log` or `/var/log/cron`; the matching
+   CMD (…)` in syslog or `cron.log`, `CROND[pid]` from cronie in
+   `/var/log/cron`; the matching
    `pam_unix(cron:session)` open and close in the auth log;
    `crontab[pid]: (user) REPLACE|BEGIN EDIT|DELETE`; `/etc/cron.*`
    mentions), `atd` jobs, systemd timers started from the journal,

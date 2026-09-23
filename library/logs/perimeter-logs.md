@@ -72,9 +72,9 @@ ran the first pass; read `catalog/` before running the same commands again.
    window; runs of NXDOMAIN from one host; and the answers, where the log
    has them, that map a name to the addresses the firewall and the proxy
    saw; and the name resolution the resolver never saw: outbound 53/udp
-   and 53/tcp from any host other than the resolvers, 853/tcp (DoT), and
-   proxy or firewall connections to known public DoH endpoints (by SNI or
-   the URL path `/dns-query`), per host.
+   and 53/tcp from any host other than the resolvers, 853/tcp (DoT),
+   853/udp (DoQ), and proxy or firewall connections to known public DoH
+   endpoints (by SNI or the URL path `/dns-query`), per host.
 7. Beaconing: for every internal host and destination pair, the intervals
    between connections, their regularity (median, spread, the share of
    intervals within a few percent of the median), the count, the duration
@@ -188,10 +188,10 @@ unchanged.
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 27`
-- `grep -m1 '^| ' work/timeline.md | grep -qi 'device'`
+- `awk '/^[|][|: ]*-[|: -]*$/ && tolower(p) ~ /^[|].*device/ {m=1} {p=$0} END{exit !m}' work/timeline.md`
 - `test -f work/hosts.md`
-- `test "$(grep -c '^| ' work/hosts.md)" -ge 3`
-- `grep -m1 '^| ' work/hosts.md | grep -qi 'rank'`
+- `test "$(grep '^|' work/hosts.md | grep -vcE '^[|: -]+$')" -ge 2`
+- `awk '/^[|][|: ]*-[|: -]*$/ && tolower(p) ~ /^[|].*rank/ {m=1} {p=$0} END{exit !m}' work/hosts.md`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`
