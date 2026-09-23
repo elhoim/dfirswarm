@@ -79,12 +79,13 @@ Read `catalog/` before running the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the hives (SYSTEM, SOFTWARE, SAM, SECURITY, every NTUSER.DAT and
-  UsrClass.dat), the event logs (`Security`, `System`, `Application`,
-  `Microsoft-Windows-TerminalServices-*`, `-PowerShell/Operational`,
-  `-Sysmon/Operational`, `-TaskScheduler/Operational`, `-WMI-Activity`,
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts: the hives (SYSTEM, SOFTWARE, SAM, SECURITY,
+  every NTUSER.DAT and UsrClass.dat), the event logs (`Security`, `System`,
+  `Application`, `Microsoft-Windows-TerminalServices-*`,
+  `-PowerShell/Operational`, `-Sysmon/Operational`,
+  `-TaskScheduler/Operational`, `-WMI-Activity`,
   `-Windows Defender/Operational`), `$MFT`, `$LogFile`, `$UsnJrnl:$J`,
   Prefetch, Amcache.hve, SRUDB.dat, the browser profiles. Copy into the
   shared `work/extracted/` only what peers must read, and claim it first.

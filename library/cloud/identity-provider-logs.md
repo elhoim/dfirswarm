@@ -97,11 +97,11 @@ ran the first pass; read `catalog/` before running the same commands again.
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
 - Anything you write out of the exports goes under
-  `work/extracted/<your id>/` (quarantined: nothing there can execute); a
-  redirect URL, an application's reply address, a token's metadata quoted
-  from a record is for reading, never for fetching or using. Copy into the
-  shared `work/extracted/` only what peers must read, and claim it first.
-  Your own scratch goes under `work/<your id>/`.
+  `work/extracted/<your id>/` (nothing there is run; it is no-exec only
+  under `--quarantine`); a redirect URL, an application's reply address, a
+  token's metadata quoted from a record is for reading, never for fetching
+  or using. Copy into the shared `work/extracted/` only what peers must
+  read, and claim it first. Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite

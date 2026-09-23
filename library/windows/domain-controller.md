@@ -108,19 +108,19 @@ Read `catalog/` before running the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the hives (SYSTEM, SOFTWARE, SECURITY, every NTUSER.DAT), the
-  event logs (`Security`, `System`, `Application`, `Directory Service`,
-  `Microsoft-Windows-TerminalServices-*`, `-PowerShell/Operational`,
-  `-Sysmon/Operational`, `-GroupPolicy/Operational`), `$MFT`,
-  `$UsnJrnl:$J`, Prefetch,
-  Amcache.hve, SYSVOL, and any file the intruder left. The directory
-  database and the hives are read for structure, timestamps and
-  membership, never for password material: no hash, key, ticket or stored
-  password is extracted, decoded or posted. Copy into the shared
-  `work/extracted/` only what peers must read, and claim it first. Your
-  own scratch goes under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts: the hives (SYSTEM, SOFTWARE, SECURITY,
+  every NTUSER.DAT), the event logs (`Security`, `System`, `Application`,
+  `Directory Service`, `Microsoft-Windows-TerminalServices-*`,
+  `-PowerShell/Operational`, `-Sysmon/Operational`,
+  `-GroupPolicy/Operational`), `$MFT`, `$UsnJrnl:$J`, Prefetch, Amcache.hve,
+  SYSVOL, and any file the intruder left. The directory database and the
+  hives are read for structure, timestamps and membership, never for
+  password material: no hash, key, ticket or stored password is extracted,
+  decoded or posted. Copy into the shared `work/extracted/` only what peers
+  must read, and claim it first. Your own scratch goes under
+  `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite

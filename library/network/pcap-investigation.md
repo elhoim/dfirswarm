@@ -103,13 +103,13 @@ commands again.
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
 - Everything reassembled from the capture goes under
-  `work/extracted/<your id>/` (quarantined: nothing there can execute; hash
-  everything you pull out); an executable, a script, a document or an
-  archive carved from a stream is for reading, parsing and disassembling,
-  never running. Copy into the shared `work/extracted/` only what peers
-  must read, and claim it first. Your own scratch goes under
-  `work/<your id>/`. Never write a packet, never replay one, and never
-  connect to any address in the capture.
+  `work/extracted/<your id>/` (nothing there is run; it is no-exec only
+  under `--quarantine`; hash everything you pull out); an executable, a
+  script, a document or an archive carved from a stream is for reading,
+  parsing and disassembling, never running. Copy into the shared
+  `work/extracted/` only what peers must read, and claim it first. Your own
+  scratch goes under `work/<your id>/`. Never write a packet, never replay
+  one, and never connect to any address in the capture.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
