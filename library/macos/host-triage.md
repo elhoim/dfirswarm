@@ -22,20 +22,25 @@ The evidence is under `inputs/` (read-only; call `inputs` to list it, and
 read `inputs.json` for the manifest). If the operator left a brief beside it
 (`inputs/CASE.md`, a ticket, an alert export), its questions come first and
 the ones below fill in what it did not ask. If `SWARM.md` has an "Evidence
-catalog" section, the kickoff already ran the first pass: partition map,
-file list, body file and MAC timeline. Read `catalog/` before running the
-same commands again.
+catalog" section, the kickoff already ran `mmls` into `catalog/`; an APFS
+container is a pool, and the catalog's `fls` pass over it may be listed
+under "Not built". Read `catalog/README.md` before assuming a body file
+exists, and before running the same commands again.
 
 ### Questions the report has to answer
 
 1. System profile: the macOS product name, version and build
    (`SystemVersion.plist`), the hardware and the host name (the
    `SystemConfiguration` preferences), the time zone, every user with its
-   home directory, uid and role (admin or standard, from the local
-   directory records under `/var/db/dslocal/nodes/Default/users`), and the
-   FileVault state as far as the readable metadata shows it (the
-   EncryptedRoot preferences, whether a recovery key is present — never its
-   value).
+   home directory and uid (the local directory records under
+   `/var/db/dslocal/nodes/Default/users`) and role (admin or standard, from
+   `groups/admin.plist` beside them: its `users` key holds short names,
+   `groupmembers` holds GeneratedUIDs, and `nestedgroups` holds the
+   GeneratedUIDs of groups whose members are admins too), and the
+   FileVault state as far as the readable metadata shows it (the volume's
+   encryption flag in `pstat` and `fsstat`, on pre-APFS systems the
+   CoreStorage `EncryptedRoot.plist.wipekey`, whether a recovery key is
+   present — never its value).
 2. Persistence and what runs at boot: the LaunchAgents and LaunchDaemons
    plists per user and system (`/Library/LaunchAgents`,
    `/Library/LaunchDaemons`, every `~/Library/LaunchAgents`, with the
@@ -46,9 +51,17 @@ same commands again.
    (`/Library/Managed Preferences`, `/var/db/ConfigurationProfiles`); each
    with the plist path, the program it launches, the code-signing state
    where it can be read, and the file times.
-3. Program execution and user activity: what the unified logs show where the
-   `.tracev3` files under `/var/db/diagnostics` are readable (or via a
-   forged reader), `KnowledgeC.db` for app usage and focus intervals,
+3. Program execution and user activity: what the unified log shows where
+   it is readable (or via a forged reader): `/private/var/db/diagnostics/`
+   (Persist, Special, Signpost, HighVolume and `timesync`) together with
+   `/private/var/db/uuidtext/`, which a reader needs to render messages;
+   `knowledgeC.db` (`/private/var/db/CoreDuet/Knowledge/` and
+   `~/Library/Application Support/Knowledge/`) for app usage and focus
+   intervals and, on macOS 13 and later, the Biome streams under
+   `/private/var/db/biome/` and `~/Library/Biome/`; login and session
+   records (`utmpx`, `/var/log/asl`, the unified log's loginwindow and
+   `sudo` entries) and the install history
+   (`/Library/Receipts/InstallHistory.plist`, `/var/log/install.log`);
    `com.apple.LaunchServices.QuarantineEventsV2` for what was opened, the
    shells' `.zsh_history` and `.bash_history`, Spotlight metadata and the
    FSEvents records under `.fseventsd`, `TCC.db` for what was granted disk,
@@ -88,33 +101,51 @@ same commands again.
   `fsstat`, `fls`, `istat`, `icat`; APFS is read where this TSK build
   supports it), libewf (`ewfinfo` for the acquisition record and hashes),
   `plutil` and Python's `plistlib` for the property lists (binary and XML),
-  `sqlite3` for the databases, `strings` and `python3` (3.12). Where this
-  TSK build cannot read the APFS container, say so on the board and reach the
-  files with a forged `pyapfs`-style reader or `dfvfs` over the raw image,
-  and prove which volume you addressed with `fsstat`. There is no root: no
-  mounting, no `sudo`.
+  `sqlite3` for the databases, `strings` and `python3` (3.12). APFS is a
+  pool: `pstat -o <sector> <img>` lists its volumes and their superblock
+  blocks, and one volume is addressed with `-o <sector> -P apfs -B <block>`
+  (the same flags for `fls`, `fsstat`, `istat` and `icat`). Since 10.15 the
+  user data lives on the "<name> - Data" volume (role Data), not the
+  System volume (read-only from 10.15, sealed from macOS 11). One agent
+  builds the Data volume's body file with `fls -m / -r -P apfs -B ...` and
+  shares it under `work/extracted/`. Where this TSK build cannot read the
+  APFS container, say so on the board and reach the files with a forged
+  `pyapfs`-style reader or `dfvfs` over the raw image, and prove which
+  volume you addressed with `fsstat`. There is no root: no mounting, no
+  `sudo`.
+- If the APFS Data volume is encrypted (FileVault; `pstat` and `fsstat`
+  report it), say so on the board at once. That is a finding, not a
+  failure: report which volumes are readable (Preboot, Recovery, an
+  unencrypted System) and which questions cannot be answered from them.
+  Never attempt to recover the password, the recovery key or the
+  institutional key; a decrypted re-acquisition is the next-collection
+  recommendation.
 - If `SWARM.md` has an "Evidence catalog" section, the first pass is already
   done: read `catalog/` instead of rebuilding it.
 - If `skill` is in your tool list, this run carries packs: call it once with
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the launchd and profile plists, the databases (`KnowledgeC.db`,
-  `TCC.db`, `QuarantineEventsV2`, the browser stores), the `.fseventsd`
-  records, the shell histories, the diagnostics directory. Every binary,
-  script, stream, document and download that comes out of the image is for
-  reading, parsing, hashing and disassembling, never running — not in the
-  sandbox and not anywhere else; what a file does is what the static reading
-  shows. Copy into the shared `work/extracted/` only what peers must read,
-  and claim it first. Your own scratch goes under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull out)
+  and analyse the extracts: the launchd and profile plists, the databases
+  (`knowledgeC.db`, `TCC.db`, `QuarantineEventsV2`, the browser stores), the
+  `.fseventsd` records, the shell histories, the diagnostics and `uuidtext`
+  directories. Every binary, script, stream, document and download that
+  comes out of the image is for reading, parsing, hashing and disassembling,
+  never running — not in the sandbox and not anywhere else; what a file does
+  is what the static reading shows. Copy into the shared `work/extracted/`
+  only what peers must read, and claim it first. Your own scratch goes under
+  `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
   `ledger/ledger.md`. APFS and the unified log keep time in UTC already; say
   so, and say when a local-time artefact (a shell history with no zone) was
-  converted and how.
+  converted and how. Most Apple SQLite stores (`knowledgeC.db`,
+  `QuarantineEventsV2`, Safari's `History.db`) count Mac Absolute Time,
+  seconds since 2001-01-01 UTC (add 978307200 for Unix time); say which
+  epoch each column used.
 - Every claim in the report cites its evidence: the path, the inode, the
   plist key, the database row, the record id, the command that produced it.
   A claim without evidence is a hypothesis and is labelled as one. A claim
@@ -147,7 +178,7 @@ a post. Say so again when you change course.
 
 The work falls along the artefact families, not the questions: the launchd
 and profile inventory that is persistence; the execution-and-activity
-databases (the unified log, `KnowledgeC.db`, `TCC.db`, the shell histories);
+databases (the unified log, `knowledgeC.db`, `TCC.db`, the shell histories);
 the file system and provenance (the body file, FSEvents, Spotlight, the
 quarantine attributes and the downloads); and the network and browser
 artefacts. One agent per family avoids two readers grinding the same
@@ -162,26 +193,28 @@ one who certifies it. Do not all parse the same database on the same image.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified, `work/timeline.md` holds the merged timeline as a table with at
-least 20 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/indicators.md` holds one table of
-every indicator (type, value, first seen, source, confidence; one row saying
-so if none was found), the ledger holds the dated events the timeline rests
-on, and `inputs/` is unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 20
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, source, confidence; one row saying so if
+none was found), the ledger holds the dated events the timeline rests on,
+and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 20`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 15`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

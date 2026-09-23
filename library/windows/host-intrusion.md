@@ -53,9 +53,12 @@ Read `catalog/` before running the same commands again.
    features, log clearing 1102/104, timestomping), with the artefact and the
    time it was set.
 6. Lateral movement and data: which other hosts, shares and accounts were
-   reached from here (4648, 4776, SMB and RDP client traces, PsExec and
-   WMI remnants, mapped drives, the remote session hives), what data was
-   staged, archived or taken, and by what channel.
+   reached from here (outbound: 4648 explicit credentials, the RDP client
+   `Terminal Server Client\Servers` MRU and bitmap cache, `MountPoints2`
+   and `Map Network Drive MRU`, PsExec and WMI client remnants, the remote
+   session hives; inbound from peers: 4624 type 3 and 10 with source, 4776
+   for local-account NTLM validation), what data was staged, archived or
+   taken, and by what channel.
 7. Leftovers and indicators: every file, tool, script, binary, web shell,
    configuration and network indicator the intruder brought or created, with
    path, hash, size, timestamps and what it does; and what the antivirus saw.
@@ -85,12 +88,13 @@ Read `catalog/` before running the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the hives (SYSTEM, SOFTWARE, SAM, SECURITY, every NTUSER.DAT and
-  UsrClass.dat), the event logs (`Security`, `System`, `Application`,
-  `Microsoft-Windows-TerminalServices-*`, `-PowerShell/Operational`,
-  `-Sysmon/Operational`, `-TaskScheduler/Operational`, `-WMI-Activity`,
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts: the hives (SYSTEM, SOFTWARE, SAM, SECURITY,
+  every NTUSER.DAT and UsrClass.dat), the event logs (`Security`, `System`,
+  `Application`, `Microsoft-Windows-TerminalServices-*`,
+  `-PowerShell/Operational`, `-Sysmon/Operational`,
+  `-TaskScheduler/Operational`, `-WMI-Activity`,
   `-Windows Defender/Operational`), `$MFT`, `$LogFile`, `$UsnJrnl:$J`,
   Prefetch, Amcache.hve, SRUDB.dat, the browser profiles. Every binary,
   script, stream, document and download that comes out of the image is for
@@ -151,26 +155,28 @@ board first.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, every answer
-cites evidence, the critic has posted a sign-off on the board naming what
-they verified, `work/timeline.md` holds the merged timeline as a table with
-at least 40 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/indicators.md` holds one table of
-every indicator (type, value, first seen, source, confidence; one row saying
-so if none was found), the ledger holds the dated events the timeline rests
-on, and `inputs/` is unchanged.
+cites evidence, the critic has posted a sign-off on the board as a `result`
+post that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 40
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, source, confidence; one row saying so if
+none was found), the ledger holds the dated events the timeline rests on,
+and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 40`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 30`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

@@ -40,8 +40,9 @@ Read `catalog/` before running the same commands again.
    and modules, the application (ASP.NET or PHP, with `php.ini`), the
    database behind it (SQL Server, MySQL or MariaDB with its data directory
    and logs), and where each keeps its logs.
-2. The web logs: IIS `u_ex*.log` under `inetpub\logs\LogFiles\W3SVC<n>` and
-   the `HTTPERR` log (W3C fields, UTC), or Apache `access.log` and
+2. The web logs: IIS `u_ex*.log` under `inetpub\logs\LogFiles\W3SVC<n>`
+   (W3C fields, UTC) and the HTTP.sys `HTTPERR` log under
+   `System32\LogFiles\HTTPERR`, or Apache `access.log` and
    `error.log` (local time); the window they cover and the gaps; the
    requests that read as attempts against the application rather than a
    use of it (a parameter carrying code, a path escaping its directory, a
@@ -52,7 +53,9 @@ Read `catalog/` before running the same commands again.
    upload directories and temp paths created or modified in the window
    (web shells, uploads, scripts, renamed executables — from `$MFT`,
    `$UsnJrnl:$J` and the body file), with path, hash, size, SI and FN
-   timestamps, the content read as text and what it does as read, and the
+   timestamps, the content read as text and what it does as read, the
+   compiled `App_Web_*.dll` and `.compiled` files under `Temporary ASP.NET
+   Files` whose creation time dates a shell's first request, and the
    requests in the logs that reached it (the first, the count, the
    parameters as logged, the response sizes).
 4. Accounts and privilege: the identity the web process ran as (the pool
@@ -66,7 +69,11 @@ Read `catalog/` before running the same commands again.
    services, scheduled tasks, WMI subscriptions, a handler mapping or
    `web.config` that routes to a shell, an IIS module or ISAPI filter
    added, a changed `global.asax`, a PHP `auto_prepend_file`, a second
-   account), with the artefact and the time it was set; every tool and
+   account), with the artefact and the time it was set — the
+   `inetpub\history\CFGHISTORY_*` snapshots diffed against the current
+   `applicationHost.config`, `Microsoft-IIS-Configuration/Operational` 29,
+   ASP.NET 1309/1310 in the Application log, and `FailedReqLogFiles` where
+   tracing was on; every tool and
    script dropped elsewhere (temp paths, `ProgramData`, the profiles) with
    path, hash, size, timestamps and strings; and what the antivirus saw
    (`Windows Defender/Operational` 1116/1117).
@@ -111,20 +118,20 @@ Read `catalog/` before running the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the hives (SYSTEM, SOFTWARE, SAM, SECURITY, every NTUSER.DAT),
-  the event logs (`Security`, `System`, `Application`,
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts: the hives (SYSTEM, SOFTWARE, SAM, SECURITY,
+  every NTUSER.DAT), the event logs (`Security`, `System`, `Application`,
   `Microsoft-Windows-TerminalServices-*`, `-PowerShell/Operational`,
   `-Sysmon/Operational`, `-TaskScheduler/Operational`,
   `-Windows Defender/Operational`), the web logs, `applicationHost.config`
   and every `web.config`, `httpd.conf`, `php.ini`, `$MFT`, `$UsnJrnl:$J`,
   Prefetch, Amcache.hve, SRUDB.dat, the database logs, and every file the
-  attacker placed. A web shell, an upload or a script pulled from the
-  image is for reading, parsing and hashing, never running; the report
-  describes what it does, not its code. Copy into the shared
-  `work/extracted/` only what peers must read, and claim it first. Your
-  own scratch goes under `work/<your id>/`.
+  attacker placed. A web shell, an upload or a script pulled from the image
+  is for reading, parsing and hashing, never running; the report describes
+  what it does, not its code. Copy into the shared `work/extracted/` only
+  what peers must read, and claim it first. Your own scratch goes under
+  `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -186,12 +193,13 @@ the report cannot be the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, every answer
-cites evidence, the critic has posted a sign-off on the board naming what
-they verified, `work/timeline.md` holds the merged timeline as a table with
-at least 30 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/indicators.md` holds one table of
-every indicator (type, value, first seen, source, confidence; one row saying
-so if none was found), every file pulled from the web root is under
+cites evidence, the critic has posted a sign-off on the board as a `result`
+post that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 30
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, source, confidence; one row saying so if
+none was found), every file pulled from the web root is under
 `work/extracted/` with its hash in the report, the ledger holds the dated
 events the timeline rests on, and `inputs/` is unchanged.
 
@@ -199,14 +207,15 @@ events the timeline rests on, and `inputs/` is unchanged.
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 30`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 23`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

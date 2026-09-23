@@ -33,8 +33,9 @@ before running the same commands again.
 
 1. System profile and the account: Windows edition and build, computer
    name, domain or workgroup, the time zone the host kept and whether it
-   changed in the window (SYSTEM `TimeZoneInformation`, System log
-   Kernel-General 1 for clock changes); the account of interest with its
+   changed in the window (SYSTEM `TimeZoneInformation`, System
+   Kernel-General 1 and Security 4616 for clock changes, with the account
+   that made them); the account of interest with its
    SID, profile path, creation time, last logon, password last set and
    group membership (SAM, SOFTWARE `ProfileList`); and every other account
    that logged on in the window, so this account's actions can be told
@@ -49,13 +50,16 @@ before running the same commands again.
 3. Program execution: every program the account ran with first and last
    run and count — Prefetch with its run times, Amcache, ShimCache (an
    order on newer builds, not a time of execution), UserAssist, BAM/DAM,
-   SRUM application usage, `RunMRU`, `MUICache`, jump lists and LNK files
+   SRUM application usage, `ActivitiesCache.db` (Windows Timeline, under
+   `%LOCALAPPDATA%\ConnectedDevicesPlatform\<id>\`) for application focus
+   and duration, `RunMRU`, `MUICache`, jump lists and LNK files
    for what was launched through a document, `ConsoleHost_history.txt` and
    PowerShell 4103/4104, Security 4688 where process auditing was on — and
    for each artefact what it can and cannot say about the time.
 4. Files and folders: what was opened, saved, created, moved and deleted —
    NTUSER `RecentDocs`, `OpenSavePidlMRU`, `LastVisitedPidlMRU`, the Office
-   MRU and trusted-document keys, jump lists and LNK files (target path,
+   MRU and trusted-document keys, NTUSER `WordWheelQuery` (Explorer
+   searches) and `TypedPaths`, jump lists and LNK files (target path,
    volume serial, MAC times), shellbags in UsrClass.dat for every folder
    browsed on local, removable and UNC paths, thumbcache for what was
    viewed, the recycle bin `$I` and `$R` pairs for what was deleted and
@@ -100,10 +104,11 @@ before running the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the hives (SYSTEM, SOFTWARE, SAM, the account's NTUSER.DAT and
-  UsrClass.dat), the event logs (`Security`, `System`,
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts: the hives (SYSTEM, SOFTWARE, SAM, the
+  account's NTUSER.DAT and UsrClass.dat), the event logs (`Security`,
+  `System`,
   `Microsoft-Windows-TerminalServices-LocalSessionManager/Operational`,
   `-User Profile Service/Operational`, `-PowerShell/Operational`,
   `-PrintService/Operational`), `$MFT`, `$UsnJrnl:$J`, Prefetch,
@@ -184,27 +189,29 @@ the shared `work/extracted/` and posts the hashes.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified, `work/timeline.md` holds the merged timeline as a table with at
-least 25 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/activity.md` holds one table with a
-row per day from the day before the window to the day after it (date,
-sessions, programs, files, sites, devices and shares, evidence; a day with
-nothing gets a row saying so), the ledger holds the dated events the
-timeline rests on, and `inputs/` is unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 25
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/activity.md` holds one table with a row per day
+from the day before the window to the day after it (date, sessions,
+programs, files, sites, devices and shares, evidence; a day with nothing
+gets a row saying so), the ledger holds the dated events the timeline rests
+on, and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 25`
 - `test -f work/activity.md`
 - `test "$(grep -c '^| ' work/activity.md)" -ge 5`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 19`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

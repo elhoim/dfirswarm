@@ -38,21 +38,37 @@ sources, already extracted.
    offset, the capture host's clock for a memory image), the offset applied
    to bring it to UTC and how that offset was established, the window each
    source covers and its resolution; all of it in `work/sources.md` as one
-   table (source, rows, offset, coverage).
+   table (source, rows, offset, coverage). The offset has two parts: the
+   time zone, and the skew of the clock that wrote the source against real
+   time. Artefacts stored in UTC (NTFS `$STANDARD_INFORMATION` and
+   `$FILE_NAME`, EVTX, registry last-write, Prefetch, browser databases,
+   Volatility times) need no time-zone conversion, but still take the
+   host's skew; the time zone applies only to sources written in local
+   time (FAT entries, ZIP entries and other DOS date-times, text logs,
+   some application databases), and the table says which those are.
+   `mactime` renders in the analysis host's zone unless given `-z UTC`:
+   check which zone a `catalog/` MAC timeline was rendered in before
+   merging it.
 2. The extraction per source: how each was turned into dated rows — body
-   files and `$MFT` through `fls -m` and `mactime`, `$UsnJrnl:$J` and
-   `$LogFile` through `usn_journal` or a forged reader, event logs through
+   files and `$MFT` through `fls -m` and `mactime`, `$UsnJrnl:$J` through
+   `usn_journal` (set `limit` high enough and state the record count; the
+   default is 500), `$LogFile` through a forged reader, event logs through
    `evtx_query` or `python-evtx`, registry last-write times through `regkv`,
    prefetch through `prefetch_mam`, browser histories through
    `browser_history`, memory through `pslist`, `psscan`, `netscan` and
    `timeliner.Timeliner`, log lines through a parser per format, or everything at
-   once through `plaso` where it is present — the row count from each, and
-   what could not be extracted and why.
+   once through `plaso` where it is present — the row count from each,
+   compared with the source's own count where it has one, and what could
+   not be extracted and why.
 3. The merged timeline: `work/timeline.md`, every row with time in UTC,
    source, artefact, the event, the actor or object, and the confidence,
    sorted, deduplicated where two sources report one event (both cited on
-   the row), and verified: a sample of rows from every source re-derived
-   from the artefact by somebody other than the one who extracted it.
+   the row), and filtered: the brief's window, or the incident window the
+   team agrees on the board, with file-system noise (updates, antivirus
+   scans) collapsed to one row per burst, the full per-source CSVs left in
+   `work/<your id>/timeline-<source>.csv`, and the filter stated in the
+   report; and verified: a sample of rows from every source re-derived from
+   the artefact by somebody other than the one who extracted it.
 4. The phases: the stretches of the timeline that belong together (before
    the incident, first contact, establishment, activity, clean-up, the
    response), each with its start and end, the sources that speak in it,
@@ -75,31 +91,32 @@ sources, already extracted.
 
 ### Ground rules
 
-- `inputs/` is read-only and stays byte-for-byte what it was. Never `cat`
-  or `read` an image whole. Work on images in place with The Sleuth Kit
-  (`mmls`, `fsstat`, `fls -m` for a body file, `icat` for `$MFT`,
-  `$LogFile` and `$UsnJrnl:$J`, `mactime` to render a body file; E01 files
+- `inputs/` is read-only and stays byte-for-byte what it was. Never `cat` or
+  `read` an image whole. Work on images in place with The Sleuth Kit
+  (`mmls`, `fsstat`, `fls -m` for a body file, `icat` for `$MFT`, `$LogFile`
+  and `$UsnJrnl:$J`, `mactime -z UTC -d -y` to render a body file; E01 files
   are read natively), Volatility 3 (`vol`, when the kickoff allowed the
   symbol server `isf-server.techanarchy.net`) on memory, `plaso`
-  (`log2timeline.py`, `psort.py`) where
-  it is installed, `regipy` and `python-evtx` (Python 3.12), `grep`,
-  `zcat`, `awk`, `sort`, `sqlite3` and `python3` on logs; a peer may find
-  `usn_journal`, `evtx_query`, `regkv`, `prefetch_mam`, `amcache_apps`,
-  `browser_history`, `lnk_parse` and `volrun` already seeded from the tool
-  library. There is no root: no mounting, no `sudo`.
+  (`log2timeline.py`, `psort.py`) where it is installed, `regipy` and
+  `python-evtx` (Python 3.12), `grep`, `zcat`, `awk`, `sort`, `sqlite3` and
+  `python3` on logs; a peer may find `usn_journal`, `evtx_query`, `regkv`,
+  `prefetch_mam`, `amcache_apps`, `browser_history`, `lnk_parse` and
+  `volrun` already seeded from the tool library. There is no root: no
+  mounting, no `sudo`.
 - If `SWARM.md` has an "Evidence catalog" section, the first pass is already
   done: read `catalog/` instead of rebuilding it.
 - If `skill` is in your tool list, this run carries packs: call it once with
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out): the journals,
-  the hives, the event logs, the prefetch directory, the browser profiles.
-  Write your per-source rows to `work/<your id>/timeline-<source>.csv` with
-  the same columns as the merged table, and post the path and the row count.
-  Copy into the shared `work/extracted/` only what peers must read, and
-  claim it first. Your own scratch goes under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out): the journals, the hives, the event logs, the prefetch directory, the
+  browser profiles. Write your per-source rows to
+  `work/<your id>/timeline-<source>.csv` with the same columns as the merged
+  table, and post the path and the row count. Copy into the shared
+  `work/extracted/` only what peers must read, and claim it first. Your own
+  scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -169,28 +186,29 @@ the report cannot be the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified (the rows sampled per source and the offsets re-checked),
-`work/timeline.md` is the product: the merged timeline as one table with
-at least 100 dated rows (the ISO 8601 UTC time in the first column, after
-any `#` index), every row with source, artefact and confidence, built from
-the per-source extractions and anchored in the ledger, `work/sources.md`
-holds one table with a row per source (source, rows, offset, coverage), the
-ledger holds the dated events the narrative rests on, and `inputs/` is
-unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified (the rows
+sampled per source and the offsets re-checked), `work/timeline.md` is the
+product: the merged timeline as one table with at least 100 dated rows (the
+ISO 8601 UTC time in the first column, after any `#` index), every row with
+source, artefact and confidence, built from the per-source extractions and
+anchored in the ledger, `work/sources.md` holds one table with a row per
+source (source, rows, offset, coverage), the ledger holds the dated events
+the narrative rests on, and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 100`
 - `test -f work/sources.md`
 - `test "$(grep -c '^| ' work/sources.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 15`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

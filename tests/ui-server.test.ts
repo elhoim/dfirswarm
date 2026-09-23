@@ -562,6 +562,55 @@ test("artifacts: a symlink under work/ is not served, wherever it points", async
   await rm(alias);
 });
 
+test("artifacts: a name outside Latin-1 is served, with an ASCII fallback and a UTF-8 filename*", async () => {
+  // Names under work/ come from evidence (a Cyrillic report, a Turkish user
+  // name); Node refuses a header value above U+00FF, so the raw name cannot go
+  // in filename="...".
+  for (const name of ["\u043e\u0442\u0447\u0435\u0442.txt", "kullan\u0131c\u0131_\u015f.csv"]) {
+    const abs = join(runsDir, "s7a1c", "work", name);
+    await writeFile(abs, "payload\n", "utf8");
+    const res = await get<string>(`/api/swarms/s7a1c/work/${encodeURIComponent(name)}?download=1`);
+    await rm(abs);
+    assert.equal(res.status, 200);
+    assert.equal(res.body, "payload\n");
+    const disposition = res.headers.get("content-disposition") ?? "";
+    assert.match(disposition, /^attachment; filename="[\x20-\x7e]+"; filename\*=UTF-8''/);
+    assert.equal(decodeURIComponent(disposition.split("filename*=UTF-8''")[1]), name);
+  }
+});
+
+test("artifacts: a file that cannot be opened after stat fails the request, not the server", { skip: process.getuid?.() === 0 && "root ignores file modes" }, async () => {
+  // stat succeeds and the headers go out; the open fails afterwards. Without
+  // an error listener on the read stream that failure is an unhandled 'error'
+  // event and takes the whole console down.
+  // The test runner swallows an uncaught exception that ui-server.ts would
+  // die of, so the test listens for one itself. chmod 000 makes the open fail
+  // every time, where a real rm between stat and open is a race.
+  const uncaught: unknown[] = [];
+  const onUncaught = (err: unknown) => uncaught.push(err);
+  process.on("uncaughtException", onUncaught);
+  const abs = join(runsDir, "s7a1c", "work", "unreadable.txt");
+  await writeFile(abs, "secret\n", "utf8");
+  execFileSync("chmod", ["000", abs]);
+  let failure: unknown;
+  try {
+    const res = await fetch(`${base}/api/swarms/s7a1c/work/unreadable.txt`, { signal: AbortSignal.timeout(5_000) });
+    await res.text();
+  } catch (err) {
+    failure = err;
+  } finally {
+    execFileSync("chmod", ["600", abs]);
+    await rm(abs);
+    await new Promise((r) => setImmediate(r));
+    process.off("uncaughtException", onUncaught);
+  }
+  assert.deepEqual(uncaught.map(String), [], "the read stream's error escaped as an uncaught exception");
+  assert.ok(failure, "a body that could not be read must not arrive as a complete response");
+  assert.notEqual((failure as Error).name, "TimeoutError", "the response was left hanging instead of being closed");
+  const alive = await get<string>("/api/swarms/s7a1c/work/notes.md");
+  assert.equal(alive.status, 200);
+});
+
 test("history: list, read a revision, restore under an operator claim, refuse when held", async () => {
   const list = await get<Record<string, Array<{ rev: number }>>>("/api/swarms/s3f09/history");
   assert.equal(list.body["work/usb-devices.txt"].length, 2);

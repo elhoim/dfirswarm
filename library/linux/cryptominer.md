@@ -54,17 +54,25 @@ before running the same commands again.
 4. Persistence and self-protection: every mechanism found, with the file,
    the time it was set and what it launches: cron (`/etc/crontab`,
    `/etc/cron.*`, `/var/spool/cron`), systemd units and timers, rc scripts,
-   shell profiles, `authorized_keys` entries added, `/etc/ld.so.preload`
-   and the library it names, watchdog scripts that restart the miner,
-   scripts that stop competing miners or security agents, firewall and
-   `hosts` changes, and immutable attributes on its files (the inode flags from `istat` on the image; an
-   extracted copy does not carry them).
+   shell profiles, `authorized_keys` entries added, `/etc/ld.so.preload` and
+   the library it names, watchdog scripts that restart the miner, scripts
+   that stop competing miners or security agents, firewall and `hosts`
+   changes, hugepages set for the miner (`vm.nr_hugepages` in
+   `/etc/sysctl.conf` or `/etc/sysctl.d`), the `msr` module loaded for the
+   miner's MSR tuning (`modprobe msr` in its scripts or histories, `msr` in
+   `/etc/modules-load.d`, kernel log lines), and immutable attributes on its
+   files (the inode flags from `istat` on the image; an extracted copy does
+   not carry them).
 5. Resource and network evidence: the connections to the pool in the logs
    and configuration (addresses, ports, the protocol named), kernel and
    syslog lines about CPU, temperature, out-of-memory kills and killed
-   processes, monitoring and cron mail that recorded the load, the process
-   names seen in `wtmp`-adjacent accounting if `psacct` was on, and the
-   window in which the host was mining.
+   processes, monitoring that recorded the load, cron mail
+   (`/var/mail/<user>`, `/var/spool/mail`), process accounting if it was on
+   (`/var/account/pacct` or `/var/log/account/pacct`: `lastcomm -f` or
+   `dump-acct` on the extract if this host has them, else forge a reader),
+   the sysstat CPU history (`/var/log/sa/saDD` or `/var/log/sysstat/saDD`:
+   `sadf -d` on the extract, else forge a reader), and the window in which
+   the host was mining.
 6. What else was the access used for? Commands in the histories beyond the
    miner, other tools downloaded, keys and users added, data read or
    archived, other hosts reached from here (`known_hosts`, histories,
@@ -116,14 +124,14 @@ before running the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: `/etc`, `/var/log` whole, `/var/spool/cron`, the systemd
-  directories, every home and `/root` with their dot files, the temp
-  directories, and the miner's own files. A miner or a script pulled from
-  the image is for hashing, `strings` and reading, never running. Copy
-  into the shared `work/extracted/` only what peers must read, and claim it
-  first. Your own scratch goes under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts: `/etc`, `/var/log` whole,
+  `/var/spool/cron`, the systemd directories, every home and `/root` with
+  their dot files, the temp directories, and the miner's own files. A miner
+  or a script pulled from the image is for hashing, `strings` and reading,
+  never running. Copy into the shared `work/extracted/` only what peers must
+  read, and claim it first. Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -183,26 +191,28 @@ first, and post the LVM offset once proved so nobody derives it twice.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified, `work/timeline.md` holds the merged timeline as a table with at
-least 20 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/indicators.md` holds one table of
-every indicator (type, value, first seen, source, confidence; one row saying
-so if none was found), the ledger holds the dated events the timeline rests
-on, and `inputs/` is unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 20
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, source, confidence; one row saying so if
+none was found), the ledger holds the dated events the timeline rests on,
+and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 20`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 15`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

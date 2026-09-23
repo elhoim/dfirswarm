@@ -25,9 +25,12 @@ The evidence is under `inputs/` (read-only; call `inputs` to list it, and
 read `inputs.json` for the manifest). If the operator left a brief beside
 it (`inputs/CASE.md`, the alert, the kernel version, why and when the
 capture was taken), its questions come first and the ones below fill in
-what it did not ask. If `SWARM. For a
-Linux capture it holds only the note that `windows.info` failed: run
-`banners.Banners` yourselves, once, and post the result.
+what it did not ask. If `SWARM.md` has an "Evidence catalog" section,
+know that the kickoff's memory pass is Windows-only: a Linux capture fails
+its `windows.info` probe and is left out of `catalog/` without a note (the
+summary counts 0 memory images). Nothing has been run on it yet: one agent
+runs `vol -f <image> banners.Banners` once and posts the result before
+anyone else starts.
 
 Volatility's symbol tables for this case come from
 `isf-server.techanarchy.net`: the kickoff has to allow that host
@@ -40,14 +43,24 @@ reliable route.
 
 1. The capture and the symbols: the format (a LiME file opens every range
    with its `EMiL` header and the range's physical addresses; AVML writes
-   LiME format by default and may compress it; a raw dump has neither),
+   LiME format by default and may compress it; a raw dump has neither; a
+   compressed AVML capture is read directly only if Volatility's AVML
+   layer finds the `libsnappy` library, otherwise it is converted once
+   (AVML's `avml-convert`, if the host has it) into
+   `work/extracted/<your id>/`, at full size, so check free space first,
+   then hashed, posted, and used by everybody; if neither works,
+   `banners.Banners` finds nothing, and the answer says no kernel banner
+   was found and why),
    the ranges and the total, the acquisition tool's own traces (a `lime`
    module in the module list, an `avml` process in the process list, both
    named and set aside), the kernel banner (`banners.Banners`), the distribution and hostname as strings show them,
    the boot time and uptime (`linux.boottime`, the ring buffer through
    `linux.kmsg`), and whether a symbol table matches: the ISF's banner
    must equal the dump's banner byte for byte, from one under `inputs/`
-   or one Volatility can fetch from the host the kickoff allowed. If
+   or one Volatility can fetch from the host the kickoff allowed.
+   Volatility does not look in `inputs/` by itself: copy or link the ISF
+   into `work/<your id>/symbols/linux/`, pass
+   `vol -s work/<your id>/symbols`, and confirm the match. If
    there is none, say so first; say that building one needs this
    kernel's debug symbols (the distribution's `dbgsym` or `debuginfo`
    package, or a `vmlinux` with DWARF), which the kickoff has to provide
@@ -74,14 +87,21 @@ reliable route.
    connections with local and remote address and state, files open but
    deleted, the mounted file systems (`linux.mountinfo`: a `tmpfs` or an
    overlay where none belongs, a bind mount over a system path), and
-   which of it is the host's ordinary traffic and which is not.
+   which of it is the host's ordinary traffic and which is not; the files
+   held in the page cache (`linux.pagecache.Files`, one recovered with
+   `linux.pagecache.InodePages --find <path> --dump` or `--inode`, the
+   whole cached tree with `linux.pagecache.RecoverFs`),
+   `/etc/ld.so.preload`, crontabs and systemd units among them.
 5. The kernel: loaded modules against the module list and the memory that
    holds them (`linux.lsmod`, `linux.check_modules`,
    `linux.hidden_modules`), the system call table, the interrupt table and
    the network information hooks (`linux.check_syscall`,
    `linux.check_idt`, `linux.check_afinfo`), credentials that do not add
    up (`linux.check_creds`), keyboard and TTY hooks
-   (`linux.keyboard_notifiers`, `linux.tty_check`), taint and module
+   (`linux.keyboard_notifiers`, `linux.tty_check`), netfilter hooks
+   (`linux.netfilter`), loaded eBPF programs (`linux.ebpf`) and ftrace
+   hooks (`linux.tracing.ftrace`), where the installed Volatility has them
+   (say which it lacks), taint and module
    messages in the ring buffer (`linux.kmsg`), and the capture tool's own
    module told apart from everything else; each hooked entry with the
    address it points to and the module that owns that address.
@@ -119,11 +139,11 @@ reliable route.
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
 - Everything dumped from memory goes under `work/extracted/<your id>/`
-  (quarantined: nothing there can execute; hash everything you pull out);
-  a dumped region, ELF or module is for reading, parsing and
-  disassembling, never running. Copy into the shared `work/extracted/`
-  only what peers must read, and claim it first. Your own scratch goes
-  under `work/<your id>/`.
+  (nothing there is run; it is no-exec only under `--quarantine`; hash
+  everything you pull out); a dumped region, ELF or module is for reading,
+  parsing and disassembling, never running. Copy into the shared
+  `work/extracted/` only what peers must read, and claim it first. Your own
+  scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -176,14 +196,17 @@ agent who wrote the report cannot be the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the report says in its first answer whether a symbol table
-matched and what was done without one, the critic has posted a sign-off on
-the board naming what they verified, `work/timeline.md` holds the merged
-timeline as a table with at least 10 dated rows (the ISO 8601 UTC time in
-the first column, after any `#` index) built from the ledger,
-`work/indicators.md` holds one table of every indicator (type, value, where
-seen, confidence; one row saying so if none was found), every region or
-module dumped is under `work/extracted/` with its hash in the report, the
+evidence, the report quotes the kernel banner (or says no kernel banner was
+found and why) and says in its first answer whether a symbol table matched
+and what was done without one, the critic has posted a sign-off on the board
+as a `result` post that starts a line with `SIGN-OFF:` and names what they
+verified, `work/timeline.md` holds the merged timeline as a table with at
+least 10 dated rows (the ISO 8601 UTC time in the first column, after any
+`#` index) built from the ledger, `work/indicators.md` holds one table of
+every indicator (type, value, where seen, confidence; one row saying so if
+none was found), every region or module dumped is under `work/extracted/`
+with its hash in the report and in a `SHA256SUMS` file beside it
+(`sha256sum` output; or the report says nothing was dumped and why), the
 ledger holds the dated events the timeline rests on, and `inputs/` is
 unchanged.
 
@@ -191,15 +214,19 @@ unchanged.
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
-- `grep -qi 'symbol' work/report.md`
+- `awk '/^## 1\./{f=1;next} /^## [0-9]/{f=0} f&&tolower($0)~/symbol/{x=1} END{exit !x}' work/report.md`
+- `awk '/^## 1\./{f=1;next} /^## [0-9]/{f=0} f&&(/Linux version/||tolower($0)~/no kernel banner/){x=1} END{exit !x}' work/report.md`
+- `test "$(find work/extracted -name SHA256SUMS -exec cat {} + 2>/dev/null | grep -cE '^[0-9a-fA-F]{64} |^SHA256 ?\(.*\) ?= ?[0-9a-fA-F]{64}')" -ge 1 || grep -qiE 'nothing (was )?dumped' work/report.md`
+- `find work/extracted -name SHA256SUMS -exec sh -c 'c="sha256sum -c"; command -v sha256sum >/dev/null || c="shasum -a 256 -c"; for m; do (cd "${m%/*}" && $c SHA256SUMS) >/dev/null 2>&1 || $c "$m" >/dev/null 2>&1 || exit 1; done' sh {} +`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 10`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 8`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

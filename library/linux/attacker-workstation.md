@@ -29,19 +29,30 @@ the same commands again.
 
 ### Questions the report has to answer
 
-1. System profile and which tools were present and run: the distribution and
-   release (`/etc/os-release`), the kernel, the hostname, the time zone, the
-   users, and the toolset — what was installed (the package logs `dpkg.log`,
-   `/var/lib/dpkg/status`, the `apt` history, the rpm or dnf history) and
-   what was actually run, from every user's shell histories
-   (`.bash_history`, `.zsh_history`), the tools' own logs and databases (a
-   framework's session and workspace database, its log files), and the output
-   and report files left behind. Report that a tool was used and when, not
-   how the tool works.
-2. The targets: the addresses and hostnames this machine acted against, from
-   the shell histories, configuration and output files, `known_hosts`, the
-   frameworks' workspaces, and the browser history; each target with the
-   artefacts that name it and the first and last time it appears.
+1. System profile and which tools were present and run: the acquisition
+   record and the media hash it holds (`ewfinfo`), and whether the image
+   still verifies against it (`ewfverify` reads the whole image, a long
+   run, so say on the board before starting it; `inputs.json` holds the
+   SHA-256 of the container files as copied, not the media hash, so it
+   shows only that the files have not changed since and cannot stand in
+   for the acquisition hash); the distribution and release
+   (`/etc/os-release`), the kernel, the hostname, the time zone, the
+   users, and the toolset — what was installed (the package logs
+   `dpkg.log`, `/var/lib/dpkg/status`, the `apt` history, the rpm or dnf
+   history) and what was actually run, from every user's shell
+   histories (`.bash_history`, `.zsh_history`), the tools' own logs and
+   databases (`~/.msf4/history`, `~/.msf4/logs/framework.log`,
+   `~/.msf4/loot/` and the Metasploit PostgreSQL data directory; the netexec
+   and crackmapexec workspaces `~/.nxc/workspaces` and `~/.cme/workspaces`
+   (SQLite); the sqlmap output directories; Responder logs; john and hashcat
+   potfiles, by path and hash only), and the output and report files left
+   behind. Report that a tool was used and when, not how the tool works.
+2. The targets: the addresses and hostnames this machine acted against,
+   from the shell histories, configuration and output files, `known_hosts`,
+   `~/.ssh/config`, `/etc/hosts`, `~/.wget-hsts`,
+   `~/.local/share/recently-used.xbel`, the frameworks' workspaces, the
+   sqlmap output directory names, and the browser history; each target with
+   the artefacts that name it and the first and last time it appears.
 3. The time range of activity: when the active account's work began and
    ended, from logins (`auth.log` or `secure`, `wtmp`, `lastlog`), the
    shell-history time marks where present, and the file modification times on
@@ -58,8 +69,11 @@ the same commands again.
 6. Operational-security mistakes and attribution clues: the accounts, user
    and real names, email addresses, locales, keyboard layouts, time zones,
    SSH and PGP keys, and the reused identifiers that point at who used this
-   machine; each an indicator recorded as one, never a lead to chase over the
-   network.
+   machine; the egress the operator hid behind (VPN profiles, NetworkManager
+   `system-connections`, `proxychains` and `torrc`); and the anti-forensics
+   (histories linked to `/dev/null`, `HISTFILE` unset, `shred` or
+   `bleachbit` in histories or packages); each an indicator recorded as one,
+   never a lead to chase over the network.
 7. The timeline of the operator's activity across every source in UTC; the
    hypothesis for what this machine was used for and how it was tested; what
    the machine cannot tell you about the targets themselves and what evidence
@@ -76,9 +90,13 @@ the same commands again.
   read it with `dfvfs` if `--toolbox crypto` put it here, or ask the
   operator for a logical export, before forging a superblock and inode
   B+tree reader — say which on the board), libewf
-  (`ewfinfo` for the acquisition record and hashes), `strings`, `sqlite3`,
-  `python3` (3.12). Read the journal with `journalctl --file` if the host
-  has it, else forge a parser for the binary journal; read the package
+  (`ewfinfo` for the acquisition record and hashes, `ewfverify` to check
+  them), `strings`, `sqlite3`, `python3` (3.12), `openssl`, `gpg`
+  (`gpg --show-keys` or `gpg --list-packets` on an extracted key file;
+  never `--homedir` on the extract itself, which writes into it),
+  `ssh-keygen -l -f` for key fingerprints. Read the journal with
+  `journalctl --file` if the host has it, else forge a parser for the
+  binary journal; read the package
   databases (`/var/lib/dpkg`, `/var/lib/rpm`) from the extracts. There is no
   root: no mounting, no `sudo`.
 - If the root file system sits inside an LVM physical volume (partition type
@@ -104,17 +122,17 @@ the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the shell histories, the package logs, the frameworks' databases
-  and logs, the home directories and `/root`, the loot and output
-  directories, the mount configuration and logs. Anything retrieved from a
-  target — a credentials file, a dump, an archive — is quarantined material
-  for reading by path and hash, never for running and never for use against
-  the target. The kits, implants and exploits themselves are the same: read,
-  parsed, hashed and disassembled, never running, quarantined or not. Copy
-  into the shared `work/extracted/` only what peers must read, and claim it
-  first. Your own scratch goes under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull out)
+  and analyse the extracts: the shell histories, the package logs, the
+  frameworks' databases and logs, the home directories and `/root`, the loot
+  and output directories, the mount configuration and logs. Anything retrieved
+  from a target — a credentials file, a dump, an archive — is quarantined
+  material for reading by path and hash, never for running and never for use
+  against the target. The kits, implants and exploits themselves are the same:
+  read, parsed, hashed and disassembled, never running, quarantined or not.
+  Copy into the shared `work/extracted/` only what peers must read, and claim
+  it first. Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -173,26 +191,28 @@ not what the target says today.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified, `work/timeline.md` holds the merged timeline as a table with at
-least 25 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/indicators.md` holds one table of
-every indicator (type, value, first seen, source, confidence; one row saying
-so if none was found), the ledger holds the dated events the timeline rests
-on, and `inputs/` is unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 25
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, source, confidence; one row saying so if
+none was found), the ledger holds the dated events the timeline rests on,
+and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 25`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 19`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

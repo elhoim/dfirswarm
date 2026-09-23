@@ -76,16 +76,17 @@ same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts. Copy a browser database and its `-wal` and `-shm` companions out
-  together and query the copy, so the write-ahead log is replayed and no
-  record is missed; a peer may find `browser_history` already seeded. Every
-  binary, script, stream, document and download that comes out of the image
-  is for reading, parsing, hashing and disassembling, never running — not in
-  the sandbox and not anywhere else; what a file does is what the static
-  reading shows. Copy into the shared `work/extracted/` only what peers must
-  read, and claim it first. Your own scratch goes under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull out)
+  and analyse the extracts. Copy a browser database and its `-wal` and `-shm`
+  companions out together and query the copy, so the write-ahead log is
+  replayed and no record is missed; a peer may find `browser_history` already
+  seeded. Every binary, script, stream, document and download that comes out
+  of the image is for reading, parsing, hashing and disassembling, never
+  running — not in the sandbox and not anywhere else; what a file does is what
+  the static reading shows. Copy into the shared `work/extracted/` only what
+  peers must read, and claim it first. Your own scratch goes under
+  `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -139,25 +140,27 @@ report cannot be the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified, `work/timeline.md` holds the merged timeline as a table with at
-least 18 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/browsing.md` holds the per-browser
-activity as a table with at least one row of substance, the ledger holds the
-dated events the timeline rests on, and `inputs/` is unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 18
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/browsing.md` holds the per-browser activity as
+a table with at least one row of substance, the ledger holds the dated
+events the timeline rests on, and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 18`
 - `test -f work/browsing.md`
 - `test "$(grep -c '^| ' work/browsing.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 14`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

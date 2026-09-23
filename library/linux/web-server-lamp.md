@@ -43,20 +43,36 @@ before running the same commands again.
    the static tree, with the status and size of the response that says
    whether each one worked; the first request that succeeded where it
    should not have; and the error-log or application-log line beside each.
+   The access log records no POST body, and where a proxy sits in front the
+   client field is the proxy's: look for `X-Forwarded-For` in a custom log
+   format, and for the body in `modsec_audit.log` where ModSecurity ran.
 3. Files added to the document roots and to the temp directories: scripts
    that were not part of the application, uploads whose content is not
    what their extension says, application files whose hash differs from the
    upstream copy, and files owned by the web server's account
    outside the roots (`/tmp`, `/var/tmp`, `/dev/shm`, the upload and cache
    directories); for each the path, inode, hash, size, times, what it does
-   as read, and every access-log request that called it.
-4. The database: the engine's own logs (error log, general or slow log,
-   binary or write-ahead log as far as readable); the accounts and grants
-   as the data files hold them; dumps and export files left on disk (`.sql`
-   files, the engine's export directory, archives in temp);
-   rows the application's own audit or user tables show as added or
-   changed in the window; and the application's own log of logins and
-   actions.
+   as read, and every access-log request that called it. Grep the roots for
+   `eval(`, `assert(`, `base64_decode`, `gzinflate`, `system(`, `passthru`,
+   `shell_exec`, `preg_replace` with `/e` and `move_uploaded_file`; read the
+   PHP session files (`/var/lib/php/sessions` on Debian and Ubuntu,
+   `/var/lib/php/session` on RHEL) and the php-fpm log and slow log for the
+   requests that used them.
+4. The database: the data directory (`/var/lib/mysql`,
+   `/var/lib/postgresql/<ver>/main`); the engine's own logs (error log,
+   general or slow log and the `general_log` or `log_statement` settings
+   that enabled them, the binary log `*-bin.NNNNNN` or `binlog.NNNNNN`
+   (the MySQL 8 default name) or `pg_wal/` as far as `strings` and a
+   forged reader get: `mysqlbinlog` is not in the toolbox, say so); the
+   accounts and grants as the data files hold them (`mysql/user.MYD` on
+   MySQL 5.x, `strings` of `mysql.ibd` on 8.x, `mysql/global_priv.MAD` on
+   MariaDB 10.4 onward, `global/1260` on PostgreSQL); the
+   `secure_file_priv` directory (`/var/lib/mysql-files`) and any
+   `INTO OUTFILE` result; `.mysql_history` and `.psql_history`; dumps and
+   export files left on disk (`.sql` files, the engine's export directory,
+   archives in temp); rows the application's
+   own audit or user tables show as added or changed in the window; and the
+   application's own log of logins and actions.
 5. The host after the foothold: commands the web server's account ran
    (histories under its home or the roots, error-log lines that show a
    shell being spawned by the interpreter), the auth log and `wtmp` for a
@@ -114,17 +130,16 @@ before running the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the web server's configuration and logs (rotated ones
-  included), the roots, the application's configuration and logs, the
-  database's directory and logs, `/etc`, `/var/log`, the homes and temp
-  directories. A script pulled out of a root is for
-  reading and decoding, never running. Parse the access log once into a
-  table you can query and forge that parser with `make_tool` so every peer
-  uses the same one. Copy into the shared `work/extracted/` only what
-  peers must read, and claim it first. Your own scratch goes under
-  `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts: the web server's configuration and logs
+  (rotated ones included), the roots, the application's configuration and
+  logs, the database's directory and logs, `/etc`, `/var/log`, the homes and
+  temp directories. A script pulled out of a root is for reading and
+  decoding, never running. Parse the access log once into a table you can
+  query and forge that parser with `make_tool` so every peer uses the same
+  one. Copy into the shared `work/extracted/` only what peers must read, and
+  claim it first. Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -185,26 +200,28 @@ the LVM offset once proved so nobody derives it twice.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified, `work/timeline.md` holds the merged timeline as a table with at
-least 30 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/indicators.md` holds one table of
-every indicator (type, value, first seen, source, confidence; one row saying
-so if none was found), the ledger holds the dated events the timeline rests
-on, and `inputs/` is unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 30
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, source, confidence; one row saying so if
+none was found), the ledger holds the dated events the timeline rests on,
+and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 30`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 23`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

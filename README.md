@@ -144,9 +144,9 @@ More screens: [docs/screenshots.md](docs/screenshots.md). Every case with goals,
 
 ## Quick start
 
-You need **Node ≥ 22.6**, `jq`, `python3`, `zsh`, [Herdr](https://herdr.dev) and [Pi](https://pi.dev), and a Pi login (`pi /login`: an API key or a Claude / ChatGPT subscription). A live run costs real money; start small.
+You need **Node ≥ 22.6**, `jq`, `python3`, zsh or bash as the login shell, [Herdr](https://herdr.dev) and [Pi](https://pi.dev), and a Pi login (`pi /login`: an API key or a Claude / ChatGPT subscription). A live run costs real money; start small.
 
-macOS and Linux both run the swarm with its guards at the kernel: seatbelt on macOS, Landlock inside a user namespace on Linux. A Linux server needs a little setting up — the account's login shell has to be zsh, and unprivileged user namespaces have to be allowed — and [docs/linux-server.md](docs/linux-server.md) is that page.
+macOS and Linux both run the swarm with its guards at the kernel: seatbelt on macOS, Landlock inside a user namespace on Linux. A Linux server needs a little setting up — the account's login shell has to be zsh or bash, and unprivileged user namespaces have to be allowed — and [docs/linux-server.md](docs/linux-server.md) is that page.
 
 ```bash
 git clone https://github.com/halilozturkci/dfirswarm && cd dfirswarm

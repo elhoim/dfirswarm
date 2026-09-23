@@ -576,7 +576,7 @@ export function anchorGuarded(writeGuard: string | undefined, hostCaps: Record<s
 /**
  * What the panes' own probes said, beside what the kickoff built. A guard the
  * host can enforce is not a guard the panes got: the hook rides on the pane's
- * shell, and a login shell that is not zsh never reads it.
+ * shell, and a login shell that is neither zsh nor bash never reads it.
  */
 export function measuredGuardLine(state: string | undefined): string {
   switch (state) {

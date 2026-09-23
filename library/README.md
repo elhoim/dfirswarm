@@ -10,6 +10,12 @@ scripts/swarm.sh start --goal-file library/windows/host-intrusion.md \
   --inputs /cases/host-01 --pack windows-forensics --catalog --n 5 --cap-usd 30
 ```
 
+`--catalog` also turns on `--quarantine`, which strips execute bits under
+`work/extracted/` and `work/quarantine/` and makes both no-exec where the
+host has a kernel guard. A case that pulls samples, carvings or decoded
+stages out of loose files is launched with `--quarantine` whether or not it
+takes the catalog; without either flag nothing there is protected.
+
 Every entry is a starting point, not a script. Load it, name the evidence it
 should read where the document says so, tighten or drop the questions the
 case does not need, and save the result under `prompts/goals/` as yours. The
@@ -124,7 +130,12 @@ eighteen published runs converged on:
    read-only, `inputs` lists it; `inputs.json` is the manifest; `catalog/`
    holds the kickoff's first pass when the run had `--catalog`); and that a
    brief the operator dropped beside the evidence (`inputs/CASE.md`, a
-   `README`, a ticket) sets the questions before the ones below do.
+   `README`, a ticket) sets the questions before the ones below do. A
+   question never takes file times from the manifest: `inputs.json`'s
+   `mtime_ms` is the kickoff's copy time unless the manifest says
+   `"held": "bind"` or `"attached": true`, and even then it is the
+   operator's copy, never a timeline row on its own. File times come from
+   the brief or the acquisition record.
 2. `### Questions the report has to answer` — numbered `1.` to `N.`, each a
    real question with the artefacts that answer it named in the question.
    The last one is always the timeline, the hypothesis and approach, and
@@ -163,10 +174,11 @@ Verbatim across the cases, with the tool list adapted to the evidence:
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts; copy into the shared `work/extracted/` only what peers must
-  read, and claim it first. Your own scratch goes under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts; copy into the shared `work/extracted/` only
+  what peers must read, and claim it first. Your own scratch goes under
+  `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -210,10 +222,11 @@ Verbatim across the cases, with the tool list adapted to the evidence:
 
 > `work/report.md` exists, answers every question under headings `## 1.` …
 > `## N.`, every answer cites evidence, the critic has posted a sign-off on
-> the board naming what they verified, `work/timeline.md` holds the merged
-> timeline as a table with at least X dated rows (the ISO 8601 UTC time in
-> the first column, after any `#` index) built from the ledger, the ledger
-> holds the dated events the timeline rests on, and `inputs/` is unchanged.
+> the board as a `result` post that starts a line with `SIGN-OFF:` and names
+> what they verified, `work/timeline.md` holds the merged timeline as a
+> table with at least X dated rows (the ISO 8601 UTC time in the first
+> column, after any `#` index) built from the ledger, the ledger holds the
+> dated events the timeline rests on, and `inputs/` is unchanged.
 
 X is what the evidence can honestly yield: 40 for a full host intrusion, 10
 for a single-artefact puzzle. The timeline check counts only rows whose first
@@ -237,20 +250,79 @@ first lines (a title and a paragraph come first in a real run):
 ```markdown
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 25`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 19`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)
 ```
 
+The last two read a verdict, not a mention. `done` writes `inputs_check`
+every time, whatever it found, so a bare grep for the event could never
+fail; the check reads the latest one and asks for `"content_ok":true` (no
+file modified, missing or added) rather than `ok`, which also turns false
+when only a file's mode or link count drifted; `tail -1` reads all of its
+input before the last `grep -q` sees a line, so `pipefail` cannot fail it
+early. The sign-off check wants a post tagged `result` with a line that
+starts `SIGN-OFF:` (bold stars in front are fine), so the early "who takes
+the sign-off?" posts the division paragraph asks for, and a result post
+saying "I will not sign-off until 4.1 is fixed", do not satisfy it. One
+`awk` reads every post, with no pipe for `pipefail` to fail and no process
+per post, so a board of thousands of posts still checks in well under the
+time limit. It is still a heuristic: a result post opening `SIGN-OFF:
+withheld` passes, and nothing a shell can read proves that the certifier is
+not the agent who wrote the report. That rule rests on the division
+paragraph.
+
+The long `awk` line after the headings check holds "every answer cites
+evidence" to something a script can see: each numbered section must carry a
+citation (a path under `inputs/`, `work/`, `catalog/` or `ledger/`, a host
+path, a registry key, an artefact file name, a hash, an IP address, a `seq`,
+ledger entry, inode, offset, record id or event id with its number) or be
+labelled `Hypothesis:`. A word on its own, such as "offset" or "hypothesis"
+in a sentence, is not a citation. One section in four may go without, for a
+closing answer that rests on the ones before it; an empty report fails. Of
+the 22 published reports under `docs/use-cases/`, it passes 20 and fails
+two: belkactf6-bogus-bill `run-2`, left with answers of `TBD.`, and
+dfir-web-server-case `run-4-linux`, where 7 of 8 sections cite nothing.
+
 Add what the kind of case can promise: an indicators table for an intrusion
 or a malware case (`test "$(grep -c '^| ' work/indicators.md)" -ge 3` — one
 row at least, and a row may say that nothing was found and why), a flags
 table for a question set, an extracted-artefact directory for a memory dump.
+A case that extracts samples, carvings or decoded stages adds
+`test -z "$(find work -path work/.toolchain -prune -o -type f \( -perm -u+x -o -perm -g+x -o -perm -o+x \) -print 2>/dev/null | head -1)"`:
+no file under `work/` carries an execute bit (pip's `work/.toolchain/`
+aside), which is the part of the quarantine a check can see.
+
+Where the definition of done promises extracted files with their hashes,
+name the manifest (`sha256sum` output in a `SHA256SUMS` file beside them)
+and check it, not the directory: one check counts manifest lines (either
+case of hex, and the BSD `SHA256 (file) = ...` form), `test "$(find
+work/extracted -name SHA256SUMS -exec cat {} + 2>/dev/null | grep -cE
+'^[0-9a-fA-F]{64} |^SHA256 ?\(.*\) ?= ?[0-9a-fA-F]{64}')" -ge 1`, and a
+second runs `sha256sum -c` (or `shasum -a 256 -c`) on every manifest, so a
+hash of a file that is not there fails. Where it promises a YARA rule,
+check that a file declares a rule outside a comment (`test -n "$(find
+work/rules -iname '*.yar*' -exec awk ... {} + 2>/dev/null)"`, the awk
+dropping `/* */` and `//` text and printing the file name on a `rule`
+line) and, in a second check, that every rule compiles: `command -v yara
+>/dev/null || exit 0;` then `yara "$r" /dev/null` over each file. The
+guard lets a run started without the dfir toolbox pass the compile check;
+the declaration check still holds it.
+
+Checks run under `set -euo pipefail`, so never end a pipe with `grep -q`:
+it exits on the first match, the command feeding it dies of SIGPIPE, and
+the check fails although it matched, more often the bigger the input.
+Count instead (`test "$(... | grep -c PATTERN)" -ge 1`), test the output
+(`test -n "$(...)"`), or do it in one `awk` with `END{exit !m}`. The
+standard `inputs_check` line is safe as it stands: the `grep -q` at its end
+reads the one line `tail -1` prints, and `tail -1` has read all of its input
+before it prints, so nothing upstream is left to die of SIGPIPE.
 
 ### What an entry must not do
 

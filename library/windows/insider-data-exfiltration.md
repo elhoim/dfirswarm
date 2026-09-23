@@ -57,8 +57,11 @@ before running the same commands again.
 4. Removable media: every device connected in the window (SYSTEM
    `USBSTOR`, `USB`, `SCSI` and `MountedDevices`, SOFTWARE `Windows
    Portable Devices`, NTUSER `MountPoints2`, `setupapi.dev.log`, System
-   log 20001/20003 and `DriverFrameworks-UserMode/Operational`, Security
-   6416 and 4663 where auditing was on), the drive letter, volume serial
+   log 20001/20003 and `DriverFrameworks-UserMode/Operational` (off by
+   default), `Microsoft-Windows-Partition/Diagnostic` 1006,
+   `Kernel-PnP/Configuration` 400/410, SOFTWARE `Microsoft\Windows
+   NT\CurrentVersion\EMDMgmt`, Security 6416 and 4663 where auditing was
+   on), the drive letter, volume serial
    and first and last connection of each, and the LNK files, shellbags and
    `$UsnJrnl` entries that show which files were written to it.
 5. Network channels, each with its artefacts: cloud sync and webmail
@@ -72,7 +75,10 @@ before running the same commands again.
    remnants), screenshots (`Pictures\Screenshots`, Snipping Tool traces),
    and RDP or remote tools (mstsc MRU and bitmap cache, TeamViewer and
    AnyDesk logs) that could have carried a file out of the host's view;
-   for each the file, the direction, the time.
+   SRUM network data usage (`{973F5D5C-1D90-4944-BE8E-24B94231A174}`:
+   bytes sent and received per application per hour) set against the sync
+   client, browser and mail processes in the window; for each the file,
+   the direction, the time.
 6. Attempts to hide or clean: cleaners installed or run (CCleaner,
    BleachBit: installs, Prefetch, their own logs), deletions (recycle bin
    `$I`/`$R`, `$UsnJrnl` delete and rename reasons), browser history
@@ -104,10 +110,10 @@ before running the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the hives (SYSTEM, SOFTWARE, SAM, the user's NTUSER.DAT and
-  UsrClass.dat), the event logs (`Security`, `System`,
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts: the hives (SYSTEM, SOFTWARE, SAM, the
+  user's NTUSER.DAT and UsrClass.dat), the event logs (`Security`, `System`,
   `Microsoft-Windows-DriverFrameworks-UserMode/Operational`,
   `-PrintService/Operational`, `-TerminalServices-*`), `$MFT`, `$LogFile`,
   `$UsnJrnl:$J`, Prefetch, SRUDB.dat, `setupapi.dev.log`, the jump lists
@@ -184,27 +190,29 @@ agent who wrote the report cannot be the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified, `work/timeline.md` holds the merged timeline as a table with at
-least 30 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/data-of-interest.md` holds one table
-of every file of interest the user handled (file, where it went, channel,
-time, evidence, confidence; one row saying so if none was found and why),
-the ledger holds the dated events the timeline rests on, and `inputs/` is
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 30
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/data-of-interest.md` holds one table of every
+file of interest the user handled (file, where it went, channel, time,
+evidence, confidence; one row saying so if none was found and why), the
+ledger holds the dated events the timeline rests on, and `inputs/` is
 unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 30`
 - `test -f work/data-of-interest.md`
 - `test "$(grep -c '^| ' work/data-of-interest.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 23`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

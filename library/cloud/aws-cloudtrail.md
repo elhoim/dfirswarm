@@ -4,7 +4,7 @@ summary: CloudTrail, GuardDuty, VPC flow logs and a credential report; which ide
 evidence: cloud-export
 os: any
 tags: aws, cloudtrail, guardduty, vpc-flow-logs, iam, access-keys, assume-role, enumeration, privilege, persistence, s3, exfiltration, timeline
-inputs: the account's CloudTrail files for the window (management and, if enabled, data events; gzipped JSON as delivered to S3, or a console export), GuardDuty findings as JSON, VPC flow logs for the VPCs that matter, the IAM credential report as CSV, and a brief naming the finding or the key that raised the alarm
+inputs: the account's CloudTrail files for the window and a baseline period before it (30 days where retained; management and, if enabled, data events; gzipped JSON as delivered to S3, or a console export), GuardDuty findings as JSON, VPC flow logs for the VPCs that matter, the IAM credential report as CSV, and a brief naming the finding or the key that raised the alarm
 seats: 5
 cap_usd: 25
 wall_clock: 75
@@ -30,8 +30,12 @@ ran the first pass; read `catalog/` before running the same commands again.
 ### Questions the report has to answer
 
 1. Inventory: every file with its format, the account ids, the regions and
-   the trails it covers, the exact window and the gaps in it (an hour with
-   no delivery, a region with none), whether data events were on and for
+   the trails it covers, whether each trail is multi-region and includes
+   global service events (`IncludeGlobalServiceEvents`: IAM, global STS and
+   some `ConsoleLogin` records land in us-east-1, so their absence is a gap,
+   not a clean account), the exact window and the gaps in it (an hour with
+   no delivery, a region with none), the baseline period and whether it is
+   long enough to call a source new, whether data events were on and for
    which resources, the event sources and event names present with their
    counts, the GuardDuty finding types and their counts, the flow log
    version and fields and the interfaces they cover, the credential
@@ -42,21 +46,34 @@ ran the first pass; read `catalog/` before running the same commands again.
    `sessionContext` and the issuer of an assumed role), with the source
    addresses, user agents and regions each used before and inside the
    window; the first call from a source, agent or region the identity had
-   never used; the calls that failed for lack of permission and the ones
-   that succeeded right after; and the keys the credential report shows as
-   old, unused or without MFA.
+   never used (us-east-1 on a global-service call, and a `sourceIPAddress`
+   that is an AWS service name or `AWS Internal`, are expected, not a new
+   region or source); console sign-ins (`ConsoleLogin` with
+   `responseElements.ConsoleLogin` and `additionalEventData.MFAUsed`),
+   federated and token-vending calls (`GetSessionToken`,
+   `GetFederationToken`, `AssumeRoleWithSAML`, `AssumeRoleWithWebIdentity`),
+   long-term (`AKIA`) versus temporary (`ASIA`) key ids, and any
+   instance-role session (an `i-` session name) used from an address
+   outside the account's instances; the calls that failed for lack of
+   permission and the ones that succeeded right after; and the keys the
+   credential report shows as old, unused or without MFA.
 3. Enumeration: bursts of `List*`, `Describe*` and `Get*` calls by identity
    and minute, across services and regions, with what they asked about
    (IAM, S3, EC2, Secrets Manager, Lambda, RDS, the organisation); the
    `GetCallerIdentity` calls that mark a credential being tested; and the
    order in which the services were surveyed.
 4. Privilege: policies attached or put (`AttachUserPolicy`, `PutUserPolicy`,
-   `AttachRolePolicy`, `CreatePolicyVersion` with `SetAsDefault`), users and
-   roles created, trust policies edited (`UpdateAssumeRolePolicy`), roles
-   assumed and by whom (`AssumeRole` with the session name and the source
-   identity), access keys and login profiles created, MFA devices
-   deactivated or added, and permission boundaries removed; each with the
-   identity, the time, the source and the outcome.
+   `AttachRolePolicy`, `PutRolePolicy`, `PutGroupPolicy`,
+   `AttachGroupPolicy`, `AddUserToGroup`, `CreatePolicyVersion` with
+   `SetAsDefault`, `SetDefaultPolicyVersion`), users and roles created,
+   trust policies edited (`UpdateAssumeRolePolicy`), roles assumed and by
+   whom (`AssumeRole` with the session name and the source identity),
+   access keys and login profiles created or changed on another user
+   (`CreateLoginProfile`, `UpdateLoginProfile`), roles passed to compute
+   (`RunInstances`, `CreateFunction`, `AssociateIamInstanceProfile` with a
+   role or profile parameter), MFA devices deactivated or added, and
+   permission boundaries removed; each with the identity, the time, the
+   source and the outcome.
 5. Resources reached and changed: instances launched, stopped or given a
    new instance profile; snapshots created, shared or made public
    (`ModifySnapshotAttribute`, `ModifyImageAttribute`); buckets listed,
@@ -65,12 +82,17 @@ ran the first pass; read `catalog/` before running the same commands again.
    read by name only (`GetSecretValue`, `GetParameter`, never the value);
    security groups opened (`AuthorizeSecurityGroupIngress`) and to what;
    Lambda functions created or updated; and the trail itself touched
-   (`StopLogging`, `DeleteTrail`, `UpdateTrail`, `PutEventSelectors`).
+   (`StopLogging`, `DeleteTrail`, `UpdateTrail`, `PutEventSelectors`) and
+   the other sensors (`DeleteDetector`, `UpdateDetector`, `CreateIPSet`,
+   `CreateFilter`, `StopConfigurationRecorder`, `DeleteFlowLogs`).
 6. Persistence: identities, keys, roles, trust relationships, Lambda
    functions, EventBridge rules, instance profiles, SSM associations and
    open security groups that still exist at the window's end as the trail
-   shows them created and never deleted; and what the credential report
-   says about them.
+   shows them created and never deleted; resource and trust policies that
+   name a principal outside the account (`PutBucketPolicy`, `PutKeyPolicy`,
+   Lambda `AddPermission`, `UpdateAssumeRolePolicy`) and SAML or OIDC
+   providers created (`CreateSAMLProvider`, `CreateOpenIDConnectProvider`);
+   and what the credential report says about them.
 7. Exfiltration: the data events that read or copied data (S3 `GetObject`
    and `CopyObject` by bucket, prefix, count and bytes; snapshot copies
    across accounts or regions; `GetSecretValue` calls by name; database
@@ -109,11 +131,11 @@ ran the first pass; read `catalog/` before running the same commands again.
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
 - Anything you write out of the exports goes under
-  `work/extracted/<your id>/` (quarantined: nothing there can execute); a
-  user-data script, a Lambda's code location, a policy document quoted
-  from a request is for reading, never running or applying. Copy into the
-  shared `work/extracted/` only what peers must read, and claim it first.
-  Your own scratch goes under `work/<your id>/`.
+  `work/extracted/<your id>/` (nothing there is run; it is no-exec only
+  under `--quarantine`); a user-data script, a Lambda's code location, a
+  policy document quoted from a request is for reading, never running or
+  applying. Copy into the shared `work/extracted/` only what peers must
+  read, and claim it first. Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -173,19 +195,21 @@ certifies it.
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, every answer
 cites evidence (file, event id, event name), the critic has posted a
-sign-off on the board naming what they verified against the ledger,
-`work/timeline.md` holds the merged timeline as a table with at least 25
-dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
-built from the ledger, each row naming the identity, `work/indicators.md`
-holds one table of every indicator (type, value, first seen, identity,
-source record, confidence; one row saying so if none was found), the report
-ends question 8 with the remediation list, the ledger holds the dated events
-the timeline rests on, and `inputs/` is unchanged.
+sign-off on the board as a `result` post that starts a line with `SIGN-OFF:`
+and names what they verified against the ledger, `work/timeline.md` holds
+the merged timeline as a table with at least 25 dated rows (the ISO 8601 UTC
+time in the first column, after any `#` index) built from the ledger, each
+row naming the identity, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, identity, source record, confidence; one
+row saying so if none was found), the report ends question 8 with the
+remediation list, the ledger holds the dated events the timeline rests on,
+and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `grep -qi 'remediation' work/report.md`
 - `test -f work/timeline.md`
@@ -194,8 +218,8 @@ the timeline rests on, and `inputs/` is unchanged.
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 19`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

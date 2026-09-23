@@ -88,11 +88,11 @@ ran the first pass; read `catalog/` before running the same commands again.
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
 - Anything you write out of the exports goes under
-  `work/extracted/<your id>/` (quarantined: nothing there can execute); a
-  command line, a script fragment or an encoded argument quoted from the
-  telemetry is for reading and decoding, never running. Copy into the
-  shared `work/extracted/` only what peers must read, and claim it first.
-  Your own scratch goes under `work/<your id>/`.
+  `work/extracted/<your id>/` (nothing there is run; it is no-exec only
+  under `--quarantine`); a command line, a script fragment or an encoded
+  argument quoted from the telemetry is for reading and decoding, never
+  running. Copy into the shared `work/extracted/` only what peers must read,
+  and claim it first. Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -151,8 +151,14 @@ the report cannot be the one who certifies it.
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
 evidence (file, record id, field), every alert in the export has a verdict
-in the report, the critic has posted a sign-off on the board naming what
-they verified against the ledger, `work/timeline.md` holds the merged
+in the report, `work/alerts.md` holds one table with a row per alert in the
+export (alert id, host, rule, severity, verdict: true positive, benign or
+undecidable, the record it rests on; one row saying so if the export holds
+no alerts) and one of its first five lines states the alert count the parser
+found (`1000 alerts` or `Alerts: 1000`), the critic has posted a sign-off on
+the board as a `result` post that starts a line with `SIGN-OFF:` and names
+what they verified against the ledger and states that the table's row count
+equals the parser's alert count, `work/timeline.md` holds the merged
 timeline as a table with at least 30 dated rows (the ISO 8601 UTC time in
 the first column, after any `#` index) built from the ledger, each row
 naming the host, `work/indicators.md` holds one table of every indicator
@@ -164,16 +170,21 @@ on, and `inputs/` is unchanged.
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `grep -qi 'verdict' work/report.md`
+- `test -f work/alerts.md`
+- `test "$(head -5 work/alerts.md | grep -Eci '(^|[^[:alnum:]])[0-9]+ alerts?|alerts?( count)?: *[0-9]+')" -ge 1`
+- `test "$(grep '^|' work/alerts.md | grep -vcE '^[|: -]+$')" -ge 2`
+- `test "$(grep '^|' work/alerts.md | grep -vE '^[|: -]+$' | sed 1d | grep -Eci 'true positive|benign|undecidable|no alerts')" -ge 1`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 30`
 - `grep -m1 -iE '^\| *(# *\| *)?(time|utc|date)' work/timeline.md | grep -qi 'host'`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 23`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

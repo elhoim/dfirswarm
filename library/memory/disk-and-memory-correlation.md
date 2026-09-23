@@ -38,12 +38,19 @@ did) unless the operator put the tables under `inputs/`.
 ### Questions the report has to answer
 
 1. System profile, and proof that the two images are one host: computer
-   name, machine SID, install date, network adapters and their addresses
-   from the SYSTEM and SOFTWARE hives on disk against the cached hives in
-   memory (`windows.registry.hivelist`, `printkey`), the boot time and
-   uptime in memory against the last boot the System log records, the
-   capture time of each image and the gap between them, the time zone the
-   host kept, whether either image is incomplete, and the acquisition tool's
+   name (SYSTEM `ControlSet00x\Control\ComputerName`), machine SID (SAM
+   `Domains\Account`, its `V` value, or SECURITY `Policy\PolAcDmS`; the
+   local account SIDs `windows.getsids` shows share it), install date
+   (SOFTWARE `Microsoft\Windows NT\CurrentVersion`, `InstallDate`; on
+   Windows 10 and 11 it is reset by every feature update, so it dates the
+   last one, and the original install date is under SYSTEM `Setup\Source OS
+   (Updated on ...)`),
+   network adapters and their addresses (SYSTEM
+   `Services\Tcpip\Parameters\Interfaces`) on disk against the cached
+   hives in memory (`windows.registry.hivelist`, `printkey`), the boot time
+   and uptime in memory against the last boot the System log records
+   (EventLog 6005 and 6009, Kernel-General 12), the capture time of each
+   image and the gap between them, the time zone the host kept, whether either image is incomplete, and the acquisition tool's
    own traces (its process, its driver in `modules`/`driverscan`, its handle
    to `\Device\PhysicalMemory`, and on disk its file, service and Prefetch),
    named and set aside.
@@ -72,13 +79,20 @@ did) unless the operator put the tables under `inputs/`.
    from memory (a dumped image differs from its file: relocations applied,
    imports resolved, sections in memory layout; compare import hash,
    section hashes, resources and strings, and say which you compared);
-   the processes with no file (deleted, hollowed, memory-only)
+   and each process matched to its creation record on disk, Security 4688
+   (4689 for the exit) and Sysmon 1, on PID, parent PID, image path,
+   command line and creation time (a PID reused after a reboot is not a
+   match); the processes with no file (deleted, hollowed, memory-only)
    and the files with no process (set to run but not running).
 5. Each connection to a log line: every entry in `netscan` matched to
-   Sysmon 3, the Windows Filtering Platform events 5156 and 5157, the
-   firewall log, the DNS client log, SRUM's network usage, the browser
-   history and the web cache; the connections no log recorded and the
-   logged connections no longer in memory, with the time each was made.
+   Sysmon 3 and 22 (the DNS query), the Windows Filtering Platform events
+   5156 and 5157, the firewall log, the DNS client log, SRUM's network
+   usage, the browser history and the web cache; which of those logs were
+   enabled at all (audit policy in SECURITY `Policy\PolAdtEv`, the firewall
+   profiles' logging keys, the DNS-Client Operational channel is off by
+   default), so an empty log is read as not collected rather than as
+   nothing happened; the connections no log recorded and the logged
+   connections no longer in memory, with the time each was made.
 6. Each persistence entry to its running instance: every Run key, service,
    task, WMI subscription and startup item on disk matched to the process
    or thread it produced in memory (`svcscan` states against the SYSTEM
@@ -124,14 +138,14 @@ did) unless the operator put the tables under `inputs/`.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out): the hives, the
-  event logs, `$MFT`, the journals, Prefetch, Amcache, SRUM, the files
-  behind the processes, and every process image, module or region dumped
-  from memory; a dumped or extracted executable is for reading, parsing
-  and disassembling, never running. Copy into the shared `work/extracted/`
-  only what peers must read, and claim it first. Your own scratch goes
-  under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out): the hives, the event logs, `$MFT`, the journals, Prefetch, Amcache,
+  SRUM, the files behind the processes, and every process image, module or
+  region dumped from memory; a dumped or extracted executable is for
+  reading, parsing and disassembling, never running. Copy into the shared
+  `work/extracted/` only what peers must read, and claim it first. Your own
+  scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -187,35 +201,44 @@ the one who certifies it.
 ## Definition of done
 
 `work/report.md` exists, answers every question under headings `## 1.`,
-`## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, every
-answer cites evidence and names the image it came from, the critic has
-posted a sign-off on the board naming what they verified,
-`work/timeline.md` holds the merged timeline as a table with at least 28
-dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
-built from the ledger with a source column that names disk or memory on
-every row, `work/reconciliation.md` holds one table with a row per process,
-connection and persistence entry (memory evidence, disk evidence, match or
-gap, explanation, confidence), `work/indicators.md` holds one table of every
-indicator (type, value, first seen, source, confidence; one row saying so if
-none was found), every dump and extract is under `work/extracted/` with its
-hash in the report, the ledger holds the dated events the timeline rests on,
-and `inputs/` is unchanged.
+`## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, every answer
+cites evidence and names the image it came from, the critic has posted a
+sign-off on the board as a `result` post that starts a line with `SIGN-OFF:`
+and names what they verified, `work/timeline.md` holds the merged timeline
+as a table with at least 28 dated rows (the ISO 8601 UTC time in the first
+column, after any `#` index) built from the ledger with a `Source` column
+that names disk or memory on every row, `work/reconciliation.md` holds one
+table whose first column is the kind (process, connection or persistence),
+then memory evidence, disk evidence, match or gap, explanation, confidence,
+with a row for every process outside the baseline (the suspect tree, every
+process with no file, every process whose path, parent or signer is
+unusual), one row for the baseline processes with their count, a row for
+every non-loopback connection and a row for every persistence entry that is
+not Microsoft's (a kind with nothing in it gets one row saying so),
+`work/indicators.md` holds one table of every indicator (type, value, first
+seen, source, confidence; one row saying so if none was found), every dump
+and extract is under `work/extracted/` with its hash in the report and in a
+`SHA256SUMS` file beside it (`sha256sum` output), the ledger holds the dated
+events the timeline rests on, and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 28`
 - `test -f work/reconciliation.md`
-- `test "$(grep -c '^| ' work/reconciliation.md)" -ge 5`
+- `for k in process connection persistence; do grep -qiE "^[|] *$k[^|]*[|]" work/reconciliation.md || exit 1; done`
+- `awk -F'|' 'function hc(s,  a,n,i,h){n=split(s,a,"|");for(i=2;i<=n;i++){h=tolower(a[i]);gsub(/[ \t]/,"",h);if(h~/^source/)return i}return 0} BEGIN{r="^[|] *([0-9]+ *[|] *)?[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"} !/^[|]/{c=0;p="";next} /^[|: -]+$/{if(p!="")c=hc(p);p="";next} $0~r{s=c?tolower($c):"";if(s~/disk/)d=1;if(s~/memory/)m=1;if(s!~/disk|memory/)b=1;p=$0;next} {if(!c)c=hc($0);p=$0} END{exit !(d&&m&&!b)}' work/timeline.md`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
-- `test "$(find work/extracted -type f 2>/dev/null | wc -l)" -ge 1`
+- `test "$(find work/extracted -name SHA256SUMS -exec cat {} + 2>/dev/null | grep -cE '^[0-9a-fA-F]{64} |^SHA256 ?\(.*\) ?= ?[0-9a-fA-F]{64}')" -ge 1`
+- `find work/extracted -name SHA256SUMS -exec sh -c 'c="sha256sum -c"; command -v sha256sum >/dev/null || c="shasum -a 256 -c"; for m; do (cd "${m%/*}" && $c SHA256SUMS) >/dev/null 2>&1 || $c "$m" >/dev/null 2>&1 || exit 1; done' sh {} +`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 21`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

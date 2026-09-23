@@ -38,13 +38,20 @@ not recognise, because that is where this run begins.
    `ewfinfo`, the AD1 header, the AFF metadata, a KAPE or Velociraptor
    manifest, a tool's own log beside the data) with the acquisition date and
    examiner it records; written to `work/inventory.md` as one table (file,
-   type, what it is, hosts and period, readable by, notes).
+   type, what it is, hosts and period, readable by, notes). A row is a
+   file, except that a split image's segments (`.E01`, `.E02`, …,
+   `.Ex01`, `.L01`, `.001`, `-s001.vmdk`) are one row, and so is a
+   collector's output tree in its own directory (KAPE, Velociraptor, UAC,
+   an extracted archive), with its file count.
 2. What each piece is, one level down: for a disk image the partition table,
    the file systems, the operating system and version, the host name, the
    time zone, the users and the install date (`mmls`, `fsstat`, `fls` to the
    root, the SYSTEM and SOFTWARE hives, or `/etc/hostname`, `/etc/timezone`
-   and `/var/log/installer/`); for a memory dump the format, the size and
-   the profile (`windows.info` or `banners.Banners`); for a log its format,
+   and `/var/log/installer/`); for a memory dump the format, the size, the
+   OS and kernel build (`banners.Banners`; `windows.info` when the kickoff
+   allowed the symbol server) and the symbol table a full analysis would
+   need (a Windows PDB GUID, or for Linux and macOS the exact kernel banner
+   an ISF must be built for); for a log its format,
    fields, time zone, and first and last timestamp; for an archive its
    listing and what the listing says it is; for a document or an export its
    origin and date range.
@@ -95,11 +102,11 @@ not recognise, because that is where this run begins.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and keep it
-  small: a hive, a configuration file, an archive's listing, the first
-  megabyte of a log. An unknown binary or script is for reading, parsing and
-  hashing, never running, quarantined or not. Copy into the shared
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull out)
+  and keep it small: a hive, a configuration file, an archive's listing, the
+  first megabyte of a log. An unknown binary or script is for reading, parsing
+  and hashing, never running, quarantined or not. Copy into the shared
   `work/extracted/` only what peers must read, and claim it first. Your own
   scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
@@ -161,29 +168,35 @@ agent who wrote the report cannot be the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified (every file in the inventory opened by them, at least by
-signature), `work/inventory.md` holds one table with a row for every file
-under `inputs/` (file, type, what it is, hosts and period, readable by,
-notes; an unrecognised file is a row that says so), `work/timeline.md`
-holds the merged timeline as a table with at least 10 dated rows (the ISO
-8601 UTC time in the first column, after any `#` index) built from the
-ledger, the report's plan names a library entry or says why none fits for
-every piece, the ledger holds the dated events the timeline rests on, and
-`inputs/` is unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified (every file
+in the inventory opened by them, at least by signature), `work/inventory.md`
+holds one table with a row for every file under `inputs/` (a split image or
+a collector's tree as one row; file, type, what it is, hosts and period,
+readable by, notes; an unrecognised file is a row that says so),
+`work/timeline.md` holds the merged timeline as a table with at least 10
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, the report's plan names a library entry or says why
+none fits for every piece, the ledger holds the dated events the timeline
+rests on, and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/inventory.md`
-- `test "$(grep -c '^| ' work/inventory.md)" -ge 3`
+- `test "$(awk '/^ *\|/{if($0~/^ *\|[ :|-]*-[ :|-]*$/){if(p)r--;p=0}else{r++;p=1};next}{p=0}END{print r+0}' work/inventory.md)" -ge "$(python3 -c 'import json,re;f=json.load(open("inputs.json"))["files"];s={re.sub(r"(?i)[.]([el]x?[0-9]{2}|[0-9]{3})$|-(s[0-9]{3}|f[0-9]{3}|flat)(?=[.]vmdk$)","",re.sub(r"^inputs/","",p["path"]).split("/")[0]) for p in f};print(min(len(s),20))')"`
+  (one data row at least per top-level piece of `inputs.json`, up to
+  twenty: a split image's segments (`.E01`, `.Ex01`, `.L01`, `.001`,
+  `-s001.vmdk`, `-flat.vmdk`) count once, and the header and separator
+  rows are not counted, whether the separator is `| --- |` or `|---|`.)
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 10`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 8`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

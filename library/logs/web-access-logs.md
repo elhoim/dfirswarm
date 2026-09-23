@@ -30,7 +30,10 @@ questions come first and the ones below fill in what it did not ask. If
    format, the fields, the signatures in the error log), the time zone and
    the exact window covered, gaps and rotations, the request volume per day,
    and every distinct client address with its request count, user agents,
-   and first and last seen.
+   and first and last seen; whether the server sat behind a proxy, load
+   balancer or CDN (the same few addresses carrying most traffic; an
+   X-Forwarded-For or equivalent field), which field is the real client,
+   and where that field can be forged by the client.
 2. Reconnaissance: which clients probed the site before anything else
    happened (path enumeration, scanner user agents, forced browsing,
    parameter fuzzing), when, and what the responses told them (status codes,
@@ -64,8 +67,8 @@ questions come first and the ones below fill in what it did not ask. If
   logs with `grep`, `awk`, `zcat`, `sort`, `uniq`, `sqlite3` and `python3`;
   do not decompress or copy them wholesale. Parse once into a table you can
   query (`work/<your id>/requests.sqlite` or a CSV with client, time,
-  method, path, query, status, size, referrer, user agent) and forge that
-  parser with `make_tool` so every peer uses the same one.
+  method, path, query, status, size, referrer, user agent, forwarded-for)
+  and forge that parser with `make_tool` so every peer uses the same one.
 - If `SWARM.md` has an "Evidence catalog" section, the first pass is already
   done: read `catalog/` instead of rebuilding it.
 - If `skill` is in your tool list, this run carries packs: call it once with
@@ -73,15 +76,18 @@ questions come first and the ones below fill in what it did not ask. If
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
 - Anything you write out of the logs goes under `work/extracted/<your id>/`
-  (quarantined: nothing there can execute); a script or a payload quoted
-  from a request is for reading and decoding, never running. Copy into the
-  shared `work/extracted/` only what peers must read, and claim it first.
-  Your own scratch goes under `work/<your id>/`.
+  (nothing there is run; it is no-exec only under `--quarantine`); a script
+  or a payload quoted from a request is for reading and decoding, never
+  running. Copy into the shared `work/extracted/` only what peers must read,
+  and claim it first. Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
-  `ledger/ledger.md`. Convert every timestamp to UTC and say what the
-  server's offset was.
+  `ledger/ledger.md`. Convert every timestamp to UTC and say how: Apache
+  and nginx lines carry their own offset; IIS W3C `date time` is already
+  UTC (do not apply the host offset); note that Apache logs the request's
+  start and nginx its completion, and use `%D`, `$request_time` or
+  `time-taken` where present to place long transfers.
 - Every claim in the report cites its evidence: the log file, the line
   number or the exact line, the request as logged, the command that produced
   the count. A claim without evidence is a hypothesis and is labelled as
@@ -124,26 +130,28 @@ one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified, `work/timeline.md` holds the merged timeline as a table with at
-least 25 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/indicators.md` holds one table of
-every indicator (type, value, first seen, requests, confidence; one row
-saying so if none was found), the ledger holds the dated events the timeline
-rests on, and `inputs/` is unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 25
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, requests, confidence; one row saying so
+if none was found), the ledger holds the dated events the timeline rests on,
+and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 25`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 19`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

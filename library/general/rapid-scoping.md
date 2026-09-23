@@ -39,16 +39,22 @@ there, because the budget does not allow a second pass.
    collection was made relative to the alert.
 2. Compromised or not: the strongest evidence for and the strongest
    evidence against, each named (a logon from an unexpected source in
-   4624/4625, a process with no business on this host in Prefetch, Amcache
-   or the process list, a persistence entry in the Run keys, services or
-   scheduled tasks, an executable under a user or temp path, a beacon in
-   the connection list, an alert the antivirus log confirms or contradicts,
-   the `auth.log` and `wtmp` on Linux), and the verdict — yes, no, or cannot
-   tell — with the two independent artefacts it rests on or the statement
-   that only one was found.
+   4624/4625, a cleared log (1102, 104), a service or task created (7045,
+   4698), a process with its command line (4688, PowerShell 4104), a
+   Defender detection (1116, 1117), a process with no business on this host
+   in Prefetch or the process list, ShimCache and Amcache entries (presence,
+   not proof of execution: pair them with Prefetch or a 4688), a
+   persistence entry in the Run keys, services or scheduled tasks, an
+   executable under a user or temp path, a beacon in the connection list,
+   an alert the antivirus log confirms or contradicts, the `auth.log` and
+   `wtmp` on Linux), and the verdict with the two independent artefacts it
+   rests on or the statement that only one was found. The verdict stands
+   on its own line as `Verdict: compromised`, `Verdict: not compromised` or
+   `Verdict: cannot tell`.
 3. Scope: if compromised, the blast radius as far as this package shows it
    — the accounts used and created (4720, 4728, 4732, 4672, `sudo` and
-   `useradd` lines), the other hosts reached or reaching in (4648, 4776, RDP
+   `useradd` lines), the other hosts reached or reaching in (4648; the NTLM
+   validations this host performed (4776), to be read against the DC; RDP
    and SMB client traces, `netscan`, known-hosts and shell histories), the
    data touched (files opened, archives created, shares mapped, 4663 and
    5145 where audited); if not, what the package rules out and what it
@@ -58,10 +64,12 @@ there, because the budget does not allow a second pass.
    controller's Security log, the proxy or firewall logs for the window,
    the other hosts named in 3), in order of what each would resolve, and
    the containment step that is safe on what is known.
-5. The timeline of what is known, from the ledger, however short; the
-   hypothesis and how far it was tested within the budget; what remains
-   uncertain and what evidence would resolve it; the recommendation: which
-   library entry runs next on what.
+5. The timeline of what is known, from the ledger: the collection time,
+   the alert time, the host's install date and last boot and shutdown, the
+   first and last record of each log collected, and every event the
+   verdict and the scope rest on; the hypothesis and how far it was tested
+   within the budget; what remains uncertain and what evidence would
+   resolve it; the recommendation: which library entry runs next on what.
 
 ### Ground rules
 
@@ -83,11 +91,11 @@ there, because the budget does not allow a second pass.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and only what a
-  question needs: the hives, the Security and System logs, Prefetch, the
-  process list. Every binary, script, stream, document and download that
-  comes out of the evidence is for reading, parsing, hashing and
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull out)
+  and only what a question needs: the hives, the Security and System logs,
+  Prefetch, the process list. Every binary, script, stream, document and
+  download that comes out of the evidence is for reading, parsing, hashing and
   disassembling, never running — not in the sandbox and not anywhere else;
   what a file does is what the static reading shows. Copy into the shared
   `work/extracted/` only what peers must read, and claim it first. Your own
@@ -158,27 +166,30 @@ the check is the two artefacts under the verdict, re-read.
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, every answer cites evidence, the report
 states the verdict (compromised, not compromised, or cannot tell) with the
 two independent artefacts it rests on or the reason it rests on fewer, the
-critic has posted a sign-off on the board naming what they verified,
-`work/timeline.md` holds the merged timeline as a table with at least 10
-dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
-built from the ledger, `work/collect-next.md` holds one table of what to
-collect next (artefact, from where, what it would resolve; one row saying so
-if nothing more is needed), the ledger holds the dated events the timeline
-rests on, and `inputs/` is unchanged.
+critic has posted a sign-off on the board as a `result` post that starts a
+line with `SIGN-OFF:` and names what they verified, `work/timeline.md` holds
+the merged timeline as a table with at least 10 dated rows (the ISO 8601 UTC
+time in the first column, after any `#` index) built from the ledger,
+`work/collect-next.md` holds one table of what to collect next (artefact,
+from where, what it would resolve; one row saying so if nothing more is
+needed), the ledger holds the dated events the timeline rests on, and
+`inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
-- `grep -qiE 'compromised|cannot tell' work/report.md`
+- `grep -qiE '^\**verdict\**: *\** *(compromised|not compromised|cannot tell)' work/report.md`
+  (the verdict line's format, not its answer: any of the three passes.)
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 10`
 - `test -f work/collect-next.md`
 - `test "$(grep -c '^| ' work/collect-next.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 8`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

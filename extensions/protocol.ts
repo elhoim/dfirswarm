@@ -82,6 +82,7 @@ export const PROTECTED_PREFIXES = [
   ".inputs-pristine/",
   ".fsguard/",
   ".zsh/",
+  ".bash/",
   // The findings ledger and the evidence catalog are written by the harness
   // (through `record`, and at kickoff) and read by everyone.
   "ledger/",
@@ -2303,6 +2304,60 @@ function traceToken(): string {
   return process.env.SWARM_TRACE_TOKEN || "";
 }
 
+/**
+ * Whether the trace's tail refuses a direct append, read from the end of the
+ * file so a long trace is not loaded whole on every fallback: its last line
+ * carries the collector's `prev`, or it is a fragment (no closing newline, or
+ * not JSON) that a collector killed mid-append left behind. A line appended
+ * onto a fragment would fuse with it and corrupt the record for good.
+ */
+async function tailRefusesAppend(file: string): Promise<boolean> {
+  let handle;
+  try {
+    handle = await open(file, "r");
+  } catch {
+    return false;
+  }
+  try {
+    const { size } = await handle.stat();
+    if (size === 0) return false;
+    const lastByte = Buffer.alloc(1);
+    await handle.read(lastByte, 0, 1, size - 1);
+    if (lastByte[0] !== 0x0a) return true;
+    const CHUNK = 65536;
+    const chunks: Buffer[] = [];
+    let end = size;
+    let seen = 0;
+    while (end > 0) {
+      const start = Math.max(0, end - CHUNK);
+      const buf = Buffer.alloc(end - start);
+      await handle.read(buf, 0, buf.length, start);
+      chunks.unshift(buf);
+      seen += buf.length;
+      end = start;
+      const text = Buffer.concat(chunks, seen).toString("utf8").replace(/\n+$/, "");
+      const cut = text.lastIndexOf("\n");
+      if (cut >= 0 || end === 0) {
+        const last = text.slice(cut + 1);
+        if (!last) return false;
+        try {
+          const record = JSON.parse(last) as { prev?: unknown };
+          return typeof record?.prev === "string";
+        } catch {
+          return true;
+        }
+      }
+    }
+    return false;
+  } catch {
+    // Unreadable is not chained: the append below meets the same error and
+    // spills, as it always has.
+    return false;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
 export async function appendEvent(
   sandboxRoot: string,
   event: Omit<SwarmEvent, "ts"> & { ts?: string },
@@ -2326,6 +2381,17 @@ export async function appendEvent(
   // field: it goes to the collector and nowhere else.
   const plain = `${JSON.stringify(record)}\n`;
   await mkdir(dirname(file), { recursive: true }).catch(() => undefined);
+  // A chained record must not take an unchained line: the verifier reports it
+  // as "appended" by something other than the collector — a tamper alarm the
+  // harness raises against itself. This is a collector that stopped answering
+  // with no write guard to make traces/ read-only. The line goes to the spill
+  // file, as the shell watchdogs do; only an unchained record takes the append.
+  // So does a torn tail, which the appended line would fuse with.
+  if (await tailRefusesAppend(file)) {
+    await mkdir(dirname(join(sandboxRoot, TRACE_SPILL_REL)), { recursive: true }).catch(() => undefined);
+    await appendFile(join(sandboxRoot, TRACE_SPILL_REL), plain, "utf8");
+    return record;
+  }
   // O_APPEND keeps two writers from overwriting each other, but a line is no
   // longer guaranteed to be small: an argument may now be 20,000 characters
   // (A43), which is past the size any filesystem promises to write in one

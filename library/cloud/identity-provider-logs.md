@@ -49,25 +49,51 @@ ran the first pass; read `catalog/` before running the same commands again.
    or user agent, or a token used from a place the sign-in was not, as the
    provider records it; application consent grants and their scopes;
    administrator roles assigned; API tokens and service credentials issued;
+   sign-ins by device-code or password-grant flows (Entra
+   `authenticationProtocol` `deviceCode` or `ropc`), by legacy clients that
+   cannot do MFA (`clientAppUsed` IMAP, POP, SMTP, "Other clients"), and
+   tokens replayed on a session id from a new address (`incomingTokenType`);
    each with the account, the time, the address, the client and the record
-   that holds it.
+   that holds it. As the providers name them: Okta `user.session.start`,
+   `system.push.send_factor_verify_push`, `user.mfa.okta_verify.deny_push`,
+   `user.mfa.factor.activate`, `user.mfa.factor.deactivate`,
+   `user.mfa.factor.reset_all`, `app.oauth2.as.consent.grant`,
+   `system.api_token.create`; Entra sign-in `status.errorCode` 50126, 50074,
+   500121, 53003 and `authenticationDetails`, audit `User registered
+   security info`, `Consent to application`, `Add member to role`;
+   Workspace login `login_failure`, `login_challenge`, `suspicious_login`,
+   token `authorize`, admin `ASSIGN_ROLE`.
 4. What the sessions reached: for every anomalous session, the
    applications signed into through it (SAML and OIDC assertions, token
    grants, application sign-in events), in order and with the outcome; the
    data those applications hold as the brief describes it; and the
    sessions that are still valid at the window's end as the logs show
-   them.
+   them. Follow a session on the provider's own key: Entra `sessionId`
+   across interactive and non-interactive sign-ins, Okta
+   `authenticationContext.externalSessionId`.
 5. Password and recovery changes: password changes and resets (by the
    user, by self-service, by an administrator), recovery email and phone
    changes, security question and backup code events, account unlocks,
    and for each who did it, from where and whether it follows an anomaly
-   from question 3.
+   from question 3 (Okta `user.account.reset_password`,
+   `user.account.update_password`; Entra audit `Reset password (by admin)`,
+   `Reset password (self-service)`, `Change user password`; Workspace login
+   `password_edit`, `recovery_email_edit`, `recovery_phone_edit`).
 6. Administrator actions in the window: every administrative event
    (roles granted or removed, policies and rules changed, applications
    added or configured, users created, suspended or deleted, sessions
-   revoked, tokens created) with the administrator, the address and the
-   client, and which of them were the response and which were the
-   intrusion.
+   revoked, tokens created; identity providers, federation settings and
+   domain authentication added or changed, cross-tenant or partner trust
+   added, credentials added to an application or service principal, and
+   support or admin impersonation sessions) with the administrator, the
+   address and the client, and which of them were the response and which
+   were the intrusion. As the providers name them: Okta
+   `user.account.privilege.grant`, `policy.lifecycle.update`,
+   `application.lifecycle.create`, `system.idp.lifecycle.create`,
+   `system.idp.lifecycle.update`, `user.session.impersonation.initiate`;
+   Entra audit `Add member to role`, `Set domain authentication`, `Set
+   federation settings on domain`, `Add service principal credentials`;
+   Workspace admin `ASSIGN_ROLE`, `CREATE_USER`.
 7. The timeline across the exports from the first anomaly to the last
    observed action; the hypothesis for how the first account was taken
    and how it was tested; what the provider's logs cannot answer and what
@@ -81,15 +107,19 @@ ran the first pass; read `catalog/` before running the same commands again.
 - `inputs/` is read-only and stays byte-for-byte what it was. Read the
   exports with `jq`, `grep`, `awk`, `zcat`, `sort`, `uniq`, `sqlite3` and
   `python3`; do not copy them wholesale. Parse once into a table you can
-  query (`work/<your id>/signins.sqlite`: one table per export with time
-  in UTC, account, event type, outcome, address, recorded location,
-  device and its identifier, client and user agent, application,
-  authentication method, risk, session or correlation id, the actor for
-  an audit event, and the record id), and forge that parser with
-  `make_tool` so every peer reads the same tables; the three providers
-  name the same facts differently and the parser is where the names are
-  reconciled. There is no root, and no tenant to query: the exports are
-  the whole of the evidence. If `signin_analyse` is already in your tool
+  query (`work/<your id>/signins.sqlite`: one table per export with time in
+  UTC, account, event type, outcome, address, recorded location, device and
+  its identifier, client and user agent, application, authentication method,
+  risk, session or correlation id, the actor for an audit event, and the
+  record id: Okta `uuid`, Entra `id`, Workspace `id.uniqueQualifier`), and
+  forge that parser with `make_tool` so every peer reads the same tables;
+  the three providers name the same facts differently and the parser is
+  where the names are reconciled. An Entra portal CSV export comes as a
+  sign-ins file plus an AuthDetails file per sign-in type (interactive,
+  non-interactive, service principal); join them on Request ID before
+  counting MFA outcomes, since the push denials and the per-step methods are
+  only in AuthDetails. There is no root, and no tenant to query: the exports
+  are the whole of the evidence. If `signin_analyse` is already in your tool
   list, that is the parser: load its output into the sqlite tables and forge
   only what it lacks. Its default `limit` is 500 records, so set it
   explicitly or take counts from sqlite, never from a capped tool result.
@@ -100,11 +130,11 @@ ran the first pass; read `catalog/` before running the same commands again.
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
 - Anything you write out of the exports goes under
-  `work/extracted/<your id>/` (quarantined: nothing there can execute); a
-  redirect URL, an application's reply address, a token's metadata quoted
-  from a record is for reading, never for fetching or using. Copy into the
-  shared `work/extracted/` only what peers must read, and claim it first.
-  Your own scratch goes under `work/<your id>/`.
+  `work/extracted/<your id>/` (nothing there is run; it is no-exec only
+  under `--quarantine`); a redirect URL, an application's reply address, a
+  token's metadata quoted from a record is for reading, never for fetching
+  or using. Copy into the shared `work/extracted/` only what peers must
+  read, and claim it first. Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -163,19 +193,21 @@ the report cannot be the one who certifies it.
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
 evidence (export, record id, event type), the critic has posted a sign-off
-on the board naming what they verified against the ledger,
-`work/timeline.md` holds the merged timeline as a table with at least 20
-dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
-built from the ledger, each row naming the account, `work/indicators.md`
-holds one table of every indicator (type, value, first seen, account, source
-record, confidence; one row saying so if none was found), the report ends
-question 7 with the reset list, the ledger holds the dated events the
-timeline rests on, and `inputs/` is unchanged.
+on the board as a `result` post that starts a line with `SIGN-OFF:` and
+names what they verified against the ledger, `work/timeline.md` holds the
+merged timeline as a table with at least 20 dated rows (the ISO 8601 UTC
+time in the first column, after any `#` index) built from the ledger, each
+row naming the account, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, account, source record, confidence; one
+row saying so if none was found), the report ends question 7 with the reset
+list, the ledger holds the dated events the timeline rests on, and `inputs/`
+is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `grep -qi 'baseline' work/report.md`
 - `test -f work/timeline.md`
@@ -184,8 +216,8 @@ timeline rests on, and `inputs/` is unchanged.
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 15`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

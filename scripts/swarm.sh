@@ -422,6 +422,17 @@ alloc_prefix() {
   exit 1
 }
 
+# The HOME the panes are meant to have: the last --env HOME, else this one.
+# The bash pane hook puts exactly this back, so Pi in the pane and the
+# preflight here agree on where ~/.pi/agent is.
+pane_home() {
+  local item home="$HOME"
+  for item in ${extra_env[@]+"${extra_env[@]}"}; do
+    case "$item" in HOME=*) home="${item#HOME=}" ;; esac
+  done
+  printf '%s\n' "$home"
+}
+
 # Pi resolves its config dir from $PI_CODING_AGENT_DIR before falling back to
 # ~/.pi/agent (getAgentDir() in the Pi package). The credential preflight has to
 # look where the panes will actually look, which includes a directory handed
@@ -431,10 +442,10 @@ pi_agent_dir() {
   # is what Pi itself treats as unset, so it has to fall back to the home
   # default rather than to whatever this shell happened to export. The home in
   # question is the panes' home, which --env can move too.
-  local item dir="" seen=0 home="$HOME"
+  local item dir="" seen=0 home
+  home="$(pane_home)"
   for item in ${extra_env[@]+"${extra_env[@]}"}; do
     case "$item" in
-      HOME=*) home="${item#HOME=}" ;;
       PI_CODING_AGENT_DIR=*) dir="${item#PI_CODING_AGENT_DIR=}"; seen=1 ;;
     esac
   done
@@ -760,10 +771,10 @@ netguard_mode_label() {
 inputs_guard_label() {
   case "$1" in
     image) echo "image (attached read-only; the refusal comes from the device, not from a profile)" ;;
-    seatbelt) echo "seatbelt (macOS sandbox-exec, through the pane's zsh)" ;;
-    mountns) echo "mountns (Linux mount namespace, through the pane's zsh)" ;;
-    linux) echo "linux (Landlock inside a user namespace, through the pane's zsh)" ;;
-    landlock) echo "landlock (Linux Landlock, no namespace, through the pane's zsh)" ;;
+    seatbelt) echo "seatbelt (macOS sandbox-exec, through the pane's shell)" ;;
+    mountns) echo "mountns (Linux mount namespace, through the pane's shell)" ;;
+    linux) echo "linux (Landlock inside a user namespace, through the pane's shell)" ;;
+    landlock) echo "landlock (Linux Landlock, no namespace, through the pane's shell)" ;;
     *) echo "none (detect + heal only)" ;;
   esac
 }
@@ -779,7 +790,7 @@ clear_inputs() {
       rm -rf "$d"
     fi
   done
-  rm -rf "$sandbox/.fsguard" "$sandbox/.zsh"
+  rm -rf "$sandbox/.fsguard" "$sandbox/.zsh" "$sandbox/.bash"
   rm -f "$sandbox/inputs.json"
 }
 
@@ -970,9 +981,15 @@ inputs_summary() {
 }
 
 # The pane's shell re-runs itself under fsguard. Herdr starts pi from the
-# pane shell however it likes, so the hook is on the shell, not on pi: a zsh
-# reads $ZDOTDIR/.zshenv first, re-execs under the guard, and hands ZDOTDIR
-# back to the user's own config.
+# pane shell however it likes, so the hook is on the shell, not on pi. A zsh
+# reads $ZDOTDIR/.zshenv first; a bash has no such variable, so the pane is
+# given HOME=<sandbox>/.bash when the account's login shell is bash, where a
+# bash finds its .bashrc (Herdr starts it interactive and not a login shell,
+# measured with Herdr 0.9.1) or its .bash_profile (a login shell). Either
+# hook puts the panes' HOME back before anything else runs, re-execs under
+# the guard, and hands the shell back to the user's own config. HOME is not
+# moved for any other shell: one that reads neither hook would keep it, and
+# Pi would find no credentials.
 write_fsguard_hook() {
   local sandbox="$1" mode="$2"
   shift 2
@@ -983,7 +1000,9 @@ write_fsguard_hook() {
   ZSH_BIN="$(command -v zsh || echo /bin/zsh)"
   local quoted="" a
   for a in "$@"; do quoted+=" $(printf '%q' "$a")"; done
-  mkdir -p "$sandbox/.fsguard" "$sandbox/.zsh"
+  local home
+  home="$(pane_home)"
+  mkdir -p "$sandbox/.fsguard" "$sandbox/.zsh" "$sandbox/.bash"
   bash "$ROOT/scripts/fsguard.sh" "$@" --mode "$mode" --in-place --dry-run -- true \
     > "$sandbox/.fsguard/plan.txt" 2>/dev/null || true
   # An account with no ~/.zshrc gets, on Ubuntu, zsh's new-user wizard in every
@@ -1000,7 +1019,9 @@ write_fsguard_hook() {
 # so the guarded paths hold at the kernel for everything started from it, then
 # hands ZDOTDIR back to the user's own configuration (or keeps this directory,
 # whose empty .zshrc keeps zsh's new-user wizard out of the pane, when the
-# home has none).
+# home has none). HOME is put back first: on an account whose login shell is
+# bash, the pane was started with the sandbox's .bash/ as HOME.
+export HOME=$(printf '%q' "$home")
 if [[ -f "\$HOME/.zshrc" ]]; then
   export ZDOTDIR="\$HOME"
 else
@@ -1010,6 +1031,55 @@ if [[ -o interactive && -z "\${SWARM_FSGUARD:-}" ]]; then
   exec bash $(printf '%q' "$ROOT")/scripts/fsguard.sh${quoted} --mode $(printf '%q' "$mode") --in-place -- $(printf '%q' "$ZSH_BIN") -l -i
 fi
 HOOK
+  # The bash side: one file, read as .bashrc by an interactive shell and as
+  # .bash_profile by a login shell. Once guarded (or when not interactive), it
+  # reads the file the user's own home would have given this shell.
+  cat > "$sandbox/.bash/.bashrc" <<HOOK
+# Generated by swarm.sh. The pane was started with HOME set to this directory
+# so that a bash reads this file; it puts HOME back, re-runs this shell under
+# scripts/fsguard.sh so the guarded paths hold at the kernel for everything
+# started from it, and then reads the user's own bash configuration. The
+# shell re-run is \$BASH, the one Herdr started, not the first bash on PATH.
+export HOME=$(printf '%q' "$home")
+if [[ \$- == *i* && -z "\${SWARM_FSGUARD:-}" ]]; then
+  if shopt -q login_shell; then
+    exec bash $(printf '%q' "$ROOT")/scripts/fsguard.sh${quoted} --mode $(printf '%q' "$mode") --in-place -- "\$BASH" -l -i
+  fi
+  exec bash $(printf '%q' "$ROOT")/scripts/fsguard.sh${quoted} --mode $(printf '%q' "$mode") --in-place -- "\$BASH" -i
+fi
+if shopt -q login_shell; then
+  for __swarm_rc in "\$HOME/.bash_profile" "\$HOME/.bash_login" "\$HOME/.profile"; do
+    if [[ -f "\$__swarm_rc" ]]; then . "\$__swarm_rc"; break; fi
+  done
+  unset __swarm_rc
+elif [[ -f "\$HOME/.bashrc" ]]; then
+  . "\$HOME/.bashrc"
+fi
+HOOK
+  cp "$sandbox/.bash/.bashrc" "$sandbox/.bash/.bash_profile"
+  # /etc/bash.bashrc runs before the hook, with this directory as HOME. On
+  # Debian and Ubuntu it prints the sudo hint to a sudo-group account whose
+  # HOME has neither .sudo_as_admin_successful nor .hushlogin; the re-run
+  # shell reads it again with the real HOME and decides for itself.
+  : > "$sandbox/.bash/.hushlogin"
+}
+
+# A bash has no ZDOTDIR, so on an account whose login shell is bash the panes
+# get HOME=<sandbox>/.bash, where the bash hook is, and the hook puts the
+# panes' HOME back (pane_home). An operator's --env HOME is taken out of
+# provider_env rather than passed next to ours: the hook restores it, and
+# Herdr is never handed the same key twice.
+bash_hook_env() {
+  local sandbox="$1" kept=() i=0 n=${#provider_env[@]}
+  while [[ "$i" -lt "$n" ]]; do
+    if [[ "${provider_env[$i]}" == "--env" && "${provider_env[$((i + 1))]:-}" == HOME=* ]]; then
+      i=$((i + 2))
+      continue
+    fi
+    kept+=("${provider_env[$i]}")
+    i=$((i + 1))
+  done
+  provider_env=(${kept[@]+"${kept[@]}"} --env "HOME=$sandbox/.bash")
 }
 
 # `--inputs-enforce on` means the panes really are under the guard, not that
@@ -1029,7 +1099,7 @@ require_kernel_guard() {
     done
     [[ -z "$missing" ]] && break
     if (( SECONDS >= deadline )); then
-      echo "BLOCKER: --inputs-enforce on, but these panes did not measure a kernel guard within 90 s:$missing. Stopping the swarm before its first prompt. The pane's shell may not be zsh, or Herdr may start pi outside it; see docs/inputs.md." >&2
+      echo "BLOCKER: --inputs-enforce on, but these panes did not measure a kernel guard within 90 s:$missing. Stopping the swarm before its first prompt. The pane's shell may be neither zsh nor bash, or Herdr may start pi outside it; see docs/inputs.md." >&2
       cmd_stop "$swarm_id" >/dev/null 2>&1 || true
       exit 3
     fi
@@ -1042,7 +1112,7 @@ require_kernel_guard() {
 #
 # The kickoff builds the guard and announces it; whether it reached the pane
 # is a different question, and it has been answered wrongly before — a login
-# shell that was not zsh, a Herdr that started pi outside the pane shell.
+# shell that was neither zsh nor bash, a Herdr that started pi outside the pane shell.
 # Every agent probes at session start and writes `inputs_guard` to the trace.
 # This reads those probes and writes the verdict to the record as
 # `write_guard_measured`, so a run that was not guarded cannot be read later
@@ -1074,7 +1144,7 @@ measured_guard() {
     echo "WARN: the kernel guard reached $kernel of ${#ids[@]} panes; the rest are running unguarded. The record says so." >&2
   elif [[ "$seen" -gt 0 ]]; then
     verdict="none"
-    echo "WARN: no pane measured the kernel guard, though this host can enforce one — the panes are running unguarded and the record says so. Check that the account's login shell is zsh and that Herdr starts pi from the pane shell." >&2
+    echo "WARN: no pane measured the kernel guard, though this host can enforce one — the panes are running unguarded and the record says so. Check that the account's login shell is zsh or bash and that Herdr starts pi from the pane shell." >&2
   else
     verdict="unmeasured"
     echo "WARN: no pane reported an inputs_guard probe within 30 s; whether the guard reached them is unknown, and the record says that rather than guessing." >&2
@@ -2671,34 +2741,45 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   command -v herdr >/dev/null 2>&1 || missing+=("herdr")
   command -v pi >/dev/null 2>&1 || missing+=("pi")
   command -v jq >/dev/null 2>&1 || missing+=("jq")
-  # zsh runs the write guard's pane hook and nothing else: a run with
-  # --no-write-guard writes no hook, and the panes start whatever login shell
-  # the account has.
-  if [[ "$write_guard" -eq 1 ]]; then
-    command -v zsh >/dev/null 2>&1 || missing+=("zsh (the pane hook runs in it)")
-  fi
-  # Installed is not enough. Herdr starts each pane with the *login* shell
-  # from /etc/passwd, and the guard hook is a $ZDOTDIR/.zshenv that only a zsh
-  # reads. Measured on an Ubuntu server whose account had bash: every pane
-  # came up unguarded, every pane's own probe said `none`, and the record said
-  # the write guard was on. macOS has made zsh the login shell since Catalina,
-  # which is why this never showed there.
-  if [[ "$write_guard" -eq 1 ]]; then
+  # Installed is not enough. Herdr starts each pane with the account's login
+  # shell, and the guard is a hook that shell reads at startup: a zsh reads
+  # $ZDOTDIR/.zshenv, a bash the .bashrc or .bash_profile under the HOME the
+  # pane is given. Any other shell reads neither. Measured on an Ubuntu server
+  # before the bash hook existed: an account with bash got every pane
+  # unguarded, every pane's own probe said `none`, and the record said the
+  # write guard was on. The check runs whenever a hook is written, which
+  # --inputs and --quarantine do even with --no-write-guard: the bash hook
+  # moves the panes' HOME, and a shell that reads no hook would keep it.
+  local login_shell=""
+  if [[ "$write_guard" -eq 1 || -f "$sandbox/.zsh/.zshenv" ]]; then
     # From the account database, never from $SHELL: $SHELL is the shell that
     # launched the kickoff, and Herdr asks the system what this account's
     # login shell is. Where neither source answers, the check is skipped
-    # rather than guessed at — a false BLOCKER here stops a good run.
-    local login_shell=""
+    # rather than guessed at — a false BLOCKER here stops a good run — and
+    # the panes' HOME is left alone, so only a zsh pane gets the hook.
     if command -v getent >/dev/null 2>&1; then
-      login_shell="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)"
+      login_shell="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)" || login_shell=""
     elif command -v dscl >/dev/null 2>&1; then
-      login_shell="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk '{print $2}')"
+      login_shell="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk '{print $2}')" || login_shell=""
     fi
-    if [[ -n "$login_shell" && "$(basename "$login_shell")" != "zsh" ]]; then
-      echo "BLOCKER: this account's login shell is $login_shell, and the write guard is a hook the pane's zsh reads. The panes would start unguarded while the record said they were guarded." >&2
-      echo "         chsh -s $(command -v zsh || echo /usr/bin/zsh) $(id -un)   (then open a new session), or --no-write-guard to run without the guard." >&2
-      exit 2
-    fi
+    case "$(basename "${login_shell:-unknown}")" in
+      zsh) command -v zsh >/dev/null 2>&1 || missing+=("zsh (the pane hook runs in it)") ;;
+      bash) ;;
+      unknown)
+        echo "WARN: this account's login shell could not be read (no getent or dscl answer); only a zsh pane will read the guard hook." >&2
+        if [[ "$write_guard" -eq 1 ]]; then
+          command -v zsh >/dev/null 2>&1 || missing+=("zsh (the pane hook runs in it)")
+        fi
+        ;;
+      *)
+        if [[ "$write_guard" -eq 1 || "$inputs_enforce" == "on" ]]; then
+          echo "BLOCKER: this account's login shell is $login_shell, and the kernel guard is a hook that only a zsh or a bash reads. The panes would start unguarded while the record said they were guarded." >&2
+          echo "         chsh -s $(command -v zsh || command -v bash || echo /bin/bash) $(id -un)   (then open a new session), or --no-write-guard (and --inputs-enforce auto) to run without it." >&2
+          exit 2
+        fi
+        echo "WARN: this account's login shell is $login_shell, which reads neither pane hook: the panes run without the kernel guard (inputs/ is held by detection and healing only), and the record will say so." >&2
+        ;;
+    esac
   fi
   command -v python3 >/dev/null 2>&1 || missing+=("python3")
   if [[ ${#missing[@]} -gt 0 ]]; then
@@ -2915,9 +2996,13 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     provider_env+=(--env "BROWSER_CHECK_EXECUTABLE=/usr/bin/google-chrome")
   fi
   if [[ -f "$sandbox/.zsh/.zshenv" ]]; then
-    # The pane's zsh reads $ZDOTDIR/.zshenv and re-runs itself under fsguard;
-    # a bash pane ignores it, and the harness reports what it actually got.
+    # The pane's zsh reads $ZDOTDIR/.zshenv and re-runs itself under fsguard.
+    # Any other shell ignores it, and the harness reports what the panes
+    # actually got.
     provider_env+=(--env "ZDOTDIR=$sandbox/.zsh")
+    if [[ "$(basename "${login_shell:-unknown}")" == "bash" ]]; then
+      bash_hook_env "$sandbox"
+    fi
   fi
   if [[ "$quarantine" -eq 1 ]]; then
     provider_env+=(--env "SWARM_QUARANTINE=1")

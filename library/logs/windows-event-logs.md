@@ -62,19 +62,28 @@ ran the first pass; read `catalog/` before running the same commands again.
    (module logging) and 4104 (script block, with the scripts reassembled
    from their parts and hashed) and 400, 403 and 600 in
    `Windows PowerShell`; WMI activity 5857 to 5861; and Sysmon 1, 3, 7, 8,
-   10, 11 and 13 where the channel is present; each with user, time, host
-   and the record that holds it.
+   10, 11, 12, 13, 14, 19 to 22 (WMI persistence and DNS), 23 (file
+   delete archived), 25 (process tampering) and 26 (FileDeleteDetected)
+   where the channel is present; each with user, time, host and the
+   record that holds it.
 5. Defence tampering: Defender 5001, 5004, 5007, 5010 and 5012 (protection
    turned off, exclusions or settings changed), 1116 and 1117 (what was
    detected and what was done about it), audit policy changes 4719 and
    4907, the log clears from question 1, the event log service stopping
-   (System 6005/6006 out of place), and the services or tasks that stopped
-   security tooling; each with the account and the moment.
+   (System 6005/6006 out of place), Security 1100 and 1104 (logging shut
+   down, log full), System 7036 and 7040 for the security services,
+   Sysmon 16 (configuration change) and Defender 5013, and the services
+   or tasks that stopped security tooling; each with the account and the
+   moment.
 6. Lateral movement between the hosts in the bundle: for every pair of
    hosts, the logons on one whose source is the other (4624 types 3 and 10,
    4648, 4776 with the workstation name), the service installs and tasks
    that follow within minutes, the shares and files opened (5140, 5145)
-   and the named pipes in Sysmon 17 and 18 where present, and the account
+   and the named pipes in Sysmon 17 and 18 where present,
+   `TerminalServices-RDPClient/Operational` 1024 and 1102 on the source,
+   `WinRM/Operational` 6 on the source and 91 on the target, 7045 names
+   such as `PSEXESVC` or random-looking services, 4624 type 3 followed by
+   a 4688 whose parent is `WmiPrvSE.exe` on the target, and the account
    each hop used; the graph of who reached what from where, in order.
 7. A per-account, per-host timeline: for each account of interest, every
    host it appeared on and what it did there in sequence, from the logs'
@@ -108,11 +117,11 @@ ran the first pass; read `catalog/` before running the same commands again.
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
 - Anything you write out of the logs goes under `work/extracted/<your id>/`
-  (quarantined: nothing there can execute; hash everything you pull out):
-  a reassembled 4104 script block, a command line, an encoded argument
-  decoded is for reading, never running. Copy into the shared
-  `work/extracted/` only what peers must read, and claim it first. Your
-  own scratch goes under `work/<your id>/`.
+  (nothing there is run; it is no-exec only under `--quarantine`; hash
+  everything you pull out): a reassembled 4104 script block, a command line,
+  an encoded argument decoded is for reading, never running. Copy into the
+  shared `work/extracted/` only what peers must read, and claim it first.
+  Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -173,20 +182,21 @@ same file: read the catalog and the board first.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, every answer
-cites evidence (file, channel, record id), the critic has posted a
-sign-off on the board naming what they verified against the ledger,
-`work/timeline.md` holds the merged timeline as a table with at least 30
-dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
-built from the ledger, each row naming the host and the account,
-`work/indicators.md` holds one table of every indicator (type, value, first
-seen, host, source record, confidence; one row saying so if none was found),
-the ledger holds the dated events the timeline rests on, and `inputs/` is
-unchanged.
+cites evidence (file, channel, record id), the critic has posted a sign-off
+on the board as a `result` post that starts a line with `SIGN-OFF:` and
+names what they verified against the ledger, `work/timeline.md` holds the
+merged timeline as a table with at least 30 dated rows (the ISO 8601 UTC
+time in the first column, after any `#` index) built from the ledger, each
+row naming the host and the account, `work/indicators.md` holds one table of
+every indicator (type, value, first seen, host, source record, confidence;
+one row saying so if none was found), the ledger holds the dated events the
+timeline rests on, and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 30`
@@ -194,8 +204,8 @@ unchanged.
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 23`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

@@ -22,7 +22,7 @@ it is refused or undone. Results go in `work/`, where the usual claims apply.
 | Manifest | `inputs.json` — the source path, when it was copied, every file with its size and sha256, and which guard the panes got. |
 | Contract | `SWARM.md` gains an **Inputs (read-only)** section: the rule, the file list, what happens on a write. |
 | Registry | `inputs: {source, files, bytes, enforce, guard}` on the run, so the console can show it. |
-| Pane hook | With a kernel guard available, `.zsh/.zshenv` and `.fsguard/plan.txt`; the workspace gets `ZDOTDIR` pointing at it (below). |
+| Pane hook | With a kernel guard available, `.zsh/.zshenv`, `.bash/.bashrc` + `.bash/.bash_profile` and `.fsguard/plan.txt`; the workspace gets `ZDOTDIR` pointing at the first, and `HOME` at `.bash/` when the account's login shell is bash (below). |
 
 Limits: `--inputs-max-mb` (default 512) refuses a larger directory before
 anything is copied, and so does a directory with more than 5000 files: that
@@ -72,8 +72,19 @@ where it cannot be kept.
    `PATH` shim. A zsh reads `$ZDOTDIR/.zshenv` before anything else, so the
    workspace is created with `ZDOTDIR=<sandbox>/.zsh`, whose `.zshenv`
    re-runs the interactive shell under `fsguard.sh` and hands `ZDOTDIR` back
-   to the user's own configuration. Everything typed into that pane, `pi`
-   included, then runs with `inputs/` read-only. A bash pane ignores the hook.
+   to the user's own configuration. A bash has no such variable, so when the
+   account's login shell is bash the workspace is also given
+   `HOME=<sandbox>/.bash`: Herdr starts bash interactive and not as a login
+   shell (measured with Herdr 0.9.1), and it reads `$HOME/.bashrc`; a login
+   bash reads `.bash_profile`, which is the same file. Each hook puts the
+   panes' `HOME` back first (an `--env HOME` if one was given, otherwise the
+   kickoff's), re-runs the shell under `fsguard.sh`, and then reads the
+   user's own configuration. Everything typed into that pane, `pi` included,
+   then runs with `inputs/` read-only. `HOME` is moved for a bash account
+   only: a shell that reads neither hook would keep it, and Pi would find no
+   credentials there. Such a shell is refused at kickoff while the write
+   guard is on or `--inputs-enforce on` is asked for, and warned about
+   otherwise.
 
    Nothing is assumed: at session start every agent's harness tries to
    create a file under `inputs/` and records what stopped it as an

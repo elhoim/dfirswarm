@@ -30,33 +30,53 @@ commands again.
 
 1. System profile: distribution and release (`/etc/os-release`), kernel
    (`/boot`, `/lib/modules`), hostname, the time zone the host kept
-   (`/etc/localtime`, `/etc/timezone`), the install date (`fsstat`, the
-   oldest package log entry), every user and group with uid, home, shell,
-   account state and password-change date
-   (`/etc/passwd`, `/etc/group`, `/etc/shadow` as metadata), the sudoers
-   policy (`/etc/sudoers`, `/etc/sudoers.d/`), the SSH server's
-   configuration and every `authorized_keys` and `known_hosts` file.
+   (`/etc/localtime`, `/etc/timezone`), the install date (on ext4, the
+   crtime of inode 2 or 11 from `istat`; ext3 has no crtime, and on XFS the
+   root inode is the superblock's `sb_rootino`, often 128, read with the
+   forged reader; `fsstat`'s last-checked time as a proxy;
+   `/var/log/installer/` or `/root/anaconda-ks.cfg`; the oldest package log
+   entry, rotated `.gz` included; on a cloud or template image the file
+   system dates are the template's build, so take deployment from
+   cloud-init's first boot in `/var/log/cloud-init.log` and
+   `/var/lib/cloud/instances/`), every user and group with uid, home,
+   shell, account state and password-change date (`/etc/passwd`,
+   `/etc/group`, `/etc/shadow` as metadata), the sudoers policy
+   (`/etc/sudoers`, `/etc/sudoers.d/`), the SSH server's configuration and
+   every `authorized_keys` and `known_hosts` file.
 2. How was access gained? State the hypothesis (a guessed password, a
-   stolen key, a vulnerable service or web application, a poisoned
-   package) and the evidence: `auth.log` or `secure` and the
-   journal for accepted and failed logins with source, user and method;
-   `wtmp`, `btmp` and `lastlog` (utmp records; forge a parser); the
-   web or service logs where the entry was through a service; the first
-   foreign session, its source, and what preceded it.
+   stolen key, a vulnerable service or web application, a poisoned package)
+   and the evidence: `auth.log` or `secure` and the journal for accepted and
+   failed logins with source, user and method; `wtmp` and `btmp` (utmp
+   records: `utmpdump` or `last -f` on the extract if this host has them,
+   else forge a parser); `lastlog` (a UID-indexed array of `struct lastlog`,
+   not utmp records); on newer systems `/var/lib/wtmpdb/wtmp.db` and
+   `/var/lib/lastlog/lastlog2.db` (SQLite: `sqlite3`);
+   `/var/log/audit/audit.log` (USER_LOGIN, USER_AUTH, CRED_ACQ; its epoch
+   timestamps are UTC); the web or service logs where the entry was through
+   a service; the first foreign session, its source, and what preceded it.
 3. What privileges were obtained, and how? `sudo` and `su` lines in the auth
    log and the journal; SUID and SGID binaries whose change time postdates
    the install; writable cron and service files; exploit sources and
    compiled binaries in `/tmp`, `/dev/shm`, `/var/tmp` or a home; module
    loads and taint messages in `kern.log` and the journal;
-   `/etc/ld.so.preload`; the first command run as root.
-4. What was modified? Packages installed, removed or downgraded (`dpkg.log`,
-   `/var/lib/dpkg/status`, `yum.log`, the `dnf` history database, the rpm
-   database); binaries whose hash differs from what the package database
-   records (`/var/lib/dpkg/info/*.md5sums` or the rpm database; the shells,
-   `sshd`, `ps` and `ss` first); configuration files changed inside
-   the window; users and keys added or altered; logs truncated, rotated
-   early or edited (a gap, a size of zero, a change time after the last
-   line).
+   `/etc/ld.so.preload`; the first command run as root (audit EXECVE and
+   SYSCALL records, which exist only where an execve rule was loaded, not
+   the default: read `/etc/audit/rules.d/` and `/etc/audit/audit.rules`
+   first).
+4. What was modified? Packages installed, removed or downgraded
+   (`dpkg.log`, `/var/lib/dpkg/status`, `yum.log`, the `dnf` history
+   database, the rpm database); binaries whose hash differs from what the
+   package database records (`/var/lib/dpkg/info/*.md5sums` or the rpm
+   database; the shells, `sshd`, `ps` and `ss` first); conffiles against the
+   `Conffiles:` hashes in `/var/lib/dpkg/status`, which the md5sums files
+   leave out; the rpm database is `rpmdb.sqlite` (`sqlite3`) on RHEL 9 and
+   Fedora 33 onward, and Berkeley DB (`/var/lib/rpm/Packages`) on older
+   releases, which `sqlite3` cannot read (forge a reader or record the gap);
+   on Fedora 36 onward it lives in `/usr/lib/sysimage/rpm/`, and
+   `/var/lib/rpm` is a symlink that `icat` does not follow;
+   configuration files changed inside the window; users and keys added or
+   altered; logs truncated, rotated early or edited (a gap, a size of zero,
+   a change time after the last line).
 5. What persistence is in place? Every mechanism found, with file, inode,
    time set and what it launches: cron (`/etc/crontab`,
    `/etc/cron.*`, `/var/spool/cron`), systemd units, timers and drop-ins
@@ -64,7 +84,15 @@ commands again.
    shell profiles (`/etc/profile.d`, `/etc/bash.bashrc`, every `.bashrc`
    and `.profile`), SSH keys and `sshd_config` changes, PAM (`/etc/pam.d`
    and its modules), `ld.so.preload` and altered libraries, kernel modules
-   no package owns, and listening services the packages do not explain.
+   no package owns, and listening services the packages do not explain;
+   and the less obvious ones: at jobs (`/var/spool/cron/atjobs`,
+   `/var/spool/at`), `/etc/rc.local` and `/etc/init.d`, udev `RUN+=` rules
+   (`/etc/udev/rules.d`), XDG autostart (`~/.config/autostart`,
+   `/etc/xdg/autostart`), package-manager hooks (`/etc/apt/apt.conf.d`,
+   dnf and yum plugins), `/etc/ld.so.conf.d`, `/etc/modules-load.d` and
+   `install` lines in `/etc/modprobe.d`, `~/.ssh/rc`, `command=` in
+   `authorized_keys`, `AuthorizedKeysCommand`, `/etc/update-motd.d`, and
+   user units under `~/.config/systemd/user`.
 6. What was done and what was taken? Shell histories (`.bash_history`,
    `.zsh_history`, `.mysql_history`, `.viminfo`) with their time marks if
    any; tools downloaded (`wget-log`, package installs,
@@ -121,22 +149,23 @@ commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: `/etc`, `/var/log` whole, `/var/spool/cron`, the systemd
-  directories, every home and `/root` with their dot files, the temp
-  directories. Every binary, script, stream, document and download that
-  comes out of the image is for reading, parsing, hashing and disassembling,
-  never running — not in the sandbox and not anywhere else; what a file does
-  is what the static reading shows. Copy into the shared `work/extracted/`
-  only what peers must read, and claim it first. Your own scratch goes under
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull out)
+  and analyse the extracts: `/etc`, `/var/log` whole, `/var/spool/cron`, the
+  systemd directories, every home and `/root` with their dot files, the temp
+  directories. Every binary, script, stream, document and download that comes
+  out of the image is for reading, parsing, hashing and disassembling, never
+  running — not in the sandbox and not anywhere else; what a file does is what
+  the static reading shows. Copy into the shared `work/extracted/` only what
+  peers must read, and claim it first. Your own scratch goes under
   `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
   `ledger/ledger.md`. Log lines carry the host's local time and often no
   year: convert every timestamp to UTC, say which time zone the host kept,
-  and say how the year was fixed.
+  and say how the year was fixed (`audit.log` epoch times and the journal's
+  full timestamps fix the year and the offset for syslog lines).
 - Every claim in the report cites its evidence: the path, the inode, the
   offset, the log line, the record in the package database, the command that
   produced it. A claim without evidence is a hypothesis and is labelled as
@@ -191,26 +220,28 @@ so nobody derives it twice.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, every answer
-cites evidence, the critic has posted a sign-off on the board naming what
-they verified, `work/timeline.md` holds the merged timeline as a table with
-at least 25 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/indicators.md` holds one table of
-every indicator (type, value, first seen, source, confidence; one row saying
-so if none was found), the ledger holds the dated events the timeline rests
-on, and `inputs/` is unchanged.
+cites evidence, the critic has posted a sign-off on the board as a `result`
+post that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 25
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, source, confidence; one row saying so if
+none was found), the ledger holds the dated events the timeline rests on,
+and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 25`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 19`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

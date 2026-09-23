@@ -21,10 +21,11 @@ The archive is the phone; nothing in this report comes from anywhere else.
 The evidence is under `inputs/` (read-only; call `inputs` to list it, and
 read `inputs.json` for the manifest). If the operator left a brief beside
 it (`inputs/CASE.md`, a ticket, the requester's questions), its questions
-come first and the ones below fill in what it did not ask. If `SWARM.md`
-has an "Evidence catalog" section, know that the catalog covers disk and memory images only, not an
-archive: list it once with `tar tf`, post the listing to the shared
-`work/extracted/`, and read that instead of listing it again.
+come first and the ones below fill in what it did not ask. The evidence
+catalog, if `SWARM.md` has one, covers disk and memory images only, not an
+archive: list it once with `tar tvf` (or `unzip -Z -l`), save it as
+`work/listing.txt` (claim it first), post that path on the board, and grep
+that file instead of listing again.
 
 ### Questions the report has to answer
 
@@ -52,7 +53,12 @@ archive: list it once with `tar tf`, post the listing to the shared
    timestamp.
 4. Applications and their use: what was installed, when, and how it was
    used, from `KnowledgeC.db` (app in-focus intervals, notifications,
-   Safari, Bluetooth and charging streams), `ApplicationState.db`, the
+   Safari, Bluetooth and charging streams) and, on iOS 16 and later, the
+   Biome streams beside it (`/private/var/mobile/Library/Biome/streams/`,
+   SEGB files that need a forged reader), `DataUsage.sqlite` under
+   `/private/var/wireless/Library/Databases/` for per-process network use,
+   the powerlog (`CurrentPowerlog.PLSQL`) for app and screen state,
+   `ApplicationState.db`, the
    installed-application plists and the `MobileInstallation` logs, Screen
    Time, `interactionC.db`, and the app containers themselves; the
    applications that matter to the case, and the ones removed.
@@ -85,27 +91,37 @@ archive: list it once with `tar tf`, post the listing to the shared
   plists), `exiftool`, `strings`, `file` and `python3`; a peer may find
   `browser_history` and `sqlite_query` already seeded from the tool library.
   There is no root: no mounting, no `sudo`.
-- If `SWARM.md` has an "Evidence catalog" section, the first pass is already
-  done: read `catalog/` instead of rebuilding it.
+- The evidence catalog does not open archives; the listing above
+  replaces it.
 - If `skill` is in your tool list, this run carries packs: call it once with
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) with
-  `tar xf <archive> -C work/extracted/<your id>/ <path>`, and analyse the
-  extracts. Copy a SQLite database together with its `-wal` and `-shm`
-  files and open the copy, never the original, so the write-ahead log is
-  replayed into what you query. Copy into the shared `work/extracted/` only
-  what peers must read (`sms.db`, `KnowledgeC.db`, the routined caches), and
-  claim it first. Your own scratch goes under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out), batching your paths so the archive is streamed once, not once per
+  file:
+  `tar -xf <archive> -C work/extracted/<your id>/ --no-same-owner --no-same-permissions --verbatim-files-from -T work/<your id>/paths.txt`
+  (`--verbatim-files-from` is GNU tar's: without it a line starting with
+  `-` is read as an option; for a zip,
+  `unzip -n <archive> -d work/extracted/<your id>/ <path>...`, where
+  `unzip` reads each path as a wildcard, so escape a `[` as `\[`).
+  Quote paths exactly as the listing prints them; tools prefix them
+  differently (`private/var/...`, `/private/var/...`, `filesystem1/...`).
+  Analyse the extracts. Copy a SQLite database together with its `-wal`
+  and `-shm` files and open the copy, never the original, so the
+  write-ahead log is replayed into what you query. Copy into the shared
+  `work/extracted/` only what peers must read (`sms.db`, `KnowledgeC.db`,
+  the routined caches), and claim it first. Your own scratch goes under
+  `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
   `ledger/ledger.md`. iOS keeps several epochs: Cocoa seconds from 2001 in
-  most databases, nanoseconds since 2001 in `sms.db`, Unix seconds
-  elsewhere; convert each to UTC, say which epoch the column used, and say
-  which time zone the device kept.
+  most databases, nanoseconds since 2001 in `sms.db` from iOS 11 (seconds
+  before it; test the magnitude of the value), Unix seconds elsewhere;
+  convert each to UTC, say which epoch the column used, and say which
+  time zone the device kept.
 - Every claim in the report cites its evidence: the path inside the
   archive, the database, the table and the row id, the plist key, the hash
   of a media file, the command that produced it. A claim without evidence
@@ -164,14 +180,15 @@ the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, every answer
-cites evidence, the critic has posted a sign-off on the board naming what
-they verified, `work/timeline.md` holds the merged timeline as a table with
-at least 30 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/identifiers.md` holds one table of
-every identifier the device yielded (type, value, where seen, confidence:
-the Apple ID, phone numbers, handles, e-mail addresses, Wi-Fi networks,
-paired hosts; one row saying so if none was found), every extracted database
-and media file is under `work/extracted/` with its hash in the report, the
+cites evidence, the critic has posted a sign-off on the board as a `result`
+post that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 30
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/identifiers.md` holds one table of every
+identifier the device yielded (type, value, where seen, confidence: the
+Apple ID, phone numbers, handles, e-mail addresses, Wi-Fi networks, paired
+hosts; one row saying so if none was found), every extracted database and
+media file is under `work/extracted/` with its hash in the report, the
 ledger holds the dated events the timeline rests on, and `inputs/` is
 unchanged.
 
@@ -179,14 +196,15 @@ unchanged.
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 30`
 - `test -f work/identifiers.md`
 - `test "$(grep -c '^| ' work/identifiers.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 23`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

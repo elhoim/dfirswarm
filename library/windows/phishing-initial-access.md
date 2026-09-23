@@ -44,7 +44,12 @@ same commands again.
    a script file — evidenced by the Mark-of-the-Web / `Zone.Identifier`
    stream, Office trust records (Trusted Documents, the file MRUs), recent
    files and jump lists, and Explorer or mount events (4663 and
-   `Microsoft-Windows-VHDMP-Operational` for a mounted image).
+   `Microsoft-Windows-VHDMP-Operational` for a mounted image); the Outlook
+   SecureTemp folder (`OutlookSecureTempFolder` in NTUSER, files under
+   `INetCache\Content.Outlook\`); a browser history or download row whose
+   URL matches a link from question 2 (the click); OneNote, HTA and
+   Windows Script Host lures; and for an ISO/IMG, whether the inner file
+   carried MOTW (it did not before the November 2022 update).
 4. The first execution: the first process that ran from what was opened,
    from Prefetch, Amcache, ShimCache, event 4688, an Office application
    spawning a child process, PowerShell 4103/4104 and its console history,
@@ -71,11 +76,14 @@ same commands again.
 - `inputs/` is read-only and stays byte-for-byte what it was. Never `cat` or
   `read` an image whole. Work on images in place with The Sleuth Kit
   (`mmls`, `fsstat`, `fls`, `istat`, `icat`, `ifind`, `blkls`,
-  `tsk_recover`; E01 files are read natively), libewf (`ewfinfo`), `libpff`
-  / `pffexport` for the Outlook store, `regipy` and `python-evtx`
-  (Python 3.12), `strings`, `sqlite3`, `exiftool`, `oledump` and
-  `olevba`-style parsing for Office documents. There is no root: no mounting,
-  no `sudo`.
+  `tsk_recover`; E01 files are read natively), libewf (`ewfinfo`), `regipy`
+  and `python-evtx` (Python 3.12), `strings`, `sqlite3`, `exiftool`.
+  `pffexport` (libpff) for the Outlook store and `olevba`/`oledump`
+  (oletools) for Office documents are not in the default toolbox: if they
+  are missing, say so on the board, read `.eml` files and the webmail cache
+  with Python's `email` module, read OLE streams with a forged
+  `olefile`-style reader, and record that the PST/OST could not be parsed.
+  The kickoff decides installs. There is no root: no mounting, no `sudo`.
 - If `SWARM.md` has an "Evidence catalog" section, the first pass is already
   done: read `catalog/` instead of rebuilding it.
 - If `skill` is in your tool list, this run carries packs: call it once with
@@ -84,12 +92,12 @@ same commands again.
   loaded, and every fetch is on the trace for the report to cite.
 - Static only: an attachment or a dropped payload is read, parsed and hashed,
   never opened in an application and never run. Extract what you need into
-  `work/extracted/<your id>/` (quarantined: nothing there can execute; hash
-  everything you pull out) and analyse the extracts — the macro streams, the
-  LNK targets, the script text, the PE headers — with `strings`, `exiftool`,
-  `oledump` and `olevba`-style parsing. Copy into the shared
-  `work/extracted/` only what peers must read, and claim it first. Your own
-  scratch goes under `work/<your id>/`.
+  `work/extracted/<your id>/` (nothing there is run; it is no-exec only
+  under `--quarantine`; hash everything you pull out) and analyse the
+  extracts — the macro streams, the LNK targets, the script text, the PE
+  headers — with `strings`, `exiftool`, `oledump` and `olevba`-style
+  parsing. Copy into the shared `work/extracted/` only what peers must read,
+  and claim it first. Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -114,8 +122,8 @@ same commands again.
 - Write every post and file in English. Use tables where they help. If a
   step needs a tool this host does not have, say exactly what is missing and
   what you established up to that point; forge a tool with `make_tool` where
-  a small script closes the gap — a PST/OST message extractor, an LNK
-  parser, a macro-stream dumper, a `Zone.Identifier` reader — and share it.
+  a small script closes the gap — an `.eml` header reader, an LNK parser,
+  a macro-stream dumper, a `Zone.Identifier` reader — and share it.
 
 ## How to divide the work
 
@@ -142,26 +150,28 @@ wrote the report cannot be the one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified, `work/timeline.md` holds the merged timeline as a table with at
-least 18 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/indicators.md` holds one table of
-every indicator (type, value, first seen, source, confidence; one row saying
-so if none was found), the ledger holds the dated events the timeline rests
-on, and `inputs/` is unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 18
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, source, confidence; one row saying so if
+none was found), the ledger holds the dated events the timeline rests on,
+and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 18`
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 14`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

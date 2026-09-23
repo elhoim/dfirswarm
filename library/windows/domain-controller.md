@@ -65,10 +65,13 @@ Read `catalog/` before running the same commands again.
 5. Copies of the directory and the hives: VSS activity (Application 8222,
    8193 and 8224; `vssadmin`, `diskshadow`, `wbadmin`, `ntdsutil` and
    `esentutl` in 4688 and Sysmon 1 command lines; backup logs for a
-   snapshot in the window), the Prefetch and Amcache entries for those
-   tools, files named like the directory database or the hives in places
-   they do not belong (temp paths, a share, an archive), with their
-   journal history and their hashes.
+   snapshot in the window), ESENT 216, 325, 326 and 327 in the Application
+   log naming a copy of the directory database outside `NTDS\` (the trace
+   that survives when process auditing was off), System 7036 for the
+   Volume Shadow Copy service starting in the window, the Prefetch and
+   Amcache entries for those tools, files named like the directory
+   database or the hives in places they do not belong (temp paths, a
+   share, an archive), with their journal history and their hashes.
 6. GPO and SYSVOL: the policies as SYSVOL holds them (`Policies\{GUID}`,
    `gpt.ini` versions), what changed in the window (`$MFT` and `$UsnJrnl`
    under `SYSVOL`, 5136/5137/5141 on groupPolicyContainer objects,
@@ -113,22 +116,30 @@ Read `catalog/` before running the same commands again.
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the hives (SYSTEM, SOFTWARE, SECURITY, every NTUSER.DAT), the
-  event logs (`Security`, `System`, `Application`, `Directory Service`,
-  `Microsoft-Windows-TerminalServices-*`, `-PowerShell/Operational`,
-  `-Sysmon/Operational`, `-GroupPolicy/Operational`), `$MFT`,
-  `$UsnJrnl:$J`, Prefetch,
-  Amcache.hve, SYSVOL, and any file the intruder left. The directory
-  database and the hives are read for structure, timestamps and
-  membership, never for password material: no hash, key, ticket or stored
-  password is extracted, decoded or posted. Every binary, script, stream,
-  document and download that comes out of the image is for reading, parsing,
-  hashing and disassembling, never running — not in the sandbox and not
-  anywhere else; what a file does is what the static reading shows. Copy
-  into the shared `work/extracted/` only what peers must read, and claim it
-  first. Your own scratch goes under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull out)
+  and analyse the extracts: the hives (SYSTEM, SOFTWARE, SECURITY, every
+  NTUSER.DAT), the event logs (`Security`, `System`, `Application`,
+  `Directory Service`, `Microsoft-Windows-TerminalServices-*`,
+  `-PowerShell/Operational`, `-Sysmon/Operational`,
+  `-GroupPolicy/Operational`), `$MFT`, `$UsnJrnl:$J`, Prefetch, Amcache.hve,
+  SYSVOL, and any file the intruder left. The directory database and the hives
+  are read for structure, timestamps and membership, never for password
+  material: no hash, key, ticket or stored password is extracted, decoded or
+  posted. Do not export `ntds.dit` whole and do not run `esedb_query` or
+  `esedbexport` on its `datatable`: both write every column, the password
+  blobs included. Read the directory through the event logs, SYSVOL and the
+  replication metadata; if a table read is essential, forge a reader that
+  selects only named columns (`sAMAccountName`, `objectSid`, `whenCreated`,
+  `whenChanged`, `pwdLastSet`, `userAccountControl`, `adminCount`, and
+  `link_table` for membership) and say which it reads. SYSTEM is read for its
+  own keys; its boot key is never derived or combined with the directory.
+  Every binary, script, stream, document and download that comes out of the
+  image is for reading, parsing, hashing and disassembling, never running —
+  not in the sandbox and not anywhere else; what a file does is what the
+  static reading shows. Copy into the shared `work/extracted/` only what peers
+  must read, and claim it first. Your own scratch goes under
+  `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -190,19 +201,21 @@ one who certifies it.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, every answer
-cites evidence, the critic has posted a sign-off on the board naming what
-they verified, `work/timeline.md` holds the merged timeline as a table with
-at least 40 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/indicators.md` holds one table of
-every indicator (type, value, first seen, source, confidence; one row saying
-so if none was found), the report's last section holds the blast-radius
-list, the ledger holds the dated events the timeline rests on, and `inputs/`
-is unchanged.
+cites evidence, the critic has posted a sign-off on the board as a `result`
+post that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 40
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, source, confidence; one row saying so if
+none was found), the report's last section holds the blast-radius list, the
+ledger holds the dated events the timeline rests on, and `inputs/` is
+unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `grep -qi 'blast radius' work/report.md`
 - `test -f work/timeline.md`
@@ -210,8 +223,8 @@ is unchanged.
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 30`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

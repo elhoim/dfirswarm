@@ -37,8 +37,12 @@ first pass (partition table, file list, body file, MAC timeline); read
    configuration (`/etc/docker/daemon.json`, `/etc/containerd/config.toml`,
    the service unit and its drop-ins) and whether the API socket was bound
    to a network address and with what authentication; the accounts in the
-   `docker` group (`/etc/group`); rootless or root; and the daemon's own
-   lines in the journal.
+   `docker` group (`/etc/group`); rootless or root (rootless Docker under
+   `~<user>/.local/share/docker`; Podman and CRI-O under
+   `/var/lib/containers/storage` — `overlay-containers/containers.json`,
+   `overlay-images/images.json`, libpod's `bolt_state.db` or `db.sql` — and
+   `~<user>/.local/share/containers/storage`); and the daemon's own lines in
+   the journal.
 2. The containers and the images: every container in the store
    (`/var/lib/docker/containers/<id>/config.v2.json` and
    `hostconfig.json`, or containerd's metadata database and its
@@ -46,19 +50,31 @@ first pass (partition table, file list, body file, MAC timeline); read
    privileged flag, capabilities, host namespaces, ports, restart policy
    and created, started and finished times; every image with tag, digest,
    registry of origin, pull time and the history in its configuration
-   (`image/*/imagedb`), and which were built on this host.
-3. What ran inside the containers: the writable layer of each (the upper
-   directory under `overlay2/<id>/diff`, or the snapshotter's directory)
-   as files added, changed and deleted, with the histories, cron entries,
-   keys and downloaded tools found there; the container logs
-   (`<id>-json.log`, the CRI log directory); and what the image's own
-   layers say the container was meant to run.
+   (tags in `image/overlay2/repositories.json`, configuration and history in
+   `imagedb/content/sha256/<id>`, and in `layerdb/sha256/<chain-id>/` the
+   `diff`, `cache-id` and `parent` that say which `overlay2` directory holds
+   each layer), and which were built on this host.
+3. What ran inside the containers: the writable layer of each (the
+   `overlay2` directory is not named after the container:
+   `image/overlay2/layerdb/mounts/<container-id>/mount-id` names the
+   `overlay2/<mount-id>/diff` that holds it; containerd uses the
+   snapshotter's `snapshots/<n>/fs`) as files added, changed and deleted — a
+   deleted file is a whiteout, a character device 0/0 (type `c` in `fls`),
+   and a replaced directory is an opaque one (the `trusted.overlay.opaque`
+   attribute) — with the histories, cron entries, keys and downloaded tools
+   found there; the container logs (`<id>-json.log`, the CRI log directory
+   `/var/log/pods/<ns>_<pod>_<uid>/<container>/*.log`); and what the image's
+   own layers say the container was meant to run.
 4. Did a container reach the host? Binds of the host root, the runtime's
    socket or a device into a container; the privileged flag, host
-   namespaces, capabilities beyond the default; host files whose change
-   time and content match a container's activity; kernel, audit and daemon
-   lines (`kern.log`, `audit.log`, the journal) that show a container's
-   process on host paths; and a file on the host that a container's layer
+   namespaces (`PidMode`, `NetworkMode`, `IpcMode`, `UsernsMode` set to
+   host), capabilities beyond the default (`CapAdd` with `SYS_ADMIN`,
+   `SYS_PTRACE`, `SYS_MODULE` or `DAC_READ_SEARCH`), `Devices`, and
+   `SecurityOpt` turning AppArmor or seccomp off (`unconfined`) in
+   `hostconfig.json`; host files whose change time and content match a
+   container's activity; kernel, audit and daemon lines (`kern.log`,
+   `audit.log`, the journal) that show a container's process on host
+   paths; and a file on the host that a container's layer
    explains.
 5. Persistence on the host and in the images: cron entries and systemd
    units that start or recreate a container, containers with a restart
@@ -123,15 +139,14 @@ first pass (partition table, file list, body file, MAC timeline); read
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
-- Extract what you need into `work/extracted/<your id>/` (quarantined:
-  nothing there can execute; hash everything you pull out) and analyse the
-  extracts: the runtime's metadata, each container's configuration and
-  log, the writable layers, the image configurations, the kubelet tree,
-  `/etc`, `/var/log`, the homes and temp directories. A binary from a
-  layer is for reading, never running; an image is never loaded or
-  started. Copy into the shared `work/extracted/`
-  only what peers must read, and claim it first. Your own scratch goes
-  under `work/<your id>/`.
+- Extract what you need into `work/extracted/<your id>/` (nothing there is
+  run; it is no-exec only under `--quarantine`; hash everything you pull
+  out) and analyse the extracts: the runtime's metadata, each container's
+  configuration and log, the writable layers, the image configurations, the
+  kubelet tree, `/etc`, `/var/log`, the homes and temp directories. A binary
+  from a layer is for reading, never running; an image is never loaded or
+  started. Copy into the shared `work/extracted/` only what peers must read,
+  and claim it first. Your own scratch goes under `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -192,18 +207,20 @@ proved so nobody derives them twice.
 
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, every answer cites
-evidence, the critic has posted a sign-off on the board naming what they
-verified, `work/timeline.md` holds the merged timeline as a table with at
-least 25 dated rows (the ISO 8601 UTC time in the first column, after any
-`#` index) built from the ledger, `work/indicators.md` holds one table of
-every indicator (type, value, first seen, source, confidence; one row saying
-so if none was found), the ledger holds the dated events the timeline rests
-on, and `inputs/` is unchanged.
+evidence, the critic has posted a sign-off on the board as a `result` post
+that starts a line with `SIGN-OFF:` and names what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 25
+dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
+built from the ledger, `work/indicators.md` holds one table of every
+indicator (type, value, first seen, source, confidence; one row saying so if
+none was found), the ledger holds the dated events the timeline rests on,
+and `inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `grep -qi 'privileged' work/report.md`
 - `test -f work/timeline.md`
@@ -211,8 +228,8 @@ on, and `inputs/` is unchanged.
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 19`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)

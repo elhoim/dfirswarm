@@ -19,15 +19,16 @@ internal hosts talk to the outside on a clock, which ones sweep the
 network, what volume left and to where, what the resolver and the TLS
 handshakes reveal about the destinations, which files crossed by hash, and
 which hosts the next collection should take first. Firewall, VPN, proxy
-and DNS server logs are the perimeter entry's case; the two share one
-periodicity tool.
+and DNS server logs are the perimeter entry's case; the periodicity tool
+one of you forges here can be saved to the tool library for it.
 
 The evidence is under `inputs/` (read-only; call `inputs` to list it, and
 read `inputs.json` for the manifest). If the operator left a brief beside
 it (`inputs/CASE.md`, an alert, the addresses or the window they care
 about), its questions come first and the ones below fill in what it did not
-ask. If `SWARM.md` has an "Evidence catalog" section, the kickoff already
-ran the first pass; read `catalog/` before running the same commands again.
+ask. The evidence catalog covers disk and memory images only; it holds
+nothing for logs. One agent posts the inventory (question 1) and everyone
+reads that.
 
 ### Questions the report has to answer
 
@@ -48,8 +49,17 @@ ran the first pass; read `catalog/` before running the same commands again.
    intervals close to the median), the count, the durations and the byte
    counts; the pairs whose regularity and persistence read as a scheduled
    channel, ranked; and the destinations in the long tail that only one
-   host reaches and reaches often. Forge one periodicity tool and share
-   it, so every pair is measured the same way.
+   host reaches and reaches often. Before scoring, merge a flow record
+   into the previous one only when it continues that session: same
+   five-tuple, the previous record lasted about the exporter's active
+   timeout (it was cut, not ended), the gap is under the inactive timeout,
+   and for TCP the previous record has no FIN or RST. State both timeouts
+   (for AWS VPC flow logs the 1- or 10-minute aggregation interval plays
+   the active timeout's part). Anything else is a new connection, however
+   close, so a long session's re-exports are not read as a beacon and a
+   fixed-port, UDP or ICMP beacon is not merged away; for Zeek, score
+   connection starts (`ts`), not log lines. Forge one periodicity tool and
+   share it, so every pair is measured the same way.
 4. Scanning: hosts whose distinct destination or port count stands out,
    the connections that failed or were rejected (`conn_state` S0, REJ,
    RSTO and their flow equivalents in flags and packet counts), the sweeps
@@ -60,6 +70,10 @@ ran the first pass; read `catalog/` before running the same commands again.
    volume out stands out against the host's history in the window; the
    protocol and port they used; and the files Zeek saw leaving with their
    hashes, types and sizes (`files.log` joined to `conn.log` by `uid`).
+   Multiply sampled flow bytes and packets by the sampling rate from
+   question 1 and say so; for Zeek, use `orig_bytes` and `resp_bytes`
+   (payload), and report a non-zero `missed_bytes` as a capture-loss
+   caveat.
 6. Names, certificates and notices: `dns.log` queries by host with the
    rare names, the generated-looking names, the TXT and unusual types, the
    NXDOMAIN runs and the names first seen in the window; `ssl.log` and
@@ -87,24 +101,31 @@ ran the first pass; read `catalog/` before running the same commands again.
   `sqlite3` and `python3`; read flow exports the same way, and binary
   `nfcapd` files with `nfdump` if it is installed — if it is not, say so on
   the board and work from whatever text export came with them. Do not
-  decompress or copy the logs wholesale. Load once into a table you can
-  query (`work/<your id>/flows.sqlite`: one table per log type keyed by
-  Zeek's `uid` or by the flow's five-tuple and start time, with time in
-  UTC, source, destination, ports, protocol, service, duration, bytes and
-  packets in each direction, state, and the file and line it came from)
-  and forge that loader with `make_tool` so every peer reads the same
-  tables. There is no root.
-- If `SWARM.md` has an "Evidence catalog" section, the first pass is already
-  done: read `catalog/` instead of rebuilding it.
+  decompress or copy the logs wholesale. One agent loads them once into a
+  database at `work/extracted/flows.sqlite` (claimed first; stream with
+  `zcat file | loader`, never write decompressed copies): one table per
+  log type keyed by Zeek's `uid` or by the flow's five-tuple and start
+  time, with time in UTC, source, destination, ports, protocol, service,
+  duration, bytes and packets in each direction, state, and the file and
+  line it came from. That loader is forged with `make_tool` and shared,
+  its row counts per table are posted against the source's record count
+  (`grep -vc '^#'`, through `zcat` for a compressed log; Zeek's `#close`
+  line holds only the close time, and JSON logs have no `#` lines), and
+  peers open the database read-only (`sqlite3 -readonly`).
+  Everyone else waits for that post or works a log the loader has not
+  reached. There is no root.
+- The evidence catalog holds nothing for logs; the inventory posted for
+  question 1 replaces it.
 - If `skill` is in your tool list, this run carries packs: call it once with
   no id for the index, and fetch the notes that match the evidence in front of
   you. A pack's method was written for this kind of case, its tools are already
   loaded, and every fetch is on the trace for the report to cite.
 - Anything you write out of the logs goes under `work/extracted/<your id>/`
-  (quarantined: nothing there can execute); Zeek's extracted files, if the
-  sensor kept them, are for hashing, typing and reading, never running.
-  Copy into the shared `work/extracted/` only what peers must read, and
-  claim it first. Your own scratch goes under `work/<your id>/`.
+  (nothing there is run; it is no-exec only under `--quarantine`); Zeek's
+  extracted files, if the sensor kept them, are for hashing, typing and
+  reading, never running. Copy into the shared `work/extracted/` only what
+  peers must read, and claim it first. Your own scratch goes under
+  `work/<your id>/`.
 - Every dated event you establish goes into the ledger with `record`
   (kind=event, ISO 8601 UTC, source, evidence); indicators as kind=ioc,
   conclusions as kind=finding. The timeline and the report cite
@@ -163,20 +184,22 @@ agent who wrote the report cannot be the one who certifies it.
 `work/report.md` exists, answers every question under headings `## 1.`,
 `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, `## 7.`, `## 8.`, every answer
 cites evidence (file, line or `uid`, query), the critic has posted a
-sign-off on the board naming what they verified against the ledger,
-`work/timeline.md` holds the merged timeline as a table with at least 25
-dated rows (the ISO 8601 UTC time in the first column, after any `#` index)
-built from the ledger, `work/hosts.md` holds one table of the internal hosts
-to collect next (address, name where known, what implicates it, rank; one
-row saying so if none was found), `work/indicators.md` holds one table of
-every indicator (type, value, first seen, sensor, confidence; one row saying
-so if none was found), the ledger holds the dated events the timeline rests
-on, and `inputs/` is unchanged.
+sign-off on the board as a `result` post that starts a line with `SIGN-OFF:`
+and names what they verified against the ledger, `work/timeline.md` holds
+the merged timeline as a table with at least 25 dated rows (the ISO 8601 UTC
+time in the first column, after any `#` index) built from the ledger,
+`work/hosts.md` holds one table of the internal hosts to collect next
+(address, name where known, what implicates it, rank; one row saying so if
+none was found), `work/indicators.md` holds one table of every indicator
+(type, value, first seen, sensor, confidence; one row saying so if none was
+found), the ledger holds the dated events the timeline rests on, and
+`inputs/` is unchanged.
 
 ## Checks
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
+- `awk 'BEGIN{h="[0-9a-f]";h=h h h h h h h h;h=h h h h;d="[0-9][0-9]?[0-9]?";p=d"[.]"d"[.]"d"[.]"d} /^## /{if(s&&!c)b++;s=/^## [0-9]+\./;n+=s;c=0;next} {l=tolower($0)} l~h||l~p||l~/(^|[^a-z0-9_])(inputs|work|catalog|ledger)\/|ledger (entr[a-z]* )?#?[0-9]|(seq|inode|offset|record ?id|event ?id)[ #:=]*[0-9]|hk(lm|cu|u|cr):?\\|hkey_|[a-z]:\\|(^|[^a-z0-9_.)\/])\/[a-z_.][^ \/]*\/[^ \/]|\.(evtx|jsonl|csv|log|db|sqlite|pf|lnk|dat|e01|raw|mem|pcap|txt|json|xml|reg|exe|dll|sys|plist|php|png|jpg|zip|html)([^a-z0-9]|$)|(^|[^a-z ]) ?hypothesis[*_]*:/{c=1} END{if(s&&!c)b++;exit !n||4*b>n}' work/report.md`
 - `grep -qi 'hypothesis' work/report.md`
 - `test -f work/timeline.md`
 - `test "$(grep -cE '^\| *([0-9]+ *\| *)?[0-9]{4}-[0-9]{2}-[0-9]{2}' work/timeline.md)" -ge 25`
@@ -185,8 +208,8 @@ on, and `inputs/` is unchanged.
 - `test -f work/indicators.md`
 - `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 19`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for
   it, and `make_tool` will refuse that name.)
