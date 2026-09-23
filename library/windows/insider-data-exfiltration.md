@@ -57,8 +57,11 @@ before running the same commands again.
 4. Removable media: every device connected in the window (SYSTEM
    `USBSTOR`, `USB`, `SCSI` and `MountedDevices`, SOFTWARE `Windows
    Portable Devices`, NTUSER `MountPoints2`, `setupapi.dev.log`, System
-   log 20001/20003 and `DriverFrameworks-UserMode/Operational`, Security
-   6416 and 4663 where auditing was on), the drive letter, volume serial
+   log 20001/20003 and `DriverFrameworks-UserMode/Operational` (off by
+   default), `Microsoft-Windows-Partition/Diagnostic` 1006,
+   `Kernel-PnP/Configuration` 400/410, SOFTWARE `Microsoft\Windows
+   NT\CurrentVersion\EMDMgmt`, Security 6416 and 4663 where auditing was
+   on), the drive letter, volume serial
    and first and last connection of each, and the LNK files, shellbags and
    `$UsnJrnl` entries that show which files were written to it.
 5. Network channels, each with its artefacts: cloud sync and webmail
@@ -72,7 +75,10 @@ before running the same commands again.
    remnants), screenshots (`Pictures\Screenshots`, Snipping Tool traces),
    and RDP or remote tools (mstsc MRU and bitmap cache, TeamViewer and
    AnyDesk logs) that could have carried a file out of the host's view;
-   for each the file, the direction, the time.
+   SRUM network data usage (`{973F5D5C-1D90-4944-BE8E-24B94231A174}`:
+   bytes sent and received per application per hour) set against the sync
+   client, browser and mail processes in the window; for each the file,
+   the direction, the time.
 6. Attempts to hide or clean: cleaners installed or run (CCleaner,
    BleachBit: installs, Prefetch, their own logs), deletions (recycle bin
    `$I`/`$R`, `$UsnJrnl` delete and rename reasons), browser history

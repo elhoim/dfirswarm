@@ -50,9 +50,13 @@ Read `catalog/` before running the same commands again.
    file with times, the directories touched and skipped, counts and bytes
    per volume, and a sample of file headers showing the bytes changed;
    every ransom note (path, hash, the text and its identifiers as data);
-   shadow-copy deletion (Application VSS 8222 and 8193, the `vssadmin`,
-   `wmic`, `wbadmin`, `bcdedit` and `diskshadow` command lines in 4688 and
-   Sysmon 1); services and processes stopped (System 7036 and 7040, `net
+   shadow-copy deletion (the `vssadmin delete shadows`, `wmic shadowcopy
+   delete`, `wbadmin delete catalog`, `bcdedit ... recoveryenabled no` and
+   `diskshadow` command lines in 4688, Sysmon 1 and PowerShell 4104;
+   `Microsoft-Windows-Backup` 524 for a deleted catalog; the shadow store
+   under `System Volume Information` empty or missing; Application VSS
+   8222 (a copy created) and 8193 (a VSS error) only as context for when
+   the service ran); services and processes stopped (System 7036 and 7040, `net
    stop` and `taskkill` traces); logs cleared (1102, 104); defence
    tampering (Defender 5001, 5007, 5010, 5012, the exclusion keys, the
    firewall profile keys).
@@ -181,7 +185,9 @@ cites evidence, the critic has posted a sign-off on the board naming what
 they verified, `work/timeline.md` holds the merged timeline as a table with
 at least 35 dated rows built from the ledger, `work/indicators.md` holds one
 table of every indicator (type, value, first seen, source, confidence; one
-row saying so if none was found), every file and region pulled from the
+row saying so if none was found), `work/recovery.md` holds the recovery
+list of question 7 (path, state, method, confidence; one row saying so if
+nothing is recoverable), every file and region pulled from the
 image is under `work/extracted/` with its hash in the report, the ledger
 holds the dated events the timeline rests on, and `inputs/` is unchanged.
 
@@ -190,6 +196,8 @@ holds the dated events the timeline rests on, and `inputs/` is unchanged.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
+- `test -f work/recovery.md`
+- `test "$(grep -c '^| ' work/recovery.md)" -ge 3`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 37`
 - `test -f work/indicators.md`

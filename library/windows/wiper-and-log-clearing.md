@@ -41,8 +41,12 @@ same commands again.
    shadow copies.
 3. The tools and the clearing: traces that a wiping or clearing tool ran —
    SDelete, `cipher /w`, `wevtutil`, a cleaner — from Prefetch, Amcache and
-   event 4688; the log clears themselves (1102 in Security, 104 in System)
-   and exactly what remains in each log before the clear.
+   event 4688; the log clears (Security 1102, System 104 per channel
+   cleared, Security 1100 for a stopped EventLog service, gaps in
+   EventRecordID), what each log holds after the clear, and pre-clear
+   records recovered by carving `ElfChnk` chunks from unallocated space,
+   slack, shadow copies and `pagefile.sys` (a signature carve with `blkls`
+   and a forged chunk parser), each carved record with offset and hash.
 4. Who, from where and when: the account that carried out the destruction,
    the logon type and source that placed it there (4624/4778 for a local or
    an RDP session), and the time of each destructive act tied to the
@@ -137,7 +141,11 @@ checked: the agent who wrote the report cannot be the one who certifies it.
 evidence, the critic has posted a sign-off on the board naming what they
 verified, `work/timeline.md` holds the merged timeline as a table with at
 least 23 dated rows built from the ledger, every recovered file is named
-with its hash in the report, the ledger holds the dated events the timeline
+with its hash in the report, `work/recovered.md` holds one table of every
+file recovered or declared unrecoverable (original path, source:
+USN/LogFile/VSS/carve/slack, inode or offset, SHA-256 or the reason it is
+unrecoverable), `work/indicators.md` holds the indicators (one row saying
+so if none was found), the ledger holds the dated events the timeline
 rests on, and `inputs/` is unchanged.
 
 ## Checks
@@ -145,6 +153,10 @@ rests on, and `inputs/` is unchanged.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qi 'hypothesis' work/report.md`
+- `test -f work/recovered.md`
+- `test "$(grep -c '^| ' work/recovered.md)" -ge 3`
+- `test -f work/indicators.md`
+- `test "$(grep -c '^| ' work/indicators.md)" -ge 3`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 25`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 12`
