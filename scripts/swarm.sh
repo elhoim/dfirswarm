@@ -168,7 +168,7 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
       [--quarantine] [--case-id ID] [--examiner NAME] [--allow-host HOST]...
       [--no-netguard] [--local-only] [--playwright] [--probe-violation]
       [--key-from-env] [--env KEY=VALUE]...
-      [--isolation host|microvm] [--image REF] [--vm-cpus N] [--vm-memory MIB] [--no-vm-snapshot] [--allow-oauth-in-vm]
+      [--isolation host|microvm] [--image REF] [--vm-cpus N] [--vm-memory MIB] [--vm-disk MIB] [--no-vm-snapshot] [--allow-oauth-in-vm]
 
 The team
   --model P/ID        One model for every agent.
@@ -358,7 +358,11 @@ Isolation
                       starts when this host does not have it; refused when it
                       cannot be.
   --vm-cpus N         vCPUs per agent VM (default 2).
-  --vm-memory MIB     Memory per agent VM in MiB (default 2048).
+  --vm-memory MIB     Memory per agent VM in MiB (default 2048; 1024 on a host with
+                      less than 8 GiB). N VMs that would take more than 85% of this
+                      host's memory are refused, more than 60% warned about.
+  --vm-disk MIB       Root disk per agent VM in MiB (default 8192): where a VM's own
+                      installs and /tmp live.
   --inputs-copy       Under --isolation microvm, copy --inputs into the run (read-only)
                       instead of mounting it in place: a second layer when the
                       examiner's account can write the evidence.
@@ -416,27 +420,124 @@ json_get() {
   jq -c --arg id "$id" '.runs[] | select(.id == $id)' "$REGISTRY" 2>/dev/null || true
 }
 
+# The registry is written by this script and by a VM run's hub (vm-hub.ts
+# updateRegistryState): both take <registry>.lock, a directory, so neither
+# reads the file, changes it and writes back over the other's change. A lock
+# older than a minute is a writer that died holding it.
+registry_lock() {
+  local lock="$REGISTRY.lock" i
+  for ((i = 0; i < 200; i++)); do
+    mkdir "$lock" 2>/dev/null && return 0
+    if [[ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]]; then
+      rmdir "$lock" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.05
+  done
+  echo "BLOCKER: the run registry is locked ($lock); another kickoff or stop is writing it." >&2
+  return 1
+}
+registry_unlock() { rmdir "$REGISTRY.lock" 2>/dev/null || true; }
+
 registry_upsert() {
   local rec="$1"
   ensure_registry
-  local tmp
-  tmp="$(mktemp)"
-  jq --argjson rec "$rec" '
+  registry_lock || return 1
+  # Beside the registry, so the rename is atomic (a temp file under /tmp is
+  # another filesystem on some hosts, and mv then copies).
+  local tmp="$REGISTRY.tmp.$$"
+  if jq --argjson rec "$rec" '
     .runs = ([.runs[] | select(.id != $rec.id)] + [$rec])
-  ' "$REGISTRY" > "$tmp"
-  mv "$tmp" "$REGISTRY"
+  ' "$REGISTRY" > "$tmp"; then
+    mv "$tmp" "$REGISTRY"
+  else
+    rm -f "$tmp"
+  fi
+  registry_unlock
 }
 
 registry_update_state() {
   local id="$1"
   local state="$2"
   ensure_registry
-  local tmp
-  tmp="$(mktemp)"
-  jq --arg id "$id" --arg state "$state" '
+  registry_lock || return 1
+  local tmp="$REGISTRY.tmp.$$"
+  if jq --arg id "$id" --arg state "$state" '
     .runs = [.runs[] | if .id == $id then .state = $state else . end]
-  ' "$REGISTRY" > "$tmp"
-  mv "$tmp" "$REGISTRY"
+  ' "$REGISTRY" > "$tmp"; then
+    mv "$tmp" "$REGISTRY"
+  else
+    rm -f "$tmp"
+  fi
+  registry_unlock
+}
+
+# The harness a VM run started with, whatever happens to the checkout while
+# it runs: a `git pull` or an edit mid-run used to reach agents that had not
+# loaded the extension yet, and a forged tool's runner, in the middle of a
+# case. A copy in the hub's directory (outside the run, which no agent can
+# write), mounted read-only where the checkout is.
+freeze_harness() { # <hub dir>
+  local dir="$1/harness" rel commit
+  mkdir -p "$dir/node_modules"
+  for rel in extensions scripts prompts node_modules/typebox; do
+    rm -rf "${dir:?}/$rel"
+    cp -R "$ROOT/$rel" "$dir/$rel"
+  done
+  commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo "not a git checkout")"
+  git -C "$ROOT" diff --quiet HEAD -- extensions scripts prompts 2>/dev/null || commit="$commit with local changes"
+  printf '%s\n' "$commit" > "$dir/COMMIT"
+}
+
+# A laptop that sleeps mid-run pauses every agent and its VM while the wall
+# clock, which is the host's, keeps going: the run comes back to a spent
+# budget of time. The host is kept awake for the wall clock and half an hour
+# more (caffeinate on macOS, systemd-inhibit on Linux); stop ends it sooner.
+keep_host_awake() { # <sandbox> <wall minutes>
+  local sandbox="$1" secs=$(( (${2:-60} + 30) * 60 ))
+  if command -v caffeinate >/dev/null 2>&1; then
+    detach_exec caffeinate -i -s -t "$secs" >/dev/null 2>&1 </dev/null &
+  elif command -v systemd-inhibit >/dev/null 2>&1; then
+    detach_exec systemd-inhibit --what=sleep:idle --who=dfirswarm --why="run $(basename "$sandbox")" --mode=block sleep "$secs" >/dev/null 2>&1 </dev/null &
+  else
+    echo "Awake:        nothing on this host keeps it from sleeping; a sleep pauses the agents while the wall clock runs" >&2
+    return 0
+  fi
+  echo $! > "$sandbox/inhibit.pid"
+  echo "Awake:        this host is kept from sleeping for the run (pid $(cat "$sandbox/inhibit.pid"))"
+}
+
+# One teardown for a kickoff that does not reach its end, whichever exit it
+# takes: the VMs it made, the daemons it started, the Herdr workspaces it
+# opened, and the run recorded as failed. The kickoff arms it once the run is
+# in the registry and disarms it where it succeeds.
+KICKOFF_ARMED=0
+kickoff_teardown() { # <exit status>
+  local rc="$1" ws
+  trap - EXIT INT TERM
+  [[ "$KICKOFF_ARMED" -eq 1 && "$rc" -ne 0 ]] || return 0
+  KICKOFF_ARMED=0
+  echo "Kickoff did not finish (exit $rc): putting away what it started." >&2
+  if [[ "${KICKOFF_ISOLATION:-host}" == "microvm" ]]; then
+    stop_vm_run "$KICKOFF_SANDBOX" "$KICKOFF_ID" 0 >&2 2>&1 || true
+  fi
+  for ws in ${KICKOFF_WORKSPACES[@]+"${KICKOFF_WORKSPACES[@]}"}; do
+    [[ -n "$ws" ]] && herdr workspace close "$ws" >/dev/null 2>&1 || true
+  done
+  stop_sandbox_daemons "$KICKOFF_SANDBOX" keep-record >/dev/null 2>&1 || true
+  registry_update_state "$KICKOFF_ID" failed || true
+  echo "Recorded as failed; the sandbox stays for reading: $KICKOFF_SANDBOX" >&2
+}
+kickoff_arm() { # <sandbox> <id> <isolation>
+  KICKOFF_SANDBOX="$1" KICKOFF_ID="$2" KICKOFF_ISOLATION="$3" KICKOFF_ARMED=1
+  KICKOFF_WORKSPACES=()
+  trap 'kickoff_teardown $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+kickoff_disarm() {
+  KICKOFF_ARMED=0
+  trap - EXIT INT TERM
 }
 
 herdr_agent_names() {
@@ -1849,15 +1950,29 @@ PY
 # the current tab hits SWARM_PANES_PER_TAB, open a new tab. If tab create
 # fails, open another workspace for the same swarm. After a spill the new
 # surface starts its own grid so "down from parent" stays on that tab.
+# What a new pane's shell is started with. A host pane gets the agent's
+# identity, its trace token and the provider environment; a microVM run's
+# pane only runs `msb exec` into its VM, so it gets the quiet shell and
+# nothing of the host run's environment (its tokens and keys included). The
+# root pane of a VM run was given ZDOTDIR and every split pane was not, so a
+# zsh new-user wizard could swallow the launch in any pane but the first.
+pane_env_for() { # <agent> -> sets PANE_ENV_ARGS
+  if [[ -n "${VM_PANE_ZDOTDIR:-}" ]]; then
+    PANE_ENV_ARGS=(--env "ZDOTDIR=$VM_PANE_ZDOTDIR")
+  else
+    PANE_ENV_ARGS=(--env "AGENT_ID=$1" --env "SWARM_ID=$swarm_id" --env "SWARM_HARD_KILL=$hard"
+      --env "SWARM_TRACE_TOKEN=$(trace_token_for "$1")" ${provider_env[@]+"${provider_env[@]}"})
+  fi
+}
+
 herdr_try_split() {
   local parent="$1"
   local dir="$2"
   local agent="$3"
   local split pane
+  pane_env_for "$agent"
   split="$(herdr pane split "$parent" --direction "$dir" --no-focus \
-    --env "AGENT_ID=$agent" --env "SWARM_ID=$swarm_id" --env "SWARM_HARD_KILL=$hard" \
-    --env "SWARM_TRACE_TOKEN=$(trace_token_for "$agent")" \
-    ${provider_env[@]+"${provider_env[@]}"})" || true
+    ${PANE_ENV_ARGS[@]+"${PANE_ENV_ARGS[@]}"})" || true
   pane="$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id // empty')"
   if [[ -z "$pane" ]]; then
     split_failures=$((split_failures + 1))
@@ -1871,10 +1986,9 @@ herdr_try_split() {
 herdr_new_surface() {
   local agent="$1"
   local created pane new_ws
+  pane_env_for "$agent"
   created="$(herdr tab create --workspace "$workspace_id" --cwd "$sandbox" --label "$agent" --no-focus \
-    --env "AGENT_ID=$agent" --env "SWARM_ID=$swarm_id" --env "SWARM_HARD_KILL=$hard" \
-    --env "SWARM_TRACE_TOKEN=$(trace_token_for "$agent")" \
-    ${provider_env[@]+"${provider_env[@]}"})" || true
+    ${PANE_ENV_ARGS[@]+"${PANE_ENV_ARGS[@]}"})" || true
   pane="$(printf '%s\n' "$created" | jq -r '.result.root_pane.pane_id // empty')"
   if [[ -n "$pane" ]]; then
     tab_count=$((tab_count + 1))
@@ -1886,9 +2000,7 @@ herdr_new_surface() {
   printf '%s\n' "$created" >&2
   extra_workspaces=$((extra_workspaces + 1))
   created="$(herdr workspace create --cwd "$sandbox" --label "${label}-w${extra_workspaces}" --no-focus \
-    --env "AGENT_ID=$agent" --env "SWARM_ID=$swarm_id" --env "SWARM_HARD_KILL=$hard" \
-    --env "SWARM_TRACE_TOKEN=$(trace_token_for "$agent")" \
-    ${provider_env[@]+"${provider_env[@]}"})"
+    ${PANE_ENV_ARGS[@]+"${PANE_ENV_ARGS[@]}"})"
   pane="$(printf '%s\n' "$created" | jq -r '.result.root_pane.pane_id // empty')"
   new_ws="$(printf '%s\n' "$created" | jq -r '.result.workspace.workspace_id // .result.workspace.id // empty')"
   if [[ -z "$pane" || -z "$new_ws" ]]; then
@@ -1898,6 +2010,7 @@ herdr_new_surface() {
   fi
   workspace_id="$new_ws"
   workspace_ids+=("$new_ws")
+  KICKOFF_WORKSPACES+=("$new_ws")
   tab_count=$((tab_count + 1))
   echo "Layout: new workspace $new_ws for $agent"
   printf '%s\n' "$pane"
@@ -2013,7 +2126,7 @@ cmd_start() {
   local packs=""
   local write_guard=1
   # Where the agents live: host processes, or one microVM each.
-  local isolation="${SWARM_ISOLATION:-host}" vm_image="${SWARM_VM_IMAGE:-}" vm_image_digest="" vm_cpus=2 vm_memory=2048 vm_snapshot=1 allow_oauth_in_vm=0 inputs_copy=0
+  local isolation="${SWARM_ISOLATION:-host}" vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 allow_oauth_in_vm=0 inputs_copy=0
   local seal_herdr=1
   # Directories the panes may not read. Reads are open by design, so this is
   # narrow on purpose: material about the case the agents must derive rather
@@ -2115,9 +2228,10 @@ cmd_start() {
       --no-netguard|--open-net) use_netguard=0; shift ;;
       --no-start) start_agents=0; shift ;;
       --isolation) isolation="$2"; shift 2 ;;
-      --image) vm_image="$2"; shift 2 ;;
+      --image) vm_image="$2"; vm_image_named=1; shift 2 ;;
       --vm-cpus) vm_cpus="$2"; shift 2 ;;
       --vm-memory) vm_memory="$2"; shift 2 ;;
+      --vm-disk) vm_disk="$2"; shift 2 ;;
       --no-vm-snapshot) vm_snapshot=0; shift ;;
       --allow-oauth-in-vm) allow_oauth_in_vm=1; shift ;;
       --inputs-copy) inputs_copy=1; shift ;;
@@ -2133,9 +2247,29 @@ cmd_start() {
   esac
   if [[ "$isolation" == "microvm" ]]; then
     [[ "$vm_cpus" =~ ^[1-9][0-9]?$ ]] || { echo "BLOCKER: --vm-cpus must be 1..99 (got $vm_cpus)." >&2; exit 2; }
+    # Unset: 2048 MiB, or 1024 on a host with less than 8 GiB (a small
+    # server that also serves something else, ADR 0005).
+    if [[ -z "$vm_memory" ]]; then
+      local host_mib
+      host_mib="$(node -e 'console.log(Math.floor(require("os").totalmem() / 1048576))' 2>/dev/null || echo 16384)"
+      if [[ "$host_mib" -lt 8192 ]]; then vm_memory=1024; else vm_memory=2048; fi
+    fi
     [[ "$vm_memory" =~ ^[0-9]+$ && "$vm_memory" -ge 512 ]] || { echo "BLOCKER: --vm-memory is MiB, at least 512 (got $vm_memory)." >&2; exit 2; }
+    [[ "$vm_disk" =~ ^[0-9]+$ && "$vm_disk" -ge 2048 ]] || { echo "BLOCKER: --vm-disk is MiB, at least 2048 (got $vm_disk)." >&2; exit 2; }
     if [[ "$probe" -eq 1 ]]; then
       echo "BLOCKER: --probe-violation checks the host's write guard; under --isolation microvm there is none to probe (the VM's own probe runs at kickoff)." >&2
+      exit 2
+    fi
+    # Flags that set a host guard: a VM run has none of those guards (the VM
+    # is the guard), and a flag accepted in silence reads as if it had done
+    # something.
+    local host_only=()
+    [[ "$write_guard" -eq 0 ]] && host_only+=(--no-write-guard)
+    [[ "$seal_herdr" -eq 0 ]] && host_only+=(--no-seal-herdr)
+    [[ "$inputs_enforce" != "auto" ]] && host_only+=("--inputs-enforce $inputs_enforce")
+    [[ "$key_from_env" -eq 1 ]] && host_only+=(--key-from-env)
+    if ((${#host_only[@]})); then
+      echo "BLOCKER: ${host_only[*]} set a guard of a host run; under --isolation microvm the VM is the guard and none of them means anything (credentials reach a VM as placeholders, the evidence is read-only in it). Drop them." >&2
       exit 2
     fi
     if [[ -n "$inputs_dir" && "$inputs_bind" -eq 0 && "$inputs_copy" -eq 0 ]]; then
@@ -2573,6 +2707,13 @@ STRIP
   # cannot boot a VM: an operator asked for isolation and must not get a run
   # that quietly has none.
   if [[ "$isolation" == "microvm" ]]; then
+    # Whether n VMs of this size fit this host, before anything is written.
+    local vm_capacity
+    if ! vm_capacity="$(vm_cli capacity --n "$n" --cpus "$vm_cpus" --memory "$vm_memory")"; then
+      echo "BLOCKER: $(jq -r '.blockers | join("; ")' <<<"$vm_capacity" 2>/dev/null || printf '%s' "$vm_capacity")" >&2
+      exit 2
+    fi
+    jq -r '.warnings[]? | "WARN: " + .' <<<"$vm_capacity" >&2 || true
     [[ -n "$vm_image" ]] || vm_image="$(vm_default_image "$pack_dirs" "$playwright")"
     if [[ "$start_agents" -eq 1 ]]; then
       local vm_probe
@@ -2623,6 +2764,21 @@ STRIP
   # would otherwise clear a work/ directory outside this run.
   mkdir -p "$sandbox"
   sandbox="$(cd "$sandbox" && pwd -P)"
+  # A sandbox another run is still using is not this run's to clear: its
+  # record says running, or its VMs are still up (a VM mounts the sandbox,
+  # and clearing it under a live agent is how its work goes missing).
+  local busy prev_run
+  busy="$(jq -r --arg sb "$sandbox" '.runs[]? | select(.sandbox == $sb and .state == "running") | .id' "$REGISTRY" 2>/dev/null | head -1)"
+  if [[ -n "$busy" ]]; then
+    echo "BLOCKER: run $busy is still running in $sandbox; stop it first (scripts/swarm.sh stop $busy) or use another --sandbox." >&2
+    exit 2
+  fi
+  for prev_run in $(jq -r '.run // empty' "$sandbox"/vm/*.json 2>/dev/null | sort -u); do
+    if [[ -n "$(vm_cli list --run "$prev_run" 2>/dev/null | jq -r '.vms[]?.name' 2>/dev/null)" ]]; then
+      echo "BLOCKER: $sandbox still holds run $prev_run's VMs; put them away first (scripts/swarm.sh stop $prev_run, or reap $prev_run)." >&2
+      exit 2
+    fi
+  done
   if [[ "$sandbox" == "/" || "$sandbox" == "$HOME" || "$sandbox" == "$ROOT" ]]; then
     echo "BLOCKER: refusing to use $sandbox as a swarm sandbox." >&2
     exit 2
@@ -2722,7 +2878,22 @@ STRIP
     [[ -f "$sandbox/inputs.device" ]] && catalog_evidence+=(--evidence "$sandbox/inputs")
     [[ -n "$allow_hosts" ]] && catalog_evidence+=(--allow-host "$allow_hosts")
     [[ "$use_netguard" -eq 0 ]] && catalog_evidence+=(--open-net)
-    vm_cli catalog --image "$vm_image" --sandbox "$sandbox" --memory "$vm_memory" --cpus "$vm_cpus" --run "$swarm_id" ${catalog_evidence[@]+"${catalog_evidence[@]}"} || exit $?
+    # The catalog is The Sleuth Kit and Volatility over the evidence. A run
+    # with no packs boots the base image, which has neither, and its catalog
+    # came back empty; the image that serves the base pack does, when this
+    # host has it. An image the operator named is theirs.
+    local catalog_image="$vm_image"
+    if [[ -z "$pack_dirs" && "$vm_image_named" -eq 0 ]]; then
+      local tsk_image
+      tsk_image="$(vm_default_image "computer-forensics-base" 0)"
+      if [[ "$(vm_cli probe --image "$tsk_image" 2>/dev/null | jq -r '.image_present // false')" == "true" ]]; then
+        catalog_image="$tsk_image"
+        echo "Catalog:      in $tsk_image (the run's image has no Sleuth Kit; this one does)"
+      else
+        echo "WARN: the catalog runs in $vm_image, which has no Sleuth Kit or Volatility: disks and memory will not be catalogued. Add --pack computer-forensics-base, or load $tsk_image (images/README.md)." >&2
+      fi
+    fi
+    vm_cli catalog --image "$catalog_image" --sandbox "$sandbox" --memory "$vm_memory" --cpus "$vm_cpus" --run "$swarm_id" ${catalog_evidence[@]+"${catalog_evidence[@]}"} || exit $?
   elif [[ "$catalog" -eq 1 && "$isolation" == "microvm" ]]; then
     echo "Catalog:      built in the run's image when the VMs start (prepared run: not yet)"
   elif [[ "$catalog" -eq 1 ]]; then
@@ -2827,14 +2998,35 @@ STRIP
       write_guard_mode="none"
     fi
   fi
-  if [[ "$write_guard_mode" != "none" && ${#no_read[@]} -gt 0 ]]; then
+  if [[ "$write_guard_mode" != "none" && "$write_guard_mode" != "microvm" && ${#no_read[@]} -gt 0 ]]; then
     local nr
     for nr in "${no_read[@]}"; do
       guard_args+=(--no-read "$nr")
       no_read_applied=1
     done
   elif [[ ${#no_read[@]} -gt 0 && "$isolation" == "microvm" ]]; then
-    # A VM sees only what is mounted into it, and these never are.
+    # A VM sees only what is mounted into it. A --no-read path is held away
+    # from it unless it is, or holds, or sits inside something every VM
+    # mounts: the harness, the packs, the evidence, the run. That one cannot
+    # be hidden and must not be claimed as hidden.
+    local nr mp nr_real mp_real mounted=() mount_roots=("$ROOT/extensions" "$ROOT/scripts" "$ROOT/prompts" "$ROOT/node_modules" "$sandbox")
+    while read -r mp; do [[ -n "$mp" ]] && mount_roots+=("$mp"); done <<< "$pack_dirs"
+    [[ -L "$sandbox/inputs" ]] && mount_roots+=("$(cd "$sandbox/inputs" && pwd -P)")
+    for nr in "${no_read[@]}"; do
+      nr_real="$(cd "$nr" 2>/dev/null && pwd -P || printf '%s' "$nr")"
+      for mp in "${mount_roots[@]}"; do
+        mp_real="$(cd "$mp" 2>/dev/null && pwd -P || printf '%s' "$mp")"
+        if [[ "$mp_real" == "$nr_real" || "$mp_real" == "$nr_real"/* || "$nr_real" == "$mp_real"/* ]]; then
+          mounted+=("$nr (every VM mounts $mp)")
+          break
+        fi
+      done
+    done
+    if ((${#mounted[@]})); then
+      echo "BLOCKER: --no-read cannot hide what the VMs are given: ${mounted[*]}." >&2
+      stop_sandbox_daemons "$sandbox"
+      exit 2
+    fi
     no_read_applied=1
   elif [[ ${#no_read[@]} -gt 0 ]]; then
     echo "WARN: --no-read needs a kernel write guard; on this host the panes can read those paths." >&2
@@ -3060,7 +3252,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --arg isolation "$isolation" \
     --arg vm_image "$vm_image" --arg vm_image_digest "${vm_image_digest:-}" \
     --argjson vm_cpus "$vm_cpus" \
-    --argjson vm_memory "$vm_memory" \
+    --argjson vm_memory "${vm_memory:-2048}" --argjson vm_disk "$vm_disk" \
     --argjson vm_snapshot "$vm_snapshot" \
     --argjson allow_oauth_in_vm "$allow_oauth_in_vm" \
     '{
@@ -3117,7 +3309,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       agents: $agents,
       agent_models: $agent_models,
       isolation: (if $isolation == "microvm"
-        then {mode: "microvm", runtime: "microsandbox", image: $vm_image, image_digest: (if $vm_image_digest == "" then null else $vm_image_digest end), cpus: $vm_cpus, memory_mib: $vm_memory, snapshot: ($vm_snapshot == 1), oauth_allowed: ($allow_oauth_in_vm == 1)}
+        then {mode: "microvm", runtime: "microsandbox", image: $vm_image, image_digest: (if $vm_image_digest == "" then null else $vm_image_digest end), cpus: $vm_cpus, memory_mib: $vm_memory, disk_mib: $vm_disk, snapshot: ($vm_snapshot == 1), oauth_allowed: ($allow_oauth_in_vm == 1)}
         else {mode: "host"} end),
       started_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
       state: "prepared"
@@ -3125,7 +3317,10 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # The kickoff's own record of what the run started with, outside the run
   # where no agent reaches it: custody compares the manifest against this,
   # so a manifest rewritten inside the run is caught rather than trusted.
-  registry_upsert "$rec"
+  registry_upsert "$rec" || exit 1
+  # From here the run is in the registry: any exit that does not reach the
+  # end of the kickoff puts away what was started and says the run failed.
+  kickoff_arm "$sandbox" "$swarm_id" "$isolation"
 
   echo "Swarm id:     $swarm_id"
   echo "Label:        $label"
@@ -3247,6 +3442,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     fi
     echo "Sandbox ready. Skipping Herdr/Pi start (--no-start)."
     echo "SANDBOX=$sandbox"
+    kickoff_disarm
     return 0
   fi
 
@@ -3646,6 +3842,7 @@ EOF
     exit 1
   fi
   workspace_ids=("$workspace_id")
+  KICKOFF_WORKSPACES=("$workspace_id")
 
   panes=("$root_pane")
   if [[ "$n" -gt 1 ]]; then
@@ -3755,6 +3952,8 @@ EOF
     fi
   fi
 
+  keep_host_awake "$sandbox" "$wall"
+  kickoff_disarm
   echo
   echo "Agents prompted."
   echo "SANDBOX=$sandbox"
@@ -4424,6 +4623,15 @@ stop_sandbox_daemons() {
       kill "$pid" 2>/dev/null || true
     fi
   fi
+  if [[ -f "$sandbox/inhibit.pid" ]]; then
+    pid="$(cat "$sandbox/inhibit.pid" || true)"
+    # Only what the kickoff started for this: a pid file a pane rewrote must
+    # not stop a process of the operator's.
+    if [[ -n "$pid" ]] && ps -o command= -p "$pid" 2>/dev/null | grep -q -E '^(caffeinate|systemd-inhibit) '; then
+      kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$sandbox/inhibit.pid"
+  fi
   if [[ -f "$sandbox/idle-nudge.pid" ]]; then
     pid="$(cat "$sandbox/idle-nudge.pid" || true)"
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
@@ -4963,11 +5171,19 @@ vm_build_spec() { # <hub dir> <out file>
   local hub_dir="$1" spec="$2"
 
   # What every VM gets: the harness code read-only at its own path, the
-  # packs, the registry view, the evidence in place.
-  local mounts=() d real
-  for d in "$ROOT/extensions" "$ROOT/scripts" "$ROOT/prompts" "$ROOT/node_modules/typebox" "$hub_dir/runs"; do
-    mounts+=("$(jq -nc --arg h "$d" '{host: $h, readonly: true}')")
+  # packs, the registry view, the evidence in place. The harness is the copy
+  # freeze_harness took at kickoff when there is one, mounted where the
+  # checkout is, so the guest's paths do not change and the code does not
+  # either.
+  local mounts=() d real rel
+  for rel in extensions scripts prompts node_modules/typebox; do
+    if [[ -d "$hub_dir/harness/$rel" ]]; then
+      mounts+=("$(jq -nc --arg h "$hub_dir/harness/$rel" --arg g "$ROOT/$rel" '{host: $h, guest: $g, readonly: true}')")
+    else
+      mounts+=("$(jq -nc --arg h "$ROOT/$rel" '{host: $h, readonly: true}')")
+    fi
   done
+  mounts+=("$(jq -nc --arg h "$hub_dir/runs" '{host: $h, readonly: true}')")
   # The browser tools: this repository's Playwright (plain JavaScript) drives
   # the image's own Chromium.
   if [[ "$playwright" -eq 1 ]]; then
@@ -5071,14 +5287,14 @@ vm_build_spec() { # <hub dir> <out file>
   if [[ "$local_only" -eq 1 ]]; then providers="$(jq -c 'map(select(.kind == "local"))' <<<"$providers")"; fi
   jq -n \
     --arg run "$swarm_id" --arg sandbox "$sandbox" --arg image "$vm_image" --arg hub "$hub_dir" \
-    --argjson cpus "$vm_cpus" --argjson mem "$vm_memory" --argjson wall "$wall" \
+    --argjson cpus "$vm_cpus" --argjson mem "$vm_memory" --argjson disk "$vm_disk" --argjson wall "$wall" \
     --argjson mounts "$(printf '%s\n' ${mounts[@]+"${mounts[@]}"} | jq -s -c .)" \
     --argjson late "$(printf '%s\n' ${late[@]+"${late[@]}"} | jq -s -c .)" \
     --argjson env "$env_json" --argjson agents "$agents_json" --argjson allow "$allow_json" \
     --argjson providers "$providers" --argjson open "$([[ "$use_netguard" -eq 0 ]] && echo true || echo false)" \
     --argjson pack_secrets "$PACK_SECRETS_VM" \
     --arg pi "$(command -v pi)" --arg pidir "$(pi_agent_dir)" --arg registry "$REGISTRY" --arg digest "${vm_image_digest:-}" \
-    '{run: $run, sandbox: $sandbox, image: $image, pull: "if-missing", cpus: $cpus, memory_mib: $mem,
+    '{run: $run, sandbox: $sandbox, image: $image, pull: "if-missing", cpus: $cpus, memory_mib: $mem, root_disk_mib: $disk,
       max_duration_sec: (($wall + 30) * 60), hub_dir: $hub, mounts: $mounts, late_mounts: $late,
       env: $env, agents: $agents, allow_hosts: $allow, open_net: $open, providers: $providers,
       pack_secrets: $pack_secrets,
@@ -5105,9 +5321,11 @@ launch_vm_agents() {
   cp "$kickoff" "$sandbox/.kickoff"
   start_vm_hub "$sandbox" "$hub_dir" "$swarm_id" "$trace_socket" "${agent_ids[@]}" || { stop_vm_run "$sandbox" "$swarm_id" 0; exit 1; }
   local spec="$hub_dir/vm-spec.json"
+  freeze_harness "$hub_dir"
+  echo "Harness:      frozen for this run at $(cat "$hub_dir/harness/COMMIT") (the checkout can change; these VMs will not see it)"
   vm_build_spec "$hub_dir" "$spec"
 
-  echo "VMs:          creating ${n} on $vm_image (${vm_cpus} vCPU, ${vm_memory} MiB each)..."
+  echo "VMs:          creating ${n} on $vm_image (${vm_cpus} vCPU, ${vm_memory} MiB memory, ${vm_disk} MiB disk each)..."
   local vm_out
   if ! vm_out="$(vm_cli create --spec "$spec" 2>"$sandbox/traces/vm-create.log")"; then
     {
@@ -5150,7 +5368,10 @@ launch_vm_agents() {
     exit 1
   fi
   workspace_ids=("$workspace_id")
+  KICKOFF_WORKSPACES=("$workspace_id")
   panes=("$root_pane")
+  # Every pane of a VM run gets the quiet shell, not only the first.
+  VM_PANE_ZDOTDIR="$hub_dir/zdot"
   if [[ "$n" -gt 1 ]]; then
     layout_agent_panes "$n"
   fi
@@ -5178,6 +5399,9 @@ launch_vm_agents() {
     chmod 700 "$launch"
     panes_json="$(jq -c --arg a "${agent_ids[$idx]}" --arg p "${panes[$idx]}" '. + {($a): $p}' <<<"$panes_json")"
   done
+  # If an agent's Pi exits and its pane is left at a shell, this starts it
+  # again in the same VM with the same session.
+  echo "Relaunch:     $hub_dir/launch-<agent id>.sh, in that agent's pane"
   hub_send "$hub_dir/admin.sock" "$(jq -nc --argjson p "$panes_json" '{op: "panes", panes: $p}')" >/dev/null || true
   # A pane's shell may still be starting when it is asked; the hub knows who
   # has linked up, and whoever has not is asked once more.
@@ -5218,9 +5442,13 @@ cmd_reap() {
   done
   ensure_registry
   # VMs no running run owns: a kickoff that died between creating them and
-  # recording itself, or a stop that never came. By label, never by name.
-  local reaped
-  reaped="$(vm_cli reap --registry "$REGISTRY" 2>/dev/null | jq -r '.removed | length' 2>/dev/null || echo 0)"
+  # recording itself, or a stop that never came; a throwaway step's VM left
+  # behind. By label, never by name, and only this registry's. With an id,
+  # only that run's: the console's Reap on one run once removed another's.
+  # An orphan of a run this registry knows keeps its disk, as a stop would.
+  local reaped only_args=()
+  [[ -n "$id" ]] && only_args=(--only "$id")
+  reaped="$(vm_cli reap --registry "$REGISTRY" ${only_args[@]+"${only_args[@]}"} 2>/dev/null | jq -r '.removed | length' 2>/dev/null || echo 0)"
   [[ "${reaped:-0}" -gt 0 ]] && echo "Reaped $reaped VM(s) whose run is not running."
   local sandboxes=()
   if [[ -n "$id" ]]; then
@@ -5245,7 +5473,7 @@ cmd_reap() {
   [[ "$stop" -eq 1 ]] && extra+=(--stop)
   for sb in "${sandboxes[@]}"; do
     echo "Reap $sb (stall ${stall}s)"
-    bash "$ROOT/scripts/reap.sh" --sandbox "$sb" --timeout "$stall" ${extra[@]+"${extra[@]}"}
+    SWARM_REGISTRY="$REGISTRY" bash "$ROOT/scripts/reap.sh" --sandbox "$sb" --timeout "$stall" ${extra[@]+"${extra[@]}"}
   done
 }
 
@@ -5332,6 +5560,11 @@ cmd_stop() {
     echo "Unknown swarm id: $id" >&2
     exit 1
   fi
+  # A stop can take minutes (snapshots, custody). Interrupted, it says where
+  # it was and that running it again finishes the job: every step is safe to
+  # repeat.
+  local stop_step="closing the panes"
+  trap 'echo >&2; echo "stop interrupted while ${stop_step}. Nothing is lost: scripts/swarm.sh stop '"$id"' again finishes it (every step is safe to repeat)." >&2; exit 130' INT TERM
   if command -v herdr >/dev/null 2>&1; then
     while read -r ws; do
       [[ -z "$ws" ]] && continue
@@ -5347,9 +5580,11 @@ cmd_stop() {
   if [[ -n "$sandbox" && "$(jq -r '.isolation.mode // "host"' <<<"$rec")" == "microvm" ]]; then
     local snap
     snap="$(jq -r 'if .isolation.snapshot == false then 0 else 1 end' <<<"$rec")"
-    echo "VMs:          stopping$( [[ "$snap" -eq 1 ]] && printf ', each disk kept as a snapshot beside the run')"
+    echo "VMs:          stopping$( [[ "$snap" -eq 1 ]] && printf ', each disk kept as a snapshot beside the run (a few minutes a VM)')..."
+    stop_step="putting the VMs away"
     stop_vm_run "$sandbox" "$id" "$snap"
   fi
+  stop_step="stopping the run's daemons"
   stop_sandbox_daemons "$sandbox" keep-record
   local final_state="stopped"
   [[ -n "$sandbox" && -f "$sandbox/done/SWARM_DONE" ]] && final_state="done"
@@ -5362,6 +5597,7 @@ cmd_stop() {
   # the run is over, so an interrupted custody leaves a stopped run.
   if [[ -n "$sandbox" && -d "$sandbox" && "$no_custody" -eq 0 ]]; then
     echo "Custody:      re-hashing the evidence and sealing the run (up to ${custody_timeout}s; --no-custody skips it)..."
+    stop_step="taking custody"
     local custody_rc=0
     node --experimental-strip-types --no-warnings "$ROOT/scripts/custody.ts" "$sandbox" --run "$id" --timeout "$custody_timeout" >/dev/null 2>"$sandbox/traces/custody.log" || custody_rc=$?
     if [[ -f "$sandbox/custody.json" ]]; then
@@ -5374,7 +5610,9 @@ cmd_stop() {
   fi
   # An attached evidence image would otherwise outlive the run that needed it,
   # and the next kickoff on the same sandbox cannot clear a mount point.
+  stop_step="detaching the evidence image"
   [[ -n "$sandbox" ]] && detach_inputs_image "$sandbox"
+  trap - INT TERM
   if [[ -n "$sandbox" && -f "$sandbox/done/SWARM_DONE" ]]; then
     registry_update_state "$id" "done"
     echo "Stopped $id (the sentinel was present; recorded as done)"

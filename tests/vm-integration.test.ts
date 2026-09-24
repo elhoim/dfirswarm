@@ -362,10 +362,22 @@ test("finish keeps each disk and removes the VMs; reap touches only its own regi
   assert.ok(record.stopped_at);
   assert.equal((await runVms("vmt5")).length, 0, "the run's VM is gone");
   assert.equal((await finishRun("vmt5", r.sandbox)).length, 0, "a second finish is a no-op");
+  assert.ok(record.installed_outside_image && typeof record.installed_outside_image === "object" && !record.installed_outside_image.error, `the stop-time inventory was taken: ${JSON.stringify(record.installed_outside_image)}`);
+
+  // A kickoff that died while preparing: its record says prepared, hours ago.
+  // A reap of one other run leaves it; a reap of it keeps its disk, as a
+  // stop would, and removes the VM.
+  await mkdir(dirname(r.spec.registry as string), { recursive: true });
+  assert.deepEqual((await createVms(r.spec)).failures, []);
+  await writeFile(r.spec.registry as string, JSON.stringify({ runs: [{ id: "vmt5", state: "prepared", started_at: new Date(Date.now() - 3 * 3600_000).toISOString(), sandbox: r.sandbox }] }));
+  assert.deepEqual(await reapVms({ registry: r.spec.registry, only: "some-other-run" }), [], "a reap of one run touches no other");
+  assert.equal((await runVms("vmt5")).length, 1);
+  await rm(`${r.sandbox}.vm-snapshots/vmt500.msb`, { force: true });
+  assert.deepEqual(await reapVms({ registry: r.spec.registry, only: "vmt5" }), [vmName("vmt5", "vmt500")], "a stale prepared run's VM is reaped");
+  assert.ok(existsSync(`${r.sandbox}.vm-snapshots/vmt500.msb`), "and its disk was kept first");
 
   // vmt6's registry has no running run: a reap of *that* registry removes it,
   // and a reap of any other registry never does.
-  await mkdir(dirname(r.spec.registry as string), { recursive: true });
   await writeFile(r.spec.registry as string, JSON.stringify({ runs: [] }));
   assert.deepEqual(await reapVms({ registry: r.spec.registry }), [], "a reap of another registry leaves vmt6 alone");
   assert.equal((await runVms("vmt6")).length, 1);
@@ -476,4 +488,17 @@ test("the network check boots the run's policy in a throwaway VM: allowed hosts 
   assert.ok(r.rows.some((x) => /outside the list/.test(x.check) && /000$/.test(x.result)), text);
   assert.ok(r.rows.some((x) => /stopped on its way to pypi\.org/.test(x.check) && x.ok), text);
   assert.doesNotMatch(msb("list"), /dfs-netcheck-/, "the check's VM is gone");
+});
+
+test("a finish lock left by a stop that was interrupted does not hold the next stop", async (t) => {
+  if (skip) return t.skip(skip);
+  const sandbox = await mkdtemp(join(tmpdir(), "vmlock-"));
+  cleanups.push(() => rm(sandbox, { recursive: true, force: true }));
+  await mkdir(join(sandbox, "vm", ".finish.lock"), { recursive: true });
+  // A pid nobody has: the stop that held it is gone.
+  await writeFile(join(sandbox, "vm", ".finish.lock", "pid"), "999999\n");
+  const started = Date.now();
+  assert.deepEqual(await finishRun("vmt-nolock", sandbox), [], "no VM of that run, and no wait");
+  assert.ok(Date.now() - started < 10_000, `the dead owner's lock was waited on for ${Date.now() - started} ms`);
+  assert.equal(existsSync(join(sandbox, "vm", ".finish.lock")), false, "and the lock is released after");
 });

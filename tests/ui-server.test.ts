@@ -14,7 +14,7 @@ import { createUiApp, defaultRunsDir, type UiApp } from "../scripts/ui/app.ts";
 import { ActionRunner, checkReadiness, isHostName, isLocalHost, listModels, listPacks, parseModelList, parseModelTeam, readLocalProviders, startArgv, validateStart } from "../scripts/ui/actions.ts";
 import { resolveInputSet } from "../scripts/ui/inputs.ts";
 import { ChangeBus, classifyPath, SUPPRESSED_KINDS, type BusMessage } from "../scripts/ui/watch.ts";
-import { activitySeries, deriveCallsign } from "../scripts/ui/model.ts";
+import { activitySeries, deriveCallsign, derivePhase, vmHealth } from "../scripts/ui/model.ts";
 import { seedFixtureRuns } from "../scripts/seed-fixture.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1815,4 +1815,55 @@ test("the kickoff form takes installed packs by id and hands them to --pack; the
   await mkdir(join(home, "packs", "not-a-pack"), { recursive: true });
   assert.deepEqual(await listPacks(home), [{ id: "demo-pack", name: "Demo", version: "1.0.0", description: "d", depends: ["computer-forensics-base"] }]);
   await rm(home, { recursive: true, force: true });
+});
+
+test("the console refuses a host guard's setting for a microVM run, as the kickoff does", () => {
+  const r = validateStart({ n: 2, cap_usd: 1, model: "x/y", isolation: "microvm", inputs: "case1", inputs_enforce: "on" });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /microVM run has none/);
+});
+
+test("a run that failed at kickoff is failed, not unknown, and a hub-finished one without its sentinel is stopped", () => {
+  assert.equal(derivePhase("failed", false), "failed");
+  assert.equal(derivePhase("finished", false), "stopped");
+  assert.equal(derivePhase("finished", true), "done");
+  assert.equal(derivePhase("something-new", false), "unknown");
+});
+
+test("a VM run's VMs are shown from their records, with the live state only from this run's own hub", async () => {
+  const base = await mkdtemp(join(tmpdir(), "ui-vms-"));
+  const was = process.env.TMPDIR;
+  process.env.TMPDIR = base;
+  try {
+    const sandbox = join(base, "sb");
+    await mkdir(join(sandbox, "vm"), { recursive: true });
+    await writeFile(join(sandbox, "vm", "a0.json"), JSON.stringify({
+      agent: "a0", name: "dfs-r-a0", cpus: 2, memory_mib: 2048,
+      image: { ref: "dfirswarm-disk:dev-arm64", manifest_digest: "sha256:aa", expected_digest: "sha256:aa" },
+      probe: { hub: true, base: "ro", inputs: "ro", clock_skew_s: -0.4, fuse: false, loop: true, missing_binaries: [] },
+      image_fit: { warnings: ["the image was built with cfb 1.2.1"], blockers: [] },
+      installed_outside_image: { baseline: true, apt: { cowsay: "3.03" }, venv: {} },
+      runtime: { name: "microsandbox", version: "0.7.2" },
+    }));
+    const hubs = join(base, "dfirswarm-hubs");
+    const hub = join(hubs, "dfs-r.x");
+    await mkdir(hub, { recursive: true });
+    await writeFile(join(hub, "sandbox"), `${await realpath(sandbox)}\n`);
+    await writeFile(join(hub, "status.json"), JSON.stringify({ agents: { a0: { state: "working", connected: true, since: "t" } } }));
+    await writeFile(join(sandbox, "hub.dir"), `${await realpath(hub)}\n`);
+    const [vm] = await vmHealth(sandbox);
+    assert.deepEqual(vm.live, { state: "working", connected: true, since: "t" });
+    assert.deepEqual(vm.image, { ref: "dfirswarm-disk:dev-arm64", digest: "sha256:aa", expected: "sha256:aa" });
+    assert.equal(vm.probe.clock_skew_s, -0.4);
+    assert.deepEqual(vm.installed_outside, ["apt cowsay 3.03"]);
+    assert.deepEqual(vm.fit_warnings, ["the image was built with cfb 1.2.1"]);
+    // hub.dir naming another sandbox's hub is not believed.
+    await writeFile(join(hub, "sandbox"), "/somewhere/else\n");
+    assert.equal((await vmHealth(sandbox))[0].live, null);
+    assert.deepEqual(await vmHealth(join(base, "no-such")), [], "a host run has no VMs");
+  } finally {
+    if (was === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = was;
+    await rm(base, { recursive: true, force: true });
+  }
 });

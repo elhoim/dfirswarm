@@ -28,6 +28,7 @@ import { ClaimsPanel } from "./detail/claims-panel";
 import { BudgetPanel } from "./detail/budget-panel";
 import { FilesPanel } from "./detail/files-panel";
 import { InputsPanel } from "./detail/inputs-panel";
+import { VmPanel } from "./detail/vm-panel";
 import { ReportPanel } from "./detail/report-panel";
 import { ArtifactsPanel } from "./detail/artifacts-panel";
 import { GoalPanel } from "./detail/goal-panel";
@@ -252,6 +253,11 @@ export function SwarmDetailScreen() {
     <Chip tone="kelp" className="bg-kelp text-white">
       running
     </Chip>
+  ) : s.phase === "done" && d.registry?.state === "running" && (d.vms ?? []).some((v) => !v.stopped_at) ? (
+    // The sentinel is there and the hub is still putting the VMs away.
+    <span title="done/SWARM_DONE exists; the VMs are being snapshotted and removed, then custody runs">
+      <Chip tone="moss">finishing</Chip>
+    </span>
   ) : s.phase === "done" ? (
     <Chip tone="moss" className="bg-moss text-white">
       done
@@ -436,7 +442,12 @@ export function SwarmDetailScreen() {
           {tab === "story" ? <StoryPanel view={d} version={threadsVersion} /> : null}
           {tab === "threads" ? <ThreadsPanel view={d} selected={sub ? decodeURIComponent(sub) : null} onSelect={(t) => setSub("threads", t)} version={threadsVersion} /> : null}
           {tab === "traces" ? <TracesPanel view={d} version={eventsVersion} initialAgent={sub ? decodeURIComponent(sub) : undefined} /> : null}
-          {tab === "agents" ? <AgentsPanel view={d} selected={sub ? decodeURIComponent(sub) : null} onSelect={(a) => setSub("agents", a)} version={eventsVersion} /> : null}
+          {tab === "agents" ? (
+            <div className="space-y-4">
+              <VmPanel view={d} />
+              <AgentsPanel view={d} selected={sub ? decodeURIComponent(sub) : null} onSelect={(a) => setSub("agents", a)} version={eventsVersion} />
+            </div>
+          ) : null}
           {tab === "claims" ? <ClaimsPanel view={d} now={now} /> : null}
           {tab === "budget" ? <BudgetPanel view={d} elapsedMs={elapsedLive} /> : null}
           {tab === "files" ? (

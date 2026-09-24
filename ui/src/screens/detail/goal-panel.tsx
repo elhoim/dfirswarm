@@ -41,7 +41,7 @@ function frameFacts(view: SwarmView): Fact[] {
     out.push({
       label: "Isolation",
       value: `microVM per agent · ${iso.image ?? "image not recorded"}${iso.cpus ? ` · ${iso.cpus} vCPU` : ""}${iso.memory_mib ? ` · ${iso.memory_mib} MiB` : ""}${iso.snapshot === false ? " · disks not kept" : ""}`,
-      title: "Each agent ran Pi in its own microVM: the run read-only but for work/ and its own outputs, the board written by the hub on the host, no credential inside. vm/<id>.json holds each VM's record.",
+      title: "Each agent ran Pi in its own microVM: the run read-only but for its own work/<id>/, extracted and quarantine directories, outputs and session; shared files published through the hub, the board written by the hub on the host, no credential inside. vm/<id>.json holds each VM's record.",
     });
   } else {
     out.push({ label: "Isolation", value: "host processes", title: "Each agent ran as a Pi process on this host, held by the write guard, the tool guard and netguard" });
@@ -60,7 +60,7 @@ function frameFacts(view: SwarmView): Fact[] {
     tone: r.net === "open" ? "warn" : undefined,
     title: iso.mode === "microvm" ? "What each agent's VM could reach: msb's network policy, deny by default" : "What the panes could reach through netguard",
   });
-  if (r.toolbox && r.toolbox !== "off") out.push({ label: "Toolbox", value: String(r.toolbox), title: "The tool sets checked on this host before the run started" });
+  if (r.toolbox && r.toolbox !== "off") out.push({ label: "Toolbox", value: String(r.toolbox), title: iso.mode === "microvm" ? "The tool sets and the packs' programs, checked in the run's image before the run started" : "The tool sets checked on this host before the run started" });
   if (r.catalog === true) out.push({ label: "Catalog", value: "first pass done", title: "The standard first pass over the evidence ran before any agent" });
   if (r.quarantine === true) out.push({ label: "Quarantine", value: "no-exec on extracts", title: "Nothing under work/extracted or work/quarantine can execute" });
   out.push({ label: "Forging", value: r.tool_forging ? "on" : "off", title: "Whether agents could write tools with make_tool and share them" });

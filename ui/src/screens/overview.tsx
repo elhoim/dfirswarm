@@ -62,6 +62,7 @@ function statusChip(row: SwarmRow, now: number) {
   if (row.phase === "done") return <Chip tone="moss">done</Chip>;
   if (row.phase === "stopped") return <Chip tone="neutral">stopped</Chip>;
   if (row.phase === "prepared") return <Chip tone="slate">prepared · not launched</Chip>;
+  if (row.phase === "failed") return <Chip tone="brick">failed · the kickoff did not get its agents running</Chip>;
   return <Chip tone="neutral">{row.phase}</Chip>;
 }
 
@@ -164,7 +165,7 @@ export function OverviewScreen() {
     const q = query.trim().toLowerCase();
     return all
       .filter((r) => {
-        if (filter === "stopped" && !(r.phase === "stopped" || r.phase === "prepared")) return false;
+        if (filter === "stopped" && !(r.phase === "stopped" || r.phase === "prepared" || r.phase === "failed")) return false;
         if ((filter === "running" || filter === "done") && r.phase !== filter) return false;
         if (q && !`${r.id} ${r.label} ${r.model} ${r.goal} ${r.last_post?.body ?? ""} ${r.last_post?.from ?? ""}`.toLowerCase().includes(q)) return false;
         return true;
@@ -181,7 +182,7 @@ export function OverviewScreen() {
       all: all.length,
       running: all.filter((r) => r.phase === "running").length,
       done: all.filter((r) => r.phase === "done").length,
-      stopped: all.filter((r) => r.phase === "stopped" || r.phase === "prepared").length,
+      stopped: all.filter((r) => r.phase === "stopped" || r.phase === "prepared" || r.phase === "failed").length,
     };
   }, [swarms.data]);
 

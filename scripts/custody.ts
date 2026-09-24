@@ -151,6 +151,8 @@ export type Custody = {
         secret_violations: SecretViolation[];
         /** Packages the VM held at stop that its image did not (vm.ts INVENTORY_SCRIPT), or why that is unknown. */
         installed_outside: { apt: string[]; venv: string[]; note: string | null };
+        /** msb's version when the VM was made and when it was put away, when they differ. */
+        runtime_changed: { from: string; to: string } | null;
       }>;
   incomplete: string | null;
   summary: string;
@@ -490,6 +492,7 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
         logs,
         secret_violations: violations,
         installed_outside: outsideOf(rec.installed_outside_image),
+        runtime_changed: rec.runtime_changed && typeof rec.runtime_changed === "object" ? (rec.runtime_changed as { from: string; to: string }) : null,
       });
     }
   }
@@ -524,6 +527,8 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
     parts.push(`${vms.length} VM${vms.length === 1 ? "" : "s"}, ${kept} of ${vms.length} snapshots verified${failed.length ? `, ${failed.length} NOT PUT AWAY (${failed.map((v) => v.agent).join(", ")})` : ""}`);
     const offImage = vms.filter((v) => v.expected_image && v.image && v.image !== v.expected_image);
     if (offImage.length) parts.push(`IMAGE DIGEST DIFFERS: ${offImage.map((v) => `${v.agent} booted ${v.image}, not ${v.expected_image}`).join("; ")}`);
+    const moved = vms.filter((v) => v.runtime_changed);
+    if (moved.length) parts.push(`MSB CHANGED DURING THE RUN: ${moved.map((v) => `${v.agent} ${v.runtime_changed?.from} → ${v.runtime_changed?.to}`).join("; ")}`);
     const outside = vms.filter((v) => v.installed_outside.apt.length || v.installed_outside.venv.length);
     if (outside.length) {
       parts.push(`INSTALLED OUTSIDE THE IMAGE AND THE TOOLCHAIN RECORD: ${outside.map((v) => `${v.agent} ${[...v.installed_outside.apt.map((p) => `apt ${p}`), ...v.installed_outside.venv.map((p) => `venv ${p}`)].join(", ")}`).join("; ")}`);

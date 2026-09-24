@@ -44,6 +44,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, realpathSync } from "node:fs";
 import { isIPv4, isIPv6 } from "node:net";
+import { availableParallelism, totalmem } from "node:os";
 import { mkdir, readFile, rm, stat, writeFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -971,7 +972,7 @@ export type FinishEntry = { agent: string; name: string; snapshot?: string; erro
  * kept, never removed, since removing it is the one step that cannot be
  * undone; and every msb step's outcome is in the entry, not swallowed.
  */
-export async function finishRun(runId: string, sandbox: string, options: { snapshot?: boolean; agent?: string } = {}): Promise<FinishEntry[]> {
+export async function finishRun(runId: string, sandbox: string, options: { snapshot?: boolean; agent?: string; registry?: string } = {}): Promise<FinishEntry[]> {
   const msb = msbBinary();
   const records = join(sandbox, "vm");
   const snapDir = `${sandbox}.vm-snapshots`;
@@ -982,16 +983,32 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
   for (let i = 0; i < 20 && !held; i++) {
     try {
       await mkdir(lock);
+      // Whose it is: a stop interrupted with ^C leaves the lock, and the
+      // next stop must see its owner is gone rather than wait half an hour.
+      await writeFile(join(lock, "pid"), `${process.pid}\n`).catch(() => undefined);
       held = true;
     } catch {
+      const owner = Number.parseInt(await readFile(join(lock, "pid"), "utf8").catch(() => ""), 10);
+      let ownerAlive = false;
+      if (Number.isInteger(owner) && owner > 0) {
+        try {
+          process.kill(owner, 0);
+          ownerAlive = true;
+        } catch {
+          ownerAlive = false;
+        }
+      }
       const age = await stat(lock).then((s) => Date.now() - s.mtimeMs).catch(() => 0);
-      if (age > 30 * 60_000) await rm(lock, { recursive: true, force: true });
+      if ((Number.isInteger(owner) && owner > 0 && !ownerAlive) || age > 30 * 60_000) await rm(lock, { recursive: true, force: true });
       else await new Promise((r) => setTimeout(r, 3000));
     }
   }
   if (!held) throw new Error(`another finish of run ${runId} is in progress (${lock})`);
   try {
+  // Another registry's run can carry the same id: only this registry's VMs.
+  const mine = options.registry ? registryLabel(options.registry) : "";
   for (const vm of await runVms(runId)) {
+    if (mine && vm.registry && vm.registry !== mine) continue;
     const agent = vm.agent || vm.name.replace(`dfs-${runId}-`, "");
     if (options.agent && agent !== options.agent) continue;
     const entry: FinishEntry = { agent, name: vm.name };
@@ -1054,6 +1071,12 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
     }
     if (record) {
       (record as VmRecord & { installed_outside_image?: unknown }).installed_outside_image = outside;
+      // The runtime that put the VM away against the one that made it: msb
+      // upgraded under a live run changes how the disk is kept and checked.
+      const nowVersion = await msbVersion();
+      if (record.runtime?.version && nowVersion && record.runtime.version !== nowVersion) {
+        (record as VmRecord & { runtime_changed?: unknown }).runtime_changed = { from: record.runtime.version, to: nowVersion };
+      }
       record.stopped_at = new Date().toISOString();
       if (entry.kept) (record as VmRecord & { kept?: string }).kept = entry.error;
       await writeFile(recordFile, `${JSON.stringify(record, null, 2)}\n`).catch(() => undefined);
@@ -1098,23 +1121,56 @@ print(json.dumps(res))
  * run that was stopped properly already has one. A VM labelled for another
  * registry, or for none, is never touched; `--run` names one run outright.
  */
-export async function reapVms(options: { run?: string; registry?: string } = {}): Promise<string[]> {
+/** A kickoff still preparing its run after this long died without saying so. */
+export const PREPARED_STALE_MS = 2 * 3600_000;
+
+/** The throwaway VMs the harness boots for one step, by their run label. */
+const THROWAWAY_RUNS = new Set(["catalog", "toolbox", "netcheck"]);
+
+export async function reapVms(options: { run?: string; registry?: string; only?: string; now?: number } = {}): Promise<string[]> {
   const live = new Set<string>();
+  const sandboxOf = new Map<string, string>();
   let mine = "";
   if (!options.run) {
     if (!options.registry || !existsSync(options.registry)) return [];
     mine = registryLabel(options.registry);
     try {
-      const reg = JSON.parse(readFileSync(options.registry, "utf8")) as { runs?: Array<{ id?: string; state?: string }> };
-      for (const r of reg.runs ?? []) if ((r.state === "running" || r.state === "prepared") && r.id) live.add(r.id);
+      const reg = JSON.parse(readFileSync(options.registry, "utf8")) as { runs?: Array<{ id?: string; state?: string; started_at?: string; sandbox?: string }> };
+      const now = options.now ?? Date.now();
+      for (const r of reg.runs ?? []) {
+        if (!r.id) continue;
+        if (r.sandbox) sandboxOf.set(r.id, r.sandbox);
+        // `prepared` is a kickoff between writing its record and starting its
+        // agents; one that stayed there for hours is a kickoff that died.
+        const started = Date.parse(r.started_at ?? "");
+        const stale = r.state === "prepared" && Number.isFinite(started) && now - started > PREPARED_STALE_MS;
+        if ((r.state === "running" || r.state === "prepared") && !stale) live.add(r.id);
+      }
     } catch {
       // an unreadable registry reaps nothing
       return [];
     }
   }
   const removed: string[] = [];
+  const kept = new Set<string>();
   for (const vm of await runVms(options.run)) {
-    if (!options.run && (vm.registry !== mine || live.has(vm.run))) continue;
+    if (!options.run) {
+      // A throwaway VM (the catalog's, the toolbox check's, netcheck's) that
+      // is no longer running was left by a step that died.
+      const throwaway = THROWAWAY_RUNS.has(vm.run) && vm.status !== "running";
+      if (!throwaway && (vm.registry !== mine || live.has(vm.run))) continue;
+      if (options.only && vm.run !== options.only) continue;
+      // An orphan of a run this registry knows keeps its disk and its logs,
+      // as a stop would have: whoever reads the run may need them.
+      const sandbox = sandboxOf.get(vm.run);
+      if (!throwaway && sandbox && existsSync(sandbox) && !kept.has(vm.run)) {
+        kept.add(vm.run);
+        const done = await finishRun(vm.run, sandbox, { snapshot: true, registry: options.registry }).catch(() => []);
+        for (const e of done) if (!e.kept) removed.push(e.name);
+        continue;
+      }
+      if (kept.has(vm.run)) continue;
+    }
     await run(msbBinary(), ["stop", vm.name], { timeoutMs: 120_000 });
     const r = await run(msbBinary(), ["rm", vm.name], { timeoutMs: 60_000 });
     if (r.code === 0) removed.push(vm.name);
@@ -1495,7 +1551,29 @@ export async function imageRefDigest(ref: string): Promise<string | null> {
   }
 }
 
-export async function probeHost(image?: string): Promise<{ ok: boolean; msb: string; version: string; reasons: string[]; image_present?: boolean; image_digest?: string | null; doctor_output?: string }> {
+/** What this host can give the agents' VMs: its memory and its cores. */
+export function hostCapacity(): { mem_mib: number; cpus: number } {
+  return { mem_mib: Math.floor(totalmem() / 1048576), cpus: availableParallelism() };
+}
+
+/**
+ * Whether N VMs of a size fit this host. Memory is the hard limit (a VM's
+ * memory is the host's, and a host out of it kills something); vCPUs are
+ * shared, so only a count far past the cores is refused.
+ */
+export function capacityVerdict(n: number, cpusEach: number, memEach: number, host: { mem_mib: number; cpus: number }): { blockers: string[]; warnings: string[] } {
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+  const mem = n * memEach;
+  if (mem > host.mem_mib * 0.85) blockers.push(`${n} VMs of ${memEach} MiB need ${mem} MiB, and this host has ${host.mem_mib} MiB: lower --vm-memory or --n`);
+  else if (mem > host.mem_mib * 0.6) warnings.push(`${n} VMs of ${memEach} MiB take ${mem} of this host's ${host.mem_mib} MiB; whatever else it runs shares the rest`);
+  const cpus = n * cpusEach;
+  if (cpus > host.cpus * 4) blockers.push(`${n} VMs of ${cpusEach} vCPU are ${cpus} vCPUs on ${host.cpus} cores: lower --vm-cpus or --n`);
+  else if (cpus > host.cpus) warnings.push(`${cpus} vCPUs on ${host.cpus} cores: the agents' tools will share them`);
+  return { blockers, warnings };
+}
+
+export async function probeHost(image?: string): Promise<{ ok: boolean; msb: string; version: string; reasons: string[]; image_present?: boolean; image_digest?: string | null; doctor_output?: string; host?: { mem_mib: number; cpus: number } }>{
   const msb = msbBinary();
   const reasons: string[] = [];
   const platform = vmPlatformProblem();
@@ -1522,7 +1600,7 @@ export async function probeHost(image?: string): Promise<{ ok: boolean; msb: str
     image_digest = await imageRefDigest(image);
     image_present = image_digest !== null;
   }
-  return { ok: reasons.length === 0, msb, version: v.stdout.trim(), reasons, ...(image !== undefined ? { image_present, image_digest } : {}), ...(doctor_output !== undefined ? { doctor_output } : {}) };
+  return { ok: reasons.length === 0, msb, version: v.stdout.trim(), reasons, ...(image !== undefined ? { image_present, image_digest } : {}), ...(doctor_output !== undefined ? { doctor_output } : {}), host: hostCapacity() };
 }
 
 async function main(): Promise<void> {
@@ -1545,6 +1623,13 @@ async function main(): Promise<void> {
       const r = await netCheck(image, hosts, { canary: opt("--canary") });
       for (const row of r.rows) console.log(`${row.ok ? "ok  " : "FAIL"}  ${row.check}: ${row.host} -> ${row.result}`);
       process.exit(r.ok ? 0 : 1);
+    }
+    case "capacity": {
+      // n cpus-each mem-each: the kickoff's question, answered with this host's numbers.
+      const [n, cpus, mem] = [opt("--n"), opt("--cpus"), opt("--memory")].map((v) => Number(v));
+      const verdict = capacityVerdict(n, cpus, mem, hostCapacity());
+      console.log(JSON.stringify({ ok: verdict.blockers.length === 0, host: hostCapacity(), ...verdict }));
+      process.exit(verdict.blockers.length ? 2 : 0);
     }
     case "check-allow": {
       // The kickoff asks before anything is written: every --allow-host and
@@ -1598,7 +1683,7 @@ async function main(): Promise<void> {
       const runId = opt("--run");
       const sandbox = opt("--sandbox");
       if (!runId || !sandbox) throw new Error("finish needs --run ID --sandbox DIR");
-      const out = await finishRun(runId, resolve(sandbox), { snapshot: !rest.includes("--no-snapshot"), agent: opt("--agent") });
+      const out = await finishRun(runId, resolve(sandbox), { snapshot: !rest.includes("--no-snapshot"), agent: opt("--agent"), registry: opt("--registry") });
       const ok = out.every((o) => !o.error);
       console.log(JSON.stringify({ ok, vms: out }));
       process.exit(ok ? 0 : 1);
@@ -1648,12 +1733,12 @@ async function main(): Promise<void> {
       return;
     }
     case "reap": {
-      const removed = await reapVms({ run: opt("--run"), registry: opt("--registry") });
+      const removed = await reapVms({ run: opt("--run"), registry: opt("--registry"), only: opt("--only") });
       console.log(JSON.stringify({ ok: true, removed }));
       return;
     }
     default:
-      console.error("usage: vm.ts probe|create|finish|reap|msb-path (see the header)");
+      console.error("usage: vm.ts probe|pull|create|finish|reap|toolbox|catalog|netcheck|check-allow|msb-path (see the header)");
       process.exit(2);
   }
 }

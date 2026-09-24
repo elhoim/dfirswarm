@@ -133,6 +133,7 @@ export type StartParams = {
   image?: string;
   vm_cpus?: number;
   vm_memory?: number;
+  vm_disk?: number;
   /** false: remove each VM at stop without keeping its disk. */
   vm_snapshot?: boolean;
 };
@@ -510,7 +511,7 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
   const image = typeof body.image === "string" ? body.image.trim() : "";
   if (image && !/^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$/.test(image)) return { ok: false, error: "image must be an OCI reference (registry/name:tag or name@sha256:...)" };
   if (image && isolation !== "microvm") return { ok: false, error: "image names a VM image; it needs isolation microvm" };
-  const vmNumber = (key: "vm_cpus" | "vm_memory", min: number, max: number): number | undefined | { error: string } => {
+  const vmNumber = (key: "vm_cpus" | "vm_memory" | "vm_disk", min: number, max: number): number | undefined | { error: string } => {
     const raw = body[key];
     if (raw === undefined || raw === null || raw === "") return undefined;
     const v = Number(raw);
@@ -518,12 +519,18 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
     if (isolation !== "microvm") return { error: `${key} needs isolation microvm` };
     return v;
   };
-  const vmCpus = vmNumber("vm_cpus", 1, 64);
+  // The kickoff's own ranges (--vm-cpus 1-99, --vm-memory from 512 MiB,
+  // --vm-disk from 2048 MiB): the form refuses what the kickoff would.
+  const vmCpus = vmNumber("vm_cpus", 1, 99);
   if (vmCpus && typeof vmCpus === "object") return { ok: false, error: vmCpus.error };
   const vmMemory = vmNumber("vm_memory", 512, 262144);
   if (vmMemory && typeof vmMemory === "object") return { ok: false, error: vmMemory.error };
+  const vmDisk = vmNumber("vm_disk", 2048, 1048576);
+  if (vmDisk && typeof vmDisk === "object") return { ok: false, error: vmDisk.error };
   const vmSnapshot = body.vm_snapshot === false ? false : undefined;
   if (vmSnapshot === false && isolation !== "microvm") return { ok: false, error: "vm_snapshot needs isolation microvm" };
+  // A host guard's setting means nothing in a VM, which the kickoff refuses.
+  if (isolation === "microvm" && inputsEnforce && inputsEnforce !== "auto") return { ok: false, error: "inputs_enforce sets a host guard; a microVM run has none (the evidence is read-only in each VM)" };
   // Packs by id; whether each is installed is the kickoff's to say (pack.sh
   // resolve), with its dependencies.
   let packs: string[] | undefined;
@@ -580,6 +587,7 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
       image: image || undefined,
       vm_cpus: vmCpus as number | undefined,
       vm_memory: vmMemory as number | undefined,
+      vm_disk: vmDisk as number | undefined,
       vm_snapshot: vmSnapshot,
     },
   };
@@ -637,6 +645,7 @@ export function startArgv(p: StartParams): string[] {
     if (p.image) argv.push("--image", p.image);
     if (p.vm_cpus) argv.push("--vm-cpus", String(p.vm_cpus));
     if (p.vm_memory) argv.push("--vm-memory", String(p.vm_memory));
+    if (p.vm_disk) argv.push("--vm-disk", String(p.vm_disk));
     if (p.vm_snapshot === false) argv.push("--no-vm-snapshot");
   }
   if (p.no_start) argv.push("--no-start");

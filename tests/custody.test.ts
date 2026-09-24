@@ -197,6 +197,8 @@ test("custody checks a kept VM disk against its record, and counts lines the cha
   const installed = await takeCustody(root);
   assert.match(installed.summary, /INSTALLED OUTSIDE THE IMAGE AND THE TOOLCHAIN RECORD: a0 apt cowsay 3\.03, venv tabulate 0\.10\.0/);
   assert.equal(installed.vms?.find((v) => v.agent === "a1")?.installed_outside.note, "no inventory was taken (a VM put away before stop took one)");
+  await writeFile(join(root, "vm", "a1.json"), JSON.stringify({ agent: "a1", image: { manifest_digest: "sha256:abc" }, snapshot: { path: snap, sha256: sha("other") }, runtime_changed: { from: "0.7.2", to: "0.7.3" } }));
+  assert.match((await takeCustody(root)).summary, /MSB CHANGED DURING THE RUN: a1 0\.7\.2 → 0\.7\.3/);
   assert.doesNotMatch(again.summary, /IMAGE DIGEST DIFFERS/, "records with no resolved digest are not called different");
 });
 

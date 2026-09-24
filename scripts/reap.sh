@@ -253,6 +253,18 @@ EOF
     else
       log "  herdr not installed; skipping pane close"
     fi
+    # A microVM agent's VM outlives its pane: put it away as stop would (its
+    # disk kept), so a reaped seat holds no VM and the hub serves nobody.
+    local run_id
+    run_id="$(jq -r '.run // empty' "$SANDBOX/vm/$id.json" 2>/dev/null || true)"
+    if [[ -n "$run_id" ]] && hub_dir_of "$SANDBOX" >/dev/null; then
+      if node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" finish --run "$run_id" --sandbox "$SANDBOX" --agent "$id" \
+          ${SWARM_REGISTRY:+--registry "$SWARM_REGISTRY"} >>"$SANDBOX/traces/vm-finish.log" 2>&1; then
+        log "  VM of $id put away (disk kept)"
+      else
+        log "  VM of $id: finish failed; see traces/vm-finish.log"
+      fi
+    fi
   fi
   echo "reaped $id (idle ${idle}s, released ${released} lock(s)) -> done/agents/$id.dead"
 }
@@ -276,7 +288,7 @@ while IFS= read -r id; do
   fi
   if (( idle > TIMEOUT )); then
     if agent_working "$id"; then
-      log "work $id: idle ${idle}s but herdr says working; leaving alone"
+      log "work $id: idle ${idle}s but $(hub_dir_of "$SANDBOX" >/dev/null && echo "its VM's extension" || echo herdr) says working; leaving alone"
       continue
     fi
     if [[ "$DRY_RUN" -eq 1 ]]; then

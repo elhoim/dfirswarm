@@ -158,7 +158,7 @@ export function activitySeries(events: readonly SwarmEvent[], from: string | nul
   return series;
 }
 
-export type SwarmPhase = "running" | "done" | "stopped" | "prepared" | "unknown";
+export type SwarmPhase = "running" | "done" | "stopped" | "prepared" | "failed" | "unknown";
 
 export type MarkerInfo = {
   reason?: string;
@@ -269,6 +269,25 @@ export type ForgedToolRow = ForgedToolManifest & {
   last_used_at: string | null;
 };
 
+/** One agent's VM as the console shows it: its record, and the hub's live word on it. */
+export type VmHealth = {
+  agent: string;
+  name: string | null;
+  image: { ref: string | null; digest: string | null; expected: string | null };
+  cpus: number | null;
+  memory_mib: number | null;
+  /** What the kickoff's probe found in the VM. */
+  probe: { hub: boolean; floor: string | null; inputs: string | null; clock_skew_s: number | null; fuse: boolean | null; loop: boolean | null; missing: string[] };
+  fit_warnings: string[];
+  /** The hub's live state: working, idle, done, gone; null when no hub answers for this run. */
+  live: { state: string; connected: boolean; since: string | null } | null;
+  stopped_at: string | null;
+  snapshot: "kept" | "not kept" | "failed" | null;
+  installed_outside: string[];
+  runtime: string | null;
+  runtime_changed: string | null;
+};
+
 export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   summary: SwarmRow;
   agents: AgentRow[];
@@ -296,6 +315,8 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   ledger: LedgerView;
   /** What each agent decided to call itself, in its own words. */
   names: NameRecord[];
+  /** A microVM run's VMs; empty for a host run. */
+  vms: VmHealth[];
 };
 
 /** ledger/entries.jsonl as the agents wrote it, and whether ledger.md exists. */
@@ -341,8 +362,12 @@ function parseFrontMatter(text: string): Record<string, string> {
 export function derivePhase(state: string, done: boolean): SwarmPhase {
   if (done) return "done";
   if (state === "running") return "running";
-  if (state === "stopped") return "stopped";
+  // `finished`: the hub put a VM run away after its sentinel; without the
+  // sentinel it is a run that ended, which the console calls stopped.
+  if (state === "stopped" || state === "finished") return "stopped";
   if (state === "prepared") return "prepared";
+  // A kickoff that did not get its agents running: said, not "unknown".
+  if (state === "failed") return "failed";
   return "unknown";
 }
 
@@ -725,7 +750,70 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     inputs: await inputsView(sandbox, events),
     ledger: await ledgerView(sandbox),
     names: await readNames(sandbox).catch(() => []),
+    vms: await vmHealth(sandbox),
   };
+}
+
+/**
+ * Each agent's VM: the record the kickoff and stop wrote (vm/<id>.json) and,
+ * while the run is up, the hub's live status. The hub is found the way the
+ * scripts find it: hub.dir must name a directory under the hubs' parent made
+ * for this sandbox, since a pane could write hub.dir.
+ */
+export async function vmHealth(sandbox: string): Promise<VmHealth[]> {
+  const dir = join(sandbox, "vm");
+  const names = (await readdir(dir).catch(() => [] as string[])).filter((n) => n.endsWith(".json") && !n.startsWith(".")).sort();
+  if (!names.length) return [];
+  let live: Record<string, { state?: string; connected?: boolean; since?: string }> = {};
+  try {
+    const hub = (await readFile(join(sandbox, "hub.dir"), "utf8")).trim();
+    const parent = await realpath(join(process.env.TMPDIR || "/tmp", "dfirswarm-hubs")).catch(() => "");
+    const mine = parent && hub.startsWith(`${parent}/dfs-`) && !hub.includes("..") && (await readFile(join(hub, "sandbox"), "utf8").catch(() => "")).trim() === (await realpath(sandbox).catch(() => sandbox));
+    if (mine) live = ((JSON.parse(await readFile(join(hub, "status.json"), "utf8")) as { agents?: typeof live }).agents ?? {});
+  } catch {
+    live = {};
+  }
+  const out: VmHealth[] = [];
+  for (const name of names) {
+    let rec: Record<string, unknown>;
+    try {
+      rec = JSON.parse(await readFile(join(dir, name), "utf8")) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const agent = typeof rec.agent === "string" ? rec.agent : name.replace(/\.json$/, "");
+    const image = (rec.image ?? {}) as { ref?: string; manifest_digest?: string | null; expected_digest?: string };
+    const probe = (rec.probe ?? {}) as Record<string, unknown>;
+    const fit = (rec.image_fit ?? {}) as { warnings?: string[]; blockers?: string[] };
+    const snap = rec.snapshot as { sha256?: string; error?: string } | undefined;
+    const inv = rec.installed_outside_image as { apt?: Record<string, string>; venv?: Record<string, string> } | undefined;
+    const changed = rec.runtime_changed as { from?: string; to?: string } | undefined;
+    const l = live[agent];
+    out.push({
+      agent,
+      name: typeof rec.name === "string" ? rec.name : null,
+      image: { ref: image.ref ?? null, digest: image.manifest_digest ?? null, expected: image.expected_digest ?? null },
+      cpus: typeof rec.cpus === "number" ? rec.cpus : null,
+      memory_mib: typeof rec.memory_mib === "number" ? rec.memory_mib : null,
+      probe: {
+        hub: probe.hub === true,
+        floor: typeof probe.base === "string" ? probe.base : null,
+        inputs: typeof probe.inputs === "string" ? probe.inputs : null,
+        clock_skew_s: typeof probe.clock_skew_s === "number" ? probe.clock_skew_s : null,
+        fuse: typeof probe.fuse === "boolean" ? probe.fuse : null,
+        loop: typeof probe.loop === "boolean" ? probe.loop : null,
+        missing: Array.isArray(probe.missing_binaries) ? (probe.missing_binaries as string[]) : [],
+      },
+      fit_warnings: [...(fit.blockers ?? []), ...(fit.warnings ?? [])],
+      live: l ? { state: String(l.state ?? "?"), connected: l.connected === true, since: typeof l.since === "string" ? l.since : null } : null,
+      stopped_at: typeof rec.stopped_at === "string" ? rec.stopped_at : null,
+      snapshot: !snap ? (typeof rec.stopped_at === "string" ? "not kept" : null) : snap.error ? "failed" : "kept",
+      installed_outside: inv ? [...Object.entries(inv.apt ?? {}).map(([k, v]) => `apt ${k} ${v}`), ...Object.entries(inv.venv ?? {}).map(([k, v]) => `venv ${k} ${v}`)] : [],
+      runtime: typeof (rec.runtime as { version?: string } | undefined)?.version === "string" ? (rec.runtime as { version: string }).version : null,
+      runtime_changed: changed?.from && changed.to ? `${changed.from} → ${changed.to}` : null,
+    });
+  }
+  return out;
 }
 
 /** The packs a run carried, joined with what each one holds on this host. */

@@ -40,9 +40,27 @@ out="$(start --isolation microvm --vm-cpus 0 --label bad-cpus)"; rc=$?
 [[ $rc -eq 2 ]] || fail "--vm-cpus 0 exited $rc, wanted 2"
 out="$(start --isolation microvm --vm-memory 100 --label bad-mem)"; rc=$?
 [[ $rc -eq 2 ]] || fail "--vm-memory 100 exited $rc, wanted 2"
+out="$(start --isolation microvm --vm-memory 10000000 --label bad-capacity)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'lower --vm-memory or --n' || fail "VMs larger than this host were not refused: $out"
+for flag in --no-write-guard --no-seal-herdr --key-from-env "--inputs-enforce on"; do
+  # shellcheck disable=SC2086
+  out="$(start --isolation microvm $flag --label bad-hostflag)"; rc=$?
+  [[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'none of them means anything' || fail "$flag was accepted under microvm: $out"
+done
+out="$(start --isolation microvm --vm-disk 100 --label bad-disk)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'vm-disk is MiB' || fail "--vm-disk 100 was not refused: $out"
 [[ ! -f "$TMP/runs/registry.json" ]] || [[ -z "$(jq -r '.runs[] | select(.label | startswith("bad-")) | .id' "$TMP/runs/registry.json")" ]] \
   || fail "a refused kickoff left a run in the registry"
-pass "an isolation that does not exist, a probe with no guard to probe, and a VM with no CPU or too little memory are refused before anything is written"
+pass "an isolation that does not exist, a probe with no guard to probe, a host guard's flag, and a VM with no CPU, too little memory or more than the host has are refused before anything is written"
+
+# --no-read: what every VM mounts cannot be hidden, and is not claimed hidden.
+out="$(start --isolation microvm --no-read "$ROOT/scripts" --label bad-noread)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'cannot hide what the VMs are given' || fail "--no-read of a mounted path was accepted under microvm: $out"
+mkdir -p "$TMP/private-notes"
+out="$(start --isolation microvm --no-read "$TMP/private-notes" --label vm-noread)"; rc=$?
+[[ $rc -eq 0 ]] || fail "--no-read of a path no VM mounts was refused: $out"
+[[ "$(reg vm-noread '.no_read_applied')" == true ]] || fail "--no-read of an unmounted path was not recorded as applied"
+pass "--no-read of a path the VMs mount is refused; of one they do not, recorded as applied"
 
 # No collector: a VM cannot fall back to appending traces/ itself, so the run
 # would be all spill. A node that refuses to run the collector stands in for
@@ -116,6 +134,7 @@ sbx="$(sandbox_of "$out")"
 [[ ! -e "$sbx/.inputs-pristine" ]] || fail "a VM run made a pristine clone it will never heal from"
 [[ "$(jq -r '.guard' "$sbx/inputs.json")" == "microvm" ]] || fail "inputs.json does not say the VM holds the evidence"
 [[ "$(jq -r '.held' "$sbx/inputs.json")" == "bind" ]] || fail "inputs.json does not say the evidence was used in place"
+[[ "$(reg vm-ev '.isolation.disk_mib')" == "8192" ]] || fail "the VM disk size is not recorded"
 [[ "$(jq -r '.files | length' "$sbx/inputs.json")" == "2" ]] || fail "the manifest does not list both files"
 printf '%s\n' "$out" | grep -q 'kernel guard: microvm' || fail "the kickoff does not say who holds the evidence: $out"
 pass "the evidence is used in place, with no copy and no pristine clone, and the manifest says the VM holds it"
@@ -285,7 +304,15 @@ out="$(start --isolation microvm --sandbox "$reuse" --label vm-reuse2)"; rc=$?
 for gone in vm/old.json custody.json tools/old_tool .pi-sessions/old tool-output/old; do
   [[ ! -e "$reuse/$gone" ]] || fail "a reused sandbox kept the previous run's $gone"
 done
-pass "a reused sandbox loses the previous run's VM records, custody, tools, sessions and outputs"
+# A sandbox a running run still uses is not cleared under it.
+reuse_id="$(reg vm-reuse2 '.id')"
+jq --arg id "$reuse_id" '.runs = [.runs[] | if .id == $id then .state = "running" else . end]' "$TMP/runs/registry.json" > "$TMP/reg.tmp" && mv "$TMP/reg.tmp" "$TMP/runs/registry.json"
+touch "$reuse/work/keep-me"
+out="$(start --isolation microvm --sandbox "$reuse" --label vm-reuse3)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q "run $reuse_id is still running in" || fail "a sandbox a running run uses was taken: $out"
+[[ -e "$reuse/work/keep-me" ]] || fail "the running run's work was cleared"
+jq --arg id "$reuse_id" '.runs = [.runs[] | if .id == $id then .state = "stopped" else . end]' "$TMP/runs/registry.json" > "$TMP/reg.tmp" && mv "$TMP/reg.tmp" "$TMP/runs/registry.json"
+pass "a reused sandbox loses the previous run's VM records, custody, tools, sessions and outputs, and one a running run uses is refused"
 out="$(start --isolation microvm --inputs "$TMP/ev" --catalog --label vm-prepared)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a prepared VM run with --catalog exited $rc: $out"
 sbx="$(sandbox_of "$out")"

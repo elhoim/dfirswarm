@@ -1,6 +1,6 @@
 /** Wire types. Mirrors scripts/ui/model.ts + extensions/*.ts; keep in sync by hand. */
 
-export type SwarmPhase = "running" | "done" | "stopped" | "prepared" | "unknown";
+export type SwarmPhase = "running" | "done" | "stopped" | "prepared" | "failed" | "unknown";
 export type AgentMarker = "done" | "dead" | "stalled" | "active";
 export type PostTag = "intro" | "ask" | "claim" | "result" | "hold" | "veto" | "stop";
 
@@ -294,6 +294,25 @@ export type Dossier = {
 
 export type SentinelInfo = { by?: string; output?: string; reason?: string; at?: string };
 
+/** One agent's VM as the console shows it: its record, and the hub's live word on it. */
+export type VmHealth = {
+  agent: string;
+  name: string | null;
+  image: { ref: string | null; digest: string | null; expected: string | null };
+  cpus: number | null;
+  memory_mib: number | null;
+  /** What the kickoff's probe found in the VM. */
+  probe: { hub: boolean; floor: string | null; inputs: string | null; clock_skew_s: number | null; fuse: boolean | null; loop: boolean | null; missing: string[] };
+  fit_warnings: string[];
+  /** The hub's live state: working, idle, done, gone; null when no hub answers for this run. */
+  live: { state: string; connected: boolean; since: string | null } | null;
+  stopped_at: string | null;
+  snapshot: "kept" | "not kept" | "failed" | null;
+  installed_outside: string[];
+  runtime: string | null;
+  runtime_changed: string | null;
+};
+
 export type SwarmView = {
   summary: SwarmRow;
   /** The rendered SWARM.md: the goal document plus the harness frame. */
@@ -325,6 +344,8 @@ export type SwarmView = {
   ledger: LedgerView;
   /** What each agent decided to call itself; nothing here was assigned. */
   names?: Array<{ id: string; name: string; doing?: string; at: string }>;
+  /** A microVM run's VMs; empty or absent for a host run. */
+  vms?: VmHealth[];
 };
 
 /** One `record` call, as the harness stored it in ledger/entries.jsonl. */

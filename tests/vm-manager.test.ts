@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import {
   bypassCovers,
+  capacityVerdict,
   egressRules,
   gatewayPorts,
   imageFit,
@@ -335,4 +336,15 @@ test("a host msb does not run on is refused by name, before msb is asked", () =>
   assert.match(vmPlatformProblem("linux", "x64", undefined) ?? "", /not glibc \(musl\?\)/);
   assert.match(vmPlatformProblem("win32", "x64", undefined) ?? "", /this host is win32/);
   assert.match(vmPlatformProblem("linux", "ppc64", "2.36") ?? "", /x64 or arm64/);
+});
+
+test("N VMs of a size are refused past 85% of the host's memory or four times its cores, and warned about past 60% or its cores", () => {
+  const host = { mem_mib: 16384, cpus: 8 };
+  assert.deepEqual(capacityVerdict(4, 2, 2048, host), { blockers: [], warnings: [] });
+  const warm = capacityVerdict(5, 2, 2048, host);
+  assert.equal(warm.blockers.length, 0);
+  assert.match(warm.warnings.join("\n"), /10240 of this host's 16384 MiB/);
+  assert.match(warm.warnings.join("\n"), /10 vCPUs on 8 cores/);
+  assert.match(capacityVerdict(30, 1, 1024 * 1024, host).blockers.join("\n"), /need 31457280 MiB, and this host has 16384 MiB/);
+  assert.match(capacityVerdict(20, 2, 512, host).blockers.join("\n"), /40 vCPUs on 8 cores/);
 });

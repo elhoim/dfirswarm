@@ -14,6 +14,7 @@ import type { InputsView, SwarmView } from "@/lib/types";
 function guardWord(guard: string): string {
   if (guard === "seatbelt") return "kernel (macOS sandbox-exec)";
   if (guard === "mountns") return "kernel (Linux mount namespace)";
+  if (guard === "microvm") return "a read-only mount in each microVM";
   return "detect + heal";
 }
 
@@ -26,6 +27,7 @@ function enforcedWord(enforced: string): { text: string; tone: "kelp" | "saffron
 export function inputsGuardSummary(inputs: InputsView): { text: string; tone: "kelp" | "saffron" | "brick" } {
   const seen = Object.values(inputs.enforced);
   if (seen.length === 0) return { text: inputs.guard === "none" ? "detect + heal" : `${guardWord(inputs.guard)} planned`, tone: inputs.guard === "none" ? "saffron" : "kelp" };
+  if (inputs.guard === "microvm" && seen.every((v) => v === "kernel")) return { text: "read-only in every agent's microVM", tone: "kelp" };
   if (seen.every((v) => v === "kernel")) return { text: "kernel in every pane", tone: "kelp" };
   if (seen.some((v) => v === "kernel")) return { text: "kernel in some panes", tone: "saffron" };
   return { text: "detect + heal only", tone: "saffron" };

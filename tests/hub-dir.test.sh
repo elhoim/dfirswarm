@@ -65,4 +65,27 @@ hub_pid_ours "$B" "$pid_a" && fail "run b's stop would kill run a's hub, named i
 hub_pid_ours "$A" "$$" && fail "a process that is not a hub was taken for one"
 hub_pid_ours "$A" "" && fail "an empty hub.pid was taken for a hub"
 pass "hub.pid names this sandbox's hub or nothing: another run's hub and a stranger are refused"
+# watch.sh lists a VM run's agents from the hub, and only from the hub made
+# for that sandbox.
+printf '{"agents":{"a0":{"state":"working","connected":true,"since":"t1"},"a1":{"state":"idle","connected":false,"since":"t2"}}}\n' > "$hub_a/status.json"
+printf '%s\n' "$hub_a" > "$A/hub.dir"
+out="$(SWARM_SANDBOX="$A" bash "$ROOT/scripts/watch.sh" --once 2>&1)"
+printf '%s\n' "$out" | grep -q '^VM AGENTS' || fail "watch.sh shows no VM agents: $out"
+printf '%s\n' "$out" | grep -q $'^a1\tidle\tnot linked' || fail "watch.sh does not show an agent's state and link: $out"
+printf '%s\n' "$hub_a" > "$B/hub.dir"
+SWARM_SANDBOX="$B" bash "$ROOT/scripts/watch.sh" --once 2>&1 | grep -q '^VM AGENTS' && fail "watch.sh read another run's hub for sandbox b"
+pass "watch.sh lists a VM run's agents from its own hub and no other"
+
+# Every pane of a VM run gets the quiet shell and nothing of the host run's
+# environment; a host pane gets its identity, token and provider settings.
+eval "$(fn swarm.sh pane_env_for)"
+type pane_env_for >/dev/null 2>&1 || fail "pane_env_for was not found in swarm.sh"
+trace_token_for() { echo "tok-$1"; }
+swarm_id=s1 hard=0 provider_env=(--env HTTPS_PROXY=http://127.0.0.1:3128)
+VM_PANE_ZDOTDIR="" pane_env_for a0
+host_env="${PANE_ENV_ARGS[*]}"
+[[ "$host_env" == *"SWARM_TRACE_TOKEN=tok-a0"* && "$host_env" == *"HTTPS_PROXY="* && "$host_env" == *"AGENT_ID=a0"* ]] || fail "a host pane lost its environment: $host_env"
+VM_PANE_ZDOTDIR=/h/zdot pane_env_for a1
+[[ "${PANE_ENV_ARGS[*]}" == "--env ZDOTDIR=/h/zdot" ]] || fail "a VM run's pane got more than the quiet shell: ${PANE_ENV_ARGS[*]}"
+pass "every pane of a VM run gets the quiet shell and none of the host run's tokens or keys"
 echo "hub-dir: all checks passed"

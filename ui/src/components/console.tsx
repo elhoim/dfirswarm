@@ -155,13 +155,22 @@ export function PhaseHead({ title, summary }: { title: string; summary?: ReactNo
   );
 }
 
-export function StatusDot({ phase }: { phase: "running" | "done" | "stopped" | "prepared" | "unknown" }) {
+export function StatusDot({ phase }: { phase: "running" | "done" | "stopped" | "prepared" | "failed" | "unknown" }) {
   if (phase === "running") return <span className="ml-[7px] box-border block size-3.5 rounded-full border-[3px] border-kelp" aria-label="running" />;
   if (phase === "done") {
     return (
       <span className="ml-[7px] grid size-3.5 place-items-center rounded-full bg-moss" aria-label="done">
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
           <path d="M5 13l4 4L19 7" />
+        </svg>
+      </span>
+    );
+  }
+  if (phase === "failed") {
+    return (
+      <span className="ml-[7px] grid size-3.5 place-items-center rounded-full bg-brick" aria-label="failed">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.5" strokeLinecap="round" aria-hidden>
+          <path d="M7 7l10 10M17 7L7 17" />
         </svg>
       </span>
     );

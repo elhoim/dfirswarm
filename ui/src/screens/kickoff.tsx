@@ -184,6 +184,7 @@ type FormState = {
   vm_image: string;
   vm_cpus: string;
   vm_memory: string;
+  vm_disk: string;
   /** Keep each VM's disk at stop. */
   vm_snapshot: boolean;
 };
@@ -386,6 +387,7 @@ export function KickoffScreen() {
     vm_image: "",
     vm_cpus: "",
     vm_memory: "",
+    vm_disk: "",
     vm_snapshot: true,
   });
 
@@ -544,6 +546,7 @@ export function KickoffScreen() {
         image: form.microvm && form.vm_image.trim() ? form.vm_image.trim() : undefined,
         vm_cpus: form.microvm && form.vm_cpus.trim() ? Number(form.vm_cpus.trim()) : undefined,
         vm_memory: form.microvm && form.vm_memory.trim() ? Number(form.vm_memory.trim()) : undefined,
+        vm_disk: form.microvm && form.vm_disk.trim() ? Number(form.vm_disk.trim()) : undefined,
         vm_snapshot: form.microvm && !form.vm_snapshot ? false : undefined,
       });
       setJobId(accepted.id);
@@ -555,7 +558,7 @@ export function KickoffScreen() {
     }
   }
 
-  const command = `swarm.sh start ${teamMode ? `--models "${teamSpec(form.team) || "?"}"` : `--model ${effectiveModel || "?"}`}${capNum > 0 ? ` --cap-usd ${form.cap_usd}` : allLocal ? "" : " --cap-usd ?"}${capTokensNum > 0 ? ` --cap-tokens ${capTokensNum}` : allLocal ? " --cap-tokens ?" : ""} --n ${effectiveN}${form.wall_clock ? ` --wall-clock ${form.wall_clock}` : ""}${form.net === "open" ? " --no-netguard" : form.net === "local" ? " --local-only" : form.net === "hosts" ? hostList.map((h) => ` --allow-host ${h}`).join("") : ""}${form.playwright ? " --playwright" : ""}${form.hard_kill ? " --hard-kill" : ""}${form.tool_forging ? " --allow-tool-forging" : ""}${form.self_compact ? "" : " --no-self-compact"}${compactSpecs[0] ? ` --compact-notice-at ${compactSpecs[0]}` : ""}${compactSpecs[1] ? ` --compact-warn-at ${compactSpecs[1]}` : ""}${compactSpecs[2] ? ` --compact-at ${compactSpecs[2]}` : ""}${form.self_compact && form.compact_model.trim() ? ` --compact-model ${form.compact_model.trim()}` : ""}${form.inbox_page_chars.trim() ? ` --inbox-page-chars ${form.inbox_page_chars.trim()}` : ""}${form.inputs && form.inputs_attach === "image" ? ` --inputs-image ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}/${form.inputs_image || "<image>"}` : form.inputs ? ` --inputs ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}${form.inputs_attach === "bind" ? " --inputs-bind" : ""}${form.inputs_enforce !== "auto" ? ` --inputs-enforce ${form.inputs_enforce}` : ""}${form.inputs_attach === "copy" && form.inputs_max_mb ? ` --inputs-max-mb ${form.inputs_max_mb}` : ""}` : ""}${form.no_read.map((id) => ` --no-read <runs>/${id}`).join("")}${form.tools_from ? ` --tools-from <runs>/${form.tools_from}/tools` : ""}${form.catalog ? " --catalog" : ""}${form.toolbox ? ` --toolbox ${form.toolbox}` : ""}${form.toolbox && form.toolbox !== "off" && form.toolbox_required ? " --toolbox-required" : ""}${form.quarantine ? " --quarantine" : ""}${form.allow_install ? " --allow-install" : ""}${form.allow_install && form.no_pypi ? " --no-pypi" : ""}${form.cap_per_agent ? ` --cap-per-agent ${form.cap_per_agent}` : ""}${form.case_id ? ` --case-id ${form.case_id}` : ""}${form.examiner ? ` --examiner "${form.examiner}"` : ""}${form.packs.length ? ` --pack ${form.packs.join(",")}` : ""}${form.microvm ? ` --isolation microvm${form.vm_image.trim() ? ` --image ${form.vm_image.trim()}` : ""}${form.vm_cpus.trim() ? ` --vm-cpus ${form.vm_cpus.trim()}` : ""}${form.vm_memory.trim() ? ` --vm-memory ${form.vm_memory.trim()}` : ""}${form.vm_snapshot ? "" : " --no-vm-snapshot"}` : ""}${form.no_start ? " --no-start" : ""}`;
+  const command = `swarm.sh start ${teamMode ? `--models "${teamSpec(form.team) || "?"}"` : `--model ${effectiveModel || "?"}`}${capNum > 0 ? ` --cap-usd ${form.cap_usd}` : allLocal ? "" : " --cap-usd ?"}${capTokensNum > 0 ? ` --cap-tokens ${capTokensNum}` : allLocal ? " --cap-tokens ?" : ""} --n ${effectiveN}${form.wall_clock ? ` --wall-clock ${form.wall_clock}` : ""}${form.net === "open" ? " --no-netguard" : form.net === "local" ? " --local-only" : form.net === "hosts" ? hostList.map((h) => ` --allow-host ${h}`).join("") : ""}${form.playwright ? " --playwright" : ""}${form.hard_kill ? " --hard-kill" : ""}${form.tool_forging ? " --allow-tool-forging" : ""}${form.self_compact ? "" : " --no-self-compact"}${compactSpecs[0] ? ` --compact-notice-at ${compactSpecs[0]}` : ""}${compactSpecs[1] ? ` --compact-warn-at ${compactSpecs[1]}` : ""}${compactSpecs[2] ? ` --compact-at ${compactSpecs[2]}` : ""}${form.self_compact && form.compact_model.trim() ? ` --compact-model ${form.compact_model.trim()}` : ""}${form.inbox_page_chars.trim() ? ` --inbox-page-chars ${form.inbox_page_chars.trim()}` : ""}${form.inputs && form.inputs_attach === "image" ? ` --inputs-image ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}/${form.inputs_image || "<image>"}` : form.inputs ? ` --inputs ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}${form.inputs_attach === "bind" ? " --inputs-bind" : ""}${form.inputs_enforce !== "auto" ? ` --inputs-enforce ${form.inputs_enforce}` : ""}${form.inputs_attach === "copy" && form.inputs_max_mb ? ` --inputs-max-mb ${form.inputs_max_mb}` : ""}` : ""}${form.no_read.map((id) => ` --no-read <runs>/${id}`).join("")}${form.tools_from ? ` --tools-from <runs>/${form.tools_from}/tools` : ""}${form.catalog ? " --catalog" : ""}${form.toolbox ? ` --toolbox ${form.toolbox}` : ""}${form.toolbox && form.toolbox !== "off" && form.toolbox_required ? " --toolbox-required" : ""}${form.quarantine ? " --quarantine" : ""}${form.allow_install ? " --allow-install" : ""}${form.allow_install && form.no_pypi ? " --no-pypi" : ""}${form.cap_per_agent ? ` --cap-per-agent ${form.cap_per_agent}` : ""}${form.case_id ? ` --case-id ${form.case_id}` : ""}${form.examiner ? ` --examiner "${form.examiner}"` : ""}${form.packs.length ? ` --pack ${form.packs.join(",")}` : ""}${form.microvm ? ` --isolation microvm${form.vm_image.trim() ? ` --image ${form.vm_image.trim()}` : ""}${form.vm_cpus.trim() ? ` --vm-cpus ${form.vm_cpus.trim()}` : ""}${form.vm_memory.trim() ? ` --vm-memory ${form.vm_memory.trim()}` : ""}${form.vm_disk.trim() ? ` --vm-disk ${form.vm_disk.trim()}` : ""}${form.vm_snapshot ? "" : " --no-vm-snapshot"}` : ""}${form.no_start ? " --no-start" : ""}`;
 
   return (
     <form onSubmit={submit} className="mx-auto grid w-full max-w-[1680px] gap-8 px-4 py-7 sm:px-10 lg:grid-cols-[minmax(0,1fr)_500px]">
@@ -955,6 +958,10 @@ export function KickoffScreen() {
                 <label className="flex flex-col gap-1">
                   <span className="label-caps">Memory per agent (MiB)</span>
                   <Input value={form.vm_memory} onChange={(e) => setForm({ ...form, vm_memory: e.target.value })} placeholder="2048" inputMode="numeric" aria-label="VM memory" />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="label-caps">Disk per agent (MiB)</span>
+                  <Input value={form.vm_disk} onChange={(e) => setForm({ ...form, vm_disk: e.target.value })} placeholder="8192" inputMode="numeric" aria-label="VM disk" />
                 </label>
                 <label className="flex items-center justify-between gap-2 text-[13px]">
                   <span>Keep each disk at stop</span>
