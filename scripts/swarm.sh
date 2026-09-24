@@ -850,7 +850,7 @@ detach_inputs_image() {
 }
 
 install_inputs() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4"
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" quarantine="${5:-0}"
   mkdir -p "$sandbox/inputs" "$sandbox/.inputs-pristine"
   # A clone is free and instant on APFS; elsewhere cp copies. Symlinks are
   # dereferenced either way.
@@ -872,7 +872,7 @@ install_inputs() {
   # modes here, once, before anything is read-only.
   find "$sandbox/inputs" "$sandbox/.inputs-pristine" -type f -exec chmod a-x {} + 2>/dev/null || true
   chmod -R a-w "$sandbox/inputs" "$sandbox/.inputs-pristine"
-  write_inputs_manifest "$sandbox" "$src" "$enforce" "$guard" copy
+  write_inputs_manifest "$sandbox" "$src" "$enforce" "$guard" copy "$quarantine"
 }
 
 # The one walk over inputs/ that every way of holding the evidence writes
@@ -882,11 +882,15 @@ install_inputs() {
 # are the operator's and the manifest describes how they are held rather
 # than dictating it; `image` skips symlinks, which an attached volume may
 # carry and a copy dereferenced.
+#
+# `quarantine` is the kickoff's --quarantine (on by --catalog too), recorded
+# here because a goal's checks run in the sandbox and cannot read the
+# registry: a case that must not extract without it checks this key.
 write_inputs_manifest() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4" held="$5"
-  python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" <<'PY'
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" held="$5" quarantine="${6:-0}"
+  python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" "$quarantine" <<'PY'
 import hashlib, json, os, sys, time
-sandbox, src, enforce, guard, held = sys.argv[1:]
+sandbox, src, enforce, guard, held, quarantine = sys.argv[1:]
 root = os.path.join(sandbox, "inputs")
 files, total = [], 0
 for dirpath, dirnames, filenames in os.walk(root):
@@ -921,6 +925,7 @@ manifest = {
     "bytes": total,
     "enforce": enforce,
     "guard": guard,
+    "quarantine": quarantine == "1",
 }
 if held == "bind":
     manifest["bound"] = True
@@ -946,7 +951,7 @@ PY
 # guarded. A Linux mount namespace does this best; seatbelt's deny on the
 # resolved path does it too.
 bind_inputs() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4"
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" quarantine="${5:-0}"
   if [[ "$guard" == "none" ]]; then
     echo "BLOCKER: --inputs-bind needs a kernel guard (seatbelt, a Linux namespace, or Landlock); this host has none, so the source would be writable by the panes. Use --inputs to copy." >&2
     exit 2
@@ -955,15 +960,15 @@ bind_inputs() {
   real="$(cd "$src" && pwd -P)"
   rm -rf "${sandbox:?}/inputs"
   ln -s "$real" "$sandbox/inputs"
-  write_inputs_manifest "$sandbox" "$real" "$enforce" "$guard" bind
+  write_inputs_manifest "$sandbox" "$real" "$enforce" "$guard" bind "$quarantine"
 }
 
 # The manifest for an attached image. Same shape as install_inputs writes, so
 # every reader downstream is unchanged; what is missing is the pristine clone,
 # because there is nothing to heal from and nothing that can change.
 manifest_attached_inputs() {
-  local sandbox="$1" src="$2"
-  write_inputs_manifest "$sandbox" "$src" on image image
+  local sandbox="$1" src="$2" quarantine="${3:-0}"
+  write_inputs_manifest "$sandbox" "$src" on image image "$quarantine"
 }
 
 inputs_record() {
@@ -2292,13 +2297,13 @@ STRIP
   rm -rf "${sandbox:?}/catalog" "${sandbox:?}/ledger" "$sandbox/toolbox.json"
   if [[ -n "$inputs_dir" ]]; then
     if [[ "$inputs_bind" -eq 1 ]]; then
-      bind_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard"
+      bind_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$quarantine"
     else
-      install_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard"
+      install_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$quarantine"
     fi
   elif [[ -n "$inputs_image" ]]; then
     attach_inputs_image "$sandbox" "$inputs_image" >/dev/null
-    manifest_attached_inputs "$sandbox" "$inputs_image"
+    manifest_attached_inputs "$sandbox" "$inputs_image" "$quarantine"
   fi
   if [[ "$toolbox" != "off" ]]; then
     local toolbox_args=()
