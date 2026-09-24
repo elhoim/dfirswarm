@@ -31,7 +31,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { basename, dirname, join, normalize, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -42,7 +42,6 @@ import { fileURLToPath } from "node:url";
  */
 export const DEFAULT_CLAIM_SECONDS = 120;
 export const MAX_CLAIM_SECONDS = 600;
-export const CLAIM_TTL_MS = DEFAULT_CLAIM_SECONDS * 1000;
 export const TABLE_LOCK_WAIT_MS = 10_000;
 export const TABLE_LOCK_STALE_MS = 15_000;
 export const DEFAULT_SWARM_ID = "hello-n2";
@@ -1124,14 +1123,25 @@ async function listPostFiles(sandboxRoot: string, thread: string): Promise<strin
   }
 }
 
-async function nextPostId(sandboxRoot: string, thread: string): Promise<number> {
-  const files = await listPostFiles(sandboxRoot, thread);
+/** Highest post id in a thread, from the 6-digit filename prefixes; 0 when empty. */
+async function maxPostId(sandboxRoot: string, thread: string): Promise<number> {
+  let names: string[];
+  try {
+    names = await readdir(join(sandboxRoot, "threads", thread));
+  } catch {
+    return 0;
+  }
   let max = 0;
-  for (const file of files) {
-    const id = Number.parseInt(file.split(sep).pop()?.slice(0, 6) ?? "0", 10);
+  for (const name of names) {
+    if (!/^\d{6}-.+\.md$/.test(name)) continue;
+    const id = Number.parseInt(name.slice(0, 6), 10);
     if (id > max) max = id;
   }
-  return max + 1;
+  return max;
+}
+
+async function nextPostId(sandboxRoot: string, thread: string): Promise<number> {
+  return (await maxPostId(sandboxRoot, thread)) + 1;
 }
 
 /**
@@ -1575,6 +1585,10 @@ export async function readInbox(
   for (const thread of threads) {
     const seen = cursors[thread] ?? 0;
     for (const file of await listPostFiles(ctx.sandboxRoot, thread)) {
+      // Already seen by its filename id: skip the read. A 000000 prefix falls
+      // back to the front-matter id in readPost, so it is still read.
+      const fileId = Number.parseInt(basename(file).slice(0, 6), 10);
+      if (fileId > 0 && fileId <= seen) continue;
       const record = await readPost(file);
       if (record.id > seen) unread.push(record);
     }
@@ -1990,11 +2004,16 @@ export async function heldBy(ctx: SwarmContext, rawPath: string): Promise<LockRe
 /**
  * The peer whose own directory `pathKey` is in, when that is not the
  * caller's: a claim there, and so a write, a restore or a publish there, is
- * refused. The harness (`system`) is not refused.
+ * refused — a lease a peer took would also lock the owner out of its own
+ * directory, whose writes need no claim. Someone outside the team (the
+ * operator restoring a revision from the console, the harness) is not a
+ * peer and is not refused, and a team that cannot be read refuses nothing.
  */
 async function peerHoleOf(ctx: SwarmContext, pathKey: string): Promise<string | null> {
   if (ctx.agentId === SYSTEM_AGENT) return null;
-  const owner = seatHoleOwner(pathKey, await teamIds(ctx.sandboxRoot));
+  const ids = await teamIds(ctx.sandboxRoot);
+  if (!ids.some((id) => id.toLowerCase() === ctx.agentId.toLowerCase())) return null;
+  const owner = seatHoleOwner(pathKey, ids);
   return owner && owner.toLowerCase() !== ctx.agentId.toLowerCase() ? owner : null;
 }
 
@@ -2161,10 +2180,6 @@ Collective finished. Presence of this file is the clock. Call done and stop.
 
 export function toolText(payload: unknown): string {
   return `${JSON.stringify(payload, null, 2)}\n`;
-}
-
-export function normalizeRel(pathValue: string): string {
-  return normalize(pathValue).split("\\").join("/");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -3471,11 +3486,7 @@ export async function latestPostIds(
   threads: readonly string[],
 ): Promise<Record<string, number>> {
   const out: Record<string, number> = Object.create(null);
-  for (const thread of threads) {
-    const files = await listPostFiles(sandboxRoot, thread);
-    const last = files.at(-1);
-    out[thread] = last ? Number.parseInt(basename(last).slice(0, 6), 10) || 0 : 0;
-  }
+  for (const thread of threads) out[thread] = await maxPostId(sandboxRoot, thread);
   return out;
 }
 
@@ -3751,7 +3762,11 @@ export function vmSeatScope(agentId: string | undefined, env: NodeJS.ProcessEnv 
   return [`work/${agentId}/`, `work/extracted/${agentId}/`, `work/quarantine/${agentId}/`];
 }
 
-export async function watchedPathHashes(sandboxRoot: string, agentId?: string): Promise<WatchSnapshot> {
+export async function watchedPathHashes(
+  sandboxRoot: string,
+  agentId?: string,
+  opts: { appendOnly?: boolean } = {},
+): Promise<WatchSnapshot> {
   const scope = vmSeatScope(agentId);
   if (scope) {
     const hashes = new Map<string, string>();
@@ -3777,7 +3792,9 @@ export async function watchedPathHashes(sandboxRoot: string, agentId?: string): 
   return {
     hashes,
     caps: capFingerprint(await readBudget(sandboxRoot).catch(() => null)),
-    appendOnly: await appendOnlyMarks(sandboxRoot),
+    // Only the before-snapshot's marks are read: the after side checks the
+    // prefix against them directly, so it skips the two full-file hashes.
+    appendOnly: opts.appendOnly === false ? new Map() : await appendOnlyMarks(sandboxRoot),
     truncated: work.truncated,
   };
 }
@@ -3837,7 +3854,7 @@ export async function diffWatchedPaths(
   writer: string,
   lookups: WatchLookups = { listClaims, listFileHistory },
 ): Promise<BashWriteReport[]> {
-  const after = await watchedPathHashes(sandboxRoot, writer);
+  const after = await watchedPathHashes(sandboxRoot, writer, { appendOnly: false });
   const claims = new Map((await lookups.listClaims(sandboxRoot)).map((c) => [c.path, c]));
   const out: BashWriteReport[] = [];
 
@@ -3959,6 +3976,13 @@ export function toolOutputRel(agentId: string | undefined, tool: string, stream:
   return `${TOOL_OUTPUT_REL}/${who}/${stamp}-${what}-${salt}.${stream}.log`;
 }
 
+/** How many `\n` bytes a buffer holds. */
+function countNewlines(buf: Buffer): number {
+  let n = 0;
+  for (let at = buf.indexOf(10); at !== -1; at = buf.indexOf(10, at + 1)) n += 1;
+  return n;
+}
+
 /**
  * Keep a text whole under tool-output/ and describe it. For a result that
  * already exists in memory (Pi's own bash spill, a page's text); a forged
@@ -3966,8 +3990,7 @@ export function toolOutputRel(agentId: string | undefined, tool: string, stream:
  */
 export async function keepToolOutput(sandboxRoot: string, rel: string, data: Buffer | string): Promise<FullOutputRef> {
   const buffer = typeof data === "string" ? Buffer.from(data, "utf8") : data;
-  let lines = 0;
-  for (let at = buffer.indexOf(10); at !== -1; at = buffer.indexOf(10, at + 1)) lines += 1;
+  const lines = countNewlines(buffer);
   const ref: FullOutputRef = { path: rel, bytes: buffer.length, lines, sha256: createHash("sha256").update(buffer).digest("hex") };
   try {
     await mkdir(dirname(join(sandboxRoot, rel)), { recursive: true });
@@ -3995,7 +4018,7 @@ export async function keepToolOutputFromFile(sandboxRoot: string, rel: string, s
       const buffer = chunk as Buffer;
       hash.update(buffer);
       bytes += buffer.length;
-      for (let at = buffer.indexOf(10); at !== -1; at = buffer.indexOf(10, at + 1)) lines += 1;
+      lines += countNewlines(buffer);
       await out.write(buffer);
     }
   } finally {
@@ -4087,10 +4110,6 @@ export type ForgeResult =
   | { ok: true; manifest: ForgedToolManifest; created: boolean }
   | { ok: false; reason: string };
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /** What make_tool refuses before anything touches disk, with the reason spelled out. */
 /**
  * Why a name is taken, in one sentence, for the names an agent is most likely
@@ -4123,7 +4142,7 @@ const RESERVED_NAME_REASON: Record<string, string> = {
 };
 
 export function validateToolSpec(spec: unknown): { ok: true; spec: ForgeToolSpec } | { ok: false; reason: string } {
-  if (!isPlainObject(spec)) return { ok: false, reason: "spec must be an object" };
+  if (!isRecord(spec)) return { ok: false, reason: "spec must be an object" };
   const name = typeof spec.name === "string" ? spec.name.trim() : "";
   if (!TOOL_NAME_RE.test(name)) return { ok: false, reason: `name must match ${TOOL_NAME_RE} (got "${name}")` };
   if (TOOL_RESERVED_NAMES.has(name)) {
@@ -4147,12 +4166,12 @@ export function validateToolSpec(spec: unknown): { ok: true; spec: ForgeToolSpec
   if (Buffer.byteLength(script, "utf8") > TOOL_SCRIPT_MAX_BYTES) return { ok: false, reason: `script is over ${TOOL_SCRIPT_MAX_BYTES} bytes` };
   const params: Record<string, ForgedParam> = {};
   if (spec.params !== undefined) {
-    if (!isPlainObject(spec.params)) return { ok: false, reason: "params must be an object of {name: {type, description, required, enum}}" };
+    if (!isRecord(spec.params)) return { ok: false, reason: "params must be an object of {name: {type, description, required, enum}}" };
     const entries = Object.entries(spec.params);
     if (entries.length > TOOL_MAX_PARAMS) return { ok: false, reason: `at most ${TOOL_MAX_PARAMS} params` };
     for (const [key, raw] of entries) {
       if (!TOOL_NAME_RE.test(key)) return { ok: false, reason: `param "${key}" must match ${TOOL_NAME_RE}` };
-      if (!isPlainObject(raw)) return { ok: false, reason: `param "${key}" must be an object` };
+      if (!isRecord(raw)) return { ok: false, reason: `param "${key}" must be an object` };
       const type = raw.type;
       if (typeof type !== "string" || !(TOOL_PARAM_TYPES as readonly string[]).includes(type)) {
         return { ok: false, reason: `param "${key}": type must be one of ${TOOL_PARAM_TYPES.join(", ")}` };
@@ -4215,7 +4234,7 @@ function parseManifest(raw: string): ForgedToolManifest | null {
     return {
       name: m.name,
       description: m.description,
-      params: isPlainObject(m.params) ? (m.params as Record<string, ForgedParam>) : {},
+      params: isRecord(m.params) ? (m.params as Record<string, ForgedParam>) : {},
       runtime: m.runtime as ToolRuntime,
       entry: m.entry,
       timeout_seconds: Number(m.timeout_seconds) || TOOL_TIMEOUT_DEFAULT_SECONDS,
@@ -4525,7 +4544,7 @@ export class StreamCapture {
   push(chunk: Buffer): void {
     this.hash.update(chunk);
     this.bytes += chunk.length;
-    for (let at = chunk.indexOf(10); at !== -1; at = chunk.indexOf(10, at + 1)) this.lines += 1;
+    this.lines += countNewlines(chunk);
     const room = this.max - this.held;
     if (!this.spilled) {
       if (chunk.length <= room) {
@@ -4579,8 +4598,7 @@ export class StreamCapture {
     // in its first `max` bytes is shown as it is.
     const cut = all.lastIndexOf(10);
     const shown = cut > 0 ? all.subarray(0, cut) : all;
-    let shownLines = 0;
-    for (let at = shown.indexOf(10); at !== -1; at = shown.indexOf(10, at + 1)) shownLines += 1;
+    let shownLines = countNewlines(shown);
     if (cut > 0) shownLines += 1;
     return `${shown.toString("utf8")}\n\n${fullOutputTrailer(shownLines, shown.length, ref)}`;
   }
@@ -5602,4 +5620,16 @@ export function finishLineVerdict(
       `done ends the whole swarm, not your slice. If your slice is finished, post it to the board and take the next one, or wait. ` +
       `If the finish line cannot be met, call done again with abandon: true and say why on the board.`,
   };
+}
+
+/** The first command word of a shell line, past env assignments and `cd x &&`. */
+export function leadingCommand(command: string): string {
+  let text = command.trim();
+  // drop a leading `cd … &&` or `cd … ;`
+  text = text.replace(/^cd\s+[^&;|\n]+(&&|;|\n)\s*/, "");
+  // drop VAR=value prefixes
+  text = text.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)+/, "");
+  const word = text.split(/\s+/)[0] ?? "";
+  const base = word.split("/").pop() ?? word;
+  return /^[A-Za-z0-9_.+-]{1,40}$/.test(base) ? base : "";
 }

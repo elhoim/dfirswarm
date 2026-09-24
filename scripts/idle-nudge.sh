@@ -32,6 +32,8 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/trace.sh
+. "$ROOT/scripts/lib/trace.sh"
 SANDBOX=""
 IDLE_SEC="${SWARM_IDLE_SEC:-180}"
 NEWS_SEC="${SWARM_NEWS_SEC:-45}"
@@ -164,28 +166,7 @@ log_event() { # log_event <agent> <idle> <ok> <count>
   # here directly used to break the chain for the *next* line the collector
   # wrote, which with this watchdog on by default meant a run reporting its
   # own record as edited every three minutes.
-  if ! printf '%s' "$line" | node "$ROOT/scripts/trace-emit.mjs" "$SANDBOX" 2>/dev/null; then
-    # Where the line goes depends on whether there is a chain to protect,
-    # which is a property of the file and not of the collector's liveness: a
-    # socket can exist and still be unreachable.
-    #
-    # An unchained record — no collector ran, and the kickoff and the report
-    # both say so — takes the append, consistent with every other line in it.
-    #
-    # A chained one must not. Appending there puts an unchained line into a
-    # chained record, and the verifier reports the file as "added by
-    # something other than the harness": a corruption alarm the harness
-    # raises against itself. The line is kept in the spill file instead,
-    # which custody reads, so nothing is lost and nothing is falsified.
-    if tail -n 1 "$SANDBOX/traces/events.jsonl" 2>/dev/null | grep -q '"prev":'; then
-      # Not work/: an agent on the host writes there, and a line in a file
-      # an agent can write is that agent's word, not the harness's. traces/
-      # is read-only to every pane and every VM whenever there is a chain.
-      printf '%s\n' "$line" >> "$SANDBOX/traces/system-spill.jsonl"
-    else
-      printf '%s\n' "$line" >> "$SANDBOX/traces/events.jsonl"
-    fi
-  fi
+  trace_emit "$ROOT" "$SANDBOX" "$line"
 }
 
 # The stop from outside the panes, for a host run. Each pane's extension
@@ -224,7 +205,7 @@ host_backstop() {
     ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
     line="$(jq -cn --arg ts "$ts" --arg t "$(if [[ "$what" == stopped ]]; then echo harness_stop; elif [[ "$reason" == cap ]]; then echo cap_steer; else echo wall_steer; fi)" --arg r "$reason" \
       '{ts: $ts, agent: "system", tool: $t, args: {via: "idle-nudge", reason: $r}, result: {ok: true}}')"
-    printf '%s' "$line" | node "$ROOT/scripts/trace-emit.mjs" "$SANDBOX" >/dev/null 2>&1 || printf '%s\n' "$line" >> "$SANDBOX/traces/system-spill.jsonl"
+    trace_emit "$ROOT" "$SANDBOX" "$line"
     echo "idle-nudge: $what the swarm ($reason)" >&2
   done <<< "$said"
 }
