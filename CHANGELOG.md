@@ -608,6 +608,30 @@ not surprised:
 
 ### Fixed
 
+- **A seat's large file froze its link to the hub, and the seat was
+  stopped mid-case** (real CTF runs on macOS and Linux). Recording a file
+  a seat had just extracted sent its bytes as one RPC line; msb's vsock
+  path from guest to host stops moving on a single write of about 256 KiB
+  (measured: ~215 KB crosses, ~262 KB stalls; the network path is not
+  affected), and every later call on that connection, the liveness check
+  among them, waited behind it until `hub_lost_stop`. No line on a seat's
+  link is now larger than one part (32 KiB of payload, 44,716 bytes on the
+  wire): larger requests, answers, trace lines and prompts travel in parts,
+  each acknowledged, checked by size and sha256. A call that times out or
+  a write queue that has not moved in 20 s replaces the link, and RETRIED
+  calls resend with their request id. A VM test publishes 8 MiB while the
+  budget answers within seconds.
+- `catalog_search` (computer-forensics-base 1.2.4) failed every call on an
+  unbound name; a static scan of every pack and library tool now fails on
+  one.
+- An installed pack older than the one the checkout ships ran without a
+  word; the kickoff says so and names the update command. Pack warnings no
+  longer name tools, skills or programs a dependency carries.
+- An unpacked `git archive` knows its commit (`scripts/HARNESS_COMMIT`),
+  and no longer claims "local changes" it cannot see. `start --check`
+  names the isolation, the image and what the model gateway would front.
+  `stop` no longer prints Herdr's JSON.
+
 - **The venv was 642 claims and seven violations, and the panes' temp
   files were more.** With `--allow-install` one agent's pip created
   `work/.toolchain/`; the shell-write watch took every file in it as that

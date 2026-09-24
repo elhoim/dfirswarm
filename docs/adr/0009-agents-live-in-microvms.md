@@ -294,6 +294,15 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
 
 ## Limits that stay
 
+- msb's vsock path from guest to host stops moving on a single write of
+  about 256 KiB, and the connection stays open (measured with msb 0.7.2 on
+  macOS and Linux; the network path carries 4 MB bodies without trouble).
+  The harness therefore never writes a line larger than one part on a
+  seat's link (32 KiB of payload): larger calls, answers, trace lines and
+  prompts go in acknowledged parts, and a link that stalls anyway is
+  replaced. A future msb that fixes the stall does not need any of it, and
+  the limit stays until one is measured to.
+
 - A guest's terminal output reaches the host's terminal through Herdr, so an
   escape sequence an agent prints is interpreted there.
 - msb's supervisor on the host holds every credential of the run in memory;

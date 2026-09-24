@@ -36,6 +36,8 @@ A host guard's flag (`--no-write-guard`, `--no-seal-herdr`,
 a VM, where the VM is the guard. Add `--isolation host` if a host run is what
 you meant, or drop the flag.
 
+**A VM seat stopped with `hub_lost_stop`, while the hub was up.** The seat's liveness check (a budget read through the hub) got no answer for four minutes. A link that stalls is replaced now (a call that times out, or a write queue that has not moved in 20 s), so this should end in a new link, not a stop. If it does not: look on the trace for `hub_call` refusals with `fn:"upload"`, `fn:"download"` or `fn:"reply"`, and in the seat's pane for "nothing written for 20s" or "not answered within". `scripts/swarm.sh status <id>` shows whether the hub answers; the hub's `admin.sock` answers `{"op":"status"}` with each seat's `connected` and `last_seen`.
+
 **`agent_name_taken` from Herdr.**
 Each `start` allocates a fresh `s????` prefix and checks `herdr agent list` for `<prefix>00`, so two concurrent runs never collide. If you see this, a crashed run left agents registered under the same names: `herdr agent list`, then `scripts/swarm.sh stop <id>` (closes its workspaces) or `herdr workspace close <ws>`.
 
