@@ -54,14 +54,21 @@ pass "a lock left by a writer that died does not block the next"
 # --- the host kept awake, for the run and no longer -----------------------------
 if command -v caffeinate >/dev/null 2>&1 || command -v systemd-inhibit >/dev/null 2>&1; then
   mkdir -p "$TMP/sb"
-  out="$(keep_host_awake "$TMP/sb" 1)"
+  out="$(keep_host_awake "$TMP/sb" 1 2>&1)"
   pid="$(cat "$TMP/sb/inhibit.pid" 2>/dev/null)"
-  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || fail "nothing keeps the host awake: $out"
-  PIDS+=("$pid")
-  stop_sandbox_daemons "$TMP/sb"
-  sleep 0.3
-  kill -0 "$pid" 2>/dev/null && fail "the host is still kept awake after stop"
-  [[ ! -f "$TMP/sb/inhibit.pid" ]] || fail "the pid file stayed"
+  if [[ -z "$pid" ]]; then
+    # The system refused the inhibitor (systemd-inhibit with no login
+    # session): said as such, never claimed.
+    printf '%s\n' "$out" | grep -q "could not be kept from sleeping" || fail "an inhibitor that died was not said: $out"
+    printf '%s\n' "$out" | grep -q "kept from sleeping for the run" && fail "a refused inhibitor was claimed: $out"
+  else
+    kill -0 "$pid" 2>/dev/null || fail "nothing keeps the host awake: $out"
+    PIDS+=("$pid")
+    stop_sandbox_daemons "$TMP/sb"
+    sleep 0.3
+    kill -0 "$pid" 2>/dev/null && fail "the host is still kept awake after stop"
+    [[ ! -f "$TMP/sb/inhibit.pid" ]] || fail "the pid file stayed"
+  fi
   # A pid file naming something else is not obeyed.
   sleep 60 & other=$!
   disown "$other" 2>/dev/null || true
@@ -69,7 +76,7 @@ if command -v caffeinate >/dev/null 2>&1 || command -v systemd-inhibit >/dev/nul
   echo "$other" > "$TMP/sb/inhibit.pid"
   stop_sandbox_daemons "$TMP/sb"
   kill -0 "$other" 2>/dev/null || fail "stop killed a process the pid file named that is not the run's"
-  pass "the host is kept awake for a run, let go at stop, and a pid file that names something else is left alone"
+  pass "the host is kept awake for a run (or the refusal is said), let go at stop, and a pid file that names something else is left alone"
 else
   echo "skip - neither caffeinate nor systemd-inhibit on this host"
 fi

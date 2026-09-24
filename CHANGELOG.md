@@ -17,8 +17,9 @@ not surprised:
 - A kickoff that stops after registering puts away what it started and
   records the run as `failed`. The registry is written under a lock. The
   host is asked not to sleep for the run (`caffeinate`, `systemd-inhibit`;
-  neither holds against a closed laptop lid). A sandbox a running run uses
-  is refused.
+  neither holds against a closed laptop lid; one the system refuses, such as
+  systemd-inhibit for a user with no login session, is said as a WARN, not
+  claimed). A sandbox a running run uses is refused.
 - `stop` takes custody (see Added; `--no-custody` skips it,
   `--custody-timeout SEC` bounds it, 14400 by default) and says where it was
   if interrupted. Custody re-reads every evidence file, so a stop on a large

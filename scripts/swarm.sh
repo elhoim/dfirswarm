@@ -646,16 +646,39 @@ freeze_harness() { # <hub dir>
 # budget of time. The host is kept awake for the wall clock and half an hour
 # more (caffeinate on macOS, systemd-inhibit on Linux); stop ends it sooner.
 keep_host_awake() { # <sandbox> <wall minutes>
-  local sandbox="$1" secs=$(( (${2:-60} + 30) * 60 ))
+  local sandbox="$1" secs=$(( (${2:-60} + 30) * 60 )) ierr
+  ierr="$(mktemp "${TMPDIR:-/tmp}/dfs-inhibit.XXXXXX")"
   if command -v caffeinate >/dev/null 2>&1; then
-    detach_exec caffeinate -i -s -t "$secs" >/dev/null 2>&1 </dev/null &
+    detach_exec caffeinate -i -s -t "$secs" >/dev/null 2>"$ierr" </dev/null &
   elif command -v systemd-inhibit >/dev/null 2>&1; then
-    detach_exec systemd-inhibit --what=sleep:idle --who=dfirswarm --why="run $(basename "$sandbox")" --mode=block sleep "$secs" >/dev/null 2>&1 </dev/null &
+    detach_exec systemd-inhibit --what=sleep:idle --who=dfirswarm --why="run $(basename "$sandbox")" --mode=block sleep "$secs" >/dev/null 2>"$ierr" </dev/null &
   else
+    rm -f "$ierr"
     echo "Awake:        nothing on this host keeps it from sleeping; a sleep pauses the agents while the wall clock runs" >&2
     return 0
   fi
-  echo $! > "$sandbox/inhibit.pid"
+  # The pid is the background shell until it has exec'd into the inhibitor
+  # (through setsid or nohup); a stop that reads the pid file before then
+  # would not know the process and leave it running. Wait for the exec.
+  local ipid=$! i
+  for i in $(seq 1 40); do
+    ps -o command= -p "$ipid" 2>/dev/null | grep -q -E '^(caffeinate|systemd-inhibit) ' && break
+    sleep 0.05
+  done
+  # An inhibitor the system refuses exits at once: systemd-inhibit for a user
+  # with no login session gets polkit's "Access denied" (measured for the
+  # swarm user under sudo). The run is not told it is kept awake then.
+  for i in $(seq 1 20); do
+    kill -0 "$ipid" 2>/dev/null || break
+    sleep 0.05
+  done
+  if ! kill -0 "$ipid" 2>/dev/null; then
+    echo "WARN: this host could not be kept from sleeping ($(tr '\n' ' ' < "$ierr" | sed 's/ *$//')); a sleep pauses the agents while the wall clock runs." >&2
+    rm -f "$ierr"
+    return 0
+  fi
+  rm -f "$ierr"
+  echo "$ipid" > "$sandbox/inhibit.pid"
   echo "Awake:        this host is kept from sleeping for the run (pid $(cat "$sandbox/inhibit.pid"))"
   # caffeinate -s holds only on AC power, and nothing held here stops a Mac
   # from sleeping when its lid is closed.
@@ -5257,7 +5280,13 @@ stop_sandbox_daemons() {
     pid="$(cat "$sandbox/inhibit.pid" || true)"
     # Only what the kickoff started for this: a pid file a pane rewrote must
     # not stop a process of the operator's.
-    if [[ -n "$pid" ]] && ps -o command= -p "$pid" 2>/dev/null | grep -q -E '^(caffeinate|systemd-inhibit) '; then
+    # systemd-inhibit names the run in its --why; caffeinate carries nothing
+    # of the run. setsid or nohup is still in front while the exec is under
+    # way.
+    local icmd
+    icmd="$(ps -ww -o command= -p "$pid" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && { printf '%s\n' "$icmd" | grep -q -E '^((setsid|nohup) )?caffeinate ' \
+      || { printf '%s\n' "$icmd" | grep -q -E '^((setsid|nohup) )?systemd-inhibit ' && [[ "$icmd" == *"run $(basename "$sandbox")"* ]]; }; }; then
       kill "$pid" 2>/dev/null || true
     fi
     rm -f "$sandbox/inhibit.pid"
