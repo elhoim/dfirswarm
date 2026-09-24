@@ -401,6 +401,58 @@ test("a secret never enters the guest: the VM holds its placeholder", async (t) 
   }
 });
 
+test("a body with a percent sign reaches a secret's host from the VM's fetch, sent chunked", async (t) => {
+  if (skip) return t.skip(skip);
+  // msb 0.7.2 closed a Content-Length request whose first TLS record held
+  // the credential header and a `%` or `\u` of the body (run se064eb: every
+  // compaction summary of one agent). extensions/vm-egress.ts sends such a
+  // body chunked; this is that, against the real msb and a real host.
+  const base = await mkdtemp(join(tmpdir(), "vmegress-"));
+  cleanups.push(() => rm(base, { recursive: true, force: true }));
+  await writeFile(join(base, "secret"), "dfirswarm-test-not-a-key");
+  const r = await rig("vmt6", ["vmt600"], { pack_secrets: [{ name: "VT_API_KEY", value_file: join(base, "secret"), hosts: ["www.virustotal.com"] }] });
+  const created = await createVms(r.spec);
+  assert.deepEqual(created.failures, []);
+  const script = [
+    `const { installChunkedEgress } = await import(${JSON.stringify(join(ROOT, "extensions", "vm-egress.ts"))});`,
+    `const body = JSON.stringify({ q: "GET /dvwa/?q=%27%20OR%201%3D1 \\u2014 100 %" });`,
+    `const call = async () => { try { const r = await fetch("https://www.virustotal.com/api/v3/urls", { method: "POST", headers: { "content-type": "application/json", "x-apikey": process.env.VT_API_KEY }, body }); await r.text(); return String(r.status); } catch (e) { return "socket:" + (e.cause?.code ?? e.message); } };`,
+    `const plain = await call();`,
+    `const installed = installChunkedEgress();`,
+    `console.log(JSON.stringify({ hosts: process.env.SWARM_SECRET_HOSTS, plain, installed, chunked: await call() }));`,
+  ].join("\n");
+  const out = await inVmAsync(vmName(r.run, "vmt600"), `cat > /tmp/egress.mjs <<'JS'\n${script}\nJS\nnode /tmp/egress.mjs`);
+  const line = out.split("\n").find((l) => l.startsWith("{"));
+  assert.ok(line, `no answer from the guest:\n${out}`);
+  const got = JSON.parse(line) as { hosts: string; plain: string; installed: boolean; chunked: string };
+  assert.equal(got.hosts, "www.virustotal.com", "the VM is told its secret's host");
+  assert.equal(got.installed, true);
+  assert.match(got.chunked, /^\d{3}$/, `the chunked request reached the host: ${line}`);
+  // Not asserted: a fixed msb lets the plain one through too, and then the
+  // wrapper can go.
+  t.diagnostic(`plain Content-Length request: ${got.plain}`);
+});
+
+test("a large mounted text file is text to grep, and SEEK_DATA and SEEK_HOLE answer as Linux means them", async (t) => {
+  if (skip) return t.skip(skip);
+  // On a macOS host msb swapped the two, every mounted file looked like one
+  // hole, and grep printed "binary file matches" for a catalogue file list
+  // (run s882f8d). images/seekfix.c, preloaded in the image, swaps them back.
+  const r = await rig("vmt7", ["vmt700"]);
+  const big = join(r.evidence, "filelist.txt");
+  await writeFile(big, `${"r/r 1-128-1:\tUsers/x/AppData/Local/file.dat\n".repeat(6000)}r/r 2-128-1:\tUsers/IEUser/AppData/Local/Microsoft/Windows/AppCache/container.dat\n`);
+  const size = (await stat(big)).size;
+  const created = await createVms(r.spec);
+  assert.deepEqual(created.failures, []);
+  const out = inVm(
+    vmName(r.run, "vmt700"),
+    `grep -F container.dat ${big} 2>&1; python3 -c 'import os; fd=os.open("${big}", os.O_RDONLY); print("seek", os.lseek(fd, 0, os.SEEK_DATA), os.lseek(fd, 0, os.SEEK_HOLE))'`,
+  );
+  assert.match(out, /^r\/r 2-128-1:\tUsers\/IEUser\/AppData\/Local\/Microsoft\/Windows\/AppCache\/container\.dat$/m, `grep printed the line:\n${out}`);
+  assert.doesNotMatch(out, /binary file matches/);
+  assert.match(out, new RegExp(`^seek 0 ${size}$`, "m"), `data at 0, the only hole at the end:\n${out}`);
+});
+
 test("two VMs posting and recording at once through the hub lose nothing and never share an id", async (t) => {
   if (skip) return t.skip(skip);
   const r = await rig("vmt4", ["vmt400", "vmt401"]);

@@ -13,6 +13,16 @@
 # root cannot change it, and the launcher that starts Pi comes with the
 # harness too (scripts/vm.ts), so an image outlives any number of harness
 # changes.
+# seekfix (images/seekfix.c): SEEK_DATA and SEEK_HOLE on a virtiofs mount as
+# Linux means them. msb on a macOS host swaps the two, and GNU grep then calls
+# every mounted text file past its first buffer "binary".
+FROM debian:bookworm-slim AS seekfix
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc libc6-dev \
+ && rm -rf /var/lib/apt/lists/*
+COPY seekfix.c /src/seekfix.c
+RUN gcc -O2 -Wall -Wextra -Werror -shared -fPIC -o /seekfix.so /src/seekfix.c -ldl
+
 FROM node:24-bookworm-slim
 
 ARG PI_VERSION=0.87.0
@@ -51,6 +61,11 @@ RUN python3 -m venv /opt/dfir/venv \
       python3 /tmp/dfirswarm-build/install.py --base \
  && rm -rf /tmp/dfirswarm-build
 ENV PATH=/opt/dfir/venv/bin:$PATH
+
+# Preloaded into every process; it acts only on a FUSE file whose server
+# answers SEEK_DATA and SEEK_HOLE the macOS way round.
+COPY --from=seekfix /seekfix.so /usr/local/lib/dfirswarm/seekfix.so
+RUN echo /usr/local/lib/dfirswarm/seekfix.so > /etc/ld.so.preload
 
 # No image-wide licence label: an image is an aggregate of separately
 # licensed programs, and each keeps its own (/etc/dfirswarm/NOTICE). The

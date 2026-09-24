@@ -302,6 +302,13 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   prompts go in acknowledged parts, and a link that stalls anyway is
   replaced. A future msb that fixes the stall does not need any of it, and
   the limit stays until one is measured to.
+- msb 0.7.2 stops a request to a secret's own host as a placeholder leak
+  when the TLS record carrying the credential header also carries a `%` or
+  a `\u` escape of a Content-Length body (it reports `location=body
+  match_form=percent_decoded`). In a VM the extension sends a whole body to
+  a secret's host chunked (`extensions/vm-egress.ts`), which msb reads apart
+  from the headers. The VM test logs whether the plain request still fails;
+  once it does not, the wrapper can go.
 
 - A guest's terminal output reaches the host's terminal through Herdr, so an
   escape sequence an agent prints is interpreted there.
