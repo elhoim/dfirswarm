@@ -182,9 +182,9 @@ export type AgentBudget = {
   /** The seat's model, `provider/id`, as the kickoff assigned it. It rides
    *  here so a per-model cap can be summed from this record alone. */
   model?: string;
-  /** What the seat's earlier Pi sessions spent, carried forward when a new
-   *  session (a restart, `/new`) starts reporting from zero again. The
-   *  counters above are the seat's whole run: this plus the live session. */
+  /** What the seat's Pi sessions other than the live one spent (a restart,
+   *  `/new`). The counters above are the seat's whole run: this plus the
+   *  live session. See foldSessionSlice. */
   earlier_sessions?: CarriedCounters;
   /** The Pi session this row's live counters come from, when Pi says. */
   session_id?: string;

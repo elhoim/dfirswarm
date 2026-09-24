@@ -188,6 +188,27 @@ export type AgentBudget = {
   compaction_usd?: number;
   /** Hand-offs completed through self_compact: the note came back. */
   handoffs?: number;
+  /** What the seat's other Pi sessions spent; the counters above include it. */
+  earlier_sessions?: SessionCounters;
+  /** The Pi session the live counters come from, when Pi gave an id. */
+  session_id?: string;
+  /** Each session's last report, by session id; the counters above are their sum. */
+  sessions?: Record<string, SessionCounters>;
+};
+
+/** A Pi session's counters as the budget fold carries them (see extensions/protocol.ts). */
+export type SessionCounters = {
+  spent_usd: number;
+  tokens: number;
+  calls: number;
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+  compactions?: number;
+  compaction_tokens?: number;
+  compaction_usd?: number;
+  handoffs?: number;
 };
 
 /** The kickoff's self-compaction options, as the registry records them. Absent on runs older than the feature. */
