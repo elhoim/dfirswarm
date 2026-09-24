@@ -1,7 +1,7 @@
 {
   "id": "macos-forensics",
   "name": "macOS Forensics Pack",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Artefact-by-artefact method and tooling for a macOS host: the system profile, property lists, the unified log, FSEvents, the KnowledgeC and biome activity databases, launch items and other persistence, accounts and TCC, and what APFS keeps that HFS+ did not.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -25,8 +25,8 @@
       "tools/knowledgec_query/run.py": "a9f0a4001e31b94d4f6fa583a82367417387e22035bc59b507806ea3b093e90f",
       "tools/fsevents_parse/manifest.json": "fa4470cc2dc22eb6601a1e6a05cdd62392ed5de9d51ce3ba01cd4dac65f67e8e",
       "tools/fsevents_parse/run.py": "00bef7be780b17f2e5c3f923bc7445cac7ba60efa4bafcc14f619a5ce09609f2",
-      "tools/unified_log/manifest.json": "305223e032eb79e2f9ee9dbd5575dc8ed1345e5c6a0705675894e3c79817383b",
-      "tools/unified_log/run.py": "e7673020106c47525adb4d30c36f4699977c1a5a3a585fb745b31ec7e2838871",
+      "tools/unified_log/manifest.json": "8cf376b655ff59d5c0f6ad6fcb6a49c2bfee275ab2c510b65b2de4e308b4c427",
+      "tools/unified_log/run.py": "cd290be17b4e4481cc5b445a6abe74dcc2f8620b55f9dfa1da74d3e25cd85c1f",
       "goals/mac-compromise.md": "5ce08be5772f268238887f822f32ef16e53b837337b74915d747f503196e963b",
       "skills/artifacts/fsevents.md": "5fc19d683448eb7214fd34172bed2377827f70281ea0440162d962366263547b",
       "skills/artifacts/knowledgec.md": "447ac0c2b030e0d366c3ccc7c5915f3923ee15ea84aa954e4dda132329d3e326",
@@ -36,7 +36,7 @@
       "skills/logs/unified.md": "e1d5e22470ae8ecff86f79e86b564a5031f0598363d00413ecf0ceabec67d0d7",
       "skills/accounts/users.md": "f5caccc6923ae53ec68c3039477498559ef0a5d513684e8bd718ae92852c43c5",
       "skills/persistence/mechanisms.md": "736140b00e53fbb7d3c53790f79a40757c9ec1dafe3f491c0e55a8f1897f6888",
-      "requires/host.json": "b9cb71e430b7f4172791e00ab683ff1625219a9a423d2ee68833f2c980494f45",
+      "requires/host.json": "bf6b225d04607cc9434df8c0cc23b0d681e65ba282f32a5aa9f50945a223f165",
       "requires/python.txt": "45bf903d28379de232cca57282d4dfba38654cd026f95243752642caaa333461",
       "skills/INDEX.md": "d97f983c4e2816df653a5652eed3b81bd69471eefbd0f5d54602a224d5ff7d10"
     }

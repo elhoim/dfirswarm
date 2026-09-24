@@ -42,8 +42,8 @@
       "optional": true,
       "why": "Read a unified log archive on a host that is not a Mac, where Apple's own log command does not exist.",
       "install": {
-        "brew": "python3 -m pip install UnifiedLogReader",
-        "apt": "python3 -m pip install UnifiedLogReader"
+        "brew": "https://github.com/ydkhatri/UnifiedLogReader (run scripts/UnifiedLogReader.py from a clone, with biplist and lz4 installed: PyPI has no UnifiedLogReader project, and its UnifiedLog 0.3 does not build with pip 20 or later)",
+        "apt": "https://github.com/ydkhatri/UnifiedLogReader (run scripts/UnifiedLogReader.py from a clone, with biplist and lz4 installed: PyPI has no UnifiedLogReader project, and its UnifiedLog 0.3 does not build with pip 20 or later)"
       },
       "licence": "MIT",
       "redistributable": false

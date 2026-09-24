@@ -19,6 +19,9 @@
   },
   "runtime": "python3",
   "entry": "run.py",
+  "requires": [
+    "vol"
+  ],
   "timeout_seconds": 120,
   "example": "{\"image\":\"inputs/ransomcare5.dmp\",\"plugin\":\"windows.pslist\",\"args\":[\"--pid\",\"356\"]}",
   "by": "s69d306",

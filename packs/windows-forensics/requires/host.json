@@ -92,18 +92,6 @@
       "redistributable": false
     },
     {
-      "name": "fwsiinfo",
-      "package": "libfwsi",
-      "optional": true,
-      "why": "Decode a shell item from its documented layout, which is what shellbags falls back to searching for.",
-      "install": {
-        "brew": "python3 -m pip install libfwsi-python",
-        "apt": "python3 -m pip install libfwsi-python"
-      },
-      "licence": "LGPL-3.0-or-later",
-      "redistributable": false
-    },
-    {
       "name": "olecfexport",
       "package": "libolecf",
       "optional": true,

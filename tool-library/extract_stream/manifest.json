@@ -17,6 +17,9 @@
   },
   "runtime": "bash",
   "entry": "run.sh",
+  "requires": [
+    "icat"
+  ],
   "timeout_seconds": 30,
   "example": "{\"image\": \"inputs/NTFS-HiddenFiles.E01\", \"inode\": \"168-128-4\", \"offset\": 0}",
   "by": "sfcc303",

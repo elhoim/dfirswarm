@@ -36,6 +36,15 @@ they were unusable on any other. Those filenames are defaults now, and
 image is a tool the next run has to write again, which is the argument
 against the library rather than for it.
 
+**A tool says which programs it runs.** A manifest's `requires` lists the
+programs the script calls (`icat`, `fls`, `img_stat`, `esedbexport`, `yara`,
+`vol`, `sqlite3`); the Python it imports is in
+[images/library-python.txt](../images/library-python.txt), which every VM
+image installs. Only `sqlite3` of those is in the base image, so
+`images/recipe.py profile-for --tools-from tool-library` names an image
+that has the rest (disk, today); `tests/recipe.test.sh` fails when a script
+runs one of them without saying so.
+
 | Tool | Runtime | Written by | v | What it does |
 | --- | --- | --- | --- | --- |
 | `aescrypt_v2_decrypt` | python3 | `s864a02` | 3 | Decrypt AES Crypt 3.10 Windows GUI v2 files (KDF: SHA256(IV||zeros16||UTF16LE pw)×8192). Returns plaintext pa… |

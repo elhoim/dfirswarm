@@ -1,7 +1,7 @@
 {
   "id": "windows-forensics",
   "name": "Windows Forensics Pack",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Artefact-by-artefact method and tooling for a Windows examination: the file system and its journals, the hives, execution evidence, the event logs and the records inside a cleared one, accounts and remote access, persistence, PowerShell, browsers, shadow copies, memory, and the traces anti-forensics leaves.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -31,8 +31,8 @@
       "tools/yara_scan/run.py": "10d52eb0ea10c50a26587f32e3b2d123c6c1ed29c87b4086b3c63ceb4e74d8c1",
       "tools/utf16_urls/manifest.json": "12483993b6658a9f3f1c8f69dc4c02fc798e68506672c3aed8213e5505453c1f",
       "tools/utf16_urls/run.py": "a7a83040d582b70c0b4cec3fb0e2b3aeadbfd9d7ce44d7f135c716bd730e0e19",
-      "tools/vss_stores/manifest.json": "680c33cd51541336461995cf080fe691f9287121d22c7fdd60420a2b38a8c452",
-      "tools/vss_stores/run.py": "c60af2ad91535597708502fb1b5e283a7f1eccaaab8794a4d0380e2261861e40",
+      "tools/vss_stores/manifest.json": "b11e63281b20d975455867d9656ffd917bdfe43d622cacd9211f5da396de4fc7",
+      "tools/vss_stores/run.py": "abc0cdbb17c1b574319b8f5f3f4f6866b480751fd05b226f2eb2887ae3204a9a",
       "tools/amcache_apps/manifest.json": "3f3174ded543db080667b376c565db3f2e474220104fc03a1670300bc8b87c6b",
       "tools/amcache_apps/run.py": "c99e8d9c5dd11304191e8db9b3996e8bf992debe3adb126fec48fe1b50718882",
       "tools/mft_records/manifest.json": "2617a293df9dc15969e2496f86ad7e934bfeebe0ec9d08d580ec952deeca3fed",
@@ -62,7 +62,7 @@
       "goals/data-left-the-building.md": "ed701b0ef1e3bf0c4de60fe937ba5f48ef04073b3c671e5025959fb62a00a4ff",
       "goals/hidden-data.md": "0546554b9f4f9c78fdfd3271eb13bba19417d8da4abf12ee0cc94d6cb686f545",
       "goals/intrusion-triage.md": "01cc449a5c92b16543fcdbdd6e465c71b60e2e5b4f2db66f1136bc64b5b9c23d",
-      "skills/artifacts/shell.md": "6be9d9ec461f705bfb5e8511a20b0dbfceed7bca99a969a6845be063d57ee0c9",
+      "skills/artifacts/shell.md": "b9cf8070a18484a37132d2c1ddc745bef01ac56a9a18ce9db69fc4a0eb60ba9b",
       "skills/memory/windows.md": "c9f9d9d598d861b035448afa99cb907b0fed3c47ece2e944a09fbd387a8c0393",
       "skills/filesystem/ads.md": "6f486730c5524adb0187e07190c55a3b48a74893c99f1e4dbd5e2b249ebb9b8d",
       "skills/filesystem/deleted.md": "2a5266ba92789ed4e047375dd0ab0f14ad9c53850503503bf585b2a257a840ce",
@@ -86,8 +86,8 @@
       "skills/registry/overview.md": "a645987cbbbe4c610e7701e41788e067f880d3d5729a31d2ae4569a8fdee625a",
       "skills/registry/system-profile.md": "931b25341d637782c5f21c34cdfbe6bda8709486a16280ce29a0b54b0f7b75b0",
       "skills/antiforensics/traces.md": "c87467f49a555613b42c980c1ef084d98fd6f8e3e7ac438243084e7443cf2748",
-      "requires/host.json": "3fc8c692b9eea0a6d9917dbbe2de53b3685ab62ec0fc7f5f816f863a03948a35",
-      "requires/python.txt": "1530ba5bb98f86b57d6a87e787ad4f0a6a10a185f13ca5cfd0935f6fc7e5b4cb",
+      "requires/host.json": "480cbe539c35f88b31380b440e456a0760b65dbda0cc2c667b1876a2bf0bfa49",
+      "requires/python.txt": "c82e082a319cb54264a5028d908b36e9cf63540fdfc476956cac67959f1b5bd3",
       "skills/INDEX.md": "8c386266c502dc85a1c46b2896421ab3bc4f82c5a28a72b2518bd5ffeebe45c7"
     }
   },

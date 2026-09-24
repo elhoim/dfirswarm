@@ -84,7 +84,9 @@ def main():
     binary = shutil.which("zeek") or shutil.which("bro")
     if not binary:
         fail("zeek is not on PATH",
-             install="brew install zeek, or apt-get install -y zeek",
+             install="brew install zeek, or the Zeek project's own packages "
+                     "(https://software.opensuse.org/download.html?project=security%3Azeek&package=zeek): "
+                     "zeek is in neither Debian's nor Ubuntu's archive",
              note="Without it, pcap_summary still answers the first four questions about a "
                   "capture. Say in the report which route was taken.")
 

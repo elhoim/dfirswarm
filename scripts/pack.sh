@@ -542,6 +542,29 @@ def visit(pid, chain):
     seen.add(pid); order.append(pid)
 for p in want:
     visit(p.strip(), [])
+# A run holds one tool per name, so two packs that carry a tool of the same
+# name with different scripts leave one pack's skills calling the other's
+# tool. Said here, before the kickoff copies either; the same script in both
+# is the same tool and says nothing.
+held = {}
+for p in order:
+    td = os.path.join(packs, p, "tools")
+    if not os.path.isdir(td):
+        continue
+    for name in sorted(os.listdir(td)):
+        mf = os.path.join(td, name, "manifest.json")
+        if not os.path.isfile(mf):
+            continue
+        try:
+            sha = json.load(open(mf)).get("sha256")
+        except Exception:
+            sha = None
+        if name not in held:
+            held[name] = (p, sha)
+        elif held[name][1] != sha:
+            print("WARN: packs %s and %s both carry a tool named %s, with different scripts; a run holds one "
+                  "tool per name, so one pack's skills would call the other's. Rename one of them."
+                  % (held[name][0], p, name), file=sys.stderr)
 for p in order:
     print(os.path.join(packs, p))
 PYEOF

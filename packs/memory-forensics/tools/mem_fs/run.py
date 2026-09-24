@@ -41,7 +41,8 @@ def main():
         fail("no such file", path=path)
     mount = args.get("mount")
     if not isinstance(mount, str) or not mount:
-        fail("mount is required: a directory under work/ to mount the image at")
+        fail("mount is required: a directory under your own work/<your id>/ to mount the image at "
+             "(the rest of work/ is read-only in a VM)")
     timeout = args.get("timeout_seconds", 300)
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 10:
         fail("timeout_seconds must be an integer of at least 10")

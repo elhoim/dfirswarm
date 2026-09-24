@@ -21,6 +21,9 @@
   },
   "runtime": "bash",
   "entry": "run.sh",
+  "requires": [
+    "icat"
+  ],
   "timeout_seconds": 30,
   "example": "{\"inode\": 2229261, \"output\": \"work/passwd\"}",
   "by": "s9a5f06",

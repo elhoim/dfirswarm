@@ -27,24 +27,37 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates python3 python3-venv python3-pip jq sqlite3 file xxd socat procps \
       binutils bsdextrautils less unzip p7zip-full xz-utils bzip2 zstd curl libimage-exiftool-perl \
- && rm -rf /var/lib/apt/lists/* \
- && mkdir -p /etc/dfirswarm \
- && printf '{"profile":"base","pi":"%s","node":"%s","python":"%s"}\n' \
-      "$PI_VERSION" "$(node --version)" "$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')" \
-      > /etc/dfirswarm/image.json
+ && rm -rf /var/lib/apt/lists/*
+
+# Not for redistribution until its licences have been reviewed, the rule the
+# packs' programs follow too (images/README.md): the venv holds dissect.util,
+# which is AGPL-3.0, and Debian's GPL programs want a written source offer.
+# Every profile built on this image carries the flag on (install.py).
+ARG REDISTRIBUTABLE=false
+ARG NONREDISTRIBUTABLE="dissect.util"
 
 # The tool library's Python imports, in a venv every profile builds on: a
 # library tool reaches a run through --tools-from whatever its packs, so a
 # tool that imports regipy must not work only in the disk image.
-COPY library-python.txt /tmp/library-python.txt
+#
+# Then the record, taken last, in the fields a profile image has: the whole
+# Debian package list and the venv (what a VM holds at stop is diffed against
+# them, so the image's own packages are never "installed outside the image"),
+# /etc/dfirswarm/NOTICE and the SBOM, /etc/dfirswarm/sbom.json.
+COPY library-python.txt install.py /tmp/dfirswarm-build/
 RUN python3 -m venv /opt/dfir/venv \
- && /opt/dfir/venv/bin/pip install --no-cache-dir -r /tmp/library-python.txt \
- && rm /tmp/library-python.txt
+ && /opt/dfir/venv/bin/pip install --no-cache-dir -r /tmp/dfirswarm-build/library-python.txt \
+ && REDISTRIBUTABLE="$REDISTRIBUTABLE" NONREDISTRIBUTABLE="$NONREDISTRIBUTABLE" PI_VERSION="$PI_VERSION" \
+      python3 /tmp/dfirswarm-build/install.py --base \
+ && rm -rf /tmp/dfirswarm-build
 ENV PATH=/opt/dfir/venv/bin:$PATH
 
 # No image-wide licence label: an image is an aggregate of separately
-# licensed programs, and each keeps its own.
+# licensed programs, and each keeps its own (/etc/dfirswarm/NOTICE). The
+# redistributable label is the same one a profile image carries; a profile
+# whose packs hold nothing marked otherwise inherits this one.
 LABEL org.opencontainers.image.title="dfirswarm-base" \
       org.opencontainers.image.source="https://github.com/halilozturkci/dfirswarm" \
       dev.dfirswarm.profile="base" \
-      dev.dfirswarm.pi-version="${PI_VERSION}"
+      dev.dfirswarm.pi-version="${PI_VERSION}" \
+      dev.dfirswarm.redistributable="${REDISTRIBUTABLE}"

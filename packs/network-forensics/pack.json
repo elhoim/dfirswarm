@@ -1,7 +1,7 @@
 {
   "id": "network-forensics",
   "name": "Network Forensics Pack",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Method and tooling for captures and flow logs: what the capture can and cannot contain, session reconstruction, DNS and TLS metadata when the payload is encrypted, beacon detection by timing, exfiltration by volume, and tying all of it back to the host timeline.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -21,8 +21,8 @@
       "README.md": "f3b6d7f3ac8eb27ad1b2da997ab74ae7e9de90e46bad6424a25f6b75cce21f4b",
       "tools/beacon_score/manifest.json": "d08332c090abbc6be4dda02b6e57867b9ea61e46eb245b534c2f0d3a775442d3",
       "tools/beacon_score/run.py": "aface6b389b2414a49d2a3fdd51052669e94c3119fd40e009d8b44dcb47eb523",
-      "tools/zeek_run/manifest.json": "6662bb5b2cf2a8bfc45c251e2b6a63cd15d0904c80a07a46e3c96737efc1a375",
-      "tools/zeek_run/run.py": "aaf27a8daddf8c686c949e667367a5d0aacce3da59242428ad8bc78b9cc3f6cd",
+      "tools/zeek_run/manifest.json": "583f575df01a06a81e55092bc92866cfec771b945a470427fc9e1af7983d7bd1",
+      "tools/zeek_run/run.py": "590c5a66457dab361cc76f7ccb010bf05c90ede64bb3038176fb35c7088b8d48",
       "tools/pcap_summary/manifest.json": "c275ec18dbae1086106ea17c2caf0f7ada191d64153e0c3756ee6b6b766e9b80",
       "tools/pcap_summary/run.py": "6a3df3a03177a816e89b7ff6e9fe3ff84b073a35954199f67a4af7e1cb49bbeb",
       "goals/what-left-the-network.md": "438c888da99e22ab488a2a041352cc10b0fa535a1f824acf9d3d7edcde262dd6",
@@ -32,7 +32,7 @@
       "skills/correlate/host.md": "dd9f12201855272d2262aece9ddccad7427666cec8e3bf801e16362d07326d4d",
       "skills/metadata/dns-tls.md": "ae25ea8c2c9c1292c3c801a2099cb61cba2d06a0188766ab76e677aa85bf38f0",
       "skills/beacons/periodicity.md": "ff555a901d3a03c0efe70ba8ec38bccb71974eab1e06cc72fc68ccd0c9159265",
-      "requires/host.json": "8697ed91d7ee2627ee44594bb867738247c605271151b13fb848a6d2fd8b889d",
+      "requires/host.json": "c58d472301dde5519d42cd88677d987f22429bc9cfb0b60c783a0d1faa69ed20",
       "requires/python.txt": "d5768d4bec0bea8ec8e736e2710a757309af18fa3f862dae2db201e154d45a4a",
       "skills/INDEX.md": "d2d1ace13a2b25afaa97e26f3147d9561a769f1fa8434b72a5e8a23a213f2163"
     }

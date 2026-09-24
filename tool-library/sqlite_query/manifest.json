@@ -21,6 +21,9 @@
   },
   "runtime": "python3",
   "entry": "run.py",
+  "requires": [
+    "sqlite3"
+  ],
   "timeout_seconds": 30,
   "example": "{\"db_path\":\"work/extracted/memory/chrome_History\",\"sql\":\"select count(*) from urls;\",\"csv\":true,\"readonly\":true}",
   "by": "s881002",

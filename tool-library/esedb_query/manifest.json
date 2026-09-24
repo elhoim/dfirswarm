@@ -17,6 +17,9 @@
   },
   "runtime": "python3",
   "entry": "run.py",
+  "requires": [
+    "esedbexport"
+  ],
   "timeout_seconds": 120,
   "example": "{\"path\": \"work/extracted/WebCacheV01.dat\", \"table\": \"Containers\", \"limit\": 50}",
   "by": "maintainer",

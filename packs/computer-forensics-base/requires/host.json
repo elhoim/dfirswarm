@@ -78,6 +78,30 @@
       "redistributable": false
     },
     {
+      "name": "img_stat",
+      "package": "sleuthkit",
+      "optional": true,
+      "why": "The size and format of an image as The Sleuth Kit reads it, E01 included: the bound for a scan over the whole of it.",
+      "install": {
+        "brew": "brew install sleuthkit",
+        "apt": "apt-get install -y sleuthkit"
+      },
+      "licence": "CPL-1.0 core, IPL-1.0 in the TCT-derived parts",
+      "redistributable": false
+    },
+    {
+      "name": "img_cat",
+      "package": "sleuthkit",
+      "optional": true,
+      "why": "The raw bytes of an image, E01 included, over a range of sectors: a signature scan without converting the image first.",
+      "install": {
+        "brew": "brew install sleuthkit",
+        "apt": "apt-get install -y sleuthkit"
+      },
+      "licence": "CPL-1.0 core, IPL-1.0 in the TCT-derived parts",
+      "redistributable": false
+    },
+    {
       "name": "bdeinfo",
       "package": "libbde",
       "optional": true,

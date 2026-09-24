@@ -59,7 +59,10 @@ def main():
     if not apple and not reader:
         fail("no unified log reader on PATH",
              looked_for=["log", "UnifiedLogReader.py"],
-             install={"log": "part of macOS", "UnifiedLogReader": "python3 -m pip install UnifiedLogReader"},
+             install={"log": "part of macOS",
+                      "UnifiedLogReader": "git clone https://github.com/ydkhatri/UnifiedLogReader, then "
+                                          "python3 -m pip install biplist lz4 and run scripts/UnifiedLogReader.py "
+                                          "from the clone (PyPI has no UnifiedLogReader project)"},
              note="Off a Mac, Apple's log command does not exist and UnifiedLogReader is the route.")
 
     os.makedirs(out_dir, exist_ok=True)

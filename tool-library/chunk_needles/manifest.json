@@ -38,6 +38,9 @@
   },
   "runtime": "python3",
   "entry": "run.py",
+  "requires": [
+    "icat"
+  ],
   "timeout_seconds": 120,
   "example": "{\"path\": \"work/sd1d102/SRUDB.dat\", \"needles\": \"vmtoolsIO|SysInternals|malware430\"}",
   "by": "sd1d102",

@@ -121,6 +121,23 @@ out="$("$PACK" resolve child-pack)"
 [[ "$(sed -n 2p <<<"$out")" == *"child-pack" ]] || fail "resolve should then give the pack itself"
 pass "dependencies resolve, in order"
 
+# Two packs with a tool of the same name: one run holds one tool per name, so
+# the kickoff is told which packs collide. The same script twice is one tool.
+mk_pack "$WORK/src" twin-pack
+printf 'print("the twin")\n' >> "$WORK/src/twin-pack/tools/echo_tool/run.py"
+"$PACK" seal "$WORK/src/twin-pack" >/dev/null || fail "seal twin"
+"$PACK" install "$WORK/src/twin-pack" --no-secrets >/dev/null || fail "install twin"
+out="$("$PACK" resolve base-pack,twin-pack 2>"$WORK/resolve.err")" || fail "resolve refused two packs that share a tool name"
+[[ "$(wc -l <<<"$out" | tr -d ' ')" == 2 ]] || fail "resolve should still give both packs, got: $out"
+grep -q 'packs base-pack and twin-pack both carry a tool named echo_tool' "$WORK/resolve.err" \
+  || fail "resolve did not name both packs and the tool they share: $(cat "$WORK/resolve.err")"
+mk_pack "$WORK/src" same-pack
+"$PACK" seal "$WORK/src/same-pack" >/dev/null || fail "seal same"
+"$PACK" install "$WORK/src/same-pack" --no-secrets >/dev/null || fail "install same"
+"$PACK" resolve base-pack,same-pack >/dev/null 2>"$WORK/resolve.err" || fail "resolve refused two packs with the same tool"
+[[ ! -s "$WORK/resolve.err" ]] || fail "the same script in two packs is one tool, not a collision: $(cat "$WORK/resolve.err")"
+pass "two packs carrying different tools of one name are named at resolve; the same tool twice is not"
+
 "$PACK" remove base-pack >/dev/null
 "$PACK" resolve child-pack >/dev/null 2>&1 && fail "resolve should refuse when a dependency is gone"
 pass "a missing dependency is refused"
