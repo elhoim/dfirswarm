@@ -8,6 +8,7 @@ inputs: one disk image of a Windows web server (E01, raw or VHDX), optionally it
 seats: 5
 cap_usd: 30
 wall_clock: 90
+toolbox: dfir
 ---
 ## Goal
 

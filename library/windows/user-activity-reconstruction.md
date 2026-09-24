@@ -8,6 +8,7 @@ inputs: one disk image of a Windows workstation (E01, raw or VHDX), the account 
 seats: 4
 cap_usd: 20
 wall_clock: 60
+toolbox: dfir
 ---
 ## Goal
 

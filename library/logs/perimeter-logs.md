@@ -8,6 +8,7 @@ inputs: the perimeter's logs for the window (firewall connection logs, VPN sessi
 seats: 5
 cap_usd: 25
 wall_clock: 75
+toolbox: dfir
 ---
 ## Goal
 

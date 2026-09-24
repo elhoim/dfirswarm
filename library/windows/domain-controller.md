@@ -8,6 +8,7 @@ inputs: one disk image of a Windows Server domain controller (E01, raw or VHDX),
 seats: 6
 cap_usd: 45
 wall_clock: 120
+toolbox: dfir
 ---
 ## Goal
 

@@ -8,6 +8,7 @@ inputs: whatever the incident left about data access, in any mix: images of file
 seats: 5
 cap_usd: 30
 wall_clock: 90
+toolbox: dfir
 ---
 ## Goal
 

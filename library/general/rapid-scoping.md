@@ -8,6 +8,7 @@ inputs: a triage package (a KAPE or Velociraptor collection, a quick image, a me
 seats: 3
 cap_usd: 10
 wall_clock: 45
+toolbox: dfir
 ---
 ## Goal
 

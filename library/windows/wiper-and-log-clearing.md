@@ -8,6 +8,7 @@ inputs: one disk image of a Windows host (E01, raw or VHDX) and, if the operator
 seats: 5
 cap_usd: 30
 wall_clock: 90
+toolbox: dfir,crypto
 ---
 ## Goal
 
@@ -74,9 +75,8 @@ same commands again.
   and `python-evtx` (Python 3.12) for the hives and the event logs, `strings`,
   `sqlite3`, `exiftool`. There is no root: no mounting, no `sudo`.
 - Read shadow copies in place with `vshadowinfo` and `pyvshadow`
-  (libvshadow) where this host has them; the toolbox does not ship them, and
-  `dfvfs` from `--toolbox crypto` reads a shadow store only with `pyvshadow`
-  beside it. If neither is here, say so and report only the evidence of VSS
+  (libvshadow), which `--toolbox crypto` checks for beside `dfvfs`
+  (itself able to open a shadow store only with `pyvshadow` there). If neither is here, say so and report only the evidence of VSS
   state (the catalog file `{3808876b-c176-4e48-b7ae-04046e6cc752}` under
   `System Volume Information`, its size, the VSS events), never "no shadow
   copies".

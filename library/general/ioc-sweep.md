@@ -8,6 +8,7 @@ inputs: one or more indicator files under inputs/ (hashes, domains, addresses, U
 seats: 4
 cap_usd: 15
 wall_clock: 60
+toolbox: dfir
 ---
 ## Goal
 

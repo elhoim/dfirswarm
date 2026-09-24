@@ -8,6 +8,7 @@ inputs: one full file system acquisition of an iPhone as a tar or zip archive (C
 seats: 5
 cap_usd: 30
 wall_clock: 90
+toolbox: dfir
 ---
 ## Goal
 

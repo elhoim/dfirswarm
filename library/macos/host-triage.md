@@ -8,6 +8,7 @@ inputs: one disk image of a macOS host (APFS, in E01 or raw) or a logical collec
 seats: 4
 cap_usd: 25
 wall_clock: 75
+toolbox: dfir,crypto
 ---
 ## Goal
 

@@ -8,6 +8,7 @@ inputs: one or two memory images of Windows hosts taken during or just after enc
 seats: 5
 cap_usd: 30
 wall_clock: 75
+toolbox: dfir
 ---
 ## Goal
 

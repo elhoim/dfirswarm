@@ -8,6 +8,7 @@ inputs: one Android acquisition, either a physical image (raw, E01 or per-partit
 seats: 5
 cap_usd: 30
 wall_clock: 90
+toolbox: dfir,linux
 ---
 ## Goal
 

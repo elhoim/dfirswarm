@@ -8,6 +8,7 @@ inputs: the account's CloudTrail files for the window and a baseline period befo
 seats: 5
 cap_usd: 25
 wall_clock: 75
+toolbox: dfir
 ---
 ## Goal
 

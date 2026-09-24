@@ -8,6 +8,7 @@ inputs: one disk image of a Windows host with encrypted files or a ransom note (
 seats: 5
 cap_usd: 35
 wall_clock: 90
+toolbox: dfir,crypto
 ---
 ## Goal
 
@@ -108,9 +109,8 @@ Read `catalog/` before running the same commands again.
   raw layer and a forged pool-tag scanner: every `windows.*` plugin needs
   the ISF. Say what a symbol table would have added.
 - Read shadow copies in place with `vshadowinfo` and `pyvshadow`
-  (libvshadow) where this host has them; the toolbox does not ship them, and
-  `dfvfs` from `--toolbox crypto` reads a shadow store only with `pyvshadow`
-  beside it. If neither is here, say so and report only the evidence of VSS
+  (libvshadow), which `--toolbox crypto` checks for beside `dfvfs`
+  (itself able to open a shadow store only with `pyvshadow` there). If neither is here, say so and report only the evidence of VSS
   state (the catalog file `{3808876b-c176-4e48-b7ae-04046e6cc752}` under
   `System Volume Information`, its size, the VSS events), never "no shadow
   copies".

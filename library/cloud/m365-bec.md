@@ -8,6 +8,7 @@ inputs: the tenant's exports for the window and a baseline period before it (at 
 seats: 5
 cap_usd: 25
 wall_clock: 75
+toolbox: dfir
 ---
 ## Goal
 

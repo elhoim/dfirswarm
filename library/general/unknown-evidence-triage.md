@@ -8,6 +8,7 @@ inputs: whatever was collected, as it arrived: images, dumps, archives, exports,
 seats: 4
 cap_usd: 15
 wall_clock: 45
+toolbox: dfir,crypto
 ---
 ## Goal
 

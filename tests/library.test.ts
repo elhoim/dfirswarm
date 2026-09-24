@@ -177,6 +177,8 @@ test("every entry that ships keeps the library's contract", async () => {
     if (!(LIBRARY_OS as readonly string[]).includes(entry.os)) bad(id, `unknown os ${entry.os}`);
     if (!entry.tags.length) bad(id, "no tags");
     if (!entry.inputs) bad(id, "no inputs line: what does the operator put under inputs/?");
+    // swarm.sh reads this instead of guessing sets from the goal's words.
+    if (!/^(dfir|crypto|linux)(,(dfir|crypto|linux))*$/.test(String(meta.toolbox ?? "").replace(/\s/g, ""))) bad(id, "no toolbox line naming the sets from dfir, crypto, linux");
     if (meta.category && meta.category !== entry.category) bad(id, `category ${meta.category} is not the directory ${entry.category}`);
     if (entry.seats !== undefined && (entry.seats < 1 || entry.seats > 12)) bad(id, `seats ${entry.seats} is not a team`);
     if (raw.length > 32_000) bad(id, `${raw.length} characters: over the console's 32,000`);
