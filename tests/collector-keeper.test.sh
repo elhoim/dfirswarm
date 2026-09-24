@@ -119,4 +119,54 @@ kill -0 "$K3" 2>/dev/null && fail "a hub that dies at once, again and again, is 
 grep -q 'in a row' "$SB/traces/vm-hub.log" || fail "the keeper did not say why it gave up"
 pass "a hub that recovers between crashes keeps its keeper; one that dies at once, again and again, is given up on, and the mark says so"
 
+echo "# the model gateway, brought back on the port the VMs were given"
+HUB4="$TMP/hubs/dfs-sck1.x4"
+mkdir -p "$HUB4/host/scripts"
+printf '{"agents":[],"tokens":{"system":"tok-system"}}\n' > "$HUB4/hub-input.json"
+printf '{"v":1}\n' > "$HUB4/model-gateway.json"
+printf '47777\n' > "$HUB4/model-gateway.port"
+# A stand-in gateway in the run's frozen copy: it says what it was started
+# with, writes its ready file and stays up.
+cat > "$HUB4/host/scripts/model-gateway.ts" <<'JS'
+import { appendFileSync, writeFileSync } from "node:fs";
+const arg = (n: string) => process.argv[process.argv.indexOf(n) + 1];
+appendFileSync(`${arg("--config")}.starts`, `${JSON.stringify(process.argv.slice(2))}\n`);
+writeFileSync(arg("--ready"), JSON.stringify({ port: Number(arg("--port") ?? 0), pid: process.pid }));
+setTimeout(() => process.exit(0), 60000);
+JS
+node --experimental-strip-types --no-warnings "$HUB4/host/scripts/model-gateway.ts" --config "$HUB4/model-gateway.json" --port 47777 --ready "$HUB4/model-gateway.ready" &
+gw_first=$!
+disown "$gw_first" 2>/dev/null || true
+PIDS+=("$gw_first")
+echo "$gw_first" > "$HUB4/model-gateway.pid"
+sleep 600 &
+HUBPID4=$!
+disown "$HUBPID4" 2>/dev/null || true
+PIDS+=("$HUBPID4")
+bash "$ROOT/scripts/hub-supervise.sh" "$SB" "$HUB4" "$ROOT/scripts/vm-hub.ts" "$HUBPID4" >/dev/null 2>&1 &
+K4=$!
+disown "$K4" 2>/dev/null || true
+PIDS+=("$K4")
+sleep 1
+kill "$gw_first"
+for _ in $(seq 1 40); do
+  now="$(cat "$HUB4/model-gateway.pid" 2>/dev/null || true)"
+  [[ -n "$now" && "$now" != "$gw_first" ]] && kill -0 "$now" 2>/dev/null && [[ "$(wc -l < "$HUB4/model-gateway.json.starts" | tr -d ' ')" -ge 2 ]] && break
+  sleep 0.25
+done
+now="$(cat "$HUB4/model-gateway.pid" 2>/dev/null || true)"
+[[ -n "$now" && "$now" != "$gw_first" ]] && kill -0 "$now" 2>/dev/null || fail "the model gateway was not brought back"
+PIDS+=("$now")
+tail -1 "$HUB4/model-gateway.json.starts" | jq -e --arg c "$HUB4/model-gateway.json" 'index("--port") as $i | .[$i + 1] == "47777" and (index("--config") as $j | .[$j + 1] == $c)' >/dev/null \
+  || fail "the gateway was not restarted on the VMs' port with its config: $(tail -1 "$HUB4/model-gateway.json.starts")"
+# The keeper records the restart once the new gateway says it is ready,
+# which can come after its pid file: wait for the line, bounded.
+for _ in $(seq 1 40); do
+  grep -q '"model_gateway_restarted"' "$SB/traces/events.jsonl" "$HUB4/hub-spill.jsonl" 2>/dev/null && break
+  sleep 0.25
+done
+grep -q '"model_gateway_restarted"' "$SB/traces/events.jsonl" "$HUB4/hub-spill.jsonl" 2>/dev/null || fail "the gateway's restart is not on the record"
+: > "$HUB4/.stop"
+pass "a model gateway that dies is brought back by the keeper on the same port and config, and the restart is on the record"
+
 echo "collector-keeper.test.sh: all checks passed"

@@ -85,11 +85,55 @@ keep_collector() {
     '{ts: $ts, agent: "system", tool: "collector_restarted", args: {by: "hub-supervise", restart: $n}, result: {ok: $ok}}')"
 }
 
+# The model gateway (--model-gateway), when the kickoff started one: brought
+# back on the port the VMs were given, with the same config.
+gateway_alive() {
+  local pid cmd
+  pid="$(cat "$HUB_DIR/model-gateway.pid" 2>/dev/null || true)"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
+  cmd="$(ps -ww -o command= -p "$pid" 2>/dev/null)" || return 1
+  [[ "$cmd" == *model-gateway.ts* && "$cmd" == *"$HUB_DIR"* ]]
+}
+gateway_restarts=0
+gateway_since=$SECONDS
+GATEWAY_GAVE_UP=0
+GATEWAY_SCRIPT="$ROOT/scripts/model-gateway.ts"
+[[ -f "$HUB_DIR/host/scripts/model-gateway.ts" ]] && GATEWAY_SCRIPT="$HUB_DIR/host/scripts/model-gateway.ts"
+
+keep_gateway() {
+  [[ "$GATEWAY_GAVE_UP" -eq 0 && -f "$HUB_DIR/model-gateway.json" && -s "$HUB_DIR/model-gateway.port" ]] || return 0
+  gateway_alive && return 0
+  over && return 0
+  (( SECONDS - gateway_since >= STABLE_SEC )) && gateway_restarts=0
+  gateway_restarts=$((gateway_restarts + 1))
+  if (( gateway_restarts > MAX_RESTARTS )); then
+    echo "hub-supervise: the model gateway died ${MAX_RESTARTS} times in a row; not restarting it again" >> "$SANDBOX/traces/model-gateway.log"
+    GATEWAY_GAVE_UP=1
+    return 0
+  fi
+  local port pid ok=false i
+  port="$(cat "$HUB_DIR/model-gateway.port")"
+  rm -f "$HUB_DIR/model-gateway.ready"
+  SWARM_TRACE_TOKEN="$SYSTEM_TOKEN" node --experimental-strip-types --no-warnings "$GATEWAY_SCRIPT" --config "$HUB_DIR/model-gateway.json" \
+    --port "$port" --ready "$HUB_DIR/model-gateway.ready" --quiet >>"$SANDBOX/traces/model-gateway.log" 2>&1 </dev/null &
+  pid=$!
+  echo "$pid" > "$HUB_DIR/model-gateway.pid"
+  gateway_since=$SECONDS
+  for ((i = 0; i < 100; i++)); do
+    [[ -s "$HUB_DIR/model-gateway.ready" ]] && kill -0 "$pid" 2>/dev/null && { ok=true; break; }
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  emit "$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson ok "$ok" --argjson n "$gateway_restarts" --argjson port "$port" \
+    '{ts: $ts, agent: "system", tool: "model_gateway_restarted", args: {by: "hub-supervise", restart: $n, port: $port}, result: {ok: $ok}}')"
+}
+
 restarts=0
 up_since=$SECONDS
 while :; do
   while kill -0 "$PID" 2>/dev/null; do
     keep_collector
+    keep_gateway
     sleep 2
   done
   over && exit 0
@@ -100,6 +144,9 @@ while :; do
     # The idle watchdog restarts a hub whose keeper is gone; one that gave
     # up is not second-guessed every half minute.
     date -u +%Y-%m-%dT%H:%M:%SZ > "$HUB_DIR/.keeper-gave-up"
+    # A run whose hub is down for good has no board, trace door or stop:
+    # the operator's notify command hears it.
+    bash "$ROOT/scripts/notify.sh" "$SANDBOX" hub_down "$(jq -nc --argjson n "$MAX_RESTARTS" '{restarts_in_a_row: $n}')" >/dev/null 2>&1 </dev/null || true
     exit 1
   fi
   sleep 2

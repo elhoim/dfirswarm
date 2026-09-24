@@ -251,6 +251,9 @@ EOF
     fi
   fi
   echo "reaped $id (idle ${idle}s, released ${released} lock(s)) -> done/agents/$id.dead"
+  # The operator's notify command, when the run has one.
+  SWARM_RUNS_DIR="${SWARM_RUNS_DIR:-${SWARM_REGISTRY:+$(dirname "$SWARM_REGISTRY")}}" \
+    bash "$ROOT/scripts/notify.sh" "$SANDBOX" agent_dead "$(jq -nc --arg a "$id" --argjson idle "$idle" '{agent: $a, idle_seconds: $idle, reason: "stall"}')" >/dev/null 2>&1 </dev/null || true
 }
 
 reaped=0

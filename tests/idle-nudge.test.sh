@@ -229,4 +229,38 @@ grep -q '^by: harness' "$BS/done/SWARM_DONE" || fail "the sentinel is not the ha
 grep -q '"tool":"harness_stop"' "$BS/traces/events.jsonl" "$BS/traces/system-spill.jsonl" 2>/dev/null || fail "the stop is not on the record"
 pass "a host run past its wall clock is steered from outside the panes, and stopped by the harness after the grace period"
 
+# --- the operator hears the swarm's cap --------------------------------------------
+CB="$TMP/nruns/scap1"
+mkdir -p "$CB"/{traces,done/agents,threads/main,inbox/c00,.pi-sessions/c00,locks} "$TMP/nruns/notify"
+printf '{"swarm_id":"scap1","n":1,"agents":[{"id":"c00","role":"worker"}]}\n' > "$CB/team.json"
+printf '{"cap_usd":5,"spent_usd":6,"wall_clock_minutes":600,"started_at":"%s","agents":{}}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$CB/budget.json"
+jq -n --arg sb "$CB" '{runs: [{id: "scap1", state: "running", sandbox: $sb, notify: true}]}' > "$TMP/nruns/registry.json"
+printf 'cat >> %q\n' "$TMP/cap-events.jsonl" > "$TMP/nruns/notify/scap1.cmd"
+chmod 600 "$TMP/nruns/notify/scap1.cmd"
+SWARM_RUNS_DIR="$TMP/nruns" HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$CB" --once >"$TMP/cap.log" 2>&1
+for i in $(seq 1 50); do [[ -s "$TMP/cap-events.jsonl" ]] && break; sleep 0.1; done
+jq -e 'select(.event == "budget_cap" and .run == "scap1" and .detail.spent_usd == 6 and .detail.cap_usd == 5)' "$TMP/cap-events.jsonl" >/dev/null \
+  || fail "the cap was not notified: $(cat "$TMP/cap-events.jsonl" 2>/dev/null; cat "$TMP/cap.log")"
+pass "a host run past its cap tells the operator's notify command (budget_cap)"
+
+# --- where nobody has looked, at a quarter, a half and three quarters -------------
+CV="$TMP/coverage"
+mkdir -p "$CV"/{traces,done/agents,threads/main,inbox/d00,.pi-sessions/d00,locks,inputs}
+printf '{"swarm_id":"cov","n":1,"agents":[{"id":"d00","role":"worker"}]}\n' > "$CV/team.json"
+: > "$CV/done/agents/d00.done"
+printf '{"files":[{"path":"inputs/named.bin","bytes":1,"sha256":"x"},{"path":"inputs/nobody.bin","bytes":1,"sha256":"y"}]}\n' > "$CV/inputs.json"
+printf '%s\n' '{"ts":"2026-01-01T00:00:00Z","agent":"d00","tool":"bash","args":{"command":"xxd inputs/named.bin | head"},"result":{"ok":true}}' > "$CV/traces/events.jsonl"
+started="$(date -u -d '@'$(( $(date +%s) - 3000 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r $(( $(date +%s) - 3000 )) +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"cap_usd":5,"spent_usd":0,"wall_clock_minutes":60,"started_at":"%s","agents":{}}\n' "$started" > "$CV/budget.json"
+HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$CV" --once >"$TMP/cov1.log" 2>&1
+post="$(cat "$CV"/threads/main/*.md 2>/dev/null || true)"
+printf '%s\n' "$post" | grep -q 'no command has named these inputs yet' || fail "the uncovered inputs were not posted: $(cat "$TMP/cov1.log")"
+printf '%s\n' "$post" | grep -q 'inputs/nobody.bin' || fail "the input nobody named is not listed: $post"
+printf '%s\n' "$post" | grep -q 'inputs/named.bin' && fail "an input a command named is listed as untouched"
+printf '%s\n' "$post" | grep -q 'At 75%' || fail "the post does not say where in the run it is: $post"
+[[ "$(tr '\n' ' ' < "$CV/traces/idle-nudge.coverage")" == "25 50 75 " ]] || fail "the marks passed are not spent: $(cat "$CV/traces/idle-nudge.coverage")"
+HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$CV" --once >"$TMP/cov2.log" 2>&1
+[[ "$(ls "$CV"/threads/main/*.md | wc -l | tr -d ' ')" == 1 ]] || fail "the coverage was posted twice"
+pass "past three quarters of the wall clock the inputs no command named are posted once, naming none that was named"
+
 echo "idle-nudge.test.sh: all checks passed"

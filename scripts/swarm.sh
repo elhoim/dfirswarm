@@ -104,7 +104,8 @@ Commands:
   summary <id>       A Markdown report of a run, from its own files
   context <id>       Each agent's context history from the trace: peaks, lines crossed, hand-offs, summary cost
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
-  package <id>       Hand a run over: report, board, trace, hashes
+  package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
+  review verify export hold release purge image-for   After a run: sign-off, checks, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
   say <id> "<msg>"   Post to a running swarm as the examiner
   stop <id>          Stop a run and record how it ended
@@ -136,8 +137,7 @@ Evidence, when the goal is a case rather than a task:
   --no-write-guard   Host runs: panes may write outside the run (--no-seal-herdr: reach Herdr)
   --no-read DIR      Deny the agents reading DIR (repeatable; a VM does not mount it)
   --inputs-image F   Attach F read-only as inputs/ (macOS; the kernel refuses writes)
-  --case-id ID       Case identifier, recorded everywhere the run is
-  --examiner NAME    Who is running it
+  --case-id ID       Case identifier, recorded everywhere the run is; --examiner NAME, who runs it
 
 Tools the agents write:
   --allow-tool-forging   Let agents write tools with make_tool and share them
@@ -169,6 +169,7 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
   swarm.sh start --model <provider/id> --cap-usd <n> --n <N>
       [--models "<provider/id>=<k>[@USD],..."] [--goal-file FILE | --goal "<markdown>"]
       [--sandbox DIR] [--allow-synced-folder] [--custody-timeout SEC] [--label NAME] [--wall-clock MIN] [--hard-kill] [--no-start]
+      [--notify CMD] [--ledger-from RUN] [--no-verify-copy] [--allow-root] [--model-gateway] [--check]
       [--cap-per-agent USD] [--cap-tokens N] [--idle-nudge-sec N] [--allow-tool-forging]
       [--no-self-compact] [--compact-at SPEC] [--compact-warn-at SPEC] [--compact-notice-at SPEC]
       [--compact-prompt-file FILE] [--compact-model P/ID] [--inbox-page-chars N]
@@ -207,6 +208,40 @@ The team
                       Let a copy of the evidence, or the VMs' kept disks, go
                       into a folder a sync client uploads (Dropbox, iCloud,
                       OneDrive, …). Refused otherwise, before anything is written.
+                      A file named .dfirswarm-allow-synced at the top of the
+                      synced folder (or in any folder between it and the run)
+                      says the same for everything under it; the kickoff says
+                      which it went by.
+  --notify CMD        A command of yours to run when something happens to the
+                      run: finished, finish_failed, stop_incomplete, budget_cap,
+                      wall_clock, evidence_changed, chain_broken, agent_dead,
+                      collector_unreachable, hub_down. It gets one
+                      JSON line on stdin ({event, run, at, detail}) and 30
+                      seconds; it is kept outside the run (runs/notify/, 0600),
+                      and the registry records only that there is one.
+  --ledger-from RUN   Bring a finished earlier run's ledger in as hypotheses to
+                      test: prior/ledger.md, read-only, never the new ledger.
+                      With the earlier run's examiner reviews, only the entries
+                      the examiner accepted; without, every entry, marked
+                      unreviewed.
+  --no-verify-copy    Check the copy of the evidence against its source by
+                      name, kind and size only. By default every copied file's
+                      source is hashed again and compared with the manifest.
+  --model-gateway     VM runs: every model call a VM makes goes through one process
+                      on this host that holds the key, meters the call from the
+                      provider's own answer and refuses calls past a cap or the
+                      wall clock. A VM then holds a seat token, never a key, and
+                      reaches no provider host. Providers it cannot front
+                      (subscriptions, Bedrock, Vertex, Azure, OpenRouter,
+                      Fireworks, local models) keep msb's placeholder path.
+                      docs/model-gateway.md.
+  --check             Run every refusal and preflight of this start and write nothing:
+                      no sandbox, no registry entry, no daemon, no VM, no pull.
+                      Prints what the start would print; exit 0 when it would go
+                      ahead, 2 when it would be refused.
+  --allow-root        Start a host run as root. Refused otherwise: root is not
+                      bound by the read-only modes the host run relies on. A
+                      microVM run as root is warned about, not refused.
 
 The goal
   --goal-file FILE    The goal document. It must carry a "## Definition of done";
@@ -437,6 +472,16 @@ EOF
 }
 
 ensure_registry() {
+  # A check (start --check) writes no registry: one that is not there yet
+  # is read as the empty one it would be, from a temporary file.
+  if [[ "${CHECK_ONLY:-0}" -eq 1 ]]; then
+    if [[ ! -f "$REGISTRY" ]]; then
+      REGISTRY="$(mktemp "${TMPDIR:-/tmp}/dfs-check-registry.XXXXXX")"
+      printf '{"runs":[]}\n' > "$REGISTRY"
+      CHECK_TMP+=("$REGISTRY")
+    fi
+    return 0
+  fi
   mkdir -p "$RUNS_DIR"
   if [[ ! -f "$REGISTRY" ]]; then
     printf '{"runs":[]}\n' > "$REGISTRY"
@@ -500,6 +545,106 @@ registry_update_state() {
   registry_unlock
 }
 
+# A path resolved as `cd && pwd -P` would, without making it: the nearest
+# part that exists, resolved, and the rest as written.
+resolve_path_nocreate() { # <path>
+  local p="$1" rest=""
+  [[ "$p" == /* ]] || p="$PWD/$p"
+  while [[ ! -d "$p" && "$p" != "/" ]]; do
+    rest="/$(basename "$p")$rest"
+    p="$(dirname "$p")"
+  done
+  printf '%s%s\n' "$(cd "$p" && pwd -P | sed 's#/$##')" "$rest"
+}
+
+# Merge fields into one run's record, under the registry's lock.
+registry_merge() { # <id> <json object>
+  local id="$1" patch="$2" rc=0
+  ensure_registry
+  registry_lock || return 1
+  local tmp="$REGISTRY.tmp.$$"
+  if jq --arg id "$id" --argjson p "$patch" '.runs = [.runs[] | if .id == $id then . + $p else . end]' "$REGISTRY" > "$tmp"; then
+    mv "$tmp" "$REGISTRY"
+  else
+    rm -f "$tmp"
+    rc=1
+  fi
+  registry_unlock
+  return $rc
+}
+
+# The operator's notify command, if the run has one: finished, a VM left up,
+# the evidence changed. Never blocks, never fails the caller (notify.sh).
+notify_run() { # <sandbox> <event> [detail json]
+  [[ -n "${1:-}" && -d "${1:-}" ]] || return 0
+  SWARM_RUNS_DIR="$RUNS_DIR" bash "$ROOT/scripts/notify.sh" "$1" "$2" "${3:-}" >/dev/null 2>&1 </dev/null || true
+}
+
+# Whether the volume a path is on is encrypted at rest: FileVault on macOS,
+# dm-crypt (LUKS) under the mount on Linux; "unknown" anywhere it cannot be
+# told without privilege. A laptop's case material on an unencrypted disk is
+# what a lost laptop hands over.
+disk_encryption_of() { # <path>
+  local p="$1" dev src
+  p="$(cd "$p" 2>/dev/null && pwd -P || printf '%s' "$p")"
+  if [[ "$(uname -s)" == Darwin ]]; then
+    if command -v fdesetup >/dev/null 2>&1; then
+      case "$(fdesetup status 2>/dev/null)" in
+        *"FileVault is On"*) echo on; return ;;
+        *"FileVault is Off"*)
+          # An external APFS volume can be encrypted with FileVault off.
+          if diskutil info "$(df "$p" 2>/dev/null | awk 'NR==2 {print $1}')" 2>/dev/null | grep -q "FileVault: *Yes"; then echo on; else echo off; fi
+          return ;;
+      esac
+    fi
+    echo unknown
+    return
+  fi
+  if [[ "$(uname -s)" == Linux ]] && command -v findmnt >/dev/null 2>&1 && command -v lsblk >/dev/null 2>&1; then
+    src="$(findmnt -n -o SOURCE --target "$p" 2>/dev/null | sed 's/\[.*//')"
+    if [[ -n "$src" && -b "$src" ]]; then
+      # Any crypt device between the file system and the disk.
+      if lsblk -s -n -o TYPE "$src" 2>/dev/null | grep -qx crypt; then echo on; else echo off; fi
+      return
+    fi
+  fi
+  echo unknown
+}
+
+# The top of the synced folder a path is in, when it is in one: where the
+# operator's .dfirswarm-allow-synced marker goes.
+synced_folder_root() { # <path>
+  local p
+  p="$(cd "$1" 2>/dev/null && pwd -P || printf '%s' "$1")"
+  case "$p" in
+    */Library/CloudStorage/*) printf '%s\n' "$(printf '%s' "$p" | sed -E 's#^(.*/Library/CloudStorage/[^/]+).*#\1#')"; return 0 ;;
+    */Library/Mobile\ Documents/*) printf '%s\n' "${p%%/Library/Mobile Documents/*}/Library/Mobile Documents"; return 0 ;;
+    */Dropbox|*/Dropbox/*) printf '%s\n' "$(printf '%s' "$p" | sed -E 's#^(.*/Dropbox)(/.*)?$#\1#')"; return 0 ;;
+    */Google\ Drive/*) printf '%s\n' "$(printf '%s' "$p" | sed -E 's#^(.*/Google Drive)/.*#\1#')"; return 0 ;;
+    */OneDrive*) printf '%s\n' "$(printf '%s' "$p" | sed -E 's#^(.*/OneDrive[^/]*).*#\1#')"; return 0 ;;
+  esac
+  return 1
+}
+
+# The marker that lets material go into a synced folder, for a path in one:
+# a regular file .dfirswarm-allow-synced of this user's at the synced
+# folder's top or in any folder between it and the path. Prints the marker.
+synced_marker_for() { # <path>
+  local root p dir
+  root="$(synced_folder_root "$1")" || return 1
+  p="$(cd "$1" 2>/dev/null && pwd -P || printf '%s' "$1")"
+  dir="$p"
+  while [[ -n "$dir" && "$dir" != "/" ]]; do
+    if [[ -f "$dir/.dfirswarm-allow-synced" && ! -L "$dir/.dfirswarm-allow-synced" && -O "$dir/.dfirswarm-allow-synced" ]]; then
+      printf '%s\n' "$dir/.dfirswarm-allow-synced"
+      return 0
+    fi
+    [[ "$dir" == "$root" ]] && break
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
 # The host's clock as the run found it: its zone, and whether the host kept
 # it in sync where it can say (timedatectl; macOS has no unprivileged way,
 # and "unknown" is the answer there). The run's own processes — the agents,
@@ -551,9 +696,11 @@ redact_args_json() { # [args...]
   for a in "$@"; do
     if [[ "$redact" == env ]]; then out+=("${a%%=*}=<redacted>"); redact=0; continue; fi
     if [[ "$redact" == goal ]]; then out+=("<goal document, ${#a} chars>"); redact=0; continue; fi
+    if [[ "$redact" == notify ]]; then out+=("<notify command, ${#a} chars>"); redact=0; continue; fi
     case "$a" in
       --env) redact=env ;;
       --goal) redact=goal ;;
+      --notify) redact=notify ;;
     esac
     out+=("$a")
   done
@@ -584,9 +731,12 @@ operator_audit() { # <command> [args...]
   if [[ -s "$file" ]]; then
     prev="$(tail -n 1 "$file" | tr -d '\n' | { shasum -a 256 2>/dev/null || sha256sum; } | cut -d' ' -f1)"
   fi
+  # A command may add what it did (purge: what it destroyed).
+  local detail="${OPERATOR_AUDIT_DETAIL:-null}"
+  jq -e . >/dev/null 2>&1 <<<"$detail" || detail=null
   line="$(SWARM_OPERATOR_VIA="$via" operator_identity_json | jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cmd "$cmd" \
-    --argjson argv "$(redact_args_json "$@")" --arg cwd "$PWD" --arg prev "$prev" \
-    '{at: $at, command: $cmd, argv: $argv, cwd: $cwd} + . + {prev: (if $prev == "" then null else $prev end)}')" || { rmdir "$lock" 2>/dev/null; return 0; }
+    --argjson argv "$(redact_args_json "$@")" --arg cwd "$PWD" --arg prev "$prev" --argjson detail "$detail" \
+    '{at: $at, command: $cmd, argv: $argv, cwd: $cwd} + . + (if $detail == null then {} else {detail: $detail} end) + {prev: (if $prev == "" then null else $prev end)}')" || { rmdir "$lock" 2>/dev/null; return 0; }
   printf '%s\n' "$line" >> "$file"
   chmod 600 "$file" 2>/dev/null || true
   rmdir "$lock" 2>/dev/null || true
@@ -1236,7 +1386,7 @@ copy_tree_as_is() { # <src dir> <dst dir>
 }
 
 install_inputs() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4" entry name
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" verify="${5:-1}" entry name
   mkdir -p "$sandbox/inputs" "$sandbox/.inputs-pristine"
   # A link inside the evidence is the evidence's own and is copied as the
   # link it is. `cp -RL` followed every link on this host: an extracted
@@ -1295,7 +1445,7 @@ PY
   # modes here, once, before anything is read-only.
   find "$sandbox/inputs" "$sandbox/.inputs-pristine" -type f -exec chmod a-x {} + 2>/dev/null || true
   chmod -R a-w "$sandbox/inputs" "$sandbox/.inputs-pristine"
-  write_inputs_manifest "$sandbox" "$src" "$enforce" "$guard" copy
+  write_inputs_manifest "$sandbox" "$src" "$enforce" "$guard" copy "$verify"
 }
 
 # The one walk over inputs/ that every way of holding the evidence writes
@@ -1306,10 +1456,10 @@ PY
 # than dictating it; `image` skips symlinks, which an attached volume may
 # carry and a copy dereferenced.
 write_inputs_manifest() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4" held="$5"
-  python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" <<'PY'
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" held="$5" verify="${6:-0}"
+  python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" "$verify" <<'PY'
 import base64, hashlib, json, os, stat as _stat, sys, time
-sandbox, src, enforce, guard, held = sys.argv[1:]
+sandbox, src, enforce, guard, held, verify = sys.argv[1:]
 root = os.path.join(sandbox, "inputs")
 
 def named(entry, key, value):
@@ -1441,6 +1591,38 @@ if held == "copy":
 def disp(value):
     return os.fsencode(value).decode("utf-8", "replace")
 
+# And, unless --no-verify-copy, by content: each copied file's source is
+# read again and its SHA-256 compared with the copy's in the manifest. A
+# copy that differs from its source by content (a source still being
+# written, a short read on a network volume, a bad block) is the manifest
+# vouching for bytes the source never had.
+content_check = None
+if held == "copy" and verify == "1" and not problems:
+    started = time.time()
+    regular = [e for e in files if "special" not in e and "link" not in e and "link_b64" not in e]
+    want_bytes = sum(e["bytes"] for e in regular)
+    done_bytes, next_note, hashed, differ = 0, 2 << 30, 0, []
+    for e in regular:
+        raw = base64.b64decode(e["path_b64"]) if "path_b64" in e else e["path"].encode("utf-8")
+        source_path = os.path.join(os.fsencode(src), raw[len(b"inputs/"):])
+        digest = hashlib.sha256()
+        try:
+            with open(source_path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    digest.update(chunk)
+                    done_bytes += len(chunk)
+                    if want_bytes > (2 << 30) and done_bytes >= next_note:
+                        sys.stderr.write("Copy check:   %.1f of %.1f GiB read again from the source\n" % (done_bytes / (1 << 30), want_bytes / (1 << 30)))
+                        next_note += 2 << 30
+        except OSError as err:
+            differ.append("could not be read again from its source (%s): %s" % (err.strerror or err, disp(raw)))
+            continue
+        hashed += 1
+        if digest.hexdigest() != e["sha256"]:
+            differ.append("differs from its source by content: " + disp(raw))
+    content_check = {"by": "content", "files": hashed, "mismatches": len(differ), "seconds": round(time.time() - started, 1)}
+    problems.extend(differ)
+
 manifest = {
     "source": disp(src),
     "copied_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1450,7 +1632,10 @@ manifest = {
     "guard": guard,
     "digests": ["sha256", "sha1", "md5"]}
 if held == "copy":
-    manifest["source_checked"] = "names, kinds and sizes" if not problems else "MISMATCH"
+    if problems:
+        manifest["source_checked"] = "MISMATCH" if content_check is None else dict(content_check)
+    else:
+        manifest["source_checked"] = content_check if content_check is not None else "names, kinds and sizes"
 # How the evidence is held, always said: every reader words its custody
 # line from this (a copy, in place, an attached image).
 manifest["held"] = held
@@ -1470,6 +1655,8 @@ if problems:
     for line in problems:
         sys.stderr.write("  %s\n" % line)
     sys.stderr.write("A case-insensitive volume merges names that differ only in case or Unicode form, and a short read leaves a file short. Put the run on a volume that keeps the source's names (a case-sensitive APFS volume or the source's own file system), or use --inputs-bind to hold the evidence in place.\n")
+    if content_check is not None and content_check["mismatches"]:
+        sys.stderr.write("A file that differs by content was changed while it was copied, or read short: make sure nothing writes to the source, and copy again.\n")
     sys.exit(4)
 PY
 }
@@ -2560,12 +2747,220 @@ sandbox, n, tabs, splits, extra, *panes = sys.argv[1:]
 PY
 }
 
+# The kickoff's refusals that come after the sandbox exists in a real start,
+# as functions: the real start calls them where it always did, and
+# `start --check` calls the same code without writing the sandbox. They read
+# and set cmd_start's own variables (bash scope is dynamic): login_shell,
+# provider_env, auth_file, models_json.
+start_check_host_tools() {
+  local missing=()
+  command -v herdr >/dev/null 2>&1 || missing+=("herdr")
+  command -v pi >/dev/null 2>&1 || missing+=("pi")
+  command -v jq >/dev/null 2>&1 || missing+=("jq")
+  if [[ "$isolation" == "microvm" ]]; then
+    command -v node >/dev/null 2>&1 || missing+=("node (the VM manager and the hub run in it)")
+  fi
+  # Installed is not enough. Herdr starts each pane with the account's login
+  # shell, and the guard is a hook that shell reads at startup: a zsh reads
+  # $ZDOTDIR/.zshenv, a bash the .bashrc or .bash_profile under the HOME the
+  # pane is given. Any other shell reads neither. Measured on an Ubuntu server
+  # before the bash hook existed: an account with bash got every pane
+  # unguarded, every pane's own probe said `none`, and the record said the
+  # write guard was on. The check runs whenever a hook is written, which
+  # --inputs and --quarantine do even with --no-write-guard: the bash hook
+  # moves the panes' HOME, and a shell that reads no hook would keep it.
+  # A microVM run writes no hook: the pane only runs `msb exec`.
+  login_shell=""
+  # A check (start --check) writes no hook: whether the kickoff would write
+  # one is read off the options that make it.
+  if [[ "$isolation" != "microvm" ]] && [[ "$write_guard" -eq 1 || -f "$sandbox/.zsh/.zshenv" || ( "${CHECK_ONLY:-0}" -eq 1 && ( -n "${inputs_dir:-}" || "${quarantine:-0}" -eq 1 ) ) ]]; then
+    # From the account database, never from $SHELL: $SHELL is the shell that
+    # launched the kickoff, and Herdr asks the system what this account's
+    # login shell is. Where neither source answers, the check is skipped
+    # rather than guessed at — a false BLOCKER here stops a good run — and
+    # the panes' HOME is left alone, so only a zsh pane gets the hook.
+    if command -v getent >/dev/null 2>&1; then
+      login_shell="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)" || login_shell=""
+    elif command -v dscl >/dev/null 2>&1; then
+      login_shell="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk '{print $2}')" || login_shell=""
+    fi
+    case "$(basename "${login_shell:-unknown}")" in
+      zsh) command -v zsh >/dev/null 2>&1 || missing+=("zsh (the pane hook runs in it)") ;;
+      bash) ;;
+      unknown)
+        echo "WARN: this account's login shell could not be read (no getent or dscl answer); only a zsh pane will read the guard hook." >&2
+        if [[ "$write_guard" -eq 1 ]]; then
+          command -v zsh >/dev/null 2>&1 || missing+=("zsh (the pane hook runs in it)")
+        fi
+        ;;
+      *)
+        if [[ "$write_guard" -eq 1 || "$inputs_enforce" == "on" ]]; then
+          echo "BLOCKER: this account's login shell is $login_shell, and the kernel guard is a hook that only a zsh or a bash reads. The panes would start unguarded while the record said they were guarded." >&2
+          echo "         chsh -s $(command -v zsh || command -v bash || echo /bin/bash) $(id -un)   (then open a new session), or --no-write-guard (and --inputs-enforce auto) to run without it." >&2
+          exit 2
+        fi
+        echo "WARN: this account's login shell is $login_shell, which reads neither pane hook: the panes run without the kernel guard (inputs/ is held by detection and healing only), and the record will say so." >&2
+        ;;
+    esac
+  fi
+  command -v python3 >/dev/null 2>&1 || missing+=("python3")
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "BLOCKER: missing ${missing[*]}." >&2
+    exit 1
+  fi
+}
+
+start_check_key_from_env() {
+  # In a VM no key travels at all: Pi on this host resolves each one, from
+  # its store or from the environment, and msb swaps it in on the way out.
+  if [[ "$key_from_env" -eq 1 && "$isolation" != "microvm" ]]; then
+    # One key per provider on the team. Handing the panes whichever key the
+    # scan happened to find first leaves the other half of a mixed swarm
+    # unable to authenticate at all.
+    local one_model detected_key forwarded_keys=""
+    while IFS= read -r one_model; do
+      [[ -n "$one_model" ]] || continue
+      if provider_is_local "$one_model"; then
+        echo "BLOCKER: --key-from-env, but $one_model is a local server and has no key to forward." >&2
+        echo "Drop --key-from-env; a placeholder apiKey in models.json is all Pi wants for it." >&2
+        exit 1
+      fi
+      detected_key=""
+      if ! detected_key="$(detect_provider_key "$one_model")" || [[ "$detected_key" == "$auth_file" ]]; then
+        echo "BLOCKER: --key-from-env but no provider key is exported for $one_model." >&2
+        echo "Export the matching key in this shell (DEEPSEEK_API_KEY, OPENAI_API_KEY, ...)." >&2
+        echo "A subscription login (Claude, ChatGPT/Codex) needs no key: just drop --key-from-env." >&2
+        exit 1
+      fi
+      case " $forwarded_keys " in
+        *" $detected_key "*) continue ;;
+      esac
+      forwarded_keys+="${forwarded_keys:+ }${detected_key}"
+      provider_env+=(--env "${detected_key}=${!detected_key}")
+      echo "Key:          \$${detected_key} passed to each pane for $one_model (--key-from-env; visible in ps)"
+    done < <(credential_models)
+  fi
+}
+
+start_check_credentials() {
+  # One gate, and it is Pi's own. An OAuth subscription, a stored API key and a
+  # models.json provider all come back "ready" here, which is why a swarm runs
+  # on a Claude or ChatGPT plan with nothing special asked of the operator.
+  # Every distinct model is checked: a mixed team that can only authenticate
+  # half of itself should fail at kickoff, not three agents into the run.
+  local one_model auth_report auth_status auth_type auth_provider auth_reason
+  while IFS= read -r one_model; do
+    [[ -n "$one_model" ]] || continue
+    # A local server is asked before Pi is: whether it answers, whether it has
+    # the model, and what it will really do — all things a credential check
+    # cannot see and a pane would only discover by dying.
+    if provider_is_local "$one_model"; then
+      preflight_local_model "$one_model" "$models_json" || exit 1
+    fi
+    auth_report="$(pi_auth_report "$one_model")"
+    auth_status="$(printf '%s' "$auth_report" | cut -f1)"
+    auth_type="$(printf '%s' "$auth_report" | cut -f2)"
+    auth_provider="$(printf '%s' "$auth_report" | cut -f3)"
+    auth_reason="$(printf '%s' "$auth_report" | cut -f4)"
+    # Pi resolves a model *pattern*, so a typo can land on a provider the run
+    # was never configured for — and then netguard allowlists the wrong hosts.
+    if [[ "$auth_status" == "ready" && -n "$auth_provider" && "$auth_provider" != "${one_model%%/*}" ]]; then
+      {
+        echo "BLOCKER: $one_model resolves to provider '$auth_provider', not '${one_model%%/*}'."
+        echo
+        echo "Pi matches a model pattern rather than an exact id, so this run would"
+        echo "authenticate against one provider while the netguard allowlist and the"
+        echo "recorded model say another. Name the model exactly:"
+        echo
+        echo "  pi --list-models | grep ${one_model##*/}"
+      } >&2
+      exit 1
+    fi
+    if [[ "$auth_status" != "ready" ]] && provider_is_local "$one_model"; then
+      # Pi lists a provider only when it has some credential, even one the
+      # server ignores. The fix is a placeholder, not a login, and saying
+      # "pi /login" here sends the operator to the wrong place.
+      {
+        echo "BLOCKER: Pi will not use $one_model without a credential, and a local server has none (pi auth check: ${auth_status:-no answer}${auth_reason:+, $auth_reason})."
+        echo
+        if [[ "${one_model%%/*}" == "llama.cpp" ]]; then
+          echo "Pi's own llama.cpp provider takes its credential from the shell:"
+          echo
+          echo "  export LLAMA_BASE_URL=$(provider_base_url "$one_model")"
+          echo "  export LLAMA_API_KEY=local        # any value; the server ignores it"
+          echo
+          echo "or run 'pi' once and use /login llama.cpp."
+        else
+          echo "Give '${one_model%%/*}' a placeholder apiKey in $models_json — Pi treats it as"
+          echo "configured, and the server never reads it:"
+          echo
+          echo "  \"${one_model%%/*}\": {"
+          echo "    \"baseUrl\": \"$(provider_base_url "$one_model")\","
+          echo "    \"api\": \"openai-completions\","
+          echo "    \"apiKey\": \"local\","
+          echo "    \"compat\": { \"supportsDeveloperRole\": false, \"supportsReasoningEffort\": false,"
+          echo "                \"supportsStore\": false, \"maxTokensField\": \"max_tokens\" },"
+          echo "    \"models\": [{ \"id\": \"${one_model#*/}\", \"contextWindow\": 131072, \"maxTokens\": 32768 }]"
+          echo "  }"
+        fi
+        echo
+        echo "Then: pi auth check --model $one_model --json    # expect \"ready\""
+        echo "There is no key to log in with and nothing for --key-from-env to forward."
+      } >&2
+      exit 1
+    fi
+    if [[ "$auth_status" != "ready" ]]; then
+      {
+        echo "BLOCKER: Pi cannot authenticate $one_model (pi auth check: ${auth_status:-no answer}${auth_reason:+, $auth_reason})."
+        echo
+        echo "Log in once and Pi keeps the credential itself:"
+        echo
+        echo "  pi /login          # an API key, or a Claude / ChatGPT subscription"
+        echo
+        echo "A subscription login needs no API key and no --key-from-env."
+        if models_json_declares_key "$models_json" "${one_model%%/*}" &&
+           ! models_json_has_key "$models_json" "${one_model%%/*}"; then
+          echo
+          if [[ "$isolation" == "microvm" ]]; then
+            echo "Note: $models_json gives '${one_model%%/*}' an apiKey that interpolates an"
+            echo "environment variable which is unset here. In a microVM run the key has to be"
+            echo "a literal there or in Pi's store: --env and --key-from-env are refused."
+          else
+            echo "Note: $models_json gives '${one_model%%/*}' an apiKey that interpolates an"
+            echo "environment variable which is unset here. Export it, pass it with --env, or"
+            echo "put a literal key there."
+          fi
+        fi
+        if [[ "$isolation" != "microvm" ]]; then
+          echo
+          echo "On a host with no persistent home, export the key and pass it through:"
+          echo
+          echo "  export DEEPSEEK_API_KEY=..."
+          echo "  scripts/swarm.sh start --key-from-env ..."
+        fi
+      } >&2
+      exit 1
+    fi
+    if provider_is_local "$one_model"; then
+      echo "Model:        $one_model -> local endpoint $(provider_base_url "$one_model") (no metered cost)"
+    else
+      case "$auth_type" in
+        oauth) echo "Key:          $one_model -> $auth_provider subscription (OAuth, refreshed by Pi)" ;;
+        *) echo "Key:          $one_model -> $auth_provider $auth_type via Pi's own store" ;;
+      esac
+    fi
+  done < <(credential_models)
+}
+
 cmd_start() {
   local start_args=("$@")
   # The host's zone before the run's processes are put in UTC.
   local host_clock
   host_clock="$(host_clock_json)"
   export TZ=UTC
+  # The run's own daemons (the watchdog, the hub's clear-up, notify) find
+  # this registry whichever copy of the harness they run from.
+  export SWARM_RUNS_DIR="$RUNS_DIR"
   # The command this run was started with, kept so the console and the report
   # can answer "what were these agents given?" without the operator having to
   # remember. A `--goal` document is replaced by its length — the goal itself
@@ -2580,8 +2975,15 @@ cmd_start() {
       redact_next=0
       continue
     fi
+    # A notify command often carries a webhook's secret in its URL.
+    if [[ "$redact_next" -eq 2 ]]; then
+      START_COMMAND+=" '<notify command, ${#a} chars>'"
+      redact_next=0
+      continue
+    fi
     case "$a" in
       --env) redact_next=1; START_COMMAND+=" $a" ;;
+      --notify) redact_next=2; START_COMMAND+=" $a" ;;
       --goal) START_COMMAND+=" $a" ;;
       *)
         if [[ "$a" == *$'\n'* ]]; then
@@ -2606,6 +3008,11 @@ cmd_start() {
   local allow_hosts="" tools_from="" catalog=0 toolbox="off" toolbox_required=0 quarantine=0 cap_per_agent="" case_id="" examiner=""
   local packs=""
   local allow_synced=0 custody_timeout="${SWARM_CUSTODY_TIMEOUT:-14400}"
+  local notify_cmd="" allow_root=0 verify_copy=1 ledger_from="" synced_allowed_by="" disk_encryption="unknown" model_gateway=0
+  # start --check: every refusal and preflight a start makes, the same code,
+  # and nothing written (no sandbox, no registry entry, no daemon, no VM, no
+  # pull). Exit 0 when the start would go ahead, 2 when it would be refused.
+  CHECK_ONLY=0
   local write_guard=1
   # Where the agents live: one microVM each (the default), or host
   # processes (--isolation host, unisolated). isolation_given says the
@@ -2664,6 +3071,16 @@ cmd_start() {
         ;;
       --sandbox) sandbox="$2"; shift 2 ;;
       --allow-synced-folder) allow_synced=1; shift ;;
+      --notify)
+        [[ -n "${2:-}" ]] || { echo "BLOCKER: --notify takes a command." >&2; exit 2; }
+        notify_cmd="$2"; shift 2 ;;
+      --allow-root) allow_root=1; shift ;;
+      --model-gateway) model_gateway=1; shift ;;
+      --check) CHECK_ONLY=1; shift ;;
+      --no-verify-copy) verify_copy=0; shift ;;
+      --ledger-from)
+        [[ "${2:-}" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "BLOCKER: --ledger-from takes a run id, got ${2:-nothing}." >&2; exit 2; }
+        ledger_from="$2"; shift 2 ;;
       --custody-timeout)
         [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { echo "BLOCKER: --custody-timeout takes a number of seconds, got ${2:-nothing}." >&2; exit 2; }
         custody_timeout="$2"; shift 2 ;;
@@ -2735,7 +3152,17 @@ cmd_start() {
     esac
   done
   require_absolute_agent_dir
+  if [[ "$CHECK_ONLY" -eq 1 ]]; then
+    # Whatever refuses the start, whatever its own code: 2. The temporary
+    # files the checks make (the goal as read, a prior ledger) go with it.
+    CHECK_TMP=()
+    trap 'check_rc=$?; trap - EXIT; rm -f ${CHECK_TMP[@]+"${CHECK_TMP[@]}"}; [[ $check_rc -eq 0 ]] || exit 2; exit 0' EXIT
+  fi
 
+  if [[ "$model_gateway" -eq 1 && "$isolation" == "host" ]]; then
+    echo "BLOCKER: --model-gateway fronts VM runs; host runs keep their keys in the panes' environment." >&2
+    exit 2
+  fi
   case "$isolation" in
     host|microvm) ;;
     *) echo "BLOCKER: --isolation must be host or microvm (got $isolation)." >&2; exit 2 ;;
@@ -2932,6 +3359,7 @@ cmd_start() {
 
   local goal_file
   goal_file="$(mktemp)"
+  [[ "$CHECK_ONLY" -eq 1 ]] && CHECK_TMP+=("$goal_file")
   if [[ -n "$goal" ]]; then
     printf '%s\n' "$goal" > "$goal_file"
   else
@@ -3275,6 +3703,8 @@ STRIP
       fi
       if [[ "$(jq -r '.image_present' <<<"$vm_probe" 2>/dev/null)" == "true" ]]; then
         vm_image_digest="$(jq -r '.image_digest // empty' <<<"$vm_probe")"
+      elif [[ "$CHECK_ONLY" -eq 1 ]]; then
+        echo "WARN: $vm_image is not on this host: the start would pull it first, and stop if it cannot be pulled (a check pulls nothing)." >&2
       else
         # Pulled here, before the run's clock starts and before anything is
         # written: N VMs pulling a multi-gigabyte image at once used to spend
@@ -3331,8 +3761,12 @@ STRIP
 
   # Resolve before any recursive delete: `--sandbox .` or a symlinked path
   # would otherwise clear a work/ directory outside this run.
-  mkdir -p "$sandbox"
-  sandbox="$(cd "$sandbox" && pwd -P)"
+  if [[ "$CHECK_ONLY" -eq 1 ]]; then
+    sandbox="$(resolve_path_nocreate "$sandbox")"
+  else
+    mkdir -p "$sandbox"
+    sandbox="$(cd "$sandbox" && pwd -P)"
+  fi
   # A sandbox another run is still using is not this run's to clear: its
   # record says running, or its VMs are still up (a VM mounts the sandbox,
   # and clearing it under a live agent is how its work goes missing).
@@ -3341,6 +3775,51 @@ STRIP
   if [[ -n "$busy" ]]; then
     echo "BLOCKER: run $busy is still running in $sandbox; stop it first (scripts/swarm.sh stop $busy) or use another --sandbox." >&2
     exit 2
+  fi
+  # A run on hold keeps its material: a new run here would clear it.
+  # By the resolved path: a record may name the sandbox through a link.
+  local held_run="" h_id h_sb
+  while IFS=$'\t' read -r h_id h_sb; do
+    [[ -n "$h_id" && -d "$h_sb" ]] || continue
+    if [[ "$(cd "$h_sb" && pwd -P)" == "$sandbox" ]]; then held_run="$h_id"; break; fi
+  done < <(jq -r '.runs[]? | select((.hold | type) == "object") | [.id, .sandbox] | @tsv' "$REGISTRY" 2>/dev/null)
+  if [[ -n "$held_run" ]]; then
+    echo "BLOCKER: run $held_run in $sandbox is on hold ($(json_get "$held_run" | jq -r '.hold.reason // "no reason given"')); a new run there would clear its material. Use another --sandbox, or scripts/swarm.sh release $held_run first." >&2
+    exit 2
+  fi
+  # An earlier run's ledger, brought in as hypotheses: read now, before a
+  # reused sandbox (it may be that run's own) is cleared.
+  local prior_tmp="" LEDGER_FROM_RECORD="null"
+  if [[ -n "$ledger_from" ]]; then
+    local lf_rec lf_state lf_case lf_sandbox lf_out
+    lf_rec="$(json_get "$ledger_from")"
+    [[ -n "$lf_rec" ]] || { echo "BLOCKER: --ledger-from $ledger_from: no such run in $REGISTRY." >&2; exit 2; }
+    lf_state="$(jq -r '.state // empty' <<<"$lf_rec")"
+    case "$lf_state" in
+      running|prepared|finishing)
+        echo "BLOCKER: --ledger-from $ledger_from: that run is still $lf_state; bring its ledger in once it has ended." >&2; exit 2 ;;
+      purged)
+        echo "BLOCKER: --ledger-from $ledger_from: that run was purged; its ledger is gone." >&2; exit 2 ;;
+    esac
+    # A run on hold for one case keeps its claims to that case.
+    lf_case="$(jq -r 'if (.hold | type) == "object" then (.case_id // "") else "" end' <<<"$lf_rec")"
+    if [[ -n "$lf_case" && "$lf_case" != "$case_id" ]]; then
+      echo "BLOCKER: --ledger-from $ledger_from: that run is on hold for case $lf_case, and this run is $([[ -n "$case_id" ]] && printf 'case %s' "$case_id" || printf 'not that case'); its claims stay with its case." >&2
+      exit 2
+    fi
+    lf_sandbox="$(jq -r '.sandbox // empty' <<<"$lf_rec")"
+    if [[ ! -f "$lf_sandbox/ledger/entries.jsonl" || -L "$lf_sandbox/ledger/entries.jsonl" ]]; then
+      echo "BLOCKER: --ledger-from $ledger_from: its ledger ($lf_sandbox/ledger/entries.jsonl) is not there." >&2
+      exit 2
+    fi
+    prior_tmp="$(mktemp "${TMPDIR:-/tmp}/dfs-prior.XXXXXX")"
+    [[ "$CHECK_ONLY" -eq 1 ]] && CHECK_TMP+=("$prior_tmp")
+    if ! lf_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/review.ts" prior --runs "$RUNS_DIR" --run "$ledger_from" --sandbox "$lf_sandbox" --out "$prior_tmp")"; then
+      rm -f "$prior_tmp"
+      echo "BLOCKER: --ledger-from $ledger_from: its ledger could not be read: $lf_out" >&2
+      exit 2
+    fi
+    LEDGER_FROM_RECORD="$(jq -c --arg run "$ledger_from" '{run: $run, entries: .entries, reviewed: .reviewed, ledger_sha256: .ledger_sha256}' <<<"$lf_out")"
   fi
   for prev_run in $(jq -r '.run // empty' "$sandbox"/vm/*.json 2>/dev/null | sort -u); do
     if [[ -n "$(vm_cli list --run "$prev_run" 2>/dev/null | jq -r '.vms[]?.name' 2>/dev/null)" ]]; then
@@ -3357,7 +3836,11 @@ STRIP
   # are writable to root whatever their bits say. Only a kernel guard (or a
   # VM) still holds.
   if [[ "$(id -u)" -eq 0 ]]; then
-    echo "WARN: this run is started as root: the read-only modes on the evidence, its pristine copy, the manifest and the anchor do not bind root.$([[ "$isolation" == "microvm" ]] && printf ' The VMs still hold the evidence read-only.' || printf ' Only the kernel guard still holds them for the panes; run as an ordinary user.')" >&2
+    if [[ "$isolation" == "host" && "$allow_root" -eq 0 ]]; then
+      echo "BLOCKER: a host run as root: the panes would be root, and the read-only modes on the evidence, its pristine copy, the manifest and the anchor do not bind root. Run as an ordinary user, run the agents in microVMs (the default), or pass --allow-root to take that on." >&2
+      exit 2
+    fi
+    echo "WARN: this run is started as root: the read-only modes on the evidence, its pristine copy, the manifest and the anchor do not bind root.$([[ "$isolation" == "microvm" ]] && printf ' The VMs still hold the evidence read-only.' || printf ' Only the kernel guard still holds them for the panes (--allow-root).')" >&2
   fi
   # A folder a sync client uploads, found before anything is written: the
   # check used to come after the evidence was already copied there, twice
@@ -3373,20 +3856,38 @@ STRIP
     [[ -n "$inputs_dir" && "$inputs_bind" -eq 0 ]] && synced_what+=("the copy of the evidence (inputs/ and .inputs-pristine/)")
   fi
   [[ -n "$synced_disks" ]] && synced_what+=("each VM's kept disk ($disks_dir, $synced_disks)")
+  local synced_marker="" synced_marker_disks=""
+  [[ -n "${synced:-}" ]] && synced_marker="$(synced_marker_for "$sandbox" || true)"
+  [[ -n "$synced_disks" ]] && synced_marker_disks="$(synced_marker_for "$disks_dir" || true)"
   if [[ ${#synced_what[@]} -gt 0 ]]; then
+    # Every synced destination needs its own leave: the flag covers all of
+    # them, a marker only the folder it is in.
+    local marker_covers=1
+    [[ -n "${synced:-}" && -n "$inputs_dir" && "$inputs_bind" -eq 0 && -z "$synced_marker" ]] && marker_covers=0
+    [[ -n "$synced_disks" && -z "$synced_marker_disks" ]] && marker_covers=0
     if [[ "$allow_synced" -eq 1 ]]; then
+      synced_allowed_by="flag"
       echo "WARN: going into a synced folder as --allow-synced-folder asks: $(IFS=';'; printf '%s' "${synced_what[*]}" | sed 's/;/; /g'). Its sync client will upload them." >&2
+    elif [[ "$marker_covers" -eq 1 ]]; then
+      synced_allowed_by="marker"
+      echo "WARN: going into a synced folder as the marker $(printf '%s\n' "$synced_marker" "$synced_marker_disks" | awk 'NF && !seen[$0]++' | paste -sd, - | sed 's/,/, /g') allows: $(IFS=';'; printf '%s' "${synced_what[*]}" | sed 's/;/; /g'). Its sync client will upload them; remove the marker to refuse this again." >&2
     else
       {
         echo "BLOCKER: these would go into a folder a sync client uploads, and leave this machine:"
         printf '  %s\n' "${synced_what[@]}"
-        echo "Pass --sandbox$([[ -n "$synced_disks" ]] && printf ' and --vm-snapshot-dir') outside it (or SWARM_RUNS_DIR for every run), or --allow-synced-folder when the material may be uploaded."
+        echo "Pass --sandbox$([[ -n "$synced_disks" ]] && printf ' and --vm-snapshot-dir') outside it (or SWARM_RUNS_DIR for every run), or --allow-synced-folder when the material may be uploaded (a .dfirswarm-allow-synced file at the top of the synced folder says so for every run under it)."
       } >&2
       exit 2
     fi
   fi
   if [[ -n "${synced:-}" ]]; then
     echo "WARN: this run is kept in a synced folder ($synced): what the agents derive from the evidence — work/, the trace, their sessions — will be uploaded by its sync client. Pass --sandbox outside it for a case whose material must stay on this machine." >&2
+  fi
+  # The volume the run is kept on, encrypted at rest or not: recorded, and
+  # said when it is not.
+  disk_encryption="$(disk_encryption_of "$(dirname "$sandbox")")"
+  if [[ "$disk_encryption" == off ]]; then
+    echo "WARN: the volume this run is kept on ($(dirname "$sandbox")) is not encrypted at rest: a lost or stolen disk hands over the evidence copy, the VMs' disks and everything the agents derived. Turn on FileVault (macOS) or keep runs on an encrypted volume (SWARM_RUNS_DIR)." >&2
   fi
   if [[ -n "$inputs_dir" ]]; then
     case "$inputs_dir/" in
@@ -3395,6 +3896,21 @@ STRIP
     case "$sandbox/" in
       "$inputs_dir/"*) echo "BLOCKER: the sandbox $sandbox is inside --inputs $inputs_dir." >&2; exit 2 ;;
     esac
+  fi
+  if [[ "$CHECK_ONLY" -eq 1 ]]; then
+    # What a real start checks once the sandbox exists, on this host: the
+    # programs, the login shell, the keys Pi would use. Nothing is written.
+    # A prepared run (--no-start) stops before these, as a real one does.
+    if [[ "$start_agents" -eq 1 ]]; then
+      local login_shell="" provider_env=() auth_file models_json
+      start_check_host_tools
+      auth_file="$(pi_auth_file)"
+      models_json="$(pi_agent_dir)/models.json"
+      start_check_key_from_env
+      start_check_credentials
+    fi
+    echo "Check:        the start would go ahead ($isolation, $n agent(s), sandbox $sandbox); nothing was written"
+    exit 0
   fi
   mkdir -p \
     "$sandbox/threads/main" \
@@ -3449,7 +3965,7 @@ STRIP
     if [[ "$inputs_bind" -eq 1 ]]; then
       bind_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard"
     else
-      install_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard"
+      install_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$verify_copy"
     fi
   elif [[ -n "$inputs_image" ]]; then
     attach_inputs_image "$sandbox" "$inputs_image" >/dev/null
@@ -3838,6 +4354,26 @@ STRIP
     HOST_CAPS_FOR_CONTRACT="$host_caps_json" WRITE_GUARD_FOR_CONTRACT="$write_guard_mode" \
     ATTRIBUTION_FOR_CONTRACT="$attribution" ISOLATION_FOR_CONTRACT="$isolation" VM_HOSTS_FOR_CONTRACT="$vm_hosts" \
     render_contract "$sandbox" "$swarm_id" "$n" "$cap" "$wall" "$goal_file" "${agent_ids[@]}"
+  # An earlier run's claims, when --ledger-from asked for them: read-only in
+  # the run (the VMs' floor is read-only; a host run's mode and write guard),
+  # and never in this run's ledger.
+  if [[ -e "$sandbox/prior" ]]; then
+    chmod -R u+w "$sandbox/prior" 2>/dev/null || true
+    rm -rf "$sandbox/prior"
+  fi
+  if [[ -n "$prior_tmp" ]]; then
+    mkdir -p "$sandbox/prior"
+    mv "$prior_tmp" "$sandbox/prior/ledger.md"
+    chmod 444 "$sandbox/prior/ledger.md"
+    chmod 555 "$sandbox/prior"
+    {
+      printf '\n## An earlier run'"'"'s claims (prior/ledger.md)\n\n'
+      printf 'prior/ledger.md holds %s ledger entr%s of run %s, %s. They are claims to re-derive or refute from the evidence, not findings, and none of them is in this run'"'"'s ledger. A claim of yours that rests on one must cite what you read in the evidence, never the prior ledger. Refuting one is as useful as confirming it.\n' \
+        "$(jq -r '.entries' <<<"$LEDGER_FROM_RECORD")" "$([[ "$(jq -r '.entries' <<<"$LEDGER_FROM_RECORD")" == 1 ]] && echo y || echo ies)" "$ledger_from" \
+        "$([[ "$(jq -r '.reviewed' <<<"$LEDGER_FROM_RECORD")" == true ]] && echo 'the ones its examiner accepted' || echo 'unreviewed: no examiner has accepted any of them')"
+    } >> "$sandbox/SWARM.md"
+    echo "Prior claims: $(jq -r '.entries' <<<"$LEDGER_FROM_RECORD") entr$([[ "$(jq -r '.entries' <<<"$LEDGER_FROM_RECORD")" == 1 ]] && echo y || echo ies) of run $ledger_from in prior/ledger.md, as hypotheses ($([[ "$(jq -r '.reviewed' <<<"$LEDGER_FROM_RECORD")" == true ]] && echo 'examiner-accepted only' || echo 'unreviewed'))"
+  fi
   mkdir -p "$sandbox/.pi"
   cp "$ROOT/prompts/worker-system.md" "$sandbox/.pi/SYSTEM.md"
   # Pi's own compaction settings, pinned per run: a pane read whatever the
@@ -3917,6 +4453,12 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson provenance "$(provenance_json)" \
     --argjson custody_timeout "$custody_timeout" \
     --argjson host_clock "$host_clock" \
+    --argjson notify "$([[ -n "$notify_cmd" ]] && echo true || echo false)" \
+    --arg disk_encryption "$disk_encryption" \
+    --arg synced_allowed_by "$synced_allowed_by" \
+    --argjson ledger_from "$LEDGER_FROM_RECORD" \
+    --argjson allow_root "$allow_root" \
+    --argjson model_gateway "$model_gateway" \
     '{
       id: $id,
       "label": $run_label,
@@ -3973,10 +4515,17 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       agent_models: $agent_models,
       isolation: (if $isolation == "microvm"
         then {mode: "microvm", runtime: "microsandbox", image: $vm_image, image_digest: (if $vm_image_digest == "" then null else $vm_image_digest end), cpus: $vm_cpus, memory_mib: $vm_memory, disk_mib: $vm_disk, snapshot: ($vm_snapshot == 1), oauth_allowed: ($allow_oauth_in_vm == 1)}
+          + (if $model_gateway == 1 then {model_gateway: {on: true}} else {} end)
         else {mode: "host"} end),
       provenance: $provenance,
       host_clock: $host_clock,
       custody_timeout_sec: $custody_timeout,
+      notify: $notify,
+      disk_encryption: $disk_encryption,
+      synced_folder_allowed_by: (if $synced_allowed_by == "" then null else $synced_allowed_by end),
+      ledger_from: $ledger_from,
+      allow_root: ($allow_root == 1),
+      hold: null,
       started_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
       state: "prepared"
     }')"
@@ -3984,12 +4533,24 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # where no agent reaches it: custody compares the manifest against this,
   # so a manifest rewritten inside the run is caught rather than trusted.
   registry_upsert "$rec" || exit 1
+  # The operator's notify command, outside the run and 0600: a webhook's
+  # URL is often its secret, and nothing an agent writes may name what the
+  # host runs.
+  if [[ -n "$notify_cmd" ]]; then
+    ( umask 077; mkdir -p "$RUNS_DIR/notify" && chmod 700 "$RUNS_DIR/notify" && rm -f "$RUNS_DIR/notify/$swarm_id.cmd" && printf '%s\n' "$notify_cmd" > "$RUNS_DIR/notify/$swarm_id.cmd" && chmod 600 "$RUNS_DIR/notify/$swarm_id.cmd" ) \
+      || echo "WARN: the notify command could not be kept in $RUNS_DIR/notify/; nothing will be notified." >&2
+  fi
   # From here the run is in the registry: any exit that does not reach the
   # end of the kickoff puts away what was started and says the run failed.
   kickoff_arm "$sandbox" "$swarm_id" "$isolation"
 
   echo "Swarm id:     $swarm_id"
   echo "Label:        $label"
+  [[ -n "$notify_cmd" ]] && echo "Notify:       your command runs on finished, finish_failed, stop_incomplete, budget_cap, wall_clock, evidence_changed, chain_broken, agent_dead, collector_unreachable, hub_down (kept in $RUNS_DIR/notify/, 0600)"
+  local disk_words="of unknown encryption (the host did not say)"
+  [[ "$disk_encryption" == on ]] && disk_words="encrypted at rest"
+  [[ "$disk_encryption" == off ]] && disk_words="NOT encrypted at rest"
+  echo "Disk:         the runs volume is $disk_words"
   echo "Isolated cwd: $sandbox"
   echo "N:            $n (${agent_ids[*]})"
   if [[ "$isolation" == "microvm" ]]; then
@@ -4144,59 +4705,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     return 0
   fi
 
-  local missing=()
-  command -v herdr >/dev/null 2>&1 || missing+=("herdr")
-  command -v pi >/dev/null 2>&1 || missing+=("pi")
-  command -v jq >/dev/null 2>&1 || missing+=("jq")
-  if [[ "$isolation" == "microvm" ]]; then
-    command -v node >/dev/null 2>&1 || missing+=("node (the VM manager and the hub run in it)")
-  fi
-  # Installed is not enough. Herdr starts each pane with the account's login
-  # shell, and the guard is a hook that shell reads at startup: a zsh reads
-  # $ZDOTDIR/.zshenv, a bash the .bashrc or .bash_profile under the HOME the
-  # pane is given. Any other shell reads neither. Measured on an Ubuntu server
-  # before the bash hook existed: an account with bash got every pane
-  # unguarded, every pane's own probe said `none`, and the record said the
-  # write guard was on. The check runs whenever a hook is written, which
-  # --inputs and --quarantine do even with --no-write-guard: the bash hook
-  # moves the panes' HOME, and a shell that reads no hook would keep it.
-  # A microVM run writes no hook: the pane only runs `msb exec`.
   local login_shell=""
-  if [[ "$isolation" != "microvm" ]] && [[ "$write_guard" -eq 1 || -f "$sandbox/.zsh/.zshenv" ]]; then
-    # From the account database, never from $SHELL: $SHELL is the shell that
-    # launched the kickoff, and Herdr asks the system what this account's
-    # login shell is. Where neither source answers, the check is skipped
-    # rather than guessed at — a false BLOCKER here stops a good run — and
-    # the panes' HOME is left alone, so only a zsh pane gets the hook.
-    if command -v getent >/dev/null 2>&1; then
-      login_shell="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)" || login_shell=""
-    elif command -v dscl >/dev/null 2>&1; then
-      login_shell="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk '{print $2}')" || login_shell=""
-    fi
-    case "$(basename "${login_shell:-unknown}")" in
-      zsh) command -v zsh >/dev/null 2>&1 || missing+=("zsh (the pane hook runs in it)") ;;
-      bash) ;;
-      unknown)
-        echo "WARN: this account's login shell could not be read (no getent or dscl answer); only a zsh pane will read the guard hook." >&2
-        if [[ "$write_guard" -eq 1 ]]; then
-          command -v zsh >/dev/null 2>&1 || missing+=("zsh (the pane hook runs in it)")
-        fi
-        ;;
-      *)
-        if [[ "$write_guard" -eq 1 || "$inputs_enforce" == "on" ]]; then
-          echo "BLOCKER: this account's login shell is $login_shell, and the kernel guard is a hook that only a zsh or a bash reads. The panes would start unguarded while the record said they were guarded." >&2
-          echo "         chsh -s $(command -v zsh || command -v bash || echo /bin/bash) $(id -un)   (then open a new session), or --no-write-guard (and --inputs-enforce auto) to run without it." >&2
-          exit 2
-        fi
-        echo "WARN: this account's login shell is $login_shell, which reads neither pane hook: the panes run without the kernel guard (inputs/ is held by detection and healing only), and the record will say so." >&2
-        ;;
-    esac
-  fi
-  command -v python3 >/dev/null 2>&1 || missing+=("python3")
-  if [[ ${#missing[@]} -gt 0 ]]; then
-    echo "BLOCKER: missing ${missing[*]}." >&2
-    exit 1
-  fi
+  start_check_host_tools
 
   # Pi reads its own credential store by default, so the key never appears in
   # this process tree. `--key-from-env` is for hosts with no persistent home
@@ -4270,143 +4780,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   local auth_file models_json
   auth_file="$(pi_auth_file)"
   models_json="$(pi_agent_dir)/models.json"
-  # In a VM no key travels at all: Pi on this host resolves each one, from
-  # its store or from the environment, and msb swaps it in on the way out.
-  if [[ "$key_from_env" -eq 1 && "$isolation" != "microvm" ]]; then
-    # One key per provider on the team. Handing the panes whichever key the
-    # scan happened to find first leaves the other half of a mixed swarm
-    # unable to authenticate at all.
-    local one_model detected_key forwarded_keys=""
-    while IFS= read -r one_model; do
-      [[ -n "$one_model" ]] || continue
-      if provider_is_local "$one_model"; then
-        echo "BLOCKER: --key-from-env, but $one_model is a local server and has no key to forward." >&2
-        echo "Drop --key-from-env; a placeholder apiKey in models.json is all Pi wants for it." >&2
-        exit 1
-      fi
-      detected_key=""
-      if ! detected_key="$(detect_provider_key "$one_model")" || [[ "$detected_key" == "$auth_file" ]]; then
-        echo "BLOCKER: --key-from-env but no provider key is exported for $one_model." >&2
-        echo "Export the matching key in this shell (DEEPSEEK_API_KEY, OPENAI_API_KEY, ...)." >&2
-        echo "A subscription login (Claude, ChatGPT/Codex) needs no key: just drop --key-from-env." >&2
-        exit 1
-      fi
-      case " $forwarded_keys " in
-        *" $detected_key "*) continue ;;
-      esac
-      forwarded_keys+="${forwarded_keys:+ }${detected_key}"
-      provider_env+=(--env "${detected_key}=${!detected_key}")
-      echo "Key:          \$${detected_key} passed to each pane for $one_model (--key-from-env; visible in ps)"
-    done < <(credential_models)
-  fi
+  start_check_key_from_env
 
-  # One gate, and it is Pi's own. An OAuth subscription, a stored API key and a
-  # models.json provider all come back "ready" here, which is why a swarm runs
-  # on a Claude or ChatGPT plan with nothing special asked of the operator.
-  # Every distinct model is checked: a mixed team that can only authenticate
-  # half of itself should fail at kickoff, not three agents into the run.
-  local one_model auth_report auth_status auth_type auth_provider auth_reason
-  while IFS= read -r one_model; do
-    [[ -n "$one_model" ]] || continue
-    # A local server is asked before Pi is: whether it answers, whether it has
-    # the model, and what it will really do — all things a credential check
-    # cannot see and a pane would only discover by dying.
-    if provider_is_local "$one_model"; then
-      preflight_local_model "$one_model" "$models_json" || exit 1
-    fi
-    auth_report="$(pi_auth_report "$one_model")"
-    auth_status="$(printf '%s' "$auth_report" | cut -f1)"
-    auth_type="$(printf '%s' "$auth_report" | cut -f2)"
-    auth_provider="$(printf '%s' "$auth_report" | cut -f3)"
-    auth_reason="$(printf '%s' "$auth_report" | cut -f4)"
-    # Pi resolves a model *pattern*, so a typo can land on a provider the run
-    # was never configured for — and then netguard allowlists the wrong hosts.
-    if [[ "$auth_status" == "ready" && -n "$auth_provider" && "$auth_provider" != "${one_model%%/*}" ]]; then
-      {
-        echo "BLOCKER: $one_model resolves to provider '$auth_provider', not '${one_model%%/*}'."
-        echo
-        echo "Pi matches a model pattern rather than an exact id, so this run would"
-        echo "authenticate against one provider while the netguard allowlist and the"
-        echo "recorded model say another. Name the model exactly:"
-        echo
-        echo "  pi --list-models | grep ${one_model##*/}"
-      } >&2
-      exit 1
-    fi
-    if [[ "$auth_status" != "ready" ]] && provider_is_local "$one_model"; then
-      # Pi lists a provider only when it has some credential, even one the
-      # server ignores. The fix is a placeholder, not a login, and saying
-      # "pi /login" here sends the operator to the wrong place.
-      {
-        echo "BLOCKER: Pi will not use $one_model without a credential, and a local server has none (pi auth check: ${auth_status:-no answer}${auth_reason:+, $auth_reason})."
-        echo
-        if [[ "${one_model%%/*}" == "llama.cpp" ]]; then
-          echo "Pi's own llama.cpp provider takes its credential from the shell:"
-          echo
-          echo "  export LLAMA_BASE_URL=$(provider_base_url "$one_model")"
-          echo "  export LLAMA_API_KEY=local        # any value; the server ignores it"
-          echo
-          echo "or run 'pi' once and use /login llama.cpp."
-        else
-          echo "Give '${one_model%%/*}' a placeholder apiKey in $models_json — Pi treats it as"
-          echo "configured, and the server never reads it:"
-          echo
-          echo "  \"${one_model%%/*}\": {"
-          echo "    \"baseUrl\": \"$(provider_base_url "$one_model")\","
-          echo "    \"api\": \"openai-completions\","
-          echo "    \"apiKey\": \"local\","
-          echo "    \"compat\": { \"supportsDeveloperRole\": false, \"supportsReasoningEffort\": false,"
-          echo "                \"supportsStore\": false, \"maxTokensField\": \"max_tokens\" },"
-          echo "    \"models\": [{ \"id\": \"${one_model#*/}\", \"contextWindow\": 131072, \"maxTokens\": 32768 }]"
-          echo "  }"
-        fi
-        echo
-        echo "Then: pi auth check --model $one_model --json    # expect \"ready\""
-        echo "There is no key to log in with and nothing for --key-from-env to forward."
-      } >&2
-      exit 1
-    fi
-    if [[ "$auth_status" != "ready" ]]; then
-      {
-        echo "BLOCKER: Pi cannot authenticate $one_model (pi auth check: ${auth_status:-no answer}${auth_reason:+, $auth_reason})."
-        echo
-        echo "Log in once and Pi keeps the credential itself:"
-        echo
-        echo "  pi /login          # an API key, or a Claude / ChatGPT subscription"
-        echo
-        echo "A subscription login needs no API key and no --key-from-env."
-        if models_json_declares_key "$models_json" "${one_model%%/*}" &&
-           ! models_json_has_key "$models_json" "${one_model%%/*}"; then
-          echo
-          if [[ "$isolation" == "microvm" ]]; then
-            echo "Note: $models_json gives '${one_model%%/*}' an apiKey that interpolates an"
-            echo "environment variable which is unset here. In a microVM run the key has to be"
-            echo "a literal there or in Pi's store: --env and --key-from-env are refused."
-          else
-            echo "Note: $models_json gives '${one_model%%/*}' an apiKey that interpolates an"
-            echo "environment variable which is unset here. Export it, pass it with --env, or"
-            echo "put a literal key there."
-          fi
-        fi
-        if [[ "$isolation" != "microvm" ]]; then
-          echo
-          echo "On a host with no persistent home, export the key and pass it through:"
-          echo
-          echo "  export DEEPSEEK_API_KEY=..."
-          echo "  scripts/swarm.sh start --key-from-env ..."
-        fi
-      } >&2
-      exit 1
-    fi
-    if provider_is_local "$one_model"; then
-      echo "Model:        $one_model -> local endpoint $(provider_base_url "$one_model") (no metered cost)"
-    else
-      case "$auth_type" in
-        oauth) echo "Key:          $one_model -> $auth_provider subscription (OAuth, refreshed by Pi)" ;;
-        *) echo "Key:          $one_model -> $auth_provider $auth_type via Pi's own store" ;;
-      esac
-    fi
-  done < <(credential_models)
+  start_check_credentials
   if [[ -x /usr/local/bin/google-chrome ]]; then
     provider_env+=(--env "BROWSER_CHECK_EXECUTABLE=/usr/local/bin/google-chrome")
   elif [[ -x /usr/bin/google-chrome ]]; then
@@ -4608,12 +4984,14 @@ EOF
     # kickoff's memory, so its lines stay unverified. That is the honest
     # answer rather than a wrong one: a token on disk would be readable by
     # every pane, since the guard denies writes and leaves reads open.
-    local hub_env=() hub_dir_now
+    local hub_env=() hub_dir_now="" nudge_script
     if [[ "$isolation" == "microvm" ]] && hub_dir_now="$(hub_dir_of "$sandbox")"; then
       hub_env=(SWARM_HUB_ADMIN="$hub_dir_now/admin.sock" SWARM_HUB_STATUS="$hub_dir_now/status.json" SWARM_HUB_DIR="$hub_dir_now")
     fi
-    detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" ${hub_env[@]+"${hub_env[@]}"} \
-      bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
+    # The run's frozen copy when it has one, as the hub and its keeper.
+    nudge_script="$(run_script "$hub_dir_now" scripts/idle-nudge.sh)"
+    detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
+      bash "$nudge_script" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
       >"$sandbox/traces/idle-nudge.log" 2>&1 &
     echo $! > "$sandbox/idle-nudge.pid"
     # On the Linux runs 5 and 6 (2026-09-22) the watchdog started here was
@@ -4625,8 +5003,8 @@ EOF
     # watchdog sits idle until the wall clock, which is what run 6 showed.
     sleep 2
     if ! kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
-      detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" ${hub_env[@]+"${hub_env[@]}"} \
-        bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
+      detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
+        bash "$nudge_script" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
         >>"$sandbox/traces/idle-nudge.log" 2>&1 </dev/null &
       echo $! > "$sandbox/idle-nudge.pid"
       sleep 2
@@ -5311,6 +5689,17 @@ stop_sandbox_daemons() {
       kill "$pid" 2>/dev/null || true
     fi
   fi
+  # The model gateway, once the VMs it served are put away: only a process
+  # whose command line is the gateway's with this run's hub directory.
+  local gw_dir gw_cmd
+  if gw_dir="$(hub_dir_of "$sandbox" 2>/dev/null)" && [[ -f "$gw_dir/model-gateway.pid" ]]; then
+    pid="$(cat "$gw_dir/model-gateway.pid" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      gw_cmd="$(ps -ww -o command= -p "$pid" 2>/dev/null || true)"
+      [[ "$gw_cmd" == *model-gateway.ts* && "$gw_cmd" == *"$gw_dir"* ]] && kill "$pid" 2>/dev/null
+    fi
+    rm -f "$gw_dir/model-gateway.pid" "$gw_dir/model-gateway.ready"
+  fi
   if [[ -f "$sandbox/inhibit.pid" ]]; then
     pid="$(cat "$sandbox/inhibit.pid" || true)"
     # Only what the kickoff started for this: a pid file a pane rewrote must
@@ -5704,7 +6093,62 @@ vm_default_image() { # <pack dirs, one per line> [playwright 0|1]  (returns 1 on
     fi
     ref="$(jq -r --arg p "$profile" --arg a "$(vm_arch)" '.images[$p][$a] // empty' "$lock" 2>/dev/null || true)"
   fi
+  # What image-for says of it (read when called without a subshell).
+  VM_DEFAULT_PROFILE="$profile"
+  VM_DEFAULT_PINNED_BY="$([[ -n "$ref" ]] && printf '%s' "$lock")"
   printf '%s\n' "${ref:-dfirswarm-$profile:dev-$(vm_arch)}"
+}
+
+# The image a kickoff would boot for these packs (vm_default_image), read
+# only: the reference, its digest when the lock pins it or msb holds it,
+# and why this one. For the console's preview, before anything is started.
+cmd_image_for() {
+  local packs="" tools_from="" playwright=0 pack_dirs="" out ref digest="" reason
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pack) packs="${packs:+$packs,}$2"; shift 2 ;;
+      --tools-from) tools_from="$2"; shift 2 ;;
+      --playwright) playwright=1; shift ;;
+      *) die_usage "image-for: unknown option $1" ;;
+    esac
+  done
+  if [[ -n "$tools_from" && ! -d "$tools_from" ]]; then
+    echo "BLOCKER: --tools-from $tools_from is not a directory." >&2
+    exit 2
+  fi
+  if [[ -n "$packs" ]]; then
+    pack_dirs="$("$ROOT/scripts/pack.sh" resolve "$packs")" || exit 2
+  fi
+  out="$(mktemp "${TMPDIR:-/tmp}/dfs-image-for.XXXXXX")"
+  if ! vm_default_image "$pack_dirs" "$playwright" > "$out"; then
+    rm -f "$out"
+    exit 2
+  fi
+  ref="$(cat "$out")"
+  rm -f "$out"
+  if [[ "$ref" == *@sha256:* ]]; then
+    digest="${ref##*@}"
+  else
+    digest="$(vm_cli image-digest --image "$ref" 2>/dev/null | jq -r '.digest // empty' 2>/dev/null || true)"
+  fi
+  if [[ -z "$packs" && "$VM_DEFAULT_PROFILE" == base ]]; then
+    reason="no packs: the base image"
+  else
+    local serves="the tools" also="" browser=""
+    [[ -n "$packs" ]] && serves="the packs ${packs//,/, }"
+    [[ -n "$tools_from" ]] && also=" and the programs the tools in $tools_from call"
+    [[ "$playwright" -eq 1 && "$VM_DEFAULT_PROFILE" == web ]] && browser=", with a browser for --playwright"
+    reason="the smallest profile that serves ${serves}${also}${browser}: $VM_DEFAULT_PROFILE"
+  fi
+  if [[ -n "$VM_DEFAULT_PINNED_BY" ]]; then
+    reason+="; pinned by digest in $VM_DEFAULT_PINNED_BY"
+  else
+    reason+="; a local build's name (no lock pins it: build and load it, or set SWARM_IMAGES_LOCK)"
+  fi
+  jq -nc --arg ref "$ref" --arg digest "$digest" --arg profile "$VM_DEFAULT_PROFILE" --arg lock "$VM_DEFAULT_PINNED_BY" --arg reason "$reason" \
+    --argjson packs "$(jq -nc --arg p "$packs" '$p | split(",") | map(select(. != ""))')" --arg arch "$(vm_arch)" \
+    '{ref: $ref, digest: (if $digest == "" then null else $digest end), profile: $profile, arch: $arch, packs: $packs,
+      pinned_by: (if $lock == "" then null else $lock end), reason: $reason}'
 }
 
 # The sha256 of one file, with whichever tool this host has.
@@ -5773,7 +6217,13 @@ hubs_parent() { # [--create]
 # and msb refuses to map a longer one into a VM (ENAMETOOLONG, measured).
 hub_socket_path_max() { # <run id> <longest agent id>
   local parent LC_ALL=C
-  parent="$(hubs_parent --create)" || return 1
+  # A check creates nothing: the directory as it would be made, measured;
+  # one that is there is still checked for whose it is.
+  if [[ "${CHECK_ONLY:-0}" -eq 1 && ! -e "$(hubs_parent_path)" && ! -L "$(hubs_parent_path)" ]]; then
+    parent="$(resolve_path_nocreate "$(hubs_parent_path)")"
+  else
+    parent="$(hubs_parent --create)" || return 1
+  fi
   printf '%s\n' "${#parent}" | awk -v r="$1" -v a="$2" '{print $1 + length("/dfs-" r ".XXXXXX/" a ".sock")}'
 }
 
@@ -5832,14 +6282,19 @@ start_vm_hub() { # <sandbox> <hub dir> <run id> <collector socket> <agent ids...
   [[ -f "$dir/host/scripts/vm-hub.ts" ]] && script="$dir/host/scripts/vm-hub.ts"
   local roster input
   roster="$(printf '%s\n' "$@" | jq -R . | jq -c -s .)"
-  input="$(SWARM_TOKENS="$TRACE_TOKENS_JSON" SWARM_ROSTER="$roster" SWARM_COLLECTOR="$collector" jq -nc \
+  # Each seat's hello token beside the collector's attribution tokens, which
+  # never reach a VM; the hub keeps both in its own 0600 input.
+  local seat_tokens=""
+  [[ -n "${SEAT_TOKENS_FILE:-}" && -f "$SEAT_TOKENS_FILE" ]] && seat_tokens="$(cat "$SEAT_TOKENS_FILE")"
+  input="$(SWARM_TOKENS="$TRACE_TOKENS_JSON" SWARM_ROSTER="$roster" SWARM_COLLECTOR="$collector" SWARM_SEAT_TOKENS_JSON="$seat_tokens" jq -nc \
     '{agents: ($ENV.SWARM_ROSTER | fromjson),
       tokens: ($ENV.SWARM_TOKENS | fromjson | to_entries | map({key: .value, value: .key}) | from_entries),
-      collector: $ENV.SWARM_COLLECTOR}')"
+      collector: $ENV.SWARM_COLLECTOR}
+     + (if ($ENV.SWARM_SEAT_TOKENS_JSON // "") == "" then {} else {seat_tokens: ($ENV.SWARM_SEAT_TOKENS_JSON | fromjson)} end)')"
   # Once the hub has put the VMs away and taken custody, it runs the
   # operator's stop for what is left (the panes, the collector, the keep-awake,
   # an attached image), with this runs directory.
-  local hub_args=(--registry "$REGISTRY" --stop-cmd "$ROOT/scripts/swarm.sh")
+  local hub_args=(--registry "$REGISTRY" --stop-cmd "$(run_script "$dir" scripts/swarm.sh)")
   [[ "${forging:-0}" -eq 1 ]] && hub_args+=(--forging)
   [[ "${vm_snapshot:-1}" -eq 1 ]] || hub_args+=(--no-snapshot)
   # The inbox page bound is read by readInbox, which for a VM runs here.
@@ -5853,7 +6308,7 @@ start_vm_hub() { # <sandbox> <hub dir> <run id> <collector socket> <agent ids...
   for ((i = 0; i < 100; i++)); do
     if [[ -S "$dir/admin.sock" ]]; then
       # Its keeper, which brings it back if it dies, until the stop.
-      detach_exec bash "$ROOT/scripts/hub-supervise.sh" "$sandbox" "$dir" "$script" "$hub_pid" >/dev/null 2>&1 </dev/null &
+      detach_exec env SWARM_RUNS_DIR="$RUNS_DIR" bash "$(run_script "$dir" scripts/hub-supervise.sh)" "$sandbox" "$dir" "$script" "$hub_pid" >/dev/null 2>&1 </dev/null &
       echo $! > "$dir/supervisor.pid"
       return 0
     fi
@@ -5861,6 +6316,53 @@ start_vm_hub() { # <sandbox> <hub dir> <run id> <collector socket> <agent ids...
   done
   echo "BLOCKER: the VM hub did not come up; see $sandbox/traces/vm-hub.log" >&2
   return 1
+}
+
+# The model gateway (--model-gateway): planned from the VM spec (which
+# providers it fronts, each seat's gateway token, the prices), started from
+# the run's frozen copy, kept by the hub's keeper, and named in the spec so
+# each VM's Pi calls it for those providers. The config holds the seats'
+# tokens: it stays in the hub's directory (0700, mounted by no VM) and goes
+# with it. The keys stay in the gateway's memory, read from Pi's store.
+start_model_gateway() { # <sandbox> <hub dir> <spec file>
+  local sandbox="$1" dir="$2" spec="$3" plan script pid port i declined fronted gw_rec
+  if ! plan="$(vm_cli gateway-plan --spec "$spec" --out "$dir/model-gateway.json" 2>&1)"; then
+    echo "BLOCKER: the model gateway could not be planned: $plan" >&2
+    return 1
+  fi
+  declined="$(jq -c '.declined // []' <<<"$plan")"
+  jq -r '.declined[]? | "Gateway:      \(.provider) left to msb'"'"'s placeholder path (\(.reason)); its spend is what its seats report"' <<<"$plan"
+  fronted="$(jq -c '[.providers | keys[]]' "$dir/model-gateway.json")"
+  if [[ "$fronted" == "[]" ]]; then
+    echo "Gateway:      fronts none of this team's providers; every VM keeps msb's placeholder path"
+  fi
+  script="$(run_script "$dir" scripts/model-gateway.ts)"
+  rm -f "$dir/model-gateway.ready" "$dir/model-gateway.port"
+  SWARM_TRACE_TOKEN="$(trace_token_for system)" PI_CODING_AGENT_DIR="$(pi_agent_dir)" detach_exec node --experimental-strip-types --no-warnings "$script" \
+    --config "$dir/model-gateway.json" --ready "$dir/model-gateway.ready" --quiet >/dev/null 2>>"$sandbox/traces/model-gateway.log" </dev/null &
+  pid=$!
+  echo "$pid" > "$dir/model-gateway.pid"
+  for ((i = 0; i < 300; i++)); do
+    [[ -s "$dir/model-gateway.ready" ]] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  port="$(jq -r '.port // empty' "$dir/model-gateway.ready" 2>/dev/null || true)"
+  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+    kill "$pid" 2>/dev/null || true
+    echo "BLOCKER: the model gateway did not come up: $(tail -n 1 "$sandbox/traces/model-gateway.log" 2>/dev/null || echo 'no word from it')" >&2
+    return 1
+  fi
+  # The port the VMs are given: a gateway the keeper restarts takes it again.
+  printf '%s\n' "$port" > "$dir/model-gateway.port"
+  jq --argjson port "$port" --arg config "$dir/model-gateway.json" --argjson declined "$declined" \
+    '. + {model_gateway: {port: $port, config: $config, declined: $declined}}' "$spec" > "$spec.tmp" && mv "$spec.tmp" "$spec"
+  chmod 600 "$spec"
+  gw_rec="$(jq -nc --argjson port "$port" --argjson p "$fronted" --argjson d "$declined" '{on: true, port: $port, providers: $p, declined: $d}')"
+  rec="$(jq --argjson g "$gw_rec" '.isolation.model_gateway = $g' <<<"$rec")"
+  registry_upsert "$rec"
+  [[ "$fronted" != "[]" ]] && echo "Gateway:      every call to $(jq -r 'join(", ")' <<<"$fronted") goes through the model gateway on this host (port $port): the key stays here, and the spend is metered here"
+  return 0
 }
 
 # Every provider the team's models need, as the VM manager wants them: how
@@ -6130,14 +6632,43 @@ vm_build_spec() { # <hub dir> <out file>
     --argjson providers "$providers" --argjson open "$([[ "$use_netguard" -eq 0 ]] && echo true || echo false)" \
     --argjson pack_secrets "$PACK_SECRETS_VM" \
     --arg pi "$(command -v pi)" --arg pidir "$(pi_agent_dir)" --arg registry "$REGISTRY" --arg digest "${vm_image_digest:-}" \
+    --arg seat_tokens "${SEAT_TOKENS_FILE:-}" \
     '{run: $run, sandbox: $sandbox, image: $image, pull: "if-missing", cpus: $cpus, memory_mib: $mem, root_disk_mib: $disk,
       max_duration_sec: (($wall + 30) * 60), hub_dir: $hub, mounts: $mounts, late_mounts: $late,
       env: $env, agents: $agents, allow_hosts: $allow, open_net: $open, providers: $providers,
       pack_secrets: $pack_secrets,
       pi_bin: $pi, pi_agent_dir: $pidir, min_token_validity: "\($wall + 60)m",
       records_dir: ($sandbox + "/vm"), registry: $registry}
-     + (if $digest == "" then {} else {image_digest: $digest} end)' > "$spec"
+     + (if $digest == "" then {} else {image_digest: $digest} end)
+     + (if $seat_tokens == "" then {} else {seat_tokens_file: $seat_tokens} end)' > "$spec"
   chmod 600 "$spec"
+}
+
+# One random token per seat, 32 hex: what a VM's process shows the hub on
+# every connection to its seat's socket, beside the socket it arrives on
+# (vm-hub.ts). Written 0600 into the run's hub directory, which is the
+# host's, 0700 and mounted by no VM; the spec names the file, never a token.
+# Never in the trace, the registry, a VM record or a package. While a VM
+# lives its token is also in msb's database with the secret values.
+write_seat_tokens() { # <hub dir> <agent ids...>
+  local dir="$1" id tok json='{}'
+  shift
+  for id in "$@"; do
+    tok="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+    [[ "$tok" =~ ^[0-9a-f]{32}$ ]] || return 1
+    json="$(jq -c --arg id "$id" --arg t "$tok" '. + {($id): $t}' <<<"$json")"
+  done
+  ( umask 077; rm -f "$dir/seat-tokens.json"; printf '%s\n' "$json" > "$dir/seat-tokens.json" ) || return 1
+  chmod 600 "$dir/seat-tokens.json"
+  printf '%s\n' "$dir/seat-tokens.json"
+}
+
+# A script of the harness as this run runs it: the hub directory's frozen
+# host copy when the kickoff made one (freeze_harness), the checkout's
+# otherwise. The keeper, the watchdog and the stop the hub runs then run
+# the code the run started with, whatever happens to the checkout.
+run_script() { # <hub dir or ""> <scripts/… relative path>
+  if [[ -n "$1" && -f "$1/host/$2" ]]; then printf '%s\n' "$1/host/$2"; else printf '%s\n' "$ROOT/$2"; fi
 }
 
 # The agents' VMs, their panes and their hub. Called by cmd_start in the
@@ -6158,9 +6689,16 @@ launch_vm_agents() {
   # Frozen first: the hub then runs from the host copy, as the VMs do from theirs.
   freeze_harness "$hub_dir"
   echo "Harness:      frozen for this run at $(cat "$hub_dir/harness/COMMIT") (the checkout can change; these VMs and the hub will not see it)"
+  SEAT_TOKENS_FILE="$(write_seat_tokens "$hub_dir" "${agent_ids[@]}")" || { echo "BLOCKER: the seats' hub tokens could not be made in $hub_dir." >&2; exit 1; }
   start_vm_hub "$sandbox" "$hub_dir" "$swarm_id" "$trace_socket" "${agent_ids[@]}" || { stop_vm_run "$sandbox" "$swarm_id" 0; exit 1; }
   local spec="$hub_dir/vm-spec.json"
   vm_build_spec "$hub_dir" "$spec"
+  if [[ "${model_gateway:-0}" -eq 1 ]] && ! start_model_gateway "$sandbox" "$hub_dir" "$spec"; then
+    stop_vm_run "$sandbox" "$swarm_id" 0
+    stop_sandbox_daemons "$sandbox" keep-record
+    registry_update_state "$swarm_id" "failed"
+    exit 1
+  fi
 
   echo "VMs:          creating ${n} on $vm_image (${vm_cpus} vCPU, ${vm_memory} MiB memory, ${vm_disk} MiB disk each)..."
   local vm_out
@@ -6498,6 +7036,13 @@ cmd_stop() {
     [[ -f "$sandbox/custody.json" ]] && custody_at="$(jq -r '.at // empty' "$sandbox/custody.json" 2>/dev/null || true)"
     if [[ -n "$custody_at" && "$custody_at" != "$custody_before" ]]; then
       echo "Custody:      $(jq -r '.summary' "$sandbox/custody.json" 2>/dev/null)"
+      # What the operator is told at once, when a notify command was given.
+      if [[ "$(jq -r '(.inputs | type) == "object" and .inputs.unchanged == false' "$sandbox/custody.json" 2>/dev/null)" == true ]]; then
+        notify_run "$sandbox" evidence_changed "$(jq -c '{changed: (.inputs.changed // []), missing: (.inputs.missing // []), added: (.inputs.added // []), summary}' "$sandbox/custody.json" 2>/dev/null || echo '{}')"
+      fi
+      if [[ "$(jq -r '(.trace.intact == false) or ((.ledger | type) == "object" and .ledger.intact == false)' "$sandbox/custody.json" 2>/dev/null)" == true ]]; then
+        notify_run "$sandbox" chain_broken "$(jq -c '{trace: .trace.detail, ledger: (.ledger.detail // null), summary}' "$sandbox/custody.json" 2>/dev/null || echo '{}')"
+      fi
     else
       echo "WARN: the custody check did not finish (exit $custody_rc); see $sandbox/traces/custody.log" >&2
       [[ -n "$custody_at" ]] && echo "      The verdict in $sandbox/custody.json is an earlier one ($custody_at), not this stop's." >&2
@@ -6516,16 +7061,20 @@ cmd_stop() {
     # A run whose VMs are still up is not stopped, and its record says so.
     registry_update_state "$id" "stop_incomplete"
     echo "NOT STOPPED: $id still has VMs up (above); the record says stop_incomplete. Look, then run stop again or \`swarm.sh reap $id\`." >&2
+    notify_run "$sandbox" stop_incomplete '{"state":"stop_incomplete"}'
     exit 3
   elif [[ "$after_hub" -eq 1 && ( "$was" == "finished" || "$was" == "finish_failed" ) ]]; then
+    # The hub told the operator when it finished the run.
     registry_update_state "$id" "$was"
     echo "Cleared $id after the hub finished it (recorded as $was)"
   elif [[ -n "$sandbox" && -f "$sandbox/done/SWARM_DONE" ]]; then
     registry_update_state "$id" "done"
     echo "Stopped $id (the sentinel was present; recorded as done)"
+    notify_run "$sandbox" finished '{"state":"done","by":"stop"}'
   else
     registry_update_state "$id" "stopped"
     echo "Stopped $id"
+    [[ "$after_hub" -eq 1 ]] || notify_run "$sandbox" finished '{"state":"stopped","by":"stop"}'
   fi
 }
 
@@ -6787,8 +7336,16 @@ pkg_copy() { # <src> <dst> [non-empty]
 }
 
 cmd_package() {
-  local id="${1:-}"
-  [[ -n "$id" ]] || { echo "package requires <id>" >&2; exit 2; }
+  local id="${1:-}" sign=0 key=""
+  [[ -n "$id" && "$id" != -* ]] || { echo "package requires <id> [--sign [--key FILE]]" >&2; exit 2; }
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --sign) sign=1; shift ;;
+      --key) key="$2"; sign=1; shift 2 ;;
+      *) echo "package: unknown option $1" >&2; exit 2 ;;
+    esac
+  done
   ensure_registry
   local sandbox
   sandbox="$(json_get "$id" | jq -r '.sandbox // empty')"
@@ -6893,6 +7450,10 @@ PY
   pkg_copy "$sandbox/catalog/README.md" "$out/catalog-README.md"
   pkg_copy "$sandbox/catalog.json" "$out/catalog.json"
   pkg_copy "$sandbox/traces/events.jsonl" "$out/trace/events.jsonl"
+  # The model gateway's record of every call it carried (seats, models,
+  # tokens, costs, statuses; no bodies) and its totals.
+  pkg_copy "$sandbox/traces/model-gateway.jsonl" "$out/trace/model-gateway.jsonl" non-empty
+  pkg_copy "$sandbox/traces/model-gateway.json" "$out/trace/model-gateway.json" non-empty
   # What a recipient needs to check the record without this machine: the
   # anchors the chain and the manifest were pinned to, every trace line that
   # never made the chain (spilled, per agent and the hub's), every whole
@@ -6927,12 +7488,382 @@ PY
       if command -v sha256sum >/dev/null 2>&1; then sha256sum "$f"; else shasum -a 256 "$f"; fi
     done > MANIFEST.txt )
   echo "Packaged $id -> $out ($(find "$out" -type f | wc -l | tr -d ' ') files; MANIFEST.txt has the hashes)"
+  if [[ "$sign" -eq 1 ]]; then
+    sign_package "$out" "$key" "$(json_get "$id" | jq -r '.examiner // empty')" || exit 1
+  fi
   if [[ "${skipped:-0}" -gt 0 ]]; then
     echo "Left in the sandbox: ${skipped} file(s) under work/extracted and work/quarantine, which came out of the evidence."
   fi
   if [[ "${left_behind:-0}" -gt 0 ]]; then
     echo "Left in the sandbox: ${left_behind} binary file(s) over ${max_kb} KB from the agents' own directories; LEFT-BEHIND.txt names them with their hashes, and artifacts.json has them too."
   fi
+}
+
+# A package's manifest signed with the examiner's ssh key (ssh-keygen -Y,
+# namespace dfirswarm-package): MANIFEST.txt.sig beside it, the public key
+# as signer.pub and who signed as SIGNER.txt. `swarm.sh verify` checks it.
+sign_package() { # <package dir> <key file or ""> <examiner or "">
+  local out="$1" key="$2" examiner="$3" k principal fingerprint err
+  if [[ -z "$key" ]]; then
+    for k in "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_ecdsa"; do
+      [[ -f "$k" ]] && { key="$k"; break; }
+    done
+  fi
+  if [[ -z "$key" || ! -f "$key" ]]; then
+    echo "BLOCKER: no key to sign the package with: pass --key FILE (an ssh private key), or keep one at ~/.ssh/id_ed25519 or ~/.ssh/id_ecdsa." >&2
+    return 1
+  fi
+  command -v ssh-keygen >/dev/null 2>&1 || { echo "BLOCKER: ssh-keygen is not on this host; the package is not signed." >&2; return 1; }
+  # An allowed-signers principal is one word.
+  principal="$(id -un)@$(hostname -s 2>/dev/null || hostname)"
+  rm -f "$out/MANIFEST.txt.sig" "$out/signer.pub" "$out/SIGNER.txt"
+  if ! err="$(ssh-keygen -Y sign -f "$key" -n dfirswarm-package "$out/MANIFEST.txt" 2>&1 >/dev/null)" || [[ ! -s "$out/MANIFEST.txt.sig" ]]; then
+    echo "BLOCKER: ssh-keygen could not sign $out/MANIFEST.txt with $key: $err" >&2
+    return 1
+  fi
+  if [[ -f "$key.pub" ]]; then cp "$key.pub" "$out/signer.pub"; else ssh-keygen -y -f "$key" > "$out/signer.pub"; fi
+  fingerprint="$(ssh-keygen -lf "$out/signer.pub" 2>/dev/null | awk '{print $2}')"
+  {
+    printf 'principal %s\n' "$principal"
+    printf 'examiner %s\n' "${examiner:-not recorded}"
+    printf 'key %s\n' "$fingerprint"
+    printf 'signed_at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'namespace dfirswarm-package\n'
+  } > "$out/SIGNER.txt"
+  echo "Signed:       MANIFEST.txt with $fingerprint as $principal (MANIFEST.txt.sig). A recipient checks it with: swarm.sh verify <package> --allowed-signers FILE, where FILE has the line: $principal $(awk '{print $1, $2}' "$out/signer.pub")"
+}
+
+# A package checked where it lands: every file against MANIFEST.txt, no
+# file missing, none added, and its signature. Exit 0 when all of it holds
+# and the signer is one the allowed-signers file names; 3 when the files
+# hold and the signature is sound but who signed was not checked (no
+# --allowed-signers); 4 when the files hold and the package is unsigned; 1
+# when anything does not hold; 2 on a usage error.
+cmd_verify() {
+  local target="${1:-}" allowed="" tmp="" dir
+  [[ -n "$target" && "$target" != -* ]] || die_usage "verify requires <package dir|zip> [--allowed-signers FILE]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --allowed-signers) allowed="$2"; shift 2 ;;
+      *) die_usage "verify: unknown option $1" ;;
+    esac
+  done
+  dir="$target"
+  if [[ -f "$target" ]]; then
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/dfs-verify.XXXXXX")"
+    # Python's zipfile keeps every member inside the directory it extracts to.
+    python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$target" "$tmp" 2>/dev/null \
+      || { rm -rf "$tmp"; echo "NOT A PACKAGE: $target is not a zip this host can open" >&2; exit 2; }
+    dir="$(dirname "$(find "$tmp" -maxdepth 3 -name MANIFEST.txt -type f | head -1)")"
+  fi
+  if [[ ! -f "$dir/MANIFEST.txt" ]]; then
+    [[ -n "$tmp" ]] && rm -rf "$tmp"
+    echo "NOT A PACKAGE: no MANIFEST.txt in $target" >&2
+    exit 2
+  fi
+  local files_out files_ok=1
+  files_out="$(python3 - "$dir" <<'PY'
+import hashlib, os, re, sys
+root = sys.argv[1]
+listed, bad = {}, []
+for n, line in enumerate(open(os.path.join(root, "MANIFEST.txt"), encoding="utf-8", errors="surrogateescape"), 1):
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    m = re.match(r"^([0-9a-f]{64}) [ *](.+)$", line)
+    if not m:
+        bad.append("MANIFEST.txt line %d is not a hash and a path" % n)
+        continue
+    rel = m.group(2)
+    rel = rel[2:] if rel.startswith("./") else rel
+    listed[rel] = m.group(1)
+meta = {"MANIFEST.txt", "MANIFEST.txt.sig", "SIGNER.txt", "signer.pub"}
+present = set()
+for dirpath, dirs, files in os.walk(root):
+    for name in files:
+        present.add(os.path.relpath(os.path.join(dirpath, name), root).replace(os.sep, "/"))
+checked = 0
+for rel, want in sorted(listed.items()):
+    p = os.path.join(root, rel)
+    if os.path.islink(p) or not os.path.isfile(p):
+        bad.append("missing: " + rel)
+        continue
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    checked += 1
+    if h.hexdigest() != want:
+        bad.append("changed: " + rel)
+for rel in sorted(present - set(listed) - meta):
+    bad.append("not in the manifest: " + rel)
+print("%d %d" % (checked, len(listed)))
+for b in bad:
+    print(b)
+sys.exit(1 if bad else 0)
+PY
+)" || files_ok=0
+  local counts sig_state="unsigned" sig_err="" principal
+  counts="$(head -1 <<<"$files_out")"
+  if [[ -f "$dir/MANIFEST.txt.sig" ]]; then
+    if [[ -n "$allowed" ]]; then
+      principal="$(awk '$1 == "principal" {print $2; exit}' "$dir/SIGNER.txt" 2>/dev/null)"
+      if sig_err="$(ssh-keygen -Y verify -f "$allowed" -I "${principal:-unknown}" -n dfirswarm-package -s "$dir/MANIFEST.txt.sig" < "$dir/MANIFEST.txt" 2>&1)"; then
+        sig_state="verified"
+      else
+        sig_state="bad"
+      fi
+    elif sig_err="$(ssh-keygen -Y check-novalidate -n dfirswarm-package -s "$dir/MANIFEST.txt.sig" < "$dir/MANIFEST.txt" 2>&1)"; then
+      sig_state="unvalidated"
+    else
+      sig_state="bad"
+    fi
+  fi
+  [[ -n "$tmp" ]] && rm -rf "$tmp"
+  echo "Files:        ${counts%% *} of ${counts##* } re-hashed against MANIFEST.txt$([[ "$files_ok" -eq 1 ]] && printf ', all match, none missing, none added' || printf ':')"
+  [[ "$files_ok" -eq 1 ]] || tail -n +2 <<<"$files_out" | sed 's/^/  /'
+  case "$sig_state" in
+    verified) echo "Signature:    valid, by $principal, a signer $allowed allows" ;;
+    unvalidated) echo "Signature:    sound, but who signed was not checked (pass --allowed-signers FILE); SIGNER.txt says $(awk '$1 == "principal" {print $2}' "$dir/SIGNER.txt" 2>/dev/null || echo nobody)" ;;
+    unsigned) echo "Signature:    none (the package was not signed)" ;;
+    bad) echo "Signature:    DOES NOT VERIFY: $sig_err" ;;
+  esac
+  if [[ "$files_ok" -eq 0 || "$sig_state" == bad ]]; then
+    echo "VERIFY FAILED: $target"
+    exit 1
+  fi
+  case "$sig_state" in
+    verified) echo "VERIFIED: $target"; exit 0 ;;
+    unvalidated) echo "FILES VERIFIED, SIGNER NOT CHECKED: $target"; exit 3 ;;
+    *) echo "FILES VERIFIED, UNSIGNED: $target"; exit 4 ;;
+  esac
+}
+
+# The examiner's review of a run's ledger (scripts/review.ts): accept,
+# reject or amend an entry, or sign off the ledger as it stands. Outside
+# the run, beside the registry, chained.
+cmd_review() {
+  local id="${1:-}" action="" entry="" note="" examiner=""
+  [[ -n "$id" && "$id" != -* ]] || die_usage "review requires <id> (--accept N | --reject N --note TEXT | --amend N --note TEXT | --sign | --show) [--examiner NAME]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --accept|--reject|--amend) action="${1#--}"; entry="${2:-}"; shift 2 ;;
+      --sign) action=sign; shift ;;
+      --show) action=show; shift ;;
+      --note) note="$2"; shift 2 ;;
+      --examiner) examiner="$2"; shift 2 ;;
+      *) die_usage "review: unknown option $1" ;;
+    esac
+  done
+  [[ -n "$action" ]] || die_usage "review: say --accept N, --reject N, --amend N, --sign or --show"
+  ensure_registry
+  local rec sandbox state
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  state="$(jq -r '.state // empty' <<<"$rec")"
+  [[ "$state" != purged ]] || { echo "BLOCKER: run $id was purged; its ledger is gone." >&2; exit 2; }
+  if [[ "$action" == show ]]; then
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/review.ts" show --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox"
+    return $?
+  fi
+  [[ -n "$examiner" ]] || examiner="$(jq -r '.examiner // empty' <<<"$rec")"
+  [[ -n "$examiner" ]] || { echo "BLOCKER: who is reviewing? pass --examiner NAME (the run recorded none)." >&2; exit 2; }
+  if [[ "$action" == sign ]]; then
+    case "$state" in
+      running|prepared|finishing) echo "BLOCKER: run $id is still $state; sign off its ledger once it has ended." >&2; exit 2 ;;
+    esac
+  fi
+  local args=(add --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox" --action "$action" --examiner "$examiner")
+  [[ -n "$entry" ]] && args+=(--entry "$entry")
+  [[ -n "$note" ]] && args+=(--note "$note")
+  local line
+  line="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/review.ts" "${args[@]}")" || exit 1
+  [[ "$state" == running ]] && operator_trace "$sandbox" review "$id" "--$action" ${entry:+"$entry"}
+  if [[ "$action" == sign ]]; then
+    echo "Signed off:   run $id's ledger ($(jq -r '.ledger_entries' <<<"$line") entries, head $(jq -r '.ledger_head' <<<"$line")) by $examiner; the review is $RUNS_DIR/reviews/$id.jsonl"
+  else
+    echo "Reviewed:     run $id entry $entry $(case "$action" in accept) echo accepted ;; reject) echo rejected ;; amend) echo amended ;; esac) by $examiner$([[ -n "$note" ]] && printf ' (%s)' "$note")"
+  fi
+}
+
+# A run on hold keeps its material: purge refuses it, a new run in its
+# sandbox is refused, and the VM reaper leaves its VMs alone.
+cmd_hold() {
+  local id="${1:-}" reason=""
+  [[ -n "$id" && "$id" != -* ]] || die_usage "hold requires <id> [--reason TEXT]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --reason) reason="$2"; shift 2 ;;
+      *) die_usage "hold: unknown option $1" ;;
+    esac
+  done
+  ensure_registry
+  local rec
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  [[ "$(jq -r '.state // empty' <<<"$rec")" != purged ]] || { echo "BLOCKER: run $id was purged; there is nothing to hold." >&2; exit 2; }
+  registry_merge "$id" "$(jq -nc --arg r "$reason" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg by "$(id -un)@$(hostname)" \
+    '{hold: {reason: (if $r == "" then null else $r end), at: $at, by: $by}}')" || exit 1
+  [[ "$(jq -r '.state // empty' <<<"$rec")" == running ]] && operator_trace "$(jq -r '.sandbox // empty' <<<"$rec")" hold "$id"
+  echo "Held:         run $id$([[ -n "$reason" ]] && printf ' (%s)' "$reason"); purge and a new run in its sandbox are refused until swarm.sh release $id"
+}
+
+cmd_release() {
+  local id="${1:-}"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "release requires <id>"
+  ensure_registry
+  local rec
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  if [[ "$(jq -r '(.hold | type) == "object"' <<<"$rec")" != true ]]; then
+    echo "Run $id is not on hold."
+    return 0
+  fi
+  registry_merge "$id" "$(jq -nc --argjson h "$(jq -c '.hold' <<<"$rec")" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{hold: null, released: ($h + {released_at: $at})}')" || exit 1
+  [[ "$(jq -r '.state // empty' <<<"$rec")" == running ]] && operator_trace "$(jq -r '.sandbox // empty' <<<"$rec")" release "$id"
+  echo "Released:     run $id is no longer on hold"
+}
+
+# A finished run's material deleted: the sandbox (the evidence copy, work/,
+# the trace, the sessions), the VMs' kept disks and the hub's directory. What
+# was there is written down first — sizes, the manifest's and the custody
+# verdict's hashes, the package's — as a destruction record on the operator's
+# audit (runs/operator-audit.jsonl), and the registry keeps the run as
+# purged. The anchors beside the run and the examiner's review stay: they
+# hold hashes, not material.
+cmd_purge() {
+  local id="${1:-}" yes=0
+  [[ -n "$id" && "$id" != -* ]] || die_usage "purge requires <id> --yes"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --yes) yes=1; shift ;;
+      *) die_usage "purge: unknown option $1" ;;
+    esac
+  done
+  ensure_registry
+  local rec state sandbox
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  state="$(jq -r '.state // empty' <<<"$rec")"
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  case "$state" in
+    running|prepared|finishing|stop_incomplete)
+      echo "BLOCKER: run $id is $state; stop it first (swarm.sh stop $id)." >&2; exit 2 ;;
+    purged)
+      echo "Run $id was purged already."; return 0 ;;
+  esac
+  if [[ "$(jq -r '(.hold | type) == "object"' <<<"$rec")" == true ]]; then
+    echo "BLOCKER: run $id is on hold ($(jq -r '.hold.reason // "no reason given"' <<<"$rec")); release it first (swarm.sh release $id)." >&2
+    exit 2
+  fi
+  if [[ "$(jq -r '.isolation.mode // "host"' <<<"$rec")" == microvm && -n "$(vm_cli list --run "$id" 2>/dev/null | jq -r '.vms[]?.name' 2>/dev/null)" ]]; then
+    echo "BLOCKER: run $id still has VMs up; stop it first (swarm.sh stop $id)." >&2
+    exit 2
+  fi
+  if [[ -z "$sandbox" || "$sandbox" != /* || "$sandbox" == "/" || "$sandbox" == "$HOME" || "$sandbox" == "$ROOT" || -L "$sandbox" ]]; then
+    echo "BLOCKER: run $id's sandbox ($sandbox) is not one purge will delete." >&2
+    exit 2
+  fi
+  local what=() snaps="" snap_target="" hub=""
+  [[ -d "$sandbox" ]] && what+=("$sandbox")
+  if [[ -L "$sandbox.vm-snapshots" ]]; then
+    snap_target="$(cd "$sandbox.vm-snapshots" 2>/dev/null && pwd -P || true)"
+  elif [[ -d "$sandbox.vm-snapshots" ]]; then
+    snaps="$sandbox.vm-snapshots"
+    what+=("$snaps")
+  fi
+  hub="$(hub_dir_of "$sandbox" 2>/dev/null || true)"
+  [[ -n "$hub" && -d "$hub" ]] && what+=("$hub")
+  # In a --vm-snapshot-dir shared with other runs, only this run's disks.
+  local agents=() a snap_files=()
+  while IFS= read -r a; do [[ -n "$a" ]] && agents+=("$a"); done < <(jq -r '.agents[]? // empty' <<<"$rec")
+  if [[ -n "$snap_target" ]]; then
+    for a in ${agents[@]+"${agents[@]}"}; do
+      [[ -e "$snap_target/$a.msb" ]] && snap_files+=("$snap_target/$a.msb")
+      [[ -e "$snap_target/$a.logs" ]] && snap_files+=("$snap_target/$a.logs")
+    done
+    what+=(${snap_files[@]+"${snap_files[@]}"})
+  fi
+  if [[ "$yes" -ne 1 ]]; then
+    echo "purge deletes, and nothing brings back:"
+    printf '  %s\n' ${what[@]+"${what[@]}"}
+    echo "Run it again with --yes. The registry keeps run $id as purged, and runs/operator-audit.jsonl gets the destruction record."
+    exit 2
+  fi
+  local sha_of manifest_sha custody_sha custody_summary package_sha detail p entries='[]'
+  sha_of() { [[ -f "$1" && ! -L "$1" ]] && { shasum -a 256 "$1" 2>/dev/null || sha256sum "$1"; } | cut -d' ' -f1; }
+  manifest_sha="$(jq -r '.inputs_manifest_sha256 // empty' <<<"$rec")"
+  [[ -n "$manifest_sha" ]] || manifest_sha="$(sha_of "$sandbox/inputs.json")"
+  custody_sha="$(sha_of "$sandbox/custody.json")"
+  custody_summary="$(jq -r '.summary // empty' "$sandbox/custody.json" 2>/dev/null || true)"
+  package_sha="$(sha_of "$sandbox/package/MANIFEST.txt")"
+  local kb nfiles
+  for p in ${what[@]+"${what[@]}"}; do
+    kb="$(du -sk "$p" 2>/dev/null | awk '{print $1+0}')"
+    nfiles="$(find "$p" -type f 2>/dev/null | wc -l | tr -d ' ')"
+    entries="$(jq -c --arg p "$p" --argjson kb "${kb:-0}" --argjson n "${nfiles:-0}" '. + [{path: $p, kb: $kb, files: $n}]' <<<"$entries")"
+  done
+  detail="$(jq -nc --arg run "$id" --arg case "$(jq -r '.case_id // ""' <<<"$rec")" --argjson what "$entries" \
+    --arg m "$manifest_sha" --arg c "$custody_sha" --arg cs "$custody_summary" --arg pk "$package_sha" \
+    '{run: $run, case_id: (if $case == "" then null else $case end), deleted: $what,
+      inputs_manifest_sha256: (if $m == "" then null else $m end), custody_sha256: (if $c == "" then null else $c end),
+      custody_summary: (if $cs == "" then null else $cs end), package_manifest_sha256: (if $pk == "" then null else $pk end)}')"
+  # Read-only evidence copies and manifests come away only once writable.
+  for p in ${what[@]+"${what[@]}"}; do
+    chmod -R u+w "$p" 2>/dev/null || true
+    rm -rf "$p"
+  done
+  [[ -L "$sandbox.vm-snapshots" ]] && rm -f "$sandbox.vm-snapshots"
+  [[ -n "$snap_target" ]] && rmdir "$snap_target" 2>/dev/null || true
+  rm -f "$RUNS_DIR/notify/$id.cmd"
+  local left=()
+  for p in ${what[@]+"${what[@]}"}; do [[ -e "$p" ]] && left+=("$p"); done
+  detail="$(jq -c --argjson left "$(printf '%s\n' ${left[@]+"${left[@]}"} | jq -R . | jq -s 'map(select(. != ""))')" '. + {not_deleted: $left}' <<<"$detail")"
+  OPERATOR_AUDIT_DETAIL="$detail" operator_audit purge_record "$id"
+  registry_merge "$id" "$(jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg by "$(id -un)@$(hostname)" --argjson d "$detail" \
+    '{state: "purged", purged: {at: $at, by: $by, deleted: $d.deleted, not_deleted: $d.not_deleted}}')" || true
+  if [[ ${#left[@]} -gt 0 ]]; then
+    echo "WARN: purge could not delete: ${left[*]}" >&2
+  fi
+  echo "Purged:       run $id ($(jq -r '[.deleted[].kb] | add // 0' <<<"$detail") KB in $(jq -r '.deleted | length' <<<"$detail") place(s)); the destruction record is on $RUNS_DIR/operator-audit.jsonl"
+}
+
+# The ledger for another tool: CSV, or a Timesketch CSV import
+# (scripts/export.ts).
+cmd_export() {
+  local id="${1:-}" format="" out=""
+  [[ -n "$id" && "$id" != -* ]] || die_usage "export requires <id> --format csv|timesketch [--out FILE]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --format) format="$2"; shift 2 ;;
+      --out) out="$2"; shift 2 ;;
+      *) die_usage "export: unknown option $1" ;;
+    esac
+  done
+  case "$format" in
+    csv|timesketch) ;;
+    *) die_usage "export: --format csv or --format timesketch" ;;
+  esac
+  ensure_registry
+  local rec sandbox
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "BLOCKER: run $id's sandbox is not there." >&2; exit 2; }
+  [[ -f "$ROOT/scripts/export.ts" ]] || { echo "BLOCKER: scripts/export.ts is not in this checkout." >&2; exit 2; }
+  if [[ -z "$out" ]]; then
+    mkdir -p "$sandbox/exports"
+    out="$sandbox/exports/ledger$([[ "$format" == timesketch ]] && printf '.timesketch').csv"
+  fi
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/export.ts" "$sandbox" --format "$format" --out "$out" || exit 1
+  [[ "$(jq -r '.state // empty' <<<"$rec")" == running ]] && operator_trace "$sandbox" export "$id" --format "$format"
+  echo "Exported:     run $id's ledger as $format to $out"
 }
 
 cmd_help() {
@@ -6943,6 +7874,26 @@ cmd_help() {
     list|status|summary|report|package|tools|say|stop|reap|ui|netcheck)
       usage | awk -v c="$topic" '$1 == c { print }'
       echo "docs/usage.md has the detail; start is the only command with a long page." ;;
+    review) cat <<'EOF'
+  review <id> --accept N [--note TEXT] --examiner NAME     accept ledger entry N
+  review <id> --reject N --note TEXT --examiner NAME       reject it, saying why
+  review <id> --amend N --note TEXT --examiner NAME        accept it with a correction
+  review <id> --sign --examiner NAME                       sign off the ledger as it stands (once the run has ended)
+  review <id> --show                                       what has been reviewed, and whether the sign-off is current
+The review is kept beside the registry (runs/reviews/<id>.jsonl, 0600), chained, where no agent reaches.
+EOF
+      ;;
+    verify) cat <<'EOF'
+  verify <package dir|zip> [--allowed-signers FILE]
+Re-hashes every file against MANIFEST.txt (none missing, none added) and checks MANIFEST.txt.sig.
+Exit 0: all of it holds and the signer is one FILE allows; 3: the files hold, the signature is sound,
+the signer was not checked; 4: the files hold, the package is unsigned; 1: something does not hold.
+EOF
+      ;;
+    image-for) echo "  image-for [--pack ID]... [--tools-from DIR] [--playwright]   the image a kickoff would boot, as JSON: ref, digest (null when neither the lock nor msb has it), profile, pinned_by, reason; read only" ;;
+    export) echo "  export <id> --format csv|timesketch [--out FILE]   the ledger as CSV or a Timesketch CSV import (default: <sandbox>/exports/)" ;;
+    hold|release) echo "  hold <id> [--reason TEXT] / release <id>   a held run's material is kept from purge and from a new run in its sandbox" ;;
+    purge) echo "  purge <id> --yes   delete a finished run's sandbox, kept VM disks and hub directory; the registry keeps it as purged, and runs/operator-audit.jsonl gets the destruction record" ;;
     *) die_usage "no help for '$topic'" ;;
   esac
 }
@@ -6957,8 +7908,9 @@ main() {
   # What changes or leaves a run is on the operator's record; what only reads
   # it (list, status, summary, context, help) is not.
   case "$cmd" in
-    start|stop|reap|say|package|report|tools)
-      case " $* " in *" -h "*|*" --help "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
+    start|stop|reap|say|package|report|tools|review|export|hold|release|purge|verify)
+      # A start --check writes nothing, the audit included.
+      case " $* " in *" -h "*|*" --help "*|*" --check "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
   esac
   case "$cmd" in
     start) cmd_start "$@" ;;
@@ -6974,6 +7926,13 @@ main() {
     tools) cmd_tools "$@" ;;
     say) cmd_say "$@" ;;
     netcheck) cmd_netcheck "$@" ;;
+    review) cmd_review "$@" ;;
+    image-for) cmd_image_for "$@" ;;
+    export) cmd_export "$@" ;;
+    hold) cmd_hold "$@" ;;
+    release) cmd_release "$@" ;;
+    purge) cmd_purge "$@" ;;
+    verify) cmd_verify "$@" ;;
     help) cmd_help "$@" ;;
     *) die_usage "unknown command: $cmd" ;;
   esac

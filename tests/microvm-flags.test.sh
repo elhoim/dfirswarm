@@ -564,3 +564,59 @@ PY
 out="$(swarm start --isolation host --model solo/model --provider-host solo=api.solo.example --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --toolbox off --env SOME_SETTING=hush-hush --label audit-redact)"
 ! grep -q 'hush-hush' "$audit" || fail "an --env value reached the operator audit record"
 pass "every start is on the operator's own record, chained, with the OS user and an --env value left out"
+
+# --- an earlier run's claims in a VM run: on the read-only floor ------------------
+mkdir -p "$TMP/runs/sprv9/ledger"
+printf '%s\n' '{"v":2,"seq":1,"kind":"finding","value":"earlier claim","by":"sprv900","authors":["sprv900"],"at":"t","prev":"genesis","hash":"p1"}' > "$TMP/runs/sprv9/ledger/entries.jsonl"
+jq --arg sb "$TMP/runs/sprv9" '.runs += [{id: "sprv9", label: "prior-run", state: "done", sandbox: $sb, n: 1}]' "$TMP/runs/registry.json" > "$TMP/runs/registry.json.new" && mv "$TMP/runs/registry.json.new" "$TMP/runs/registry.json"
+out="$(start --isolation microvm --inputs "$TMP/ev" --ledger-from sprv9 --label vm-prior)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a VM run with --ledger-from exited $rc: $out"
+sbx="$(sandbox_of "$out")"
+[[ -f "$sbx/prior/ledger.md" ]] && grep -q 'earlier claim' "$sbx/prior/ledger.md" || fail "the VM run has no prior/ledger.md"
+# What each VM mounts is the spec's mounts plus the floor and the seat's own
+# holes (vm.ts mountsFor): the floor is read-only, and no writable mount is
+# prior/ or under it.
+node --experimental-strip-types --no-warnings -e '
+  const [vm, specFile] = process.argv.slice(2);
+  import(vm).then((V) => {
+    const spec = JSON.parse(require("fs").readFileSync(specFile, "utf8"));
+    for (const a of spec.agents) {
+      const all = [...V.mountsFor(spec, a.id), ...(spec.mounts ?? []), ...(spec.late_mounts ?? [])];
+      if (!all.some((m) => m.host === spec.sandbox && m.readonly)) { console.error("no read-only floor for " + a.id); process.exit(1); }
+      const rw = all.filter((m) => !m.readonly && (m.host === spec.sandbox + "/prior" || m.host.startsWith(spec.sandbox + "/prior/")));
+      if (rw.length) { console.error("writable over prior/: " + JSON.stringify(rw)); process.exit(1); }
+    }
+  });
+' -- not-a-script "$ROOT/scripts/vm.ts" "$sbx/vm-spec.json" || fail "prior/ is not on the VMs' read-only floor"
+pass "an earlier run's claims sit on a VM run's read-only floor, with no writable mount over them"
+
+# --- root: a VM run is warned about, not refused -----------------------------------
+mkdir -p "$TMP/rootbin"
+printf '#!/usr/bin/env bash\nif [[ "${1:-}" == "-u" ]]; then echo 0; else exec /usr/bin/id "$@"; fi\n' > "$TMP/rootbin/id"
+chmod +x "$TMP/rootbin/id"
+out="$(PATH="$TMP/rootbin:$PATH" start --isolation microvm --inputs "$TMP/ev" --label vm-root)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a VM run as root was refused (rc $rc): $out"
+printf '%s\n' "$out" | grep -q 'WARN: this run is started as root.*The VMs still hold the evidence read-only' || fail "a VM run as root is not warned about: $out"
+pass "a VM run started as root is warned about, not refused"
+
+# --- the model gateway: VM runs only, recorded, planned from the spec -------------
+out="$(start --isolation host --model-gateway --label gw-host)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'BLOCKER: --model-gateway fronts VM runs' || fail "--model-gateway on a host run was not refused (rc $rc): $out"
+out="$(start --isolation microvm --inputs "$TMP/ev" --model-gateway --label gw-vm)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a prepared VM run with --model-gateway exited $rc: $out"
+[[ "$(reg gw-vm '.isolation.model_gateway.on')" == true ]] || fail "the registry does not record the gateway: $(reg gw-vm '.isolation')"
+[[ "$(reg vm-ev '.isolation.model_gateway // "absent"')" == absent ]] || fail "a run without the flag records a gateway"
+# The plan from a spec: which providers it fronts, which it leaves to msb,
+# each seat's token in a 0600 config, and none of it on stdout.
+jq -n --arg sb "$TMP/gw-sb" '{run: "sgw1", sandbox: $sb, image: "i", hub_dir: "/h", mounts: [], env: {}, records_dir: "/r", allow_hosts: [],
+  agents: [{id: "sgw100", model: "openai/gpt-5.4-mini"}, {id: "sgw101", model: "openrouter/x"}],
+  providers: [{provider: "openai", kind: "api_key", hosts: ["api.openai.com"]}, {provider: "openrouter", kind: "api_key", hosts: ["openrouter.ai"]}]}' > "$TMP/gw-spec.json"
+plan="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" gateway-plan --spec "$TMP/gw-spec.json" --out "$TMP/gw-config.json")" || fail "gateway-plan failed: $plan"
+jq -e '.providers == ["openai"] and ([.declined[].provider] == ["openrouter"])' <<<"$plan" >/dev/null || fail "the plan does not front openai and leave openrouter: $plan"
+mode="$(stat -c %a "$TMP/gw-config.json" 2>/dev/null || stat -f %Lp "$TMP/gw-config.json")"
+[[ "$mode" == 600 ]] || fail "the gateway's config is mode $mode"
+tok="$(jq -r '.seats.sgw100.token' "$TMP/gw-config.json")"
+[[ ${#tok} -ge 32 ]] || fail "the seat has no gateway token"
+printf '%s\n' "$plan" | grep -q "$tok" && fail "a seat's token was printed"
+jq -e '.seats.sgw100.providers == ["openai"] and .seats.sgw101.providers == []' "$TMP/gw-config.json" >/dev/null || fail "the seats' providers are not what the gateway fronts"
+pass "--model-gateway is refused for a host run, recorded for a VM run, and planned from the spec: openai fronted, openrouter left to msb, tokens only in the 0600 config"

@@ -4,7 +4,9 @@
 #
 # - a link inside the evidence is copied as the link it is, never followed on
 #   this host; only a link at the top of --inputs (the operator's) is;
-# - a copy that lost a name or a byte against its source is refused;
+# - a copy that lost a name or a byte against its source is refused, and by
+#   default each copied file's source is hashed again (--no-verify-copy:
+#   names, kinds and sizes only);
 # - every file carries SHA-256, SHA-1 and MD5 from one read;
 # - a name that is not UTF-8 is kept exactly (Linux; APFS refuses such names).
 set -euo pipefail
@@ -53,7 +55,7 @@ jq -e '[.files[] | select(.path == "inputs/etc/hosts")][0].link' "$SB/inputs.jso
 printf '%s\n' "$out" | grep -q 'lead out of it' || fail "the links that lead out were not said: $out"
 printf '%s\n' "$out" | grep -q 'etc/hosts' || fail "the NOTE does not name etc/hosts: $out"
 printf '%s\n' "$out" | grep -q 'etc/inside' && fail "a link that stays inside was said to lead out: $out"
-[[ "$(jq -r '.source_checked' "$SB/inputs.json")" == "names, kinds and sizes" ]] || fail "the copy was not checked against its source: $(jq -c . "$SB/inputs.json")"
+[[ "$(jq -c '.source_checked | {by, files, mismatches}' "$SB/inputs.json")" == '{"by":"content","files":3,"mismatches":0}' ]] || fail "the copy was not checked against its source by content: $(jq -c .source_checked "$SB/inputs.json")"
 pass "links inside the evidence stay links (said when they lead out), the operator's top-level links are followed, and the copy is checked against the source"
 
 echo "# three digests from one read"
@@ -81,6 +83,33 @@ printf '%s\n' "$out" | grep -q 'not in the copy: B.txt' || fail "the missing nam
 printf '%s\n' "$out" | grep -q 'differs from its source.*c.txt' || fail "the short file is not said: $out"
 [[ "$(jq -r '.source_checked' "$SB2/inputs.json")" == "MISMATCH" ]] || fail "the manifest does not record the mismatch"
 pass "a copy with a name merged away or a short file is refused, naming each"
+
+echo "# the copy against its source by content"
+SB4="$TMP/sb4"
+mkdir -p "$SB4/inputs" "$TMP/src4"
+printf 'same size A\n' > "$TMP/src4/a.txt"
+printf 'untouched\n' > "$TMP/src4/b.txt"
+# Same name, same size, other bytes: only a content check sees it.
+printf 'same size B\n' > "$SB4/inputs/a.txt"
+cp "$TMP/src4/b.txt" "$SB4/inputs/b.txt"
+set +e
+out="$(write_inputs_manifest "$SB4" "$TMP/src4" auto none copy 1 2>&1)"
+rc=$?
+set -e
+[[ $rc -eq 4 ]] || fail "a copy that differs from its source by content exited $rc, wanted 4: $out"
+printf '%s\n' "$out" | grep -q 'differs from its source by content: inputs/a.txt' || fail "the file that differs is not named: $out"
+printf '%s\n' "$out" | grep -q 'b.txt' && fail "an unchanged file was named: $out"
+[[ "$(jq -c '.source_checked | {by, files, mismatches}' "$SB4/inputs.json")" == '{"by":"content","files":2,"mismatches":1}' ]] || fail "the manifest does not record the content check: $(jq -c .source_checked "$SB4/inputs.json")"
+# --no-verify-copy: names, kinds and sizes, and the difference goes unseen.
+rm -f "$SB4/inputs.json"
+out="$(write_inputs_manifest "$SB4" "$TMP/src4" auto none copy 0 2>&1)" || fail "without the content check the copy was refused: $out"
+[[ "$(jq -r '.source_checked' "$SB4/inputs.json")" == "names, kinds and sizes" ]] || fail "--no-verify-copy does not say what it checked"
+# And through install_inputs, whose default is the content check.
+SB5="$TMP/sb5"
+mkdir -p "$SB5"
+out="$(install_inputs "$SB5" "$TMP/src4" auto none 0 2>&1)" || fail "install_inputs with the check off failed: $out"
+[[ "$(jq -r '.source_checked' "$SB5/inputs.json")" == "names, kinds and sizes" ]] || fail "install_inputs did not pass --no-verify-copy on"
+pass "each copied file is hashed again from its source and compared; --no-verify-copy checks names, kinds and sizes only"
 
 echo "# a name that is not UTF-8 is kept exactly"
 if [[ "$(uname -s)" == "Darwin" ]]; then

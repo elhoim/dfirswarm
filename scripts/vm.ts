@@ -37,6 +37,8 @@
  *   node --experimental-strip-types scripts/vm.ts probe  [--image REF]
  *   node --experimental-strip-types scripts/vm.ts pull   --image REF
  *   node --experimental-strip-types scripts/vm.ts create --spec FILE
+ *   node --experimental-strip-types scripts/vm.ts gateway-plan --spec FILE --out FILE
+ *   node --experimental-strip-types scripts/vm.ts image-digest --image REF
  *   node --experimental-strip-types scripts/vm.ts finish --run ID --sandbox DIR [--no-snapshot] [--agent ID] [--registry FILE]
  *   node --experimental-strip-types scripts/vm.ts reap   [--run ID] [--registry FILE] [--only ID]
  *   node --experimental-strip-types scripts/vm.ts list   [--run ID]
@@ -58,6 +60,7 @@ import { chmod, mkdir, readFile, rename, rm, stat, utimes, writeFile, readdir } 
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { guestProviders, planGateway, type GatewayConfig } from "./model-gateway.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** The vsock port every VM's hub link uses; the host end is the agent's own socket. */
@@ -131,7 +134,35 @@ export type VmSpec = {
   registry?: string;
   /** The image's digest as the kickoff resolved it, once: every VM must boot this. */
   image_digest?: string;
+  /**
+   * Where the seats' hub tokens are: a 0600 JSON file ({agent id: 32 hex})
+   * in the run's hub directory, which no VM mounts. The spec names the file
+   * and never holds a token; each VM gets its own as SWARM_SEAT_TOKEN.
+   */
+  seat_tokens_file?: string;
+  /**
+   * The model gateway (`--model-gateway`): where the VMs reach it (msb's
+   * host gateway and this port) and its config, which holds each seat's
+   * gateway token and is read here, never mounted. `declined` names the
+   * providers left to msb's placeholder path and why.
+   */
+  model_gateway?: { port: number; config: string; declined?: Array<{ provider: string; reason: string }> };
 };
+
+/**
+ * This seat's hub token from the spec's seat-tokens file: what every
+ * connection a VM process opens to its seat's socket shows first
+ * (`{"t":"auth","token":…}`), beside the socket it arrives on. Null when the
+ * run has none (an older kickoff); a missing or malformed token for a seat
+ * of a run that has them is an error, not a seat that goes without.
+ */
+export function seatTokenFor(spec: Pick<VmSpec, "seat_tokens_file">, agent: string): string | null {
+  if (!spec.seat_tokens_file) return null;
+  const tokens = JSON.parse(readFileSync(spec.seat_tokens_file, "utf8")) as Record<string, unknown>;
+  const token = tokens[agent];
+  if (typeof token !== "string" || !/^[0-9a-f]{32}$/.test(token)) throw new Error(`no hub token for ${agent} in the run's seat-tokens file`);
+  return token;
+}
 
 /**
  * Why this host cannot run the agents' VMs, before msb is asked: microsandbox
@@ -621,6 +652,11 @@ try:
     s = socket.socket(socket.AF_UNIX)
     s.settimeout(10)
     s.connect("${GUEST_HUB_SOCKET}")
+    # The seat's token first, when the run has one: the hub takes nothing
+    # else on this seat's socket before it.
+    token = os.environ.get("SWARM_SEAT_TOKEN", "")
+    if token:
+        s.sendall(json.dumps({"t": "auth", "token": token}).encode() + b"\\n")
     s.sendall(b'{"t":"rpc","fn":"swarmDoneExists","args":[null]}\\n')
     data = b""
     while not data.endswith(b"\\n"):
@@ -723,29 +759,50 @@ export function imageFit(probe: Record<string, unknown>, needs: PackNeed[], allo
 }
 
 /** What each agent's VM must find, or the kickoff stops. */
+/** One isolation check of a VM's probe: what it is, what it wants, what was found, and what that means. */
+export type ProbeCheck = { check: string; want: string; got: string; ok: boolean; meaning: string };
+
+/**
+ * Every isolation check a VM's probe made, one row each, in the order the
+ * kickoff reports them: its name, what it wants, what the probe found
+ * ("not measured" when it did not), whether it holds, and what that means:
+ * what is held when it holds, the reason the VM is refused when it does
+ * not. The one list the kickoff (probeVerdict) and the console both read.
+ */
+export function probeChecks(probe: Record<string, unknown>, expectInputs: boolean, expectedInputFiles?: number | null): ProbeCheck[] {
+  const rows: ProbeCheck[] = [];
+  const add = (check: string, want: string, got: unknown, ok: boolean, held: string, refused: string) =>
+    rows.push({ check, want, got: got === undefined ? "not measured" : String(got), ok, meaning: ok ? held : refused });
+  add("the sandbox floor", "ro", probe.base, probe.base === "ro", "the run's files are read-only in the VM", `the sandbox floor is ${String(probe.base)}, not read-only`);
+  add("the shared work/", "ro", probe.work, probe.work === "ro", "what peers wrote is read-only here; a shared file is published through the hub", `the shared work/ is ${String(probe.work)}, not read-only`);
+  add("its own work/<id>/", "rw", probe.scratch, probe.scratch === "rw", "the seat can write its own scratch", `its own work/<id>/ is ${String(probe.scratch)}, not writable`);
+  add("its own work/extracted/<id>/", "rw", probe.extracted, probe.extracted === "rw", "the seat can extract into its own corner", `its own work/extracted/<id>/ is ${String(probe.extracted)}, not writable`);
+  add("work/extracted/<id>/ executes", "noexec", probe.extracted_exec, probe.extracted_exec === "noexec", "what the seat extracts cannot run", `work/extracted/<id>/ can execute (${String(probe.extracted_exec)})`);
+  add("work/quarantine/<id>/ executes", "noexec", probe.quarantine_exec, probe.quarantine_exec === "noexec", "what the seat quarantines cannot run", `work/quarantine/<id>/ can execute (${String(probe.quarantine_exec)})`);
+  if (probe.peers_extracted_exec !== undefined) add("a peer's work/extracted/ executes", "noexec", probe.peers_extracted_exec, probe.peers_extracted_exec === "noexec", "what a peer extracted cannot run here", `a peer's work/extracted/ can execute here (${String(probe.peers_extracted_exec)})`);
+  if (probe.peers_quarantine_exec !== undefined) add("a peer's work/quarantine/ executes", "noexec", probe.peers_quarantine_exec, probe.peers_quarantine_exec === "noexec", "what a peer quarantined cannot run here", `a peer's work/quarantine/ can execute here (${String(probe.peers_quarantine_exec)})`);
+  add("its tool-output/", "rw", probe.tool_output, probe.tool_output === "rw", "the seat's whole tool outputs are kept", `its tool-output/ is ${String(probe.tool_output)}, not writable`);
+  add("its Pi session directory", "rw", probe.session, probe.session === "rw", "the seat's Pi sessions are kept", `its Pi session directory is ${String(probe.session)}, not writable`);
+  if (expectInputs) {
+    add("inputs/", "ro", probe.inputs, probe.inputs === "ro", "the evidence is read-only in the VM", `inputs/ is ${String(probe.inputs)}, not read-only`);
+    if (probe.inputs_exec !== undefined) add("the evidence executes", "noexec", probe.inputs_exec, probe.inputs_exec === "noexec", "nothing in the evidence can run", `the evidence can execute in the VM (${String(probe.inputs_exec)})`);
+  }
+  for (const r of Array.isArray(probe.reach) ? (probe.reach as Array<{ target?: unknown; ok?: unknown; error?: unknown }>) : []) {
+    const ok = r.ok === true;
+    add(`the model's host ${String(r.target ?? "?")}`, "reachable", ok ? "reachable" : String(r.error ?? "no connection"), ok, "the seat reaches its model", `the model's host ${String(r.target)} is not reachable from the VM (${String(r.error ?? "no connection")})`);
+  }
+  if (expectInputs && typeof expectedInputFiles === "number" && typeof probe.inputs_files === "number") {
+    add("evidence names seen", String(expectedInputFiles), probe.inputs_files, probe.inputs_files === expectedInputFiles, "the VM sees every name the manifest lists", `the VM sees ${probe.inputs_files} evidence name(s) where the manifest lists ${expectedInputFiles}`);
+  }
+  add("the hub", "reachable", probe.hub === true ? "reachable" : String(probe.hub_error ?? "no answer"), probe.hub === true, "the seat reaches the board, the trace and the harness through the hub", `the hub is not reachable (${String(probe.hub_error ?? "no answer")})`);
+  const piOk = typeof probe.pi === "string" && /^\d+\.\d+/.test(probe.pi);
+  add("pi", "runs", probe.pi, piOk, "Pi runs in the VM", `pi does not run (${String(probe.pi)})`);
+  return rows;
+}
+
+/** Why a VM is refused: each failed probe check's meaning, in order; empty when every check holds. */
 export function probeVerdict(probe: Record<string, unknown>, expectInputs: boolean, expectedInputFiles?: number): string[] {
-  const wrong: string[] = [];
-  if (probe.base !== "ro") wrong.push(`the sandbox floor is ${String(probe.base)}, not read-only`);
-  if (probe.work !== "ro") wrong.push(`the shared work/ is ${String(probe.work)}, not read-only`);
-  if (probe.scratch !== "rw") wrong.push(`its own work/<id>/ is ${String(probe.scratch)}, not writable`);
-  if (probe.extracted !== "rw") wrong.push(`its own work/extracted/<id>/ is ${String(probe.extracted)}, not writable`);
-  if (probe.extracted_exec !== "noexec") wrong.push(`work/extracted/<id>/ can execute (${String(probe.extracted_exec)})`);
-  if (probe.quarantine_exec !== "noexec") wrong.push(`work/quarantine/<id>/ can execute (${String(probe.quarantine_exec)})`);
-  if (probe.peers_extracted_exec !== undefined && probe.peers_extracted_exec !== "noexec") wrong.push(`a peer's work/extracted/ can execute here (${String(probe.peers_extracted_exec)})`);
-  if (probe.peers_quarantine_exec !== undefined && probe.peers_quarantine_exec !== "noexec") wrong.push(`a peer's work/quarantine/ can execute here (${String(probe.peers_quarantine_exec)})`);
-  if (probe.tool_output !== "rw") wrong.push(`its tool-output/ is ${String(probe.tool_output)}, not writable`);
-  if (probe.session !== "rw") wrong.push(`its Pi session directory is ${String(probe.session)}, not writable`);
-  if (expectInputs && probe.inputs !== "ro") wrong.push(`inputs/ is ${String(probe.inputs)}, not read-only`);
-  if (expectInputs && probe.inputs_exec !== undefined && probe.inputs_exec !== "noexec") wrong.push(`the evidence can execute in the VM (${String(probe.inputs_exec)})`);
-  for (const r of Array.isArray(probe.reach) ? (probe.reach as Array<{ target: string; ok: boolean; error?: string }>) : []) {
-    if (!r.ok) wrong.push(`the model's host ${r.target} is not reachable from the VM (${r.error ?? "no connection"})`);
-  }
-  if (expectInputs && typeof expectedInputFiles === "number" && typeof probe.inputs_files === "number" && probe.inputs_files !== expectedInputFiles) {
-    wrong.push(`the VM sees ${probe.inputs_files} evidence name(s) where the manifest lists ${expectedInputFiles}`);
-  }
-  if (probe.hub !== true) wrong.push(`the hub is not reachable (${String(probe.hub_error ?? "no answer")})`);
-  if (typeof probe.pi !== "string" || !/^\d+\.\d+/.test(probe.pi)) wrong.push(`pi does not run (${String(probe.pi)})`);
-  return wrong;
+  return probeChecks(probe, expectInputs, expectedInputFiles).filter((c) => !c.ok).map((c) => c.meaning);
 }
 
 /**
@@ -849,6 +906,8 @@ export type VmRecord = {
   mounts: Array<{ host: string; guest: string; mode: "ro" | "rw"; noexec?: boolean }>;
   network: { default: "deny" | "public"; allow_hosts: string[]; host_ports: number[] };
   secrets: Array<{ name: string; hosts: string[] }>;
+  /** Which of its providers this VM reaches through the model gateway, never the seat's token. */
+  model_gateway?: { port: number; providers: string[]; declined: Array<{ provider: string; reason: string }> };
   probe: Record<string, unknown>;
   created_at: string;
   stopped_at?: string;
@@ -858,6 +917,84 @@ export type VmRecord = {
 async function msbVersion(): Promise<string> {
   const r = await run(msbBinary(), ["--version"], { timeoutMs: 20_000 });
   return r.stdout.trim().replace(/^msb\s+/, "") || "unknown";
+}
+
+/**
+ * A seat's guest Pi config with the providers the model gateway fronts
+ * pointed at it: each one's models.json entry keeps the operator's settings
+ * (its model list, its API), takes the gateway's base URL and the seat's
+ * gateway token as its key, and loses every credential header (the values
+ * were already placeholders, which msb would no longer swap); its auth.json
+ * entry goes, since a stored credential wins over models.json's key in Pi.
+ */
+export function gatewayPiConfig(
+  config: ReturnType<typeof guestPiConfig>,
+  fronted: Record<string, { baseUrl: string; apiKey: string }>,
+  placeholders: string[],
+): ReturnType<typeof guestPiConfig> {
+  const auth = JSON.parse(config.auth || "{}") as Record<string, unknown>;
+  const models = (config.models ? JSON.parse(config.models) : {}) as { providers?: Record<string, Record<string, unknown>> } & Record<string, unknown>;
+  const providers = { ...(models.providers ?? {}) };
+  const isCredential = (name: string, value: unknown) =>
+    secretLikeName(name) || /^authorization$/i.test(name) || (typeof value === "string" && placeholders.some((ph) => ph && value.includes(ph)));
+  for (const [p, gw] of Object.entries(fronted)) {
+    delete auth[p];
+    const entry: Record<string, unknown> = { ...(providers[p] ?? {}) };
+    delete entry.apiKey;
+    if (entry.headers && typeof entry.headers === "object") {
+      const headers = Object.fromEntries(Object.entries(entry.headers as Record<string, unknown>).filter(([k, v]) => !isCredential(k, v)));
+      if (Object.keys(headers).length) entry.headers = headers;
+      else delete entry.headers;
+    }
+    providers[p] = { ...entry, baseUrl: gw.baseUrl, apiKey: gw.apiKey };
+  }
+  return { ...config, auth: `${JSON.stringify(auth, null, 2)}\n`, models: `${JSON.stringify({ ...models, providers }, null, 2)}\n` };
+}
+
+/**
+ * What one seat's VM is given for its models, worked out before msb is
+ * asked: its providers, the credentials msb binds for it (as placeholders),
+ * its guest Pi config, the hosts and host ports it may reach and what its
+ * probe tries. With the model gateway, a provider the gateway fronts is
+ * reached through the gateway on this host instead: no msb secret and no
+ * auth.json entry for it in the VM, no route to its hosts, the gateway's
+ * port through msb's host gateway. A provider the gateway does not front
+ * keeps the placeholder path, and without the gateway nothing changes.
+ */
+export function seatPlan(
+  spec: VmSpec,
+  agent: VmSpec["agents"][number],
+  allSecrets: ResolvedSecret[],
+  gateway?: GatewayConfig | null,
+): { providers: ProviderSpec[]; secrets: ResolvedSecret[]; piConfig: ReturnType<typeof guestPiConfig>; allowHosts: string[]; hostPorts: number[]; probeTargets: string[]; fronted: string[] } {
+  // Least privilege per seat: this VM holds the credentials of the model it
+  // runs and of the summary model, reaches those providers' hosts, and no
+  // other seat's.
+  const providers = seatProviders(spec, agent);
+  const mine = new Set(providers.map((p) => p.provider));
+  const seatSecrets = allSecrets.filter((s) => mine.has(s.provider));
+  const gw = gateway && spec.model_gateway ? guestProviders(gateway, agent.id, spec.model_gateway.port) : {};
+  const fronted = Object.keys(gw).filter((p) => mine.has(p)).sort();
+  let piConfig = guestPiConfig({ ...spec, providers }, seatSecrets);
+  if (fronted.length) {
+    piConfig = gatewayPiConfig(
+      piConfig,
+      Object.fromEntries(fronted.map((p) => [p, gw[p]])),
+      seatSecrets.filter((s) => fronted.includes(s.provider)).map((s) => s.placeholder),
+    );
+  }
+  const secrets = seatSecrets.filter((s) => !fronted.includes(s.provider));
+  const reached = providers.filter((p) => !fronted.includes(p.provider));
+  // A local model on this machine is reached through msb's host gateway; one
+  // elsewhere on the LAN is an address and a port like any other entry.
+  const localLoopback = (p: ProviderSpec) => p.hosts.length === 0 || p.hosts.every((h) => parseAllowEntry(h).loopback);
+  const hostPorts = [
+    ...reached.filter((p) => p.kind === "local" && p.port && localLoopback(p)).map((p) => p.port as number),
+    ...(fronted.length && spec.model_gateway ? [spec.model_gateway.port] : []),
+  ];
+  const allowHosts = [...new Set([...spec.allow_hosts, ...reached.flatMap((p) => (p.kind === "local" && localLoopback(p) ? [] : p.hosts)), ...(spec.pack_secrets ?? []).flatMap((s) => s.hosts ?? [])])].sort();
+  const targets = [...probeTargets(reached), ...(fronted.length && spec.model_gateway ? [`host.microsandbox.internal:${spec.model_gateway.port}`] : [])];
+  return { providers, secrets, piConfig, allowHosts, hostPorts: [...new Set(hostPorts)], probeTargets: [...new Set(targets)].sort(), fronted };
 }
 
 /** The providers one seat's VM needs: its own model's, the summary model's, and every local one (no credential). */
@@ -871,24 +1008,15 @@ async function createOne(
   spec: VmSpec,
   agent: VmSpec["agents"][number],
   allSecrets: ResolvedSecret[],
+  gateway: GatewayConfig | null = null,
 ): Promise<VmRecord> {
   const name = vmName(spec.run, agent.id);
   const mounts = mountsFor(spec, agent.id);
   for (const m of mounts) if (!m.readonly) await mkdir(m.host, { recursive: true });
   // The shares every seat's corner sits in exist before they are mounted.
   for (const d of ["extracted", "quarantine"]) await mkdir(join(spec.sandbox, "work", d), { recursive: true });
-  // Least privilege per seat: this VM holds the credentials of the model it
-  // runs and of the summary model, reaches those providers' hosts, and no
-  // other seat's.
-  const providers = seatProviders(spec, agent);
-  const mine = new Set(providers.map((p) => p.provider));
-  const secrets = allSecrets.filter((s) => mine.has(s.provider));
-  const piConfig = guestPiConfig({ ...spec, providers }, secrets);
-  // A local model on this machine is reached through msb's host gateway; one
-  // elsewhere on the LAN is an address and a port like any other entry.
-  const localLoopback = (p: ProviderSpec) => p.hosts.length === 0 || p.hosts.every((h) => parseAllowEntry(h).loopback);
-  const hostPorts = providers.filter((p) => p.kind === "local" && p.port && localLoopback(p)).map((p) => p.port as number);
-  const allowHosts = [...new Set([...spec.allow_hosts, ...providers.flatMap((p) => (p.kind === "local" && localLoopback(p) ? [] : p.hosts)), ...(spec.pack_secrets ?? []).flatMap((s) => s.hosts ?? [])])].sort();
+  const plan = seatPlan(spec, agent, allSecrets, gateway);
+  const { secrets, piConfig, hostPorts, allowHosts } = plan;
   // A pack's secrets: the value is read here, on the host, from the store
   // `pack install` wrote (KEY=VALUE lines, or one bare value), and the VM
   // gets a placeholder under the secret's own name, which the pack's tool
@@ -921,10 +1049,15 @@ async function createOne(
     SWARM_NUDGE_SOCKET: GUEST_HUB_SOCKET,
     SWARM_ISOLATION: "microvm",
     // What the probe reaches: each of this seat's model hosts, as Pi will.
-    SWARM_PROBE_TARGETS: probeTargets(providers).join(","),
+    SWARM_PROBE_TARGETS: plan.probeTargets.join(","),
     // What the probe looks for: every program the run's packs require.
     SWARM_REQUIRED_BINARIES: [...new Set(packNeeds((spec.env.SWARM_PACK_DIRS ?? "").split(":")).flatMap((n) => n.required))].join(","),
   };
+  // This seat's own hub token. It rests in msb's database with the secret
+  // values while the VM lives (scrubbed after finish), never in the spec,
+  // the record or a log.
+  const seatToken = seatTokenFor(spec, agent.id);
+  if (seatToken) env.SWARM_SEAT_TOKEN = seatToken;
 
   // A secret is bound to named hosts only: bound to a suffix, msb would put
   // its value on any host under it, and any host under a suffix is one an
@@ -1056,6 +1189,7 @@ async function createOne(
       ...secrets.map((s) => ({ name: `${s.provider} (${s.kind === "oauth" ? "subscription token" : "API key"})`, hosts: s.hosts })),
       ...packSecrets.map((s) => ({ name: s.name, hosts: s.hosts })),
     ],
+    ...(spec.model_gateway ? { model_gateway: { port: spec.model_gateway.port, providers: plan.fronted, declined: spec.model_gateway.declined ?? [] } } : {}),
     probe,
     created_at: new Date().toISOString(),
   };
@@ -1079,7 +1213,10 @@ export async function createVms(spec: VmSpec): Promise<{ records: VmRecord[]; fa
   }
   const needs = packNeeds((spec.env.SWARM_PACK_DIRS ?? "").split(":"));
   const allowInstall = spec.env.SWARM_ALLOW_INSTALL === "1";
-  const settled = await Promise.allSettled(spec.agents.map((a) => createOne(M, spec, a, secrets)));
+  // The model gateway's config, read once: each seat's gateway token is in
+  // it, and it reaches a VM only as that seat's own models.json key.
+  const gateway = spec.model_gateway ? (JSON.parse(await readFile(spec.model_gateway.config, "utf8")) as GatewayConfig) : null;
+  const settled = await Promise.allSettled(spec.agents.map((a) => createOne(M, spec, a, secrets, gateway)));
   const records: VmRecord[] = [];
   const failures: Array<{ agent: string; reasons: string[] }> = [];
   const warnings = new Set<string>();
@@ -1490,11 +1627,17 @@ export async function reapVms(options: { run?: string; registry?: string; only?:
     if (!options.registry || !existsSync(options.registry)) return [];
     mine = registryLabel(options.registry);
     try {
-      const reg = JSON.parse(readFileSync(options.registry, "utf8")) as { runs?: Array<{ id?: string; state?: string; started_at?: string; sandbox?: string }> };
+      const reg = JSON.parse(readFileSync(options.registry, "utf8")) as { runs?: Array<{ id?: string; state?: string; started_at?: string; sandbox?: string; hold?: unknown }> };
       const now = options.now ?? Date.now();
       for (const r of reg.runs ?? []) {
         if (!r.id) continue;
         if (r.sandbox) sandboxOf.set(r.id, r.sandbox);
+        // A run on hold (`swarm.sh hold`) keeps what it has, its VMs too,
+        // until the operator releases it.
+        if (r.hold && typeof r.hold === "object") {
+          live.add(r.id);
+          continue;
+        }
         // `prepared` is a kickoff between writing its record and starting its
         // agents; one that stayed there for hours is a kickoff that died.
         const started = Date.parse(r.started_at ?? "");
@@ -2006,6 +2149,13 @@ async function main(): Promise<void> {
     case "msb-path":
       console.log(msbBinary());
       return;
+    case "image-digest": {
+      // An image's digest as msb holds it here, or null: read only.
+      const image = opt("--image");
+      if (!image) throw new Error("image-digest needs --image REF");
+      console.log(JSON.stringify({ image, digest: await imageRefDigest(image) }));
+      process.exit(0);
+    }
     case "netcheck": {
       const image = opt("--image");
       if (!image) throw new Error("netcheck needs --image REF [--allow-host H]... [--canary HOST]");
@@ -2057,6 +2207,29 @@ async function main(): Promise<void> {
       const r = await probeHost(opt("--image"));
       console.log(JSON.stringify(r));
       process.exit(r.ok ? 0 : 1);
+    }
+    case "gateway-plan": {
+      // The model gateway's config for a run, from its VM spec: which of the
+      // team's providers it fronts (and which it leaves to msb, and why),
+      // each seat's gateway token, the prices. Written 0600 by rename; the
+      // declined list is what is printed.
+      const file = opt("--spec");
+      const out = opt("--out");
+      if (!file || !out) throw new Error("gateway-plan needs --spec FILE --out FILE");
+      const spec = JSON.parse(await readFile(file, "utf8")) as VmSpec;
+      const planned = planGateway({
+        run: spec.run,
+        sandbox: spec.sandbox,
+        providers: spec.providers.map((p) => ({ provider: p.provider, kind: p.kind })),
+        seats: spec.agents.map((a) => ({ id: a.id, model: a.model, providers: seatProviders(spec, a).filter((p) => p.kind !== "local").map((p) => p.provider) })),
+        piAgentDir: spec.pi_agent_dir,
+        piBin: spec.pi_bin,
+      });
+      const tmp = `${out}.tmp.${process.pid}`;
+      await writeFile(tmp, `${JSON.stringify(planned.config, null, 2)}\n`, { mode: 0o600 });
+      await rename(tmp, out);
+      console.log(JSON.stringify({ declined: planned.declined, providers: Object.keys(planned.config.providers) }));
+      process.exit(0);
     }
     case "create": {
       const file = opt("--spec");

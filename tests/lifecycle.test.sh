@@ -119,4 +119,63 @@ sandbox="$TMP/sandbox" swarm_id=s1 hard=0 wall=10 n=0 vm_image=img vm_cpus=1 vm_
 [[ "$(jq -r '.env.LLAMA_API_KEY // empty' "$TMP/spec-llama.json")" == "local" ]] || fail "llama.cpp in a VM has no stand-in key"
 pass "Pi's built-in llama.cpp provider reaches the host's server from a VM through the gateway"
 
+# --- the hub's keeper, its stop and the seats' tokens, from the frozen copy --------
+for f in run_script write_seat_tokens start_vm_hub hub_send; do
+  eval "$(fn "$f")"
+  type "$f" >/dev/null 2>&1 || fail "$f was not found in swarm.sh"
+done
+HD="$(hubs_parent --create)/dfs-sfz1.test"
+mkdir -p "$HD/host/scripts" "$TMP/fsb/traces"
+[[ "$(run_script "" scripts/idle-nudge.sh)" == "$ROOT/scripts/idle-nudge.sh" ]] || fail "a run with no frozen copy does not use the checkout"
+[[ "$(run_script "$HD" scripts/idle-nudge.sh)" == "$ROOT/scripts/idle-nudge.sh" ]] || fail "a script the copy lacks is not taken from the checkout"
+: > "$HD/host/scripts/idle-nudge.sh"
+[[ "$(run_script "$HD" scripts/idle-nudge.sh)" == "$HD/host/scripts/idle-nudge.sh" ]] || fail "the frozen copy's watchdog is not the one run"
+# Tokens: one per seat, 32 hex, 0600, in the hub's directory.
+tokens_file="$(write_seat_tokens "$HD" sfz100 sfz101)" || fail "write_seat_tokens failed"
+[[ "$tokens_file" == "$HD/seat-tokens.json" ]] || fail "the tokens are not in the hub's directory: $tokens_file"
+jq -e '(keys == ["sfz100", "sfz101"]) and ([.[] | test("^[0-9a-f]{32}$")] | all) and (.sfz100 != .sfz101)' "$tokens_file" >/dev/null || fail "the tokens are not one 32-hex token per seat: $(cat "$tokens_file")"
+mode="$(stat -c %a "$tokens_file" 2>/dev/null || stat -f %Lp "$tokens_file")"
+[[ "$mode" == 600 ]] || fail "the tokens file is mode $mode"
+# A stand-in hub in the frozen copy: it keeps its argv and its stdin, and
+# answers on admin.sock; a stand-in keeper says which copy was started.
+cat > "$HD/host/scripts/vm-hub.ts" <<'EOF'
+import { writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { join } from "node:path";
+const dir = process.argv[process.argv.indexOf("--dir") + 1];
+let input = "";
+process.stdin.on("data", (d) => (input += d));
+process.stdin.on("end", () => {
+  writeFileSync(join(dir, "stand-in.json"), JSON.stringify({ argv: process.argv.slice(2), input: JSON.parse(input) }));
+  createServer().listen(join(dir, "admin.sock"));
+  setTimeout(() => process.exit(0), 20000);
+});
+EOF
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$0" "$SWARM_RUNS_DIR" > "%s/keeper-ran"\n' "$HD" > "$HD/host/scripts/hub-supervise.sh"
+printf '#!/usr/bin/env bash\n' > "$HD/host/scripts/swarm.sh"
+TRACE_TOKENS_JSON='{"sfz100":"t0","sfz101":"t1"}' SEAT_TOKENS_FILE="$tokens_file" RUNS_DIR="$TMP/runs" REGISTRY="$TMP/runs/registry.json" \
+  start_vm_hub "$TMP/fsb" "$HD" sfz1 "$TMP/collector.sock" sfz100 sfz101 || fail "start_vm_hub failed: $(cat "$TMP/fsb/traces/vm-hub.log" 2>/dev/null)"
+PIDS+=("$(cat "$TMP/fsb/hub.pid")")
+for i in $(seq 1 50); do [[ -f "$HD/keeper-ran" ]] && break; sleep 0.1; done
+[[ "$(head -1 "$HD/keeper-ran" 2>/dev/null)" == "$HD/host/scripts/hub-supervise.sh" ]] || fail "the keeper was not started from the frozen copy: $(cat "$HD/keeper-ran" 2>/dev/null)"
+[[ "$(sed -n 2p "$HD/keeper-ran")" == "$TMP/runs" ]] || fail "the keeper does not know the runs directory"
+jq -e --arg s "$HD/host/scripts/swarm.sh" '.argv | index("--stop-cmd") as $i | .[$i + 1] == $s' "$HD/stand-in.json" >/dev/null || fail "the hub's stop is not the frozen copy's: $(jq -c .argv "$HD/stand-in.json")"
+jq -e --slurpfile t "$tokens_file" '.input.seat_tokens == $t[0] and .input.tokens == {"t0": "sfz100", "t1": "sfz101"}' "$HD/stand-in.json" >/dev/null \
+  || fail "the hub was not given the seats' tokens beside the collector's: $(jq -c .input "$HD/stand-in.json")"
+pass "the keeper, the hub's stop and the watchdog run from the frozen copy; the hub gets one 32-hex token per seat (0600, in its own directory) beside the collector's"
+
+# The spec names the tokens file and never holds a token.
+for f in vm_build_spec vm_providers_json pi_agent_dir pi_auth_file credential_models distinct_models; do eval "$(fn "$f")"; done
+extra_env=() agent_ids=() AGENT_MODELS=()
+sandbox="$TMP/sandbox" swarm_id=s1 hard=0 wall=10 n=0 vm_image=img vm_cpus=1 vm_memory=1024 vm_disk=8192 \
+  playwright=0 pack_dirs="" compact_prompt="" self_compact=0 forging=0 inbox_page_chars="" quarantine=0 local_only=0 \
+  allow_install=0 install_hosts=0 allow_hosts="" use_netguard=1 PACK_SECRETS_VM='[]' PACK_SECRETS_ENV='{}' REGISTRY="$TMP/runs/registry.json" \
+  vm_image_digest="" PI_TOOLS="" SEAT_TOKENS_FILE="$tokens_file" \
+  vm_build_spec "$TMP/hub" "$TMP/spec-tokens.json" 2>/dev/null || true
+[[ "$(jq -r '.seat_tokens_file // empty' "$TMP/spec-tokens.json")" == "$tokens_file" ]] || fail "the spec does not name the tokens file"
+for tok in $(jq -r '.[]' "$tokens_file"); do
+  grep -q "$tok" "$TMP/spec-tokens.json" && fail "a seat's token is in the spec"
+done
+pass "the VM spec names the seats' tokens file and holds no token"
+
 echo "lifecycle: all checks passed"

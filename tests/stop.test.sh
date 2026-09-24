@@ -196,4 +196,29 @@ printf '%s\n' "$out" | grep -q "an earlier one (2020-01-01" || fail "stop did no
 printf '%s\n' "$out" | grep -q "nothing of run scus1 was alive" || fail "a run recorded as running with nothing alive was not said to have crashed or lost its host: $out"
 pass "a custody that did not run is said, and the verdict left from an earlier stop is named as that; a run with nothing alive is said to have crashed or lost its host"
 
+echo "# a run on hold keeps its VMs from the reaper"
+HR="$TMP/hold-runs"
+mkdir -p "$HR/shd1"
+jq -n --arg sb "$HR/shd1" '{runs: [{id: "shd1", label: "held", state: "stopped", sandbox: $sb, n: 1, hold: {reason: "matter", at: "t", by: "x"}}]}' > "$HR/registry.json"
+label="$(node --experimental-strip-types --no-warnings -e 'import(process.argv[2]).then((V) => console.log(V.registryLabel(process.argv[3])))' -- x "$ROOT/scripts/vm.ts" "$HR/registry.json")"
+: > "$TMP/msb-hold.log"
+cat > "$TMP/msb" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$TMP/msb-hold.log"
+case "\$1" in
+  list) printf '[{"name":"dfs-shd1-shd100","status":"stopped","labels":{"dev.dfirswarm.run":"shd1","dev.dfirswarm.agent":"shd100","dev.dfirswarm.registry":"$label"}}]\\n' ;;
+  inspect) printf '{"config":{"labels":{"dev.dfirswarm.run":"shd1","dev.dfirswarm.agent":"shd100","dev.dfirswarm.registry":"$label"}}}\\n' ;;
+  --version) echo "msb 0.7.2" ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$TMP/msb"
+out="$(SWARM_MSB_BIN="$TMP/msb" node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" reap --registry "$HR/registry.json" 2>&1)" || fail "reap failed: $out"
+grep -q '^stop dfs-shd1\|^rm dfs-shd1\|^snapshot' "$TMP/msb-hold.log" && fail "the reaper touched a held run's VM: $(cat "$TMP/msb-hold.log")"
+# Released, the same VM is the reaper's.
+jq '.runs[0].hold = null' "$HR/registry.json" > "$HR/r" && mv "$HR/r" "$HR/registry.json"
+out="$(SWARM_MSB_BIN="$TMP/msb" node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" reap --registry "$HR/registry.json" 2>&1)" || true
+grep -q '^rm dfs-shd1-shd100\|^snapshot' "$TMP/msb-hold.log" || fail "a released run's VM was not reaped: $(cat "$TMP/msb-hold.log")"
+pass "a held run's VM is left alone by the reaper, and reaped once released"
+
 echo "stop.test.sh: all checks passed"

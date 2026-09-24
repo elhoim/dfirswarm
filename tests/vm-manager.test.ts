@@ -37,7 +37,13 @@ import {
   type VmSpec,
   scrubCompleted,
   scrubMsbDatabase,
+  seatTokenFor,
+  PROBE_SCRIPT,
+  GUEST_HUB_SOCKET,
+  seatPlan,
+  probeChecks,
 } from "../scripts/vm.ts";
+import type { GatewayConfig } from "../scripts/model-gateway.ts";
 
 const dirs: string[] = [];
 after(async () => {
@@ -512,3 +518,150 @@ r.execute("COMMIT")`,
   }
 });
 
+test("a seat's hub token comes from the run's seat-tokens file, never the spec, and a seat without a good one is an error", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "seat-tokens-"));
+  after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, "seat-tokens.json");
+  await writeFile(file, JSON.stringify({ s1a2b00: "0123456789abcdef0123456789abcdef", s1a2b01: "short" }), { mode: 0o600 });
+  assert.equal(seatTokenFor({ seat_tokens_file: file }, "s1a2b00"), "0123456789abcdef0123456789abcdef");
+  assert.throws(() => seatTokenFor({ seat_tokens_file: file }, "s1a2b01"), /no hub token for s1a2b01/, "a malformed token is refused");
+  assert.throws(() => seatTokenFor({ seat_tokens_file: file }, "s1a2b02"), /no hub token for s1a2b02/, "a seat the file does not name is refused");
+  assert.equal(seatTokenFor({}, "s1a2b00"), null, "a run without tokens (an older kickoff) has none");
+  // The error names the seat, never a token.
+  try {
+    seatTokenFor({ seat_tokens_file: file }, "s1a2b01");
+  } catch (err) {
+    assert.doesNotMatch(String(err), /0123456789abcdef/);
+  }
+});
+
+test("the VM's probe shows its seat's token before anything else on the hub socket, and nothing when the run has none", async () => {
+  // The probe's hub check, as the guest runs it, against a socket here.
+  const block = PROBE_SCRIPT.match(/try:\n    s = socket\.socket\(socket\.AF_UNIX\)[\s\S]*?out\["hub_error"\] = str\(e\)\n/);
+  assert.ok(block, "the probe's hub check was not found");
+  const dir = await mkdtemp(join("/tmp", "probe-auth-"));
+  after(() => rm(dir, { recursive: true, force: true }));
+  const sock = join(dir, "hub.sock");
+  const net = await import("node:net");
+  const run = async (token: string | undefined): Promise<{ lines: string[]; out: { hub?: boolean } }> => {
+    const lines: string[] = [];
+    const server = net.createServer((c) => {
+      let buf = "";
+      c.on("data", (d) => {
+        buf += d.toString();
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, i);
+          buf = buf.slice(i + 1);
+          lines.push(line);
+          if (JSON.parse(line).t === "rpc") c.end('{"ok":true,"result":false}\n');
+        }
+      });
+    });
+    await new Promise<void>((r) => server.listen(sock, r));
+    const py = `import json, os, socket\nout = {}\n${block![0].replaceAll(GUEST_HUB_SOCKET, sock)}print(json.dumps(out))\n`;
+    const out = await new Promise<string>((resolve, reject) => {
+      const child = spawn("python3", ["-c", py], { env: { ...process.env, SWARM_SEAT_TOKEN: token ?? "" } });
+      let text = "";
+      child.stdout.on("data", (d) => (text += d));
+      child.on("error", reject);
+      child.on("close", () => resolve(text));
+    });
+    await new Promise<void>((r) => server.close(() => r()));
+    return { lines, out: JSON.parse(out.trim().split("\n").pop() ?? "{}") };
+  };
+  const withToken = await run("0123456789abcdef0123456789abcdef");
+  assert.deepEqual(JSON.parse(withToken.lines[0]), { t: "auth", token: "0123456789abcdef0123456789abcdef" }, "the auth line is first");
+  assert.equal(JSON.parse(withToken.lines[1]).t, "rpc");
+  assert.equal(withToken.out.hub, true);
+  const without = await run(undefined);
+  assert.equal(JSON.parse(without.lines[0]).t, "rpc", "no auth line when the run has no tokens");
+  assert.equal(without.lines.length, 1);
+});
+
+
+test("without --model-gateway a seat's VM plan is today's; with it a fronted provider is reached through the gateway and nothing of its credential is in the VM", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gw-plan-"));
+  after(() => rm(dir, { recursive: true, force: true }));
+  // The operator's Pi: a custom entry for openai with a credential header
+  // (whose value the VM must not get) and a setting it may.
+  await writeFile(join(dir, "models.json"), JSON.stringify({ providers: { openai: { headers: { "X-Org-Token": "real-header-value", "X-Team": "forensics" } } } }));
+  await writeFile(join(dir, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "sk-real-openai" }, openrouter: { type: "api_key", key: "sk-real-openrouter" } }));
+  const base = spec({
+    pi_agent_dir: dir,
+    agents: [
+      { id: "s1a2b00", model: "openai/gpt-5.4-mini" },
+      { id: "s1a2b01", model: "openrouter/some-model" },
+    ],
+    providers: [
+      { provider: "openai", kind: "api_key", hosts: ["api.openai.com"] },
+      { provider: "openrouter", kind: "api_key", hosts: ["openrouter.ai"] },
+    ],
+  });
+  const secrets: ResolvedSecret[] = [
+    { provider: "openai", kind: "api_key", placeholder: "dfirswarm-secret-openai-aaaaaaaaaaaaaaaaaaaaaaaa", value: "sk-real-openai", hosts: ["api.openai.com"] },
+    { provider: "openai", kind: "api_key", placeholder: "dfirswarm-secret-openaihdr-bbbbbbbbbbbbbbbbbbbbbbbb", value: "real-header-value", hosts: ["api.openai.com"], envKey: "header:X-Org-Token" },
+    { provider: "openrouter", kind: "api_key", placeholder: "dfirswarm-secret-openrouter-cccccccccccccccccccccccc", value: "sk-real-openrouter", hosts: ["openrouter.ai"] },
+  ];
+  // Off: the plan is exactly what createOne worked out before the gateway.
+  const off = seatPlan(base, base.agents[0], secrets, null);
+  assert.deepEqual(off.fronted, []);
+  assert.deepEqual(off.secrets.map((x) => x.placeholder).sort(), secrets.filter((x) => x.provider === "openai").map((x) => x.placeholder).sort());
+  assert.deepEqual(off.allowHosts, ["api.openai.com"]);
+  assert.deepEqual(off.hostPorts, []);
+  assert.deepEqual(off.piConfig, guestPiConfig({ ...base, providers: [base.providers[0]] }, secrets.filter((x) => x.provider === "openai")));
+  // On: the gateway fronts openai (not openrouter).
+  const gateway: GatewayConfig = {
+    v: 1,
+    run: "s1a2b",
+    sandbox: base.sandbox,
+    seats: {
+      s1a2b00: { token: "seat-token-00", model: "openai/gpt-5.4-mini", providers: ["openai"] },
+      s1a2b01: { token: "seat-token-01", model: "openrouter/some-model", providers: [] },
+    },
+    providers: { openai: { upstream: "https://api.openai.com", base_path: "/v1", api: "openai-responses", auth_header: "authorization", key: { source: "pi", provider: "openai" } } },
+  };
+  const gw = { ...base, model_gateway: { port: 47123, config: "/hub/model-gateway.json", declined: [{ provider: "openrouter", reason: "not fronted" }] } };
+  const on = seatPlan(gw, gw.agents[0], secrets, gateway);
+  assert.deepEqual(on.fronted, ["openai"]);
+  assert.deepEqual(on.secrets, [], "no msb secret for a fronted provider");
+  assert.ok(!on.allowHosts.includes("api.openai.com"), "the VM does not reach the provider's host");
+  assert.deepEqual(on.hostPorts, [47123], "it reaches the gateway's port through msb's host gateway");
+  assert.deepEqual(on.probeTargets, ["host.microsandbox.internal:47123"]);
+  const models = JSON.parse(on.piConfig.models ?? "{}");
+  assert.equal(models.providers.openai.baseUrl, "http://host.microsandbox.internal:47123/p/openai/api.openai.com/v1");
+  assert.equal(models.providers.openai.apiKey, "seat-token-00", "the key Pi sends is the seat's gateway token");
+  assert.deepEqual(models.providers.openai.headers, { "X-Team": "forensics" }, "the credential header goes, the setting stays");
+  assert.equal(JSON.parse(on.piConfig.auth).openai, undefined, "no stored credential for a fronted provider (it would win over models.json)");
+  const all = JSON.stringify(on);
+  for (const real of ["sk-real-openai", "real-header-value", "dfirswarm-secret-openai"]) assert.ok(!all.includes(real), `${real} reached the VM's plan`);
+  // A provider the gateway does not front keeps the placeholder path.
+  const other = seatPlan(gw, gw.agents[1], secrets, gateway);
+  assert.deepEqual(other.fronted, []);
+  assert.deepEqual(other.secrets.map((x) => x.provider), ["openrouter"]);
+  assert.deepEqual(other.allowHosts, ["openrouter.ai"]);
+  assert.deepEqual(other.hostPorts, []);
+  assert.equal(JSON.parse(other.piConfig.auth).openrouter.key, "dfirswarm-secret-openrouter-cccccccccccccccccccccccc");
+});
+
+test("each probe check has a name, what it wants, what was found, whether it holds and what that means; the kickoff's verdict is the failed ones' meanings", () => {
+  const good = {
+    hub: true, base: "ro", work: "ro", scratch: "rw", extracted: "rw", extracted_exec: "noexec", quarantine_exec: "noexec",
+    peers_extracted_exec: "noexec", peers_quarantine_exec: "noexec", tool_output: "rw", session: "rw", inputs: "ro", inputs_exec: "noexec",
+    inputs_files: 2, pi: "0.87.0", reach: [{ target: "api.openai.com:443", ok: true }],
+  };
+  const rows = probeChecks(good, true, 2);
+  assert.ok(rows.length >= 15);
+  for (const r of rows) {
+    assert.ok(r.check && r.want && r.got && r.meaning, `a row lacks a field: ${JSON.stringify(r)}`);
+    assert.equal(r.ok, true, `${r.check} fails on a good probe`);
+  }
+  assert.deepEqual(probeVerdict(good, true, 2), []);
+  const bad = { ...good, work: "rw", inputs_exec: "exec", hub: false, hub_error: "no socket" };
+  const failed = probeChecks(bad, true, 2).filter((r) => !r.ok);
+  assert.deepEqual(failed.map((r) => r.check), ["the shared work/", "the evidence executes", "the hub"]);
+  assert.deepEqual(probeVerdict(bad, true, 2), failed.map((r) => r.meaning));
+  assert.equal(failed[0].meaning, "the shared work/ is rw, not read-only");
+  // Not measured is said, not taken for a value.
+  assert.equal(probeChecks({ hub: true }, false).find((r) => r.check === "the sandbox floor")?.got, "not measured");
+});

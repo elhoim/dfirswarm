@@ -216,7 +216,43 @@ host_backstop() {
       '{ts: $ts, agent: "system", tool: $t, args: {via: "idle-nudge", reason: $r}, result: {ok: true}}')"
     trace_emit "$ROOT" "$SANDBOX" "$line"
     echo "idle-nudge: $what the swarm ($reason)" >&2
+    # The operator's notify command, once, when the swarm's cap is reached.
+    if [[ "$what" == steered && "$reason" == cap ]]; then
+      bash "$ROOT/scripts/notify.sh" "$SANDBOX" budget_cap "$(jq -c '{spent_usd: (.spent_usd // null), cap_usd: (.cap_usd // null)}' "$SANDBOX/budget.json" 2>/dev/null || echo '{}')" >/dev/null 2>&1 </dev/null || true
+    fi
   done <<< "$said"
+}
+
+# Where nobody has looked, three times a run: at a quarter, a half and three
+# quarters of the wall clock, one harness post lists the inputs no command
+# has named yet (scripts/coverage.ts, read off the trace). A named input is
+# not an examined one, and an unnamed one is only unnamed: the post says
+# which, and assigns nothing. Skipped when every input has been named, or
+# when this checkout has no coverage.ts.
+coverage_hint() {
+  local cov="$ROOT/scripts/coverage.ts" mark="$SANDBOX/traces/idle-nudge.coverage" pct at due="" list body
+  [[ -f "$cov" && -f "$SANDBOX/inputs.json" && -f "$SANDBOX/budget.json" ]] || return 0
+  pct="$(jq -r 'if (.started_at // "") == "" or ((.wall_clock_minutes // 0) | tonumber) <= 0 then empty
+    else (((now - (.started_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) / 60) / (.wall_clock_minutes | tonumber) * 100 | floor) end' "$SANDBOX/budget.json" 2>/dev/null || true)"
+  [[ "$pct" =~ ^-?[0-9]+$ ]] || return 0
+  for at in 25 50 75; do
+    [[ "$pct" -ge "$at" ]] && ! grep -qx "$at" "$mark" 2>/dev/null && due="$at"
+  done
+  [[ -n "$due" ]] || return 0
+  # Every mark passed is spent by this one post: a watchdog that started
+  # late does not post three times in a row.
+  for at in 25 50 75; do
+    [[ "$at" -le "$due" ]] && ! grep -qx "$at" "$mark" 2>/dev/null && echo "$at" >> "$mark"
+  done
+  list="$(node --experimental-strip-types --no-warnings "$cov" "$SANDBOX" --json 2>/dev/null | jq -r '.untouched[]? // empty' 2>/dev/null || true)"
+  [[ -n "$list" ]] || return 0
+  body="$(printf 'At %s%% of the wall clock, no command has named these inputs yet (read off the trace; a named input is not always an examined one):\n\n%s\n\nNobody is assigned to them. If one matters to the goal and nobody has it, say on the board that you are taking it.' \
+    "$due" "$(printf '%s\n' "$list" | sed 's/^/- `/; s/$/`/')")"
+  node --experimental-strip-types --no-warnings -e '
+    const [protocol, S, body] = process.argv.slice(1);
+    import(protocol).then((P) => P.systemPost(S, { tag: "ask", body })).catch(() => process.exit(1));
+  ' "$ROOT/extensions/protocol.ts" "$SANDBOX" "$body" >/dev/null 2>&1 || return 0
+  echo "idle-nudge: posted the inputs no command has named yet ($(printf '%s\n' "$list" | wc -l | tr -d ' ') at ${due}%)" >&2
 }
 
 # "id n idle_at_last_nudge" lines. The count is per silence: if the agent has
@@ -282,6 +318,7 @@ while :; do
   [[ -f "$SANDBOX/done/SWARM_DONE" ]] && exit 0
   ensure_hub
   host_backstop
+  coverage_hint
   for id in $(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null); do
     [[ -e "$SANDBOX/done/agents/$id.done" || -e "$SANDBOX/done/agents/$id.dead" ]] && continue
     idle="$(idle_seconds "$id")"
