@@ -81,6 +81,8 @@ export type ProviderSpec = {
   hosts: string[];
   /** For `local`: the host's port the guest may reach through the host gateway. */
   port?: number;
+  /** For a LAN model named by a name the guest cannot resolve: the address the host resolved it to. */
+  resolved?: { name: string; ip: string };
 };
 
 export type PackSecretSpec = { name: string; value_file?: string; hosts: string[] };
@@ -147,6 +149,8 @@ function glibcVersion(): string | undefined {
 
 /** The msb binary this repository pins, for the pane's `msb exec` and the CLI calls. */
 export function msbBinary(): string {
+  // A stand-in for tests of what the harness does with msb's answers.
+  if (process.env.SWARM_MSB_BIN) return process.env.SWARM_MSB_BIN;
   const plat = process.platform === "darwin" ? `darwin-${process.arch}` : `linux-${process.arch === "x64" ? "x64" : process.arch}-gnu`;
   const require = createRequire(import.meta.url);
   try {
@@ -212,7 +216,52 @@ export type ResolvedSecret = {
 
 /** A name under which a value is a credential: what may not cross into a VM in clear. */
 export function secretLikeName(name: string): boolean {
-  return /key|token|secret|password|passwd|credential|authorization/i.test(name);
+  return /key|token|secret|password|passwd|credential|auth|cookie|session/i.test(name);
+}
+
+/** What a local server's `apiKey` says when it is a stand-in and no credential (Ollama, LM Studio, llama.cpp, vLLM without one). */
+const LOCAL_DUMMY_KEYS = new Set(["", "ollama", "lm-studio", "lmstudio", "llama.cpp", "local", "none", "dummy", "empty", "no-key", "sk-no-key-required", "not-needed", "x"]);
+
+/**
+ * Every header of a provider's config that carries a credential, wherever
+ * Pi reads headers from: the provider's own, each model's, and each model
+ * override's. Pi's config schema (model-config.ts) has all three.
+ */
+export function credentialHeaders(config: unknown): Array<{ name: string; value: string }> {
+  const out: Array<{ name: string; value: string }> = [];
+  const visit = (node: unknown) => {
+    if (Array.isArray(node)) {
+      for (const n of node) visit(n);
+      return;
+    }
+    if (!node || typeof node !== "object") return;
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      if (k === "headers" && v && typeof v === "object" && !Array.isArray(v)) {
+        for (const [name, value] of Object.entries(v as Record<string, unknown>)) {
+          if (typeof value === "string" && value && secretLikeName(name)) out.push({ name, value });
+        }
+      } else visit(v);
+    }
+  };
+  visit(config);
+  return out;
+}
+
+/** The same config with each credential header's value swapped for its placeholder, at every depth. */
+function swapHeaders(config: unknown, swap: Map<string, string>): unknown {
+  if (Array.isArray(config)) return config.map((c) => swapHeaders(c, swap));
+  if (!config || typeof config !== "object") return config;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(config as Record<string, unknown>)) {
+    if (k === "headers" && v && typeof v === "object" && !Array.isArray(v)) {
+      const headers: Record<string, unknown> = {};
+      for (const [name, value] of Object.entries(v as Record<string, unknown>)) {
+        headers[name] = typeof value === "string" && secretLikeName(name) && swap.has(value) ? swap.get(value) : value;
+      }
+      out[k] = headers;
+    } else out[k] = swapHeaders(v, swap);
+  }
+  return out;
 }
 
 /**
@@ -239,7 +288,19 @@ export async function resolveSecrets(spec: VmSpec): Promise<ResolvedSecret[]> {
     models = {};
   }
   for (const p of spec.providers) {
-    if (p.kind === "local") continue;
+    if (p.kind === "local") {
+      // A local server is reached over plain HTTP through the host gateway,
+      // where there is no TLS for msb to intercept and so no measured place
+      // to swap a placeholder for a value: a real credential in its config
+      // would sit in the VM in clear. A stand-in key is not one.
+      const custom = models[p.provider] ?? {};
+      const key = typeof custom.apiKey === "string" ? custom.apiKey : "";
+      const headers = credentialHeaders(custom);
+      if ((key && !LOCAL_DUMMY_KEYS.has(key.toLowerCase())) || headers.length) {
+        throw new Error(`models.json: the local provider ${p.provider} carries a credential (${key && !LOCAL_DUMMY_KEYS.has(key.toLowerCase()) ? "apiKey" : `header ${headers[0].name}`}); a VM would hold it in clear, since a local server is reached without TLS for msb to swap a placeholder on. Drop it for this run, or run this model on the host.`);
+      }
+      continue;
+    }
     let value = "";
     let accountId: string | undefined;
     if (p.kind === "oauth") {
@@ -267,13 +328,14 @@ export async function resolveSecrets(spec: VmSpec): Promise<ResolvedSecret[]> {
     // name is a credential and crosses as a placeholder; a value Pi would
     // resolve at request time ($ENV, !command) has no host-side value to
     // swap in, and is refused rather than sent in clear.
-    const headers = models[p.provider]?.headers;
-    if (headers && typeof headers === "object") {
-      for (const [k, v] of Object.entries(headers as Record<string, unknown>)) {
-        if (typeof v !== "string" || !secretLikeName(k)) continue;
-        if (/^\s*[$!]/.test(v)) throw new Error(`models.json: provider ${p.provider} header ${k} is resolved by Pi at request time (${v.slice(0, 1)}…), which a VM cannot do without the value; put the literal in the store or the header`);
-        out.push({ provider: p.provider, kind: "api_key", placeholder: `dfirswarm-secret-hdr-${k.toLowerCase().replace(/[^a-z0-9]/g, "")}-${randomBytes(12).toString("hex")}`, value: v, hosts: p.hosts, envKey: `header:${k}` });
-      }
+    // Headers at every depth Pi reads them: the provider's, each model's,
+    // each model override's.
+    const seen = new Set<string>();
+    for (const { name: k, value: v } of credentialHeaders(models[p.provider])) {
+      if (/^\s*[$!]/.test(v)) throw new Error(`models.json: provider ${p.provider} header ${k} is resolved by Pi at request time (${v.slice(0, 1)}…), which a VM cannot do without the value; put the literal in the store or the header`);
+      if (seen.has(v)) continue;
+      seen.add(v);
+      out.push({ provider: p.provider, kind: "api_key", placeholder: `dfirswarm-secret-hdr-${k.toLowerCase().replace(/[^a-z0-9]/g, "")}-${randomBytes(12).toString("hex")}`, value: v, hosts: p.hosts, envKey: `header:${k}` });
     }
   }
   return out;
@@ -304,7 +366,7 @@ function codexAccountId(token: string, piAgentDir?: string): string {
  * a local server reached through the host gateway, and the operator's
  * settings. Nothing in these files is a credential.
  */
-export function guestPiConfig(spec: VmSpec, secrets: ResolvedSecret[]): { auth: string; models: string | null; settings: string | null } {
+export function guestPiConfig(spec: VmSpec, secrets: ResolvedSecret[]): { auth: string; models: string | null; settings: string | null; modelsStore?: string | null } {
   const dir = spec.pi_agent_dir || join(process.env.HOME || "", ".pi", "agent");
   const auth: Record<string, unknown> = {};
   let models: Record<string, unknown> | null = null;
@@ -326,13 +388,20 @@ export function guestPiConfig(spec: VmSpec, secrets: ResolvedSecret[]): { auth: 
     const extras = secrets.filter((s) => s.provider === p.provider && s.envKey);
     const custom = providers[p.provider];
     if (custom) {
-      const copy = { ...custom };
+      const swap = new Map(extras.filter((s) => s.envKey?.startsWith("header:")).map((s) => [s.value, s.placeholder]));
+      const copy = swapHeaders(custom, swap) as Record<string, unknown>;
       if (secret && "apiKey" in copy) copy.apiKey = secret.placeholder;
       if (p.kind === "local" && typeof copy.baseUrl === "string") copy.baseUrl = hostGatewayUrl(copy.baseUrl);
-      if (copy.headers && typeof copy.headers === "object") {
-        const headers = { ...(copy.headers as Record<string, unknown>) };
-        for (const s of extras) if (s.envKey?.startsWith("header:")) headers[s.envKey.slice(7)] = s.placeholder;
-        copy.headers = headers;
+      if (p.kind === "local" && p.resolved && typeof copy.baseUrl === "string") {
+        try {
+          const u = new URL(copy.baseUrl);
+          if (u.hostname.toLowerCase() === p.resolved.name.toLowerCase()) {
+            u.hostname = p.resolved.ip;
+            copy.baseUrl = u.toString().replace(/\/$/, String(custom.baseUrl).endsWith("/") ? "/" : "");
+          }
+        } catch {
+          // left as the operator wrote it
+        }
       }
       keep[p.provider] = copy;
     }
@@ -376,10 +445,27 @@ export function guestPiConfig(spec: VmSpec, secrets: ResolvedSecret[]): { auth: 
   } catch {
     settings = null;
   }
+  // Pi's model catalog cache (models-store.json: each provider's model list
+  // as last fetched), so a model the host knows from a refreshed catalog is
+  // one the guest knows. It holds no credential; anything named like one is
+  // dropped anyway.
+  let store2: string | null = null;
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, "models-store.json"), "utf8")) as unknown;
+    const clean = (node: unknown): unknown => {
+      if (Array.isArray(node)) return node.map(clean);
+      if (!node || typeof node !== "object") return node;
+      return Object.fromEntries(Object.entries(node as Record<string, unknown>).filter(([k]) => !/^(apiKey|key|token|secret|password|authorization|headers)$/i.test(k)).map(([k, v]) => [k, clean(v)]));
+    };
+    store2 = `${JSON.stringify(clean(parsed), null, 2)}\n`;
+  } catch {
+    store2 = null;
+  }
   return {
     auth: `${JSON.stringify(auth, null, 2)}\n`,
     models: Object.keys(keep).length ? `${JSON.stringify({ ...(models ?? {}), providers: keep }, null, 2)}\n` : null,
     settings,
+    modelsStore: store2,
   };
 }
 
@@ -472,12 +558,28 @@ def can_exec(path):
         return "noexec"
     except OSError as e:
         return "error:" + errno.errorcode.get(e.errno, str(e.errno))
+def mount_noexec(path):
+    # The options of the mount a path is on: the longest mount point that
+    # holds it, from the kernel's own table.
+    best, opts = "", ""
+    try:
+        for line in open("/proc/self/mountinfo"):
+            parts = line.split()
+            point = parts[4].replace("\\040", " ")
+            if (path == point or path.startswith(point.rstrip("/") + "/")) and len(point) > len(best):
+                best, opts = point, parts[5]
+    except OSError as e:
+        return "error:" + str(e)
+    return "noexec" if "noexec" in opts.split(",") else "exec"
 out["base"] = can_write(os.path.join(S, ".vm-probe-" + A))
 out["work"] = can_write(os.path.join(S, "work", ".vm-probe-" + A))
 out["scratch"] = can_write(os.path.join(S, "work", A, ".vm-probe"))
 out["extracted"] = can_write(os.path.join(S, "work", "extracted", A, ".vm-probe"))
 out["extracted_exec"] = can_exec(os.path.join(S, "work", "extracted", A, ".vm-probe.sh"))
 out["quarantine_exec"] = can_exec(os.path.join(S, "work", "quarantine", A, ".vm-probe.sh"))
+# A peer's corner is read-only here, so it is not written to test: its mount says.
+out["peers_extracted_exec"] = mount_noexec(os.path.join(S, "work", "extracted", ".peer"))
+out["peers_quarantine_exec"] = mount_noexec(os.path.join(S, "work", "quarantine", ".peer"))
 out["tool_output"] = can_write(os.path.join(S, "tool-output", A, ".vm-probe"))
 out["session"] = can_write(os.path.join(S, ".pi-sessions", A, ".vm-probe"))
 inputs = os.path.join(S, "inputs")
@@ -489,8 +591,22 @@ if os.path.exists(inputs):
     for root, dirs, files in os.walk(os.path.realpath(inputs)):
         n += len(files) + sum(1 for d in dirs if os.path.islink(os.path.join(root, d)))
     out["inputs_files"] = n
+    out["inputs_exec"] = mount_noexec(os.path.join(os.path.realpath(inputs), ".probe"))
 else:
     out["inputs"] = "absent"
+# The model's hosts, reached the way Pi will: a TCP connection through the
+# VM's policy (a name the policy denies does not resolve). No request is
+# sent, so no credential is spent and no TLS question is asked.
+reach = []
+for target in [t for t in os.environ.get("SWARM_PROBE_TARGETS", "").split(",") if t]:
+    host, _, port = target.rpartition(":")
+    host = host.strip("[]")
+    try:
+        socket.create_connection((host, int(port)), timeout=10).close()
+        reach.append({"target": target, "ok": True})
+    except Exception as e:
+        reach.append({"target": target, "ok": False, "error": str(e)})
+out["reach"] = reach
 try:
     s = socket.socket(socket.AF_UNIX)
     s.settimeout(10)
@@ -603,15 +719,40 @@ export function probeVerdict(probe: Record<string, unknown>, expectInputs: boole
   if (probe.extracted !== "rw") wrong.push(`its own work/extracted/<id>/ is ${String(probe.extracted)}, not writable`);
   if (probe.extracted_exec !== "noexec") wrong.push(`work/extracted/<id>/ can execute (${String(probe.extracted_exec)})`);
   if (probe.quarantine_exec !== "noexec") wrong.push(`work/quarantine/<id>/ can execute (${String(probe.quarantine_exec)})`);
+  if (probe.peers_extracted_exec !== undefined && probe.peers_extracted_exec !== "noexec") wrong.push(`a peer's work/extracted/ can execute here (${String(probe.peers_extracted_exec)})`);
+  if (probe.peers_quarantine_exec !== undefined && probe.peers_quarantine_exec !== "noexec") wrong.push(`a peer's work/quarantine/ can execute here (${String(probe.peers_quarantine_exec)})`);
   if (probe.tool_output !== "rw") wrong.push(`its tool-output/ is ${String(probe.tool_output)}, not writable`);
   if (probe.session !== "rw") wrong.push(`its Pi session directory is ${String(probe.session)}, not writable`);
   if (expectInputs && probe.inputs !== "ro") wrong.push(`inputs/ is ${String(probe.inputs)}, not read-only`);
+  if (expectInputs && probe.inputs_exec !== undefined && probe.inputs_exec !== "noexec") wrong.push(`the evidence can execute in the VM (${String(probe.inputs_exec)})`);
+  for (const r of Array.isArray(probe.reach) ? (probe.reach as Array<{ target: string; ok: boolean; error?: string }>) : []) {
+    if (!r.ok) wrong.push(`the model's host ${r.target} is not reachable from the VM (${r.error ?? "no connection"})`);
+  }
   if (expectInputs && typeof expectedInputFiles === "number" && typeof probe.inputs_files === "number" && probe.inputs_files !== expectedInputFiles) {
     wrong.push(`the VM sees ${probe.inputs_files} evidence name(s) where the manifest lists ${expectedInputFiles}`);
   }
   if (probe.hub !== true) wrong.push(`the hub is not reachable (${String(probe.hub_error ?? "no answer")})`);
   if (typeof probe.pi !== "string" || !/^\d+\.\d+/.test(probe.pi)) wrong.push(`pi does not run (${String(probe.pi)})`);
   return wrong;
+}
+
+/**
+ * What a seat's probe connects to: each model host it needs, as `host:port`
+ * — a local model on this machine through msb's host gateway, a named host
+ * on its own port. Suffix entries name no host to try.
+ */
+export function probeTargets(providers: ProviderSpec[]): string[] {
+  const out = new Set<string>();
+  for (const p of providers) {
+    const entries = p.hosts.map((h) => parseAllowEntry(h));
+    if (p.kind === "local" && p.port && (entries.length === 0 || entries.every((e) => e.loopback))) {
+      out.add(`host.microsandbox.internal:${p.port}`);
+      continue;
+    }
+    const first = entries.find((e) => e.kind === "domain" || e.kind === "ip");
+    if (first) out.add(`${first.value.includes(":") ? `[${first.value}]` : first.value}:${p.kind === "local" && p.port ? p.port : first.port}`);
+  }
+  return [...out].sort();
 }
 
 /** Every mount one agent's VM gets: the run's own, then this agent's writable holes. */
@@ -622,10 +763,15 @@ export function mountsFor(spec: VmSpec, agent: string): Mount[] {
   // writable `work/` shared by every VM let any seat rewrite any other's
   // findings without a record (measured, and the ADR's own finding). A
   // shared deliverable is published through the hub (protocol.ts
-  // publishFile). The extracted and quarantined material cannot execute.
+  // publishFile). The extracted and quarantined material is mounted
+  // noexec — a peer's as well as one's own: the floor under it is not, and a
+  // file a peer extracted and made executable would otherwise run here. (A
+  // guest mount flag stops an accident, not a root that means to run it.)
   return [
     { host: S, readonly: true },
     ...spec.mounts,
+    { host: join(S, "work", "extracted"), readonly: true, noexec: true },
+    { host: join(S, "work", "quarantine"), readonly: true, noexec: true },
     { host: join(S, "work", agent) },
     { host: join(S, "work", "extracted", agent), noexec: true },
     { host: join(S, "work", "quarantine", agent), noexec: true },
@@ -652,6 +798,21 @@ function allowEgress(policy: PolicyB, hosts: string[]): PolicyB {
   // The host's own loopback, which a VM reaches only through the gateway.
   for (const port of gatewayPorts(hosts)) policy.egress((r) => r.tcp().port(port).allowHost());
   return policy;
+}
+
+/** How long one VM may take to come up before the kickoff says so rather than wait. */
+const CREATE_TIMEOUT_MS = Number(process.env.SWARM_VM_CREATE_TIMEOUT_MS ?? 10 * 60_000);
+
+/** A promise that settles, or rejects with `why` once `ms` have passed. */
+function withTimeout<T>(p: Promise<T>, ms: number, why: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    p.finally(() => clearTimeout(timer)),
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(why)), ms);
+      timer.unref?.();
+    }),
+  ]);
 }
 
 async function sdk(): Promise<SdkModule> {
@@ -702,6 +863,8 @@ async function createOne(
   const name = vmName(spec.run, agent.id);
   const mounts = mountsFor(spec, agent.id);
   for (const m of mounts) if (!m.readonly) await mkdir(m.host, { recursive: true });
+  // The shares every seat's corner sits in exist before they are mounted.
+  for (const d of ["extracted", "quarantine"]) await mkdir(join(spec.sandbox, "work", d), { recursive: true });
   // Least privilege per seat: this VM holds the credentials of the model it
   // runs and of the summary model, reaches those providers' hosts, and no
   // other seat's.
@@ -745,10 +908,18 @@ async function createOne(
     SWARM_TRACE_SOCKET: GUEST_HUB_SOCKET,
     SWARM_NUDGE_SOCKET: GUEST_HUB_SOCKET,
     SWARM_ISOLATION: "microvm",
+    // What the probe reaches: each of this seat's model hosts, as Pi will.
+    SWARM_PROBE_TARGETS: probeTargets(providers).join(","),
     // What the probe looks for: every program the run's packs require.
     SWARM_REQUIRED_BINARIES: [...new Set(packNeeds((spec.env.SWARM_PACK_DIRS ?? "").split(":")).flatMap((n) => n.required))].join(","),
   };
 
+  // A secret is bound to named hosts only: bound to a suffix, msb would put
+  // its value on any host under it, and any host under a suffix is one an
+  // agent can name.
+  for (const h of [...secrets.flatMap((s) => s.hosts), ...packSecrets.flatMap((s) => s.hosts)]) {
+    if (parseAllowEntry(h).kind === "suffix") throw new Error(`a secret is bound to the suffix ${h}; msb would substitute its value for any host under it. Name the host.`);
+  }
   // Never `.replace()`: a VM of this name is another run's, or this run's
   // twin on another registry, and replacing it sends it SIGTERM. Run ids
   // are short, and the same one on two registries is a collision to refuse.
@@ -770,6 +941,7 @@ async function createOne(
       p.text("/root/.pi/agent/auth.json", piConfig.auth, { mode: 0o600 });
       if (piConfig.models) p.text("/root/.pi/agent/models.json", piConfig.models);
       if (piConfig.settings) p.text("/root/.pi/agent/settings.json", piConfig.settings);
+      if (piConfig.modelsStore) p.text("/root/.pi/agent/models-store.json", piConfig.modelsStore);
       return p;
     })
     .network((n) => {
@@ -828,7 +1000,7 @@ async function createOne(
       return v;
     });
   }
-  const sandbox = await builder.create();
+  const sandbox = await withTimeout(builder.create(), CREATE_TIMEOUT_MS, `${name} was not up within ${CREATE_TIMEOUT_MS / 1000} s`);
   let probe: Record<string, unknown> = {};
   try {
     const out = await sandbox.exec("/.msb/scripts/dfirswarm-probe", []);
@@ -972,6 +1144,25 @@ export type FinishEntry = { agent: string; name: string; snapshot?: string; erro
  * kept, never removed, since removing it is the one step that cannot be
  * undone; and every msb step's outcome is in the entry, not swallowed.
  */
+/** Free space below which a VM's disk is not snapshotted (and the VM not removed). */
+const SNAPSHOT_MIN_FREE_BYTES = Number(process.env.SWARM_SNAPSHOT_MIN_FREE_BYTES ?? 4 * 1024 ** 3);
+
+/** Free bytes on the file system that holds `dir` (or its nearest existing parent); null when unknown. */
+async function freeBytes(dir: string): Promise<number | null> {
+  const { statfs } = await import("node:fs/promises");
+  let probe = dir;
+  for (;;) {
+    try {
+      const st = await statfs(probe);
+      return Number(st.bavail) * Number(st.bsize);
+    } catch {
+      const parent = dirname(probe);
+      if (parent === probe) return null;
+      probe = parent;
+    }
+  }
+}
+
 /** How long a finish waits for another finish of the same run that is still alive. */
 const FINISH_LOCK_WAIT_MS = 45 * 60_000;
 
@@ -1043,7 +1234,15 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
     } catch {
       record = null;
     }
-    if (options.snapshot !== false) {
+    // A snapshot that runs out of disk half-way is a lost disk if the VM is
+    // then removed: below the floor the VM is kept, stopped, for a stop run
+    // again once there is room.
+    const room = options.snapshot !== false ? await freeBytes(snapDir) : null;
+    if (options.snapshot !== false && room !== null && room < SNAPSHOT_MIN_FREE_BYTES) {
+      entry.error = `only ${room} bytes free where the disks are kept (${snapDir}); the VM is kept, not snapshotted and not removed. Free space and run stop again.`;
+      entry.kept = true;
+      if (record) record.snapshot = { error: entry.error };
+    } else if (options.snapshot !== false) {
       await mkdir(snapDir, { recursive: true });
       const file = join(snapDir, `${agent}.msb`);
       await rm(file, { force: true });
@@ -1066,8 +1265,13 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
       const keep = join(snapDir, `${agent}.logs`);
       await mkdir(keep, { recursive: true });
       const { readdir: ls, copyFile } = await import("node:fs/promises");
-      for (const f of await ls(logs).catch(() => [])) await copyFile(join(logs, f), join(keep, f)).catch(() => undefined);
-      if (record) (record as VmRecord & { logs?: string }).logs = keep;
+      // A log that could not be kept is named on the record, not dropped.
+      const lost: string[] = [];
+      for (const f of await ls(logs).catch(() => [])) await copyFile(join(logs, f), join(keep, f)).catch((err: Error) => lost.push(`${f}: ${err.message}`));
+      if (record) {
+        (record as VmRecord & { logs?: string }).logs = keep;
+        if (lost.length) (record as VmRecord & { logs_not_kept?: string[] }).logs_not_kept = lost;
+      }
     }
     if (!entry.kept) {
       const removed = await run(msb, ["rm", vm.name], { timeoutMs: 60_000 });
@@ -1131,8 +1335,9 @@ print(json.dumps(res))
 /** A kickoff still preparing its run after this long died without saying so. */
 export const PREPARED_STALE_MS = 2 * 3600_000;
 
-/** The throwaway VMs the harness boots for one step, by their run label. */
+/** The throwaway VMs the harness boots for one step, by their run label, or by their agent label (the catalog carries its run's id). */
 const THROWAWAY_RUNS = new Set(["catalog", "toolbox", "netcheck"]);
+const THROWAWAY_AGENTS = new Set(["catalog", "toolbox", "netcheck"]);
 
 export async function reapVms(options: { run?: string; registry?: string; only?: string; now?: number } = {}): Promise<string[]> {
   const live = new Set<string>();
@@ -1164,7 +1369,7 @@ export async function reapVms(options: { run?: string; registry?: string; only?:
     if (!options.run) {
       // A throwaway VM (the catalog's, the toolbox check's, netcheck's) that
       // is no longer running was left by a step that died.
-      const throwaway = THROWAWAY_RUNS.has(vm.run) && vm.status !== "running";
+      const throwaway = (THROWAWAY_RUNS.has(vm.run) || THROWAWAY_AGENTS.has(vm.agent)) && vm.status !== "running";
       if (!throwaway && (vm.registry !== mine || live.has(vm.run))) continue;
       if (options.only && vm.run !== options.only) continue;
       // An orphan of a run this registry knows keeps its disk and its logs,
@@ -1186,6 +1391,26 @@ export async function reapVms(options: { run?: string; registry?: string; only?:
 }
 
 /**
+ * A throwaway VM put away when this process is interrupted: its `finally`
+ * does not run on a signal, and a ^C during the catalog left the VM up.
+ */
+function putAwayOnSignal(name: string): () => void {
+  const handler = (sig: NodeJS.Signals) => {
+    void (async () => {
+      await run(msbBinary(), ["stop", name], { timeoutMs: 60_000 });
+      await run(msbBinary(), ["rm", name], { timeoutMs: 60_000 });
+      process.exit(sig === "SIGINT" ? 130 : 143);
+    })();
+  };
+  process.once("SIGINT", handler);
+  process.once("SIGTERM", handler);
+  return () => {
+    process.off("SIGINT", handler);
+    process.off("SIGTERM", handler);
+  };
+}
+
+/**
  * The toolbox check (scripts/toolbox.sh) run where the agents will run: in
  * a throwaway VM of the run's image, offline. On the host it described the
  * host, which an agent in a VM never touches. Returns the check's exit code
@@ -1196,6 +1421,7 @@ export async function imageToolbox(image: string, preset: string, required: bool
   const { mkdtemp, copyFile } = await import("node:fs/promises");
   const tmp = await mkdtemp("/tmp/dfs-tb-");
   const name = `dfs-toolbox-${randomBytes(6).toString("hex")}`;
+  const release = putAwayOnSignal(name);
   try {
     await copyFile(join(ROOT, "scripts", "toolbox.sh"), join(tmp, "toolbox.sh"));
     await mkdir(join(tmp, "sbx"), { recursive: true });
@@ -1235,6 +1461,7 @@ export async function imageToolbox(image: string, preset: string, required: bool
     }
     return { code: out.code, json, output: `${out.stdout()}${out.stderr()}`, ...(digest ? { digest } : {}) };
   } finally {
+    release();
     await run(msbBinary(), ["stop", name], { timeoutMs: 60_000 });
     await run(msbBinary(), ["rm", name], { timeoutMs: 60_000 });
     await rm(tmp, { recursive: true, force: true });
@@ -1255,10 +1482,11 @@ export async function imageCatalog(
   image: string,
   sandbox: string,
   evidence: string[],
-  options: { cpus?: number; memoryMib?: number; allowHosts?: string[]; openNet?: boolean; run?: string; maxDurationSec?: number } = {},
+  options: { cpus?: number; memoryMib?: number; allowHosts?: string[]; openNet?: boolean; run?: string; maxDurationSec?: number; registry?: string } = {},
 ): Promise<{ code: number; output: string; digest?: string }> {
   const M = await sdk();
   const name = `dfs-catalog-${randomBytes(6).toString("hex")}`;
+  const release = putAwayOnSignal(name);
   // The parser runs over hostile evidence as root in this VM: it may write
   // catalog/ and nothing else of the run. The run's floor — the manifest
   // custody compares against, the contract, the trace — is read-only here.
@@ -1270,7 +1498,7 @@ export async function imageCatalog(
       .cpus(options.cpus ?? 2)
       .memory(options.memoryMib ?? 2048)
       .maxDuration(options.maxDurationSec ?? 4 * 3600)
-      .labels({ [LABEL_RUN]: options.run ?? "catalog", [LABEL_AGENT]: "catalog", ...(options.run ? {} : {}) });
+      .labels({ [LABEL_RUN]: options.run ?? "catalog", [LABEL_AGENT]: "catalog", ...(options.registry ? { [LABEL_REGISTRY]: registryLabel(options.registry) } : {}) });
     if (options.openNet) {
       // --no-netguard: the catalog reaches what the agents reach.
       const policy = new M.NetworkPolicyBuilder().defaultDeny();
@@ -1284,7 +1512,6 @@ export async function imageCatalog(
     }
     builder = builder
       .detached(true)
-      .replace()
       .workdir(sandbox)
       .envs({
         SWARM_CATALOG_STEP_TIMEOUT: process.env.SWARM_CATALOG_STEP_TIMEOUT ?? "900",
@@ -1294,11 +1521,12 @@ export async function imageCatalog(
       .volume(join(sandbox, "catalog"), (v) => v.bind(realpathSync(join(sandbox, "catalog"))))
       .volume(join(ROOT, "scripts"), (v) => v.bind(realpathSync(join(ROOT, "scripts"))).readonly());
     for (const e of evidence) builder = builder.volume(e, (v) => v.bind(realpathSync(e)).readonly().noexec());
-    const vm = await builder.create();
+    const vm = await withTimeout(builder.create(), CREATE_TIMEOUT_MS, `the catalog VM was not up within ${CREATE_TIMEOUT_MS / 1000} s`);
     const out = await vm.exec("bash", [join(ROOT, "scripts", "evidence-catalog.sh"), sandbox]);
     const digest = await imageDigest(name);
     return { code: out.code, output: `${out.stdout()}${out.stderr()}`, ...(digest ? { digest } : {}) };
   } finally {
+    release();
     await run(msbBinary(), ["stop", name], { timeoutMs: 120_000 });
     await run(msbBinary(), ["rm", name], { timeoutMs: 60_000 });
   }
@@ -1316,8 +1544,13 @@ export type AllowEntry = { kind: "domain" | "suffix" | "ip" | "cidr"; value: str
 
 const LABEL = /^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$/;
 
-function isLoopbackIp(ip: string): boolean {
-  return (isIPv4(ip) && ip.startsWith("127.")) || ip === "::1" || ip === "0:0:0:0:0:0:0:1";
+/**
+ * An address that means this machine: 127/8, ::1, and 0.0.0.0 (a server
+ * bound to every interface is reached here on loopback). One definition,
+ * so the allowlist, the gateway ports and hostGatewayUrl agree.
+ */
+export function isLoopbackIp(ip: string): boolean {
+  return (isIPv4(ip) && (ip.startsWith("127.") || ip === "0.0.0.0")) || ip === "::1" || ip === "0:0:0:0:0:0:0:1" || ip === "::";
 }
 
 export function parseAllowEntry(raw: string): AllowEntry {
@@ -1468,6 +1701,7 @@ export async function writeCatalogRecord(sandbox: string, image: string, digest:
 export async function netCheck(image: string, allowHosts: string[], options: { canary?: string } = {}): Promise<{ ok: boolean; rows: Array<{ check: string; host: string; result: string; ok: boolean }> }> {
   const M = await sdk();
   const name = `dfs-netcheck-${randomBytes(6).toString("hex")}`;
+  const release = putAwayOnSignal(name);
   const canary = options.canary ?? "example.com";
   const entries = parseAllowList(allowHosts);
   const probe = entries.filter((e) => e.kind === "domain" && !e.loopback);
@@ -1528,6 +1762,7 @@ export async function netCheck(image: string, allowHosts: string[], options: { c
   } catch (err) {
     rows.push({ check: "the check VM", host: image, result: err instanceof Error ? err.message : String(err), ok: false });
   } finally {
+    release();
     await run(msbBinary(), ["stop", name], { timeoutMs: 120_000 });
     await run(msbBinary(), ["rm", name], { timeoutMs: 60_000 });
   }
@@ -1709,7 +1944,7 @@ async function main(): Promise<void> {
     case "catalog": {
       const image = opt("--image");
       const sandbox = opt("--sandbox");
-      if (!image || !sandbox) throw new Error("catalog needs --image REF --sandbox DIR [--evidence DIR]... [--allow-host H]... [--open-net] [--memory MIB] [--cpus N] [--run ID]");
+      if (!image || !sandbox) throw new Error("catalog needs --image REF --sandbox DIR [--evidence DIR]... [--allow-host H]... [--open-net] [--memory MIB] [--cpus N] [--run ID] [--registry FILE]");
       const evidence: string[] = [];
       const allowHosts: string[] = [];
       rest.forEach((a, i) => {
@@ -1722,6 +1957,7 @@ async function main(): Promise<void> {
         allowHosts,
         openNet: rest.includes("--open-net"),
         run: opt("--run"),
+        registry: opt("--registry"),
       });
       process.stdout.write(r.output);
       // What the catalog was built with, beside it: the image it booted and

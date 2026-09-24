@@ -67,6 +67,9 @@ pass "a uniform contract does not repeat the model after every id"
 # Read the helper out of the script: starting for real would need Herdr.
 HELPERS="$TMP/helpers.sh"
 {
+  # Pi's store is read where the kickoff reads it (an --env value wins).
+  sed -n '/^pane_home() {/,/^}/p' "$ROOT/scripts/swarm.sh"
+  sed -n '/^pi_agent_dir() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^valid_model_ref() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^parse_model_teams() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^distinct_models() {/,/^}/p' "$ROOT/scripts/swarm.sh"
@@ -87,6 +90,7 @@ hosts_for() { # hosts_for <spec>
   local script="$TMP/hosts.sh"
   {
     echo 'set -u'
+    echo "ROOT=\"$ROOT\""
     echo "source \"$HELPERS\""
     echo "parse_model_teams \"\$1\""
     echo 'provider_hosts_for_models'
@@ -259,7 +263,7 @@ pass "per-model lines, the summary model and the inbox page are validated, recor
 # --- a local server: its host, its twin, and what it means for the caps -----
 # Nothing on the way resolves names: not Pi's own proxy matcher, not the
 # proxy's allowlist. So a loopback host reaches the allowlist with its other
-# spelling, an IPv6 literal keeps its colons, and Pi's llama.cpp provider,
+# spelling, an IPv6 literal is written [v6]:port, and Pi's llama.cpp provider,
 # which has no models.json entry, brings the host of LLAMA_BASE_URL.
 mkdir -p "$TMP/pi-local"
 cat > "$TMP/pi-local/models.json" <<'JSON'
@@ -281,7 +285,7 @@ got="$(PI_CODING_AGENT_DIR="$TMP/pi-local" hosts_for "ollama/qwen3:8b=2")"
 got="$(PI_CODING_AGENT_DIR="$TMP/pi-local" hosts_for "lmstudio/m=1")"
 [[ "$got" == "localhost:1234,127.0.0.1:1234" ]] || fail "localhost brings its address: $got"
 got="$(PI_CODING_AGENT_DIR="$TMP/pi-local" hosts_for "six/m=1")"
-[[ "$got" == "::1:8000" ]] || fail "an IPv6 literal keeps its colons and loses its brackets: $got"
+[[ "$got" == "[::1]:8000" ]] || fail "an IPv6 literal with a port is bracketed, the form netguard and a VM both read: $got"
 got="$(LLAMA_BASE_URL="" PI_CODING_AGENT_DIR="$TMP/pi-local" hosts_for "llama.cpp/qwen=1")"
 [[ "$got" == "127.0.0.1:8080,localhost:8080" ]] || fail "llama.cpp defaults to Pi's own base URL: $got"
 got="$(LLAMA_BASE_URL="http://gpu-box.local:8080" PI_CODING_AGENT_DIR="$TMP/pi-local" hosts_for "llama.cpp/qwen=1")"

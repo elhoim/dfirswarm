@@ -49,7 +49,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
-import { eventChainVerifier, readInputsManifest, verifyLedgerChain } from "../extensions/protocol.ts";
+import { eventChainVerifier, readInputsManifest, specialKind, verifyLedgerChain } from "../extensions/protocol.ts";
 
 type Handle = Awaited<ReturnType<typeof open>>;
 
@@ -447,6 +447,11 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
       const lst = await lstat(abs).catch(() => null);
       if (!lst) {
         missing.push(file.path);
+        continue;
+      }
+      if (file.special) {
+        // A FIFO, socket or device node is checked by its kind, never opened.
+        if (specialKind(lst) !== file.special) changed.push(file.path);
         continue;
       }
       if (!lst.isFile()) {

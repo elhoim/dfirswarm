@@ -2750,6 +2750,43 @@ async function tailRefusesAppend(file: string): Promise<boolean> {
  */
 const TRACE_SID = createHash("sha256").update(`${process.pid}:${Date.now()}:${Math.random()}`).digest("hex").slice(0, 12);
 let traceSeq = 0;
+/** In a VM: lines went to this seat's spill, and how far into it has been sent on since. */
+let vmSpilled = false;
+let spillResent = 0;
+
+/**
+ * Once the link is back, what a VM spilled while it was down goes on to the
+ * chain, in order, under its own sid and seq: the lines were the seat's own
+ * and belong in the anchored record, not only in a file in the seat's own
+ * directory. The spill stays as it was (custody counts a line in both as a
+ * duplicate, not a loss), and a line the collector still refuses stops the
+ * resend until the next time.
+ */
+async function resendSpill(sandboxRoot: string, token: string): Promise<void> {
+  vmSpilled = false;
+  const file = join(sandboxRoot, traceSpillRel());
+  const text = await readFile(file, "utf8").catch(() => "");
+  if (text.length <= spillResent) return;
+  const lines = text.slice(spillResent).split("\n");
+  const tail = lines.pop() ?? "";
+  let sent = spillResent;
+  for (const l of lines) {
+    sent += l.length + 1;
+    if (!l.trim()) continue;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(l) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (!(await sendToCollector(sandboxRoot, `${JSON.stringify(token ? { ...parsed, token, resent: true } : { ...parsed, resent: true })}\n`))) {
+      vmSpilled = true;
+      return;
+    }
+    spillResent = sent;
+  }
+  if (tail) vmSpilled = true;
+}
 
 export async function appendEvent(
   sandboxRoot: string,
@@ -2781,7 +2818,10 @@ export async function appendEvent(
   // sandbox profile, holding the only writable handle to the trace. The pane
   // may connect to its socket and may not write the directory, so an agent
   // cannot edit the record of what it did.
-  if (await sendToCollector(sandboxRoot, line)) return record;
+  if (await sendToCollector(sandboxRoot, line)) {
+    if (vmSpilled) await resendSpill(sandboxRoot, token);
+    return record;
+  }
   // The fallback writes the file itself, and the token is a secret, not a
   // field: it goes to the collector and nowhere else.
   const plain = `${JSON.stringify(record)}\n`;
@@ -2791,6 +2831,7 @@ export async function appendEvent(
     // A line that reaches neither the collector nor the spill is lost, and a
     // lost line must not pass for a recorded one.
     await appendFile(join(sandboxRoot, traceSpillRel()), plain, "utf8");
+    vmSpilled = true;
     return record;
   }
   await mkdir(dirname(file), { recursive: true }).catch(() => undefined);
@@ -3531,7 +3572,9 @@ const BASH_WATCH_FILES = ["SWARM.md", "team.json", "layout.json", SENTINEL_REL] 
  * whose prefix changed or that got shorter was rewritten. `edit` and `write`
  * already refuse both paths; this is the shell, which no hook can intercept.
  */
-const APPEND_ONLY_WATCH = ["ledger/entries.jsonl", "traces/events.jsonl"] as const;
+// The host's spill of trace lines the collector did not take is the record
+// too: a shell that rewrote it would unsay what the harness kept.
+const APPEND_ONLY_WATCH = ["ledger/entries.jsonl", "traces/events.jsonl", TRACE_SPILL_REL] as const;
 
 /** Size and full digest of an append-only record, taken before a shell call. */
 export type AppendOnlyMark = { size: number; sha: string };
@@ -3994,7 +4037,7 @@ export const TOOL_RESERVED_NAMES = new Set([
   // microVM runs: the tool that writes a shared file, the hub's own lines,
   // and what an agent's extension says about the hub (tests/reserved-names)
   "publish_file", "publish_needed", "skill", "finish_line", "hub_call", "hub_link", "hub_prompt",
-  "hub_lost", "hub_lost_stop", "hub_restarted", "vm_finish", "custody", "record_violation",
+  "hub_lost", "hub_lost_stop", "hub_restarted", "hub_clear_up", "vm_finish", "custody", "record_violation",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
@@ -4659,6 +4702,18 @@ export function redactSecrets<T>(value: T, secrets: Record<string, string>): T {
   return walk(value) as T;
 }
 
+/**
+ * The script hash a tool was sealed with, by name: what the hub answers a VM,
+ * read on the host, where the record is current (a guest reads tools/ and
+ * history/ up to five seconds old). Empty when there is no such tool.
+ */
+export async function forgedToolSeal(sandboxRoot: string, name: string): Promise<string> {
+  if (!/^[a-z][a-z0-9_]{2,31}$/.test(String(name))) return "";
+  const read = await readSandboxFile(sandboxRoot, `${TOOLS_DIR}/${name}/${TOOL_MANIFEST}`).catch(() => null);
+  const manifest = read ? parseManifest(read.bytes.toString("utf8")) : null;
+  return manifest ? expectedToolHash(sandboxRoot, manifest) : "";
+}
+
 /** The hash make_tool (or sealForgedTools) recorded, not whatever is on disk now. */
 async function expectedToolHash(sandboxRoot: string, manifest: ForgedToolManifest): Promise<string> {
   const versions = await listFileHistory(sandboxRoot, `${TOOLS_DIR}/${manifest.name}/${TOOL_MANIFEST}`);
@@ -4685,7 +4740,7 @@ export async function runForgedTool(
   sandboxRoot: string,
   manifest: ForgedToolManifest,
   args: Record<string, unknown>,
-  options: { signal?: AbortSignal; env?: Record<string, string | undefined>; agentId?: string } = {},
+  options: { signal?: AbortSignal; env?: Record<string, string | undefined>; agentId?: string; sealed?: string } = {},
 ): Promise<ForgedRunResult> {
   const started = Date.now();
   const fail = (reason: string): ForgedRunResult => ({ ok: false, exit_code: null, signal: null, stdout: "", stderr: reason, duration_ms: Date.now() - started, timed_out: false, truncated: false });
@@ -4701,15 +4756,20 @@ export async function runForgedTool(
   let bytes = await readFile(real).catch(() => null);
   if (!bytes) return fail(`tool "${manifest.name}" entry is unreadable`);
   let sha256 = createHash("sha256").update(bytes).digest("hex");
-  const expected = await expectedToolHash(sandboxRoot, manifest);
+  // In a VM the seal comes from the hub (options.sealed), read on the host
+  // where the record is current: the guest's own tools/ and history/ are up
+  // to five seconds old, and both stale together read as the old version
+  // matching its old seal — v1 run while the record said v2. The bytes here
+  // are read again until they are the sealed ones, for as long as the cache
+  // can lag, and a tool that never gets there is not run.
+  const expected = options.sealed ?? (await expectedToolHash(sandboxRoot, manifest));
   if (isToolHash(expected) && sha256 !== expected && process.env.SWARM_ISOLATION === "microvm") {
-    // In a VM tools/ is read through virtio-fs, which shows a file up to five
-    // seconds old; the record (through the hub) is current. A tool re-forged
-    // moments ago reads as its old self here: wait the window out and look
-    // once more before calling the mismatch real.
-    await new Promise((r) => setTimeout(r, 6000));
-    bytes = (await readFile(real).catch(() => null)) ?? bytes;
-    sha256 = createHash("sha256").update(bytes).digest("hex");
+    const deadline = Date.now() + GUEST_CACHE_WAIT_MS;
+    while (sha256 !== expected && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 250));
+      bytes = (await readFile(real).catch(() => null)) ?? bytes;
+      sha256 = createHash("sha256").update(bytes).digest("hex");
+    }
   }
   if (!isToolHash(expected) || sha256 !== expected) {
     return fail(`tool "${manifest.name}" on disk (${shortHash(sha256)}) does not match its manifest (${shortHash(expected || "missing")}); re-forge it with make_tool`);
@@ -4813,6 +4873,13 @@ export type InputFile = {
   path: string;
   bytes: number;
   sha256: string;
+  /**
+   * A name in the evidence that is neither a file nor a link — a FIFO, a
+   * socket, a device node (an extracted Linux root has them) — recorded as
+   * the kind it is and never opened: every walk counts it, and a change of
+   * kind is a change.
+   */
+  special?: "fifo" | "socket" | "char" | "block";
   /** The stat the kickoff saw after locking the file, so a large input is
    *  not re-hashed while nothing about it has moved. */
   mtime_ms?: number;
@@ -4917,6 +4984,7 @@ export async function readInputsManifest(sandboxRoot: string): Promise<InputsMan
           ...(typeof f.links === "number" ? { links: f.links } : {}),
           // A link inside the evidence, checked as a link by every walk.
           ...(typeof f.link === "string" ? { link: f.link } : {}),
+          ...(f.special === "fifo" || f.special === "socket" || f.special === "char" || f.special === "block" ? { special: f.special } : {}),
         })),
       bytes: Number(parsed.bytes) || 0,
       enforce: typeof parsed.enforce === "string" ? parsed.enforce : "auto",
@@ -4948,11 +5016,22 @@ export async function listInputFiles(sandboxRoot: string): Promise<string[]> {
     for (const entry of entries) {
       const abs = join(dir, entry.name);
       if (entry.isDirectory()) await walk(abs);
-      else if (entry.isFile() || entry.isSymbolicLink()) out.push(claimKey(sandboxRoot, abs));
+      // Every name that is not a directory: a file, a link, and a FIFO,
+      // socket or device node, which the manifest records by kind.
+      else out.push(claimKey(sandboxRoot, abs));
     }
   }
   await walk(join(sandboxRoot, INPUTS_DIR));
   return out;
+}
+
+/** The kind of a name in the evidence that is not a file, a link or a directory. */
+export function specialKind(st: { isFIFO(): boolean; isSocket(): boolean; isCharacterDevice(): boolean; isBlockDevice(): boolean }): InputFile["special"] | null {
+  if (st.isFIFO()) return "fifo";
+  if (st.isSocket()) return "socket";
+  if (st.isCharacterDevice()) return "char";
+  if (st.isBlockDevice()) return "block";
+  return null;
 }
 
 const inputHashCache = new Map<string, { size: number; mtimeMs: number; ctimeMs: number; sha: string }>();
@@ -4995,7 +5074,8 @@ async function hashOfCached(sandboxRoot: string, pathKey: string): Promise<strin
   }
   if (!info.isFile()) {
     inputHashCache.delete(abs);
-    return "";
+    const kind = specialKind(info);
+    return kind ? `special:${kind}` : "";
   }
   const hit = inputHashCache.get(abs);
   let sha: string;
@@ -5026,8 +5106,9 @@ async function hashOfCached(sandboxRoot: string, pathKey: string): Promise<strin
  * `444|1` for a copy the kickoff locked itself; whatever was recorded for an
  * attached image, which it cannot lock and must therefore describe.
  */
-function expectedFingerprint(file: { sha256: string; mode?: string; links?: number; link?: string }): string {
+function expectedFingerprint(file: { sha256: string; mode?: string; links?: number; link?: string; special?: string }): string {
   if (typeof file.link === "string") return `link:${file.link}`;
+  if (file.special) return `special:${file.special}`;
   return `${file.sha256}|mode=${file.mode ?? "444"}|links=${file.links ?? 1}`;
 }
 

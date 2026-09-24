@@ -247,7 +247,14 @@ clash_sb="$(sandbox_of "$out")"
 printf '%s\n' "$out" | grep -q 'differs from pack keyed-pack.s echo_tool; the pack.s version is kept' || fail "the clash was not said: $out"
 [[ "$(jq -r '.pack // empty' "$clash_sb/tools/echo_tool/manifest.json")" == keyed-pack ]] || fail "the library's copy replaced the pack's"
 pass "a library tool named like a pack tool leaves the pack's copy in place, and the difference is said"
-out="$(start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --compact-prompt-file "$TMP/home2/prompt.md" --label vm-spec)"; rc=$?
+# Without the operator's yes the pack's secrets are withheld in a VM too: its
+# placeholder would be in the whole VM's environment, for any process there.
+out="$(start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --label vm-spec-no)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a prepared microvm run with a keyed pack and no --allow-pack-secrets exited $rc: $out"
+printf '%s\n' "$out" | grep -q 'keyed-pack has secret(s).*withheld' || fail "withholding the pack's secrets was not said: $out"
+[[ "$(jq -c '.pack_secrets' "$(sandbox_of "$out")/vm-spec.json")" == "[]" ]] || fail "a secret was bound without --allow-pack-secrets"
+[[ "$(reg vm-spec-no '.pack_secrets."keyed-pack".mode')" == "withheld" ]] || fail "the record does not say withheld"
+out="$(start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pack-secrets --compact-prompt-file "$TMP/home2/prompt.md" --label vm-spec)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a prepared microvm run with a keyed pack exited $rc: $out"
 sbx="$(sandbox_of "$out")"
 [[ -f "$sbx/vm-spec.json" ]] || fail "a prepared microvm run writes vm-spec.json"
@@ -266,6 +273,11 @@ printf '%s\n' "$out" | grep -q 'LOOSE_KEY.*withheld' || fail "a secret with no h
 [[ "$(jq -r '.env.SWARM_PACK_SECRETS | fromjson | ."keyed-pack".names | join(",")' "$sbx/vm-spec.json")" == "TEST_API_KEY" ]] || fail "the VM is told the wrong secret names"
 grep -rq 'hunter2-value\|loose-value' "$sbx" && fail "a secret's value is in the run"
 [[ "$(reg vm-spec '.pack_secrets."keyed-pack".mode')" == "injected" ]] || fail "the record does not say injected"
+[[ "$(reg vm-spec '.pack_secrets."keyed-pack".secrets.TEST_API_KEY')" == "injected" ]] || fail "the record does not say which secret was injected"
+[[ "$(reg vm-spec '.pack_secrets."keyed-pack".secrets.LOOSE_KEY')" == "withheld: names no host" ]] || fail "the record says the loose secret was injected"
+# --local-only: nothing of the pack's service is opened, and the secrets are withheld.
+out="$(start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pack-secrets --local-only --model ollama/qwen3:8b --label vm-local)"
+if [[ "$(jq -c '.pack_secrets // [] | length' "$(sandbox_of "$out")/vm-spec.json" 2>/dev/null)" == "0" ]] || printf '%s\n' "$out" | grep -q -- '--local-only withholds'; then :; else fail "--local-only bound a pack secret: $out"; fi
 pass "a prepared VM run's spec mounts neither the prompt's directory nor a secret, points at the run's own copy of the prompt, and binds each secret to its hosts"
 
 # --- a credential cannot ride in on --env; a subscription needs an explicit yes ---------
@@ -364,3 +376,48 @@ out="$(swarm package "$pkg_id")"; rc=$?
 [[ -f "$pkg_sb/package/trace/spill-system.jsonl" ]] || fail "the package lacks the watchdogs' spill"
 grep -q "vm/${pkg_id}00.json" "$pkg_sb/package/MANIFEST.txt" || fail "the VM record is not in the package's manifest"
 pass "a VM run's package carries its VM records and every trace line that missed the chain, in its manifest"
+# A link a seat left where its spill should be is not followed into the package.
+printf 'OPERATOR SECRET\n' > "$TMP/operator-file"
+rm -f "$pkg_sb/tool-output/${pkg_id}00/trace-spill.jsonl"
+ln -s "$TMP/operator-file" "$pkg_sb/tool-output/${pkg_id}00/trace-spill.jsonl"
+out="$(swarm package "$pkg_id")"; rc=$?
+[[ $rc -eq 0 ]] || fail "package with a planted link exited $rc: $out"
+[[ ! -e "$pkg_sb/package/trace/spill-${pkg_id}00.jsonl" ]] || fail "the package followed a planted link into a host file"
+grep -rq "OPERATOR SECRET" "$pkg_sb/package" && fail "a host file reached the package"
+pass "the package copies only regular files: a link a seat left in place of its spill is not followed"
+
+# --- what the review found in the kickoff ----------------------------------------------
+# A prepared VM run with forging on writes its spec (the tool list was unset there).
+out="$(start --isolation microvm --allow-tool-forging --label vm-forge-prepared)"; rc=$?
+[[ $rc -eq 0 ]] || fail "--isolation microvm --allow-tool-forging --no-start exited $rc: $out"
+[[ -n "$(jq -r '.env.SWARM_TOOLS // empty' "$(sandbox_of "$out")/vm-spec.json")" ]] || fail "the prepared spec has no tool list"
+# --allow-install in a VM installs into the VM's own disk, never a shared toolchain.
+out="$(start --isolation microvm --allow-install --label vm-install)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a prepared VM run with --allow-install exited $rc: $out"
+sbx="$(sandbox_of "$out")"
+[[ "$(jq -r '.env.SWARM_TOOLCHAIN' "$sbx/vm-spec.json")" == "/opt/dfir/agent" ]] || fail "the VMs are not pointed at their own disk for installs"
+[[ ! -d "$sbx/work/.toolchain" ]] || fail "a VM run made the host's shared toolchain directory"
+printf '%s\n' "$out" | grep -q "each VM's own disk" || fail "the Install line does not say where a VM installs: $out"
+# A credential name in --env is refused whatever its case, and so is a user:password in a URL.
+out="$(start --isolation microvm --env openai_api_key=abc --label bad-env-lower)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'names a credential' || fail "a lower-case credential name in --env went through: $out"
+out="$(start --isolation microvm --env PROXY_URL=https://user:pw@proxy.example --label bad-env-url)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'user and password in a URL' || fail "a URL credential in --env went through: $out"
+# A suffix in the allowlist is said to be a way out as well as in.
+out="$(start --isolation microvm --allow-host '*.blob.core.windows.net' --label vm-suffix)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a suffix allow entry exited $rc: $out"
+printf '%s\n' "$out" | grep -q 'lets an agent reach, and send data to, any host under it' || fail "a suffix allow entry was not warned about: $out"
+# A pack that binds a secret to a suffix is refused: msb would put the value on any host under it.
+rm -rf "$TMP/psrc/suffix-pack"
+cp -R "$TMP/psrc/keyed-pack" "$TMP/psrc/suffix-pack"
+jq '.id = "suffix-pack" | .name = "suffix-pack" | del(.checksums) | .secrets = [{name: "WIDE_KEY", title: "A key", why: "For the suite.", required: false, hosts: [".example.test"]}]' \
+  "$TMP/psrc/keyed-pack/pack.json" > "$TMP/psrc/suffix-pack/pack.json"
+# The pack format refuses it at seal time (the kickoff and the VM manager
+# refuse it again, for a pack that got past that).
+out="$(bash "$ROOT/scripts/pack.sh" seal "$TMP/psrc/suffix-pack" 2>&1)" && fail "a pack binding a secret to a suffix was sealed: $out"
+printf '%s\n' "$out" | grep -q 'hosts must be a list of host names' || fail "the seal refusal does not say why: $out"
+# A lock that pins by tag, not digest, is refused.
+printf '{"images":{"base":{"%s":"ghcr.io/x/dfirswarm-base:latest"}}}\n' "$ARCH" > "$TMP/tag-lock.json"
+out="$(SWARM_IMAGES_LOCK="$TMP/tag-lock.json" start --isolation microvm --label vm-tag-lock)"; rc=$?
+[[ $rc -ne 0 ]] && printf '%s\n' "$out" | grep -q 'other than its digest' || fail "a lock pinned by tag went through: $out"
+pass "a prepared forging VM run writes its tools, installs go to the VM's disk, --env credentials are refused whatever their case or form, suffixes are warned about, a secret on a suffix and a tag lock are refused"

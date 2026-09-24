@@ -145,7 +145,19 @@ test("a VM's mounts: the run's floor read-only first, then the agent's own writa
     "/runs/s1a2b/.pi-sessions/s1a2b00",
   ]);
   assert.ok(!writable.includes("/runs/s1a2b/work"), "the shared work/ is part of the read-only floor");
-  assert.ok(m.filter((x) => x.noexec).every((x) => /\/(extracted|quarantine)\/s1a2b00$/.test(x.host)), "the extracted and quarantined holes cannot execute");
+  // Listed outright: an `every` over an empty list would pass with no noexec mount at all.
+  assert.deepEqual(
+    m.filter((x) => x.noexec).map((x) => [x.host, x.readonly === true]),
+    [
+      ["/runs/s1a2b/work/extracted", true],
+      ["/runs/s1a2b/work/quarantine", true],
+      ["/runs/s1a2b/work/extracted/s1a2b00", false],
+      ["/runs/s1a2b/work/quarantine/s1a2b00", false],
+    ],
+    "extracted and quarantined material cannot execute here, a peer's (read-only) as well as one's own",
+  );
+  const order = m.map((x) => x.host);
+  assert.ok(order.indexOf("/runs/s1a2b/work/extracted") < order.indexOf("/runs/s1a2b/work/extracted/s1a2b00"), "the shared corner is mounted before the seat's own inside it");
   assert.ok(!writable.some((h) => h.includes("s1a2b01")), "never a peer's directory");
 });
 
@@ -157,6 +169,10 @@ test("the kickoff goes on only when a VM's own probe says what the run needs", (
   assert.match(probeVerdict({ ...good, extracted_exec: "exec" }, true).join(), /extracted\/<id>\/ can execute/);
   assert.match(probeVerdict({ ...good, quarantine_exec: "exec" }, true).join(), /quarantine\/<id>\/ can execute/);
   assert.deepEqual(probeVerdict({ ...good, inputs_files: 4 }, true, 4), [], "the VM sees every name the manifest lists");
+  assert.match(probeVerdict({ ...good, peers_extracted_exec: "exec" }, true).join(), /a peer's work\/extracted\/ can execute/);
+  assert.match(probeVerdict({ ...good, inputs_exec: "exec" }, true).join(), /the evidence can execute/);
+  assert.deepEqual(probeVerdict({ ...good, peers_extracted_exec: "noexec", peers_quarantine_exec: "noexec", inputs_exec: "noexec", reach: [{ target: "api.openai.com:443", ok: true }] }, true), []);
+  assert.match(probeVerdict({ ...good, reach: [{ target: "api.openai.com:443", ok: false, error: "getaddrinfo ENOTFOUND" }] }, true).join(), /model's host api\.openai\.com:443 is not reachable from the VM/);
   assert.match(probeVerdict({ ...good, inputs_files: 3 }, true, 4).join(), /sees 3 evidence name\(s\) where the manifest lists 4/);
   assert.deepEqual(probeVerdict({ ...good, inputs: "absent" }, false), [], "no evidence, nothing to check there");
   assert.match(probeVerdict({ ...good, base: "rw" }, true).join(), /floor is rw/);
@@ -347,4 +363,30 @@ test("N VMs of a size are refused past 85% of the host's memory or four times it
   assert.match(warm.warnings.join("\n"), /10 vCPUs on 8 cores/);
   assert.match(capacityVerdict(30, 1, 1024 * 1024, host).blockers.join("\n"), /need 31457280 MiB, and this host has 16384 MiB/);
   assert.match(capacityVerdict(20, 2, 512, host).blockers.join("\n"), /40 vCPUs on 8 cores/);
+});
+
+test("a seat's probe tries each model host it needs: a local model through the gateway, a named host on its port", async () => {
+  const { probeTargets } = await import("../scripts/vm.ts");
+  assert.deepEqual(
+    probeTargets([
+      { provider: "openai", kind: "api_key", hosts: ["api.openai.com"] },
+      { provider: "ollama", kind: "local", hosts: [], port: 11434 },
+      { provider: "lan", kind: "local", hosts: ["10.0.0.5:8000"], port: 8000 },
+      { provider: "v6", kind: "local", hosts: ["[fd00::5]:9000"], port: 9000 },
+      { provider: "suffixonly", kind: "api_key", hosts: [".example.com"] },
+    ]),
+    ["10.0.0.5:8000", "[fd00::5]:9000", "api.openai.com:443", "host.microsandbox.internal:11434"],
+  );
+});
+
+test("a credential header is found at every depth Pi reads one, and a local model's real key is refused", async () => {
+  const { credentialHeaders, isLoopbackIp } = await import("../scripts/vm.ts");
+  const config = {
+    headers: { "X-Api-Key": "k1", Accept: "json" },
+    models: [{ id: "m", headers: { Authorization: "Bearer k2" } }],
+    modelOverrides: { big: { headers: { "x-session-token": "k3" } } },
+  };
+  assert.deepEqual(credentialHeaders(config).map((h) => h.value).sort(), ["Bearer k2", "k1", "k3"]);
+  assert.equal(isLoopbackIp("0.0.0.0"), true, "a server bound to every interface is reached on loopback");
+  assert.equal(isLoopbackIp("10.0.0.1"), false);
 });

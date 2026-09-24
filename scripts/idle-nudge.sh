@@ -217,12 +217,18 @@ set_count() {
 # clock; this watchdog, which already runs for the length of the run, is
 # what notices.
 ensure_hub() {
-  [[ -n "$HUB_DIR" && -d "$HUB_DIR" ]] || return 0
-  local pid
+  [[ -n "$HUB_DIR" && -d "$HUB_DIR" && ! -e "$HUB_DIR/.stop" ]] || return 0
+  local pid keeper script
   pid="$(cat "$SANDBOX/hub.pid" 2>/dev/null || true)"
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then return 0; fi
+  # The hub's own keeper (hub-supervise.sh) brings it back; two restarting
+  # it at once would start two hubs.
+  keeper="$(cat "$HUB_DIR/supervisor.pid" 2>/dev/null || true)"
+  if [[ -n "$keeper" ]] && ps -o command= -p "$keeper" 2>/dev/null | grep -q "hub-supervise.sh"; then return 0; fi
   [[ -f "$HUB_DIR/hub-input.json" ]] || return 0
-  nohup node --experimental-strip-types --no-warnings "$ROOT/scripts/vm-hub.ts" --resume "$HUB_DIR" >>"$SANDBOX/traces/vm-hub.log" 2>&1 </dev/null &
+  script="$ROOT/scripts/vm-hub.ts"
+  [[ -f "$HUB_DIR/host/scripts/vm-hub.ts" ]] && script="$HUB_DIR/host/scripts/vm-hub.ts"
+  nohup node --experimental-strip-types --no-warnings "$script" --resume "$HUB_DIR" >>"$SANDBOX/traces/vm-hub.log" 2>&1 </dev/null &
   echo $! > "$SANDBOX/hub.pid"
   local i
   for ((i = 0; i < 50; i++)); do

@@ -111,6 +111,7 @@ import {
   threadOpen,
   waitForSwarmChange,
   forgeTool,
+  forgedToolSeal,
   listForgedTools,
   listLedger,
   recordEntry,
@@ -2187,10 +2188,13 @@ export default function (pi: ExtensionAPI) {
         // A pack tool gets its pack's secrets in its own environment; the
         // trace row below has their values replaced by their names.
         const secrets = await packSecretsFor(manifest);
+        // In a VM the seal is the hub's word, read where the record is current.
+        const sealed = boardSocket() ? await forgedToolSeal(toolCtx.cwd, manifest.name).catch(() => undefined) : undefined;
         const run = await runForgedTool(toolCtx.cwd, manifest, (params ?? {}) as Record<string, unknown>, {
           signal: signal as AbortSignal | undefined,
           agentId,
           env: secrets,
+          ...(sealed ? { sealed } : {}),
         });
         if (before && agentId) {
           try {

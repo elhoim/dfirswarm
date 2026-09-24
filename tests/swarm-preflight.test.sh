@@ -349,6 +349,9 @@ pass "SWARM_RUNS_DIR still overrides both"
 # OpenAI-style /v1/models, plus Ollama's /api/version and /api/show.
 LOCAL_HELPERS="$TMP/local-helpers.sh"
 {
+  # Pi's store is read where the kickoff reads it (an --env value wins).
+  sed -n '/^pane_home() {/,/^}/p' "$ROOT/scripts/swarm.sh"
+  sed -n '/^pi_agent_dir() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^provider_base_url() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^host_of_url() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^host_is_local() {/,/^}/p' "$ROOT/scripts/swarm.sh"

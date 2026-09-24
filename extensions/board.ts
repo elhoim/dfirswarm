@@ -259,6 +259,7 @@ export const REMOTE_FUNCTIONS = [
   "correctionsAfter",
   "fileDiff",
   "forgeTool",
+  "forgedToolSeal",
   "guardWrite",
   "heldBy",
   "listClaims",
@@ -418,6 +419,7 @@ export const restoreFileVersion: typeof P.restoreFileVersion = async (ctx, rawPa
   return { ok: true, path: pathKey, rev, landed_rev: landed?.rev ?? null, sha256: version.sha256 };
 };
 export const forgeTool = remote("forgeTool", P.forgeTool);
+export const forgedToolSeal = remote("forgedToolSeal", P.forgedToolSeal);
 export const guardWrite = remote("guardWrite", P.guardWrite);
 export const harnessStop = P.harnessStop;
 export const heldBy = remote("heldBy", P.heldBy);

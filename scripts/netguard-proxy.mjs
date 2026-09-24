@@ -54,8 +54,15 @@ export function parseAllowlist(raw) {
     .map((entry) => {
       let host = entry;
       let port = null;
+      // An IPv6 address with a port is written [v6]:port (the one form a VM's
+      // allowlist reads too); the bare form, v6:port by its last colon, is
+      // still read.
+      const v6 = entry.match(/^\[([^\]]+)\](?::(\d+))?$/);
       const m = entry.match(/^(.*):(\d+)$/);
-      if (m && !entry.startsWith("[")) {
+      if (v6) {
+        host = v6[1];
+        port = v6[2] ? Number.parseInt(v6[2], 10) : null;
+      } else if (m) {
         host = m[1];
         port = Number.parseInt(m[2], 10);
       }
@@ -235,7 +242,7 @@ if (mode === "proxy") runProxy();
 else if (mode === "bridge") runBridge();
 else if (mode === "self-test") {
   // Pure allowlist unit checks; no sockets. Used by tests/netguard.test.sh.
-  const rules = parseAllowlist("api.openai.com, .googleapis.com, *.x.ai, api.deepseek.com:443, 127.0.0.1:11434");
+  const rules = parseAllowlist("api.openai.com, .googleapis.com, *.x.ai, api.deepseek.com:443, 127.0.0.1:11434, [::1]:8000, fd00::5:9000");
   const cases = [
     ["api.openai.com", 443, true],
     ["API.OPENAI.COM.", 443, true],
@@ -254,6 +261,9 @@ else if (mode === "self-test") {
     ["127.0.0.1", 443, false],
     ["127.0.0.1", 11434, true],
     ["localhost", 11434, false],
+    ["::1", 8000, true],
+    ["::1", 8001, false],
+    ["fd00::5", 9000, true],
   ];
   let failed = 0;
   for (const [host, port, expected] of cases) {

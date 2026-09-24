@@ -342,14 +342,17 @@ Isolation
                       held by the write guard, the tool guard and netguard.
                       microvm: every agent is a Pi process in its own microVM
                       (microsandbox), brought up by this kickoff and put away by
-                      stop. The run is mounted read-only in each VM except work/,
-                      the agent's own tool-output/ and its own Pi session; the
-                      evidence is mounted read-only from the host with no copy;
+                      stop. The run is mounted read-only in each VM except the
+                      agent's own work/<id>/, work/extracted/<id>/,
+                      work/quarantine/<id>/, tool-output/<id>/ and Pi session;
+                      a shared file goes through publish_file; the evidence is
+                      mounted read-only from the host (--inputs-copy for a copy);
                       the board is written by the hub on the host
                       (scripts/vm-hub.ts), the only writer; a VM reaches only the
-                      hosts its models and --allow-host name; no credential
-                      enters a VM — Pi on the host resolves each one and msb swaps
-                      it in on the way out, to that provider's hosts only.
+                      hosts its models and --allow-host name (every public host
+                      with --no-netguard); no credential enters a VM — Pi on the
+                      host resolves each one and msb swaps it in on the way out,
+                      to that provider's hosts only.
                       SWARM_ISOLATION sets the default.
   --image REF         The VM image (SWARM_VM_IMAGE). Default: the smallest profile
                       that serves the packs (images/recipe.py profile-for), by the
@@ -478,15 +481,25 @@ registry_update_state() {
 # case. A copy in the hub's directory (outside the run, which no agent can
 # write), mounted read-only where the checkout is.
 freeze_harness() { # <hub dir>
-  local dir="$1/harness" rel commit
-  mkdir -p "$dir/node_modules"
+  local dir="$1/harness" host="$1/host" rel commit
+  mkdir -p "$dir/node_modules" "$host"
   for rel in extensions scripts prompts node_modules/typebox; do
     rm -rf "${dir:?}/$rel"
     cp -R "$ROOT/$rel" "$dir/$rel"
   done
+  # The host's side of the run runs from a copy too: the hub, the VM finish
+  # it starts, the custody it takes. A checkout reset under a live run (the
+  # app resets local main) changed the code those later steps ran. The
+  # copy's node_modules are the checkout's: a run does not change them.
+  for rel in extensions scripts prompts; do
+    rm -rf "${host:?}/$rel"
+    cp -R "$ROOT/$rel" "$host/$rel"
+  done
+  ln -sfn "$ROOT/node_modules" "$host/node_modules"
   commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo "not a git checkout")"
   git -C "$ROOT" diff --quiet HEAD -- extensions scripts prompts 2>/dev/null || commit="$commit with local changes"
   printf '%s\n' "$commit" > "$dir/COMMIT"
+  printf '%s\n' "$commit" > "$host/COMMIT"
 }
 
 # A laptop that sleeps mid-run pauses every agent and its VM while the wall
@@ -1054,6 +1067,20 @@ for dirpath, dirnames, filenames in os.walk(root):
             })
             continue
         if not os.path.isfile(abs_path):
+            # A FIFO, a socket or a device node (an extracted Linux root has
+            # them): recorded by its kind and never opened, so every walk —
+            # the VMs' probe, the agents' check, custody — counts the same
+            # names and a change of kind is a change.
+            import stat as _stat
+            mode = os.lstat(abs_path).st_mode
+            kind = "fifo" if _stat.S_ISFIFO(mode) else "socket" if _stat.S_ISSOCK(mode) else "char" if _stat.S_ISCHR(mode) else "block" if _stat.S_ISBLK(mode) else None
+            if kind:
+                files.append({
+                    "path": os.path.relpath(abs_path, sandbox).replace(os.sep, "/"),
+                    "bytes": 0,
+                    "sha256": hashlib.sha256(("special:" + kind).encode()).hexdigest(),
+                    "special": kind,
+                })
             continue
         digest = hashlib.sha256()
         with open(abs_path, "rb") as f:
@@ -1351,16 +1378,18 @@ start_agent_when_shell_ready() {
 # PACK_SECRETS_RECORD (JSON for the run record). Never reads a value.
 #
 # In a microVM a secret reaches the VM only as a placeholder bound to the
-# hosts its pack declares, so the names are all the pane needs. On the host a
-# pane can read anything its own extension can, so handing a pack tool its
-# secret means handing it to the agent too: that takes --allow-pack-secrets,
-# and a pack that *requires* one is refused without it.
+# hosts its pack declares, so the names are all the pane needs — but the
+# placeholder is in the whole VM's environment, and any process there can
+# use it against those hosts. On the host a pane can read anything its own
+# extension can. Either way handing a pack tool its secret hands it to the
+# agent too: that takes --allow-pack-secrets, and a pack that *requires* one
+# is refused without it. --local-only withholds them all.
 # Where `pack install` keeps a pack's secrets: beside the packs, never inside
 # one (a pack directory is mounted into every VM; scripts/pack.sh).
 pack_secrets_file() { printf '%s/secrets/%s.env\n' "${DFIRSWARM_HOME:-$HOME/.dfirswarm}" "$1"; }
 
-pack_secrets_plan() { # <pack dirs, one per line> <isolation> <allow 0|1>
-  local pack_dirs="$1" isolation="$2" allow="$3" pd id names required file
+pack_secrets_plan() { # <pack dirs, one per line> <isolation> <allow 0|1> [local-only 0|1]
+  local pack_dirs="$1" isolation="$2" allow="$3" local_only="${4:-0}" pd id names required file
   PACK_SECRETS_ENV='{}'
   PACK_SECRETS_RECORD='{}'
   # What the VM manager binds: one entry per secret with a value, named for
@@ -1378,40 +1407,90 @@ pack_secrets_plan() { # <pack dirs, one per line> <isolation> <allow 0|1>
     fi
     required="$(jq -r '[.secrets[]? | select(.required == true) | .name] | join(",")' "$pd/pack.json")"
     file="$(pack_secrets_file "$id")"
-    local mode
-    if [[ ! -s "$file" ]]; then
-      mode="not-set"
-    elif [[ "$isolation" == "microvm" ]]; then
-      mode="injected"
-      local sname shosts bound="" withheld=""
-      while IFS=$'\t' read -r sname shosts; do
-        [[ -n "$sname" ]] || continue
-        grep -q "^$sname=" "$file" 2>/dev/null || continue
-        if [[ -z "$shosts" ]]; then
-          withheld="${withheld:+$withheld,}$sname"
-          continue
-        fi
-        bound="${bound:+$bound,}$sname"
-        PACK_SECRETS_VM="$(jq -c --arg n "$sname" --arg f "$file" --arg h "$shosts" '. + [{name: $n, value_file: $f, hosts: ($h | split(","))}]' <<<"$PACK_SECRETS_VM")"
-      done < <(jq -r '.secrets[]? | [.name, ((.hosts // []) | join(","))] | @tsv' "$pd/pack.json")
-      if [[ -n "$withheld" ]]; then
-        echo "WARN: pack $id secret(s) $withheld name no hosts, so they cannot be bound to anything and are withheld from the VMs." >&2
-        [[ -z "$bound" ]] && mode="withheld"
-      fi
-    elif [[ "$allow" -eq 1 ]]; then
-      mode="exposed"
-    else
+    local mode per='{}' sname shosts bound="" h
+    bound=""
+    if [[ "$local_only" -eq 1 ]]; then
+      # --local-only: nothing leaves this machine, a pack's service included.
       if [[ -n "$required" ]]; then
-        echo "BLOCKER: pack $id requires secret(s) $required. On the host a pane can read whatever its own extension can, so its pack tools cannot have them without the agents having them too. Pass --allow-pack-secrets to accept that, or run with --isolation microvm, where the value never enters the VM." >&2
+        echo "BLOCKER: pack $id requires secret(s) $required for a service off this machine, and --local-only keeps every run on it. Drop the pack or --local-only." >&2
         exit 2
       fi
       mode="withheld"
-      echo "WARN: pack $id has secret(s) $names; they are withheld from the panes (pass --allow-pack-secrets, or use --isolation microvm)." >&2
+      echo "WARN: pack $id has secret(s) $names for a service off this machine; --local-only withholds them and opens none of its hosts." >&2
+      while IFS= read -r sname; do [[ -n "$sname" ]] && per="$(jq -c --arg n "$sname" '. + {($n): "withheld: --local-only"}' <<<"$per")"; done < <(jq -r '.secrets[]?.name' "$pd/pack.json")
+    elif [[ "$allow" -ne 1 ]]; then
+      # On the host a pane can read whatever its own extension can; in a VM
+      # the value never enters, but its placeholder is in the whole VM's
+      # environment, so any process there — an agent's shell — can use the
+      # operator's account against the pack's hosts (upload the evidence to
+      # a scanning service, say). Either way it is the operator's to allow.
+      if [[ -n "$required" ]]; then
+        if [[ "$isolation" == "microvm" ]]; then
+          echo "BLOCKER: pack $id requires secret(s) $required. In a VM the value never enters, but any process in the VM can use it against the pack's hosts through its placeholder. Pass --allow-pack-secrets to accept that." >&2
+        else
+          echo "BLOCKER: pack $id requires secret(s) $required. On the host a pane can read whatever its own extension can, so its pack tools cannot have them without the agents having them too. Pass --allow-pack-secrets to accept that, or run with --isolation microvm, where the value never enters the VM." >&2
+        fi
+        exit 2
+      fi
+      mode="withheld"
+      echo "WARN: pack $id has secret(s) $names; they are withheld (pass --allow-pack-secrets to hand them over$([[ "$isolation" == "microvm" ]] && printf ' as placeholders' || printf ', or use --isolation microvm'))." >&2
+      while IFS= read -r sname; do [[ -n "$sname" ]] && per="$(jq -c --arg n "$sname" '. + {($n): "withheld: not allowed"}' <<<"$per")"; done < <(jq -r '.secrets[]?.name' "$pd/pack.json")
+    elif [[ "$isolation" == "microvm" ]]; then
+      local withheld=""
+      while IFS=$'\t' read -r sname shosts; do
+        [[ -n "$sname" ]] || continue
+        if [[ ! -s "$file" ]] || ! grep -q "^$sname=" "$file" 2>/dev/null; then
+          per="$(jq -c --arg n "$sname" '. + {($n): "not set"}' <<<"$per")"
+          continue
+        fi
+        if [[ -z "$shosts" ]]; then
+          withheld="${withheld:+$withheld,}$sname"
+          per="$(jq -c --arg n "$sname" '. + {($n): "withheld: names no host"}' <<<"$per")"
+          continue
+        fi
+        # Checked now, as the VM's policy will read them: an entry msb reads
+        # as nothing, and a suffix (msb would put the value on any host
+        # under it), stop the kickoff before anything is written.
+        for h in ${shosts//,/ }; do
+          if [[ "$h" == .* || "$h" == \*.* ]]; then
+            echo "BLOCKER: pack $id binds secret $sname to the suffix $h; msb would substitute its value for any host under it. The pack must name its hosts." >&2
+            exit 2
+          fi
+        done
+        if ! vm_cli check-allow "$shosts" >/dev/null 2>&1; then
+          echo "BLOCKER: pack $id names host(s) for secret $sname that a VM's policy cannot read: $shosts" >&2
+          exit 2
+        fi
+        bound="${bound:+$bound,}$sname"
+        per="$(jq -c --arg n "$sname" '. + {($n): "injected"}' <<<"$per")"
+        PACK_SECRETS_VM="$(jq -c --arg n "$sname" --arg f "$file" --arg h "$shosts" '. + [{name: $n, value_file: $f, hosts: ($h | split(","))}]' <<<"$PACK_SECRETS_VM")"
+      done < <(jq -r '.secrets[]? | [.name, ((.hosts // []) | join(","))] | @tsv' "$pd/pack.json")
+      # A secret the pack requires that no VM can have is a pack that cannot work.
+      local r
+      for r in ${required//,/ }; do
+        if [[ ",$bound," != *",$r,"* ]]; then
+          echo "BLOCKER: pack $id requires secret $r, which cannot be bound in a VM ($(jq -r --arg n "$r" '.[$n]' <<<"$per")). Set it with scripts/pack.sh install, or have the pack name its hosts." >&2
+          exit 2
+        fi
+      done
+      [[ -n "$withheld" ]] && echo "WARN: pack $id secret(s) $withheld name no hosts, so they cannot be bound to anything and are withheld from the VMs." >&2
+      if [[ -n "$bound" ]]; then mode="injected"; elif [[ ! -s "$file" ]]; then mode="not-set"; else mode="withheld"; fi
+    elif [[ ! -s "$file" ]]; then
+      mode="not-set"
+      while IFS= read -r sname; do [[ -n "$sname" ]] && per="$(jq -c --arg n "$sname" '. + {($n): "not set"}' <<<"$per")"; done < <(jq -r '.secrets[]?.name' "$pd/pack.json")
+    else
+      mode="exposed"
+      while IFS= read -r sname; do
+        [[ -n "$sname" ]] || continue
+        if grep -q "^$sname=" "$file" 2>/dev/null; then per="$(jq -c --arg n "$sname" '. + {($n): "exposed"}' <<<"$per")"; else per="$(jq -c --arg n "$sname" '. + {($n): "not set"}' <<<"$per")"; fi
+      done < <(jq -r '.secrets[]?.name' "$pd/pack.json")
     fi
-    PACK_SECRETS_RECORD="$(jq -c --arg id "$id" --arg n "$names" --arg m "$mode" \
-      '. + {($id): {names: ($n | split(",")), mode: $m}}' <<<"$PACK_SECRETS_RECORD")"
+    # What happened to each secret, by name: the record says "injected" only
+    # of what was.
+    PACK_SECRETS_RECORD="$(jq -c --arg id "$id" --arg n "$names" --arg m "$mode" --argjson per "$per" \
+      '. + {($id): {names: ($n | split(",")), mode: $m, secrets: $per}}' <<<"$PACK_SECRETS_RECORD")"
     case "$mode" in
-      injected) PACK_SECRETS_ENV="$(jq -c --arg id "$id" --arg n "${bound:-$names}" '. + {($id): {names: ($n | split(","))}}' <<<"$PACK_SECRETS_ENV")" ;;
+      injected) PACK_SECRETS_ENV="$(jq -c --arg id "$id" --arg n "$bound" '. + {($id): {names: ($n | split(","))}}' <<<"$PACK_SECRETS_ENV")" ;;
       exposed) PACK_SECRETS_ENV="$(jq -c --arg id "$id" --arg n "$names" --arg f "$file" '. + {($id): {names: ($n | split(",")), file: $f}}' <<<"$PACK_SECRETS_ENV")" ;;
     esac
   done <<< "$pack_dirs"
@@ -1444,13 +1523,23 @@ install_tools_from() { # sandbox library-dir [pack-id]
     # reviewed path, and its manifest carries which pack it came from. The
     # same bytes are simply the same tool; different bytes are said out loud
     # rather than overwritten, which is what used to happen.
-    if [[ -z "$pack_id" && -f "$sandbox/tools/$tool_name/manifest.json" ]]; then
+    if [[ -f "$sandbox/tools/$tool_name/manifest.json" ]]; then
       local held_pack held_hash
       held_pack="$(jq -r '.pack // empty' "$sandbox/tools/$tool_name/manifest.json" 2>/dev/null || true)"
       held_hash="$(jq -r '.sha256 // empty' "$sandbox/tools/$tool_name/manifest.json" 2>/dev/null || true)"
-      if [[ -n "$held_pack" ]]; then
+      if [[ -z "$pack_id" && -n "$held_pack" ]]; then
         if [[ "$held_hash" != "$hash" ]]; then
           echo "WARN: $from/$tool_name differs from pack $held_pack's $tool_name; the pack's version is kept." >&2
+        fi
+        skipped=$(( skipped + 1 ))
+        continue
+      fi
+      # Two packs carrying a tool of one name: the first keeps it, and a
+      # different script under the same name is said with both packs named,
+      # not silently laid over the first.
+      if [[ -n "$pack_id" && -n "$held_pack" && "$held_pack" != "$pack_id" ]]; then
+        if [[ "$held_hash" != "$hash" ]]; then
+          echo "WARN: packs $held_pack and $pack_id both carry a tool named $tool_name, with different scripts; $held_pack's is kept." >&2
         fi
         skipped=$(( skipped + 1 ))
         continue
@@ -1509,7 +1598,11 @@ warn_on_catalog_signatures() { # <sandbox> <toolbox sets in force>
   hits="$(grep -rhoiE '[^ /]*\.(vhdx?|vmdk|qcow2|vc|hc|tc|luks)\b|-fve-fs-|bitlocker' \
             "$sandbox/catalog" 2>/dev/null | sort -u | head -4 | tr '\n' ' ' || true)"
   [[ -n "$hits" ]] || return 0
-  echo "WARN: the catalog found what looks like an encrypted or virtual volume (${hits% }) and this run has no crypto toolbox set. If the case turns on it, stop and start again with --toolbox ${sets:-dfir},crypto (and --toolbox-required)." >&2
+  if [[ "${isolation:-host}" == "microvm" ]]; then
+    echo "WARN: the catalog found what looks like an encrypted or virtual volume (${hits% }). In a VM the tools come from the image: if the case turns on it, stop and start again with --pack encrypted-containers (its image holds pybde, pyvhdi, pytsk3 and dfvfs)." >&2
+  else
+    echo "WARN: the catalog found what looks like an encrypted or virtual volume (${hits% }) and this run has no crypto toolbox set. If the case turns on it, stop and start again with --toolbox ${sets:-dfir},crypto (and --toolbox-required)." >&2
+  fi
 }
 
 render_contract() {
@@ -1634,8 +1727,9 @@ text = text.replace("{{SEATS}}\n\n", "")
 # The evidence catalog, from its own README.
 catalog_section = ""
 catalog_readme = os.path.join(sandbox, "catalog", "README.md")
-if os.path.isfile(catalog_readme):
-    with open(catalog_readme, encoding="utf-8") as f:
+# A regular file only: never a link out of the run, never a FIFO.
+if os.path.isfile(catalog_readme) and not os.path.islink(catalog_readme):
+    with open(catalog_readme, encoding="utf-8", errors="replace") as f:
         body = f.read().strip()
     # The index names evidence files, partitions and what the tools said about
     # them: text that came out of the evidence. It goes in as quoted material
@@ -1786,14 +1880,22 @@ if caps:
         )
         gaps.append(
             "A file a peer has just published can take up to five seconds to look current in your VM: read a peer's file after "
-            "they post about it. Nothing under `work/extracted/` or `work/quarantine/` can execute in any VM"
+            "they post about it, and a peer's extracted files may still be being written. `work/extracted/` and `work/quarantine/` "
+            "are mounted no-exec in every VM, a peer's corner as well as your own: what came out of the evidence does not run "
+            "by accident (a mount flag, not a wall against a root that means to)"
         )
         gaps.append(
             "A mount you make (FUSE, a loop device, where your VM has them) exists in your VM alone: your peers do not see it "
             "and nothing under it is recorded. What you derive from it counts once it is a file under `work/<your id>/`, "
             "named in a `record`; prefer a library that reads a volume in place (`pybde`, `pytsk3`, `dfvfs`) over a mount"
         )
-        if os.environ.get("SWARM_CONTRACT_ALLOW_INSTALL") == "1":
+        if os.environ.get("SWARM_CONTRACT_ALLOW_INSTALL") == "1" and os.environ.get("SWARM_CONTRACT_INSTALL_HOSTS") != "1":
+            gaps.append(
+                "`pip install` is set up to lay packages into your VM's own disk (/opt/dfir/agent), but `pypi.org` is not on the "
+                "network allowlist (`--no-pypi`): installs fail. Do not look for a way around it; work with what the image holds, "
+                "and `record` (kind=event) the tool you did without"
+            )
+        elif os.environ.get("SWARM_CONTRACT_ALLOW_INSTALL") == "1":
             gaps.append(
                 "`pip install <package>` (no --user) lays packages into your VM's own disk (/opt/dfir/agent), on your PATH and import "
                 "path and your forged tools'; a peer's VM does not share them, so a peer who needs the package installs it too. "
@@ -1806,7 +1908,8 @@ if caps:
             )
         else:
             gaps.append(
-                ("Your VM reaches " + vm_hosts + " and nothing else: another name does not resolve, and an address has no route")
+                ("The team's VMs reach " + vm_hosts + " and nothing else: another name does not resolve, and an address has no "
+                 "route. Of the model hosts, each VM reaches only its own seat's model's and the summary model's")
                 if vm_hosts else "Your VM reaches no network host but your model's"
             )
     host_section = "\n".join([
@@ -2260,7 +2363,7 @@ cmd_start() {
   if [[ "$isolation" == "microvm" ]]; then
     [[ "$vm_cpus" =~ ^[1-9][0-9]?$ ]] || { echo "BLOCKER: --vm-cpus must be 1..99 (got $vm_cpus)." >&2; exit 2; }
     # Unset: 2048 MiB, or 1024 on a host with less than 8 GiB (a small
-    # server that also serves something else, ADR 0005).
+    # server that also serves something else, ADR 0009).
     if [[ -z "$vm_memory" ]]; then
       local host_mib
       host_mib="$(node -e 'console.log(Math.floor(require("os").totalmem() / 1048576))' 2>/dev/null || echo 16384)"
@@ -2297,14 +2400,23 @@ cmd_start() {
     # Whatever --env carries goes into every VM's environment and its
     # snapshot as it is; a credential cannot go in as a placeholder that
     # way, so it does not go in at all. Pi's store is where a key lives.
-    local ve
+    # The name is read the way the VM manager reads one (vm.ts
+    # secretLikeName), whatever its case, and a value that carries a
+    # user:password in a URL is a credential whatever its name.
+    local ve ve_name ve_upper
     for ve in ${extra_env[@]+"${extra_env[@]}"}; do
       [[ "$ve" == --env ]] && continue
-      case "${ve%%=*}" in
-        *KEY*|*TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*CREDENTIAL*)
-          echo "BLOCKER: --env ${ve%%=*} names a credential, which would enter every VM and its snapshot in clear. Put the key in Pi's store (pi auth) or a pack's secrets (pack install); the VM gets a placeholder." >&2
+      ve_name="${ve%%=*}"
+      ve_upper="$(printf '%s' "$ve_name" | tr '[:lower:]' '[:upper:]')"
+      case "$ve_upper" in
+        *KEY*|*TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*CREDENTIAL*|*AUTH*|*COOKIE*|*SESSION*)
+          echo "BLOCKER: --env $ve_name names a credential, which would enter every VM and its snapshot in clear. Put the key in Pi's store (pi auth) or a pack's secrets (pack install); the VM gets a placeholder." >&2
           exit 2 ;;
       esac
+      if [[ "$ve" == *=* ]] && [[ "${ve#*=}" =~ ://[^/@[:space:]]+:[^/@[:space:]]*@ ]]; then
+        echo "BLOCKER: --env $ve_name carries a user and password in a URL, which would enter every VM and its snapshot in clear." >&2
+        exit 2
+      fi
     done
   fi
 
@@ -2326,6 +2438,12 @@ cmd_start() {
   fi
   if [[ -n "$inputs_image" ]]; then
     [[ -f "$inputs_image" ]] || { echo "BLOCKER: --inputs-image $inputs_image is not a file." >&2; exit 2; }
+    # Refused before anything is written, not when the image is attached
+    # (by then the sandbox had been cleared for it).
+    if [[ "$(uname -s)" != "Darwin" ]] || ! command -v hdiutil >/dev/null 2>&1; then
+      echo "BLOCKER: --inputs-image needs macOS (hdiutil). On Linux a read-only loop mount needs root; use --inputs DIR (a read-only mount of its volume, or --inputs-copy)." >&2
+      exit 2
+    fi
     inputs_image="$(cd "$(dirname "$inputs_image")" && pwd -P)/$(basename "$inputs_image")"
     inputs_guard="image"
     inputs_enforce="on"
@@ -2494,7 +2612,7 @@ STRIP
   PACK_SECRETS_RECORD='{}'
   PACK_SECRETS_VM='[]'
   if [[ -n "$pack_dirs" ]]; then
-    pack_secrets_plan "$pack_dirs" "${isolation:-host}" "$allow_pack_secrets"
+    pack_secrets_plan "$pack_dirs" "${isolation:-host}" "$allow_pack_secrets" "$local_only"
   fi
   if [[ -n "$tools_from" && ! -d "$tools_from" ]]; then
     echo "BLOCKER: --tools-from $tools_from is not a directory." >&2
@@ -2602,9 +2720,11 @@ STRIP
   if [[ "$isolation" == "microvm" && "$allow_oauth_in_vm" -eq 0 ]]; then
     # A subscription token is a bearer token for the operator's whole
     # account at the provider, and a VM that holds its placeholder can send
-    # it to any path on the host it is bound to. An API key is scoped to
-    # inference; a subscription is not. Said here, before anything is
-    # written, and overridden only on purpose.
+    # it to any path on the host it is bound to. An API key's placeholder
+    # reaches every path on its provider's host too, but an API key is what
+    # the provider issued for API use; a subscription is the person's whole
+    # account. Said here, before anything is written, and overridden only on
+    # purpose.
     local sub_provider
     sub_provider="$(vm_oauth_providers)"
     if [[ -n "$sub_provider" ]]; then
@@ -2714,6 +2834,15 @@ STRIP
       exit 2
     fi
   fi
+  # A suffix entry is a way out as much as a way in: any host under it is
+  # one an agent can name, and send the case to (a storage account of its
+  # own under *.blob.core.windows.net, say). Said, so it is a choice.
+  local suffix_entry
+  for suffix_entry in ${allow_hosts//,/ }; do
+    case "$suffix_entry" in
+      .*|\*.*) echo "WARN: --allow-host $suffix_entry lets an agent reach, and send data to, any host under it$([[ "$isolation" == "microvm" ]] && printf ' (in a VM the apex too)'); name the hosts when you can." >&2 ;;
+    esac
+  done
 
   # A VM run is refused here, before anything is written, when this host
   # cannot boot a VM: an operator asked for isolation and must not get a run
@@ -2726,7 +2855,7 @@ STRIP
       exit 2
     fi
     jq -r '.warnings[]? | "WARN: " + .' <<<"$vm_capacity" >&2 || true
-    [[ -n "$vm_image" ]] || vm_image="$(vm_default_image "$pack_dirs" "$playwright")"
+    [[ -n "$vm_image" ]] || vm_image="$(vm_default_image "$pack_dirs" "$playwright")" || exit 2
     if [[ "$start_agents" -eq 1 ]]; then
       local vm_probe
       if ! vm_probe="$(vm_cli probe --image "$vm_image")"; then
@@ -2897,7 +3026,7 @@ STRIP
     local catalog_image="$vm_image"
     if [[ -z "$pack_dirs" && "$vm_image_named" -eq 0 ]]; then
       local tsk_image
-      tsk_image="$(vm_default_image "computer-forensics-base" 0)"
+      tsk_image="$(vm_default_image "$("$ROOT/scripts/pack.sh" resolve computer-forensics-base 2>/dev/null || echo computer-forensics-base)" 0)" || exit 2
       if [[ "$(vm_cli probe --image "$tsk_image" 2>/dev/null | jq -r '.image_present // false')" == "true" ]]; then
         catalog_image="$tsk_image"
         echo "Catalog:      in $tsk_image (the run's image has no Sleuth Kit; this one does)"
@@ -2905,13 +3034,22 @@ STRIP
         echo "WARN: the catalog runs in $vm_image, which has no Sleuth Kit or Volatility: disks and memory will not be catalogued. Add --pack computer-forensics-base, or load $tsk_image (images/README.md)." >&2
       fi
     fi
-    vm_cli catalog --image "$catalog_image" --sandbox "$sandbox" --memory "$vm_memory" --cpus "$vm_cpus" --run "$swarm_id" ${catalog_evidence[@]+"${catalog_evidence[@]}"} || exit $?
+    vm_cli catalog --image "$catalog_image" --sandbox "$sandbox" --memory "$vm_memory" --cpus "$vm_cpus" --run "$swarm_id" --registry "$REGISTRY" ${catalog_evidence[@]+"${catalog_evidence[@]}"} || exit $?
   elif [[ "$catalog" -eq 1 && "$isolation" == "microvm" ]]; then
     echo "Catalog:      built in the run's image when the VMs start (prepared run: not yet)"
   elif [[ "$catalog" -eq 1 ]]; then
     bash "$ROOT/scripts/evidence-catalog.sh" "$sandbox" || exit $?
   fi
   if [[ "$catalog" -eq 1 && -d "$sandbox/catalog" ]]; then
+    # The catalog's parsers ran over hostile evidence: what they left that
+    # is not a file or a directory (a link to a host file whose text would
+    # be pasted into SWARM.md, a FIFO) is removed before anything reads it.
+    local odd
+    odd="$(find "$sandbox/catalog" ! -type f ! -type d -print 2>/dev/null)"
+    if [[ -n "$odd" ]]; then
+      echo "WARN: the catalog left what is not a file; removed before the contract reads it: $(tr '\n' ' ' <<<"$odd")" >&2
+      find "$sandbox/catalog" ! -type f ! -type d -delete 2>/dev/null || true
+    fi
     warn_on_catalog_signatures "$sandbox" "$toolbox"
     chmod -R a-w "$sandbox/catalog" 2>/dev/null || true
   fi
@@ -3083,9 +3221,14 @@ STRIP
     # No host-mode pane may reach a VM run's hub: its sockets take a caller
     # for the agent whose socket it is, with no token to show, so a pane of
     # a run on this host would be that agent to it. The hubs share one
-    # parent, and the whole parent is denied (a socket cannot be sealed on
-    # Linux; docs/safety.md says so).
+    # parent, and the whole parent is denied: sandbox-exec refuses the
+    # connect, a mount namespace hides the directory. Landlock alone cannot
+    # (it does not govern connecting to a socket), and no guard does nothing.
     guard_args+=(--no-socket-tree "$(hubs_parent)")
+  fi
+  if [[ "$isolation" != "microvm" ]] && [[ "$write_guard_mode" == "none" || "$write_guard_mode" == "landlock" ]] \
+    && compgen -G "$(hubs_parent)/dfs-*/admin.sock" >/dev/null 2>&1; then
+    echo "WARN: a microVM run is up on this machine, and this run's panes (write guard: $write_guard_mode) cannot be kept from its hub's sockets: a pane could speak to that run's board as one of its agents. Run them one at a time, or on a host with user namespaces (a mount namespace masks the sockets)." >&2
   fi
   if [[ -n "$trace_socket" && "$write_guard_mode" != "none" ]]; then
     # The panes may connect to the collector's socket and may not write the
@@ -3167,7 +3310,8 @@ STRIP
     install_tools_from "$sandbox" "$tools_from"
   fi
   write_team_budget "$sandbox" "$swarm_id" "$n" "$cap" "$wall" "$hard" "${agent_ids[@]}"
-  if [[ "$allow_install" -eq 1 ]]; then
+  # The host's shared install area; a VM installs into its own disk.
+  if [[ "$allow_install" -eq 1 && "$isolation" != "microvm" ]]; then
     mkdir -p "$sandbox/work/.toolchain"
   fi
   # One observation of the host: the contract and the registry describe the
@@ -3186,7 +3330,16 @@ STRIP
       vm_hosts="$(provider_hosts_for_models 2>/dev/null || true)"
       [[ -n "$allow_hosts" ]] && vm_hosts="${vm_hosts}${vm_hosts:+,}$allow_hosts"
       [[ "$allow_install" -eq 1 && "$install_hosts" -eq 1 ]] && vm_hosts="${vm_hosts}${vm_hosts:+,}pypi.org,files.pythonhosted.org"
-      vm_hosts="$(printf '%s' "$vm_hosts" | tr ',' '\n' | awk 'NF && !seen[$0]++' | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g')"
+      # A pack's secret hosts are reached from the VMs too.
+      local ps_hosts
+      ps_hosts="$(jq -r '[.[]?.hosts[]?] | join(",")' <<<"${PACK_SECRETS_VM:-[]}" 2>/dev/null || true)"
+      [[ -n "$ps_hosts" ]] && vm_hosts="${vm_hosts}${vm_hosts:+,}$ps_hosts"
+      # In the words a VM meets them in: a refresh host is not bound (the
+      # guest never refreshes), and this machine's loopback is the gateway.
+      vm_hosts="$(printf '%s' "$vm_hosts" | tr ',' '\n' | awk 'NF && !seen[$0]++' \
+        | grep -v -x -E 'auth\.openai\.com|platform\.claude\.com' \
+        | sed -E 's/^(127\.[0-9.]+|localhost|0\.0\.0\.0|\[::1\]|::1):([0-9]+)$/host.microsandbox.internal:\2/' \
+        | awk '!seen[$0]++' | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g')"
     fi
   fi
   CASE_ID_FOR_CONTRACT="$case_id" EXAMINER_FOR_CONTRACT="$examiner" ALLOW_INSTALL_FOR_CONTRACT="$allow_install" INSTALL_HOSTS_FOR_CONTRACT="$install_hosts" \
@@ -3371,7 +3524,11 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   if [[ "$forging" -eq 1 ]]; then
     echo "Tools:        forging on (make_tool / tools; scripts under tools/<name>/ run as subprocesses)"
   fi
-  if [[ "$allow_install" -eq 1 && "$install_hosts" -eq 1 ]]; then
+  if [[ "$allow_install" -eq 1 && "$isolation" == "microvm" && "$install_hosts" -eq 1 ]]; then
+    echo "Install:      pip from pypi.org into each VM's own disk (/opt/dfir/agent), never shared; the agent is root in its VM; named in custody at stop"
+  elif [[ "$allow_install" -eq 1 && "$isolation" == "microvm" ]]; then
+    echo "Install:      pip into each VM's own disk, but pypi.org is NOT on the allowlist (--no-pypi): installs fail"
+  elif [[ "$allow_install" -eq 1 && "$install_hosts" -eq 1 ]]; then
     echo "Install:      pip from pypi.org into work/.toolchain (inside the sandbox); no root, no system packages"
   elif [[ "$allow_install" -eq 1 ]]; then
     echo "Install:      pip into work/.toolchain, but pypi.org is NOT on the egress allowlist (--no-pypi): the machinery runs and the network refuses it"
@@ -3440,6 +3597,29 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     echo "Case:         ${case_id:-—} · examiner ${examiner:-—}"
   fi
 
+  # The tools each Pi is given, known before a prepared run returns: a
+  # prepared VM run writes them into vm-spec.json.
+  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,thread_open,thread_join,inputs,name,record,ledger,done"
+  # Pi's --tools is an allowlist by name, so a tool the extension registers is
+  # invisible until it is named here. The skill tool exists only when the run
+  # carries packs.
+  [[ -n "$pack_dirs" ]] && PI_TOOLS+=",skill"
+  # Seeded tools by name, when forging is off: with forging on the extension
+  # enforces the list itself and --tools is dropped.
+  if [[ "$forging" -eq 0 && -d "$sandbox/tools" ]]; then
+    local _tm _tn
+    for _tm in "$sandbox"/tools/*/manifest.json; do
+      [[ -f "$_tm" ]] || continue
+      _tn="$(jq -r '.name // empty' "$_tm" 2>/dev/null || true)"
+      [[ "$_tn" =~ ^[a-z][a-z0-9_]{2,31}$ ]] && PI_TOOLS+=",$_tn"
+    done
+  fi
+  if [[ "$playwright" -eq 1 ]]; then
+    PI_TOOLS+=",playwright,browser_check"
+  fi
+  if [[ "$self_compact" -eq 1 ]]; then
+    PI_TOOLS+=",self_compact"
+  fi
   if [[ "$start_agents" -eq 0 ]]; then
     # Nothing will talk to the collector, the gate or the broker until a real
     # start, which starts its own; left running they outlived every prepared
@@ -3517,27 +3697,6 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # this process tree. `--key-from-env` is for hosts with no persistent home
   # (cloud sandboxes, CI), where the key has to travel as an env var and is
   # briefly visible in `ps` to this user.
-  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,thread_open,thread_join,inputs,name,record,ledger,done"
-  # Pi's --tools is an allowlist by name, so a tool the extension registers is
-  # invisible until it is named here. The skill tool exists only when the run
-  # carries packs.
-  [[ -n "$pack_dirs" ]] && PI_TOOLS+=",skill"
-  # Seeded tools by name, when forging is off: with forging on the extension
-  # enforces the list itself and --tools is dropped.
-  if [[ "$forging" -eq 0 && -d "$sandbox/tools" ]]; then
-    local _tm _tn
-    for _tm in "$sandbox"/tools/*/manifest.json; do
-      [[ -f "$_tm" ]] || continue
-      _tn="$(jq -r '.name // empty' "$_tm" 2>/dev/null || true)"
-      [[ "$_tn" =~ ^[a-z][a-z0-9_]{2,31}$ ]] && PI_TOOLS+=",$_tn"
-    done
-  fi
-  if [[ "$playwright" -eq 1 ]]; then
-    PI_TOOLS+=",playwright,browser_check"
-  fi
-  if [[ "$self_compact" -eq 1 ]]; then
-    PI_TOOLS+=",self_compact"
-  fi
   local provider_env=()
   provider_env+=(${extra_env[@]+"${extra_env[@]}"})
   # Where the registry is, so the finish line `done` runs in a pane reads the
@@ -3714,15 +3873,23 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
         if models_json_declares_key "$models_json" "${one_model%%/*}" &&
            ! models_json_has_key "$models_json" "${one_model%%/*}"; then
           echo
-          echo "Note: $models_json gives '${one_model%%/*}' an apiKey that interpolates an"
-          echo "environment variable which is unset here. Export it, pass it with --env, or"
-          echo "put a literal key there."
+          if [[ "$isolation" == "microvm" ]]; then
+            echo "Note: $models_json gives '${one_model%%/*}' an apiKey that interpolates an"
+            echo "environment variable which is unset here. In a microVM run the key has to be"
+            echo "a literal there or in Pi's store: --env and --key-from-env are refused."
+          else
+            echo "Note: $models_json gives '${one_model%%/*}' an apiKey that interpolates an"
+            echo "environment variable which is unset here. Export it, pass it with --env, or"
+            echo "put a literal key there."
+          fi
         fi
-        echo
-        echo "On a host with no persistent home, export the key and pass it through:"
-        echo
-        echo "  export DEEPSEEK_API_KEY=..."
-        echo "  scripts/swarm.sh start --key-from-env ..."
+        if [[ "$isolation" != "microvm" ]]; then
+          echo
+          echo "On a host with no persistent home, export the key and pass it through:"
+          echo
+          echo "  export DEEPSEEK_API_KEY=..."
+          echo "  scripts/swarm.sh start --key-from-env ..."
+        fi
       } >&2
       exit 1
     fi
@@ -4209,7 +4376,7 @@ provider_hosts_for_model() {
 # The base URL models.json gives a provider, built-in or not: Pi takes it over
 # its own, so a proxy in front of a cloud provider is where the calls go.
 models_json_base_url() {
-  local store="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/models.json"
+  local store="$(pi_agent_dir)/models.json"
   [[ -f "$store" ]] && command -v jq >/dev/null 2>&1 || return 0
   jq -r --arg p "${1%%/*}" '.providers[$p].baseUrl // empty' "$store" 2>/dev/null || true
 }
@@ -4231,7 +4398,7 @@ provider_known_hosts() {
       # block of the provider's entry in its credential store; look in the
       # same places, in the same order. Empty means "pass --allow-host".
       local base="${AZURE_OPENAI_BASE_URL:-}" name="${AZURE_OPENAI_RESOURCE_NAME:-}" store
-      store="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/auth.json"
+      store="$(pi_agent_dir)/auth.json"
       if [[ -z "$base" && -z "$name" && -f "$store" ]] && command -v jq >/dev/null 2>&1; then
         base="$(jq -r '."azure-openai-responses".env.AZURE_OPENAI_BASE_URL // empty' "$store" 2>/dev/null || true)"
         name="$(jq -r '."azure-openai-responses".env.AZURE_OPENAI_RESOURCE_NAME // empty' "$store" 2>/dev/null || true)"
@@ -4277,7 +4444,7 @@ provider_base_url() {
     llama.cpp) printf '%s\n' "${LLAMA_BASE_URL:-http://127.0.0.1:8080}" ;;
     openai|deepseek|xai|google|anthropic|openai-codex|openrouter|azure-openai-responses) echo "" ;;
     *)
-      local store="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/models.json"
+      local store="$(pi_agent_dir)/models.json"
       if [[ -f "$store" ]] && command -v jq >/dev/null 2>&1; then
         jq -r --arg p "$provider" '.providers[$p].baseUrl // empty' "$store" 2>/dev/null || true
       fi
@@ -4317,8 +4484,12 @@ allow_entry_of_url() {
   if [[ -z "$port" ]]; then
     if [[ "$scheme" == "http" ]]; then port=80; else port=443; fi
   fi
+  # An IPv6 address with a port is written in brackets, the one form the
+  # allowlist reads it in ([::1]:8000, not ::1:8000).
+  local shown="$host"
+  [[ "$host" == *:* ]] && shown="[$host]"
   if host_is_local "$host" || [[ "$port" != "443" ]]; then
-    printf '%s:%s\n' "$host" "$port"
+    printf '%s:%s\n' "$shown" "$port"
   else
     printf '%s\n' "$host"
   fi
@@ -4333,7 +4504,7 @@ host_is_local() {
   h="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
   case "$h" in
     localhost|localhost.localdomain|*.localhost) return 0 ;;
-    ::1|0:0:0:0:0:0:0:1) return 0 ;;
+    ::1|0:0:0:0:0:0:0:1|0.0.0.0|::) return 0 ;;
     127.*|10.*|192.168.*|169.254.*) return 0 ;;
     172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
     fe80:*|f[cd][0-9a-f][0-9a-f]:*) return 0 ;;
@@ -4362,7 +4533,7 @@ model_is_metered() {
     llama.cpp) return 1 ;;
     openai|deepseek|xai|google|anthropic|openai-codex|openrouter|azure-openai-responses) return 0 ;;
   esac
-  local store="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/models.json"
+  local store="$(pi_agent_dir)/models.json"
   [[ -f "$store" ]] || return 0
   python3 - "$store" "$provider" "$id" <<'PY'
 import json, sys
@@ -4492,16 +4663,21 @@ PY
 # Where each model's traffic goes, for the record: whatever an agent reads is
 # sent to its model's provider, and the report says so in the custody
 # section. A model served on this machine is marked local.
+# Every model the run's content is sent to — the seats' and the summary
+# model self-compaction hands a context to — with its hosts. The record's
+# "content sent to" line is read from this, and it left the summary model out.
 providers_json() {
-  local one hosts out='[]' is_local
+  local one hosts out='[]' is_local seat
   while IFS= read -r one; do
     [[ -n "$one" ]] || continue
     hosts="$(provider_hosts_for_model "$one")"
     is_local=false
-    if [[ ",${local_models_csv:-}," == *",$one,"* ]]; then is_local=true; fi
-    out="$(jq -c --arg m "$one" --arg h "$hosts" --argjson l "$is_local" \
-      '. + [{model: $m, hosts: ($h | split(",") | map(select(. != ""))), local: $l}]' <<<"$out")"
-  done < <(distinct_models)
+    if [[ ",${local_models_csv:-}," == *",$one,"* ]] || provider_is_local "$one"; then is_local=true; fi
+    seat=true
+    distinct_models | grep -qxF "$one" || seat=false
+    out="$(jq -c --arg m "$one" --arg h "$hosts" --argjson l "$is_local" --argjson seat "$seat" \
+      '. + [{model: $m, hosts: ($h | split(",") | map(select(. != ""))), local: $l} + (if $seat then {} else {role: "summary"} end)]' <<<"$out")"
+  done < <(credential_models)
   printf '%s\n' "$out"
 }
 
@@ -4984,12 +5160,16 @@ vm_arch() {
 # SWARM_IMAGES_LOCK (the pro edition's prebuilt images), else
 # images/images.lock.json. Without a lock entry, the local build of that
 # profile (images/README.md).
-vm_default_image() { # <pack dirs, one per line> [playwright 0|1]
+vm_default_image() { # <pack dirs, one per line> [playwright 0|1]  (returns 1 on a lock that pins nothing)
   local ids=() d profile ref="" lock="${SWARM_IMAGES_LOCK:-$ROOT/images/images.lock.json}"
+  # Each pack by its directory, so an installed pack (a pro pack, say) is
+  # matched by what it names rather than falling to `full`; and the seeded
+  # tools' own programs, so a library tool that needs one gets an image
+  # that has it.
   while read -r d; do
-    [[ -n "$d" ]] && ids+=("$(basename "$d")")
+    [[ -n "$d" ]] && ids+=("$d")
   done <<< "$1"
-  profile="$(python3 "$ROOT/images/recipe.py" profile-for ${ids[@]+"${ids[@]}"} 2>/dev/null || echo base)"
+  profile="$(python3 "$ROOT/images/recipe.py" profile-for ${ids[@]+"${ids[@]}"} ${tools_from:+--tools-from "$tools_from"} 2>/dev/null || echo base)"
   # The browser tools need a browser: the web profile is the base with Chromium.
   if [[ "${2:-0}" -eq 1 ]]; then
     if [[ "$profile" == "base" ]]; then
@@ -4999,6 +5179,12 @@ vm_default_image() { # <pack dirs, one per line> [playwright 0|1]
     fi
   fi
   if [[ -f "$lock" ]]; then
+    # A lock pins by digest or it pins nothing: a tag in it would boot
+    # whatever the tag points at today.
+    if ! python3 "$ROOT/images/recipe.py" check-lock "$lock" >&2; then
+      echo "BLOCKER: $lock pins an image by something other than its digest (name@sha256:<64 hex>)." >&2
+      return 1
+    fi
     ref="$(jq -r --arg p "$profile" --arg a "$(vm_arch)" '.images[$p][$a] // empty' "$lock" 2>/dev/null || true)"
   fi
   printf '%s\n' "${ref:-dfirswarm-$profile:dev-$(vm_arch)}"
@@ -5080,25 +5266,37 @@ hub_send() { # <admin socket> <json>
 # harness's voice in each pane. Tokens reach it the way they reach the
 # collector — on stdin, from the environment, never on argv.
 start_vm_hub() { # <sandbox> <hub dir> <run id> <collector socket> <agent ids...>
-  local sandbox="$1" dir="$2" run="$3" collector="$4"
+  local sandbox="$1" dir="$2" run="$3" collector="$4" script
   shift 4
+  # The frozen host copy when the kickoff made one (freeze_harness).
+  script="$ROOT/scripts/vm-hub.ts"
+  [[ -f "$dir/host/scripts/vm-hub.ts" ]] && script="$dir/host/scripts/vm-hub.ts"
   local roster input
   roster="$(printf '%s\n' "$@" | jq -R . | jq -c -s .)"
   input="$(SWARM_TOKENS="$TRACE_TOKENS_JSON" SWARM_ROSTER="$roster" SWARM_COLLECTOR="$collector" jq -nc \
     '{agents: ($ENV.SWARM_ROSTER | fromjson),
       tokens: ($ENV.SWARM_TOKENS | fromjson | to_entries | map({key: .value, value: .key}) | from_entries),
       collector: $ENV.SWARM_COLLECTOR}')"
-  local hub_args=(--registry "$REGISTRY")
+  # Once the hub has put the VMs away and taken custody, it runs the
+  # operator's stop for what is left (the panes, the collector, the keep-awake,
+  # an attached image), with this runs directory.
+  local hub_args=(--registry "$REGISTRY" --stop-cmd "$ROOT/scripts/swarm.sh")
   [[ "${forging:-0}" -eq 1 ]] && hub_args+=(--forging)
   [[ "${vm_snapshot:-1}" -eq 1 ]] || hub_args+=(--no-snapshot)
   # The inbox page bound is read by readInbox, which for a VM runs here.
-  printf '%s' "$input" | SWARM_INBOX_PAGE_CHARS="${inbox_page_chars:-}" detach_exec node --experimental-strip-types --no-warnings "$ROOT/scripts/vm-hub.ts" \
+  printf '%s' "$input" | SWARM_RUNS_DIR="$RUNS_DIR" SWARM_INBOX_PAGE_CHARS="${inbox_page_chars:-}" detach_exec node --experimental-strip-types --no-warnings "$script" \
     "$sandbox" --dir "$dir" --run "$run" "${hub_args[@]}" --quiet >"$sandbox/traces/vm-hub.log" 2>&1 &
-  echo $! > "$sandbox/hub.pid"
+  local hub_pid=$!
+  echo "$hub_pid" > "$sandbox/hub.pid"
   printf '%s\n' "$dir" > "$sandbox/hub.dir"
   local i
   for ((i = 0; i < 100; i++)); do
-    [[ -S "$dir/admin.sock" ]] && return 0
+    if [[ -S "$dir/admin.sock" ]]; then
+      # Its keeper, which brings it back if it dies, until the stop.
+      detach_exec bash "$ROOT/scripts/hub-supervise.sh" "$sandbox" "$dir" "$script" "$hub_pid" >/dev/null 2>&1 </dev/null &
+      echo $! > "$dir/supervisor.pid"
+      return 0
+    fi
     sleep 0.1
   done
   echo "BLOCKER: the VM hub did not come up; see $sandbox/traces/vm-hub.log" >&2
@@ -5122,12 +5320,14 @@ vm_providers_json() {
       port="$(python3 -c 'import sys, urllib.parse; u = urllib.parse.urlsplit(sys.argv[1]); print(u.port or (443 if u.scheme == "https" else 80))' "$(provider_base_url "$model")")"
     elif [[ -f "$auth_file" ]] && [[ "$(jq -r --arg p "$provider" '.[$p].type // empty' "$auth_file" 2>/dev/null)" == "oauth" ]]; then
       kind="oauth"
-      # The guest never refreshes the token (the host minted one for the
-      # run), so the endpoint a refresh would go to is not the VM's to reach.
-      hosts_drop="auth.openai.com platform.claude.com"
     else
       kind="api_key"
     fi
+    # The guest never refreshes a token (the host minted one for the run),
+    # and an API key has no business with the account console: the endpoints
+    # a refresh or a console call would go to are not the VM's to reach, and
+    # its credential is not bound to them.
+    hosts_drop="auth.openai.com platform.claude.com"
     hosts="$(provider_hosts_for_model "$model")"
     if [[ -n "${hosts_drop:-}" ]]; then
       local kept="" one
@@ -5138,16 +5338,48 @@ vm_providers_json() {
       hosts="$kept"
       hosts_drop=""
     fi
-    jq -nc --arg p "$provider" --arg k "$kind" --arg h "$hosts" --arg port "$port" \
-      '{provider: $p, kind: $k, hosts: ($h | split(",") | map(select(. != ""))), port: (if $port == "" then null else ($port | tonumber) end)}'
+    # A local model on the LAN named by a name a VM cannot resolve (mDNS's
+    # .local is not forwarded, and msb refuses a name that resolves to a
+    # private address): resolved here, on the host, and the VM is given the
+    # address — in its allowlist and in its Pi's base URL.
+    local resolved_name="" resolved_ip=""
+    if [[ "$kind" == "local" && -n "$hosts" ]]; then
+      local lan_host
+      lan_host="$(printf '%s' "${hosts%%,*}" | sed -E 's/:[0-9]+$//')"
+      if [[ -n "$lan_host" && "$lan_host" != \[* && ! "$lan_host" =~ ^[0-9.]+$ && "$lan_host" != localhost && "$lan_host" != *.localhost ]]; then
+        resolved_ip="$(python3 -c 'import socket, sys; print(socket.gethostbyname(sys.argv[1]))' "$lan_host" 2>/dev/null || true)"
+        if [[ -n "$resolved_ip" ]]; then
+          resolved_name="$lan_host"
+          hosts="$resolved_ip:$port"
+        fi
+      fi
+    fi
+    jq -nc --arg p "$provider" --arg k "$kind" --arg h "$hosts" --arg port "$port" --arg rn "$resolved_name" --arg ri "$resolved_ip" \
+      '{provider: $p, kind: $k, hosts: ($h | split(",") | map(select(. != ""))), port: (if $port == "" then null else ($port | tonumber) end)} + (if $rn != "" then {resolved: {name: $rn, ip: $ri}} else {} end)'
   done < <(credential_models) | jq -s -c .
 }
 
 # Put a run's VMs away, then its hub: snapshot (unless told not to), stop and
 # remove every VM carrying the run's label. Safe to run twice.
-stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>
-  local sandbox="$1" run="$2" snap="${3:-1}" args=() pid dir out left
+stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when a VM of the run is still there)
+  local sandbox="$1" run="$2" snap="${3:-1}" args=(--registry "$REGISTRY") pid dir out left rc=0
   [[ "$snap" -eq 1 ]] || args+=(--no-snapshot)
+  if dir="$(hub_dir_of "$sandbox")"; then
+    # The keeper first, or it brings back the hub this stop is ending.
+    : > "$dir/.stop"
+    pid="$(cat "$dir/supervisor.pid" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && ps -o command= -p "$pid" 2>/dev/null | grep -q "hub-supervise.sh"; then kill "$pid" 2>/dev/null || true; fi
+    # A hub that is putting the VMs away itself is let finish: a second
+    # finish would only wait for its lock, and custody taken twice at once
+    # writes one verdict over the other.
+    local waited=0
+    while [[ "$(jq -r 'if .finished == true and (.finish_done // false) == false then "busy" else "" end' "$dir/status.json" 2>/dev/null)" == "busy" ]] \
+      && hub_pid_ours "$sandbox" "$(cat "$sandbox/hub.pid" 2>/dev/null)" && (( waited < ${SWARM_STOP_HUB_WAIT_SEC:-1800} )); do
+      (( waited % 30 == 0 )) && echo "              the hub is putting the VMs away itself; waiting for it (${waited}s)"
+      sleep 5
+      waited=$((waited + 5))
+    done
+  fi
   # Every VM's outcome is said, and a VM still there afterwards is said
   # loudly: a run whose VMs are up is not stopped, whatever the record says.
   out="$(vm_cli finish --run "$run" --sandbox "$sandbox" ${args[@]+"${args[@]}"} 2>>"$sandbox/traces/vm-finish.log")" || true
@@ -5160,10 +5392,12 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>
   local listed
   if ! listed="$(vm_cli list --run "$run" 2>/dev/null)"; then
     echo "WARN: could not list run $run's VMs afterwards ($(jq -r '.error // "no answer"' <<<"$listed" 2>/dev/null)); check with \`swarm.sh status $run\`." >&2
+    rc=3
   fi
   left="$(jq -r '.vms[]?.name' <<<"$listed" 2>/dev/null || true)"
   if [[ -n "$left" ]]; then
     echo "WARN: these VMs of run $run are still there: $(tr '\n' ' ' <<<"$left")— see $sandbox/traces/vm-finish.log; \`swarm.sh reap $run\` removes them once you have looked." >&2
+    rc=3
   fi
   if [[ -f "$sandbox/hub.pid" ]]; then
     pid="$(cat "$sandbox/hub.pid" 2>/dev/null || true)"
@@ -5172,11 +5406,12 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>
   fi
   if dir="$(hub_dir_of "$sandbox")"; then
     # The hub's own lines the collector did not take stay with the run.
-    [[ -s "$dir/hub-spill.jsonl" ]] && cp "$dir/hub-spill.jsonl" "$sandbox/traces/hub-spill.jsonl" 2>/dev/null
+    [[ -f "$dir/hub-spill.jsonl" && ! -L "$dir/hub-spill.jsonl" && -s "$dir/hub-spill.jsonl" ]] && cp -P "$dir/hub-spill.jsonl" "$sandbox/traces/hub-spill.jsonl" 2>/dev/null
     # Only a directory this run could have made.
     [[ "$dir" == */dfs-"$run".* ]] && rm -rf "$dir"
   fi
   rm -f "$sandbox/hub.dir"
+  return "$rc"
 }
 
 # The VM specification of this run, as the VM manager reads it: every mount,
@@ -5261,6 +5496,13 @@ vm_build_spec() { # <hub dir> <out file>
   [[ "$quarantine" -eq 1 ]] && add_env SWARM_QUARANTINE 1
   [[ "$playwright" -eq 1 ]] && add_env BROWSER_CHECK_EXECUTABLE /usr/bin/chromium
   [[ "$local_only" -eq 1 ]] && add_env PI_OFFLINE 1
+  # Pi's built-in llama.cpp provider takes its server and key from the
+  # environment, not from a store the VM is given: the server as the guest
+  # reaches it (through the host gateway), and a stand-in key it ignores.
+  if distinct_models | grep -q '^llama\.cpp/'; then
+    add_env LLAMA_BASE_URL "$(provider_base_url "llama.cpp/x" | sed -E 's#://(127\.[0-9.]+|localhost|0\.0\.0\.0|\[::1\])#://host.microsandbox.internal#')"
+    add_env LLAMA_API_KEY "local"
+  fi
   if [[ "$allow_install" -eq 1 ]]; then
     # pip installs into the VM's own disk: the launcher points the image's
     # pip at /opt/dfir/agent and puts it on that seat's import path. Nothing
@@ -5336,10 +5578,11 @@ launch_vm_agents() {
   mkdir -p "$hub_dir/runs"
   jq -n --argjson r "$rec" '{runs: [$r]}' > "$hub_dir/runs/registry.json"
   cp "$kickoff" "$sandbox/.kickoff"
+  # Frozen first: the hub then runs from the host copy, as the VMs do from theirs.
+  freeze_harness "$hub_dir"
+  echo "Harness:      frozen for this run at $(cat "$hub_dir/harness/COMMIT") (the checkout can change; these VMs and the hub will not see it)"
   start_vm_hub "$sandbox" "$hub_dir" "$swarm_id" "$trace_socket" "${agent_ids[@]}" || { stop_vm_run "$sandbox" "$swarm_id" 0; exit 1; }
   local spec="$hub_dir/vm-spec.json"
-  freeze_harness "$hub_dir"
-  echo "Harness:      frozen for this run at $(cat "$hub_dir/harness/COMMIT") (the checkout can change; these VMs will not see it)"
   vm_build_spec "$hub_dir" "$spec"
 
   echo "VMs:          creating ${n} on $vm_image (${vm_cpus} vCPU, ${vm_memory} MiB memory, ${vm_disk} MiB disk each)..."
@@ -5510,7 +5753,7 @@ cmd_netcheck() {
   if [[ "$isolation" == "microvm" ]]; then
     # The VMs' own policy, built the way a run builds it, in a VM of its own
     # that is gone when the check is.
-    [[ -n "$image" ]] || image="$(vm_default_image "" 0)"
+    [[ -n "$image" ]] || image="$(vm_default_image "" 0)" || exit 2
     [[ -n "$hosts" ]] || hosts="api.deepseek.com,api.anthropic.com"
     echo "netcheck in a microVM ($image): $hosts"
     local args=() one
@@ -5557,11 +5800,14 @@ cmd_netcheck() {
 }
 
 cmd_stop() {
-  local id="${1:-}" no_custody=0 custody_timeout="${SWARM_CUSTODY_TIMEOUT:-14400}"
+  local id="${1:-}" no_custody=0 custody_timeout="${SWARM_CUSTODY_TIMEOUT:-14400}" after_hub=0 vms_left=0
   shift || true
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-custody) no_custody=1; shift ;;
+      # The hub's own stop, once it has put the VMs away and taken custody:
+      # what is left is cleared, and the run keeps the state the hub gave it.
+      --after-hub) after_hub=1; no_custody=1; shift ;;
       --custody-timeout) custody_timeout="$2"; shift 2 ;;
       *) echo "stop: unknown argument $1" >&2; exit 2 ;;
     esac
@@ -5599,7 +5845,7 @@ cmd_stop() {
     snap="$(jq -r 'if .isolation.snapshot == false then 0 else 1 end' <<<"$rec")"
     echo "VMs:          stopping$( [[ "$snap" -eq 1 ]] && printf ', each disk kept as a snapshot beside the run (a few minutes a VM)')..."
     stop_step="putting the VMs away"
-    stop_vm_run "$sandbox" "$id" "$snap"
+    stop_vm_run "$sandbox" "$id" "$snap" || vms_left=1
   fi
   stop_step="stopping the run's daemons"
   stop_sandbox_daemons "$sandbox" keep-record
@@ -5616,7 +5862,10 @@ cmd_stop() {
     echo "Custody:      re-hashing the evidence and sealing the run (up to ${custody_timeout}s; --no-custody skips it)..."
     stop_step="taking custody"
     local custody_rc=0
-    node --experimental-strip-types --no-warnings "$ROOT/scripts/custody.ts" "$sandbox" --run "$id" --timeout "$custody_timeout" >/dev/null 2>"$sandbox/traces/custody.log" || custody_rc=$?
+    # Its own deadline, a hard one past that inside it, and this one past
+    # both: nothing custody reads can hold the stop. Its progress goes to the
+    # log; no input is given it.
+    with_timeout "$((custody_timeout + 300))" node --experimental-strip-types --no-warnings "$ROOT/scripts/custody.ts" "$sandbox" --run "$id" --timeout "$custody_timeout" >/dev/null 2>"$sandbox/traces/custody.log" </dev/null || custody_rc=$?
     if [[ -f "$sandbox/custody.json" ]]; then
       echo "Custody:      $(jq -r '.summary' "$sandbox/custody.json" 2>/dev/null)"
     else
@@ -5630,7 +5879,17 @@ cmd_stop() {
   stop_step="detaching the evidence image"
   [[ -n "$sandbox" ]] && detach_inputs_image "$sandbox"
   trap - INT TERM
-  if [[ -n "$sandbox" && -f "$sandbox/done/SWARM_DONE" ]]; then
+  local was
+  was="$(jq -r '.state // empty' <<<"$rec")"
+  if [[ "$vms_left" -eq 1 ]]; then
+    # A run whose VMs are still up is not stopped, and its record says so.
+    registry_update_state "$id" "stop_incomplete"
+    echo "NOT STOPPED: $id still has VMs up (above); the record says stop_incomplete. Look, then run stop again or \`swarm.sh reap $id\`." >&2
+    exit 3
+  elif [[ "$after_hub" -eq 1 && ( "$was" == "finished" || "$was" == "finish_failed" ) ]]; then
+    registry_update_state "$id" "$was"
+    echo "Cleared $id after the hub finished it (recorded as $was)"
+  elif [[ -n "$sandbox" && -f "$sandbox/done/SWARM_DONE" ]]; then
     registry_update_state "$id" "done"
     echo "Stopped $id (the sentinel was present; recorded as done)"
   else
@@ -5872,6 +6131,16 @@ copy_tree() {
   done < <(find "$src" -type f 2>/dev/null | sort)
 }
 
+# A file copied into a package only as what it is: a regular file, never
+# through a link. A seat can leave a link where a file of the run is expected
+# (its own spill under tool-output/, anything in a host-mode pane's reach),
+# and `cp` follows it: the operator's auth.json would travel in the handover.
+pkg_copy() { # <src> <dst> [non-empty]
+  [[ -f "$1" && ! -L "$1" ]] || return 0
+  [[ "${3:-}" == "non-empty" && ! -s "$1" ]] && return 0
+  cp -P "$1" "$2"
+}
+
 cmd_package() {
   local id="${1:-}"
   [[ -n "$id" ]] || { echo "package requires <id>" >&2; exit 2; }
@@ -5956,20 +6225,29 @@ PY
   # B12: the tools a run forged or was seeded with are part of how the result
   # was reached, so the package keeps them with their manifests and hashes.
   copy_tree "$sandbox/tools" "$out/tools"
-  [[ -f "$sandbox/ledger/ledger.md" ]] && cp "$sandbox/ledger/ledger.md" "$out/ledger.md"
-  [[ -f "$sandbox/ledger/entries.jsonl" ]] && cp "$sandbox/ledger/entries.jsonl" "$out/ledger.jsonl"
+  pkg_copy "$sandbox/ledger/ledger.md" "$out/ledger.md"
+  pkg_copy "$sandbox/ledger/entries.jsonl" "$out/ledger.jsonl"
   for f in inputs.json toolbox.json toolchain.json team.json budget.json layout.json netguard.allow SWARM.md custody.json; do
-    [[ -f "$sandbox/$f" ]] && cp "$sandbox/$f" "$out/"
+    pkg_copy "$sandbox/$f" "$out/$f"
   done
   # What each agent's VM was, as the VM manager recorded it (image digest,
-  # mounts, network, the secrets' names and hosts, the kept disk's sha256).
+  # mounts, network, the secrets' names and hosts, the kept disk's sha256),
+  # and the VM's own logs kept beside its disk (the runtime's, where msb
+  # writes a secret it stopped; the guest kernel's): a recipient checks the
+  # custody verdict's VM lines against them.
   if [[ -d "$sandbox/vm" ]]; then
     mkdir -p "$out/vm"
-    cp "$sandbox"/vm/*.json "$out/vm/" 2>/dev/null || true
+    for f in "$sandbox"/vm/*.json; do pkg_copy "$f" "$out/vm/$(basename "$f")"; done
+    local logs
+    for logs in "$sandbox.vm-snapshots"/*.logs; do
+      [[ -d "$logs" && ! -L "$logs" ]] || continue
+      mkdir -p "$out/vm/logs/$(basename "$logs" .logs)"
+      for f in "$logs"/*; do pkg_copy "$f" "$out/vm/logs/$(basename "$logs" .logs)/$(basename "$f")"; done
+    done
   fi
-  [[ -f "$sandbox/catalog/README.md" ]] && cp "$sandbox/catalog/README.md" "$out/catalog-README.md"
-  [[ -f "$sandbox/catalog.json" ]] && cp "$sandbox/catalog.json" "$out/catalog.json"
-  cp "$sandbox/traces/events.jsonl" "$out/trace/events.jsonl"
+  pkg_copy "$sandbox/catalog/README.md" "$out/catalog-README.md"
+  pkg_copy "$sandbox/catalog.json" "$out/catalog.json"
+  pkg_copy "$sandbox/traces/events.jsonl" "$out/trace/events.jsonl"
   # What a recipient needs to check the record without this machine: the
   # anchors the chain and the manifest were pinned to, every trace line that
   # never made the chain (spilled, per agent and the hub's), every whole
@@ -5978,26 +6256,26 @@ PY
   for anc in "$sandbox.trace-anchor.json" "$sandbox.custody-anchor.json"; do
     [[ -f "$anc" ]] && cp "$anc" "$out/trace/$(basename "$anc" | sed "s/^$(basename "$sandbox")\.//")"
   done
-  [[ -s "$sandbox/work/.trace-spill.jsonl" ]] && cp "$sandbox/work/.trace-spill.jsonl" "$out/trace/spill-host.jsonl"
-  [[ -s "$sandbox/traces/hub-spill.jsonl" ]] && cp "$sandbox/traces/hub-spill.jsonl" "$out/trace/spill-hub.jsonl"
-  [[ -s "$sandbox/traces/system-spill.jsonl" ]] && cp "$sandbox/traces/system-spill.jsonl" "$out/trace/spill-system.jsonl"
+  pkg_copy "$sandbox/work/.trace-spill.jsonl" "$out/trace/spill-host.jsonl" non-empty
+  pkg_copy "$sandbox/traces/hub-spill.jsonl" "$out/trace/spill-hub.jsonl" non-empty
+  pkg_copy "$sandbox/traces/system-spill.jsonl" "$out/trace/spill-system.jsonl" non-empty
   local sp
   for sp in "$sandbox"/tool-output/*/trace-spill.jsonl; do
-    [[ -s "$sp" ]] && cp "$sp" "$out/trace/spill-$(basename "$(dirname "$sp")").jsonl"
+    pkg_copy "$sp" "$out/trace/spill-$(basename "$(dirname "$sp")").jsonl" non-empty
   done
   if [[ -d "$sandbox/tool-output" ]]; then
     local to_rel
     while IFS= read -r -d '' to_rel; do
       [[ "$(basename "$to_rel")" == "trace-spill.jsonl" ]] && continue
       mkdir -p "$out/$(dirname "$to_rel")"
-      cp "$sandbox/$to_rel" "$out/$to_rel"
+      pkg_copy "$sandbox/$to_rel" "$out/$to_rel"
     done < <(cd "$sandbox" && find tool-output -type f -print0 2>/dev/null)
   fi
-  for f in "$sandbox"/custody.*.json; do [[ -f "$f" ]] && { mkdir -p "$out/custody-history"; cp "$f" "$out/custody-history/"; }; done
+  for f in "$sandbox"/custody.*.json; do [[ -f "$f" && ! -L "$f" ]] && { mkdir -p "$out/custody-history"; pkg_copy "$f" "$out/custody-history/$(basename "$f")"; }; done
   local t
   for t in "$sandbox"/threads/*/; do
-    [[ -d "$t" ]] || continue
-    { for f in "$t"*.md; do [[ -f "$f" ]] && { printf '\n\n---\n\n'; cat "$f"; }; done; } > "$out/board/$(basename "$t").md"
+    [[ -d "$t" && ! -L "${t%/}" ]] || continue
+    { for f in "$t"*.md; do [[ -f "$f" && ! -L "$f" ]] && { printf '\n\n---\n\n'; cat "$f"; }; done; } > "$out/board/$(basename "$t").md"
   done
   find "$out" -type d -empty -delete 2>/dev/null || true
   ( cd "$out" && find . -type f ! -name MANIFEST.txt | sort | while read -r f; do

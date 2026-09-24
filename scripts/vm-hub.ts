@@ -50,8 +50,8 @@
  * VMs away, records the run as finished and takes custody.
  *
  *   node --experimental-strip-types scripts/vm-hub.ts <sandbox> --dir DIR
- *        [--run ID] [--vm-cli PATH] [--registry FILE] [--settle-ms N]
- *        [--forging] [--no-snapshot] [--quiet]
+ *        [--run ID] [--vm-cli PATH] [--registry FILE] [--stop-cmd SWARM_SH]
+ *        [--settle-ms N] [--forging] [--no-snapshot] [--quiet]
  *   node --experimental-strip-types scripts/vm-hub.ts --resume DIR
  *
  * One line of JSON on stdin: `{agents: [...], tokens: {<agent>: <token>},
@@ -60,7 +60,7 @@
  * directory (0700, on the host, in no VM) so that `--resume` can bring the
  * hub back after a crash with the same tokens and the same clock.
  */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
@@ -148,6 +148,8 @@ export type HubConfig = {
   snapshot?: boolean;
   /** How long after a seat's done its VM is put away (tests shorten it). */
   seatLeaveMs?: number;
+  /** The operator's swarm.sh: run as `stop <run> --after-hub` once the hub has finished the run. */
+  stopCmd?: string;
 };
 
 type AgentState = { state: string; detail?: string; since: string; connected: boolean; last_seen?: string };
@@ -157,6 +159,7 @@ type HubState = {
   stop_steer?: { reason: P.StopReason; at: number } | null;
   done_since?: number;
   finished?: boolean;
+  finish_done?: boolean;
   told?: string[];
   seat_steer?: Record<string, number>;
 };
@@ -361,6 +364,7 @@ export function boardTable(hub: {
       if (!hub.forging) throw new Error("tool forging is off for this run (--allow-tool-forging); the hub does not forge");
       return P.forgeTool(as(who), a[1]);
     },
+    forgedToolSeal: (_who, a) => P.forgedToolSeal(S, String(a[1] ?? "")),
     guardWrite: (who, a) => P.guardWrite(as(who), String(a[1] ?? "")),
     heldBy: (who, a) => P.heldBy(as(who), String(a[1] ?? "")),
     listClaims: () => P.listClaims(S),
@@ -486,6 +490,8 @@ export class Hub {
   private seatSteer = new Map<string, number>();
   private doneSince = 0;
   private finished = false;
+  /** The finish is over: the VMs put away (or not) and custody taken. */
+  private finishDone = false;
   private finishing: Promise<void> | null = null;
 
   constructor(cfg: HubConfig) {
@@ -565,6 +571,7 @@ export class Hub {
       this.stopSteer = raw.stop_steer ?? null;
       this.doneSince = raw.done_since ?? 0;
       this.finished = raw.finished === true;
+      this.finishDone = raw.finish_done === true;
       for (const t of raw.told ?? []) this.told.add(t);
       for (const [agent, at] of Object.entries(raw.seat_steer ?? {})) this.seatSteer.set(agent, at);
     } catch {
@@ -577,6 +584,7 @@ export class Hub {
       stop_steer: this.stopSteer,
       done_since: this.doneSince,
       finished: this.finished,
+      finish_done: this.finishDone,
       told: [...this.told],
       seat_steer: Object.fromEntries(this.seatSteer),
     };
@@ -1102,7 +1110,7 @@ export class Hub {
   private writeStatus(): void {
     try {
       const tmp = `${this.statusFile()}.tmp`;
-      writeFileSync(tmp, `${JSON.stringify({ at: new Date().toISOString(), agents: this.statusSnapshot(), finished: this.finished }, null, 2)}\n`);
+      writeFileSync(tmp, `${JSON.stringify({ at: new Date().toISOString(), pid: process.pid, agents: this.statusSnapshot(), finished: this.finished, finish_done: this.finishDone }, null, 2)}\n`);
       renameSync(tmp, this.statusFile());
     } catch {
       // the admin socket answers the same question
@@ -1220,6 +1228,13 @@ export class Hub {
       return;
     }
     const allOut = this.roster.every((a) => existsSync(P.agentDonePath(S, a)) || existsSync(P.agentDeadPath(S, a)));
+    if (this.finished && !this.finishDone && !this.finishing) {
+      // A hub that died while finishing the run finishes it now: putting
+      // the VMs away again skips what is already away, and custody is taken.
+      this.finishing = this.finishVms(allOut);
+      await this.finishing;
+      return;
+    }
     if (this.finished || (!allOut && now - this.doneSince < P.STOP_GRACE_MS)) return;
     this.finished = true;
     this.saveState();
@@ -1332,7 +1347,31 @@ export class Hub {
       await this.event("custody", { via: "hub" }, { ok: c.ok, ...(c.ok ? {} : { error: c.out }) });
       this.copySpill();
     }
+    this.finishDone = true;
+    this.saveState();
     this.writeStatus();
+    this.clearUp();
+  }
+
+  /**
+   * What the run still holds once the hub has finished it — the panes, the
+   * collector, the keep-awake, an attached evidence image, this hub — is the
+   * operator's stop's to clear: it is run, detached, with custody already
+   * taken, and the run keeps the state the hub recorded.
+   */
+  private clearUp(): void {
+    if (!this.cfg.stopCmd || !this.cfg.run || !existsSync(this.cfg.stopCmd)) return;
+    try {
+      const child = spawn("bash", [this.cfg.stopCmd, "stop", this.cfg.run, "--after-hub"], {
+        detached: true,
+        stdio: ["ignore", "ignore", "ignore"],
+        env: { ...process.env, ...(this.cfg.registry ? { SWARM_RUNS_DIR: dirname(resolve(this.cfg.registry)) } : {}) },
+      });
+      child.unref();
+      void this.event("hub_clear_up", { via: "hub" }, { ok: true, pid: child.pid ?? null });
+    } catch (err) {
+      this.log(`clear-up failed: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   /**
@@ -1419,6 +1458,7 @@ type HubInput = {
   run?: string;
   vmCli?: string;
   registry?: string;
+  stopCmd?: string;
   settleMs?: number;
   forging: boolean;
   snapshot: boolean;
@@ -1455,7 +1495,7 @@ async function main(): Promise<void> {
     const sandbox = resolve(args[0] ?? "");
     const dir = opt("--dir");
     if (!args[0] || !existsSync(sandbox) || !dir) {
-      console.error("vm-hub: usage: vm-hub.ts <sandbox> --dir DIR [--run ID] [--vm-cli PATH] [--registry FILE] [--settle-ms N] [--forging] [--no-snapshot] [--quiet]  (stdin: {agents, tokens, collector}) | --resume DIR");
+      console.error("vm-hub: usage: vm-hub.ts <sandbox> --dir DIR [--run ID] [--vm-cli PATH] [--registry FILE] [--stop-cmd SWARM_SH] [--settle-ms N] [--forging] [--no-snapshot] [--quiet]  (stdin: {agents, tokens, collector}) | --resume DIR");
       process.exit(2);
     }
     let parsed: { agents?: unknown; tokens?: unknown; collector?: unknown };
@@ -1475,6 +1515,7 @@ async function main(): Promise<void> {
       run: opt("--run"),
       vmCli: opt("--vm-cli") ?? join(dirname(fileURLToPath(import.meta.url)), "vm.ts"),
       registry: opt("--registry"),
+      stopCmd: opt("--stop-cmd"),
       settleMs: settle !== undefined ? Number(settle) : undefined,
       forging: args.includes("--forging"),
       snapshot: !args.includes("--no-snapshot"),
@@ -1495,6 +1536,28 @@ async function main(): Promise<void> {
   } catch {
     // the collector may not be there; the forward says so line by line
   }
+  // One hub per run: a second (a watchdog and the keeper both restarting a
+  // hub that died) would take the first's sockets and run a second stop clock.
+  const lockFile = join(input.dir, "hub.lock");
+  try {
+    const other = Number.parseInt(readFileSync(lockFile, "utf8"), 10);
+    if (Number.isInteger(other) && other > 0 && other !== process.pid) {
+      let alive = false;
+      try {
+        process.kill(other, 0);
+        alive = true;
+      } catch {
+        alive = false;
+      }
+      if (alive) {
+        console.error(`vm-hub: a hub for ${input.dir} is already running (pid ${other}); not starting a second`);
+        process.exit(0);
+      }
+    }
+  } catch {
+    // no lock yet
+  }
+  writeFileSync(lockFile, `${process.pid}\n`, { mode: 0o600 });
   const hub = new Hub(input);
   await hub.start();
   console.error(`vm-hub: up${resumeDir ? " (resumed)" : ""}, ${input.agents.length} agent socket(s) in ${input.dir}`);

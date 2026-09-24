@@ -40,6 +40,7 @@ import {
   EVENTS_REL,
   SENTINEL_REL,
   claimKey,
+  hostTime,
   normalizeBudget,
   readEventLog,
   readInputsManifest,
@@ -618,15 +619,27 @@ export function measuredGuardLine(state: string | undefined): string {
 export function egressRefusedLine(
   denied: Array<[string, number]>,
   logPresent: boolean,
-  run: { netguard?: unknown; isolation?: { mode?: string } } | null | undefined,
+  run: { netguard?: unknown; netguard_mode?: unknown; isolation?: { mode?: string } } | null | undefined,
+  secretViolations: string[] = [],
 ): string {
   if (denied.length) return denied.map(([host, n]) => `${host}${n > 1 ? ` (${n})` : ""}`).join(", ");
   if (logPresent) return "nothing was refused";
   if (run?.isolation?.mode === "microvm") {
-    return "not observable: each agent's microVM refused everything outside its rules, and that refusal leaves no log";
+    // The one refusal msb writes down is a credential's placeholder aimed at
+    // a host it is not bound to; custody read those from each VM's log.
+    const stopped = secretViolations.length
+      ? `; msb stopped ${secretViolations.length} credential placeholder${secretViolations.length === 1 ? "" : "s"} aimed at a host not its own: ${secretViolations.join("; ")}`
+      : "; msb stopped no credential placeholder on its way to another host";
+    if (run.netguard_mode === "microvm-open") return `not observable, and the network was open (--no-netguard): each VM could reach every public host${stopped}`;
+    return `not observable: each agent's microVM refused everything outside its rules, and that refusal leaves no log${stopped}`;
   }
   if (run?.netguard === false) return "not observable: no egress control was running";
   return "not observable: no netguard log was kept";
+}
+
+/** Each placeholder msb stopped, as custody read it from the VMs' logs. */
+export function custodyViolations(custody: { vms?: Array<{ agent?: string; secret_violations?: Array<{ env?: string; host?: string; method?: string; path?: string }> }> | null } | null | undefined): string[] {
+  return (custody?.vms ?? []).flatMap((v) => (v.secret_violations ?? []).map((x) => `${v.agent ?? "?"} ${x.env ?? ""} → ${x.host ?? ""} ${x.method ?? ""} ${x.path ?? ""}`.replace(/\s+/g, " ").trim()));
 }
 
 /**
@@ -643,7 +656,7 @@ export function providersLine(run: { providers?: unknown } | null | undefined): 
   return list
     .map((p) => {
       const where = p.local ? "this machine (local model)" : p.hosts?.length ? p.hosts.join(", ") : "its provider (host not recorded)";
-      return `${p.model ?? "?"} → ${where}`;
+      return `${p.model ?? "?"}${(p as { role?: string }).role === "summary" ? " (the summary model self-compaction hands contexts to)" : ""} → ${where}`;
     })
     .join("; ");
 }
@@ -844,7 +857,7 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   const ledger = await readLedger(sandbox);
   const inputs = await readInputsManifest(sandbox);
   const vmRecords = await readVmRecords(sandbox);
-  const hostCustody = await readJson<{ summary?: string; at?: string; inputs?: unknown; run?: string | null }>(join(sandbox, "custody.json"));
+  const hostCustody = await readJson<{ summary?: string; at?: string; inputs?: unknown; run?: string | null; vms?: Array<{ agent?: string; secret_violations?: Array<{ env?: string; host?: string; method?: string; path?: string }> }> | null }>(join(sandbox, "custody.json"));
   // The manifest says what was copied; the trace says what each pane measured
   // and what the final check found. The console joins them the same way in
   // `inputsView`, and the report must not state a guard the panes did not
@@ -931,7 +944,8 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   const caseId = options.caseId ?? run?.case_id ?? "";
   const examiner = options.examiner ?? run?.examiner ?? "";
   const startedAt = budget?.started_at ?? run?.started_at ?? events[0]?.ts ?? "";
-  const endedAt = sentinel?.at ?? events.at(-1)?.ts ?? "";
+  // The host's clock, where the collector stamped one: a guest's own `ts` is its word.
+  const endedAt = sentinel?.at ?? (events.length ? hostTime(events.at(-1) as { ts: string; recv_ts?: string }) : "");
   const durationMs = startedAt && endedAt ? Date.parse(endedAt) - Date.parse(startedAt) : Number.NaN;
   const generatedAt = options.now ?? new Date().toISOString();
   const unmetered = budget?.metered === false;
@@ -1049,7 +1063,7 @@ ${verdictGroups(findings)}`
     html: `<p>${team.n} peer agent${team.n === 1 ? "" : "s"} shared one sandbox and coordinated through an append-only file board. Nobody planned, nobody was assigned a seat, and no agent could direct another.${anyNamed ? ' The "Calls itself" column is what each one decided to be, in its own words, after reading the goal.' : ""}</p>
 <table><thead><tr><th>Agent</th>${anyNamed ? "<th>Calls itself</th>" : ""}<th>Model</th><th class="num">Spent</th><th class="num">Calls</th><th class="num">Tokens</th>${contextHeaders}</tr></thead><tbody>${teamRows}</tbody></table>
 <p>
-  ${unmetered ? "Unmetered (local models)." : `${escapeHtml(usd(budget?.spent_usd ?? 0))} of a ${escapeHtml(usd(run?.cap_usd ?? budget?.cap_usd ?? 0))} cap`},
+  ${unmetered ? "Unmetered (local models)." : `${escapeHtml(usd(budget?.spent_usd ?? 0))} of a ${escapeHtml(usd(run?.cap_usd ?? budget?.cap_usd ?? 0))} cap${run?.isolation?.mode === "microvm" ? " (as each VM reported its own spend; the host did not meter it)" : ""}`},
   ${(budget?.tokens ?? 0).toLocaleString("en-US")} tokens, ${events.length.toLocaleString("en-US")} tool calls in ${escapeHtml(durationHuman(durationMs))}.
   ${run?.wall_clock_minutes ? `Wall-clock cap ${run.wall_clock_minutes} min.` : ""}
   ${run?.cap_per_agent_usd ? `Per-agent cap ${escapeHtml(usd(run.cap_per_agent_usd))}.` : ""}
@@ -1132,7 +1146,9 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ],
     [
       "Network",
-      vmRecords.length
+      vmRecords.length && (run?.netguard_mode === "microvm-open" || vmRecords.some((r) => r.network?.default === "public"))
+        ? "each agent's VM, OPEN (--no-netguard): every public host; each credential still only to its own host"
+        : vmRecords.length
         ? `each agent's VM, deny by default: ${[...new Set(vmRecords.flatMap((r) => r.network?.default === "public" ? ["every public host"] : [...(r.network?.allow_hosts ?? []), ...(r.network?.host_ports ?? []).map((p) => `host gateway :${p}`)]))].join(", ") || "nothing"}`
         : allowHosts
         ? `netguard allowlist: ${allowHosts.split("\n").filter(Boolean).join(", ")}`
@@ -1153,7 +1169,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
       "Trace integrity",
       chainLine(chain, Boolean(anchorPoint), anchorGuarded(run?.write_guard as string | undefined, run?.host_caps as Record<string, unknown> | undefined)),
     ],
-    ["Egress refused", egressRefusedLine(deniedHosts, netguardLog !== null, run)],
+    ["Egress refused", egressRefusedLine(deniedHosts, netguardLog !== null, run, custodyViolations(hostCustody))],
     ["Content sent to", providersLine(run)],
     [
       "Installed during the run",

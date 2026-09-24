@@ -18,6 +18,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   SENTINEL_REL,
+  hostTime,
   isSharedScratch,
   normalizeBudget,
   readEventLog,
@@ -186,7 +187,7 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   const id = run?.id ?? team.swarm_id ?? "";
   const label = run?.label ?? "";
   const startedAt = budget?.started_at ?? events[0]?.ts ?? "";
-  const endedAt = sentinel?.at ?? events.at(-1)?.ts ?? "";
+  const endedAt = sentinel?.at ?? (events.length ? hostTime(events.at(-1)!) : "");
   const durationMs = startedAt && endedAt ? Date.parse(endedAt) - Date.parse(startedAt) : Number.NaN;
   const lines: string[] = [];
 
@@ -195,6 +196,15 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   lines.push(`- State: ${run?.state ?? "unknown (no registry entry)"} · sentinel ${sentinel ? "present" : "absent"}`);
   lines.push(`- Started: ${startedAt || "unknown"} · Duration: ${durationHuman(durationMs)}${endedAt ? ` (to ${sentinel ? "the sentinel" : "the last trace event"} at ${endedAt})` : ""}`);
   if (run?.case_id || run?.examiner) lines.push(`- Case: ${run?.case_id || "—"} · Examiner: ${run?.examiner || "—"}`);
+  // How the agents were held, and what the host could say once they were gone.
+  const iso = (run as { isolation?: { mode?: string; image?: string; image_digest?: string } } | null)?.isolation;
+  lines.push(`- Isolation: ${iso?.mode === "microvm" ? `one microVM per agent${iso.image ? ` (${iso.image}${iso.image_digest ? ` ${iso.image_digest}` : ""})` : ""}; spend is what each VM reported` : "host (every agent a process on this machine)"}`);
+  try {
+    const custody = JSON.parse(await readFile(join(sandbox, "custody.json"), "utf8")) as { summary?: string };
+    if (custody.summary) lines.push(`- Custody: ${custody.summary}`);
+  } catch {
+    lines.push("- Custody: not taken (swarm.sh stop takes it)");
+  }
   const flags: string[] = [];
   if (run?.model) flags.push(`model ${run.model}`);
   if (run?.catalog) flags.push("catalog");
@@ -303,7 +313,7 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
 
   // --- activity -----------------------------------------------------------
   lines.push("## Activity", "");
-  lines.push(`${events.length} trace events${events.length ? ` from ${events[0].ts} to ${events.at(-1)?.ts}` : ""}.`, "");
+  lines.push(`${events.length} trace events${events.length ? ` from ${hostTime(events[0])} to ${hostTime(events.at(-1)!)} (the host's clock where the collector stamped it)` : ""}.`, "");
   if (events.length) {
     const byAgent = new Map<string, SwarmEvent[]>();
     for (const e of events) {
@@ -342,7 +352,7 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
       for (const e of forged) {
         const name = String(e.args?.name ?? "?");
         const calls = events.filter((x) => x.tool === name).length;
-        lines.push(`- \`${name}\` by ${e.agent} at ${e.ts} (${String(e.args?.runtime ?? "?")}; called ${calls} time${calls === 1 ? "" : "s"})`);
+        lines.push(`- \`${name}\` by ${e.agent} at ${hostTime(e)} (${String(e.args?.runtime ?? "?")}; called ${calls} time${calls === 1 ? "" : "s"})`);
       }
       lines.push("");
     }
@@ -458,7 +468,7 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
         // `ok` is the only answer there is.
         const contentOk = r.content_ok === undefined ? r.ok === true : r.content_ok === true;
         const verdict = r.ok === true ? "intact" : contentOk ? `bytes intact, ${metadata} held differently` : "CHANGED";
-        lines.push(`| ${e.ts} | ${e.agent} | ${verdict}: ${String(r.checked ?? 0)} checked, ${modified} modified, ${missing} missing, ${added} added |`);
+        lines.push(`| ${hostTime(e)} | ${e.agent} | ${verdict}: ${String(r.checked ?? 0)} checked, ${modified} modified, ${missing} missing, ${added} added |`);
       }
       lines.push("");
     } else {

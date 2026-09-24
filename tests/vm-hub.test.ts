@@ -814,3 +814,45 @@ test("in a VM a seat's shell-write watch is its own directories: a peer's publis
   assert.deepEqual(viaHub, [], "a write the hub's history already holds is accounted for");
   assert.deepEqual(seen, ["claims", "history work/a0/mine.txt"], "the lookups asked were the ones passed in, not the local files");
 });
+
+test("the hub's keeper brings a dead hub back with --resume, and lets it go once the stop has begun", async () => {
+  const base = await mkdtemp(join(tmpdir(), "dfh-keeper-"));
+  cleanups.push(() => rm(base, { recursive: true, force: true }));
+  const sandbox = join(base, "runs", "case");
+  await mkdir(join(sandbox, "traces"), { recursive: true });
+  const dir = join(base, "hub");
+  const { spawn } = await import("node:child_process");
+  const script = join(import.meta.dirname, "..", "scripts", "vm-hub.ts");
+  const first = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", script, sandbox, "--dir", dir, "--quiet"], { stdio: ["pipe", "ignore", "ignore"] });
+  first.stdin.end(JSON.stringify({ agents: ["a0"], tokens: {}, collector: join(sandbox, "traces", "none.sock") }));
+  await until(() => existsSync(join(dir, "admin.sock")), "the first hub is up", 10_000);
+  const keeper = spawn("bash", [join(import.meta.dirname, "..", "scripts", "hub-supervise.sh"), sandbox, dir, script, String(first.pid)], { stdio: "ignore" });
+  cleanups.push(async () => {
+    keeper.kill();
+    const pid = Number((await readFile(join(sandbox, "hub.pid"), "utf8").catch(() => "0")).trim());
+    if (pid) {
+      try {
+        process.kill(pid);
+      } catch {
+        // gone
+      }
+    }
+  });
+  first.kill("SIGKILL");
+  await until(() => existsSync(join(sandbox, "hub.pid")), "the keeper wrote a new hub pid", 15_000);
+  const second = Number((await readFile(join(sandbox, "hub.pid"), "utf8")).trim());
+  assert.notEqual(second, first.pid);
+  await until(() => {
+    try {
+      process.kill(second, 0);
+      return existsSync(join(dir, "admin.sock"));
+    } catch {
+      return false;
+    }
+  }, "the resumed hub is up", 15_000);
+  // Once the stop has begun, a hub that goes is let go, and the keeper ends.
+  await writeFile(join(dir, ".stop"), "");
+  process.kill(second, "SIGTERM");
+  await new Promise<void>((resolve) => keeper.once("exit", () => resolve()));
+  assert.equal(Number((await readFile(join(sandbox, "hub.pid"), "utf8")).trim()), second, "no third hub was started");
+});
