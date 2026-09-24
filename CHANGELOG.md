@@ -135,6 +135,10 @@ not surprised:
     Subscriptions need `--allow-oauth-in-vm`. `--provider-host P=HOST` names
     a provider's host when the harness cannot (Pi's own model list names the
     hosts of the providers it ships); a provider with none is refused.
+    msb keeps a live VM's secret values in its own database on the host: the
+    kickoff makes `~/.microsandbox` its user's alone, and a finish that
+    removed VMs rewrites that database without their leftover bytes
+    (`sqlite3` on the host; `stop` warns when it could not).
   - The image is the smallest profile that serves the packs, pulled before
     the run starts, booted by one digest; a program a pack requires that the
     image lacks stops the kickoff. Images carry a NOTICE, pinned downloads

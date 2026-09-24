@@ -54,7 +54,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, realpathSync } from "node:fs";
 import { isIPv4, isIPv6 } from "node:net";
 import { availableParallelism, totalmem } from "node:os";
-import { mkdir, readFile, rm, stat, writeFile, readdir } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1065,6 +1065,9 @@ async function createOne(
 
 export async function createVms(spec: VmSpec): Promise<{ records: VmRecord[]; failures: Array<{ agent: string; reasons: string[] }>; warnings: string[] }> {
   const M = await sdk();
+  // msb's database holds a live VM's secret values (scrubMsbDatabase): its
+  // directory is the run's user's alone, whatever mode msb created it with.
+  await chmod(msbHome(), 0o700).catch(() => undefined);
   const secrets = await resolveSecrets(spec);
   const expectInputs = existsSync(join(spec.sandbox, "inputs"));
   let expectedInputFiles: number | undefined;
@@ -1179,6 +1182,30 @@ async function freeBytes(dir: string): Promise<number | null> {
   }
 }
 
+/**
+ * msb keeps each VM's configuration in its own SQLite database, a secret's
+ * value included while the VM exists (measured on Linux, msb 0.7.2), and a
+ * removed VM's rows leave their bytes in the file's free pages and its
+ * write-ahead log until SQLite reuses them (measured: test values from runs
+ * long finished, still in msb.db and msb.db-wal). Once a finish has removed
+ * VMs the free pages are dropped: a checkpoint, a VACUUM (which rewrites the
+ * file from the live rows only) and a checkpoint again. Nothing live is
+ * changed; a database another msb is writing just then is left for the next
+ * finish (busy), and a host with no sqlite3 says so.
+ */
+/** msb's own directory: its database, each sandbox's configuration and logs. */
+function msbHome(): string {
+  return process.env.MSB_HOME || join(process.env.HOME || "", ".microsandbox");
+}
+
+export async function scrubMsbDatabase(): Promise<"scrubbed" | "busy" | "no sqlite3" | "no database"> {
+  const db = join(msbHome(), "db", "msb.db");
+  if (!existsSync(db)) return "no database";
+  if ((await run("sh", ["-c", "command -v sqlite3"], { timeoutMs: 10_000 })).code !== 0) return "no sqlite3";
+  const r = await run("sqlite3", [db, "PRAGMA busy_timeout=3000; PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);"], { timeoutMs: 120_000 });
+  return r.code === 0 ? "scrubbed" : "busy";
+}
+
 /** How long a finish waits for another finish of the same run that is still alive. */
 const FINISH_LOCK_WAIT_MS = 45 * 60_000;
 
@@ -1276,7 +1303,7 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
     }
     // The VM's own logs (the runtime's, the guest kernel's, its execs) go
     // with it when it is removed; keep them beside the disk.
-    const logs = join(process.env.MSB_HOME || join(process.env.HOME || "", ".microsandbox"), "sandboxes", vm.name, "logs");
+    const logs = join(msbHome(), "sandboxes", vm.name, "logs");
     if (existsSync(logs)) {
       const keep = join(snapDir, `${agent}.logs`);
       await mkdir(keep, { recursive: true });
@@ -1312,6 +1339,11 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
   }
   } finally {
     await rm(lock, { recursive: true, force: true });
+  }
+  // What the removed VMs' configuration left in msb's database goes too.
+  if (out.some((e) => !e.kept)) {
+    const scrub = await scrubMsbDatabase().catch(() => "busy" as const);
+    for (const e of out) if (!e.kept) (e as FinishEntry & { msb_db?: string }).msb_db = scrub;
   }
   return out;
 }
@@ -1381,6 +1413,7 @@ export async function reapVms(options: { run?: string; registry?: string; only?:
   }
   const removed: string[] = [];
   const kept = new Set<string>();
+  let direct = false;
   for (const vm of await runVms(options.run)) {
     if (!options.run) {
       // A throwaway VM (the catalog's, the toolbox check's, netcheck's) that
@@ -1401,8 +1434,13 @@ export async function reapVms(options: { run?: string; registry?: string; only?:
     }
     await run(msbBinary(), ["stop", vm.name], { timeoutMs: 120_000 });
     const r = await run(msbBinary(), ["rm", vm.name], { timeoutMs: 60_000 });
-    if (r.code === 0) removed.push(vm.name);
+    if (r.code === 0) {
+      removed.push(vm.name);
+      direct = true;
+    }
   }
+  // As a finish does: the removed VMs' rows leave no bytes in msb's database.
+  if (direct) await scrubMsbDatabase().catch(() => undefined);
   return removed;
 }
 

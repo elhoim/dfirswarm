@@ -203,6 +203,16 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   escape sequence an agent prints is interpreted there.
 - msb's supervisor on the host holds every credential of the run in memory;
   a compromise of the host process is a compromise of the keys.
+- msb also writes each VM's configuration, its secret values included, to
+  its own SQLite database on the host (`~/.microsandbox/db`, measured on
+  Linux with msb 0.7.2), and a removed VM's rows stay in the file's free
+  pages and write-ahead log until SQLite reuses them. The kickoff makes
+  `~/.microsandbox` its user's alone (0700), and a finish or reap that
+  removed VMs rewrites the database from its live rows (`VACUUM` between
+  two checkpoints, `scrubMsbDatabase`). While a VM lives its keys are on the
+  host's disk in that file; a host with no `sqlite3` keeps the removed
+  VMs' bytes, and `stop` says so. Blocks the filesystem freed are not
+  overwritten.
 - An allowed host is a channel out: anything an agent can send to its
   model's host, to a symbol server or to a blob store it may reach, leaves.
   The allowlist bounds where, not what.

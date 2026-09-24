@@ -5493,6 +5493,11 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when a VM of the
   out="$(vm_cli finish --run "$run" --sandbox "$sandbox" ${args[@]+"${args[@]}"} 2>>"$sandbox/traces/vm-finish.log")" || true
   printf '%s\n' "$out" >> "$sandbox/traces/vm-finish.log"
   jq -r '.vms[]? | "              \(.agent): \(if .error then "NOT PUT AWAY — \(.error)\(if .kept then " (kept for you to look at)" else "" end)" elif .snapshot then "stopped, disk kept (\(.snapshot))" else "stopped and removed" end)"' <<<"$out" 2>/dev/null || true
+  # msb keeps a VM's secret values in its database; a finish that removed
+  # VMs clears their bytes from it, and one that could not says so.
+  local unscrubbed
+  unscrubbed="$(jq -r '[.vms[]?.msb_db // empty | select(. != "scrubbed" and . != "no database")] | unique | join(", ")' <<<"$out" 2>/dev/null || true)"
+  [[ -n "$unscrubbed" ]] && echo "WARN: msb's database was not cleared of the removed VMs' configuration ($unscrubbed): a secret's value may stay in ${MSB_HOME:-$HOME/.microsandbox}/db until a later stop clears it." >&2
   # Nothing to put away is said too: the hub had already done it.
   if [[ "$(jq -r '(.vms // []) | length' <<<"$out" 2>/dev/null || echo 0)" == "0" ]]; then
     echo "              none left to stop (the hub had put them away, or none was made)"

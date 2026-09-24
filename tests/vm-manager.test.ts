@@ -8,6 +8,8 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import {
@@ -33,6 +35,7 @@ import {
   vmName,
   type ResolvedSecret,
   type VmSpec,
+  scrubMsbDatabase,
 } from "../scripts/vm.ts";
 
 const dirs: string[] = [];
@@ -389,4 +392,50 @@ test("a credential header is found at every depth Pi reads one, and a local mode
   assert.deepEqual(credentialHeaders(config).map((h) => h.value).sort(), ["Bearer k2", "k1", "k3"]);
   assert.equal(isLoopbackIp("0.0.0.0"), true, "a server bound to every interface is reached on loopback");
   assert.equal(isLoopbackIp("10.0.0.1"), false);
+});
+
+test("a finish leaves no byte of a removed VM's secret in msb's database", async (t) => {
+  try {
+    execFileSync("sh", ["-c", "command -v sqlite3"], { stdio: "ignore" });
+  } catch {
+    t.skip("no sqlite3 on this host");
+    return;
+  }
+  const home = await mkdtemp(join(tmpdir(), "msb-home-"));
+  after(() => rm(home, { recursive: true, force: true }));
+  const db = join(home, "db", "msb.db");
+  execFileSync("mkdir", ["-p", join(home, "db")]);
+  const value = `sk-test-${Date.now().toString(36)}-never-kept`;
+  // As msb keeps it: WAL, a live VM's row and a removed one's, and no secure
+  // delete (msb's own SQLite has none; a distribution's sqlite3 may).
+  execFileSync("sqlite3", [
+    db,
+    `PRAGMA secure_delete=OFF; PRAGMA journal_mode=WAL; CREATE TABLE sandbox(name TEXT, config TEXT); INSERT INTO sandbox VALUES ('live', '{"env":{}}'); INSERT INTO sandbox VALUES ('gone', '{"secret":"${value}"}'); DELETE FROM sandbox WHERE name='gone';`,
+  ]);
+  const held = () =>
+    ["msb.db", "msb.db-wal"].some((f) => {
+      try {
+        return readFileSync(join(home, "db", f)).includes(value);
+      } catch {
+        return false;
+      }
+    });
+  assert.ok(held(), "the removed row's bytes are in the database before the scrub, as measured with msb");
+  const before = process.env.MSB_HOME;
+  process.env.MSB_HOME = home;
+  try {
+    assert.equal(await scrubMsbDatabase(), "scrubbed");
+  } finally {
+    if (before === undefined) delete process.env.MSB_HOME;
+    else process.env.MSB_HOME = before;
+  }
+  assert.ok(!held(), "the removed row's bytes outlived the scrub");
+  assert.equal(execFileSync("sqlite3", [db, "SELECT name FROM sandbox"], { encoding: "utf8" }).trim(), "live", "the live row is kept");
+  process.env.MSB_HOME = join(home, "nothing-here");
+  try {
+    assert.equal(await scrubMsbDatabase(), "no database");
+  } finally {
+    if (before === undefined) delete process.env.MSB_HOME;
+    else process.env.MSB_HOME = before;
+  }
 });

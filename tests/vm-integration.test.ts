@@ -328,18 +328,19 @@ test("a secret never enters the guest: the VM holds its placeholder", async (t) 
   const record = JSON.parse(await readFile(join(r.sandbox, "vm", "vmt300.json"), "utf8"));
   assert.deepEqual(record.secrets, [{ name: "VT_API_KEY", hosts: ["www.virustotal.com"] }], "the record names the secret and its host, never its value");
   assert.ok(!JSON.stringify(record).includes(value));
-  // Nor on the host, at rest: msb keeps a sandbox's configuration under its
-  // home — its database and the sandbox's own directory — and the value must
-  // not be in either (msb's own CLI refuses an inline value for that reason;
-  // the SDK path is checked here). The guest's disk and root filesystem are
-  // the guest's files, searched from inside above: reading an 8 GiB disk
-  // image from here took the test past three minutes.
+  // Nor on the host, at rest, outside msb's own database: not in the
+  // sandbox's directory under msb's home, the run or the hub's directory.
+  // msb's database holds a live VM's configuration, the secret's value with
+  // it (measured on Linux; ADR 0009, Limits), and is checked after finish
+  // below. The guest's disk and root filesystem are the guest's files,
+  // searched from inside above: reading an 8 GiB disk image from here took
+  // the test past three minutes.
   const msbHome = process.env.MSB_HOME || join(process.env.HOME || "", ".microsandbox");
   let atRest = "";
   try {
     atRest = execFileSync(
       "grep",
-      ["-rlsF", "--exclude=upper.ext4", "--exclude-dir=rootfs", "--exclude-dir=checkpoint-store", "--exclude-dir=checkpoints", value, join(msbHome, "sandboxes", name), join(msbHome, "db"), r.sandbox, r.hubDir],
+      ["-rlsF", "--exclude=upper.ext4", "--exclude-dir=rootfs", "--exclude-dir=checkpoint-store", "--exclude-dir=checkpoints", value, join(msbHome, "sandboxes", name), r.sandbox, r.hubDir],
       { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } },
     ).trim();
   } catch {
@@ -374,6 +375,20 @@ test("a secret never enters the guest: the VM holds its placeholder", async (t) 
     }
   }
   assert.equal(inKept, "", `the value is in the kept disk's files or logs: ${inKept}`);
+  // And once the VM is removed, not in msb's database either: finish drops
+  // the free pages the removed VM's rows left (scrubMsbDatabase).
+  const scrub = done.find((e) => e.agent === "vmt300") as { msb_db?: string } | undefined;
+  if (scrub?.msb_db === "scrubbed") {
+    let inDb = "";
+    try {
+      inDb = execFileSync("grep", ["-rlsaF", value, join(msbHome, "db")], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).trim();
+    } catch {
+      inDb = "";
+    }
+    assert.equal(inDb, "", `the value outlived its VM in msb's database: ${inDb}`);
+  } else {
+    t.diagnostic(`msb's database was not scrubbed (${scrub?.msb_db ?? "no answer"}): not checked`);
+  }
 });
 
 test("two VMs posting and recording at once through the hub lose nothing and never share an id", async (t) => {
