@@ -171,3 +171,40 @@ grep -q "disk.E01" "$SEGSB/catalog/README.md" \
 [[ ! -d "$SEGSB/catalog/disk.E02" ]] || fail "disk.E02 should not have its own catalog tree"
 rm -rf "$SEGSB"
 pass "the catalog index names the segments it did not walk, and why"
+
+# --- the MAC timeline is rendered in UTC, as its index row says -------------
+# mactime renders in the local zone of whoever runs it unless it is given
+# -z. The index labels timeline.csv UTC, so the catalog must ask for UTC and
+# not inherit the kickoff host's TZ.
+MT="$(mktemp -d)"
+mkdir -p "$MT/bin" "$MT/sandbox/inputs"
+dd if=/dev/zero of="$MT/sandbox/inputs/disk.raw" bs=1024 count=64 status=none
+cat > "$MT/bin/mmls" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' 'DOS Partition Table' 'Units are in 512-byte sectors' '' \
+  '      Slot      Start        End          Length       Description' \
+  '002:  000:000   0000002048   0001028095   001026048    NTFS (0x07)'
+FAKE
+cat > "$MT/bin/fsstat" <<'FAKE'
+#!/usr/bin/env bash
+echo 'File System Type: NTFS'
+FAKE
+cat > "$MT/bin/fls" <<'FAKE'
+#!/usr/bin/env bash
+echo '0|/x|5-128-1|r/rrwxrwxrwx|0|0|1|1600000000|1600000000|1600000000|1600000000'
+FAKE
+cat > "$MT/bin/mactime" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${MACTIME_LOG:?}"
+echo 'Date,Size,Type,Mode,UID,GID,Meta,File Name'
+FAKE
+chmod +x "$MT/bin/"*
+PATH="$MT/bin:/usr/bin:/bin" MACTIME_LOG="$MT/mactime.log" TZ=America/New_York \
+  bash "$ROOT/scripts/evidence-catalog.sh" "$MT/sandbox" >/dev/null
+[[ -s "$MT/mactime.log" ]] || fail "mactime was never run on the body file"
+grep -qE '(^| )-z UTC( |$)' "$MT/mactime.log" \
+  || fail "mactime ran without -z UTC, so timeline.csv is in the host's zone: $(cat "$MT/mactime.log")"
+grep -q 'timeline.csv.*UTC' "$MT/sandbox/catalog/README.md" \
+  || fail "the index should still label the timeline UTC: $(cat "$MT/sandbox/catalog/README.md")"
+rm -rf "$MT"
+pass "the catalog's MAC timeline is rendered with -z UTC, as its index row says"

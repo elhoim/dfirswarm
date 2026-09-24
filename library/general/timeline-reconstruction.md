@@ -47,8 +47,8 @@ sources, already extracted.
    time (FAT entries, ZIP entries and other DOS date-times, text logs,
    some application databases), and the table says which those are.
    `mactime` renders in the analysis host's zone unless given `-z UTC`:
-   check which zone a `catalog/` MAC timeline was rendered in before
-   merging it.
+   the `catalog/` MAC timelines are rendered with it, and a body file you
+   render yourself needs it too.
 2. The extraction per source: how each was turned into dated rows — body
    files and `$MFT` through `fls -m` and `mactime`, `$UsnJrnl:$J` through
    `usn_journal` (set `limit` high enough and state the record count; the

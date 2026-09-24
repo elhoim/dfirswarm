@@ -163,9 +163,11 @@ catalog_volume() { # catalog_volume <img> <rel> <slug> <start sector> <descripti
     notes+=("fls missing: no body file or path list for $rel")
   fi
   if have mactime && [[ -s "$pdir/bodyfile.txt" ]]; then
-    r="$(run_step "$pdir/timeline.csv" mactime -b "$pdir/bodyfile.txt" -d -y)"
+    # mactime renders in the local zone of whoever runs it; without -z the
+    # timeline is in the kickoff host's zone while the index says UTC.
+    r="$(run_step "$pdir/timeline.csv" mactime -z UTC -b "$pdir/bodyfile.txt" -d -y)"
     [[ "$r" == ok ]] || notes+=("mactime at sector $start: $r")
-    add_index "$slug/p$start/timeline.csv" "MAC timeline (mactime -d -y): date, size, MACB, mode, uid, gid, inode, name — UTC"
+    add_index "$slug/p$start/timeline.csv" "MAC timeline (mactime -z UTC -d -y): date, size, MACB, mode, uid, gid, inode, name — UTC"
   fi
 }
 
