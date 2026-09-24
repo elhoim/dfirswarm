@@ -20,9 +20,17 @@ are willing to lose, with credentials you are willing to rotate.**
 
 With `--isolation microvm` the model is different: each agent is root in its
 own microVM, and the boundary is the host side of every mount, the VM's
-network policy and the hub's socket — not the agent's shell. In that mode a
-`bash` inside the VM is in scope wherever it reaches past those
-([ADR 0009](docs/adr/0009-agents-live-in-microvms.md), `docs/safety.md`).
+network policy and the hub's socket — not the agent's shell. What that
+boundary protects: the host's files (a VM holds only what is mounted, and the
+run is a read-only floor in it but for the seat's own directories), the
+credentials (provider keys, subscription tokens and pack secrets never enter
+a guest; msb swaps a placeholder for the value on the way to the credential's
+own hosts), the evidence (read-only through a mount the host enforces), and
+the harness's decisions (the finish line, the stop clock, custody and the
+report are taken on the host). What it does not protect is listed under Out
+of scope. In that mode a `bash` inside the VM is in scope wherever it reaches
+past those ([ADR 0009](docs/adr/0009-agents-live-in-microvms.md),
+`docs/safety.md`).
 
 ## In scope
 
@@ -66,10 +74,30 @@ Please report these privately (see below):
   `work/` file, any artifact, and the `swarm.sh` output of each start, stop and
   reap on `/api/jobs`. If the goal or the evidence names something you would
   not put on a shared screen, keep the default.
-- Under `--isolation microvm`, what the ADR and `docs/safety.md` list as the
-  mode's stated limits: a spend report is the seat's own, an allowed host is
-  reachable for anything, a bound placeholder is usable at its host, msb holds
-  the credentials uncaged, and a guest's terminal output reaches the host's.
+- Under `--isolation microvm`, what the ADR ("Limits that stay") and
+  `docs/safety.md` list as the mode's stated limits, among them:
+  - a spend report is the seat's own; the host enforces the wall clock by
+    itself, and the caps only on what the seats report;
+  - every process in a VM speaks to the hub as that seat: a forged tool, a
+    parser over hostile content, a binary extracted from the evidence and
+    run by the guest's root;
+  - the extension's checks inside a VM are advisory against the guest's
+    root; only the hub, the mounts and msb enforce;
+  - an allowed host is a way out: anything an agent can send to its model's
+    host, a symbol server, or any host under an allowed suffix leaves, and a
+    bound placeholder is usable at its host for whatever that credential may
+    do there (an API key is not limited to inference; a pack's secret is
+    usable by any process in the VM);
+  - a local model's port, reached through the host gateway, is that server's
+    whole API to every VM (Ollama's `/api/pull` and `/api/delete` included);
+  - a real key that a provider echoes back in a response is not masked in
+    the trace;
+  - `vm/<id>.json` is readable from every VM (it names secrets and hosts, no
+    value);
+  - msb's strict mode is off: a host-name rule admits what the name resolves
+    to, whatever server name the connection then sends;
+  - msb holds the credentials uncaged, the hub runs as the examiner, and a
+    guest's terminal output reaches the host's.
 - The behaviour, cost or output of the model you point Pi at.
 - Vulnerabilities in Herdr, Pi or a model provider. Report those upstream.
 
@@ -90,3 +118,6 @@ You will get an acknowledgement within a week. There is no bounty.
 - Treat the console token like a password; it is printed once at startup.
 - Read the goal you are about to run. The harness refuses one without a
   definition of done, but it does not judge what the checks do.
+- Under `--isolation microvm`: use API keys and keep `--allow-oauth-in-vm`
+  off; allow suffixes (`*.name`) only where the case needs one; and keep the
+  runs, with their `<sandbox>.vm-snapshots/`, out of synced folders.

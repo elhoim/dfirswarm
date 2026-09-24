@@ -121,11 +121,23 @@ server the kickoff sizes each VM at 1 GiB when the host has under 8 GiB, and
 refuses N VMs that would not fit its memory; `--vm-memory` and `--vm-disk`
 say otherwise. The host guards above are not started for a VM run (the VM is
 the guard), so the account's shell and user namespaces matter only for host
-runs. The hub's sockets live under `$TMPDIR/dfirswarm-hubs/`, which no pane
-can reach. `swarm.sh netcheck --isolation microvm` shows what a run's VMs
+runs. The hub's sockets live under `$TMPDIR/dfirswarm-hubs/`. A host-mode pane
+of another run on the same account is kept from them by its guard's mount
+namespace (the directory is masked) or, on macOS, by sandbox-exec; with
+Landlock alone, or with no write guard, it is not, and a host kickoff that
+finds a VM run up says so. Run such hosts one run at a time. `swarm.sh netcheck --isolation microvm` shows what a run's VMs
 would reach; `swarm.sh status <id>` lists each agent's state from its hub; a
 stop keeps each VM's disk beside the run (`<sandbox>.vm-snapshots/`) with its
 logs, and custody checks it with msb.
+
+Plan the disk for it: each kept snapshot can be as large as that VM's root
+disk (`--vm-disk`, 8 GiB by default), per agent. The stop keeps a VM rather
+than snapshot it when less than 4 GiB is free where the disks go
+(`SWARM_SNAPSHOT_MIN_FREE_BYTES`), which is a floor, not the disk's size; a
+VM whose snapshot fails is kept and named, not removed. Plan the time too:
+custody at stop reads every evidence file once more, so on a small droplet a
+stop over tens of gigabytes of evidence takes as long as hashing them again
+(`--custody-timeout SEC` bounds it, `--no-custody` skips it for later).
 
 ## What the record will say on a good host
 

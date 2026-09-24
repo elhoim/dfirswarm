@@ -3,8 +3,12 @@
 With `--isolation microvm`, every agent is a Pi process inside its own
 microVM, created by the kickoff and put away by `stop`. The board's files are
 written by one process on the host, the hub, which each VM reaches over its
-own vsock port. Host mode (`--isolation host`) stays the default and is
-unchanged.
+own vsock port. Host mode (`--isolation host`) stays the default and keeps
+its design: panes on the host, the board functions run locally, the host
+guards. It did change where this work fixed things for both modes: the
+console binds 127.0.0.1, the finish line is read from the registry only,
+the trace masks the harness's tokens, `stop` takes custody, and more; the
+CHANGELOG lists each under "Changed for host runs".
 
 ## Context
 
@@ -56,8 +60,10 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   `publish_file`, from the agent's own directory, claimed and recorded. A
   writable `work/` shared by every VM kept none of the promises below and
   let any seat rewrite any other's findings without a record. The evidence
-  is mounted read-only from where it is, with no copy. Everything is mounted
-  at its host path, so no path is ever translated. The harness code
+  is mounted read-only from where it is, with no copy: the host side of that
+  read-only share is the one layer, and `--inputs-copy` adds a read-only copy
+  in the run for evidence the examiner's own account can write. Everything is
+  mounted at its host path, so no path is ever translated. The harness code
   (extensions, scripts, prompts, packs) is mounted read-only; the repository
   is not, because `runs/registry.json` and `docs/use-cases/` would come with
   it; a `--compact-prompt-file` is copied into the run rather than mounted
@@ -91,17 +97,26 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   kickoff (`--provider-host` names it); one that signs requests with its
   secret on the client (Bedrock, Vertex) cannot run in a VM at all.
 - **The hub answers only an agent's business.** The stop clock and the
-  harness stop are not on the agent channel; a sentinel is written only when
-  the operator's finish line passes on the host; a seat's spend report may
-  only grow; every path is resolved on the host without following a link
-  the agent planted. Spend is still what the seat reports — the wall clock
-  and each VM's `maxDuration` are the brakes the host enforces by itself.
-- **The harness owns the stop.** The hub enforces the wall clock and the caps
-  from outside the VMs, writes the sentinel when the agents do not stop, and
-  once it has stood for the grace period snapshots and stops the VMs. Each VM
-  also has a hard `maxDuration`.
+  harness stop are not on the agent channel; a `done` that would write the
+  sentinel is refused unless the operator's finish line passes when the hub
+  re-runs it on the host, with two exceptions: a reason that starts
+  `ABANDONED: ` ends the run without the checks (the reason says so on the
+  sentinel), and a seat leaving on its own cap (`agent_cap`) writes no
+  sentinel and is not checked. A finish line the hub cannot run at all lets
+  the `done` through unchecked, as it does on the host (`docs/protocol.md`).
+  A seat's spend report may only grow; every path is resolved on the host
+  without following a link the agent planted. Spend is still what the seat
+  reports — the wall clock and each VM's `maxDuration` are the brakes the
+  host enforces by itself.
+- **The harness owns the stop.** The hub keeps the wall clock on its own
+  clock, and applies the caps (the swarm's, each seat's, each model's) to the
+  spend each seat reports about itself. It writes the sentinel when the
+  agents do not stop, and once that has stood for the grace period it
+  snapshots and stops the VMs. Each VM also has a hard `maxDuration` (the
+  wall clock and half an hour).
 - **Custody is taken on the host after the run** (`scripts/custody.ts`): the
-  evidence re-hashed in full, the sessions sealed, every kept output checked
+  evidence re-hashed in full (a custody that runs out of time says which
+  files it did not re-read), the sessions sealed, every kept output checked
   against the trace, every kept disk checked against its record.
 - **Images come from the packs** (`images/recipe.py`), and a run records the
   digest it booted. Prebuilt images are published privately from the pro
@@ -112,21 +127,26 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   image's tag once (pulling it before the run's clock when the host lacks
   it) and every VM must boot that digest. Each VM's probe looks for the
   programs the run's packs require; one missing stops the kickoff unless the
-  agents may install. At stop each VM lists what it holds that its image did
-  not.
+  agents may install. An image built from another version of a pack is said
+  and recorded in `vm/<id>.json`, not refused. At stop each VM lists what it
+  holds that its image did not; that list is measured inside the guest, by
+  its root, and the kept disk is the authority.
 - **The harness is frozen per run.** The extensions, scripts and prompts a VM
   sees are a copy taken at kickoff and mounted where the checkout is, so an
   edit or a `git pull` mid-run does not reach agents that have not loaded
-  them yet.
+  them yet. The hub runs from a second copy taken at the same time, and so
+  do the VM finish and the custody it starts; the operator's own commands
+  (`swarm.sh`, `stop`, the idle watchdog) run from the checkout.
 
 ## Consequences
 
 - Host mode keeps its design; the board functions run locally whenever
   `SWARM_BOARD_SOCKET` is unset. It did change where the work fixed things
-  for both modes (the CHANGELOG lists them under "Host runs"), and every
-  host-mode suite runs.
+  for both modes (the CHANGELOG lists them under "Changed for host runs"),
+  and every host-mode suite runs.
 - A VM run needs a host that can boot one, and says so before it writes
-  anything; N VMs that would not fit the host's memory are refused. The
+  anything (a `--no-start` prepared run boots nothing and is not probed);
+  N VMs that would not fit the host's memory are refused. The
   droplet (2 vCPU, 4 GB) runs two agents at 1 vCPU / 1 GiB, which is the
   default on a host under 8 GiB.
 - The five-second visibility window is real and bounded; the settle window
@@ -137,16 +157,21 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   unmount its own holes and even the floor, and what is then under those
   paths is its own disk, never the host's (the host's trace and floor are
   unchanged). The no-exec on `work/extracted/` and `work/quarantine/` is a
-  mount flag in the guest: it keeps an agent from running carved material by
-  mistake, not a root that means to. Nothing the harness decides is read
-  inside a VM: the finish line, custody and the report run on the host.
-- The hub is one process on the host. The idle watchdog restarts it from the
-  state it keeps (`hub-input.json`, the stop clock), and an agent whose hub
-  stays unreachable for four minutes is stopped by its own extension.
+  mount flag in the guest: both are mounted whole, read-only and no-exec,
+  with the seat's own corner writable and no-exec on top, so neither its own
+  carved material nor a peer's runs by mistake. It does not stop a root that
+  means to run it. Nothing the harness decides is read inside a VM: the
+  finish line, custody and the report run on the host.
+- The hub is one process on the host. A keeper (`scripts/hub-supervise.sh`)
+  brings it back from the state it keeps (`hub-input.json`, the stop clock)
+  until the run's stop, and the idle watchdog does too while it runs. An
+  agent whose hub stays unreachable for four minutes is stopped by its own
+  extension.
 - `tests/vm-integration.test.ts` holds all of this on every pull request, on
   a KVM runner, including one run end to end: Pi in its VM with the harness
   extension, a scripted model on the host, a post through the hub, and the
-  evidence refused by the kernel.
+  evidence refused by the kernel. The test builds that run's VM itself; no
+  test boots a run through `swarm.sh start`.
 
 ## Limits that stay
 
@@ -159,6 +184,56 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   The allowlist bounds where, not what.
 - Spend in a VM run is what each seat reports; the wall clock and each VM's
   `maxDuration` are the brakes the host enforces by itself.
+- Who is asking is the channel, not the process: every process inside a VM
+  speaks to the hub as that seat. A forged tool, a parser running over
+  hostile content, or a binary carved from the evidence and run by the
+  guest's root can post, publish, record and call `done` as the seat.
+- The extension inside a VM is the agent's own code under the guest's root.
+  Its tool refusals, claim-before-write, the self-compaction lock and the
+  per-seat cap steer are advisory there; what holds is what the hub, the
+  mounts and msb enforce.
+- The trace masks the harness's own tokens, and in a VM it never sees a
+  provider's real key, only placeholders. A real key a provider echoes back
+  in a response is not masked in the trace.
+- `vm/<id>.json`, the record of each VM, is on the run's floor and readable
+  from every VM. It names each secret and its hosts and holds no value.
+- The hub runs on the host as the examiner, with no cage of its own: a path
+  it resolves wrongly is a host path. Its own checks on each path (inside the
+  run, no link an agent planted) are what stand there.
+- A seat's writable holes are host directories with no quota: a seat can
+  fill the host's disk.
+- Liveness is the seat's own report: a VM that keeps its hub link and says
+  "working" is never nudged or reaped. The wall clock bounds it.
+- A local model's port, reached through msb's host gateway, is that
+  server's whole API to every VM, not only inference: Ollama's `/api/pull`,
+  `/api/create` and `/api/delete` included.
+- msb's strict mode is not enabled: a host-name rule admits the addresses
+  that name resolves to, and msb does not require the connection's own TLS
+  server name or HTTP `Host` to be that name. Its DNS rebinding protection
+  is left at the SDK's default (on).
+- A client with its own trust store fails on a connection msb intercepts:
+  Chromium's NSS store, Java's keystore.
+- Deferred: `--inputs-image` attaches a disk image with macOS's `hdiutil`
+  only; there is no Linux path and no read-only virtio-blk attach to a VM
+  yet, and on Linux the kickoff refuses it (`--inputs DIR` instead).
+- Deferred: image signatures and an SBOM. A run records and checks the
+  digest it booted; nothing verifies who built that image.
+
+## Open decisions
+
+For the project owner; nothing in the code decides them yet.
+
+- Whether `--isolation microvm` becomes the default, and on what evidence
+  (for example the KVM job green over a number of pull requests and one real
+  case run end to end in VMs).
+- Whether host mode is frozen (labelled unisolated, fixes only) or removed
+  once VM mode is the default, and what code goes with it: the host guards,
+  the second spill location, the direct board path.
+- A host-side backstop for host runs. In host mode the stop is written by
+  the agents' own extensions; nothing outside the panes writes the sentinel
+  when every pane is wedged. The hub does this for VM runs only.
+- A bare-metal Linux server with KVM for real cases. The droplet runs VMs
+  through nested KVM and fits two agents.
 
 ## Alternatives considered
 

@@ -26,7 +26,17 @@ DFIRSWARM_VM_TESTS=1 npm run test:vm   # real VMs, one run end to end with a scr
 ```
 
 That is everything CI runs, and none of it needs a model, a key, Herdr or a
-Pi login. `npm ci` brings Pi's own package in as a devDependency, for the
+Pi login. CI runs on amd64 Linux runners only: the VM suite boots the base
+and disk images there, under KVM. Nothing in CI boots an arm64 image or
+runs on macOS, so the Apple-silicon VM path, the arm64 image builds and pins,
+and the macOS-only suites (the seatbelt guard, `--inputs-image`) are run by
+hand before a release. The `spikes/` directory is neither typechecked
+(`tsconfig.json` covers `extensions/`, `scripts/` and `tests/`) nor re-run:
+its scripts record measurements made once, and they can go stale. The host
+suites run on Node 22 (`.nvmrc`), while Pi in a VM runs on the image's
+Node 24 (`images/base.Dockerfile`); only the VM suite exercises the latter.
+
+`npm ci` brings Pi's own package in as a devDependency, for the
 extension's types and the loader test; a real run still needs
 [Herdr](https://herdr.dev) and [Pi](https://pi.dev) installed and logged in
 on the machine; see the README's quick start. A whole swarm with real

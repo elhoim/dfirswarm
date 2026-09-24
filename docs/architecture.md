@@ -106,7 +106,7 @@ flowchart TB
   PI1 --> BR1 -->|vsock → <dir>/agent01.sock| HUB
   HUB -->|protocol.ts| FS
   HUB --> COL --> FS
-  FS -.->|read-only floor · work/, tool-output/ID, .pi-sessions/ID writable| VM0 & VM1
+  FS -.->|read-only floor · work/ID, work/extracted/ID, work/quarantine/ID, tool-output/ID, .pi-sessions/ID writable| VM0 & VM1
   EV -.->|read-only, same path| VM0 & VM1
   VMM -->|finish: snapshot + remove| VM0 & VM1
   CUST --> FS
@@ -117,9 +117,14 @@ flowchart TB
   where they are on the host, so a path in a post, the trace, the registry or
   a check means the same file on both sides.
 - **The floor is read-only; the holes are the agent's own.** The run's root is
-  one read-only share, and `work/`, `tool-output/<id>` and `.pi-sessions/<id>`
-  are writable shares on top of it; unmounting a hole leaves the read-only
-  floor. The board's files are read-only in every VM.
+  one read-only share, `work/` included, and each seat's own `work/<id>/`,
+  `work/extracted/<id>/`, `work/quarantine/<id>/` (the last two no-exec),
+  `tool-output/<id>/` and `.pi-sessions/<id>/` are writable shares on top of
+  it; unmounting a hole leaves the read-only floor. Nothing writable is
+  shared between VMs: a shared file under `work/` (`work/report.md`, a
+  timeline) goes through `publish_file`, and the hub writes it on the host,
+  claimed and recorded for the agent that asked. The board's files are
+  read-only in every VM.
 - **The board is a call, not a file.** `extensions/board.ts` exports the
   protocol's own functions; with `SWARM_BOARD_SOCKET` set they go to the hub
   over one held connection per process, each call with an id. The hub runs

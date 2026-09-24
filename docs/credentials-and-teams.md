@@ -231,6 +231,41 @@ account". The preflight cannot see any of this, because `pi auth check` asks
 whether Pi *has a credential*, not whether the account may use a given model.
 The first agent turn is where you find out.
 
+### Under `--isolation microvm`
+
+The same gate runs, and then no credential enters a VM:
+
+- Pi on the host resolves each credential at kickoff (`pi auth
+  print-api-key`, or for a subscription `pi auth print-bearer-token
+  --min-expiry`, refreshed on the host for the length of the run) and msb
+  holds it. The guest's Pi gets a placeholder shaped the way Pi reads that
+  credential, and msb swaps the value in only on the way to the provider's
+  own hosts; a placeholder sent anywhere else is stopped and logged, and
+  custody names it.
+- Each seat's VM holds only its own model's credential and the summary
+  model's (`--compact-model`), never another seat's.
+- A provider's `env` block and credential headers in `models.json` cross as
+  placeholders too; a header Pi would resolve at request time (`$VAR`,
+  `!command`) is refused.
+- A subscription (OAuth) needs `--allow-oauth-in-vm`: its token is the
+  operator's account at the provider, not an inference key. The guest never
+  refreshes it and the refresh endpoint is never bound, so the token Pi mints
+  at kickoff must last the wall clock and an hour more, or the kickoff stops.
+- An API key needs no flag, but its placeholder reaches every endpoint on the
+  provider's host that the key may use, not only inference.
+- `--key-from-env` is refused, and so is an `--env` name that looks like a
+  credential: either would put the value into every VM and its snapshot.
+- A provider whose host the harness cannot find is refused
+  (`--provider-host P=HOST` names it). Bedrock and Vertex sign every request
+  with their secret inside the client, so they cannot run in a VM.
+- A pack's secrets reach a VM as placeholders too, in the whole VM's
+  environment ([packs.md](packs.md) §4).
+- A local model on this machine is reached through msb's host gateway: the
+  guest's `models.json` names it `host.microsandbox.internal:<port>`. One
+  elsewhere on the LAN is reached by its address and port. Pi's built-in
+  `llama.cpp` provider, configured by `LLAMA_BASE_URL` in the shell, is not
+  carried into a VM; describe the same server as a `models.json` provider.
+
 ## What a run may install
 
 A case can turn on a reader this host does not have. `--allow-install` is the
@@ -248,7 +283,25 @@ makes `inputs/` read-only mean anything. For reading an encrypted or virtual
 volume this costs nothing: libbde, libvhdi, libluksde and pytsk3 all read in
 place, and the `crypto` toolbox set names them so a kickoff finds out before
 the run instead of at minute forty. For a case that genuinely needs a mount,
-the answer is a container, not `sudo`; see [safety](safety.md).
+the answer is `--isolation microvm`, where root and the mount are the VM's
+own (whether FUSE or a loop device is there is in each VM's probe record),
+not `sudo` on the host; see [safety](safety.md).
+
+On the host `--allow-install` also sets `PIP_BREAK_SYSTEM_PACKAGES=1`, so
+`pip install --user` works on a system whose Python is marked externally
+managed (PEP 668). It also means PEP 668 no longer refuses a pip run without
+`--user`; the write guard is what keeps that out of the system.
+
+Under `--isolation microvm` the agent is root in its own VM and the rule
+changes shape. `pip install` (without `--user`) goes into that VM's own disk,
+`/opt/dfir/agent`, which no other VM sees and which is kept in that VM's disk
+snapshot at stop; the
+package index is `pypi.org` and `files.pythonhosted.org`, and `--no-pypi`
+keeps them off the VM's allowlist. There is no Debian mirror on the
+allowlist, so apt reaches nothing unless the operator allows the image's
+mirror with `--allow-host`. A program a pack requires that the image lacks
+is a warning with `--allow-install` rather than a refusal. What each VM holds
+that its image did not is listed at stop and named in custody.
 
 ## Mixed teams
 

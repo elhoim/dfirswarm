@@ -2,7 +2,7 @@
   "name": "dfirswarm",
   "version": "0.3.0",
   "private": true,
-  "description": "DFIR Swarm: an agent swarm for digital forensics and incident response. Local, observable peer agents on Herdr + Pi: a sanctioned file board, enforced write leases, read-only evidence guarded at the kernel, a shared ledger, a harness-owned stop sentinel, spend, token and wall-clock caps, an egress allowlist and a live LAN console.",
+  "description": "DFIR Swarm: an agent swarm for digital forensics and incident response. Local, observable peer agents on Herdr + Pi: a sanctioned file board, enforced write leases, read-only evidence guarded at the kernel, a shared ledger, a harness-owned stop sentinel, spend, token and wall-clock caps, an egress allowlist and a live local web console.",
   "license": "AGPL-3.0-or-later",
   "author": "Halil Öztürkci",
   "repository": {

@@ -110,12 +110,15 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   in `--help` that `ps` can see it. No file in the repo or sandbox ever contains
   a key; `.gitignore` excludes `runs/` anyway. See
   [ADR 0003](adr/0003-the-provider-key-comes-from-pis-own-store.md) and
-  [Credentials](usage.md#credentials).
+  [Credentials](credentials-and-teams.md).
 - **Cost and time caps.** `--cap-usd` is mandatory. Spend is measured from Pi's
   own session usage, not estimated. At either cap the agents are steered to
   `done cannot_complete`, and if the swarm is still over one grace period later
-  the harness writes the sentinel itself. `--hard-kill` additionally shuts the
-  steered session down. Kickoff allows N=1–30 and warns above 10.
+  the harness writes the sentinel itself: on the host that is each pane's own
+  extension, so a swarm whose every pane is wedged has nothing outside it to
+  write the sentinel; in a microVM run it is the hub, on the host.
+  `--hard-kill` additionally shuts the steered session down. Kickoff allows
+  N=1–30 and warns above 10.
 - **No root on the host, ever, and installing is not root.** (Under
   `--isolation microvm` the agent is root *inside its own VM*, which holds
   nothing of the host but what is mounted, read-only but for the seat's own
@@ -127,17 +130,22 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   on this machine. A case that needs a library the host does not have gets
   `--allow-install` instead: `pypi.org` and `files.pythonhosted.org` join the
   allowlist, `PYTHONUSERBASE` points at `work/.toolchain/` inside the sandbox,
-  and what a run installs goes when the run goes. It is off by default, the
-  contract tells the agents the rule when it is on, and the ledger is where
-  they record what they installed. Homebrew and the system package managers
-  stay out: they write outside the sandbox, to a machine the next case also
-  has to trust.
+  and what a run installs goes when the run goes. It also sets
+  `PIP_BREAK_SYSTEM_PACKAGES=1`, so pip installs there on a system whose
+  Python is marked externally managed (PEP 668); PEP 668 then no longer
+  refuses a pip run without `--user` either, and what keeps that out of the
+  system's Python is the write guard (with `--no-write-guard`, nothing). It
+  is off by default, the contract tells the agents the rule when it is on,
+  and the ledger is where they record what they installed. Homebrew and the
+  system package managers stay out: they write outside the sandbox, to a
+  machine the next case also has to trust.
 
-  What that leaves unreachable is anything that genuinely needs root —
-  a FUSE mount, a loop device, attaching a volume. The place for that is not
-  the examiner's machine but a container, where root is confined to something
-  disposable and the evidence is bind-mounted read-only. Nothing here runs
-  that way yet; it is B16 in the [improvement plan](improvement-plan.md). A
+  What that leaves unreachable on the host is anything that genuinely needs
+  root — a FUSE mount, a loop device, attaching a volume. The place for that
+  is not the examiner's machine. Under `--isolation microvm` it is what each
+  agent's VM is: root confined to a disposable VM, with the evidence mounted
+  read-only; whether FUSE or a loop device exists there is what the VM's
+  probe records (`vm/<id>.json`, `probe.fuse`, `probe.loop`). A
   run that needs to *read* an
   encrypted or virtual volume usually does not need root at all: libbde,
   libvhdi, libluksde and pytsk3 read them in place, and the `crypto` toolbox
@@ -151,38 +159,97 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   every write) or unmounting a writable hole; a VM reaches its allowed hosts
   and nothing else, by name or by address; a secret is only a placeholder in
   the guest; two VMs posting at once through the hub lose nothing; a seat
-  writes only its own `work/<id>/`, and the extracted material cannot run.
+  writes only its own `work/<id>/`, and its extracted material sits on a
+  no-exec mount.
   What stays true about a VM, said plainly:
   - A peer's published file can take five seconds to look current in another
-    VM (a claim on such a file waits that out; a plain read does not).
+    VM (a claim on such a file waits that out; a plain read does not). A
+    peer's `work/extracted/<id>/` is read directly, not published, and may be
+    read while the peer is still writing it.
   - The guest's TLS is intercepted whenever a secret is bound, on 443 and on
-    every port a secret travels on. The allowed hosts that receive no secret
-    keep their own TLS end to end, except one a bypass would cover along with
-    a secret's host (a suffix), which is intercepted too; under
-    `--no-netguard` every public host on 443 is decrypted by the host's msb.
+    every port a secret travels on. The allowed host names that receive no
+    secret keep their own TLS end to end. Intercepted as well: an allowed
+    suffix that covers a secret's host, an `--allow-host` entry given as an
+    address or a CIDR block (msb's bypass takes names only), and under
+    `--no-netguard` every public host on those ports, which the host's msb
+    decrypts. A client with its own trust store (Chromium's NSS store, Java's
+    keystore) fails on an intercepted connection. [usage.md](usage.md#netcheck)
+    lists the cases.
   - Root in the guest can flip a read-only share's flag (the host still
     refuses the write) and can unmount its own holes or the floor; what is
     then under those paths is the VM's own disk, never the host's. The no-exec
     on `work/extracted/` and `work/quarantine/` is a mount flag in the guest:
-    it stops an agent running carved material by mistake, not a root that
-    means to. The finish line, custody and the report are decided on the
-    host, never from what a VM reads.
+    both directories are mounted whole, read-only and no-exec, with the seat's
+    own corner writable and no-exec on top, so a peer's carved material is
+    no-exec in every VM too. It stops an agent running carved material by
+    mistake, not a root that means to. The finish line, custody and the
+    report are decided on the host, never from what a VM reads.
+  - Inside a VM the extension's refusals are the agent's own code under the
+    guest's root: tool refusals, claim-before-write, the self-compaction lock
+    and the per-seat cap steer are advisory there. What holds is what the
+    hub, the mounts and msb enforce. And every process in the VM speaks to
+    the hub as that seat: a forged tool, a parser over hostile content, a
+    carved binary the guest's root runs.
   - A placeholder is still a capability at the host it is bound to: an API
-    key can be spent there, and a subscription token is the operator's
-    account there, which is why a subscription needs `--allow-oauth-in-vm`.
+    key reaches every endpoint there that the key may use (files, batches,
+    fine-tuning, not only inference), and a subscription token is the
+    operator's account there, which is why a subscription needs
+    `--allow-oauth-in-vm`. A pack's secret is in the environment of the whole
+    VM, so any process in it, an agent's shell included, can use it at the
+    pack's hosts; the value itself never enters the VM.
   - Spend is what each seat reports (it may only grow); the host enforces the
     wall clock and each VM's `maxDuration` by itself.
   - An allowed host is a way out as well as in: a `*.blob.core.windows.net`
-    rule (Volatility's symbols) reaches any account's storage there.
+    rule (Volatility's symbols) reaches any account's storage there. A local
+    model's port, reached through msb's host gateway, is the whole API of
+    that server, not only inference: Ollama's `/api/pull`, `/api/create` and
+    `/api/delete` included.
+  - msb's strict mode is not enabled: a host-name rule admits the addresses
+    that name resolves to, and msb does not check that the connection's TLS
+    server name or HTTP `Host` is that name. A service behind a shared front
+    may be reachable through an allowed name.
   - msb, which holds every credential for the run, is not itself caged.
   - What a guest prints reaches the host's terminal through Herdr, escape
     sequences included (a clipboard write, a title change).
   - Each kept VM disk holds what the agent left on it — extracted material,
-    its /tmp — and is evidence-bearing: keep or destroy it with the case.
+    its /tmp — and is evidence-bearing: keep or destroy it with the case
+    (below).
 
   The host resolves the credentials at kickoff, so a subscription token must
-  outlive the run (`--min-expiry` asks Pi for one that does).
+  outlive the run (`--min-expiry` asks Pi for one that does). No VM can
+  refresh a token, so one revoked at the provider mid-run ends every seat
+  that uses it.
   [ADR 0009](adr/0009-agents-live-in-microvms.md).
+- **What a run leaves on disk, and who keeps it.** Everything a run derives
+  from the evidence stays on this machine until the operator removes it: the
+  run directory (`work/` with `work/extracted/` and `work/quarantine/`,
+  `tool-output/`, `.pi-sessions/`, the trace, the ledger, `catalog/`,
+  `package/`, and with a copied `--inputs` the copy and its pristine clone),
+  and under `--isolation microvm` each VM's kept disk and logs beside it, in
+  `<sandbox>.vm-snapshots/<id>.msb` and `<id>.logs`. The harness deletes none
+  of it.
+  - **Retention and legal hold.** Keep or destroy a run with its case, under
+    the case's retention rules and any legal hold; the snapshots go with the
+    run (`<sandbox>.vm-snapshots/` is a separate directory, so delete it too),
+    and not before custody and the package are taken. `--no-vm-snapshot`
+    keeps no VM disk at all.
+  - **Synced folders.** The runs live under `runs/` in the checkout unless
+    `SWARM_RUNS_DIR` or `--sandbox` says otherwise. A run directory inside a
+    synced folder (Dropbox, iCloud Drive, OneDrive, anything under
+    `~/Library/CloudStorage`) is uploaded to that service, snapshots and
+    extracted material included, and the harness does not check for it. For
+    a real case put the runs on a local disk that is not synced.
+  - **Disk.** A kept snapshot can be as large as the VM's root disk
+    (`--vm-disk`, 8 GiB by default) per agent. Before each snapshot the stop
+    looks at the free space where the disks are kept: below a fixed floor of
+    4 GiB (`SWARM_SNAPSHOT_MIN_FREE_BYTES`), not the size of the disk, the VM
+    is kept, not snapshotted and not removed. A VM whose snapshot fails for
+    any reason is kept the same way, and the stop says `NOT PUT AWAY`.
+  - **Time.** Custody at stop reads every evidence file once more, so a stop
+    on a large case takes as long as hashing its evidence again.
+    `--custody-timeout SEC` bounds it (14400 by default) and names what it did
+    not re-read; `--no-custody` skips it, and `scripts/custody.ts <sandbox>`
+    takes it later.
 - **Playwright is off by default** and refuses remote http(s) targets unless `SWARM_BROWSER_REMOTE=1`; under netguard the browser has no egress anyway.
 - **The web app gates what costs money, and keeps case data on this machine.**
   It binds `127.0.0.1`; reads need no token and show case data, so opening it

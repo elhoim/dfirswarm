@@ -16,13 +16,53 @@ not surprised:
   latter. The watchdogs spill to `traces/system-spill.jsonl`, not `work/`.
 - A kickoff that stops after registering puts away what it started and
   records the run as `failed`. The registry is written under a lock. The
-  host is kept awake for the run. A sandbox a running run uses is refused.
-- `stop` takes custody (see Added; `--no-custody` skips it) and says where it was
-  if interrupted. `reap <id>` touches only that run.
-- Pack secrets live in `~/.dfirswarm/secrets/<pack>.env`, not inside the pack
-  (a reinstall moves an old one). Six shipped packs were resealed with
-  corrected install lines (`pff-tools`, `libfwsi-python`, plaso from PyPI)
-  and pinned downloads.
+  host is asked not to sleep for the run (`caffeinate`, `systemd-inhibit`;
+  neither holds against a closed laptop lid). A sandbox a running run uses
+  is refused.
+- `stop` takes custody (see Added; `--no-custody` skips it,
+  `--custody-timeout SEC` bounds it, 14400 by default) and says where it was
+  if interrupted. Custody re-reads every evidence file, so a stop on a large
+  case takes as long as hashing the evidence once more. `reap <id>` touches
+  only that run.
+- The console binds `127.0.0.1` by default. It bound `0.0.0.0`, so anyone on
+  the LAN could read the board and the trace without a token; `--host
+  0.0.0.0` opens it to the LAN on purpose.
+- The finish line `done` runs is read from the registry only. It looked for
+  the registry beside the sandbox and fell back to the agent-writable
+  `SWARM.md` in silence; panes now get `SWARM_RUNS_DIR`, and a finish line
+  that is met but was read from anywhere else cannot certify a run
+  (abandoning still ends it).
+- The trace token and the console's token are masked in every trace line. A
+  shell's `env` in a tool output had put both into the trace.
+- Pack and library tools are registered at session start with forging off,
+  and named in `--tools`. They loaded only with `--allow-tool-forging`,
+  although the contract listed them as ready. A `--tools-from` tool of the
+  same name no longer replaces a pack's tool: the pack's copy is kept, and
+  different bytes are said.
+- Pack secrets are implemented (`docs/packs.md` §4): a pack tool gets its
+  pack's secrets in its own child's environment, and the trace row and the
+  output carry `[secret NAME]`. On the host that needs `--allow-pack-secrets`,
+  since a pane can read what its extension can; a pack that requires a
+  secret is refused without it. The secrets live in
+  `$DFIRSWARM_HOME/secrets/<pack>.env` (`~/.dfirswarm` by default), not inside
+  the pack; a reinstall moves an old one, and a pack that declares secrets
+  and still has a `secrets.env` in its directory stops the kickoff in either
+  mode. Six shipped packs were resealed with corrected install lines
+  (`pff-tools`, `libfwsi-python`, plaso from PyPI) and pinned downloads.
+- `--allow-install` sets `PIP_BREAK_SYSTEM_PACKAGES=1` in every pane:
+  `pip install --user` was refused on a PEP 668 system. The installs still
+  go under `work/.toolchain/`, and the Python install paths now reach a
+  forged or pack tool's child, which could not import what an agent had
+  installed. The inventory also reads a venv an agent made under
+  `work/.toolchain/`.
+- The inputs integrity walk no longer stops at 5,000 files and 12 levels.
+  Every manifest file past it read as missing, so a KAPE-style triage set
+  failed the check on every sweep.
+- `start --no-start` no longer leaves the collector, the gate and the broker
+  running.
+- The report says when refused connections are not observable, where it said
+  "nothing was refused" with no log behind it, and names each model's
+  provider hosts, recorded at kickoff.
 - `tools --save` keeps only sealed tools, with `provenance.json` and without a
   `pack` field; `pack.sh adopt` takes a saved tool into a pack. The toolbox's
   use column read " head -1" for every tool; fixed.
@@ -48,8 +88,12 @@ not surprised:
   - The board has one writer, the hub (`scripts/vm-hub.ts`); who is asking
     is the vsock port. The harness's own functions are not on the agents'
     channel, a sentinel is written only when the finish line passes on the
-    host, spend reports may only grow, and paths are resolved on the host
-    without following a planted link. The idle watchdog restarts a dead hub.
+    host (a reason starting `ABANDONED: ` is let through unchecked, and a
+    seat leaving on its own cap writes none), spend reports may only grow,
+    and paths are resolved on the host without following a planted link.
+    The hub keeps the wall clock itself; the caps apply to the spend each
+    seat reports. A keeper (`scripts/hub-supervise.sh`) restarts a dead
+    hub from its saved state until the run's stop.
   - No credential enters a VM: placeholders, swapped in by msb on the way
     to the credential's own hosts only, stopped and logged anywhere else.
     Subscriptions need `--allow-oauth-in-vm`. `--provider-host P=HOST` names
@@ -63,6 +107,11 @@ not surprised:
   - `netcheck --isolation microvm` asks msb what a run's VMs would reach.
     The report and the console's VM panel say what each VM was given, found
     and left: probe, image fit, clock, live state, installs outside the image.
+  - The console starts a VM run (`isolation`, `image`, `vm_cpus`,
+    `vm_memory`, `vm_disk`, `vm_snapshot`, `allow_oauth_in_vm`,
+    `provider_hosts`); its default "copy" of the evidence is sent as
+    `--inputs-copy` in a VM run, and a run whose hub could not put its VMs
+    away shows as `finish_failed`.
 - **Host custody at stop** (`scripts/custody.ts` → `custody.json`, printed by
   `stop` and carried by the report), both modes: the evidence re-hashed in
   full against a manifest anchored outside the run, every session file

@@ -767,11 +767,14 @@ Reviewing the change against itself turned up four defects, all fixed here:
 
 ### Still open
 
-- The container **run mode** (`--isolation container`): the Dockerfile, panes
-  over `docker exec`, the proxy sidecar on an `--internal` network, the image
-  digest in the run record, and ADR 0007's CI test for the whole thing.
-- Per-agent isolation, which needs `process.kill(pid, 0)` liveness to become
-  a heartbeat first.
+- ~~The container **run mode** (`--isolation container`)~~ — not built:
+  `--isolation microvm` took its place, one VM per agent rather than one
+  container per run (Phases 3 and 4 above; ADR 0009 says why a container's
+  root was not the boundary). The image digest is in the run record, and ADR
+  0007's CI test runs against the VMs.
+- ~~Per-agent isolation~~ — shipped 2026-09-24 as `--isolation microvm`
+  ([ADR 0009](adr/0009-agents-live-in-microvms.md)): one microVM per agent,
+  and liveness is each agent's report over its hub link, not a pid.
 - ~~The write guard on Linux~~ — shipped 2026-09-21: Landlock holds the write
   allowlist on every Linux kernel from 5.13, a user namespace (bubblewrap or
   `unshare`) adds the read-only root, the masks and the pid tree where the

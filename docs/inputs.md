@@ -24,23 +24,30 @@ it is refused or undone. Results go in `work/`, where the usual claims apply.
 | Registry | `inputs: {source, files, bytes, enforce, guard}` on the run, so the console can show it. |
 | Pane hook | With a kernel guard available, `.zsh/.zshenv`, `.bash/.bashrc` + `.bash/.bash_profile` and `.fsguard/plan.txt`; the workspace gets `ZDOTDIR` pointing at the first, and `HOME` at `.bash/` when the account's login shell is bash (below). |
 
-Limits: `--inputs-max-mb` (default 512) refuses a larger directory before
-anything is copied, and so does a directory with more than 5000 files: that
-is how many the watch and the checks cover, and the promise is not made
-where it cannot be kept.
+Limits: none by default, on size or on file count: evidence is as large as
+the case is. `--inputs-max-mb N` and `--inputs-max-files N` (or
+`SWARM_INPUTS_MAX_MB` and `SWARM_INPUTS_MAX_FILES` in the environment) are
+opt-in limits an operator may set; a directory above either is refused
+before anything is copied. What grows with the file count is the integrity
+sweep, which fingerprints every input.
 
 ### Under `--isolation microvm`
 
 No copy and no pristine clone: the evidence is used where it is, mounted
-read-only (and no-exec) into every agent's VM, and the host refuses every
-write through that mount whatever the guest does. `inputs/` is a link to it
-and `inputs.json` records `guard: "microvm"` and `held: "bind"`, links inside
-the evidence recorded as links. A link that leads out of the evidence is
-refused at kickoff, naming it, since no VM could follow it. When the
-examiner's account can write the evidence, the kickoff warns; `--inputs-copy`
-gives the run its own read-only copy instead (`held: "copy"`). The manifest's
-sha256 is anchored outside the run at kickoff, and custody re-hashes the
-evidence in full at stop against it.
+read-only and no-exec into every agent's VM, and the host refuses every
+write through that mount whatever the guest does. The no-exec is a flag in
+the guest's mount, and the VM's probe does not measure it. `inputs/` is a
+link to it and `inputs.json` records `guard: "microvm"` and `held: "bind"`,
+links inside the evidence recorded as links. A link that leads out of the
+evidence is refused at kickoff, naming it, since no VM could follow it. When
+the examiner's account can write the evidence, the kickoff warns;
+`--inputs-copy` gives the run its own read-only copy instead
+(`held: "copy"`), which lies on the run's read-only floor in each VM and so
+is read-only but not no-exec. The manifest's sha256 is anchored outside the
+run at kickoff, and custody re-hashes the evidence in full at stop against it
+(a custody that runs out of time says which files it did not re-read).
+`--inputs-image` is macOS-only (`hdiutil`) in either mode: there is no Linux
+path and no read-only virtio-blk attach to a VM yet.
 
 ## Three layers, from the tool call down to the kernel
 
@@ -150,12 +157,14 @@ token adds an absolute, existing directory, kept in `inputs-roots.json`
 under the runs directory so it survives a restart, and `DELETE
 /api/inputs/roots/N` removes one that was added that way (a root named at
 start cannot be removed from the form). The flag is off by default on
-purpose: anyone on the LAN holding the token could otherwise expose any
-directory on the machine, which is what the names-not-paths rule exists to
-prevent. `GET /api/inputs` is open
-like every other read on this app (the LAN can watch; the token gates what
-starts, stops or changes a run), so set names and a few file names per set
-are visible to the LAN: keep the root to what the LAN may know exists.
+purpose: anyone who can reach the console and holds the token could
+otherwise expose any directory on the machine, which is what the
+names-not-paths rule exists to prevent. `GET /api/inputs` is open like
+every other read on this app (whoever can reach it can watch; the token
+gates what starts, stops or changes a run). The console binds `127.0.0.1`,
+so by default that is this machine; started with `--host 0.0.0.0` it is the
+LAN, and set names and a few file names per set are then visible to it:
+keep the root to what the LAN may know exists.
 
 On a run, the header carries an **inputs read-only** chip with the guard
 summary, and the **Files** tab opens with the inputs: source, every file with
