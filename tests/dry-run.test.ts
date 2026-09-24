@@ -1459,6 +1459,29 @@ test("budget: a seat whose Pi session restarts keeps what it already spent", asy
   });
 });
 
+test("budget: a report of nothing is not a new session", async () => {
+  await withSandbox(async (root) => {
+    const usage = (spent_usd: number, calls: number) => ({
+      spent_usd,
+      tokens: calls * 100,
+      calls,
+      input: calls * 100,
+      output: 0,
+      cache_read: 0,
+      cache_write: 0,
+    });
+    await applySessionUsage(root, "agent00", usage(4, 4));
+    // A session read that failed reports zero; the next good read reports 5.
+    const blank = await applySessionUsage(root, "agent00", { ...usage(0, 0), context_tokens: 1234 });
+    assert.equal(blank.budget.agents.agent00.spent_usd, 4);
+    assert.equal(blank.budget.agents.agent00.context_tokens, 1234, "decoration still lands");
+    const after = await applySessionUsage(root, "agent00", usage(5, 5));
+    assert.equal(after.budget.agents.agent00.spent_usd, 5, "not 4 + 5");
+    assert.equal(after.budget.agents.agent00.calls, 5);
+    assert.equal(after.budget.agents.agent00.earlier_sessions, undefined);
+  });
+});
+
 test("budget: an unreadable budget.json does not take the caps off the run", async () => {
   await withSandbox(async (root) => {
     const seeded = await readBudget(root);

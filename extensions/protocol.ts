@@ -750,6 +750,20 @@ export async function writeBudget(sandboxRoot: string, budget: BudgetRecord): Pr
  * seat's totals so far are carried forward and the new session adds to them.
  */
 export function foldSessionSlice(previous: AgentBudget | undefined, slice: SessionUsageSlice): AgentBudget {
+  // A report of nothing at all is not a new session: it is what a failed read
+  // of the session looks like, and folding it as one would add the whole old
+  // session again on the next good read (4 -> 0 -> 5 recorded 9). A session
+  // that really is new has nothing to add yet, so keeping the counters loses
+  // nothing; its first real report starts the carry.
+  if (previous && SESSION_COUNTERS.every((key) => !(Number(slice[key]) > 0))) {
+    const row: AgentBudget = { ...previous };
+    for (const [key, value] of Object.entries(slice)) {
+      if (!(SESSION_COUNTERS as readonly string[]).includes(key) && value !== undefined) {
+        (row as Record<string, unknown>)[key] = value;
+      }
+    }
+    return row;
+  }
   const carried: SessionCounters = { spent_usd: 0, tokens: 0, calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 };
   if (previous) {
     const before = previous.earlier_sessions;
