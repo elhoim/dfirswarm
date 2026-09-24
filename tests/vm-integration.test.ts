@@ -410,7 +410,7 @@ test("a body with a percent sign reaches a secret's host from the VM's fetch, se
   const base = await mkdtemp(join(tmpdir(), "vmegress-"));
   cleanups.push(() => rm(base, { recursive: true, force: true }));
   await writeFile(join(base, "secret"), "dfirswarm-test-not-a-key");
-  const r = await rig("vmt6", ["vmt600"], { pack_secrets: [{ name: "VT_API_KEY", value_file: join(base, "secret"), hosts: ["www.virustotal.com"] }] });
+  const r = await rig("vmtg", ["vmtg00"], { pack_secrets: [{ name: "VT_API_KEY", value_file: join(base, "secret"), hosts: ["www.virustotal.com"] }] });
   const created = await createVms(r.spec);
   assert.deepEqual(created.failures, []);
   const script = [
@@ -421,7 +421,7 @@ test("a body with a percent sign reaches a secret's host from the VM's fetch, se
     `const installed = installChunkedEgress();`,
     `console.log(JSON.stringify({ hosts: process.env.SWARM_SECRET_HOSTS, plain, installed, chunked: await call() }));`,
   ].join("\n");
-  const out = await inVmAsync(vmName(r.run, "vmt600"), `cat > /tmp/egress.mjs <<'JS'\n${script}\nJS\nnode /tmp/egress.mjs`);
+  const out = await inVmAsync(vmName(r.run, "vmtg00"), `cat > /tmp/egress.mjs <<'JS'\n${script}\nJS\nnode /tmp/egress.mjs`);
   const line = out.split("\n").find((l) => l.startsWith("{"));
   assert.ok(line, `no answer from the guest:\n${out}`);
   const got = JSON.parse(line) as { hosts: string; plain: string; installed: boolean; chunked: string };
@@ -438,14 +438,14 @@ test("a large mounted text file is text to grep, and SEEK_DATA and SEEK_HOLE ans
   // On a macOS host msb swapped the two, every mounted file looked like one
   // hole, and grep printed "binary file matches" for a catalogue file list
   // (run s882f8d). images/seekfix.c, preloaded in the image, swaps them back.
-  const r = await rig("vmt7", ["vmt700"]);
+  const r = await rig("vmth", ["vmth00"]);
   const big = join(r.evidence, "filelist.txt");
   await writeFile(big, `${"r/r 1-128-1:\tUsers/x/AppData/Local/file.dat\n".repeat(6000)}r/r 2-128-1:\tUsers/IEUser/AppData/Local/Microsoft/Windows/AppCache/container.dat\n`);
   const size = (await stat(big)).size;
   const created = await createVms(r.spec);
   assert.deepEqual(created.failures, []);
   const out = inVm(
-    vmName(r.run, "vmt700"),
+    vmName(r.run, "vmth00"),
     `grep -F container.dat ${big} 2>&1; python3 -c 'import os; fd=os.open("${big}", os.O_RDONLY); print("seek", os.lseek(fd, 0, os.SEEK_DATA), os.lseek(fd, 0, os.SEEK_HOLE))'`,
   );
   assert.match(out, /^r\/r 2-128-1:\tUsers\/IEUser\/AppData\/Local\/Microsoft\/Windows\/AppCache\/container\.dat$/m, `grep printed the line:\n${out}`);
