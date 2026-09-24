@@ -972,6 +972,9 @@ export type FinishEntry = { agent: string; name: string; snapshot?: string; erro
  * kept, never removed, since removing it is the one step that cannot be
  * undone; and every msb step's outcome is in the entry, not swallowed.
  */
+/** How long a finish waits for another finish of the same run that is still alive. */
+const FINISH_LOCK_WAIT_MS = 45 * 60_000;
+
 export async function finishRun(runId: string, sandbox: string, options: { snapshot?: boolean; agent?: string; registry?: string } = {}): Promise<FinishEntry[]> {
   const msb = msbBinary();
   const records = join(sandbox, "vm");
@@ -980,7 +983,11 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
   await mkdir(records, { recursive: true });
   const lock = join(records, ".finish.lock");
   let held = false;
-  for (let i = 0; i < 20 && !held; i++) {
+  // A finish in progress (the hub putting a seat away, or the swarm) holds
+  // the lock for as long as its snapshots take: wait for it while its owner
+  // lives, rather than give up after a minute and leave the run half put away.
+  const deadline = Date.now() + FINISH_LOCK_WAIT_MS;
+  while (!held && Date.now() < deadline) {
     try {
       await mkdir(lock);
       // Whose it is: a stop interrupted with ^C leaves the lock, and the

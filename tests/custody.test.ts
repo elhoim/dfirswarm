@@ -162,11 +162,58 @@ test("the ledger's chain is verified: an entry rewritten after the fact breaks i
   await writeFile(join(root, "ledger", "entries.jsonl"), `${JSON.stringify(e1)}\n${JSON.stringify(e2)}\n`);
   let c = await takeCustody(root);
   assert.equal(c.ledger?.intact, true);
-  assert.match(c.summary, /ledger 2 entries, chain intact/);
+  assert.match(c.summary, /ledger 2 entries, all chained, chain intact/);
   await writeFile(join(root, "ledger", "entries.jsonl"), `${JSON.stringify({ ...e1, value: "first, reworded" })}\n${JSON.stringify(e2)}\n`);
   c = await takeCustody(root);
   assert.equal(c.ledger?.intact, false);
   assert.match(c.summary, /LEDGER CHAIN BROKEN/);
+  // A line added after the chained ones without the chain is a line added
+  // outside it, not an old unchained entry.
+  const loose = { seq: 3, kind: "finding", value: "slipped in", source: "s", evidence: "e", by: "a1", authors: ["a1"], at: "2026-09-24T00:00:02Z" };
+  await writeFile(join(root, "ledger", "entries.jsonl"), `${JSON.stringify(e1)}\n${JSON.stringify(e2)}\n${JSON.stringify(loose)}\n`);
+  c = await takeCustody(root);
+  assert.equal(c.ledger?.intact, false, "an unchained entry after chained ones breaks the chain");
+  assert.match(c.summary, /LEDGER CHAIN BROKEN .*without the chain/);
+});
+
+test("the ledger's provenance is in its chain, and the ledger is held to the trace", async () => {
+  const root = await sandbox();
+  await mkdir(join(root, "ledger"), { recursive: true });
+  // Entries written before the ledger was chained, then chained ones: the
+  // first chained entry names the last old one, and the whole verifies.
+  const old: LedgerEntry = { seq: 1, kind: "event", ts: "2026-01-01T00:00:00Z", value: "old", by: "a0", authors: ["a0"], at: "2026-09-24T00:00:00Z" };
+  const e2: LedgerEntry = { v: 2, seq: 2, kind: "finding", value: "second", source: "s", evidence: "e", confidence: "high", by: "a1", authors: ["a1"], at: "2026-09-24T00:00:01Z" };
+  e2.prev = ledgerHash(old, "genesis");
+  e2.hash = ledgerHash(e2, e2.prev);
+  const e3: LedgerEntry = { v: 2, seq: 3, kind: "ioc", value: "1.2.3.4", source: "fw.log", evidence: "line 9", by: "a0", authors: ["a0"], at: "2026-09-24T00:00:02Z" };
+  e3.prev = e2.hash;
+  e3.hash = ledgerHash(e3, e3.prev);
+  const write = (entries: LedgerEntry[]) => writeFile(join(root, "ledger", "entries.jsonl"), entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
+  await write([old, e2, e3]);
+  // The record tool's lines carry each new entry's hash.
+  const traceLine = (e: LedgerEntry, n: number) => JSON.stringify({ ts: e.at, agent: e.by, tool: "record", args: {}, result: { ok: true, seq: e.seq, merged: false, total: n, hash: e.hash } });
+  await writeFile(join(root, "traces", "events.jsonl"), `${traceLine(e2, 2)}\n${traceLine(e3, 3)}\n`);
+  let c = await takeCustody(root);
+  assert.equal(c.ledger?.intact, true, JSON.stringify(c.ledger));
+  assert.match(c.summary, /ledger 3 entries, 2 of 3 chained, chain intact/);
+  // Rewriting a version 2 entry's source breaks the chain: provenance is in the core.
+  await write([old, e2, { ...e3, source: "somewhere else" }]);
+  c = await takeCustody(root);
+  assert.equal(c.ledger?.intact, false, "a rewritten source breaks the chain");
+  // The last entry deleted: the chain the file still has is intact, and the
+  // trace says an entry is gone.
+  await write([old, e2]);
+  c = await takeCustody(root);
+  assert.deepEqual(c.ledger?.missing_from_ledger, [e3.hash]);
+  assert.match(c.summary, /LEDGER DIFFERS FROM THE TRACE: 1 entry on the trace missing from the ledger/);
+  // An entry written into the file without the tool: chained, never on the trace.
+  const e4: LedgerEntry = { v: 2, seq: 4, kind: "finding", value: "forged", source: "x", evidence: "y", by: "a1", authors: ["a1"], at: "2026-09-24T00:00:03Z" };
+  e4.prev = e3.hash;
+  e4.hash = ledgerHash(e4, e4.prev);
+  await write([old, e2, e3, e4]);
+  c = await takeCustody(root);
+  assert.deepEqual(c.ledger?.not_on_trace, [4]);
+  assert.match(c.summary, /in the ledger never on the trace \(seq 4\)/);
 });
 
 test("custody checks a kept VM disk against its record, and counts lines the chain never took", async () => {
@@ -181,7 +228,7 @@ test("custody checks a kept VM disk against its record, and counts lines the cha
   await writeFile(join(root, "tool-output", "a0", "trace-spill.jsonl"), '{"tool":"bash"}\n{"tool":"read"}\n');
   const c = await takeCustody(root);
   assert.deepEqual(c.vms?.map((v) => [v.agent, v.snapshot && "verified" in v.snapshot ? v.snapshot.verified : null]), [["a0", true], ["a1", false]]);
-  assert.match(c.summary, /2 VMs, 1 of 2 snapshots verified, 2 NOT PUT AWAY/, "a VM never recorded as stopped is named");
+  assert.match(c.summary, /2 VMs, 1 of 2 snapshots verified against their record, .*2 NOT PUT AWAY/, "a VM never recorded as stopped is named");
   assert.deepEqual(c.trace.spilled, [{ path: "tool-output/a0/trace-spill.jsonl", lines: 2, agent: "a0", bad: 2, duplicates: 0 }], "spilled lines that do not say whose they are cannot be attributed");
   assert.match(c.summary, /2 trace lines outside the chain .* 2 NOT ATTRIBUTABLE/);
   await writeFile(join(root, "tool-output", "a0", "trace-spill.jsonl"), '{"tool":"bash","agent":"a0"}\n{"tool":"read","agent":"a1"}\n');

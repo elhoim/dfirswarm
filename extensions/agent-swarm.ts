@@ -2502,7 +2502,10 @@ export default function (pi: ExtensionAPI) {
         await logEvent(toolCtx.cwd, agentId, "record", { kind: params.kind }, { ok: false, reason: result.reason }, Date.now() - started);
         return { content: [{ type: "text" as const, text: `record refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
       }
-      await logEvent(toolCtx.cwd, agentId, "record", { kind: params.kind, ts: params.ts, value: params.value }, { ok: true, seq: result.entry.seq, merged: result.merged, total: result.total }, Date.now() - started);
+      // The entry's hash goes on the trace, which is anchored outside the
+      // run: custody holds the ledger to it, so an entry deleted from the
+      // tail, or one written into the file without this tool, is named.
+      await logEvent(toolCtx.cwd, agentId, "record", { kind: params.kind, ts: params.ts, value: params.value }, { ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.hash ? { hash: result.entry.hash } : {}) }, Date.now() - started);
       return okResult({ ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, rendered: LEDGER_MD });
     },
   });

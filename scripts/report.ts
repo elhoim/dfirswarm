@@ -39,11 +39,13 @@ import { fileURLToPath } from "node:url";
 import {
   EVENTS_REL,
   SENTINEL_REL,
+  claimKey,
   normalizeBudget,
   readEventLog,
   readInputsManifest,
   readLedger,
   readNames,
+  readSandboxFile,
   verifyEventChain,
   type AgentBudget,
   type BudgetRecord,
@@ -1179,9 +1181,20 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
   // --- 9. The swarm's own report ------------------------------------------
   const own = await (async () => {
     for (const candidate of [sentinel?.output, "work/report.md", "work/notes.md"]) {
-      if (!candidate || !candidate.startsWith("work/") || !candidate.endsWith(".md")) continue;
-      const text = await readFile(join(sandbox, candidate), "utf8").catch(() => null);
-      if (text && text.trim()) return { path: candidate, text };
+      if (!candidate || !candidate.endsWith(".md")) continue;
+      // The sentinel's output is an agent's word: a path that leaves the run
+      // (`work/../..`) or a link an agent planted is not read into a report
+      // that leaves the building.
+      let key: string;
+      try {
+        key = claimKey(sandbox, candidate);
+      } catch {
+        continue;
+      }
+      if (!key.startsWith("work/")) continue;
+      const read = await readSandboxFile(sandbox, key, { maxBytes: 16 * 1024 * 1024 }).catch(() => null);
+      const text = read ? read.bytes.toString("utf8") : null;
+      if (text && text.trim()) return { path: key, text };
     }
     return null;
   })();

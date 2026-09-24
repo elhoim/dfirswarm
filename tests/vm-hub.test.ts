@@ -5,6 +5,7 @@
  * extension in a VM does (extensions/board.ts), with a stand-in collector.
  */
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -19,6 +20,22 @@ after(async () => {
   for (const c of cleanups.reverse()) await c().catch(() => undefined);
 });
 
+/**
+ * Run `fn` as the extension in a seat's VM runs: the board's calls go to
+ * that seat's hub socket (SWARM_BOARD_SOCKET), so the wrappers that send a
+ * file's bytes with the call are the ones exercised.
+ */
+async function asVm<T>(socket: string, fn: () => Promise<T>): Promise<T> {
+  const was = process.env.SWARM_BOARD_SOCKET;
+  process.env.SWARM_BOARD_SOCKET = socket;
+  try {
+    return await fn();
+  } finally {
+    if (was === undefined) delete process.env.SWARM_BOARD_SOCKET;
+    else process.env.SWARM_BOARD_SOCKET = was;
+  }
+}
+
 /** Poll until the condition holds: a fixed sleep was either too short on a loaded runner or wasted time. */
 async function until(cond: () => boolean, what: string, ms = 5000): Promise<void> {
   const end = Date.now() + ms;
@@ -28,7 +45,7 @@ async function until(cond: () => boolean, what: string, ms = 5000): Promise<void
   }
 }
 
-async function setup(options: { agents?: string[]; settleMs?: number; wall?: number; collector?: boolean; forging?: boolean } = {}) {
+async function setup(options: { agents?: string[]; settleMs?: number; wall?: number; collector?: boolean; forging?: boolean; extra?: Record<string, unknown> } = {}) {
   const agents = options.agents ?? ["a0", "a1"];
   const base = await mkdtemp(join(tmpdir(), "dfs-hub-"));
   const sandbox = join(base, "runs", "t1");
@@ -63,6 +80,7 @@ async function setup(options: { agents?: string[]; settleMs?: number; wall?: num
     settleMs: options.settleMs ?? 0,
     herdrBin: "/usr/bin/false",
     forging: options.forging ?? true,
+    ...(options.extra ?? {}),
   });
   await hub.start();
   cleanups.push(async () => {
@@ -333,14 +351,107 @@ test("a link an agent planted in work/ is refused: history, diffs and restores n
   await mkdir(join(sandbox, "work", "a0"), { recursive: true });
   await writeFile(join(sandbox, "work", "a0", "own.md"), "rev one\n");
   await board.callBoard(hub.socketFor("a0"), "claimFile", [null, "work/a0/own.md", { reason: "mine" }]);
-  const rec = (await board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/a0/own.md", "a0"])) as { rev: number };
+  // The hub does not open a file in a seat's own directory: a call without
+  // its bytes is refused, and the VM's wrapper sends them.
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/a0/own.md", "a0"]), /its bytes come with the call/);
+  const rec = (await asVm(hub.socketFor("a0"), () => board.recordFileVersion(sandbox, "work/a0/own.md", "a0"))) as { rev: number };
   assert.equal(rec.rev, 1);
   await writeFile(join(sandbox, "work", "a0", "other.md"), "do not touch\n");
   await rm(join(sandbox, "work", "a0", "own.md"));
   await symlink("other.md", join(sandbox, "work", "a0", "own.md"));
   const restored = (await board.callBoard(hub.socketFor("a0"), "restoreFileVersion", [null, "work/a0/own.md", 1]).catch((e: Error) => ({ ok: false, reason: e.message }))) as { ok: boolean; reason?: string };
   assert.equal(restored.ok, false, `a restore through a link is refused: ${JSON.stringify(restored)}`);
+  const inVm = await asVm(hub.socketFor("a0"), () => board.restoreFileVersion({ sandboxRoot: sandbox, agentId: "a0" }, "work/a0/own.md", 1));
+  assert.equal(inVm.ok, false, `nor in the VM: ${JSON.stringify(inVm)}`);
   assert.equal(await readFile(join(sandbox, "work", "a0", "other.md"), "utf8"), "do not touch\n", "the link's target is untouched");
+});
+
+test("the hub never opens a file in a seat's own directory: records, diffs and publishes carry the bytes, restores happen in the VM", async () => {
+  const { hub, sandbox } = await setup();
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  await writeFile(join(sandbox, "work", "a0", "notes.md"), "one\n");
+  const vm = (fn: () => Promise<unknown>) => asVm(hub.socketFor("a0"), fn);
+  const r1 = (await vm(() => board.recordFileVersion(sandbox, "work/a0/notes.md", "a0"))) as { rev: number; sha256: string };
+  assert.equal(r1.rev, 1);
+  await writeFile(join(sandbox, "work", "a0", "notes.md"), "one\ntwo\n");
+  const r2 = (await vm(() => board.recordFileVersion(sandbox, "work/a0/notes.md", "a0"))) as { rev: number };
+  assert.equal(r2.rev, 2);
+  // What the hub recorded is what the VM sent, and a diff against the disk
+  // uses the VM's own view of it.
+  const diff = (await vm(() => board.fileDiff(sandbox, "work/a0/notes.md", 1))) as { added: number };
+  assert.equal(diff.added, 1);
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "fileDiff", [sandbox, "work/a0/notes.md", 1]), /the bytes on disk come with the call/, "a raw diff against a hole's disk is refused");
+  // A restore of one's own file is made in the VM, checked against the hash the hub recorded.
+  const restored = (await vm(() => board.restoreFileVersion({ sandboxRoot: sandbox, agentId: "a0" }, "work/a0/notes.md", 1))) as { ok: boolean; sha256?: string; landed_rev?: number | null };
+  assert.equal(restored.ok, true, JSON.stringify(restored));
+  assert.equal(restored.sha256, r1.sha256);
+  assert.equal(await readFile(join(sandbox, "work", "a0", "notes.md"), "utf8"), "one\n");
+  assert.equal(restored.landed_rev, 3, "the restore itself is a revision");
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "restoreFileVersion", [null, "work/a0/notes.md", 2]), /restores it in your VM/);
+  // A file past the store limit is recorded by its hash only, and cannot be restored.
+  const big = (await board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/a0/notes.md", "a0", { hash_only: { sha256: "a".repeat(64), bytes: 40 * 1024 * 1024 } }])) as { rev: number; stored?: boolean };
+  assert.equal(big.stored, false);
+  const noBytes = (await vm(() => board.restoreFileVersion({ sandboxRoot: sandbox, agentId: "a0" }, "work/a0/notes.md", big.rev))) as { ok: boolean; reason?: string };
+  assert.equal(noBytes.ok, false);
+  assert.match(noBytes.reason ?? "", /hash only/);
+  // Bytes over the limit in a call are refused.
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/a0/notes.md", "a0", { bytes_b64: Buffer.alloc(33 * 1024 * 1024).toString("base64") }]), /hash_only/);
+});
+
+test("a seat cannot claim, record, restore or publish into a peer's directory, whatever the letter case", async () => {
+  const { hub, sandbox } = await setup();
+  await mkdir(join(sandbox, "work", "a1"), { recursive: true });
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  await writeFile(join(sandbox, "work", "a1", "findings.md"), "a1's\n");
+  await writeFile(join(sandbox, "work", "a0", "evil.md"), "a0's\n");
+  const claim = (await board.callBoard(hub.socketFor("a0"), "claimFile", [null, "work/a1/findings.md", { reason: "take it" }])) as { ok: boolean; owner?: string };
+  assert.equal(claim.ok, false);
+  assert.equal(claim.owner, "a1");
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/a1/findings.md", "a0", { bytes_b64: "eA==" }]), /a1's own directory/);
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "restoreFileVersion", [null, "work/a1/findings.md", 1]), /a1's own directory/);
+  const guard = (await board.callBoard(hub.socketFor("a0"), "guardWrite", [null, "work/a1/findings.md"])) as { ok: boolean; reason?: string };
+  assert.equal(guard.ok, false);
+  for (const to of ["work/a1/findings.md", "work/A1/findings.md", "work/extracted/a1/x.md", "tool-output/a1/x"]) {
+    const res = (await asVm(hub.socketFor("a0"), () => board.publishFile({ sandboxRoot: sandbox, agentId: "a0" }, "work/a0/evil.md", to))) as { ok: boolean; reason?: string };
+    assert.equal(res.ok, false, `${to}: ${JSON.stringify(res)}`);
+  }
+  assert.equal(await readFile(join(sandbox, "work", "a1", "findings.md"), "utf8"), "a1's\n", "the peer's file is untouched");
+});
+
+// Linux names the file a descriptor holds, which closes the race; macOS does
+// not, and there the hub's answer is never to open such a path at all (the
+// tests above). So the race itself is held to zero on Linux only.
+test("the harness's reads refuse a directory swapped for a link while they read", { skip: process.platform !== "linux" && "macOS gives no path for an open descriptor; the hub never opens a seat's directory instead" }, async () => {
+  const { sandbox, dir } = await setup();
+  const { readSandboxFile } = await import("../extensions/protocol.ts");
+  const outside = join(dir, "outside");
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(outside, "auth.json"), "SECRET");
+  const inside = join(sandbox, "work", "a0", "sub");
+  await mkdir(inside, { recursive: true });
+  await writeFile(join(inside, "auth.json"), "fine");
+  // A second process swaps the directory for a link to the outside one and back, as fast as it can.
+  const { spawn } = await import("node:child_process");
+  const swapper = spawn(process.execPath, ["-e", `
+    const fs = require("node:fs");
+    const d = ${JSON.stringify(inside)}, parked = d + ".real", out = ${JSON.stringify(outside)};
+    const end = Date.now() + 2500;
+    while (Date.now() < end) {
+      try { fs.renameSync(d, parked); fs.symlinkSync(out, d); fs.unlinkSync(d); fs.renameSync(parked, d); } catch {}
+    }
+    try { fs.unlinkSync(d); } catch {}
+    try { fs.renameSync(parked, d); } catch {}
+  `]);
+  let leaks = 0;
+  let reads = 0;
+  const end = Date.now() + 2500;
+  while (Date.now() < end) {
+    const got = await readSandboxFile(sandbox, "work/a0/sub/auth.json").catch(() => null);
+    reads += 1;
+    if (got && got.bytes.toString() === "SECRET") leaks += 1;
+  }
+  await new Promise((r) => swapper.once("exit", r));
+  assert.equal(leaks, 0, `${leaks} of ${reads} reads returned the outside file`);
 });
 
 test("a seat's spend report may only grow: a smaller, negative or non-numeric report is refused and the row stays", async () => {
@@ -450,12 +561,192 @@ test("a burst of calls from one seat queues past the running cap and is refused 
   assert.equal(answers.length - refused, 256, "and the rest were answered");
 });
 
+
+/** One raw request on its own connection, answered with one line: what a VM's one-shot call is. */
+function rawCall(socket: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const s = connect(socket);
+    let buf = "";
+    s.setEncoding("utf8");
+    s.on("connect", () => s.write(`${JSON.stringify(body)}\n`));
+    s.on("data", (d: string) => {
+      buf += d;
+      const cut = buf.indexOf("\n");
+      if (cut >= 0) {
+        s.destroy();
+        resolve(JSON.parse(buf.slice(0, cut)));
+      }
+    });
+    s.on("error", reject);
+  });
+}
+
+/** A stand-in for scripts/vm.ts: records how it was called; a custody.ts beside it records what it saw. */
+async function fakeVmCli(dir: string, sandbox: string): Promise<{ cli: string; log: string; seen: string }> {
+  const bin = join(dir, "fake-bin");
+  await mkdir(bin, { recursive: true });
+  const log = join(bin, "calls.log");
+  const seen = join(bin, "custody-saw.txt");
+  await writeFile(join(bin, "vm.ts"), `require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n`);
+  await writeFile(join(bin, "custody.ts"), `const fs = require("node:fs"); fs.writeFileSync(${JSON.stringify(seen)}, fs.existsSync(${JSON.stringify(join(sandbox, "traces", "hub-spill.jsonl"))}) ? "spill copied" : "no spill");\n`);
+  return { cli: join(bin, "vm.ts"), log, seen };
+}
+
+test("a call a seat sends again after a dropped link is run once: the same request id gets the first answer", async () => {
+  const { hub, sandbox } = await setup();
+  const body = { t: "rpc", fn: "postMessage", rid: "req-1", args: [null, { tag: "intro", body: "said once" }] };
+  const first = await rawCall(hub.socketFor("a0"), body);
+  const again = await rawCall(hub.socketFor("a0"), body);
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.deepEqual(again.result, first.result, "the repeat gets the first run's answer");
+  const posts = (await readdir(join(sandbox, "threads", "main"))).filter((f) => f.endsWith("-a0.md"));
+  assert.equal(posts.length, 1, "and the board has the post once");
+  // The same id from another seat is another request.
+  const other = await rawCall(hub.socketFor("a1"), body);
+  assert.notDeepEqual(other.result, first.result);
+  // A restarted hub still knows the id (the answers are kept in its own directory).
+  const replies = await readFile(join(hub.cfg.dir, "replies.jsonl"), "utf8");
+  assert.match(replies, /req-1/);
+});
+
+test("a seat that posts in a loop is slowed, its peers are not, and the refusals are counted rather than written each time", async () => {
+  const { hub, lines } = await setup();
+  const results: string[] = [];
+  for (let i = 0; i < 46; i++) {
+    results.push(await board.callBoard(hub.socketFor("a0"), "postMessage", [null, { tag: "intro", body: `post ${i}` }]).then(() => "ok", (e: Error) => e.message));
+  }
+  assert.equal(results.filter((r) => r === "ok").length, 40, "a burst up to the bucket goes through");
+  assert.ok(results.slice(40).every((r) => /slow down/.test(r)), results.slice(40).join(" | "));
+  assert.equal(await board.callBoard(hub.socketFor("a1"), "postMessage", [null, { tag: "intro", body: "a1 is fine" }]).then(() => "ok"), "ok", "a peer is not slowed");
+  await until(() => lines.some((l) => l.tool === "hub_call" && (l.args as { fn?: string }).fn === "postMessage"), "the first refusal is on the trace");
+  const refusalLines = lines.filter((l) => l.tool === "hub_call" && (l.args as { fn?: string }).fn === "postMessage" && (l.result as { ok?: boolean }).ok === false);
+  assert.equal(refusalLines.length, 1, "six identical refusals in a minute are one line and a count");
+  await hub.flushRefusals();
+  await until(() => lines.some((l) => (l.result as { repeated?: number }).repeated === 5), "the count is written on the flush");
+});
+
+test("one seat cannot hold more connections than its cap, and a peer's calls still answer", async () => {
+  const { hub } = await setup();
+  const held = Array.from({ length: 24 }, () => connect(hub.socketFor("a0")));
+  let closed = 0;
+  for (const s of held) {
+    s.on("error", () => undefined);
+    s.on("close", () => (closed += 1));
+  }
+  await until(() => closed >= 8, `connections past the cap are closed (${closed} closed)`);
+  assert.ok(closed <= 12, `only those past the cap (${closed} closed)`);
+  const answer = (await board.callBoard(hub.socketFor("a1"), "listTeam", [null])) as { agents: unknown[] };
+  assert.equal(answer.agents.length, 2);
+  for (const s of held) s.destroy();
+});
+
+test("a seat's usage report carries only a budget row's fields, each of its kind, and never moves the seat's model", async () => {
+  const { hub, sandbox } = await setup();
+  const budgetFile = join(sandbox, "budget.json");
+  const b = JSON.parse(await readFile(budgetFile, "utf8"));
+  b.agents.a0 = { ...emptyAgentBudget(), model: "openai/gpt-5" };
+  await writeFile(budgetFile, JSON.stringify(b));
+  const row = { ...emptyAgentBudget(), spent_usd: 0.2, tokens: 10, junk: "x".repeat(100_000), model: "local/free", context_level: "notice", context_locked: false };
+  await board.callBoard(hub.socketFor("a0"), "applySessionUsage", [sandbox, "a0", row]);
+  const after = JSON.parse(await readFile(budgetFile, "utf8")).agents.a0;
+  assert.equal(after.junk, undefined, "a field a row does not have is dropped");
+  assert.equal(after.model, "openai/gpt-5", "the kickoff's model stays");
+  assert.equal(after.context_level, "notice");
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "applySessionUsage", [sandbox, "a0", { ...row, spent_usd: 0.3, context_level: 42 }]), /context_level/);
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "applySessionUsage", [sandbox, "a0", { ...row, spent_usd: 0.3, context_locked: "yes" }]), /context_locked/);
+  // Reports in flight at once: the check is made under the table lock, so the row ends at the largest.
+  const values = Array.from({ length: 30 }, (_, i) => (i % 2 ? 1 + i / 100 : 2 + i / 100));
+  await Promise.all(values.map((v) => board.callBoard(hub.socketFor("a0"), "applySessionUsage", [sandbox, "a0", { ...emptyAgentBudget(), spent_usd: v, tokens: 10 }]).catch(() => undefined)));
+  const last = JSON.parse(await readFile(budgetFile, "utf8")).agents.a0.spent_usd;
+  assert.equal(last, Math.max(...values), `the row never went back (${last})`);
+});
+
+test("the hub's own calls are on the trace: a refused forge and a done that ended the swarm", async () => {
+  const { hub, lines } = await setup({ forging: false });
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "forgeTool", [null, { name: "x_tool", runtime: "bash", script: "echo" }]), /forging is off/);
+  await board.callBoard(hub.socketFor("a1"), "markDone", [null, { reason: "ABANDONED: nothing to do", outputFile: "work/none.md" }]);
+  await until(() => lines.filter((l) => l.tool === "hub_call").length >= 2, "two hub_call lines");
+  const calls = lines.filter((l) => l.tool === "hub_call") as Array<{ agent: string; args: { agent: string; fn: string }; result: Record<string, unknown>; sid?: string; seq?: number }>;
+  const forge = calls.find((c) => c.args.fn === "forgeTool");
+  assert.equal(forge?.result.ok, false);
+  assert.equal(forge?.args.agent, "a0");
+  const done = calls.find((c) => c.args.fn === "markDone");
+  assert.equal(done?.result.ok, true);
+  assert.equal(done?.result.created_sentinel, true);
+  assert.ok(calls.every((c) => typeof c.sid === "string" && typeof c.seq === "number"), "the hub numbers its own lines");
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "markDone", [null, { reason: "done", outputFile: "../../etc/passwd" }]), /escapes sandbox/, "a done's output file is a file in the run");
+});
+
+test("the hub puts the VMs away with the run's registry and snapshot choice, and custody sees its own spilled lines", async () => {
+  const pre = await mkdtemp(join(tmpdir(), "dfh-fake-"));
+  cleanups.push(() => rm(pre, { recursive: true, force: true }));
+  const registry = join(pre, "registry.json");
+  await writeFile(registry, JSON.stringify({ runs: [{ id: "t1", state: "running" }] }));
+  const probe = await setup({ collector: false });
+  const fake = await fakeVmCli(pre, probe.sandbox);
+  await probe.hub.stop();
+  const { hub, sandbox } = await setup({ collector: false, extra: { run: "t1", vmCli: fake.cli, registry, snapshot: false } });
+  const fake2 = await fakeVmCli(pre, sandbox);
+  (hub.cfg as { vmCli?: string }).vmCli = fake2.cli;
+  await writeFile(join(sandbox, SENTINEL_REL), "---\nby: a0\nreason: done\n---\n");
+  for (const a of ["a0", "a1"]) await writeFile(join(sandbox, "done", "agents", `${a}.done`), "---\nby: x\n---\n");
+  await hub.backstop(Date.now());
+  await hub.backstop(Date.now() + 1000);
+  const calls = (await readFile(fake2.log, "utf8")).trim().split("\n").map((l) => JSON.parse(l) as string[]);
+  const finish = calls.find((c) => c.includes("finish") && !c.includes("--agent"));
+  assert.ok(finish, JSON.stringify(calls));
+  assert.ok(finish.includes("--no-snapshot"), "the run's --no-vm-snapshot reaches the finish");
+  assert.equal(finish[finish.indexOf("--registry") + 1], registry, "only this registry's VMs are put away");
+  assert.equal(await readFile(fake2.seen, "utf8"), "spill copied", "the hub's own spilled lines are in the run before custody reads it");
+  assert.equal(JSON.parse(await readFile(registry, "utf8")).runs[0].state, "finished");
+});
+
+test("a seat that is done while the swarm goes on has its VM put away a grace period later", async () => {
+  const pre = await mkdtemp(join(tmpdir(), "dfh-leave-"));
+  cleanups.push(() => rm(pre, { recursive: true, force: true }));
+  const probe = await setup();
+  const fake = await fakeVmCli(pre, probe.sandbox);
+  await probe.hub.stop();
+  const { hub } = await setup({ extra: { run: "t1", vmCli: fake.cli, seatLeaveMs: 50 } });
+  await board.callBoard(hub.socketFor("a0"), "markDone", [null, { reason: "agent_cap", outputFile: "work/a0.md", createSentinel: false }]);
+  await until(() => existsSync(fake.log), "the seat's VM is put away", 5000);
+  const calls = (await readFile(fake.log, "utf8")).trim().split("\n").map((l) => JSON.parse(l) as string[]);
+  assert.ok(calls.some((c) => c.includes("--agent") && c[c.indexOf("--agent") + 1] === "a0"), JSON.stringify(calls));
+  assert.ok(!calls.some((c) => c.includes("--agent") && c[c.indexOf("--agent") + 1] === "a1"), "and no other seat's");
+});
+
+test("a hub started from the command line keeps what --resume needs: the runs directory of its registry and the inbox bound", async () => {
+  const base = await mkdtemp(join(tmpdir(), "dfh-main-"));
+  cleanups.push(() => rm(base, { recursive: true, force: true }));
+  const sandbox = join(base, "elsewhere", "case");
+  await mkdir(join(sandbox, "traces"), { recursive: true });
+  const registry = join(base, "runs", "registry.json");
+  await mkdir(join(base, "runs"), { recursive: true });
+  await writeFile(registry, JSON.stringify({ runs: [] }));
+  const dir = join(base, "hub");
+  const { spawn } = await import("node:child_process");
+  const env: NodeJS.ProcessEnv = { ...process.env, SWARM_INBOX_PAGE_CHARS: "12345" };
+  delete env.SWARM_RUNS_DIR;
+  const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", join(import.meta.dirname, "..", "scripts", "vm-hub.ts"), sandbox, "--dir", dir, "--registry", registry, "--quiet"], { env, stdio: ["pipe", "ignore", "ignore"] });
+  child.stdin.end(JSON.stringify({ agents: ["a0"], tokens: {}, collector: join(sandbox, "traces", "none.sock") }));
+  cleanups.push(async () => child.kill());
+  await until(() => existsSync(join(dir, "admin.sock")), "the hub is up", 10_000);
+  const input = JSON.parse(await readFile(join(dir, "hub-input.json"), "utf8")) as { env?: Record<string, string> };
+  assert.equal(input.env?.SWARM_RUNS_DIR, join(base, "runs"), "the finish line is found through the registry's directory, wherever the sandbox is");
+  assert.equal(input.env?.SWARM_INBOX_PAGE_CHARS, "12345");
+  child.kill();
+});
+
 test("publish_file: a seat's own file lands in the shared work/ claimed and recorded; a peer's directory and a peer's claim are refused", async () => {
   const { hub, sandbox } = await setup();
+  const ctx0 = { sandboxRoot: sandbox, agentId: "a0" };
+  const ctx1 = { sandboxRoot: sandbox, agentId: "a1" };
+  const pub = (socket: string, ctx: { sandboxRoot: string; agentId: string }, from: string, to: string) => asVm(socket, () => board.publishFile(ctx, from, to));
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "publishFile", [null, "work/a0/report.md", "work/report.md"]), /bytes with the call/, "a publish without its bytes is refused");
   await mkdir(join(sandbox, "work", "a0"), { recursive: true });
   await mkdir(join(sandbox, "work", "a1"), { recursive: true });
   await writeFile(join(sandbox, "work", "a0", "report.md"), "# findings\n");
-  const published = (await board.callBoard(hub.socketFor("a0"), "publishFile", [null, "work/a0/report.md", "work/report.md"])) as { ok: boolean; path: string; sha256: string; rev: number | null; reason?: string };
+  const published = (await pub(hub.socketFor("a0"), ctx0, "work/a0/report.md", "work/report.md")) as { ok: boolean; path: string; sha256: string; rev: number | null; reason?: string };
   assert.equal(published.ok, true, published.reason);
   assert.equal(published.path, "work/report.md");
   assert.equal(await readFile(join(sandbox, "work", "report.md"), "utf8"), "# findings\n");
@@ -464,23 +755,23 @@ test("publish_file: a seat's own file lands in the shared work/ claimed and reco
   assert.ok(claims.some((c) => c.path === "work/report.md" && c.owner === "a0"), "the destination is a0's claim");
   // A peer's own directory is theirs.
   await writeFile(join(sandbox, "work", "a0", "note.md"), "mine\n");
-  const intoPeer = (await board.callBoard(hub.socketFor("a0"), "publishFile", [null, "work/a0/note.md", "work/a1/note.md"])) as { ok: boolean; reason?: string };
+  const intoPeer = (await pub(hub.socketFor("a0"), ctx0, "work/a0/note.md", "work/a1/note.md")) as { ok: boolean; reason?: string };
   assert.equal(intoPeer.ok, false);
   assert.match(intoPeer.reason ?? "", /a1's own directory/);
   // A file that is not one's own cannot be published as one's own.
   await writeFile(join(sandbox, "work", "a1", "theirs.md"), "theirs\n");
-  const notMine = (await board.callBoard(hub.socketFor("a0"), "publishFile", [null, "work/a1/theirs.md", "work/theirs.md"])) as { ok: boolean; reason?: string };
+  const notMine = (await pub(hub.socketFor("a0"), ctx0, "work/a1/theirs.md", "work/theirs.md")) as { ok: boolean; reason?: string };
   assert.equal(notMine.ok, false);
   assert.match(notMine.reason ?? "", /a file of your own/);
   // While a0 holds work/report.md, a1 cannot publish over it.
   await writeFile(join(sandbox, "work", "a1", "report.md"), "# other\n");
-  const over = (await board.callBoard(hub.socketFor("a1"), "publishFile", [null, "work/a1/report.md", "work/report.md"])) as { ok: boolean; reason?: string };
+  const over = (await pub(hub.socketFor("a1"), ctx1, "work/a1/report.md", "work/report.md")) as { ok: boolean; reason?: string };
   assert.equal(over.ok, false);
   assert.match(over.reason ?? "", /held by a0/);
   assert.equal(await readFile(join(sandbox, "work", "report.md"), "utf8"), "# findings\n", "and the file is untouched");
   // A planted link as the source is refused.
   await symlink("/etc/hosts", join(sandbox, "work", "a0", "leak.md"));
-  const leak = (await board.callBoard(hub.socketFor("a0"), "publishFile", [null, "work/a0/leak.md", "work/leak.md"])) as { ok: boolean; reason?: string };
+  const leak = (await pub(hub.socketFor("a0"), ctx0, "work/a0/leak.md", "work/leak.md")) as { ok: boolean; reason?: string };
   assert.equal(leak.ok, false);
   assert.match(leak.reason ?? "", /escapes sandbox|link/i);
   assert.equal(await stat(join(sandbox, "work", "leak.md")).then(() => true).catch(() => false), false, "nothing of the host was published");

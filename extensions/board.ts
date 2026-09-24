@@ -21,6 +21,8 @@
  * does not change at a single call site.
  */
 
+import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import * as P from "./protocol.ts";
 import * as T from "./toolchain.ts";
@@ -52,6 +54,9 @@ function refused(err: unknown): boolean {
 }
 
 type Pending = { fn: string; resolve: (value: unknown) => void; reject: (err: Error) => void };
+
+/** Calls that change the board, sent once more with the same request id when a link drops. */
+const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion"]);
 
 /**
  * One held connection to the hub per process, carrying every board call:
@@ -137,7 +142,28 @@ class HubClient {
     socket.on("error", () => undefined);
   }
 
+  /**
+   * A call that changes the board, sent again when the link closed before
+   * its answer came: the same request id goes with it, and the hub answers a
+   * request id it has already run with that run's answer. A reply lost on a
+   * dropped link is otherwise a model's cue to post again, and the board
+   * gets the post twice.
+   */
   async call(fn: string, args: unknown[], options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<unknown> {
+    if (!RETRIED.has(fn)) return this.callOnce(fn, args, options);
+    const rid = randomUUID();
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.callOnce(fn, args, options, rid);
+      } catch (err) {
+        const lost = err instanceof BoardError && err.unreachable && /link closed/.test(err.message);
+        if (!lost || attempt >= 3 || options.signal?.aborted) throw err;
+        await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+      }
+    }
+  }
+
+  private async callOnce(fn: string, args: unknown[], options: { timeoutMs?: number; signal?: AbortSignal }, rid?: string): Promise<unknown> {
     if (options.signal?.aborted) throw new BoardError("aborted");
     const socket = await this.open();
     const id = this.next++;
@@ -174,7 +200,7 @@ class HubClient {
           reject(err);
         },
       });
-      socket.write(`${JSON.stringify({ t: "rpc", id, fn, args: args.map((a) => (a === undefined ? null : a)) })}\n`);
+      socket.write(`${JSON.stringify({ t: "rpc", id, fn, ...(rid ? { rid } : {}), args: args.map((a) => (a === undefined ? null : a)) })}\n`);
     });
   }
 
@@ -271,7 +297,126 @@ export const claimName = remote("claimName", P.claimName);
  */
 export const clearStopSteer = P.clearStopSteer;
 export const correctionsAfter = remote("correctionsAfter", P.correctionsAfter);
-export const fileDiff = remote("fileDiff", P.fileDiff);
+/**
+ * The bytes of a file in this seat's own directory, for the hub, which does
+ * not open a file under a directory a running seat can rearrange (a
+ * directory swapped for a link between its checks and its open would read
+ * the operator's files). Past the store limit only the hash and size go;
+ * `missing` when there is no such file. Undefined for a path outside this
+ * seat's own directories: the hub reads those itself.
+ */
+export async function ownFileWire(
+  sandboxRoot: string,
+  rawPath: string,
+  agentId: string,
+  limit = P.HISTORY_STORE_MAX_BYTES,
+): Promise<OwnFileWire | undefined> {
+  // A path that leaves the run (a link out of it) is refused here as on the
+  // host: the error is the protocol's own.
+  const pathKey = await P.realPathKey(sandboxRoot, rawPath);
+  if (!P.isOwnScratch(pathKey, agentId)) return undefined;
+  try {
+    const read = await P.readSandboxFile(sandboxRoot, pathKey, { maxBytes: limit });
+    if (!read) return { missing: true };
+    return { bytes_b64: read.bytes.toString("base64") };
+  } catch (err) {
+    if (!(err instanceof P.FileTooLarge)) throw err;
+  }
+  const hashed = await P.hashSandboxFile(sandboxRoot, pathKey);
+  return hashed ? { hash_only: { sha256: hashed.sha256, bytes: hashed.bytes } } : { missing: true };
+}
+
+export type OwnFileWire = { bytes_b64?: string; hash_only?: { sha256: string; bytes: number }; missing?: true };
+
+export const recordFileVersion: typeof P.recordFileVersion = async (sandboxRoot, rawPath, agentId, options = {}) => {
+  const socket = boardSocket();
+  if (!socket) return P.recordFileVersion(sandboxRoot, rawPath, agentId, options);
+  const wire = options.bytes ? { bytes_b64: options.bytes.toString("base64") } : await ownFileWire(sandboxRoot, rawPath, agentId);
+  return (await callBoard(socket, "recordFileVersion", [sandboxRoot, rawPath, agentId, wire ?? null])) as Awaited<ReturnType<typeof P.recordFileVersion>>;
+};
+
+/** What a VM may publish in one call: its bytes cross the hub link. */
+export const PUBLISH_MAX_BYTES = P.HISTORY_STORE_MAX_BYTES;
+
+export const publishFile: typeof P.publishFile = async (ctx, fromRaw, toRaw, options = {}) => {
+  const socket = boardSocket();
+  if (!socket) return P.publishFile(ctx, fromRaw, toRaw, options);
+  let wire: OwnFileWire | undefined;
+  try {
+    wire = await ownFileWire(ctx.sandboxRoot, fromRaw, ctx.agentId, PUBLISH_MAX_BYTES);
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+  if (!wire) return { ok: false, reason: `publish takes a file of your own: ${fromRaw} is not under work/${ctx.agentId}/, work/extracted/${ctx.agentId}/ or work/quarantine/${ctx.agentId}/`, path: fromRaw };
+  if (wire.missing) return { ok: false, reason: `no such file: ${fromRaw}`, path: fromRaw };
+  if (wire.hash_only) {
+    return { ok: false, reason: `${fromRaw} is ${wire.hash_only.bytes} bytes; a VM publishes up to ${PUBLISH_MAX_BYTES}. Leave it in your own directory and name its path in the report.`, path: fromRaw };
+  }
+  return (await callBoard(socket, "publishFile", [ctx, fromRaw, toRaw ?? null, wire])) as Awaited<ReturnType<typeof P.publishFile>>;
+};
+
+export const fileDiff: typeof P.fileDiff = async (sandboxRoot, rawPath, fromRef, toRef, options = {}) => {
+  const socket = boardSocket();
+  if (!socket) return P.fileDiff(sandboxRoot, rawPath, fromRef, toRef, options);
+  // The bytes on disk go with the call whenever a side is the disk (the
+  // default right side is): the hub uses them for a file in a seat's own
+  // directory, which it does not open, and its own read for any other.
+  let disk: { disk_b64?: string; missing?: true } | null = null;
+  if (fromRef === undefined || toRef === undefined || P.isDiskRef(fromRef) || P.isDiskRef(toRef)) {
+    try {
+      const read = await P.readSandboxFile(sandboxRoot, rawPath, { maxBytes: P.DIFF_MAX_BYTES });
+      disk = read ? { disk_b64: read.bytes.toString("base64") } : { missing: true };
+    } catch (err) {
+      if (err instanceof P.FileTooLarge) throw new Error(`${rawPath} is too large to diff (${err.size} bytes; the limit is ${P.DIFF_MAX_BYTES})`);
+      throw err;
+    }
+  }
+  return (await callBoard(socket, "fileDiff", [sandboxRoot, rawPath, fromRef ?? null, toRef ?? null, disk])) as Awaited<ReturnType<typeof P.fileDiff>>;
+};
+
+/**
+ * A file of this seat's own is restored here, in its VM: the hub does not
+ * write under a directory a running seat can rearrange, and a write made by
+ * the host would meet this guest's cached view of the file for five seconds.
+ * The revision's bytes are read from history/ on the run's floor and checked
+ * against the hash the hub recorded, waiting out the same cache for a
+ * revision recorded a moment ago. Anything else is the hub's to restore.
+ */
+export const restoreFileVersion: typeof P.restoreFileVersion = async (ctx, rawPath, rev) => {
+  const socket = boardSocket();
+  if (!socket) return P.restoreFileVersion(ctx, rawPath, rev);
+  const pathKey = await P.realPathKey(ctx.sandboxRoot, rawPath);
+  if (!P.isOwnScratch(pathKey, ctx.agentId)) {
+    return (await callBoard(socket, "restoreFileVersion", [ctx, rawPath, rev])) as Awaited<ReturnType<typeof P.restoreFileVersion>>;
+  }
+  const guard = (await callBoard(socket, "guardWrite", [ctx, pathKey])) as P.GuardResult;
+  if (!guard.ok) return { ok: false, path: pathKey, rev, reason: guard.reason };
+  const versions = (await callBoard(socket, "listFileHistory", [ctx.sandboxRoot, pathKey])) as P.FileVersion[];
+  const version = versions.find((v) => v.rev === rev);
+  if (!version) return { ok: false, path: pathKey, rev, reason: `no history rev ${rev}` };
+  if (version.stored === false) return { ok: false, path: pathKey, rev, reason: `${pathKey} rev ${rev} was recorded by its hash only; its bytes were not kept` };
+  const src = P.historyRevisionPath(ctx.sandboxRoot, pathKey, rev);
+  let bytes: Buffer | null = null;
+  const deadline = Date.now() + P.GUEST_CACHE_WAIT_MS;
+  for (;;) {
+    const got = await readFile(src).catch(() => null);
+    if (got && P.sha256Hex(got) === version.sha256) {
+      bytes = got;
+      break;
+    }
+    if (Date.now() > deadline) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  if (!bytes) return { ok: false, path: pathKey, rev, reason: `rev ${rev} of ${pathKey} is not readable from history/ in this VM yet; try again in a few seconds` };
+  await recordFileVersion(ctx.sandboxRoot, pathKey, ctx.agentId);
+  try {
+    await P.writeSandboxFile(ctx.sandboxRoot, pathKey, bytes);
+  } catch (err) {
+    return { ok: false, path: pathKey, rev, reason: (err as Error).message };
+  }
+  const landed = await recordFileVersion(ctx.sandboxRoot, pathKey, ctx.agentId, { bytes });
+  return { ok: true, path: pathKey, rev, landed_rev: landed?.rev ?? null, sha256: version.sha256 };
+};
 export const forgeTool = remote("forgeTool", P.forgeTool);
 export const guardWrite = remote("guardWrite", P.guardWrite);
 export const harnessStop = P.harnessStop;
@@ -285,16 +430,13 @@ export const markDone = remote("markDone", P.markDone);
 export const markStopSteer = P.markStopSteer;
 export const nameOf = remote("nameOf", P.nameOf);
 export const postMessage = remote("postMessage", P.postMessage);
-export const publishFile = remote("publishFile", P.publishFile);
 export const readBudget = remote("readBudget", P.readBudget);
 export const readBudgetStatus = remote("readBudgetStatus", P.readBudgetStatus);
 export const readInbox = remote("readInbox", P.readInbox);
 export const readNames = remote("readNames", P.readNames);
 export const recordEntry = remote("recordEntry", P.recordEntry);
-export const recordFileVersion = remote("recordFileVersion", P.recordFileVersion);
 export const releaseAllOwned = remote("releaseAllOwned", P.releaseAllOwned);
 export const releaseFile = remote("releaseFile", P.releaseFile);
-export const restoreFileVersion = remote("restoreFileVersion", P.restoreFileVersion);
 export const swarmDoneExists = remote("swarmDoneExists", P.swarmDoneExists);
 export const systemPost = remote("systemPost", P.systemPost);
 export const threadJoin = remote("threadJoin", P.threadJoin);
