@@ -2285,10 +2285,12 @@ STRIP
     rm -rf "${sandbox:?}/work"
   fi
   mkdir -p "$sandbox/work"
-  : > "$sandbox/traces/events.jsonl"
 
   clear_inputs "$sandbox"
   stop_sandbox_daemons "$sandbox"
+  # Emptied only once the previous run's collector and watchdogs are stopped,
+  # so none of them can land a stray line in the new run's trace.
+  : > "$sandbox/traces/events.jsonl"
   # The trace was just emptied for the new run, so the previous run's anchor
   # goes with it. A collector keeps any anchor it finds — an anchor must not
   # drop to match a shortened file — and would read the new run as cut short.
