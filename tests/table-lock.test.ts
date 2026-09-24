@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { lockNamespace, tableLockTiming, withTableLock } from "../extensions/protocol.ts";
+import { lockNamespace, TableLockLostError, tableLockTiming, withTableLock } from "../extensions/protocol.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** What a peer in another pid namespace, or another VM, records. */
@@ -233,4 +233,31 @@ test("protocol.ts and the bash copies name this namespace alike", { skip: proces
   const fromBash = execFileSync("bash", ["-c", `${block}\ntable_lock_ns`], { encoding: "utf8" });
   assert.equal(fromBash, lockNamespace());
   if (process.platform === "linux" || process.platform === "darwin") assert.notEqual(lockNamespace(), "");
+});
+
+test("a holder checks its lock is still its own before it commits a write", async () => {
+  const { root, lockDir } = await sandbox();
+  const target = join(root, "table.json");
+  try {
+    await withTableLock(root, async (held) => {
+      await held.assertOwned();
+    });
+    const warned = await warningsDuring(async () => {
+      await assert.rejects(
+        withTableLock(root, async (held) => {
+          // Broken while we stalled, and taken by someone else.
+          await rm(lockDir, { recursive: true, force: true });
+          await mkdir(lockDir);
+          await writeFile(join(lockDir, "owner"), "someone-else", "utf8");
+          await held.assertOwned();
+          await writeFile(target, "lost update", "utf8");
+        }),
+        TableLockLostError,
+      );
+    });
+    assert.equal(existsSync(target), false, "wrote after its lock was taken over");
+    assert.equal(warned.length, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

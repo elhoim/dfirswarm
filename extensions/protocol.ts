@@ -637,9 +637,24 @@ async function releaseLockDir(dir: string, token: string): Promise<void> {
   warnLockLost(`${basename(dir)} was taken over while this process held it; another process may have been inside with it`);
 }
 
+/** Thrown when a holder finds, before a write, that its lock was taken over. */
+export class TableLockLostError extends Error {}
+
+/** What a holder can ask of the lock it holds. */
+export type HeldLock = {
+  /**
+   * Throws TableLockLostError when the lock is no longer ours: it was broken
+   * while we stalled and someone else may be inside. Called just before a
+   * read-modify-write commits, so a lost lock costs the write rather than
+   * overwriting the other holder's. The check and the write are still two
+   * steps, so this narrows the window; it does not close it.
+   */
+  assertOwned(): Promise<void>;
+};
+
 export async function withTableLock<T>(
   sandboxRoot: string,
-  fn: () => Promise<T>,
+  fn: (lock: HeldLock) => Promise<T>,
 ): Promise<T> {
   return withNamedLock(sandboxRoot, ".table.lock", fn);
 }
@@ -656,7 +671,7 @@ export async function withTableLock<T>(
 export async function withNamedLock<T>(
   sandboxRoot: string,
   name: string,
-  fn: () => Promise<T>,
+  fn: (lock: HeldLock) => Promise<T>,
 ): Promise<T> {
   const lockDir = join(sandboxRoot, "locks", name);
   await mkdir(join(sandboxRoot, "locks"), { recursive: true });
@@ -683,8 +698,18 @@ export async function withNamedLock<T>(
     utimes(lockDir, now, now).catch(() => undefined);
   }, tableLockTiming.heartbeatMs);
   heartbeat.unref();
+  const held: HeldLock = {
+    async assertOwned() {
+      const owner = await readFile(join(lockDir, "owner"), "utf8").catch(() => "");
+      if (owner !== token) {
+        throw new TableLockLostError(
+          `locks/${name} was taken over while this call held it, so its write was not made. Try again.`,
+        );
+      }
+    },
+  };
   try {
-    return await fn();
+    return await fn(held);
   } finally {
     clearInterval(heartbeat);
     // Remove only our own lock. One broken while its holder stalled may
@@ -1619,7 +1644,7 @@ export async function claimFile(
       note: `${pathKey} is in ${scratchOwner}'s own scratch directory and only ${scratchOwner} writes there. Ask on the board, or work on a copy under your own work/${ctx.agentId}/.`,
     };
   }
-  return withTableLock(ctx.sandboxRoot, async () => {
+  return withTableLock(ctx.sandboxRoot, async (held) => {
     const file = lockPath(ctx.sandboxRoot, pathKey);
     const existing = await readLock(file);
     const now = Date.now();
@@ -1651,6 +1676,7 @@ export async function claimFile(
       ...(options.implicit ? { implicit: true as const } : {}),
     };
     await mkdir(join(ctx.sandboxRoot, "locks"), { recursive: true });
+    await held.assertOwned();
     await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, "utf8");
     return {
       ok: true,
@@ -2601,7 +2627,7 @@ export async function applySessionUsage(
   over_budget: boolean;
   first_over: boolean;
 }> {
-  return withTableLock(sandboxRoot, async () => {
+  return withTableLock(sandboxRoot, async (held) => {
     const budget = await readBudget(sandboxRoot).catch(() =>
       normalizeBudget({ started_at: new Date().toISOString() }),
     );
@@ -2624,6 +2650,7 @@ export async function applySessionUsage(
     const over = overCap(budget).over;
     const first_over = over && !budget.cap_steer_sent;
     if (first_over) budget.cap_steer_sent = true;
+    await held.assertOwned();
     await writeBudget(sandboxRoot, budget);
     return { budget, over_budget: over, first_over };
   });
@@ -2690,13 +2717,14 @@ export async function recordFileVersion(
   // operator). Without the mutex two writers take the same number, one
   // binary overwrites the other, and the surviving index entry names a hash
   // the stored bytes do not have.
-  return withTableLock(sandboxRoot, async () => {
+  return withTableLock(sandboxRoot, async (held) => {
     const dir = historyDir(sandboxRoot, pathKey);
     await mkdir(dir, { recursive: true });
     const versions = await listFileHistory(sandboxRoot, pathKey);
     const last = versions.at(-1);
     if (last?.sha256 === sha256) return null;
     const rev = (last?.rev ?? 0) + 1;
+    await held.assertOwned();
     await writeFile(join(dir, `${String(rev).padStart(6, "0")}.bin`), bytes);
     const record: FileVersion = {
       rev,
@@ -4719,7 +4747,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
   if (evidence.length > LEDGER_EVIDENCE_MAX_CHARS) {
     return { ok: false, reason: `evidence is over ${LEDGER_EVIDENCE_MAX_CHARS} characters: say how to check it, and put the material itself in a work/ file` };
   }
-  return withTableLock(ctx.sandboxRoot, async () => {
+  return withTableLock(ctx.sandboxRoot, async (held) => {
     const entries = await readLedger(ctx.sandboxRoot);
     const same = entries.find((e) => e.kind === kind && e.value === value && (e.ts ?? "") === (ts.ts ?? ""));
     if (same) {
@@ -4727,6 +4755,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
       // A merge adds an author, it does not rewrite the first citation.
       if (!same.source) same.source = source;
       if (!same.evidence) same.evidence = evidence;
+      await held.assertOwned();
       await writeFile(join(ctx.sandboxRoot, LEDGER_ENTRIES), entries.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
       await renderLedger(ctx.sandboxRoot, entries);
       return { ok: true, entry: same, merged: true, total: entries.length };
@@ -4745,6 +4774,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
       at: new Date().toISOString(),
     };
     await mkdir(join(ctx.sandboxRoot, LEDGER_DIR), { recursive: true });
+    await held.assertOwned();
     await appendFile(join(ctx.sandboxRoot, LEDGER_ENTRIES), `${JSON.stringify(entry)}\n`, "utf8");
     entries.push(entry);
     await renderLedger(ctx.sandboxRoot, entries);
