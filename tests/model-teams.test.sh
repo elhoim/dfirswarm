@@ -68,6 +68,8 @@ HELPERS="$TMP/helpers.sh"
   sed -n '/^distinct_models() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^credential_models() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^provider_hosts_for_model() {/,/^}/p' "$ROOT/scripts/swarm.sh"
+  sed -n '/^provider_known_hosts() {/,/^}/p' "$ROOT/scripts/swarm.sh"
+  sed -n '/^models_json_base_url() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^provider_base_url() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^host_of_url() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^allow_entry_of_url() {/,/^}/p' "$ROOT/scripts/swarm.sh"
@@ -360,6 +362,9 @@ printf '%s\n' "$out" | grep -q -- '--local-only, but deepseek/deepseek-v4-pro' |
 out="$(PI_CODING_AGENT_DIR="$TMP/pi-local" start --model ollama/qwen3:8b --n 1 --cap-tokens 1000 --local-only --no-netguard --no-start \
   --goal-file "$ROOT/prompts/goals/hello.md" --label lonlyopen)"
 printf '%s\n' "$out" | grep -q 'drop --no-netguard' || fail "--local-only without netguard should be refused: $out"
-pass "--local-only is recorded as a network mode, refused with a cloud model, and needs netguard"
+out="$(PI_CODING_AGENT_DIR="$TMP/pi-local" start --model ollama/qwen3:8b --n 1 --cap-tokens 1000 --local-only --compact-model deepseek/deepseek-v4-pro --no-start \
+  --goal-file "$ROOT/prompts/goals/hello.md" --label local-cloud-summary)" && fail "--local-only with a cloud summary model should be refused: $out"
+printf '%s\n' "$out" | grep -q -- '--compact-model deepseek/deepseek-v4-pro is not served from this machine' || fail "the refusal should name the summary model: $out"
+pass "--local-only is recorded as a network mode, refused with a cloud model or a cloud summary model, and needs netguard"
 
 echo "all model-team cases passed"

@@ -100,7 +100,7 @@ Commands:
   stop <id>          Stop a run and record how it ended
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
-  netcheck           What the network guard would allow
+  netcheck           What the network guard (or, --isolation microvm, a VM) would allow
   help [command]     This, or a command's own page
 
 Start, at its shortest:
@@ -367,6 +367,13 @@ Isolation
 Network
   --allow-host HOST   Add one host to netguard's allowlist; repeatable. For a
                       symbol server, a package index, the one site a case needs.
+                      `*.name` and `.name` allow the name and everything under it.
+  --provider-host P=HOST
+                      The host a model provider is called on, when the harness
+                      cannot know it (a gateway, a region, an account). Pi's own
+                      model list names the host of every provider it ships; a
+                      microVM run is refused when a provider still has none,
+                      because its key is bound to its hosts and nowhere else.
   --no-netguard       Open egress entirely. --open-net is the same thing.
   --local-only        Every model on the team must be served from this machine
                       or network (a models.json baseUrl on loopback, a private
@@ -1981,6 +1988,7 @@ cmd_start() {
   done
 
   local model="" models_spec="" cap="" n="" goal="" goal_source=""
+  PROVIDER_HOST_OVERRIDES=()
   AGENT_MODELS=()
   MODEL_SUMMARY=""
   MODEL_CAPS=()
@@ -2067,6 +2075,12 @@ cmd_start() {
       --cap-tokens) cap_tokens="$2"; shift 2 ;;
       --local-only) local_only=1; shift ;;
       --allow-host) allow_hosts+="${allow_hosts:+,}$2"; shift 2 ;;
+      --provider-host)
+        if ! [[ "${2:-}" =~ ^[a-z0-9][a-z0-9._-]*=[^=,[:space:]]+$ ]]; then
+          echo "BLOCKER: --provider-host takes provider=host (got ${2:-nothing})." >&2
+          exit 2
+        fi
+        PROVIDER_HOST_OVERRIDES+=("$2"); shift 2 ;;
       --idle-nudge-sec) idle_nudge_sec="$2"; shift 2 ;;
       --self-compact) self_compact=1; shift ;;
       --no-self-compact) self_compact=0; shift ;;
@@ -2498,6 +2512,45 @@ STRIP
     fi
     if [[ "$use_netguard" -ne 1 ]]; then
       echo "BLOCKER: --local-only is a netguard mode; drop --no-netguard." >&2
+      exit 2
+    fi
+    # The summary model is called like any seat's: a cloud one under
+    # --local-only would find no route, and every compaction would fail.
+    if [[ -n "$compact_model" ]] && ! provider_is_local "$compact_model"; then
+      echo "BLOCKER: --local-only, but --compact-model $compact_model is not served from this machine or network." >&2
+      exit 2
+    fi
+  fi
+  # A VM reaches only the hosts it is told of, and a provider's key is
+  # bound to that provider's hosts and swapped in nowhere else, open network
+  # or not. A provider with no known host would boot, and fail on its first
+  # call.
+  if [[ "$isolation" == "microvm" ]]; then
+    local cm cm_hosts unknown_hosts=()
+    while IFS= read -r cm; do
+      [[ -n "$cm" ]] || continue
+      provider_is_local "$cm" && continue
+      case "${cm%%/*}" in
+        amazon-bedrock|google-vertex)
+          echo "BLOCKER: ${cm%%/*} signs every request with its secret inside the client, so a VM would have to hold the secret itself. Run this model with --isolation host, or through a gateway that takes a key (--provider-host)." >&2
+          exit 2
+          ;;
+      esac
+      cm_hosts="$(provider_hosts_for_model "$cm")"
+      [[ -n "$cm_hosts" ]] || unknown_hosts+=("$cm")
+    done < <(credential_models)
+    if ((${#unknown_hosts[@]})); then
+      echo "BLOCKER: no host is known for ${unknown_hosts[*]}; a VM reaches nothing it is not told of. Pass --provider-host ${unknown_hosts[0]%%/*}=<host>, the host its base URL names." >&2
+      exit 2
+    fi
+  fi
+  if [[ "$isolation" == "microvm" ]]; then
+    # Every entry the VM's policy will be built from, read as it will read
+    # them, before anything is written: an entry it would read as nothing
+    # leaves a run that cannot reach what the operator named.
+    local vm_allow_check
+    if ! vm_allow_check="$(vm_cli check-allow "$(provider_hosts_for_models 2>/dev/null | paste -sd, -)" "$allow_hosts")"; then
+      echo "BLOCKER: $(jq -r '.refused | join("; ")' <<<"$vm_allow_check" 2>/dev/null || printf '%s' "$vm_allow_check")" >&2
       exit 2
     fi
   fi
@@ -2948,7 +3001,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --arg examiner "$examiner" \
     --arg allow_hosts "$allow_hosts" \
     --argjson netguard "$use_netguard" \
-    --arg netguard_mode "$(if [[ "$isolation" == "microvm" ]]; then echo microvm; elif [[ "$use_netguard" -eq 1 ]]; then netguard_mode; else echo off; fi)" \
+    --arg netguard_mode "$(if [[ "$isolation" == "microvm" && "$use_netguard" -eq 1 ]]; then echo microvm; elif [[ "$isolation" == "microvm" ]]; then echo microvm-open; elif [[ "$use_netguard" -eq 1 ]]; then netguard_mode; else echo off; fi)" \
     --arg write_guard "$write_guard_mode" \
     --argjson no_read "$(printf '%s\n' ${no_read[@]+"${no_read[@]}"} | jq -R . | jq -c -s 'map(select(. != ""))')" \
     --argjson no_read_applied "$no_read_applied" \
@@ -3483,6 +3536,14 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     if distinct_models | grep -q '^azure-openai-responses/' && [[ -z "$(provider_hosts_for_model azure-openai-responses/x)" && -z "$allow_hosts" ]]; then
       echo "WARN: the Azure OpenAI host is not known (no AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME in the shell or in Pi's credential store); pass --allow-host <resource>.openai.azure.com or the panes cannot reach it." >&2
     fi
+    local nm
+    while IFS= read -r nm; do
+      [[ -n "$nm" && "${nm%%/*}" != azure-openai-responses ]] || continue
+      provider_is_local "$nm" && continue
+      if [[ -z "$(provider_hosts_for_model "$nm")" && -z "$allow_hosts" ]]; then
+        echo "WARN: no host is known for $nm; pass --provider-host ${nm%%/*}=<host> or the panes cannot reach it." >&2
+      fi
+    done < <(credential_models)
     if [[ -n "$allow_hosts" ]]; then
       netguard_allow="${netguard_allow}${netguard_allow:+,}$(printf '%s' "$allow_hosts" | tr 'A-Z' 'a-z')"
     fi
@@ -3892,8 +3953,35 @@ vm_oauth_providers() {
 # provider needs two: the API, and the endpoint Pi refreshes its OAuth token
 # against — an access token outlives its welcome mid-run, and a refresh that
 # cannot reach the token endpoint fails the swarm rather than the request.
+# A provider's hosts: what the harness knows of it, then every
+# --provider-host the operator gave for it.
 provider_hosts_for_model() {
-  local model="$1"
+  local model="$1" provider="${1%%/*}" known extra="" one
+  known="$(provider_known_hosts "$model")"
+  for one in ${PROVIDER_HOST_OVERRIDES[@]+"${PROVIDER_HOST_OVERRIDES[@]}"}; do
+    [[ "${one%%=*}" == "$provider" ]] && extra+="${extra:+,}$(printf '%s' "${one#*=}" | tr 'A-Z' 'a-z')"
+  done
+  printf '%s\n' "${known}${known:+${extra:+,}}${extra}"
+}
+
+# The base URL models.json gives a provider, built-in or not: Pi takes it over
+# its own, so a proxy in front of a cloud provider is where the calls go.
+models_json_base_url() {
+  local store="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/models.json"
+  [[ -f "$store" ]] && command -v jq >/dev/null 2>&1 || return 0
+  jq -r --arg p "${1%%/*}" '.providers[$p].baseUrl // empty' "$store" 2>/dev/null || true
+}
+
+provider_known_hosts() {
+  local model="$1" override
+  # A built-in provider pointed elsewhere by models.json: that host first,
+  # beside the provider's own (below).
+  case "${model%%/*}" in
+    openai|deepseek|xai|google|anthropic|openai-codex|openrouter)
+      override="$(models_json_base_url "$model")"
+      [[ -n "$override" ]] && { allow_entry_of_url "$override" | tr '\n' ','; }
+      ;;
+  esac
   case "${model%%/*}" in
     azure-openai-responses)
       # The host is the customer's own resource. Pi takes it from the shell
@@ -3924,13 +4012,14 @@ provider_hosts_for_model() {
     *)
       # A provider Pi knows only from models.json — a gateway, a local server,
       # an Azure AI Foundry resource — and Pi's own llama.cpp provider bring
-      # the host of their base URL.
+      # the host of their base URL. Every other provider Pi ships (Groq,
+      # Mistral, Fireworks, …) names its host in Pi's own model list.
       local base
       base="$(provider_base_url "$model")"
       if [[ -n "$base" ]]; then
         allow_entry_of_url "$base"
       else
-        echo ""
+        node "$ROOT/scripts/provider-hosts.mjs" "$model" 2>/dev/null | paste -sd, - || echo ""
       fi
       ;;
   esac
@@ -5126,6 +5215,30 @@ cmd_reap() {
 }
 
 cmd_netcheck() {
+  local isolation="${SWARM_ISOLATION:-host}" image="" hosts="" m
+  PROVIDER_HOST_OVERRIDES=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --isolation) isolation="$2"; shift 2 ;;
+      --image) image="$2"; shift 2 ;;
+      --model) hosts+="${hosts:+,}$(provider_hosts_for_model "$2")"; shift 2 ;;
+      --allow-host) hosts+="${hosts:+,}$2"; shift 2 ;;
+      --provider-host) PROVIDER_HOST_OVERRIDES+=("$2"); hosts+="${hosts:+,}${2#*=}"; shift 2 ;;
+      *) echo "netcheck: unknown argument $1" >&2; exit 2 ;;
+    esac
+  done
+  if [[ "$isolation" == "microvm" ]]; then
+    # The VMs' own policy, built the way a run builds it, in a VM of its own
+    # that is gone when the check is.
+    [[ -n "$image" ]] || image="$(vm_default_image "" 0)"
+    [[ -n "$hosts" ]] || hosts="api.deepseek.com,api.anthropic.com"
+    echo "netcheck in a microVM ($image): $hosts"
+    local args=() one
+    for one in ${hosts//,/ }; do [[ -n "$one" ]] && args+=(--allow-host "$one"); done
+    vm_cli netcheck --image "$image" "${args[@]}" || { echo "netcheck FAILED" >&2; exit 1; }
+    echo "netcheck ok"
+    return 0
+  fi
   local log="${TMPDIR:-/tmp}/swarm-netguard-check.log"
   rm -f "$log"
   echo "netcheck via scripts/netguard.sh --only api.deepseek.com"

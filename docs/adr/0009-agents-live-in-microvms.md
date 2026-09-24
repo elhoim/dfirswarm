@@ -84,6 +84,12 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   token never refreshes, and the refresh endpoint is never bound. A
   subscription's placeholder is still the operator's account at the
   inference host, so a subscription provider needs `--allow-oauth-in-vm`.
+  A credential is bound to its provider's hosts: msb terminates TLS on every
+  port one travels on, no TLS bypass covers a secret's host, and a
+  placeholder aimed anywhere else is stopped and logged (`block-and-log`),
+  which custody reads. A provider whose host is not known is refused at
+  kickoff (`--provider-host` names it); one that signs requests with its
+  secret on the client (Bedrock, Vertex) cannot run in a VM at all.
 - **The hub answers only an agent's business.** The stop clock and the
   harness stop are not on the agent channel; a sentinel is written only when
   the operator's finish line passes on the host; a seat's spend report may

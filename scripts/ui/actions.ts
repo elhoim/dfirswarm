@@ -144,8 +144,10 @@ const HOST_LABEL = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/i;
 /**
  * A host we are willing to put on a command line, and nothing else: a name
  * with at least one dot, `localhost`, an IPv4 address, an IPv6 literal in
- * brackets, any of them with `:port`. The proxy's allowlist takes exactly
- * these, and a local model server is usually one of the last three.
+ * brackets, any of them with `:port`; or a suffix, `*.name` or `.name`, which
+ * matches the name itself and everything under it (the proxy and msb read it
+ * the same way). A suffix of one label (`*.com`) is refused: that is a whole
+ * top-level domain. A local model server is usually one of the address forms.
  */
 export function isHostName(raw: string): boolean {
   if (raw.length > 260) return false;
@@ -166,6 +168,8 @@ export function isHostName(raw: string): boolean {
   if (port !== null && (Number(port) < 1 || Number(port) > 65535)) return false;
   if (v6) return true;
   if (host.toLowerCase() === "localhost") return true;
+  if (host.startsWith("*.")) host = host.slice(2);
+  else if (host.startsWith(".")) host = host.slice(1);
   const labels = host.split(".");
   return labels.length >= 2 && host.length <= 253 && labels.every((l) => HOST_LABEL.test(l));
 }

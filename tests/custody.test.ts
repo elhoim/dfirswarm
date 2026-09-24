@@ -9,7 +9,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { confinedOutput, custodyAnchorPath, keptOutputRefs, takeCustody, type Custody } from "../scripts/custody.ts";
+import { confinedOutput, custodyAnchorPath, keptOutputRefs, secretViolations, takeCustody, type Custody } from "../scripts/custody.ts";
 import { ledgerHash, type LedgerEntry } from "../extensions/protocol.ts";
 import {
   anchorGuarded,
@@ -193,6 +193,7 @@ test("the report's custody lines know a microVM run", () => {
   assert.match(writeGuardLine("microvm"), /^enforced \(microVM/);
   assert.match(attributionLine("channel"), /^by channel/);
   assert.match(egressLine("microvm"), /^enforced \(microVM network policy/);
+  assert.match(egressLine("microvm-open"), /^OPEN \(--no-netguard/, "a VM run with the network open says so, not \"none\"");
   assert.match(herdrSocketLine("unreachable"), /^out of reach/);
   assert.match(measuredGuardLine("microvm"), /probed at kickoff/);
   assert.equal(anchorGuarded("microvm", undefined), true, "the anchor is on the host, and the host is in no VM");
@@ -249,4 +250,13 @@ test("a line whose own clock is far from the collector's is named, with how far"
   const c = await takeCustody(root);
   assert.deepEqual(c.trace.clock, [{ agent: "a1", lines: 2, max_skew_s: -603 }], "a0's one-second gap is not named; a1's ten minutes both ways are");
   assert.match(c.summary, /a1 2 lines \(up to -603 s\)/);
+});
+
+test("a placeholder msb stopped on its way to another host is read from the VM's runtime log", () => {
+  const log = [
+    "2026-09-24T07:03:09.080700Z  INFO microsandbox_runtime::runner::vm: sandbox starting sandbox=dfs-x",
+    "2026-09-24T07:03:10.051819Z  WARN microsandbox_network::engine::secrets::handler: secret violation: placeholder detected for disallowed host action=block-and-log secret_env_var=K placeholder=dfirswarm-secret-probe-abc protocol=http/1.1 sni=api.openai.com host=api.openai.com method=GET path=/v1/models location=header match_form=raw guest_dst=172.66.0.243:443 http2_stream_id=",
+  ].join("\n");
+  assert.deepEqual(secretViolations(log), [{ at: "2026-09-24T07:03:10.051819Z", env: "K", host: "api.openai.com", method: "GET", path: "/v1/models", action: "block-and-log" }]);
+  assert.deepEqual(secretViolations("nothing here\n"), []);
 });

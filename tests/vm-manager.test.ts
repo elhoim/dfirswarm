@@ -11,7 +11,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import {
+  bypassCovers,
   egressRules,
+  gatewayPorts,
+  interceptPorts,
+  parseAllowEntry,
   guestPiConfig,
   resolveSecrets,
   seatProviders,
@@ -168,11 +172,49 @@ test("a VM's allowlist reads the host allowlist's syntax (netguard-proxy.mjs): s
   const hosts = ["api.openai.com", "*.blob.core.windows.net", ".googleapis.com", "mirror.example.org:8443", "10.0.0.5:3128", "PyPI.org"];
   const rules = egressRules(hosts);
   assert.deepEqual(rules, [
-    { port: 443, domains: ["api.openai.com", "pypi.org"], suffixes: [".blob.core.windows.net", ".googleapis.com"], ips: [] },
-    { port: 3128, domains: [], suffixes: [], ips: ["10.0.0.5"] },
-    { port: 8443, domains: ["mirror.example.org"], suffixes: [], ips: [] },
+    { port: 443, domains: ["api.openai.com", "pypi.org"], suffixes: [".blob.core.windows.net", ".googleapis.com"], ips: [], cidrs: [] },
+    { port: 3128, domains: [], suffixes: [], ips: ["10.0.0.5"], cidrs: [] },
+    { port: 8443, domains: ["mirror.example.org"], suffixes: [], ips: [], cidrs: [] },
   ]);
   assert.deepEqual(tlsBypass(hosts), ["api.openai.com", "pypi.org", "*.blob.core.windows.net", "*.googleapis.com", "mirror.example.org"]);
+});
+
+test("IPv6, CIDR blocks and the host's loopback each become the rule a VM can use; a loopback entry goes through the host gateway", () => {
+  const hosts = ["[2001:db8::1]:8443", "2001:db8::2", "10.0.0.0/8:8080", "[fd00::/8]:443", "127.0.0.1:8080", "[::1]:11434", "localhost:1234", "api.x.com"];
+  assert.deepEqual(egressRules(hosts), [
+    { port: 443, domains: ["api.x.com"], suffixes: [], ips: ["2001:db8::2"], cidrs: ["fd00::/8"] },
+    { port: 8080, domains: [], suffixes: [], ips: [], cidrs: ["10.0.0.0/8"] },
+    { port: 8443, domains: [], suffixes: [], ips: ["2001:db8::1"], cidrs: [] },
+  ], "the VM's own loopback is not the host's, so no loopback entry is a plain rule");
+  assert.deepEqual(gatewayPorts(hosts), [1234, 8080, 11434]);
+  // A bare IPv6 address is not host:port: 2001:db8::1 is not host 2001:db8: on port 1.
+  assert.deepEqual(parseAllowEntry("2001:db8::1"), { kind: "ip", value: "2001:db8::1", port: 443, loopback: false });
+});
+
+test("an allowlist entry a VM would read as nothing is refused with the reason", () => {
+  for (const [entry, why] of [
+    ["https://api.x.com", /not a URL/],
+    ["api.x.com/v1", /no path/],
+    ["*.com", /top-level domain/],
+    ["a*.x.com", /leading \*\./],
+    ["x.com:0", /1-65535/],
+    ["x.com:70000", /1-65535/],
+    ["300.1.1.1", /not an IPv4 address/],
+    ["10.0.0.0/33", /not an IPv4 block/],
+    ["[zz]:443", /not an IPv6 address/],
+    ["user@x.com", /no user/],
+  ] as const) {
+    assert.throws(() => parseAllowEntry(entry), why, entry);
+  }
+});
+
+test("TLS is terminated on every port a secret travels on, and no bypass covers a secret's host", () => {
+  const allow = ["*.openai.com", "pypi.org", "api.openai.com", "*.azure.com", "*.blob.core.windows.net"];
+  const secretHosts = ["api.openai.com", "*.openai.azure.com", "gw.example.com:8443"];
+  assert.deepEqual(tlsBypass(allow, secretHosts), ["pypi.org", "*.blob.core.windows.net"], "*.openai.com and *.azure.com would carry a placeholder past the swap");
+  assert.deepEqual(interceptPorts(secretHosts), [443, 8443]);
+  assert.equal(bypassCovers("*.openai.com", "openai.com"), true, "a suffix covers its apex, as msb matches it");
+  assert.equal(bypassCovers("*.openai.com", "notopenai.com"), false);
 });
 
 test("a provider's env block crosses with its settings as they are and its credentials as placeholders; host-only settings stay behind", async () => {

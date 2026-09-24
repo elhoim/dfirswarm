@@ -43,6 +43,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, realpathSync } from "node:fs";
+import { isIPv4, isIPv6 } from "node:net";
 import { mkdir, readFile, rm, stat, writeFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -549,7 +550,10 @@ function allowEgress(policy: PolicyB, hosts: string[]): PolicyB {
     if (rule.domains.length) policy.egress((r) => r.tcp().port(rule.port).allowDomains(rule.domains));
     if (rule.suffixes.length) policy.egress((r) => r.tcp().port(rule.port).allowDomainSuffixes(rule.suffixes));
     for (const ip of rule.ips) policy.egress((r) => r.tcp().port(rule.port).allow((d) => d.ip(ip)));
+    for (const cidr of rule.cidrs) policy.egress((r) => r.tcp().port(rule.port).allow((d) => d.cidr(cidr)));
   }
+  // The host's own loopback, which a VM reaches only through the gateway.
+  for (const port of gatewayPorts(hosts)) policy.egress((r) => r.tcp().port(port).allowHost());
   return policy;
 }
 
@@ -608,8 +612,11 @@ async function createOne(
   const mine = new Set(providers.map((p) => p.provider));
   const secrets = allSecrets.filter((s) => mine.has(s.provider));
   const piConfig = guestPiConfig({ ...spec, providers }, secrets);
-  const hostPorts = providers.filter((p) => p.kind === "local" && p.port).map((p) => p.port as number);
-  const allowHosts = [...new Set([...spec.allow_hosts, ...providers.flatMap((p) => (p.kind === "local" ? [] : p.hosts)), ...(spec.pack_secrets ?? []).flatMap((s) => s.hosts ?? [])])].sort();
+  // A local model on this machine is reached through msb's host gateway; one
+  // elsewhere on the LAN is an address and a port like any other entry.
+  const localLoopback = (p: ProviderSpec) => p.hosts.length === 0 || p.hosts.every((h) => parseAllowEntry(h).loopback);
+  const hostPorts = providers.filter((p) => p.kind === "local" && p.port && localLoopback(p)).map((p) => p.port as number);
+  const allowHosts = [...new Set([...spec.allow_hosts, ...providers.flatMap((p) => (p.kind === "local" && localLoopback(p) ? [] : p.hosts)), ...(spec.pack_secrets ?? []).flatMap((s) => s.hosts ?? [])])].sort();
   // A pack's secrets: the value is read here, on the host, from the store
   // `pack install` wrote (KEY=VALUE lines, or one bare value), and the VM
   // gets a placeholder under the secret's own name, which the pack's tool
@@ -673,26 +680,37 @@ async function createOne(
       // it is configured (the CLI turns it on by itself). Every other allowed
       // host keeps its own TLS end to end: a package index verified against
       // the tool's own CA bundle, not msb's.
-      const secretHosts = new Set([...secrets.flatMap((s) => s.hosts), ...packSecrets.flatMap((s) => s.hosts)]);
-      if (secretHosts.size) {
+      const secretHosts = [...new Set([...secrets.flatMap((s) => s.hosts), ...packSecrets.flatMap((s) => s.hosts)])];
+      if (secretHosts.length) {
         n.tls((t: TlsB) => {
-          t.interceptedPorts([443]);
-          for (const h of tlsBypass(allowHosts)) if (!secretHosts.has(h)) t.bypass(h);
+          // Every port a secret travels on, not only 443: a provider on
+          // :8443 would otherwise get its placeholder, never its key.
+          t.interceptedPorts(interceptPorts(secretHosts));
+          for (const h of tlsBypass(allowHosts, secretHosts)) t.bypass(h);
           return t;
         });
       }
+      // A placeholder on its way anywhere but its own hosts is stopped and
+      // written to the VM's runtime log, which custody reads at stop.
+      n.secretViolationAction("block-and-log");
+      // msb binds a secret to a host name or a `*.suffix` pattern; the port
+      // is the policy's business.
+      const nameOf = (h: string) => {
+        const e = parseAllowEntry(h);
+        return e.kind === "suffix" ? `*${e.value}` : e.value;
+      };
       for (const s of secrets) {
         n.secret((b: SecretB) => {
           const label = s.envKey ? s.envKey.replace(/^header:/, "HEADER_") : `${s.provider}_CREDENTIAL`;
           b.env(`DFIRSWARM_${label.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`).value(s.value).placeholder(s.placeholder);
-          for (const h of s.hosts) b.allow(h);
+          for (const h of new Set(s.hosts.map(nameOf))) b.allow(h);
           return b;
         });
       }
       for (const s of packSecrets) {
         n.secret((b: SecretB) => {
           b.env(s.name).value(s.value).placeholder(s.placeholder);
-          for (const h of s.hosts) b.allow(h);
+          for (const h of new Set(s.hosts.map(nameOf))) b.allow(h);
           return b;
         });
       }
@@ -1055,37 +1073,137 @@ export async function imageCatalog(
 }
 
 /**
- * The host allowlist's own syntax (scripts/netguard-proxy.mjs: an exact host,
- * `.suffix` or `*.suffix` for the names under it, `host:port`, an address) as
+ * One allowlist entry, in the host allowlist's syntax (netguard-proxy.mjs):
+ * `host`, `host:port`, `*.suffix` or `.suffix` (the apex included, as msb
+ * matches it), an IPv4 or IPv6 address (`[v6]:port` with a port), or a CIDR
+ * block (`10.0.0.0/8`, `10.0.0.0/8:8080`, `[fd00::/8]:443`). Anything else
+ * throws with the reason: an entry the VM would read as nothing must stop
+ * the kickoff, not leave a run that cannot reach what the operator named.
+ */
+export type AllowEntry = { kind: "domain" | "suffix" | "ip" | "cidr"; value: string; port: number; loopback: boolean };
+
+const LABEL = /^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$/;
+
+function isLoopbackIp(ip: string): boolean {
+  return (isIPv4(ip) && ip.startsWith("127.")) || ip === "::1" || ip === "0:0:0:0:0:0:0:1";
+}
+
+export function parseAllowEntry(raw: string): AllowEntry {
+  const entry = raw.trim().toLowerCase();
+  const bad = (why: string) => new Error(`--allow-host ${JSON.stringify(raw)}: ${why}`);
+  if (!entry) throw bad("empty");
+  if (/\s|@|:\/\//.test(entry)) throw bad("a host, not a URL: no scheme, no user, no spaces");
+  const portOf = (p: string | undefined) => {
+    if (p === undefined) return 443;
+    const n = Number.parseInt(p, 10);
+    if (!/^\d{1,5}$/.test(p) || n < 1 || n > 65535) throw bad(`port ${p} is not 1-65535`);
+    return n;
+  };
+  // [v6] or [v6/prefix], with an optional port.
+  const bracket = entry.match(/^\[([^\]]+)\](?::(\d+))?$/);
+  if (bracket) {
+    const [addr, prefix] = bracket[1].split("/");
+    if (!isIPv6(addr)) throw bad(`${addr} is not an IPv6 address`);
+    const port = portOf(bracket[2]);
+    if (prefix !== undefined) {
+      if (!/^\d{1,3}$/.test(prefix) || Number(prefix) > 128) throw bad(`/${prefix} is not an IPv6 prefix`);
+      return { kind: "cidr", value: `${addr}/${prefix}`, port, loopback: false };
+    }
+    return { kind: "ip", value: addr, port, loopback: isLoopbackIp(addr) };
+  }
+  // A bare IPv6 address has colons of its own and so no port.
+  if (isIPv6(entry)) return { kind: "ip", value: entry, port: 443, loopback: isLoopbackIp(entry) };
+  const v6cidr = entry.match(/^([0-9a-f:.]+)\/(\d{1,3})$/);
+  if (v6cidr && isIPv6(v6cidr[1])) {
+    if (Number(v6cidr[2]) > 128) throw bad(`/${v6cidr[2]} is not an IPv6 prefix`);
+    return { kind: "cidr", value: entry, port: 443, loopback: false };
+  }
+  const withPort = entry.match(/^(.*):(\d+)$/);
+  const host = withPort ? withPort[1] : entry;
+  const port = portOf(withPort?.[2]);
+  const v4cidr = host.match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
+  if (v4cidr) {
+    if (!isIPv4(v4cidr[1]) || Number(v4cidr[2]) > 32) throw bad(`${host} is not an IPv4 block`);
+    return { kind: "cidr", value: host, port, loopback: false };
+  }
+  if (host.includes("/")) throw bad("a host, not a URL: no path");
+  if (isIPv4(host)) return { kind: "ip", value: host, port, loopback: isLoopbackIp(host) };
+  if (/^\d+(\.\d+)*$/.test(host)) throw bad(`${host} is not an IPv4 address`);
+  let name = host;
+  let suffix = false;
+  if (name.startsWith("*.")) {
+    name = name.slice(2);
+    suffix = true;
+  } else if (name.startsWith(".")) {
+    name = name.slice(1);
+    suffix = true;
+  }
+  if (name.endsWith(".")) name = name.slice(0, -1);
+  if (!name || name.length > 253 || !name.split(".").every((l) => LABEL.test(l))) {
+    throw bad(name.includes("*") ? "a wildcard only as a leading *." : `${host} is not a host name`);
+  }
+  // A suffix of one label (`*.com`) is the whole of a top-level domain.
+  if (suffix && !name.includes(".")) throw bad(`*.${name} would allow a whole top-level domain`);
+  const loopback = !suffix && (name === "localhost" || name.endsWith(".localhost"));
+  return { kind: suffix ? "suffix" : "domain", value: suffix ? `.${name}` : name, port, loopback };
+}
+
+/** Every entry parsed; the first that is not an entry throws. */
+export function parseAllowList(hosts: string[]): AllowEntry[] {
+  return hosts.filter((h) => h.trim()).map(parseAllowEntry);
+}
+
+/**
  * msb egress rules, one per port. Without this a `--allow-host
  * '*.blob.core.windows.net'` that works on the host would match nothing in a
- * VM.
+ * VM. A loopback entry is not here: the VM's own loopback is not the host's,
+ * so `127.0.0.1:8080` goes through msb's host gateway (gatewayPorts).
  */
-export function egressRules(hosts: string[]): Array<{ port: number; domains: string[]; suffixes: string[]; ips: string[] }> {
-  const byPort = new Map<number, { port: number; domains: string[]; suffixes: string[]; ips: string[] }>();
-  for (const raw of hosts) {
-    const entry = raw.trim().toLowerCase();
-    if (!entry) continue;
-    let host = entry;
-    let port = 443;
-    const m = entry.match(/^(.*):(\d+)$/);
-    if (m && !entry.startsWith("[")) {
-      host = m[1];
-      port = Number.parseInt(m[2], 10);
-    }
-    if (host.startsWith("*.")) host = host.slice(1);
-    const rule = byPort.get(port) ?? { port, domains: [], suffixes: [], ips: [] };
-    byPort.set(port, rule);
-    if (host.startsWith(".")) rule.suffixes.push(host);
-    else if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":")) rule.ips.push(host.replace(/^\[|\]$/g, ""));
-    else rule.domains.push(host);
+export function egressRules(hosts: string[]): Array<{ port: number; domains: string[]; suffixes: string[]; ips: string[]; cidrs: string[] }> {
+  const byPort = new Map<number, { port: number; domains: string[]; suffixes: string[]; ips: string[]; cidrs: string[] }>();
+  for (const e of parseAllowList(hosts)) {
+    if (e.loopback) continue;
+    const rule = byPort.get(e.port) ?? { port: e.port, domains: [], suffixes: [], ips: [], cidrs: [] };
+    byPort.set(e.port, rule);
+    const list = e.kind === "domain" ? rule.domains : e.kind === "suffix" ? rule.suffixes : e.kind === "ip" ? rule.ips : rule.cidrs;
+    if (!list.includes(e.value)) list.push(e.value);
   }
   return [...byPort.values()].sort((a, b) => a.port - b.port);
 }
 
-/** The same allowlist as TLS bypass patterns: a suffix is `*.suffix` to msb. */
-export function tlsBypass(hosts: string[]): string[] {
-  return egressRules(hosts).flatMap((r) => [...r.domains, ...r.suffixes.map((s) => `*${s}`)]);
+/** The ports of the allowlist's loopback entries: reached through msb's host gateway. */
+export function gatewayPorts(hosts: string[]): number[] {
+  return [...new Set(parseAllowList(hosts).filter((e) => e.loopback).map((e) => e.port))].sort((a, b) => a - b);
+}
+
+/** Does a TLS bypass pattern (`host` or `*.suffix`) cover this host name? */
+export function bypassCovers(pattern: string, host: string): boolean {
+  if (pattern.startsWith("*.")) {
+    const suffix = pattern.slice(1);
+    return host === suffix.slice(1) || host.endsWith(suffix);
+  }
+  return pattern === host;
+}
+
+/**
+ * The same allowlist as TLS bypass patterns (a suffix is `*.suffix` to msb),
+ * less every pattern that covers a host a secret goes to. A secret is swapped
+ * in only where msb terminates TLS: a `*.openai.com` bypass would carry the
+ * placeholder to api.openai.com untouched and the call would fail, or worse.
+ */
+export function tlsBypass(hosts: string[], secretHosts: string[] = []): string[] {
+  const secrets = secretHosts.map((h) => parseAllowEntry(h));
+  // A secret bound to a suffix covers every host under it: no bypass there.
+  const covered = (p: string) =>
+    secrets.some((e) => (e.kind === "suffix" ? bypassCovers(`*${e.value}`, p.replace(/^\*\./, "")) || bypassCovers(p, e.value.slice(1)) : bypassCovers(p, e.value)));
+  return egressRules(hosts)
+    .flatMap((r) => [...r.domains, ...r.suffixes.map((s) => `*${s}`)])
+    .filter((p, i, all) => all.indexOf(p) === i && !covered(p));
+}
+
+/** The ports msb must terminate TLS on: 443 and every port a secret host is reached on. */
+export function interceptPorts(secretHosts: string[]): number[] {
+  return [...new Set([443, ...secretHosts.map((h) => parseAllowEntry(h).port)])].sort((a, b) => a - b);
 }
 
 /** catalog.json beside catalog/: the image and every file's sha256, written on the host after the VM is gone. */
@@ -1103,6 +1221,85 @@ export async function writeCatalogRecord(sandbox: string, image: string, digest:
   await walk(root);
   files.sort((a, b) => a.path.localeCompare(b.path));
   await writeFile(join(sandbox, "catalog.json"), `${JSON.stringify({ at: new Date().toISOString(), image, manifest_digest: digest, files }, null, 2)}\n`);
+}
+
+/**
+ * What a run's VMs would reach, asked of a throwaway VM with the same policy:
+ * every allowed host answers (any HTTP status is an answer; no answer is not),
+ * a host outside the list does not resolve, and — as between two providers of
+ * one VM — a placeholder bound to one host is stopped on its way to another
+ * host that also holds a secret. (A host that holds none keeps its own TLS end
+ * to end, so msb never reads what goes there: a placeholder can reach it, the
+ * value it stands for cannot.) The host version of this (`swarm.sh netcheck`)
+ * asks netguard; this asks msb.
+ */
+export async function netCheck(image: string, allowHosts: string[], options: { canary?: string } = {}): Promise<{ ok: boolean; rows: Array<{ check: string; host: string; result: string; ok: boolean }> }> {
+  const M = await sdk();
+  const name = `dfs-netcheck-${randomBytes(6).toString("hex")}`;
+  const canary = options.canary ?? "example.com";
+  const entries = parseAllowList(allowHosts);
+  const probe = entries.filter((e) => e.kind === "domain" && !e.loopback);
+  const hostOf = (e: AllowEntry) => (e.port === 443 ? e.value : `${e.value}:${e.port}`);
+  // Two stand-in secrets, one per host, as two providers of one VM would be.
+  const pair = probe.slice(0, 2);
+  const keys = pair.map((e, i) => ({ env: `NETCHECK_KEY${i}`, host: e, placeholder: `dfirswarm-secret-netcheck${i}-${randomBytes(8).toString("hex")}` }));
+  const policy = allowEgress(new M.NetworkPolicyBuilder().defaultDeny(), allowHosts);
+  const rows: Array<{ check: string; host: string; result: string; ok: boolean }> = [];
+  try {
+    const vm = await M.Sandbox.builder(name)
+      .image(image)
+      .pullPolicy("if-missing")
+      .cpus(1)
+      .memory(1024)
+      .maxDuration(900)
+      .labels({ [LABEL_RUN]: "netcheck", [LABEL_AGENT]: "netcheck" })
+      .detached(true)
+      .envs(Object.fromEntries(keys.map((k) => [k.env, k.placeholder])))
+      .network((n) => {
+        n.policyFromBuilder(policy);
+        if (keys.length) {
+          const secretHosts = keys.map((k) => hostOf(k.host));
+          n.tls((t: TlsB) => {
+            t.interceptedPorts(interceptPorts(secretHosts));
+            for (const h of tlsBypass(allowHosts, secretHosts)) t.bypass(h);
+            return t;
+          });
+          n.secretViolationAction("block-and-log");
+          for (const k of keys) n.secret((b: SecretB) => b.env(k.env).value(`netcheck-not-a-secret-${k.env}`).placeholder(k.placeholder).allow(k.host.value));
+        }
+        return n;
+      })
+      .create();
+    const curl = async (url: string, env?: string) => {
+      const cmd = `curl -sS -o /dev/null -m 15 -w '%{http_code}' ${env ? `-H "x-netcheck: $${env}" ` : ""}'${url}' 2>&1; true`;
+      const out = await vm.exec("sh", ["-c", cmd]);
+      return `${out.stdout()}${out.stderr()}`.trim().replace(/\s+/g, " ");
+    };
+    const url = (e: AllowEntry) => `https://${hostOf(e)}/`;
+    for (const e of probe) {
+      const got = await curl(url(e));
+      rows.push({ check: "allowed host answers", host: hostOf(e), result: got, ok: (got.match(/(\d{3})$/)?.[1] ?? "000") !== "000" });
+    }
+    for (const e of entries.filter((x) => x.kind !== "domain" || x.loopback)) {
+      rows.push({ check: "allowed entry (not probed: a suffix, an address or the host gateway)", host: hostOf(e), result: "—", ok: true });
+    }
+    const denied = await curl(`https://${canary}/`);
+    rows.push({ check: "a host outside the list is refused", host: canary, result: denied, ok: /000$/.test(denied) });
+    if (keys.length === 2) {
+      const own = await curl(url(keys[0].host), keys[0].env);
+      rows.push({ check: `a placeholder goes to its own host (${keys[0].host.value}) and is swapped there`, host: hostOf(keys[0].host), result: own, ok: !/000$/.test(own) });
+      const leak = await curl(url(keys[1].host), keys[0].env);
+      rows.push({ check: `${keys[0].host.value}'s placeholder is stopped on its way to ${keys[1].host.value}`, host: hostOf(keys[1].host), result: leak, ok: /000$/.test(leak) });
+    } else {
+      rows.push({ check: "a placeholder is stopped on its way to another secret's host (needs two host names)", host: "—", result: "not checked", ok: true });
+    }
+  } catch (err) {
+    rows.push({ check: "the check VM", host: image, result: err instanceof Error ? err.message : String(err), ok: false });
+  } finally {
+    await run(msbBinary(), ["stop", name], { timeoutMs: 120_000 });
+    await run(msbBinary(), ["rm", name], { timeoutMs: 60_000 });
+  }
+  return { ok: rows.every((r) => r.ok), rows };
 }
 
 /** The manifest digest of the image a VM was made from, from msb's own record of it. */
@@ -1148,6 +1345,31 @@ async function main(): Promise<void> {
     case "msb-path":
       console.log(msbBinary());
       return;
+    case "netcheck": {
+      const image = opt("--image");
+      if (!image) throw new Error("netcheck needs --image REF [--allow-host H]... [--canary HOST]");
+      const hosts: string[] = [];
+      rest.forEach((a, i) => {
+        if (a === "--allow-host" && rest[i + 1]) hosts.push(...rest[i + 1].split(",").filter(Boolean));
+      });
+      const r = await netCheck(image, hosts, { canary: opt("--canary") });
+      for (const row of r.rows) console.log(`${row.ok ? "ok  " : "FAIL"}  ${row.check}: ${row.host} -> ${row.result}`);
+      process.exit(r.ok ? 0 : 1);
+    }
+    case "check-allow": {
+      // The kickoff asks before anything is written: every --allow-host and
+      // provider host, as the VM's policy will read it.
+      const bad: string[] = [];
+      for (const h of rest.flatMap((a) => a.split(",")).filter((a) => a.trim())) {
+        try {
+          parseAllowEntry(h);
+        } catch (err) {
+          bad.push(err instanceof Error ? err.message : String(err));
+        }
+      }
+      console.log(JSON.stringify({ ok: bad.length === 0, refused: bad }));
+      process.exit(bad.length ? 2 : 0);
+    }
     case "probe": {
       const r = await probeHost(opt("--image"));
       console.log(JSON.stringify(r));

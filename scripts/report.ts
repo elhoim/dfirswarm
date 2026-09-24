@@ -702,6 +702,8 @@ export function egressLine(mode: string | undefined): string {
       return "none (netguard was off for this run)";
     case "microvm":
       return "enforced (microVM network policy on the host: deny by default, each VM's allowed hosts only; a denied name does not resolve and a hard-coded address has no route)";
+    case "microvm-open":
+      return "OPEN (--no-netguard: each microVM could reach every public host; its secrets still went only to their own hosts)";
     default:
       return "not recorded (this run predates the field)";
   }
@@ -1102,7 +1104,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ],
     // What the allowlist was is half the custody line; whether the host could
     // hold it is the other half, and the record used to carry only the first.
-    ["Egress enforcement", egressLine(run?.netguard === false ? "off" : (run?.netguard_mode as string | undefined))],
+    ["Egress enforcement", egressLine(run?.netguard === false && !String(run?.netguard_mode ?? "").startsWith("microvm") ? "off" : (run?.netguard_mode as string | undefined))],
     ["Write guard", writeGuardLine(run?.write_guard as string | undefined)],
     ["Terminal socket", herdrSocketLine(run?.herdr_socket as string | undefined)],
     ["Pi extensions", piExtensionsLine(run?.pi_extensions as string | undefined)],

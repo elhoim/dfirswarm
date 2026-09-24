@@ -217,11 +217,11 @@ test("the network setting reaches the command line, and a bad one is refused", (
   assert.equal(validateStart({ n: 2, cap_usd: 1, model: "x/y", no_start: true, net: "hosts", allow_hosts: "" }).ok, false);
 });
 
-test("a host is a name with a dot, localhost, an address, or any of them with a port", () => {
-  for (const ok of ["pypi.org", "files.pythonhosted.org", "127.0.0.1", "127.0.0.1:11434", "localhost", "localhost:1234", "[::1]", "[::1]:8080", "gpu-box.local", "192.168.1.20:8000"]) {
+test("a host is a name with a dot, localhost, an address, a suffix, or any of them with a port", () => {
+  for (const ok of ["pypi.org", "files.pythonhosted.org", "127.0.0.1", "127.0.0.1:11434", "localhost", "localhost:1234", "[::1]", "[::1]:8080", "gpu-box.local", "192.168.1.20:8000", "*.blob.core.windows.net", ".googleapis.com"]) {
     assert.equal(isHostName(ok), true, `${ok} should be a host`);
   }
-  for (const bad of ["", "not a host; rm -rf /", "nodots", "host:", "host:0", "host:70000", "[::1", "a..b", "-bad.example"]) {
+  for (const bad of ["", "not a host; rm -rf /", "nodots", "host:", "host:0", "host:70000", "[::1", "a..b", "-bad.example", "*.com", ".com", "a*.b.com", "*.*.x.com"]) {
     assert.equal(isHostName(bad), false, `${bad} should not be a host`);
   }
 });

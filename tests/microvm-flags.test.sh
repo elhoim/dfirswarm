@@ -17,7 +17,10 @@ trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 swarm() { SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" "$@" 2>&1; }
-start() { swarm start --model solo/model --n 2 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --toolbox off "$@"; }
+# "solo" is a provider nobody ships: its host is given, as an operator with a
+# gateway would give it.
+start() { swarm start --model solo/model --provider-host solo=api.solo.example --n 2 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --toolbox off "$@"; }
+bare_start() { swarm start --n 2 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --toolbox off "$@"; }
 sandbox_of() { printf '%s\n' "$1" | sed -n 's/^SANDBOX=//p' | tail -1; }
 reg() { jq -r --arg l "$1" ".runs[] | select(.[\"label\"] == \$l) | $2" "$TMP/runs/registry.json"; }
 case "$(uname -m)" in arm64|aarch64) ARCH=arm64 ;; *) ARCH=amd64 ;; esac
@@ -60,6 +63,33 @@ out="$(PATH="$TMP/nocollector:$PATH" start --label host-no-collector)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a host kickoff with no collector should still start, with a warning: $out"
 printf '%s\n' "$out" | grep -q 'appended by the panes themselves' || fail "the host fallback is not said: $out"
 pass "a microvm run whose trace collector does not come up is refused; a host run falls back and says so"
+
+# --- the network a VM is given -------------------------------------------------
+out="$(bare_start --model mystery/m1 --isolation microvm --label bad-provider)"; rc=$?
+[[ $rc -eq 2 ]] || fail "a provider with no known host exited $rc under microvm, wanted 2: $out"
+printf '%s\n' "$out" | grep -q -- '--provider-host mystery=<host>' || fail "the refusal does not say how to name the host: $out"
+out="$(bare_start --model mystery/m1 --isolation microvm --no-netguard --label bad-provider-open)"; rc=$?
+[[ $rc -eq 2 ]] || fail "an open network does not make an unknown provider's key reachable, but it exited $rc: $out"
+out="$(bare_start --model amazon-bedrock/anthropic.claude-x --isolation microvm --label bad-bedrock)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'signs every request' || fail "bedrock under microvm was not refused with the reason: $out"
+out="$(bare_start --model solo/model --provider-host 'solo' --label bad-ph)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'provider=host' || fail "a --provider-host without =host was not refused: $out"
+out="$(start --isolation microvm --allow-host 'https://mirror.example.org/x' --label bad-allow)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'not a URL' || fail "an --allow-host a VM would read as nothing was not refused: $out"
+out="$(start --isolation microvm --allow-host '*.com' --label bad-tld)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'top-level domain' || fail "*.com was not refused: $out"
+[[ -z "$(jq -r '.runs[]? | select(.label | startswith("bad-")) | .id' "$TMP/runs/registry.json" 2>/dev/null)" ]] || fail "a refused network left a run"
+# Pi's own model list names the hosts of the providers it ships.
+out="$(bare_start --model groq/llama-3.3-70b-versatile --isolation microvm --allow-host '*.blob.core.windows.net' --allow-host '[::1]:11434' --label vm-groq)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a Pi provider with a known host was refused: $out"
+sbx="$(sandbox_of "$out")"
+jq -e '.providers[] | select(.provider == "groq") | .hosts | index("api.groq.com")' "$sbx/vm-spec.json" >/dev/null \
+  || fail "the groq host did not come from Pi's model list: $(jq -c .providers "$sbx/vm-spec.json")"
+out="$(start --isolation microvm --no-netguard --label vm-open)"; rc=$?
+[[ $rc -eq 0 ]] || fail "an open microvm run was refused: $out"
+[[ "$(reg vm-open '.netguard_mode')" == "microvm-open" ]] || fail "an open VM network was recorded as $(reg vm-open '.netguard_mode')"
+[[ "$(reg vm-ev '.netguard_mode' 2>/dev/null)" != "microvm-open" ]] || fail "a closed VM network was recorded as open"
+pass "a provider with no host, a signing provider, a bad --provider-host or --allow-host are refused under microvm; Pi's list names a shipped provider's host; an open VM network is recorded as open"
 
 # A link in the evidence that leads out of it would dangle in every VM.
 mkdir -p "$TMP/ev-link" "$TMP/elsewhere"

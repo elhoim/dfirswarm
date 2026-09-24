@@ -145,10 +145,43 @@ export type Custody = {
         kept: string | null;
         snapshot: null | { path: string; sha256: string; verified: boolean; msb_verified: boolean | null } | { error: string };
         logs: Array<{ path: string; sha256: string }>;
+        /** Placeholders msb stopped on their way to a host their secret is not bound to (runtime.log). */
+        secret_violations: SecretViolation[];
       }>;
   incomplete: string | null;
   summary: string;
 };
+
+export type SecretViolation = { at: string; env: string; host: string; method: string; path: string; action: string };
+
+/**
+ * msb's record of a placeholder it stopped: a WARN line in the VM's
+ * runtime.log (measured, msb 0.7.2, secretViolationAction block-and-log):
+ *   <ts>  WARN microsandbox_network::engine::secrets::handler: secret
+ *   violation: placeholder detected for disallowed host action=block-and-log
+ *   secret_env_var=K placeholder=… sni=… host=… method=GET path=/v1/models …
+ * A request to a host outside the policy is not logged at all: its name does
+ * not resolve and its address has no route. This is the one refusal msb
+ * writes down, and the one that says a credential was aimed somewhere else.
+ */
+export function secretViolations(runtimeLog: string): SecretViolation[] {
+  const out: SecretViolation[] = [];
+  for (const line of runtimeLog.split("\n")) {
+    const i = line.indexOf("secret violation:");
+    if (i < 0) continue;
+    const fields: Record<string, string> = {};
+    for (const m of line.slice(i).matchAll(/(\w+)=(\S*)/g)) fields[m[1]] = m[2];
+    out.push({
+      at: line.slice(0, line.indexOf(" ")).trim(),
+      env: fields.secret_env_var ?? "",
+      host: fields.host || fields.sni || "",
+      method: fields.method ?? "",
+      path: fields.path ?? "",
+      action: fields.action ?? "",
+    });
+  }
+  return out;
+}
 
 /** Every `{path: "tool-output/…", sha256}` a trace line carries, wherever it sits in the line. */
 export function keptOutputRefs(value: unknown, out: Map<string, string> = new Map()): Map<string, string> {
@@ -424,9 +457,14 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
         snapshot = { path: snap.path, sha256: snap.sha256, verified: ok, msb_verified: msbOk };
       }
       const logs: Array<{ path: string; sha256: string }> = [];
+      let violations: SecretViolation[] = [];
       const logDir = typeof rec.logs === "string" ? await realpath(rec.logs).catch(() => null) : null;
       if (logDir && snapRoot && logDir.startsWith(`${snapRoot}/`)) {
-        for (const abs of await walk(logDir)) logs.push({ path: relative(dirname(snapRoot), abs), sha256: (await stat(abs)).size > MAX_HASHED_BYTES ? "unhashed" : await sha256File(abs) });
+        for (const abs of await walk(logDir)) {
+          const size = (await stat(abs)).size;
+          logs.push({ path: relative(dirname(snapRoot), abs), sha256: size > MAX_HASHED_BYTES ? "unhashed" : await sha256File(abs) });
+          if (basename(abs) === "runtime.log" && size <= MAX_HASHED_BYTES) violations = violations.concat(secretViolations(await readFile(abs, "utf8")));
+        }
       }
       vms.push({
         agent: String(rec.agent ?? name.replace(/\.json$/, "")),
@@ -435,6 +473,7 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
         kept: typeof rec.kept === "string" ? rec.kept : null,
         snapshot,
         logs,
+        secret_violations: violations,
       });
     }
   }
@@ -467,6 +506,8 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
     const kept = vms.filter((v) => v.snapshot && "verified" in v.snapshot && v.snapshot.verified).length;
     const failed = vms.filter((v) => (v.snapshot && "error" in v.snapshot) || v.kept || !v.stopped);
     parts.push(`${vms.length} VM${vms.length === 1 ? "" : "s"}, ${kept} of ${vms.length} snapshots verified${failed.length ? `, ${failed.length} NOT PUT AWAY (${failed.map((v) => v.agent).join(", ")})` : ""}`);
+    const sv = vms.flatMap((v) => v.secret_violations.map((x) => `${v.agent} ${x.env} → ${x.host} ${x.method} ${x.path}`.trim()));
+    if (sv.length) parts.push(`${sv.length} SECRET PLACEHOLDER${sv.length === 1 ? "" : "S"} AIMED AT A HOST NOT ITS OWN, stopped by msb: ${sv.join("; ")}`);
   }
   if (incomplete) parts.push(`CUSTODY INCOMPLETE: ${incomplete}`);
 

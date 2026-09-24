@@ -29,7 +29,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { initSandbox, readLedger } from "../extensions/protocol.ts";
 import { Hub } from "../scripts/vm-hub.ts";
-import { createVms, finishRun, imageCatalog, msbBinary, probeHost, reapVms, registryLabel, runVms, vmName, type VmSpec } from "../scripts/vm.ts";
+import { createVms, finishRun, imageCatalog, msbBinary, netCheck, probeHost, reapVms, registryLabel, runVms, vmName, type VmSpec } from "../scripts/vm.ts";
 import { execFileSync } from "node:child_process";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -451,4 +451,16 @@ test("in a VM the shared work/ is read-only, a peer's directory is not one's own
   assert.equal(await readFile(join(S, "work", "report.md"), "utf8"), "# findings\n", "the deliverable is on the host, written by the hub");
   const claims = await readdir(join(S, "locks")).catch(() => []);
   assert.ok(claims.length >= 1, "the destination was claimed for the publisher");
+});
+
+test("the network check boots the run's policy in a throwaway VM: allowed hosts answer, others do not resolve, and one provider's placeholder never reaches another's host", async (t) => {
+  if (skip) return t.skip(skip);
+  // Real hosts on the internet: an offline host says so instead of failing.
+  if (process.env.DFIRSWARM_OFFLINE === "1") return t.skip("DFIRSWARM_OFFLINE=1");
+  const r = await netCheck(IMAGE, ["api.deepseek.com", "pypi.org", "*.blob.core.windows.net", "127.0.0.1:8080"]);
+  const text = r.rows.map((x) => `${x.ok ? "ok" : "FAIL"} ${x.check}: ${x.host} -> ${x.result}`).join("\n");
+  assert.ok(r.ok, text);
+  assert.ok(r.rows.some((x) => /outside the list/.test(x.check) && /000$/.test(x.result)), text);
+  assert.ok(r.rows.some((x) => /stopped on its way to pypi\.org/.test(x.check) && x.ok), text);
+  assert.doesNotMatch(msb("list"), /dfs-netcheck-/, "the check's VM is gone");
 });
