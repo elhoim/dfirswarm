@@ -670,15 +670,36 @@ host_clock_json() {
 # harness's commit and whether the checkout had local changes (untracked
 # files included), the Node and Pi it ran on, msb for a VM run, and the host.
 # The models and the image digest are in the record already.
+# The harness's commit: git's, or, in a tree unpacked from `git archive`
+# (the Linux host is synced that way), the one the archive wrote into
+# scripts/HARNESS_COMMIT (export-subst in .gitattributes). Prints nothing when
+# neither is known.
+harness_commit() {
+  local c
+  c="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -z "$c" ]]; then
+    c="$(tr -d '[:space:]' < "$ROOT/scripts/HARNESS_COMMIT" 2>/dev/null || true)"
+    [[ "$c" =~ ^[0-9a-f]{40}$ ]] || c=""
+  fi
+  printf '%s' "$c"
+}
+# Whether the checkout differs from its commit: true, false, or unknown when
+# there is no git to ask (an unpacked archive).
+harness_dirty() {
+  git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1 || { echo unknown; return; }
+  [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal -- extensions scripts prompts packs images tool-library library 2>/dev/null)" ]] && echo true || echo false
+}
+
 provenance_json() {
-  local commit dirty=false pi_pkg pi_path
-  commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
-  [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal -- extensions scripts prompts packs images tool-library library 2>/dev/null)" ]] && dirty=true
+  local commit dirty pi_pkg pi_path
+  commit="$(harness_commit)"
+  dirty="$(harness_dirty)"
+  [[ "$dirty" == unknown ]] && dirty=null
   pi_pkg="$(jq -r '.version // empty' "$ROOT/node_modules/@earendil-works/pi-coding-agent/package.json" 2>/dev/null || true)"
   pi_path="$(command -v pi 2>/dev/null || true)"
   jq -nc --arg commit "$commit" --argjson dirty "$dirty" --arg node "$(node --version 2>/dev/null || true)" --arg pi "$pi_pkg" --arg pi_path "$pi_path" \
     --arg msb "${msb_version:-}" --arg image "${vm_image_digest:-}" --arg os "$(uname -sr)" --arg arch "$(uname -m)" \
-    '{harness_commit: (if $commit == "" then "not a git checkout" else $commit end), harness_dirty: $dirty,
+    '{harness_commit: (if $commit == "" then "unknown (not a git checkout, and no archive commit)" else $commit end), harness_dirty: $dirty,
       node_version: $node, pi_version: (if $pi == "" then null else $pi end), pi_on_path: (if $pi_path == "" then null else $pi_path end),
       msb_version: (if $msb == "" then null else $msb end), image_digest: (if $image == "" then null else $image end), os: $os, arch: $arch}'
 }
@@ -794,8 +815,11 @@ freeze_harness() { # <hub dir>
       *) ln -s "$entry" "$host/node_modules/$name" ;;
     esac
   done
-  commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo "not a git checkout")"
-  git -C "$ROOT" diff --quiet HEAD -- extensions scripts prompts 2>/dev/null || commit="$commit with local changes"
+  commit="$(harness_commit)"
+  case "$(harness_dirty)" in
+    true) commit="$commit with local changes" ;;
+    unknown) commit="${commit:-an unknown commit} (unpacked, not a git checkout: local changes cannot be told)" ;;
+  esac
   printf '%s\n' "$commit" > "$dir/COMMIT"
   printf '%s\n' "$commit" > "$host/COMMIT"
 }
@@ -3428,6 +3452,19 @@ STRIP
       [[ -n "$_pd" ]] || continue
       "$ROOT/scripts/pack.sh" verify "$(basename "$_pd")" >/dev/null || {
         echo "BLOCKER: pack $(basename "$_pd") does not verify; install it again." >&2; exit 1; }
+      # An installed pack older than the one this checkout ships runs as it
+      # was installed: its tools and skills are the old ones, fixes and all.
+      local _id _have _ship _shipped="${SWARM_SHIPPED_PACKS:-$ROOT/packs}"
+      _id="$(basename "$_pd")"
+      if [[ -f "$_shipped/$_id/pack.json" ]]; then
+        _have="$(jq -r '.version // empty' "$_pd/pack.json" 2>/dev/null)"
+        _ship="$(jq -r '.version // empty' "$_shipped/$_id/pack.json" 2>/dev/null)"
+        if [[ -n "$_have" && -n "$_ship" ]] && python3 -c 'import sys
+t = lambda v: tuple(int(x) for x in v.split("."))
+sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/null; then
+          echo "WARN: pack $_id is installed at $_have and this checkout ships $_ship; the run uses $_have. Update it with: scripts/pack.sh install $_shipped/$_id" >&2
+        fi
+      fi
     done <<< "$pack_dirs"
   fi
   PACK_SECRETS_ENV='{}'
@@ -3908,6 +3945,32 @@ STRIP
       models_json="$(pi_agent_dir)/models.json"
       start_check_key_from_env
       start_check_credentials
+    fi
+    # What the start would set up, in the words it would use: where the
+    # agents run, on which image, and what the model gateway would front.
+    if [[ "$isolation" == "microvm" ]]; then
+      echo "Isolation:    one microVM per agent (${vm_image:-the image the packs choose}${vm_image_digest:+, $vm_image_digest})"
+    else
+      echo "Isolation:    host, unisolated: every agent is a process on this machine, held by the host guards"
+    fi
+    if [[ "$model_gateway" -eq 1 ]]; then
+      local _gp _gk _gwhy _gauth
+      _gauth="$(pi_auth_file)"
+      while IFS= read -r _gp; do
+        [[ -n "$_gp" ]] || continue
+        if provider_is_local "$_gp/x" 2>/dev/null; then _gk=local
+        elif [[ "$(jq -r --arg p "$_gp" '.[$p].type // empty' "$_gauth" 2>/dev/null)" == "oauth" ]]; then _gk=oauth
+        else _gk=api_key; fi
+        _gwhy="$(PI_CODING_AGENT_DIR="$(pi_agent_dir)" node --experimental-strip-types --no-warnings --input-type=module -e '
+import { gatewayProviderFor } from "'"$ROOT"'/scripts/model-gateway.ts";
+const r = gatewayProviderFor(process.argv[1], process.argv[2], { piAgentDir: process.env.PI_CODING_AGENT_DIR });
+console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not be planned")"
+        if [[ -z "$_gwhy" ]]; then
+          echo "Gateway:      every call to $_gp would go through the model gateway on this host: the key stays here, and the spend is metered here"
+        else
+          echo "Gateway:      $_gp would be left to msb's placeholder path ($_gwhy); its spend is what its seats report"
+        fi
+      done < <(credential_models | sed 's#/.*##' | awk '!seen[$0]++')
     fi
     echo "Check:        the start would go ahead ($isolation, $n agent(s), sandbox $sandbox); nothing was written"
     exit 0
@@ -6563,6 +6626,9 @@ vm_build_spec() { # <hub dir> <out file>
     [[ -n "$compact_model" ]] && add_env SWARM_COMPACT_MODEL "$compact_model"
   fi
   [[ -n "$inbox_page_chars" ]] && add_env SWARM_INBOX_PAGE_CHARS "$inbox_page_chars"
+  # The hub refuses a part larger than its own size: a size set for this run
+  # reaches the guests too, so both ends cut the same parts.
+  [[ -n "${SWARM_TRANSFER_PART_BYTES:-}" ]] && add_env SWARM_TRANSFER_PART_BYTES "$SWARM_TRANSFER_PART_BYTES"
   # The programs the seeded tools name (`requires` in their manifests): the
   # VM's probe looks for them, and a missing one is said at kickoff.
   local tool_programs
@@ -6988,7 +7054,8 @@ cmd_stop() {
   if command -v herdr >/dev/null 2>&1; then
     while read -r ws; do
       [[ -z "$ws" ]] && continue
-      herdr workspace close "$ws" || true
+      # Herdr answers in JSON; the stop's own lines say what happened.
+      herdr workspace close "$ws" >/dev/null 2>&1 || true
     done < <(jq -r '
       ((.workspace_ids // []) + [(.workspace_id // empty)]) | unique | .[]
     ' <<<"$rec")

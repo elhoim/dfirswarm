@@ -778,3 +778,45 @@ test("icat_root and master_icat read the image they are given, not the one they 
   });
 });
 
+
+// Every Python tool a pack or the library ships, read for a name it uses at
+// module level and never binds: a NameError waits for the first call that
+// reaches it. catalog_search read `d` for `args` and failed every call in a
+// real run.
+test("no pack or library tool uses a module-level name it never binds", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const scan = `
+import builtins, glob, symtable, sys
+bad = []
+for p in sorted(glob.glob("packs/*/tools/*/*.py") + glob.glob("tool-library/*/*.py")):
+    src = open(p, encoding="utf-8", errors="replace").read()
+    st = symtable.symtable(src, p, "exec")
+    for s in st.get_symbols():
+        if s.is_referenced() and not (s.is_assigned() or s.is_imported() or s.is_parameter()) and s.get_name() not in dir(builtins):
+            bad.append("%s: %s" % (p, s.get_name()))
+print("\\n".join(bad))
+`;
+  const r = spawnSync("python3", ["-c", scan], { cwd: join(LIB, ".."), encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "", `unbound names:\n${r.stdout}`);
+});
+
+test("catalog_search finds lines in the only catalogue, and takes catalog= when there are several", async () => {
+  await withCwd(async (cwd) => {
+    const script = join(LIB, "..", "packs", "computer-forensics-base", "tools", "catalog_search", "run.py");
+    await mkdir(join(cwd, "catalog", "Case4", "p0"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "Case4", "p0", "filelist.txt"), "Users/alice/NTUSER.DAT\nWindows/Prefetch/CHROME.EXE-1.pf\n");
+    let r = await runPy(script, cwd, { pattern: "prefetch", which: "filelist" });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /CHROME\.EXE-1\.pf/);
+    assert.doesNotMatch(r.stdout, /NTUSER/);
+    await mkdir(join(cwd, "catalog", "Other", "p0"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "Other", "p0", "filelist.txt"), "Other/file.txt\n");
+    r = await runPy(script, cwd, { pattern: "file", which: "filelist" });
+    assert.notEqual(r.code, 0);
+    assert.match(r.stdout + r.stderr, /several catalogues; pass catalog=/);
+    r = await runPy(script, cwd, { pattern: "file", which: "filelist", catalog: join("catalog", "Other") });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /Other\/file\.txt/);
+  });
+});

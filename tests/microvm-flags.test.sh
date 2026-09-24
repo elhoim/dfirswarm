@@ -339,6 +339,15 @@ rm -f "$kp_dir/secrets.env"
   || fail "a secrets.env inside a pack's directory was not refused (rc $rc): $out"
 grep -rq 'planted-value' "$TMP/runs" 2>/dev/null && fail "the planted secret's value reached a run"
 pass "a pack whose directory holds a secrets.env is refused before any VM could mount it"
+# An installed pack older than the one the checkout ships is said: the run
+# uses the installed tools, fixes and all.
+mkdir -p "$TMP/shipped/keyed-pack"
+jq '.version = "9.9.9"' "$(bash "$ROOT/scripts/pack.sh" resolve keyed-pack | tail -1)/pack.json" > "$TMP/shipped/keyed-pack/pack.json"
+out="$(SWARM_SHIPPED_PACKS="$TMP/shipped" start --check --isolation host --pack keyed-pack 2>&1)"
+printf '%s\n' "$out" | grep -q "WARN: pack keyed-pack is installed at .* and this checkout ships 9.9.9; the run uses" || fail "an installed pack older than the shipped one was not said: $out"
+out="$(SWARM_SHIPPED_PACKS="$TMP/no-such-dir" start --check --isolation host --pack keyed-pack 2>&1)"
+printf '%s\n' "$out" | grep -q "WARN: pack keyed-pack is installed" && fail "a pack the checkout does not ship was warned about: $out"
+pass "an installed pack older than the one this checkout ships is said at kickoff"
 # --local-only: nothing of the pack's service is opened, and the secrets are withheld.
 out="$(start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pack-secrets --local-only --model ollama/qwen3:8b --label vm-local)"
 if [[ "$(jq -c '.pack_secrets // [] | length' "$(sandbox_of "$out")/vm-spec.json" 2>/dev/null)" == "0" ]] || printf '%s\n' "$out" | grep -q -- '--local-only withholds'; then :; else fail "--local-only bound a pack secret: $out"; fi

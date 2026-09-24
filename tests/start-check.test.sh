@@ -121,4 +121,14 @@ unset DFIRSWARM_HOME
 nothing_written "$TMP/runs-check" "image-for"
 pass "image-for says the image, its digest when a lock pins it or msb has it, the profile and why, and writes nothing"
 
+echo "# the check says what the start would set up"
+run "$TMP/runs-plan" --check "${base[@]}" --isolation host --no-start
+[[ $rc -eq 0 ]] || fail "a host check exited $rc: $out"
+printf '%s\n' "$out" | grep -q "^Isolation:    host, unisolated" || fail "the check does not say the run would be unisolated: $out"
+run "$TMP/runs-plan" --check --isolation microvm --model openai/gpt-5.4-mini --n 1 --cap-usd 1 --goal-file "$GOAL" --toolbox off --no-start --model-gateway --image dfirswarm-base:dev-test
+printf '%s\n' "$out" | grep -q "^Isolation:    one microVM per agent (dfirswarm-base:dev-test" || fail "the check does not name the VMs' image: $out"
+printf '%s\n' "$out" | grep -q "^Gateway:      every call to openai would go through the model gateway" || fail "the check does not say the gateway fronts openai: $out"
+nothing_written "$TMP/runs-plan" "the plan check"
+pass "the check names the isolation, the image and what the model gateway would front"
+
 echo "start-check.test.sh: all checks passed"

@@ -178,4 +178,21 @@ for tok in $(jq -r '.[]' "$tokens_file"); do
 done
 pass "the VM spec names the seats' tokens file and holds no token"
 
+# An unpacked `git archive` (how the Linux host is synced) knows its commit
+# from scripts/HARNESS_COMMIT, which the archive fills in; git itself is
+# asked first, and without git local changes are "unknown", not "changed".
+eval "$(fn harness_commit)"; eval "$(fn harness_dirty)"
+G="$TMP/arch-src"; mkdir -p "$G/scripts"
+cp "$ROOT/.gitattributes" "$G/.gitattributes"; cp "$ROOT/scripts/HARNESS_COMMIT" "$G/scripts/HARNESS_COMMIT"
+git -C "$G" init -q && git -C "$G" -c user.name=t -c user.email=t@t add -A && git -C "$G" -c user.name=t -c user.email=t@t commit -qm t
+want="$(git -C "$G" rev-parse HEAD)"
+mkdir -p "$TMP/arch-out" && git -C "$G" archive HEAD | tar -x -C "$TMP/arch-out"
+[[ "$(tr -d '[:space:]' < "$TMP/arch-out/scripts/HARNESS_COMMIT")" == "$want" ]] || fail "git archive did not write the commit: $(cat "$TMP/arch-out/scripts/HARNESS_COMMIT")"
+[[ "$(ROOT="$TMP/arch-out" harness_commit)" == "$want" ]] || fail "an unpacked archive does not know its commit"
+[[ "$(ROOT="$TMP/arch-out" harness_dirty)" == unknown ]] || fail "an unpacked archive claims to know its local changes"
+[[ "$(ROOT="$G" harness_commit)" == "$want" ]] || fail "a git checkout's own commit is not used"
+mkdir -p "$TMP/no-commit/scripts" && printf '$Format:%%H$\n' > "$TMP/no-commit/scripts/HARNESS_COMMIT"
+[[ -z "$(ROOT="$TMP/no-commit" harness_commit)" ]] || fail "an unfilled placeholder was taken for a commit"
+pass "an unpacked archive knows its commit, and says it cannot tell local changes"
+
 echo "lifecycle: all checks passed"

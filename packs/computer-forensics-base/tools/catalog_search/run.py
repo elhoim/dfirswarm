@@ -45,7 +45,7 @@ except re.error as e:
     print(json.dumps({"error": str(e)}))
     sys.exit(1)
 ex = re.compile(exclude, flags) if exclude else None
-base = _resolve_catalog(d.get("catalog") if isinstance(d, dict) else None)
+base = _resolve_catalog(args.get("catalog") if isinstance(args, dict) else None)
 paths = {
     "filelist": os.path.join(base, "p0/filelist.txt"),
     "timeline": os.path.join(base, "p0/timeline.csv"),

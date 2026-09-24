@@ -121,6 +121,30 @@ out="$("$PACK" resolve child-pack)"
 [[ "$(sed -n 2p <<<"$out")" == *"child-pack" ]] || fail "resolve should then give the pack itself"
 pass "dependencies resolve, in order"
 
+# A name its dependency carries is no warning, where the dependency sits
+# beside the pack: in the checkout when sealing, installed when verifying.
+# One no pack in the set carries still is, and so is a dependency that is
+# not there. (Kickoffs printed a warning per dependency tool on every run.)
+mk_pack "$WORK/src" uses-dep base-pack
+sed -i.bak 's/tools: \[echo_tool\]/tools: [echo_tool, base_only_tool]/' "$WORK/src/uses-dep/skills/alpha/first.md"
+rm -f "$WORK/src/uses-dep/skills/alpha/first.md.bak"
+mkdir -p "$WORK/src/base-pack/tools/base_only_tool"
+cp "$WORK/src/base-pack/tools/echo_tool/run.py" "$WORK/src/base-pack/tools/base_only_tool/run.py"
+sed 's/"echo_tool"/"base_only_tool"/' "$WORK/src/base-pack/tools/echo_tool/manifest.json" > "$WORK/src/base-pack/tools/base_only_tool/manifest.json"
+"$PACK" seal "$WORK/src/base-pack" >/dev/null 2>&1 || fail "reseal base-pack with its new tool"
+warn="$("$PACK" seal "$WORK/src/uses-dep" 2>&1 >/dev/null)" || fail "seal uses-dep"
+grep -q "base_only_tool" <<<"$warn" && fail "a tool the dependency beside it carries was still warned about: $warn"
+sed -i.bak 's/base_only_tool\]/base_only_tool, nowhere_tool]/' "$WORK/src/uses-dep/skills/alpha/first.md"
+rm -f "$WORK/src/uses-dep/skills/alpha/first.md.bak"
+warn="$("$PACK" seal "$WORK/src/uses-dep" 2>&1 >/dev/null)" || fail "seal uses-dep again"
+grep -q "nowhere_tool.*neither this pack nor its dependencies carry" <<<"$warn" || fail "a tool no pack in the set carries was not named: $warn"
+mk_pack "$WORK/src" orphan-dep not-here-pack
+sed -i.bak 's/tools: \[echo_tool\]/tools: [elsewhere_tool]/' "$WORK/src/orphan-dep/skills/alpha/first.md"
+rm -f "$WORK/src/orphan-dep/skills/alpha/first.md.bak"
+warn="$("$PACK" seal "$WORK/src/orphan-dep" 2>&1 >/dev/null)" || fail "seal orphan-dep"
+grep -q "elsewhere_tool.*not-here-pack is not beside it" <<<"$warn" || fail "a missing dependency was not named: $warn"
+pass "a name a dependency carries is no warning; one no pack carries, or a dependency that is absent, is"
+
 # Two packs with a tool of the same name: one run holds one tool per name, so
 # the kickoff is told which packs collide. The same script twice is one tool.
 mk_pack "$WORK/src" twin-pack

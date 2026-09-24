@@ -1,7 +1,7 @@
 {
   "id": "computer-forensics-base",
   "name": "Computer Forensics Base Pack",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Method and tooling every examination needs, whatever the platform: read the container and find the volume, verify the evidence, read the catalogue, extract and carve, tell an encrypted volume from an unreadable one, keep a timeline, cite what you claim.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -25,8 +25,8 @@
       "tools/check_inputs/run.py": "bd79f2cbff81154a30a5d1901bb6894d0290f564490b17efdedf54c54d799561",
       "tools/file_type/manifest.json": "e522c522b30513753829c0effc50e6947f922c510efb0f911bbd20b40804b1f2",
       "tools/file_type/run.py": "90aafa1509018ad7ced70076714e4ee73b73a96126b45df338680be66c70d9a4",
-      "tools/catalog_search/manifest.json": "8bc50b8c5f6e09d6299c3c01b457e6364359a0a82f79992d60b63ac903a937d9",
-      "tools/catalog_search/run.py": "cd6a14e013e6ee825cd628d9e6a5d5f54c8d9571d15319b441708f1e66ab201d",
+      "tools/catalog_search/manifest.json": "68695678495ce9e408d5f4bb5e0323346b07322d6d594769db6e71e0c1f1136d",
+      "tools/catalog_search/run.py": "90cdc479b5ded2437b1e865d185037cb1c9cab43d8250239f25e3ddec35fb9cd",
       "tools/icat_extract/manifest.json": "00ee2cd67cfc9a0d036a527ae960fb096c650d476b2a4deb7c2aa5d7cd0aaca7",
       "tools/icat_extract/run.py": "10fd3c920198ad0efe196a65a5e131da9085f7acf28fe43b208c0f9041b5602f",
       "tools/feature_scan/manifest.json": "4d3cfd7673ed4292c21588c2817810208d6efd09f44a276ba77ff7a2bb9549dd",

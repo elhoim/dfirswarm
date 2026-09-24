@@ -26,6 +26,11 @@
       "type": "string",
       "description": "Regex of lines to drop",
       "required": false
+    },
+    "catalog": {
+      "type": "string",
+      "description": "The catalogue directory under catalog/ when there is more than one (default: the only one)",
+      "required": false
     }
   },
   "runtime": "python3",
@@ -34,6 +39,6 @@
   "example": "{\"pattern\": \"SysInternal\", \"which\": \"filelist\"}",
   "by": "sd1d100",
   "at": "2026-09-18T14:14:47.839Z",
-  "version": 1,
-  "sha256": "cd6a14e013e6ee825cd628d9e6a5d5f54c8d9571d15319b441708f1e66ab201d"
+  "version": 2,
+  "sha256": "90cdc479b5ded2437b1e865d185037cb1c9cab43d8250239f25e3ddec35fb9cd"
 }

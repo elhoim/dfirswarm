@@ -133,14 +133,55 @@ if os.path.isdir(tdir):
             errors.append("tools/%s has an empty description" % name)
         tools[name] = tm
 
+# What the dependencies carry, from the packs beside this one: the installed
+# set when an installed pack is verified, the checkout's packs/ when one is
+# sealed there. A name a dependency carries is no warning; one no pack in
+# the set carries is, and one whose dependency is not there says so.
+def _dep_names(pack_dir, seen, acc):
+    try:
+        dm = json.load(open(os.path.join(pack_dir, "pack.json")))
+    except Exception:
+        acc["missing"].add(os.path.basename(pack_dir))
+        return
+    tdir = os.path.join(pack_dir, "tools")
+    if os.path.isdir(tdir):
+        acc["tools"].update(n for n in os.listdir(tdir) if os.path.isdir(os.path.join(tdir, n)))
+    for dirpath, _d, files in os.walk(os.path.join(pack_dir, "skills")):
+        for f in files:
+            if f.endswith(".md"):
+                m = FM.match(open(os.path.join(dirpath, f), encoding="utf-8", errors="replace").read())
+                if m:
+                    sid = re.search(r"^id:\s*(\S+)", m.group(1), re.M)
+                    if sid:
+                        acc["skills"].add(sid.group(1).strip("'\""))
+    try:
+        for b in json.load(open(os.path.join(pack_dir, "requires", "host.json"))).get("binaries", []):
+            acc["host"].add(b.get("name"))
+    except Exception:
+        pass
+    for spec in dm.get("depends", []) or []:
+        did = re.split(r"[<>=!~ ]", str(spec), 1)[0]
+        if did and did not in seen:
+            seen.add(did)
+            _dep_names(os.path.join(os.path.dirname(pack_dir), did), seen, acc)
+
+deps = {"tools": set(), "skills": set(), "host": set(), "missing": set()}
+_seen = {pid}
+for spec in man.get("depends", []) or []:
+    did = re.split(r"[<>=!~ ]", str(spec), 1)[0]
+    if did and did not in _seen:
+        _seen.add(did)
+        _dep_names(os.path.join(os.path.dirname(os.path.abspath(root)), did), _seen, deps)
+_where = ("this pack does not carry (a dependency must: %s is not beside it)" % ", ".join(sorted(deps["missing"]))
+          if deps["missing"] else
+          ("neither this pack nor its dependencies carry" if man.get("depends") else "this pack does not carry"))
+
 for t in sorted(skill_tools):
-    if t not in tools:
-        # A dependency may carry it; the full set is resolved at kickoff.
-        warnings.append("a skill names the tool %r, which this pack does not carry (a dependency must)" % t)
+    if t not in tools and t not in deps["tools"]:
+        warnings.append("a skill names the tool %r, which %s" % (t, _where))
 for n in sorted(skill_needs):
-    if n not in skills:
-        # A dependency may carry it; resolve names across packs at kickoff, not here.
-        warnings.append("a skill needs %r, which this pack does not carry (a dependency must)" % n)
+    if n not in skills and n not in deps["skills"]:
+        warnings.append("a skill needs %r, which %s" % (n, _where))
 
 # --- host requirements ------------------------------------------------------
 host_names = set()
@@ -177,8 +218,8 @@ if os.path.isfile(hj):
     except Exception as e:
         errors.append("requires/host.json is not valid JSON: %s" % e)
 for h in sorted(skill_host):
-    if h not in host_names:
-        warnings.append("a skill calls %r, which requires/host.json does not declare" % h)
+    if h not in host_names and h not in deps["host"]:
+        warnings.append("a skill calls %r, which requires/host.json does not declare%s" % (h, " (nor does a dependency's)" if man.get("depends") and not deps["missing"] else ""))
 
 # --- vendored code has to carry its licence ---------------------------------
 for v in man.get("vendor", []) or []:
