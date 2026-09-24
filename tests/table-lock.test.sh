@@ -131,6 +131,21 @@ check_copy() {
     rm -rf "$lock"
     pass "$name: a lock that is gone is not stale"
   )
+  (
+    eval "$3"
+    # A waiter whose clock runs a minute ahead of the one that stamped the
+    # lock must not see a fresh lock as stale: the age is read against a
+    # probe file on the same filesystem.
+    mkdir -p "$lock"
+    printf 'linux:pid:[1]:another-boot' > "$lock/ns"
+    # shellcheck disable=SC2329  # called by table_lock_stale
+    date() { echo $(( $(command date +%s) + 60 )); }
+    if stale_call "$lock"; then fail "$name: a fresh lock was judged stale on a skewed clock"; fi
+    unset -f date
+    [[ "$(ls -A "${lock%/*}")" == "${lock##*/}" ]] || fail "$name: the probe was left behind"
+    rm -rf "$lock"
+    pass "$name: a lock's age is read on the filesystem's clock"
+  )
 }
 
 SB="$TMP/reap"; mkdir -p "$SB/locks"

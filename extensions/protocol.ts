@@ -38,7 +38,6 @@ import {
   rename,
   rm,
   stat,
-  utimes,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
@@ -569,6 +568,34 @@ async function stampLock(dir: string, token: string): Promise<void> {
 }
 
 /**
+ * "Now" by the clock that stamps the lock: the mtime of a probe file written
+ * just now next to it. A holder in a microVM or on an NFS client stamps its
+ * lock through the filesystem, and so does the probe, so the two are compared
+ * on one clock whatever the host's and the guest's clocks say. Falls back to
+ * our own clock when the probe cannot be written.
+ */
+async function filesystemNow(probe: string): Promise<number> {
+  try {
+    await writeFile(probe, String(process.pid), "utf8");
+    return (await stat(probe)).mtimeMs;
+  } catch {
+    return Date.now();
+  }
+}
+
+/**
+ * How long since a lock last changed: made, or its `beat` file rewritten by
+ * the holder's heartbeat. null when the lock is gone.
+ */
+async function lockAgeMs(dir: string, probe: string): Promise<number | null> {
+  const now = await filesystemNow(probe);
+  const info = await stat(dir).catch(() => null);
+  if (info === null) return null;
+  const beat = await stat(join(dir, "beat")).catch(() => null);
+  return now - Math.max(info.mtimeMs, beat?.mtimeMs ?? 0);
+}
+
+/**
  * A lock is stale once it is older than the stale age, unless its holder is
  * known to be alive. Its holder is known to be alive only when it recorded the
  * same namespace as ours and its pid is live here; anything else — another
@@ -577,9 +604,9 @@ async function stampLock(dir: string, token: string): Promise<void> {
  * its lock from a peer that can see it, and loses it after the stale age only
  * to a peer that cannot.
  */
-async function lockIsStale(dir: string): Promise<boolean> {
-  const info = await stat(dir).catch(() => null);
-  if (info === null || Date.now() - info.mtimeMs < tableLockTiming.staleMs) return false;
+async function lockIsStale(dir: string, probe: string): Promise<boolean> {
+  const age = await lockAgeMs(dir, probe);
+  if (age === null || age < tableLockTiming.staleMs) return false;
   const ns = (await readFile(join(dir, "ns"), "utf8").catch(() => "")).trim();
   if (ns && ns === lockNamespace()) {
     const pid = (await readFile(join(dir, "pid"), "utf8").catch(() => "")).trim();
@@ -608,20 +635,20 @@ export function warnLockLost(message: string): void {
  * the first removed it and took the lock, and the second's rm then removed
  * that live lock, putting both in the critical section.
  */
-async function maybeBreakStaleTableLock(lockDir: string, token: string): Promise<void> {
-  if (!(await lockIsStale(lockDir))) return;
+async function maybeBreakStaleTableLock(lockDir: string, token: string, probe: string): Promise<void> {
+  if (!(await lockIsStale(lockDir, probe))) return;
   const breakDir = `${lockDir}.break`;
   try {
     await mkdir(breakDir);
   } catch {
     // Someone else is breaking it. One that died mid-break leaves its own
     // lock behind, cleared here once that is stale too.
-    if (await lockIsStale(breakDir)) await rm(breakDir, { recursive: true, force: true }).catch(() => undefined);
+    if (await lockIsStale(breakDir, probe)) await rm(breakDir, { recursive: true, force: true }).catch(() => undefined);
     return;
   }
   try {
     await stampLock(breakDir, token);
-    if (await lockIsStale(lockDir)) await rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+    if (await lockIsStale(lockDir, probe)) await rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
   } finally {
     await releaseLockDir(breakDir, token);
   }
@@ -701,25 +728,41 @@ export async function withNamedLock<T>(
   await mkdir(join(sandboxRoot, "locks"), { recursive: true });
   const deadline = Date.now() + tableLockTiming.waitMs;
   const token = `${process.pid}-${randomUUID()}`;
-  while (true) {
-    try {
-      await mkdir(lockDir);
-      await stampLock(lockDir, token);
-      break;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") throw err;
-      await maybeBreakStaleTableLock(lockDir, token);
-      if (Date.now() > deadline) {
-        throw new Error(`Timed out waiting for locks/${name}`);
+  const probe = join(sandboxRoot, "locks", `.probe.${token}`);
+  try {
+    while (true) {
+      try {
+        await mkdir(lockDir);
+        await stampLock(lockDir, token);
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST") throw err;
+        await maybeBreakStaleTableLock(lockDir, token, probe);
+        if (Date.now() > deadline) {
+          throw new Error(`Timed out waiting for locks/${name}`);
+        }
+        await sleep(20);
       }
-      await sleep(20);
     }
+  } finally {
+    await rm(probe, { force: true }).catch(() => undefined);
   }
-  // The heartbeat that keeps a held lock from ever looking stale.
+  // The heartbeat that keeps a held lock from ever looking stale. It writes a
+  // file rather than setting a time, so the filesystem stamps it (see
+  // filesystemNow), and it stops once the lock is no longer ours: a holder
+  // whose lock was broken while it stalled must not keep the next holder's
+  // lock fresh.
   const heartbeat = setInterval(() => {
-    const now = new Date();
-    utimes(lockDir, now, now).catch(() => undefined);
+    readFile(join(lockDir, "owner"), "utf8")
+      .then((owner) => {
+        if (owner !== token) {
+          clearInterval(heartbeat);
+          return;
+        }
+        return writeFile(join(lockDir, "beat"), token, "utf8");
+      })
+      .catch(() => undefined);
   }, tableLockTiming.heartbeatMs);
   heartbeat.unref();
   const held: HeldLock = {

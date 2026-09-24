@@ -262,3 +262,51 @@ test("a holder checks its lock is still its own before it commits a write", asyn
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a lock's age is read on the filesystem's clock, not the waiter's", async () => {
+  // A waiter whose clock runs a minute ahead of the one that stamped the lock
+  // (a host judging a microVM guest's lock, an NFS client) must not see a
+  // fresh lock as stale. Age is taken against a probe file's mtime instead.
+  const { root, lockDir } = await sandbox();
+  const saved = { ...tableLockTiming };
+  const realNow = Date.now;
+  try {
+    await mkdir(lockDir);
+    await writeFile(join(lockDir, "pid"), "999999999", "utf8");
+    await writeFile(join(lockDir, "ns"), FOREIGN_NS, "utf8");
+    tableLockTiming.waitMs = 1_000;
+    Date.now = () => realNow() + 60_000;
+    await assert.rejects(withTableLock(root, async () => undefined), /Timed out/);
+    Date.now = realNow;
+    assert.equal(await readFile(join(lockDir, "pid"), "utf8"), "999999999", "a fresh lock was broken on a skewed clock");
+    assert.deepEqual((await readdir(join(root, "locks"))).sort(), [".table.lock"], "the probe was left behind");
+  } finally {
+    Date.now = realNow;
+    Object.assign(tableLockTiming, saved);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a holder's heartbeat stops once its lock has been taken over", async () => {
+  const { root, lockDir } = await sandbox();
+  const saved = { ...tableLockTiming };
+  try {
+    tableLockTiming.heartbeatMs = 50;
+    await warningsDuring(() =>
+      withTableLock(root, async () => {
+        const until = Date.now() + 2_000;
+        while (!existsSync(join(lockDir, "beat")) && Date.now() < until) await sleep(20);
+        assert.ok(existsSync(join(lockDir, "beat")), "the holder never refreshed its lock");
+        // Broken while we stalled, and taken by someone else.
+        await rm(lockDir, { recursive: true, force: true });
+        await mkdir(lockDir);
+        await writeFile(join(lockDir, "owner"), "someone-else", "utf8");
+        await sleep(300);
+        assert.equal(existsSync(join(lockDir, "beat")), false, "kept refreshing a lock that is someone else's");
+      }),
+    );
+  } finally {
+    Object.assign(tableLockTiming, saved);
+    await rm(root, { recursive: true, force: true });
+  }
+});

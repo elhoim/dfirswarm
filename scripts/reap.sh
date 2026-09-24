@@ -109,9 +109,16 @@ table_lock_ns() {
 # Stale: older than 15 s and no live holder we can see. A lock that is gone
 # (released between the mkdir and the stat) is not stale.
 table_lock_stale() {
-  local m pid ns
+  local m b now pid ns probe="${1%/*}/.probe.$TABLE_LOCK_TOKEN"
   m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)" || return 1
-  (( $(date +%s) - m >= 15 )) || return 1
+  # protocol.ts's heartbeat rewrites <lock>/beat.
+  if b="$(stat -c %Y "$1/beat" 2>/dev/null || stat -f %m "$1/beat" 2>/dev/null)" && (( b > m )); then m=$b; fi
+  # "Now" by the clock that stamped the lock: a probe file touched next to it,
+  # so a lock stamped through NFS or a microVM's shared directory is aged on
+  # the same clock. Our own clock only when the probe cannot be made.
+  if touch "$probe" 2>/dev/null && now="$(stat -c %Y "$probe" 2>/dev/null || stat -f %m "$probe" 2>/dev/null)"; then :; else now="$(date +%s)"; fi
+  rm -f "$probe"
+  (( now - m >= 15 )) || return 1
   : "${TABLE_LOCK_NS=$(table_lock_ns)}"
   ns="$(cat "$1/ns" 2>/dev/null || true)"
   pid="$(cat "$1/pid" 2>/dev/null || true)"
