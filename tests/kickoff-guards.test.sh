@@ -27,7 +27,7 @@ done
 echo "# the hubs' directory"
 export SWARM_HUBS_DIR="$TMP/hubs"
 p="$(hubs_parent --create)" || fail "the hubs' directory was not made"
-[[ "$(stat -f %Lp "$SWARM_HUBS_DIR" 2>/dev/null || stat -c %a "$SWARM_HUBS_DIR")" == "700" ]] || fail "the hubs' directory is not 0700"
+[[ "$(stat -c %a "$SWARM_HUBS_DIR" 2>/dev/null || stat -f %Lp "$SWARM_HUBS_DIR")" == "700" ]] || fail "the hubs' directory is not 0700"
 [[ "$p" == "$(cd "$SWARM_HUBS_DIR" && pwd -P)" ]] || fail "hubs_parent did not resolve the directory"
 unset SWARM_HUBS_DIR
 [[ "$(HOME="$TMP/home" hubs_parent_path)" == "$TMP/home/.dfirswarm/hubs" ]] || fail "the default is not under the user's home"

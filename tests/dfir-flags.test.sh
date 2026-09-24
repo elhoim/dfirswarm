@@ -320,7 +320,10 @@ touch -t 202601010000 "$sb/.pi-sessions/$a0/s.jsonl" "$sb/.pi-sessions/$a1/s.jso
 HERDR_LOG="$TMP/herdr.log" HERDR_BIN="$TMP/herdr-bin/herdr" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$sb" --idle-sec 60 --once >/dev/null 2>&1 || fail "idle-nudge.sh --once failed"
 grep -q "^agent prompt $a0 " "$TMP/herdr.log" || fail "the idle agent was not prompted: $(cat "$TMP/herdr.log" 2>/dev/null)"
 grep -q "^agent prompt $a1 " "$TMP/herdr.log" && fail "an agent with a done marker must be left alone"
-jq -e "select(.tool == \"idle_nudge\" and .args.agent == \"$a0\" and .result.ok == true)" "$sb/traces/events.jsonl" >/dev/null || fail "no idle_nudge event on the trace"
+# With no collector the line goes to the trace, or to the harness's spill
+# when the trace is already chained (scripts/lib/trace.sh); either is kept.
+{ cat "$sb/traces/events.jsonl" "$sb/traces/system-spill.jsonl" 2>/dev/null || true; } \
+  | jq -e "select(.tool == \"idle_nudge\" and .args.agent == \"$a0\" and .result.ok == true)" >/dev/null || fail "no idle_nudge event on the trace or the harness's spill"
 pass "the watchdog prompts an idle agent through herdr, skips a finished one, and logs idle_nudge"
 
 # --- toolbox -------------------------------------------------------------------------

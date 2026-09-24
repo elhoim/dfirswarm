@@ -168,7 +168,11 @@ pass "every agent's writable holes exist before its VM would mount over them"
 
 [[ "$(reg vm-ev '.isolation.mode')" == "microvm" ]] || fail "the registry does not record the isolation"
 [[ "$(reg vm-ev '.isolation.image')" == "dfirswarm-base:dev-$ARCH" ]] || fail "a run with no packs should boot the base image, got $(reg vm-ev '.isolation.image')"
-[[ "$(reg vm-ev '.isolation.cpus')" == "2" && "$(reg vm-ev '.isolation.memory_mib')" == "2048" ]] || fail "the VM size is not recorded"
+# The default memory is 2048 MiB, or 1024 on a host with less than 8 GiB
+# (swarm.sh; CI's macOS runner has 7 GiB).
+host_mib="$(node -e 'console.log(Math.floor(require("os").totalmem() / 1048576))')"
+want_mib=2048; [[ "$host_mib" -lt 8192 ]] && want_mib=1024
+[[ "$(reg vm-ev '.isolation.cpus')" == "2" && "$(reg vm-ev '.isolation.memory_mib')" == "$want_mib" ]] || fail "the VM size is not recorded (wanted 2 vCPU, $want_mib MiB): $(reg vm-ev '.isolation')"
 [[ "$(reg vm-ev '.isolation.snapshot')" == "true" ]] || fail "a VM run keeps each disk by default"
 [[ "$(reg vm-ev '.write_guard')" == "microvm" ]] || fail "write_guard is $(reg vm-ev '.write_guard'), not microvm"
 [[ "$(reg vm-ev '.attribution')" == "channel" ]] || fail "attribution is $(reg vm-ev '.attribution'), not channel"
@@ -452,7 +456,7 @@ out="$(start --isolation microvm --inputs "$TMP/ev" --vm-snapshot-dir "$TMP/disk
 [[ $rc -eq 0 ]] || fail "--vm-snapshot-dir was refused: $out"
 sbx="$(sandbox_of "$out")"
 [[ -L "$sbx.vm-snapshots" && "$(readlink "$sbx.vm-snapshots")" == "$(cd "$TMP/disks" && pwd -P)" ]] || fail "the disks' link beside the run does not name --vm-snapshot-dir: $(ls -l "$sbx.vm-snapshots" 2>&1)"
-[[ "$(stat -f %Lp "$TMP/disks" 2>/dev/null || stat -c %a "$TMP/disks")" == "700" ]] || fail "the disks' directory is not the user's alone"
+[[ "$(stat -c %a "$TMP/disks" 2>/dev/null || stat -f %Lp "$TMP/disks")" == "700" ]] || fail "the disks' directory is not the user's alone"
 # A run whose disks' place already holds an earlier run's disks is refused.
 rm -f "$sbx.vm-snapshots"
 mkdir -p "$sbx.vm-snapshots"
