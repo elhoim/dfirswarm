@@ -11,7 +11,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { closeSync, createReadStream, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
 import { connect } from "node:net";
 import {
@@ -675,6 +675,9 @@ function perModelCaps(raw: unknown): Record<string, number> {
  */
 const lastGoodBudget = new Map<string, BudgetRecord>();
 
+/** How long a fold waits before reading an unreadable budget.json again. */
+const BUDGET_REREAD_MS = 100;
+
 function rememberBudget(sandboxRoot: string, budget: BudgetRecord): void {
   lastGoodBudget.set(resolve(sandboxRoot), structuredClone(budget));
 }
@@ -686,9 +689,55 @@ export async function readBudget(sandboxRoot: string): Promise<BudgetRecord> {
   return budget;
 }
 
+/** True when the run's guard holds budget.json by its inode (Landlock alone). */
+async function budgetPinnedByInode(sandboxRoot: string): Promise<boolean> {
+  const plan = await readFile(join(sandboxRoot, ".fsguard", "plan.txt"), "utf8").catch(() => "");
+  return /^mode: landlock$/m.test(plan);
+}
+
+/**
+ * Replace budget.json whole: a temp file beside it, then `rename` over it, so
+ * a reader outside the table lock (`maybeEnforceStops`, `watchCaps`, the UI,
+ * observe) sees the old record or the new one, never half of one, and a
+ * crash mid-write leaves the old record in place.
+ *
+ * The temp file sits in budget.json's own directory, the sandbox root, since
+ * `rename` does not cross filesystems.
+ *
+ * Under Landlock alone (`mode: landlock` in the kickoff's .fsguard/plan.txt)
+ * the record is written in place, as it always was, by every process of the
+ * run. There inputs/ is carved out of the sandbox, so the root is
+ * listing-only (scripts/landlock.py `plan`) and budget.json's rights are a
+ * rule on its inode, taken when each pane started. A rename cannot happen
+ * inside such a pane, and one from a pane that runs without the guard would
+ * put a new inode at the name that no confined pane could read or write
+ * again. An EACCES or EPERM on the temp file falls back the same way.
+ * Any other failure (a full disk) is thrown, not retried in place:
+ * truncating the live file on a disk that cannot take the new bytes is how a
+ * torn record is made.
+ */
 export async function writeBudget(sandboxRoot: string, budget: BudgetRecord): Promise<void> {
   const normalized = normalizeBudget(budget);
-  await writeFile(join(sandboxRoot, "budget.json"), `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+  const target = join(sandboxRoot, "budget.json");
+  const body = `${JSON.stringify(normalized, null, 2)}\n`;
+  if (await budgetPinnedByInode(sandboxRoot)) {
+    await writeFile(target, body, "utf8");
+    rememberBudget(sandboxRoot, normalized);
+    return;
+  }
+  const temp = join(dirname(target), `.budget.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  let created = false;
+  try {
+    // `wx`: never through a link or over a file someone put at that name.
+    await writeFile(temp, body, { encoding: "utf8", flag: "wx", mode: 0o644 });
+    created = true;
+    await rename(temp, target);
+  } catch (err) {
+    if (created) await rm(temp, { force: true }).catch(() => undefined);
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "EACCES" && code !== "EPERM") throw err;
+    await writeFile(target, body, "utf8");
+  }
   rememberBudget(sandboxRoot, normalized);
 }
 
@@ -2540,14 +2589,26 @@ export async function applySessionUsage(
   first_over: boolean;
 }> {
   return withTableLock(sandboxRoot, async () => {
-    // An unreadable budget.json is folded into the last one this process
-    // saw, which carries the caps. With none to fall back on the fold is
-    // refused: writing defaults over the file would drop every cap.
-    const budget = await readBudget(sandboxRoot).catch((err: unknown) => {
-      const last = lastGoodBudget.get(resolve(sandboxRoot));
-      if (last) return structuredClone(last);
-      throw new Error(`budget.json is unreadable and no earlier copy is known; not folding over it (${(err as Error).message})`);
-    });
+    // An unreadable budget.json is read once more: the harness's own writes
+    // are whole (writeBudget), but an operator raising a cap in an editor
+    // may be caught mid-save. Still unreadable, it is folded into the last
+    // record this process saw, which carries the caps; with none to fall
+    // back on the fold is refused, since writing defaults over the file
+    // would drop every cap.
+    let fromCache = false;
+    const budget = await readBudget(sandboxRoot)
+      .catch(async () => {
+        await new Promise((done) => setTimeout(done, BUDGET_REREAD_MS));
+        return readBudget(sandboxRoot);
+      })
+      .catch((err: unknown) => {
+        const last = lastGoodBudget.get(resolve(sandboxRoot));
+        if (!last) {
+          throw new Error(`budget.json is unreadable and no earlier copy is known; not folding over it (${(err as Error).message})`);
+        }
+        fromCache = true;
+        return structuredClone(last);
+      });
     // The kickoff wrote the seat's model once; a fold that dropped it would
     // take the seat out of its model's cap after the first provider call.
     const model = budget.agents[agentId]?.model ?? slice.model;
@@ -2565,7 +2626,10 @@ export async function applySessionUsage(
     budget.calls = calls;
     budget.source = BUDGET_SOURCE;
     const over = overCap(budget).over;
-    const first_over = over && !budget.cap_steer_sent;
+    // A fold from the cached copy changes this seat's row and the totals and
+    // nothing else: the caps and the stop fields it writes back are the
+    // cache's, as they were, and it does not claim the first-over steer.
+    const first_over = over && !budget.cap_steer_sent && !fromCache;
     if (first_over) budget.cap_steer_sent = true;
     await writeBudget(sandboxRoot, budget);
     return { budget, over_budget: over, first_over };

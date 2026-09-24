@@ -1501,6 +1501,98 @@ test("budget: an unreadable budget.json does not take the caps off the run", asy
   }
 });
 
+test("budget: writeBudget replaces the record whole and leaves no temp file", async () => {
+  await withSandbox(async (root) => {
+    const before = statSync(join(root, "budget.json")).ino;
+    const budget = await readBudget(root);
+    budget.cap_usd = 3;
+    await writeBudget(root, budget);
+    assert.notEqual(statSync(join(root, "budget.json")).ino, before, "a new inode: renamed over, not truncated in place");
+    assert.equal((await readBudget(root)).cap_usd, 3);
+    assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".tmp")), []);
+  });
+});
+
+test(
+  "budget: where nothing can be created beside budget.json it is still written, in place",
+  { skip: process.getuid?.() === 0 && "root ignores file modes" },
+  async () => {
+    await withSandbox(async (root) => {
+      const before = statSync(join(root, "budget.json")).ino;
+      const budget = await readBudget(root);
+      budget.cap_usd = 4;
+      // What Landlock alone does to the sandbox root once inputs/ is carved
+      // out of it: a listing, no create, no rename; budget.json stays writable.
+      await chmod(root, 0o555);
+      try {
+        await writeBudget(root, budget);
+      } finally {
+        await chmod(root, 0o755);
+      }
+      assert.equal(statSync(join(root, "budget.json")).ino, before);
+      assert.equal((await readBudget(root)).cap_usd, 4);
+    });
+  },
+);
+
+test("budget: under Landlock alone budget.json keeps its inode, whoever writes it", async () => {
+  await withSandbox(async (root) => {
+    await mkdir(join(root, ".fsguard"), { recursive: true });
+    await writeFile(join(root, ".fsguard", "plan.txt"), "mode: landlock\nread-only: inputs\n", "utf8");
+    const before = statSync(join(root, "budget.json")).ino;
+    const budget = await readBudget(root);
+    budget.cap_usd = 6;
+    await writeBudget(root, budget);
+    assert.equal(statSync(join(root, "budget.json")).ino, before, "a confined pane's rule is on this inode");
+    assert.equal((await readBudget(root)).cap_usd, 6);
+  });
+});
+
+test("budget: a fold reads a budget.json caught mid-save once more before falling back", async () => {
+  await withSandbox(async (root) => {
+    const seeded = await readBudget(root);
+    seeded.cap_usd = 1;
+    await writeBudget(root, seeded);
+    await applySessionUsage(root, "agent00", { spent_usd: 0.1, tokens: 10, calls: 1, input: 10, output: 0, cache_read: 0, cache_write: 0 });
+
+    // An editor raising the cap to 5, caught between truncate and write.
+    const raised = { ...seeded, cap_usd: 5 };
+    await writeFile(join(root, "budget.json"), "", "utf8");
+    const finished = new Promise((done) => setTimeout(done, 20)).then(() =>
+      writeFile(join(root, "budget.json"), JSON.stringify(raised), "utf8"),
+    );
+    const applied = await applySessionUsage(root, "agent00", { spent_usd: 2, tokens: 20, calls: 2, input: 20, output: 0, cache_read: 0, cache_write: 0 });
+    await finished;
+    assert.equal(applied.budget.cap_usd, 5, "the raised cap, not the cached $1");
+    assert.equal(applied.over_budget, false);
+    assert.equal((await readBudget(root)).cap_usd, 5);
+  });
+});
+
+test("budget: a fold from the cached copy changes this seat's row and the totals only", async () => {
+  await withSandbox(async (root) => {
+    const seeded = await readBudget(root);
+    seeded.cap_usd = 1;
+    seeded.stop_steer_at = "2026-01-01T00:00:00.000Z";
+    seeded.stop_reason = "wall_clock";
+    await writeBudget(root, seeded);
+    await applySessionUsage(root, "agent00", { spent_usd: 0.1, tokens: 10, calls: 1, input: 10, output: 0, cache_read: 0, cache_write: 0 });
+    await applySessionUsage(root, "agent01", { spent_usd: 0.2, tokens: 20, calls: 2, input: 20, output: 0, cache_read: 0, cache_write: 0 });
+
+    await writeFile(join(root, "budget.json"), "{ this is not json", "utf8");
+    const applied = await applySessionUsage(root, "agent00", { spent_usd: 2, tokens: 30, calls: 3, input: 30, output: 0, cache_read: 0, cache_write: 0 });
+    assert.equal(applied.over_budget, true);
+    assert.equal(applied.first_over, false, "the first-over steer is not claimed from a cached copy");
+    const reread = await readBudget(root);
+    assert.equal(reread.cap_steer_sent, false);
+    assert.equal(reread.stop_steer_at, "2026-01-01T00:00:00.000Z");
+    assert.equal(reread.stop_reason, "wall_clock");
+    assert.equal(reread.agents.agent00.spent_usd, 2);
+    assert.equal(reread.agents.agent01.spent_usd, 0.2);
+    assert.equal(reread.spent_usd, 2.2);
+  });
+});
+
 test("a bash write that changes the caps is reported", async () => {
   await withSandbox(async (root) => {
     const before = await watchedPathHashes(root);
