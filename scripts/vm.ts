@@ -37,7 +37,7 @@
  *   node --experimental-strip-types scripts/vm.ts reap   [--run ID] [--registry FILE]
  *   node --experimental-strip-types scripts/vm.ts list   [--run ID]
  *   node --experimental-strip-types scripts/vm.ts toolbox --image REF --out FILE [--preset SETS] [--required]
- *   node --experimental-strip-types scripts/vm.ts catalog --image REF --sandbox DIR [--evidence DIR]... [--memory MIB]
+ *   node --experimental-strip-types scripts/vm.ts catalog --image REF --sandbox DIR [--evidence DIR]... [--allow-host H]... [--memory MIB]
  *   node --experimental-strip-types scripts/vm.ts msb-path
  */
 import { execFile } from "node:child_process";
@@ -409,6 +409,17 @@ type SdkModule = typeof import("microsandbox");
 /** The SDK's secret builder, as far as this file uses it. */
 type SecretB = { env(v: string): SecretB; value(v: string): SecretB; placeholder(p: string): SecretB; allow(h: string): SecretB };
 type TlsB = { interceptedPorts(p: number[]): TlsB; bypass(h: string): TlsB };
+type PolicyB = InstanceType<SdkModule["NetworkPolicyBuilder"]>;
+
+/** Egress to the allowlist's hosts, one msb rule per port and kind (see egressRules). */
+function allowEgress(policy: PolicyB, hosts: string[]): PolicyB {
+  for (const rule of egressRules(hosts)) {
+    if (rule.domains.length) policy.egress((r) => r.tcp().port(rule.port).allowDomains(rule.domains));
+    if (rule.suffixes.length) policy.egress((r) => r.tcp().port(rule.port).allowDomainSuffixes(rule.suffixes));
+    for (const ip of rule.ips) policy.egress((r) => r.tcp().port(rule.port).allow((d) => d.ip(ip)));
+  }
+  return policy;
+}
 
 async function sdk(): Promise<SdkModule> {
   return import("microsandbox");
@@ -463,11 +474,7 @@ async function createOne(
 
   const policy = new M.NetworkPolicyBuilder().defaultDeny();
   if (spec.open_net) policy.egress((r) => r.allowPublic());
-  for (const rule of egressRules(allowHosts)) {
-    if (rule.domains.length) policy.egress((r) => r.tcp().port(rule.port).allowDomains(rule.domains));
-    if (rule.suffixes.length) policy.egress((r) => r.tcp().port(rule.port).allowDomainSuffixes(rule.suffixes));
-    for (const ip of rule.ips) policy.egress((r) => r.tcp().port(rule.port).allow((d) => d.ip(ip)));
-  }
+  allowEgress(policy, allowHosts);
   for (const port of hostPorts) policy.egress((r) => r.tcp().port(port).allowHost());
 
   const env: Record<string, string> = {
@@ -775,13 +782,16 @@ export async function imageToolbox(image: string, preset: string, required: bool
  * the run's image, before any agent starts: the tools it calls are the
  * image's, and a host that holds no forensic tools (by design) still gets a
  * first pass. The sandbox is mounted writable for this one harness step; the
- * evidence read-only; the network off.
+ * evidence read-only. The network is off unless the operator allowed hosts
+ * for the run (`--allow-host`), which then reach the catalog as they reach
+ * the agents: Volatility fetches a Windows kernel's symbols the first time,
+ * and on the host the catalog had the host's network.
  */
 export async function imageCatalog(
   image: string,
   sandbox: string,
   evidence: string[],
-  options: { cpus?: number; memoryMib?: number } = {},
+  options: { cpus?: number; memoryMib?: number; allowHosts?: string[] } = {},
 ): Promise<{ code: number; output: string }> {
   const M = await sdk();
   const name = `dfs-catalog-${randomBytes(6).toString("hex")}`;
@@ -790,8 +800,14 @@ export async function imageCatalog(
       .image(image)
       .pullPolicy("if-missing")
       .cpus(options.cpus ?? 2)
-      .memory(options.memoryMib ?? 2048)
-      .disableNetwork()
+      .memory(options.memoryMib ?? 2048);
+    if (options.allowHosts?.length) {
+      const policy = allowEgress(new M.NetworkPolicyBuilder().defaultDeny(), options.allowHosts);
+      builder = builder.network((n) => n.policyFromBuilder(policy));
+    } else {
+      builder = builder.disableNetwork();
+    }
+    builder = builder
       .detached(true)
       .replace()
       .workdir(sandbox)
@@ -902,18 +918,21 @@ async function main(): Promise<void> {
       if (!image || !out) throw new Error("toolbox needs --image REF --out FILE [--preset SETS] [--required]");
       const r = await imageToolbox(image, preset, rest.includes("--required"));
       if (r.json) await writeFile(out, r.json);
-      process.stderr.write(r.output);
+      // The script names the file at its guest path; the operator reads the host's.
+      process.stderr.write(r.output.replaceAll("/tb/sbx/toolbox.json", out));
       process.exit(r.json ? r.code : 1);
     }
     case "catalog": {
       const image = opt("--image");
       const sandbox = opt("--sandbox");
-      if (!image || !sandbox) throw new Error("catalog needs --image REF --sandbox DIR [--evidence DIR]... [--memory MIB]");
+      if (!image || !sandbox) throw new Error("catalog needs --image REF --sandbox DIR [--evidence DIR]... [--allow-host H]... [--memory MIB]");
       const evidence: string[] = [];
+      const allowHosts: string[] = [];
       rest.forEach((a, i) => {
         if (a === "--evidence" && rest[i + 1]) evidence.push(rest[i + 1]);
+        if (a === "--allow-host" && rest[i + 1]) allowHosts.push(...rest[i + 1].split(",").filter(Boolean));
       });
-      const r = await imageCatalog(image, resolve(sandbox), evidence, { memoryMib: opt("--memory") ? Number(opt("--memory")) : undefined });
+      const r = await imageCatalog(image, resolve(sandbox), evidence, { memoryMib: opt("--memory") ? Number(opt("--memory")) : undefined, allowHosts });
       process.stdout.write(r.output);
       process.exit(r.code);
     }

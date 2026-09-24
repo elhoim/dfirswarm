@@ -380,7 +380,8 @@ test("the catalog runs in a throwaway VM of the image, with the image's tools, a
   assert.deepEqual((await createVms(r.spec)).failures, []);
   const imageHasTsk = inVm(vmName(r.run, "vmt700"), "command -v fsstat >/dev/null && command -v fls >/dev/null && echo yes || echo no").trim() === "yes";
 
-  const result = await imageCatalog(IMAGE, sandbox, [evidence], { memoryMib: 1024 });
+  // With the run's allowed hosts, as a kickoff with --allow-host passes them.
+  const result = await imageCatalog(IMAGE, sandbox, [evidence], { memoryMib: 1024, allowHosts: ["registry.npmjs.org", "*.github.com"] });
   assert.equal(result.code, 0, result.output);
   const readme = await readFile(join(sandbox, "catalog", "README.md"), "utf8");
   if (imageHasTsk) {

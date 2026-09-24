@@ -2501,10 +2501,12 @@ STRIP
   fi
   if [[ "$catalog" -eq 1 && "$isolation" == "microvm" && "$start_agents" -eq 1 ]]; then
     # In a throwaway VM of the run's image, like the toolbox: the tools the
-    # first pass calls are the image's, not this host's.
+    # first pass calls are the image's, not this host's; it reaches only the
+    # hosts the operator allowed for the run.
     local catalog_evidence=()
     [[ -L "$sandbox/inputs" ]] && catalog_evidence+=(--evidence "$(cd "$sandbox/inputs" && pwd -P)")
     [[ -f "$sandbox/inputs.device" ]] && catalog_evidence+=(--evidence "$sandbox/inputs")
+    [[ -n "$allow_hosts" ]] && catalog_evidence+=(--allow-host "$allow_hosts")
     vm_cli catalog --image "$vm_image" --sandbox "$sandbox" --memory "$vm_memory" ${catalog_evidence[@]+"${catalog_evidence[@]}"} || exit $?
     warn_on_catalog_signatures "$sandbox" "$toolbox"
     chmod -R a-w "$sandbox/catalog" 2>/dev/null || true
