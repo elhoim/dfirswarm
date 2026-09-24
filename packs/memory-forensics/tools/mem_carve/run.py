@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import sys
+from pathlib import Path
 
 SIGNATURES = [
     (b"regf", "registry hive", 1 << 20),
@@ -41,6 +42,26 @@ WINDOW = 1 << 22
 def fail(message, **extra):
     print(json.dumps({"error": message, **extra}))
     raise SystemExit(1)
+
+
+def resolve_output(out):
+    """Where `out` really lands, refusing anything outside the run directory.
+
+    A string check is not enough: `work/../inputs/x` and an absolute path
+    both name a file the tool must not write, and neither starts with
+    "inputs/". Resolving first and comparing directories is what actually
+    holds, and the read-only inputs are the one place extracted bytes must
+    never appear -- a later integrity check would report the evidence as
+    modified.
+    """
+    root = Path.cwd().resolve()
+    dest = (root / out).resolve() if not Path(out).is_absolute() else Path(out).resolve()
+    if dest != root and root not in dest.parents:
+        fail("output must stay inside the run directory", output=str(out))
+    inputs = root / "inputs"
+    if dest == inputs or inputs in dest.parents:
+        fail("output cannot be under inputs/", output=str(out))
+    return dest
 
 
 def main():
@@ -71,6 +92,7 @@ def main():
     end = min(size, start + args["max_bytes"]) if args.get("max_bytes") else size
     extract_to = args.get("extract_to")
     if extract_to:
+        resolve_output(extract_to)
         os.makedirs(extract_to, exist_ok=True)
 
     longest = max(len(s) for s, _n, _z in signatures)
