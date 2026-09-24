@@ -11,6 +11,10 @@
 # microvm wherever the host run says which guard it had; the image must follow
 # the packs; and the contract must tell the agents what a VM changes for them.
 set -uo pipefail
+# A shell with a VM default, an image or a lock file exported, or another pack
+# home, would turn this suite's kickoffs into something else (a VM kickoff, another
+# image): what the suite checks is the defaults.
+unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/microvm-flags.XXXXXX")"
 trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
@@ -47,10 +51,15 @@ for flag in --no-write-guard --no-seal-herdr --key-from-env "--inputs-enforce on
   out="$(start --isolation microvm $flag --label bad-hostflag)"; rc=$?
   [[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'none of them means anything' || fail "$flag was accepted under microvm: $out"
 done
+out="$(start --isolation microvm --image 'img; rm -rf /' --label bad-image)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'must be an OCI reference' || fail "an --image that is not an OCI reference was accepted: $out"
 out="$(start --isolation microvm --vm-disk 100 --label bad-disk)"; rc=$?
 [[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'vm-disk is MiB' || fail "--vm-disk 100 was not refused: $out"
 [[ ! -f "$TMP/runs/registry.json" ]] || [[ -z "$(jq -r '.runs[] | select(.label | startswith("bad-")) | .id' "$TMP/runs/registry.json")" ]] \
   || fail "a refused kickoff left a run in the registry"
+# Nor a sandbox: "before anything is written" means the directory too.
+leftover="$(find "$TMP/runs" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)"
+[[ -z "$leftover" ]] || fail "a refused kickoff left a sandbox directory: $leftover"
 pass "an isolation that does not exist, a probe with no guard to probe, a host guard's flag, and a VM with no CPU, too little memory or more than the host has are refused before anything is written"
 
 # --no-read: what every VM mounts cannot be hidden, and is not claimed hidden.
@@ -106,6 +115,9 @@ jq -e '.providers[] | select(.provider == "groq") | .hosts | index("api.groq.com
 out="$(start --isolation microvm --no-netguard --label vm-open)"; rc=$?
 [[ $rc -eq 0 ]] || fail "an open microvm run was refused: $out"
 [[ "$(reg vm-open '.netguard_mode')" == "microvm-open" ]] || fail "an open VM network was recorded as $(reg vm-open '.netguard_mode')"
+open_sb="$(reg vm-open '.sandbox')"
+grep -q 'Your VM can reach every public host' "$open_sb/SWARM.md" || fail "the contract of an open VM run does not say the network is open"
+grep -q 'every public host. and nothing else' "$open_sb/SWARM.md" && fail "the contract says every public host and nothing else"
 [[ "$(reg vm-ev '.netguard_mode' 2>/dev/null)" != "microvm-open" ]] || fail "a closed VM network was recorded as open"
 pass "a provider with no host, a signing provider, a bad --provider-host or --allow-host are refused under microvm; Pi's list names a shipped provider's host; an open VM network is recorded as open"
 
@@ -181,8 +193,8 @@ done
 out="$(start --isolation microvm --pack memory-forensics --label vm-mem)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a microvm run with a pack exited $rc: $out"
 [[ "$(reg vm-mem '.isolation.image')" == "dfirswarm-memory:dev-$ARCH" ]] || fail "memory-forensics should boot the memory image, got $(reg vm-mem '.isolation.image')"
-out="$(start --isolation microvm --image registry.example/dfirswarm-custom@sha256:abc --label vm-img)"
-[[ "$(reg vm-img '.isolation.image')" == "registry.example/dfirswarm-custom@sha256:abc" ]] || fail "--image was not honoured"
+out="$(start --isolation microvm --image registry.example/dfirswarm-custom@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --label vm-img)"
+[[ "$(reg vm-img '.isolation.image')" == "registry.example/dfirswarm-custom@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]] || fail "--image was not honoured"
 out="$(SWARM_ISOLATION=microvm start --label vm-env)"
 [[ "$(reg vm-env '.isolation.mode')" == "microvm" ]] || fail "SWARM_ISOLATION=microvm did not set the default"
 out="$(start --label host-default)"
@@ -223,6 +235,18 @@ TEST_API_KEY=hunter2-value LOOSE_KEY=loose-value bash "$ROOT/scripts/pack.sh" in
 mkdir -p "$TMP/home2"
 printf 'Summarise the case so far.\n' > "$TMP/home2/prompt.md"
 printf '{"not":"a real store"}\n' > "$TMP/home2/auth.json"
+# A library tool with a pack tool's name: the pack's copy is kept, and a
+# different copy is said, not silently taken.
+mkdir -p "$TMP/lib-clash/echo_tool"
+printf 'print("the library copy")\n' > "$TMP/lib-clash/echo_tool/run.py"
+clash_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$TMP/lib-clash/echo_tool/run.py")"
+printf '{"name":"echo_tool","description":"Echo, another way.","params":{},"runtime":"python3","entry":"run.py","timeout_seconds":10,"by":"s1","at":"t","version":1,"sha256":"%s"}\n' "$clash_sha" > "$TMP/lib-clash/echo_tool/manifest.json"
+out="$(start --pack keyed-pack --allow-tool-forging --tools-from "$TMP/lib-clash" --label tool-clash)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a kickoff with a pack and a clashing library exited $rc: $out"
+clash_sb="$(sandbox_of "$out")"
+printf '%s\n' "$out" | grep -q 'differs from pack keyed-pack.s echo_tool; the pack.s version is kept' || fail "the clash was not said: $out"
+[[ "$(jq -r '.pack // empty' "$clash_sb/tools/echo_tool/manifest.json")" == keyed-pack ]] || fail "the library's copy replaced the pack's"
+pass "a library tool named like a pack tool leaves the pack's copy in place, and the difference is said"
 out="$(start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --compact-prompt-file "$TMP/home2/prompt.md" --label vm-spec)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a prepared microvm run with a keyed pack exited $rc: $out"
 sbx="$(sandbox_of "$out")"
@@ -325,3 +349,18 @@ pass "a prepared VM run leaves the toolbox and the catalog to the image, and anc
 out="$(start --isolation microvm --no-vm-snapshot --label vm-nosnap)"
 [[ "$(reg vm-nosnap '.isolation.snapshot')" == "false" ]] || fail "--no-vm-snapshot is not recorded"
 pass "--no-vm-snapshot is recorded for stop to read"
+
+# --- the package carries what a VM run adds -----------------------------------------
+pkg_id="$(reg vm-ev '.id')"
+pkg_sb="$(reg vm-ev '.sandbox')"
+mkdir -p "$pkg_sb/vm" "$pkg_sb/tool-output/${pkg_id}00"
+printf '{"agent":"%s00","name":"dfs-x","image":{"ref":"img","manifest_digest":"sha256:aa"}}\n' "$pkg_id" > "$pkg_sb/vm/${pkg_id}00.json"
+printf '{"ts":"t","agent":"%s00","tool":"bash","args":{},"result":{}}\n' "$pkg_id" > "$pkg_sb/tool-output/${pkg_id}00/trace-spill.jsonl"
+printf '{"ts":"t","agent":"system","tool":"idle_nudge","args":{},"result":{}}\n' > "$pkg_sb/traces/system-spill.jsonl"
+out="$(swarm package "$pkg_id")"; rc=$?
+[[ $rc -eq 0 ]] || fail "package of a VM run exited $rc: $out"
+[[ -f "$pkg_sb/package/vm/${pkg_id}00.json" ]] || fail "the package lacks the VM records"
+[[ -f "$pkg_sb/package/trace/spill-${pkg_id}00.jsonl" ]] || fail "the package lacks an agent's trace spill"
+[[ -f "$pkg_sb/package/trace/spill-system.jsonl" ]] || fail "the package lacks the watchdogs' spill"
+grep -q "vm/${pkg_id}00.json" "$pkg_sb/package/MANIFEST.txt" || fail "the VM record is not in the package's manifest"
+pass "a VM run's package carries its VM records and every trace line that missed the chain, in its manifest"

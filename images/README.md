@@ -2,8 +2,10 @@
 
 `--isolation microvm` boots every agent in its own microVM (microsandbox),
 from an OCI image with Pi inside. The harness's own code — the extensions,
-the prompts, the packs, the launcher — is never baked in: it is mounted
-read-only at boot, so one image outlives any number of harness changes.
+the scripts, the prompts, the packs — is never baked in: it is mounted
+read-only at boot (a copy taken at kickoff), and the launcher and probe
+scripts are written into each VM by the SDK, so one image outlives any
+number of harness changes.
 
 | File | What it is |
 |---|---|

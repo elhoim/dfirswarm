@@ -168,12 +168,15 @@ s.on("connect", () => s.write(JSON.stringify({ t: "hello" }) + "\n" + JSON.strin
 s.on("data", (d) => { b += d; let i; while ((i = b.indexOf("\n")) >= 0) { const m = JSON.parse(b.slice(0, i)); b = b.slice(i + 1); if (m.t === "prompt") fs.appendFileSync(process.argv[2], m.text + "\n"); } });
 ' "$HUB_DIR/v0.sock" "$TMP/vm-prompts.txt" &
 LINK_PID=$!
-sleep 0.5
+# Until the hub has the link, not a fixed half second.
+for _ in $(seq 100); do jq -e '.agents.v0.connected == true' "$HUB_DIR/status.json" >/dev/null 2>&1 && break; sleep 0.05; done
+jq -e '.agents.v0.connected == true' "$HUB_DIR/status.json" >/dev/null 2>&1 || fail "v0's link never reached the hub: $(cat "$HUB_DIR/status.json" 2>/dev/null)"
 printf '#!/usr/bin/env bash\necho "$@" >> "%s"\nexit 1\n' "$TMP/herdr-used.txt" > "$TMP/bin/herdr-broken"
 chmod +x "$TMP/bin/herdr-broken"
 HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HUB_STATUS="$HUB_DIR/status.json" \
-  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$VM_SB" --once --news-sec 45 --idle-sec 180 >/dev/null 2>&1
-sleep 0.3
+  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$VM_SB" --once --news-sec 45 --idle-sec 180 >"$TMP/nudge1.log" 2>&1 \
+  || fail "the watchdog failed: $(cat "$TMP/nudge1.log")"
+for _ in $(seq 100); do grep -q '1 post(s) you have not read' "$TMP/vm-prompts.txt" 2>/dev/null && break; sleep 0.05; done
 grep -q '1 post(s) you have not read' "$TMP/vm-prompts.txt" 2>/dev/null || fail "a VM agent's nudge did not arrive through the hub: $(cat "$TMP/vm-prompts.txt" 2>/dev/null)"
 [[ ! -s "$TMP/herdr-used.txt" ]] || fail "the watchdog asked Herdr about a VM agent: $(cat "$TMP/herdr-used.txt")"
 grep -q '"tool":"idle_nudge"' "$VM_SB/traces/events.jsonl" "$VM_SB/traces/system-spill.jsonl" 2>/dev/null || fail "the VM nudge is not recorded"
@@ -182,10 +185,15 @@ pass "an agent in a microVM is nudged through the hub, and Herdr is never asked"
 printf '{"agents":{"v0":{"state":"working","connected":true}}}\n' > "$TMP/working.json"
 : > "$TMP/vm-prompts.txt"
 : > "$VM_SB/traces/idle-nudge.state"
+# The watchdog's own verdict, not its silence: a watchdog that crashed would
+# also nudge nobody.
+nudges_before="$(cat "$VM_SB/traces/events.jsonl" "$VM_SB/traces/system-spill.jsonl" 2>/dev/null | grep -c '"tool":"idle_nudge"')"
 HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HUB_STATUS="$TMP/working.json" \
-  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$VM_SB" --once --news-sec 45 --idle-sec 180 >/dev/null 2>&1
+  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$VM_SB" --once --news-sec 45 --idle-sec 180 >"$TMP/nudge2.log" 2>&1 \
+  || fail "the watchdog failed: $(cat "$TMP/nudge2.log")"
 sleep 0.3
 [[ ! -s "$TMP/vm-prompts.txt" ]] || fail "a VM agent the hub says is working was nudged"
+[[ "$(cat "$VM_SB/traces/events.jsonl" "$VM_SB/traces/system-spill.jsonl" 2>/dev/null | grep -c '"tool":"idle_nudge"')" == "$nudges_before" ]] || fail "a nudge was recorded for the working agent"
 pass "an agent the hub says is working is left to work"
 
 # --- a hub that died is brought back by the watchdog, from what the hub kept ----

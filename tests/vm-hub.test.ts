@@ -19,6 +19,15 @@ after(async () => {
   for (const c of cleanups.reverse()) await c().catch(() => undefined);
 });
 
+/** Poll until the condition holds: a fixed sleep was either too short on a loaded runner or wasted time. */
+async function until(cond: () => boolean, what: string, ms = 5000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error(`timed out waiting: ${what}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 async function setup(options: { agents?: string[]; settleMs?: number; wall?: number; collector?: boolean; forging?: boolean } = {}) {
   const agents = options.agents ?? ["a0", "a1"];
   const base = await mkdtemp(join(tmpdir(), "dfs-hub-"));
@@ -166,7 +175,7 @@ test("a claim on a file a peer just wrote waits out the cache window; the writer
   const { hub, sandbox } = await setup({ settleMs: 1500 });
   await writeFile(join(sandbox, "work", "shared.md"), "a0 wrote this\n");
   await board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/shared.md", "a0"]);
-  await new Promise((r) => setTimeout(r, 20));
+  // No pause: the hub waits for its own write note before judging a claim.
   let t = Date.now();
   const own = (await board.callBoard(hub.socketFor("a0"), "claimFile", [null, "work/shared.md", { reason: "more" }])) as { ok: boolean };
   assert.equal(own.ok, true);
@@ -185,6 +194,14 @@ test("trace lines are forwarded with the channel's token, and a token in the lin
   assert.equal(lines.length, 1);
   assert.equal(lines[0].token, "token-a1", "the collector sees a1's token, so it writes the line as a1's");
   assert.equal(lines[0].agent, "a0", "the claim is left for the collector to judge");
+  // And the collector's judgement, on the very line the hub forwarded: the
+  // channel's token wins, the claim is kept as a claim.
+  const collectorModule = "../scripts/trace-collector.mjs";
+  const { attribute } = (await import(collectorModule)) as { attribute: (r: Record<string, unknown>, m: Map<string, string>, k?: string) => Record<string, unknown> };
+  const judged = attribute(lines[0], new Map([["token-a0", "a0"], ["token-a1", "a1"]]), "");
+  assert.equal(judged.agent, "a1", "written as the channel's agent");
+  assert.equal(judged.claimed_agent, "a0", "with what it claimed beside it");
+  assert.equal("token" in judged, false, "and no token in the record");
 });
 
 test("a nudge reaches the peer's link as a prompt, once, and only for a kind the run bears out", async () => {
@@ -192,8 +209,7 @@ test("a nudge reaches the peer's link as a prompt, once, and only for a kind the
   const prompts: string[] = [];
   const link = board.openHubLink(hub.socketFor("a1"), (p) => prompts.push(p.text), { retryMs: 50 });
   cleanups.push(async () => link.close());
-  await new Promise((r) => setTimeout(r, 100));
-  assert.equal(hub.statusSnapshot().a1.connected, true);
+  await until(() => hub.statusSnapshot().a1?.connected === true, "a1's link comes up");
   let answer = await exchange(hub.socketFor("a0"), { kind: "swarm_done", peer: "a1", from: "a1" });
   assert.equal(answer.ok, false, "no sentinel yet: the run does not say that");
   await writeFile(join(sandbox, SENTINEL_REL), "---\nby: a0\n---\n");
@@ -205,7 +221,7 @@ test("a nudge reaches the peer's link as a prompt, once, and only for a kind the
   assert.equal(answer.ok, false, "the sender is not its own peer, whatever `from` said");
   answer = await exchange(hub.socketFor("a0"), { kind: "anything", peer: "a1" });
   assert.equal(answer.ok, false);
-  await new Promise((r) => setTimeout(r, 100));
+  await until(() => prompts.length >= 1, "the one nudge arrives");
   assert.equal(prompts.length, 1);
   assert.match(prompts[0], /SWARM_DONE/);
 });
@@ -215,9 +231,9 @@ test("the admin socket prompts an agent, reports who is working, and knows nobod
   const prompts: Array<{ text: string; deliver?: string }> = [];
   const link = board.openHubLink(hub.socketFor("a0"), (p) => prompts.push(p), { retryMs: 50 });
   cleanups.push(async () => link.close());
-  await new Promise((r) => setTimeout(r, 100));
+  await until(() => hub.statusSnapshot().a0?.connected === true, "a0's link comes up");
   link.state("working");
-  await new Promise((r) => setTimeout(r, 100));
+  await until(() => hub.statusSnapshot().a0?.state === "working", "a0's state reaches the hub");
   const status = await exchange(hub.adminSocket(), { op: "status" });
   const agents = status.agents as Record<string, { state: string; connected: boolean }>;
   assert.equal(agents.a0.state, "working");
@@ -231,7 +247,7 @@ test("the admin socket prompts an agent, reports who is working, and knows nobod
   assert.equal(answer.delivered, false, "a1 has no link: said, not pretended");
   answer = await exchange(hub.adminSocket(), { op: "prompt", agent: "zz", text: "x" });
   assert.equal(answer.ok, false);
-  await new Promise((r) => setTimeout(r, 100));
+  await until(() => prompts.length >= 1, "the prompt arrives");
   assert.deepEqual(prompts.map((p) => p.text), ["you are idle"]);
   assert.equal(prompts[0].deliver, "followUp");
 });
@@ -243,7 +259,7 @@ test("a queued prompt is delivered when the agent's link comes up", async () => 
   const prompts: string[] = [];
   const link = board.openHubLink(hub.socketFor("a1"), (p) => prompts.push(p.text), { retryMs: 50 });
   cleanups.push(async () => link.close());
-  await new Promise((r) => setTimeout(r, 150));
+  await until(() => prompts.length >= 1, "the held prompt is delivered on link");
   assert.deepEqual(prompts, ["kickoff follow-up"]);
 });
 
@@ -278,14 +294,13 @@ test("the backstop writes the sentinel past the wall clock and the grace period,
   const prompts: string[] = [];
   const link = board.openHubLink(hub.socketFor("a0"), (p) => prompts.push(p.text), { retryMs: 50 });
   cleanups.push(async () => link.close());
-  await new Promise((r) => setTimeout(r, 100));
+  await until(() => hub.statusSnapshot().a0?.connected === true, "a0's link comes up");
   const budgetFile = join(sandbox, "budget.json");
   const budget = JSON.parse(await readFile(budgetFile, "utf8")) as Record<string, unknown>;
   budget.started_at = new Date(Date.now() - 2 * 60_000).toISOString();
   await writeFile(budgetFile, JSON.stringify(budget));
   await hub.backstop();
-  await new Promise((r) => setTimeout(r, 100));
-  assert.ok(prompts.some((p) => /wall clock/i.test(p)), "the agents are steered first");
+  await until(() => prompts.some((p) => /wall clock/i.test(p)), "the agents are steered first");
   assert.equal(await stat(join(sandbox, SENTINEL_REL)).then(() => true).catch(() => false), false, "not stopped inside the grace period");
   await hub.backstop(Date.now() + 3 * 60_000);
   assert.equal(await stat(join(sandbox, SENTINEL_REL)).then(() => true).catch(() => false), true, "stopped once the grace period passed");
@@ -366,12 +381,11 @@ test("the sentinel is written only when the operator's finish line passes on the
 test("a seat whose link went down mid-turn is 'gone', not 'working', so the watchdogs act on it", async () => {
   const { hub } = await setup();
   const link = board.openHubLink(hub.socketFor("a0"), () => undefined, { retryMs: 60_000 });
-  await new Promise((r) => setTimeout(r, 100));
+  await until(() => hub.statusSnapshot().a0?.connected === true, "a0's link comes up");
   link.state("working");
-  await new Promise((r) => setTimeout(r, 100));
-  assert.equal(hub.statusSnapshot().a0.state, "working");
+  await until(() => hub.statusSnapshot().a0?.state === "working", "a0's state reaches the hub");
   link.close();
-  await new Promise((r) => setTimeout(r, 150));
+  await until(() => hub.statusSnapshot().a0?.state === "gone", "the closed link is seen");
   const st = hub.statusSnapshot().a0;
   assert.equal(st.state, "gone");
   assert.equal(st.connected, false);

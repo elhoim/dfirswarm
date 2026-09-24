@@ -29,6 +29,19 @@ anything is copied, and so does a directory with more than 5000 files: that
 is how many the watch and the checks cover, and the promise is not made
 where it cannot be kept.
 
+### Under `--isolation microvm`
+
+No copy and no pristine clone: the evidence is used where it is, mounted
+read-only (and no-exec) into every agent's VM, and the host refuses every
+write through that mount whatever the guest does. `inputs/` is a link to it
+and `inputs.json` records `guard: "microvm"` and `held: "bind"`, links inside
+the evidence recorded as links. A link that leads out of the evidence is
+refused at kickoff, naming it, since no VM could follow it. When the
+examiner's account can write the evidence, the kickoff warns; `--inputs-copy`
+gives the run its own read-only copy instead (`held: "copy"`). The manifest's
+sha256 is anchored outside the run at kickoff, and custody re-hashes the
+evidence in full at stop against it.
+
 ## Three layers, from the tool call down to the kernel
 
 1. **The tools refuse.** `edit`, `write` and `claim_file` return

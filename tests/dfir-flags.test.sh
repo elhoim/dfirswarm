@@ -12,6 +12,10 @@
 # every refusal (unknown toolbox, catalog without inputs,
 # a cap that is not a number) has to be a refusal.
 set -uo pipefail
+# A shell with a VM default, an image or a lock file exported, or another pack
+# home, would turn this suite's kickoffs into something else (a VM kickoff, another
+# image): what the suite checks is the defaults.
+unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/dfir-flags.XXXXXX")"
 trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT

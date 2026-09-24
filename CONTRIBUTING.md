@@ -19,8 +19,10 @@ nvm use            # .nvmrc → Node 22
 npm ci
 npm run typecheck  # server + UI
 npm test           # protocol + web API suites, no key, no Herdr
-npm run test:bash  # certification, preflight, model teams, reaper, netguard
+npm run test:bash  # every shell suite: certification, preflight, model teams, reaper, netguard, images, packs, microVM flags
 npm run ui:build
+# on a host that can boot a microVM (Apple silicon, or Linux with /dev/kvm) and has the base image loaded:
+DFIRSWARM_VM_TESTS=1 npm run test:vm   # real VMs, one run end to end with a scripted model
 ```
 
 That is everything CI runs, and none of it needs a model, a key, Herdr or a

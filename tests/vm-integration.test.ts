@@ -193,11 +193,19 @@ test("guest root cannot change the run's floor, the evidence or the trace, by an
     w() { if ( printf x >> "$1" ) 2>/dev/null; then echo "WROTE $1"; else echo "refused $1"; fi; }
     w "${S}/traces/events.jsonl"; w "${S}/SWARM.md"; w "${S}/inputs/notes.txt"; w "${S}/budget.json"
     mount -o remount,rw "${S}" 2>/dev/null; mount -o remount,rw "${r.evidence}" 2>/dev/null
+    grep -q " ${S} virtiofs rw" /proc/mounts && echo "floor-flag: rw" || echo "floor-flag: ro"
     printf 'remounted: '; w "${S}/SWARM.md"
     printf 'remounted: '; w "${r.evidence}/notes.txt"
-    umount "${S}/work" 2>/dev/null; w "${S}/work/after-umount.txt"
-    umount "${S}/.pi-sessions/vmt100" 2>/dev/null; w "${S}/.pi-sessions/vmt100/planted"
-    umount "${S}" 2>/dev/null; mkdir -p "${S}/traces" 2>/dev/null; w "${S}/traces/events.jsonl"
+    # Lazily: a plain umount of a mount with mounts under it is EBUSY, and the
+    # write after it would prove nothing about what an unmount leaves.
+    umount -l "${S}/work/vmt100" 2>/dev/null && echo "umount-scratch: done" || echo "umount-scratch: refused"
+    w "${S}/work/vmt100/after-umount.txt"
+    umount -l "${S}/.pi-sessions/vmt100" 2>/dev/null && echo "umount-session: done" || echo "umount-session: refused"
+    w "${S}/.pi-sessions/vmt100/planted"
+    umount -l "${S}" 2>/dev/null && echo "umount-floor: done" || echo "umount-floor: refused"
+    # With the floor unmounted the path is the guest's own disk: a write
+    # there lands in the VM, and the host's trace must not move.
+    mkdir -p "${S}/traces" 2>/dev/null; printf 'after-floor-umount: '; w "${S}/traces/events.jsonl"
     rm -rf "${r.evidence}/notes.txt" 2>/dev/null; chmod 777 "${r.evidence}/mail/a.bin" 2>/dev/null; echo done
   `);
   assert.match(out, /refused .*events\.jsonl/);
@@ -207,18 +215,29 @@ test("guest root cannot change the run's floor, the evidence or the trace, by an
   // read-only on the host side, and that is what refuses the write.
   assert.match(out, /remounted: refused .*SWARM\.md/);
   assert.match(out, /remounted: refused .*notes\.txt/);
-  assert.doesNotMatch(out, /WROTE/, out);
-  assert.match(out, /refused .*after-umount\.txt/, "unmounting work/ leaves the read-only floor, not a writable host");
+  // Every write through a mount the host shares was refused. The one after
+  // the floor was unmounted went to the guest's own disk (measured: the
+  // guest can do that), and the host's floor, trace included, is unchanged
+  // below.
+  assert.doesNotMatch(out.split("\n").filter((l) => !l.startsWith("after-floor-umount:")).join("\n"), /WROTE/, out);
+  // Root in the guest can unmount its own holes; what is under them is the
+  // read-only floor, never the host's directory.
+  assert.match(out, /umount-scratch: done/, `the unmount was not made, so the write after it proves nothing\n${out}`);
+  assert.match(out, /refused .*work\/vmt100\/after-umount\.txt/, "unmounting the scratch hole leaves the read-only floor, not a writable host");
+  assert.match(out, /umount-session: done/, out);
+  assert.equal(await readFile(join(r.sandbox, "traces", "events.jsonl"), "utf8"), '{"ts":"t","agent":"system","tool":"agent_start","args":{},"result":{}}\n', "the host's trace is what it was");
   const floorAfter = await fingerprint(r.sandbox, ["work", "tool-output", ".pi-sessions", "vm"]);
   const evidenceAfter = await fingerprint(r.evidence, []);
   assert.deepEqual([...floorAfter], [...floorBefore], "the host's copy of the run's floor did not change");
   assert.deepEqual([...evidenceAfter], [...evidenceBefore], "the host's evidence did not change, in bytes or mode");
-  assert.ok(!existsSync(join(r.sandbox, "work", "after-umount.txt")));
+  assert.ok(!existsSync(join(r.sandbox, "work", "vmt100", "after-umount.txt")));
   assert.ok(!existsSync(join(r.sandbox, ".pi-sessions", "vmt100", "planted")), "a write after unmounting the session hole never reached the host");
 });
 
 test("a VM reaches its allowed host and the names under an allowed suffix, and no other name or address", async (t) => {
   if (skip) return t.skip(skip);
+  // Real hosts on the internet: an offline host says so instead of failing.
+  if (process.env.DFIRSWARM_OFFLINE === "1") return t.skip("DFIRSWARM_OFFLINE=1");
   const r = await rig("vmt2", ["vmt200"], { allow_hosts: ["registry.npmjs.org", "*.github.com"] });
   const created = await createVms(r.spec);
   assert.deepEqual(created.failures, []);
@@ -245,7 +264,19 @@ test("a local model's port on the host is reachable through the host gateway, an
   const port = 18000 + Math.floor(Math.random() * 1000);
   const srv = spawn(process.execPath, ["-e", `require("node:http").createServer((q, s) => s.end("local model here\\n")).listen(${port}, "127.0.0.1")`], { stdio: "ignore" });
   cleanups.push(async () => srv.kill());
-  await new Promise((r) => setTimeout(r, 500));
+  // Until it answers, not a fixed half second.
+  const { connect } = await import("node:net");
+  for (let i = 0; i < 100; i++) {
+    const up = await new Promise<boolean>((done) => {
+      const c = connect(port, "127.0.0.1", () => {
+        c.end();
+        done(true);
+      });
+      c.on("error", () => done(false));
+    });
+    if (up) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
   const r = await rig("vmt7", ["vmt700"], { providers: [{ provider: "lmstudio", kind: "local", hosts: [], port }] });
   assert.deepEqual((await createVms(r.spec)).failures, []);
   const out = inVm(vmName(r.run, "vmt700"), `
@@ -361,6 +392,13 @@ test("finish keeps each disk and removes the VMs; reap touches only its own regi
   assert.equal(record.snapshot.sha256, createHash("sha256").update(readFileSync(finished[0].snapshot as string)).digest("hex"));
   assert.ok(record.stopped_at);
   assert.equal((await runVms("vmt5")).length, 0, "the run's VM is gone");
+  // Custody checks the kept disk with msb's own integrity record, not only
+  // against the hash the finish wrote itself.
+  const { takeCustody } = await import("../scripts/custody.ts");
+  const custody = await takeCustody(r.sandbox, { run: "vmt5" });
+  const kept = custody.vms?.find((v) => v.agent === "vmt500")?.snapshot as { verified?: boolean; msb_verified?: boolean | null } | undefined;
+  assert.equal(kept?.verified, true, JSON.stringify(custody.vms));
+  assert.equal(kept?.msb_verified, true, `msb verified the snapshot it made: ${JSON.stringify(custody.vms)}`);
   assert.equal((await finishRun("vmt5", r.sandbox)).length, 0, "a second finish is a no-op");
   assert.ok(record.installed_outside_image && typeof record.installed_outside_image === "object" && !record.installed_outside_image.error, `the stop-time inventory was taken: ${JSON.stringify(record.installed_outside_image)}`);
 
@@ -501,4 +539,96 @@ test("a finish lock left by a stop that was interrupted does not hold the next s
   assert.deepEqual(await finishRun("vmt-nolock", sandbox), [], "no VM of that run, and no wait");
   assert.ok(Date.now() - started < 10_000, `the dead owner's lock was waited on for ${Date.now() - started} ms`);
   assert.equal(existsSync(join(sandbox, "vm", ".finish.lock")), false, "and the lock is released after");
+});
+
+test("end to end: Pi runs in its VM with the harness extension, calls a scripted model on the host, posts through the hub, and finds the evidence guarded by the kernel", async (t) => {
+  if (skip) return t.skip(skip);
+  const base = await mkdtemp(join(tmpdir(), "vme2e-"));
+  cleanups.push(() => rm(base, { recursive: true, force: true }));
+  // A model on this host, scripted: the first turn posts to the board, the
+  // second says it is done. OpenAI's streaming shape, as Pi calls it.
+  const port = 19000 + Math.floor(Math.random() * 500);
+  const requests = join(base, "requests.log");
+  await writeFile(join(base, "model.mjs"), `
+import { createServer } from "node:http";
+import { appendFileSync } from "node:fs";
+createServer((req, res) => {
+  let body = "";
+  req.on("data", (d) => (body += d));
+  req.on("end", () => {
+    appendFileSync(${JSON.stringify(requests)}, req.url + "\\n");
+    const toolDone = (JSON.parse(body || "{}").messages || []).some((m) => m.role === "tool");
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const send = (o) => res.write("data: " + JSON.stringify(o) + "\\n\\n");
+    const chunk = (delta, finish) => send({ id: "c", object: "chat.completion.chunk", model: "m1", choices: [{ index: 0, delta, finish_reason: finish }] });
+    if (!toolDone) {
+      chunk({ role: "assistant", content: null, tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "post", arguments: JSON.stringify({ tag: "result", body: "hello from inside the VM" }) } }] }, null);
+      chunk({}, "tool_calls");
+    } else {
+      chunk({ role: "assistant", content: "Posted." }, null);
+      chunk({}, "stop");
+    }
+    res.end("data: [DONE]\\n\\n");
+  });
+}).listen(${port}, "127.0.0.1");
+`);
+  const { spawn } = await import("node:child_process");
+  const model = spawn(process.execPath, [join(base, "model.mjs")], { stdio: "ignore" });
+  cleanups.push(async () => model.kill());
+  const { connect } = await import("node:net");
+  for (let i = 0; i < 100; i++) {
+    const up = await new Promise<boolean>((done) => {
+      const c = connect(port, "127.0.0.1", () => {
+        c.end();
+        done(true);
+      });
+      c.on("error", () => done(false));
+    });
+    if (up) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  // Pi's store on the host: the scripted provider, as a local server.
+  const piDir = join(base, "pi");
+  await mkdir(piDir, { recursive: true });
+  await writeFile(join(piDir, "auth.json"), "{}\n");
+  await writeFile(join(piDir, "models.json"), JSON.stringify({ providers: { scripted: { baseUrl: `http://127.0.0.1:${port}/v1`, api: "openai-completions", apiKey: "none", models: [{ id: "m1", name: "m1", reasoning: false, input: ["text"], contextWindow: 32000, maxTokens: 2000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
+  const r = await rig("vmte", ["vmte00"], {
+    pi_agent_dir: piDir,
+    providers: [{ provider: "scripted", kind: "local", hosts: [`127.0.0.1:${port}`], port }],
+    env: { SWARM_ID: "vmte", PI_OFFLINE: "1" },
+  });
+  r.spec.agents = [{ id: "vmte00", model: "scripted/m1" }];
+  r.spec.mounts = [
+    ...r.spec.mounts,
+    { host: join(ROOT, "scripts"), readonly: true },
+    { host: join(ROOT, "prompts"), readonly: true },
+    { host: join(ROOT, "node_modules", "typebox"), readonly: true },
+  ];
+  // The evidence manifest the kickoff writes: what makes the agent probe
+  // inputs/ at the start of its session.
+  const files = [];
+  for (const rel of ["notes.txt", "mail/a.bin"]) {
+    const bytes = await readFile(join(r.evidence, rel));
+    files.push({ path: `inputs/${rel}`, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
+  }
+  await writeFile(join(r.sandbox, "inputs.json"), JSON.stringify({ source: r.evidence, copied_at: new Date().toISOString(), files, bytes: files.reduce((n, f) => n + f.bytes, 0), guard: "microvm", enforce: "on", held: "bind" }));
+  const created = await createVms(r.spec);
+  assert.deepEqual(created.failures, [], JSON.stringify(created.failures));
+  const S = r.sandbox;
+  const out = await inVmAsync(
+    vmName(r.run, "vmte00"),
+    `/.msb/scripts/dfirswarm-pi -p --approve --name vmte00 --session-dir "${S}/.pi-sessions/vmte00" -e "${join(ROOT, "extensions", "agent-swarm.ts")}" --model scripted/m1 "Post hello to the board." 2>&1 | tail -20`,
+  );
+  assert.match(out, /Posted\./, `Pi finished its turn in the VM\n${out}`);
+  const calls = (await readFile(requests, "utf8").catch(() => "")).trim().split("\n").filter(Boolean);
+  assert.ok(calls.length >= 2, `the scripted model was called through the host gateway: ${calls.join(", ")}`);
+  const tools = r.lines.map((l) => String(l.tool));
+  assert.ok(tools.includes("agent_start"), `the extension started and its line came through the hub: ${tools.join(", ")}`);
+  const guard = r.lines.find((l) => l.tool === "inputs_guard") as { result?: { enforced?: string } } | undefined;
+  assert.equal(guard?.result?.enforced, "kernel", `the evidence is refused to the agent by the kernel: ${JSON.stringify(guard)}`);
+  assert.ok(tools.includes("post"), `the post was recorded: ${tools.join(", ")}`);
+  const posts = await readdir(join(S, "threads", "main"));
+  const mine = posts.find((f) => f.endsWith("-vmte00.md"));
+  assert.ok(mine, `the hub wrote the agent's post on the board: ${posts.join(", ")}`);
+  assert.match(await readFile(join(S, "threads", "main", mine as string), "utf8"), /hello from inside the VM/);
 });

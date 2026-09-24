@@ -11,6 +11,11 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The suites check the defaults: an operator's exported VM default, image,
+# lock file or pack home would have turned their kickoffs into VM kickoffs or
+# pointed them at other images, and eleven suites would have tested something
+# else (each suite that kicks off unsets them too, for a run of one).
+unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 # Every tests/*.test.sh, so adding a suite needs no edit here.
 ALL=()
 for f in "$ROOT"/tests/*.test.sh; do

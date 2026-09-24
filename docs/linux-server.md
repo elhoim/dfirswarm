@@ -112,6 +112,21 @@ egress proxy or the trace collector with it. `swarm.sh stop <id>` ends them;
 after it, `pgrep -f 'trace-collector|trace-gate|nudge-broker|netguard-proxy'`
 should find nothing.
 
+## Agents in microVMs
+
+`--isolation microvm` needs `/dev/kvm` for the account (`ls -l /dev/kvm`; a
+group or a udev rule, as CI's microVM job sets one) and the image loaded into
+msb (`images/README.md`; `msb load -i` a `docker save` of it). On a small
+server the kickoff sizes each VM at 1 GiB when the host has under 8 GiB, and
+refuses N VMs that would not fit its memory; `--vm-memory` and `--vm-disk`
+say otherwise. The host guards above are not started for a VM run (the VM is
+the guard), so the account's shell and user namespaces matter only for host
+runs. The hub's sockets live under `$TMPDIR/dfirswarm-hubs/`, which no pane
+can reach. `swarm.sh netcheck --isolation microvm` shows what a run's VMs
+would reach; `swarm.sh status <id>` lists each agent's state from its hub; a
+stop keeps each VM's disk beside the run (`<sandbox>.vm-snapshots/`) with its
+logs, and custody checks it with msb.
+
 ## What the record will say on a good host
 
 ```

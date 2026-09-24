@@ -1753,7 +1753,7 @@ if caps:
         "linux": "Linux, a read-only root in your mount namespace with Landlock beneath it: writes are refused everywhere but this run and Pi's agent directory",
         "landlock": "Linux Landlock: writes are refused everywhere but this run and Pi's agent directory",
         "mountns": "Linux mount namespace: the evidence is read-only; the rest of the filesystem is as the host has it",
-        "microvm": "your own microVM: you can write `work/`, your own `tool-output/` and your Pi session; the rest of the run is read-only, and nothing of the host outside the run is in your VM",
+        "microvm": "your own microVM: you can write your own `work/<id>/`, `work/extracted/<id>/`, `work/quarantine/<id>/`, `tool-output/<id>/` and your Pi session; the rest of the run is read-only, and of the host outside the run your VM has only the harness code, the packs and the evidence, read-only",
         "none": "none — nothing at the kernel refuses a write; the tool guard and the sweep are what there is",
     }.get(write_guard, "not recorded")
     attribution_words = {
@@ -1799,10 +1799,16 @@ if caps:
                 "path and your forged tools'; a peer's VM does not share them, so a peer who needs the package installs it too. "
                 "You are root in your VM; there is no sudo to call and nothing of the host to reach"
             )
-        gaps.append(
-            ("Your VM reaches " + vm_hosts + " and nothing else: another name does not resolve, and an address has no route")
-            if vm_hosts else "Your VM reaches no network host but your model's"
-        )
+        if vm_hosts == "every public host":
+            gaps.append(
+                "Your VM can reach every public host (the operator opened the network with --no-netguard); your model's "
+                "credential still goes only to your model's host"
+            )
+        else:
+            gaps.append(
+                ("Your VM reaches " + vm_hosts + " and nothing else: another name does not resolve, and an address has no route")
+                if vm_hosts else "Your VM reaches no network host but your model's"
+            )
     host_section = "\n".join([
         "## This host",
         "",
@@ -2228,7 +2234,13 @@ cmd_start() {
       --no-netguard|--open-net) use_netguard=0; shift ;;
       --no-start) start_agents=0; shift ;;
       --isolation) isolation="$2"; shift 2 ;;
-      --image) vm_image="$2"; vm_image_named=1; shift 2 ;;
+      --image)
+        # An OCI reference and nothing else: it reaches msb's argv and a pull.
+        if ! [[ "${2:-}" =~ ^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$ ]]; then
+          echo "BLOCKER: --image must be an OCI reference (registry/name:tag or name@sha256:...), got ${2:-nothing}." >&2
+          exit 2
+        fi
+        vm_image="$2"; vm_image_named=1; shift 2 ;;
       --vm-cpus) vm_cpus="$2"; shift 2 ;;
       --vm-memory) vm_memory="$2"; shift 2 ;;
       --vm-disk) vm_disk="$2"; shift 2 ;;
@@ -2956,8 +2968,9 @@ STRIP
   SWARM_GUARD_MEASURED="not-applicable"
   if [[ "$isolation" == "microvm" ]]; then
     # The VM is the guard: the run is mounted read-only in it except the
-    # agent's own writable directories, and nothing else of this host is
-    # there at all. Pi's agent directory is the VM's own.
+    # agent's own writable directories, and of this host it has only what is
+    # mounted (the harness, the packs, the evidence), read-only. Pi's agent
+    # directory is the VM's own.
     write_guard_mode="microvm"
     pi_extensions="read-only"
   elif [[ "$write_guard" -eq 1 ]]; then
@@ -3390,7 +3403,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     echo "Trace:        appended by the panes themselves (no collector, no hash chain)" >&2
   fi
   case "$write_guard_mode" in
-    microvm) echo "Write guard:  microvm: each agent writes only its own work/<id>/, work/extracted/<id>/, work/quarantine/<id>/, tool-output/<id>/ and Pi session; the rest of the run is read-only in its VM, shared files and the board are written by the hub, and nothing else of this host is in the VM" ;;
+    microvm) echo "Write guard:  microvm: each agent writes only its own work/<id>/, work/extracted/<id>/, work/quarantine/<id>/, tool-output/<id>/ and Pi session; the rest of the run is read-only in its VM, shared files and the board are written by the hub, and of this host a VM has only its mounts (vm/<id>.json), read-only" ;;
     seatbelt) echo "Write guard:  on (seatbelt): panes write inside $sandbox and Pi's agent dir, nowhere else" ;;
     linux) echo "Write guard:  on (Landlock inside a user namespace): panes write inside $sandbox and Pi's agent dir, nowhere else; the previous run's paths and the terminal's socket are masked" ;;
     landlock) echo "Write guard:  on (Landlock, no namespace): panes write inside $sandbox and Pi's agent dir, nowhere else; a socket cannot be masked on this host, and Pi's extensions/ stays writable" ;;
@@ -5140,6 +5153,10 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>
   out="$(vm_cli finish --run "$run" --sandbox "$sandbox" ${args[@]+"${args[@]}"} 2>>"$sandbox/traces/vm-finish.log")" || true
   printf '%s\n' "$out" >> "$sandbox/traces/vm-finish.log"
   jq -r '.vms[]? | "              \(.agent): \(if .error then "NOT PUT AWAY — \(.error)\(if .kept then " (kept for you to look at)" else "" end)" elif .snapshot then "stopped, disk kept (\(.snapshot))" else "stopped and removed" end)"' <<<"$out" 2>/dev/null || true
+  # Nothing to put away is said too: the hub had already done it.
+  if [[ "$(jq -r '(.vms // []) | length' <<<"$out" 2>/dev/null || echo 0)" == "0" ]]; then
+    echo "              none left to stop (the hub had put them away, or none was made)"
+  fi
   local listed
   if ! listed="$(vm_cli list --run "$run" 2>/dev/null)"; then
     echo "WARN: could not list run $run's VMs afterwards ($(jq -r '.error // "no answer"' <<<"$listed" 2>/dev/null)); check with \`swarm.sh status $run\`." >&2

@@ -108,17 +108,57 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   repository, never from this one: an image bundles separately licensed
   programs.
 
+- **One image, by digest, fitted to the packs.** The kickoff resolves the
+  image's tag once (pulling it before the run's clock when the host lacks
+  it) and every VM must boot that digest. Each VM's probe looks for the
+  programs the run's packs require; one missing stops the kickoff unless the
+  agents may install. At stop each VM lists what it holds that its image did
+  not.
+- **The harness is frozen per run.** The extensions, scripts and prompts a VM
+  sees are a copy taken at kickoff and mounted where the checkout is, so an
+  edit or a `git pull` mid-run does not reach agents that have not loaded
+  them yet.
+
 ## Consequences
 
-- Host mode is untouched: the board functions run locally whenever
-  `SWARM_BOARD_SOCKET` is unset, and every host-mode suite runs as before.
+- Host mode keeps its design; the board functions run locally whenever
+  `SWARM_BOARD_SOCKET` is unset. It did change where the work fixed things
+  for both modes (the CHANGELOG lists them under "Host runs"), and every
+  host-mode suite runs.
 - A VM run needs a host that can boot one, and says so before it writes
-  anything. The droplet (2 vCPU, 4 GB) runs two agents at 1 vCPU / 1 GiB.
+  anything; N VMs that would not fit the host's memory are refused. The
+  droplet (2 vCPU, 4 GB) runs two agents at 1 vCPU / 1 GiB, which is the
+  default on a host under 8 GiB.
 - The five-second visibility window is real and bounded; the settle window
   covers writes, not reads.
 - The guest kernel is the agent's; the boundary is the host side of every
-  share and of the network. A test (`tests/vm-integration.test.ts`) holds
-  that on every pull request, on a KVM runner.
+  share and of the network. What that means, measured: guest root can flip a
+  read-only share's flag, and the host still refuses the write; it can
+  unmount its own holes and even the floor, and what is then under those
+  paths is its own disk, never the host's (the host's trace and floor are
+  unchanged). The no-exec on `work/extracted/` and `work/quarantine/` is a
+  mount flag in the guest: it keeps an agent from running carved material by
+  mistake, not a root that means to. Nothing the harness decides is read
+  inside a VM: the finish line, custody and the report run on the host.
+- The hub is one process on the host. The idle watchdog restarts it from the
+  state it keeps (`hub-input.json`, the stop clock), and an agent whose hub
+  stays unreachable for four minutes is stopped by its own extension.
+- `tests/vm-integration.test.ts` holds all of this on every pull request, on
+  a KVM runner, including one run end to end: Pi in its VM with the harness
+  extension, a scripted model on the host, a post through the hub, and the
+  evidence refused by the kernel.
+
+## Limits that stay
+
+- A guest's terminal output reaches the host's terminal through Herdr, so an
+  escape sequence an agent prints is interpreted there.
+- msb's supervisor on the host holds every credential of the run in memory;
+  a compromise of the host process is a compromise of the keys.
+- An allowed host is a channel out: anything an agent can send to its
+  model's host, to a symbol server or to a blob store it may reach, leaves.
+  The allowlist bounds where, not what.
+- Spend in a VM run is what each seat reports; the wall clock and each VM's
+  `maxDuration` are the brakes the host enforces by itself.
 
 ## Alternatives considered
 

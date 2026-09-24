@@ -44,7 +44,13 @@ function frameFacts(view: SwarmView): Fact[] {
       title: "Each agent ran Pi in its own microVM: the run read-only but for its own work/<id>/, extracted and quarantine directories, outputs and session; shared files published through the hub, the board written by the hub on the host, no credential inside. vm/<id>.json holds each VM's record.",
     });
   } else {
-    out.push({ label: "Isolation", value: "host processes", title: "Each agent ran as a Pi process on this host, held by the write guard, the tool guard and netguard" });
+    // What held a host run is what its record says it had, not the defaults.
+    const holders = [r.write_guard && r.write_guard !== "none" ? "the write guard" : null, "the tool guard", r.netguard === false ? null : "netguard"].filter(Boolean) as string[];
+    out.push({
+      label: "Isolation",
+      value: "host processes",
+      title: `Each agent ran as a Pi process on this host, held by ${holders.join(", ")}${r.write_guard === "none" ? "; the write guard was off" : ""}${r.netguard === false ? "; netguard was off" : ""}`,
+    });
   }
   if (view.inputs) {
     out.push({

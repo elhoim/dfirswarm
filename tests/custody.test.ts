@@ -297,3 +297,12 @@ test("a placeholder msb stopped on its way to another host is read from the VM's
   assert.deepEqual(secretViolations(log), [{ at: "2026-09-24T07:03:10.051819Z", env: "K", host: "api.openai.com", method: "GET", path: "/v1/models", action: "block-and-log" }]);
   assert.deepEqual(secretViolations("nothing here\n"), []);
 });
+
+test("a trace with no chain is called unchained, never intact", async () => {
+  const root = await sandbox();
+  await writeFile(join(root, "traces", "events.jsonl"), [1, 2].map((i) => JSON.stringify({ ts: "t", agent: "a0", tool: "bash", args: { i }, result: {} })).join("\n") + "\n");
+  const c = await takeCustody(root);
+  assert.equal(c.trace.intact, false);
+  assert.match(c.summary, /TRACE UNCHAINED \(2 lines\)/);
+  assert.doesNotMatch(c.summary, /chain intact/);
+});

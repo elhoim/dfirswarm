@@ -7,6 +7,10 @@
 # distinct model has to reach the netguard allowlist, and the team has to be able
 # to see who is running what.
 set -uo pipefail
+# A shell with a VM default, an image or a lock file exported, or another pack
+# home, would turn this suite's kickoffs into something else (a VM kickoff, another
+# image): what the suite checks is the defaults.
+unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/model-teams.XXXXXX")"

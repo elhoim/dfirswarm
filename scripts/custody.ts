@@ -38,7 +38,8 @@
  */
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { lstat, readdir, readFile, readlink, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
@@ -225,11 +226,41 @@ export async function confinedOutput(sandbox: string, rel: string): Promise<{ ab
   return { abs: real, size: reg.size };
 }
 
-function msbSnapshotVerify(file: string): Promise<boolean | null> {
-  const msb = process.env.MSB_BIN || join(dirname(new URL(import.meta.url).pathname), "..", "node_modules", ".bin", "msb");
-  return new Promise((done) => {
-    execFile(msb, ["snapshot", "verify", file], { timeout: 10 * 60_000 }, (err) => done(err ? false : true));
-  }).catch(() => null) as Promise<boolean | null>;
+/**
+ * msb's own integrity check of a kept disk. `msb snapshot verify` reads a
+ * snapshot directory, not the `.msb` archive stop keeps (measured: on the
+ * archive it answers "snapshot not found: …/snapshot.json: Not a directory",
+ * so this check used to fail every time). The archive is loaded into a
+ * directory of its own, verified there — msb recomputes its merkle tree over
+ * every file — and taken out of msb's index again. Null when msb is not
+ * there to ask.
+ */
+async function msbSnapshotVerify(file: string): Promise<boolean | null> {
+  const { msbBinary } = await import("./vm.ts");
+  const msb = msbBinary();
+  const run = (args: string[]) =>
+    new Promise<{ code: number; out: string; missing: boolean }>((done) => {
+      const child = execFile(msb, args, { timeout: 10 * 60_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) =>
+        done({ code: err ? 1 : 0, out: `${stdout}${stderr}`, missing: (err as NodeJS.ErrnoException | null)?.code === "ENOENT" }),
+      );
+      child.stdin?.end();
+    });
+  const dest = await mkdtemp(join(tmpdir(), "dfs-verify-"));
+  let digest = "";
+  try {
+    const loaded = await run(["snapshot", "load", "--dest", dest, file]);
+    if (loaded.code !== 0) return loaded.missing ? null : false;
+    digest = loaded.out.match(/sha256:[0-9a-f]{64}/)?.[0] ?? "";
+    const dir = (await walk(dest)).find((p) => p.endsWith("/snapshot.json"));
+    if (!dir) return false;
+    const verified = await run(["snapshot", "verify", dirname(dir)]);
+    return verified.code === 0 && /Verification:\s+verified/.test(verified.out);
+  } catch {
+    return null;
+  } finally {
+    if (digest) await run(["snapshot", "remove", "--force", "--quiet", digest]);
+    await rm(dest, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 export async function takeCustody(sandboxInput: string, options: { timeoutSec?: number; run?: string } = {}): Promise<Custody> {

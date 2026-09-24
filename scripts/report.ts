@@ -480,7 +480,7 @@ export function writeGuardLine(mode: string | undefined): string {
     case "mountns":
       return "enforced (bubblewrap: a read-only root with this run and Pi's agent directory bound back writable)";
     case "microvm":
-      return "enforced (microVM: each agent could write work/, its own tool-output/ and its own Pi session; the rest of the run was read-only in its VM, the board was written by the hub on the host, and nothing else of the host was in the VM)";
+      return "enforced (microVM: each agent could write only its own work/<id>/, work/extracted/<id>/, work/quarantine/<id>/, tool-output/<id>/ and Pi session; the rest of the run was read-only in its VM, shared files and the board were written by the hub on the host, and of the host the VM was given only what its record lists as mounted, all read-only: the harness code, the packs, the evidence, the run)";
     case "none":
       return "NONE — a pane could write anywhere this user can, including outside the run";
     default:

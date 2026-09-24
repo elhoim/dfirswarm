@@ -155,9 +155,18 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   What stays true about a VM, said plainly:
   - A peer's published file can take five seconds to look current in another
     VM (a claim on such a file waits that out; a plain read does not).
-  - The guest's TLS on port 443 is intercepted whenever a secret is bound —
-    the hosts that receive no secret are bypassed, but under `--no-netguard`
-    every public host on 443 is decrypted by the host's msb.
+  - The guest's TLS is intercepted whenever a secret is bound, on 443 and on
+    every port a secret travels on. The allowed hosts that receive no secret
+    keep their own TLS end to end, except one a bypass would cover along with
+    a secret's host (a suffix), which is intercepted too; under
+    `--no-netguard` every public host on 443 is decrypted by the host's msb.
+  - Root in the guest can flip a read-only share's flag (the host still
+    refuses the write) and can unmount its own holes or the floor; what is
+    then under those paths is the VM's own disk, never the host's. The no-exec
+    on `work/extracted/` and `work/quarantine/` is a mount flag in the guest:
+    it stops an agent running carved material by mistake, not a root that
+    means to. The finish line, custody and the report are decided on the
+    host, never from what a VM reads.
   - A placeholder is still a capability at the host it is bound to: an API
     key can be spent there, and a subscription token is the operator's
     account there, which is why a subscription needs `--allow-oauth-in-vm`.

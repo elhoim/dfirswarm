@@ -682,10 +682,17 @@ export class Hub {
     return this.event("hub_call", { agent: who, fn }, result);
   }
 
+  /** Write notes still resolving their path: settle waits for them, or a claim right after a write could miss it. */
+  private notes = new Set<Promise<void>>();
+
   private noteWrite(who: string, raw: string): void {
-    void P.realPathKey(this.cfg.sandbox, raw)
-      .then((key) => this.lastWrite.set(key, { who, at: Date.now() }))
-      .catch(() => undefined);
+    const note: Promise<void> = P.realPathKey(this.cfg.sandbox, raw)
+      .then((key) => {
+        this.lastWrite.set(key, { who, at: Date.now() });
+      })
+      .catch(() => undefined)
+      .finally(() => this.notes.delete(note));
+    this.notes.add(note);
   }
 
   /**
@@ -696,6 +703,8 @@ export class Hub {
   async settle(who: string, raw: string): Promise<void> {
     const window = this.cfg.settleMs ?? SETTLE_MS_DEFAULT;
     if (window <= 0 || !raw) return;
+    // Every write noted before this claim is known before it is judged.
+    await Promise.all([...this.notes]);
     let key: string;
     try {
       key = await P.realPathKey(this.cfg.sandbox, raw);

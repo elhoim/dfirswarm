@@ -6,39 +6,72 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed for host runs
+
+What the microVM work changed for host runs as well, so a host operator is
+not surprised:
+
+- Every trace line carries its process's id and count (`sid`, `seq`) and the
+  collector's `recv_ts`; the idle watchdog and the console order by the
+  latter. The watchdogs spill to `traces/system-spill.jsonl`, not `work/`.
+- A kickoff that stops after registering puts away what it started and
+  records the run as `failed`. The registry is written under a lock. The
+  host is kept awake for the run. A sandbox a running run uses is refused.
+- `stop` takes custody (see Added; `--no-custody` skips it) and says where it was
+  if interrupted. `reap <id>` touches only that run.
+- Pack secrets live in `~/.dfirswarm/secrets/<pack>.env`, not inside the pack
+  (a reinstall moves an old one). Six shipped packs were resealed with
+  corrected install lines (`pff-tools`, `libfwsi-python`, plaso from PyPI)
+  and pinned downloads.
+- `tools --save` keeps only sealed tools, with `provenance.json` and without a
+  `pack` field; `pack.sh adopt` takes a saved tool into a pack. The toolbox's
+  use column read " head -1" for every tool; fixed.
+- The netguard allowlist takes a provider's host from `models.json` for a
+  built-in provider too, and from Pi's model list for the providers Pi ships;
+  `--provider-host` adds one. `--local-only` refuses a cloud `--compact-model`.
+- The console: a `failed` state, a packs field, `*.name` allowlist entries.
+- `microsandbox` is an optional dependency (`npm ci --omit=optional` for a
+  host-only install).
+
 ### Added
 
 - **Agents in microVMs (`--isolation microvm`).** Every agent runs Pi inside
   its own microVM (microsandbox 0.7.2; macOS on Apple silicon, Linux with
   KVM), created at kickoff through the SDK (`scripts/vm.ts`) and put away by
-  `stop` with each disk kept as a snapshot with msb's integrity record. The
-  run is a read-only floor in each VM with `work/`, the agent's own
-  `tool-output/` and its own Pi session writable on top, everything at its
-  host path; `--inputs DIR` is used in place and mounted read-only. The board
-  has one writer, the hub (`scripts/vm-hub.ts`): the extension's board calls
-  (`extensions/board.ts`, the protocol's own names) go to it over one held
-  connection, and who is asking is the vsock port the call came in on. A VM
-  reaches only its models' hosts; no credential enters a VM (Pi on the host
-  resolves it, msb swaps it in on the way out). The hub enforces the wall
-  clock and the caps from outside the VMs and stops them once the sentinel
-  has stood for the grace period. Images come from the packs
-  (`images/recipe.py`, `images/README.md`), and a run records the digest it
-  booted. `--toolbox` and `--catalog` run in a throwaway VM of the same
-  image, so a host with no forensic tools still gets its first pass, and
-  evidence whose links lead out of the `--inputs` directory is refused,
-  naming them, since no VM could follow them. `--allow-host` means in a VM
-  what it means to netguard (`*.suffix`, `.suffix`, `host:port`, an
-  address). The console's kickoff has the
-  switch; the report and the run page say what each VM could write, reach
-  and was given. ADR 0009.
+  `stop` with each disk kept as a snapshot msb can verify. ADR 0009.
+  - The run is a read-only floor in each VM; the agent writes only its own
+    `work/<id>/`, `work/extracted/<id>/` and `work/quarantine/<id>/` (both
+    no-exec), `tool-output/<id>/` and Pi session. A shared file is written
+    by the hub through `publish_file`, claimed and recorded. `--inputs` is
+    used in place and mounted read-only; `--inputs-copy` gives the run its
+    own read-only copy.
+  - The board has one writer, the hub (`scripts/vm-hub.ts`); who is asking
+    is the vsock port. The harness's own functions are not on the agents'
+    channel, a sentinel is written only when the finish line passes on the
+    host, spend reports may only grow, and paths are resolved on the host
+    without following a planted link. The idle watchdog restarts a dead hub.
+  - No credential enters a VM: placeholders, swapped in by msb on the way
+    to the credential's own hosts only, stopped and logged anywhere else.
+    Subscriptions need `--allow-oauth-in-vm`. `--provider-host P=HOST` names
+    a provider's host when the harness cannot (Pi's own model list names the
+    hosts of the providers it ships); a provider with none is refused.
+  - The image is the smallest profile that serves the packs, pulled before
+    the run starts, booted by one digest; a program a pack requires that the
+    image lacks stops the kickoff. Images carry a NOTICE, pinned downloads
+    checked by sha256, and refuse to bake programs marked not redistributable
+    without `--allow-nonredistributable` (`images/README.md`).
+  - `netcheck --isolation microvm` asks msb what a run's VMs would reach.
+    The report and the console's VM panel say what each VM was given, found
+    and left: probe, image fit, clock, live state, installs outside the image.
 - **Host custody at stop** (`scripts/custody.ts` → `custody.json`, printed by
-  `stop` and carried by the report): the evidence re-hashed in full, every
-  session file sealed, every kept output the trace names checked against its
-  hash, every kept VM disk checked against its record.
-- **`recv_ts` on every trace line**, stamped by the collector with the host's
-  clock.
-- **VM integration tests** (`npm run test:vm`, `tests/vm-integration.test.ts`)
-  on real VMs, and a CI job that runs them on a KVM runner.
+  `stop` and carried by the report), both modes: the evidence re-hashed in
+  full against a manifest anchored outside the run, every session file
+  sealed, every kept output checked against the trace, the trace and the
+  ledger chains, spilled and lost trace lines by their numbers, and every
+  kept VM disk checked against its record and by msb.
+- **VM integration tests** (`npm run test:vm`) on real VMs, one of them end to
+  end with a scripted model, and a CI job that runs them on a KVM runner with
+  the base and disk images built from this repository.
 
 - **Agents compact their own context.** On by default at kickoff
   (`--no-self-compact` turns it off): each agent watches its context against

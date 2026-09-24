@@ -14,6 +14,10 @@
 # Docker is optional: without it the container halves are skipped and the
 # host-side assertions still run.
 set -euo pipefail
+# A shell with a VM default, an image or a lock file exported, or another pack
+# home, would turn this suite's kickoffs into something else (a VM kickoff, another
+# image): what the suite checks is the defaults.
+unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pass=0
