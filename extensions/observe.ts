@@ -11,7 +11,7 @@ import {
   readThreadMeta,
   normalizeBudget,
   readAgentMarker,
-  readEventLog,
+  readEventLogChecked,
   readPost,
   swarmDoneExists,
   type AgentMarker,
@@ -81,6 +81,8 @@ export type SwarmDetail = {
   claims: ClaimRow[];
   sentinel: boolean;
   traces: SwarmEvent[];
+  /** Why the trace could not be read, when it is there and could not be; null otherwise. Not the same as no trace. */
+  trace_unreadable: string | null;
   history: Record<string, FileVersion[]>;
 };
 
@@ -258,7 +260,8 @@ export async function readSwarmDetail(
     });
   }
 
-  const traces: SwarmEvent[] = (await readEventLog(sandbox)).slice(-traceLimit);
+  const traceRead = await readEventLogChecked(sandbox);
+  const traces: SwarmEvent[] = traceRead.events.slice(-traceLimit);
 
   const history = await readHistory(sandbox);
 
@@ -273,6 +276,7 @@ export async function readSwarmDetail(
     claims: await listClaims(sandbox),
     sentinel: await swarmDoneExists(sandbox),
     traces,
+    trace_unreadable: traceRead.unreadable,
     history,
   };
 }

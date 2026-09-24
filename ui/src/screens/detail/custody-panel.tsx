@@ -74,6 +74,7 @@ export function CustodyPanel({ view }: { view: SwarmView }) {
         <span className="text-[14px] font-medium text-ink">Custody</span>
         <Chip tone={clean ? "moss" : "brick"}>{clean ? "clean" : `${c.problems.length} to look at`}</Chip>
         {c.at ? <span className="font-mono text-[11.5px] text-ink-3">taken {dateTime(c.at)}</span> : null}
+        {c.anchor ? <span className="text-[11.5px] text-ink-3">custody.json {c.anchor}</span> : null}
       </div>
       {c.summary ? <p className="m-0 font-mono text-[11.5px] leading-[1.55] text-ink-2 [overflow-wrap:anywhere]">{c.summary}</p> : null}
       {c.problems.length ? (

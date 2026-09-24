@@ -156,3 +156,17 @@ test("kind comes from the extension, and an unknown one is binary", () => {
   assert.equal(artifactKind("SOFTWARE"), "text");
   assert.equal(artifactKind("image.E01"), "binary");
 });
+
+test("the index is in code-unit order, the same in every locale, because its hash is anchored", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "artifacts-order-"));
+  try {
+    await mkdir(join(sandbox, "work"), { recursive: true });
+    // Names no case-insensitive file system folds together.
+    for (const name of ["b", "C", "a", "ä", "ı", "Z"]) await writeFile(join(sandbox, "work", name), name);
+    const index = await hashArtifacts(sandbox);
+    // localeCompare gave a different order under en_US, da_DK, sv_SE and tr_TR.
+    assert.deepEqual(index.files.map((f) => f.path), ["work/C", "work/Z", "work/a", "work/b", "work/ä", "work/ı"]);
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});

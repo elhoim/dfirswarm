@@ -10,7 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import {
   SENTINEL_REL,
   normalizeBudget,
-  readEventLog,
+  readEventLogChecked,
   readInputsManifest,
   readLedger,
   type BudgetRecord,
@@ -99,6 +99,12 @@ export type RunContext = {
   budgetRaw: Partial<BudgetRecord> | null;
   budget: BudgetRecord | null;
   events: SwarmEvent[];
+  /**
+   * Why the trace could not be read, when it is there and could not be (a
+   * link, not a regular file, an open that failed); null when it was read or
+   * is absent. A reader must say this, never "no trace".
+   */
+  trace_unreadable: string | null;
   sentinel: Record<string, string> | null;
   ledger: LedgerEntry[];
   inputs: InputsManifest | null;
@@ -124,10 +130,11 @@ export async function loadRunContext(
   };
   const budgetRaw = await readJsonFile<Partial<BudgetRecord>>(join(sandbox, "budget.json"));
   const budget: BudgetRecord | null = budgetRaw ? normalizeBudget(budgetRaw) : null;
-  const events = [...(await readEventLog(sandbox))];
+  const trace = await readEventLogChecked(sandbox);
+  const events = [...trace.events];
   const sentinelText = await readFile(join(sandbox, SENTINEL_REL), "utf8").catch(() => null);
   const sentinel = sentinelText === null ? null : opts.parseSentinel(sentinelText);
   const ledger = await readLedger(sandbox);
   const inputs = await readInputsManifest(sandbox);
-  return { sandbox, runsDir, run, team, budgetRaw, budget, events, sentinel, ledger, inputs };
+  return { sandbox, runsDir, run, team, budgetRaw, budget, events, trace_unreadable: trace.unreadable, sentinel, ledger, inputs };
 }

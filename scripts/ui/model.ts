@@ -8,6 +8,7 @@ import { constants as fsConstants, existsSync } from "node:fs";
 import { lstat, open, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { artifactKind } from "../artifact-kind.ts";
+import { verdictAnchorLine, verdictAnchorState } from "../custody.ts";
 import {
   LEDGER_MD,
   listForgedTools,
@@ -28,7 +29,7 @@ import {
   type SwarmDetail,
   type SwarmSummary,
 } from "../../extensions/observe.ts";
-import { agentDeadPath, agentDonePath, hostTime, readEventLog, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
+import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
 import { isFailureEvent } from "../../ui/src/lib/event-taxonomy.ts";
 import { countChecks } from "./goals.ts";
 
@@ -342,7 +343,9 @@ export type CustodyView = {
   evidence:
     | null
     | { unverifiable: string }
-    | { files: number; bytes: number; unchanged: boolean; complete: boolean; changed: string[]; missing: string[]; added: string[]; skipped: string[]; manifest_anchored: boolean | null };
+    | { files: number; bytes: number; unchanged: boolean; complete: boolean; changed: string[]; missing: string[]; added: string[]; skipped: string[]; unreadable: string[]; manifest_anchored: boolean | null };
+  /** Whether custody.json is the verdict custody anchored outside the run, in words; null when there is nothing to check it against. */
+  anchor: string | null;
   /** Names under the sessions that are not regular files (a link, a device): sealed nothing. */
   sessions_not_files: string[];
   /** `refused_spills`: spill files custody would not read, and why. */
@@ -885,6 +888,21 @@ async function vmsNotPutAway(sandbox: string): Promise<boolean> {
 }
 
 /**
+ * Where every run's hub lives, as swarm.sh hubs_parent decides: the
+ * operator's SWARM_HUBS_DIR, else ~/.dfirswarm/hubs (under DFIRSWARM_HOME),
+ * resolved; and only a directory that is not a link and is this user's. A
+ * directory someone else made or linked there is no hubs' parent at all.
+ */
+export async function hubsParent(): Promise<string> {
+  const home = process.env.DFIRSWARM_HOME || join(process.env.HOME || "", ".dfirswarm");
+  const parent = process.env.SWARM_HUBS_DIR || join(home, "hubs");
+  const st = await lstat(parent).catch(() => null);
+  if (!st || st.isSymbolicLink() || !st.isDirectory()) return "";
+  if (typeof process.getuid === "function" && st.uid !== process.getuid()) return "";
+  return realpath(parent).catch(() => "");
+}
+
+/**
  * The hub directory a sandbox's hub.dir names, when it is one the harness
  * made for this sandbox, as swarm.sh hub_dir_of decides: under the hubs'
  * parent, and naming this sandbox in its own `sandbox` file. A pane could
@@ -893,7 +911,7 @@ async function vmsNotPutAway(sandbox: string): Promise<boolean> {
 async function ownHubDir(sandbox: string): Promise<string | null> {
   const hub = (await readFile(join(sandbox, "hub.dir"), "utf8").catch(() => "")).trim();
   if (!hub) return null;
-  const parent = await realpath(join(process.env.TMPDIR || "/tmp", "dfirswarm-hubs")).catch(() => "");
+  const parent = await hubsParent();
   if (!parent || !hub.startsWith(`${parent}/dfs-`) || hub.includes("..")) return null;
   const named = (await readFile(join(hub, "sandbox"), "utf8").catch(() => "")).trim();
   return named && named === (await realpath(sandbox).catch(() => sandbox)) ? hub : null;
@@ -1112,7 +1130,7 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return null;
     const why = code === "ELOOP" ? "custody.json is a link, not the file custody wrote; it was not followed" : `custody.json could not be read (${code ?? (err as Error).message})`;
-    return { at: null, summary: why, verdict: "attention", problems: [why], evidence: null, sessions_not_files: [], trace: null, ledger: null, tool_outputs: null, vms: null, incomplete: null };
+    return { at: null, summary: why, verdict: "attention", problems: [why], evidence: null, anchor: null, sessions_not_files: [], trace: null, ledger: null, tool_outputs: null, vms: null, incomplete: null };
   }
   let raw: Record<string, unknown>;
   try {
@@ -1120,9 +1138,14 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
     if (!raw || typeof raw !== "object") throw new Error("not an object");
   } catch {
     const why = "custody.json is not readable JSON";
-    return { at: null, summary: why, verdict: "attention", problems: [why], evidence: null, sessions_not_files: [], trace: null, ledger: null, tool_outputs: null, vms: null, incomplete: null };
+    return { at: null, summary: why, verdict: "attention", problems: [why], evidence: null, anchor: null, sessions_not_files: [], trace: null, ledger: null, tool_outputs: null, vms: null, incomplete: null };
   }
   const problems: string[] = [];
+  // The file against the verdict custody anchored outside the run: one edited
+  // after the stop (or an older one put back) is said, first.
+  const anchorState = await verdictAnchorState(sandbox).catch(() => null);
+  const anchor = anchorState && anchorState.state !== "no verdict" && anchorState.state !== "not anchored" ? verdictAnchorLine(anchorState) : null;
+  if (anchorState?.state === "differs") problems.push(`custody.json ${verdictAnchorLine(anchorState)}`);
 
   let evidence: CustodyView["evidence"] = null;
   const inputs = raw.inputs as Record<string, unknown> | null | undefined;
@@ -1132,6 +1155,7 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
       problems.push(`evidence unverifiable: ${inputs.unverifiable}`);
     } else {
       const skipped = stringList(inputs.skipped);
+      const unreadable = stringList(inputs.unreadable);
       evidence = {
         files: num(inputs.files),
         bytes: num(inputs.bytes),
@@ -1142,11 +1166,13 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
         missing: stringList(inputs.missing),
         added: stringList(inputs.added),
         skipped,
+        unreadable,
         manifest_anchored: typeof inputs.manifest_anchored === "boolean" ? inputs.manifest_anchored : null,
       };
       if (evidence.changed.length || evidence.missing.length || evidence.added.length) problems.push(`evidence changed: ${evidence.changed.length} changed, ${evidence.missing.length} missing, ${evidence.added.length} added`);
       if (evidence.manifest_anchored === false) problems.push("the evidence manifest in the run is not the one the kickoff recorded");
-      if (!evidence.complete || skipped.length) problems.push(`evidence not fully re-hashed: ${skipped.length} of ${evidence.files} not re-read before the deadline, which the verdict does not cover`);
+      if (skipped.length || (!evidence.complete && !unreadable.length)) problems.push(`evidence not fully re-hashed: ${skipped.length} of ${evidence.files} not re-read before the deadline, which the verdict does not cover`);
+      if (unreadable.length) problems.push(`${unreadable.length} evidence file${unreadable.length === 1 ? "" : "s"} the host could not read, not covered by the verdict: ${unreadable.join(", ")}`);
     }
   }
 
@@ -1160,6 +1186,10 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
     if (toolOutputs.missing.length || toolOutputs.mismatched.length || toolOutputs.refused.length) {
       problems.push(`kept outputs: ${toolOutputs.missing.length} missing, ${toolOutputs.mismatched.length} not matching the trace, ${toolOutputs.refused.length} refused`);
     }
+    const again = stringList(to.rereferenced);
+    if (again.length) problems.push(`kept output named again with another hash: ${again.join(", ")}`);
+    const foreign = stringList(to.foreign);
+    if (foreign.length) problems.push(`kept-output references from an agent whose directory it is not, ignored: ${foreign.join(", ")}`);
   }
 
   let trace: CustodyView["trace"] = null;
@@ -1195,6 +1225,8 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
     // custody.ts says "broken" in the detail when the chain itself is; a
     // ledger that only differs from the trace is said above.
     if (!ledger.intact && (ledger.detail.startsWith("broken") || (!ledger.missing_from_ledger.length && !ledger.not_on_trace.length))) problems.push(`ledger chain broken${ledger.detail ? `: ${ledger.detail}` : ""}`);
+    const claimed = stringList(lg.claimed_by_seat);
+    if (claimed.length) problems.push(`${claimed.length} ledger hash${claimed.length === 1 ? "" : "es"} a seat's own record line carried and the hub never logged`);
   }
 
   let vms: CustodyView["vms"] = null;
@@ -1202,7 +1234,7 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
     vms = raw.vms
       .filter((v): v is Record<string, unknown> => !!v && typeof v === "object")
       .map((v) => {
-        const snap = v.snapshot as { verified?: unknown; error?: unknown } | null | undefined;
+        const snap = v.snapshot as { verified?: unknown; error?: unknown; refused?: unknown; msb_verified?: unknown; msb_note?: unknown } | null | undefined;
         const outside = (v.installed_outside ?? {}) as { apt?: unknown; venv?: unknown; note?: unknown };
         const changed = v.runtime_changed as { from?: unknown; to?: unknown } | null | undefined;
         const image = typeof v.image === "string" ? v.image : null;
@@ -1212,7 +1244,19 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
           record_sha256: typeof v.record_sha256 === "string" ? v.record_sha256 : null,
           stopped: v.stopped === true,
           kept: typeof v.kept === "string" ? v.kept : null,
-          snapshot: !snap ? null : typeof snap.error === "string" ? `failed: ${snap.error}` : snap.verified === true ? "verified" : "not verified",
+          snapshot: !snap
+            ? null
+            : typeof snap.error === "string"
+              ? `failed: ${snap.error}`
+              : typeof snap.refused === "string"
+                ? `not read: ${snap.refused}`
+                : snap.verified !== true
+                  ? "does not match its record"
+                  : snap.msb_verified === false
+                    ? "matches its record; FAILED MSB'S CHECK"
+                    : snap.msb_verified === null && typeof snap.msb_note === "string"
+                      ? `matches its record; msb did not check it (${snap.msb_note})`
+                      : "verified",
           image,
           expected_image: expected,
           image_differs: !!(image && expected && image !== expected),
@@ -1233,8 +1277,22 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
       if (v.secret_violations.length) problems.push(`${v.agent}: ${v.secret_violations.length} secret placeholder${v.secret_violations.length === 1 ? "" : "s"} aimed at a host not its own, stopped by msb`);
       if (v.installed_outside.length) problems.push(`${v.agent}: installed outside the image: ${v.installed_outside.join(", ")}`);
       if (v.runtime_changed) problems.push(`${v.agent}: msb changed during the run, ${v.runtime_changed}`);
+      if (v.snapshot && (v.snapshot.startsWith("not read") || v.snapshot === "does not match its record" || v.snapshot.includes("FAILED MSB'S CHECK"))) problems.push(`${v.agent}: snapshot ${v.snapshot}`);
     }
+    const raws = raw.vms.filter((v): v is Record<string, unknown> => !!v && typeof v === "object");
+    const unscrubbed = raws.filter((v) => typeof v.msb_db === "string" && v.msb_db !== "scrubbed" && v.msb_db !== "no database");
+    if (unscrubbed.length) problems.push(`msb's database not cleared after removing ${unscrubbed.map((v) => `${String(v.agent ?? "?")} (${String(v.msb_db)})`).join(", ")}: a secret's value may remain in msb's database`);
   }
+  const records = raw.vm_records as { unreadable?: unknown; no_record?: unknown; ignored?: unknown } | null | undefined;
+  if (records && typeof records === "object") {
+    const unreadable = stringList(records.unreadable);
+    if (unreadable.length) problems.push(`VM record unreadable: ${unreadable.join(", ")}`);
+    const none = stringList(records.no_record);
+    if (none.length) problems.push(`no VM record for: ${none.join(", ")}`);
+    if (typeof records.ignored === "string" && records.ignored) problems.push(`VM records not read: ${records.ignored}`);
+  }
+  const notReached = stringList(raw.not_reached);
+  if (notReached.length) problems.push(`not checked before custody ended: ${notReached.join(", ")}`);
 
   const incomplete = typeof raw.incomplete === "string" && raw.incomplete ? raw.incomplete : null;
   if (incomplete) problems.push(`custody incomplete: ${incomplete}`);
@@ -1244,6 +1302,7 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
     verdict: problems.length ? "attention" : "clean",
     problems,
     evidence,
+    anchor,
     sessions_not_files: notFiles,
     trace,
     ledger,
@@ -1380,6 +1439,8 @@ export type TracePage = {
   tools: string[];
   /** Lines and spend per agent over the whole trace, for the filter chips. */
   by_agent: Record<string, { events: number; spent_usd: number }>;
+  /** Why the trace could not be read, when it is there and could not be; null otherwise. The view says it rather than "no traces yet". */
+  unreadable: string | null;
   /**
    * Lines per agent over the *filtered* set — who the matches belong to.
    *
@@ -1393,7 +1454,8 @@ export type TracePage = {
 };
 
 export async function queryTraces(sandbox: string, query: TraceQuery): Promise<TracePage> {
-  const events = await readEvents(sandbox);
+  const read = await readEventLogChecked(sandbox);
+  const events = read.events;
   const agents = [...new Set(events.map((e) => e.agent))].sort();
   const tools = [...new Set(events.map((e) => e.tool))].sort();
   const byAgent: TracePage["by_agent"] = {};
@@ -1427,6 +1489,7 @@ export async function queryTraces(sandbox: string, query: TraceQuery): Promise<T
     tools,
     by_agent: byAgent,
     matched_by_agent: matchedByAgent,
+    unreadable: read.unreadable,
   };
 }
 

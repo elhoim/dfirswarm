@@ -19,16 +19,23 @@
  *
  * Symlinks are never followed and never hashed. A link an agent's shell
  * dropped under `work/` points wherever it likes, and a hash of what it
- * points at would be a hash of a file the swarm did not write.
+ * points at would be a hash of a file the swarm did not write. Each file is
+ * opened as a regular file (no link, no waiting on a FIFO a live VM swapped
+ * in) and hashed through the handle that was checked.
+ *
+ * The order is by code unit, not by locale: the index's sha256 is anchored
+ * outside the run, and the same files must give the same digest from any
+ * shell, in any language.
  *
  * Who last wrote a file comes from `history/`, not from the trace. A claim
  * is a lease, not a write; the snapshot is what names the writer.
  */
-import { readdir, stat } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { listFileHistory, sha256File } from "../extensions/protocol.ts";
 import { artifactKind, type ArtifactKind } from "./artifact-kind.ts";
+import { hashRegularFile, type Expiry } from "./regular-file.ts";
 
 export { artifactKind, type ArtifactKind } from "./artifact-kind.ts";
 
@@ -73,7 +80,16 @@ function isUnpackaged(rel: string): boolean {
   return (UNPACKAGED_DIRS as readonly string[]).includes(top);
 }
 
-export async function hashArtifacts(sandbox: string): Promise<ArtifactIndex> {
+/** An order that is the same in every locale: plain UTF-16 code units. */
+export function byCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * `expiry` is custody's deadline: past it, the files not yet hashed are
+ * listed as skipped with that reason rather than the index holding the stop.
+ */
+export async function hashArtifacts(sandbox: string, options: { expiry?: Expiry } = {}): Promise<ArtifactIndex> {
   const root = resolve(sandbox, "work");
   const files: ArtifactEntry[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
@@ -96,25 +112,26 @@ export async function hashArtifacts(sandbox: string): Promise<ArtifactIndex> {
         skipped.push({ path: `work/${rel}`, reason: "not a regular file" });
         continue;
       }
-      const info = await stat(abs).catch(() => null);
-      if (!info) {
-        skipped.push({ path: `work/${rel}`, reason: "vanished before it could be read" });
+      if (options.expiry?.over) {
+        skipped.push({ path: `work/${rel}`, reason: "not hashed: the deadline passed" });
         continue;
       }
-      let sha256: string;
-      try {
-        sha256 = await sha256File(abs);
-      } catch (err) {
-        skipped.push({ path: `work/${rel}`, reason: (err as Error).message });
+      const hashed = await hashRegularFile(abs, { expiry: options.expiry }).catch((err: Error) => ({ why: err.message }));
+      if (hashed === null) {
+        skipped.push({ path: `work/${rel}`, reason: "not hashed: the deadline passed" });
+        continue;
+      }
+      if ("why" in hashed) {
+        skipped.push({ path: `work/${rel}`, reason: hashed.why === "missing" ? "vanished before it could be read" : hashed.why });
         continue;
       }
       const key = `work/${rel}`;
       const history = await listFileHistory(sandbox, key).catch(() => []);
       files.push({
         path: key,
-        bytes: info.size,
-        mtime: info.mtime.toISOString(),
-        sha256,
+        bytes: hashed.size,
+        mtime: hashed.mtime.toISOString(),
+        sha256: hashed.sha256,
         kind: artifactKind(entry.name),
         packaged: !isUnpackaged(rel),
         revisions: history.length,
@@ -124,8 +141,8 @@ export async function hashArtifacts(sandbox: string): Promise<ArtifactIndex> {
   }
 
   await walk(root);
-  files.sort((a, b) => a.path.localeCompare(b.path));
-  skipped.sort((a, b) => a.path.localeCompare(b.path));
+  files.sort((a, b) => byCodeUnit(a.path, b.path));
+  skipped.sort((a, b) => byCodeUnit(a.path, b.path));
   return {
     generated_at: new Date().toISOString(),
     files,

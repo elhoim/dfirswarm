@@ -126,7 +126,8 @@ export function ReportPanel({ view }: { view: SwarmView }) {
               <iframe
                 srcDoc={dossier.data.html}
                 title={`Report for ${id}`}
-                sandbox="allow-scripts"
+                // The report carries no script; it needs none to render.
+                sandbox=""
                 referrerPolicy="no-referrer"
                 className="h-full w-full border-0 bg-white"
               />

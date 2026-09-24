@@ -18,7 +18,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { escapeHtml, lintReport, markdownToHtml, renderReport } from "../scripts/report.ts";
+import { chainLine, escapeHtml, hostClockLine, hostEvidenceLine, lintReport, markdownToHtml, renderReport, reproducibilityLine, sourceCheckedLine, vmRows } from "../scripts/report.ts";
+import { summarize } from "../scripts/summary.ts";
+import { takeCustody } from "../scripts/custody.ts";
 import { recordEntry, createContext, initSandbox } from "../extensions/protocol.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -269,6 +271,128 @@ test("the print stylesheet keeps the rules that decide whether the PDF is usable
     assert.match(html, /\.hash\s*\{[^}]*word-break:\s*break-all/);
     // And the document does not claim page numbers it cannot compute.
     assert.match(html, /Section numbers, not page numbers/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the evidence row says only what the host re-read: yes, NO, or not fully re-hashed", () => {
+  const at = "2026-09-24T10:00:00.000Z";
+  assert.equal(hostEvidenceLine(null, at), null, "no custody of the evidence, no host line");
+  assert.match(hostEvidenceLine({ unverifiable: "no manifest" }, at) ?? "", /^UNVERIFIABLE by the host — no manifest$/);
+  assert.equal(
+    hostEvidenceLine({ files: 3, unchanged: true, complete: true, changed: [], missing: [], added: [], skipped: [], manifest_anchored: true, checked: { files: 2, links: 1, special: 0 } }, at),
+    `yes — re-hashed in full by the host at ${at} (3 files; 1 link checked by target), manifest anchored`,
+  );
+  // A custody that ran out of time before some files found nothing changed in
+  // the rest: not "NO — 0 changed", which reads as evidence that changed.
+  const partial = hostEvidenceLine({ files: 3, unchanged: false, complete: false, changed: [], missing: [], added: [], skipped: ["inputs/big.raw"], manifest_anchored: null }, at) ?? "";
+  assert.match(partial, /^NOT FULLY RE-HASHED — 2 of 3 files checked unchanged by the host at .*, 1 not re-read before custody's deadline, manifest not anchored \(the kickoff recorded no hash of it\); the rest are not covered$/);
+  assert.doesNotMatch(partial, /^NO —/);
+  assert.match(hostEvidenceLine({ files: 3, unchanged: false, changed: ["inputs/a"], missing: [], added: [], skipped: ["inputs/b"], manifest_anchored: true }, at) ?? "", /^NO — the host's re-hash found 1 changed, 0 missing, 0 added; 1 not re-read/);
+  assert.match(hostEvidenceLine({ files: 1, unchanged: true, changed: [], missing: [], added: [], skipped: [], manifest_anchored: null }, at) ?? "", /manifest not anchored/, "the yes says when the manifest was not anchored");
+});
+
+test("the trace line puts a broken chain first, even when nothing is left of the trace", () => {
+  assert.match(chainLine({ ok: false, chained: 0, total: 0, broken_at: 0, reason: "shortened" }, true), /^BROKEN at line 0 of 0 — the record is shorter than the anchor says it was/);
+  assert.equal(chainLine({ ok: true, chained: 0, total: 0 }), "no trace");
+});
+
+test("the provenance and host-clock rows say what the kickoff recorded, and nothing when it recorded nothing", () => {
+  assert.equal(reproducibilityLine(null, ["m"]), null);
+  assert.equal(reproducibilityLine({ state: "running" }, []), null);
+  const line = reproducibilityLine({ provenance: { harness_commit: "abc123def456", harness_dirty: true, pi_version: "0.87.0", node_version: "v24.13.1", msb_version: "0.7.2" }, isolation: { image_digest: "sha256:aa" } }, ["openai/gpt-5.4"]) ?? "";
+  assert.match(line, /^harness commit abc123def456 with local changes; Pi 0\.87\.0; Node v24\.13\.1; msb 0\.7\.2; image sha256:aa; models openai\/gpt-5\.4\./);
+  assert.match(line, /not deterministic/);
+  assert.match(reproducibilityLine({ harness_commit: "abc" }, []) ?? "", /^harness commit abc\./, "top-level fields are read too");
+  assert.equal(hostClockLine(null), null);
+  assert.equal(hostClockLine({ host_clock: { tz: "Europe/Istanbul", utc_offset: "+03:00", synced: true, source: "timedatectl" } }), "time zone Europe/Istanbul (UTC+03:00); clock synchronised: yes (timedatectl). The harness stamps its own times in UTC.");
+  assert.match(hostClockLine({ host_tz: "UTC" }) ?? "", /^time zone UTC; clock synchronised: not known/);
+});
+
+test("the report discloses the AI, names each exhibit's model and hash, lists forged tools as unvalidated, and holds custody.json to its anchor", async () => {
+  const root = await sandboxWithLedger();
+  try {
+    await writeFile(
+      join(root, "traces", "events.jsonl"),
+      `${JSON.stringify({ ts: "2026-02-11T03:00:00Z", agent: "sr00100", tool: "make_tool", args: { name: "evtx_grep", runtime: "python3" }, result: { ok: true, sha256: "e".repeat(64) } })}\n${JSON.stringify({ ts: "2026-02-11T03:01:00Z", agent: "sr00101", tool: "evtx_grep", args: {}, result: { ok: true } })}\n`,
+      { flag: "a" },
+    );
+    const team = JSON.parse(await readFile(join(root, "team.json"), "utf8")) as { agents: Array<{ id: string; model?: string }> };
+    team.agents = team.agents.map((a) => ({ ...a, model: "openai/gpt-5.4" }));
+    await writeFile(join(root, "team.json"), JSON.stringify(team));
+    let html = await renderReport(root, { runsDir: join(root, ".."), now: "2026-02-12T09:00:00.000Z" });
+    assert.match(html, /<dt>Prepared by<\/dt><dd>an AI agent swarm \(2 agents\); its findings are the agents' conclusions until an examiner reviews them<\/dd>/);
+    assert.match(html, /Prepared by an AI agent swarm\. The findings are the agents' conclusions/);
+    assert.match(html, /not deterministic/);
+    assert.match(html, /<dt>Model<\/dt><dd>openai\/gpt-5\.4<\/dd>/);
+    assert.match(html, /<dt>Entry hash<\/dt><dd class="hash">[0-9a-f]{64}<\/dd>/);
+    assert.match(html, /<code>evtx_grep<\/code> by sr00100 \(python3\), called 1 time, sha256 <span class="hash">e{64}<\/span>/);
+    assert.match(html, /not independently validated/);
+    // custody.json, then edited after the stop.
+    const anchorFile = `${root}.custody-anchor.json`;
+    try {
+      await takeCustody(root);
+      html = await renderReport(root, { runsDir: join(root, ".."), now: "2026-02-12T09:00:00.000Z" });
+      assert.match(html, /which matches the verdict anchored outside the run/);
+      const text = await readFile(join(root, "custody.json"), "utf8");
+      await writeFile(join(root, "custody.json"), text.replace(/"summary": "[^"]*"/, '"summary": "evidence unchanged (edited)"'));
+      html = await renderReport(root, { runsDir: join(root, ".."), now: "2026-02-12T09:00:00.000Z" });
+      assert.match(html, /which DOES NOT MATCH the verdict anchored outside the run/);
+    } finally {
+      await rm(anchorFile, { force: true });
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("operator actions from another shell are worded as the operator's, not as lines no pane accounts for", () => {
+  const line = chainLine({ ok: true, chained: 5, total: 5, unverified: 3 }, true, true, 2);
+  assert.match(line, /2 operator action\(s\) run from a shell outside the run .* runs\/operator-audit\.jsonl/);
+  assert.match(line, /1 line\(s\) could not be attributed to a pane/);
+  assert.doesNotMatch(chainLine({ ok: true, chained: 2, total: 2, unverified: 1 }, true, true, 1), /could not be attributed/);
+});
+
+test("the copy's check against its source is said for exactly what it was: names, kinds and sizes, not content", () => {
+  assert.equal(sourceCheckedLine(undefined), null);
+  assert.equal(sourceCheckedLine("names, kinds and sizes"), "the copy was checked against its source at kickoff by names, kinds and sizes, not by content (the source itself was not hashed)");
+  assert.match(sourceCheckedLine("MISMATCH") ?? "", /did NOT match its source/);
+});
+
+test("a removed VM whose finish could not clear msb's database is named", () => {
+  const rows = vmRows([
+    { agent: "a0", msb_db: "busy" },
+    { agent: "a1", msb_db: "scrubbed" },
+    { agent: "a2", msb_db: "no database" },
+  ]);
+  assert.match(rows.find(([k]) => k === "VM a0")?.[1] ?? "", /msb's database NOT cleared after removal \(busy\): a secret's value may remain in msb's database/);
+  assert.match(rows.find(([k]) => k === "VM a1")?.[1] ?? "", /msb's database cleared of it after removal/);
+  assert.equal(rows.find(([k]) => k === "Secrets in msb's database")?.[1], "NOT CLEARED after removing a0 (busy): a secret's value may remain in msb's database on the host");
+});
+
+test("sha1 and md5 stand beside sha256 where the evidence is listed, with the source check; an unreadable trace is not no trace", async () => {
+  const root = await sandboxWithLedger();
+  try {
+    await mkdir(join(root, "inputs"), { recursive: true });
+    await writeFile(join(root, "inputs", "a.txt"), "a");
+    await writeFile(
+      join(root, "inputs.json"),
+      JSON.stringify({ source: "/ev", copied_at: "t", held: "copy", files: [{ path: "inputs/a.txt", bytes: 1, sha256: "a".repeat(64), sha1: "b".repeat(40), md5: "c".repeat(32) }], bytes: 1, enforce: "auto", guard: "none", source_checked: "names, kinds and sizes" }),
+    );
+    let html = await renderReport(root, { runsDir: join(root, ".."), now: "2026-02-12T09:00:00.000Z" });
+    assert.match(html, /<th>sha1<\/th><th>md5<\/th>/);
+    assert.match(html, new RegExp(`<td class="hash">${"b".repeat(40)}</td><td class="hash">${"c".repeat(32)}</td>`));
+    assert.match(html, /checked against its source at kickoff by names, kinds and sizes, not by content/);
+    const summary = await summarize(root, { runsDir: join(root, "..") });
+    assert.match(summary, /\| Input \| Bytes \| SHA-256 \| SHA-1 \| MD5 \|/);
+    assert.match(summary, /not by content/);
+    // The trace replaced by a directory: there, and not read.
+    await rm(join(root, "traces", "events.jsonl"), { force: true });
+    await mkdir(join(root, "traces", "events.jsonl"));
+    html = await renderReport(root, { runsDir: join(root, ".."), now: "2026-02-12T09:00:00.000Z" });
+    assert.match(html, /NOT READ HERE: the trace could not be read by this report \(not a regular file\)/);
+    assert.match(await summarize(root, { runsDir: join(root, "..") }), /The trace is there and could not be read \(not a regular file\)/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

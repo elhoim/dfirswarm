@@ -667,6 +667,13 @@ export function TracesPanel({ view, version, initialAgent }: { view: SwarmView; 
             />
             <div ref={bottomRef} />
           </>
+        ) : page.data.total === 0 && page.data.unreadable ? (
+          // There, and not readable: not the same as a run with no trace yet.
+          <EmptyState
+            icon={<ListTree />}
+            title="The trace could not be read"
+            hint={`traces/events.jsonl is there and was not read: ${page.data.unreadable}. The host's custody check says what it found.`}
+          />
         ) : page.data.total === 0 ? (
           <EmptyState icon={<ListTree />} title="No traces yet" hint="traces/events.jsonl is empty. Lines appear on the first tool call (agent_start, post, inbox…)." />
         ) : (

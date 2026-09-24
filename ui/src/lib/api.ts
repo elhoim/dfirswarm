@@ -144,6 +144,13 @@ export const api = {
   /** A dossier file, as a download with a filename and the run's id on it. */
   dossierUrl: (id: string, name: string) => `/api/swarms/${encodeURIComponent(id)}/dossier/${encodeURIComponent(name)}`,
   workUrl: (id: string, path: string) => `/api/swarms/${encodeURIComponent(id)}/${path.split("/").map(encodeURIComponent).join("/")}`,
+  /**
+   * A one-time grant to open one HTML artifact with its scripts: the server
+   * binds it to the path and the file's sha256, spends it on first use and
+   * lets it lapse in a minute. Needs the token.
+   */
+  workScriptsGrant: (id: string, path: string) =>
+    postJson<{ grant: string; path: string; sha256: string; expires_in_ms: number }>(`/api/swarms/${encodeURIComponent(id)}/work-scripts`, { path }),
   history: (id: string) => request<Record<string, FileVersion[]>>(`/api/swarms/${encodeURIComponent(id)}/history`),
   revision: (id: string, path: string, rev: number) =>
     request<{ path: string; rev: number; text: string; versions: FileVersion[] }>(

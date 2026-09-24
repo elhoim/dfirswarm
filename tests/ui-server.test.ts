@@ -14,7 +14,7 @@ import { createUiApp, defaultRunsDir, type UiApp } from "../scripts/ui/app.ts";
 import { ActionRunner, allowEntryOfUrl, checkReadiness, isHostName, isLocalHost, listModels, listPacks, parseModelList, parseModelTeam, readLocalProviders, startArgv, validateStart, vmProviderHosts, vmReadiness } from "../scripts/ui/actions.ts";
 import { resolveInputSet } from "../scripts/ui/inputs.ts";
 import { ChangeBus, classifyPath, SUPPRESSED_KINDS, type BusMessage } from "../scripts/ui/watch.ts";
-import { activitySeries, deriveCallsign, derivePhase, listSwarmRows, readCustody, vmHealth } from "../scripts/ui/model.ts";
+import { activitySeries, deriveCallsign, derivePhase, hubsParent, listSwarmRows, queryTraces, readCustody, vmHealth } from "../scripts/ui/model.ts";
 import { seedFixtureRuns } from "../scripts/seed-fixture.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -68,7 +68,18 @@ function waitJob(id: string, timeoutMs = 20_000): Promise<JobView> {
   return waitJobAt(base, id, timeoutMs);
 }
 
+// The VM hubs' parent, for everything this file starts: a short directory of
+// its own, so a run never creates ~/.dfirswarm/hubs and a socket path stays
+// short. Tests that need hubs of their own set their own and put this back.
+let hubsDir: string | null = null;
+const hubsDirWas = process.env.SWARM_HUBS_DIR;
+
 before(async () => {
+  if (!process.env.SWARM_HUBS_DIR) {
+    hubsDir = join(await mkdtemp("/tmp/dfh."), "dfirswarm-hubs");
+    await mkdir(hubsDir, { mode: 0o700 });
+    process.env.SWARM_HUBS_DIR = hubsDir;
+  }
   runsDir = await mkdtemp(join(tmpdir(), "swarm-ui-"));
   await seedFixtureRuns(runsDir);
   // The inputs library: one real set, and a symlink that must never count as one.
@@ -108,6 +119,9 @@ after(async () => {
   execFileSync("chmod", ["-R", "u+w", runsDir]);
   await rm(runsDir, { recursive: true, force: true });
   await rm(inputsRoot, { recursive: true, force: true });
+  if (hubsDir) await rm(dirname(hubsDir), { recursive: true, force: true });
+  if (hubsDirWas === undefined) delete process.env.SWARM_HUBS_DIR;
+  else process.env.SWARM_HUBS_DIR = hubsDirWas;
 });
 
 /** A goal document the harness will accept: it carries its own finish line. */
@@ -621,10 +635,11 @@ test("artifacts: a name outside Latin-1 is served, with an ASCII fallback and a 
   }
 });
 
-test("artifacts: a file that cannot be opened after stat fails the request, not the server", { skip: process.getuid?.() === 0 && "root ignores file modes" }, async () => {
-  // stat succeeds and the headers go out; the open fails afterwards. Without
-  // an error listener on the read stream that failure is an unhandled 'error'
-  // event and takes the whole console down.
+test("artifacts: a file that cannot be opened fails the request, not the server", { skip: process.getuid?.() === 0 && "root ignores file modes" }, async () => {
+  // The file is opened (as a regular file, no link, no FIFO) before any
+  // header goes out, so a file that cannot be opened is an error response,
+  // never a 200 cut short; and whatever fails later in the read must not be
+  // an unhandled 'error' event that takes the whole console down.
   // The test runner swallows an uncaught exception that ui-server.ts would
   // die of, so the test listens for one itself. chmod 000 makes the open fail
   // every time, where a real rm between stat and open is a race.
@@ -635,9 +650,12 @@ test("artifacts: a file that cannot be opened after stat fails the request, not 
   await writeFile(abs, "secret\n", "utf8");
   execFileSync("chmod", ["000", abs]);
   let failure: unknown;
+  let status = 0;
+  let body = "";
   try {
     const res = await fetch(`${base}/api/swarms/s7a1c/work/unreadable.txt`, { signal: AbortSignal.timeout(5_000) });
-    await res.text();
+    status = res.status;
+    body = await res.text();
   } catch (err) {
     failure = err;
   } finally {
@@ -647,8 +665,9 @@ test("artifacts: a file that cannot be opened after stat fails the request, not 
     process.off("uncaughtException", onUncaught);
   }
   assert.deepEqual(uncaught.map(String), [], "the read stream's error escaped as an uncaught exception");
-  assert.ok(failure, "a body that could not be read must not arrive as a complete response");
-  assert.notEqual((failure as Error).name, "TimeoutError", "the response was left hanging instead of being closed");
+  assert.ok(failure || status !== 200, "a body that could not be read must not arrive as a complete response");
+  assert.ok(!failure || (failure as Error).name !== "TimeoutError", "the response was left hanging instead of being closed");
+  assert.doesNotMatch(body, /secret/, "none of the file reached the reader");
   const alive = await get<string>("/api/swarms/s7a1c/work/notes.md");
   assert.equal(alive.status, 200);
 });
@@ -994,6 +1013,9 @@ test("several evidence roots, and one added from the form when the server allows
     assert.deepEqual(lib.sets.map((s) => s.id), ["0:brief", "1:brief"]);
   } finally {
     await open.close();
+    // A kickoff leaves the pristine copy and the manifest read-only on
+    // purpose; the bits go back before the directory is removed.
+    for (const d of [second, third, runs2]) execFileSync("chmod", ["-R", "u+w", d]);
     await rm(second, { recursive: true, force: true });
     await rm(third, { recursive: true, force: true });
     await rm(runs2, { recursive: true, force: true });
@@ -1558,7 +1580,10 @@ test("the report renders from the console, sandboxed, and the artifacts route ha
   // The report is agent-derived text the console frames in an iframe, so it
   // carries the same sandbox an artifact does: no same-origin, no network.
   const csp = report.headers.get("content-security-policy") ?? "";
-  assert.match(csp, /sandbox allow-scripts/);
+  // No scripts: the report carries none, and a page that may run them can
+  // navigate itself anywhere with what it holds.
+  assert.match(csp, /^sandbox;/);
+  assert.doesNotMatch(csp, /allow-scripts|script-src/);
   assert.match(csp, /connect-src 'none'/);
   const html = String(report.body);
   assert.match(html, /Forensic report/);
@@ -1763,6 +1788,31 @@ test("a report of a path whose size and mtime did not move is not a change", asy
   }
 });
 
+test("a kickoff from the console takes its isolation from the form, not from the console's environment", async () => {
+  // A host form adds no --isolation; under an exported SWARM_ISOLATION=microvm
+  // it became a VM run. The runner drops the variable, and the form decides.
+  const dir = await mkdtemp(join(tmpdir(), "swarm-runner-iso-"));
+  const was = process.env.SWARM_ISOLATION;
+  try {
+    const fake = join(dir, "fake-swarm.sh");
+    await writeFile(fake, '#!/usr/bin/env bash\necho "ISOLATION=[${SWARM_ISOLATION:-unset}]"\n', "utf8");
+    process.env.SWARM_ISOLATION = "microvm";
+    const runner = new ActionRunner({ root: dir, runsDir: dir, swarmSh: fake });
+    const job = runner.stop("sfake");
+    const deadline = Date.now() + 10_000;
+    while (runner.get(job.id)?.status === "running" && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    const done = runner.get(job.id);
+    assert.equal(done?.status, "ok", done?.stderr);
+    assert.match(done!.stdout, /ISOLATION=\[unset\]/, "the console's SWARM_ISOLATION reached swarm.sh");
+  } finally {
+    if (was === undefined) delete process.env.SWARM_ISOLATION;
+    else process.env.SWARM_ISOLATION = was;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("a swarm started from the console does not carry the console's token into the run", async () => {
   // The panes come out of this process tree, and a forged tool is agent-written
   // code: the token that starts, stops and reaps swarms must not travel with it.
@@ -1832,8 +1882,8 @@ test("a run that failed at kickoff is failed, not unknown, and a hub-finished on
 
 test("a VM run's VMs are shown from their records, with the live state only from this run's own hub", async () => {
   const base = await mkdtemp(join(tmpdir(), "ui-vms-"));
-  const was = process.env.TMPDIR;
-  process.env.TMPDIR = base;
+  const was = process.env.SWARM_HUBS_DIR;
+  process.env.SWARM_HUBS_DIR = join(base, "dfirswarm-hubs");
   try {
     const sandbox = join(base, "sb");
     await mkdir(join(sandbox, "vm"), { recursive: true });
@@ -1862,8 +1912,8 @@ test("a VM run's VMs are shown from their records, with the live state only from
     assert.equal((await vmHealth(sandbox))[0].live, null);
     assert.deepEqual(await vmHealth(join(base, "no-such")), [], "a host run has no VMs");
   } finally {
-    if (was === undefined) delete process.env.TMPDIR;
-    else process.env.TMPDIR = was;
+    if (was === undefined) delete process.env.SWARM_HUBS_DIR;
+    else process.env.SWARM_HUBS_DIR = was;
     await rm(base, { recursive: true, force: true });
   }
 });
@@ -1981,8 +2031,8 @@ test("finish_failed and stop_incomplete are their own phases, sentinel or not, a
 
     // The hub's own word: finished and not finish_done, while its process is
     // up, is finishing even after the registry says finished (custody runs then).
-    const was = process.env.TMPDIR;
-    process.env.TMPDIR = dir;
+    const was = process.env.SWARM_HUBS_DIR;
+    process.env.SWARM_HUBS_DIR = join(dir, "dfirswarm-hubs");
     try {
       const hub = join(dir, "dfirswarm-hubs", "dfs-sfin1.z");
       await mkdir(hub, { recursive: true });
@@ -1997,8 +2047,8 @@ test("finish_failed and stop_incomplete are their own phases, sentinel or not, a
       await hubStatus({ finished: true, finish_done: false, pid: 999_999_9 });
       assert.equal((await row()).finishing, false, "a dead hub's last word is not what is happening");
     } finally {
-      if (was === undefined) delete process.env.TMPDIR;
-      else process.env.TMPDIR = was;
+      if (was === undefined) delete process.env.SWARM_HUBS_DIR;
+      else process.env.SWARM_HUBS_DIR = was;
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -2007,8 +2057,8 @@ test("finish_failed and stop_incomplete are their own phases, sentinel or not, a
 
 test("a VM run's hub is up only while its pid is this run's vm-hub.ts and the status is its own; last_seen, mounts, network and pack secrets are shown", async () => {
   const base = await mkdtemp(join(tmpdir(), "ui-hub-"));
-  const was = process.env.TMPDIR;
-  process.env.TMPDIR = base;
+  const was = process.env.SWARM_HUBS_DIR;
+  process.env.SWARM_HUBS_DIR = join(base, "dfirswarm-hubs");
   let child: ReturnType<typeof spawn> | null = null;
   let keeper: ReturnType<typeof spawn> | null = null;
   try {
@@ -2109,8 +2159,8 @@ test("a VM run's hub is up only while its pid is this run's vm-hub.ts and the st
   } finally {
     child?.kill("SIGKILL");
     keeper?.kill("SIGKILL");
-    if (was === undefined) delete process.env.TMPDIR;
-    else process.env.TMPDIR = was;
+    if (was === undefined) delete process.env.SWARM_HUBS_DIR;
+    else process.env.SWARM_HUBS_DIR = was;
     await rm(base, { recursive: true, force: true });
   }
 });
@@ -2121,6 +2171,11 @@ test("custody.json reaches the run's view whole: the verdict, the evidence count
   const file = join(sandbox, "custody.json");
   // The stop test above may already have taken real custody of this run; it goes back as it was.
   const kept = await readFile(file, "utf8").catch(() => null);
+  // So may its anchor, outside the run: set aside, so the hand-written
+  // verdicts below are judged against the anchors this test writes.
+  const anchorFile = join(await realpath(dirname(sandbox)), `${sandbox.split("/").pop()}.custody-anchor.json`);
+  const keptAnchor = await readFile(anchorFile, "utf8").catch(() => null);
+  await rm(anchorFile, { force: true });
   assert.equal(before.custody === null, kept === null, "the view has custody exactly when the run has custody.json");
   const custody = {
     at: "2026-09-24T10:00:00.000Z",
@@ -2177,6 +2232,19 @@ test("custody.json reaches the run's view whole: the verdict, the evidence count
     assert.deepEqual(partial?.problems, ["evidence not fully re-hashed: 1 of 3 not re-read before the deadline, which the verdict does not cover"]);
     await writeFile(file, JSON.stringify(clean));
     assert.equal((await readCustody(sandbox))?.verdict, "clean");
+    // Held to the verdict anchored outside the run: the one custody wrote
+    // matches; a file edited after the stop is said not to.
+    const sha = createHash("sha256").update(JSON.stringify(clean)).digest("hex");
+    await writeFile(anchorFile, JSON.stringify({ run: "s0d4e", custody: [{ at: clean.at, sha256: sha }] }));
+    const anchored = await readCustody(sandbox);
+    assert.equal(anchored?.verdict, "clean");
+    assert.match(anchored?.anchor ?? "", /^matches the verdict anchored outside the run/);
+    await writeFile(file, JSON.stringify({ ...clean, summary: "evidence unchanged (edited after the stop)" }));
+    const edited = await readCustody(sandbox);
+    assert.equal(edited?.verdict, "attention");
+    assert.match(edited?.problems[0] ?? "", /custody\.json DOES NOT MATCH the verdict anchored outside the run/);
+    await rm(anchorFile, { force: true });
+    await writeFile(file, JSON.stringify(clean));
     await rm(file);
     await symlink("/etc/hosts", file);
     const linked = await readCustody(sandbox);
@@ -2187,5 +2255,147 @@ test("custody.json reaches the run's view whole: the verdict, the evidence count
   } finally {
     await rm(file, { force: true });
     if (kept !== null) await writeFile(file, kept);
+    await rm(anchorFile, { force: true });
+    if (keptAnchor !== null) await writeFile(anchorFile, keptAnchor, { mode: 0o444 });
+  }
+});
+
+test("an HTML artifact is framed with no scripts, and opened with them only once, by a grant the console asked for", async () => {
+  // The default: the sandbox directive with no allow-scripts and no script-src.
+  const plain = await get<string>("/api/swarms/sbe12/work/report.html");
+  assert.equal(plain.status, 200);
+  const csp = plain.headers.get("content-security-policy") ?? "";
+  assert.match(csp, /^sandbox;/);
+  assert.doesNotMatch(csp, /allow-scripts|script-src/);
+  assert.match(csp, /connect-src 'none'/);
+  assert.match(csp, /form-action 'none'/);
+
+  const guarded = createUiApp({ root: ROOT, runsDir, distDir: join(runsDir, "no-dist"), token: "s3cret", heartbeatMs: 200, scriptGrantTtlMs: 300 });
+  const { port } = await guarded.listen(0, "127.0.0.1");
+  const at = `http://127.0.0.1:${port}`;
+  const ask = (path: string, auth = true) =>
+    fetch(`${at}/api/swarms/sbe12/work-scripts`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(auth ? { authorization: "Bearer s3cret" } : {}) },
+      body: JSON.stringify({ path }),
+    });
+  const open = async (grant: string | null, path = "report.html") => {
+    const res = await fetch(`${at}/api/swarms/sbe12/work/${path}${grant === null ? "" : `?scripts=${encodeURIComponent(grant)}`}`);
+    await res.arrayBuffer();
+    return { status: res.status, csp: res.headers.get("content-security-policy") ?? "", scripts: res.headers.get("x-artifact-scripts") };
+  };
+  const noScripts = (r: { csp: string }) => /^sandbox;/.test(r.csp) && !/allow-scripts|script-src/.test(r.csp);
+  const traceHas = async (sha: string) => {
+    const read = async (rel: string) => readFile(join(runsDir, "sbe12", rel), "utf8").catch(() => "");
+    const lines = `${await read("traces/events.jsonl")}${await read("work/.trace-spill.jsonl")}`.split("\n").filter(Boolean);
+    return lines.some((l) => {
+      const e = JSON.parse(l) as { agent?: string; tool?: string; args?: { path?: string; sha256?: string } };
+      return e.agent === "operator" && e.tool === "artifact_scripts" && e.args?.path === "work/report.html" && e.args?.sha256 === sha;
+    });
+  };
+  try {
+    // A grant needs the token: the artifact, framed with no scripts and no token, cannot mint one.
+    assert.equal((await ask("work/report.html", false)).status, 401);
+    // Only HTML is opened with its scripts.
+    assert.equal((await ask("work/summary.md")).status, 400);
+
+    // No grant, or one nobody issued: the no-script file.
+    assert.ok(noScripts(await open(null)));
+    assert.ok(noScripts(await open("made-up")), "an unknown grant serves the no-script file");
+
+    // A valid grant: scripts on, still no same origin, no fetch, no forms.
+    const granted = (await (await ask("work/report.html")).json()) as { grant: string; sha256: string };
+    assert.match(granted.sha256, /^[0-9a-f]{64}$/);
+    const on = await open(granted.grant);
+    assert.equal(on.status, 200);
+    assert.equal(on.scripts, "on");
+    assert.match(on.csp, /^sandbox allow-scripts;/);
+    assert.doesNotMatch(on.csp, /allow-same-origin|allow-top-navigation|allow-popups|allow-forms/);
+    assert.match(on.csp, /connect-src 'none'/);
+    assert.match(on.csp, /form-action 'none'/);
+    assert.ok(await traceHas(granted.sha256), "opening with scripts is an operator action on the run's trace");
+
+    // Spent: the same grant again serves the no-script file.
+    const reused = await open(granted.grant);
+    assert.equal(reused.scripts, "off");
+    assert.ok(noScripts(reused), "a grant is single-use");
+
+    // Bound to its path: presented for another file, it gives no scripts (and is spent).
+    const other = (await (await ask("work/report.html")).json()) as { grant: string };
+    const elsewhere = await open(other.grant, "summary.md");
+    assert.ok(noScripts(elsewhere), "a grant for one file does not open another");
+    assert.ok(noScripts(await open(other.grant)), "and it was spent by that attempt");
+
+    // Bound to the bytes: a file changed since the grant gives no scripts.
+    const before = (await (await ask("work/report.html")).json()) as { grant: string };
+    const file = join(runsDir, "sbe12", "work", "report.html");
+    const original = await readFile(file);
+    await writeFile(file, Buffer.concat([original, Buffer.from("<!-- changed -->")]));
+    try {
+      assert.ok(noScripts(await open(before.grant)), "a grant is for the bytes the operator was shown");
+    } finally {
+      await writeFile(file, original);
+    }
+
+    // It lapses.
+    const lapsed = (await (await ask("work/report.html")).json()) as { grant: string };
+    await new Promise((r) => setTimeout(r, 400));
+    assert.ok(noScripts(await open(lapsed.grant)), "an expired grant serves the no-script file");
+  } finally {
+    await guarded.close();
+  }
+});
+
+test("a trace that is there and cannot be read is said so in the trace view, not shown as no traces", async () => {
+  const base = await mkdtemp(join(tmpdir(), "ui-unread-"));
+  try {
+    await mkdir(join(base, "traces", "events.jsonl"), { recursive: true });
+    const page = await queryTraces(base, {});
+    assert.equal(page.total, 0);
+    assert.equal(page.unreadable, "not a regular file");
+    await rm(join(base, "traces", "events.jsonl"), { recursive: true });
+    await writeFile(join(base, "traces", "events.jsonl"), `${JSON.stringify({ ts: "t", agent: "a0", tool: "bash", args: {}, result: {} })}\n`);
+    const again = await queryTraces(base, {});
+    assert.deepEqual([again.total, again.unreadable], [1, null]);
+    const none = await queryTraces(join(base, "no-such"), {});
+    assert.deepEqual([none.total, none.unreadable], [0, null], "no trace at all is not an unreadable one");
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("the console finds VM hubs where swarm.sh keeps them, and only in a directory of this user's that is not a link", async () => {
+  const base = await mkdtemp(join(tmpdir(), "ui-hubs-parent-"));
+  const was = process.env.SWARM_HUBS_DIR;
+  try {
+    const real = join(base, "hubs");
+    await mkdir(real, { mode: 0o700 });
+    process.env.SWARM_HUBS_DIR = real;
+    assert.equal(await hubsParent(), await realpath(real));
+    await symlink(real, join(base, "linked"));
+    process.env.SWARM_HUBS_DIR = join(base, "linked");
+    assert.equal(await hubsParent(), "", "a link is no hubs' parent");
+    process.env.SWARM_HUBS_DIR = join(base, "missing");
+    assert.equal(await hubsParent(), "");
+    await writeFile(join(base, "file"), "");
+    process.env.SWARM_HUBS_DIR = join(base, "file");
+    assert.equal(await hubsParent(), "", "a file is no hubs' parent");
+    // Unset, it is ~/.dfirswarm/hubs under DFIRSWARM_HOME.
+    delete process.env.SWARM_HUBS_DIR;
+    const home = process.env.DFIRSWARM_HOME;
+    process.env.DFIRSWARM_HOME = base;
+    await mkdir(join(base, "hubs2"), { mode: 0o700 });
+    try {
+      await rm(real, { recursive: true });
+      await mkdir(join(base, "hubs"), { mode: 0o700 });
+      assert.equal(await hubsParent(), await realpath(join(base, "hubs")));
+    } finally {
+      if (home === undefined) delete process.env.DFIRSWARM_HOME;
+      else process.env.DFIRSWARM_HOME = home;
+    }
+  } finally {
+    if (was === undefined) delete process.env.SWARM_HUBS_DIR;
+    else process.env.SWARM_HUBS_DIR = was;
+    await rm(base, { recursive: true, force: true });
   }
 });

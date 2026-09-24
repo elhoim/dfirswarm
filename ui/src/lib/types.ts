@@ -366,6 +366,8 @@ export type SwarmView = {
   sentinel: boolean;
   sentinel_info: SentinelInfo | null;
   traces: SwarmEvent[];
+  /** Why the trace could not be read, when it is there and could not be; null or absent otherwise. */
+  trace_unreadable?: string | null;
   history: Record<string, FileVersion[]>;
   registry: (Record<string, unknown> & { tool_forging?: boolean; self_compact?: SelfCompactOptions; inbox_page_chars?: number; inputs?: { source: string; files: number; bytes: number; enforce: string; guard: string } | null }) | null;
   work: WorkFile[];
@@ -398,7 +400,9 @@ export type CustodyView = {
   evidence:
     | null
     | { unverifiable: string }
-    | { files: number; bytes: number; unchanged: boolean; complete: boolean; changed: string[]; missing: string[]; added: string[]; skipped: string[]; manifest_anchored: boolean | null };
+    | { files: number; bytes: number; unchanged: boolean; complete: boolean; changed: string[]; missing: string[]; added: string[]; skipped: string[]; unreadable?: string[]; manifest_anchored: boolean | null };
+  /** Whether custody.json is the verdict custody anchored outside the run, in words; null when there is nothing to check it against. */
+  anchor?: string | null;
   sessions_not_files: string[];
   trace: { lines: number; intact: boolean; detail: string; unverified: number; disputed: number; spilled: number; lost: number; refused_spills: Array<{ path: string; why: string }> } | null;
   ledger: { entries: number; chained: number | null; intact: boolean; detail: string; missing_from_ledger: string[]; not_on_trace: number[] } | null;
@@ -538,6 +542,8 @@ export type TracePage = {
   by_agent: Record<string, { events: number; spent_usd: number }>;
   /** Lines per agent over the filtered set — who the matches belong to. */
   matched_by_agent: Record<string, number>;
+  /** Why the trace could not be read, when it is there and could not be; null or absent otherwise. */
+  unreadable?: string | null;
 };
 
 export type Job = {
