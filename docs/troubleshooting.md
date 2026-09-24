@@ -38,6 +38,8 @@ you meant, or drop the flag.
 
 **A VM seat stopped with `hub_lost_stop`, while the hub was up.** The seat's liveness check (a budget read through the hub) got no answer for four minutes. A link that stalls is replaced now (a call that times out, or a write queue that has not moved in 20 s), so this should end in a new link, not a stop. If it does not: look on the trace for `hub_call` refusals with `fn:"upload"`, `fn:"download"` or `fn:"reply"`, and in the seat's pane for "nothing written for 20s" or "not answered within". `scripts/swarm.sh status <id>` shows whether the hub answers; the hub's `admin.sock` answers `{"op":"status"}` with each seat's `connected` and `last_seen`.
 
+**A VM seat's model calls or compaction summaries fail with "Connection error." while the network is up.** Look in the VM's `runtime.log` (under msb's home, `sandboxes/<vm>/logs/`, or kept beside the run's snapshots) for `secret violation: placeholder detected for disallowed host … location=body match_form=percent_decoded` naming the provider's own host. That is msb 0.7.2 misreading the credential header as body when a `%` or `\u` sits near the start of the request body. The extension sends such bodies chunked in a VM, which avoids it; if you still see it, check that the seat's environment has `SWARM_SECRET_HOSTS` naming that host (`msb exec <vm> -- env`).
+
 **`agent_name_taken` from Herdr.**
 Each `start` allocates a fresh `s????` prefix and checks `herdr agent list` for `<prefix>00`, so two concurrent runs never collide. If you see this, a crashed run left agents registered under the same names: `herdr agent list`, then `scripts/swarm.sh stop <id>` (closes its workspaces) or `herdr workspace close <ws>`.
 

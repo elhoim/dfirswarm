@@ -133,6 +133,7 @@ import {
 } from "./board.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
+import { installChunkedEgress } from "./vm-egress.ts";
 
 type ToolCtx = { cwd: string };
 
@@ -367,6 +368,9 @@ function entriesFrom(ctx: { sessionManager?: { getEntries?: () => unknown[] } })
 }
 
 export default function (pi: ExtensionAPI) {
+  // In a VM, before Pi's first model call: a body to a host msb swaps a
+  // credential in for goes chunked (vm-egress.ts says why).
+  installChunkedEgress();
   let agentId = process.env.AGENT_ID?.trim() ?? "";
   /** Start times per tool call, so every trace row can carry its duration. */
   const toolStarts = new Map<string, number>();

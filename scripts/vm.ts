@@ -1052,6 +1052,9 @@ async function createOne(
     SWARM_PROBE_TARGETS: plan.probeTargets.join(","),
     // What the probe looks for: every program the run's packs require.
     SWARM_REQUIRED_BINARIES: [...new Set(packNeeds((spec.env.SWARM_PACK_DIRS ?? "").split(":")).flatMap((n) => n.required))].join(","),
+    // The hosts msb swaps a placeholder in for: the extension sends a request
+    // body to them chunked (extensions/vm-egress.ts says why).
+    SWARM_SECRET_HOSTS: [...new Set([...secrets.flatMap((s) => s.hosts), ...packSecrets.flatMap((s) => s.hosts)].map((h) => parseAllowEntry(h).value))].sort().join(","),
   };
   // This seat's own hub token. It rests in msb's database with the secret
   // values while the VM lives (scrubbed after finish), never in the spec,

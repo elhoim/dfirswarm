@@ -968,7 +968,12 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
       await trace(ctx.cwd, "compact_failed", { reason: event.reason, stage: "pi" }, { ok: false, reason: event.errorMessage ?? (event.aborted ? "compaction was cancelled" : "compaction failed"), aborted: event.aborted });
       return;
     }
-    const error = R.lastCompactionError ?? event.errorMessage ?? (event.aborted ? "compaction was cancelled" : "compaction failed");
+    // Both failures when both happened: ours alone hid that Pi's own summary,
+    // the fallback, failed too (run se064eb: the trace said only "our
+    // summary failed", while Pi's pane said its turn-prefix summary had).
+    const pis = event.errorMessage ?? (event.aborted ? "compaction was cancelled" : undefined);
+    const ours = R.lastCompactionError;
+    const error = ours && pis && !pis.includes(ours) ? `${ours}; then Pi's own summary: ${pis}` : ours ?? pis ?? "compaction failed";
     R.state.handoff = { ...h, status: "failed", attempts: h.attempts + 1, error };
     const current = handoff()!;
     const canRetry = !event.aborted && current.attempts < MAX_AUTO_RETRIES;
