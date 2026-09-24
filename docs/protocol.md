@@ -38,7 +38,7 @@ runs/<id>/
   inbox/<id>/cursors.json      per-agent, per-thread: highest post id read
   work/                        the artifact(s); work/.browser/*.png from playwright
   locks/<sha256(path)>.json    live claims
-  locks/.table.lock/           mkdir mutex for lock-table changes (pid, owner token inside)
+  locks/.table.lock/           mkdir mutex for lock-table changes (pid, ns, owner token inside)
   history/<sha256(path)>/      000001.bin … + index.json (rev, ts, agent, bytes, sha256)
   done/agents/<id>.done        this worker exited
   done/agents/<id>.dead        this worker was reaped
@@ -141,11 +141,17 @@ reason**, not an open-ended lock:
   reaper drop everything an agent owns.
 - All lock-table mutations run under `locks/.table.lock` (exclusive `mkdir`,
   10 s wait). The holder refreshes its mtime every 3 s, so a lock older than
-  15 s has no live holder and is broken; the recorded pid is not consulted,
-  since each pane may have its own pid namespace. A break happens under
-  `locks/.table.lock.break`, which re-checks the age first, so two waiters
+  15 s has no live holder unless that holder has stalled (SIGSTOP, swap, a
+  laptop asleep). A stale lock is broken, except that a holder is kept while
+  its pid is live and it recorded the same `ns` as the waiter: the pid
+  namespace and boot id on Linux, the host name and boot time on macOS. A
+  waiter that cannot check the pid — another pane's pid namespace, another
+  VM, a lock with no `ns` — goes by age alone. A break happens under
+  `locks/.table.lock.break`, which re-checks the lock first, so two waiters
   cannot both break one lock. A holder removes only a lock whose `owner`
-  token is its own. `reap.sh` and `swarm.sh say` use the same mutex from bash.
+  token is its own, and warns (`DFIRSWARM_TABLE_LOCK_LOST`; on stderr from
+  bash) when it finds its lock was taken over. `reap.sh` and `swarm.sh say`
+  use the same mutex from bash, and hold it for a few seconds at most.
 
 ### Write guard and `claim_violation`
 

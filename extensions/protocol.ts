@@ -10,10 +10,20 @@
  * not the names agents choose for themselves.
  */
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, createReadStream, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  createReadStream,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  writeSync,
+} from "node:fs";
 import { connect } from "node:net";
+import { hostname } from "node:os";
 import {
   appendFile,
   chmod,
@@ -45,6 +55,12 @@ export const TABLE_LOCK_WAIT_MS = 10_000;
 export const TABLE_LOCK_STALE_MS = 15_000;
 /** How often a holder refreshes its table lock; well inside the stale window. */
 export const TABLE_LOCK_HEARTBEAT_MS = 3_000;
+/** The table lock's timings. Only tests change them, to shorten a stall. */
+export const tableLockTiming = {
+  waitMs: TABLE_LOCK_WAIT_MS,
+  staleMs: TABLE_LOCK_STALE_MS,
+  heartbeatMs: TABLE_LOCK_HEARTBEAT_MS,
+};
 export const DEFAULT_SWARM_ID = "hello-n2";
 export const DEFAULT_AGENT_IDS = ["agent00", "agent01"] as const;
 export const SENTINEL_REL = "done/SWARM_DONE";
@@ -506,27 +522,93 @@ export async function swarmDoneExists(sandboxRoot: string): Promise<boolean> {
   }
 }
 
-async function lockIsStale(dir: string): Promise<boolean> {
-  const info = await stat(dir).catch(() => null);
-  return info !== null && Date.now() - info.mtimeMs >= TABLE_LOCK_STALE_MS;
+let lockNamespaceCache: string | undefined;
+
+/**
+ * Where a pid recorded in a lock can be checked: this pid namespace and boot
+ * on Linux, this host and boot on macOS. Two processes that print the same
+ * string number their processes alike, so one can ask whether the other's pid
+ * is live. "" when it cannot be told, and then only the lock's age counts.
+ * The bash copies in reap.sh and swarm.sh print the same string.
+ */
+export function lockNamespace(): string {
+  if (lockNamespaceCache !== undefined) return lockNamespaceCache;
+  let ns = "";
+  try {
+    if (process.platform === "linux") {
+      const pidNs = readlinkSync("/proc/self/ns/pid");
+      const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      if (pidNs && boot) ns = `linux:${pidNs}:${boot}`;
+    } else if (process.platform === "darwin") {
+      const out = execFileSync("sysctl", ["-n", "kern.boottime"], { encoding: "utf8", timeout: 2_000 });
+      const sec = /sec = (\d+)/.exec(out)?.[1];
+      if (sec) ns = `darwin:${hostname()}:${sec}`;
+    }
+  } catch {
+    ns = "";
+  }
+  lockNamespaceCache = ns;
+  return ns;
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: it exists, it just is not ours to signal.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** What a holder writes into a lock directory it has just made. */
+async function stampLock(dir: string, token: string): Promise<void> {
+  await writeFile(join(dir, "pid"), String(process.pid), "utf8");
+  await writeFile(join(dir, "ns"), lockNamespace(), "utf8");
+  await writeFile(join(dir, "owner"), token, "utf8");
 }
 
 /**
- * Break a lock whose holder has stopped: one older than TABLE_LOCK_STALE_MS.
- *
- * Age alone decides. A holder refreshes its lock's mtime every
- * TABLE_LOCK_HEARTBEAT_MS, so an old lock has no live holder. The recorded
- * pid used to decide instead, and cannot: under fsguard's pid namespaces each
- * pane numbers its own processes, so a live holder in another pane looked
- * dead and lost its lock after 15 s, and an unrelated live pid could keep a
- * dead lock standing.
- *
- * Breaking takes a second mkdir lock, `<lock>.break`, and judges the age again
- * under it. Two waiters could otherwise both judge one dead lock stale: the
- * first removed it and took the lock, and the second's rm then removed that
- * live lock, putting both in the critical section.
+ * A lock is stale once it is older than the stale age, unless its holder is
+ * known to be alive. Its holder is known to be alive only when it recorded the
+ * same namespace as ours and its pid is live here; anything else — another
+ * pane's pid namespace, another VM, an older lock with no `ns` — is judged by
+ * age alone. So a holder that stalls (SIGSTOP, swap, a laptop asleep) keeps
+ * its lock from a peer that can see it, and loses it after the stale age only
+ * to a peer that cannot.
  */
-async function maybeBreakStaleTableLock(lockDir: string): Promise<void> {
+async function lockIsStale(dir: string): Promise<boolean> {
+  const info = await stat(dir).catch(() => null);
+  if (info === null || Date.now() - info.mtimeMs < tableLockTiming.staleMs) return false;
+  const ns = (await readFile(join(dir, "ns"), "utf8").catch(() => "")).trim();
+  if (ns && ns === lockNamespace()) {
+    const pid = (await readFile(join(dir, "pid"), "utf8").catch(() => "")).trim();
+    if (/^[1-9]\d*$/.test(pid) && pidAlive(Number(pid))) return false;
+  }
+  return true;
+}
+
+/** Say that a holder's lock was taken over while it held it. */
+export function warnLockLost(message: string): void {
+  process.emitWarning(message, { code: "DFIRSWARM_TABLE_LOCK_LOST" });
+}
+
+/**
+ * Break a lock whose holder has stopped (see lockIsStale).
+ *
+ * A holder refreshes its lock's mtime every TABLE_LOCK_HEARTBEAT_MS, so an old
+ * lock has no live holder unless that holder has stalled; a stalled holder is
+ * kept by its pid where a peer can check it. The pid alone used to decide and
+ * cannot: under fsguard's pid namespaces each pane numbers its own processes,
+ * so a live holder in another pane looked dead and lost its lock after 15 s,
+ * and an unrelated live pid could keep a dead lock standing.
+ *
+ * Breaking takes a second mkdir lock, `<lock>.break`, and judges the lock
+ * again under it. Two waiters could otherwise both judge one dead lock stale:
+ * the first removed it and took the lock, and the second's rm then removed
+ * that live lock, putting both in the critical section.
+ */
+async function maybeBreakStaleTableLock(lockDir: string, token: string): Promise<void> {
   if (!(await lockIsStale(lockDir))) return;
   const breakDir = `${lockDir}.break`;
   try {
@@ -534,14 +616,25 @@ async function maybeBreakStaleTableLock(lockDir: string): Promise<void> {
   } catch {
     // Someone else is breaking it. One that died mid-break leaves its own
     // lock behind, cleared here once that is stale too.
-    if (await lockIsStale(breakDir)) await rm(breakDir, { recursive: true, force: true });
+    if (await lockIsStale(breakDir)) await rm(breakDir, { recursive: true, force: true }).catch(() => undefined);
     return;
   }
   try {
-    if (await lockIsStale(lockDir)) await rm(lockDir, { recursive: true, force: true });
+    await stampLock(breakDir, token);
+    if (await lockIsStale(lockDir)) await rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
   } finally {
-    await rm(breakDir, { recursive: true, force: true });
+    await releaseLockDir(breakDir, token);
   }
+}
+
+/** Remove a lock directory only while it is still ours. */
+async function releaseLockDir(dir: string, token: string): Promise<void> {
+  const owner = await readFile(join(dir, "owner"), "utf8").catch(() => "");
+  if (owner === token) {
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  warnLockLost(`${basename(dir)} was taken over while this process held it; another process may have been inside with it`);
 }
 
 export async function withTableLock<T>(
@@ -567,18 +660,17 @@ export async function withNamedLock<T>(
 ): Promise<T> {
   const lockDir = join(sandboxRoot, "locks", name);
   await mkdir(join(sandboxRoot, "locks"), { recursive: true });
-  const deadline = Date.now() + TABLE_LOCK_WAIT_MS;
+  const deadline = Date.now() + tableLockTiming.waitMs;
   const token = `${process.pid}-${randomUUID()}`;
   while (true) {
     try {
       await mkdir(lockDir);
-      await writeFile(join(lockDir, "pid"), String(process.pid), "utf8");
-      await writeFile(join(lockDir, "owner"), token, "utf8");
+      await stampLock(lockDir, token);
       break;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== "EEXIST") throw err;
-      await maybeBreakStaleTableLock(lockDir);
+      await maybeBreakStaleTableLock(lockDir, token);
       if (Date.now() > deadline) {
         throw new Error(`Timed out waiting for locks/${name}`);
       }
@@ -589,16 +681,15 @@ export async function withNamedLock<T>(
   const heartbeat = setInterval(() => {
     const now = new Date();
     utimes(lockDir, now, now).catch(() => undefined);
-  }, TABLE_LOCK_HEARTBEAT_MS);
+  }, tableLockTiming.heartbeatMs);
   heartbeat.unref();
   try {
     return await fn();
   } finally {
     clearInterval(heartbeat);
     // Remove only our own lock. One broken while its holder stalled may
-    // already belong to someone else.
-    const owner = await readFile(join(lockDir, "owner"), "utf8").catch(() => "");
-    if (owner === token) await rm(lockDir, { recursive: true, force: true });
+    // already belong to someone else, and that is said rather than ignored.
+    await releaseLockDir(lockDir, token);
   }
 }
 

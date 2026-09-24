@@ -10,11 +10,41 @@
  * like a holder.
  */
 import assert from "node:assert/strict";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { withTableLock } from "../extensions/protocol.ts";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { lockNamespace, tableLockTiming, withTableLock } from "../extensions/protocol.ts";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+/** What a peer in another pid namespace, or another VM, records. */
+const FOREIGN_NS = "linux:pid:[1]:another-boot";
+
+/** A pid that was ours a moment ago and is gone now. */
+function deadPid(): number {
+  const out = execFileSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" });
+  return Number(out);
+}
+
+/** Collect the lost-lock warnings `fn` raises. */
+async function warningsDuring(fn: () => Promise<void>): Promise<string[]> {
+  const seen: string[] = [];
+  const onWarning = (w: Error & { code?: string }) => {
+    if (w.code === "DFIRSWARM_TABLE_LOCK_LOST") seen.push(w.message);
+  };
+  process.on("warning", onWarning);
+  try {
+    await fn();
+    // emitWarning delivers on the next tick.
+    await new Promise((r) => setImmediate(r));
+  } finally {
+    process.off("warning", onWarning);
+  }
+  return seen;
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -44,9 +74,11 @@ test("a live holder keeps its lock past the stale age, whatever pid it recorded"
       aInside = false;
     });
     await aEntered;
-    // What a peer in another pid namespace sees: a pid that is not live here.
-    // The holder has also been in its critical section longer than the stale age.
+    // What a peer in another pid namespace sees: a pid that is not live here,
+    // recorded in a namespace that is not ours. The holder has also been in its
+    // critical section longer than the stale age.
     await writeFile(join(lockDir, "pid"), "999999999", "utf8");
+    await writeFile(join(lockDir, "ns"), FOREIGN_NS, "utf8");
     await age(lockDir, 20_000);
     // A live holder refreshes its lock; give it the time to do so.
     const until = Date.now() + 6_000;
@@ -66,13 +98,14 @@ test("a live holder keeps its lock past the stale age, whatever pid it recorded"
   }
 });
 
-test("a stale lock is broken even when the pid it records is live", async () => {
+test("a stale lock from another namespace is broken even when the pid it records is live", async () => {
   const { root, lockDir } = await sandbox();
   try {
     // A pid that is live here but is not the holder: in another pid namespace
     // it is someone else, or a recycled number. The holder stopped long ago.
     await mkdir(lockDir);
     await writeFile(join(lockDir, "pid"), String(process.pid), "utf8");
+    await writeFile(join(lockDir, "ns"), FOREIGN_NS, "utf8");
     await age(lockDir, 20_000);
     const started = Date.now();
     let ran = false;
@@ -110,18 +143,94 @@ test("only one waiter breaks a stale lock at a time, and it judges the age again
   }
 });
 
-test("a holder does not remove a lock that is no longer its own", async () => {
+test("a holder does not remove a lock that is no longer its own, and says so", async () => {
   const { root, lockDir } = await sandbox();
   try {
-    await withTableLock(root, async () => {
-      // Ours was broken while we stalled, and someone else took it.
-      await rm(lockDir, { recursive: true, force: true });
-      await mkdir(lockDir);
-      await writeFile(join(lockDir, "pid"), "1", "utf8");
-      await writeFile(join(lockDir, "owner"), "someone-else", "utf8");
-    });
+    const warned = await warningsDuring(() =>
+      withTableLock(root, async () => {
+        // Ours was broken while we stalled, and someone else took it.
+        await rm(lockDir, { recursive: true, force: true });
+        await mkdir(lockDir);
+        await writeFile(join(lockDir, "pid"), "1", "utf8");
+        await writeFile(join(lockDir, "owner"), "someone-else", "utf8");
+      }),
+    );
     assert.equal(await readFile(join(lockDir, "owner"), "utf8"), "someone-else", "released a lock someone else holds");
+    assert.equal(warned.length, 1, "a lost lock went unreported at release");
+    assert.match(warned[0], /taken over/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("a holder that stalls past the stale age keeps its lock from a peer that can see its pid", async () => {
+  // The review's reproduction, with the 15 s stale age shortened to 1 s: a
+  // holder blocks its event loop (as SIGSTOP, swap or a laptop asleep would),
+  // so its heartbeat stops, for longer than the stale age.
+  const { root } = await sandbox();
+  const saved = { ...tableLockTiming };
+  const inside = join(root, "inside");
+  const left = join(root, "left");
+  const child = spawn(
+    process.execPath,
+    [
+      "--experimental-strip-types",
+      "--input-type=module",
+      "-e",
+      `
+        import { writeFileSync } from "node:fs";
+        const m = await import(${JSON.stringify(pathToFileURL(join(ROOT, "extensions/protocol.ts")).href)});
+        m.tableLockTiming.staleMs = 1000;
+        m.tableLockTiming.heartbeatMs = 200;
+        await m.withTableLock(${JSON.stringify(root)}, async () => {
+          writeFileSync(${JSON.stringify(inside)}, "");
+          const until = Date.now() + 2500;
+          while (Date.now() < until) {}
+          writeFileSync(${JSON.stringify(left)}, "");
+        });
+      `,
+    ],
+    { stdio: ["ignore", "ignore", "inherit"] },
+  );
+  const exited = new Promise<number | null>((r) => child.on("exit", (code) => r(code)));
+  try {
+    tableLockTiming.staleMs = 1000;
+    const until = Date.now() + 20_000;
+    while (!existsSync(inside) && Date.now() < until) await sleep(20);
+    assert.ok(existsSync(inside), "the stalling holder never took the lock");
+    let heldAlready: boolean | null = null;
+    await withTableLock(root, async () => {
+      heldAlready = !existsSync(left);
+    });
+    assert.equal(heldAlready, false, "entered while the stalled holder was still inside");
+    assert.equal(await exited, 0);
+  } finally {
+    Object.assign(tableLockTiming, saved);
+    child.kill();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a stale lock from our namespace whose holder is dead is broken", async () => {
+  const { root, lockDir } = await sandbox();
+  try {
+    await mkdir(lockDir);
+    await writeFile(join(lockDir, "pid"), String(deadPid()), "utf8");
+    await writeFile(join(lockDir, "ns"), lockNamespace(), "utf8");
+    await age(lockDir, 20_000);
+    const started = Date.now();
+    await withTableLock(root, async () => undefined);
+    assert.ok(Date.now() - started < 5_000, `took ${Date.now() - started} ms to break a dead holder's lock`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("protocol.ts and the bash copies name this namespace alike", { skip: process.platform === "win32" }, () => {
+  const block = execFileSync("sed", ["-n", "/^# >>> table lock/,/^# <<< table lock/p", join(ROOT, "scripts/reap.sh")], {
+    encoding: "utf8",
+  });
+  const fromBash = execFileSync("bash", ["-c", `${block}\ntable_lock_ns`], { encoding: "utf8" });
+  assert.equal(fromBash, lockNamespace());
+  if (process.platform === "linux" || process.platform === "darwin") assert.notEqual(lockNamespace(), "");
 });
