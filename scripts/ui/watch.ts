@@ -107,6 +107,9 @@ function kindOf(second: string, third: string): ChangeKind {
     case "idle-nudge.pid":
       return "internal";
     default:
+      // writeBudget's temp file, renamed over budget.json a moment later:
+      // the rename is the "budget" change, the temp file is bookkeeping.
+      if (second.startsWith(".budget.json.") && second.endsWith(".tmp")) return "internal";
       return "other";
   }
 }

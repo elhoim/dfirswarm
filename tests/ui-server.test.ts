@@ -1099,6 +1099,7 @@ test("helpers: path classification and callsign heuristic", () => {
   assert.equal(classifyPath("/runs", "s7a1c/.pi-sessions/s7a1c00/session.jsonl").kind, "sessions");
   assert.equal(classifyPath("/runs", "s7a1c/inbox/s7a1c00/cursors.json").kind, "internal");
   assert.equal(classifyPath("/runs", "s7a1c/locks/.table.lock/pid").kind, "internal");
+  assert.equal(classifyPath("/runs", "s7a1c/.budget.json.4242.a1b2c3d4e5f6.tmp").kind, "internal");
   assert.equal(classifyPath("/runs", "s7a1c/locks/abc.json").kind, "locks");
   assert.equal(classifyPath("/runs", "s7a1c/tools/csv_stats/manifest.json").kind, "tools");
   assert.equal(classifyPath("/runs", "s7a1c/names.json").kind, "names");
