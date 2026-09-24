@@ -5,14 +5,15 @@
  * extension in a VM does (extensions/board.ts), with a stand-in collector.
  */
 import assert from "node:assert/strict";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { connect, createServer, type Server } from "node:net";
+import { connect, createServer, type Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import * as board from "../extensions/board.ts";
-import { agentDeadPath, diffWatchedPaths, emptyAgentBudget, initSandbox, postSender, readPost, SENTINEL_REL, watchedPathHashes } from "../extensions/protocol.ts";
+import { agentDeadPath, appendEvent, diffWatchedPaths, TRANSFER_PART_BYTES, WIRE_LINE_MAX, WireLineTooLarge, watchWriteStall, emptyAgentBudget, initSandbox, postSender, readPost, SENTINEL_REL, watchedPathHashes } from "../extensions/protocol.ts";
 import { boardTable, CollectorLink, historyQuotaBytes, Hub, isHubProcess, msbDbOutcomes, parseSeatTokens, seatTokenMatches, SocketPathTooLong, takeHubLock, updateRegistryState } from "../scripts/vm-hub.ts";
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -1529,4 +1530,427 @@ test("without the model gateway a seat's smaller spend report is still refused",
   await board.callBoard(hub.socketFor("a1"), "applySessionUsage", [null, "a1", { spent_usd: 0.5, tokens: 10, calls: 1, input: 5, output: 5, cache_read: 0, cache_write: 0 }]);
   await assert.rejects(board.callBoard(hub.socketFor("a1"), "applySessionUsage", [null, "a1", { spent_usd: 0.1, tokens: 10, calls: 1, input: 5, output: 5, cache_read: 0, cache_write: 0 }]), /backwards/);
   assert.equal((JSON.parse(await readFile(join(sandbox, "budget.json"), "utf8")) as Record<string, any>).agents.a1.metered_by, undefined);
+});
+
+// --- transfers: nothing large travels as one line ---------------------------
+//
+// In two real runs a seat's file (recorded after an extraction) went to the
+// hub as one line of several megabytes, msb's vsock path stopped carrying it,
+// and every call behind it on the connection (the liveness check among them)
+// waited until the seat was stopped as cut off. Measured since: one write of
+// about 262 KB stalls the link for good, one of about 215 KB passes. A
+// request, an answer, a trace line or a prompt past a part's size now travels
+// in parts, one acknowledged at a time; no line either end writes is past
+// WIRE_LINE_MAX, and a link that stops carrying data is replaced.
+
+/** Every line a client socket in this process writes, while `fn` runs. */
+async function linesWritten<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
+  const lines: string[] = [];
+  const original = Socket.prototype.write;
+  Socket.prototype.write = function (this: Socket, chunk: unknown, ...rest: unknown[]) {
+    if (typeof chunk === "string") lines.push(chunk);
+    return (original as (...a: unknown[]) => boolean).call(this, chunk, ...rest);
+  } as typeof original;
+  try {
+    return { value: await fn(), lines };
+  } finally {
+    Socket.prototype.write = original;
+  }
+}
+
+/** A stand-in for the guest bridge: forwards to the hub, and on its first connection stops carrying the client's bytes after `after` of them. */
+async function stallingBridge(target: string, path: string, after: number): Promise<{ connections: () => number }> {
+  let count = 0;
+  const open = new Set<Socket>();
+  const server = createServer((client) => {
+    count += 1;
+    open.add(client);
+    const first = count === 1;
+    const up = connect(target);
+    open.add(up);
+    let passed = 0;
+    client.on("data", (chunk: Buffer) => {
+      if (first && passed + chunk.length > after) {
+        const room = Math.max(0, after - passed);
+        if (room) up.write(chunk.subarray(0, room));
+        passed += room;
+        client.pause();
+        return;
+      }
+      passed += chunk.length;
+      up.write(chunk);
+    });
+    up.on("data", (c: Buffer) => client.write(c));
+    const end = () => {
+      client.destroy();
+      up.destroy();
+    };
+    client.on("close", end);
+    up.on("close", end);
+    client.on("error", () => undefined);
+    up.on("error", () => undefined);
+  });
+  await new Promise<void>((r) => server.listen(path, () => r()));
+  cleanups.push(async () => {
+    board.closeBoardClients();
+    for (const s of open) s.destroy();
+    await new Promise((r) => server.close(() => r(undefined)));
+  });
+  return { connections: () => count };
+}
+
+/** A raw connection to a seat's socket: one line out, the next line back. */
+async function rawSeat(path: string): Promise<{ send: (body: unknown) => Promise<Record<string, unknown>>; close: () => void }> {
+  const socket = connect(path);
+  await new Promise<void>((r, j) => {
+    socket.once("connect", () => r());
+    socket.once("error", j);
+  });
+  socket.setEncoding("utf8");
+  let buffer = "";
+  const waiting: Array<(line: Record<string, unknown>) => void> = [];
+  socket.on("data", (chunk: string) => {
+    buffer += chunk;
+    let cut;
+    while ((cut = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, cut);
+      buffer = buffer.slice(cut + 1);
+      waiting.shift()?.(JSON.parse(line));
+    }
+  });
+  return {
+    send: (body) =>
+      new Promise((r) => {
+        waiting.push(r);
+        socket.write(`${JSON.stringify(body)}\n`);
+      }),
+    close: () => socket.destroy(),
+  };
+}
+
+test("a seat's 12 MiB file travels to the hub in parts, published and recorded alike, and lands byte for byte", async () => {
+  const { hub, sandbox } = await setup();
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  const big = randomBytes(12 * 1024 * 1024);
+  await writeFile(join(sandbox, "work", "a0", "big.bin"), big);
+  const ctx = { sandboxRoot: sandbox, agentId: "a0" };
+  const { value: pub, lines } = await linesWritten(() => asVm(hub.socketFor("a0"), () => board.publishFile(ctx, "work/a0/big.bin", "work/big.bin")));
+  assert.equal((pub as { ok: boolean }).ok, true, JSON.stringify(pub));
+  assert.ok((await readFile(join(sandbox, "work", "big.bin"))).equals(big), "the published copy is the seat's file, byte for byte");
+  const longest = Math.max(...lines.map((l) => Buffer.byteLength(l)));
+  assert.ok(longest <= WIRE_LINE_MAX, `no line past a part (base64 and its envelope): the longest was ${longest}`);
+  assert.ok(lines.filter((l) => l.startsWith('{"t":"up"')).length >= Math.floor(big.length / TRANSFER_PART_BYTES), "the file went up in parts");
+  const { value: rec } = await linesWritten(() => asVm(hub.socketFor("a0"), () => board.recordFileVersion(sandbox, "work/a0/big.bin", "a0")));
+  const recorded = rec as { rev: number; sha256: string; stored?: boolean };
+  assert.equal(recorded.sha256, createHash("sha256").update(big).digest("hex"), "the hub recorded the bytes the seat sent, not a torn copy");
+  assert.notEqual(recorded.stored, false, "12 MiB is under the history store's limit: the bytes are kept");
+});
+
+test("an answer past a part's size is kept by the hub and fetched in parts, whole", async () => {
+  const { hub, sandbox } = await setup();
+  // The diff shows its first 400 rows: long rows make it larger than a part.
+  const lines1 = Array.from({ length: 200 }, (_, i) => `first ${i} ${randomBytes(800).toString("hex")}`).join("\n");
+  const lines2 = Array.from({ length: 200 }, (_, i) => `second ${i} ${randomBytes(800).toString("hex")}`).join("\n");
+  await writeFile(join(sandbox, "work", "shared.txt"), lines1);
+  await board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
+  await writeFile(join(sandbox, "work", "shared.txt"), lines2);
+  await board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
+  const { value: diff, lines } = await linesWritten(() => board.callBoard(hub.socketFor("a0"), "fileDiff", [sandbox, "work/shared.txt", 1, 2]));
+  const text = JSON.stringify(diff);
+  assert.ok(Buffer.byteLength(text) > TRANSFER_PART_BYTES, `the answer is larger than a part (${Buffer.byteLength(text)})`);
+  assert.ok(text.includes("second 199") && text.includes("first 0"), "the whole diff arrived");
+  assert.ok(lines.some((l) => l.startsWith('{"t":"down"')), "it was fetched in parts");
+});
+
+test("an upload is refused by name when its sha256, its order or its size is wrong, or when it sat too long", async () => {
+  const { hub, lines: trace } = await setup({ extra: { transferIdleMs: 300 } });
+  const seat = await rawSeat(hub.socketFor("a0"));
+  cleanups.push(async () => seat.close());
+  const body = Buffer.from(JSON.stringify([null, null]));
+  const b64 = body.toString("base64");
+  // wrong sha256
+  assert.equal((await seat.send({ t: "up", id: "u1", off: 0, size: body.length, b64 })).ok, true);
+  const bad = await seat.send({ t: "rpc", id: 1, fn: "listClaims", argsUpload: { id: "u1", size: body.length, sha256: "0".repeat(64) } });
+  assert.equal(bad.ok, false);
+  assert.match(String(bad.error), /do not match its sha256/);
+  // a gap
+  assert.equal((await seat.send({ t: "up", id: "u2", off: 0, size: 100, b64: Buffer.from("[1,").toString("base64") })).ok, true);
+  const gap = await seat.send({ t: "up", id: "u2", off: 10, size: 100, b64: Buffer.from("2]").toString("base64") });
+  assert.equal(gap.ok, false);
+  assert.match(String(gap.error), /does not follow the 3 bytes received/);
+  // past the limit for a call
+  const huge = await seat.send({ t: "up", id: "u3", off: 0, size: 65_000_000, b64 });
+  assert.equal(huge.ok, false);
+  assert.match(String(huge.error), /past the .*-byte limit for a call/);
+  // a part larger than a part
+  const fat = await seat.send({ t: "up", id: "u4", off: 0, size: TRANSFER_PART_BYTES * 2, b64: randomBytes(TRANSFER_PART_BYTES + 1).toString("base64") });
+  assert.equal(fat.ok, false);
+  assert.match(String(fat.error), /a part is 1 to/);
+  // left untouched past the idle limit: dropped, and said on the trace
+  assert.equal((await seat.send({ t: "up", id: "u5", off: 0, size: 100, b64: Buffer.from("[1,").toString("base64") })).ok, true);
+  await until(() => trace.some((l) => l.tool === "hub_call" && /untouched/.test(String((l.result as { error?: string })?.error ?? ""))), "the idle upload dropped", 5000);
+  const late = await seat.send({ t: "up", id: "u5", off: 3, size: 100, b64: Buffer.from("2]").toString("base64") });
+  assert.equal(late.ok, false);
+  assert.match(String(late.error), /starts at 0/);
+  // a good upload still runs its call
+  const good = Buffer.from(JSON.stringify([null]));
+  assert.equal((await seat.send({ t: "up", id: "u6", off: 0, size: good.length, b64: good.toString("base64") })).ok, true);
+  const ran = await seat.send({ t: "rpc", id: 2, fn: "listClaims", argsUpload: { id: "u6", size: good.length, sha256: createHash("sha256").update(good).digest("hex") } });
+  assert.equal(ran.ok, true, JSON.stringify(ran));
+});
+
+test("a link that stops carrying a transfer is replaced: the call goes through on a new one, and the calls behind it are answered", async () => {
+  const { hub, sandbox, dir } = await setup();
+  board.setHubClientTimings({ partTimeoutMs: 500, writeStallMs: 500 });
+  cleanups.push(async () => board.setHubClientTimings({}));
+  const bridge = join(dir, "bridge-a0.sock");
+  // The first connection carries the auth line and a little more, then stops, as the vsock path did.
+  const { connections } = await stallingBridge(hub.socketFor("a0"), bridge, 2048);
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  const bytes = randomBytes(2 * 1024 * 1024);
+  await writeFile(join(sandbox, "work", "a0", "out.bin"), bytes);
+  const started = Date.now();
+  const [pub, budget] = await asVm(bridge, () =>
+    Promise.all([
+      board.publishFile({ sandboxRoot: sandbox, agentId: "a0" }, "work/a0/out.bin", "work/out.bin"),
+      board.readBudget(sandbox),
+    ]),
+  );
+  assert.equal((pub as { ok: boolean }).ok, true, JSON.stringify(pub));
+  assert.ok((await readFile(join(sandbox, "work", "out.bin"))).equals(bytes), "the retried publish landed whole");
+  assert.ok(budget && typeof budget === "object", "the control call behind the stalled transfer was answered");
+  assert.ok(connections() >= 2, "the stalled link was replaced by a new one");
+  assert.ok(Date.now() - started < 30_000, "found and replaced in seconds, not the two minutes of a call's timeout");
+});
+
+test("a call that times out closes its link, and the next call opens another", async () => {
+  const { hub, dir, sandbox } = await setup();
+  const bridge = join(dir, "bridge-a1.sock");
+  const { connections } = await stallingBridge(hub.socketFor("a1"), bridge, 0);
+  await assert.rejects(board.callBoard(bridge, "readBudget", [sandbox], { timeoutMs: 300 }), /did not answer readBudget.*link closed and a new one opens/);
+  const budget = await board.callBoard(bridge, "readBudget", [sandbox], { timeoutMs: 5000 });
+  assert.ok(budget && typeof budget === "object");
+  assert.equal(connections(), 2);
+});
+
+test("a socket whose queued writes stop moving is closed by the write watchdog", async () => {
+  const { dir } = await setup();
+  const path = join(dir, "sink.sock");
+  const held: Socket[] = [];
+  const server = createServer((s) => {
+    s.pause();
+    held.push(s);
+  });
+  await new Promise<void>((r) => server.listen(path, () => r()));
+  cleanups.push(async () => {
+    for (const s of held) s.destroy();
+    await new Promise((r) => server.close(() => r(undefined)));
+  });
+  const socket = connect(path);
+  await new Promise<void>((r) => socket.once("connect", () => r()));
+  socket.on("error", () => undefined);
+  watchWriteStall(socket, 200);
+  const closed = new Promise<void>((r) => socket.once("close", () => r()));
+  socket.write(randomBytes(16 * 1024 * 1024));
+  await closed;
+  assert.ok(socket.destroyed, "the stalled socket was closed");
+});
+
+/**
+ * The size of every write on a seat's link while `fn` runs, from either end:
+ * a fake of the vsock path's one measure, taken on the sockets themselves.
+ * The client's are the sockets this process connects to one of `paths`; the
+ * hub's are those a server listening on one of them accepted.
+ */
+async function wireWrites<T>(paths: string[], fn: () => Promise<T>): Promise<{ value: T; client: number[]; hub: number[] }> {
+  const client: number[] = [];
+  const hub: number[] = [];
+  const tagged = new WeakSet<Socket>();
+  const proto = Socket.prototype as unknown as Record<"connect" | "write" | "end", (...args: unknown[]) => unknown>;
+  const { connect: connect0, write: write0, end: end0 } = proto;
+  const side = (s: Socket): number[] | null => {
+    if (tagged.has(s)) return client;
+    const server = (s as Socket & { server?: Server }).server;
+    return server && paths.includes(String(server.address())) ? hub : null;
+  };
+  const size = (chunk: unknown) => (typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk instanceof Uint8Array ? chunk.length : 0);
+  proto.connect = function (this: Socket, ...args: unknown[]) {
+    const first = args[0];
+    const options = Array.isArray(first) ? first[0] : first;
+    const path = typeof options === "string" ? options : (options as { path?: unknown } | null)?.path;
+    if (typeof path === "string" && paths.includes(path)) tagged.add(this);
+    return connect0.apply(this, args);
+  };
+  proto.write = function (this: Socket, chunk: unknown, ...rest: unknown[]) {
+    side(this)?.push(size(chunk));
+    return write0.call(this, chunk, ...rest);
+  };
+  proto.end = function (this: Socket, chunk?: unknown, ...rest: unknown[]) {
+    if (chunk !== undefined && typeof chunk !== "function") side(this)?.push(size(chunk));
+    return end0.call(this, chunk, ...rest);
+  };
+  try {
+    return { value: await fn(), client, hub };
+  } finally {
+    proto.connect = connect0;
+    proto.write = write0;
+    proto.end = end0;
+  }
+}
+
+/** Numbered lines of text, at least `bytes` of them: longer than any one line may be, whatever the part size. */
+function linesOf(what: string, bytes: number): string {
+  const out: string[] = [];
+  let size = 0;
+  for (let i = 0; size < bytes; i++) {
+    const line = `${what} ${i}`;
+    out.push(line);
+    size += line.length + 1;
+  }
+  return out.join("\n");
+}
+
+/** Run `fn` with the trace going to the hub, as a VM's extension sends it. */
+async function tracingAsVm<T>(socket: string, fn: () => Promise<T>): Promise<T> {
+  const was = { iso: process.env.SWARM_ISOLATION, trace: process.env.SWARM_TRACE_SOCKET };
+  process.env.SWARM_ISOLATION = "microvm";
+  process.env.SWARM_TRACE_SOCKET = socket;
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of [["SWARM_ISOLATION", was.iso], ["SWARM_TRACE_SOCKET", was.trace]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test("no write on a seat's link is past the line limit, from either end: a 12 MiB publish, a large answer, a large trace line and a long prompt all arrive whole", async () => {
+  const { hub, sandbox, lines: trace } = await setup();
+  const seats = [hub.socketFor("a0"), hub.socketFor("a1")];
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  const big = randomBytes(12 * 1024 * 1024);
+  await writeFile(join(sandbox, "work", "a0", "big.bin"), big);
+  const rows = (tag: string) => Array.from({ length: 200 }, (_, i) => `${tag} ${i} ${randomBytes(Math.ceil(WIRE_LINE_MAX / 200)).toString("hex")}`).join("\n");
+  await writeFile(join(sandbox, "work", "shared.txt"), rows("first"));
+  await board.callBoard(seats[0], "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
+  await writeFile(join(sandbox, "work", "shared.txt"), rows("second"));
+  await board.callBoard(seats[0], "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
+  // A write tool's whole content is kept in its trace line.
+  const content = linesOf("row of a file the agent wrote", 3 * WIRE_LINE_MAX);
+  const brief = linesOf("step, and keep going", 2 * WIRE_LINE_MAX);
+  const prompts: string[] = [];
+  // Connections opened from here on are the ones measured.
+  board.closeBoardClients();
+  const { client, hub: fromHub } = await wireWrites(seats, async () => {
+    const pub = (await asVm(seats[0], () => board.publishFile({ sandboxRoot: sandbox, agentId: "a0" }, "work/a0/big.bin", "work/big.bin"))) as { ok: boolean };
+    assert.equal(pub.ok, true, JSON.stringify(pub));
+    const diff = await board.callBoard(seats[0], "fileDiff", [sandbox, "work/shared.txt", 1, 2]);
+    assert.ok(Buffer.byteLength(JSON.stringify(diff)) > WIRE_LINE_MAX, "the answer is past the line limit");
+    assert.ok(JSON.stringify(diff).includes("second 199"), "and it arrived whole");
+    await tracingAsVm(seats[0], () => appendEvent(sandbox, { agent: "a0", tool: "write", args: { path: "work/a0/notes.md", content }, result: { ok: true } }));
+    const link = board.openHubLink(seats[1], (p) => prompts.push(p.text), { retryMs: 50 });
+    cleanups.push(async () => link.close());
+    await until(() => hub.statusSnapshot().a1?.connected === true, "a1's link comes up");
+    assert.equal(hub.prompt("a1", brief, { deliver: "followUp", kind: "brief" }), true);
+    await until(() => prompts.length === 1, "the long prompt arrives");
+  });
+  assert.ok((await readFile(join(sandbox, "work", "big.bin"))).equals(big), "the publish landed byte for byte");
+  const line = trace.find((l) => l.tool === "write" && l.agent === "a0");
+  assert.equal((line?.args as { content?: string } | undefined)?.content, content, "the trace line reached the collector whole, forwarded by the hub");
+  assert.equal(line?.token, "token-a0", "attributed by the hub, as a line sent in one piece is");
+  assert.equal(prompts[0], brief, "the long prompt arrived whole");
+  assert.ok(client.length > 100 && fromHub.length > 100, `both ends were measured (${client.length} and ${fromHub.length} writes)`);
+  // The measure sees the parts themselves: each end's longest write is a part's line.
+  assert.ok(Math.max(...client) > TRANSFER_PART_BYTES && Math.max(...fromHub) > TRANSFER_PART_BYTES, "the parts were among the writes measured");
+  const longest = Math.max(...client, ...fromHub);
+  assert.ok(longest <= WIRE_LINE_MAX, `the longest write was ${longest} bytes, the limit ${WIRE_LINE_MAX}`);
+});
+
+test("a line past the limit is refused by name, never written: the client's call, the link's state, the hub's answer, and a one-shot answer too large for its form", async () => {
+  const { hub, sandbox, lines: trace } = await setup();
+  const seat = hub.socketFor("a0");
+  const { client } = await wireWrites([seat], async () => {
+    await assert.rejects(board.callBoard(seat, "f".repeat(WIRE_LINE_MAX), []), /line limit of a VM's hub link, and was not sent/);
+  });
+  assert.ok(Math.max(...client) <= WIRE_LINE_MAX, "the client wrote nothing past the limit");
+  const link = board.openHubLink(seat, () => undefined, { retryMs: 50 });
+  cleanups.push(async () => link.close());
+  assert.throws(() => link.state("working", "d".repeat(WIRE_LINE_MAX)), (err: unknown) => err instanceof WireLineTooLarge);
+  // The hub's own refusal of a call quotes the call's name: past the limit,
+  // it goes back as a short answer that says why, and the refusal is traced.
+  const raw = await rawSeat(seat);
+  cleanups.push(async () => raw.close());
+  const { value: refused, hub: fromHub } = await wireWrites([seat], () => raw.send({ t: "rpc", id: 7, fn: "f".repeat(WIRE_LINE_MAX), args: ["x".repeat(8_100_000)] }));
+  assert.equal(refused.id, 7);
+  assert.equal(refused.ok, false);
+  assert.match(String(refused.error), /an answer of \d+ bytes is past the \d+-byte line limit/);
+  assert.ok(Math.max(...fromHub) <= WIRE_LINE_MAX, "the hub wrote nothing past the limit");
+  await until(() => trace.some((l) => l.tool === "hub_call" && (l.args as { fn?: string })?.fn === "reply"), "the refused answer is on the trace");
+  // The one-shot form ends with its answer and has no parts to fetch it in.
+  const rows = (tag: string) => Array.from({ length: 200 }, (_, i) => `${tag} ${i} ${randomBytes(Math.ceil(WIRE_LINE_MAX / 200)).toString("hex")}`).join("\n");
+  await writeFile(join(sandbox, "work", "shared.txt"), rows("first"));
+  await board.callBoard(seat, "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
+  await writeFile(join(sandbox, "work", "shared.txt"), rows("second"));
+  await board.callBoard(seat, "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
+  const oneShot = await exchange(seat, { t: "rpc", fn: "fileDiff", args: [sandbox, "work/shared.txt", 1, 2] });
+  assert.equal(oneShot.ok, false);
+  assert.match(String(oneShot.error), /one-shot form carries no parts/);
+});
+
+test("a long prompt the link did not fetch whole is given again on its next hello, whole", async () => {
+  const { hub } = await setup();
+  const brief = linesOf("step, and keep going", 2 * WIRE_LINE_MAX);
+  // A link that says hello, hears the prompt announced, and drops before fetching it.
+  const raw = connect(hub.socketFor("a1"));
+  raw.setEncoding("utf8");
+  const announced = new Promise<Record<string, unknown>>((resolve) => {
+    let buffer = "";
+    raw.on("data", (chunk: string) => {
+      buffer += chunk;
+      const cut = buffer.indexOf("\n");
+      if (cut >= 0) resolve(JSON.parse(buffer.slice(0, cut)));
+    });
+  });
+  raw.on("connect", () => raw.write(`${JSON.stringify({ t: "hello" })}\n`));
+  raw.on("error", () => undefined);
+  await until(() => hub.statusSnapshot().a1?.connected === true, "the first link comes up");
+  assert.equal(hub.prompt("a1", brief, { deliver: "steer", kind: "brief" }), true);
+  const first = await announced;
+  assert.equal(first.t, "prompt");
+  assert.equal(first.text, undefined, "the words are not in the announcement");
+  assert.equal((first.download as { size?: number } | undefined)?.size, Buffer.byteLength(brief));
+  raw.destroy();
+  await until(() => hub.statusSnapshot().a1?.connected === false, "the first link is gone");
+  const prompts: Array<{ text: string; kind?: string; deliver?: string }> = [];
+  const link = board.openHubLink(hub.socketFor("a1"), (p) => prompts.push(p), { retryMs: 50 });
+  cleanups.push(async () => link.close());
+  await until(() => prompts.length === 1, "the prompt is given again");
+  assert.equal(prompts[0].text, brief, "whole");
+  assert.equal(prompts[0].kind, "brief");
+  assert.equal(prompts[0].deliver, "steer");
+});
+
+test("a burst of large calls and large answers at once is taken in turn, and none is refused", async () => {
+  const { hub, sandbox } = await setup();
+  const seat = hub.socketFor("a0");
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  const files = await Promise.all(
+    Array.from({ length: 8 }, async (_, i) => {
+      const bytes = randomBytes(3 * WIRE_LINE_MAX);
+      await writeFile(join(sandbox, "work", "a0", `part${i}.bin`), bytes);
+      return bytes;
+    }),
+  );
+  const ctx = { sandboxRoot: sandbox, agentId: "a0" };
+  const published = await asVm(seat, () => Promise.all(files.map((_, i) => board.publishFile(ctx, `work/a0/part${i}.bin`, `work/part${i}.bin`))));
+  assert.deepEqual(published.map((p) => (p as { ok: boolean }).ok), files.map(() => true), JSON.stringify(published.filter((p) => !(p as { ok: boolean }).ok)));
+  for (const [i, bytes] of files.entries()) assert.ok((await readFile(join(sandbox, "work", `part${i}.bin`))).equals(bytes), `part${i} landed whole`);
+  const rows = (tag: string) => Array.from({ length: 200 }, (_, i) => `${tag} ${i} ${randomBytes(Math.ceil(WIRE_LINE_MAX / 200)).toString("hex")}`).join("\n");
+  await writeFile(join(sandbox, "work", "shared.txt"), rows("first"));
+  await board.callBoard(seat, "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
+  await writeFile(join(sandbox, "work", "shared.txt"), rows("second"));
+  await board.callBoard(seat, "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
+  const diffs = await Promise.all(Array.from({ length: 12 }, () => board.callBoard(seat, "fileDiff", [sandbox, "work/shared.txt", 1, 2])));
+  for (const d of diffs) assert.ok(JSON.stringify(d).includes("second 199"), "every large answer arrived whole");
 });

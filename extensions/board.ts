@@ -36,6 +36,8 @@ export function boardSocket(env: NodeJS.ProcessEnv = process.env): string {
 const CALL_TIMEOUT_MS = 120_000;
 /** One reply line, however large a result (an inbox page, a ledger) gets. */
 const MAX_REPLY_BYTES = 256 * 1024 * 1024;
+/** A part of a transfer the hub has not acknowledged in this long: the link is dead. */
+const PART_TIMEOUT_MS = 30_000;
 
 /** The hub said no, or could not be reached. The message is the hub's own. */
 export class BoardError extends Error {
@@ -53,10 +55,19 @@ function refused(err: unknown): boolean {
   return code === "EAGAIN" || code === "ECONNREFUSED" || code === "ENOENT";
 }
 
-type Pending = { fn: string; resolve: (value: unknown) => void; reject: (err: Error) => void };
+/** A call waiting for its answer, on the link it was sent on. `answered` stops its clock once the hub has answered, even if the answer is still to be fetched. */
+type Pending = { fn: string; socket: Socket; answered: () => void; resolve: (value: unknown) => void; reject: (err: Error) => void };
 
 /** Calls that change the board, sent once more with the same request id when a link drops. */
 const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion"]);
+
+/** Timings a test shortens; the defaults are the run's. */
+export type HubClientTimings = { partTimeoutMs?: number; writeStallMs?: number };
+let clientTimings: HubClientTimings = {};
+/** Set the transfer timings of connections opened from now on (tests). */
+export function setHubClientTimings(timings: HubClientTimings): void {
+  clientTimings = { ...timings };
+}
 
 /**
  * One held connection to the hub per process, carrying every board call:
@@ -65,11 +76,25 @@ const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "threadOpen
  * them under load — the vsock path refused 20 of 80 concurrent connects
  * (measured) — and a held connection is also what lets a `wait` be
  * cancelled without closing anything else.
+ *
+ * Nothing large goes as one line. A call whose request is past
+ * P.TRANSFER_PART_BYTES (a file's bytes, recorded or published) is uploaded
+ * first in parts, one part on the link at a time (P.TransferLane), and then
+ * sent naming the upload; an answer past it is fetched the same way. One
+ * write of about 262 KB stalled the vsock path for good, and the calls behind
+ * it on the same connection (the liveness check among them) never reached
+ * the hub; no line here is past P.WIRE_LINE_MAX, and one that would be is
+ * refused by name instead. A link that stops carrying data is closed and
+ * replaced: a call that timed out, a part not answered, or queued writes
+ * that have not moved (P.watchWriteStall). The calls pending on it fail as
+ * "link closed", and the ones that change the board are sent again with
+ * their request id.
  */
 class HubClient {
   private socket: Socket | null = null;
   private opening: Promise<Socket> | null = null;
   private pending = new Map<number, Pending>();
+  private lanes = new WeakMap<Socket, P.TransferLane>();
   private next = 1;
   private buffer = "";
   private readonly path: string;
@@ -108,6 +133,9 @@ class HubClient {
     this.buffer = "";
     socket.setEncoding("utf8");
     socket.unref();
+    P.watchWriteStall(socket, clientTimings.writeStallMs);
+    const lane = new P.TransferLane(socket, clientTimings.partTimeoutMs ?? PART_TIMEOUT_MS, (message, lost) => new BoardError(message, lost));
+    this.lanes.set(socket, lane);
     // The seat's token first, before any call: the hub serves nothing else
     // on a seat's socket until it has it (P.seatAuthLine).
     const auth = P.seatAuthLine();
@@ -122,28 +150,58 @@ class HubClient {
       while ((cut = this.buffer.indexOf("\n")) >= 0) {
         const line = this.buffer.slice(0, cut);
         this.buffer = this.buffer.slice(cut + 1);
-        let msg: { t?: string; id?: number; ok?: boolean; result?: unknown; error?: string };
+        let msg: { t?: string; id?: number | string; ok?: boolean; result?: unknown; error?: string; download?: P.TransferRef };
         try {
           msg = JSON.parse(line);
         } catch {
           continue;
         }
+        if (lane.take(msg as P.PartAnswer)) continue;
         const call = typeof msg.id === "number" ? this.pending.get(msg.id) : undefined;
         if (!call) continue;
         this.pending.delete(msg.id as number);
+        call.answered();
+        if (msg.download && typeof msg.download.id === "string") {
+          // The answer is kept on the hub: fetched in parts, then settled as
+          // if it had come in this line.
+          void lane.download(msg.download).then(
+            (bytes) => {
+              let reply: { ok?: boolean; result?: unknown; error?: string };
+              try {
+                reply = JSON.parse(bytes.toString("utf8"));
+              } catch {
+                call.reject(new BoardError(`${call.fn}: the answer fetched in parts is not JSON`, true));
+                return;
+              }
+              if (reply.ok) call.resolve(reply.result);
+              else call.reject(new BoardError(reply.error || `${call.fn} failed on the hub`));
+            },
+            (err: Error) => call.reject(err),
+          );
+          continue;
+        }
         if (msg.ok) call.resolve(msg.result);
         else call.reject(new BoardError(msg.error || `${call.fn} failed on the hub`));
       }
     });
+    // Only this link's calls and parts: a link replaced while the old one
+    // was still closing already carries calls of its own.
     const lost = () => {
       if (this.socket === socket) this.socket = null;
       for (const [id, call] of this.pending) {
+        if (call.socket !== socket) continue;
         this.pending.delete(id);
         call.reject(new BoardError(`the hub link closed during ${call.fn}`, true));
       }
+      lane.fail("the hub link closed during a transfer");
     };
     socket.on("close", lost);
     socket.on("error", () => undefined);
+  }
+
+  /** Close this link so the next call opens another: it stopped answering. */
+  private drop(socket: Socket, why: string): void {
+    if (!socket.destroyed) socket.destroy(new Error(why));
   }
 
   /**
@@ -170,8 +228,25 @@ class HubClient {
   private async callOnce(fn: string, args: unknown[], options: { timeoutMs?: number; signal?: AbortSignal }, rid?: string): Promise<unknown> {
     if (options.signal?.aborted) throw new BoardError("aborted");
     const socket = await this.open();
+    const lane = this.lanes.get(socket);
+    if (!lane) throw new BoardError(`the hub link closed during ${fn}`, true);
     const id = this.next++;
     const timeoutMs = options.timeoutMs ?? CALL_TIMEOUT_MS;
+    const argsText = JSON.stringify(args.map((a) => (a === undefined ? null : a)));
+    const head = `{"t":"rpc","id":${id},"fn":${JSON.stringify(fn)}${rid ? `,"rid":${JSON.stringify(rid)}` : ""}`;
+    let line = `${head},"args":${argsText}}\n`;
+    if (Buffer.byteLength(line) > P.TRANSFER_PART_BYTES) {
+      const upload = await lane.upload(Buffer.from(argsText, "utf8"));
+      line = `${head},"argsUpload":${JSON.stringify(upload)}}\n`;
+    }
+    // Refused here, by name, rather than written: a line this large would
+    // stall the link and every call behind it.
+    try {
+      P.wireChecked(line, `a ${fn} call`);
+    } catch (err) {
+      throw new BoardError((err as Error).message);
+    }
+    if (socket.destroyed) throw new BoardError(`the hub link closed during ${fn}`, true);
     return new Promise((resolve, reject) => {
       const done = () => {
         clearTimeout(timer);
@@ -180,13 +255,16 @@ class HubClient {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         done();
-        reject(new BoardError(`the hub did not answer ${fn} within ${Math.round(timeoutMs / 1000)}s`, true));
+        // No answer in time is a link that stopped carrying one: it is
+        // closed, so the next call does not queue behind whatever holds it.
+        this.drop(socket, `${fn} not answered`);
+        reject(new BoardError(`the hub did not answer ${fn} within ${Math.round(timeoutMs / 1000)}s; the link closed and a new one opens`, true));
       }, timeoutMs);
       const onAbort = () => {
         this.pending.delete(id);
         done();
         try {
-          socket.write(`${JSON.stringify({ t: "cancel", id })}\n`);
+          socket.write(P.wireLine({ t: "cancel", id }));
         } catch {
           // the link is gone, and the call with it
         }
@@ -195,6 +273,9 @@ class HubClient {
       options.signal?.addEventListener("abort", onAbort);
       this.pending.set(id, {
         fn,
+        socket,
+        // Answered: an answer still to be fetched is timed by its parts.
+        answered: () => clearTimeout(timer),
         resolve: (value) => {
           done();
           resolve(value);
@@ -204,7 +285,7 @@ class HubClient {
           reject(err);
         },
       });
-      socket.write(`${JSON.stringify({ t: "rpc", id, fn, ...(rid ? { rid } : {}), args: args.map((a) => (a === undefined ? null : a)) })}\n`);
+      socket.write(line);
     });
   }
 
@@ -437,6 +518,18 @@ export const markStopSteer = P.markStopSteer;
 export const nameOf = remote("nameOf", P.nameOf);
 export const postMessage = remote("postMessage", P.postMessage);
 export const readBudget = remote("readBudget", P.readBudget);
+/**
+ * How long the liveness check waits for the hub. Past it the link is closed
+ * and replaced (a timed-out call drops its link), well inside the minute
+ * after which a seat is steered as cut off from the hub.
+ */
+export const LIVENESS_TIMEOUT_MS = 20_000;
+/** The budget, read as the liveness check reads it: in a VM with a short deadline, so a dead link is found and replaced. */
+export async function readBudgetLive(sandboxRoot: string): Promise<P.BudgetRecord> {
+  const socket = boardSocket();
+  if (!socket) return P.readBudget(sandboxRoot);
+  return (await callBoard(socket, "readBudget", [sandboxRoot], { timeoutMs: LIVENESS_TIMEOUT_MS })) as P.BudgetRecord;
+}
 export const readBudgetStatus = remote("readBudgetStatus", P.readBudgetStatus);
 export const readInbox = remote("readInbox", P.readInbox);
 export const readNames = remote("readNames", P.readNames);
@@ -496,10 +589,21 @@ export function openHubLink(
   let last: { state: string; detail?: string } | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const retryMs = options.retryMs ?? 2000;
+  // Prompts are handed on in the order they came: one being fetched in
+  // parts holds back the ones behind it.
+  let delivering: Promise<void> = Promise.resolve();
+  let fetching = 0;
+  const deliver = (prompt: HubPrompt) => {
+    try {
+      onPrompt(prompt);
+    } catch {
+      // the receiver's own failure; the link goes on
+    }
+  };
 
   const send = (body: unknown) => {
     try {
-      if (socket && !socket.destroyed) socket.write(`${JSON.stringify(body)}\n`);
+      if (socket && !socket.destroyed) socket.write(P.wireLine(body));
     } catch {
       // the next connection says it again
     }
@@ -511,6 +615,8 @@ export function openHubLink(
     const s = connect(socketPath);
     socket = s;
     s.setEncoding("utf8");
+    P.watchWriteStall(s, clientTimings.writeStallMs);
+    const lane = new P.TransferLane(s, clientTimings.partTimeoutMs ?? PART_TIMEOUT_MS);
     s.on("connect", () => {
       // The link says hello with the seat's token (SWARM_SEAT_TOKEN), which
       // the hub takes as this connection's authentication.
@@ -524,12 +630,35 @@ export function openHubLink(
       while ((cut = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, cut);
         buffer = buffer.slice(cut + 1);
+        let message: (Partial<HubPrompt> & { download?: P.TransferRef }) | null;
         try {
-          const message = JSON.parse(line) as HubPrompt;
-          if (message && message.t === "prompt" && typeof message.text === "string") onPrompt(message);
+          message = JSON.parse(line);
         } catch {
-          // not a message
+          continue;
         }
+        if (lane.take(message as P.PartAnswer)) continue;
+        if (!message || message.t !== "prompt") continue;
+        const { download, ...words } = message;
+        if (download && typeof download.id === "string") {
+          // Words past a part's size are kept by the hub and fetched here in
+          // parts. A link that drops first gets them again on its next hello.
+          fetching++;
+          delivering = delivering.then(async () => {
+            try {
+              const text = (await lane.download(download)).toString("utf8");
+              deliver({ ...words, t: "prompt", text });
+            } catch {
+              s.destroy();
+            } finally {
+              fetching--;
+            }
+          });
+          continue;
+        }
+        if (typeof words.text !== "string") continue;
+        const prompt = words as HubPrompt;
+        if (fetching === 0) deliver(prompt);
+        else delivering = delivering.then(() => deliver(prompt));
       }
     });
     const again = () => {
@@ -541,14 +670,20 @@ export function openHubLink(
       timer.unref?.();
     };
     s.on("error", again);
-    s.on("close", again);
+    s.on("close", () => {
+      lane.fail("the hub link closed");
+      again();
+    });
     s.unref?.();
   };
   open();
 
   return {
     state(state, detail) {
-      last = { state, ...(detail ? { detail } : {}) };
+      const next = { state, ...(detail ? { detail } : {}) };
+      // Refused here, by name, rather than written past the line limit.
+      P.wireLine({ t: "state", ...next }, "a state line");
+      last = next;
       send({ t: "state", ...last });
     },
     close() {

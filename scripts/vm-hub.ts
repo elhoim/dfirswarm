@@ -37,6 +37,14 @@
  *   - the agent's link (`t: "hello"`), held open: the harness's prompts go
  *     down it, and the agent's working/idle state comes up it.
  *
+ * No line either way is past P.WIRE_LINE_MAX: one write of about 262 KB
+ * stalled msb's vsock path for good. Anything larger travels in parts of
+ * P.TRANSFER_PART_BYTES, one at a time: a call's arguments (`t: "up"`, then
+ * the call names its `argsUpload`), a trace line (`t: "up"`, then
+ * `t: "trace"` names its `upload`), an answer or a prompt (announced with a
+ * `download`, fetched with `t: "down"`). A line to a seat that would be past
+ * the limit is refused by name instead of written.
+ *
  * The admin socket, `<dir>/admin.sock`, is for the harness's own scripts on
  * the host (idle-nudge.sh, await-done.sh, swarm.sh): prompt an agent, read
  * who is working, tell the hub which Herdr pane is whose.
@@ -64,7 +72,7 @@
  * hub back after a crash with the same tokens and the same clock.
  */
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { connect, createServer, type Server, type Socket } from "node:net";
@@ -89,6 +97,20 @@ const MAX_REQUEST_BYTES = 64_000_000;
 const RPC_LINE_MAX = 8_000_000;
 /** The calls whose arguments carry a file's bytes. */
 const FILE_FNS = new Set(["publishFile", "recordFileVersion", "fileDiff"]);
+/**
+ * Transfers: a call's arguments or a trace line uploaded in parts, or an
+ * answer or a prompt kept to be fetched in parts, when any is past
+ * P.TRANSFER_PART_BYTES (board.ts and protocol.ts send and fetch them one
+ * part at a time). What one seat may hold here in them at once, how many at
+ * once, and how long one may sit untouched. Uploads are few at once (a
+ * connection sends one at a time); answers kept are as many as the calls
+ * that may run at once (IN_FLIGHT_MAX), since with parts of 32 KiB an inbox
+ * page or a diff is often one. A prompt is the hub's own words, not something
+ * the seat asked it to keep, and does not count against these.
+ */
+const TRANSFER_SEAT_BYTES = 96 * 1024 * 1024;
+const TRANSFER_SEAT_COUNT = 4;
+const TRANSFER_IDLE_MS = 5 * 60_000;
 /** The states a seat reports (the extension's), and how much text may go with one. */
 const SEAT_STATES = new Set(["idle", "working", "blocked", "unknown"]);
 const STATE_DETAIL_MAX = 200;
@@ -193,11 +215,18 @@ export type HubConfig = {
   repliesKept?: number;
   /** Bytes of file history one seat may have stored (historyQuotaBytes; tests lower it). */
   historyQuotaBytes?: number;
+  /** How long a transfer may sit untouched before it is dropped (TRANSFER_IDLE_MS; tests lower it). */
+  transferIdleMs?: number;
   /** The operator's swarm.sh: run as `stop <run> --after-hub` once the hub has finished the run. */
   stopCmd?: string;
 };
 
 type AgentState = { state: string; detail?: string; since: string; connected: boolean; last_seen?: string };
+/** An upload being received, or an answer waiting to be fetched, for one seat on one connection. */
+/** Words the hub puts in front of an agent on its link. */
+type QueuedPrompt = { text: string; deliver?: string; kind?: string };
+/** An upload being received, or an answer (or a prompt, `prompt`) kept to be fetched. */
+type Transfer = { agent: string; kind: "up" | "down"; socket: Socket; size: number; parts: Buffer[]; got: number; data?: Buffer; at: number; prompt?: QueuedPrompt };
 
 /** What survives a restart: the swarm's stop clock and what the hub already said. */
 type HubState = {
@@ -573,7 +602,7 @@ export class Hub {
   /** Every open connection, so stopping does not wait on a held one. */
   private sockets = new Set<Socket>();
   private links = new Map<string, Socket>();
-  private queued = new Map<string, { text: string; deliver?: string; kind?: string }[]>();
+  private queued = new Map<string, QueuedPrompt[]>();
   private status = new Map<string, AgentState>();
   private panes = new Map<string, string>();
   private told = new Set<string>();
@@ -611,6 +640,11 @@ export class Hub {
   private collectorDownTold = false;
   /** The seats the model gateway meters, from its state file at the last fold. */
   private gatewaySeats = new Set<string>();
+  /** Uploads and downloads in progress, by seat, kind and id. */
+  private transfers = new Map<string, Transfer>();
+  private transferTimer: ReturnType<typeof setInterval> | null = null;
+  /** The sockets a seat's VM holds, and whose: every line written on one is checked against P.WIRE_LINE_MAX. */
+  private seatSockets = new WeakMap<Socket, string>();
   private table: ReturnType<typeof boardTable>;
   private backstopTimer: ReturnType<typeof setInterval> | null = null;
   private collector: CollectorLink;
@@ -755,6 +789,8 @@ export class Hub {
   }
 
   async start(): Promise<void> {
+    this.transferTimer = setInterval(() => this.sweepTransfers(), Math.max(1_000, Math.min(60_000, Math.floor((this.cfg.transferIdleMs ?? TRANSFER_IDLE_MS) / 2))));
+    this.transferTimer.unref();
     // A Unix socket path the kernel takes is 103 bytes and its NUL (104 on
     // macOS): past it `listen` fails with a bare EINVAL, which said nothing
     // about why (measured: a 3-byte run id under macOS's TMPDIR made 105).
@@ -856,6 +892,8 @@ export class Hub {
 
   async stop(): Promise<void> {
     if (this.backstopTimer) clearInterval(this.backstopTimer);
+    if (this.transferTimer) clearInterval(this.transferTimer);
+    for (const key of [...this.transfers.keys()]) this.dropTransfer(key, false);
     await this.flushRefusals().catch(() => undefined);
     for (const link of this.links.values()) link.destroy();
     this.links.clear();
@@ -984,9 +1022,184 @@ export class Hub {
     return (this.buffered.get(agent) ?? 0) + (this.held.get(agent) ?? 0);
   }
 
+  /**
+   * Drop a transfer: an upload's bytes stop counting against its seat. A
+   * prompt not fetched whole goes again (`requeue`, unless it was fetched or
+   * the hub is stopping): on the agent's link if a new one is up already,
+   * else at the front of its queue, for the next hello. Nothing is cut, and
+   * the words are not lost to a dropped link.
+   */
+  private dropTransfer(key: string, requeue = true): void {
+    const t = this.transfers.get(key);
+    if (!t) return;
+    this.transfers.delete(key);
+    if (t.kind === "up") this.hold(t.agent, -t.got);
+    if (!t.prompt || !requeue) return;
+    this.log(`${t.agent}: a prompt of ${t.size} bytes was not fetched whole; it goes again`);
+    const link = this.links.get(t.agent);
+    if (link && link !== t.socket && !link.destroyed) this.sendPrompt(t.agent, link, t.prompt);
+    else this.queued.set(t.agent, [t.prompt, ...(this.queued.get(t.agent) ?? [])]);
+  }
+
+  /** Transfers untouched past the idle limit go, and so do a closed connection's. */
+  private sweepTransfers(now = Date.now()): void {
+    const idle = this.cfg.transferIdleMs ?? TRANSFER_IDLE_MS;
+    // Newest first, so prompts put back keep their order at the front of the queue.
+    for (const [key, t] of [...this.transfers].reverse()) {
+      if (!t.socket.destroyed && now - t.at <= idle) continue;
+      if (!t.socket.destroyed) void this.refused(t.agent, t.prompt ? "prompt" : t.kind === "up" ? "upload" : "download", `a transfer untouched for ${Math.round(idle / 1000)}s was dropped`);
+      this.dropTransfer(key);
+    }
+  }
+
+  /** What one seat holds in transfers now, prompts aside: uploads, answers kept, and their bytes. */
+  private seatTransfers(agent: string): { uploads: number; answers: number; bytes: number } {
+    let uploads = 0;
+    let answers = 0;
+    let bytes = 0;
+    for (const t of this.transfers.values()) {
+      if (t.agent !== agent || t.prompt) continue;
+      if (t.kind === "up") uploads++;
+      else answers++;
+      bytes += t.kind === "up" ? t.size : (t.data?.length ?? 0);
+    }
+    return { uploads, answers, bytes };
+  }
+
+  /**
+   * One part of a call's arguments, sent ahead of the call (board.ts): taken
+   * in order and acknowledged, or refused by name and the upload dropped. Its
+   * bytes count against the seat from the moment they arrive.
+   */
+  private uploadPart(agent: string, socket: Socket, msg: Record<string, unknown>): void {
+    const id = typeof msg.id === "string" && msg.id.length > 0 && msg.id.length <= 128 ? msg.id : "";
+    const key = `${agent}\u0000up\u0000${id}`;
+    const refuse = (error: string) => {
+      void this.refused(agent, "upload", error);
+      if (id) this.dropTransfer(key);
+      this.reply(socket, { t: "up", id, ok: false, error }, false);
+    };
+    if (!id) return refuse("an upload part needs an id");
+    this.sweepTransfers();
+    const { off, size } = msg;
+    if (typeof off !== "number" || !Number.isInteger(off) || off < 0 || typeof size !== "number" || !Number.isInteger(size) || size <= 0) {
+      return refuse("an upload part needs whole numbers off and size");
+    }
+    if (typeof msg.b64 !== "string") return refuse("an upload part carries its bytes as b64");
+    let t = this.transfers.get(key);
+    if (!t) {
+      if (off !== 0) return refuse(`an upload starts at 0, not ${off}`);
+      if (size > MAX_REQUEST_BYTES) return refuse(`an upload of ${size} bytes is past the ${MAX_REQUEST_BYTES}-byte limit for a call`);
+      const seat = this.seatTransfers(agent);
+      if (seat.uploads >= TRANSFER_SEAT_COUNT) return refuse(`more than ${TRANSFER_SEAT_COUNT} uploads at once`);
+      if (seat.bytes + size > TRANSFER_SEAT_BYTES) return refuse(`${seat.bytes + size} bytes in transfers at once is past the ${TRANSFER_SEAT_BYTES}-byte limit for a seat`);
+      t = { agent, kind: "up", socket, size, parts: [], got: 0, at: Date.now() };
+      this.transfers.set(key, t);
+    }
+    if (t.socket !== socket) return refuse("an upload's parts come on the connection that started it");
+    if (size !== t.size) return refuse(`an upload's size changed from ${t.size} to ${size}`);
+    if (off !== t.got) return refuse(`an upload part at ${off} does not follow the ${t.got} bytes received`);
+    const bytes = Buffer.from(msg.b64, "base64");
+    if (!bytes.length || bytes.length > P.TRANSFER_PART_BYTES) return refuse(`an upload part of ${bytes.length} bytes: a part is 1 to ${P.TRANSFER_PART_BYTES} bytes`);
+    if (t.got + bytes.length > t.size) return refuse(`an upload part past the ${t.size} bytes declared`);
+    t.parts.push(bytes);
+    t.got += bytes.length;
+    t.at = Date.now();
+    this.hold(agent, bytes.length);
+    this.reply(socket, { t: "up", id, ok: true, got: t.got }, false);
+  }
+
+  /**
+   * What an upload carried (a call's arguments, or a trace line), checked
+   * whole (size, sha256, JSON), or why not. Taken, its bytes stay counted
+   * until the call answers or the line is forwarded (`held`).
+   */
+  private takeUpload(agent: string, socket: Socket, spec: unknown): { args?: unknown; held: number; error?: string } {
+    if (!isObject(spec) || typeof spec.id !== "string") return { held: 0, error: "a call or a trace line sent in parts names its upload by id" };
+    const key = `${agent}\u0000up\u0000${spec.id}`;
+    const t = this.transfers.get(key);
+    if (!t || t.kind !== "up") return { held: 0, error: `no upload ${spec.id} on this connection` };
+    this.transfers.delete(key);
+    const fail = (error: string) => {
+      this.hold(agent, -t.got);
+      return { held: 0, error };
+    };
+    if (t.socket !== socket) return fail("an upload is used on the connection that sent it");
+    if (t.got !== t.size || spec.size !== t.size) return fail(`an upload of ${t.got} bytes, declared ${t.size}, named as ${String(spec.size)}`);
+    const whole = Buffer.concat(t.parts);
+    if (typeof spec.sha256 !== "string" || createHash("sha256").update(whole).digest("hex") !== spec.sha256) {
+      return fail("an upload whose bytes do not match its sha256");
+    }
+    try {
+      return { args: JSON.parse(whole.toString("utf8")), held: t.got };
+    } catch {
+      return fail("an upload that is not JSON");
+    }
+  }
+
+  /**
+   * The answer to a held call: in its own line, or, past a part's size, kept
+   * here and named, for board.ts to fetch in parts. A multi-megabyte line is
+   * what stalled the vsock path; an answer (a restored file, a diff, a long
+   * page) is not sent as one either.
+   */
+  private replyRpc(agent: string, socket: Socket, id: number, result: { ok: boolean; result?: unknown; error?: string }): void {
+    const body = JSON.stringify(result);
+    if (Buffer.byteLength(body) + 64 <= P.TRANSFER_PART_BYTES) {
+      this.reply(socket, { t: "rpc", id, ...result }, false);
+      return;
+    }
+    const data = Buffer.from(body, "utf8");
+    this.sweepTransfers();
+    const seat = this.seatTransfers(agent);
+    if (seat.answers >= IN_FLIGHT_MAX || seat.bytes + data.length > TRANSFER_SEAT_BYTES) {
+      const error = `an answer of ${data.length} bytes could not be kept to be fetched: ${seat.answers} answers and ${seat.bytes} bytes in transfers are held for this seat already`;
+      void this.refused(agent, "download", error);
+      this.reply(socket, { t: "rpc", id, ok: false, error }, false);
+      return;
+    }
+    const download = randomBytes(12).toString("hex");
+    this.transfers.set(`${agent}\u0000down\u0000${download}`, { agent, kind: "down", socket, size: data.length, parts: [], got: 0, data, at: Date.now() });
+    this.reply(socket, { t: "rpc", id, ok: true, download: { id: download, size: data.length, sha256: createHash("sha256").update(data).digest("hex") } }, false);
+  }
+
+  /** One part of a kept answer or prompt, by offset; `done` drops it, fetched whole. */
+  private downloadPart(agent: string, socket: Socket, msg: Record<string, unknown>): void {
+    const id = typeof msg.id === "string" && msg.id.length <= 128 ? msg.id : "";
+    const key = `${agent}\u0000down\u0000${id}`;
+    if (msg.done === true) {
+      if (this.transfers.get(key)?.socket === socket) this.dropTransfer(key, false);
+      return;
+    }
+    const t = this.transfers.get(key);
+    const refuse = (error: string) => {
+      void this.refused(agent, "download", error);
+      this.reply(socket, { t: "down", id, ok: false, error }, false);
+    };
+    if (!t || !t.data || t.socket !== socket) return refuse(`no answer ${id} is kept for this connection`);
+    const off = msg.off;
+    if (typeof off !== "number" || !Number.isInteger(off) || off < 0 || off >= t.data.length) return refuse(`a part at ${String(off)} is outside the ${t.data.length}-byte answer`);
+    t.at = Date.now();
+    this.reply(socket, { t: "down", id, ok: true, off, b64: t.data.subarray(off, off + P.TRANSFER_PART_BYTES).toString("base64") }, false);
+  }
+
   private reply(socket: Socket, body: unknown, end: boolean): void {
     try {
-      const text = `${JSON.stringify(body)}\n`;
+      let text = `${JSON.stringify(body)}\n`;
+      const agent = this.seatSockets.get(socket);
+      if (agent !== undefined && Buffer.byteLength(text) > P.WIRE_LINE_MAX) {
+        // Never written to a seat: one line this large stalls the VM's link
+        // and every answer behind it. What goes instead says so, by name,
+        // and carries only what names the answer it stands for.
+        const error = new P.WireLineTooLarge(Buffer.byteLength(text), "an answer").message;
+        void this.refused(agent, "reply", error);
+        const b = isObject(body) ? body : {};
+        const named = {
+          ...(typeof b.t === "string" && b.t.length <= 16 ? { t: b.t } : {}),
+          ...(typeof b.id === "number" || (typeof b.id === "string" && b.id.length <= 128) ? { id: b.id } : {}),
+        };
+        text = `${JSON.stringify({ ...named, ok: false, error })}\n`;
+      }
       if (end) socket.end(text);
       else socket.write(text);
     } catch {
@@ -1004,10 +1217,13 @@ export class Hub {
       return;
     }
     this.conns.set(agent, open);
+    this.seatSockets.set(socket, agent);
     // Calls in flight on this connection, so a cancel or a hang-up ends them.
     const running = new Map<number, AbortController>();
     socket.once("close", () => {
       this.conns.set(agent, Math.max(0, (this.conns.get(agent) ?? 1) - 1));
+      // Newest first, so prompts put back keep their order at the front of the queue.
+      for (const [key, t] of [...this.transfers].reverse()) if (t.socket === socket) this.dropTransfer(key);
       for (const c of running.values()) c.abort();
       running.clear();
     });
@@ -1052,12 +1268,61 @@ export class Hub {
         this.setState(agent, String(msg.state ?? "unknown"), typeof msg.detail === "string" ? msg.detail : undefined);
         return true;
       }
+      if (msg.t === "up" || msg.t === "down") {
+        // A transfer's part: the connection is held, as a call's is.
+        socket.setTimeout(0);
+        if (msg.t === "up") this.uploadPart(agent, socket, msg);
+        else this.downloadPart(agent, socket, msg);
+        return true;
+      }
+      if (msg.t === "trace") {
+        // A trace line past a part's size, sent ahead in parts
+        // (protocol.ts): forwarded whole, as the line it would have been.
+        socket.setTimeout(0);
+        const taken = this.takeUpload(agent, socket, msg.upload);
+        try {
+          const record = taken.args;
+          const error = taken.error ?? (isObject(record) && typeof record.tool === "string" && typeof record.ts === "string" ? undefined : "an uploaded trace line that is not one");
+          if (error) {
+            void this.refused(agent, "trace", error);
+            this.reply(socket, { ok: false, error }, false);
+            return true;
+          }
+          const ok = await this.forwardTrace(agent, record as Record<string, unknown>);
+          this.reply(socket, ok ? { ok: true } : { ok: false, error: "the collector did not take the line" }, false);
+        } finally {
+          if (taken.held) this.hold(agent, -taken.held);
+        }
+        return true;
+      }
       if (msg.t === "rpc" && line.length > RPC_LINE_MAX && !FILE_FNS.has(String(msg.fn ?? ""))) {
         const error = `a ${String(msg.fn ?? "")} call of ${line.length} bytes is past the ${RPC_LINE_MAX}-byte limit for a call that carries no file`;
         void this.refused(agent, String(msg.fn ?? ""), error);
         const held = typeof msg.id === "number";
         this.reply(socket, held ? { t: "rpc", id: msg.id, ok: false, error } : { ok: false, error }, !held);
         return held;
+      }
+      // A call whose arguments came ahead in parts runs as if they had come
+      // in its line: the same limits, dedupe and accounting.
+      let args: unknown = msg.args;
+      let uploaded = 0;
+      if (msg.t === "rpc" && msg.argsUpload !== undefined) {
+        const fn = String(msg.fn ?? "");
+        const spec = isObject(msg.argsUpload) ? msg.argsUpload : {};
+        const held = typeof msg.id === "number";
+        const size = typeof spec.size === "number" ? spec.size : 0;
+        const taken: { args?: unknown; held: number; error?: string } =
+          size > RPC_LINE_MAX && !FILE_FNS.has(fn)
+            ? (this.dropTransfer(`${agent}\u0000up\u0000${String(spec.id ?? "")}`),
+              { held: 0, error: `a ${fn} call of ${size} bytes is past the ${RPC_LINE_MAX}-byte limit for a call that carries no file` })
+            : this.takeUpload(agent, socket, msg.argsUpload);
+        if (taken.error) {
+          void this.refused(agent, fn, taken.error);
+          this.reply(socket, held ? { t: "rpc", id: msg.id, ok: false, error: taken.error } : { ok: false, error: taken.error }, !held);
+          return held;
+        }
+        args = taken.args;
+        uploaded = taken.held;
       }
       if (msg.t === "rpc" && typeof msg.id === "number") {
         // Many calls on one held connection, each answered when it finishes:
@@ -1075,15 +1340,17 @@ export class Hub {
           if (!got) {
             running.delete(id);
             release();
+            if (uploaded) this.hold(agent, -uploaded);
             this.reply(socket, { t: "rpc", id, ok: false, error: `too many board calls waiting (${IN_FLIGHT_MAX} running, ${QUEUE_MAX} queued); slow down` }, false);
             return;
           }
           try {
-            const result = await this.callOnce(agent, String(msg.fn ?? ""), msg.args, controller.signal, msg.rid);
-            this.reply(socket, { t: "rpc", id, ...result }, false);
+            const result = await this.callOnce(agent, String(msg.fn ?? ""), args, controller.signal, msg.rid);
+            this.replyRpc(agent, socket, id, result);
           } finally {
             running.delete(id);
             release();
+            if (uploaded) this.hold(agent, -uploaded);
             this.release(agent);
           }
         });
@@ -1100,13 +1367,23 @@ export class Hub {
         socket.setTimeout(0);
         socket.once("close", () => controller.abort());
         if (!(await this.slot(agent))) {
+          if (uploaded) this.hold(agent, -uploaded);
           this.reply(socket, { ok: false, error: `too many board calls waiting (${IN_FLIGHT_MAX} running, ${QUEUE_MAX} queued); slow down` }, true);
           return false;
         }
         try {
-          const result = await this.callOnce(agent, String(msg.fn ?? ""), msg.args, controller.signal, msg.rid);
-          this.reply(socket, result, true);
+          const result = await this.callOnce(agent, String(msg.fn ?? ""), args, controller.signal, msg.rid);
+          const size = Buffer.byteLength(JSON.stringify(result)) + 1;
+          if (size > P.WIRE_LINE_MAX) {
+            // The one-shot form ends with its answer and carries no parts.
+            const error = `an answer of ${size} bytes is past the ${P.WIRE_LINE_MAX}-byte line limit of a VM's hub link, and the one-shot form carries no parts: make the call on a held connection (board.ts), which fetches a large answer in parts`;
+            void this.refused(agent, String(msg.fn ?? ""), error);
+            this.reply(socket, { ok: false, error }, true);
+          } else {
+            this.reply(socket, result, true);
+          }
         } finally {
+          if (uploaded) this.hold(agent, -uploaded);
           this.release(agent);
         }
         return false;
@@ -1373,9 +1650,28 @@ export class Hub {
     this.writeStatus();
     const pending = this.queued.get(agent) ?? [];
     this.queued.delete(agent);
-    for (const p of pending) this.reply(socket, { t: "prompt", ...p }, false);
+    for (const p of pending) this.sendPrompt(agent, socket, p);
     this.log(`${agent}: link up`);
     void this.event("hub_link", { agent }, { up: true });
+  }
+
+  /**
+   * Words on a seat's link: in one line, or, past a part's size, kept here
+   * and named, for the link (board.ts openHubLink) to fetch in parts. Nothing
+   * is cut: a long brief arrives whole, or, if the link drops before it is
+   * fetched, waits for the next hello (dropTransfer).
+   */
+  private sendPrompt(agent: string, link: Socket, message: QueuedPrompt): void {
+    const line = { t: "prompt", ...message };
+    if (Buffer.byteLength(JSON.stringify(line)) + 1 <= P.TRANSFER_PART_BYTES) {
+      this.reply(link, line, false);
+      return;
+    }
+    const data = Buffer.from(message.text, "utf8");
+    const id = randomBytes(12).toString("hex");
+    this.transfers.set(`${agent}\u0000down\u0000${id}`, { agent, kind: "down", socket: link, size: data.length, parts: [], got: 0, data, at: Date.now(), prompt: message });
+    const { text: _text, ...named } = message;
+    this.reply(link, { t: "prompt", ...named, download: { id, size: data.length, sha256: createHash("sha256").update(data).digest("hex") } }, false);
   }
 
   /**
@@ -1387,7 +1683,7 @@ export class Hub {
     const link = this.links.get(agent);
     const message = { text, ...(options.deliver ? { deliver: options.deliver } : {}), ...(options.kind ? { kind: options.kind } : {}) };
     if (link && !link.destroyed) {
-      this.reply(link, { t: "prompt", ...message }, false);
+      this.sendPrompt(agent, link, message);
       return true;
     }
     if (options.queue) {
@@ -1973,7 +2269,7 @@ export function msbDbOutcomes(stdout: string): Array<{ agent: string; name: stri
   return [];
 }
 
-const KEPT_ENV = ["SWARM_INBOX_PAGE_CHARS", "SWARM_RUNS_DIR", "SWARM_VM_IMAGE_DIGEST", "SWARM_CUSTODY_TIMEOUT", "SWARM_HISTORY_QUOTA_MB"];
+const KEPT_ENV = ["SWARM_INBOX_PAGE_CHARS", "SWARM_RUNS_DIR", "SWARM_VM_IMAGE_DIGEST", "SWARM_CUSTODY_TIMEOUT", "SWARM_HISTORY_QUOTA_MB", "SWARM_TRANSFER_PART_BYTES"];
 
 /**
  * Bytes of file history one seat may have stored: SWARM_HISTORY_QUOTA_MB, else

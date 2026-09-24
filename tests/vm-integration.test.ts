@@ -695,6 +695,82 @@ test("a claim on a file a peer just published waits out the guest cache, with th
   assert.ok(waited >= 5500, `the peer's claim waited out the cache window (${waited} ms)`);
 });
 
+test("in a VM an 8 MiB deliverable, a large trace line and a long prompt cross the hub link in parts, whole, while the budget still answers within seconds", async (t) => {
+  if (skip) return t.skip(skip);
+  const r = await rig("vmtb", ["vmtb00"]);
+  assert.deepEqual((await createVms(r.spec)).failures, []);
+  const S = r.sandbox;
+  // The guest's own board client and trace, as the extension uses them. One
+  // write of about 262 KB stalled the vsock path for good (215 KB passed),
+  // and every call behind it on the connection waited until the seat was
+  // stopped as cut off from the hub.
+  const content = Array.from({ length: 12_000 }, (_, i) => `row ${i} of a file the agent wrote`).join("\n");
+  const brief = Array.from({ length: 4_000 }, (_, i) => `step ${i}: keep going`).join("\n");
+  const code = `
+    const B = await import(${JSON.stringify(join(ROOT, "extensions", "board.ts"))});
+    const P = await import(${JSON.stringify(join(ROOT, "extensions", "protocol.ts"))});
+    const { createHash, randomBytes } = await import("node:crypto");
+    const fs = await import("node:fs/promises");
+    const S = ${JSON.stringify(S)};
+    const ctx = { sandboxRoot: S, agentId: "vmtb00" };
+    const say = (k, v) => console.log(k + " " + JSON.stringify(v));
+    const prompts = [];
+    const link = B.openHubLink(process.env.SWARM_BOARD_SOCKET, (p) => prompts.push(p.text));
+    const bytes = randomBytes(8 * 1024 * 1024);
+    await fs.writeFile(S + "/work/vmtb00/big.bin", bytes);
+    say("sha", createHash("sha256").update(bytes).digest("hex"));
+    let done = false;
+    const t0 = Date.now();
+    const publishing = B.publishFile(ctx, "work/vmtb00/big.bin", "work/big.bin").then(
+      (res) => say("published", { ok: res.ok, reason: res.reason ?? null, ms: Date.now() - t0 }),
+      (err) => say("published", { ok: false, reason: String(err && err.message), ms: Date.now() - t0 }),
+    ).finally(() => { done = true; });
+    const budgets = [];
+    let during = 0;
+    do {
+      await new Promise((ok) => setTimeout(ok, 200));
+      const b0 = Date.now();
+      const budget = await B.readBudgetLive(S);
+      budgets.push(Date.now() - b0);
+      if (!done) during++;
+      if (typeof budget.spent_usd !== "number") say("budget odd", budget);
+    } while (!done && budgets.length < 600);
+    await publishing;
+    say("budget ms", budgets);
+    say("during", during);
+    const content = await fs.readFile(S + "/work/vmtb00-content.txt", "utf8");
+    await P.appendEvent(S, { agent: "vmtb00", tool: "write", args: { path: "work/vmtb00/notes.md", content }, result: { ok: true } });
+    say("traced", true);
+    const until = Date.now() + 60_000;
+    while (!prompts.length && Date.now() < until) await new Promise((ok) => setTimeout(ok, 100));
+    say("prompt sha", prompts.length ? createHash("sha256").update(prompts[0]).digest("hex") : null);
+    link.close();
+  `;
+  await writeFile(join(S, "work", "vmtb00-check.mjs"), code);
+  await writeFile(join(S, "work", "vmtb00-content.txt"), content);
+  const running = inVmAsync(vmName(r.run, "vmtb00"), `/.msb/scripts/dfirswarm-bridge; sleep 0.5; cd "${S}" && node --experimental-strip-types --no-warnings work/vmtb00-check.mjs 2>&1`);
+  // The prompt goes as soon as the guest's link is up: fetched in parts on
+  // the link while the publish goes up in parts on the board's connection.
+  const deadline = Date.now() + 120_000;
+  while (r.hub.statusSnapshot().vmtb00?.connected !== true && Date.now() < deadline) await new Promise((ok) => setTimeout(ok, 100));
+  assert.equal(r.hub.prompt("vmtb00", brief, { deliver: "followUp", kind: "brief" }), true, "the guest's link came up");
+  const out = await running;
+  assert.match(out, /published \{"ok":true/, `the publish went through the hub: ${out}`);
+  const sha = /sha "([0-9a-f]{64})"/.exec(out)?.[1];
+  assert.ok(sha, out);
+  const landed = await readFile(join(S, "work", "big.bin"));
+  assert.equal(landed.length, 8 * 1024 * 1024, "every byte arrived");
+  assert.equal(createHash("sha256").update(landed).digest("hex"), sha, "the deliverable on the host is the guest's file, byte for byte");
+  const budgets = JSON.parse(/budget ms (\[[^\]]*\])/.exec(out)?.[1] ?? "[]") as number[];
+  assert.ok(budgets.length >= 1, out);
+  assert.ok(Math.max(...budgets) < 5_000, `the budget answered within seconds throughout (${budgets.join(", ")} ms)`);
+  assert.doesNotMatch(out, /budget odd/, out);
+  assert.match(out, /traced true/, out);
+  const line = r.lines.find((l) => l.tool === "write" && l.agent === "vmtb00");
+  assert.equal((line?.args as { content?: string } | undefined)?.content, content, "the trace line reached the collector whole");
+  assert.match(out, new RegExp(`prompt sha "${createHash("sha256").update(brief).digest("hex")}"`), `the long prompt arrived in the guest whole: ${out}`);
+});
+
 test("the network check boots the run's policy in a throwaway VM: allowed hosts answer, others do not resolve, and one provider's placeholder never reaches another's host", async (t) => {
   if (skip) return t.skip(skip);
   // Real hosts on the internet: an offline host says so instead of failing.

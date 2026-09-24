@@ -104,6 +104,7 @@ import {
   postMessage,
   publishFile,
   readBudget,
+  readBudgetLive,
   readBudgetStatus,
   readInbox,
   recordFileVersion,
@@ -714,7 +715,7 @@ export default function (pi: ExtensionAPI) {
     if (!agentId) return;
     if (Date.now() - lastStopCheck < STOP_CHECK_INTERVAL_MS) return;
     lastStopCheck = Date.now();
-    const budget = await readBudget(cwd).catch(() => null);
+    const budget = await readBudgetLive(cwd).catch(() => null);
     await hubReachable(cwd, ctx, budget !== null);
     if (budget) await enforceAllCaps(cwd, budget, ctx).catch(() => undefined);
   }
@@ -728,7 +729,7 @@ export default function (pi: ExtensionAPI) {
     if (capTimer) return;
     capTimer = setInterval(() => {
       void (async () => {
-        const budget = await readBudget(ctx.cwd).catch(() => null);
+        const budget = await readBudgetLive(ctx.cwd).catch(() => null);
         await hubReachable(ctx.cwd, ctx, budget !== null);
         if (budget) await enforceAllCaps(ctx.cwd, budget, ctx).catch(() => undefined);
       })();
@@ -1084,7 +1085,8 @@ export default function (pi: ExtensionAPI) {
     // two timeouts first.
     if (boardSocket() && hubLost.since) return;
     const cwd = ctx.cwd;
-    const budget = await readBudget(cwd).catch(() => null);
+    // The short deadline: a dead link is replaced, not waited on for two minutes before every model call.
+    const budget = await readBudgetLive(cwd).catch(() => null);
     if (budget) await enforceAllCaps(cwd, budget, ctx).catch(() => undefined);
     const sentinel = !stoppedByHarness && (await swarmDoneExists(cwd).catch(() => false));
     if (!stoppedByHarness && !sentinel) return;

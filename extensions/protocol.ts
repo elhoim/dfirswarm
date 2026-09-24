@@ -11,7 +11,7 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, createReadStream, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import {
@@ -2582,45 +2582,266 @@ let collectorGaveUpAt = 0;
 let collectorFailuresFor = "";
 
 /**
+ * A request or an answer larger than this travels between a VM and the hub
+ * in parts of this size, each acknowledged before the next goes. One
+ * multi-megabyte line stalled msb's vsock path from guest to host in two
+ * real runs (a seat's file recorded after an extraction: 6.6 MB and 10.6 MB
+ * left queued in the guest), and every later call on that connection waited
+ * behind it until the seat was stopped as cut off from the hub. Measured
+ * since with the guest's own board client: one write of about 215 KB passes,
+ * one of about 262 KB stalls the link for good, whatever went before (1.77 MB
+ * in small lines passed). A part is 32 KiB, about 44 KB of base64 on the
+ * wire. SWARM_TRANSFER_PART_BYTES changes it for an experiment, and belongs
+ * on both ends alike: the hub refuses a part larger than its own.
+ */
+export const TRANSFER_PART_BYTES = Math.max(4096, Number(process.env.SWARM_TRANSFER_PART_BYTES) || 32 * 1024);
+/**
+ * The largest line either end writes on a VM's hub link: a part in base64
+ * and its envelope. Anything larger goes in parts or not at all; a line past
+ * it is refused by name (WireLineTooLarge), never written.
+ */
+export const WIRE_LINE_MAX = Math.ceil(TRANSFER_PART_BYTES / 3) * 4 + 1024;
+/** A connection whose queued writes have not moved in this long carries nothing any more. */
+export const WRITE_STALL_MS = 20_000;
+
+/** A line for a VM's hub link past WIRE_LINE_MAX: it is not written. */
+export class WireLineTooLarge extends Error {
+  readonly bytes: number;
+  constructor(bytes: number, what = "a line") {
+    super(`${what} of ${bytes} bytes is past the ${WIRE_LINE_MAX}-byte line limit of a VM's hub link, and was not sent: one write that large stalls the link, so large things go in parts`);
+    this.name = "WireLineTooLarge";
+    this.bytes = bytes;
+  }
+}
+
+/** `line` unchanged, or WireLineTooLarge: every write on a VM's hub link is checked here. */
+export function wireChecked(line: string, what?: string): string {
+  const bytes = Buffer.byteLength(line);
+  if (bytes > WIRE_LINE_MAX) throw new WireLineTooLarge(bytes, what);
+  return line;
+}
+
+/** `body` as one line for a VM's hub link, or WireLineTooLarge. */
+export function wireLine(body: unknown, what?: string): string {
+  return wireChecked(`${JSON.stringify(body)}\n`, what);
+}
+
+/**
+ * Destroy `socket` when bytes wait to go out and none has left for
+ * `stallMs`: a link that stopped carrying data is replaced, not waited on.
+ * Progress is the queue emptying or shrinking (Node's buffer and libuv's);
+ * `bytesWritten` is no measure, since it counts what is only queued.
+ */
+export function watchWriteStall(socket: Socket, stallMs = WRITE_STALL_MS): void {
+  const queued = () => socket.writableLength + ((socket as unknown as { _handle?: { writeQueueSize?: number } })._handle?.writeQueueSize ?? 0);
+  let last = queued();
+  let since = Date.now();
+  const timer = setInterval(() => {
+    if (socket.destroyed) {
+      clearInterval(timer);
+      return;
+    }
+    const now = queued();
+    if (now === 0 || now < last) {
+      last = now;
+      since = Date.now();
+      return;
+    }
+    last = now;
+    if (Date.now() - since >= stallMs) {
+      clearInterval(timer);
+      socket.destroy(new Error(`nothing written for ${Math.round(stallMs / 1000)}s`));
+    }
+  }, Math.max(20, Math.min(5_000, Math.floor(stallMs / 4))));
+  timer.unref();
+  socket.once("close", () => clearInterval(timer));
+}
+
+/** What names a transfer: the hub holds its bytes under `id` until they are whole, or fetched. */
+export type TransferRef = { id: string; size: number; sha256: string };
+/** The hub's answer to one part: an upload's acknowledgement, or a download's bytes. */
+export type PartAnswer = { t?: string; id?: string; ok?: boolean; error?: string; got?: number; off?: number; b64?: string };
+
+/**
+ * The parts of every transfer on one connection to the hub, in turn: one
+ * part in flight on the connection at a time, answered before the next goes
+ * (several transfers take turns part by part), so however many wait, no
+ * more than one part's line is ever queued on the link. A part not answered
+ * in time closes the connection, which fails every transfer on it, and its
+ * owner opens another. Its errors come from `error`, so each owner reports
+ * them in its own terms; `lost` says the link went.
+ */
+export class TransferLane {
+  private readonly waits = new Map<string, { resolve: (answer: PartAnswer) => void; reject: (err: Error) => void }>();
+  private turn: Promise<unknown> = Promise.resolve();
+  private uploading: Promise<unknown> = Promise.resolve();
+  private readonly socket: Socket;
+  private readonly timeoutMs: number;
+  private readonly error: (message: string, lost: boolean) => Error;
+
+  constructor(socket: Socket, timeoutMs: number, error: (message: string, lost: boolean) => Error = (message) => new Error(message)) {
+    this.socket = socket;
+    this.timeoutMs = timeoutMs;
+    this.error = error;
+  }
+
+  /** A line read from the connection: true when it was a part's answer, which is then settled. */
+  take(message: PartAnswer | null | undefined): boolean {
+    if (!message || (message.t !== "up" && message.t !== "down") || typeof message.id !== "string") return false;
+    const key = `${message.t}:${message.id}`;
+    const wait = this.waits.get(key);
+    if (wait) {
+      this.waits.delete(key);
+      wait.resolve(message);
+    }
+    return true;
+  }
+
+  /** The connection closed: every part waiting on it fails. */
+  fail(why: string): void {
+    for (const [key, wait] of this.waits) {
+      this.waits.delete(key);
+      wait.reject(this.error(`${why} (${key})`, true));
+    }
+  }
+
+  /**
+   * `bytes` sent ahead in parts; the hub holds them under the name returned.
+   * One upload at a time on a connection: the hub takes a few per seat at
+   * once, and a burst of parallel publishes waits its turn rather than being
+   * refused.
+   */
+  upload(bytes: Buffer): Promise<TransferRef> {
+    const sent = this.uploading.then(async () => {
+      const id = randomUUID();
+      for (let off = 0; off < bytes.length; off += TRANSFER_PART_BYTES) {
+        const answer = await this.ask({ t: "up", id, size: bytes.length, off, b64: bytes.subarray(off, off + TRANSFER_PART_BYTES).toString("base64") });
+        if (!answer.ok) throw this.error(answer.error || "the hub refused a part", false);
+      }
+      return { id, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+    });
+    this.uploading = sent.catch(() => undefined);
+    return sent;
+  }
+
+  /**
+   * What the hub kept under `ref`, fetched in parts and checked whole; only
+   * then is the hub told it may drop it. A fetch that failed leaves it there
+   * until the connection closes or it idles out.
+   */
+  async download(ref: TransferRef): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    let got = 0;
+    while (got < ref.size) {
+      const answer = await this.ask({ t: "down", id: ref.id, off: got });
+      if (answer.ok === false || typeof answer.b64 !== "string" || answer.off !== got) throw this.error(answer.error || "the hub sent a part out of turn", true);
+      const bytes = Buffer.from(answer.b64, "base64");
+      if (!bytes.length) throw this.error("the hub sent an empty part before the whole had come", true);
+      chunks.push(bytes);
+      got += bytes.length;
+    }
+    const whole = Buffer.concat(chunks);
+    if (whole.length !== ref.size || createHash("sha256").update(whole).digest("hex") !== ref.sha256) {
+      throw this.error("what was fetched in parts does not match what the hub said it was", true);
+    }
+    try {
+      this.socket.write(wireLine({ t: "down", id: ref.id, done: true }));
+    } catch {
+      // the hub drops what it kept on its own, when the connection closes or idles
+    }
+    return whole;
+  }
+
+  /** One part out, and its answer back, when the part before it (of any transfer) has had its answer. */
+  private ask(message: { t: "up" | "down"; id: string } & Record<string, unknown>): Promise<PartAnswer> {
+    const key = `${message.t}:${message.id}`;
+    const asked = this.turn.then(
+      () =>
+        new Promise<PartAnswer>((resolve, reject) => {
+          if (this.socket.destroyed) {
+            reject(this.error("the hub link closed during a transfer", true));
+            return;
+          }
+          const timer = setTimeout(() => {
+            this.waits.delete(key);
+            if (!this.socket.destroyed) this.socket.destroy(new Error("a transfer part not answered"));
+            reject(this.error(`the hub did not answer a transfer part within ${Math.round(this.timeoutMs / 1000)}s; the link closed and a new one opens`, true));
+          }, this.timeoutMs);
+          this.waits.set(key, {
+            resolve: (answer) => {
+              clearTimeout(timer);
+              resolve(answer);
+            },
+            reject: (err) => {
+              clearTimeout(timer);
+              reject(err);
+            },
+          });
+          try {
+            this.socket.write(wireLine(message, "a transfer part"));
+          } catch (err) {
+            this.waits.delete(key);
+            clearTimeout(timer);
+            reject(err as Error);
+          }
+        }),
+    );
+    this.turn = asked.catch(() => undefined);
+    return asked;
+  }
+}
+
+/**
  * In a microVM the trace goes to the hub on one held connection, line after
  * line, each answered in order. A connection per line is what a pane on the
  * host does; through a VM's vsock path, connections opened in a burst were
  * refused (measured on the board's calls, extensions/board.ts), and a refused
- * trace line lands in the spill instead of the chain.
+ * trace line lands in the spill instead of the chain. A line past a part (a
+ * tool's whole output is kept in the trace) goes ahead in parts, and the hub
+ * forwards it whole: nothing is cut, and no write on the link is large.
  */
-type HeldTrace = { socket: Socket; waiting: Array<(ok: boolean) => void>; buffer: string };
+type HeldTrace = { path: string; socket: Socket; waiting: Array<(ok: boolean) => void>; buffer: string; lane: TransferLane };
 let heldTrace: HeldTrace | null = null;
 let heldTraceOpening: Promise<HeldTrace> | null = null;
 
 function openHeldTrace(socketPath: string): Promise<HeldTrace> {
-  if (heldTrace && !heldTrace.socket.destroyed) return Promise.resolve(heldTrace);
+  if (heldTrace && heldTrace.path === socketPath && !heldTrace.socket.destroyed) return Promise.resolve(heldTrace);
   if (heldTraceOpening) return heldTraceOpening;
+  // Another socket than the held one's: that link is done with.
+  heldTrace?.socket.destroy();
   heldTraceOpening = new Promise<HeldTrace>((resolve, reject) => {
     const socket = connect(socketPath);
     socket.once("error", reject);
     socket.once("connect", () => {
       const auth = seatAuthLine();
       if (auth) socket.write(auth);
-      const ch: HeldTrace = { socket, waiting: [], buffer: "" };
+      const ch: HeldTrace = { path: socketPath, socket, waiting: [], buffer: "", lane: new TransferLane(socket, COLLECTOR_TIMEOUT_MS * 5) };
       socket.setEncoding("utf8");
       socket.unref();
+      // A link whose writes stopped moving is closed, and the next line
+      // opens another: the lines waiting on it settle as not taken.
+      watchWriteStall(socket);
       socket.on("data", (chunk: string) => {
         ch.buffer += chunk;
         let cut;
         while ((cut = ch.buffer.indexOf("\n")) >= 0) {
           const answer = ch.buffer.slice(0, cut);
           ch.buffer = ch.buffer.slice(cut + 1);
-          let ok = false;
+          let parsed: (PartAnswer & { ok?: unknown }) | null = null;
           try {
-            ok = JSON.parse(answer)?.ok === true;
+            parsed = JSON.parse(answer);
           } catch {
-            ok = false;
+            parsed = null;
           }
-          ch.waiting.shift()?.(ok);
+          // A part's acknowledgement is the lane's; every other answer is
+          // the next waiting line's, in order.
+          if (ch.lane.take(parsed)) continue;
+          ch.waiting.shift()?.(parsed?.ok === true);
         }
       });
       socket.on("close", () => {
         if (heldTrace === ch) heldTrace = null;
+        ch.lane.fail("the trace link closed");
         for (const settle of ch.waiting.splice(0)) settle(false);
       });
       socket.on("error", () => undefined);
@@ -2640,14 +2861,39 @@ async function sendHeldTrace(socketPath: string, line: string): Promise<boolean>
   } catch {
     return false;
   }
+  let wire = line;
+  if (Buffer.byteLength(line) > TRANSFER_PART_BYTES) {
+    try {
+      const upload = await ch.lane.upload(Buffer.from(line.endsWith("\n") ? line.slice(0, -1) : line, "utf8"));
+      wire = wireLine({ t: "trace", upload }, "a trace line");
+    } catch {
+      return false;
+    }
+  }
+  try {
+    wireChecked(wire, "a trace line");
+  } catch {
+    return false;
+  }
   return new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => ch.socket.destroy(), COLLECTOR_TIMEOUT_MS * 5);
-    ch.waiting.push((ok) => {
+    let settled = false;
+    const settle = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       resolve(ok);
-    });
+    };
+    const timer = setTimeout(() => {
+      ch.socket.destroy();
+      settle(false);
+    }, COLLECTOR_TIMEOUT_MS * 5);
+    if (ch.socket.destroyed) {
+      settle(false);
+      return;
+    }
+    ch.waiting.push(settle);
     try {
-      ch.socket.write(line);
+      ch.socket.write(wire);
     } catch {
       ch.socket.destroy();
     }
