@@ -733,7 +733,7 @@ test("POST /api/swarms runs swarm.sh start (--no-start) and the run appears", as
   const job = await waitJob(accepted.body.id);
   assert.equal(job.status, "ok", job.stderr);
   assert.match(job.stdout, /Sandbox ready/);
-  assert.ok(job.swarm_id && /^s[0-9a-f]{4}$/.test(job.swarm_id), `swarm id parsed: ${job.swarm_id}`);
+  assert.ok(job.swarm_id && /^s[0-9a-f]{4,6}$/.test(job.swarm_id), `swarm id parsed: ${job.swarm_id}`);
 
   const list = await get<Array<{ id: string; label: string; phase: string; goal: string }>>("/api/swarms");
   const created = list.body.find((r) => r.id === job.swarm_id);

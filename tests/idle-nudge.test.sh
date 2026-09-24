@@ -211,4 +211,22 @@ printf '%s' "$answer" | jq -e '.ok == true and (.agents | has("v0"))' >/dev/null
 grep -q 'hub_restarted' "$VM_SB/traces/events.jsonl" "$HUB_DIR/hub-spill.jsonl" 2>/dev/null || fail "the restart is not on the record"
 pass "a hub that died is brought back by the watchdog with the run's agents, and the restart is on the record"
 
+# --- a host run's stop from outside the panes ---------------------------------
+BS="$TMP/backstop"
+mkdir -p "$BS"/{traces,done/agents,threads/main,inbox/b00,.pi-sessions/b00,locks}
+printf '{"swarm_id":"bs","n":1,"agents":[{"id":"b00","role":"worker"}]}\n' > "$BS/team.json"
+long_ago="$(date -u -d '@'$(( $(date +%s) - 1800 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r $(( $(date +%s) - 1800 )) +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"cap_usd":5,"spent_usd":0,"wall_clock_minutes":1,"started_at":"%s","agents":{}}\n' "$long_ago" > "$BS/budget.json"
+HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$BS" --once >"$TMP/bs1.log" 2>&1
+[[ -n "$(jq -r '.stop_steer_at // empty' "$BS/budget.json")" ]] || fail "past the wall clock the watchdog did not start the stop clock: $(cat "$TMP/bs1.log")"
+ls "$BS/threads/main"/*.md >/dev/null 2>&1 || fail "the steer was not said on the board"
+[[ ! -f "$BS/done/SWARM_DONE" ]] || fail "the watchdog stopped the swarm before the grace period"
+# The grace period passed with nobody stopping: the harness writes the sentinel.
+jq --arg t "$long_ago" '.stop_steer_at = $t' "$BS/budget.json" > "$BS/b.tmp" && mv "$BS/b.tmp" "$BS/budget.json"
+HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$BS" --once >"$TMP/bs2.log" 2>&1
+[[ -f "$BS/done/SWARM_DONE" ]] || fail "past the grace period the watchdog did not stop the swarm: $(cat "$TMP/bs2.log")"
+grep -q '^by: harness' "$BS/done/SWARM_DONE" || fail "the sentinel is not the harness's"
+grep -q '"tool":"harness_stop"' "$BS/traces/events.jsonl" "$BS/traces/system-spill.jsonl" 2>/dev/null || fail "the stop is not on the record"
+pass "a host run past its wall clock is steered from outside the panes, and stopped by the harness after the grace period"
+
 echo "idle-nudge.test.sh: all checks passed"

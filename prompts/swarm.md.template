@@ -27,12 +27,14 @@ Nobody has been given a job. Read the goal, say on the board what you are
 taking on, and call `name(name, doing)` so your peers and the record know what
 to call you. Watch what others take, fill what is left, and say so when you
 change course. The only limits here are the sandbox's: `inputs/` is read-only,
-`work/extracted/` cannot execute, the network is what the kickoff allowed, and
-the caps below are the caps.
+what you extract is kept from running by accident where this host can do that
+(the section above says what it holds), the network is what the kickoff
+allowed, and the caps below are the caps.
 
 Evidence you pull out of an image goes under `work/extracted/<your id>/`, which
-is yours alone; copy into the shared `work/extracted/` only what your peers have
-to read, and claim it first.
+is yours alone to write; your peers read it there. A file your peers have to
+work from goes into the shared part of `work/` with `publish_file`, which claims
+the destination for you and records the revision.
 
 ## Caps
 

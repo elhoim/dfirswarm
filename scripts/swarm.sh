@@ -566,12 +566,19 @@ alloc_prefix() {
   local hex p names
   names="$(herdr_agent_names)"
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    hex="$(openssl rand -hex 2 2>/dev/null || python3 -c 'import os; print(os.urandom(2).hex())')"
+    # Three bytes: a run id is also the name of its VMs, and two registries
+    # on one machine (the console's and a terminal's) must not draw the same
+    # one — sixteen bits gave even odds within a few hundred runs.
+    hex="$(openssl rand -hex 3 2>/dev/null || python3 -c 'import os; print(os.urandom(3).hex())')"
     p="s${hex}"
     if printf '%s\n' "$names" | grep -qx "${p}00"; then
       continue
     fi
     if [[ -n "$(json_get "$p")" ]]; then
+      continue
+    fi
+    # Nor an id another registry's VMs already carry.
+    if [[ "${isolation:-host}" == "microvm" ]] && [[ "$(vm_cli list --run "$p" 2>/dev/null | jq -r '(.vms // []) | length' 2>/dev/null || echo 0)" != "0" ]]; then
       continue
     fi
     printf '%s\n' "$p"
@@ -1116,7 +1123,11 @@ if held == "bind":
     manifest["bound"] = True
 elif held == "image":
     manifest["attached"] = True
-with open(os.path.join(sandbox, "inputs.json"), "w", encoding="utf-8") as f:
+# A manifest left read-only by an earlier kickoff is replaced, not written through.
+out_path = os.path.join(sandbox, "inputs.json")
+if os.path.lexists(out_path):
+    os.unlink(out_path)
+with open(out_path, "w", encoding="utf-8") as f:
     json.dump(manifest, f, indent=2)
     f.write("\n")
 PY
@@ -1679,6 +1690,8 @@ if os.path.isfile(manifest_path):
         guard_line = "your VM mounts `inputs/` read-only from the host, which refuses every write"
     elif m.get("held") == "bind":
         guard_line = "the kernel refuses every write"
+    elif m.get("held") == "image" or guard == "image":
+        guard_line = "the host attached the image read-only, and its kernel refuses every write"
     else:
         guard_line = "a shell write is detected after the fact and undone from a pristine copy"
     if m.get("held") == "bind" and guard == "microvm":
@@ -1691,6 +1704,13 @@ if os.path.isfile(manifest_path):
             f"{len(files)} file(s), {kb} KB, from `{m.get('source', '')}`, which `inputs/` links to in place: "
             "there is no copy, and the kernel holds the source itself read-only in every pane. "
         )
+    elif m.get("held") == "image":
+        arrival = (
+            f"{len(files)} file(s), {kb} KB, from the disk image `{m.get('source', '')}`, attached read-only as `inputs/`: "
+            "there is no copy. "
+        )
+    elif guard == "microvm":
+        arrival = f"{len(files)} file(s), {kb} KB, copied from `{m.get('source', '')}` into `inputs/`, read-only, and mounted read-only into your VM. "
     else:
         arrival = f"{len(files)} file(s), {kb} KB, copied from `{m.get('source', '')}` into `inputs/`. "
     lines = [
@@ -2516,8 +2536,13 @@ cmd_start() {
           outside+=("${link#"$inputs_dir"/} -> $target")
         fi
       done < <(find "$inputs_dir" -type l -print0)
-      if [[ "$inputs_bind" -eq 1 ]] && [[ -n "$(find "$inputs_dir" -type f -perm -u+w -print -quit 2>/dev/null)" ]]; then
-        echo "WARN: the evidence in $inputs_dir is writable by this account. In a VM run it is held by the VMs' read-only mount and nothing else: the host (you, a tool, a sync client) can still change it. Make it read-only (chmod -R a-w), mount its volume read-only, or pass --inputs-copy to give the run its own read-only copy." >&2
+      # Writable is a file's bit, or a directory's (a name can be added,
+      # removed or renamed in it), on a volume that is not mounted read-only.
+      local ro_fs writable
+      ro_fs="$(python3 -c 'import os, sys; print(1 if os.statvfs(sys.argv[1]).f_flag & os.ST_RDONLY else 0)' "$inputs_dir" 2>/dev/null || echo 0)"
+      writable="$(find "$inputs_dir" \( -type f -o -type d \) -perm -u+w -print -quit 2>/dev/null)"
+      if [[ "$inputs_bind" -eq 1 && "$ro_fs" != 1 && -n "$writable" ]]; then
+        echo "WARN: the evidence in $inputs_dir is writable by this account (${writable#"$inputs_dir"/} and perhaps more: a file, or a directory whose names can change), on a volume mounted read-write. In a VM run it is held by the VMs' read-only mount and nothing else: the host (you, a tool, a sync client) can still change it. Make it read-only (chmod -R a-w), mount its volume read-only, or pass --inputs-copy to give the run its own read-only copy." >&2
       fi
       # A copy dereferences its links (cp -RL), so only a directory used in
       # place has names no VM can follow.
@@ -2995,6 +3020,11 @@ STRIP
   # manifest against this, so a manifest rewritten inside the run is caught
   # rather than trusted.
   write_custody_anchor "$sandbox" "$swarm_id"
+  # The manifest and its anchor are the harness's record of what the run was
+  # given: read-only on disk too, beneath the tool guard and outside the
+  # panes' write allowlist, so a slip is refused rather than recorded.
+  [[ -f "$sandbox/inputs.json" ]] && chmod a-w "$sandbox/inputs.json" 2>/dev/null
+  chmod a-w "$(cd "$(dirname "$sandbox")" && pwd -P)/$(basename "$sandbox").custody-anchor.json" 2>/dev/null || true
   if [[ "$toolbox" != "off" && "$isolation" == "microvm" && "$start_agents" -eq 1 ]]; then
     # The same check, run in a throwaway VM of the run's image: the agents'
     # tools are the image's, and this host's are none of theirs.
@@ -3387,6 +3417,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson cap_per_model "$(model_caps_json)" \
     --arg case_id "$case_id" \
     --arg examiner "$examiner" \
+    --arg inputs_manifest_sha "$([[ -f "$sandbox/inputs.json" ]] && sha256_of "$sandbox/inputs.json" || true)" \
     --arg allow_hosts "$allow_hosts" \
     --argjson netguard "$use_netguard" \
     --arg netguard_mode "$(if [[ "$isolation" == "microvm" && "$use_netguard" -eq 1 ]]; then echo microvm; elif [[ "$isolation" == "microvm" ]]; then echo microvm-open; elif [[ "$use_netguard" -eq 1 ]]; then netguard_mode; else echo off; fi)" \
@@ -3444,6 +3475,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       case_id: $case_id,
       examiner: $examiner,
       allow_hosts: $allow_hosts,
+      inputs_manifest_sha256: (if $inputs_manifest_sha == "" then null else $inputs_manifest_sha end),
       netguard: ($netguard == 1),
       netguard_mode: $netguard_mode,
       write_guard: $write_guard,
@@ -5206,6 +5238,8 @@ write_custody_anchor() { # <sandbox> <run id>
   local sandbox="$1" run="$2" anchor manifest_sha=""
   anchor="$(cd "$(dirname "$sandbox")" && pwd -P)/$(basename "$sandbox").custody-anchor.json"
   [[ -f "$sandbox/inputs.json" ]] && manifest_sha="$(sha256_of "$sandbox/inputs.json")"
+  # A reused sandbox's anchor is read-only: replaced, not written through.
+  rm -f "$anchor"
   jq -n --arg run "$run" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg m "$manifest_sha" \
     '{run: $run, started_at: $at} + (if $m == "" then {} else {inputs_manifest_sha256: $m} end)' > "$anchor"
 }

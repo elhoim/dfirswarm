@@ -304,7 +304,10 @@ printf 'b\n' > "$TMP/ev-mixed/sub/b.txt"
 ln -s a.txt "$TMP/ev-mixed/a-link.txt"
 ln -s sub "$TMP/ev-mixed/sub-link"
 chmod -R a-w "$TMP/ev-mixed"/a.txt "$TMP/ev-mixed/sub/b.txt"
+# Its directories too: a writable directory is a place names can change.
+chmod a-w "$TMP/ev-mixed/sub" "$TMP/ev-mixed"
 out="$(start --isolation microvm --inputs "$TMP/ev-mixed" --label vm-links)"; rc=$?
+chmod u+w "$TMP/ev-mixed" "$TMP/ev-mixed/sub"
 [[ $rc -eq 0 ]] || fail "evidence with links inside it exited $rc: $out"
 sbx="$(sandbox_of "$out")"
 jq -e '[.files[] | select(.link)] | map({path, link}) == [{path: "inputs/a-link.txt", link: "a.txt"}, {path: "inputs/sub-link", link: "sub"}]' "$sbx/inputs.json" >/dev/null \

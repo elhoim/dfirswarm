@@ -859,7 +859,8 @@ async function anchorVerdict(anchorFile: string, verdict: Record<string, unknown
   const verdicts = Array.isArray(anchor.custody) ? (anchor.custody as unknown[]) : [];
   verdicts.push(verdict);
   const tmp = `${anchorFile}.tmp`;
-  await writeFile(tmp, `${JSON.stringify({ ...anchor, custody: verdicts }, null, 2)}\n`);
+  await rm(tmp, { force: true });
+  await writeFile(tmp, `${JSON.stringify({ ...anchor, custody: verdicts }, null, 2)}\n`, { mode: 0o444 });
   await rename(tmp, anchorFile);
 }
 

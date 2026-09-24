@@ -188,6 +188,47 @@ log_event() { # log_event <agent> <idle> <ok> <count>
   fi
 }
 
+# The stop from outside the panes, for a host run. Each pane's extension
+# steers its agent and writes the sentinel itself past a cap or the wall
+# clock plus the grace period — from inside the pane, where an agent that
+# never ends a turn, or a pane whose extension is wedged, never gets there.
+# This watchdog runs for the length of the run outside every pane: past a
+# limit it claims the stop clock (and says so on the board) when no pane
+# has, and past the grace period it writes the sentinel as the harness. A VM
+# run's hub does the same from its own process; this is the host's.
+host_backstop() {
+  [[ -z "$HUB_DIR" ]] || return 0
+  local said
+  said="$(node --experimental-strip-types --no-warnings -e '
+    const [protocol, S] = process.argv.slice(1);
+    import(protocol).then(async (P) => {
+      if (await P.swarmDoneExists(S)) return;
+      const budget = await P.readBudget(S).catch(() => null);
+      if (!budget) return;
+      const pressure = P.budgetPressure(budget);
+      if (!pressure.reason) return;
+      const mark = await P.markStopSteer(S, pressure.reason);
+      if (mark.claimed) {
+        const text = pressure.reason === "cap" ? P.CAP_STEER : `Swarm wall clock hit (${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes). Call done with reason cannot_complete and stop. Do not start new work.`;
+        await P.systemPost(S, { tag: "stop", body: text }).catch(() => undefined);
+        console.log(`steered ${pressure.reason}`);
+      }
+      if (Date.now() - Date.parse(mark.at) < P.STOP_GRACE_MS) return;
+      const stop = await P.harnessStop(S, pressure.reason, `The harness watchdog stopped the swarm: ${pressure.reason} passed and the agents did not stop within the grace period.`, { verify: true });
+      if (stop.created) console.log(`stopped ${pressure.reason}`);
+    }).catch(() => undefined);
+  ' "$ROOT/extensions/protocol.ts" "$SANDBOX" 2>/dev/null || true)"
+  local what reason ts line
+  while read -r what reason; do
+    [[ -n "$what" ]] || continue
+    ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+    line="$(jq -cn --arg ts "$ts" --arg t "$(if [[ "$what" == stopped ]]; then echo harness_stop; elif [[ "$reason" == cap ]]; then echo cap_steer; else echo wall_steer; fi)" --arg r "$reason" \
+      '{ts: $ts, agent: "system", tool: $t, args: {via: "idle-nudge", reason: $r}, result: {ok: true}}')"
+    printf '%s' "$line" | node "$ROOT/scripts/trace-emit.mjs" "$SANDBOX" >/dev/null 2>&1 || printf '%s\n' "$line" >> "$SANDBOX/traces/system-spill.jsonl"
+    echo "idle-nudge: $what the swarm ($reason)" >&2
+  done <<< "$said"
+}
+
 # "id n idle_at_last_nudge" lines. The count is per silence: if the agent has
 # done anything since we last nudged it — its idle clock is shorter than it was
 # then — this is a new silence and the budget starts again.
@@ -247,6 +288,7 @@ while :; do
   [[ -d "$SANDBOX" ]] || exit 0
   [[ -f "$SANDBOX/done/SWARM_DONE" ]] && exit 0
   ensure_hub
+  host_backstop
   for id in $(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null); do
     [[ -e "$SANDBOX/done/agents/$id.done" || -e "$SANDBOX/done/agents/$id.dead" ]] && continue
     idle="$(idle_seconds "$id")"

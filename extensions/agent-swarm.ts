@@ -22,6 +22,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1349,12 +1350,18 @@ export default function (pi: ExtensionAPI) {
           { tool: via, path: report.path },
           { blocked: false, detected: true, via, healed: action, ...(heal?.error ? { error: heal.error } : {}) },
         );
+        // Only a copied run has a pristine copy: evidence held in place, from an
+        // image or in a VM has none to heal from, and saying one exists
+        // would send the operator looking for it.
+        const hasPristine = existsSync(join(cwd, ".inputs-pristine"));
         const outcome =
           action === "restored"
             ? "It was restored from the pristine copy."
             : action === "removed"
               ? "The new file was removed again."
-              : `It could NOT be healed (${heal?.error ?? "unknown error"}); the operator has the pristine copy under .inputs-pristine/.`;
+              : hasPristine
+                ? `It could NOT be healed (${heal?.error ?? "unknown error"}); the operator has the pristine copy under .inputs-pristine/.`
+                : `It could NOT be healed: this run holds its evidence in place, with no pristine copy to restore from (${heal?.error ?? "no copy"}). The change stands; the host's custody check at stop names it.`;
         await systemPost(cwd, {
           tag: "veto",
           body: `INPUTS VIOLATION: ${agentId}'s ${via} call changed \`${report.path}\`, which is a read-only input. ${outcome} Never write under inputs/; copy the file into work/ if you need a version you can change.`,
