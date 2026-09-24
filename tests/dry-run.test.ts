@@ -9,6 +9,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, symlink, utimes, writeFile } fro
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
 import { chmod, link, stat } from "node:fs/promises";
 import {
   INPUTS_DIR,
@@ -1616,6 +1617,19 @@ test("budget: writeBudget replaces the record whole and leaves no temp file", as
     assert.notEqual(statSync(join(root, "budget.json")).ino, before, "a new inode: renamed over, not truncated in place");
     assert.equal((await readBudget(root)).cap_usd, 3);
     assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".tmp")), []);
+  });
+});
+
+test("budget: a write that fails after the temp file was opened leaves no temp file behind", async () => {
+  await withSandbox(async (root) => {
+    // `ulimit -f 0` with SIGXFSZ ignored: the open succeeds and the first
+    // write fails with EFBIG, as it would on a full disk or a spent quota.
+    const protocol = join(import.meta.dirname, "..", "extensions", "protocol.ts");
+    const script = `const m = await import(${JSON.stringify(protocol)}); const b = await m.readBudget(${JSON.stringify(root)}); try { await m.writeBudget(${JSON.stringify(root)}, b); process.exit(0); } catch (e) { process.exit(e.code === "EFBIG" ? 7 : 9); }`;
+    const status = spawnSync("bash", ["-c", 'trap "" XFSZ; ulimit -f 0; exec "$0" --experimental-strip-types --input-type=module -e "$1"', process.execPath, script], { stdio: "ignore" }).status;
+    assert.equal(status, 7, "the write failed with EFBIG");
+    assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".tmp")), []);
+    await readBudget(root); // the old record is still there, whole
   });
 });
 

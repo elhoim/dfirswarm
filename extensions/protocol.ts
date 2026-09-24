@@ -734,15 +734,15 @@ export async function writeBudget(sandboxRoot: string, budget: BudgetRecord): Pr
     return;
   }
   const temp = join(dirname(target), `.budget.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
-  let created = false;
   try {
     // `wx`: never through a link or over a file someone put at that name.
     await writeFile(temp, body, { encoding: "utf8", flag: "wx", mode: 0o644 });
-    created = true;
     await rename(temp, target);
   } catch (err) {
-    if (created) await rm(temp, { force: true }).catch(() => undefined);
     const code = (err as NodeJS.ErrnoException).code;
+    // A write that failed after the open (a full disk) leaves a partial temp
+    // file behind; EEXIST means the name was someone else's, so leave it.
+    if (code !== "EEXIST") await rm(temp, { force: true }).catch(() => undefined);
     if (code !== "EACCES" && code !== "EPERM") throw err;
     await writeFile(target, body, "utf8");
   }
