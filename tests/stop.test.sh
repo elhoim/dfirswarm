@@ -64,4 +64,36 @@ out="$(SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/swarm
 printf '%s\n' "$out" | grep -q "Custody:.*skipped\|Cleared sstp1 after the hub finished it" || fail "the after-hub stop did not say what it did: $out"
 pass "a stop the hub runs after finishing the run clears up and keeps the state finished"
 
+echo "# a reaped microVM seat has its VM put away, its disk kept"
+RS="$TMP/reap-sb"
+mkdir -p "$RS/traces" "$RS/done/agents" "$RS/vm" "$RS/locks" "$RS/threads/main"
+printf '{"swarm_id":"srp1","n":1,"agents":[{"id":"srp100","role":"worker"}]}\n' > "$RS/team.json"
+printf '{"cap_usd":1,"spent_usd":0,"wall_clock_minutes":60,"started_at":"2026-01-01T00:00:00Z","agents":{}}\n' > "$RS/budget.json"
+printf '{"agent":"srp100","name":"dfs-srp1-srp100","run":"srp1"}\n' > "$RS/vm/srp100.json"
+: > "$RS/traces/events.jsonl"
+HUBS="$TMP/dfirswarm-hubs"
+mkdir -p "$HUBS/dfs-srp1.x1"
+chmod 700 "$HUBS"
+(cd "$RS" && pwd -P) > "$HUBS/dfs-srp1.x1/sandbox"
+printf '{"agents":{"srp100":{"state":"idle"}}}\n' > "$HUBS/dfs-srp1.x1/status.json"
+(cd "$HUBS/dfs-srp1.x1" && pwd -P) > "$RS/hub.dir"
+cat > "$TMP/msb" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$TMP/msb-calls.log"
+case "\$1" in
+  list) printf '[{"name":"dfs-srp1-srp100","status":"running","labels":{"dev.dfirswarm.run":"srp1","dev.dfirswarm.agent":"srp100"}}]\\n' ;;
+  exec) printf '{"baseline":true,"apt":{},"venv":{}}\\n' ;;
+  snapshot) for a in "\$@"; do [[ "\$prev" == "-o" ]] && printf 'disk' > "\$a"; prev="\$a"; done ;;
+  --version) echo "msb 0.7.2" ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$TMP/msb"
+out="$(TMPDIR="$TMP" SWARM_MSB_BIN="$TMP/msb" HERDR_BIN=/usr/bin/false PATH="/usr/bin:/bin:$(dirname "$(command -v node)"):$(dirname "$(command -v jq)")" bash "$ROOT/scripts/reap.sh" --sandbox "$RS" --timeout 1 --stop 2>&1)" || true
+[[ -f "$RS/done/agents/srp100.dead" ]] || fail "the silent seat was not reaped: $out"
+grep -q "^stop dfs-srp1-srp100" "$TMP/msb-calls.log" 2>/dev/null || fail "the reaped seat's VM was not stopped: $(cat "$TMP/msb-calls.log" 2>/dev/null); $out"
+grep -q "^snapshot create" "$TMP/msb-calls.log" || fail "the reaped seat's disk was not kept"
+printf '%s\n' "$out" | grep -q "VM of srp100 put away" || fail "the reaper did not say the VM was put away: $out"
+pass "a reaped microVM seat has its VM stopped and its disk kept, as stop would"
+
 echo "stop.test.sh: all checks passed"

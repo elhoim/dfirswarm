@@ -108,6 +108,25 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   without following a link the agent planted. Spend is still what the seat
   reports — the wall clock and each VM's `maxDuration` are the brakes the
   host enforces by itself.
+- **The hub never opens a file under a seat's own directory.** Those are
+  the only directories a running seat can rearrange, and a directory
+  swapped for a link between the hub's checks and its open read a host file
+  (measured: 140 of 39,385 racing reads before this rule; on Linux the open
+  is also checked against `/proc/self/fd`, macOS has no such name). A seat
+  sends the bytes of its own file with the call — a revision (kept whole up
+  to 32 MiB, by its hash past that), a publish (up to 32 MiB), the disk side
+  of a diff (up to 16 MiB) — and restores its own file in its own VM, checked
+  against the hash the hub recorded. A peer's directory is refused for
+  claims, writes, restores, records and publishes, compared without regard
+  to case. A forged tool runs in a VM only as the bytes the hub says were
+  sealed.
+- **The hub bounds each seat.** At most 16 connections and 160 MB buffered
+  per seat; 64 calls running and 192 queued; posts and claims at 40 in a
+  burst and one every two seconds after, ledger records at 200 and five a
+  second; a refusal repeated within a minute is counted, not written again.
+  A call a seat sends again after a dropped link carries the same request id
+  and gets the first run's answer. A seat's usage report carries only a
+  budget row's fields; its model is the kickoff's.
 - **The harness owns the stop.** The hub keeps the wall clock on its own
   clock, and applies the caps (the swarm's, each seat's, each model's) to the
   spend each seat reports about itself. It writes the sentinel when the
@@ -137,6 +156,11 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   them yet. The hub runs from a second copy taken at the same time, and so
   do the VM finish and the custody it starts; the operator's own commands
   (`swarm.sh`, `stop`, the idle watchdog) run from the checkout.
+- **A host run gets a stop from outside its panes too.** The idle watchdog,
+  which runs for the length of every run outside the panes, claims the stop
+  clock past a cap or the wall clock when no pane has, and writes the
+  sentinel as the harness past the grace period: the hub's backstop, for
+  runs that have no hub.
 
 ## Consequences
 
@@ -229,9 +253,6 @@ For the project owner; nothing in the code decides them yet.
 - Whether host mode is frozen (labelled unisolated, fixes only) or removed
   once VM mode is the default, and what code goes with it: the host guards,
   the second spill location, the direct board path.
-- A host-side backstop for host runs. In host mode the stop is written by
-  the agents' own extensions; nothing outside the panes writes the sentinel
-  when every pane is wedged. The hub does this for VM runs only.
 - A bare-metal Linux server with KVM for real cases. The droplet runs VMs
   through nested KVM and fits two agents.
 

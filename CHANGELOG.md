@@ -47,8 +47,13 @@ not surprised:
   `$DFIRSWARM_HOME/secrets/<pack>.env` (`~/.dfirswarm` by default), not inside
   the pack; a reinstall moves an old one, and a pack that declares secrets
   and still has a `secrets.env` in its directory stops the kickoff in either
-  mode. Six shipped packs were resealed with corrected install lines
-  (`pff-tools`, `libfwsi-python`, plaso from PyPI) and pinned downloads.
+  mode. Shipped packs were resealed with corrected install lines
+  (`pff-tools`, `libfwsi-python`, plaso from PyPI), pinned downloads, and
+  after the review with names checked against Debian 12 and PyPI (zeek,
+  suricata and radare2 are manual, `libfwsi-python` is a Python library, the
+  encrypted-containers pack installs pybde, pyvhdi, pyluksde, pytsk3 and
+  dfvfs, and `vss_stores` and `mem_fs` mount under the seat's own
+  directory).
 - `--allow-install` sets `PIP_BREAK_SYSTEM_PACKAGES=1` in every pane:
   `pip install --user` was refused on a PEP 668 system. The installs still
   go under `work/.toolchain/`, and the Python install paths now reach a
@@ -72,6 +77,37 @@ not surprised:
 - The console: a `failed` state, a packs field, `*.name` allowlist entries.
 - `microsandbox` is an optional dependency (`npm ci --omit=optional` for a
   host-only install).
+- The idle watchdog is a host run's stop from outside the panes: past a cap
+  or the wall clock it claims the stop clock (and says so on the board) when
+  no pane has, and past the grace period writes the sentinel as the harness.
+- Custody opens nothing through a link and waits on no FIFO; every evidence
+  file is re-hashed in full whatever its size, against one deadline checked
+  inside the read, and an unfinished re-hash says so rather than
+  "unchanged"; the trace is read a line at a time; the ledger is held to the
+  trace (an entry deleted from its end, or written without the tool, is
+  named); `artifacts.json` indexes `work/`; the verdict's hash is anchored
+  outside the run. `stop` bounds it from outside too.
+- The ledger's chain covers each entry's provenance (source, evidence,
+  confidence); an unchained line after chained ones breaks it.
+- Evidence FIFOs, sockets and device nodes are recorded by their kind and
+  checked by kind; the evidence manifest and its anchor are read-only on
+  disk, and the manifest's hash is in the run's record.
+- A peer's own directory is refused for claims and writes; the report reads
+  the swarm's own report only inside the run and never through a link; the
+  package copies only regular files (a link left in place of a spill had
+  put a host file into the handover).
+- A trace line a pane could write nowhere is said on its next line and
+  counted by custody; the host spill is watched as append-only.
+- Pack secrets are refused on a suffix; two packs' tools of one name keep the
+  first. `tools --save` copies a tool only as its sealed version, with what
+  it ran with. A forged tool may name the programs it calls (`requires`).
+- `list` has a `HELD` column; run ids are six hex digits; a pane helper that
+  opened a workspace no longer loses it (they ran in a subshell); a kickoff
+  that fails before its record is written clears what it started.
+- Warnings: a run kept in a synced folder, a Mac on battery, a suffix in the
+  allowlist, writable evidence directories, a host run whose panes cannot be
+  kept from a live VM run's hub. An IPv6 allow entry is written `[v6]:port`,
+  and netguard reads it. GitHub Copilot's token host is allowed.
 
 ### Added
 
@@ -121,6 +157,33 @@ not surprised:
 - **VM integration tests** (`npm run test:vm`) on real VMs, one of them end to
   end with a scripted model, and a CI job that runs them on a KVM runner with
   the base and disk images built from this repository.
+- **What the final review of the microVM work changed** (ADR 0009):
+  - The hub never opens a file under a seat's own directory: a revision, a
+    publish and the disk side of a diff come from the VM with the call (32,
+    32 and 16 MiB), a seat restores its own file in its own VM, and a
+    forged tool runs only as its sealed bytes. The host's own reads are
+    checked again after the open (on Linux against `/proc/self/fd`).
+  - The hub bounds each seat (connections, bytes buffered, calls, a rate for
+    posts and records), answers a resent call once, keeps its lines
+    numbered, refuses to run twice, resumes a finish it died in, clears up
+    the run with `stop --after-hub`, and is kept by `scripts/hub-supervise.sh`;
+    it runs from a frozen copy of the harness. A seat that is done has its
+    VM put away a grace period later.
+  - `stop` exits 3 and records `stop_incomplete` while a VM of the run is up,
+    and waits for a hub that is finishing. Below 4 GiB free a VM is kept
+    rather than snapshotted and removed; `--vm-snapshot-dir` puts the disks
+    elsewhere.
+  - `work/extracted/` and `work/quarantine/` are no-exec in every VM, a
+    peer's corner as well as one's own. Each VM's probe checks that, that
+    the evidence is no-exec, and that it can reach its model's hosts.
+  - Pack secrets need `--allow-pack-secrets` in a VM too (the placeholder is
+    in the whole VM's environment); `--local-only` withholds them; a local
+    model's real key is refused; credential headers are swapped at every
+    depth; a LAN model's name is resolved on the host; llama.cpp gets its
+    environment; Pi's model catalog goes into the guest.
+  - The catalog VM leaves only files and directories, is put away on `^C`
+    and reaped if left; a VM that does not come up times out; `msb` other
+    than 0.7.2 is warned about; a lock pinned by tag is refused.
 
 - **Agents compact their own context.** On by default at kickoff
   (`--no-self-compact` turns it off): each agent watches its context against

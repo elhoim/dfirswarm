@@ -50,6 +50,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
 import { eventChainVerifier, readInputsManifest, specialKind, verifyLedgerChain } from "../extensions/protocol.ts";
+import { hashArtifacts } from "./artifacts.ts";
 
 type Handle = Awaited<ReturnType<typeof open>>;
 
@@ -250,6 +251,8 @@ export type Custody = {
     gaps: Array<{ sid: string; agent: string; missing: number }>;
     /** Per agent, lines whose own clock (`ts`) was more than CLOCK_FLAG_SEC off the collector's (`recv_ts`). */
     clock: Array<{ agent: string; lines: number; max_skew_s: number }>;
+    /** Per agent, lines its own process said it could write nowhere. */
+    sender_lost: Array<{ agent: string; lines: number }>;
   };
   ledger: {
     entries: number;
@@ -281,6 +284,13 @@ export type Custody = {
         /** msb's version when the VM was made and when it was put away, when they differ. */
         runtime_changed: { from: string; to: string } | null;
       }>;
+  /**
+   * What the run produced under work/, every file with its sha256, written
+   * beside the verdict (artifacts.json) and its hash anchored with it: the
+   * record of the deliverables as the host found them at stop, not only when
+   * someone packages the run.
+   */
+  artifacts: { files: number; bytes: number; skipped: number; index_sha256: string } | null;
   incomplete: string | null;
   summary: string;
 };
@@ -537,6 +547,13 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
   // Every ledger entry's hash the trace carries: the record tool's own line,
   // and the hub's line for a record made from a VM.
   const recordHashes = new Set<string>();
+  // Lines a sender says it could not deliver (logEvent's count, carried on
+  // its next line).
+  const senderLost = new Map<string, number>();
+  const noteLost = (parsed: Record<string, unknown>) => {
+    const n = Number((parsed.args as Record<string, unknown> | undefined)?.trace_lines_lost_before ?? 0);
+    if (Number.isFinite(n) && n > 0) senderLost.set(String(parsed.agent ?? "?"), (senderLost.get(String(parsed.agent ?? "?")) ?? 0) + n);
+  };
   const noteRecord = (parsed: Record<string, unknown>) => {
     const result = parsed.result as Record<string, unknown> | undefined;
     const args = parsed.args as Record<string, unknown> | undefined;
@@ -576,6 +593,7 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
       clockOf(parsed);
       keptOutputRefs(parsed, refs);
       noteRecord(parsed);
+      noteLost(parsed);
       if (parsed.agent_unverified === true) unverified += 1;
       // The collector's word on a line whose sender claimed another seat.
       if (parsed.claimed_agent) disputed += 1;
@@ -605,6 +623,7 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
         // Also in the chain: the collector took it after the sender gave up.
         if (note(parsed)) duplicates += 1;
         noteRecord(parsed);
+        noteLost(parsed);
       } catch {
         bad += 1;
       }
@@ -762,6 +781,21 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
     }
   }
 
+  // --- what the run produced -------------------------------------------------------
+  let artifacts: Custody["artifacts"] = null;
+  if (!tooLate("the artifact index")) {
+    try {
+      const index = await hashArtifacts(sandbox);
+      const text = `${JSON.stringify(index, null, 2)}\n`;
+      const out = join(sandbox, "artifacts.json");
+      await rm(out, { force: true });
+      await writeFile(out, text);
+      artifacts = { files: index.files.length, bytes: index.bytes, skipped: index.skipped.length, index_sha256: createHash("sha256").update(text).digest("hex") };
+    } catch {
+      artifacts = null;
+    }
+  }
+
   // --- the summary -------------------------------------------------------------
   const parts: string[] = [];
   if (inputs && "unverifiable" in inputs) parts.push(`EVIDENCE UNVERIFIABLE: ${inputs.unverifiable}`);
@@ -791,6 +825,7 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
   if (clock.length) parts.push(`sent with a clock more than ${CLOCK_FLAG_SEC} s off the host's: ${clock.map((c) => `${c.agent} ${c.lines} line${c.lines === 1 ? "" : "s"} (up to ${c.max_skew_s} s)`).join(", ")}; the record orders by the host's recv_ts`);
   const lost = gaps.reduce((n, g) => n + g.missing, 0);
   if (lost) parts.push(`${lost} TRACE LINE${lost === 1 ? "" : "S"} LOST (numbered but in neither the chain nor a spill: ${gaps.map((g) => `${g.agent} ${g.missing}`).join(", ")})`);
+  if (senderLost.size) parts.push(`TRACE LINES THE SENDER COULD NOT WRITE: ${[...senderLost].map(([a, n]) => `${a} ${n}`).join(", ")}`);
   if (ledger) {
     const chainedPart = ledger.chained === ledger.entries ? "all chained" : `${ledger.chained} of ${ledger.entries} chained`;
     if (ledger.intact) parts.push(`ledger ${ledger.entries} entries, ${chainedPart}, chain intact`);
@@ -815,6 +850,7 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
     const sv = vms.flatMap((v) => v.secret_violations.map((x) => `${v.agent} ${x.env} → ${x.host} ${x.method} ${x.path}`.trim()));
     if (sv.length) parts.push(`${sv.length} SECRET PLACEHOLDER${sv.length === 1 ? "" : "S"} AIMED AT A HOST NOT ITS OWN, stopped by msb: ${sv.join("; ")}`);
   }
+  if (artifacts) parts.push(`${artifacts.files} work file${artifacts.files === 1 ? "" : "s"} indexed (artifacts.json)${artifacts.skipped ? `, ${artifacts.skipped} not hashed (links and the like, named there)` : ""}`);
   if (incomplete) parts.push(`CUSTODY INCOMPLETE: ${incomplete}`);
 
   const custody: Custody = {
@@ -823,9 +859,10 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
     inputs,
     sessions: { files: sessionFiles, digest: sessionsDigest, not_files: sessionWalk.other },
     tool_outputs: { referenced: refs.size, verified, missing: missingOut, mismatched, refused },
-    trace: { lines, intact: chained, detail: chainDetail, unverified, disputed, spilled: spills, gaps, clock },
+    trace: { lines, intact: chained, detail: chainDetail, unverified, disputed, spilled: spills, gaps, clock, sender_lost: [...senderLost].map(([agent, n]) => ({ agent, lines: n })) },
     ledger,
     vms,
+    artifacts,
     incomplete,
     summary: parts.join(" · "),
   };
@@ -844,7 +881,7 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
   await writeFile(file, text);
   // The verdict's hash goes beside the kickoff's anchor, outside the run: a
   // custody.json edited after the stop no longer matches what stop wrote.
-  await anchorVerdict(anchorFile, { at: custody.at, sha256: createHash("sha256").update(text).digest("hex"), summary: custody.summary, snapshots: (vms ?? []).flatMap((v) => (v.snapshot && "sha256" in v.snapshot ? [{ agent: v.agent, sha256: v.snapshot.sha256 }] : [])), sessions_digest: sessionsDigest }).catch(() => undefined);
+  await anchorVerdict(anchorFile, { at: custody.at, sha256: createHash("sha256").update(text).digest("hex"), summary: custody.summary, snapshots: (vms ?? []).flatMap((v) => (v.snapshot && "sha256" in v.snapshot ? [{ agent: v.agent, sha256: v.snapshot.sha256 }] : [])), sessions_digest: sessionsDigest, artifacts_sha256: artifacts?.index_sha256 ?? null }).catch(() => undefined);
   return custody;
 }
 

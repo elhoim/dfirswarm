@@ -20,6 +20,15 @@ import { fileURLToPath } from "node:url";
 
 const DATA_REL = join("node_modules", "@earendil-works", "pi-ai", "dist", "providers", "data");
 
+/**
+ * Hosts a provider calls that its models' base URLs do not name: where a
+ * subscription's short-lived token is exchanged. GitHub Copilot trades its
+ * GitHub login for an API token at api.github.com/copilot_internal/v2/token
+ * (pi-ai auth/oauth/github-copilot.js). A VM never makes that exchange — the
+ * host mints the token for the run — and the kickoff drops these for a VM.
+ */
+export const TOKEN_HOSTS = { "github-copilot": ["api.github.com"] };
+
 function dataDirs() {
   const dirs = [];
   try {
@@ -71,7 +80,8 @@ export function allowEntry(url) {
   if (/[{}]/.test(url) || /%7B|%7D/i.test(u.hostname)) return null;
   const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   const port = u.port ? Number(u.port) : u.protocol === "http:" ? 80 : 443;
-  return port === 443 ? host : `${host}:${port}`;
+  // An IPv6 address with a port in brackets, the form both allowlists read.
+  return port === 443 ? host : host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
 }
 
 export function providerHosts(model, dirs = dataDirs()) {
@@ -87,7 +97,7 @@ export function providerHosts(model, dirs = dataDirs()) {
       // One host that cannot be known makes the provider unknown: allowing the
       // others would pass a run that fails on its first call to the missing one.
       if (entries.some((e) => e === null)) return [];
-      return [...new Set(entries)];
+      return [...new Set([...entries, ...(TOKEN_HOSTS[provider] ?? [])])];
     } catch {
       return [];
     }

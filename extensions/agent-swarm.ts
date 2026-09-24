@@ -270,6 +270,34 @@ function okResult(payload: unknown, extra: { terminate?: true } = {}) {
   };
 }
 
+/** How long a VM's seat goes on without its hub: told after the first, stopped after the second. */
+export const HUB_LOST_STEER_MS = 60_000;
+export const HUB_LOST_STOP_MS = 4 * 60_000;
+export type HubLostState = { since: number; told: boolean };
+
+/**
+ * One check of the hub from a VM's seat: back, it forgets; lost for a
+ * minute, the agent is told once; lost for four, the seat is stopped. A seat
+ * with no hub has no record and no brake, and does not go on as if it had.
+ */
+export function hubLostStep(state: HubLostState, ok: boolean, now: number): { state: HubLostState; steer: boolean; stop: boolean } {
+  if (ok) return { state: { since: 0, told: false }, steer: false, stop: false };
+  const since = state.since || now;
+  const lost = now - since;
+  const steer = lost >= HUB_LOST_STEER_MS && !state.told;
+  return { state: { since, told: state.told || steer }, steer, stop: lost >= HUB_LOST_STOP_MS };
+}
+
+/**
+ * Lines this process could put neither on the chain nor in its spill. The
+ * tool call goes on — a record that cannot be written must not stop the
+ * work — but the loss is not silent: the next line that is written says how
+ * many went before it (custody adds them up), and the pane's stderr says so
+ * at once. A loss at the very end of a run, with no later line, is what
+ * custody's per-sender gaps and a missing last line are left to show.
+ */
+let traceLinesLost = 0;
+
 async function logEvent(
   cwd: string,
   agentId: string,
@@ -278,18 +306,26 @@ async function logEvent(
   result: unknown,
   durationMs?: number,
 ): Promise<void> {
+  const lost = traceLinesLost;
   try {
     await appendEvent(cwd, {
       agent: agentId || "unknown",
       tool,
-      args: summarizeArgs(args),
+      args: { ...summarizeArgs(args), ...(lost ? { trace_lines_lost_before: lost } : {}) },
       result:
         durationMs === undefined || result === null || typeof result !== "object"
           ? result
           : { ...(result as Record<string, unknown>), duration_ms: durationMs },
     });
-  } catch {
-    // observability must not break the protocol
+    traceLinesLost -= lost;
+  } catch (err) {
+    // observability must not break the protocol, and must not go quiet either
+    traceLinesLost += 1;
+    try {
+      process.stderr.write(`dfirswarm: a trace line (${tool}) reached neither the collector nor the spill: ${err instanceof Error ? err.message : String(err)}\n`);
+    } catch {
+      // no stderr either
+    }
   }
 }
 
@@ -419,27 +455,18 @@ export default function (pi: ExtensionAPI) {
    * it does not go on as if it had one: told once, then stopped, unless the
    * hub is back (the watchdog restarts it).
    */
-  let hubLostSince = 0;
-  let hubLostTold = false;
-  const HUB_LOST_STEER_MS = 60_000;
-  const HUB_LOST_STOP_MS = 4 * 60_000;
+  let hubLost: HubLostState = { since: 0, told: false };
   async function hubReachable(cwd: string, ctx: { shutdown?: () => void }, ok: boolean): Promise<void> {
     if (!boardSocket()) return;
-    if (ok) {
-      hubLostSince = 0;
-      hubLostTold = false;
-      return;
-    }
-    if (!hubLostSince) hubLostSince = Date.now();
-    const lost = Date.now() - hubLostSince;
-    if (lost >= HUB_LOST_STEER_MS && !hubLostTold) {
-      hubLostTold = true;
+    const step = hubLostStep(hubLost, ok, Date.now());
+    hubLost = step.state;
+    if (step.steer) {
       steer("The harness hub cannot be reached from this VM: nothing you post or record lands, and no cap is enforced. Stop tool calls and wait; if it is not back within three minutes this seat is stopped.");
-      await logEvent(cwd, agentId, "hub_lost", {}, { since: new Date(hubLostSince).toISOString() }).catch(() => undefined);
+      await logEvent(cwd, agentId, "hub_lost", {}, { since: new Date(hubLost.since).toISOString() }).catch(() => undefined);
     }
-    if (lost >= HUB_LOST_STOP_MS && typeof ctx.shutdown === "function") {
+    if (step.stop && typeof ctx.shutdown === "function") {
       stoppedByHarness = "hub_unreachable";
-      await logEvent(cwd, agentId, "hub_lost_stop", {}, { since: new Date(hubLostSince).toISOString() }).catch(() => undefined);
+      await logEvent(cwd, agentId, "hub_lost_stop", {}, { since: new Date(hubLost.since).toISOString() }).catch(() => undefined);
       ctx.shutdown();
     }
   }
@@ -2360,6 +2387,7 @@ export default function (pi: ExtensionAPI) {
         ),
         timeout_seconds: Type.Optional(Type.Number({ description: `Kill the script after this long (default ${TOOL_TIMEOUT_DEFAULT_SECONDS}, max ${TOOL_TIMEOUT_MAX_SECONDS})` })),
         example: Type.Optional(Type.String({ description: "One example call, shown to peers" })),
+        requires: Type.Optional(Type.Array(Type.String(), { description: "Programs the script calls (e.g. fls, yara), so a later case knows what its image must hold" })),
       }),
       async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
         const started = Date.now();

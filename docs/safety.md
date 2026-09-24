@@ -114,9 +114,10 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
 - **Cost and time caps.** `--cap-usd` is mandatory. Spend is measured from Pi's
   own session usage, not estimated. At either cap the agents are steered to
   `done cannot_complete`, and if the swarm is still over one grace period later
-  the harness writes the sentinel itself: on the host that is each pane's own
-  extension, so a swarm whose every pane is wedged has nothing outside it to
-  write the sentinel; in a microVM run it is the hub, on the host.
+  the harness writes the sentinel itself: each pane's own extension, and
+  from outside every pane the idle watchdog on the host (for a microVM run,
+  the hub), so a swarm whose every pane is wedged is still stopped. With
+  `--idle-nudge-sec 0` a host run has no watchdog and only its panes.
   `--hard-kill` additionally shuts the steered session down. Kickoff allows
   N=1–30 and warns above 10.
 - **No root on the host, ever, and installing is not root.** (Under

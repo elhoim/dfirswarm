@@ -11,12 +11,24 @@
  *   - guest root cannot write the run's floor, the evidence or the trace, by
  *     writing, remounting or unmounting — and unmounting a writable hole
  *     leaves the read-only floor, not the host;
- *   - a VM reaches its allowed host and nothing else, by name or by address;
- *   - a secret never enters the guest, only its placeholder;
+ *   - a VM reaches its allowed host and nothing else, by name or by address,
+ *     and a local model's port on the host but no other port;
+ *   - a secret never enters the guest, only its placeholder, and is in no
+ *     kept disk or log after finish;
  *   - two VMs posting and recording at once through the hub lose nothing and
  *     never share an id — the failure the shared directory had;
+ *   - in a VM the shared work/ is read-only, a peer's directory is not one's
+ *     own, extracted material (one's own or a peer's) does not run, and a
+ *     deliverable is published through the hub with its bytes;
+ *   - a tool forged through the hub, and one seeded like a pack's, runs in a
+ *     VM only as its sealed bytes; a VM's own file is recorded and restored
+ *     without the hub opening it;
+ *   - a claim on a file a peer just published waits out the guest cache
+ *     (the default settle, not zero);
  *   - finish snapshots and removes a run's VMs, and reap touches only the VMs
- *     its own registry recorded.
+ *     its own registry recorded;
+ *   - end to end, Pi in its VM calls a scripted model and posts through the
+ *     hub, with the evidence refused to it by the kernel.
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -102,7 +114,7 @@ async function fingerprint(root: string, skipDirs: string[]): Promise<Map<string
 type Rig = { run: string; sandbox: string; hub: Hub; hubDir: string; spec: VmSpec; lines: Record<string, unknown>[]; evidence: string };
 
 /** A sandbox, its evidence, a hub and a stand-in collector; the VMs are made by the test. */
-async function rig(run: string, agents: string[], extra: Partial<VmSpec> = {}): Promise<Rig> {
+async function rig(run: string, agents: string[], extra: Partial<VmSpec> = {}, hubOptions: { settleMs?: number; forging?: boolean } = {}): Promise<Rig> {
   const base = await mkdtemp(join(tmpdir(), "vmit-"));
   const sandbox = join(base, "runs", run);
   await mkdir(sandbox, { recursive: true });
@@ -136,7 +148,7 @@ async function rig(run: string, agents: string[], extra: Partial<VmSpec> = {}): 
     socket.on("error", () => undefined);
   });
   await new Promise<void>((r) => collector.listen(collectorPath, () => r()));
-  const hub = new Hub({ sandbox, dir: hubDir, agents, tokens: {}, collector: collectorPath, backstop: false, quiet: true, settleMs: 0 });
+  const hub = new Hub({ sandbox, dir: hubDir, agents, tokens: {}, collector: collectorPath, backstop: false, quiet: true, settleMs: "settleMs" in hubOptions ? hubOptions.settleMs : 0, forging: hubOptions.forging === true });
   await hub.start();
   const spec: VmSpec = {
     run,
@@ -211,8 +223,10 @@ test("guest root cannot change the run's floor, the evidence or the trace, by an
   assert.match(out, /refused .*events\.jsonl/);
   assert.match(out, /refused .*SWARM\.md/);
   assert.match(out, /refused .*inputs\/notes\.txt/);
-  // The guest kernel may flip its own flag (it does, measured); the share is
-  // read-only on the host side, and that is what refuses the write.
+  // The guest kernel may flip its own flag (it does, measured: "rw" after
+  // the remount); the share is read-only on the host side, and that is what
+  // refuses the write. The flag is read so the case is known, not assumed.
+  assert.match(out, /floor-flag: (rw|ro)/, `the remount's effect on the guest's flag was read\n${out}`);
   assert.match(out, /remounted: refused .*SWARM\.md/);
   assert.match(out, /remounted: refused .*notes\.txt/);
   // Every write through a mount the host shares was refused. The one after
@@ -264,6 +278,10 @@ test("a local model's port on the host is reachable through the host gateway, an
   const port = 18000 + Math.floor(Math.random() * 1000);
   const srv = spawn(process.execPath, ["-e", `require("node:http").createServer((q, s) => s.end("local model here\\n")).listen(${port}, "127.0.0.1")`], { stdio: "ignore" });
   cleanups.push(async () => srv.kill());
+  // Something listens on the next port too: its refusal is then the VM's
+  // policy, not an empty port.
+  const other = spawn(process.execPath, ["-e", `require("node:http").createServer((q, s) => s.end("another service\\n")).listen(${port + 1}, "127.0.0.1")`], { stdio: "ignore" });
+  cleanups.push(async () => other.kill());
   // Until it answers, not a fixed half second.
   const { connect } = await import("node:net");
   for (let i = 0; i < 100; i++) {
@@ -286,6 +304,7 @@ test("a local model's port on the host is reachable through the host gateway, an
   `);
   assert.match(out, /local model here/, out);
   assert.match(out, /refused-other-port/, "only the model's port is open on the host");
+  assert.doesNotMatch(out, /another service/, "the service on the next port was not reached");
   assert.match(out, /refused-public/);
   const record = JSON.parse(await readFile(join(r.sandbox, "vm", "vmt700.json"), "utf8"));
   assert.deepEqual(record.network.host_ports, [port]);
@@ -327,6 +346,34 @@ test("a secret never enters the guest: the VM holds its placeholder", async (t) 
     atRest = ""; // grep exits 1 when nothing matches
   }
   assert.equal(atRest, "", `the value is on the host's disk in: ${atRest}`);
+  // Nor after finish: the kept disk (loaded back as msb loads it) and the
+  // logs kept beside it.
+  const done = await finishRun(r.run, r.sandbox, { snapshot: true, registry: r.spec.registry });
+  assert.ok(done.some((e) => e.snapshot), `the disk was kept: ${JSON.stringify(done)}`);
+  cleanups.push(() => rm(`${r.sandbox}.vm-snapshots`, { recursive: true, force: true }));
+  const dest = await mkdtemp(join(tmpdir(), "vmsec-load-"));
+  cleanups.push(() => rm(dest, { recursive: true, force: true }));
+  let loaded = "";
+  try {
+    loaded = msb("snapshot", "load", "--dest", dest, join(`${r.sandbox}.vm-snapshots`, "vmt300.msb"));
+  } catch (err) {
+    loaded = String((err as { stdout?: string }).stdout ?? "");
+  }
+  let inKept = "";
+  try {
+    inKept = execFileSync("grep", ["-rlsaF", "--exclude=*.ext4", "--exclude=*.raw", "--exclude=*.qcow2", value, dest, join(`${r.sandbox}.vm-snapshots`, "vmt300.logs")], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).trim();
+  } catch {
+    inKept = "";
+  }
+  const digest = loaded.match(/sha256:[0-9a-f]{64}/)?.[0];
+  if (digest) {
+    try {
+      msb("snapshot", "remove", "--force", "--quiet", digest);
+    } catch {
+      // not in msb's index
+    }
+  }
+  assert.equal(inKept, "", `the value is in the kept disk's files or logs: ${inKept}`);
 });
 
 test("two VMs posting and recording at once through the hub lose nothing and never share an id", async (t) => {
@@ -493,27 +540,134 @@ test("in a VM the shared work/ is read-only, a peer's directory is not one's own
   const r = await rig("vmt9", ["vmt900", "vmt901"]);
   assert.deepEqual((await createVms(r.spec)).failures, []);
   const S = r.sandbox;
+  // A peer makes a file executable in its own extracted corner first.
+  const peer = await inVmAsync(vmName(r.run, "vmt901"), `
+    printf '#!/bin/sh\necho ran\n' > "${S}/work/extracted/vmt901/peer.sh" && chmod +x "${S}/work/extracted/vmt901/peer.sh" && echo "peer file made"
+  `);
+  assert.match(peer, /peer file made/, peer);
   const out = await inVmAsync(vmName(r.run, "vmt900"), `
     w() { if ( printf x > "$1" ) 2>/dev/null; then echo "WROTE $1"; else echo "refused $1"; fi; }
     w "${S}/work/shared.md"; w "${S}/work/vmt901/theirs.md"; w "${S}/work/extracted/vmt901/theirs.bin"
     printf '# findings\n' > "${S}/work/vmt900/report.md" && echo "own ok"
     printf '#!/bin/sh\necho ran\n' > "${S}/work/extracted/vmt900/x.sh"; chmod +x "${S}/work/extracted/vmt900/x.sh"
+    # test -x asks access(X_OK), which a no-exec mount refuses: the mode bits are asked instead.
+    [ -f "${S}/work/extracted/vmt900/x.sh" ] && stat -c %A "${S}/work/extracted/vmt900/x.sh" | grep -q x && echo "own file there"
     "${S}/work/extracted/vmt900/x.sh" 2>/dev/null && echo "EXECUTED" || echo "noexec held"
+    for i in $(seq 40); do [ -f "${S}/work/extracted/vmt901/peer.sh" ] && break; sleep 0.25; done
+    [ -f "${S}/work/extracted/vmt901/peer.sh" ] && stat -c %A "${S}/work/extracted/vmt901/peer.sh" | grep -q x && echo "peer file there"
+    "${S}/work/extracted/vmt901/peer.sh" 2>/dev/null && echo "PEER EXECUTED" || echo "peer noexec held"
     /.msb/scripts/dfirswarm-bridge; sleep 0.5
     # The request's writer stays open until the hub answers: a half-closed
     # connection is ended by the guest's bridge before a slow reply arrives.
-    { printf '%s\\n' '{"t":"rpc","fn":"publishFile","args":[null,"work/vmt900/report.md","work/report.md"]}'; sleep 8; } | socat -t 30 - UNIX-CONNECT:/run/dfirswarm/hub.sock 2>&1 | sed 's/^/publish /'
+    # Without its bytes a publish is refused: the hub does not open a file
+    # in a seat's own directory.
+    { printf '%s\\n' '{"t":"rpc","fn":"publishFile","args":[null,"work/vmt900/report.md","work/report.md"]}'; sleep 4; } | socat -t 30 - UNIX-CONNECT:/run/dfirswarm/hub.sock 2>&1 | sed 's/^/rawpublish /'
+    b64="$(base64 -w0 "${S}/work/vmt900/report.md" 2>/dev/null || base64 "${S}/work/vmt900/report.md" | tr -d '\\n')"
+    { printf '{"t":"rpc","fn":"publishFile","args":[null,"work/vmt900/report.md","work/report.md",{"bytes_b64":"%s"}]}\\n' "$b64"; sleep 8; } | socat -t 30 - UNIX-CONNECT:/run/dfirswarm/hub.sock 2>&1 | sed 's/^/publish /'
   `);
   assert.match(out, /refused .*work\/shared\.md/, out);
   assert.match(out, /refused .*work\/vmt901\/theirs\.md/, "a peer's scratch is read-only here");
   assert.match(out, /refused .*work\/extracted\/vmt901\/theirs\.bin/, "a peer's extracted material is read-only here");
   assert.match(out, /own ok/, out);
+  assert.match(out, /own file there/, `the file under test exists and is executable by its mode: ${out}`);
   assert.match(out, /noexec held/, "nothing under work/extracted/ runs");
+  assert.match(out, /peer file there/, `the peer's file is visible here: ${out}`);
+  assert.match(out, /peer noexec held/, "a peer's extracted file does not run in another VM");
   assert.doesNotMatch(out, /EXECUTED/);
+  assert.match(out, /rawpublish .*bytes with the call/, `a publish without its bytes is refused: ${out}`);
   assert.match(out, /"ok":true/, `the publish went through the hub: ${out}`);
   assert.equal(await readFile(join(S, "work", "report.md"), "utf8"), "# findings\n", "the deliverable is on the host, written by the hub");
   const claims = await readdir(join(S, "locks")).catch(() => []);
   assert.ok(claims.length >= 1, "the destination was claimed for the publisher");
+});
+
+test("the catalog's VM, parsing hostile evidence as root, can write catalog/ and nothing else of the run or the evidence", async (t) => {
+  if (skip) return t.skip(skip);
+  const r = await rig("vmtc", ["vmtc00"]);
+  const S = r.sandbox;
+  await writeFile(join(S, "inputs.json"), '{"files":[]}\n');
+  const before = await fingerprint(S, ["catalog", "vm"]);
+  const evidenceBefore = await fingerprint(r.evidence, []);
+  const out = await imageCatalog(IMAGE, S, [r.evidence], {
+    command: `
+      w() { if ( printf x >> "$1" ) 2>/dev/null; then echo "WROTE $1"; else echo "refused $1"; fi; }
+      w "${S}/inputs.json"; w "${S}/SWARM.md"; w "${S}/traces/events.jsonl"; w "${r.evidence}/notes.txt"
+      mkdir -p "${S}/tools/planted" 2>/dev/null && echo "MADE tools" || echo "refused tools"
+      printf 'index\n' > "${S}/catalog/README.md" && echo "catalog ok"
+    `,
+  });
+  assert.match(out.output, /catalog ok/, out.output);
+  assert.doesNotMatch(out.output, /WROTE|MADE/, out.output);
+  assert.deepEqual(await fingerprint(S, ["catalog", "vm"]), before, "nothing of the run outside catalog/ changed");
+  assert.deepEqual(await fingerprint(r.evidence, []), evidenceBefore, "the evidence is unchanged");
+});
+
+test("in a VM a forged tool and a seeded one run only as their sealed bytes, and a seat's own file is recorded and restored without the hub opening it", async (t) => {
+  if (skip) return t.skip(skip);
+  const r = await rig("vmtf", ["vmtf00"], { env: { SWARM_ID: "vmtf", SWARM_TOOL_FORGING: "1" } }, { forging: true });
+  const S = r.sandbox;
+  // A tool seeded the way a pack's is: copied into tools/ and sealed into history on the host.
+  const { sealForgedTools } = await import("../extensions/protocol.ts");
+  const script = "echo seeded-ran\n";
+  await mkdir(join(S, "tools", "seeded_tool"), { recursive: true });
+  await writeFile(join(S, "tools", "seeded_tool", "run.sh"), script);
+  await writeFile(join(S, "tools", "seeded_tool", "manifest.json"), JSON.stringify({ name: "seeded_tool", description: "Seeded.", params: {}, runtime: "bash", entry: "run.sh", timeout_seconds: 30, by: "harness", at: new Date().toISOString(), version: 1, sha256: createHash("sha256").update(script).digest("hex"), pack: "a-pack" }));
+  await sealForgedTools(S);
+  assert.deepEqual((await createVms(r.spec)).failures, []);
+  const code = `
+    const P = await import(${JSON.stringify(join(ROOT, "extensions", "protocol.ts"))});
+    const B = await import(${JSON.stringify(join(ROOT, "extensions", "board.ts"))});
+    const S = ${JSON.stringify(S)};
+    const ctx = { sandboxRoot: S, agentId: "vmtf00" };
+    const say = (k, v) => console.log(k + " " + JSON.stringify(v));
+    const forged = await B.forgeTool(ctx, { name: "echo_here", description: "Echo.", runtime: "bash", script: "echo forged-ran\\n" });
+    say("forged", forged.ok);
+    for (const name of ["echo_here", "seeded_tool"]) {
+      const sealed = await B.forgedToolSeal(S, name);
+      const manifest = JSON.parse(require("node:fs").readFileSync(S + "/tools/" + name + "/manifest.json", "utf8"));
+      const run = await P.runForgedTool(S, manifest, {}, { agentId: "vmtf00", sealed });
+      say(name, run.stdout.trim());
+    }
+    const fs = await import("node:fs/promises");
+    await fs.writeFile(S + "/work/vmtf00/notes.md", "one\\n");
+    const r1 = await B.recordFileVersion(S, "work/vmtf00/notes.md", "vmtf00");
+    await fs.writeFile(S + "/work/vmtf00/notes.md", "two\\n");
+    await B.recordFileVersion(S, "work/vmtf00/notes.md", "vmtf00");
+    const back = await B.restoreFileVersion(ctx, "work/vmtf00/notes.md", r1.rev);
+    say("restored", back.ok);
+    say("now", await fs.readFile(S + "/work/vmtf00/notes.md", "utf8"));
+  `;
+  const { writeFile: wf } = await import("node:fs/promises");
+  await wf(join(S, "work", "vmtf00-check.mjs"), `import { createRequire } from "node:module"; const require = createRequire(import.meta.url);\n${code}`);
+  const out = await inVmAsync(vmName(r.run, "vmtf00"), `/.msb/scripts/dfirswarm-bridge; sleep 0.5; cd "${S}" && node --experimental-strip-types --no-warnings work/vmtf00-check.mjs 2>&1`);
+  assert.match(out, /forged true/, out);
+  assert.match(out, /echo_here "forged-ran"/, `the forged tool ran in the VM as its sealed bytes: ${out}`);
+  assert.match(out, /seeded_tool "seeded-ran"/, `the seeded tool ran in the VM: ${out}`);
+  assert.match(out, /restored true/, out);
+  assert.match(out, /now "one\\n"/, `the restore was made in the VM: ${out}`);
+  assert.equal(await readFile(join(S, "work", "vmtf00", "notes.md"), "utf8"), "one\n", "and the host sees it");
+  const history = await readdir(join(S, "history"));
+  assert.ok(history.length >= 1, "the revisions are in history/, written by the hub from the bytes the VM sent");
+});
+
+test("a claim on a file a peer just published waits out the guest cache, with the default settle", async (t) => {
+  if (skip) return t.skip(skip);
+  const r = await rig("vmts", ["vmts00", "vmts01"], {}, { settleMs: undefined });
+  assert.deepEqual((await createVms(r.spec)).failures, []);
+  const S = r.sandbox;
+  await writeFile(join(S, "work", "vmts00", "report.md"), "# from vmts00\n").catch(async () => {
+    await mkdir(join(S, "work", "vmts00"), { recursive: true });
+    await writeFile(join(S, "work", "vmts00", "report.md"), "# from vmts00\n");
+  });
+  const { callBoard } = await import("../extensions/board.ts");
+  const published = (await callBoard(r.hub.socketFor("vmts00"), "publishFile", [null, "work/vmts00/report.md", "work/report.md", { bytes_b64: Buffer.from("# from vmts00\n").toString("base64") }])) as { ok: boolean };
+  assert.equal(published.ok, true);
+  await callBoard(r.hub.socketFor("vmts00"), "releaseFile", [null, "work/report.md"]);
+  const t0 = Date.now();
+  const claim = (await callBoard(r.hub.socketFor("vmts01"), "claimFile", [null, "work/report.md", { reason: "take over the report" }])) as { ok: boolean };
+  const waited = Date.now() - t0;
+  assert.equal(claim.ok, true);
+  assert.ok(waited >= 5500, `the peer's claim waited out the cache window (${waited} ms)`);
 });
 
 test("the network check boots the run's policy in a throwaway VM: allowed hosts answer, others do not resolve, and one provider's placeholder never reaches another's host", async (t) => {

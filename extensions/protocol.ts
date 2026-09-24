@@ -4065,6 +4065,11 @@ export type ForgedToolManifest = {
   /** The pack this tool was seeded from, when a run carried one. Absent for a
    *  tool an agent forged during the run. */
   pack?: string;
+  /** Programs the script calls, as its author named them: what a later case
+   *  (or `tools --save` into a library) needs its image to hold. */
+  requires?: string[];
+  /** The image the tool was forged against, by digest, in a VM run. */
+  image_digest?: string;
 };
 
 export type ForgeToolSpec = {
@@ -4075,6 +4080,7 @@ export type ForgeToolSpec = {
   script: string;
   timeout_seconds?: number;
   example?: string;
+  requires?: string[];
 };
 
 export type ForgeResult =
@@ -4181,7 +4187,14 @@ export function validateToolSpec(spec: unknown): { ok: true; spec: ForgeToolSpec
   }
   const example = typeof spec.example === "string" && spec.example.trim() ? spec.example.trim() : undefined;
   if (example && example.length > TOOL_DESCRIPTION_MAX_CHARS) return { ok: false, reason: `example is longer than ${TOOL_DESCRIPTION_MAX_CHARS} chars` };
-  return { ok: true, spec: { name, description, params, runtime: runtime as ToolRuntime, script, timeout_seconds: timeout, ...(example ? { example } : {}) } };
+  let requires: string[] | undefined;
+  if (spec.requires !== undefined) {
+    if (!Array.isArray(spec.requires) || spec.requires.length > 32 || !spec.requires.every((r) => typeof r === "string" && /^[A-Za-z0-9._+-]{1,64}$/.test(r))) {
+      return { ok: false, reason: "requires must be a list of program names (at most 32)" };
+    }
+    requires = [...new Set(spec.requires as string[])];
+  }
+  return { ok: true, spec: { name, description, params, runtime: runtime as ToolRuntime, script, timeout_seconds: timeout, ...(example ? { example } : {}), ...(requires?.length ? { requires } : {}) } };
 }
 
 export function toolDir(sandboxRoot: string, name: string): string {
@@ -4212,6 +4225,8 @@ function parseManifest(raw: string): ForgedToolManifest | null {
       version: Number(m.version) || 1,
       sha256: m.sha256,
       ...(typeof m.pack === "string" && m.pack ? { pack: m.pack } : {}),
+      ...(Array.isArray(m.requires) && m.requires.every((r: unknown) => typeof r === "string") ? { requires: m.requires as string[] } : {}),
+      ...(typeof m.image_digest === "string" && m.image_digest ? { image_digest: m.image_digest } : {}),
     };
   } catch {
     return null;
@@ -4438,6 +4453,9 @@ export async function forgeTool(ctx: SwarmContext, rawSpec: unknown): Promise<Fo
     entry,
     timeout_seconds: spec.timeout_seconds ?? TOOL_TIMEOUT_DEFAULT_SECONDS,
     ...(spec.example ? { example: spec.example } : {}),
+    ...(spec.requires?.length ? { requires: spec.requires } : {}),
+    // In a VM run the hub forges on the host and knows the run's image.
+    ...(process.env.SWARM_VM_IMAGE_DIGEST ? { image_digest: process.env.SWARM_VM_IMAGE_DIGEST } : {}),
     by: ctx.agentId,
     at: new Date().toISOString(),
     version,

@@ -168,7 +168,7 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
       [--quarantine] [--case-id ID] [--examiner NAME] [--allow-host HOST]...
       [--no-netguard] [--local-only] [--playwright] [--probe-violation]
       [--key-from-env] [--env KEY=VALUE]...
-      [--isolation host|microvm] [--image REF] [--vm-cpus N] [--vm-memory MIB] [--vm-disk MIB] [--no-vm-snapshot] [--allow-oauth-in-vm]
+      [--isolation host|microvm] [--image REF] [--vm-cpus N] [--vm-memory MIB] [--vm-disk MIB] [--no-vm-snapshot] [--vm-snapshot-dir DIR] [--allow-oauth-in-vm]
 
 The team
   --model P/ID        One model for every agent.
@@ -374,6 +374,8 @@ Isolation
   --no-vm-snapshot    At stop, remove each VM without keeping its disk. By default
                       the disk is kept beside the run (<sandbox>.vm-snapshots/)
                       with msb's integrity record, and its sha256 is in vm/<id>.json.
+  --vm-snapshot-dir DIR  Keep the VMs' disks in DIR instead (a link beside the run
+                      names it): off a synced folder, on a volume with room.
 
 Network
   --allow-host HOST   Add one host to netguard's allowlist; repeatable. For a
@@ -518,6 +520,27 @@ keep_host_awake() { # <sandbox> <wall minutes>
   fi
   echo $! > "$sandbox/inhibit.pid"
   echo "Awake:        this host is kept from sleeping for the run (pid $(cat "$sandbox/inhibit.pid"))"
+  # caffeinate -s holds only on AC power, and nothing held here stops a Mac
+  # from sleeping when its lid is closed.
+  if command -v pmset >/dev/null 2>&1 && pmset -g batt 2>/dev/null | grep -q "Battery Power"; then
+    echo "WARN: this Mac is on battery: it is kept awake only on power, and a closed lid sleeps it whatever is asked. Plug it in and keep the lid open for the run." >&2
+  fi
+}
+
+# Where a run is kept, if a sync client uploads it: what the agents derive
+# from the evidence (work/, the trace, the sessions) and each VM's kept disk
+# would leave the machine. Said at kickoff; where to keep the disks is
+# --vm-snapshot-dir.
+synced_folder_of() { # <path>
+  local p
+  p="$(cd "$1" 2>/dev/null && pwd -P || printf '%s' "$1")"
+  case "$p" in
+    */Library/CloudStorage/*) printf '%s\n' "$(printf '%s' "$p" | sed -E 's#^.*/Library/CloudStorage/([^/]+).*#\1#')"; return 0 ;;
+    */Library/Mobile\ Documents/*) printf 'iCloud Drive\n'; return 0 ;;
+    */Dropbox|*/Dropbox/*) printf 'Dropbox\n'; return 0 ;;
+    */OneDrive*|*/Google\ Drive/*) printf 'a synced drive\n'; return 0 ;;
+  esac
+  return 1
 }
 
 # One teardown for a kickoff that does not reach its end, whichever exit it
@@ -540,6 +563,16 @@ kickoff_teardown() { # <exit status>
   stop_sandbox_daemons "$KICKOFF_SANDBOX" keep-record >/dev/null 2>&1 || true
   registry_update_state "$KICKOFF_ID" failed || true
   echo "Recorded as failed; the sandbox stays for reading: $KICKOFF_SANDBOX" >&2
+}
+# Before the record is written there is no run to mark failed, but the
+# kickoff has already started things: an attached evidence image, the trace
+# collector, the nudge broker, the gate, the netguard sidecar. An exit before
+# kickoff_arm left them running for a run that never was.
+kickoff_pre_arm() { # <sandbox>
+  KICKOFF_SANDBOX="$1"
+  trap 'rc=$?; trap - EXIT INT TERM; if [[ $rc -ne 0 ]]; then stop_sandbox_daemons "$KICKOFF_SANDBOX" keep-record >/dev/null 2>&1; detach_inputs_image "$KICKOFF_SANDBOX" >/dev/null 2>&1; fi; exit $rc' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 }
 kickoff_arm() { # <sandbox> <id> <isolation>
   KICKOFF_SANDBOX="$1" KICKOFF_ID="$2" KICKOFF_ISOLATION="$3" KICKOFF_ARMED=1
@@ -2094,11 +2127,18 @@ pane_env_for() { # <agent> -> sets PANE_ENV_ARGS
   fi
 }
 
+# The pane helpers leave the new pane's id in NEW_PANE and are called in
+# this shell, not in $(...): they count failed splits, tabs and extra
+# workspaces, and a workspace they open has to reach the list the stop and
+# the kickoff's teardown close. Called in a subshell, every one of those was
+# lost — and the "Layout:" line went into the pane id.
+NEW_PANE=""
 herdr_try_split() {
   local parent="$1"
   local dir="$2"
   local agent="$3"
   local split pane
+  NEW_PANE=""
   pane_env_for "$agent"
   split="$(herdr pane split "$parent" --direction "$dir" --no-focus \
     ${PANE_ENV_ARGS[@]+"${PANE_ENV_ARGS[@]}"})" || true
@@ -2109,12 +2149,13 @@ herdr_try_split() {
     printf '%s\n' "$split" >&2
     return 1
   fi
-  printf '%s\n' "$pane"
+  NEW_PANE="$pane"
 }
 
 herdr_new_surface() {
   local agent="$1"
   local created pane new_ws
+  NEW_PANE=""
   pane_env_for "$agent"
   created="$(herdr tab create --workspace "$workspace_id" --cwd "$sandbox" --label "$agent" --no-focus \
     ${PANE_ENV_ARGS[@]+"${PANE_ENV_ARGS[@]}"})" || true
@@ -2122,7 +2163,7 @@ herdr_new_surface() {
   if [[ -n "$pane" ]]; then
     tab_count=$((tab_count + 1))
     echo "Layout: new tab #$tab_count for $agent on $workspace_id"
-    printf '%s\n' "$pane"
+    NEW_PANE="$pane"
     return 0
   fi
   echo "WARN: tab create failed for $agent; opening a new workspace." >&2
@@ -2142,18 +2183,14 @@ herdr_new_surface() {
   KICKOFF_WORKSPACES+=("$new_ws")
   tab_count=$((tab_count + 1))
   echo "Layout: new workspace $new_ws for $agent"
-  printf '%s\n' "$pane"
+  NEW_PANE="$pane"
 }
 
 herdr_new_pane() {
   local parent="$1"
   local dir="$2"
   local agent="$3"
-  local pane
-  if pane="$(herdr_try_split "$parent" "$dir" "$agent")"; then
-    printf '%s\n' "$pane"
-    return 0
-  fi
+  herdr_try_split "$parent" "$dir" "$agent" && return 0
   herdr_new_surface "$agent"
 }
 
@@ -2169,7 +2206,8 @@ layout_agent_panes() {
   for ((idx = 1; idx < n; idx++)); do
     pane=""
     if (( panes_on_tab >= max_tab )); then
-      pane="$(herdr_new_surface "${agent_ids[$idx]}")"
+      herdr_new_surface "${agent_ids[$idx]}" || return 1
+      pane="$NEW_PANE"
       panes+=("$pane")
       panes_on_tab=1
       tab_base=$((${#panes[@]} - 1))
@@ -2183,11 +2221,12 @@ layout_agent_panes() {
       parent="${panes[$((tab_base + pos - cols))]}"
       dir=down
     fi
-    if pane="$(herdr_try_split "$parent" "$dir" "${agent_ids[$idx]}")"; then
-      panes+=("$pane")
+    if herdr_try_split "$parent" "$dir" "${agent_ids[$idx]}"; then
+      panes+=("$NEW_PANE")
       panes_on_tab=$((panes_on_tab + 1))
     else
-      pane="$(herdr_new_surface "${agent_ids[$idx]}")"
+      herdr_new_surface "${agent_ids[$idx]}" || return 1
+      pane="$NEW_PANE"
       panes+=("$pane")
       panes_on_tab=1
       tab_base=$((${#panes[@]} - 1))
@@ -2255,7 +2294,7 @@ cmd_start() {
   local packs=""
   local write_guard=1
   # Where the agents live: host processes, or one microVM each.
-  local isolation="${SWARM_ISOLATION:-host}" vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 allow_oauth_in_vm=0 inputs_copy=0
+  local isolation="${SWARM_ISOLATION:-host}" vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0
   local seal_herdr=1
   # Directories the panes may not read. Reads are open by design, so this is
   # narrow on purpose: material about the case the agents must derive rather
@@ -2368,6 +2407,7 @@ cmd_start() {
       --vm-memory) vm_memory="$2"; shift 2 ;;
       --vm-disk) vm_disk="$2"; shift 2 ;;
       --no-vm-snapshot) vm_snapshot=0; shift ;;
+      --vm-snapshot-dir) vm_snapshot_dir="$2"; shift 2 ;;
       --allow-oauth-in-vm) allow_oauth_in_vm=1; shift ;;
       --inputs-copy) inputs_copy=1; shift ;;
       -h|--help) usage_start; exit 0 ;;
@@ -2888,6 +2928,17 @@ STRIP
         jq -r '.doctor_output // empty' <<<"$vm_probe" 2>/dev/null | sed 's/^/  | /' >&2
         exit 3
       fi
+      # The measurements this isolation rests on — the five-second guest
+      # cache, the secret-violation log line, snapshot verification — were
+      # taken on msb 0.7.2 as this repository pins it. Another msb is said.
+      local msb_version msb_path
+      msb_version="$(jq -r '.version // empty' <<<"$vm_probe" 2>/dev/null)"
+      msb_path="$(jq -r '.msb // empty' <<<"$vm_probe" 2>/dev/null)"
+      if [[ "$msb_version" != *"0.7.2"* ]]; then
+        echo "WARN: msb here is ${msb_version:-unknown} ($msb_path); this isolation was measured on 0.7.2. The guest cache window and msb's logs may differ: run DFIRSWARM_VM_TESTS=1 npm run test:vm on it before a case." >&2
+      elif [[ "$msb_path" == "msb" ]]; then
+        echo "WARN: msb is the one on PATH, not the pinned package (npm ci installs it); it says 0.7.2." >&2
+      fi
       if [[ "$(jq -r '.image_present' <<<"$vm_probe" 2>/dev/null)" == "true" ]]; then
         vm_image_digest="$(jq -r '.image_digest // empty' <<<"$vm_probe")"
       else
@@ -2966,6 +3017,7 @@ STRIP
     "$sandbox/history" \
     "$sandbox/tools"
   local id
+  kickoff_pre_arm "$sandbox"
   for id in "${agent_ids[@]}"; do
     mkdir -p "$sandbox/inbox/$id"
     printf '{}\n' > "$sandbox/inbox/$id/cursors.json"
@@ -3020,6 +3072,25 @@ STRIP
   # manifest against this, so a manifest rewritten inside the run is caught
   # rather than trusted.
   write_custody_anchor "$sandbox" "$swarm_id"
+  local synced
+  if synced="$(synced_folder_of "$(dirname "$sandbox")")"; then
+    echo "WARN: this run is kept in a synced folder ($synced): what the agents derive from the evidence — work/, the trace, their sessions$([[ "$isolation" == "microvm" ]] && printf ', and each VM'"'"'s kept disk') — will be uploaded by its sync client. Pass --sandbox (and --vm-snapshot-dir) outside it for a case whose material must stay on this machine." >&2
+  fi
+  # Where the VMs' disks are kept: beside the run by default, or where the
+  # operator says (a link beside the run names it, so every reader — stop,
+  # custody, the package, reap — finds them where it always looks).
+  if [[ "$isolation" == "microvm" && -n "$vm_snapshot_dir" ]]; then
+    mkdir -p "$vm_snapshot_dir" && chmod 700 "$vm_snapshot_dir"
+    local snap_real
+    snap_real="$(cd "$vm_snapshot_dir" && pwd -P)"
+    rm -f "$sandbox.vm-snapshots" 2>/dev/null || true
+    if [[ -e "$sandbox.vm-snapshots" ]]; then
+      echo "BLOCKER: $sandbox.vm-snapshots already holds an earlier run's disks; move them, or drop --vm-snapshot-dir." >&2
+      exit 2
+    fi
+    ln -s "$snap_real" "$sandbox.vm-snapshots"
+    echo "Disks:        each VM's disk will be kept in $snap_real"
+  fi
   # The manifest and its anchor are the harness's record of what the run was
   # given: read-only on disk too, beneath the tool guard and outside the
   # panes' write allowlist, so a slip is refused rather than recorded.
@@ -3357,17 +3428,17 @@ STRIP
     elif [[ "$local_only" -eq 1 ]]; then
       vm_hosts="your local model through the host gateway"
     else
-      vm_hosts="$(provider_hosts_for_models 2>/dev/null || true)"
+      # The models' hosts less the ones a VM never reaches (a token refresh or
+      # exchange: the guest never refreshes, the host minted its token), then
+      # what the operator allowed, the package index and a pack's hosts.
+      vm_hosts="$(provider_hosts_for_models 2>/dev/null | tr ',' '\n' | grep -v -x -E 'auth\.openai\.com|platform\.claude\.com|api\.github\.com' | paste -sd, - || true)"
       [[ -n "$allow_hosts" ]] && vm_hosts="${vm_hosts}${vm_hosts:+,}$allow_hosts"
       [[ "$allow_install" -eq 1 && "$install_hosts" -eq 1 ]] && vm_hosts="${vm_hosts}${vm_hosts:+,}pypi.org,files.pythonhosted.org"
-      # A pack's secret hosts are reached from the VMs too.
       local ps_hosts
       ps_hosts="$(jq -r '[.[]?.hosts[]?] | join(",")' <<<"${PACK_SECRETS_VM:-[]}" 2>/dev/null || true)"
       [[ -n "$ps_hosts" ]] && vm_hosts="${vm_hosts}${vm_hosts:+,}$ps_hosts"
-      # In the words a VM meets them in: a refresh host is not bound (the
-      # guest never refreshes), and this machine's loopback is the gateway.
-      vm_hosts="$(printf '%s' "$vm_hosts" | tr ',' '\n' | awk 'NF && !seen[$0]++' \
-        | grep -v -x -E 'auth\.openai\.com|platform\.claude\.com' \
+      # In the words a VM meets them in: this machine's loopback is the gateway.
+      vm_hosts="$(printf '%s' "$vm_hosts" | tr ',' '\n' | awk 'NF' \
         | sed -E 's/^(127\.[0-9.]+|localhost|0\.0\.0\.0|\[::1\]|::1):([0-9]+)$/host.microsandbox.internal:\2/' \
         | awk '!seen[$0]++' | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g')"
     fi
@@ -4098,7 +4169,8 @@ EOF
   if [[ "$probe" -eq 1 ]]; then
     local probe_id="${swarm_id}pv"
     local probe_pane probe_tools probe_prompt
-    probe_pane="$(herdr_new_pane "${panes[$((n-1))]}" down "$probe_id")"
+    herdr_new_pane "${panes[$((n-1))]}" down "$probe_id" || true
+    probe_pane="$NEW_PANE"
     probe_tools="read,bash,edit,write,post,inbox,list_team,budget,done"
     echo "Probe:        $probe_id (no claim_file) on $probe_pane"
     herdr agent start "$probe_id" --kind pi --pane "$probe_pane" --timeout 120000 -- \
@@ -4180,13 +4252,15 @@ cmd_list() {
     echo "(no swarms)"
     return 0
   fi
+  # How each run's agents were held is a column: a VM run's stop puts VMs
+  # away, and its states (finished, finish_failed, stop_incomplete) are its own.
   jq -r '
     .runs[] |
-    [.id, .state, .["label"], (.workspace_id // "-"), .n, .model, .sandbox] |
+    [.id, .state, .["label"], (.isolation.mode // "host"), (.workspace_id // "-"), .n, .model, .sandbox] |
     @tsv
   ' "$REGISTRY" | awk -F'\t' 'BEGIN {
-    printf "%-10s %-10s %-22s %-8s %-3s %-28s %s\n", "ID", "STATE", "LABEL", "WS", "N", "MODEL", "SANDBOX"
-  } { printf "%-10s %-10s %-22s %-8s %-3s %-28s %s\n", $1, $2, $3, $4, $5, $6, $7 }'
+    printf "%-10s %-16s %-22s %-8s %-8s %-3s %-28s %s\n", "ID", "STATE", "LABEL", "HELD", "WS", "N", "MODEL", "SANDBOX"
+  } { printf "%-10s %-16s %-22s %-8s %-8s %-3s %-28s %s\n", $1, $2, $3, $4, $5, $6, $7, $8 }'
 }
 
 cmd_status() {
@@ -5318,7 +5392,7 @@ start_vm_hub() { # <sandbox> <hub dir> <run id> <collector socket> <agent ids...
   [[ "${forging:-0}" -eq 1 ]] && hub_args+=(--forging)
   [[ "${vm_snapshot:-1}" -eq 1 ]] || hub_args+=(--no-snapshot)
   # The inbox page bound is read by readInbox, which for a VM runs here.
-  printf '%s' "$input" | SWARM_RUNS_DIR="$RUNS_DIR" SWARM_INBOX_PAGE_CHARS="${inbox_page_chars:-}" detach_exec node --experimental-strip-types --no-warnings "$script" \
+  printf '%s' "$input" | SWARM_RUNS_DIR="$RUNS_DIR" SWARM_INBOX_PAGE_CHARS="${inbox_page_chars:-}" SWARM_VM_IMAGE_DIGEST="${vm_image_digest:-}" detach_exec node --experimental-strip-types --no-warnings "$script" \
     "$sandbox" --dir "$dir" --run "$run" "${hub_args[@]}" --quiet >"$sandbox/traces/vm-hub.log" 2>&1 &
   local hub_pid=$!
   echo "$hub_pid" > "$sandbox/hub.pid"
@@ -5361,7 +5435,7 @@ vm_providers_json() {
     # and an API key has no business with the account console: the endpoints
     # a refresh or a console call would go to are not the VM's to reach, and
     # its credential is not bound to them.
-    hosts_drop="auth.openai.com platform.claude.com"
+    hosts_drop="auth.openai.com platform.claude.com api.github.com"
     hosts="$(provider_hosts_for_model "$model")"
     if [[ -n "${hosts_drop:-}" ]]; then
       local kept="" one
@@ -5527,6 +5601,11 @@ vm_build_spec() { # <hub dir> <out file>
     [[ -n "$compact_model" ]] && add_env SWARM_COMPACT_MODEL "$compact_model"
   fi
   [[ -n "$inbox_page_chars" ]] && add_env SWARM_INBOX_PAGE_CHARS "$inbox_page_chars"
+  # The programs the seeded tools name (`requires` in their manifests): the
+  # VM's probe looks for them, and a missing one is said at kickoff.
+  local tool_programs
+  tool_programs="$(jq -r '.requires[]? // empty' "$sandbox"/tools/*/manifest.json 2>/dev/null | awk 'NF && !seen[$0]++' | paste -sd, - || true)"
+  [[ -n "$tool_programs" ]] && add_env SWARM_TOOL_PROGRAMS "$tool_programs"
   [[ "$quarantine" -eq 1 ]] && add_env SWARM_QUARANTINE 1
   [[ "$playwright" -eq 1 ]] && add_env BROWSER_CHECK_EXECUTABLE /usr/bin/chromium
   [[ "$local_only" -eq 1 ]] && add_env PI_OFFLINE 1
@@ -5716,7 +5795,13 @@ launch_vm_agents() {
     fi
     sleep 1
   done
-  if [[ "$linked" -lt "$n" ]]; then
+  if [[ "$linked" -eq 0 ]]; then
+    # Not one agent reached the hub: the VMs are up and nothing in them
+    # runs the case. That is a kickoff that failed, not a slow start; the
+    # teardown puts the VMs away and the record says failed.
+    echo "BLOCKER: none of the $n agents linked to the hub within a minute; see $sandbox/traces/vm-create.log and each pane (swarm.sh status $swarm_id)." >&2
+    exit 1
+  elif [[ "$linked" -lt "$n" ]]; then
     echo "WARN: $linked of $n agents linked to the hub within a minute; the others' panes may still be starting Pi (swarm.sh status $swarm_id)." >&2
   else
     echo "Agents:       $n Pi sessions up in their VMs, each linked to the hub"
@@ -6110,7 +6195,13 @@ cmd_tools() {
     # changed after it was forged, and a library would carry the change into
     # every case that loads it.
     entry="$(jq -r '.entry // empty' "$tool/manifest.json" 2>/dev/null)"
-    want="$(jq -r '.sha256 // empty' "$tool/manifest.json" 2>/dev/null)"
+    # The hash make_tool sealed into file history, not the manifest on disk:
+    # a shell that rewrote the script could rewrite its manifest to match.
+    want="$(node --experimental-strip-types --no-warnings -e '
+      const [protocol, S, name] = process.argv.slice(1);
+      import(protocol).then(async (P) => console.log(await P.forgedToolSeal(S, name))).catch(() => console.log(""));
+    ' "$ROOT/extensions/protocol.ts" "$sandbox" "$name" 2>/dev/null || true)"
+    [[ "$want" =~ ^[0-9a-f]{64}$ ]] || want="$(jq -r '.sha256 // empty' "$tool/manifest.json" 2>/dev/null)"
     if [[ -z "$entry" || "$entry" == */* || ! -f "$tool/$entry" || -L "$tool/$entry" || "$(sha256_of "$tool/$entry")" != "$want" ]]; then
       echo "Left out $name: its script does not match the sha256 in its manifest." >&2
       unsealed=$(( unsealed + 1 ))
@@ -6132,11 +6223,18 @@ cmd_tools() {
     jq 'del(.pack)' "$tool/manifest.json" > "$dest/$name/manifest.json"
     # Where it came from, for whoever loads it next: the run, the image it
     # ran against, who forged it and when, and the pack it came from if any.
-    jq -n --arg run "$id" --arg saved "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson m "$(cat "$tool/manifest.json")" --argjson rec "$rec" \
+    # And what it ran with: the packs (by version) and what the run
+    # installed, which a script importing a library needs as much as the image.
+    local toolchain_json='[]'
+    [[ -f "$sandbox/toolchain.json" ]] && toolchain_json="$(jq -c '[.packages[]? | {name, version} ] // []' "$sandbox/toolchain.json" 2>/dev/null || echo '[]')"
+    jq -n --arg run "$id" --arg saved "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson m "$(cat "$tool/manifest.json")" --argjson rec "$rec" --arg sealed "$want" --argjson tc "$toolchain_json" \
       '{saved_from_run: $run, saved_at: $saved, case_id: ($rec.case_id // null),
         isolation: ($rec.isolation.mode // "host"), image: ($rec.isolation.image // null), image_digest: ($rec.isolation.image_digest // null),
-        forged_by: ($m.by // null), forged_at: ($m.at // null), version: ($m.version // null), sha256: ($m.sha256 // null),
-        from_pack: ($m.pack // null)}' > "$dest/$name/provenance.json"
+        forged_by: ($m.by // null), forged_at: ($m.at // null), version: ($m.version // null), sha256: $sealed,
+        from_pack: ($m.pack // null),
+        runtime: ($m.runtime // null),
+        packs: ($rec.packs // []),
+        installed_during_the_run: $tc}' > "$dest/$name/provenance.json"
     saved=$(( saved + 1 ))
   done
   [[ "$left" -gt 0 ]] && echo "Left out $left tool(s) whose name is reserved." >&2

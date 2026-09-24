@@ -128,3 +128,15 @@ are not.
   provider: one forges `count_lines`, the other wakes, sees `new_tools`, calls
   it by name; a reserved name and a takeover are refused; a failing tool is
   reported as a failure. See [verified-runs.md](verified-runs.md).
+
+## What a manifest says about where a tool can run
+
+`make_tool` takes an optional `requires`, the programs the script calls; the
+manifest keeps it, and a VM run forged through the hub also records the
+image the tool was forged against (`image_digest`). `tools --save` copies a
+tool only as the version sealed into file history (a script and a manifest
+rewritten together on disk are not that version) and writes, beside it, what
+it ran with: the run, its image, its packs, and what the run installed.
+In a VM a tool runs only as the bytes the hub says were sealed: the guest's
+own view of `tools/` can lag five seconds behind a re-forge, and the bytes
+are read again until they are the sealed ones or the tool is refused.

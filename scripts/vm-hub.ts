@@ -1472,7 +1472,7 @@ type HubInput = {
 };
 
 /** The environment a hub runs with that must survive a --resume. */
-const KEPT_ENV = ["SWARM_INBOX_PAGE_CHARS", "SWARM_RUNS_DIR"];
+const KEPT_ENV = ["SWARM_INBOX_PAGE_CHARS", "SWARM_RUNS_DIR", "SWARM_VM_IMAGE_DIGEST"];
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);

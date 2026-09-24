@@ -353,3 +353,30 @@ test("a trace with no chain is called unchained, never intact", async () => {
   assert.match(c.summary, /TRACE UNCHAINED \(2 lines\)/);
   assert.doesNotMatch(c.summary, /chain intact/);
 });
+
+test("custody indexes what the run produced and anchors the index and its own verdict outside the run", async () => {
+  const root = await sandbox();
+  await mkdir(join(root, "work", "a0"), { recursive: true });
+  await writeFile(join(root, "work", "report.md"), "# findings\n");
+  await writeFile(join(root, "work", "a0", "notes.txt"), "notes\n");
+  const anchorFile = `${root}.custody-anchor.json`;
+  await writeFile(anchorFile, JSON.stringify({ run: "t1", started_at: "2026-09-24T00:00:00Z" }));
+  dirs.push(anchorFile);
+  const c = await takeCustody(root);
+  assert.equal(c.artifacts?.files, 2);
+  const index = await readFile(join(root, "artifacts.json"), "utf8");
+  assert.equal(c.artifacts?.index_sha256, sha(index));
+  assert.match(c.summary, /2 work files indexed/);
+  const anchor = JSON.parse(await readFile(anchorFile, "utf8")) as { run: string; custody: Array<{ sha256: string; artifacts_sha256: string }> };
+  assert.equal(anchor.run, "t1", "the kickoff's fields stay");
+  assert.equal(anchor.custody.at(-1)?.artifacts_sha256, sha(index));
+  assert.equal(anchor.custody.at(-1)?.sha256, sha(await readFile(join(root, "custody.json"), "utf8")), "the verdict's own hash is anchored");
+});
+
+test("a line a sender says it could not write is counted, not lost in silence", async () => {
+  const root = await sandbox();
+  await writeFile(join(root, "traces", "events.jsonl"), `${JSON.stringify({ ts: "2026-09-24T00:00:00Z", agent: "a0", tool: "bash", args: { trace_lines_lost_before: 2 }, result: {} })}\n`);
+  const c = await takeCustody(root);
+  assert.deepEqual(c.trace.sender_lost, [{ agent: "a0", lines: 2 }]);
+  assert.match(c.summary, /TRACE LINES THE SENDER COULD NOT WRITE: a0 2/);
+});

@@ -11,13 +11,16 @@
  * file on both sides and nothing is ever translated.
  *
  * **A read-only floor with writable holes, never the reverse.** The sandbox
- * is mounted read-only as a whole; `work/`, the agent's own `tool-output/`
- * and its own Pi session directory are mounted writable on top. A read-only
- * mount inside a writable one is not a boundary — guest root unmounted one
- * and wrote through the parent (measured, spikes/microvm-smoke) — while a
- * writable mount inside a read-only one, unmounted, leaves the read-only
- * floor. The board's files are not writable at all: the hub writes them
- * (scripts/vm-hub.ts).
+ * is mounted read-only as a whole, `work/` with it; each agent's own
+ * `work/<id>/`, `work/extracted/<id>/` and `work/quarantine/<id>/` (the last
+ * two no-exec, inside the whole extracted and quarantine shares mounted
+ * read-only and no-exec), its own `tool-output/<id>/` and its own Pi session
+ * directory are mounted writable on top. A read-only mount inside a writable
+ * one is not a boundary — guest root unmounted one and wrote through the
+ * parent (measured, spikes/microvm-smoke) — while a writable mount inside a
+ * read-only one, unmounted, leaves the read-only floor. The board's files and
+ * the shared part of `work/` are written by the hub (scripts/vm-hub.ts,
+ * publish_file), which never opens a file under a seat's own directory.
  *
  * **Structured, not parsed.** Mounts, network rules and secrets go through
  * the SDK's builders. `msb create --mount-dir` misparsed a long mount spec
@@ -32,13 +35,19 @@
  * value on the way out over TLS, to those hosts only.
  *
  *   node --experimental-strip-types scripts/vm.ts probe  [--image REF]
+ *   node --experimental-strip-types scripts/vm.ts pull   --image REF
  *   node --experimental-strip-types scripts/vm.ts create --spec FILE
- *   node --experimental-strip-types scripts/vm.ts finish --run ID --sandbox DIR [--no-snapshot] [--agent ID]
- *   node --experimental-strip-types scripts/vm.ts reap   [--run ID] [--registry FILE]
+ *   node --experimental-strip-types scripts/vm.ts finish --run ID --sandbox DIR [--no-snapshot] [--agent ID] [--registry FILE]
+ *   node --experimental-strip-types scripts/vm.ts reap   [--run ID] [--registry FILE] [--only ID]
  *   node --experimental-strip-types scripts/vm.ts list   [--run ID]
- *   node --experimental-strip-types scripts/vm.ts toolbox --image REF --out FILE [--preset SETS] [--required]
- *   node --experimental-strip-types scripts/vm.ts catalog --image REF --sandbox DIR [--evidence DIR]... [--allow-host H]... [--memory MIB]
+ *   node --experimental-strip-types scripts/vm.ts capacity --n N --cpus N --memory MIB
+ *   node --experimental-strip-types scripts/vm.ts netcheck --image REF [--allow-host H]...
+ *   node --experimental-strip-types scripts/vm.ts check-allow ENTRIES...
+ *   node --experimental-strip-types scripts/vm.ts toolbox --image REF --out FILE [--preset SETS] [--required] [--packs DIRS]
+ *   node --experimental-strip-types scripts/vm.ts catalog --image REF --sandbox DIR [--evidence DIR]... [--allow-host H]... [--memory MIB] [--run ID] [--registry FILE]
  *   node --experimental-strip-types scripts/vm.ts msb-path
+ *
+ * SWARM_MSB_BIN names another msb (tests stand one in).
  */
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -636,6 +645,8 @@ out["kernel"] = os.uname().release
 want = [b for b in os.environ.get("SWARM_REQUIRED_BINARIES", "").split(",") if b]
 search = "/opt/dfir/venv/bin:" + os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 out["missing_binaries"] = [b for b in want if not shutil.which(b, path=search)]
+tool_want = [b for b in os.environ.get("SWARM_TOOL_PROGRAMS", "").split(",") if b]
+out["missing_tool_programs"] = [b for b in tool_want if not shutil.which(b, path=search)]
 # What a pack tool that mounts something would find: FUSE and loop devices.
 out["fuse"] = os.path.exists("/dev/fuse")
 out["loop"] = any(n.startswith("loop") for n in os.listdir("/dev")) or os.path.exists("/dev/loop-control")
@@ -1084,6 +1095,11 @@ export async function createVms(spec: VmSpec): Promise<{ records: VmRecord[]; fa
     }
     if (wrong.length) failures.push({ agent, reasons: wrong });
     for (const w of fit.warnings) warnings.add(w);
+    // The seeded tools' own programs (their manifests' `requires`): a tool
+    // that calls one the image lacks fails when an agent calls it, so it is
+    // said now; it does not stop the run, the tool is one of many.
+    const lacking = Array.isArray(r.value.probe.missing_tool_programs) ? (r.value.probe.missing_tool_programs as string[]) : [];
+    if (lacking.length) warnings.add(`the seeded tools call ${lacking.join(", ")}, which this image does not hold: those tools will fail`);
     // The fit is part of what the VM was: recorded beside the probe.
     (r.value as VmRecord & { image_fit?: unknown }).image_fit = { packs: needs.map((n) => ({ id: n.id, version: n.version })), ...fit };
     await writeFile(join(spec.records_dir, `${agent}.json`), `${JSON.stringify(r.value, null, 2)}\n`).catch(() => undefined);
@@ -1482,7 +1498,7 @@ export async function imageCatalog(
   image: string,
   sandbox: string,
   evidence: string[],
-  options: { cpus?: number; memoryMib?: number; allowHosts?: string[]; openNet?: boolean; run?: string; maxDurationSec?: number; registry?: string } = {},
+  options: { cpus?: number; memoryMib?: number; allowHosts?: string[]; openNet?: boolean; run?: string; maxDurationSec?: number; registry?: string; /** Tests only: a shell command run in the catalog's VM in place of the catalog, to show what that VM can reach. */ command?: string } = {},
 ): Promise<{ code: number; output: string; digest?: string }> {
   const M = await sdk();
   const name = `dfs-catalog-${randomBytes(6).toString("hex")}`;
@@ -1522,7 +1538,7 @@ export async function imageCatalog(
       .volume(join(ROOT, "scripts"), (v) => v.bind(realpathSync(join(ROOT, "scripts"))).readonly());
     for (const e of evidence) builder = builder.volume(e, (v) => v.bind(realpathSync(e)).readonly().noexec());
     const vm = await withTimeout(builder.create(), CREATE_TIMEOUT_MS, `the catalog VM was not up within ${CREATE_TIMEOUT_MS / 1000} s`);
-    const out = await vm.exec("bash", [join(ROOT, "scripts", "evidence-catalog.sh"), sandbox]);
+    const out = options.command ? await vm.exec("sh", ["-c", options.command]) : await vm.exec("bash", [join(ROOT, "scripts", "evidence-catalog.sh"), sandbox]);
     const digest = await imageDigest(name);
     return { code: out.code, output: `${out.stdout()}${out.stderr()}`, ...(digest ? { digest } : {}) };
   } finally {

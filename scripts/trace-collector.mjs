@@ -366,8 +366,11 @@ function start() {
   });
 
   // One sender per pane plus the harness's watchdogs; this is far above what
-  // a run uses and far below what exhausts the machine. Past it the kernel
-  // queues, so a legitimate sender waits rather than failing.
+  // a run uses and far below what exhausts the machine. Past it Node accepts
+  // and at once closes the connection (server.maxConnections does not leave
+  // it in the kernel's queue): the sender's send fails, and its line goes to
+  // its spill, which custody reads. A host pane opens a connection per line;
+  // a VM's lines come through its hub's one held connection.
   server.maxConnections = COLLECTOR_MAX_CONNECTIONS;
 
   server.on("error", (err) => {

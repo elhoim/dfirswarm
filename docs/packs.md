@@ -157,8 +157,11 @@ the operator accepts that the agents can reach it too.
   tool gets a secret there only when the operator accepts it (below).
 - The trace records the call and its parameters. It does not record the secret.
 
-A pack that requires a secret is refused on the host unless the operator
-passes `--allow-pack-secrets`, and the record's `pack_secrets` says what each pack's secrets were given.
+A pack's secrets are handed over only when the operator passes
+`--allow-pack-secrets`, on the host and in a VM alike, and a pack that
+requires one is refused without it; `--local-only` withholds them all and
+opens none of their hosts. The record's `pack_secrets` says, per pack, the
+mode and what happened to each secret by name.
 
 How this is implemented:
 
@@ -171,11 +174,14 @@ How this is implemented:
   `--allow-pack-secrets`, and a pack that requires one is refused without it.
   The run record's `pack_secrets` says, per pack, `exposed`, `withheld` or
   `not-set`.
-- Under `--isolation microvm` the value never enters the VM. Each secret is
-  given to the VM as a placeholder bound to the pack's `hosts`; the host swaps
-  the real value in on the way to those hosts only, and a placeholder sent
-  anywhere else is refused. The record says `injected`. A secret with no
-  `hosts` cannot be bound, and is withheld.
+- Under `--isolation microvm` the value never enters the VM. With
+  `--allow-pack-secrets` each secret is given to the VM as a placeholder
+  bound to the pack's `hosts`; the host swaps the real value in on the way to
+  those hosts only, and a placeholder sent anywhere else is refused. The
+  placeholder is in the whole VM's environment, so any process there can use
+  it against those hosts: that is why the flag is needed here too. The
+  record says `injected`. A secret with no `hosts` cannot be bound, and is
+  withheld; a required secret that cannot be bound stops the kickoff.
 - On the host, only the pack's own tools get the secret, in their child
   process's environment; a tool forged during the run gets none. In a VM the
   placeholder is in the environment of the whole VM, under the secret's own
@@ -301,3 +307,15 @@ Volatility would be a derived work of Volatility rather than of this
 repository. And almost every host binary is marked **optional**: the packs'
 own tools use the standard library, so a host with none of them still works,
 and each host tool widens what can be established rather than being required.
+
+## Tools that call programs, and tools that mount
+
+A tool's manifest may name the programs it calls, `"requires": ["fls",
+"icat"]` (the tool library's manifests do; `make_tool` takes the same list).
+The image choice for a VM run counts them, each VM's probe looks for them,
+and a program the image lacks is said at kickoff: the run goes on, and that
+tool will fail when it is called. In a VM an agent writes only its own
+directories, so a tool that mounts something (a volume shadow copy, a
+memory filesystem) mounts it under `work/<agent id>/`, which is where
+`vss_stores` and `mem_fs` put theirs; the mount is that VM's alone, and what
+is derived from it counts once it is a file there.
