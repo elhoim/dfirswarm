@@ -102,6 +102,24 @@ check_copy() {
   )
   (
     eval "$3"
+    lock_call || fail "$name: could not take a free lock"
+    unlock_call
+    [[ -z "$(ls -A "${lock%/*}")" ]] || fail "$name: release left $(ls -A "${lock%/*}") behind"
+    lock_call || fail "$name: could not take a free lock"
+    # Taken over between the owner check and the rename: the rename moves
+    # someone else's lock, which must be put back, not removed.
+    # shellcheck disable=SC2329  # called by table_lock_release
+    mv() { echo someone-else > "$1/owner"; unset -f mv; command mv "$@"; }
+    local said; said="$(unlock_call 2>&1)"
+    [[ "$(cat "$lock/owner" 2>/dev/null || true)" == "someone-else" ]] \
+      || fail "$name: a lock taken over during release was not put back"
+    [[ "$(ls -A "${lock%/*}")" == "${lock##*/}" ]] || fail "$name: release left $(ls -A "${lock%/*}") behind"
+    [[ "$said" == *"taken over"* ]] || fail "$name: a lock taken over during release went unreported"
+    rm -rf "$lock"
+    pass "$name: release renames before it judges, and puts back a lock that is not its own"
+  )
+  (
+    eval "$3"
     # Released between the waiter's look at it and its stat: the stat fails,
     # which must not read as infinitely old. A stat that fails stands in for
     # the lock vanishing in that gap.

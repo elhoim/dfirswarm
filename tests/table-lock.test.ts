@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -114,6 +114,7 @@ test("a stale lock from another namespace is broken even when the pid it records
     });
     assert.ok(ran);
     assert.ok(Date.now() - started < 5_000, `took ${Date.now() - started} ms to break a stale lock`);
+    assert.deepEqual(await readdir(join(root, "locks")), [], "a break or a release left something behind");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -147,13 +147,19 @@ table_lock_acquire() {
   table_lock_stamp "$dir"
 }
 # Only our own lock: one broken while we stalled may be someone else's now,
-# and that is said rather than ignored.
+# and that is said rather than ignored. The lock is renamed to a name only we
+# use before its owner is read, so what is removed is what was judged ours;
+# one taken over in between is put back unless a new lock has appeared.
 table_lock_release() {
-  if [[ "$(cat "$1/owner" 2>/dev/null || true)" == "$TABLE_LOCK_TOKEN" ]]; then
-    rm -rf "$1"
-  else
-    echo "warning: ${1##*/} was taken over while this process held it; another process may have been inside with it" >&2
+  local tomb="$1.released.$TABLE_LOCK_TOKEN"
+  if [[ "$(cat "$1/owner" 2>/dev/null || true)" == "$TABLE_LOCK_TOKEN" ]] && mv "$1" "$tomb" 2>/dev/null; then
+    if [[ "$(cat "$tomb/owner" 2>/dev/null || true)" == "$TABLE_LOCK_TOKEN" ]]; then
+      rm -rf "$tomb"
+      return 0
+    fi
+    if [[ -e "$1" ]] || ! mv "$tomb" "$1" 2>/dev/null; then rm -rf "$tomb"; fi
   fi
+  echo "warning: ${1##*/} was taken over while this process held it; another process may have been inside with it" >&2
 }
 # <<< table lock
 TABLE_LOCK="$SANDBOX/locks/.table.lock"

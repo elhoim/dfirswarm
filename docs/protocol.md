@@ -152,6 +152,22 @@ reason**, not an open-ended lock:
   token is its own, and warns (`DFIRSWARM_TABLE_LOCK_LOST`; on stderr from
   bash) when it finds its lock was taken over. `reap.sh` and `swarm.sh say`
   use the same mutex from bash, and hold it for a few seconds at most.
+- What the table lock does not guarantee. Each of these needs a process to
+  stall or die inside a window of a few filesystem calls:
+  - A holder that stalls past 15 s where its pid cannot be checked (another
+    pane's pid namespace, another VM) loses its lock. It finds out before its
+    next write in `claimFile`, the budget fold, `record` and file history,
+    which fail with `TableLockLostError` rather than commit, and at release,
+    which warns. The check and the write are still two steps.
+  - A holder whose recorded pid is reused by another live process in the
+    same namespace keeps a dead lock standing; waiters time out after 10 s.
+  - Clearing a stale `.break` repeats the break race one level down: two
+    waiters that both judge it stale can both remove it, the second removing
+    a `.break` the first has just taken.
+  - Release renames the lock to `<lock>.released.<token>` before judging it,
+    so it removes only what it judged its own. If the renamed lock turns out
+    not to be its own, it is renamed back unless a new lock has appeared at
+    the path meanwhile; that step has a gap of its own.
 
 ### Write guard and `claim_violation`
 

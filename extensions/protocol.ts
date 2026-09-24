@@ -627,14 +627,38 @@ async function maybeBreakStaleTableLock(lockDir: string, token: string): Promise
   }
 }
 
-/** Remove a lock directory only while it is still ours. */
+/**
+ * Remove a lock directory only while it is still ours.
+ *
+ * Reading `owner` and then removing the path left a gap in which the lock
+ * could be broken and taken by someone else, whose lock the rm then removed.
+ * So the lock is first renamed to a name only we use, and `owner` is read
+ * from there: what was renamed is exactly what gets judged. If it turns out
+ * not to be ours (taken over between the read and the rename), it is renamed
+ * back unless a new lock has appeared at the path meanwhile. That last step
+ * still has a gap, but reaching it takes a stall, a break and a new mkdir
+ * inside two renames.
+ */
 async function releaseLockDir(dir: string, token: string): Promise<void> {
+  const lost = () =>
+    warnLockLost(`${basename(dir)} was taken over while this process held it; another process may have been inside with it`);
   const owner = await readFile(join(dir, "owner"), "utf8").catch(() => "");
-  if (owner === token) {
-    await rm(dir, { recursive: true, force: true });
+  if (owner !== token) return lost();
+  const tomb = `${dir}.released.${token}`;
+  try {
+    await rename(dir, tomb);
+  } catch {
+    return lost();
+  }
+  if ((await readFile(join(tomb, "owner"), "utf8").catch(() => "")) === token) {
+    await rm(tomb, { recursive: true, force: true });
     return;
   }
-  warnLockLost(`${basename(dir)} was taken over while this process held it; another process may have been inside with it`);
+  const occupied = await stat(dir).then(() => true, () => false);
+  if (occupied || !(await rename(tomb, dir).then(() => true, () => false))) {
+    await rm(tomb, { recursive: true, force: true });
+  }
+  lost();
 }
 
 /** Thrown when a holder finds, before a write, that its lock was taken over. */
