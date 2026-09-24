@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -28,7 +28,8 @@ import {
   validateSpecs,
 } from "../extensions/context-ceiling.ts";
 import { handoffHeader, HANDOFF_TYPE, latestAssistantUsage, nowPrompt, recoverState, renderTemplate, STATE_TYPE } from "../extensions/self-compact.ts";
-import { EVENTS_REL, initSandbox, TOOL_RESERVED_NAMES } from "../extensions/protocol.ts";
+import { agentDonePath, EVENTS_REL, initSandbox, SENTINEL_REL, TOOL_RESERVED_NAMES } from "../extensions/protocol.ts";
+import { normalizeShellCommand, repeatHintMinMs, repeatHintText, REPEAT_HINT_MIN_MS } from "../extensions/agent-swarm.ts";
 
 const REPO = resolve(import.meta.dirname, "..");
 
@@ -283,6 +284,90 @@ test("Pi loader: self_compact exists only when the spawner turned self-compactio
     else process.env.AGENT_ID = previous.agent;
     if (previous.on === undefined) delete process.env.SWARM_SELF_COMPACT;
     else process.env.SWARM_SELF_COMPACT = previous.on;
+    execFileSync("chmod", ["-R", "u+w", root]);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the repeat hint compares commands by their words, not their spacing, and waits a minute by default", () => {
+  assert.equal(normalizeShellCommand("  vol -f  mem.raw\twindows.pslist \n"), "vol -f mem.raw windows.pslist");
+  assert.equal(repeatHintMinMs({}), REPEAT_HINT_MIN_MS);
+  assert.equal(REPEAT_HINT_MIN_MS, 60_000);
+  assert.equal(repeatHintMinMs({ SWARM_REPEAT_HINT_MIN_MS: "0" }), 0);
+  assert.equal(repeatHintMinMs({ SWARM_REPEAT_HINT_MIN_MS: "soon" }), REPEAT_HINT_MIN_MS);
+  assert.match(repeatHintText({ ms: 106_400, path: "tool-output/a0/bash-1.out" }), /ran for 106 s earlier.*tool-output\/a0\/bash-1\.out.*grep or read that file/);
+});
+
+type Hook = (event: unknown, ctx: unknown) => Promise<unknown>;
+
+test("Pi loader: a long command run again is pointed at its kept output once, and a seat is stopped before a model call once the sentinel stands", async (t) => {
+  const loaderPath = await findLoader();
+  if (!loaderPath) {
+    t.skip("Pi package not found");
+    return;
+  }
+  const { loadExtensions } = (await import(loaderPath)) as { loadExtensions: (paths: string[], cwd: string) => Promise<{ extensions: LoadedExtension[]; errors: unknown[] }> };
+  const previous = { agent: process.env.AGENT_ID, min: process.env.SWARM_REPEAT_HINT_MIN_MS, board: process.env.SWARM_BOARD_SOCKET, trace: process.env.SWARM_TRACE_SOCKET, compact: process.env.SWARM_SELF_COMPACT };
+  const root = await mkdtemp(join(tmpdir(), "pi-load-precall-"));
+  try {
+    await initSandbox(root, { reset: true, agentIds: ["agent00"] });
+    process.env.AGENT_ID = "agent00";
+    process.env.SWARM_REPEAT_HINT_MIN_MS = "0";
+    delete process.env.SWARM_BOARD_SOCKET;
+    delete process.env.SWARM_TRACE_SOCKET;
+    delete process.env.SWARM_SELF_COMPACT;
+    const loaded = await loadExtensions([join(REPO, "extensions", "agent-swarm.ts")], root);
+    assert.deepEqual(loaded.errors, []);
+    const [swarm] = loaded.extensions;
+    const hooks = (name: string) => (swarm.handlers.get(name) ?? []) as Hook[];
+    const fire = async (name: string, event: unknown, ctx: unknown) => {
+      let out: unknown;
+      for (const h of hooks(name)) out = (await h(event, ctx)) ?? out;
+      return out;
+    };
+    let aborted = 0;
+    let shut = 0;
+    const ctx = { cwd: root, hasUI: false, ui: {}, abort: () => void aborted++, shutdown: () => void shut++ };
+    // Pi spills an output past its bound to a temp file; the extension keeps it under tool-output/.
+    const run = async (id: string, command: string) => {
+      await mkdir(join(root, "work", ".tmp"), { recursive: true });
+      const spill = join(root, "work", ".tmp", `${id}.log`);
+      await writeFile(spill, "line\n".repeat(20_000));
+      await fire("tool_call", { toolName: "bash", toolCallId: id, input: { command } }, ctx);
+      return (await fire("tool_result", { toolName: "bash", toolCallId: id, input: { command }, content: [{ type: "text", text: `head\n\nFull output: ${spill}` }], details: { fullOutputPath: spill, truncation: { truncated: true } }, isError: false }, ctx)) as { content?: Array<{ text?: string }> } | undefined;
+    };
+    const first = await run("c1", "vol -f mem.raw windows.pslist");
+    assert.ok(!JSON.stringify(first ?? {}).includes("Note from the harness"), "the first run is told nothing");
+    const second = await run("c2", "vol  -f mem.raw   windows.pslist");
+    const text = (second?.content ?? []).map((b) => b.text ?? "").join("\n");
+    assert.match(text, /this same command ran for \d+ s earlier in this session, and its whole output is kept at tool-output\/agent00\//, "the second run is pointed at the first one's kept output");
+    const third = await run("c3", "vol -f mem.raw windows.pslist");
+    assert.ok(!JSON.stringify(third ?? {}).includes("Note from the harness"), "once per command");
+    let events = (await readFile(join(root, EVENTS_REL), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(events.filter((e) => e.tool === "repeat_hint").length, 1, "the hint is on the trace once");
+
+    // Before a model call: nothing to stop, nothing done.
+    await fire("context", { type: "context", messages: [] }, ctx);
+    assert.equal(aborted, 0);
+    // The sentinel stands: the next call does not go out.
+    await mkdir(join(root, "done"), { recursive: true });
+    await writeFile(join(root, SENTINEL_REL), "stopped\n");
+    await fire("context", { type: "context", messages: [] }, ctx);
+    assert.equal(aborted, 1, "the turn is aborted before the call");
+    assert.equal(shut, 1, "and the session ended");
+    await access(agentDonePath(root, "agent00"));
+    events = (await readFile(join(root, EVENTS_REL), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    const stop = events.find((e) => e.tool === "budget_precall_stop");
+    assert.equal(stop?.args.reason, "sentinel_present");
+    assert.equal(stop?.result.brake, "host", "on the host this is the brake");
+    assert.ok(events.some((e) => e.tool === "agent_stop" && e.result.via === "precall"), "the same outcome as the sentinel stop, said where it was taken");
+    await fire("context", { type: "context", messages: [] }, ctx);
+    assert.equal(aborted, 1, "stopped once");
+  } finally {
+    for (const [k, v] of [["AGENT_ID", previous.agent], ["SWARM_REPEAT_HINT_MIN_MS", previous.min], ["SWARM_BOARD_SOCKET", previous.board], ["SWARM_TRACE_SOCKET", previous.trace], ["SWARM_SELF_COMPACT", previous.compact]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
     execFileSync("chmod", ["-R", "u+w", root]);
     await rm(root, { recursive: true, force: true });
   }

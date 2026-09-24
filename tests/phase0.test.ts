@@ -341,3 +341,81 @@ test("a trace that is there and cannot be read is said so, by the event log and 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a ledger entry is corrected by a later one that supersedes it: both stay, the chain holds, and the rules are said", async () => {
+  const { ledgerCore, listLedger, readLedger, recordEntry, verifyLedgerChain } = await import("../extensions/protocol.ts");
+  const root = await mkdtemp(join(tmpdir(), "phase0-supersedes-"));
+  try {
+    await initSandbox(root, { reset: true, agentIds: ["a0", "a1"] });
+    const a0 = { sandboxRoot: root, agentId: "a0" };
+    const a1 = { sandboxRoot: root, agentId: "a1" };
+    const first = await recordEntry(a0, { kind: "finding", value: "The shell was uploaded through the contact form", source: "access.log", evidence: "POST /contact.php at 12:40" });
+    assert.ok(first.ok);
+    const before = ledgerCore((first as { entry: Parameters<typeof ledgerCore>[0] }).entry);
+    assert.doesNotMatch(before, /supersedes/, "an entry that corrects nothing has the core it always had");
+    // A peer corrects it; the seq may be written as #1.
+    const fix = await recordEntry(a1, { kind: "finding", value: "The shell was uploaded through the file manager, not the contact form", source: "access.log", evidence: "POST /filemanager/upload.php at 12:39", supersedes: "#1" });
+    assert.ok(fix.ok, (fix as { reason?: string }).reason);
+    assert.equal((fix as { entry: { supersedes?: number } }).entry.supersedes, 1);
+    assert.match(ledgerCore((fix as { entry: Parameters<typeof ledgerCore>[0] }).entry), /"supersedes":1/, "the correction is in the chained core");
+    const entries = await readLedger(root);
+    assert.equal(entries.length, 2, "nothing is deleted");
+    assert.equal(entries[0].value, "The shell was uploaded through the contact form");
+    const text = await readFile(join(root, "ledger", "entries.jsonl"), "utf8");
+    assert.equal(verifyLedgerChain(text).ok, true);
+    // A correction moved to another entry breaks the chain.
+    const moved = text.replace('"supersedes":1', '"supersedes":2');
+    assert.equal(verifyLedgerChain(moved).ok, false);
+    const md = await readFile(join(root, "ledger", "ledger.md"), "utf8");
+    assert.match(md, /\*\*#1\*\* The shell was uploaded through the contact form \*\*\(superseded by #2\)\*\*/);
+    assert.match(md, /\*\*#2\*\* The shell was uploaded through the file manager, not the contact form \(corrects #1\)/);
+    assert.match(md, /1 corrected by a later entry, which stands/);
+    const listed = await listLedger(root, {});
+    assert.equal((listed[0] as { superseded_by?: number }).superseded_by, 2);
+    // What is refused, and why.
+    const unknown = await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", supersedes: 9 });
+    assert.equal(unknown.ok, false);
+    assert.match((unknown as { reason: string }).reason, /no entry #9/);
+    const self = await recordEntry(a0, { kind: "finding", value: "y", source: "s", evidence: "e", supersedes: 3 });
+    assert.equal(self.ok, false, "the next seq is no entry yet: an entry cannot supersede itself");
+    const twice = await recordEntry(a0, { kind: "finding", value: "z", source: "s", evidence: "e", supersedes: 1 });
+    assert.equal(twice.ok, false);
+    assert.match((twice as { reason: string }).reason, /already superseded by #2: correct #2 instead/);
+    const same = await recordEntry(a0, { kind: "finding", value: "The shell was uploaded through the file manager, not the contact form", source: "access.log", evidence: "again", supersedes: 2 });
+    assert.equal(same.ok, false);
+    assert.match((same as { reason: string }).reason, /word for word/);
+    const bad = await recordEntry(a0, { kind: "finding", value: "w", source: "s", evidence: "e", supersedes: "first" });
+    assert.equal(bad.ok, false);
+    assert.match((bad as { reason: string }).reason, /whole number/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a search that found nothing is recorded as absence, with what, where and how far, and rendered as such", async () => {
+  const { LEDGER_KINDS, recordEntry } = await import("../extensions/protocol.ts");
+  assert.ok((LEDGER_KINDS as readonly string[]).includes("absence"));
+  const root = await mkdtemp(join(tmpdir(), "phase0-absence-"));
+  try {
+    await initSandbox(root, { reset: true, agentIds: ["a0"] });
+    const a0 = { sandboxRoot: root, agentId: "a0" };
+    const noSource = await recordEntry(a0, { kind: "absence", value: "BitLocker recovery key", evidence: "grep -a 'BitLocker' (GNU grep 3.11), allocated files only" });
+    assert.equal(noSource.ok, false);
+    assert.match((noSource as { reason: string }).reason, /what was searched/);
+    assert.match((noSource as { reason: string }).reason, /not found there/);
+    const noEvidence = await recordEntry(a0, { kind: "absence", value: "BitLocker recovery key", source: "inputs/disk.E01" });
+    assert.equal(noEvidence.ok, false);
+    assert.match((noEvidence as { reason: string }).reason, /the query, the tool and its version, and the scope/);
+    assert.match((noEvidence as { reason: string }).reason, /unallocated/);
+    const noValue = await recordEntry(a0, { kind: "absence", value: " ", source: "inputs/disk.E01", evidence: "q" });
+    assert.match((noValue as { reason: string }).reason, /what was looked for/);
+    const ok = await recordEntry(a0, { kind: "absence", value: "BitLocker recovery key", source: "inputs/disk.E01, partition 2", evidence: "grep -a -i 'bitlocker' over icat of every allocated file (GNU grep 3.11, sleuthkit 4.12); unallocated and slack not searched" });
+    assert.ok(ok.ok, (ok as { reason?: string }).reason);
+    const md = await readFile(join(root, "ledger", "ledger.md"), "utf8");
+    assert.match(md, /1 searches that found nothing/);
+    assert.match(md, /## Searched, not found/);
+    assert.match(md, /\| 1 \| BitLocker recovery key \| inputs\/disk\.E01, partition 2 \| grep -a -i 'bitlocker'.*unallocated and slack not searched \| a0 \|/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

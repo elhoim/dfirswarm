@@ -108,6 +108,10 @@ class HubClient {
     this.buffer = "";
     socket.setEncoding("utf8");
     socket.unref();
+    // The seat's token first, before any call: the hub serves nothing else
+    // on a seat's socket until it has it (P.seatAuthLine).
+    const auth = P.seatAuthLine();
+    if (auth) socket.write(auth);
     socket.on("data", (chunk: string) => {
       this.buffer += chunk;
       if (this.buffer.length > MAX_REPLY_BYTES) {
@@ -508,7 +512,10 @@ export function openHubLink(
     socket = s;
     s.setEncoding("utf8");
     s.on("connect", () => {
-      send({ t: "hello" });
+      // The link says hello with the seat's token (SWARM_SEAT_TOKEN), which
+      // the hub takes as this connection's authentication.
+      const token = process.env.SWARM_SEAT_TOKEN;
+      send(token ? { t: "hello", token } : { t: "hello" });
       if (last) send({ t: "state", ...last });
     });
     s.on("data", (chunk: string) => {

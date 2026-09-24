@@ -55,14 +55,17 @@
  *   node --experimental-strip-types scripts/vm-hub.ts --resume DIR
  *
  * One line of JSON on stdin: `{agents: [...], tokens: {<agent>: <token>},
- * collector: "<socket>"}`. Tokens reach this process the way they reach the
+ * seat_tokens: {<agent>: <token>}, collector: "<socket>"}`: `tokens` are
+ * the collector's attribution tokens, which no VM ever sees; `seat_tokens`
+ * are the hello tokens, one to each seat's VM, which the hub asks of every
+ * connection on that seat's socket. Tokens reach this process the way they reach the
  * collector, on stdin, never argv. What was given is kept in the hub's own
  * directory (0700, on the host, in no VM) so that `--resume` can bring the
  * hub back after a crash with the same tokens and the same clock.
  */
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -70,6 +73,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import * as P from "../extensions/protocol.ts";
 import * as T from "../extensions/toolchain.ts";
 import { claimHolds, messageFor, resolvePeer } from "./nudge-broker.mjs";
+import { GATEWAY_STATE_REL } from "./model-gateway.ts";
 
 /**
  * One line from a VM: a trace line keeps a tool's whole input and output
@@ -121,6 +125,8 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
 const REFUSAL_WINDOW_MS = 60_000;
 /** Request ids remembered, so a call sent again after a dropped link gets the first run's answer. */
 const REPLIES_KEPT = 4096;
+/** How long the operator's notify hook may run before it is killed. */
+const NOTIFY_TIMEOUT_MS = 30_000;
 /** This process's own trace lines: an id of its own and a count, as every sender's are. */
 const HUB_SID = `hub-${randomBytes(6).toString("hex")}`;
 /** How long a quiet non-link connection is kept. `wait` is a long call, not a quiet one. */
@@ -156,6 +162,13 @@ export type HubConfig = {
   dir: string;
   agents: string[];
   tokens: Record<string, string>;
+  /**
+   * Each seat's hello token (the kickoff's `seat_tokens`), which that seat's
+   * VM alone holds (SWARM_SEAT_TOKEN): every connection to a seat's socket
+   * starts with it or is refused. Absent (an older kickoff), nothing is
+   * asked; present, a seat with no entry is refused everything.
+   */
+  seatTokens?: Record<string, string>;
   collector: string;
   run?: string;
   vmCli?: string;
@@ -176,6 +189,10 @@ export type HubConfig = {
   bufferMax?: number;
   /** Custody's bound at finish, in seconds (else SWARM_CUSTODY_TIMEOUT, else 14400). */
   custodyTimeoutSec?: number;
+  /** Answers kept for request-id resends, in memory and in replies.jsonl (REPLIES_KEPT; tests lower it). */
+  repliesKept?: number;
+  /** Bytes of file history one seat may have stored (historyQuotaBytes; tests lower it). */
+  historyQuotaBytes?: number;
   /** The operator's swarm.sh: run as `stop <run> --after-hub` once the hub has finished the run. */
   stopCmd?: string;
 };
@@ -190,6 +207,10 @@ type HubState = {
   finish_done?: boolean;
   told?: string[];
   seat_steer?: Record<string, number>;
+  /** Per seat that said done: when its VM is due to be put away. A restarted hub puts it away still. */
+  seat_leave?: Record<string, number>;
+  /** Per seat: the bytes of file history it has stored, against its quota. */
+  history_bytes?: Record<string, number>;
 };
 
 /**
@@ -328,6 +349,17 @@ export function boardTable(hub: {
   ids?: string[];
   /** A seat said done: its VM can be put away before the swarm's. */
   seatDone?: (who: string) => void;
+  /**
+   * The per-seat file-history quota: whether `bytes` more may be stored for
+   * `who`, what was stored, and what a seat past it is told. Absent, none.
+   */
+  history?: {
+    allow: (who: string, bytes: number) => boolean;
+    stored: (who: string, bytes: number) => void;
+    refused: (who: string) => string;
+  };
+  /** Whether the model gateway meters this seat's spend on the host (foldGatewaySpend). */
+  gatewaySeat?: (who: string) => boolean;
 }) {
   const S = hub.sandbox;
   const ids = hub.ids ?? [];
@@ -379,6 +411,15 @@ export function boardTable(hub: {
       if (raw.context_locked !== undefined && raw.context_locked !== null) {
         if (typeof raw.context_locked !== "boolean") throw new Error("usage.context_locked must be true or false");
         slice.context_locked = raw.context_locked;
+      }
+      // A seat the model gateway meters: its spend is the host's measure,
+      // and its own report a cross-check that can only raise it. Each figure
+      // is the larger of the two, so the report still lands (its context
+      // fields with it) and never lowers what the host measured.
+      if (hub.gatewaySeat?.(who)) {
+        const row = (await P.readBudget(S).catch(() => null))?.agents[who];
+        if (row) for (const key of P.MONOTONIC_USAGE_KEYS) slice[key] = Math.max(Number(slice[key] ?? 0), Number(row[key] ?? 0));
+        slice.metered_by = "model-gateway";
       }
       return P.applySessionUsage(S, who, slice as never, { monotonic: true });
     },
@@ -461,14 +502,35 @@ export function boardTable(hub: {
       // have no revisions a seat puts its name on.
       if (P.isProtectedPath(key)) throw new Error(`harness-owned path: ${key}; a seat records its own files and the shared ones under work/`);
       hub.wrote(who, key);
-      if (!owner) return P.recordFileVersion(S, key, who);
+      // Past the seat's history quota a revision is still recorded, by its
+      // hash: the record stays whole, and the host's disk is not the seat's
+      // to fill with copies.
+      const counted = (rec: P.FileVersion | null) => {
+        if (rec && rec.stored !== false) hub.history?.stored(who, rec.bytes);
+        return rec;
+      };
+      const hashOnly = async (sha256: string, bytes: number) => {
+        const rec = await P.recordFileVersion(S, key, who, { hashOnly: { sha256, bytes } });
+        return rec ? { ...rec, not_stored: hub.history?.refused(who) } : rec;
+      };
+      if (!owner) {
+        if (hub.history) {
+          const size = await stat(join(S, key)).then((st) => st.size).catch(() => 0);
+          if (!hub.history.allow(who, size)) {
+            const h = await P.hashSandboxFile(S, key);
+            if (h) return hashOnly(h.sha256, h.bytes);
+          }
+        }
+        return counted(await P.recordFileVersion(S, key, who));
+      }
       const wire = isObject(a[3]) ? a[3] : null;
       if (!wire) throw new Error(`${key} is in your own directory, which the hub does not open: its bytes come with the call`);
       if (wire.missing === true) return null;
       if (typeof wire.bytes_b64 === "string") {
         const bytes = Buffer.from(wire.bytes_b64, "base64");
         if (bytes.byteLength > P.HISTORY_STORE_MAX_BYTES) throw new Error(`past ${P.HISTORY_STORE_MAX_BYTES} bytes a revision is its hash: send hash_only`);
-        return P.recordFileVersion(S, key, who, { bytes });
+        if (hub.history && !hub.history.allow(who, bytes.byteLength)) return hashOnly(P.sha256Hex(bytes), bytes.byteLength);
+        return counted(await P.recordFileVersion(S, key, who, { bytes }));
       }
       const h = isObject(wire.hash_only) ? wire.hash_only : null;
       const sha = typeof h?.sha256 === "string" && /^[0-9a-f]{64}$/.test(h.sha256) ? h.sha256 : null;
@@ -539,6 +601,16 @@ export class Hub {
   private seq = 0;
   /** Seats whose VM is put away early, once they are done and the swarm is not. */
   private leaving = new Set<string>();
+  /** When each leaving seat's VM is due to be put away (persisted: seat_leave). */
+  private seatLeave = new Map<string, number>();
+  /** Bytes of file history each seat has stored (persisted: history_bytes). */
+  private historyBytes = new Map<string, number>();
+  /** Lines in replies.jsonl, so it is cut back before it grows past twice what is kept. */
+  private repliesLines = 0;
+  /** Whether the operator's hook has heard the collector stopped taking the hub's lines. */
+  private collectorDownTold = false;
+  /** The seats the model gateway meters, from its state file at the last fold. */
+  private gatewaySeats = new Set<string>();
   private table: ReturnType<typeof boardTable>;
   private backstopTimer: ReturnType<typeof setInterval> | null = null;
   private collector: CollectorLink;
@@ -563,6 +635,15 @@ export class Hub {
       forging: cfg.forging === true,
       ids: this.roster,
       seatDone: (who) => this.seatLeft(who),
+      history: {
+        allow: (who, bytes) => (this.historyBytes.get(who) ?? 0) + bytes <= this.historyQuota(),
+        stored: (who, bytes) => {
+          this.historyBytes.set(who, (this.historyBytes.get(who) ?? 0) + bytes);
+          this.saveState();
+        },
+        refused: (who) => this.historyRefused(who),
+      },
+      gatewaySeat: (who) => this.gatewaySeats.has(who),
     });
     this.collector = new CollectorLink(this.cfg.collector);
   }
@@ -592,6 +673,82 @@ export class Hub {
     return join(this.cfg.dir, "hub-state.json");
   }
 
+  private repliesKept(): number {
+    return this.cfg.repliesKept ?? REPLIES_KEPT;
+  }
+
+  /** replies.jsonl cut back to the answers kept: written aside and renamed in, whole or not at all. */
+  private compactReplies(kept?: string[]): void {
+    try {
+      const lines = kept ?? readFileSync(this.repliesFile(), "utf8").split("\n").filter(Boolean).slice(-this.repliesKept());
+      const tmp = `${this.repliesFile()}.tmp`;
+      writeFileSync(tmp, lines.length ? `${lines.join("\n")}\n` : "", { mode: 0o600 });
+      renameSync(tmp, this.repliesFile());
+      this.repliesLines = lines.length;
+    } catch {
+      // the file keeps growing until the next try; memory has the window
+    }
+  }
+
+  /**
+   * Whether the operator gave this run a hook: `swarm.sh start --notify`
+   * keeps it at <runs>/notify/<run>.cmd, outside the run. No hook, no call
+   * and no line on the trace.
+   */
+  private notifyConfigured(): boolean {
+    // The run's own registry first: its directory is where the kickoff kept the hook.
+    const runsDir = this.cfg.registry ? dirname(resolve(this.cfg.registry)) : process.env.SWARM_RUNS_DIR || "";
+    return Boolean(this.cfg.run && runsDir && existsSync(join(runsDir, "notify", `${this.cfg.run}.cmd`)));
+  }
+
+  private historyQuota(): number {
+    return this.cfg.historyQuotaBytes ?? historyQuotaBytes();
+  }
+
+  /**
+   * What a seat past its history quota is told, with the record of it: once
+   * on the trace and once on the board, addressed to the seat, and on every
+   * revision recorded by its hash alone.
+   */
+  private historyRefused(who: string): string {
+    const used = this.historyBytes.get(who) ?? 0;
+    const quota = this.historyQuota();
+    const text = `not stored: ${who} has stored ${used} bytes of file history, and its quota is ${quota}; this revision is recorded by its hash, its bytes are not kept`;
+    const mark = `history_quota:${who}`;
+    if (!this.told.has(mark)) {
+      this.told.add(mark);
+      this.saveState();
+      void this.event("history_quota", { agent: who }, { ok: true, used_bytes: used, quota_bytes: quota });
+      void P.systemPost(this.cfg.sandbox, {
+        tag: "ask",
+        to: who,
+        body: `${who}: your file history has reached its quota (${Math.round(quota / 1048576)} MiB). Every revision you write from now on is still recorded, by its hash, but its bytes are not kept, so file_restore and file_diff cannot use it. Keep large outputs as files under your own directory and record the small deliverables.`,
+      }).catch(() => undefined);
+    }
+    return text;
+  }
+
+  /**
+   * The operator's hook (`--notify`): scripts/notify.sh, beside the VM
+   * manager the hub runs, with the sandbox, what happened and its details.
+   * Started and let go, bounded: the hook may be slow or broken, and the hub
+   * never waits on it. Said on the trace; no script, no hook.
+   */
+  private notify(what: string, detail: Record<string, unknown>): void {
+    const script = join(dirname(this.cfg.vmCli ?? join(dirname(fileURLToPath(import.meta.url)), "vm.ts")), "notify.sh");
+    if (!existsSync(script) || !this.notifyConfigured()) return;
+    let started = false;
+    try {
+      const child = spawn("bash", [script, this.cfg.sandbox, what, JSON.stringify(detail)], { detached: true, stdio: "ignore", timeout: NOTIFY_TIMEOUT_MS });
+      child.on("error", () => undefined);
+      child.unref();
+      started = true;
+    } catch {
+      started = false;
+    }
+    void this.event("notify", { event: what }, { ok: started });
+  }
+
   /** The answers to calls that came with a request id: a restarted hub still knows it ran them. */
   private repliesFile(): string {
     return join(this.cfg.dir, "replies.jsonl");
@@ -607,6 +764,9 @@ export class Hub {
     }
     mkdirSync(this.cfg.dir, { recursive: true, mode: 0o700 });
     this.loadState();
+    // A seat that said done before a restart still has its VM put away, at
+    // the time it was due, not a grace period after the restart.
+    for (const [agent, due] of this.seatLeave) this.armSeatLeave(agent, due);
     for (const agent of this.roster) {
       await this.listen(this.socketFor(agent), (socket) => this.serveAgent(agent, socket));
     }
@@ -619,7 +779,10 @@ export class Hub {
 
   private loadState(): void {
     try {
-      const lines = readFileSync(this.repliesFile(), "utf8").split("\n").filter(Boolean).slice(-REPLIES_KEPT);
+      const all = readFileSync(this.repliesFile(), "utf8").split("\n").filter(Boolean);
+      this.repliesLines = all.length;
+      const lines = all.slice(-this.repliesKept());
+      if (all.length > this.repliesKept()) this.compactReplies(lines);
       for (const line of lines) {
         try {
           const r = JSON.parse(line) as { key?: string; reply?: { ok: boolean; result?: unknown; error?: string } };
@@ -639,6 +802,8 @@ export class Hub {
       this.finishDone = raw.finish_done === true;
       for (const t of raw.told ?? []) this.told.add(t);
       for (const [agent, at] of Object.entries(raw.seat_steer ?? {})) this.seatSteer.set(agent, at);
+      for (const [agent, due] of Object.entries(raw.seat_leave ?? {})) if (this.roster.includes(agent) && Number.isFinite(due)) this.seatLeave.set(agent, due);
+      for (const [agent, n] of Object.entries(raw.history_bytes ?? {})) if (Number.isFinite(n) && n >= 0) this.historyBytes.set(agent, n);
     } catch {
       // a first start
     }
@@ -652,6 +817,8 @@ export class Hub {
       finish_done: this.finishDone,
       told: [...this.told],
       seat_steer: Object.fromEntries(this.seatSteer),
+      seat_leave: Object.fromEntries(this.seatLeave),
+      history_bytes: Object.fromEntries(this.historyBytes),
     };
     try {
       const tmp = `${this.stateFile()}.tmp`;
@@ -844,9 +1011,11 @@ export class Hub {
       for (const c of running.values()) c.abort();
       running.clear();
     });
+    // A connection is the seat's only once it has shown the seat's token
+    // (P.seatAuthLine): a hello carrying it, or an auth line before anything
+    // else. Until then nothing on it is served, not even its state.
+    let authed = this.cfg.seatTokens === undefined;
     this.lines(socket, async (line, keep) => {
-      const seen = this.status.get(agent);
-      if (seen) seen.last_seen = new Date().toISOString();
       let msg: unknown;
       try {
         msg = JSON.parse(line);
@@ -858,6 +1027,23 @@ export class Hub {
         this.reply(socket, { ok: false, error: "not an object" }, true);
         return false;
       }
+      if (!authed) {
+        const expected = this.cfg.seatTokens?.[agent];
+        if ((msg.t === "auth" || msg.t === "hello") && seatTokenMatches(expected, msg.token)) {
+          authed = true;
+          if (msg.t === "auth") return true;
+        } else {
+          // Never the token itself, on the trace or in the answer.
+          const why = expected === undefined ? "this seat was given no token" : msg.token === undefined ? "no seat token" : "a wrong seat token";
+          void this.refused(agent, "seat_auth", `connection refused: ${why}; a seat's socket serves only its own VM, which starts every connection with its seat token`);
+          this.reply(socket, { ok: false, error: "this socket serves only its seat's VM: the connection did not start with the seat's token" }, true);
+          return false;
+        }
+      } else if (msg.t === "auth") {
+        return true;
+      }
+      const seen = this.status.get(agent);
+      if (seen) seen.last_seen = new Date().toISOString();
       if (msg.t === "hello") {
         this.attachLink(agent, socket);
         return true;
@@ -990,13 +1176,17 @@ export class Hub {
       }
       try {
         appendFileSync(this.repliesFile(), `${JSON.stringify({ key, reply })}\n`, { mode: 0o600 });
+        this.repliesLines += 1;
+        // Cut back to what is kept once it is twice that: a long run's file
+        // stays bounded, and a restart still knows the same window of answers.
+        if (this.repliesLines > 2 * this.repliesKept()) this.compactReplies();
       } catch {
         // memory still has it
       }
       return reply;
     });
     this.replies.set(key, running);
-    while (this.replies.size > REPLIES_KEPT) {
+    while (this.replies.size > this.repliesKept()) {
       const oldest = this.replies.keys().next().value;
       if (oldest === undefined) break;
       this.replies.delete(oldest);
@@ -1143,6 +1333,12 @@ export class Hub {
         appendFileSync(this.spillFile(), `${JSON.stringify(record)}\n`, { mode: 0o600 });
       } catch {
         this.log(`spill failed: ${tool}`);
+      }
+      // Once per hub: the collector stopped taking the hub's own lines. The
+      // keeper brings a dead collector back; the operator hears of it now.
+      if (!this.collectorDownTold && tool !== "notify") {
+        this.collectorDownTold = true;
+        this.notify("collector_unreachable", { first_line: tool });
       }
     }
   }
@@ -1353,6 +1549,7 @@ export class Hub {
     }
     const done = await P.swarmDoneExists(S);
     if (!done) {
+      await this.foldGatewaySpend().catch((err: Error) => this.log(`gateway fold: ${err.message}`));
       const budget = await P.readBudget(S).catch(() => null);
       if (!budget) return;
       await this.seatBackstop(budget, now);
@@ -1382,6 +1579,7 @@ export class Hub {
       const stop = await P.harnessStop(S, pressure.reason, `The hub stopped the swarm: ${pressure.reason} passed and the agents did not stop within the grace period.`, { verify: true });
       if (stop.created) {
         await this.event("harness_stop", { via: "hub", reason: pressure.reason }, { created_sentinel: true });
+        this.notify(pressure.reason === "wall_clock" ? "wall_clock" : "budget_cap", { scope: "run", reason: pressure.reason });
         await P.systemPost(S, { tag: "stop", body: `Harness wrote done/SWARM_DONE (reason ${pressure.reason}). Call done and stop.` }).catch(() => undefined);
       }
       return;
@@ -1409,6 +1607,52 @@ export class Hub {
     this.writeStatus();
     this.finishing = this.finishVms(allOut);
     await this.finishing;
+  }
+
+  /**
+   * With the model gateway (`--model-gateway`), a fronted seat's spend is
+   * measured on the host, off the provider's own answers, and kept in
+   * traces/model-gateway.json, which no VM can write. On every tick it is
+   * folded into budget.json, so every cap, steer and stop (this process's
+   * and the extensions') reads the host's figure: each field is the larger
+   * of the gateway's and the seat's own report, which stays a cross-check,
+   * and the row says it was metered on the host. Without the gateway there
+   * is no file and nothing changes.
+   */
+  async foldGatewaySpend(): Promise<void> {
+    const S = this.cfg.sandbox;
+    const file = join(S, GATEWAY_STATE_REL);
+    let seats: Record<string, Record<string, unknown>>;
+    try {
+      if (!lstatSync(file).isFile()) return;
+      const state = JSON.parse(readFileSync(file, "utf8")) as { seats?: unknown };
+      if (!isObject(state.seats)) return;
+      seats = state.seats as Record<string, Record<string, unknown>>;
+    } catch {
+      return;
+    }
+    const budget = await P.readBudget(S).catch(() => null);
+    if (!budget) return;
+    const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+    for (const [seat, gw] of Object.entries(seats)) {
+      if (!this.roster.includes(seat) || !isObject(gw)) continue;
+      this.gatewaySeats.add(seat);
+      const row = budget.agents[seat] ?? P.emptyAgentBudget();
+      const next: P.AgentBudget = {
+        ...row,
+        spent_usd: Math.max(row.spent_usd, n(gw.spent_usd)),
+        tokens: Math.max(row.tokens, n(gw.input) + n(gw.output) + n(gw.cache_read) + n(gw.cache_write)),
+        calls: Math.max(row.calls, n(gw.calls)),
+        input: Math.max(row.input, n(gw.input)),
+        output: Math.max(row.output, n(gw.output)),
+        cache_read: Math.max(row.cache_read, n(gw.cache_read)),
+        cache_write: Math.max(row.cache_write, n(gw.cache_write)),
+        metered_by: "model-gateway",
+      };
+      const same = row.metered_by === "model-gateway" && P.MONOTONIC_USAGE_KEYS.every((k) => Number(row[k]) === Number(next[k]));
+      if (same) continue;
+      await P.applySessionUsage(S, seat, next, { monotonic: true }).catch((err: Error) => this.log(`gateway fold ${seat}: ${err.message}`));
+    }
   }
 
   /**
@@ -1449,6 +1693,7 @@ export class Hub {
       );
       await this.event("agent_cap_stop", { via: "hub", agent }, marked);
       if (!marked.ok) continue;
+      this.notify("budget_cap", { scope: "seat", agent, by: mine.over ? "agent cap" : "model cap" });
       this.seatSteer.delete(agent);
       this.saveState();
       await this.finishOne(agent);
@@ -1481,13 +1726,27 @@ export class Hub {
    */
   private seatLeft(agent: string): void {
     if (this.leaving.has(agent) || !this.cfg.vmCli || !this.cfg.run) return;
+    const due = Date.now() + (this.cfg.seatLeaveMs ?? P.STOP_GRACE_MS);
+    this.seatLeave.set(agent, due);
+    this.saveState();
+    this.armSeatLeave(agent, due);
+  }
+
+  /** Put a leaving seat's VM away at `due`; kept in the hub's state until it has been. */
+  private armSeatLeave(agent: string, due: number): void {
+    if (this.leaving.has(agent) || !this.cfg.vmCli || !this.cfg.run) return;
     this.leaving.add(agent);
     const timer = setTimeout(() => {
       void (async () => {
         if (this.finished || this.finishing || (await P.swarmDoneExists(this.cfg.sandbox))) return;
         await this.finishOne(agent);
-      })().catch(() => undefined);
-    }, this.cfg.seatLeaveMs ?? P.STOP_GRACE_MS);
+      })()
+        .catch(() => undefined)
+        .finally(() => {
+          this.seatLeave.delete(agent);
+          this.saveState();
+        });
+    }, Math.max(0, due - Date.now()));
     timer.unref?.();
   }
 
@@ -1511,6 +1770,7 @@ export class Hub {
     this.log(`finish: ${r.ok ? "ok" : "failed"} ${r.out}`);
     await this.event("vm_finish", { via: "hub", all_out: allOut }, { ok: r.ok, ...(r.ok ? {} : { error: r.out }), ...(r.msbDb.length ? { msb_db: r.msbDb } : {}) });
     if (this.cfg.registry) await updateRegistryState(this.cfg.registry, this.cfg.run, r.ok ? "finished" : "finish_failed").catch((err: Error) => this.log(`registry: ${err.message}`));
+    this.notify(r.ok ? "finished" : "finish_failed", { all_out: allOut, ...(r.ok ? {} : { error: r.out }) });
     await this.flushRefusals().catch(() => undefined);
     this.copySpill();
     const custody = join(dirname(this.cfg.vmCli), "custody.ts");
@@ -1643,6 +1903,8 @@ type HubInput = {
   dir: string;
   agents: string[];
   tokens: Record<string, string>;
+  /** The kickoff's `seat_tokens`, kept here (0600, 0700 dir, no VM mounts it) so a resumed hub asks for the same ones. */
+  seatTokens?: Record<string, string>;
   collector: string;
   run?: string;
   vmCli?: string;
@@ -1659,6 +1921,23 @@ type HubInput = {
    */
   env?: Record<string, string>;
 };
+
+/**
+ * Whether `given` is the seat's token, compared in constant time. No token
+ * issued, or none given, is never a match.
+ */
+export function seatTokenMatches(expected: string | undefined, given: unknown): boolean {
+  if (typeof expected !== "string" || !expected || typeof given !== "string" || !given) return false;
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(given, "utf8");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** The kickoff's `seat_tokens`, kept only as agent id → non-empty string; absent stays absent. */
+export function parseSeatTokens(raw: unknown): Record<string, string> | undefined {
+  if (!isObject(raw)) return undefined;
+  return Object.fromEntries(Object.entries(raw).filter(([k, v]) => /^[a-z][a-z0-9_-]{0,31}$/.test(k) && typeof v === "string" && v.length > 0 && v.length <= 256)) as Record<string, string>;
+}
 
 /** The environment a hub runs with that must survive a --resume. */
 /** The longest Unix socket path, in bytes, that every platform the hub runs on binds (macOS: 104 with the NUL). */
@@ -1694,7 +1973,20 @@ export function msbDbOutcomes(stdout: string): Array<{ agent: string; name: stri
   return [];
 }
 
-const KEPT_ENV = ["SWARM_INBOX_PAGE_CHARS", "SWARM_RUNS_DIR", "SWARM_VM_IMAGE_DIGEST", "SWARM_CUSTODY_TIMEOUT"];
+const KEPT_ENV = ["SWARM_INBOX_PAGE_CHARS", "SWARM_RUNS_DIR", "SWARM_VM_IMAGE_DIGEST", "SWARM_CUSTODY_TIMEOUT", "SWARM_HISTORY_QUOTA_MB"];
+
+/**
+ * Bytes of file history one seat may have stored: SWARM_HISTORY_QUOTA_MB, else
+ * 1 GiB. A revision is stored whole up to 32 MiB (HISTORY_STORE_MAX_BYTES)
+ * and a deliverable is kilobytes to a few megabytes, so a gibibyte holds
+ * thirty-two revisions at the largest and thousands of ordinary ones; past it
+ * a revision is still recorded by its hash. What it bounds is one seat
+ * writing copies onto the host's disk in a loop.
+ */
+export function historyQuotaBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const mb = Number(env.SWARM_HISTORY_QUOTA_MB);
+  return Number.isFinite(mb) && mb > 0 ? Math.floor(mb * 1048576) : 1024 * 1048576;
+}
 
 /** Custody's bound when the hub takes it: the operator's SWARM_CUSTODY_TIMEOUT, else stop's default. */
 export function custodyTimeoutSec(env: NodeJS.ProcessEnv = process.env): number {
@@ -1723,10 +2015,10 @@ async function main(): Promise<void> {
     const sandbox = resolve(args[0] ?? "");
     const dir = opt("--dir");
     if (!args[0] || !existsSync(sandbox) || !dir) {
-      console.error("vm-hub: usage: vm-hub.ts <sandbox> --dir DIR [--run ID] [--vm-cli PATH] [--registry FILE] [--stop-cmd SWARM_SH] [--settle-ms N] [--forging] [--no-snapshot] [--quiet]  (stdin: {agents, tokens, collector}) | --resume DIR");
+      console.error("vm-hub: usage: vm-hub.ts <sandbox> --dir DIR [--run ID] [--vm-cli PATH] [--registry FILE] [--stop-cmd SWARM_SH] [--settle-ms N] [--forging] [--no-snapshot] [--quiet]  (stdin: {agents, tokens, seat_tokens, collector}) | --resume DIR");
       process.exit(2);
     }
-    let parsed: { agents?: unknown; tokens?: unknown; collector?: unknown };
+    let parsed: { agents?: unknown; tokens?: unknown; seat_tokens?: unknown; collector?: unknown };
     try {
       parsed = JSON.parse((await readStdin()).trim() || "{}");
     } catch (err) {
@@ -1739,6 +2031,7 @@ async function main(): Promise<void> {
       dir: resolve(dir),
       agents: Array.isArray(parsed.agents) ? parsed.agents.filter((a): a is string => typeof a === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(a)) : [],
       tokens: isObject(parsed.tokens) ? (Object.fromEntries(Object.entries(parsed.tokens).filter(([, v]) => typeof v === "string")) as Record<string, string>) : {},
+      ...(parsed.seat_tokens !== undefined ? { seatTokens: parseSeatTokens(parsed.seat_tokens) ?? {} } : {}),
       collector: typeof parsed.collector === "string" ? parsed.collector : join(sandbox, "traces", ".collector.sock"),
       run: opt("--run"),
       vmCli: opt("--vm-cli") ?? join(dirname(fileURLToPath(import.meta.url)), "vm.ts"),

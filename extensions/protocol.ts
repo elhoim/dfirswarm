@@ -189,6 +189,12 @@ export type AgentBudget = {
   spent_usd: number;
   tokens: number;
   calls: number;
+  /**
+   * "model-gateway" when the row's spend was metered on the host, off the
+   * provider's own answers (scripts/model-gateway.ts); absent, it is what
+   * the seat reported about itself.
+   */
+  metered_by?: "model-gateway";
   input: number;
   output: number;
   cache_read: number;
@@ -2593,6 +2599,8 @@ function openHeldTrace(socketPath: string): Promise<HeldTrace> {
     const socket = connect(socketPath);
     socket.once("error", reject);
     socket.once("connect", () => {
+      const auth = seatAuthLine();
+      if (auth) socket.write(auth);
       const ch: HeldTrace = { socket, waiting: [], buffer: "" };
       socket.setEncoding("utf8");
       socket.unref();
@@ -2760,7 +2768,7 @@ export async function nudgePeerViaBroker(sandboxRoot: string, peer: string, kind
         }
       });
       socket.on("connect", () => {
-        socket.write(`${JSON.stringify({ kind, peer, from })}\n`);
+        socket.write(`${seatAuthLine()}${JSON.stringify({ kind, peer, from })}\n`);
       });
     } catch {
       finish(false);
@@ -2773,6 +2781,20 @@ const COLLECTOR_TIMEOUT_MS = 2000;
 const NUDGE_TIMEOUT_MS = 8000;
 /** Below the ~104-byte `sun_path` limit with room for a prefix. */
 const SOCKET_PATH_SAFE = 96;
+
+/**
+ * The first line a VM's process writes on every connection it opens to its
+ * seat's hub socket: the seat token the kickoff gave that VM alone
+ * (SWARM_SEAT_TOKEN). The hub serves a seat's socket only after it, so a
+ * process outside the VM that can reach the socket file (a host-mode pane
+ * on a host where only Landlock guards, say) cannot speak as the seat. The
+ * hub answers a good one with nothing, so every client reads its replies as
+ * before. Empty outside a VM: no pane is ever given a seat token.
+ */
+export function seatAuthLine(env: NodeJS.ProcessEnv = process.env): string {
+  const token = env.SWARM_SEAT_TOKEN;
+  return token ? `${JSON.stringify({ t: "auth", token })}\n` : "";
+}
 /** Consecutive failures after which this pane stops trying the socket. */
 const COLLECTOR_GIVE_UP_AFTER = 3;
 /** How long a pane stays away before trying the collector again. */
@@ -4231,6 +4253,12 @@ export const TOOL_RESERVED_NAMES = new Set([
   // The keeper restarting the collector, an operator's own command or
   // console action, and the console opening an artifact with its scripts.
   "collector_restarted", "operator_action", "artifact_scripts",
+  // A long command run again pointed at its kept output, a seat stopped
+  // before a model call, a ledger correction, the operator's --notify hook,
+  // the hub's history quota and a connection refused its seat token.
+  "repeat_hint", "budget_precall_stop", "ledger_superseded", "notify", "history_quota", "seat_auth",
+  // The host-side model gateway (scripts/model-gateway.ts).
+  "model_gateway_started", "model_gateway_refused", "model_gateway_upstream_error", "model_gateway_restarted",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
@@ -5527,7 +5555,12 @@ export async function healInputs(sandboxRoot: string, only?: string[]): Promise<
 export const LEDGER_DIR = "ledger";
 export const LEDGER_ENTRIES = "ledger/entries.jsonl";
 export const LEDGER_MD = "ledger/ledger.md";
-export const LEDGER_KINDS = ["event", "ioc", "finding"] as const;
+/**
+ * `absence`: a search that found nothing, when that matters to the case. It
+ * holds only for what was searched, with what and how far, so all of it is
+ * required (recordEntry).
+ */
+export const LEDGER_KINDS = ["event", "ioc", "finding", "absence"] as const;
 export const LEDGER_CONFIDENCE = ["high", "medium", "low"] as const;
 export const LEDGER_VALUE_MAX_CHARS = 2000;
 /**
@@ -5557,6 +5590,12 @@ export type LedgerEntry = {
   /** How to check it: the command, the inode, the record id, the hash. */
   evidence?: string;
   confidence?: (typeof LEDGER_CONFIDENCE)[number];
+  /**
+   * The seq of the entry this one corrects. Nothing is deleted: the older
+   * entry stays where it was, and this one is the correction. In the chained
+   * core when present, so a correction cannot be moved to another entry.
+   */
+  supersedes?: number;
   by: string;
   authors: string[];
   at: string;
@@ -5579,7 +5618,9 @@ export type LedgerEntry = {
  */
 export function ledgerCore(e: LedgerEntry): string {
   if (e.v === 2) {
-    return JSON.stringify({ v: 2, seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, source: e.source ?? "", evidence: e.evidence ?? "", confidence: e.confidence ?? "", by: e.by, at: e.at });
+    // `supersedes` only when there is one: every entry written before it
+    // existed keeps the core, and the hash, it was chained with.
+    return JSON.stringify({ v: 2, seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, source: e.source ?? "", evidence: e.evidence ?? "", confidence: e.confidence ?? "", ...(e.supersedes !== undefined ? { supersedes: e.supersedes } : {}), by: e.by, at: e.at });
   }
   return JSON.stringify({ seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, by: e.by, at: e.at });
 }
@@ -5637,7 +5678,20 @@ export type LedgerInput = {
   source?: string;
   evidence?: string;
   confidence?: string;
+  /** The seq of an entry this one corrects. */
+  supersedes?: number | string;
 };
+
+/**
+ * The seq each corrected entry is superseded by. A correction of a correction
+ * names the one it replaces, so following the map from any entry reaches the
+ * one that stands.
+ */
+export function supersededBy(entries: LedgerEntry[]): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const e of entries) if (typeof e.supersedes === "number") out.set(e.supersedes, e.seq);
+  return out;
+}
 
 export type LedgerResult =
   | { ok: true; entry: LedgerEntry; merged: boolean; total: number }
@@ -5701,8 +5755,14 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
   if (!(LEDGER_KINDS as readonly string[]).includes(kind)) {
     return { ok: false, reason: `kind must be one of ${LEDGER_KINDS.join(", ")}` };
   }
+  const absence = kind === "absence";
   const value = String(input.value ?? "").trim();
-  if (!value) return { ok: false, reason: "value is required: the event, the indicator or the finding, in one sentence" };
+  if (!value) {
+    return {
+      ok: false,
+      reason: absence ? "value is required: what was looked for and not found, in one sentence" : "value is required: the event, the indicator or the finding, in one sentence",
+    };
+  }
   if (value.length > LEDGER_VALUE_MAX_CHARS) return { ok: false, reason: `value is over ${LEDGER_VALUE_MAX_CHARS} characters` };
   const ts = normalizeTs(input.ts);
   if (!ts.ok) return ts;
@@ -5717,21 +5777,48 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
   // cannot be checked, which is the one a reader has no way to spot.
   const source = String(input.source ?? "").trim();
   if (!source) {
-    return { ok: false, reason: "source is required: where it was seen — a path, a log, a plugin, a registry key" };
+    return {
+      ok: false,
+      reason: absence
+        ? "source is required: what was searched — the path, image, log or artefact the search ran over. 'Not found' is only ever 'not found there'."
+        : "source is required: where it was seen — a path, a log, a plugin, a registry key",
+    };
   }
   if (source.length > LEDGER_SOURCE_MAX_CHARS) {
     return { ok: false, reason: `source is over ${LEDGER_SOURCE_MAX_CHARS} characters: name where it was seen, and put the material itself in a work/ file` };
   }
   const evidence = String(input.evidence ?? "").trim();
   if (!evidence) {
-    return { ok: false, reason: "evidence is required: how to check it — the command, the inode, the record id, the hash" };
+    return {
+      ok: false,
+      reason: absence
+        ? "evidence is required: the query, the tool and its version, and the scope searched — allocated files only, or unallocated space and slack too, and the time range. An empty result holds only for that query and that scope."
+        : "evidence is required: how to check it — the command, the inode, the record id, the hash",
+    };
   }
   if (evidence.length > LEDGER_EVIDENCE_MAX_CHARS) {
     return { ok: false, reason: `evidence is over ${LEDGER_EVIDENCE_MAX_CHARS} characters: say how to check it, and put the material itself in a work/ file` };
   }
+  let supersedes: number | undefined;
+  if (input.supersedes !== undefined && input.supersedes !== null && String(input.supersedes).trim() !== "") {
+    const n = Number(String(input.supersedes).trim().replace(/^#/, ""));
+    if (!Number.isInteger(n) || n < 1) return { ok: false, reason: `supersedes names an entry by its seq, a whole number (got ${JSON.stringify(input.supersedes)})` };
+    supersedes = n;
+  }
   return withTableLock(ctx.sandboxRoot, async () => {
     const entries = await readLedger(ctx.sandboxRoot);
-    const same = entries.find((e) => e.kind === kind && e.value === value && (e.ts ?? "") === (ts.ts ?? ""));
+    if (supersedes !== undefined) {
+      const target = entries.find((e) => e.seq === supersedes);
+      if (!target) return { ok: false, reason: `supersedes #${supersedes}: there is no entry #${supersedes} in the ledger (list them with ledger)` };
+      const already = supersededBy(entries).get(supersedes);
+      if (already !== undefined) return { ok: false, reason: `#${supersedes} is already superseded by #${already}: correct #${already} instead, so the corrections stay one line` };
+      if (target.kind === kind && target.value === value && (target.ts ?? "") === (ts.ts ?? "")) {
+        return { ok: false, reason: `the correction repeats #${supersedes} word for word: a correction says what is right now` };
+      }
+    }
+    // A correction is always its own entry: merged into an equal one, the
+    // link to what it corrects would be lost.
+    const same = supersedes === undefined ? entries.find((e) => e.kind === kind && e.value === value && (e.ts ?? "") === (ts.ts ?? "")) : undefined;
     if (same) {
       if (!same.authors.includes(ctx.agentId)) same.authors.push(ctx.agentId);
       // A merge adds an author, it does not rewrite the first citation.
@@ -5754,6 +5841,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
       source,
       evidence,
       ...(confidence ? { confidence: confidence as LedgerEntry["confidence"] } : {}),
+      ...(supersedes !== undefined ? { supersedes } : {}),
       by: ctx.agentId,
       authors: [ctx.agentId],
       at: new Date().toISOString(),
@@ -5780,17 +5868,31 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   const events = all.filter((e) => e.kind === "event").sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? "") || a.seq - b.seq);
   const iocs = all.filter((e) => e.kind === "ioc");
   const findings = all.filter((e) => e.kind === "finding");
-  const lines: string[] = ["# Ledger", "", `${all.length} entries: ${events.length} events, ${iocs.length} indicators, ${findings.length} findings. Written by the harness from \`record\`; cite it as \`ledger/ledger.md\`.`, ""];
-  lines.push("## Timeline", "", "| Time (UTC) | Event | Source | Evidence | By |", "| --- | --- | --- | --- | --- |");
+  const absences = all.filter((e) => e.kind === "absence");
+  const replaced = supersededBy(all);
+  const lines: string[] = [
+    "# Ledger",
+    "",
+    `${all.length} entries: ${events.length} events, ${iocs.length} indicators, ${findings.length} findings, ${absences.length} searches that found nothing${replaced.size ? `; ${replaced.size} corrected by a later entry, which stands` : ""}. Written by the harness from \`record\`; cite it as \`ledger/ledger.md\`.`,
+    "",
+  ];
+  // A corrected entry stays where it was, marked; its correction says what it corrects.
+  const mark = (e: LedgerEntry) =>
+    `${replaced.has(e.seq) ? ` **(superseded by #${replaced.get(e.seq)})**` : ""}${e.supersedes !== undefined ? ` (corrects #${e.supersedes})` : ""}`;
+  lines.push("## Timeline", "", "| # | Time (UTC) | Event | Source | Evidence | By |", "| --- | --- | --- | --- | --- | --- |");
   // A time the source gave with an offset (or as a date) is shown as written too.
   const asWritten = (e: LedgerEntry) => (e.ts_raw && !/[Zz]$/.test(e.ts_raw) ? ` (as written: ${mdCell(e.ts_raw)})` : "");
-  for (const e of events) lines.push(`| ${e.ts}${asWritten(e)} | ${mdCell(e.value)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.authors.join(", ")} |`);
-  lines.push("", "## Indicators", "", "| Indicator | Source | Evidence | Confidence | By |", "| --- | --- | --- | --- | --- |");
-  for (const e of iocs) lines.push(`| ${mdCell(e.value)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.confidence ?? ""} | ${e.authors.join(", ")} |`);
+  for (const e of events) lines.push(`| ${e.seq} | ${e.ts}${asWritten(e)} | ${mdCell(e.value)}${mark(e)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.authors.join(", ")} |`);
+  lines.push("", "## Indicators", "", "| # | Indicator | Source | Evidence | Confidence | By |", "| --- | --- | --- | --- | --- | --- |");
+  for (const e of iocs) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.confidence ?? ""} | ${e.authors.join(", ")} |`);
   lines.push("", "## Findings", "");
   for (const e of findings) {
-    lines.push(`- **#${e.seq}** ${e.value}${e.confidence ? ` _(${e.confidence})_` : ""}${e.source ? ` — source: ${e.source}` : ""}${e.evidence ? ` — evidence: ${e.evidence}` : ""} — by ${e.authors.join(", ")}`);
+    lines.push(`- **#${e.seq}** ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence})_` : ""}${e.source ? ` — source: ${e.source}` : ""}${e.evidence ? ` — evidence: ${e.evidence}` : ""} — by ${e.authors.join(", ")}`);
   }
+  // Searched and not found: what, where, and how far. Each holds for that
+  // query and that scope only.
+  lines.push("", "## Searched, not found", "", "| # | Looked for | Searched | Query, tool, scope | By |", "| --- | --- | --- | --- | --- |");
+  for (const e of absences) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.authors.join(", ")} |`);
   const text = lines.join("\n") + "\n";
   await mkdir(join(sandboxRoot, LEDGER_DIR), { recursive: true });
   await writeFile(join(sandboxRoot, LEDGER_MD), text, "utf8");
@@ -5802,7 +5904,9 @@ export async function listLedger(sandboxRoot: string, filter: { kind?: string; l
   const kind = (filter.kind ?? "").trim().toLowerCase();
   const picked = kind ? all.filter((e) => e.kind === kind) : all;
   const limit = Math.max(1, Math.min(500, Number(filter.limit) || 200));
-  return picked.slice(-limit);
+  // A corrected entry is listed with the entry that corrects it.
+  const replaced = supersededBy(all);
+  return picked.slice(-limit).map((e) => (replaced.has(e.seq) ? { ...e, superseded_by: replaced.get(e.seq) } : e));
 }
 
 /**

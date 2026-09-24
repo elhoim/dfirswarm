@@ -247,6 +247,31 @@ export function isPeersScratch(pathKey: string, agentId: string, peers?: Readonl
 
 export { leadingCommand } from "./protocol.ts";
 
+/**
+ * A shell command that took this long and left its whole output under
+ * tool-output/ is not worth running again: the second run is told where the
+ * first one's output is (SWARM_REPEAT_HINT_MIN_MS overrides, in ms).
+ */
+export const REPEAT_HINT_MIN_MS = 60_000;
+
+export function repeatHintMinMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SWARM_REPEAT_HINT_MIN_MS);
+  return Number.isFinite(n) && n >= 0 && env.SWARM_REPEAT_HINT_MIN_MS !== "" && env.SWARM_REPEAT_HINT_MIN_MS !== undefined ? n : REPEAT_HINT_MIN_MS;
+}
+
+/** The same command, whatever its spacing: what the repeat hint compares. Not its meaning. */
+export function normalizeShellCommand(command: string): string {
+  return command.trim().replace(/\s+/g, " ");
+}
+
+/** A long shell call whose whole output was kept: how long it ran and where the output is. */
+export type KeptRun = { ms: number; path: string };
+
+/** What the second run of a long command is told, once, with its own output. */
+export function repeatHintText(run: KeptRun): string {
+  return `Note from the harness: this same command ran for ${Math.round(run.ms / 1000)} s earlier in this session, and its whole output is kept at ${run.path}. Next time, grep or read that file instead of running the command again.`;
+}
+
 function ctxFrom(cwd: string, agentId?: string): SwarmContext {
   return createContext(cwd, agentId ?? resolveAgentId());
 }
@@ -366,6 +391,9 @@ export default function (pi: ExtensionAPI) {
   /** Leading word of each bash command this agent ran, counted for the forge hint. */
   const bashCommandCounts = new Map<string, number>();
   const forgeHinted = new Set<string>();
+  /** Long shell calls whose whole output is kept, by command (normalizeShellCommand), and the ones already pointed back. */
+  const longRuns = new Map<string, KeptRun>();
+  const repeatHinted = new Set<string>();
   /** When this agent was steered for its own cap, if it was. */
   let agentCapSteeredAt: number | null = null;
   /** The watch outgrowing work/ is said once per session, not per shell call. */
@@ -1033,6 +1061,47 @@ export default function (pi: ExtensionAPI) {
   let stoppedByHarness: string | null = null;
 
   /**
+   * The caps, before each model call. Spend is folded in at the end of a
+   * turn and the stops were acted on at the next tool result or timer tick,
+   * so a seat past its grace period, or one whose swarm the sentinel ended,
+   * could still make the call it was about to. Here the caps are taken just
+   * before the call (a first breach is steered as ever, and its grace period
+   * runs), and a seat that is to stop is stopped before the call goes out:
+   * the turn is aborted and the session shut down, with the same outcome as
+   * the stop it replaces (its done file, its trace line) and a
+   * `budget_precall_stop` line saying it was taken here.
+   *
+   * On the host this is the brake. In a microVM this hook runs in the guest,
+   * under the agent's own root, and is advisory like the rest of the
+   * extension: the hub's cap stop (scripts/vm-hub.ts, seatBackstop) and its
+   * wall clock are the brakes the host holds.
+   */
+  let precallStopped = false;
+  pi.on("context", async (_event, ctx) => {
+    if (!agentId || precallStopped) return;
+    // A VM whose hub is down has no budget or sentinel to read; the lost-hub
+    // steer and stop (hubReachable) handle it, and a call must not wait out
+    // two timeouts first.
+    if (boardSocket() && hubLost.since) return;
+    const cwd = ctx.cwd;
+    const budget = await readBudget(cwd).catch(() => null);
+    if (budget) await enforceAllCaps(cwd, budget, ctx).catch(() => undefined);
+    const sentinel = !stoppedByHarness && (await swarmDoneExists(cwd).catch(() => false));
+    if (!stoppedByHarness && !sentinel) return;
+    precallStopped = true;
+    if (sentinel) {
+      // As the tool-call hook does once the sentinel stands: this seat's
+      // done file, its leases released, and the process ended.
+      const result = await markDone(ctxFrom(cwd, agentId), { reason: "sentinel_present", outputFile: "(stopped after the sentinel)" }).catch(() => null);
+      await logEvent(cwd, agentId, "agent_stop", { reason: "sentinel_present" }, { ok: true, via: "precall", created_sentinel: result?.created_sentinel ?? false }).catch(() => undefined);
+      stoppedByHarness = "sentinel_present";
+    }
+    await logEvent(cwd, agentId, "budget_precall_stop", { reason: stoppedByHarness }, { ok: true, brake: boardSocket() ? "advisory (in the VM; the hub holds the brake)" : "host" }).catch(() => undefined);
+    ctx.abort();
+    ctx.shutdown();
+  });
+
+  /**
    * A turn that ends in a provider error ends the agent, and used to end it in
    * silence. On the BelkaCTF #6 run both DeepSeek agents stopped six seconds
    * apart on `402 Insufficient Balance`; the console counted them among the
@@ -1584,6 +1653,22 @@ export default function (pi: ExtensionAPI) {
         }
       } catch (error) {
         fullOutputError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    // The same long command a second time: told, once, where the first
+    // run's whole output is, with this run's result. Generic: any command
+    // whose earlier run was long and whose output was kept whole.
+    if ((name === "bash" || name === "powershell") && agentId && typeof input?.command === "string") {
+      const key = normalizeShellCommand(input.command);
+      const earlier = longRuns.get(key);
+      if (earlier && !repeatHinted.has(key)) {
+        repeatHinted.add(key);
+        content = [...(Array.isArray(content) ? content : []), { type: "text", text: repeatHintText(earlier) }];
+        contentChanged = true;
+        await logEvent(ctx.cwd, agentId, "repeat_hint", { command: leadingCommand(input.command) ?? "" }, { ok: true, earlier_ms: earlier.ms, full_output: earlier.path }).catch(() => undefined);
+      }
+      if (fullOutput && !fullOutput.write_error && !isError && durationMs !== undefined && durationMs >= repeatHintMinMs()) {
+        longRuns.set(key, { ms: durationMs, path: fullOutput.path });
       }
     }
     const override = contentChanged ? ({ content } as never) : undefined;
@@ -2519,20 +2604,23 @@ export default function (pi: ExtensionAPI) {
     name: "record",
     label: "Record",
     description:
-      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account) or finding (a conclusion). Both source and evidence are required: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. The harness renders ledger/ledger.md — timeline, indicators, findings — after every record; cite that file in the report.",
+      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (a conclusion) or absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope). Both source and evidence are required: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq>: nothing is deleted, and the newer entry is the correction. The harness renders ledger/ledger.md — timeline, indicators, findings, searches that found nothing — after every record; cite that file in the report.",
     promptSnippet: "Record a dated event, an indicator or a finding with its evidence",
     promptGuidelines: [
       "Record every dated event you establish as kind=event with ts in UTC; the timeline is built from them.",
       "Record indicators and findings as you confirm them, with the evidence that proves them.",
       "source and evidence are required on every record: where you saw it, and the command or id that lets somebody else see it too.",
+      "A wrong entry is corrected, never deleted: record the right one with supersedes=<seq of the wrong one>.",
+      "kind=absence is optional: record a search that found nothing only when the absence matters to the case, with the scope it holds for.",
     ],
     parameters: Type.Object({
-      kind: Type.Union(LEDGER_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding" }),
-      value: Type.String({ description: "The event, indicator or finding, in one sentence" }),
+      kind: Type.Union(LEDGER_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding | absence" }),
+      value: Type.String({ description: "The event, indicator or finding, in one sentence; for absence, what was looked for" }),
       ts: Type.Optional(Type.String({ description: "The event's time, ISO 8601 with its zone: 2024-01-15T12:44:22Z, or 2024-01-15T15:44:22+03:00 as the source records it. A time without a zone is refused." })),
       source: Type.String({ description: "Where it was seen: a path, log, plugin, registry key. Required." }),
       evidence: Type.String({ description: "How to check it: command, inode, record id, hash. Required." }),
       confidence: Type.Optional(Type.Union(LEDGER_CONFIDENCE.map((c) => Type.Literal(c)))),
+      supersedes: Type.Optional(Type.Number({ description: "The seq of an entry this one corrects. The older entry stays, marked superseded." })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
@@ -2543,6 +2631,7 @@ export default function (pi: ExtensionAPI) {
         source: params.source,
         evidence: params.evidence,
         confidence: params.confidence,
+        ...(params.supersedes !== undefined ? { supersedes: params.supersedes } : {}),
       });
       if (!result.ok) {
         await logEvent(toolCtx.cwd, agentId, "record", { kind: params.kind }, { ok: false, reason: result.reason }, Date.now() - started);
@@ -2551,18 +2640,23 @@ export default function (pi: ExtensionAPI) {
       // The entry's hash goes on the trace, which is anchored outside the
       // run: custody holds the ledger to it, so an entry deleted from the
       // tail, or one written into the file without this tool, is named.
-      await logEvent(toolCtx.cwd, agentId, "record", { kind: params.kind, ts: params.ts, value: params.value }, { ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.hash ? { hash: result.entry.hash } : {}) }, Date.now() - started);
-      return okResult({ ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, rendered: LEDGER_MD });
+      await logEvent(toolCtx.cwd, agentId, "record", { kind: params.kind, ts: params.ts, value: params.value, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}) }, { ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.hash ? { hash: result.entry.hash } : {}) }, Date.now() - started);
+      // A correction is said on the trace as itself, so a reader of the
+      // record sees which entry stopped standing, when, and by whom.
+      if (result.entry.supersedes !== undefined && !result.merged) {
+        await logEvent(toolCtx.cwd, agentId, "ledger_superseded", { seq: result.entry.supersedes }, { ok: true, by_seq: result.entry.seq });
+      }
+      return okResult({ ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), rendered: LEDGER_MD });
     },
   });
 
   pi.registerTool({
     name: "ledger",
     label: "Ledger",
-    description: "List the swarm's ledger: every event, indicator and finding recorded so far, with authors and evidence. Filter by kind; the rendered file is ledger/ledger.md.",
+    description: "List the swarm's ledger: every event, indicator, finding and search that found nothing, recorded so far, with authors and evidence; a corrected entry carries superseded_by. Filter by kind; the rendered file is ledger/ledger.md.",
     promptSnippet: "See what the swarm has recorded so far",
     parameters: Type.Object({
-      kind: Type.Optional(Type.String({ description: "event | ioc | finding" })),
+      kind: Type.Optional(Type.String({ description: "event | ioc | finding | absence" })),
       limit: Type.Optional(Type.Number({ description: "Newest N entries (default 200)" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
