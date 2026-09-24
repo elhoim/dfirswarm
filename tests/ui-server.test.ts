@@ -1773,13 +1773,13 @@ test("a report of a path whose size and mtime did not move is not a change", asy
   // touching attributes reports it again with the same bytes: each would be
   // a refetch on every open page for nothing.
   const dir = await mkdtemp(join(tmpdir(), "swarm-bus-"));
-  // The window is what is under test, not how fast the machine is: at 5ms a
-  // loaded CI runner can take longer than that between two file operations, and
-  // the pair being coalesced lands in two windows instead of one.
-  const bus = new ChangeBus(dir, 60);
+  // The window is what is under test, not how fast the machine is: at 5ms,
+  // and later at 60ms, a loaded CI runner took longer than that between two
+  // file operations, and the pair being coalesced landed in two windows.
+  const bus = new ChangeBus(dir, 400);
   const seen: BusMessage[] = [];
   bus.subscribe((m) => seen.push(m));
-  const settle = () => new Promise((r) => setTimeout(r, 300));
+  const settle = () => new Promise((r) => setTimeout(r, 1000));
   try {
     await mkdir(join(dir, "s9", "threads", "main"), { recursive: true });
     const post = join(dir, "s9", "threads", "main", "000001-a.md");
