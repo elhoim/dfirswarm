@@ -1015,6 +1015,9 @@ test("several evidence roots, and one added from the form when the server allows
     // A kickoff resolves the added root's set like any other.
     const started = await send("POST", "/api/swarms", { model: "deepseek/deepseek-v4-pro", cap_usd: 0.5, n: 1, goal: FIXTURE_GOAL, no_start: true, inputs: "2:images", inputs_enforce: "off", isolation: "host" });
     assert.equal(started.status, 202);
+    // The kickoff runs as a job and writes into runs2 while it lasts: wait
+    // for it, or the clean-up below races the swarm.sh it started.
+    await waitJobAt(at, ((await started.json()) as { id: string }).id, 60_000);
 
     // A root named at start cannot be removed from the form; one added there can.
     assert.equal((await send("DELETE", "/api/inputs/roots/0")).status, 400);
