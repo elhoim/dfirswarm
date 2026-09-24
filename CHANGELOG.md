@@ -154,21 +154,45 @@ not surprised:
   conclusions until an examiner reviews them, names each exhibit's model,
   and lists the tools the agents forged as not independently validated.
 - **The operator is on the record.** Every `start`, `stop`, `reap`, `say`,
-  `package`, `report` and `tools` is a line in `runs/operator-audit.jsonl`
+  `package`, `report`, `tools`, `review`, `export`, `hold`, `release`,
+  `purge` and `verify` is a line in `runs/operator-audit.jsonl`
   beside the registry: when, the OS user and host, through what (the command
   line, the console, the hub's own clear-up), the arguments with `--env`
   values and the goal left out, and the sha256 of the line before. A
-  `start`, `stop`, `reap` or `say` of a live run is on its trace too, as
-  `operator_action`; from a shell that is not the kickoff's it is marked
+  `start`, `stop`, `reap`, `say`, `review`, `export`, `hold` or `release` of
+  a live run is on its trace too, as `operator_action`; from a shell that is not the kickoff's it is marked
   unverified there, and custody, the report and the summary count such
   lines as the operator's actions, not as lines no pane accounts for.
+- **Node 22.19 is the floor.** `engines` said 22.6, but the pinned Pi and
+  its HTTP client declare 22.19.0, and on an older 22 the harness extension
+  does not load. A CI job runs the typecheck and the node suites on exactly
+  22.19.0.
+- **A host run started as root is refused** unless `--allow-root`: root is
+  not bound by the read-only modes a host run relies on. A microVM run
+  started as root is warned about.
+- **The caps are taken before each model call too.** A seat past its grace
+  period, or whose swarm the sentinel ended, is stopped before the call goes
+  out, with the same outcome as the stop it replaces and a
+  `budget_precall_stop` line. On the host this is the brake; in a VM it is
+  advisory, and the hub's cap stop and wall clock are the host's brakes.
+- **A long command run a second time is pointed at its first run's output.**
+  A shell command that took a minute or more (`SWARM_REPEAT_HINT_MIN_MS`),
+  ended without error and was kept whole under `tool-output/` is
+  remembered; the same agent running it again gets one paragraph naming the
+  kept file to grep or read instead (`repeat_hint`, once per command). The
+  harness names no tool.
+- **The kickoff records whether the runs' volume is encrypted at rest**
+  (`disk_encryption`: FileVault and APFS on macOS, a crypt device under the
+  mount on Linux), prints it as a `Disk:` line and warns when it is off.
 - **The evidence copy keeps the evidence's links as links.** `cp -RL`
   followed every link: an extracted root's `etc/hosts` became the examiner's
   own file, vouched for by the manifest. Only a link at the top of
   `--inputs` (the operator's own) is followed; links that lead out of the
   evidence are listed at kickoff. The copy is checked against its source by
-  name, kind and size (`source_checked`), and a mismatch (names merged on a
-  case-insensitive volume, a short read) stops the kickoff. A name that is
+  name, kind and size, and then by content: each copied file's source is read
+  again and its SHA-256 compared with the manifest's (`source_checked`); a
+  mismatch (names merged on a case-insensitive volume, a short read, other
+  bytes) stops the kickoff. `--no-verify-copy` keeps the first check only. A name that is
   not UTF-8 is kept exactly (`path_b64`, `link_b64`) and compared as bytes
   by the agents' check and by custody, so a Windows-1254 name on ext4 is no
   longer both missing and added.
@@ -181,9 +205,12 @@ not surprised:
 - **A synced folder is refused, not only warned about.** A copy of the
   evidence, or the VMs' kept disks, is not put in a folder a sync client
   uploads (Dropbox, iCloud Drive, OneDrive, …) unless
-  `--allow-synced-folder`; the check runs before anything is written, where
-  it used to run after the evidence was copied there. A run directory there
-  is still warned about for what the agents derive.
+  `--allow-synced-folder`, or a `.dfirswarm-allow-synced` file of the
+  operator's at the top of that synced folder (or between it and the
+  destination); the registry says which allowed it. The check runs before
+  anything is written, where it used to run after the evidence was copied
+  there. A run directory there is still warned about for what the agents
+  derive.
 - **Custody writes nothing through a link.** The previous verdict is set
   aside as `custody.previous-<stamp>.json` before anything is checked, and
   every file custody writes goes to a fresh file renamed into place: a host
@@ -231,6 +258,125 @@ not surprised:
 
 ### Added
 
+- **The examiner's review of the ledger** (`swarm.sh review <id>`): accept,
+  reject (with a note) or amend (with a note) each entry, and sign off the
+  ledger once the run has ended, over its current head. Kept beside the
+  registry where no agent reaches (`runs/reviews/<id>.jsonl`, 0600), each
+  line chained to the one before, appended and never rewritten. The report
+  shows each exhibit's standing (accepted, rejected, amended, not reviewed,
+  or review unreadable) on its head and in its rows, the counts, whether the
+  review's chain verifies, whether the sign-off covers the ledger's current
+  head, and "reviewed and signed by" on the cover; until then it says every
+  finding is the agents' conclusion. The console's Ledger tab takes the
+  review through the same command.
+- **Ledger corrections and searches that found nothing.** `record(…,
+  supersedes=<seq>)` records a correction; nothing is deleted, the corrected
+  entry is marked "superseded by #N" where it stands and the correction
+  "corrects #M", and the link is in the chained core, so it cannot be moved.
+  An entry is corrected once. `record(kind=absence)` is a search that found
+  nothing, with what was looked for, what was searched, and the query, the
+  tool and its version and the scope, all required; `ledger.md`, the report
+  and the summary list absences apart, valid only for that scope, never as
+  findings. Both are optional.
+- **Coverage and grounding** (`scripts/coverage.ts`): which evidence files no
+  command on the trace named, and, for each ledger entry, whether a call
+  before it named its source. Generic path matching over every call's
+  arguments; it knows no tool, and "named" is not "examined", which every
+  place it appears says. The report (a "Named by" column, the list of
+  unnamed evidence, "not grounded in the trace" on an exhibit), the summary
+  and the console carry it, and the idle watchdog posts the unnamed inputs at
+  a quarter, a half and three quarters of the wall clock, assigning them to
+  nobody.
+- **A package that can be signed and checked.** `swarm.sh package <id>
+  --sign [--key FILE]` signs the manifest with an ssh key (`ssh-keygen -Y
+  sign`, namespace `dfirswarm-package`) and writes the signature, the public
+  key and who signed beside it; `swarm.sh verify <dir|zip>
+  [--allowed-signers FILE]` re-hashes every file (none missing, changed or
+  added) and checks the signature (exit 0, 3, 4 or 1). The package also
+  carries `court-set.json` (every file handed over, with its size and sha256
+  or why it is absent) and this run's lines of the operator's record, and
+  the report lists the files handed over with it.
+- **Export**: `swarm.sh export <id> --format csv|timesketch` writes the
+  ledger as CSV (every field, the entry hash, superseded by, the review,
+  grounding) or as a CSV Timesketch imports. A text cell a spreadsheet would
+  run as a formula gets a leading apostrophe.
+- **Retention**: `swarm.sh hold <id> [--reason]` keeps a run from purge,
+  from a new run in its sandbox and from the VM reaper; `release <id>` lifts
+  it. `swarm.sh purge <id> --yes` deletes a finished run's sandbox, its kept
+  disks and its hub directory, refuses a held or running run, keeps the run
+  in the registry as `purged`, and writes a destruction record (what, with
+  sizes, and the hashes of the inputs manifest, the custody verdict and the
+  package manifest) on the operator's record.
+- **`--notify CMD`**: a command of the operator's hears a run's
+  `finished`, `finish_failed`, `stop_incomplete`, `budget_cap`,
+  `wall_clock`, `evidence_changed`, `chain_broken`, `agent_dead`,
+  `collector_unreachable` and `hub_down`, as one JSON line on stdin,
+  detached, within 30 seconds. It is kept outside the run
+  (`runs/notify/<id>.cmd`, 0600); the registry records only that there is
+  one, and the command line is redacted on the operator's record.
+- **`--ledger-from RUN`**: an earlier run's ledger as hypotheses to
+  re-derive or refute, in `prior/ledger.md` (read-only; with the earlier
+  run's review, only the entries the examiner accepted or amended; without,
+  every entry marked unreviewed), never in the new ledger. The worker prompt
+  says to cite the evidence, not the prior entry.
+- **The model gateway (`--model-gateway`, VM runs, off by default).** Every
+  model call a VM makes to a provider the gateway fronts goes through one
+  process on the host. It holds the provider's key in memory, reads each
+  call's usage off the provider's own answer (OpenAI chat and responses and
+  Anthropic messages, JSON and streaming, priced as Pi prices them), refuses
+  a stopped seat's call at once and a call past a cap or the wall clock
+  three minutes after it was crossed, and is not a general proxy. The VM
+  holds a seat token, never that provider's key. The hub folds the measured
+  spend into `budget.json` (`metered_by: "model-gateway"`), so every cap
+  reads it; `traces/model-gateway.jsonl` has one chained line per call and
+  no bodies, custody checks its chain and anchors its hash, and the report
+  says which spend was metered on the host. Subscriptions, Bedrock, Vertex,
+  Google, Mistral, OpenRouter, Fireworks, Azure and local models keep msb's
+  placeholder path, and the kickoff names each. docs/model-gateway.md.
+- **VM runs: each seat's socket serves only its own VM.** The kickoff makes a
+  token per seat, gives it to that VM (`SWARM_SEAT_TOKEN`) and to the hub,
+  and every connection must open with it or is refused and named on the
+  trace (`seat_auth`). The tokens rest in the hub directory, the VM's
+  environment and msb's database while the VM lives; never in the trace,
+  the registry, a VM record or a package. The hub also cuts `replies.jsonl`
+  back to the answers it keeps, bounds each seat's file history
+  (`SWARM_HISTORY_QUOTA_MB`, 1 GiB; past it a revision is recorded by its
+  hash and the seat is told once), puts a seat that said done away when it
+  was due across a hub restart, and calls `--notify`. The keeper, the stop
+  the hub runs, the idle watchdog and the gateway run from the run's frozen
+  copy of the harness.
+- **`swarm.sh start --check`** runs every refusal and preflight of a start,
+  the same code, and writes nothing (no sandbox, registry entry, hook,
+  daemon, VM, pull or operator-record line): exit 0 when the start would go
+  ahead, 2 when it would be refused. **`swarm.sh image-for [--pack ID]...
+  [--tools-from DIR] [--playwright]`** prints, as JSON, the image a kickoff
+  with those packs would boot, its digest when known, and why. The console's
+  New swarm form uses both before Start.
+- **`scripts/score.ts`**: an accuracy check the operator runs by hand
+  against an answers file of their own; it prints found, not found or
+  contradicted per question and writes nothing anywhere.
+- **The console shows a microVM run as itself.** An isolation chip on every
+  run; a VM panel with each probe check and what it means, what the hub
+  refused, hub and collector restarts, a keeper that gave up, the kept disks
+  (path, size, hash, or why not, with the remedy) and msb's database; one
+  timeline of the run's life across its VMs; a seat's state from one source,
+  the hub while it hears from the VM, watched where it lives; `system via
+  <seat>` posts shown as that seat's; a Custody tab; coverage, corrections
+  and absences in the Ledger tab; a record dialog to hold and release,
+  export, package (signed or not, downloaded as a zip), verify and, behind
+  the run id typed out, purge. The kickoff form checks the host can boot the
+  VMs, shows the image the packs choose, and takes the new options; it never
+  shows an `--env` value or the notify command. Stop takes custody's options.
+- **CI**: actions are pinned by commit; a job runs the node suites on the
+  Node floor; `image-boot.yml` builds every image profile once a week, boots
+  each as an agent's VM (the probe, its verdict and Pi end to end), checks
+  it against its packs with the kickoff's `imageFit`, and does the same for
+  base on arm64 where the runner has KVM. Nothing is pushed.
+- **The worker prompt** asks agents to read a tool's usage for the options
+  that change what its output means before relying on it, to keep a large
+  artefact's full walk under `work/<id>/` and grep it, to correct a ledger
+  entry with `supersedes`, and to record a meaningful empty search as an
+  `absence` with its scope. It names no tool.
 - **Agents in microVMs (`--isolation microvm`).** Every agent runs Pi inside
   its own microVM (microsandbox 0.7.2; macOS on Apple silicon, Linux with
   KVM), created at kickoff through the SDK (`scripts/vm.ts`) and put away by

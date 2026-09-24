@@ -179,12 +179,52 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   refused rather than read in the host's zone, and the text as written is
   kept (`ts_raw`) beside the UTC time.
 - **The operator is on the record too.** Each command that starts, stops,
-  reaps, speaks into, exports or reports on a run is a line in
+  reaps, speaks into, reports on, packages, reviews, exports, holds,
+  releases, purges or verifies a run is a line in
   `runs/operator-audit.jsonl`, chained by hash, with the OS user and host;
-  a `start`, `stop`, `reap` or `say` is on the live run's trace as well
-  (`operator_action`). The run records what
-  produced it (`provenance`: the harness commit and local changes, Node,
-  Pi, msb, the image digest).
+  on a live run `start`, `stop`, `reap`, `say`, `review`, `export`, `hold`
+  and `release` are on the trace as well (`operator_action`). The run
+  records what produced it (`provenance`: the harness commit and local
+  changes, Node, Pi, msb, the image digest).
+- **Each seat's socket serves only its own VM.** The kickoff makes a token
+  per seat and gives it to that VM (`SWARM_SEAT_TOKEN`) and to the hub;
+  every connection to the seat's socket opens with it or is refused and
+  named on the trace (`seat_auth`). A host-mode pane on a host whose guard
+  cannot seal a socket, or any other process of the same user, can no
+  longer speak to the hub as a seat. The tokens rest in the hub directory
+  (0600, in a 0700 directory no VM mounts), in each VM's environment and in
+  msb's database while the VM lives; never in the trace, the registry, a VM
+  record or a package.
+- **An examiner reviews the ledger.** `swarm.sh review` accepts, rejects or
+  amends each entry with a note and signs off the ledger's head, in a
+  chained file beside the registry that no agent reaches
+  (`runs/reviews/<id>.jsonl`). Until it has been reviewed the report says
+  every finding is the agents' conclusion, and it shows each exhibit's
+  review, whether the review's chain verifies and whether the sign-off
+  covers the ledger's current head. Corrections (`supersedes`) and searches
+  that found nothing (`absence`) are ledger entries of their own; nothing is
+  deleted. The report and the summary say which evidence files no command on
+  the trace named, and which entries no call before them named the source of
+  (`scripts/coverage.ts`): generic path matching, and a named file is not
+  necessarily an examined one.
+- **The package can be signed and checked.** `package --sign` signs its
+  manifest with the examiner's ssh key; `verify` re-hashes every file and
+  checks the signature against an allowed-signers file. A held run is kept
+  from purge, from a new run in its sandbox and from the reaper; `purge`
+  deletes a finished run's material and leaves a destruction record.
+- **Optional: the model gateway (`--model-gateway`).** Every model call a
+  VM makes to a provider the gateway fronts goes through one process on the
+  host that holds the key, meters the call from the provider's own answer,
+  and refuses a stopped seat's call at once and a call past a cap or the
+  wall clock three minutes after it was first crossed (the harness's
+  two-minute grace and one more). The VM holds a seat token, never that
+  provider's key, and reaches no provider host for it. It fronts keyed
+  providers whose models share one API and one base URL and whose usage it
+  reads: OpenAI-style chat and responses, Anthropic messages. It does not
+  front subscriptions, Bedrock, Vertex, Google, Mistral, OpenRouter,
+  Fireworks, an operator-set base URL such as Azure's, or local models; the
+  kickoff names each one left out, and those keep msb's placeholder path.
+  Off by default.
 - **Images come from the packs** (`images/recipe.py`), and a run records the
   digest it booted. Prebuilt images are published privately from the pro
   repository, never from this one: an image bundles separately licensed
@@ -205,8 +245,9 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   do the VM finish and the custody it starts; that copy holds its own msb
   and SDK, so an `npm ci` mid-run does not change the binary that puts the
   VMs away (the rest of `node_modules` is linked from the checkout). The
-  operator's own commands (`swarm.sh`, `stop`, the keeper, the idle
-  watchdog) run from the checkout.
+  keeper, the stop the hub runs, the idle watchdog and the model gateway
+  run from that copy too. The operator's own commands (`swarm.sh`, an
+  operator's `stop`, `await-done.sh`) run from the checkout.
 - **A host run gets a stop from outside its panes too.** The idle watchdog,
   which runs for the length of every run outside the panes, claims the stop
   clock past a cap or the wall clock when no pane has, and writes the
@@ -240,7 +281,8 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
 - The hub is one process on the host. A keeper (`scripts/hub-supervise.sh`)
   brings it back from the state it keeps (`hub-input.json`, the stop clock)
   until the run's stop, and the run's trace collector too, which in a VM run
-  is the trace's only door (`collector_restarted`); it gives up after
+  is the trace's only door (`collector_restarted`), and the model gateway,
+  on the port the VMs were given (`model_gateway_restarted`); it gives up after
   twenty crashes in a row and says so, and the idle watchdog restarts a hub
   only while no keeper is running and none has given up. An agent whose hub
   stays unreachable for four minutes is stopped by its own extension.
@@ -270,28 +312,45 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   model's host, to a symbol server or to a blob store it may reach, leaves.
   The allowlist bounds where, not what.
 - Spend in a VM run is what each seat reports; the wall clock and each VM's
-  `maxDuration` are the brakes the host enforces by itself.
+  `maxDuration` are the brakes the host enforces by itself. Under
+  `--model-gateway` this holds only for the providers the gateway does not
+  front: a fronted seat's spend is what the gateway measured on the host
+  (`metered_by: "model-gateway"` in `budget.json`), a seat's own report can
+  only raise it, and a stopped seat's calls are refused on the host. A
+  call past a cap is still let through for three minutes after the cap is
+  crossed, so a run can go past a cap by what its seats spend in that
+  grace. A call whose provider sent no usage, or to a model Pi's catalogue
+  does not price, is counted with its cost unknown, never as free.
+- The model gateway, when on, holds the fronted providers' keys in its
+  memory on the host, as msb's supervisor does for the rest.
 - Who is asking is the channel, not the process: every process inside a VM
-  speaks to the hub as that seat. A forged tool, a parser running over
+  speaks to the hub as that seat. The seat token keeps a process outside the
+  VM from doing the same; inside it, the token is in the guest's
+  environment, and every guest process has it. A forged tool, a parser running over
   hostile content, or a binary carved from the evidence and run by the
   guest's root can post, publish, record and call `done` as the seat. The
   harness code in a VM is the guest's too: a harness post it sends reaches
   peers as `from: "system via <seat>"`, the seat's word and not the
   harness's.
 - The extension inside a VM is the agent's own code under the guest's root.
-  Its tool refusals, claim-before-write, the self-compaction lock and the
-  per-seat cap steer are advisory there; what holds is what the hub, the
-  mounts and msb enforce.
+  Its tool refusals, claim-before-write, the self-compaction lock, the
+  per-seat cap steer and the budget check before each model call are
+  advisory there; what holds is what the hub, the mounts, msb and, when it
+  is on, the model gateway enforce.
 - The trace masks the harness's own tokens, and in a VM it never sees a
   provider's real key, only placeholders. A real key a provider echoes back
-  in a response is not masked in the trace.
+  in a response is not masked in the trace. The model gateway streams a
+  provider's answer back to the VM byte for byte, so a key a provider echoes
+  reaches the VM with or without it.
 - `vm/<id>.json`, the record of each VM, is on the run's floor and readable
   from every VM. It names each secret and its hosts and holds no value.
 - The hub runs on the host as the examiner, with no cage of its own: a path
   it resolves wrongly is a host path. Its own checks on each path (inside the
   run, no link an agent planted) are what stand there.
 - A seat's writable holes are host directories with no quota: a seat can
-  fill the host's disk.
+  fill the host's disk. Only its file history on the hub is bounded
+  (`SWARM_HISTORY_QUOTA_MB`, 1 GiB): past it a revision is recorded by its
+  hash only.
 - Liveness is the seat's own report: a VM that keeps its hub link and says
   "working" is never nudged or reaped. The wall clock bounds it.
 - A local model's port, reached through msb's host gateway, is that
@@ -312,12 +371,19 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
 - The operator's record says who typed a command only as the OS says it:
   a line on the trace from a shell that is not the kickoff's carries no
   token and is marked unverified, and `runs/operator-audit.jsonl` is chained
-  but not signed, so whoever can write it can rewrite it whole.
+  but not signed, so whoever can write it can rewrite it whole. The same
+  holds for the examiner's review file. A signed package proves which key
+  signed its manifest and that nothing changed since; who holds the key is
+  for the recipient's allowed-signers file to say.
+- `--notify` runs the operator's own command, as the operator, with each
+  event's details (run id, state, counts; no evidence). What that command
+  does with them is outside the harness.
 - `host_clock.synced` is `null` on macOS, which has no unprivileged way to
   say whether the clock is synced.
-- The evidence copy is checked against its source by name, kind and size,
-  not by content: the manifest hashes the copy, and a source that changed
-  under the copy with its size unchanged is not caught there.
+- The evidence copy is checked against its source by content by default,
+  which reads the evidence a second time; `--no-verify-copy` keeps the check
+  by name, kind and size, under which a source that changed under the copy
+  with its size unchanged is not caught.
 - A client with its own trust store fails on a connection msb intercepts:
   Chromium's NSS store, Java's keystore.
 - Deferred: `--inputs-image` attaches a disk image with macOS's `hdiutil`
@@ -341,6 +407,12 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   `--probe-violation`) without `--isolation` is refused with the hint to
   name host. A registry record with no isolation is a run from before the
   default changed, and is shown as a host run.
+- **The copy is checked by content** (2026-09-24): each copied file's
+  source is read again and hashed at kickoff; `--no-verify-copy` opts out.
+- **Root**: a host run started as root is refused unless `--allow-root`; a
+  microVM run started as root is warned about (2026-09-24).
+- **The keeper and the idle watchdog run from the frozen copy**, with the
+  hub (2026-09-24).
 - **Host mode stays** (2026-09-24), neither frozen nor removed: supported as
   the opt-in, unisolated mode. What stays true of it: every agent is a Pi
   process on this machine, held by the write guard, the tool guard, netguard,
@@ -355,12 +427,9 @@ For the project owner; nothing in the code decides them yet.
 
 - A bare-metal Linux server with KVM for real cases. The droplet runs VMs
   through nested KVM and fits two agents.
-- Whether a copied `--inputs` is also re-hashed from its source, which
-  doubles the reads of a large case, or stays checked by name, kind and
-  size.
-- Whether a run started as root is refused rather than warned about.
-- Whether the keeper and the idle watchdog run from the frozen copy as the
-  hub does.
+- Whether `--model-gateway` becomes the default for VM runs, and whether it
+  should front more providers (OpenRouter and Fireworks per model, Azure
+  from the operator's base URL, Google's usage).
 
 ## Alternatives considered
 

@@ -32,11 +32,16 @@ where it boots the base and disk images under KVM. A hosted macOS runner
 cannot boot a microVM, so the Apple-silicon VM path is run by hand before a
 release. A pull request that touches `images/` or a pack's requirements
 also builds every profile for amd64 and two (memory, re) for arm64
-(`images.yml`); none of those is booted, and no arm64 image is booted in CI.
+(`images.yml`), without booting them. Once a week `image-boot.yml` builds
+every profile, boots each as an agent's VM under KVM (the probe, its verdict
+and Pi end to end), checks it against its packs with the kickoff's
+`imageFit`, and does the same for base on arm64 where that runner has KVM;
+it pushes nothing. Actions are pinned by commit, with the tag beside each.
 The `spikes/` directory is neither typechecked (`tsconfig.json` covers
 `extensions/`, `scripts/` and `tests/`) nor re-run: its scripts record
 measurements made once, and they can go stale. The host suites run on
-Node 22 (`.nvmrc`); Pi in a VM runs on the image's Node 24
+Node 22 (`.nvmrc`), and on exactly 22.19.0, the `engines` floor the pinned Pi
+needs, in a job of their own; Pi in a VM runs on the image's Node 24
 (`images/base.Dockerfile`), and CI runs the node suites on Node 24 as well.
 
 `npm ci` brings Pi's own package in as a devDependency, for the

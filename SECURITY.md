@@ -63,6 +63,18 @@ Please report these privately (see below):
   allowlist, act through the hub as another seat or as the harness (the stop
   clock, the sentinel, a forge with forging off), make the hub follow a link,
   or hang or crash the hub or a custody check.
+- Under `--isolation microvm`: a process outside a seat's VM that the hub
+  serves as that seat without the seat's token, or a seat token that shows
+  up in the trace, the registry, a VM record or a package.
+- With `--model-gateway`: a VM that reaches a fronted provider without the
+  gateway, a provider key that reaches a VM, a file or the trace, a seat
+  whose token calls another seat's providers, a stopped seat's call that is
+  forwarded, or a gateway route that reaches a host other than the
+  provider's.
+- The review, the package and purge: a way for an agent to write the
+  examiner's review file (`runs/reviews/`), a package change that `verify`
+  does not report, or a `purge` that deletes a held run or anything outside
+  the run it names.
 - With `--allow-tool-forging` on: a way to put a script under `tools/`
   without `make_tool`, to run a tool whose bytes differ from its manifest,
   to replace a live author's tool as a peer, or to register a forged tool
@@ -84,10 +96,14 @@ Please report these privately (see below):
 - Under `--isolation microvm`, what the ADR ("Limits that stay") and
   `docs/safety.md` list as the mode's stated limits, among them:
   - a spend report is the seat's own; the host enforces the wall clock by
-    itself, and the caps only on what the seats report;
+    itself, and the caps only on what the seats report, except under
+    `--model-gateway` for the providers it fronts, where the host measures
+    the spend and refuses a call three minutes after a cap is crossed (so a
+    run can overshoot a cap by what is spent in that grace);
   - every process in a VM speaks to the hub as that seat: a forged tool, a
     parser over hostile content, a binary extracted from the evidence and
-    run by the guest's root;
+    run by the guest's root; the seat token is in the guest's environment,
+    and it keeps out only processes outside the VM;
   - the extension's checks inside a VM are advisory against the guest's
     root; only the hub, the mounts and msb enforce;
   - an allowed host is a way out: anything an agent can send to its model's
@@ -98,7 +114,9 @@ Please report these privately (see below):
   - a local model's port, reached through the host gateway, is that server's
     whole API to every VM (Ollama's `/api/pull` and `/api/delete` included);
   - a real key that a provider echoes back in a response is not masked in
-    the trace;
+    the trace, and reaches the VM with or without the model gateway;
+  - the model gateway, when on, holds the fronted providers' keys in its
+    memory on the host;
   - `vm/<id>.json` is readable from every VM (it names secrets and hosts, no
     value);
   - msb's strict mode is off: a host-name rule admits what the name resolves
@@ -116,9 +134,14 @@ Please report these privately (see below):
     agent's HTML artifact without scripts, but one the operator opens with
     **Open with scripts**, after its warning, or a file opened outside the
     console can reach the network;
-  - the operator's record (`runs/operator-audit.jsonl`) is chained by hash,
-    not signed: whoever can write it can rewrite it whole, and a trace line
-    from a shell that is not the kickoff's is marked unverified.
+  - the operator's record (`runs/operator-audit.jsonl`) and the examiner's
+    review (`runs/reviews/`) are chained by hash, not signed: whoever can
+    write them can rewrite them whole, and a trace line from a shell that is
+    not the kickoff's is marked unverified;
+  - a signed package proves which key signed its manifest, not whose key it
+    is: that is the recipient's allowed-signers file;
+  - `purge` deletes files the ordinary way, without overwriting the blocks
+    the filesystem freed, and knows nothing of copies made elsewhere.
 - The behaviour, cost or output of the model you point Pi at.
 - Vulnerabilities in Herdr, Pi or a model provider. Report those upstream.
 
@@ -140,5 +163,10 @@ You will get an acknowledgement within a week. There is no bounty.
 - Read the goal you are about to run. The harness refuses one without a
   definition of done, but it does not judge what the checks do.
 - Under `--isolation microvm`: use API keys and keep `--allow-oauth-in-vm`
-  off; allow suffixes (`*.name`) only where the case needs one; and keep the
-  runs, with their `<sandbox>.vm-snapshots/`, out of synced folders.
+  off; allow suffixes (`*.name`) only where the case needs one; keep the
+  runs, with their `<sandbox>.vm-snapshots/`, out of synced folders and on an
+  encrypted volume (the kickoff's `Disk:` line says which it is); and
+  consider `--model-gateway`, which meters the fronted providers' spend on
+  the host and refuses a stopped seat's calls there.
+- Sign what you hand over (`swarm.sh package <id> --sign`), and give the
+  recipient the allowed-signers line the command prints.

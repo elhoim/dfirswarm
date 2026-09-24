@@ -141,7 +141,9 @@ back to a host run on its own.
   guard over `inputs/`, a no-exec rule over what is carved out of it, and an
   egress allowlist. There is no `sudo`, nothing mounts, and nothing asks for
   either — which is the guarantee that makes read-only evidence mean anything
-  on this machine. A case that needs a library the host does not have gets
+  on this machine. A host run started as root is refused unless
+  `--allow-root`: root is not bound by the read-only modes a host run relies
+  on. A microVM run started as root is warned about. A case that needs a library the host does not have gets
   `--allow-install` instead: `pypi.org` and `files.pythonhosted.org` join the
   allowlist, `PYTHONUSERBASE` points at `work/.toolchain/` inside the sandbox,
   and what a run installs goes when the run goes. It also sets
@@ -199,12 +201,22 @@ back to a host run on its own.
     mistake, not a root that means to. The finish line, custody and the
     report are decided on the host, never from what a VM reads.
   - Inside a VM the extension's refusals are the agent's own code under the
-    guest's root: tool refusals, claim-before-write, the self-compaction lock
-    and the per-seat cap steer are advisory there. What holds is what the
-    hub, the mounts and msb enforce. And every process in the VM speaks to
+    guest's root: tool refusals, claim-before-write, the self-compaction lock,
+    the per-seat cap steer and the budget check before each model call are
+    advisory there. What holds is what the hub, the mounts, msb and, when it
+    is on, the model gateway enforce. And every process in the VM speaks to
     the hub as that seat: a forged tool, a parser over hostile content, a
     carved binary the guest's root runs. A harness post sent from a VM
     reaches peers as `from: "system via <seat>"`, that seat's word.
+  - Each seat's socket on the hub serves only its own VM. The kickoff makes a
+    token per seat (`SWARM_SEAT_TOKEN` in that VM's environment); every
+    connection opens with it or is refused and named on the trace
+    (`seat_auth`), so a process outside the VM, a host-mode pane on a host
+    that cannot seal a socket included, cannot speak to the hub as a seat.
+    Inside the VM every process has the token. It rests in the hub
+    directory (0600, 0700, mounted by no VM), in the VM's environment and in
+    msb's database while the VM lives; never in the trace, the registry, a
+    VM record or a package; and it goes with the hub directory.
   - The hub bounds what one seat can ask of it: 16 connections, 160 MB held
     at once (lines not yet whole, lines waiting, calls queued or running;
     past it the seat's connections pause), 8 MB for a call that carries no
@@ -219,7 +231,16 @@ back to a host run on its own.
     VM, so any process in it, an agent's shell included, can use it at the
     pack's hosts; the value itself never enters the VM.
   - Spend is what each seat reports (it may only grow); the host enforces the
-    wall clock and each VM's `maxDuration` by itself.
+    wall clock and each VM's `maxDuration` by itself. With `--model-gateway`,
+    for the providers it fronts, one process on the host holds the key (in
+    its memory; never in a VM, a file or the trace), meters each call from
+    the provider's own answer, and refuses a stopped seat's call at once and
+    a call past a cap or the wall clock three minutes after it was crossed.
+    The VM holds a seat token that is worth nothing off this host and
+    reaches no provider host for that provider. Subscriptions, Bedrock,
+    Vertex, Google, Mistral, OpenRouter, Fireworks, Azure and local models
+    are not fronted and keep the placeholder path; the kickoff names each.
+    [model-gateway.md](model-gateway.md).
   - An allowed host is a way out as well as in: a `*.blob.core.windows.net`
     rule (Volatility's symbols) reaches any account's storage there. A local
     model's port, reached through msb's host gateway, is the whole API of
@@ -247,6 +268,23 @@ back to a host run on its own.
   refresh a token, so one revoked at the provider mid-run ends every seat
   that uses it.
   [ADR 0009](adr/0009-agents-live-in-microvms.md).
+- **What leaves with the package, and how a recipient checks it.**
+  `swarm.sh package <id> --sign` signs the package's `MANIFEST.txt` with the
+  examiner's ssh key (namespace `dfirswarm-package`) and puts the signature,
+  the public key and who signed beside it. `swarm.sh verify` re-hashes every
+  file against the manifest (none missing, changed or added) and checks the
+  signature against an allowed-signers file. A good signature proves that
+  key signed that manifest and nothing in the package changed since; that
+  the key is the examiner's is for the allowed-signers file to say. The
+  ledger export (`swarm.sh export`) puts a leading apostrophe on a text cell
+  a spreadsheet would run as a formula.
+- **`--notify` runs the operator's own command.** It gets each event's
+  details (run id, state, counts and paths; no evidence) on stdin, as the
+  operator, detached and for at most 30 seconds. The command is kept outside
+  the run (`runs/notify/<id>.cmd`, 0600) and runs only when that file is a
+  regular file of the operator's; the registry records only that there is
+  one, and the operator's record shows its length, not its text, since a
+  webhook URL can carry a token.
 - **What a run leaves on disk, and who keeps it.** Everything a run derives
   from the evidence stays on this machine until the operator removes it: the
   run directory (`work/` with `work/extracted/` and `work/quarantine/`,
@@ -257,11 +295,25 @@ back to a host run on its own.
   of it. [data-protection.md](data-protection.md) says what of it can be
   personal data, what leaves the machine, and what the operator decides.
   - **Retention and legal hold.** Keep or destroy a run with its case, under
-    the case's retention rules and any legal hold; the snapshots go with the
-    run (`<sandbox>.vm-snapshots/` is a separate directory, so delete it too;
-    with `--vm-snapshot-dir` it is a link, and the disks are in the directory
-    it points to), and not before custody and the package are taken.
-    `--no-vm-snapshot` keeps no VM disk at all.
+    the case's retention rules and any legal hold, and not before custody and
+    the package are taken. `swarm.sh hold <id> [--reason TEXT]` keeps a run
+    from `purge`, from a new run in its sandbox and from the VM reaper;
+    `release <id>` lifts it. `swarm.sh purge <id> --yes` deletes a finished
+    run's sandbox, its kept VM disks (`<sandbox>.vm-snapshots/`; with
+    `--vm-snapshot-dir`, only this run's files in that directory) and its hub
+    directory, refuses a held run or one still running, and leaves a
+    destruction record on `runs/operator-audit.jsonl`: what was deleted with
+    its size, and the hashes of the inputs manifest, the custody verdict and
+    the package manifest. The registry keeps the run as `purged`. Purge
+    deletes files the ordinary way: it does not overwrite the blocks the
+    filesystem freed, and copies elsewhere (a package handed over, a synced
+    folder, a backup) are the operator's to deal with. `--no-vm-snapshot`
+    keeps no VM disk at all.
+  - **Disk encryption.** The kickoff records whether the volume that holds the
+    runs is encrypted at rest (`disk_encryption`: `on`, `off` or `unknown`,
+    from FileVault and APFS on macOS, a crypt device under the mount on
+    Linux), prints it as the `Disk:` line and warns when it is off. It does
+    not refuse.
   - **Synced folders.** The runs live under `runs/` in the checkout unless
     `SWARM_RUNS_DIR` or `--sandbox` says otherwise. A run directory inside a
     synced folder (Dropbox, iCloud Drive, OneDrive, anything under
@@ -271,8 +323,10 @@ back to a host run on its own.
     (`inputs/`, `.inputs-pristine/`) or the VMs' kept disks in a folder it
     recognises as synced (under `~/Library/CloudStorage`, iCloud Drive,
     Dropbox, OneDrive, Google Drive), unless `--allow-synced-folder` says
-    they may go; a run directory there is warned about for what the agents
-    derive. It recognises only those names. For a real case put the runs,
+    they may go, or a regular file of the operator's named
+    `.dfirswarm-allow-synced` sits at the top of that synced folder (or in a
+    folder between it and the destination); the registry says which allowed
+    it. A run directory there is warned about for what the agents derive. It recognises only those names. For a real case put the runs,
     and any `--vm-snapshot-dir`, on a local disk that is not synced.
   - **Disk.** A kept snapshot can be as large as the VM's root disk
     (`--vm-disk`, 8 GiB by default) per agent. Before each snapshot the stop

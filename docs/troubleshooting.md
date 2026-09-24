@@ -2,6 +2,12 @@
 
 What goes wrong at kickoff, in a run and in the console, and what to do about it.
 
+Every kickoff refusal below can be met before anything is written: add
+`--check` to the same `swarm.sh start` line, and it runs the start's own
+checks, prints what the start would, and exits 0 (it would go ahead) or 2
+(it would be refused). `swarm.sh image-for --pack …` says which image the
+packs choose.
+
 
 **`BLOCKER: this host cannot run the agents' VMs`.**
 Every agent runs in its own microVM unless the run says `--isolation host`,
@@ -45,14 +51,19 @@ The copy of the evidence (`inputs/`, `.inputs-pristine/`) or the VMs' kept
 disks would land in Dropbox, iCloud Drive, OneDrive, Google Drive or
 another folder under `~/Library/CloudStorage`. Put the run on a local disk
 (`--sandbox`, `SWARM_RUNS_DIR`, `--vm-snapshot-dir`), or pass
-`--allow-synced-folder` when the material may be uploaded.
+`--allow-synced-folder` when the material may be uploaded. A regular file
+of yours named `.dfirswarm-allow-synced` at the top of that synced folder
+says the same for everything under it, without the flag.
 
 **`BLOCKER: the copy of the evidence … does not match its source`.**
 The copy lost names the source has: a case-insensitive volume (the default
 APFS) merges names that differ only in case or Unicode form, and a short
 read leaves a file short. Put the run on a volume that keeps the source's
 names (a case-sensitive APFS volume, or the source's own file system), or
-hold the evidence in place with `--inputs-bind`.
+hold the evidence in place with `--inputs-bind`. When it is the content that
+differs, the source's bytes changed between the copy and the check (a volume
+still being written, a sync client, a failing disk): hold the source still
+and copy again. `--no-verify-copy` skips the content check.
 
 **`NOTE: nothing of run <id> was alive`.**
 The host restarted, or the run crashed, while the registry still said
@@ -60,6 +71,35 @@ The host restarted, or the run crashed, while the registry still said
 the hub's state and unsent trace lines (kept under `~/.dfirswarm/hubs/`,
 which a reboot does not clear), custody. The note names the trace's last
 time, which is when the run's record ends.
+
+**`BLOCKER: a host run as root`.**
+A host run's panes would be root, and the read-only modes on the evidence,
+its pristine copy, the manifest and the anchor do not bind root. Run as an
+ordinary user, run the agents in microVMs (the default), or pass
+`--allow-root` to take that on.
+
+**`BLOCKER: --ledger-from <run>: …`.**
+The run named is not in this registry, is still running (bring its ledger in
+once it has ended), was purged, or is held for another case.
+
+**`BLOCKER: the model gateway did not come up`.**
+The line after it is the gateway's own last word in
+`traces/model-gateway.log`, most often a provider Pi holds no key for
+(`pi auth print-api-key --provider <p>` says so too). Log in to that
+provider with Pi, or run without `--model-gateway`.
+
+**`BLOCKER: no key to sign the package with`.**
+`package --sign` looks for `~/.ssh/id_ed25519`, then `~/.ssh/id_ecdsa`.
+Pass `--key FILE` for another ssh private key.
+
+**`swarm.sh verify` exits 3 or 4.**
+The files match the manifest in both cases. 3: the signature is sound, and
+nothing said whose key it should be; pass `--allowed-signers FILE` with the
+line `package --sign` printed. 4: the package is not signed.
+
+**`BLOCKER: run <id> is on hold …` from `purge`.**
+`swarm.sh release <id>` lifts the hold first; `swarm.sh status <id>` shows
+who put it there and why.
 
 **`BLOCKER: Pi has no stored credential for <model>`.**
 Run `pi /login` once. The spawner no longer passes keys to panes, so an

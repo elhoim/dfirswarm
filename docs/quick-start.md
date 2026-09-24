@@ -11,7 +11,7 @@ already installed, plus one image build.
 
 | Need | Why | Check |
 | --- | --- | --- |
-| **Node ≥ 22.6** | `--experimental-strip-types` runs the `.ts` scripts and tests without a build step. Node ≥ 22.21 (or 24) is needed for `NODE_USE_ENV_PROXY` if your `pi` is a Node build (see [Safety](safety.md)). | `node --version` |
+| **Node ≥ 22.19** | `--experimental-strip-types` runs the `.ts` scripts and tests without a build step; the pinned Pi needs 22.19, and on an older 22 the harness extension does not load. Node ≥ 22.21 (or 24) is needed for `NODE_USE_ENV_PROXY` if your `pi` is a Node build (see [Safety](safety.md)). | `node --version` |
 | **bash 3.2+ (macOS's own is enough), jq 1.6+, python3, curl; zsh if it is the login shell** | `swarm.sh` renders the contract with python3 and manages the registry with jq; the pane hook runs in the login shell, which has to be zsh or bash; `netcheck` uses curl. | `jq --version && python3 --version`; the login shell: `getent passwd "$(id -un)" \| cut -d: -f7` on Linux, `dscl . -read "/Users/$(id -un)" UserShell` on macOS |
 | **Herdr** | Panes, workspaces, `herdr agent start --kind pi`. Live runs used Herdr 0.9.0. There is **no** `herdr swarm` command; do not install `pi-herdsman`, `pi-herdr` or `@gjczone/pi-swarm` expecting this demo. | `herdr --version` |
 | **Pi** (`@earendil-works/pi-coding-agent`) | The agent harness. Verified against 0.85.1 and 0.87.0, the version `package.json` pins and the tests load; the extension APIs it uses date from 0.74. | `pi --version` |
@@ -262,10 +262,32 @@ scripts/swarm.sh start \
   is advisory and the record says so.
 - **A re-run.** `--no-read DIR` keeps a previous run's findings on the same
   evidence away from the agents (no VM mounts it; a host run denies it at the
-  kernel), so a second swarm cannot read the back of the book.
+  kernel), so a second swarm cannot read the back of the book. To hand the
+  second swarm the first one's claims as hypotheses to re-derive or refute
+  instead, `--ledger-from <run>`.
+- **The copy and the disk.** A copied `--inputs` is checked against its
+  source by content (`--no-verify-copy` for name, kind and size only), and
+  the kickoff's `Disk:` line says whether the volume that holds the runs is
+  encrypted at rest. Keep the runs on a local, encrypted disk that is not
+  synced: a copy of the evidence bound for a synced folder is refused.
 
 When the sentinel lands, `scripts/swarm.sh report <id>` renders the report
 with its custody section, `scripts/swarm.sh summary <id>` prints what the run
 cost and what the harness had to do, and `scripts/swarm.sh package <id>` ships
 the whole run with a SHA-256 manifest. Every published case under
 [docs/use-cases/](use-cases/README.md) is that package, pruned of the evidence.
+
+Before you hand it over:
+
+```bash
+scripts/swarm.sh review <id> --accept 3 --examiner "Your name"        # or --reject / --amend N --note "why"
+scripts/swarm.sh review <id> --sign --examiner "Your name"            # sign off the ledger as it stands
+scripts/swarm.sh package <id> --sign                                  # sign the manifest with your ssh key
+scripts/swarm.sh verify runs/<id>/package --allowed-signers signers   # what the recipient runs
+```
+
+Until an examiner reviews the ledger, the report says every finding is the
+agents' conclusion. `hold <id>` keeps a run from being purged or reused;
+`purge <id> --yes` deletes a finished run's material and leaves a
+destruction record. [usage.md](usage.md#after-a-run-review-package---sign-verify-export-hold-release-purge)
+has each command.

@@ -23,6 +23,15 @@ establish, and nothing here settles it.
   hosts, `--allow-host` entries such as a symbol server, and the package
   index under `--allow-install`. Anything an agent can send to an allowed
   host can leave, evidence included ([safety.md](safety.md)).
+- **With `--model-gateway`,** a fronted provider's calls leave through one
+  process on the host rather than from each VM; what the provider receives
+  is the same. The gateway writes no request or response body: its log
+  (`traces/model-gateway.jsonl`) holds seats, models, statuses, token
+  counts, costs and byte counts.
+- **The operator's `--notify` command** receives each event's details: the
+  run id, states, counts, and on `evidence_changed` the names of the
+  evidence files that changed, went missing or appeared. No evidence
+  content. Where that command sends them is the operator's choice.
 - **Nothing to the harness's authors.** The harness sends no telemetry. Pi's
   own startup calls to `pi.dev` are not on netguard's list or a VM's
   allowlist and are refused; on a host run with `--no-netguard` they go
@@ -50,12 +59,18 @@ models.
   given). A kept disk holds whatever the agent left in its VM.
 - **The package** (`swarm.sh package <id>` → `<sandbox>/package/`): the
   report, the summary, everything under `work/` except `work/extracted/` and
-  `work/quarantine/`, the ledger, the trace and the board. It is what gets
-  handed over, and it carries evidence content too.
+  `work/quarantine/`, the ledger, the trace and the board, `court-set.json`
+  and this run's lines of the operator's record. It is what gets handed
+  over, and it carries evidence content too. `--sign` adds the examiner's
+  signature and public key.
+- **Exports** (`swarm.sh export`, under `<sandbox>/exports/` by default):
+  the ledger as CSV, values in full.
 - **Who ran it.** `runs/operator-audit.jsonl`, beside the registry, has a
-  line for each `start`, `stop`, `reap`, `say`, `package`, `report` and
-  `tools`: the time, the examiner's OS user name and host, and the
-  arguments. The trace carries the same for a live run (`operator_action`,
+  line for each `start`, `stop`, `reap`, `say`, `package`, `report`,
+  `tools`, `review`, `export`, `hold`, `release`, `purge` and `verify`: the
+  time, the examiner's OS user name and host, and the arguments. The
+  examiner's review (`runs/reviews/<id>.jsonl`) holds the examiner's name
+  and notes on each entry. The trace carries the same for a live run (`operator_action`,
   and `artifact_scripts` with the console client's address), so the
   package carries it too. The registry records the host's time zone
   (`host_clock`) and what produced the run (`provenance`). These name the
@@ -71,10 +86,19 @@ models.
   can reach it can read the board, the trace and every `work/` file
   ([SECURITY.md](../SECURITY.md)).
 
-The harness deletes none of this. A run directory inside a synced folder
+The harness deletes none of this on its own. `swarm.sh purge <id> --yes`
+deletes a finished run's directory, its kept VM disks and its hub
+directory when the operator asks, keeps the anchor and the review (hashes,
+verdicts and notes, not material), and leaves a destruction record on the
+operator's record; a held run (`swarm.sh hold`) is refused. Purge removes
+files the ordinary way and knows nothing of copies elsewhere: a package
+handed on, a synced folder, a backup. The kickoff records whether the
+volume that holds the runs is encrypted at rest (`disk_encryption`) and
+warns when it is not. A run directory inside a synced folder
 (Dropbox, iCloud Drive, OneDrive, Google Drive) is uploaded by that folder's
 client. The kickoff refuses to put a copy of the evidence or the VMs' kept
 disks in a folder it recognises as synced unless `--allow-synced-folder`
+(or a `.dfirswarm-allow-synced` file the operator placed in that folder)
 says they may go, and warns about a run directory there for what the agents
 derive.
 

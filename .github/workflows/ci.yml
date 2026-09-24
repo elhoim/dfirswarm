@@ -20,8 +20,8 @@ jobs:
       # actions/checkout runs `git init` on the runner, and git prints its
       # init.defaultBranch hint unless one is configured.
       - run: git config --global init.defaultBranch main
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -58,18 +58,45 @@ jobs:
             echo "run state is tracked" >&2; exit 1
           fi
 
+  node-floor:
+    # The oldest Node the harness claims, run exactly: package.json engines
+    # says >=22.19 because the pinned Pi and its undici declare 22.19.0 as
+    # their own floor, and an older 22 cannot load the extension (measured on
+    # 22.6.0: undici calls webidl.util.markAsUncloneable, which that Node has
+    # not got, and every test that loads Pi fails). .nvmrc's 22 above is the
+    # newest 22; this is the floor, so the claim is tested, not assumed.
+    name: typecheck · node tests · Node 22.19 (the engines floor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - run: git config --global init.defaultBranch main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Tools the suites use
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q jq python3 zsh bubblewrap util-linux iproute2 sqlite3
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          test "$(node --version)" = v22.19.0 || { echo "wanted Node v22.19.0, got $(node --version)" >&2; exit 1; }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
   node-24:
-    # Two Nodes run this harness. The host's floor is .nvmrc's 22 (package.json
-    # engines >=22.6), which the job above runs; inside a VM, Pi runs the
-    # extensions on the image's Node, and images/base.Dockerfile builds on
-    # node:24. The node suites again, on 24.
+    # Two Nodes run this harness. The host runs .nvmrc's 22 (package.json
+    # engines >=22.19; the job above runs that floor exactly); inside a VM, Pi
+    # runs the extensions on the image's Node, and images/base.Dockerfile
+    # builds on node:24. The node suites again, on 24.
     name: node tests · Node 24 (the VM image's)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - run: git config --global init.defaultBranch main
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -92,8 +119,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - run: git config --global init.defaultBranch main
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -121,8 +148,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - run: git config --global init.defaultBranch main
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -145,14 +172,15 @@ jobs:
     # images/base.Dockerfile rather than pulled, so a pull request that changes
     # it is tested with the change. Nothing is pushed from this repository:
     # images.yml builds every profile (and two for arm64) and checks each
-    # from the inside, but boots none; this job is the one that boots.
+    # from the inside; this job boots base and disk on every pull request, and
+    # image-boot.yml boots every profile once a week.
     name: microVM · integration tests (KVM)
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
       - run: git config --global init.defaultBranch main
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm

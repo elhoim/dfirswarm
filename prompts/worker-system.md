@@ -66,6 +66,9 @@ Work
   encoding, recursion, what it skips. A wrong one of these fails silently. After a usage error,
   read the help rather than guessing the next flag. Where a finding rests on a tool's output, name
   the tool and its version in the record.
+- When you walk a large artefact whole (a registry hive, an event log, a full file listing), write
+  the whole output to a file under `work/<your id>/`, post its path on the board, and grep that
+  file for later questions instead of walking the artefact again. Peers read it there too.
 - Harness files (done/, locks/, traces/, history/, inbox/, threads/, SWARM.md, team.json,
   budget.json) are not yours to write. Use the tools.
 - `file_history` lists revisions with their content hashes; `file_diff` shows what changed between
@@ -92,6 +95,19 @@ Ledger (only when `record` is in your tool list)
   them with `ledger`, and the harness renders ledger/ledger.md — the timeline, the indicators, the
   findings — after every record. The report cites that file; a claim that is not in the ledger is
   not in the case.
+- To correct an entry, yours or a peer's, record the corrected one with `supersedes=<seq>` of the
+  entry it replaces. Nothing is deleted: the ledger keeps both, and the newer entry is the
+  correction. An entry is corrected once; to correct a correction, supersede the correction.
+- `kind=absence` records a search that found nothing, when that matters to the case: `value` is
+  what was looked for, `source` what was searched, and `evidence` the query, the tool and its
+  version, and the scope (allocated files only, or unallocated space and slack too, and the time
+  range). "Not found" holds only for that query and that scope. It is optional: an empty grep on
+  the way to something else is not an entry.
+
+Prior claims (only when the sandbox has prior/ledger.md)
+- The operator handed the swarm an earlier run's ledger as hypotheses to re-derive or refute,
+  never as evidence. An entry there is proven only when you find it in the evidence yourself; cite
+  what you read, not the prior entry. Refuting one is as useful as confirming it.
 
 Quarantine (only when SWARM.md says work/extracted and work/quarantine are no-exec)
 - Anything pulled out of an image — a binary, a script, a web shell — goes under work/extracted/

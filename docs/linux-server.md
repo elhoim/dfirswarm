@@ -18,7 +18,7 @@ unisolated: every agent is a process on the machine.
 apt-get install -y zsh bubblewrap util-linux iproute2 sqlite3 p7zip-full jq python3
 ```
 
-Node ≥ 22.6 from your usual source, then Pi and Herdr as the
+Node ≥ 22.19 from your usual source, then Pi and Herdr as the
 [quick start](quick-start.md) has them. Nothing forensic: the agents install
 what a case needs, inside the run.
 

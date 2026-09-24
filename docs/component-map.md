@@ -77,7 +77,7 @@ The files you would actually open, what they do, and when you would touch them. 
 
 | Path | What it does | Needs |
 | --- | --- | --- |
-| `tests/dry-run.test.ts` | Two fake workers: posts, per-thread cursors, thread membership, claim conflicts and leases, protected paths, the write guard, symlink and case bypasses, content-addressed history and diffs, bash-write detection and its hash cache, the swarm-wide stop clock, `wait`, budget fold from fake Pi `Usage`, stall marker + reap, forged tools, read-only inputs, names, corrections after done. | Node ≥ 22.6 only. |
+| `tests/dry-run.test.ts` | Two fake workers: posts, per-thread cursors, thread membership, claim conflicts and leases, protected paths, the write guard, symlink and case bypasses, content-addressed history and diffs, bash-write detection and its hash cache, the swarm-wide stop clock, `wait`, budget fold from fake Pi `Usage`, stall marker + reap, forged tools, read-only inputs, names, corrections after done. | Node ≥ 22.19 only. |
 | `tests/plan.test.ts` | The ledger, implicit claims, the per-agent cap, harness-owned `catalog/`, `ledger/`, `toolbox.json` and `names.json`, and the three helpers `agent-swarm.ts` exports. | Node only. |
 | `tests/summary.test.ts` | `scripts/summary.ts` against a seeded sandbox: every section, a metered and an unmetered team. | Node only. |
 | `tests/extension-imports.test.ts` | Every protocol function `agent-swarm.ts` calls is in its import list — the check `tsc` cannot make because the extension imports Pi's package. | Node only. |
@@ -118,6 +118,6 @@ The files you would actually open, what they do, and when you would touch them. 
 | --- | --- |
 | `CONTEXT.md` | The project's glossary: claim, board, sentinel, protected path, reap. One page, no implementation detail. |
 | `sandbox/` | Committed skeleton (`SWARM.md`, `team.json`, `budget.json`, empty `threads/main`, `inbox/agent0x/seen`, `locks/`, `done/`, `work/`). Default target for `watch.sh` / `reap.sh` when `SWARM_SANDBOX` is unset. Live runs never use it; they go to `runs/<id>/` (gitignored). |
-| `package.json` | Scripts (`test`, `typecheck`, `ui:*`, `swarm`, `watch`, …), `engines.node >= 22.6`, runtime dep `typebox` (tool schemas), UI/dev deps, and Pi's own package (`@earendil-works/pi-coding-agent`, pinned) as a devDependency: it supplies the extension's types and the loader test, not the `pi` a run needs on `PATH`. |
+| `package.json` | Scripts (`test`, `typecheck`, `ui:*`, `swarm`, `watch`, …), `engines.node >= 22.19`, runtime dep `typebox` (tool schemas), UI/dev deps, and Pi's own package (`@earendil-works/pi-coding-agent`, pinned) as a devDependency: it supplies the extension's types and the loader test, not the `pi` a run needs on `PATH`. |
 | `tsconfig.json` | The typecheck config for the extension, the scripts and the node tests (`npm run typecheck` runs it, then `ui/tsconfig.json`). |
 | `.gitignore` | `node_modules`, `ui/dist`, `runs/`, `runs-fixture/`, per-run files under `sandbox/`. |
