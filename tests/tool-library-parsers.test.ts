@@ -6,7 +6,7 @@
  * tool at all.
  */
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { LIB, runPy, runPySnippet, withCwd } from "./tool-library-harness.ts";
@@ -181,6 +181,45 @@ test("esedb_query and yara_scan say the binary is missing instead of reporting n
     const noRules = await runPy(join(LIB, "yara_scan", "run.py"), cwd, { rules: "work/nope.yar", target: "work" });
     assert.notEqual(noRules.code, 0);
     assert.match(noRules.stdout, /no such rules file/);
+  });
+});
+
+test("esedb_query calls esedbexport only with options the Debian build has", async () => {
+  // esedbexport 20181229, as the images carry it: -c -l -m -t -T -h -v -V and
+  // nothing else; an unknown option is refused. It passed -q once and every
+  // call in a real run failed on it.
+  await withCwd(async (cwd, bin) => {
+    await writeFile(join(cwd, "work", "WebCacheV01.dat"), "ESE stand-in", "utf8");
+    await writeFile(
+      join(bin, "esedbexport"),
+      `#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+target = None
+i = 0
+while i < len(args) - 1:
+    a = args[i]
+    if a in ("-c", "-l", "-m", "-t", "-T"):
+        if a == "-t":
+            target = args[i + 1]
+        i += 2
+        continue
+    if a in ("-h", "-v", "-V"):
+        i += 1
+        continue
+    sys.stderr.write("esedbexport: invalid option -- '%s'\\nInvalid argument: %s\\n" % (a.lstrip("-"), a))
+    sys.exit(1)
+os.makedirs(target + ".export", exist_ok=True)
+open(os.path.join(target + ".export", "Containers.0"), "w").write("ContainerId\\tName\\n1\\tContent\\n")
+`,
+      "utf8",
+    );
+    await chmod(join(bin, "esedbexport"), 0o755);
+    for (const script of [join(LIB, "esedb_query", "run.py"), join(LIB, "..", "packs", "windows-forensics", "tools", "esedb_query", "run.py")]) {
+      const r = await runPy(script, cwd, { path: "work/WebCacheV01.dat" }, bin);
+      assert.doesNotMatch(r.stdout + r.stderr, /invalid option/, `${script}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout, /Containers/, `${script}: ${r.stdout}${r.stderr}`);
+    }
   });
 });
 

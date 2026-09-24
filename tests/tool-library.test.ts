@@ -801,22 +801,43 @@ print("\\n".join(bad))
   assert.equal(r.stdout.trim(), "", `unbound names:\n${r.stdout}`);
 });
 
-test("catalog_search finds lines in the only catalogue, and takes catalog= when there are several", async () => {
+test("catalog_search finds the filesystem the catalogue names by its sector, and asks which when there are several", async () => {
   await withCwd(async (cwd) => {
     const script = join(LIB, "..", "packs", "computer-forensics-base", "tools", "catalog_search", "run.py");
-    await mkdir(join(cwd, "catalog", "Case4", "p0"), { recursive: true });
-    await writeFile(join(cwd, "catalog", "Case4", "p0", "filelist.txt"), "Users/alice/NTUSER.DAT\nWindows/Prefetch/CHROME.EXE-1.pf\n");
+    // As scripts/evidence-catalog.sh writes it: one directory per filesystem,
+    // named by its first sector; a usual first partition is p2048.
+    await mkdir(join(cwd, "catalog", "Case4", "p2048"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "Case4", "p2048", "filelist.txt"), "Users/alice/NTUSER.DAT\nWindows/Prefetch/CHROME.EXE-1.pf\n");
+    await writeFile(join(cwd, "catalog", "Case4", "partitions.txt"), "002:  000:000   0000002048   ...   NTFS\n");
     let r = await runPy(script, cwd, { pattern: "prefetch", which: "filelist" });
-    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /CHROME\.EXE-1\.pf/);
+    assert.match(r.stdout, /"partition": "p2048"/);
     assert.doesNotMatch(r.stdout, /NTUSER/);
+    r = await runPy(script, cwd, { pattern: "NTFS", which: "partitions" });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    // A second filesystem: the caller says which, by directory or by sector.
+    await mkdir(join(cwd, "catalog", "Case4", "p409600"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "Case4", "p409600", "filelist.txt"), "Data/secret.txt\n");
+    r = await runPy(script, cwd, { pattern: "secret", which: "filelist" });
+    assert.notEqual(r.code, 0);
+    assert.match(r.stdout, /several filesystems.*pass partition=/);
+    assert.match(r.stdout, /p409600/);
+    r = await runPy(script, cwd, { pattern: "secret", which: "filelist", partition: "409600" });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /Data\/secret\.txt/);
+    // A file the catalogue did not write is said, never a traceback.
+    r = await runPy(script, cwd, { pattern: "x", which: "timeline", partition: "p2048" });
+    assert.notEqual(r.code, 0);
+    assert.match(r.stdout, /is not in the catalogue/);
+    assert.doesNotMatch(r.stdout + r.stderr, /Traceback/);
+    // A second catalogue: catalog= names it.
     await mkdir(join(cwd, "catalog", "Other", "p0"), { recursive: true });
     await writeFile(join(cwd, "catalog", "Other", "p0", "filelist.txt"), "Other/file.txt\n");
-    r = await runPy(script, cwd, { pattern: "file", which: "filelist" });
-    assert.notEqual(r.code, 0);
+    r = await runPy(script, cwd, { pattern: "file", which: "filelist", partition: "p2048" });
     assert.match(r.stdout + r.stderr, /several catalogues; pass catalog=/);
     r = await runPy(script, cwd, { pattern: "file", which: "filelist", catalog: join("catalog", "Other") });
-    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
     assert.match(r.stdout, /Other\/file\.txt/);
   });
 });

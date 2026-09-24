@@ -31,6 +31,11 @@
       "type": "string",
       "description": "The catalogue directory under catalog/ when there is more than one (default: the only one)",
       "required": false
+    },
+    "partition": {
+      "type": "string",
+      "description": "The filesystem's directory in the catalogue, p<first sector> (e.g. p2048), when there is more than one (default: the only one)",
+      "required": false
     }
   },
   "runtime": "python3",
@@ -39,6 +44,6 @@
   "example": "{\"pattern\": \"SysInternal\", \"which\": \"filelist\"}",
   "by": "sd1d100",
   "at": "2026-09-18T14:14:47.839Z",
-  "version": 2,
-  "sha256": "90cdc479b5ded2437b1e865d185037cb1c9cab43d8250239f25e3ddec35fb9cd"
+  "version": 3,
+  "sha256": "715183083eb0d89e8c54e8091f790976726efd5bec5487f483a5de21e1083b16"
 }

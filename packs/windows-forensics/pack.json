@@ -1,7 +1,7 @@
 {
   "id": "windows-forensics",
   "name": "Windows Forensics Pack",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Artefact-by-artefact method and tooling for a Windows examination: the file system and its journals, the hives, execution evidence, the event logs and the records inside a cleared one, accounts and remote access, persistence, PowerShell, browsers, shadow copies, memory, and the traces anti-forensics leaves.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -49,8 +49,8 @@
       "tools/evtx_carve/run.py": "a64709827e40ac2ced81da0a44c3f4715956433adb6c65f2e06ec36697dfcfe6",
       "tools/shellbags/manifest.json": "1896467203766d4ca9e2d93a1b2dc4fa927958a95a67e01e2645209fda9e9f41",
       "tools/shellbags/run.py": "c739ce8b7eef0415f751f16527e9f2e74e8f68d412f042a6de82d488f208d267",
-      "tools/esedb_query/manifest.json": "ff5e601b5670705d5896adb8b403a1248f5d1f38812779270a7e0c399955b7d0",
-      "tools/esedb_query/run.py": "22a2f5e8803750340cc85f13ebac9b6c36d18cd1a1350c1a87f084ab5cebcc48",
+      "tools/esedb_query/manifest.json": "dcdb67b98f918761dedfba2ec2f638dbf919a82b630e758a20a0822525ff2724",
+      "tools/esedb_query/run.py": "e1b68221d42238379c0ee1468ea45c2af37a00a4255e6edb985eb81736149a26",
       "tools/usn_journal/manifest.json": "cb027300bad5eb30fa37eb75e9c75119a2ecb61e7f5b5140dafa7a3998d3df1f",
       "tools/usn_journal/run.py": "91227cf2e3e1d024c20fec6be1e16784b1c389c9dcacc9f0ea5a720e1b6c9846",
       "tools/browser_history/manifest.json": "0322d1e0281583097aba9b5fa1321fa4f88293a2b49eae173d6b4d9d175cd13a",

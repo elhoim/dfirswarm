@@ -46,16 +46,39 @@ except re.error as e:
     sys.exit(1)
 ex = re.compile(exclude, flags) if exclude else None
 base = _resolve_catalog(args.get("catalog") if isinstance(args, dict) else None)
-paths = {
-    "filelist": os.path.join(base, "p0/filelist.txt"),
-    "timeline": os.path.join(base, "p0/timeline.csv"),
-    "bodyfile": os.path.join(base, "p0/bodyfile.txt"),
-    "fsstat": os.path.join(base, "p0/fsstat.txt"),
-    "partitions": os.path.join(base, "partitions.txt"),
-}
-path = paths.get(which)
-if not path:
+# The catalog keeps one directory per filesystem, named by its first sector
+# (p0 for an image with no partition table, p2048 for a usual first
+# partition): the one there is, or the one the caller names.
+parts = sorted(n for n in os.listdir(base) if re.fullmatch(r"p\d+", n) and os.path.isdir(os.path.join(base, n)))
+want = str(args.get("partition") or "").strip()
+if want and not want.startswith("p"):
+    want = "p" + want
+if which == "partitions":
+    part = None
+elif want:
+    if want not in parts:
+        print(json.dumps({"ok": False, "error": "no filesystem at %s in %s; pass partition= one of these" % (want, base), "partitions": parts}))
+        sys.exit(1)
+    part = want
+elif len(parts) == 1:
+    part = parts[0]
+elif not parts:
+    print(json.dumps({"ok": False, "error": "the catalogue %s holds no filesystem listing (see its partitions.txt and README.md)" % base}))
+    sys.exit(1)
+else:
+    print(json.dumps({"ok": False, "error": "several filesystems in %s; pass partition= one of these" % base, "partitions": parts}))
+    sys.exit(1)
+files = {"filelist": "filelist.txt", "timeline": "timeline.csv", "bodyfile": "bodyfile.txt", "fsstat": "fsstat.txt"}
+if which == "partitions":
+    path = os.path.join(base, "partitions.txt")
+elif which in files:
+    path = os.path.join(base, part, files[which])
+else:
     print(json.dumps({"error": "which must be filelist|timeline|bodyfile|fsstat|partitions"}))
+    sys.exit(1)
+if not os.path.isfile(path):
+    have = sorted(os.listdir(os.path.dirname(path))) if os.path.isdir(os.path.dirname(path)) else []
+    print(json.dumps({"ok": False, "error": "%s is not in the catalogue" % path, "there": have}))
     sys.exit(1)
 hits = []
 total = 0
@@ -67,4 +90,4 @@ with open(path, "r", errors="replace") as f:
             total += 1
             if len(hits) < limit:
                 hits.append({"n": i, "line": line.rstrip("\n")})
-print(json.dumps({"which": which, "pattern": pattern, "matched": total, "returned": len(hits), "hits": hits}))
+print(json.dumps({"which": which, "partition": part, "file": path, "pattern": pattern, "matched": total, "returned": len(hits), "hits": hits}))

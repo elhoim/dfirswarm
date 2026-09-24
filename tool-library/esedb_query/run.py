@@ -56,10 +56,11 @@ def main():
 
     out = tempfile.mkdtemp(prefix="esedb-")
     try:
-        # -t names the export root; libesedb appends ".export".
+        # -t names the export root; libesedb appends ".export". No -q: the
+        # esedbexport Debian ships (20181229) has none, and refused the call.
         target = os.path.join(out, "db")
         proc = subprocess.run(
-            ["esedbexport", "-q", "-t", target, path],
+            ["esedbexport", "-t", target, path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )

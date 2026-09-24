@@ -21,6 +21,6 @@
   "example": "{\"path\": \"work/extracted/WebCacheV01.dat\", \"table\": \"Containers\", \"limit\": 50}",
   "by": "maintainer",
   "at": "2026-09-20T12:00:00.000Z",
-  "version": 1,
-  "sha256": "22a2f5e8803750340cc85f13ebac9b6c36d18cd1a1350c1a87f084ab5cebcc48"
+  "version": 2,
+  "sha256": "e1b68221d42238379c0ee1468ea45c2af37a00a4255e6edb985eb81736149a26"
 }
