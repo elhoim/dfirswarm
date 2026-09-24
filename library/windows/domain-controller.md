@@ -35,8 +35,16 @@ Read `catalog/` before running the same commands again.
    (SYSTEM `Services\NTDS\Parameters` and `Services\Netlogon\Parameters`,
    the schema and behaviour versions the hives hold), the roles
    held (DNS, DHCP, certificate services, FSMO), the other DCs the host
-   knew (DNS zones, the `Directory Service` log), and the state of every
-   log: retention, earliest and latest record, gaps.
+   knew (DNS zones, the `Directory Service` log), the state of every
+   log: retention, earliest and latest record, gaps, and the audit policy
+   in force: the local categories (SECURITY `Policy\PolAdtEv`), the
+   Default Domain Controllers Policy's audit settings in SYSVOL
+   (`GptTmpl.inf` `[Event Audit]` and `audit.csv` under the policy
+   `{6AC1786C-016F-11D2-945F-00C04fB984F9}`), whether directory service
+   access and changes (4662, 5136) and Kerberos (4768, 4769) were audited,
+   and policy changes (4719). An event the later answers do not find is
+   then "not audited", "rolled over" or "cleared", never simply "did not
+   happen".
 2. Privileged accounts and groups and their changes: the members of the
    groups AdminSDHolder protects (Domain, Enterprise and Schema Admins,
    Administrators, Account and Backup Operators) and every change in the

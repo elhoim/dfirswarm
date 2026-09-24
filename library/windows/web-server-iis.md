@@ -39,7 +39,15 @@ Read `catalog/` before running the same commands again.
    each site's `web.config`, `httpd-vhosts.conf`), the handler mappings
    and modules, the application (ASP.NET or PHP, with `php.ini`), the
    database behind it (SQL Server, MySQL or MariaDB with its data directory
-   and logs), and where each keeps its logs.
+   and logs), and where each keeps its logs; and the audit policy in force:
+   which categories were audited (SECURITY `Policy\PolAdtEv`, and any
+   advanced policy in
+   `System32\GroupPolicy\Machine\Microsoft\Windows NT\Audit\audit.csv`),
+   whether process creation (4688) was logged with its command line, which
+   fields the IIS logs record (`logFile` in `applicationHost.config`), and
+   policy changes (4719). An event the later answers do not find is then
+   "not audited", "rolled over" or "cleared", never simply "did not
+   happen".
 2. The web logs: IIS `u_ex*.log` under `inetpub\logs\LogFiles\W3SVC<n>`
    (W3C fields, UTC) and the HTTP.sys `HTTPERR` log under
    `System32\LogFiles\HTTPERR`, or Apache `access.log` and

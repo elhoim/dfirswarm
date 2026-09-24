@@ -20,7 +20,8 @@ hosts talk to the outside on a clock, what the resolver saw that a resolver
 should not, whether a perimeter device was itself the way in, and rank
 the internal hosts and devices the next collection should take. This entry
 is for the devices' own logs; flow records and Zeek logs alone are the
-flow entry's case, and the two share one periodicity tool.
+flow entry's case. Neither ships a periodicity tool: the one you forge for
+question 7 can be saved to the tool library and handed to a flow case.
 
 The evidence is under `inputs/` (read-only; call `inputs` to list it, and
 read `inputs.json` for the manifest). If the operator left a brief beside

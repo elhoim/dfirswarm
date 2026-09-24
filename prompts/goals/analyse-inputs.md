@@ -22,4 +22,7 @@ kickoff.
 - `test "$(find -H inputs -type f | wc -l | tr -d ' ')" -eq "$(jq '.files | length' inputs.json)"`
 - `python3 -c "import hashlib, json, sys; m = json.load(open('inputs.json')); bad = [f['path'] for f in m['files'] if hashlib.sha256(open(f['path'], 'rb').read()).hexdigest() != f['sha256']]; sys.exit(1 if bad else 0)"`
 - `grep -q '"tool":"inputs_guard"' traces/events.jsonl`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
+  (`inputs_check` is an event the harness writes itself when `done` verifies
+  the inputs, before it runs these checks. Nobody needs to forge a tool for
+  it, and `make_tool` will refuse that name.)
