@@ -43,14 +43,17 @@ import {
   readNames,
   eventChainVerifier,
   readSandboxFile,
+  supersededBy,
   type AgentBudget,
   type LedgerEntry,
 } from "../extensions/protocol.ts";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
 import { manifestMeta, verdictAnchorLine, verdictAnchorState } from "./custody.ts";
-import { openRegular } from "./regular-file.ts";
+import { hashRegularFile, openRegular, readRegularText } from "./regular-file.ts";
 import { createInterface } from "node:readline";
 import { loadRunContext, readJsonFile } from "./run-record.ts";
+import { coverageLine, coverageOf, type CoverageReport, type Grounding } from "./coverage.ts";
+import { ReviewFileError, ledgerHead, readReviews, reviewState, verifyReviewChain, type ReviewLine } from "./review.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -65,6 +68,14 @@ export type ReportOptions = {
   now?: string;
   /** Skip a second walk of work/ when the caller already hashed it. */
   artifacts?: ArtifactIndex;
+  /** The examiner's review, when the caller already read it; read from the runs directory otherwise. */
+  review?: ReviewState | null;
+  /**
+   * The files handed over with this report (the dossier's court set), each
+   * with its size and sha256 or why it is absent: printed in the custody
+   * section so the paper copy names what came with it.
+   */
+  handover?: Array<{ name: string; description: string; present: boolean; reason?: string; bytes: number | null; sha256: string | null }>;
 };
 
 // ---------------------------------------------------------------------------
@@ -123,7 +134,7 @@ export function lintReport(markdown: string): LintFinding[] {
 // Reading the sandbox
 // ---------------------------------------------------------------------------
 
-function parseFrontMatter(text: string): Record<string, string> {
+export function parseFrontMatter(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   const block = /^---\n([\s\S]*?)\n---/.exec(text);
   for (const line of (block ? block[1] : text).split("\n")) {
@@ -243,6 +254,20 @@ th.num, td.num { text-align: right; }
 .chip-slate { background: var(--slate-soft); color: var(--slate-ink); }
 .chip-moss { background: var(--moss-soft); color: var(--moss-ink); }
 .chip-none { background: var(--paper-3); color: var(--ink-2); }
+/* In a table cell or an exhibit's head a chip may wrap: a nowrap chip wider
+   than its column was cut off at the table's edge, on a phone and in the
+   console's narrow report pane. */
+td .chip, .exhibit .chips .chip { white-space: normal; }
+/* The artifact and hand-over tables: room for the path and the hash, and a
+   last column wide enough for its chip or its reason. */
+table.artifacts th:nth-child(1) { width: 36%; }
+table.artifacts th:nth-child(2) { width: 11%; }
+table.artifacts th:nth-child(3) { width: 37%; }
+table.artifacts th:nth-child(4) { width: 16%; }
+table.handover th:nth-child(1) { width: 22%; }
+table.handover th:nth-child(2) { width: 10%; }
+table.handover th:nth-child(3) { width: 33%; }
+table.handover th:nth-child(4) { width: 35%; }
 
 /* --- contents ------------------------------------------------------------- */
 .toc { padding-top: 2rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--line); }
@@ -292,13 +317,14 @@ section { padding-top: 2.5rem; }
 .exhibit { border: 1px solid var(--line); border-left: 3px solid var(--slate); border-radius: 8px; background: var(--card); padding: .75rem .95rem; margin: .6rem 0; }
 .exhibit .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem; }
 .exhibit .no { font-family: var(--mono); font-size: .74rem; color: var(--ink-3); font-weight: 650; }
-.exhibit .chips { margin-left: auto; display: flex; gap: .35rem; }
+.exhibit .chips { margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .35rem; }
 .exhibit .value { margin: .35rem 0 .5rem; font-size: .98rem; line-height: 1.45; }
 .exhibit dl { display: grid; grid-template-columns: 5.4rem minmax(0, 1fr); gap: .18rem .8rem; margin: 0; font-size: .82em; }
 .exhibit dt { color: var(--ink-3); }
 .exhibit dd { margin: 0; overflow-wrap: anywhere; color: var(--ink-2); }
 .exhibit-ioc { border-left-color: var(--saffron); }
 .exhibit-finding { border-left-color: var(--kelp); }
+.exhibit-absence { border-left-style: dashed; }
 
 /* --- spend ---------------------------------------------------------------- */
 .bars { margin: 1rem 0; display: flex; flex-direction: column; gap: .45rem; }
@@ -386,7 +412,7 @@ function givenTime(entry: LedgerEntry): string | null {
 }
 
 /** One dated event on the timeline rail: stamp, claim, then its citation. */
-function timelineRow(entry: LedgerEntry): string {
+function timelineRow(entry: LedgerEntry, correctedBy?: number): string {
   const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(entry.ts ?? "");
   const stamp = m
     ? `<span class="date">${m[1]}</span><span>${m[2]}Z</span>`
@@ -396,6 +422,7 @@ function timelineRow(entry: LedgerEntry): string {
   if (given) rows.push(`<dt>Time as given</dt><dd>${escapeHtml(given)}</dd>`);
   if (entry.source) rows.push(`<dt>Source</dt><dd>${inline(entry.source)}</dd>`);
   if (entry.evidence) rows.push(`<dt>Evidence</dt><dd>${inline(entry.evidence)}</dd>`);
+  if (correctedBy) rows.push(`<dt>Superseded by</dt><dd>E-${correctedBy}</dd>`);
   return `<li>
   <div class="stamp">${stamp}<span class="no">E-${entry.seq}</span></div>
   <div class="what">${inline(entry.value)}</div>
@@ -409,7 +436,7 @@ function timelineRow(entry: LedgerEntry): string {
  * scan, and confidence is the first thing they need: what this run stands
  * behind, and what it is only offering.
  */
-function verdictGroups(findings: LedgerEntry[]): string {
+function verdictGroups(findings: LedgerEntry[], corrections: Map<number, number> = new Map()): string {
   const order: Array<{ key: string; label: string; cls: string }> = [
     { key: "high", label: "High confidence", cls: "c-high" },
     { key: "medium", label: "Medium confidence", cls: "c-medium" },
@@ -425,10 +452,11 @@ function verdictGroups(findings: LedgerEntry[]): string {
       .reverse()
       .map((f) => {
         const source = f.source ? inline(f.source) : f.evidence ? inline(f.evidence) : "";
+        const by = corrections.get(f.seq);
         return `<div class="verdict ${group.cls}">
   <span class="no">E-${f.seq}</span>
   <div>
-    <div class="claim">${inline(f.value)}</div>
+    <div class="claim">${inline(f.value)}${by ? ` ${chip(`superseded by E-${by}`, "brick")}` : ""}</div>
     ${source ? `<div class="meta">${source}</div>` : ""}
   </div>
 </div>`;
@@ -445,8 +473,19 @@ function verdictGroups(findings: LedgerEntry[]): string {
  * which model, and the entry's own chain hash — what a reader needs to say
  * whose conclusion this is and to find the very line in ledger.jsonl.
  */
-function exhibitCard(entry: LedgerEntry, modelOf: (agent: string) => string | undefined = () => undefined): string {
-  const tone = entry.kind === "ioc" ? "ioc" : entry.kind === "finding" ? "finding" : "event";
+/**
+ * What the report knows about an entry beyond the entry itself: whether the
+ * trace shows its source being read, the entry that corrects it, and the
+ * examiner's standing on it.
+ */
+export type ExhibitNotes = {
+  grounding?: Grounding;
+  supersededBy?: number;
+  review?: string;
+};
+
+function exhibitCard(entry: LedgerEntry, modelOf: (agent: string) => string | undefined = () => undefined, notes: ExhibitNotes = {}): string {
+  const tone = entry.kind === "ioc" ? "ioc" : entry.kind === "finding" ? "finding" : entry.kind === "event" ? "event" : "absence";
   const rows: string[] = [];
   if (entry.ts) rows.push(`<dt>When</dt><dd>${whenCell(entry.ts)}</dd>`);
   const given = givenTime(entry);
@@ -458,17 +497,200 @@ function exhibitCard(entry: LedgerEntry, modelOf: (agent: string) => string | un
   if (models.length) rows.push(`<dt>Model</dt><dd>${escapeHtml(models.join(", "))}</dd>`);
   if (entry.at) rows.push(`<dt>Recorded at</dt><dd class="tabular">${escapeHtml(entry.at)}</dd>`);
   if (entry.hash) rows.push(`<dt>Entry hash</dt><dd class="hash">${escapeHtml(entry.hash)}</dd>`);
+  const corrects = Number((entry as { supersedes?: unknown }).supersedes);
+  if (Number.isInteger(corrects) && corrects > 0) rows.push(`<dt>Corrects</dt><dd><a href="#e-${corrects}">E-${corrects}</a>, which stays in the ledger as it was recorded</dd>`);
+  if (notes.supersededBy) rows.push(`<dt>Superseded by</dt><dd><a href="#e-${notes.supersededBy}">E-${notes.supersededBy}</a>: the swarm recorded a correction; this entry is shown as it was recorded</dd>`);
+  if (notes.grounding === "not in the trace") rows.push(`<dt>Grounding</dt><dd>NOT GROUNDED IN THE TRACE: no call before this entry was recorded named its source</dd>`);
+  else if (notes.grounding === "grounded") rows.push(`<dt>Grounding</dt><dd>a call before this entry named its source</dd>`);
+  if (notes.review) rows.push(`<dt>Examiner review</dt><dd>${escapeHtml(notes.review)}</dd>`);
   const confidence = entry.confidence
     ? ` ${chip(entry.confidence, entry.confidence === "high" ? "moss" : entry.confidence === "medium" ? "saffron" : "none")}`
     : "";
-  return `<div class="exhibit exhibit-${tone}">
-  <div class="head"><span class="no">E-${entry.seq}</span><span class="chips">${chip(entry.kind, entry.kind === "ioc" ? "saffron" : entry.kind === "finding" ? "kelp" : "slate")}${confidence}</span></div>
+  const superseded = notes.supersededBy ? ` ${chip(`superseded by E-${notes.supersededBy}`, "brick")}` : "";
+  const ungrounded = notes.grounding === "not in the trace" ? ` ${chip("not grounded in the trace", "saffron")}` : "";
+  // The examiner's standing, at a glance on the exhibit's head: the full
+  // words are in its Examiner review row.
+  const reviewChip = notes.review
+    ? ` ${
+        notes.review.startsWith("accepted")
+          ? chip("accepted by the examiner", "moss")
+          : notes.review.startsWith("REJECTED")
+            ? chip("rejected by the examiner", "brick")
+            : notes.review.startsWith("amended")
+              ? chip("amended by the examiner", "saffron")
+              : notes.review.startsWith("the examiner's review could not be read")
+                ? chip("review unreadable", "brick")
+                : chip("not reviewed", "none")
+      }`
+    : "";
+  return `<div class="exhibit exhibit-${tone}" id="e-${entry.seq}">
+  <div class="head"><span class="no">E-${entry.seq}</span><span class="chips">${chip(entry.kind, entry.kind === "ioc" ? "saffron" : entry.kind === "finding" ? "kelp" : "slate")}${confidence}${superseded}${ungrounded}${reviewChip}</span></div>
   <p class="value">${inline(entry.value)}</p>
   <dl>${rows.join("")}</dl>
 </div>`;
 }
 
 type Section = { n: number; title: string; html: string; breakBefore?: boolean; count?: string };
+
+/** An examiner's review of a run, as the report reads it (scripts/review.ts keeps the file). */
+export type ReviewState = {
+  lines: number;
+  /** Whether the review file's own chain holds, and where it does not. */
+  chain: { ok: boolean; reason?: string | null };
+  /** The examiner's latest word on each entry. */
+  byEntry: Map<number, ReviewLine>;
+  /** The last signature, over the ledger head it names. */
+  signed: ReviewLine | null;
+  /** The ledger's head now, to hold the signature to: the last chain hash, or file:<sha256>. */
+  head: string;
+  /** Why the review file could not be read (a link, not a regular file): said as that, never as "not reviewed". */
+  unreadable?: string;
+};
+
+/**
+ * The examiner's review of run `id`, from `<runs>/reviews/<id>.jsonl`, with
+ * its chain checked and the ledger's current head beside it; null when there
+ * is none.
+ */
+export async function readReviewState(runsDir: string, id: string, sandbox: string, ledger: readonly LedgerEntry[]): Promise<ReviewState | null> {
+  if (!id) return null;
+  let lines: Awaited<ReturnType<typeof readReviews>>;
+  try {
+    lines = await readReviews(runsDir, id);
+  } catch (err) {
+    if (!(err instanceof ReviewFileError)) throw err;
+    return { lines: 0, chain: { ok: false, reason: err.why }, byEntry: new Map(), signed: null, head: "", unreadable: err.why };
+  }
+  if (!lines.length) return null;
+  const parsed = lines.filter((l) => typeof (l as ReviewLine).action === "string") as ReviewLine[];
+  const { entries, signed } = reviewState(parsed);
+  const digest = await hashRegularFile(join(sandbox, "ledger", "entries.jsonl"));
+  const fileSha = digest && "sha256" in digest ? digest.sha256 : "";
+  const head = ledgerHead(ledger.map((e) => ({ ...(e as object), text: "" })) as Parameters<typeof ledgerHead>[0], fileSha);
+  return { lines: lines.length, chain: verifyReviewChain(lines), byEntry: entries, signed, head };
+}
+
+/** The examiner's standing on one entry, in the words of its exhibit. */
+export function reviewStatusOf(state: ReviewState | null, entry: LedgerEntry): string {
+  if (!state) return "not reviewed by an examiner";
+  if (state.unreadable) return `the examiner's review could not be read (${state.unreadable})`;
+  const l = state.byEntry.get(entry.seq);
+  if (!l) return "not reviewed";
+  const verb = l.action === "accept" ? "accepted" : l.action === "reject" ? "REJECTED" : "amended";
+  const other = l.entry_hash && entry.hash && l.entry_hash !== entry.hash ? `; reviewed against entry hash ${l.entry_hash}, which is not this entry's` : "";
+  return `${verb} by ${l.examiner} at ${l.at}${l.note ? `: ${l.note}` : ""}${other}`;
+}
+
+/** The report's "Examiner review" row. */
+export function reviewLine(state: ReviewState | null, ledger: readonly LedgerEntry[]): string {
+  if (state?.unreadable) return `the examiner's review could not be read: ${state.unreadable} (reviews/<run>.jsonl beside the registry); nothing here says whether it was reviewed`;
+  if (!state || !state.lines) return "not reviewed by an examiner: every finding here is the agents' conclusion";
+  const counts = { accept: 0, reject: 0, amend: 0 };
+  for (const l of state.byEntry.values()) if (l.action in counts) counts[l.action as "accept" | "reject" | "amend"] += 1;
+  // A review names the entry's hash as it was reviewed; one that no longer
+  // matches was a review of a different entry.
+  const stale = ledger.filter((e) => {
+    const l = state.byEntry.get(e.seq);
+    return Boolean(l?.entry_hash && e.hash && l.entry_hash !== e.hash);
+  }).length;
+  const reviewed = `${counts.accept} accepted, ${counts.reject} rejected, ${counts.amend} amended, ${ledger.length - state.byEntry.size} of ${ledger.length} entries not reviewed${stale ? `; ${stale} reviewed against an entry hash that is not the entry's now` : ""}`;
+  const chain = state.chain.ok ? "the review file's chain verifies" : `the review file's chain is BROKEN${state.chain.reason ? ` (${state.chain.reason})` : ""}`;
+  const head = state.head;
+  const sign = state.signed
+    ? `signed by ${state.signed.examiner} at ${state.signed.at} over ledger head ${state.signed.ledger_head ?? "not named"}${
+        state.signed.ledger_head && head ? (state.signed.ledger_head === head ? " (the ledger's current head)" : ` — NOT the ledger's current head (${head}): entries were recorded after the signature`) : ""
+      }`
+    : "not signed";
+  return `${reviewed}; ${sign}; ${chain}`;
+}
+
+/** The run's model gateway as the kickoff recorded it (`isolation.model_gateway`); null when it had none. */
+export type GatewayRecord = { providers: string[]; declined: Array<{ provider: string; reason: string }> };
+
+export function gatewayRecordOf(run: Record<string, unknown> | null | undefined): GatewayRecord | null {
+  const iso = run?.isolation && typeof run.isolation === "object" ? (run.isolation as { model_gateway?: unknown }) : null;
+  const g = iso?.model_gateway && typeof iso.model_gateway === "object" ? (iso.model_gateway as { on?: unknown; providers?: unknown; declined?: unknown }) : null;
+  if (!g || g.on !== true) return null;
+  const providers = Array.isArray(g.providers) ? g.providers.filter((p): p is string => typeof p === "string") : [];
+  const declined = Array.isArray(g.declined)
+    ? g.declined.flatMap((d) => (d && typeof d === "object" && typeof (d as { provider?: unknown }).provider === "string" ? [{ provider: (d as { provider: string }).provider, reason: String((d as { reason?: unknown }).reason ?? "") }] : []))
+    : [];
+  return { providers, declined };
+}
+
+/** The gateway's own totals (traces/model-gateway.json), as far as the report needs them. */
+export type GatewayTotals = { spent_usd?: number; seats?: Record<string, { calls?: number; refused?: number; spent_usd?: number; unpriced_calls?: number }> };
+
+/**
+ * Whose word a VM run's spend is. Without the gateway, each seat's own
+ * report (the wording is unchanged); with it, the host's meter, for the
+ * providers it fronted, and each seat's report for the ones it did not.
+ * Empty for a host run.
+ */
+export function vmSpendNote(run: Record<string, unknown> | null | undefined, totals: GatewayTotals | null): string {
+  const iso = run?.isolation as { mode?: unknown } | undefined;
+  if (iso?.mode !== "microvm") return "";
+  const gw = gatewayRecordOf(run);
+  if (!gw) return " (as each VM reported its own spend; the host did not meter it)";
+  const unpriced = Object.values(totals?.seats ?? {}).reduce((n, t) => n + (Number(t?.unpriced_calls) || 0), 0);
+  const unpricedNote = unpriced ? `; ${unpriced} call${unpriced === 1 ? "" : "s"} the gateway could not price` : "";
+  if (!gw.declined.length) return ` (metered on the host by the model gateway${unpricedNote})`;
+  return ` (metered on the host by the model gateway for ${gw.providers.join(", ") || "no provider"}; ${gw.declined.map((d) => d.provider).join(", ")} ${gw.declined.length === 1 ? "was" : "were"} not fronted, and that spend is what each VM reported${unpricedNote})`;
+}
+
+/** The custody row for the gateway: what it fronted, what it metered and refused, and custody's word on its log. */
+export function gatewayLine(gw: GatewayRecord, totals: GatewayTotals | null, log: { lines: number; intact: boolean; detail: string; refused?: string } | null | undefined): string {
+  const seats = Object.entries(totals?.seats ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const calls = seats.reduce((n, [, t]) => n + (Number(t?.calls) || 0), 0);
+  const refused = seats.filter(([, t]) => Number(t?.refused) > 0).map(([id, t]) => `${id} ${t?.refused}`);
+  const unpriced = seats.reduce((n, [, t]) => n + (Number(t?.unpriced_calls) || 0), 0);
+  const parts = [
+    `on for ${gw.providers.join(", ") || "no provider"}`,
+    totals ? `${usd(Number(totals.spent_usd) || 0)} metered on the host across ${calls} call${calls === 1 ? "" : "s"}` : "its totals were not found (traces/model-gateway.json)",
+    ...(gw.declined.length ? [`not fronted, so seat-reported: ${gw.declined.map((d) => `${d.provider}${d.reason ? ` (${d.reason})` : ""}`).join(", ")}`] : []),
+    ...(refused.length ? [`calls refused by the gateway: ${refused.join(", ")}`] : []),
+    ...(unpriced ? [`${unpriced} call${unpriced === 1 ? "" : "s"} it could not price`] : []),
+    log ? `its log: ${log.refused ? log.detail : log.intact ? `${log.lines} lines, chain intact (custody)` : `CHAIN BROKEN (${log.detail})`}` : "its log was not checked by custody",
+  ];
+  return parts.join("; ");
+}
+
+/**
+ * What the kickoff recorded about how the run was held that a custody
+ * record should carry: the disk's encryption, a legal hold, a notify hook
+ * (whether one was set; the command itself is never recorded, since it may
+ * carry a token), how a synced folder was allowed, an earlier run's ledger
+ * handed in as hypotheses, and a run started as root.
+ */
+export function heldRows(run: Record<string, unknown> | null | undefined): Array<[string, string]> {
+  if (!run) return [];
+  const rows: Array<[string, string]> = [];
+  const enc = run.disk_encryption;
+  if (enc === "on" || enc === "off" || enc === "unknown") {
+    rows.push(["Disk encryption", enc === "on" ? "on, where the run is kept" : enc === "off" ? "OFF where the run is kept: the evidence copy and the record sit on an unencrypted disk" : "not known where the run is kept"]);
+  }
+  if ("hold" in run || run.state === "purged") {
+    const h = run.hold && typeof run.hold === "object" ? (run.hold as { reason?: unknown; at?: unknown; by?: unknown }) : null;
+    rows.push([
+      "Legal hold",
+      run.state === "purged"
+        ? "the run was PURGED"
+        : h
+          ? `held${typeof h.reason === "string" && h.reason ? `: ${h.reason}` : ""}${typeof h.by === "string" ? `, by ${h.by}` : ""}${typeof h.at === "string" ? `, at ${h.at}` : ""}`
+          : "not held",
+    ]);
+  }
+  if (typeof run.notify === "boolean") rows.push(["Notify hook", run.notify ? "set (its command is not recorded)" : "none"]);
+  if (run.synced_folder_allowed_by === "flag" || run.synced_folder_allowed_by === "marker") {
+    rows.push(["Synced folder", `the run's files sit in a synced folder, allowed by ${run.synced_folder_allowed_by === "flag" ? "--allow-synced-folder" : "a marker in the folder"}: copies may leave this machine`]);
+  }
+  if (run.ledger_from && typeof run.ledger_from === "object") {
+    const l = run.ledger_from as { run?: unknown; entries?: unknown; reviewed?: unknown };
+    rows.push(["Prior ledger", `${Number(l.entries) || 0} entr${Number(l.entries) === 1 ? "y" : "ies"} from run ${String(l.run ?? "?")}${l.reviewed === true ? " (reviewed ones only)" : ""}, handed in as hypotheses to re-derive, not as evidence`]);
+  }
+  if (run.allow_root === true) rows.push(["Started as root", "yes, allowed by --allow-root"]);
+  return rows;
+}
 
 /**
  * How firmly the egress allowlist was held, in the report's own words.
@@ -742,6 +964,16 @@ export function chainLine(
  * when the manifest says nothing (evidence used in place, an older run).
  */
 export function sourceCheckedLine(sourceChecked: unknown): string | null {
+  // The content check: every copied file's source hashed again and compared
+  // with the manifest's sha256.
+  if (sourceChecked && typeof sourceChecked === "object") {
+    const c = sourceChecked as { by?: unknown; files?: unknown; mismatches?: unknown; seconds?: unknown };
+    if (c.by !== "content") return null;
+    const files = Number(c.files) || 0;
+    const mismatches = Number(c.mismatches) || 0;
+    const secs = Number(c.seconds);
+    return `the copy was checked against its source at kickoff by content: ${files} file${files === 1 ? "" : "s"} hashed again from the source, ${mismatches ? `${mismatches} MISMATCH${mismatches === 1 ? "" : "ES"}` : "0 mismatches"}${Number.isFinite(secs) && secs > 0 ? ` (${Math.round(secs)} s)` : ""}`;
+  }
   if (typeof sourceChecked !== "string" || !sourceChecked) return null;
   if (sourceChecked === "MISMATCH") return "the copy did NOT match its source by name, kind and size at kickoff";
   return `the copy was checked against its source at kickoff by ${sourceChecked}, not by content (the source itself was not hashed)`;
@@ -993,12 +1225,22 @@ async function streamedChain(file: string, anchor: Parameters<typeof eventChainV
 }
 
 export async function renderReport(sandboxArg: string, options: ReportOptions = {}): Promise<string> {
-  const { sandbox, run, team, budget, events, trace_unreadable, sentinel, ledger, inputs } = await loadRunContext(sandboxArg, {
+  const { sandbox, runsDir, run, team, budget, events, trace_unreadable, sentinel, ledger, inputs } = await loadRunContext(sandboxArg, {
     runsDir: options.runsDir,
     parseSentinel: parseFrontMatter,
   });
   const vmRecords = await readVmRecords(sandbox);
-  const hostCustody = await readJsonFile<{ summary?: string; at?: string; inputs?: unknown; run?: string | null; vms?: Array<{ agent?: string; secret_violations?: Array<{ env?: string; host?: string; method?: string; path?: string }> }> | null }>(join(sandbox, "custody.json"));
+  const hostCustody = await readJsonFile<{ summary?: string; at?: string; inputs?: unknown; run?: string | null; vms?: Array<{ agent?: string; secret_violations?: Array<{ env?: string; host?: string; method?: string; path?: string }> }> | null; model_gateway?: { lines: number; intact: boolean; detail: string; refused?: string } | null }>(join(sandbox, "custody.json"));
+  // The model gateway's totals, host-written beside the trace, when the run had one.
+  const gatewayTotals = await (async (): Promise<GatewayTotals | null> => {
+    const read = await readRegularText(join(sandbox, "traces", "model-gateway.json"), 64 * 1024 * 1024);
+    if (!("text" in read)) return null;
+    try {
+      return JSON.parse(read.text) as GatewayTotals;
+    } catch {
+      return null;
+    }
+  })();
   // Whether that custody.json is the verdict custody anchored outside the run.
   const custodyAnchor = hostCustody ? await verdictAnchorState(sandbox) : null;
   // The manifest says what was copied; the trace says what each pane measured
@@ -1094,6 +1336,8 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   const chosen = new Map(names.map((n) => [n.id, n.doing ? `${n.name} — ${n.doing}` : n.name]));
 
   const id = run?.id ?? team.swarm_id ?? "";
+  // The examiner's review, kept beside the registry where no agent writes.
+  const review: ReviewState | null = options.review !== undefined ? options.review : await readReviewState(runsDir, id, sandbox, ledger);
   // Which model each agent ran on, for the exhibits and the provenance row.
   const modelOf = (agent: string): string | undefined => team.agents.find((a) => a.id === agent)?.model ?? run?.model;
   const models = [...new Set(team.agents.map((a) => a.model ?? run?.model).filter((m): m is string => Boolean(m)))].sort();
@@ -1117,6 +1361,19 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   const timeline = ledger.filter((e) => e.kind === "event").sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? "") || a.seq - b.seq);
   const iocs = ledger.filter((e) => e.kind === "ioc");
   const findings = ledger.filter((e) => e.kind === "finding");
+  // Searches that found nothing, as the agents recorded them.
+  const absences = ledger.filter((e) => (e.kind as string) === "absence");
+  // Corrections: the corrected entry stays as it was recorded, marked.
+  const correctedBy = supersededBy(ledger);
+  // What the trace shows the swarm naming, and whether it shows each
+  // exhibit's source being read before the exhibit was recorded.
+  const coverage: CoverageReport = await coverageOf(sandbox, { events, ledger, traceUnreadable: traceUnread });
+  const notesFor = (e: LedgerEntry): ExhibitNotes => ({
+    grounding: coverage.grounding[String(e.seq)],
+    supersededBy: correctedBy.get(e.seq),
+    review: reviewStatusOf(review, e),
+  });
+  const ungrounded = ledger.filter((e) => coverage.grounding[String(e.seq)] === "not in the trace");
 
   const sections: Section[] = [];
 
@@ -1127,7 +1384,7 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
     count: findings.length ? `${findings.length} recorded` : "none recorded",
     html: findings.length
       ? `<p class="lede">What the swarm concluded, strongest first. Each card carries the exhibit number its full entry has in §4, and the source it rests on. A claim with no evidence line is a claim this document does not stand behind.</p>
-${verdictGroups(findings)}`
+${verdictGroups(findings, correctedBy)}`
       : `<div class="note">The swarm recorded no findings. That is not the same as finding nothing: it means nothing was written to the ledger with <code>record</code>, so this report has no conclusions to carry. §7 says what was and was not covered.</div>`,
   });
 
@@ -1139,12 +1396,28 @@ ${verdictGroups(findings)}`
   const fileDigests = (f: unknown) => f as { md5?: string; sha1?: string };
   const withSha1 = (inputs?.files ?? []).some((f) => typeof fileDigests(f).sha1 === "string");
   const withMd5 = (inputs?.files ?? []).some((f) => typeof fileDigests(f).md5 === "string");
+  // How many commands on the trace named each file; "—" is a file no command named.
+  const withCoverage = !coverage.unavailable && coverage.inputs > 0;
+  const namedCell = (path: string) => {
+    if (!withCoverage) return "";
+    const n = coverage.touched[path] ?? 0;
+    const walked = coverage.under_named_dir[path] ?? 0;
+    return `<td class="num">${n ? String(n) : walked ? `— <span class="muted">(directory named ${walked}×)</span>` : "—"}</td>`;
+  };
   const evidenceRows = (inputs?.files ?? [])
     .map(
       (f) =>
-        `<tr><td><code>${escapeHtml(f.path)}</code></td><td class="num">${escapeHtml(bytesHuman(f.bytes))}</td><td class="hash">${escapeHtml(f.sha256)}</td>${withSha1 ? `<td class="hash">${escapeHtml(fileDigests(f).sha1 ?? "—")}</td>` : ""}${withMd5 ? `<td class="hash">${escapeHtml(fileDigests(f).md5 ?? "—")}</td>` : ""}</tr>`,
+        `<tr><td><code>${escapeHtml(f.path)}</code></td><td class="num">${escapeHtml(bytesHuman(f.bytes))}</td><td class="hash">${escapeHtml(f.sha256)}</td>${withSha1 ? `<td class="hash">${escapeHtml(fileDigests(f).sha1 ?? "—")}</td>` : ""}${withMd5 ? `<td class="hash">${escapeHtml(fileDigests(f).md5 ?? "—")}</td>` : ""}${namedCell(f.path)}</tr>`,
     )
     .join("");
+  const coverageHtml = inputs
+    ? `<h3>Coverage, from the trace</h3>
+<p>${escapeHtml(coverageLine(coverage))}${withCoverage ? " The table's last column counts the calls that named each file." : ""}</p>${
+        withCoverage && coverage.untouched.length
+          ? `<p>Named by no command: ${coverage.untouched.map((p) => `<code>${escapeHtml(p)}</code>`).join(", ")}.</p>`
+          : ""
+      }`
+    : "";
   const manifest = inputs ? await manifestMeta(sandbox) : null;
   const sourceCheck = sourceCheckedLine(manifest?.source_checked);
   sections.push({
@@ -1160,8 +1433,9 @@ ${verdictGroups(findings)}`
                 .join(" ")
             : "no pane reported"
         }.</p>
-<table><thead><tr><th>File</th><th class="num">Size</th><th>sha256 at kickoff</th>${withSha1 ? "<th>sha1</th>" : ""}${withMd5 ? "<th>md5</th>" : ""}</tr></thead><tbody>${evidenceRows}</tbody></table>
-<p>${(inputs.files ?? []).length} file${(inputs.files ?? []).length === 1 ? "" : "s"}, ${escapeHtml(bytesHuman(inputs.bytes ?? 0))} in total.${sourceCheck ? ` ${escapeHtml(sourceCheck)}` : ""}</p>`
+<table><thead><tr><th>File</th><th class="num">Size</th><th>sha256 at kickoff</th>${withSha1 ? "<th>sha1</th>" : ""}${withMd5 ? "<th>md5</th>" : ""}${withCoverage ? '<th class="num">Named by</th>' : ""}</tr></thead><tbody>${evidenceRows}</tbody></table>
+<p>${(inputs.files ?? []).length} file${(inputs.files ?? []).length === 1 ? "" : "s"}, ${escapeHtml(bytesHuman(inputs.bytes ?? 0))} in total.${sourceCheck ? ` ${escapeHtml(sourceCheck)}` : ""}</p>
+${coverageHtml}`
       : `<div class="note">This run was given no read-only inputs. Whatever the agents examined, they reached some other way, and this report cannot state a hash for it.</div>`,
   });
 
@@ -1173,7 +1447,7 @@ ${verdictGroups(findings)}`
     breakBefore: true,
     html: timeline.length
       ? `<p class="lede">${timeline.length} dated event${timeline.length === 1 ? "" : "s"}, in time order, in UTC as the ledger holds them: each is the time its agent recorded, converted from the zone the agent gave (where the ledger kept the source's own words, they are shown beside it). The exhibit number is the ledger's own sequence, so the console, <code>ledger.jsonl</code> and this rail all name the same row.</p>
-<ol class="tl">${timeline.map(timelineRow).join("")}</ol>`
+<ol class="tl">${timeline.map((e) => timelineRow(e, correctedBy.get(e.seq))).join("")}</ol>`
       : `<div class="note">No dated events were recorded, so this report has no timeline.</div>`,
   });
 
@@ -1181,14 +1455,20 @@ ${verdictGroups(findings)}`
   sections.push({
     n: 4,
     title: "Indicators and findings",
-    count: `${iocs.length} indicator${iocs.length === 1 ? "" : "s"} · ${findings.length} finding${findings.length === 1 ? "" : "s"}`,
+    count: `${iocs.length} indicator${iocs.length === 1 ? "" : "s"} · ${findings.length} finding${findings.length === 1 ? "" : "s"}${absences.length ? ` · ${absences.length} searched and not found` : ""}`,
     html:
+      (ungrounded.length
+        ? `<p class="lede">${ungrounded.length} entr${ungrounded.length === 1 ? "y is" : "ies are"} marked <strong>not grounded in the trace</strong>: no call before ${ungrounded.length === 1 ? "it" : "each"} was recorded named its source. The source may still be right (a path inside an image a tool reached by inode, say), but the trace does not show the swarm reading it.</p>`
+        : "") +
       (iocs.length
-        ? `<h3>Indicators (${iocs.length})</h3>${iocs.map((e) => exhibitCard(e, modelOf)).join("")}`
+        ? `<h3>Indicators (${iocs.length})</h3>${iocs.map((e) => exhibitCard(e, modelOf, notesFor(e))).join("")}`
         : `<h3>Indicators</h3><div class="note">None recorded.</div>`) +
       (findings.length
-        ? `<h3>Findings (${findings.length})</h3>${findings.map((e) => exhibitCard(e, modelOf)).join("")}`
-        : `<h3>Findings</h3><div class="note">None recorded.</div>`),
+        ? `<h3>Findings (${findings.length})</h3>${findings.map((e) => exhibitCard(e, modelOf, notesFor(e))).join("")}`
+        : `<h3>Findings</h3><div class="note">None recorded.</div>`) +
+      (absences.length
+        ? `<h3>Searched and not found (${absences.length})</h3><p class="lede">Searches that found nothing, as recorded by the agents, valid only for the stated scope: what was looked for, where, and how (the query, the tool and its version, allocated space only or unallocated and slack too). Not found by that search is not absent from the evidence.</p>${absences.map((e) => exhibitCard(e, modelOf, notesFor(e))).join("")}`
+        : ""),
   });
 
   // --- 5. Method -----------------------------------------------------------
@@ -1249,7 +1529,7 @@ ${verdictGroups(findings)}`
     html: `<p>${team.n} peer agent${team.n === 1 ? "" : "s"} shared one sandbox and coordinated through an append-only file board. Nobody planned, nobody was assigned a seat, and no agent could direct another.${anyNamed ? ' The "Calls itself" column is what each one decided to be, in its own words, after reading the goal.' : ""}</p>
 <table><thead><tr><th>Agent</th>${anyNamed ? "<th>Calls itself</th>" : ""}<th>Model</th><th class="num">Spent</th><th class="num">Calls</th><th class="num">Tokens</th>${contextHeaders}</tr></thead><tbody>${teamRows}</tbody></table>
 <p>
-  ${unmetered ? "Unmetered (local models)." : `${escapeHtml(usd(budget?.spent_usd ?? 0))} of a ${escapeHtml(usd(run?.cap_usd ?? budget?.cap_usd ?? 0))} cap${run?.isolation?.mode === "microvm" ? " (as each VM reported its own spend; the host did not meter it)" : ""}`},
+  ${unmetered ? "Unmetered (local models)." : `${escapeHtml(usd(budget?.spent_usd ?? 0))} of a ${escapeHtml(usd(run?.cap_usd ?? budget?.cap_usd ?? 0))} cap${escapeHtml(vmSpendNote(runRecord, gatewayTotals))}`},
   ${(budget?.tokens ?? 0).toLocaleString("en-US")} tokens, ${events.length.toLocaleString("en-US")} tool calls in ${escapeHtml(durationHuman(durationMs))}.
   ${run?.wall_clock_minutes ? `Wall-clock cap ${run.wall_clock_minutes} min.` : ""}
   ${run?.cap_per_agent_usd ? `Per-agent cap ${escapeHtml(usd(run.cap_per_agent_usd))}.` : ""}
@@ -1275,7 +1555,7 @@ ${forgedHtml}`,
     title: "Artifacts produced",
     count: artifacts.files.length ? `${artifacts.files.length} file${artifacts.files.length === 1 ? "" : "s"}` : "none",
     html: artifacts.files.length
-      ? `<table><thead><tr><th>Path</th><th class="num">Size</th><th>sha256</th><th>Where</th></tr></thead><tbody>${artifactRows}</tbody></table>
+      ? `<table class="artifacts"><thead><tr><th>Path</th><th class="num">Size</th><th>sha256</th><th>Where</th></tr></thead><tbody>${artifactRows}</tbody></table>
 <p>${artifacts.files.length} file${artifacts.files.length === 1 ? "" : "s"}, ${escapeHtml(bytesHuman(artifacts.bytes))} in total; ${escapeHtml(bytesHuman(artifacts.packaged_bytes))} of that travels with the package.</p>
 ${
   artifacts.files.some((f) => !f.packaged)
@@ -1291,13 +1571,23 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
   const limits: string[] = [];
   // Whose conclusions these are, first: a reader deciding what to rely on
   // needs to know an AI swarm wrote them before anything else.
-  limits.push("Prepared by an AI agent swarm. The findings are the agents' conclusions, each recorded with the source it rests on; none is an examiner's opinion until an examiner has reviewed it.");
+  limits.push(
+    review?.unreadable
+      ? `Prepared by an AI agent swarm. The examiner's review could not be read (${escapeHtml(review.unreadable)}), so this document cannot say whether any finding was reviewed.`
+      : review && review.signed
+      ? `Prepared by an AI agent swarm and reviewed by an examiner: ${escapeHtml(reviewLine(review, ledger))}. An entry the examiner did not review is still the agents' conclusion.`
+      : review && review.lines
+        ? `Prepared by an AI agent swarm. An examiner has reviewed some entries and has not signed the review (${escapeHtml(reviewLine(review, ledger))}); an entry not reviewed is the agents' conclusion.`
+        : "Prepared by an AI agent swarm. The findings are the agents' conclusions, each recorded with the source it rests on; none is an examiner's opinion until an examiner has reviewed it.",
+  );
   limits.push("The models' output is not deterministic: running the case again would not give the same words. The reproducible record is the trace, the kept tool outputs and the sealed sessions, not a re-run.");
   if (forged.length) limits.push(`${forged.length} tool${forged.length === 1 ? " was" : "s were"} written by the agents during the run and not independently validated (§5).`);
   if (!sentinel) limits.push("The swarm did not finish: there is no <code>done/SWARM_DONE</code>, so no agent stated that the definition of done was met.");
   if (capHit) limits.push(`Spend reached the cap (${escapeHtml(usd(budget?.spent_usd ?? 0))} of ${escapeHtml(usd(run?.cap_usd ?? 0))}). Work stopped because of the budget, not because the questions were answered.`);
   if (!findings.length) limits.push("No findings were recorded, so nothing in this report is stated as a conclusion.");
   if (!inputs) limits.push("No read-only inputs were given, so no evidence hash is stated.");
+  if (withCoverage && coverage.untouched.length) limits.push(`${coverage.untouched.length} of ${coverage.inputs} evidence file${coverage.inputs === 1 ? " was" : "s were"} named by no command on the trace (§2). An artefact nobody opened is not evidence of absence.`);
+  if (ungrounded.length) limits.push(`${ungrounded.length} ledger entr${ungrounded.length === 1 ? "y's" : "ies'"} source${ungrounded.length === 1 ? " was" : "s were"} named by no call before the entry was recorded (§4).`);
   const refusals = events.filter((e) => e.result && typeof e.result === "object" && (e.result as { ok?: boolean }).ok === false);
   if (refusals.length) limits.push(`${refusals.length} tool call${refusals.length === 1 ? "" : "s"} failed or were refused during the run; they are in <code>trace/events.jsonl</code>.`);
   limits.push("This document reports what the swarm recorded. An artefact nobody opened is not evidence of absence, and the trace is the record of what was actually read.");
@@ -1375,7 +1665,17 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
         ? toolchain.packages.map((p) => `${p.name} ${p.version}${p.record_sha256 ? ` (${p.record_sha256.slice(0, 12)})` : ""}`).join(", ")
         : "nothing",
     ],
-    ["Ledger", `${ledger.length} entries (${timeline.length} events, ${iocs.length} indicators, ${findings.length} findings)`],
+    ["Ledger", `${ledger.length} entries (${timeline.length} events, ${iocs.length} indicators, ${findings.length} findings${absences.length ? `, ${absences.length} searched and not found` : ""}${correctedBy.size ? `; ${correctedBy.size} corrected by a later entry, kept as recorded` : ""})`],
+    ["Examiner review", reviewLine(review, ledger)],
+    ...(gatewayRecordOf(runRecord) ? ([["Model gateway", gatewayLine(gatewayRecordOf(runRecord) as GatewayRecord, gatewayTotals, hostCustody?.model_gateway)]] as Array<[string, string]>) : []),
+    ["Coverage", coverageLine(coverage)],
+    [
+      "Grounding",
+      coverage.unavailable
+        ? `not computed: ${coverage.unavailable}`
+        : `${ledger.length - ungrounded.length - Object.values(coverage.grounding).filter((g) => g === "not a path").length} entr${ledger.length === 1 ? "y" : "ies"} with a source a call named before it was recorded; ${ungrounded.length} not grounded in the trace${ungrounded.length ? ` (${ungrounded.map((e) => `E-${e.seq}`).join(", ")})` : ""}; ${Object.values(coverage.grounding).filter((g) => g === "not a path").length} whose source names no path`,
+    ],
+    ...heldRows(runRecord),
     [
       "Host custody check",
       hostCustody?.summary
@@ -1384,12 +1684,23 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ],
     ["Trace", traceUnread ? `not read here (${traceUnread})` : `${events.length} tool calls`],
   ];
+  const handover = options.handover ?? [];
+  const handoverHtml = handover.length
+    ? `<h3>Files handed over with this report (${handover.length})</h3>
+<p>What a court or a counterparty receives beside this document, as the dossier read each file when it generated this report: its size and sha256, or why it is absent. This report is not in the list, since its own hash cannot be inside it; <code>court-set.json</code> carries it.</p>
+<table class="handover"><thead><tr><th>File</th><th class="num">Size</th><th>sha256</th><th>Contents</th></tr></thead><tbody>${handover
+        .map(
+          (f) =>
+            `<tr><td><code>${escapeHtml(f.name)}</code></td><td class="num">${f.present && f.bytes !== null ? escapeHtml(bytesHuman(f.bytes)) : "—"}</td><td class="hash">${f.present && f.sha256 ? escapeHtml(f.sha256) : escapeHtml(`absent: ${f.reason ?? "not there"}`)}</td><td>${escapeHtml(f.description)}</td></tr>`,
+        )
+        .join("")}</tbody></table>`
+    : "";
   sections.push({
     n: 8,
     title: "Chain of custody",
     html: `<table><thead><tr><th>Item</th><th>Recorded</th></tr></thead><tbody>${custody
       .map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td class="${k.startsWith("Sandbox") ? "hash" : ""}">${escapeHtml(v)}</td></tr>`)
-      .join("")}</tbody></table>`,
+      .join("")}</tbody></table>${handoverHtml}`,
   });
 
   // --- 9. The swarm's own report ------------------------------------------
@@ -1481,7 +1792,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
       <dt>Run</dt><dd class="hash">${escapeHtml(id || "—")}</dd>
       <dt>Period</dt><dd class="tabular">${escapeHtml(startedAt || "—")} → ${escapeHtml(endedAt || "—")}</dd>
       <dt>Tool</dt><dd>DFIR Swarm ${escapeHtml(version)}${escapeHtml(commit)}</dd>
-      <dt>Prepared by</dt><dd>an AI agent swarm (${team.n} agent${team.n === 1 ? "" : "s"}); its findings are the agents' conclusions until an examiner reviews them</dd>
+      <dt>Prepared by</dt><dd>an AI agent swarm (${team.n} agent${team.n === 1 ? "" : "s"}); ${review && review.signed ? `reviewed and signed by ${escapeHtml(review.signed.examiner)} at ${escapeHtml(review.signed.at)}` : "its findings are the agents' conclusions until an examiner reviews them"}</dd>
       <dt>Generated</dt><dd class="tabular">${escapeHtml(generatedAt)}</dd>
     </dl>
   </header>

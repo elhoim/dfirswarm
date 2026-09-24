@@ -416,6 +416,23 @@ export async function manifestMeta(sandbox: string): Promise<Record<string, unkn
   return "meta" in read ? read.meta : null;
 }
 
+/**
+ * Every name inputs.json lists, streamed: the path as the manifest shows it
+ * and the name under inputs/ as bytes (`path_b64` honoured). What coverage
+ * matches the trace against, for a manifest of any size; `why` when there is
+ * no manifest to read.
+ */
+export async function eachInputsFile(
+  sandbox: string,
+  onFile: (f: { path: string; rel: Buffer }) => void | Promise<void>,
+): Promise<{ ok: true } | { why: string }> {
+  const read = await streamManifest(join(resolve(sandbox), "inputs.json"), async (raw) => {
+    const f = manifestFile(raw);
+    if (f) await onFile({ path: f.path, rel: f.rel });
+  });
+  return "meta" in read ? { ok: true } : { why: read.why };
+}
+
 export type Custody = {
   at: string;
   run: string | null;
@@ -533,6 +550,13 @@ export type Custody = {
    * someone packages the run.
    */
   artifacts: { files: number; bytes: number; skipped: number; index_sha256: string } | null;
+  /**
+   * The model gateway's call log (traces/model-gateway.jsonl), when the run
+   * had one: its lines, whether its chain holds (each line's `prev` the
+   * sha256 of the line before, the first null) and its sha256, anchored with
+   * the verdict. Null when there is no log.
+   */
+  model_gateway: { lines: number; intact: boolean; detail: string; sha256: string | null; refused?: string } | null;
   /** Parts custody never reached, for a verdict written when it was ended. */
   not_reached: string[];
   incomplete: string | null;
@@ -565,8 +589,40 @@ export type CustodyState = {
   vmsDone?: boolean;
   artifacts?: Custody["artifacts"];
   artifactsDone?: boolean;
+  model_gateway?: Custody["model_gateway"];
+  gatewayDone?: boolean;
   incomplete?: string | null;
 };
+
+/** The model gateway's call log and totals, beside the trace (scripts/model-gateway.ts). */
+export const GATEWAY_LOG = "traces/model-gateway.jsonl";
+
+/**
+ * The gateway log's own chain, line by line as written: every line JSON,
+ * its `prev` the sha256 of the raw line before it and null on the first.
+ */
+export function gatewayChainVerifier(): { line: (raw: string) => void; result: () => { lines: number; ok: boolean; broken_at: number | null; reason: string | null } } {
+  let lines = 0;
+  let last: string | null = null;
+  let broken: { at: number; reason: string } | null = null;
+  return {
+    line(raw: string) {
+      lines += 1;
+      if (broken) return;
+      let rec: { prev?: unknown };
+      try {
+        rec = JSON.parse(raw) as { prev?: unknown };
+      } catch {
+        broken = { at: lines, reason: "not json" };
+        return;
+      }
+      if (!rec || typeof rec !== "object" || !("prev" in rec)) broken = { at: lines, reason: "a line without its prev" };
+      else if ((rec.prev ?? null) !== last) broken = { at: lines, reason: last === null ? "the first line names a line before it" : "prev does not name the line before it" };
+      last = createHash("sha256").update(raw).digest("hex");
+    },
+    result: () => ({ lines, ok: !broken, broken_at: broken?.at ?? null, reason: broken?.reason ?? null }),
+  };
+}
 
 /** What a VM's stop-time inventory said: package names, or why there is none. */
 function outsideOf(raw: unknown): { apt: string[]; venv: string[]; note: string | null } {
@@ -1199,6 +1255,40 @@ export async function takeCustody(
   } else state.ledger = null;
   state.ledgerDone = true;
 
+  // --- the model gateway's log -----------------------------------------------
+  // When the run's model calls went through the host's gateway, its log is
+  // the record of what each seat spent: the host's own, in traces/, which no
+  // VM writes. Its chain is checked and its hash anchored with the verdict.
+  state.phase = "the model gateway log";
+  state.model_gateway = null;
+  const gatewayPath = join(sandbox, GATEWAY_LOG);
+  const gatewayThere = await lstat(gatewayPath).then(() => true, () => false);
+  if (gatewayThere && !tooLate("the model gateway log")) {
+    const reg = await regular(gatewayPath);
+    if (!vmRun) {
+      // A host run starts no gateway: a file there is not the harness's.
+      state.model_gateway = { lines: 0, intact: false, detail: "not read: a host run has no model gateway, so this file is not the harness's", sha256: null, refused: "in a host run" };
+    } else if ("why" in reg) {
+      state.model_gateway = { lines: 0, intact: false, detail: `not read: it is ${reg.why}`, sha256: null, refused: reg.why };
+    } else {
+      const verifier = gatewayChainVerifier();
+      const read = await eachLine(gatewayPath, (line) => verifier.line(line));
+      if ("why" in read) state.model_gateway = { lines: 0, intact: false, detail: `not read: it is ${read.why}`, sha256: null, refused: read.why };
+      else {
+        const r = verifier.result();
+        // The file's own sha256, over its bytes, for the anchor.
+        const digest = await hashRegular(gatewayPath, deadline).catch(() => null);
+        state.model_gateway = {
+          lines: r.lines,
+          intact: r.ok,
+          detail: r.ok ? `${r.lines} lines, chain intact` : `chain broken at line ${r.broken_at} (${r.reason})`,
+          sha256: digest && "sha256" in digest ? digest.sha256 : null,
+        };
+      }
+    }
+  }
+  state.gatewayDone = true;
+
   // --- the VMs -----------------------------------------------------------------
   state.phase = "the VM check";
   const vmDir = join(sandbox, "vm");
@@ -1363,6 +1453,7 @@ export function verdictOf(state: CustodyState, incomplete: string | null): Custo
   if (!state.ledgerDone) notReached.push("the ledger");
   if (!state.vmsDone) notReached.push("the VMs");
   if (!state.artifactsDone) notReached.push("the artifact index");
+  if (!state.gatewayDone && state.sandbox && existsSync(join(state.sandbox, GATEWAY_LOG))) notReached.push("the model gateway log");
   const inputs = state.inputs ?? null;
   const sessions = state.sessions ?? { files: [], digest: "", not_files: [] };
   const toolOutputs = state.tool_outputs ?? { referenced: 0, verified: 0, missing: [], mismatched: [], refused: [], rereferenced: [], foreign: [] };
@@ -1380,6 +1471,7 @@ export function verdictOf(state: CustodyState, incomplete: string | null): Custo
     vms: state.vms ?? null,
     vm_records: state.vm_records ?? null,
     artifacts: state.artifacts ?? null,
+    model_gateway: state.model_gateway ?? null,
     not_reached: notReached,
     incomplete,
   };
@@ -1452,6 +1544,10 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
     } else parts.push(`LEDGER CHAIN BROKEN (${l.detail})`);
     if (l.claimed_by_seat.length) parts.push(`${plural(l.claimed_by_seat.length, "ledger hash", "ledger hashes")} a seat's own record line carried and the hub never logged (a guest's word, not counted against the ledger)`);
   }
+  if (c.model_gateway) {
+    const g = c.model_gateway;
+    parts.push(g.refused ? `MODEL GATEWAY LOG NOT READ: ${g.detail.replace(/^not read: /, "")}` : g.intact ? `model gateway log ${plural(g.lines, "line")}, chain intact` : `MODEL GATEWAY LOG CHAIN BROKEN (${g.detail})`);
+  }
   if (c.vm_records?.ignored) parts.push(`VM RECORDS NOT READ: ${c.vm_records.ignored}`);
   if (c.vms) {
     const vms = c.vms;
@@ -1507,6 +1603,7 @@ function writeVerdict(sandbox: string, anchorFile: string, custody: Custody): { 
       snapshots: (custody.vms ?? []).flatMap((v) => (v.snapshot && "sha256" in v.snapshot ? [{ agent: v.agent, sha256: v.snapshot.sha256 }] : [])),
       sessions_digest: custody.sessions.digest,
       artifacts_sha256: custody.artifacts?.index_sha256 ?? null,
+      ...(custody.model_gateway ? { model_gateway: { sha256: custody.model_gateway.sha256, lines: custody.model_gateway.lines, intact: custody.model_gateway.intact } } : {}),
     });
     return { anchored: true };
   } catch (err) {

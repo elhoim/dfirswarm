@@ -63,6 +63,18 @@ export type RegistryRun = {
   write_guard_measured?: string;
   started_at?: string;
   inputs?: { source?: string; files?: number; bytes?: number; enforce?: string; guard?: string; held?: string };
+  /** Whether the disk the run is kept on is encrypted: on · off · unknown. */
+  disk_encryption?: string;
+  /** A legal hold on the run, or null; a purged run's state is "purged". */
+  hold?: { reason?: string; at?: string; by?: string } | null;
+  /** Whether a notify hook was set; its command is never recorded. */
+  notify?: boolean;
+  /** How the run's files were let into a synced folder: "flag", "marker" or null. */
+  synced_folder_allowed_by?: string | null;
+  /** An earlier run's ledger handed in as hypotheses (--ledger-from), or null. */
+  ledger_from?: { run?: string; entries?: number; reviewed?: boolean } | null;
+  /** Started as root, by --allow-root. */
+  allow_root?: boolean;
   /** The kickoff's self-compaction options; absent on runs older than the feature. */
   self_compact?: { enabled?: boolean; notice_at?: string; warn_at?: string; compact_at?: string; prompt?: string | null; set?: { notice_at?: boolean; warn_at?: boolean; compact_at?: boolean } } | null;
 };

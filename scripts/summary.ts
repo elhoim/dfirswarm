@@ -24,6 +24,7 @@ import {
   isSharedScratch,
   leadingCommand,
   readNames,
+  supersededBy,
   type AgentBudget,
   type LedgerEntry,
   type SwarmEvent,
@@ -31,7 +32,8 @@ import {
 } from "../extensions/protocol.ts";
 import { loadRunContext, readJsonFile } from "./run-record.ts";
 import { manifestMeta, verdictAnchorLine, verdictAnchorState } from "./custody.ts";
-import { sourceCheckedLine } from "./report.ts";
+import { gatewayRecordOf, heldRows, readReviewState, reviewLine, sourceCheckedLine, vmSpendNote, type GatewayTotals } from "./report.ts";
+import { coverageLine, coverageOf } from "./coverage.ts";
 import { readRegularText } from "./regular-file.ts";
 
 type Marker = { id: string; marker: "done" | "dead" | "none"; reason: string; at: string };
@@ -144,7 +146,7 @@ function resultOf(event: SwarmEvent): Record<string, unknown> {
 }
 
 export async function summarize(sandboxArg: string, options: { runsDir?: string } = {}): Promise<string> {
-  const { sandbox, run, team, budgetRaw, budget, events, trace_unreadable, sentinel, ledger, inputs } = await loadRunContext(sandboxArg, {
+  const { sandbox, runsDir, run, team, budgetRaw, budget, events, trace_unreadable, sentinel, ledger, inputs } = await loadRunContext(sandboxArg, {
     runsDir: options.runsDir,
     parseSentinel: parseFrontMatter,
   });
@@ -159,6 +161,8 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
 
   const id = run?.id ?? team.swarm_id ?? "";
   const label = run?.label ?? "";
+  // What the trace shows the swarm naming, and the ledger's grounding in it.
+  const coverage = await coverageOf(sandbox, { events, ledger, traceUnreadable: trace_unreadable });
   const startedAt = budget?.started_at ?? events[0]?.ts ?? "";
   const endedAt = sentinel?.at ?? (events.length ? hostTime(events.at(-1)!) : "");
   const durationMs = startedAt && endedAt ? Date.parse(endedAt) - Date.parse(startedAt) : Number.NaN;
@@ -171,7 +175,18 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   if (run?.case_id || run?.examiner) lines.push(`- Case: ${run?.case_id || "—"} · Examiner: ${run?.examiner || "—"}`);
   // How the agents were held, and what the host could say once they were gone.
   const iso = (run as { isolation?: { mode?: string; image?: string; image_digest?: string } } | null)?.isolation;
-  lines.push(`- Isolation: ${iso?.mode === "microvm" ? `one microVM per agent${iso.image ? ` (${iso.image}${iso.image_digest ? ` ${iso.image_digest}` : ""})` : ""}; spend is what each VM reported` : "host, unisolated (every agent a process on this machine)"}`);
+  const gateway = gatewayRecordOf(run as Record<string, unknown> | null);
+  const gatewayTotalsRead = gateway ? await readRegularText(join(sandbox, "traces", "model-gateway.json"), 64 * 1024 * 1024) : null;
+  let gatewayTotals: GatewayTotals | null = null;
+  try {
+    gatewayTotals = gatewayTotalsRead && "text" in gatewayTotalsRead ? (JSON.parse(gatewayTotalsRead.text) as GatewayTotals) : null;
+  } catch {
+    gatewayTotals = null;
+  }
+  lines.push(`- Isolation: ${iso?.mode === "microvm" ? `one microVM per agent${iso.image ? ` (${iso.image}${iso.image_digest ? ` ${iso.image_digest}` : ""})` : ""}; spend ${gateway ? vmSpendNote(run as Record<string, unknown> | null, gatewayTotals).replace(/^ \(|\)$/g, "") : "is what each VM reported"}` : "host, unisolated (every agent a process on this machine)"}`);
+  if (gateway) {
+    lines.push(`- Model gateway: on for ${gateway.providers.join(", ") || "no provider"}; ${gatewayTotals ? `$${(Number(gatewayTotals.spent_usd) || 0).toFixed(2)} metered on the host` : "its totals were not found (traces/model-gateway.json)"}${gateway.declined.length ? `; ${gateway.declined.map((d) => d.provider).join(", ")} as reported by the seats` : ""}`);
+  }
   // A removed VM whose finish could not clear msb's database of it: its
   // secret values may still be there, on the host.
   if (iso?.mode === "microvm") {
@@ -202,6 +217,11 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   if (custodySummary) lines.push(`- Custody: ${custodySummary}${custodyAnchor ? ` (custody.json ${custodyAnchor})` : ""}`);
   else if ("why" in custodyRead && custodyRead.why !== "missing") lines.push(`- Custody: custody.json is ${custodyRead.why}; not read`);
   else lines.push("- Custody: not taken (swarm.sh stop takes it)");
+  // Whether an examiner has reviewed the agents' conclusions, from the
+  // review file beside the registry.
+  const review = await readReviewState(runsDir, id, sandbox, ledger);
+  lines.push(`- Examiner review: ${reviewLine(review, ledger)}`);
+  for (const [k, v] of heldRows(run as Record<string, unknown> | null)) lines.push(`- ${k}: ${v}`);
   const flags: string[] = [];
   if (run?.model) flags.push(`model ${run.model}`);
   if (run?.catalog) flags.push("catalog");
@@ -387,10 +407,15 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
     lines.push("No ledger: nothing was recorded with `record`.", "");
   } else {
     const kinds = count(ledger, (e) => e.kind);
+    const corrected = supersededBy(ledger);
     lines.push(
-      `${ledger.length} entries: ${["event", "ioc", "finding"].map((k) => `${kinds.get(k) ?? 0} ${k === "ioc" ? "indicators" : `${k}s`}`).join(", ")} (\`ledger/ledger.md\`).`,
+      `${ledger.length} entries: ${["event", "ioc", "finding"].map((k) => `${kinds.get(k) ?? 0} ${k === "ioc" ? "indicators" : `${k}s`}`).join(", ")}${kinds.get("absence") ? `, ${kinds.get("absence")} searched and not found (valid only for the scope each states)` : ""} (\`ledger/ledger.md\`).${corrected.size ? ` ${corrected.size} corrected by a later entry, kept as recorded: ${[...corrected].map(([old, by]) => `E-${old} by E-${by}`).join(", ")}.` : ""}`,
       "",
     );
+    const ungrounded = Object.entries(coverage.grounding).filter(([, g]) => g === "not in the trace").map(([seq]) => `E-${seq}`);
+    if (!coverage.unavailable || Object.keys(coverage.grounding).length) {
+      lines.push(`Grounding: ${ungrounded.length ? `${ungrounded.length} entr${ungrounded.length === 1 ? "y's" : "ies'"} source named by no call before the entry was recorded (${ungrounded.join(", ")})` : "every entry that names a path had it named by an earlier call"}.`, "");
+    }
     const timeline: LedgerEntry[] = ledger
       .filter((e) => e.kind === "event")
       .sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? "") || a.seq - b.seq)
@@ -508,6 +533,7 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
     lines.push(`Toolbox (${toolbox.preset ?? "?"}): ${present.length} present${present.length ? ` — ${present.join(", ")}` : ""}; ${missing.length} missing${missing.length ? ` — ${missing.join(", ")}` : ""}.`, "");
   }
   if (catalogSummary) lines.push(`Evidence catalog: ${catalogSummary}.`, "");
+  if (inputs) lines.push(`Coverage: ${coverageLine(coverage)}`, "");
 
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }

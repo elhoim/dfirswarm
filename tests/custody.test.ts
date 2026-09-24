@@ -765,3 +765,58 @@ test("operator actions from another shell are the operator's, not unverified lin
   assert.match(c.summary, /MSB'S DATABASE NOT CLEARED after removing a0 \(busy\): a secret's value may remain in msb's database/);
   assert.doesNotMatch(c.summary, /a1 \(scrubbed\)/);
 });
+
+test("the model gateway's log: its chain is checked, its hash anchored with the verdict, and one in a host run or behind a link is not read", async () => {
+  const root = await sandbox();
+  await anchor(root, { isolation: "microvm" });
+  // No gateway: nothing about one in the verdict.
+  let c = await takeCustody(root);
+  assert.equal(c.model_gateway, null);
+  assert.doesNotMatch(c.summary, /gateway/i);
+  // The log as the gateway writes it: each line's prev the sha256 of the line before, the first null.
+  const lines: string[] = [];
+  let prev: string | null = null;
+  for (const rec of [
+    { at: "2026-09-24T00:00:01Z", seat: "a0", model: "gpt-5.4", status: 200, input: 10, output: 5, usd: 0.001 },
+    { at: "2026-09-24T00:00:02Z", seat: "a1", refused: "seat_cap", status: 429 },
+    { at: "2026-09-24T00:00:03Z", seat: "a0", model: "gpt-5.4", status: 200, input: 12, output: 7, usd: 0.0012 },
+  ]) {
+    const line = JSON.stringify({ ...rec, prev });
+    lines.push(line);
+    prev = sha(line);
+  }
+  const log = join(root, "traces", "model-gateway.jsonl");
+  await writeFile(log, `${lines.join("\n")}\n`);
+  c = await takeCustody(root);
+  assert.deepEqual(c.model_gateway, { lines: 3, intact: true, detail: "3 lines, chain intact", sha256: sha(`${lines.join("\n")}\n`) });
+  assert.match(c.summary, /model gateway log 3 lines, chain intact/);
+  const anchored = JSON.parse(await readFile(custodyAnchorPath(root), "utf8")) as { custody: Array<{ model_gateway?: unknown }> };
+  assert.deepEqual(anchored.custody.at(-1)?.model_gateway, { sha256: sha(`${lines.join("\n")}\n`), lines: 3, intact: true });
+  // A line rewritten after it was chained: the next line no longer names it.
+  await writeFile(log, `${[lines[0], lines[1].replace("seat_cap", "none"), lines[2]].join("\n")}\n`);
+  c = await takeCustody(root);
+  assert.equal(c.model_gateway?.intact, false);
+  assert.match(c.summary, /MODEL GATEWAY LOG CHAIN BROKEN \(chain broken at line 3 \(prev does not name the line before it\)\)/);
+  // A line deleted from the top: the first line names a line before it.
+  await writeFile(log, `${lines.slice(1).join("\n")}\n`);
+  assert.match((await takeCustody(root)).model_gateway?.detail ?? "", /chain broken at line 1 \(the first line names a line before it\)/);
+  // A link in its place is not followed.
+  const outside = await mkdtemp(join(tmpdir(), "gw-outside-"));
+  dirs.push(outside);
+  await writeFile(join(outside, "real.jsonl"), `${lines.join("\n")}\n`);
+  await rm(log);
+  await symlink(join(outside, "real.jsonl"), log);
+  c = await takeCustody(root);
+  assert.equal(c.model_gateway?.refused, "a link");
+  assert.match(c.summary, /MODEL GATEWAY LOG NOT READ: it is a link/);
+  // A host run runs no gateway: a file there is not the harness's.
+  await rm(log);
+  await writeFile(log, `${lines.join("\n")}\n`);
+  await anchor(root, { isolation: "host" });
+  c = await takeCustody(root);
+  assert.equal(c.model_gateway?.refused, "in a host run");
+  assert.equal(c.model_gateway?.intact, false);
+  // Not reached before custody ended: named as such.
+  const partial = verdictOf({ phase: "the ledger", sandbox: root, inputsDone: true, ledgerDone: true, vmsDone: true, artifactsDone: true }, "the deadline passed");
+  assert.ok(partial.not_reached.includes("the model gateway log"));
+});
