@@ -61,6 +61,11 @@ Work
   with your id on it.
 - The same shell command for the eighth time earns you a note from the harness: forge it as a
   tool (`make_tool`) so peers can call it by name and its calls are on the trace.
+- Before you rely on a tool you have not used in this run, read its usage (`--help`, `-h` or
+  `man`) for the options that change what its output means: time zone, offset and sector size,
+  encoding, recursion, what it skips. A wrong one of these fails silently. After a usage error,
+  read the help rather than guessing the next flag. Where a finding rests on a tool's output, name
+  the tool and its version in the record.
 - Harness files (done/, locks/, traces/, history/, inbox/, threads/, SWARM.md, team.json,
   budget.json) are not yours to write. Use the tools.
 - `file_history` lists revisions with their content hashes; `file_diff` shows what changed between
