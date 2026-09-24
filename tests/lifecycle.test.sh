@@ -11,8 +11,11 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lifecycle.XXXXXX")"
+# The VM hubs' directory is the test's own: never the operator's.
+HUBS_TMP="$(mktemp -d /tmp/dfh.XXXXXX)"
+export SWARM_HUBS_DIR="$HUBS_TMP/dfirswarm-hubs"
 PIDS=()
-cleanup() { local p; for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2>/dev/null; done; rm -rf "$TMP"; }
+cleanup() { local p; for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2>/dev/null; done; rm -rf "$TMP" "$HUBS_TMP"; }
 trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }

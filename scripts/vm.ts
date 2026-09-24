@@ -54,7 +54,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, realpathSync } from "node:fs";
 import { isIPv4, isIPv6 } from "node:net";
 import { availableParallelism, totalmem } from "node:os";
-import { chmod, mkdir, readFile, rm, stat, writeFile, readdir } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, stat, utimes, writeFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1060,7 +1060,7 @@ async function createOne(
     created_at: new Date().toISOString(),
   };
   await mkdir(spec.records_dir, { recursive: true });
-  await writeFile(join(spec.records_dir, `${agent.id}.json`), `${JSON.stringify(record, null, 2)}\n`);
+  await writeRecord(join(spec.records_dir, `${agent.id}.json`), record);
   return record;
 }
 
@@ -1106,7 +1106,7 @@ export async function createVms(spec: VmSpec): Promise<{ records: VmRecord[]; fa
     if (lacking.length) warnings.add(`the seeded tools call ${lacking.join(", ")}, which this image does not hold: those tools will fail`);
     // The fit is part of what the VM was: recorded beside the probe.
     (r.value as VmRecord & { image_fit?: unknown }).image_fit = { packs: needs.map((n) => ({ id: n.id, version: n.version })), ...fit };
-    await writeFile(join(spec.records_dir, `${agent}.json`), `${JSON.stringify(r.value, null, 2)}\n`).catch(() => undefined);
+    await writeRecord(join(spec.records_dir, `${agent}.json`), r.value).catch(() => undefined);
   }
   return { records, failures, warnings: [...warnings] };
 }
@@ -1157,13 +1157,6 @@ export async function runVms(runId?: string): Promise<Array<{ name: string; stat
  */
 export type FinishEntry = { agent: string; name: string; snapshot?: string; error?: string; kept?: true };
 
-/**
- * Put a run's VMs away: stop, snapshot, keep the logs, remove, record. One
- * finish at a time per run (the hub's own and an operator's `stop` used to
- * race on the same snapshot file); a VM whose snapshot failed is stopped and
- * kept, never removed, since removing it is the one step that cannot be
- * undone; and every msb step's outcome is in the entry, not swallowed.
- */
 /** Free space below which a VM's disk is not snapshotted (and the VM not removed). */
 const SNAPSHOT_MIN_FREE_BYTES = Number(process.env.SWARM_SNAPSHOT_MIN_FREE_BYTES ?? 4 * 1024 ** 3);
 
@@ -1183,6 +1176,11 @@ async function freeBytes(dir: string): Promise<number | null> {
   }
 }
 
+/** msb's own directory: its database, each sandbox's configuration and logs. */
+function msbHome(): string {
+  return process.env.MSB_HOME || join(process.env.HOME || "", ".microsandbox");
+}
+
 /**
  * msb keeps each VM's configuration in its own SQLite database, a secret's
  * value included while the VM exists (measured on Linux, msb 0.7.2), and a
@@ -1193,22 +1191,51 @@ async function freeBytes(dir: string): Promise<number | null> {
  * file from the live rows only) and a checkpoint again. Nothing live is
  * changed; a database another msb is writing just then is left for the next
  * finish (busy), and a host with no sqlite3 says so.
+ *
+ * "scrubbed" only when the last checkpoint really completed and no free
+ * page is left: sqlite3 reports a checkpoint a reader held back in its
+ * result row (busy = 1), not in its exit code, and the free pages and the
+ * log then still hold the removed rows.
  */
-/** msb's own directory: its database, each sandbox's configuration and logs. */
-function msbHome(): string {
-  return process.env.MSB_HOME || join(process.env.HOME || "", ".microsandbox");
-}
-
 export async function scrubMsbDatabase(): Promise<"scrubbed" | "busy" | "no sqlite3" | "no database"> {
   const db = join(msbHome(), "db", "msb.db");
   if (!existsSync(db)) return "no database";
   if ((await run("sh", ["-c", "command -v sqlite3"], { timeoutMs: 10_000 })).code !== 0) return "no sqlite3";
-  const r = await run("sqlite3", [db, "PRAGMA busy_timeout=3000; PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);"], { timeoutMs: 120_000 });
-  return r.code === 0 ? "scrubbed" : "busy";
+  const r = await run("sqlite3", ["-batch", db, "PRAGMA busy_timeout=3000; PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE); PRAGMA freelist_count;"], { timeoutMs: 120_000 });
+  return r.code === 0 && scrubCompleted(r.stdout) ? "scrubbed" : "busy";
+}
+
+/**
+ * Whether sqlite3's answer to the scrub says it completed: the last
+ * `wal_checkpoint` row (busy|log|checkpointed) not busy and, in WAL mode,
+ * every frame of the log checkpointed; and no free page left.
+ */
+export function scrubCompleted(stdout: string): boolean {
+  const lines = stdout.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+  const free = Number(lines.at(-1));
+  const rows = lines.filter((l) => /^-?\d+\|-?\d+\|-?\d+$/.test(l)).map((l) => l.split("|").map(Number));
+  const last = rows.at(-1);
+  if (!last || !Number.isFinite(free)) return false;
+  const [busy, log, done] = last;
+  return busy === 0 && (log === -1 || log === done) && free === 0;
 }
 
 /** How long a finish waits for another finish of the same run that is still alive. */
 const FINISH_LOCK_WAIT_MS = 45 * 60_000;
+/**
+ * A finish touches its lock every so often while it works (a snapshot can
+ * take a quarter of an hour); a lock not touched for this long belongs to a
+ * finish that is gone, whatever process now has its pid.
+ */
+const FINISH_LOCK_STALE_MS = Number(process.env.SWARM_FINISH_LOCK_STALE_MS ?? 10 * 60_000);
+
+/**
+ * Put a run's VMs away: stop, snapshot, keep the logs, remove, record. One
+ * finish at a time per run (the hub's own and an operator's `stop` used to
+ * race on the same snapshot file); a VM whose snapshot failed is stopped and
+ * kept, never removed, since removing it is the one step that cannot be
+ * undone; and every msb step's outcome is in the entry, not swallowed.
+ */
 
 export async function finishRun(runId: string, sandbox: string, options: { snapshot?: boolean; agent?: string; registry?: string } = {}): Promise<FinishEntry[]> {
   const msb = msbBinary();
@@ -1218,6 +1245,7 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
   await mkdir(records, { recursive: true });
   const lock = join(records, ".finish.lock");
   let held = false;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
   // A finish in progress (the hub putting a seat away, or the swarm) holds
   // the lock for as long as its snapshots take: wait for it while its owner
   // lives, rather than give up after a minute and leave the run half put away.
@@ -1229,6 +1257,14 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
       // next stop must see its owner is gone rather than wait half an hour.
       await writeFile(join(lock, "pid"), `${process.pid}\n`).catch(() => undefined);
       held = true;
+      // Alive and working, said by the lock's own time: a finish still
+      // snapshotting after half an hour was taken for a dead one, and a
+      // second finish then worked the same VMs.
+      heartbeat = setInterval(() => {
+        const now = new Date();
+        void utimes(lock, now, now).catch(() => undefined);
+      }, Math.max(250, Math.min(30_000, FINISH_LOCK_STALE_MS / 4)));
+      heartbeat.unref();
     } catch {
       const owner = Number.parseInt(await readFile(join(lock, "pid"), "utf8").catch(() => ""), 10);
       let ownerAlive = false;
@@ -1240,9 +1276,12 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
           ownerAlive = false;
         }
       }
+      // Broken only when its owner is gone: dead, or silent past the
+      // heartbeat (a pid another process now has). A live owner's lock is
+      // never broken for being old.
       const age = await stat(lock).then((s) => Date.now() - s.mtimeMs).catch(() => 0);
-      if ((Number.isInteger(owner) && owner > 0 && !ownerAlive) || age > 30 * 60_000) await rm(lock, { recursive: true, force: true });
-      else await new Promise((r) => setTimeout(r, 3000));
+      if ((Number.isInteger(owner) && owner > 0 && !ownerAlive) || age > FINISH_LOCK_STALE_MS) await rm(lock, { recursive: true, force: true });
+      else await new Promise((r) => setTimeout(r, Math.min(3000, Math.max(100, FINISH_LOCK_STALE_MS / 4))));
     }
   }
   if (!held) throw new Error(`another finish of run ${runId} is in progress (${lock})`);
@@ -1281,25 +1320,44 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
     // A snapshot that runs out of disk half-way is a lost disk if the VM is
     // then removed: below the floor the VM is kept, stopped, for a stop run
     // again once there is room.
+    // The floor is the larger of the fixed one and what this VM's disk
+    // holds: a --vm-disk bigger than the floor could still run out.
     const room = options.snapshot !== false ? await freeBytes(snapDir) : null;
-    if (options.snapshot !== false && room !== null && room < SNAPSHOT_MIN_FREE_BYTES) {
-      entry.error = `only ${room} bytes free where the disks are kept (${snapDir}); the VM is kept, not snapshotted and not removed. Free space and run stop again.`;
+    const need = Math.max(SNAPSHOT_MIN_FREE_BYTES, await allocatedBytes(join(msbHome(), "sandboxes", vm.name, "upper.ext4")));
+    const file = join(snapDir, `${agent}.msb`);
+    // A disk an earlier finish kept (its VM then failed to go) is kept
+    // until a new one has replaced it: a failed second attempt must not
+    // leave the run with no disk at all.
+    const earlier = record?.snapshot && "path" in record.snapshot && existsSync(file) ? record.snapshot : null;
+    if (options.snapshot !== false && room !== null && room < need) {
+      entry.error = `only ${room} bytes free where the disks are kept (${snapDir}), and this VM's disk needs ${need}; the VM is kept, not snapshotted and not removed. Free space and run stop again.`;
       entry.kept = true;
-      if (record) record.snapshot = { error: entry.error };
+      if (record) {
+        if (earlier) (record as VmRecord & { snapshot_retry_error?: string }).snapshot_retry_error = entry.error;
+        else record.snapshot = { error: entry.error };
+      }
     } else if (options.snapshot !== false) {
       await mkdir(snapDir, { recursive: true });
-      const file = join(snapDir, `${agent}.msb`);
-      await rm(file, { force: true });
-      const r = await run(msb, ["snapshot", "create", "--from-sandbox", vm.name, "--integrity", "--label", `run=${runId}`, "--label", `agent=${agent}`, "-o", file, "--quiet"], { timeoutMs: 15 * 60_000 });
-      if (r.code === 0 && existsSync(file)) {
+      const fresh = `${file}.new`;
+      await rm(fresh, { force: true });
+      const r = await run(msb, ["snapshot", "create", "--from-sandbox", vm.name, "--integrity", "--label", `run=${runId}`, "--label", `agent=${agent}`, "-o", fresh, "--quiet"], { timeoutMs: 15 * 60_000 });
+      if (r.code === 0 && existsSync(fresh)) {
+        await rename(fresh, file);
         const bytes = (await stat(file)).size;
         const sha = await sha256File(file);
         entry.snapshot = file;
-        if (record) record.snapshot = { path: file, sha256: sha, bytes, integrity: true };
+        if (record) {
+          record.snapshot = { path: file, sha256: sha, bytes, integrity: true };
+          delete (record as VmRecord & { snapshot_retry_error?: string }).snapshot_retry_error;
+        }
       } else {
+        await rm(fresh, { force: true });
         entry.error = (r.stderr || r.stdout).trim() || `snapshot exit ${r.code}`;
         entry.kept = true;
-        if (record) record.snapshot = { error: entry.error };
+        if (record) {
+          if (earlier) (record as VmRecord & { snapshot_retry_error?: string }).snapshot_retry_error = entry.error;
+          else record.snapshot = { error: entry.error };
+        }
       }
     }
     // The VM's own logs (the runtime's, the guest kernel's, its execs) go
@@ -1334,19 +1392,55 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
       }
       record.stopped_at = new Date().toISOString();
       if (entry.kept) (record as VmRecord & { kept?: string }).kept = entry.error;
-      await writeFile(recordFile, `${JSON.stringify(record, null, 2)}\n`).catch(() => undefined);
+      await writeRecord(recordFile, record).catch(() => undefined);
     }
     out.push(entry);
   }
   } finally {
+    if (heartbeat) clearInterval(heartbeat);
     await rm(lock, { recursive: true, force: true });
   }
-  // What the removed VMs' configuration left in msb's database goes too.
+  // What the removed VMs' configuration left in msb's database goes too,
+  // and the outcome goes on each removed VM's record: most runs are put
+  // away by the hub, and the record is what custody, the report and a
+  // later stop read.
   if (out.some((e) => !e.kept)) {
     const scrub = await scrubMsbDatabase().catch(() => "busy" as const);
-    for (const e of out) if (!e.kept) (e as FinishEntry & { msb_db?: string }).msb_db = scrub;
+    for (const e of out) {
+      if (e.kept) continue;
+      (e as FinishEntry & { msb_db?: string }).msb_db = scrub;
+      const recordFile = join(records, `${e.agent}.json`);
+      try {
+        const record = JSON.parse(await readFile(recordFile, "utf8")) as VmRecord & { msb_db?: string };
+        record.msb_db = scrub;
+        await writeRecord(recordFile, record);
+      } catch {
+        // no record to carry it: the entry still does
+      }
+    }
   }
   return out;
+}
+
+/**
+ * A VM's record, written whole: to a temporary file beside it, then renamed
+ * over it. Written in place, a finish killed half-way (a stop's deadline, a
+ * ^C) left a torn record, and custody then read the VM as having none.
+ */
+async function writeRecord(file: string, record: unknown): Promise<void> {
+  const tmp = `${file}.${process.pid}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(record, null, 2)}\n`);
+  await rename(tmp, file);
+}
+
+/** Bytes a (sparse) file really holds on disk; 0 when it cannot be read. */
+async function allocatedBytes(file: string): Promise<number> {
+  try {
+    const st = await stat(file);
+    return Number(st.blocks) * 512;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -1739,7 +1833,9 @@ export async function writeCatalogRecord(sandbox: string, image: string, digest:
     }
   };
   await walk(root);
-  files.sort((a, b) => a.path.localeCompare(b.path));
+  // By code unit, not by locale: the index is hashed, and four locales
+  // gave four orders (and four digests) for the same files.
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   await writeFile(join(sandbox, "catalog.json"), `${JSON.stringify({ at: new Date().toISOString(), image, manifest_digest: digest, files }, null, 2)}\n`);
 }
 

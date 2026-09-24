@@ -9,8 +9,12 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/hub-dir.XXXXXX")"
+# The hubs' directory is the test's own, and short (a hub socket path must
+# fit in 104 bytes): never the operator's ~/.dfirswarm/hubs.
+HUBS_TMP="$(mktemp -d /tmp/dfh.XXXXXX)"
+export SWARM_HUBS_DIR="$HUBS_TMP/dfirswarm-hubs"
 PIDS=()
-cleanup() { local p; for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2>/dev/null; done; rm -rf "$TMP"; }
+cleanup() { local p; for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2>/dev/null; done; rm -rf "$TMP" "$HUBS_TMP"; }
 trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
@@ -19,6 +23,7 @@ mkdir -p "$TMPDIR"
 
 fn() { sed -n "/^$2() {/,/^}/p" "$ROOT/scripts/$1"; }
 eval "$(fn swarm.sh hubs_parent)"
+eval "$(fn swarm.sh hubs_parent_path)"
 eval "$(fn swarm.sh vm_hub_dir)"
 eval "$(fn swarm.sh hub_dir_of)"
 eval "$(fn swarm.sh hub_pid_ours)"

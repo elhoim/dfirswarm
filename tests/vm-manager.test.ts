@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -35,6 +35,7 @@ import {
   vmName,
   type ResolvedSecret,
   type VmSpec,
+  scrubCompleted,
   scrubMsbDatabase,
 } from "../scripts/vm.ts";
 
@@ -441,3 +442,73 @@ test("a finish leaves no byte of a removed VM's secret in msb's database", async
     else process.env.MSB_HOME = before;
   }
 });
+
+test("a scrub a reader held back is busy, not scrubbed: the removed row's bytes are still there", async (t) => {
+  try {
+    execFileSync("sh", ["-c", "command -v sqlite3 && command -v python3"], { stdio: "ignore" });
+  } catch {
+    t.skip("no sqlite3 or python3 on this host");
+    return;
+  }
+  // sqlite3's own answer rows: busy|log|checkpointed, then the free pages.
+  assert.equal(scrubCompleted("3000\n0|0|0\n0|0|0\n0\n"), true);
+  assert.equal(scrubCompleted("3000\n0|-1|-1\n0|-1|-1\n0\n"), true, "a database not in WAL mode has no log to checkpoint");
+  assert.equal(scrubCompleted("3000\n0|4|4\n1|12|3\n0\n"), false, "a checkpoint a reader held back");
+  assert.equal(scrubCompleted("3000\n0|4|4\n0|12|3\n0\n"), false, "a log not wholly checkpointed");
+  assert.equal(scrubCompleted("3000\n0|0|0\n0|0|0\n2\n"), false, "free pages left");
+  assert.equal(scrubCompleted(""), false);
+  const home = await mkdtemp(join(tmpdir(), "msb-home-"));
+  after(() => rm(home, { recursive: true, force: true }));
+  const db = join(home, "db", "msb.db");
+  execFileSync("mkdir", ["-p", join(home, "db")]);
+  const value = `sk-test-${Date.now().toString(36)}-held`;
+  // A live msb's pool can hold a read transaction: here a second connection
+  // that keeps one open until told to let go.
+  const reader = spawn(
+    "python3",
+    [
+      "-c",
+      `import sqlite3, sys
+c = sqlite3.connect(sys.argv[1], isolation_level=None)
+c.execute("PRAGMA secure_delete=OFF"); c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA wal_autocheckpoint=0")
+c.execute("CREATE TABLE sandbox(name TEXT, config TEXT)")
+c.execute("INSERT INTO sandbox VALUES ('live', '{}')")
+c.execute("INSERT INTO sandbox VALUES ('gone', ?)", (sys.argv[2],))
+c.execute("DELETE FROM sandbox WHERE name='gone'")
+r = sqlite3.connect(sys.argv[1], isolation_level=None)
+r.execute("BEGIN"); r.execute("SELECT count(*) FROM sandbox").fetchall()
+print("ready", flush=True)
+sys.stdin.read()
+r.execute("COMMIT")`,
+      db,
+      value,
+    ],
+    { stdio: ["pipe", "pipe", "inherit"] },
+  );
+  await new Promise<void>((resolve, reject) => {
+    reader.stdout.on("data", (d: Buffer) => d.toString().includes("ready") && resolve());
+    reader.on("exit", (code) => reject(new Error(`the reader exited ${code} before it held a snapshot`)));
+  });
+  const before = process.env.MSB_HOME;
+  process.env.MSB_HOME = home;
+  try {
+    assert.equal(await scrubMsbDatabase(), "busy", "a scrub a reader held back said scrubbed");
+    reader.stdin.end();
+    await new Promise((r) => reader.on("exit", r));
+    assert.equal(await scrubMsbDatabase(), "scrubbed", "once the reader let go the scrub completes");
+  } finally {
+    reader.kill();
+    if (before === undefined) delete process.env.MSB_HOME;
+    else process.env.MSB_HOME = before;
+  }
+  for (const f of ["msb.db", "msb.db-wal"]) {
+    let bytes = Buffer.alloc(0);
+    try {
+      bytes = readFileSync(join(home, "db", f));
+    } catch {
+      // a truncated log may be gone
+    }
+    assert.ok(!bytes.includes(value), `${f} still holds the removed row after the scrub completed`);
+  }
+});
+

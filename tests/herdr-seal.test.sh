@@ -30,12 +30,16 @@ fail() { echo "not ok - $1" >&2; exit 1; }
 # uncanonical path is the point.
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/herdr-seal.XXXXXX")"
 REAL="$(cd "$TMP" && pwd -P)"
+# The VM hubs' directory is the test's own (the pane plans below name it),
+# never the operator's ~/.dfirswarm/hubs.
+HUBS_TMP="$(mktemp -d /tmp/dfh.XXXXXX)"
+export SWARM_HUBS_DIR="$HUBS_TMP/dfirswarm-hubs"
 BROKER_PID=""
 LISTENER=""
 cleanup() {
   [[ -n "$BROKER_PID" ]] && kill "$BROKER_PID" 2>/dev/null || true
   [[ -n "$LISTENER" ]] && kill "$LISTENER" 2>/dev/null || true
-  rm -rf "$TMP" "$REAL"
+  rm -rf "$TMP" "$REAL" "$HUBS_TMP"
 }
 trap cleanup EXIT
 

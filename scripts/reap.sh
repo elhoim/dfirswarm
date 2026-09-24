@@ -107,12 +107,15 @@ table_unlock() { rm -rf "$TABLE_LOCK"; }
 # The hub directory a sandbox names, if it is one the harness made: under
 # the hubs' parent, which no pane can write. hub.dir itself is only
 # tool-protected, and a pane that wrote it a path to its own status.json
-# would never be reaped.
+# would never be reaped. The parent is swarm.sh's hubs_parent: one per user,
+# whatever this process's TMPDIR, and only a directory of this user's own.
 hub_dir_of() { # <sandbox>
   local dir parent
   [[ -f "$1/hub.dir" ]] || return 1
   dir="$(cat "$1/hub.dir" 2>/dev/null || true)"
-  parent="$(cd "${TMPDIR:-/tmp}/dfirswarm-hubs" 2>/dev/null && pwd -P)" || return 1
+  parent="${SWARM_HUBS_DIR:-${DFIRSWARM_HOME:-$HOME/.dfirswarm}/hubs}"
+  [[ -d "$parent" && ! -L "$parent" && -O "$parent" ]] || return 1
+  parent="$(cd "$parent" 2>/dev/null && pwd -P)" || return 1
   [[ -n "$dir" && "$dir" == "$parent"/dfs-* && "$dir" != *..* && -d "$dir" ]] || return 1
   # Made for this sandbox (the kickoff wrote which), not another run's.
   [[ "$(cat "$dir/sandbox" 2>/dev/null)" == "$(cd "$1" 2>/dev/null && pwd -P)" ]] || return 1

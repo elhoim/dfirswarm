@@ -17,7 +17,11 @@ set -uo pipefail
 unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/microvm-flags.XXXXXX")"
-trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
+# The VM hubs' directory is the suite's own, and short: a hub's socket path
+# must stay under the 104 bytes macOS allows.
+HUBS_TMP="$(mktemp -d /tmp/dfh.XXXXXX)"
+export SWARM_HUBS_DIR="$HUBS_TMP/hubs" MSB_HOME="$HUBS_TMP/msb-home"
+trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP" "$HUBS_TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 swarm() { SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" "$@" 2>&1; }
@@ -182,6 +186,8 @@ grep -q 'up to five seconds' "$sbx/SWARM.md" || fail "SWARM.md does not warn abo
 grep -q 'written for you' "$sbx/SWARM.md" || fail "SWARM.md does not say the board is written by the harness"
 grep -q 'no copy, and the host holds the source read-only' "$sbx/SWARM.md" || fail "SWARM.md does not say how the evidence arrived"
 ! grep -q 'advisory here (a proxy' "$sbx/SWARM.md" || fail "SWARM.md describes the host's proxy to agents that have none"
+grep -q "carries that seat's authority, no more" "$sbx/SWARM.md" || fail "SWARM.md does not say a 'system via' post is a seat's own"
+grep -q 'An event.*time you record needs its zone\|time you record needs its zone' "$sbx/SWARM.md" || fail "SWARM.md does not ask for a zone on event times"
 pass "the contract says the agent is in its own VM, the board is written for it, a peer's file can lag, and how the evidence arrived"
 
 # --- the image follows the packs, and an operator's image wins ------------------
@@ -424,3 +430,79 @@ printf '{"images":{"base":{"%s":"ghcr.io/x/dfirswarm-base:latest"}}}\n' "$ARCH" 
 out="$(SWARM_IMAGES_LOCK="$TMP/tag-lock.json" start --isolation microvm --label vm-tag-lock)"; rc=$?
 [[ $rc -ne 0 ]] && printf '%s\n' "$out" | grep -q 'other than its digest' || fail "a lock pinned by tag went through: $out"
 pass "a prepared forging VM run writes its tools, installs go to the VM's disk, --env credentials are refused whatever their case or form, suffixes are warned about, a secret on a suffix and a tag lock are refused"
+
+# --- a synced folder is found before anything is written -------------------------
+SYNCED="$TMP/home/Library/CloudStorage/Dropbox-Test"
+mkdir -p "$SYNCED"
+host_start() { SWARM_RUNS_DIR="$1" bash "$ROOT/scripts/swarm.sh" start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --toolbox off "${@:2}" 2>&1; }
+out="$(host_start "$SYNCED/runs" --inputs "$TMP/ev" --label synced-copy)"; rc=$?
+[[ $rc -eq 2 ]] || fail "a copy of the evidence into a synced folder exited $rc, wanted 2: $out"
+printf '%s\n' "$out" | grep -q 'the copy of the evidence (inputs/ and .inputs-pristine/)' || fail "the refusal does not name the evidence copy: $out"
+[[ -z "$(find "$SYNCED/runs" -name inputs -o -name .inputs-pristine 2>/dev/null)" ]] || fail "the evidence was copied into the synced folder before the refusal"
+out="$(host_start "$SYNCED/runs" --inputs "$TMP/ev" --label synced-allowed --allow-synced-folder)"; rc=$?
+[[ $rc -eq 0 ]] || fail "--allow-synced-folder did not let the run go: $out"
+printf '%s\n' "$out" | grep -q 'as --allow-synced-folder asks' || fail "an allowed synced copy was not said: $out"
+out="$(start --isolation microvm --inputs "$TMP/ev" --vm-snapshot-dir "$SYNCED/disks" --label synced-disks)"; rc=$?
+[[ $rc -eq 2 ]] || fail "VM disks kept in a synced folder exited $rc, wanted 2: $out"
+printf '%s\n' "$out" | grep -q "each VM's kept disk ($SYNCED/disks" || fail "the refusal does not name the disks' folder: $out"
+pass "a copy of the evidence or the VMs' disks bound for a synced folder is refused before anything is written, unless --allow-synced-folder"
+
+# --- where the disks are kept, and what is read-only on disk ----------------------
+out="$(start --isolation microvm --inputs "$TMP/ev" --vm-snapshot-dir "$TMP/disks" --label vm-disks-dir)"; rc=$?
+[[ $rc -eq 0 ]] || fail "--vm-snapshot-dir was refused: $out"
+sbx="$(sandbox_of "$out")"
+[[ -L "$sbx.vm-snapshots" && "$(readlink "$sbx.vm-snapshots")" == "$(cd "$TMP/disks" && pwd -P)" ]] || fail "the disks' link beside the run does not name --vm-snapshot-dir: $(ls -l "$sbx.vm-snapshots" 2>&1)"
+[[ "$(stat -f %Lp "$TMP/disks" 2>/dev/null || stat -c %a "$TMP/disks")" == "700" ]] || fail "the disks' directory is not the user's alone"
+# A run whose disks' place already holds an earlier run's disks is refused.
+rm -f "$sbx.vm-snapshots"
+mkdir -p "$sbx.vm-snapshots"
+printf 'disk' > "$sbx.vm-snapshots/old.msb"
+out="$(start --isolation microvm --inputs "$TMP/ev" --vm-snapshot-dir "$TMP/disks" --sandbox "$sbx" --label vm-disks-taken)"; rc=$?
+[[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q "already holds an earlier run's disks" || fail "a disks' place holding an earlier run's disks was not refused ($rc): $out"
+[[ -f "$sbx.vm-snapshots/old.msb" ]] || fail "the earlier run's disk was touched"
+rm -rf "$sbx.vm-snapshots"
+# The manifest and the custody anchor are read-only on disk.
+out="$(start --isolation microvm --inputs "$TMP/ev" --label vm-ro-record)"; rc=$?
+sbx="$(sandbox_of "$out")"
+[[ -f "$sbx/inputs.json" && ! -w "$sbx/inputs.json" ]] || fail "inputs.json is writable on disk"
+anchor="$(dirname "$sbx")/$(basename "$sbx").custody-anchor.json"
+[[ -f "$anchor" && ! -w "$anchor" ]] || fail "the custody anchor is writable on disk"
+[[ "$(jq -r '.isolation' "$anchor")" == "microvm" ]] || fail "the custody anchor does not say how the agents were held: $(cat "$anchor")"
+[[ "$(reg vm-ro-record '.inputs_manifest_sha256')" == "$(shasum -a 256 "$sbx/inputs.json" | cut -d' ' -f1)" ]] || fail "the registry does not hold the manifest's sha256"
+pass "--vm-snapshot-dir is linked beside the run (0700) and an occupied place refused; the manifest and the anchor are read-only and the anchor says microvm"
+
+# --- the run records what produced it and the host's clock ------------------------
+[[ "$(reg vm-ro-record '.provenance.harness_commit')" =~ ^[0-9a-f]{40}$|^not\ a\ git ]] || fail "no harness commit in the record: $(reg vm-ro-record '.provenance')"
+[[ "$(reg vm-ro-record '.provenance.node_version')" == "$(node --version)" ]] || fail "the record's Node version is not this Node"
+[[ "$(reg vm-ro-record '.provenance.harness_dirty | type')" == "boolean" ]] || fail "the record does not say whether the checkout had local changes"
+[[ -n "$(reg vm-ro-record '.host_clock.utc_offset')" && "$(reg vm-ro-record '.host_clock.run_processes_tz')" == "UTC" ]] || fail "the record does not hold the host's clock: $(reg vm-ro-record '.host_clock')"
+[[ "$(reg vm-ro-record '.host_clock.synced | type')" =~ ^(boolean|null)$ ]] || fail "host_clock.synced is neither known nor null"
+jq -e '.env.TZ == "UTC"' "$sbx/vm-spec.json" >/dev/null || fail "the agents' environment is not in UTC: $(jq -c '.env' "$sbx/vm-spec.json")"
+# A proxy the operator's shell uses is the host's, in any case of its name.
+out="$(start --isolation microvm --inputs "$TMP/ev" --env https_proxy=http://proxy.example:3128 --env No_Proxy=corp.example --env HTTP_PROXY=http://p:1 --label vm-proxy-env)"; rc=$?
+sbp="$(sandbox_of "$out")"
+[[ $rc -eq 0 ]] || fail "a kickoff with proxy settings in --env failed: $out"
+jq -e '.env | keys | map(ascii_upcase) | (index("HTTPS_PROXY") == null and index("NO_PROXY") == null and index("HTTP_PROXY") == null)' "$sbp/vm-spec.json" >/dev/null || fail "a proxy setting crossed into the VMs: $(jq -c '.env' "$sbp/vm-spec.json")"
+out="$(start --isolation microvm --inputs "$TMP/ev" --custody-timeout 900 --label vm-custody-time)"; rc=$?
+[[ $rc -eq 0 && "$(reg vm-custody-time '.custody_timeout_sec')" == "900" ]] || fail "--custody-timeout is not recorded for the run: $out"
+out="$(start --isolation microvm --inputs "$TMP/ev" --custody-timeout soon --label vm-custody-bad)"; rc=$?
+[[ $rc -eq 2 ]] || fail "a --custody-timeout that is not a number was taken ($rc): $out"
+grep -q 'SWARM_CUSTODY_TIMEOUT="${custody_timeout' "$ROOT/scripts/swarm.sh" || fail "the hub is not given the run's custody deadline"
+pass "the record holds the harness commit, Node, whether the checkout had changes, and the host's clock; the agents run in UTC; the custody deadline is the run's own"
+
+# --- the operator is on the record -----------------------------------------------
+audit="$TMP/runs/operator-audit.jsonl"
+[[ -s "$audit" ]] || fail "no operator audit record in the runs directory"
+last="$(tail -1 "$audit")"
+[[ "$(jq -r '.command' <<<"$last")" == "start" && "$(jq -r '.os_user' <<<"$last")" == "$(id -un)" ]] || fail "the audit line does not name the command and the OS user: $last"
+python3 - "$audit" <<'PY' || fail "the operator audit record's chain is broken"
+import hashlib, sys
+lines = [l for l in open(sys.argv[1], encoding="utf-8").read().split("\n") if l]
+import json
+for a, b in zip(lines, lines[1:]):
+    if json.loads(b).get("prev") != hashlib.sha256(a.encode()).hexdigest():
+        sys.exit(1)
+PY
+out="$(swarm start --model solo/model --provider-host solo=api.solo.example --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --toolbox off --env SOME_SETTING=hush-hush --label audit-redact)"
+! grep -q 'hush-hush' "$audit" || fail "an --env value reached the operator audit record"
+pass "every start is on the operator's own record, chained, with the OS user and an --env value left out"

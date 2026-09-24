@@ -13,6 +13,9 @@ unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNS="$(mktemp -d "${TMPDIR:-/tmp}/await-done.XXXXXX")"
+# The VM hubs' directory is the suite's own (a kickoff makes it for its pane
+# guard), never the operator's ~/.dfirswarm/hubs.
+export SWARM_HUBS_DIR="$RUNS/dfirswarm-hubs"
 trap 'rm -rf "$RUNS"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -192,6 +195,7 @@ printf '{"cap_usd":1,"spent_usd":0,"wall_clock_minutes":15,"started_at":"%s","ag
 HUBS_TMP="$(mktemp -d /tmp/adt.XXXXXX)"
 HUBS="$(cd "$HUBS_TMP" && pwd -P)/dfirswarm-hubs"
 mkdir -p "$HUBS/dfs-svmnudge.1"
+chmod 700 "$HUBS"
 (cd "$SB" && pwd -P) > "$HUBS/dfs-svmnudge.1/sandbox"
 printf '%s\n' "$HUBS/dfs-svmnudge.1" > "$SB/hub.dir"
 node -e '
@@ -203,13 +207,15 @@ trap 'kill "$HUB_FAKE" 2>/dev/null || true; rm -rf "$RUNS" "$HUBS_TMP"' EXIT
 for _ in $(seq 50); do [[ -S "$HUBS/dfs-svmnudge.1/admin.sock" ]] && break; sleep 0.05; done
 printf '#!/usr/bin/env bash\necho "$@" >> "%s"\n' "$HUBS_TMP/herdr-used.txt" > "$HUBS_TMP/herdr"
 chmod +x "$HUBS_TMP/herdr"
-TMPDIR="$HUBS_TMP" HERDR_BIN="$HUBS_TMP/herdr" SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/await-done.sh" --sandbox "$SB" --nudge --timeout 1 --interval 1 >/dev/null 2>&1 || true
+# From a shell whose TMPDIR is anything at all: the hubs' directory is the
+# user's own, not the shell's temp directory.
+TMPDIR="$HUBS_TMP/elsewhere" SWARM_HUBS_DIR="$HUBS" HERDR_BIN="$HUBS_TMP/herdr" SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/await-done.sh" --sandbox "$SB" --nudge --timeout 1 --interval 1 >/dev/null 2>&1 || true
 grep -q '"op":"prompt".*"agent":"svmnudge00".*"kind":"swarm_done"' "$HUBS_TMP/hub-ops.txt" 2>/dev/null || fail "the VM agent was not nudged through its hub: $(cat "$HUBS_TMP/hub-ops.txt" 2>/dev/null)"
 [[ ! -s "$HUBS_TMP/herdr-used.txt" ]] || fail "Herdr was asked about a VM agent: $(cat "$HUBS_TMP/herdr-used.txt")"
 # hub.dir naming a hub made for another sandbox is not that run's hub.
 echo /somewhere/else > "$HUBS/dfs-svmnudge.1/sandbox"
 : > "$HUBS_TMP/hub-ops.txt"
-TMPDIR="$HUBS_TMP" HERDR_BIN="$HUBS_TMP/herdr" SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/await-done.sh" --sandbox "$SB" --nudge --timeout 1 --interval 1 >/dev/null 2>&1 || true
+SWARM_HUBS_DIR="$HUBS" HERDR_BIN="$HUBS_TMP/herdr" SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/await-done.sh" --sandbox "$SB" --nudge --timeout 1 --interval 1 >/dev/null 2>&1 || true
 [[ ! -s "$HUBS_TMP/hub-ops.txt" ]] || fail "another sandbox's hub was used"
 kill "$HUB_FAKE" 2>/dev/null || true
 wait "$HUB_FAKE" 2>/dev/null || true

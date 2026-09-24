@@ -296,6 +296,15 @@ sb="$(sandbox_of "$out")"
 [[ "$(reg idle '.idle_nudge_sec')" == "120" ]] || fail "registry should record idle_nudge_sec=120"
 printf '%s\n' "$out" | grep -q '^Idle nudge:' || fail "no Idle nudge line in the kickoff output: $out"
 [[ ! -e "$sb/idle-nudge.pid" ]] || fail "--no-start must not start the watchdog"
+# Nor leave any daemon of the run alive: the collector, the gate, the broker
+# and the proxy a --no-start kickoff may have started for its checks.
+for f in collector.pid gate.pid nudge.pid netguard.pid idle-nudge.pid inhibit.pid hub.pid; do
+  p="$(cat "$sb/$f" 2>/dev/null || true)"
+  [[ -z "$p" ]] || ! kill -0 "$p" 2>/dev/null || fail "--no-start left $f's process ($p) running"
+done
+if pgrep -f -- "$sb" >/dev/null 2>&1; then
+  fail "--no-start left a process naming the sandbox: $(pgrep -fl -- "$sb")"
+fi
 out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$HELLO" --idle-nudge-sec soon)"; rc=$?
 [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep -q 'BLOCKER: --idle-nudge-sec' || fail "a non-numeric --idle-nudge-sec should be refused: $out"
 pass "--idle-nudge-sec is validated, recorded and announced; --no-start starts no watchdog"

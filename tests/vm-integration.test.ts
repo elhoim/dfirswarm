@@ -32,7 +32,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -336,16 +336,21 @@ test("a secret never enters the guest: the VM holds its placeholder", async (t) 
   // searched from inside above: reading an 8 GiB disk image from here took
   // the test past three minutes.
   const msbHome = process.env.MSB_HOME || join(process.env.HOME || "", ".microsandbox");
-  let atRest = "";
-  try {
-    atRest = execFileSync(
-      "grep",
-      ["-rlsF", "--exclude=upper.ext4", "--exclude-dir=rootfs", "--exclude-dir=checkpoint-store", "--exclude-dir=checkpoints", value, join(msbHome, "sandboxes", name), r.sandbox, r.hubDir],
-      { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } },
-    ).trim();
-  } catch {
-    atRest = ""; // grep exits 1 when nothing matches
-  }
+  // A search that could not read what it was given is not "not found":
+  // grep's 1 is no match, anything else a failure of the check itself.
+  const found = (args: string[], where: string[]): string => {
+    for (const w of where) assert.ok(existsSync(w), `the check's own input is missing: ${w}`);
+    try {
+      // Sockets and FIFOs (the hub's directory holds them) are not files to
+      // read: skipped, not an error.
+      return execFileSync("grep", ["-D", "skip", ...args, ...where], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).trim();
+    } catch (err) {
+      const e = err as { status?: number; stdout?: string };
+      if (e.status === 1) return "";
+      throw new Error(`grep failed (exit ${e.status}): ${String(e.stdout ?? "")}`);
+    }
+  };
+  const atRest = found(["-rlF", "--exclude=upper.ext4", "--exclude-dir=rootfs", "--exclude-dir=checkpoint-store", "--exclude-dir=checkpoints", value], [join(msbHome, "sandboxes", name), r.sandbox, r.hubDir]);
   assert.equal(atRest, "", `the value is on the host's disk in: ${atRest}`);
   // Nor after finish: the kept disk (loaded back as msb loads it) and the
   // logs kept beside it.
@@ -360,13 +365,12 @@ test("a secret never enters the guest: the VM holds its placeholder", async (t) 
   } catch (err) {
     loaded = String((err as { stdout?: string }).stdout ?? "");
   }
-  let inKept = "";
-  try {
-    inKept = execFileSync("grep", ["-rlsaF", "--exclude=*.ext4", "--exclude=*.raw", "--exclude=*.qcow2", value, dest, join(`${r.sandbox}.vm-snapshots`, "vmt300.logs")], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).trim();
-  } catch {
-    inKept = "";
-  }
   const digest = loaded.match(/sha256:[0-9a-f]{64}/)?.[0];
+  // The disk really came back: an empty directory would pass any search.
+  assert.ok(digest, `msb did not load the kept disk: ${loaded}`);
+  assert.ok(readdirSync(dest).length > 0, "the loaded disk is empty");
+  const keptLogs = join(`${r.sandbox}.vm-snapshots`, "vmt300.logs");
+  const inKept = found(["-rlaF", "--exclude=*.ext4", "--exclude=*.raw", "--exclude=*.qcow2", value], [dest, ...(existsSync(keptLogs) ? [keptLogs] : [])]);
   if (digest) {
     try {
       msb("snapshot", "remove", "--force", "--quiet", digest);
@@ -378,16 +382,22 @@ test("a secret never enters the guest: the VM holds its placeholder", async (t) 
   // And once the VM is removed, not in msb's database either: finish drops
   // the free pages the removed VM's rows left (scrubMsbDatabase).
   const scrub = done.find((e) => e.agent === "vmt300") as { msb_db?: string } | undefined;
+  const record300 = JSON.parse(readFileSync(join(r.sandbox, "vm", "vmt300.json"), "utf8")) as { msb_db?: string };
+  assert.equal(record300.msb_db, scrub?.msb_db, "the VM's record does not carry the scrub's outcome");
+  let haveSqlite = true;
+  try {
+    execFileSync("sh", ["-c", "command -v sqlite3"], { stdio: "ignore" });
+  } catch {
+    haveSqlite = false;
+  }
+  // In CI nothing else holds msb's database: the scrub must have completed.
+  if (process.env.CI) assert.equal(scrub?.msb_db, "scrubbed", "CI's host needs sqlite3, and nothing else holds msb's database there");
   if (scrub?.msb_db === "scrubbed") {
-    let inDb = "";
-    try {
-      inDb = execFileSync("grep", ["-rlsaF", value, join(msbHome, "db")], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).trim();
-    } catch {
-      inDb = "";
-    }
+    const inDb = found(["-rlaF", value], [join(msbHome, "db")]);
     assert.equal(inDb, "", `the value outlived its VM in msb's database: ${inDb}`);
   } else {
-    t.diagnostic(`msb's database was not scrubbed (${scrub?.msb_db ?? "no answer"}): not checked`);
+    assert.ok(!haveSqlite || scrub?.msb_db === "busy", `a host with sqlite3 did not scrub msb's database: ${scrub?.msb_db}`);
+    t.diagnostic(`msb's database was not scrubbed (${scrub?.msb_db ?? "no answer"}): the value in it was not searched for`);
   }
 });
 

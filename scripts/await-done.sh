@@ -132,7 +132,14 @@ nudge_unfinished() {
   local hd parent
   if [[ -f "$sandbox/hub.dir" ]]; then
     hd="$(cat "$sandbox/hub.dir" 2>/dev/null || true)"
-    parent="$(cd "${TMPDIR:-/tmp}/dfirswarm-hubs" 2>/dev/null && pwd -P || true)"
+    # The hubs' parent as swarm.sh keeps it (hubs_parent): one per user,
+    # whatever this shell's TMPDIR, and only a directory of the user's own.
+    parent="${SWARM_HUBS_DIR:-${DFIRSWARM_HOME:-$HOME/.dfirswarm}/hubs}"
+    if [[ -d "$parent" && ! -L "$parent" && -O "$parent" ]]; then
+      parent="$(cd "$parent" 2>/dev/null && pwd -P || true)"
+    else
+      parent=""
+    fi
     [[ -n "$parent" && "$hd" == "$parent"/dfs-* && "$hd" != *..* && -S "$hd/admin.sock" \
       && "$(cat "$hd/sandbox" 2>/dev/null)" == "$(cd "$sandbox" 2>/dev/null && pwd -P)" ]] && hub="$hd/admin.sock"
   fi

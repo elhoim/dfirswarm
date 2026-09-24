@@ -10,6 +10,12 @@
 # them in its own directory) until the run's stop says it is over (a `.stop`
 # file in the hub directory) or the run is gone.
 #
+# The trace collector too: in a VM run it is the trace's only door (the hub
+# sends every seat's line through it), and one that died left the rest of
+# the run in spill files outside the chain. It is brought back with the same
+# tokens (the hub keeps them) and the same anchor, and resumes the chain from
+# the file's last line.
+#
 #   hub-supervise.sh <sandbox> <hub dir> <hub script> <first hub pid>
 set -u
 
@@ -20,29 +26,93 @@ PID="$4"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # A hub that dies this often in a row is not going to stay up: say so and stop trying.
 MAX_RESTARTS="${SWARM_HUB_MAX_RESTARTS:-20}"
+# In a row: a hub that stayed up this long before it died starts the count
+# again, or a run of days with a crash now and then lost its keeper for good.
+STABLE_SEC="${SWARM_HUB_STABLE_SEC:-600}"
 
 over() { [[ -e "$HUB_DIR/.stop" || ! -d "$SANDBOX" || ! -f "$HUB_DIR/hub-input.json" ]]; }
 
+# The harness's own token, from what the hub keeps: this keeper's lines are
+# the harness's, attributed as such.
+SYSTEM_TOKEN="$(jq -r '.tokens.system // empty' "$HUB_DIR/hub-input.json" 2>/dev/null || true)"
+
+emit() { # <json line>
+  printf '%s' "$1" | SWARM_TRACE_TOKEN="$SYSTEM_TOKEN" node "$ROOT/scripts/trace-emit.mjs" "$SANDBOX" >/dev/null 2>&1 \
+    || printf '%s\n' "$1" >> "$HUB_DIR/hub-spill.jsonl"
+}
+
+collector_alive() {
+  local pid cmd
+  pid="$(cat "$SANDBOX/collector.pid" 2>/dev/null || true)"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
+  cmd="$(ps -ww -o command= -p "$pid" 2>/dev/null)" || return 1
+  [[ "$cmd" == *trace-collector.mjs* && "$cmd" == *"$SANDBOX"* ]]
+}
+
+# Only a run whose kickoff started a collector has one to keep.
+KEEP_COLLECTOR=0
+collector_alive && KEEP_COLLECTOR=1
+collector_restarts=0
+collector_since=$SECONDS
+COLLECTOR_SCRIPT="$ROOT/scripts/trace-collector.mjs"
+[[ -f "$HUB_DIR/host/scripts/trace-collector.mjs" ]] && COLLECTOR_SCRIPT="$HUB_DIR/host/scripts/trace-collector.mjs"
+
+keep_collector() {
+  [[ "$KEEP_COLLECTOR" -eq 1 ]] || return 0
+  collector_alive && return 0
+  over && return 0
+  (( SECONDS - collector_since >= STABLE_SEC )) && collector_restarts=0
+  collector_restarts=$((collector_restarts + 1))
+  if (( collector_restarts > MAX_RESTARTS )); then
+    echo "hub-supervise: the collector died ${MAX_RESTARTS} times in a row; not restarting it again" >> "$SANDBOX/traces/vm-hub.log"
+    KEEP_COLLECTOR=0
+    return 0
+  fi
+  local anchor tokens pid ok=false i
+  anchor="$(cd "$(dirname "$SANDBOX")" && pwd -P)/$(basename "$SANDBOX").trace-anchor.json"
+  # The collector's own shape: token -> agent, and no gate in a VM run.
+  tokens="$(jq -c '{tokens: ((.tokens // {}) | to_entries | map({key: .value, value: .key}) | from_entries), gate: ""}' "$HUB_DIR/hub-input.json" 2>/dev/null)" || return 0
+  rm -f "$SANDBOX/traces/.collector.sock"
+  printf '%s' "$tokens" | node "$COLLECTOR_SCRIPT" "$SANDBOX" --tokens --anchor "$anchor" --quiet >>"$SANDBOX/traces/collector.log" 2>&1 &
+  pid=$!
+  echo "$pid" > "$SANDBOX/collector.pid"
+  collector_since=$SECONDS
+  for ((i = 0; i < 50; i++)); do
+    [[ -S "$SANDBOX/traces/.collector.sock" ]] && kill -0 "$pid" 2>/dev/null && { ok=true; break; }
+    sleep 0.1
+  done
+  emit "$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson ok "$ok" --argjson n "$collector_restarts" \
+    '{ts: $ts, agent: "system", tool: "collector_restarted", args: {by: "hub-supervise", restart: $n}, result: {ok: $ok}}')"
+}
+
 restarts=0
+up_since=$SECONDS
 while :; do
-  while kill -0 "$PID" 2>/dev/null; do sleep 2; done
+  while kill -0 "$PID" 2>/dev/null; do
+    keep_collector
+    sleep 2
+  done
   over && exit 0
+  (( SECONDS - up_since >= STABLE_SEC )) && restarts=0
   restarts=$((restarts + 1))
   if (( restarts > MAX_RESTARTS )); then
-    echo "hub-supervise: the hub died ${MAX_RESTARTS} times; not restarting it again" >> "$SANDBOX/traces/vm-hub.log"
+    echo "hub-supervise: the hub died ${MAX_RESTARTS} times in a row; not restarting it again" >> "$SANDBOX/traces/vm-hub.log"
+    # The idle watchdog restarts a hub whose keeper is gone; one that gave
+    # up is not second-guessed every half minute.
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$HUB_DIR/.keeper-gave-up"
     exit 1
   fi
   sleep 2
   over && exit 0
   node --experimental-strip-types --no-warnings "$HUB_SCRIPT" --resume "$HUB_DIR" >>"$SANDBOX/traces/vm-hub.log" 2>&1 </dev/null &
   PID=$!
+  up_since=$SECONDS
   echo "$PID" > "$SANDBOX/hub.pid"
   ok=false
   for ((i = 0; i < 100; i++)); do
     [[ -S "$HUB_DIR/admin.sock" ]] && kill -0 "$PID" 2>/dev/null && { ok=true; break; }
     sleep 0.1
   done
-  line="$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg d "$HUB_DIR" --argjson ok "$ok" --argjson n "$restarts" \
+  emit "$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg d "$HUB_DIR" --argjson ok "$ok" --argjson n "$restarts" \
     '{ts: $ts, agent: "system", tool: "hub_restarted", args: {dir: $d, by: "hub-supervise", restart: $n}, result: {ok: $ok}}')"
-  printf '%s' "$line" | node "$ROOT/scripts/trace-emit.mjs" "$SANDBOX" >/dev/null 2>&1 || printf '%s\n' "$line" >> "$HUB_DIR/hub-spill.jsonl"
 done

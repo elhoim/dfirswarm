@@ -751,8 +751,11 @@ export class ActionRunner {
     }
     // `swarm.sh` has no use for the console's own mutation token, and what it
     // starts is a pane: a credential that travels that far ends up inside the
-    // sandbox. Everything else in the environment is passed as before.
-    const { SWARM_UI_TOKEN: _token, ...env } = process.env;
+    // sandbox. Nor does a kickoff take its isolation from the console's
+    // environment: the form says host or microvm, and a host form (which adds
+    // no --isolation) under an exported SWARM_ISOLATION=microvm became a VM
+    // run. Everything else in the environment is passed as before.
+    const { SWARM_UI_TOKEN: _token, SWARM_ISOLATION: _isolation, ...env } = process.env;
     const child = spawn("bash", [this.swarmSh, ...argv], {
       cwd: this.opts.root,
       env: { ...env, ...this.opts.env, SWARM_RUNS_DIR: this.opts.runsDir },

@@ -36,6 +36,11 @@ is yours alone to write; your peers read it there. A file your peers have to
 work from goes into the shared part of `work/` with `publish_file`, which claims
 the destination for you and records the revision.
 
+A post whose `from` reads `system via <id>` was sent by that seat's own harness
+code, not by the harness: it carries that seat's authority, no more. An event
+time you record needs its zone: `Z` when the source is UTC, otherwise the
+offset the artefact itself records.
+
 ## Caps
 
 - Spend: ${{CAP_USD}} USD across the swarm

@@ -16,6 +16,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # pointed them at other images, and eleven suites would have tested something
 # else (each suite that kicks off unsets them too, for a run of one).
 unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
+# Nor do they reach the operator's own msb database (a finish that removes a
+# stand-in VM scrubs it) or the VM hubs' directory: both are the suite run's.
+# Under /tmp, not the per-user TMPDIR: a hub's socket path must stay under
+# the 104 bytes macOS allows, and /var/folders/… leaves no room for it.
+SUITE_HOME="$(mktemp -d /tmp/dfh.XXXXXX)"
+trap 'rm -rf "$SUITE_HOME"' EXIT
+export MSB_HOME="$SUITE_HOME/msb-home" SWARM_HUBS_DIR="$SUITE_HOME/dfirswarm-hubs"
+mkdir -p "$MSB_HOME"
 # Every tests/*.test.sh, so adding a suite needs no edit here.
 ALL=()
 for f in "$ROOT"/tests/*.test.sh; do

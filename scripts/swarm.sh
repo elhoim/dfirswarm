@@ -13,6 +13,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# trace_emit: a harness line into a run's trace, through its collector. A
+# copy of this script alone (a suite runs one from a bare directory) goes
+# without it, and puts nothing of its own on a trace.
+# shellcheck source=lib/trace.sh
+[[ -f "$ROOT/scripts/lib/trace.sh" ]] && . "$ROOT/scripts/lib/trace.sh"
 # Live runs go in runs/. They used to go in sandbox-runs/, one hyphen away from
 # the committed sandbox/ skeleton, which is a poor way to name two unrelated
 # things. A checkout that still has the old directory keeps using it, so nobody
@@ -158,7 +163,7 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
 
   swarm.sh start --model <provider/id> --cap-usd <n> --n <N>
       [--models "<provider/id>=<k>[@USD],..."] [--goal-file FILE | --goal "<markdown>"]
-      [--sandbox DIR] [--label NAME] [--wall-clock MIN] [--hard-kill] [--no-start]
+      [--sandbox DIR] [--allow-synced-folder] [--custody-timeout SEC] [--label NAME] [--wall-clock MIN] [--hard-kill] [--no-start]
       [--cap-per-agent USD] [--cap-tokens N] [--idle-nudge-sec N] [--allow-tool-forging]
       [--no-self-compact] [--compact-at SPEC] [--compact-warn-at SPEC] [--compact-notice-at SPEC]
       [--compact-prompt-file FILE] [--compact-model P/ID] [--inbox-page-chars N]
@@ -188,6 +193,15 @@ The team
   --label NAME        A name for the run.
   --sandbox DIR       Where the run lives. Default: a new directory under
                       runs/ (SWARM_RUNS_DIR moves that).
+  --custody-timeout SEC
+                      How long custody may take at the run's end, whoever
+                      takes it (the hub at a VM run's finish, or stop). Default
+                      14400 (SWARM_CUSTODY_TIMEOUT); stop --custody-timeout
+                      overrides it for that stop.
+  --allow-synced-folder
+                      Let a copy of the evidence, or the VMs' kept disks, go
+                      into a folder a sync client uploads (Dropbox, iCloud,
+                      OneDrive, …). Refused otherwise, before anything is written.
 
 The goal
   --goal-file FILE    The goal document. It must carry a "## Definition of done";
@@ -477,6 +491,111 @@ registry_update_state() {
   registry_unlock
 }
 
+# The host's clock as the run found it: its zone, and whether the host kept
+# it in sync where it can say (timedatectl; macOS has no unprivileged way,
+# and "unknown" is the answer there). The run's own processes — the agents,
+# the hub, the collector, the watchdogs — run in UTC (TZ=UTC), so a tool's
+# local time and a zone-less time mean the same instant on every host; the
+# examiner's own shell is left as it is.
+host_clock_json() {
+  local zone sync="" how="none"
+  zone="$(readlink /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p' || true)"
+  if command -v timedatectl >/dev/null 2>&1; then
+    sync="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
+    [[ -n "$sync" ]] && how="timedatectl"
+  fi
+  # tz: the zone's name where the host says it, else its abbreviation;
+  # synced: true, false, or null when the host cannot say.
+  jq -nc --arg zone "$zone" --arg tzenv "${TZ:-}" --arg abbr "$(date +%Z)" --arg off "$(date +%z)" --arg sync "${sync:-}" --arg how "$how" \
+    '{tz: (if $tzenv != "" then $tzenv elif $zone != "" then $zone else $abbr end), abbreviation: $abbr, utc_offset: $off,
+      synced: (if $sync == "yes" then true elif $sync == "no" then false else null end),
+      source: (if $how == "none" then null else $how end), run_processes_tz: "UTC"}'
+}
+
+# What produced the run, for a reader who has to reproduce or defend it: the
+# harness's commit and whether the checkout had local changes (untracked
+# files included), the Node and Pi it ran on, msb for a VM run, and the host.
+# The models and the image digest are in the record already.
+provenance_json() {
+  local commit dirty=false pi_pkg pi_path
+  commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal -- extensions scripts prompts packs images tool-library library 2>/dev/null)" ]] && dirty=true
+  pi_pkg="$(jq -r '.version // empty' "$ROOT/node_modules/@earendil-works/pi-coding-agent/package.json" 2>/dev/null || true)"
+  pi_path="$(command -v pi 2>/dev/null || true)"
+  jq -nc --arg commit "$commit" --argjson dirty "$dirty" --arg node "$(node --version 2>/dev/null || true)" --arg pi "$pi_pkg" --arg pi_path "$pi_path" \
+    --arg msb "${msb_version:-}" --arg image "${vm_image_digest:-}" --arg os "$(uname -sr)" --arg arch "$(uname -m)" \
+    '{harness_commit: (if $commit == "" then "not a git checkout" else $commit end), harness_dirty: $dirty,
+      node_version: $node, pi_version: (if $pi == "" then null else $pi end), pi_on_path: (if $pi_path == "" then null else $pi_path end),
+      msb_version: (if $msb == "" then null else $msb end), image_digest: (if $image == "" then null else $image end), os: $os, arch: $arch}'
+}
+
+# The operator's own record. Every command that starts, stops, reaps,
+# speaks into, exports or reports on a run is a line in
+# $RUNS_DIR/operator-audit.jsonl: when, which OS user on which host, through
+# what (the command line, the console, the hub's own clear-up), and the
+# arguments, with an --env value and a --goal document left out as the
+# registry leaves them out. Each line carries the sha256 of the one before,
+# so a line taken out or changed breaks the chain. It lives beside the
+# registry, which no pane can write.
+redact_args_json() { # [args...]
+  local a redact=0 out=()
+  for a in "$@"; do
+    if [[ "$redact" == env ]]; then out+=("${a%%=*}=<redacted>"); redact=0; continue; fi
+    if [[ "$redact" == goal ]]; then out+=("<goal document, ${#a} chars>"); redact=0; continue; fi
+    case "$a" in
+      --env) redact=env ;;
+      --goal) redact=goal ;;
+    esac
+    out+=("$a")
+  done
+  if [[ ${#out[@]} -eq 0 ]]; then printf '[]'; else printf '%s\0' "${out[@]}" | jq -Rs 'split("\u0000") | .[:-1]'; fi
+}
+
+operator_identity_json() {
+  local via="${SWARM_OPERATOR_VIA:-cli}"
+  jq -nc --arg user "$(id -un 2>/dev/null || printf '%s' "${USER:-unknown}")" --arg host "$(hostname 2>/dev/null || uname -n)" --arg via "$via" \
+    '{os_user: $user, host: $host, via: $via}'
+}
+
+operator_audit() { # <command> [args...]
+  local cmd="$1" file lock prev line i
+  shift
+  file="$RUNS_DIR/operator-audit.jsonl"
+  lock="$RUNS_DIR/.operator-audit.lock"
+  mkdir -p "$RUNS_DIR" 2>/dev/null || return 0
+  local via="${SWARM_OPERATOR_VIA:-cli}" a
+  for a in "$@"; do [[ "$a" == --after-hub ]] && via=hub; done
+  for ((i = 0; i < 60; i++)); do
+    mkdir "$lock" 2>/dev/null && break
+    # A lock older than this was left by a command that died holding it.
+    (( i == 59 )) && { rm -rf "$lock"; mkdir "$lock" 2>/dev/null || true; }
+    sleep 0.05
+  done
+  prev=""
+  if [[ -s "$file" ]]; then
+    prev="$(tail -n 1 "$file" | tr -d '\n' | { shasum -a 256 2>/dev/null || sha256sum; } | cut -d' ' -f1)"
+  fi
+  line="$(SWARM_OPERATOR_VIA="$via" operator_identity_json | jq -c --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cmd "$cmd" \
+    --argjson argv "$(redact_args_json "$@")" --arg cwd "$PWD" --arg prev "$prev" \
+    '{at: $at, command: $cmd, argv: $argv, cwd: $cwd} + . + {prev: (if $prev == "" then null else $prev end)}')" || { rmdir "$lock" 2>/dev/null; return 0; }
+  printf '%s\n' "$line" >> "$file"
+  chmod 600 "$file" 2>/dev/null || true
+  rmdir "$lock" 2>/dev/null || true
+}
+
+# The same action on a live run's trace, through its collector: the operator
+# is on the record beside the agents. From a shell that is not the kickoff
+# the line carries no token and the collector marks it unverified, as it
+# does a `swarm.sh reap` line: the harness cannot prove who typed it.
+operator_trace() { # <sandbox> <command> [args...]
+  local sandbox="$1" cmd="$2" line
+  shift 2
+  [[ -n "$sandbox" && -d "$sandbox/traces" ]] && declare -F trace_emit >/dev/null || return 0
+  line="$(operator_identity_json | jq -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" --arg cmd "$cmd" --argjson argv "$(redact_args_json "$@")" \
+    '{ts: $ts, agent: "system", tool: "operator_action", args: ({command: $cmd, argv: $argv} + .), result: {ok: true}}')" || return 0
+  trace_emit "$ROOT" "$sandbox" "$line" >/dev/null 2>&1 || true
+}
+
 # The harness a VM run started with, whatever happens to the checkout while
 # it runs: a `git pull` or an edit mid-run used to reach agents that had not
 # loaded the extension yet, and a forged tool's runner, in the middle of a
@@ -497,7 +616,25 @@ freeze_harness() { # <hub dir>
     rm -rf "${host:?}/$rel"
     cp -R "$ROOT/$rel" "$host/$rel"
   done
-  ln -sfn "$ROOT/node_modules" "$host/node_modules"
+  # msb and its SDK are frozen with it: an `npm ci` in the checkout mid-run
+  # removed node_modules for a while and then put in whatever it resolved,
+  # and the hub's finish ran that msb against VMs another one had made. A
+  # clone on APFS, hard links on Linux, a copy elsewhere (about 85 MB); the
+  # rest of node_modules is the checkout's, which the host side does not load.
+  rm -rf "${host:?}/node_modules"
+  mkdir -p "$host/node_modules"
+  local entry name
+  for entry in "$ROOT/node_modules"/* "$ROOT/node_modules"/.[!.]*; do
+    [[ -e "$entry" || -L "$entry" ]] || continue
+    name="$(basename "$entry")"
+    case "$name" in
+      microsandbox|@microsandbox|@superradcompany)
+        cp -Rc "$entry" "$host/node_modules/$name" 2>/dev/null \
+          || cp -al "$entry" "$host/node_modules/$name" 2>/dev/null \
+          || cp -R "$entry" "$host/node_modules/$name" ;;
+      *) ln -s "$entry" "$host/node_modules/$name" ;;
+    esac
+  done
   commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo "not a git checkout")"
   git -C "$ROOT" diff --quiet HEAD -- extensions scripts prompts 2>/dev/null || commit="$commit with local changes"
   printf '%s\n' "$commit" > "$dir/COMMIT"
@@ -610,9 +747,15 @@ alloc_prefix() {
     if [[ -n "$(json_get "$p")" ]]; then
       continue
     fi
-    # Nor an id another registry's VMs already carry.
-    if [[ "${isolation:-host}" == "microvm" ]] && [[ "$(vm_cli list --run "$p" 2>/dev/null | jq -r '(.vms // []) | length' 2>/dev/null || echo 0)" != "0" ]]; then
-      continue
+    # Nor an id another registry's VMs already carry. A list that failed is
+    # said as that, not as ten ids that could not be had.
+    if [[ "${isolation:-host}" == "microvm" ]]; then
+      local listed
+      if ! listed="$(vm_cli list --run "$p" 2>/dev/null)"; then
+        echo "BLOCKER: msb could not list its VMs, so a run id cannot be checked against them: $(jq -r '.error // "no answer"' <<<"$listed" 2>/dev/null || printf 'no answer')" >&2
+        exit 3
+      fi
+      [[ "$(jq -r '(.vms // []) | length' <<<"$listed" 2>/dev/null)" == "0" ]] || continue
     fi
     printf '%s\n' "$p"
     return 0
@@ -1049,16 +1192,63 @@ detach_inputs_image() {
   rm -f "$sandbox/inputs.device"
 }
 
-install_inputs() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4"
-  mkdir -p "$sandbox/inputs" "$sandbox/.inputs-pristine"
-  # A clone is free and instant on APFS; elsewhere cp copies. Symlinks are
-  # dereferenced either way.
-  if ! cp -RLc "$src/." "$sandbox/inputs/" 2>/dev/null; then
-    rm -rf "${sandbox:?}/inputs"
-    mkdir -p "$sandbox/inputs"
-    cp -RL "$src/." "$sandbox/inputs/"
+# Copy a tree with its links as links: never followed. A clone is free and
+# instant on APFS (cp -c); elsewhere cp copies.
+copy_tree_as_is() { # <src dir> <dst dir>
+  if ! cp -RPc "$1/." "$2/" 2>/dev/null; then
+    rm -rf "${2:?}"
+    mkdir -p "$2"
+    cp -RP "$1/." "$2/"
   fi
+}
+
+install_inputs() {
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" entry name
+  mkdir -p "$sandbox/inputs" "$sandbox/.inputs-pristine"
+  # A link inside the evidence is the evidence's own and is copied as the
+  # link it is. `cp -RL` followed every link on this host: an extracted
+  # root's etc/hosts or etc/localtime (absolute links) became this
+  # machine's own files, in the evidence, vouched for by the manifest. Only a
+  # link the operator put at the top of --inputs (`ln -s
+  # /mnt/evidence/case.E01 ./`) is followed, to the file or directory it
+  # names; what is inside a linked directory keeps its links.
+  copy_tree_as_is "$src" "$sandbox/inputs"
+  while IFS= read -r -d '' entry; do
+    name="$(basename "$entry")"
+    [[ -L "$sandbox/inputs/$name" ]] || continue
+    if [[ -d "$entry" ]]; then
+      rm -f "$sandbox/inputs/$name"
+      mkdir -p "$sandbox/inputs/$name"
+      copy_tree_as_is "$entry" "$sandbox/inputs/$name"
+    elif [[ -f "$entry" ]]; then
+      rm -f "$sandbox/inputs/$name"
+      cp -Lc "$entry" "$sandbox/inputs/$name" 2>/dev/null || cp -L "$entry" "$sandbox/inputs/$name"
+    fi
+    # A link to nothing, or to a device or a FIFO, stays the link it is:
+    # nothing is read through it.
+  done < <(find "$src/" -mindepth 1 -maxdepth 1 -type l -print0)
+  # Said, not followed: links in the evidence that lead out of it (an
+  # extracted root's absolute ones) name this host's files, not the case's.
+  python3 - "$sandbox/inputs" <<'PY' >&2 || true
+import os, sys
+root = os.path.realpath(sys.argv[1])
+out = []
+for dirpath, dirnames, filenames in os.walk(root):
+    for name in dirnames + filenames:
+        p = os.path.join(dirpath, name)
+        if not os.path.islink(p):
+            continue
+        t = os.readlink(p)
+        dest = os.path.normpath(t if os.path.isabs(t) else os.path.join(dirpath, t))
+        if dest != root and not dest.startswith(root + os.sep):
+            out.append("%s -> %s" % (os.fsencode(os.path.relpath(p, root)).decode("utf-8", "replace"), os.fsencode(t).decode("utf-8", "replace")))
+if out:
+    print("NOTE: %d link%s in the evidence lead%s out of it; each is kept as the link it is (the evidence's own) and never followed, so it names nothing of the case on this host:" % (len(out), "" if len(out) == 1 else "s", "s" if len(out) == 1 else ""))
+    for line in out[:20]:
+        print("  " + line)
+    if len(out) > 20:
+        print("  and %d more (inputs.json lists every link and its target)" % (len(out) - 20))
+PY
   # Clones are free on APFS (cp -c) and btrfs/xfs (--reflink); plain copy elsewhere.
   if ! cp -Rc "$sandbox/inputs/." "$sandbox/.inputs-pristine/" 2>/dev/null; then
     if ! cp -R --reflink=auto "$sandbox/inputs/." "$sandbox/.inputs-pristine/" 2>/dev/null; then
@@ -1085,9 +1275,27 @@ install_inputs() {
 write_inputs_manifest() {
   local sandbox="$1" src="$2" enforce="$3" guard="$4" held="$5"
   python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" <<'PY'
-import hashlib, json, os, sys, time
+import base64, hashlib, json, os, stat as _stat, sys, time
 sandbox, src, enforce, guard, held = sys.argv[1:]
 root = os.path.join(sandbox, "inputs")
+
+def named(entry, key, value):
+    # A name is bytes on disk. One that is not UTF-8 (a Windows-1254 or
+    # Latin-1 name from an archive, on ext4) is kept exactly as base64 in
+    # `<key>_b64`, with a readable `<key>` beside it; a reader opens the
+    # bytes. Written as the text Python decoded it to, the name was a
+    # different one to every reader in another language, and untouched
+    # evidence was "missing" and "added" at once.
+    raw = os.fsencode(value)
+    try:
+        entry[key] = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        entry[key] = raw.decode("utf-8", "replace")
+        entry[key + "_b64"] = base64.b64encode(raw).decode("ascii")
+
+def rel(abs_path):
+    return os.path.relpath(abs_path, sandbox).replace(os.sep, "/")
+
 files, total = [], 0
 for dirpath, dirnames, filenames in os.walk(root):
     dirnames.sort()
@@ -1099,56 +1307,117 @@ for dirpath, dirnames, filenames in os.walk(root):
         abs_path = os.path.join(dirpath, name)
         if os.path.islink(abs_path):
             target = os.readlink(abs_path)
-            files.append({
-                "path": os.path.relpath(abs_path, sandbox).replace(os.sep, "/"),
-                "bytes": 0,
-                "sha256": hashlib.sha256(("link:" + target).encode()).hexdigest(),
-                "link": target,
-            })
+            entry = {}
+            named(entry, "path", rel(abs_path))
+            entry["bytes"] = 0
+            entry["sha256"] = hashlib.sha256(b"link:" + os.fsencode(target)).hexdigest()
+            named(entry, "link", target)
+            files.append(entry)
             continue
         if not os.path.isfile(abs_path):
             # A FIFO, a socket or a device node (an extracted Linux root has
             # them): recorded by its kind and never opened, so every walk —
             # the VMs' probe, the agents' check, custody — counts the same
             # names and a change of kind is a change.
-            import stat as _stat
             mode = os.lstat(abs_path).st_mode
             kind = "fifo" if _stat.S_ISFIFO(mode) else "socket" if _stat.S_ISSOCK(mode) else "char" if _stat.S_ISCHR(mode) else "block" if _stat.S_ISBLK(mode) else None
             if kind:
-                files.append({
-                    "path": os.path.relpath(abs_path, sandbox).replace(os.sep, "/"),
-                    "bytes": 0,
-                    "sha256": hashlib.sha256(("special:" + kind).encode()).hexdigest(),
-                    "special": kind,
-                })
+                entry = {}
+                named(entry, "path", rel(abs_path))
+                entry["bytes"] = 0
+                entry["sha256"] = hashlib.sha256(("special:" + kind).encode()).hexdigest()
+                entry["special"] = kind
+                files.append(entry)
             continue
-        digest = hashlib.sha256()
+        # The three digests a court and an imager's log speak in, from one
+        # read: SHA-256 is what every check here compares; MD5 and SHA-1 are
+        # for matching the acquisition hashes an imager recorded.
+        sha256, sha1, md5 = hashlib.sha256(), hashlib.sha1(), hashlib.md5()
         with open(abs_path, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 20), b""):
-                digest.update(chunk)
+                sha256.update(chunk)
+                sha1.update(chunk)
+                md5.update(chunk)
         st = os.stat(abs_path)
         total += st.st_size
-        entry = {
-            "path": os.path.relpath(abs_path, sandbox).replace(os.sep, "/"),
+        entry = {}
+        named(entry, "path", rel(abs_path))
+        entry.update({
             "bytes": st.st_size,
-            "sha256": digest.hexdigest(),
+            "sha256": sha256.hexdigest(),
+            "sha1": sha1.hexdigest(),
+            "md5": md5.hexdigest(),
             # The stat after the chmod (copy) or as found (bind, image); the
             # harness trusts the sha while these hold.
             "mtime_ms": st.st_mtime_ns // 1_000_000,
             "ctime_ms": st.st_ctime_ns // 1_000_000,
-        }
+        })
         if held != "copy":
             entry["mode"] = oct(st.st_mode & 0o777)[2:]
             entry["links"] = st.st_nlink
         files.append(entry)
+
+# A copy is checked against its source, name by name, kind and size: a
+# case-sensitive source (ext4, an SMB share) with File.txt and file.txt, or
+# the two Unicode forms of one name, merged silently on a case-insensitive
+# volume, and a short read on a network volume went unnoticed — the manifest
+# then vouched for what survived. The source's names are walked as the copy
+# was made: links as links, a top-level link to the file or directory it
+# names.
+problems = []
+if held == "copy":
+    def kind_size(st):
+        if _stat.S_ISLNK(st.st_mode):
+            return ("link", 0)
+        if _stat.S_ISREG(st.st_mode):
+            return ("file", st.st_size)
+        if _stat.S_ISDIR(st.st_mode):
+            return ("dir", 0)
+        return ("special", 0)
+    def walk(top):
+        seen = {}
+        for dirpath, dirnames, filenames in os.walk(top):
+            for name in dirnames + filenames:
+                p = os.path.join(dirpath, name)
+                seen[os.fsencode(os.path.relpath(p, top))] = kind_size(os.lstat(p))
+        return seen
+    source = {}
+    for name in os.listdir(src):
+        p = os.path.join(src, name)
+        key = os.fsencode(name)
+        if os.path.islink(p) and os.path.isdir(p):
+            source[key] = ("dir", 0)
+            for sub, ks in walk(p).items():
+                source[key + b"/" + sub] = ks
+        elif os.path.islink(p) and os.path.isfile(p):
+            source[key] = kind_size(os.stat(p))
+        else:
+            source[key] = kind_size(os.lstat(p))
+            if source[key][0] == "dir":
+                for sub, ks in walk(p).items():
+                    source[key + b"/" + sub] = ks
+    copy = walk(root)
+    for key in sorted(source):
+        if key not in copy:
+            problems.append("not in the copy: " + key.decode("utf-8", "replace"))
+        elif copy[key] != source[key]:
+            problems.append("differs from its source (%s %d, copied as %s %d): %s" % (source[key] + copy[key] + (key.decode("utf-8", "replace"),)))
+    for key in sorted(set(copy) - set(source)):
+        problems.append("in the copy but not in the source: " + key.decode("utf-8", "replace"))
+
+def disp(value):
+    return os.fsencode(value).decode("utf-8", "replace")
+
 manifest = {
-    "source": src,
+    "source": disp(src),
     "copied_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "files": files,
     "bytes": total,
     "enforce": enforce,
     "guard": guard,
-}
+    "digests": ["sha256", "sha1", "md5"]}
+if held == "copy":
+    manifest["source_checked"] = "names, kinds and sizes" if not problems else "MISMATCH"
 # How the evidence is held, always said: every reader words its custody
 # line from this (a copy, in place, an attached image).
 manifest["held"] = held
@@ -1163,6 +1432,12 @@ if os.path.lexists(out_path):
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(manifest, f, indent=2)
     f.write("\n")
+if problems:
+    sys.stderr.write("BLOCKER: the copy of the evidence in %s does not match its source %s (%d name%s):\n" % (root, disp(src), len(problems), "" if len(problems) == 1 else "s"))
+    for line in problems:
+        sys.stderr.write("  %s\n" % line)
+    sys.stderr.write("A case-insensitive volume merges names that differ only in case or Unicode form, and a short read leaves a file short. Put the run on a volume that keeps the source's names (a case-sensitive APFS volume or the source's own file system), or use --inputs-bind to hold the evidence in place.\n")
+    sys.exit(4)
 PY
 }
 
@@ -2122,7 +2397,7 @@ pane_env_for() { # <agent> -> sets PANE_ENV_ARGS
   if [[ -n "${VM_PANE_ZDOTDIR:-}" ]]; then
     PANE_ENV_ARGS=(--env "ZDOTDIR=$VM_PANE_ZDOTDIR")
   else
-    PANE_ENV_ARGS=(--env "AGENT_ID=$1" --env "SWARM_ID=$swarm_id" --env "SWARM_HARD_KILL=$hard"
+    PANE_ENV_ARGS=(--env "AGENT_ID=$1" --env "SWARM_ID=$swarm_id" --env "SWARM_HARD_KILL=$hard" --env "TZ=UTC"
       --env "SWARM_TRACE_TOKEN=$(trace_token_for "$1")" ${provider_env[@]+"${provider_env[@]}"})
   fi
 }
@@ -2253,6 +2528,11 @@ PY
 }
 
 cmd_start() {
+  local start_args=("$@")
+  # The host's zone before the run's processes are put in UTC.
+  local host_clock
+  host_clock="$(host_clock_json)"
+  export TZ=UTC
   # The command this run was started with, kept so the console and the report
   # can answer "what were these agents given?" without the operator having to
   # remember. A `--goal` document is replaced by its length — the goal itself
@@ -2292,6 +2572,7 @@ cmd_start() {
   local inputs_dir="" inputs_image="" inputs_enforce="auto" inputs_bind=0 inputs_max_mb="${SWARM_INPUTS_MAX_MB:-}" inputs_max_files="${SWARM_INPUTS_MAX_FILES:-}" inputs_guard="none"
   local allow_hosts="" tools_from="" catalog=0 toolbox="off" toolbox_required=0 quarantine=0 cap_per_agent="" case_id="" examiner=""
   local packs=""
+  local allow_synced=0 custody_timeout="${SWARM_CUSTODY_TIMEOUT:-14400}"
   local write_guard=1
   # Where the agents live: host processes, or one microVM each.
   local isolation="${SWARM_ISOLATION:-host}" vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0
@@ -2347,6 +2628,10 @@ cmd_start() {
         shift 2
         ;;
       --sandbox) sandbox="$2"; shift 2 ;;
+      --allow-synced-folder) allow_synced=1; shift ;;
+      --custody-timeout)
+        [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { echo "BLOCKER: --custody-timeout takes a number of seconds, got ${2:-nothing}." >&2; exit 2; }
+        custody_timeout="$2"; shift 2 ;;
       --label) label="$2"; shift 2 ;;
       --wall-clock) wall="$2"; wall_set=1; shift 2 ;;
       --hard-kill) hard=1; shift ;;
@@ -2584,12 +2869,13 @@ cmd_start() {
       if [[ "$inputs_bind" -eq 1 && "$ro_fs" != 1 && -n "$writable" ]]; then
         echo "WARN: the evidence in $inputs_dir is writable by this account (${writable#"$inputs_dir"/} and perhaps more: a file, or a directory whose names can change), on a volume mounted read-write. In a VM run it is held by the VMs' read-only mount and nothing else: the host (you, a tool, a sync client) can still change it. Make it read-only (chmod -R a-w), mount its volume read-only, or pass --inputs-copy to give the run its own read-only copy." >&2
       fi
-      # A copy dereferences its links (cp -RL), so only a directory used in
-      # place has names no VM can follow.
+      # A copy follows only the links at the top of --inputs (the
+      # operator's); deeper ones are the evidence's own and stay links, as
+      # the copy's own NOTE says.
       if [[ ${#outside[@]} -gt 0 && "$inputs_bind" -eq 1 ]]; then
         echo "BLOCKER: under --isolation microvm, --inputs $inputs_dir is mounted into each VM as it is, and these links lead out of it, so no VM could read them:" >&2
         printf '  %s\n' "${outside[@]}" >&2
-        echo "Point --inputs at the directory that holds the files, put the files themselves (not links) in $inputs_dir, or pass --inputs-copy to copy what the links point at into the run." >&2
+        echo "Point --inputs at the directory that holds the files, put the files themselves (not links) in $inputs_dir, or pass --inputs-copy to copy what the links at its top point at into the run (links deeper in the tree are the evidence's own and are copied as links)." >&2
         exit 2
       fi
     else
@@ -2976,6 +3262,19 @@ STRIP
   for ((i = 0; i < n; i++)); do
     agent_ids+=("$(printf '%s%02d' "$swarm_id" "$i")")
   done
+  # The hub's sockets, before anything is written: a path past the Unix
+  # limit made the hub die on its first listen, after the VMs' work began.
+  if [[ "$isolation" == "microvm" ]]; then
+    local sock_max
+    if ! sock_max="$(hub_socket_path_max "$swarm_id" "${agent_ids[${#agent_ids[@]}-1]}")"; then
+      echo "BLOCKER: the VM hubs' directory $(hubs_parent_path) cannot be used (see above)." >&2
+      exit 2
+    fi
+    if (( sock_max > 103 )); then
+      echo "BLOCKER: this run's hub sockets would be ${sock_max} bytes long under $(hubs_parent_path); a Unix socket path may be 103. Set SWARM_HUBS_DIR to a shorter directory of your own (for example /tmp/dfh-\$(id -u))." >&2
+      exit 2
+    fi
+  fi
 
   # Resolve before any recursive delete: `--sandbox .` or a symlinked path
   # would otherwise clear a work/ directory outside this run.
@@ -2999,6 +3298,42 @@ STRIP
   if [[ "$sandbox" == "/" || "$sandbox" == "$HOME" || "$sandbox" == "$ROOT" ]]; then
     echo "BLOCKER: refusing to use $sandbox as a swarm sandbox." >&2
     exit 2
+  fi
+  # Root makes every protection that is a file's mode void for the panes:
+  # the read-only evidence, the pristine copy, the manifest and its anchor
+  # are writable to root whatever their bits say. Only a kernel guard (or a
+  # VM) still holds.
+  if [[ "$(id -u)" -eq 0 ]]; then
+    echo "WARN: this run is started as root: the read-only modes on the evidence, its pristine copy, the manifest and the anchor do not bind root.$([[ "$isolation" == "microvm" ]] && printf ' The VMs still hold the evidence read-only.' || printf ' Only the kernel guard still holds them for the panes; run as an ordinary user.')" >&2
+  fi
+  # A folder a sync client uploads, found before anything is written: the
+  # check used to come after the evidence was already copied there, twice
+  # (inputs/ and .inputs-pristine/), and named only what the agents derive.
+  # A copy of the evidence or a VM's kept disk there is refused unless the
+  # operator says it may go; what the agents derive is said.
+  local synced synced_disks="" disks_dir="" synced_what=()
+  if [[ "$isolation" == "microvm" && "$vm_snapshot" -eq 1 ]]; then
+    disks_dir="${vm_snapshot_dir:-$sandbox.vm-snapshots}"
+    synced_disks="$(synced_folder_of "$disks_dir" || true)"
+  fi
+  if synced="$(synced_folder_of "$sandbox")"; then
+    [[ -n "$inputs_dir" && "$inputs_bind" -eq 0 ]] && synced_what+=("the copy of the evidence (inputs/ and .inputs-pristine/)")
+  fi
+  [[ -n "$synced_disks" ]] && synced_what+=("each VM's kept disk ($disks_dir, $synced_disks)")
+  if [[ ${#synced_what[@]} -gt 0 ]]; then
+    if [[ "$allow_synced" -eq 1 ]]; then
+      echo "WARN: going into a synced folder as --allow-synced-folder asks: $(IFS=';'; printf '%s' "${synced_what[*]}" | sed 's/;/; /g'). Its sync client will upload them." >&2
+    else
+      {
+        echo "BLOCKER: these would go into a folder a sync client uploads, and leave this machine:"
+        printf '  %s\n' "${synced_what[@]}"
+        echo "Pass --sandbox$([[ -n "$synced_disks" ]] && printf ' and --vm-snapshot-dir') outside it (or SWARM_RUNS_DIR for every run), or --allow-synced-folder when the material may be uploaded."
+      } >&2
+      exit 2
+    fi
+  fi
+  if [[ -n "${synced:-}" ]]; then
+    echo "WARN: this run is kept in a synced folder ($synced): what the agents derive from the evidence — work/, the trace, their sessions — will be uploaded by its sync client. Pass --sandbox outside it for a case whose material must stay on this machine." >&2
   fi
   if [[ -n "$inputs_dir" ]]; then
     case "$inputs_dir/" in
@@ -3071,11 +3406,7 @@ STRIP
   # where no agent (and no catalog parser) reaches it: custody compares the
   # manifest against this, so a manifest rewritten inside the run is caught
   # rather than trusted.
-  write_custody_anchor "$sandbox" "$swarm_id"
-  local synced
-  if synced="$(synced_folder_of "$(dirname "$sandbox")")"; then
-    echo "WARN: this run is kept in a synced folder ($synced): what the agents derive from the evidence — work/, the trace, their sessions$([[ "$isolation" == "microvm" ]] && printf ', and each VM'"'"'s kept disk') — will be uploaded by its sync client. Pass --sandbox (and --vm-snapshot-dir) outside it for a case whose material must stay on this machine." >&2
-  fi
+  write_custody_anchor "$sandbox" "$swarm_id" "$isolation"
   # Where the VMs' disks are kept: beside the run by default, or where the
   # operator says (a link beside the run names it, so every reader — stop,
   # custody, the package, reap — finds them where it always looks).
@@ -3182,6 +3513,9 @@ STRIP
     trace_socket="$SWARM_TRACE_SOCKET"
     [[ -n "$trace_gate" ]] && attribution="ancestry"
     [[ "$isolation" == "microvm" ]] && attribution="channel"
+    # The kickoff on the run's own record, as the operator's action; the
+    # kickoff holds the harness's token, so this line is attributed.
+    SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" operator_trace "$sandbox" start ${start_args[@]+"${start_args[@]}"}
   elif [[ "$isolation" == "microvm" ]]; then
     # A pane on the host falls back to appending the file itself. A VM
     # cannot: traces/ is read-only in it, so every line of the run would go
@@ -3325,10 +3659,14 @@ STRIP
     # parent, and the whole parent is denied: sandbox-exec refuses the
     # connect, a mount namespace hides the directory. Landlock alone cannot
     # (it does not govern connecting to a socket), and no guard does nothing.
-    guard_args+=(--no-socket-tree "$(hubs_parent)")
+    # The parent is made now if it is not there, so the deny names the
+    # directory a later run's hub is made in; a path that does not exist yet
+    # is denied all the same.
+    hubs_parent --create >/dev/null 2>&1 || true
+    guard_args+=(--no-socket-tree "$(hubs_parent_path)")
   fi
   if [[ "$isolation" != "microvm" ]] && [[ "$write_guard_mode" == "none" || "$write_guard_mode" == "landlock" ]] \
-    && compgen -G "$(hubs_parent)/dfs-*/admin.sock" >/dev/null 2>&1; then
+    && compgen -G "$(hubs_parent_path)/dfs-*/admin.sock" >/dev/null 2>&1; then
     echo "WARN: a microVM run is up on this machine, and this run's panes (write guard: $write_guard_mode) cannot be kept from its hub's sockets: a pane could speak to that run's board as one of its agents. Run them one at a time, or on a host with user namespaces (a mount namespace masks the sockets)." >&2
   fi
   if [[ -n "$trace_socket" && "$write_guard_mode" != "none" ]]; then
@@ -3523,6 +3861,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson vm_memory "${vm_memory:-2048}" --argjson vm_disk "$vm_disk" \
     --argjson vm_snapshot "$vm_snapshot" \
     --argjson allow_oauth_in_vm "$allow_oauth_in_vm" \
+    --argjson provenance "$(provenance_json)" \
+    --argjson custody_timeout "$custody_timeout" \
+    --argjson host_clock "$host_clock" \
     '{
       id: $id,
       "label": $run_label,
@@ -3580,6 +3921,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       isolation: (if $isolation == "microvm"
         then {mode: "microvm", runtime: "microsandbox", image: $vm_image, image_digest: (if $vm_image_digest == "" then null else $vm_image_digest end), cpus: $vm_cpus, memory_mib: $vm_memory, disk_mib: $vm_disk, snapshot: ($vm_snapshot == 1), oauth_allowed: ($allow_oauth_in_vm == 1)}
         else {mode: "host"} end),
+      provenance: $provenance,
+      host_clock: $host_clock,
+      custody_timeout_sec: $custody_timeout,
       started_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
       state: "prepared"
     }')"
@@ -4866,52 +5210,43 @@ pick_free_port() {
   return 1
 }
 
+# Is this pid the daemon its pid file says it is, for this sandbox? A pid
+# file is only as good as the process it names: after a reboot the pid is
+# someone else's, and in a host run a pane can rewrite the file (it is only
+# tool-protected), so a stop that killed on `kill -0` alone could end any
+# process of the operator's. The daemon's command line names its script and
+# this sandbox.
+daemon_pid_ours() { # <pid> <script> <sandbox>
+  local cmd
+  [[ -n "$1" && "$1" =~ ^[0-9]+$ ]] && kill -0 "$1" 2>/dev/null || return 1
+  cmd="$(ps -ww -o command= -p "$1" 2>/dev/null)" || return 1
+  [[ "$cmd" == *"$2"* && "$cmd" == *"$3"* ]]
+}
+
 stop_sandbox_daemons() {
   # Leftover sidecar / idle-nudge from a previous start --sandbox DIR. cmd_start
   # used to skip cmd_stop, so a second kickoff reused the old proxy allowlist
   # and left a second watchdog after overwriting idle-nudge.pid.
-  local sandbox="$1" pid i
+  local sandbox="$1" pid
   [[ -n "$sandbox" ]] || return 0
-  if [[ -f "$sandbox/netguard.pid" ]]; then
-    pid="$(cat "$sandbox/netguard.pid" || true)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      for ((i = 0; i < 20; i++)); do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 0.05
-      done
-    fi
-  fi
-  if [[ -f "$sandbox/collector.pid" ]]; then
-    pid="$(cat "$sandbox/collector.pid" || true)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      for ((i = 0; i < 20; i++)); do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 0.05
-      done
-    fi
-  fi
-  if [[ -f "$sandbox/gate.pid" ]]; then
-    pid="$(cat "$sandbox/gate.pid" || true)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      for ((i = 0; i < 20; i++)); do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 0.05
-      done
-    fi
-  fi
-  if [[ -f "$sandbox/nudge.pid" ]]; then
-    pid="$(cat "$sandbox/nudge.pid" || true)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      for ((i = 0; i < 20; i++)); do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 0.05
-      done
-    fi
-  fi
+  # The same check as daemon_pid_ours, here so that this function is whole
+  # on its own (suites lift it out of the script by itself).
+  _stop_sandbox_daemon() { # <pid file> <script>
+    local p c i
+    p="$(cat "$1" 2>/dev/null || true)"
+    [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null || return 0
+    c="$(ps -ww -o command= -p "$p" 2>/dev/null)" || return 0
+    [[ "$c" == *"$2"* && "$c" == *"$sandbox"* ]] || return 0
+    kill "$p" 2>/dev/null || true
+    for ((i = 0; i < 20; i++)); do
+      kill -0 "$p" 2>/dev/null || break
+      sleep 0.05
+    done
+  }
+  _stop_sandbox_daemon "$sandbox/netguard.pid" netguard.sh
+  _stop_sandbox_daemon "$sandbox/collector.pid" trace-collector.mjs
+  _stop_sandbox_daemon "$sandbox/gate.pid" trace-gate.py
+  _stop_sandbox_daemon "$sandbox/nudge.pid" nudge-broker.mjs
   if [[ -f "$sandbox/hub.pid" ]]; then
     pid="$(cat "$sandbox/hub.pid" || true)"
     if hub_pid_ours "$sandbox" "$pid"; then
@@ -4927,16 +5262,7 @@ stop_sandbox_daemons() {
     fi
     rm -f "$sandbox/inhibit.pid"
   fi
-  if [[ -f "$sandbox/idle-nudge.pid" ]]; then
-    pid="$(cat "$sandbox/idle-nudge.pid" || true)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      for ((i = 0; i < 20; i++)); do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 0.05
-      done
-    fi
-  fi
+  _stop_sandbox_daemon "$sandbox/idle-nudge.pid" idle-nudge.sh
   rm -f "$sandbox/netguard.pid" "$sandbox/netguard.port" "$sandbox/netguard.only" "$sandbox/idle-nudge.pid" \
         "$sandbox/collector.pid" "$sandbox/traces/.collector.sock" \
         "$sandbox/nudge.pid" "$sandbox/traces/.nudge.sock" \
@@ -5215,27 +5541,48 @@ start_netguard_sidecar() {
     fi
     stop_sandbox_daemons "$sandbox"
   fi
-  port="$(pick_free_port "${SWARM_NETGUARD_PORT:-43178}")" || {
-    echo "BLOCKER: no free port for the netguard sidecar from ${SWARM_NETGUARD_PORT:-43178} upward" >&2
-    exit 3
-  }
   local allow_flag="--allow"
   [[ "${SWARM_NETGUARD_ONLY:-0}" == "1" ]] && allow_flag="--only"
-  detach_exec bash "$ROOT/scripts/netguard.sh" --mode proxy-only --port "$port" \
-    "$allow_flag" "$allow" --log "$log" -- \
-    bash -c 'trap "exit 0" TERM INT; while true; do sleep 3600; done' \
-    >"$sandbox/traces/netguard-sidecar.log" 2>&1 &
-  echo $! > "$sandbox/netguard.pid"
+  # The port has to be this run's own proxy's: two kickoffs at once could
+  # pick the same free port, the second proxy then failed to bind, and a
+  # listener answering there — the first run's — was taken for it, so the
+  # second run's panes went out under the first run's allowlist and log.
+  # Ours says so in this run's own log; another port is tried otherwise.
+  local from="${SWARM_NETGUARD_PORT:-43178}" attempt i log_size ours=0
+  for ((attempt = 0; attempt < 5; attempt++)); do
+    port="$(pick_free_port "$from")" || {
+      echo "BLOCKER: no free port for the netguard sidecar from $from upward" >&2
+      exit 3
+    }
+    log_size=0
+    [[ -f "$log" ]] && log_size="$(wc -c < "$log" | tr -d ' ')"
+    detach_exec bash "$ROOT/scripts/netguard.sh" --mode proxy-only --port "$port" \
+      "$allow_flag" "$allow" --log "$log" -- \
+      bash -c 'trap "exit 0" TERM INT; while true; do sleep 3600; done' \
+      >"$sandbox/traces/netguard-sidecar.log" 2>&1 &
+    local sidecar=$!
+    echo "$sidecar" > "$sandbox/netguard.pid"
+    for ((i = 0; i < 40; i++)); do
+      if tail -c "+$((log_size + 1))" "$log" 2>/dev/null | grep -qE "proxy listening on tcp:127\.0\.0\.1:${port}([^0-9]|\$)"; then
+        ours=1
+        break
+      fi
+      sleep 0.1
+    done
+    [[ "$ours" -eq 1 ]] && break
+    # The one just started, known by its own pid: not a pid file's word.
+    kill "$sidecar" 2>/dev/null || true
+    rm -f "$sandbox/netguard.pid"
+    echo "WARN: port $port was taken by another listener as this run's proxy started; trying the next one." >&2
+    from=$((port + 1))
+  done
+  if [[ "$ours" -ne 1 ]]; then
+    echo "BLOCKER: this run's netguard proxy did not come up on a port of its own; see $log and $sandbox/traces/netguard-sidecar.log" >&2
+    exit 3
+  fi
   echo "$port" > "$sandbox/netguard.port"
   printf '%s' "$allow" > "$sandbox/netguard.allow"
   printf '%s' "${SWARM_NETGUARD_ONLY:-0}" > "$sandbox/netguard.only"
-  local i
-  for ((i = 0; i < 40; i++)); do
-    if port_in_use "$port"; then
-      break
-    fi
-    sleep 0.1
-  done
   SWARM_PROXY_URL="http://127.0.0.1:${port}"
 }
 
@@ -5296,8 +5643,6 @@ vm_default_image() { # <pack dirs, one per line> [playwright 0|1]  (returns 1 on
   printf '%s\n' "${ref:-dfirswarm-$profile:dev-$(vm_arch)}"
 }
 
-# The hub's sockets live in a short directory: a Unix socket path must fit in
-# 104 bytes on macOS, and msb refuses a longer one (ENAMETOOLONG, measured).
 # The sha256 of one file, with whichever tool this host has.
 sha256_of() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
@@ -5308,28 +5653,70 @@ sha256_of() {
 
 # <sandbox>.custody-anchor.json: the run id, when it started, and the sha256
 # of inputs.json as the kickoff wrote it (scripts/custody.ts reads it).
-write_custody_anchor() { # <sandbox> <run id>
-  local sandbox="$1" run="$2" anchor manifest_sha=""
+write_custody_anchor() { # <sandbox> <run id> [isolation]
+  local sandbox="$1" run="$2" isolation="${3:-host}" anchor manifest_sha=""
   anchor="$(cd "$(dirname "$sandbox")" && pwd -P)/$(basename "$sandbox").custody-anchor.json"
   [[ -f "$sandbox/inputs.json" ]] && manifest_sha="$(sha256_of "$sandbox/inputs.json")"
   # A reused sandbox's anchor is read-only: replaced, not written through.
   rm -f "$anchor"
-  jq -n --arg run "$run" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg m "$manifest_sha" \
-    '{run: $run, started_at: $at} + (if $m == "" then {} else {inputs_manifest_sha256: $m} end)' > "$anchor"
+  # How the agents were held is part of what custody must not take from
+  # inside the run: which files an agent could write depends on it.
+  jq -n --arg run "$run" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg m "$manifest_sha" --arg iso "$isolation" \
+    '{run: $run, started_at: $at, isolation: $iso} + (if $m == "" then {} else {inputs_manifest_sha256: $m} end)' > "$anchor"
 }
 
 # Where every run's hub lives: one parent, so a host-mode pane can be denied
 # the lot (fsguard --no-socket-tree) and a file that claims to name a hub
 # directory can be checked against it.
-hubs_parent() {
-  local parent="${TMPDIR:-/tmp}/dfirswarm-hubs"
-  mkdir -p "$parent" && chmod 700 "$parent"
+#
+# One per user and the same from any shell: it was under the caller's
+# $TMPDIR, so a stop from an ssh session, cron or sudo (another TMPDIR, or
+# none) found no hub, said "Stopped" and left the hub, its keeper and its
+# tokens behind; on Linux one /tmp/dfirswarm-hubs served every user of the
+# host, and whoever made it first locked the others out. On macOS the
+# resolved /private/var/folders/… path also put an agent's socket past the
+# 104 bytes a Unix socket path may have. It is under the harness's own home,
+# which a guarded pane cannot write and a reboot does not clear, so a stop
+# after a crash still finds the hub's state.
+hubs_parent_path() {
+  printf '%s\n' "${SWARM_HUBS_DIR:-${DFIRSWARM_HOME:-$HOME/.dfirswarm}/hubs}"
+}
+
+# The hubs' parent, resolved, and only when it is this user's own directory:
+# not a link, not someone else's. --create makes it (0700) when it is not
+# there; a reader never creates it.
+hubs_parent() { # [--create]
+  local parent="${SWARM_HUBS_DIR:-${DFIRSWARM_HOME:-$HOME/.dfirswarm}/hubs}"
+  if [[ "${1:-}" == "--create" && ! -e "$parent" && ! -L "$parent" ]]; then
+    mkdir -p "$(dirname "$parent")" 2>/dev/null && mkdir -m 700 "$parent" 2>/dev/null || true
+  fi
+  if [[ -L "$parent" ]]; then
+    echo "BLOCKER: the VM hubs' directory $parent is a link; the harness keeps its hubs only in a directory of its own. Remove the link (or set SWARM_HUBS_DIR)." >&2
+    return 1
+  fi
+  [[ -d "$parent" ]] || return 1
+  if [[ ! -O "$parent" ]]; then
+    echo "BLOCKER: the VM hubs' directory $parent is not yours; the harness keeps its hubs only in a directory of its own. Set SWARM_HUBS_DIR to one." >&2
+    return 1
+  fi
+  chmod 700 "$parent" 2>/dev/null || return 1
   (cd "$parent" && pwd -P)
 }
 
+# The longest Unix socket path a run's hub will bind: an agent's, in a hub
+# directory made for this run id. macOS allows 104 bytes with the NUL,
+# Linux 108; a path over 103 bytes makes the hub die on its first listen,
+# and msb refuses to map a longer one into a VM (ENAMETOOLONG, measured).
+hub_socket_path_max() { # <run id> <longest agent id>
+  local parent LC_ALL=C
+  parent="$(hubs_parent --create)" || return 1
+  printf '%s\n' "${#parent}" | awk -v r="$1" -v a="$2" '{print $1 + length("/dfs-" r ".XXXXXX/" a ".sock")}'
+}
+
 vm_hub_dir() { # <run id> <sandbox>
-  local dir
-  dir="$(mktemp -d "$(hubs_parent)/dfs-$1.XXXXXX")"
+  local dir parent
+  parent="$(hubs_parent --create)" || return 1
+  dir="$(mktemp -d "$parent/dfs-$1.XXXXXX")" || return 1
   chmod 700 "$dir"
   # Which run this hub serves, where no pane can write: hub.dir in the
   # sandbox is only tool-protected, so a host pane could name another run's
@@ -5348,7 +5735,7 @@ hub_dir_of() { # <sandbox>
   local sandbox="$1" dir parent
   [[ -f "$sandbox/hub.dir" ]] || return 1
   dir="$(cat "$sandbox/hub.dir" 2>/dev/null || true)"
-  parent="$(hubs_parent)"
+  parent="$(hubs_parent 2>/dev/null)" || return 1
   [[ -n "$dir" && "$dir" == "$parent"/dfs-* && "$dir" != *..* && -d "$dir" ]] || return 1
   # And one made for this sandbox, not another run's.
   [[ "$(cat "$dir/sandbox" 2>/dev/null)" == "$(cd "$sandbox" 2>/dev/null && pwd -P)" ]] || return 1
@@ -5392,7 +5779,8 @@ start_vm_hub() { # <sandbox> <hub dir> <run id> <collector socket> <agent ids...
   [[ "${forging:-0}" -eq 1 ]] && hub_args+=(--forging)
   [[ "${vm_snapshot:-1}" -eq 1 ]] || hub_args+=(--no-snapshot)
   # The inbox page bound is read by readInbox, which for a VM runs here.
-  printf '%s' "$input" | SWARM_RUNS_DIR="$RUNS_DIR" SWARM_INBOX_PAGE_CHARS="${inbox_page_chars:-}" SWARM_VM_IMAGE_DIGEST="${vm_image_digest:-}" detach_exec node --experimental-strip-types --no-warnings "$script" \
+  # The custody the hub takes at the finish has the operator's deadline.
+  printf '%s' "$input" | SWARM_RUNS_DIR="$RUNS_DIR" SWARM_INBOX_PAGE_CHARS="${inbox_page_chars:-}" SWARM_VM_IMAGE_DIGEST="${vm_image_digest:-}" SWARM_CUSTODY_TIMEOUT="${custody_timeout:-${SWARM_CUSTODY_TIMEOUT:-14400}}" detach_exec node --experimental-strip-types --no-warnings "$script" \
     "$sandbox" --dir "$dir" --run "$run" "${hub_args[@]}" --quiet >"$sandbox/traces/vm-hub.log" 2>&1 &
   local hub_pid=$!
   echo "$hub_pid" > "$sandbox/hub.pid"
@@ -5496,7 +5884,10 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when a VM of the
   # msb keeps a VM's secret values in its database; a finish that removed
   # VMs clears their bytes from it, and one that could not says so.
   local unscrubbed
-  unscrubbed="$(jq -r '[.vms[]?.msb_db // empty | select(. != "scrubbed" and . != "no database")] | unique | join(", ")' <<<"$out" 2>/dev/null || true)"
+  # The VM records carry it too: most runs are put away by the hub, whose
+  # finish this stop does not see.
+  unscrubbed="$( { jq -c '.vms[]? // empty' <<<"$out" 2>/dev/null; cat "$sandbox"/vm/*.json 2>/dev/null; } \
+    | jq -rs '[.[] | objects | .msb_db // empty | select(. != "scrubbed" and . != "no database")] | unique | join(", ")' 2>/dev/null || true)"
   [[ -n "$unscrubbed" ]] && echo "WARN: msb's database was not cleared of the removed VMs' configuration ($unscrubbed): a secret's value may stay in ${MSB_HOME:-$HOME/.microsandbox}/db until a later stop clears it." >&2
   # Nothing to put away is said too: the hub had already done it.
   if [[ "$(jq -r '(.vms // []) | length' <<<"$out" 2>/dev/null || echo 0)" == "0" ]]; then
@@ -5633,11 +6024,15 @@ vm_build_spec() { # <hub dir> <out file>
     add_env PIP_CACHE_DIR "/tmp/pip-cache"
     add_env PIP_BREAK_SYSTEM_PACKAGES 1
   fi
+  # The agents' clock reads UTC, as the host's own run processes do; an
+  # operator's --env TZ below still wins.
+  add_env TZ UTC
   local e
   for e in ${extra_env[@]+"${extra_env[@]}"}; do
     [[ "$e" == --env ]] && continue
-    case "${e%%=*}" in
-      PATH|HOME|PI_CODING_AGENT_DIR|ZDOTDIR|HTTPS_PROXY|HTTP_PROXY|ALL_PROXY|TMPDIR) continue ;;
+    # Named in any case: curl and pip read https_proxy and no_proxy too.
+    case "$(printf '%s' "${e%%=*}" | tr '[:lower:]' '[:upper:]')" in
+      PATH|HOME|PI_CODING_AGENT_DIR|ZDOTDIR|HTTPS_PROXY|HTTP_PROXY|ALL_PROXY|NO_PROXY|TMPDIR) continue ;;
     esac
     add_env "${e%%=*}" "${e#*=}"
   done
@@ -5815,6 +6210,7 @@ launch_vm_agents() {
 }
 
 cmd_reap() {
+  local reap_args=("$@")
   local id="" stall="${REAP_TIMEOUT:-960}" stop=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -5832,8 +6228,14 @@ cmd_reap() {
   # An orphan of a run this registry knows keeps its disk, as a stop would.
   local reaped only_args=()
   [[ -n "$id" ]] && only_args=(--only "$id")
-  reaped="$(vm_cli reap --registry "$REGISTRY" ${only_args[@]+"${only_args[@]}"} 2>/dev/null | jq -r '.removed | length' 2>/dev/null || echo 0)"
-  [[ "${reaped:-0}" -gt 0 ]] && echo "Reaped $reaped VM(s) whose run is not running."
+  local reap_out
+  if reap_out="$(vm_cli reap --registry "$REGISTRY" ${only_args[@]+"${only_args[@]}"} 2>/dev/null)"; then
+    reaped="$(jq -r '(.removed // []) | length' <<<"$reap_out" 2>/dev/null || echo 0)"
+    [[ "${reaped:-0}" -gt 0 ]] && echo "Reaped $reaped VM(s) whose run is not running."
+  else
+    # Said, not taken for "nothing to reap": a VM left up is not put away by silence.
+    echo "WARN: msb's VMs could not be listed, so none was reaped: $(jq -r '.error // "no answer"' <<<"$reap_out" 2>/dev/null || printf 'no answer')" >&2
+  fi
   local sandboxes=()
   if [[ -n "$id" ]]; then
     local rec
@@ -5856,6 +6258,7 @@ cmd_reap() {
   local sb extra=()
   [[ "$stop" -eq 1 ]] && extra+=(--stop)
   for sb in "${sandboxes[@]}"; do
+    operator_trace "$sb" reap ${reap_args[@]+"${reap_args[@]}"}
     echo "Reap $sb (stall ${stall}s)"
     SWARM_REGISTRY="$REGISTRY" bash "$ROOT/scripts/reap.sh" --sandbox "$sb" --timeout "$stall" ${extra[@]+"${extra[@]}"}
   done
@@ -5923,8 +6326,32 @@ cmd_netcheck() {
   echo "netcheck ok"
 }
 
+# Whether anything of a run is still up: its hub, collector, watchdog or
+# proxy, or (a VM run) one of its VMs.
+run_has_live_process() { # <sandbox> <record json>
+  local sandbox="$1" rec="$2" run
+  daemon_pid_ours "$(cat "$sandbox/collector.pid" 2>/dev/null)" trace-collector.mjs "$sandbox" && return 0
+  daemon_pid_ours "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null)" idle-nudge.sh "$sandbox" && return 0
+  daemon_pid_ours "$(cat "$sandbox/netguard.pid" 2>/dev/null)" netguard.sh "$sandbox" && return 0
+  hub_pid_ours "$sandbox" "$(cat "$sandbox/hub.pid" 2>/dev/null)" && return 0
+  if [[ "$(jq -r '.isolation.mode // "host"' <<<"$rec")" == "microvm" ]]; then
+    run="$(jq -r '.id' <<<"$rec")"
+    # A list that fails says nothing either way: taken as alive.
+    local listed
+    listed="$(vm_cli list --run "$run" 2>/dev/null)" || return 0
+    [[ "$(jq -r '(.vms // []) | length' <<<"$listed" 2>/dev/null)" != "0" ]] && return 0
+  fi
+  return 1
+}
+
+# The time of the trace's last line, when it has one.
+last_trace_ts() { # <sandbox>
+  tail -n 1 "$1/traces/events.jsonl" 2>/dev/null | jq -r '.recv_ts // .ts // empty' 2>/dev/null || true
+}
+
 cmd_stop() {
-  local id="${1:-}" no_custody=0 custody_timeout="${SWARM_CUSTODY_TIMEOUT:-14400}" after_hub=0 vms_left=0
+  local stop_args=("$@")
+  local id="${1:-}" no_custody=0 custody_timeout="" after_hub=0 vms_left=0
   shift || true
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -5947,6 +6374,9 @@ cmd_stop() {
     echo "Unknown swarm id: $id" >&2
     exit 1
   fi
+  # This stop's --custody-timeout, else the environment's, else what the
+  # kickoff recorded for the run, else four hours.
+  [[ -n "$custody_timeout" ]] || custody_timeout="${SWARM_CUSTODY_TIMEOUT:-$(jq -r '.custody_timeout_sec // 14400' <<<"$rec")}"
   # A stop can take minutes (snapshots, custody). Interrupted, it says where
   # it was and that running it again finishes the job: every step is safe to
   # repeat.
@@ -5962,6 +6392,13 @@ cmd_stop() {
   fi
   local sandbox
   sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  operator_trace "$sandbox" stop ${stop_args[@]+"${stop_args[@]}"}
+  # A run recorded as running whose every process is gone did not end by
+  # itself: the host restarted, or the run crashed. Said, with the last line
+  # the trace has, before this stop records it as stopped.
+  if [[ -n "$sandbox" && "$(jq -r '.state // empty' <<<"$rec")" == "running" ]] && ! run_has_live_process "$sandbox" "$rec"; then
+    echo "NOTE:         nothing of run $id was alive (no hub, collector, watchdog or VM): the host restarted or the run crashed$(last_trace_ts "$sandbox" | sed 's/^/; its last trace line is from /')."
+  fi
   # The VMs before the daemons: an agent's last lines reach the trace through
   # the hub and the collector, so those stay up until the VMs are down.
   if [[ -n "$sandbox" && "$(jq -r '.isolation.mode // "host"' <<<"$rec")" == "microvm" ]]; then
@@ -5985,15 +6422,20 @@ cmd_stop() {
   if [[ -n "$sandbox" && -d "$sandbox" && "$no_custody" -eq 0 ]]; then
     echo "Custody:      re-hashing the evidence and sealing the run (up to ${custody_timeout}s; --no-custody skips it)..."
     stop_step="taking custody"
-    local custody_rc=0
+    local custody_rc=0 custody_before="" custody_at=""
+    # Which verdict is on disk now: an earlier stop's (the hub's, at its
+    # finish), which a custody that fails to write must not pass for this one.
+    [[ -f "$sandbox/custody.json" ]] && custody_before="$(jq -r '.at // empty' "$sandbox/custody.json" 2>/dev/null || true)"
     # Its own deadline, a hard one past that inside it, and this one past
     # both: nothing custody reads can hold the stop. Its progress goes to the
     # log; no input is given it.
     with_timeout "$((custody_timeout + 300))" node --experimental-strip-types --no-warnings "$ROOT/scripts/custody.ts" "$sandbox" --run "$id" --timeout "$custody_timeout" >/dev/null 2>"$sandbox/traces/custody.log" </dev/null || custody_rc=$?
-    if [[ -f "$sandbox/custody.json" ]]; then
+    [[ -f "$sandbox/custody.json" ]] && custody_at="$(jq -r '.at // empty' "$sandbox/custody.json" 2>/dev/null || true)"
+    if [[ -n "$custody_at" && "$custody_at" != "$custody_before" ]]; then
       echo "Custody:      $(jq -r '.summary' "$sandbox/custody.json" 2>/dev/null)"
     else
       echo "WARN: the custody check did not finish (exit $custody_rc); see $sandbox/traces/custody.log" >&2
+      [[ -n "$custody_at" ]] && echo "      The verdict in $sandbox/custody.json is an earlier one ($custody_at), not this stop's." >&2
     fi
   elif [[ "$no_custody" -eq 1 ]]; then
     echo "Custody:      skipped (--no-custody); run scripts/custody.ts $sandbox later"
@@ -6139,6 +6581,7 @@ cmd_say() {
   local sandbox
   sandbox="$(json_get "$id" | jq -r '.sandbox // empty')"
   [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+  operator_trace "$sandbox" say "$id" "$message"
   local dir="$sandbox/threads/main"
   mkdir -p "$dir"
   table_lock "$sandbox" || exit 1
@@ -6446,6 +6889,12 @@ main() {
     exit 0
   fi
   shift || true
+  # What changes or leaves a run is on the operator's record; what only reads
+  # it (list, status, summary, context, help) is not.
+  case "$cmd" in
+    start|stop|reap|say|package|report|tools)
+      case " $* " in *" -h "*|*" --help "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
+  esac
   case "$cmd" in
     start) cmd_start "$@" ;;
     list) cmd_list ;;

@@ -77,8 +77,17 @@ is_local_model() { # <agent id>
     lmstudio|ollama|vllm|llamacpp|llama.cpp|local) return 0 ;;
   esac
   host="$(jq -r --arg p "${model%%/*}" '.providers[$p].baseUrl // empty' "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/models.json" 2>/dev/null || true)"
+  # The host part of the base URL, not any "10." in it: a public name such
+  # as api10.example.com is not local.
+  host="$(printf '%s' "$host" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[^@/]*@##; s#[/?].*$##')"
+  if [[ "$host" == \[* ]]; then
+    host="${host#[}"
+    host="${host%%]*}"
+  else
+    host="${host%:*}"
+  fi
   case "$host" in
-    *127.0.0.1*|*localhost*|*192.168.*|*10.*|*.local*) return 0 ;;
+    127.*|localhost|::1|0.0.0.0|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|169.254.*|fc*|fd*|fe80:*|*.local|*.localhost|host.microsandbox.internal) return 0 ;;
   esac
   return 1
 }
@@ -240,6 +249,9 @@ set_count() {
 # what notices.
 ensure_hub() {
   [[ -n "$HUB_DIR" && -d "$HUB_DIR" && ! -e "$HUB_DIR/.stop" ]] || return 0
+  # A keeper that gave up on a hub dying in a row has said why in the hub's
+  # log; restarting it here every pass would only repeat the crash.
+  [[ -e "$HUB_DIR/.keeper-gave-up" ]] && return 0
   local pid keeper script
   pid="$(cat "$SANDBOX/hub.pid" 2>/dev/null || true)"
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then return 0; fi
