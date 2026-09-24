@@ -48,9 +48,10 @@ export type UiAppOptions = {
   runsDir: string;
   /**
    * Shared secret for the calls that spend money or change a run. Reading
-   * stays open — the whole point of the app is that anyone on the LAN can
-   * watch — but starting, stopping, reaping and restoring need it. Empty
-   * disables the check, which is the old behaviour.
+   * stays open to whoever can reach the bound address (this machine only by
+   * default; the LAN with --host 0.0.0.0), but starting, stopping, reaping
+   * and restoring need it. Empty disables the check, which is the old
+   * behaviour.
    */
   token?: string;
   distDir?: string;
@@ -245,6 +246,8 @@ export function createUiApp(options: UiAppOptions): UiApp {
       roots: await describeRoots(envRoots, ui),
       sets: await listInputSets(roots),
       runtime_roots: allowRuntimeRoots,
+      /** The server's OS: a disk image is attached with hdiutil, so only on darwin. The form says so before the kickoff refuses it. */
+      platform: process.platform,
     };
   }
 
@@ -265,8 +268,8 @@ export function createUiApp(options: UiAppOptions): UiApp {
    * await-done.sh certifies a run, so the panel and the CLI can never disagree.
    * Checks are operator-authored shell commands reading agent-written files,
    * so a result is cached and a swarm's checks never run concurrently —
-   * anyone on the LAN can watch, and watching must not become a way to hammer
-   * the host. A result stands for the TTL, and beyond it for as long as
+   * whoever can reach the console can watch without the token, and watching
+   * must not become a way to hammer the host. A result stands for the TTL, and beyond it for as long as
    * nothing under the sandbox has changed: the checks read what the agents
    * wrote, so a quiet or finished swarm never sends the console to the shell
    * again. Only an attached watcher can vouch for "nothing changed"; while
@@ -413,7 +416,7 @@ export function createUiApp(options: UiAppOptions): UiApp {
       json(res, 200, await inputsLibrary());
       return;
     }
-    // Adding a root over the LAN is off unless the server was started with the flag; then it needs the token.
+    // Adding a root from the form is off unless the server was started with the flag; then it needs the token.
     if (path === "/api/inputs/roots") {
       if (method !== "POST") throw new HttpError(405, "method not allowed");
       if (!allowRuntimeRoots) throw new HttpError(403, "this server does not take inputs roots from the form; start it with swarm.sh ui --allow-inputs-root-from-ui, or name the root with --inputs-root DIR");
@@ -740,9 +743,9 @@ export function createUiApp(options: UiAppOptions): UiApp {
         }
         const rel = decodeURIComponent(rest.join("/"));
         // The lexical check stops `..`; it does not stop a symlink an agent's
-        // shell planted under work/. This route is open to the LAN, so the
-        // resolver refuses a link outright and confirms what is left really
-        // lives under work/.
+        // shell planted under work/. This route needs no token (whoever
+        // reaches the console may read it), so the resolver refuses a link
+        // outright and confirms what is left really lives under work/.
         const abs = await resolveWorkFile(sandbox, rel);
         if (typeof abs !== "string") throw new HttpError(abs.error, abs.message);
         // Artifacts are agent output. sandbox without allow-same-origin is an

@@ -3,18 +3,18 @@
  * Kickoff uses `swarm.sh start --no-start`, so the real registry writer runs.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import { createUiApp, defaultRunsDir, type UiApp } from "../scripts/ui/app.ts";
-import { ActionRunner, checkReadiness, isHostName, isLocalHost, listModels, listPacks, parseModelList, parseModelTeam, readLocalProviders, startArgv, validateStart } from "../scripts/ui/actions.ts";
+import { ActionRunner, allowEntryOfUrl, checkReadiness, isHostName, isLocalHost, listModels, listPacks, parseModelList, parseModelTeam, readLocalProviders, startArgv, validateStart, vmProviderHosts, vmReadiness } from "../scripts/ui/actions.ts";
 import { resolveInputSet } from "../scripts/ui/inputs.ts";
 import { ChangeBus, classifyPath, SUPPRESSED_KINDS, type BusMessage } from "../scripts/ui/watch.ts";
-import { activitySeries, deriveCallsign, derivePhase, vmHealth } from "../scripts/ui/model.ts";
+import { activitySeries, deriveCallsign, derivePhase, listSwarmRows, readCustody, vmHealth } from "../scripts/ui/model.ts";
 import { seedFixtureRuns } from "../scripts/seed-fixture.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1852,7 +1852,7 @@ test("a VM run's VMs are shown from their records, with the live state only from
     await writeFile(join(hub, "status.json"), JSON.stringify({ agents: { a0: { state: "working", connected: true, since: "t" } } }));
     await writeFile(join(sandbox, "hub.dir"), `${await realpath(hub)}\n`);
     const [vm] = await vmHealth(sandbox);
-    assert.deepEqual(vm.live, { state: "working", connected: true, since: "t" });
+    assert.deepEqual(vm.live, { state: "working", connected: true, since: "t", last_seen: null });
     assert.deepEqual(vm.image, { ref: "dfirswarm-disk:dev-arm64", digest: "sha256:aa", expected: "sha256:aa" });
     assert.equal(vm.probe.clock_skew_s, -0.4);
     assert.deepEqual(vm.installed_outside, ["apt cowsay 3.03"]);
@@ -1865,5 +1865,327 @@ test("a VM run's VMs are shown from their records, with the live state only from
     if (was === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = was;
     await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("under microVM the form's default copy of the evidence reaches the kickoff as --inputs-copy; bind stays a bind", () => {
+  const argvOf = (extra: Record<string, unknown>) => {
+    const r = validateStart({ n: 2, cap_usd: 1, model: "x/y", inputs: "brief", ...extra });
+    assert.ok(r.ok, JSON.stringify(extra));
+    return r.ok ? startArgv({ ...r.params, inputs_dir: "/evidence/brief" }) : [];
+  };
+  // The default and an explicit copy: without the flag the kickoff mounts the source in place.
+  for (const extra of [{ isolation: "microvm" }, { isolation: "microvm", inputs_attach: "copy" }]) {
+    const argv = argvOf(extra);
+    assert.ok(argv.includes("--inputs-copy"), JSON.stringify(extra));
+    assert.ok(!argv.includes("--inputs-bind"));
+  }
+  const bind = argvOf({ isolation: "microvm", inputs_attach: "bind" });
+  assert.ok(bind.includes("--inputs-bind") && !bind.includes("--inputs-copy"));
+  // A host run copies by default; the flag is a VM run's.
+  const host = argvOf({});
+  assert.ok(!host.includes("--inputs-copy") && !host.includes("--inputs-bind"));
+});
+
+test("OAuth in the VMs is a microVM run's switch, and reaches the kickoff as --allow-oauth-in-vm", () => {
+  const on = validateStart({ n: 2, cap_usd: 1, model: "anthropic/claude-sonnet-4.5", isolation: "microvm", allow_oauth_in_vm: true });
+  assert.ok(on.ok);
+  if (on.ok) assert.ok(startArgv(on.params).includes("--allow-oauth-in-vm"));
+  const off = validateStart({ n: 2, cap_usd: 1, model: "anthropic/claude-sonnet-4.5", isolation: "microvm" });
+  assert.ok(off.ok && !startArgv(off.params).includes("--allow-oauth-in-vm"));
+  const host = validateStart({ n: 2, cap_usd: 1, model: "anthropic/claude-sonnet-4.5", allow_oauth_in_vm: true });
+  assert.equal(host.ok, false);
+  if (!host.ok) assert.match(host.error, /allow_oauth_in_vm needs isolation microvm/);
+});
+
+test("provider hosts are provider=host as the kickoff checks them, one --provider-host each, in either mode", () => {
+  const ok = validateStart({ n: 2, cap_usd: 1, model: "my-gw/m1", provider_hosts: ["my-gw=LLM.example.org", "llama=192.168.1.20:8000", "my-gw=LLM.example.org"] });
+  assert.ok(ok.ok);
+  if (ok.ok) {
+    assert.deepEqual(ok.params.provider_hosts, ["my-gw=LLM.example.org", "llama=192.168.1.20:8000"], "an entry given twice is taken once");
+    const argv = startArgv(ok.params);
+    assert.deepEqual(
+      argv.filter((a, i) => a === "--provider-host" || argv[i - 1] === "--provider-host"),
+      ["--provider-host", "my-gw=LLM.example.org", "--provider-host", "llama=192.168.1.20:8000"],
+    );
+  }
+  const typed = validateStart({ n: 2, cap_usd: 1, model: "x/y", isolation: "microvm", provider_hosts: "a=a.example.com, b=b.example.org" });
+  assert.ok(typed.ok && typed.params.provider_hosts?.length === 2, "a typed list splits on commas and spaces");
+  for (const bad of ["MyGW=llm.example.org", "gw", "gw=", "=llm.example.org", "gw=a=b.example.org", "gw=nodot", "gw=*.com", "-gw=llm.example.org"]) {
+    const r = validateStart({ n: 2, cap_usd: 1, model: "x/y", provider_hosts: [bad] });
+    assert.equal(r.ok, false, bad);
+    if (!r.ok) assert.match(r.error, /provider_hosts/);
+  }
+  const many = validateStart({ n: 2, cap_usd: 1, model: "x/y", provider_hosts: Array.from({ length: 21 }, (_, i) => `p${i}=h${i}.example.org`) });
+  assert.equal(many.ok, false);
+});
+
+test("readiness says what a VM kickoff would refuse: a subscription, a signing provider, a provider with no host", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ui-vmready-"));
+  try {
+    await writeFile(join(dir, "auth.json"), JSON.stringify({ anthropic: { type: "oauth" }, openai: { type: "api_key" } }));
+    await writeFile(join(dir, "models.json"), JSON.stringify({ providers: { "my-gw": { baseUrl: "https://llm.example.org:8443/v1" }, lab: { baseUrl: "http://192.168.1.20:8000/v1", apiKey: "local" } } }));
+    const opts = { agentDir: dir, env: {}, piHosts: async (m: string) => (m.startsWith("groq/") ? ["api.groq.com"] : []) };
+
+    const sub = await vmReadiness("anthropic/claude-sonnet-4.5", undefined, opts);
+    assert.deepEqual(sub.vm_blockers.map((b) => [b.kind, b.lifted_by]), [["oauth", "allow_oauth_in_vm"]]);
+    assert.deepEqual(sub.vm_hosts, ["api.anthropic.com", "platform.claude.com"]);
+
+    const key = await vmReadiness("openai/gpt-5.4", "api_key", opts);
+    assert.deepEqual(key.vm_blockers, []);
+
+    const signing = await vmReadiness("amazon-bedrock/claude", undefined, opts);
+    assert.deepEqual(signing.vm_blockers.map((b) => [b.kind, b.lifted_by]), [["signing", undefined]], "nothing lifts a provider that signs its own requests");
+
+    const unknown = await vmReadiness("mystery/m1", undefined, opts);
+    assert.deepEqual(unknown.vm_blockers.map((b) => [b.kind, b.lifted_by]), [["unknown_host", "provider_hosts"]]);
+    assert.match(unknown.vm_blockers[0].reason, /mystery=<the host/);
+
+    assert.deepEqual((await vmReadiness("groq/llama", undefined, opts)).vm_blockers, [], "Pi's own list names the host");
+    assert.deepEqual(await vmProviderHosts("my-gw/m1", opts), ["llm.example.org:8443"], "a models.json provider brings its base URL's host");
+    assert.deepEqual(await vmReadiness("lab/qwen", undefined, opts), { vm_hosts: [], vm_blockers: [] }, "a local server goes through the host gateway");
+    // Azure's resource comes from the shell, as the kickoff reads it.
+    assert.deepEqual(await vmProviderHosts("azure-openai-responses/gpt", { ...opts, env: { AZURE_OPENAI_RESOURCE_NAME: "Contoso" } }), ["contoso.openai.azure.com"]);
+    assert.equal((await vmReadiness("azure-openai-responses/gpt", undefined, opts)).vm_blockers[0]?.kind, "unknown_host");
+    assert.equal(allowEntryOfUrl("http://127.0.0.1:8080/v1"), "127.0.0.1:8080");
+    assert.equal(allowEntryOfUrl("https://api.example.org/v1"), "api.example.org");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("finish_failed and stop_incomplete are their own phases, sentinel or not, and the list says finishing while the hub puts the VMs away", async () => {
+  assert.equal(derivePhase("finish_failed", true), "finish_failed");
+  assert.equal(derivePhase("finish_failed", false), "finish_failed");
+  assert.equal(derivePhase("stop_incomplete", true), "stop_incomplete", "a VM left up after a stop is said over the sentinel");
+  assert.equal(derivePhase("stop_incomplete", false), "stop_incomplete");
+  const dir = await mkdtemp(join(tmpdir(), "ui-finishing-"));
+  try {
+    const sandbox = join(dir, "sfin1");
+    await mkdir(join(sandbox, "done"), { recursive: true });
+    await mkdir(join(sandbox, "vm"), { recursive: true });
+    await writeFile(join(sandbox, "done", "SWARM_DONE"), "---\nby: a0\n---\n");
+    await writeFile(join(sandbox, "vm", "a0.json"), JSON.stringify({ agent: "a0" }));
+    const registry = (state: string, mode = "microvm") => writeFile(join(dir, "registry.json"), JSON.stringify({ runs: [{ id: "sfin1", sandbox, state, isolation: { mode }, agents: ["a0"] }] }));
+    const row = async () => (await listSwarmRows(dir)).find((r) => r.id === "sfin1")!;
+
+    await registry("running");
+    assert.deepEqual([(await row()).phase, (await row()).finishing], ["done", true], "the sentinel is written and a VM is not put away");
+    await registry("running", "host");
+    assert.equal((await row()).finishing, false, "a host run has no VMs to put away");
+    await registry("running");
+    await writeFile(join(sandbox, "vm", "a0.json"), JSON.stringify({ agent: "a0", stopped_at: "2026-09-24T10:00:00Z" }));
+    assert.equal((await row()).finishing, false, "every VM is put away");
+    await registry("finish_failed");
+    assert.deepEqual([(await row()).phase, (await row()).finishing], ["finish_failed", false]);
+
+    // The hub's own word: finished and not finish_done, while its process is
+    // up, is finishing even after the registry says finished (custody runs then).
+    const was = process.env.TMPDIR;
+    process.env.TMPDIR = dir;
+    try {
+      const hub = join(dir, "dfirswarm-hubs", "dfs-sfin1.z");
+      await mkdir(hub, { recursive: true });
+      await writeFile(join(hub, "sandbox"), `${await realpath(sandbox)}\n`);
+      await writeFile(join(sandbox, "hub.dir"), `${await realpath(hub)}\n`);
+      await registry("finished");
+      const hubStatus = (extra: Record<string, unknown>) => writeFile(join(hub, "status.json"), JSON.stringify({ at: new Date().toISOString(), pid: process.pid, agents: {}, ...extra }));
+      await hubStatus({ finished: true, finish_done: false });
+      assert.equal((await row()).finishing, true, "the hub is taking custody");
+      await hubStatus({ finished: true, finish_done: true });
+      assert.equal((await row()).finishing, false, "the hub is done");
+      await hubStatus({ finished: true, finish_done: false, pid: 999_999_9 });
+      assert.equal((await row()).finishing, false, "a dead hub's last word is not what is happening");
+    } finally {
+      if (was === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = was;
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a VM run's hub is up only while its pid is this run's vm-hub.ts and the status is its own; last_seen, mounts, network and pack secrets are shown", async () => {
+  const base = await mkdtemp(join(tmpdir(), "ui-hub-"));
+  const was = process.env.TMPDIR;
+  process.env.TMPDIR = base;
+  let child: ReturnType<typeof spawn> | null = null;
+  let keeper: ReturnType<typeof spawn> | null = null;
+  try {
+    const sandbox = join(base, "sb");
+    await mkdir(join(sandbox, "vm"), { recursive: true });
+    await writeFile(join(sandbox, "vm", "a0.json"), JSON.stringify({
+      agent: "a0",
+      mounts: [
+        { host: "/runs/sb", guest: "/runs/sb", mode: "ro" },
+        { host: "/runs/sb/work/a0", guest: "/runs/sb/work/a0", mode: "rw" },
+        { host: "/runs/sb/work/a0/extracted", guest: "/runs/sb/work/a0/extracted", mode: "rw", noexec: true },
+      ],
+      network: { default: "deny", allow_hosts: ["api.openai.com"], host_ports: [] },
+      secrets: [{ name: "openai (API key)", hosts: ["api.openai.com"] }, { name: "VT_KEY", hosts: ["www.virustotal.com"] }],
+    }));
+    const run = { id: "r", pack_secrets: { "memory-forensics": { names: ["VT_KEY"], mode: "injected" } } };
+
+    // No hub.dir: no hub is recorded, and nothing is said about one.
+    let [vm] = await vmHealth(sandbox, run);
+    assert.equal(vm.hub_alive, null);
+    assert.deepEqual(vm.mounts, [
+      { host: "/runs/sb", guest: "/runs/sb", mode: "ro", noexec: false },
+      { host: "/runs/sb/work/a0", guest: "/runs/sb/work/a0", mode: "rw", noexec: false },
+      { host: "/runs/sb/work/a0/extracted", guest: "/runs/sb/work/a0/extracted", mode: "rw", noexec: true },
+    ]);
+    assert.deepEqual(vm.network, { default: "deny", allow_hosts: ["api.openai.com"], host_ports: [] });
+    assert.deepEqual(vm.secrets.map((s) => s.name), ["openai (API key)", "VT_KEY"]);
+    assert.deepEqual(vm.pack_secrets, [{ pack: "memory-forensics", names: ["VT_KEY"], mode: "injected" }]);
+
+    const hub = join(base, "dfirswarm-hubs", "dfs-r.y");
+    await mkdir(hub, { recursive: true });
+    const realHub = await realpath(hub);
+    await writeFile(join(hub, "sandbox"), `${await realpath(sandbox)}\n`);
+    await writeFile(join(sandbox, "hub.dir"), `${realHub}\n`);
+    // A process whose command line is a hub's for this directory.
+    child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "vm-hub.ts", "--dir", realHub], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 200));
+    await writeFile(join(sandbox, "hub.pid"), `${child.pid}\n`);
+    const status = (at: string) => writeFile(join(hub, "status.json"), JSON.stringify({ at, agents: { a0: { state: "working", connected: true, since: "t", last_seen: "2026-09-24T10:00:00.000Z" } } }));
+    await status(new Date().toISOString());
+    [vm] = await vmHealth(sandbox, run);
+    assert.equal(vm.hub_alive, true, vm.hub_detail ?? "");
+    assert.equal(vm.live?.last_seen, "2026-09-24T10:00:00.000Z");
+    assert.equal(typeof vm.hub_status_age_s, "number");
+
+    // The pid is the hub's, but the status predates it: an earlier hub wrote it.
+    await status(new Date(Date.now() - 3600_000).toISOString());
+    [vm] = await vmHealth(sandbox, run);
+    assert.equal(vm.hub_alive, false);
+    assert.match(vm.hub_detail ?? "", /has not written its status since it started/);
+    assert.ok((vm.hub_status_age_s ?? 0) >= 3599, "how stale is said");
+
+    // A status older than a pid file written long ago is the hub's own, however quiet.
+    const old = new Date(Date.now() - 7200_000);
+    await utimes(join(sandbox, "hub.pid"), old, old);
+    assert.equal((await vmHealth(sandbox, run))[0].hub_alive, true, "no heartbeat: a quiet hub's status is old and that is fine");
+
+    // A status that names its writer: the hub now in hub.pid, or another.
+    await writeFile(join(hub, "status.json"), JSON.stringify({ at: new Date(Date.now() - 3600_000).toISOString(), pid: child.pid, finished: true, finish_done: false, agents: {} }));
+    [vm] = await vmHealth(sandbox, run);
+    assert.equal(vm.hub_alive, true, "written by this hub, however long ago");
+    assert.equal(vm.hub_finishing, true, "and it says it is putting the VMs away");
+    await writeFile(join(hub, "status.json"), JSON.stringify({ at: new Date().toISOString(), pid: (child.pid ?? 0) + 1, agents: {} }));
+    [vm] = await vmHealth(sandbox, run);
+    assert.equal(vm.hub_alive, false, "written by another process than the one hub.pid names");
+    assert.match(vm.hub_detail ?? "", /an earlier hub's/);
+    await status(new Date().toISOString());
+
+    // The process ends: the hub is down, loudly, and the states are its last word.
+    child.kill("SIGKILL");
+    await new Promise((r) => child!.once("exit", r));
+    [vm] = await vmHealth(sandbox, run);
+    assert.equal(vm.hub_alive, false);
+    assert.equal(vm.hub_tone, "danger");
+    assert.equal(vm.hub_finishing, false, "a dead hub finishes nothing");
+    assert.match(vm.hub_detail ?? "", /HUB DOWN/);
+    assert.equal(vm.live?.state, "working");
+
+    // With its keeper up it is being brought back: said, not shouted.
+    keeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "hub-supervise.sh"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 200));
+    await writeFile(join(hub, "supervisor.pid"), `${keeper.pid}\n`);
+    [vm] = await vmHealth(sandbox, run);
+    assert.deepEqual([vm.hub_tone, vm.hub_keeper_alive], ["warn", true]);
+    assert.match(vm.hub_detail ?? "", /its keeper \(pid \d+\) is up and brings it back/);
+    // Once the stop has begun, a hub that is gone was ended on purpose.
+    keeper.kill("SIGKILL");
+    await new Promise((r) => keeper!.once("exit", r));
+    await writeFile(join(hub, ".stop"), "");
+    [vm] = await vmHealth(sandbox, run);
+    assert.deepEqual([vm.hub_tone, vm.hub_stop_begun], ["warn", true]);
+    await rm(join(hub, ".stop"));
+    assert.equal((await vmHealth(sandbox, run))[0].hub_keeper_alive, false, "a keeper that is gone is said");
+
+    // A pid that is alive but is not a hub (this test process) is not believed.
+    await writeFile(join(sandbox, "hub.pid"), `${process.pid}\n`);
+    assert.equal((await vmHealth(sandbox, run))[0].hub_alive, false);
+  } finally {
+    child?.kill("SIGKILL");
+    keeper?.kill("SIGKILL");
+    if (was === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = was;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("custody.json reaches the run's view whole: the verdict, the evidence counts, both chains, and every VM finding", async () => {
+  const { body: before } = await get<{ summary: { sandbox: string }; custody: unknown }>("/api/swarms/s0d4e");
+  const sandbox = before.summary.sandbox;
+  const file = join(sandbox, "custody.json");
+  // The stop test above may already have taken real custody of this run; it goes back as it was.
+  const kept = await readFile(file, "utf8").catch(() => null);
+  assert.equal(before.custody === null, kept === null, "the view has custody exactly when the run has custody.json");
+  const custody = {
+    at: "2026-09-24T10:00:00.000Z",
+    run: "s0d4e",
+    inputs: { files: 3, bytes: 30, unchanged: false, complete: false, changed: ["disk/a very long name that must not be cut short in any way.E01"], missing: [], added: ["x.txt"], skipped: ["big.raw"], manifest_sha256: "ab", manifest_anchored: true },
+    sessions: { files: [], digest: "d", not_files: ["sessions/a0/link.jsonl"] },
+    tool_outputs: { referenced: 2, verified: 2, missing: [], mismatched: [], refused: [] },
+    trace: { lines: 40, intact: true, detail: "chain ok", unverified: 0, disputed: 0, spilled: [{ path: "p", lines: 2, agent: "a0", bad: 0, duplicates: 0 }, { path: "tool-output/a1/trace-spill.jsonl", lines: 0, agent: "a1", bad: 0, duplicates: 0, refused: "a link" }], gaps: [{ sid: "s", agent: "a1", missing: 3 }], clock: [] },
+    ledger: { entries: 5, chained: 5, intact: false, detail: "broken at entry 4", missing_from_ledger: ["h1"], not_on_trace: [7] },
+    vms: [{
+      agent: "a0", record_sha256: "cc".repeat(32), image: "sha256:bb", expected_image: "sha256:aa", stopped: true, kept: null,
+      snapshot: { path: "s", sha256: "h", verified: true, msb_verified: true }, logs: [],
+      secret_violations: [{ at: "2026-09-24T09:00:00Z", env: "VT_KEY", host: "evil.example.org", method: "POST", path: "/x", action: "block" }],
+      installed_outside: { apt: ["cowsay 3.03"], venv: [], note: null },
+      runtime_changed: null,
+    }],
+    incomplete: null,
+    summary: "EVIDENCE CHANGED: 1 changed, 0 missing, 1 added · LEDGER CHAIN BROKEN",
+  };
+  try {
+    await writeFile(file, JSON.stringify(custody));
+    const { body } = await get<{ custody: Record<string, any> }>("/api/swarms/s0d4e");
+    const c = body.custody;
+    assert.equal(c.verdict, "attention");
+    assert.equal(c.summary, custody.summary);
+    assert.deepEqual(c.evidence.changed, custody.inputs.changed, "names are whole");
+    assert.deepEqual([c.evidence.files, c.evidence.added.length, c.evidence.skipped.length, c.evidence.complete], [3, 1, 1, false]);
+    assert.deepEqual([c.trace.intact, c.trace.spilled, c.trace.lost], [true, 2, 3]);
+    assert.deepEqual(c.trace.refused_spills, [{ path: "tool-output/a1/trace-spill.jsonl", why: "a link" }]);
+    assert.deepEqual([c.ledger.intact, c.ledger.chained, c.ledger.missing_from_ledger, c.ledger.not_on_trace], [false, 5, ["h1"], [7]]);
+    assert.deepEqual(c.sessions_not_files, ["sessions/a0/link.jsonl"]);
+    assert.equal(c.vms[0].record_sha256, "cc".repeat(32));
+    assert.equal(c.vms[0].image_differs, true);
+    assert.equal(c.vms[0].secret_violations[0].host, "evil.example.org");
+    assert.deepEqual(c.vms[0].installed_outside, ["apt cowsay 3.03"]);
+    for (const want of [/evidence changed/, /not re-read before the deadline/, /not a file/, /3 trace lines lost/, /spill not read: tool-output\/a1/, /missing from the ledger/, /never on the trace.*seq 7/, /ledger chain broken/, /image digest differs/, /secret placeholder/, /installed outside the image/]) {
+      assert.ok(c.problems.some((p: string) => want.test(p)), String(want));
+    }
+
+    // A clean one says so, and so does a link planted in its place.
+    const clean = {
+      ...custody,
+      inputs: { ...custody.inputs, unchanged: true, complete: true, changed: [], added: [], skipped: [] },
+      sessions: { ...custody.sessions, not_files: [] },
+      trace: { ...custody.trace, gaps: [], spilled: [custody.trace.spilled[0]] },
+      ledger: { entries: 5, chained: 5, intact: true, detail: "", missing_from_ledger: [], not_on_trace: [] },
+      vms: [{ ...custody.vms[0], image: "sha256:aa", secret_violations: [], installed_outside: { apt: [], venv: [], note: null } }],
+    };
+    await writeFile(file, JSON.stringify(clean));
+    assert.deepEqual((await readCustody(sandbox))?.problems, []);
+    // Unchanged as far as it got is not unchanged: the deadline left files unread.
+    await writeFile(file, JSON.stringify({ ...clean, inputs: { ...clean.inputs, unchanged: false, complete: false, skipped: ["big.raw"] } }));
+    const partial = await readCustody(sandbox);
+    assert.deepEqual(partial?.problems, ["evidence not fully re-hashed: 1 of 3 not re-read before the deadline, which the verdict does not cover"]);
+    await writeFile(file, JSON.stringify(clean));
+    assert.equal((await readCustody(sandbox))?.verdict, "clean");
+    await rm(file);
+    await symlink("/etc/hosts", file);
+    const linked = await readCustody(sandbox);
+    assert.equal(linked?.verdict, "attention");
+    assert.match(linked?.problems[0] ?? "", /is a link/);
+    await rm(file);
+    assert.equal(await readCustody(sandbox), null, "no custody.json, no custody");
+  } finally {
+    await rm(file, { force: true });
+    if (kept !== null) await writeFile(file, kept);
   }
 });

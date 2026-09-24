@@ -20,6 +20,7 @@ import { clock, compact, money, relTime } from "@/lib/format";
 import { compactionHistory, contextSeries, defaultThresholds, isContextEvent, type CompactionMoment, type ContextPoint, type ContextSeries, type ContextThresholds } from "@/lib/context-series";
 import { isNoise, toolLabel, toolTone, useAgentNames } from "@/lib/hooks";
 import { useResource } from "@/lib/live";
+import { reachedDone } from "@/lib/overview-status";
 import { thinkingText } from "@/lib/thinking";
 import type { AgentBudget, AgentRow, SwarmEvent, SwarmView } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -703,7 +704,7 @@ export function AgentsPanel({
   // five rows of `session end`, `done` and `inputs check` with no heading,
   // sitting above the agents and belonging to nothing a reader had asked
   // about. A live run gets them; a finished one gets its agents.
-  const finished = view.summary.phase === "done";
+  const finished = reachedDone(view.summary.phase);
   const recent = useMemo(
     () => (finished ? [] : view.traces.filter((e) => !isNoise(e) || e.tool === "thinking").slice(-5).reverse()),
     [view.traces, finished],

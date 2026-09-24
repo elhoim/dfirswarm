@@ -11,7 +11,7 @@ import { useNow } from "@/lib/hooks";
 import { useLive, useResource } from "@/lib/live";
 import type { SwarmRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { harnessStopLabel, isCertifiedDone, isHarnessStop } from "@/lib/overview-status";
+import { harnessStopLabel, isCertifiedDone, isHarnessStop, phaseGroup, reachedDone } from "@/lib/overview-status";
 
 type Filter = "all" | "running" | "done" | "stopped";
 
@@ -58,6 +58,11 @@ function overCapOf(row: SwarmRow): boolean {
 
 function statusChip(row: SwarmRow, now: number) {
   if (row.phase === "running") return <Chip tone="kelp">running · {shortDuration(liveElapsed(row, now))}</Chip>;
+  // Before the harness-stop chip: whoever wrote the sentinel, what is
+  // happening now is the hub putting the VMs away, or having failed to.
+  if (row.finishing) return <Chip tone="moss">finishing · the hub is putting the VMs away</Chip>;
+  if (row.phase === "finish_failed") return <Chip tone="brick">finish failed · the hub could not put the VMs away</Chip>;
+  if (row.phase === "stop_incomplete") return <Chip tone="brick">stop incomplete · a VM is still up after the stop</Chip>;
   if (isHarnessStop(row)) return <Chip tone="brick">{harnessStopLabel(row)}</Chip>;
   if (row.phase === "done") return <Chip tone="moss">done</Chip>;
   if (row.phase === "stopped") return <Chip tone="neutral">stopped</Chip>;
@@ -77,7 +82,7 @@ function SwarmLine({ row, now }: { row: SwarmRow; now: number }) {
       to={`/swarms/${row.id}`}
       className={cn("console-row", row.phase === "running" && "border-kelp shadow-[0_0_0_3px_var(--color-kelp-soft)]")}
     >
-      <StatusDot phase={isHarnessStop(row) ? "stopped" : row.phase} />
+      <StatusDot phase={row.finishing ? "finishing" : row.phase === "finish_failed" || row.phase === "stop_incomplete" ? row.phase : isHarnessStop(row) ? "stopped" : row.phase} />
       <div className="flex min-w-0 flex-col gap-1.5">
         <div className="flex flex-wrap items-center gap-2.5">
           <span className="serif text-[22px] leading-[1.1]">{row.label}</span>
@@ -131,7 +136,7 @@ function SwarmLine({ row, now }: { row: SwarmRow; now: number }) {
         </span>
       </div>
       <div className="console-cell flex flex-col gap-1.5">
-        <Meter pct={pct} tone={overCap ? "brick" : row.phase === "done" ? "moss" : "kelp"} />
+        <Meter pct={pct} tone={overCap ? "brick" : reachedDone(row.phase) ? "moss" : "kelp"} />
         <span className={cn("text-[12.5px]", overCap ? "text-brick-ink" : "text-ink-2")}>
           {free ? (
             <>
@@ -165,8 +170,7 @@ export function OverviewScreen() {
     const q = query.trim().toLowerCase();
     return all
       .filter((r) => {
-        if (filter === "stopped" && !(r.phase === "stopped" || r.phase === "prepared" || r.phase === "failed")) return false;
-        if ((filter === "running" || filter === "done") && r.phase !== filter) return false;
+        if (filter !== "all" && phaseGroup(r.phase) !== filter) return false;
         if (q && !`${r.id} ${r.label} ${r.model} ${r.goal} ${r.last_post?.body ?? ""} ${r.last_post?.from ?? ""}`.toLowerCase().includes(q)) return false;
         return true;
       })
@@ -180,9 +184,9 @@ export function OverviewScreen() {
     const all = swarms.data ?? [];
     return {
       all: all.length,
-      running: all.filter((r) => r.phase === "running").length,
-      done: all.filter((r) => r.phase === "done").length,
-      stopped: all.filter((r) => r.phase === "stopped" || r.phase === "prepared" || r.phase === "failed").length,
+      running: all.filter((r) => phaseGroup(r.phase) === "running").length,
+      done: all.filter((r) => phaseGroup(r.phase) === "done").length,
+      stopped: all.filter((r) => phaseGroup(r.phase) === "stopped").length,
     };
   }, [swarms.data]);
 

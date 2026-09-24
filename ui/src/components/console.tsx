@@ -155,8 +155,19 @@ export function PhaseHead({ title, summary }: { title: string; summary?: ReactNo
   );
 }
 
-export function StatusDot({ phase }: { phase: "running" | "done" | "stopped" | "prepared" | "failed" | "unknown" }) {
+export function StatusDot({ phase }: { phase: "running" | "finishing" | "done" | "stopped" | "prepared" | "failed" | "finish_failed" | "stop_incomplete" | "unknown" }) {
   if (phase === "running") return <span className="ml-[7px] box-border block size-3.5 rounded-full border-[3px] border-kelp" aria-label="running" />;
+  // The work is done and the hub is still putting the VMs away: not live, not over.
+  if (phase === "finishing") return <span className="ml-[7px] box-border block size-3.5 rounded-full border-[3px] border-dashed border-moss" aria-label="finishing" />;
+  if (phase === "finish_failed" || phase === "stop_incomplete") {
+    return (
+      <span className="ml-[7px] grid size-3.5 place-items-center rounded-full bg-brick" aria-label={phase === "finish_failed" ? "finish failed" : "stop incomplete"}>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3.5" strokeLinecap="round" aria-hidden>
+          <path d="M12 6v8M12 18.5v.01" />
+        </svg>
+      </span>
+    );
+  }
   if (phase === "done") {
     return (
       <span className="ml-[7px] grid size-3.5 place-items-center rounded-full bg-moss" aria-label="done">

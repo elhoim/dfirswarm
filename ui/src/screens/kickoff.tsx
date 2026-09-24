@@ -12,7 +12,7 @@ import { InlineNote } from "@/components/states";
 import { JobCard } from "@/components/jobs-drawer";
 import { api, ApiError } from "@/lib/api";
 import { useLive, useResource } from "@/lib/live";
-import type { InputsLibrary, Job, NetMode, SwarmRow } from "@/lib/types";
+import type { InputsLibrary, Job, NetMode, ProviderReadiness, SwarmRow, VmBlocker } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -116,6 +116,16 @@ function readGoal(text: string) {
 const COMPACT_SPEC = /^(?:[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)?=)?\d+(?:\.\d+)?[kKmM%]?(?:\s*,\s*(?:[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)?=)?\d+(?:\.\d+)?[kKmM%]?)*$/;
 /** A model ref as swarm.sh checks it: provider/id. */
 const COMPACT_MODEL_REF = /^[a-z0-9_.-]+\/[A-Za-z0-9_.:/-]+$/;
+/** provider=host, the pattern swarm.sh start checks --provider-host against. */
+const PROVIDER_HOST = /^[a-z0-9][a-z0-9._-]*=[^=,\s]+$/;
+
+/**
+ * What the VM kickoff would still refuse about a provider, once the form's
+ * own settings are counted: OAuth allowed in the VMs, a host named for it.
+ */
+function activeVmBlockers(r: ProviderReadiness | undefined, allowOauth: boolean, named: Set<string>): VmBlocker[] {
+  return (r?.vm_blockers ?? []).filter((b) => !(b.lifted_by === "allow_oauth_in_vm" && allowOauth) && !(b.lifted_by === "provider_hosts" && named.has(r?.provider ?? "")));
+}
 
 type FormState = {
   mode: "single" | "team";
@@ -187,6 +197,10 @@ type FormState = {
   vm_disk: string;
   /** Keep each VM's disk at stop. */
   vm_snapshot: boolean;
+  /** Let a subscription (OAuth) provider into the VMs, accepting that its token is the whole account. */
+  allow_oauth_in_vm: boolean;
+  /** provider=host entries as typed, for a provider whose host the harness cannot know. */
+  provider_hosts: string;
 };
 
 function Row({ ok, children }: { ok: boolean | "pending"; children: React.ReactNode }) {
@@ -267,7 +281,7 @@ function InputsRootAdder({ onAdded }: { onAdded: () => void }) {
         <Button variant="secondary" size="sm" disabled={busy || !path.trim()} onClick={() => void submit()}>Add root</Button>
       </div>
       {error ? <span className="text-[12px] text-brick-ink">{error}</span> : null}
-      <span className="text-[11.5px] text-ink-3">Needs the server token. Every directory directly under it becomes a set the LAN can see the name of.</span>
+      <span className="text-[11.5px] text-ink-3">Needs the server token. Every directory directly under it becomes a set whose name anyone who reaches this console can see (this machine only, unless the server was started with --host 0.0.0.0).</span>
     </div>
   );
 }
@@ -306,7 +320,7 @@ function CleanRoom({ chosen, runs, evidence, onChange }: { chosen: string[]; run
           value: r.id,
           label: r.id,
           hint: `${r.label || r.goal.slice(0, 50)}${r.inputs_source && r.inputs_source === evidence ? " · same evidence" : r.inputs_source ? " · other evidence" : " · no evidence"}`,
-          meta: r.done ? "finished" : r.state,
+          meta: r.phase === "finish_failed" ? "finish failed" : r.finishing ? "finishing" : r.done ? "finished" : r.state,
           keywords: `${r.label} ${r.inputs_source ?? ""}`,
         }))}
       />
@@ -389,6 +403,8 @@ export function KickoffScreen() {
     vm_memory: "",
     vm_disk: "",
     vm_snapshot: true,
+    allow_oauth_in_vm: false,
+    provider_hosts: "",
   });
 
   // What the operator typed, as host names: commas or spaces, lower case.
@@ -396,6 +412,12 @@ export function KickoffScreen() {
     () => form.allow_hosts.split(/[\s,]+/).map((h) => h.trim().toLowerCase()).filter(Boolean),
     [form.allow_hosts],
   );
+  // provider=host entries as typed, and the providers they name.
+  const providerHostList = useMemo(
+    () => form.provider_hosts.split(/[\s,]+/).map((h) => h.trim()).filter(Boolean),
+    [form.provider_hosts],
+  );
+  const namedProviders = useMemo(() => new Set(providerHostList.filter((e) => PROVIDER_HOST.test(e)).map((e) => e.slice(0, e.indexOf("=")))), [providerHostList]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -462,6 +484,35 @@ export function KickoffScreen() {
     const chosen = teamMode ? form.team.map((r) => r.model.trim()).filter(Boolean) : effectiveModel ? [effectiveModel] : [];
     return [...new Set(chosen.map(providerOf).filter((p) => providers[p]?.status === "local"))];
   }, [providers, teamMode, form.team, effectiveModel]);
+  // Ready on this host is not ready in a VM: the VM kickoff refuses a
+  // subscription without the OAuth switch, a provider that signs its own
+  // requests, and one whose host nobody named. The summary model is called
+  // from the VMs too, so it counts like a seat.
+  const vmRefused = useMemo(() => {
+    if (!form.microvm || !providers) return [] as Array<{ provider: string; blocker: VmBlocker }>;
+    const models = [...chosenModels, ...(form.self_compact && form.compact_model.trim() ? [form.compact_model.trim()] : [])];
+    const out: Array<{ provider: string; blocker: VmBlocker }> = [];
+    const seen = new Set<string>();
+    for (const m of models) {
+      const p = providerOf(m);
+      for (const b of activeVmBlockers(providers[p], form.allow_oauth_in_vm, namedProviders)) {
+        if (seen.has(`${p}:${b.kind}`)) continue;
+        seen.add(`${p}:${b.kind}`);
+        out.push({ provider: p, blocker: b });
+      }
+    }
+    return out;
+  }, [form.microvm, form.self_compact, form.compact_model, form.allow_oauth_in_vm, providers, chosenModels, namedProviders]);
+  // A subscription let in on purpose: said beside the switch, not refused.
+  const oauthInVm = useMemo(() => {
+    if (!form.microvm || !form.allow_oauth_in_vm || !providers) return [] as string[];
+    const models = [...chosenModels, ...(form.self_compact && form.compact_model.trim() ? [form.compact_model.trim()] : [])];
+    return [...new Set(models.map(providerOf).filter((p) => providers[p]?.vm_blockers?.some((b) => b.kind === "oauth")))];
+  }, [form.microvm, form.allow_oauth_in_vm, form.self_compact, form.compact_model, providers, chosenModels]);
+  // A disk image is attached with hdiutil, so only a macOS server can; an
+  // older server that does not say is left to the kickoff to refuse.
+  const serverPlatform = inputsLib.data?.platform;
+  const imageAttachable = !serverPlatform || serverPlatform === "darwin";
 
   const problems = useMemo(() => {
     const out: string[] = [];
@@ -488,8 +539,14 @@ export function KickoffScreen() {
     if (form.self_compact && compactSpecs.some((spec) => spec && !COMPACT_SPEC.test(spec))) out.push("Compact thresholds are a token count (150k) or a percentage (60%), optionally with per-model overrides (60%,openai/gpt-5.4-mini=55%).");
     if (form.self_compact && form.compact_model.trim() && !COMPACT_MODEL_REF.test(form.compact_model.trim())) out.push("The summary model is provider/id.");
     if (form.inbox_page_chars.trim() && !/^\d{1,9}$/.test(form.inbox_page_chars.trim())) out.push("The inbox page is a whole number of characters (0 for no bound).");
+    const badProviderHost = providerHostList.find((e) => !PROVIDER_HOST.test(e));
+    if (badProviderHost) out.push(`Provider host "${badProviderHost}" is not provider=host (a lower-case provider id, then the host its base URL names).`);
+    if (providerHostList.length > ALLOW_HOSTS_MAX) out.push(`At most ${ALLOW_HOSTS_MAX} provider hosts.`);
+    if (form.inputs && form.inputs_attach === "image" && !imageAttachable) out.push(`A disk image is attached with hdiutil, which is macOS only, and this server runs on ${serverPlatform}. Hand the swarm the directory instead (copy or bind in place).`);
+    if (form.microvm && form.inputs && form.inputs_attach !== "image" && form.inputs_enforce !== "auto") out.push("The kernel guard is a host run's setting; a microVM run has none (each VM mounts the evidence read-only). Set it to auto.");
+    for (const { provider, blocker } of vmRefused) out.push(`${provider} cannot go into a VM: ${blocker.reason}.`);
     return out;
-  }, [form, effectiveModel, capNum, capTokensNum, allLocal, notLocal, chosenModels.length, hostList.length, teamMode, effectiveN, read.hasDod, compactSpecs]);
+  }, [form, effectiveModel, capNum, capTokensNum, allLocal, notLocal, chosenModels.length, hostList.length, teamMode, effectiveN, read.hasDod, compactSpecs, providerHostList, imageAttachable, serverPlatform, vmRefused]);
 
   useEffect(() => {
     if (job && job.status === "ok" && job.swarm_id) {
@@ -548,6 +605,8 @@ export function KickoffScreen() {
         vm_memory: form.microvm && form.vm_memory.trim() ? Number(form.vm_memory.trim()) : undefined,
         vm_disk: form.microvm && form.vm_disk.trim() ? Number(form.vm_disk.trim()) : undefined,
         vm_snapshot: form.microvm && !form.vm_snapshot ? false : undefined,
+        allow_oauth_in_vm: form.microvm && form.allow_oauth_in_vm ? true : undefined,
+        provider_hosts: providerHostList.length ? providerHostList : undefined,
       });
       setJobId(accepted.id);
       live.mergeJobs([accepted]);
@@ -558,7 +617,7 @@ export function KickoffScreen() {
     }
   }
 
-  const command = `swarm.sh start ${teamMode ? `--models "${teamSpec(form.team) || "?"}"` : `--model ${effectiveModel || "?"}`}${capNum > 0 ? ` --cap-usd ${form.cap_usd}` : allLocal ? "" : " --cap-usd ?"}${capTokensNum > 0 ? ` --cap-tokens ${capTokensNum}` : allLocal ? " --cap-tokens ?" : ""} --n ${effectiveN}${form.wall_clock ? ` --wall-clock ${form.wall_clock}` : ""}${form.net === "open" ? " --no-netguard" : form.net === "local" ? " --local-only" : form.net === "hosts" ? hostList.map((h) => ` --allow-host ${h}`).join("") : ""}${form.playwright ? " --playwright" : ""}${form.hard_kill ? " --hard-kill" : ""}${form.tool_forging ? " --allow-tool-forging" : ""}${form.self_compact ? "" : " --no-self-compact"}${compactSpecs[0] ? ` --compact-notice-at ${compactSpecs[0]}` : ""}${compactSpecs[1] ? ` --compact-warn-at ${compactSpecs[1]}` : ""}${compactSpecs[2] ? ` --compact-at ${compactSpecs[2]}` : ""}${form.self_compact && form.compact_model.trim() ? ` --compact-model ${form.compact_model.trim()}` : ""}${form.inbox_page_chars.trim() ? ` --inbox-page-chars ${form.inbox_page_chars.trim()}` : ""}${form.inputs && form.inputs_attach === "image" ? ` --inputs-image ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}/${form.inputs_image || "<image>"}` : form.inputs ? ` --inputs ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}${form.inputs_attach === "bind" ? " --inputs-bind" : ""}${form.inputs_enforce !== "auto" ? ` --inputs-enforce ${form.inputs_enforce}` : ""}${form.inputs_attach === "copy" && form.inputs_max_mb ? ` --inputs-max-mb ${form.inputs_max_mb}` : ""}` : ""}${form.no_read.map((id) => ` --no-read <runs>/${id}`).join("")}${form.tools_from ? ` --tools-from <runs>/${form.tools_from}/tools` : ""}${form.catalog ? " --catalog" : ""}${form.toolbox ? ` --toolbox ${form.toolbox}` : ""}${form.toolbox && form.toolbox !== "off" && form.toolbox_required ? " --toolbox-required" : ""}${form.quarantine ? " --quarantine" : ""}${form.allow_install ? " --allow-install" : ""}${form.allow_install && form.no_pypi ? " --no-pypi" : ""}${form.cap_per_agent ? ` --cap-per-agent ${form.cap_per_agent}` : ""}${form.case_id ? ` --case-id ${form.case_id}` : ""}${form.examiner ? ` --examiner "${form.examiner}"` : ""}${form.packs.length ? ` --pack ${form.packs.join(",")}` : ""}${form.microvm ? ` --isolation microvm${form.vm_image.trim() ? ` --image ${form.vm_image.trim()}` : ""}${form.vm_cpus.trim() ? ` --vm-cpus ${form.vm_cpus.trim()}` : ""}${form.vm_memory.trim() ? ` --vm-memory ${form.vm_memory.trim()}` : ""}${form.vm_disk.trim() ? ` --vm-disk ${form.vm_disk.trim()}` : ""}${form.vm_snapshot ? "" : " --no-vm-snapshot"}` : ""}${form.no_start ? " --no-start" : ""}`;
+  const command = `swarm.sh start ${teamMode ? `--models "${teamSpec(form.team) || "?"}"` : `--model ${effectiveModel || "?"}`}${capNum > 0 ? ` --cap-usd ${form.cap_usd}` : allLocal ? "" : " --cap-usd ?"}${capTokensNum > 0 ? ` --cap-tokens ${capTokensNum}` : allLocal ? " --cap-tokens ?" : ""} --n ${effectiveN}${form.wall_clock ? ` --wall-clock ${form.wall_clock}` : ""}${form.net === "open" ? " --no-netguard" : form.net === "local" ? " --local-only" : form.net === "hosts" ? hostList.map((h) => ` --allow-host ${h}`).join("") : ""}${providerHostList.map((e) => ` --provider-host ${e}`).join("")}${form.playwright ? " --playwright" : ""}${form.hard_kill ? " --hard-kill" : ""}${form.tool_forging ? " --allow-tool-forging" : ""}${form.self_compact ? "" : " --no-self-compact"}${compactSpecs[0] ? ` --compact-notice-at ${compactSpecs[0]}` : ""}${compactSpecs[1] ? ` --compact-warn-at ${compactSpecs[1]}` : ""}${compactSpecs[2] ? ` --compact-at ${compactSpecs[2]}` : ""}${form.self_compact && form.compact_model.trim() ? ` --compact-model ${form.compact_model.trim()}` : ""}${form.inbox_page_chars.trim() ? ` --inbox-page-chars ${form.inbox_page_chars.trim()}` : ""}${form.inputs && form.inputs_attach === "image" ? ` --inputs-image ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}/${form.inputs_image || "<image>"}` : form.inputs ? ` --inputs ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}${form.inputs_attach === "bind" ? " --inputs-bind" : form.microvm ? " --inputs-copy" : ""}${form.inputs_enforce !== "auto" ? ` --inputs-enforce ${form.inputs_enforce}` : ""}${form.inputs_attach === "copy" && form.inputs_max_mb ? ` --inputs-max-mb ${form.inputs_max_mb}` : ""}` : ""}${form.no_read.map((id) => ` --no-read <runs>/${id}`).join("")}${form.tools_from ? ` --tools-from <runs>/${form.tools_from}/tools` : ""}${form.catalog ? " --catalog" : ""}${form.toolbox ? ` --toolbox ${form.toolbox}` : ""}${form.toolbox && form.toolbox !== "off" && form.toolbox_required ? " --toolbox-required" : ""}${form.quarantine ? " --quarantine" : ""}${form.allow_install ? " --allow-install" : ""}${form.allow_install && form.no_pypi ? " --no-pypi" : ""}${form.cap_per_agent ? ` --cap-per-agent ${form.cap_per_agent}` : ""}${form.case_id ? ` --case-id ${form.case_id}` : ""}${form.examiner ? ` --examiner "${form.examiner}"` : ""}${form.packs.length ? ` --pack ${form.packs.join(",")}` : ""}${form.microvm ? ` --isolation microvm${form.vm_image.trim() ? ` --image ${form.vm_image.trim()}` : ""}${form.vm_cpus.trim() ? ` --vm-cpus ${form.vm_cpus.trim()}` : ""}${form.vm_memory.trim() ? ` --vm-memory ${form.vm_memory.trim()}` : ""}${form.vm_disk.trim() ? ` --vm-disk ${form.vm_disk.trim()}` : ""}${form.vm_snapshot ? "" : " --no-vm-snapshot"}${form.allow_oauth_in_vm ? " --allow-oauth-in-vm" : ""}` : ""}${form.no_start ? " --no-start" : ""}`;
 
   return (
     <form onSubmit={submit} className="mx-auto grid w-full max-w-[1680px] gap-8 px-4 py-7 sm:px-10 lg:grid-cols-[minmax(0,1fr)_500px]">
@@ -710,7 +769,7 @@ export function KickoffScreen() {
           {/* which providers can be used right now, from pi auth check */}
           <div className="flex flex-col gap-1.5 border-t border-paper-3 pt-2.5">
             <div className="flex items-baseline justify-between">
-              <span className="label-caps">Credentials · pi auth check</span>
+              <span className="label-caps">Credentials · pi auth check{form.microvm ? " · and what a VM takes" : ""}</span>
               {readiness.data ? <span className="font-mono text-[10.5px] text-ink-3">{new Date(readiness.data.checked_at).toLocaleTimeString()}</span> : null}
             </div>
             {readiness.error && !readiness.data ? (
@@ -721,16 +780,37 @@ export function KickoffScreen() {
               <div className="flex flex-wrap gap-1.5" aria-label="Provider readiness">
                 {Object.values(readiness.data.providers)
                   .sort((a, b) => (a.status === b.status ? a.provider.localeCompare(b.provider) : a.status === "ready" ? -1 : b.status === "ready" ? 1 : 0))
-                  .map((r) => (
-                    <Chip key={r.provider} tone={r.status === "ready" ? "kelp" : r.status === "invalid" ? "brick" : r.status === "not_ready" ? "neutral" : "saffron"} mono>
-                      {r.provider} · {r.status === "ready" ? (r.local ? "local · free" : r.auth_type === "oauth" ? "subscription" : r.auth_type === "api_key" ? "api key" : "ready") : r.status === "not_ready" ? "not logged in" : r.status === "local" ? "local · needs a placeholder key" : r.status}
-                    </Chip>
-                  ))}
+                  .map((r) => {
+                    // Under microVM a provider the VM kickoff refuses says so on
+                    // its chip, with the reason on hover: "ready" is the host's word.
+                    const blocked = form.microvm ? activeVmBlockers(r, form.allow_oauth_in_vm, namedProviders) : [];
+                    return (
+                      <span key={r.provider} title={blocked.length ? blocked.map((b) => b.reason).join("\n") : r.vm_hosts?.length && form.microvm ? `A VM reaches it at ${r.vm_hosts.join(", ")}` : undefined}>
+                        <Chip tone={blocked.length ? "brick" : r.status === "ready" ? "kelp" : r.status === "invalid" ? "brick" : r.status === "not_ready" ? "neutral" : "saffron"} mono>
+                          {r.provider} · {r.status === "ready" ? (r.local ? "local · free" : r.auth_type === "oauth" ? "subscription" : r.auth_type === "api_key" ? "api key" : "ready") : r.status === "not_ready" ? "not logged in" : r.status === "local" ? "local · needs a placeholder key" : r.status}
+                          {blocked.length ? " · not in a VM" : ""}
+                        </Chip>
+                      </span>
+                    );
+                  })}
               </div>
             )}
             {notReady.length ? (
               <InlineNote tone="warn">
                 {notReady.join(", ")} {notReady.length === 1 ? "is" : "are"} not logged in — swarm.sh will refuse to start. Run <span className="font-mono">pi auth login {notReady[0]}</span> (or set the provider's key), then reload.
+              </InlineNote>
+            ) : null}
+            {vmRefused.length ? (
+              <InlineNote tone="danger">
+                The VM kickoff would refuse {[...new Set(vmRefused.map((v) => v.provider))].join(", ")}:
+                <ul className="m-0 mt-1 flex list-disc flex-col gap-0.5 pl-4">
+                  {vmRefused.map(({ provider, blocker }) => (
+                    <li key={`${provider}:${blocker.kind}`}>
+                      <span className="font-mono">{provider}</span>: {blocker.reason}.{" "}
+                      {blocker.lifted_by === "allow_oauth_in_vm" ? "The switch is under the microVM setting." : blocker.lifted_by === "provider_hosts" ? "Name it under Network, Provider hosts." : ""}
+                    </li>
+                  ))}
+                </ul>
               </InlineNote>
             ) : null}
             {needsKey.length ? (
@@ -813,15 +893,15 @@ export function KickoffScreen() {
                     ]}
                   />
                 </label>
-                <label className={cn("flex flex-col gap-1", !form.inputs && "opacity-50")}>
+                <label className={cn("flex flex-col gap-1", (!form.inputs || form.microvm) && "opacity-50")} title={form.microvm ? "A host run's guard; in a microVM run each VM mounts the evidence read-only, and nothing else applies" : undefined}>
                   <span className="label-caps flex min-h-[2.1em] items-start leading-[1.35]">Kernel guard</span>
                   <Select
                     value={form.inputs_enforce}
                     onChange={(v) => setForm({ ...form, inputs_enforce: v as FormState["inputs_enforce"] })}
-                    disabled={!form.inputs}
+                    disabled={!form.inputs || (form.microvm && form.inputs_enforce === "auto")}
                     aria-label="Inputs enforcement"
                     options={[
-                      { value: "auto", label: "auto", hint: "kernel when the host can" },
+                      { value: "auto", label: "auto", hint: form.microvm ? "a VM run: each VM's read-only mount is the guard" : "kernel when the host can" },
                       { value: "on", label: "on", hint: "refuse to start without it" },
                       { value: "off", label: "off", hint: "detect and heal only" },
                     ]}
@@ -837,9 +917,30 @@ export function KickoffScreen() {
                       onChange={(v) => setForm({ ...form, inputs_attach: v as FormState["inputs_attach"], inputs_image: v === "image" ? (chosenSet?.images[0] ?? "") : "" })}
                       aria-label="How the evidence is attached"
                       options={[
-                        { value: "copy", label: "copy", hint: "a read-only copy under inputs/; the source is never touched" },
-                        { value: "bind", label: "bind in place", hint: "no copy: the source itself is held read-only by the kernel, for evidence too large to copy" },
-                        { value: "image", label: "disk image", hint: chosenSet?.images.length ? "attach a dmg, iso or img read-only (macOS)" : "no dmg, iso or img in this set", disabled: !chosenSet?.images.length },
+                        {
+                          value: "copy",
+                          label: "copy",
+                          hint: form.microvm ? "a read-only copy in the run (--inputs-copy), mounted read-only into every VM; the source is never touched" : "a read-only copy under inputs/; the source is never touched",
+                        },
+                        {
+                          value: "bind",
+                          label: "bind in place",
+                          hint: form.microvm
+                            ? "no copy: the source is mounted read-only into every VM from where it is; the VMs cannot write it, this host's account still can"
+                            : "no copy: the source itself is held read-only by the kernel, for evidence too large to copy",
+                        },
+                        {
+                          value: "image",
+                          label: "disk image",
+                          hint: !imageAttachable
+                            ? `needs macOS (hdiutil); this server runs on ${serverPlatform}`
+                            : chosenSet?.images.length
+                              ? form.microvm
+                                ? "a dmg, iso or img attached read-only on this host (macOS) and mounted read-only into every VM"
+                                : "attach a dmg, iso or img read-only (macOS)"
+                              : "no dmg, iso or img in this set",
+                          disabled: !chosenSet?.images.length || !imageAttachable,
+                        },
                       ]}
                     />
                   </label>
@@ -856,13 +957,29 @@ export function KickoffScreen() {
                       </div>
                     </label>
                   ) : (
-                    <span className="self-end pb-2.5 text-[12px] leading-[1.5] text-ink-2">Nothing is copied. The harness refuses this on a host without a kernel guard, because the source would be writable.</span>
+                    <span className="self-end pb-2.5 text-[12px] leading-[1.5] text-ink-2">
+                      {form.microvm
+                        ? "Nothing is copied. Every VM mounts the source read-only; the kickoff warns when this account can still write it, and refuses links that lead out of it."
+                        : "Nothing is copied. The harness refuses this on a host without a kernel guard, because the source would be writable."}
+                    </span>
                   )}
                 </div>
               ) : null}
               <span className="text-[12px] leading-[1.5] text-ink-2">
                 {chosenSet
-                  ? `${chosenSet.files} file${chosenSet.files === 1 ? "" : "s"}, ${humanSize(chosenSet.bytes)}${chosenSet.sample.length ? `: ${chosenSet.sample.join(", ")}${chosenSet.files > chosenSet.sample.length ? ", …" : ""}` : ""}${form.inputs_attach === "bind" ? ". Held read-only in place by the kernel; nothing is copied, and the source stays exactly as it is." : form.inputs_attach === "image" ? ". The image is attached read-only and used as inputs/; the kernel refuses every write to it." : ". Copied into inputs/ at kickoff; edit, write and claim_file refuse it, a shell write is undone and announced, and on macOS and Linux the panes run with it read-only at the kernel."}`
+                  ? `${chosenSet.files} file${chosenSet.files === 1 ? "" : "s"}, ${humanSize(chosenSet.bytes)}${chosenSet.sample.length ? `: ${chosenSet.sample.join(", ")}${chosenSet.files > chosenSet.sample.length ? ", …" : ""}` : ""}${
+                      form.microvm
+                        ? form.inputs_attach === "bind"
+                          ? ". Mounted read-only into every VM from where it is; nothing is copied. No VM can write it, but this host's account still can: make it read-only, or choose copy."
+                          : form.inputs_attach === "image"
+                            ? ". The image is attached read-only on this host and mounted read-only into every VM; the kernel refuses every write to it."
+                            : ". Copied into the run at kickoff (--inputs-copy) and mounted read-only into every VM; the source is never touched, and a copy is the second layer when this account can write the evidence."
+                        : form.inputs_attach === "bind"
+                          ? ". Held read-only in place by the kernel; nothing is copied, and the source stays exactly as it is."
+                          : form.inputs_attach === "image"
+                            ? ". The image is attached read-only and used as inputs/; the kernel refuses every write to it."
+                            : ". Copied into inputs/ at kickoff; edit, write and claim_file refuse it, a shell write is undone and announced, and on macOS and Linux the panes run with it read-only at the kernel."
+                    }`
                   : inputsLib.data?.sets.length
                     ? "Pick a set to hand the swarm files to analyse. Results go in work/; the inputs stay as they were."
                     : "No sets yet: a set is a directory directly under a root, so put the evidence for one case in its own directory there."}
@@ -895,7 +1012,15 @@ export function KickoffScreen() {
               <span>
                 Install what the case needs
                 <span className="block text-[12px] leading-[1.5] text-ink-2">
-                  Agents may <code>pip install</code> from <code>pypi.org</code> into <code>work/.toolchain/</code>, inside the sandbox, when the host is missing a reader the case turns on. Still no root and no system packages. Off by default; what was installed belongs in the ledger.
+                  {form.microvm ? (
+                    <>
+                      Each agent may <code>pip install</code> from <code>pypi.org</code> into its own VM's disk (<code>/opt/dfir/agent</code>), with root in that VM only, when the image lacks a reader the case turns on. Nothing goes into the run; what a VM held beyond its image is listed at stop. Off by default; what was installed belongs in the ledger.
+                    </>
+                  ) : (
+                    <>
+                      Agents may <code>pip install</code> from <code>pypi.org</code> into <code>work/.toolchain/</code>, inside the sandbox, when the host is missing a reader the case turns on. Still no root and no system packages. Off by default; what was installed belongs in the ledger.
+                    </>
+                  )}
                 </span>
               </span>
               <Switch checked={form.allow_install} onCheckedChange={(v) => setForm({ ...form, allow_install: v, no_pypi: v ? form.no_pypi : false })} aria-label="Allow install" />
@@ -940,7 +1065,13 @@ export function KickoffScreen() {
               <span>
                 Each agent in its own microVM
                 <span className="block text-[12px] leading-[1.5] text-ink-2">
-                  Every agent runs Pi inside its own microVM (microsandbox): the run is read-only there except the agent's own <code>work/&lt;id&gt;/</code>, its extracted and quarantine directories and its outputs (a shared file is published through the harness), the evidence is mounted read-only from this host with no copy, the board is written by the harness on the host, a VM reaches only its models' hosts, and no provider credential enters a VM. The packs below choose the image. Needs a host that can boot a VM (macOS on Apple silicon, Linux with KVM).
+                  Every agent runs Pi inside its own microVM (microsandbox): the run is read-only there except the agent's own <code>work/&lt;id&gt;/</code>, its extracted and quarantine directories and its outputs (a shared file is published through the harness), the evidence is mounted read-only into each VM (a read-only copy in the run by default, the source itself with bind in place), the board is written by the harness on the host,{" "}
+                  {form.net === "open"
+                    ? "a VM reaches every public host (the network is Open, --no-netguard), though a credential is still swapped in only on the way to its own provider's hosts,"
+                    : form.net === "hosts"
+                      ? "a VM reaches only its models' hosts and the hosts named under Network,"
+                      : "a VM reaches only its models' hosts,"}{" "}
+                  and no provider credential enters a VM. The packs below choose the image. Needs a host that can boot a VM (macOS on Apple silicon, Linux with KVM).
                 </span>
               </span>
               <Switch checked={form.microvm} onCheckedChange={(v) => setForm({ ...form, microvm: v })} aria-label="MicroVM isolation" />
@@ -967,13 +1098,27 @@ export function KickoffScreen() {
                   <span>Keep each disk at stop</span>
                   <Switch checked={form.vm_snapshot} onCheckedChange={(v) => setForm({ ...form, vm_snapshot: v })} aria-label="Keep VM disks" />
                 </label>
+                <div className="flex items-center justify-between gap-3 text-[13px] sm:col-span-3">
+                  <span>
+                    Allow a subscription (OAuth) provider into the VMs
+                    <span className="block text-[12px] leading-[1.5] text-ink-2">
+                      <code>--allow-oauth-in-vm</code>. A subscription token is the operator's whole account at the provider, not a key scoped to inference: an Anthropic token can create API keys, a Codex token is the ChatGPT account. A VM holding its placeholder could use it on any path of the provider's hosts, and the token is not refreshed inside the run. Off, the kickoff refuses such a provider; on, the record says it was allowed. Use an API key when you can.
+                    </span>
+                  </span>
+                  <Switch checked={form.allow_oauth_in_vm} onCheckedChange={(v) => setForm({ ...form, allow_oauth_in_vm: v })} aria-label="Allow OAuth in VMs" />
+                </div>
+                {oauthInVm.length ? (
+                  <InlineNote tone="warn" className="sm:col-span-3">
+                    {oauthInVm.join(", ")} {oauthInVm.length === 1 ? "is a subscription" : "are subscriptions"}: {oauthInVm.length === 1 ? "its" : "their"} token goes into the VMs as a placeholder for the whole account, by your choice.
+                  </InlineNote>
+                ) : null}
               </div>
             )}
             <div className="flex items-center justify-between gap-3 text-[13px]">
               <span>
                 Quarantine
                 <span className="block text-[12px] leading-[1.5] text-ink-2">
-                  Nothing under <code>work/extracted/</code> or <code>work/quarantine/</code> may execute: no-exec at the kernel, and execute bits stripped.
+                  Nothing under <code>work/extracted/</code> or <code>work/quarantine/</code> may execute: no-exec at the kernel, and execute bits stripped.{form.microvm ? " In a microVM run it is on whatever this says: each seat's extracted and quarantine directories are no-exec mounts in its VM." : ""}
                 </span>
               </span>
               <Switch checked={form.quarantine} onCheckedChange={(v) => setForm({ ...form, quarantine: v })} aria-label="Quarantine" />
@@ -1081,6 +1226,21 @@ export function KickoffScreen() {
             {form.net === "hosts" && hostList.length === 0 ? (
               <p className="text-[12px] text-band-brick">Name at least one host, or choose Guarded.</p>
             ) : null}
+            <label className="flex flex-col gap-1 text-[13px]">
+              <span>
+                Provider hosts<span className="ml-1 text-ink-3">· optional</span>
+                <span className="block text-[12px] leading-[1.5] text-ink-2">
+                  <code>provider=host</code>, one <code>--provider-host</code> each: the host a model provider is called on when the harness cannot know it (a gateway, a region, an account). Pi's own model list names the host of every provider it ships; a microVM run is refused while a provider on the team still has none, because its key is bound to its hosts and nowhere else.
+                </span>
+              </span>
+              <Input
+                value={form.provider_hosts}
+                onChange={(e) => setForm({ ...form, provider_hosts: e.target.value })}
+                placeholder="my-gateway=llm.example.org"
+                aria-label="Provider hosts"
+                className="font-mono text-[13px]"
+              />
+            </label>
             {form.net === "open" ? (
               <p className="text-[12px] text-band-brick">
                 Everything the agents fetch, and anything they could send, is then outside the run's record. Do not use it on evidence.

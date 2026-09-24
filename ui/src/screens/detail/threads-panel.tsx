@@ -24,6 +24,7 @@ import { api } from "@/lib/api";
 import { chars, clock, eventTime, money, relTime, shortDuration } from "@/lib/format";
 import { useAgentNames } from "@/lib/hooks";
 import { useResource } from "@/lib/live";
+import { reachedDone } from "@/lib/overview-status";
 import type { AgentRow, SwarmEvent, SwarmView, ThreadRow, TimedPost } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -111,7 +112,7 @@ function ThreadLine({ t, view, colour, names, onOpen }: { t: ThreadRow; view: Sw
             {primary ? "Primary thread" : t.name}
           </span>
           {primary ? (
-            s.phase === "done" ? (
+            reachedDone(s.phase) ? (
               <span className="rounded-[3px] bg-moss px-1.5 font-mono text-[10px] font-semibold uppercase text-white">done</span>
             ) : s.phase === "running" ? (
               <span className="rounded-[3px] border border-moss px-1.5 font-mono text-[10px] font-semibold uppercase text-moss-ink">running</span>

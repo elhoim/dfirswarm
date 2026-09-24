@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * LAN web app for DFIR Swarm: swarms → threads → agents → traces, plus
+ * Local web app for DFIR Swarm: swarms → threads → agents → traces, plus
  * kickoff / stop / reap through scripts/swarm.sh. Reads runs/,
- * pushes changes over SSE, serves the Vite bundle from ui/dist.
+ * pushes changes over SSE, serves the Vite bundle from ui/dist. It binds
+ * 127.0.0.1 unless told otherwise; --host 0.0.0.0 opens it to the LAN.
  *
  *   node --experimental-strip-types scripts/ui-server.ts [--port N] [--host H] [--runs-dir DIR]
  */
@@ -44,8 +45,9 @@ function parseArgs(argv: string[]) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-// Anyone on the LAN may watch; starting a swarm spends money, so that needs
-// the token. SWARM_UI_TOKEN="" turns the check off deliberately.
+// Whoever can reach the bound address may watch (this machine only unless
+// --host says otherwise); starting a swarm spends money, so that needs the
+// token. SWARM_UI_TOKEN="" turns the check off deliberately.
 const token =
   process.env.SWARM_UI_TOKEN === undefined
     ? randomBytes(16).toString("hex")

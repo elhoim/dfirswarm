@@ -3,8 +3,9 @@
  * spawner and extension already write under runs/<id>/. No new
  * on-disk protocol.
  */
-import { existsSync } from "node:fs";
-import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { constants as fsConstants, existsSync } from "node:fs";
+import { lstat, open, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { artifactKind } from "../artifact-kind.ts";
 import {
@@ -77,6 +78,14 @@ export type RegistryRun = {
   tab_count?: number;
   split_failures?: number;
   extra_workspaces?: number;
+  /** Where the agents ran; `mode` is host or microvm. Absent on runs older than isolation. */
+  isolation?: { mode?: string; image?: string; snapshot?: boolean; oauth_allowed?: boolean };
+  /**
+   * Each pack's secrets and what the kickoff did with them: injected (bound
+   * to their hosts, the value never in a VM), withheld, exposed (host panes
+   * with --allow-pack-secrets) or not-set.
+   */
+  pack_secrets?: Record<string, { names?: string[]; mode?: string }>;
 };
 
 export type SwarmRow = SwarmSummary & {
@@ -100,8 +109,15 @@ export type SwarmRow = SwarmSummary & {
   /** Threads on the board and posts across all of them, for the list. */
   threads_total: number;
   posts_total: number;
-  /** running | done | stopped | prepared | unknown, derived from sentinel + registry */
+  /** running | done | stopped | prepared | failed | finish_failed | stop_incomplete | unknown, derived from sentinel + registry */
   phase: SwarmPhase;
+  /**
+   * A VM run whose sentinel is written and whose VMs are not all put away
+   * yet: the hub is waiting for the agents to get out, or snapshotting and
+   * removing the VMs and taking custody (its status says finished, not
+   * finish_done). Stopping now would race it.
+   */
+  finishing: boolean;
   /** Frontmatter `by` on done/SWARM_DONE, when the swarm is finished. */
   sentinel_by: string | null;
   /** budget.json stop_reason (cap / wall_clock), when the harness steered or stopped. */
@@ -158,7 +174,7 @@ export function activitySeries(events: readonly SwarmEvent[], from: string | nul
   return series;
 }
 
-export type SwarmPhase = "running" | "done" | "stopped" | "prepared" | "failed" | "unknown";
+export type SwarmPhase = "running" | "done" | "stopped" | "prepared" | "failed" | "finish_failed" | "stop_incomplete" | "unknown";
 
 export type MarkerInfo = {
   reason?: string;
@@ -279,13 +295,85 @@ export type VmHealth = {
   /** What the kickoff's probe found in the VM. */
   probe: { hub: boolean; floor: string | null; inputs: string | null; clock_skew_s: number | null; fuse: boolean | null; loop: boolean | null; missing: string[] };
   fit_warnings: string[];
-  /** The hub's live state: working, idle, done, gone; null when no hub answers for this run. */
-  live: { state: string; connected: boolean; since: string | null } | null;
+  /**
+   * The hub's word on this agent: working, idle, done, gone, and when it last
+   * heard a line from the VM; null when no hub answers for this run. When the
+   * hub is not alive this is what it last wrote, not what is true now.
+   */
+  live: { state: string; connected: boolean; since: string | null; last_seen: string | null } | null;
+  /**
+   * The run's hub (one for every VM, repeated on each): alive when hub.pid is
+   * a vm-hub.ts serving this run's hub directory and the status shown was
+   * written by that process. null when no hub is recorded: before the
+   * kickoff started it, or after stop put it away.
+   */
+  hub_alive: boolean | null;
+  /** What was found about the hub, in words, with how stale its status is. */
+  hub_detail: string | null;
+  /** How loud to be about the hub: ok, warn (down but being brought back, or ended by the stop), danger (down and nothing brings it back). */
+  hub_tone: "ok" | "warn" | "danger" | null;
+  /** The hub's keeper (hub-supervise.sh), which restarts a dead hub until the stop; null when none is recorded. */
+  hub_keeper_alive: boolean | null;
+  /** The run's stop has begun (the hub directory's .stop): a hub ended now was ended on purpose. */
+  hub_stop_begun: boolean;
+  /** The hub says it is putting the VMs away and taking custody (finished, not yet finish_done). */
+  hub_finishing: boolean;
+  /** Seconds since the hub last wrote status.json. It writes on a change of a seat's state or link, not on a clock, so a quiet hub's is old. */
+  hub_status_age_s: number | null;
+  /** What the VM mounts, from its record: the host path, where it appears in the VM, ro or rw, no-exec. */
+  mounts: Array<{ host: string; guest: string; mode: string; noexec: boolean }>;
+  /** Its network policy: deny by default plus these hosts, or public (--no-netguard); null on a record without one. */
+  network: { default: string; allow_hosts: string[]; host_ports: number[] } | null;
+  /** The credentials bound to it as placeholders, each with the only hosts it is swapped in for. */
+  secrets: Array<{ name: string; hosts: string[] }>;
+  /** Each pack's secrets and what the kickoff did with them (the run record's pack_secrets): the same for every VM. */
+  pack_secrets: Array<{ pack: string; names: string[]; mode: string }>;
   stopped_at: string | null;
   snapshot: "kept" | "not kept" | "failed" | null;
   installed_outside: string[];
   runtime: string | null;
   runtime_changed: string | null;
+};
+
+/**
+ * custody.json as the console shows it: custody.ts's own summary, whole, and
+ * the parts of it an examiner asks about, with every name kept. `problems`
+ * is what custody flagged; an empty list is a clean verdict.
+ */
+export type CustodyView = {
+  at: string | null;
+  summary: string;
+  verdict: "clean" | "attention";
+  problems: string[];
+  /** `skipped`: files not re-read before custody's deadline, which the verdict does not cover; `complete` is false when there are any. */
+  evidence:
+    | null
+    | { unverifiable: string }
+    | { files: number; bytes: number; unchanged: boolean; complete: boolean; changed: string[]; missing: string[]; added: string[]; skipped: string[]; manifest_anchored: boolean | null };
+  /** Names under the sessions that are not regular files (a link, a device): sealed nothing. */
+  sessions_not_files: string[];
+  /** `refused_spills`: spill files custody would not read, and why. */
+  trace: { lines: number; intact: boolean; detail: string; unverified: number; disputed: number; spilled: number; lost: number; refused_spills: Array<{ path: string; why: string }> } | null;
+  /** `missing_from_ledger`: hashes the trace carries and the ledger does not (deleted); `not_on_trace`: chained entries never on the trace (written without the tool). */
+  ledger: { entries: number; chained: number | null; intact: boolean; detail: string; missing_from_ledger: string[]; not_on_trace: number[] } | null;
+  tool_outputs: { referenced: number; verified: number; missing: string[]; mismatched: string[]; refused: string[] } | null;
+  vms: Array<{
+    agent: string;
+    /** The sha256 of the VM's record as custody read it. */
+    record_sha256: string | null;
+    stopped: boolean;
+    kept: string | null;
+    /** verified, unverified, an error, or null when no snapshot was taken. */
+    snapshot: string | null;
+    image: string | null;
+    expected_image: string | null;
+    image_differs: boolean;
+    secret_violations: Array<{ at: string; env: string; host: string; method: string; path: string; action: string }>;
+    installed_outside: string[];
+    installed_note: string | null;
+    runtime_changed: string | null;
+  }> | null;
+  incomplete: string | null;
 };
 
 export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
@@ -317,6 +405,8 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   names: NameRecord[];
   /** A microVM run's VMs; empty for a host run. */
   vms: VmHealth[];
+  /** What the last custody check found (custody.json), or null before any stop or hub finish took one. */
+  custody: CustodyView | null;
 };
 
 /** ledger/entries.jsonl as the agents wrote it, and whether ledger.md exists. */
@@ -360,6 +450,13 @@ function parseFrontMatter(text: string): Record<string, string> {
 }
 
 export function derivePhase(state: string, done: boolean): SwarmPhase {
+  // `finish_failed`: the hub reached the end of a VM run and could not put
+  // its VMs away. The sentinel is there, so without this line the failure
+  // read as a plain "done" and VMs left running went unmentioned.
+  if (state === "finish_failed") return "finish_failed";
+  // `stop_incomplete`: swarm.sh stop ran and a VM of the run was still up
+  // after it. Whatever the sentinel says, that is what the operator must see.
+  if (state === "stop_incomplete") return "stop_incomplete";
   if (done) return "done";
   if (state === "running") return "running";
   // `finished`: the hub put a VM run away after its sentinel; without the
@@ -457,6 +554,9 @@ async function enrichSummary(
     if (!stopReason && fm.reason) stopReason = fm.reason;
   }
   void runsDir;
+  // The same predicate for the list and the run page, so neither says
+  // "done" while the hub is still snapshotting.
+  const finishing = summary.done && run?.isolation?.mode === "microvm" && (await vmRunFinishing(sandbox, summary.state));
   return {
     ...summary,
     started_at: started,
@@ -476,6 +576,7 @@ async function enrichSummary(
     threads_total: threadNames.length,
     posts_total: postsTotal,
     phase: derivePhase(summary.state, summary.done),
+    finishing,
     sentinel_by: sentinelBy,
     stop_reason: stopReason,
     tools_forged: toolsForged,
@@ -750,45 +851,212 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     inputs: await inputsView(sandbox, events),
     ledger: await ledgerView(sandbox),
     names: await readNames(sandbox).catch(() => []),
-    vms: await vmHealth(sandbox),
+    vms: await vmHealth(sandbox, run),
+    custody: await readCustody(sandbox),
   };
 }
 
 /**
- * Each agent's VM: the record the kickoff and stop wrote (vm/<id>.json) and,
- * while the run is up, the hub's live status. The hub is found the way the
- * scripts find it: hub.dir must name a directory under the hubs' parent made
- * for this sandbox, since a pane could write hub.dir.
+ * Whether a VM run past its sentinel is still being put away. The hub says
+ * so itself (status.json: finished, and not yet finish_done) while its
+ * process is up, which covers custody after the registry already says
+ * finished. Before the hub starts, while the registry says running, a VM
+ * record without its stop time says the same.
  */
-export async function vmHealth(sandbox: string): Promise<VmHealth[]> {
+async function vmRunFinishing(sandbox: string, state: string): Promise<boolean> {
+  const hub = await ownHubDir(sandbox);
+  if (hub) {
+    try {
+      const status = JSON.parse(await readFile(join(hub, "status.json"), "utf8")) as { finished?: unknown; finish_done?: unknown; pid?: unknown };
+      if (status.finished === true && status.finish_done !== true && typeof status.pid === "number" && pidAlive(status.pid)) return true;
+    } catch {
+      // no status: the records below decide
+    }
+  }
+  return state === "running" && (await vmsNotPutAway(sandbox));
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Whether any of a run's VM records still lacks the stop time the VM manager writes when it puts one away. */
+async function vmsNotPutAway(sandbox: string): Promise<boolean> {
+  const dir = join(sandbox, "vm");
+  const names = (await readdir(dir).catch(() => [] as string[])).filter((n) => n.endsWith(".json") && !n.startsWith("."));
+  for (const name of names) {
+    try {
+      const rec = JSON.parse(await readFile(join(dir, name), "utf8")) as { stopped_at?: unknown };
+      if (typeof rec.stopped_at !== "string") return true;
+    } catch {
+      // a torn record says nothing either way
+    }
+  }
+  return false;
+}
+
+/**
+ * The hub directory a sandbox's hub.dir names, when it is one the harness
+ * made for this sandbox, as swarm.sh hub_dir_of decides: under the hubs'
+ * parent, and naming this sandbox in its own `sandbox` file. A pane could
+ * write hub.dir; it cannot make a directory there.
+ */
+async function ownHubDir(sandbox: string): Promise<string | null> {
+  const hub = (await readFile(join(sandbox, "hub.dir"), "utf8").catch(() => "")).trim();
+  if (!hub) return null;
+  const parent = await realpath(join(process.env.TMPDIR || "/tmp", "dfirswarm-hubs")).catch(() => "");
+  if (!parent || !hub.startsWith(`${parent}/dfs-`) || hub.includes("..")) return null;
+  const named = (await readFile(join(hub, "sandbox"), "utf8").catch(() => "")).trim();
+  return named && named === (await realpath(sandbox).catch(() => sandbox)) ? hub : null;
+}
+
+function ageWords(seconds: number | null): string {
+  if (seconds === null) return "an unknown time";
+  if (seconds < 90) return `${seconds} s`;
+  if (seconds < 90 * 60) return `${Math.round(seconds / 60)} min`;
+  if (seconds < 48 * 3600) return `${Math.round(seconds / 3600)} h`;
+  return `${Math.round(seconds / 86400)} days`;
+}
+
+/** Whether a pid runs a command line that has every one of these in it; without ps, the signal's answer. */
+function commandHas(pid: number, needles: string[]): Promise<boolean> {
+  if (!pidAlive(pid)) return Promise.resolve(false);
+  return new Promise((done) => {
+    execFile("ps", ["-ww", "-o", "command=", "-p", String(pid)], { timeout: 5000 }, (err, stdout) => {
+      if (err) {
+        done((err as NodeJS.ErrnoException).code === "ENOENT");
+        return;
+      }
+      const cmd = String(stdout);
+      done(needles.every((n) => cmd.includes(n)));
+    });
+  });
+}
+
+type HubHealth = { alive: boolean; tone: "ok" | "warn" | "danger"; detail: string; age: number | null; keeper: boolean | null; stopBegun: boolean };
+
+/**
+ * Is the hub up, and is the status on screen its own? The hub writes
+ * status.json when it starts and whenever a seat's state or link changes,
+ * with no heartbeat, so an old file from a quiet hub is fine. A status
+ * written by another process than the one hub.pid names is not: that is an
+ * earlier hub's word. The status carries the writer's pid; a hub from before
+ * that field is judged by the file times instead. A hub that is down is
+ * weighed against its keeper and the stop: brought back, ended on purpose,
+ * or nobody's.
+ */
+async function hubHealth(sandbox: string, hub: string, status: { at: string | null; pid: number | null }, now: number): Promise<HubHealth> {
+  const statusMs = status.at ? Date.parse(status.at) : NaN;
+  const age = Number.isFinite(statusMs) ? Math.max(0, Math.round((now - statusMs) / 1000)) : null;
+  const stopBegun = existsSync(join(hub, ".stop"));
+  const keeperPid = Number((await readFile(join(hub, "supervisor.pid"), "utf8").catch(() => "")).trim());
+  const keeper = Number.isInteger(keeperPid) && keeperPid > 1 ? await commandHas(keeperPid, ["hub-supervise.sh"]) : null;
+  const pidFile = join(sandbox, "hub.pid");
+  const pid = Number((await readFile(pidFile, "utf8").catch(() => "")).trim());
+  const down = (why: string): HubHealth => {
+    if (stopBegun) return { alive: false, tone: "warn", detail: `${why}; the run's stop has begun and ends the hub on purpose`, age, keeper, stopBegun };
+    if (keeper) return { alive: false, tone: "warn", detail: `HUB DOWN: ${why}; its keeper (pid ${keeperPid}) is up and brings it back`, age, keeper, stopBegun };
+    return { alive: false, tone: "danger", detail: `HUB DOWN: ${why}${keeper === false ? ", and its keeper is not running either, so nothing brings it back" : ""}`, age, keeper, stopBegun };
+  };
+  if (!Number.isInteger(pid) || pid <= 1) return down("no hub.pid names the hub process");
+  // A pid is reused, and hub.pid is only tool-protected: it has to be a
+  // vm-hub.ts serving this hub's directory (swarm.sh hub_pid_ours).
+  if (!(await commandHas(pid, ["vm-hub.ts", hub]))) return down(`the hub (pid ${pid}) is not running; the states below are what it last wrote, ${ageWords(age)} ago`);
+  if (!Number.isFinite(statusMs)) return { alive: false, tone: "warn", detail: `the hub (pid ${pid}) is running but has written no status`, age, keeper, stopBegun };
+  if (status.pid !== null ? status.pid !== pid : statusMs < ((await stat(pidFile).catch(() => null))?.mtimeMs ?? -Infinity) - 2000) {
+    return { alive: false, tone: "warn", detail: `the hub (pid ${pid}) is running but has not written its status since it started; the states below are an earlier hub's, ${ageWords(age)} old`, age, keeper, stopBegun };
+  }
+  return { alive: true, tone: "ok", detail: `hub running (pid ${pid}) · status written ${ageWords(age)} ago${keeper === false ? " · its keeper is not running" : ""}`, age, keeper, stopBegun };
+}
+
+type VmRecordShape = {
+  agent?: unknown;
+  name?: unknown;
+  cpus?: unknown;
+  memory_mib?: unknown;
+  image?: { ref?: string; manifest_digest?: string | null; expected_digest?: string };
+  probe?: Record<string, unknown>;
+  image_fit?: { warnings?: string[]; blockers?: string[] };
+  snapshot?: { sha256?: string; error?: string };
+  installed_outside_image?: { apt?: Record<string, string>; venv?: Record<string, string> };
+  runtime_changed?: { from?: string; to?: string };
+  runtime?: { version?: string };
+  stopped_at?: unknown;
+  mounts?: unknown;
+  network?: unknown;
+  secrets?: unknown;
+};
+
+function stringList(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+/**
+ * Each agent's VM: the record the kickoff and stop wrote (vm/<id>.json) and,
+ * while the run is up, the hub's live status and whether the hub is up at
+ * all, since a dead hub's last status looks like a live one. The hub is
+ * found the way the scripts find it: hub.dir must name a directory under the
+ * hubs' parent made for this sandbox, since a pane could write hub.dir. The
+ * run record, when given, adds what the kickoff did with each pack's secrets.
+ */
+export async function vmHealth(sandbox: string, run: RegistryRun | null = null, now = Date.now()): Promise<VmHealth[]> {
   const dir = join(sandbox, "vm");
   const names = (await readdir(dir).catch(() => [] as string[])).filter((n) => n.endsWith(".json") && !n.startsWith(".")).sort();
   if (!names.length) return [];
-  let live: Record<string, { state?: string; connected?: boolean; since?: string }> = {};
-  try {
-    const hub = (await readFile(join(sandbox, "hub.dir"), "utf8")).trim();
-    const parent = await realpath(join(process.env.TMPDIR || "/tmp", "dfirswarm-hubs")).catch(() => "");
-    const mine = parent && hub.startsWith(`${parent}/dfs-`) && !hub.includes("..") && (await readFile(join(hub, "sandbox"), "utf8").catch(() => "")).trim() === (await realpath(sandbox).catch(() => sandbox));
-    if (mine) live = ((JSON.parse(await readFile(join(hub, "status.json"), "utf8")) as { agents?: typeof live }).agents ?? {});
-  } catch {
-    live = {};
+  let live: Record<string, { state?: string; connected?: boolean; since?: string; last_seen?: string }> = {};
+  let hubAlive: boolean | null = null;
+  let hubDetail: string | null = null;
+  let hubAge: number | null = null;
+  let hubTone: VmHealth["hub_tone"] = null;
+  let hubKeeper: boolean | null = null;
+  let hubStopBegun = false;
+  let hubFinishing = false;
+  const hub = await ownHubDir(sandbox);
+  if (hub) {
+    let statusAt: string | null = null;
+    let statusPid: number | null = null;
+    try {
+      const status = JSON.parse(await readFile(join(hub, "status.json"), "utf8")) as { at?: unknown; pid?: unknown; agents?: typeof live; finished?: unknown; finish_done?: unknown };
+      live = status.agents ?? {};
+      statusAt = typeof status.at === "string" ? status.at : null;
+      statusPid = typeof status.pid === "number" ? status.pid : null;
+      hubFinishing = status.finished === true && status.finish_done !== true;
+    } catch {
+      live = {};
+    }
+    const h = await hubHealth(sandbox, hub, { at: statusAt, pid: statusPid }, now);
+    hubAlive = h.alive;
+    hubDetail = h.detail;
+    hubAge = h.age;
+    hubTone = h.tone;
+    hubKeeper = h.keeper;
+    hubStopBegun = h.stopBegun;
+    // Finishing is what a live hub is doing; a dead one's last word is not.
+    hubFinishing = hubFinishing && h.alive;
   }
+  const packSecrets = Object.entries(run?.pack_secrets ?? {}).map(([pack, s]) => ({ pack, names: stringList(s?.names), mode: typeof s?.mode === "string" ? s.mode : "?" }));
   const out: VmHealth[] = [];
   for (const name of names) {
-    let rec: Record<string, unknown>;
+    let rec: VmRecordShape;
     try {
-      rec = JSON.parse(await readFile(join(dir, name), "utf8")) as Record<string, unknown>;
+      rec = JSON.parse(await readFile(join(dir, name), "utf8")) as VmRecordShape;
     } catch {
       continue;
     }
     const agent = typeof rec.agent === "string" ? rec.agent : name.replace(/\.json$/, "");
-    const image = (rec.image ?? {}) as { ref?: string; manifest_digest?: string | null; expected_digest?: string };
-    const probe = (rec.probe ?? {}) as Record<string, unknown>;
-    const fit = (rec.image_fit ?? {}) as { warnings?: string[]; blockers?: string[] };
-    const snap = rec.snapshot as { sha256?: string; error?: string } | undefined;
-    const inv = rec.installed_outside_image as { apt?: Record<string, string>; venv?: Record<string, string> } | undefined;
-    const changed = rec.runtime_changed as { from?: string; to?: string } | undefined;
+    const image = rec.image ?? {};
+    const probe = rec.probe ?? {};
+    const fit = rec.image_fit ?? {};
+    const snap = rec.snapshot;
+    const inv = rec.installed_outside_image;
+    const changed = rec.runtime_changed;
     const l = live[agent];
+    const net = rec.network && typeof rec.network === "object" ? (rec.network as { default?: unknown; allow_hosts?: unknown; host_ports?: unknown }) : null;
     out.push({
       agent,
       name: typeof rec.name === "string" ? rec.name : null,
@@ -805,15 +1073,200 @@ export async function vmHealth(sandbox: string): Promise<VmHealth[]> {
         missing: Array.isArray(probe.missing_binaries) ? (probe.missing_binaries as string[]) : [],
       },
       fit_warnings: [...(fit.blockers ?? []), ...(fit.warnings ?? [])],
-      live: l ? { state: String(l.state ?? "?"), connected: l.connected === true, since: typeof l.since === "string" ? l.since : null } : null,
+      live: l
+        ? { state: String(l.state ?? "?"), connected: l.connected === true, since: typeof l.since === "string" ? l.since : null, last_seen: typeof l.last_seen === "string" ? l.last_seen : null }
+        : null,
+      hub_alive: hubAlive,
+      hub_detail: hubDetail,
+      hub_tone: hubTone,
+      hub_keeper_alive: hubKeeper,
+      hub_stop_begun: hubStopBegun,
+      hub_finishing: hubFinishing,
+      hub_status_age_s: hubAge,
+      mounts: Array.isArray(rec.mounts)
+        ? rec.mounts
+            .filter((m): m is Record<string, unknown> => !!m && typeof m === "object")
+            .map((m) => ({ host: String(m.host ?? "?"), guest: String(m.guest ?? m.host ?? "?"), mode: m.mode === "rw" ? "rw" : "ro", noexec: m.noexec === true }))
+        : [],
+      network: net ? { default: typeof net.default === "string" ? net.default : "?", allow_hosts: stringList(net.allow_hosts), host_ports: Array.isArray(net.host_ports) ? net.host_ports.filter((p): p is number => typeof p === "number") : [] } : null,
+      secrets: Array.isArray(rec.secrets)
+        ? rec.secrets.filter((s): s is Record<string, unknown> => !!s && typeof s === "object").map((s) => ({ name: String(s.name ?? "?"), hosts: stringList(s.hosts) }))
+        : [],
+      pack_secrets: packSecrets,
       stopped_at: typeof rec.stopped_at === "string" ? rec.stopped_at : null,
       snapshot: !snap ? (typeof rec.stopped_at === "string" ? "not kept" : null) : snap.error ? "failed" : "kept",
       installed_outside: inv ? [...Object.entries(inv.apt ?? {}).map(([k, v]) => `apt ${k} ${v}`), ...Object.entries(inv.venv ?? {}).map(([k, v]) => `venv ${k} ${v}`)] : [],
-      runtime: typeof (rec.runtime as { version?: string } | undefined)?.version === "string" ? (rec.runtime as { version: string }).version : null,
+      runtime: typeof rec.runtime?.version === "string" ? rec.runtime.version : null,
       runtime_changed: changed?.from && changed.to ? `${changed.from} → ${changed.to}` : null,
     });
   }
   return out;
+}
+
+function num(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * custody.json, read without following a link planted in its place (the
+ * file sits in the run, where a host run's shell can reach), and laid out
+ * for the console. Nothing is cut: every changed file, every violation, the
+ * summary line whole. A file that is there and cannot be read is itself
+ * something to say, not an absence.
+ */
+export async function readCustody(sandbox: string): Promise<CustodyView | null> {
+  let text: string;
+  try {
+    const fh = await open(join(sandbox, "custody.json"), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      if (!(await fh.stat()).isFile()) return null;
+      text = await fh.readFile("utf8");
+    } finally {
+      await fh.close();
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    const why = code === "ELOOP" ? "custody.json is a link, not the file custody wrote; it was not followed" : `custody.json could not be read (${code ?? (err as Error).message})`;
+    return { at: null, summary: why, verdict: "attention", problems: [why], evidence: null, sessions_not_files: [], trace: null, ledger: null, tool_outputs: null, vms: null, incomplete: null };
+  }
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(text) as Record<string, unknown>;
+    if (!raw || typeof raw !== "object") throw new Error("not an object");
+  } catch {
+    const why = "custody.json is not readable JSON";
+    return { at: null, summary: why, verdict: "attention", problems: [why], evidence: null, sessions_not_files: [], trace: null, ledger: null, tool_outputs: null, vms: null, incomplete: null };
+  }
+  const problems: string[] = [];
+
+  let evidence: CustodyView["evidence"] = null;
+  const inputs = raw.inputs as Record<string, unknown> | null | undefined;
+  if (inputs && typeof inputs === "object") {
+    if (typeof inputs.unverifiable === "string") {
+      evidence = { unverifiable: inputs.unverifiable };
+      problems.push(`evidence unverifiable: ${inputs.unverifiable}`);
+    } else {
+      const skipped = stringList(inputs.skipped);
+      evidence = {
+        files: num(inputs.files),
+        bytes: num(inputs.bytes),
+        unchanged: inputs.unchanged === true,
+        // A custody from before the field: complete when nothing was skipped.
+        complete: typeof inputs.complete === "boolean" ? inputs.complete : skipped.length === 0,
+        changed: stringList(inputs.changed),
+        missing: stringList(inputs.missing),
+        added: stringList(inputs.added),
+        skipped,
+        manifest_anchored: typeof inputs.manifest_anchored === "boolean" ? inputs.manifest_anchored : null,
+      };
+      if (evidence.changed.length || evidence.missing.length || evidence.added.length) problems.push(`evidence changed: ${evidence.changed.length} changed, ${evidence.missing.length} missing, ${evidence.added.length} added`);
+      if (evidence.manifest_anchored === false) problems.push("the evidence manifest in the run is not the one the kickoff recorded");
+      if (!evidence.complete || skipped.length) problems.push(`evidence not fully re-hashed: ${skipped.length} of ${evidence.files} not re-read before the deadline, which the verdict does not cover`);
+    }
+  }
+
+  const notFiles = stringList((raw.sessions as { not_files?: unknown } | undefined)?.not_files);
+  if (notFiles.length) problems.push(`${notFiles.length} name${notFiles.length === 1 ? "" : "s"} under the sessions not a file, sealed as nothing: ${notFiles.join(", ")}`);
+
+  let toolOutputs: CustodyView["tool_outputs"] = null;
+  const to = raw.tool_outputs as Record<string, unknown> | undefined;
+  if (to && typeof to === "object") {
+    toolOutputs = { referenced: num(to.referenced), verified: num(to.verified), missing: stringList(to.missing), mismatched: stringList(to.mismatched), refused: stringList(to.refused) };
+    if (toolOutputs.missing.length || toolOutputs.mismatched.length || toolOutputs.refused.length) {
+      problems.push(`kept outputs: ${toolOutputs.missing.length} missing, ${toolOutputs.mismatched.length} not matching the trace, ${toolOutputs.refused.length} refused`);
+    }
+  }
+
+  let trace: CustodyView["trace"] = null;
+  const tr = raw.trace as Record<string, unknown> | undefined;
+  if (tr && typeof tr === "object") {
+    const spilled = Array.isArray(tr.spilled) ? tr.spilled.reduce((n: number, s) => n + num((s as { lines?: unknown })?.lines), 0) : 0;
+    const lost = Array.isArray(tr.gaps) ? tr.gaps.reduce((n: number, g) => n + num((g as { missing?: unknown })?.missing), 0) : 0;
+    const refusedSpills = Array.isArray(tr.spilled)
+      ? tr.spilled
+          .filter((x): x is Record<string, unknown> => !!x && typeof x === "object" && typeof (x as { refused?: unknown }).refused === "string")
+          .map((x) => ({ path: String(x.path ?? "?"), why: String(x.refused) }))
+      : [];
+    trace = { lines: num(tr.lines), intact: tr.intact === true, detail: typeof tr.detail === "string" ? tr.detail : "", unverified: num(tr.unverified), disputed: num(tr.disputed), spilled, lost, refused_spills: refusedSpills };
+    if (!trace.lines) problems.push("no trace");
+    else if (!trace.intact) problems.push(`trace chain not intact${trace.detail ? `: ${trace.detail}` : ""}`);
+    if (lost) problems.push(`${lost} trace line${lost === 1 ? "" : "s"} lost (numbered, but in neither the chain nor a spill)`);
+    for (const r of refusedSpills) problems.push(`spill not read: ${r.path} is ${r.why}`);
+  }
+
+  let ledger: CustodyView["ledger"] = null;
+  const lg = raw.ledger as Record<string, unknown> | null | undefined;
+  if (lg && typeof lg === "object") {
+    ledger = {
+      entries: num(lg.entries),
+      chained: typeof lg.chained === "number" ? lg.chained : null,
+      intact: lg.intact === true,
+      detail: typeof lg.detail === "string" ? lg.detail : "",
+      missing_from_ledger: stringList(lg.missing_from_ledger),
+      not_on_trace: Array.isArray(lg.not_on_trace) ? lg.not_on_trace.filter((n): n is number => typeof n === "number") : [],
+    };
+    if (ledger.missing_from_ledger.length) problems.push(`${ledger.missing_from_ledger.length} ledger entr${ledger.missing_from_ledger.length === 1 ? "y" : "ies"} on the trace missing from the ledger (deleted)`);
+    if (ledger.not_on_trace.length) problems.push(`${ledger.not_on_trace.length} ledger entr${ledger.not_on_trace.length === 1 ? "y" : "ies"} never on the trace, written without the tool (seq ${ledger.not_on_trace.join(", ")})`);
+    // custody.ts says "broken" in the detail when the chain itself is; a
+    // ledger that only differs from the trace is said above.
+    if (!ledger.intact && (ledger.detail.startsWith("broken") || (!ledger.missing_from_ledger.length && !ledger.not_on_trace.length))) problems.push(`ledger chain broken${ledger.detail ? `: ${ledger.detail}` : ""}`);
+  }
+
+  let vms: CustodyView["vms"] = null;
+  if (Array.isArray(raw.vms)) {
+    vms = raw.vms
+      .filter((v): v is Record<string, unknown> => !!v && typeof v === "object")
+      .map((v) => {
+        const snap = v.snapshot as { verified?: unknown; error?: unknown } | null | undefined;
+        const outside = (v.installed_outside ?? {}) as { apt?: unknown; venv?: unknown; note?: unknown };
+        const changed = v.runtime_changed as { from?: unknown; to?: unknown } | null | undefined;
+        const image = typeof v.image === "string" ? v.image : null;
+        const expected = typeof v.expected_image === "string" ? v.expected_image : null;
+        return {
+          agent: String(v.agent ?? "?"),
+          record_sha256: typeof v.record_sha256 === "string" ? v.record_sha256 : null,
+          stopped: v.stopped === true,
+          kept: typeof v.kept === "string" ? v.kept : null,
+          snapshot: !snap ? null : typeof snap.error === "string" ? `failed: ${snap.error}` : snap.verified === true ? "verified" : "not verified",
+          image,
+          expected_image: expected,
+          image_differs: !!(image && expected && image !== expected),
+          secret_violations: Array.isArray(v.secret_violations)
+            ? v.secret_violations
+                .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+                .map((x) => ({ at: String(x.at ?? ""), env: String(x.env ?? ""), host: String(x.host ?? ""), method: String(x.method ?? ""), path: String(x.path ?? ""), action: String(x.action ?? "") }))
+            : [],
+          installed_outside: [...stringList(outside.apt).map((p) => `apt ${p}`), ...stringList(outside.venv).map((p) => `venv ${p}`)],
+          installed_note: typeof outside.note === "string" ? outside.note : null,
+          runtime_changed: changed && typeof changed.from === "string" && typeof changed.to === "string" ? `${changed.from} → ${changed.to}` : null,
+        };
+      });
+    const notAway = vms.filter((v) => !v.stopped || v.kept || v.snapshot?.startsWith("failed"));
+    if (notAway.length) problems.push(`not put away: ${notAway.map((v) => v.agent).join(", ")}`);
+    for (const v of vms) {
+      if (v.image_differs) problems.push(`image digest differs: ${v.agent} booted ${v.image}, not ${v.expected_image}`);
+      if (v.secret_violations.length) problems.push(`${v.agent}: ${v.secret_violations.length} secret placeholder${v.secret_violations.length === 1 ? "" : "s"} aimed at a host not its own, stopped by msb`);
+      if (v.installed_outside.length) problems.push(`${v.agent}: installed outside the image: ${v.installed_outside.join(", ")}`);
+      if (v.runtime_changed) problems.push(`${v.agent}: msb changed during the run, ${v.runtime_changed}`);
+    }
+  }
+
+  const incomplete = typeof raw.incomplete === "string" && raw.incomplete ? raw.incomplete : null;
+  if (incomplete) problems.push(`custody incomplete: ${incomplete}`);
+  return {
+    at: typeof raw.at === "string" ? raw.at : null,
+    summary: typeof raw.summary === "string" ? raw.summary : "",
+    verdict: problems.length ? "attention" : "clean",
+    problems,
+    evidence,
+    sessions_not_files: notFiles,
+    trace,
+    ledger,
+    tool_outputs: toolOutputs,
+    vms,
+    incomplete,
+  };
 }
 
 /** The packs a run carried, joined with what each one holds on this host. */

@@ -136,6 +136,18 @@ export type StartParams = {
   vm_disk?: number;
   /** false: remove each VM at stop without keeping its disk. */
   vm_snapshot?: boolean;
+  /**
+   * Let a subscription (OAuth) provider into the VMs (--allow-oauth-in-vm).
+   * Its token is the operator's whole account at the provider, so the
+   * kickoff refuses one under microvm unless this is set, and records it.
+   */
+  allow_oauth_in_vm?: boolean;
+  /**
+   * `provider=host`, one --provider-host each: the host a provider is called
+   * on when the harness cannot know it (a gateway, a region, an account). A
+   * microVM run is refused when a provider still has none.
+   */
+  provider_hosts?: string[];
 };
 
 /** guarded: the providers' hosts · hosts: plus named ones · open: no guard · local: the local endpoints and nothing else. */
@@ -326,6 +338,8 @@ const INPUT_SET = /^(?:\d{1,2}:)?[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const INPUT_IMAGE = /^(?:\d{1,2}:)?[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9 ._-]{0,127}\.(dmg|iso|img|sparseimage)$/i;
 // A run id as the registry writes it.
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+// `provider=host`, the pattern swarm.sh start checks --provider-host against.
+const PROVIDER_HOST = /^[a-z0-9][a-z0-9._-]*=[^=,\s]+$/;
 
 export function validateStart(input: unknown): { ok: true; params: StartParams } | { ok: false; error: string } {
   if (typeof input !== "object" || input === null) return { ok: false, error: "body must be a JSON object" };
@@ -531,6 +545,23 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
   if (vmSnapshot === false && isolation !== "microvm") return { ok: false, error: "vm_snapshot needs isolation microvm" };
   // A host guard's setting means nothing in a VM, which the kickoff refuses.
   if (isolation === "microvm" && inputsEnforce && inputsEnforce !== "auto") return { ok: false, error: "inputs_enforce sets a host guard; a microVM run has none (the evidence is read-only in each VM)" };
+  // The kickoff asks for this switch only when a VM would hold a subscription
+  // token, and records it only on a VM run; on a host run it would say
+  // nothing and read as if it had.
+  const allowOauthInVm = body.allow_oauth_in_vm === true;
+  if (allowOauthInVm && isolation !== "microvm") return { ok: false, error: "allow_oauth_in_vm needs isolation microvm" };
+  // provider=host: the kickoff's own pattern, and the host part the same
+  // check allow_hosts gets, since both end up on the same allowlist. Valid in
+  // either mode: a host run puts the host on netguard's list too.
+  let providerHosts: string[] | undefined;
+  if (body.provider_hosts !== undefined && body.provider_hosts !== null && body.provider_hosts !== "") {
+    const raw = Array.isArray(body.provider_hosts) ? body.provider_hosts : String(body.provider_hosts).split(/[\s,]+/);
+    providerHosts = [...new Set(raw.map((e) => String(e).trim()).filter(Boolean))];
+    const bad = providerHosts.find((e) => !PROVIDER_HOST.test(e) || !isHostName(e.slice(e.indexOf("=") + 1).toLowerCase()));
+    if (bad) return { ok: false, error: `provider_hosts: ${bad} is not provider=host (a lower-case provider id, then the host its base URL names)` };
+    if (providerHosts.length > 20) return { ok: false, error: "provider_hosts: at most 20" };
+    if (!providerHosts.length) providerHosts = undefined;
+  }
   // Packs by id; whether each is installed is the kickoff's to say (pack.sh
   // resolve), with its dependencies.
   let packs: string[] | undefined;
@@ -589,6 +620,8 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
       vm_memory: vmMemory as number | undefined,
       vm_disk: vmDisk as number | undefined,
       vm_snapshot: vmSnapshot,
+      allow_oauth_in_vm: allowOauthInVm || undefined,
+      provider_hosts: providerHosts,
     },
   };
 }
@@ -609,6 +642,7 @@ export function startArgv(p: StartParams): string[] {
   if (net === "open") argv.push("--no-netguard");
   if (net === "local") argv.push("--local-only");
   if (net === "hosts") for (const host of p.allow_hosts ?? []) argv.push("--allow-host", host);
+  for (const entry of p.provider_hosts ?? []) argv.push("--provider-host", entry);
   if (p.hard_kill) argv.push("--hard-kill");
   if (p.tool_forging) argv.push("--allow-tool-forging");
   // On is the kickoff's default, so only "off" and the explicit lines travel.
@@ -627,6 +661,9 @@ export function startArgv(p: StartParams): string[] {
   } else if (p.inputs_dir) {
     argv.push("--inputs", p.inputs_dir);
     if (p.inputs_attach === "bind") argv.push("--inputs-bind");
+    // A VM run mounts --inputs in place unless told to copy it, so "copy",
+    // the form's default, has to say so there, or it quietly becomes a bind.
+    else if (p.isolation === "microvm") argv.push("--inputs-copy");
     if (p.inputs_enforce) argv.push("--inputs-enforce", p.inputs_enforce);
     if (p.inputs_max_mb) argv.push("--inputs-max-mb", String(p.inputs_max_mb));
   }
@@ -647,6 +684,7 @@ export function startArgv(p: StartParams): string[] {
     if (p.vm_memory) argv.push("--vm-memory", String(p.vm_memory));
     if (p.vm_disk) argv.push("--vm-disk", String(p.vm_disk));
     if (p.vm_snapshot === false) argv.push("--no-vm-snapshot");
+    if (p.allow_oauth_in_vm) argv.push("--allow-oauth-in-vm");
   }
   if (p.no_start) argv.push("--no-start");
   return argv;
@@ -834,6 +872,20 @@ export type ProviderReadiness = {
   /** Served from this machine or network: no key to log in with, no metered cost. */
   local?: boolean;
   base_url?: string;
+  /** The hosts a microVM would be told of for this provider, found the way swarm.sh provider_known_hosts finds them; empty when none is known, or for a local server (reached through the host gateway). */
+  vm_hosts?: string[];
+  /** What `swarm.sh start --isolation microvm` refuses about this provider; empty when it can go into a VM. Ready on the host is not ready in a VM. */
+  vm_blockers?: VmBlocker[];
+};
+
+/**
+ * One reason the VM kickoff refuses a provider, and the form setting that
+ * lifts it; none lifts a provider that signs its own requests.
+ */
+export type VmBlocker = {
+  kind: "oauth" | "signing" | "unknown_host";
+  lifted_by?: "allow_oauth_in_vm" | "provider_hosts";
+  reason: string;
 };
 
 export type ReadinessReport = {
@@ -916,8 +968,169 @@ export async function checkReadiness(models: string[], timeoutMs = 8000, piBin =
     }
     return { ...r, local: true, base_url: local.base_url };
   });
-  for (const [i, provider] of [...firstModel.keys()].entries()) providers[provider] = results[i];
+  for (const [i, [provider, model]] of [...firstModel.entries()].entries()) {
+    const vm = await vmReadiness(model, results[i].auth_type, { agentDir });
+    providers[provider] = { ...results[i], ...vm };
+  }
   return { checked_at: new Date().toISOString(), providers };
+}
+
+/** The hosts the kickoff knows by heart for Pi's built-in cloud providers (swarm.sh provider_known_hosts). */
+const BUILTIN_HOSTS: Record<string, string[]> = {
+  openai: ["api.openai.com"],
+  deepseek: ["api.deepseek.com"],
+  xai: ["api.x.ai"],
+  google: ["generativelanguage.googleapis.com"],
+  anthropic: ["api.anthropic.com", "platform.claude.com"],
+  "openai-codex": ["chatgpt.com", "auth.openai.com"],
+  openrouter: ["openrouter.ai"],
+};
+/** Providers that sign every request with their secret inside the client: the kickoff never puts one in a VM. */
+const SIGNING_PROVIDERS = new Set(["amazon-bedrock", "google-vertex"]);
+
+type VmCheckOptions = {
+  agentDir?: string;
+  env?: NodeJS.ProcessEnv;
+  /** The hosts Pi's own model list gives a provider; tests pass one so no `pi` is looked for. */
+  piHosts?: (model: string) => Promise<string[]>;
+};
+
+function readJsonObject(file: string): Record<string, unknown> | null {
+  try {
+    const data = JSON.parse(readFileSync(file, "utf8").replace(/^﻿/, "")) as unknown;
+    return data && typeof data === "object" ? (data as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function field(obj: unknown, ...path: string[]): unknown {
+  let cur = obj;
+  for (const key of path) {
+    if (!cur || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[key];
+  }
+  return cur;
+}
+
+/**
+ * The allowlist entry for a URL, as swarm.sh allow_entry_of_url writes it:
+ * the host alone for HTTPS on 443, `host:port` off 443 or on a local host.
+ */
+export function allowEntryOfUrl(url: string): string {
+  const m = url.match(/^([a-z]+):\/\/(\[[^\]]+\]|[^/:]+)(?::(\d+))?/i);
+  if (!m) return "";
+  const host = m[2].replace(/^\[|\]$/g, "").toLowerCase();
+  const port = m[3] ?? (m[1].toLowerCase() === "http" ? "80" : "443");
+  return isLocalHost(host) || port !== "443" ? `${host}:${port}` : host;
+}
+
+/** Pi's own model list, through the script the kickoff runs (scripts/provider-hosts.mjs), loaded once. */
+let piHostLookup: Promise<(model: string) => string[]> | null = null;
+function piProviderHosts(model: string): Promise<string[]> {
+  // A computed specifier: the module is plain JavaScript with no types, and
+  // it is the kickoff's own, so both ask Pi the same question.
+  const spec = new URL("../provider-hosts.mjs", import.meta.url).href;
+  piHostLookup ??= import(spec).then((m: { providerHosts?: (model: string) => string[] }) => m.providerHosts ?? (() => [])).catch(() => () => []);
+  return piHostLookup.then((lookup) => {
+    try {
+      return lookup(model);
+    } catch {
+      return [];
+    }
+  });
+}
+
+/**
+ * The base URL a provider is served from when the harness can know it, the
+ * way swarm.sh provider_base_url reads it: llama.cpp's own default, nothing
+ * for the cloud providers Pi knows, models.json for every other one.
+ */
+function providerBaseUrl(provider: string, models: Record<string, unknown> | null, env: NodeJS.ProcessEnv): string {
+  if (provider === "llama.cpp") return env.LLAMA_BASE_URL || "http://127.0.0.1:8080";
+  if (BUILTIN_HOSTS[provider] || provider === "azure-openai-responses") return "";
+  const base = field(models, "providers", provider, "baseUrl");
+  return typeof base === "string" ? base : "";
+}
+
+/**
+ * The hosts a VM is told of for a model before any --provider-host: the
+ * same places, in the same order, as swarm.sh provider_known_hosts. Empty
+ * means the kickoff would ask for --provider-host.
+ */
+export async function vmProviderHosts(model: string, opts: VmCheckOptions = {}): Promise<string[]> {
+  const env = opts.env ?? process.env;
+  const agentDir = opts.agentDir ?? (env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"));
+  const provider = providerOf(model);
+  const models = readJsonObject(join(agentDir, "models.json"));
+  const builtin = BUILTIN_HOSTS[provider];
+  if (builtin) {
+    // A built-in provider pointed elsewhere by models.json is called there, beside its own hosts.
+    const override = field(models, "providers", provider, "baseUrl");
+    return [...new Set([...(typeof override === "string" && override ? [allowEntryOfUrl(override)] : []), ...builtin].filter(Boolean))];
+  }
+  if (provider === "azure-openai-responses") {
+    // The customer's own resource: the shell first, then the provider's env block in Pi's store.
+    let base = env.AZURE_OPENAI_BASE_URL || "";
+    let name = env.AZURE_OPENAI_RESOURCE_NAME || "";
+    if (!base && !name) {
+      const auth = readJsonObject(join(agentDir, "auth.json"));
+      const b = field(auth, "azure-openai-responses", "env", "AZURE_OPENAI_BASE_URL");
+      const n = field(auth, "azure-openai-responses", "env", "AZURE_OPENAI_RESOURCE_NAME");
+      base = typeof b === "string" ? b : "";
+      name = typeof n === "string" ? n : "";
+    }
+    if (base) return [allowEntryOfUrl(base)].filter(Boolean);
+    return name ? [`${name}.openai.azure.com`.toLowerCase()] : [];
+  }
+  const base = providerBaseUrl(provider, models, env);
+  if (base) return [allowEntryOfUrl(base)].filter(Boolean);
+  return (opts.piHosts ?? piProviderHosts)(model);
+}
+
+/**
+ * What the VM kickoff would say about one model's provider, before it
+ * writes anything: a subscription token refused without the switch, a
+ * provider that signs its own requests refused outright, a provider with no
+ * known host refused until one is named. The same checks, in the same
+ * order, as swarm.sh start under --isolation microvm, so a model the host
+ * calls ready is not shown as ready for a VM it cannot enter.
+ */
+export async function vmReadiness(model: string, authType: string | undefined, opts: VmCheckOptions = {}): Promise<{ vm_hosts: string[]; vm_blockers: VmBlocker[] }> {
+  const env = opts.env ?? process.env;
+  const agentDir = opts.agentDir ?? (env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"));
+  const provider = providerOf(model);
+  const blockers: VmBlocker[] = [];
+  // vm_oauth_providers reads the type from Pi's store; `pi auth check`
+  // stands in only when the store has no entry for the provider.
+  const stored = field(readJsonObject(join(agentDir, "auth.json")), provider, "type");
+  if (stored === "oauth" || (stored === undefined && authType === "oauth")) {
+    blockers.push({
+      kind: "oauth",
+      lifted_by: "allow_oauth_in_vm",
+      reason: "a subscription (OAuth) provider: its token is the operator's whole account, and a VM holding its placeholder could use it beyond inference. Use an API key, or allow OAuth in the VMs to accept that",
+    });
+  }
+  // A local server is reached through the host gateway; no host to name.
+  const base = providerBaseUrl(provider, readJsonObject(join(agentDir, "models.json")), env);
+  const baseHost = base ? hostOfUrl(base) : "";
+  if (baseHost && isLocalHost(baseHost)) return { vm_hosts: [], vm_blockers: blockers };
+  if (SIGNING_PROVIDERS.has(provider)) {
+    blockers.push({
+      kind: "signing",
+      reason: "signs every request with its secret inside the client, so a VM would have to hold the secret itself. Run it on the host, or through a gateway that takes a key",
+    });
+    return { vm_hosts: [], vm_blockers: blockers };
+  }
+  const hosts = await vmProviderHosts(model, opts);
+  if (!hosts.length) {
+    blockers.push({
+      kind: "unknown_host",
+      lifted_by: "provider_hosts",
+      reason: `no host is known for it, and a VM reaches nothing it is not told of. Name one: ${provider}=<the host its base URL names>`,
+    });
+  }
+  return { vm_hosts: hosts, vm_blockers: blockers };
 }
 
 /** An installed pack, as the kickoff form lists it. */

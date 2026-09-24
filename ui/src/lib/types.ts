@@ -1,6 +1,11 @@
 /** Wire types. Mirrors scripts/ui/model.ts + extensions/*.ts; keep in sync by hand. */
 
-export type SwarmPhase = "running" | "done" | "stopped" | "prepared" | "failed" | "unknown";
+/**
+ * `finish_failed`: the hub reached the end of a VM run and could not put its
+ * VMs away. `stop_incomplete`: swarm.sh stop ran and a VM of the run was
+ * still up after it.
+ */
+export type SwarmPhase = "running" | "done" | "stopped" | "prepared" | "failed" | "finish_failed" | "stop_incomplete" | "unknown";
 export type AgentMarker = "done" | "dead" | "stalled" | "active";
 export type PostTag = "intro" | "ask" | "claim" | "result" | "hold" | "veto" | "stop";
 
@@ -39,6 +44,8 @@ export type SwarmRow = {
   threads_total: number;
   posts_total: number;
   phase: SwarmPhase;
+  /** A VM run whose sentinel is written and whose VMs are not all put away yet (the hub waiting for its agents, or finishing). */
+  finishing: boolean;
   /** Frontmatter `by` on done/SWARM_DONE, when the swarm is finished. */
   sentinel_by: string | null;
   /** budget.json stop_reason (cap / wall_clock), when the harness steered or stopped. */
@@ -70,6 +77,17 @@ export type ProviderReadiness = {
   provider: string;
   auth_type?: string;
   reason?: string;
+  /** The hosts a microVM would be told of for this provider; empty when none is known, or for a local server. */
+  vm_hosts?: string[];
+  /** What the microVM kickoff refuses about this provider; empty when it can go into a VM. */
+  vm_blockers?: VmBlocker[];
+};
+
+/** One reason the microVM kickoff refuses a provider, and the form setting that lifts it (none for a provider that signs its own requests). */
+export type VmBlocker = {
+  kind: "oauth" | "signing" | "unknown_host";
+  lifted_by?: "allow_oauth_in_vm" | "provider_hosts";
+  reason: string;
 };
 
 /** Which providers `pi auth check` says are usable, keyed by provider. */
@@ -304,8 +322,28 @@ export type VmHealth = {
   /** What the kickoff's probe found in the VM. */
   probe: { hub: boolean; floor: string | null; inputs: string | null; clock_skew_s: number | null; fuse: boolean | null; loop: boolean | null; missing: string[] };
   fit_warnings: string[];
-  /** The hub's live state: working, idle, done, gone; null when no hub answers for this run. */
-  live: { state: string; connected: boolean; since: string | null } | null;
+  /** The hub's word on this agent and when it last heard from the VM; null when no hub answers. What a dead hub last wrote, when hub_alive is false. */
+  live: { state: string; connected: boolean; since: string | null; last_seen: string | null } | null;
+  /** The run's hub, the same on every VM: up and the author of the status shown; null when none is recorded (before kickoff started it, after stop). */
+  hub_alive: boolean | null;
+  hub_detail: string | null;
+  /** ok; warn: down but being brought back, or ended by the stop; danger: down and nothing brings it back. */
+  hub_tone: "ok" | "warn" | "danger" | null;
+  /** The hub's keeper (hub-supervise.sh), which restarts a dead hub until the stop; null when none is recorded. */
+  hub_keeper_alive: boolean | null;
+  /** The run's stop has begun. */
+  hub_stop_begun: boolean;
+  /** The hub is putting the VMs away and taking custody (its status: finished, not yet finish_done). */
+  hub_finishing: boolean;
+  /** Seconds since the hub last wrote its status; it writes on changes, not on a clock. */
+  hub_status_age_s: number | null;
+  mounts: Array<{ host: string; guest: string; mode: string; noexec: boolean }>;
+  /** deny (plus allow_hosts) or public (--no-netguard). */
+  network: { default: string; allow_hosts: string[]; host_ports: number[] } | null;
+  /** Credentials bound to this VM as placeholders, each with the only hosts it is swapped in for. */
+  secrets: Array<{ name: string; hosts: string[] }>;
+  /** Each pack's secrets and what the kickoff did with them: injected, withheld, exposed, not-set. */
+  pack_secrets: Array<{ pack: string; names: string[]; mode: string }>;
   stopped_at: string | null;
   snapshot: "kept" | "not kept" | "failed" | null;
   installed_outside: string[];
@@ -346,6 +384,40 @@ export type SwarmView = {
   names?: Array<{ id: string; name: string; doing?: string; at: string }>;
   /** A microVM run's VMs; empty or absent for a host run. */
   vms?: VmHealth[];
+  /** What the last custody check found (custody.json); null before a stop or the hub's finish took one. */
+  custody?: CustodyView | null;
+};
+
+/** custody.json as the console shows it; `problems` empty is a clean verdict. */
+export type CustodyView = {
+  at: string | null;
+  summary: string;
+  verdict: "clean" | "attention";
+  problems: string[];
+  /** `skipped`: not re-read before custody's deadline; the verdict does not cover them. */
+  evidence:
+    | null
+    | { unverifiable: string }
+    | { files: number; bytes: number; unchanged: boolean; complete: boolean; changed: string[]; missing: string[]; added: string[]; skipped: string[]; manifest_anchored: boolean | null };
+  sessions_not_files: string[];
+  trace: { lines: number; intact: boolean; detail: string; unverified: number; disputed: number; spilled: number; lost: number; refused_spills: Array<{ path: string; why: string }> } | null;
+  ledger: { entries: number; chained: number | null; intact: boolean; detail: string; missing_from_ledger: string[]; not_on_trace: number[] } | null;
+  tool_outputs: { referenced: number; verified: number; missing: string[]; mismatched: string[]; refused: string[] } | null;
+  vms: Array<{
+    agent: string;
+    record_sha256: string | null;
+    stopped: boolean;
+    kept: string | null;
+    snapshot: string | null;
+    image: string | null;
+    expected_image: string | null;
+    image_differs: boolean;
+    secret_violations: Array<{ at: string; env: string; host: string; method: string; path: string; action: string }>;
+    installed_outside: string[];
+    installed_note: string | null;
+    runtime_changed: string | null;
+  }> | null;
+  incomplete: string | null;
 };
 
 /** One `record` call, as the harness stored it in ledger/entries.jsonl. */
@@ -404,6 +476,8 @@ export type InputsLibrary = {
   sets: InputSet[];
   /** Whether this server takes a new root from the form (`swarm.sh ui --allow-inputs-root-from-ui`). */
   runtime_roots: boolean;
+  /** The server's OS: a disk image is attached with hdiutil, so only on darwin. Absent from an older server. */
+  platform?: string;
 };
 
 /** A tool an agent wrote with make_tool, as the server lists it with its usage. */

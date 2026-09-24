@@ -16,6 +16,7 @@ import { compact, liveElapsed, mmss, money } from "@/lib/format";
 import { useNow } from "@/lib/hooks";
 import { useLive, useResource, useSwarmVersion } from "@/lib/live";
 import { CHECKS_CHANGE_KINDS } from "@/lib/live-version";
+import { reachedDone, stopHasWork } from "@/lib/overview-status";
 import type { SwarmView } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { StoryPanel } from "./detail/story-panel";
@@ -28,6 +29,7 @@ import { ClaimsPanel } from "./detail/claims-panel";
 import { BudgetPanel } from "./detail/budget-panel";
 import { FilesPanel } from "./detail/files-panel";
 import { InputsPanel } from "./detail/inputs-panel";
+import { CustodyPanel } from "./detail/custody-panel";
 import { VmPanel } from "./detail/vm-panel";
 import { ReportPanel } from "./detail/report-panel";
 import { ArtifactsPanel } from "./detail/artifacts-panel";
@@ -74,9 +76,32 @@ function ActionBar({ view }: { view: SwarmView }) {
   const [closePanes, setClosePanes] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [stopAnyway, setStopAnyway] = useState(false);
   const job = jobId ? live.jobs[jobId] ?? null : null;
   const id = view.summary.id;
-  const canStop = view.summary.state === "running" || view.summary.state === "prepared";
+  const state = view.summary.state;
+  const canStop = stopHasWork(state);
+  const vmRun = (view.vms ?? []).length > 0 || (view.registry?.isolation as { mode?: string } | undefined)?.mode === "microvm";
+  const vm0 = view.vms?.[0];
+  const hubAlive = vm0?.hub_alive ?? null;
+  // The hub itself says it is putting the VMs away and taking custody. A
+  // stop now waits for it before it touches anything, and custody taken
+  // twice at once writes one verdict over the other: asked for on purpose,
+  // never by accident. Before the hub starts, or with no hub running, Stop
+  // is how the VMs get put away, and needs no guard.
+  const finishingGuard = vm0?.hub_finishing === true && hubAlive === true;
+  const stopBegun = vm0?.hub_stop_begun === true;
+  const afterFinish = state === "finished" || state === "finish_failed";
+  const stopLabel = afterFinish ? "Clean up" : state === "stop_incomplete" ? "Stop again" : "Stop swarm";
+  const stopTitle = !canStop
+    ? "Already stopped"
+    : afterFinish
+      ? "swarm.sh stop: the hub already ran it after finishing; safe to run again for anything left"
+      : state === "stop_incomplete"
+        ? "swarm.sh stop again: a VM of this run was still up after the last stop"
+        : finishingGuard
+          ? "The hub is putting the VMs away; a stop now waits for it"
+          : "swarm.sh stop";
 
   async function run(fn: () => Promise<{ id: string }>) {
     setError(null);
@@ -91,11 +116,21 @@ function ActionBar({ view }: { view: SwarmView }) {
   return (
     <div className="flex flex-col items-end gap-2">
       <div className="flex gap-2">
-        <Button variant="secondary" size="sm" className="h-9 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => setReapOpen(true)} disabled={view.summary.phase === "done"}>
+        <Button variant="secondary" size="sm" className="h-9 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => setReapOpen(true)} disabled={reachedDone(view.summary.phase)}>
           <Skull /> Reap stalled
         </Button>
-        <Button variant="danger" size="sm" className="h-9" onClick={() => setStopOpen(true)} disabled={!canStop} title={canStop ? "swarm.sh stop" : "Already stopped"}>
-          <Square className="fill-current" /> Stop swarm
+        <Button
+          variant="danger"
+          size="sm"
+          className="h-9"
+          onClick={() => {
+            setStopAnyway(false);
+            setStopOpen(true);
+          }}
+          disabled={!canStop}
+          title={stopTitle}
+        >
+          <Square className="fill-current" /> {stopLabel}
         </Button>
       </div>
       {error ? <InlineNote tone="danger">{error}</InlineNote> : null}
@@ -107,22 +142,62 @@ function ActionBar({ view }: { view: SwarmView }) {
 
       <Dialog open={stopOpen} onOpenChange={setStopOpen}>
         <DialogContent>
-          <DialogTitle>Stop {view.summary.label}?</DialogTitle>
+          <DialogTitle>{afterFinish ? `Clean up ${view.summary.label}?` : `Stop ${view.summary.label}?`}</DialogTitle>
           <DialogDescription>
-            Runs <code>scripts/swarm.sh stop {id}</code>: closes the Herdr workspace(s), kills the netguard sidecar, marks the registry <code>stopped</code>. Files in the sandbox stay. This does not write <code>SWARM_DONE</code>.
+            {vmRun ? (
+              <>
+                Runs <code>scripts/swarm.sh stop {id}</code>: closes the Herdr workspace(s), puts each VM away ({(view.registry?.isolation as { snapshot?: boolean } | undefined)?.snapshot === false ? "removed without keeping its disk" : "its disk kept as a snapshot beside the run, then removed"}; a few minutes a VM), stops the hub and the collector, marks the registry <code>stopped</code> (<code>done</code> when the sentinel is there), then takes custody: the evidence re-hashed and the run sealed into <code>custody.json</code>. Files in the sandbox stay. This does not write <code>SWARM_DONE</code>.
+              </>
+            ) : (
+              <>
+                Runs <code>scripts/swarm.sh stop {id}</code>: closes the Herdr workspace(s), stops the collector and the netguard sidecar, marks the registry <code>stopped</code> (<code>done</code> when the sentinel is there), then takes custody: the evidence re-hashed and the run sealed into <code>custody.json</code>. Files in the sandbox stay. This does not write <code>SWARM_DONE</code>.
+              </>
+            )}
           </DialogDescription>
+          {state === "finish_failed" ? (
+            <InlineNote tone="danger">
+              The hub tried to put the VMs away and failed; some may still be running. Stop puts away what is left and takes custody again; the previous <code>custody.json</code> is kept beside it, dated.
+            </InlineNote>
+          ) : state === "finished" ? (
+            <InlineNote tone="neutral">
+              The hub put the VMs away, took custody, then ran the stop itself (<code>swarm.sh stop --after-hub</code>) for the panes and the daemons. Usually nothing is left; running it again is safe, and takes custody again (the previous <code>custody.json</code> is kept beside it, dated).
+            </InlineNote>
+          ) : state === "stop_incomplete" ? (
+            <InlineNote tone="danger">
+              The last stop left a VM of this run up, and the record says <code>stop_incomplete</code>. Stop again puts away what is left; a VM that still will not go is for <code>swarm.sh reap {id}</code>, or msb itself.
+            </InlineNote>
+          ) : null}
+          {stopBegun && !afterFinish ? <InlineNote tone="warn">A stop of this run has already begun. Another one is safe: it finds what the first has done and goes on from there.</InlineNote> : null}
+          {view.summary.finishing ? (
+            finishingGuard ? (
+              <div className="mt-2 flex flex-col gap-2">
+                <InlineNote tone="danger">
+                  The hub is putting the VMs away right now: a snapshot of each disk, then removal, then custody. A stop now waits for it to finish, up to half an hour, before it closes anything, and custody taken twice at once writes one verdict over the other. Leave it to the hub unless it is stuck.
+                </InlineNote>
+                <label className="flex items-center justify-between gap-3 text-[13px]">
+                  <span>Stop anyway, while the hub is finishing</span>
+                  <Switch checked={stopAnyway} onCheckedChange={setStopAnyway} aria-label="Stop while the hub is finishing" />
+                </label>
+              </div>
+            ) : hubAlive === false ? (
+              <InlineNote tone="warn">The sentinel is written and some VMs are not put away yet, but the hub is not running, so nothing is putting them away. Stop does it.</InlineNote>
+            ) : (
+              <InlineNote tone="neutral">The sentinel is written; the hub puts the VMs away once every agent is out. Stopping now puts them away instead.</InlineNote>
+            )
+          ) : null}
           <div className="mt-4 flex justify-end gap-2">
             <Button variant="secondary" onClick={() => setStopOpen(false)}>
               Cancel
             </Button>
             <Button
               variant="danger"
+              disabled={finishingGuard && !stopAnyway}
               onClick={() => {
                 setStopOpen(false);
                 void run(() => api.stop(id));
               }}
             >
-              <Square className="fill-current" /> Stop swarm
+              <Square className="fill-current" /> {stopLabel}
             </Button>
           </div>
         </DialogContent>
@@ -141,7 +216,15 @@ function ActionBar({ view }: { view: SwarmView }) {
             </div>
             <label className="flex items-center justify-between gap-3 text-[13px]">
               <span>
-                Also close the agent's Herdr pane (<code>--stop</code>)
+                {vmRun ? (
+                  <>
+                    Also close the agent's Herdr pane and put its VM away (<code>--stop</code>)
+                  </>
+                ) : (
+                  <>
+                    Also close the agent's Herdr pane (<code>--stop</code>)
+                  </>
+                )}
               </span>
               <Switch checked={closePanes} onCheckedChange={setClosePanes} />
             </label>
@@ -239,12 +322,30 @@ export function SwarmDetailScreen() {
   const steeredAt = b.stop_steer_at ? Date.parse(b.stop_steer_at) : NaN;
   const steering = Number.isFinite(steeredAt) && !d.sentinel && s.phase === "running";
   const graceLeft = steering ? Math.max(0, steeredAt + GRACE_MS - now) : 0;
-  const harnessStopped = s.phase === "done" && d.sentinel_info?.by === "harness";
+  const harnessStopped = reachedDone(s.phase) && d.sentinel_info?.by === "harness";
 
   const stateChip = steering ? (
     <Chip tone="brick" className="bg-brick text-white">
       over {b.stop_reason === "wall_clock" ? "wall clock" : "cap"} · steered
     </Chip>
+  ) : s.finishing ? (
+    // The sentinel is there and the hub is still putting the VMs away; the
+    // list says the same, from the same predicate on the server.
+    <span title="done/SWARM_DONE exists; the VMs are being snapshotted and removed, then custody runs">
+      <Chip tone="moss">finishing</Chip>
+    </span>
+  ) : s.phase === "finish_failed" ? (
+    <span title="The hub reached the end of the run and could not put every VM away. The work is done; Clean up puts away what is left.">
+      <Chip tone="brick" className="bg-brick text-white">
+        finish failed
+      </Chip>
+    </span>
+  ) : s.phase === "stop_incomplete" ? (
+    <span title="swarm.sh stop ran and a VM of this run was still up after it. Stop again, or reap.">
+      <Chip tone="brick" className="bg-brick text-white">
+        stop incomplete · a VM is still up
+      </Chip>
+    </span>
   ) : harnessStopped ? (
     <Chip tone="brick" className="bg-brick text-white">
       stopped by harness
@@ -253,11 +354,6 @@ export function SwarmDetailScreen() {
     <Chip tone="kelp" className="bg-kelp text-white">
       running
     </Chip>
-  ) : s.phase === "done" && d.registry?.state === "running" && (d.vms ?? []).some((v) => !v.stopped_at) ? (
-    // The sentinel is there and the hub is still putting the VMs away.
-    <span title="done/SWARM_DONE exists; the VMs are being snapshotted and removed, then custody runs">
-      <Chip tone="moss">finishing</Chip>
-    </span>
   ) : s.phase === "done" ? (
     <Chip tone="moss" className="bg-moss text-white">
       done
@@ -301,6 +397,15 @@ export function SwarmDetailScreen() {
                   <Chip tone="saffron">{d.layout.split_failures} pane split{d.layout.split_failures === 1 ? "" : "s"} fell back to a new tab</Chip>
                 </div>
               ) : null}
+              {d.custody?.verdict === "attention" ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={() => setTab("files")} title={d.custody.problems.join("\n")}>
+                    <Chip tone="brick" className="bg-brick text-white">
+                      custody: {d.custody.problems.length} to look at
+                    </Chip>
+                  </button>
+                </div>
+              ) : null}
             </div>
             <ActionBar view={d} />
           </div>
@@ -336,7 +441,7 @@ export function SwarmDetailScreen() {
             }
           />
           <Vital
-            label={s.phase === "done" ? "Took" : "Wall clock"}
+            label={reachedDone(s.phase) ? "Took" : "Wall clock"}
             value={mmss(elapsedLive)}
             tail={wallMs ? `of ${mmss(wallMs)}` : undefined}
             tone={overWall ? "saffron" : undefined}
@@ -350,9 +455,9 @@ export function SwarmDetailScreen() {
             // header counted only the ones that made it. A reader cannot tell
             // 6 of 6 from 6 of 10, and on the BelkaCTF run the difference was
             // two dead providers.
-            value={`${s.phase === "done" ? doneN : working} of ${d.agents.length}`}
+            value={`${reachedDone(s.phase) ? doneN : working} of ${d.agents.length}`}
             tail={
-              s.phase === "done"
+              reachedDone(s.phase)
                 ? `done${unmarkedN ? ` · ${unmarkedN} unfinished` : ""}${deadN ? ` · ${deadN} dead` : ""}`
                 : `working · ${doneN} done${deadN ? ` · ${deadN} dead` : ""}${stalledN ? ` · ${stalledN} quiet` : ""}`
             }
@@ -452,6 +557,7 @@ export function SwarmDetailScreen() {
           {tab === "budget" ? <BudgetPanel view={d} elapsedMs={elapsedLive} /> : null}
           {tab === "files" ? (
             <div className="space-y-4">
+              <CustodyPanel view={d} />
               <InputsPanel view={d} />
               <FilesPanel view={d} selected={sub ? decodeURIComponent(sub) : null} onSelect={(p) => setSub("files", p)} version={historyVersion} />
             </div>

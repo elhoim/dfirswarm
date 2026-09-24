@@ -59,12 +59,23 @@ function frameFacts(view: SwarmView): Fact[] {
       title: "Agents read inputs/ and can never write it; this is the guard each pane actually got",
     });
   }
+  // Open is what the record says, in either field: a VM run with
+  // --no-netguard records netguard_mode microvm-open, and its policy was
+  // public, not deny by default.
+  const netOpen = r.net === "open" || r.netguard_mode === "microvm-open" || r.netguard === false;
   out.push({
     label: "Network",
     value:
-      r.net === "open" ? "open" : r.net === "local" ? "local endpoints only" : r.net === "hosts" ? `allowlist + ${String(r.allow_hosts ?? "")}` : "allowlist only",
-    tone: r.net === "open" ? "warn" : undefined,
-    title: iso.mode === "microvm" ? "What each agent's VM could reach: msb's network policy, deny by default" : "What the panes could reach through netguard",
+      netOpen ? "open" : r.net === "local" ? "local endpoints only" : r.net === "hosts" ? `allowlist + ${String(r.allow_hosts ?? "")}` : "allowlist only",
+    tone: netOpen ? "warn" : undefined,
+    title:
+      iso.mode === "microvm"
+        ? netOpen
+          ? "Each agent's VM could reach every public host (--no-netguard); credentials still went only to their own hosts"
+          : "What each agent's VM could reach: msb's network policy, deny by default"
+        : netOpen
+          ? "The panes could reach whatever this machine could: netguard was off"
+          : "What the panes could reach through netguard",
   });
   if (r.toolbox && r.toolbox !== "off") out.push({ label: "Toolbox", value: String(r.toolbox), title: iso.mode === "microvm" ? "The tool sets and the packs' programs, checked in the run's image before the run started" : "The tool sets checked on this host before the run started" });
   if (r.catalog === true) out.push({ label: "Catalog", value: "first pass done", title: "The standard first pass over the evidence ran before any agent" });
@@ -95,7 +106,17 @@ function frameFacts(view: SwarmView): Fact[] {
       title: "How much post text one inbox or wait delivery carried; whole posts only, the rest stayed unread for the next call",
     });
   }
-  if (r.allow_install === true) out.push({ label: "Install", value: "pypi into the sandbox", title: "Agents could pip-install into work/.toolchain; no root, no system packages" });
+  if (r.allow_install === true) {
+    out.push(
+      iso.mode === "microvm"
+        ? {
+            label: "Install",
+            value: `${r.install_hosts === false ? "from the cache" : "pypi"} into each VM`,
+            title: "Each agent could install into its own VM's disk (/opt/dfir/agent), root in its VM only; nothing went into work/.toolchain, and what a VM held beyond its image is listed at stop",
+          }
+        : { label: "Install", value: "pypi into the sandbox", title: "Agents could pip-install into work/.toolchain; no root, no system packages" },
+    );
+  }
   out.push({ label: "Hard kill", value: view.budget?.hard_kill ? "on" : "off", title: "Whether a cap steer shuts the session down or waits out the grace period" });
   if (typeof r.cap_per_agent_usd === "number" && r.cap_per_agent_usd > 0) {
     out.push({ label: "Per agent", value: `$${r.cap_per_agent_usd}`, title: "What one agent may spend before it is steered to finish and stopped" });
