@@ -1,14 +1,18 @@
 # Agents live in microVMs, and the board has one writer on the host
 
-With `--isolation microvm`, every agent is a Pi process inside its own
-microVM, created by the kickoff and put away by `stop`. The board's files are
-written by one process on the host, the hub, which each VM reaches over its
-own vsock port. Host mode (`--isolation host`) stays the default and keeps
-its design: panes on the host, the board functions run locally, the host
-guards. It did change where this work fixed things for both modes: the
-console binds 127.0.0.1, the finish line is read from the registry only,
-the trace masks the harness's tokens, `stop` takes custody, and more; the
-CHANGELOG lists each under "Changed for host runs".
+Every agent is a Pi process inside its own microVM, created by the kickoff
+and put away by `stop`: `--isolation microvm`, the default since 2026-09-24.
+The board's files are written by one process on the host, the hub, which
+each VM reaches over its own vsock port. Host mode (`--isolation host`) is
+kept as the opt-in, unisolated mode, with its design: panes on the host, the
+board functions run locally, the host guards. It did change where this work
+fixed things for both modes: the console binds 127.0.0.1, the finish line is
+read from the registry only, the trace masks the harness's tokens, `stop`
+takes custody, and more; the CHANGELOG lists each under "Changed for host
+runs".
+
+Status: accepted. The default was decided on 2026-09-24 (see "Decided"
+below).
 
 ## Context
 
@@ -322,16 +326,33 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
 - Deferred: image signatures and an SBOM. A run records and checks the
   digest it booted; nothing verifies who built that image.
 
+## Decided
+
+- **The default is `--isolation microvm`** (2026-09-24). A run is in
+  microVMs unless `--isolation host` or `SWARM_ISOLATION=host` says
+  otherwise; the console's form defaults to it too and always names the
+  isolation it chose in the command it runs. A host that cannot boot the
+  VMs (an Intel Mac, Linux without KVM or glibc, no msb, an image that is
+  not there and cannot be pulled, VMs that do not fit) is refused before
+  anything is written, with what it lacks, how to fix it and `--isolation
+  host` as the unisolated way on. The kickoff never falls back to host
+  processes on its own. A host guard's flag (`--no-write-guard`,
+  `--no-seal-herdr`, `--inputs-enforce`, `--key-from-env`,
+  `--probe-violation`) without `--isolation` is refused with the hint to
+  name host. A registry record with no isolation is a run from before the
+  default changed, and is shown as a host run.
+- **Host mode stays** (2026-09-24), neither frozen nor removed: supported as
+  the opt-in, unisolated mode. What stays true of it: every agent is a Pi
+  process on this machine, held by the write guard, the tool guard, netguard,
+  the trace gate and the nudge broker where the host can enforce them, and
+  by nothing else; reads are open by design; on macOS egress is advisory;
+  the record and the report say which guard held. The kickoff and the
+  console label it unisolated wherever it is chosen.
+
 ## Open decisions
 
 For the project owner; nothing in the code decides them yet.
 
-- Whether `--isolation microvm` becomes the default, and on what evidence
-  (for example the KVM job green over a number of pull requests and one real
-  case run end to end in VMs).
-- Whether host mode is frozen (labelled unisolated, fixes only) or removed
-  once VM mode is the default, and what code goes with it: the host guards,
-  the second spill location, the direct board path.
 - A bare-metal Linux server with KVM for real cases. The droplet runs VMs
   through nested KVM and fits two agents.
 - Whether a copied `--inputs` is also re-hashed from its source, which

@@ -10,10 +10,11 @@
 # inside the sandbox, too big, bad enforcement, enforcement the host cannot
 # give) have to be refusals.
 set -uo pipefail
-# A shell with a VM default, an image or a lock file exported, or another pack
-# home, would turn this suite's kickoffs into something else (a VM kickoff, another
-# image): what the suite checks is the defaults.
-unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
+# This suite tests host runs, and a run is in microVMs unless it says
+# otherwise: it names host. An image, a lock file or another pack home
+# exported in the shell would point its kickoffs somewhere else.
+unset SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
+export SWARM_ISOLATION=host
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/inputs.XXXXXX")"
 # A kickoff starts the run's daemons (the collector, the gate, the nudge

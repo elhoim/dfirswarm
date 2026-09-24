@@ -7,6 +7,11 @@ measured on that host. What the kernel can enforce and how is in
 [linux-plan.md](linux-plan.md); this page is what an operator has to get
 right.
 
+Every agent runs in its own microVM unless the run says `--isolation host`,
+so a Linux host needs KVM first ([Agents in microVMs](#agents-in-microvms)).
+The account and namespace sections below matter for host runs, which are
+unisolated: every agent is a process on the machine.
+
 ## Packages
 
 ```
@@ -114,7 +119,8 @@ should find nothing.
 
 ## Agents in microVMs
 
-`--isolation microvm` needs `/dev/kvm` for the account (`ls -l /dev/kvm`; a
+A run is in microVMs by default (`--isolation microvm`), which needs
+`/dev/kvm` for the account (`ls -l /dev/kvm`; a
 group or a udev rule, as CI's microVM job sets one) and the image loaded into
 msb (`images/README.md`; `msb load -i` a `docker save` of it). On a small
 server the kickoff sizes each VM at 1 GiB when the host has under 8 GiB, and
@@ -128,8 +134,8 @@ restarted or the run crashed. A host-mode pane
 of another run on the same account is kept from them by its guard's mount
 namespace (the directory is masked) or, on macOS, by sandbox-exec; with
 Landlock alone, or with no write guard, it is not, and a host kickoff that
-finds a VM run up says so. Run such hosts one run at a time. `swarm.sh netcheck --isolation microvm` shows what a run's VMs
-would reach; `swarm.sh status <id>` lists each agent's state from its hub; a
+finds a VM run up says so. Run such hosts one run at a time. `swarm.sh netcheck` shows what a run's VMs
+would reach (`--isolation host` checks netguard instead); `swarm.sh status <id>` lists each agent's state from its hub; a
 stop keeps each VM's disk beside the run (`<sandbox>.vm-snapshots/`) with its
 logs, and custody checks it with msb.
 

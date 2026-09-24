@@ -171,7 +171,7 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   if (run?.case_id || run?.examiner) lines.push(`- Case: ${run?.case_id || "—"} · Examiner: ${run?.examiner || "—"}`);
   // How the agents were held, and what the host could say once they were gone.
   const iso = (run as { isolation?: { mode?: string; image?: string; image_digest?: string } } | null)?.isolation;
-  lines.push(`- Isolation: ${iso?.mode === "microvm" ? `one microVM per agent${iso.image ? ` (${iso.image}${iso.image_digest ? ` ${iso.image_digest}` : ""})` : ""}; spend is what each VM reported` : "host (every agent a process on this machine)"}`);
+  lines.push(`- Isolation: ${iso?.mode === "microvm" ? `one microVM per agent${iso.image ? ` (${iso.image}${iso.image_digest ? ` ${iso.image_digest}` : ""})` : ""}; spend is what each VM reported` : "host, unisolated (every agent a process on this machine)"}`);
   // A removed VM whose finish could not clear msb's database of it: its
   // secret values may still be there, on the host.
   if (iso?.mode === "microvm") {

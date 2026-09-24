@@ -48,8 +48,8 @@ function frameFacts(view: SwarmView): Fact[] {
     const holders = [r.write_guard && r.write_guard !== "none" ? "the write guard" : null, "the tool guard", r.netguard === false ? null : "netguard"].filter(Boolean) as string[];
     out.push({
       label: "Isolation",
-      value: "host processes",
-      title: `Each agent ran as a Pi process on this host, held by ${holders.join(", ")}${r.write_guard === "none" ? "; the write guard was off" : ""}${r.netguard === false ? "; netguard was off" : ""}`,
+      value: "host processes · unisolated",
+      title: `Each agent ran as a Pi process on this host, with no VM around it (a run with no isolation recorded is one of these), held by ${holders.join(", ")}${r.write_guard === "none" ? "; the write guard was off" : ""}${r.netguard === false ? "; netguard was off" : ""}`,
     });
   }
   if (view.inputs) {

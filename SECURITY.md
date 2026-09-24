@@ -6,31 +6,33 @@ Read this before you run it, and before you report something.
 ## Threat model, in one paragraph
 
 A swarm is N Pi sessions with `bash`, `read`, `edit` and `write`, all with the
-same isolated directory as their working directory. The harness enforces what
-it can: `edit`/`write` outside the sandbox or without a lease are blocked;
-harness-owned files (`SWARM.md`, `team.json`, `budget.json`, `names.json`,
-`done/`, `locks/`, `threads/`, `traces/`, `history/`, `inbox/`, `tools/`,
-`inputs/`, `ledger/`, `catalog/`) are refused as write targets;
-egress goes through a per-swarm allowlisting proxy; every tool call is logged.
-What it cannot enforce is `bash`: a shell command can read or write anything
-the user running the swarm can, and no hook can stop it mid-command. The
-harness *detects* shell writes to leased paths, snapshots them and announces
-them on the board — after the fact. **Run swarms on a machine or account you
-are willing to lose, with credentials you are willing to rotate.**
+same isolated directory as their working directory. By default each agent is
+root in its own microVM, and the boundary is the host side of every mount,
+the VM's network policy and the hub's socket, not the agent's shell. What
+that boundary protects: the host's files (a VM holds only what is mounted,
+and the run is a read-only floor in it but for the seat's own directories),
+the credentials (provider keys, subscription tokens and pack secrets never
+enter a guest; msb swaps a placeholder for the value on the way to the
+credential's own hosts), the evidence (read-only through a mount the host
+enforces), and the harness's decisions (the finish line, the stop clock,
+custody and the report are taken on the host). What it does not protect is
+listed under Out of scope. In that mode a `bash` inside the VM is in scope
+wherever it reaches past those
+([ADR 0009](docs/adr/0009-agents-live-in-microvms.md), `docs/safety.md`).
 
-With `--isolation microvm` the model is different: each agent is root in its
-own microVM, and the boundary is the host side of every mount, the VM's
-network policy and the hub's socket — not the agent's shell. What that
-boundary protects: the host's files (a VM holds only what is mounted, and the
-run is a read-only floor in it but for the seat's own directories), the
-credentials (provider keys, subscription tokens and pack secrets never enter
-a guest; msb swaps a placeholder for the value on the way to the credential's
-own hosts), the evidence (read-only through a mount the host enforces), and
-the harness's decisions (the finish line, the stop clock, custody and the
-report are taken on the host). What it does not protect is listed under Out
-of scope. In that mode a `bash` inside the VM is in scope wherever it reaches
-past those ([ADR 0009](docs/adr/0009-agents-live-in-microvms.md),
-`docs/safety.md`).
+With `--isolation host` the run is unisolated: every agent is a process on
+this machine, and the harness enforces what it can. `edit`/`write` outside
+the sandbox or without a lease are blocked; harness-owned files (`SWARM.md`,
+`team.json`, `budget.json`, `names.json`, `done/`, `locks/`, `threads/`,
+`traces/`, `history/`, `inbox/`, `tools/`, `inputs/`, `ledger/`, `catalog/`)
+are refused as write targets; egress goes through a per-swarm allowlisting
+proxy; every tool call is logged. What it cannot enforce is `bash`: a shell
+command can read or write anything the user running the swarm can, and no
+hook can stop it mid-command. The harness *detects* shell writes to leased
+paths, snapshots them and announces them on the board, after the fact.
+
+In either mode, **run swarms on a machine or account you are willing to
+lose, with credentials you are willing to rotate.**
 
 ## In scope
 

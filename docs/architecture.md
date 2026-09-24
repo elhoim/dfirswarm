@@ -2,6 +2,11 @@
 
 What runs where: the operator's scripts, the Herdr panes, the Pi extension, the sandbox on disk, the egress proxy and the web app.
 
+Every agent runs in its own microVM unless the run says `--isolation host`.
+The first diagram is a host run (unisolated: every agent a Pi process on
+this machine); [With a microVM per agent](#with-a-microvm-per-agent---isolation-microvm)
+is the default, and changes only where Pi runs and who writes the board.
+
 
 ```mermaid
 flowchart TB
@@ -75,7 +80,7 @@ Reading the diagram:
 
 ## With a microVM per agent (`--isolation microvm`)
 
-The same extension, the same protocol and the same files, with the agents
+The default. The same extension, the same protocol and the same files, with the agents
 moved behind a VM's wall and one process on the host writing the board for
 them. [ADR 0009](adr/0009-agents-live-in-microvms.md) says why.
 

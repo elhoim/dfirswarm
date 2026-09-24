@@ -1357,6 +1357,10 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ["Attribution", attributionLine(run?.attribution as string | undefined)],
     ["Guard measured", measuredGuardLine(run?.write_guard_measured as string | undefined)],
     ...vmRows(vmRecords),
+    // A host run says so beside the VM rows it does not have: every agent
+    // was a process on this machine, and a record with no isolation field is
+    // an old host run.
+    ...(run?.isolation?.mode === "microvm" ? [] : [["Isolation", "host, unisolated: every agent was a process on this machine (--isolation host); the host guards above are what held it"] as [string, string]]),
     [
       "Trace integrity",
       traceUnread

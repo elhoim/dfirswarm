@@ -6,6 +6,32 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed: agents run in microVMs by default (breaking)
+
+- **`--isolation microvm` is the default.** A run with no `--isolation` and
+  no `SWARM_ISOLATION` puts every agent in its own microVM, and so does
+  `netcheck`. The old behaviour is `--isolation host` (or
+  `SWARM_ISOLATION=host`): every agent a Pi process on this machine, held by
+  the host guards. Host mode is kept and supported; the kickoff, `help`
+  and the console call it unisolated wherever it is chosen.
+- A host that cannot boot the VMs (an Intel Mac, Linux without KVM or glibc,
+  no msb, an image that is not there and cannot be pulled, VMs that do not
+  fit) is refused before anything is written, with what it lacks, how to fix
+  it (the base image's build commands among them) and `--isolation host` as
+  the unisolated way on. It never falls back to a host run on its own.
+- A host guard's flag (`--no-write-guard`, `--no-seal-herdr`,
+  `--inputs-enforce`, `--key-from-env`, `--probe-violation`) with no
+  `--isolation` is refused with the hint to add `--isolation host`.
+- The console's New swarm form has the microVM switch on by default and
+  always passes `--isolation` explicitly; its API takes `isolation: "host"`
+  for a host run.
+- A registry record with no isolation (every run from before this change)
+  is a host run, and `list`, `status`, the console and the report show it as
+  one.
+- The kickoff prints an `Isolation:` line. The quick start builds the base
+  image before the first run; the keyless proofs it shows are host runs, as
+  they were proven.
+
 ### Changed for host runs
 
 What the microVM work changed for host runs as well, so a host operator is

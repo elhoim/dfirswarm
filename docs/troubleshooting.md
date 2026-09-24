@@ -3,6 +3,33 @@
 What goes wrong at kickoff, in a run and in the console, and what to do about it.
 
 
+**`BLOCKER: this host cannot run the agents' VMs`.**
+Every agent runs in its own microVM unless the run says `--isolation host`,
+and this host cannot boot one: an Intel Mac, Linux without KVM (`/dev/kvm`
+this user can open) or glibc, msb missing (`npm ci --omit=optional` leaves it
+out), or `msb doctor` failing, whose whole output follows the refusal. Fix
+what it names, or run unisolated with `--isolation host`: every agent is
+then a process on this host, held by the host guards. The kickoff never
+falls back to host processes on its own.
+
+**`BLOCKER: dfirswarm-<profile>:dev-<arch> is not on this host and could not be pulled`.**
+The VM image the run needs is not loaded into msb and no registry had it.
+The refusal prints the three commands for the base (`docker build`,
+`docker save`, `msb load`); a profile image is built the same way
+([images/README.md](../images/README.md)). `--image REF` names one this host
+has (`msb image list`), and `--isolation host` runs without VMs.
+
+**`BLOCKER: msb could not list its VMs`.**
+The kickoff checks a new run id against msb's VMs, even with `--no-start`,
+and msb did not answer. Check `"$(node --experimental-strip-types scripts/vm.ts msb-path)" list`;
+reinstall with `npm ci`; or run with `--isolation host`.
+
+**`BLOCKER: --no-write-guard … set a guard of a host run, and a run is in microVMs unless it says otherwise`.**
+A host guard's flag (`--no-write-guard`, `--no-seal-herdr`,
+`--inputs-enforce`, `--key-from-env`, `--probe-violation`) means nothing in
+a VM, where the VM is the guard. Add `--isolation host` if a host run is what
+you meant, or drop the flag.
+
 **`agent_name_taken` from Herdr.**
 Each `start` allocates a fresh `s????` prefix and checks `herdr agent list` for `<prefix>00`, so two concurrent runs never collide. If you see this, a crashed run left agents registered under the same names: `herdr agent list`, then `scripts/swarm.sh stop <id>` (closes its workspaces) or `herdr workspace close <ws>`.
 

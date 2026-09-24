@@ -139,10 +139,19 @@ Fixture kickoff from the web app test.
 `;
 
 test("a microVM kickoff reaches the command line, and a VM option without it is refused", () => {
-  const host = validateStart({ n: 2, cap_usd: 1, model: "openai/gpt-5.4", no_start: true });
+  // A microVM per agent is the default, as swarm.sh's; the argv names it
+  // either way, so the kickoff's own default never decides what the form chose.
+  const plain = validateStart({ n: 2, cap_usd: 1, model: "openai/gpt-5.4", no_start: true });
+  assert.equal(plain.ok, true);
+  if (!plain.ok) return;
+  assert.equal(plain.params.isolation, "microvm");
+  const plainArgv = startArgv(plain.params);
+  assert.deepEqual(plainArgv.slice(plainArgv.indexOf("--isolation"), plainArgv.indexOf("--isolation") + 2), ["--isolation", "microvm"]);
+  const host = validateStart({ n: 2, cap_usd: 1, model: "openai/gpt-5.4", no_start: true, isolation: "host" });
   assert.equal(host.ok, true);
   if (!host.ok) return;
-  assert.ok(!startArgv(host.params).includes("--isolation"), "host is the default and adds nothing");
+  const hostArgv = startArgv(host.params);
+  assert.deepEqual(hostArgv.slice(hostArgv.indexOf("--isolation"), hostArgv.indexOf("--isolation") + 2), ["--isolation", "host"], "a host run is named, not left to swarm.sh's default");
 
   const vm = validateStart({
     n: 2,
@@ -169,12 +178,12 @@ test("a microVM kickoff reaches the command line, and a VM option without it is 
 
   for (const bad of [
     { isolation: "docker" },
-    { image: "dfirswarm-disk:dev" },
+    { isolation: "host", image: "dfirswarm-disk:dev" },
     { isolation: "microvm", image: "not an image; rm -rf /" },
     { isolation: "microvm", vm_cpus: 0 },
     { isolation: "microvm", vm_memory: 64 },
-    { vm_cpus: 2 },
-    { vm_snapshot: false },
+    { isolation: "host", vm_cpus: 2 },
+    { isolation: "host", vm_snapshot: false },
   ]) {
     assert.equal(validateStart({ n: 2, cap_usd: 1, model: "x/y", no_start: true, ...bad }).ok, false, JSON.stringify(bad));
   }
@@ -890,7 +899,8 @@ test("a per-model cap rides on the --models spec as @cap, and cannot exceed the 
 });
 
 test("the six kickoff switches the form gained: validated, and mapped to the flags swarm.sh takes", () => {
-  const base = { model: "a/b", cap_usd: 1, n: 1 };
+  // Host runs: the kernel guard and the attached image are a host run's.
+  const base = { model: "a/b", cap_usd: 1, n: 1, isolation: "host" };
   // attach: copy is the default, bind needs a set, an image is not also bound
   assert.equal(validateStart({ ...base, inputs_attach: "bind" }).ok, false);
   assert.equal(validateStart({ ...base, inputs: "0:brief", inputs_attach: "bind" }).ok, true);
@@ -1002,7 +1012,7 @@ test("several evidence roots, and one added from the form when the server allows
     assert.equal(JSON.parse(await readFile(join(runs2, "inputs-roots.json"), "utf8"))[0], await realpath(third), "a root added from the form survives a restart");
 
     // A kickoff resolves the added root's set like any other.
-    const started = await send("POST", "/api/swarms", { model: "deepseek/deepseek-v4-pro", cap_usd: 0.5, n: 1, goal: FIXTURE_GOAL, no_start: true, inputs: "2:images", inputs_enforce: "off" });
+    const started = await send("POST", "/api/swarms", { model: "deepseek/deepseek-v4-pro", cap_usd: 0.5, n: 1, goal: FIXTURE_GOAL, no_start: true, inputs: "2:images", inputs_enforce: "off", isolation: "host" });
     assert.equal(started.status, 202);
 
     // A root named at start cannot be removed from the form; one added there can.
@@ -1039,11 +1049,12 @@ test("the inputs library: sets under the root by name, nothing outside it, and t
   // Names only: the body cannot carry a path, and the server ignores a client's inputs_dir.
   assert.equal(validateStart({ model: "a/b", cap_usd: 1, n: 1, inputs: "../etc" }).ok, false);
   assert.equal(validateStart({ model: "a/b", cap_usd: 1, n: 1, inputs: "brief", inputs_enforce: "maybe" }).ok, false);
-  assert.equal(validateStart({ model: "a/b", cap_usd: 1, n: 1, inputs_enforce: "on" }).ok, false, "enforcement without inputs is refused");
-  const named = validateStart({ model: "a/b", cap_usd: 1, n: 1, inputs: "brief", inputs_enforce: "on", inputs_dir: "/etc" });
+  assert.equal(validateStart({ model: "a/b", cap_usd: 1, n: 1, isolation: "host", inputs_enforce: "on" }).ok, false, "enforcement without inputs is refused");
+  assert.equal(validateStart({ model: "a/b", cap_usd: 1, n: 1, inputs: "brief", inputs_enforce: "on" }).ok, false, "the kernel guard is a host run's, and a run is in microVMs unless it says host");
+  const named = validateStart({ model: "a/b", cap_usd: 1, n: 1, isolation: "host", inputs: "brief", inputs_enforce: "on", inputs_dir: "/etc" });
   assert.ok(named.ok && named.params.inputs === "brief" && named.params.inputs_enforce === "on" && named.params.inputs_dir === undefined);
   assert.ok(named.ok && !startArgv(named.params).includes("--inputs"), "no --inputs until the server resolved the set");
-  const resolved = validateStart({ model: "a/b", cap_usd: 1, n: 1, inputs: "brief", inputs_enforce: "off" });
+  const resolved = validateStart({ model: "a/b", cap_usd: 1, n: 1, isolation: "host", inputs: "brief", inputs_enforce: "off" });
   if (resolved.ok) {
     resolved.params.inputs_dir = "/srv/sets/brief";
     const argv = startArgv(resolved.params);
@@ -1068,6 +1079,7 @@ test("the inputs library: sets under the root by name, nothing outside it, and t
     no_start: true,
     inputs: "brief",
     inputs_enforce: "off",
+    isolation: "host",
   });
   assert.equal(accepted.status, 202);
   const job = await waitJob(accepted.body.id);
@@ -1789,8 +1801,9 @@ test("a report of a path whose size and mtime did not move is not a change", asy
 });
 
 test("a kickoff from the console takes its isolation from the form, not from the console's environment", async () => {
-  // A host form adds no --isolation; under an exported SWARM_ISOLATION=microvm
-  // it became a VM run. The runner drops the variable, and the form decides.
+  // The form names its isolation in the argv, and the runner drops the
+  // console's own SWARM_ISOLATION too: under an exported one a host form once
+  // became a VM run.
   const dir = await mkdtemp(join(tmpdir(), "swarm-runner-iso-"));
   const was = process.env.SWARM_ISOLATION;
   try {
@@ -1925,7 +1938,7 @@ test("under microVM the form's default copy of the evidence reaches the kickoff 
     return r.ok ? startArgv({ ...r.params, inputs_dir: "/evidence/brief" }) : [];
   };
   // The default and an explicit copy: without the flag the kickoff mounts the source in place.
-  for (const extra of [{ isolation: "microvm" }, { isolation: "microvm", inputs_attach: "copy" }]) {
+  for (const extra of [{}, { isolation: "microvm" }, { isolation: "microvm", inputs_attach: "copy" }]) {
     const argv = argvOf(extra);
     assert.ok(argv.includes("--inputs-copy"), JSON.stringify(extra));
     assert.ok(!argv.includes("--inputs-bind"));
@@ -1933,7 +1946,7 @@ test("under microVM the form's default copy of the evidence reaches the kickoff 
   const bind = argvOf({ isolation: "microvm", inputs_attach: "bind" });
   assert.ok(bind.includes("--inputs-bind") && !bind.includes("--inputs-copy"));
   // A host run copies by default; the flag is a VM run's.
-  const host = argvOf({});
+  const host = argvOf({ isolation: "host" });
   assert.ok(!host.includes("--inputs-copy") && !host.includes("--inputs-bind"));
 });
 
@@ -1943,7 +1956,7 @@ test("OAuth in the VMs is a microVM run's switch, and reaches the kickoff as --a
   if (on.ok) assert.ok(startArgv(on.params).includes("--allow-oauth-in-vm"));
   const off = validateStart({ n: 2, cap_usd: 1, model: "anthropic/claude-sonnet-4.5", isolation: "microvm" });
   assert.ok(off.ok && !startArgv(off.params).includes("--allow-oauth-in-vm"));
-  const host = validateStart({ n: 2, cap_usd: 1, model: "anthropic/claude-sonnet-4.5", allow_oauth_in_vm: true });
+  const host = validateStart({ n: 2, cap_usd: 1, model: "anthropic/claude-sonnet-4.5", isolation: "host", allow_oauth_in_vm: true });
   assert.equal(host.ok, false);
   if (!host.ok) assert.match(host.error, /allow_oauth_in_vm needs isolation microvm/);
 });

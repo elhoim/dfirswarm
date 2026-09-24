@@ -44,6 +44,11 @@ fi
 # examiner keeps open; there it stays as it was.
 REGISTRY="$RUNS_DIR/registry.json"
 
+# A run is in microVMs unless it says --isolation host. Every refusal of a
+# host that cannot run them names the other way on, and what it gives up:
+# the kickoff never falls back to host processes on its own.
+VM_HOST_WAY_ON="Or run the agents unisolated with --isolation host: each is then a process on this host, held by the host guards (write guard, tool guard, netguard), with no VM around it."
+
 # How a run's daemons leave the kickoff's terminal behind. `nohup` only makes
 # a process ignore SIGHUP; the process keeps its controlling terminal, and
 # measured on an Ubuntu server: started that way inside a tmux window that the
@@ -105,7 +110,7 @@ Commands:
   stop <id>          Stop a run and record how it ended
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
-  netcheck           What the network guard (or, --isolation microvm, a VM) would allow
+  netcheck           What a run's VM (or, --isolation host, the network guard) would allow
   help [command]     This, or a command's own page
 
 Start, at its shortest:
@@ -121,15 +126,15 @@ The options a run usually needs:
   --wall-clock MIN   How long the run may take
   --goal-file FILE   The goal document, which carries its own finish line
   --label NAME       A name for the run, shown in the list and the console
+  --isolation host   Agents as processes on this host, unisolated (default: a microVM each)
 
 Evidence, when the goal is a case rather than a task:
-  --inputs DIR       A read-only copy of DIR under inputs/, guarded at the kernel
+  --inputs DIR       DIR, read-only in every VM (a host run gets a guarded copy)
   --catalog          Run the standard first pass over the inputs before agents start
   --toolbox SETS     Check the tools a case needs: dfir, crypto, linux (or auto, off)
-  --quarantine       Nothing under work/extracted/ can execute
-  --no-write-guard   Let the panes write outside the run (the old behaviour)
-  --no-seal-herdr    Let the panes reach Herdr's control socket (an escape)
-  --no-read DIR      Deny the panes reading DIR (repeatable; seatbelt only)
+  --quarantine       Nothing under work/extracted/ can execute (always, in a VM)
+  --no-write-guard   Host runs: panes may write outside the run (--no-seal-herdr: reach Herdr)
+  --no-read DIR      Deny the agents reading DIR (repeatable; a VM does not mount it)
   --inputs-image F   Attach F read-only as inputs/ (macOS; the kernel refuses writes)
   --case-id ID       Case identifier, recorded everywhere the run is
   --examiner NAME    Who is running it
@@ -352,10 +357,9 @@ Tools the agents write
                       kept. "swarm.sh tools <id> --save DIR" fills such a library.
 
 Isolation
-  --isolation MODE    host (default): every agent is a Pi process on this machine,
-                      held by the write guard, the tool guard and netguard.
-                      microvm: every agent is a Pi process in its own microVM
-                      (microsandbox), brought up by this kickoff and put away by
+  --isolation MODE    microvm (default): every agent is a Pi process in its own
+                      microVM (microsandbox; a Mac on Apple silicon, or Linux
+                      with KVM), brought up by this kickoff and put away by
                       stop. The run is mounted read-only in each VM except the
                       agent's own work/<id>/, work/extracted/<id>/,
                       work/quarantine/<id>/, tool-output/<id>/ and Pi session;
@@ -366,7 +370,12 @@ Isolation
                       hosts its models and --allow-host name (every public host
                       with --no-netguard); no credential enters a VM — Pi on the
                       host resolves each one and msb swaps it in on the way out,
-                      to that provider's hosts only.
+                      to that provider's hosts only. A host that cannot boot the
+                      VMs is refused, with how to fix it; never run on the host
+                      in their place.
+                      host: unisolated. Every agent is a Pi process on this
+                      machine, held by the write guard, the tool guard and
+                      netguard, with no VM around it.
                       SWARM_ISOLATION sets the default.
   --image REF         The VM image (SWARM_VM_IMAGE). Default: the smallest profile
                       that serves the packs (images/recipe.py profile-for), by the
@@ -776,6 +785,7 @@ alloc_prefix() {
       local listed
       if ! listed="$(vm_cli list --run "$p" 2>/dev/null)"; then
         echo "BLOCKER: msb could not list its VMs, so a run id cannot be checked against them: $(jq -r '.error // "no answer"' <<<"$listed" 2>/dev/null || printf 'no answer')" >&2
+        echo "  msb comes with npm ci (npm ci --omit=optional leaves it out). ${VM_HOST_WAY_ON:-}" >&2
         exit 3
       fi
       [[ "$(jq -r '(.vms // []) | length' <<<"$listed" 2>/dev/null)" == "0" ]] || continue
@@ -2597,8 +2607,10 @@ cmd_start() {
   local packs=""
   local allow_synced=0 custody_timeout="${SWARM_CUSTODY_TIMEOUT:-14400}"
   local write_guard=1
-  # Where the agents live: host processes, or one microVM each.
-  local isolation="${SWARM_ISOLATION:-host}" vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0
+  # Where the agents live: one microVM each (the default), or host
+  # processes (--isolation host, unisolated). isolation_given says the
+  # operator named it, so a refusal can say how to choose the other.
+  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0
   local seal_herdr=1
   # Directories the panes may not read. Reads are open by design, so this is
   # narrow on purpose: material about the case the agents must derive rather
@@ -2703,7 +2715,7 @@ cmd_start() {
       --net-allow) use_netguard=1; shift ;;
       --no-netguard|--open-net) use_netguard=0; shift ;;
       --no-start) start_agents=0; shift ;;
-      --isolation) isolation="$2"; shift 2 ;;
+      --isolation) isolation="$2"; isolation_given=1; shift 2 ;;
       --image)
         # An OCI reference and nothing else: it reaches msb's argv and a pull.
         if ! [[ "${2:-}" =~ ^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$ ]]; then
@@ -2740,7 +2752,11 @@ cmd_start() {
     [[ "$vm_memory" =~ ^[0-9]+$ && "$vm_memory" -ge 512 ]] || { echo "BLOCKER: --vm-memory is MiB, at least 512 (got $vm_memory)." >&2; exit 2; }
     [[ "$vm_disk" =~ ^[0-9]+$ && "$vm_disk" -ge 2048 ]] || { echo "BLOCKER: --vm-disk is MiB, at least 2048 (got $vm_disk)." >&2; exit 2; }
     if [[ "$probe" -eq 1 ]]; then
-      echo "BLOCKER: --probe-violation checks the host's write guard; under --isolation microvm there is none to probe (the VM's own probe runs at kickoff)." >&2
+      if [[ "$isolation_given" -eq 1 ]]; then
+        echo "BLOCKER: --probe-violation checks the host's write guard; under --isolation microvm there is none to probe (the VM's own probe runs at kickoff)." >&2
+      else
+        echo "BLOCKER: --probe-violation checks a host run's write guard, and a run is in microVMs unless it says otherwise. Add --isolation host to probe a host run (unisolated: the agents are processes on this host)." >&2
+      fi
       exit 2
     fi
     # Flags that set a host guard: a VM run has none of those guards (the VM
@@ -2752,7 +2768,11 @@ cmd_start() {
     [[ "$inputs_enforce" != "auto" ]] && host_only+=("--inputs-enforce $inputs_enforce")
     [[ "$key_from_env" -eq 1 ]] && host_only+=(--key-from-env)
     if ((${#host_only[@]})); then
-      echo "BLOCKER: ${host_only[*]} set a guard of a host run; under --isolation microvm the VM is the guard and none of them means anything (credentials reach a VM as placeholders, the evidence is read-only in it). Drop them." >&2
+      if [[ "$isolation_given" -eq 1 ]]; then
+        echo "BLOCKER: ${host_only[*]} set a guard of a host run; under --isolation microvm the VM is the guard and none of them means anything (credentials reach a VM as placeholders, the evidence is read-only in it). Drop them." >&2
+      else
+        echo "BLOCKER: ${host_only[*]} set a guard of a host run, and a run is in microVMs unless it says otherwise: there the VM is the guard. Add --isolation host for a host run (unisolated: the agents are processes on this host), or drop them." >&2
+      fi
       exit 2
     fi
     if [[ -n "$inputs_dir" && "$inputs_bind" -eq 0 && "$inputs_copy" -eq 0 ]]; then
@@ -3226,6 +3246,7 @@ STRIP
     local vm_capacity
     if ! vm_capacity="$(vm_cli capacity --n "$n" --cpus "$vm_cpus" --memory "$vm_memory")"; then
       echo "BLOCKER: $(jq -r '.blockers | join("; ")' <<<"$vm_capacity" 2>/dev/null || printf '%s' "$vm_capacity")" >&2
+      echo "  $VM_HOST_WAY_ON" >&2
       exit 2
     fi
     jq -r '.warnings[]? | "WARN: " + .' <<<"$vm_capacity" >&2 || true
@@ -3235,6 +3256,10 @@ STRIP
       if ! vm_probe="$(vm_cli probe --image "$vm_image")"; then
         echo "BLOCKER: this host cannot run the agents' VMs: $(jq -r '.reasons | join("; ")' <<<"$vm_probe" 2>/dev/null || printf '%s' "$vm_probe")" >&2
         jq -r '.doctor_output // empty' <<<"$vm_probe" 2>/dev/null | sed 's/^/  | /' >&2
+        {
+          echo "  microVMs need a Mac on Apple silicon, or Linux with KVM (/dev/kvm this user can open) and glibc, and msb, which npm ci installs."
+          echo "  $VM_HOST_WAY_ON"
+        } >&2
         exit 3
       fi
       # The measurements this isolation rests on — the five-second guest
@@ -3260,8 +3285,13 @@ STRIP
         if ! vm_pull="$(vm_cli pull --image "$vm_image")"; then
           {
             echo "BLOCKER: $vm_image is not on this host and could not be pulled."
-            echo "  A local image is named dfirswarm-<profile>:dev-<arch>: build it (images/README.md), then \`msb load\` it;"
-            echo "  or pass --image with one this host has (msb image list); a private registry needs \`msb registry login\` first."
+            echo "  A local image is named dfirswarm-<profile>:dev-<arch>: build it (images/README.md), then load it into msb."
+            echo "  The base, which a run with no packs boots and every profile builds on:"
+            echo "    docker build -f $ROOT/images/base.Dockerfile -t dfirswarm-base:dev-$(vm_arch) $ROOT/images"
+            echo "    docker save dfirswarm-base:dev-$(vm_arch) -o /tmp/dfirswarm-base.tar"
+            echo "    $(vm_cli msb-path 2>/dev/null || echo msb) load -i /tmp/dfirswarm-base.tar"
+            echo "  Or pass --image with one this host has (msb image list); a private registry needs \`msb registry login\` first."
+            echo "  $VM_HOST_WAY_ON"
           } >&2
           exit 3
         fi
@@ -3962,6 +3992,11 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   echo "Label:        $label"
   echo "Isolated cwd: $sandbox"
   echo "N:            $n (${agent_ids[*]})"
+  if [[ "$isolation" == "microvm" ]]; then
+    echo "Isolation:    one microVM per agent ($vm_image)"
+  else
+    echo "Isolation:    host, unisolated: every agent is a process on this machine, held by the host guards"
+  fi
   if [[ "$self_compact" -eq 1 ]]; then
     # A line left unset next to one that is set is a default the extension
     # may fit to it per seat (compact_config on the trace has the numbers).
@@ -6294,7 +6329,8 @@ cmd_reap() {
 }
 
 cmd_netcheck() {
-  local isolation="${SWARM_ISOLATION:-host}" image="" hosts="" m
+  # The egress a run would have: in a microVM unless --isolation host.
+  local isolation="${SWARM_ISOLATION:-microvm}" image="" hosts="" m
   PROVIDER_HOST_OVERRIDES=()
   while [[ $# -gt 0 ]]; do
     case "$1" in

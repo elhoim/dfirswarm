@@ -7,6 +7,13 @@ The product requirements inverted from the incident write-up, and exactly what t
 
 These are product requirements, inverted from what OpenAI's [Hugging Face incident write-up](https://openai.com/index/hugging-face-incident-and-the-road-ahead/) describes: a hidden channel, goals adopted from peers, no safe exit from impossible tasks, a grader to game, and no harness or monitor on the evaluation. The mapping is in [Why: the incident, inverted](why-the-incident-inverted.md); the mechanisms are below.
 
+Every agent runs in its own microVM unless the run says `--isolation host`.
+What a VM holds is the bullet "In a microVM (the default)" below. The other
+mechanisms are a host run's (`--isolation host`, unisolated): every agent is
+a process on this machine, and they are all that holds it. A host that
+cannot boot the VMs is refused with what it lacks; the kickoff never falls
+back to a host run on its own.
+
 - **Isolated cwd, and a write allowlist.** Every agent's cwd is `runs/<id>/`.
   Claim keys, history and artifact serving all reject paths that escape it, and
   `edit` / `write` outside it are blocked. `bash` still cannot be stopped
@@ -159,8 +166,8 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   set now names them so a kickoff finds out before the run rather than at
   minute forty.
 
-- **With `--isolation microvm`, the agent is inside a VM and the guards are
-  the host's.** Measured, and held by `tests/vm-integration.test.ts` on a KVM
+- **In a microVM (the default, `--isolation microvm`), the agent is inside a
+  VM and the guards are the host's.** Measured, and held by `tests/vm-integration.test.ts` on a KVM
   runner: guest root cannot change the run's floor, the evidence or the trace
   by writing, remounting (its kernel flips the flag; the host still refuses
   every write) or unmounting a writable hole; a VM reaches its allowed hosts

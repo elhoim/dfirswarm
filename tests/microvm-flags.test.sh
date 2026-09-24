@@ -66,6 +66,37 @@ leftover="$(find "$TMP/runs" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)"
 [[ -z "$leftover" ]] || fail "a refused kickoff left a sandbox directory: $leftover"
 pass "an isolation that does not exist, a probe with no guard to probe, a host guard's flag, and a VM with no CPU, too little memory or more than the host has are refused before anything is written"
 
+# --- the default is a VM: what cannot be one is refused, and says both ways on --------
+# A host guard's flag with no --isolation: the run would be a VM run, so the
+# flag means nothing; the refusal says how to ask for a host run.
+for flag in --no-write-guard --probe-violation; do
+  out="$(start $flag --label bad-default-hostflag)"; rc=$?
+  [[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q -- 'Add --isolation host' || fail "$flag without --isolation was not refused with the way to a host run: $out"
+done
+# A host that cannot run the VMs: msb's doctor fails (no KVM, say). The
+# kickoff stops before anything is written, names how to fix it and the
+# unisolated way on, and never becomes a host run on its own.
+cat > "$TMP/msb-no-kvm" <<'MSB'
+#!/usr/bin/env bash
+case "$1" in
+  --version) echo "msb 0.7.2" ;;
+  doctor) echo "kvm: /dev/kvm is not accessible" >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+MSB
+chmod +x "$TMP/msb-no-kvm"
+out="$(SWARM_MSB_BIN="$TMP/msb-no-kvm" swarm start --model solo/model --provider-host solo=api.solo.example --n 2 --cap-usd 1 --goal-file "$ROOT/prompts/goals/hello.md" --toolbox off --label bad-no-kvm)"; rc=$?
+[[ $rc -eq 3 ]] || fail "a host whose msb doctor fails exited $rc, wanted 3: $out"
+printf '%s\n' "$out" | grep -q "BLOCKER: this host cannot run the agents' VMs" || fail "no BLOCKER for a host that cannot run VMs: $out"
+printf '%s\n' "$out" | grep -q 'Apple silicon, or Linux with KVM' || fail "the refusal does not say what a VM needs: $out"
+printf '%s\n' "$out" | grep -q -- '--isolation host: each is then a process on this host' || fail "the refusal does not name the unisolated way on: $out"
+# msb itself missing or broken: the id cannot be checked against its VMs.
+out="$(SWARM_MSB_BIN="$TMP/msb-no-kvm" start --label bad-no-msb)"; rc=$?
+[[ $rc -eq 3 ]] && printf '%s\n' "$out" | grep -q 'msb could not list its VMs' && printf '%s\n' "$out" | grep -q -- '--isolation host' \
+  || fail "a broken msb at a --no-start kickoff was not refused with both ways on (exit $rc): $out"
+[[ -z "$(jq -r '.runs[]? | select(.label | startswith("bad-")) | .id' "$TMP/runs/registry.json" 2>/dev/null)" ]] || fail "a refused default kickoff left a run in the registry"
+pass "under the default, a host guard's flag is refused with the way to a host run, and a host that cannot run the VMs is refused with how to fix it and the unisolated way on, never run on the host instead"
+
 # --no-read: what every VM mounts cannot be hidden, and is not claimed hidden.
 out="$(start --isolation microvm --no-read "$ROOT/scripts" --label bad-noread)"; rc=$?
 [[ $rc -eq 2 ]] && printf '%s\n' "$out" | grep -q 'cannot hide what the VMs are given' || fail "--no-read of a mounted path was accepted under microvm: $out"
@@ -90,7 +121,7 @@ out="$(PATH="$TMP/nocollector:$PATH" start --isolation microvm --label bad-colle
 [[ $rc -eq 1 ]] || fail "a microvm kickoff with no collector exited $rc, wanted 1: $out"
 printf '%s\n' "$out" | grep -q 'BLOCKER: the trace collector did not come up' || fail "no BLOCKER naming the collector: $out"
 [[ -z "$(jq -r '.runs[]? | select(.label == "bad-collector") | .id' "$TMP/runs/registry.json" 2>/dev/null)" ]] || fail "the refused kickoff left a run"
-out="$(PATH="$TMP/nocollector:$PATH" start --label host-no-collector)"; rc=$?
+out="$(PATH="$TMP/nocollector:$PATH" start --isolation host --label host-no-collector)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a host kickoff with no collector should still start, with a warning: $out"
 printf '%s\n' "$out" | grep -q 'appended by the panes themselves' || fail "the host fallback is not said: $out"
 pass "a microvm run whose trace collector does not come up is refused; a host run falls back and says so"
@@ -205,11 +236,22 @@ out="$(start --isolation microvm --pack memory-forensics --label vm-mem)"; rc=$?
 [[ "$(reg vm-mem '.isolation.image')" == "dfirswarm-memory:dev-$ARCH" ]] || fail "memory-forensics should boot the memory image, got $(reg vm-mem '.isolation.image')"
 out="$(start --isolation microvm --image registry.example/dfirswarm-custom@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --label vm-img)"
 [[ "$(reg vm-img '.isolation.image')" == "registry.example/dfirswarm-custom@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]] || fail "--image was not honoured"
-out="$(SWARM_ISOLATION=microvm start --label vm-env)"
-[[ "$(reg vm-env '.isolation.mode')" == "microvm" ]] || fail "SWARM_ISOLATION=microvm did not set the default"
-out="$(start --label host-default)"
-[[ "$(reg host-default '.isolation.mode')" == "host" ]] || fail "a run without --isolation is not a host run"
-pass "the packs choose the image, --image overrides it, SWARM_ISOLATION sets the default, and host stays the default"
+out="$(start --label vm-default)"
+[[ "$(reg vm-default '.isolation.mode')" == "microvm" ]] || fail "a run without --isolation is not a microVM run: $out"
+printf '%s\n' "$out" | grep -q "^Isolation:    one microVM per agent (dfirswarm-" || fail "the kickoff does not say its agents are in VMs: $out"
+out="$(SWARM_ISOLATION=host start --label host-env)"
+[[ "$(reg host-env '.isolation.mode')" == "host" ]] || fail "SWARM_ISOLATION=host did not make a host run"
+out="$(start --isolation host --label host-flag)"
+[[ "$(reg host-flag '.isolation.mode')" == "host" ]] || fail "--isolation host did not make a host run"
+printf '%s\n' "$out" | grep -q "^Isolation:    host, unisolated" || fail "a host run is not said to be unisolated: $out"
+pass "the packs choose the image, --image overrides it, a run is in microVMs unless --isolation host or SWARM_ISOLATION=host says otherwise, and a host run is said to be unisolated"
+
+# --- a run from before isolation was recorded was a host run, and stays one ---------
+mkdir -p "$TMP/old-runs"
+printf '{"runs":[{"id":"s0old1","state":"stopped","label":"before-isolation","n":2,"model":"deepseek/deepseek-v4-pro","sandbox":"%s/old-runs/s0old1"}]}\n' "$TMP" > "$TMP/old-runs/registry.json"
+held="$(SWARM_RUNS_DIR="$TMP/old-runs" bash "$ROOT/scripts/swarm.sh" list 2>&1 | awk '$1 == "s0old1" {print $4}')"
+[[ "$held" == "host" ]] || fail "a registry record with no isolation is listed as '$held', wanted host"
+pass "a registry record with no isolation (a run from before the default changed) is listed as a host run"
 
 # --- what the VMs would be given: no credential, no host home, the secrets bound ----
 # A pack with two secrets: one bound to a host, one with no host to bind to.
@@ -251,7 +293,7 @@ mkdir -p "$TMP/lib-clash/echo_tool"
 printf 'print("the library copy")\n' > "$TMP/lib-clash/echo_tool/run.py"
 clash_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$TMP/lib-clash/echo_tool/run.py")"
 printf '{"name":"echo_tool","description":"Echo, another way.","params":{},"runtime":"python3","entry":"run.py","timeout_seconds":10,"by":"s1","at":"t","version":1,"sha256":"%s"}\n' "$clash_sha" > "$TMP/lib-clash/echo_tool/manifest.json"
-out="$(start --pack keyed-pack --allow-tool-forging --tools-from "$TMP/lib-clash" --label tool-clash)"; rc=$?
+out="$(start --isolation host --pack keyed-pack --allow-tool-forging --tools-from "$TMP/lib-clash" --label tool-clash)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a kickoff with a pack and a clashing library exited $rc: $out"
 clash_sb="$(sandbox_of "$out")"
 printf '%s\n' "$out" | grep -q 'differs from pack keyed-pack.s echo_tool; the pack.s version is kept' || fail "the clash was not said: $out"
@@ -438,7 +480,7 @@ pass "a prepared forging VM run writes its tools, installs go to the VM's disk, 
 # --- a synced folder is found before anything is written -------------------------
 SYNCED="$TMP/home/Library/CloudStorage/Dropbox-Test"
 mkdir -p "$SYNCED"
-host_start() { SWARM_RUNS_DIR="$1" bash "$ROOT/scripts/swarm.sh" start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --toolbox off "${@:2}" 2>&1; }
+host_start() { SWARM_RUNS_DIR="$1" bash "$ROOT/scripts/swarm.sh" start --isolation host --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --toolbox off "${@:2}" 2>&1; }
 out="$(host_start "$SYNCED/runs" --inputs "$TMP/ev" --label synced-copy)"; rc=$?
 [[ $rc -eq 2 ]] || fail "a copy of the evidence into a synced folder exited $rc, wanted 2: $out"
 printf '%s\n' "$out" | grep -q 'the copy of the evidence (inputs/ and .inputs-pristine/)' || fail "the refusal does not name the evidence copy: $out"
@@ -507,6 +549,6 @@ for a, b in zip(lines, lines[1:]):
     if json.loads(b).get("prev") != hashlib.sha256(a.encode()).hexdigest():
         sys.exit(1)
 PY
-out="$(swarm start --model solo/model --provider-host solo=api.solo.example --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --toolbox off --env SOME_SETTING=hush-hush --label audit-redact)"
+out="$(swarm start --isolation host --model solo/model --provider-host solo=api.solo.example --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --toolbox off --env SOME_SETTING=hush-hush --label audit-redact)"
 ! grep -q 'hush-hush' "$audit" || fail "an --env value reached the operator audit record"
 pass "every start is on the operator's own record, chained, with the OS user and an --env value left out"

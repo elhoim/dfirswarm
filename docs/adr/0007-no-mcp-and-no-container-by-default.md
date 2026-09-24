@@ -4,8 +4,8 @@ Two things a reader will look for and not find. Both are refused on the same
 grounds: each one would take away a guard this project's claims rest on.
 
 > **Amended by [ADR 0009](0009-agents-live-in-microvms.md) (2026-09-24).** An
-> opt-in isolation now exists that is not a container: `--isolation microvm`
-> runs each agent in a microVM whose guards are the host's (read-only mounts
+> isolation now exists that is not a container, and it is the default:
+> `--isolation microvm` runs each agent in a microVM whose guards are the host's (read-only mounts
 > enforced on the host side, a deny-by-default network policy). Two claims
 > below change for that mode: a refused connection is not on the run's log
 > (msb enforces the policy and the report says so rather than counting), and

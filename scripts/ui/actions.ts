@@ -127,7 +127,7 @@ export type StartParams = {
   examiner?: string;
   /** Installed packs, by id: their skills and tools, and under microvm the image that serves them. */
   packs?: string[];
-  /** Where the agents live: host processes (the default), or one microVM each. */
+  /** Where the agents live: one microVM each (the default), or host processes (unisolated). */
   isolation?: "host" | "microvm";
   /** The VM image, when not the one the packs pick. */
   image?: string;
@@ -518,9 +518,10 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
     if (!Number.isInteger(n) || n < 0 || n > 999_999_999) return { ok: false, error: "inbox_page_chars must be a whole number of characters (0 for no bound)" };
     inboxPageChars = n;
   }
-  // Isolation: host unless the form asks for a microVM per agent. The image
-  // is an OCI reference; the harness checks the host can boot it.
-  const isolation = body.isolation === "microvm" ? "microvm" : body.isolation === undefined || body.isolation === null || body.isolation === "" || body.isolation === "host" ? "host" : null;
+  // Isolation: a microVM per agent unless the form asks for host processes,
+  // as swarm.sh itself defaults. The image is an OCI reference; the harness
+  // checks the host can boot it.
+  const isolation = body.isolation === "host" ? "host" : body.isolation === undefined || body.isolation === null || body.isolation === "" || body.isolation === "microvm" ? "microvm" : null;
   if (!isolation) return { ok: false, error: "isolation must be host or microvm" };
   const image = typeof body.image === "string" ? body.image.trim() : "";
   if (image && !/^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$/.test(image)) return { ok: false, error: "image must be an OCI reference (registry/name:tag or name@sha256:...)" };
@@ -614,7 +615,7 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
       case_id: caseId || undefined,
       examiner: examiner || undefined,
       packs,
-      isolation: isolation === "microvm" ? "microvm" : undefined,
+      isolation,
       image: image || undefined,
       vm_cpus: vmCpus as number | undefined,
       vm_memory: vmMemory as number | undefined,
@@ -677,8 +678,9 @@ export function startArgv(p: StartParams): string[] {
   if (p.case_id) argv.push("--case-id", p.case_id);
   if (p.examiner) argv.push("--examiner", p.examiner);
   if (p.packs?.length) argv.push("--pack", p.packs.join(","));
-  if (p.isolation === "microvm") {
-    argv.push("--isolation", "microvm");
+  // Always named: the kickoff's own default must not decide what the form chose.
+  argv.push("--isolation", p.isolation === "host" ? "host" : "microvm");
+  if (p.isolation !== "host") {
     if (p.image) argv.push("--image", p.image);
     if (p.vm_cpus) argv.push("--vm-cpus", String(p.vm_cpus));
     if (p.vm_memory) argv.push("--vm-memory", String(p.vm_memory));
@@ -752,9 +754,9 @@ export class ActionRunner {
     // `swarm.sh` has no use for the console's own mutation token, and what it
     // starts is a pane: a credential that travels that far ends up inside the
     // sandbox. Nor does a kickoff take its isolation from the console's
-    // environment: the form says host or microvm, and a host form (which adds
-    // no --isolation) under an exported SWARM_ISOLATION=microvm became a VM
-    // run. Everything else in the environment is passed as before.
+    // environment: the form says host or microvm and the argv names it; an
+    // exported SWARM_ISOLATION once turned a host form into a VM run.
+    // Everything else in the environment is passed as before.
     const { SWARM_UI_TOKEN: _token, SWARM_ISOLATION: _isolation, ...env } = process.env;
     const child = spawn("bash", [this.swarmSh, ...argv], {
       cwd: this.opts.root,

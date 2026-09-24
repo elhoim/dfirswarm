@@ -11,10 +11,11 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# The suites check the defaults: an operator's exported VM default, image,
-# lock file or pack home would have turned their kickoffs into VM kickoffs or
-# pointed them at other images, and eleven suites would have tested something
-# else (each suite that kicks off unsets them too, for a run of one).
+# The suites choose where their runs are: an operator's exported isolation,
+# image, lock file or pack home would have pointed their kickoffs somewhere
+# else. A run is in microVMs unless it says otherwise, so each suite that
+# tests host runs exports SWARM_ISOLATION=host itself (and holds for a run of
+# one), and microvm-flags checks the default with nothing set.
 unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 # Nor do they reach the operator's own msb database (a finish that removes a
 # stand-in VM scrubs it) or the VM hubs' directory: both are the suite run's.

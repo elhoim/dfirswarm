@@ -200,6 +200,9 @@ test("the report is one self-contained file that cites the ledger's own sequence
   try {
     const html = await renderReport(root, { runsDir: join(root, ".."), caseId: "CASE-2026-004", examiner: "H. Ozturkci", now: "2026-02-12T09:00:00.000Z" });
 
+    // A run with no VMs recorded is a host run and says it was unisolated.
+    assert.match(html, /host, unisolated: every agent was a process on this machine/);
+
     // Self-contained: nothing is fetched. The one <style> is inline, the mark
     // is an inline <svg>, and there is no <img>, <link> or <script>.
     assert.doesNotMatch(html, /<script/i);
