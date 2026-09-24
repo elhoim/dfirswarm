@@ -103,4 +103,20 @@ jq -e --arg h "$TMP/hub/harness/extensions" --arg g "$ROOT/extensions" '.mounts[
 jq -e --arg h "$ROOT/extensions" '.mounts[] | select(.host == $h)' "$TMP/spec.json" >/dev/null && fail "the live checkout is still mounted"
 pass "a VM run's harness is a copy taken at kickoff, mounted read-only where the checkout is"
 
+# Pi's built-in llama.cpp provider has no models.json entry: the VMs are
+# given its server as the guest reaches it, through the host gateway, and a
+# stand-in key the server ignores.
+eval "$(fn provider_base_url)"
+# Arrays cannot ride on a command's prefix: set them for the call.
+extra_env=() agent_ids=() AGENT_MODELS=("llama.cpp/qwen")
+sandbox="$TMP/sandbox" swarm_id=s1 hard=0 wall=10 n=0 vm_image=img vm_cpus=1 vm_memory=1024 vm_disk=8192 \
+  playwright=0 pack_dirs="" compact_prompt="" self_compact=0 forging=0 inbox_page_chars="" quarantine=0 local_only=0 \
+  allow_install=0 install_hosts=0 allow_hosts="" use_netguard=1 PACK_SECRETS_VM='[]' PACK_SECRETS_ENV='{}' REGISTRY="$TMP/runs/registry.json" \
+  vm_image_digest="" PI_TOOLS="" LLAMA_BASE_URL="http://127.0.0.1:8080" \
+  vm_build_spec "$TMP/hub" "$TMP/spec-llama.json" 2>/dev/null || true
+[[ "$(jq -r '.env.LLAMA_BASE_URL // empty' "$TMP/spec-llama.json" 2>/dev/null)" == "http://host.microsandbox.internal:8080" ]] \
+  || fail "llama.cpp in a VM is not pointed at the host gateway: $(jq -c '.env' "$TMP/spec-llama.json" 2>&1)"
+[[ "$(jq -r '.env.LLAMA_API_KEY // empty' "$TMP/spec-llama.json")" == "local" ]] || fail "llama.cpp in a VM has no stand-in key"
+pass "Pi's built-in llama.cpp provider reaches the host's server from a VM through the gateway"
+
 echo "lifecycle: all checks passed"

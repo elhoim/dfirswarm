@@ -327,6 +327,18 @@ grep -rq 'hunter2-value\|loose-value' "$sbx" && fail "a secret's value is in the
 [[ "$(reg vm-spec '.pack_secrets."keyed-pack".mode')" == "injected" ]] || fail "the record does not say injected"
 [[ "$(reg vm-spec '.pack_secrets."keyed-pack".secrets.TEST_API_KEY')" == "injected" ]] || fail "the record does not say which secret was injected"
 [[ "$(reg vm-spec '.pack_secrets."keyed-pack".secrets.LOOSE_KEY')" == "withheld: names no host" ]] || fail "the record says the loose secret was injected"
+# A secrets.env left inside an installed pack's directory would be mounted
+# into every VM, where the guest's root reads it: the kickoff refuses the
+# run, by the pack's seal (the file is not part of what was sealed) or by
+# the secrets rule, and no spec carries the value.
+kp_dir="$(bash "$ROOT/scripts/pack.sh" resolve keyed-pack)"
+printf 'TEST_API_KEY=planted-value\n' > "$kp_dir/secrets.env"
+out="$(start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pack-secrets --label vm-spec-planted)"; rc=$?
+rm -f "$kp_dir/secrets.env"
+[[ $rc -ne 0 ]] && printf '%s\n' "$out" | grep -q "pack keyed-pack does not verify\|has a secrets.env inside its directory, which every VM mounts" \
+  || fail "a secrets.env inside a pack's directory was not refused (rc $rc): $out"
+grep -rq 'planted-value' "$TMP/runs" 2>/dev/null && fail "the planted secret's value reached a run"
+pass "a pack whose directory holds a secrets.env is refused before any VM could mount it"
 # --local-only: nothing of the pack's service is opened, and the secrets are withheld.
 out="$(start --isolation microvm --inputs "$TMP/ev" --pack keyed-pack --allow-pack-secrets --local-only --model ollama/qwen3:8b --label vm-local)"
 if [[ "$(jq -c '.pack_secrets // [] | length' "$(sandbox_of "$out")/vm-spec.json" 2>/dev/null)" == "0" ]] || printf '%s\n' "$out" | grep -q -- '--local-only withholds'; then :; else fail "--local-only bound a pack secret: $out"; fi
