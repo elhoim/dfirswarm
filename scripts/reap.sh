@@ -89,7 +89,12 @@ max() { if [[ "$1" -ge "$2" ]]; then echo "$1"; else echo "$2"; fi; }
 # break it. The pid is not consulted: a pane's pid is its own namespace's.
 TABLE_LOCK="$SANDBOX/locks/.table.lock"
 TABLE_LOCK_TOKEN="$$.$RANDOM$RANDOM"
-lock_stale() { [[ -d "$1" ]] && (( $(date +%s) - $(mtime "$1") >= 15 )); }
+# A lock that is gone (released between the mkdir and the stat) is not stale.
+lock_stale() {
+  local m
+  m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)" || return 1
+  (( $(date +%s) - m >= 15 ))
+}
 table_lock() {
   mkdir -p "$SANDBOX/locks"
   local deadline=$((SECONDS + 10))

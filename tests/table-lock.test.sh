@@ -69,6 +69,18 @@ check_copy() {
     rm -rf "$lock"
     pass "$name: a holder removes only its own lock"
   )
+  (
+    eval "$3"
+    # Released between the waiter's look at it and its stat: the stat fails,
+    # which must not read as infinitely old. A stat that fails stands in for
+    # the lock vanishing in that gap.
+    mkdir -p "$lock"
+    stat() { return 1; }
+    if stale_call "$lock"; then fail "$name: a lock that is gone was judged stale"; fi
+    unset -f stat
+    rm -rf "$lock"
+    pass "$name: a lock that is gone is not stale"
+  )
 }
 
 SB="$TMP/reap"; mkdir -p "$SB/locks"
@@ -76,13 +88,15 @@ reap_fns="SANDBOX='$SB'
 $(sed -n '/^mtime() {/,/^}/p' "$ROOT/scripts/reap.sh")
 $(lift "$ROOT/scripts/reap.sh" '^TABLE_LOCK=')
 lock_call() { table_lock; }
-unlock_call() { table_unlock; }"
+unlock_call() { table_unlock; }
+stale_call() { lock_stale \"\$1\"; }"
 check_copy reap.sh "$SB/locks/.table.lock" "$reap_fns"
 
 SB2="$TMP/swarm"; mkdir -p "$SB2/locks"
 swarm_fns="$(lift "$ROOT/scripts/swarm.sh" '^# The lock-table mutex protocol.ts and reap.sh use')
 lock_call() { table_lock '$SB2'; }
-unlock_call() { table_unlock '$SB2'; }"
+unlock_call() { table_unlock '$SB2'; }
+stale_call() { table_lock_stale \"\$1\"; }"
 check_copy swarm.sh "$SB2/locks/.table.lock" "$swarm_fns"
 
 echo "table-lock: all passed"

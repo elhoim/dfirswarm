@@ -4298,8 +4298,11 @@ import("'"$ROOT"'/extensions/protocol.ts").then((m) => {
 # written from here cannot take the same id as one an agent is writing at the
 # same moment.
 TABLE_LOCK_TOKEN="$$.$RANDOM$RANDOM"
+# A lock that is gone (released between the mkdir and the stat) is not stale.
 table_lock_stale() {
-  [[ -d "$1" ]] && (( $(date +%s) - $(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0) >= 15 ))
+  local m
+  m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)" || return 1
+  (( $(date +%s) - m >= 15 ))
 }
 table_lock() {
   local sandbox="$1" dir="$1/locks/.table.lock" deadline=$((SECONDS + 10))
