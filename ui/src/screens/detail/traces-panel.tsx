@@ -16,13 +16,16 @@ import { Pager, usePager } from "@/components/pager";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { useAgentColours } from "@/lib/agent-colour";
 import { api } from "@/lib/api";
-import { clock, compact, money, shortJson } from "@/lib/format";
+import { clock, compact, eventSkew, eventTime, money, shortJson } from "@/lib/format";
 import { isNoise, toolLabel, toolTone, useAgentNames } from "@/lib/hooks";
 import { useResource } from "@/lib/live";
 import { ARG_TRUNCATED_KEY } from "@/lib/trace-record";
 import type { AgentRow, SwarmEvent, SwarmView } from "@/lib/types";
 import { thinkingText } from "@/lib/thinking";
 import { cn } from "@/lib/utils";
+
+/** A sender whose clock is this far from the host's gets its time shown in red; custody names it too. */
+const SKEW_FLAG_SEC = 120;
 
 function humanResult(e: SwarmEvent): string {
   const r = e.result as Record<string, unknown> | null;
@@ -188,9 +191,12 @@ export function TraceRow({
           }
         }}
       >
-        <span className="flex items-baseline gap-1 whitespace-nowrap font-mono text-[11px] tabular text-ink-3" title={e.ts}>
+        <span
+          className={cn("flex items-baseline gap-1 whitespace-nowrap font-mono text-[11px] tabular", Math.abs(eventSkew(e) ?? 0) > SKEW_FLAG_SEC ? "text-brick-ink" : "text-ink-3")}
+          title={e.recv_ts ? `received ${e.recv_ts} (host) · sent ${e.ts} (sender's clock${Math.abs(eventSkew(e) ?? 0) > SKEW_FLAG_SEC ? `, ${eventSkew(e)} s off the host's` : ""})` : e.ts}
+        >
           <ChevronRight className={cn("size-3 shrink-0 self-center text-ink-3 transition-transform", open && "rotate-90")} aria-hidden />
-          {clock(e.ts)}
+          {clock(eventTime(e))}
         </span>
         {showAgent ? (
           <span className="truncate font-mono text-[12px] font-medium" style={{ color: colour(e.agent) }} title={e.agent}>

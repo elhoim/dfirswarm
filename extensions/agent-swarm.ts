@@ -1121,7 +1121,7 @@ export default function (pi: ExtensionAPI) {
       if (callId) {
         try {
           const command = (event as { input?: { command?: unknown } }).input?.command;
-          const snapshot = await watchedPathHashes(ctx.cwd);
+          const snapshot = await watchedPathHashes(ctx.cwd, agentId);
           bashSnapshots.set(callId, { at: Date.now(), snapshot, command: typeof command === "string" ? command : "" });
           if (snapshot.truncated) await reportWatchTruncated(ctx.cwd);
         } catch {
@@ -1556,7 +1556,7 @@ export default function (pi: ExtensionAPI) {
           // Let a peer's concurrent legal write record its revision first, so
           // it accounts for itself instead of looking like our shell's doing.
           await new Promise((r) => setTimeout(r, BASH_SETTLE_MS));
-          const reports = await attributeToThisCall(ctx.cwd, await diffWatchedPaths(ctx.cwd, before.snapshot, agentId), before.command);
+          const reports = await attributeToThisCall(ctx.cwd, await diffWatchedPaths(ctx.cwd, before.snapshot, agentId, { listClaims, listFileHistory }), before.command);
           if (reports.length) await reportBashWrites(ctx.cwd, reports, "bash", before.snapshot);
         } catch {
           // detection is best-effort; never break the agent's turn
@@ -2183,7 +2183,7 @@ export default function (pi: ExtensionAPI) {
         // A forged tool is a subprocess with the same reach as bash, so it
         // gets the same treatment: a snapshot of every watched path before,
         // a diff after, and the same reports (claims, harness files, inputs).
-        const before = await watchedPathHashes(toolCtx.cwd).catch(() => null);
+        const before = await watchedPathHashes(toolCtx.cwd, agentId).catch(() => null);
         // A pack tool gets its pack's secrets in its own environment; the
         // trace row below has their values replaced by their names.
         const secrets = await packSecretsFor(manifest);
@@ -2202,7 +2202,7 @@ export default function (pi: ExtensionAPI) {
             // (six on the first microVM case run, and on host runs before it).
             const reports = await attributeToThisCall(
               toolCtx.cwd,
-              await diffWatchedPaths(toolCtx.cwd, before, agentId),
+              await diffWatchedPaths(toolCtx.cwd, before, agentId, { listClaims, listFileHistory }),
               JSON.stringify(params ?? {}),
             );
             if (reports.length) await reportBashWrites(toolCtx.cwd, reports, manifest.name, before);

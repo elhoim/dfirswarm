@@ -182,7 +182,7 @@ test("custody checks a kept VM disk against its record, and counts lines the cha
   const c = await takeCustody(root);
   assert.deepEqual(c.vms?.map((v) => [v.agent, v.snapshot && "verified" in v.snapshot ? v.snapshot.verified : null]), [["a0", true], ["a1", false]]);
   assert.match(c.summary, /2 VMs, 1 of 2 snapshots verified, 2 NOT PUT AWAY/, "a VM never recorded as stopped is named");
-  assert.deepEqual(c.trace.spilled, [{ path: "tool-output/a0/trace-spill.jsonl", lines: 2, agent: "a0", bad: 2 }], "spilled lines that do not say whose they are cannot be attributed");
+  assert.deepEqual(c.trace.spilled, [{ path: "tool-output/a0/trace-spill.jsonl", lines: 2, agent: "a0", bad: 2, duplicates: 0 }], "spilled lines that do not say whose they are cannot be attributed");
   assert.match(c.summary, /2 trace lines outside the chain .* 2 NOT ATTRIBUTABLE/);
   await writeFile(join(root, "tool-output", "a0", "trace-spill.jsonl"), '{"tool":"bash","agent":"a0"}\n{"tool":"read","agent":"a1"}\n');
   const again = await takeCustody(root);
@@ -224,4 +224,29 @@ test("each agent's VM is a custody row: what it could write, reach and was given
   assert.match(rows[1][1], /openai \(API key\) → api\.openai\.com/);
   assert.match(rows[1][1], new RegExp(`kept, sha256 ${"f".repeat(64)}`));
   assert.deepEqual(vmRows([]), [], "a host run adds nothing");
+});
+
+test("numbered trace lines: a line in both the chain and a spill is counted once as a duplicate, and a missing number is a lost line", async () => {
+  const root = await sandbox();
+  const chainLines = [1, 2, 4].map((seq) => ({ ts: "t", agent: "a0", tool: "bash", args: {}, result: {}, sid: "abc", seq }));
+  await writeFile(join(root, "traces", "events.jsonl"), chainLines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  await writeFile(join(root, "tool-output", "a0", "trace-spill.jsonl"), [2, 5].map((seq) => JSON.stringify({ ts: "t", agent: "a0", tool: "read", args: {}, result: {}, sid: "abc", seq })).join("\n") + "\n");
+  const c = await takeCustody(root);
+  assert.equal(c.trace.spilled[0].duplicates, 1, "seq 2 reached the chain and the spill");
+  assert.deepEqual(c.trace.gaps, [{ sid: "abc", agent: "a0", missing: 1 }], "seq 3 reached neither");
+  assert.match(c.summary, /1 also in the chain/);
+  assert.match(c.summary, /1 TRACE LINE LOST/);
+});
+
+test("a line whose own clock is far from the collector's is named, with how far", async () => {
+  const root = await sandbox();
+  const lines = [
+    { ts: "2026-09-24T10:00:00.000Z", recv_ts: "2026-09-24T10:00:01.000Z", agent: "a0", tool: "bash", args: {}, result: {} },
+    { ts: "2026-09-24T10:10:00.000Z", recv_ts: "2026-09-24T10:00:02.000Z", agent: "a1", tool: "bash", args: {}, result: {} },
+    { ts: "2026-09-24T09:50:00.000Z", recv_ts: "2026-09-24T10:00:03.000Z", agent: "a1", tool: "read", args: {}, result: {} },
+  ];
+  await writeFile(join(root, "traces", "events.jsonl"), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  const c = await takeCustody(root);
+  assert.deepEqual(c.trace.clock, [{ agent: "a1", lines: 2, max_skew_s: -603 }], "a0's one-second gap is not named; a1's ten minutes both ways are");
+  assert.match(c.summary, /a1 2 lines \(up to -603 s\)/);
 });

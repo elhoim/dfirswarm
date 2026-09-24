@@ -158,7 +158,10 @@ export type LockRecord = {
 export type ClaimRow = LockRecord & { expires_in_seconds: number };
 
 export type SwarmEvent = {
+  /** The sender's clock: in a VM, the guest's. */
   ts: string;
+  /** The collector's clock, the host's, when the line reached it. */
+  recv_ts?: string;
   agent: string;
   tool: string;
   args: Record<string, unknown>;

@@ -41,6 +41,26 @@ out="$(start --isolation microvm --vm-memory 100 --label bad-mem)"; rc=$?
   || fail "a refused kickoff left a run in the registry"
 pass "an isolation that does not exist, a probe with no guard to probe, and a VM with no CPU or too little memory are refused before anything is written"
 
+# No collector: a VM cannot fall back to appending traces/ itself, so the run
+# would be all spill. A node that refuses to run the collector stands in for
+# one that crashed.
+mkdir -p "$TMP/nocollector"
+REAL_NODE="$(command -v node)"
+cat > "$TMP/nocollector/node" <<EOF
+#!/usr/bin/env bash
+case "\$*" in *trace-collector.mjs*) exit 1 ;; esac
+exec "$REAL_NODE" "\$@"
+EOF
+chmod +x "$TMP/nocollector/node"
+out="$(PATH="$TMP/nocollector:$PATH" start --isolation microvm --label bad-collector)"; rc=$?
+[[ $rc -eq 1 ]] || fail "a microvm kickoff with no collector exited $rc, wanted 1: $out"
+printf '%s\n' "$out" | grep -q 'BLOCKER: the trace collector did not come up' || fail "no BLOCKER naming the collector: $out"
+[[ -z "$(jq -r '.runs[]? | select(.label == "bad-collector") | .id' "$TMP/runs/registry.json" 2>/dev/null)" ]] || fail "the refused kickoff left a run"
+out="$(PATH="$TMP/nocollector:$PATH" start --label host-no-collector)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a host kickoff with no collector should still start, with a warning: $out"
+printf '%s\n' "$out" | grep -q 'appended by the panes themselves' || fail "the host fallback is not said: $out"
+pass "a microvm run whose trace collector does not come up is refused; a host run falls back and says so"
+
 # A link in the evidence that leads out of it would dangle in every VM.
 mkdir -p "$TMP/ev-link" "$TMP/elsewhere"
 printf 'image' > "$TMP/elsewhere/case.E01"

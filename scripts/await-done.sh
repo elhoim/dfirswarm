@@ -133,7 +133,8 @@ nudge_unfinished() {
   if [[ -f "$sandbox/hub.dir" ]]; then
     hd="$(cat "$sandbox/hub.dir" 2>/dev/null || true)"
     parent="$(cd "${TMPDIR:-/tmp}/dfirswarm-hubs" 2>/dev/null && pwd -P || true)"
-    [[ -n "$parent" && "$hd" == "$parent"/dfs-* && -S "$hd/admin.sock" ]] && hub="$hd/admin.sock"
+    [[ -n "$parent" && "$hd" == "$parent"/dfs-* && "$hd" != *..* && -S "$hd/admin.sock" \
+      && "$(cat "$hd/sandbox" 2>/dev/null)" == "$(cd "$sandbox" 2>/dev/null && pwd -P)" ]] && hub="$hd/admin.sock"
   fi
   if [[ -z "$hub" ]]; then
     command -v "${HERDR_BIN:-herdr}" >/dev/null 2>&1 || { say "  nudge: herdr is not on PATH"; NUDGE=0; return 0; }

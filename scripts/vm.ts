@@ -413,7 +413,7 @@ exec pi "$@"
 export const PROBE_SCRIPT = `#!/bin/sh
 /.msb/scripts/dfirswarm-bridge >/dev/null 2>&1 || true
 exec python3 - <<'PY'
-import errno, json, os, socket, subprocess
+import errno, json, os, socket, subprocess, time
 S = os.environ.get("SWARM_SANDBOX", "")
 A = os.environ.get("AGENT_ID", "")
 def can_write(path):
@@ -490,6 +490,8 @@ for line in open("/proc/mounts"):
     if len(parts) > 3 and parts[2] == "virtiofs" and parts[1] != "/.msb":
         mounts.append({"path": parts[1].replace("\\\\040", " "), "mode": "ro" if "ro" in parts[3].split(",") else "rw"})
 out["mounts"] = mounts
+# Last, so the host compares it with its own clock the moment this returns.
+out["guest_time"] = time.time()
 print(json.dumps(out))
 PY
 `;
@@ -713,8 +715,13 @@ async function createOne(
   let probe: Record<string, unknown> = {};
   try {
     const out = await sandbox.exec("/.msb/scripts/dfirswarm-probe", []);
+    const hostNow = Date.now() / 1000;
     const text = out.stdout().trim().split("\n").pop() ?? "";
     probe = JSON.parse(text) as Record<string, unknown>;
+    // The guest's clock stamps every line an agent sends (`ts`); the
+    // collector stamps the host's (`recv_ts`). How far apart they started is
+    // recorded, so a gap in the record can be read against it.
+    if (typeof probe.guest_time === "number") probe.clock_skew_s = Math.round((probe.guest_time - hostNow) * 10) / 10;
   } catch (err) {
     probe = { error: err instanceof Error ? err.message : String(err) };
   }
@@ -1110,19 +1117,25 @@ export async function imageDigest(name: string): Promise<string | null> {
 }
 
 /** Can this host run a VM at all, and is the image here? */
-export async function probeHost(image?: string): Promise<{ ok: boolean; msb: string; version: string; reasons: string[]; image_present?: boolean }> {
+export async function probeHost(image?: string): Promise<{ ok: boolean; msb: string; version: string; reasons: string[]; image_present?: boolean; doctor_output?: string }> {
   const msb = msbBinary();
   const reasons: string[] = [];
   const v = await run(msb, ["--version"], { timeoutMs: 20_000 });
   if (v.code !== 0) return { ok: false, msb, version: "", reasons: [`msb does not run: ${v.stderr.trim() || v.code}`] };
   const doctor = await run(msb, ["doctor"], { timeoutMs: 60_000 });
-  if (doctor.code !== 0) reasons.push(`msb doctor: ${(doctor.stdout + doctor.stderr).trim().split("\n").slice(-3).join(" ")}`);
+  // The whole of what doctor said goes back with the refusal: its last lines
+  // were once all an operator saw, and the check that failed was above them.
+  let doctor_output: string | undefined;
+  if (doctor.code !== 0) {
+    doctor_output = `${doctor.stdout}${doctor.stderr}`.trim();
+    reasons.push(`msb doctor failed (exit ${doctor.code}); its whole output follows`);
+  }
   let image_present: boolean | undefined;
   if (image) {
     const r = await run(msb, ["image", "inspect", image], { timeoutMs: 30_000 });
     image_present = r.code === 0;
   }
-  return { ok: reasons.length === 0, msb, version: v.stdout.trim(), reasons, ...(image !== undefined ? { image_present } : {}) };
+  return { ok: reasons.length === 0, msb, version: v.stdout.trim(), reasons, ...(image !== undefined ? { image_present } : {}), ...(doctor_output !== undefined ? { doctor_output } : {}) };
 }
 
 async function main(): Promise<void> {

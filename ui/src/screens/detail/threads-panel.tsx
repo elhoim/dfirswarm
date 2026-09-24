@@ -21,7 +21,7 @@ import { DarkThreadMark } from "@/components/swarm-bits";
 import { BoardAnalytics } from "./board-analytics";
 import { useAgentColours } from "@/lib/agent-colour";
 import { api } from "@/lib/api";
-import { chars, clock, money, relTime, shortDuration } from "@/lib/format";
+import { chars, clock, eventTime, money, relTime, shortDuration } from "@/lib/format";
 import { useAgentNames } from "@/lib/hooks";
 import { useResource } from "@/lib/live";
 import type { AgentRow, SwarmEvent, SwarmView, ThreadRow, TimedPost } from "@/lib/types";
@@ -190,7 +190,7 @@ function ThreadOverlay({ view, thread, version, onClose }: { view: SwarmView; th
       out.push({ kind: "post", badge: "goal / starting prompt", at: Number.isFinite(at) ? at : 0, post: { id: 0, thread: "main", from: "system", to: "all", tag: "intro", body: `MISSION — the starting prompt for this swarm.\n\n${view.goal_document}`, path: "", at: view.summary.started_at || null } });
     }
     if (showSystem && primary && !needle) {
-      for (const e of view.violations) out.push({ kind: "violation", event: e, at: Date.parse(e.ts) });
+      for (const e of view.violations) out.push({ kind: "violation", event: e, at: Date.parse(eventTime(e)) });
     }
     out.sort((a, b2) => a.at - b2.at || (a.kind === "post" && b2.kind === "post" ? a.post.id - b2.post.id : 0));
     return newestFirst ? out.reverse() : out;

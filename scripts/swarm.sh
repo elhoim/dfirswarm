@@ -2511,6 +2511,7 @@ STRIP
       local vm_probe
       if ! vm_probe="$(vm_cli probe --image "$vm_image")"; then
         echo "BLOCKER: this host cannot run the agents' VMs: $(jq -r '.reasons | join("; ")' <<<"$vm_probe" 2>/dev/null || printf '%s' "$vm_probe")" >&2
+        jq -r '.doctor_output // empty' <<<"$vm_probe" 2>/dev/null | sed 's/^/  | /' >&2
         exit 3
       fi
       if [[ "$(jq -r '.image_present' <<<"$vm_probe" 2>/dev/null)" != "true" ]]; then
@@ -2676,6 +2677,14 @@ STRIP
     trace_socket="$SWARM_TRACE_SOCKET"
     [[ -n "$trace_gate" ]] && attribution="ancestry"
     [[ "$isolation" == "microvm" ]] && attribution="channel"
+  elif [[ "$isolation" == "microvm" ]]; then
+    # A pane on the host falls back to appending the file itself. A VM
+    # cannot: traces/ is read-only in it, so every line of the run would go
+    # to per-agent spill files outside any chain, each the agent's own word.
+    # That is not a record worth starting a case on.
+    echo "BLOCKER: the trace collector did not come up, and under --isolation microvm there is no fallback: every line would be unchained. See $sandbox/traces/collector.log" >&2
+    stop_sandbox_daemons "$sandbox"
+    exit 1
   fi
 
   local guard_args=()
@@ -3103,7 +3112,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     echo "Trace:        appended by the panes themselves (no collector, no hash chain)" >&2
   fi
   case "$write_guard_mode" in
-    microvm) echo "Write guard:  microvm: each agent writes work/, its own tool-output/ and its own Pi session; the rest of the run is read-only in its VM, the board is written by the hub, and nothing else of this host is in the VM" ;;
+    microvm) echo "Write guard:  microvm: each agent writes only its own work/<id>/, work/extracted/<id>/, work/quarantine/<id>/, tool-output/<id>/ and Pi session; the rest of the run is read-only in its VM, shared files and the board are written by the hub, and nothing else of this host is in the VM" ;;
     seatbelt) echo "Write guard:  on (seatbelt): panes write inside $sandbox and Pi's agent dir, nowhere else" ;;
     linux) echo "Write guard:  on (Landlock inside a user namespace): panes write inside $sandbox and Pi's agent dir, nowhere else; the previous run's paths and the terminal's socket are masked" ;;
     landlock) echo "Write guard:  on (Landlock, no namespace): panes write inside $sandbox and Pi's agent dir, nowhere else; a socket cannot be masked on this host, and Pi's extensions/ stays writable" ;;
@@ -3709,8 +3718,9 @@ cmd_status() {
   if [[ "$(jq -r '.isolation.mode // "host"' <<<"$rec")" == "microvm" ]]; then
     echo
     vm_cli list --run "$id" 2>/dev/null | jq -r '.vms[]? | "vm \(.agent): \(.name) \(.status)"' || true
-    if [[ -f "$sandbox/hub.dir" && -S "$(cat "$sandbox/hub.dir")/admin.sock" ]]; then
-      hub_send "$(cat "$sandbox/hub.dir")/admin.sock" '{"op":"status"}' 2>/dev/null \
+    local status_hub
+    if status_hub="$(hub_dir_of "$sandbox")" && [[ -S "$status_hub/admin.sock" ]]; then
+      hub_send "$status_hub/admin.sock" '{"op":"status"}' 2>/dev/null \
         | jq -r '.agents | to_entries[] | "agent \(.key): \(.value.state)\(if .value.connected then "" else " (not linked)" end) since \(.value.since)"' || true
     fi
   fi
@@ -4291,9 +4301,7 @@ stop_sandbox_daemons() {
   fi
   if [[ -f "$sandbox/hub.pid" ]]; then
     pid="$(cat "$sandbox/hub.pid" || true)"
-    # Only a hub: hub.pid is tool-protected, not shell-protected, so a pane
-    # could name any process of this user in it.
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && ps -o command= -p "$pid" 2>/dev/null | grep -q 'vm-hub.ts'; then
+    if hub_pid_ours "$sandbox" "$pid"; then
       kill "$pid" 2>/dev/null || true
     fi
   fi
@@ -4685,10 +4693,15 @@ hubs_parent() {
   (cd "$parent" && pwd -P)
 }
 
-vm_hub_dir() { # <run id>
+vm_hub_dir() { # <run id> <sandbox>
   local dir
   dir="$(mktemp -d "$(hubs_parent)/dfs-$1.XXXXXX")"
   chmod 700 "$dir"
+  # Which run this hub serves, where no pane can write: hub.dir in the
+  # sandbox is only tool-protected, so a host pane could name another run's
+  # hub in it. hub_dir_of accepts a directory only when this file names the
+  # sandbox that asks.
+  (cd "$2" && pwd -P) > "$dir/sandbox"
   # Resolved: macOS's temp directory is under /var, a symlink.
   (cd "$dir" && pwd -P)
 }
@@ -4702,8 +4715,21 @@ hub_dir_of() { # <sandbox>
   [[ -f "$sandbox/hub.dir" ]] || return 1
   dir="$(cat "$sandbox/hub.dir" 2>/dev/null || true)"
   parent="$(hubs_parent)"
-  [[ -n "$dir" && "$dir" == "$parent"/dfs-* && -d "$dir" ]] || return 1
+  [[ -n "$dir" && "$dir" == "$parent"/dfs-* && "$dir" != *..* && -d "$dir" ]] || return 1
+  # And one made for this sandbox, not another run's.
+  [[ "$(cat "$dir/sandbox" 2>/dev/null)" == "$(cd "$sandbox" 2>/dev/null && pwd -P)" ]] || return 1
   printf '%s\n' "$dir"
+}
+
+# Is this pid this sandbox's hub? hub.pid is only tool-protected, so a pane
+# could name any process of this user in it, another run's hub included; the
+# hub's command line carries its own directory, which hub_dir_of vouches for.
+hub_pid_ours() { # <sandbox> <pid>
+  local dir cmd
+  [[ -n "$2" ]] && kill -0 "$2" 2>/dev/null || return 1
+  dir="$(hub_dir_of "$1")" || return 1
+  cmd="$(ps -o command= -p "$2" 2>/dev/null)" || return 1
+  [[ "$cmd" == *vm-hub.ts* && "$cmd" == *"$dir"* ]]
 }
 
 hub_send() { # <admin socket> <json>
@@ -4797,7 +4823,7 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>
   fi
   if [[ -f "$sandbox/hub.pid" ]]; then
     pid="$(cat "$sandbox/hub.pid" 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && ps -o command= -p "$pid" 2>/dev/null | grep -q 'vm-hub.ts'; then kill "$pid" 2>/dev/null || true; fi
+    if hub_pid_ours "$sandbox" "$pid"; then kill "$pid" 2>/dev/null || true; fi
     rm -f "$sandbox/hub.pid"
   fi
   if dir="$(hub_dir_of "$sandbox")"; then
@@ -4949,7 +4975,7 @@ vm_build_spec() { # <hub dir> <out file>
 # tab_count, split_failures, extra_workspaces, SWARM_GUARD_MEASURED.
 launch_vm_agents() {
   local hub_dir
-  hub_dir="$(vm_hub_dir "$swarm_id")"
+  hub_dir="$(vm_hub_dir "$swarm_id" "$sandbox")"
   # The finish line inside a VM reads the registry the way await-done.sh
   # always has, from SWARM_RUNS_DIR: here, a directory holding this run's
   # record and nothing else. The real registry — every other case on this
@@ -4977,7 +5003,11 @@ launch_vm_agents() {
   local rec_file
   for rec_file in "$sandbox"/vm/*.json; do
     [[ -f "$rec_file" ]] || continue
-    jq -r '"              \(.agent) -> \(.name) · image \(.image.manifest_digest // "?" | .[0:19]) · inputs \(.probe.inputs) · work \(.probe.work) · floor \(.probe.base) · hub \(if .probe.hub then "linked" else "NO" end)"' "$rec_file"
+    jq -r '"              \(.agent) -> \(.name) · image \(.image.manifest_digest // "?") · inputs \(.probe.inputs) · work \(.probe.work) · floor \(.probe.base) · hub \(if .probe.hub then "linked" else "NO" end) · clock \(.probe.clock_skew_s // "?") s off the host"' "$rec_file"
+    # A guest clock far from the host's does not stop a run: the record
+    # orders by the collector's clock. It does break TLS past a point, and
+    # it makes every `ts` from that VM misleading, so it is said.
+    jq -r 'select((.probe.clock_skew_s // 0) | (if . < 0 then -. else . end) > 120) | "WARN: \(.agent)'"'"'s VM clock is \(.probe.clock_skew_s) s off this host'"'"'s; its lines carry that in ts, the collector'"'"'s recv_ts is the host'"'"'s"' "$rec_file" >&2
   done
   echo "Secrets:      $(jq -r '[.secrets[]?.name] | unique | join(", ") | if . == "" then "none" else . end' "$sandbox/vm/${agent_ids[0]}.json") — resolved on this host, swapped in by msb on the way out; the VMs hold placeholders"
 
@@ -5516,6 +5546,7 @@ PY
   done
   [[ -s "$sandbox/work/.trace-spill.jsonl" ]] && cp "$sandbox/work/.trace-spill.jsonl" "$out/trace/spill-host.jsonl"
   [[ -s "$sandbox/traces/hub-spill.jsonl" ]] && cp "$sandbox/traces/hub-spill.jsonl" "$out/trace/spill-hub.jsonl"
+  [[ -s "$sandbox/traces/system-spill.jsonl" ]] && cp "$sandbox/traces/system-spill.jsonl" "$out/trace/spill-system.jsonl"
   local sp
   for sp in "$sandbox"/tool-output/*/trace-spill.jsonl; do
     [[ -s "$sp" ]] && cp "$sp" "$out/trace/spill-$(basename "$(dirname "$sp")").jsonl"

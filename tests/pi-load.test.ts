@@ -102,7 +102,10 @@ test("Pi loader: agent-swarm.ts loads and `playwright` is the real browser tool"
 
     const events = (await readFile(join(root, EVENTS_REL), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.ok(events.every((e) => e.tool === "playwright" && e.agent === "agent00"));
-    assert.deepEqual(Object.keys(events[0]).sort(), ["agent", "args", "result", "tool", "ts"]);
+    // sid and seq: the sending process and its count, so custody can tell a
+    // line that reached both the chain and a spill from one that reached neither.
+    assert.deepEqual(Object.keys(events[0]).sort(), ["agent", "args", "result", "seq", "sid", "tool", "ts"]);
+    assert.ok(events.every((e, i) => i === 0 || e.seq > events[i - 1].seq), "one process's lines count up");
   } finally {
     if (previousAgent === undefined) delete process.env.AGENT_ID;
     else process.env.AGENT_ID = previousAgent;

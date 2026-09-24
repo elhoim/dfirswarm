@@ -111,7 +111,9 @@ hub_dir_of() { # <sandbox>
   [[ -f "$1/hub.dir" ]] || return 1
   dir="$(cat "$1/hub.dir" 2>/dev/null || true)"
   parent="$(cd "${TMPDIR:-/tmp}/dfirswarm-hubs" 2>/dev/null && pwd -P)" || return 1
-  [[ -n "$dir" && "$dir" == "$parent"/dfs-* && -d "$dir" ]] || return 1
+  [[ -n "$dir" && "$dir" == "$parent"/dfs-* && "$dir" != *..* && -d "$dir" ]] || return 1
+  # Made for this sandbox (the kickoff wrote which), not another run's.
+  [[ "$(cat "$dir/sandbox" 2>/dev/null)" == "$(cd "$1" 2>/dev/null && pwd -P)" ]] || return 1
   printf '%s\n' "$dir"
 }
 
@@ -216,10 +218,12 @@ EOF
     # chained record, and the verifier reports the file as "added by
     # something other than the harness": a corruption alarm the harness
     # raises against itself. The line is kept in the spill file instead,
-    # which the report reads, so nothing is lost and nothing is falsified.
+    # which custody reads, so nothing is lost and nothing is falsified.
     if tail -n 1 "$SANDBOX/traces/events.jsonl" 2>/dev/null | grep -q '"prev":'; then
-      mkdir -p "$SANDBOX/work"
-      printf '%s\n' "$reap_line" >> "$SANDBOX/work/.trace-spill.jsonl"
+      # Not work/: an agent on the host writes there, and a line in a file
+      # an agent can write is that agent's word, not the harness's. traces/
+      # is read-only to every pane and every VM whenever there is a chain.
+      printf '%s\n' "$reap_line" >> "$SANDBOX/traces/system-spill.jsonl"
     else
       printf '%s\n' "$reap_line" >> "$SANDBOX/traces/events.jsonl"
     fi

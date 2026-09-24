@@ -176,7 +176,7 @@ HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HU
 sleep 0.3
 grep -q '1 post(s) you have not read' "$TMP/vm-prompts.txt" 2>/dev/null || fail "a VM agent's nudge did not arrive through the hub: $(cat "$TMP/vm-prompts.txt" 2>/dev/null)"
 [[ ! -s "$TMP/herdr-used.txt" ]] || fail "the watchdog asked Herdr about a VM agent: $(cat "$TMP/herdr-used.txt")"
-grep -q '"tool":"idle_nudge"' "$VM_SB/traces/events.jsonl" "$VM_SB/work/.trace-spill.jsonl" 2>/dev/null || fail "the VM nudge is not recorded"
+grep -q '"tool":"idle_nudge"' "$VM_SB/traces/events.jsonl" "$VM_SB/traces/system-spill.jsonl" 2>/dev/null || fail "the VM nudge is not recorded"
 pass "an agent in a microVM is nudged through the hub, and Herdr is never asked"
 
 printf '{"agents":{"v0":{"state":"working","connected":true}}}\n' > "$TMP/working.json"

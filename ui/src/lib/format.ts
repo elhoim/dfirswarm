@@ -51,6 +51,24 @@ export function clock(iso: string | null | undefined): string {
   return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+/**
+ * When a trace line happened, by the host's clock: the collector's receive
+ * time when it stamped one, the sender's own otherwise. Lines from a VM carry
+ * the guest's clock in `ts`, and ordering them against the host's posts by
+ * that clock puts a skewed guest's lines in the wrong place.
+ */
+export function eventTime(e: { ts: string; recv_ts?: string }): string {
+  return e.recv_ts || e.ts;
+}
+
+/** Seconds between the sender's clock and the host's for one line; null when either is missing. */
+export function eventSkew(e: { ts: string; recv_ts?: string }): number | null {
+  if (!e.recv_ts) return null;
+  const a = Date.parse(e.ts);
+  const b = Date.parse(e.recv_ts);
+  return Number.isFinite(a) && Number.isFinite(b) ? Math.round((a - b) / 1000) : null;
+}
+
 export function dateTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);

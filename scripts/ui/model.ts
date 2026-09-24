@@ -27,7 +27,7 @@ import {
   type SwarmDetail,
   type SwarmSummary,
 } from "../../extensions/observe.ts";
-import { readEventLog, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
+import { hostTime, readEventLog, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
 import { countChecks } from "./goals.ts";
 
 export type RegistryRun = {
@@ -131,7 +131,7 @@ export type ActivitySeries = {
 export const LIFECYCLE_TOOLS = new Set(["agent_start", "agent_stop", "harness_stop", "cap_steer", "wall_steer", "claim_violation", "reap", "reaped", "thinking"]);
 
 export function activitySeries(events: readonly SwarmEvent[], from: string | null, to: string | null, buckets = 96, now = Date.now()): ActivitySeries {
-  const stamps = events.map((e) => Date.parse(e.ts)).filter((n) => Number.isFinite(n));
+  const stamps = events.map((e) => Date.parse(hostTime(e))).filter((n) => Number.isFinite(n));
   const startMs = from && Number.isFinite(Date.parse(from)) ? Date.parse(from) : stamps.length ? Math.min(...stamps) : NaN;
   const endMs = to && Number.isFinite(Date.parse(to)) ? Date.parse(to) : stamps.length ? Math.max(now, ...stamps) : NaN;
   const series: ActivitySeries = {
@@ -144,7 +144,7 @@ export function activitySeries(events: readonly SwarmEvent[], from: string | nul
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return series;
   const span = Math.max(1, endMs - startMs);
   for (const e of events) {
-    const t = Date.parse(e.ts);
+    const t = Date.parse(hostTime(e));
     if (!Number.isFinite(t)) continue;
     const idx = Math.min(buckets - 1, Math.max(0, Math.floor(((t - startMs) / span) * buckets)));
     if (e.tool === "post") {
@@ -658,8 +658,8 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
   const failuresByAgent = new Map<string, string[]>();
   const compactionsByAgent = new Map<string, string[]>();
   for (const e of events) {
-    lastEventByAgent.set(e.agent, e.ts);
-    if (!firstEventByAgent.has(e.agent)) firstEventByAgent.set(e.agent, e.ts);
+    lastEventByAgent.set(e.agent, hostTime(e));
+    if (!firstEventByAgent.has(e.agent)) firstEventByAgent.set(e.agent, hostTime(e));
     if (isFailureEvent(e)) (failuresByAgent.get(e.agent) ?? failuresByAgent.set(e.agent, []).get(e.agent)!).push(e.ts);
     if (e.tool === "compact_done") (compactionsByAgent.get(e.agent) ?? compactionsByAgent.set(e.agent, []).get(e.agent)!).push(e.ts);
   }

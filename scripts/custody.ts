@@ -46,6 +46,8 @@ import { readInputsManifest, verifyEventChain, verifyLedgerChain } from "../exte
 
 export const CUSTODY_REL = "custody.json";
 /** A file past this is noted, not read: custody is a check, not a way to hang a stop. */
+/** A sender clock this far from the collector's is named in the verdict. */
+export const CLOCK_FLAG_SEC = 120;
 export const MAX_HASHED_BYTES = 8 * 1024 * 1024 * 1024;
 /** The kickoff's own record of what the run started with, outside the run. */
 export function custodyAnchorPath(sandbox: string): string {
@@ -121,7 +123,18 @@ export type Custody = {
     | { files: number; bytes: number; unchanged: boolean; changed: string[]; missing: string[]; added: string[]; skipped: string[]; manifest_sha256: string; manifest_anchored: boolean | null };
   sessions: { files: Array<{ path: string; bytes: number; sha256: string | null }>; digest: string };
   tool_outputs: { referenced: number; verified: number; missing: string[]; mismatched: string[]; refused: string[] };
-  trace: { lines: number; intact: boolean; detail: string; unverified: number; disputed: number; spilled: Array<{ path: string; lines: number; agent: string | null; bad: number }> };
+  trace: {
+    lines: number;
+    intact: boolean;
+    detail: string;
+    unverified: number;
+    disputed: number;
+    spilled: Array<{ path: string; lines: number; agent: string | null; bad: number; duplicates: number }>;
+    /** Per sending process, how many of its numbered lines are in neither the chain nor a spill. */
+    gaps: Array<{ sid: string; agent: string; missing: number }>;
+    /** Per agent, lines whose own clock (`ts`) was more than CLOCK_FLAG_SEC off the collector's (`recv_ts`). */
+    clock: Array<{ agent: string; lines: number; max_skew_s: number }>;
+  };
   ledger: { entries: number; intact: boolean; detail: string } | null;
   vms:
     | null
@@ -269,11 +282,37 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
   let lines = 0;
   let unverified = 0;
   let disputed = 0;
+  // Numbered lines, per sending process: (sid, seq) seen in the chain.
+  const numbered = new Map<string, { agent: string; seqs: Set<number> }>();
+  const note = (parsed: Record<string, unknown>) => {
+    if (typeof parsed.sid !== "string" || typeof parsed.seq !== "number") return false;
+    const entry = numbered.get(parsed.sid) ?? { agent: String(parsed.agent ?? "?"), seqs: new Set<number>() };
+    numbered.set(parsed.sid, entry);
+    const had = entry.seqs.has(parsed.seq);
+    entry.seqs.add(parsed.seq);
+    return had;
+  };
+  // A sender's clock against the collector's: in a VM, the guest's against
+  // the host's. The record orders by the collector's; a line whose own time
+  // is far from it is said, because a reader of `ts` would be misled.
+  const skewed = new Map<string, { lines: number; max: number }>();
+  const clockOf = (parsed: Record<string, unknown>) => {
+    if (typeof parsed.ts !== "string" || typeof parsed.recv_ts !== "string") return;
+    const skew = (Date.parse(parsed.ts) - Date.parse(parsed.recv_ts)) / 1000;
+    if (!Number.isFinite(skew) || Math.abs(skew) <= CLOCK_FLAG_SEC) return;
+    const agent = String(parsed.agent ?? "?");
+    const entry = skewed.get(agent) ?? { lines: 0, max: 0 };
+    entry.lines += 1;
+    if (Math.abs(skew) > Math.abs(entry.max)) entry.max = Math.round(skew);
+    skewed.set(agent, entry);
+  };
   for (const line of traceText.split("\n")) {
     if (!line.trim()) continue;
     lines += 1;
     try {
       const parsed = JSON.parse(line) as Record<string, unknown>;
+      note(parsed);
+      clockOf(parsed);
       keptOutputRefs(parsed, refs);
       if (parsed.agent_unverified === true) unverified += 1;
       if (parsed.agent_disputed === true || parsed.agent_claimed) disputed += 1;
@@ -284,24 +323,36 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
   // Lines the collector never took, kept rather than lost: the shared spill
   // on the host, each agent's own in a VM run, and the hub's own.
   const spills: Custody["trace"]["spilled"] = [];
-  const spillPaths = ["work/.trace-spill.jsonl", "traces/hub-spill.jsonl", ...(await readdir(join(sandbox, "tool-output")).catch(() => [])).map((a) => `tool-output/${a}/trace-spill.jsonl`)];
+  const spillPaths = ["work/.trace-spill.jsonl", "traces/system-spill.jsonl", "traces/hub-spill.jsonl", ...(await readdir(join(sandbox, "tool-output")).catch(() => [])).map((a) => `tool-output/${a}/trace-spill.jsonl`)];
   for (const rel of spillPaths) {
     const text = await readFile(join(sandbox, rel), "utf8").catch(() => "");
     const lines = text.split("\n").filter((l) => l.trim());
     if (!lines.length) continue;
-    const owner = rel.match(/^tool-output\/([^/]+)\//)?.[1] ?? (rel.startsWith("traces/hub-") ? "system" : null);
+    const owner = rel.match(/^tool-output\/([^/]+)\//)?.[1] ?? (rel.startsWith("traces/") ? "system" : null);
     let bad = 0;
+    let duplicates = 0;
     for (const l of lines) {
       try {
         const parsed = JSON.parse(l) as Record<string, unknown>;
         // A spilled line says whose it is; the directory it sits in says whose it can be.
         if (owner && owner !== "system" && parsed.agent !== owner) bad += 1;
+        // Also in the chain: the collector took it after the sender gave up.
+        if (note(parsed)) duplicates += 1;
       } catch {
         bad += 1;
       }
     }
-    spills.push({ path: rel, lines: lines.length, agent: owner, bad });
+    spills.push({ path: rel, lines: lines.length, agent: owner, bad, duplicates });
   }
+  // A process's numbered lines run 1..n; a number missing below its highest
+  // is a line that reached neither the chain nor a spill.
+  const gaps: Custody["trace"]["gaps"] = [];
+  for (const [sid, entry] of numbered) {
+    const top = Math.max(...entry.seqs);
+    const missing = top - entry.seqs.size;
+    if (missing > 0) gaps.push({ sid, agent: entry.agent, missing });
+  }
+  const clock = [...skewed].map(([agent, e]) => ({ agent, lines: e.lines, max_skew_s: e.max }));
   const missingOut: string[] = [];
   const mismatched: string[] = [];
   const refused: string[] = [];
@@ -406,7 +457,11 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
   else parts.push("TRACE CHAIN BROKEN");
   const spilled = spills.reduce((n, s) => n + s.lines, 0);
   const badSpill = spills.reduce((n, s) => n + s.bad, 0);
-  if (spilled) parts.push(`${spilled} trace line${spilled === 1 ? "" : "s"} outside the chain (spilled: ${spills.map((s) => s.path).join(", ")})${badSpill ? `, ${badSpill} NOT ATTRIBUTABLE` : ""}`);
+  const dupSpill = spills.reduce((n, s) => n + s.duplicates, 0);
+  if (spilled) parts.push(`${spilled} trace line${spilled === 1 ? "" : "s"} outside the chain (spilled: ${spills.map((s) => s.path).join(", ")})${dupSpill ? `, ${dupSpill} also in the chain` : ""}${badSpill ? `, ${badSpill} NOT ATTRIBUTABLE` : ""}`);
+  if (clock.length) parts.push(`sent with a clock more than ${CLOCK_FLAG_SEC} s off the host's: ${clock.map((c) => `${c.agent} ${c.lines} line${c.lines === 1 ? "" : "s"} (up to ${c.max_skew_s} s)`).join(", ")}; the record orders by the host's recv_ts`);
+  const lost = gaps.reduce((n, g) => n + g.missing, 0);
+  if (lost) parts.push(`${lost} TRACE LINE${lost === 1 ? "" : "S"} LOST (numbered but in neither the chain nor a spill: ${gaps.map((g) => `${g.agent} ${g.missing}`).join(", ")})`);
   if (ledger) parts.push(ledger.intact ? `ledger ${ledger.entries} entries, chain intact` : "LEDGER CHAIN BROKEN");
   if (vms) {
     const kept = vms.filter((v) => v.snapshot && "verified" in v.snapshot && v.snapshot.verified).length;
@@ -421,7 +476,7 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
     inputs,
     sessions: { files: sessionFiles, digest: sessionsDigest },
     tool_outputs: { referenced: refs.size, verified, missing: missingOut, mismatched, refused },
-    trace: { lines, intact: chained, detail: chainDetail, unverified, disputed, spilled: spills },
+    trace: { lines, intact: chained, detail: chainDetail, unverified, disputed, spilled: spills, gaps, clock },
     ledger,
     vms,
     incomplete,

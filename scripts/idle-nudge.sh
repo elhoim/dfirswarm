@@ -119,8 +119,10 @@ try:
         # written by "system" and names the agent in its arguments.
         if event.get("agent") != aid:
             continue
+        # The collector's clock, the host's: a VM's own `ts` is the guest's,
+        # and a guest whose clock runs ahead would never look idle.
         try:
-            last = max(last, datetime.fromisoformat(event["ts"].replace("Z", "+00:00")).timestamp())
+            last = max(last, datetime.fromisoformat((event.get("recv_ts") or event["ts"]).replace("Z", "+00:00")).timestamp())
         except Exception:
             pass
         break
@@ -174,10 +176,12 @@ log_event() { # log_event <agent> <idle> <ok> <count>
     # chained record, and the verifier reports the file as "added by
     # something other than the harness": a corruption alarm the harness
     # raises against itself. The line is kept in the spill file instead,
-    # which the report reads, so nothing is lost and nothing is falsified.
+    # which custody reads, so nothing is lost and nothing is falsified.
     if tail -n 1 "$SANDBOX/traces/events.jsonl" 2>/dev/null | grep -q '"prev":'; then
-      mkdir -p "$SANDBOX/work"
-      printf '%s\n' "$line" >> "$SANDBOX/work/.trace-spill.jsonl"
+      # Not work/: an agent on the host writes there, and a line in a file
+      # an agent can write is that agent's word, not the harness's. traces/
+      # is read-only to every pane and every VM whenever there is a chain.
+      printf '%s\n' "$line" >> "$SANDBOX/traces/system-spill.jsonl"
     else
       printf '%s\n' "$line" >> "$SANDBOX/traces/events.jsonl"
     fi

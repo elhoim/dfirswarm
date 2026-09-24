@@ -244,7 +244,17 @@ export type SwarmEvent = {
   tool: string;
   args: Record<string, unknown>;
   result: unknown;
+  /** The sending process's id and its count of lines sent (appendEvent). */
+  sid?: string;
+  seq?: number;
+  /** The collector's clock when the line reached it; the sender's `ts` is, in a VM, the guest's. */
+  recv_ts?: string;
 };
+
+/** When a line happened by the host's clock: the collector's stamp when there is one. */
+export function hostTime(e: { ts: string; recv_ts?: string }): string {
+  return e.recv_ts || e.ts;
+}
 
 export const BUDGET_SOURCE = "pi.sessionManager.getEntries";
 export const EVENTS_REL = "traces/events.jsonl";
@@ -2581,6 +2591,15 @@ async function tailRefusesAppend(file: string): Promise<boolean> {
   }
 }
 
+/**
+ * Each process's own count of the lines it sent, under an id of its own: a
+ * line that reached the chain and the spill both (a collector that answered
+ * late) is the same (sid, seq) twice, and a gap in a process's seq is a line
+ * that reached neither. Custody reads both.
+ */
+const TRACE_SID = createHash("sha256").update(`${process.pid}:${Date.now()}:${Math.random()}`).digest("hex").slice(0, 12);
+let traceSeq = 0;
+
 export async function appendEvent(
   sandboxRoot: string,
   event: Omit<SwarmEvent, "ts"> & { ts?: string },
@@ -2600,6 +2619,8 @@ export async function appendEvent(
       tool: event.tool,
       args: event.args ?? {},
       result: event.result ?? {},
+      sid: TRACE_SID,
+      seq: ++traceSeq,
     },
     credentials,
   );
@@ -2616,7 +2637,9 @@ export async function appendEvent(
   // In a VM the trace directory is read-only and shared: the spill is the
   // only place a line can go.
   if (process.env.SWARM_ISOLATION === "microvm") {
-    await appendFile(join(sandboxRoot, traceSpillRel()), plain, "utf8").catch(() => undefined);
+    // A line that reaches neither the collector nor the spill is lost, and a
+    // lost line must not pass for a recorded one.
+    await appendFile(join(sandboxRoot, traceSpillRel()), plain, "utf8");
     return record;
   }
   await mkdir(dirname(file), { recursive: true }).catch(() => undefined);
@@ -3416,7 +3439,26 @@ async function hashOfWatched(sandboxRoot: string, pathKey: string): Promise<stri
  * everything under work/ (the artifacts, claimed or not), the handful of
  * harness files above, every live claim, and the caps.
  */
-export async function watchedPathHashes(sandboxRoot: string): Promise<WatchSnapshot> {
+/**
+ * In a microVM a seat can write only its own directories: the rest of the
+ * run is read-only in its VM, and whatever changes there changed through the
+ * hub (a peer's publish, recorded with its author) or on the host. Watching
+ * it from here only read a five-second-old view of other seats' work and
+ * blamed this seat's command for it; so a VM's watch is its own directories.
+ */
+export function vmSeatScope(agentId: string | undefined, env: NodeJS.ProcessEnv = process.env): string[] | null {
+  if (env.SWARM_ISOLATION !== "microvm" || !agentId || agentId === SYSTEM_AGENT) return null;
+  return [`work/${agentId}/`, `work/extracted/${agentId}/`, `work/quarantine/${agentId}/`];
+}
+
+export async function watchedPathHashes(sandboxRoot: string, agentId?: string): Promise<WatchSnapshot> {
+  const scope = vmSeatScope(agentId);
+  if (scope) {
+    const hashes = new Map<string, string>();
+    const work = await listWorkFiles(sandboxRoot);
+    for (const file of work.files) if (scope.some((p) => file.startsWith(p))) hashes.set(file, await hashOfWatched(sandboxRoot, file));
+    return { hashes, caps: "", appendOnly: new Map(), truncated: work.truncated };
+  }
   const hashes = new Map<string, string>();
   const paths = new Set<string>((await listClaims(sandboxRoot)).map((c) => c.path));
   for (const file of BASH_WATCH_FILES) paths.add(file);
@@ -3458,8 +3500,19 @@ export type BashWriteReport = {
 };
 
 /** True when the bytes on disk are the newest thing history knows about. */
-async function accountedForByHistory(sandboxRoot: string, pathKey: string): Promise<boolean> {
-  const versions = await listFileHistory(sandboxRoot, pathKey);
+/**
+ * Where the write diff asks who holds a path and what its history says. On
+ * the host that is these files; in a VM it is the hub, because the VM reads
+ * locks/ and history/ through a share that caches attributes for 5 s, and a
+ * revision recorded a moment ago would look like an unaccounted write.
+ */
+export type WatchLookups = {
+  listClaims: (sandboxRoot: string) => Promise<LockRecord[]>;
+  listFileHistory: (sandboxRoot: string, rawPath: string) => Promise<FileVersion[]>;
+};
+
+async function accountedForByHistory(sandboxRoot: string, pathKey: string, lookups: WatchLookups): Promise<boolean> {
+  const versions = await lookups.listFileHistory(sandboxRoot, pathKey);
   const latest = versions.at(-1);
   if (!latest) return false;
   return (await hashOfWatched(sandboxRoot, pathKey)) === latest.sha256;
@@ -3482,9 +3535,10 @@ export async function diffWatchedPaths(
   sandboxRoot: string,
   before: WatchSnapshot,
   writer: string,
+  lookups: WatchLookups = { listClaims, listFileHistory },
 ): Promise<BashWriteReport[]> {
-  const after = await watchedPathHashes(sandboxRoot);
-  const claims = new Map((await listClaims(sandboxRoot)).map((c) => [c.path, c]));
+  const after = await watchedPathHashes(sandboxRoot, writer);
+  const claims = new Map((await lookups.listClaims(sandboxRoot)).map((c) => [c.path, c]));
   const out: BashWriteReport[] = [];
 
   if (before.caps && after.caps && before.caps !== after.caps) {
@@ -3530,11 +3584,11 @@ export async function diffWatchedPaths(
         ? await hashOfCached(sandboxRoot, pathKey)
         : await hashOfWatched(sandboxRoot, pathKey);
     if (was === now) continue;
-    if (await accountedForByHistory(sandboxRoot, pathKey)) continue;
+    if (await accountedForByHistory(sandboxRoot, pathKey, lookups)) continue;
     const claim = claims.get(pathKey);
     const isProtected = isProtectedPath(pathKey);
     const isInput = isInputsPath(pathKey);
-    const versions = isInput ? [] : await listFileHistory(sandboxRoot, pathKey);
+    const versions = isInput ? [] : await lookups.listFileHistory(sandboxRoot, pathKey);
     out.push({
       path: pathKey,
       owner: claim?.owner ?? null,
@@ -3680,6 +3734,10 @@ export const TOOL_RESERVED_NAMES = new Set([
   // self-compaction: the tool, the per-turn context row and the hand-off events
   "self_compact", "context", "compact_notice", "compact_warning", "compact_forced", "compact_hold",
   "compact_note", "compact_start", "compact_done", "compact_failed", "compact_config",
+  // microVM runs: the tool that writes a shared file, the hub's own lines,
+  // and what an agent's extension says about the hub (tests/reserved-names)
+  "publish_file", "publish_needed", "skill", "finish_line", "hub_call", "hub_link", "hub_prompt",
+  "hub_lost", "hub_lost_stop", "hub_restarted", "vm_finish", "custody", "record_violation",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };

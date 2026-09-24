@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import * as board from "../extensions/board.ts";
-import { agentDeadPath, emptyAgentBudget, initSandbox, readPost, SENTINEL_REL } from "../extensions/protocol.ts";
+import { agentDeadPath, diffWatchedPaths, emptyAgentBudget, initSandbox, readPost, SENTINEL_REL, watchedPathHashes } from "../extensions/protocol.ts";
 import { boardTable, Hub } from "../scripts/vm-hub.ts";
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -470,4 +470,42 @@ test("publish_file: a seat's own file lands in the shared work/ claimed and reco
   assert.equal(leak.ok, false);
   assert.match(leak.reason ?? "", /escapes sandbox|link/i);
   assert.equal(await stat(join(sandbox, "work", "leak.md")).then(() => true).catch(() => false), false, "nothing of the host was published");
+});
+
+test("in a VM a seat's shell-write watch is its own directories: a peer's published file is never blamed on its command", async () => {
+  const { sandbox } = await setup();
+  const was = process.env.SWARM_ISOLATION;
+  process.env.SWARM_ISOLATION = "microvm";
+  cleanups.push(async () => {
+    if (was === undefined) delete process.env.SWARM_ISOLATION;
+    else process.env.SWARM_ISOLATION = was;
+  });
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  await mkdir(join(sandbox, "work", "a1"), { recursive: true });
+  await writeFile(join(sandbox, "work", "report.md"), "v1\n");
+  const before = await watchedPathHashes(sandbox, "a0");
+  assert.ok([...before.hashes.keys()].every((k) => k.startsWith("work/a0/")), "only the seat's own files are watched");
+  // During a0's command: a peer publishes into the shared work/, and writes its own scratch.
+  await writeFile(join(sandbox, "work", "report.md"), "v2 by a1\n");
+  await writeFile(join(sandbox, "work", "a1", "x.txt"), "a1's\n");
+  await writeFile(join(sandbox, "work", "a0", "mine.txt"), "a0 wrote this\n");
+  const reports = await diffWatchedPaths(sandbox, before, "a0");
+  assert.deepEqual(reports.map((r) => r.path), ["work/a0/mine.txt"], "a0's command wrote its own file and nothing else");
+  // The history the diff reads is the one it is given: in a VM, the hub's,
+  // which has a revision the VM's cached view of history/ does not show yet.
+  const { createHash } = await import("node:crypto");
+  const sha = createHash("sha256").update("a0 wrote this\n").digest("hex");
+  const seen: string[] = [];
+  const viaHub = await diffWatchedPaths(sandbox, before, "a0", {
+    listClaims: async () => {
+      seen.push("claims");
+      return [];
+    },
+    listFileHistory: async (_root, path) => {
+      seen.push(`history ${path}`);
+      return path === "work/a0/mine.txt" ? [{ rev: 1, sha256: sha, bytes: 14, by: "a0", at: new Date().toISOString(), path } as never] : [];
+    },
+  });
+  assert.deepEqual(viaHub, [], "a write the hub's history already holds is accounted for");
+  assert.deepEqual(seen, ["claims", "history work/a0/mine.txt"], "the lookups asked were the ones passed in, not the local files");
 });
