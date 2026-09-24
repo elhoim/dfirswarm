@@ -156,6 +156,21 @@ A pack that declares a required secret on a host that cannot deny the read is
 refused at kickoff unless the operator says to go ahead, and the record names
 the gap.
 
+**Status.** Only the first two points exist today. `pack install` writes
+`secrets.env` (mode 0600), and nothing exports it into a pane or copies it into
+the sandbox. The rest is still to be built:
+
+- No pack tool is handed its secret yet. Nothing in the harness reads
+  `secrets.env` after install.
+- The kickoff does not deny the read. `~/.dfirswarm/packs/` stays readable to
+  the panes because their skills and tools live there, so an agent's own shell
+  can `cat` the file under every write-guard mode.
+- The kickoff does not refuse a pack whose required secret it cannot protect,
+  and the run record does not name the gap.
+
+Until then, treat a pack secret as readable by the agents of any run that loads
+the pack, and install one only when that is acceptable.
+
 ---
 
 ## 5. Third-party tools and licences
