@@ -141,4 +141,27 @@ PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$LOCAL_SB" -
 [[ "$(grep -c '^L0	' "$PROMPT_LOG")" -eq 1 ]] || fail "a local seat that has worked is nudged like any other"
 pass "the first-turn grace is for the first turn only"
 
+# --- the fallback append ----------------------------------------------------
+# With no collector answering, a harness line goes to the trace only when the
+# trace has no chain. A trace that ends partway through a line is spilled
+# around too: the fragment is usually a chained line cut short, and `prev` is
+# its last key, so the last line alone does not show the chain.
+TORN_SB="$TMP/torn"
+mkdir -p "$TORN_SB/traces"
+printf '{"ts":"t1","agent":"a0","tool":"bash","args":{},"result":{"ok":true},"prev":""}\n{"ts":"t2","agent":"a0","tool":"bash","args":{"cmd":"cut sh' \
+  > "$TORN_SB/traces/events.jsonl"
+before="$(cksum < "$TORN_SB/traces/events.jsonl")"
+( source "$ROOT/scripts/lib/trace.sh"; trace_emit "$ROOT" "$TORN_SB" '{"ts":"t3","agent":"system","tool":"idle_nudge","args":{},"result":{"ok":true}}' )
+[[ "$(cksum < "$TORN_SB/traces/events.jsonl")" == "$before" ]] || fail "a line was appended onto a torn trace tail"
+[[ "$(grep -c idle_nudge "$TORN_SB/work/.trace-spill.jsonl" 2>/dev/null)" -eq 1 ]] || fail "the line refused by a torn tail is not in the spill"
+pass "a harness line spills rather than fusing onto a torn trace tail"
+
+# An unchained trace that ends in a newline still takes the append.
+PLAIN_SB="$TMP/plain"
+mkdir -p "$PLAIN_SB/traces"
+printf '{"ts":"t1","agent":"a0","tool":"bash","args":{},"result":{"ok":true}}\n' > "$PLAIN_SB/traces/events.jsonl"
+( source "$ROOT/scripts/lib/trace.sh"; trace_emit "$ROOT" "$PLAIN_SB" '{"ts":"t2","agent":"system","tool":"idle_nudge","args":{},"result":{"ok":true}}' )
+[[ "$(wc -l < "$PLAIN_SB/traces/events.jsonl" | tr -d ' ')" -eq 2 ]] || fail "an unchained trace no longer takes the fallback append"
+pass "an unchained trace with whole lines still takes the fallback append"
+
 echo "idle-nudge.test.sh: all checks passed"

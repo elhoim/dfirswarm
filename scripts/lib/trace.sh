@@ -17,7 +17,13 @@ trace_emit() {
     # something other than the harness": a corruption alarm the harness
     # raises against itself. The line is kept in the spill file instead,
     # which the report reads, so nothing is lost and nothing is falsified.
-    if tail -n 1 "$sandbox/traces/events.jsonl" 2>/dev/null | grep -q '"prev":'; then
+    #
+    # A file that ends partway through a line spills too, as the collector
+    # refuses it: a line appended there fuses into the fragment. The fragment
+    # is usually a chained line cut short, and `prev` is its last key, so the
+    # `prev` check alone misses it.
+    if [[ -s "$sandbox/traces/events.jsonl" && "$(tail -c 1 "$sandbox/traces/events.jsonl" | wc -l | tr -d ' ')" -eq 0 ]] \
+      || tail -n 1 "$sandbox/traces/events.jsonl" 2>/dev/null | grep -q '"prev":'; then
       mkdir -p "$sandbox/work"
       printf '%s\n' "$line" >> "$sandbox/work/.trace-spill.jsonl"
     else
