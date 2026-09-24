@@ -54,7 +54,8 @@ async function setup(options: { agents?: string[]; settleMs?: number; wall?: num
   });
   await hub.start();
   cleanups.push(async () => {
-    await hub.stop();
+    // A test may have stopped the hub itself; the directories go either way.
+    await hub.stop().catch(() => undefined);
     collector.close();
     await rm(sandbox, { recursive: true, force: true });
     await rm(dir, { recursive: true, force: true });
