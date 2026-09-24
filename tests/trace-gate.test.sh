@@ -109,11 +109,15 @@ esac
 mkdir -p "$TMP/runs"
 out="$(SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" start --model solo/model --n 2 --cap-usd 1 \
   --no-start --goal-file "$ROOT/prompts/goals/hello.md" --sandbox "$TMP/run" 2>&1)" || fail "kickoff failed: $out"
-[[ -S "$TMP/run/traces/.collector-gate.sock" ]] || fail "the kickoff did not start the gate: $out"
-[[ -f "$TMP/run/gate.pid" ]] && kill -0 "$(cat "$TMP/run/gate.pid")" 2>/dev/null || fail "gate.pid does not name a live gate"
+# The gate came up (its own log says so) and, --no-start being a prepared run
+# nothing talks to yet, was put away again with the collector: a real start
+# starts its own.
+grep -q 'trace-gate: up' "$TMP/run/traces/trace-gate.log" 2>/dev/null || fail "the kickoff did not start the gate: $out"
+[[ ! -S "$TMP/run/traces/.collector-gate.sock" && ! -f "$TMP/run/gate.pid" ]] \
+  || fail "--no-start left the gate running after the kickoff"
 [[ "$(jq -r '.runs[-1].attribution' "$TMP/runs/registry.json")" == "ancestry" ]] \
   || fail "the record should say attribution: ancestry, got $(jq -r '.runs[-1].attribution' "$TMP/runs/registry.json")"
-pass "the kickoff starts the gate and records attribution: ancestry"
+pass "the kickoff starts the gate, records attribution: ancestry, and --no-start puts the gate away"
 
 # --- and both processes hold the key: the gate marks, the collector counts ----------
 # The gate was once started with the flat token map (no key) while the

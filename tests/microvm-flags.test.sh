@@ -99,6 +99,11 @@ grep -q 'no copy, and the host holds the source read-only' "$sbx/SWARM.md" || fa
 pass "the contract says the agent is in its own VM, the board is written for it, a peer's file can lag, and how the evidence arrived"
 
 # --- the image follows the packs, and an operator's image wins ------------------
+# In a home of our own: whatever packs this machine has installed are not the test's.
+export DFIRSWARM_HOME="$TMP/home"
+for p in computer-forensics-base memory-forensics; do
+  bash "$ROOT/scripts/pack.sh" install "$ROOT/packs/$p" --yes >/dev/null 2>&1 || fail "could not install pack $p into the test's home"
+done
 out="$(start --isolation microvm --pack memory-forensics --label vm-mem)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a microvm run with a pack exited $rc: $out"
 [[ "$(reg vm-mem '.isolation.image')" == "dfirswarm-memory:dev-$ARCH" ]] || fail "memory-forensics should boot the memory image, got $(reg vm-mem '.isolation.image')"
