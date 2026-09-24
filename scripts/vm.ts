@@ -811,7 +811,10 @@ export async function imageCatalog(
       .detached(true)
       .replace()
       .workdir(sandbox)
-      .envs({ SWARM_CATALOG_STEP_TIMEOUT: process.env.SWARM_CATALOG_STEP_TIMEOUT ?? "900" })
+      .envs({
+        SWARM_CATALOG_STEP_TIMEOUT: process.env.SWARM_CATALOG_STEP_TIMEOUT ?? "900",
+        ...(process.env.SWARM_CATALOG_MEMORY_PROBE_TIMEOUT ? { SWARM_CATALOG_MEMORY_PROBE_TIMEOUT: process.env.SWARM_CATALOG_MEMORY_PROBE_TIMEOUT } : {}),
+      })
       .volume(sandbox, (v) => v.bind(realpathSync(sandbox)))
       .volume(join(ROOT, "scripts"), (v) => v.bind(realpathSync(join(ROOT, "scripts"))).readonly());
     for (const e of evidence) builder = builder.volume(e, (v) => v.bind(realpathSync(e)).readonly().noexec());
