@@ -16,10 +16,10 @@ it is refused or undone. Results go in `work/`, where the usual claims apply.
 
 | Step | What lands in the sandbox |
 | --- | --- |
-| Copy | `inputs/` — a dereferenced copy (`cp -RL`), so a symlink in the source becomes a plain file and nothing outside the copy is reachable through it. |
+| Copy | `inputs/` — a copy with the evidence's links kept as the links they are, never followed: an extracted root's `etc/hosts -> /etc/hosts` stays a link to a path, and does not become this machine's own file. Only a link at the top of `--inputs` (the operator's, `ln -s /mnt/evidence/case.E01 ./`) is followed, to the file or directory it names. Links that lead out of the evidence are listed at kickoff. The copy is then checked against its source by name, kind and size (not by content): names merged on a case-insensitive volume, or a short read, stop the kickoff. |
 | Lock | Every file `r--r--r--`, every directory `r-xr-xr-x`. |
 | Clone | `.inputs-pristine/` — the same bytes once more (an APFS clone or a reflink where the filesystem has them, a copy elsewhere). The harness heals from it. |
-| Manifest | `inputs.json` — the source path, when it was copied, every file with its size and sha256, and which guard the panes got. |
+| Manifest | `inputs.json` — the source path, when it was copied, every file with its size and its sha256, sha1 and md5 (from one read, to set beside an imager's acquisition hashes), every link with its target, every FIFO, socket or device by its kind, `source_checked`, and which guard the panes got. A name that is not UTF-8 (a Windows-1254 name from an archive, on ext4) is kept exactly as base64 in `path_b64` (`link_b64` for a link's target) beside a readable `path`, and every check compares names as those bytes. |
 | Contract | `SWARM.md` gains an **Inputs (read-only)** section: the rule, the file list, what happens on a write. |
 | Registry | `inputs: {source, files, bytes, enforce, guard}` on the run, so the console can show it. |
 | Pane hook | With a kernel guard available, `.zsh/.zshenv`, `.bash/.bashrc` + `.bash/.bash_profile` and `.fsguard/plan.txt`; the workspace gets `ZDOTDIR` pointing at the first, and `HOME` at `.bash/` when the account's login shell is bash (below). |
@@ -36,7 +36,10 @@ sweep, which fingerprints every input.
 No copy and no pristine clone: the evidence is used where it is, mounted
 read-only and no-exec into every agent's VM, and the host refuses every
 write through that mount whatever the guest does. The no-exec is a flag in
-the guest's mount, and the VM's probe does not measure it. `inputs/` is a
+the guest's mount: each VM's probe reads it from the guest kernel's mount
+table, and a VM whose evidence mount allows execution is refused. The
+guest's root could remount it, so it guards against running evidence by
+mistake, not against a root that means to. `inputs/` is a
 link to it and `inputs.json` records `guard: "microvm"` and `held: "bind"`,
 links inside the evidence recorded as links. A link that leads out of the
 evidence is refused at kickoff, naming it, since no VM could follow it. When
@@ -65,8 +68,8 @@ path and no read-only virtio-blk attach to a VM yet.
    size and mtime back with `touch -t`; ctime needs root), a write bit given
    back counts as a change, and so does a second name for the inode (a hard
    link out of `inputs/`, which is how a path-based check would be walked
-   around). A symlink planted inside is an addition: the kickoff dereferenced
-   every one it copied, so none is legitimate. A changed, re-permissioned or
+   around). A link planted inside is an addition: the manifest lists every
+   link the evidence had, with its target, so any other is new. A changed, re-permissioned or
    deleted file is put back from `.inputs-pristine/` at a fresh inode, a
    planted file or link is removed, the trace gets an `inputs_violation` line
    naming the agent, the path and the tool it came through, and the board
@@ -75,7 +78,11 @@ path and no read-only virtio-blk attach to a VM yet.
    turn ends (at most every 15 s per agent; a stat per file) and again inside
    `done`, which heals first and then records
    an `inputs_check` line: an `ok: false` there means a heal failed, not that
-   nobody looked.
+   nobody looked. A file the check reads again is held to the manifest's
+   sha1 and md5 too; sha256 decides, and a file whose sha256 matches while
+   another digest does not is listed as `digest_mismatch` in the `inputs`
+   tool's answer, since the record around the bytes then disagrees with
+   itself.
 3. **The kernel says no** where the host can do it (`scripts/fsguard.sh`; the
    same wrapper takes `--noexec DIR` for `--quarantine`, a seatbelt
    `process-exec*` deny or a `noexec` bind mount over `work/extracted/` and

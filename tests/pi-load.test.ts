@@ -5,8 +5,11 @@
  *
  * Needs an installed @earendil-works/pi-coding-agent. Resolution order:
  *   1. $PI_PACKAGE_DIR/dist/core/extensions/loader.js
- *   2. `npm root -g`/@earendil-works/pi-coding-agent
- * Skips with a reason when neither exists.
+ *   2. the pinned devDependency, node_modules/@earendil-works/pi-coding-agent
+ *      (what `npm ci` installs, in CI too)
+ *   3. `npm root -g`/@earendil-works/pi-coding-agent
+ * The pinned one comes before a global Pi, so the version tested is the
+ * version package.json names. Skips with a reason when none exists.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -22,6 +25,7 @@ const REPO = resolve(import.meta.dirname, "..");
 async function findLoader(): Promise<string | null> {
   const candidates: string[] = [];
   if (process.env.PI_PACKAGE_DIR) candidates.push(process.env.PI_PACKAGE_DIR);
+  candidates.push(join(REPO, "node_modules", "@earendil-works", "pi-coding-agent"));
   try {
     const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
     candidates.push(join(globalRoot, "@earendil-works", "pi-coding-agent"));

@@ -88,7 +88,8 @@ not surprised:
   named); `artifacts.json` indexes `work/`; the verdict's hash is anchored
   outside the run. `stop` bounds it from outside too.
 - The ledger's chain covers each entry's provenance (source, evidence,
-  confidence); an unchained line after chained ones breaks it.
+  confidence); an unchained line after chained ones breaks it, and so does
+  a version 1 entry after version 2 ones.
 - Evidence FIFOs, sockets and device nodes are recorded by their kind and
   checked by kind; the evidence manifest and its anchor are read-only on
   disk, and the manifest's hash is in the run's record.
@@ -106,8 +107,100 @@ not surprised:
   that fails before its record is written clears what it started.
 - Warnings: a run kept in a synced folder, a Mac on battery, a suffix in the
   allowlist, writable evidence directories, a host run whose panes cannot be
-  kept from a live VM run's hub. An IPv6 allow entry is written `[v6]:port`,
-  and netguard reads it. GitHub Copilot's token host is allowed.
+  kept from a live VM run's hub, a run started as root. An IPv6 allow entry
+  is written `[v6]:port`, and netguard reads it. GitHub Copilot's token host
+  is allowed.
+- **Event times carry their zone.** A ledger `ts` without `Z` or an offset
+  is refused, and so is a form like `01/02/2024`; a date alone is that day
+  at 00:00Z. A zone-less time was read in the host's own zone, so one entry
+  was 12:44Z on the droplet and 09:44Z on a Mac in Istanbul. An offset is
+  converted to UTC, and the text as written is kept as `ts_raw` and shown
+  beside the UTC time in `ledger.md`. The agents and the run's own
+  processes (the hub, the collector, the watchdogs) run with `TZ=UTC`,
+  which an `--env TZ=` overrides; the registry records the host's clock as
+  the run found it (`host_clock`: zone, offset, and whether it was synced,
+  where the host can say).
+- **The run records what produced it** (`provenance`: the harness commit and
+  whether the checkout had local changes, Node, Pi, msb and the image digest
+  for a VM run, the OS). The report shows it with the host clock, says that
+  an AI agent swarm prepared it and that its findings are the agents'
+  conclusions until an examiner reviews them, names each exhibit's model,
+  and lists the tools the agents forged as not independently validated.
+- **The operator is on the record.** Every `start`, `stop`, `reap`, `say`,
+  `package`, `report` and `tools` is a line in `runs/operator-audit.jsonl`
+  beside the registry: when, the OS user and host, through what (the command
+  line, the console, the hub's own clear-up), the arguments with `--env`
+  values and the goal left out, and the sha256 of the line before. A
+  `start`, `stop`, `reap` or `say` of a live run is on its trace too, as
+  `operator_action`; from a shell that is not the kickoff's it is marked
+  unverified there, and custody, the report and the summary count such
+  lines as the operator's actions, not as lines no pane accounts for.
+- **The evidence copy keeps the evidence's links as links.** `cp -RL`
+  followed every link: an extracted root's `etc/hosts` became the examiner's
+  own file, vouched for by the manifest. Only a link at the top of
+  `--inputs` (the operator's own) is followed; links that lead out of the
+  evidence are listed at kickoff. The copy is checked against its source by
+  name, kind and size (`source_checked`), and a mismatch (names merged on a
+  case-insensitive volume, a short read) stops the kickoff. A name that is
+  not UTF-8 is kept exactly (`path_b64`, `link_b64`) and compared as bytes
+  by the agents' check and by custody, so a Windows-1254 name on ext4 is no
+  longer both missing and added.
+- **The manifest carries SHA-1 and MD5 beside SHA-256**, from the same read,
+  to match an imager's acquisition hashes. Custody and the agents' `inputs`
+  check compare them when the manifest has them; SHA-256 decides, and a
+  file whose SHA-256 matches while another digest does not is listed as
+  `digest_mismatch`. The report and the summary list them beside SHA-256
+  and say how the copy was checked against its source.
+- **A synced folder is refused, not only warned about.** A copy of the
+  evidence, or the VMs' kept disks, is not put in a folder a sync client
+  uploads (Dropbox, iCloud Drive, OneDrive, …) unless
+  `--allow-synced-folder`; the check runs before anything is written, where
+  it used to run after the evidence was copied there. A run directory there
+  is still warned about for what the agents derive.
+- **Custody writes nothing through a link.** The previous verdict is set
+  aside as `custody.previous-<stamp>.json` before anything is checked, and
+  every file custody writes goes to a fresh file renamed into place: a host
+  pane's link had made custody copy a credential file into the run and
+  overwrite an operator's file with its own JSON. A custody ended by its
+  deadline, a signal or an error writes what it found and names what it
+  never reached (`not_reached`), so after a failed custody `custody.json` is
+  that partial verdict or absent, never the older one. A directory of more
+  than 125,000 evidence files, or a manifest over 256 MiB, no longer breaks
+  it; a file the host cannot read is `unreadable`, not missing; the ledger
+  is held to the trace whatever the trace carries, and a seat's spill fills
+  only its own gaps. The report, the summary and the console say whether
+  `custody.json` matches the verdict anchored outside the run, and the
+  report says "NOT FULLY RE-HASHED", not "NO", when custody ran out of time.
+  Custody's verdicts and `artifacts.json` are harness files no seat claims
+  or writes. The artifact index is ordered by code unit, so its anchored
+  hash no longer depends on the locale.
+- `start --custody-timeout SEC` bounds the custody taken at the run's end,
+  by the hub or by `stop`; it is recorded (`custody_timeout_sec`), and
+  `stop --custody-timeout` overrides it for that stop.
+- **The console shows an agent's HTML without scripts**, the report too: a
+  script could navigate the frame with the file's contents to any host,
+  past every allowlist of the run. **Open with scripts** runs one file's
+  scripts in that view after a warning, through a one-time grant (it needs
+  the console token, is bound to the file's sha256, is spent on first use
+  and lapses after a minute), and each opening is on the run's trace as
+  `artifact_scripts`.
+- A trace that is there and cannot be read is said so, rather than shown as
+  no trace: by the report, the summary, the dossier and the console's trace
+  and swarm views. The report checks the chain a line at a time, so a trace
+  past 512 MB is read and checked.
+- `budget.json`, history's index and a ledger merge are written whole (a
+  temporary file and a rename); a usage report refuses a `budget.json` it
+  cannot read rather than rebuilding the run's caps from defaults. A peer's
+  ledger merge (an author added) is no longer charged to a seat's shell
+  call as RECORD REWRITTEN. A lost trace line is counted once.
+- `stop` ends a daemon only when its pid is that daemon for that run: after
+  a reboot, or with a pid file a pane rewrote, it could have named any of
+  the operator's processes. A `stop` of a run nothing of which is alive
+  says the host restarted or the run crashed, with the trace's last time.
+  Two host kickoffs at once no longer share one netguard proxy. The
+  console's host kickoff stays a host run whatever `SWARM_ISOLATION` says.
+- New trace names (`operator_action`, `artifact_scripts`,
+  `collector_restarted`) are reserved: no forged tool takes them.
 
 ### Added
 
@@ -188,6 +281,57 @@ not surprised:
   - The catalog VM leaves only files and directories, is put away on `^C`
     and reaped if left; a VM that does not come up times out; `msb` other
     than 0.7.2 is warned about; a lock pinned by tag is refused.
+- **What the second review of the microVM work changed** (ADR 0009):
+  - The hubs live in `~/.dfirswarm/hubs`, one directory per user, 0700, and
+    refused when it is a link or someone else's (`SWARM_HUBS_DIR` moves it).
+    Under the caller's `$TMPDIR` a stop from ssh, cron or sudo found no hub
+    and left it and its tokens running, one `/tmp/dfirswarm-hubs` served
+    every Linux user, and on macOS the six-hex run ids put an agent's socket
+    past the 104 bytes a socket path may have, so every VM kickoff from a
+    Mac terminal ended with "the VM hub did not come up". The kickoff now
+    refuses a socket path over 103 bytes before it starts anything, and a
+    reboot no longer takes the hub's state with it. The console, `watch.sh`
+    and `await-done.sh` look for hubs there too, and a hub started with a
+    longer socket path stops with an error naming the path and its length,
+    where it died on a bare EINVAL.
+  - What one seat holds in the hub counts lines waiting their turn and calls
+    queued or running against its 160 MB; past it the seat's connections
+    pause. A call that carries no file is refused past 8 MB. The hub, not
+    the seat, picks how often `wait` polls. `done` is paced (three, then one
+    a minute), and dones that arrive together share one run of the finish
+    line. A `state` report is one of four states with at most 200
+    characters of detail and no terminal control characters, and Herdr gets
+    at most one report per seat every quarter second. A collector socket
+    cut on a timeout fails only its own lines.
+  - The hub stops a seat over its own or its model's cap for real: the
+    seat's `done` marker is written and the stop is on the trace with its
+    outcome. It had been refused in silence and retried every two minutes.
+  - A harness post sent from inside a VM reaches peers as
+    `from: "system via <seat>"`: the harness code in a VM is the guest's,
+    so its word is that seat's, not the harness's.
+  - A seat cannot publish onto the harness's own files in `work/` (the
+    trace spill custody reads, the install area, the temp directory).
+  - In a VM a seat's shell watch walks only its own directories, so a
+    peer's large extraction no longer leaves the seat's own files unwatched.
+  - The keeper also brings back a VM run's trace collector
+    (`collector_restarted`) and counts crashes in a row; a keeper that gave
+    up is not second-guessed by the idle watchdog.
+  - A finish touches its lock as it works, and only a dead or silent
+    owner's lock is broken; two finishes had worked the same VMs after half
+    an hour. A second finish keeps the disk an earlier one kept until it has
+    a new one, and the free-space floor counts the VM's own disk size.
+  - msb's database scrub says "scrubbed" only when the checkpoint completed
+    and no free page is left. The outcome is on each removed VM's record
+    and on the hub's `vm_finish` line; `stop` warns about any removed VM
+    whose bytes were not cleared, whoever removed it, and custody, the
+    report, the summary and the console name it.
+  - The hub takes custody at a run's finish within the operator's bound
+    (`--custody-timeout`, `SWARM_CUSTODY_TIMEOUT`), where it was a fixed
+    four hours.
+  - Lower-case proxy variables in `--env` no longer reach a VM, and a failed
+    `msb list` is said as that at kickoff and at reap.
+  - Every shell suite runs with its own msb home and hubs directory: the
+    stop suite had run the scrub on the developer's own msb database.
 
 - **Agents compact their own context.** On by default at kickoff
   (`--no-self-compact` turns it off): each agent watches its context against

@@ -93,7 +93,10 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   A credential is bound to its provider's hosts: msb terminates TLS on every
   port one travels on, no TLS bypass covers a secret's host, and a
   placeholder aimed anywhere else is stopped and logged (`block-and-log`),
-  which custody reads. A provider whose host is not known is refused at
+  which custody reads. msb swaps a placeholder for its value in request
+  headers only (the SDK's default, which the harness keeps): a placeholder
+  in a URL query or a request body goes out as the placeholder, to its own
+  host too. A provider whose host is not known is refused at
   kickoff (`--provider-host` names it); one that signs requests with its
   secret on the client (Bedrock, Vertex) cannot run in a VM at all.
 - **The hub answers only an agent's business.** The stop clock and the
@@ -120,13 +123,32 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   claims, writes, restores, records and publishes, compared without regard
   to case. A forged tool runs in a VM only as the bytes the hub says were
   sealed.
-- **The hub bounds each seat.** At most 16 connections and 160 MB buffered
-  per seat; 64 calls running and 192 queued; posts and claims at 40 in a
-  burst and one every two seconds after, ledger records at 200 and five a
-  second; a refusal repeated within a minute is counted, not written again.
-  A call a seat sends again after a dropped link carries the same request id
-  and gets the first run's answer. A seat's usage report carries only a
-  budget row's fields; its model is the kickoff's.
+- **The hub bounds each seat.** At most 16 connections per seat, and 160 MB
+  held for it at once: the bytes of lines not yet whole, of lines waiting
+  their turn and of calls queued or running (their arguments stay in memory
+  until they answer); past it the seat's connections are paused until its
+  calls drain. A line carries at most 64 MB (a file's bytes travel in the
+  call), and a call that carries no file at most 8 MB. 64 calls running and
+  192 queued; posts and claims at 40 in a burst and one every two seconds
+  after, ledger records at 200 and five a second, `done` at three and one a
+  minute after (each may run the operator's finish line on the host, and
+  dones that arrive together share one run). How often `wait` polls is the
+  hub's. A `state` report is one of four states with at most 200 characters
+  of detail and no terminal control characters, and Herdr is told at most
+  one report per seat every quarter second. A refusal repeated within a
+  minute is counted, not written again. A call a seat sends again after a
+  dropped link carries the same request id and gets the first run's answer.
+  A seat's usage report carries only a budget row's fields; its model is the
+  kickoff's.
+- **The hubs live under the harness's home**, `~/.dfirswarm/hubs`
+  (`SWARM_HUBS_DIR` moves it): one directory per user, 0700, refused when it
+  is a link or not the user's own, not under the caller's `$TMPDIR` (a stop
+  from another shell found no hub there) nor in a `/tmp` every user shares.
+  A reboot does not clear it, so a `stop` after a crash finds the hub's
+  state and its spill. A Unix socket path may be 103 bytes (104 on macOS
+  with the NUL; msb also refuses a longer one): the kickoff measures the
+  longest socket path the run's hub would bind and refuses the run past it,
+  before anything starts.
 - **The harness owns the stop.** The hub keeps the wall clock on its own
   clock, and applies the caps (the swarm's, each seat's, each model's) to the
   spend each seat reports about itself. It writes the sentinel when the
@@ -136,7 +158,29 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
 - **Custody is taken on the host after the run** (`scripts/custody.ts`): the
   evidence re-hashed in full (a custody that runs out of time says which
   files it did not re-read), the sessions sealed, every kept output checked
-  against the trace, every kept disk checked against its record.
+  against the trace, every kept disk checked against its record. It reads
+  and writes nothing through a link: the previous verdict is set aside
+  before anything is checked, and every file it writes goes to a fresh file
+  renamed into place. Ended by its deadline, a signal or an error, it writes
+  what it found and names what it never reached, so `custody.json` is this
+  custody's verdict, partial or whole, or none. Its sha256 is added to the
+  anchor outside the run, and the report, the summary and the console say
+  whether the `custody.json` they read matches it. The hub's own custody
+  at a run's finish keeps the operator's bound (`--custody-timeout`).
+- **Time is UTC by construction.** The agents and the run's own processes
+  run with `TZ=UTC`, so a tool's local time and a zone-less time mean one
+  instant on every host; the registry records the host's own zone and,
+  where the host can say, whether its clock was synced (`host_clock`). A
+  ledger event time must carry its zone (`Z` or an offset); one without is
+  refused rather than read in the host's zone, and the text as written is
+  kept (`ts_raw`) beside the UTC time.
+- **The operator is on the record too.** Each command that starts, stops,
+  reaps, speaks into, exports or reports on a run is a line in
+  `runs/operator-audit.jsonl`, chained by hash, with the OS user and host;
+  a `start`, `stop`, `reap` or `say` is on the live run's trace as well
+  (`operator_action`). The run records what
+  produced it (`provenance`: the harness commit and local changes, Node,
+  Pi, msb, the image digest).
 - **Images come from the packs** (`images/recipe.py`), and a run records the
   digest it booted. Prebuilt images are published privately from the pro
   repository, never from this one: an image bundles separately licensed
@@ -154,8 +198,11 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   sees are a copy taken at kickoff and mounted where the checkout is, so an
   edit or a `git pull` mid-run does not reach agents that have not loaded
   them yet. The hub runs from a second copy taken at the same time, and so
-  do the VM finish and the custody it starts; the operator's own commands
-  (`swarm.sh`, `stop`, the idle watchdog) run from the checkout.
+  do the VM finish and the custody it starts; that copy holds its own msb
+  and SDK, so an `npm ci` mid-run does not change the binary that puts the
+  VMs away (the rest of `node_modules` is linked from the checkout). The
+  operator's own commands (`swarm.sh`, `stop`, the keeper, the idle
+  watchdog) run from the checkout.
 - **A host run gets a stop from outside its panes too.** The idle watchdog,
   which runs for the length of every run outside the panes, claims the stop
   clock past a cap or the wall clock when no pane has, and writes the
@@ -188,13 +235,15 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   finish line, custody and the report run on the host.
 - The hub is one process on the host. A keeper (`scripts/hub-supervise.sh`)
   brings it back from the state it keeps (`hub-input.json`, the stop clock)
-  until the run's stop, and the idle watchdog does too while it runs. An
-  agent whose hub stays unreachable for four minutes is stopped by its own
-  extension.
-- `tests/vm-integration.test.ts` holds all of this on every pull request, on
-  a KVM runner, including one run end to end: Pi in its VM with the harness
-  extension, a scripted model on the host, a post through the hub, and the
-  evidence refused by the kernel. The test builds that run's VM itself; no
+  until the run's stop, and the run's trace collector too, which in a VM run
+  is the trace's only door (`collector_restarted`); it gives up after
+  twenty crashes in a row and says so, and the idle watchdog restarts a hub
+  only while no keeper is running and none has given up. An agent whose hub
+  stays unreachable for four minutes is stopped by its own extension.
+- `tests/vm-integration.test.ts` holds the parts of this that need a real
+  VM on every pull request, on a KVM runner, including one run end to end:
+  Pi in its VM with the harness extension, a scripted model on the host, a
+  post through the hub, and the evidence refused by the kernel. The test builds that run's VM itself; no
   test boots a run through `swarm.sh start`.
 
 ## Limits that stay
@@ -211,8 +260,8 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   removed VMs rewrites the database from its live rows (`VACUUM` between
   two checkpoints, `scrubMsbDatabase`). While a VM lives its keys are on the
   host's disk in that file; a host with no `sqlite3` keeps the removed
-  VMs' bytes, and `stop` says so. Blocks the filesystem freed are not
-  overwritten.
+  VMs' bytes, and `stop` says so from each removed VM's record, whoever
+  removed it. Blocks the filesystem freed are not overwritten.
 - An allowed host is a channel out: anything an agent can send to its
   model's host, to a symbol server or to a blob store it may reach, leaves.
   The allowlist bounds where, not what.
@@ -221,7 +270,10 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
 - Who is asking is the channel, not the process: every process inside a VM
   speaks to the hub as that seat. A forged tool, a parser running over
   hostile content, or a binary carved from the evidence and run by the
-  guest's root can post, publish, record and call `done` as the seat.
+  guest's root can post, publish, record and call `done` as the seat. The
+  harness code in a VM is the guest's too: a harness post it sends reaches
+  peers as `from: "system via <seat>"`, the seat's word and not the
+  harness's.
 - The extension inside a VM is the agent's own code under the guest's root.
   Its tool refusals, claim-before-write, the self-compaction lock and the
   per-seat cap steer are advisory there; what holds is what the hub, the
@@ -245,6 +297,23 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   that name resolves to, and msb does not require the connection's own TLS
   server name or HTTP `Host` to be that name. Its DNS rebinding protection
   is left at the SDK's default (on).
+- The examiner's browser is a way out the VM allowlist never sees. The
+  console shows an agent's HTML artifact without scripts: with them, a page
+  could navigate itself and carry what it holds to any host, from the
+  examiner's machine. **Open with scripts** runs one file's scripts after a
+  warning that says so, through a one-time grant bound to the file's hash,
+  and the opening is on the run's trace (`artifact_scripts`); from then on
+  that view is outside the allowlist. A file the examiner opens outside the
+  console is outside that rule.
+- The operator's record says who typed a command only as the OS says it:
+  a line on the trace from a shell that is not the kickoff's carries no
+  token and is marked unverified, and `runs/operator-audit.jsonl` is chained
+  but not signed, so whoever can write it can rewrite it whole.
+- `host_clock.synced` is `null` on macOS, which has no unprivileged way to
+  say whether the clock is synced.
+- The evidence copy is checked against its source by name, kind and size,
+  not by content: the manifest hashes the copy, and a source that changed
+  under the copy with its size unchanged is not caught there.
 - A client with its own trust store fails on a connection msb intercepts:
   Chromium's NSS store, Java's keystore.
 - Deferred: `--inputs-image` attaches a disk image with macOS's `hdiutil`
@@ -265,6 +334,12 @@ For the project owner; nothing in the code decides them yet.
   the second spill location, the direct board path.
 - A bare-metal Linux server with KVM for real cases. The droplet runs VMs
   through nested KVM and fits two agents.
+- Whether a copied `--inputs` is also re-hashed from its source, which
+  doubles the reads of a large case, or stays checked by name, kind and
+  size.
+- Whether a run started as root is refused rather than warned about.
+- Whether the keeper and the idle watchdog run from the frozen copy as the
+  hub does.
 
 ## Alternatives considered
 

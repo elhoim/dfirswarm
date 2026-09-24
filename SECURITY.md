@@ -45,8 +45,13 @@ Please report these privately (see below):
   on (other than by `--no-netguard`, which is the documented opt-out).
 - A path-traversal or symlink escape in the web app (`/api/swarms/:id/work/…`,
   `/api/goals/:name`, history restore, the contract route).
-- A way to call a token-gated route (start, stop, reap, restore, save goal)
-  without the token.
+- A way to call a token-gated route (start, stop, reap, restore, save goal,
+  the grant that opens an HTML artifact with its scripts) without the token,
+  or a way for an agent's HTML artifact to run a script in the console
+  without that grant.
+- A way for a pane to make custody, the report or `stop` read or write
+  through a link it planted, or to make custody's verdict say something
+  other than what it checked.
 - Secrets leaking into `traces/events.jsonl`, `budget.json`, the registry, or
   the web app's responses.
 - Under `--isolation microvm`: anything an agent in its VM can do to the host
@@ -96,8 +101,22 @@ Please report these privately (see below):
     value);
   - msb's strict mode is off: a host-name rule admits what the name resolves
     to, whatever server name the connection then sends;
-  - msb holds the credentials uncaged, the hub runs as the examiner, and a
-    guest's terminal output reaches the host's.
+  - msb holds the credentials uncaged, and while a VM lives its secrets'
+    values are in msb's own database on the host's disk
+    (`~/.microsandbox/db`, made its user's alone at kickoff; a finish that
+    removed VMs clears their leftover bytes when the host has `sqlite3`,
+    and `stop` warns about any it could not clear);
+  - msb swaps a placeholder for its value in request headers only: a
+    placeholder in a URL query or a body goes out as the placeholder;
+  - the hub runs as the examiner, and a guest's terminal output reaches the
+    host's;
+  - the examiner's browser is outside the VM allowlist: the console shows an
+    agent's HTML artifact without scripts, but one the operator opens with
+    **Open with scripts**, after its warning, or a file opened outside the
+    console can reach the network;
+  - the operator's record (`runs/operator-audit.jsonl`) is chained by hash,
+    not signed: whoever can write it can rewrite it whole, and a trace line
+    from a shell that is not the kickoff's is marked unverified.
 - The behaviour, cost or output of the model you point Pi at.
 - Vulnerabilities in Herdr, Pi or a model provider. Report those upstream.
 

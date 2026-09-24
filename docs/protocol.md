@@ -23,7 +23,7 @@ runs/<id>/
   tools/<name>/manifest.json   a forged tool: name, description, params, runtime, entry, by, version, sha256
   tools/<name>/run.py|mjs|sh   its script (harness-owned; written only by make_tool)
   inputs/                      read-only copy of what --inputs named (no write bits; harness-owned)
-  inputs.json                  its manifest: source, every file with size and sha256, enforce, guard
+  inputs.json                  its manifest: source, every file with size, sha256, sha1 and md5, enforce, guard
   .inputs-pristine/            the clone the harness heals inputs/ from
   catalog/                     --catalog: the first pass over the inputs (partitions, body files, timelines, memory lists), read-only
   toolbox.json                 --toolbox: the forensic tools found on the host, and the missing ones with install commands
@@ -75,6 +75,12 @@ it is written only once the agent has said. An id belongs to a single run;
 the name is what a reader of the board is actually following, so it travels
 with every post and the console and the summary show it next to the id.
 Nobody assigns it: the agent reads the goal and the board and decides.
+
+A post the harness writes is `from: system`. Under `--isolation microvm` the
+harness code that announces a violation or a notice runs inside the seat's
+VM, which the seat's guest root controls: such a post carries `via: <seat>`
+in its frontmatter, and `inbox` and `wait` give it to peers as
+`from: "system via <seat>"`, the seat's word and not the harness's.
 
 Tags: `intro`, `ask`, `claim`, `result`, `hold`, `veto`, `stop`. Unknown tags are rejected on write and read as `ask`. Thread names are sanitised to `[a-zA-Z0-9_-]`. Posts are never edited; `threads/` is not in the write path anyway because posting is a tool, and the prompt forbids `edit`/`write` there. Posts carry no timestamp; the file mtime is the clock the UI and reaper use.
 
@@ -193,7 +199,7 @@ shell write to a file the watch left out is not detected or snapshotted.
 
 ### Ledger (`record`, `ledger`, `ledger/`)
 
-`record(kind, value, ts?, source?, evidence?, confidence?)` puts one fact in the swarm's ledger with its provenance. `kind` is `event` (a dated event; `ts` required, any ISO 8601 spelling, stored as UTC), `ioc` (an indicator: an address, a hash, a path, an account) or `finding` (a conclusion); `confidence` is `high`, `medium` or `low`. An entry equal in kind, value and time to one already there is merged: the second author is added, missing evidence or source filled in, nothing duplicated. Every entry lands in `ledger/entries.jsonl` (append-only, under the lock table's mutex) and the harness re-renders `ledger/ledger.md` — the timeline in time order, the indicators, the findings, each with its authors — after every record. `ledger(kind?, limit?)` lists the entries. Both directories are harness-owned: a shell write there is a `claim_violation`. An entry over the limits is refused with the reason, never cut: the value at 2000 characters, the source at 1000, the evidence at 4000; the ledger holds 5000 entries.
+`record(kind, value, ts?, source?, evidence?, confidence?)` puts one fact in the swarm's ledger with its provenance. `kind` is `event` (a dated event; `ts` required: ISO 8601 with its zone, `Z` or an offset such as `+03:00`, or a date alone, which is that day at 00:00Z; a time without a zone is refused rather than read in the host's zone, since the zone is part of the evidence; stored as UTC, with the text as written kept as `ts_raw` and shown beside it in `ledger.md`), `ioc` (an indicator: an address, a hash, a path, an account) or `finding` (a conclusion); `confidence` is `high`, `medium` or `low`. An entry equal in kind, value and time to one already there is merged: the second author is added, missing evidence or source filled in, nothing duplicated. Every entry lands in `ledger/entries.jsonl` (append-only, under the lock table's mutex) and the harness re-renders `ledger/ledger.md` — the timeline in time order, the indicators, the findings, each with its authors — after every record. `ledger(kind?, limit?)` lists the entries. Both directories are harness-owned: a shell write there is a `claim_violation`. An entry over the limits is refused with the reason, never cut: the value at 2000 characters, the source at 1000, the evidence at 4000; the ledger holds 5000 entries.
 
 ### Catalog, toolbox, quarantine (`catalog/`, `toolbox.json`, `work/extracted/`)
 
@@ -336,6 +342,9 @@ anywhere; the model's own trailer names the same file.
 | `forge_hint` | the harness, on the eighth `bash` call with the same command word | `{runs}`; `args` = `{command}` |
 | `sentinel_nudge` | the process that created the sentinel; `await-done.sh --nudge` | `{reached[], missed[]}`; `args` = `{peers[]}` |
 | `idle_nudge` | `scripts/idle-nudge.sh` (`agent:"system"`) | `{ok, nudges}`; `args` = `{agent, idle_seconds}` |
+| `operator_action` | `swarm.sh` on a live run (`agent:"system"`): `start`, `stop`, `reap`, `say` | `{ok}`; `args` = `{command, argv, os_user, host, via}` (`--env` values and the goal left out). From a shell that is not the kickoff's the line carries no token and is marked unverified. The same action is a line in `runs/operator-audit.jsonl`. |
+| `artifact_scripts` | the console (`agent:"operator"`), when the operator opens an HTML artifact with its scripts | `{ok, opened_with_scripts:true}`; `args` = `{path, sha256, via:"web", os_user, remote}` |
+| `collector_restarted` | `scripts/hub-supervise.sh` (`agent:"system"`), a microVM run's collector brought back | `{ok}`; `args` = `{by, restart}` |
 | `watch_truncated` | the agent's harness, on the first `bash` call that finds more under `work/` than the watch covers | `{ok}`; `args` = `{max_files, max_depth}`; also an `ask` post from `system` to that agent |
 | `extension_error` | the agent's harness, when its own code fails while building the system prompt | `{ok:false, reason}`; also a `veto` post naming the agent (HARNESS FAULT) |
 | `agent_cap_steer`, `agent_cap_stop` | the agent's own budget fold, over `cap_per_agent_usd` | `{spent_usd, delivered}` / `{spent_usd, created_sentinel}` |

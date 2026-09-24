@@ -121,7 +121,10 @@ server the kickoff sizes each VM at 1 GiB when the host has under 8 GiB, and
 refuses N VMs that would not fit its memory; `--vm-memory` and `--vm-disk`
 say otherwise. The host guards above are not started for a VM run (the VM is
 the guard), so the account's shell and user namespaces matter only for host
-runs. The hub's sockets live under `$TMPDIR/dfirswarm-hubs/`. A host-mode pane
+runs. The hub's sockets live under `~/.dfirswarm/hubs/` (`SWARM_HUBS_DIR`
+moves it), one directory per user, which a reboot does not clear: after a
+restart, `swarm.sh stop <id>` finds the hub's state and says the host
+restarted or the run crashed. A host-mode pane
 of another run on the same account is kept from them by its guard's mount
 namespace (the directory is masked) or, on macOS, by sandbox-exec; with
 Landlock alone, or with no write guard, it is not, and a host kickoff that

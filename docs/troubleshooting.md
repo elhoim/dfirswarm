@@ -6,6 +6,34 @@ What goes wrong at kickoff, in a run and in the console, and what to do about it
 **`agent_name_taken` from Herdr.**
 Each `start` allocates a fresh `s????` prefix and checks `herdr agent list` for `<prefix>00`, so two concurrent runs never collide. If you see this, a crashed run left agents registered under the same names: `herdr agent list`, then `scripts/swarm.sh stop <id>` (closes its workspaces) or `herdr workspace close <ws>`.
 
+**`BLOCKER: this run's hub sockets would be N bytes long under …`.**
+A microVM run's hub binds one Unix socket per agent under
+`~/.dfirswarm/hubs/`, and a socket path may be 103 bytes. A long home
+directory (or `DFIRSWARM_HOME`) can pass it. Set `SWARM_HUBS_DIR` to a
+shorter directory of your own, for example `/tmp/dfh-$(id -u)`; the kickoff
+makes it 0700 and refuses one that is a link or someone else's.
+
+**`BLOCKER: these would go into a folder a sync client uploads`.**
+The copy of the evidence (`inputs/`, `.inputs-pristine/`) or the VMs' kept
+disks would land in Dropbox, iCloud Drive, OneDrive, Google Drive or
+another folder under `~/Library/CloudStorage`. Put the run on a local disk
+(`--sandbox`, `SWARM_RUNS_DIR`, `--vm-snapshot-dir`), or pass
+`--allow-synced-folder` when the material may be uploaded.
+
+**`BLOCKER: the copy of the evidence … does not match its source`.**
+The copy lost names the source has: a case-insensitive volume (the default
+APFS) merges names that differ only in case or Unicode form, and a short
+read leaves a file short. Put the run on a volume that keeps the source's
+names (a case-sensitive APFS volume, or the source's own file system), or
+hold the evidence in place with `--inputs-bind`.
+
+**`NOTE: nothing of run <id> was alive`.**
+The host restarted, or the run crashed, while the registry still said
+`running`. The `stop` that printed it puts the run away as usual: its VMs,
+the hub's state and unsent trace lines (kept under `~/.dfirswarm/hubs/`,
+which a reboot does not clear), custody. The note names the trace's last
+time, which is when the run's record ends.
+
 **`BLOCKER: Pi has no stored credential for <model>`.**
 Run `pi /login` once. The spawner no longer passes keys to panes, so an
 exported `DEEPSEEK_API_KEY` alone is not enough — add `--key-from-env` if that

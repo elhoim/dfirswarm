@@ -46,12 +46,18 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   the enforcement is visible to every agent rather than buried in a log.
 - **The harness owns its own files.** `done/`, `locks/`, `traces/`, `history/`,
   `inbox/`, `threads/`, `tools/`, `inputs/`, `ledger/`, `catalog/`, `SWARM.md`,
-  `team.json`, `budget.json`, `names.json` and `layout.json`
+  `team.json`, `budget.json`, `names.json` and `layout.json`, custody's
+  verdicts (`custody.json` and the earlier ones beside it), `artifacts.json`
+  and the host's trace spill `work/.trace-spill.jsonl`
   cannot be claimed or written by an agent; a shell write to one is detected and
   announced. The sentinel is written only by `done` or by the harness itself.
+  Custody itself reads and writes nothing through a link planted at one of
+  its names: the previous verdict is set aside first, and each file it
+  writes goes to a fresh file renamed into place.
 - **Inputs are copies, read-only at three depths.** `--inputs DIR` copies the
-  directory into `inputs/` (the original is never touched, symlinks are
-  dereferenced), strips the write bits, and keeps a pristine clone. The tool
+  directory into `inputs/` (the original is never touched; the evidence's
+  own links are copied as links and never followed, so none names a file of
+  this machine), strips the write bits, and keeps a pristine clone. The tool
   guard refuses it, a shell write is healed and announced, and on macOS
   (`sandbox-exec`) or Linux (a read-only bind in a mount namespace, Landlock
   beneath it, or Landlock alone where the host allows no namespaces) the pane
@@ -190,7 +196,14 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
     and the per-seat cap steer are advisory there. What holds is what the
     hub, the mounts and msb enforce. And every process in the VM speaks to
     the hub as that seat: a forged tool, a parser over hostile content, a
-    carved binary the guest's root runs.
+    carved binary the guest's root runs. A harness post sent from a VM
+    reaches peers as `from: "system via <seat>"`, that seat's word.
+  - The hub bounds what one seat can ask of it: 16 connections, 160 MB held
+    at once (lines not yet whole, lines waiting, calls queued or running;
+    past it the seat's connections pause), 8 MB for a call that carries no
+    file, and a pace for posts, ledger records and `done`. A seat can still
+    fill the host's disk through its own writable directories, which have
+    no quota.
   - A placeholder is still a capability at the host it is bound to: an API
     key reaches every endpoint there that the key may use (files, batches,
     fine-tuning, not only inference), and a subscription token is the
@@ -210,6 +223,12 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
     server name or HTTP `Host` is that name. A service behind a shared front
     may be reachable through an allowed name.
   - msb, which holds every credential for the run, is not itself caged.
+    While a VM lives, msb also keeps its configuration, the secrets' values
+    included, in its own database on the host's disk
+    (`~/.microsandbox/db`). The kickoff makes `~/.microsandbox` its user's
+    alone, and a finish or reap that removed VMs rewrites that database
+    without the removed VMs' leftover bytes. That needs `sqlite3` on the
+    host; an operator's `stop` warns when it could not.
   - What a guest prints reaches the host's terminal through Herdr, escape
     sequences included (a clipboard write, a title change).
   - Each kept VM disk holds what the agent left on it — extracted material,
@@ -228,18 +247,26 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   `package/`, and with a copied `--inputs` the copy and its pristine clone),
   and under `--isolation microvm` each VM's kept disk and logs beside it, in
   `<sandbox>.vm-snapshots/<id>.msb` and `<id>.logs`. The harness deletes none
-  of it.
+  of it. [data-protection.md](data-protection.md) says what of it can be
+  personal data, what leaves the machine, and what the operator decides.
   - **Retention and legal hold.** Keep or destroy a run with its case, under
     the case's retention rules and any legal hold; the snapshots go with the
-    run (`<sandbox>.vm-snapshots/` is a separate directory, so delete it too),
-    and not before custody and the package are taken. `--no-vm-snapshot`
-    keeps no VM disk at all.
+    run (`<sandbox>.vm-snapshots/` is a separate directory, so delete it too;
+    with `--vm-snapshot-dir` it is a link, and the disks are in the directory
+    it points to), and not before custody and the package are taken.
+    `--no-vm-snapshot` keeps no VM disk at all.
   - **Synced folders.** The runs live under `runs/` in the checkout unless
     `SWARM_RUNS_DIR` or `--sandbox` says otherwise. A run directory inside a
     synced folder (Dropbox, iCloud Drive, OneDrive, anything under
-    `~/Library/CloudStorage`) is uploaded to that service, snapshots and
-    extracted material included, and the harness does not check for it. For
-    a real case put the runs on a local disk that is not synced.
+    `~/Library/CloudStorage`) is uploaded to that service: a copied
+    `--inputs`, snapshots and extracted material included. Before anything
+    is written, the kickoff refuses to put a copy of the evidence
+    (`inputs/`, `.inputs-pristine/`) or the VMs' kept disks in a folder it
+    recognises as synced (under `~/Library/CloudStorage`, iCloud Drive,
+    Dropbox, OneDrive, Google Drive), unless `--allow-synced-folder` says
+    they may go; a run directory there is warned about for what the agents
+    derive. It recognises only those names. For a real case put the runs,
+    and any `--vm-snapshot-dir`, on a local disk that is not synced.
   - **Disk.** A kept snapshot can be as large as the VM's root disk
     (`--vm-disk`, 8 GiB by default) per agent. Before each snapshot the stop
     looks at the free space where the disks are kept: below a fixed floor of
@@ -257,7 +284,33 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   to the LAN (`--host 0.0.0.0`) is the operator's explicit choice. Start, stop,
   reap and restore need the token the server prints in its URL (in the
   fragment, so it never reaches a proxy log). `SWARM_UI_TOKEN=` turns that off
-  deliberately. Never port-forward it; use an SSH tunnel.
+  deliberately. Never port-forward it; use an SSH tunnel. An agent's HTML
+  artifact, and the report, are shown without scripts: a script could
+  navigate the frame with what the file holds to any host, from the
+  examiner's browser, past every allowlist of the run. **Open with scripts**
+  runs one file's scripts in that view after a warning that says so,
+  through a one-time grant that needs the token, is bound to the file's
+  sha256 and lapses after a minute, and each opening is on the run's trace
+  (`artifact_scripts`).
+- **The operator is on the record.** Each `start`, `stop`, `reap`, `say`,
+  `package`, `report` and `tools` is a line in `runs/operator-audit.jsonl`
+  beside the registry, which no pane can write: when, the OS user and host,
+  through what, and the arguments (`--env` values and the goal left out),
+  each line carrying the sha256 of the one before. A `start`, `stop`, `reap`
+  or `say` of a live run is on its trace too (`operator_action`); from a
+  shell that is not the kickoff's it is marked unverified, since the
+  harness cannot prove who typed it. The chain shows a line taken out or
+  changed; it is not signed, so whoever can write the file can rewrite it
+  whole.
+- **Time is UTC in the run.** The agents and the run's own processes run
+  with `TZ=UTC` (an `--env TZ=` overrides it), a ledger event time must
+  carry its zone, and the registry records the host's own zone and, where
+  the host can say, whether its clock was synced (`host_clock`; macOS gives
+  no unprivileged answer, and it is `null` there). The examiner's own shell
+  keeps its zone.
+- **A run started as root is warned about**: root is not held by the modes
+  on the evidence, its pristine copy, the manifest and the anchor, so only
+  the kernel guard (or a VM) still holds them.
 
 **Settled**: claims are short leases with a reason and a `seconds` argument,
 renewed by re-claiming (120 s); the trace shows `thinking` rows and a duration

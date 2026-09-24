@@ -214,6 +214,7 @@ Each guard is enforced by the operating system where the host allows it, and the
 | Agents writing their own tools | [docs/forged-tools.md](docs/forged-tools.md) |
 | Packs: skills, tools and method an operator imports | [docs/packs.md](docs/packs.md), [packs/](packs/) |
 | Files the swarm may read but never change | [docs/inputs.md](docs/inputs.md) |
+| Where a run sends the evidence's personal data, where it keeps it, and what the operator decides | [docs/data-protection.md](docs/data-protection.md) |
 | Seventeen forensic cases, end to end, with every artifact | [docs/use-cases/](docs/use-cases/README.md), [docs/use-cases/belkactf/](docs/use-cases/belkactf/README.md) |
 | The run an agent walked out of, end to end, with the tour | [netguard-escape.md](docs/use-cases/belkactf/belkactf6-bogus-bill/netguard-escape.md), [the tour](docs/use-cases/belkactf/belkactf6-bogus-bill/media/README.md) |
 | Live runs that proved a feature, with ids and costs | [docs/verified-runs.md](docs/verified-runs.md), [docs/feature-evidence.md](docs/feature-evidence.md) |
