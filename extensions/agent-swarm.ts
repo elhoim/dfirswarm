@@ -42,6 +42,7 @@ import {
   STOP_GRACE_MS,
   appendEvent,
   applySessionUsage,
+  reportBudgetUnreadable,
   budgetPressure,
   claimFile,
   clearStopSteer,
@@ -378,8 +379,8 @@ export default function (pi: ExtensionAPI) {
     } catch (err) {
       // budget.json could not be read and there was no earlier copy to fold
       // into. Leave the file and the stop clock as they are: a fold over
-      // defaults would have dropped every cap.
-      await logEvent(cwd, agentId, "budget_unreadable", {}, { error: (err as Error).message }).catch(() => undefined);
+      // defaults would have dropped every cap. Said once, on the board.
+      await reportBudgetUnreadable(cwd, agentId, (err as Error).message);
       return;
     }
     lastStopCheck = Date.now();

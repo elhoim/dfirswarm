@@ -2579,6 +2579,28 @@ export function formatEventLine(event: SwarmEvent): string {
   return [event.ts, event.agent, event.tool, args, result].filter(Boolean).join("  ");
 }
 
+/** Sandboxes whose unreadable budget.json this process has already reported. */
+const budgetUnreadableTold = new Set<string>();
+
+/**
+ * Say, once per process, that a fold was refused because budget.json could
+ * not be read and this process had no earlier copy of it. While that lasts
+ * no cap and no wall clock is enforced from this pane (the stop checks skip
+ * an unreadable file too), which is worth a veto on the board: a trace row
+ * on every turn end is where nobody looks. Returns whether this call told.
+ */
+export async function reportBudgetUnreadable(sandboxRoot: string, agentId: string, error: string): Promise<boolean> {
+  const key = resolve(sandboxRoot);
+  if (budgetUnreadableTold.has(key)) return false;
+  budgetUnreadableTold.add(key);
+  await appendEvent(sandboxRoot, { agent: agentId || "unknown", tool: "budget_unreadable", args: {}, result: { error } }).catch(() => undefined);
+  await systemPost(sandboxRoot, {
+    tag: "veto",
+    body: `BUDGET UNREADABLE: ${agentId}'s pane cannot parse budget.json and has no earlier copy of it, so its spend is not being folded and no cap or wall clock is enforced from it. Put a valid budget.json back (the caps from the kickoff) and the next turn folds again. (${error})`,
+  }).catch(() => undefined);
+  return true;
+}
+
 export async function applySessionUsage(
   sandboxRoot: string,
   agentId: string,

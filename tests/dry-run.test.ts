@@ -24,6 +24,7 @@ import {
   appendEvent,
   agentPressure,
   applySessionUsage,
+  reportBudgetUnreadable,
   claimName,
   nameOf,
   readPost,
@@ -52,6 +53,7 @@ import {
   resolveAgentId,
   shortHash,
   subscribedThreads,
+  EVENTS_REL,
   SYSTEM_AGENT,
   systemPost,
   threadJoin,
@@ -1499,6 +1501,18 @@ test("budget: an unreadable budget.json does not take the caps off the run", asy
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("budget: a refused fold is put on the board as a veto once per process", async () => {
+  await withSandbox(async (root) => {
+    assert.equal(await reportBudgetUnreadable(root, "agent00", "Unexpected token"), true);
+    assert.equal(await reportBudgetUnreadable(root, "agent01", "Unexpected token"), false);
+    const box = await readInbox(createContext(root, "agent00"));
+    const vetoes = box.posts.filter((post) => post.from === SYSTEM_AGENT && post.tag === "veto" && /BUDGET UNREADABLE/.test(post.body));
+    assert.equal(vetoes.length, 1);
+    const rows = (await readFile(join(root, EVENTS_REL), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { tool: string });
+    assert.equal(rows.filter((row) => row.tool === "budget_unreadable").length, 1);
+  });
 });
 
 test("budget: writeBudget replaces the record whole and leaves no temp file", async () => {
