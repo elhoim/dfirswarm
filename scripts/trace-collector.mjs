@@ -382,6 +382,13 @@ function sameSecret(a, b) {
  * the fragment is the line the anchor had promised and never acknowledged:
  * it is moved out to traces/, cut off, and the cut is itself a line of the
  * record. A fragment the anchor does not account for is left where it is.
+ *
+ * And the anchor is checked, not just trusted for its count. A restart used
+ * to write a fresh anchor naming whatever head the file had, so a trace
+ * rewritten while no collector ran — a recomputed chain, the same number of
+ * lines — was re-anchored onto and verified. On a mismatch the anchor found
+ * is kept beside it as `.prev.json`, and the mismatch is a line of the
+ * record before anything else is written.
  */
 function reconcile() {
   const anchor = readAnchor();
@@ -395,7 +402,35 @@ function reconcile() {
   const cut = bytes.lastIndexOf(0x0a) + 1;
   const whole = wholeLines(bytes.subarray(0, cut).toString("utf8"));
   const wrong = disagreement(whole, anchor);
-  if (wrong || cut === bytes.length) return;
+  if (wrong) {
+    const kept = anchorPath.endsWith(".json") ? `${anchorPath.slice(0, -5)}.prev.json` : `${anchorPath}.prev`;
+    try {
+      // The first mismatch's anchor is the evidence; a later one does not replace it.
+      writeFileSync(kept, readFileSync(anchorPath), { flag: "wx" });
+    } catch {
+      // already kept by an earlier restart, or not writable; the line below still says it
+    }
+    console.error(
+      `trace-collector: the trace does not match the anchor it found (${wrong.reason} at line ${wrong.at}: ${whole.length} line(s), anchor ${anchor.lines}); kept the anchor as ${kept}`,
+    );
+    write({
+      ts: new Date().toISOString(),
+      agent: "system",
+      tool: "trace_anchor_mismatch",
+      args: {
+        reason: wrong.reason,
+        at: wrong.at,
+        lines: whole.length,
+        anchor_lines: anchor.lines,
+        anchor_head: anchor.head,
+        anchor_pending: anchor.pending === true,
+        kept: relative(dirname(anchorPath), kept),
+      },
+      result: { ok: false },
+    });
+    return;
+  }
+  if (cut === bytes.length) return;
   const fragment = bytes.subarray(cut);
   const saved = join(dirname(eventsFile), `events.fragment-${new Date().toISOString().replace(/[:.]/g, "-")}.partial`);
   try {

@@ -2292,7 +2292,10 @@ STRIP
   # The trace was just emptied for the new run, so the previous run's anchor
   # goes with it. A collector keeps any anchor it finds — an anchor must not
   # drop to match a shortened file — and would read the new run as cut short.
-  rm -f "$(trace_anchor_path "$sandbox")"
+  local old_anchor
+  old_anchor="$(trace_anchor_path "$sandbox")"
+  # With the one a restarted collector kept because the trace did not match it.
+  rm -f "$old_anchor" "${old_anchor%.json}.prev.json"
   rm -rf "${sandbox:?}/catalog" "${sandbox:?}/ledger" "$sandbox/toolbox.json"
   if [[ -n "$inputs_dir" ]]; then
     if [[ "$inputs_bind" -eq 1 ]]; then

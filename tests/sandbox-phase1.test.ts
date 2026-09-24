@@ -757,8 +757,45 @@ test("a collector restarted over a shortened trace keeps the anchor it found", a
   socket = await collectorWithTokens(root, { t: "a0" }, anchor);
   await new Promise((r) => setTimeout(r, 200));
   const recorded = JSON.parse(await readFile(anchor, "utf8")) as { lines: number; head: string; prev_head: string };
-  assert.equal(recorded.lines, 4, "the anchor still says how long the record was");
+  // Four, and the line that records the mismatch the restart found.
+  assert.equal(recorded.lines, 5, "the anchor still says how long the record was");
   const chain = verifyEventChain(`${(await lines(root)).join("\n")}\n`, recorded);
   assert.equal(chain.ok, false, "and the shortened record does not verify");
   assert.equal(chain.reason, "shortened");
+  assert.equal(JSON.parse(await readFile(join(root, "anchor.prev.json"), "utf8")).lines, 4, "the anchor found is kept");
+});
+
+test("a collector restarted over a trace rewritten to the same length keeps the anchor it found and records the mismatch", async () => {
+  // A restart wrote a fresh anchor naming whatever head the file had. A trace
+  // rewritten while no collector ran, with a recomputed chain and the same
+  // number of lines, was re-anchored onto and verified as intact.
+  const root = await mkdtemp(join(tmpdir(), "swarm-restart-rewrite-"));
+  const anchor = join(root, "anchor.json");
+  let socket = await collectorWithTokens(root, { t: "a0" }, anchor);
+  for (let i = 1; i <= 4; i += 1) {
+    assert.equal((await sendForReply(socket, { ts: `t${i}`, agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" })).ok, true);
+  }
+  await killLastCollector(root);
+  const found = JSON.parse(await readFile(anchor, "utf8")) as { lines: number; head: string };
+  assert.equal(found.lines, 4);
+  let prev = "";
+  const forged = [1, 2, 3, 4].map((i) => {
+    const line = JSON.stringify({ ts: `t${i}`, agent: "a0", tool: "bash", args: { cmd: "something else" }, result: { ok: true }, prev });
+    prev = createHash("sha256").update(line).digest("hex");
+    return line;
+  });
+  await writeFile(join(root, "traces", "events.jsonl"), `${forged.join("\n")}\n`, "utf8");
+  assert.equal(verifyEventChain(`${forged.join("\n")}\n`).ok, true, "the forged chain verifies against itself");
+
+  socket = await collectorWithTokens(root, { t: "a0" }, anchor);
+  await new Promise((r) => setTimeout(r, 200));
+  const kept = JSON.parse(await readFile(join(root, "anchor.prev.json"), "utf8")) as { lines: number; head: string };
+  assert.deepEqual([kept.lines, kept.head], [found.lines, found.head], "the anchor found is kept, not re-anchored over");
+  const now = await lines(root);
+  assert.deepEqual(now.slice(0, 4), forged, "the collector does not edit the file it found");
+  const mismatch = JSON.parse(now[4]) as { tool: string; prev: string; args: { reason: string; anchor_head: string; anchor_lines: number } };
+  assert.equal(mismatch.tool, "trace_anchor_mismatch", "the mismatch is a line of the record");
+  assert.equal(mismatch.prev, prev, "chained onto the file as found");
+  assert.deepEqual([mismatch.args.reason, mismatch.args.anchor_lines, mismatch.args.anchor_head], ["head", 4, found.head]);
+  assert.match(collectorLogs.get(root) ?? "", /does not match the anchor it found \(head/, "and it is logged under --quiet");
 });
