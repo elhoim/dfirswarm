@@ -168,7 +168,21 @@ function run(cmd: string, args: string[], options: { timeoutMs?: number; env?: N
   });
 }
 
-export type ResolvedSecret = { provider: string; kind: ProviderSpec["kind"]; placeholder: string; value: string; hosts: string[]; accountId?: string };
+export type ResolvedSecret = {
+  provider: string;
+  kind: ProviderSpec["kind"];
+  placeholder: string;
+  value: string;
+  hosts: string[];
+  accountId?: string;
+  /** Set when this is one variable of the provider's `env` block in Pi's store (an Azure key, say), not the provider's key itself. */
+  envKey?: string;
+};
+
+/** A name under which a value is a credential: what may not cross into a VM in clear. */
+export function secretLikeName(name: string): boolean {
+  return /key|token|secret|password|passwd|credential|authorization/i.test(name);
+}
 
 /**
  * Every credential the team needs, resolved on the host by Pi's own commands
@@ -177,22 +191,59 @@ export type ResolvedSecret = { provider: string; kind: ProviderSpec["kind"]; pla
  */
 export async function resolveSecrets(spec: VmSpec): Promise<ResolvedSecret[]> {
   const pi = spec.pi_bin || "pi";
+  // Pi reads the store the kickoff chose (--env PI_CODING_AGENT_DIR), not this process's.
+  const env = spec.pi_agent_dir ? { ...process.env, PI_CODING_AGENT_DIR: spec.pi_agent_dir } : process.env;
+  const dir = spec.pi_agent_dir || join(process.env.HOME || "", ".pi", "agent");
   const out: ResolvedSecret[] = [];
+  let store: Record<string, Record<string, unknown>> = {};
+  try {
+    store = JSON.parse(readFileSync(join(dir, "auth.json"), "utf8")) as Record<string, Record<string, unknown>>;
+  } catch {
+    store = {};
+  }
+  let models: Record<string, Record<string, unknown>> = {};
+  try {
+    models = ((JSON.parse(readFileSync(join(dir, "models.json"), "utf8")) as { providers?: Record<string, Record<string, unknown>> }).providers ?? {});
+  } catch {
+    models = {};
+  }
   for (const p of spec.providers) {
     if (p.kind === "local") continue;
     let value = "";
     let accountId: string | undefined;
     if (p.kind === "oauth") {
-      const r = await run(pi, ["auth", "print-bearer-token", "--provider", p.provider, "--min-expiry", spec.min_token_validity || "2h"]);
+      const r = await run(pi, ["auth", "print-bearer-token", "--provider", p.provider, "--min-expiry", spec.min_token_validity || "2h"], { env });
       if (r.code !== 0 || !r.stdout.trim()) throw new Error(`pi could not produce a ${p.provider} subscription token valid for the run: ${r.stderr.trim() || `exit ${r.code}`}`);
       value = r.stdout.trim();
       if (p.provider === "openai-codex") accountId = codexAccountId(value, spec.pi_agent_dir);
     } else {
-      const r = await run(pi, ["auth", "print-api-key", "--provider", p.provider]);
+      const r = await run(pi, ["auth", "print-api-key", "--provider", p.provider], { env });
       if (r.code !== 0 || !r.stdout.trim()) throw new Error(`pi has no key for ${p.provider}: ${r.stderr.trim() || `exit ${r.code}`}`);
       value = r.stdout.trim();
     }
     out.push({ provider: p.provider, kind: p.kind, placeholder: placeholderFor(p.provider, p.kind, accountId), value, hosts: p.hosts, ...(accountId ? { accountId } : {}) });
+    // The provider's `env` block in Pi's store (Azure keeps its resource and
+    // version there, and may keep a key): a variable named like a credential
+    // is one, and crosses as its own placeholder bound to the same hosts.
+    const block = store[p.provider]?.env;
+    if (block && typeof block === "object") {
+      for (const [k, v] of Object.entries(block as Record<string, unknown>)) {
+        if (typeof v !== "string" || !v || !secretLikeName(k)) continue;
+        out.push({ provider: p.provider, kind: "api_key", placeholder: `dfirswarm-secret-${k.toLowerCase().replace(/[^a-z0-9]/g, "")}-${randomBytes(12).toString("hex")}`, value: v, hosts: p.hosts, envKey: k });
+      }
+    }
+    // A custom provider's headers (models.json): a literal under a credential
+    // name is a credential and crosses as a placeholder; a value Pi would
+    // resolve at request time ($ENV, !command) has no host-side value to
+    // swap in, and is refused rather than sent in clear.
+    const headers = models[p.provider]?.headers;
+    if (headers && typeof headers === "object") {
+      for (const [k, v] of Object.entries(headers as Record<string, unknown>)) {
+        if (typeof v !== "string" || !secretLikeName(k)) continue;
+        if (/^\s*[$!]/.test(v)) throw new Error(`models.json: provider ${p.provider} header ${k} is resolved by Pi at request time (${v.slice(0, 1)}…), which a VM cannot do without the value; put the literal in the store or the header`);
+        out.push({ provider: p.provider, kind: "api_key", placeholder: `dfirswarm-secret-hdr-${k.toLowerCase().replace(/[^a-z0-9]/g, "")}-${randomBytes(12).toString("hex")}`, value: v, hosts: p.hosts, envKey: `header:${k}` });
+      }
+    }
   }
   return out;
 }
@@ -233,16 +284,42 @@ export function guestPiConfig(spec: VmSpec, secrets: ResolvedSecret[]): { auth: 
   }
   const providers = (models?.providers ?? {}) as Record<string, Record<string, unknown>>;
   const keep: Record<string, Record<string, unknown>> = {};
+  let store: Record<string, Record<string, unknown>> = {};
+  try {
+    store = JSON.parse(readFileSync(join(dir, "auth.json"), "utf8")) as Record<string, Record<string, unknown>>;
+  } catch {
+    store = {};
+  }
   for (const p of spec.providers) {
-    const secret = secrets.find((s) => s.provider === p.provider);
+    const secret = secrets.find((s) => s.provider === p.provider && !s.envKey);
+    const extras = secrets.filter((s) => s.provider === p.provider && s.envKey);
     const custom = providers[p.provider];
     if (custom) {
       const copy = { ...custom };
       if (secret && "apiKey" in copy) copy.apiKey = secret.placeholder;
       if (p.kind === "local" && typeof copy.baseUrl === "string") copy.baseUrl = hostGatewayUrl(copy.baseUrl);
+      if (copy.headers && typeof copy.headers === "object") {
+        const headers = { ...(copy.headers as Record<string, unknown>) };
+        for (const s of extras) if (s.envKey?.startsWith("header:")) headers[s.envKey.slice(7)] = s.placeholder;
+        copy.headers = headers;
+      }
       keep[p.provider] = copy;
     }
     if (!secret) continue;
+    // The provider's env block travels with its non-credential settings as
+    // they are (a resource name, an API version) and its credentials as
+    // placeholders; nothing else of the store's entry does.
+    const block = store[p.provider]?.env;
+    const guestEnv: Record<string, string> = {};
+    if (block && typeof block === "object") {
+      for (const [k, v] of Object.entries(block as Record<string, unknown>)) {
+        if (typeof v !== "string") continue;
+        const swapped = extras.find((s) => s.envKey === k);
+        if (swapped) guestEnv[k] = swapped.placeholder;
+        else if (!secretLikeName(k)) guestEnv[k] = v;
+      }
+    }
+    const env = Object.keys(guestEnv).length ? { env: guestEnv } : {};
     if (secret.kind === "oauth") {
       auth[p.provider] = {
         type: "oauth",
@@ -250,14 +327,21 @@ export function guestPiConfig(spec: VmSpec, secrets: ResolvedSecret[]): { auth: 
         refresh: "dfirswarm-vm-never-refreshes",
         expires: GUEST_OAUTH_EXPIRES,
         ...(secret.accountId ? { accountId: secret.accountId } : {}),
+        ...env,
       };
     } else if (!custom || !("apiKey" in custom)) {
-      auth[p.provider] = { type: "api_key", key: secret.placeholder };
+      auth[p.provider] = { type: "api_key", key: secret.placeholder, ...env };
+    } else if (Object.keys(guestEnv).length) {
+      auth[p.provider] = { type: "api_key", key: secret.placeholder, ...env };
     }
   }
+  // The operator's settings, less what names this host: a proxy the guest
+  // cannot reach, package and extension paths that are not in the image.
   let settings: string | null = null;
   try {
-    settings = readFileSync(join(dir, "settings.json"), "utf8");
+    const parsed = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")) as Record<string, unknown>;
+    for (const k of ["httpProxy", "packages", "extensions", "shellPath"]) delete parsed[k];
+    settings = `${JSON.stringify(parsed, null, 2)}\n`;
   } catch {
     settings = null;
   }
@@ -454,22 +538,45 @@ async function msbVersion(): Promise<string> {
   return r.stdout.trim().replace(/^msb\s+/, "") || "unknown";
 }
 
+/** The providers one seat's VM needs: its own model's, the summary model's, and every local one (no credential). */
+export function seatProviders(spec: VmSpec, agent: VmSpec["agents"][number]): ProviderSpec[] {
+  const mine = new Set([agent.model.split("/")[0], ...(spec.env?.SWARM_COMPACT_MODEL ? [spec.env.SWARM_COMPACT_MODEL.split("/")[0]] : [])]);
+  return spec.providers.filter((p) => p.kind === "local" || mine.has(p.provider));
+}
+
 async function createOne(
   M: SdkModule,
   spec: VmSpec,
   agent: VmSpec["agents"][number],
-  secrets: ResolvedSecret[],
-  piConfig: ReturnType<typeof guestPiConfig>,
+  allSecrets: ResolvedSecret[],
 ): Promise<VmRecord> {
   const name = vmName(spec.run, agent.id);
   const mounts = mountsFor(spec, agent.id);
   for (const m of mounts) if (!m.readonly) await mkdir(m.host, { recursive: true });
-  const hostPorts = spec.providers.filter((p) => p.kind === "local" && p.port).map((p) => p.port as number);
-  const allowHosts = [...new Set([...spec.allow_hosts, ...spec.providers.flatMap((p) => (p.kind === "local" ? [] : p.hosts))])].sort();
-  const packSecrets: Array<{ name: string; value: string; hosts: string[] }> = [];
+  // Least privilege per seat: this VM holds the credentials of the model it
+  // runs and of the summary model, reaches those providers' hosts, and no
+  // other seat's.
+  const providers = seatProviders(spec, agent);
+  const mine = new Set(providers.map((p) => p.provider));
+  const secrets = allSecrets.filter((s) => mine.has(s.provider));
+  const piConfig = guestPiConfig({ ...spec, providers }, secrets);
+  const hostPorts = providers.filter((p) => p.kind === "local" && p.port).map((p) => p.port as number);
+  const allowHosts = [...new Set([...spec.allow_hosts, ...providers.flatMap((p) => (p.kind === "local" ? [] : p.hosts)), ...(spec.pack_secrets ?? []).flatMap((s) => s.hosts ?? [])])].sort();
+  // A pack's secrets: the value is read here, on the host, from the store
+  // `pack install` wrote (KEY=VALUE lines, or one bare value), and the VM
+  // gets a placeholder under the secret's own name, which the pack's tool
+  // reads from its environment and msb swaps for the value on the way to
+  // the pack's hosts and nowhere else.
+  const packSecrets: Array<{ name: string; value: string; hosts: string[]; placeholder: string }> = [];
   for (const s of spec.pack_secrets ?? []) {
-    const value = s.value_file ? (await readFile(s.value_file, "utf8").catch(() => "")).trim() : process.env[s.name] ?? "";
-    if (value) packSecrets.push({ name: s.name, value, hosts: s.hosts });
+    if (!s.hosts?.length) continue;
+    let value = process.env[s.name] ?? "";
+    if (s.value_file) {
+      const text = await readFile(s.value_file, "utf8").catch(() => "");
+      const line = text.split(/\r?\n/).find((l) => l.startsWith(`${s.name}=`));
+      value = line ? line.slice(s.name.length + 1) : text.includes("=") ? "" : text.trim();
+    }
+    if (value) packSecrets.push({ name: s.name, value, hosts: s.hosts, placeholder: `dfirswarm-secret-${s.name.toLowerCase().replace(/[^a-z0-9]/g, "")}-${randomBytes(12).toString("hex")}` });
   }
 
   const policy = new M.NetworkPolicyBuilder().defaultDeny();
@@ -528,14 +635,15 @@ async function createOne(
       }
       for (const s of secrets) {
         n.secret((b: SecretB) => {
-          b.env(`DFIRSWARM_${s.provider.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}_CREDENTIAL`).value(s.value).placeholder(s.placeholder);
+          const label = s.envKey ? s.envKey.replace(/^header:/, "HEADER_") : `${s.provider}_CREDENTIAL`;
+          b.env(`DFIRSWARM_${label.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`).value(s.value).placeholder(s.placeholder);
           for (const h of s.hosts) b.allow(h);
           return b;
         });
       }
       for (const s of packSecrets) {
         n.secret((b: SecretB) => {
-          b.env(s.name).value(s.value);
+          b.env(s.name).value(s.value).placeholder(s.placeholder);
           for (const h of s.hosts) b.allow(h);
           return b;
         });
@@ -605,9 +713,8 @@ async function createOne(
 export async function createVms(spec: VmSpec): Promise<{ records: VmRecord[]; failures: Array<{ agent: string; reasons: string[] }> }> {
   const M = await sdk();
   const secrets = await resolveSecrets(spec);
-  const piConfig = guestPiConfig(spec, secrets);
   const expectInputs = existsSync(join(spec.sandbox, "inputs"));
-  const settled = await Promise.allSettled(spec.agents.map((a) => createOne(M, spec, a, secrets, piConfig)));
+  const settled = await Promise.allSettled(spec.agents.map((a) => createOne(M, spec, a, secrets)));
   const records: VmRecord[] = [];
   const failures: Array<{ agent: string; reasons: string[] }> = [];
   settled.forEach((r, i) => {

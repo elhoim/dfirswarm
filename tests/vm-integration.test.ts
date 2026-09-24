@@ -252,11 +252,22 @@ test("a secret never enters the guest: the VM holds its placeholder", async (t) 
   assert.deepEqual(created.failures, []);
   const name = vmName(r.run, "vmt300");
   const out = inVm(name, `printf 'env=%s\\n' "$VT_API_KEY"; (env; cat /proc/1/environ 2>/dev/null; grep -rs "${value}" /root /etc /run /tmp) | grep -c "${value}" || true`);
-  assert.match(out, /env=\$MSB_VT_API_KEY/, out);
+  assert.match(out, /env=dfirswarm-secret-vtapikey-[0-9a-f]{24}/, `the guest holds a placeholder under the secret's own name\n${out}`);
   assert.match(out, /^0$/m, "the value is nowhere in the guest's environment or files");
   const record = JSON.parse(await readFile(join(r.sandbox, "vm", "vmt300.json"), "utf8"));
   assert.deepEqual(record.secrets, [{ name: "VT_API_KEY", hosts: ["www.virustotal.com"] }], "the record names the secret and its host, never its value");
   assert.ok(!JSON.stringify(record).includes(value));
+  // Nor on the host, at rest: msb keeps a sandbox's configuration under its
+  // home, and the value must not be in it (msb's own CLI refuses an inline
+  // value for that reason; the SDK path is checked here).
+  const msbHome = process.env.MSB_HOME || join(process.env.HOME || "", ".microsandbox");
+  let atRest = "";
+  try {
+    atRest = execFileSync("grep", ["-rls", value, join(msbHome, "sandboxes", name), r.sandbox, r.hubDir], { encoding: "utf8" }).trim();
+  } catch {
+    atRest = ""; // grep exits 1 when nothing matches
+  }
+  assert.equal(atRest, "", `the value is on the host's disk in: ${atRest}`);
 });
 
 test("two VMs posting and recording at once through the hub lose nothing and never share an id", async (t) => {

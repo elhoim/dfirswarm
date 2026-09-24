@@ -155,7 +155,9 @@ json.dump(m, open(sys.argv[1], "w"), indent=2)
 EOF
 "$PACK" seal "$WORK/src/secret-pack" >/dev/null || fail "seal secret pack"
 TEST_API_KEY=hunter2 "$PACK" install "$WORK/src/secret-pack" >/dev/null 2>&1 || fail "install should take a secret from the environment"
-env_file="$DFIRSWARM_HOME/packs/secret-pack/secrets.env"
+env_file="$DFIRSWARM_HOME/secrets/secret-pack.env"
+[[ ! -e "$DFIRSWARM_HOME/packs/secret-pack/secrets.env" ]] || fail "the secret was written inside the pack directory, which every VM mounts"
+"$PACK" verify secret-pack >/dev/null || fail "a pack with a stored secret must still verify"
 [[ -f "$env_file" ]] || fail "the secret should be stored"
 grep -q 'TEST_API_KEY=hunter2' "$env_file" || fail "the stored secret should hold the value"
 # GNU stat first: its -f means --file-system, so asking BSD-style first prints a

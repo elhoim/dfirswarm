@@ -14,6 +14,11 @@ set -euo pipefail
 
 HOME_DIR="${DFIRSWARM_HOME:-$HOME/.dfirswarm}"
 PACKS="$HOME_DIR/packs"
+# A pack's secrets live beside the packs, never inside one: a pack directory
+# is mounted read-only into every agent's VM, and `verify` checks it against
+# its own checksums, which a file the operator wrote would fail.
+SECRETS="$HOME_DIR/secrets"
+secrets_file() { printf '%s/%s.env\n' "$SECRETS" "$1"; }
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${PYTHON:-python3}"
 
@@ -314,8 +319,9 @@ for s in m.get("secrets") or []:
     print("%s\t%s\t%s\t%s\t%s" % (s["name"], s["title"], s["why"], "required" if s.get("required") else "optional", s.get("url","")))
 ' "$src/pack.json")"
   [[ -n "$names" ]] || return 0
-  install -d -m 700 "$dst"
-  local env_file="$dst/secrets.env"
+  install -d -m 700 "$SECRETS"
+  local env_file
+  env_file="$(secrets_file "$(basename "$dst")")"
   : > "$env_file"; chmod 600 "$env_file"
   while IFS=$'\t' read -r name title why need url; do
     [[ -n "$name" ]] || continue
@@ -401,7 +407,15 @@ sys.exit(0 if t(sys.argv[1]) >= t(sys.argv[2]) else 1)' "$have" "$dep_min" \
   find "$dst" -type d -exec chmod 755 {} +
   find "$dst" -type f -exec chmod 644 {} +
   find "$dst/tools" -name '*.py' -exec chmod 755 {} + 2>/dev/null || true
-  [[ -d "$dst.old" ]] && { cp -R "$dst.old/secrets.env" "$dst/secrets.env" 2>/dev/null || true; rm -rf "$dst.old"; }
+  if [[ -d "$dst.old" ]]; then
+    # A store from before secrets moved out of the pack directory: carried
+    # over once, then the old copy goes with the old install.
+    if [[ -f "$dst.old/secrets.env" && ! -f "$(secrets_file "$id")" ]]; then
+      install -d -m 700 "$SECRETS"
+      cp "$dst.old/secrets.env" "$(secrets_file "$id")" && chmod 600 "$(secrets_file "$id")"
+    fi
+    rm -rf "$dst.old"
+  fi
 
   [[ "$secrets" == "1" ]] && collect_secrets "$dst" "$dst" "$([[ -t 0 ]] && echo 1 || echo 0)"
   echo "installed $id $ver into $dst"
@@ -419,8 +433,8 @@ cmd_list() {
     "$PY" -c '
 import json,sys,os
 d=json.load(open(sys.argv[1]))
-sec = os.path.isfile(os.path.join(os.path.dirname(sys.argv[1]), "secrets.env"))
-print("  %-28s %-8s %s%s" % (d["id"], d["version"], d.get("description","")[:60], "  [secrets set]" if sec else ""))' "$d/pack.json"
+sec = os.path.isfile(sys.argv[2])
+print("  %-28s %-8s %s%s" % (d["id"], d["version"], d.get("description","")[:60], "  [secrets set]" if sec else ""))' "$d/pack.json" "$(secrets_file "$(basename "$d")")"
   done
   [[ "$any" == "1" ]] || echo "no packs installed"
 }
@@ -428,7 +442,7 @@ print("  %-28s %-8s %s%s" % (d["id"], d["version"], d.get("description","")[:60]
 cmd_show() {
   local id="${1:?pack id}"; local d="$PACKS/$id"
   [[ -f "$d/pack.json" ]] || die "$id is not installed"
-  "$PY" - "$d" <<'PYEOF'
+  "$PY" - "$d" "$(secrets_file "$id")" <<'PYEOF'
 import json, os, sys, re
 d = sys.argv[1]
 m = json.load(open(os.path.join(d, "pack.json")))
@@ -456,7 +470,7 @@ if os.path.isfile(hj):
         state = "present" if have else ("optional" if b.get("optional") else "MISSING")
         print("  %-16s %-8s %s" % (b["name"], state, b["why"]))
 if m.get("secrets"):
-    env = os.path.join(d, "secrets.env")
+    env = sys.argv[2]
     have = set()
     if os.path.isfile(env):
         have = {l.split("=",1)[0] for l in open(env) if "=" in l}

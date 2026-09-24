@@ -135,7 +135,9 @@ A pack may declare secrets. The rule the harness already holds is that no
 credential is handed to an agent's pane, and a pack gets no exception.
 
 - At install, `pack install` asks for each declared secret and writes it to
-  `~/.dfirswarm/packs/<id>/secrets.env`, mode 0600, owned by the operator. A
+  `~/.dfirswarm/secrets/<id>.env`, mode 0600, owned by the operator — beside
+  the packs, never inside one: a pack's directory is mounted read-only into
+  every agent's VM, and `verify` checks it against the pack's own checksums. A
   secret that is not required may be skipped; the tools that need it say so when
   they run.
 - At kickoff the secret is not exported into the pane environment and is not
@@ -147,7 +149,7 @@ credential is handed to an agent's pane, and a pack gets no exception.
   keeps a previous run's findings unreadable: a tmpfs over the directory inside
   the namespace, or a Landlock rule denying the read. This is the honest part:
   the extension runs inside the pane, so without that denial an agent could read
-  `secrets.env` with its own shell. Where the host cannot enforce the denial the
+  the secrets file with its own shell. Where the host cannot enforce the denial the
   kickoff says so and the run record carries it, exactly as it does for every
   other guard.
 - The trace records the call and its parameters. It does not record the secret.

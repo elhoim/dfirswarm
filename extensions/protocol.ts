@@ -127,6 +127,7 @@ export const PROTECTED_FILES = [
   "hub.dir",
   // The harness's own verdict on the run, taken on the host after it ended.
   "custody.json",
+  "compact-prompt.md",
   // The kickoff each agent's Pi starts with.
   ".kickoff",
 ] as const;

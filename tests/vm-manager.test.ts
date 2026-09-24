@@ -13,6 +13,8 @@ import { after, test } from "node:test";
 import {
   egressRules,
   guestPiConfig,
+  resolveSecrets,
+  seatProviders,
   hostGatewayUrl,
   mountsFor,
   placeholderFor,
@@ -163,4 +165,75 @@ test("a VM's allowlist reads the host allowlist's syntax (netguard-proxy.mjs): s
     { port: 8443, domains: ["mirror.example.org"], suffixes: [], ips: [] },
   ]);
   assert.deepEqual(tlsBypass(hosts), ["api.openai.com", "pypi.org", "*.blob.core.windows.net", "*.googleapis.com", "mirror.example.org"]);
+});
+
+test("a provider's env block crosses with its settings as they are and its credentials as placeholders; host-only settings stay behind", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "vm-pi-env-"));
+  dirs.push(dir);
+  await writeFile(join(dir, "auth.json"), JSON.stringify({
+    "azure-openai-responses": {
+      type: "api_key",
+      key: "REAL-AZURE-KEY",
+      env: { AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com", AZURE_OPENAI_API_VERSION: "2025-04-01", AZURE_OPENAI_API_KEY: "REAL-ENV-KEY" },
+    },
+  }));
+  await writeFile(join(dir, "settings.json"), JSON.stringify({ defaultThinkingLevel: "low", httpProxy: "http://proxy.corp:3128", packages: ["/host/only"], shellPath: "/bin/zsh" }));
+  const s = spec({ pi_agent_dir: dir, providers: [{ provider: "azure-openai-responses", kind: "api_key", hosts: ["res.openai.azure.com"] }] });
+  const key = placeholderFor("azure-openai-responses", "api_key");
+  const secrets: ResolvedSecret[] = [
+    { provider: "azure-openai-responses", kind: "api_key", placeholder: key, value: "REAL-AZURE-KEY", hosts: ["res.openai.azure.com"] },
+    { provider: "azure-openai-responses", kind: "api_key", placeholder: "dfirswarm-secret-envkey-x", value: "REAL-ENV-KEY", hosts: ["res.openai.azure.com"], envKey: "AZURE_OPENAI_API_KEY" },
+  ];
+  const cfg = guestPiConfig(s, secrets);
+  assert.ok(!`${cfg.auth}${cfg.settings}`.includes("REAL-"), "no credential in the guest's files");
+  const auth = JSON.parse(cfg.auth)["azure-openai-responses"];
+  assert.equal(auth.key, key);
+  assert.equal(auth.env.AZURE_OPENAI_BASE_URL, "https://res.openai.azure.com", "the resource travels: Pi needs it to build the URL");
+  assert.equal(auth.env.AZURE_OPENAI_API_VERSION, "2025-04-01");
+  assert.equal(auth.env.AZURE_OPENAI_API_KEY, "dfirswarm-secret-envkey-x", "a credential in the env block is its placeholder");
+  const settings = JSON.parse(cfg.settings ?? "{}");
+  assert.equal(settings.defaultThinkingLevel, "low");
+  for (const k of ["httpProxy", "packages", "shellPath"]) assert.equal(settings[k], undefined, `${k} names this host and stays behind`);
+});
+
+test("resolving secrets: an env-block credential and a header credential get placeholders; a header Pi resolves at request time is refused", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "vm-pi-res-"));
+  dirs.push(dir);
+  // A stand-in for `pi auth print-api-key`: every provider has the key "REAL-KEY".
+  const fakePi = join(dir, "pi");
+  await writeFile(fakePi, "#!/bin/sh\necho REAL-KEY\n", { mode: 0o755 });
+  await writeFile(join(dir, "auth.json"), JSON.stringify({
+    gw: { type: "api_key", key: "REAL-KEY", env: { GW_REGION: "eu", GW_TOKEN: "REAL-ENV-TOKEN" } },
+  }));
+  await writeFile(join(dir, "models.json"), JSON.stringify({
+    providers: { gw: { baseUrl: "https://gw.example/v1", api: "openai-completions", apiKey: "REAL-KEY", headers: { "x-api-key": "REAL-HEADER-KEY", "x-trace": "on" }, models: [{ id: "m" }] } },
+  }));
+  const s = spec({ pi_agent_dir: dir, pi_bin: fakePi, providers: [{ provider: "gw", kind: "api_key", hosts: ["gw.example"] }] });
+  const secrets = await resolveSecrets(s);
+  assert.deepEqual(secrets.map((x) => x.envKey ?? "key").sort(), ["GW_TOKEN", "header:x-api-key", "key"]);
+  assert.ok(secrets.every((x) => x.hosts.length === 1 && x.hosts[0] === "gw.example"), "every one is bound to the provider's host");
+  const cfg = guestPiConfig(s, secrets);
+  assert.ok(!`${cfg.auth}${cfg.models}`.includes("REAL-"), "nothing real crosses");
+  const models = JSON.parse(cfg.models ?? "{}");
+  assert.equal(models.providers.gw.headers["x-api-key"], secrets.find((x) => x.envKey === "header:x-api-key")?.placeholder);
+  assert.equal(models.providers.gw.headers["x-trace"], "on", "a header that is not a credential travels as it is");
+  await writeFile(join(dir, "models.json"), JSON.stringify({
+    providers: { gw: { baseUrl: "https://gw.example/v1", api: "openai-completions", apiKey: "REAL-KEY", headers: { Authorization: "!op read secret" }, models: [{ id: "m" }] } },
+  }));
+  await assert.rejects(resolveSecrets(s), /resolved by Pi at request time/);
+});
+
+test("a seat's VM gets the providers of its own model and the summary model, and every local one", () => {
+  const s = spec({
+    providers: [
+      { provider: "openai", kind: "api_key", hosts: ["api.openai.com"] },
+      { provider: "deepseek", kind: "api_key", hosts: ["api.deepseek.com"] },
+      { provider: "google", kind: "api_key", hosts: ["generativelanguage.googleapis.com"] },
+      { provider: "lmstudio", kind: "local", hosts: [], port: 1234 },
+    ],
+    env: { SWARM_COMPACT_MODEL: "google/gemini" },
+    agents: [{ id: "a0", model: "openai/gpt" }, { id: "a1", model: "deepseek/chat" }],
+  });
+  assert.deepEqual(seatProviders(s, s.agents[0]).map((p) => p.provider), ["openai", "google", "lmstudio"]);
+  assert.deepEqual(seatProviders(s, s.agents[1]).map((p) => p.provider), ["deepseek", "google", "lmstudio"]);
 });

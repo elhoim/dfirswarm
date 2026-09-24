@@ -168,7 +168,7 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
       [--quarantine] [--case-id ID] [--examiner NAME] [--allow-host HOST]...
       [--no-netguard] [--local-only] [--playwright] [--probe-violation]
       [--key-from-env] [--env KEY=VALUE]...
-      [--isolation host|microvm] [--image REF] [--vm-cpus N] [--vm-memory MIB] [--no-vm-snapshot]
+      [--isolation host|microvm] [--image REF] [--vm-cpus N] [--vm-memory MIB] [--no-vm-snapshot] [--allow-oauth-in-vm]
 
 The team
   --model P/ID        One model for every agent.
@@ -355,6 +355,8 @@ Isolation
                       packs in images/images.lock.json, else the base image.
   --vm-cpus N         vCPUs per agent VM (default 2).
   --vm-memory MIB     Memory per agent VM in MiB (default 2048).
+  --allow-oauth-in-vm Let a subscription (OAuth) provider into the VMs; refused
+                      otherwise, since its token is the operator's whole account.
   --no-vm-snapshot    At stop, remove each VM without keeping its disk. By default
                       the disk is kept beside the run (<sandbox>.vm-snapshots/)
                       with msb's integrity record, and its sha256 is in vm/<id>.json.
@@ -1223,22 +1225,49 @@ start_agent_when_shell_ready() {
 # pane can read anything its own extension can, so handing a pack tool its
 # secret means handing it to the agent too: that takes --allow-pack-secrets,
 # and a pack that *requires* one is refused without it.
+# Where `pack install` keeps a pack's secrets: beside the packs, never inside
+# one (a pack directory is mounted into every VM; scripts/pack.sh).
+pack_secrets_file() { printf '%s/secrets/%s.env\n' "${DFIRSWARM_HOME:-$HOME/.dfirswarm}" "$1"; }
+
 pack_secrets_plan() { # <pack dirs, one per line> <isolation> <allow 0|1>
   local pack_dirs="$1" isolation="$2" allow="$3" pd id names required file
   PACK_SECRETS_ENV='{}'
   PACK_SECRETS_RECORD='{}'
+  # What the VM manager binds: one entry per secret with a value, named for
+  # the hosts its pack says it is for. A secret with no hosts cannot be
+  # bound to anything and is withheld, as docs/packs.md promises.
+  PACK_SECRETS_VM='[]'
   while read -r pd; do
     [[ -n "$pd" && -f "$pd/pack.json" ]] || continue
     names="$(jq -r '[.secrets[]?.name] | join(",")' "$pd/pack.json")"
     [[ -n "$names" ]] || continue
     id="$(jq -r '.id' "$pd/pack.json")"
+    if [[ -e "$pd/secrets.env" ]]; then
+      echo "BLOCKER: pack $id has a secrets.env inside its directory, which every VM mounts. Reinstall it (scripts/pack.sh install) so the secrets move to $(pack_secrets_file "$id")." >&2
+      exit 2
+    fi
     required="$(jq -r '[.secrets[]? | select(.required == true) | .name] | join(",")' "$pd/pack.json")"
-    file="$pd/secrets.env"
+    file="$(pack_secrets_file "$id")"
     local mode
     if [[ ! -s "$file" ]]; then
       mode="not-set"
     elif [[ "$isolation" == "microvm" ]]; then
       mode="injected"
+      local sname shosts bound="" withheld=""
+      while IFS=$'\t' read -r sname shosts; do
+        [[ -n "$sname" ]] || continue
+        grep -q "^$sname=" "$file" 2>/dev/null || continue
+        if [[ -z "$shosts" ]]; then
+          withheld="${withheld:+$withheld,}$sname"
+          continue
+        fi
+        bound="${bound:+$bound,}$sname"
+        PACK_SECRETS_VM="$(jq -c --arg n "$sname" --arg f "$file" --arg h "$shosts" '. + [{name: $n, value_file: $f, hosts: ($h | split(","))}]' <<<"$PACK_SECRETS_VM")"
+      done < <(jq -r '.secrets[]? | [.name, ((.hosts // []) | join(","))] | @tsv' "$pd/pack.json")
+      if [[ -n "$withheld" ]]; then
+        echo "WARN: pack $id secret(s) $withheld name no hosts, so they cannot be bound to anything and are withheld from the VMs." >&2
+        [[ -z "$bound" ]] && mode="withheld"
+      fi
     elif [[ "$allow" -eq 1 ]]; then
       mode="exposed"
     else
@@ -1252,7 +1281,7 @@ pack_secrets_plan() { # <pack dirs, one per line> <isolation> <allow 0|1>
     PACK_SECRETS_RECORD="$(jq -c --arg id "$id" --arg n "$names" --arg m "$mode" \
       '. + {($id): {names: ($n | split(",")), mode: $m}}' <<<"$PACK_SECRETS_RECORD")"
     case "$mode" in
-      injected) PACK_SECRETS_ENV="$(jq -c --arg id "$id" --arg n "$names" '. + {($id): {names: ($n | split(","))}}' <<<"$PACK_SECRETS_ENV")" ;;
+      injected) PACK_SECRETS_ENV="$(jq -c --arg id "$id" --arg n "${bound:-$names}" '. + {($id): {names: ($n | split(","))}}' <<<"$PACK_SECRETS_ENV")" ;;
       exposed) PACK_SECRETS_ENV="$(jq -c --arg id "$id" --arg n "$names" --arg f "$file" '. + {($id): {names: ($n | split(",")), file: $f}}' <<<"$PACK_SECRETS_ENV")" ;;
     esac
   done <<< "$pack_dirs"
@@ -1920,7 +1949,7 @@ cmd_start() {
   local packs=""
   local write_guard=1
   # Where the agents live: host processes, or one microVM each.
-  local isolation="${SWARM_ISOLATION:-host}" vm_image="${SWARM_VM_IMAGE:-}" vm_cpus=2 vm_memory=2048 vm_snapshot=1
+  local isolation="${SWARM_ISOLATION:-host}" vm_image="${SWARM_VM_IMAGE:-}" vm_cpus=2 vm_memory=2048 vm_snapshot=1 allow_oauth_in_vm=0
   local seal_herdr=1
   # Directories the panes may not read. Reads are open by design, so this is
   # narrow on purpose: material about the case the agents must derive rather
@@ -2020,6 +2049,7 @@ cmd_start() {
       --vm-cpus) vm_cpus="$2"; shift 2 ;;
       --vm-memory) vm_memory="$2"; shift 2 ;;
       --no-vm-snapshot) vm_snapshot=0; shift ;;
+      --allow-oauth-in-vm) allow_oauth_in_vm=1; shift ;;
       -h|--help) usage_start; exit 0 ;;
       *) die_usage "start: unknown option $1" ;;
     esac
@@ -2043,6 +2073,18 @@ cmd_start() {
       # and disk. The directory is used in place.
       inputs_bind=1
     fi
+    # Whatever --env carries goes into every VM's environment and its
+    # snapshot as it is; a credential cannot go in as a placeholder that
+    # way, so it does not go in at all. Pi's store is where a key lives.
+    local ve
+    for ve in ${extra_env[@]+"${extra_env[@]}"}; do
+      [[ "$ve" == --env ]] && continue
+      case "${ve%%=*}" in
+        *KEY*|*TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*CREDENTIAL*)
+          echo "BLOCKER: --env ${ve%%=*} names a credential, which would enter every VM and its snapshot in clear. Put the key in Pi's store (pi auth) or a pack's secrets (pack install); the VM gets a placeholder." >&2
+          exit 2 ;;
+      esac
+    done
   fi
 
   # The pane hook skips fsguard when SWARM_FSGUARD is already set. An operator
@@ -2220,6 +2262,7 @@ STRIP
   fi
   PACK_SECRETS_ENV='{}'
   PACK_SECRETS_RECORD='{}'
+  PACK_SECRETS_VM='[]'
   if [[ -n "$pack_dirs" ]]; then
     pack_secrets_plan "$pack_dirs" "${isolation:-host}" "$allow_pack_secrets"
   fi
@@ -2325,6 +2368,19 @@ STRIP
     for ((mi = 0; mi < n; mi++)); do
       AGENT_MODELS+=("$model")
     done
+  fi
+  if [[ "$isolation" == "microvm" && "$allow_oauth_in_vm" -eq 0 ]]; then
+    # A subscription token is a bearer token for the operator's whole
+    # account at the provider, and a VM that holds its placeholder can send
+    # it to any path on the host it is bound to. An API key is scoped to
+    # inference; a subscription is not. Said here, before anything is
+    # written, and overridden only on purpose.
+    local sub_provider
+    sub_provider="$(vm_oauth_providers)"
+    if [[ -n "$sub_provider" ]]; then
+      echo "BLOCKER: $sub_provider is a subscription (OAuth) provider. Its token is the operator's account, and the VM that holds its placeholder could use it beyond inference (an Anthropic token can create API keys; a Codex token is the ChatGPT account). Use an API key for this provider, or pass --allow-oauth-in-vm to accept the exposure; the record will say so." >&2
+      exit 2
+    fi
   fi
 
   # Money is only a brake where money is charged. A model served from this
@@ -2837,6 +2893,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson vm_cpus "$vm_cpus" \
     --argjson vm_memory "$vm_memory" \
     --argjson vm_snapshot "$vm_snapshot" \
+    --argjson allow_oauth_in_vm "$allow_oauth_in_vm" \
     '{
       id: $id,
       "label": $run_label,
@@ -2891,7 +2948,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       agents: $agents,
       agent_models: $agent_models,
       isolation: (if $isolation == "microvm"
-        then {mode: "microvm", runtime: "microsandbox", image: $vm_image, cpus: $vm_cpus, memory_mib: $vm_memory, snapshot: ($vm_snapshot == 1)}
+        then {mode: "microvm", runtime: "microsandbox", image: $vm_image, cpus: $vm_cpus, memory_mib: $vm_memory, snapshot: ($vm_snapshot == 1), oauth_allowed: ($allow_oauth_in_vm == 1)}
         else {mode: "host"} end),
       started_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
       state: "prepared"
@@ -3004,6 +3061,14 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     # start, which starts its own; left running they outlived every prepared
     # run (the console's "Prepare only" included).
     stop_sandbox_daemons "$sandbox"
+    if [[ "$isolation" == "microvm" ]]; then
+      # What the VMs would be given, for the operator and the tests to read.
+      local prepared="$sandbox/vm-prepared"
+      mkdir -p "$prepared/runs"
+      jq -n --argjson r "$rec" '{runs: [$r]}' > "$prepared/runs/registry.json"
+      vm_build_spec "$prepared" "$sandbox/vm-spec.json"
+      echo "VM spec:      $sandbox/vm-spec.json (what each VM would be given; no VM was made)"
+    fi
     echo "Sandbox ready. Skipping Herdr/Pi start (--no-start)."
     echo "SANDBOX=$sandbox"
     return 0
@@ -3713,6 +3778,20 @@ credential_models() {
     distinct_models
     if [[ -n "${compact_model:-}" ]]; then printf '%s\n' "$compact_model"; fi
   } | awk '!seen[$0]++'
+}
+
+# The team's subscription (OAuth) providers, by Pi's store, one per line.
+vm_oauth_providers() {
+  local auth_file model provider seen=""
+  auth_file="$(pi_auth_file)"
+  [[ -f "$auth_file" ]] || return 0
+  while IFS= read -r model; do
+    [[ -n "$model" ]] || continue
+    provider="${model%%/*}"
+    case " $seen " in *" $provider "*) continue ;; esac
+    seen+=" $provider"
+    if [[ "$(jq -r --arg p "$provider" '.[$p].type // empty' "$auth_file" 2>/dev/null)" == "oauth" ]]; then printf '%s\n' "$provider"; fi
+  done < <(credential_models)
 }
 
 # Hosts a provider needs reachable from inside the sandbox. A subscription
@@ -4562,7 +4641,7 @@ start_vm_hub() { # <sandbox> <hub dir> <run id> <collector socket> <agent ids...
 # the credential is held (a key, a subscription, or none for a local server)
 # and the hosts it may go to. Never a value.
 vm_providers_json() {
-  local model provider kind hosts port auth_file seen=""
+  local model provider kind hosts port auth_file seen="" hosts_drop=""
   auth_file="$(pi_auth_file)"
   while IFS= read -r model; do
     [[ -n "$model" ]] || continue
@@ -4575,10 +4654,22 @@ vm_providers_json() {
       port="$(python3 -c 'import sys, urllib.parse; u = urllib.parse.urlsplit(sys.argv[1]); print(u.port or (443 if u.scheme == "https" else 80))' "$(provider_base_url "$model")")"
     elif [[ -f "$auth_file" ]] && [[ "$(jq -r --arg p "$provider" '.[$p].type // empty' "$auth_file" 2>/dev/null)" == "oauth" ]]; then
       kind="oauth"
+      # The guest never refreshes the token (the host minted one for the
+      # run), so the endpoint a refresh would go to is not the VM's to reach.
+      hosts_drop="auth.openai.com platform.claude.com"
     else
       kind="api_key"
     fi
     hosts="$(provider_hosts_for_model "$model")"
+    if [[ -n "${hosts_drop:-}" ]]; then
+      local kept="" one
+      for one in ${hosts//,/ }; do
+        case " $hosts_drop " in *" $one "*) continue ;; esac
+        kept="${kept:+$kept,}$one"
+      done
+      hosts="$kept"
+      hosts_drop=""
+    fi
     jq -nc --arg p "$provider" --arg k "$kind" --arg h "$hosts" --arg port "$port" \
       '{provider: $p, kind: $k, hosts: ($h | split(",") | map(select(. != ""))), port: (if $port == "" then null else ($port | tonumber) end)}'
   done < <(credential_models) | jq -s -c .
@@ -4604,22 +4695,13 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>
   rm -f "$sandbox/hub.dir"
 }
 
-# The agents' VMs, their panes and their hub. Called by cmd_start in the
-# place where a host run starts Pi in each pane, and reads cmd_start's own
-# variables (bash scope is dynamic): the run, the team, the options. Sets
-# what the rest of cmd_start records: workspace_id, workspace_ids, panes,
-# tab_count, split_failures, extra_workspaces, SWARM_GUARD_MEASURED.
-launch_vm_agents() {
-  local hub_dir
-  hub_dir="$(vm_hub_dir "$swarm_id")"
-  # The finish line inside a VM reads the registry the way await-done.sh
-  # always has, from SWARM_RUNS_DIR: here, a directory holding this run's
-  # record and nothing else. The real registry — every other case on this
-  # machine — is never mounted.
-  mkdir -p "$hub_dir/runs"
-  jq -n --argjson r "$rec" '{runs: [$r]}' > "$hub_dir/runs/registry.json"
-  cp "$kickoff" "$sandbox/.kickoff"
-  start_vm_hub "$sandbox" "$hub_dir" "$swarm_id" "$trace_socket" "${agent_ids[@]}" || { stop_vm_run "$sandbox" "$swarm_id" 0; exit 1; }
+# The VM specification of this run, as the VM manager reads it: every mount,
+# the environment, the team, the allowlist, the providers and the pack
+# secrets (never a value). Written by the kickoff for a start, and for a
+# --no-start into the run (`vm-spec.json`), so what the VMs would be given
+# can be read and tested without booting one. Reads cmd_start's variables.
+vm_build_spec() { # <hub dir> <out file>
+  local hub_dir="$1" spec="$2"
 
   # What every VM gets: the harness code read-only at its own path, the
   # packs, the registry view, the evidence in place.
@@ -4639,8 +4721,14 @@ launch_vm_agents() {
       [[ -n "$d" && -d "$d" ]] && mounts+=("$(jq -nc --arg h "$d" '{host: $h, readonly: true}')")
     done <<< "$pack_dirs"
   fi
+  # The operator's compaction prompt goes into the run as a copy: mounting
+  # the file's directory put whatever else was in it — a home directory,
+  # with the operator's credential store — into every VM.
+  local compact_prompt_vm="$compact_prompt"
   if [[ -n "$compact_prompt" && "$compact_prompt" != "$ROOT/prompts/"* ]]; then
-    mounts+=("$(jq -nc --arg h "$(dirname "$compact_prompt")" '{host: $h, readonly: true}')")
+    cp "$compact_prompt" "$sandbox/compact-prompt.md"
+    chmod 444 "$sandbox/compact-prompt.md"
+    compact_prompt_vm="$sandbox/compact-prompt.md"
   fi
   if [[ -L "$sandbox/inputs" ]]; then
     real="$(cd "$sandbox/inputs" && pwd -P)"
@@ -4676,7 +4764,7 @@ launch_vm_agents() {
     [[ -n "$compact_notice_at" ]] && add_env SWARM_COMPACT_NOTICE_AT "$compact_notice_at"
     [[ -n "$compact_warn_at" ]] && add_env SWARM_COMPACT_WARN_AT "$compact_warn_at"
     [[ -n "$compact_at" ]] && add_env SWARM_COMPACT_AT "$compact_at"
-    [[ -n "$compact_prompt" ]] && add_env SWARM_COMPACT_PROMPT "$compact_prompt"
+    [[ -n "$compact_prompt" ]] && add_env SWARM_COMPACT_PROMPT "$compact_prompt_vm"
     [[ -n "$compact_model" ]] && add_env SWARM_COMPACT_MODEL "$compact_model"
   fi
   [[ -n "$inbox_page_chars" ]] && add_env SWARM_INBOX_PAGE_CHARS "$inbox_page_chars"
@@ -4721,7 +4809,6 @@ launch_vm_agents() {
   local providers
   providers="$(vm_providers_json)"
   if [[ "$local_only" -eq 1 ]]; then providers="$(jq -c 'map(select(.kind == "local"))' <<<"$providers")"; fi
-  local spec="$hub_dir/vm-spec.json"
   jq -n \
     --arg run "$swarm_id" --arg sandbox "$sandbox" --arg image "$vm_image" --arg hub "$hub_dir" \
     --argjson cpus "$vm_cpus" --argjson mem "$vm_memory" --argjson wall "$wall" \
@@ -4729,13 +4816,35 @@ launch_vm_agents() {
     --argjson late "$(printf '%s\n' ${late[@]+"${late[@]}"} | jq -s -c .)" \
     --argjson env "$env_json" --argjson agents "$agents_json" --argjson allow "$allow_json" \
     --argjson providers "$providers" --argjson open "$([[ "$use_netguard" -eq 0 ]] && echo true || echo false)" \
+    --argjson pack_secrets "$PACK_SECRETS_VM" \
     --arg pi "$(command -v pi)" --arg pidir "$(pi_agent_dir)" --arg registry "$REGISTRY" \
     '{run: $run, sandbox: $sandbox, image: $image, pull: "if-missing", cpus: $cpus, memory_mib: $mem,
       max_duration_sec: (($wall + 30) * 60), hub_dir: $hub, mounts: $mounts, late_mounts: $late,
       env: $env, agents: $agents, allow_hosts: $allow, open_net: $open, providers: $providers,
+      pack_secrets: $pack_secrets,
       pi_bin: $pi, pi_agent_dir: $pidir, min_token_validity: "\($wall + 60)m",
       records_dir: ($sandbox + "/vm"), registry: $registry}' > "$spec"
   chmod 600 "$spec"
+}
+
+# The agents' VMs, their panes and their hub. Called by cmd_start in the
+# place where a host run starts Pi in each pane, and reads cmd_start's own
+# variables (bash scope is dynamic): the run, the team, the options. Sets
+# what the rest of cmd_start records: workspace_id, workspace_ids, panes,
+# tab_count, split_failures, extra_workspaces, SWARM_GUARD_MEASURED.
+launch_vm_agents() {
+  local hub_dir
+  hub_dir="$(vm_hub_dir "$swarm_id")"
+  # The finish line inside a VM reads the registry the way await-done.sh
+  # always has, from SWARM_RUNS_DIR: here, a directory holding this run's
+  # record and nothing else. The real registry — every other case on this
+  # machine — is never mounted.
+  mkdir -p "$hub_dir/runs"
+  jq -n --argjson r "$rec" '{runs: [$r]}' > "$hub_dir/runs/registry.json"
+  cp "$kickoff" "$sandbox/.kickoff"
+  start_vm_hub "$sandbox" "$hub_dir" "$swarm_id" "$trace_socket" "${agent_ids[@]}" || { stop_vm_run "$sandbox" "$swarm_id" 0; exit 1; }
+  local spec="$hub_dir/vm-spec.json"
+  vm_build_spec "$hub_dir" "$spec"
 
   echo "VMs:          creating ${n} on $vm_image (${vm_cpus} vCPU, ${vm_memory} MiB each)..."
   local vm_out
