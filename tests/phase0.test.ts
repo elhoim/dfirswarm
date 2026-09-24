@@ -122,3 +122,222 @@ test("a seat in a VM that loses its hub is told after a minute, once, and stoppe
   step = hubLostStep(step.state, true, t0 + HUB_LOST_STOP_MS + 1);
   assert.deepEqual(step.state, { since: 0, told: false }, "the hub's return forgets the loss");
 });
+
+test("trace lines lost while two are written at once are told once, on one later line, and the count goes back to zero", async () => {
+  const { logEvent, traceLinesLostCount } = await import("../extensions/agent-swarm.ts");
+  const keep = { iso: process.env.SWARM_ISOLATION, agent: process.env.AGENT_ID, socket: process.env.SWARM_TRACE_SOCKET };
+  process.env.SWARM_ISOLATION = "microvm";
+  process.env.AGENT_ID = "a0";
+  delete process.env.SWARM_TRACE_SOCKET;
+  const root = await mkdtemp(join(tmpdir(), "phase0-lost-"));
+  const stderr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (() => true) as typeof process.stderr.write;
+  try {
+    // No spill directory yet: both lines are lost.
+    await Promise.all([logEvent(root, "a0", "bash", {}, { ok: true }), logEvent(root, "a0", "read", {}, { ok: true })]);
+    assert.equal(traceLinesLostCount(), 2);
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(join(root, "tool-output", "a0"), { recursive: true });
+    await Promise.all([logEvent(root, "a0", "bash", {}, { ok: true }), logEvent(root, "a0", "read", {}, { ok: true })]);
+    const lines = (await readFile(join(root, "tool-output", "a0", "trace-spill.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    const told = lines.map((l) => l.args?.trace_lines_lost_before ?? 0);
+    assert.deepEqual(told.sort(), [0, 2], "one line carries the two lost, the other nothing");
+    assert.equal(traceLinesLostCount(), 0);
+  } finally {
+    process.stderr.write = stderr;
+    for (const [k, v] of [["SWARM_ISOLATION", keep.iso], ["AGENT_ID", keep.agent], ["SWARM_TRACE_SOCKET", keep.socket]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an event's time says its zone: a time without one is refused on every host, an offset is kept beside the UTC value", async () => {
+  const { normalizeTs, recordEntry } = await import("../extensions/protocol.ts");
+  const was = process.env.TZ;
+  try {
+    for (const tz of ["UTC", "Europe/Istanbul", "America/New_York"]) {
+      process.env.TZ = tz;
+      const naive = normalizeTs("2024-01-15T12:44:22");
+      assert.equal(naive.ok, false, `refused under ${tz}`);
+      assert.match((naive as { reason: string }).reason, /no zone/);
+      assert.equal(normalizeTs("2024-01-15 12:44:22").ok, false);
+      assert.deepEqual(normalizeTs("2024-01-15T12:44:22Z"), { ok: true, ts: "2024-01-15T12:44:22.000Z", raw: "2024-01-15T12:44:22Z" });
+      assert.deepEqual(normalizeTs("2024-01-15T15:44:22+03:00"), { ok: true, ts: "2024-01-15T12:44:22.000Z", raw: "2024-01-15T15:44:22+03:00" });
+      assert.equal((normalizeTs("2024-01-15T15:44:22+0300") as { ts?: string }).ts, "2024-01-15T12:44:22.000Z");
+      assert.equal((normalizeTs("2024-01-15") as { ts?: string }).ts, "2024-01-15T00:00:00.000Z", "a date alone is that day, in UTC");
+      assert.deepEqual(normalizeTs("2024-01-15T12:44:22.000Z"), { ok: true, ts: "2024-01-15T12:44:22.000Z" }, "no raw when it is already the value");
+      assert.equal(normalizeTs("01/02/2024").ok, false, "a day and a month that read two ways are refused");
+      assert.equal(normalizeTs("yesterday").ok, false);
+    }
+    process.env.TZ = "Europe/Istanbul";
+    const root = await mkdtemp(join(tmpdir(), "phase0-ts-"));
+    try {
+      await initSandbox(root, { reset: true, agentIds: ["a0"] });
+      const r = await recordEntry({ sandboxRoot: root, agentId: "a0" }, { kind: "event", value: "logon", ts: "2024-01-15T15:44:22+03:00", source: "Security.evtx", evidence: "EventID 4624 record 812" });
+      assert.ok(r.ok);
+      assert.equal((r as { entry: { ts?: string; ts_raw?: string } }).entry.ts, "2024-01-15T12:44:22.000Z");
+      assert.equal((r as { entry: { ts_raw?: string } }).entry.ts_raw, "2024-01-15T15:44:22+03:00");
+      assert.match(await readFile(join(root, "ledger", "ledger.md"), "utf8"), /2024-01-15T12:44:22\.000Z \(as written: 2024-01-15T15:44:22\+03:00\)/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  } finally {
+    if (was === undefined) delete process.env.TZ;
+    else process.env.TZ = was;
+  }
+});
+
+test("the ledger chain: legacy entries before the chain pass, a version 1 entry appended after version 2 ones breaks it", async () => {
+  const { ledgerHash, recordEntry, verifyLedgerChain } = await import("../extensions/protocol.ts");
+  const root = await mkdtemp(join(tmpdir(), "phase0-chain-"));
+  try {
+    await initSandbox(root, { reset: true, agentIds: ["a0"] });
+    const file = join(root, "ledger", "entries.jsonl");
+    // A ledger begun before the chain: two legacy lines, then the harness's.
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(join(root, "ledger"), { recursive: true });
+    const legacy = [1, 2].map((seq) => JSON.stringify({ seq, kind: "ioc", value: `v${seq}`, by: "a0", authors: ["a0"], at: "2024-01-01T00:00:00.000Z" }));
+    await writeFile(file, `${legacy.join("\n")}\n`);
+    for (const value of ["evil.example.com", "10.0.0.9"]) {
+      assert.ok((await recordEntry({ sandboxRoot: root, agentId: "a0" }, { kind: "ioc", value, source: "dns.log", evidence: "grep" })).ok);
+    }
+    const text = await readFile(file, "utf8");
+    const good = verifyLedgerChain(text);
+    assert.equal(good.ok, true, good.reason ?? "");
+    assert.equal(good.chained, 2);
+    // A pane appends a finding in the version 1 shape, correctly chained.
+    const last = JSON.parse(text.trim().split("\n").at(-1) as string) as { hash: string; seq: number };
+    const forged: Record<string, unknown> = { seq: last.seq + 1, kind: "finding", value: "the suspect is innocent", by: "a0", authors: ["a0"], at: new Date().toISOString(), prev: last.hash };
+    forged.hash = ledgerHash(forged as never, last.hash);
+    const bad = verifyLedgerChain(`${text}${JSON.stringify(forged)}\n`);
+    assert.equal(bad.ok, false);
+    assert.equal(bad.reason, "a version 1 entry after version 2 ones");
+    assert.equal(bad.broken_at, 5);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the agents' evidence check compares names by their bytes: a name that is not UTF-8 is neither missing nor added", async (t) => {
+  const { verifyInputs } = await import("../extensions/protocol.ts");
+  const { mkdir, writeFile, symlink, chmod } = await import("node:fs/promises");
+  const { createHash } = await import("node:crypto");
+  const root = await mkdtemp(join(tmpdir(), "phase0-bytes-"));
+  try {
+    await initSandbox(root, { reset: true, agentIds: ["a0"] });
+    const dir = join(root, "inputs");
+    await mkdir(dir, { recursive: true });
+    // "kay\xfdt.txt": a Windows-1254 name (ı is 0xfd there), as an archive leaves it.
+    const name = Buffer.concat([Buffer.from("kay"), Buffer.from([0xfd]), Buffer.from("t.txt")]);
+    const abs = Buffer.concat([Buffer.from(`${dir}/`), name]);
+    try {
+      await writeFile(abs, "evidence\n");
+    } catch {
+      t.skip("this filesystem keeps names as UTF-8 and refuses these bytes (APFS); the check runs on Linux");
+      return;
+    }
+    const target = Buffer.concat([Buffer.from("kay"), Buffer.from([0xfd]), Buffer.from("t.txt")]);
+    await symlink(target, Buffer.concat([Buffer.from(`${dir}/`), Buffer.from("alias")]));
+    await chmod(abs, 0o444);
+    const rel = Buffer.concat([Buffer.from("inputs/"), name]);
+    const sha = createHash("sha256").update("evidence\n").digest("hex");
+    const manifest = {
+      source: "/evidence",
+      copied_at: new Date().toISOString(),
+      bytes: 9,
+      enforce: "auto",
+      guard: "none",
+      files: [
+        { path: "inputs/alias", path_b64: undefined, bytes: 0, sha256: createHash("sha256").update(Buffer.concat([Buffer.from("link:"), target])).digest("hex"), link: target.toString("utf8"), link_b64: target.toString("base64") },
+        { path: rel.toString("utf8"), path_b64: rel.toString("base64"), bytes: 9, sha256: sha },
+      ],
+    };
+    await writeFile(join(root, "inputs.json"), JSON.stringify(manifest));
+    const check = await verifyInputs(root);
+    assert.ok(check);
+    assert.deepEqual({ missing: check.missing, added: check.added, modified: check.modified }, { missing: [], added: [], modified: [] });
+    assert.equal(check.content_ok, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the agents' evidence check reads md5 and sha1 from the manifest and holds a re-read file to them; sha256 decides about the bytes", async () => {
+  const { readInputsManifest, verifyInputs } = await import("../extensions/protocol.ts");
+  const { mkdir, writeFile, chmod } = await import("node:fs/promises");
+  const { createHash } = await import("node:crypto");
+  const root = await mkdtemp(join(tmpdir(), "phase0-digests-"));
+  try {
+    await initSandbox(root, { reset: true, agentIds: ["a0"] });
+    await mkdir(join(root, "inputs"), { recursive: true });
+    const body = "disk image bytes\n";
+    for (const n of ["a.bin", "b.bin"]) {
+      await writeFile(join(root, "inputs", n), body);
+      await chmod(join(root, "inputs", n), 0o444);
+    }
+    const d = (alg: string) => createHash(alg).update(body).digest("hex");
+    // No stat recorded: the check reads each file again.
+    const files = [
+      { path: "inputs/a.bin", bytes: body.length, sha256: d("sha256"), md5: d("md5").toUpperCase(), sha1: d("sha1") },
+      { path: "inputs/b.bin", bytes: body.length, sha256: d("sha256"), md5: "0".repeat(32), sha1: d("sha1") },
+    ];
+    await writeFile(join(root, "inputs.json"), JSON.stringify({ source: "/ev", copied_at: "", bytes: 0, enforce: "auto", guard: "none", files }));
+    const manifest = await readInputsManifest(root);
+    assert.equal(manifest?.files[0].md5, d("md5"), "md5 is read, lower-cased");
+    assert.equal(manifest?.files[0].sha1, d("sha1"));
+    const check = await verifyInputs(root);
+    assert.ok(check);
+    assert.equal(check.content_ok, true, "the bytes match their sha256");
+    assert.deepEqual(check.digest_mismatch, ["inputs/b.bin"], "the manifest's md5 for b does not describe b's bytes");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a trace that is there and cannot be read is said so, by the event log and by the dossier, never taken for no trace", async () => {
+  const { readEventLogChecked, eventLogProblem, readEventLog } = await import("../extensions/protocol.ts");
+  const { buildDossier } = await import("../scripts/dossier.ts");
+  const { mkdir, writeFile, symlink } = await import("node:fs/promises");
+  const root = await mkdtemp(join(tmpdir(), "phase0-trace-"));
+  try {
+    await initSandbox(root, { reset: true, agentIds: ["a0"] });
+    const trace = join(root, EVENTS_REL);
+    await rm(trace, { force: true });
+    // No trace at all: nothing to say.
+    assert.deepEqual(await readEventLogChecked(root), { events: [], unreadable: null });
+    let dossier = await buildDossier(root);
+    assert.equal(dossier.files.find((f) => f.name === "trace.jsonl")?.reason, "not produced");
+    // A trace that is a directory.
+    await mkdir(trace);
+    const dir = await readEventLogChecked(root);
+    assert.equal(dir.unreadable, "not a regular file");
+    assert.deepEqual([...(await readEventLog(root))], []);
+    assert.equal(eventLogProblem(root), "not a regular file", "a caller of readEventLog can ask why");
+    dossier = await buildDossier(root);
+    const listed = dossier.files.find((f) => f.name === "trace.jsonl");
+    assert.equal(listed?.present, false);
+    assert.match(listed?.reason ?? "", /there, and could not be read: not a regular file/);
+    await rm(trace, { recursive: true });
+    // A trace that is a link to a file outside the run.
+    const outside = join(root, "..", `outside-${Date.now()}.jsonl`);
+    await writeFile(outside, `${JSON.stringify({ ts: "t", agent: "a0", tool: "bash", args: {}, result: {} })}\n`);
+    await symlink(outside, trace);
+    assert.equal((await readEventLogChecked(root)).unreadable, "a link, not the trace");
+    assert.match((await buildDossier(root)).files.find((f) => f.name === "trace.jsonl")?.reason ?? "", /could not be read: a link/);
+    await rm(outside, { force: true });
+    await rm(trace, { force: true });
+    // A readable trace again: read, and the problem is forgotten.
+    await writeFile(trace, `${JSON.stringify({ ts: "t", agent: "a0", tool: "bash", args: {}, result: {} })}\n`);
+    const ok = await readEventLogChecked(root);
+    assert.equal(ok.unreadable, null);
+    assert.equal(ok.events.length, 1);
+    assert.equal(eventLogProblem(root), null);
+    const good = (await buildDossier(root)).files.find((f) => f.name === "trace.jsonl");
+    assert.equal(good?.present, true);
+    assert.equal(good?.bytes, (await readFile(trace)).length);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -12,8 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import * as board from "../extensions/board.ts";
-import { agentDeadPath, diffWatchedPaths, emptyAgentBudget, initSandbox, readPost, SENTINEL_REL, watchedPathHashes } from "../extensions/protocol.ts";
-import { boardTable, Hub } from "../scripts/vm-hub.ts";
+import { agentDeadPath, diffWatchedPaths, emptyAgentBudget, initSandbox, postSender, readPost, SENTINEL_REL, watchedPathHashes } from "../extensions/protocol.ts";
+import { boardTable, CollectorLink, Hub, isHubProcess, msbDbOutcomes, SocketPathTooLong, takeHubLock, updateRegistryState } from "../scripts/vm-hub.ts";
 
 const cleanups: Array<() => Promise<unknown>> = [];
 after(async () => {
@@ -149,6 +149,15 @@ test("a harness post sent from a VM says which agent's harness said it", async (
   assert.equal(post.from, "system");
   assert.equal(post.via, "a1");
   assert.equal((await readPost(post.path)).via, "a1", "and the file on the board carries it");
+  // What a peer reads names the seat: a harness post from inside a VM is
+  // that seat's harness code, which its guest root controls.
+  const box = await asVm(hub.socketFor("a0"), () => board.readInbox({ sandboxRoot: "/x", agentId: "a0" }));
+  const seen = box.posts.find((p) => p.id === (post as { id?: number }).id);
+  assert.ok(seen, "a0 reads the post");
+  assert.equal(postSender(seen), "system via a1");
+  const extension = await readFile(join(import.meta.dirname, "..", "extensions", "agent-swarm.ts"), "utf8");
+  assert.equal((extension.match(/from: postSender\(p\)/g) ?? []).length, 2, "the inbox and the wait payloads both name the seat");
+  assert.doesNotMatch(extension, /from: p\.from,/, "no payload shows a post's bare sender");
 });
 
 test("the extension's board functions go to the hub when SWARM_BOARD_SOCKET is set, and run locally when it is not", async () => {
@@ -444,14 +453,19 @@ test("the harness's reads refuse a directory swapped for a link while they read"
   `]);
   let leaks = 0;
   let reads = 0;
+  let refused = 0;
   const end = Date.now() + 2500;
   while (Date.now() < end) {
     const got = await readSandboxFile(sandbox, "work/a0/sub/auth.json").catch(() => null);
     reads += 1;
+    if (got === null) refused += 1;
     if (got && got.bytes.toString() === "SECRET") leaks += 1;
   }
   await new Promise((r) => swapper.once("exit", r));
   assert.equal(leaks, 0, `${leaks} of ${reads} reads returned the outside file`);
+  // The race was run: reads happened, and some met the swapped directory.
+  assert.ok(reads > 100, `only ${reads} reads`);
+  assert.ok(refused > 0, "no read met the link: the swapper never swapped, and the test proved nothing");
 });
 
 test("a seat's spend report may only grow: a smaller, negative or non-numeric report is refused and the row stays", async () => {
@@ -588,7 +602,10 @@ async function fakeVmCli(dir: string, sandbox: string): Promise<{ cli: string; l
   const log = join(bin, "calls.log");
   const seen = join(bin, "custody-saw.txt");
   await writeFile(join(bin, "vm.ts"), `require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n`);
-  await writeFile(join(bin, "custody.ts"), `const fs = require("node:fs"); fs.writeFileSync(${JSON.stringify(seen)}, fs.existsSync(${JSON.stringify(join(sandbox, "traces", "hub-spill.jsonl"))}) ? "spill copied" : "no spill");\n`);
+  await writeFile(
+    join(bin, "custody.ts"),
+    `const fs = require("node:fs"); fs.writeFileSync(${JSON.stringify(seen)}, fs.existsSync(${JSON.stringify(join(sandbox, "traces", "hub-spill.jsonl"))}) ? "spill copied" : "no spill"); fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(["custody", ...process.argv.slice(2)]) + "\\n");\n`,
+  );
   return { cli: join(bin, "vm.ts"), log, seen };
 }
 
@@ -685,7 +702,7 @@ test("the hub puts the VMs away with the run's registry and snapshot choice, and
   const probe = await setup({ collector: false });
   const fake = await fakeVmCli(pre, probe.sandbox);
   await probe.hub.stop();
-  const { hub, sandbox } = await setup({ collector: false, extra: { run: "t1", vmCli: fake.cli, registry, snapshot: false } });
+  const { hub, sandbox } = await setup({ collector: false, extra: { run: "t1", vmCli: fake.cli, registry, snapshot: false, custodyTimeoutSec: 600 } });
   const fake2 = await fakeVmCli(pre, sandbox);
   (hub.cfg as { vmCli?: string }).vmCli = fake2.cli;
   await writeFile(join(sandbox, SENTINEL_REL), "---\nby: a0\nreason: done\n---\n");
@@ -699,6 +716,19 @@ test("the hub puts the VMs away with the run's registry and snapshot choice, and
   assert.equal(finish[finish.indexOf("--registry") + 1], registry, "only this registry's VMs are put away");
   assert.equal(await readFile(fake2.seen, "utf8"), "spill copied", "the hub's own spilled lines are in the run before custody reads it");
   assert.equal(JSON.parse(await readFile(registry, "utf8")).runs[0].state, "finished");
+  const custody = calls.find((c) => c[0] === "custody");
+  assert.ok(custody, "custody was taken");
+  assert.equal(custody[custody.indexOf("--timeout") + 1], "600", "with the operator's bound, not a fixed one");
+});
+
+test("custody's bound at a hub's finish is the operator's SWARM_CUSTODY_TIMEOUT, kept across a restart, else stop's default", async () => {
+  const { custodyTimeoutSec } = await import("../scripts/vm-hub.ts");
+  assert.equal(custodyTimeoutSec({ SWARM_CUSTODY_TIMEOUT: "900" }), 900);
+  assert.equal(custodyTimeoutSec({}), 14400);
+  assert.equal(custodyTimeoutSec({ SWARM_CUSTODY_TIMEOUT: "-5" }), 14400);
+  assert.equal(custodyTimeoutSec({ SWARM_CUSTODY_TIMEOUT: "soon" }), 14400);
+  const source = await readFile(join(import.meta.dirname, "..", "scripts", "vm-hub.ts"), "utf8");
+  assert.match(source, /const KEPT_ENV = \[[^\]]*"SWARM_CUSTODY_TIMEOUT"/, "a resumed hub keeps the operator's bound");
 });
 
 test("a seat that is done while the swarm goes on has its VM put away a grace period later", async () => {
@@ -855,4 +885,345 @@ test("the hub's keeper brings a dead hub back with --resume, and lets it go once
   process.kill(second, "SIGTERM");
   await new Promise<void>((resolve) => keeper.once("exit", () => resolve()));
   assert.equal(Number((await readFile(join(sandbox, "hub.pid"), "utf8")).trim()), second, "no third hub was started");
+});
+
+test("a seat over its own cap is recorded done by the hub once the grace period passes, and is not steered again", async () => {
+  const { hub, sandbox, lines } = await setup();
+  const budgetFile = join(sandbox, "budget.json");
+  const budget = JSON.parse(await readFile(budgetFile, "utf8")) as Record<string, any>;
+  budget.cap_per_agent_usd = 1;
+  budget.agents = { ...(budget.agents ?? {}), a0: { ...emptyAgentBudget(), spent_usd: 2 } };
+  await writeFile(budgetFile, JSON.stringify(budget));
+  const t0 = Date.now();
+  await hub.backstop(t0);
+  assert.equal(lines.filter((l) => l.tool === "agent_cap_steer").length, 1, "the seat is told first");
+  assert.equal(existsSync(join(sandbox, "done", "agents", "a0.done")), false, "not stopped inside the grace period");
+  await hub.backstop(t0 + 3 * 60_000);
+  const marker = await readFile(join(sandbox, "done", "agents", "a0.done"), "utf8");
+  assert.match(marker, /reason: agent_cap/);
+  assert.match(marker, /output: \(stopped by the per-agent cap\)/);
+  const stops = lines.filter((l) => l.tool === "agent_cap_stop");
+  assert.equal(stops.length, 1);
+  assert.equal((stops[0].result as Record<string, unknown>).ok, true);
+  await hub.backstop(t0 + 6 * 60_000);
+  assert.equal(lines.filter((l) => l.tool === "agent_cap_steer").length, 1, "a seat that is out is not steered again");
+  assert.equal(lines.filter((l) => l.tool === "agent_cap_stop").length, 1, "nor stopped again");
+  assert.equal(existsSync(join(sandbox, SENTINEL_REL)), false, "one seat's cap does not end the swarm");
+});
+
+test("what a seat holds in the hub stays under its budget: whole lines waiting their turn count too, and its connection is paused, not grown", async () => {
+  const base = await mkdtemp(join(tmpdir(), "dfh-held-"));
+  cleanups.push(() => rm(base, { recursive: true, force: true }));
+  const sandbox = join(base, "sb");
+  await mkdir(sandbox, { recursive: true });
+  await initSandbox(sandbox, { swarmId: "t1", agentIds: ["a0"], capUsd: 5, wallClockMinutes: 30 });
+  // A collector that takes the connection and never answers: each line waits.
+  const colPath = join(base, "c.sock");
+  const silent: Server = createServer(() => undefined);
+  await new Promise<void>((r) => silent.listen(colPath, () => r()));
+  cleanups.push(async () => silent.close());
+  const max = 4_000_000;
+  const hub = new Hub({ sandbox, dir: join(base, "hub"), agents: ["a0"], tokens: {}, collector: colPath, backstop: false, quiet: true, herdrBin: "/usr/bin/false", bufferMax: max });
+  await hub.start();
+  cleanups.push(() => hub.stop());
+  const s = connect(hub.socketFor("a0"));
+  cleanups.push(async () => s.destroy());
+  await new Promise((r) => s.once("connect", r));
+  const pad = "x".repeat(500_000);
+  let peak = 0;
+  const watch = setInterval(() => (peak = Math.max(peak, hub.heldBytes("a0"))), 5);
+  for (let i = 0; i < 40; i++) s.write(`${JSON.stringify({ tool: "bash", ts: new Date().toISOString(), agent: "a0", args: { pad } })}\n`);
+  await new Promise((r) => setTimeout(r, 1500));
+  clearInterval(watch);
+  // One chunk past the budget at most: the read that crossed it.
+  assert.ok(peak <= max + 1_100_000, `held ${peak} bytes against a budget of ${max}`);
+  assert.ok(peak > max / 2, `the flood reached the budget (${peak})`);
+  assert.equal(s.destroyed, false, "the seat's connection is paused, not cut");
+});
+
+test("a board call that carries no file is refused past its size limit; a file-bearing call is not held to it", async () => {
+  const { hub, sandbox } = await setup();
+  const big = "y".repeat(8_100_000);
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "postMessage", [{ sandboxRoot: sandbox, agentId: "a0" }, { thread: "main", body: big }]), /limit for a call that carries no file/);
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  const bytes = Buffer.from("z".repeat(8_100_000));
+  await writeFile(join(sandbox, "work", "a0", "big.txt"), bytes);
+  const recorded = (await asVm(hub.socketFor("a0"), () => board.recordFileVersion(sandbox, "work/a0/big.txt", "a0"))) as { rev?: number } | null;
+  assert.ok(recorded && typeof recorded.rev === "number", "a record of an 8 MB file goes through");
+});
+
+test("in a VM a peer's extraction of thousands of files does not use up a seat's watch: its own files are still watched", async () => {
+  const { sandbox } = await setup();
+  const was = process.env.SWARM_ISOLATION;
+  process.env.SWARM_ISOLATION = "microvm";
+  cleanups.push(async () => {
+    if (was === undefined) delete process.env.SWARM_ISOLATION;
+    else process.env.SWARM_ISOLATION = was;
+  });
+  const peer = join(sandbox, "work", "extracted", "a1");
+  await mkdir(peer, { recursive: true });
+  for (let i = 0; i < 600; i++) await writeFile(join(peer, `f${i}.bin`), String(i));
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  await writeFile(join(sandbox, "work", "a0", "mine.txt"), "a0's\n");
+  const snap = await watchedPathHashes(sandbox, "a0");
+  assert.ok(snap.hashes.has("work/a0/mine.txt"), "the seat's own file is watched");
+  assert.equal(snap.truncated, false, "a peer's files are not the seat's budget");
+});
+
+test("a VM's wait cannot choose how often the hub polls: a pollMs of 0 is not a tight loop on the hub", async () => {
+  const { hub, sandbox } = await setup();
+  const cpu = process.cpuUsage();
+  const r = (await board.callBoard(hub.socketFor("a0"), "waitForSwarmChange", [{ sandboxRoot: sandbox, agentId: "a0" }, { seconds: 1, pollMs: 0 }])) as { reason?: string };
+  const used = process.cpuUsage(cpu);
+  assert.equal(r.reason, "timeout");
+  const ms = (used.user + used.system) / 1000;
+  // Measured: 9 ms at the hub's own poll, 343 ms at a pollMs of 0.
+  assert.ok(ms < 150, `the wait used ${ms.toFixed(0)} ms of CPU in one second`);
+});
+
+test("a seat that alternates its state in a loop gets one Herdr report at a time, spaced out, with no terminal controls in it", async () => {
+  const base = await mkdtemp(join(tmpdir(), "dfh-state-"));
+  cleanups.push(() => rm(base, { recursive: true, force: true }));
+  const log = join(base, "herdr.log");
+  const herdr = join(base, "herdr.sh");
+  await writeFile(herdr, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nsleep 0.2\n`, { mode: 0o755 });
+  const { hub } = await setup({ extra: { herdrBin: herdr } });
+  const admin = connect(join(hub.cfg.dir, "admin.sock"));
+  cleanups.push(async () => admin.destroy());
+  await new Promise((r) => admin.once("connect", r));
+  admin.write(`${JSON.stringify({ op: "panes", panes: { a0: "p1" } })}\n`);
+  await until(() => (hub as unknown as { panes: Map<string, string> }).panes.get("a0") === "p1", "the pane is known");
+  const s = connect(hub.socketFor("a0"));
+  cleanups.push(async () => s.destroy());
+  await new Promise((r) => s.once("connect", r));
+  let lines = "";
+  for (let i = 0; i < 400; i++) lines += `${JSON.stringify({ t: "state", state: i % 2 ? "working" : "idle" })}\n`;
+  lines += `${JSON.stringify({ t: "state", state: "blocked", detail: "waiting\u001b]52;c;cHduZWQ=\u0007 on a1" })}\n`;
+  s.write(lines);
+  await until(() => hub.statusSnapshot().a0?.state === "blocked", "the last state is taken");
+  await new Promise((r) => setTimeout(r, 1500));
+  const calls = (await readFile(log, "utf8").catch(() => "")).trim().split("\n").filter(Boolean);
+  assert.ok(calls.length >= 1 && calls.length <= 6, `${calls.length} Herdr reports for 401 state lines`);
+  assert.equal(hub.statusSnapshot().a0?.detail, "waiting]52;c;cHduZWQ= on a1", "the controls are gone, the text is kept");
+  assert.ok(calls.at(-1)?.includes("--state blocked"), "the newest state is the one reported last");
+});
+
+test("a collector socket cut on a timeout fails only its own lines: the next socket's answers land on the right lines", async () => {
+  const base = await mkdtemp(join(tmpdir(), "dfh-link-"));
+  cleanups.push(() => rm(base, { recursive: true, force: true }));
+  const path = join(base, "c.sock");
+  const written: string[] = [];
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      let cut;
+      while ((cut = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, cut);
+        buffer = buffer.slice(cut + 1);
+        if (line === "A") continue; // never answered
+        if (line === "D") {
+          setTimeout(() => socket.write('{"ok":false,"error":"refused"}\n'), 60);
+          continue;
+        }
+        written.push(line);
+        setTimeout(() => socket.write('{"ok":true}\n'), 30);
+      }
+    });
+    socket.on("error", () => undefined);
+  });
+  await new Promise<void>((r) => server.listen(path, () => r()));
+  cleanups.push(async () => server.close());
+  const link = new CollectorLink(path, 200);
+  cleanups.push(async () => link.close());
+  const a = link.send("A\n");
+  // Sent in the same timers phase as A's timeout, before the cut socket closes.
+  const b = new Promise<boolean>((resolve) => setTimeout(() => resolve(link.send("B\n")), 200));
+  assert.equal(await a, false, "the unanswered line is lost");
+  assert.equal(await b, true, "B was written and is said written");
+  assert.ok(written.includes("B"));
+  assert.equal(await link.send("D\n"), false, "a line the collector refused is said refused");
+});
+
+test("a seat cannot publish over the harness's own files in work/: the trace spill custody reads, the install area, the temp directory", async () => {
+  const { hub, sandbox } = await setup();
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  await writeFile(join(sandbox, "work", "a0", "lines.jsonl"), '{"agent":"a1","sid":"x","seq":1,"tool":"recordEntry"}\n');
+  for (const to of ["work/.trace-spill.jsonl", "work/.TRACE-SPILL.jsonl", "work/.toolchain/lib/site.py", "work/.tmp/x"]) {
+    const r = (await asVm(hub.socketFor("a0"), () => board.publishFile({ sandboxRoot: sandbox, agentId: "a0" }, "work/a0/lines.jsonl", to))) as { ok: boolean; reason?: string };
+    assert.equal(r.ok, false, `publishing to ${to} was refused`);
+    assert.match(r.reason ?? "", /harness's|harness-owned/);
+  }
+  assert.equal(existsSync(join(sandbox, "work", ".trace-spill.jsonl")), false, "nothing was written there");
+  const fine = (await asVm(hub.socketFor("a0"), () => board.publishFile({ sandboxRoot: sandbox, agentId: "a0" }, "work/a0/lines.jsonl", "work/lines.jsonl"))) as { ok: boolean };
+  assert.equal(fine.ok, true, "a shared name is still published");
+});
+
+test("a hub lock naming a live process that is not a hub is stale and is taken; one naming a live hub for the run is not", async () => {
+  const base = await mkdtemp(join(tmpdir(), "dfh-lock-"));
+  cleanups.push(() => rm(base, { recursive: true, force: true }));
+  const dir = join(base, "dfs-t1.abc123");
+  await mkdir(dir, { recursive: true });
+  const lock = join(dir, "hub.lock");
+  const { spawn } = await import("node:child_process");
+  // The dead hub's pid, taken since by an unrelated process of the user's.
+  const other = spawn("sleep", ["30"], { stdio: "ignore" });
+  cleanups.push(async () => other.kill());
+  await writeFile(lock, `${other.pid}\n`);
+  assert.equal(isHubProcess(other.pid as number, dir), false);
+  assert.equal(takeHubLock(lock, dir), true, "a lock held by a process that is not a hub is taken");
+  assert.equal(Number((await readFile(lock, "utf8")).trim()), process.pid);
+  // A live hub for this directory holds it.
+  const hub = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)", "scripts/vm-hub.ts", "--resume", dir], { stdio: "ignore" });
+  cleanups.push(async () => hub.kill());
+  await until(() => {
+    try {
+      process.kill(hub.pid as number, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }, "the stand-in hub is up");
+  await writeFile(lock, `${hub.pid}\n`);
+  assert.equal(isHubProcess(hub.pid as number, dir), true);
+  assert.equal(takeHubLock(lock, dir), false, "a second hub for the run does not start");
+  assert.equal(Number((await readFile(lock, "utf8")).trim()), hub.pid, "and the live hub's lock is left as it was");
+});
+
+test("done from a VM is paced, and calls that arrive together share one run of the operator's finish line on the host", async () => {
+  const { hub, sandbox, base } = await setup();
+  const was = process.env.SWARM_RUNS_DIR;
+  process.env.SWARM_RUNS_DIR = join(base, "runs");
+  cleanups.push(async () => {
+    if (was === undefined) delete process.env.SWARM_RUNS_DIR;
+    else process.env.SWARM_RUNS_DIR = was;
+  });
+  await registryWithChecks(base, sandbox, ["echo ran >> checks-ran.log; test -f work/never.md"]);
+  const calls = Array.from({ length: 6 }, () =>
+    board.callBoard(hub.socketFor("a0"), "markDone", [null, { reason: "finished", outputFile: "work/report.md" }]).then(
+      () => "ok",
+      (err: Error) => err.message,
+    ),
+  );
+  const answers = await Promise.all(calls);
+  assert.equal(answers.filter((a) => /slow down: markDone/.test(a)).length, 3, answers.join(" | "));
+  assert.equal(answers.filter((a) => /finish line/.test(a)).length, 3, "the three let through were refused on the finish line");
+  const ran = (await readFile(join(sandbox, "checks-ran.log"), "utf8")).trim().split("\n").length;
+  assert.equal(ran, 1, "one run of the finish line answered the three");
+});
+
+test("the hub works from the bytes a VM sends, never its own read: with the seat's directory closed to it, record, diff and publish still answer, from the sent bytes", { skip: process.getuid?.() === 0 && "root reads a mode-000 directory" }, async () => {
+  const { hub, sandbox } = await setup();
+  const { createHash } = await import("node:crypto");
+  const { chmod } = await import("node:fs/promises");
+  const own = join(sandbox, "work", "a0");
+  await mkdir(own, { recursive: true });
+  // What the host disk holds differs from what the VM sends; the hub can read neither.
+  await writeFile(join(own, "notes.md"), "HOST\n");
+  await chmod(own, 0o000);
+  cleanups.push(() => chmod(own, 0o700));
+  const b64 = (t: string) => Buffer.from(t).toString("base64");
+  const sha = (t: string) => createHash("sha256").update(t).digest("hex");
+  const call = (fn: string, args: unknown[]) => board.callBoard(hub.socketFor("a0"), fn, args);
+  const r1 = (await call("recordFileVersion", [sandbox, "work/a0/notes.md", "a0", { bytes_b64: b64("VM one\n") }])) as { rev: number; sha256: string };
+  assert.equal(r1.sha256, sha("VM one\n"), "the revision is the sent bytes");
+  const diff = (await call("fileDiff", [sandbox, "work/a0/notes.md", 1, null, { disk_b64: b64("VM one\nVM two\n") }])) as { added: number; removed: number };
+  assert.deepEqual([diff.added, diff.removed], [1, 0], "the disk side of the diff is the sent bytes");
+  const pub = (await call("publishFile", [{ sandboxRoot: sandbox, agentId: "a0" }, "work/a0/notes.md", "work/notes.md", { bytes_b64: b64("VM published\n") }])) as { ok: boolean; sha256?: string };
+  assert.equal(pub.ok, true, JSON.stringify(pub));
+  assert.equal(pub.sha256, sha("VM published\n"));
+  assert.equal(await readFile(join(sandbox, "work", "notes.md"), "utf8"), "VM published\n");
+});
+
+test("publish tells a peer's directory from a shared one by the hub's roster; with no roster and no team file it publishes nothing", async () => {
+  const { sandbox } = await setup();
+  const { publishFile } = await import("../extensions/protocol.ts");
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  await writeFile(join(sandbox, "work", "a0", "x.md"), "x\n");
+  await rm(join(sandbox, "team.json"));
+  const ctx = { sandboxRoot: sandbox, agentId: "a0" };
+  const peer = await publishFile(ctx, "work/a0/x.md", "work/a1/x.md", { bytes: Buffer.from("x\n"), ids: ["a0", "a1"] });
+  assert.equal(peer.ok, false, "the roster names a1's directory");
+  assert.match((peer as { reason: string }).reason, /a1's own directory/);
+  const blind = await publishFile(ctx, "work/a0/x.md", "work/a1/x.md", { bytes: Buffer.from("x\n") });
+  assert.equal(blind.ok, false, "no roster, no team file: refused");
+  assert.match((blind as { reason: string }).reason, /team cannot be read/);
+  assert.equal(existsSync(join(sandbox, "work", "a1", "x.md")), false);
+});
+
+test("the hub records a run's state past a registry lock a dead writer left, and waits on a live one", async () => {
+  const base = await mkdtemp(join(tmpdir(), "dfh-reg-"));
+  cleanups.push(() => rm(base, { recursive: true, force: true }));
+  const registry = join(base, "registry.json");
+  await writeFile(registry, JSON.stringify({ runs: [{ id: "t1", state: "running" }] }));
+  const { utimes } = await import("node:fs/promises");
+  await mkdir(`${registry}.lock`);
+  const old = new Date(Date.now() - 5 * 60_000);
+  await utimes(`${registry}.lock`, old, old);
+  await updateRegistryState(registry, "t1", "finished");
+  assert.equal(JSON.parse(await readFile(registry, "utf8")).runs[0].state, "finished", "a lock older than a minute is broken");
+  await mkdir(`${registry}.lock`);
+  await assert.rejects(updateRegistryState(registry, "t1", "stopped"), /the registry is locked/, "a fresh lock is waited on, not broken");
+  assert.equal(JSON.parse(await readFile(registry, "utf8")).runs[0].state, "finished");
+});
+
+test("custody's verdicts and the artifact index are the harness's: no seat records, restores or claims them", async () => {
+  const { hub, sandbox } = await setup();
+  const { isProtectedPath } = await import("../extensions/protocol.ts");
+  for (const f of ["custody.json", "custody.20260924T101500Z.json", "custody.previous.json", "custody.previous-20260924.json", "CUSTODY.JSON", "artifacts.json", "work/.trace-spill.jsonl"]) {
+    assert.equal(isProtectedPath(f), true, f);
+  }
+  assert.equal(isProtectedPath("work/custody.json"), false, "a seat's own file of that name under work/ is not the harness's");
+  await writeFile(join(sandbox, "custody.json"), '{"verdict":"intact"}\n');
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "custody.json", "a0", null]), /harness-owned path/);
+  const restore = (await board.callBoard(hub.socketFor("a0"), "restoreFileVersion", [null, "artifacts.json", 1])) as { ok: boolean; reason?: string };
+  assert.equal(restore.ok, false);
+  assert.match(restore.reason ?? "", /harness-owned path/);
+  const claim = (await board.callBoard(hub.socketFor("a0"), "claimFile", [null, "custody.previous.json", { reason: "edit" }])) as { ok: boolean; protected?: boolean };
+  assert.equal(claim.ok, false);
+  assert.equal(claim.protected, true);
+});
+
+test("a hub socket path past what a Unix socket takes is refused by name, with the path and its length, before anything is bound", async () => {
+  const base = await mkdtemp(join(tmpdir(), "dfh-long-"));
+  cleanups.push(() => rm(base, { recursive: true, force: true }));
+  const sandbox = join(base, "sb");
+  await mkdir(sandbox, { recursive: true });
+  await initSandbox(sandbox, { swarmId: "t1", agentIds: ["a0"], capUsd: 5, wallClockMinutes: 30 });
+  const dir = join(base, "d".repeat(Math.max(1, 110 - base.length)));
+  const hub = new Hub({ sandbox, dir, agents: ["a0"], tokens: {}, collector: join(base, "none.sock"), backstop: false, quiet: true, herdrBin: "/usr/bin/false" });
+  const path = hub.socketFor("a0");
+  assert.ok(Buffer.byteLength(path) > 103, `the test's path is ${Buffer.byteLength(path)} bytes`);
+  await assert.rejects(hub.start(), (err: unknown) => {
+    assert.ok(err instanceof SocketPathTooLong);
+    assert.equal(err.path, path);
+    assert.equal(err.bytes, Buffer.byteLength(path));
+    assert.match(err.message, /past the 103 a Unix socket can take/);
+    return true;
+  });
+  assert.equal(existsSync(dir), false, "nothing was created");
+});
+
+test("the hub's vm_finish line says what became of msb's database for each VM it removed", async () => {
+  assert.deepEqual(msbDbOutcomes('noise\n{"ok":true,"vms":[{"agent":"a0","name":"dfs-t1-a0","msb_db":"scrubbed"},{"agent":"a1","name":"dfs-t1-a1","kept":true}]}\n'), [{ agent: "a0", name: "dfs-t1-a0", msb_db: "scrubbed" }]);
+  assert.deepEqual(msbDbOutcomes("not json"), []);
+  const pre = await mkdtemp(join(tmpdir(), "dfh-msbdb-"));
+  cleanups.push(() => rm(pre, { recursive: true, force: true }));
+  const cli = join(pre, "vm.ts");
+  await writeFile(
+    cli,
+    `process.stdout.write(JSON.stringify({ ok: true, vms: [{ agent: "a0", name: "dfs-t1-a0", msb_db: "busy" }, { agent: "a1", name: "dfs-t1-a1", msb_db: "busy" }] }) + "\\n");\n`,
+  );
+  const { hub, sandbox, lines } = await setup({ extra: { run: "t1", vmCli: cli, snapshot: false } });
+  await writeFile(join(sandbox, SENTINEL_REL), "---\nby: a0\nreason: done\n---\n");
+  for (const a of ["a0", "a1"]) await writeFile(join(sandbox, "done", "agents", `${a}.done`), "---\nby: x\n---\n");
+  await hub.backstop(Date.now());
+  await hub.backstop(Date.now() + 1000);
+  const finish = lines.find((l) => l.tool === "vm_finish");
+  assert.ok(finish, "the finish is on the trace");
+  assert.deepEqual((finish.result as { msb_db?: unknown }).msb_db, [
+    { agent: "a0", name: "dfs-t1-a0", msb_db: "busy" },
+    { agent: "a1", name: "dfs-t1-a1", msb_db: "busy" },
+  ]);
 });

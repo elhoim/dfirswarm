@@ -60,12 +60,12 @@
  * directory (0700, on the host, in no VM) so that `--resume` can bring the
  * hub back after a crash with the same tokens and the same clock.
  */
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { connect, createServer, type Server, type Socket } from "node:net";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as P from "../extensions/protocol.ts";
 import * as T from "../extensions/toolchain.ts";
@@ -77,9 +77,30 @@ import { claimHolds, messageFor, resolvePeer } from "./nudge-broker.mjs";
  * call, so a line may be large; past this it is not a line.
  */
 const MAX_REQUEST_BYTES = 64_000_000;
+/**
+ * A board call that carries no file has no business being large: past this
+ * it is refused. The calls that carry a file's bytes (FILE_FNS) and trace
+ * lines keep MAX_REQUEST_BYTES.
+ */
+const RPC_LINE_MAX = 8_000_000;
+/** The calls whose arguments carry a file's bytes. */
+const FILE_FNS = new Set(["publishFile", "recordFileVersion", "fileDiff"]);
+/** The states a seat reports (the extension's), and how much text may go with one. */
+const SEAT_STATES = new Set(["idle", "working", "blocked", "unknown"]);
+const STATE_DETAIL_MAX = 200;
+/** C0 and C1 control characters, ESC and DEL: what a terminal acts on rather than shows. */
+const TERMINAL_CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
+/** The least time between two Herdr reports for one seat. */
+const HERDR_REPORT_GAP_MS = 250;
 /** Connections one seat may hold open at once: its link, its board calls, its trace, a few one-shot calls. */
 const AGENT_CONNECTIONS_MAX = 16;
-/** Bytes one seat may have buffered here across all its connections before the newest is cut. */
+/**
+ * What one seat may have held here at once, across all its connections: the
+ * bytes of lines not yet whole, of lines waiting their turn, and of calls
+ * queued or running (their arguments stay in memory until they answer).
+ * Past it the seat's connections are paused until its calls drain; a line
+ * not yet whole that alone passes it cuts its connection.
+ */
 const AGENT_BUFFER_MAX = 160_000_000;
 /**
  * How fast a seat may add to what every peer reads: posts (and the harness
@@ -92,6 +113,9 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   threadOpen: { bucket: "post", capacity: 40, perSecond: 0.5 },
   claimName: { bucket: "post", capacity: 40, perSecond: 0.5 },
   recordEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  // Each done that would end the swarm runs the operator's finish line on
+  // the host: a few in a row, then one a minute.
+  markDone: { bucket: "done", capacity: 3, perSecond: 1 / 60 },
 };
 /** A refusal repeated within this window is counted, not written again. */
 const REFUSAL_WINDOW_MS = 60_000;
@@ -148,6 +172,10 @@ export type HubConfig = {
   snapshot?: boolean;
   /** How long after a seat's done its VM is put away (tests shorten it). */
   seatLeaveMs?: number;
+  /** A seat's byte budget here (AGENT_BUFFER_MAX; tests lower it). */
+  bufferMax?: number;
+  /** Custody's bound at finish, in seconds (else SWARM_CUSTODY_TIMEOUT, else 14400). */
+  custodyTimeoutSec?: number;
   /** The operator's swarm.sh: run as `stop <run> --after-hub` once the hub has finished the run. */
   stopCmd?: string;
 };
@@ -199,10 +227,15 @@ function finiteNonNegative(value: unknown): number {
  * A line that is not answered in time fails, and the connection is dropped
  * so the next line is not answered with this one's reply.
  */
-class CollectorLink {
-  private socket: Socket | null = null;
-  private waiting: Array<{ done: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> }> = [];
-  private buffer = "";
+export class CollectorLink {
+  /**
+   * One dial: its socket, the lines on it still waiting for an answer, and
+   * what it has read. Kept per socket: a socket cut on a timeout closes a
+   * moment later, and its close must fail its own lines only, not the ones
+   * already sent on the next socket (whose answers would then be matched to
+   * the wrong lines: one written line said lost, one refused said written).
+   */
+  private conn: { socket: Socket; waiting: Array<{ done: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> }>; buffer: string } | null = null;
   private readonly path: string;
   private readonly timeoutMs: number;
   constructor(path: string, timeoutMs = 5000) {
@@ -210,16 +243,17 @@ class CollectorLink {
     this.timeoutMs = timeoutMs;
   }
 
-  private dial(): Socket {
+  private dial(): NonNullable<CollectorLink["conn"]> {
     const s = connect(reachable(this.path));
+    const conn: NonNullable<CollectorLink["conn"]> = { socket: s, waiting: [], buffer: "" };
     s.setEncoding("utf8");
     s.on("data", (chunk: string) => {
-      this.buffer += chunk;
+      conn.buffer += chunk;
       let cut;
-      while ((cut = this.buffer.indexOf("\n")) >= 0) {
-        const line = this.buffer.slice(0, cut);
-        this.buffer = this.buffer.slice(cut + 1);
-        const head = this.waiting.shift();
+      while ((cut = conn.buffer.indexOf("\n")) >= 0) {
+        const line = conn.buffer.slice(0, cut);
+        conn.buffer = conn.buffer.slice(cut + 1);
+        const head = conn.waiting.shift();
         if (!head) continue;
         clearTimeout(head.timer);
         let ok = false;
@@ -232,36 +266,39 @@ class CollectorLink {
       }
     });
     const drop = () => {
-      if (this.socket === s) this.socket = null;
-      this.buffer = "";
-      for (const w of this.waiting.splice(0)) {
+      if (this.conn === conn) this.conn = null;
+      conn.buffer = "";
+      for (const w of conn.waiting.splice(0)) {
         clearTimeout(w.timer);
         w.done(false);
       }
     };
     s.on("error", drop);
     s.on("close", drop);
-    return s;
+    return conn;
   }
 
   send(line: string): Promise<boolean> {
     return new Promise((done) => {
-      if (!this.socket || this.socket.destroyed) this.socket = this.dial();
-      const s = this.socket;
+      if (!this.conn || this.conn.socket.destroyed) this.conn = this.dial();
+      const conn = this.conn;
       const entry = {
         done,
         timer: setTimeout(() => {
-          const i = this.waiting.indexOf(entry);
-          if (i >= 0) this.waiting.splice(i, 1);
+          const i = conn.waiting.indexOf(entry);
+          if (i >= 0) conn.waiting.splice(i, 1);
           done(false);
-          s.destroy();
+          // The answers after this one would be matched to the wrong lines:
+          // this socket is done, and the next line dials a new one.
+          if (this.conn === conn) this.conn = null;
+          conn.socket.destroy();
         }, this.timeoutMs),
       };
-      this.waiting.push(entry);
-      s.write(line, (err) => {
+      conn.waiting.push(entry);
+      conn.socket.write(line, (err) => {
         if (err) {
-          const i = this.waiting.indexOf(entry);
-          if (i >= 0) this.waiting.splice(i, 1);
+          const i = conn.waiting.indexOf(entry);
+          if (i >= 0) conn.waiting.splice(i, 1);
           clearTimeout(entry.timer);
           done(false);
         }
@@ -270,8 +307,8 @@ class CollectorLink {
   }
 
   close(): void {
-    this.socket?.destroy();
-    this.socket = null;
+    this.conn?.socket.destroy();
+    this.conn = null;
   }
 }
 
@@ -303,6 +340,9 @@ export function boardTable(hub: {
     return { key, owner: P.seatHoleOwner(key, ids) };
   };
   const as = (who: string): P.SwarmContext => ({ sandboxRoot: S, agentId: who });
+  // One finish-line run on the host at a time: a done that arrives while
+  // one runs gets that run's answer.
+  let finishLine: Promise<Awaited<ReturnType<typeof P.runFinishLine>> | null> | null = null;
   type Call = (who: string, a: unknown[], signal: AbortSignal) => Promise<unknown>;
   const table: Record<string, Call> = {
     applySessionUsage: async (who, a) => {
@@ -382,7 +422,12 @@ export function boardTable(hub: {
       const reason = String(args.reason ?? "");
       const endsSwarm = args.createSentinel !== false && reason !== "agent_cap" && !reason.startsWith("ABANDONED: ");
       if (endsSwarm && !(await P.swarmDoneExists(S))) {
-        const run = await P.runFinishLine(S).catch(() => null);
+        finishLine ??= P.runFinishLine(S)
+          .catch(() => null)
+          .finally(() => {
+            finishLine = null;
+          });
+        const run = await finishLine;
         const verdict = P.finishLineVerdict(run, false);
         if (!verdict.proceed) throw new Error(`the harness re-ran the finish line on the host and it is not met: ${verdict.reason}`);
       }
@@ -402,7 +447,7 @@ export function boardTable(hub: {
       const bytes = Buffer.from(wire.bytes_b64, "base64");
       if (bytes.byteLength > P.HISTORY_STORE_MAX_BYTES) throw new Error(`a VM publishes up to ${P.HISTORY_STORE_MAX_BYTES} bytes; this is ${bytes.byteLength}`);
       hub.wrote(who, String(a[2] ?? ""));
-      return P.publishFile(as(who), String(a[1] ?? ""), a[2] as string | undefined, { bytes });
+      return P.publishFile(as(who), String(a[1] ?? ""), a[2] as string | undefined, { bytes, ids });
     },
     readBudget: () => P.readBudget(S),
     readBudgetStatus: (who) => P.readBudgetStatus(as(who)),
@@ -412,6 +457,9 @@ export function boardTable(hub: {
     recordFileVersion: async (who, a) => {
       const { key, owner } = await holeOf(String(a[1] ?? ""));
       if (owner && owner !== who) throw new Error(`${key} is ${owner}'s own directory; a seat records its own files`);
+      // The harness's files (custody's verdicts, the trace spill, the budget)
+      // have no revisions a seat puts its name on.
+      if (P.isProtectedPath(key)) throw new Error(`harness-owned path: ${key}; a seat records its own files and the shared ones under work/`);
       hub.wrote(who, key);
       if (!owner) return P.recordFileVersion(S, key, who);
       const wire = isObject(a[3]) ? a[3] : null;
@@ -448,8 +496,10 @@ export function boardTable(hub: {
     threadJoin: (who, a) => P.threadJoin(as(who), String(a[1] ?? "")),
     threadOpen: (who, a) => P.threadOpen(as(who), a[1] as never),
     updateToolchainRecord: (who, a) => T.updateToolchainRecord(S, isObject(a[1]) ? { agent: who, inventory: a[1] as never } : undefined),
+    // Only how long: how often the hub polls is the hub's (a guest's
+    // pollMs of 0 was a tight loop of readdir on the hub's one event loop).
     waitForSwarmChange: (who, a, signal) =>
-      P.waitForSwarmChange(as(who), { ...((a[1] as { seconds?: number; pollMs?: number }) ?? {}), signal }),
+      P.waitForSwarmChange(as(who), { seconds: Number((a[1] as { seconds?: unknown } | null)?.seconds) || undefined, signal }),
   };
   return table;
 }
@@ -470,7 +520,15 @@ export class Hub {
   private queue = new Map<string, Array<() => void>>();
   /** Per seat: connections open, and bytes buffered across them. */
   private conns = new Map<string, number>();
+  /** A Herdr report running per seat, and the newest one waiting behind it. */
+  private herdrBusy = new Set<string>();
+  private herdrNext = new Map<string, string[]>();
+  /** Bytes of lines not yet whole, per seat. */
   private buffered = new Map<string, number>();
+  /** Bytes of whole lines waiting or running, per seat, until each is answered. */
+  private held = new Map<string, number>();
+  /** Each seat's connections paused on its byte budget, resumed as its calls drain. */
+  private stalled = new Map<string, Set<() => void>>();
   /** Per seat and bucket: tokens left and when they were last topped up. */
   private buckets = new Map<string, { tokens: number; at: number }>();
   /** Per (seat, call, error): a refusal already written this window, and how many since. */
@@ -540,6 +598,13 @@ export class Hub {
   }
 
   async start(): Promise<void> {
+    // A Unix socket path the kernel takes is 103 bytes and its NUL (104 on
+    // macOS): past it `listen` fails with a bare EINVAL, which said nothing
+    // about why (measured: a 3-byte run id under macOS's TMPDIR made 105).
+    for (const path of [...this.roster.map((a) => this.socketFor(a)), this.adminSocket()]) {
+      const bytes = Buffer.byteLength(path);
+      if (bytes > SOCKET_PATH_MAX) throw new SocketPathTooLong(path, bytes);
+    }
     mkdirSync(this.cfg.dir, { recursive: true, mode: 0o700 });
     this.loadState();
     for (const agent of this.roster) {
@@ -640,11 +705,22 @@ export class Hub {
    * until the backlog drains: one VM in a loop must not grow this process
    * until it dies and takes every peer's board with it.
    */
-  private lines(socket: Socket, onLine: (line: string) => Promise<boolean> | boolean, idle = true, agent?: string): void {
+  private lines(socket: Socket, onLine: (line: string, keep: () => () => void) => Promise<boolean> | boolean, idle = true, agent?: string): void {
     let buffer = "";
     let busy = Promise.resolve(true);
     let pending = 0;
-    let paused = false;
+    // Two reasons to stop reading: too many lines waiting on this
+    // connection, or too many bytes held for its seat across all of them.
+    let pausedLines = false;
+    let pausedBytes = false;
+    const settle = () => {
+      if (pausedLines || pausedBytes) socket.pause();
+      else if (!socket.destroyed) socket.resume();
+    };
+    const unstall = () => {
+      pausedBytes = false;
+      settle();
+    };
     // What this connection holds counts against its seat's budget, so one VM
     // opening every connection it may cannot hold a line the size of the
     // limit on each of them at once.
@@ -657,14 +733,16 @@ export class Hub {
     socket.once("close", () => {
       account(-buffer.length);
       buffer = "";
+      if (agent) this.stalled.get(agent)?.delete(unstall);
     });
     socket.setEncoding("utf8");
     if (idle) socket.setTimeout(IDLE_MS, () => socket.destroy());
     socket.on("error", () => undefined);
     socket.on("data", (chunk: string) => {
       buffer += chunk;
-      const total = account(chunk.length);
-      if (buffer.length > MAX_REQUEST_BYTES || total > AGENT_BUFFER_MAX) {
+      const partial = account(chunk.length);
+      const max = this.cfg.bufferMax ?? AGENT_BUFFER_MAX;
+      if (buffer.length > MAX_REQUEST_BYTES || partial > max) {
         account(-buffer.length);
         buffer = "";
         socket.destroy();
@@ -676,23 +754,67 @@ export class Hub {
         buffer = buffer.slice(cut + 1);
         account(-(cut + 1));
         if (!line.trim()) continue;
+        // A whole line stays counted until it is handled, or, when its
+        // handler keeps it (a call that answers later), until it answers.
+        const size = cut + 1;
+        this.hold(agent, size);
+        let kept = false;
+        const keep = () => {
+          kept = true;
+          let released = false;
+          return () => {
+            if (released) return;
+            released = true;
+            this.hold(agent, -size);
+          };
+        };
         pending++;
-        if (pending >= PENDING_HIGH && !paused) {
-          paused = true;
-          socket.pause();
+        if (pending >= PENDING_HIGH && !pausedLines) {
+          pausedLines = true;
+          settle();
         }
         busy = busy
-          .then((more) => (more ? onLine(line) : false))
+          .then((more) => (more ? onLine(line, keep) : false))
           .catch(() => false)
           .finally(() => {
+            if (!kept) this.hold(agent, -size);
             pending--;
-            if (paused && pending <= PENDING_LOW) {
-              paused = false;
-              socket.resume();
+            if (pausedLines && pending <= PENDING_LOW) {
+              pausedLines = false;
+              settle();
             }
           });
       }
+      // Held bytes drain as calls answer; until then this connection reads
+      // no more. Bytes of lines not yet whole cannot drain while paused, so
+      // they alone never pause a connection (they cut it, above).
+      if (agent && !pausedBytes && (this.held.get(agent) ?? 0) > 0 && (this.buffered.get(agent) ?? 0) + (this.held.get(agent) ?? 0) > max) {
+        pausedBytes = true;
+        settle();
+        const set = this.stalled.get(agent) ?? new Set();
+        set.add(unstall);
+        this.stalled.set(agent, set);
+      }
     });
+  }
+
+  /** Bytes of whole lines held for `agent`: waiting, or kept by a call until it answers. */
+  private hold(agent: string | undefined, delta: number): void {
+    if (!agent) return;
+    const now = Math.max(0, (this.held.get(agent) ?? 0) + delta);
+    this.held.set(agent, now);
+    if (delta >= 0) return;
+    // Below a quarter of the budget the seat's paused connections read again.
+    const stalled = this.stalled.get(agent);
+    if (stalled?.size && now <= (this.cfg.bufferMax ?? AGENT_BUFFER_MAX) / 4) {
+      this.stalled.delete(agent);
+      for (const resume of stalled) resume();
+    }
+  }
+
+  /** What a seat holds here now: lines not yet whole, and whole ones not yet answered. */
+  heldBytes(agent: string): number {
+    return (this.buffered.get(agent) ?? 0) + (this.held.get(agent) ?? 0);
   }
 
   private reply(socket: Socket, body: unknown, end: boolean): void {
@@ -722,7 +844,7 @@ export class Hub {
       for (const c of running.values()) c.abort();
       running.clear();
     });
-    this.lines(socket, async (line) => {
+    this.lines(socket, async (line, keep) => {
       const seen = this.status.get(agent);
       if (seen) seen.last_seen = new Date().toISOString();
       let msg: unknown;
@@ -744,6 +866,13 @@ export class Hub {
         this.setState(agent, String(msg.state ?? "unknown"), typeof msg.detail === "string" ? msg.detail : undefined);
         return true;
       }
+      if (msg.t === "rpc" && line.length > RPC_LINE_MAX && !FILE_FNS.has(String(msg.fn ?? ""))) {
+        const error = `a ${String(msg.fn ?? "")} call of ${line.length} bytes is past the ${RPC_LINE_MAX}-byte limit for a call that carries no file`;
+        void this.refused(agent, String(msg.fn ?? ""), error);
+        const held = typeof msg.id === "number";
+        this.reply(socket, held ? { t: "rpc", id: msg.id, ok: false, error } : { ok: false, error }, !held);
+        return held;
+      }
       if (msg.t === "rpc" && typeof msg.id === "number") {
         // Many calls on one held connection, each answered when it finishes:
         // a VM makes one connection for its board calls instead of one per
@@ -753,9 +882,13 @@ export class Hub {
         const id = msg.id;
         const controller = new AbortController();
         running.set(id, controller);
+        // The call's arguments stay in memory until it answers: its line's
+        // bytes stay counted against the seat until then.
+        const release = keep();
         void this.slot(agent).then(async (got) => {
           if (!got) {
             running.delete(id);
+            release();
             this.reply(socket, { t: "rpc", id, ok: false, error: `too many board calls waiting (${IN_FLIGHT_MAX} running, ${QUEUE_MAX} queued); slow down` }, false);
             return;
           }
@@ -764,6 +897,7 @@ export class Hub {
             this.reply(socket, { t: "rpc", id, ...result }, false);
           } finally {
             running.delete(id);
+            release();
             this.release(agent);
           }
         });
@@ -889,7 +1023,8 @@ export class Hub {
     if (!handler) return { ok: false, error: `${fn} is not a board function` };
     if (!this.takeToken(who, fn)) {
       const limit = RATE_LIMITS[fn];
-      const error = `slow down: ${fn} past ${limit.capacity} in a burst and ${limit.perSecond} a second after; wait and send again`;
+      const pace = limit.perSecond >= 1 ? `${limit.perSecond} a second` : `one every ${Math.round(1 / limit.perSecond)} seconds`;
+      const error = `slow down: ${fn} past ${limit.capacity} in a burst and ${pace} after; wait and send again`;
       void this.refused(who, fn, error);
       return { ok: false, error };
     }
@@ -1084,9 +1219,18 @@ export class Hub {
     return { ok };
   }
 
-  setState(agent: string, state: string, detail?: string): void {
+  setState(agent: string, rawState: string, rawDetail?: string): void {
     const st = this.status.get(agent);
     if (!st) return;
+    // The states the extension sends, and a short line of text without the
+    // control characters a terminal acts on: both reach the operator's
+    // Herdr and status.json, and a guest writes them.
+    const state = SEAT_STATES.has(rawState) ? rawState : "unknown";
+    let detail = rawDetail === undefined ? undefined : rawDetail.replace(TERMINAL_CONTROLS, "");
+    if (detail !== undefined && detail.length > STATE_DETAIL_MAX) {
+      void this.refused(agent, "state", `a state detail of ${detail.length} characters is past the ${STATE_DETAIL_MAX}-character limit; the state is kept without it`);
+      detail = undefined;
+    }
     // A state line that says what the last one said changes nothing: no
     // status write and no Herdr process, so a VM repeating itself in a loop
     // does not fork a process on the host per line.
@@ -1096,11 +1240,35 @@ export class Hub {
     st.detail = detail;
     this.writeStatus();
     const pane = this.panes.get(agent);
-    if (pane && ["idle", "working", "blocked", "unknown"].includes(state)) {
+    if (pane) {
       const args = ["pane", "report-agent", pane, "--source", "dfirswarm-vm", "--agent", "pi", "--state", state];
       if (detail) args.push("--message", detail);
-      execFile(this.cfg.herdrBin || process.env.HERDR_BIN || "herdr", args, { timeout: 5000 }, () => undefined);
+      this.reportPane(agent, args);
     }
+  }
+
+  /**
+   * One Herdr report per seat at a time, spaced out, and only the newest one
+   * waiting: a VM that alternates its state in a loop forked a Herdr process
+   * per line (measured: 400 lines, about 214 processes alive at once).
+   */
+  private reportPane(agent: string, args: string[]): void {
+    if (this.herdrBusy.has(agent)) {
+      this.herdrNext.set(agent, args);
+      return;
+    }
+    this.herdrBusy.add(agent);
+    execFile(this.cfg.herdrBin || process.env.HERDR_BIN || "herdr", args, { timeout: 5000 }, () => {
+      const gap = setTimeout(() => {
+        this.herdrBusy.delete(agent);
+        const next = this.herdrNext.get(agent);
+        if (next) {
+          this.herdrNext.delete(agent);
+          this.reportPane(agent, next);
+        }
+      }, HERDR_REPORT_GAP_MS);
+      gap.unref?.();
+    });
   }
 
   statusSnapshot(): Record<string, AgentState> {
@@ -1270,8 +1438,17 @@ export class Hub {
         continue;
       }
       if (now - told < P.STOP_GRACE_MS) continue;
-      await P.markDone({ sandboxRoot: S, agentId: agent }, { reason: "agent_cap", outputFile: "", createSentinel: false }).catch(() => undefined);
-      await this.event("agent_cap_stop", { via: "hub", agent }, { ok: true });
+      // The output names what stopped the seat, as its extension's own stop
+      // does: done refuses an empty one, and a stop that wrote no marker
+      // is said as failed and tried again on the next tick, not said done.
+      const model = budget.agents[agent]?.model;
+      const outputFile = mine.over ? "(stopped by the per-agent cap)" : `(stopped by the per-model cap on ${model ?? "its model"})`;
+      const marked = await P.markDone({ sandboxRoot: S, agentId: agent }, { reason: "agent_cap", outputFile, createSentinel: false }).then(
+        () => ({ ok: true as const }),
+        (err: unknown) => ({ ok: false as const, error: err instanceof Error ? err.message : String(err) }),
+      );
+      await this.event("agent_cap_stop", { via: "hub", agent }, marked);
+      if (!marked.ok) continue;
       this.seatSteer.delete(agent);
       this.saveState();
       await this.finishOne(agent);
@@ -1286,11 +1463,11 @@ export class Hub {
     return args;
   }
 
-  private runVmCli(args: string[], timeoutMs: number): Promise<{ ok: boolean; out: string }> {
+  private runVmCli(args: string[], timeoutMs: number): Promise<{ ok: boolean; out: string; msbDb: Array<{ agent: string; name: string; msb_db: string }> }> {
     return new Promise((done) => {
       execFile(process.execPath, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
         const out = `${String(stdout).trim()} ${String(stderr).trim()}`.trim();
-        done({ ok: !err, out: err ? `${err.message} ${out}`.trim() : out });
+        done({ ok: !err, out: err ? `${err.message} ${out}`.trim() : out, msbDb: msbDbOutcomes(String(stdout)) });
       });
     });
   }
@@ -1318,7 +1495,7 @@ export class Hub {
     if (!this.cfg.vmCli || !this.cfg.run) return;
     const r = await this.runVmCli(this.vmCliArgs(["--agent", agent]), 20 * 60_000);
     this.log(`finish ${agent}: ${r.ok ? "ok" : "failed"} ${r.out}`);
-    await this.event("vm_finish", { via: "hub", agent }, { ok: r.ok, ...(r.ok ? {} : { error: r.out }) });
+    await this.event("vm_finish", { via: "hub", agent }, { ok: r.ok, ...(r.ok ? {} : { error: r.out }), ...(r.msbDb.length ? { msb_db: r.msbDb } : {}) });
   }
 
   /**
@@ -1332,14 +1509,18 @@ export class Hub {
     if (!this.cfg.vmCli || !this.cfg.run) return;
     const r = await this.runVmCli(this.vmCliArgs([]), (this.roster.length + 1) * 20 * 60_000);
     this.log(`finish: ${r.ok ? "ok" : "failed"} ${r.out}`);
-    await this.event("vm_finish", { via: "hub", all_out: allOut }, { ok: r.ok, ...(r.ok ? {} : { error: r.out }) });
+    await this.event("vm_finish", { via: "hub", all_out: allOut }, { ok: r.ok, ...(r.ok ? {} : { error: r.out }), ...(r.msbDb.length ? { msb_db: r.msbDb } : {}) });
     if (this.cfg.registry) await updateRegistryState(this.cfg.registry, this.cfg.run, r.ok ? "finished" : "finish_failed").catch((err: Error) => this.log(`registry: ${err.message}`));
     await this.flushRefusals().catch(() => undefined);
     this.copySpill();
     const custody = join(dirname(this.cfg.vmCli), "custody.ts");
     if (existsSync(custody)) {
+      // The operator's bound on custody, as `swarm.sh stop --custody-timeout`
+      // takes it (SWARM_CUSTODY_TIMEOUT), with the same five minutes past it
+      // before the process is ended.
+      const timeoutSec = this.cfg.custodyTimeoutSec ?? custodyTimeoutSec();
       const c = await new Promise<{ ok: boolean; out: string }>((done) => {
-        execFile(process.execPath, ["--experimental-strip-types", "--no-warnings", custody, this.cfg.sandbox, "--run", this.cfg.run as string, "--timeout", "14400"], { timeout: 5 * 60 * 60_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+        execFile(process.execPath, ["--experimental-strip-types", "--no-warnings", custody, this.cfg.sandbox, "--run", this.cfg.run as string, "--timeout", String(timeoutSec)], { timeout: (timeoutSec + 300) * 1000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
           done({ ok: !err, out: `${String(stdout).trim()} ${String(stderr).trim()}`.trim() });
         });
       });
@@ -1426,6 +1607,14 @@ export async function updateRegistryState(registry: string, runId: string, state
       mkdirSync(lock);
       break;
     } catch {
+      // A lock older than a minute is a writer that died holding it, as
+      // swarm.sh's registry_lock reads it: a stop killed mid-write must not
+      // keep the hub from recording the run finished.
+      const age = await stat(lock).then((st) => Date.now() - st.mtimeMs).catch(() => 0);
+      if (age > 60_000) {
+        rmSync(lock, { recursive: true, force: true });
+        continue;
+      }
       await new Promise((r) => setTimeout(r, 100));
       if (i === 99) throw new Error(`the registry is locked (${lock})`);
     }
@@ -1472,7 +1661,46 @@ type HubInput = {
 };
 
 /** The environment a hub runs with that must survive a --resume. */
-const KEPT_ENV = ["SWARM_INBOX_PAGE_CHARS", "SWARM_RUNS_DIR", "SWARM_VM_IMAGE_DIGEST"];
+/** The longest Unix socket path, in bytes, that every platform the hub runs on binds (macOS: 104 with the NUL). */
+export const SOCKET_PATH_MAX = 103;
+
+/** A hub socket path past SOCKET_PATH_MAX: named, with the path and its length. */
+export class SocketPathTooLong extends Error {
+  readonly code = "ESOCKETPATH";
+  readonly path: string;
+  readonly bytes: number;
+  constructor(path: string, bytes: number) {
+    super(`the hub socket path ${path} is ${bytes} bytes, past the ${SOCKET_PATH_MAX} a Unix socket can take: start the hub in a shorter directory`);
+    this.name = "SocketPathTooLong";
+    this.path = path;
+    this.bytes = bytes;
+  }
+}
+
+/** Each removed VM's msb database outcome, from `vm.ts finish`'s JSON (FinishEntry.msb_db). */
+export function msbDbOutcomes(stdout: string): Array<{ agent: string; name: string; msb_db: string }> {
+  for (const line of stdout.split("\n").reverse()) {
+    if (!line.trim().startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(line) as { vms?: Array<{ agent?: unknown; name?: unknown; msb_db?: unknown }> };
+      if (!Array.isArray(parsed.vms)) continue;
+      return parsed.vms
+        .filter((v) => typeof v.msb_db === "string")
+        .map((v) => ({ agent: String(v.agent ?? ""), name: String(v.name ?? ""), msb_db: v.msb_db as string }));
+    } catch {
+      // not the finish's line
+    }
+  }
+  return [];
+}
+
+const KEPT_ENV = ["SWARM_INBOX_PAGE_CHARS", "SWARM_RUNS_DIR", "SWARM_VM_IMAGE_DIGEST", "SWARM_CUSTODY_TIMEOUT"];
+
+/** Custody's bound when the hub takes it: the operator's SWARM_CUSTODY_TIMEOUT, else stop's default. */
+export function custodyTimeoutSec(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SWARM_CUSTODY_TIMEOUT);
+  return Number.isInteger(n) && n > 0 ? n : 14400;
+}
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -1539,25 +1767,10 @@ async function main(): Promise<void> {
   // One hub per run: a second (a watchdog and the keeper both restarting a
   // hub that died) would take the first's sockets and run a second stop clock.
   const lockFile = join(input.dir, "hub.lock");
-  try {
-    const other = Number.parseInt(readFileSync(lockFile, "utf8"), 10);
-    if (Number.isInteger(other) && other > 0 && other !== process.pid) {
-      let alive = false;
-      try {
-        process.kill(other, 0);
-        alive = true;
-      } catch {
-        alive = false;
-      }
-      if (alive) {
-        console.error(`vm-hub: a hub for ${input.dir} is already running (pid ${other}); not starting a second`);
-        process.exit(0);
-      }
-    }
-  } catch {
-    // no lock yet
+  if (!takeHubLock(lockFile, input.dir)) {
+    console.error(`vm-hub: a hub for ${input.dir} is already running; not starting a second`);
+    process.exit(0);
   }
-  writeFileSync(lockFile, `${process.pid}\n`, { mode: 0o600 });
   const hub = new Hub(input);
   await hub.start();
   console.error(`vm-hub: up${resumeDir ? " (resumed)" : ""}, ${input.agents.length} agent socket(s) in ${input.dir}`);
@@ -1566,6 +1779,51 @@ async function main(): Promise<void> {
   // Not SIGINT: a run started from the console's terminal shares its process
   // group, and the operator's Ctrl-C there must not take the stop with it.
   process.on("SIGINT", () => undefined);
+}
+
+/**
+ * Whether `pid` is a hub serving `dir`: alive, and its command line is this
+ * script's with that directory. A bare pid alive is not enough: after a
+ * crash the dead hub's pid can be any process of the user's, and a resumed
+ * hub that took it for a live one exited, until the keeper gave up.
+ */
+export function isHubProcess(pid: number, dir: string): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  let command: string;
+  try {
+    command = execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 5000 });
+  } catch {
+    // No answer from ps: a live pid is taken for the hub, as before.
+    return true;
+  }
+  return command.includes("vm-hub") && command.includes(basename(dir));
+}
+
+/**
+ * Take the run's hub lock: created exclusively, so two hubs starting at once
+ * cannot both pass; one that names a process which is not a hub for this
+ * directory is stale and is replaced.
+ */
+export function takeHubLock(lockFile: string, dir: string): boolean {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fd = openSync(lockFile, "wx", 0o600);
+      writeSync(fd, `${process.pid}\n`);
+      closeSync(fd);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+    const other = Number.parseInt(readFileSync(lockFile, "utf8"), 10);
+    if (other === process.pid) return true;
+    if (Number.isInteger(other) && other > 0 && isHubProcess(other, dir)) return false;
+    rmSync(lockFile, { force: true });
+  }
+  return false;
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

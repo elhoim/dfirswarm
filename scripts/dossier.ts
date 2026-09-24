@@ -10,11 +10,12 @@
  * This builds that set once. `--write DIR` is what `swarm.sh package` calls.
  */
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EVENTS_REL } from "../extensions/protocol.ts";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
+import { hashRegularFile } from "./regular-file.ts";
 import { renderReport, type ReportOptions } from "./report.ts";
 import { summarize } from "./summary.ts";
 
@@ -38,6 +39,30 @@ export type Dossier = {
 
 function sha256OfString(text: string): string {
   return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * A file the dossier lists and does not rewrite (the trace, the ledger):
+ * its size and sha256, read as it lies. One that is not there is `missing`
+ * (the caller says why that is normal); one that is there and could not be
+ * read (a link, a directory, a read that failed) says so, rather than
+ * passing for a run that produced none. Hashed as a stream: a trace past
+ * the size one string can hold is listed, not dropped.
+ */
+async function listedFile(
+  path: string,
+  name: string,
+  description: string,
+  type: string,
+  missingReason: string,
+): Promise<DossierFile> {
+  const r = await hashRegularFile(path).catch((err: Error) => ({ why: `unreadable (${(err as NodeJS.ErrnoException).code ?? err.message})` }));
+  if (r === null) return { name, description, type, present: false, reason: "could not be read: interrupted", bytes: null, sha256: null };
+  if ("why" in r) {
+    const reason = r.why === "missing" ? missingReason : `there, and could not be read: ${r.why}`;
+    return { name, description, type, present: false, reason, bytes: null, sha256: null };
+  }
+  return { name, description, type, present: true, bytes: r.size, sha256: r.sha256 };
 }
 
 function fileOf(
@@ -67,9 +92,9 @@ export async function buildDossier(sandboxArg: string, options: ReportOptions = 
   const [reportHtml, summaryMd, ledgerJsonl, ledgerMd, trace] = await Promise.all([
     renderReport(sandbox, { ...options, artifacts }),
     summarize(sandbox, { runsDir: options.runsDir }),
-    readFile(join(sandbox, "ledger", "entries.jsonl"), "utf8").catch(() => null),
-    readFile(join(sandbox, "ledger", "ledger.md"), "utf8").catch(() => null),
-    readFile(join(sandbox, EVENTS_REL), "utf8").catch(() => null),
+    listedFile(join(sandbox, "ledger", "entries.jsonl"), "ledger.jsonl", "The timeline, indicators and findings as the agents recorded them.", "application/x-ndjson; charset=utf-8", "nothing recorded"),
+    listedFile(join(sandbox, "ledger", "ledger.md"), "ledger.md", "The same ledger, rendered.", "text/markdown; charset=utf-8", "nothing recorded"),
+    listedFile(join(sandbox, EVENTS_REL), "trace.jsonl", "Every tool call the swarm made, whole — not the page the Traces tab shows.", "application/x-ndjson; charset=utf-8", "not produced"),
   ]);
   const files: DossierFile[] = [
     fileOf(
@@ -93,27 +118,9 @@ export async function buildDossier(sandboxArg: string, options: ReportOptions = 
       artifactsJson,
       "not produced",
     ),
-    fileOf(
-      "ledger.jsonl",
-      "The timeline, indicators and findings as the agents recorded them.",
-      "application/x-ndjson; charset=utf-8",
-      ledgerJsonl,
-      "nothing recorded",
-    ),
-    fileOf(
-      "ledger.md",
-      "The same ledger, rendered.",
-      "text/markdown; charset=utf-8",
-      ledgerMd,
-      "nothing recorded",
-    ),
-    fileOf(
-      "trace.jsonl",
-      "Every tool call the swarm made, whole — not the page the Traces tab shows.",
-      "application/x-ndjson; charset=utf-8",
-      trace,
-      "not produced",
-    ),
+    ledgerJsonl,
+    ledgerMd,
+    trace,
   ];
   return { artifacts, reportHtml, summaryMd, artifactsJson, files };
 }

@@ -86,6 +86,7 @@ import {
   isOwnScratch,
   realPathKey,
   nudgePeerViaBroker,
+  postSender,
 } from "./protocol.ts";
 // The board: protocol.ts on the host, the hub on the other side of a VM's wall (board.ts says why).
 import {
@@ -291,7 +292,12 @@ export function hubLostStep(state: HubLostState, ok: boolean, now: number): { st
  */
 let traceLinesLost = 0;
 
-async function logEvent(
+/** How many trace lines were lost and not yet told on a later line (tests read it). */
+export function traceLinesLostCount(): number {
+  return traceLinesLost;
+}
+
+export async function logEvent(
   cwd: string,
   agentId: string,
   tool: string,
@@ -299,7 +305,11 @@ async function logEvent(
   result: unknown,
   durationMs?: number,
 ): Promise<void> {
+  // Taken, not read: two lines written at once (a tool's call and its
+  // result, parallel tools) must not both carry the same count, which
+  // custody would add up twice.
   const lost = traceLinesLost;
+  traceLinesLost = 0;
   try {
     await appendEvent(cwd, {
       agent: agentId || "unknown",
@@ -310,10 +320,10 @@ async function logEvent(
           ? result
           : { ...(result as Record<string, unknown>), duration_ms: durationMs },
     });
-    traceLinesLost -= lost;
   } catch (err) {
-    // observability must not break the protocol, and must not go quiet either
-    traceLinesLost += 1;
+    // observability must not break the protocol, and must not go quiet
+    // either: this line and the count it carried go to the next one.
+    traceLinesLost += lost + 1;
     try {
       process.stderr.write(`dfirswarm: a trace line (${tool}) reached neither the collector nor the spill: ${err instanceof Error ? err.message : String(err)}\n`);
     } catch {
@@ -1714,7 +1724,8 @@ export default function (pi: ExtensionAPI) {
         posts: box.posts.map((p) => ({
           id: p.id,
           thread: p.thread,
-          from: p.from,
+          from: postSender(p),
+          ...(p.via ? { via: p.via } : {}),
           to: p.to,
           tag: p.tag,
           path: p.path,
@@ -1970,7 +1981,8 @@ export default function (pi: ExtensionAPI) {
           box?.posts.map((p) => ({
             id: p.id,
             thread: p.thread,
-            from: p.from,
+            from: postSender(p),
+            ...(p.via ? { via: p.via } : {}),
             to: p.to,
             tag: p.tag,
             body: p.body,
@@ -1987,7 +1999,7 @@ export default function (pi: ExtensionAPI) {
           reason: result.reason,
           waited_ms: result.waited_ms,
           n: payload.posts.length,
-          ...(box ? { from: box.posts.map((p) => p.from), ids: box.posts.map((p) => p.id), remaining } : {}),
+          ...(box ? { from: box.posts.map((p) => postSender(p)), ids: box.posts.map((p) => p.id), remaining } : {}),
         },
         Date.now() - started,
       );
@@ -2507,7 +2519,7 @@ export default function (pi: ExtensionAPI) {
     name: "record",
     label: "Record",
     description:
-      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 UTC), ioc (an indicator: address, hash, file, account) or finding (a conclusion). Both source and evidence are required: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. The harness renders ledger/ledger.md — timeline, indicators, findings — after every record; cite that file in the report.",
+      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account) or finding (a conclusion). Both source and evidence are required: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. The harness renders ledger/ledger.md — timeline, indicators, findings — after every record; cite that file in the report.",
     promptSnippet: "Record a dated event, an indicator or a finding with its evidence",
     promptGuidelines: [
       "Record every dated event you establish as kind=event with ts in UTC; the timeline is built from them.",
@@ -2517,7 +2529,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       kind: Type.Union(LEDGER_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding" }),
       value: Type.String({ description: "The event, indicator or finding, in one sentence" }),
-      ts: Type.Optional(Type.String({ description: "ISO 8601 UTC time of an event" })),
+      ts: Type.Optional(Type.String({ description: "The event's time, ISO 8601 with its zone: 2024-01-15T12:44:22Z, or 2024-01-15T15:44:22+03:00 as the source records it. A time without a zone is refused." })),
       source: Type.String({ description: "Where it was seen: a path, log, plugin, registry key. Required." }),
       evidence: Type.String({ description: "How to check it: command, inode, record id, hash. Required." }),
       confidence: Type.Optional(Type.Union(LEDGER_CONFIDENCE.map((c) => Type.Literal(c)))),
@@ -2646,6 +2658,7 @@ export default function (pi: ExtensionAPI) {
           metadata: inputsCheck.metadata,
           missing: inputsCheck.missing,
           added: inputsCheck.added,
+          ...(inputsCheck.digest_mismatch.length ? { digest_mismatch: inputsCheck.digest_mismatch } : {}),
         });
       }
       // The finish line, before the sentinel: the operator's checks, run now.

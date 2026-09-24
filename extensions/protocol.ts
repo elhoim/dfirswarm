@@ -32,6 +32,7 @@ import {
 } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -124,12 +125,26 @@ export const PROTECTED_FILES = [
   // which process is the hub, and which directory is its to delete.
   "hub.pid",
   "hub.dir",
-  // The harness's own verdict on the run, taken on the host after it ended.
+  // The harness's own verdict on the run, taken on the host after it ended,
+  // its earlier verdicts (custody.<stamp>.json, custody.previous*.json:
+  // PROTECTED_ROOT_PATTERNS) and the index of the run's artifacts.
   "custody.json",
+  "artifacts.json",
   "compact-prompt.md",
   // The kickoff each agent's Pi starts with.
   ".kickoff",
+  // The host's spill of trace lines the collector did not take
+  // (TRACE_SPILL_REL): custody reads it as the harness's own record.
+  "work/.trace-spill.jsonl",
 ] as const;
+
+/**
+ * Harness files at the sandbox root named by a pattern: custody's earlier
+ * verdicts (custody.<stamp>.json, custody.previous.json,
+ * custody.previous-<stamp>.json) and a custody.json it moved aside. Keys
+ * are lower-cased before the test.
+ */
+export const PROTECTED_ROOT_PATTERNS: readonly RegExp[] = [/^custody\.[^/]*$/];
 
 /**
  * True when `pathKey` (sandbox-relative, forward slashes) belongs to the
@@ -141,6 +156,7 @@ export const PROTECTED_FILES = [
 export function isProtectedPath(pathKey: string): boolean {
   const key = pathKey.replace(/^\.\//, "").toLowerCase();
   if ((PROTECTED_FILES as readonly string[]).some((file) => file.toLowerCase() === key)) return true;
+  if (PROTECTED_ROOT_PATTERNS.some((re) => re.test(key))) return true;
   return (PROTECTED_PREFIXES as readonly string[]).some((prefix) =>
     key.startsWith(prefix.toLowerCase()),
   );
@@ -621,7 +637,7 @@ export type PublishResult = { ok: true; path: string; from: string; sha256: stri
  * a directory a running seat can rearrange. On the host the same call does
  * the same thing, so a goal reads the same either way.
  */
-export async function publishFile(ctx: SwarmContext, fromRaw: string, toRaw?: string, options: { bytes?: Buffer } = {}): Promise<PublishResult> {
+export async function publishFile(ctx: SwarmContext, fromRaw: string, toRaw?: string, options: { bytes?: Buffer; ids?: string[] } = {}): Promise<PublishResult> {
   let fromKey: string;
   try {
     fromKey = await realPathKey(ctx.sandboxRoot, fromRaw);
@@ -641,7 +657,17 @@ export async function publishFile(ctx: SwarmContext, fromRaw: string, toRaw?: st
     return { ok: false, reason: (err as Error).message, path: lexicalTo };
   }
   if (!toKey.startsWith("work/") || toKey === "work/") return { ok: false, reason: `a file is published under work/: ${toKey}`, path: toKey };
-  const owner = seatHoleOwner(toKey, [ctx.agentId, ...(await teamIds(ctx.sandboxRoot))]) ?? seatHoleOwner(lexicalTo, await teamIds(ctx.sandboxRoot));
+  // work/'s dot entries are the run's own: the trace spill custody reads,
+  // the shared install area, the panes' temp directory.
+  if (/^work\/\./.test(toKey) || isProtectedPath(toKey)) {
+    return { ok: false, reason: `${toKey} is the harness's, not a shared file: publish to a name under work/ that does not start with a dot`, path: toKey };
+  }
+  // Whose directories are whose: the hub's roster when it passes one, else
+  // the team file. With neither there is no telling a peer's directory from
+  // a shared one, and nothing is published.
+  const ids = options.ids?.length ? options.ids : await teamIds(ctx.sandboxRoot);
+  if (!ids.length) return { ok: false, reason: "the run's team cannot be read, so a peer's directory cannot be told from a shared one; nothing is published", path: toKey };
+  const owner = seatHoleOwner(toKey, [ctx.agentId, ...ids]) ?? seatHoleOwner(lexicalTo, ids);
   if (owner && owner.toLowerCase() === ctx.agentId.toLowerCase()) return { ok: false, reason: `${toKey} is your own directory already; publish puts a file in the shared part of work/`, path: toKey };
   if (owner) return { ok: false, reason: `${toKey} is ${owner}'s own directory; a peer's scratch is theirs to write`, path: toKey };
   let bytes: Buffer;
@@ -913,17 +939,30 @@ function perModelCaps(raw: unknown): Record<string, number> {
   return caps;
 }
 
+/**
+ * A file every reader must see whole: written beside itself and renamed,
+ * which is atomic on POSIX. A plain writeFile truncates first, and a writer
+ * killed in between left budget.json empty, which the next usage fold then
+ * rebuilt from defaults: no cap, a fifteen-minute clock started now.
+ */
+export async function writeFileAtomic(path: string, text: string): Promise<void> {
+  const staging = join(dirname(path), `.${basename(path)}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`);
+  try {
+    await writeFile(staging, text, "utf8");
+    await rename(staging, path);
+  } catch (err) {
+    await rm(staging, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
 export async function readBudget(sandboxRoot: string): Promise<BudgetRecord> {
   const raw = await readFile(join(sandboxRoot, "budget.json"), "utf8");
   return normalizeBudget(JSON.parse(raw) as Partial<BudgetRecord>);
 }
 
 export async function writeBudget(sandboxRoot: string, budget: BudgetRecord): Promise<void> {
-  await writeFile(
-    join(sandboxRoot, "budget.json"),
-    `${JSON.stringify(normalizeBudget(budget), null, 2)}\n`,
-    "utf8",
-  );
+  await writeFileAtomic(join(sandboxRoot, "budget.json"), `${JSON.stringify(normalizeBudget(budget), null, 2)}\n`);
 }
 
 /**
@@ -1321,6 +1360,16 @@ export async function readPost(file: string): Promise<PostRecord> {
     ...(attrs.name ? { name: attrs.name } : {}),
     ...(attrs.via ? { via: attrs.via } : {}),
   };
+}
+
+/**
+ * Who a post is from, as an agent reads it. A harness post sent from inside
+ * a VM (a seat's extension posting a veto or a notice) is the harness code
+ * in that seat's VM, which the seat's guest root controls: peers read it as
+ * that seat's, never as the harness's own.
+ */
+export function postSender(post: { from: string; via?: string }): string {
+  return post.via ? `${post.from} via ${post.via}` : post.from;
 }
 
 export function normalizeThreadName(raw: string | undefined): string {
@@ -1876,28 +1925,73 @@ export type AgentMarker = "done" | "dead" | "stalled" | "active";
 const eventLogCache = new Map<string, { size: number; mtimeMs: number; events: readonly SwarmEvent[] }>();
 const EVENT_LOG_CACHE_MAX = 64;
 
-export async function readEventLog(sandboxRoot: string): Promise<readonly SwarmEvent[]> {
+/** Why each sandbox's trace could not be read at its last read; absent when it was read, or is not there. */
+const eventLogProblems = new Map<string, string>();
+
+/**
+ * The event log and, when there is one but it could not be read, why: a
+ * trace that is a link, a directory or a FIFO, or a read that failed, is
+ * not "no trace". Read line by line, so a trace past the size one string
+ * can hold (512 MB) is read too, not dropped whole.
+ */
+export async function readEventLogChecked(sandboxRoot: string): Promise<{ events: readonly SwarmEvent[]; unreadable: string | null }> {
   const file = join(sandboxRoot, EVENTS_REL);
-  const info = await stat(file).catch(() => null);
-  if (!info) {
+  const fail = (why: string) => {
     eventLogCache.delete(file);
-    return [];
+    eventLogProblems.set(file, why);
+    return { events: [] as readonly SwarmEvent[], unreadable: why };
+  };
+  const info = await lstat(file).catch((err: NodeJS.ErrnoException) => (err.code === "ENOENT" || err.code === "ENOTDIR" ? null : err));
+  if (info === null) {
+    eventLogCache.delete(file);
+    eventLogProblems.delete(file);
+    return { events: [], unreadable: null };
   }
+  if (info instanceof Error) return fail(`unreadable (${(info as NodeJS.ErrnoException).code ?? info.message})`);
+  if (info.isSymbolicLink()) return fail("a link, not the trace");
+  if (!info.isFile()) return fail("not a regular file");
   const hit = eventLogCache.get(file);
-  if (hit && hit.size === info.size && hit.mtimeMs === info.mtimeMs) return hit.events;
-  const raw = await readFile(file, "utf8").catch(() => "");
+  if (hit && hit.size === info.size && hit.mtimeMs === info.mtimeMs) {
+    eventLogProblems.delete(file);
+    return { events: hit.events, unreadable: null };
+  }
   const events: SwarmEvent[] = [];
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      events.push(JSON.parse(line) as SwarmEvent);
-    } catch {
-      // a torn line is skipped, not fatal
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    handle = await open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    const lines = createInterface({ input: handle.createReadStream({ autoClose: false, encoding: "utf8" }), crlfDelay: Infinity });
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        events.push(JSON.parse(line) as SwarmEvent);
+      } catch {
+        // a torn line is skipped, not fatal
+      }
     }
+  } catch (err) {
+    return fail(`unreadable (${(err as NodeJS.ErrnoException).code ?? (err as Error).message})`);
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
   if (eventLogCache.size >= EVENT_LOG_CACHE_MAX) eventLogCache.clear();
   eventLogCache.set(file, { size: info.size, mtimeMs: info.mtimeMs, events });
-  return events;
+  eventLogProblems.delete(file);
+  return { events, unreadable: null };
+}
+
+/**
+ * The event log, parsed, for readers that want the lines only. A trace
+ * that is there and could not be read gives no lines here; `eventLogProblem`
+ * (or readEventLogChecked) says why, so a caller can say it too rather than
+ * report a run with no trace.
+ */
+export async function readEventLog(sandboxRoot: string): Promise<readonly SwarmEvent[]> {
+  return (await readEventLogChecked(sandboxRoot)).events;
+}
+
+/** Why the sandbox's trace could not be read at its last read, or null. */
+export function eventLogProblem(sandboxRoot: string): string | null {
+  return eventLogProblems.get(join(sandboxRoot, EVENTS_REL)) ?? null;
 }
 
 export async function lastAgentActivityMs(
@@ -2914,9 +3008,13 @@ export async function applySessionUsage(
   first_over: boolean;
 }> {
   return withTableLock(sandboxRoot, async () => {
-    const budget = await readBudget(sandboxRoot).catch(() =>
-      normalizeBudget({ started_at: new Date().toISOString() }),
-    );
+    // A sandbox with no budget yet starts one; a budget.json that is there
+    // and does not read is the run's caps, and is never rebuilt from
+    // defaults (no cap, a fifteen-minute clock started now).
+    const budget = await readBudget(sandboxRoot).catch((err: NodeJS.ErrnoException) => {
+      if (err?.code === "ENOENT") return normalizeBudget({ started_at: new Date().toISOString() });
+      throw new Error(`budget.json does not read (${err instanceof Error ? err.message : String(err)}); its caps are left as they are`);
+    });
     if (options.monotonic) {
       // Checked here, under the table lock, against the row this write
       // replaces: two reports in flight at once cannot both pass a check made
@@ -3094,7 +3192,7 @@ export async function recordFileVersion(
       ...(bytes ? {} : { stored: false as const }),
     };
     versions.push(record);
-    await writeFile(join(dir, "index.json"), `${JSON.stringify(versions, null, 2)}\n`, "utf8");
+    await writeFileAtomic(join(dir, "index.json"), `${JSON.stringify(versions, null, 2)}\n`);
     return record;
   });
 }
@@ -3587,8 +3685,35 @@ const BASH_WATCH_FILES = ["SWARM.md", "team.json", "layout.json", SENTINEL_REL] 
 // too: a shell that rewrote it would unsay what the harness kept.
 const APPEND_ONLY_WATCH = ["ledger/entries.jsonl", "traces/events.jsonl", TRACE_SPILL_REL] as const;
 
-/** Size and full digest of an append-only record, taken before a shell call. */
-export type AppendOnlyMark = { size: number; sha: string };
+/**
+ * Size and full digest of an append-only record, taken before a shell call.
+ * The ledger also keeps the digest of its entries' chained cores: a merge
+ * (a second agent citing an entry) rewrites the file to add an author, which
+ * changes its bytes and not one chained core.
+ */
+export type AppendOnlyMark = { size: number; sha: string; cores?: { lines: number; digest: string } };
+
+const LEDGER_WATCH = "ledger/entries.jsonl";
+
+/** The digest of the first `limit` entries' chained cores (all, by default), and how many it covered. */
+function ledgerCoreDigest(text: string, limit = Infinity): { lines: number; digest: string } {
+  const hash = createHash("sha256");
+  let lines = 0;
+  for (const line of text.split("\n")) {
+    if (lines >= limit) break;
+    if (!line.trim()) continue;
+    lines += 1;
+    let e: LedgerEntry;
+    try {
+      e = JSON.parse(line) as LedgerEntry;
+    } catch {
+      hash.update(`raw\u0000${line}\u0000`);
+      continue;
+    }
+    hash.update(`${ledgerCore(e)}\u0000${e.prev ?? ""}\u0000${e.hash ?? ""}\u0000`);
+  }
+  return { lines, digest: hash.digest("hex") };
+}
 
 /**
  * Hash the first `bytes` of a file. Used to ask whether what a record used to
@@ -3616,6 +3741,24 @@ async function hashOfPrefix(sandboxRoot: string, pathKey: string, bytes: number)
   }
 }
 
+/** The first `bytes` of a file as text, or null when it cannot be read. */
+async function readPrefixText(sandboxRoot: string, pathKey: string, bytes: number): Promise<string | null> {
+  const handle = await open(resolve(sandboxRoot, pathKey), "r").catch(() => null);
+  if (!handle) return null;
+  try {
+    const buf = Buffer.alloc(bytes);
+    let read = 0;
+    while (read < bytes) {
+      const { bytesRead } = await handle.read(buf, read, bytes - read, read);
+      if (bytesRead <= 0) break;
+      read += bytesRead;
+    }
+    return buf.subarray(0, read).toString("utf8");
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
 /** Where each append-only record stood before the call. */
 async function appendOnlyMarks(sandboxRoot: string): Promise<Map<string, AppendOnlyMark>> {
   const marks = new Map<string, AppendOnlyMark>();
@@ -3629,7 +3772,12 @@ async function appendOnlyMarks(sandboxRoot: string): Promise<Map<string, AppendO
     // over S+delta bytes never matches the S-byte prefix hashed afterwards,
     // and run s7099 posted RECORD REWRITTEN for regipy reads that touched
     // nothing. Hash exactly the sized prefix, as the comparison does.
-    marks.set(pathKey, { size: info.size, sha: await hashOfPrefix(sandboxRoot, pathKey, info.size) });
+    const mark: AppendOnlyMark = { size: info.size, sha: await hashOfPrefix(sandboxRoot, pathKey, info.size) };
+    if (pathKey === LEDGER_WATCH) {
+      const text = await readPrefixText(sandboxRoot, pathKey, info.size);
+      if (text !== null) mark.cores = ledgerCoreDigest(text);
+    }
+    marks.set(pathKey, mark);
   }
   return marks;
 }
@@ -3669,15 +3817,21 @@ function capFingerprint(budget: BudgetRecord | null): string {
  */
 export const SHARED_WORK_DIRS = [".toolchain", ".tmp"] as const;
 
-async function listWorkFiles(sandboxRoot: string): Promise<{ files: string[]; truncated: boolean }> {
+/**
+ * The files under work/, or under `root` (a directory below work/) with a
+ * budget of its own: a VM seat's watch walks only its own directories, so a
+ * peer's extraction of thousands of files cannot use up the budget first.
+ */
+async function listWorkFiles(sandboxRoot: string, root = "work"): Promise<{ files: string[]; truncated: boolean }> {
   const out: string[] = [];
   let truncated = false;
+  const top = root === "work";
   async function walk(dir: string, depth: number): Promise<void> {
     const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       const abs = join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (depth === 0 && (SHARED_WORK_DIRS as readonly string[]).includes(entry.name)) continue;
+        if (top && depth === 0 && (SHARED_WORK_DIRS as readonly string[]).includes(entry.name)) continue;
         if (depth >= BASH_WATCH_MAX_DEPTH) {
           truncated = true;
           continue;
@@ -3688,7 +3842,7 @@ async function listWorkFiles(sandboxRoot: string): Promise<{ files: string[]; tr
         // it grows during a shell call because the harness writes it, and a
         // watch that counted it blamed the agent's command (measured: a false
         // CLAIM VIOLATION on the first microVM run).
-        if (depth === 0 && entry.name === ".trace-spill.jsonl") continue;
+        if (top && depth === 0 && entry.name === ".trace-spill.jsonl") continue;
         if (out.length >= BASH_WATCH_MAX_WORK_FILES) {
           truncated = true;
           return;
@@ -3697,12 +3851,12 @@ async function listWorkFiles(sandboxRoot: string): Promise<{ files: string[]; tr
       }
     }
   }
-  await walk(join(sandboxRoot, "work"), 0);
+  await walk(join(sandboxRoot, root), 0);
   return { files: out, truncated };
 }
 
 /** sha256 of a file by streaming: a 25 GB disk image must not become a Buffer. */
-export async function sha256File(abs: string): Promise<string> {
+export async function sha256File(abs: string | Buffer): Promise<string> {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(abs)) hash.update(chunk as Buffer);
   return hash.digest("hex");
@@ -3770,9 +3924,13 @@ export async function watchedPathHashes(
   const scope = vmSeatScope(agentId);
   if (scope) {
     const hashes = new Map<string, string>();
-    const work = await listWorkFiles(sandboxRoot);
-    for (const file of work.files) if (scope.some((p) => file.startsWith(p))) hashes.set(file, await hashOfWatched(sandboxRoot, file));
-    return { hashes, caps: "", appendOnly: new Map(), truncated: work.truncated };
+    let truncated = false;
+    for (const dir of scope) {
+      const work = await listWorkFiles(sandboxRoot, dir.replace(/\/$/, ""));
+      truncated ||= work.truncated;
+      for (const file of work.files) hashes.set(file, await hashOfWatched(sandboxRoot, file));
+    }
+    return { hashes, caps: "", appendOnly: new Map(), truncated };
   }
   const hashes = new Map<string, string>();
   const paths = new Set<string>((await listClaims(sandboxRoot)).map((c) => c.path));
@@ -3878,6 +4036,15 @@ export async function diffWatchedPaths(
     const size = info && info.isFile() ? info.size : 0;
     const prefix = size >= mark.size ? await hashOfPrefix(sandboxRoot, pathKey, mark.size) : "";
     if (size >= mark.size && prefix === mark.sha) continue;
+    // A ledger whose earlier entries kept every chained core was merged
+    // into (an author added), not rewritten.
+    if (mark.cores && size > 0) {
+      const text = await readPrefixText(sandboxRoot, pathKey, size);
+      if (text !== null) {
+        const now = ledgerCoreDigest(text, mark.cores.lines);
+        if (now.lines === mark.cores.lines && now.digest === mark.cores.digest) continue;
+      }
+    }
     out.push({
       path: pathKey,
       owner: null,
@@ -4061,6 +4228,9 @@ export const TOOL_RESERVED_NAMES = new Set([
   // and what an agent's extension says about the hub (tests/reserved-names)
   "publish_file", "publish_needed", "skill", "finish_line", "hub_call", "hub_link", "hub_prompt",
   "hub_lost", "hub_lost_stop", "hub_restarted", "hub_clear_up", "vm_finish", "custody", "record_violation",
+  // The keeper restarting the collector, an operator's own command or
+  // console action, and the console opening an artifact with its scripts.
+  "collector_restarted", "operator_action", "artifact_scripts",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
@@ -4909,6 +5079,9 @@ export type InputFile = {
   path: string;
   bytes: number;
   sha256: string;
+  /** The digests courts and acquisition tools quote beside sha256, when the kickoff took them. sha256 decides. */
+  md5?: string;
+  sha1?: string;
   /**
    * A name in the evidence that is neither a file nor a link — a FIFO, a
    * socket, a device node (an extracted Linux root has them) — recorded as
@@ -4939,6 +5112,14 @@ export type InputFile = {
    * never reported as a changed or an added file.
    */
   link?: string;
+  /**
+   * A name, or a link's target, whose bytes are not UTF-8 (a Windows-1254
+   * or Latin-1 name from an archive, on a filesystem that keeps bytes):
+   * `path` and `link` are then only for reading, and these hold the bytes,
+   * base64. Every walk compares names by their bytes.
+   */
+  path_b64?: string;
+  link_b64?: string;
 };
 
 export type InputsManifest = {
@@ -4975,6 +5156,12 @@ export type InputsCheck = {
   missing: string[];
   /** Files and symlinks the manifest does not know. */
   added: string[];
+  /**
+   * Files whose bytes match the manifest's sha256 but not its md5 or sha1,
+   * as read again now: the manifest disagrees with itself (sha256 decides
+   * about the bytes; this says the record around them was changed).
+   */
+  digest_mismatch: string[];
   checked: number;
 };
 
@@ -5011,6 +5198,8 @@ export async function readInputsManifest(sandboxRoot: string): Promise<InputsMan
           path: f.path,
           bytes: Number(f.bytes) || 0,
           sha256: f.sha256,
+          ...(typeof f.md5 === "string" && /^[0-9a-fA-F]{32}$/.test(f.md5) ? { md5: f.md5.toLowerCase() } : {}),
+          ...(typeof f.sha1 === "string" && /^[0-9a-fA-F]{40}$/.test(f.sha1) ? { sha1: f.sha1.toLowerCase() } : {}),
           ...(typeof f.mtime_ms === "number" ? { mtime_ms: f.mtime_ms } : {}),
           ...(typeof f.ctime_ms === "number" ? { ctime_ms: f.ctime_ms } : {}),
           // How the file is held, when the kickoff recorded it rather than
@@ -5020,6 +5209,12 @@ export async function readInputsManifest(sandboxRoot: string): Promise<InputsMan
           ...(typeof f.links === "number" ? { links: f.links } : {}),
           // A link inside the evidence, checked as a link by every walk.
           ...(typeof f.link === "string" ? { link: f.link } : {}),
+          ...(typeof f.path_b64 === "string" ? { path_b64: f.path_b64 } : {}),
+          ...(typeof f.link_b64 === "string"
+            ? { link_b64: f.link_b64 }
+            : typeof (f as unknown as { target_b64?: unknown }).target_b64 === "string"
+              ? { link_b64: (f as unknown as { target_b64: string }).target_b64 }
+              : {}),
           ...(f.special === "fifo" || f.special === "socket" || f.special === "char" || f.special === "block" ? { special: f.special } : {}),
         })),
       bytes: Number(parsed.bytes) || 0,
@@ -5061,6 +5256,46 @@ export async function listInputFiles(sandboxRoot: string): Promise<string[]> {
   return out;
 }
 
+/** Whether these bytes are UTF-8 as they stand: decoding them and encoding back gives the same bytes. */
+function isUtf8(bytes: Buffer): boolean {
+  return Buffer.from(bytes.toString("utf8"), "utf8").equals(bytes);
+}
+
+/** A name's bytes as a map key: latin1 maps each byte to one character, so no two names share a key. */
+function byteKey(bytes: Buffer): string {
+  return bytes.toString("latin1");
+}
+
+/** The bytes of a manifest entry's name, as the kickoff read them. */
+function inputNameBytes(file: InputFile): Buffer {
+  return typeof file.path_b64 === "string" ? Buffer.from(file.path_b64, "base64") : Buffer.from(file.path, "utf8");
+}
+
+/**
+ * Every name under inputs/ that is not a directory, by its bytes: the key
+ * (see byteKey), the name as text for reading, and the path to open. A
+ * string walk turned a name that is not UTF-8 into a different name, which
+ * then read as one file missing and another added.
+ */
+async function listInputEntries(sandboxRoot: string): Promise<Map<string, { display: string; abs: Buffer }>> {
+  const out = new Map<string, { display: string; abs: Buffer }>();
+  const slash = Buffer.from("/");
+  async function walk(abs: Buffer, rel: Buffer): Promise<void> {
+    const entries = (await readdir(abs, { withFileTypes: true, encoding: "buffer" }).catch(() => [])).sort((a, b) =>
+      Buffer.compare(a.name as unknown as Buffer, b.name as unknown as Buffer),
+    );
+    for (const entry of entries) {
+      const name = entry.name as unknown as Buffer;
+      const childAbs = Buffer.concat([abs, slash, name]);
+      const childRel = Buffer.concat([rel, slash, name]);
+      if (entry.isDirectory()) await walk(childAbs, childRel);
+      else out.set(byteKey(childRel), { display: childRel.toString("utf8"), abs: childAbs });
+    }
+  }
+  await walk(Buffer.from(join(sandboxRoot, INPUTS_DIR)), Buffer.from(INPUTS_DIR));
+  return out;
+}
+
 /** The kind of a name in the evidence that is not a file, a link or a directory. */
 export function specialKind(st: { isFIFO(): boolean; isSocket(): boolean; isCharacterDevice(): boolean; isBlockDevice(): boolean }): InputFile["special"] | null {
   if (st.isFIFO()) return "fifo";
@@ -5070,7 +5305,24 @@ export function specialKind(st: { isFIFO(): boolean; isSocket(): boolean; isChar
   return null;
 }
 
-const inputHashCache = new Map<string, { size: number; mtimeMs: number; ctimeMs: number; sha: string }>();
+const inputHashCache = new Map<string, { size: number; mtimeMs: number; ctimeMs: number; sha: string; md5?: string; sha1?: string }>();
+
+/** sha256, sha1 and md5 of a file in one read. */
+async function digestsOfFile(abs: string | Buffer): Promise<{ sha256: string; sha1: string; md5: string } | null> {
+  try {
+    const h256 = createHash("sha256");
+    const h1 = createHash("sha1");
+    const h5 = createHash("md5");
+    for await (const chunk of createReadStream(abs)) {
+      h256.update(chunk as Buffer);
+      h1.update(chunk as Buffer);
+      h5.update(chunk as Buffer);
+    }
+    return { sha256: h256.digest("hex"), sha1: h1.digest("hex"), md5: h5.digest("hex") };
+  } catch {
+    return null;
+  }
+}
 
 /** inputs.json per sandbox, re-read when its mtime moves, for the manifest-seeded cache below. */
 const manifestCache = new Map<string, { mtimeMs: number; byPath: Map<string, InputFile> }>();
@@ -5097,23 +5349,28 @@ async function manifestEntry(sandboxRoot: string, pathKey: string): Promise<Inpu
  * write bit is the road to a later change, and the link count because a
  * second name for the inode outside inputs/ is a road around the path checks.
  */
-async function hashOfCached(sandboxRoot: string, pathKey: string): Promise<string> {
-  const abs = resolve(sandboxRoot, pathKey);
+async function hashOfCached(sandboxRoot: string, pathKey: string, opts: { abs?: Buffer; known?: InputFile } = {}): Promise<string> {
+  // A name whose bytes are not UTF-8 is opened by its bytes, and its
+  // manifest entry comes with it (two such names can read alike as text).
+  const abs: string | Buffer = opts.abs ?? resolve(sandboxRoot, pathKey);
+  const cacheKey = typeof abs === "string" ? abs : byteKey(abs);
   const info = await lstat(abs).catch(() => null);
   if (!info) {
-    inputHashCache.delete(abs);
+    inputHashCache.delete(cacheKey);
     return "";
   }
   if (info.isSymbolicLink()) {
-    inputHashCache.delete(abs);
-    return `link:${await readlink(abs).catch(() => "?")}`;
+    inputHashCache.delete(cacheKey);
+    const target = await readlink(abs, { encoding: "buffer" }).catch(() => null);
+    if (!target) return "link:?";
+    return isUtf8(target) ? `link:${target.toString("utf8")}` : `link-b64:${target.toString("base64")}`;
   }
   if (!info.isFile()) {
-    inputHashCache.delete(abs);
+    inputHashCache.delete(cacheKey);
     const kind = specialKind(info);
     return kind ? `special:${kind}` : "";
   }
-  const hit = inputHashCache.get(abs);
+  const hit = inputHashCache.get(cacheKey);
   let sha: string;
   if (hit && hit.size === info.size && hit.mtimeMs === info.mtimeMs && hit.ctimeMs === info.ctimeMs) {
     sha = hit.sha;
@@ -5121,7 +5378,7 @@ async function hashOfCached(sandboxRoot: string, pathKey: string): Promise<strin
     // The manifest is the first cache: while the size, mtime and ctime are
     // what the kickoff recorded after locking the file, its sha holds, and a
     // 25 GB image is never read again just to be sure.
-    const known = await manifestEntry(sandboxRoot, pathKey);
+    const known = opts.known ?? (await manifestEntry(sandboxRoot, pathKey));
     const unchanged =
       known &&
       known.bytes === info.size &&
@@ -5129,8 +5386,11 @@ async function hashOfCached(sandboxRoot: string, pathKey: string): Promise<strin
       typeof known.ctime_ms === "number" &&
       known.mtime_ms === Math.floor(info.mtimeMs) &&
       known.ctime_ms === Math.floor(info.ctimeMs);
-    sha = unchanged ? known.sha256 : await hashOf(sandboxRoot, pathKey);
-    inputHashCache.set(abs, { size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs, sha });
+    // A file read again is read for all three digests at once, so the
+    // manifest's md5 and sha1 are checked on the same bytes as its sha256.
+    const read = unchanged ? null : await digestsOfFile(abs);
+    sha = unchanged ? known.sha256 : (read?.sha256 ?? "");
+    inputHashCache.set(cacheKey, { size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs, sha, ...(read ? { md5: read.md5, sha1: read.sha1 } : {}) });
   }
   return `${sha}|mode=${(info.mode & 0o777).toString(8)}|links=${info.nlink}`;
 }
@@ -5142,7 +5402,8 @@ async function hashOfCached(sandboxRoot: string, pathKey: string): Promise<strin
  * `444|1` for a copy the kickoff locked itself; whatever was recorded for an
  * attached image, which it cannot lock and must therefore describe.
  */
-function expectedFingerprint(file: { sha256: string; mode?: string; links?: number; link?: string; special?: string }): string {
+function expectedFingerprint(file: { sha256: string; mode?: string; links?: number; link?: string; link_b64?: string; special?: string }): string {
+  if (typeof file.link_b64 === "string") return `link-b64:${file.link_b64}`;
   if (typeof file.link === "string") return `link:${file.link}`;
   if (file.special) return `special:${file.special}`;
   return `${file.sha256}|mode=${file.mode ?? "444"}|links=${file.links ?? 1}`;
@@ -5152,25 +5413,35 @@ function expectedFingerprint(file: { sha256: string; mode?: string; links?: numb
 export async function verifyInputs(sandboxRoot: string): Promise<InputsCheck | null> {
   const manifest = await readInputsManifest(sandboxRoot);
   if (!manifest) return null;
-  const known = new Map(manifest.files.map((f) => [f.path, f]));
-  const onDisk = new Set(await listInputFiles(sandboxRoot));
+  // By the bytes of each name, on both sides (inputNameBytes, listInputEntries).
+  const known = new Map(manifest.files.map((f) => [byteKey(inputNameBytes(f)), f]));
+  const onDisk = await listInputEntries(sandboxRoot);
   const modified: string[] = [];
   const missing: string[] = [];
   const added: string[] = [];
   const metadata: string[] = [];
-  for (const [pathKey, file] of known) {
-    if (!onDisk.has(pathKey)) {
-      missing.push(pathKey);
+  const digestMismatch: string[] = [];
+  for (const [key, file] of known) {
+    const there = onDisk.get(key);
+    if (!there) {
+      missing.push(file.path);
       continue;
     }
-    const found = await hashOfCached(sandboxRoot, pathKey);
+    const raw = typeof file.path_b64 === "string" || !isUtf8(Buffer.from(key, "latin1"));
+    const found = await hashOfCached(sandboxRoot, file.path, raw ? { abs: there.abs, known: file } : {});
+    if (found.startsWith(`${file.sha256}|`)) {
+      // Read again now (not taken from the manifest on an unmoved stat): the
+      // other digests the manifest records must be these bytes' too.
+      const read = inputHashCache.get(raw ? byteKey(there.abs) : resolve(sandboxRoot, file.path));
+      if ((file.md5 && read?.md5 && read.md5 !== file.md5) || (file.sha1 && read?.sha1 && read.sha1 !== file.sha1)) digestMismatch.push(file.path);
+    }
     if (found === expectedFingerprint(file)) continue;
     // `<sha>|mode=<octal>|links=<n>`: the first field is the bytes and the
     // rest is how the file is held. Only the first one is the evidence.
-    if (found.startsWith(`${file.sha256}|`)) metadata.push(pathKey);
-    else modified.push(pathKey);
+    if (found.startsWith(`${file.sha256}|`)) metadata.push(file.path);
+    else modified.push(file.path);
   }
-  for (const pathKey of onDisk) if (!known.has(pathKey)) added.push(pathKey);
+  for (const [key, there] of onDisk) if (!known.has(key)) added.push(there.display);
   const contentOk = modified.length === 0 && missing.length === 0 && added.length === 0;
   return {
     ok: contentOk && metadata.length === 0,
@@ -5179,6 +5450,7 @@ export async function verifyInputs(sandboxRoot: string): Promise<InputsCheck | n
     metadata,
     missing,
     added,
+    digest_mismatch: digestMismatch,
     checked: known.size,
   };
 }
@@ -5275,8 +5547,10 @@ export type LedgerEntry = {
   v?: 2;
   seq: number;
   kind: LedgerKind;
-  /** ISO 8601 for an event; optional for the other kinds. */
+  /** ISO 8601 for an event, in UTC; optional for the other kinds. */
   ts?: string;
+  /** What the agent wrote for `ts`, when it was not already the UTC value (an offset, a date alone). Not in the chain. */
+  ts_raw?: string;
   value: string;
   /** Where it was seen: a path, a log, a plugin, a registry key. */
   source?: string;
@@ -5321,12 +5595,15 @@ export function ledgerHash(e: LedgerEntry, prev: string): string {
  * counted unchained, not broken — but only before the first chained entry:
  * the first chained entry names the last of them (recordEntry links a legacy
  * entry by its core's hash from genesis), and an unchained line after a
- * chained one is a line added outside the chain, which breaks it.
+ * chained one is a line added outside the chain, which breaks it. So is a
+ * version 1 entry after a version 2 one: the harness never writes one
+ * again, and its core leaves out the provenance a version 2 chain covers.
  */
 export function verifyLedgerChain(text: string): { ok: boolean; total: number; chained: number; broken_at: number | null; reason: string | null; hashes: string[] } {
   let total = 0;
   let chained = 0;
   let last = "genesis";
+  let sawV2 = false;
   const hashes: string[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -5337,6 +5614,8 @@ export function verifyLedgerChain(text: string): { ok: boolean; total: number; c
     } catch {
       return { ok: false, total, chained, broken_at: total, reason: "not json", hashes };
     }
+    if (sawV2 && e.v !== 2) return { ok: false, total, chained, broken_at: total, reason: "a version 1 entry after version 2 ones", hashes };
+    if (e.v === 2) sawV2 = true;
     if (!e.prev && !e.hash) {
       if (chained > 0) return { ok: false, total, chained, broken_at: total, reason: "an entry without the chain after chained ones", hashes };
       last = ledgerHash(e, "genesis");
@@ -5364,12 +5643,42 @@ export type LedgerResult =
   | { ok: true; entry: LedgerEntry; merged: boolean; total: number }
   | { ok: false; reason: string };
 
-function normalizeTs(raw: string | undefined): { ok: true; ts?: string } | { ok: false; reason: string } {
+const TS_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const TS_DATE_TIME = /^(\d{4}-\d{2}-\d{2})[Tt ](\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?)(Z|z|[+-]\d{2}:?\d{2})?$/;
+
+/**
+ * An event's time, in UTC, from what the agent wrote. A date and a time
+ * must say their zone: `Z`, or the offset the source records. ECMAScript
+ * reads a date-time without one as the host's local time, so the same
+ * entry was 12:44Z on the droplet, 09:44Z on a Mac in Istanbul and 17:44Z
+ * in New York, and the text it came from was gone. A date alone is a date.
+ * Nothing else (01/02/2024 is two different days) is taken. What the agent
+ * wrote is kept beside the UTC value when the two differ.
+ */
+export function normalizeTs(raw: string | undefined): { ok: true; ts?: string; raw?: string } | { ok: false; reason: string } {
   const text = (raw ?? "").trim();
   if (!text) return { ok: true };
-  const ms = Date.parse(text);
-  if (!Number.isFinite(ms)) return { ok: false, reason: `ts must be ISO 8601 (got ${JSON.stringify(text)})` };
-  return { ok: true, ts: new Date(ms).toISOString() };
+  let iso: string;
+  if (TS_DATE.test(text)) {
+    iso = `${text}T00:00:00Z`;
+  } else {
+    const m = TS_DATE_TIME.exec(text);
+    if (!m) {
+      return { ok: false, reason: `ts must be ISO 8601 with its zone, e.g. 2024-01-15T12:44:22Z or 2024-01-15T15:44:22+03:00 (got ${JSON.stringify(text)})` };
+    }
+    if (!m[3]) {
+      return {
+        ok: false,
+        reason: `ts ${JSON.stringify(text)} has no zone: add Z if the source's time is UTC, or the offset the source records (+03:00). The time zone is part of the evidence; the harness does not guess it.`,
+      };
+    }
+    const zone = /^[Zz]$/.test(m[3]) ? "Z" : m[3].length === 5 ? `${m[3].slice(0, 3)}:${m[3].slice(3)}` : m[3];
+    iso = `${m[1]}T${m[2]}${zone}`;
+  }
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return { ok: false, reason: `ts is not a real time (got ${JSON.stringify(text)})` };
+  const ts = new Date(ms).toISOString();
+  return { ok: true, ts, ...(ts !== text ? { raw: text } : {}) };
 }
 
 export async function readLedger(sandboxRoot: string): Promise<LedgerEntry[]> {
@@ -5397,7 +5706,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
   if (value.length > LEDGER_VALUE_MAX_CHARS) return { ok: false, reason: `value is over ${LEDGER_VALUE_MAX_CHARS} characters` };
   const ts = normalizeTs(input.ts);
   if (!ts.ok) return ts;
-  if (kind === "event" && !ts.ts) return { ok: false, reason: "an event needs a ts (ISO 8601, UTC)" };
+  if (kind === "event" && !ts.ts) return { ok: false, reason: "an event needs a ts (ISO 8601 with its zone: Z for UTC, or the source's offset)" };
   const confidence = String(input.confidence ?? "").trim().toLowerCase();
   if (confidence && !(LEDGER_CONFIDENCE as readonly string[]).includes(confidence)) {
     return { ok: false, reason: `confidence must be one of ${LEDGER_CONFIDENCE.join(", ")}` };
@@ -5428,7 +5737,9 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
       // A merge adds an author, it does not rewrite the first citation.
       if (!same.source) same.source = source;
       if (!same.evidence) same.evidence = evidence;
-      await writeFile(join(ctx.sandboxRoot, LEDGER_ENTRIES), entries.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+      // Whole or not at all: a writer killed mid-way must not leave the
+      // record of the case cut short.
+      await writeFileAtomic(join(ctx.sandboxRoot, LEDGER_ENTRIES), entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
       await renderLedger(ctx.sandboxRoot, entries);
       return { ok: true, entry: same, merged: true, total: entries.length };
     }
@@ -5438,6 +5749,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
       seq: (entries.at(-1)?.seq ?? 0) + 1,
       kind: kind as LedgerKind,
       ...(ts.ts ? { ts: ts.ts } : {}),
+      ...(ts.raw ? { ts_raw: ts.raw } : {}),
       value,
       source,
       evidence,
@@ -5470,7 +5782,9 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   const findings = all.filter((e) => e.kind === "finding");
   const lines: string[] = ["# Ledger", "", `${all.length} entries: ${events.length} events, ${iocs.length} indicators, ${findings.length} findings. Written by the harness from \`record\`; cite it as \`ledger/ledger.md\`.`, ""];
   lines.push("## Timeline", "", "| Time (UTC) | Event | Source | Evidence | By |", "| --- | --- | --- | --- | --- |");
-  for (const e of events) lines.push(`| ${e.ts} | ${mdCell(e.value)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.authors.join(", ")} |`);
+  // A time the source gave with an offset (or as a date) is shown as written too.
+  const asWritten = (e: LedgerEntry) => (e.ts_raw && !/[Zz]$/.test(e.ts_raw) ? ` (as written: ${mdCell(e.ts_raw)})` : "");
+  for (const e of events) lines.push(`| ${e.ts}${asWritten(e)} | ${mdCell(e.value)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.authors.join(", ")} |`);
   lines.push("", "## Indicators", "", "| Indicator | Source | Evidence | Confidence | By |", "| --- | --- | --- | --- | --- |");
   for (const e of iocs) lines.push(`| ${mdCell(e.value)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.confidence ?? ""} | ${e.authors.join(", ")} |`);
   lines.push("", "## Findings", "");
