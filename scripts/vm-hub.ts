@@ -260,7 +260,7 @@ export function boardTable(hub: {
       // A seat's report of its own spend may only grow: a VM that reported
       // less than before, or a number that is not one, is refused and the
       // row it had stays. (What it reports at all is still its own word;
-      // docs/adr/0005 says so, and the wall clock is the brake that is not.)
+      // docs/adr/0009 says so, and the wall clock is the brake that is not.)
       const slice = isObject(a[2]) ? (a[2] as Record<string, unknown>) : null;
       if (!slice) throw new Error("usage must be an object");
       const budget = await P.readBudget(S).catch(() => null);
@@ -315,6 +315,10 @@ export function boardTable(hub: {
       // An agent's post is its own; `via` is the hub's to set.
       const { via: _via, ...args } = (a[1] as Record<string, unknown>) ?? {};
       return P.postMessage(as(who), args as never);
+    },
+    publishFile: async (who, a) => {
+      hub.wrote(who, String(a[2] ?? ""));
+      return P.publishFile(as(who), String(a[1] ?? ""), a[2] as string | undefined);
     },
     readBudget: () => P.readBudget(S),
     readBudgetStatus: (who) => P.readBudgetStatus(as(who)),
@@ -1032,7 +1036,7 @@ export class Hub {
     const custody = join(dirname(this.cfg.vmCli), "custody.ts");
     if (existsSync(custody)) {
       const c = await new Promise<{ ok: boolean; out: string }>((done) => {
-        execFile(process.execPath, ["--experimental-strip-types", "--no-warnings", custody, this.cfg.sandbox], { timeout: 6 * 60 * 60_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+        execFile(process.execPath, ["--experimental-strip-types", "--no-warnings", custody, this.cfg.sandbox, "--run", this.cfg.run as string, "--timeout", "14400"], { timeout: 5 * 60 * 60_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
           done({ ok: !err, out: `${String(stdout).trim()} ${String(stderr).trim()}`.trim() });
         });
       });

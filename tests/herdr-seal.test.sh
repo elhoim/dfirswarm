@@ -168,6 +168,8 @@ fi
 [[ "$(jq -r '.runs[-1].herdr_socket' "$TMP/runs/registry.json")" == "$want" ]] \
   || fail "the run record should say $want, got $(jq -r '.runs[-1].herdr_socket' "$TMP/runs/registry.json")"
 ok "a kickoff puts the deny in the pane profile and records it ($want)"
+grep -q 'dfirswarm-hubs' "$SB/.fsguard/plan.txt" 2>/dev/null || fail "a host pane is not denied the VM hubs' sockets"
+ok "a host pane is denied every VM run's hub sockets"
 
 out="$(SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" start \
   --model solo/model --n 1 --cap-usd 1 --no-start --no-seal-herdr \
@@ -175,8 +177,10 @@ out="$(SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" start \
 SB2="$(printf '%s\n' "$out" | sed -n 's/^SANDBOX=//p' | tail -1)"
 # The collector's own socket is masked on Linux whatever --no-seal-herdr says:
 # that deny is about attribution (the gate stands in front), not about Herdr.
-if grep -E 'network-outbound|^no-socket' "$SB2/.fsguard/plan.txt" 2>/dev/null | grep -qv 'collector\.sock'; then
-  fail "--no-seal-herdr still emitted a socket deny"
+# So are the VM hubs' sockets (dfirswarm-hubs/): a host pane must never speak
+# as a VM run's agent, and that is not Herdr's either.
+if grep -E 'network-outbound|^no-socket' "$SB2/.fsguard/plan.txt" 2>/dev/null | grep -v 'collector\.sock' | grep -qv 'dfirswarm-hubs'; then
+  fail "--no-seal-herdr still emitted a Herdr socket deny"
 fi
 [[ "$(jq -r '.runs[-1].herdr_socket' "$TMP/runs/registry.json")" == "open" ]] \
   || fail "--no-seal-herdr should record open, got $(jq -r '.runs[-1].herdr_socket' "$TMP/runs/registry.json")"

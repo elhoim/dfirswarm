@@ -137,7 +137,7 @@ scripts/swarm.sh stop <id>
 
 A live N=2 hello run costs about **$0.02–0.06** on DeepSeek V4 Pro and finishes in one to two minutes ([Verified results](verified-runs.md)).
 
-### 3. Open the web console on the LAN
+### 3. Open the web console
 
 ```bash
 npm run ui:build                     # once; swarm.sh ui also builds when ui/dist is missing

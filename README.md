@@ -160,7 +160,7 @@ scripts/swarm.sh start --model deepseek/deepseek-v4-pro --cap-usd 1 --n 2 \
   --goal-file prompts/goals/hello.md
 
 scripts/swarm.sh status <id>                # the id is printed at kickoff
-scripts/swarm.sh ui                         # the console, on the LAN
+scripts/swarm.sh ui                         # the console, on 127.0.0.1 (--host 0.0.0.0 for the LAN)
 ```
 
 The goal is a markdown file that carries its own `## Definition of done` and `## Checks`; a goal without one does not start. `scripts/swarm.sh --help` lists the commands, `swarm.sh help start` every option. The console's **New swarm** form starts a swarm the same way, and defaults to a model Pi can use.
@@ -197,7 +197,8 @@ Each guard is enforced by the operating system where the host allows it, and the
 - **Evidence is hostile input.** A URL in a chat log is a finding to record, never a link to fetch. The contract says it, the egress guard and the quarantine enforce it, and the trace shows every time it was tested. `--no-read DIR` keeps a directory the agents must not consult (a previous run's answers on the same evidence, above all) unreadable at the kernel, so a re-run is a re-run.
 - **The terminal's control socket is denied.** Herdr's socket authenticates nobody, and a process started through it would run outside every rule above; the write guard denies it to the panes, and a host that cannot mask it records `unenforced`.
 - **Agents can forge tools, if you let them.** With `--allow-tool-forging`, an agent writes the parser or checker the goal needs with `make_tool`; every peer gets it as a real tool; the script, its author, its hash and every call are on the console; the library is kept between runs. [docs/forged-tools.md](docs/forged-tools.md).
-- **What it cannot do.** Reads are open by design: a pane can read anything this user can, outside the directories you name with `--no-read`. On macOS a process that ignores its proxy variables has egress, and one did. Run swarms on a machine you are willing to lose, and read [SECURITY.md](SECURITY.md).
+- **Or each agent in its own microVM.** `--isolation microvm` (macOS on Apple silicon, Linux with KVM) puts every agent's Pi in a VM of its own, built from the case's packs: the run is read-only in it but for the agent's own directories, the evidence is mounted read-only, the board is written for it on the host by one process, the network is closed but for its models' hosts, and no credential enters it — only a placeholder the host swaps on the way out. The stop, the snapshots of each VM's disk and a full re-hash of the evidence are taken on the host. [ADR 0009](docs/adr/0009-agents-live-in-microvms.md) has the design and its stated limits.
+- **What it cannot do.** On the host, reads are open by design: a pane can read anything this user can, outside the directories you name with `--no-read`. On macOS a process that ignores its proxy variables has egress, and one did. Run swarms on a machine you are willing to lose, and read [SECURITY.md](SECURITY.md).
 
 ## Documentation
 

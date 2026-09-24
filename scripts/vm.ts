@@ -43,7 +43,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, realpathSync } from "node:fs";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -371,7 +371,9 @@ export const BRIDGE_SCRIPT = `#!/bin/sh
 set -e
 mkdir -p /run/dfirswarm
 if [ ! -S ${GUEST_HUB_SOCKET} ]; then
-  setsid socat UNIX-LISTEN:${GUEST_HUB_SOCKET},fork,mode=600,backlog=256 VSOCK-CONNECT:2:${HUB_PORT} </dev/null >>/run/dfirswarm/bridge.log 2>&1 &
+  # -t 600: a caller that sends its request and closes its writing side
+  # still gets the answer; socat's default gives the hub half a second.
+  setsid socat -t 600 UNIX-LISTEN:${GUEST_HUB_SOCKET},fork,mode=600,backlog=256 VSOCK-CONNECT:2:${HUB_PORT} </dev/null >>/run/dfirswarm/bridge.log 2>&1 &
   i=0
   while [ ! -S ${GUEST_HUB_SOCKET} ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
 fi
@@ -387,9 +389,13 @@ export const PI_SCRIPT = `#!/bin/sh
 /.msb/scripts/dfirswarm-bridge
 cd "$SWARM_SANDBOX"
 if [ "$SWARM_ALLOW_INSTALL" = 1 ] && [ -n "$SWARM_TOOLCHAIN" ]; then
-  # --allow-install: pip lays packages into the run, where every agent's VM
-  # sees them and the toolchain record reads them, as on the host.
+  # --allow-install: pip lays packages into this VM's own disk, on its own
+  # PATH and import path. Never a directory shared with the other VMs: a
+  # shared prefix at the head of every seat's PATH let one seat put code in
+  # front of every other's python. The seat's extension inventories it and
+  # sends the list to the hub for toolchain.json.
   pyv=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+  mkdir -p "$SWARM_TOOLCHAIN"
   export PIP_PREFIX="$SWARM_TOOLCHAIN"
   export PYTHONPATH="$SWARM_TOOLCHAIN/lib/python$pyv/site-packages\${PYTHONPATH:+:$PYTHONPATH}"
   export PATH="$SWARM_TOOLCHAIN/bin:$PATH"
@@ -419,14 +425,39 @@ def can_write(path):
     except OSError as e:
         return "ro" if e.errno in (errno.EROFS, errno.EACCES, errno.EPERM) else "error:" + errno.errorcode.get(e.errno, str(e.errno))
 out = {"agent": A, "sandbox": S}
+def can_exec(path):
+    try:
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\\necho ran\\n")
+        os.chmod(path, 0o755)
+        r = subprocess.run([path], capture_output=True, text=True, timeout=30)
+        os.unlink(path)
+        return "exec" if "ran" in r.stdout else "noexec"
+    except PermissionError:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return "noexec"
+    except OSError as e:
+        return "error:" + errno.errorcode.get(e.errno, str(e.errno))
 out["base"] = can_write(os.path.join(S, ".vm-probe-" + A))
 out["work"] = can_write(os.path.join(S, "work", ".vm-probe-" + A))
+out["scratch"] = can_write(os.path.join(S, "work", A, ".vm-probe"))
+out["extracted"] = can_write(os.path.join(S, "work", "extracted", A, ".vm-probe"))
+out["extracted_exec"] = can_exec(os.path.join(S, "work", "extracted", A, ".vm-probe.sh"))
+out["quarantine_exec"] = can_exec(os.path.join(S, "work", "quarantine", A, ".vm-probe.sh"))
 out["tool_output"] = can_write(os.path.join(S, "tool-output", A, ".vm-probe"))
 out["session"] = can_write(os.path.join(S, ".pi-sessions", A, ".vm-probe"))
 inputs = os.path.join(S, "inputs")
 if os.path.exists(inputs):
     out["inputs"] = can_write(os.path.join(os.path.realpath(inputs), ".vm-probe"))
-    out["inputs_files"] = sum(len(f) for _, _, f in os.walk(inputs, followlinks=True))
+    # Names, the way the manifest counts them: files, and links as links
+    # (never followed — a link loop would never end).
+    n = 0
+    for root, dirs, files in os.walk(os.path.realpath(inputs)):
+        n += len(files) + sum(1 for d in dirs if os.path.islink(os.path.join(root, d)))
+    out["inputs_files"] = n
 else:
     out["inputs"] = "absent"
 try:
@@ -464,13 +495,20 @@ PY
 `;
 
 /** What each agent's VM must find, or the kickoff stops. */
-export function probeVerdict(probe: Record<string, unknown>, expectInputs: boolean): string[] {
+export function probeVerdict(probe: Record<string, unknown>, expectInputs: boolean, expectedInputFiles?: number): string[] {
   const wrong: string[] = [];
   if (probe.base !== "ro") wrong.push(`the sandbox floor is ${String(probe.base)}, not read-only`);
-  if (probe.work !== "rw") wrong.push(`work/ is ${String(probe.work)}, not writable`);
+  if (probe.work !== "ro") wrong.push(`the shared work/ is ${String(probe.work)}, not read-only`);
+  if (probe.scratch !== "rw") wrong.push(`its own work/<id>/ is ${String(probe.scratch)}, not writable`);
+  if (probe.extracted !== "rw") wrong.push(`its own work/extracted/<id>/ is ${String(probe.extracted)}, not writable`);
+  if (probe.extracted_exec !== "noexec") wrong.push(`work/extracted/<id>/ can execute (${String(probe.extracted_exec)})`);
+  if (probe.quarantine_exec !== "noexec") wrong.push(`work/quarantine/<id>/ can execute (${String(probe.quarantine_exec)})`);
   if (probe.tool_output !== "rw") wrong.push(`its tool-output/ is ${String(probe.tool_output)}, not writable`);
   if (probe.session !== "rw") wrong.push(`its Pi session directory is ${String(probe.session)}, not writable`);
   if (expectInputs && probe.inputs !== "ro") wrong.push(`inputs/ is ${String(probe.inputs)}, not read-only`);
+  if (expectInputs && typeof expectedInputFiles === "number" && typeof probe.inputs_files === "number" && probe.inputs_files !== expectedInputFiles) {
+    wrong.push(`the VM sees ${probe.inputs_files} evidence name(s) where the manifest lists ${expectedInputFiles}`);
+  }
   if (probe.hub !== true) wrong.push(`the hub is not reachable (${String(probe.hub_error ?? "no answer")})`);
   if (typeof probe.pi !== "string" || !/^\d+\.\d+/.test(probe.pi)) wrong.push(`pi does not run (${String(probe.pi)})`);
   return wrong;
@@ -479,10 +517,18 @@ export function probeVerdict(probe: Record<string, unknown>, expectInputs: boole
 /** Every mount one agent's VM gets: the run's own, then this agent's writable holes. */
 export function mountsFor(spec: VmSpec, agent: string): Mount[] {
   const S = spec.sandbox;
+  // `work/` is part of the read-only floor: the agent's own directories are
+  // the writable holes on it, and what a peer wrote is read-only here. One
+  // writable `work/` shared by every VM let any seat rewrite any other's
+  // findings without a record (measured, and the ADR's own finding). A
+  // shared deliverable is published through the hub (protocol.ts
+  // publishFile). The extracted and quarantined material cannot execute.
   return [
     { host: S, readonly: true },
     ...spec.mounts,
-    { host: join(S, "work") },
+    { host: join(S, "work", agent) },
+    { host: join(S, "work", "extracted", agent), noexec: true },
+    { host: join(S, "work", "quarantine", agent), noexec: true },
     { host: join(S, "tool-output", agent) },
     { host: join(S, ".pi-sessions", agent) },
     ...(spec.late_mounts ?? []),
@@ -714,6 +760,12 @@ export async function createVms(spec: VmSpec): Promise<{ records: VmRecord[]; fa
   const M = await sdk();
   const secrets = await resolveSecrets(spec);
   const expectInputs = existsSync(join(spec.sandbox, "inputs"));
+  let expectedInputFiles: number | undefined;
+  try {
+    expectedInputFiles = (JSON.parse(readFileSync(join(spec.sandbox, "inputs.json"), "utf8")) as { files?: unknown[] }).files?.length;
+  } catch {
+    expectedInputFiles = undefined;
+  }
   const settled = await Promise.allSettled(spec.agents.map((a) => createOne(M, spec, a, secrets)));
   const records: VmRecord[] = [];
   const failures: Array<{ agent: string; reasons: string[] }> = [];
@@ -724,7 +776,7 @@ export async function createVms(spec: VmSpec): Promise<{ records: VmRecord[]; fa
       return;
     }
     records.push(r.value);
-    const wrong = probeVerdict(r.value.probe, expectInputs);
+    const wrong = probeVerdict(r.value.probe, expectInputs, expectedInputFiles);
     if (wrong.length) failures.push({ agent, reasons: wrong });
   });
   return { records, failures };
@@ -737,12 +789,14 @@ export async function runVms(runId?: string): Promise<Array<{ name: string; stat
   const args = ["list", "--format", "json"];
   if (runId) args.push("--label", `${LABEL_RUN}=${runId}`);
   const r = await run(msbBinary(), args, { timeoutMs: 30_000 });
-  if (r.code !== 0) return [];
+  // A list that failed is not an empty list: read as one, `stop` said a run
+  // was put away while its VMs were up.
+  if (r.code !== 0) throw new Error(`msb list failed: ${(r.stderr || r.stdout).trim() || `exit ${r.code}`}`);
   let rows: unknown;
   try {
     rows = JSON.parse(r.stdout || "[]");
   } catch {
-    return [];
+    throw new Error("msb list answered something that is not JSON");
   }
   const list = Array.isArray(rows) ? rows : Array.isArray((rows as { sandboxes?: unknown[] })?.sandboxes) ? (rows as { sandboxes: unknown[] }).sandboxes : [];
   const out: Array<{ name: string; status: string; run: string; agent: string; registry: string }> = [];
@@ -914,9 +968,10 @@ export async function imageToolbox(image: string, preset: string, required: bool
       .pullPolicy("if-missing")
       .cpus(1)
       .memory(1024)
+      .maxDuration(1800)
+      .labels({ [LABEL_RUN]: "toolbox", [LABEL_AGENT]: "toolbox" })
       .disableNetwork()
       .detached(true)
-      .replace()
       .volume("/tb", (v) => v.bind(realpathSync(tmp)))
       .create();
     const out = await sandbox.exec("bash", ["/tb/toolbox.sh", "/tb/sbx", preset, ...(required ? ["--required"] : [])]);
@@ -943,17 +998,28 @@ export async function imageCatalog(
   image: string,
   sandbox: string,
   evidence: string[],
-  options: { cpus?: number; memoryMib?: number; allowHosts?: string[] } = {},
-): Promise<{ code: number; output: string }> {
+  options: { cpus?: number; memoryMib?: number; allowHosts?: string[]; openNet?: boolean; run?: string; maxDurationSec?: number } = {},
+): Promise<{ code: number; output: string; digest?: string }> {
   const M = await sdk();
   const name = `dfs-catalog-${randomBytes(6).toString("hex")}`;
+  // The parser runs over hostile evidence as root in this VM: it may write
+  // catalog/ and nothing else of the run. The run's floor — the manifest
+  // custody compares against, the contract, the trace — is read-only here.
+  await mkdir(join(sandbox, "catalog"), { recursive: true });
   try {
     let builder = M.Sandbox.builder(name)
       .image(image)
       .pullPolicy("if-missing")
       .cpus(options.cpus ?? 2)
-      .memory(options.memoryMib ?? 2048);
-    if (options.allowHosts?.length) {
+      .memory(options.memoryMib ?? 2048)
+      .maxDuration(options.maxDurationSec ?? 4 * 3600)
+      .labels({ [LABEL_RUN]: options.run ?? "catalog", [LABEL_AGENT]: "catalog", ...(options.run ? {} : {}) });
+    if (options.openNet) {
+      // --no-netguard: the catalog reaches what the agents reach.
+      const policy = new M.NetworkPolicyBuilder().defaultDeny();
+      policy.egress((r) => r.allowPublic());
+      builder = builder.network((n) => n.policyFromBuilder(policy));
+    } else if (options.allowHosts?.length) {
       const policy = allowEgress(new M.NetworkPolicyBuilder().defaultDeny(), options.allowHosts);
       builder = builder.network((n) => n.policyFromBuilder(policy));
     } else {
@@ -967,12 +1033,14 @@ export async function imageCatalog(
         SWARM_CATALOG_STEP_TIMEOUT: process.env.SWARM_CATALOG_STEP_TIMEOUT ?? "900",
         ...(process.env.SWARM_CATALOG_MEMORY_PROBE_TIMEOUT ? { SWARM_CATALOG_MEMORY_PROBE_TIMEOUT: process.env.SWARM_CATALOG_MEMORY_PROBE_TIMEOUT } : {}),
       })
-      .volume(sandbox, (v) => v.bind(realpathSync(sandbox)))
+      .volume(sandbox, (v) => v.bind(realpathSync(sandbox)).readonly())
+      .volume(join(sandbox, "catalog"), (v) => v.bind(realpathSync(join(sandbox, "catalog"))))
       .volume(join(ROOT, "scripts"), (v) => v.bind(realpathSync(join(ROOT, "scripts"))).readonly());
     for (const e of evidence) builder = builder.volume(e, (v) => v.bind(realpathSync(e)).readonly().noexec());
     const vm = await builder.create();
     const out = await vm.exec("bash", [join(ROOT, "scripts", "evidence-catalog.sh"), sandbox]);
-    return { code: out.code, output: `${out.stdout()}${out.stderr()}` };
+    const digest = await imageDigest(name);
+    return { code: out.code, output: `${out.stdout()}${out.stderr()}`, ...(digest ? { digest } : {}) };
   } finally {
     await run(msbBinary(), ["stop", name], { timeoutMs: 120_000 });
     await run(msbBinary(), ["rm", name], { timeoutMs: 60_000 });
@@ -1011,6 +1079,34 @@ export function egressRules(hosts: string[]): Array<{ port: number; domains: str
 /** The same allowlist as TLS bypass patterns: a suffix is `*.suffix` to msb. */
 export function tlsBypass(hosts: string[]): string[] {
   return egressRules(hosts).flatMap((r) => [...r.domains, ...r.suffixes.map((s) => `*${s}`)]);
+}
+
+/** catalog.json beside catalog/: the image and every file's sha256, written on the host after the VM is gone. */
+export async function writeCatalogRecord(sandbox: string, image: string, digest: string | null): Promise<void> {
+  const root = join(sandbox, "catalog");
+  const files: Array<{ path: string; bytes: number; sha256: string }> = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const e of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const abs = join(dir, e.name);
+      if (e.isSymbolicLink()) continue;
+      if (e.isDirectory()) await walk(abs);
+      else if (e.isFile()) files.push({ path: `catalog/${abs.slice(root.length + 1)}`, bytes: (await stat(abs)).size, sha256: await sha256File(abs) });
+    }
+  };
+  await walk(root);
+  files.sort((a, b) => a.path.localeCompare(b.path));
+  await writeFile(join(sandbox, "catalog.json"), `${JSON.stringify({ at: new Date().toISOString(), image, manifest_digest: digest, files }, null, 2)}\n`);
+}
+
+/** The manifest digest of the image a VM was made from, from msb's own record of it. */
+export async function imageDigest(name: string): Promise<string | null> {
+  const r = await run(msbBinary(), ["inspect", name, "--format", "json"], { timeoutMs: 30_000 });
+  if (r.code !== 0) return null;
+  try {
+    return (JSON.parse(r.stdout) as { config?: { manifest_digest?: string } }).config?.manifest_digest ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** Can this host run a VM at all, and is the image here? */
@@ -1081,19 +1177,34 @@ async function main(): Promise<void> {
     case "catalog": {
       const image = opt("--image");
       const sandbox = opt("--sandbox");
-      if (!image || !sandbox) throw new Error("catalog needs --image REF --sandbox DIR [--evidence DIR]... [--allow-host H]... [--memory MIB]");
+      if (!image || !sandbox) throw new Error("catalog needs --image REF --sandbox DIR [--evidence DIR]... [--allow-host H]... [--open-net] [--memory MIB] [--cpus N] [--run ID]");
       const evidence: string[] = [];
       const allowHosts: string[] = [];
       rest.forEach((a, i) => {
         if (a === "--evidence" && rest[i + 1]) evidence.push(rest[i + 1]);
         if (a === "--allow-host" && rest[i + 1]) allowHosts.push(...rest[i + 1].split(",").filter(Boolean));
       });
-      const r = await imageCatalog(image, resolve(sandbox), evidence, { memoryMib: opt("--memory") ? Number(opt("--memory")) : undefined, allowHosts });
+      const r = await imageCatalog(image, resolve(sandbox), evidence, {
+        memoryMib: opt("--memory") ? Number(opt("--memory")) : undefined,
+        cpus: opt("--cpus") ? Number(opt("--cpus")) : undefined,
+        allowHosts,
+        openNet: rest.includes("--open-net"),
+        run: opt("--run"),
+      });
       process.stdout.write(r.output);
+      // What the catalog was built with, beside it: the image it booted and
+      // the sha256 of every file it wrote, so a catalog cannot be changed
+      // after the fact without it showing.
+      await writeCatalogRecord(resolve(sandbox), image, r.digest ?? null).catch((err: Error) => process.stderr.write(`catalog record: ${err.message}\n`));
       process.exit(r.code);
     }
     case "list": {
-      console.log(JSON.stringify({ ok: true, vms: await runVms(opt("--run")) }));
+      try {
+        console.log(JSON.stringify({ ok: true, vms: await runVms(opt("--run")) }));
+      } catch (err) {
+        console.log(JSON.stringify({ ok: false, error: (err as Error).message }));
+        process.exit(1);
+      }
       return;
     }
     case "reap": {

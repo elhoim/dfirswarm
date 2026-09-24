@@ -80,6 +80,7 @@ import {
   type SwarmContext,
   type WatchSnapshot,
   isOwnScratch,
+  realPathKey,
   nudgePeerViaBroker,
 } from "./protocol.ts";
 // The board: protocol.ts on the host, the hub on the other side of a VM's wall (board.ts says why).
@@ -96,6 +97,7 @@ import {
   markDone,
   markStopSteer,
   postMessage,
+  publishFile,
   readBudget,
   readBudgetStatus,
   readInbox,
@@ -123,7 +125,7 @@ import {
   type HubLink,
 } from "./board.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
-import { TOOLCHAIN_DIR } from "./toolchain.ts";
+import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
 
 type ToolCtx = { cwd: string };
 
@@ -779,6 +781,30 @@ export default function (pi: ExtensionAPI) {
     const check = await verifyInputs(cwd).catch(() => null);
     if (!check || check.ok) return;
     const content = [...check.modified, ...check.missing, ...check.added];
+    const held = (await readInputsManifest(cwd).catch(() => null))?.held;
+    if (boardSocket() || held === "bind") {
+      // Evidence held in place (a VM's read-only mount, or --inputs-bind):
+      // there is no pristine copy to heal from, and nothing in this pane
+      // wrote it. What the check sees changed is a change on the host, and
+      // it is said as that — once per path — for the host's custody to
+      // confirm or not.
+      const fresh = content.filter((p) => {
+        const last = metadataReportedAt.get(p) ?? 0;
+        if (Date.now() - last < METADATA_QUIET_MS) return false;
+        metadataReportedAt.set(p, Date.now());
+        return true;
+      });
+      for (const path of fresh) {
+        await logEvent(cwd, agentId, "inputs_violation", { tool: via, path }, { blocked: false, detected: true, kind: "content", via, healed: "none", held: held ?? "bind" });
+      }
+      if (fresh.length) {
+        await systemPost(cwd, {
+          tag: "veto",
+          body: `INPUTS CHANGED: ${fresh.join(", ")} no longer match the manifest, seen from ${agentId}'s ${boardSocket() ? "VM" : "pane"}. The evidence is held in place, read-only to every agent, so this is a change on the host or in the source, not in any pane; there is no pristine copy to restore. Stop relying on those files and say so in the report; the host's custody check at stop is the verdict.`,
+        }).catch(() => undefined);
+      }
+      return;
+    }
     const healed = await healInputs(cwd, [...content, ...check.metadata]);
     const contentSet = new Set(content);
     for (const heal of healed) {
@@ -844,7 +870,11 @@ export default function (pi: ExtensionAPI) {
     if (Date.now() - lastToolchainAt < TOOLCHAIN_INTERVAL_MS) return;
     lastToolchainAt = Date.now();
     try {
-      const { fresh } = await updateToolchainRecord(cwd);
+      // In a VM the prefix is the seat's own disk, which the host cannot
+      // read: the inventory is taken here and sent to the hub.
+      const { fresh } = boardSocket() && process.env.SWARM_TOOLCHAIN
+        ? await updateToolchainRecord(cwd, { agent: agentId, inventory: await readToolchainAt(process.env.SWARM_TOOLCHAIN) })
+        : await updateToolchainRecord(cwd);
       for (const pkg of fresh) {
         await logEvent(cwd, agentId, "toolchain", { name: pkg.name, version: pkg.version }, {
           ok: true,
@@ -1117,6 +1147,16 @@ export default function (pi: ExtensionAPI) {
         reason: "edit/write missing path",
       });
       return { block: true, reason: "claim violation: edit/write missing path" };
+    }
+    if (boardSocket()) {
+      // In a VM the shared part of work/ is read-only: a deliverable is put
+      // there through publish_file. Said before the write fails with EROFS.
+      const key = await realPathKey(ctx.cwd, path).catch(() => "");
+      if (key.startsWith("work/") && !isOwnScratch(key, agentId) && !isSharedScratch(key)) {
+        const reason = `${key} is in the shared part of work/, which is read-only in your VM. Write it under work/${agentId}/ and call publish_file(path, to: "${key}"); it is claimed for you and recorded.`;
+        await logEvent(ctx.cwd, agentId, "publish_needed", { tool: event.toolName, path: key }, { blocked: true }).catch(() => undefined);
+        return { block: true, reason };
+      }
     }
     const guard = await guardWrite(ctxFrom(ctx.cwd, agentId), path);
     if (guard.ok && !guard.refreshed && isOwnScratch(guard.path, agentId)) {
@@ -1956,6 +1996,27 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const result = await restoreFileVersion(ctxFrom(toolCtx.cwd, agentId), params.path, params.rev);
       await logEvent(toolCtx.cwd, agentId, "file_restore", params, result);
+      return okResult(result);
+    },
+  });
+
+  pi.registerTool({
+    name: "publish_file",
+    label: "Publish file",
+    description:
+      "Put a file of your own (under work/<your id>/) into the shared part of work/ — work/report.md, work/timeline.md, a shared CSV. The destination is claimed for you (refused when a peer holds it), the bytes are copied by the harness and the revision is recorded. In a microVM this is the only way a shared file is written; on the host it works the same.",
+    promptSnippet: "Publish a file of your own into the shared work/ (claimed and recorded for you)",
+    promptGuidelines: ["Write a shared deliverable under work/<your id>/ first, then publish_file it. To change a shared file, copy it into your directory, edit, publish."],
+    parameters: Type.Object({
+      path: Type.String({ description: "Your own file, under work/<your id>/" }),
+      to: Type.Optional(Type.String({ description: "Where it goes under work/; default: work/<basename>" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const result = await publishFile(ctxFrom(toolCtx.cwd, agentId), params.path, params.to);
+      await logEvent(toolCtx.cwd, agentId, "publish_file", params, result);
+      if (!result.ok) {
+        return { content: [{ type: "text" as const, text: result.reason }], details: result, isError: true };
+      }
       return okResult(result);
     },
   });

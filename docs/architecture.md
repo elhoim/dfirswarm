@@ -8,7 +8,7 @@ flowchart TB
   subgraph OP["Operator"]
     CLI["scripts/swarm.sh<br/>start · list · status · stop · reap · netcheck · ui"]
     TAIL["scripts/watch.sh<br/>scripts/await-done.sh"]
-    BROWSER["Any browser on the LAN"]
+    BROWSER["A browser on this machine (the LAN with --host 0.0.0.0)"]
   end
 
   subgraph HERDR["Herdr workspace (one pane per agent, √N grid, tab/workspace spill)"]
@@ -77,7 +77,7 @@ Reading the diagram:
 
 The same extension, the same protocol and the same files, with the agents
 moved behind a VM's wall and one process on the host writing the board for
-them. [ADR 0005](adr/0005-agents-live-in-microvms.md) says why.
+them. [ADR 0009](adr/0009-agents-live-in-microvms.md) says why.
 
 ```mermaid
 flowchart TB

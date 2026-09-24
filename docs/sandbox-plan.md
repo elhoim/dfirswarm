@@ -564,7 +564,7 @@ namespaces make that check collide across containers.
 
 **Phases 3 and 4, as built (2026-09-24):** one microVM per agent, not one
 container per run — `--isolation microvm`,
-[ADR 0005](adr/0005-agents-live-in-microvms.md). The condition above is kept:
+[ADR 0009](adr/0009-agents-live-in-microvms.md). The condition above is kept:
 `tests/vm-integration.test.ts` runs on a KVM runner on every pull request and
 fails unless guest root cannot modify the evidence, the run's floor or the
 trace, by writing, remounting or unmounting, and unless a VM reaches no host

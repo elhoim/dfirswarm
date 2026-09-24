@@ -73,7 +73,12 @@ pass "the evidence is used in place, with no copy and no pristine clone, and the
 for id in $(jq -r '.agents[].id' "$sbx/team.json"); do
   [[ -d "$sbx/tool-output/$id" ]] || fail "no tool-output/$id for its VM to mount writable"
   [[ -d "$sbx/.pi-sessions/$id" ]] || fail "no .pi-sessions/$id for its VM to mount writable"
+  for d in "work/$id" "work/extracted/$id" "work/quarantine/$id"; do
+    [[ -d "$sbx/$d" ]] || fail "no $d for its VM to mount writable"
+  done
 done
+grep -q 'publish_file' "$sbx/SWARM.md" || fail "the contract does not tell a VM agent how a shared file is written"
+grep -q 'the rest of `work/` is read-only there' "$sbx/SWARM.md" || fail "the contract does not say the shared work/ is read-only in a VM"
 pass "every agent's writable holes exist before its VM would mount over them"
 
 [[ "$(reg vm-ev '.isolation.mode')" == "microvm" ]] || fail "the registry does not record the isolation"
@@ -186,6 +191,59 @@ sbx="$(sandbox_of "$out")"
 [[ "$(jq -r '.providers[] | select(.provider == "openai-codex") | .hosts | join(",")' "$sbx/vm-spec.json")" == "chatgpt.com" ]] \
   || fail "the refresh endpoint is bound though the guest never refreshes: $(jq -c '.providers' "$sbx/vm-spec.json")"
 pass "a credential in --env is refused, a subscription needs --allow-oauth-in-vm and is recorded, and its refresh endpoint is never bound"
+
+# --- the evidence: links recorded as links, a second layer on request, a warning ------
+mkdir -p "$TMP/ev-mixed/sub"
+printf 'a\n' > "$TMP/ev-mixed/a.txt"
+printf 'b\n' > "$TMP/ev-mixed/sub/b.txt"
+ln -s a.txt "$TMP/ev-mixed/a-link.txt"
+ln -s sub "$TMP/ev-mixed/sub-link"
+chmod -R a-w "$TMP/ev-mixed"/a.txt "$TMP/ev-mixed/sub/b.txt"
+out="$(start --isolation microvm --inputs "$TMP/ev-mixed" --label vm-links)"; rc=$?
+[[ $rc -eq 0 ]] || fail "evidence with links inside it exited $rc: $out"
+sbx="$(sandbox_of "$out")"
+jq -e '[.files[] | select(.link)] | map({path, link}) == [{path: "inputs/a-link.txt", link: "a.txt"}, {path: "inputs/sub-link", link: "sub"}]' "$sbx/inputs.json" >/dev/null \
+  || fail "the manifest does not record the links as links: $(jq -c '.files' "$sbx/inputs.json")"
+[[ "$(jq '[.files[] | select(.link | not)] | length' "$sbx/inputs.json")" == "2" ]] || fail "a directory link was walked into, or a file was lost"
+printf '%s\n' "$out" | grep -q 'is writable by this account' && fail "read-only evidence was said to be writable"
+node --experimental-strip-types --no-warnings --input-type=module -e "
+  const P = await import('$ROOT/extensions/protocol.ts');
+  const c = await P.verifyInputs('$sbx');
+  if (!c.ok) { console.error(JSON.stringify(c)); process.exit(1); }
+" || fail "the agents' own inputs check calls unchanged evidence with links in it changed"
+(cd "$sbx" && python3 "$ROOT/packs/computer-forensics-base/tools/check_inputs/run.py" >/dev/null) || fail "the pack's check_inputs calls it changed"
+pass "links inside the evidence are recorded as links, and the manifest, the agents' check and check_inputs agree they are unchanged"
+
+chmod u+w "$TMP/ev-mixed/a.txt"
+out="$(start --isolation microvm --inputs "$TMP/ev-mixed" --label vm-writable)"
+printf '%s\n' "$out" | grep -q 'is writable by this account' || fail "writable evidence used in place is not warned about: $out"
+out="$(start --isolation microvm --inputs "$TMP/ev-link" --inputs-copy --label vm-copy)"; rc=$?
+[[ $rc -eq 0 ]] || fail "--inputs-copy exited $rc: $out"
+sbx="$(sandbox_of "$out")"
+[[ -d "$sbx/inputs" && ! -L "$sbx/inputs" ]] || fail "--inputs-copy did not copy the evidence into the run"
+[[ "$(jq -r '.held' "$sbx/inputs.json")" == "copy" ]] || fail "the manifest does not say the evidence was copied"
+[[ -z "$(find "$sbx/inputs" -type f -perm -u+w)" ]] || fail "the copy is writable"
+pass "writable evidence used in place is warned about; --inputs-copy gives the run its own read-only copy"
+
+# --- a reused sandbox starts clean; a prepared VM run touches no host tool ---------------
+reuse="$TMP/reused"
+out="$(start --isolation microvm --sandbox "$reuse" --label vm-reuse1)"
+mkdir -p "$reuse/vm" "$reuse/tools/old_tool" "$reuse/history/x" "$reuse/.pi-sessions/old" "$reuse/tool-output/old"
+printf '{}' > "$reuse/vm/old.json"; printf '{"summary":"old"}' > "$reuse/custody.json"; printf 'x' > "$reuse/tools/old_tool/manifest.json"
+out="$(start --isolation microvm --sandbox "$reuse" --label vm-reuse2)"; rc=$?
+[[ $rc -eq 0 ]] || fail "reusing a sandbox exited $rc: $out"
+for gone in vm/old.json custody.json tools/old_tool .pi-sessions/old tool-output/old; do
+  [[ ! -e "$reuse/$gone" ]] || fail "a reused sandbox kept the previous run's $gone"
+done
+pass "a reused sandbox loses the previous run's VM records, custody, tools, sessions and outputs"
+out="$(start --isolation microvm --inputs "$TMP/ev" --catalog --label vm-prepared)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a prepared VM run with --catalog exited $rc: $out"
+sbx="$(sandbox_of "$out")"
+printf '%s\n' "$out" | grep -q 'built in the run.s image when the VMs start' || fail "a prepared VM run does not say where its catalog will be built: $out"
+[[ ! -f "$sbx/catalog/README.md" ]] || fail "a prepared VM run built its catalog with this host's tools"
+[[ ! -f "$sbx/toolbox.json" ]] || fail "a prepared VM run checked this host's toolbox"
+[[ -f "$TMP/runs/$(basename "$sbx").custody-anchor.json" || -f "$sbx.custody-anchor.json" ]] || fail "no custody anchor outside the run"
+pass "a prepared VM run leaves the toolbox and the catalog to the image, and anchors its manifest outside the run"
 
 out="$(start --isolation microvm --no-vm-snapshot --label vm-nosnap)"
 [[ "$(reg vm-nosnap '.isolation.snapshot')" == "false" ]] || fail "--no-vm-snapshot is not recorded"

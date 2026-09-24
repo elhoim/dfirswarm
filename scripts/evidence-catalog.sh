@@ -32,8 +32,11 @@ if [[ "${1:-}" == "--candidates" ]]; then
 fi
 [[ -n "$sandbox" && -d "$sandbox/inputs" ]] || { echo "evidence-catalog: usage: evidence-catalog.sh <sandbox> (needs inputs/)" >&2; exit 2; }
 out="$sandbox/catalog"
-rm -rf "$out"
+# Emptied, not removed: in a VM catalog/ is a mount of its own, the one
+# writable place in an otherwise read-only run, and a mount point cannot
+# be removed from inside.
 mkdir -p "$out"
+find "$out" -mindepth 1 -delete 2>/dev/null || true
 STEP_TIMEOUT="${SWARM_CATALOG_STEP_TIMEOUT:-900}"
 index=()
 notes=()

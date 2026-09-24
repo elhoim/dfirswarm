@@ -56,6 +56,25 @@ function msb(...args: string[]): string {
   return execFileSync(msbBinary(), args, { encoding: "utf8", timeout: 120_000 });
 }
 
+/**
+ * The same, without blocking this process: needed whenever the guest talks
+ * to the hub, which runs in this process and must keep answering.
+ */
+async function inVmAsync(name: string, script: string): Promise<string> {
+  const { spawn } = await import("node:child_process");
+  return new Promise<string>((done) => {
+    const child = spawn(msbBinary(), ["exec", name, "--", "sh", "-c", script], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
+    const timer = setTimeout(() => child.kill(), 120_000);
+    child.on("close", () => {
+      clearTimeout(timer);
+      done(out);
+    });
+  });
+}
+
 /** Run a shell command in a VM as its root; stdout, whatever the exit. */
 function inVm(name: string, script: string): string {
   try {
@@ -404,4 +423,32 @@ test("the catalog runs in a throwaway VM of the image, with the image's tools, a
   assert.deepEqual([...(await fingerprint(evidence, []))], [...evidenceBefore], "the evidence did not change");
   assert.deepEqual([...(await fingerprint(sandbox, ["catalog", "vm"]))], [...floorBefore].filter(([k]) => !k.startsWith("vm/")), "the catalog wrote nothing but catalog/");
   assert.doesNotMatch(msb("list"), /dfs-catalog-/, "the catalog's VM is gone");
+});
+
+test("in a VM the shared work/ is read-only, a peer's directory is not one's own, extracted material cannot run, and a deliverable is published through the hub", async (t) => {
+  if (skip) return t.skip(skip);
+  const r = await rig("vmt9", ["vmt900", "vmt901"]);
+  assert.deepEqual((await createVms(r.spec)).failures, []);
+  const S = r.sandbox;
+  const out = await inVmAsync(vmName(r.run, "vmt900"), `
+    w() { if ( printf x > "$1" ) 2>/dev/null; then echo "WROTE $1"; else echo "refused $1"; fi; }
+    w "${S}/work/shared.md"; w "${S}/work/vmt901/theirs.md"; w "${S}/work/extracted/vmt901/theirs.bin"
+    printf '# findings\n' > "${S}/work/vmt900/report.md" && echo "own ok"
+    printf '#!/bin/sh\necho ran\n' > "${S}/work/extracted/vmt900/x.sh"; chmod +x "${S}/work/extracted/vmt900/x.sh"
+    "${S}/work/extracted/vmt900/x.sh" 2>/dev/null && echo "EXECUTED" || echo "noexec held"
+    /.msb/scripts/dfirswarm-bridge; sleep 0.5
+    # The request's writer stays open until the hub answers: a half-closed
+    # connection is ended by the guest's bridge before a slow reply arrives.
+    { printf '%s\\n' '{"t":"rpc","fn":"publishFile","args":[null,"work/vmt900/report.md","work/report.md"]}'; sleep 8; } | socat -t 30 - UNIX-CONNECT:/run/dfirswarm/hub.sock 2>&1 | sed 's/^/publish /'
+  `);
+  assert.match(out, /refused .*work\/shared\.md/, out);
+  assert.match(out, /refused .*work\/vmt901\/theirs\.md/, "a peer's scratch is read-only here");
+  assert.match(out, /refused .*work\/extracted\/vmt901\/theirs\.bin/, "a peer's extracted material is read-only here");
+  assert.match(out, /own ok/, out);
+  assert.match(out, /noexec held/, "nothing under work/extracted/ runs");
+  assert.doesNotMatch(out, /EXECUTED/);
+  assert.match(out, /"ok":true/, `the publish went through the hub: ${out}`);
+  assert.equal(await readFile(join(S, "work", "report.md"), "utf8"), "# findings\n", "the deliverable is on the host, written by the hub");
+  const claims = await readdir(join(S, "locks")).catch(() => []);
+  assert.ok(claims.length >= 1, "the destination was claimed for the publisher");
 });

@@ -191,7 +191,8 @@ test("summary: a seeded sandbox produces every section with the right numbers", 
     assert.match(text, /\| `work\/sum0100\/` \(scratch of sum0100\) \| 2 files, 14 B \|/);
     assert.doesNotMatch(text, /work\/sum0100\/scratch\.txt/);
     // custody
-    assert.match(text, /Inputs from `\/cases\/one`, copied 2026-09-18T09:59:00\.000Z: 2 files, 3\.0 KB; enforcement asked auto, kickoff guard seatbelt\./);
+    assert.match(text, /Inputs copied from `\/cases\/one` 2026-09-18T09:59:00\.000Z: 2 files, 3\.0 KB; enforcement asked auto, kickoff guard seatbelt\./);
+    assert.match(text, /No host custody was taken yet/, "without custody.json the summary says the agents' word is all there is");
     assert.match(text, new RegExp(`\\| \`inputs/disk\\.raw\` \\| 1,024 \\| \`${"a".repeat(64)}\` \\|`));
     assert.match(text, /\| 2026-09-18T10:30:00\.000Z \| sum0102 \| intact: 2 checked, 0 modified, 0 missing, 0 added \|/);
     assert.match(text, /Toolbox \(dfir\): 1 present — mmls \(4\.15\); 1 missing — yara\./);

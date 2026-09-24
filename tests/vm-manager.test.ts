@@ -124,23 +124,31 @@ test("a local server's address becomes the host gateway, and nothing else change
   assert.equal(hostGatewayUrl("not a url"), "not a url");
 });
 
-test("a VM's mounts: the run's floor read-only first, then the agent's own writable holes", () => {
-  const m = mountsFor(spec({ late_mounts: [{ host: "/runs/s1a2b/work/quarantine", noexec: true }] }), "s1a2b00");
+test("a VM's mounts: the run's floor read-only first, then the agent's own writable holes, and nothing shared writable", () => {
+  const m = mountsFor(spec(), "s1a2b00");
   assert.deepEqual(m[0], { host: "/runs/s1a2b", readonly: true }, "the floor comes first, read-only");
   const writable = m.filter((x) => !x.readonly).map((x) => x.host);
   assert.deepEqual(writable, [
-    "/runs/s1a2b/work",
+    "/runs/s1a2b/work/s1a2b00",
+    "/runs/s1a2b/work/extracted/s1a2b00",
+    "/runs/s1a2b/work/quarantine/s1a2b00",
     "/runs/s1a2b/tool-output/s1a2b00",
     "/runs/s1a2b/.pi-sessions/s1a2b00",
-    "/runs/s1a2b/work/quarantine",
   ]);
+  assert.ok(!writable.includes("/runs/s1a2b/work"), "the shared work/ is part of the read-only floor");
+  assert.ok(m.filter((x) => x.noexec).every((x) => /\/(extracted|quarantine)\/s1a2b00$/.test(x.host)), "the extracted and quarantined holes cannot execute");
   assert.ok(!writable.some((h) => h.includes("s1a2b01")), "never a peer's directory");
-  assert.equal(m.at(-1)?.noexec, true, "a no-exec hole inside work/ is mounted after work/");
 });
 
 test("the kickoff goes on only when a VM's own probe says what the run needs", () => {
-  const good = { base: "ro", work: "rw", tool_output: "rw", session: "rw", inputs: "ro", hub: true, pi: "0.87.0" };
+  const good = { base: "ro", work: "ro", scratch: "rw", extracted: "rw", extracted_exec: "noexec", quarantine_exec: "noexec", tool_output: "rw", session: "rw", inputs: "ro", hub: true, pi: "0.87.0" };
   assert.deepEqual(probeVerdict(good, true), []);
+  assert.match(probeVerdict({ ...good, work: "rw" }, true).join(), /shared work\/ is rw/, "a writable shared work/ is refused");
+  assert.match(probeVerdict({ ...good, scratch: "ro" }, true).join(), /own work\/<id>\/ is ro/);
+  assert.match(probeVerdict({ ...good, extracted_exec: "exec" }, true).join(), /extracted\/<id>\/ can execute/);
+  assert.match(probeVerdict({ ...good, quarantine_exec: "exec" }, true).join(), /quarantine\/<id>\/ can execute/);
+  assert.deepEqual(probeVerdict({ ...good, inputs_files: 4 }, true, 4), [], "the VM sees every name the manifest lists");
+  assert.match(probeVerdict({ ...good, inputs_files: 3 }, true, 4).join(), /sees 3 evidence name\(s\) where the manifest lists 4/);
   assert.deepEqual(probeVerdict({ ...good, inputs: "absent" }, false), [], "no evidence, nothing to check there");
   assert.match(probeVerdict({ ...good, base: "rw" }, true).join(), /floor is rw/);
   assert.match(probeVerdict({ ...good, inputs: "rw" }, true).join(), /inputs\/ is rw/);

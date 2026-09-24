@@ -91,7 +91,16 @@ async function sitePackageDirs(root: string): Promise<string[]> {
  * records that fact rather than leaving a gap a reader has to interpret.
  */
 export async function readToolchain(sandboxRoot: string): Promise<ToolchainRecord> {
-  const root = join(sandboxRoot, TOOLCHAIN_DIR);
+  return readToolchainAt(join(sandboxRoot, TOOLCHAIN_DIR), sandboxRoot, TOOLCHAIN_DIR);
+}
+
+/**
+ * The same inventory of any install prefix: in a microVM each seat installs
+ * into its own disk (/opt/dfir/agent), which the host cannot read, so the
+ * seat reads it and sends it up through the hub.
+ */
+export async function readToolchainAt(root: string, pathsRelativeTo = root, dirLabel = root): Promise<ToolchainRecord> {
+  const sandboxRoot = pathsRelativeTo;
   const packages: InstalledPackage[] = [];
   for (const site of await sitePackageDirs(root)) {
     for (const entry of await readdir(site, { withFileTypes: true }).catch(() => [])) {
@@ -120,7 +129,7 @@ export async function readToolchain(sandboxRoot: string): Promise<ToolchainRecor
     }
   }
   packages.sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
-  return { checked_at: new Date().toISOString(), dir: TOOLCHAIN_DIR, packages };
+  return { checked_at: new Date().toISOString(), dir: dirLabel, packages };
 }
 
 /** `name@version`, the key a reader compares two inventories on. */

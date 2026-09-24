@@ -9,7 +9,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { keptOutputRefs, takeCustody } from "../scripts/custody.ts";
+import { confinedOutput, custodyAnchorPath, keptOutputRefs, takeCustody, type Custody } from "../scripts/custody.ts";
+import { ledgerHash, type LedgerEntry } from "../extensions/protocol.ts";
 import {
   anchorGuarded,
   attributionLine,
@@ -27,6 +28,8 @@ after(async () => {
 });
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+/** The evidence part of a verdict, for a run whose manifest was readable. */
+const evidence = (c: Custody) => c.inputs as Exclude<Custody["inputs"], null | { unverifiable: string }>;
 
 async function sandbox(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "custody-"));
@@ -69,8 +72,9 @@ test("every kept output the trace names is found, wherever in a line it sits", (
 test("custody names every kept output that is gone or no longer what the trace says", async () => {
   const root = await sandbox();
   const c = await takeCustody(root);
-  assert.equal(c.inputs?.unchanged, true);
-  assert.equal(c.inputs?.files, 2);
+  assert.equal(evidence(c).unchanged, true);
+  assert.equal(evidence(c).files, 2);
+  assert.equal(evidence(c).manifest_anchored, null, "no anchor: said, not assumed");
   assert.equal(c.sessions.files.length, 1);
   assert.equal(c.sessions.files[0].sha256, sha('{"type":"session"}\n'));
   assert.equal(c.tool_outputs.referenced, 3);
@@ -88,26 +92,101 @@ test("custody re-hashes the evidence in full and says what changed, went missing
   await rm(join(root, "inputs", "mail", "a.bin"));
   await writeFile(join(root, "inputs", "planted.txt"), "new");
   const c = await takeCustody(root);
-  assert.equal(c.inputs?.unchanged, false);
-  assert.deepEqual(c.inputs?.changed, ["inputs/notes.txt"]);
-  assert.deepEqual(c.inputs?.missing, ["inputs/mail/a.bin"]);
-  assert.deepEqual(c.inputs?.added, ["inputs/planted.txt"]);
+  assert.equal(evidence(c).unchanged, false);
+  assert.deepEqual(evidence(c).changed, ["inputs/notes.txt"]);
+  assert.deepEqual(evidence(c).missing, ["inputs/mail/a.bin"]);
+  assert.deepEqual(evidence(c).added, ["inputs/planted.txt"]);
   assert.match(c.summary, /^EVIDENCE CHANGED: 1 changed, 1 missing, 1 added/);
+});
+
+test("the manifest is checked against the kickoff's anchor outside the run: a rewritten manifest is caught, a missing one is said", async () => {
+  const root = await sandbox();
+  const manifest = await readFile(join(root, "inputs.json"));
+  await writeFile(custodyAnchorPath(root), JSON.stringify({ run: "t1", inputs_manifest_sha256: createHash("sha256").update(manifest).digest("hex") }));
+  let c = await takeCustody(root);
+  assert.equal(evidence(c).manifest_anchored, true);
+  assert.match(c.summary, /manifest anchored/);
+  assert.equal(c.run, "t1", "the run id comes from the anchor");
+  // An agent that could write the manifest could make custody compare
+  // against its own list; the anchor says which list the kickoff wrote.
+  const forged = JSON.parse(manifest.toString()) as { files: Array<{ path: string; sha256: string }> };
+  await writeFile(join(root, "inputs", "notes.txt"), "notes, edited\n");
+  forged.files[0].sha256 = sha("notes, edited\n");
+  await writeFile(join(root, "inputs.json"), JSON.stringify(forged));
+  c = await takeCustody(root);
+  assert.equal(evidence(c).manifest_anchored, false);
+  assert.equal(evidence(c).unchanged, false, "a rewritten manifest is not an unchanged evidence set");
+  assert.match(c.summary, /MANIFEST REWRITTEN/);
+  await rm(join(root, "inputs.json"));
+  c = await takeCustody(root);
+  assert.ok(c.inputs && "unverifiable" in c.inputs, "evidence with no manifest is unverifiable, not unchanged");
+  assert.match(c.summary, /EVIDENCE UNVERIFIABLE/);
+});
+
+test("custody takes no path an agent wrote at face value: a kept-output reference is a regular file under tool-output/ or it is refused", async () => {
+  const root = await sandbox();
+  for (const bad of ["tool-output/../../etc/passwd", "tool-output/a0/../../inputs.json", "tool-output/a0", "work/x.log"]) {
+    const where = await confinedOutput(root, bad);
+    assert.ok("why" in where, `${bad} is refused`);
+  }
+  const { symlink, mkdir: mk } = await import("node:fs/promises");
+  await symlink("/etc/hosts", join(root, "tool-output", "a0", "link.log"));
+  await mk(join(root, "tool-output", "a0", "dir.log"));
+  assert.deepEqual(await confinedOutput(root, "tool-output/a0/link.log"), { why: "a link" });
+  assert.deepEqual(await confinedOutput(root, "tool-output/a0/dir.log"), { why: "not a regular file" });
+  const ok = await confinedOutput(root, "tool-output/a0/x.out.log");
+  assert.ok("abs" in ok && ok.size === 13);
+  // A trace line that names a link is a refusal in the verdict, and the stop goes on.
+  await writeFile(join(root, "traces", "events.jsonl"), `${JSON.stringify({ ts: "t", agent: "a0", tool: "bash", args: {}, result: { full_output: { path: "tool-output/a0/link.log", sha256: "0".repeat(64) } } })}\n`);
+  const c = await takeCustody(root, { timeoutSec: 60 });
+  assert.deepEqual(c.tool_outputs.refused, ["tool-output/a0/link.log (a link)"]);
+  assert.match(c.summary, /1 refused/);
+});
+
+test("custody has a deadline: past it the verdict says what was not finished instead of the stop hanging", async () => {
+  const root = await sandbox();
+  const c = await takeCustody(root, { timeoutSec: 0 });
+  assert.ok(c.incomplete, "the deadline is on the record");
+  assert.match(c.summary, /CUSTODY INCOMPLETE/);
+});
+
+test("the ledger's chain is verified: an entry rewritten after the fact breaks it", async () => {
+  const root = await sandbox();
+  await mkdir(join(root, "ledger"), { recursive: true });
+  const e1: LedgerEntry = { seq: 1, kind: "event", ts: "2026-01-01T00:00:00Z", value: "first", source: "s", evidence: "e", by: "a0", authors: ["a0"], at: "2026-09-24T00:00:00Z" };
+  e1.prev = "genesis";
+  e1.hash = ledgerHash(e1, e1.prev);
+  const e2: LedgerEntry = { seq: 2, kind: "finding", value: "second", source: "s", evidence: "e", by: "a1", authors: ["a1"], at: "2026-09-24T00:00:01Z" };
+  e2.prev = e1.hash;
+  e2.hash = ledgerHash(e2, e2.prev);
+  await writeFile(join(root, "ledger", "entries.jsonl"), `${JSON.stringify(e1)}\n${JSON.stringify(e2)}\n`);
+  let c = await takeCustody(root);
+  assert.equal(c.ledger?.intact, true);
+  assert.match(c.summary, /ledger 2 entries, chain intact/);
+  await writeFile(join(root, "ledger", "entries.jsonl"), `${JSON.stringify({ ...e1, value: "first, reworded" })}\n${JSON.stringify(e2)}\n`);
+  c = await takeCustody(root);
+  assert.equal(c.ledger?.intact, false);
+  assert.match(c.summary, /LEDGER CHAIN BROKEN/);
 });
 
 test("custody checks a kept VM disk against its record, and counts lines the chain never took", async () => {
   const root = await sandbox();
   await mkdir(join(root, "vm"), { recursive: true });
-  const snap = join(root, "a0.msb");
+  await mkdir(`${root}.vm-snapshots`, { recursive: true });
+  dirs.push(`${root}.vm-snapshots`);
+  const snap = join(`${root}.vm-snapshots`, "a0.msb");
   await writeFile(snap, "disk bytes");
   await writeFile(join(root, "vm", "a0.json"), JSON.stringify({ agent: "a0", image: { manifest_digest: "sha256:abc" }, snapshot: { path: snap, sha256: sha("disk bytes"), bytes: 10 } }));
   await writeFile(join(root, "vm", "a1.json"), JSON.stringify({ agent: "a1", image: { manifest_digest: "sha256:abc" }, snapshot: { path: snap, sha256: sha("other") } }));
   await writeFile(join(root, "tool-output", "a0", "trace-spill.jsonl"), '{"tool":"bash"}\n{"tool":"read"}\n');
   const c = await takeCustody(root);
   assert.deepEqual(c.vms?.map((v) => [v.agent, v.snapshot && "verified" in v.snapshot ? v.snapshot.verified : null]), [["a0", true], ["a1", false]]);
-  assert.match(c.summary, /2 VMs, 1 snapshot verified/);
-  assert.deepEqual(c.trace.spilled, [{ path: "tool-output/a0/trace-spill.jsonl", lines: 2 }]);
-  assert.match(c.summary, /2 trace lines outside the chain/);
+  assert.match(c.summary, /2 VMs, 1 of 2 snapshots verified, 2 NOT PUT AWAY/, "a VM never recorded as stopped is named");
+  assert.deepEqual(c.trace.spilled, [{ path: "tool-output/a0/trace-spill.jsonl", lines: 2, agent: "a0", bad: 2 }], "spilled lines that do not say whose they are cannot be attributed");
+  assert.match(c.summary, /2 trace lines outside the chain .* 2 NOT ATTRIBUTABLE/);
+  await writeFile(join(root, "tool-output", "a0", "trace-spill.jsonl"), '{"tool":"bash","agent":"a0"}\n{"tool":"read","agent":"a1"}\n');
+  const again = await takeCustody(root);
+  assert.equal(again.trace.spilled[0].bad, 1, "a line in a0's spill that claims to be a1's is not attributable");
 });
 
 test("the report's custody lines know a microVM run", () => {

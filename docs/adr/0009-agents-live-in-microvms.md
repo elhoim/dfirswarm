@@ -47,13 +47,22 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   rules and secrets, nothing on argv), runs each agent's Pi in its Herdr pane
   with `msb exec`, and at stop snapshots each disk with msb's integrity
   record, then removes the VM. Agents never make VMs.
-- **A read-only floor with writable holes.** The whole run is mounted
-  read-only; `work/`, the agent's own `tool-output/` and its own Pi session
-  are mounted writable on top. The evidence is mounted read-only from where it
-  is, with no copy. Everything is mounted at its host path, so no path is ever
-  translated. The harness code (extensions, scripts, prompts, packs) is
-  mounted read-only; the repository is not, because `runs/registry.json` and
-  `docs/use-cases/` would come with it.
+- **A read-only floor with writable holes, each one seat's own.** The whole
+  run is mounted read-only; the agent's own `work/<id>/`,
+  `work/extracted/<id>/` and `work/quarantine/<id>/` (the last two no-exec),
+  its own `tool-output/<id>/` and its own Pi session are mounted writable on
+  top. Nothing writable is shared between VMs: the shared part of `work/`
+  (`work/report.md`, `work/timeline.md`) is written by the hub through
+  `publish_file`, from the agent's own directory, claimed and recorded. A
+  writable `work/` shared by every VM kept none of the promises below and
+  let any seat rewrite any other's findings without a record. The evidence
+  is mounted read-only from where it is, with no copy. Everything is mounted
+  at its host path, so no path is ever translated. The harness code
+  (extensions, scripts, prompts, packs) is mounted read-only; the repository
+  is not, because `runs/registry.json` and `docs/use-cases/` would come with
+  it; a `--compact-prompt-file` is copied into the run rather than mounted
+  with its directory. `--allow-install` installs into the VM's own disk,
+  never a shared prefix.
 - **The board has one writer: the hub** (`scripts/vm-hub.ts`). An agent's
   board calls go to it over one held connection (`extensions/board.ts`, the
   protocol's own function names), and it runs the same `protocol.ts` against
@@ -69,8 +78,18 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
 - **No credential enters a VM.** Pi on the host resolves each one (`pi auth
   print-api-key`, `pi auth print-bearer-token --min-expiry`, which refreshes
   a subscription for the length of the run) and msb holds it; the guest's Pi
-  has a placeholder shaped the way Pi reads that credential. A guest's token
-  never refreshes.
+  has a placeholder shaped the way Pi reads that credential, and so do a
+  provider's env-block or header credentials and a pack's secrets. Each
+  seat's VM holds only its own model's and the summary model's. A guest's
+  token never refreshes, and the refresh endpoint is never bound. A
+  subscription's placeholder is still the operator's account at the
+  inference host, so a subscription provider needs `--allow-oauth-in-vm`.
+- **The hub answers only an agent's business.** The stop clock and the
+  harness stop are not on the agent channel; a sentinel is written only when
+  the operator's finish line passes on the host; a seat's spend report may
+  only grow; every path is resolved on the host without following a link
+  the agent planted. Spend is still what the seat reports — the wall clock
+  and each VM's `maxDuration` are the brakes the host enforces by itself.
 - **The harness owns the stop.** The hub enforces the wall clock and the caps
   from outside the VMs, writes the sentinel when the agents do not stop, and
   once it has stood for the grace period snapshots and stops the VMs. Each VM

@@ -18,6 +18,12 @@ harness *detects* shell writes to leased paths, snapshots them and announces
 them on the board — after the fact. **Run swarms on a machine or account you
 are willing to lose, with credentials you are willing to rotate.**
 
+With `--isolation microvm` the model is different: each agent is root in its
+own microVM, and the boundary is the host side of every mount, the VM's
+network policy and the hub's socket — not the agent's shell. In that mode a
+`bash` inside the VM is in scope wherever it reaches past those
+([ADR 0009](docs/adr/0009-agents-live-in-microvms.md), `docs/safety.md`).
+
 ## In scope
 
 Please report these privately (see below):
@@ -35,6 +41,13 @@ Please report these privately (see below):
   without the token.
 - Secrets leaking into `traces/events.jsonl`, `budget.json`, the registry, or
   the web app's responses.
+- Under `--isolation microvm`: anything an agent in its VM can do to the host
+  or a peer — write outside its own directories (`work/<id>/`,
+  `work/extracted/<id>/`, `work/quarantine/<id>/`, `tool-output/<id>/`, its
+  session), read a host file or a credential, reach a host outside its
+  allowlist, act through the hub as another seat or as the harness (the stop
+  clock, the sentinel, a forge with forging off), make the hub follow a link,
+  or hang or crash the hub or a custody check.
 - With `--allow-tool-forging` on: a way to put a script under `tools/`
   without `make_tool`, to run a tool whose bytes differ from its manifest,
   to replace a live author's tool as a peer, or to register a forged tool
@@ -45,14 +58,18 @@ Please report these privately (see below):
 - Anything an agent does through `bash` inside the sandbox it was given. That
   is the documented limit of the harness, not a bug. The same goes for what a
   forged tool's script does when it runs: it is a `bash` with a schema on it.
-- The web app being reachable from your LAN. It binds to `0.0.0.0` on purpose
-  so a second machine can watch; watching is meant to be open, spending needs
-  the token. Do not expose it to the internet. Read "open" literally: without
-  the token, a request on the LAN can fetch the goal document, the board, the
-  whole trace, every revision of every `work/` file, any artifact, and the
-  `swarm.sh` output of each start, stop and reap on `/api/jobs`. If the goal
-  or the evidence names something you would not put on a shared screen, put
-  the console somewhere only you can reach.
+- The web app being reachable from your LAN when you ask for it. It binds to
+  `127.0.0.1` by default; `--host 0.0.0.0` opens it to a second machine, and
+  then watching is open and spending needs the token. Do not expose it to the
+  internet. Read "open" literally: without the token, a request on the LAN can
+  fetch the goal document, the board, the whole trace, every revision of every
+  `work/` file, any artifact, and the `swarm.sh` output of each start, stop and
+  reap on `/api/jobs`. If the goal or the evidence names something you would
+  not put on a shared screen, keep the default.
+- Under `--isolation microvm`, what the ADR and `docs/safety.md` list as the
+  mode's stated limits: a spend report is the seat's own, an allowed host is
+  reachable for anything, a bound placeholder is usable at its host, msb holds
+  the credentials uncaged, and a guest's terminal output reaches the host's.
 - The behaviour, cost or output of the model you point Pi at.
 - Vulnerabilities in Herdr, Pi or a model provider. Report those upstream.
 

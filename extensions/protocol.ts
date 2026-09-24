@@ -507,6 +507,53 @@ export async function writeSandboxFile(sandboxRoot: string, rawPath: string, byt
   }
 }
 
+export type PublishResult = { ok: true; path: string; from: string; sha256: string; bytes: number; rev: number | null } | { ok: false; reason: string; path?: string };
+
+/**
+ * Put a file of the agent's own into the shared part of `work/`. In a
+ * microVM `work/` is read-only but for the agent's own directories, so a
+ * shared deliverable (`work/report.md`, `work/timeline.md`) is written by the
+ * harness: the bytes are read from the agent's scratch without following a
+ * link, the destination is claimed for the agent (or refused when a peer
+ * holds it), written in place, and recorded in history under the agent's
+ * name. On the host the same call does the same thing, so a goal reads the
+ * same either way.
+ */
+export async function publishFile(ctx: SwarmContext, fromRaw: string, toRaw?: string): Promise<PublishResult> {
+  let fromKey: string;
+  try {
+    fromKey = await realPathKey(ctx.sandboxRoot, fromRaw);
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+  if (!isOwnScratch(fromKey, ctx.agentId)) {
+    return { ok: false, reason: `publish takes a file of your own: ${fromKey} is not under work/${ctx.agentId}/, work/extracted/${ctx.agentId}/ or work/quarantine/${ctx.agentId}/`, path: fromKey };
+  }
+  const toKey = claimKey(ctx.sandboxRoot, toRaw && toRaw.trim() ? toRaw : `work/${basename(fromKey)}`);
+  if (!toKey.startsWith("work/") || toKey === "work/") return { ok: false, reason: `a file is published under work/: ${toKey}`, path: toKey };
+  if (isOwnScratch(toKey, ctx.agentId)) return { ok: false, reason: `${toKey} is your own directory already; publish puts a file in the shared part of work/`, path: toKey };
+  const other = toKey.match(/^work\/(?:extracted\/|quarantine\/)?([a-z][a-z0-9_-]{0,31})\//);
+  if (other && other[1] !== ctx.agentId && (await listTeam(ctx)).agents.some((a) => a.id === other[1])) {
+    return { ok: false, reason: `${toKey} is ${other[1]}'s own directory; a peer's scratch is theirs to write`, path: toKey };
+  }
+  const read = await readSandboxFile(ctx.sandboxRoot, fromKey);
+  if (!read) return { ok: false, reason: `no such file: ${fromKey}`, path: fromKey };
+  const held = await heldBy(ctx, toKey);
+  if (held && held.owner !== ctx.agentId) return { ok: false, reason: `claim violation: ${toKey} is held by ${held.owner}`, path: toKey };
+  const claim = held ? { ok: true } : await claimFile(ctx, toKey, { reason: "publish", implicit: true });
+  if (!claim.ok) return { ok: false, reason: `could not claim ${toKey}: ${"reason" in claim ? String((claim as { reason?: string }).reason) : "held by a peer"}`, path: toKey };
+  const guard = await guardWrite(ctx, toKey);
+  if (!guard.ok) return { ok: false, reason: guard.reason, path: toKey };
+  await recordFileVersion(ctx.sandboxRoot, toKey, ctx.agentId).catch(() => null);
+  try {
+    await writeSandboxFile(ctx.sandboxRoot, toKey, read.bytes);
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message, path: toKey };
+  }
+  const version = await recordFileVersion(ctx.sandboxRoot, toKey, ctx.agentId).catch(() => null);
+  return { ok: true, path: toKey, from: fromKey, sha256: createHash("sha256").update(read.bytes).digest("hex"), bytes: read.bytes.byteLength, rev: version?.rev ?? null };
+}
+
 /** True when either the lexical path or what it really points at is harness-owned. */
 export async function resolvesToProtected(sandboxRoot: string, rawPath: string): Promise<boolean> {
   if (isProtectedPath(claimKey(sandboxRoot, rawPath))) return true;
@@ -4336,10 +4383,19 @@ export async function runForgedTool(
     );
   }
   const real = entry.real;
-  const bytes = await readFile(real).catch(() => null);
+  let bytes = await readFile(real).catch(() => null);
   if (!bytes) return fail(`tool "${manifest.name}" entry is unreadable`);
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  let sha256 = createHash("sha256").update(bytes).digest("hex");
   const expected = await expectedToolHash(sandboxRoot, manifest);
+  if (isToolHash(expected) && sha256 !== expected && process.env.SWARM_ISOLATION === "microvm") {
+    // In a VM tools/ is read through virtio-fs, which shows a file up to five
+    // seconds old; the record (through the hub) is current. A tool re-forged
+    // moments ago reads as its old self here: wait the window out and look
+    // once more before calling the mismatch real.
+    await new Promise((r) => setTimeout(r, 6000));
+    bytes = (await readFile(real).catch(() => null)) ?? bytes;
+    sha256 = createHash("sha256").update(bytes).digest("hex");
+  }
   if (!isToolHash(expected) || sha256 !== expected) {
     return fail(`tool "${manifest.name}" on disk (${shortHash(sha256)}) does not match its manifest (${shortHash(expected || "missing")}); re-forge it with make_tool`);
   }
@@ -4457,11 +4513,21 @@ export type InputFile = {
    */
   mode?: string;
   links?: number;
+  /**
+   * A symbolic link inside the evidence, recorded as the link it is: its
+   * target, never followed. Every walk over the evidence — this manifest,
+   * the agents' `inputs` check, the pack's check_inputs, host custody —
+   * treats a link the same way, so a link that was there at the start is
+   * never reported as a changed or an added file.
+   */
+  link?: string;
 };
 
 export type InputsManifest = {
   /** Where the copy came from, as the operator named it. */
   source: string;
+  /** How the evidence is held: `copy`, `bind` (in place) or `image`. */
+  held?: string;
   copied_at: string;
   files: InputFile[];
   bytes: number;
@@ -4534,10 +4600,13 @@ export async function readInputsManifest(sandboxRoot: string): Promise<InputsMan
           // drift on its own first sweep.
           ...(typeof f.mode === "string" ? { mode: f.mode } : {}),
           ...(typeof f.links === "number" ? { links: f.links } : {}),
+          // A link inside the evidence, checked as a link by every walk.
+          ...(typeof f.link === "string" ? { link: f.link } : {}),
         })),
       bytes: Number(parsed.bytes) || 0,
       enforce: typeof parsed.enforce === "string" ? parsed.enforce : "auto",
       guard: typeof parsed.guard === "string" ? parsed.guard : "none",
+      ...(typeof (parsed as { held?: unknown }).held === "string" ? { held: (parsed as { held: string }).held } : {}),
     };
   } catch {
     return null;
@@ -4642,7 +4711,8 @@ async function hashOfCached(sandboxRoot: string, pathKey: string): Promise<strin
  * `444|1` for a copy the kickoff locked itself; whatever was recorded for an
  * attached image, which it cannot lock and must therefore describe.
  */
-function expectedFingerprint(file: { sha256: string; mode?: string; links?: number }): string {
+function expectedFingerprint(file: { sha256: string; mode?: string; links?: number; link?: string }): string {
+  if (typeof file.link === "string") return `link:${file.link}`;
   return `${file.sha256}|mode=${file.mode ?? "444"}|links=${file.links ?? 1}`;
 }
 
@@ -4782,7 +4852,52 @@ export type LedgerEntry = {
   by: string;
   authors: string[];
   at: string;
+  /** The chain: the previous entry's hash (or "genesis"), and this entry's own over its immutable core. */
+  prev?: string;
+  hash?: string;
 };
+
+/**
+ * What of a ledger entry never changes once written: a merge adds an author
+ * or a first citation, it does not move an event or reword a finding. The
+ * chain is over this, so a merge leaves it intact and a rewritten entry
+ * breaks it.
+ */
+export function ledgerCore(e: LedgerEntry): string {
+  return JSON.stringify({ seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, by: e.by, at: e.at });
+}
+
+export function ledgerHash(e: LedgerEntry, prev: string): string {
+  return createHash("sha256").update(`${prev}\n${ledgerCore(e)}`).digest("hex");
+}
+
+/**
+ * Walk the ledger's chain: every entry that carries `prev` must name the hash
+ * of the entry before it, and its own hash must be what its core gives.
+ * Entries written before the ledger was chained carry neither and are
+ * counted unchained, not broken.
+ */
+export function verifyLedgerChain(text: string): { ok: boolean; total: number; chained: number; broken_at: number | null; reason: string | null } {
+  let total = 0;
+  let chained = 0;
+  let last = "genesis";
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    total += 1;
+    let e: LedgerEntry;
+    try {
+      e = JSON.parse(line) as LedgerEntry;
+    } catch {
+      return { ok: false, total, chained, broken_at: total, reason: "not json" };
+    }
+    if (!e.prev && !e.hash) continue;
+    if (e.prev !== last) return { ok: false, total, chained, broken_at: total, reason: "prev does not name the entry before it" };
+    if (e.hash !== ledgerHash(e, e.prev)) return { ok: false, total, chained, broken_at: total, reason: "the entry's core was rewritten" };
+    chained += 1;
+    last = e.hash;
+  }
+  return { ok: true, total, chained, broken_at: null, reason: null };
+}
 
 export type LedgerInput = {
   kind: string;
@@ -4878,6 +4993,10 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
       authors: [ctx.agentId],
       at: new Date().toISOString(),
     };
+    // Chained like the trace: each entry names the one before it.
+    const previous = entries.at(-1);
+    entry.prev = previous?.hash ?? (previous ? ledgerHash(previous, previous.prev ?? "genesis") : "genesis");
+    entry.hash = ledgerHash(entry, entry.prev);
     await mkdir(join(ctx.sandboxRoot, LEDGER_DIR), { recursive: true });
     await appendFile(join(ctx.sandboxRoot, LEDGER_ENTRIES), `${JSON.stringify(entry)}\n`, "utf8");
     entries.push(entry);

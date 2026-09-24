@@ -116,7 +116,10 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   `done cannot_complete`, and if the swarm is still over one grace period later
   the harness writes the sentinel itself. `--hard-kill` additionally shuts the
   steered session down. Kickoff allows N=1–30 and warns above 10.
-- **No root, ever, and installing is not root.** The panes are ordinary
+- **No root on the host, ever, and installing is not root.** (Under
+  `--isolation microvm` the agent is root *inside its own VM*, which holds
+  nothing of the host but what is mounted, read-only but for the seat's own
+  directories; see the next point.) The panes are ordinary
   processes owned by the examiner: the "sandbox" is a directory plus a kernel
   guard over `inputs/`, a no-exec rule over what is carved out of it, and an
   egress allowlist. There is no `sudo`, nothing mounts, and nothing asks for
@@ -147,13 +150,30 @@ These are product requirements, inverted from what OpenAI's [Hugging Face incide
   by writing, remounting (its kernel flips the flag; the host still refuses
   every write) or unmounting a writable hole; a VM reaches its allowed hosts
   and nothing else, by name or by address; a secret is only a placeholder in
-  the guest; two VMs posting at once through the hub lose nothing. What stays
-  true about a VM: a peer's write to `work/` can take five seconds to look
-  current in another VM (a claim on such a file waits that out; a plain read
-  does not), the guest's TLS is intercepted for the hosts that receive a
-  secret (and only those), and the host's Pi resolves the credentials at
-  kickoff, so a subscription token must outlive the run (`--min-expiry` asks
-  Pi for one that does). [ADR 0005](adr/0005-agents-live-in-microvms.md).
+  the guest; two VMs posting at once through the hub lose nothing; a seat
+  writes only its own `work/<id>/`, and the extracted material cannot run.
+  What stays true about a VM, said plainly:
+  - A peer's published file can take five seconds to look current in another
+    VM (a claim on such a file waits that out; a plain read does not).
+  - The guest's TLS on port 443 is intercepted whenever a secret is bound —
+    the hosts that receive no secret are bypassed, but under `--no-netguard`
+    every public host on 443 is decrypted by the host's msb.
+  - A placeholder is still a capability at the host it is bound to: an API
+    key can be spent there, and a subscription token is the operator's
+    account there, which is why a subscription needs `--allow-oauth-in-vm`.
+  - Spend is what each seat reports (it may only grow); the host enforces the
+    wall clock and each VM's `maxDuration` by itself.
+  - An allowed host is a way out as well as in: a `*.blob.core.windows.net`
+    rule (Volatility's symbols) reaches any account's storage there.
+  - msb, which holds every credential for the run, is not itself caged.
+  - What a guest prints reaches the host's terminal through Herdr, escape
+    sequences included (a clipboard write, a title change).
+  - Each kept VM disk holds what the agent left on it — extracted material,
+    its /tmp — and is evidence-bearing: keep or destroy it with the case.
+
+  The host resolves the credentials at kickoff, so a subscription token must
+  outlive the run (`--min-expiry` asks Pi for one that does).
+  [ADR 0009](adr/0009-agents-live-in-microvms.md).
 - **Playwright is off by default** and refuses remote http(s) targets unless `SWARM_BROWSER_REMOTE=1`; under netguard the browser has no egress anyway.
 - **The web app gates what costs money, and keeps case data on this machine.**
   It binds `127.0.0.1`; reads need no token and show case data, so opening it

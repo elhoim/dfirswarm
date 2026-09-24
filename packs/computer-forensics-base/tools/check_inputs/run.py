@@ -19,6 +19,18 @@ if not isinstance(files, list):
     print(json.dumps({"status": "FAIL", "error": "inputs.json has no files list"}))
     sys.exit(1)
 
+def sha256_file(path):
+    # In chunks: an input can be tens of gigabytes, and reading one whole is
+    # both a MemoryError in a small VM and against the ground rules.
+    digest = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
 modified = []
 missing = []
 known = {}
@@ -27,12 +39,21 @@ for entry in files:
         continue
     rel = entry["path"]
     known[rel] = entry
+    # A link inside the evidence is recorded as a link, and checked as one:
+    # its target, never followed.
+    if isinstance(entry.get("link"), str):
+        if not os.path.islink(rel):
+            missing.append(rel)
+        elif os.readlink(rel) != entry["link"]:
+            modified.append(rel)
+        continue
+    if os.path.islink(rel):
+        modified.append(rel)
+        continue
     if not os.path.isfile(rel):
         missing.append(rel)
         continue
-    data = open(rel, "rb").read()
-    digest = hashlib.sha256(data).hexdigest()
-    size = len(data)
+    digest, size = sha256_file(rel)
     want_hash = entry.get("sha256")
     want_bytes = entry.get("bytes")
     if want_hash and digest != want_hash:
@@ -42,9 +63,11 @@ for entry in files:
 
 added = []
 if os.path.isdir("inputs"):
-    for root, _dirs, names in os.walk("inputs"):
-        for name in names:
-            rel = os.path.join(root, name).replace("\\", "/")
+    top = os.path.realpath("inputs")
+    for root, dirs, names in os.walk(top):
+        # A directory link is a name of its own, not a place to walk into.
+        for name in names + [d for d in dirs if os.path.islink(os.path.join(root, d))]:
+            rel = "inputs/" + os.path.relpath(os.path.join(root, name), top).replace("\\", "/")
             if rel not in known:
                 added.append(rel)
 

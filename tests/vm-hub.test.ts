@@ -435,3 +435,39 @@ test("a burst of calls from one seat queues past the running cap and is refused 
   assert.ok(refused >= 30 && refused <= 60, `a flood past the queue is refused (${refused} refused)`);
   assert.equal(answers.length - refused, 256, "and the rest were answered");
 });
+
+test("publish_file: a seat's own file lands in the shared work/ claimed and recorded; a peer's directory and a peer's claim are refused", async () => {
+  const { hub, sandbox } = await setup();
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  await mkdir(join(sandbox, "work", "a1"), { recursive: true });
+  await writeFile(join(sandbox, "work", "a0", "report.md"), "# findings\n");
+  const published = (await board.callBoard(hub.socketFor("a0"), "publishFile", [null, "work/a0/report.md", "work/report.md"])) as { ok: boolean; path: string; sha256: string; rev: number | null; reason?: string };
+  assert.equal(published.ok, true, published.reason);
+  assert.equal(published.path, "work/report.md");
+  assert.equal(await readFile(join(sandbox, "work", "report.md"), "utf8"), "# findings\n");
+  assert.equal(published.rev, 1, "the revision is recorded");
+  const claims = (await board.callBoard(hub.socketFor("a0"), "listClaims", [sandbox])) as Array<{ path: string; owner: string }>;
+  assert.ok(claims.some((c) => c.path === "work/report.md" && c.owner === "a0"), "the destination is a0's claim");
+  // A peer's own directory is theirs.
+  await writeFile(join(sandbox, "work", "a0", "note.md"), "mine\n");
+  const intoPeer = (await board.callBoard(hub.socketFor("a0"), "publishFile", [null, "work/a0/note.md", "work/a1/note.md"])) as { ok: boolean; reason?: string };
+  assert.equal(intoPeer.ok, false);
+  assert.match(intoPeer.reason ?? "", /a1's own directory/);
+  // A file that is not one's own cannot be published as one's own.
+  await writeFile(join(sandbox, "work", "a1", "theirs.md"), "theirs\n");
+  const notMine = (await board.callBoard(hub.socketFor("a0"), "publishFile", [null, "work/a1/theirs.md", "work/theirs.md"])) as { ok: boolean; reason?: string };
+  assert.equal(notMine.ok, false);
+  assert.match(notMine.reason ?? "", /a file of your own/);
+  // While a0 holds work/report.md, a1 cannot publish over it.
+  await writeFile(join(sandbox, "work", "a1", "report.md"), "# other\n");
+  const over = (await board.callBoard(hub.socketFor("a1"), "publishFile", [null, "work/a1/report.md", "work/report.md"])) as { ok: boolean; reason?: string };
+  assert.equal(over.ok, false);
+  assert.match(over.reason ?? "", /held by a0/);
+  assert.equal(await readFile(join(sandbox, "work", "report.md"), "utf8"), "# findings\n", "and the file is untouched");
+  // A planted link as the source is refused.
+  await symlink("/etc/hosts", join(sandbox, "work", "a0", "leak.md"));
+  const leak = (await board.callBoard(hub.socketFor("a0"), "publishFile", [null, "work/a0/leak.md", "work/leak.md"])) as { ok: boolean; reason?: string };
+  assert.equal(leak.ok, false);
+  assert.match(leak.reason ?? "", /escapes sandbox|link/i);
+  assert.equal(await stat(join(sandbox, "work", "leak.md")).then(() => true).catch(() => false), false, "nothing of the host was published");
+});

@@ -714,8 +714,14 @@ export function egressLine(mode: string | undefined): string {
 export function evidenceArrival(inputs: { source?: string; copied_at?: string; guard?: string; held?: string; bound?: boolean }): string {
   const source = `<code>${escapeHtml(inputs.source || "the operator")}</code>`;
   const at = escapeHtml(inputs.copied_at || "—");
+  if (inputs.guard === "microvm" && inputs.held === "copy") {
+    return `<p>Copied from ${source} at ${at} into <code>inputs/</code>, read-only, as a second layer (<code>--inputs-copy</code>): each agent's microVM had the copy mounted read-only, and the host refused every write through that mount.</p>`;
+  }
   if (inputs.guard === "microvm") {
-    return `<p>Used in place from ${source} (manifest taken ${at}), with no copy: each agent's microVM had it mounted read-only as <code>inputs/</code>, and the host refused every write through that mount. The harness also refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it.</p>`;
+    return `<p>Used in place from ${source} (manifest taken ${at}), with no copy: each agent's microVM had it mounted read-only as <code>inputs/</code>, and the host refused every write through that mount. The harness also refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it. The source itself stayed as writable on the host as it was; the host's custody check at stop is what says it did not change.</p>`;
+  }
+  if (inputs.held === "image") {
+    return `<p>Attached from ${source} (manifest taken ${at}) as a read-only disk image at <code>inputs/</code>: the device refused every write. There is no pristine copy, and nothing to restore from.</p>`;
   }
   if (inputs.held === "bind" || inputs.bound) {
     return `<p>Used in place from ${source} (manifest taken ${at}), with no copy: <code>inputs/</code> linked to it, and the kernel held the source read-only in every pane. The harness refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it.</p>`;
@@ -798,7 +804,7 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   const ledger = await readLedger(sandbox);
   const inputs = await readInputsManifest(sandbox);
   const vmRecords = await readVmRecords(sandbox);
-  const hostCustody = await readJson<{ summary?: string; at?: string }>(join(sandbox, "custody.json"));
+  const hostCustody = await readJson<{ summary?: string; at?: string; inputs?: unknown; run?: string | null }>(join(sandbox, "custody.json"));
   // The manifest says what was copied; the trace says what each pane measured
   // and what the final check found. The console joins them the same way in
   // `inputsView`, and the report must not state a guard the panes did not
@@ -1067,13 +1073,22 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ["Evidence", inputs ? `${inputs.files.length} file(s), ${bytesHuman(inputs.bytes ?? 0)}, from ${inputs.source || "the operator"}` : "none given"],
     [
       "Evidence intact at the end",
-      !inputsCheck
-        ? "not checked"
-        : inputsCheck.ok
-          ? `yes, ${inputsCheck.checked} checked by ${inputsCheck.by} at ${inputsCheck.at}`
-          : inputsCheck.content_ok
-            ? `bytes intact (${inputsCheck.checked} checked by ${inputsCheck.by} at ${inputsCheck.at}); ${inputsCheck.metadata.length} file(s) drifted in mode or link count only`
-            : `NO — ${inputsCheck.modified.length} modified, ${inputsCheck.missing.length} missing, ${inputsCheck.added.length} added`,
+      // The host's own re-hash, when the stop took one, is the verdict; an
+      // agent's check is the agent's word and is said as such beside it.
+      hostCustody?.inputs && typeof hostCustody.inputs === "object" && "unverifiable" in hostCustody.inputs
+        ? `UNVERIFIABLE by the host — ${String((hostCustody.inputs as { unverifiable: string }).unverifiable)}`
+        : hostCustody?.inputs && typeof hostCustody.inputs === "object"
+          ? ((hostCustody.inputs as { unchanged?: boolean; files?: number; changed?: string[]; missing?: string[]; added?: string[]; manifest_anchored?: boolean | null }).unchanged
+              ? `yes — re-hashed in full by the host at ${hostCustody.at ?? "?"} (${(hostCustody.inputs as { files?: number }).files ?? "?"} files)${(hostCustody.inputs as { manifest_anchored?: boolean | null }).manifest_anchored === true ? ", manifest anchored" : ""}`
+              : `NO — the host's re-hash found ${((hostCustody.inputs as { changed?: string[] }).changed ?? []).length} changed, ${((hostCustody.inputs as { missing?: string[] }).missing ?? []).length} missing, ${((hostCustody.inputs as { added?: string[] }).added ?? []).length} added${(hostCustody.inputs as { manifest_anchored?: boolean | null }).manifest_anchored === false ? "; the manifest was rewritten" : ""}`) +
+            (inputsCheck ? `; the agents' own last check (${inputsCheck.by}, ${inputsCheck.at}) said ${inputsCheck.ok ? "intact" : "changed"}` : "")
+          : !inputsCheck
+            ? "not checked (no host custody was taken; an agent's check is absent too)"
+            : inputsCheck.ok
+              ? `an agent's word only: ${inputsCheck.checked} checked by ${inputsCheck.by} at ${inputsCheck.at}; no host custody was taken (swarm.sh stop takes it)`
+              : inputsCheck.content_ok
+                ? `an agent's word only: bytes intact (${inputsCheck.checked} checked by ${inputsCheck.by} at ${inputsCheck.at}); ${inputsCheck.metadata.length} file(s) drifted in mode or link count only`
+                : `an agent's word only: NO — ${inputsCheck.modified.length} modified, ${inputsCheck.missing.length} missing, ${inputsCheck.added.length} added`,
     ],
     [
       "Network",

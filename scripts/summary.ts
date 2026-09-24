@@ -419,11 +419,24 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
 
   // --- custody ------------------------------------------------------------
   lines.push("## Custody", "");
+  // The host's own verdict first: what custody.json says was re-hashed,
+  // sealed and checked after the run, which no agent could write.
+  const hostCustody = await readJson<{ summary?: string; at?: string; incomplete?: string | null; trace?: { spilled?: Array<{ path: string; lines: number; bad?: number }> } }>(join(sandbox, "custody.json"));
+  if (hostCustody?.summary) {
+    lines.push(`Host custody (taken ${hostCustody.at ?? "at an unknown time"}, \`custody.json\`): ${hostCustody.summary}`, "");
+  } else {
+    lines.push("No host custody was taken yet: what follows is what the agents said about the evidence, and `swarm.sh stop` takes the host's own verdict.", "");
+  }
   if (!inputs) {
     lines.push("No read-only inputs were given to this swarm.", "");
   } else {
+    const arrived = (inputs as { held?: string }).held === "bind"
+      ? `used in place from \`${inputs.source}\` (no copy; ${inputs.guard === "microvm" ? "mounted read-only into every VM" : "kernel guard " + inputs.guard})`
+      : (inputs as { held?: string }).held === "image"
+        ? `attached as a read-only image from \`${inputs.source}\``
+        : `copied from \`${inputs.source}\` ${inputs.copied_at || "at an unknown time"}`;
     lines.push(
-      `Inputs from \`${inputs.source}\`, copied ${inputs.copied_at || "at an unknown time"}: ${inputs.files.length} file${inputs.files.length === 1 ? "" : "s"}, ${bytesHuman(inputs.bytes)}; enforcement asked ${inputs.enforce}, kickoff guard ${inputs.guard}.`,
+      `Inputs ${arrived}: ${inputs.files.length} file${inputs.files.length === 1 ? "" : "s"}, ${bytesHuman(inputs.bytes)}; enforcement asked ${inputs.enforce}, kickoff guard ${inputs.guard}.`,
       "",
       "| Input | Bytes | SHA-256 |",
       "| --- | --- | --- |",

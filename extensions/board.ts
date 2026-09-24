@@ -243,6 +243,7 @@ export const REMOTE_FUNCTIONS = [
   "markDone",
   "nameOf",
   "postMessage",
+  "publishFile",
   "readBudget",
   "readBudgetStatus",
   "readInbox",
@@ -284,6 +285,7 @@ export const markDone = remote("markDone", P.markDone);
 export const markStopSteer = P.markStopSteer;
 export const nameOf = remote("nameOf", P.nameOf);
 export const postMessage = remote("postMessage", P.postMessage);
+export const publishFile = remote("publishFile", P.publishFile);
 export const readBudget = remote("readBudget", P.readBudget);
 export const readBudgetStatus = remote("readBudgetStatus", P.readBudgetStatus);
 export const readInbox = remote("readInbox", P.readInbox);

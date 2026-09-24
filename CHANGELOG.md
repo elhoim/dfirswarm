@@ -30,7 +30,7 @@ All notable changes to this project. The format follows
   what it means to netguard (`*.suffix`, `.suffix`, `host:port`, an
   address). The console's kickoff has the
   switch; the report and the run page say what each VM could write, reach
-  and was given. ADR 0005.
+  and was given. ADR 0009.
 - **Host custody at stop** (`scripts/custody.ts` → `custody.json`, printed by
   `stop` and carried by the report): the evidence re-hashed in full, every
   session file sealed, every kept output the trace names checked against its

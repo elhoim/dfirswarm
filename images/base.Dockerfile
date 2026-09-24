@@ -22,7 +22,7 @@ RUN npm install -g --no-audit --no-fund "@earendil-works/pi-coding-agent@${PI_VE
 # vsock port to the Unix socket the extension dials.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates python3 python3-venv jq sqlite3 file xxd socat procps \
+      ca-certificates python3 python3-venv python3-pip jq sqlite3 file xxd socat procps \
       binutils bsdextrautils less unzip p7zip-full xz-utils bzip2 zstd curl libimage-exiftool-perl \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /etc/dfirswarm \
