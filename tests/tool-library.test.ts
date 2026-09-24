@@ -841,3 +841,96 @@ test("catalog_search finds the filesystem the catalogue names by its sector, and
     assert.match(r.stdout, /Other\/file\.txt/);
   });
 });
+
+test("icat_extract and chunk_needles find an image by its catalogue when it has no extension, and the offset with it", async () => {
+  // Run 2 on Linux: the evidence was a raw dd named after the host
+  // (inputs/s4a-challenge4), and every icat_extract call answered "no disk
+  // image under inputs/". On macOS the same tool read Case4.E01 at sector 0
+  // and icat said "Cannot determine file system type": the filesystem the
+  // catalogue lists is at 2048.
+  const tools = join(LIB, "..", "packs", "computer-forensics-base", "tools");
+  await withCwd(async (cwd, bin) => {
+    await rm(join(cwd, "inputs", "AF-Case2.E01"));
+    await rm(join(cwd, "inputs", "Webserver.E01"));
+    await writeFile(join(cwd, "inputs", "s4a-challenge4"), "raw\n");
+    await writeFile(join(cwd, "inputs", "memdump.mem"), "mem\n");
+    await mkdir(join(cwd, "catalog", "s4a-challenge4", "p2048"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "s4a-challenge4", "partitions.txt"), "002:  000:000   0000002048   ...   Linux (0x83)\n");
+    await mkdir(join(cwd, "catalog", "memdump.mem"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "memdump.mem", "pslist.txt"), "PID\n");
+
+    let r = await runPy(join(tools, "icat_extract", "run.py"), cwd, { inode: 12, output: "work/x.bin" }, bin);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    let body = JSON.parse(r.stdout) as { image: string; offset: number };
+    assert.equal(body.image, "inputs/s4a-challenge4");
+    assert.equal(body.offset, 2048);
+    assert.equal(await readFile(join(cwd, "icat-args.txt"), "utf8"), "-o\n2048\ninputs/s4a-challenge4\n12\n");
+
+    r = await runPy(join(tools, "chunk_needles", "run.py"), cwd, { needles: "extracted", inode: 12 }, bin);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.equal(await readFile(join(cwd, "icat-args.txt"), "utf8"), "-o\n2048\ninputs/s4a-challenge4\n12\n");
+    assert.equal((JSON.parse(r.stdout) as { hits: Record<string, { ascii: number }> }).hits.extracted.ascii, 1);
+
+    // A second filesystem: the caller says which; a given 0 is 0.
+    await mkdir(join(cwd, "catalog", "s4a-challenge4", "p409600"), { recursive: true });
+    r = await runPy(join(tools, "icat_extract", "run.py"), cwd, { inode: 12, output: "work/x.bin" }, bin);
+    assert.notEqual(r.code, 0);
+    assert.match(r.stdout + r.stderr, /several filesystems in inputs\/s4a-challenge4; pass offset=/);
+    assert.match(r.stdout + r.stderr, /\[2048, 409600\]/);
+    r = await runPy(join(tools, "icat_extract", "run.py"), cwd, { inode: 12, output: "work/x.bin", offset: 0 }, bin);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.equal(await readFile(join(cwd, "icat-args.txt"), "utf8"), "-o\n0\ninputs/s4a-challenge4\n12\n");
+  });
+
+  // A nested input with a space and a non-ASCII letter: the catalogue's name
+  // for it is what evidence-catalog.sh's `tr` makes of its bytes.
+  await withCwd(async (cwd, bin) => {
+    await rm(join(cwd, "inputs", "AF-Case2.E01"));
+    await rm(join(cwd, "inputs", "Webserver.E01"));
+    const rel = "olay ş/disk";
+    await mkdir(join(cwd, "inputs", "olay ş"), { recursive: true });
+    await writeFile(join(cwd, "inputs", rel), "raw\n");
+    const { spawnSync } = await import("node:child_process");
+    const slug = spawnSync("bash", ["-c", "printf '%s' \"$1\" | tr -c 'A-Za-z0-9._-' '_'", "_", rel], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).stdout;
+    await mkdir(join(cwd, "catalog", slug, "p63"), { recursive: true });
+    await writeFile(join(cwd, "catalog", slug, "partitions.txt"), "002:  000:000   0000000063   ...   NTFS\n");
+    const r = await runPy(join(tools, "icat_extract", "run.py"), cwd, { inode: 5, output: "work/y.bin" }, bin);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    const body = JSON.parse(r.stdout) as { image: string; offset: number };
+    assert.equal(body.image, `inputs/${rel}`);
+    assert.equal(body.offset, 63);
+  });
+});
+
+test("sqlite_query opens a database read-only by URI, on a read-only directory, whatever its name", async (t) => {
+  // It passed `sqlite3 -uri`, an option the shell does not have: every call
+  // with readonly=true (the default) failed in the macOS run. A WAL database
+  // in another agent's read-only work directory is the case immutable=1 is for.
+  const { spawnSync } = await import("node:child_process");
+  if (spawnSync("sqlite3", ["-version"]).status !== 0) {
+    t.skip("no sqlite3 shell on this host");
+    return;
+  }
+  for (const script of [
+    join(LIB, "..", "packs", "computer-forensics-base", "tools", "sqlite_query", "run.py"),
+    join(LIB, "sqlite_query", "run.py"),
+  ]) {
+    await withCwd(async (cwd) => {
+      const dir = join(cwd, "work", "agent 03 #1");
+      await mkdir(dir, { recursive: true });
+      const db = join(dir, "ActivitiesCache.db");
+      const made = spawnSync("sqlite3", [db, "pragma journal_mode=wal; create table a(x); insert into a values(7);"], { encoding: "utf8" });
+      assert.equal(made.status, 0, made.stderr);
+      await chmod(dir, 0o555);
+      try {
+        const r = await runPy(script, cwd, { db_path: "work/agent 03 #1/ActivitiesCache.db", sql: "select x from a;", csv: true });
+        assert.equal(r.code, 0, r.stderr + r.stdout);
+        const out = JSON.parse(r.stdout) as { ok: boolean; stdout: string };
+        assert.equal(out.ok, true);
+        assert.equal(out.stdout, "x\n7\n");
+      } finally {
+        await chmod(dir, 0o755);
+      }
+    });
+  }
+});

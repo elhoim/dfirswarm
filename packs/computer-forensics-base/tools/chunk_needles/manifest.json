@@ -19,11 +19,11 @@
     },
     "image": {
       "type": "string",
-      "description": "Image for inode extraction. Defaults to the single image under inputs/."
+      "description": "Image path. Defaults to the single disk image under inputs/: one with a disk image's extension, or one the catalogue read as a disk (catalog/<input>/partitions.txt)."
     },
     "offset": {
       "type": "integer",
-      "description": "Optional volume offset in sectors for icat -o"
+      "description": "Volume offset in sectors for icat -o. Defaults to the one filesystem the catalogue lists for the image (catalog/<input>/p<start>/); several mean pass it; none is 0."
     },
     "context": {
       "type": "integer",
@@ -42,6 +42,6 @@
   "example": "{\"path\": \"work/sd1d102/SRUDB.dat\", \"needles\": \"vmtoolsIO|SysInternals|malware430\"}",
   "by": "sd1d102",
   "at": "2026-09-18T14:26:18.665Z",
-  "version": 2,
-  "sha256": "d2c0a744f356882e8c2ca16e959fff1d28796cb11c68442c48e6970ce658ebf8"
+  "version": 3,
+  "sha256": "e303539f44ed5d446dfdf5c79ad376790372b5a3b5a75cbb9babe231091dee9d"
 }

@@ -631,6 +631,42 @@ not surprised:
   and no longer claims "local changes" it cannot see. `start --check`
   names the isolation, the image and what the model gateway would front.
   `stop` no longer prints Herdr's JSON.
+- **No agent could publish a shared file.** `publish_file` was registered
+  but missing from the tool allowlist swarm.sh gives Pi, and in a VM it is
+  the only way `work/report.md` is written. In the second CTF round the
+  agents on both hosts wrote their reports under their own directories and
+  abandoned the run with the finish line unmet. A test now fails on any
+  registered tool the allowlist does not name.
+- **A request with a `%` near its start was stopped as a leaked
+  credential.** msb 0.7.2 reads the placeholder in the Authorization header
+  as "in the body" when the first TLS record also holds a `%` or a `\u`
+  escape of a Content-Length body, and closes the connection; Pi reports
+  "Connection error." One agent's every compaction summary failed on it
+  (its conversation began with a URL-encoded access log). In a VM the
+  extension now sends a body to a secret's host chunked, which reaches msb
+  apart from the headers; a VM test shows the plain request stopped and the
+  chunked one answered. A failed compaction now names Pi's own fallback
+  failure as well as ours.
+- **On a macOS host, grep called every large mounted file binary.** msb
+  passes a guest's `SEEK_DATA`/`SEEK_HOLE` to macOS unchanged, and macOS
+  numbers the two the other way round, so each file under a mount looked
+  like one hole and GNU grep printed "binary file matches" instead of the
+  lines of a catalogue file list. The base image preloads `seekfix`, which
+  swaps them back only on a FUSE file whose server answers the swapped
+  pair; a VM test reads a 264 KB mounted list with grep.
+- The first prompt told each agent to read `threads/main` (a directory)
+  and `done/SWARM_DONE` (absent until the end): two failed calls per agent
+  at every start. It now sends them to `inbox`, which answers both.
+- Pack tools the round found failing on every call: `catalog_search` looked
+  for the filesystem in `p0`, where the catalogue names it by its first
+  sector (`p2048`); `esedb_query` passed `esedbexport` a `-q` the Debian
+  build lacks; `sqlite_query` passed `sqlite3` a `-uri` it never had, and
+  lost the CSV header on a newer shell. `icat_extract` and `chunk_needles`
+  now find an image without an extension by its catalogue (a raw `dd` named
+  after the host) and default the offset to the one filesystem the
+  catalogue lists (`icat` at sector 0 of Case4.E01 said "Cannot determine
+  file system type"). computer-forensics-base 1.2.6, windows-forensics
+  1.2.3.
 
 - **The venv was 642 claims and seven violations, and the panes' temp
   files were more.** With `--allow-install` one agent's pip created

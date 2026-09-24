@@ -7,21 +7,54 @@ import subprocess
 import sys
 from pathlib import Path
 
+def _catalogue_slug(path):
+    """The directory name the kickoff's catalogue gives an input: its path under
+    inputs/ with every byte outside [A-Za-z0-9._-] made "_" (evidence-catalog.sh)."""
+    import os, re
+    rel = os.fsencode(os.path.relpath(path, "inputs"))
+    return os.fsdecode(re.sub(rb"[^A-Za-z0-9._-]", b"_", rel))
+
+
 def _resolve_image(explicit=None):
     """A pack tool belongs to no case: find the image under inputs/ instead of
-    baking one in. One candidate is used; several mean the caller must say which."""
+    baking one in. One candidate is used; several mean the caller must say which.
+    An image is known by its extension or, lacking one (a raw `dd` of a web
+    server named after the host), by the catalogue: the kickoff writes
+    catalog/<input>/partitions.txt for every input it read as a disk."""
     import glob, os
     if explicit:
         return explicit
     cands = []
     for ext in ("*.E01", "*.e01", "*.raw", "*.dd", "*.001", "*.img", "*.vhd", "*.vhdx"):
         cands += glob.glob(os.path.join("inputs", ext))
+    for base, _dirs, files in os.walk("inputs", followlinks=True):
+        for f in files:
+            p = os.path.join(base, f)
+            if os.path.isfile(os.path.join("catalog", _catalogue_slug(p), "partitions.txt")):
+                cands.append(p)
     cands = sorted(set(cands))
     if len(cands) == 1:
         return cands[0]
     if not cands:
         raise SystemExit('{"ok": false, "error": "no disk image under inputs/; pass image="}')
-    raise SystemExit('{"ok": false, "error": "several images under inputs/; pass image=", "candidates": %s}' % cands)
+    raise SystemExit('{"ok": false, "error": "several images under inputs/; pass image=", "candidates": %s}' % json.dumps(cands))
+
+
+def _resolve_offset(image, explicit=None):
+    """The volume's start sector for icat -o. Given, it is used as is; not
+    given, the catalogue says: one filesystem catalogued (catalog/<input>/p<start>/)
+    is that start, several mean the caller must say which, none is sector 0."""
+    import os, re
+    if explicit is not None:
+        return explicit
+    root = os.path.join("catalog", _catalogue_slug(image))
+    starts = sorted(int(d[1:]) for d in (os.listdir(root) if os.path.isdir(root) else [])
+                    if re.fullmatch(r"p\d+", d) and os.path.isdir(os.path.join(root, d)))
+    if len(starts) == 1:
+        return starts[0]
+    if not starts:
+        return 0
+    raise SystemExit('{"ok": false, "error": "several filesystems in %s; pass offset= (a start sector, see %s/partitions.txt)", "candidates": %s}' % (image, root, json.dumps(starts)))
 
 
 def _resolve_catalog(explicit=None):
@@ -70,20 +103,20 @@ d = json.load(sys.stdin)
 inode = d.get("inode")
 output = d.get("output")
 image = _resolve_image(d.get("image"))
-offset = d.get("offset", 0)
 if inode is None or not isinstance(output, str) or not output:
     fail("need inode and output")
 dest = resolve_output(output)
 if not os.path.isfile(image):
     fail(f"image not found: {image}")
+offset = _resolve_offset(image, d.get("offset"))
 r = subprocess.run(
     ["icat", "-o", str(offset), image, str(inode)],
     capture_output=True,
 )
 if r.returncode != 0:
     err = r.stderr.decode("utf-8", "replace").strip() or f"icat exit {r.returncode}"
-    fail(err, image=image, inode=inode)
+    fail(err, image=image, inode=inode, offset=offset)
 dest.parent.mkdir(parents=True, exist_ok=True)
 dest.write_bytes(r.stdout)
 digest = hashlib.sha256(r.stdout).hexdigest()
-print(json.dumps({"path": output, "size": len(r.stdout), "sha256": digest, "image": image}))
+print(json.dumps({"path": output, "size": len(r.stdout), "sha256": digest, "image": image, "offset": offset}))

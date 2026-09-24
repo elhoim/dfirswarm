@@ -14,11 +14,11 @@
     },
     "image": {
       "type": "string",
-      "description": "Image path. Defaults to the single image under inputs/."
+      "description": "Image path. Defaults to the single disk image under inputs/: one with a disk image's extension, or one the catalogue read as a disk (catalog/<input>/partitions.txt)."
     },
     "offset": {
       "type": "integer",
-      "description": "Volume offset in sectors for icat -o (default 0)"
+      "description": "Volume offset in sectors for icat -o. Defaults to the one filesystem the catalogue lists for the image (catalog/<input>/p<start>/); several mean pass it; none is 0."
     }
   },
   "runtime": "python3",
@@ -26,6 +26,6 @@
   "timeout_seconds": 30,
   "by": "s864a08",
   "at": "2026-09-18T16:09:29.146Z",
-  "version": 3,
-  "sha256": "10fd3c920198ad0efe196a65a5e131da9085f7acf28fe43b208c0f9041b5602f"
+  "version": 4,
+  "sha256": "f2fab63555103c39abbc4539effefed997448332042a57a119326e70b761504a"
 }

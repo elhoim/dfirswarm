@@ -55,7 +55,7 @@ runs one of them without saying so.
 | `check_inputs` | python3 | `sfcc304` | 2 | Diff inputs/ against inputs.json (size and sha256). Fails if the manifest is missing or any file differs. |
 | `chunk_needles` | python3 | `sd1d102` | 2 | Scan a local file (or icat an inode from the E01) for ASCII/UTF-16 needles; return hit counts and nearby snip… |
 | `csearch` | python3 | `sf6df06` | 2 | Search the kickoff catalog files (filelist/timeline/bodyfile/pslist/cmdline/netscan/malfind/dlllist/psscan) f… |
-| `esedb_query` | python3 | `maintainer` | 1 | Read an ESE database (WebCacheV01.dat, SRUDB.dat, spartan.edb) as tables via esedbexport. Lists the tables, o… |
+| `esedb_query` | python3 | `maintainer` | 2 | Read an ESE database (WebCacheV01.dat, SRUDB.dat, spartan.edb) as tables via esedbexport. Lists the tables, o… |
 | `evtx_filter` | python3 | `sd1d101` | 1 | Parse a local EVTX; return EventID/TimeCreated/EventData for matching IDs or a time prefix |
 | `evtx_query` | python3 | `sbe1801` | 1 | Parse an EVTX file and return filtered events with timestamp, event_id, channel, computer, record_id, and nam… |
 | `extract_stream` | bash | `sfcc303` | 2 | Extract a data stream from an NTFS E01 image using icat. Returns the raw bytes (base64-encoded); a failure co… |
@@ -80,7 +80,7 @@ runs one of them without saying so.
 | `regkv` | python3 | `s9f2005` | 1 | Read a Windows registry hive with regipy and dump a key's values plus subkeys with their last-modified (FILET… |
 | `sig_carve` | python3 | `s183906` | 1 | Scan a binary file for multiple file signatures (magic bytes) and return offsets, context, and estimated size… |
 | `sigscan_e01` | python3 | `s5d1001` | 3 | Scan an E01/raw image for a byte signature via TSK img_cat (logical media, not the EWF wrapper). Returns offs… |
-| `sqlite_query` | python3 | `s881002` | 1 | Run a read-only sqlite3 query against a database file and return stdout/stderr plus exit code. |
+| `sqlite_query` | python3 | `s881002` | 2 | Run a read-only sqlite3 query against a database file and return stdout/stderr plus exit code. |
 | `usn_journal` | python3 | `maintainer` | 1 | Parse an NTFS change journal ($UsnJrnl:$J) into records: name, USN, timestamp, reason bits and file reference… |
 | `utf16_urls` | python3 | `s5d1003` | 1 | Extract UTF-16LE and ASCII URL/Visited strings from a local file; filter optional substrings. Returns unique … |
 | `volrun` | python3 | `s69d306` | 2 | Run a Volatility 3 plugin against a memory image with typed arguments. Returns stdout/stderr. |

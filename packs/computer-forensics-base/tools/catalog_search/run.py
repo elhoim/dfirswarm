@@ -1,21 +1,38 @@
 #!/usr/bin/env python3
 import json, re, sys, os
 
+def _catalogue_slug(path):
+    """The directory name the kickoff's catalogue gives an input: its path under
+    inputs/ with every byte outside [A-Za-z0-9._-] made "_" (evidence-catalog.sh)."""
+    import os, re
+    rel = os.fsencode(os.path.relpath(path, "inputs"))
+    return os.fsdecode(re.sub(rb"[^A-Za-z0-9._-]", b"_", rel))
+
+
 def _resolve_image(explicit=None):
     """A pack tool belongs to no case: find the image under inputs/ instead of
-    baking one in. One candidate is used; several mean the caller must say which."""
+    baking one in. One candidate is used; several mean the caller must say which.
+    An image is known by its extension or, lacking one (a raw `dd` of a web
+    server named after the host), by the catalogue: the kickoff writes
+    catalog/<input>/partitions.txt for every input it read as a disk."""
     import glob, os
     if explicit:
         return explicit
     cands = []
     for ext in ("*.E01", "*.e01", "*.raw", "*.dd", "*.001", "*.img", "*.vhd", "*.vhdx"):
         cands += glob.glob(os.path.join("inputs", ext))
+    for base, _dirs, files in os.walk("inputs", followlinks=True):
+        for f in files:
+            p = os.path.join(base, f)
+            if os.path.isfile(os.path.join("catalog", _catalogue_slug(p), "partitions.txt")):
+                cands.append(p)
     cands = sorted(set(cands))
     if len(cands) == 1:
         return cands[0]
     if not cands:
         raise SystemExit('{"ok": false, "error": "no disk image under inputs/; pass image="}')
-    raise SystemExit('{"ok": false, "error": "several images under inputs/; pass image=", "candidates": %s}' % cands)
+    raise SystemExit('{"ok": false, "error": "several images under inputs/; pass image=", "candidates": %s}' % json.dumps(cands))
+
 
 
 def _resolve_catalog(explicit=None):
