@@ -16,113 +16,8 @@ import type { SwarmView } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ErrorState, LoadingState } from "@/components/states";
-import { inputsGuardSummary } from "./inputs-panel";
+import { frameFacts } from "@/lib/run-facts";
 import { cn } from "@/lib/utils";
-
-type Fact = { label: string; value: string; title?: string; tone?: "warn" };
-
-/**
- * Everything the kickoff decided, in one row, in the order an operator would
- * ask about it: where the agents run, what they may reach, what they may do
- * to the evidence, and what stops them.
- */
-function frameFacts(view: SwarmView): Fact[] {
-  const r = (view.registry ?? {}) as Record<string, unknown>;
-  const layout = (view.layout ?? {}) as Record<string, unknown>;
-  const s = view.summary;
-  const out: Fact[] = [];
-  if (s.workspace_id) {
-    const tabs = typeof layout.tabs === "number" ? `${layout.tabs} tab${layout.tabs === 1 ? "" : "s"} · ` : "";
-    out.push({ label: "Panes", value: `${s.workspace_id} · ${tabs}${s.n} panes`, title: "The Herdr workspace this run's agents live in" });
-  }
-  // Where the agents lived: on this host, or one microVM each.
-  const iso = (r.isolation ?? {}) as { mode?: string; image?: string; cpus?: number; memory_mib?: number; snapshot?: boolean };
-  if (iso.mode === "microvm") {
-    out.push({
-      label: "Isolation",
-      value: `microVM per agent · ${iso.image ?? "image not recorded"}${iso.cpus ? ` · ${iso.cpus} vCPU` : ""}${iso.memory_mib ? ` · ${iso.memory_mib} MiB` : ""}${iso.snapshot === false ? " · disks not kept" : ""}`,
-      title: "Each agent ran Pi in its own microVM: the run read-only but for its own work/<id>/, extracted and quarantine directories, outputs and session; shared files published through the hub, the board written by the hub on the host, no credential inside. vm/<id>.json holds each VM's record.",
-    });
-  } else {
-    // What held a host run is what its record says it had, not the defaults.
-    const holders = [r.write_guard && r.write_guard !== "none" ? "the write guard" : null, "the tool guard", r.netguard === false ? null : "netguard"].filter(Boolean) as string[];
-    out.push({
-      label: "Isolation",
-      value: "host processes · unisolated",
-      title: `Each agent ran as a Pi process on this host, with no VM around it (a run with no isolation recorded is one of these), held by ${holders.join(", ")}${r.write_guard === "none" ? "; the write guard was off" : ""}${r.netguard === false ? "; netguard was off" : ""}`,
-    });
-  }
-  if (view.inputs) {
-    out.push({
-      label: "Inputs",
-      value: `read-only · ${inputsGuardSummary(view.inputs).text}`,
-      title: "Agents read inputs/ and can never write it; this is the guard each pane actually got",
-    });
-  }
-  // Open is what the record says, in either field: a VM run with
-  // --no-netguard records netguard_mode microvm-open, and its policy was
-  // public, not deny by default.
-  const netOpen = r.net === "open" || r.netguard_mode === "microvm-open" || r.netguard === false;
-  out.push({
-    label: "Network",
-    value:
-      netOpen ? "open" : r.net === "local" ? "local endpoints only" : r.net === "hosts" ? `allowlist + ${String(r.allow_hosts ?? "")}` : "allowlist only",
-    tone: netOpen ? "warn" : undefined,
-    title:
-      iso.mode === "microvm"
-        ? netOpen
-          ? "Each agent's VM could reach every public host (--no-netguard); credentials still went only to their own hosts"
-          : "What each agent's VM could reach: msb's network policy, deny by default"
-        : netOpen
-          ? "The panes could reach whatever this machine could: netguard was off"
-          : "What the panes could reach through netguard",
-  });
-  if (r.toolbox && r.toolbox !== "off") out.push({ label: "Toolbox", value: String(r.toolbox), title: iso.mode === "microvm" ? "The tool sets and the packs' programs, checked in the run's image before the run started" : "The tool sets checked on this host before the run started" });
-  if (r.catalog === true) out.push({ label: "Catalog", value: "first pass done", title: "The standard first pass over the evidence ran before any agent" });
-  if (r.quarantine === true) out.push({ label: "Quarantine", value: "no-exec on extracts", title: "Nothing under work/extracted or work/quarantine can execute" });
-  out.push({ label: "Forging", value: r.tool_forging ? "on" : "off", title: "Whether agents could write tools with make_tool and share them" });
-  // Absent on runs older than the feature; those say nothing rather than "off".
-  const selfCompact = view.registry?.self_compact;
-  if (selfCompact && typeof selfCompact === "object") {
-    // A line the operator left unset next to one they set is a default the
-    // extension may have fitted to it per seat; say so rather than show it as set.
-    const set = selfCompact.set;
-    const fitted = set && (set.notice_at || set.warn_at || set.compact_at);
-    const shown = (spec: string | undefined, fallback: string, isSet: boolean | undefined) => `${spec || fallback}${fitted && !isSet ? " (default)" : ""}`;
-    out.push({
-      label: "Self compaction",
-      value: selfCompact.enabled
-        ? `on · notice ${shown(selfCompact.notice_at, "40%", set?.notice_at)} · warning ${shown(selfCompact.warn_at, "50%", set?.warn_at)} · compact ${shown(selfCompact.compact_at, "60%", set?.compact_at)}${selfCompact.model ? ` · summaries by ${selfCompact.model}` : ""}`
-        : "off",
-      title:
-        "Whether agents compacted their own context, the three lines against each model's ceiling (per-model entries after a comma), and the model the summaries went to. A line marked default is fitted per seat to the lines the operator set where it would be out of order; each agent's compact_config trace row has the numbers it ran at",
-    });
-  }
-  // Absent on runs older than the bound; those say nothing rather than a number they never had.
-  if (typeof view.registry?.inbox_page_chars === "number") {
-    out.push({
-      label: "Inbox page",
-      value: view.registry.inbox_page_chars > 0 ? `${view.registry.inbox_page_chars.toLocaleString()} chars of post text per delivery` : "unbounded",
-      title: "How much post text one inbox or wait delivery carried; whole posts only, the rest stayed unread for the next call",
-    });
-  }
-  if (r.allow_install === true) {
-    out.push(
-      iso.mode === "microvm"
-        ? {
-            label: "Install",
-            value: `${r.install_hosts === false ? "from the cache" : "pypi"} into each VM`,
-            title: "Each agent could install into its own VM's disk (/opt/dfir/agent), root in its VM only; nothing went into work/.toolchain, and what a VM held beyond its image is listed at stop",
-          }
-        : { label: "Install", value: "pypi into the sandbox", title: "Agents could pip-install into work/.toolchain; no root, no system packages" },
-    );
-  }
-  out.push({ label: "Hard kill", value: view.budget?.hard_kill ? "on" : "off", title: "Whether a cap steer shuts the session down or waits out the grace period" });
-  if (typeof r.cap_per_agent_usd === "number" && r.cap_per_agent_usd > 0) {
-    out.push({ label: "Per agent", value: `$${r.cap_per_agent_usd}`, title: "What one agent may spend before it is steered to finish and stopped" });
-  }
-  return out;
-}
 
 export function GoalPanel({ view, version }: { view: SwarmView; version: number }) {
   const navigate = useNavigate();
@@ -219,7 +114,9 @@ export function GoalPanel({ view, version }: { view: SwarmView; version: number 
                 key={fact.label}
                 title={fact.title}
                 className={cn(
-                  "rounded-full border px-2.5 py-1 text-[11.5px]",
+                  // A fact can carry a long machine string (an image reference, a
+                  // commit): it breaks inside rather than pushing a phone sideways.
+                  "max-w-full rounded-full border px-2.5 py-1 text-[11.5px] [overflow-wrap:anywhere]",
                   fact.tone === "warn"
                     ? "border-saffron/40 bg-saffron-soft text-saffron-ink"
                     : "border-line bg-paper-2 text-ink-2",

@@ -6,10 +6,13 @@
  * evidence file or a secret aimed at the wrong host was only in a file
  * nobody opens. Every name is shown whole: nothing here is cut.
  */
+import { useCallback } from "react";
 import { ShieldAlert, ShieldCheck } from "lucide-react";
 import { Chip } from "@/components/console";
-import { dateTime } from "@/lib/format";
-import type { CustodyView, SwarmView } from "@/lib/types";
+import { api } from "@/lib/api";
+import { bytes, dateTime } from "@/lib/format";
+import { useResource } from "@/lib/live";
+import type { CustodyView, OperatorAudit, SwarmView } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 function Names({ label, names }: { label: string; names: string[] }) {
@@ -54,15 +57,29 @@ function evidenceLine(e: NonNullable<CustodyView["evidence"]>): { text: string; 
 export function CustodyPanel({ view }: { view: SwarmView }) {
   const c = view.custody;
   const phase = view.summary.phase;
+  const id = view.summary.id;
+  const loadOperator = useCallback(() => api.operator(id), [id]);
+  const operator = useResource<OperatorAudit>(loadOperator, 0, [id, "operator"]);
   if (!c) {
-    if (phase === "running" || phase === "prepared" || view.summary.finishing) return null;
+    const pending = phase === "running" || phase === "prepared" || view.summary.finishing;
     return (
-      <section className="card flex items-start gap-2.5 p-4 text-[12.5px] text-ink-2" aria-label="Custody">
-        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-ink-3" />
-        <span>
-          No custody was taken for this run: no <code>custody.json</code>. <code>scripts/swarm.sh stop {view.summary.id}</code> takes it (the hub takes it itself at the end of a VM run), or run <code>scripts/custody.ts</code> on the sandbox.
-        </span>
-      </section>
+      <div className="space-y-4">
+        <section className="card flex items-start gap-2.5 p-4 text-[12.5px] text-ink-2" aria-label="Custody">
+          <ShieldAlert className="mt-0.5 size-4 shrink-0 text-ink-3" />
+          <span>
+            {pending ? (
+              <>
+                Custody is taken when the run stops: the host re-hashes the evidence, checks the trace and ledger chains and each VM, and seals the verdict into <code>custody.json</code>, anchored outside the run. {view.summary.finishing ? "The hub is putting the VMs away now; custody follows." : ""}
+              </>
+            ) : (
+              <>
+                No custody was taken for this run: no <code>custody.json</code>. <code>scripts/swarm.sh stop {id}</code> takes it (the hub takes it itself at the end of a VM run), or run <code>scripts/custody.ts</code> on the sandbox.
+              </>
+            )}
+          </span>
+        </section>
+        <RunRecord view={view} operator={operator.data} />
+      </div>
     );
   }
   const clean = c.verdict === "clean";
@@ -89,6 +106,15 @@ export function CustodyPanel({ view }: { view: SwarmView }) {
       <div className="flex flex-col">
         <Row label="Evidence" bad={ev?.bad}>
           {ev ? ev.text : "no evidence was given to this run"}
+          {c.evidence && !("unverifiable" in c.evidence) && c.evidence.digests ? (
+            <span className="text-ink-3">
+              sha256 compared on {c.evidence.digests.sha256}
+              {c.evidence.digests.md5 ? `, md5 on ${c.evidence.digests.md5}` : ""}
+              {c.evidence.digests.sha1 ? `, sha1 on ${c.evidence.digests.sha1}` : ""}
+              {c.evidence.checked ? ` · ${c.evidence.checked.files} files by their bytes, ${c.evidence.checked.links} links by their target, ${c.evidence.checked.special} special files by their kind` : ""}
+            </span>
+          ) : null}
+          {view.inputs?.source_checked ? <span className={view.inputs.source_checked.mismatches ? "text-brick-ink" : "text-ink-3"}>at the kickoff the copy was {view.inputs.source_checked.detail}</span> : null}
           {c.evidence && !("unverifiable" in c.evidence) ? (
             <>
               <Names label="changed" names={c.evidence.changed} />
@@ -136,6 +162,13 @@ export function CustodyPanel({ view }: { view: SwarmView }) {
             </>
           ) : null}
         </Row>
+        {c.artifacts ? (
+          <Row label="Artifact index">
+            {c.artifacts.files} file{c.artifacts.files === 1 ? "" : "s"} · {bytes(c.artifacts.bytes)}
+            {c.artifacts.skipped ? ` · ${c.artifacts.skipped} not hashed` : ""}
+            {c.artifacts.index_sha256 ? <span className="font-mono text-[11px] text-ink-3">artifacts.json sha256 {c.artifacts.index_sha256}</span> : null}
+          </Row>
+        ) : null}
         {c.tool_outputs ? (
           <Row label="Kept outputs" bad={!!(c.tool_outputs.missing.length || c.tool_outputs.mismatched.length || c.tool_outputs.refused.length)}>
             {c.tool_outputs.verified} of {c.tool_outputs.referenced} verified against the trace
@@ -173,11 +206,108 @@ export function CustodyPanel({ view }: { view: SwarmView }) {
               ) : null}
               {vm.installed_outside.length ? <span>installed outside the image and the toolchain record: {vm.installed_outside.join(", ")}</span> : null}
               {vm.installed_note ? <span className="text-ink-3">{vm.installed_note}</span> : null}
+              {(() => {
+                // What the VM's own record adds: the kept disk and msb's database.
+                const rec = view.vms?.find((v) => v.agent === vm.agent);
+                if (!rec) return null;
+                return (
+                  <>
+                    {rec.snapshot_detail?.path ? (
+                      <span className="text-ink-3">
+                        disk at <span className="font-mono">{rec.snapshot_detail.path}</span>
+                        {rec.snapshot_detail.bytes !== null ? ` · ${bytes(rec.snapshot_detail.bytes)}` : ""}
+                      </span>
+                    ) : null}
+                    {rec.msb_db ? (
+                      <span className={rec.msb_db === "scrubbed" || rec.msb_db === "no database" ? "text-ink-3" : "text-saffron-ink"}>
+                        {rec.msb_db === "scrubbed" ? "msb's database cleared of its configuration" : `msb's database ${rec.msb_db}: a secret's value may remain in it`}
+                      </span>
+                    ) : null}
+                  </>
+                );
+              })()}
               {vm.record_sha256 ? <span className="font-mono text-[11px] text-ink-3">record sha256 {vm.record_sha256}</span> : null}
             </Row>
           );
         })}
       </div>
+      <RunRecord view={view} operator={operator.data} />
     </section>
+  );
+}
+
+/**
+ * What produced the run and who acted on it: the provenance and the host
+ * clock the kickoff recorded, the custody deadline, the disk and the hold,
+ * and the operator's own record for this run (runs/operator-audit.jsonl,
+ * chained, and the operator lines on the run's trace).
+ */
+function RunRecord({ view, operator }: { view: SwarmView; operator: OperatorAudit | null }) {
+  const r = view.registry;
+  const p = r?.provenance;
+  const clock = r?.host_clock;
+  const timeout = r?.custody_timeout_sec;
+  const hold = view.summary.hold ?? null;
+  const stops = (operator?.lines ?? []).filter((l) => l.command === "stop");
+  return (
+    <div className="flex flex-col">
+      {p ? (
+        <Row label="Provenance" bad={p.harness_dirty === true}>
+          <span>
+            harness {p.harness_commit ?? "?"}
+            {p.harness_dirty ? " · WITH LOCAL CHANGES" : ""} · Node {p.node_version ?? "?"} · Pi {p.pi_version ?? "?"}
+            {p.msb_version ? ` · msb ${p.msb_version}` : ""} · {p.os ?? "?"} {p.arch ?? ""}
+          </span>
+          {p.image_digest ? <span className="font-mono text-[11px] text-ink-3">image {p.image_digest}</span> : null}
+        </Row>
+      ) : null}
+      {clock ? (
+        <Row label="Host clock" bad={clock.synced === false}>
+          {clock.tz ?? "?"} ({clock.abbreviation ?? "?"}, UTC{clock.utc_offset ?? "?"}) ·{" "}
+          {clock.synced === true ? `in sync (${clock.source ?? "?"})` : clock.synced === false ? "NOT in sync" : "sync unknown"} · the run's own processes in {clock.run_processes_tz ?? "UTC"}
+        </Row>
+      ) : null}
+      {timeout !== undefined || r?.disk_encryption || hold ? (
+        <Row label="Record" bad={r?.disk_encryption === "off"}>
+          {timeout !== undefined ? <span>custody deadline {timeout} s</span> : null}
+          {r?.disk_encryption ? <span>the runs directory's disk: encryption {r.disk_encryption}</span> : null}
+          {hold ? <span>on legal hold{hold.reason ? `: ${hold.reason}` : ""}{hold.at ? ` since ${hold.at}` : ""}</span> : null}
+        </Row>
+      ) : null}
+      {operator ? (
+        <Row label="Who did what" bad={!operator.intact}>
+          <span>
+            {stops.length ? `stopped by ${stops.map((l) => `${l.os_user}@${l.host} via ${l.via} at ${l.at}`).join("; ")}` : "no stop recorded in the operator's record"} · the operator's record: {operator.detail}
+          </span>
+          {operator.lines.length ? (
+            <details className="text-[12px]">
+              <summary className="cursor-pointer text-ink-2">{operator.lines.length} command{operator.lines.length === 1 ? "" : "s"} on this run</summary>
+              <ul className="m-0 mt-1 flex list-none flex-col gap-0.5 p-0 font-mono text-[11.5px]">
+                {operator.lines.map((l, i) => (
+                  <li key={i} className={cn("[overflow-wrap:anywhere]", l.chained ? "text-ink-2" : "text-brick-ink")}>
+                    {l.at} · {l.os_user}@{l.host} · {l.via} · {l.command} {l.argv.join(" ")}
+                    {l.chained ? "" : " · NOT CHAINED to the line before"}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+          {operator.trace.length ? (
+            <details className="text-[12px]">
+              <summary className="cursor-pointer text-ink-2">{operator.trace.length} operator line{operator.trace.length === 1 ? "" : "s"} on the run's trace</summary>
+              <ul className="m-0 mt-1 flex list-none flex-col gap-0.5 p-0 font-mono text-[11.5px]">
+                {operator.trace.map((t, i) => (
+                  <li key={i} className="[overflow-wrap:anywhere] text-ink-2">
+                    {t.at} · {t.tool} · {t.command} · {t.via}
+                    {t.os_user !== "?" ? ` · ${t.os_user}` : ""}
+                    {t.verified ? "" : " · unverified (from another shell)"}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+        </Row>
+      ) : null}
+    </div>
   );
 }

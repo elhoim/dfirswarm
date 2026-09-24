@@ -68,6 +68,10 @@ export function ArtifactsPanel({ view, selected, onSelect }: { view: SwarmView; 
   // Hashing is on demand: the extracted tree reaches gigabytes and the swarm
   // view is re-read on every change, so the index is its own request.
   const index = useResource<ArtifactIndex>(loadIndex, 0, [id]);
+  // When each file was opened with its scripts, from the run's own trace
+  // (the operator's artifact_scripts lines): who, when, and which bytes.
+  const loadOperator = useCallback(() => api.operator(id), [id]);
+  const operator = useResource(loadOperator, 0, [id, "operator"]);
   const pager = usePager(files, files.length);
   const hashes = new Map<string, ArtifactEntry>((index.data?.files ?? []).map((f) => [f.path, f]));
 
@@ -186,7 +190,7 @@ export function ArtifactsPanel({ view, selected, onSelect }: { view: SwarmView; 
               {chosen ? <HashChip sha={chosen.sha256} /> : null}
               {chosen && !chosen.packaged ? <Chip tone="saffron">not packaged</Chip> : null}
               {preferred.path === output ? <Badge variant="moss">done.output_file{view.sentinel_info?.by ? ` · by ${view.sentinel_info.by}` : ""}</Badge> : null}
-              <div className="ml-auto flex items-center gap-2">
+              <div className="ml-auto flex flex-wrap items-center gap-2">
                 {preferred.kind === "html" ? (
                   scriptsUrl ? (
                     <>
@@ -206,6 +210,7 @@ export function ArtifactsPanel({ view, selected, onSelect }: { view: SwarmView; 
                     </Button>
                   )
                 ) : null}
+                {preferred.kind === "html" && !scriptsUrl ? <Chip tone="neutral">scripts off</Chip> : null}
                 <Button variant="ghost" size="sm" onClick={() => setReloadKey((k) => k + 1)}>
                   Reload
                 </Button>
@@ -274,7 +279,20 @@ export function ArtifactsPanel({ view, selected, onSelect }: { view: SwarmView; 
               )}
             </div>
             {preferred.kind === "html" ? (
-              <p className="text-[11.5px] text-ink-3">HTML runs in a sandboxed iframe (scripts on, same-origin and network off) so agent output cannot call this app or the internet.</p>
+              <div className="space-y-0.5 text-[11.5px] text-ink-3">
+                <p className="m-0">
+                  HTML is shown with no scripts, in a sandboxed frame with no same-origin and no network: agent output, or a page carved from the evidence, cannot call this app, the internet, or navigate away with what it holds. <em>Open with scripts</em> runs this one file's scripts once, in this view, after a warning; it is recorded on the run's trace as an operator action.
+                </p>
+                {(() => {
+                  const opened = (operator.data?.trace ?? []).filter((t) => t.tool === "artifact_scripts" && t.command === `work/${preferred.path}`);
+                  return opened.length ? (
+                    <p className="m-0 text-saffron-ink">
+                      Opened with scripts {opened.length}×, last at {opened[opened.length - 1].at}
+                      {opened[opened.length - 1].os_user !== "?" ? ` by ${opened[opened.length - 1].os_user}` : ""}.
+                    </p>
+                  ) : null;
+                })()}
+              </div>
             ) : null}
           </>
         ) : null}

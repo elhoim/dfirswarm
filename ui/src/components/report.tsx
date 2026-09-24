@@ -32,7 +32,8 @@ import { bytes as formatBytes } from "@/lib/format";
 import { HashChip } from "@/components/evidence";
 
 /** What `record` puts in the ledger. Structurally the app's `LedgerEntry`. */
-export type ClaimKind = "event" | "ioc" | "finding";
+/** absence: a search that found nothing, valid only for the scope it names. */
+export type ClaimKind = "event" | "ioc" | "finding" | "absence";
 export type Confidence = "high" | "medium" | "low";
 
 export type ClaimRecord = {
@@ -47,6 +48,12 @@ export type ClaimRecord = {
   evidence?: string;
   confidence?: Confidence;
   authors?: string[];
+  /** The seq of the entry this one corrects; nothing is deleted. */
+  supersedes?: number;
+  /** What the agent wrote for `ts`, when it was not already the UTC value. */
+  ts_raw?: string;
+  /** The entry's own hash in the ledger's chain. */
+  hash?: string;
 };
 
 /** One author of a record, with whatever it decided to call itself. */
@@ -212,6 +219,7 @@ export function Claim({
   emphasis = "normal",
   showTime = false,
   tail,
+  below,
   className,
 }: {
   claim: ClaimRecord;
@@ -220,6 +228,8 @@ export function Claim({
   /** Put the UTC stamp above the statement. Events want this; findings do not. */
   showTime?: boolean;
   tail?: ReactNode;
+  /** Marks under the provenance: a correction, a review, whether the trace grounds it. */
+  below?: ReactNode;
   className?: string;
 }) {
   const cited = isCited(claim);
@@ -244,6 +254,7 @@ export function Claim({
       <div className="mt-1.5">
         <Provenance source={claim.source} evidence={claim.evidence} />
       </div>
+      {below ? <div className="mt-1.5 flex flex-wrap items-center gap-1.5">{below}</div> : null}
     </div>
   );
 }
@@ -252,13 +263,15 @@ export function Claim({
 export function FindingCard({
   claim,
   authors = [],
+  below,
   className,
 }: {
   claim: ClaimRecord;
   authors?: Author[];
+  below?: ReactNode;
   className?: string;
 }) {
-  return <Claim claim={claim} authors={authors} emphasis="lead" className={className} />;
+  return <Claim claim={claim} authors={authors} emphasis="lead" below={below} className={className} />;
 }
 
 /* -------------------------------------------------------------------------
@@ -290,11 +303,14 @@ function Cell({ text, mono }: { text?: string; mono?: boolean }) {
 export function TimelineTable({
   entries,
   authorsFor,
+  marks,
   className,
 }: {
   entries: ClaimRecord[];
   /** Resolve an entry's authors. Omit it and the column is left out. */
   authorsFor?: (claim: ClaimRecord) => Author[];
+  /** Marks under an entry's statement: a correction, a review, whether the trace grounds it. */
+  marks?: (claim: ClaimRecord) => ReactNode;
   className?: string;
 }) {
   const rows = [...entries].sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? "") || a.seq - b.seq);
@@ -323,8 +339,16 @@ export function TimelineTable({
               <td className="px-3 py-2">
                 <ExhibitNo seq={e.seq} />
               </td>
-              <td className="px-3 py-2 font-mono text-[11.5px] tabular text-ink-2">{utcStamp(e.ts) || <span className="text-brick-ink">no time</span>}</td>
-              <td className="px-3 py-2 break-words text-ink">{e.value}</td>
+              <td className="px-3 py-2 font-mono text-[11.5px] tabular text-ink-2">
+                {utcStamp(e.ts) || <span className="text-brick-ink">no time</span>}
+                {/* The ledger's own rule (protocol.ts renderLedger): the time as the
+                    agent wrote it is worth showing only when it was not already UTC. */}
+                {e.ts_raw && !/[Zz]$/.test(e.ts_raw) ? <span className="mt-0.5 block font-sans text-[10.5px] text-ink-3 [overflow-wrap:anywhere]">written as {e.ts_raw}</span> : null}
+              </td>
+              <td className="px-3 py-2 break-words text-ink">
+                {e.value}
+                {marks ? <div className="mt-1 flex flex-wrap gap-1">{marks(e)}</div> : null}
+              </td>
               <td className="px-3 py-2">
                 <Cell text={e.source} mono />
               </td>
@@ -352,10 +376,12 @@ export function TimelineTable({
 export function IndicatorTable({
   entries,
   authorsFor,
+  marks,
   className,
 }: {
   entries: ClaimRecord[];
   authorsFor?: (claim: ClaimRecord) => Author[];
+  marks?: (claim: ClaimRecord) => ReactNode;
   className?: string;
 }) {
   if (!entries.length) return <NotRecorded what="No indicators" why="Nothing was recorded with kind `ioc`." />;
@@ -381,7 +407,10 @@ export function IndicatorTable({
               <td className="px-3 py-2">
                 <ExhibitNo seq={e.seq} />
               </td>
-              <td className="px-3 py-2 font-mono text-[12px] break-all text-ink">{e.value}</td>
+              <td className="px-3 py-2 font-mono text-[12px] break-all text-ink">
+                {e.value}
+                {marks ? <div className="mt-1 flex flex-wrap gap-1 font-sans">{marks(e)}</div> : null}
+              </td>
               <td className="px-3 py-2">
                 <Cell text={e.source} mono />
               </td>

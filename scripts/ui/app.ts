@@ -6,7 +6,9 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { pipeline } from "node:stream";
 import { execFile } from "node:child_process";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, realpath, rm, stat } from "node:fs/promises";
+import { finished } from "node:stream/promises";
+import { tmpdir } from "node:os";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { basename, extname, join, normalize, resolve, sep } from "node:path";
 import {
@@ -20,11 +22,14 @@ import {
   restoreFileVersion,
 } from "../../extensions/protocol.ts";
 import { readHistory } from "../../extensions/observe.ts";
-import { ActionRunner, checkReadiness, listModels, listPacks, validateStart, type Job, type ModelList, type ReadinessReport } from "./actions.ts";
+import { ActionRunner, checkReadiness, listModels, listPacks, validateReview, validateStart, type ImagePreview, type ImagePreviewQuery, type Job, type ModelList, type ReadinessReport, type StartParams } from "./actions.ts";
+import { checkVmReadiness, startFlags, type VmReadiness, type VmReadinessQuery } from "./vm-readiness.ts";
+import { coverageOf } from "../coverage.ts";
 import { deleteGoal, GoalError, listGoals, readGoal, saveGoal } from "./goals.ts";
 import { listLibrary, readLibraryEntry } from "./library.ts";
 import { describeRoots, InputsError, listInputSets, parseInputsRoots, resolveInputImage, resolveInputSet, RootStore } from "./inputs.ts";
-import { countForgedTools, findRun, listSwarmRows, listWorkFiles, queryTraces, readAllPosts, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
+import { countForgedTools, findRun, listSwarmRows, listWorkFiles, liveHubDirs, operatorAudit, queryTraces, readAllPosts, readRunEvents, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
+import { readReviews } from "./reviews.ts";
 import { userInfo } from "node:os";
 import { hashArtifacts } from "../artifacts.ts";
 import { hashRegularFile, openRegular } from "../regular-file.ts";
@@ -32,7 +37,8 @@ import { buildDossier } from "../dossier.ts";
 import { renderReport } from "../report.ts";
 import { summarize } from "../summary.ts";
 import { readForgedTool, TOOL_NAME_RE } from "../../extensions/protocol.ts";
-import { ChangeBus } from "./watch.ts";
+import { ChangeBus, HubWatch, type HubDir } from "./watch.ts";
+import { packageInfo, zipDirectory } from "./zip.ts";
 
 /**
  * Where a checkout's runs live, when nothing says otherwise. Runs are in runs/;
@@ -61,6 +67,8 @@ export type UiAppOptions = {
   distDir?: string;
   runner?: ActionRunner;
   bus?: ChangeBus;
+  /** The live VM runs' hub directories to watch; tests inject one. */
+  liveHubDirs?: () => Promise<HubDir[]>;
   models?: () => Promise<ModelList>;
   /** Which providers are usable right now; tests inject one so no `pi` runs. */
   readiness?: (models: string[]) => Promise<ReadinessReport>;
@@ -73,11 +81,16 @@ export type UiAppOptions = {
   checksTtlMs?: number;
   /** How long a grant to open one HTML artifact with its scripts stays good; tests shorten it. */
   scriptGrantTtlMs?: number;
+  /** Can this host run VMs: tests inject one so no msb runs. */
+  vmReadiness?: (q: VmReadinessQuery) => Promise<VmReadiness>;
+  /** The flags `swarm.sh help start` lists; tests inject them. */
+  startFlags?: () => Promise<string[]>;
 };
 
 export type UiApp = {
   server: Server;
   bus: ChangeBus;
+  hubWatch: HubWatch;
   runner: ActionRunner;
   listen(port: number, host: string): Promise<{ port: number; host: string }>;
   close(): Promise<void>;
@@ -238,6 +251,12 @@ export function createUiApp(options: UiAppOptions): UiApp {
   const runsDir = resolve(options.runsDir);
   const distDir = options.distDir ?? join(root, "ui", "dist");
   const bus = options.bus ?? new ChangeBus(runsDir);
+  // The live VM runs' hubs, outside the runs directory: their status.json
+  // moves the seats' states, and the set of hubs follows the registry.
+  const hubWatch = new HubWatch(bus, options.liveHubDirs ?? (() => liveHubDirs(runsDir)));
+  const unwatchRegistry = bus.subscribe((msg) => {
+    if (msg.event === "change" && (msg.data.kinds.includes("registry") || msg.data.swarm_ids.length === 0)) void hubWatch.refresh();
+  });
   const runner =
     options.runner ??
     new ActionRunner({
@@ -260,6 +279,75 @@ export function createUiApp(options: UiAppOptions): UiApp {
     readinessCache = { at: Date.now(), promise };
     return promise;
   }
+  // The VM readiness check runs vm.ts probe and capacity (msb doctor among
+  // them): a minute's cache per question, like the models' readiness.
+  const vmReadiness = options.vmReadiness ?? ((q: VmReadinessQuery) => checkVmReadiness(root, runsDir, q));
+  const vmReadinessCache = new Map<string, { at: number; promise: Promise<VmReadiness> }>();
+  function vmReadinessFor(q: VmReadinessQuery): Promise<VmReadiness> {
+    const key = JSON.stringify(q);
+    const hit = vmReadinessCache.get(key);
+    if (hit && Date.now() - hit.at < READINESS_TTL_MS) return hit.promise;
+    const promise = vmReadiness(q);
+    vmReadinessCache.set(key, { at: Date.now(), promise });
+    if (vmReadinessCache.size > 32) vmReadinessCache.delete(vmReadinessCache.keys().next().value as string);
+    return promise;
+  }
+  /**
+   * A start's options as swarm.sh takes them: validated, and a set name, an
+   * image name and a run id made into paths here and nowhere else. The start
+   * and its check (`swarm.sh start --check`) both go through it, so the check
+   * answers for exactly the start the form would make.
+   */
+  async function prepareStart(raw: unknown): Promise<StartParams> {
+    const check = validateStart(raw);
+    if (!check.ok) throw new HttpError(400, check.error);
+    // A set name, an image name and a run id become paths here and nowhere else.
+    try {
+      if (check.params.inputs_image) {
+        if (process.platform !== "darwin") throw new HttpError(400, "attaching a disk image needs macOS (hdiutil); on this host hand the swarm a directory");
+        const slash = check.params.inputs_image.indexOf("/");
+        check.params.inputs_image_path = await resolveInputImage(await inputsRoots(), check.params.inputs_image.slice(0, slash), check.params.inputs_image.slice(slash + 1));
+        check.params.inputs = undefined;
+      } else if (check.params.inputs) {
+        check.params.inputs_dir = await resolveInputSet(await inputsRoots(), check.params.inputs);
+      }
+    } catch (err) {
+      if (err instanceof InputsError) throw new HttpError(err.status, err.message);
+      throw err;
+    }
+    if (check.params.tools_from) {
+      const from = await findRun(runsDir, check.params.tools_from);
+      const dir = from?.sandbox ? join(String(from.sandbox), "tools") : "";
+      const forged = from?.sandbox ? await countForgedTools(String(from.sandbox)) : 0;
+      if (!from) throw new HttpError(404, `no run ${check.params.tools_from} to take tools from`);
+      if (forged === 0) throw new HttpError(400, `run ${check.params.tools_from} forged no tools`);
+      check.params.tools_from_dir = dir;
+    }
+    if (check.params.no_read?.length) {
+      const dirs: string[] = [];
+      for (const id of check.params.no_read) {
+        const run = await findRun(runsDir, id);
+        const dir = run?.sandbox ? await realpath(String(run.sandbox)).catch(() => null) : null;
+        if (!dir) throw new HttpError(404, `no run ${id} to keep unreadable`);
+        dirs.push(dir);
+      }
+      check.params.no_read_dirs = dirs;
+    }
+    return check.params;
+  }
+
+  const imagePreviewCache = new Map<string, { at: number; promise: Promise<ImagePreview> }>();
+  function imagePreviewFor(q: ImagePreviewQuery): Promise<ImagePreview> {
+    const key = JSON.stringify(q);
+    const hit = imagePreviewCache.get(key);
+    if (hit && Date.now() - hit.at < READINESS_TTL_MS) return hit.promise;
+    const promise = runner.imageFor(q);
+    imagePreviewCache.set(key, { at: Date.now(), promise });
+    if (imagePreviewCache.size > 32) imagePreviewCache.delete(imagePreviewCache.keys().next().value as string);
+    return promise;
+  }
+  const flagsOf = options.startFlags ?? (() => startFlags(root));
+  let flagsCache: Promise<string[]> | null = null;
   const token = options.token ?? process.env.SWARM_UI_TOKEN ?? "";
   /**
    * One-time grants to open one HTML artifact with its scripts. The console
@@ -301,6 +389,50 @@ export function createUiApp(options: UiAppOptions): UiApp {
       /** The server's OS: a disk image is attached with hdiutil, so only on darwin. The form says so before the kickoff refuses it. */
       platform: process.platform,
     };
+  }
+
+  /**
+   * The files an examiner hands over beside the report, by download name:
+   * custody.json, the verdict anchored outside the run, inputs.json, each
+   * vm/<id>.json, and this run's lines of runs/operator-audit.jsonl. A
+   * closed table of names; the abs path is the harness's, never a caller's.
+   */
+  async function courtFile(sandbox: string, id: string, name: string): Promise<{ name: string; type: string; description: string; abs?: string; body?: string } | null> {
+    const jsonType = "application/json; charset=utf-8";
+    if (name === "custody.json") return { name, type: jsonType, abs: join(sandbox, "custody.json"), description: "The host's custody verdict at stop: the evidence re-hashed, the trace and ledger chains, the kept outputs, each VM" };
+    if (name === "custody-anchor.json") return { name, type: jsonType, abs: `${sandbox}.custody-anchor.json`, description: "The verdict's hash, kept outside the run where no agent reaches: custody.json is checked against it" };
+    if (name === "inputs.json") return { name, type: jsonType, abs: join(sandbox, "inputs.json"), description: "The evidence manifest the kickoff wrote: every name with its sha256, and md5 and sha1 when taken" };
+    const vm = name.match(/^vm-([A-Za-z0-9][A-Za-z0-9_-]{0,63})\.json$/);
+    if (vm) return { name, type: jsonType, abs: join(sandbox, "vm", `${vm[1]}.json`), description: `The record of ${vm[1]}'s VM: its image, size, mounts, network, placeholders, probe, and what its stop did` };
+    if (name === "operator-audit.jsonl") {
+      const audit = await operatorAudit(runsDir, id);
+      const body = audit.lines.map((l) => JSON.stringify(l)).join("\n") + (audit.lines.length ? "\n" : "");
+      return { name, type: "application/x-ndjson; charset=utf-8", body, description: `This run's lines of the operator's record (who ran which command, from where). The chain is checked over the whole file in the runs directory: ${audit.detail}` };
+    }
+    return null;
+  }
+  async function courtFiles(sandbox: string, id: string): Promise<Array<{ name: string; description: string; present: boolean; reason?: string; bytes: number | null; sha256: string | null; type: string }>> {
+    const names = ["custody.json", "custody-anchor.json", "inputs.json"];
+    for (const f of (await readdir(join(sandbox, "vm")).catch(() => [] as string[])).sort()) {
+      if (/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.json$/.test(f)) names.push(`vm-${f}`);
+    }
+    names.push("operator-audit.jsonl");
+    const out = [];
+    for (const n of names) {
+      const f = await courtFile(sandbox, id, n);
+      if (!f) continue;
+      if (f.body !== undefined) {
+        out.push({ name: f.name, description: f.description, present: f.body.length > 0, ...(f.body.length ? {} : { reason: "no line of the operator's record names this run" }), bytes: Buffer.byteLength(f.body), sha256: createHash("sha256").update(f.body).digest("hex"), type: f.type });
+        continue;
+      }
+      const hashed = await hashRegularFile(f.abs!);
+      if (!hashed || "why" in hashed) {
+        out.push({ name: f.name, description: f.description, present: false, reason: hashed && "why" in hashed ? (hashed.why === "missing" ? "not written for this run" : hashed.why) : "not read", bytes: null, sha256: null, type: f.type });
+      } else {
+        out.push({ name: f.name, description: f.description, present: true, bytes: hashed.size, sha256: hashed.sha256, type: f.type });
+      }
+    }
+    return out;
   }
 
   /** Mutations carry the token; GET and SSE do not. */
@@ -453,6 +585,56 @@ export function createUiApp(options: UiAppOptions): UiApp {
       json(res, 200, await models());
       return;
     }
+    // Can this host run the agents in microVMs: before Start, not after.
+    if (path === "/api/vm/readiness") {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      const num = (k: string) => {
+        const v = Number(url.searchParams.get(k));
+        return Number.isInteger(v) && v > 0 && v < 1e7 ? v : undefined;
+      };
+      const image = (url.searchParams.get("image") ?? "").trim();
+      if (image && !/^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,255}$/.test(image)) throw new HttpError(400, "image is not an image reference");
+      json(res, 200, await vmReadinessFor({ image: image || undefined, n: num("n"), cpus: num("cpus"), memory: num("memory") }));
+      return;
+    }
+    // `swarm.sh start --check` with the form's options: the start's own
+    // checks, nothing written. Its BLOCKER and WARN lines go back to the form
+    // whole, with every --env value and the notify command taken out.
+    if (path === "/api/start/check") {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      requireToken(req, url);
+      json(res, 200, await runner.check(await prepareStart(await readBody(req))));
+      return;
+    }
+    // The image a kickoff with these packs would boot: `swarm.sh image-for`
+    // (read only), so the form never guesses it.
+    if (path === "/api/vm/image") {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      const packs = (url.searchParams.get("packs") ?? "").split(",").map((p) => p.trim()).filter(Boolean);
+      if (packs.length > 32 || packs.some((p) => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(p))) throw new HttpError(400, "packs must be pack ids");
+      const toolsFrom = (url.searchParams.get("tools_from") ?? "").trim();
+      let toolsDir: string | undefined;
+      if (toolsFrom) {
+        if (!/^[A-Za-z0-9_-]+$/.test(toolsFrom)) throw new HttpError(400, "tools_from must be a run id");
+        const from = await findRun(runsDir, toolsFrom);
+        toolsDir = from?.sandbox ? join(String(from.sandbox), "tools") : undefined;
+      }
+      json(res, 200, await imagePreviewFor({ packs, playwright: url.searchParams.get("playwright") === "1", tools_from_dir: toolsDir }));
+      return;
+    }
+    // The start flags this harness documents: the form offers a newer one (--model-gateway) only when it is there.
+    if (path === "/api/kickoff/flags") {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      flagsCache ??= flagsOf().catch(() => []);
+      json(res, 200, { flags: await flagsCache });
+      return;
+    }
+    // The operator's own record (runs/operator-audit.jsonl), its chain checked.
+    if (path === "/api/operator-audit") {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      json(res, 200, await operatorAudit(runsDir, null));
+      return;
+    }
     if (path === "/api/models/readiness") {
       if (method !== "GET") throw new HttpError(405, "method not allowed");
       const list = await models();
@@ -564,6 +746,18 @@ export function createUiApp(options: UiAppOptions): UiApp {
       json(res, 200, job);
       return;
     }
+    // An export job's file, once it is done: the ledger as CSV or a
+    // Timesketch import, written by swarm.sh into the console's own temp
+    // directory, never a path a caller names.
+    const downloadMatch = path.match(/^\/api\/jobs\/([^/]+)\/download$/);
+    if (downloadMatch) {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      const job = runner.get(downloadMatch[1]);
+      if (!job || job.kind !== "export" || !job.output_file) throw new HttpError(404, "no export with that id");
+      if (job.status !== "ok") throw new HttpError(409, job.status === "running" ? "the export is still running" : "the export failed; its output says why");
+      await sendFile(res, job.output_file, {}, true);
+      return;
+    }
 
     if (path === "/api/swarms") {
       if (method === "GET") {
@@ -572,41 +766,8 @@ export function createUiApp(options: UiAppOptions): UiApp {
       }
       if (method === "POST") {
         requireToken(req, url);
-        const check = validateStart(await readBody(req));
-        if (!check.ok) throw new HttpError(400, check.error);
-        // A set name, an image name and a run id become paths here and nowhere else.
-        try {
-          if (check.params.inputs_image) {
-            if (process.platform !== "darwin") throw new HttpError(400, "attaching a disk image needs macOS (hdiutil); on this host hand the swarm a directory");
-            const slash = check.params.inputs_image.indexOf("/");
-            check.params.inputs_image_path = await resolveInputImage(await inputsRoots(), check.params.inputs_image.slice(0, slash), check.params.inputs_image.slice(slash + 1));
-            check.params.inputs = undefined;
-          } else if (check.params.inputs) {
-            check.params.inputs_dir = await resolveInputSet(await inputsRoots(), check.params.inputs);
-          }
-        } catch (err) {
-          if (err instanceof InputsError) throw new HttpError(err.status, err.message);
-          throw err;
-        }
-        if (check.params.tools_from) {
-          const from = await findRun(runsDir, check.params.tools_from);
-          const dir = from?.sandbox ? join(String(from.sandbox), "tools") : "";
-          const forged = from?.sandbox ? await countForgedTools(String(from.sandbox)) : 0;
-          if (!from) throw new HttpError(404, `no run ${check.params.tools_from} to take tools from`);
-          if (forged === 0) throw new HttpError(400, `run ${check.params.tools_from} forged no tools`);
-          check.params.tools_from_dir = dir;
-        }
-        if (check.params.no_read?.length) {
-          const dirs: string[] = [];
-          for (const id of check.params.no_read) {
-            const run = await findRun(runsDir, id);
-            const dir = run?.sandbox ? await realpath(String(run.sandbox)).catch(() => null) : null;
-            if (!dir) throw new HttpError(404, `no run ${id} to keep unreadable`);
-            dirs.push(dir);
-          }
-          check.params.no_read_dirs = dirs;
-        }
-        json(res, 202, runner.start(check.params));
+        const params = await prepareStart(await readBody(req));
+        json(res, 202, runner.start(params));
         return;
       }
       throw new HttpError(405, "method not allowed");
@@ -687,7 +848,21 @@ export function createUiApp(options: UiAppOptions): UiApp {
             summary: dossier.summaryMd,
             artifactsJson: dossier.artifactsJson,
             artifacts: dossier.artifacts,
-            files: dossier.files,
+            // The court set around the report: the custody verdict and its
+            // anchor, the evidence manifest, each VM's record and this run's
+            // lines of the operator's record, each with the hash of its bytes.
+            files: [...dossier.files, ...(await courtFiles(sandbox, id))],
+          });
+          return;
+        }
+        const court = await courtFile(sandbox, id, what);
+        if (court) {
+          if (court.body !== undefined) {
+            send(court.name, court.type, court.body);
+            return;
+          }
+          await sendFile(res, court.abs!, attach(court.name, court.type)).catch(() => {
+            throw new HttpError(404, `this run has no ${what}`);
           });
           return;
         }
@@ -770,6 +945,7 @@ export function createUiApp(options: UiAppOptions): UiApp {
             q: url.searchParams.get("q") || undefined,
             limit: Number(url.searchParams.get("limit")) || undefined,
             order: url.searchParams.get("order") === "desc" ? "desc" : "asc",
+            spilled: url.searchParams.get("spilled") === "1",
           }),
         );
         return;
@@ -940,7 +1116,12 @@ export function createUiApp(options: UiAppOptions): UiApp {
       case "stop": {
         if (method !== "POST") throw new HttpError(405, "method not allowed");
         requireToken(req, url);
-        json(res, 202, runner.stop(id));
+        // The custody options are swarm.sh stop's own: skip the host's
+        // custody check, or bound it. Nothing else is taken from the body.
+        const body = (await readBody(req)) as { no_custody?: unknown; custody_timeout?: unknown };
+        const timeout = body.custody_timeout === undefined || body.custody_timeout === null || body.custody_timeout === "" ? undefined : Number(body.custody_timeout);
+        if (timeout !== undefined && (!Number.isInteger(timeout) || timeout < 1 || timeout > 7 * 24 * 3600)) throw new HttpError(400, "custody_timeout must be a whole number of seconds, 1 to 604800");
+        json(res, 202, runner.stop(id, { no_custody: body.no_custody === true, custody_timeout: timeout }));
         return;
       }
       case "reap": {
@@ -950,6 +1131,117 @@ export function createUiApp(options: UiAppOptions): UiApp {
         const stall = body.stall_sec === undefined ? undefined : Number(body.stall_sec);
         if (stall !== undefined && (!Number.isInteger(stall) || stall < 1)) throw new HttpError(400, "stall_sec must be a positive integer");
         json(res, 202, runner.reap(id, { stall_sec: stall, stop: body.stop === true }));
+        return;
+      }
+      // Who did what to this run: its lines in runs/operator-audit.jsonl
+      // (the chain checked over the whole file) and its operator lines on
+      // the trace.
+      case "operator": {
+        if (method !== "GET") throw new HttpError(405, "method not allowed");
+        json(res, 200, await operatorAudit(runsDir, id, await readRunEvents(sandbox)));
+        return;
+      }
+      // Which inputs no command named, and which ledger entries no call
+      // before them named their source: generic path matching over the
+      // trace. "No command named it" is all it can say; a named input is not
+      // an examined one.
+      case "coverage": {
+        if (method !== "GET") throw new HttpError(405, "method not allowed");
+        json(res, 200, await coverageOf(sandbox));
+        return;
+      }
+      // The examiner's review: read here, written by scripts/review.ts
+      // through `swarm.sh review` (its one writer), outside the run where no
+      // agent reaches it.
+      case "review": {
+        if (method === "GET") {
+          json(res, 200, await readReviews(runsDir, id));
+          return;
+        }
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        const check = validateReview(await readBody(req));
+        if (!check.ok) throw new HttpError(400, check.error);
+        json(res, 202, runner.review(id, check.params));
+        return;
+      }
+      case "hold":
+      case "release": {
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        if (sub === "release") {
+          json(res, 202, runner.release(id));
+          return;
+        }
+        const body = (await readBody(req)) as { reason?: unknown };
+        const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+        if (reason.length > 500 || /[\x00-\x1f\x7f]/.test(reason)) throw new HttpError(400, "reason: one line, at most 500 characters");
+        json(res, 202, runner.hold(id, reason || undefined));
+        return;
+      }
+      case "export": {
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        const body = (await readBody(req)) as { format?: unknown };
+        const format = body.format === "timesketch" ? "timesketch" : body.format === "csv" || body.format === undefined ? "csv" : null;
+        if (!format) throw new HttpError(400, "format must be csv or timesketch");
+        const dir = await mkdtemp(join(tmpdir(), "dfirswarm-export-"));
+        json(res, 202, runner.export(id, format, join(dir, `${id}-ledger${format === "timesketch" ? "-timesketch" : ""}.csv`)));
+        return;
+      }
+      // What swarm.sh package left (read here), or a new package (a job).
+      case "package": {
+        if (method === "GET") {
+          json(res, 200, await packageInfo(sandbox));
+          return;
+        }
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        const body = (await readBody(req)) as { sign?: unknown };
+        json(res, 202, runner.package(id, body.sign === true));
+        return;
+      }
+      // The run's package as one zip, made from the directory swarm.sh wrote
+      // into the console's own temp directory, served and then removed.
+      // swarm.sh verify takes the zip as it takes the directory.
+      case "package.zip": {
+        if (method !== "GET") throw new HttpError(405, "method not allowed");
+        const info = await packageInfo(sandbox);
+        if (!info.present) throw new HttpError(404, info.error ?? "no package yet: package the run first");
+        const tmp = await mkdtemp(join(tmpdir(), "dfirswarm-package-"));
+        const file = join(tmp, `${id}-package.zip`);
+        try {
+          const made = await zipDirectory(info.dir, file, `${id}-package`).catch((err: Error) => {
+            throw new HttpError(413, err.message);
+          });
+          const extra: Record<string, string> = { "x-package-manifest-sha256": info.manifest_sha256 ?? "" };
+          if (made.left_out.length) extra["x-package-left-out"] = String(made.left_out.length);
+          await sendFile(res, file, extra, true);
+          // The file stays until the response is through, then goes.
+          await finished(res).catch(() => undefined);
+        } finally {
+          await rm(tmp, { recursive: true, force: true });
+        }
+        return;
+      }
+      case "verify": {
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        const body = (await readBody(req)) as { package?: unknown };
+        const pkg = typeof body.package === "string" ? body.package.trim() : "";
+        if (!pkg.startsWith("/") || /[\x00-\x1f\x7f]/.test(pkg) || pkg.length > 2048) throw new HttpError(400, "package: the absolute path of the package directory or zip");
+        json(res, 202, runner.verify(id, pkg));
+        return;
+      }
+      // Deleting a run's sandbox, disks and hub directory. The body names
+      // the run again, typed by the operator; swarm.sh refuses a running or
+      // held run and leaves a destruction record.
+      case "purge": {
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        const body = (await readBody(req)) as { confirm?: unknown };
+        if (body.confirm !== id) throw new HttpError(400, `type the run id (${id}) to confirm the purge`);
+        json(res, 202, runner.purge(id));
         return;
       }
       default:
@@ -974,9 +1266,11 @@ export function createUiApp(options: UiAppOptions): UiApp {
   return {
     server,
     bus,
+    hubWatch,
     runner,
     async listen(port, host) {
       await bus.start();
+      hubWatch.start();
       await new Promise<void>((done, fail) => {
         server.once("error", fail);
         server.listen(port, host, () => done());
@@ -987,6 +1281,8 @@ export function createUiApp(options: UiAppOptions): UiApp {
     async close() {
       for (const client of sseClients) client.end();
       sseClients.clear();
+      unwatchRegistry();
+      hubWatch.close();
       bus.close();
       await new Promise<void>((done) => server.close(() => done()));
     },

@@ -1,4 +1,4 @@
-import type { ArtifactIndex, Dossier, Job, ModelList, SwarmRow, SwarmView, TimedPost, TracePage, WorkFile, FileVersion, Health, GoalSummary,
+import type { ArtifactIndex, Coverage, Dossier, ImagePreview, Job, OperatorAudit, PackageInfo, StartCheck, PackRow, ReviewAction, ReviewState, VmReadiness, ModelList, SwarmRow, SwarmView, TimedPost, TracePage, WorkFile, FileVersion, Health, GoalSummary,
   LibraryDocument,
   LibraryEntry, GoalDocument, SwarmContract, ChecksReport, ReadinessReport, ForgedToolSource, InputsLibrary } from "./types";
 
@@ -128,8 +128,9 @@ export const api = {
   thread: (id: string, thread: string) => request<TimedPost[]>(`/api/swarms/${encodeURIComponent(id)}/threads/${encodeURIComponent(thread)}`),
   /** Every post across every thread, bodies included — what the board analytics reads. */
   posts: (id: string) => request<TimedPost[]>(`/api/swarms/${encodeURIComponent(id)}/posts`),
-  traces: (id: string, q: { agent?: string; tool?: string; q?: string; limit?: number; order?: "asc" | "desc" }) => {
+  traces: (id: string, q: { agent?: string; tool?: string; q?: string; limit?: number; order?: "asc" | "desc"; spilled?: boolean }) => {
     const params = new URLSearchParams();
+    if (q.spilled) params.set("spilled", "1");
     if (q.agent) params.set("agent", q.agent);
     if (q.tool) params.set("tool", q.tool);
     if (q.q) params.set("q", q.q);
@@ -166,7 +167,39 @@ export const api = {
   goals: () => request<{ goals: GoalSummary[] }>("/api/goals"),
   library: () => request<{ entries: LibraryEntry[] }>("/api/library"),
   /** Packs installed with pack.sh; the kickoff's pack field. */
-  packs: () => request<{ packs: Array<{ id: string; name: string; version: string; description: string; depends: string[] }> }>("/api/packs"),
+  packs: () => request<{ packs: PackRow[] }>("/api/packs"),
+  /** Can this host run the agents in microVMs (msb, doctor, the image, capacity), asked before Start. */
+  vmImage: (q: { packs: string[]; playwright: boolean; tools_from?: string }) => {
+    const params = new URLSearchParams({ packs: q.packs.join(","), playwright: q.playwright ? "1" : "0" });
+    if (q.tools_from) params.set("tools_from", q.tools_from);
+    return request<ImagePreview>(`/api/vm/image?${params}`);
+  },
+  vmReadiness: (q: { image?: string; n?: number; cpus?: number; memory?: number }) => {
+    const params = new URLSearchParams();
+    if (q.image) params.set("image", q.image);
+    if (q.n) params.set("n", String(q.n));
+    if (q.cpus) params.set("cpus", String(q.cpus));
+    if (q.memory) params.set("memory", String(q.memory));
+    return request<VmReadiness>(`/api/vm/readiness?${params}`);
+  },
+  /** The start flags this harness documents (swarm.sh help start). */
+  kickoffFlags: () => request<{ flags: string[] }>("/api/kickoff/flags"),
+  operator: (id: string) => request<OperatorAudit>(`/api/swarms/${encodeURIComponent(id)}/operator`),
+  coverage: (id: string) => request<Coverage>(`/api/swarms/${encodeURIComponent(id)}/coverage`),
+  review: (id: string) => request<ReviewState>(`/api/swarms/${encodeURIComponent(id)}/review`),
+  /** One examiner decision, or the signature over the ledger head; written by swarm.sh review. Needs the token. */
+  sendReview: (id: string, payload: { action: ReviewAction; entry_seq?: number; note?: string; examiner: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/review`, payload),
+  hold: (id: string, reason: string) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/hold`, { reason }),
+  release: (id: string) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/release`, {}),
+  exportLedger: (id: string, format: "csv" | "timesketch") => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/export`, { format }),
+  exportUrl: (jobId: string) => `/api/jobs/${encodeURIComponent(jobId)}/download`,
+  packageRun: (id: string, sign: boolean) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/package`, { sign }),
+  /** What swarm.sh package left in the run's sandbox. */
+  packageInfo: (id: string) => request<PackageInfo>(`/api/swarms/${encodeURIComponent(id)}/package`),
+  /** The package directory as one zip; swarm.sh verify takes it as it takes the directory. */
+  packageZipUrl: (id: string) => `/api/swarms/${encodeURIComponent(id)}/package.zip`,
+  verifyPackage: (id: string, pkg: string) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/verify`, { package: pkg }),
+  purge: (id: string, confirm: string) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/purge`, { confirm }),
   libraryEntry: (id: string) => request<LibraryDocument>(`/api/library/${id.split("/").map(encodeURIComponent).join("/")}`),
   inputs: () => request<InputsLibrary>("/api/inputs"),
   /** Only when the server was started with --allow-inputs-root-from-ui; otherwise a 403 with the command to use. */
@@ -180,6 +213,8 @@ export const api = {
   jobs: () => request<Job[]>("/api/jobs"),
   job: (id: string) => request<Job>(`/api/jobs/${encodeURIComponent(id)}`),
   start: (payload: Record<string, unknown>) => postJson<Job>("/api/swarms", payload),
-  stop: (id: string) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/stop`, {}),
+  /** `swarm.sh start --check` with the same payload: the start's own checks, nothing written. */
+  checkStart: (payload: Record<string, unknown>) => postJson<StartCheck>("/api/start/check", payload),
+  stop: (id: string, opts: { no_custody?: boolean; custody_timeout?: number } = {}) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/stop`, opts),
   reap: (id: string, payload: { stall_sec?: number; stop?: boolean }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/reap`, payload),
 };

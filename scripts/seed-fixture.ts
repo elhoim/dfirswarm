@@ -27,6 +27,7 @@ import {
   type AgentBudget,
   forgeTool,
   recordEntry,
+  systemContext,
 } from "../extensions/protocol.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -34,7 +35,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 type RunSpec = {
   id: string;
   label: string;
-  state: "running" | "prepared" | "stopped";
+  state: "running" | "prepared" | "stopped" | "finished";
   n: number;
   model: string;
   cap_usd: number;
@@ -104,6 +105,21 @@ const RUNS: RunSpec[] = [
     goal: "Carve deleted executables out of unallocated space with work/carve.py and record every hit with its offset.",
     started_min_ago: 95,
     workspace_id: "w3",
+  },
+  {
+    // A microVM run the hub finished: VM records, the hub's own trace lines,
+    // custody, the operator's record and an examiner's review, so every VM
+    // screen of the console is exercised against the fixture.
+    id: "svm1d",
+    label: "web-server-vm",
+    state: "finished",
+    n: 3,
+    model: "openai/gpt-5.4-mini",
+    cap_usd: 2,
+    wall: 20,
+    goal: "In microVMs: establish how the web server in inputs/ was compromised, record every dated event, and deliver work/report.md.",
+    started_min_ago: 130,
+    workspace_id: "w5",
   },
 ];
 
@@ -601,6 +617,115 @@ async function seedStopped(root: string, spec: RunSpec): Promise<void> {
   await backdate(stop.path, m - 31);
 }
 
+/**
+ * A microVM run the hub finished, as its files would read: three VMs, one of
+ * which the hub refused a peer's directory and stopped at its own cap, one
+ * whose finish found msb's database busy; every VM put away with its disk
+ * kept; custody taken; a correction and a search that found nothing in the
+ * ledger; a post from a seat's own harness code (`via`); the operator's
+ * record and one examiner decision.
+ */
+async function seedMicroVm(root: string, spec: RunSpec, runsDir: string): Promise<void> {
+  const [a0, a1, a2] = ids(spec).map((id) => createContext(root, id));
+  const m = spec.started_min_ago;
+  await seedInputs(root, { "web/access.log": "10.0.0.5 - - [03/Feb/2026:09:12:41 +0000] \"GET /shell.php HTTP/1.1\" 200\n", "web/shell.php": "<?php system($_GET['c']); ?>\n" }, "microvm");
+  const manifestPath = join(root, "inputs.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+  manifest.held = "copy";
+  manifest.source_checked = { by: "content", files: 2, mismatches: [], seconds: 0.1 };
+  for (const f of manifest.files as Array<Record<string, unknown>>) {
+    const text = f.path === "inputs/web/access.log" ? "10.0.0.5 - - [03/Feb/2026:09:12:41 +0000] \"GET /shell.php HTTP/1.1\" 200\n" : "<?php system($_GET['c']); ?>\n";
+    f.md5 = createHash("md5").update(text).digest("hex");
+    f.sha1 = createHash("sha1").update(text).digest("hex");
+  }
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  for (const ctx of [a0, a1, a2]) await event(root, ctx.agentId, "agent_start", {}, { ok: true }, m);
+  for (const ctx of [a0, a1, a2]) await event(root, "system", "hub_link", { agent: ctx.agentId }, { up: true }, m - 0.5);
+  const intro = await postMessage(a0, { tag: "intro", body: "Taking the access log and the web root, in my VM." });
+  await backdate(intro.path, m - 1);
+  const via = await postMessage(systemContext(root), { tag: "result", body: "Harness code in this seat's VM: the shell write under work/ was refused; publish through the hub.", via: a1.agentId });
+  await backdate(via.path, m - 5);
+  await event(root, "system", "hub_call", { agent: a1.agentId, fn: "claimFile" }, { ok: false, error: `work/${a0.agentId}/notes.md is in ${a0.agentId}'s own directory` }, m - 6);
+  await event(root, "system", "hub_call", { agent: a1.agentId, fn: "claimFile" }, { ok: false, error: `work/${a0.agentId}/notes.md is in ${a0.agentId}'s own directory`, repeated: 3 }, m - 5);
+  // As hub-supervise.sh writes them: the system's lines, the restart numbered.
+  await event(root, "system", "hub_restarted", { dir: `/hubs/dfs-${spec.id}.fixture`, by: "hub-supervise", restart: 1 }, { ok: true }, m - 40);
+  await event(root, "system", "collector_restarted", { by: "hub-supervise", restart: 1 }, { ok: true }, m - 42);
+  // One seat's link dropped while the hub was down, and came back.
+  await event(root, "system", "hub_link", { agent: a1.agentId }, { up: false }, m - 39.5);
+  await event(root, "system", "hub_link", { agent: a1.agentId }, { up: true }, m - 41);
+  await event(root, "system", "agent_cap_stop", { agent: a2.agentId }, { ok: true }, m - 60);
+  await event(root, "system", "publish_file", { agent: a0.agentId }, { ok: true }, m - 70);
+  await event(root, a0.agentId, "publish_file", { path: `work/${a0.agentId}/report.md`, to: "work/report.md" }, { ok: true }, m - 71);
+  await mkdir(join(root, "work"), { recursive: true });
+  await writeFile(join(root, "work", "report.md"), "# Web server\n\nA web shell (inputs/web/shell.php) was requested at 2026-02-03T09:12:41Z.\n", "utf8");
+  const e1 = await recordEntry(a0, { kind: "event", ts: "2026-02-03T09:12:41Z", value: "GET /shell.php answered 200", source: "inputs/web/access.log", evidence: "line 1" });
+  const f1 = await recordEntry(a1, { kind: "finding", value: "The web shell was uploaded through the admin panel", source: "inputs/web/access.log", evidence: "line 1", confidence: "low" });
+  await recordEntry(a1, { kind: "finding", value: "The web shell was requested once; how it arrived is not in the log", source: "inputs/web/access.log", evidence: "line 1; no POST to the admin panel", confidence: "medium", supersedes: (f1 as { entry: { seq: number } }).entry.seq } as Parameters<typeof recordEntry>[1]);
+  await recordEntry(a2, { kind: "absence", value: "a POST to /admin/upload", source: "inputs/web/access.log", evidence: "grep -c 'POST /admin' (GNU grep 3.11) · the whole log, allocated file only" } as Parameters<typeof recordEntry>[1]);
+  void e1;
+  await applySessionUsage(root, a0.agentId, usage(0.41, 520_000, 44));
+  await applySessionUsage(root, a1.agentId, usage(0.38, 470_000, 39));
+  await applySessionUsage(root, a2.agentId, usage(0.66, 800_000, 61));
+  for (const ctx of [a0, a1, a2]) await markDone(ctx, { reason: "complete", outputFile: "work/report.md" }).catch(() => undefined);
+  for (const [i, ctx] of [a0, a1, a2].entries()) await event(root, ctx.agentId, "agent_stop", { reason: "done" }, { ok: true }, 14 - i);
+  await event(root, "system", "vm_finish", { via: "hub", all_out: true }, { ok: true, msb_db: [{ agent: a0.agentId, name: `dfs-${spec.id}-${a0.agentId}`, msb_db: "scrubbed" }, { agent: a2.agentId, name: `dfs-${spec.id}-${a2.agentId}`, msb_db: "busy" }] }, 10);
+  await event(root, "system", "custody", { via: "hub" }, { ok: true }, 9);
+  await event(root, "operator", "artifact_scripts", { path: "work/report.md", sha256: "0".repeat(64), via: "web", os_user: "examiner" }, { ok: true, opened_with_scripts: true }, 5);
+  // Each VM's record, as vm.ts wrote it at kickoff and finish.
+  await mkdir(join(root, "vm"), { recursive: true });
+  const probe = (inputsFiles: number) => ({
+    hub: true, base: "ro", work: "ro", scratch: "rw", extracted: "rw", extracted_exec: "noexec", quarantine_exec: "noexec",
+    peers_extracted_exec: "noexec", peers_quarantine_exec: "noexec", tool_output: "rw", session: "rw", inputs: "ro", inputs_exec: "noexec",
+    inputs_files: inputsFiles, pi: "0.87.0", clock_skew_s: 0, reach: [{ target: "api.openai.com:443", ok: true }], missing_binaries: [],
+  });
+  const vms = [a0.agentId, a1.agentId, a2.agentId];
+  for (const [i, agent] of vms.entries()) {
+    const rec = {
+      agent, name: `dfs-${spec.id}-${agent}`, run: spec.id, runtime: { name: "microsandbox", version: "0.7.2" },
+      image: { ref: "dfirswarm-base:dev-arm64", manifest_digest: "sha256:6b1f0c2e9a", expected_digest: "sha256:6b1f0c2e9a" },
+      cpus: 2, memory_mib: 2048, max_duration_sec: 1500,
+      mounts: [{ host: join(root), guest: "/run/sandbox", mode: "ro" }, { host: join(root, "work", agent), guest: join("/run/sandbox/work", agent), mode: "rw" }, { host: join(root, "work", "extracted", agent), guest: join("/run/sandbox/work/extracted", agent), mode: "rw", noexec: true }],
+      network: { default: "deny", allow_hosts: ["api.openai.com"], host_ports: [] },
+      secrets: [{ name: "OPENAI_API_KEY", hosts: ["api.openai.com"] }],
+      probe: probe(2), created_at: iso(m), stopped_at: iso(11),
+      snapshot: { path: `${root}.vm-snapshots/${agent}.qcow2`, sha256: createHash("sha256").update(agent).digest("hex"), bytes: 734_003_200 + i, integrity: true },
+      logs: `${root}.vm-snapshots/${agent}.logs`,
+      msb_db: i === 2 ? "busy" : "scrubbed",
+    };
+    await writeFile(join(root, "vm", `${agent}.json`), `${JSON.stringify(rec, null, 2)}\n`, "utf8");
+  }
+  // The host's custody verdict, as custody.ts writes it.
+  const custody = {
+    at: iso(9), summary: "evidence unchanged (2 files re-hashed); trace chain intact; ledger chain intact; 3 VMs put away",
+    inputs: { files: 2, bytes: 90, unchanged: true, complete: true, changed: [], missing: [], added: [], skipped: [], unreadable: [], checked: { files: 2, links: 0, special: 0 }, digests_compared: { sha256: 2, md5: 2, sha1: 2 }, manifest_sha256: "a".repeat(64), manifest_anchored: true },
+    sessions: { files: [], digest: "b".repeat(64), not_files: [] },
+    trace: { lines: 40, intact: true, detail: "", unverified: 0, disputed: 0, spilled: [], gaps: [] },
+    ledger: { entries: 4, chained: 4, intact: true, detail: "", missing_from_ledger: [], not_on_trace: [] },
+    tool_outputs: { referenced: 0, verified: 0, missing: [], mismatched: [], refused: [] },
+    artifacts: { files: 1, bytes: 90, skipped: 0, index_sha256: "c".repeat(64) },
+    vms: vms.map((agent, i) => ({ agent, record_sha256: createHash("sha256").update(`rec-${agent}`).digest("hex"), stopped: true, snapshot: { verified: true, msb_verified: true }, image: "sha256:6b1f0c2e9a", expected_image: "sha256:6b1f0c2e9a", msb_db: i === 2 ? "busy" : "scrubbed", secret_violations: [], installed_outside: {} })),
+  };
+  await writeFile(join(root, "custody.json"), `${JSON.stringify(custody, null, 2)}\n`, "utf8");
+  // The operator's record for this run, chained as swarm.sh writes it.
+  const auditFile = join(runsDir, "operator-audit.jsonl");
+  const prevText = await readFile(auditFile, "utf8").then((t) => t.trimEnd().split("\n").filter(Boolean).at(-1) ?? null).catch(() => null);
+  let prev = prevText === null ? null : createHash("sha256").update(prevText).digest("hex");
+  const lines: string[] = [];
+  for (const [cmd, argv, via, at] of [
+    ["start", ["--isolation", "microvm", "--label", spec.label, spec.id], "console", iso(m)],
+    ["stop", [spec.id, "--after-hub"], "hub", iso(9)],
+  ] as Array<[string, string[], string, string]>) {
+    const line = JSON.stringify({ at, command: cmd, argv, cwd: ROOT, os_user: "examiner", host: "fixture-host", via, prev });
+    lines.push(line);
+    prev = createHash("sha256").update(line).digest("hex");
+  }
+  await writeFile(auditFile, `${lines.join("\n")}\n`, { flag: "a" });
+  // One examiner decision, in the review file outside the run.
+  await mkdir(join(runsDir, "reviews"), { recursive: true });
+  const review = JSON.stringify({ v: 1, seq: 1, at: iso(3), examiner: "H. Examiner", os_user: "examiner", host: "fixture-host", action: "accept", entry_seq: (e1 as { entry: { seq: number } }).entry.seq, entry_hash: null, note: null, prev: null });
+  await writeFile(join(runsDir, "reviews", `${spec.id}.jsonl`), `${review}\n`, "utf8");
+}
+
 /** Put write bits back on a tree seedInputs made read-only, so rm can clear it. */
 async function restoreWriteBits(dir: string): Promise<void> {
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
@@ -630,6 +755,7 @@ export async function seedFixtureRuns(runsDir: string): Promise<string[]> {
     sbe12: seedRansomware,
     s1e77: seedSingleHive,
     s0d4e: seedStopped,
+    svm1d: (root, spec) => seedMicroVm(root, spec, runsDir),
   };
   for (const spec of RUNS) {
     const root = join(runsDir, spec.id);
@@ -673,6 +799,18 @@ export async function seedFixtureRuns(runsDir: string): Promise<string[]> {
       started_at: startedAt,
       state: spec.state,
       inputs: spec.id === "s7a1c" ? { source: "/srv/evidence/webserver-2026-02", files: 2, bytes: 78, enforce: "auto", guard: "seatbelt" } : null,
+      ...(spec.id === "svm1d"
+        ? {
+            isolation: { mode: "microvm", runtime: "microsandbox", image: "dfirswarm-base:dev-arm64", image_digest: "sha256:6b1f0c2e9a", cpus: 2, memory_mib: 2048, disk_mib: 8192, snapshot: true, oauth_allowed: false },
+            netguard_mode: "microvm",
+            provenance: { harness_commit: "0123456789abcdef0123456789abcdef01234567", harness_dirty: false, node_version: "v24.13.1", pi_version: "0.87.0", pi_on_path: null, msb_version: "0.7.2", image_digest: "sha256:6b1f0c2e9a", os: "Darwin 27.0.0", arch: "arm64" },
+            host_clock: { tz: "Europe/Istanbul", abbreviation: "+03", utc_offset: "+0300", synced: null, source: null, run_processes_tz: "UTC" },
+            custody_timeout_sec: 14400,
+            idle_nudge_sec: 300,
+            disk_encryption: "on",
+            pack_secrets: {},
+          }
+        : {}),
     });
   }
   await writeFile(join(runsDir, "registry.json"), `${JSON.stringify({ runs: registry }, null, 2)}\n`, "utf8");

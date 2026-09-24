@@ -10,7 +10,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type JobKind = "start" | "stop" | "reap";
+export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review";
 export type JobStatus = "running" | "ok" | "failed";
 
 export type Job = {
@@ -24,7 +24,11 @@ export type Job = {
   started_at: string;
   finished_at: string | null;
   swarm_id: string | null;
+  /** An export's file, served once the job is done. */
+  output_file?: string;
 };
+
+export type StopParams = { no_custody?: boolean; custody_timeout?: number };
 
 export type StartParams = {
   model: string;
@@ -148,6 +152,35 @@ export type StartParams = {
    * microVM run is refused when a provider still has none.
    */
   provider_hosts?: string[];
+  /** Where each VM's disk is kept at stop, an absolute path (--vm-snapshot-dir). */
+  vm_snapshot_dir?: string;
+  /** Hand the packs' secrets over (--allow-pack-secrets): in a VM as placeholders bound to each secret's hosts. */
+  allow_pack_secrets?: boolean;
+  /** A copy of the evidence or the VMs' disks may go into a synced folder (--allow-synced-folder). */
+  allow_synced_folder?: boolean;
+  /** The deadline of the host's custody check at stop, seconds (--custody-timeout). */
+  custody_timeout?: number;
+  /** Seconds a seat may sit quiet before the idle watchdog nudges it; 0 turns the watchdog off (--idle-nudge-sec). */
+  idle_nudge_sec?: number;
+  /** Refuse an evidence set with more files than this (--inputs-max-files). */
+  inputs_max_files?: number;
+  /** A command the harness runs, with one JSON line on stdin, when the run finishes, fails to finish, hits its cap or its evidence changes (--notify). */
+  notify?: string;
+  /**
+   * Extra environment for every pane or VM (--env KEY=VALUE, repeatable).
+   * The console checks only the shape; what may not go in (a credential's
+   * name, a password in a URL, the guard's own variables) is swarm.sh's
+   * rule, and its refusal is what the operator sees.
+   */
+  env?: string[];
+  /** A finished run whose ledger this one gets as hypotheses to test (--ledger-from). */
+  ledger_from?: string;
+  /** Check the copy against its source by names, kinds and sizes only, not by content (--no-verify-copy). */
+  no_verify_copy?: boolean;
+  /** Start a host run as root anyway (--allow-root); refused by the kickoff otherwise. */
+  allow_root?: boolean;
+  /** Route the VMs' model calls through the host's model gateway (--model-gateway), when this harness has one. */
+  model_gateway?: boolean;
 };
 
 /** guarded: the providers' hosts · hosts: plus named ones · open: no guard · local: the local endpoints and nothing else. */
@@ -256,6 +289,26 @@ export function readLocalProviders(agentDir = process.env.PI_CODING_AGENT_DIR ||
 }
 
 export type ReapParams = { stall_sec?: number; stop?: boolean };
+
+/** An examiner's decision on one ledger entry, or the signature over the ledger head. */
+export type ReviewParams = { action: "accept" | "reject" | "amend" | "sign"; entry_seq?: number; note?: string; examiner: string };
+
+/** A review from the console's body, checked: a reject or an amend needs a note, a sign names no entry. */
+export function validateReview(input: unknown): { ok: true; params: ReviewParams } | { ok: false; error: string } {
+  if (!input || typeof input !== "object") return { ok: false, error: "body must be an object" };
+  const b = input as Record<string, unknown>;
+  const action = b.action;
+  if (action !== "accept" && action !== "reject" && action !== "amend" && action !== "sign") return { ok: false, error: "action must be accept, reject, amend or sign" };
+  const examiner = typeof b.examiner === "string" ? b.examiner.trim() : "";
+  if (!examiner || examiner.length > 200 || /[\x00-\x1f\x7f]/.test(examiner)) return { ok: false, error: "examiner: the name the review is signed with, one line" };
+  const note = typeof b.note === "string" ? b.note.trim() : "";
+  if (note.length > 4000 || /[\x00-\x08\x0b-\x1f\x7f]/.test(note)) return { ok: false, error: "note: at most 4000 characters, no control characters" };
+  if ((action === "reject" || action === "amend") && !note) return { ok: false, error: `${action} needs a note saying why` };
+  if (action === "sign") return { ok: true, params: { action, examiner, note: note || undefined } };
+  const seq = Number(b.entry_seq);
+  if (!Number.isInteger(seq) || seq < 1) return { ok: false, error: "entry_seq must be the ledger entry's seq" };
+  return { ok: true, params: { action, entry_seq: seq, examiner, note: note || undefined } };
+}
 
 export type ModelList = {
   source: "pi" | "static";
@@ -551,6 +604,45 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
   // nothing and read as if it had.
   const allowOauthInVm = body.allow_oauth_in_vm === true;
   if (allowOauthInVm && isolation !== "microvm") return { ok: false, error: "allow_oauth_in_vm needs isolation microvm" };
+  // Where the VMs' disks are kept: an absolute path, VM runs only.
+  const vmSnapshotDir = typeof body.vm_snapshot_dir === "string" ? body.vm_snapshot_dir.trim() : "";
+  if (vmSnapshotDir) {
+    if (isolation !== "microvm") return { ok: false, error: "vm_snapshot_dir needs isolation microvm" };
+    if (!vmSnapshotDir.startsWith("/") || /[\x00-\x1f\x7f]/.test(vmSnapshotDir) || vmSnapshotDir.length > 1024) return { ok: false, error: "vm_snapshot_dir must be an absolute path" };
+  }
+  const allowRoot = body.allow_root === true;
+  // Root weakens the host guards: a host run refuses it unless told, and a
+  // VM run is only warned about it, so the flag is the host mode's.
+  if (allowRoot && isolation !== "host") return { ok: false, error: "allow_root is for a host run (isolation host); a VM run as root is only warned about" };
+  const intField = (key: string, min: number, max: number): number | undefined | { error: string } => {
+    if (body[key] === undefined || body[key] === null || body[key] === "") return undefined;
+    const v = Number(body[key]);
+    if (!Number.isInteger(v) || v < min || v > max) return { error: `${key} must be a whole number from ${min} to ${max}` };
+    return v;
+  };
+  const custodyTimeout = intField("custody_timeout", 60, 7 * 24 * 3600);
+  if (typeof custodyTimeout === "object") return { ok: false, error: custodyTimeout.error };
+  const idleNudgeSec = intField("idle_nudge_sec", 0, 24 * 3600);
+  if (typeof idleNudgeSec === "object") return { ok: false, error: idleNudgeSec.error };
+  const inputsMaxFiles = intField("inputs_max_files", 1, 1e9);
+  if (typeof inputsMaxFiles === "object") return { ok: false, error: inputsMaxFiles.error };
+  // The notify command runs as the operator with the run's events on stdin:
+  // one line, no control characters, and only through the token-holding form.
+  const notify = typeof body.notify === "string" ? body.notify.trim() : "";
+  if (notify && (notify.length > 1024 || /[\x00-\x1f\x7f]/.test(notify))) return { ok: false, error: "notify must be one command line, at most 1024 characters" };
+  // --env: KEY=VALUE, one line each. The shape only; swarm.sh refuses what
+  // may not go in, in its own words, before anything is written.
+  const envList = body.env === undefined || body.env === null ? [] : body.env;
+  if (!Array.isArray(envList) || envList.length > 64) return { ok: false, error: "env must be a list of at most 64 KEY=VALUE entries" };
+  const env: string[] = [];
+  for (const item of envList) {
+    if (typeof item !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*=/.test(item) || item.length > 4096 || /[\x00-\x1f\x7f]/.test(item)) {
+      return { ok: false, error: "each env entry must be one line of KEY=VALUE, the key a shell variable name" };
+    }
+    env.push(item);
+  }
+  const ledgerFrom = typeof body.ledger_from === "string" ? body.ledger_from.trim() : "";
+  if (ledgerFrom && !RUN_ID.test(ledgerFrom)) return { ok: false, error: "ledger_from must be a run id" };
   // provider=host: the kickoff's own pattern, and the host part the same
   // check allow_hosts gets, since both end up on the same allowlist. Valid in
   // either mode: a host run puts the host on netguard's list too.
@@ -623,9 +715,110 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
       vm_snapshot: vmSnapshot,
       allow_oauth_in_vm: allowOauthInVm || undefined,
       provider_hosts: providerHosts,
+      vm_snapshot_dir: vmSnapshotDir || undefined,
+      allow_pack_secrets: body.allow_pack_secrets === true || undefined,
+      allow_synced_folder: body.allow_synced_folder === true || undefined,
+      custody_timeout: custodyTimeout,
+      idle_nudge_sec: idleNudgeSec,
+      inputs_max_files: inputsMaxFiles,
+      notify: notify || undefined,
+      env: env.length ? env : undefined,
+      ledger_from: ledgerFrom || undefined,
+      no_verify_copy: body.no_verify_copy === true || undefined,
+      allow_root: allowRoot || undefined,
+      model_gateway: body.model_gateway === true && isolation === "microvm" ? true : undefined,
     },
   };
 }
+
+/**
+ * A job's argv as the console shows it: an --env value and the --notify
+ * command are the operator's and may carry a secret, so the job list, the
+ * event stream and the drawer show `KEY=…` and that a command was given,
+ * never the value. swarm.sh gets the argv whole.
+ */
+export function publicArgv(argv: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    out.push(argv[i]);
+    if (i + 1 >= argv.length) continue;
+    if (argv[i] === "--env") {
+      i += 1;
+      const eq = argv[i].indexOf("=");
+      out.push(eq > 0 ? `${argv[i].slice(0, eq)}=…` : "…");
+    } else if (argv[i] === "--notify") {
+      i += 1;
+      out.push("<command not shown>");
+    }
+  }
+  return out;
+}
+
+/**
+ * What swarm.sh said, with the operator's own secrets taken out: each --env
+ * value and the --notify command. swarm.sh names a refused variable by its
+ * key and never echoes a value, but the console does not rely on that: the
+ * page, the job list and the event stream never carry one.
+ */
+export function scrubSecrets(text: string, p: Pick<StartParams, "env" | "notify">): string {
+  let out = text;
+  if (p.notify && p.notify.length >= 3) out = out.split(p.notify).join("<notify command>");
+  for (const e of p.env ?? []) {
+    const eq = e.indexOf("=");
+    const value = eq > 0 ? e.slice(eq + 1) : "";
+    if (value.length >= 3) out = out.split(value).join("…");
+  }
+  return out;
+}
+
+/** What `swarm.sh start --check` said: exit 0 the start would go ahead, 2 it would be refused. */
+export type StartCheck = {
+  exit: number;
+  ok: boolean;
+  /** BLOCKER lines, each with the indented lines that follow it. */
+  blockers: string[];
+  warnings: string[];
+  /** The whole output in the order swarm.sh wrote it, secrets taken out. */
+  said: string[];
+  checked_at: string;
+};
+
+/** Sort swarm.sh's output into blockers, warnings and the rest; an indented line belongs to the line before it. */
+export function parseCheckOutput(text: string): { blockers: string[]; warnings: string[]; said: string[] } {
+  const said = text.split("\n").filter((l) => l.trim());
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+  let last: string[] | null = null;
+  for (const line of said) {
+    if (/^BLOCKER:/.test(line)) {
+      blockers.push(line);
+      last = blockers;
+    } else if (/^WARN:/.test(line)) {
+      warnings.push(line);
+      last = warnings;
+    } else if (/^\s/.test(line) && last?.length) {
+      last[last.length - 1] += `\n${line}`;
+    } else last = null;
+  }
+  return { blockers, warnings, said };
+}
+
+/** `swarm.sh image-for`: the image a kickoff with these packs boots, and why. */
+export type ImagePreview = {
+  ref: string | null;
+  digest: string | null;
+  profile: string | null;
+  arch: string | null;
+  packs: string[];
+  pinned_by: string | null;
+  reason: string | null;
+  /** What swarm.sh said beside the JSON (a WARN, a BLOCKER), whole. */
+  said: string[];
+  /** Why no image was named, in swarm.sh's or pack.sh's words; null when one was. */
+  error: string | null;
+};
+
+export type ImagePreviewQuery = { packs: string[]; playwright: boolean; tools_from_dir?: string };
 
 export function startArgv(p: StartParams): string[] {
   const argv = ["start"];
@@ -667,7 +860,17 @@ export function startArgv(p: StartParams): string[] {
     else if (p.isolation === "microvm") argv.push("--inputs-copy");
     if (p.inputs_enforce) argv.push("--inputs-enforce", p.inputs_enforce);
     if (p.inputs_max_mb) argv.push("--inputs-max-mb", String(p.inputs_max_mb));
+    if (p.inputs_max_files) argv.push("--inputs-max-files", String(p.inputs_max_files));
+    // The content check is the copy's; a bind has nothing to check against.
+    if (p.no_verify_copy && p.inputs_attach !== "bind") argv.push("--no-verify-copy");
   }
+  if (p.allow_synced_folder) argv.push("--allow-synced-folder");
+  if (p.allow_pack_secrets) argv.push("--allow-pack-secrets");
+  if (p.custody_timeout) argv.push("--custody-timeout", String(p.custody_timeout));
+  if (p.idle_nudge_sec !== undefined) argv.push("--idle-nudge-sec", String(p.idle_nudge_sec));
+  if (p.notify) argv.push("--notify", p.notify);
+  for (const e of p.env ?? []) argv.push("--env", e);
+  if (p.ledger_from) argv.push("--ledger-from", p.ledger_from);
   if (p.tools_from_dir) argv.push("--tools-from", p.tools_from_dir);
   for (const dir of p.no_read_dirs ?? []) argv.push("--no-read", dir);
   if (p.catalog) argv.push("--catalog");
@@ -687,6 +890,10 @@ export function startArgv(p: StartParams): string[] {
     if (p.vm_disk) argv.push("--vm-disk", String(p.vm_disk));
     if (p.vm_snapshot === false) argv.push("--no-vm-snapshot");
     if (p.allow_oauth_in_vm) argv.push("--allow-oauth-in-vm");
+    if (p.vm_snapshot_dir) argv.push("--vm-snapshot-dir", p.vm_snapshot_dir);
+    if (p.model_gateway) argv.push("--model-gateway");
+  } else if (p.allow_root) {
+    argv.push("--allow-root");
   }
   if (p.no_start) argv.push("--no-start");
   return argv;
@@ -719,11 +926,103 @@ export class ActionRunner {
   }
 
   start(params: StartParams): Job {
-    return this.run("start", startArgv(params), null);
+    return this.run("start", startArgv(params), null, undefined, params);
   }
 
-  stop(swarmId: string): Job {
-    return this.run("stop", ["stop", swarmId], swarmId);
+  /**
+   * `swarm.sh start --check` with the form's options: the real start's own
+   * checks, nothing written (no sandbox, registry, hub, audit line, VM or
+   * pull). Not a job: the form waits for its answer and shows it.
+   */
+  check(params: StartParams, timeoutMs = 240_000): Promise<StartCheck> {
+    const argv = startArgv(params);
+    return this.exec(["start", "--check", ...argv.slice(1)], timeoutMs).then(({ code, output }) => {
+      const parsed = parseCheckOutput(scrubSecrets(output, params));
+      if (code !== 0 && code !== 2 && !parsed.blockers.length) parsed.blockers.push(`BLOCKER: the check itself did not finish (exit ${code})`);
+      return { exit: code, ok: code === 0, ...parsed, checked_at: new Date().toISOString() };
+    });
+  }
+
+  /** `swarm.sh image-for`: read only. */
+  imageFor(q: ImagePreviewQuery, timeoutMs = 60_000): Promise<ImagePreview> {
+    const argv = ["image-for", ...q.packs.flatMap((p) => ["--pack", p]), ...(q.tools_from_dir ? ["--tools-from", q.tools_from_dir] : []), ...(q.playwright ? ["--playwright"] : [])];
+    return this.exec(argv, timeoutMs).then(({ code, stdout, stderr }) => {
+      const said = stderr.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
+      const none: ImagePreview = { ref: null, digest: null, profile: null, arch: null, packs: q.packs, pinned_by: null, reason: null, said, error: null };
+      const line = stdout.trim().split("\n").pop() ?? "";
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        parsed = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        parsed = null;
+      }
+      if (code !== 0 || !parsed || typeof parsed.ref !== "string" || !parsed.ref) {
+        return { ...none, error: said.find((l) => /^BLOCKER/.test(l)) ?? said.at(-1) ?? `swarm.sh image-for named no image (exit ${code})` };
+      }
+      const str = (v: unknown) => (typeof v === "string" && v ? v : null);
+      return {
+        ref: parsed.ref,
+        digest: str(parsed.digest),
+        profile: str(parsed.profile),
+        arch: str(parsed.arch),
+        packs: Array.isArray(parsed.packs) ? parsed.packs.map(String) : q.packs,
+        pinned_by: str(parsed.pinned_by),
+        reason: str(parsed.reason),
+        said,
+        error: null,
+      };
+    });
+  }
+
+  /**
+   * The environment every swarm.sh the console runs gets. `swarm.sh` has no
+   * use for the console's own mutation token, and what it starts is a pane:
+   * a credential that travels that far ends up inside the sandbox. Nor does a
+   * kickoff take its isolation from the console's environment: the form says
+   * host or microvm and the argv names it; an exported SWARM_ISOLATION once
+   * turned a host form into a VM run. Everything else is passed as it is.
+   */
+  private childEnv(): NodeJS.ProcessEnv {
+    const { SWARM_UI_TOKEN: _token, SWARM_ISOLATION: _isolation, ...env } = process.env;
+    return { ...env, ...this.opts.env, SWARM_RUNS_DIR: this.opts.runsDir, SWARM_OPERATOR_VIA: "console" };
+  }
+
+  /** Run swarm.sh and wait: its output whole, in the order it came, and apart. */
+  private exec(argv: string[], timeoutMs: number): Promise<{ code: number; output: string; stdout: string; stderr: string }> {
+    return new Promise((done) => {
+      const child = spawn("bash", [this.swarmSh, ...argv], { cwd: this.opts.root, env: this.childEnv(), stdio: ["ignore", "pipe", "pipe"] });
+      let output = "";
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (c: Buffer) => {
+        output += c.toString("utf8");
+        stdout += c.toString("utf8");
+      });
+      child.stderr.on("data", (c: Buffer) => {
+        output += c.toString("utf8");
+        stderr += c.toString("utf8");
+      });
+      const timer = setTimeout(() => {
+        output += `\nBLOCKER: swarm.sh ${argv[0]} did not answer within ${Math.round(timeoutMs / 1000)} s; it was stopped.\n`;
+        child.kill("SIGTERM");
+      }, timeoutMs);
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        done({ code: -1, output: `${output}\n${err.message}`, stdout, stderr: `${stderr}\n${err.message}` });
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        done({ code: code ?? -1, output, stdout, stderr });
+      });
+    });
+  }
+
+  /** Stop a run; `no_custody` skips the host's custody check, `custody_timeout` bounds it (seconds). */
+  stop(swarmId: string, opts: StopParams = {}): Job {
+    const argv = ["stop", swarmId];
+    if (opts.no_custody) argv.push("--no-custody");
+    else if (opts.custody_timeout) argv.push("--custody-timeout", String(opts.custody_timeout));
+    return this.run("stop", argv, swarmId);
   }
 
   reap(swarmId: string, params: ReapParams = {}): Job {
@@ -733,11 +1032,51 @@ export class ActionRunner {
     return this.run("reap", argv, swarmId);
   }
 
-  private run(kind: JobKind, argv: string[], swarmId: string | null): Job {
+  /** A legal hold on the run, with its reason: purge and reap refuse it until released. */
+  hold(swarmId: string, reason?: string): Job {
+    return this.run("hold", ["hold", swarmId, ...(reason ? ["--reason", reason] : [])], swarmId);
+  }
+
+  release(swarmId: string): Job {
+    return this.run("release", ["release", swarmId], swarmId);
+  }
+
+  /** The ledger as CSV or a Timesketch import, written to `out` (a file of the console's own). */
+  export(swarmId: string, format: "csv" | "timesketch", out: string): Job {
+    return this.run("export", ["export", swarmId, "--format", format, "--out", out], swarmId, out);
+  }
+
+  /** The handover package, signed with the operator's SSH key when asked. */
+  package(swarmId: string, sign: boolean): Job {
+    return this.run("package", ["package", swarmId, ...(sign ? ["--sign"] : [])], swarmId);
+  }
+
+  /** Re-hash a package against its manifest and check its signature. */
+  verify(swarmId: string, pkg: string): Job {
+    return this.run("verify", ["verify", pkg], swarmId);
+  }
+
+  /** Delete a run's sandbox, disks and hub directory, keeping its record and a destruction record. swarm.sh refuses a running or held run. */
+  purge(swarmId: string): Job {
+    return this.run("purge", ["purge", swarmId, "--yes"], swarmId);
+  }
+
+  /** One examiner review line, written by scripts/review.ts through swarm.sh (its one writer). */
+  review(swarmId: string, r: ReviewParams): Job {
+    const argv = ["review", swarmId];
+    if (r.action === "sign") argv.push("--sign");
+    else argv.push(`--${r.action}`, String(r.entry_seq));
+    if (r.note) argv.push("--note", r.note);
+    argv.push("--examiner", r.examiner);
+    return this.run("review", argv, swarmId);
+  }
+
+  private run(kind: JobKind, argv: string[], swarmId: string | null, outputFile?: string, secrets?: Pick<StartParams, "env" | "notify">): Job {
     const job: Job = {
+      ...(outputFile ? { output_file: outputFile } : {}),
       id: `${kind}-${randomBytes(3).toString("hex")}`,
       kind,
-      argv,
+      argv: publicArgv(argv),
       status: "running",
       exit_code: null,
       stdout: "",
@@ -751,20 +1090,15 @@ export class ActionRunner {
       const oldest = this.list().at(-1);
       if (oldest && oldest.status !== "running") this.jobs.delete(oldest.id);
     }
-    // `swarm.sh` has no use for the console's own mutation token, and what it
-    // starts is a pane: a credential that travels that far ends up inside the
-    // sandbox. Nor does a kickoff take its isolation from the console's
-    // environment: the form says host or microvm and the argv names it; an
-    // exported SWARM_ISOLATION once turned a host form into a VM run.
-    // Everything else in the environment is passed as before.
-    const { SWARM_UI_TOKEN: _token, SWARM_ISOLATION: _isolation, ...env } = process.env;
     const child = spawn("bash", [this.swarmSh, ...argv], {
       cwd: this.opts.root,
-      env: { ...env, ...this.opts.env, SWARM_RUNS_DIR: this.opts.runsDir },
+      // The operator's record says the console was the way in.
+      env: this.childEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
     const append = (field: "stdout" | "stderr", chunk: Buffer) => {
-      job[field] = (job[field] + chunk.toString("utf8")).slice(-OUTPUT_CAP);
+      const text = job[field] + chunk.toString("utf8");
+      job[field] = (secrets ? scrubSecrets(text, secrets) : text).slice(-OUTPUT_CAP);
       if (kind === "start" && !job.swarm_id) {
         const m = job.stdout.match(/Swarm id:\s+(\S+)/);
         if (m) job.swarm_id = m[1];
@@ -1138,7 +1472,15 @@ export async function vmReadiness(model: string, authType: string | undefined, o
 }
 
 /** An installed pack, as the kickoff form lists it. */
-export type PackRow = { id: string; name: string; version: string; description: string; depends: string[] };
+export type PackRow = {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  depends: string[];
+  /** The secrets the pack declares, by name and title: the form asks for consent (--allow-pack-secrets) when a chosen pack has any. Never a value. */
+  secrets: Array<{ name: string; title: string; required: boolean }>;
+};
 
 /**
  * The packs installed under DFIRSWARM_HOME (pack.sh's store), for the form.
@@ -1149,9 +1491,19 @@ export async function listPacks(home: string = process.env.DFIRSWARM_HOME || joi
   const out: PackRow[] = [];
   for (const id of (await readdir(dir).catch(() => [] as string[])).sort()) {
     try {
-      const m = JSON.parse(await readFile(join(dir, id, "pack.json"), "utf8")) as { id?: string; name?: string; version?: string; description?: string; depends?: string[] };
+      const m = JSON.parse(await readFile(join(dir, id, "pack.json"), "utf8")) as {
+        id?: string;
+        name?: string;
+        version?: string;
+        description?: string;
+        depends?: string[];
+        secrets?: Array<{ name?: unknown; title?: unknown; required?: unknown }>;
+      };
       if (m.id !== id) continue;
-      out.push({ id, name: m.name ?? id, version: m.version ?? "?", description: m.description ?? "", depends: (m.depends ?? []).map((d) => d.split(/[<>=!~ ]/)[0]) });
+      const secrets = (Array.isArray(m.secrets) ? m.secrets : [])
+        .filter((x) => x && typeof x.name === "string")
+        .map((x) => ({ name: String(x.name), title: typeof x.title === "string" ? x.title : String(x.name), required: x.required === true }));
+      out.push({ id, name: m.name ?? id, version: m.version ?? "?", description: m.description ?? "", depends: (m.depends ?? []).map((d) => d.split(/[<>=!~ ]/)[0]), secrets });
     } catch {
       // not a pack
     }

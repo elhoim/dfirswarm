@@ -1,3 +1,4 @@
+import { spendSourceNote } from "@/lib/run-facts";
 import { Badge } from "@/components/ui/badge";
 import { InlineNote } from "@/components/states";
 import { BudgetBar } from "@/components/swarm-bits";
@@ -71,8 +72,17 @@ export function BudgetPanel({ view, elapsedMs }: { view: SwarmView; elapsedMs: n
   const shareOf = (spent: number, tokens: number) =>
     unmetered ? (b.tokens > 0 ? `${Math.round((tokens / b.tokens) * 100)}%` : "—") : b.spent_usd > 0 ? `${Math.round((spent / b.spent_usd) * 100)}%` : "—";
 
+  const vmRun = view.summary.isolation === "microvm" || (view.vms ?? []).length > 0;
+  const capStopped = (view.vms ?? []).filter((v) => v.cap_stopped_at);
+
   return (
     <div className="space-y-4">
+      {vmRun ? (
+        <InlineNote>
+          {spendSourceNote(true)}
+          {capStopped.length ? ` Stopped at their own cap by the hub: ${capStopped.map((v) => v.agent).join(", ")}.` : ""}
+        </InlineNote>
+      ) : null}
       <div className="grid gap-3 md:grid-cols-3">
         <section className="card p-4 md:col-span-2">
           <div className="flex items-baseline justify-between">

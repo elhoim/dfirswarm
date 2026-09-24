@@ -1,4 +1,5 @@
 /** Wire types. Mirrors scripts/ui/model.ts + extensions/*.ts; keep in sync by hand. */
+import type { VmTimeline } from "./vm-timeline.ts";
 
 /**
  * `finish_failed`: the hub reached the end of a VM run and could not put its
@@ -30,7 +31,7 @@ export type SwarmRow = {
   /** False when no model on the team bills: spend is an exact zero and cap_tokens is the brake. */
   metered: boolean;
   cap_tokens: number;
-  /** guarded · hosts · open · local */
+  /** guarded · hosts · open · local for a host run; vm (each VM denies by default) · vm-open for a microVM run. */
   net: string;
   agents_total: number;
   agents_done: number;
@@ -54,6 +55,14 @@ export type SwarmRow = {
   tools_forged: number;
   /** The evidence directory the run was given, or null: what a clean room is about. */
   inputs_source: string | null;
+  /** Where the agents ran; a record from before isolation was recorded is a host run. Absent from an older server. */
+  isolation?: "microvm" | "host";
+  /** The last custody verdict, or null before any stop or hub finish took one. */
+  custody?: "clean" | "attention" | null;
+  /** A legal hold, with its reason. */
+  hold?: { reason: string | null; at: string | null } | null;
+  /** A running VM run whose hub is down with nothing to bring it back. */
+  hub_down?: boolean | null;
 };
 
 /** One post as a dot on a thread's pulse line. */
@@ -323,7 +332,9 @@ export type VmHealth = {
   probe: { hub: boolean; floor: string | null; inputs: string | null; clock_skew_s: number | null; fuse: boolean | null; loop: boolean | null; missing: string[] };
   fit_warnings: string[];
   /** The hub's word on this agent and when it last heard from the VM; null when no hub answers. What a dead hub last wrote, when hub_alive is false. */
-  live: { state: string; connected: boolean; since: string | null; last_seen: string | null } | null;
+  live: { state: string; connected: boolean; since: string | null; last_seen: string | null; detail?: string | null } | null;
+  /** Each isolation check the kickoff's probe made, by the kickoff's own rules. */
+  probe_checks?: Array<{ check: string; want: string; got: string; ok: boolean; meaning?: string }>;
   /** The run's hub, the same on every VM: up and the author of the status shown; null when none is recorded (before kickoff started it, after stop). */
   hub_alive: boolean | null;
   hub_detail: string | null;
@@ -335,6 +346,18 @@ export type VmHealth = {
   hub_stop_begun: boolean;
   /** The hub is putting the VMs away and taking custody (its status: finished, not yet finish_done). */
   hub_finishing: boolean;
+  /** The hub finished the run and exited on its own: not a hub that is down. */
+  hub_ended?: boolean;
+  hub_restarts?: number;
+  collector_restarts?: number;
+  /** When the keeper gave up on a hub that kept dying at once, or null. */
+  keeper_gave_up_at?: string | null;
+  /** What the hub refused this seat, by call, with counts. */
+  refusals?: Array<{ fn: string; count: number; last_error: string; last_at: string }>;
+  /** When the hub stopped this seat at its own spend cap. */
+  cap_stopped_at?: string | null;
+  created_at?: string | null;
+  max_duration_sec?: number | null;
   /** Seconds since the hub last wrote its status; it writes on changes, not on a clock. */
   hub_status_age_s: number | null;
   mounts: Array<{ host: string; guest: string; mode: string; noexec: boolean }>;
@@ -346,6 +369,14 @@ export type VmHealth = {
   pack_secrets: Array<{ pack: string; names: string[]; mode: string }>;
   stopped_at: string | null;
   snapshot: "kept" | "not kept" | "failed" | null;
+  /** The disk kept at stop, or why it was not. */
+  snapshot_detail?: { path: string | null; bytes: number | null; sha256: string | null; integrity: boolean | null; error: string | null; retry_error: string | null } | null;
+  /** Why the VM was kept rather than put away, in the finish's words. */
+  kept?: string | null;
+  /** What the finish did to msb's database: scrubbed, busy, no sqlite3, no database. */
+  msb_db?: string | null;
+  logs?: string | null;
+  logs_not_kept?: string[];
   installed_outside: string[];
   runtime: string | null;
   runtime_changed: string | null;
@@ -369,7 +400,25 @@ export type SwarmView = {
   /** Why the trace could not be read, when it is there and could not be; null or absent otherwise. */
   trace_unreadable?: string | null;
   history: Record<string, FileVersion[]>;
-  registry: (Record<string, unknown> & { tool_forging?: boolean; self_compact?: SelfCompactOptions; inbox_page_chars?: number; inputs?: { source: string; files: number; bytes: number; enforce: string; guard: string } | null }) | null;
+  registry: (Record<string, unknown> & {
+    tool_forging?: boolean;
+    self_compact?: SelfCompactOptions;
+    inbox_page_chars?: number;
+    inputs?: { source: string; files: number; bytes: number; enforce: string; guard: string } | null;
+    isolation?: { mode?: string; image?: string; image_digest?: string | null; cpus?: number; memory_mib?: number; disk_mib?: number; snapshot?: boolean; oauth_allowed?: boolean; snapshot_dir?: string | null };
+    provenance?: RunProvenance;
+    host_clock?: HostClock;
+    custody_timeout_sec?: number | string;
+    idle_nudge_sec?: number | string;
+    vm_snapshot_dir?: string | null;
+    disk_encryption?: string;
+    hold?: { reason?: string | null; at?: string; by?: string } | boolean | null;
+    notify?: string | boolean | null;
+    ledger_from?: string | { run?: string; entries?: number; reviewed?: boolean } | null;
+    synced_folder_allowed_by?: string | null;
+    pack_secrets?: Record<string, { names?: string[]; mode?: string }>;
+    netguard_mode?: string;
+  }) | null;
   work: WorkFile[];
   layout: Record<string, unknown> | null;
   violations: SwarmEvent[];
@@ -386,9 +435,27 @@ export type SwarmView = {
   names?: Array<{ id: string; name: string; doing?: string; at: string }>;
   /** A microVM run's VMs; empty or absent for a host run. */
   vms?: VmHealth[];
+  /** The run's life across its VMs over the whole trace; null for a host run. */
+  vm_timeline?: VmTimeline | null;
   /** What the last custody check found (custody.json); null before a stop or the hub's finish took one. */
   custody?: CustodyView | null;
 };
+
+/** What produced the run, as the kickoff recorded it. */
+export type RunProvenance = {
+  harness_commit?: string;
+  harness_dirty?: boolean;
+  node_version?: string;
+  pi_version?: string | null;
+  pi_on_path?: string | null;
+  msb_version?: string | null;
+  image_digest?: string | null;
+  os?: string;
+  arch?: string;
+};
+
+/** The host's clock as the kickoff found it; the run's own processes run in UTC. */
+export type HostClock = { tz?: string; abbreviation?: string; utc_offset?: string; synced?: boolean | null; source?: string | null; run_processes_tz?: string };
 
 /** custody.json as the console shows it; `problems` empty is a clean verdict. */
 export type CustodyView = {
@@ -400,7 +467,23 @@ export type CustodyView = {
   evidence:
     | null
     | { unverifiable: string }
-    | { files: number; bytes: number; unchanged: boolean; complete: boolean; changed: string[]; missing: string[]; added: string[]; skipped: string[]; unreadable?: string[]; manifest_anchored: boolean | null };
+    | {
+        files: number;
+        bytes: number;
+        unchanged: boolean;
+        complete: boolean;
+        changed: string[];
+        missing: string[];
+        added: string[];
+        skipped: string[];
+        unreadable?: string[];
+        manifest_anchored: boolean | null;
+        /** How many files each digest was compared on: sha256 decides; md5 and sha1 when the manifest carries them. */
+        digests?: { sha256: number; md5: number; sha1: number } | null;
+        checked?: { files: number; links: number; special: number } | null;
+      };
+  /** The artifact index custody wrote beside its verdict. */
+  artifacts?: { files: number; bytes: number; skipped: number; index_sha256: string } | null;
   /** Whether custody.json is the verdict custody anchored outside the run, in words; null when there is nothing to check it against. */
   anchor?: string | null;
   sessions_not_files: string[];
@@ -427,9 +510,16 @@ export type CustodyView = {
 /** One `record` call, as the harness stored it in ledger/entries.jsonl. */
 export type LedgerEntry = {
   seq: number;
-  kind: "event" | "ioc" | "finding";
+  /** absence: a search that found nothing, valid only for its stated scope. */
+  kind: "event" | "ioc" | "finding" | "absence";
   /** ISO 8601 UTC for an event; absent for the other kinds. */
   ts?: string;
+  /** What the agent wrote for `ts` when it was not already the UTC value. */
+  ts_raw?: string;
+  /** The seq of the entry this one corrects; nothing is deleted. */
+  supersedes?: number;
+  /** This entry's own hash in the ledger's chain. */
+  hash?: string;
   value: string;
   /** Where it was seen: a path, a log, a plugin, a registry key. */
   source?: string;
@@ -448,11 +538,30 @@ export type LedgerView = {
 };
 
 /** A file under inputs/ as the kickoff recorded it. */
-export type InputFile = { path: string; bytes: number; sha256: string };
+export type InputFile = {
+  path: string;
+  bytes: number;
+  sha256: string;
+  md5?: string;
+  sha1?: string;
+  /** A name that is neither a file nor a link: a FIFO, a socket, a device. */
+  special?: "fifo" | "socket" | "char" | "block";
+  /** A symbolic link inside the evidence, recorded as the link it is: its target, never followed. */
+  link?: string;
+  /** A name whose bytes are not UTF-8: `path` is only for reading, this holds the bytes, base64. */
+  path_b64?: string;
+  link_b64?: string;
+};
 
 /** The read-only inputs a swarm was given, with what the trace says about them. */
 export type InputsView = {
   source: string;
+  /** copy, bind (in place) or image; null on an older manifest. */
+  held?: string | null;
+  /** In a VM run the evidence is a read-only, no-exec mount in every VM. */
+  isolation?: "microvm" | "host";
+  /** How the copy was checked against its source at the kickoff. */
+  source_checked?: { by: string; files: number | null; mismatches: number | null; seconds: number | null; detail: string } | null;
   copied_at: string;
   files: InputFile[];
   bytes: number;
@@ -531,6 +640,11 @@ export type TimedPost = {
   at: string | null;
   /** What the author calls itself, as the post recorded it. */
   name?: string;
+  /**
+   * A post from `system` sent by a seat's own harness code in its VM: the
+   * seat's authority, not the harness's. The hub sets it; an agent cannot.
+   */
+  via?: string;
 };
 
 export type TracePage = {
@@ -544,11 +658,13 @@ export type TracePage = {
   matched_by_agent: Record<string, number>;
   /** Why the trace could not be read, when it is there and could not be; null or absent otherwise. */
   unreadable?: string | null;
+  /** With `spilled`: each spill file read, or why not. Their lines are not on the chain. */
+  spills?: Array<{ path: string; lines: number; why: string | null; writable_by: string }>;
 };
 
 export type Job = {
   id: string;
-  kind: "start" | "stop" | "reap";
+  kind: "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review";
   argv: string[];
   status: "running" | "ok" | "failed";
   exit_code: number | null;
@@ -557,6 +673,8 @@ export type Job = {
   started_at: string;
   finished_at: string | null;
   swarm_id: string | null;
+  /** An export's file, downloadable from /api/jobs/:id/download once the job is done. */
+  output_file?: string;
 };
 
 export type LocalModel = { model: string; provider: string; base_url: string; has_key: boolean; metered: boolean };
@@ -592,6 +710,8 @@ export type ChangeKind =
   | "names"
   | "inputs"
   | "contract"
+  /** A live VM run's hub wrote its status: the seats' states moved. */
+  | "hub"
   | "other";
 
 export type ChangeEvent = {
@@ -648,3 +768,91 @@ export type SwarmContract = {
 
 /** What the panes may reach: the allowlist, the allowlist plus hosts, or everything. */
 export type NetMode = "guarded" | "hosts" | "open" | "local";
+
+/** Can this host run the agents in microVMs. GET /api/vm/readiness. */
+/** What `swarm.sh package` left in the run's sandbox. */
+export type PackageInfo = {
+  present: boolean;
+  error: string | null;
+  dir: string;
+  made_at: string | null;
+  files: number;
+  manifest_sha256: string | null;
+  signed: boolean;
+  /** SIGNER.txt's lines: principal, examiner, key, signed_at, namespace. */
+  signer: string[];
+};
+
+/** `swarm.sh image-for`: the image a kickoff with the chosen packs would boot, and why. */
+export type ImagePreview = {
+  ref: string | null;
+  digest: string | null;
+  profile: string | null;
+  arch: string | null;
+  packs: string[];
+  pinned_by: string | null;
+  reason: string | null;
+  said: string[];
+  error: string | null;
+};
+
+/** `swarm.sh start --check` with the form's options: exit 0 the start would go ahead, 2 it would be refused. Env values and the notify command are taken out. */
+export type StartCheck = {
+  exit: number;
+  ok: boolean;
+  blockers: string[];
+  warnings: string[];
+  said: string[];
+  checked_at: string;
+};
+
+export type VmReadiness = {
+  checked_at: string;
+  ok: boolean;
+  reasons: string[];
+  warnings: string[];
+  msb: { path: string; version: string; measured: string; matches: boolean } | null;
+  doctor_output: string | null;
+  image: { ref: string; present: boolean; digest: string | null } | null;
+  capacity: { ok: boolean; blockers: string[]; warnings: string[]; host: { mem_mib: number; cpus: number } | null } | null;
+  runs_dir: { path: string; synced: string | null };
+};
+
+/** One line of the operator's record. */
+export type OperatorLine = { at: string; command: string; argv: string[]; os_user: string; host: string; via: string; chained: boolean };
+
+/** GET /api/swarms/:id/operator: this run's lines of runs/operator-audit.jsonl, and its operator lines on the trace. */
+export type OperatorAudit = {
+  lines: OperatorLine[];
+  intact: boolean;
+  detail: string;
+  trace: Array<{ at: string; tool: string; command: string; via: string; os_user: string; verified: boolean }>;
+};
+
+/** GET /api/swarms/:id/coverage: which inputs no command named; which ledger entries no call before them named the source of. */
+export type Coverage = {
+  unavailable: string | null;
+  inputs: number;
+  untouched: string[];
+  touched: Record<string, number>;
+  under_named_dir: Record<string, number>;
+  calls_scanned: number;
+  clipped_calls: number;
+  grounding: Record<string, "grounded" | "not in the trace" | "not a path">;
+};
+
+export type ReviewAction = "accept" | "reject" | "amend" | "sign";
+
+/** GET /api/swarms/:id/review: the examiner's decisions, kept outside the run and chained. */
+export type ReviewState = {
+  present: boolean;
+  /** Why the review file was not read (a link, a FIFO, a directory in its place), or null. */
+  error?: string | null;
+  lines: Array<{ seq: number; at: string; examiner: string; os_user: string; host: string; action: ReviewAction; entry_seq: number | null; entry_hash: string | null; note: string | null; ledger_head: string | null; chained: boolean }>;
+  chain: { intact: boolean; detail: string };
+  by_entry: Record<string, { action: Exclude<ReviewAction, "sign">; examiner: string; at: string; note: string | null; entry_hash: string | null }>;
+  signed: { examiner: string; at: string; ledger_head: string | null } | null;
+};
+
+/** An installed pack as the kickoff form lists it. */
+export type PackRow = { id: string; name: string; version: string; description: string; depends: string[]; secrets?: Array<{ name: string; title: string; required: boolean }> };

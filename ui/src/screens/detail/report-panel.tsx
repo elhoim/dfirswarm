@@ -108,7 +108,7 @@ export function ReportPanel({ view }: { view: SwarmView }) {
         ) : null}
         {/*
           The report is agent-derived text rendered by the harness, so it goes
-          behind the same sandbox as any other artifact: scripts on, no
+          behind the same sandbox as any other artifact: no scripts, no
           same-origin, no network. The preview is `srcdoc`, not `src`: the
           report is one self-contained file, so handing the markup straight to
           the frame is one fewer request and nothing between the console and

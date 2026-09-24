@@ -4,6 +4,7 @@ import { ChevronRight, Layers, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Chip, FinishMeter, Meter, StatusDot, VitalsBand } from "@/components/console";
+import { isolationChip } from "@/components/swarm-bits";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { api } from "@/lib/api";
 import { compact, dateTime, liveElapsed, money, providerGlyph, shortDuration } from "@/lib/format";
@@ -29,6 +30,11 @@ function FleetBand({ rows }: { rows: SwarmRow[] }) {
   const cap = metered.reduce((a, r) => a + r.cap_usd, 0);
   const violations = rows.reduce((a, r) => a + r.violations, 0);
   const capStops = rows.filter((r) => isHarnessStop(r)).length;
+  // A VM run's own vitals: how many agents are in VMs right now, and whose
+  // hub is down with nothing to bring it back (its agents fail closed).
+  const vmRunning = running.filter((r) => r.isolation === "microvm");
+  const vmsUp = vmRunning.reduce((a, r) => a + Math.max(0, r.agents_total - r.agents_done - r.agents_dead), 0);
+  const hubsDown = vmRunning.filter((r) => r.hub_down === true).length;
   const cell = (label: string, big: string, tail: string, last = false) => (
     <div className={cn("flex min-w-0 flex-col gap-1 py-1 pr-7", !last && "border-r border-band-line", label !== "Running now" && "pl-7")}>
       <span className="label-caps text-band-ink-2">{label}</span>
@@ -41,7 +47,7 @@ function FleetBand({ rows }: { rows: SwarmRow[] }) {
     <VitalsBand>
       <div className="mx-auto grid w-full max-w-[1680px] grid-cols-2 gap-y-5 px-4 py-[26px] sm:px-10 lg:grid-cols-4" aria-label="Fleet vitals">
         {cell("Running now", String(running.length), `of ${rows.length} swarm${rows.length === 1 ? "" : "s"}`)}
-        {cell("Agents working", String(working), `· ${done} done · ${dead} dead`)}
+        {cell("Agents working", String(working), `· ${done} done · ${dead} dead${vmRunning.length ? ` · ${vmsUp} in VMs${hubsDown ? ` · ${hubsDown} hub${hubsDown === 1 ? "" : "s"} DOWN` : ""}` : ""}`)}
         {cell("Spend across the fleet", money(spent, 2), `of ${money(cap, 2)} in caps${free ? ` · ${free} free` : ""}`)}
         {cell("Harness interventions", String(violations + capStops), `· ${violations} blocked · ${capStops} cap stop${capStops === 1 ? "" : "s"}`, true)}
       </div>
@@ -88,6 +94,14 @@ function SwarmLine({ row, now }: { row: SwarmRow; now: number }) {
           <span className="serif text-[22px] leading-[1.1]">{row.label}</span>
           <span className="font-mono text-[12px] text-ink-3">{row.id}</span>
           {statusChip(row, now)}
+          {isolationChip(row)}
+          {row.hub_down ? <Chip tone="brick">hub down · the agents fail closed</Chip> : null}
+          {row.custody ? <Chip tone={row.custody === "clean" ? "moss" : "brick"}>custody {row.custody === "clean" ? "clean" : "needs attention"}</Chip> : null}
+          {row.hold ? (
+            <span title={row.hold.reason ?? undefined}>
+              <Chip tone="slate">on hold{row.hold.reason ? ` · ${row.hold.reason}` : ""}</Chip>
+            </span>
+          ) : null}
           <Chip tone="neutral">{row.agents_total} agent{row.agents_total === 1 ? "" : "s"}</Chip>
           {row.model ? (
             <span

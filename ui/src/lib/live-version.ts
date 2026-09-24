@@ -11,10 +11,11 @@ import type { ChangeKind } from "./types.ts";
  * shipped goals alone read five of those. So this is a list of what a check
  * cannot read rather than a guess at what it can: a lease landing and a
  * turn's spend fold, which are also the two most frequent changes in a
- * running swarm. The server's own cache is what bounds how often the checks
- * can actually run; this only keeps the console from asking for nothing.
+ * running swarm, and a VM run's hub status, which lives outside the sandbox
+ * where no check runs. The server's own cache is what bounds how often the
+ * checks can actually run; this only keeps the console from asking for nothing.
  */
-export const CHECKS_IGNORED_KINDS: readonly ChangeKind[] = ["locks", "budget"];
+export const CHECKS_IGNORED_KINDS: readonly ChangeKind[] = ["locks", "budget", "hub"];
 
 /** Every kind a client is told about; mirrors `ChangeKind` in `types.ts`. */
 export const ALL_CHANGE_KINDS: readonly ChangeKind[] = [
@@ -32,6 +33,7 @@ export const ALL_CHANGE_KINDS: readonly ChangeKind[] = [
   "names",
   "inputs",
   "contract",
+  "hub",
   "other",
 ];
 

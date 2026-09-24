@@ -4,6 +4,7 @@
  * it took — with a chip per agent carrying its line count and spend, and a
  * CALL / RESULT modal for any row.
  */
+import { describeEvent, eventCategory, type EventCategory } from "@/lib/event-taxonomy";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowDownToLine, ChevronDown, ChevronRight, Download, ListTree } from "lucide-react";
@@ -164,7 +165,11 @@ export function TraceRow({
   open?: boolean;
   onToggle?: (e: SwarmEvent) => void;
 }) {
-  const tone = toolTone(e.tool);
+  const category = eventCategory(e);
+  const described = category === "agent" ? null : describeEvent(e);
+  const spilled = typeof (e as { spilled?: unknown }).spilled === "string" ? String((e as { spilled?: unknown }).spilled) : null;
+  const unverified = (e as { agent_unverified?: unknown }).agent_unverified === true;
+  const tone = category === "infrastructure" ? "slate" : category === "operator" ? "saffron" : toolTone(e.tool);
   const violation = e.tool === "claim_violation";
   const thinking = e.tool === "thinking";
   const result = e.tool === "inbox" ? <InboxResult e={e} names={names} swarmId={swarmId} /> : humanResult(e);
@@ -208,9 +213,25 @@ export function TraceRow({
           {toolLabel(e.tool)}
         </Badge>
         <span className={cn("col-span-2 min-w-0 truncate font-mono text-[12px] text-ink-2 sm:col-span-1")}>
-          {e.tool === "post" && typeof e.args.thread === "string" ? <span className="mr-1.5 font-semibold text-brick-ink">→ #{e.args.thread}</span> : null}
-          <span className={cn(thinking ? "italic text-[#6b3d7a]" : "text-ink")}>{thinking ? thinkingText(e) : humanArgs(e)}</span>
-          {result && !thinking ? <span className="text-ink-3"> → {result}</span> : null}
+          {spilled ? (
+            <span className="mr-1.5 rounded-[3px] border border-saffron/50 px-1 font-sans text-[10.5px] text-saffron-ink" title={`From ${spilled}: a line that missed the chain`}>
+              spilled · not on the chain
+            </span>
+          ) : null}
+          {unverified ? (
+            <span className="mr-1.5 rounded-[3px] border border-line px-1 font-sans text-[10.5px] text-ink-3" title="The collector could not prove who sent it (no token: another shell)">
+              unverified
+            </span>
+          ) : null}
+          {described ? (
+            <span className={cn("font-sans", category === "operator" ? "text-saffron-ink" : "text-ink")}>{described}</span>
+          ) : (
+            <>
+              {e.tool === "post" && typeof e.args.thread === "string" ? <span className="mr-1.5 font-semibold text-brick-ink">→ #{e.args.thread}</span> : null}
+              <span className={cn(thinking ? "italic text-[#6b3d7a]" : "text-ink")}>{thinking ? thinkingText(e) : humanArgs(e)}</span>
+              {result && !thinking ? <span className="text-ink-3"> → {result}</span> : null}
+            </>
+          )}
         </span>
         <span className="hidden justify-self-end sm:block">
           <Tail e={e} />
@@ -509,17 +530,21 @@ export function TracesPanel({ view, version, initialAgent }: { view: SwarmView; 
   const [order, setOrder] = useState<"asc" | "desc">("asc");
   const [showAll, setShowAll] = useState(false);
   const [follow, setFollow] = useState(true);
+  // A lane: the agents' own calls, the run's infrastructure (hub, VMs,
+  // keeper, collector, custody, caps) or the operator's actions.
+  const [lane, setLane] = useState<"" | EventCategory>("");
+  const [spilled, setSpilled] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const prevCount = useRef(0);
-  const loader = useCallback(() => api.traces(id, { agent: agent || undefined, tool: tool || undefined, q: q || undefined, limit: 1000, order }), [id, agent, tool, q, order]);
-  const page = useResource(loader, version, [id, agent, tool, q, order]);
+  const loader = useCallback(() => api.traces(id, { agent: agent || undefined, tool: tool || undefined, q: q || undefined, limit: 1000, order, spilled }), [id, agent, tool, q, order, spilled]);
+  const page = useResource(loader, version, [id, agent, tool, q, order, spilled]);
   const names = useAgentNames(view.agents);
   const colour = useAgentColours(view.agents);
 
   const events = useMemo(() => {
-    const all = page.data?.events ?? [];
-    return showAll || tool ? all : all.filter((e) => !isNoise(e));
-  }, [page.data, showAll, tool]);
+    const all = (page.data?.events ?? []).filter((e) => !lane || eventCategory(e) === lane);
+    return showAll || tool || lane ? all : all.filter((e) => !isNoise(e));
+  }, [page.data, showAll, tool, lane]);
   const hidden = (page.data?.events.length ?? 0) - events.length;
 
   useEffect(() => {
@@ -544,9 +569,39 @@ export function TracesPanel({ view, version, initialAgent }: { view: SwarmView; 
           <Badge variant="saffron">reap</Badge>
           <Badge variant="moss">done · session end</Badge>
           <Badge variant="kelp">post · inbox</Badge>
-          <Badge variant="slate">claim · release · write</Badge>
+          <Badge variant="slate">claim · release · write · infrastructure</Badge>
+          <Badge variant="saffron">operator</Badge>
         </span>
       </div>
+
+      <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter by lane">
+        {(
+          [
+            ["", "Every lane"],
+            ["agent", "The agents' calls"],
+            ["infrastructure", "Infrastructure: hub, VMs, keeper, collector, custody, caps"],
+            ["operator", "The operator"],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key || "all"}
+            type="button"
+            onClick={() => setLane(key)}
+            aria-pressed={lane === key}
+            className={cn("h-7 rounded-full border px-2.5 text-[12px]", lane === key ? "border-ink bg-ink text-paper" : "border-line bg-card text-ink-2 hover:text-ink")}
+          >
+            {label}
+          </button>
+        ))}
+        <label className="ml-auto flex items-center gap-1.5 text-[12px] text-ink-2" title="Also read the spill files: lines that missed the chain, each marked with the file it came from">
+          <input type="checkbox" checked={spilled} onChange={(e) => setSpilled(e.target.checked)} /> include spilled lines
+        </label>
+      </div>
+      {spilled && page.data?.spills?.length ? (
+        <p className="m-0 text-[11.5px] text-ink-3">
+          {page.data.spills.map((sp) => `${sp.path}: ${sp.why ? `not read (${sp.why})` : `${sp.lines} line${sp.lines === 1 ? "" : "s"}`}, writable by ${sp.writable_by}`).join(" · ")}
+        </p>
+      ) : null}
 
       {/* one chip per agent: lines and spend, in the agent's own colour */}
       <div className="flex flex-wrap gap-1.5" role="group" aria-label="Filter by agent">

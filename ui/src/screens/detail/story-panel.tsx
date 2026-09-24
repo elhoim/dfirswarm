@@ -3,6 +3,7 @@
  * approvals on a hash pulled out as the sign-off and the harness's own posts
  * set in its own voice.
  */
+import { runMilestones } from "@/lib/vm-timeline";
 import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronDown, ChevronRight, Hash } from "lucide-react";
@@ -19,7 +20,11 @@ import { cn } from "@/lib/utils";
 
 function PostCard({ post, highlight, colour, chosen, swarmId }: { post: TimedPost; highlight?: boolean; colour: (id: string) => string; chosen?: (id: string) => string | undefined; swarmId: string }) {
   const [open, setOpen] = useState(false);
-  const system = post.from === "system";
+  // A post from `system` sent by a seat's own harness code in its VM
+  // (`via`) is that seat's word, not the harness's: it is drawn as the
+  // seat's, never in the harness's band.
+  const seatVia = post.from === "system" && post.via ? post.via : null;
+  const system = post.from === "system" && !seatVia;
   const long = post.body.length > 420 || post.body.split("\n").length > 6;
   return (
     <article
@@ -28,7 +33,7 @@ function PostCard({ post, highlight, colour, chosen, swarmId }: { post: TimedPos
         system ? "border-band bg-band text-band-ink" : "border-paper-3 bg-card",
         highlight && !system && "border-kelp",
       )}
-      style={system ? undefined : { borderLeft: `3px solid ${colour(post.from)}` }}
+      style={system ? undefined : { borderLeft: `3px solid ${colour(seatVia ?? post.from)}` }}
     >
       {/*
         The author block: what the agent called itself first, its id under it,
@@ -41,6 +46,11 @@ function PostCard({ post, highlight, colour, chosen, swarmId }: { post: TimedPos
       <div className="flex flex-col gap-1">
         {system ? (
           <span className="font-mono text-[12px] font-medium text-band-brick">system</span>
+        ) : seatVia ? (
+          <Link to={`/swarms/${swarmId}/agents/${seatVia}`} title={`Harness code in ${seatVia}'s VM posted this with that seat's authority, not the harness's`} className="group flex flex-col gap-0.5 no-underline">
+            <span className="text-[12px] font-semibold leading-tight text-ink group-hover:underline">system via {seatVia}</span>
+            <span className="text-[10.5px] leading-tight text-ink-3">harness code in its VM · the seat's word</span>
+          </Link>
         ) : (
           <Link
             to={`/swarms/${swarmId}/agents/${post.from}`}
@@ -57,7 +67,7 @@ function PostCard({ post, highlight, colour, chosen, swarmId }: { post: TimedPos
             </span>
           </Link>
         )}
-        <TagChip tag={post.tag} from={post.from} className="w-fit" />
+        <TagChip tag={post.tag} from={seatVia ?? post.from} className="w-fit" />
         {post.at ? <span className={cn("font-mono text-[10.5px]", system ? "text-band-ink-2" : "text-ink-3")}>{clock(post.at)}</span> : null}
       </div>
       <div className="min-w-0">
@@ -227,6 +237,7 @@ export function StoryPanel({ view, version }: { view: SwarmView; version: number
 
   return (
     <div className="flex flex-col gap-3.5">
+      <RunLifecycle view={view} />
       <SerifH size={28}>The board, as a story</SerifH>
       {phases.map((phase, i) => {
         // Joining folds by default once the team is past it; everything else opens.
@@ -252,5 +263,26 @@ export function StoryPanel({ view, version }: { view: SwarmView; version: number
         </div>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * A VM run's own milestones, which the board never tells: the VMs up and
+ * what their probes found, the keeper bringing back a hub or a collector,
+ * seats stopped at their cap, the VMs put away with their disks, msb's
+ * database cleared, and the custody verdict. Nothing for a host run.
+ */
+function RunLifecycle({ view }: { view: SwarmView }) {
+  const steps = runMilestones(view.vms ?? [], view.custody ?? null);
+  if (!steps.length) return null;
+  return (
+    <section className="flex flex-wrap items-center gap-1.5 text-[12px]" aria-label="The run's VM lifecycle">
+      <span className="label-caps mr-1">The VMs</span>
+      {steps.map((s, i) => (
+        <Chip key={i} tone={s.tone} wrap>
+          {s.what}
+        </Chip>
+      ))}
+    </section>
   );
 }

@@ -19,9 +19,21 @@ const CHIP: Record<Tone, string> = {
   band: "bg-band-2 text-[#e6e1d6]",
 };
 
-export function Chip({ tone = "neutral", mono, className, children }: { tone?: Tone; mono?: boolean; className?: string; children: ReactNode }) {
+/**
+ * `wrap`: a chip that may carry a long machine string (an image reference, a
+ * digest) breaks inside it instead of pushing the page sideways on a phone.
+ */
+export function Chip({ tone = "neutral", mono, wrap, className, children }: { tone?: Tone; mono?: boolean; wrap?: boolean; className?: string; children: ReactNode }) {
   return (
-    <span className={cn("inline-flex h-6 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 text-[12px] font-medium", mono && "font-mono text-[11.5px]", CHIP[tone], className)}>
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full px-2.5 text-[12px] font-medium",
+        wrap ? "min-h-6 max-w-full py-0.5 [overflow-wrap:anywhere] break-all" : "h-6 whitespace-nowrap",
+        mono && "font-mono text-[11.5px]",
+        CHIP[tone],
+        className,
+      )}
+    >
       {children}
     </span>
   );

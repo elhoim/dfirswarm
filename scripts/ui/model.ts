@@ -9,6 +9,9 @@ import { lstat, open, readdir, readFile, realpath, stat } from "node:fs/promises
 import { join, relative, resolve, sep } from "node:path";
 import { artifactKind } from "../artifact-kind.ts";
 import { verdictAnchorLine, verdictAnchorState } from "../custody.ts";
+import { readRegularText } from "../regular-file.ts";
+// The kickoff's own rules: the console shows the checks probeVerdict refuses on.
+import { probeChecks } from "../vm.ts";
 import {
   LEDGER_MD,
   listForgedTools,
@@ -31,6 +34,7 @@ import {
 } from "../../extensions/observe.ts";
 import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
 import { isFailureEvent } from "../../ui/src/lib/event-taxonomy.ts";
+import { vmTimeline, type VmTimeline } from "../../ui/src/lib/vm-timeline.ts";
 import { countChecks } from "./goals.ts";
 
 export type RegistryRun = {
@@ -80,8 +84,49 @@ export type RegistryRun = {
   tab_count?: number;
   split_failures?: number;
   extra_workspaces?: number;
-  /** Where the agents ran; `mode` is host or microvm. Absent on runs older than isolation. */
-  isolation?: { mode?: string; image?: string; snapshot?: boolean; oauth_allowed?: boolean };
+  /** Where the agents ran; `mode` is host or microvm. Absent on runs older than isolation, which were host runs. */
+  isolation?: {
+    mode?: string;
+    runtime?: string;
+    image?: string;
+    image_digest?: string | null;
+    cpus?: number;
+    memory_mib?: number;
+    disk_mib?: number;
+    snapshot?: boolean;
+    oauth_allowed?: boolean;
+    snapshot_dir?: string | null;
+  };
+  /** What produced the run: the harness commit (and whether it had local changes), Node, Pi, msb, the image digest, the host. */
+  provenance?: {
+    harness_commit?: string;
+    harness_dirty?: boolean;
+    node_version?: string;
+    pi_version?: string | null;
+    pi_on_path?: string | null;
+    msb_version?: string | null;
+    image_digest?: string | null;
+    os?: string;
+    arch?: string;
+  };
+  /** The host's clock as the kickoff found it; the run's own processes run in UTC. */
+  host_clock?: { tz?: string; abbreviation?: string; utc_offset?: string; synced?: boolean | null; source?: string | null; run_processes_tz?: string };
+  /** The deadline the host's custody check gets, in seconds. */
+  custody_timeout_sec?: number | string;
+  idle_nudge_sec?: number | string;
+  /** Where each VM's disk is kept at stop, when the operator named a place. */
+  vm_snapshot_dir?: string | null;
+  /** Whether the runs directory's volume is encrypted: on, off or unknown. */
+  disk_encryption?: string;
+  /** A legal hold: the run may not be purged or reaped while it is set. */
+  hold?: { reason?: string | null; at?: string; by?: string } | boolean | null;
+  /** A command the harness runs on the run's events (--notify); only whether one is set is shown. */
+  notify?: string | boolean | null;
+  /** The earlier run whose ledger this one was handed as hypotheses. */
+  ledger_from?: string | { run?: string; entries?: number; reviewed?: boolean } | null;
+  /** How a copy or disks inside a synced folder were allowed: flag or marker. */
+  synced_folder_allowed_by?: string | null;
+  netguard_mode_detail?: string;
   /**
    * Each pack's secrets and what the kickoff did with them: injected (bound
    * to their hosts, the value never in a VM), withheld, exposed (host panes
@@ -128,6 +173,14 @@ export type SwarmRow = SwarmSummary & {
   tools_forged: number;
   /** The inputs directory the run was given, from inputs.json, or null: what a clean room is about. */
   inputs_source: string | null;
+  /** Where the agents ran. A record from before isolation was recorded is a host run. */
+  isolation: "microvm" | "host";
+  /** The last custody verdict, for a run that has one: clean, attention, or null before any stop or hub finish took one. */
+  custody: "clean" | "attention" | null;
+  /** A legal hold on the run, with its reason, or null. */
+  hold: { reason: string | null; at: string | null } | null;
+  /** A running VM run whose hub is not up and nothing brings it back: the agents fail closed. Null for anything else. */
+  hub_down: boolean | null;
 };
 
 /** One post as a dot on a thread's pulse line: when, and who. */
@@ -145,8 +198,17 @@ export type ActivitySeries = {
   buckets: Array<{ m: number; c: number }>;
 };
 
-/** Lifecycle and harness lines: not something an agent chose to call. */
-export const LIFECYCLE_TOOLS = new Set(["agent_start", "agent_stop", "harness_stop", "cap_steer", "wall_steer", "claim_violation", "reap", "reaped", "thinking"]);
+/**
+ * Lifecycle and harness lines: not something an agent chose to call. In a
+ * VM run that includes the hub's own lines (a hub_call is the hub's record
+ * of a call the seat's trace already has), the VMs' finish, custody, the
+ * keeper's restarts, and the operator's actions.
+ */
+export const LIFECYCLE_TOOLS = new Set([
+  "agent_start", "agent_stop", "harness_stop", "cap_steer", "wall_steer", "claim_violation", "reap", "reaped", "thinking",
+  "hub_call", "hub_link", "hub_clear_up", "hub_restarted", "collector_restarted", "agent_cap_steer", "agent_cap_stop",
+  "vm_finish", "custody", "idle_nudge", "notify", "repeat_hint", "budget_precall_stop", "operator_action", "artifact_scripts",
+]);
 
 export function activitySeries(events: readonly SwarmEvent[], from: string | null, to: string | null, buckets = 96, now = Date.now()): ActivitySeries {
   const stamps = events.map((e) => Date.parse(hostTime(e))).filter((n) => Number.isFinite(n));
@@ -244,6 +306,16 @@ export type SentinelInfo = {
 /** The read-only inputs a swarm was given, with what the trace says about them. */
 export type InputsView = {
   source: string;
+  /** How the evidence is held: copy, bind (in place) or image; null on a manifest from before the field. */
+  held: string | null;
+  /** Where the agents ran: in a VM run the evidence is a read-only, no-exec mount in every VM, not a pane's guarded copy. */
+  isolation: "microvm" | "host";
+  /**
+   * How the copy was checked against its source at the kickoff, as the
+   * manifest says: by content (each file hashed again at the source), or by
+   * names, kinds and sizes only; null when the manifest does not say.
+   */
+  source_checked: { by: string; files: number | null; mismatches: number | null; seconds: number | null; detail: string } | null;
   copied_at: string;
   files: InputFile[];
   bytes: number;
@@ -294,7 +366,15 @@ export type VmHealth = {
    * heard a line from the VM; null when no hub answers for this run. When the
    * hub is not alive this is what it last wrote, not what is true now.
    */
-  live: { state: string; connected: boolean; since: string | null; last_seen: string | null } | null;
+  live: { state: string; connected: boolean; since: string | null; last_seen: string | null; detail: string | null } | null;
+  /**
+   * Each isolation check the kickoff's probe made in this VM, by the same
+   * rules the kickoff refuses a VM on (vm.ts probeVerdict): what it wants,
+   * what the probe found, and whether they agree. Empty on a record with no
+   * probe.
+   */
+  /** Each check by vm.ts probeChecks: what it wants, what was found, and what that means. */
+  probe_checks: Array<{ check: string; want: string; got: string; ok: boolean; meaning: string }>;
   /**
    * The run's hub (one for every VM, repeated on each): alive when hub.pid is
    * a vm-hub.ts serving this run's hub directory and the status shown was
@@ -312,6 +392,24 @@ export type VmHealth = {
   hub_stop_begun: boolean;
   /** The hub says it is putting the VMs away and taking custody (finished, not yet finish_done). */
   hub_finishing: boolean;
+  /** The hub finished the run and exited on its own (status: finished and finish_done): not a hub that is down. */
+  hub_ended: boolean;
+  /** How many times the keeper brought the hub back, and the run's collector, from the trace. */
+  hub_restarts: number;
+  collector_restarts: number;
+  /** When the keeper gave up on a hub that kept dying at once (.keeper-gave-up), or null. */
+  keeper_gave_up_at: string | null;
+  /**
+   * What the hub refused this seat, by call: how many times (a refusal
+   * repeated within the hub's window is counted on one line), the last
+   * error and when. A peer's directory, a harness file, a rate limit.
+   */
+  refusals: Array<{ fn: string; count: number; last_error: string; last_at: string }>;
+  /** When the hub stopped this seat at its own spend cap, or null. */
+  cap_stopped_at: string | null;
+  /** When the VM was created, and the most it may run, from its record. */
+  created_at: string | null;
+  max_duration_sec: number | null;
   /** Seconds since the hub last wrote status.json. It writes on a change of a seat's state or link, not on a clock, so a quiet hub's is old. */
   hub_status_age_s: number | null;
   /** What the VM mounts, from its record: the host path, where it appears in the VM, ro or rw, no-exec. */
@@ -324,6 +422,15 @@ export type VmHealth = {
   pack_secrets: Array<{ pack: string; names: string[]; mode: string }>;
   stopped_at: string | null;
   snapshot: "kept" | "not kept" | "failed" | null;
+  /** The disk kept at stop: where, how big, its sha256 and whether msb's own check passed; or why it was not kept. */
+  snapshot_detail: { path: string | null; bytes: number | null; sha256: string | null; integrity: boolean | null; error: string | null; retry_error: string | null } | null;
+  /** Why the VM was kept rather than put away (a failed snapshot, a failed removal), in the finish's words; null when it was put away. */
+  kept: string | null;
+  /** What the finish that removed the VM did to msb's database: scrubbed, busy, no sqlite3, no database; null before a finish. */
+  msb_db: string | null;
+  /** Where the VM's own logs were kept, and the ones that could not be copied. */
+  logs: string | null;
+  logs_not_kept: string[];
   installed_outside: string[];
   runtime: string | null;
   runtime_changed: string | null;
@@ -343,7 +450,24 @@ export type CustodyView = {
   evidence:
     | null
     | { unverifiable: string }
-    | { files: number; bytes: number; unchanged: boolean; complete: boolean; changed: string[]; missing: string[]; added: string[]; skipped: string[]; unreadable: string[]; manifest_anchored: boolean | null };
+    | {
+        files: number;
+        bytes: number;
+        unchanged: boolean;
+        complete: boolean;
+        changed: string[];
+        missing: string[];
+        added: string[];
+        skipped: string[];
+        unreadable: string[];
+        manifest_anchored: boolean | null;
+        /** How many files each digest was compared on: sha256 decides, md5 and sha1 when the manifest carries them. */
+        digests: { sha256: number; md5: number; sha1: number } | null;
+        /** What was checked how: regular files by their bytes, links by their target, special files by their kind. */
+        checked: { files: number; links: number; special: number } | null;
+      };
+  /** The artifact index custody wrote beside its verdict (artifacts.json): files, bytes, and the index's own sha256. */
+  artifacts: { files: number; bytes: number; skipped: number; index_sha256: string } | null;
   /** Whether custody.json is the verdict custody anchored outside the run, in words; null when there is nothing to check it against. */
   anchor: string | null;
   /** Names under the sessions that are not regular files (a link, a device): sealed nothing. */
@@ -401,6 +525,8 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   names: NameRecord[];
   /** A microVM run's VMs; empty for a host run. */
   vms: VmHealth[];
+  /** The run's life across its VMs over the whole trace (the view's trace is a tail); null for a host run. */
+  vm_timeline: VmTimeline | null;
   /** What the last custody check found (custody.json), or null before any stop or hub finish took one. */
   custody: CustodyView | null;
 };
@@ -479,6 +605,11 @@ function readEvents(sandbox: string): Promise<readonly SwarmEvent[]> {
   return readEventLog(sandbox);
 }
 
+/** A run's trace, for the routes that join it with something else (the operator record, coverage). */
+export function readRunEvents(sandbox: string): Promise<readonly SwarmEvent[]> {
+  return readEvents(sandbox);
+}
+
 export async function findRun(runsDir: string, id: string): Promise<RegistryRun | null> {
   const runs = await loadRegistry(runsDir);
   const run = runs.find((r) => isRecord(r) && r.id === id);
@@ -553,6 +684,13 @@ async function enrichSummary(
   // The same predicate for the list and the run page, so neither says
   // "done" while the hub is still snapshotting.
   const finishing = summary.done && run?.isolation?.mode === "microvm" && (await vmRunFinishing(sandbox, summary.state));
+  const isolation: SwarmRow["isolation"] = run?.isolation?.mode === "microvm" ? "microvm" : "host";
+  // A VM run's network is each VM's own policy (deny by default plus the
+  // allowlist), not netguard's; the host words would say the wrong thing.
+  const hostNet = typeof run?.net === "string" ? run.net : "guarded";
+  const net = isolation === "microvm" ? (run?.netguard_mode === "microvm-open" || hostNet === "open" ? "vm-open" : "vm") : hostNet;
+  const custodyView = await readCustody(sandbox).catch(() => null);
+  const hubDown = isolation === "microvm" && summary.state === "running" && !summary.done ? await runHubDown(sandbox) : null;
   return {
     ...summary,
     started_at: started,
@@ -562,7 +700,7 @@ async function enrichSummary(
     wall_clock_minutes: wall,
     metered,
     cap_tokens: capTokens,
-    net: typeof run?.net === "string" ? run.net : "guarded",
+    net,
     agents_total: ids.length || summary.n,
     agents_done: markers.done,
     agents_dead: markers.dead,
@@ -577,7 +715,52 @@ async function enrichSummary(
     stop_reason: stopReason,
     tools_forged: toolsForged,
     inputs_source: inputsSource,
+    isolation,
+    custody: custodyView ? custodyView.verdict : null,
+    hold: holdOf(run),
+    hub_down: hubDown,
   };
+}
+
+/** The run record's legal hold, however it was written: an object with a reason, or true. */
+export function holdOf(run: RegistryRun | null | undefined): SwarmRow["hold"] {
+  const h = run?.hold;
+  if (!h) return null;
+  if (h === true) return { reason: null, at: null };
+  if (typeof h === "object") return { reason: typeof h.reason === "string" && h.reason ? h.reason : null, at: typeof h.at === "string" ? h.at : null };
+  return null;
+}
+
+/** For the list: is a running VM run's hub down with nothing to bring it back (the agents fail closed)? */
+/**
+ * The hub directory of every VM run whose hub may still write: a microVM run
+ * not stopped, done or purged, with a hub directory the harness made for its
+ * sandbox (ownHubDir). The console watches these for the seats' states.
+ */
+export async function liveHubDirs(runsDir: string): Promise<Array<{ id: string; dir: string }>> {
+  const out: Array<{ id: string; dir: string }> = [];
+  for (const run of await loadRegistry(runsDir)) {
+    if (!isRecord(run) || typeof run.id !== "string" || typeof run.sandbox !== "string") continue;
+    const iso = isRecord(run.isolation) ? run.isolation : null;
+    if (iso?.mode !== "microvm") continue;
+    if (["stopped", "done", "purged", "failed", "finish_failed", "stop_incomplete"].includes(String(run.state ?? ""))) continue;
+    const dir = await ownHubDir(run.sandbox);
+    if (dir) out.push({ id: run.id, dir });
+  }
+  return out;
+}
+
+async function runHubDown(sandbox: string): Promise<boolean | null> {
+  const hub = await ownHubDir(sandbox);
+  if (!hub) return null;
+  let status: { at?: unknown; pid?: unknown; finished?: unknown; finish_done?: unknown } = {};
+  try {
+    status = JSON.parse(await readFile(join(hub, "status.json"), "utf8")) as typeof status;
+  } catch {
+    // no status yet: judged by the pid alone
+  }
+  const h = await hubHealth(sandbox, hub, { at: typeof status.at === "string" ? status.at : null, pid: typeof status.pid === "number" ? status.pid : null, finished: status.finished === true, finish_done: status.finish_done === true }, Date.now());
+  return !h.alive && h.tone === "danger";
 }
 
 export async function listSwarmRows(runsDir: string, now = Date.now()): Promise<SwarmRow[]> {
@@ -818,6 +1001,7 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     }
   }
 
+  const vms = await vmHealth(sandbox, run, Date.now(), events);
   return {
     ...detail,
     summary,
@@ -835,10 +1019,11 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     activity: activitySeries(events, summary.started_at || null, summary.finished_at),
     tools: await forgedToolRows(sandbox, events),
     packs: await packViews(run),
-    inputs: await inputsView(sandbox, events),
+    inputs: await inputsView(sandbox, events, run),
     ledger: await ledgerView(sandbox),
     names: await readNames(sandbox).catch(() => []),
-    vms: await vmHealth(sandbox, run),
+    vms,
+    vm_timeline: vmTimeline({ started_at: summary.started_at || null, finished_at: summary.finished_at, now: Date.now(), vms, events: events.map((e) => ({ ...e, ts: hostTime(e) })) }),
     custody: await readCustody(sandbox),
   };
 }
@@ -940,7 +1125,7 @@ function commandHas(pid: number, needles: string[]): Promise<boolean> {
   });
 }
 
-type HubHealth = { alive: boolean; tone: "ok" | "warn" | "danger"; detail: string; age: number | null; keeper: boolean | null; stopBegun: boolean };
+type HubHealth = { alive: boolean; tone: "ok" | "warn" | "danger"; detail: string; age: number | null; keeper: boolean | null; stopBegun: boolean; ended: boolean };
 
 /**
  * Is the hub up, and is the status on screen its own? The hub writes
@@ -952,7 +1137,12 @@ type HubHealth = { alive: boolean; tone: "ok" | "warn" | "danger"; detail: strin
  * weighed against its keeper and the stop: brought back, ended on purpose,
  * or nobody's.
  */
-async function hubHealth(sandbox: string, hub: string, status: { at: string | null; pid: number | null }, now: number): Promise<HubHealth> {
+async function hubHealth(
+  sandbox: string,
+  hub: string,
+  status: { at: string | null; pid: number | null; finished?: boolean; finish_done?: boolean },
+  now: number,
+): Promise<HubHealth> {
   const statusMs = status.at ? Date.parse(status.at) : NaN;
   const age = Number.isFinite(statusMs) ? Math.max(0, Math.round((now - statusMs) / 1000)) : null;
   const stopBegun = existsSync(join(hub, ".stop"));
@@ -961,30 +1151,42 @@ async function hubHealth(sandbox: string, hub: string, status: { at: string | nu
   const pidFile = join(sandbox, "hub.pid");
   const pid = Number((await readFile(pidFile, "utf8").catch(() => "")).trim());
   const down = (why: string): HubHealth => {
-    if (stopBegun) return { alive: false, tone: "warn", detail: `${why}; the run's stop has begun and ends the hub on purpose`, age, keeper, stopBegun };
-    if (keeper) return { alive: false, tone: "warn", detail: `HUB DOWN: ${why}; its keeper (pid ${keeperPid}) is up and brings it back`, age, keeper, stopBegun };
-    return { alive: false, tone: "danger", detail: `HUB DOWN: ${why}${keeper === false ? ", and its keeper is not running either, so nothing brings it back" : ""}`, age, keeper, stopBegun };
+    // A hub that finished the run (status: finished and finish_done) ended
+    // on its own, as it should: not a hub that is down.
+    if (status.finished && status.finish_done) {
+      return { alive: false, tone: "ok", detail: `the hub finished the run${status.at ? ` (its last status at ${status.at})` : ""} and exited: the VMs' finish is done`, age, keeper, stopBegun, ended: true };
+    }
+    if (stopBegun) return { alive: false, tone: "warn", detail: `${why}. The run's stop has begun and ends the hub on purpose.`, age, keeper, stopBegun, ended: true };
+    if (keeper) return { alive: false, tone: "warn", detail: `HUB DOWN: ${why}. Its keeper (pid ${keeperPid}) is up and brings it back.`, age, keeper, stopBegun, ended: false };
+    return { alive: false, tone: "danger", detail: `HUB DOWN: ${why}${keeper === false ? ", and its keeper is not running either, so nothing brings it back" : ""}.`, age, keeper, stopBegun, ended: false };
   };
   if (!Number.isInteger(pid) || pid <= 1) return down("no hub.pid names the hub process");
   // A pid is reused, and hub.pid is only tool-protected: it has to be a
   // vm-hub.ts serving this hub's directory (swarm.sh hub_pid_ours).
   if (!(await commandHas(pid, ["vm-hub.ts", hub]))) return down(`the hub (pid ${pid}) is not running; the states below are what it last wrote, ${ageWords(age)} ago`);
-  if (!Number.isFinite(statusMs)) return { alive: false, tone: "warn", detail: `the hub (pid ${pid}) is running but has written no status`, age, keeper, stopBegun };
+  if (!Number.isFinite(statusMs)) return { alive: false, tone: "warn", detail: `the hub (pid ${pid}) is running but has written no status`, age, keeper, stopBegun, ended: false };
   if (status.pid !== null ? status.pid !== pid : statusMs < ((await stat(pidFile).catch(() => null))?.mtimeMs ?? -Infinity) - 2000) {
-    return { alive: false, tone: "warn", detail: `the hub (pid ${pid}) is running but has not written its status since it started; the states below are an earlier hub's, ${ageWords(age)} old`, age, keeper, stopBegun };
+    return { alive: false, tone: "warn", detail: `the hub (pid ${pid}) is running but has not written its status since it started; the states below are an earlier hub's, ${ageWords(age)} old`, age, keeper, stopBegun, ended: false };
   }
-  return { alive: true, tone: "ok", detail: `hub running (pid ${pid}) · status written ${ageWords(age)} ago${keeper === false ? " · its keeper is not running" : ""}`, age, keeper, stopBegun };
+  return { alive: true, tone: "ok", detail: `hub running (pid ${pid}) · status written ${ageWords(age)} ago${keeper === false ? " · its keeper is not running" : ""}`, age, keeper, stopBegun, ended: false };
 }
 
 type VmRecordShape = {
   agent?: unknown;
+  created_at?: unknown;
+  max_duration_sec?: unknown;
+  kept?: unknown;
+  msb_db?: unknown;
+  logs?: unknown;
+  logs_not_kept?: unknown;
+  snapshot_retry_error?: unknown;
   name?: unknown;
   cpus?: unknown;
   memory_mib?: unknown;
   image?: { ref?: string; manifest_digest?: string | null; expected_digest?: string };
   probe?: Record<string, unknown>;
   image_fit?: { warnings?: string[]; blockers?: string[] };
-  snapshot?: { sha256?: string; error?: string };
+  snapshot?: { sha256?: string; error?: string; path?: string; bytes?: number; integrity?: boolean };
   installed_outside_image?: { apt?: Record<string, string>; venv?: Record<string, string> };
   runtime_changed?: { from?: string; to?: string };
   runtime?: { version?: string };
@@ -1006,11 +1208,11 @@ function stringList(v: unknown): string[] {
  * hubs' parent made for this sandbox, since a pane could write hub.dir. The
  * run record, when given, adds what the kickoff did with each pack's secrets.
  */
-export async function vmHealth(sandbox: string, run: RegistryRun | null = null, now = Date.now()): Promise<VmHealth[]> {
+export async function vmHealth(sandbox: string, run: RegistryRun | null = null, now = Date.now(), events: readonly SwarmEvent[] = []): Promise<VmHealth[]> {
   const dir = join(sandbox, "vm");
   const names = (await readdir(dir).catch(() => [] as string[])).filter((n) => n.endsWith(".json") && !n.startsWith(".")).sort();
   if (!names.length) return [];
-  let live: Record<string, { state?: string; connected?: boolean; since?: string; last_seen?: string }> = {};
+  let live: Record<string, { state?: string; connected?: boolean; since?: string; last_seen?: string; detail?: string }> = {};
   let hubAlive: boolean | null = null;
   let hubDetail: string | null = null;
   let hubAge: number | null = null;
@@ -1018,20 +1220,29 @@ export async function vmHealth(sandbox: string, run: RegistryRun | null = null, 
   let hubKeeper: boolean | null = null;
   let hubStopBegun = false;
   let hubFinishing = false;
+  let hubEnded = false;
+  let keeperGaveUp: string | null = null;
   const hub = await ownHubDir(sandbox);
   if (hub) {
     let statusAt: string | null = null;
     let statusPid: number | null = null;
+    let finished = false;
+    let finishDone = false;
     try {
       const status = JSON.parse(await readFile(join(hub, "status.json"), "utf8")) as { at?: unknown; pid?: unknown; agents?: typeof live; finished?: unknown; finish_done?: unknown };
       live = status.agents ?? {};
       statusAt = typeof status.at === "string" ? status.at : null;
       statusPid = typeof status.pid === "number" ? status.pid : null;
-      hubFinishing = status.finished === true && status.finish_done !== true;
+      finished = status.finished === true;
+      finishDone = status.finish_done === true;
+      hubFinishing = finished && !finishDone;
     } catch {
       live = {};
     }
-    const h = await hubHealth(sandbox, hub, { at: statusAt, pid: statusPid }, now);
+    const gaveUp = (await readFile(join(hub, ".keeper-gave-up"), "utf8").catch(() => null))?.trim();
+    keeperGaveUp = gaveUp === undefined || gaveUp === null ? null : gaveUp || "yes";
+    const h = await hubHealth(sandbox, hub, { at: statusAt, pid: statusPid, finished, finish_done: finishDone }, now);
+    hubEnded = h.ended && finished && finishDone;
     hubAlive = h.alive;
     hubDetail = h.detail;
     hubAge = h.age;
@@ -1042,6 +1253,21 @@ export async function vmHealth(sandbox: string, run: RegistryRun | null = null, 
     hubFinishing = hubFinishing && h.alive;
   }
   const packSecrets = Object.entries(run?.pack_secrets ?? {}).map(([pack, s]) => ({ pack, names: stringList(s?.names), mode: typeof s?.mode === "string" ? s.mode : "?" }));
+  // From the trace: the keeper's restarts, the hub's refusals and cap stops.
+  let hubRestarts = 0;
+  let collectorRestarts = 0;
+  const refusals = hubRefusals(events);
+  const capStops = new Map<string, string>();
+  for (const e of events) {
+    if (e.tool === "hub_restarted") hubRestarts += 1;
+    else if (e.tool === "collector_restarted") collectorRestarts += 1;
+    else if (e.tool === "agent_cap_stop") {
+      const who = isRecord(e.args) && typeof e.args.agent === "string" ? e.args.agent : e.agent;
+      if (!capStops.has(who)) capStops.set(who, e.ts);
+    }
+  }
+  const expectInputs = existsSync(join(sandbox, "inputs"));
+  const expectedFiles = await manifestFileCount(sandbox);
   const out: VmHealth[] = [];
   for (const name of names) {
     let rec: VmRecordShape;
@@ -1076,14 +1302,29 @@ export async function vmHealth(sandbox: string, run: RegistryRun | null = null, 
       },
       fit_warnings: [...(fit.blockers ?? []), ...(fit.warnings ?? [])],
       live: l
-        ? { state: String(l.state ?? "?"), connected: l.connected === true, since: typeof l.since === "string" ? l.since : null, last_seen: typeof l.last_seen === "string" ? l.last_seen : null }
+        ? {
+            state: String(l.state ?? "?"),
+            connected: l.connected === true,
+            since: typeof l.since === "string" ? l.since : null,
+            last_seen: typeof l.last_seen === "string" ? l.last_seen : null,
+            detail: typeof l.detail === "string" && l.detail ? l.detail : null,
+          }
         : null,
+      probe_checks: rec.probe ? probeChecks(probe, expectInputs, expectedFiles) : [],
       hub_alive: hubAlive,
       hub_detail: hubDetail,
       hub_tone: hubTone,
       hub_keeper_alive: hubKeeper,
       hub_stop_begun: hubStopBegun,
       hub_finishing: hubFinishing,
+      hub_ended: hubEnded,
+      hub_restarts: hubRestarts,
+      collector_restarts: collectorRestarts,
+      keeper_gave_up_at: keeperGaveUp,
+      refusals: refusals.get(agent) ?? [],
+      cap_stopped_at: capStops.get(agent) ?? null,
+      created_at: typeof rec.created_at === "string" ? rec.created_at : null,
+      max_duration_sec: typeof rec.max_duration_sec === "number" ? rec.max_duration_sec : null,
       hub_status_age_s: hubAge,
       mounts: Array.isArray(rec.mounts)
         ? rec.mounts
@@ -1097,6 +1338,20 @@ export async function vmHealth(sandbox: string, run: RegistryRun | null = null, 
       pack_secrets: packSecrets,
       stopped_at: typeof rec.stopped_at === "string" ? rec.stopped_at : null,
       snapshot: !snap ? (typeof rec.stopped_at === "string" ? "not kept" : null) : snap.error ? "failed" : "kept",
+      snapshot_detail: snap
+        ? {
+            path: typeof snap.path === "string" ? snap.path : null,
+            bytes: typeof snap.bytes === "number" ? snap.bytes : null,
+            sha256: typeof snap.sha256 === "string" ? snap.sha256 : null,
+            integrity: typeof snap.integrity === "boolean" ? snap.integrity : null,
+            error: typeof snap.error === "string" ? snap.error : null,
+            retry_error: typeof rec.snapshot_retry_error === "string" ? rec.snapshot_retry_error : null,
+          }
+        : null,
+      kept: typeof rec.kept === "string" && rec.kept ? rec.kept : null,
+      msb_db: typeof rec.msb_db === "string" ? rec.msb_db : null,
+      logs: typeof rec.logs === "string" ? rec.logs : null,
+      logs_not_kept: stringList(rec.logs_not_kept),
       installed_outside: inv ? [...Object.entries(inv.apt ?? {}).map(([k, v]) => `apt ${k} ${v}`), ...Object.entries(inv.venv ?? {}).map(([k, v]) => `venv ${k} ${v}`)] : [],
       runtime: typeof rec.runtime?.version === "string" ? rec.runtime.version : null,
       runtime_changed: changed?.from && changed.to ? `${changed.from} → ${changed.to}` : null,
@@ -1107,6 +1362,49 @@ export async function vmHealth(sandbox: string, run: RegistryRun | null = null, 
 
 function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/** How many names inputs.json lists, read once per change of the file; null without a manifest. */
+const manifestCounts = new Map<string, { mtime: number; size: number; count: number | null }>();
+async function manifestFileCount(sandbox: string): Promise<number | null> {
+  const file = join(sandbox, "inputs.json");
+  const st = await stat(file).catch(() => null);
+  if (!st) return null;
+  const hit = manifestCounts.get(file);
+  if (hit && hit.mtime === st.mtimeMs && hit.size === st.size) return hit.count;
+  const manifest = await readInputsManifest(sandbox).catch(() => null);
+  const count = manifest ? manifest.files.length : null;
+  manifestCounts.set(file, { mtime: st.mtimeMs, size: st.size, count });
+  return count;
+}
+
+/**
+ * What the hub refused each seat, from its hub_call lines: per seat, per
+ * call, how many (a refusal repeated within the hub's window is written once
+ * with the count), the last error and when.
+ */
+export function hubRefusals(events: readonly SwarmEvent[]): Map<string, VmHealth["refusals"]> {
+  const bySeat = new Map<string, Map<string, { fn: string; count: number; last_error: string; last_at: string }>>();
+  for (const e of events) {
+    if (e.tool !== "hub_call" || !isRecord(e.result) || e.result.ok !== false) continue;
+    const args = isRecord(e.args) ? e.args : {};
+    const seat = typeof args.agent === "string" ? args.agent : e.agent;
+    const fn = typeof args.fn === "string" ? args.fn : "?";
+    const fns = bySeat.get(seat) ?? bySeat.set(seat, new Map()).get(seat)!;
+    const row = fns.get(fn) ?? { fn, count: 0, last_error: "", last_at: "" };
+    // The hub writes a refusal once and counts its repeats within a window:
+    // a closing line carries `repeated` (the repeats after the one written),
+    // and a fresh refusal may carry `repeated_before` (an earlier window's
+    // repeats not written yet).
+    if (typeof e.result.repeated === "number") row.count += e.result.repeated;
+    else row.count += 1 + (typeof e.result.repeated_before === "number" ? e.result.repeated_before : 0);
+    if (typeof e.result.error === "string") row.last_error = e.result.error;
+    row.last_at = e.ts;
+    fns.set(fn, row);
+  }
+  const out = new Map<string, VmHealth["refusals"]>();
+  for (const [seat, fns] of bySeat) out.set(seat, [...fns.values()].sort((a, b) => b.count - a.count || a.fn.localeCompare(b.fn)));
+  return out;
 }
 
 /**
@@ -1130,7 +1428,7 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return null;
     const why = code === "ELOOP" ? "custody.json is a link, not the file custody wrote; it was not followed" : `custody.json could not be read (${code ?? (err as Error).message})`;
-    return { at: null, summary: why, verdict: "attention", problems: [why], evidence: null, anchor: null, sessions_not_files: [], trace: null, ledger: null, tool_outputs: null, vms: null, incomplete: null };
+    return { at: null, summary: why, verdict: "attention", problems: [why], evidence: null, artifacts: null, anchor: null, sessions_not_files: [], trace: null, ledger: null, tool_outputs: null, vms: null, incomplete: null };
   }
   let raw: Record<string, unknown>;
   try {
@@ -1138,7 +1436,7 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
     if (!raw || typeof raw !== "object") throw new Error("not an object");
   } catch {
     const why = "custody.json is not readable JSON";
-    return { at: null, summary: why, verdict: "attention", problems: [why], evidence: null, anchor: null, sessions_not_files: [], trace: null, ledger: null, tool_outputs: null, vms: null, incomplete: null };
+    return { at: null, summary: why, verdict: "attention", problems: [why], evidence: null, artifacts: null, anchor: null, sessions_not_files: [], trace: null, ledger: null, tool_outputs: null, vms: null, incomplete: null };
   }
   const problems: string[] = [];
   // The file against the verdict custody anchored outside the run: one edited
@@ -1168,6 +1466,10 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
         skipped,
         unreadable,
         manifest_anchored: typeof inputs.manifest_anchored === "boolean" ? inputs.manifest_anchored : null,
+        digests: isRecord(inputs.digests_compared)
+          ? { sha256: num(inputs.digests_compared.sha256), md5: num(inputs.digests_compared.md5), sha1: num(inputs.digests_compared.sha1) }
+          : null,
+        checked: isRecord(inputs.checked) ? { files: num(inputs.checked.files), links: num(inputs.checked.links), special: num(inputs.checked.special) } : null,
       };
       if (evidence.changed.length || evidence.missing.length || evidence.added.length) problems.push(`evidence changed: ${evidence.changed.length} changed, ${evidence.missing.length} missing, ${evidence.added.length} added`);
       if (evidence.manifest_anchored === false) problems.push("the evidence manifest in the run is not the one the kickoff recorded");
@@ -1296,12 +1598,17 @@ export async function readCustody(sandbox: string): Promise<CustodyView | null> 
 
   const incomplete = typeof raw.incomplete === "string" && raw.incomplete ? raw.incomplete : null;
   if (incomplete) problems.push(`custody incomplete: ${incomplete}`);
+  const art = raw.artifacts;
+  const artifacts: CustodyView["artifacts"] = isRecord(art)
+    ? { files: num(art.files), bytes: num(art.bytes), skipped: num(art.skipped), index_sha256: typeof art.index_sha256 === "string" ? art.index_sha256 : "" }
+    : null;
   return {
     at: typeof raw.at === "string" ? raw.at : null,
     summary: typeof raw.summary === "string" ? raw.summary : "",
     verdict: problems.length ? "attention" : "clean",
     problems,
     evidence,
+    artifacts,
     anchor,
     sessions_not_files: notFiles,
     trace,
@@ -1354,9 +1661,10 @@ export async function ledgerView(sandbox: string): Promise<LedgerView> {
 }
 
 /** inputs.json joined with the guard, violation and check lines from the trace. */
-export async function inputsView(sandbox: string, events: readonly SwarmEvent[]): Promise<InputsView | null> {
+export async function inputsView(sandbox: string, events: readonly SwarmEvent[], run: RegistryRun | null = null): Promise<InputsView | null> {
   const manifest = await readInputsManifest(sandbox);
   if (!manifest) return null;
+  const extras = await manifestExtras(sandbox);
   const enforced: Record<string, string> = {};
   for (const e of events) {
     if (e.tool !== "inputs_guard") continue;
@@ -1377,6 +1685,9 @@ export async function inputsView(sandbox: string, events: readonly SwarmEvent[])
   const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
   return {
     source: manifest.source,
+    held: typeof manifest.held === "string" ? manifest.held : null,
+    isolation: run?.isolation?.mode === "microvm" ? "microvm" : "host",
+    source_checked: extras.source_checked,
     copied_at: manifest.copied_at,
     files: manifest.files,
     bytes: manifest.bytes,
@@ -1398,6 +1709,43 @@ export async function inputsView(sandbox: string, events: readonly SwarmEvent[])
         }
       : null,
   };
+}
+
+/**
+ * The manifest's top-level fields readInputsManifest does not carry (how
+ * the copy was checked against its source), read once per change of the
+ * file.
+ */
+const manifestExtraCache = new Map<string, { mtime: number; size: number; value: { source_checked: InputsView["source_checked"] } }>();
+async function manifestExtras(sandbox: string): Promise<{ source_checked: InputsView["source_checked"] }> {
+  const file = join(sandbox, "inputs.json");
+  const st = await stat(file).catch(() => null);
+  const none = { source_checked: null };
+  if (!st) return none;
+  const hit = manifestExtraCache.get(file);
+  if (hit && hit.mtime === st.mtimeMs && hit.size === st.size) return hit.value;
+  let value: { source_checked: InputsView["source_checked"] } = none;
+  const read = await readRegularText(file, Math.max(st.size, 1));
+  if ("text" in read) {
+    try {
+      const raw = (JSON.parse(read.text) as { source_checked?: unknown }).source_checked;
+      if (typeof raw === "string" && raw) value = { source_checked: { by: raw, files: null, mismatches: null, seconds: null, detail: raw } };
+      else if (isRecord(raw)) {
+        const by = typeof raw.by === "string" ? raw.by : "?";
+        const files = typeof raw.files === "number" ? raw.files : null;
+        const mism = Array.isArray(raw.mismatches) ? raw.mismatches.length : typeof raw.mismatches === "number" ? raw.mismatches : null;
+        const seconds = typeof raw.seconds === "number" ? raw.seconds : null;
+        const detail = by === "content"
+          ? `verified against its source by content${files !== null ? `: ${files} file${files === 1 ? "" : "s"} hashed again at the source` : ""}${mism ? `, ${mism} MISMATCH${mism === 1 ? "" : "ES"}` : ", all matching"}${seconds !== null ? ` (${seconds} s)` : ""}`
+          : `checked against its source by ${by}, not by content`;
+        value = { source_checked: { by, files, mismatches: mism, seconds, detail } };
+      }
+    } catch {
+      // a torn manifest says nothing more here; the view already read it
+    }
+  }
+  manifestExtraCache.set(file, { mtime: st.mtimeMs, size: st.size, value });
+  return value;
 }
 
 /** Manifests from tools/ joined with the calls the trace recorded under each name. */
@@ -1429,6 +1777,8 @@ export type TraceQuery = {
   q?: string;
   limit?: number;
   order?: "asc" | "desc";
+  /** Also read the spill files: lines that missed the chain, each marked `spilled` with the file it came from. */
+  spilled?: boolean;
 };
 
 export type TracePage = {
@@ -1451,6 +1801,8 @@ export type TracePage = {
    * ten. With `limit=1` this field alone answers it.
    */
   matched_by_agent: Record<string, number>;
+  /** With `spilled`: each spill file read (lines), or why it was not. Lines from them are not on the chain. */
+  spills: Array<{ path: string; lines: number; why: string | null; writable_by: string }>;
 };
 
 export async function queryTraces(sandbox: string, query: TraceQuery): Promise<TracePage> {
@@ -1468,8 +1820,16 @@ export async function queryTraces(sandbox: string, query: TraceQuery): Promise<T
   } catch {
     // no budget yet: chips show lines only
   }
+  const spills: TracePage["spills"] = [];
   let out: readonly SwarmEvent[] = events;
-  if (query.agent) out = out.filter((e) => e.agent === query.agent);
+  if (query.spilled) {
+    const spilled = await readSpills(sandbox, spills);
+    out = [...events, ...spilled].sort((a, b) => hostTime(a).localeCompare(hostTime(b)));
+  }
+  // The hub's lines about a seat (a refusal, a cap stop, a finish) are the
+  // harness's (agent "system") and name the seat in their args: they belong
+  // under that seat's filter too.
+  if (query.agent) out = out.filter((e) => e.agent === query.agent || (e.agent === "system" && isRecord(e.args) && e.args.agent === query.agent));
   if (query.tool) out = out.filter((e) => e.tool === query.tool);
   if (query.q) {
     const needle = query.q.toLowerCase();
@@ -1490,7 +1850,139 @@ export async function queryTraces(sandbox: string, query: TraceQuery): Promise<T
     by_agent: byAgent,
     matched_by_agent: matchedByAgent,
     unreadable: read.unreadable,
+    spills,
   };
+}
+
+/** Where a run's spill files are, and who could write each: the harness's own, each seat's (in its own tool-output/), a host run's shared one. */
+async function spillFiles(sandbox: string): Promise<Array<{ rel: string; writable_by: string }>> {
+  const out: Array<{ rel: string; writable_by: string }> = [{ rel: "traces/system-spill.jsonl", writable_by: "the harness only" }];
+  for (const d of await readdir(join(sandbox, "tool-output"), { withFileTypes: true }).catch(() => [])) {
+    if (d.isDirectory()) out.push({ rel: `tool-output/${d.name}/trace-spill.jsonl`, writable_by: `${d.name} (its own directory)` });
+  }
+  out.push({ rel: "work/.trace-spill.jsonl", writable_by: "any pane of a host run" });
+  return out;
+}
+
+/** Spilled lines, read without following a link or opening anything but a regular file, each marked with its file. */
+async function readSpills(sandbox: string, report: TracePage["spills"]): Promise<SwarmEvent[]> {
+  const out: SwarmEvent[] = [];
+  for (const f of await spillFiles(sandbox)) {
+    const path = join(sandbox, f.rel);
+    const st = await lstat(path).catch(() => null);
+    if (!st) continue;
+    const read = await readRegularText(path, Math.max(st.size, 1));
+    if ("why" in read) {
+      report.push({ path: f.rel, lines: 0, why: read.why, writable_by: f.writable_by });
+      continue;
+    }
+    let n = 0;
+    for (const line of read.text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const e = JSON.parse(line) as SwarmEvent;
+        if (!e || typeof e !== "object" || typeof e.tool !== "string") continue;
+        out.push({ ...e, agent: typeof e.agent === "string" ? e.agent : "?", spilled: f.rel } as SwarmEvent);
+        n += 1;
+      } catch {
+        // a torn line is skipped, as the trace reader skips one
+      }
+    }
+    report.push({ path: f.rel, lines: n, why: null, writable_by: f.writable_by });
+  }
+  return out;
+}
+
+/** One line of runs/operator-audit.jsonl, and whether the chain holds at it. */
+export type OperatorLine = {
+  at: string;
+  command: string;
+  argv: string[];
+  os_user: string;
+  host: string;
+  /** cli, console or hub (the hub's own clear-up). */
+  via: string;
+  /** Whether this line's `prev` is the sha256 of the line before it. */
+  chained: boolean;
+};
+
+export type OperatorAudit = {
+  lines: OperatorLine[];
+  /** The whole file's chain: intact, or where it breaks. */
+  intact: boolean;
+  detail: string;
+  /** This run's own lines from its trace (operator_action, artifact_scripts): verified when the collector knew the token. */
+  trace: Array<{ at: string; tool: string; command: string; via: string; os_user: string; verified: boolean }>;
+};
+
+/**
+ * The operator's own record: runs/operator-audit.jsonl (beside the registry,
+ * where no pane can write), its chain checked line by line, the lines about
+ * one run when `runId` is given, and that run's operator lines on its trace.
+ */
+export async function operatorAudit(runsDir: string, runId: string | null, events: readonly SwarmEvent[] = []): Promise<OperatorAudit> {
+  const file = join(runsDir, "operator-audit.jsonl");
+  const lines: OperatorLine[] = [];
+  let intact = true;
+  let detail = "no operator record yet";
+  const st = await lstat(file).catch(() => null);
+  if (st) {
+    const read = await readRegularText(file, Math.max(st.size, 1));
+    if ("why" in read) {
+      intact = false;
+      detail = `runs/operator-audit.jsonl not read: ${read.why}`;
+    } else {
+      const { createHash } = await import("node:crypto");
+      let prevText: string | null = null;
+      let firstBreak: number | null = null;
+      let n = 0;
+      for (const text of read.text.split("\n")) {
+        if (!text.trim()) continue;
+        n += 1;
+        let rec: Record<string, unknown>;
+        try {
+          rec = JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          if (firstBreak === null) firstBreak = n;
+          prevText = text;
+          continue;
+        }
+        const want = prevText === null ? null : createHash("sha256").update(prevText).digest("hex");
+        const chained = (rec.prev ?? null) === want;
+        if (!chained && firstBreak === null) firstBreak = n;
+        prevText = text;
+        const argv = Array.isArray(rec.argv) ? rec.argv.map(String) : [];
+        if (runId && !argv.includes(runId) && !String(rec.command ?? "").includes(runId)) continue;
+        lines.push({
+          at: String(rec.at ?? ""),
+          command: String(rec.command ?? "?"),
+          argv,
+          os_user: String(rec.os_user ?? "?"),
+          host: String(rec.host ?? "?"),
+          via: String(rec.via ?? "cli"),
+          chained,
+        });
+      }
+      intact = firstBreak === null;
+      detail = intact ? `${n} line${n === 1 ? "" : "s"}, each chained to the one before` : `the chain breaks at line ${firstBreak} of ${n}: a line taken out or changed`;
+    }
+  }
+  const trace = events
+    .filter((e) => e.tool === "operator_action" || e.tool === "artifact_scripts")
+    .map((e) => {
+      const a = isRecord(e.args) ? e.args : {};
+      return {
+        at: hostTime(e),
+        tool: e.tool,
+        command: String(a.command ?? a.path ?? e.tool),
+        via: String(a.via ?? (e.tool === "artifact_scripts" ? "console" : "cli")),
+        os_user: String(a.os_user ?? "?"),
+        // The collector marks a line whose sender it could not prove (no
+        // token: another shell) agent_unverified.
+        verified: (e as { agent_unverified?: unknown; unverified?: unknown }).agent_unverified !== true && (e as { unverified?: unknown }).unverified !== true,
+      };
+    });
+  return { lines, intact, detail, trace };
 }
 
 /** Directories under tools/ that carry a manifest: the ones `swarm.sh tools --save` would keep. */

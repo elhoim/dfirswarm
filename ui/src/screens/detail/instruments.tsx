@@ -3,6 +3,8 @@
  * with spend per agent, and what the harness is doing — including the grace
  * clock once a cap or wall-clock steer has gone out.
  */
+import { seatStates } from "@/lib/seat-state";
+import { describeEvent } from "@/lib/event-taxonomy";
 import { Fragment } from "react";
 import { Link } from "react-router-dom";
 import { Chip, Meter, SerifH } from "@/components/console";
@@ -57,6 +59,10 @@ export function TeamPanel({ view, onSelect }: { view: SwarmView; onSelect?: (id:
   const max = Math.max(unmetered ? 1 : 0.0001, ...view.agents.map(measure));
   const lastTool = new Map<string, string>();
   for (const e of view.traces) lastTool.set(e.agent, e.tool);
+  // One source for a seat's state: the hub's word while it hears from the
+  // VM, the host's markers otherwise (the same rule as the band and the VM panel).
+  const states = seatStates(view.agents, view.vms, lastTool);
+  const byHub = [...states.values()].some((st) => st.by === "hub");
   const models = new Map(view.team.agents.map((a) => [a.id, a.model]));
   const mixed = (view.team.models?.length ?? 0) > 1;
   const colour = useAgentColours(view.agents);
@@ -66,12 +72,12 @@ export function TeamPanel({ view, onSelect }: { view: SwarmView; onSelect?: (id:
         <SerifH as="h3" size={22}>
           Team
         </SerifH>
-        <span className="text-[12px] text-ink-3">{mixed ? "mixed models · " : ""}{unmetered ? "tokens per agent · free" : "spend per agent"}</span>
+        <span className="text-[12px] text-ink-3">{mixed ? "mixed models · " : ""}{unmetered ? "tokens per agent · free" : "spend per agent"}{byHub ? " · state by the hub" : ""}</span>
       </div>
       <div className="grid grid-cols-[minmax(64px,auto)_minmax(0,1fr)_60px_56px] items-center gap-x-3 gap-y-2 text-[12.5px]">
         {view.agents.map((a) => {
-          const state = a.done ? "done" : a.dead ? "dead" : a.stalled ? "stalled" : lastTool.get(a.id) ?? "idle";
-          const tone = a.done ? "text-moss" : a.dead || a.stalled ? "text-brick-ink" : state === "wait" || state === "idle" ? "text-ink-3" : "text-kelp-ink";
+          const st = states.get(a.id)!;
+          const tone = { done: "text-moss", dead: "text-brick-ink", quiet: "text-saffron-ink", idle: "text-ink-3", working: "text-kelp-ink" }[st.tone];
           return (
             <Fragment key={a.id}>
               <button type="button" onClick={() => onSelect?.(a.id)} className="flex flex-col items-start gap-0.5 text-left font-mono text-[12.5px] hover:underline" style={{ color: colour(a.id) }}>
@@ -85,8 +91,8 @@ export function TeamPanel({ view, onSelect }: { view: SwarmView; onSelect?: (id:
               <span className="text-right font-mono">
                 {unmetered ? compact(a.tokens) : money(a.spent_usd, 2)}
               </span>
-              <span className={cn("truncate", tone)}>
-                {state}
+              <span className={cn("truncate", tone)} title={`${st.by === "hub" ? "the hub's word" : "the host's markers"}${st.host_note ? ` · ${st.host_note}` : ""}`}>
+                {st.label}
               </span>
             </Fragment>
           );
@@ -107,13 +113,28 @@ function describe(e: SwarmEvent): string {
   if (e.tool === "wall_steer") return `steered ${e.agent}: the wall clock is hit`;
   if (e.tool === "harness_stop") return `wrote done/SWARM_DONE itself (${String(e.args.reason ?? "")})`;
   if (e.tool === "reap") return `reaped ${e.agent}`;
+  // The VM run's own: the hub, the keeper, the collector, the finish, custody.
+  const words = describeEvent(e);
+  if (words) return words;
   return `${e.tool} · ${e.agent}`;
+}
+
+/**
+ * What the harness did to the run rather than what an agent did: a blocked
+ * or detected write, a steer, a stop, a reap, and in a VM run the hub's own
+ * interventions: a seat stopped at its cap, the keeper bringing back a dead
+ * hub or collector, a finish or a custody that failed, an idle nudge.
+ */
+export function isIntervention(e: SwarmEvent): boolean {
+  if (["claim_violation", "cap_steer", "wall_steer", "harness_stop", "reap", "agent_cap_steer", "agent_cap_stop", "hub_restarted", "collector_restarted", "idle_nudge", "budget_precall_stop"].includes(e.tool)) return true;
+  const failed = (e.result as { ok?: unknown } | null)?.ok === false;
+  return failed && (e.tool === "vm_finish" || e.tool === "custody");
 }
 
 export function HarnessPanel({ view, now, onShowTraces }: { view: SwarmView; now: number; onShowTraces?: () => void }) {
   const b = view.budget;
   const s = view.summary;
-  const interventions = view.traces.filter((e) => ["claim_violation", "cap_steer", "wall_steer", "harness_stop", "reap"].includes(e.tool));
+  const interventions = view.traces.filter(isIntervention);
   const steeredAt = b.stop_steer_at ? Date.parse(b.stop_steer_at) : NaN;
   const steering = Number.isFinite(steeredAt) && !view.sentinel && s.phase === "running";
   const graceLeft = steering ? Math.max(0, steeredAt + GRACE_MS - now) : 0;

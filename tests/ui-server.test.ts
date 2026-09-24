@@ -3,7 +3,7 @@
  * Kickoff uses `swarm.sh start --no-start`, so the real registry writer runs.
  */
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -345,7 +345,8 @@ test("health reports the runs dir and the watcher", async () => {
 test("swarm list carries spend, tokens, calls, elapsed, markers, phase", async () => {
   const { status, body } = await get<Array<Record<string, unknown>>>("/api/swarms");
   assert.equal(status, 200);
-  assert.equal(body.length, 5);
+  // Five host runs and the microVM run the fixture seeds.
+  assert.equal(body.length, 6);
   const webserver = body.find((r) => r.id === "s7a1c");
   assert.ok(webserver);
   assert.equal(webserver.phase, "running");
@@ -1876,7 +1877,7 @@ test("the kickoff form takes installed packs by id and hands them to --pack; the
   await mkdir(join(home, "packs", "demo-pack"), { recursive: true });
   await writeFile(join(home, "packs", "demo-pack", "pack.json"), JSON.stringify({ id: "demo-pack", name: "Demo", version: "1.0.0", description: "d", depends: ["computer-forensics-base>=1.2.0"] }));
   await mkdir(join(home, "packs", "not-a-pack"), { recursive: true });
-  assert.deepEqual(await listPacks(home), [{ id: "demo-pack", name: "Demo", version: "1.0.0", description: "d", depends: ["computer-forensics-base"] }]);
+  assert.deepEqual(await listPacks(home), [{ id: "demo-pack", name: "Demo", version: "1.0.0", description: "d", depends: ["computer-forensics-base"], secrets: [] }]);
   await rm(home, { recursive: true, force: true });
 });
 
@@ -1915,7 +1916,7 @@ test("a VM run's VMs are shown from their records, with the live state only from
     await writeFile(join(hub, "status.json"), JSON.stringify({ agents: { a0: { state: "working", connected: true, since: "t" } } }));
     await writeFile(join(sandbox, "hub.dir"), `${await realpath(hub)}\n`);
     const [vm] = await vmHealth(sandbox);
-    assert.deepEqual(vm.live, { state: "working", connected: true, since: "t", last_seen: null });
+    assert.deepEqual(vm.live, { state: "working", connected: true, since: "t", last_seen: null, detail: null });
     assert.deepEqual(vm.image, { ref: "dfirswarm-disk:dev-arm64", digest: "sha256:aa", expected: "sha256:aa" });
     assert.equal(vm.probe.clock_skew_s, -0.4);
     assert.deepEqual(vm.installed_outside, ["apt cowsay 3.03"]);
@@ -2156,7 +2157,7 @@ test("a VM run's hub is up only while its pid is this run's vm-hub.ts and the st
     await writeFile(join(hub, "supervisor.pid"), `${keeper.pid}\n`);
     [vm] = await vmHealth(sandbox, run);
     assert.deepEqual([vm.hub_tone, vm.hub_keeper_alive], ["warn", true]);
-    assert.match(vm.hub_detail ?? "", /its keeper \(pid \d+\) is up and brings it back/);
+    assert.match(vm.hub_detail ?? "", /its keeper \(pid \d+\) is up and brings it back/i);
     // Once the stop has begun, a hub that is gone was ended on purpose.
     keeper.kill("SIGKILL");
     await new Promise((r) => keeper!.once("exit", r));
@@ -2410,5 +2411,800 @@ test("the console finds VM hubs where swarm.sh keeps them, and only in a directo
     if (was === undefined) delete process.env.SWARM_HUBS_DIR;
     else process.env.SWARM_HUBS_DIR = was;
     await rm(base, { recursive: true, force: true });
+  }
+});
+
+// --- the microVM run in the console (impl-ui) ---------------------------------
+
+test("a VM run lists as microVM with its custody verdict; a record from before isolation lists as a host run", async () => {
+  const rows = await listSwarmRows(runsDir);
+  const vm = rows.find((r) => r.id === "svm1d");
+  assert.ok(vm, "the fixture has its microVM run");
+  assert.equal(vm.isolation, "microvm");
+  assert.equal(vm.net, "vm", "a VM run's network is each VM's own policy, never netguard's word");
+  assert.equal(vm.custody, "attention", "msb's database left busy is something to look at");
+  // The fixture's other runs record no isolation (earlier tests here add runs of their own).
+  for (const r of rows.filter((x) => ["s7a1c", "s3f09", "sbe12", "s1e77", "s0d4e"].includes(x.id))) {
+    assert.equal(r.isolation, "host", `${r.id} has no isolation recorded, so it is an old host run`);
+  }
+  const listed = await get<Array<{ id: string; isolation: string; hold: unknown; hub_down: unknown }>>("/api/swarms");
+  assert.equal(listed.body.find((r) => r.id === "svm1d")?.isolation, "microvm");
+});
+
+test("the VM panel's data: each probe check, the hub's refusals and restarts, a cap stop, the kept disk and msb's database", async () => {
+  const view = await get<{ vms: Array<Record<string, unknown>> }>("/api/swarms/svm1d");
+  assert.equal(view.status, 200);
+  const [v0, v1, v2] = view.body.vms as Array<{
+    probe_checks: Array<{ check: string; ok: boolean }>;
+    refusals: Array<{ fn: string; count: number; last_error: string }>;
+    hub_restarts: number;
+    collector_restarts: number;
+    cap_stopped_at: string | null;
+    snapshot_detail: { path: string | null; bytes: number | null; integrity: boolean | null } | null;
+    msb_db: string | null;
+  }>;
+  assert.ok(v0.probe_checks.length >= 14, "every isolation check is listed, not only the hub and the floor");
+  assert.ok(v0.probe_checks.every((c) => c.ok));
+  assert.ok(v0.probe_checks.some((c) => c.check === "a peer's work/extracted/ executes"), "the peers' no-exec is among them");
+  assert.deepEqual(v1.refusals.map((r) => [r.fn, r.count]), [["claimFile", 4]], "a refusal written once and repeated three times counts four");
+  assert.match(v1.refusals[0].last_error, /own directory/);
+  assert.equal(v0.hub_restarts, 1);
+  assert.equal(v0.collector_restarts, 1);
+  assert.ok(v2.cap_stopped_at, "the seat the hub stopped at its cap is marked");
+  assert.equal(v0.snapshot_detail?.integrity, true);
+  assert.ok((v0.snapshot_detail?.bytes ?? 0) > 0);
+  assert.deepEqual([v0.msb_db, v1.msb_db, v2.msb_db], ["scrubbed", "scrubbed", "busy"]);
+});
+
+test("a hub that finished the run and exited is said as that, never as a hub that is down", async () => {
+  const hubs = process.env.SWARM_HUBS_DIR!;
+  const sandbox = await mkdtemp(join(tmpdir(), "vm-ended-"));
+  const real = await realpath(sandbox);
+  const hub = join(await realpath(hubs), `dfs-sended.${Date.now().toString(36)}`);
+  try {
+    await mkdir(join(sandbox, "vm"), { recursive: true });
+    await writeFile(join(sandbox, "vm", "a0.json"), JSON.stringify({ agent: "a0", stopped_at: "2026-09-24T10:00:00Z" }));
+    await mkdir(hub, { recursive: true });
+    await writeFile(join(hub, "sandbox"), `${real}\n`);
+    await writeFile(join(hub, "status.json"), JSON.stringify({ at: "2026-09-24T10:00:00Z", pid: 999_999, finished: true, finish_done: true, agents: {} }));
+    await writeFile(join(sandbox, "hub.dir"), `${hub}\n`);
+    await writeFile(join(sandbox, "hub.pid"), "999999\n");
+    const [vm] = await vmHealth(sandbox);
+    assert.equal(vm.hub_alive, false);
+    assert.equal(vm.hub_ended, true);
+    assert.equal(vm.hub_tone, "ok");
+    assert.doesNotMatch(vm.hub_detail ?? "", /HUB DOWN|fail closed/);
+    assert.match(vm.hub_detail ?? "", /finished the run/);
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+    await rm(hub, { recursive: true, force: true });
+  }
+});
+
+test("a post a seat's harness code sent from its VM carries `via` to the console", async () => {
+  const posts = await get<Array<{ from: string; via?: string; body: string }>>("/api/swarms/svm1d/threads/main");
+  const via = posts.body.find((p) => p.from === "system" && p.via);
+  assert.ok(via, "the via post is on the board");
+  assert.equal(via.via, "svm1d01");
+});
+
+test("the inputs view says how the evidence is held, how the copy was checked, and each file's md5 and sha1", async () => {
+  const view = await get<{ inputs: { held: string; isolation: string; source_checked: { by: string; detail: string }; files: Array<{ md5?: string; sha1?: string }> } }>("/api/swarms/svm1d");
+  assert.equal(view.body.inputs.held, "copy");
+  assert.equal(view.body.inputs.isolation, "microvm");
+  assert.equal(view.body.inputs.source_checked.by, "content");
+  assert.match(view.body.inputs.source_checked.detail, /by content/);
+  assert.ok(view.body.inputs.files.every((f) => f.md5 && f.sha1));
+});
+
+test("custody's digests and artifact index reach the console", async () => {
+  const c = await readCustody(join(runsDir, "svm1d"));
+  assert.ok(c && c.evidence && !("unverifiable" in c.evidence));
+  assert.deepEqual((c.evidence as { digests: unknown }).digests, { sha256: 2, md5: 2, sha1: 2 });
+  assert.equal(c.artifacts?.files, 1);
+  assert.ok(c.problems.some((p) => /msb's database not cleared/.test(p)));
+});
+
+test("the operator's record for a run: its lines, the chain checked over the whole file, a broken line named", async () => {
+  const ok = await get<{ lines: Array<{ command: string; via: string; chained: boolean }>; intact: boolean; trace: Array<{ tool: string }> }>("/api/swarms/svm1d/operator");
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.body.lines.map((l) => [l.command, l.via]), [["start", "console"], ["stop", "hub"]]);
+  assert.equal(ok.body.intact, true);
+  assert.ok(ok.body.trace.some((t) => t.tool === "artifact_scripts"), "opening a file with its scripts is an operator line");
+  const { operatorAudit } = await import("../scripts/ui/model.ts");
+  const dir = await mkdtemp(join(tmpdir(), "audit-"));
+  try {
+    const a = JSON.stringify({ at: "t1", command: "start", argv: ["sx"], os_user: "u", host: "h", via: "cli", prev: null });
+    const b = JSON.stringify({ at: "t2", command: "stop", argv: ["sx"], os_user: "u", host: "h", via: "cli", prev: "0".repeat(64) });
+    await writeFile(join(dir, "operator-audit.jsonl"), `${a}\n${b}\n`);
+    const broken = await operatorAudit(dir, "sx");
+    assert.equal(broken.intact, false);
+    assert.match(broken.detail, /breaks at line 2/);
+    assert.equal(broken.lines[1].chained, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the review is read from outside the run, its chain checked; writing one needs the token and goes through swarm.sh review", async () => {
+  const read = await get<{ present: boolean; chain: { intact: boolean }; by_entry: Record<string, { action: string; examiner: string }> }>("/api/swarms/svm1d/review");
+  assert.equal(read.body.present, true);
+  assert.equal(read.body.chain.intact, true);
+  assert.equal(read.body.by_entry["1"]?.action, "accept");
+  const none = await get<{ present: boolean }>("/api/swarms/s7a1c/review");
+  assert.equal(none.body.present, false);
+
+  const dir = await mkdtemp(join(tmpdir(), "swarm-review-"));
+  const fake = join(dir, "fake-swarm.sh");
+  // An export writes its --out file, as swarm.sh export does; everything else echoes.
+  await writeFile(
+    fake,
+    '#!/usr/bin/env bash\necho "ARGV=[$*] VIA=[${SWARM_OPERATOR_VIA:-unset}]"\nif [ "$1" = export ]; then while [ $# -gt 0 ]; do [ "$1" = --out ] && printf "seq,kind\\n1,event\\n" > "$2"; shift; done; fi\n',
+    "utf8",
+  );
+  const guarded = createUiApp({ root: ROOT, runsDir, distDir: join(runsDir, "no-dist"), token: "t0k", runner: new ActionRunner({ root: ROOT, runsDir, swarmSh: fake }) });
+  const { port } = await guarded.listen(0, "127.0.0.1");
+  const at = `http://127.0.0.1:${port}`;
+  try {
+    const send = (path: string, payload: unknown, token?: string) =>
+      fetch(`${at}${path}`, { method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(payload) });
+    assert.equal((await send("/api/swarms/svm1d/review", { action: "accept", entry_seq: 1, examiner: "E" })).status, 401, "a review without the token is refused");
+    assert.equal((await send("/api/swarms/svm1d/review", { action: "reject", entry_seq: 1, examiner: "E" }, "t0k")).status, 400, "a rejection without a note is refused");
+    const res = await send("/api/swarms/svm1d/review", { action: "amend", entry_seq: 3, note: "the upload path is not in the log", examiner: "E. Xaminer" }, "t0k");
+    assert.equal(res.status, 202);
+    const job = await waitJobAt(at, ((await res.json()) as { id: string }).id);
+    assert.equal(job.status, "ok", job.stderr);
+    assert.match(job.stdout, /ARGV=\[review svm1d --amend 3 --note the upload path is not in the log --examiner E\. Xaminer\]/);
+    assert.match(job.stdout, /VIA=\[console\]/, "the operator's record says the console ran it");
+    const sign = await send("/api/swarms/svm1d/review", { action: "sign", examiner: "E" }, "t0k");
+    assert.match((await waitJobAt(at, ((await sign.json()) as { id: string }).id)).stdout, /ARGV=\[review svm1d --sign --examiner E\]/);
+
+    // The run's record: hold, export, package, verify, purge, each a swarm.sh command.
+    const hold = await send("/api/swarms/svm1d/hold", { reason: "litigation hold 42" }, "t0k");
+    assert.match((await waitJobAt(at, ((await hold.json()) as { id: string }).id)).stdout, /ARGV=\[hold svm1d --reason litigation hold 42\]/);
+    const exp = await send("/api/swarms/svm1d/export", { format: "timesketch" }, "t0k");
+    const expId = ((await exp.json()) as { id: string }).id;
+    const expJob = await waitJobAt(at, expId);
+    assert.match(expJob.stdout, /ARGV=\[export svm1d --format timesketch --out .*svm1d-ledger-timesketch\.csv\]/);
+    const dl = await fetch(`${at}/api/jobs/${expId}/download`);
+    assert.equal(dl.status, 200, "the finished export downloads from the job, never from a path the caller names");
+    assert.match(dl.headers.get("content-disposition") ?? "", /^attachment;/);
+    assert.equal(await dl.text(), "seq,kind\n1,event\n");
+    const holdJobId = ((await (await send("/api/swarms/svm1d/hold", {}, "t0k")).json()) as { id: string }).id;
+    await waitJobAt(at, holdJobId);
+    assert.equal((await fetch(`${at}/api/jobs/${holdJobId}/download`)).status, 404, "only an export has a download");
+    assert.equal((await send("/api/swarms/svm1d/export", { format: "xlsx" }, "t0k")).status, 400);
+    const pkg = await send("/api/swarms/svm1d/package", { sign: true }, "t0k");
+    assert.match((await waitJobAt(at, ((await pkg.json()) as { id: string }).id)).stdout, /ARGV=\[package svm1d --sign\]/);
+    assert.equal((await send("/api/swarms/svm1d/verify", { package: "relative/path" }, "t0k")).status, 400, "a package is named by its absolute path");
+    assert.equal((await send("/api/swarms/svm1d/purge", { confirm: "sWRONG" }, "t0k")).status, 400, "a purge needs the run id typed out");
+    const purge = await send("/api/swarms/svm1d/purge", { confirm: "svm1d" }, "t0k");
+    assert.match((await waitJobAt(at, ((await purge.json()) as { id: string }).id)).stdout, /ARGV=\[purge svm1d --yes\]/);
+  } finally {
+    await guarded.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("coverage for a run says which inputs no command named and which entries the trace does not ground", async () => {
+  const cov = await get<{ unavailable: string | null; inputs: number; untouched: string[]; grounding: Record<string, unknown> }>("/api/swarms/svm1d/coverage");
+  assert.equal(cov.status, 200);
+  assert.equal(cov.body.unavailable, null);
+  assert.ok(cov.body.inputs >= 1);
+  assert.ok(Array.isArray(cov.body.untouched));
+  assert.ok(Object.keys(cov.body.grounding).length >= 1, "each ledger entry has a grounding verdict");
+});
+
+test("the dossier of a VM run carries the court set: custody, the manifest, each VM's record and the operator's lines, each hashed", async () => {
+  const dossier = await get<{ files: Array<{ name: string; present: boolean; sha256: string | null }> }>("/api/swarms/svm1d/dossier");
+  assert.equal(dossier.status, 200);
+  const byName = new Map(dossier.body.files.map((f) => [f.name, f]));
+  for (const name of ["custody.json", "inputs.json", "vm-svm1d00.json", "vm-svm1d02.json", "operator-audit.jsonl"]) {
+    assert.ok(byName.get(name)?.present, `${name} is in the dossier`);
+    assert.match(byName.get(name)?.sha256 ?? "", /^[0-9a-f]{64}$/);
+  }
+  assert.equal(byName.get("custody-anchor.json")?.present, false, "no anchor was written for the fixture, and the row says so");
+  const vmRecord = await get<{ agent: string }>("/api/swarms/svm1d/dossier/vm-svm1d00.json");
+  assert.equal(vmRecord.status, 200);
+  assert.equal(vmRecord.body.agent, "svm1d00");
+  assert.equal((await get("/api/swarms/svm1d/dossier/vm-..%2Fteam.json")).status, 404, "a VM record name cannot reach another file");
+});
+
+test("a seat's trace includes the hub's lines about it; spilled lines come only when asked, marked, and a FIFO spill is refused", async () => {
+  const seat = await queryTraces(join(runsDir, "svm1d"), { agent: "svm1d01" });
+  assert.ok(seat.events.some((e) => e.tool === "hub_call" && e.agent === "system"), "the hub's refusal of the seat is under its filter");
+  const sandbox = join(runsDir, "svm1d");
+  await mkdir(join(sandbox, "tool-output", "svm1d00"), { recursive: true });
+  await writeFile(join(sandbox, "tool-output", "svm1d00", "trace-spill.jsonl"), `${JSON.stringify({ ts: "2026-09-24T10:00:00Z", agent: "svm1d00", tool: "post", args: {}, result: { ok: true } })}\n`);
+  execFileSync("mkfifo", [join(sandbox, "traces", "system-spill.jsonl")]);
+  try {
+    const plain = await queryTraces(sandbox, {});
+    assert.ok(!plain.events.some((e) => (e as { spilled?: string }).spilled), "no spilled line without asking");
+    const withSpills = await queryTraces(sandbox, { spilled: true });
+    const spilled = withSpills.events.filter((e) => (e as { spilled?: string }).spilled);
+    assert.equal(spilled.length, 1);
+    assert.equal((spilled[0] as { spilled?: string }).spilled, "tool-output/svm1d00/trace-spill.jsonl");
+    const fifo = withSpills.spills.find((s) => s.path === "traces/system-spill.jsonl");
+    assert.ok(fifo && fifo.why, "the FIFO in place of a spill is named, not opened");
+  } finally {
+    await rm(join(sandbox, "traces", "system-spill.jsonl"), { force: true });
+    await rm(join(sandbox, "tool-output", "svm1d00", "trace-spill.jsonl"), { force: true });
+  }
+});
+
+test("the kickoff's new fields: validated, VM-only and host-only kept apart, and argv as swarm.sh reads them", () => {
+  const base0 = { model: "openai/gpt-5.4-mini", cap_usd: 1, n: 1, goal: "## Definition of done\nx\n" };
+  const vm = validateStart({ ...base0, vm_snapshot_dir: "/Volumes/cases/disks", allow_pack_secrets: true, allow_synced_folder: true, custody_timeout: 3600, idle_nudge_sec: 0, inputs_max_files: 5000, notify: "logger -t dfirswarm", ledger_from: "s0d4e", no_verify_copy: true, model_gateway: true });
+  assert.ok(vm.ok, vm.ok ? "" : vm.error);
+  const argv = startArgv(vm.params);
+  for (const piece of [
+    ["--vm-snapshot-dir", "/Volumes/cases/disks"],
+    ["--allow-pack-secrets"],
+    ["--allow-synced-folder"],
+    ["--custody-timeout", "3600"],
+    ["--idle-nudge-sec", "0"],
+    ["--notify", "logger -t dfirswarm"],
+    ["--ledger-from", "s0d4e"],
+    ["--model-gateway"],
+  ]) {
+    const i = argv.indexOf(piece[0]);
+    assert.ok(i >= 0, `${piece[0]} is in the argv: ${argv.join(" ")}`);
+    if (piece[1] !== undefined) assert.equal(argv[i + 1], piece[1]);
+  }
+  assert.ok(!argv.includes("--inputs-max-files"), "a file cap needs evidence to apply to");
+  assert.ok(!validateStart({ ...base0, vm_snapshot_dir: "/x", isolation: "host" }).ok, "a disks' directory is a VM run's");
+  assert.ok(!validateStart({ ...base0, vm_snapshot_dir: "relative/x" }).ok, "an absolute path only");
+  assert.ok(!validateStart({ ...base0, allow_root: true }).ok, "allow_root is a host run's, and the default is microvm");
+  const root = validateStart({ ...base0, allow_root: true, isolation: "host" });
+  assert.ok(root.ok && startArgv(root.params).includes("--allow-root"));
+  assert.ok(!validateStart({ ...base0, custody_timeout: 5 }).ok, "a custody deadline under a minute is refused");
+  assert.ok(!validateStart({ ...base0, notify: "a\nb" }).ok, "one command line");
+  assert.ok(!validateStart({ ...base0, ledger_from: "../x" }).ok, "a run id");
+  const host = validateStart({ ...base0, isolation: "host", model_gateway: true });
+  assert.ok(host.ok && !startArgv(host.params).includes("--model-gateway"), "the gateway is a VM run's");
+});
+
+test("the VM readiness route and the start flags route answer from what they are given, and a bad image name is refused", async () => {
+  const guarded = createUiApp({
+    root: ROOT,
+    runsDir,
+    distDir: join(runsDir, "no-dist"),
+    vmReadiness: async (q) => ({ checked_at: "t", ok: false, reasons: [`image ${q.image} missing`], warnings: [], msb: { path: "msb", version: "0.7.3", measured: "0.7.2", matches: false }, doctor_output: null, image: { ref: q.image ?? "", present: false, digest: null }, capacity: null, runs_dir: { path: runsDir, synced: null } }),
+    startFlags: async () => ["--isolation", "--model-gateway"],
+  });
+  const { port } = await guarded.listen(0, "127.0.0.1");
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/api/vm/readiness?image=dfirswarm-base:dev&n=2&cpus=2&memory=1024`);
+    const body = (await r.json()) as { ok: boolean; reasons: string[] };
+    assert.equal(body.ok, false);
+    assert.deepEqual(body.reasons, ["image dfirswarm-base:dev missing"]);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/vm/readiness?image=${encodeURIComponent("x; rm -rf /")}`)).status, 400);
+    const flags = (await (await fetch(`http://127.0.0.1:${port}/api/kickoff/flags`)).json()) as { flags: string[] };
+    assert.ok(flags.flags.includes("--model-gateway"));
+  } finally {
+    await guarded.close();
+  }
+});
+
+test("syncedFolderOf names the folders swarm.sh names", async () => {
+  const { syncedFolderOf } = await import("../scripts/ui/vm-readiness.ts");
+  assert.equal(syncedFolderOf("/Users/x/Library/CloudStorage/Dropbox/cases"), "Dropbox");
+  assert.equal(syncedFolderOf("/Users/x/Library/Mobile Documents/com~apple~CloudDocs/c"), "iCloud Drive");
+  assert.equal(syncedFolderOf("/home/x/Dropbox/c"), "Dropbox");
+  assert.equal(syncedFolderOf("/srv/cases"), null);
+});
+
+test("the console's event lanes: infrastructure and operator lines are told apart and described in words", async () => {
+  const { describeEvent, eventCategory } = await import("../ui/src/lib/event-taxonomy.ts");
+  assert.equal(eventCategory({ tool: "hub_restarted" }), "infrastructure");
+  assert.equal(eventCategory({ tool: "operator_action" }), "operator");
+  assert.equal(eventCategory({ tool: "artifact_scripts", agent: "operator" }), "operator");
+  assert.equal(eventCategory({ tool: "bash" }), "agent");
+  assert.match(describeEvent({ tool: "hub_call", agent: "system", args: { agent: "a1", fn: "claimFile" }, result: { ok: false, error: "peer" } }) ?? "", /the hub refused a1 claimFile: peer/);
+  assert.match(describeEvent({ tool: "vm_finish", agent: "system", args: { all_out: true }, result: { ok: true, msb_db: [{ agent: "a2", msb_db: "busy" }] } }) ?? "", /every VM put away · msb DB a2 busy/);
+  assert.equal(describeEvent({ tool: "bash", agent: "a1", args: {}, result: {} }), null);
+});
+
+test("the review file's chain is checked line by line", async () => {
+  const { parseReviews } = await import("../scripts/ui/reviews.ts");
+  const a = JSON.stringify({ v: 1, seq: 1, at: "t", examiner: "E", action: "accept", entry_seq: 1, prev: null });
+  const b = JSON.stringify({ v: 1, seq: 2, at: "t", examiner: "E", action: "sign", ledger_head: "h", prev: createHash("sha256").update(a).digest("hex") });
+  const good = parseReviews(`${a}\n${b}\n`);
+  assert.equal(good.chain.intact, true);
+  assert.equal(good.signed?.ledger_head, "h");
+  const tampered = parseReviews(`${a.replace('"accept"', '"reject"')}\n${b}\n`);
+  assert.equal(tampered.chain.intact, false, "a changed line breaks the chain at the next one");
+});
+
+test("a pack's declared secrets list by name and title, so the kickoff can ask for consent; nothing else of them is carried", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ui-packs-secrets-"));
+  await mkdir(join(home, "packs", "cloud-pack"), { recursive: true });
+  await writeFile(
+    join(home, "packs", "cloud-pack", "pack.json"),
+    JSON.stringify({ id: "cloud-pack", name: "Cloud", version: "0.1.0", secrets: [{ name: "VT_API_KEY", title: "VirusTotal key", required: true, hosts: ["www.virustotal.com"] }, { name: "OTHER" }, { title: "no name" }] }),
+  );
+  const [pack] = await listPacks(home);
+  assert.deepEqual(pack.secrets, [
+    { name: "VT_API_KEY", title: "VirusTotal key", required: true },
+    { name: "OTHER", title: "OTHER", required: false },
+  ]);
+  await rm(home, { recursive: true, force: true });
+});
+
+test("no console copy says an agent's HTML runs with scripts on by default", async () => {
+  const { readdir } = await import("node:fs/promises");
+  const src = join(dirname(fileURLToPath(import.meta.url)), "..", "ui", "src");
+  const files = (await readdir(src, { recursive: true })).filter((f) => /\.(tsx?|css)$/.test(f));
+  assert.ok(files.length > 10);
+  for (const f of files) {
+    const text = await readFile(join(src, f), "utf8");
+    assert.doesNotMatch(text, /scripts on, same-origin and network off/, f);
+  }
+  const caption = await readFile(join(src, "screens", "detail", "artifacts-panel.tsx"), "utf8");
+  assert.match(caption, /HTML is shown with no scripts/);
+});
+
+test("the activity strip counts an agent's calls, not the hub's record of them, the VMs' finish or the operator's actions", () => {
+  const at = "2026-02-03T09:00:00.000Z";
+  const line = (agent: string, tool: string) => ({ ts: at, agent, tool, args: {}, result: {} }) as unknown as Parameters<typeof activitySeries>[0][number];
+  const events = [
+    line("s1d00", "claim_file"),
+    line("system", "hub_call"),
+    line("system", "hub_link"),
+    line("system", "vm_finish"),
+    line("system", "custody"),
+    line("system", "hub_restarted"),
+    line("system", "agent_cap_stop"),
+    line("system", "operator_action"),
+    line("s1d00", "post"),
+  ];
+  const s = activitySeries(events, at, "2026-02-03T09:10:00.000Z");
+  assert.equal(s.tool_calls, 1);
+  assert.equal(s.messages, 1);
+});
+
+test("a review file that is not a regular file is an error the console shows, never 'not reviewed'", async () => {
+  const dir = join(runsDir, "reviews");
+  await mkdir(dir, { recursive: true });
+  const fifo = join(dir, "s7a1c.jsonl");
+  execFileSync("mkfifo", [fifo]);
+  try {
+    const res = await get<{ present: boolean; error: string | null; chain: { intact: boolean } }>("/api/swarms/s7a1c/review");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.present, true);
+    assert.match(res.body.error ?? "", /not a regular file|not read/);
+    assert.equal(res.body.chain.intact, false);
+  } finally {
+    await rm(fifo, { force: true });
+  }
+});
+
+test("a seat's state has one source: the hub's word while it hears from the VM, the host's markers otherwise", async () => {
+  const { seatState, hubStateCounts, seatStates } = await import("../ui/src/lib/seat-state.ts");
+  const agent = { id: "s1d00", done: false, dead: false, stalled: true };
+  const vm = { agent: "s1d00", live: { state: "working", connected: true, since: null, last_seen: null }, hub_alive: true, stopped_at: null };
+  const byHub = seatState(agent, vm, "bash");
+  assert.deepEqual([byHub.label, byHub.tone, byHub.by], ["working", "working", "hub"]);
+  assert.equal(byHub.host_note, "the host saw it quiet", "the host's stall is a note, not the state");
+  assert.equal(seatState(agent, { ...vm, hub_alive: false }).by, "host", "a hub that is down is not asked");
+  assert.equal(seatState(agent, { ...vm, stopped_at: "2026-02-03T10:00:00Z" }).label, "stalled", "a VM put away is not the hub's any more");
+  assert.equal(seatState({ ...agent, stalled: false }, null, "wait").tone, "idle");
+  assert.equal(seatState({ ...agent, dead: true }, vm).label, "dead", "a reaped seat stays reaped whatever the hub last heard");
+  assert.equal(seatState(agent, { ...vm, live: { ...vm.live, connected: false } }).label, "working · not linked");
+  assert.deepEqual(hubStateCounts([vm, { ...vm, agent: "s1d01", live: { ...vm.live, state: "idle" } }, { ...vm, agent: "s1d02", hub_alive: false }]), { working: 1, idle: 1 });
+  assert.equal(hubStateCounts([{ ...vm, hub_alive: false }]), null);
+  assert.equal(seatStates([agent], [vm]).get("s1d00")?.by, "hub");
+});
+
+test("the VM timeline: a lane for the run and one per seat, every restart, link and finish on one clock", async () => {
+  const { vmTimeline, vmLifecycle, runMilestones } = await import("../ui/src/lib/vm-timeline.ts");
+  const t0 = Date.parse("2026-02-03T09:00:00Z");
+  const at = (min: number) => new Date(t0 + min * 60_000).toISOString();
+  const vm = (agent: string, extra: Record<string, unknown> = {}) => ({ agent, created_at: at(1), stopped_at: at(50), snapshot: "kept", snapshot_detail: { bytes: 700 * 1024 * 1024, error: null }, msb_db: "scrubbed", probe_checks: [{ ok: true }, { ok: true }], ...extra });
+  const events = [
+    { ts: at(2), agent: "system", tool: "hub_link", args: { agent: "a" }, result: { up: true } },
+    { ts: at(2), agent: "system", tool: "hub_link", args: { agent: "b" }, result: { up: true } },
+    { ts: at(20), agent: "system", tool: "hub_restarted", args: { restart: 1 }, result: { ok: true } },
+    { ts: at(20), agent: "system", tool: "hub_link", args: { agent: "b" }, result: { up: false } },
+    { ts: at(21), agent: "system", tool: "hub_link", args: { agent: "b" }, result: { up: true } },
+    { ts: at(22), agent: "system", tool: "collector_restarted", args: { restart: 1 }, result: { ok: false } },
+    { ts: at(30), agent: "system", tool: "agent_cap_stop", args: { agent: "b" }, result: { ok: true } },
+    { ts: at(45), agent: "a", tool: "agent_stop", args: { reason: "done" }, result: { ok: true } },
+    { ts: at(50), agent: "system", tool: "vm_finish", args: { via: "hub", agent: "a" }, result: { ok: true } },
+    { ts: at(51), agent: "system", tool: "vm_finish", args: { via: "hub", all_out: true }, result: { ok: true } },
+    { ts: at(52), agent: "system", tool: "custody", args: { via: "hub" }, result: { ok: true } },
+    { ts: at(53), agent: "system", tool: "hub_clear_up", args: { via: "hub" }, result: { ok: true } },
+    { ts: at(10), agent: "a", tool: "bash", args: {}, result: {} },
+  ];
+  const tl = vmTimeline({ started_at: at(0), finished_at: at(55), now: t0, vms: [vm("a"), vm("b", { msb_db: "busy", kept: null })], events });
+  assert.ok(tl);
+  assert.deepEqual(tl.lanes, ["run", "a", "b"]);
+  const kinds = (lane: string) => tl.marks.filter((m) => m.lane === lane).map((m) => m.kind);
+  assert.deepEqual(kinds("run"), ["kickoff", "hub_restart", "collector_restart", "finish", "custody", "clear_up", "ended"]);
+  assert.deepEqual(kinds("a"), ["created", "linked", "left", "put_away"], "the record's put-away replaces the hub's line for the same seat");
+  assert.deepEqual(kinds("b"), ["created", "linked", "link_lost", "linked", "cap_stop", "put_away"]);
+  assert.equal(tl.marks.find((m) => m.kind === "collector_restart")?.tone, "brick", "a restart that did not come up is said as that");
+  assert.match(tl.marks.find((m) => m.lane === "a" && m.kind === "put_away")?.what ?? "", /put away · disk kept \(700\.0 MB\) · msb DB cleared/);
+  assert.equal(tl.marks.find((m) => m.lane === "b" && m.kind === "put_away")?.tone, "saffron", "msb's database left busy is worth a look");
+  assert.equal(tl.marks[0].pct, 0);
+  assert.equal(tl.marks.at(-1)?.pct, 100);
+  assert.ok(tl.marks.every((m, i) => i === 0 || Date.parse(m.at) >= Date.parse(tl.marks[i - 1].at)), "in time order");
+  assert.equal(vmTimeline({ started_at: at(0), finished_at: null, now: t0, vms: [], events }), null, "a host run has none");
+  assert.deepEqual(vmLifecycle(vm("a")).map((s) => s.what), ["created", "probe: 2 of 2 checks held", "put away", "disk kept (700.0 MB)", "msb DB cleared"]);
+  assert.deepEqual(runMilestones([vm("a", { kept: "only 1.2 GB free" })], { verdict: "attention", problems: ["x"] }).map((s) => s.tone).slice(-2), ["moss", "brick"]);
+
+  // The fixture's VM run: the server builds it over the whole trace.
+  const view = await get<{ vm_timeline: { lanes: string[]; marks: Array<{ lane: string; kind: string }> } | null }>("/api/swarms/svm1d");
+  const fx = view.body.vm_timeline;
+  assert.ok(fx);
+  assert.deepEqual(fx.lanes, ["run", "svm1d00", "svm1d01", "svm1d02"]);
+  for (const kind of ["kickoff", "hub_restart", "collector_restart", "finish", "custody"]) assert.ok(fx.marks.some((m) => m.lane === "run" && m.kind === kind), kind);
+  assert.ok(fx.marks.some((m) => m.lane === "svm1d01" && m.kind === "link_lost"));
+  assert.ok(fx.marks.some((m) => m.lane === "svm1d02" && m.kind === "cap_stop"));
+  assert.ok(fx.marks.some((m) => m.lane === "svm1d00" && m.kind === "left"));
+  const host = await get<{ vm_timeline: unknown }>("/api/swarms/s7a1c");
+  assert.equal(host.body.vm_timeline, null);
+});
+
+test("the run's facts, the spend's source and the evidence's words come from pure helpers the tabs share", async () => {
+  const { frameFacts, spendSourceNote } = await import("../ui/src/lib/run-facts.ts");
+  const { escapedName, inputsGuardSummary, vmInputsSummary } = await import("../ui/src/lib/inputs-words.ts");
+  assert.match(spendSourceNote(true), /what each VM reported through the hub; the host did not meter them/);
+  assert.match(spendSourceNote(false), /Metered on the host/);
+  const view = await get<Parameters<typeof frameFacts>[0]>("/api/swarms/svm1d");
+  const facts = new Map(frameFacts(view.body).map((f) => [f.label, f]));
+  assert.match(facts.get("Isolation")?.value ?? "", /^microVM per agent/);
+  assert.ok(facts.has("Disks kept") && facts.has("OAuth in VMs") && facts.has("Provenance") && facts.has("Host clock") && facts.has("Custody deadline") && facts.has("Idle nudge"));
+  assert.equal(facts.get("Disk")?.value, "encryption on");
+  assert.equal(facts.has("Pack secrets"), false, "no pack declared a secret, so there is nothing to say about one");
+  const hostView = await get<Parameters<typeof frameFacts>[0]>("/api/swarms/s7a1c");
+  assert.equal(new Map(frameFacts(hostView.body).map((f) => [f.label, f])).get("Isolation")?.value, "host processes · unisolated");
+  assert.equal(escapedName(Buffer.from([0x66, 0xff, 0x5c, 0x0a, 0x41]).toString("base64")), "f\\xff\\x5c\\x0aA");
+  assert.equal(inputsGuardSummary({ guard: "none", enforced: {} } as unknown as Parameters<typeof inputsGuardSummary>[0]).text, "detect + heal");
+  assert.equal(vmInputsSummary([{ probe_checks: [{ check: "inputs/", want: "ro", got: "rw", ok: false }] }]).tone, "brick");
+  assert.equal(vmInputsSummary([{ probe_checks: [{ check: "inputs/", want: "ro", got: "ro", ok: true }] }]).text, "read-only, no-exec in every agent's microVM");
+});
+
+test("a run's package: what swarm.sh package left, and the directory as one zip that swarm.sh verify takes", async () => {
+  const run = (await get<{ registry: { sandbox: string } }>("/api/swarms/svm1d")).body.registry;
+  const pkg = join(run.sandbox, "package");
+  assert.equal((await get<{ present: boolean }>("/api/swarms/svm1d/package")).body.present, false);
+  assert.equal((await get("/api/swarms/svm1d/package.zip")).status, 404);
+  await mkdir(join(pkg, "work"), { recursive: true });
+  await writeFile(join(pkg, "report.md"), "# Report\n", "utf8");
+  await writeFile(join(pkg, "work", "timeline.csv"), "ts,what\n2026-02-03T09:12:41Z,GET /shell.php\n".repeat(50), "utf8");
+  execFileSync("bash", ["-c", 'cd "$1" && find . -type f ! -name MANIFEST.txt | sort | while read -r f; do shasum -a 256 "$f" 2>/dev/null || sha256sum "$f"; done > MANIFEST.txt', "manifest", pkg]);
+  // Not handed over: a link out of the package, and a FIFO.
+  await symlink("/etc/hosts", join(pkg, "hosts-link"));
+  execFileSync("mkfifo", [join(pkg, "pipe")]);
+  const dl = await mkdtemp(join(tmpdir(), "ui-pkg-"));
+  try {
+    const info = await get<{ present: boolean; files: number; manifest_sha256: string; signed: boolean; dir: string }>("/api/swarms/svm1d/package");
+    assert.equal(info.body.present, true);
+    assert.equal(info.body.files, 2);
+    assert.equal(info.body.signed, false);
+    assert.equal(info.body.manifest_sha256, createHash("sha256").update(await readFile(join(pkg, "MANIFEST.txt"))).digest("hex"));
+    const res = await fetch(`${base}/api/swarms/svm1d/package.zip`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-disposition") ?? "", /^attachment;.*svm1d-package\.zip/);
+    assert.equal(res.headers.get("x-package-left-out"), "2");
+    const zip = join(dl, "svm1d-package.zip");
+    await writeFile(zip, Buffer.from(await res.arrayBuffer()));
+    const names = execFileSync("python3", ["-c", "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); assert z.testzip() is None; print('\\n'.join(sorted(z.namelist())))", zip], { encoding: "utf8" }).trim().split("\n");
+    assert.deepEqual(names, ["svm1d-package/MANIFEST.txt", "svm1d-package/report.md", "svm1d-package/work/timeline.csv"]);
+    // The harness's own check of a package: files hold, unsigned (exit 4).
+    const verify = spawnSync("bash", [join(ROOT, "scripts", "swarm.sh"), "verify", zip], { encoding: "utf8", env: { ...process.env, SWARM_RUNS_DIR: runsDir } });
+    assert.equal(verify.status, 4, `${verify.stdout}\n${verify.stderr}`);
+  } finally {
+    await rm(pkg, { recursive: true, force: true });
+    await rm(dl, { recursive: true, force: true });
+  }
+});
+
+test("stop's custody options and the kickoff's --env reach swarm.sh; the job list never shows an env value or the notify command", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "swarm-stop-"));
+  const fake = join(dir, "fake-swarm.sh");
+  await writeFile(fake, '#!/usr/bin/env bash\necho "ARGC=$#"\n', "utf8");
+  const runner = new ActionRunner({ root: ROOT, runsDir, swarmSh: fake });
+  const guarded = createUiApp({ root: ROOT, runsDir, distDir: join(runsDir, "no-dist"), token: "t0k", runner });
+  const { port } = await guarded.listen(0, "127.0.0.1");
+  const at = `http://127.0.0.1:${port}`;
+  try {
+    const stop = (payload: unknown) => fetch(`${at}/api/swarms/svm1d/stop`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer t0k" }, body: JSON.stringify(payload) });
+    const a = (await (await stop({ no_custody: true, custody_timeout: 120 })).json()) as { id: string; argv: string[] };
+    assert.deepEqual(a.argv, ["stop", "svm1d", "--no-custody"], "skipping custody leaves no deadline to set");
+    await waitJobAt(at, a.id);
+    const b = (await (await stop({ custody_timeout: 120 })).json()) as { id: string; argv: string[] };
+    assert.deepEqual(b.argv, ["stop", "svm1d", "--custody-timeout", "120"]);
+    await waitJobAt(at, b.id);
+    const c = (await (await stop({})).json()) as { id: string; argv: string[] };
+    assert.deepEqual(c.argv, ["stop", "svm1d"]);
+    await waitJobAt(at, c.id);
+    assert.equal((await stop({ custody_timeout: -5 })).status, 400);
+  } finally {
+    await guarded.close();
+  }
+  const ok = validateStart({ n: 2, cap_usd: 1, model: "x/y", env: ["LANG=C.UTF-8", "EXTRA_TOKEN=s3cr3t-value"], notify: "curl -d @- https://hooks.example/abc?key=s3cr3t-value" });
+  assert.ok(ok.ok);
+  const argv = startArgv(ok.params);
+  assert.deepEqual(argv.filter((_x, i) => argv[i - 1] === "--env"), ["LANG=C.UTF-8", "EXTRA_TOKEN=s3cr3t-value"], "swarm.sh gets the values whole, and refuses a credential itself");
+  assert.equal(validateStart({ n: 2, cap_usd: 1, model: "x/y", env: ["no equals sign"] }).ok, false);
+  assert.equal(validateStart({ n: 2, cap_usd: 1, model: "x/y", env: ["A=1\nB=2"] }).ok, false);
+  assert.equal(validateStart({ n: 2, cap_usd: 1, model: "x/y", env: "A=1" }).ok, false);
+  const job = runner.start(ok.params);
+  try {
+    const shown = JSON.stringify(job.argv);
+    assert.doesNotMatch(shown, /s3cr3t-value/, "no env value and no notify command in the job the console shows");
+    assert.ok(job.argv.includes("EXTRA_TOKEN=…") && job.argv.includes("LANG=…") && job.argv.includes("<command not shown>"));
+  } finally {
+    await new Promise<void>((done) => {
+      const t = setInterval(() => {
+        if (runner.get(job.id)?.status !== "running") {
+          clearInterval(t);
+          done();
+        }
+      }, 50);
+    });
+    assert.match(runner.get(job.id)?.stdout ?? "", /ARGC=\d+/);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a live VM run's hub status is watched where it lives, outside the runs directory; a link is not watched", async () => {
+  const { ChangeBus: Bus, HubWatch, watchableDir } = await import("../scripts/ui/watch.ts");
+  const top = await mkdtemp(join(tmpdir(), "ui-hubs-"));
+  const hub = join(top, "dfs-svmx.abc");
+  await mkdir(hub);
+  await symlink(hub, join(top, "dfs-link.abc"));
+  const bus = new Bus(join(top, "runs"), 20, 50);
+  const seen: string[][] = [];
+  bus.subscribe((msg) => {
+    if (msg.event === "change") seen.push(msg.data.by_swarm.svmx ?? []);
+  });
+  const hw = new HubWatch(bus, async () => [
+    { id: "svmx", dir: hub },
+    { id: "svmy", dir: join(top, "dfs-link.abc") },
+    { id: "svmz", dir: join(top, "gone") },
+  ]);
+  try {
+    assert.equal(await watchableDir(hub), true);
+    assert.equal(await watchableDir(join(top, "dfs-link.abc")), false);
+    await hw.refresh();
+    assert.deepEqual(hw.watched().map((w) => w.id), ["svmx"], "only a real directory of this user's");
+    await writeFile(join(hub, "status.json.tmp"), JSON.stringify({ at: new Date().toISOString(), agents: {} }), "utf8");
+    execFileSync("mv", [join(hub, "status.json.tmp"), join(hub, "status.json")]);
+    const deadline = Date.now() + 5000;
+    while (!seen.some((k) => k.includes("hub")) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(seen.some((k) => k.includes("hub")), "the status write reached the bus as the run's hub change");
+    hw.close();
+    assert.deepEqual(hw.watched(), []);
+  } finally {
+    hw.close();
+    bus.close();
+    await rm(top, { recursive: true, force: true });
+  }
+  const { liveHubDirs } = await import("../scripts/ui/model.ts");
+  assert.deepEqual((await liveHubDirs(runsDir)).filter((h) => h.id === "svm1d"), [], "a finished VM run's hub is not watched");
+});
+
+/** A swarm.sh stand-in for the kickoff's two read-only asks: `start --check` and `image-for`. */
+async function kickoffStandIn(dir: string): Promise<string> {
+  const fake = join(dir, "fake-swarm.sh");
+  await writeFile(
+    fake,
+    `#!/usr/bin/env bash
+case "$1" in
+  image-for)
+    shift
+    packs=""
+    while [ $# -gt 0 ]; do
+      case "$1" in --pack) packs="$packs $2"; shift 2 ;; --playwright) pw=1; shift ;; *) shift ;; esac
+    done
+    case "$packs" in *no-such-pack*) echo "BLOCKER: pack no-such-pack is not installed" >&2; exit 2 ;; esac
+    echo '{"ref":"dfirswarm-dfir:dev-arm64","digest":"sha256:${"a".repeat(64)}","profile":"dfir","arch":"arm64","packs":["windows-forensics"],"pinned_by":"","reason":"the smallest profile that serves the packs windows-forensics: dfir; a local build'"'"'s name (no lock pins it: build and load it, or set SWARM_IMAGES_LOCK)"}'
+    ;;
+  start)
+    for a in "$@"; do
+      case "$a" in
+        EXTRA_TOKEN=*)
+          echo "WARN: the stand-in saw $a and the notify command" >&2
+          echo "BLOCKER: --env EXTRA_TOKEN names a credential, which would enter every VM and its snapshot in clear. Put the key in Pi's store (pi auth) or a pack's secrets (pack install); the VM gets a placeholder." >&2
+          echo "  (a continuation line of the same refusal)" >&2
+          exit 2 ;;
+      esac
+    done
+    echo "WARN: the stand-in has no msb" >&2
+    echo "Check: the start would go ahead (host); nothing was written"
+    ;;
+esac
+`,
+    "utf8",
+  );
+  return fake;
+}
+
+test("the kickoff's check is swarm.sh start --check: its refusal comes back whole, no env value or notify command in it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "swarm-check-"));
+  const runner = new ActionRunner({ root: ROOT, runsDir, swarmSh: await kickoffStandIn(dir) });
+  const guarded = createUiApp({ root: ROOT, runsDir, distDir: join(runsDir, "no-dist"), token: "t0k", runner });
+  const { port } = await guarded.listen(0, "127.0.0.1");
+  const at = `http://127.0.0.1:${port}`;
+  const check = (payload: unknown, token = "t0k") => fetch(`${at}/api/start/check`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(payload) });
+  try {
+    const base = { n: 2, cap_usd: 1, model: "x/y", isolation: "host" };
+    assert.equal((await check(base, "wrong")).status, 401, "the check runs the operator's own start checks: it needs the token");
+    assert.equal((await check({ ...base, n: 0 })).status, 400, "the form's own shape is refused before swarm.sh is asked");
+    const refused = await check({ ...base, env: ["EXTRA_TOKEN=s3cr3t-value"], notify: "curl -d @- https://hooks.example/abc?key=hook-s3cr3t" });
+    assert.equal(refused.status, 200);
+    const text = await refused.text();
+    assert.doesNotMatch(text, /s3cr3t-value|hook-s3cr3t|hooks\.example/, "no env value and no notify command in what the page gets");
+    const body = JSON.parse(text) as { ok: boolean; exit: number; blockers: string[]; warnings: string[]; said: string[] };
+    assert.equal(body.ok, false);
+    assert.equal(body.exit, 2);
+    assert.equal(body.blockers.length, 1);
+    assert.match(body.blockers[0], /^BLOCKER: --env EXTRA_TOKEN names a credential/);
+    assert.match(body.blockers[0], /\n {2}\(a continuation line of the same refusal\)$/, "an indented line stays with its BLOCKER");
+    assert.match(body.warnings[0], /EXTRA_TOKEN=…/);
+    const fine = (await (await check(base)).json()) as { ok: boolean; exit: number; warnings: string[]; said: string[] };
+    assert.equal(fine.ok, true);
+    assert.equal(fine.exit, 0);
+    assert.deepEqual(fine.warnings, ["WARN: the stand-in has no msb"]);
+    assert.ok(fine.said.includes("Check: the start would go ahead (host); nothing was written"));
+  } finally {
+    await guarded.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the kickoff's image preview is swarm.sh image-for, rendered as it answers", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "swarm-imagefor-"));
+  const runner = new ActionRunner({ root: ROOT, runsDir, swarmSh: await kickoffStandIn(dir) });
+  const probe = createUiApp({ root: ROOT, runsDir, distDir: join(runsDir, "no-dist"), runner });
+  const { port } = await probe.listen(0, "127.0.0.1");
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/vm/image?packs=windows-forensics&playwright=1`);
+    const body = (await res.json()) as { ref: string; digest: string; profile: string; pinned_by: string | null; reason: string; error: string | null };
+    assert.equal(body.ref, "dfirswarm-dfir:dev-arm64");
+    assert.equal(body.digest, `sha256:${"a".repeat(64)}`);
+    assert.equal(body.profile, "dfir");
+    assert.equal(body.pinned_by, null, "an empty pin is no pin");
+    assert.match(body.reason, /the smallest profile that serves the packs windows-forensics: dfir/);
+    assert.equal(body.error, null);
+    const missing = (await (await fetch(`http://127.0.0.1:${port}/api/vm/image?packs=no-such-pack`)).json()) as { ref: string | null; error: string };
+    assert.equal(missing.ref, null);
+    assert.equal(missing.error, "BLOCKER: pack no-such-pack is not installed");
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/vm/image?packs=../etc`)).status, 400);
+  } finally {
+    await probe.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The console at a phone's width: every key screen, built from the source
+ * and served over the fixture, must not scroll sideways at 390 px. It drives
+ * a real browser, so it skips with the reason when Playwright or its
+ * Chromium is missing (as the Playwright tool test does); CI installs the
+ * headless shell before `npm test`, so there it runs.
+ */
+test("no key screen of the console scrolls sideways at 390 px (a real browser; skips without one)", async (t) => {
+  let pw: typeof import("playwright");
+  try {
+    pw = await import("playwright");
+  } catch (err) {
+    t.skip(`playwright unavailable: ${(err as Error).message.split("\n")[0]}`);
+    return;
+  }
+  const launch: { headless: true; executablePath?: string; channel?: string } = { headless: true };
+  if (process.env.BROWSER_CHECK_EXECUTABLE) launch.executablePath = process.env.BROWSER_CHECK_EXECUTABLE;
+  else if (process.env.BROWSER_CHECK_CHANNEL) launch.channel = process.env.BROWSER_CHECK_CHANNEL;
+  let browser: Awaited<ReturnType<typeof pw.chromium.launch>>;
+  try {
+    browser = await pw.chromium.launch(launch);
+  } catch (err) {
+    t.skip(`chromium unavailable: ${(err as Error).message.split("\n")[0]}`);
+    return;
+  }
+  const out = await mkdtemp(join(tmpdir(), "ui-dist-"));
+  const home = await mkdtemp(join(tmpdir(), "ui-layout-home-"));
+  const homeWas = process.env.DFIRSWARM_HOME;
+  process.env.DFIRSWARM_HOME = home;
+  let layoutApp: UiApp | null = null;
+  const standIn = await mkdtemp(join(tmpdir(), "ui-layout-standin-"));
+  try {
+    // Built from the source into a directory of its own: the test does not
+    // depend on (or overwrite) ui/dist, and CI builds after npm test.
+    execFileSync(process.execPath, [join(ROOT, "node_modules", "vite", "bin", "vite.js"), "build", "--config", join(ROOT, "ui", "vite.config.ts"), "--outDir", out, "--emptyOutDir", "--logLevel", "error"], { cwd: ROOT, stdio: "pipe" });
+    layoutApp = createUiApp({
+      root: ROOT,
+      runsDir,
+      distDir: out,
+      token: "layout",
+      models: async () => ({ source: "static", models: ["openai-codex/gpt-6-astra"] }),
+      readiness: async () => ({ checked_at: "2026-09-24T00:00:00.000Z", providers: { "openai-codex": { status: "ready" as const, provider: "openai-codex", auth_type: "oauth" } } }),
+      vmReadiness: async () => ({ checked_at: "t", ok: true, reasons: [], warnings: [], msb: { path: "msb", version: "0.7.2", measured: "0.7.2", matches: true }, doctor_output: null, image: null, capacity: null, runs_dir: { path: runsDir, synced: null } }),
+      startFlags: async () => ["--isolation", "--env"],
+      runner: new ActionRunner({ root: ROOT, runsDir, swarmSh: await kickoffStandIn(standIn) }),
+      liveHubDirs: async () => [],
+    });
+    const { port } = await layoutApp.listen(0, "127.0.0.1");
+    const at = `http://127.0.0.1:${port}`;
+    const page = await (await browser.newContext({ viewport: { width: 390, height: 844 } })).newPage();
+    await page.goto(`${at}/#token=layout`, { waitUntil: "load" });
+    const paths = [
+      "/",
+      "/new",
+      "/swarms/svm1d/story",
+      "/swarms/svm1d/agents",
+      "/swarms/svm1d/traces",
+      "/swarms/svm1d/files",
+      "/swarms/svm1d/ledger",
+      "/swarms/svm1d/custody",
+      "/swarms/svm1d/goal",
+      "/swarms/svm1d/budget",
+      "/swarms/svm1d/report",
+      "/swarms/svm1d/artifacts",
+      "/swarms/s7a1c/story",
+      "/swarms/s7a1c/agents",
+    ];
+    // How far the page is wider than the window, and its widest leaves.
+    const sideways = () =>
+      page.evaluate(() => {
+        const W = window.innerWidth;
+        const over = document.documentElement.scrollWidth - W;
+        if (over <= 1) return null;
+        const leaves: string[] = [];
+        for (const el of document.querySelectorAll("body *")) {
+          const r = el.getBoundingClientRect();
+          if (r.right > W + 1 && r.width > 0 && ![...el.children].some((c) => c.getBoundingClientRect().right > W + 1)) {
+            leaves.push(`${el.tagName.toLowerCase()}.${String(el.className).slice(0, 60)} (${Math.round(r.right)}px)`);
+          }
+        }
+        return `${over}px wider: ${leaves.slice(0, 4).join("; ")}`;
+      });
+    const offenders: string[] = [];
+    for (const path of paths) {
+      await page.goto(`${at}${path}`, { waitUntil: "load" });
+      await page.waitForTimeout(1200);
+      // A blank page would pass for the wrong reason: the screen must have rendered.
+      const text = await page.evaluate(() => document.body.innerText.length);
+      assert.ok(text > 200, `${path} rendered next to nothing (${text} characters)`);
+      const found = await sideways();
+      if (found) offenders.push(`${path}: ${found}`);
+    }
+    assert.deepEqual(offenders, [], "a screen scrolls sideways at 390 px");
+    // And the check catches one that does.
+    await page.evaluate(() => {
+      const wide = document.createElement("div");
+      wide.style.width = "600px";
+      wide.style.height = "4px";
+      document.body.appendChild(wide);
+    });
+    assert.match((await sideways()) ?? "", /wider/, "the check sees a page that is wider than the window");
+
+    // The kickoff: image-for's answer is on the page, and a start the check
+    // refuses shows swarm.sh's own words and cannot be started.
+    await page.goto(`${at}/new`, { waitUntil: "load" });
+    await page.waitForTimeout(1500);
+    const kickoff = await page.evaluate(() => document.body.innerText);
+    assert.match(kickoff, /swarm\.sh boots dfirswarm-dfir:dev-arm64/);
+    assert.match(kickoff, /the smallest profile that serves the packs windows-forensics: dfir/);
+    await page.getByRole("textbox", { name: "Extra environment" }).fill("EXTRA_TOKEN=s3cr3t-value");
+    const checkButton = page.getByRole("button", { name: "Check the start" });
+    assert.equal(await checkButton.isEnabled(), true, `the form has problems of its own: ${await page.locator("form li").allInnerTexts()}`);
+    await checkButton.click();
+    await page.getByText("swarm.sh would refuse this start").waitFor({ timeout: 10_000 });
+    const refused = await page.evaluate(() => document.body.innerText);
+    assert.match(refused, /BLOCKER: --env EXTRA_TOKEN names a credential/);
+    assert.doesNotMatch(refused, /s3cr3t-value/, "the value is in the field the operator typed it into, and nowhere else on the page");
+    assert.equal(await page.getByRole("button", { name: /Start the swarm|Prepare the sandbox/ }).isDisabled(), true, "a start the check refuses cannot be started");
+  } finally {
+    await browser.close();
+    await layoutApp?.close();
+    if (homeWas === undefined) delete process.env.DFIRSWARM_HOME;
+    else process.env.DFIRSWARM_HOME = homeWas;
+    await rm(out, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+    await rm(standIn, { recursive: true, force: true });
   }
 });

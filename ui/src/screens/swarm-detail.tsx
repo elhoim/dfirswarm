@@ -1,6 +1,7 @@
+import { hubStateCounts } from "@/lib/seat-state";
 import { useCallback, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Skull, Square } from "lucide-react";
+import { ArrowLeft, Archive, Skull, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -37,6 +38,8 @@ import { GoalPanel } from "./detail/goal-panel";
 import { PacksPanel } from "./detail/packs-panel";
 import { ToolsPanel } from "./detail/tools-panel";
 import { LedgerPanel } from "./detail/ledger-panel";
+import { RecordActions } from "./detail/record-actions";
+import { isolationChip } from "@/components/swarm-bits";
 
 /**
  * Four groups, not eleven peers. The strip had grown to eleven tabs with no
@@ -48,7 +51,7 @@ const TAB_GROUPS = [
   { label: "The run", tabs: ["story", "threads", "traces", "agents"] },
   { label: "Evidence", tabs: ["files", "artifacts", "ledger"] },
   { label: "The frame", tabs: ["goal", "packs", "tools", "claims", "budget"] },
-  { label: "Output", tabs: ["report"] },
+  { label: "Output", tabs: ["report", "custody"] },
 ] as const;
 const TABS = TAB_GROUPS.flatMap((g) => g.tabs);
 type Tab = (typeof TAB_GROUPS)[number]["tabs"][number];
@@ -66,17 +69,22 @@ const TAB_LABEL: Record<Tab, string> = {
   goal: "Goal",
   packs: "Packs",
   report: "Report",
+  custody: "Custody",
 };
 
 function ActionBar({ view }: { view: SwarmView }) {
   const live = useLive();
   const [stopOpen, setStopOpen] = useState(false);
   const [reapOpen, setReapOpen] = useState(false);
+  const [recordOpen, setRecordOpen] = useState(false);
   const [stall, setStall] = useState("90");
   const [closePanes, setClosePanes] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stopAnyway, setStopAnyway] = useState(false);
+  // swarm.sh stop's own custody options: skip the host's custody check, or bound it.
+  const [noCustody, setNoCustody] = useState(false);
+  const [custodyTimeout, setCustodyTimeout] = useState("");
   const job = jobId ? live.jobs[jobId] ?? null : null;
   const id = view.summary.id;
   const state = view.summary.state;
@@ -116,8 +124,13 @@ function ActionBar({ view }: { view: SwarmView }) {
   return (
     <div className="flex flex-col items-end gap-2">
       <div className="flex gap-2">
-        <Button variant="secondary" size="sm" className="h-9 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => setReapOpen(true)} disabled={reachedDone(view.summary.phase)}>
-          <Skull /> Reap stalled
+        {view.summary.phase === "running" && !reachedDone(view.summary.phase) ? (
+          <Button variant="secondary" size="sm" className="h-9 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => setReapOpen(true)}>
+            <Skull /> Reap stalled
+          </Button>
+        ) : null}
+        <Button variant="secondary" size="sm" className="h-9 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => setRecordOpen(true)} title="Hold, export, package, verify or purge this run">
+          <Archive /> Record
         </Button>
         <Button
           variant="danger"
@@ -185,6 +198,31 @@ function ActionBar({ view }: { view: SwarmView }) {
               <InlineNote tone="neutral">The sentinel is written; the hub puts the VMs away once every agent is out. Stopping now puts them away instead.</InlineNote>
             )
           ) : null}
+          <div className="mt-3 flex flex-col gap-2 border-t border-paper-3 pt-3 text-[13px]">
+            <span className="label-caps">Custody at stop</span>
+            <label className="flex items-center justify-between gap-3">
+              <span>
+                Skip it (<code>--no-custody</code>): the run is not re-hashed or sealed now; <code>scripts/custody.ts</code> can take it later
+              </span>
+              <Switch checked={noCustody} onCheckedChange={setNoCustody} aria-label="Skip custody at stop" />
+            </label>
+            {noCustody ? (
+              <InlineNote tone="warn">Without custody the record does not say whether the evidence changed during the run until someone takes it.</InlineNote>
+            ) : (
+              <label className="flex flex-wrap items-center justify-between gap-2">
+                <span>
+                  Its deadline in seconds (<code>--custody-timeout</code>); blank is the run's own
+                  {(view.registry as { custody_timeout_sec?: number | string } | null)?.custody_timeout_sec !== undefined ? ` (${String((view.registry as { custody_timeout_sec?: number | string }).custody_timeout_sec)} s)` : ""}
+                </span>
+                <Input value={custodyTimeout} onChange={(e) => setCustodyTimeout(e.target.value.replace(/[^0-9]/g, ""))} inputMode="numeric" placeholder="the run's own" aria-label="Custody deadline in seconds" className="h-8 w-32 font-mono" />
+              </label>
+            )}
+            {vmRun ? (
+              <span className="text-[12px] text-ink-3">
+                Whether each VM's disk is kept was set at kickoff ({(view.registry?.isolation as { snapshot?: boolean } | undefined)?.snapshot === false ? "--no-vm-snapshot: not kept" : "kept"}); stop has no option for it.
+              </span>
+            ) : null}
+          </div>
           <div className="mt-4 flex justify-end gap-2">
             <Button variant="secondary" onClick={() => setStopOpen(false)}>
               Cancel
@@ -194,7 +232,8 @@ function ActionBar({ view }: { view: SwarmView }) {
               disabled={finishingGuard && !stopAnyway}
               onClick={() => {
                 setStopOpen(false);
-                void run(() => api.stop(id));
+                const timeout = custodyTimeout ? Number(custodyTimeout) : undefined;
+                void run(() => api.stop(id, { no_custody: noCustody, custody_timeout: noCustody ? undefined : timeout }));
               }}
             >
               <Square className="fill-current" /> {stopLabel}
@@ -203,11 +242,18 @@ function ActionBar({ view }: { view: SwarmView }) {
         </DialogContent>
       </Dialog>
 
+      <RecordActions view={view} open={recordOpen} onOpenChange={setRecordOpen} onJob={setJobId} />
+
       <Dialog open={reapOpen} onOpenChange={setReapOpen}>
         <DialogContent>
           <DialogTitle>Reap stalled agents in {view.summary.label}</DialogTitle>
           <DialogDescription>
             Runs <code>scripts/swarm.sh reap {id} --stall-sec N</code>: any agent silent longer than N seconds gets <code>done/agents/&lt;id&gt;.dead</code>, its leases dropped and a <code>reap</code> trace line. Idempotent.
+            {vmRun ? (
+              <>
+                {" "}In a VM run the hub's word on a seat comes first: a seat the hub hears from is not silent, whatever the host saw. With <code>--stop</code>, a reaped seat's VM is stopped and its disk kept, as stop would keep it.
+              </>
+            ) : null}
           </DialogDescription>
           <div className="mt-4 grid gap-3">
             <div className="space-y-1.5">
@@ -311,7 +357,11 @@ export function SwarmDetailScreen() {
   const wallMs = s.wall_clock_minutes * 60_000;
   const wallPct = wallMs > 0 ? (elapsedLive / wallMs) * 100 : 0;
   const overWall = wallMs > 0 && elapsedLive > wallMs;
-  const working = d.agents.filter((a) => !a.done && !a.dead).length;
+  // In a VM run the hub's word on each seat is the live signal (a seat the
+  // hub hears from is not quiet, whatever the host saw); the host's stall is
+  // secondary. Without a live hub the markers decide, as in a host run.
+  const hubStates = hubStateCounts(d.vms);
+  const working = hubStates ? (hubStates.working ?? 0) + (hubStates.idle ?? 0) : d.agents.filter((a) => !a.done && !a.dead).length;
   const doneN = d.agents.filter((a) => a.done).length;
   const deadN = d.agents.filter((a) => a.dead).length;
   // Silent for the stall window but not reaped: in a long tool call, or idle.
@@ -379,6 +429,12 @@ export function SwarmDetailScreen() {
                 <h1 className="serif m-0 text-[40px] leading-none">{s.label}</h1>
                 <span className="font-mono text-[13px] text-band-ink-2">{s.id}</span>
                 {stateChip}
+                {isolationChip(s)}
+                {s.hold ? (
+                  <span title={s.hold.reason ?? undefined}>
+                    <Chip tone="slate">on hold{s.hold.reason ? ` · ${s.hold.reason}` : ""}</Chip>
+                  </span>
+                ) : null}
                 {view.refreshing ? <span className="text-[11px] text-band-ink-2">syncing…</span> : null}
               </div>
               {/*
@@ -399,7 +455,7 @@ export function SwarmDetailScreen() {
               ) : null}
               {d.custody?.verdict === "attention" ? (
                 <div className="flex flex-wrap items-center gap-2">
-                  <button type="button" onClick={() => setTab("files")} title={d.custody.problems.join("\n")}>
+                  <button type="button" onClick={() => setTab("custody")} title={d.custody.problems.join("\n")}>
                     <Chip tone="brick" className="bg-brick text-white">
                       custody: {d.custody.problems.length} to look at
                     </Chip>
@@ -459,9 +515,11 @@ export function SwarmDetailScreen() {
             tail={
               reachedDone(s.phase)
                 ? `done${unmarkedN ? ` · ${unmarkedN} unfinished` : ""}${deadN ? ` · ${deadN} dead` : ""}`
-                : `working · ${doneN} done${deadN ? ` · ${deadN} dead` : ""}${stalledN ? ` · ${stalledN} quiet` : ""}`
+                : hubStates
+                  ? `live, by the hub: ${Object.entries(hubStates).map(([k, n]) => `${n} ${k}`).join(" · ")}${deadN ? ` · ${deadN} dead` : ""}`
+                  : `working · ${doneN} done${deadN ? ` · ${deadN} dead` : ""}${stalledN ? ` · ${stalledN} quiet` : ""}`
             }
-            sub={`${compact(s.tokens)} tokens · ${compact(s.calls)} calls`}
+            sub={`${compact(s.tokens)} tokens · ${compact(s.calls)} calls${hubStates && stalledN ? ` · host saw ${stalledN} quiet` : ""}`}
           />
           </div>
           {/* Who is doing this, not which identifiers were passed to Pi. */}
@@ -555,9 +613,9 @@ export function SwarmDetailScreen() {
           ) : null}
           {tab === "claims" ? <ClaimsPanel view={d} now={now} /> : null}
           {tab === "budget" ? <BudgetPanel view={d} elapsedMs={elapsedLive} /> : null}
+          {tab === "custody" ? <CustodyPanel view={d} /> : null}
           {tab === "files" ? (
             <div className="space-y-4">
-              <CustodyPanel view={d} />
               <InputsPanel view={d} />
               <FilesPanel view={d} selected={sub ? decodeURIComponent(sub) : null} onSelect={(p) => setSub("files", p)} version={historyVersion} />
             </div>

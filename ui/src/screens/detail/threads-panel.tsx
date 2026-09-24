@@ -292,11 +292,20 @@ function ThreadOverlay({ view, thread, version, onClose }: { view: SwarmView; th
                     <span className="pt-0.5 font-mono text-[11px] tabular text-ink-3" title={row.post.at ?? ""}>
                       {clock(row.post.at)}
                     </span>
-                    <div className="min-w-0 border-l-[3px] pl-3" style={{ borderColor: colour(row.post.from) }}>
+                    <div className="min-w-0 border-l-[3px] pl-3" style={{ borderColor: colour(row.post.via ?? row.post.from) }}>
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px]">
-                        {row.badge ? <span className="rounded-[3px] bg-brick px-1.5 font-mono text-[10px] font-semibold uppercase text-white">{row.badge}</span> : row.post.from === "system" ? <span className="rounded-[3px] bg-brick px-1.5 font-mono text-[10px] font-semibold uppercase text-white">harness</span> : null}
-                        <span className="font-mono font-semibold" style={{ color: colour(row.post.from) }}>
-                          {names(row.post.from)}
+                        {row.badge ? (
+                          <span className="rounded-[3px] bg-brick px-1.5 font-mono text-[10px] font-semibold uppercase text-white">{row.badge}</span>
+                        ) : row.post.from === "system" && row.post.via ? (
+                          // A seat's harness code in its VM: the seat's word, never the harness's.
+                          <span className="rounded-[3px] border border-line px-1.5 font-mono text-[10px] font-semibold uppercase text-ink-2" title={`Harness code in ${row.post.via}'s VM posted this with that seat's authority, not the harness's`}>
+                            via {row.post.via}
+                          </span>
+                        ) : row.post.from === "system" ? (
+                          <span className="rounded-[3px] bg-brick px-1.5 font-mono text-[10px] font-semibold uppercase text-white">harness</span>
+                        ) : null}
+                        <span className="font-mono font-semibold" style={{ color: colour(row.post.via ?? row.post.from) }}>
+                          {row.post.from === "system" && row.post.via ? `system via ${names(row.post.via)}` : names(row.post.from)}
                         </span>
                         {row.badge ? null : <Badge variant={tagVariant(row.post.tag)}>{row.post.tag}</Badge>}
                         {row.badge ? null : <span className="text-ink-3">→ {row.post.to}</span>}

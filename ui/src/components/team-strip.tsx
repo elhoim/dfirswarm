@@ -15,29 +15,22 @@
  * says who is on it.
  */
 import { Link } from "react-router-dom";
-import type { AgentRow, SwarmView } from "@/lib/types";
+import type { SwarmView } from "@/lib/types";
 import { money } from "@/lib/format";
+import { seatStates, type SeatTone } from "@/lib/seat-state";
 import { cn } from "@/lib/utils";
 
-type Marker = AgentRow["marker"];
-
-/** done · still working · quiet · reaped. The same vocabulary as the Agents tab. */
-function dotClass(marker: Marker): string {
-  if (marker === "done") return "bg-moss";
-  if (marker === "dead") return "bg-brick";
-  if (marker === "stalled") return "bg-saffron";
+/** done · working · quiet · reaped. The same vocabulary as the Agents tab; a VM seat's comes from its hub. */
+function dotClass(tone: SeatTone): string {
+  if (tone === "done") return "bg-moss";
+  if (tone === "dead") return "bg-brick";
+  if (tone === "quiet") return "bg-saffron";
+  if (tone === "idle") return "bg-band-ink-2";
   return "bg-kelp";
 }
 
-function markerWord(marker: Marker): string {
-  if (marker === "done") return "finished";
-  if (marker === "dead") return "reaped";
-  if (marker === "stalled") return "quiet";
-  return "working";
-}
-
 export function TeamStrip({ view }: { view: SwarmView }) {
-  const byId = new Map(view.agents.map((a) => [a.id, a]));
+  const states = seatStates(view.agents, view.vms);
   const nameOf = new Map((view.names ?? []).map((n) => [n.id, n]));
   const spendOf = (id: string) => view.budget?.agents?.[id]?.spent_usd ?? 0;
 
@@ -83,17 +76,16 @@ export function TeamStrip({ view }: { view: SwarmView }) {
             <div className="mt-1.5 h-px w-full bg-band-line" />
             <ul className="m-0 mt-1.5 flex list-none flex-col gap-1 p-0">
               {group.agents.map((id) => {
-                const agent = byId.get(id);
                 const chosen = nameOf.get(id);
-                const marker = agent?.marker ?? "active";
+                const st = states.get(id);
                 return (
                   <li key={id}>
                     <Link
                       to={`/swarms/${view.summary.id}/agents/${id}`}
-                      title={`${chosen?.name ?? id} · ${markerWord(marker)}${chosen?.doing ? ` — ${chosen.doing}` : ""}`}
+                      title={`${chosen?.name ?? id} · ${st ? `${st.label}${st.by === "hub" ? " (by the hub)" : ""}` : "not started"}${chosen?.doing ? ` — ${chosen.doing}` : ""}`}
                       className="group flex items-center gap-1.5 no-underline"
                     >
-                      <span className={cn("size-1.5 shrink-0 rounded-full", dotClass(marker))} />
+                      <span className={cn("size-1.5 shrink-0 rounded-full", dotClass(st?.tone ?? "working"))} />
                       <span className="truncate text-[12px] text-band-ink group-hover:underline">
                         {chosen?.name ?? id}
                       </span>
