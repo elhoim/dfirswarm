@@ -5,13 +5,13 @@
  * extension in a VM does (extensions/board.ts), with a stand-in collector.
  */
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import * as board from "../extensions/board.ts";
-import { emptyAgentBudget, initSandbox, readPost, SENTINEL_REL } from "../extensions/protocol.ts";
+import { agentDeadPath, emptyAgentBudget, initSandbox, readPost, SENTINEL_REL } from "../extensions/protocol.ts";
 import { boardTable, Hub } from "../scripts/vm-hub.ts";
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -19,9 +19,11 @@ after(async () => {
   for (const c of cleanups.reverse()) await c().catch(() => undefined);
 });
 
-async function setup(options: { agents?: string[]; settleMs?: number; wall?: number } = {}) {
+async function setup(options: { agents?: string[]; settleMs?: number; wall?: number; collector?: boolean; forging?: boolean } = {}) {
   const agents = options.agents ?? ["a0", "a1"];
-  const sandbox = await mkdtemp(join(tmpdir(), "dfs-hub-sbx-"));
+  const base = await mkdtemp(join(tmpdir(), "dfs-hub-"));
+  const sandbox = join(base, "runs", "t1");
+  await mkdir(sandbox, { recursive: true });
   await initSandbox(sandbox, { swarmId: "t1", agentIds: agents, capUsd: 5, wallClockMinutes: options.wall ?? 30 });
   const dir = await mkdtemp(join(tmpdir(), "dfh-"));
   const lines: Record<string, unknown>[] = [];
@@ -46,21 +48,28 @@ async function setup(options: { agents?: string[]; settleMs?: number; wall?: num
     dir,
     agents,
     tokens: Object.fromEntries([...agents.map((a) => [a, `token-${a}`]), ["system", "token-system"]]),
-    collector: collectorPath,
+    collector: options.collector === false ? join(dir, "no-collector.sock") : collectorPath,
     backstop: false,
     quiet: true,
     settleMs: options.settleMs ?? 0,
     herdrBin: "/usr/bin/false",
+    forging: options.forging ?? true,
   });
   await hub.start();
   cleanups.push(async () => {
     // A test may have stopped the hub itself; the directories go either way.
     await hub.stop().catch(() => undefined);
     collector.close();
-    await rm(sandbox, { recursive: true, force: true });
+    await rm(base, { recursive: true, force: true });
     await rm(dir, { recursive: true, force: true });
   });
-  return { hub, sandbox, dir, lines, agents };
+  return { hub, sandbox, dir, lines, agents, base };
+}
+
+/** The operator's registry for a sandbox, with a goal whose finish line is these checks. */
+async function registryWithChecks(base: string, sandbox: string, checks: string[]): Promise<void> {
+  const goal = ["## Goal", "", "Do the thing.", "", "## Checks", "", ...checks.map((c) => `- \`${c}\``), ""].join("\n");
+  await writeFile(join(base, "runs", "registry.json"), JSON.stringify({ runs: [{ id: "t1", sandbox, goal }] }));
 }
 
 /** One raw line to a socket, and the first line back (or the close). */
@@ -285,4 +294,144 @@ test("the backstop writes the sentinel past the wall clock and the grace period,
   assert.equal(stopLine.token, "token-system", "as the harness's own line");
   const posts = await readdir(join(sandbox, "threads", "main"));
   assert.ok(posts.some((p) => p.endsWith("-system.md")), "and on the board");
+});
+
+test("the harness's own functions are not on the agent channel: a VM cannot stop the swarm or move its clock", async () => {
+  const { hub, sandbox } = await setup();
+  for (const fn of ["harnessStop", "markStopSteer", "clearStopSteer"]) {
+    await assert.rejects(board.callBoard(hub.socketFor("a0"), fn, [sandbox, "cap", "forged", {}]), /not a board function/, fn);
+  }
+  assert.equal(await stat(join(sandbox, SENTINEL_REL)).then(() => true).catch(() => false), false, "no sentinel was written");
+  assert.ok(!board.REMOTE_FUNCTIONS.includes("harnessStop" as never), "and the extension does not send them");
+});
+
+test("a link an agent planted in work/ is refused: history, diffs and restores never read or write through it", async () => {
+  const { hub, sandbox, dir } = await setup();
+  const outside = join(dir, "operator-secret.txt");
+  await writeFile(outside, "the operator's own file\n");
+  await symlink(outside, join(sandbox, "work", "leak"));
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/leak", "a0"]), /escapes sandbox|link/i, "history does not copy a host file");
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "fileDiff", [sandbox, "work/leak"]), /escapes sandbox|link/i, "a diff does not read a host file");
+  assert.deepEqual(await readdir(join(sandbox, "history")).catch(() => []), [], "nothing landed in history/");
+  // A link inside the sandbox is a link too: the bytes at the target are the
+  // target's, and a restore must not be redirected into another file.
+  await mkdir(join(sandbox, "work", "a0"), { recursive: true });
+  await writeFile(join(sandbox, "work", "a0", "own.md"), "rev one\n");
+  await board.callBoard(hub.socketFor("a0"), "claimFile", [null, "work/a0/own.md", { reason: "mine" }]);
+  const rec = (await board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/a0/own.md", "a0"])) as { rev: number };
+  assert.equal(rec.rev, 1);
+  await writeFile(join(sandbox, "work", "a0", "other.md"), "do not touch\n");
+  await rm(join(sandbox, "work", "a0", "own.md"));
+  await symlink("other.md", join(sandbox, "work", "a0", "own.md"));
+  const restored = (await board.callBoard(hub.socketFor("a0"), "restoreFileVersion", [null, "work/a0/own.md", 1]).catch((e: Error) => ({ ok: false, reason: e.message }))) as { ok: boolean; reason?: string };
+  assert.equal(restored.ok, false, `a restore through a link is refused: ${JSON.stringify(restored)}`);
+  assert.equal(await readFile(join(sandbox, "work", "a0", "other.md"), "utf8"), "do not touch\n", "the link's target is untouched");
+});
+
+test("a seat's spend report may only grow: a smaller, negative or non-numeric report is refused and the row stays", async () => {
+  const { hub, sandbox } = await setup();
+  const first = { ...emptyAgentBudget(), spent_usd: 0.5, tokens: 2000, calls: 4 };
+  await board.callBoard(hub.socketFor("a0"), "applySessionUsage", [sandbox, "a0", first]);
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "applySessionUsage", [sandbox, "a0", { ...first, spent_usd: 0.1 }]), /went backwards/);
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "applySessionUsage", [sandbox, "a0", { ...first, tokens: -5 }]), /not a non-negative number|went backwards/);
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "applySessionUsage", [sandbox, "a0", { ...first, spent_usd: "lots" }]), /not a non-negative number/);
+  const budget = JSON.parse(await readFile(join(sandbox, "budget.json"), "utf8")) as { agents: Record<string, { spent_usd: number; tokens: number }> };
+  assert.equal(budget.agents.a0.spent_usd, 0.5);
+  assert.equal(budget.agents.a0.tokens, 2000);
+  await board.callBoard(hub.socketFor("a0"), "applySessionUsage", [sandbox, "a0", { ...first, spent_usd: 0.75, tokens: 2500 }]);
+  assert.equal(JSON.parse(await readFile(join(sandbox, "budget.json"), "utf8")).agents.a0.spent_usd, 0.75, "a larger report is taken");
+});
+
+test("the sentinel is written only when the operator's finish line passes on the host", async () => {
+  const { hub, sandbox, base } = await setup();
+  const was = process.env.SWARM_RUNS_DIR;
+  process.env.SWARM_RUNS_DIR = join(base, "runs");
+  cleanups.push(async () => {
+    if (was === undefined) delete process.env.SWARM_RUNS_DIR;
+    else process.env.SWARM_RUNS_DIR = was;
+  });
+  await registryWithChecks(base, sandbox, ["test -f work/report.md"]);
+  await assert.rejects(
+    board.callBoard(hub.socketFor("a0"), "markDone", [null, { reason: "finished", outputFile: "work/report.md" }]),
+    /finish line/,
+    "with the check failing, done is refused by the hub itself",
+  );
+  assert.equal(await stat(join(sandbox, SENTINEL_REL)).then(() => true).catch(() => false), false);
+  assert.equal(await stat(join(sandbox, "done", "agents", "a0.done")).then(() => true).catch(() => false), false, "and the seat is not marked done either");
+  await writeFile(join(sandbox, "work", "report.md"), "# report\n");
+  const done = (await board.callBoard(hub.socketFor("a0"), "markDone", [null, { reason: "finished", outputFile: "work/report.md" }])) as { created_sentinel: boolean };
+  assert.equal(done.created_sentinel, true, "with the check passing, the sentinel is written");
+});
+
+test("a seat whose link went down mid-turn is 'gone', not 'working', so the watchdogs act on it", async () => {
+  const { hub } = await setup();
+  const link = board.openHubLink(hub.socketFor("a0"), () => undefined, { retryMs: 60_000 });
+  await new Promise((r) => setTimeout(r, 100));
+  link.state("working");
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(hub.statusSnapshot().a0.state, "working");
+  link.close();
+  await new Promise((r) => setTimeout(r, 150));
+  const st = hub.statusSnapshot().a0;
+  assert.equal(st.state, "gone");
+  assert.equal(st.connected, false);
+});
+
+test("a seat the run recorded dead is not served", async () => {
+  const { hub, sandbox } = await setup();
+  await mkdir(join(sandbox, "done", "agents"), { recursive: true });
+  await writeFile(agentDeadPath(sandbox, "a1"), "reaped\n");
+  await assert.rejects(board.callBoard(hub.socketFor("a1"), "postMessage", [null, { tag: "intro", body: "still here" }]), /recorded dead/);
+  const post = (await board.callBoard(hub.socketFor("a0"), "postMessage", [null, { tag: "intro", body: "alive" }])) as { from: string };
+  assert.equal(post.from, "a0", "a live seat is served as before");
+});
+
+test("the hub's own lines are kept on the host when the collector does not take them", async () => {
+  const { hub, dir } = await setup({ collector: false });
+  await hub.event("harness_stop", { via: "hub", reason: "cap" }, { created_sentinel: true });
+  const spill = await readFile(join(dir, "hub-spill.jsonl"), "utf8");
+  const line = JSON.parse(spill.trim()) as { agent: string; tool: string; token?: string };
+  assert.equal(line.tool, "harness_stop");
+  assert.equal(line.agent, "system");
+  assert.equal(line.token, undefined, "no token is written to disk");
+  assert.equal(hub.spillFile(), join(dir, "hub-spill.jsonl"));
+});
+
+test("tool forging off for the run: the hub refuses a forge whatever the VM asks", async () => {
+  const { hub } = await setup({ forging: false });
+  await assert.rejects(board.callBoard(hub.socketFor("a0"), "forgeTool", [null, { name: "hello_tool", runtime: "bash", script: "echo hi" }]), /forging is off/);
+});
+
+test("the stop clock survives a restart of the hub: a resumed hub does not start the grace period again", async () => {
+  const { hub, sandbox, dir, agents, lines } = await setup({ wall: 1 });
+  const budgetFile = join(sandbox, "budget.json");
+  const budget = JSON.parse(await readFile(budgetFile, "utf8")) as Record<string, unknown>;
+  budget.started_at = new Date(Date.now() - 2 * 60_000).toISOString();
+  await writeFile(budgetFile, JSON.stringify(budget));
+  const t0 = Date.now();
+  await hub.backstop(t0);
+  assert.ok(lines.some((l) => l.tool === "wall_steer"), "steered");
+  await hub.stop();
+  const again = new Hub({ sandbox, dir, agents, tokens: hub.cfg.tokens, collector: hub.cfg.collector, backstop: false, quiet: true, settleMs: 0, herdrBin: "/usr/bin/false" });
+  await again.start();
+  cleanups.push(async () => again.stop().catch(() => undefined));
+  await again.backstop(t0 + 30_000);
+  assert.equal(await stat(join(sandbox, SENTINEL_REL)).then(() => true).catch(() => false), false, "inside the grace period still");
+  await again.backstop(t0 + 3 * 60_000);
+  assert.equal(await stat(join(sandbox, SENTINEL_REL)).then(() => true).catch(() => false), true, "the grace period was measured from the first hub's clock");
+  assert.ok(lines.filter((l) => l.tool === "wall_steer").length === 1, "the resumed hub did not steer a second time");
+});
+
+test("a burst of calls from one seat queues past the running cap and is refused past the queue", async () => {
+  const { hub } = await setup();
+  const t = Date.now();
+  const burst = Array.from({ length: 70 }, () => board.callBoard(hub.socketFor("a0"), "waitForSwarmChange", [null, { seconds: 2 }]).then(() => "ok", (e: Error) => e.message));
+  const results = await Promise.all(burst);
+  assert.equal(results.filter((r) => r === "ok").length, 70, "a burst past the running cap is queued, not refused");
+  assert.ok(Date.now() - t >= 3500, `the calls past the cap waited for a slot (took ${Date.now() - t}ms)`);
+  const flood = Array.from({ length: 300 }, () => board.callBoard(hub.socketFor("a1"), "waitForSwarmChange", [null, { seconds: 1 }]).then(() => "ok", (e: Error) => e.message));
+  const answers = await Promise.all(flood);
+  const refused = answers.filter((r) => /too many board calls waiting/.test(r)).length;
+  assert.ok(refused >= 30 && refused <= 60, `a flood past the queue is refused (${refused} refused)`);
+  assert.equal(answers.length - refused, 256, "and the rest were answered");
 });

@@ -10,7 +10,7 @@
  * not the names agents choose for themselves.
  */
 
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, createReadStream, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
 import { connect, type Socket } from "node:net";
@@ -30,7 +30,9 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { basename, dirname, join, normalize, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * Claims are short leases, renewed by re-claiming: make the edit, release,
@@ -432,6 +434,75 @@ export async function realPathKey(sandboxRoot: string, rawPath: string): Promise
     if (parent === probe) return lexical;
     tail.unshift(basename(probe));
     probe = parent;
+  }
+}
+
+/**
+ * A file under the sandbox, opened for the harness on the host, without
+ * following a link an agent may have planted. An agent in a microVM writes
+ * `work/` through virtio-fs, and the link it makes there is a real link on
+ * the host (measured); the hub reads history and diffs as the operator's own
+ * user, so a link to the operator's home would read the operator's home.
+ *
+ * The path is resolved once (`realPathKey`, which refuses anything that
+ * leaves the sandbox), the resolved file is opened with O_NOFOLLOW, and the
+ * open file is compared by device and inode with what was resolved: a link
+ * swapped in between the two is a mismatch, and a mismatch is a refusal.
+ */
+export async function openSandboxFile(
+  sandboxRoot: string,
+  rawPath: string,
+  mode: "read" | "write",
+): Promise<{ handle: Awaited<ReturnType<typeof open>>; pathKey: string; abs: string }> {
+  const pathKey = await realPathKey(sandboxRoot, rawPath);
+  const realRoot = await realpath(sandboxRoot).catch(() => resolve(sandboxRoot));
+  const abs = resolve(realRoot, pathKey);
+  const O = fsConstants;
+  if (mode === "write") await mkdir(dirname(abs), { recursive: true });
+  const before = await lstat(abs).catch(() => null);
+  if (before?.isSymbolicLink()) throw new Error(`symbolic link refused: ${pathKey}`);
+  if (before && !before.isFile()) throw new Error(`not a regular file: ${pathKey}`);
+  const flags = mode === "read" ? O.O_RDONLY | O.O_NOFOLLOW : O.O_WRONLY | O.O_CREAT | O.O_TRUNC | O.O_NOFOLLOW;
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(abs, flags, 0o644);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ELOOP" || code === "EMLINK") throw new Error(`symbolic link refused: ${pathKey}`);
+    throw err;
+  }
+  const after = await handle.stat();
+  if (!after.isFile() || (before && (before.dev !== after.dev || before.ino !== after.ino))) {
+    await handle.close();
+    throw new Error(`the file changed under the harness: ${pathKey}`);
+  }
+  return { handle, pathKey, abs };
+}
+
+/** The bytes of a sandbox file, read without following a planted link; null when there is no such file. */
+export async function readSandboxFile(sandboxRoot: string, rawPath: string): Promise<{ pathKey: string; bytes: Buffer } | null> {
+  let opened: Awaited<ReturnType<typeof openSandboxFile>>;
+  try {
+    opened = await openSandboxFile(sandboxRoot, rawPath, "read");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  try {
+    return { pathKey: opened.pathKey, bytes: await opened.handle.readFile() };
+  } finally {
+    await opened.handle.close();
+  }
+}
+
+/** Write a sandbox file in place, never through a link. */
+export async function writeSandboxFile(sandboxRoot: string, rawPath: string, bytes: Buffer | string): Promise<string> {
+  const opened = await openSandboxFile(sandboxRoot, rawPath, "write");
+  try {
+    await opened.handle.writeFile(bytes);
+    return opened.pathKey;
+  } finally {
+    await opened.handle.close();
   }
 }
 
@@ -2613,7 +2684,15 @@ export async function listFileHistory(
   sandboxRoot: string,
   rawPath: string,
 ): Promise<FileVersion[]> {
-  const pathKey = claimKey(sandboxRoot, rawPath);
+  // History is kept by the path a file really has. A path that resolves out
+  // of the sandbox (a planted link) has none; the write watch asks about
+  // such paths and wants "no history", not a refusal.
+  let pathKey: string;
+  try {
+    pathKey = await realPathKey(sandboxRoot, rawPath);
+  } catch {
+    return [];
+  }
   const dir = historyDir(sandboxRoot, pathKey);
   try {
     const raw = await readFile(join(dir, "index.json"), "utf8");
@@ -2635,14 +2714,12 @@ export async function recordFileVersion(
   rawPath: string,
   agentId: string,
 ): Promise<FileVersion | null> {
-  const pathKey = claimKey(sandboxRoot, rawPath);
-  const abs = resolve(sandboxRoot, pathKey);
-  let bytes: Buffer;
-  try {
-    bytes = await readFile(abs);
-  } catch {
-    return null;
-  }
+  // Never through a link: the file is what the resolved path names, or
+  // nothing; a link out of the sandbox, or a link at all, is a refusal the
+  // caller hears about.
+  const read = await readSandboxFile(sandboxRoot, rawPath);
+  if (!read) return null;
+  const { pathKey, bytes } = read;
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   // Allocating the next revision number is a read-modify-write on
   // index.json shared by every process (agents, the reaper, the web
@@ -2680,13 +2757,14 @@ export async function resolveRevision(
   rawPath: string,
   ref: number | string,
 ): Promise<{ rev: number | null; sha256: string | null; text: string } | null> {
-  const pathKey = claimKey(sandboxRoot, rawPath);
+  const pathKey = await realPathKey(sandboxRoot, rawPath);
   const versions = await listFileHistory(sandboxRoot, pathKey);
   const token = String(ref).trim().toLowerCase();
 
   if (token === "disk" || token === "latest" || token === "working") {
-    const text = await readFile(resolve(sandboxRoot, pathKey), "utf8").catch(() => null);
-    if (text === null) return null;
+    const read = await readSandboxFile(sandboxRoot, pathKey).catch(() => null);
+    if (!read) return null;
+    const text = read.bytes.toString("utf8");
     return { rev: null, sha256: createHash("sha256").update(text).digest("hex"), text };
   }
 
@@ -2717,7 +2795,7 @@ export async function readFileVersion(
   rawPath: string,
   rev: number,
 ): Promise<{ path: string; rev: number; text: string } | null> {
-  const pathKey = claimKey(sandboxRoot, rawPath);
+  const pathKey = await realPathKey(sandboxRoot, rawPath);
   const versions = await listFileHistory(sandboxRoot, pathKey);
   if (!versions.some((v) => v.rev === rev)) return null;
   const file = join(historyDir(sandboxRoot, pathKey), `${String(rev).padStart(6, "0")}.bin`);
@@ -2826,7 +2904,7 @@ export async function fileDiff(
   fromRef?: number | string,
   toRef?: number | string,
 ): Promise<FileDiffResult> {
-  const pathKey = claimKey(sandboxRoot, rawPath);
+  const pathKey = await realPathKey(sandboxRoot, rawPath);
   const versions = await listFileHistory(sandboxRoot, pathKey);
   const from = fromRef ?? versions.at(-1)?.rev ?? "disk";
   const to = toRef ?? "disk";
@@ -2857,7 +2935,7 @@ export async function restoreFileVersion(
   rawPath: string,
   rev: number,
 ): Promise<{ ok: boolean; path: string; rev: number; reason?: string; landed_rev?: number | null }> {
-  const pathKey = claimKey(ctx.sandboxRoot, rawPath);
+  const pathKey = await realPathKey(ctx.sandboxRoot, rawPath);
   const guard = await guardWrite(ctx, pathKey);
   if (!guard.ok) {
     return { ok: false, path: pathKey, rev, reason: guard.reason };
@@ -2870,9 +2948,14 @@ export async function restoreFileVersion(
   // revision (a bash write, say). Deduping makes this a no-op when they match.
   await recordFileVersion(ctx.sandboxRoot, pathKey, ctx.agentId);
   const src = join(historyDir(ctx.sandboxRoot, pathKey), `${String(rev).padStart(6, "0")}.bin`);
-  const dest = resolve(ctx.sandboxRoot, pathKey);
-  await mkdir(dirname(dest), { recursive: true });
-  await copyFile(src, dest);
+  // In place and never through a link: the destination is opened with
+  // O_NOFOLLOW and checked against what was resolved, so a link swapped in
+  // after the guard's check lands the bytes nowhere.
+  try {
+    await writeSandboxFile(ctx.sandboxRoot, pathKey, await readFile(src));
+  } catch (err) {
+    return { ok: false, path: pathKey, rev, reason: (err as Error).message };
+  }
   // Then record the restore itself, so history stays a truthful log of what
   // the file looked like over time and who put it that way.
   const landed = await recordFileVersion(ctx.sandboxRoot, pathKey, ctx.agentId);
@@ -4878,6 +4961,31 @@ export function isSharedScratch(path: string): boolean {
 
 /** Where await-done.sh may read a finish line that certifies a run: the operator's copy. */
 export const FINISH_LINE_TRUSTED_SOURCES = new Set(["registry"]);
+
+/**
+ * The operator's finish line, run once, right now, by await-done.sh from the
+ * registry: what an agent's `done` runs before the sentinel, and what the VM
+ * hub runs again on the host before it lets a sentinel be written.
+ */
+export function runFinishLine(sandbox: string): Promise<FinishLineRun | null> {
+  const script = resolve(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "await-done.sh");
+  return new Promise((done) => {
+    execFile(
+      "bash",
+      [script, "--sandbox", sandbox, "--checks-json", "--check-timeout", "120"],
+      { cwd: sandbox, timeout: 15 * 60_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, CHECKS_SOURCE: "done" } },
+      (err, stdout) => {
+        try {
+          const parsed = JSON.parse(String(stdout || "").trim().split("\n").pop() || "") as FinishLineRun;
+          if (typeof parsed.total === "number" && Array.isArray(parsed.checks)) return done(parsed);
+        } catch {
+          /* fall through */
+        }
+        done(err ? { total: 0, passed: 0, checks: [], error: String(err.message || err) } : null);
+      },
+    );
+  });
+}
 
 /** What await-done.sh --checks-json prints: the finish line, run once, right now. */
 export type FinishLineRun = {

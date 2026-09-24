@@ -230,12 +230,10 @@ export const REMOTE_FUNCTIONS = [
   "applySessionUsage",
   "claimFile",
   "claimName",
-  "clearStopSteer",
   "correctionsAfter",
   "fileDiff",
   "forgeTool",
   "guardWrite",
-  "harnessStop",
   "heldBy",
   "listClaims",
   "listFileHistory",
@@ -243,7 +241,6 @@ export const REMOTE_FUNCTIONS = [
   "listLedger",
   "listTeam",
   "markDone",
-  "markStopSteer",
   "nameOf",
   "postMessage",
   "readBudget",
@@ -266,12 +263,17 @@ export const REMOTE_FUNCTIONS = [
 export const applySessionUsage = remote("applySessionUsage", P.applySessionUsage);
 export const claimFile = remote("claimFile", P.claimFile);
 export const claimName = remote("claimName", P.claimName);
-export const clearStopSteer = remote("clearStopSteer", P.clearStopSteer);
+/**
+ * The harness's own: the swarm's stop clock and the harness stop. On the
+ * host the extension runs them itself; in a VM they are the hub's alone
+ * (scripts/vm-hub.ts), and the extension does not call them there.
+ */
+export const clearStopSteer = P.clearStopSteer;
 export const correctionsAfter = remote("correctionsAfter", P.correctionsAfter);
 export const fileDiff = remote("fileDiff", P.fileDiff);
 export const forgeTool = remote("forgeTool", P.forgeTool);
 export const guardWrite = remote("guardWrite", P.guardWrite);
-export const harnessStop = remote("harnessStop", P.harnessStop);
+export const harnessStop = P.harnessStop;
 export const heldBy = remote("heldBy", P.heldBy);
 export const listClaims = remote("listClaims", P.listClaims);
 export const listFileHistory = remote("listFileHistory", P.listFileHistory);
@@ -279,7 +281,7 @@ export const listForgedTools = remote("listForgedTools", P.listForgedTools);
 export const listLedger = remote("listLedger", P.listLedger);
 export const listTeam = remote("listTeam", P.listTeam);
 export const markDone = remote("markDone", P.markDone);
-export const markStopSteer = remote("markStopSteer", P.markStopSteer);
+export const markStopSteer = P.markStopSteer;
 export const nameOf = remote("nameOf", P.nameOf);
 export const postMessage = remote("postMessage", P.postMessage);
 export const readBudget = remote("readBudget", P.readBudget);

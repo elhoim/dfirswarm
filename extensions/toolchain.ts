@@ -22,6 +22,8 @@ export const TOOLCHAIN_DIR = "work/.toolchain";
 export const TOOLCHAIN_REL = "toolchain.json";
 
 export type InstalledPackage = {
+  /** In a microVM run, the seat whose own disk holds the package. */
+  agent?: string;
   name: string;
   version: string;
   /** `pip`, or whatever wrote INSTALLER. */
@@ -138,12 +140,29 @@ export function newPackages(before: ToolchainRecord | null, after: ToolchainReco
  * sandbox's root, which an agent in a VM cannot write, so there this runs on
  * the hub (extensions/board.ts).
  */
-export async function updateToolchainRecord(sandboxRoot: string): Promise<{ fresh: InstalledPackage[]; total: number }> {
-  const record = await readToolchain(sandboxRoot);
+/**
+ * Refresh toolchain.json. On the host the inventory is read here, from the
+ * shared install directory. In a microVM each seat installs into its own
+ * disk, which the host cannot read, so the seat takes the inventory itself
+ * and sends it up through the hub (`options.inventory`); the record keeps
+ * every seat's packages side by side, each one saying whose it is.
+ */
+export async function updateToolchainRecord(
+  sandboxRoot: string,
+  options?: { agent: string; inventory: ToolchainRecord },
+): Promise<{ fresh: InstalledPackage[]; total: number }> {
   const file = join(sandboxRoot, TOOLCHAIN_REL);
   const before = await readFile(file, "utf8")
     .then((text) => JSON.parse(text) as ToolchainRecord)
     .catch(() => null);
+  let record: ToolchainRecord;
+  if (options) {
+    const mine = (Array.isArray(options.inventory?.packages) ? options.inventory.packages : []).map((p) => ({ ...p, agent: options.agent }));
+    const others = (before?.packages ?? []).filter((p) => p.agent && p.agent !== options.agent);
+    record = { checked_at: new Date().toISOString(), dir: String(options.inventory?.dir ?? ""), packages: [...others, ...mine] };
+  } else {
+    record = await readToolchain(sandboxRoot);
+  }
   const fresh = newPackages(before, record);
   if (!before || fresh.length || before.packages.length !== record.packages.length) {
     await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, "utf8");

@@ -48,6 +48,7 @@ HERDR="${HERDR_BIN:-herdr}"
 # link, and a prompt goes down it as a user message.
 HUB_ADMIN="${SWARM_HUB_ADMIN:-}"
 HUB_STATUS="${SWARM_HUB_STATUS:-}"
+HUB_DIR="${SWARM_HUB_DIR:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -206,9 +207,36 @@ set_count() {
   mv "$tmp" "$STATE"
 }
 
+# The hub is the VMs' board, trace door and stop: a run whose hub died has
+# none of the three until it is back. The hub kept what the kickoff gave it
+# in its own directory, so it resumes with the same tokens and the same
+# clock; this watchdog, which already runs for the length of the run, is
+# what notices.
+ensure_hub() {
+  [[ -n "$HUB_DIR" && -d "$HUB_DIR" ]] || return 0
+  local pid
+  pid="$(cat "$SANDBOX/hub.pid" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then return 0; fi
+  [[ -f "$HUB_DIR/hub-input.json" ]] || return 0
+  nohup node --experimental-strip-types --no-warnings "$ROOT/scripts/vm-hub.ts" --resume "$HUB_DIR" >>"$SANDBOX/traces/vm-hub.log" 2>&1 </dev/null &
+  echo $! > "$SANDBOX/hub.pid"
+  local i
+  for ((i = 0; i < 50; i++)); do
+    [[ -S "$HUB_DIR/admin.sock" ]] && break
+    sleep 0.1
+  done
+  local ok=false line
+  [[ -S "$HUB_DIR/admin.sock" ]] && ok=true
+  line="$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg d "$HUB_DIR" --argjson ok "$ok" \
+    '{ts: $ts, agent: "system", tool: "hub_restarted", args: {dir: $d}, result: {ok: $ok}}')"
+  printf '%s' "$line" | node "$ROOT/scripts/trace-emit.mjs" "$SANDBOX" >/dev/null 2>&1 || printf '%s\n' "$line" >> "$HUB_DIR/hub-spill.jsonl"
+  echo "idle-nudge: the hub was down; restarted (ok=$ok)" >&2
+}
+
 while :; do
   [[ -d "$SANDBOX" ]] || exit 0
   [[ -f "$SANDBOX/done/SWARM_DONE" ]] && exit 0
+  ensure_hub
   for id in $(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null); do
     [[ -e "$SANDBOX/done/agents/$id.done" || -e "$SANDBOX/done/agents/$id.dead" ]] && continue
     idle="$(idle_seconds "$id")"

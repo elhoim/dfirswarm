@@ -127,7 +127,14 @@ nudge_unfinished() {
   [[ "$NUDGE" -eq 1 ]] || return 0
   # Agents in microVMs are reached through the hub, which delivers the words
   # to Pi itself; Herdr can only type into a pane that runs `msb exec`.
-  [[ -f "$sandbox/hub.dir" ]] && hub="$(cat "$sandbox/hub.dir")/admin.sock"
+  # Only a hub directory the harness made (under the hubs' parent, which no
+  # pane can write) is a hub; a hub.dir that names anything else is ignored.
+  local hd parent
+  if [[ -f "$sandbox/hub.dir" ]]; then
+    hd="$(cat "$sandbox/hub.dir" 2>/dev/null || true)"
+    parent="$(cd "${TMPDIR:-/tmp}/dfirswarm-hubs" 2>/dev/null && pwd -P || true)"
+    [[ -n "$parent" && "$hd" == "$parent"/dfs-* && -S "$hd/admin.sock" ]] && hub="$hd/admin.sock"
+  fi
   if [[ -z "$hub" ]]; then
     command -v "${HERDR_BIN:-herdr}" >/dev/null 2>&1 || { say "  nudge: herdr is not on PATH"; NUDGE=0; return 0; }
   fi

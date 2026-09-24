@@ -367,7 +367,7 @@ function floppy(): Buffer {
 
 test("the catalog runs in a throwaway VM of the image, with the image's tools, and leaves the evidence and no VM behind", async (t) => {
   if (skip) return t.skip(skip);
-  const r = await rig("vmt7", ["vmt700"]);
+  const r = await rig("vmt8", ["vmt800"]);
   await writeFile(join(r.evidence, "floppy.img"), floppy());
   const sandbox = realpathSync(r.sandbox);
   // Mounted where inputs/ points, as the kickoff does (it links the real path).
@@ -378,7 +378,7 @@ test("the catalog runs in a throwaway VM of the image, with the image's tools, a
   // What the image holds decides what the catalog can build; the host's own
   // tools must not show through.
   assert.deepEqual((await createVms(r.spec)).failures, []);
-  const imageHasTsk = inVm(vmName(r.run, "vmt700"), "command -v fsstat >/dev/null && command -v fls >/dev/null && echo yes || echo no").trim() === "yes";
+  const imageHasTsk = inVm(vmName(r.run, "vmt800"), "command -v fsstat >/dev/null && command -v fls >/dev/null && echo yes || echo no").trim() === "yes";
 
   // With the run's allowed hosts, as a kickoff with --allow-host passes them.
   const result = await imageCatalog(IMAGE, sandbox, [evidence], { memoryMib: 1024, allowHosts: ["registry.npmjs.org", "*.github.com"] });

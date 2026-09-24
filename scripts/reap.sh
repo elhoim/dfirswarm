@@ -102,6 +102,19 @@ table_lock() {
 }
 table_unlock() { rm -rf "$TABLE_LOCK"; }
 
+# The hub directory a sandbox names, if it is one the harness made: under
+# the hubs' parent, which no pane can write. hub.dir itself is only
+# tool-protected, and a pane that wrote it a path to its own status.json
+# would never be reaped.
+hub_dir_of() { # <sandbox>
+  local dir parent
+  [[ -f "$1/hub.dir" ]] || return 1
+  dir="$(cat "$1/hub.dir" 2>/dev/null || true)"
+  parent="$(cd "${TMPDIR:-/tmp}/dfirswarm-hubs" 2>/dev/null && pwd -P)" || return 1
+  [[ -n "$dir" && "$dir" == "$parent"/dfs-* && -d "$dir" ]] || return 1
+  printf '%s\n' "$dir"
+}
+
 # A long `vol` / `fls` writes nothing to the session or the trace until it
 # returns. Herdr already knows the pane is working; idle-nudge.sh asks it
 # before nudging, and the reaper must ask before declaring the seat dead.
@@ -109,8 +122,7 @@ agent_working() {
   local id="$1" status hub
   # An agent in a microVM is not a Herdr agent: its pane runs `msb exec`. Its
   # own extension reports working/idle to the hub, which writes status.json.
-  if [[ -f "$SANDBOX/hub.dir" ]]; then
-    hub="$(cat "$SANDBOX/hub.dir" 2>/dev/null)"
+  if hub="$(hub_dir_of "$SANDBOX")"; then
     status="$(jq -r --arg id "$id" '.agents[$id].state // empty' "$hub/status.json" 2>/dev/null || true)"
     [[ "$status" == "working" ]]
     return

@@ -33,7 +33,7 @@
  *
  *   node --experimental-strip-types scripts/vm.ts probe  [--image REF]
  *   node --experimental-strip-types scripts/vm.ts create --spec FILE
- *   node --experimental-strip-types scripts/vm.ts finish --run ID --sandbox DIR [--no-snapshot]
+ *   node --experimental-strip-types scripts/vm.ts finish --run ID --sandbox DIR [--no-snapshot] [--agent ID]
  *   node --experimental-strip-types scripts/vm.ts reap   [--run ID] [--registry FILE]
  *   node --experimental-strip-types scripts/vm.ts list   [--run ID]
  *   node --experimental-strip-types scripts/vm.ts toolbox --image REF --out FILE [--preset SETS] [--required]
@@ -488,6 +488,10 @@ async function createOne(
     SWARM_ISOLATION: "microvm",
   };
 
+  // Never `.replace()`: a VM of this name is another run's, or this run's
+  // twin on another registry, and replacing it sends it SIGTERM. Run ids
+  // are short, and the same one on two registries is a collision to refuse.
+  if ((await runVms()).some((v) => v.name === name)) throw new Error(`a VM named ${name} exists already (another run with this id?); refusing to replace it`);
   let builder = M.Sandbox.builder(name)
     .image(spec.image)
     .pullPolicy(spec.pull ?? "if-missing")
@@ -495,7 +499,6 @@ async function createOne(
     .memory(spec.memory_mib ?? 2048)
     .rootDisk(spec.root_disk_mib ?? 8192)
     .detached(true)
-    .replace()
     .workdir(spec.sandbox)
     .labels({ [LABEL_RUN]: spec.run, [LABEL_AGENT]: agent.id, ...(spec.registry ? { [LABEL_REGISTRY]: registryLabel(spec.registry) } : {}) })
     .envs(env)
@@ -662,15 +665,46 @@ export async function runVms(runId?: string): Promise<Array<{ name: string; stat
  * integrity record (unless told not to), remove it, and write down where the
  * snapshot is and its sha256. Safe to run twice.
  */
-export async function finishRun(runId: string, sandbox: string, options: { snapshot?: boolean } = {}): Promise<Array<{ agent: string; name: string; snapshot?: string; error?: string }>> {
+export type FinishEntry = { agent: string; name: string; snapshot?: string; error?: string; kept?: true };
+
+/**
+ * Put a run's VMs away: stop, snapshot, keep the logs, remove, record. One
+ * finish at a time per run (the hub's own and an operator's `stop` used to
+ * race on the same snapshot file); a VM whose snapshot failed is stopped and
+ * kept, never removed, since removing it is the one step that cannot be
+ * undone; and every msb step's outcome is in the entry, not swallowed.
+ */
+export async function finishRun(runId: string, sandbox: string, options: { snapshot?: boolean; agent?: string } = {}): Promise<FinishEntry[]> {
   const msb = msbBinary();
   const records = join(sandbox, "vm");
   const snapDir = `${sandbox}.vm-snapshots`;
-  const out: Array<{ agent: string; name: string; snapshot?: string; error?: string }> = [];
+  const out: FinishEntry[] = [];
+  await mkdir(records, { recursive: true });
+  const lock = join(records, ".finish.lock");
+  let held = false;
+  for (let i = 0; i < 20 && !held; i++) {
+    try {
+      await mkdir(lock);
+      held = true;
+    } catch {
+      const age = await stat(lock).then((s) => Date.now() - s.mtimeMs).catch(() => 0);
+      if (age > 30 * 60_000) await rm(lock, { recursive: true, force: true });
+      else await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+  if (!held) throw new Error(`another finish of run ${runId} is in progress (${lock})`);
+  try {
   for (const vm of await runVms(runId)) {
     const agent = vm.agent || vm.name.replace(`dfs-${runId}-`, "");
-    const entry: { agent: string; name: string; snapshot?: string; error?: string } = { agent, name: vm.name };
-    await run(msb, ["stop", vm.name], { timeoutMs: 120_000 });
+    if (options.agent && agent !== options.agent) continue;
+    const entry: FinishEntry = { agent, name: vm.name };
+    const stopped = await run(msb, ["stop", vm.name], { timeoutMs: 120_000 });
+    if (stopped.code !== 0 && !/not running|already stopped|stopped/i.test(`${stopped.stdout}${stopped.stderr}`)) {
+      entry.error = `msb stop: ${(stopped.stderr || stopped.stdout).trim() || `exit ${stopped.code}`}`;
+      entry.kept = true;
+      out.push(entry);
+      continue;
+    }
     const recordFile = join(records, `${agent}.json`);
     let record: VmRecord | null = null;
     try {
@@ -690,6 +724,7 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
         if (record) record.snapshot = { path: file, sha256: sha, bytes, integrity: true };
       } else {
         entry.error = (r.stderr || r.stdout).trim() || `snapshot exit ${r.code}`;
+        entry.kept = true;
         if (record) record.snapshot = { error: entry.error };
       }
     }
@@ -703,12 +738,22 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
       for (const f of await ls(logs).catch(() => [])) await copyFile(join(logs, f), join(keep, f)).catch(() => undefined);
       if (record) (record as VmRecord & { logs?: string }).logs = keep;
     }
-    await run(msb, ["rm", vm.name], { timeoutMs: 60_000 });
+    if (!entry.kept) {
+      const removed = await run(msb, ["rm", vm.name], { timeoutMs: 60_000 });
+      if (removed.code !== 0) {
+        entry.error = `msb rm: ${(removed.stderr || removed.stdout).trim() || `exit ${removed.code}`}`;
+        entry.kept = true;
+      }
+    }
     if (record) {
       record.stopped_at = new Date().toISOString();
+      if (entry.kept) (record as VmRecord & { kept?: string }).kept = entry.error;
       await writeFile(recordFile, `${JSON.stringify(record, null, 2)}\n`).catch(() => undefined);
     }
     out.push(entry);
+  }
+  } finally {
+    await rm(lock, { recursive: true, force: true });
   }
   return out;
 }
@@ -910,9 +955,10 @@ async function main(): Promise<void> {
       const runId = opt("--run");
       const sandbox = opt("--sandbox");
       if (!runId || !sandbox) throw new Error("finish needs --run ID --sandbox DIR");
-      const out = await finishRun(runId, resolve(sandbox), { snapshot: !rest.includes("--no-snapshot") });
-      console.log(JSON.stringify({ ok: out.every((o) => !o.error), vms: out }));
-      return;
+      const out = await finishRun(runId, resolve(sandbox), { snapshot: !rest.includes("--no-snapshot"), agent: opt("--agent") });
+      const ok = out.every((o) => !o.error);
+      console.log(JSON.stringify({ ok, vms: out }));
+      process.exit(ok ? 0 : 1);
     }
     case "toolbox": {
       const image = opt("--image");

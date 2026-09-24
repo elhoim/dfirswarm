@@ -188,4 +188,19 @@ sleep 0.3
 [[ ! -s "$TMP/vm-prompts.txt" ]] || fail "a VM agent the hub says is working was nudged"
 pass "an agent the hub says is working is left to work"
 
+# --- a hub that died is brought back by the watchdog, from what the hub kept ----
+kill "$HUB_PID" 2>/dev/null; wait "$HUB_PID" 2>/dev/null || true
+for _ in $(seq 30); do [[ ! -S "$HUB_DIR/admin.sock" ]] && break; sleep 0.1; done
+echo "$HUB_PID" > "$VM_SB/hub.pid"
+[[ -f "$HUB_DIR/hub-input.json" ]] || fail "the hub kept nothing to resume from"
+HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HUB_STATUS="$HUB_DIR/status.json" SWARM_HUB_DIR="$HUB_DIR" \
+  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$VM_SB" --once --news-sec 45 --idle-sec 180 >"$TMP/restart.log" 2>&1
+HUB_PID="$(cat "$VM_SB/hub.pid")"
+[[ -S "$HUB_DIR/admin.sock" ]] || fail "the watchdog did not bring the hub back: $(cat "$TMP/restart.log"; cat "$TMP/hub.log")"
+kill -0 "$HUB_PID" 2>/dev/null || fail "hub.pid does not name the resumed hub"
+answer="$(node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_DIR/admin.sock" '{"op":"status"}')"
+printf '%s' "$answer" | jq -e '.ok == true and (.agents | has("v0"))' >/dev/null || fail "the resumed hub does not know the run's agents: $answer"
+grep -q 'hub_restarted' "$VM_SB/traces/events.jsonl" "$HUB_DIR/hub-spill.jsonl" 2>/dev/null || fail "the restart is not on the record"
+pass "a hub that died is brought back by the watchdog with the run's agents, and the restart is on the record"
+
 echo "idle-nudge.test.sh: all checks passed"

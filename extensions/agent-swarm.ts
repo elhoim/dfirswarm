@@ -29,9 +29,9 @@ import { Type, type TSchema } from "typebox";
 import { specsFromEnv } from "./context-ceiling.ts";
 import { registerSelfCompact, type HandoffFacts, type SelfCompactHandle } from "./self-compact.ts";
 import {
-  type FinishLineRun,
   isSharedScratch,
   finishLineVerdict,
+  runFinishLine,
   classifyTurnError,
   CAP_STEER,
   TOKEN_CAP_STEER,
@@ -401,8 +401,43 @@ export default function (pi: ExtensionAPI) {
     budget: BudgetRecord,
     ctx: { shutdown?: () => void },
   ): Promise<void> {
-    await enforceStops(cwd, budget, ctx);
+    // In a microVM the swarm's stop is the hub's, from outside: the clock
+    // and the sentinel are not this process's to move, and the hub does not
+    // take those calls from a VM (scripts/vm-hub.ts). This seat's own cap is
+    // still its own to honour.
+    if (!boardSocket()) await enforceStops(cwd, budget, ctx);
     await enforceAgentCap(cwd, budget, ctx);
+  }
+
+  /**
+   * In a microVM the hub is the board, the trace's door and the stop. A hub
+   * that cannot be reached leaves this seat with no record and no brake, so
+   * it does not go on as if it had one: told once, then stopped, unless the
+   * hub is back (the watchdog restarts it).
+   */
+  let hubLostSince = 0;
+  let hubLostTold = false;
+  const HUB_LOST_STEER_MS = 60_000;
+  const HUB_LOST_STOP_MS = 4 * 60_000;
+  async function hubReachable(cwd: string, ctx: { shutdown?: () => void }, ok: boolean): Promise<void> {
+    if (!boardSocket()) return;
+    if (ok) {
+      hubLostSince = 0;
+      hubLostTold = false;
+      return;
+    }
+    if (!hubLostSince) hubLostSince = Date.now();
+    const lost = Date.now() - hubLostSince;
+    if (lost >= HUB_LOST_STEER_MS && !hubLostTold) {
+      hubLostTold = true;
+      steer("The harness hub cannot be reached from this VM: nothing you post or record lands, and no cap is enforced. Stop tool calls and wait; if it is not back within three minutes this seat is stopped.");
+      await logEvent(cwd, agentId, "hub_lost", {}, { since: new Date(hubLostSince).toISOString() }).catch(() => undefined);
+    }
+    if (lost >= HUB_LOST_STOP_MS && typeof ctx.shutdown === "function") {
+      stoppedByHarness = "hub_unreachable";
+      await logEvent(cwd, agentId, "hub_lost_stop", {}, { since: new Date(hubLostSince).toISOString() }).catch(() => undefined);
+      ctx.shutdown();
+    }
   }
 
   /**
@@ -618,6 +653,7 @@ export default function (pi: ExtensionAPI) {
     if (Date.now() - lastStopCheck < STOP_CHECK_INTERVAL_MS) return;
     lastStopCheck = Date.now();
     const budget = await readBudget(cwd).catch(() => null);
+    await hubReachable(cwd, ctx, budget !== null);
     if (budget) await enforceAllCaps(cwd, budget, ctx).catch(() => undefined);
   }
 
@@ -631,6 +667,7 @@ export default function (pi: ExtensionAPI) {
     capTimer = setInterval(() => {
       void (async () => {
         const budget = await readBudget(ctx.cwd).catch(() => null);
+        await hubReachable(ctx.cwd, ctx, budget !== null);
         if (budget) await enforceAllCaps(ctx.cwd, budget, ctx).catch(() => undefined);
       })();
     }, STOP_CHECK_INTERVAL_MS);
@@ -926,26 +963,6 @@ export default function (pi: ExtensionAPI) {
    * operator's checks from the registry, by scripts/await-done.sh. Null when
    * the runner itself could not answer; the verdict then proceeds unchecked.
    */
-  async function runFinishLine(cwd: string): Promise<FinishLineRun | null> {
-    const script = fileURLToPath(new URL("../scripts/await-done.sh", import.meta.url));
-    return new Promise((resolve) => {
-      execFile(
-        "bash",
-        [script, "--sandbox", cwd, "--checks-json", "--check-timeout", "120"],
-        { cwd, timeout: 15 * 60_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, CHECKS_SOURCE: "done" } },
-        (err, stdout) => {
-          try {
-            const parsed = JSON.parse(String(stdout || "").trim().split("\n").pop() || "") as FinishLineRun;
-            if (typeof parsed.total === "number" && Array.isArray(parsed.checks)) return resolve(parsed);
-          } catch {
-            /* fall through */
-          }
-          resolve(err ? { total: 0, passed: 0, checks: [], error: String(err.message || err).slice(0, 200) } : null);
-        },
-      );
-    });
-  }
-
   /** The provider error this session has already reported, so it says it once. */
   let providerErrorTold = "";
   /** Set when the harness itself stops this agent, so the abort that follows is not blamed on the provider. */

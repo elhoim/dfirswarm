@@ -2649,6 +2649,14 @@ STRIP
       herdr_sealed=1
     done < <(herdr_socket_dirs)
   fi
+  if [[ "$write_guard_mode" != "none" ]]; then
+    # No host-mode pane may reach a VM run's hub: its sockets take a caller
+    # for the agent whose socket it is, with no token to show, so a pane of
+    # a run on this host would be that agent to it. The hubs share one
+    # parent, and the whole parent is denied (a socket cannot be sealed on
+    # Linux; docs/safety.md says so).
+    guard_args+=(--no-socket-tree "$(hubs_parent)")
+  fi
   if [[ -n "$trace_socket" && "$write_guard_mode" != "none" ]]; then
     # The panes may connect to the collector's socket and may not write the
     # directory it writes. `(allow default)` covers the socket; only
@@ -3468,9 +3476,9 @@ EOF
     # kickoff's memory, so its lines stay unverified. That is the honest
     # answer rather than a wrong one: a token on disk would be readable by
     # every pane, since the guard denies writes and leaves reads open.
-    local hub_env=()
-    if [[ "$isolation" == "microvm" && -f "$sandbox/hub.dir" ]]; then
-      hub_env=(SWARM_HUB_ADMIN="$(cat "$sandbox/hub.dir")/admin.sock" SWARM_HUB_STATUS="$(cat "$sandbox/hub.dir")/status.json")
+    local hub_env=() hub_dir_now
+    if [[ "$isolation" == "microvm" ]] && hub_dir_now="$(hub_dir_of "$sandbox")"; then
+      hub_env=(SWARM_HUB_ADMIN="$hub_dir_now/admin.sock" SWARM_HUB_STATUS="$hub_dir_now/status.json" SWARM_HUB_DIR="$hub_dir_now")
     fi
     detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" ${hub_env[@]+"${hub_env[@]}"} \
       bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
@@ -4120,7 +4128,9 @@ stop_sandbox_daemons() {
   fi
   if [[ -f "$sandbox/hub.pid" ]]; then
     pid="$(cat "$sandbox/hub.pid" || true)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    # Only a hub: hub.pid is tool-protected, not shell-protected, so a pane
+    # could name any process of this user in it.
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && ps -o command= -p "$pid" 2>/dev/null | grep -q 'vm-hub.ts'; then
       kill "$pid" 2>/dev/null || true
     fi
   fi
@@ -4485,12 +4495,34 @@ vm_default_image() { # <pack dirs, one per line> [playwright 0|1]
 
 # The hub's sockets live in a short directory: a Unix socket path must fit in
 # 104 bytes on macOS, and msb refuses a longer one (ENAMETOOLONG, measured).
+# Where every run's hub lives: one parent, so a host-mode pane can be denied
+# the lot (fsguard --no-socket-tree) and a file that claims to name a hub
+# directory can be checked against it.
+hubs_parent() {
+  local parent="${TMPDIR:-/tmp}/dfirswarm-hubs"
+  mkdir -p "$parent" && chmod 700 "$parent"
+  (cd "$parent" && pwd -P)
+}
+
 vm_hub_dir() { # <run id>
   local dir
-  dir="$(mktemp -d "${TMPDIR:-/tmp}/dfs-$1.XXXXXX")"
+  dir="$(mktemp -d "$(hubs_parent)/dfs-$1.XXXXXX")"
   chmod 700 "$dir"
   # Resolved: macOS's temp directory is under /var, a symlink.
   (cd "$dir" && pwd -P)
+}
+
+# The hub directory a sandbox's hub.dir names, if it names one the harness
+# made: under the hubs' parent and nowhere a pane could have written. A
+# pane's shell can write hub.dir (it is only tool-protected); it cannot make
+# a directory under the parent, so a name that points elsewhere is nobody's.
+hub_dir_of() { # <sandbox>
+  local sandbox="$1" dir parent
+  [[ -f "$sandbox/hub.dir" ]] || return 1
+  dir="$(cat "$sandbox/hub.dir" 2>/dev/null || true)"
+  parent="$(hubs_parent)"
+  [[ -n "$dir" && "$dir" == "$parent"/dfs-* && -d "$dir" ]] || return 1
+  printf '%s\n' "$dir"
 }
 
 hub_send() { # <admin socket> <json>
@@ -4509,8 +4541,12 @@ start_vm_hub() { # <sandbox> <hub dir> <run id> <collector socket> <agent ids...
     '{agents: ($ENV.SWARM_ROSTER | fromjson),
       tokens: ($ENV.SWARM_TOKENS | fromjson | to_entries | map({key: .value, value: .key}) | from_entries),
       collector: $ENV.SWARM_COLLECTOR}')"
-  printf '%s' "$input" | detach_exec node --experimental-strip-types --no-warnings "$ROOT/scripts/vm-hub.ts" \
-    "$sandbox" --dir "$dir" --run "$run" --quiet >"$sandbox/traces/vm-hub.log" 2>&1 &
+  local hub_args=(--registry "$REGISTRY")
+  [[ "${forging:-0}" -eq 1 ]] && hub_args+=(--forging)
+  [[ "${vm_snapshot:-1}" -eq 1 ]] || hub_args+=(--no-snapshot)
+  # The inbox page bound is read by readInbox, which for a VM runs here.
+  printf '%s' "$input" | SWARM_INBOX_PAGE_CHARS="${inbox_page_chars:-}" detach_exec node --experimental-strip-types --no-warnings "$ROOT/scripts/vm-hub.ts" \
+    "$sandbox" --dir "$dir" --run "$run" "${hub_args[@]}" --quiet >"$sandbox/traces/vm-hub.log" 2>&1 &
   echo $! > "$sandbox/hub.pid"
   printf '%s\n' "$dir" > "$sandbox/hub.dir"
   local i
@@ -4556,15 +4592,16 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>
   vm_cli finish --run "$run" --sandbox "$sandbox" ${args[@]+"${args[@]}"} >"$sandbox/traces/vm-finish.log" 2>&1 || true
   if [[ -f "$sandbox/hub.pid" ]]; then
     pid="$(cat "$sandbox/hub.pid" 2>/dev/null || true)"
-    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    if [[ -n "$pid" ]] && ps -o command= -p "$pid" 2>/dev/null | grep -q 'vm-hub.ts'; then kill "$pid" 2>/dev/null || true; fi
     rm -f "$sandbox/hub.pid"
   fi
-  if [[ -f "$sandbox/hub.dir" ]]; then
-    dir="$(cat "$sandbox/hub.dir" 2>/dev/null || true)"
+  if dir="$(hub_dir_of "$sandbox")"; then
+    # The hub's own lines the collector did not take stay with the run.
+    [[ -s "$dir/hub-spill.jsonl" ]] && cp "$dir/hub-spill.jsonl" "$sandbox/traces/hub-spill.jsonl" 2>/dev/null
     # Only a directory this run could have made.
-    [[ "$dir" == */dfs-"$run".* && -d "$dir" ]] && rm -rf "$dir"
-    rm -f "$sandbox/hub.dir"
+    [[ "$dir" == */dfs-"$run".* ]] && rm -rf "$dir"
   fi
+  rm -f "$sandbox/hub.dir"
 }
 
 # The agents' VMs, their panes and their hub. Called by cmd_start in the
