@@ -187,6 +187,17 @@ test("custody checks a kept VM disk against its record, and counts lines the cha
   await writeFile(join(root, "tool-output", "a0", "trace-spill.jsonl"), '{"tool":"bash","agent":"a0"}\n{"tool":"read","agent":"a1"}\n');
   const again = await takeCustody(root);
   assert.equal(again.trace.spilled[0].bad, 1, "a line in a0's spill that claims to be a1's is not attributable");
+  // One image for the run: a VM that booted another digest than the one the
+  // kickoff resolved is named.
+  await writeFile(join(root, "vm", "a1.json"), JSON.stringify({ agent: "a1", image: { manifest_digest: "sha256:def", expected_digest: "sha256:abc" }, snapshot: { path: snap, sha256: sha("other") } }));
+  const moved = await takeCustody(root);
+  assert.match(moved.summary, /IMAGE DIGEST DIFFERS: a1 booted sha256:def, not sha256:abc/);
+  // A package the VM's root installed outside the seat's toolchain is named.
+  await writeFile(join(root, "vm", "a0.json"), JSON.stringify({ agent: "a0", image: { manifest_digest: "sha256:abc" }, snapshot: { path: snap, sha256: sha("disk bytes"), bytes: 10 }, installed_outside_image: { baseline: true, apt: { cowsay: "3.03" }, venv: { tabulate: "0.10.0" } } }));
+  const installed = await takeCustody(root);
+  assert.match(installed.summary, /INSTALLED OUTSIDE THE IMAGE AND THE TOOLCHAIN RECORD: a0 apt cowsay 3\.03, venv tabulate 0\.10\.0/);
+  assert.equal(installed.vms?.find((v) => v.agent === "a1")?.installed_outside.note, "no inventory was taken (a VM put away before stop took one)");
+  assert.doesNotMatch(again.summary, /IMAGE DIGEST DIFFERS/, "records with no resolved digest are not called different");
 });
 
 test("the report's custody lines know a microVM run", () => {
@@ -225,6 +236,30 @@ test("each agent's VM is a custody row: what it could write, reach and was given
   assert.match(rows[1][1], /openai \(API key\) → api\.openai\.com/);
   assert.match(rows[1][1], new RegExp(`kept, sha256 ${"f".repeat(64)}`));
   assert.deepEqual(vmRows([]), [], "a host run adds nothing");
+});
+
+test("the report says every VM booted the digest resolved at kickoff, or which did not, and what the image says it was built from", () => {
+  const base = {
+    runtime: { name: "microsandbox", version: "0.7.2" },
+    network: { default: "deny", allow_hosts: ["msdl.microsoft.com:80", "api.x.com"] },
+  };
+  const description = { profile: "disk", pack_versions: { "windows-forensics": { version: "1.2.1" } }, redistributable: false, nonredistributable: ["fls", "vol"], downloads: { hayabusa: { version: "4.1.0" } } };
+  const same = vmRows([
+    { ...base, agent: "a0", image: { ref: "dfirswarm-disk:dev-arm64", manifest_digest: "sha256:aa", expected_digest: "sha256:aa", description } },
+    { ...base, agent: "a1", image: { ref: "dfirswarm-disk:dev-arm64", manifest_digest: "sha256:aa", expected_digest: "sha256:aa", description } },
+  ]);
+  const digestRow = same.find(([k]) => k === "Image digest");
+  assert.match(digestRow?.[1] ?? "", /^every VM booted sha256:aa, resolved once at kickoff$/);
+  const record = same.find(([k]) => k === "Image record")?.[1] ?? "";
+  assert.match(record, /profile disk; built from windows-forensics 1\.2\.1; pinned downloads hayabusa 4\.1\.0; NOT for redistribution \(2 programs/);
+  assert.match(same.find(([k]) => k === "VM a0")?.[1] ?? "", /could reach: msdl\.microsoft\.com:80, api\.x\.com:443/, "a port given is not given another");
+  const off = vmRows([
+    { ...base, agent: "a0", image: { ref: "r", manifest_digest: "sha256:aa", expected_digest: "sha256:aa" } },
+    { ...base, agent: "a1", image: { ref: "r", manifest_digest: "sha256:bb", expected_digest: "sha256:aa" } },
+  ]);
+  assert.match(off.find(([k]) => k === "Image digest")?.[1] ?? "", /^DIFFERS: a1 booted sha256:bb; the run resolved sha256:aa$/);
+  const inv = vmRows([{ ...base, agent: "a0", installed_outside_image: { baseline: true, apt: { cowsay: "3.03" }, venv: {} } }]);
+  assert.match(inv.find(([k]) => k === "VM a0")?.[1] ?? "", /installed at stop: INSTALLED OUTSIDE THE IMAGE: apt cowsay 3\.03/);
 });
 
 test("numbered trace lines: a line in both the chain and a spill is counted once as a duplicate, and a missing number is a lost line", async () => {

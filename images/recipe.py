@@ -9,16 +9,30 @@ A profile is a named set of packs (images/profiles.json), with every pack's
 dependencies added, so an image never lacks the base its method builds on.
 For each pack, `requires/host.json` says which binaries its method calls and
 how to install them, and `requires/python.txt` lists the libraries its tools
-import. The packs are the single source: the kickoff checks a host against
-them, and this turns the same lines into an image.
+import. The packs are the single source: a microVM run's probe checks the
+image against them (scripts/vm.ts imageFit), and this turns the same lines
+into an image. On the host the agents install what they lack themselves.
 
 `build` writes DIR/spec.json (what to install, and what cannot be installed
-from a package manager) and DIR/Dockerfile, and copies install.py beside
-them, so DIR is a complete build context:
+from a package manager), DIR/NOTICE (every program, its pack, its licence and
+where it comes from) and DIR/Dockerfile, and copies install.py beside them,
+so DIR is a complete build context:
 
-  docker build -t dfirswarm-re:dev DIR
+  docker build -t dfirswarm-re:dev-amd64 DIR
+
+A program a pack marks `redistributable: false` stops the build unless
+`--allow-nonredistributable` is given: an image that stays on this machine or
+in a private registry, never one published for others to pull. The image then
+says so (image.json, its label, its NOTICE).
+
+A program no package manager has may carry a pinned download in its pack
+(`install.download`: a version, and per architecture a URL, its sha256 and the
+program's path inside the archive). install.py fetches it, checks the sha256
+and puts the program on PATH; an architecture with no entry is recorded as not
+installed. Anything else is listed under `manual` and never installed.
 """
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -67,16 +81,32 @@ def words(tail: str) -> list:
     return [w for w in tail.split() if not w.startswith("-")]
 
 
+def pack_version(packs: Path, name: str) -> dict:
+    """The pack's version and seal (sha256 of its sorted checksums), as vm.ts packSeal computes it."""
+    manifest = json.loads((packs / name / "pack.json").read_text())
+    sums = (manifest.get("checksums") or {}).get("sha256") or {}
+    ordered = {k: sums[k] for k in sorted(sums)}
+    seal = hashlib.sha256(json.dumps(ordered, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    return {"version": manifest.get("version", "?"), "seal": seal}
+
+
 def read_pack(packs: Path, name: str) -> dict:
-    spec = {"apt": {}, "pip": {}, "requirements": [], "binaries": [], "manual": []}
+    spec = {"apt": {}, "pip": {}, "requirements": [], "binaries": [], "manual": [], "downloads": []}
     host = packs / name / "requires" / "host.json"
     if host.exists():
         for b in json.loads(host.read_text())["binaries"]:
-            line = (b.get("install") or {}).get("apt", "").strip()
+            install = b.get("install") or {}
+            line = install.get("apt", "").strip()
             required = not b.get("optional", False)
             spec["binaries"].append({"name": b["name"], "pack": name, "required": required,
-                                     "licence": b.get("licence")})
-            if m := APT.match(line):
+                                     "licence": b.get("licence"),
+                                     "redistributable": b.get("redistributable", True) is not False,
+                                     "source": line})
+            if isinstance(install.get("download"), dict):
+                spec["downloads"].append({"name": b["name"], "pack": name, "required": required,
+                                          **install["download"]})
+                spec["binaries"][-1]["source"] = f"download {install['download'].get('version', '?')}"
+            elif m := APT.match(line):
                 for p in words(m.group(1)):
                     spec["apt"][p] = spec["apt"].get(p, False) or required
             elif m := PIP.match(line):
@@ -94,7 +124,7 @@ def read_pack(packs: Path, name: str) -> dict:
 
 
 def merge(specs: list) -> dict:
-    out = {"apt": {}, "pip": {}, "requirements": [], "binaries": [], "manual": []}
+    out = {"apt": {}, "pip": {}, "requirements": [], "binaries": [], "manual": [], "downloads": []}
     for s in specs:
         for kind in ("apt", "pip"):
             for p, req in s[kind].items():
@@ -102,21 +132,87 @@ def merge(specs: list) -> dict:
         out["requirements"] += [r for r in s["requirements"] if r not in out["requirements"]]
         out["binaries"] += s["binaries"]
         out["manual"] += s["manual"]
+        for d in s["downloads"]:
+            if not any(x["name"] == d["name"] for x in out["downloads"]):
+                out["downloads"].append(d)
     return out
 
 
+def notice(spec: dict) -> str:
+    """Every program an image holds, its pack, its licence and where it came from."""
+    lines = [f"dfirswarm-{spec['profile']}: third-party programs in this image, by pack.",
+             "Each is its authors' work under its own licence; none is dfirswarm's.",
+             "Python packages follow with their licences, as the build found them.", ""]
+    seen = set()
+    for b in spec["binaries"]:
+        key = (b["name"], b["pack"])
+        if key in seen:
+            continue
+        seen.add(key)
+        flag = "" if b.get("redistributable", True) else "  [not for redistribution]"
+        lines.append(f"{b['name']}  ({b['pack']})  {b.get('licence') or 'licence not stated'}  <- {b.get('source') or '?'}{flag}")
+    for d in spec["downloads"]:
+        for arch in ("amd64", "arm64"):
+            if isinstance(d.get(arch), dict):
+                lines.append(f"  {d['name']} {arch}: {d[arch].get('url')}  sha256 {d[arch].get('sha256')}")
+    return "\n".join(lines) + "\n"
+
+
+def requirement_names(packs: Path, name: str) -> set:
+    names = set()
+    reqs = packs / name / "requires" / "python.txt"
+    if reqs.exists():
+        for raw in reqs.read_text().splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if line:
+                names.add(re.split(r"[<>=!~\[ ;]", line, maxsplit=1)[0].lower())
+    return names
+
+
+def needs_of(packs: Path, names: list) -> tuple:
+    """The programs these packs require, every program they name, and the Python packages their tools import."""
+    required, named, python = set(), set(), set()
+    for n in names:
+        host = packs / n / "requires" / "host.json"
+        if host.exists():
+            for b in json.loads(host.read_text())["binaries"]:
+                named.add(b["name"])
+                if not b.get("optional", False):
+                    required.add(b["name"])
+        python |= requirement_names(packs, n)
+    return required, named, python
+
+
 def profile_for(packs: Path, wanted: list) -> str:
-    """The profile with the fewest packs that holds every wanted pack and its dependencies."""
+    """The smallest profile whose image serves the wanted packs: one that holds
+    them and their dependencies, or one that covers what they use, since a
+    pack's skills and tools come from the pack itself and not from the image.
+    Covering means every program the packs name, required or optional, is one
+    the profile's packs name too, and every Python package their tools import
+    is in the profile. `full` holds every pack, so it is always a candidate and
+    only ever the choice when nothing smaller serves."""
     need = set(resolve(packs, wanted))
     if not need:
         return "base"
+    # A pack this checkout does not have cannot be covered by anything known.
+    if any(not (packs / n / "pack.json").exists() for n in need):
+        return "full"
+    _, want_named, want_python = needs_of(packs, sorted(need))
     best = None
+    # A profile with extra packages is chosen by name, never by its packs.
     for name, prof in profiles().items():
         if prof.get("apt"):
-            continue  # a profile with extra packages is chosen by name, never by its packs
-        have = set(resolve(packs, prof["packs"]))
-        if need <= have and (best is None or len(have) < best[1]):
-            best = (name, len(have))
+            continue
+        members = resolve(packs, prof["packs"])
+        holds = need <= set(members)
+        if not holds:
+            _, named, python = needs_of(packs, members)
+            if not (want_named <= named and want_python <= python):
+                continue
+        # Fewest packs first; between two of a size, the one that holds them.
+        rank = (len(members), 0 if holds else 1)
+        if best is None or rank < best[1]:
+            best = (name, rank)
     return best[0] if best else "full"
 
 
@@ -135,25 +231,37 @@ def build(a) -> int:
     spec = merge([read_pack(a.packs, p) for p in packs])
     for pkg in extra_apt:
         spec["apt"][pkg] = True
-    spec = {"profile": a.profile, "packs": packs, **spec}
+    held_back = sorted({b["name"] for b in spec["binaries"] if not b.get("redistributable", True)})
+    if held_back and not a.allow_nonredistributable:
+        print(f"recipe: {a.profile} would hold {len(held_back)} program(s) their packs mark redistributable: false "
+              f"({', '.join(held_back)}). Build with --allow-nonredistributable for an image that stays on this "
+              f"machine or in a private registry; never publish it.", file=sys.stderr)
+        return 3
+    spec = {"profile": a.profile, "packs": packs,
+            "pack_versions": {p: pack_version(a.packs, p) for p in packs},
+            "redistributable": not held_back, "nonredistributable": held_back, **spec}
 
     a.out.mkdir(parents=True, exist_ok=True)
     (a.out / "spec.json").write_text(json.dumps(spec, indent=1) + "\n")
+    (a.out / "NOTICE").write_text(notice(spec))
     shutil.copy(HERE / "install.py", a.out / "install.py")
     (a.out / "Dockerfile").write_text(f"""# Generated by images/recipe.py from packs: {", ".join(packs) or "none"}. Do not edit.
 ARG BASE={a.base}
 FROM ${{BASE}}
-COPY install.py spec.json /tmp/dfirswarm-build/
+COPY install.py spec.json NOTICE /tmp/dfirswarm-build/
 RUN python3 /tmp/dfirswarm-build/install.py /tmp/dfirswarm-build/spec.json \\
  && rm -rf /tmp/dfirswarm-build
 ENV PATH=/opt/dfir/venv/bin:$PATH
 LABEL org.opencontainers.image.title="dfirswarm-{a.profile}" \\
       dev.dfirswarm.profile="{a.profile}" \\
-      dev.dfirswarm.packs="{",".join(packs)}"
+      dev.dfirswarm.packs="{",".join(packs)}" \\
+      dev.dfirswarm.redistributable="{str(not held_back).lower()}"
 """)
     req_apt = sum(spec["apt"].values())
     print(f"{a.profile}: {len(packs)} pack(s), {len(spec['apt'])} apt ({req_apt} required), {len(spec['pip'])} pip, "
-          f"{len(spec['requirements'])} python requirements, {len(spec['manual'])} not from a package manager")
+          f"{len(spec['requirements'])} python requirements, {len(spec['downloads'])} pinned downloads, "
+          f"{len(spec['manual'])} neither"
+          + (f"; NOT for redistribution ({len(held_back)} programs)" if held_back else ""))
     return 0
 
 
@@ -164,7 +272,9 @@ def main() -> int:
     b.add_argument("profile")
     b.add_argument("--packs", type=Path, default=PACKS)
     b.add_argument("--out", required=True, type=Path)
-    b.add_argument("--base", default="dfirswarm-base:dev")
+    b.add_argument("--base", default="dfirswarm-base:dev-amd64")
+    b.add_argument("--allow-nonredistributable", action="store_true",
+                   help="build an image holding programs their packs mark redistributable: false (never publish it)")
     f = sub.add_parser("profile-for")
     f.add_argument("packs", nargs="*")
     f.add_argument("--packs-dir", type=Path, default=PACKS)

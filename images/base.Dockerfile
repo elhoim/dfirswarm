@@ -2,8 +2,11 @@
 # nothing case-specific. Profile images (disk, memory, re, ...) are generated
 # from the packs by images/recipe.py and build on this one.
 #
-#   docker build -f images/base.Dockerfile -t dfirswarm-base:dev images
-#   docker save dfirswarm-base:dev | msb load
+#   docker build -f images/base.Dockerfile -t dfirswarm-base:dev-arm64 images
+#   docker save dfirswarm-base:dev-arm64 | msb load
+#
+# (dev-<arch>: dev-arm64 on Apple silicon, dev-amd64 elsewhere, the tag the
+# kickoff looks for when no lock file names a digest.)
 #
 # The harness's own code (extensions, prompts, pack skills and tools) is not
 # baked in: it is mounted read-only from the host at boot, where the guest's
@@ -29,6 +32,15 @@ RUN apt-get update \
  && printf '{"profile":"base","pi":"%s","node":"%s","python":"%s"}\n' \
       "$PI_VERSION" "$(node --version)" "$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')" \
       > /etc/dfirswarm/image.json
+
+# The tool library's Python imports, in a venv every profile builds on: a
+# library tool reaches a run through --tools-from whatever its packs, so a
+# tool that imports regipy must not work only in the disk image.
+COPY library-python.txt /tmp/library-python.txt
+RUN python3 -m venv /opt/dfir/venv \
+ && /opt/dfir/venv/bin/pip install --no-cache-dir -r /tmp/library-python.txt \
+ && rm /tmp/library-python.txt
+ENV PATH=/opt/dfir/venv/bin:$PATH
 
 # No image-wide licence label: an image is an aggregate of separately
 # licensed programs, and each keeps its own.

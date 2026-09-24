@@ -7,7 +7,7 @@
       "why": "Several hundred iOS artefact parsers over a file-system extraction or a backup, with a report per artefact.",
       "install": {
         "brew": "python3 -m pip install ileapp",
-        "apt": "python3 -m pip install ileapp"
+        "apt": "https://github.com/abrignoni/iLEAPP (not on PyPI; run from a checkout)"
       },
       "licence": "MIT",
       "redistributable": false
@@ -19,7 +19,7 @@
       "why": "The same for Android: app data, accounts, usage, and the protobuf-heavy newer artefacts.",
       "install": {
         "brew": "python3 -m pip install aleapp",
-        "apt": "python3 -m pip install aleapp"
+        "apt": "https://github.com/abrignoni/ALEAPP (not on PyPI; run from a checkout)"
       },
       "licence": "MIT",
       "redistributable": false

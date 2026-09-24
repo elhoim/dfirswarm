@@ -50,8 +50,10 @@
     "node": ">=22.6"
   },
   "dependencies": {
-    "microsandbox": "0.7.2",
     "typebox": "^1.3.34"
+  },
+  "optionalDependencies": {
+    "microsandbox": "0.7.2"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.87.0",

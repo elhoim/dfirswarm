@@ -6,8 +6,11 @@
 # published from the private dfirswarm-pro repository, to private packages.
 #
 # What this does instead: builds the base and every profile for amd64 from
-# the recipes, as a community user would (images/README.md), and prints what
-# each image holds. CI's microVM job boots the base on a runner with KVM.
+# the recipes, `full` included, as a community user would (images/README.md),
+# and prints what each image holds. A build fails when a program a pack
+# requires is not in the image (install.py), and when a pinned download's
+# sha256 is not what its pack says. CI's microVM job boots base and disk on a
+# runner with KVM.
 name: images
 
 on:
@@ -28,9 +31,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [base, re, memory, disk, network, linux, mobile, web]
+        profile: [base, re, memory, disk, network, linux, mobile, web, full]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - run: git config --global init.defaultBranch main
       - uses: actions/checkout@v7
@@ -38,7 +41,8 @@ jobs:
         run: |
           docker build -f images/base.Dockerfile -t dfirswarm-base:dev-amd64 images
           if [ "${{ matrix.profile }}" != base ]; then
-            python3 images/recipe.py build "${{ matrix.profile }}" --out ctx --base dfirswarm-base:dev-amd64
+            # Built here, never pushed: the flag is for this runner's copy.
+            python3 images/recipe.py build "${{ matrix.profile }}" --out ctx --base dfirswarm-base:dev-amd64 --allow-nonredistributable
             docker build -t "dfirswarm-${{ matrix.profile }}:dev-amd64" ctx
           fi
           docker run --rm "dfirswarm-${{ matrix.profile }}:dev-amd64" python3 -c 'import json; r = json.load(open("/etc/dfirswarm/image.json")); print(json.dumps({"profile": r.get("profile"), "packs": r.get("packs"), "binaries_found": sum(1 for v in (r.get("binaries") or {}).values() if v), "binaries": len(r.get("binaries") or {}), "not_installed": r.get("not_installed")}))'

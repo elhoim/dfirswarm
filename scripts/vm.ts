@@ -40,7 +40,7 @@
  *   node --experimental-strip-types scripts/vm.ts catalog --image REF --sandbox DIR [--evidence DIR]... [--allow-host H]... [--memory MIB]
  *   node --experimental-strip-types scripts/vm.ts msb-path
  */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, realpathSync } from "node:fs";
 import { isIPv4, isIPv6 } from "node:net";
@@ -117,7 +117,32 @@ export type VmSpec = {
   snapshot_dir?: string;
   /** The run registry this run is recorded in (labels the VMs for the reaper). */
   registry?: string;
+  /** The image's digest as the kickoff resolved it, once: every VM must boot this. */
+  image_digest?: string;
 };
+
+/**
+ * Why this host cannot run the agents' VMs, before msb is asked: microsandbox
+ * ships for Apple silicon and for glibc Linux on x64 and arm64. A Windows or
+ * musl host used to be mapped to the glibc Linux binary and fail at the probe
+ * with an error that named neither. Null when the platform is one msb runs on.
+ */
+export function vmPlatformProblem(platform: string = process.platform, arch: string = process.arch, glibc: string | undefined = glibcVersion()): string | null {
+  if (platform === "darwin") return arch === "arm64" ? null : "microVMs on macOS need Apple silicon; this Mac is Intel";
+  if (platform !== "linux") return `microVMs need macOS on Apple silicon or Linux with KVM; this host is ${platform}`;
+  if (arch !== "x64" && arch !== "arm64") return `microVMs on Linux need x64 or arm64; this host is ${arch}`;
+  if (!glibc) return "microVMs on Linux need a glibc system; this host's C library is not glibc (musl?)";
+  return null;
+}
+
+function glibcVersion(): string | undefined {
+  try {
+    const report = process.report?.getReport() as unknown as { header?: { glibcVersionRuntime?: string } } | undefined;
+    return report?.header?.glibcVersionRuntime;
+  } catch {
+    return undefined;
+  }
+}
 
 /** The msb binary this repository pins, for the pane's `msb exec` and the CLI calls. */
 export function msbBinary(): string {
@@ -162,10 +187,14 @@ export function placeholderFor(provider: string, kind: ProviderSpec["kind"], acc
 
 function run(cmd: string, args: string[], options: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((done) => {
-    execFile(cmd, args, { timeout: options.timeoutMs ?? 120_000, maxBuffer: 64 * 1024 * 1024, env: options.env ?? process.env }, (err, stdout, stderr) => {
+    const child = execFile(cmd, args, { timeout: options.timeoutMs ?? 120_000, maxBuffer: 64 * 1024 * 1024, env: options.env ?? process.env }, (err, stdout, stderr) => {
       const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : 1) : 0;
       done({ code, stdout: String(stdout), stderr: String(stderr) });
     });
+    // Nothing is ever written to a command's stdin here, and `msb exec`
+    // streams stdin into the guest: left open, the exec never ends
+    // (measured: the stop-time inventory waited out its whole timeout).
+    child.stdin?.end();
   });
 }
 
@@ -414,7 +443,7 @@ exec pi "$@"
 export const PROBE_SCRIPT = `#!/bin/sh
 /.msb/scripts/dfirswarm-bridge >/dev/null 2>&1 || true
 exec python3 - <<'PY'
-import errno, json, os, socket, subprocess, time
+import errno, json, os, shutil, socket, subprocess, time
 S = os.environ.get("SWARM_SANDBOX", "")
 A = os.environ.get("AGENT_ID", "")
 def can_write(path):
@@ -485,6 +514,14 @@ try:
 except Exception:
     out["image"] = None
 out["kernel"] = os.uname().release
+# The run's packs' required programs, looked for the way an agent's shell
+# would find them: the image's venv first, then PATH.
+want = [b for b in os.environ.get("SWARM_REQUIRED_BINARIES", "").split(",") if b]
+search = "/opt/dfir/venv/bin:" + os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+out["missing_binaries"] = [b for b in want if not shutil.which(b, path=search)]
+# What a pack tool that mounts something would find: FUSE and loop devices.
+out["fuse"] = os.path.exists("/dev/fuse")
+out["loop"] = any(n.startswith("loop") for n in os.listdir("/dev")) or os.path.exists("/dev/loop-control")
 mounts = []
 for line in open("/proc/mounts"):
     parts = line.split()
@@ -496,6 +533,65 @@ out["guest_time"] = time.time()
 print(json.dumps(out))
 PY
 `;
+
+/** What one of the run's packs needs of an image: its version, its seal, the programs it requires. */
+export type PackNeed = { id: string; version: string; seal: string; required: string[] };
+
+/** The seal of a pack: the sha256 of its sorted checksums, as `pack.sh seal` wrote them. */
+export function packSeal(manifest: { checksums?: { sha256?: Record<string, string> } }): string {
+  const sums = manifest.checksums?.sha256 ?? {};
+  const sorted = Object.fromEntries(Object.keys(sums).sort().map((k) => [k, sums[k]]));
+  return createHash("sha256").update(JSON.stringify(sorted)).digest("hex");
+}
+
+/** The run's packs, read from their installed directories. */
+export function packNeeds(packDirs: string[]): PackNeed[] {
+  const out: PackNeed[] = [];
+  for (const dir of packDirs.filter(Boolean)) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(dir, "pack.json"), "utf8")) as { id?: string; version?: string; checksums?: { sha256?: Record<string, string> } };
+      let required: string[] = [];
+      try {
+        const host = JSON.parse(readFileSync(join(dir, "requires", "host.json"), "utf8")) as { binaries?: Array<{ name?: string; optional?: boolean }> };
+        required = (host.binaries ?? []).filter((b) => b.name && !b.optional).map((b) => b.name as string);
+      } catch {
+        required = [];
+      }
+      out.push({ id: manifest.id ?? dir.split("/").pop() ?? dir, version: manifest.version ?? "?", seal: packSeal(manifest), required: [...new Set(required)] });
+    } catch {
+      // an unreadable pack was refused at kickoff already
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether the image fits the run's packs. A program a pack requires and the
+ * VM does not have is a blocker, unless the agents may install (then they
+ * are told). An image built from another version of a pack, or one that
+ * records no pack versions at all, is said and recorded.
+ */
+export function imageFit(probe: Record<string, unknown>, needs: PackNeed[], allowInstall: boolean): { blockers: string[]; warnings: string[] } {
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+  const missing = new Set(Array.isArray(probe.missing_binaries) ? (probe.missing_binaries as string[]) : []);
+  const image = (probe.image ?? {}) as { pack_versions?: Record<string, { version?: string; seal?: string }> };
+  if (needs.length && !image.pack_versions) warnings.push("the image records no pack versions (built before images recorded them): which version of each pack it was built for is unknown");
+  for (const need of needs) {
+    const lacks = need.required.filter((b) => missing.has(b));
+    if (lacks.length) {
+      const text = `the image lacks ${lacks.join(", ")}, which pack ${need.id} requires`;
+      if (allowInstall) warnings.push(`${text}; the agents may install it (--allow-install)`);
+      else blockers.push(`${text}: build an image for these packs (images/README.md), pass --image, or let the agents install with --allow-install`);
+    }
+    const built = image.pack_versions?.[need.id];
+    if (image.pack_versions && !built) warnings.push(`the image was not built with pack ${need.id}; its required programs are there, its optional ones may not be`);
+    else if (built && (built.version !== need.version || (built.seal && built.seal !== need.seal))) {
+      warnings.push(`the image was built with ${need.id} ${built.version ?? "?"}${built.seal && built.seal !== need.seal ? " (another seal)" : ""}; this run has ${need.version}`);
+    }
+  }
+  return { blockers, warnings };
+}
 
 /** What each agent's VM must find, or the kickoff stops. */
 export function probeVerdict(probe: Record<string, unknown>, expectInputs: boolean, expectedInputFiles?: number): string[] {
@@ -572,7 +668,7 @@ export type VmRecord = {
   name: string;
   run: string;
   runtime: { name: "microsandbox"; version: string };
-  image: { ref: string; manifest_digest: string | null; description: unknown };
+  image: { ref: string; manifest_digest: string | null; expected_digest?: string; description: unknown };
   cpus: number;
   memory_mib: number;
   max_duration_sec: number | null;
@@ -648,6 +744,8 @@ async function createOne(
     SWARM_TRACE_SOCKET: GUEST_HUB_SOCKET,
     SWARM_NUDGE_SOCKET: GUEST_HUB_SOCKET,
     SWARM_ISOLATION: "microvm",
+    // What the probe looks for: every program the run's packs require.
+    SWARM_REQUIRED_BINARIES: [...new Set(packNeeds((spec.env.SWARM_PACK_DIRS ?? "").split(":")).flatMap((n) => n.required))].join(","),
   };
 
   // Never `.replace()`: a VM of this name is another run's, or this run's
@@ -763,7 +861,7 @@ async function createOne(
     name,
     run: spec.run,
     runtime: { name: "microsandbox", version: await msbVersion() },
-    image: { ref: spec.image, manifest_digest: digest, description: probe.image ?? null },
+    image: { ref: spec.image, manifest_digest: digest, ...(spec.image_digest ? { expected_digest: spec.image_digest } : {}), description: probe.image ?? null },
     cpus: spec.cpus ?? 2,
     memory_mib: spec.memory_mib ?? 2048,
     max_duration_sec: spec.max_duration_sec ?? null,
@@ -781,7 +879,7 @@ async function createOne(
   return record;
 }
 
-export async function createVms(spec: VmSpec): Promise<{ records: VmRecord[]; failures: Array<{ agent: string; reasons: string[] }> }> {
+export async function createVms(spec: VmSpec): Promise<{ records: VmRecord[]; failures: Array<{ agent: string; reasons: string[] }>; warnings: string[] }> {
   const M = await sdk();
   const secrets = await resolveSecrets(spec);
   const expectInputs = existsSync(join(spec.sandbox, "inputs"));
@@ -791,20 +889,33 @@ export async function createVms(spec: VmSpec): Promise<{ records: VmRecord[]; fa
   } catch {
     expectedInputFiles = undefined;
   }
+  const needs = packNeeds((spec.env.SWARM_PACK_DIRS ?? "").split(":"));
+  const allowInstall = spec.env.SWARM_ALLOW_INSTALL === "1";
   const settled = await Promise.allSettled(spec.agents.map((a) => createOne(M, spec, a, secrets)));
   const records: VmRecord[] = [];
   const failures: Array<{ agent: string; reasons: string[] }> = [];
-  settled.forEach((r, i) => {
+  const warnings = new Set<string>();
+  for (const [i, r] of settled.entries()) {
     const agent = spec.agents[i].id;
     if (r.status === "rejected") {
       failures.push({ agent, reasons: [r.reason instanceof Error ? r.reason.message : String(r.reason)] });
-      return;
+      continue;
     }
     records.push(r.value);
-    const wrong = probeVerdict(r.value.probe, expectInputs, expectedInputFiles);
+    const fit = imageFit(r.value.probe, needs, allowInstall);
+    const wrong = [...probeVerdict(r.value.probe, expectInputs, expectedInputFiles), ...fit.blockers];
+    // One image for the whole run, by digest: a tag moved between two VMs'
+    // boots would give two agents two different toolsets under one name.
+    if (spec.image_digest && r.value.image.manifest_digest && r.value.image.manifest_digest !== spec.image_digest) {
+      wrong.push(`booted ${r.value.image.manifest_digest}, not ${spec.image_digest}, which ${spec.image} was when the run started`);
+    }
     if (wrong.length) failures.push({ agent, reasons: wrong });
-  });
-  return { records, failures };
+    for (const w of fit.warnings) warnings.add(w);
+    // The fit is part of what the VM was: recorded beside the probe.
+    (r.value as VmRecord & { image_fit?: unknown }).image_fit = { packs: needs.map((n) => ({ id: n.id, version: n.version })), ...fit };
+    await writeFile(join(spec.records_dir, `${agent}.json`), `${JSON.stringify(r.value, null, 2)}\n`).catch(() => undefined);
+  }
+  return { records, failures, warnings: [...warnings] };
 }
 
 /** This run's VMs, from msb's own list by label. */
@@ -884,6 +995,16 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
     const agent = vm.agent || vm.name.replace(`dfs-${runId}-`, "");
     if (options.agent && agent !== options.agent) continue;
     const entry: FinishEntry = { agent, name: vm.name };
+    // What the VM holds now against what its image held: a package its root
+    // installed outside the seat's recorded toolchain (apt, or pip into the
+    // image's own venv) is named before the disk is kept.
+    const inventory = await run(msb, ["exec", vm.name, "--", "python3", "-c", INVENTORY_SCRIPT], { timeoutMs: 90_000 });
+    let outside: Record<string, unknown>;
+    try {
+      outside = inventory.code === 0 ? (JSON.parse(inventory.stdout.trim().split("\n").pop() ?? "{}") as Record<string, unknown>) : { error: (inventory.stderr || inventory.stdout).trim() || `exit ${inventory.code}` };
+    } catch {
+      outside = { error: "the inventory said something that is not JSON" };
+    }
     const stopped = await run(msb, ["stop", vm.name], { timeoutMs: 120_000 });
     if (stopped.code !== 0 && !/not running|already stopped|stopped/i.test(`${stopped.stdout}${stopped.stderr}`)) {
       entry.error = `msb stop: ${(stopped.stderr || stopped.stdout).trim() || `exit ${stopped.code}`}`;
@@ -932,6 +1053,7 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
       }
     }
     if (record) {
+      (record as VmRecord & { installed_outside_image?: unknown }).installed_outside_image = outside;
       record.stopped_at = new Date().toISOString();
       if (entry.kept) (record as VmRecord & { kept?: string }).kept = entry.error;
       await writeFile(recordFile, `${JSON.stringify(record, null, 2)}\n`).catch(() => undefined);
@@ -943,6 +1065,32 @@ export async function finishRun(runId: string, sandbox: string, options: { snaps
   }
   return out;
 }
+
+/**
+ * Run in each VM at stop: the packages it holds that its image did not, by
+ * the image's own record. apt against `dpkg_all` (an image built before that
+ * field says it has no baseline), the image's venv against `pip`.
+ */
+export const INVENTORY_SCRIPT = `
+import json, subprocess
+rec = json.load(open("/etc/dfirswarm/image.json"))
+def dpkg():
+    out = subprocess.run(["dpkg-query", "-W", "-f", "\${Package}\\t\${Version}\\n"], capture_output=True, text=True).stdout
+    return dict(l.split("\\t", 1) for l in out.splitlines() if "\\t" in l)
+def venv():
+    try:
+        out = subprocess.run(["/opt/dfir/venv/bin/pip", "list", "--format=json"], capture_output=True, text=True, timeout=60).stdout
+        return {p["name"]: p["version"] for p in json.loads(out or "[]")}
+    except Exception:
+        return {}
+def diff(base, now):
+    return {k: v for k, v in now.items() if base.get(k) != v}
+res = {"baseline": "dpkg_all" in rec}
+if "dpkg_all" in rec:
+    res["apt"] = diff(rec["dpkg_all"], dpkg())
+res["venv"] = diff(rec.get("pip") or {}, venv())
+print(json.dumps(res))
+`;
 
 /**
  * VMs whose run is over: this registry recorded them and does not say the
@@ -980,7 +1128,7 @@ export async function reapVms(options: { run?: string; registry?: string } = {})
  * host, which an agent in a VM never touches. Returns the check's exit code
  * (3: a required tool is missing) and the toolbox.json it wrote.
  */
-export async function imageToolbox(image: string, preset: string, required: boolean): Promise<{ code: number; json: string; output: string }> {
+export async function imageToolbox(image: string, preset: string, required: boolean, packDirs: string[] = []): Promise<{ code: number; json: string; output: string; digest?: string }> {
   const M = await sdk();
   const { mkdtemp, copyFile } = await import("node:fs/promises");
   const tmp = await mkdtemp("/tmp/dfs-tb-");
@@ -988,6 +1136,18 @@ export async function imageToolbox(image: string, preset: string, required: bool
   try {
     await copyFile(join(ROOT, "scripts", "toolbox.sh"), join(tmp, "toolbox.sh"));
     await mkdir(join(tmp, "sbx"), { recursive: true });
+    // Every program the run's packs name, for the check to look for in the image.
+    const programs: Array<{ name: string; why: string; pack: string; required: boolean }> = [];
+    for (const dir of packDirs.filter(Boolean)) {
+      try {
+        const id = (JSON.parse(readFileSync(join(dir, "pack.json"), "utf8")) as { id?: string }).id ?? dir;
+        const host = JSON.parse(readFileSync(join(dir, "requires", "host.json"), "utf8")) as { binaries?: Array<{ name?: string; why?: string; optional?: boolean }> };
+        for (const b of host.binaries ?? []) if (b.name) programs.push({ name: b.name, why: b.why ?? "", pack: id, required: !b.optional });
+      } catch {
+        // a pack without host requirements names no program
+      }
+    }
+    await writeFile(join(tmp, "image.json"), JSON.stringify({ image, programs }));
     const sandbox = await M.Sandbox.builder(name)
       .image(image)
       .pullPolicy("if-missing")
@@ -999,9 +1159,18 @@ export async function imageToolbox(image: string, preset: string, required: bool
       .detached(true)
       .volume("/tb", (v) => v.bind(realpathSync(tmp)))
       .create();
-    const out = await sandbox.exec("bash", ["/tb/toolbox.sh", "/tb/sbx", preset, ...(required ? ["--required"] : [])]);
-    const json = await readFile(join(tmp, "sbx", "toolbox.json"), "utf8").catch(() => "");
-    return { code: out.code, json, output: `${out.stdout()}${out.stderr()}` };
+    const out = await sandbox.exec("bash", ["/tb/toolbox.sh", "/tb/sbx", preset, ...(required ? ["--required"] : []), "--image", "/tb/image.json"]);
+    let json = await readFile(join(tmp, "sbx", "toolbox.json"), "utf8").catch(() => "");
+    // Which image this was, by digest: the check describes that image, not a tag.
+    const digest = await imageDigest(name);
+    if (json && digest) {
+      try {
+        json = `${JSON.stringify({ ...(JSON.parse(json) as Record<string, unknown>), image_digest: digest }, null, 2)}\n`;
+      } catch {
+        // left as the check wrote it
+      }
+    }
+    return { code: out.code, json, output: `${out.stdout()}${out.stderr()}`, ...(digest ? { digest } : {}) };
   } finally {
     await run(msbBinary(), ["stop", name], { timeoutMs: 60_000 });
     await run(msbBinary(), ["rm", name], { timeoutMs: 60_000 });
@@ -1314,9 +1483,29 @@ export async function imageDigest(name: string): Promise<string | null> {
 }
 
 /** Can this host run a VM at all, and is the image here? */
-export async function probeHost(image?: string): Promise<{ ok: boolean; msb: string; version: string; reasons: string[]; image_present?: boolean; doctor_output?: string }> {
+/** An image's digest as msb holds it locally, or null when msb does not have it. */
+export async function imageRefDigest(ref: string): Promise<string | null> {
+  const r = await run(msbBinary(), ["image", "inspect", ref, "--format", "json"], { timeoutMs: 30_000 });
+  if (r.code !== 0) return null;
+  try {
+    const d = (JSON.parse(r.stdout) as { digest?: string }).digest;
+    return typeof d === "string" && /^sha256:[0-9a-f]{64}$/.test(d) ? d : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function probeHost(image?: string): Promise<{ ok: boolean; msb: string; version: string; reasons: string[]; image_present?: boolean; image_digest?: string | null; doctor_output?: string }> {
   const msb = msbBinary();
   const reasons: string[] = [];
+  const platform = vmPlatformProblem();
+  if (platform) return { ok: false, msb, version: "", reasons: [platform] };
+  // An optional dependency: a host-only install (npm ci --omit=optional) has none.
+  try {
+    createRequire(import.meta.url).resolve("microsandbox");
+  } catch {
+    return { ok: false, msb, version: "", reasons: ["the microsandbox package is not installed (it is optional: run npm ci without --omit=optional)"] };
+  }
   const v = await run(msb, ["--version"], { timeoutMs: 20_000 });
   if (v.code !== 0) return { ok: false, msb, version: "", reasons: [`msb does not run: ${v.stderr.trim() || v.code}`] };
   const doctor = await run(msb, ["doctor"], { timeoutMs: 60_000 });
@@ -1328,11 +1517,12 @@ export async function probeHost(image?: string): Promise<{ ok: boolean; msb: str
     reasons.push(`msb doctor failed (exit ${doctor.code}); its whole output follows`);
   }
   let image_present: boolean | undefined;
+  let image_digest: string | null | undefined;
   if (image) {
-    const r = await run(msb, ["image", "inspect", image], { timeoutMs: 30_000 });
-    image_present = r.code === 0;
+    image_digest = await imageRefDigest(image);
+    image_present = image_digest !== null;
   }
-  return { ok: reasons.length === 0, msb, version: v.stdout.trim(), reasons, ...(image !== undefined ? { image_present } : {}), ...(doctor_output !== undefined ? { doctor_output } : {}) };
+  return { ok: reasons.length === 0, msb, version: v.stdout.trim(), reasons, ...(image !== undefined ? { image_present, image_digest } : {}), ...(doctor_output !== undefined ? { doctor_output } : {}) };
 }
 
 async function main(): Promise<void> {
@@ -1370,6 +1560,21 @@ async function main(): Promise<void> {
       console.log(JSON.stringify({ ok: bad.length === 0, refused: bad }));
       process.exit(bad.length ? 2 : 0);
     }
+    case "pull": {
+      // Before the run's clock starts, and loud about it: a multi-gigabyte
+      // image pulled by N VMs at once used to eat the first minutes of the
+      // wall clock in silence.
+      const image = opt("--image");
+      if (!image) throw new Error("pull needs --image REF");
+      const r = await new Promise<number>((done) => {
+        const child = spawn(msbBinary(), ["pull", image], { stdio: ["ignore", 2, 2] });
+        child.on("close", (code) => done(code ?? 1));
+        child.on("error", () => done(1));
+      });
+      const digest = r === 0 ? await imageRefDigest(image) : null;
+      console.log(JSON.stringify({ ok: r === 0 && digest !== null, digest }));
+      process.exit(r === 0 && digest ? 0 : 1);
+    }
     case "probe": {
       const r = await probeHost(opt("--image"));
       console.log(JSON.stringify(r));
@@ -1386,7 +1591,7 @@ async function main(): Promise<void> {
         console.log(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
         process.exit(1);
       }
-      console.log(JSON.stringify({ ok: result.failures.length === 0, vms: result.records.map((r) => ({ agent: r.agent, name: r.name, digest: r.image.manifest_digest })), failures: result.failures }));
+      console.log(JSON.stringify({ ok: result.failures.length === 0, vms: result.records.map((r) => ({ agent: r.agent, name: r.name, digest: r.image.manifest_digest })), failures: result.failures, warnings: result.warnings }));
       process.exit(result.failures.length ? 1 : 0);
     }
     case "finish": {
@@ -1402,8 +1607,8 @@ async function main(): Promise<void> {
       const image = opt("--image");
       const preset = opt("--preset") ?? "dfir";
       const out = opt("--out");
-      if (!image || !out) throw new Error("toolbox needs --image REF --out FILE [--preset SETS] [--required]");
-      const r = await imageToolbox(image, preset, rest.includes("--required"));
+      if (!image || !out) throw new Error("toolbox needs --image REF --out FILE [--preset SETS] [--packs DIR:DIR] [--required]");
+      const r = await imageToolbox(image, preset, rest.includes("--required"), (opt("--packs") ?? "").split(":"));
       if (r.json) await writeFile(out, r.json);
       // The script names the file at its guest path; the operator reads the host's.
       process.stderr.write(r.output.replaceAll("/tb/sbx/toolbox.json", out));

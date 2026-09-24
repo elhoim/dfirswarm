@@ -1,7 +1,7 @@
 {
   "id": "mobile-forensics",
   "name": "Mobile Forensics Pack",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Method and tooling for a phone: what kind of extraction you were handed and what it cannot contain, iOS backups and their manifest, Android package and user data, the app databases that carry messages and location, protobuf blobs, and what deleted means inside SQLite.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -32,7 +32,7 @@
       "skills/android/artifacts.md": "4f01be1e0816c52580e44cb10eea6508f5217e3ce56a48031d41883febaf73e5",
       "skills/extractions/what-you-have.md": "59b02f0c6e4554e10e38508d8c3c6707f7ff3a978c83c9919e413c6b6b5f451a",
       "skills/apps/databases.md": "9add48be5715438b8c229a0116957e1ff55f80d53289b4dfff457c3c7435393a",
-      "requires/host.json": "ddeab43dd66d76d494fe7a3294b74e5f97ef196a5f27268d10d6f81ff8477b23",
+      "requires/host.json": "47b78d786b0285d697cce842b531ab588a53a4a333054bcce60d3ce24a23c52b",
       "requires/python.txt": "4f3792a5513cf1a163af6dad16f76dd50b946f0f8b55bea9612056f570f48ce8",
       "skills/INDEX.md": "a292ec68c732103ea7af9c421071644568ea8532f4fac2fffae28aea4c15c203"
     }

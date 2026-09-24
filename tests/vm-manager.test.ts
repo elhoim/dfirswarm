@@ -14,7 +14,10 @@ import {
   bypassCovers,
   egressRules,
   gatewayPorts,
+  imageFit,
   interceptPorts,
+  packNeeds,
+  packSeal,
   parseAllowEntry,
   guestPiConfig,
   resolveSecrets,
@@ -24,6 +27,7 @@ import {
   placeholderFor,
   probeVerdict,
   registryLabel,
+  vmPlatformProblem,
   tlsBypass,
   vmName,
   type ResolvedSecret,
@@ -286,4 +290,49 @@ test("a seat's VM gets the providers of its own model and the summary model, and
   });
   assert.deepEqual(seatProviders(s, s.agents[0]).map((p) => p.provider), ["openai", "google", "lmstudio"]);
   assert.deepEqual(seatProviders(s, s.agents[1]).map((p) => p.provider), ["deepseek", "google", "lmstudio"]);
+});
+
+test("a pack's needs come from its installed directory: its version, its seal and the programs it requires", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "vm-packneed-"));
+  dirs.push(dir);
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(join(dir, "requires"), { recursive: true });
+  await writeFile(join(dir, "pack.json"), JSON.stringify({ id: "demo", version: "1.2.3", checksums: { sha256: { "b.md": "22", "a.md": "11" } } }));
+  await writeFile(join(dir, "requires", "host.json"), JSON.stringify({ binaries: [{ name: "fls" }, { name: "vol", optional: true }, { name: "fls" }] }));
+  const [need] = packNeeds([dir]);
+  assert.deepEqual({ ...need, seal: undefined }, { id: "demo", version: "1.2.3", seal: undefined, required: ["fls"] });
+  // The seal is the sha256 of the sorted checksums, as images/recipe.py computes it.
+  const { createHash } = await import("node:crypto");
+  assert.equal(need.seal, createHash("sha256").update('{"a.md":"11","b.md":"22"}').digest("hex"));
+  assert.equal(packSeal({ checksums: { sha256: { "a.md": "11", "b.md": "22" } } }), need.seal, "key order does not change the seal");
+});
+
+test("an image that lacks a pack's required program stops the kickoff, unless the agents may install; another pack version is said", () => {
+  const needs = [
+    { id: "cfb", version: "1.2.2", seal: "s1", required: ["fls", "icat"] },
+    { id: "mem", version: "1.0.1", seal: "s2", required: [] },
+  ];
+  const probe = { missing_binaries: ["icat"], image: { pack_versions: { cfb: { version: "1.2.1", seal: "old" } } } };
+  const closed = imageFit(probe, needs, false);
+  assert.equal(closed.blockers.length, 1);
+  assert.match(closed.blockers[0], /lacks icat, which pack cfb requires/);
+  assert.ok(closed.warnings.some((w) => /built with cfb 1\.2\.1 \(another seal\); this run has 1\.2\.2/.test(w)), closed.warnings.join("\n"));
+  assert.ok(closed.warnings.some((w) => /not built with pack mem/.test(w)), closed.warnings.join("\n"));
+  const open = imageFit(probe, needs, true);
+  assert.deepEqual(open.blockers, []);
+  assert.ok(open.warnings.some((w) => /agents may install it/.test(w)));
+  // An image from before the record: said once, not a blocker.
+  const old = imageFit({ missing_binaries: [], image: { profile: "disk" } }, needs, false);
+  assert.deepEqual(old.blockers, []);
+  assert.deepEqual(old.warnings, ["the image records no pack versions (built before images recorded them): which version of each pack it was built for is unknown"]);
+  assert.deepEqual(imageFit({ image: {} }, [], false), { blockers: [], warnings: [] }, "a run with no packs asks nothing of the image");
+});
+
+test("a host msb does not run on is refused by name, before msb is asked", () => {
+  assert.equal(vmPlatformProblem("darwin", "arm64", undefined), null);
+  assert.match(vmPlatformProblem("darwin", "x64", undefined) ?? "", /Apple silicon; this Mac is Intel/);
+  assert.equal(vmPlatformProblem("linux", "x64", "2.36"), null);
+  assert.match(vmPlatformProblem("linux", "x64", undefined) ?? "", /not glibc \(musl\?\)/);
+  assert.match(vmPlatformProblem("win32", "x64", undefined) ?? "", /this host is win32/);
+  assert.match(vmPlatformProblem("linux", "ppc64", "2.36") ?? "", /x64 or arm64/);
 });

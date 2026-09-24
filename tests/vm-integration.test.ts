@@ -270,19 +270,28 @@ test("a secret never enters the guest: the VM holds its placeholder", async (t) 
   const created = await createVms(r.spec);
   assert.deepEqual(created.failures, []);
   const name = vmName(r.run, "vmt300");
-  const out = inVm(name, `printf 'env=%s\\n' "$VT_API_KEY"; (env; cat /proc/1/environ 2>/dev/null; grep -rs "${value}" /root /etc /run /tmp) | grep -c "${value}" || true`);
+  // -D skip: a FIFO under /run held grep until the exec's timeout (the test
+  // took over three minutes); a device or a pipe holds no file's bytes.
+  const out = inVm(name, `printf 'env=%s\\n' "$VT_API_KEY"; (env; cat /proc/1/environ 2>/dev/null; grep -rs -D skip "${value}" /root /etc /run /tmp) | grep -c "${value}" || true`);
   assert.match(out, /env=dfirswarm-secret-vtapikey-[0-9a-f]{24}/, `the guest holds a placeholder under the secret's own name\n${out}`);
   assert.match(out, /^0$/m, "the value is nowhere in the guest's environment or files");
   const record = JSON.parse(await readFile(join(r.sandbox, "vm", "vmt300.json"), "utf8"));
   assert.deepEqual(record.secrets, [{ name: "VT_API_KEY", hosts: ["www.virustotal.com"] }], "the record names the secret and its host, never its value");
   assert.ok(!JSON.stringify(record).includes(value));
   // Nor on the host, at rest: msb keeps a sandbox's configuration under its
-  // home, and the value must not be in it (msb's own CLI refuses an inline
-  // value for that reason; the SDK path is checked here).
+  // home — its database and the sandbox's own directory — and the value must
+  // not be in either (msb's own CLI refuses an inline value for that reason;
+  // the SDK path is checked here). The guest's disk and root filesystem are
+  // the guest's files, searched from inside above: reading an 8 GiB disk
+  // image from here took the test past three minutes.
   const msbHome = process.env.MSB_HOME || join(process.env.HOME || "", ".microsandbox");
   let atRest = "";
   try {
-    atRest = execFileSync("grep", ["-rls", value, join(msbHome, "sandboxes", name), r.sandbox, r.hubDir], { encoding: "utf8" }).trim();
+    atRest = execFileSync(
+      "grep",
+      ["-rlsF", "--exclude=upper.ext4", "--exclude-dir=rootfs", "--exclude-dir=checkpoint-store", "--exclude-dir=checkpoints", value, join(msbHome, "sandboxes", name), join(msbHome, "db"), r.sandbox, r.hubDir],
+      { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } },
+    ).trim();
   } catch {
     atRest = ""; // grep exits 1 when nothing matches
   }
@@ -406,12 +415,16 @@ test("the catalog runs in a throwaway VM of the image, with the image's tools, a
   const floorBefore = await fingerprint(sandbox, ["catalog"]);
 
   // What the image holds decides what the catalog can build; the host's own
-  // tools must not show through.
-  assert.deepEqual((await createVms(r.spec)).failures, []);
+  // tools must not show through. VM_TEST_CATALOG_IMAGE names an image with
+  // The Sleuth Kit (CI builds disk for it): then the disk must be catalogued,
+  // not merely allowed to be.
+  const catalogImage = process.env.VM_TEST_CATALOG_IMAGE || IMAGE;
+  assert.deepEqual((await createVms({ ...r.spec, image: catalogImage })).failures, []);
   const imageHasTsk = inVm(vmName(r.run, "vmt800"), "command -v fsstat >/dev/null && command -v fls >/dev/null && echo yes || echo no").trim() === "yes";
+  if (process.env.VM_TEST_CATALOG_IMAGE) assert.ok(imageHasTsk, `${catalogImage} was named for the catalog test and has no Sleuth Kit`);
 
   // With the run's allowed hosts, as a kickoff with --allow-host passes them.
-  const result = await imageCatalog(IMAGE, sandbox, [evidence], { memoryMib: 1024, allowHosts: ["registry.npmjs.org", "*.github.com"] });
+  const result = await imageCatalog(catalogImage, sandbox, [evidence], { memoryMib: 1024, allowHosts: ["registry.npmjs.org", "*.github.com"] });
   assert.equal(result.code, 0, result.output);
   const readme = await readFile(join(sandbox, "catalog", "README.md"), "utf8");
   if (imageHasTsk) {

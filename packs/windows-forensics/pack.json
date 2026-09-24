@@ -1,7 +1,7 @@
 {
   "id": "windows-forensics",
   "name": "Windows Forensics Pack",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Artefact-by-artefact method and tooling for a Windows examination: the file system and its journals, the hives, execution evidence, the event logs and the records inside a cleared one, accounts and remote access, persistence, PowerShell, browsers, shadow copies, memory, and the traces anti-forensics leaves.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -86,7 +86,7 @@
       "skills/registry/overview.md": "a645987cbbbe4c610e7701e41788e067f880d3d5729a31d2ae4569a8fdee625a",
       "skills/registry/system-profile.md": "931b25341d637782c5f21c34cdfbe6bda8709486a16280ce29a0b54b0f7b75b0",
       "skills/antiforensics/traces.md": "c87467f49a555613b42c980c1ef084d98fd6f8e3e7ac438243084e7443cf2748",
-      "requires/host.json": "9c34b1044b28de30a748e7a6c33850f07129d2b3141b0a83375703b4f2246f15",
+      "requires/host.json": "3fc8c692b9eea0a6d9917dbbe2de53b3685ab62ec0fc7f5f816f863a03948a35",
       "requires/python.txt": "1530ba5bb98f86b57d6a87e787ad4f0a6a10a185f13ca5cfd0935f6fc7e5b4cb",
       "skills/INDEX.md": "8c386266c502dc85a1c46b2896421ab3bc4f82c5a28a72b2518bd5ffeebe45c7"
     }

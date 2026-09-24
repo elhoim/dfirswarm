@@ -736,7 +736,13 @@ export type VmRecordView = {
   agent: string;
   name?: string;
   runtime?: { name?: string; version?: string };
-  image?: { ref?: string; manifest_digest?: string | null };
+  image?: {
+    ref?: string;
+    manifest_digest?: string | null;
+    expected_digest?: string;
+    /** The image's own record, /etc/dfirswarm/image.json, as the VM's probe read it. */
+    description?: { profile?: string; pack_versions?: Record<string, { version?: string }>; redistributable?: boolean; nonredistributable?: string[]; downloads?: Record<string, { version?: string }> } | null;
+  };
   cpus?: number;
   memory_mib?: number;
   mounts?: Array<{ host?: string; guest?: string; mode?: string; noexec?: boolean }>;
@@ -745,6 +751,8 @@ export type VmRecordView = {
   snapshot?: { path?: string; sha256?: string; bytes?: number } | { error?: string };
   created_at?: string;
   stopped_at?: string;
+  /** What the VM held at stop that its image did not (scripts/vm.ts INVENTORY_SCRIPT). */
+  installed_outside_image?: { baseline?: boolean; apt?: Record<string, string>; venv?: Record<string, string>; error?: string };
 };
 
 /**
@@ -759,20 +767,48 @@ export function vmRows(records: VmRecordView[]): Array<[string, string]> {
   const rows: Array<[string, string]> = [
     ["Isolation", `one microVM per agent (${first.runtime?.name ?? "microsandbox"} ${first.runtime?.version ?? ""}`.trimEnd() + `), image ${images.join("; ")}`],
   ];
+  // Every VM booted the digest the kickoff resolved, or it is said which did not.
+  const expected = first.image?.expected_digest;
+  if (expected) {
+    const off = records.filter((r) => r.image?.manifest_digest && r.image.manifest_digest !== expected);
+    rows.push(["Image digest", off.length ? `DIFFERS: ${off.map((r) => `${r.agent} booted ${r.image?.manifest_digest}`).join("; ")}; the run resolved ${expected}` : `every VM booted ${expected}, resolved once at kickoff`]);
+  }
+  const desc = first.image?.description;
+  if (desc && typeof desc === "object") {
+    const packs = Object.entries(desc.pack_versions ?? {}).map(([id, v]) => `${id} ${v.version ?? "?"}`).join(", ");
+    const downloads = Object.entries(desc.downloads ?? {}).map(([n, v]) => `${n} ${v.version ?? "?"}`).join(", ");
+    rows.push([
+      "Image record",
+      `profile ${desc.profile ?? "?"}; built from ${packs || "no recorded pack versions"}${downloads ? `; pinned downloads ${downloads}` : ""}; ${
+        desc.redistributable === false ? `NOT for redistribution (${(desc.nonredistributable ?? []).length} programs; see /etc/dfirswarm/NOTICE in the image)` : desc.redistributable === true ? "redistributable" : "redistribution not recorded"
+      }`,
+    ]);
+  }
   for (const r of records) {
     const writable = (r.mounts ?? []).filter((m) => m.mode === "rw").map((m) => `${m.guest ?? m.host}${m.noexec ? " (no-exec)" : ""}`);
     const net = r.network?.default === "public"
       ? "every public host (--no-netguard)"
-      : [...(r.network?.allow_hosts ?? []).map((h) => `${h}:443`), ...(r.network?.host_ports ?? []).map((p) => `the host gateway :${p}`)].join(", ") || "nothing";
+      : [...(r.network?.allow_hosts ?? []).map((h) => (/:\d+$/.test(h) && !h.endsWith("]") ? h : `${h}:443`)), ...(r.network?.host_ports ?? []).map((p) => `the host gateway :${p}`)].join(", ") || "nothing";
     const secrets = (r.secrets ?? []).map((s) => `${s.name ?? "?"} → ${(s.hosts ?? []).join(", ")}`).join("; ") || "none";
     const snap = !r.snapshot
       ? "not kept"
       : "error" in r.snapshot && r.snapshot.error
         ? `NOT KEPT — ${r.snapshot.error}`
         : `kept, sha256 ${(r.snapshot as { sha256?: string }).sha256 ?? "?"} (${(r.snapshot as { path?: string }).path ?? "?"})`;
+    const inv = r.installed_outside_image;
+    const added = inv && !inv.error ? [...Object.entries(inv.apt ?? {}).map(([k, v]) => `apt ${k} ${v}`), ...Object.entries(inv.venv ?? {}).map(([k, v]) => `venv ${k} ${v}`)] : [];
+    const installed = !inv
+      ? "not inventoried"
+      : inv.error
+        ? `not inventoried (${inv.error})`
+        : added.length
+          ? `INSTALLED OUTSIDE THE IMAGE: ${added.join(", ")}`
+          : inv.baseline === false
+            ? "nothing in the image's venv; apt not comparable (the image records no full package list)"
+            : "nothing outside the image";
     rows.push([
       `VM ${r.agent}`,
-      `${r.name ?? "?"}: ${r.cpus ?? "?"} vCPU, ${r.memory_mib ?? "?"} MiB; writable: ${writable.join(", ") || "nothing"}; everything else mounted read-only; could reach: ${net}; secrets swapped in on the way out: ${secrets}; disk at stop: ${snap}`,
+      `${r.name ?? "?"}: ${r.cpus ?? "?"} vCPU, ${r.memory_mib ?? "?"} MiB; writable: ${writable.join(", ") || "nothing"}; everything else mounted read-only; could reach: ${net}; secrets swapped in on the way out: ${secrets}; installed at stop: ${installed}; disk at stop: ${snap}`,
     ]);
   }
   return rows;

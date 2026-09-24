@@ -158,6 +158,8 @@ export const api = {
   checks: (id: string) => request<ChecksReport>(`/api/swarms/${encodeURIComponent(id)}/checks`),
   goals: () => request<{ goals: GoalSummary[] }>("/api/goals"),
   library: () => request<{ entries: LibraryEntry[] }>("/api/library"),
+  /** Packs installed with pack.sh; the kickoff's pack field. */
+  packs: () => request<{ packs: Array<{ id: string; name: string; version: string; description: string; depends: string[] }> }>("/api/packs"),
   libraryEntry: (id: string) => request<LibraryDocument>(`/api/library/${id.split("/").map(encodeURIComponent).join("/")}`),
   inputs: () => request<InputsLibrary>("/api/inputs"),
   /** Only when the server was started with --allow-inputs-root-from-ui; otherwise a 403 with the command to use. */

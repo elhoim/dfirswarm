@@ -98,7 +98,7 @@
       "why": "Decode a shell item from its documented layout, which is what shellbags falls back to searching for.",
       "install": {
         "brew": "python3 -m pip install libfwsi-python",
-        "apt": "apt-get install -y libfwsi-utils"
+        "apt": "python3 -m pip install libfwsi-python"
       },
       "licence": "LGPL-3.0-or-later",
       "redistributable": false
@@ -170,7 +170,7 @@
       "why": "Read a PST or OST mailbox: the mail on a Windows machine, which nothing else in this pack touches.",
       "install": {
         "brew": "python3 -m pip install libpff-python",
-        "apt": "apt-get install -y libpff-utils"
+        "apt": "apt-get install -y pff-tools"
       },
       "licence": "LGPL-3.0-or-later",
       "redistributable": false
@@ -182,7 +182,25 @@
       "why": "Mount a memory image as a file system: processes, handles, registry and network state as files. AGPL-3.0, so unlike Volatility its licence and this project's do combine.",
       "install": {
         "brew": "https://github.com/ufrisk/MemProcFS/releases",
-        "apt": "https://github.com/ufrisk/MemProcFS/releases"
+        "apt": "pinned download 5.18.11 (install.download)",
+        "download": {
+          "version": "5.18.11",
+          "apt_deps": [
+            "libfuse2",
+            "liblz4-1",
+            "libusb-1.0-0"
+          ],
+          "amd64": {
+            "url": "https://github.com/ufrisk/MemProcFS/releases/download/v5.18/MemProcFS_files_and_binaries_v5.18.11-linux_x64-20260914.tar.gz",
+            "sha256": "55648725838cae111c428131b619845b88fee45be61ea2d962e869ec0e8012aa",
+            "bin": "memprocfs"
+          },
+          "arm64": {
+            "url": "https://github.com/ufrisk/MemProcFS/releases/download/v5.18/MemProcFS_files_and_binaries_v5.18.11-linux_aarch64-20260914.tar.gz",
+            "sha256": "3bee10290ce7b46ec15bc1d48452d4e652ae91e478e8c7f2ba187fdc287a7f85",
+            "bin": "memprocfs"
+          }
+        }
       },
       "licence": "AGPL-3.0-or-later",
       "redistributable": false
@@ -206,7 +224,21 @@
       "why": "Sigma detections plus a forensic timeline over EVTX, in one Rust binary.",
       "install": {
         "brew": "https://github.com/Yamato-Security/hayabusa/releases",
-        "apt": "https://github.com/Yamato-Security/hayabusa/releases"
+        "apt": "pinned download 4.1.0 (install.download)",
+        "download": {
+          "version": "4.1.0",
+          "amd64": {
+            "url": "https://github.com/Yamato-Security/hayabusa/releases/download/v4.1.0/hayabusa-4.1.0-lin-x64-musl.zip",
+            "sha256": "2348a889c1d5dc07880f170e131c61ef68af1c1e1d3cebd5bed8af2d17d42bed",
+            "bin": "hayabusa-4.1.0-lin-x64-musl"
+          },
+          "arm64": {
+            "url": "https://github.com/Yamato-Security/hayabusa/releases/download/v4.1.0/hayabusa-4.1.0-lin-aarch64-musl.zip",
+            "sha256": "385604bf8f9922ded5a2f9dda1c4f0786bb49f1b6ae85c7516bec9a744a27b16",
+            "bin": "hayabusa-4.1.0-lin-aarch64-musl"
+          },
+          "note": "the static (musl) build: the glibc one needs glibc 2.38, and Debian 12 has 2.36"
+        }
       },
       "licence": "GPL-3.0-only",
       "redistributable": false

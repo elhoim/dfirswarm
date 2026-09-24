@@ -166,6 +166,23 @@ perm="$(stat -c '%a' "$env_file" 2>/dev/null || stat -f '%Lp' "$env_file")"
 [[ "$perm" == "600" ]] || fail "secrets.env should be 0600, got $perm"
 pass "a declared secret is stored 0600, outside the pack's sealed files"
 
+# A saved tool taken into a pack: sealed, reduced to what a pack tool says.
+mkdir -p "$WORK/saved/carve_it"
+printf 'print("carved")\n' > "$WORK/saved/carve_it/run.py"
+csha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$WORK/saved/carve_it/run.py")"
+printf '{"name": "carve_it", "description": "Carve it.", "params": {}, "runtime": "python3", "entry": "run.py", "timeout_seconds": 30, "by": "s1", "at": "t", "version": 3, "sha256": "%s", "pack": "other-pack"}\n' "$csha" > "$WORK/saved/carve_it/manifest.json"
+printf '{"saved_from_run": "s1"}\n' > "$WORK/saved/carve_it/provenance.json"
+mk_pack "$WORK/src" adopt-pack
+"$PACK" adopt "$WORK/saved/carve_it" "$WORK/src/adopt-pack" >/dev/null || fail "adopt refused a sealed tool"
+jq -e '(has("by") or has("pack") or has("sha256") or has("version")) | not' "$WORK/src/adopt-pack/tools/carve_it/manifest.json" >/dev/null \
+  || fail "the adopted manifest kept the run's fields: $(cat "$WORK/src/adopt-pack/tools/carve_it/manifest.json")"
+[[ -f "$WORK/src/adopt-pack/tools/carve_it/provenance.json" ]] || fail "the provenance did not come along"
+"$PACK" seal "$WORK/src/adopt-pack" >/dev/null 2>&1 || fail "a pack with an adopted tool does not seal"
+"$PACK" adopt "$WORK/saved/carve_it" "$WORK/src/adopt-pack" >/dev/null 2>&1 && fail "adopt replaced a tool without --replace"
+printf 'print("changed")\n' >> "$WORK/saved/carve_it/run.py"
+"$PACK" adopt "$WORK/saved/carve_it" "$WORK/src/adopt-pack" --replace >/dev/null 2>&1 && fail "adopt took a tool whose script no longer matches its sha256"
+pass "adopt takes a sealed saved tool into a pack without the run's fields, and refuses a changed one"
+
 # Every shipped pack must be sealed, must install and must verify. Install in
 # dependency order rather than alphabetically: a pack whose dependency is not
 # installed yet is refused, which is the behaviour the tests above assert.

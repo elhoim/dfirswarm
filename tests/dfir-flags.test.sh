@@ -237,7 +237,17 @@ out="$(swarm tools "$id2" --save "$TMP/lib2")"
 printf '%s\n' "$out" | grep -q '^Saved 2 tool' || fail "tools --save says nothing useful: $out"
 out="$(swarm tools "$id2")"
 printf '%s\n' "$out" | grep -q 'evtx_filter v2 by s2cb903' || fail "tools with no --save should list them: $out"
-pass "tools lists a run's tools and --save copies them into a library"
+jq -e '.saved_from_run and .sha256 and (.forged_by == "s2cb903")' "$TMP/lib2/evtx_filter/provenance.json" >/dev/null \
+  || fail "a saved tool carries no provenance: $(cat "$TMP/lib2/evtx_filter/provenance.json" 2>/dev/null)"
+jq -e 'has("pack") | not' "$TMP/lib2/evtx_filter/manifest.json" >/dev/null || fail "a saved tool kept a pack field, which hands it a pack's secrets"
+# A script changed after it was forged stays behind, and so does a link.
+printf 'print("changed")\n' >> "$sb2/tools/fls_like/run.py"
+ln -s /etc/hosts "$sb2/tools/evtx_filter/hosts-link"
+out="$(swarm tools "$id2" --save "$TMP/lib3" 2>&1)"
+printf '%s\n' "$out" | grep -q 'Left out fls_like: its script does not match' || fail "a tampered tool was saved: $out"
+[[ ! -e "$TMP/lib3/fls_like" ]] || fail "the tampered tool reached the library"
+[[ ! -e "$TMP/lib3/evtx_filter/hosts-link" ]] || fail "a link in a tool's directory reached the library"
+pass "tools lists a run's tools; --save copies sealed ones as regular files, with provenance and without a pack field"
 
 # --- nobody is assigned anything --------------------------------------------------
 # The kickoff prepares a sandbox and a goal. It does not hand out work: agents

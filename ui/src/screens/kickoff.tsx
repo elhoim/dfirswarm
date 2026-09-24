@@ -176,6 +176,8 @@ type FormState = {
   case_id: string;
   examiner: string;
   no_start: boolean;
+  /** Installed packs the run takes: their skills and tools, and under microvm the image. */
+  packs: string[];
   /** Each agent in its own microVM instead of a process on this host. */
   microvm: boolean;
   /** The VM image; blank lets the packs choose. */
@@ -333,6 +335,8 @@ export function KickoffScreen() {
   const goals = useResource(goalsLoader, 0);
   const libraryLoader = useCallback(() => api.library(), []);
   const library = useResource(libraryLoader, 0);
+  const packsLoader = useCallback(() => api.packs(), []);
+  const installedPacks = useResource(packsLoader, 0);
   const inputsLoader = useCallback(() => api.inputs(), []);
   const inputsLib = useResource(inputsLoader, 0);
   // Earlier runs: the ones that forged tools seed a toolbox, the ones on this evidence are what a clean room hides.
@@ -377,6 +381,7 @@ export function KickoffScreen() {
     case_id: "",
     examiner: "",
     no_start: false,
+    packs: [],
     microvm: false,
     vm_image: "",
     vm_cpus: "",
@@ -534,6 +539,7 @@ export function KickoffScreen() {
         case_id: form.case_id || undefined,
         examiner: form.examiner || undefined,
         no_start: form.no_start,
+        packs: form.packs.length ? form.packs : undefined,
         isolation: form.microvm ? "microvm" : undefined,
         image: form.microvm && form.vm_image.trim() ? form.vm_image.trim() : undefined,
         vm_cpus: form.microvm && form.vm_cpus.trim() ? Number(form.vm_cpus.trim()) : undefined,
@@ -549,7 +555,7 @@ export function KickoffScreen() {
     }
   }
 
-  const command = `swarm.sh start ${teamMode ? `--models "${teamSpec(form.team) || "?"}"` : `--model ${effectiveModel || "?"}`}${capNum > 0 ? ` --cap-usd ${form.cap_usd}` : allLocal ? "" : " --cap-usd ?"}${capTokensNum > 0 ? ` --cap-tokens ${capTokensNum}` : allLocal ? " --cap-tokens ?" : ""} --n ${effectiveN}${form.wall_clock ? ` --wall-clock ${form.wall_clock}` : ""}${form.net === "open" ? " --no-netguard" : form.net === "local" ? " --local-only" : form.net === "hosts" ? hostList.map((h) => ` --allow-host ${h}`).join("") : ""}${form.playwright ? " --playwright" : ""}${form.hard_kill ? " --hard-kill" : ""}${form.tool_forging ? " --allow-tool-forging" : ""}${form.self_compact ? "" : " --no-self-compact"}${compactSpecs[0] ? ` --compact-notice-at ${compactSpecs[0]}` : ""}${compactSpecs[1] ? ` --compact-warn-at ${compactSpecs[1]}` : ""}${compactSpecs[2] ? ` --compact-at ${compactSpecs[2]}` : ""}${form.self_compact && form.compact_model.trim() ? ` --compact-model ${form.compact_model.trim()}` : ""}${form.inbox_page_chars.trim() ? ` --inbox-page-chars ${form.inbox_page_chars.trim()}` : ""}${form.inputs && form.inputs_attach === "image" ? ` --inputs-image ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}/${form.inputs_image || "<image>"}` : form.inputs ? ` --inputs ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}${form.inputs_attach === "bind" ? " --inputs-bind" : ""}${form.inputs_enforce !== "auto" ? ` --inputs-enforce ${form.inputs_enforce}` : ""}${form.inputs_attach === "copy" && form.inputs_max_mb ? ` --inputs-max-mb ${form.inputs_max_mb}` : ""}` : ""}${form.no_read.map((id) => ` --no-read <runs>/${id}`).join("")}${form.tools_from ? ` --tools-from <runs>/${form.tools_from}/tools` : ""}${form.catalog ? " --catalog" : ""}${form.toolbox ? ` --toolbox ${form.toolbox}` : ""}${form.toolbox && form.toolbox !== "off" && form.toolbox_required ? " --toolbox-required" : ""}${form.quarantine ? " --quarantine" : ""}${form.allow_install ? " --allow-install" : ""}${form.allow_install && form.no_pypi ? " --no-pypi" : ""}${form.cap_per_agent ? ` --cap-per-agent ${form.cap_per_agent}` : ""}${form.case_id ? ` --case-id ${form.case_id}` : ""}${form.examiner ? ` --examiner "${form.examiner}"` : ""}${form.microvm ? ` --isolation microvm${form.vm_image.trim() ? ` --image ${form.vm_image.trim()}` : ""}${form.vm_cpus.trim() ? ` --vm-cpus ${form.vm_cpus.trim()}` : ""}${form.vm_memory.trim() ? ` --vm-memory ${form.vm_memory.trim()}` : ""}${form.vm_snapshot ? "" : " --no-vm-snapshot"}` : ""}${form.no_start ? " --no-start" : ""}`;
+  const command = `swarm.sh start ${teamMode ? `--models "${teamSpec(form.team) || "?"}"` : `--model ${effectiveModel || "?"}`}${capNum > 0 ? ` --cap-usd ${form.cap_usd}` : allLocal ? "" : " --cap-usd ?"}${capTokensNum > 0 ? ` --cap-tokens ${capTokensNum}` : allLocal ? " --cap-tokens ?" : ""} --n ${effectiveN}${form.wall_clock ? ` --wall-clock ${form.wall_clock}` : ""}${form.net === "open" ? " --no-netguard" : form.net === "local" ? " --local-only" : form.net === "hosts" ? hostList.map((h) => ` --allow-host ${h}`).join("") : ""}${form.playwright ? " --playwright" : ""}${form.hard_kill ? " --hard-kill" : ""}${form.tool_forging ? " --allow-tool-forging" : ""}${form.self_compact ? "" : " --no-self-compact"}${compactSpecs[0] ? ` --compact-notice-at ${compactSpecs[0]}` : ""}${compactSpecs[1] ? ` --compact-warn-at ${compactSpecs[1]}` : ""}${compactSpecs[2] ? ` --compact-at ${compactSpecs[2]}` : ""}${form.self_compact && form.compact_model.trim() ? ` --compact-model ${form.compact_model.trim()}` : ""}${form.inbox_page_chars.trim() ? ` --inbox-page-chars ${form.inbox_page_chars.trim()}` : ""}${form.inputs && form.inputs_attach === "image" ? ` --inputs-image ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}/${form.inputs_image || "<image>"}` : form.inputs ? ` --inputs ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}${form.inputs_attach === "bind" ? " --inputs-bind" : ""}${form.inputs_enforce !== "auto" ? ` --inputs-enforce ${form.inputs_enforce}` : ""}${form.inputs_attach === "copy" && form.inputs_max_mb ? ` --inputs-max-mb ${form.inputs_max_mb}` : ""}` : ""}${form.no_read.map((id) => ` --no-read <runs>/${id}`).join("")}${form.tools_from ? ` --tools-from <runs>/${form.tools_from}/tools` : ""}${form.catalog ? " --catalog" : ""}${form.toolbox ? ` --toolbox ${form.toolbox}` : ""}${form.toolbox && form.toolbox !== "off" && form.toolbox_required ? " --toolbox-required" : ""}${form.quarantine ? " --quarantine" : ""}${form.allow_install ? " --allow-install" : ""}${form.allow_install && form.no_pypi ? " --no-pypi" : ""}${form.cap_per_agent ? ` --cap-per-agent ${form.cap_per_agent}` : ""}${form.case_id ? ` --case-id ${form.case_id}` : ""}${form.examiner ? ` --examiner "${form.examiner}"` : ""}${form.packs.length ? ` --pack ${form.packs.join(",")}` : ""}${form.microvm ? ` --isolation microvm${form.vm_image.trim() ? ` --image ${form.vm_image.trim()}` : ""}${form.vm_cpus.trim() ? ` --vm-cpus ${form.vm_cpus.trim()}` : ""}${form.vm_memory.trim() ? ` --vm-memory ${form.vm_memory.trim()}` : ""}${form.vm_snapshot ? "" : " --no-vm-snapshot"}` : ""}${form.no_start ? " --no-start" : ""}`;
 
   return (
     <form onSubmit={submit} className="mx-auto grid w-full max-w-[1680px] gap-8 px-4 py-7 sm:px-10 lg:grid-cols-[minmax(0,1fr)_500px]">
@@ -898,11 +904,40 @@ export function KickoffScreen() {
               </span>
               <Switch checked={form.no_pypi} disabled={!form.allow_install} onCheckedChange={(v) => setForm({ ...form, no_pypi: v })} aria-label="No package index" />
             </div>
+            <div className="flex flex-col gap-1.5 text-[13px]">
+              <span>
+                Packs
+                <span className="block text-[12px] leading-[1.5] text-ink-2">
+                  Installed packs this run takes (<code>--pack</code>): their skills and tools for every agent, dependencies included. In a microVM run they also choose the image, and a program a pack requires that the image lacks stops the kickoff.
+                </span>
+              </span>
+              {installedPacks.data?.packs.length ? (
+                <div className="flex flex-wrap gap-1.5" role="group" aria-label="Packs">
+                  {installedPacks.data.packs.map((p) => {
+                    const on = form.packs.includes(p.id);
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        aria-pressed={on}
+                        title={`${p.name} ${p.version}${p.depends.length ? ` · needs ${p.depends.join(", ")}` : ""}\n${p.description}`}
+                        onClick={() => setForm({ ...form, packs: on ? form.packs.filter((x) => x !== p.id) : [...form.packs, p.id] })}
+                        className={cn("rounded border px-2 py-0.5 font-mono text-[12px]", on ? "border-kelp bg-kelp text-white" : "border-line text-ink-2")}
+                      >
+                        {p.id} <span className="opacity-70">{p.version}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <span className="text-[12px] text-ink-3">No packs installed (<code>scripts/pack.sh install packs/&lt;id&gt;</code>).</span>
+              )}
+            </div>
             <div className="flex items-center justify-between gap-3 text-[13px]">
               <span>
                 Each agent in its own microVM
                 <span className="block text-[12px] leading-[1.5] text-ink-2">
-                  Every agent runs Pi inside its own microVM (microsandbox): the run is read-only there except <code>work/</code> and the agent's own outputs, the evidence is mounted read-only from this host with no copy, the board is written by the harness on the host, a VM reaches only its models' hosts, and no provider credential enters a VM. Needs a host that can boot a VM (macOS on Apple silicon, Linux with KVM).
+                  Every agent runs Pi inside its own microVM (microsandbox): the run is read-only there except the agent's own <code>work/&lt;id&gt;/</code>, its extracted and quarantine directories and its outputs (a shared file is published through the harness), the evidence is mounted read-only from this host with no copy, the board is written by the harness on the host, a VM reaches only its models' hosts, and no provider credential enters a VM. The packs below choose the image. Needs a host that can boot a VM (macOS on Apple silicon, Linux with KVM).
                 </span>
               </span>
               <Switch checked={form.microvm} onCheckedChange={(v) => setForm({ ...form, microvm: v })} aria-label="MicroVM isolation" />

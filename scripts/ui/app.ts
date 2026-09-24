@@ -18,7 +18,7 @@ import {
   releaseFile,
   restoreFileVersion,
 } from "../../extensions/protocol.ts";
-import { ActionRunner, checkReadiness, listModels, validateStart, type Job, type ModelList, type ReadinessReport } from "./actions.ts";
+import { ActionRunner, checkReadiness, listModels, listPacks, validateStart, type Job, type ModelList, type ReadinessReport } from "./actions.ts";
 import { deleteGoal, GoalError, listGoals, readGoal, saveGoal } from "./goals.ts";
 import { listLibrary, readLibraryEntry } from "./library.ts";
 import { describeRoots, InputsError, listInputSets, parseInputsRoots, resolveInputImage, resolveInputSet, RootStore } from "./inputs.ts";
@@ -443,6 +443,12 @@ export function createUiApp(options: UiAppOptions): UiApp {
       return;
     }
 
+    // The installed packs, for the kickoff's pack field; read-only.
+    if (path === "/api/packs") {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      json(res, 200, { packs: await listPacks() });
+      return;
+    }
     // The investigation library: read-only here, edited in the repo.
     if (path === "/api/library") {
       if (method !== "GET") throw new HttpError(405, "method not allowed");

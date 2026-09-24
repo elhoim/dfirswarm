@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import { createUiApp, defaultRunsDir, type UiApp } from "../scripts/ui/app.ts";
-import { ActionRunner, checkReadiness, isHostName, isLocalHost, listModels, parseModelList, parseModelTeam, readLocalProviders, startArgv, validateStart } from "../scripts/ui/actions.ts";
+import { ActionRunner, checkReadiness, isHostName, isLocalHost, listModels, listPacks, parseModelList, parseModelTeam, readLocalProviders, startArgv, validateStart } from "../scripts/ui/actions.ts";
 import { resolveInputSet } from "../scripts/ui/inputs.ts";
 import { ChangeBus, classifyPath, SUPPRESSED_KINDS, type BusMessage } from "../scripts/ui/watch.ts";
 import { activitySeries, deriveCallsign } from "../scripts/ui/model.ts";
@@ -1795,4 +1795,24 @@ test("a swarm started from the console does not carry the console's token into t
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("the kickoff form takes installed packs by id and hands them to --pack; the server lists what pack.sh installed", async () => {
+  const ok = validateStart({ n: 2, cap_usd: 1, model: "x/y", packs: ["windows-forensics", "memory-forensics", "windows-forensics"] });
+  assert.ok(ok.ok);
+  if (ok.ok) {
+    assert.deepEqual(ok.params.packs, ["windows-forensics", "memory-forensics"], "a pack named twice is taken once");
+    const argv = startArgv(ok.params);
+    assert.deepEqual(argv.slice(argv.indexOf("--pack"), argv.indexOf("--pack") + 2), ["--pack", "windows-forensics,memory-forensics"]);
+  }
+  const bad = validateStart({ n: 2, cap_usd: 1, model: "x/y", packs: ["../etc"] });
+  assert.equal(bad.ok, false);
+  const none = validateStart({ n: 2, cap_usd: 1, model: "x/y", packs: [] });
+  assert.ok(none.ok && none.params.packs === undefined && !startArgv(none.params).includes("--pack"));
+  const home = await mkdtemp(join(tmpdir(), "ui-packs-"));
+  await mkdir(join(home, "packs", "demo-pack"), { recursive: true });
+  await writeFile(join(home, "packs", "demo-pack", "pack.json"), JSON.stringify({ id: "demo-pack", name: "Demo", version: "1.0.0", description: "d", depends: ["computer-forensics-base>=1.2.0"] }));
+  await mkdir(join(home, "packs", "not-a-pack"), { recursive: true });
+  assert.deepEqual(await listPacks(home), [{ id: "demo-pack", name: "Demo", version: "1.0.0", description: "d", depends: ["computer-forensics-base"] }]);
+  await rm(home, { recursive: true, force: true });
 });

@@ -10,6 +10,8 @@
 #   pack.sh seal <dir>          author-side: write checksums into pack.json
 #   pack.sh path <id>           print where a pack is installed
 #   pack.sh resolve <id>[,<id>] print every pack dir, dependencies first
+#   pack.sh adopt <tool dir> <pack dir> [--replace]
+#                               author-side: take a saved tool into a pack
 set -euo pipefail
 
 HOME_DIR="${DFIRSWARM_HOME:-$HOME/.dfirswarm}"
@@ -152,6 +154,25 @@ if os.path.isfile(hj):
                     errors.append("requires/host.json: a binary entry is missing %s" % key)
             if "redistributable" not in b:
                 errors.append("requires/host.json: %s does not say whether it is redistributable" % b.get("name"))
+            # A pinned download is fetched and run inside an image: its URL
+            # is HTTPS, its sha256 whole, its program a path inside it.
+            dl = (b.get("install") or {}).get("download")
+            if dl is not None:
+                where = "requires/host.json: %s's download" % b.get("name")
+                if not isinstance(dl, dict) or not dl.get("version"):
+                    errors.append("%s needs a version" % where)
+                else:
+                    arches = [a for a in ("amd64", "arm64") if a in dl]
+                    if not arches:
+                        errors.append("%s names no architecture (amd64, arm64)" % where)
+                    for a in arches:
+                        e = dl[a]
+                        if not isinstance(e, dict) or not str(e.get("url", "")).startswith("https://"):
+                            errors.append("%s for %s needs an https url" % (where, a))
+                        elif not re.fullmatch(r"(sha256:)?[0-9a-f]{64}", str(e.get("sha256", ""))):
+                            errors.append("%s for %s needs the sha256 of what the url serves" % (where, a))
+                        elif "bin" in e and (str(e["bin"]).startswith("/") or ".." in str(e["bin"]).split("/")):
+                            errors.append("%s for %s: bin must be a path inside the download" % (where, a))
             host_names.add(b.get("name"))
     except Exception as e:
         errors.append("requires/host.json is not valid JSON: %s" % e)
@@ -526,6 +547,52 @@ for p in order:
 PYEOF
 }
 
+# A tool a run forged and `swarm.sh tools --save` kept, taken into a pack's
+# source: its script checked against the sha256 its manifest carries, its
+# manifest reduced to what a pack tool declares (the run's by/at/version and
+# any pack field stay behind), its provenance kept beside it. The author reads
+# it and seals the pack; nothing here seals for them.
+cmd_adopt() {
+  local tool="${1:-}" pack="${2:-}" replace=0
+  [[ "${3:-}" == "--replace" ]] && replace=1
+  [[ -n "$tool" && -n "$pack" ]] || die "usage: pack.sh adopt <tool dir> <pack dir> [--replace]"
+  [[ -f "$tool/manifest.json" ]] || die "$tool has no manifest.json"
+  [[ -f "$pack/pack.json" ]] || die "$pack is not a pack (no pack.json)"
+  "$PY" - "$tool" "$pack" "$replace" <<'ADOPT_EOF'
+import hashlib, json, os, re, shutil, sys
+tool, pack, replace = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+m = json.load(open(os.path.join(tool, "manifest.json")))
+name = m.get("name", "")
+if not re.fullmatch(r"[a-z][a-z0-9_]{2,31}", name):
+    sys.exit(f"BLOCKER: {name!r} is not a tool name")
+entry = m.get("entry", "")
+body = os.path.join(tool, entry)
+if not entry or "/" in entry or not os.path.isfile(body) or os.path.islink(body):
+    sys.exit(f"BLOCKER: {name}: entry {entry!r} is not a file in the tool's directory")
+digest = hashlib.sha256(open(body, "rb").read()).hexdigest()
+if m.get("sha256") != digest:
+    sys.exit(f"BLOCKER: {name}: its script does not match the sha256 in its manifest; it was changed after it was forged")
+dest = os.path.join(pack, "tools", name)
+if os.path.exists(dest) and not replace:
+    sys.exit(f"BLOCKER: {pack} already has a tool {name}; --replace to take this one instead")
+shutil.rmtree(dest, ignore_errors=True)
+os.makedirs(dest)
+for root, dirs, files in os.walk(tool):
+    for f in files:
+        src = os.path.join(root, f)
+        rel = os.path.relpath(src, tool)
+        if rel == "manifest.json" or os.path.islink(src):
+            continue
+        os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)
+        shutil.copyfile(src, os.path.join(dest, rel))
+keep = {k: m[k] for k in ("name", "description", "params", "runtime", "entry", "timeout_seconds", "example") if k in m}
+with open(os.path.join(dest, "manifest.json"), "w", encoding="utf-8") as fh:
+    json.dump(keep, fh, ensure_ascii=False, indent=2)
+    fh.write("\n")
+print(f"adopted {name} into {pack}/tools/{name}; read it, then: pack.sh seal {pack}")
+ADOPT_EOF
+}
+
 case "${1:-}" in
   install) shift; cmd_install "$@" ;;
   list) shift; cmd_list "$@" ;;
@@ -535,6 +602,7 @@ case "${1:-}" in
   seal) shift; cmd_seal "$@" ;;
   path) shift; cmd_path "$@" ;;
   resolve) shift; cmd_resolve "$@" ;;
-  ""|-h|--help|help) sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+  adopt) shift; cmd_adopt "$@" ;;
+  ""|-h|--help|help) sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
   *) die "unknown command $1" ;;
 esac

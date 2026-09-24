@@ -31,6 +31,8 @@ npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 # This repo (only needed for the web app bundle, typecheck, and the Playwright tool)
 git clone https://github.com/halilozturkci/dfirswarm && cd dfirswarm
 npm install
+# Host runs only, without microsandbox's native binaries (--isolation microvm then says it is missing):
+#   npm ci --omit=optional
 ```
 
 ### 1. Dry run without a model (no keys, no Herdr, no network)

@@ -351,8 +351,12 @@ Isolation
                       enters a VM — Pi on the host resolves each one and msb swaps
                       it in on the way out, to that provider's hosts only.
                       SWARM_ISOLATION sets the default.
-  --image REF         The VM image (SWARM_VM_IMAGE). Default: the image for the
-                      packs in images/images.lock.json, else the base image.
+  --image REF         The VM image (SWARM_VM_IMAGE). Default: the smallest profile
+                      that serves the packs (images/recipe.py profile-for), by the
+                      digest a lock file pins (SWARM_IMAGES_LOCK), else the local
+                      build dfirswarm-<profile>:dev-<arch>. Pulled before the run
+                      starts when this host does not have it; refused when it
+                      cannot be.
   --vm-cpus N         vCPUs per agent VM (default 2).
   --vm-memory MIB     Memory per agent VM in MiB (default 2048).
   --inputs-copy       Under --isolation microvm, copy --inputs into the run (read-only)
@@ -1553,7 +1557,8 @@ toolbox_path = os.path.join(sandbox, "toolbox.json")
 if os.path.isfile(toolbox_path):
     with open(toolbox_path, encoding="utf-8") as f:
         tb = json.load(f)
-    lines = ["## Toolbox", "", "Checked on this host at kickoff. Use these; do not spend turns discovering them.", "", "| Tool | Version | Use it for |", "| --- | --- | --- |"]
+    where = f"in the run's image (`{tb.get('image')}`), which every agent's VM boots" if tb.get("context") == "image" else "on this host"
+    lines = ["## Toolbox", "", f"Checked {where} at kickoff. Use these; do not spend turns discovering them.", "", "| Tool | Version | Use it for |", "| --- | --- | --- |"]
     for t in tb.get("present", []):
         lines.append(f"| `{t['name']}` | {t.get('version', '')} | {t.get('use', '')} |")
     for t in tb.get("missing", []):
@@ -1564,7 +1569,11 @@ if os.path.isfile(toolbox_path):
 # and spent its remaining half hour on it. When the operator has allowed it,
 # say so here rather than leaving the swarm to discover the allowlist by
 # running into it.
-if os.environ.get("SWARM_CONTRACT_ALLOW_INSTALL") == "1" and os.environ.get("SWARM_CONTRACT_INSTALL_HOSTS") != "1":
+# In a VM the install paragraph is the host section's (the VM's own disk,
+# pip without --user); this one describes the host's shared toolchain.
+if os.environ.get("SWARM_CONTRACT_ISOLATION") == "microvm":
+    pass
+elif os.environ.get("SWARM_CONTRACT_ALLOW_INSTALL") == "1" and os.environ.get("SWARM_CONTRACT_INSTALL_HOSTS") != "1":
     # `--allow-install --no-pypi`: pip runs, the index is not reachable. Saying
     # the opposite is how a run ends with an agent unsetting HTTP_PROXY — it
     # was told installing would work, it did not, and it made the sentence
@@ -1677,6 +1686,11 @@ if caps:
         gaps.append(
             "A file a peer has just published can take up to five seconds to look current in your VM: read a peer's file after "
             "they post about it. Nothing under `work/extracted/` or `work/quarantine/` can execute in any VM"
+        )
+        gaps.append(
+            "A mount you make (FUSE, a loop device, where your VM has them) exists in your VM alone: your peers do not see it "
+            "and nothing under it is recorded. What you derive from it counts once it is a file under `work/<your id>/`, "
+            "named in a `record`; prefer a library that reads a volume in place (`pybde`, `pytsk3`, `dfvfs`) over a mount"
         )
         if os.environ.get("SWARM_CONTRACT_ALLOW_INSTALL") == "1":
             gaps.append(
@@ -1999,7 +2013,7 @@ cmd_start() {
   local packs=""
   local write_guard=1
   # Where the agents live: host processes, or one microVM each.
-  local isolation="${SWARM_ISOLATION:-host}" vm_image="${SWARM_VM_IMAGE:-}" vm_cpus=2 vm_memory=2048 vm_snapshot=1 allow_oauth_in_vm=0 inputs_copy=0
+  local isolation="${SWARM_ISOLATION:-host}" vm_image="${SWARM_VM_IMAGE:-}" vm_image_digest="" vm_cpus=2 vm_memory=2048 vm_snapshot=1 allow_oauth_in_vm=0 inputs_copy=0
   local seal_herdr=1
   # Directories the panes may not read. Reads are open by design, so this is
   # narrow on purpose: material about the case the agents must derive rather
@@ -2567,8 +2581,24 @@ STRIP
         jq -r '.doctor_output // empty' <<<"$vm_probe" 2>/dev/null | sed 's/^/  | /' >&2
         exit 3
       fi
-      if [[ "$(jq -r '.image_present' <<<"$vm_probe" 2>/dev/null)" != "true" ]]; then
-        echo "NOTE: $vm_image is not on this host yet; msb pulls it when the first VM starts (a private registry needs: msb registry login)." >&2
+      if [[ "$(jq -r '.image_present' <<<"$vm_probe" 2>/dev/null)" == "true" ]]; then
+        vm_image_digest="$(jq -r '.image_digest // empty' <<<"$vm_probe")"
+      else
+        # Pulled here, before the run's clock starts and before anything is
+        # written: N VMs pulling a multi-gigabyte image at once used to spend
+        # the first minutes of the wall clock in silence, and an image no
+        # registry has was found out only by the first VM.
+        echo "Image:        $vm_image is not on this host; pulling it now, before the run starts..." >&2
+        local vm_pull
+        if ! vm_pull="$(vm_cli pull --image "$vm_image")"; then
+          {
+            echo "BLOCKER: $vm_image is not on this host and could not be pulled."
+            echo "  A local image is named dfirswarm-<profile>:dev-<arch>: build it (images/README.md), then \`msb load\` it;"
+            echo "  or pass --image with one this host has (msb image list); a private registry needs \`msb registry login\` first."
+          } >&2
+          exit 3
+        fi
+        vm_image_digest="$(jq -r '.digest // empty' <<<"$vm_pull")"
       fi
     fi
   fi
@@ -2673,7 +2703,7 @@ STRIP
     # tools are the image's, and this host's are none of theirs.
     local toolbox_args=()
     [[ "$toolbox_required" -eq 1 ]] && toolbox_args+=(--required)
-    vm_cli toolbox --image "$vm_image" --preset "$toolbox" --out "$sandbox/toolbox.json" ${toolbox_args[@]+"${toolbox_args[@]}"} || exit $?
+    vm_cli toolbox --image "$vm_image" --preset "$toolbox" --packs "$(paste -sd: - <<< "$pack_dirs")" --out "$sandbox/toolbox.json" ${toolbox_args[@]+"${toolbox_args[@]}"} || exit $?
   elif [[ "$toolbox" != "off" && "$isolation" == "microvm" ]]; then
     # A prepared VM run: the check belongs to the image, not this host, and
     # runs when the VMs do. Never the host's tools in a VM run's record.
@@ -3028,7 +3058,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson agents "$(printf '%s\n' "${agent_ids[@]}" | jq -R . | jq -s .)" \
     --argjson agent_models "$(printf '%s\n' ${AGENT_MODELS[@]+"${AGENT_MODELS[@]}"} | jq -R . | jq -s .)" \
     --arg isolation "$isolation" \
-    --arg vm_image "$vm_image" \
+    --arg vm_image "$vm_image" --arg vm_image_digest "${vm_image_digest:-}" \
     --argjson vm_cpus "$vm_cpus" \
     --argjson vm_memory "$vm_memory" \
     --argjson vm_snapshot "$vm_snapshot" \
@@ -3087,7 +3117,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       agents: $agents,
       agent_models: $agent_models,
       isolation: (if $isolation == "microvm"
-        then {mode: "microvm", runtime: "microsandbox", image: $vm_image, cpus: $vm_cpus, memory_mib: $vm_memory, snapshot: ($vm_snapshot == 1), oauth_allowed: ($allow_oauth_in_vm == 1)}
+        then {mode: "microvm", runtime: "microsandbox", image: $vm_image, image_digest: (if $vm_image_digest == "" then null else $vm_image_digest end), cpus: $vm_cpus, memory_mib: $vm_memory, snapshot: ($vm_snapshot == 1), oauth_allowed: ($allow_oauth_in_vm == 1)}
         else {mode: "host"} end),
       started_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
       state: "prepared"
@@ -5047,13 +5077,14 @@ vm_build_spec() { # <hub dir> <out file>
     --argjson env "$env_json" --argjson agents "$agents_json" --argjson allow "$allow_json" \
     --argjson providers "$providers" --argjson open "$([[ "$use_netguard" -eq 0 ]] && echo true || echo false)" \
     --argjson pack_secrets "$PACK_SECRETS_VM" \
-    --arg pi "$(command -v pi)" --arg pidir "$(pi_agent_dir)" --arg registry "$REGISTRY" \
+    --arg pi "$(command -v pi)" --arg pidir "$(pi_agent_dir)" --arg registry "$REGISTRY" --arg digest "${vm_image_digest:-}" \
     '{run: $run, sandbox: $sandbox, image: $image, pull: "if-missing", cpus: $cpus, memory_mib: $mem,
       max_duration_sec: (($wall + 30) * 60), hub_dir: $hub, mounts: $mounts, late_mounts: $late,
       env: $env, agents: $agents, allow_hosts: $allow, open_net: $open, providers: $providers,
       pack_secrets: $pack_secrets,
       pi_bin: $pi, pi_agent_dir: $pidir, min_token_validity: "\($wall + 60)m",
-      records_dir: ($sandbox + "/vm"), registry: $registry}' > "$spec"
+      records_dir: ($sandbox + "/vm"), registry: $registry}
+     + (if $digest == "" then {} else {image_digest: $digest} end)' > "$spec"
   chmod 600 "$spec"
 }
 
@@ -5098,6 +5129,10 @@ launch_vm_agents() {
     # it makes every `ts` from that VM misleading, so it is said.
     jq -r 'select((.probe.clock_skew_s // 0) | (if . < 0 then -. else . end) > 120) | "WARN: \(.agent)'"'"'s VM clock is \(.probe.clock_skew_s) s off this host'"'"'s; its lines carry that in ts, the collector'"'"'s recv_ts is the host'"'"'s"' "$rec_file" >&2
   done
+  # How the image fits the packs: a version it was not built for, a pack's
+  # program the agents will have to install. Recorded in vm/<id>.json.
+  jq -r '.warnings[]? | "WARN: \(.)"' <<<"$vm_out" >&2
+  jq -r '"Devices:      FUSE \(if .probe.fuse then "yes" else "no" end), loop \(if .probe.loop then "yes" else "no" end) in the VMs (a mount a pack tool makes stays in that VM)"' "$sandbox/vm/${agent_ids[0]}.json" 2>/dev/null || true
   echo "Secrets:      $(jq -r '[.secrets[]?.name] | unique | join(", ") | if . == "" then "none" else . end' "$sandbox/vm/${agent_ids[0]}.json") — resolved on this host, swapped in by msb on the way out; the VMs hold placeholders"
 
   # The panes: a quiet zsh that runs `msb exec` into its agent's VM, where
@@ -5513,8 +5548,9 @@ cmd_tools() {
     return 0
   fi
   mkdir -p "$dest"
-  local saved=0 left=0 tool name reserved
+  local saved=0 left=0 unsealed=0 tool name reserved entry want rec
   reserved="$(reserved_tool_names)" || exit 1
+  rec="$(json_get "$id")"
   for tool in "$sandbox/tools"/*/; do
     [[ -f "$tool/manifest.json" ]] || continue
     name="$(basename "${tool%/}")"
@@ -5522,12 +5558,42 @@ cmd_tools() {
       left=$(( left + 1 ))
       continue
     fi
+    # The seal first: a script that is not the one its manifest hashes was
+    # changed after it was forged, and a library would carry the change into
+    # every case that loads it.
+    entry="$(jq -r '.entry // empty' "$tool/manifest.json" 2>/dev/null)"
+    want="$(jq -r '.sha256 // empty' "$tool/manifest.json" 2>/dev/null)"
+    if [[ -z "$entry" || "$entry" == */* || ! -f "$tool/$entry" || -L "$tool/$entry" || "$(sha256_of "$tool/$entry")" != "$want" ]]; then
+      echo "Left out $name: its script does not match the sha256 in its manifest." >&2
+      unsealed=$(( unsealed + 1 ))
+      continue
+    fi
     rm -rf "${dest:?}/$name"
-    cp -R "${tool%/}" "$dest/$name"
+    mkdir -p "$dest/$name"
+    # Regular files only: a link an agent left in the tool's directory would
+    # put something of this machine into the library.
+    local f rel
+    while IFS= read -r -d '' f; do
+      rel="${f#"${tool%/}/"}"
+      [[ "$rel" == manifest.json ]] && continue
+      mkdir -p "$dest/$name/$(dirname "$rel")"
+      cp "$f" "$dest/$name/$rel"
+    done < <(find "${tool%/}" -type f -print0 2>/dev/null)
+    # A library tool belongs to no pack: `pack` is what hands a tool its
+    # pack's secrets, and a copy on its way to another case must not carry it.
+    jq 'del(.pack)' "$tool/manifest.json" > "$dest/$name/manifest.json"
+    # Where it came from, for whoever loads it next: the run, the image it
+    # ran against, who forged it and when, and the pack it came from if any.
+    jq -n --arg run "$id" --arg saved "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson m "$(cat "$tool/manifest.json")" --argjson rec "$rec" \
+      '{saved_from_run: $run, saved_at: $saved, case_id: ($rec.case_id // null),
+        isolation: ($rec.isolation.mode // "host"), image: ($rec.isolation.image // null), image_digest: ($rec.isolation.image_digest // null),
+        forged_by: ($m.by // null), forged_at: ($m.at // null), version: ($m.version // null), sha256: ($m.sha256 // null),
+        from_pack: ($m.pack // null)}' > "$dest/$name/provenance.json"
     saved=$(( saved + 1 ))
   done
   [[ "$left" -gt 0 ]] && echo "Left out $left tool(s) whose name is reserved." >&2
-  echo "Saved $saved tool(s) from $id to $dest"
+  [[ "$unsealed" -gt 0 ]] && echo "Left out $unsealed tool(s) whose script was changed after forging." >&2
+  echo "Saved $saved tool(s) from $id to $dest (each with provenance.json; \`pack.sh adopt\` takes one into a pack)"
 }
 
 # Copy a directory tree file by file, skipping the named top-level children and

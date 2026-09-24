@@ -1,19 +1,34 @@
 #!/usr/bin/env bash
 # toolbox: what the forensic tools on this host are, before any money is spent.
 #
-#   scripts/toolbox.sh <sandbox> dfir[,crypto,linux] [--required]
+#   scripts/toolbox.sh <sandbox> dfir[,crypto,linux] [--required] [--image FILE]
 #
 # Writes <sandbox>/toolbox.json: {"preset", "checked_at", "present": [{name,
 # version, use}], "missing": [{name, use, install}]}. Missing tools are a WARN
 # line, or a BLOCKER (exit 3) with --required. swarm.sh renders the same into
 # SWARM.md so the agents start knowing what they have.
+#
+# --image FILE: this is a microVM run's image, checked inside a throwaway VM
+# of it (scripts/vm.ts toolbox). FILE is {"image", "programs": [{name, why,
+# pack, required}]}: every program the run's packs name is checked too, the
+# install hints are the VM's (nobody here runs brew), and --required holds
+# only for what a pack requires — the presets are advisory in a VM, where the
+# image is the toolset and no preset set is in every image.
 set -euo pipefail
 
 sandbox="${1:-}"
 preset="${2:-dfir}"
 required=0
-[[ "${3:-}" == "--required" ]] && required=1
-[[ -n "$sandbox" && -d "$sandbox" ]] || { echo "toolbox: usage: toolbox.sh <sandbox> dfir[,crypto,linux] [--required]" >&2; exit 2; }
+image_file=""
+shift 2 2>/dev/null || true
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --required) required=1; shift ;;
+    --image) image_file="$2"; shift 2 ;;
+    *) echo "toolbox: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+[[ -n "$sandbox" && -d "$sandbox" ]] || { echo "toolbox: usage: toolbox.sh <sandbox> dfir[,crypto,linux] [--required] [--image FILE]" >&2; exit 2; }
 # One case is not another: an encryption case wants aescrypt and dislocker,
 # a Linux case wants the journal readers, and neither is worth checking for
 # on a Windows disk. Sets are comma-separated; dfir is what every case gets.
@@ -81,13 +96,32 @@ for one in "${PRESETS[@]}"; do
   esac
 done
 
+# In an image: the packs' own programs, and the VM's install hint.
+image_ref=""
+pack_required=" "
+VM_HINT="not in this image: an agent may pip-install it into its own VM (--allow-install), or build an image that has it (images/README.md)"
+if [[ -n "$image_file" ]]; then
+  image_ref="$(jq -r '.image // ""' "$image_file")"
+  while IFS=$'\t' read -r pname pwhy ppack preq; do
+    [[ -n "$pname" ]] || continue
+    [[ "$preq" == "true" ]] && pack_required+="$pname "
+    dup=0
+    for spec in "${TOOLS[@]}"; do [[ "${spec%%|*}" == "$pname" ]] && dup=1; done
+    [[ "$dup" -eq 1 ]] && continue
+    TOOLS+=("$pname|$pname --version 2>&1 | head -1|$pwhy ($ppack)|$VM_HINT")
+  done < <(jq -r '.programs[]? | [.name, (.why // ""), (.pack // ""), (.required | tostring)] | @tsv' "$image_file")
+fi
+
 present=()
 missing=()
 warn=()
 for spec in "${TOOLS[@]}"; do
+  # The version probe is a pipeline with a `|` of its own, so the fields are
+  # taken from both ends: the name first, the install hint and the use last.
+  # (Split from the left, every tool's use read " head -1".)
   name="${spec%%|*}"; rest="${spec#*|}"
-  probe="${rest%%|*}"; rest="${rest#*|}"
-  use="${rest%%|*}"; install="${rest#*|}"
+  install="${rest##*|}"; rest="${rest%|*}"
+  use="${rest##*|}"; probe="${rest%|*}"
   case "$name" in
     regipy-dump|evtx_dump|aescrypt)
       if version="$(bash -c "$probe" 2>/dev/null | head -1)" && [[ -n "$version" ]]; then ok=1; else ok=0; version=""; fi ;;
@@ -96,18 +130,27 @@ for spec in "${TOOLS[@]}"; do
   if [[ "$ok" -eq 1 ]]; then
     present+=("$(jq -cn --arg n "$name" --arg v "${version:-present}" --arg u "$use" '{name: $n, version: $v, use: $u}')")
   else
+    [[ -n "$image_file" ]] && install="$VM_HINT"
     missing+=("$(jq -cn --arg n "$name" --arg u "$use" --arg i "$install" '{name: $n, use: $u, install: $i}')")
     warn+=("$name")
   fi
 done
 
 printf '%s\n' "${present[@]+"${present[@]}"}" | jq -s --arg preset "$preset" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --argjson missing "$(printf '%s\n' "${missing[@]+"${missing[@]}"}" | jq -s '.')" \
-  '{preset: $preset, checked_at: $at, present: ., missing: $missing}' > "$sandbox/toolbox.json"
+  --arg image "$image_ref" --argjson missing "$(printf '%s\n' "${missing[@]+"${missing[@]}"}" | jq -s '.')" \
+  '{preset: $preset, checked_at: $at, present: ., missing: $missing}
+   + (if $image == "" then {context: "host"} else {context: "image", image: $image} end)' > "$sandbox/toolbox.json"
 
 if [[ "${#warn[@]}" -gt 0 ]]; then
-  if [[ "$required" -eq 1 ]]; then
-    echo "BLOCKER: --toolbox-required and these tools are missing: ${warn[*]}. See toolbox.json for the install commands." >&2
+  blocking=("${warn[@]}")
+  if [[ -n "$image_file" ]]; then
+    # In an image, --required means what the packs require; a preset tool
+    # the image lacks is said, not fatal.
+    blocking=()
+    for name in "${warn[@]}"; do [[ "$pack_required" == *" $name "* ]] && blocking+=("$name"); done
+  fi
+  if [[ "$required" -eq 1 && "${#blocking[@]}" -gt 0 ]]; then
+    echo "BLOCKER: --toolbox-required and these tools are missing: ${blocking[*]}. See toolbox.json for the install commands." >&2
     exit 3
   fi
   echo "WARN: toolbox: missing ${warn[*]} (install commands in toolbox.json)" >&2

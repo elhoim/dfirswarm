@@ -4,10 +4,25 @@
       "name": "uac",
       "package": "UAC",
       "optional": true,
-      "why": "Collect from a live Unix-like host \u2014 Linux, macOS, ESXi, BSD, Solaris \u2014 driven by YAML artefact definitions, with no agent and no dependencies.",
+      "why": "Collect from a live Unix-like host — Linux, macOS, ESXi, BSD, Solaris — driven by YAML artefact definitions, with no agent and no dependencies.",
       "install": {
         "brew": "https://github.com/tclahr/uac",
-        "apt": "https://github.com/tclahr/uac"
+        "apt": "pinned download 3.4.0 (install.download)",
+        "download": {
+          "version": "3.4.0",
+          "amd64": {
+            "url": "https://github.com/tclahr/uac/releases/download/v3.4.0/uac-3.4.0.tar.gz",
+            "sha256": "d333b72990c25d48b93200648a58084f8b79ff917d1e609dd92ac6ba9fb387db",
+            "bin": "uac-3.4.0/uac"
+          },
+          "arm64": {
+            "url": "https://github.com/tclahr/uac/releases/download/v3.4.0/uac-3.4.0.tar.gz",
+            "sha256": "d333b72990c25d48b93200648a58084f8b79ff917d1e609dd92ac6ba9fb387db",
+            "bin": "uac-3.4.0/uac"
+          },
+          "run_from_dir": true,
+          "note": "uac runs from its own directory: the wrapper changes into it, so give it absolute paths"
+        }
       },
       "licence": "Apache-2.0",
       "redistributable": false
@@ -19,7 +34,18 @@
       "why": "Build an offline collector with a chosen artefact set baked in, and read the container it produces. AGPL-3.0, the same licence as this harness.",
       "install": {
         "brew": "https://github.com/Velocidex/velociraptor/releases",
-        "apt": "https://github.com/Velocidex/velociraptor/releases"
+        "apt": "pinned download 0.77.2 (install.download)",
+        "download": {
+          "version": "0.77.2",
+          "amd64": {
+            "url": "https://github.com/Velocidex/velociraptor/releases/download/v0.77.2/velociraptor-v0.77.2-linux-amd64",
+            "sha256": "6c4c23c466d892788ff56ddcd3a31f844e4c0d797ade454c5e2625eb9e427077"
+          },
+          "arm64": {
+            "url": "https://github.com/Velocidex/velociraptor/releases/download/v0.77.2/velociraptor-v0.77.2-linux-arm64",
+            "sha256": "54d36c23f374a572a4a60106d896e0e39bc6fcafd0d6150cf56aec6c49454ea0"
+          }
+        }
       },
       "licence": "AGPL-3.0-or-later",
       "redistributable": false

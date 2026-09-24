@@ -6,6 +6,7 @@
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -124,6 +125,8 @@ export type StartParams = {
   case_id?: string;
   /** Who is running it, recorded alongside the case. */
   examiner?: string;
+  /** Installed packs, by id: their skills and tools, and under microvm the image that serves them. */
+  packs?: string[];
   /** Where the agents live: host processes (the default), or one microVM each. */
   isolation?: "host" | "microvm";
   /** The VM image, when not the one the packs pick. */
@@ -521,6 +524,17 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
   if (vmMemory && typeof vmMemory === "object") return { ok: false, error: vmMemory.error };
   const vmSnapshot = body.vm_snapshot === false ? false : undefined;
   if (vmSnapshot === false && isolation !== "microvm") return { ok: false, error: "vm_snapshot needs isolation microvm" };
+  // Packs by id; whether each is installed is the kickoff's to say (pack.sh
+  // resolve), with its dependencies.
+  let packs: string[] | undefined;
+  if (body.packs !== undefined && body.packs !== null && body.packs !== "") {
+    const raw = Array.isArray(body.packs) ? body.packs : String(body.packs).split(/[\s,]+/);
+    packs = [...new Set(raw.map((p) => String(p).trim()).filter(Boolean))];
+    const bad = packs.find((p) => !/^[a-z0-9][a-z0-9-]{1,63}$/.test(p));
+    if (bad) return { ok: false, error: `packs: ${bad} is not a pack id` };
+    if (packs.length > 12) return { ok: false, error: "packs: at most 12" };
+    if (!packs.length) packs = undefined;
+  }
   return {
     ok: true,
     params: {
@@ -561,6 +575,7 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
       quarantine: quarantine || undefined,
       case_id: caseId || undefined,
       examiner: examiner || undefined,
+      packs,
       isolation: isolation === "microvm" ? "microvm" : undefined,
       image: image || undefined,
       vm_cpus: vmCpus as number | undefined,
@@ -616,6 +631,7 @@ export function startArgv(p: StartParams): string[] {
   if (p.quarantine) argv.push("--quarantine");
   if (p.case_id) argv.push("--case-id", p.case_id);
   if (p.examiner) argv.push("--examiner", p.examiner);
+  if (p.packs?.length) argv.push("--pack", p.packs.join(","));
   if (p.isolation === "microvm") {
     argv.push("--isolation", "microvm");
     if (p.image) argv.push("--image", p.image);
@@ -893,4 +909,26 @@ export async function checkReadiness(models: string[], timeoutMs = 8000, piBin =
   });
   for (const [i, provider] of [...firstModel.keys()].entries()) providers[provider] = results[i];
   return { checked_at: new Date().toISOString(), providers };
+}
+
+/** An installed pack, as the kickoff form lists it. */
+export type PackRow = { id: string; name: string; version: string; description: string; depends: string[] };
+
+/**
+ * The packs installed under DFIRSWARM_HOME (pack.sh's store), for the form.
+ * Read-only: installing, verifying and removing stay with pack.sh.
+ */
+export async function listPacks(home: string = process.env.DFIRSWARM_HOME || join(process.env.HOME || "", ".dfirswarm")): Promise<PackRow[]> {
+  const dir = join(home, "packs");
+  const out: PackRow[] = [];
+  for (const id of (await readdir(dir).catch(() => [] as string[])).sort()) {
+    try {
+      const m = JSON.parse(await readFile(join(dir, id, "pack.json"), "utf8")) as { id?: string; name?: string; version?: string; description?: string; depends?: string[] };
+      if (m.id !== id) continue;
+      out.push({ id, name: m.name ?? id, version: m.version ?? "?", description: m.description ?? "", depends: (m.depends ?? []).map((d) => d.split(/[<>=!~ ]/)[0]) });
+    } catch {
+      // not a pack
+    }
+  }
+  return out;
 }

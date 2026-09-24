@@ -85,7 +85,7 @@ jobs:
     # it is tested with the change; images.yml tests the pushed one.
     name: microVM · integration tests (KVM)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - run: git config --global init.defaultBranch main
       - uses: actions/checkout@v7
@@ -99,14 +99,22 @@ jobs:
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
       - run: npm ci
-      - name: The base image, built and loaded into msb
+      - name: The base and disk images, built and loaded into msb
         run: |
           docker build -f images/base.Dockerfile -t dfirswarm-base:dev-amd64 images
+          # disk as well: the catalog test needs The Sleuth Kit, and a pack
+          # image that is only ever built and never booted is untested. Not
+          # published, so the licence flag is for this runner only.
+          python3 images/recipe.py build disk --out "$RUNNER_TEMP/disk" --base dfirswarm-base:dev-amd64 --allow-nonredistributable
+          docker build -t dfirswarm-disk:dev-amd64 "$RUNNER_TEMP/disk"
           docker save dfirswarm-base:dev-amd64 -o "$RUNNER_TEMP/base.tar"
+          docker save dfirswarm-disk:dev-amd64 -o "$RUNNER_TEMP/disk.tar"
           msb="$(node --experimental-strip-types --no-warnings scripts/vm.ts msb-path)"
           "$msb" doctor
           "$msb" load -i "$RUNNER_TEMP/base.tar"
+          "$msb" load -i "$RUNNER_TEMP/disk.tar"
       - name: VM integration tests
         env:
           DFIRSWARM_VM_TESTS: "1"
+          VM_TEST_CATALOG_IMAGE: dfirswarm-disk:dev-amd64
         run: npm run test:vm

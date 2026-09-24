@@ -141,16 +141,29 @@ export type Custody = {
     | Array<{
         agent: string;
         image: string | null;
+        /** The digest the kickoff resolved for the run; null when it recorded none. */
+        expected_image: string | null;
         stopped: boolean;
         kept: string | null;
         snapshot: null | { path: string; sha256: string; verified: boolean; msb_verified: boolean | null } | { error: string };
         logs: Array<{ path: string; sha256: string }>;
         /** Placeholders msb stopped on their way to a host their secret is not bound to (runtime.log). */
         secret_violations: SecretViolation[];
+        /** Packages the VM held at stop that its image did not (vm.ts INVENTORY_SCRIPT), or why that is unknown. */
+        installed_outside: { apt: string[]; venv: string[]; note: string | null };
       }>;
   incomplete: string | null;
   summary: string;
 };
+
+/** What a VM's stop-time inventory said: package names, or why there is none. */
+function outsideOf(raw: unknown): { apt: string[]; venv: string[]; note: string | null } {
+  if (!raw || typeof raw !== "object") return { apt: [], venv: [], note: "no inventory was taken (a VM put away before stop took one)" };
+  const r = raw as { error?: string; baseline?: boolean; apt?: Record<string, string>; venv?: Record<string, string> };
+  if (r.error) return { apt: [], venv: [], note: `the inventory failed: ${r.error}` };
+  const fmt = (m?: Record<string, string>) => Object.entries(m ?? {}).map(([k, v]) => `${k} ${v}`);
+  return { apt: fmt(r.apt), venv: fmt(r.venv), note: r.baseline === false ? "the image records no full package list, so apt installs cannot be told apart" : null };
+}
 
 export type SecretViolation = { at: string; env: string; host: string; method: string; path: string; action: string };
 
@@ -444,6 +457,7 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
       }
       if (run && rec.run && rec.run !== run) continue; // another run's record in a reused sandbox
       const image = ((rec.image as Record<string, unknown> | undefined)?.manifest_digest as string | null) ?? null;
+      const expectedImage = ((rec.image as Record<string, unknown> | undefined)?.expected_digest as string | undefined) ?? null;
       const snap = rec.snapshot as { path?: string; sha256?: string; error?: string } | undefined;
       let snapshot: NonNullable<Custody["vms"]>[number]["snapshot"] = null;
       if (snap?.error) snapshot = { error: snap.error };
@@ -469,11 +483,13 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
       vms.push({
         agent: String(rec.agent ?? name.replace(/\.json$/, "")),
         image,
+        expected_image: expectedImage,
         stopped: typeof rec.stopped_at === "string",
         kept: typeof rec.kept === "string" ? rec.kept : null,
         snapshot,
         logs,
         secret_violations: violations,
+        installed_outside: outsideOf(rec.installed_outside_image),
       });
     }
   }
@@ -506,6 +522,12 @@ export async function takeCustody(sandboxInput: string, options: { timeoutSec?: 
     const kept = vms.filter((v) => v.snapshot && "verified" in v.snapshot && v.snapshot.verified).length;
     const failed = vms.filter((v) => (v.snapshot && "error" in v.snapshot) || v.kept || !v.stopped);
     parts.push(`${vms.length} VM${vms.length === 1 ? "" : "s"}, ${kept} of ${vms.length} snapshots verified${failed.length ? `, ${failed.length} NOT PUT AWAY (${failed.map((v) => v.agent).join(", ")})` : ""}`);
+    const offImage = vms.filter((v) => v.expected_image && v.image && v.image !== v.expected_image);
+    if (offImage.length) parts.push(`IMAGE DIGEST DIFFERS: ${offImage.map((v) => `${v.agent} booted ${v.image}, not ${v.expected_image}`).join("; ")}`);
+    const outside = vms.filter((v) => v.installed_outside.apt.length || v.installed_outside.venv.length);
+    if (outside.length) {
+      parts.push(`INSTALLED OUTSIDE THE IMAGE AND THE TOOLCHAIN RECORD: ${outside.map((v) => `${v.agent} ${[...v.installed_outside.apt.map((p) => `apt ${p}`), ...v.installed_outside.venv.map((p) => `venv ${p}`)].join(", ")}`).join("; ")}`);
+    }
     const sv = vms.flatMap((v) => v.secret_violations.map((x) => `${v.agent} ${x.env} → ${x.host} ${x.method} ${x.path}`.trim()));
     if (sv.length) parts.push(`${sv.length} SECRET PLACEHOLDER${sv.length === 1 ? "" : "S"} AIMED AT A HOST NOT ITS OWN, stopped by msb: ${sv.join("; ")}`);
   }

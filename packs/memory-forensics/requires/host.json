@@ -7,7 +7,25 @@
       "why": "Mount a memory image as a file system: processes, handles, modules, registry and network state become files the ordinary tools read. AGPL-3.0, so its licence and this project's combine where Volatility's do not.",
       "install": {
         "brew": "https://github.com/ufrisk/MemProcFS/releases",
-        "apt": "https://github.com/ufrisk/MemProcFS/releases"
+        "apt": "pinned download 5.18.11 (install.download)",
+        "download": {
+          "version": "5.18.11",
+          "apt_deps": [
+            "libfuse2",
+            "liblz4-1",
+            "libusb-1.0-0"
+          ],
+          "amd64": {
+            "url": "https://github.com/ufrisk/MemProcFS/releases/download/v5.18/MemProcFS_files_and_binaries_v5.18.11-linux_x64-20260914.tar.gz",
+            "sha256": "55648725838cae111c428131b619845b88fee45be61ea2d962e869ec0e8012aa",
+            "bin": "memprocfs"
+          },
+          "arm64": {
+            "url": "https://github.com/ufrisk/MemProcFS/releases/download/v5.18/MemProcFS_files_and_binaries_v5.18.11-linux_aarch64-20260914.tar.gz",
+            "sha256": "3bee10290ce7b46ec15bc1d48452d4e652ae91e478e8c7f2ba187fdc287a7f85",
+            "bin": "memprocfs"
+          }
+        }
       },
       "licence": "AGPL-3.0-or-later",
       "redistributable": false
@@ -31,7 +49,18 @@
       "why": "Acquire memory from a live Linux host into a portable format, without building a kernel module.",
       "install": {
         "brew": "https://github.com/microsoft/avml/releases",
-        "apt": "https://github.com/microsoft/avml/releases"
+        "apt": "pinned download 0.20.0 (install.download)",
+        "download": {
+          "version": "0.20.0",
+          "amd64": {
+            "url": "https://github.com/microsoft/avml/releases/download/v0.20.0/avml",
+            "sha256": "a67010b08af2edf5a04d2f051a133e0d8e30853c308f055b8335e759609d6dc9"
+          },
+          "arm64": {
+            "url": "https://github.com/microsoft/avml/releases/download/v0.20.0/avml-aarch64",
+            "sha256": "d3fa9285e94ad4268cb7ed20a62d8bd7b1ac4561e191b8a82654864b4541b3ad"
+          }
+        }
       },
       "licence": "MIT",
       "redistributable": false
