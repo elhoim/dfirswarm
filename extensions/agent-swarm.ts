@@ -352,7 +352,7 @@ export default function (pi: ExtensionAPI) {
   async function refreshBudget(
     cwd: string,
     ctx: {
-      sessionManager?: { getEntries?: () => unknown[] };
+      sessionManager?: { getEntries?: () => unknown[]; getSessionId?: () => string };
       shutdown?: () => void;
       getContextUsage?: () => { tokens: number | null; contextWindow: number } | undefined;
     },
@@ -369,6 +369,14 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const slice = usageFromSessionEntries(entries);
+    try {
+      // Keys the fold per session, so a resumed or shared session replaces
+      // its own entry rather than being added again (foldSessionSlice).
+      const sessionId = ctx.sessionManager?.getSessionId?.();
+      if (typeof sessionId === "string" && sessionId) slice.session_id = sessionId;
+    } catch {
+      // without it the fold falls back to watching for a counter that drops
+    }
     try {
       const context = ctx.getContextUsage?.();
       if (context && typeof context.tokens === "number") {

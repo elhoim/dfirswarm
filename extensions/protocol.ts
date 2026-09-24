@@ -185,7 +185,12 @@ export type AgentBudget = {
   /** What the seat's earlier Pi sessions spent, carried forward when a new
    *  session (a restart, `/new`) starts reporting from zero again. The
    *  counters above are the seat's whole run: this plus the live session. */
-  earlier_sessions?: SessionCounters;
+  earlier_sessions?: CarriedCounters;
+  /** The Pi session this row's live counters come from, when Pi says. */
+  session_id?: string;
+  /** Each session's last report, by session id, when reports carry one. The
+   *  counters above are their sum; see foldSessionSlice. */
+  sessions?: Record<string, CarriedCounters>;
 };
 
 /** The counters a Pi session reports and a fold adds up. */
@@ -199,6 +204,9 @@ export const SESSION_COUNTERS = [
   "cache_write",
 ] as const;
 export type SessionCounters = Record<(typeof SESSION_COUNTERS)[number], number>;
+/** SessionCounters plus the compaction and hand-off counts, present when non-zero. */
+export type CarriedCounters = SessionCounters &
+  Partial<Record<"compactions" | "compaction_tokens" | "compaction_usd" | "handoffs", number>>;
 
 export type BudgetRecord = {
   cap_usd: number;
@@ -741,13 +749,67 @@ export async function writeBudget(sandboxRoot: string, budget: BudgetRecord): Pr
   rememberBudget(sandboxRoot, normalized);
 }
 
+/** Session-scoped counters that are not spend but ride with it: what the
+ *  session's compactions cost and how many hand-offs it completed. Carried
+ *  forward like the spend, so a restart does not reset "hand-offs cost X"
+ *  next to a whole-run total. Left out of a row that never had them. */
+export const SESSION_EXTRAS = ["compactions", "compaction_tokens", "compaction_usd", "handoffs"] as const;
+/** Stands for what a seat recorded before its reports carried a session id. */
+export const UNKEYED_SESSION = "unkeyed";
+
+function countersOf(row: Partial<AgentBudget> | undefined): CarriedCounters {
+  const out = { spent_usd: 0, tokens: 0, calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 } as CarriedCounters;
+  for (const key of SESSION_COUNTERS) out[key] = Number(row?.[key]) || 0;
+  for (const key of SESSION_EXTRAS) {
+    const value = Number(row?.[key]) || 0;
+    if (value > 0) out[key] = value;
+  }
+  return out;
+}
+
+function addCounters(a: CarriedCounters, b: CarriedCounters, sign = 1): CarriedCounters {
+  const out = { ...a } as CarriedCounters;
+  const round = (key: string, value: number) => (key.endsWith("_usd") ? Number(value.toFixed(6)) : value);
+  for (const key of SESSION_COUNTERS) out[key] = round(key, (a[key] || 0) + sign * (b[key] || 0));
+  for (const key of SESSION_EXTRAS) {
+    const value = round(key, (a[key] || 0) + sign * (b[key] || 0));
+    if (value > 0) out[key] = value;
+    else delete out[key];
+  }
+  return out;
+}
+
+function anyCounter(counters: CarriedCounters): boolean {
+  return [...SESSION_COUNTERS, ...SESSION_EXTRAS].some((key) => (counters[key] || 0) > 0);
+}
+
 /**
- * A seat's slice after a fold, never smaller than before it. Pi reports a
+ * A seat's row after a fold, never smaller than before it. Pi reports a
  * session's own totals, so a pane whose session restarts reports from zero
- * again; replacing the slice with that would hand back money already spent
- * and could lift a swarm over its cap back under it. The report carries no
- * session id, so a counter going down is what says a new session began: the
- * seat's totals so far are carried forward and the new session adds to them.
+ * again; replacing the row with that would hand back money already spent
+ * and could lift a swarm over its cap back under it.
+ *
+ * With a session id on the report (`sessionManager.getSessionId()`), the row
+ * keeps each session's last report under its id in `sessions` and its
+ * counters are their sum: a restart adds a session, `/new` then `/resume`
+ * back replaces the resumed session's entry instead of adding it again, and
+ * two processes sharing one AGENT_ID each keep their own entry. A session
+ * whose report goes down is not believed (sessions are append-only); its
+ * last report stands.
+ *
+ * Without an id, a counter going down is what says a new session began: the
+ * seat's totals so far are carried forward in `earlier_sessions` and the new
+ * session adds to them. That heuristic over-counts where the id does not:
+ * `/new` then `/resume` back adds the resumed session again (5 -> 0.5 -> 5 ->
+ * 5.2 records 10.2, not 5.7), and two live processes with one AGENT_ID add a
+ * full copy at every alternation.
+ *
+ * Either way, `/fork` over-counts: the new session starts with a copy of the
+ * prefix's entries, usage included, and gets a new id, so the prefix is
+ * counted in both sessions (5 USD forked at call 31 records about 8.1). A
+ * report that switches between having an id and not (getSessionId failing
+ * now and then) counts the live session twice. Every one of these errs high,
+ * which for a brake is the safe side, and none occurs in a headless swarm.
  */
 export function foldSessionSlice(previous: AgentBudget | undefined, slice: SessionUsageSlice): AgentBudget {
   // A report of nothing at all is not a new session: it is what a failed read
@@ -755,33 +817,52 @@ export function foldSessionSlice(previous: AgentBudget | undefined, slice: Sessi
   // session again on the next good read (4 -> 0 -> 5 recorded 9). A session
   // that really is new has nothing to add yet, so keeping the counters loses
   // nothing; its first real report starts the carry.
+  const kept = new Set<string>([...SESSION_COUNTERS, ...SESSION_EXTRAS, "session_id", "sessions", "earlier_sessions"]);
   if (previous && SESSION_COUNTERS.every((key) => !(Number(slice[key]) > 0))) {
     const row: AgentBudget = { ...previous };
     for (const [key, value] of Object.entries(slice)) {
-      if (!(SESSION_COUNTERS as readonly string[]).includes(key) && value !== undefined) {
-        (row as Record<string, unknown>)[key] = value;
-      }
+      if (!kept.has(key) && value !== undefined) (row as Record<string, unknown>)[key] = value;
     }
     return row;
   }
-  const carried: SessionCounters = { spent_usd: 0, tokens: 0, calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 };
-  if (previous) {
-    const before = previous.earlier_sessions;
-    // What the live session had reported at the last fold.
-    const live = (key: (typeof SESSION_COUNTERS)[number]) => (Number(previous[key]) || 0) - (Number(before?.[key]) || 0);
-    const restarted = SESSION_COUNTERS.some((key) => (Number(slice[key]) || 0) < live(key) - 1e-9);
-    for (const key of SESSION_COUNTERS) {
-      carried[key] = restarted ? Number(previous[key]) || 0 : Number(before?.[key]) || 0;
-    }
-  }
   const row: AgentBudget = { ...emptyAgentBudget(), ...slice };
   delete row.earlier_sessions;
-  if (SESSION_COUNTERS.some((key) => carried[key] > 0)) {
-    for (const key of SESSION_COUNTERS) {
-      row[key] = key === "spent_usd"
-        ? Number((carried[key] + (Number(slice[key]) || 0)).toFixed(6))
-        : carried[key] + (Number(slice[key]) || 0);
-    }
+  delete row.sessions;
+  delete row.session_id;
+  const put = (counters: CarriedCounters) => {
+    for (const key of SESSION_EXTRAS) delete row[key];
+    Object.assign(row, counters);
+  };
+  const live = countersOf(slice);
+  const sessionId = typeof slice.session_id === "string" && slice.session_id ? slice.session_id : undefined;
+
+  if (sessionId) {
+    const sessions: Record<string, CarriedCounters> = {};
+    for (const [id, counters] of Object.entries(previous?.sessions ?? {})) sessions[id] = countersOf(counters);
+    // A row folded before reports carried an id: all of it is an earlier session.
+    if (previous && !previous.sessions && anyCounter(countersOf(previous))) sessions[UNKEYED_SESSION] = countersOf(previous);
+    const before = sessions[sessionId];
+    if (!before || !SESSION_COUNTERS.some((key) => live[key] < before[key] - 1e-9)) sessions[sessionId] = live;
+    let total = countersOf(undefined);
+    for (const counters of Object.values(sessions)) total = addCounters(total, counters);
+    put(total);
+    row.session_id = sessionId;
+    row.sessions = sessions;
+    const earlier = addCounters(total, sessions[sessionId], -1);
+    if (Object.keys(sessions).length > 1) row.earlier_sessions = earlier;
+    return row;
+  }
+
+  let carried = countersOf(undefined);
+  if (previous) {
+    const before = countersOf(previous.earlier_sessions);
+    // What the live session had reported at the last fold.
+    const lastLive = addCounters(countersOf(previous), before, -1);
+    const restarted = SESSION_COUNTERS.some((key) => live[key] < lastLive[key] - 1e-9);
+    carried = restarted ? countersOf(previous) : before;
+  }
+  if (anyCounter(carried)) {
+    put(addCounters(carried, live));
     row.earlier_sessions = carried;
   }
   return row;

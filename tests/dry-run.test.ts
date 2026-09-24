@@ -1482,6 +1482,75 @@ test("budget: a report of nothing is not a new session", async () => {
   });
 });
 
+test("budget: with a session id, a resumed or shared session is counted once", async () => {
+  await withSandbox(async (root) => {
+    const usage = (session_id: string, spent_usd: number, calls: number, extra: Record<string, number> = {}) => ({
+      session_id,
+      spent_usd,
+      tokens: calls * 100,
+      calls,
+      input: calls * 100,
+      output: 0,
+      cache_read: 0,
+      cache_write: 0,
+      ...extra,
+    });
+    // /new then /resume back: A 5, B 0.5, A again at 5 then 5.2.
+    await applySessionUsage(root, "agent00", usage("A", 5, 50, { compactions: 1, compaction_usd: 0.3, handoffs: 1 }));
+    await applySessionUsage(root, "agent00", usage("B", 0.5, 5));
+    await applySessionUsage(root, "agent00", usage("A", 5, 50, { compactions: 1, compaction_usd: 0.3, handoffs: 1 }));
+    const resumed = await applySessionUsage(root, "agent00", usage("A", 5.2, 52, { compactions: 1, compaction_usd: 0.3, handoffs: 1 }));
+    const row = resumed.budget.agents.agent00;
+    assert.equal(row.spent_usd, 5.7, "not 10.2");
+    assert.equal(row.calls, 57);
+    assert.equal(row.session_id, "A");
+    assert.deepEqual(Object.keys(row.sessions ?? {}).sort(), ["A", "B"]);
+    assert.equal(row.earlier_sessions?.spent_usd, 0.5);
+    assert.equal(row.compactions, 1, "hand-off counters are the whole run's too");
+    assert.equal(row.handoffs, 1);
+
+    // Two processes on one AGENT_ID, alternating: each keeps its own entry.
+    for (let i = 1; i <= 4; i++) {
+      await applySessionUsage(root, "agent01", usage("P", i, i));
+      await applySessionUsage(root, "agent01", usage("Q", i / 10, i));
+    }
+    const shared = (await readBudget(root)).agents.agent01;
+    assert.equal(shared.spent_usd, 4.4);
+    assert.equal(shared.calls, 8);
+
+    // A session whose report goes down is not believed.
+    const dropped = await applySessionUsage(root, "agent01", usage("P", 1, 1));
+    assert.equal(dropped.budget.agents.agent01.spent_usd, 4.4);
+  });
+});
+
+test("budget: a restart carries the compaction and hand-off counters forward", async () => {
+  await withSandbox(async (root) => {
+    const usage = (spent_usd: number, calls: number, extra: Record<string, number>) => ({
+      spent_usd,
+      tokens: calls * 100,
+      calls,
+      input: calls * 100,
+      output: 0,
+      cache_read: 0,
+      cache_write: 0,
+      ...extra,
+    });
+    await applySessionUsage(root, "agent00", usage(2, 20, { compactions: 2, compaction_tokens: 900, compaction_usd: 0.4, handoffs: 2 }));
+    const after = await applySessionUsage(root, "agent00", usage(0.1, 1, { handoffs: 0 }));
+    const row = after.budget.agents.agent00;
+    assert.equal(row.spent_usd, 2.1);
+    assert.equal(row.compactions, 2);
+    assert.equal(row.compaction_tokens, 900);
+    assert.equal(row.compaction_usd, 0.4);
+    assert.equal(row.handoffs, 2);
+    const again = await applySessionUsage(root, "agent00", usage(0.3, 3, { compactions: 1, compaction_tokens: 100, compaction_usd: 0.05, handoffs: 1 }));
+    assert.equal(again.budget.agents.agent00.compactions, 3);
+    assert.equal(again.budget.agents.agent00.compaction_usd, 0.45);
+    assert.equal(again.budget.agents.agent00.handoffs, 3);
+  });
+});
+
 test("budget: an unreadable budget.json does not take the caps off the run", async () => {
   await withSandbox(async (root) => {
     const seeded = await readBudget(root);
