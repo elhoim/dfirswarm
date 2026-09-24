@@ -7,7 +7,8 @@
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFile, mkdtemp, mkdir, readFile, rm, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { appendFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -17,6 +18,8 @@ import { appendEvent, verifyEventChain, COLLECTOR_SOCKET_REL } from "../extensio
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const started: ChildProcess[] = [];
+/** What each collector started with `collectorWithTokens` said on stderr, by sandbox. */
+const collectorLogs = new Map<string, string>();
 
 after(() => {
   for (const proc of started) proc.kill("SIGTERM");
@@ -279,8 +282,9 @@ async function collectorWithTokens(root: string, map: Record<string, unknown>, a
   // no root. SIGXFSZ is ignored so the write fails instead of killing it.
   const proc = fileLimitKb
     ? spawn("bash", ["-c", `trap '' XFSZ; ulimit -f ${fileLimitKb}; exec node "$@"`, "bash", ...args], { stdio: ["pipe", "ignore", "ignore"] })
-    : spawn("node", args, { stdio: ["pipe", "ignore", "ignore"] });
+    : spawn("node", args, { stdio: ["pipe", "ignore", "pipe"] });
   started.push(proc);
+  proc.stderr?.on("data", (chunk: Buffer) => collectorLogs.set(root, (collectorLogs.get(root) ?? "") + chunk.toString("utf8")));
   // The one line the kickoff writes: `{tokens, gate}`. A bare map here is a
   // token map with no gate; a map that already has the shape is passed as is.
   const line = typeof map.tokens === "object" && map.tokens !== null ? map : { tokens: map, gate: "" };
@@ -684,11 +688,56 @@ test("a restarted collector refuses to append onto a partial line it finds", asy
   const events = join(root, "traces", "events.jsonl");
   await appendFile(events, '{"ts":"t3","agent":"a0","tool":"bash","args":{"cmd":"cut sh', "utf8");
   const before = await readFile(events, "utf8");
+  // No anchor to say the fragment is the line it promised: it is not this
+  // collector's to cut. (One that does is the next test.)
+  await rm(anchor);
 
   socket = await collectorWithTokens(root, { t: "a0" }, anchor);
   const reply = await sendForReply(socket, { ts: "t4", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" });
   assert.equal(reply.ok, false, "the sender is told the line was not written, so it spills it");
   assert.equal(await readFile(events, "utf8"), before, "nothing is appended onto the fragment");
+  await new Promise((r) => setTimeout(r, 100));
+  assert.match(collectorLogs.get(root) ?? "", /could not write a line: the trace ends in a partial line/, "the refusal is logged under --quiet");
+});
+
+test("a restarted collector cuts off the partial line its anchor promised and never acknowledged", async () => {
+  // A collector killed mid-append leaves its anchor pending on the line it was
+  // writing and a fragment of that line on disk. Nothing else ever cuts a
+  // fragment a collector did not write, so it used to refuse every line for
+  // the rest of the run.
+  const root = await mkdtemp(join(tmpdir(), "swarm-restart-cut-"));
+  const anchor = join(root, "anchor.json");
+  let socket = await collectorWithTokens(root, { t: "a0" }, anchor);
+  for (let i = 1; i <= 2; i += 1) {
+    assert.equal((await sendForReply(socket, { ts: `t${i}`, agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" })).ok, true);
+  }
+  await killLastCollector(root);
+  const events = join(root, "traces", "events.jsonl");
+  const kept = await lines(root);
+  const fragment = '{"ts":"t3","agent":"a0","tool":"bash","args":{"cmd":"cut sh';
+  // Exactly what a kill between the anchor write and the end of the append leaves.
+  const head2 = createHash("sha256").update(kept[1]).digest("hex");
+  await writeFile(anchor, `${JSON.stringify({ lines: 3, head: "never-written", prev_head: head2, pending: true })}\n`, "utf8");
+  await appendFile(events, fragment, "utf8");
+
+  socket = await collectorWithTokens(root, { t: "a0" }, anchor);
+  const text = await readFile(events, "utf8");
+  assert.ok(text.endsWith("\n"), "the fragment is off the end of the trace");
+  const now = text.split("\n").filter(Boolean);
+  assert.deepEqual(now.slice(0, 2), kept, "the whole lines before it are untouched");
+  const cutLine = JSON.parse(now[2]) as { tool: string; prev: string; args: { bytes: number; saved_to: string } };
+  assert.equal(cutLine.tool, "trace_fragment_cut", "the cut is itself a line of the record");
+  assert.equal(cutLine.prev, head2, "chained onto the last whole line");
+  assert.equal(cutLine.args.bytes, Buffer.byteLength(fragment));
+  assert.equal(await readFile(join(root, cutLine.args.saved_to), "utf8"), fragment, "the fragment is kept under traces/");
+  assert.ok(cutLine.args.saved_to.startsWith("traces/"));
+
+  const reply = await sendForReply(socket, { ts: "t4", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "t" });
+  assert.equal(reply.ok, true, "the collector writes again");
+  const recorded = JSON.parse(await readFile(anchor, "utf8")) as { lines: number; head: string; prev_head: string; pending: boolean };
+  assert.equal(recorded.lines, 4);
+  const chain = verifyEventChain(await readFile(events, "utf8"), recorded);
+  assert.equal(chain.ok, true, `the record verifies after the cut (${chain.reason ?? ""})`);
 });
 
 test("a collector restarted over a shortened trace keeps the anchor it found", async () => {
@@ -703,7 +752,6 @@ test("a collector restarted over a shortened trace keeps the anchor it found", a
   }
   await killLastCollector(root);
   assert.equal(JSON.parse(await readFile(anchor, "utf8")).lines, 4);
-  const { writeFile } = await import("node:fs/promises");
   await writeFile(join(root, "traces", "events.jsonl"), `${(await lines(root)).slice(0, 2).join("\n")}\n`, "utf8");
 
   socket = await collectorWithTokens(root, { t: "a0" }, anchor);

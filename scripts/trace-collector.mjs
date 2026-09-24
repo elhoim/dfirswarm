@@ -43,7 +43,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, existsSync, statSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const EVENTS_REL = "traces/events.jsonl";
@@ -145,6 +145,19 @@ function endsMidLine(file) {
   }
 }
 
+/** The anchor an earlier collector left, or null when there is none to read. */
+function readAnchor() {
+  if (!anchorPath) return null;
+  try {
+    const anchor = JSON.parse(readFileSync(anchorPath, "utf8"));
+    const lines = Number(anchor?.lines);
+    if (!Number.isInteger(lines) || lines < 0 || typeof anchor.head !== "string") return null;
+    return anchor;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * How many lines the anchor this collector finds on startup already
  * committed to. A restarted collector used to count the file instead, so a
@@ -153,15 +166,46 @@ function endsMidLine(file) {
  * that may never have reached the file, so it commits to one fewer.
  */
 function anchoredLines() {
-  if (!anchorPath) return 0;
-  try {
-    const anchor = JSON.parse(readFileSync(anchorPath, "utf8"));
-    const lines = Number(anchor?.lines);
-    if (!Number.isInteger(lines) || lines < 0) return 0;
-    return anchor.pending === true ? Math.max(0, lines - 1) : lines;
-  } catch {
-    return 0;
+  const anchor = readAnchor();
+  if (!anchor) return 0;
+  return anchor.pending === true ? Math.max(0, anchor.lines - 1) : anchor.lines;
+}
+
+/**
+ * Whether these whole lines are the record the anchor describes, by the rules
+ * `verifyEventChain` in extensions/protocol.ts applies (mirrored here so the
+ * collector needs nothing but node). Null when they are; otherwise what is
+ * wrong and where. The collector runs under plain node on every platform, so
+ * it does not import the TypeScript.
+ */
+function disagreement(lines, anchor) {
+  let previous = "";
+  let chained = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    let record;
+    try {
+      record = JSON.parse(lines[i]);
+    } catch {
+      return { reason: "edited", at: i + 1 };
+    }
+    const prev = typeof record?.prev === "string" ? record.prev : null;
+    if (prev === null) {
+      if (chained) return { reason: "appended", at: i + 1 };
+    } else {
+      chained += 1;
+      if (prev !== previous) return { reason: "edited", at: i + 1 };
+    }
+    previous = lineHash(lines[i]);
   }
+  if (!chained && anchor.lines > 0) return { reason: "head", at: 1 };
+  if (lines.length > anchor.lines) return { reason: "appended", at: anchor.lines + 1 };
+  if (lines.length === anchor.lines) {
+    return previous === anchor.head ? null : { reason: "head", at: lines.length };
+  }
+  if (anchor.pending === true && lines.length === anchor.lines - 1 && typeof anchor.prev_head === "string") {
+    return previous === anchor.prev_head ? null : { reason: "head", at: lines.length };
+  }
+  return { reason: "shortened", at: lines.length };
 }
 
 /** sha256 of the last line written, so the next one can name its parent. */
@@ -328,6 +372,49 @@ function sameSecret(a, b) {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+/**
+ * Settle the file this collector inherits before any pane can write to it.
+ *
+ * A fragment at the end — no closing newline — is refused by `write()`, and
+ * nothing else ever cuts one this process did not write, so a fragment left
+ * by a collector killed mid-append used to refuse every line for the rest of
+ * the run. When the anchor accounts for exactly the whole lines before it,
+ * the fragment is the line the anchor had promised and never acknowledged:
+ * it is moved out to traces/, cut off, and the cut is itself a line of the
+ * record. A fragment the anchor does not account for is left where it is.
+ */
+function reconcile() {
+  const anchor = readAnchor();
+  if (!anchor) return;
+  let bytes;
+  try {
+    bytes = readFileSync(eventsFile);
+  } catch {
+    return;
+  }
+  const cut = bytes.lastIndexOf(0x0a) + 1;
+  const whole = wholeLines(bytes.subarray(0, cut).toString("utf8"));
+  const wrong = disagreement(whole, anchor);
+  if (wrong || cut === bytes.length) return;
+  const fragment = bytes.subarray(cut);
+  const saved = join(dirname(eventsFile), `events.fragment-${new Date().toISOString().replace(/[:.]/g, "-")}.partial`);
+  try {
+    writeFileSync(saved, fragment, { flag: "wx" });
+    truncateSync(eventsAbs, cut);
+  } catch (err) {
+    console.error(`trace-collector: could not cut the partial line at the end of the trace: ${err.message}`);
+    return;
+  }
+  console.error(`trace-collector: cut a ${fragment.length}-byte partial line the anchor never acknowledged; kept in ${saved}`);
+  write({
+    ts: new Date().toISOString(),
+    agent: "system",
+    tool: "trace_fragment_cut",
+    args: { bytes: fragment.length, sha256: createHash("sha256").update(fragment).digest("hex"), saved_to: relative(sandbox, saved) },
+    result: { ok: true },
+  });
+}
+
 /** Tell the sender what became of its line, if it is still listening. */
 function reply(socket, body) {
   try {
@@ -353,6 +440,13 @@ function start() {
     if (existsSync(socketPath)) unlinkSync(socketPath);
   } catch {
     // a socket left by a crashed collector; the bind below will say if it matters
+  }
+
+  // Before the socket exists, so no pane's line can land first.
+  try {
+    reconcile();
+  } catch (err) {
+    console.error(`trace-collector: could not settle the trace it found: ${err.message}`);
   }
 
   const server = createServer((socket) => {
@@ -398,7 +492,10 @@ function start() {
         } catch (err) {
           // Not the sender's bug but this side's: the disk, the file. Said
           // apart from a malformed message, because the fix is somewhere else.
-          if (!quiet) console.error(`trace-collector: could not write a line: ${err.message}`);
+          // Whatever --quiet says: a refused line goes to the spill, which the
+          // report does not read, and this log is then the only place that
+          // says the record is being refused.
+          console.error(`trace-collector: could not write a line: ${err.message}`);
           reply(socket, { ok: false, error: err.message });
         }
       }
