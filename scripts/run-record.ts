@@ -8,6 +8,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
+  ALL_DEAD_REL,
   SENTINEL_REL,
   normalizeBudget,
   readEventLog,
@@ -94,6 +95,8 @@ export type RunContext = {
   budget: BudgetRecord | null;
   events: SwarmEvent[];
   sentinel: Record<string, string> | null;
+  /** done/ALL_AGENTS_DEAD's front matter: the reaper found every seat marked and no sentinel. */
+  allDead: Record<string, string> | null;
   ledger: LedgerEntry[];
   inputs: InputsManifest | null;
 };
@@ -121,7 +124,9 @@ export async function loadRunContext(
   const events = [...(await readEventLog(sandbox))];
   const sentinelText = await readFile(join(sandbox, SENTINEL_REL), "utf8").catch(() => null);
   const sentinel = sentinelText === null ? null : opts.parseSentinel(sentinelText);
+  const allDeadText = sentinel ? null : await readFile(join(sandbox, ALL_DEAD_REL), "utf8").catch(() => null);
+  const allDead = allDeadText === null ? null : opts.parseSentinel(allDeadText);
   const ledger = await readLedger(sandbox);
   const inputs = await readInputsManifest(sandbox);
-  return { sandbox, runsDir, run, team, budgetRaw, budget, events, sentinel, ledger, inputs };
+  return { sandbox, runsDir, run, team, budgetRaw, budget, events, sentinel, allDead, ledger, inputs };
 }

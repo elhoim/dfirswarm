@@ -43,6 +43,7 @@ runs/<id>/
   done/agents/<id>.done        this worker exited
   done/agents/<id>.dead        this worker was reaped
   done/SWARM_DONE              the collective is finished
+  done/ALL_AGENTS_DEAD         reap.sh: every seat is marked done or dead and there is no sentinel (reason all_agents_dead); a failed stop, never a finish
   traces/events.jsonl          append-only event log
   traces/netguard.log          ALLOW/DENY lines
   tool-output/<id>/<stamp>-<tool>.{out,err,text}.log

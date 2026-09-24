@@ -175,7 +175,7 @@ set_count() {
 
 while :; do
   [[ -d "$SANDBOX" ]] || exit 0
-  [[ -f "$SANDBOX/done/SWARM_DONE" ]] && exit 0
+  [[ -f "$SANDBOX/done/SWARM_DONE" || -f "$SANDBOX/done/ALL_AGENTS_DEAD" ]] && exit 0
   for id in $(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null); do
     [[ -e "$SANDBOX/done/agents/$id.done" || -e "$SANDBOX/done/agents/$id.dead" ]] && continue
     idle="$(idle_seconds "$id")"

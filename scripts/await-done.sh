@@ -220,6 +220,8 @@ run_checks() {
 if [[ "$CHECKS_JSON" -eq 1 ]]; then
   sentinel=false
   [[ -f "$SANDBOX/done/SWARM_DONE" ]] && sentinel=true
+  all_dead=false
+  [[ "$sentinel" == false && -f "$SANDBOX/done/ALL_AGENTS_DEAD" ]] && all_dead=true
   rows=""
   source_name=""
   if load_goal; then
@@ -237,7 +239,7 @@ if [[ "$CHECKS_JSON" -eq 1 ]]; then
       done <<< "$checks"
     fi
   fi
-  printf '%s' "$rows" | CHECKS_SENTINEL="$sentinel" CHECKS_SOURCE="$source_name" python3 -c '
+  printf '%s' "$rows" | CHECKS_SENTINEL="$sentinel" CHECKS_ALL_DEAD="$all_dead" CHECKS_SOURCE="$source_name" python3 -c '
 import json, os, sys
 checks = []
 for raw in sys.stdin.read().splitlines():
@@ -247,6 +249,7 @@ for raw in sys.stdin.read().splitlines():
     checks.append({"cmd": cmd, "ok": ok == "1", "ms": int(ms), "timed_out": timed_out == "1"})
 print(json.dumps({
     "sentinel": os.environ.get("CHECKS_SENTINEL") == "true",
+    "all_agents_dead": os.environ.get("CHECKS_ALL_DEAD") == "true",
     "source": os.environ.get("CHECKS_SOURCE") or None,
     "total": len(checks),
     "passed": sum(1 for c in checks if c["ok"]),
@@ -264,6 +267,13 @@ while (( SECONDS < deadline )); do
     bash "$ROOT/scripts/reap.sh" --sandbox "$SANDBOX" --timeout "${REAP_TIMEOUT:-960}" --quiet --stop || true
   fi
   [[ "$QUIET" -eq 1 ]] || bash "$ROOT/scripts/watch.sh" --once --sandbox "$SANDBOX" || true
+
+  # The reaper found every seat marked and no sentinel: nobody is left who
+  # could finish, so waiting out the timeout would only delay the verdict.
+  if [[ ! -f "$SANDBOX/done/SWARM_DONE" && -f "$SANDBOX/done/ALL_AGENTS_DEAD" ]]; then
+    echo "FAILED: every agent died before the definition of done was met (done/ALL_AGENTS_DEAD, reason all_agents_dead)" >&2
+    exit 1
+  fi
 
   if [[ -f "$SANDBOX/done/SWARM_DONE" ]]; then
     nudge_unfinished "$SANDBOX"

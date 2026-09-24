@@ -140,7 +140,7 @@ function resultOf(event: SwarmEvent): Record<string, unknown> {
 }
 
 export async function summarize(sandboxArg: string, options: { runsDir?: string } = {}): Promise<string> {
-  const { sandbox, run, team, budgetRaw, budget, events, sentinel, ledger, inputs } = await loadRunContext(sandboxArg, {
+  const { sandbox, run, team, budgetRaw, budget, events, sentinel, allDead, ledger, inputs } = await loadRunContext(sandboxArg, {
     runsDir: options.runsDir,
     parseSentinel: parseFrontMatter,
   });
@@ -178,6 +178,8 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   lines.push("## Outcome", "");
   if (sentinel) {
     lines.push(`Sentinel \`${SENTINEL_REL}\` by **${sentinel.by ?? "?"}** at ${sentinel.at ?? "?"}: ${sentinel.reason ?? ""}${sentinel.output ? ` (output: \`${sentinel.output}\`)` : ""}`, "");
+  } else if (allDead) {
+    lines.push(`No sentinel: every agent died (\`done/ALL_AGENTS_DEAD\`, ${allDead.reason ?? "all_agents_dead"}, at ${allDead.at ?? "?"}). The swarm stopped without meeting its definition of done.`, "");
   } else {
     lines.push("No sentinel: the swarm has not finished (or was stopped from outside without one).", "");
   }

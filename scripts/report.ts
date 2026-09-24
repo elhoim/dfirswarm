@@ -653,7 +653,7 @@ export function egressLine(mode: string | undefined): string {
 }
 
 export async function renderReport(sandboxArg: string, options: ReportOptions = {}): Promise<string> {
-  const { sandbox, run, team, budget, events, sentinel, ledger, inputs } = await loadRunContext(sandboxArg, {
+  const { sandbox, run, team, budget, events, sentinel, allDead, ledger, inputs } = await loadRunContext(sandboxArg, {
     runsDir: options.runsDir,
     parseSentinel: parseFrontMatter,
   });
@@ -899,7 +899,8 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
   // --- 7. Limitations ------------------------------------------------------
   const capHit = (budget?.spent_usd ?? 0) > 0 && (run?.cap_usd ?? 0) > 0 && (budget?.spent_usd ?? 0) >= (run?.cap_usd ?? 0) * 0.98;
   const limits: string[] = [];
-  if (!sentinel) limits.push("The swarm did not finish: there is no <code>done/SWARM_DONE</code>, so no agent stated that the definition of done was met.");
+  if (!sentinel && allDead) limits.push(`The swarm did not finish: every agent died${allDead.at ? ` (recorded by the reaper at ${escapeHtml(allDead.at)})` : ""} before any stated that the definition of done was met.`);
+  else if (!sentinel) limits.push("The swarm did not finish: there is no <code>done/SWARM_DONE</code>, so no agent stated that the definition of done was met.");
   if (capHit) limits.push(`Spend reached the cap (${escapeHtml(usd(budget?.spent_usd ?? 0))} of ${escapeHtml(usd(run?.cap_usd ?? 0))}). Work stopped because of the budget, not because the questions were answered.`);
   if (!findings.length) limits.push("No findings were recorded, so nothing in this report is stated as a conclusion.");
   if (!inputs) limits.push("No read-only inputs were given, so no evidence hash is stated.");
@@ -1030,7 +1031,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
   const headline = findings.length
     ? `${findings.length} finding${findings.length === 1 ? "" : "s"}${highCount ? `, ${highCount} at high confidence` : ""}`
     : "no findings recorded";
-  const stateChip = sentinel ? chip("finished", "moss") : run?.state === "stopped" ? chip("stopped", "brick") : chip("did not finish", "saffron");
+  const stateChip = sentinel ? chip("finished", "moss") : allDead ? chip("every agent died", "brick") : run?.state === "stopped" ? chip("stopped", "brick") : chip("did not finish", "saffron");
 
   return `<!doctype html>
 <html lang="en">
