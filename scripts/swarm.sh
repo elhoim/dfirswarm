@@ -4728,7 +4728,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
 
   # The tools each Pi is given, known before a prepared run returns: a
   # prepared VM run writes them into vm-spec.json.
-  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,thread_open,thread_join,inputs,name,record,ledger,done"
+  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,done"
   # Pi's --tools is an allowlist by name, so a tool the extension registers is
   # invisible until it is named here. The skill tool exists only when the run
   # carries packs.
@@ -4939,8 +4939,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   local kickoff
   kickoff="$(mktemp)"
   cat > "$kickoff" <<EOF
-Join swarm ${swarm_id}. Read SWARM.md, team.json, threads/main, and done/SWARM_DONE.
-If the done file exists, terminate.
+Join swarm ${swarm_id}. Read SWARM.md and team.json, then call inbox: it gives
+you the board (threads/main is a directory of posts) and says whether the swarm
+is done (done/SWARM_DONE exists only then). If it is done, terminate.
 Otherwise: nobody has been given a job here. Read the goal, see on the board
 what your peers have taken, decide what you are going to do, and call
 name(name, doing) to say what to call you and what you are taking on. Then
