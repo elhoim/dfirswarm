@@ -349,11 +349,13 @@ test("an image that lacks a pack's required program stops the kickoff, unless th
 });
 
 test("a host msb does not run on is refused by name, before msb is asked", () => {
-  assert.equal(vmPlatformProblem("darwin", "arm64", undefined), null);
-  assert.match(vmPlatformProblem("darwin", "x64", undefined) ?? "", /Apple silicon; this Mac is Intel/);
+  // null, not undefined: undefined is a left-out argument, and a left-out
+  // glibc is read from the host (a Linux CI runner has one).
+  assert.equal(vmPlatformProblem("darwin", "arm64", null), null);
+  assert.match(vmPlatformProblem("darwin", "x64", null) ?? "", /Apple silicon; this Mac is Intel/);
   assert.equal(vmPlatformProblem("linux", "x64", "2.36"), null);
-  assert.match(vmPlatformProblem("linux", "x64", undefined) ?? "", /not glibc \(musl\?\)/);
-  assert.match(vmPlatformProblem("win32", "x64", undefined) ?? "", /this host is win32/);
+  assert.match(vmPlatformProblem("linux", "x64", null) ?? "", /not glibc \(musl\?\)/);
+  assert.match(vmPlatformProblem("win32", "x64", null) ?? "", /this host is win32/);
   assert.match(vmPlatformProblem("linux", "ppc64", "2.36") ?? "", /x64 or arm64/);
 });
 

@@ -139,7 +139,8 @@ export type VmSpec = {
  * musl host used to be mapped to the glibc Linux binary and fail at the probe
  * with an error that named neither. Null when the platform is one msb runs on.
  */
-export function vmPlatformProblem(platform: string = process.platform, arch: string = process.arch, glibc: string | undefined = glibcVersion()): string | null {
+// `glibc` null is a host with none; left out, this host's own is read.
+export function vmPlatformProblem(platform: string = process.platform, arch: string = process.arch, glibc: string | null = glibcVersion() ?? null): string | null {
   if (platform === "darwin") return arch === "arm64" ? null : "microVMs on macOS need Apple silicon; this Mac is Intel";
   if (platform !== "linux") return `microVMs need macOS on Apple silicon or Linux with KVM; this host is ${platform}`;
   if (arch !== "x64" && arch !== "arm64") return `microVMs on Linux need x64 or arm64; this host is ${arch}`;
