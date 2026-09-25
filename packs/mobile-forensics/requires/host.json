@@ -100,6 +100,18 @@
       },
       "licence": "MIT",
       "redistributable": false
+    },
+    {
+      "name": "heif-convert",
+      "package": "libheif-examples",
+      "optional": true,
+      "why": "An iPhone's HEIC photo converted to JPEG or PNG, to look at it or read it with the other tools; pillow-heif opens one in a script.",
+      "install": {
+        "brew": "brew install libheif",
+        "apt": "apt-get install -y libheif-examples"
+      },
+      "licence": "LGPL-3.0-or-later",
+      "redistributable": false
     }
   ]
 }

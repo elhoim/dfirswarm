@@ -267,6 +267,44 @@
       },
       "licence": "LGPL-3.0-or-later",
       "redistributable": false
+    },
+    {
+      "name": "pdftotext",
+      "package": "poppler-utils",
+      "optional": true,
+      "why": "The text of a PDF (-layout keeps its columns); pdfinfo, pdfimages and pdftohtml come in the same package.",
+      "install": {
+        "brew": "brew install poppler",
+        "apt": "apt-get install -y poppler-utils"
+      },
+      "licence": "GPL-2.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "ccl_indexeddb_dump",
+      "package": "ccl_chromium_reader",
+      "optional": true,
+      "why": "A Chromium or Electron IndexedDB (a chat client's, a web app's) read by database, object store and record; the ccl_chromium_reader library beside it, in /opt/dfir/src/ccl_indexeddb_dump/.venv/bin/python, also reads LevelDB, Local Storage, Session Storage and the cache.",
+      "install": {
+        "brew": "https://github.com/cclgroupltd/ccl_chromium_reader (not on PyPI)",
+        "apt": "pinned source 0.3.18 (install.source)",
+        "source": {
+          "version": "0.3.18",
+          "url": "https://github.com/cclgroupltd/ccl_chromium_reader/archive/refs/tags/0.3.18.tar.gz",
+          "sha256": "df03121f6623c28b5c58363eb0e3691e743fd59c08e76e672c1ba00432d16e68",
+          "entry": "tools_and_utilities/dump_indexeddb_details.py",
+          "run": "python",
+          "pip": [
+            "--no-deps",
+            ".",
+            "Brotli>=1.0.9,<=1.2.0",
+            "zstd==1.5.7.2",
+            "https://github.com/cclgroupltd/ccl_simplesnappy/archive/3d085230baa8c46cf2090ebba29bf6e8eab31087.tar.gz"
+          ]
+        }
+      },
+      "licence": "MIT",
+      "redistributable": false
     }
   ]
 }

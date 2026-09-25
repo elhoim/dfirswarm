@@ -87,7 +87,7 @@
       "skills/registry/system-profile.md": "931b25341d637782c5f21c34cdfbe6bda8709486a16280ce29a0b54b0f7b75b0",
       "skills/antiforensics/traces.md": "c87467f49a555613b42c980c1ef084d98fd6f8e3e7ac438243084e7443cf2748",
       "requires/host.json": "33835fffa4e3b94295274b74ce0871bf6cf0ef32f42fe143d425ebf07f0939c4",
-      "requires/python.txt": "c82e082a319cb54264a5028d908b36e9cf63540fdfc476956cac67959f1b5bd3",
+      "requires/python.txt": "fbd0960e017a3aa4fd196f423f1c646d6c68e5353f43686be8165211ba933939",
       "skills/INDEX.md": "8c386266c502dc85a1c46b2896421ab3bc4f82c5a28a72b2518bd5ffeebe45c7"
     }
   },

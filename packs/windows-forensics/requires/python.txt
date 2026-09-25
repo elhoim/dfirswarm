@@ -7,3 +7,5 @@ regipy>=5.0.0          # MIT. Registry hives, Amcache and ShimCache, without Win
 dissect.util>=3.0      # AGPL-3.0, Fox-IT. lzxpress_huffman, for compressed prefetch.
 olefile>=0.46          # BSD-2-Clause. The compound file a jump list is stored in.
 libfwsi-python         # LGPL-3.0-or-later. pyfwsi: a shell item read from its documented layout. A library, no program.
+impacket               # Apache-2.0 (modified). DPAPI, the Credential Manager, Windows Vault and SAM/LSA secrets read offline; its dpapi.py and secretsdump.py are in the venv.
+dpapick3               # MIT. DPAPI master keys and blobs decrypted offline, from a user's password or SHA-1, or the domain backup key.

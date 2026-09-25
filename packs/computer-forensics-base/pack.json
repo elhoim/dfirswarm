@@ -54,7 +54,7 @@
       "skills/filesystem/extract.md": "c118a8f92bfa4a0f98a476eb43f283082875418dc3df3ac51b08d0d50e5ca632",
       "skills/timeline/build.md": "05d3ec7c58f647b4e869b1a61e5f17022f391a1071ff8aa0935c8407345d2271",
       "skills/timeline/super.md": "8efb20d4e54241bfdb6a740af1eee0c5ac908bfb42d8a8cbfc3f1a4be5a9ed69",
-      "requires/host.json": "6f477acb541626a966eee315fe4219e11e563c0102340bf96f59407694934163",
+      "requires/host.json": "3e6478d3daffeec7cf90123f56c66a9cec89d71059d9daf7b2648b34aaea3802",
       "requires/python.txt": "2966a7e050fa6f31d2bd76684e434e9f062d47bdc26a41fc452e08ffdb52a578",
       "skills/INDEX.md": "afdb1e862a9283a13876c3e1374c7d108d43927ffcb9e786e99235bb744dc7a9"
     }

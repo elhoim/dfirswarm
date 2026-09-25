@@ -266,6 +266,19 @@ not surprised:
   then what a pack names that the image does not hold. `install.py` writes it
   beside `image.json`, the NOTICE and the SBOM, in the base and in every
   profile, and the image check records it in `toolbox.json` (`tools_md`).
+- **The programs the sixth CTF round's agents went looking for are in the
+  images.** Each had been searched for, pip-installed by hand, or forged:
+  - `pdftotext` (poppler-utils, with `pdfinfo`, `pdfimages`, `pdftohtml`) in
+    computer-forensics-base 1.2.13: five agents shared a forged PDF reader and
+    two pip-installed pypdf because the image had none.
+  - `ccl_indexeddb_dump`, a pinned source of ccl_chromium_reader 0.3.18 (not on
+    PyPI) with its library in a venv of its own, in computer-forensics-base:
+    Element's IndexedDB on the BelkaCTF #6 laptop had no reader.
+  - `heif-convert` (libheif-examples) and `pillow-heif` in mobile-forensics
+    1.0.4, for an iPhone's HEIC photos.
+  - `impacket` and `dpapick3` in windows-forensics 1.2.9, for DPAPI, the
+    Credential Manager and Windows Vault read offline (both were pip-installed
+    on "Encrypt Them All").
 - **GnuPG in the encrypted-containers images** (encrypted-containers 1.1.2):
   `gpg`, to read an OpenPGP message's packets before any key is known, import
   a private key found on the evidence, and decrypt once its passphrase is. Only
