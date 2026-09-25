@@ -183,6 +183,9 @@ sbx="$(sandbox_of "$out")"
 [[ "$(jq -r '.held' "$sbx/inputs.json")" == "bind" ]] || fail "inputs.json does not say the evidence was used in place"
 [[ "$(reg vm-ev '.isolation.disk_mib')" == "8192" ]] || fail "the VM disk size is not recorded"
 [[ "$(jq -r '.files | length' "$sbx/inputs.json")" == "2" ]] || fail "the manifest does not list both files"
+# No --quarantine was given, and each seat's holes are no-exec in its VM all
+# the same: the record a malware entry's check reads says so.
+(cd "$sbx" && grep -q '"quarantine": true' inputs.json) || fail "a VM run is quarantined, and inputs.json does not say so: $(jq -c '{quarantine}' "$sbx/inputs.json")"
 printf '%s\n' "$out" | grep -q 'kernel guard: microvm' || fail "the kickoff does not say who holds the evidence: $out"
 pass "the evidence is used in place, with no copy and no pristine clone, and the manifest says the VM holds it"
 

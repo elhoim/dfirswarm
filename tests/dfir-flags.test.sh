@@ -448,14 +448,24 @@ pass "--quarantine creates the no-exec directories and says so"
 # kickoff records the flag in inputs.json, which is harness-written and
 # protected. The malware entries check it with exactly this line.
 qcheck=$'grep -q \'"quarantine": true\' inputs.json'
-(cd "$sb" && bash -c "$qcheck") || fail "--quarantine should be recorded in inputs.json: $(jq -c '{quarantine}' "$sb/inputs.json")"
+# The record is whether the no-exec holds, so on a host with no kernel guard
+# even --quarantine records false.
+if [[ "$(jq -r '.guard' "$sb/inputs.json")" != "none" ]]; then
+  (cd "$sb" && bash -c "$qcheck") || fail "--quarantine should be recorded in inputs.json: $(jq -c '{quarantine}' "$sb/inputs.json")"
+  cat_sb="$(reg catalog '.sandbox')"
+  [[ "$(jq -r '.quarantine' "$cat_sb/inputs.json")" == "true" ]] || fail "--catalog implies quarantine and inputs.json should say so"
+fi
 out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$HELLO" --label noquarantine --inputs "$TMP/src")"
 sbq="$(sandbox_of "$out")"
 [[ "$(jq -r '.quarantine' "$sbq/inputs.json")" == "false" ]] || fail "a kickoff without --quarantine should record quarantine: false: $(jq -c '{quarantine}' "$sbq/inputs.json")"
 (cd "$sbq" && bash -c "$qcheck") && fail "the quarantine check passed for a kickoff without --quarantine"
-cat_sb="$(reg catalog '.sandbox')"
-[[ "$(jq -r '.quarantine' "$cat_sb/inputs.json")" == "true" ]] || fail "--catalog implies quarantine and inputs.json should say so"
-pass "inputs.json records whether the kickoff quarantined, and a goal check can read it"
+# --inputs-enforce off drops the kernel guard, and the no-exec with it: the
+# flag was given, the quarantine did not hold, and the record says so.
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$HELLO" --label quarantine-noguard --inputs "$TMP/src" --inputs-enforce off --quarantine)"
+sbq="$(sandbox_of "$out")"
+[[ "$(jq -r '.quarantine' "$sbq/inputs.json")" == "false" ]] || fail "--quarantine without a guard should record quarantine: false: $(jq -c '{guard, quarantine}' "$sbq/inputs.json")"
+(cd "$sbq" && bash -c "$qcheck") && fail "the quarantine check passed for a run whose no-exec did not hold"
+pass "inputs.json records whether the quarantine held, and a goal check can read it"
 
 if [[ -f "$sb/.fsguard/plan.txt" ]] && ! grep -q '^mode: none' "$sb/.fsguard/plan.txt"; then
   grep -q "^no-exec: $sb/work/extracted\$" "$sb/.fsguard/plan.txt" || fail "the guard plan should list work/extracted as no-exec: $(cat "$sb/.fsguard/plan.txt")"

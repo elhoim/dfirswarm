@@ -4046,15 +4046,22 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     "${sandbox:?}/vm-prepared" "$sandbox/vm-spec.json" "$sandbox/compact-prompt.md" "$sandbox/toolchain.json"
   rm -f "$sandbox"/custody.json "$sandbox"/custody.*.json
   mkdir -p "$sandbox/history" "$sandbox/tools"
+  # The manifest records whether the no-exec holds, not whether it was asked
+  # for: with no guard (--inputs-enforce off, or a host without one) the flag
+  # makes the directories and nothing stops a file there from running, so a
+  # goal check that read the flag would pass a run that was not quarantined.
+  # A VM run always holds it (each seat's holes are no-exec in its VM).
+  local quarantine_held=0
+  if [[ "$quarantine" -eq 1 && "$inputs_guard" != "none" ]]; then quarantine_held=1; fi
   if [[ -n "$inputs_dir" ]]; then
     if [[ "$inputs_bind" -eq 1 ]]; then
-      bind_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$quarantine"
+      bind_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$quarantine_held"
     else
-      install_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$verify_copy" "$quarantine"
+      install_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$verify_copy" "$quarantine_held"
     fi
   elif [[ -n "$inputs_image" ]]; then
     attach_inputs_image "$sandbox" "$inputs_image" >/dev/null
-    manifest_attached_inputs "$sandbox" "$inputs_image" "$quarantine"
+    manifest_attached_inputs "$sandbox" "$inputs_image" "$quarantine_held"
   fi
   # The kickoff's own record of what the run started with, outside the run
   # where no agent (and no catalog parser) reaches it: custody compares the

@@ -15,8 +15,9 @@ scripts/swarm.sh start --goal-file library/windows/host-intrusion.md \
 host has a kernel guard. A case that pulls samples, carvings or decoded
 stages out of loose files is launched with `--quarantine` whether or not it
 takes the catalog; without either flag nothing there is protected. The
-kickoff records which it was as `"quarantine": true|false` in `inputs.json`,
-and the malware entries' checks read it.
+kickoff records whether the no-exec holds as `"quarantine": true|false` in
+`inputs.json` (a run in microVMs always holds it; a host run only with a
+kernel guard), and the malware entries' checks read it.
 
 Every entry is a starting point, not a script. Load it, name the evidence it
 should read where the document says so, tighten or drop the questions the
@@ -300,10 +301,11 @@ A case that extracts samples, carvings or decoded stages adds
 `test -z "$(find work -path work/.toolchain -prune -o -type f \( -perm -u+x -o -perm -g+x -o -perm -o+x \) -print 2>/dev/null | head -1)"`:
 no file under `work/` carries an execute bit (pip's `work/.toolchain/`
 aside). A case that must not extract without the kernel's no-exec adds
-`grep -q '"quarantine": true' inputs.json` as well: the kickoff records
-`--quarantine` (or `--catalog`, which implies it) in `inputs.json`, which the
-harness writes and no agent can, so a run started without the flag fails
-the check whatever it found. The malware entries carry both.
+`grep -q '"quarantine": true' inputs.json` as well: the kickoff records in
+`inputs.json`, which the harness writes and no agent can, whether the no-exec
+holds (`--quarantine` or `--catalog` with a kernel guard, or any microVM
+run), so a run without it fails the check whatever it found. The malware
+entries carry both.
 
 Where the definition of done promises extracted files with their hashes,
 name the manifest (`sha256sum` output in a `SHA256SUMS` file beside them)
