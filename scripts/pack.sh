@@ -160,7 +160,7 @@ def _dep_names(pack_dir, seen, acc):
     except Exception:
         pass
     for spec in dm.get("depends", []) or []:
-        did = re.split(r"[<>=!~ ]", str(spec), 1)[0]
+        did = re.split(r"[<>=!~ ]", str(spec), maxsplit=1)[0]
         if did and did not in seen:
             seen.add(did)
             _dep_names(os.path.join(os.path.dirname(pack_dir), did), seen, acc)
@@ -168,7 +168,7 @@ def _dep_names(pack_dir, seen, acc):
 deps = {"tools": set(), "skills": set(), "host": set(), "missing": set()}
 _seen = {pid}
 for spec in man.get("depends", []) or []:
-    did = re.split(r"[<>=!~ ]", str(spec), 1)[0]
+    did = re.split(r"[<>=!~ ]", str(spec), maxsplit=1)[0]
     if did and did not in _seen:
         _seen.add(did)
         _dep_names(os.path.join(os.path.dirname(os.path.abspath(root)), did), _seen, deps)
