@@ -857,20 +857,22 @@ test("rendered in a browser, no table and no exhibit head overflows, on a phone,
 });
 
 test("a long line of table or link punctuation renders in linear time", () => {
-  // Each of these used to be scanned once per starting position: 20,000
-  // characters took seconds, and the report and the artifact preview both
-  // render whatever markdown work/ holds.
+  // Each of these used to be scanned once per starting position, and the
+  // report and the artifact preview both render whatever markdown work/
+  // holds. At these sizes the old scans took 2.6 to 11 s each where this was
+  // measured, and the linear ones a millisecond, so a second's bound tells
+  // the two apart on a slow machine too.
   const lines = {
-    pipes: `| a | b |\n${"|".repeat(20_000)}x`,
-    cells: `| a | b |\n${"| -".repeat(7_000)}x`,
-    brackets: "[".repeat(20_000),
-    links: "[a](".repeat(5_000),
+    pipes: `| a | b |\n${"|".repeat(100_000)}x`,
+    cells: `| a | b |\n${"| -".repeat(35_000)}x`,
+    brackets: "[".repeat(100_000),
+    links: "[a](".repeat(40_000),
   };
   for (const [name, md] of Object.entries(lines)) {
     const started = performance.now();
     markdownToHtml(md);
     const ms = performance.now() - started;
-    assert.ok(ms < 3_000, `${name}: ${Math.round(ms)} ms`);
+    assert.ok(ms < 1_000, `${name}: ${Math.round(ms)} ms`);
   }
   // What the rewrite must still do: a divider is recognised with or without
   // outer pipes and alignment colons, a pipe-free rule is not a divider, and
