@@ -104,6 +104,21 @@ bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" dfir >/dev/null 2>&1 || true
 jq -e 'has("not_applicable") | not' "$TMP/sb/toolbox.json" >/dev/null || fail "a host check lists programs as not applicable"
 pass "in an image, a program another system has is listed as not applicable, never missing or blocking"
 
+# An image that describes itself: toolbox.json says where its tools.md is, so
+# the contract can point at that file instead of listing programs. Only an
+# image check says so; a host has no such file.
+printf '# Programs in this VM\n' > "$TMP/tools.md"
+rm -f "$TMP/sb/toolbox.json"
+DFIRSWARM_TOOLS_MD="$TMP/tools.md" bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" dfir --image "$TMP/image.json" >/dev/null 2>&1 || true
+jq -e '.tools_md == "/etc/dfirswarm/tools.md"' "$TMP/sb/toolbox.json" >/dev/null || fail "an image with tools.md is not recorded as having it: $(cat "$TMP/sb/toolbox.json")"
+rm -f "$TMP/sb/toolbox.json"
+DFIRSWARM_TOOLS_MD="$TMP/no-such.md" bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" dfir --image "$TMP/image.json" >/dev/null 2>&1 || true
+jq -e 'has("tools_md") | not' "$TMP/sb/toolbox.json" >/dev/null || fail "an image without tools.md was said to have one"
+rm -f "$TMP/sb/toolbox.json"
+DFIRSWARM_TOOLS_MD="$TMP/tools.md" bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" dfir >/dev/null 2>&1 || true
+jq -e 'has("tools_md") | not' "$TMP/sb/toolbox.json" >/dev/null || fail "a host check claimed an image's tools.md"
+pass "an image check records the image's tools.md, and only when the image has one"
+
 # Each tool's fields, whole: the version probe has a pipe of its own, and the
 # use column once read " head -1" for every tool.
 rm -f "$TMP/sb/toolbox.json"

@@ -38,8 +38,11 @@ Board
   re-run the command to see the rest.
 
 Waiting
-- If you are waiting on a peer, call `wait`. It returns as soon as a post lands, the swarm finishes,
-  or one of your claims lapses. Never poll with `bash sleep` — every wake-up costs a full model call.
+- If you are waiting on a peer, call `wait`. It returns as soon as a post for you lands, the swarm
+  finishes, or one of your claims lapses. On `main` a post addressed only to other agents does not
+  wake you: it stays unread and comes with your next delivery. A seat that has to follow the whole
+  board (a critic, an integrator) passes `every_post: true`. Never poll with `bash sleep` — every
+  wake-up costs a full model call.
 - While the swarm is running, do not end your turn without `wait` open. A turn that ends with
   "waiting for peers" waits for nothing: no prompt comes back until the harness nudges you, and
   every nudge is a wasted round trip. Post, then call `wait`; when it returns, act on what landed

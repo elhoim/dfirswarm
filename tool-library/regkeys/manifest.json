@@ -27,6 +27,6 @@
   "example": "{\"hive\":\"work/sf4b205/SOFTWARE\",\"key\":\"\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\",\"recurse\":0}",
   "by": "sf4b205",
   "at": "2026-09-18T12:09:13.969Z",
-  "version": 3,
-  "sha256": "b73369a14fc9ba77b3f12f0d6f0ddacab5e666f7b79a9d8b53b0c6724a0e3a38"
+  "version": 4,
+  "sha256": "b816ee72708e31a57e0d483044bcc91a6e7202dc6148eda4dfbc11870a7df336"
 }

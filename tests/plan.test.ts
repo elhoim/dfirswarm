@@ -189,14 +189,14 @@ test("per-agent cap: pressure is per seat and only when a cap is set", () => {
       a01: { spent_usd: 1.5, tokens: 0, calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 },
     },
   } as BudgetRecord;
-  assert.deepEqual(agentPressure(base, "a00"), { over: false, spent_usd: 3.5, cap_usd: 0 });
+  assert.deepEqual(agentPressure(base, "a00"), { over: false, by: null, spent_usd: 3.5, cap_usd: 0, tokens: 0, cap_tokens: 0 });
   const capped = { ...base, cap_per_agent_usd: 3 };
-  assert.deepEqual(agentPressure(capped, "a00"), { over: true, spent_usd: 3.5, cap_usd: 3 });
-  assert.deepEqual(agentPressure(capped, "a01"), { over: false, spent_usd: 1.5, cap_usd: 3 });
-  assert.deepEqual(agentPressure(capped, "a99"), { over: false, spent_usd: 0, cap_usd: 3 }, "an agent with no spend yet is under");
+  assert.deepEqual(agentPressure(capped, "a00"), { over: true, by: "usd", spent_usd: 3.5, cap_usd: 3, tokens: 0, cap_tokens: 0 });
+  assert.deepEqual(agentPressure(capped, "a01"), { over: false, by: null, spent_usd: 1.5, cap_usd: 3, tokens: 0, cap_tokens: 0 });
+  assert.deepEqual(agentPressure(capped, "a99"), { over: false, by: null, spent_usd: 0, cap_usd: 3, tokens: 0, cap_tokens: 0 }, "an agent with no spend yet is under");
   const rebuilt = normalizeBudget({ ...capped } as Partial<BudgetRecord>);
   assert.equal(rebuilt.cap_per_agent_usd, 3, "the per-agent cap survives a rebuild of the record");
-  assert.deepEqual(agentPressure(rebuilt, "a00"), { over: true, spent_usd: 3.5, cap_usd: 3 });
+  assert.deepEqual(agentPressure(rebuilt, "a00"), { over: true, by: "usd", spent_usd: 3.5, cap_usd: 3, tokens: 0, cap_tokens: 0 });
   assert.equal(
     normalizeBudget({ ...base } as Partial<BudgetRecord>).cap_per_agent_usd,
     undefined,
@@ -321,6 +321,25 @@ test("a forged tool's writes are attributed by what its arguments name, like a s
   const forged = source.slice(source.indexOf("function registerForged("), source.indexOf("function registerForged(") + 4000);
   assert.match(forged, /attributeToThisCall\(/, "the forged-tool path filters its diff the way bash does");
   assert.doesNotMatch(source, /reason: `bash write to \$\{report\.path\}/, "a violation names the tool that made it, not always bash");
+});
+
+test("a shell write in the writer's own directories takes no lease: it is snapshotted and left alone", async () => {
+  // Sixth CTF round: one ileapp run in an agent's own directory was 507 of
+  // 644 claim_file lines, each a lock file, and no peer could have written
+  // there anyway. The own-directory check comes after the snapshot and
+  // before the implicit claim.
+  assert.ok(isOwnScratch("work/a00/ileapp/parsed/x.html", "a00"));
+  assert.ok(isOwnScratch("work/extracted/a00/SYSTEM", "a00"));
+  assert.ok(!isOwnScratch("work/report.md", "a00") && !isOwnScratch("work/a01/x", "a00"));
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../extensions/agent-swarm.ts", import.meta.url), "utf8");
+  const at = source.indexOf("// Snapshot first: the announcement promises the change is undoable.");
+  assert.ok(at > 0);
+  const block = source.slice(at, source.indexOf("reason: `${via} write`", at));
+  const snapshot = block.indexOf("recordFileVersion(");
+  const skip = block.indexOf("if (isOwnScratch(report.path, agentId)) continue;");
+  const claim = block.indexOf("claimFile(");
+  assert.ok(snapshot >= 0 && skip > snapshot && claim > skip, "snapshot, then the own-directory skip, then the implicit claim");
 });
 
 test("a forged tool cannot take the name of a harness event, and is told who writes it", () => {

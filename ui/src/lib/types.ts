@@ -269,6 +269,7 @@ export type BudgetRecord = {
   stop_reason?: "cap" | "wall_clock";
   /** Each agent's own cap, when the kickoff set one (--cap-per-agent). */
   cap_per_agent_usd?: number;
+  cap_per_agent_tokens?: number;
   /** A ceiling per model on what every agent running it spends together. */
   cap_per_model_usd?: Record<string, number>;
   /** False when no model on the team bills; the brake is then cap_tokens. */

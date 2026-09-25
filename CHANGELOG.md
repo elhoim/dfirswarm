@@ -258,6 +258,34 @@ not surprised:
 
 ### Added
 
+- **Every image says what it holds, in the VM: `/etc/dfirswarm/tools.md`.**
+  One line a program: its name, what it is for (its pack's own `why`), its
+  pack, and the version its package record holds (a `--version` probe had
+  answered "invalid option" for a third of them); then the Python libraries
+  the packs and the tool library install, with the note on each one's line;
+  then what a pack names that the image does not hold. `install.py` writes it
+  beside `image.json`, the NOTICE and the SBOM, in the base and in every
+  profile, and the image check records it in `toolbox.json` (`tools_md`).
+- **The programs the sixth CTF round's agents went looking for are in the
+  images.** Each had been searched for, pip-installed by hand, or forged:
+  - `pdftotext` (poppler-utils, with `pdfinfo`, `pdfimages`, `pdftohtml`) in
+    computer-forensics-base 1.2.13: five agents shared a forged PDF reader and
+    two pip-installed pypdf because the image had none.
+  - `ccl_indexeddb_dump`, a pinned source of ccl_chromium_reader 0.3.18 (not on
+    PyPI) with its library in a venv of its own, in computer-forensics-base:
+    Element's IndexedDB on the BelkaCTF #6 laptop had no reader.
+  - `heif-convert` (libheif-examples) and `pillow-heif` in mobile-forensics
+    1.0.4, for an iPhone's HEIC photos.
+  - `impacket` and `dpapick3` in windows-forensics 1.2.9, for DPAPI, the
+    Credential Manager and Windows Vault read offline (both were pip-installed
+    on "Encrypt Them All").
+- **GnuPG in the encrypted-containers images** (encrypted-containers 1.1.2):
+  `gpg`, to read an OpenPGP message's packets before any key is known, import
+  a private key found on the evidence, and decrypt once its passphrase is. Only
+  `gpgv` was there; on the sixth CTF round an agent on "Encrypt Them All"
+  spent its turns looking for an OpenPGP reader on PyPI, where `gpg` needs
+  `gpgme.h` to build.
+
 - **Every program a pack names is in the image profile that holds it, or
   said not to belong in one.** The recipe knew an apt line, a pip line and a
   pinned download, and listed everything else as manual, never installed:
@@ -632,6 +660,59 @@ not surprised:
 
 ### Changed
 
+- **A team on a subscription is braked by tokens (breaking for such runs).**
+  A seat whose provider is an OAuth login in Pi's store (`openai-codex`) no
+  longer makes a team metered: Pi's dollars for it are an estimate, and on the
+  BelkaCTF #6 run a Luna seat with ten million tokens read $0.13 beside a
+  Daybreak seat's $14. A team with no metered seat needs `--cap-tokens`, as a
+  team of local models does; `--cap-usd`, `--cap-per-agent` and a `@cap` on a
+  model are said to brake nothing there. New: `--cap-per-agent-tokens`, the
+  per-seat brake in tokens (budget.json and the registry as
+  `cap_per_agent_tokens`).
+- **Caps change while the run goes on: `swarm.sh cap <id>`** with `--usd`,
+  `--tokens`, `--per-agent-usd`, `--per-agent-tokens`, `--wall-clock`. Made
+  under the table lock the usage folds take, kept in `budget.json` as
+  `cap_changes` with the caps each left (the shell watch no longer reports
+  such a change as the agent's write, and now also watches the per-agent and
+  per-model caps), put on the trace as the operator's, merged into the run
+  record and said on the board. A swarm-wide stop the run is no longer over
+  is withdrawn; a seat's own cap steer lifts on its next check. The run keeps
+  its brake and a finished run stays finished.
+- **`wait` sleeps through posts addressed only to other agents.** A post on
+  `main` whose `to` names teammates and not the waiting agent no longer wakes
+  it; it stays unread and the next delivery carries it, and the result counts
+  it as `passed`. A post to all, to the agent by id or by the name it chose,
+  or to no one on the team (a role, a word) still wakes it, as does any post
+  in a side thread it is in; `every_post: true` wakes on everything, for a
+  seat that follows the whole board. On the BelkaCTF #6 run 586 of 1,291
+  wake-ups on posts were for posts to someone else, each a model turn with the
+  whole context resent; the three GPT-6-Luna seats spent most of their 87M
+  tokens that way.
+- **The contract names no program when the image describes itself.** A
+  microVM run whose image has `tools.md` gets one paragraph, "## Programs",
+  that points at the file inside the VM; the table of sixty programs, a third
+  of `SWARM.md` and read by every agent at every start, is gone for it. An
+  image without the file, and a host run, keep the checked table.
+- **A pack's tools are said to be in the tool list, not listed as another
+  case's.** They sat under "Seeded tools (case-specific) … written against
+  another case", with "baked: offset 20000" for a limit and an example
+  FILETIME taken for an offset. The contract now says the packs put N tools
+  in the tool list, each described there, general and fed by the arguments.
+  Only `--tools-from` copies are listed as another case's, and "baked" is an
+  `inputs/` path or an offset their example gives.
+- **The goal's check on the trace for `inputs_check` says the harness writes
+  it.** Read bare, `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+  sent five agents of sixteen on the sixth CTF round to forge a tool by that
+  name to satisfy it (refused, as a reserved name). The contract adds, in
+  prose, that `done` writes the line when it verifies the inputs.
+- **A shell write in the writer's own directories takes no lease.** No peer
+  may claim or write there, so the implicit claim protected nothing: one
+  ileapp run was 507 of a run's 644 `claim_file` lines, each a lock file. The
+  write is still snapshotted.
+- **The kickoff's encrypted-volume warning is not given to a VM run that has
+  `encrypted-containers`**: it told operators who had passed the pack to start
+  again with it.
+
 - The pinned `@earendil-works/pi-coding-agent` is **0.87.0** (was 0.85.1):
   npm `latest`, and what the Linux host already ran. The provider contract
   changed between the two (a transcript with system messages instead of
@@ -639,6 +720,43 @@ not surprised:
   e2e speaks both, and the suite passes on both.
 
 ### Fixed
+
+- **A pack tool gets the timeout its manifest asks for**, up to an hour
+  (`PACK_TOOL_TIMEOUT_MAX_SECONDS`). Every run clamped pack tools to the
+  forged-tool ceiling of 120 s while telling the model the manifest's figure:
+  26 of them ask for 300 to 3600 s, and `timeline_super` (3600 s) and
+  `mem_carve` (900 s) died at 120 s. A forged tool keeps the 120 s ceiling, and
+  the description and the timeout message say the timeout actually applied.
+- **A failed tool call reaches the model as an error.** Pi takes a failure only
+  from a throw and drops an `isError: true` a tool returns, so every refusal
+  (`publish_file`, `record`, `done`, `name`, `make_tool`) and every failed pack
+  or forged tool reached the model and its session as a success. The
+  `tool_result` hook sets the flag from `ok: false` in the result's details.
+- **A VM's probe asks the hub again.** With eighteen VMs running and a third
+  run coming up, two seats of eight had their first connection close with no
+  answer, twice, and the kickoff stopped with "no answer" and nothing else.
+  The probe tries five times, three seconds apart, and records what the hub
+  said, or that it said nothing, and how many tries it took.
+- **`regkv`, `regkeys` and `shellbags` answer a key that is not there** with
+  the deepest key that is and the names under it (windows-forensics 1.2.9,
+  the tool library's regkv 3 and regkeys 4). regkv printed regipy's
+  traceback, twice on the sixth CTF round, for keys an agent had guessed.
+- **`chunk_needles` streams what `icat` gives it** (computer-forensics-base
+  1.2.13, the tool library's 3). It held icat's whole output in memory, and on
+  a pagefile the VM's kernel killed it with nothing said, twice on the sixth
+  CTF round. A failed icat says why, with how far the scan got.
+- **`sqlite_query` gives back bytes that are not UTF-8 as `\xNN` escapes**
+  where it died on a `UnicodeDecodeError` (an ActivitiesCache Payload).
+- **`browser_history` runs several statements one by one** (windows-forensics
+  1.2.9, the tool library's 2), each answered in `results`, where "schema;
+  count" was "You can only execute one statement at a time". A `;` inside a
+  string stays in its statement, every statement must still be a SELECT, WITH
+  or PRAGMA, and a refused query is quoted whole.
+- **`sqlite_query` says when a file is not SQLite** (computer-forensics-base
+  1.2.13, the tool library's 4): its header, the first page's entropy, and
+  whether that reads as an encrypted database (SQLCipher or an app's own) or
+  another format, where sqlite3 said only "file is not a database". A missing
+  database is a JSON answer too.
 
 - **`sigma_hunt` passed Zircolite `--noexternal`**, which Zircolite 3
   removed and refuses. Its `auto` engine prefers Zircolite, so once the disk

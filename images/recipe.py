@@ -163,7 +163,7 @@ def pack_version(packs, name: str) -> dict:
 
 
 KINDS = ("apt", "pip", "apt_release", "requirements", "binaries", "manual", "downloads", "sources", "builds",
-         "not_applicable")
+         "not_applicable", "python_notes")
 
 
 def empty() -> dict:
@@ -186,7 +186,7 @@ def read_pack(packs, name: str) -> dict:
             spec["binaries"].append({"name": b["name"], "pack": name, "required": required,
                                      "licence": b.get("licence"),
                                      "redistributable": b.get("redistributable", True) is not False,
-                                     "source": line})
+                                     "source": line, "why": b.get("why", "")})
             pinned = [k for k in ("build", "source", "download") if isinstance(install.get(k), dict)]
             if pinned:
                 kind = pinned[0]
@@ -195,11 +195,13 @@ def read_pack(packs, name: str) -> dict:
                                                   "build": "built from source"}[kind] + f" {install[kind].get('version', '?')}"
             elif m := APT.match(line):
                 pkgs, release = apt_words(m.group(1))
+                spec["binaries"][-1]["apt"] = pkgs
                 for p in pkgs:
                     spec["apt"][p] = spec["apt"].get(p, False) or required
                     if release:
                         spec["apt_release"][p] = release
             elif m := PIP.match(line):
+                spec["binaries"][-1]["pip"] = words(m.group(1))
                 for p in words(m.group(1)):
                     spec["pip"][p] = spec["pip"].get(p, False) or required
             else:
@@ -207,9 +209,13 @@ def read_pack(packs, name: str) -> dict:
     reqs = pack_dir(packs, name) / "requires" / "python.txt"
     if reqs.exists():
         for raw in reqs.read_text().splitlines():
-            line = raw.split("#", 1)[0].strip()
+            line, _, note = raw.partition("#")
+            line = line.strip()
             if line:
                 spec["requirements"].append(line)
+                # What the pack says the library is for, for the image's
+                # tools.md: the comment on its line.
+                spec["python_notes"].append({"requirement": line, "pack": name, "note": " ".join(note.split())})
     return spec
 
 
@@ -222,6 +228,7 @@ def merge(specs: list) -> dict:
         out["apt_release"].update(s["apt_release"])
         out["requirements"] += [r for r in s["requirements"] if r not in out["requirements"]]
         out["binaries"] += s["binaries"]
+        out["python_notes"] += [n for n in s["python_notes"] if not any(x["requirement"] == n["requirement"] for x in out["python_notes"])]
         out["manual"] += s["manual"]
         # A program two packs pin is installed once, as the first pins it.
         for kind in ("downloads", "sources", "builds", "not_applicable"):

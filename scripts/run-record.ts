@@ -30,6 +30,7 @@ export type RegistryRun = {
   model?: string;
   cap_usd?: number;
   cap_per_agent_usd?: number | null;
+  cap_per_agent_tokens?: number | null;
   /** model id → USD: a ceiling on the combined spend of that model's agents. */
   cap_per_model_usd?: Record<string, number> | null;
   wall_clock_minutes?: number;

@@ -1984,7 +1984,7 @@ export class Hub {
         this.seatSteer.set(agent, now);
         this.saveState();
         const text = mine.over
-          ? `You have reached your own cap ($${mine.spent_usd.toFixed(2)} of $${mine.cap_usd}). Post your findings to the board now and call done with reason agent_cap. The swarm continues without you.`
+          ? `You have reached your own cap (${mine.by === "tokens" ? `${mine.tokens.toLocaleString("en-US")} of ${mine.cap_tokens.toLocaleString("en-US")} tokens` : `$${mine.spent_usd.toFixed(2)} of $${mine.cap_usd}`}). Post your findings to the board now and call done with reason agent_cap. The swarm continues without you.`
           : `Your model has spent its ceiling across every seat running it. Post your findings to the board now and call done with reason agent_cap. The swarm continues without you.`;
         this.prompt(agent, text, { deliver: "steer", kind: "agent_cap_steer" });
         await this.event("agent_cap_steer", { via: "hub", agent }, { ok: true });

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import io, json, sys, subprocess, os
+import json, sys, subprocess, os
 
 def _catalogue_slug(path):
     """The directory name the kickoff's catalogue gives an input: its path under
@@ -140,11 +140,19 @@ else:
         print(json.dumps({"error": f"image not found: {image}"}))
         sys.exit(1)
     offset = _resolve_offset(image, args.get("offset"))
-    r = subprocess.run(["icat", "-o", str(offset), image, str(inode)], capture_output=True)
-    if r.returncode != 0:
-        err = r.stderr.decode("utf-8", "replace").strip() or f"icat exit {r.returncode}"
-        print(json.dumps({"error": err, "image": image, "inode": inode, "offset": offset}))
+    # Streamed, never held whole: capture_output kept a pagefile's gigabytes
+    # in memory until the VM's kernel killed the tool, with no word said
+    # (sixth CTF round, twice). stderr goes to a file so a chatty icat
+    # cannot stall the pipe being read.
+    import tempfile
+    with tempfile.TemporaryFile() as errf:
+        proc = subprocess.Popen(["icat", "-o", str(offset), image, str(inode)], stdout=subprocess.PIPE, stderr=errf)
+        hits, scanned = scan_fh(proc.stdout)
+        rc = proc.wait()
+        errf.seek(0)
+        err_text = errf.read().decode("utf-8", "replace").strip()
+    if rc != 0:
+        print(json.dumps({"error": err_text or f"icat exit {rc}", "image": image, "inode": inode, "offset": offset, "scanned_bytes": scanned}))
         sys.exit(1)
-    hits, scanned = scan_fh(io.BytesIO(r.stdout))
     src = f"icat:{inode}@{offset}"
 print(json.dumps({"source": src, "scanned_bytes": scanned, "hits": hits}))

@@ -75,6 +75,7 @@ import {
   TOOLS_DIR,
   TOOL_TIMEOUT_DEFAULT_SECONDS,
   TOOL_TIMEOUT_MAX_SECONDS,
+  toolTimeoutSeconds,
   isPeerForgedTool,
   type ForgedToolManifest,
   watchedPathHashes,
@@ -565,22 +566,25 @@ export default function (pi: ExtensionAPI) {
     const byModel = !mine.over;
     const spent = byModel ? group.spent_usd : mine.spent_usd;
     const cap = byModel ? group.cap_usd : mine.cap_usd;
-    const capArgs = byModel ? { cap_usd: cap, model } : { cap_usd: cap };
+    // A seat's own cap may be in tokens (a subscription team's): said in tokens.
+    const byTokens = !byModel && mine.by === "tokens";
+    const used = byTokens ? `${mine.tokens.toLocaleString("en-US")} of ${mine.cap_tokens.toLocaleString("en-US")} tokens` : `$${spent.toFixed(2)} of $${cap}`;
+    const capArgs = byModel ? { cap_usd: cap, model } : byTokens ? { cap_tokens: mine.cap_tokens } : { cap_usd: cap };
     if (await swarmDoneExists(cwd)) return;
     if (agentCapSteeredAt === null) {
       agentCapSteeredAt = Date.now();
       const delivered = steer(
         byModel
           ? `The spend cap on ${model} is reached ($${spent.toFixed(2)} of $${cap} across its ${group.agents} agent${group.agents === 1 ? "" : "s"}). Post what you have to the board, then call done(reason=agent_cap). Do not start new work.`
-          : `Your own spend cap is reached ($${spent.toFixed(2)} of $${cap}). Post what you have to the board, then call done(reason=agent_cap). Do not start new work.`,
+          : `Your own cap is reached (${used}). Post what you have to the board, then call done(reason=agent_cap). Do not start new work.`,
       );
-      await logEvent(cwd, agentId, "agent_cap_steer", capArgs, { spent_usd: spent, delivered });
+      await logEvent(cwd, agentId, "agent_cap_steer", capArgs, { spent_usd: spent, ...(byTokens ? { tokens: mine.tokens } : {}), delivered });
       await systemPost(cwd, {
         tag: "stop",
         to: agentId,
         body: byModel
           ? `${agentId} is on ${model}, whose cap is reached ($${spent.toFixed(2)} of $${cap} across its agents); it will post its findings and stop. The swarm continues.`
-          : `${agentId} reached its own cap ($${spent.toFixed(2)} of $${cap}); it will post its findings and stop. The swarm continues.`,
+          : `${agentId} reached its own cap (${used}); it will post its findings and stop. The swarm continues.`,
       }).catch(() => undefined);
       return;
     }
@@ -1522,6 +1526,11 @@ export default function (pi: ExtensionAPI) {
       // Snapshot first: the announcement promises the change is undoable.
       const version = await recordFileVersion(cwd, report.path, agentId).catch(() => null);
       await quarantineIfExtracted(cwd, report.path);
+      // The writer's own directories need no lease: no peer may claim or
+      // write there (peerHoleOf refuses it), so a claim protects nothing. On
+      // the sixth CTF round one ileapp run in an agent's own directory was
+      // 507 of 644 claim_file lines on the trace, each a lock file too.
+      if (isOwnScratch(report.path, agentId)) continue;
       if (!report.legitimate && !report.protected && !report.owner) {
         // Nobody holds it: the shell writer gets the lease it did not ask for.
         // From here on a peer writing the same file is a real conflict, and
@@ -1710,7 +1719,16 @@ export default function (pi: ExtensionAPI) {
         longRuns.set(key, { ms: durationMs, path: fullOutput.path });
       }
     }
-    const override = contentChanged ? ({ content } as never) : undefined;
+    // Pi takes a tool's failure only from a throw: an `isError: true` in what
+    // execute returns is dropped, so every refusal and every failed pack or
+    // forged tool reached the model, and its session, as a success. Their
+    // details say ok: false, and this is where the flag is set from them.
+    const refused =
+      !isError && name !== "bash" && name !== "powershell" && (details as { ok?: unknown } | undefined)?.ok === false;
+    const override =
+      contentChanged || refused
+        ? ({ ...(contentChanged ? { content } : {}), ...(refused ? { isError: true } : {}) } as never)
+        : undefined;
 
     if ((name === "bash" || name === "powershell") && callId) {
       const before = bashSnapshots.get(callId);
@@ -2078,7 +2096,7 @@ export default function (pi: ExtensionAPI) {
     name: "wait",
     label: "Wait",
     description:
-      "Sleep until something happens: a new post in one of your threads, done/SWARM_DONE appearing, or a claim of yours lapsing — whichever comes first, or the timeout. Returns the unread posts. Use this instead of `bash sleep`: a shell sleep costs a full provider round every time you wake up, this one costs nothing.",
+      "Sleep until something happens: a new post for you (on main: to you, to all, or to no one on the team; in a side thread you are in: any post), done/SWARM_DONE appearing, or a claim of yours lapsing — whichever comes first, or the timeout. A main-thread post addressed only to other agents does not wake you; it stays unread and comes with the next delivery. Returns the unread posts. Use this instead of `bash sleep`: a shell sleep costs a full provider round every time you wake up, this one costs nothing.",
     promptSnippet: "Block until the board changes instead of polling",
     promptGuidelines: [
       "When you are waiting on a peer, call wait, not bash sleep. Do not poll the board in a loop.",
@@ -2087,6 +2105,12 @@ export default function (pi: ExtensionAPI) {
       seconds: Type.Optional(
         Type.Number({ description: `How long to wait at most (default 60, max ${WAIT_MAX_SECONDS})` }),
       ),
+      every_post: Type.Optional(
+        Type.Boolean({
+          description:
+            "true: wake on every new post, one addressed to another agent included — for a seat that follows the whole board (a critic, an integrator). Each wake-up is a model turn with your whole context.",
+        }),
+      ),
     }),
     async execute(_id, params, signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
@@ -2094,6 +2118,7 @@ export default function (pi: ExtensionAPI) {
       const result = await waitForSwarmChange(ctx, {
         seconds: params.seconds,
         signal: signal as AbortSignal | undefined,
+        everyPost: params.every_post === true,
       });
       // Hand back what woke us, so the agent does not need a second call.
       const box = result.reason === "post" ? await readInbox(ctx) : null;
@@ -2123,6 +2148,7 @@ export default function (pi: ExtensionAPI) {
           reason: result.reason,
           waited_ms: result.waited_ms,
           n: payload.posts.length,
+          ...(result.passed ? { passed: result.passed } : {}),
           ...(box ? { from: box.posts.map((p) => postSender(p)), ids: box.posts.map((p) => p.id), remaining } : {}),
         },
         Date.now() - started,
@@ -2342,7 +2368,7 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
       name: manifest.name,
       label: manifest.name,
-      description: `${manifest.description} (forged by ${manifest.by}, v${manifest.version}, ${manifest.runtime}; runs in the sandbox with a ${manifest.timeout_seconds}s timeout)${manifest.example ? ` Example: ${manifest.example}` : ""}`,
+      description: `${manifest.description} (forged by ${manifest.by}, v${manifest.version}, ${manifest.runtime}; runs in the sandbox with a ${toolTimeoutSeconds(manifest)}s timeout)${manifest.example ? ` Example: ${manifest.example}` : ""}`,
       promptSnippet: `${manifest.description} — forged by ${manifest.by}`,
       parameters: forgedSchema(manifest),
       async execute(_id, params, signal, _onUpdate, toolCtx: ToolCtx) {
@@ -2415,7 +2441,7 @@ export default function (pi: ExtensionAPI) {
             details: { ok: true, exit_code: run.exit_code, duration_ms: run.duration_ms, truncated: run.truncated, ...(run.full_output ? { full_output: run.full_output } : {}) },
           };
         }
-        const why = run.timed_out ? `timed out after ${manifest.timeout_seconds}s` : `exit ${run.exit_code ?? "?"}${run.signal ? ` (${run.signal})` : ""}`;
+        const why = run.timed_out ? `timed out after ${toolTimeoutSeconds(manifest)}s` : `exit ${run.exit_code ?? "?"}${run.signal ? ` (${run.signal})` : ""}`;
         return {
           content: [{ type: "text" as const, text: `${manifest.name} failed: ${why}\n${run.stderr.trim() || run.stdout.trim()}`.trim() }],
           details: { ok: false, exit_code: run.exit_code, duration_ms: run.duration_ms, timed_out: run.timed_out },

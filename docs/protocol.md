@@ -98,7 +98,7 @@ in the registry), **whole posts only**: a post is never cut, the delivery
 stops before the post that would break the bound, and only the delivered
 posts move the cursors, so what stayed behind is still unread. The result says
 `remaining` and, when it is above zero, a `note` that nothing was cut and the
-next call brings the rest; `wait` returns at once while anything is unread.
+next call brings the rest; `wait` returns at once while anything for the agent is unread. A post on `main` addressed only to other agents (its `to` names teammates and not this one) does not wake a `wait`; it stays unread and the next delivery carries it, and the result counts it as `passed`. A post to all, to this agent by id or by the name it chose, or to no one on the team wakes it, and so does any post in a side thread it is in; `every_post: true` wakes on everything. On the BelkaCTF #6 run 586 of 1,291 wake-ups were for posts addressed only to someone else.
 The event row lists every delivered post's id and sender, whole, and
 `remaining`. On the Linux run s3096 two `wait` results carried 578 posts each,
 64k tokens, which is what this bound is for; `0` removes it.
@@ -239,7 +239,7 @@ shell write to a file the watch left out is not detected or snapshotted.
 Three kickoff options for evidence work, all recorded in the registry:
 
 - `--catalog` runs `scripts/evidence-catalog.sh` once before any agent starts: for every input that `mmls` reads as a disk image, `partitions.txt` and, per filesystem partition, `fsstat.txt`, a body file (`fls -m -r`), a path list (`fls -r -p`) and a `mactime` timeline (an image with no partition table that `fsstat` reads at sector 0 — a logical E01, a course image — gets the same under `p0`); for every input Volatility recognises as a memory image, `windows.info`, `pslist`, `psscan`, `cmdline`, `netscan`, `malfind` and `dlllist`. Each step is time-boxed (`SWARM_CATALOG_STEP_TIMEOUT`, default 900 s); a tool that is missing or fails leaves a note in the index instead of stopping the kickoff. `catalog/README.md` starts with a `Summary:` line and indexes every file with its row count and size; `SWARM.md` gets the same under "Evidence catalog". The directory is `chmod a-w`, protected like `inputs/`, and read-only at the kernel where a guard is available.
-- `--toolbox dfir` runs `scripts/toolbox.sh`: `toolbox.json` holds `present` (name, version, use) and `missing` (name, use, install command) for the Sleuth Kit, Volatility 3, regipy, python-evtx, yara, exiftool, sqlite3, strings and python3; `SWARM.md` gets a "Toolbox" section so the agents start knowing what they have. `--toolbox-required` turns a missing tool into a `BLOCKER`.
+- `--toolbox dfir` runs `scripts/toolbox.sh`: `toolbox.json` holds `present` (name, version, use) and `missing` (name, use, install command) for the Sleuth Kit, Volatility 3, regipy, python-evtx, yara, exiftool, sqlite3, strings and python3; `SWARM.md` gets a "Toolbox" section so the agents start knowing what they have. `--toolbox-required` turns a missing tool into a `BLOCKER`. In a microVM run whose image has `/etc/dfirswarm/tools.md` (images/install.py writes it), `toolbox.json` records it as `tools_md` and `SWARM.md` gets a "Programs" paragraph that points at that file inside the VM instead of the table: the image describes itself, and the contract names no program.
 - `--quarantine` creates `work/extracted/` and `work/quarantine/`, adds `--noexec` for both to the pane's `fsguard.sh` wrapper (seatbelt `process-exec*` deny on macOS, a `noexec` bind mount on Linux) and sets `SWARM_QUARANTINE=1` in every pane, on which the harness strips execute bits from any file written there after a `bash` or forged-tool call. An interpreter told to read a file (`python3 sample.py`) is not stopped by either — the contract says so and the prompt tells the agents what the directories are for.
 
 ### Names and the per-agent cap (`names.json`, `budget.json` `cap_per_agent_usd`)
@@ -359,7 +359,7 @@ anywhere; the model's own trailer names the same file.
 | _built-ins_ (`read`, `bash`, `edit`, `write`, `grep`, …) | `tool_result` | `{ok, output, output_chars, view?, full_output?, full_output_error?}`: what the model received, whole; `view` when Pi showed a slice of something on disk; `full_output` = `{path, bytes, lines, sha256}` under `tool-output/` when `bash` spilled past 50 KB (moved in from the host's temp file; the model's trailer names the sandbox path). These used to leave no trace at all, then 2,000 characters |
 | `post` | `post` tool | `{id, path, tag}` |
 | `inbox` | `inbox` tool | `{swarm_done, seen, n, from[], ids[], remaining, threads}`: every delivered post's sender and id, whole (the lists once stopped at 20), and how many stayed unread under the page bound |
-| `wait` | `wait` tool | `{reason: post\|sentinel\|claim_lost\|timeout, waited_ms, n, from[]?, ids[]?, remaining?}` (the post fields when it woke on a post) |
+| `wait` | `wait` tool | `{reason: post\|sentinel\|claim_lost\|timeout, waited_ms, n, passed?, from[]?, ids[]?, remaining?}` (the post fields when it woke on a post; `passed`: posts to other agents that did not wake it) |
 | `claims` | `claims` tool | `{n}` |
 | `thread_open`, `thread_join` | thread tools | `{created, members}` |
 | `list_team`, `budget` | tools | `{n}` / `{spent_usd, tokens, calls, over_budget}` |

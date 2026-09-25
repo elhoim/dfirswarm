@@ -353,3 +353,55 @@ test("Pi loader: a pack's seeded tools are in the list with forging off, and its
     await rm(secretDir, { recursive: true, force: true });
   }
 });
+
+test("Pi loader: a pack tool gets its manifest's timeout, and a failed call reaches the model as an error", async (t) => {
+  // Every run clamped pack tools to the forged-tool ceiling of 120 s while
+  // telling the model the manifest's figure; and Pi drops an `isError` a tool
+  // returns, so a failed pack tool reached the model as a success.
+  const loaderPath = await findLoader();
+  if (!loaderPath) {
+    t.skip("Pi package not found (set PI_PACKAGE_DIR or npm install -g @earendil-works/pi-coding-agent)");
+    return;
+  }
+  const { loadExtensions } = (await import(loaderPath)) as {
+    loadExtensions: (paths: string[], cwd: string) => Promise<{ extensions: LoadedExtension[]; errors: unknown[] }>;
+  };
+  const root = await mkdtemp(join(tmpdir(), "pi-load-fail-"));
+  const saved = process.env.SWARM_TOOL_FORGING;
+  try {
+    await initSandbox(root, { reset: true });
+    process.env.AGENT_ID = "agent00";
+    delete process.env.SWARM_TOOL_FORGING;
+    const script = "import sys\nsys.stderr.write('no such hive\\n')\nsys.exit(1)\n";
+    await mkdir(join(root, "tools", "slow_fail"), { recursive: true });
+    await writeFile(join(root, "tools", "slow_fail", "run.py"), script);
+    await writeFile(
+      join(root, "tools", "slow_fail", "manifest.json"),
+      JSON.stringify({
+        name: "slow_fail", description: "A long pack tool that fails", params: {},
+        runtime: "python3", entry: "run.py", timeout_seconds: 900, by: "pack-author", at: new Date().toISOString(),
+        version: 1, sha256: createHash("sha256").update(script).digest("hex"), pack: "disk-pack",
+      }),
+    );
+    await sealForgedTools(root);
+    const loaded = await loadExtensions([join(REPO, "extensions", "agent-swarm.ts")], root);
+    assert.deepEqual(loaded.errors, []);
+    const [swarm] = loaded.extensions;
+    const ctx = { cwd: root, hasUI: false, ui: {} };
+    for (const handler of (swarm.handlers.get("session_start") ?? []) as Array<(e: unknown, c: unknown) => Promise<unknown>>) {
+      await handler({}, ctx);
+    }
+    const tool = swarm.tools.get("slow_fail")!.definition as unknown as { description: string; execute: (...a: unknown[]) => Promise<{ content: unknown[]; details: unknown }> };
+    assert.match(tool.description, /with a 900s timeout/, "a pack tool is told, and given, its manifest's timeout");
+    const out = await tool.execute("c1", {}, undefined, undefined, ctx);
+    assert.equal((out.details as { ok: boolean }).ok, false);
+    const results = [];
+    for (const handler of (swarm.handlers.get("tool_result") ?? []) as Array<(e: unknown, c: unknown) => Promise<unknown>>) {
+      results.push(await handler({ type: "tool_result", toolName: "slow_fail", toolCallId: "c1", input: {}, content: out.content, details: out.details, isError: false }, ctx));
+    }
+    assert.ok(results.some((r) => (r as { isError?: boolean } | undefined)?.isError === true), `the failed call is not flagged as an error: ${JSON.stringify(results)}`);
+  } finally {
+    if (saved === undefined) delete process.env.SWARM_TOOL_FORGING; else process.env.SWARM_TOOL_FORGING = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});

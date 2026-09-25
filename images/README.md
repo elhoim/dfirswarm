@@ -16,7 +16,7 @@ launcher and probe scripts are written into each VM by the SDK.
 | `library-python.txt` | The Python packages the tool library's tools import. In the base, so a library tool handed to any run with `--tools-from` works whatever the run's packs; `tests/recipe.test.sh` keeps it in step with the tools' imports. |
 | `profiles.json` | A profile is a set of packs: `disk`, `memory`, `re`, `network`, `linux`, `mobile`, `full` — and `web`, the base with Chromium, which `--playwright` boots (the browser tools drive it with this repository's Playwright, mounted read-only). |
 | `recipe.py` | Turns a profile's packs — every `requires/host.json` and `requires/python.txt`, with each pack's dependencies — into a Dockerfile (with a builder stage per program built from source), a spec and a NOTICE. `profile-for PACK...` names the smallest profile that serves a run's packs: one that holds them, or one whose packs name every program they name and install every library their tools import (the ransomware pack runs on `re`). `full` only when nothing smaller serves. It reads each pack where a run does: a path as given, an id from `$DFIRSWARM_HOME/packs` and then this repository, so an installed pro or third-party pack is matched by what it names. `--tools-from DIR` adds the programs a tool directory's manifests name (`requires`): an image smaller than `full` that has them all is preferred. `check-lock FILE` refuses an images lock entry that is not pinned by digest. |
-| `install.py` | Runs inside the build: installs what the spec names, fetches each pinned artefact (download, `.deb`, source, or a source a builder stage compiles) and checks its sha256, fails on a required package it cannot install and on a required program that is not on PATH afterwards, and writes `/etc/dfirswarm/image.json` — every program it found, every package version (the image's whole Debian list and its venv too), each pack's version and seal, and what it could not install — `/etc/dfirswarm/NOTICE` and `/etc/dfirswarm/sbom.json`. |
+| `install.py` | Runs inside the build: installs what the spec names, fetches each pinned artefact (download, `.deb`, source, or a source a builder stage compiles) and checks its sha256, fails on a required package it cannot install and on a required program that is not on PATH afterwards, and writes `/etc/dfirswarm/image.json` — every program it found, every package version (the image's whole Debian list and its venv too), each pack's version and seal, and what it could not install — `/etc/dfirswarm/NOTICE`, `/etc/dfirswarm/sbom.json` and `/etc/dfirswarm/tools.md`, the list an agent greps. |
 
 ## What a run checks
 
@@ -62,7 +62,7 @@ redistribution either, under the same rule (`base.Dockerfile` says why), and a
 profile carries its base's flag: `web`, whose packs hold nothing, builds
 without the flag and is still marked not for redistribution.
 
-**What an image says about itself.** Three files under `/etc/dfirswarm/`,
+**What an image says about itself.** Four files under `/etc/dfirswarm/`,
 in every image:
 
 - `image.json` — the profile, its packs with their versions and seals, every
@@ -76,6 +76,11 @@ in every image:
 - `sbom.json` — a CycloneDX 1.5 SBOM, written at build time from the same
   inventory: each Debian, Python and npm package with its version and package
   URL, and each pinned download with the sha256 it was checked against.
+- `tools.md` — what an agent in the VM reads: one line a program, with what
+  it is for in its pack's words, its pack and the version its package record
+  holds; the Python libraries the packs and the tool library install, with the
+  note on each; and what a pack names that the image does not hold. The run's
+  contract points at this file and names no program itself.
 
 **Not signed yet.** No image is signed, and nothing verifies a signature. A
 run names its image by digest (the lock, or the tag resolved once at

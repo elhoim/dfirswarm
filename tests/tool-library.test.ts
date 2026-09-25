@@ -946,6 +946,8 @@ const ROOTED_DRIVER = [
   "        self.name, self.path, self.kids = name, path, {k.name.lower(): k for k in kids}",
   "    def get_subkey(self, name, raise_on_missing=True):",
   "        return self.kids.get(name.lower())",
+  "    def iter_subkeys(self):",
+  "        return iter(self.kids.values())",
   "def tree(name, path, spec):",
   "    return Key(name, path, [tree(k, path + '\\\\' + k, v) for k, v in spec.items()])",
   "shell = {'Microsoft': {'Windows': {'Shell': {'BagMRU': {}}}}}",
@@ -991,6 +993,139 @@ test("the registry tools read a key from the hive's root, whatever form the path
     const out = await runPySnippet(ROOTED_DRIVER, [script], [bag, `\\${bag}`, `S-1-5-21-1_Classes\\${bag}`, bag.replaceAll("\\", "/"), "Software\\Microsoft", "Microsoft\\Windows", ""]);
     assert.equal(out.code, 0, `${script}: ${out.stderr}`);
     assert.deepEqual(JSON.parse(out.stdout), [`\\${bag}`, `\\${bag}`, `\\${bag}`, `\\${bag}`, "\\Software\\Microsoft", null, ""], script);
+  }
+});
+
+test("a registry key that is not there is answered with the deepest key that is, and the names under it", async () => {
+  // Sixth CTF round: regkv asked for ControlSet001\\Enum\\USBPRINT and
+  // ...\\Print\\Printers and answered regipy's traceback twice; the agent
+  // needed the names that were there to ask again.
+  const driver = ROOTED_DRIVER.replace(
+    /out = \[\][\s\S]*$/,
+    ["out = [mod.nearest_key(Hive(), p) for p in json.load(sys.stdin)]", "print(json.dumps(out))"].join("\n"),
+  );
+  for (const script of [
+    join(LIB, "..", "packs", "windows-forensics", "tools", "shellbags", "run.py"),
+    join(LIB, "..", "packs", "windows-forensics", "tools", "regkv", "run.py"),
+    join(LIB, "regkv", "run.py"),
+    join(LIB, "regkeys", "run.py"),
+  ]) {
+    const out = await runPySnippet(driver, [script], [
+      "Local Settings\\Software\\Microsoft\\Windows\\Shell\\Printers",
+      "\\Software\\Nope\\Deeper",
+      "S-1-5-21-1_Classes/Software/microsoft",
+    ]);
+    assert.equal(out.code, 0, `${script}: ${out.stderr}`);
+    assert.deepEqual(JSON.parse(out.stdout), [
+      { deepest_found: "\\Local Settings\\Software\\Microsoft\\Windows\\Shell", missing: "Printers", subkeys_there: ["BagMRU"] },
+      { deepest_found: "\\Software", missing: "Nope", subkeys_there: ["Microsoft"] },
+      { deepest_found: "\\Software\\Microsoft", missing: null, subkeys_there: [] },
+    ], script);
+  }
+});
+
+test("sqlite_query says a file is not SQLite, and whether it looks encrypted, instead of \"file is not a database\"", async () => {
+  // Sixth CTF round: Element's SQLCipher events.db answered only sqlite3's
+  // "file is not a database", twice, to two agents.
+  const { randomBytes } = await import("node:crypto");
+  for (const script of [
+    join(LIB, "..", "packs", "computer-forensics-base", "tools", "sqlite_query", "run.py"),
+    join(LIB, "sqlite_query", "run.py"),
+  ]) {
+    await withCwd(async (cwd) => {
+      await mkdir(join(cwd, "work"), { recursive: true });
+      await writeFile(join(cwd, "work", "events.db"), randomBytes(8192));
+      await writeFile(join(cwd, "work", "notes.db"), Buffer.from("PK\u0003\u0004" + "just some text in a zip-ish file ".repeat(40)));
+      let r = await runPy(script, cwd, { db_path: "work/events.db", sql: "select 1;" });
+      assert.notEqual(r.code, 0);
+      let body = JSON.parse(r.stdout) as { ok: boolean; error: string; header_hex: string; first_page_entropy_bits_per_byte: number; reading: string };
+      assert.equal(body.ok, false);
+      assert.match(body.error, /not a SQLite file/);
+      assert.equal(body.header_hex.length, 32);
+      assert.ok(body.first_page_entropy_bits_per_byte > 7.5, String(body.first_page_entropy_bits_per_byte));
+      assert.match(body.reading, /encrypted database/);
+      r = await runPy(script, cwd, { db_path: "work/notes.db", sql: "select 1;" });
+      body = JSON.parse(r.stdout);
+      assert.equal(body.header_hex.slice(0, 8), "504b0304");
+      assert.match(body.reading, /another format/);
+      r = await runPy(script, cwd, { db_path: "work/none.db", sql: "select 1;" });
+      assert.deepEqual(JSON.parse(r.stdout), { ok: false, error: "database not found", db_path: "work/none.db" });
+    });
+  }
+});
+
+test("chunk_needles streams what icat gives it, never holding it whole, and says why icat failed", async () => {
+  // Sixth CTF round: chunk_needles on pagefile.sys held icat's output in
+  // memory until the VM's kernel killed it, twice, and nothing was said.
+  for (const script of [
+    join(LIB, "..", "packs", "computer-forensics-base", "tools", "chunk_needles", "run.py"),
+    join(LIB, "chunk_needles", "run.py"),
+  ]) {
+    assert.doesNotMatch(await readFile(script, "utf8"), /BytesIO\(r\.stdout\)/, `${script} reads icat's output whole`);
+    await withCwd(async (cwd, bin) => {
+      const icat = join(bin, "icat");
+      await writeFile(icat, `#!/bin/sh\npython3 -c 'import sys; w = sys.stdout.buffer.write\nfor _ in range(48): w(b"." * 1048576)\nw(b"NEEDLEX")'\n`, "utf8");
+      await chmod(icat, 0o755);
+      let r = await runPy(script, cwd, { needles: "NEEDLEX", inode: 80513, image: "inputs/AF-Case2.E01", offset: 2048 }, bin);
+      assert.equal(r.code, 0, r.stderr + r.stdout);
+      const body = JSON.parse(r.stdout) as { scanned_bytes: number; hits: Record<string, { ascii: number }> };
+      assert.equal(body.scanned_bytes, 48 * 1048576 + 7);
+      assert.equal(body.hits.NEEDLEX.ascii, 1, "a needle at the very end of the stream is found");
+      await writeFile(icat, `#!/bin/sh\necho "Cannot determine file system type" >&2\nexit 1\n`, "utf8");
+      r = await runPy(script, cwd, { needles: "x", inode: 5, image: "inputs/AF-Case2.E01", offset: 0 }, bin);
+      assert.notEqual(r.code, 0);
+      assert.match((JSON.parse(r.stdout) as { error: string }).error, /Cannot determine file system type/);
+    });
+  }
+});
+
+test("sqlite_query gives back bytes that are not UTF-8 as escapes instead of dying on them", async (t) => {
+  // Sixth CTF round: an ActivitiesCache Payload with such bytes was a
+  // UnicodeDecodeError traceback.
+  const { spawnSync } = await import("node:child_process");
+  if (spawnSync("sqlite3", ["-version"]).status !== 0) {
+    t.skip("no sqlite3 shell on this host");
+    return;
+  }
+  for (const script of [
+    join(LIB, "..", "packs", "computer-forensics-base", "tools", "sqlite_query", "run.py"),
+    join(LIB, "sqlite_query", "run.py"),
+  ]) {
+    await withCwd(async (cwd) => {
+      await mkdir(join(cwd, "work"), { recursive: true });
+      const made = spawnSync("sqlite3", [join(cwd, "work", "a.db"), "create table a(x); insert into a values(cast(x'ff41' as text));"], { encoding: "utf8" });
+      assert.equal(made.status, 0, made.stderr);
+      const r = await runPy(script, cwd, { db_path: "work/a.db", sql: "select x from a;" });
+      assert.equal(r.code, 0, r.stderr + r.stdout);
+      assert.equal((JSON.parse(r.stdout) as { stdout: string }).stdout, "\\xffA\n");
+    });
+  }
+});
+
+test("browser_history runs several statements one by one, and still refuses one that could write", async () => {
+  // Sixth CTF round: "schema; count" answered "You can only execute one
+  // statement at a time", to two agents.
+  const { spawnSync } = await import("node:child_process");
+  for (const script of [
+    join(LIB, "..", "packs", "windows-forensics", "tools", "browser_history", "run.py"),
+    join(LIB, "browser_history", "run.py"),
+  ]) {
+    await withCwd(async (cwd) => {
+      await mkdir(join(cwd, "work"), { recursive: true });
+      const made = spawnSync("python3", ["-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.executescript(\"create table urls(url); insert into urls values('http://a;b'),('http://c');\"); c.commit()", join(cwd, "work", "h.db")], { encoding: "utf8" });
+      assert.equal(made.status, 0, made.stderr);
+      let r = await runPy(script, cwd, { path: "work/h.db", sql: "select count(*) n from urls; select url from urls where url like '%;%';" });
+      assert.equal(r.code, 0, r.stderr + r.stdout);
+      const many = JSON.parse(r.stdout) as { results: Array<{ sql: string; rows: Array<Record<string, unknown>> }> };
+      assert.deepEqual(many.results.map((x) => x.rows), [[{ n: 2 }], [{ url: "http://a;b" }]], "a ; inside a string stays in its statement");
+      r = await runPy(script, cwd, { path: "work/h.db", sql: "select count(*) n from urls" });
+      const one = JSON.parse(r.stdout) as { rows: unknown[]; results?: unknown };
+      assert.deepEqual(one.rows, [{ n: 2 }]);
+      assert.equal(one.results, undefined, "one statement answers as it always has");
+      r = await runPy(script, cwd, { path: "work/h.db", sql: "select 1; delete from urls" });
+      assert.notEqual(r.code, 0);
+      assert.deepEqual(JSON.parse(r.stdout), { error: "sql must be a SELECT, WITH or PRAGMA", statement: "delete from urls" });
+    });
   }
 });
 

@@ -538,7 +538,7 @@ test("a seat's hub token comes from the run's seat-tokens file, never the spec, 
 
 test("the VM's probe shows its seat's token before anything else on the hub socket, and nothing when the run has none", async () => {
   // The probe's hub check, as the guest runs it, against a socket here.
-  const block = PROBE_SCRIPT.match(/try:\n    s = socket\.socket\(socket\.AF_UNIX\)[\s\S]*?out\["hub_error"\] = str\(e\)\n/);
+  const block = PROBE_SCRIPT.match(/out\["hub"\] = False\nfor attempt in range\(\d+\):[\s\S]*?out\["hub_attempts"\] = attempt \+ 1\n/);
   assert.ok(block, "the probe's hub check was not found");
   const dir = await mkdtemp(join("/tmp", "probe-auth-"));
   after(() => rm(dir, { recursive: true, force: true }));
@@ -560,7 +560,7 @@ test("the VM's probe shows its seat's token before anything else on the hub sock
       });
     });
     await new Promise<void>((r) => server.listen(sock, r));
-    const py = `import json, os, socket\nout = {}\n${block![0].replaceAll(GUEST_HUB_SOCKET, sock)}print(json.dumps(out))\n`;
+    const py = `import json, os, socket, time\nout = {}\n${block![0].replaceAll(GUEST_HUB_SOCKET, sock)}print(json.dumps(out))\n`;
     const out = await new Promise<string>((resolve, reject) => {
       const child = spawn("python3", ["-c", py], { env: { ...process.env, SWARM_SEAT_TOKEN: token ?? "" } });
       let text = "";
@@ -580,6 +580,52 @@ test("the VM's probe shows its seat's token before anything else on the hub sock
   assert.equal(without.lines.length, 1);
 });
 
+
+test("the VM's probe asks the hub again when a connection closes with no answer, and says so when it never answers", async () => {
+  // Sixth CTF round: with eighteen VMs running and a third run coming up, two
+  // seats of eight had their first connection close with nothing said, twice,
+  // and the kickoff stopped with "no answer" and nothing more.
+  const block = PROBE_SCRIPT.match(/out\["hub"\] = False\nfor attempt in range\(\d+\):[\s\S]*?out\["hub_attempts"\] = attempt \+ 1\n/);
+  assert.ok(block, "the probe's hub check was not found");
+  const dir = await mkdtemp(join("/tmp", "probe-retry-"));
+  after(() => rm(dir, { recursive: true, force: true }));
+  const sock = join(dir, "hub.sock");
+  const net = await import("node:net");
+  const probe = async (silentFor: number): Promise<{ hub?: boolean; hub_error?: string; hub_attempts?: number }> => {
+    let seen = 0;
+    const server = net.createServer((c) => {
+      seen += 1;
+      if (seen <= silentFor) {
+        c.destroy();
+        return;
+      }
+      c.on("data", (d) => {
+        if (d.toString().includes('"rpc"')) c.end('{"ok":true,"result":false}\n');
+      });
+    });
+    await new Promise<void>((r) => server.listen(sock, r));
+    const py = `import json, os, socket, time\nout = {}\n${block![0].replaceAll(GUEST_HUB_SOCKET, sock).replace(/time\.sleep\(\d+\)/, "time.sleep(0)")}print(json.dumps(out))\n`;
+    const out = await new Promise<string>((resolve, reject) => {
+      const child = spawn("python3", ["-c", py], { env: { ...process.env, SWARM_SEAT_TOKEN: "" } });
+      let text = "";
+      child.stdout.on("data", (d) => (text += d));
+      child.on("error", reject);
+      child.on("close", () => resolve(text));
+    });
+    await new Promise<void>((r) => server.close(() => r()));
+    return JSON.parse(out.trim().split("\n").pop() ?? "{}");
+  };
+  const second = await probe(1);
+  assert.equal(second.hub, true, "a hub that answers the second connection is reachable");
+  assert.equal(second.hub_attempts, 2);
+  assert.equal(second.hub_error, undefined, "a hub reached in the end leaves no error behind");
+  const never = await probe(99);
+  assert.equal(never.hub, false);
+  assert.equal(never.hub_attempts, 5);
+  // A close with nothing said reads as a clean close on macOS and as a reset
+  // on Linux, where the peer's destroy() sends an RST; either is kept as said.
+  assert.match(String(never.hub_error), /^(the connection closed with no answer|.*Connection reset by peer)$/, "a hub that never answers is said to have said nothing");
+});
 
 test("without --model-gateway a seat's VM plan is today's; with it a fronted provider is reached through the gateway and nothing of its credential is in the VM", async () => {
   const dir = await mkdtemp(join(tmpdir(), "gw-plan-"));

@@ -61,3 +61,16 @@ supply for a local URL — the kickoff prints the exact lines to add and
 refuses to start. A discovery extension that registers Ollama's models at
 runtime was considered and set aside: it would hide precisely the settings a
 local server gets wrong when they are hidden.
+
+## Later: a subscription is braked the same way
+
+On 2026-09-25 the same reasoning was extended to a team on a subscription (an
+OAuth login in Pi's store, such as `openai-codex`). Its dollars are not zero,
+which is worse: they are an estimate from a price list for a model Pi runs as
+a custom id, charged to no one, and not comparable across models. On the
+BelkaCTF #6 mixed run a GPT-6-Luna seat that used ten million tokens read
+$0.13 while a Daybreak Blue seat with a similar count read $14, so a dollar
+cap stopped one model's seats early and let another's run on. A seat on a
+subscription does not make a team metered; a team with no metered seat needs
+`--cap-tokens`, and `--cap-per-agent-tokens` is its per-seat brake. Every cap
+can be changed while the run goes on (`swarm.sh cap`).
