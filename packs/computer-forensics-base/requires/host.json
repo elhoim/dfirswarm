@@ -180,9 +180,32 @@
       "why": "Sweep a whole image for features at scale: addresses, URLs, card numbers, EXIF, and carved records, without a file system.",
       "install": {
         "brew": "brew install bulk_extractor",
-        "apt": "https://github.com/simsong/bulk_extractor (not packaged for Debian 12; build from source)"
+        "apt": "built from source 2.2.0 (install.build): not packaged for Debian 12",
+        "build": {
+          "version": "2.2.0",
+          "url": "https://github.com/simsong/bulk_extractor/releases/download/v2.2.0/bulk_extractor-2.2.0.tar.gz",
+          "sha256": "b9e15d40d711aa43590e1bf1a25d30943e3bad8371281d7c80d3803a6f34c268",
+          "bin": "bin/bulk_extractor",
+          "build_deps": [
+            "build-essential",
+            "flex",
+            "pkg-config",
+            "libssl-dev",
+            "zlib1g-dev",
+            "libexpat1-dev",
+            "libewf-dev",
+            "libre2-dev"
+          ],
+          "apt_deps": [
+            "libssl3",
+            "zlib1g",
+            "libexpat1",
+            "libewf2",
+            "libre2-9"
+          ]
+        }
       },
-      "licence": "MIT",
+      "licence": "GPL-3.0-or-later for the code since 2015; the original NPS work is public domain; bundled third-party code keeps its own (unrar's among them)",
       "redistributable": false
     },
     {
