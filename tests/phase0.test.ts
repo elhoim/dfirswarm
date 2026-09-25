@@ -61,7 +61,7 @@ test("the console listens on 127.0.0.1 unless it is told another address", async
 });
 
 test("the report says what was refused, or that it cannot know, and names where content went", async () => {
-  const { egressRefusedLine, providersLine, custodyViolations } = await import("../scripts/report.ts");
+  const { egressRefusedLine, providersLine, custodyViolations, custodyOwnHostStops } = await import("../scripts/report.ts");
   assert.equal(egressRefusedLine([["evil.example", 3], ["x.test", 1]], true, null), "evil.example (3), x.test");
   assert.equal(egressRefusedLine([], true, null), "nothing was refused");
   assert.match(egressRefusedLine([], false, { netguard: false }), /not observable: no egress control was running/);
@@ -72,6 +72,13 @@ test("the report says what was refused, or that it cannot know, and names where 
   const stopped = custodyViolations({ vms: [{ agent: "a0", secret_violations: [{ env: "OPENAI_API_KEY", host: "evil.example", method: "POST", path: "/x" }] }] });
   assert.deepEqual(stopped, ["a0 OPENAI_API_KEY → evil.example POST /x"]);
   assert.match(egressRefusedLine([], false, vm, stopped), /msb stopped 1 credential placeholder aimed at a host not its own: a0 OPENAI_API_KEY → evil\.example/);
+  // A stop on the credential's own host is a failed request, not a leak, and
+  // is said as that (run se064eb had 52, all called "aimed at a host not its own").
+  const custody = { vms: [{ agent: "a1", secret_violations: [{ env: "K", host: "api.openai.com", method: "POST", path: "/v1/responses", location: "body", own_host: true }] }] };
+  assert.deepEqual(custodyViolations(custody), []);
+  assert.deepEqual(custodyOwnHostStops(custody), ["a1 K → api.openai.com POST /v1/responses (body)"]);
+  const line = egressRefusedLine([], false, vm, custodyViolations(custody), custodyOwnHostStops(custody));
+  assert.match(line, /msb stopped no credential placeholder on its way to another host; msb also stopped 1 request to a credential's own host .*not a leak/);
   assert.equal(providersLine(null), "not recorded");
   assert.equal(
     providersLine({ providers: [{ model: "openai/gpt-5", hosts: ["api.openai.com"] }, { model: "ollama/q", local: true }, { model: "deepseek/d", hosts: ["api.deepseek.com"], role: "summary" }] }),

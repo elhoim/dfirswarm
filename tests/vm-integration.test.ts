@@ -326,7 +326,7 @@ test("a secret never enters the guest: the VM holds its placeholder", async (t) 
   assert.match(out, /env=dfirswarm-secret-vtapikey-[0-9a-f]{24}/, `the guest holds a placeholder under the secret's own name\n${out}`);
   assert.match(out, /^0$/m, "the value is nowhere in the guest's environment or files");
   const record = JSON.parse(await readFile(join(r.sandbox, "vm", "vmt300.json"), "utf8"));
-  assert.deepEqual(record.secrets, [{ name: "VT_API_KEY", hosts: ["www.virustotal.com"] }], "the record names the secret and its host, never its value");
+  assert.deepEqual(record.secrets, [{ name: "VT_API_KEY", env: "VT_API_KEY", hosts: ["www.virustotal.com"] }], "the record names the secret, its variable and its host, never its value");
   assert.ok(!JSON.stringify(record).includes(value));
   // Nor on the host, at rest, outside msb's own database: not in the
   // sandbox's directory under msb's home, the run or the hub's directory.

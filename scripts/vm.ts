@@ -244,6 +244,12 @@ function run(cmd: string, args: string[], options: { timeoutMs?: number; env?: N
   });
 }
 
+/** The variable msb holds a provider's credential under in the VM (its placeholder is the value there). */
+export function secretEnvName(s: { provider: string; envKey?: string }): string {
+  const label = s.envKey ? s.envKey.replace(/^header:/, "HEADER_") : `${s.provider}_CREDENTIAL`;
+  return `DFIRSWARM_${label.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`;
+}
+
 export type ResolvedSecret = {
   provider: string;
   kind: ProviderSpec["kind"];
@@ -905,7 +911,7 @@ export type VmRecord = {
   max_duration_sec: number | null;
   mounts: Array<{ host: string; guest: string; mode: "ro" | "rw"; noexec?: boolean }>;
   network: { default: "deny" | "public"; allow_hosts: string[]; host_ports: number[] };
-  secrets: Array<{ name: string; hosts: string[] }>;
+  secrets: Array<{ name: string; env?: string; hosts: string[] }>;
   /** Which of its providers this VM reaches through the model gateway, never the seat's token. */
   model_gateway?: { port: number; providers: string[]; declined: Array<{ provider: string; reason: string }> };
   probe: Record<string, unknown>;
@@ -1120,8 +1126,7 @@ async function createOne(
       };
       for (const s of secrets) {
         n.secret((b: SecretB) => {
-          const label = s.envKey ? s.envKey.replace(/^header:/, "HEADER_") : `${s.provider}_CREDENTIAL`;
-          b.env(`DFIRSWARM_${label.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`).value(s.value).placeholder(s.placeholder);
+          b.env(secretEnvName(s)).value(s.value).placeholder(s.placeholder);
           for (const h of new Set(s.hosts.map(nameOf))) b.allow(h);
           return b;
         });
@@ -1188,9 +1193,12 @@ async function createOne(
     max_duration_sec: spec.max_duration_sec ?? null,
     mounts: mounts.map((m) => ({ host: m.host, guest: m.guest ?? m.host, mode: m.readonly ? "ro" : "rw", ...(m.noexec ? { noexec: true } : {}) })),
     network: { default: spec.open_net ? "public" : "deny", allow_hosts: allowHosts, host_ports: hostPorts },
+    // With the variable msb holds each under: its runtime log names a
+    // stopped placeholder by that variable, and custody tells a stop on the
+    // credential's own host from one aimed elsewhere by it.
     secrets: [
-      ...secrets.map((s) => ({ name: `${s.provider} (${s.kind === "oauth" ? "subscription token" : "API key"})`, hosts: s.hosts })),
-      ...packSecrets.map((s) => ({ name: s.name, hosts: s.hosts })),
+      ...secrets.map((s) => ({ name: `${s.provider} (${s.kind === "oauth" ? "subscription token" : "API key"})`, env: secretEnvName(s), hosts: s.hosts })),
+      ...packSecrets.map((s) => ({ name: s.name, env: s.name, hosts: s.hosts })),
     ],
     ...(spec.model_gateway ? { model_gateway: { port: spec.model_gateway.port, providers: plan.fronted, declined: spec.model_gateway.declined ?? [] } } : {}),
     probe,

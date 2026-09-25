@@ -499,7 +499,8 @@ export type CustodyView = {
     image: string | null;
     expected_image: string | null;
     image_differs: boolean;
-    secret_violations: Array<{ at: string; env: string; host: string; method: string; path: string; action: string }>;
+    /** `own_host`: the credential's own host (a failed request, not a leak); false or null: aimed elsewhere, or not known. */
+    secret_violations: Array<{ at: string; env: string; host: string; method: string; path: string; action: string; location?: string; match_form?: string; own_host?: boolean | null }>;
     installed_outside: string[];
     installed_note: string | null;
     runtime_changed: string | null;

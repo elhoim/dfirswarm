@@ -867,15 +867,21 @@ export function egressRefusedLine(
   logPresent: boolean,
   run: { netguard?: unknown; netguard_mode?: unknown; isolation?: { mode?: string } } | null | undefined,
   secretViolations: string[] = [],
+  ownHostStops: string[] = [],
 ): string {
   if (denied.length) return denied.map(([host, n]) => `${host}${n > 1 ? ` (${n})` : ""}`).join(", ");
   if (logPresent) return "nothing was refused";
   if (run?.isolation?.mode === "microvm") {
     // The one refusal msb writes down is a credential's placeholder aimed at
-    // a host it is not bound to; custody read those from each VM's log.
-    const stopped = secretViolations.length
+    // a host it is not bound to; custody read those from each VM's log. A
+    // stop on the credential's own host is told apart: no leak, a failed
+    // request (msb 0.7.2 reads a body starting with % or \u that way).
+    const own = ownHostStops.length
+      ? `; msb also stopped ${ownHostStops.length} request${ownHostStops.length === 1 ? "" : "s"} to a credential's own host on a placeholder it found outside the headers (not a leak; each request failed): ${ownHostStops.join("; ")}`
+      : "";
+    const stopped = (secretViolations.length
       ? `; msb stopped ${secretViolations.length} credential placeholder${secretViolations.length === 1 ? "" : "s"} aimed at a host not its own: ${secretViolations.join("; ")}`
-      : "; msb stopped no credential placeholder on its way to another host";
+      : "; msb stopped no credential placeholder on its way to another host") + own;
     if (run.netguard_mode === "microvm-open") return `not observable, and the network was open (--no-netguard): each VM could reach every public host${stopped}`;
     return `not observable: each agent's microVM refused everything outside its rules, and that refusal leaves no log${stopped}`;
   }
@@ -883,9 +889,24 @@ export function egressRefusedLine(
   return "not observable: no netguard log was kept";
 }
 
-/** Each placeholder msb stopped, as custody read it from the VMs' logs. */
-export function custodyViolations(custody: { vms?: Array<{ agent?: string; secret_violations?: Array<{ env?: string; host?: string; method?: string; path?: string }> }> | null } | null | undefined): string[] {
-  return (custody?.vms ?? []).flatMap((v) => (v.secret_violations ?? []).map((x) => `${v.agent ?? "?"} ${x.env ?? ""} → ${x.host ?? ""} ${x.method ?? ""} ${x.path ?? ""}`.replace(/\s+/g, " ").trim()));
+type CustodyStops = { vms?: Array<{ agent?: string; secret_violations?: Array<{ env?: string; host?: string; method?: string; path?: string; location?: string; own_host?: boolean | null }> }> | null } | null | undefined;
+
+function stopLines(custody: CustodyStops, own: boolean): string[] {
+  return (custody?.vms ?? []).flatMap((v) =>
+    (v.secret_violations ?? [])
+      .filter((x) => (x.own_host === true) === own)
+      .map((x) => `${v.agent ?? "?"} ${x.env ?? ""} → ${x.host ?? ""} ${x.method ?? ""} ${x.path ?? ""}${x.location ? ` (${x.location})` : ""}`.replace(/\s+/g, " ").trim()),
+  );
+}
+
+/** Each placeholder msb stopped on its way to a host not its own (or not known to be), as custody read it from the VMs' logs. */
+export function custodyViolations(custody: CustodyStops): string[] {
+  return stopLines(custody, false);
+}
+
+/** Each request msb stopped on the credential's own host: a failed call, not a leak. */
+export function custodyOwnHostStops(custody: CustodyStops): string[] {
+  return stopLines(custody, true);
 }
 
 /**
@@ -1230,7 +1251,7 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
     parseSentinel: parseFrontMatter,
   });
   const vmRecords = await readVmRecords(sandbox);
-  const hostCustody = await readJsonFile<{ summary?: string; at?: string; inputs?: unknown; run?: string | null; vms?: Array<{ agent?: string; secret_violations?: Array<{ env?: string; host?: string; method?: string; path?: string }> }> | null; model_gateway?: { lines: number; intact: boolean; detail: string; refused?: string } | null }>(join(sandbox, "custody.json"));
+  const hostCustody = await readJsonFile<{ summary?: string; at?: string; inputs?: unknown; run?: string | null; vms?: Array<{ agent?: string; secret_violations?: Array<{ env?: string; host?: string; method?: string; path?: string; location?: string; own_host?: boolean | null }> }> | null; model_gateway?: { lines: number; intact: boolean; detail: string; refused?: string } | null }>(join(sandbox, "custody.json"));
   // The model gateway's totals, host-written beside the trace, when the run had one.
   const gatewayTotals = await (async (): Promise<GatewayTotals | null> => {
     const read = await readRegularText(join(sandbox, "traces", "model-gateway.json"), 64 * 1024 * 1024);
@@ -1657,7 +1678,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
         ? `NOT READ HERE: the trace could not be read by this report (${traceUnread}); the host's custody check streams it, and its verdict is below`
         : chainLine(chain, Boolean(anchorPoint), anchorGuarded(run?.write_guard as string | undefined, run?.host_caps as Record<string, unknown> | undefined), operatorActions),
     ],
-    ["Egress refused", egressRefusedLine(deniedHosts, netguardLog !== null, run, custodyViolations(hostCustody))],
+    ["Egress refused", egressRefusedLine(deniedHosts, netguardLog !== null, run, custodyViolations(hostCustody), custodyOwnHostStops(hostCustody))],
     ["Content sent to", providersLine(run)],
     [
       "Installed during the run",

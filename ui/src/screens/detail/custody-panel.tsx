@@ -179,7 +179,11 @@ export function CustodyPanel({ view }: { view: SwarmView }) {
         ) : null}
         {c.vms?.map((vm) => {
           const away = vm.stopped && !vm.kept && !vm.snapshot?.startsWith("failed");
-          const bad = !away || vm.image_differs || vm.secret_violations.length > 0 || vm.installed_outside.length > 0 || !!vm.runtime_changed;
+          // A stop on the credential's own host is a failed request, not a
+          // leak; one aimed elsewhere (or not known to be its own) is the alarm.
+          const elsewhere = vm.secret_violations.filter((x) => x.own_host !== true);
+          const ownHost = vm.secret_violations.filter((x) => x.own_host === true);
+          const bad = !away || vm.image_differs || elsewhere.length > 0 || vm.installed_outside.length > 0 || !!vm.runtime_changed;
           return (
             <Row key={vm.agent} label={`VM ${vm.agent}`} bad={bad}>
               <span>
@@ -192,17 +196,33 @@ export function CustodyPanel({ view }: { view: SwarmView }) {
                   IMAGE DIGEST DIFFERS: booted <code>{vm.image}</code>, the run expected <code>{vm.expected_image}</code>
                 </span>
               ) : null}
-              {vm.secret_violations.length ? (
+              {elsewhere.length ? (
                 <div>
-                  {vm.secret_violations.length} secret placeholder{vm.secret_violations.length === 1 ? "" : "s"} aimed at a host not its own, stopped by msb:
+                  {elsewhere.length} secret placeholder{elsewhere.length === 1 ? "" : "s"} aimed at a host not its own, stopped by msb:
                   <ul className="m-0 mt-0.5 flex list-none flex-col gap-0.5 p-0 font-mono text-[11.5px]">
-                    {vm.secret_violations.map((x, i) => (
+                    {elsewhere.map((x, i) => (
                       <li key={i} className="[overflow-wrap:anywhere]">
-                        {x.at} · {x.env} → {x.host} {x.method} {x.path} · {x.action}
+                        {x.at} · {x.env} → {x.host} {x.method} {x.path}
+                        {x.location ? ` (${x.location})` : ""} · {x.action}
                       </li>
                     ))}
                   </ul>
                 </div>
+              ) : null}
+              {ownHost.length ? (
+                <details className="text-ink-2">
+                  <summary className="cursor-pointer">
+                    {ownHost.length} request{ownHost.length === 1 ? "" : "s"} to the credential's own host stopped by msb, on a placeholder it found outside the headers: not a leak, each request failed
+                  </summary>
+                  <ul className="m-0 mt-0.5 flex list-none flex-col gap-0.5 p-0 font-mono text-[11.5px]">
+                    {ownHost.map((x, i) => (
+                      <li key={i} className="[overflow-wrap:anywhere]">
+                        {x.at} · {x.env} → {x.host} {x.method} {x.path}
+                        {x.location ? ` (${x.location}${x.match_form ? `, ${x.match_form}` : ""})` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
               ) : null}
               {vm.installed_outside.length ? <span>installed outside the image and the toolchain record: {vm.installed_outside.join(", ")}</span> : null}
               {vm.installed_note ? <span className="text-ink-3">{vm.installed_note}</span> : null}

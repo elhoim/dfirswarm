@@ -647,6 +647,13 @@ not surprised:
   apart from the headers; a VM test shows the plain request stopped and the
   chunked one answered. A failed compaction now names Pi's own fallback
   failure as well as ours.
+- **Custody, the report and the console called every placeholder msb
+  stopped "aimed at a host not its own".** The Linux CTF's 52 stops were
+  all to api.openai.com, the host the credential is bound to (the
+  percent-sign false positive above). The VM record now names the variable
+  each secret is held under, custody marks a stop on the credential's own
+  host and says it as a failed request, not a leak, with where msb found
+  the placeholder, and the report and the Custody tab show the two apart.
 - **On a macOS host, grep called every large mounted file binary.** msb
   passes a guest's `SEEK_DATA`/`SEEK_HOLE` to macOS unchanged, and macOS
   numbers the two the other way round, so each file under a mount looked

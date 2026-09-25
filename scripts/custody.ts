@@ -633,7 +633,25 @@ function outsideOf(raw: unknown): { apt: string[]; venv: string[]; note: string 
   return { apt: fmt(r.apt), venv: fmt(r.venv), note: r.baseline === false ? "the image records no full package list, so apt installs cannot be told apart" : null };
 }
 
-export type SecretViolation = { at: string; env: string; host: string; method: string; path: string; action: string };
+export type SecretViolation = {
+  at: string;
+  env: string;
+  host: string;
+  method: string;
+  path: string;
+  action: string;
+  /** Where msb found the placeholder (header, query, body) and in what form (raw, percent_decoded). */
+  location?: string;
+  match_form?: string;
+  /**
+   * Whether `host` is one the credential is bound to (the VM record's
+   * secrets); null when the record does not say. msb 0.7.2 also stops
+   * requests to a credential's own host: when the TLS record with the
+   * header holds a `%` or `\u` of the body, it reads the header's
+   * placeholder as body (run se064eb, 52 stops, all to api.openai.com).
+   */
+  own_host?: boolean | null;
+};
 
 /**
  * msb's record of a placeholder it stopped: a WARN line in the VM's
@@ -659,9 +677,33 @@ export function secretViolations(runtimeLog: string): SecretViolation[] {
       method: fields.method ?? "",
       path: fields.path ?? "",
       action: fields.action ?? "",
+      ...(fields.location ? { location: fields.location } : {}),
+      ...(fields.match_form ? { match_form: fields.match_form } : {}),
     });
   }
   return out;
+}
+
+/**
+ * Each stop marked with whether it was on the credential's own host, from
+ * the VM record's secrets: matched by the variable msb holds it under
+ * (records since 2026-09-25 name it), else by a pack secret's own name or
+ * the provider's DFIRSWARM_<PROVIDER>_CREDENTIAL. Unmatched stays null.
+ */
+export function markOwnHost(violations: SecretViolation[], secrets: unknown): SecretViolation[] {
+  const bound = (Array.isArray(secrets) ? secrets : [])
+    .filter((x): x is { name?: unknown; env?: unknown; hosts?: unknown } => !!x && typeof x === "object")
+    .map((x) => {
+      const name = typeof x.name === "string" ? x.name : "";
+      const provider = name.replace(/ \((?:API key|subscription token)\)$/, "");
+      const envs = new Set<string>([typeof x.env === "string" ? x.env : "", name, `DFIRSWARM_${provider.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}_CREDENTIAL`].filter(Boolean));
+      const hosts = (Array.isArray(x.hosts) ? x.hosts : []).filter((h): h is string => typeof h === "string").map((h) => h.replace(/:\d+$/, "").toLowerCase());
+      return { envs, hosts };
+    });
+  return violations.map((v) => {
+    const s = bound.find((b) => b.envs.has(v.env));
+    return { ...v, own_host: s ? s.hosts.includes(v.host.toLowerCase()) : null };
+  });
 }
 
 /**
@@ -1386,7 +1428,7 @@ export async function takeCustody(
         kept: typeof rec.kept === "string" ? rec.kept : null,
         snapshot,
         logs,
-        secret_violations: violations,
+        secret_violations: markOwnHost(violations, rec.secrets),
         installed_outside: outsideOf(rec.installed_outside_image),
         runtime_changed: rec.runtime_changed && typeof rec.runtime_changed === "object" ? (rec.runtime_changed as { from: string; to: string }) : null,
         msb_db: typeof rec.msb_db === "string" ? rec.msb_db : null,
@@ -1573,8 +1615,14 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
     // (another msb held it, no sqlite3) left them there.
     const unscrubbed = vms.filter((v) => v.msb_db && v.msb_db !== "scrubbed" && v.msb_db !== "no database");
     if (unscrubbed.length) parts.push(`MSB'S DATABASE NOT CLEARED after removing ${unscrubbed.map((v) => `${v.agent} (${v.msb_db})`).join(", ")}: a secret's value may remain in msb's database`);
-    const sv = vms.flatMap((v) => v.secret_violations.map((x) => `${v.agent} ${x.env} → ${x.host} ${x.method} ${x.path}`.trim()));
+    const line = (agent: string, x: SecretViolation) => `${agent} ${x.env} → ${x.host} ${x.method} ${x.path}${x.location ? ` (${x.location})` : ""}`.trim();
+    const sv = vms.flatMap((v) => v.secret_violations.filter((x) => x.own_host !== true).map((x) => line(v.agent, x)));
     if (sv.length) parts.push(`${sv.length} SECRET PLACEHOLDER${sv.length === 1 ? "" : "S"} AIMED AT A HOST NOT ITS OWN, stopped by msb: ${sv.join("; ")}`);
+    const own = vms.flatMap((v) => v.secret_violations.filter((x) => x.own_host === true).map((x) => line(v.agent, x)));
+    // Not a leak: the host is the one the credential is bound to. msb 0.7.2
+    // stops these when it finds the placeholder outside the headers, which
+    // it also reported, wrongly, for a body starting with % or \u.
+    if (own.length) parts.push(`msb stopped ${own.length} request${own.length === 1 ? "" : "s"} to a credential's own host on a placeholder it found outside the headers (not a leak; each request failed): ${own.join("; ")}`);
   }
   if (c.vm_records?.unreadable.length) parts.push(`VM RECORD UNREADABLE: ${c.vm_records.unreadable.join(", ")}`);
   if (c.vm_records?.no_record.length) parts.push(`NO VM RECORD FOR: ${c.vm_records.no_record.join(", ")}`);

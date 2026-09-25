@@ -16,6 +16,7 @@ import {
   fsDecode,
   fsEncode,
   keptOutputRefs,
+  markOwnHost,
   secretViolations,
   takeCustody,
   verdictAnchorState,
@@ -354,8 +355,39 @@ test("a placeholder msb stopped on its way to another host is read from the VM's
     "2026-09-24T07:03:09.080700Z  INFO microsandbox_runtime::runner::vm: sandbox starting sandbox=dfs-x",
     "2026-09-24T07:03:10.051819Z  WARN microsandbox_network::engine::secrets::handler: secret violation: placeholder detected for disallowed host action=block-and-log secret_env_var=K placeholder=dfirswarm-secret-probe-abc protocol=http/1.1 sni=api.openai.com host=api.openai.com method=GET path=/v1/models location=header match_form=raw guest_dst=172.66.0.243:443 http2_stream_id=",
   ].join("\n");
-  assert.deepEqual(secretViolations(log), [{ at: "2026-09-24T07:03:10.051819Z", env: "K", host: "api.openai.com", method: "GET", path: "/v1/models", action: "block-and-log" }]);
+  assert.deepEqual(secretViolations(log), [{ at: "2026-09-24T07:03:10.051819Z", env: "K", host: "api.openai.com", method: "GET", path: "/v1/models", action: "block-and-log", location: "header", match_form: "raw" }]);
   assert.deepEqual(secretViolations("nothing here\n"), []);
+});
+
+test("a stop on the credential's own host is told from one aimed elsewhere", async () => {
+  // Run se064eb: 52 stops, every one to api.openai.com, the host the
+  // credential is bound to (msb 0.7.2 read a body starting with % as the
+  // placeholder's location). The summary called them all "aimed at a host
+  // not its own".
+  const v = (env: string, host: string) => ({ at: "t", env, host, method: "POST", path: "/v1/responses", action: "block-and-log", location: "body" });
+  const marked = markOwnHost(
+    [v("DFIRSWARM_OPENAI_CREDENTIAL", "api.openai.com"), v("DFIRSWARM_OPENAI_CREDENTIAL", "api.deepseek.com"), v("VT_API_KEY", "www.virustotal.com"), v("NOBODY", "x.test"), v("DFIRSWARM_AZURE_CREDENTIAL", "r.openai.azure.com")],
+    [
+      { name: "openai (API key)", hosts: ["api.openai.com"] },
+      { name: "VT_API_KEY", env: "VT_API_KEY", hosts: ["www.virustotal.com"] },
+      { name: "azure-openai (API key)", env: "DFIRSWARM_AZURE_CREDENTIAL", hosts: ["r.openai.azure.com:8443"] },
+    ],
+  );
+  assert.deepEqual(marked.map((x) => x.own_host), [true, false, true, null, true], "by the record's variable, the provider's name, a pack secret's name; a port does not matter; unknown is null");
+
+  const root = await sandbox();
+  await mkdir(join(root, "vm"), { recursive: true });
+  const logs = join(`${root}.vm-snapshots`, "a0.logs");
+  await mkdir(logs, { recursive: true });
+  dirs.push(`${root}.vm-snapshots`);
+  const warn = (host: string, location: string) =>
+    `2026-09-24T23:01:03.397131Z  WARN microsandbox_network::engine::secrets::handler: secret violation: placeholder detected for disallowed host action=block-and-log secret_env_var=DFIRSWARM_OPENAI_CREDENTIAL placeholder=dfirswarm-secret-openai-x protocol=http/1.1 sni=${host} host=${host} method=POST path=/v1/responses location=${location} match_form=percent_decoded`;
+  await writeFile(join(logs, "runtime.log"), [warn("api.openai.com", "body"), warn("api.deepseek.com", "header"), ""].join("\n"));
+  await writeFile(join(root, "vm", "a0.json"), JSON.stringify({ agent: "a0", image: { manifest_digest: "sha256:abc" }, logs, secrets: [{ name: "openai (API key)", hosts: ["api.openai.com"] }] }));
+  const c = await takeCustody(root);
+  assert.deepEqual(c.vms?.[0].secret_violations.map((x) => [x.host, x.own_host, x.location]), [["api.openai.com", true, "body"], ["api.deepseek.com", false, "header"]]);
+  assert.match(c.summary, /1 SECRET PLACEHOLDER AIMED AT A HOST NOT ITS OWN, stopped by msb: a0 DFIRSWARM_OPENAI_CREDENTIAL → api\.deepseek\.com POST \/v1\/responses \(header\)/);
+  assert.match(c.summary, /msb stopped 1 request to a credential's own host on a placeholder it found outside the headers \(not a leak; each request failed\): a0 DFIRSWARM_OPENAI_CREDENTIAL → api\.openai\.com POST \/v1\/responses \(body\)/);
 });
 
 test("a trace with no chain is called unchained, never intact", async () => {
