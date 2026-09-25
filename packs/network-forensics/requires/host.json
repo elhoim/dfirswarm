@@ -7,7 +7,20 @@
       "why": "Turn a capture into structured logs per protocol \u2014 conn, dns, http, ssl, files \u2014 which is the form every later question wants.",
       "install": {
         "brew": "brew install zeek",
-        "apt": "https://software.opensuse.org/download.html?project=security%3Azeek&package=zeek (the Zeek project's own packages: zeek is in neither Debian's nor Ubuntu's archive)"
+        "apt": "pinned download 8.0.10 (install.download): the Zeek project's own Debian 12 package, zeek-8.0-core, from https://software.opensuse.org/download.html?project=security%3Azeek&package=zeek (zeek is in neither Debian's nor Ubuntu's archive)",
+        "download": {
+          "version": "8.0.10",
+          "amd64": {
+            "url": "https://download.opensuse.org/repositories/security:/zeek/Debian_12/amd64/zeek-8.0-core_8.0.10-0_amd64.deb",
+            "sha256": "70ebacb761bd1d12aa7c1fd9a2bc9cdadc1bf9b0392aefe2e24f2a74dcf9f03a",
+            "bin": "/opt/zeek/bin/zeek"
+          },
+          "arm64": {
+            "url": "https://download.opensuse.org/repositories/security:/zeek/Debian_12/arm64/zeek-8.0-core_8.0.10-0_arm64.deb",
+            "sha256": "0ce1c5cc88d161a7814d7e0bc6bbe61aba87d4e1ca1df6f6fff4a75af1d3b8f2",
+            "bin": "/opt/zeek/bin/zeek"
+          }
+        }
       },
       "licence": "BSD-3-Clause",
       "redistributable": false
@@ -43,7 +56,7 @@
       "why": "Run a signature set over a capture. GPL-2.0-only, so it is invoked as an executable and never imported.",
       "install": {
         "brew": "brew install suricata",
-        "apt": "not in Debian 12's main archive: apt-get install -t bookworm-backports suricata, once bookworm-backports is a source (Debian 13 and Ubuntu carry it as suricata)"
+        "apt": "apt-get install -y -t bookworm-backports suricata"
       },
       "licence": "GPL-2.0-only",
       "redistributable": false
