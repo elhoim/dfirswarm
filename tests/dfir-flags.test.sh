@@ -518,8 +518,11 @@ if [[ -f "$ROOT/scripts/summary.ts" ]]; then
   printf 'live sample\n' > "$sb/work/extracted/sample.bin"
   printf '{"name":"demo_tool","entry":"run.py"}\n' > "$sb/tools/demo_tool/manifest.json"
   printf 'print("hi")\n' > "$sb/tools/demo_tool/run.py"
+  # What a restarted collector keeps: the anchor it did not match, and a cut fragment.
+  printf '{"lines":1}\n' > "$sb.trace-anchor.prev.json"
+  printf 'cut sh' > "$sb/traces/events.fragment-2026-01-01T00-00-00-000Z.partial"
   out="$(swarm package "$id")" || fail "package failed: $out"
-  for f in summary.md MANIFEST.txt trace/events.jsonl SWARM.md team.json budget.json inputs.json toolbox.json \
+  for f in trace/trace-anchor.prev.json trace/events.fragment-2026-01-01T00-00-00-000Z.partial summary.md MANIFEST.txt trace/events.jsonl SWARM.md team.json budget.json inputs.json toolbox.json \
            work/report.md work/timeline.csv work/exports/findings.json \
            tools/demo_tool/manifest.json tools/demo_tool/run.py board/main.md; do
     [[ -f "$sb/package/$f" ]] || fail "package/ is missing $f: $(cd "$sb/package" && find . -type f | sort)"

@@ -7615,8 +7615,15 @@ PY
   # never made the chain (spilled, per agent and the hub's), every whole
   # tool output the trace points to, and each earlier custody verdict.
   local anc
-  for anc in "$sandbox.trace-anchor.json" "$sandbox.custody-anchor.json"; do
+  # With the anchor a restarted collector found the trace did not match, kept
+  # beside it, and any partial line it cut off the trace's end: the record
+  # names both (trace_anchor_mismatch, trace_fragment_cut).
+  for anc in "$sandbox.trace-anchor.json" "$sandbox.trace-anchor.prev.json" "$sandbox.custody-anchor.json"; do
     [[ -f "$anc" ]] && cp "$anc" "$out/trace/$(basename "$anc" | sed "s/^$(basename "$sandbox")\.//")"
+  done
+  local frag
+  for frag in "$sandbox"/traces/events.fragment-*.partial; do
+    pkg_copy "$frag" "$out/trace/$(basename "$frag")"
   done
   pkg_copy "$sandbox/work/.trace-spill.jsonl" "$out/trace/spill-host.jsonl" non-empty
   pkg_copy "$sandbox/traces/hub-spill.jsonl" "$out/trace/spill-hub.jsonl" non-empty
