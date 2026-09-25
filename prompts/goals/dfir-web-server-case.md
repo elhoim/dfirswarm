@@ -59,7 +59,8 @@ checks every citation and assembles `work/report.md`.
 
 `work/report.md` exists, answers all eight questions and the bonus under
 headings `## 1.` … `## 8.` and `## Bonus`, every answer cites evidence, the
-critic has posted a sign-off on the board naming what they verified,
+critic has posted a sign-off on the board as a `result`
+post that starts a line with `SIGN-OFF:` and names what they verified,
 `work/timeline.md` holds the merged timeline as a table with at least 40
 dated rows, and `inputs/` is unchanged.
 
@@ -73,4 +74,8 @@ dated rows, and `inputs/` is unchanged.
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 40`
 - `test "$(find -H inputs -type f | wc -l | tr -d ' ')" -eq "$(jq '.files | length' inputs.json)"`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
+  (`inputs_check` is an event the harness writes itself when `done` verifies
+  the inputs, before it runs these checks. Nobody needs to forge a tool for
+  it, and `make_tool` will refuse that name.)

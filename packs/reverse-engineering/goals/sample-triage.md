@@ -28,7 +28,8 @@ its behaviour on any machine.
 `work/report.md` exists and answers questions 1 to 7 under the headings `## 1.`
 through `## 7.`. The report states that the sample was not executed. Every
 capability claim carries an address or an import. A critic has read it against
-the board and posted a sign-off. `inputs/` is unchanged.
+the board and posted a sign-off as a `result`
+post that starts a line with `SIGN-OFF:` and names what they verified. `inputs/` is unchanged.
 
 ## Checks
 
@@ -37,5 +38,9 @@ the board and posted a sign-off. `inputs/` is unchanged.
 - `grep -qiE 'not executed|static analysis only|no dynamic analysis' work/report.md`
 - `grep -qE '[0-9a-f]{64}' work/report.md`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 3`
-- `grep -rqi 'sign-off' threads/main/`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
+  (`inputs_check` is an event the harness writes itself when `done` verifies
+  the inputs, before it runs these checks. Nobody needs to forge a tool for
+  it, and `make_tool` will refuse that name.)
 - `grep -q '"tool":"skill"' traces/events.jsonl`

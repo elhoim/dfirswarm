@@ -36,8 +36,14 @@ Read `catalog/` before running the same commands again.
    SOFTWARE, SYSTEM), the volumes, the security tooling and its state
    (Defender keys and `Windows Defender/Operational`), and the state of
    the image itself: whether it was shut down cleanly, whether it booted
-   again after the encryption, and where the logs stop (`$LogFile`, the
-   last System record, hiberfil).
+   again after the encryption, where the logs stop (`$LogFile`, the
+   last System record, hiberfil), and the audit policy in force: which
+   categories were audited (SECURITY `Policy\PolAdtEv`, and any advanced
+   policy in `System32\GroupPolicy\Machine\Microsoft\Windows NT\Audit\audit.csv`),
+   whether process creation (4688) and PowerShell script blocks (4104)
+   were logged, and policy changes (4719). An event the later answers do
+   not find is then "not audited", "rolled over" or "cleared", never
+   simply "did not happen".
 2. Arrival and execution: the initial-access hypothesis and its evidence
    (4624 type 10 and a 4625 burst for an exposed RDP, a mail attachment or
    a download with its `Zone.Identifier` stream, a remote-support tool,

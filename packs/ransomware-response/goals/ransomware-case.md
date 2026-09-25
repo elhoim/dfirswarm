@@ -31,7 +31,8 @@ explains why exfiltration is question three and not question seven.
 through `## 9.`. Answer 2 states which of the three exfiltration positions
 applies. Answer 8 is a position, not a shrug. No credential, wallet address or
 victim identifier appears in the body; identifiers go in an appendix. A critic
-has read it against the board and posted a sign-off. `inputs/` is unchanged.
+has read it against the board and posted a sign-off as a `result`
+post that starts a line with `SIGN-OFF:` and names what they verified. `inputs/` is unchanged.
 
 ## Checks
 
@@ -40,5 +41,9 @@ has read it against the board and posted a sign-off. `inputs/` is unchanged.
 - `grep -qiE 'UTC' work/report.md`
 - `grep -qiE 'not evidenced|evidenced' work/report.md`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 8`
-- `grep -rqi 'sign-off' threads/main/`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
+  (`inputs_check` is an event the harness writes itself when `done` verifies
+  the inputs, before it runs these checks. Nobody needs to forge a tool for
+  it, and `make_tool` will refuse that name.)
 - `grep -q '"tool":"skill"' traces/events.jsonl`

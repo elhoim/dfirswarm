@@ -32,7 +32,13 @@ Read `catalog/` before running the same commands again.
 1. System profile: Windows edition and build, install date, computer name,
    domain or workgroup, time zone, network configuration, and every local
    account with its SID, creation time, last logon and group membership
-   (SOFTWARE, SYSTEM and SAM hives; the Security event log for 4720/4732).
+   (SOFTWARE, SYSTEM and SAM hives; the Security event log for 4720/4732),
+   and the audit policy in force: which categories were audited (SECURITY
+   `Policy\PolAdtEv`, and any advanced policy in
+   `System32\GroupPolicy\Machine\Microsoft\Windows NT\Audit\audit.csv`),
+   policy changes (4719), and each log's size, earliest and latest record.
+   An event the later answers do not find is then "not audited", "rolled
+   over" or "cleared", never simply "did not happen".
 2. Was the host compromised, and how did the intruder get in? State the
    hypothesis for initial access (exposed service and brute force,
    exploitation, phishing attachment, removable media, stolen credentials,

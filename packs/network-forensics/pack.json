@@ -25,7 +25,7 @@
       "tools/zeek_run/run.py": "590c5a66457dab361cc76f7ccb010bf05c90ede64bb3038176fb35c7088b8d48",
       "tools/pcap_summary/manifest.json": "c275ec18dbae1086106ea17c2caf0f7ada191d64153e0c3756ee6b6b766e9b80",
       "tools/pcap_summary/run.py": "6a3df3a03177a816e89b7ff6e9fe3ff84b073a35954199f67a4af7e1cb49bbeb",
-      "goals/what-left-the-network.md": "438c888da99e22ab488a2a041352cc10b0fa535a1f824acf9d3d7edcde262dd6",
+      "goals/what-left-the-network.md": "65b30cc40308fa72dcb2a6753cc4d5fdcb8aabd9a90f195f20ba99ec61060104",
       "skills/capture/what-you-have.md": "755754f6c9861d7cacd861e027cc4cb08bf0ee11285a26de48f4359d3f7cf1e1",
       "skills/exfil/volume.md": "e3f63f9d226e537719222d35a16d1a8d31b25b9e6c8776952ceb54ea67252722",
       "skills/sessions/reconstruct.md": "e81004686d3f1877d26bbef565fc0228c4141ae10e2b1046af289dd647d01c97",

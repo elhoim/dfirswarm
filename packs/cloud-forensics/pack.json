@@ -25,7 +25,7 @@
       "tools/signin_analyse/run.py": "c85ba811bdcccb63506e5104b1fe080ca7fc1bebf16a5541156c92e6363da8cf",
       "tools/cloudtrail_parse/manifest.json": "7a97ef59f737050d2761e54d48743eddf315aaa546506ee0b9421d32e0701f0c",
       "tools/cloudtrail_parse/run.py": "f42e0f82d5ad42f3390830378657a06cb4b6c8da64b8d7f635fb9034f3ce7871",
-      "goals/tenant-compromise.md": "86a2d93ae7e7cbc0c85262bad4cb9fc3e19c2622792a2ddbc73ef29c6ec850d9",
+      "goals/tenant-compromise.md": "ea10512c899341464b30d36122b29244691e0cb71632a42e16f5e9c16bd50cd9",
       "skills/identity/tokens.md": "508d85af814f22ecc68dad4dd59815ec17dcead6b36d4e25c9bb404c32e0a277",
       "skills/google/workspace.md": "829eda2d9b7c49f091fcfe60eb5d0a27ae6e7250776cf494e3eefa37717eff33",
       "skills/logs/what-exists.md": "f2d460d1abbb89a03f6475c6ea31fa8eb10c78820abd6143b7bf2fb8cef5a68b",

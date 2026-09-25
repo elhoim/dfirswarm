@@ -28,7 +28,8 @@ from where.
 `work/report.md` exists and answers questions 1 to 7 under the headings `## 1.`
 through `## 7.`, every answer citing an artefact a reviewer can re-open. A
 device named in answer 1 is tied to something in answer 2 or the report says it
-could not be. A critic has read it against the board and posted a sign-off.
+could not be. A critic has read it against the board and posted a sign-off as a `result`
+post that starts a line with `SIGN-OFF:` and names what they verified.
 `inputs/` is unchanged.
 
 ## Checks
@@ -36,6 +37,9 @@ could not be. A critic has read it against the board and posted a sign-off.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 5`
-- `grep -rqi 'sign-off' threads/main/`
-- `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
+  (`inputs_check` is an event the harness writes itself when `done` verifies
+  the inputs, before it runs these checks. Nobody needs to forge a tool for
+  it, and `make_tool` will refuse that name.)
 - `grep -q '"tool":"skill"' traces/events.jsonl`

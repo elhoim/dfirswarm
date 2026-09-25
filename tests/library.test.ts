@@ -317,3 +317,35 @@ test("the worker prompt carries the secrets and never-run rules the entries poin
     assert.ok(prompt.includes(must), `prompts/worker-system.md does not say: ${must}`);
   }
 });
+
+// The goals that ship beside the library (a pack's own goals, and the
+// operator's shelf in prompts/goals/) are held to the same two standard
+// checks: a bare grep for "sign-off" passes on "who takes the sign-off?",
+// and a bare grep for the inputs_check event passes whatever it found.
+test("pack and prompt goals use the library's sign-off and inputs_check checks", async () => {
+  const problems: string[] = [];
+  const files: string[] = [];
+  for (const pack of await readdir(join(REPO, "packs"))) {
+    const dir = join(REPO, "packs", pack, "goals");
+    for (const name of await readdir(dir).catch(() => [] as string[])) if (name.endsWith(".md")) files.push(join(dir, name));
+  }
+  for (const name of await readdir(join(REPO, "prompts", "goals"))) if (name.endsWith(".md")) files.push(join(REPO, "prompts", "goals", name));
+  assert.ok(files.length > 10, "no pack or prompt goals found");
+  const signOff = "awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md";
+  const inputsCheck = `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`;
+  for (const file of files) {
+    const id = file.slice(REPO.length + 1);
+    const body = await readFile(file, "utf8");
+    const flat = (t: string | null) => (t ?? "").replace(/\s+/g, " ");
+    const checks = ((section(body, /^##\s+Checks\s*$/) ?? "").match(/`[^`\n]+`/g) ?? []).map((c) => c.slice(1, -1));
+    if (checks.some((c) => /grep -r?q?i? 'sign-off'/.test(c))) problems.push(`${id}: a bare sign-off grep`);
+    if (checks.some((c) => c === `grep -q '"tool":"inputs_check"' traces/events.jsonl`)) problems.push(`${id}: a bare inputs_check grep`);
+    const dod = flat(section(body, /^##\s+Definition of done\s*$/));
+    if (/sign-off/i.test(dod)) {
+      if (!checks.includes(signOff)) problems.push(`${id}: the definition of done asks for a sign-off and no check reads one`);
+      if (!dod.includes("`SIGN-OFF:`")) problems.push(`${id}: the definition of done does not say how a sign-off starts`);
+    }
+    if (/inputs\/` is unchanged/.test(dod) && !checks.includes(inputsCheck)) problems.push(`${id}: inputs/ must be unchanged and no check reads inputs_check`);
+  }
+  assert.deepEqual(problems, [], `goal problems:\n  ${problems.join("\n  ")}`);
+});
