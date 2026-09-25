@@ -708,6 +708,17 @@ not surprised:
 
 ### Fixed
 
+- **A pack tool gets the timeout its manifest asks for**, up to an hour
+  (`PACK_TOOL_TIMEOUT_MAX_SECONDS`). Every run clamped pack tools to the
+  forged-tool ceiling of 120 s while telling the model the manifest's figure:
+  26 of them ask for 300 to 3600 s, and `timeline_super` (3600 s) and
+  `mem_carve` (900 s) died at 120 s. A forged tool keeps the 120 s ceiling, and
+  the description and the timeout message say the timeout actually applied.
+- **A failed tool call reaches the model as an error.** Pi takes a failure only
+  from a throw and drops an `isError: true` a tool returns, so every refusal
+  (`publish_file`, `record`, `done`, `name`, `make_tool`) and every failed pack
+  or forged tool reached the model and its session as a success. The
+  `tool_result` hook sets the flag from `ok: false` in the result's details.
 - **A VM's probe asks the hub again.** With eighteen VMs running and a third
   run coming up, two seats of eight had their first connection close with no
   answer, twice, and the kickoff stopped with "no answer" and nothing else.

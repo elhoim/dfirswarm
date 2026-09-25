@@ -75,6 +75,7 @@ import {
   TOOLS_DIR,
   TOOL_TIMEOUT_DEFAULT_SECONDS,
   TOOL_TIMEOUT_MAX_SECONDS,
+  toolTimeoutSeconds,
   isPeerForgedTool,
   type ForgedToolManifest,
   watchedPathHashes,
@@ -1718,7 +1719,16 @@ export default function (pi: ExtensionAPI) {
         longRuns.set(key, { ms: durationMs, path: fullOutput.path });
       }
     }
-    const override = contentChanged ? ({ content } as never) : undefined;
+    // Pi takes a tool's failure only from a throw: an `isError: true` in what
+    // execute returns is dropped, so every refusal and every failed pack or
+    // forged tool reached the model, and its session, as a success. Their
+    // details say ok: false, and this is where the flag is set from them.
+    const refused =
+      !isError && name !== "bash" && name !== "powershell" && (details as { ok?: unknown } | undefined)?.ok === false;
+    const override =
+      contentChanged || refused
+        ? ({ ...(contentChanged ? { content } : {}), ...(refused ? { isError: true } : {}) } as never)
+        : undefined;
 
     if ((name === "bash" || name === "powershell") && callId) {
       const before = bashSnapshots.get(callId);
@@ -2358,7 +2368,7 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
       name: manifest.name,
       label: manifest.name,
-      description: `${manifest.description} (forged by ${manifest.by}, v${manifest.version}, ${manifest.runtime}; runs in the sandbox with a ${manifest.timeout_seconds}s timeout)${manifest.example ? ` Example: ${manifest.example}` : ""}`,
+      description: `${manifest.description} (forged by ${manifest.by}, v${manifest.version}, ${manifest.runtime}; runs in the sandbox with a ${toolTimeoutSeconds(manifest)}s timeout)${manifest.example ? ` Example: ${manifest.example}` : ""}`,
       promptSnippet: `${manifest.description} — forged by ${manifest.by}`,
       parameters: forgedSchema(manifest),
       async execute(_id, params, signal, _onUpdate, toolCtx: ToolCtx) {
@@ -2431,7 +2441,7 @@ export default function (pi: ExtensionAPI) {
             details: { ok: true, exit_code: run.exit_code, duration_ms: run.duration_ms, truncated: run.truncated, ...(run.full_output ? { full_output: run.full_output } : {}) },
           };
         }
-        const why = run.timed_out ? `timed out after ${manifest.timeout_seconds}s` : `exit ${run.exit_code ?? "?"}${run.signal ? ` (${run.signal})` : ""}`;
+        const why = run.timed_out ? `timed out after ${toolTimeoutSeconds(manifest)}s` : `exit ${run.exit_code ?? "?"}${run.signal ? ` (${run.signal})` : ""}`;
         return {
           content: [{ type: "text" as const, text: `${manifest.name} failed: ${why}\n${run.stderr.trim() || run.stdout.trim()}`.trim() }],
           details: { ok: false, exit_code: run.exit_code, duration_ms: run.duration_ms, timed_out: run.timed_out },

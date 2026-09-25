@@ -5114,6 +5114,19 @@ export function fullOutputTrailer(shownLines: number, shownBytes: number, ref: F
 }
 export const TOOL_TIMEOUT_DEFAULT_SECONDS = 30;
 export const TOOL_TIMEOUT_MAX_SECONDS = 120;
+/**
+ * The ceiling for a pack's tool, sealed and reviewed with its pack: a super
+ * timeline or a memory carve asks for up to an hour. Every run clamped them to
+ * the forged-tool ceiling of 120 s while telling the model the manifest's
+ * figure, so timeline_super (3600 s) and mem_carve (900 s) died at 120 s.
+ */
+export const PACK_TOOL_TIMEOUT_MAX_SECONDS = 3600;
+
+/** The timeout a tool's run is actually given: its manifest's, within its ceiling. */
+export function toolTimeoutSeconds(manifest: Pick<ForgedToolManifest, "timeout_seconds" | "pack">): number {
+  const ceiling = manifest.pack ? PACK_TOOL_TIMEOUT_MAX_SECONDS : TOOL_TIMEOUT_MAX_SECONDS;
+  return Math.min(ceiling, Math.max(1, Number(manifest.timeout_seconds) || TOOL_TIMEOUT_DEFAULT_SECONDS));
+}
 export const TOOL_DESCRIPTION_MAX_CHARS = 400;
 export const TOOL_MAX_PARAMS = 16;
 export const TOOL_HASH_RE = /^[0-9a-f]{64}$/;
@@ -5905,7 +5918,7 @@ export async function runForgedTool(
   if (!isToolHash(expected) || sha256 !== expected) {
     return fail(`tool "${manifest.name}" on disk (${shortHash(sha256)}) does not match its manifest (${shortHash(expected || "missing")}); re-forge it with make_tool`);
   }
-  const timeoutMs = Math.min(TOOL_TIMEOUT_MAX_SECONDS, Math.max(1, manifest.timeout_seconds)) * 1000;
+  const timeoutMs = toolTimeoutSeconds(manifest) * 1000;
   return new Promise<ForgedRunResult>((resolveRun) => {
     const stdout = new StreamCapture(TOOL_OUTPUT_MAX_BYTES, sandboxRoot, toolOutputRel(options.agentId, manifest.name, "out"));
     const stderr = new StreamCapture(TOOL_OUTPUT_MAX_BYTES / 4, sandboxRoot, toolOutputRel(options.agentId, manifest.name, "err"));
