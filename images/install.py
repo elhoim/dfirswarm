@@ -234,7 +234,8 @@ def fetch(d: dict, apt: list) -> tuple:
     why = wrapper(d["name"], program, d.get("run"), bool(d.get("run_from_dir")))
     if why:
         return None, why
-    return {"kind": "download", "version": d.get("version"), "url": entry["url"], "sha256": want}, None
+    return {"kind": "deb" if name.endswith(".deb") else "download", "version": d.get("version"),
+            "url": entry["url"], "sha256": want}, None
 
 
 def unpack(archive: Path, name: str, dest: Path, strip: bool = False, skip: list = ()) -> None:

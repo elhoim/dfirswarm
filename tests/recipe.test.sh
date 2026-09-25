@@ -312,6 +312,7 @@ jq -r '.no_runtime[1]' <<<"$res" | grep -q 'its runtime no-such-runtime is not i
 [[ "$(jq -r '.other_arch[0]' <<<"$res")" == false && ! -e "$K/opt-src/src-elsewhere" ]] && jq -r '.other_arch[1]' <<<"$res" | grep -q 'pins it for no-such-arch only' \
   || fail "a source its pack pins for other architectures was installed here: $res"
 [[ "$(jq -r '.deb[0]' <<<"$res")" == true && "$("$TMP/bin/deb-tool")" == "deb-tool ran" ]] || fail "a pinned .deb's program is not on PATH: $res"
+[[ "$(jq -r '.deb[2]' <<<"$res")" == deb && "$(jq -r '.source[2]' <<<"$res")" == source ]] || fail "the image does not record each artefact's kind: $res"
 grep -q "deb-tool_1.deb" "$K/apt.log" || fail "a pinned .deb was not handed to apt: $(cat "$K/apt.log")"
 grep -q 'deb-bad' "$K/apt.log" && fail "apt was handed a .deb whose sha256 is not the pinned one"
 [[ "$(jq -r '.deb_bad_sha[0]' <<<"$res")" == false ]] || fail "a .deb with other bytes was installed: $res"
