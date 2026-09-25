@@ -645,6 +645,10 @@ not surprised:
   image held Zircolite it would have failed at the argument error where it
   ran hayabusa before. It no longer passes the flag (2.x without it uses its
   bundled evtx_dump).
+- **`unified_log` gave UnifiedLogReader three places where it takes
+  four** (uuidtext, timesync, the tracev3 files, and its output), so off a
+  Mac it only ever got an argparse error. It now passes all four, for a
+  `.logarchive` and for a copy of `/private/var/db`.
 - The windows-forensics pack named RegRipper `rip` under "GPL". Debian
   installs it as `regripper`, and it is MIT, by its own licence file and
   Debian's copyright. computer-forensics-base called bulk_extractor MIT; its
