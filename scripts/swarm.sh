@@ -7245,15 +7245,15 @@ import("'"$ROOT"'/extensions/protocol.ts").then((m) => {
 # signal; the panes of one run share a user, so that is a dead one.
 TABLE_LOCK_TOKEN="$$.$RANDOM$RANDOM"
 # Where a recorded pid can be checked: this pid namespace and boot on Linux,
-# this host and boot on macOS; empty when it cannot be told. protocol.ts
-# prints the same string (lockNamespace).
+# this boot session on macOS (not the host's name, which can follow the
+# network across a sleep); empty when it cannot be told. protocol.ts prints
+# the same string (lockNamespace).
 table_lock_ns() {
   local ns boot
   if ns="$(readlink /proc/self/ns/pid 2>/dev/null)" && boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"; then
     printf 'linux:%s:%s' "$ns" "$boot"
-  elif boot="$(sysctl -n kern.boottime 2>/dev/null)" && [[ "$boot" == *"sec = "* ]]; then
-    boot="${boot#*sec = }"
-    printf 'darwin:%s:%s' "$(hostname)" "${boot%%,*}"
+  elif boot="$(sysctl -n kern.bootsessionuuid 2>/dev/null)" && [[ "$boot" =~ ^[0-9A-Fa-f-]+$ ]]; then
+    printf 'darwin:%s' "$boot"
   fi
 }
 # Stale: older than 15 s and no live holder we can see. A lock that is gone

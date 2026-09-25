@@ -236,6 +236,21 @@ test("protocol.ts and the bash copies name this namespace alike", { skip: proces
   if (process.platform === "linux" || process.platform === "darwin") assert.notEqual(lockNamespace(), "");
 });
 
+test("on macOS the namespace is the boot session, whatever the host is called now", { skip: process.platform !== "darwin" && "macOS only" }, () => {
+  // A Mac with no HostName set takes its name from the network it is on. A
+  // reap.sh or `swarm.sh say` run after a sleep on another network must still
+  // print what the panes stamped, or a stalled holder's lock goes by age alone.
+  const session = execFileSync("sysctl", ["-n", "kern.bootsessionuuid"], { encoding: "utf8" }).trim();
+  assert.equal(lockNamespace(), `darwin:${session}`);
+  const block = execFileSync("sed", ["-n", "/^# >>> table lock/,/^# <<< table lock/p", join(ROOT, "scripts/reap.sh")], {
+    encoding: "utf8",
+  });
+  const renamed = execFileSync("bash", ["-c", `hostname() { echo renamed-by-another-network; }\n${block}\ntable_lock_ns`], {
+    encoding: "utf8",
+  });
+  assert.equal(renamed, lockNamespace());
+});
+
 test("a holder checks its lock is still its own before it commits a write", async () => {
   const { root, lockDir } = await sandbox();
   const target = join(root, "table.json");

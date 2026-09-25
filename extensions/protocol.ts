@@ -23,7 +23,6 @@ import {
   writeSync,
 } from "node:fs";
 import { connect, type Socket } from "node:net";
-import { hostname } from "node:os";
 import {
   appendFile,
   chmod,
@@ -844,10 +843,16 @@ let lockNamespaceCache: string | undefined;
 
 /**
  * Where a pid recorded in a lock can be checked: this pid namespace and boot
- * on Linux, this host and boot on macOS. Two processes that print the same
- * string number their processes alike, so one can ask whether the other's pid
- * is live. "" when it cannot be told, and then only the lock's age counts.
+ * on Linux, this boot on macOS. Two processes that print the same string
+ * number their processes alike, so one can ask whether the other's pid is
+ * live. "" when it cannot be told, and then only the lock's age counts.
  * The bash copies in reap.sh and swarm.sh print the same string.
+ *
+ * On macOS the boot is the boot session's UUID, not the host's name: a Mac
+ * with no HostName set takes its name from the network it is on, so after a
+ * sleep on another network reap.sh or `swarm.sh say` would print another
+ * string than the panes stamped, and a stalled holder's lock would be judged
+ * by its age alone.
  */
 export function lockNamespace(): string {
   if (lockNamespaceCache !== undefined) return lockNamespaceCache;
@@ -858,9 +863,8 @@ export function lockNamespace(): string {
       const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
       if (pidNs && boot) ns = `linux:${pidNs}:${boot}`;
     } else if (process.platform === "darwin") {
-      const out = execFileSync("sysctl", ["-n", "kern.boottime"], { encoding: "utf8", timeout: 2_000 });
-      const sec = /sec = (\d+)/.exec(out)?.[1];
-      if (sec) ns = `darwin:${hostname()}:${sec}`;
+      const session = execFileSync("sysctl", ["-n", "kern.bootsessionuuid"], { encoding: "utf8", timeout: 2_000 }).trim();
+      if (/^[0-9A-Fa-f-]+$/.test(session)) ns = `darwin:${session}`;
     }
   } catch {
     ns = "";

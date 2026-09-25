@@ -150,7 +150,7 @@ reason**, not an open-ended lock:
   has not changed for 15 s has no live holder unless that holder has stalled (SIGSTOP, swap, a
   laptop asleep). A stale lock is broken, except that a holder is kept while
   its pid is live and it recorded the same `ns` as the waiter: the pid
-  namespace and boot id on Linux, the host name and boot time on macOS. A
+  namespace and boot id on Linux, the boot session (`kern.bootsessionuuid`) on macOS. A
   waiter that cannot check the pid — another pane's pid namespace, another
   VM, a lock with no `ns` — goes by age alone. A break happens under
   `locks/.table.lock.break`, which re-checks the lock first, so two waiters
