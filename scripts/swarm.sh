@@ -4018,10 +4018,19 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     rm -rf "${sandbox:?}/work"
   fi
   mkdir -p "$sandbox/work"
-  : > "$sandbox/traces/events.jsonl"
 
   clear_inputs "$sandbox"
   stop_sandbox_daemons "$sandbox"
+  # Emptied only once the previous run's collector and watchdogs are stopped,
+  # so none of them can land a stray line in the new run's trace.
+  : > "$sandbox/traces/events.jsonl"
+  # The trace was just emptied for the new run, so the previous run's anchor
+  # goes with it. A collector keeps any anchor it finds — an anchor must not
+  # drop to match a shortened file — and would read the new run as cut short.
+  local old_anchor
+  old_anchor="$(trace_anchor_path "$sandbox")"
+  # With the one a restarted collector kept because the trace did not match it.
+  rm -f "$old_anchor" "${old_anchor%.json}.prev.json"
   rm -rf "${sandbox:?}/catalog" "${sandbox:?}/ledger" "$sandbox/toolbox.json" "$sandbox/catalog.json"
   # Everything else a previous run in this directory left that the next one
   # would read as its own: its VMs' records, its custody verdicts, its
@@ -5859,6 +5868,11 @@ trace_token_for() {
   printf ''
 }
 
+# Where a sandbox's trace anchor lives: beside it, outside the panes' reach.
+trace_anchor_path() {
+  printf '%s/%s.trace-anchor.json' "$(cd "$(dirname "$1")" && pwd -P)" "$(basename "$1")"
+}
+
 start_trace_collector() {
   local sandbox="$1" pid
   mkdir -p "$sandbox/traces"
@@ -5879,7 +5893,7 @@ start_trace_collector() {
   # report found none and said the record was intact without ever consulting
   # it. Still outside the sandbox, so the write guard keeps it out of reach.
   local anchor
-  anchor="$(cd "$(dirname "$sandbox")" && pwd -P)/$(basename "$sandbox").trace-anchor.json"
+  anchor="$(trace_anchor_path "$sandbox")"
   # Keyed only when the gate is up: a collector keyed for a gate that is not
   # there would write every pane's line unverified.
   local shape="open"
