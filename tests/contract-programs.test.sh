@@ -52,3 +52,15 @@ grep -q '| `old_carver` | image, offset | Carve from 133502964000000000 onwards.
   || fail "a seeded tool's baked path and offset are not said, or a number in its prose was taken for one: $out"
 grep -q '20000' <<<"$out" && fail "a pack tool's limit reached the contract"
 pass "a pack's tools are said to be in the tool list; only seeded tools are another case's, with what their example bakes in"
+
+# The goal's check on the trace for the harness's inputs_check line says who
+# writes it, in prose with no backticks, and await-done still runs the check.
+rm -rf "$TMP/sb"; mkdir -p "$TMP/sb"
+printf '%s\n' '{"context": "host", "present": [], "missing": []}' > "$TMP/sb/toolbox.json"
+printf '## Checks\n\n- `test -f work/report.md`\n- `grep -q '"'"'"tool":"inputs_check"'"'"' traces/events.jsonl`\n' > "$TMP/goal-checks.md"
+ISOLATION_FOR_CONTRACT=host render_contract "$TMP/sb" s1 1 1 10 "$TMP/goal-checks.md" s100
+line="$(grep 'inputs_check' "$TMP/sb/SWARM.md")"
+grep -q 'the harness writes this line itself when done verifies the inputs' <<<"$line" || fail "the inputs_check check does not say the harness writes it: $line"
+[[ "$(grep -o '`' <<<"$line" | wc -l | tr -d ' ')" == 2 ]] || fail "the note added a code span await-done would run: $line"
+grep -q '^- `test -f work/report.md`$' "$TMP/sb/SWARM.md" || fail "another check was changed"
+pass "the check on the harness's inputs_check line says the harness writes it, and adds no code span"

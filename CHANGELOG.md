@@ -659,6 +659,11 @@ not surprised:
   in the tool list, each described there, general and fed by the arguments.
   Only `--tools-from` copies are listed as another case's, and "baked" is an
   `inputs/` path or an offset their example gives.
+- **The goal's check on the trace for `inputs_check` says the harness writes
+  it.** Read bare, `grep -q '"tool":"inputs_check"' traces/events.jsonl`
+  sent five agents of sixteen on the sixth CTF round to forge a tool by that
+  name to satisfy it (refused, as a reserved name). The contract adds, in
+  prose, that `done` writes the line when it verifies the inputs.
 - **A shell write in the writer's own directories takes no lease.** No peer
   may claim or write there, so the implicit claim protected nothing: one
   ileapp run was 507 of a run's 644 `claim_file` lines, each a lock file. The
