@@ -622,7 +622,9 @@ test("the VM's probe asks the hub again when a connection closes with no answer,
   const never = await probe(99);
   assert.equal(never.hub, false);
   assert.equal(never.hub_attempts, 5);
-  assert.equal(never.hub_error, "the connection closed with no answer", "a hub that never answers is said to have said nothing");
+  // A close with nothing said reads as a clean close on macOS and as a reset
+  // on Linux, where the peer's destroy() sends an RST; either is kept as said.
+  assert.match(String(never.hub_error), /^(the connection closed with no answer|.*Connection reset by peer)$/, "a hub that never answers is said to have said nothing");
 });
 
 test("without --model-gateway a seat's VM plan is today's; with it a fronted provider is reached through the gateway and nothing of its credential is in the VM", async () => {
