@@ -631,6 +631,18 @@ not surprised:
   and no longer claims "local changes" it cannot see. `start --check`
   names the isolation, the image and what the model gateway would front.
   `stop` no longer prints Herdr's JSON.
+- **A VM seat whose Pi restarted could spend past its cap unseen.** The hub
+  dropped the Pi session id from a seat's report and checked each report
+  against the seat's whole row, so a restarted Pi's reports (its own totals,
+  from zero again) were refused as going backwards until the new session
+  alone passed the old total: a seat really at $1.5 stayed recorded at $0.8,
+  under a $1 cap. The hub now passes the session id, a report is checked
+  against its own session's last one, and a new session is added to the
+  seat's total; the row still never goes down.
+- The console no longer refreshes its claims view on the table lock's own
+  files (`.probe.*`, `.table.lock.break`, a released lock's rename), and a
+  pane's shell that writes `done/ALL_AGENTS_DEAD` is caught like one that
+  writes the sentinel.
 - **No agent could publish a shared file.** `publish_file` was registered
   but missing from the tool allowlist swarm.sh gives Pi, and in a VM it is
   the only way `work/report.md` is written. In the second CTF round the
