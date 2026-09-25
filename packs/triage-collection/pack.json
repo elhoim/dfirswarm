@@ -1,7 +1,7 @@
 {
   "id": "triage-collection",
   "name": "Triage and Collection Pack",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "What to do when the evidence is a collector's output rather than an image: recognising which tool made it, reading its own manifest and log, normalising the paths it rewrote, saying what a logical acquisition cannot contain, and handing the result to the platform packs.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -29,7 +29,7 @@
       "skills/gaps/what-is-missing.md": "74bcda9d102a470d77526f66f398ca1474d4a804bc0b2cdc69108ec1c068430f",
       "skills/plan/what-to-collect.md": "02a945a114227fdf32a23d2f679db94fed1e4955ab5629716bde0977cd0e1968",
       "skills/normalise/layout.md": "0baa4346f7353ac5df1ea6712d89e6afc3145e3a692d6243ad3f225959023c8f",
-      "requires/host.json": "482e84eac58ebe845060057931f39998869c2cece8a4d32f26a1e308fb08cfa8",
+      "requires/host.json": "438452f61e68acf6c451c35d894e5d56f43f38ef78e41a6cb11d268ae4aab485",
       "requires/python.txt": "4f753bdd539922ce6d87e00b3c099f7c18af8cf5d04139588668f957d7d3eddd",
       "skills/INDEX.md": "4811a00a11c8d2865d93c5954b3d8f23ef595210709200ed401a32a4e067b42f"
     }
