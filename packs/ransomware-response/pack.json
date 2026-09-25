@@ -1,7 +1,7 @@
 {
   "id": "ransomware-response",
   "name": "Ransomware Response Pack",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "The order a ransomware case has to be worked in: scope before anything else, the exfiltration that came before the encryption, what the encryptor itself left, the destroyed shadow copies, identifying the family from the note and the file marker, what recovery is actually possible, and the report a regulator and a negotiator will both ask for.",
   "licence": "AGPL-3.0-or-later",
   "authors": [

@@ -1,7 +1,7 @@
 {
   "id": "cloud-forensics",
   "name": "Cloud and SaaS Forensics Pack",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Method and tooling for logs that belong to somebody else's computer: what each provider keeps and for how long, the Microsoft 365 unified audit log, Entra sign-ins and the tokens behind them, AWS CloudTrail, Google Workspace, and the mailbox rules and application consents that are how a cloud account is actually kept.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
