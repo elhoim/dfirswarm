@@ -215,6 +215,15 @@ does with it depends on the mode:
   `--toolbox` in a VM run also lists every program the packs name, required
   or optional, in `toolbox.json`.
 
+The image profiles are built from the same file (`images/README.md`). A
+program no package manager has says how an image gets it, as data: a pinned
+`download` per architecture (a `.deb` is handed to apt), a tag's `source` with
+its entry and interpreter (`run`), or a `build` from source; an apt line with
+`-t bookworm-backports` comes from Debian's backports. Each is checked by its
+sha256. A program that belongs to another system (Apple's `log`, a collector
+run on the host being collected) is marked `not_in_image` with why: no image
+is asked for it, and a pack may not require it.
+
     {
       "binaries": [
         { "name": "fls", "package": "sleuthkit",
