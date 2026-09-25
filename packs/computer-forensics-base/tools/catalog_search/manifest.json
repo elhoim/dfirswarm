@@ -26,6 +26,16 @@
       "type": "string",
       "description": "Regex of lines to drop",
       "required": false
+    },
+    "catalog": {
+      "type": "string",
+      "description": "The catalogue directory under catalog/ when there is more than one (default: the only one)",
+      "required": false
+    },
+    "partition": {
+      "type": "string",
+      "description": "The filesystem's directory in the catalogue, p<first sector> (e.g. p2048), when there is more than one (default: the only one)",
+      "required": false
     }
   },
   "runtime": "python3",
@@ -34,6 +44,6 @@
   "example": "{\"pattern\": \"SysInternal\", \"which\": \"filelist\"}",
   "by": "sd1d100",
   "at": "2026-09-18T14:14:47.839Z",
-  "version": 1,
-  "sha256": "cd6a14e013e6ee825cd628d9e6a5d5f54c8d9571d15319b441708f1e66ab201d"
+  "version": 6,
+  "sha256": "dbabb78560221a43adc73d8ce7fb6da3e89cdddecdb71d03b822126467f93638"
 }

@@ -8,6 +8,7 @@
  * every compaction, and its own trace with the
  * ALL / MESSAGES / TOOLS / THINKING / CONTEXT / FAILURES / SESSION ENDS tabs.
  */
+import { seatState, type SeatState } from "@/lib/seat-state";
 import { useCallback, useMemo, useState } from "react";
 import { ArrowLeft, Lock, Users } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -21,6 +22,7 @@ import { compactionHistory, contextSeries, defaultThresholds, isContextEvent, ty
 import { isFailureEvent } from "@/lib/event-taxonomy";
 import { isNoise, toolLabel, toolTone, useAgentNames } from "@/lib/hooks";
 import { useResource } from "@/lib/live";
+import { reachedDone } from "@/lib/overview-status";
 import { thinkingText } from "@/lib/thinking";
 import type { AgentBudget, AgentRow, SwarmEvent, SwarmView } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -149,15 +151,22 @@ function chosenDoing(view: SwarmView, id: string): string {
   return (view.names ?? []).find((n) => n.id === id)?.doing ?? "";
 }
 
-function lastActivity(agent: AgentRow, traces: SwarmEvent[], prepared = false): string {
+function lastActivity(agent: AgentRow, traces: SwarmEvent[], prepared = false, hub: SeatState | null = null): string {
   if (prepared && agent.marker === "stalled") return "waiting for kickoff";
   if (agent.marker === "done") return agent.marker_info?.reason ? `done · ${agent.marker_info.reason}` : "done · session end";
   if (agent.marker === "dead") return `reaped · ${agent.marker_info?.reason ?? "stall"}${agent.marker_info?.idle_seconds ? ` after ${agent.marker_info.idle_seconds}s idle` : ""}`;
   const last = [...traces].reverse().find((e) => e.agent === agent.id);
-  if (!last) return agent.marker === "stalled" ? "stalled · no trace yet" : "working";
+  // A VM seat the hub hears from is in the state the hub gives; the host's
+  // quiet is a note, not the state.
+  const lead = hub ? `${hub.label}, by the hub${hub.host_note ? ` (${hub.host_note})` : ""}` : null;
+  if (!last) return lead ?? (agent.marker === "stalled" ? "stalled · no trace yet" : "working");
   const what = last.tool === "post" ? "posting" : last.tool === "inbox" ? "reading inbox" : last.tool === "claim_file" ? `claiming ${String(last.args.path ?? "")}` : last.tool === "write" || last.tool === "edit" ? `writing ${String(last.args.path ?? "")}` : toolLabel(last.tool);
+  if (lead) return `${lead} · last ${what}`;
   return `${agent.marker === "stalled" ? "stalled · last " : ""}${what}`;
 }
+
+/** The mark for a seat whose state the hub gives. */
+const HUB_MARK: Record<SeatState["tone"], AgentRow["marker"]> = { done: "done", dead: "dead", quiet: "stalled", working: "active", idle: "active" };
 
 /** From the run's start to its end: when this agent was alive, with a brick tick per failed call and a moss one per compaction. */
 function ActivitySpan({ agent, view, colour }: { agent: AgentRow; view: SwarmView; colour: string }) {
@@ -263,7 +272,9 @@ function StatsLine({ agent }: { agent: AgentRow }) {
 
 function AgentLine({ agent, view, colour, onOpen }: { agent: AgentRow; view: SwarmView; colour: string; onOpen: () => void }) {
   const prepared = view.summary.phase === "prepared";
-  const marker = prepared && agent.marker === "stalled" ? "active" : agent.marker;
+  const seat = seatState(agent, view.vms?.find((v) => v.agent === agent.id));
+  const hub = seat.by === "hub" ? seat : null;
+  const marker = hub ? HUB_MARK[hub.tone] : prepared && agent.marker === "stalled" ? "active" : agent.marker;
   const threads = Object.keys(agent.thread_posts).length;
   return (
     <button type="button" onClick={onOpen} className={cn("card flex w-full flex-col gap-2 rounded-[10px] p-3 text-left transition-colors hover:bg-paper-2/70", agent.dead && "bg-paper-2/70")}>
@@ -274,7 +285,7 @@ function AgentLine({ agent, view, colour, onOpen }: { agent: AgentRow; view: Swa
         </span>
         <code className="text-[11px] text-ink-3">{agent.id}</code>
         {agent.role !== "worker" ? <Badge variant="slate">{agent.role}</Badge> : null}
-        <span className="truncate text-[12px] text-ink-2">{lastActivity(agent, view.traces, prepared)}</span>
+        <span className="truncate text-[12px] text-ink-2">{lastActivity(agent, view.traces, prepared, hub)}</span>
         <span className="ml-auto font-mono text-[11.5px] tabular text-ink-3">
           {threads} thread{threads === 1 ? "" : "s"} / {agent.posts} message{agent.posts === 1 ? "" : "s"} / {agent.calls} call{agent.calls === 1 ? "" : "s"}
         </span>
@@ -697,7 +708,7 @@ export function AgentsPanel({
   // five rows of `session end`, `done` and `inputs check` with no heading,
   // sitting above the agents and belonging to nothing a reader had asked
   // about. A live run gets them; a finished one gets its agents.
-  const finished = view.summary.phase === "done";
+  const finished = reachedDone(view.summary.phase);
   const recent = useMemo(
     () => (finished ? [] : view.traces.filter((e) => !isNoise(e) || e.tool === "thinking").slice(-5).reverse()),
     [view.traces, finished],

@@ -14,7 +14,7 @@
 #     plus herdr.dev, cdn.playwright.dev, playwright.download.prss.microsoft.com
 #
 # Phases:
-#   provision  Node >= 22.6, apt tools, Herdr, Pi, Playwright Chromium + deps
+#   provision  Node >= 22.19, apt tools, Herdr, Pi, Playwright Chromium + deps
 #   project    herdr integration install pi (per user), npm ci, npm run ui:build
 #   (both run by default; `provision` / `project` as $1 selects one)
 set -uo pipefail
@@ -32,7 +32,7 @@ SUDO=""
 if [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then SUDO="sudo -E"; fi
 
 node_ok() {
-  node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=6)?0:1)' 2>/dev/null
+  node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=19)?0:1)' 2>/dev/null
 }
 
 install_node() {
@@ -54,7 +54,7 @@ phase_provision() {
   if command -v node >/dev/null 2>&1 && node_ok; then
     log "node $(node --version) ok"
   else
-    log "node >= 22.6 missing; installing from nodejs.org"
+    log "node >= 22.19 missing; installing from nodejs.org"
     install_node || warn "node install failed"
   fi
 

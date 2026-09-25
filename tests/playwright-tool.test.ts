@@ -149,7 +149,8 @@ test("registerPlaywrightTool: registers `playwright`, logs ok/error events in th
     const events = (await readFile(join(root, EVENTS_REL), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.ok(events.length >= 1);
     for (const event of events) {
-      assert.deepEqual(Object.keys(event).sort(), ["agent", "args", "result", "tool", "ts"]);
+      // sid and seq: the sending process and its count (custody reads them).
+      assert.deepEqual(Object.keys(event).sort(), ["agent", "args", "result", "seq", "sid", "tool", "ts"]);
       assert.equal(event.tool, "playwright");
       assert.equal(event.agent, "agent01");
     }

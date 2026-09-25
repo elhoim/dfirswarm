@@ -6,7 +6,505 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed: agents run in microVMs by default (breaking)
+
+- **`--isolation microvm` is the default.** A run with no `--isolation` and
+  no `SWARM_ISOLATION` puts every agent in its own microVM, and so does
+  `netcheck`. The old behaviour is `--isolation host` (or
+  `SWARM_ISOLATION=host`): every agent a Pi process on this machine, held by
+  the host guards. Host mode is kept and supported; the kickoff, `help`
+  and the console call it unisolated wherever it is chosen.
+- A host that cannot boot the VMs (an Intel Mac, Linux without KVM or glibc,
+  no msb, an image that is not there and cannot be pulled, VMs that do not
+  fit) is refused before anything is written, with what it lacks, how to fix
+  it (the base image's build commands among them) and `--isolation host` as
+  the unisolated way on. It never falls back to a host run on its own.
+- A host guard's flag (`--no-write-guard`, `--no-seal-herdr`,
+  `--inputs-enforce`, `--key-from-env`, `--probe-violation`) with no
+  `--isolation` is refused with the hint to add `--isolation host`.
+- The console's New swarm form has the microVM switch on by default and
+  always passes `--isolation` explicitly; its API takes `isolation: "host"`
+  for a host run.
+- A registry record with no isolation (every run from before this change)
+  is a host run, and `list`, `status`, the console and the report show it as
+  one.
+- The kickoff prints an `Isolation:` line. The quick start builds the base
+  image before the first run; the keyless proofs it shows are host runs, as
+  they were proven.
+
+### Changed for host runs
+
+What the microVM work changed for host runs as well, so a host operator is
+not surprised:
+
+- Every trace line carries its process's id and count (`sid`, `seq`) and the
+  collector's `recv_ts`; the idle watchdog and the console order by the
+  latter. The watchdogs spill to `traces/system-spill.jsonl`, not `work/`.
+- A kickoff that stops after registering puts away what it started and
+  records the run as `failed`. The registry is written under a lock. The
+  host is asked not to sleep for the run (`caffeinate`, `systemd-inhibit`;
+  neither holds against a closed laptop lid; one the system refuses, such as
+  systemd-inhibit for a user with no login session, is said as a WARN, not
+  claimed). A sandbox a running run uses is refused.
+- `stop` takes custody (see Added; `--no-custody` skips it,
+  `--custody-timeout SEC` bounds it, 14400 by default) and says where it was
+  if interrupted. Custody re-reads every evidence file, so a stop on a large
+  case takes as long as hashing the evidence once more. `reap <id>` touches
+  only that run.
+- The console binds `127.0.0.1` by default. It bound `0.0.0.0`, so anyone on
+  the LAN could read the board and the trace without a token; `--host
+  0.0.0.0` opens it to the LAN on purpose.
+- The finish line `done` runs is read from the registry only. It looked for
+  the registry beside the sandbox and fell back to the agent-writable
+  `SWARM.md` in silence; panes now get `SWARM_RUNS_DIR`, and a finish line
+  that is met but was read from anywhere else cannot certify a run
+  (abandoning still ends it).
+- The trace token and the console's token are masked in every trace line. A
+  shell's `env` in a tool output had put both into the trace.
+- Pack and library tools are registered at session start with forging off,
+  and named in `--tools`. They loaded only with `--allow-tool-forging`,
+  although the contract listed them as ready. A `--tools-from` tool of the
+  same name no longer replaces a pack's tool: the pack's copy is kept, and
+  different bytes are said.
+- Pack secrets are implemented (`docs/packs.md` §4): a pack tool gets its
+  pack's secrets in its own child's environment, and the trace row and the
+  output carry `[secret NAME]`. On the host that needs `--allow-pack-secrets`,
+  since a pane can read what its extension can; a pack that requires a
+  secret is refused without it. The secrets live in
+  `$DFIRSWARM_HOME/secrets/<pack>.env` (`~/.dfirswarm` by default), not inside
+  the pack; a reinstall moves an old one, and a pack that declares secrets
+  and still has a `secrets.env` in its directory stops the kickoff in either
+  mode. Shipped packs were resealed with corrected install lines
+  (`pff-tools`, `libfwsi-python`, plaso from PyPI), pinned downloads, and
+  after the review with names checked against Debian 12 and PyPI (zeek,
+  suricata and radare2 are manual, `libfwsi-python` is a Python library, the
+  encrypted-containers pack installs pybde, pyvhdi, pyluksde, pytsk3 and
+  dfvfs, and `vss_stores` and `mem_fs` mount under the seat's own
+  directory).
+- `--allow-install` sets `PIP_BREAK_SYSTEM_PACKAGES=1` in every pane:
+  `pip install --user` was refused on a PEP 668 system. The installs still
+  go under `work/.toolchain/`, and the Python install paths now reach a
+  forged or pack tool's child, which could not import what an agent had
+  installed. The inventory also reads a venv an agent made under
+  `work/.toolchain/`.
+- The inputs integrity walk no longer stops at 5,000 files and 12 levels.
+  Every manifest file past it read as missing, so a KAPE-style triage set
+  failed the check on every sweep.
+- `start --no-start` no longer leaves the collector, the gate and the broker
+  running.
+- The report says when refused connections are not observable, where it said
+  "nothing was refused" with no log behind it, and names each model's
+  provider hosts, recorded at kickoff.
+- `tools --save` keeps only sealed tools, with `provenance.json` and without a
+  `pack` field; `pack.sh adopt` takes a saved tool into a pack. The toolbox's
+  use column read " head -1" for every tool; fixed.
+- The netguard allowlist takes a provider's host from `models.json` for a
+  built-in provider too, and from Pi's model list for the providers Pi ships;
+  `--provider-host` adds one. `--local-only` refuses a cloud `--compact-model`.
+- The console: a `failed` state, a packs field, `*.name` allowlist entries.
+- `microsandbox` is an optional dependency (`npm ci --omit=optional` for a
+  host-only install).
+- The idle watchdog is a host run's stop from outside the panes: past a cap
+  or the wall clock it claims the stop clock (and says so on the board) when
+  no pane has, and past the grace period writes the sentinel as the harness.
+- Custody opens nothing through a link and waits on no FIFO; every evidence
+  file is re-hashed in full whatever its size, against one deadline checked
+  inside the read, and an unfinished re-hash says so rather than
+  "unchanged"; the trace is read a line at a time; the ledger is held to the
+  trace (an entry deleted from its end, or written without the tool, is
+  named); `artifacts.json` indexes `work/`; the verdict's hash is anchored
+  outside the run. `stop` bounds it from outside too.
+- The ledger's chain covers each entry's provenance (source, evidence,
+  confidence); an unchained line after chained ones breaks it, and so does
+  a version 1 entry after version 2 ones.
+- Evidence FIFOs, sockets and device nodes are recorded by their kind and
+  checked by kind; the evidence manifest and its anchor are read-only on
+  disk, and the manifest's hash is in the run's record.
+- A peer's own directory is refused for claims and writes; the report reads
+  the swarm's own report only inside the run and never through a link; the
+  package copies only regular files (a link left in place of a spill had
+  put a host file into the handover).
+- A trace line a pane could write nowhere is said on its next line and
+  counted by custody; the host spill is watched as append-only.
+- Pack secrets are refused on a suffix; two packs' tools of one name keep the
+  first. `tools --save` copies a tool only as its sealed version, with what
+  it ran with. A forged tool may name the programs it calls (`requires`).
+- `list` has a `HELD` column; run ids are six hex digits; a pane helper that
+  opened a workspace no longer loses it (they ran in a subshell); a kickoff
+  that fails before its record is written clears what it started.
+- Warnings: a run kept in a synced folder, a Mac on battery, a suffix in the
+  allowlist, writable evidence directories, a host run whose panes cannot be
+  kept from a live VM run's hub, a run started as root. An IPv6 allow entry
+  is written `[v6]:port`, and netguard reads it. GitHub Copilot's token host
+  is allowed.
+- **Event times carry their zone.** A ledger `ts` without `Z` or an offset
+  is refused, and so is a form like `01/02/2024`; a date alone is that day
+  at 00:00Z. A zone-less time was read in the host's own zone, so one entry
+  was 12:44Z on the droplet and 09:44Z on a Mac in Istanbul. An offset is
+  converted to UTC, and the text as written is kept as `ts_raw` and shown
+  beside the UTC time in `ledger.md`. The agents and the run's own
+  processes (the hub, the collector, the watchdogs) run with `TZ=UTC`,
+  which an `--env TZ=` overrides; the registry records the host's clock as
+  the run found it (`host_clock`: zone, offset, and whether it was synced,
+  where the host can say).
+- **The run records what produced it** (`provenance`: the harness commit and
+  whether the checkout had local changes, Node, Pi, msb and the image digest
+  for a VM run, the OS). The report shows it with the host clock, says that
+  an AI agent swarm prepared it and that its findings are the agents'
+  conclusions until an examiner reviews them, names each exhibit's model,
+  and lists the tools the agents forged as not independently validated.
+- **The operator is on the record.** Every `start`, `stop`, `reap`, `say`,
+  `package`, `report`, `tools`, `review`, `export`, `hold`, `release`,
+  `purge` and `verify` is a line in `runs/operator-audit.jsonl`
+  beside the registry: when, the OS user and host, through what (the command
+  line, the console, the hub's own clear-up), the arguments with `--env`
+  values and the goal left out, and the sha256 of the line before. A
+  `start`, `stop`, `reap`, `say`, `review`, `export`, `hold` or `release` of
+  a live run is on its trace too, as `operator_action`; from a shell that is not the kickoff's it is marked
+  unverified there, and custody, the report and the summary count such
+  lines as the operator's actions, not as lines no pane accounts for.
+- **Node 22.19 is the floor.** `engines` said 22.6, but the pinned Pi and
+  its HTTP client declare 22.19.0, and on an older 22 the harness extension
+  does not load. A CI job runs the typecheck and the node suites on exactly
+  22.19.0.
+- **A host run started as root is refused** unless `--allow-root`: root is
+  not bound by the read-only modes a host run relies on. A microVM run
+  started as root is warned about.
+- **The caps are taken before each model call too.** A seat past its grace
+  period, or whose swarm the sentinel ended, is stopped before the call goes
+  out, with the same outcome as the stop it replaces and a
+  `budget_precall_stop` line. On the host this is the brake; in a VM it is
+  advisory, and the hub's cap stop and wall clock are the host's brakes.
+- **A long command run a second time is pointed at its first run's output.**
+  A shell command that took a minute or more (`SWARM_REPEAT_HINT_MIN_MS`),
+  ended without error and was kept whole under `tool-output/` is
+  remembered; the same agent running it again gets one paragraph naming the
+  kept file to grep or read instead (`repeat_hint`, once per command). The
+  harness names no tool.
+- **The kickoff records whether the runs' volume is encrypted at rest**
+  (`disk_encryption`: FileVault and APFS on macOS, a crypt device under the
+  mount on Linux), prints it as a `Disk:` line and warns when it is off.
+- **The evidence copy keeps the evidence's links as links.** `cp -RL`
+  followed every link: an extracted root's `etc/hosts` became the examiner's
+  own file, vouched for by the manifest. Only a link at the top of
+  `--inputs` (the operator's own) is followed; links that lead out of the
+  evidence are listed at kickoff. The copy is checked against its source by
+  name, kind and size, and then by content: each copied file's source is read
+  again and its SHA-256 compared with the manifest's (`source_checked`); a
+  mismatch (names merged on a case-insensitive volume, a short read, other
+  bytes) stops the kickoff. `--no-verify-copy` keeps the first check only. A name that is
+  not UTF-8 is kept exactly (`path_b64`, `link_b64`) and compared as bytes
+  by the agents' check and by custody, so a Windows-1254 name on ext4 is no
+  longer both missing and added.
+- **The manifest carries SHA-1 and MD5 beside SHA-256**, from the same read,
+  to match an imager's acquisition hashes. Custody and the agents' `inputs`
+  check compare them when the manifest has them; SHA-256 decides, and a
+  file whose SHA-256 matches while another digest does not is listed as
+  `digest_mismatch`. The report and the summary list them beside SHA-256
+  and say how the copy was checked against its source.
+- **A synced folder is refused, not only warned about.** A copy of the
+  evidence, or the VMs' kept disks, is not put in a folder a sync client
+  uploads (Dropbox, iCloud Drive, OneDrive, …) unless
+  `--allow-synced-folder`, or a `.dfirswarm-allow-synced` file of the
+  operator's at the top of that synced folder (or between it and the
+  destination); the registry says which allowed it. The check runs before
+  anything is written, where it used to run after the evidence was copied
+  there. A run directory there is still warned about for what the agents
+  derive.
+- **Custody writes nothing through a link.** The previous verdict is set
+  aside as `custody.previous-<stamp>.json` before anything is checked, and
+  every file custody writes goes to a fresh file renamed into place: a host
+  pane's link had made custody copy a credential file into the run and
+  overwrite an operator's file with its own JSON. A custody ended by its
+  deadline, a signal or an error writes what it found and names what it
+  never reached (`not_reached`), so after a failed custody `custody.json` is
+  that partial verdict or absent, never the older one. A directory of more
+  than 125,000 evidence files, or a manifest over 256 MiB, no longer breaks
+  it; a file the host cannot read is `unreadable`, not missing; the ledger
+  is held to the trace whatever the trace carries, and a seat's spill fills
+  only its own gaps. The report, the summary and the console say whether
+  `custody.json` matches the verdict anchored outside the run, and the
+  report says "NOT FULLY RE-HASHED", not "NO", when custody ran out of time.
+  Custody's verdicts and `artifacts.json` are harness files no seat claims
+  or writes. The artifact index is ordered by code unit, so its anchored
+  hash no longer depends on the locale.
+- `start --custody-timeout SEC` bounds the custody taken at the run's end,
+  by the hub or by `stop`; it is recorded (`custody_timeout_sec`), and
+  `stop --custody-timeout` overrides it for that stop.
+- **The console shows an agent's HTML without scripts**, the report too: a
+  script could navigate the frame with the file's contents to any host,
+  past every allowlist of the run. **Open with scripts** runs one file's
+  scripts in that view after a warning, through a one-time grant (it needs
+  the console token, is bound to the file's sha256, is spent on first use
+  and lapses after a minute), and each opening is on the run's trace as
+  `artifact_scripts`.
+- A trace that is there and cannot be read is said so, rather than shown as
+  no trace: by the report, the summary, the dossier and the console's trace
+  and swarm views. The report checks the chain a line at a time, so a trace
+  past 512 MB is read and checked.
+- `budget.json`, history's index and a ledger merge are written whole (a
+  temporary file and a rename); a usage report refuses a `budget.json` it
+  cannot read rather than rebuilding the run's caps from defaults. A peer's
+  ledger merge (an author added) is no longer charged to a seat's shell
+  call as RECORD REWRITTEN. A lost trace line is counted once.
+- `stop` ends a daemon only when its pid is that daemon for that run: after
+  a reboot, or with a pid file a pane rewrote, it could have named any of
+  the operator's processes. A `stop` of a run nothing of which is alive
+  says the host restarted or the run crashed, with the trace's last time.
+  Two host kickoffs at once no longer share one netguard proxy. The
+  console's host kickoff stays a host run whatever `SWARM_ISOLATION` says.
+- New trace names (`operator_action`, `artifact_scripts`,
+  `collector_restarted`) are reserved: no forged tool takes them.
+
 ### Added
+
+- **The examiner's review of the ledger** (`swarm.sh review <id>`): accept,
+  reject (with a note) or amend (with a note) each entry, and sign off the
+  ledger once the run has ended, over its current head. Kept beside the
+  registry where no agent reaches (`runs/reviews/<id>.jsonl`, 0600), each
+  line chained to the one before, appended and never rewritten. The report
+  shows each exhibit's standing (accepted, rejected, amended, not reviewed,
+  or review unreadable) on its head and in its rows, the counts, whether the
+  review's chain verifies, whether the sign-off covers the ledger's current
+  head, and "reviewed and signed by" on the cover; until then it says every
+  finding is the agents' conclusion. The console's Ledger tab takes the
+  review through the same command.
+- **Ledger corrections and searches that found nothing.** `record(…,
+  supersedes=<seq>)` records a correction; nothing is deleted, the corrected
+  entry is marked "superseded by #N" where it stands and the correction
+  "corrects #M", and the link is in the chained core, so it cannot be moved.
+  An entry is corrected once. `record(kind=absence)` is a search that found
+  nothing, with what was looked for, what was searched, and the query, the
+  tool and its version and the scope, all required; `ledger.md`, the report
+  and the summary list absences apart, valid only for that scope, never as
+  findings. Both are optional.
+- **Coverage and grounding** (`scripts/coverage.ts`): which evidence files no
+  command on the trace named, and, for each ledger entry, whether a call
+  before it named its source. Generic path matching over every call's
+  arguments; it knows no tool, and "named" is not "examined", which every
+  place it appears says. The report (a "Named by" column, the list of
+  unnamed evidence, "not grounded in the trace" on an exhibit), the summary
+  and the console carry it, and the idle watchdog posts the unnamed inputs at
+  a quarter, a half and three quarters of the wall clock, assigning them to
+  nobody.
+- **A package that can be signed and checked.** `swarm.sh package <id>
+  --sign [--key FILE]` signs the manifest with an ssh key (`ssh-keygen -Y
+  sign`, namespace `dfirswarm-package`) and writes the signature, the public
+  key and who signed beside it; `swarm.sh verify <dir|zip>
+  [--allowed-signers FILE]` re-hashes every file (none missing, changed or
+  added) and checks the signature (exit 0, 3, 4 or 1). The package also
+  carries `court-set.json` (every file handed over, with its size and sha256
+  or why it is absent) and this run's lines of the operator's record, and
+  the report lists the files handed over with it.
+- **Export**: `swarm.sh export <id> --format csv|timesketch` writes the
+  ledger as CSV (every field, the entry hash, superseded by, the review,
+  grounding) or as a CSV Timesketch imports. A text cell a spreadsheet would
+  run as a formula gets a leading apostrophe.
+- **Retention**: `swarm.sh hold <id> [--reason]` keeps a run from purge,
+  from a new run in its sandbox and from the VM reaper; `release <id>` lifts
+  it. `swarm.sh purge <id> --yes` deletes a finished run's sandbox, its kept
+  disks and its hub directory, refuses a held or running run, keeps the run
+  in the registry as `purged`, and writes a destruction record (what, with
+  sizes, and the hashes of the inputs manifest, the custody verdict and the
+  package manifest) on the operator's record.
+- **`--notify CMD`**: a command of the operator's hears a run's
+  `finished`, `finish_failed`, `stop_incomplete`, `budget_cap`,
+  `wall_clock`, `evidence_changed`, `chain_broken`, `agent_dead`,
+  `collector_unreachable` and `hub_down`, as one JSON line on stdin,
+  detached, within 30 seconds. It is kept outside the run
+  (`runs/notify/<id>.cmd`, 0600); the registry records only that there is
+  one, and the command line is redacted on the operator's record.
+- **`--ledger-from RUN`**: an earlier run's ledger as hypotheses to
+  re-derive or refute, in `prior/ledger.md` (read-only; with the earlier
+  run's review, only the entries the examiner accepted or amended; without,
+  every entry marked unreviewed), never in the new ledger. The worker prompt
+  says to cite the evidence, not the prior entry.
+- **The model gateway (`--model-gateway`, VM runs, off by default).** Every
+  model call a VM makes to a provider the gateway fronts goes through one
+  process on the host. It holds the provider's key in memory, reads each
+  call's usage off the provider's own answer (OpenAI chat and responses and
+  Anthropic messages, JSON and streaming, priced as Pi prices them), refuses
+  a stopped seat's call at once and a call past a cap or the wall clock
+  three minutes after it was crossed, and is not a general proxy. The VM
+  holds a seat token, never that provider's key. The hub folds the measured
+  spend into `budget.json` (`metered_by: "model-gateway"`), so every cap
+  reads it; `traces/model-gateway.jsonl` has one chained line per call and
+  no bodies, custody checks its chain and anchors its hash, and the report
+  says which spend was metered on the host. Subscriptions, Bedrock, Vertex,
+  Google, Mistral, OpenRouter, Fireworks, Azure and local models keep msb's
+  placeholder path, and the kickoff names each. docs/model-gateway.md.
+- **VM runs: each seat's socket serves only its own VM.** The kickoff makes a
+  token per seat, gives it to that VM (`SWARM_SEAT_TOKEN`) and to the hub,
+  and every connection must open with it or is refused and named on the
+  trace (`seat_auth`). The tokens rest in the hub directory, the VM's
+  environment and msb's database while the VM lives; never in the trace,
+  the registry, a VM record or a package. The hub also cuts `replies.jsonl`
+  back to the answers it keeps, bounds each seat's file history
+  (`SWARM_HISTORY_QUOTA_MB`, 1 GiB; past it a revision is recorded by its
+  hash and the seat is told once), puts a seat that said done away when it
+  was due across a hub restart, and calls `--notify`. The keeper, the stop
+  the hub runs, the idle watchdog and the gateway run from the run's frozen
+  copy of the harness.
+- **`swarm.sh start --check`** runs every refusal and preflight of a start,
+  the same code, and writes nothing (no sandbox, registry entry, hook,
+  daemon, VM, pull or operator-record line): exit 0 when the start would go
+  ahead, 2 when it would be refused. **`swarm.sh image-for [--pack ID]...
+  [--tools-from DIR] [--playwright]`** prints, as JSON, the image a kickoff
+  with those packs would boot, its digest when known, and why. The console's
+  New swarm form uses both before Start.
+- **`scripts/score.ts`**: an accuracy check the operator runs by hand
+  against an answers file of their own; it prints found, not found or
+  contradicted per question and writes nothing anywhere.
+- **The console shows a microVM run as itself.** An isolation chip on every
+  run; a VM panel with each probe check and what it means, what the hub
+  refused, hub and collector restarts, a keeper that gave up, the kept disks
+  (path, size, hash, or why not, with the remedy) and msb's database; one
+  timeline of the run's life across its VMs; a seat's state from one source,
+  the hub while it hears from the VM, watched where it lives; `system via
+  <seat>` posts shown as that seat's; a Custody tab; coverage, corrections
+  and absences in the Ledger tab; a record dialog to hold and release,
+  export, package (signed or not, downloaded as a zip), verify and, behind
+  the run id typed out, purge. The kickoff form checks the host can boot the
+  VMs, shows the image the packs choose, and takes the new options; it never
+  shows an `--env` value or the notify command. Stop takes custody's options.
+- **CI**: actions are pinned by commit; a job runs the node suites on the
+  Node floor; `image-boot.yml` builds every image profile once a week, boots
+  each as an agent's VM (the probe, its verdict and Pi end to end), checks
+  it against its packs with the kickoff's `imageFit`, and does the same for
+  base on arm64 where the runner has KVM. Nothing is pushed.
+- **The worker prompt** asks agents to read a tool's usage for the options
+  that change what its output means before relying on it, to keep a large
+  artefact's full walk under `work/<id>/` and grep it, to correct a ledger
+  entry with `supersedes`, and to record a meaningful empty search as an
+  `absence` with its scope. It names no tool.
+- **Agents in microVMs (`--isolation microvm`).** Every agent runs Pi inside
+  its own microVM (microsandbox 0.7.2; macOS on Apple silicon, Linux with
+  KVM), created at kickoff through the SDK (`scripts/vm.ts`) and put away by
+  `stop` with each disk kept as a snapshot msb can verify. ADR 0009.
+  - The run is a read-only floor in each VM; the agent writes only its own
+    `work/<id>/`, `work/extracted/<id>/` and `work/quarantine/<id>/` (both
+    no-exec), `tool-output/<id>/` and Pi session. A shared file is written
+    by the hub through `publish_file`, claimed and recorded. `--inputs` is
+    used in place and mounted read-only; `--inputs-copy` gives the run its
+    own read-only copy.
+  - The board has one writer, the hub (`scripts/vm-hub.ts`); who is asking
+    is the vsock port. The harness's own functions are not on the agents'
+    channel, a sentinel is written only when the finish line passes on the
+    host (a reason starting `ABANDONED: ` is let through unchecked, and a
+    seat leaving on its own cap writes none), spend reports may only grow,
+    and paths are resolved on the host without following a planted link.
+    The hub keeps the wall clock itself; the caps apply to the spend each
+    seat reports. A keeper (`scripts/hub-supervise.sh`) restarts a dead
+    hub from its saved state until the run's stop.
+  - No credential enters a VM: placeholders, swapped in by msb on the way
+    to the credential's own hosts only, stopped and logged anywhere else.
+    Subscriptions need `--allow-oauth-in-vm`. `--provider-host P=HOST` names
+    a provider's host when the harness cannot (Pi's own model list names the
+    hosts of the providers it ships); a provider with none is refused.
+    msb keeps a live VM's secret values in its own database on the host: the
+    kickoff makes `~/.microsandbox` its user's alone, and a finish that
+    removed VMs rewrites that database without their leftover bytes
+    (`sqlite3` on the host; `stop` warns when it could not).
+  - The image is the smallest profile that serves the packs, pulled before
+    the run starts, booted by one digest; a program a pack requires that the
+    image lacks stops the kickoff. Images carry a NOTICE, pinned downloads
+    checked by sha256, and refuse to bake programs marked not redistributable
+    without `--allow-nonredistributable` (`images/README.md`).
+  - `netcheck --isolation microvm` asks msb what a run's VMs would reach.
+    The report and the console's VM panel say what each VM was given, found
+    and left: probe, image fit, clock, live state, installs outside the image.
+  - The console starts a VM run (`isolation`, `image`, `vm_cpus`,
+    `vm_memory`, `vm_disk`, `vm_snapshot`, `allow_oauth_in_vm`,
+    `provider_hosts`); its default "copy" of the evidence is sent as
+    `--inputs-copy` in a VM run, and a run whose hub could not put its VMs
+    away shows as `finish_failed`.
+- **Host custody at stop** (`scripts/custody.ts` → `custody.json`, printed by
+  `stop` and carried by the report), both modes: the evidence re-hashed in
+  full against a manifest anchored outside the run, every session file
+  sealed, every kept output checked against the trace, the trace and the
+  ledger chains, spilled and lost trace lines by their numbers, and every
+  kept VM disk checked against its record and by msb.
+- **VM integration tests** (`npm run test:vm`) on real VMs, one of them end to
+  end with a scripted model, and a CI job that runs them on a KVM runner with
+  the base and disk images built from this repository.
+- **What the final review of the microVM work changed** (ADR 0009):
+  - The hub never opens a file under a seat's own directory: a revision, a
+    publish and the disk side of a diff come from the VM with the call (32,
+    32 and 16 MiB), a seat restores its own file in its own VM, and a
+    forged tool runs only as its sealed bytes. The host's own reads are
+    checked again after the open (on Linux against `/proc/self/fd`).
+  - The hub bounds each seat (connections, bytes buffered, calls, a rate for
+    posts and records), answers a resent call once, keeps its lines
+    numbered, refuses to run twice, resumes a finish it died in, clears up
+    the run with `stop --after-hub`, and is kept by `scripts/hub-supervise.sh`;
+    it runs from a frozen copy of the harness. A seat that is done has its
+    VM put away a grace period later.
+  - `stop` exits 3 and records `stop_incomplete` while a VM of the run is up,
+    and waits for a hub that is finishing. Below 4 GiB free a VM is kept
+    rather than snapshotted and removed; `--vm-snapshot-dir` puts the disks
+    elsewhere.
+  - `work/extracted/` and `work/quarantine/` are no-exec in every VM, a
+    peer's corner as well as one's own. Each VM's probe checks that, that
+    the evidence is no-exec, and that it can reach its model's hosts.
+  - Pack secrets need `--allow-pack-secrets` in a VM too (the placeholder is
+    in the whole VM's environment); `--local-only` withholds them; a local
+    model's real key is refused; credential headers are swapped at every
+    depth; a LAN model's name is resolved on the host; llama.cpp gets its
+    environment; Pi's model catalog goes into the guest.
+  - The catalog VM leaves only files and directories, is put away on `^C`
+    and reaped if left; a VM that does not come up times out; `msb` other
+    than 0.7.2 is warned about; a lock pinned by tag is refused.
+- **What the second review of the microVM work changed** (ADR 0009):
+  - The hubs live in `~/.dfirswarm/hubs`, one directory per user, 0700, and
+    refused when it is a link or someone else's (`SWARM_HUBS_DIR` moves it).
+    Under the caller's `$TMPDIR` a stop from ssh, cron or sudo found no hub
+    and left it and its tokens running, one `/tmp/dfirswarm-hubs` served
+    every Linux user, and on macOS the six-hex run ids put an agent's socket
+    past the 104 bytes a socket path may have, so every VM kickoff from a
+    Mac terminal ended with "the VM hub did not come up". The kickoff now
+    refuses a socket path over 103 bytes before it starts anything, and a
+    reboot no longer takes the hub's state with it. The console, `watch.sh`
+    and `await-done.sh` look for hubs there too, and a hub started with a
+    longer socket path stops with an error naming the path and its length,
+    where it died on a bare EINVAL.
+  - What one seat holds in the hub counts lines waiting their turn and calls
+    queued or running against its 160 MB; past it the seat's connections
+    pause. A call that carries no file is refused past 8 MB. The hub, not
+    the seat, picks how often `wait` polls. `done` is paced (three, then one
+    a minute), and dones that arrive together share one run of the finish
+    line. A `state` report is one of four states with at most 200
+    characters of detail and no terminal control characters, and Herdr gets
+    at most one report per seat every quarter second. A collector socket
+    cut on a timeout fails only its own lines.
+  - The hub stops a seat over its own or its model's cap for real: the
+    seat's `done` marker is written and the stop is on the trace with its
+    outcome. It had been refused in silence and retried every two minutes.
+  - A harness post sent from inside a VM reaches peers as
+    `from: "system via <seat>"`: the harness code in a VM is the guest's,
+    so its word is that seat's, not the harness's.
+  - A seat cannot publish onto the harness's own files in `work/` (the
+    trace spill custody reads, the install area, the temp directory).
+  - In a VM a seat's shell watch walks only its own directories, so a
+    peer's large extraction no longer leaves the seat's own files unwatched.
+  - The keeper also brings back a VM run's trace collector
+    (`collector_restarted`) and counts crashes in a row; a keeper that gave
+    up is not second-guessed by the idle watchdog.
+  - A finish touches its lock as it works, and only a dead or silent
+    owner's lock is broken; two finishes had worked the same VMs after half
+    an hour. A second finish keeps the disk an earlier one kept until it has
+    a new one, and the free-space floor counts the VM's own disk size.
+  - msb's database scrub says "scrubbed" only when the checkpoint completed
+    and no free page is left. The outcome is on each removed VM's record
+    and on the hub's `vm_finish` line; `stop` warns about any removed VM
+    whose bytes were not cleared, whoever removed it, and custody, the
+    report, the summary and the console name it.
+  - The hub takes custody at a run's finish within the operator's bound
+    (`--custody-timeout`, `SWARM_CUSTODY_TIMEOUT`), where it was a fixed
+    four hours.
+  - Lower-case proxy variables in `--env` no longer reach a VM, and a failed
+    `msb list` is said as that at kickoff and at reap.
+  - Every shell suite runs with its own msb home and hubs directory: the
+    stop suite had run the scrub on the developer's own msb database.
 
 - **Agents compact their own context.** On by default at kickoff
   (`--no-self-compact` turns it off): each agent watches its context against
@@ -109,6 +607,95 @@ All notable changes to this project. The format follows
   e2e speaks both, and the suite passes on both.
 
 ### Fixed
+
+- **A seat's large file froze its link to the hub, and the seat was
+  stopped mid-case** (real CTF runs on macOS and Linux). Recording a file
+  a seat had just extracted sent its bytes as one RPC line; msb's vsock
+  path from guest to host stops moving on a single write of about 256 KiB
+  (measured: ~215 KB crosses, ~262 KB stalls; the network path is not
+  affected), and every later call on that connection, the liveness check
+  among them, waited behind it until `hub_lost_stop`. No line on a seat's
+  link is now larger than one part (32 KiB of payload, 44,716 bytes on the
+  wire): larger requests, answers, trace lines and prompts travel in parts,
+  each acknowledged, checked by size and sha256. A call that times out or
+  a write queue that has not moved in 20 s replaces the link, and RETRIED
+  calls resend with their request id. A VM test publishes 8 MiB while the
+  budget answers within seconds.
+- `catalog_search` (computer-forensics-base 1.2.4) failed every call on an
+  unbound name; a static scan of every pack and library tool now fails on
+  one.
+- An installed pack older than the one the checkout ships ran without a
+  word; the kickoff says so and names the update command. Pack warnings no
+  longer name tools, skills or programs a dependency carries.
+- An unpacked `git archive` knows its commit (`scripts/HARNESS_COMMIT`),
+  and no longer claims "local changes" it cannot see. `start --check`
+  names the isolation, the image and what the model gateway would front.
+  `stop` no longer prints Herdr's JSON.
+- **No agent could publish a shared file.** `publish_file` was registered
+  but missing from the tool allowlist swarm.sh gives Pi, and in a VM it is
+  the only way `work/report.md` is written. In the second CTF round the
+  agents on both hosts wrote their reports under their own directories and
+  abandoned the run with the finish line unmet. A test now fails on any
+  registered tool the allowlist does not name.
+- **A request with a `%` near its start was stopped as a leaked
+  credential.** msb 0.7.2 reads the placeholder in the Authorization header
+  as "in the body" when the first TLS record also holds a `%` or a `\u`
+  escape of a Content-Length body, and closes the connection; Pi reports
+  "Connection error." One agent's every compaction summary failed on it
+  (its conversation began with a URL-encoded access log). In a VM the
+  extension now sends a body to a secret's host chunked, which reaches msb
+  apart from the headers; a VM test shows the plain request stopped and the
+  chunked one answered. A failed compaction now names Pi's own fallback
+  failure as well as ours.
+- **Custody, the report and the console called every placeholder msb
+  stopped "aimed at a host not its own".** The Linux CTF's 52 stops were
+  all to api.openai.com, the host the credential is bound to (the
+  percent-sign false positive above). The VM record now names the variable
+  each secret is held under, custody marks a stop on the credential's own
+  host and says it as a failed request, not a leak, with where msb found
+  the placeholder, and the report and the Custody tab show the two apart.
+- **On a macOS host, grep called every large mounted file binary.** msb
+  passes a guest's `SEEK_DATA`/`SEEK_HOLE` to macOS unchanged, and macOS
+  numbers the two the other way round, so each file under a mount looked
+  like one hole and GNU grep printed "binary file matches" instead of the
+  lines of a catalogue file list. The base image preloads `seekfix`, which
+  swaps them back only on a FUSE file whose server answers the swapped
+  pair; a VM test reads a 264 KB mounted list with grep.
+- `start --pack A --pack B` kept only B: a second `--pack` replaced the
+  first without a word (the Linux web-server CTF asked for
+  windows-forensics and memory-forensics and ran without the former's
+  twenty tools). Repeated, the flags now add up, as `image-for`'s did.
+- The first prompt told each agent to read `threads/main` (a directory)
+  and `done/SWARM_DONE` (absent until the end): two failed calls per agent
+  at every start. It now sends them to `inbox`, which answers both.
+- Pack tools the round found failing on every call: `catalog_search` looked
+  for the filesystem in `p0`, where the catalogue names it by its first
+  sector (`p2048`); `esedb_query` passed `esedbexport` a `-q` the Debian
+  build lacks; `sqlite_query` passed `sqlite3` a `-uri` it never had, and
+  lost the CSV header on a newer shell. `icat_extract` and `chunk_needles`
+  now find an image without an extension by its catalogue (a raw `dd` named
+  after the host) and default the offset to the one filesystem the
+  catalogue lists (`icat` at sector 0 of Case4.E01 said "Cannot determine
+  file system type"). `esedb_query` named each table by libesedb's
+  export file (`Container_1.6`), so `table=Container_1` was "no such
+  table"; it now lists and reads tables by their own names. `shellbags`
+  never decoded a shell item (regipy gives a REG_BINARY as a hex string,
+  the tool took only bytes), read a root folder's GUID two bytes early,
+  and, like `regkv` and `regkeys`, looked keys up without a leading
+  backslash, which regipy answers by dropping the path's first part: a
+  UsrClass.dat's BagMRU was "not there", and an NTUSER.DAT answered
+  Software\...\BagMRU under the Local Settings name. `catalog_search`
+  takes a catalogue by the name the index lists (`catalog=Case4.E01`, or
+  `Case4.E01/p2048`), which was a traceback; `sqlite_query` without `sql`
+  and `ioc_scan` on a missing path answer in JSON instead of raising.
+  With a disk and a memory image catalogued, the disk's catalogue (the one
+  with `partitions.txt`) is the default instead of "several catalogues".
+  `icat_extract` refuses an inode the catalogue lists only as a directory
+  (an agent extracted Edge's History directory as `EdgeHistory.db`: 272
+  bytes of `$INDEX_ROOT`, then "file is not a database") and answers a
+  file's catalogued path with it.
+  `lnk_parse` on a missing path says so instead of raising.
+  computer-forensics-base 1.2.10, windows-forensics 1.2.6.
 
 - **The venv was 642 claims and seven violations, and the panes' temp
   files were more.** With `--allow-install` one agent's pip created

@@ -9,6 +9,11 @@
 # seat's model beside its spend, and every refusal (a cap that is not a
 # number, a cap above the swarm's own) has to be a refusal.
 set -uo pipefail
+# This suite tests host runs, and a run is in microVMs unless it says
+# otherwise: it names host. An image, a lock file or another pack home
+# exported in the shell would point its kickoffs somewhere else.
+unset SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
+export SWARM_ISOLATION=host
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/model-caps.XXXXXX")"

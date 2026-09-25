@@ -6,9 +6,17 @@
 # that eats the checks after it, a check that never returns, and a goal whose
 # checks cannot be read at all.
 set -euo pipefail
+# This suite tests host runs, and a run is in microVMs unless it says
+# otherwise: it names host. An image, a lock file or another pack home
+# exported in the shell would point its kickoffs somewhere else.
+unset SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
+export SWARM_ISOLATION=host
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNS="$(mktemp -d "${TMPDIR:-/tmp}/await-done.XXXXXX")"
+# The VM hubs' directory is the suite's own (a kickoff makes it for its pane
+# guard), never the operator's ~/.dfirswarm/hubs.
+export SWARM_HUBS_DIR="$RUNS/dfirswarm-hubs"
 trap 'rm -rf "$RUNS"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -179,5 +187,40 @@ out="$(run_await "$SB")" || fail "the hello goal should pass when satisfied: $ou
 printf 'not json at all' > "$SB/team.json"
 if out="$(run_await "$SB")"; then fail "a broken team.json must fail the id check, not skip it: $out"; fi
 pass "hello checks fail closed"
+
+echo "# a microVM run's unfinished agents are nudged through its own hub, never Herdr"
+SB="$(seed svmnudge "Say hello; there is nothing to check.")"
+# Started now: an agent idle since the seed's 2026-01-01 would be reaped as
+# dead before anyone thought to nudge it.
+printf '{"cap_usd":1,"spent_usd":0,"wall_clock_minutes":15,"started_at":"%s","agents":{}}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$SB/budget.json"
+HUBS_TMP="$(mktemp -d /tmp/adt.XXXXXX)"
+HUBS="$(cd "$HUBS_TMP" && pwd -P)/dfirswarm-hubs"
+mkdir -p "$HUBS/dfs-svmnudge.1"
+chmod 700 "$HUBS"
+(cd "$SB" && pwd -P) > "$HUBS/dfs-svmnudge.1/sandbox"
+printf '%s\n' "$HUBS/dfs-svmnudge.1" > "$SB/hub.dir"
+node -e '
+const net = require("node:net"); const fs = require("node:fs");
+net.createServer((s) => { let b = ""; s.on("data", (d) => { b += d; if (b.includes("\n")) { fs.appendFileSync(process.argv[2], b); s.end("{\"ok\":true,\"delivered\":true}\n"); } }); }).listen(process.argv[1]);
+' "$HUBS/dfs-svmnudge.1/admin.sock" "$HUBS_TMP/hub-ops.txt" >/dev/null 2>&1 &
+HUB_FAKE=$!
+trap 'kill "$HUB_FAKE" 2>/dev/null || true; rm -rf "$RUNS" "$HUBS_TMP"' EXIT
+for _ in $(seq 50); do [[ -S "$HUBS/dfs-svmnudge.1/admin.sock" ]] && break; sleep 0.05; done
+printf '#!/usr/bin/env bash\necho "$@" >> "%s"\n' "$HUBS_TMP/herdr-used.txt" > "$HUBS_TMP/herdr"
+chmod +x "$HUBS_TMP/herdr"
+# From a shell whose TMPDIR is anything at all: the hubs' directory is the
+# user's own, not the shell's temp directory.
+TMPDIR="$HUBS_TMP/elsewhere" SWARM_HUBS_DIR="$HUBS" HERDR_BIN="$HUBS_TMP/herdr" SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/await-done.sh" --sandbox "$SB" --nudge --timeout 1 --interval 1 >/dev/null 2>&1 || true
+grep -q '"op":"prompt".*"agent":"svmnudge00".*"kind":"swarm_done"' "$HUBS_TMP/hub-ops.txt" 2>/dev/null || fail "the VM agent was not nudged through its hub: $(cat "$HUBS_TMP/hub-ops.txt" 2>/dev/null)"
+[[ ! -s "$HUBS_TMP/herdr-used.txt" ]] || fail "Herdr was asked about a VM agent: $(cat "$HUBS_TMP/herdr-used.txt")"
+# hub.dir naming a hub made for another sandbox is not that run's hub.
+echo /somewhere/else > "$HUBS/dfs-svmnudge.1/sandbox"
+: > "$HUBS_TMP/hub-ops.txt"
+SWARM_HUBS_DIR="$HUBS" HERDR_BIN="$HUBS_TMP/herdr" SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/await-done.sh" --sandbox "$SB" --nudge --timeout 1 --interval 1 >/dev/null 2>&1 || true
+[[ ! -s "$HUBS_TMP/hub-ops.txt" ]] || fail "another sandbox's hub was used"
+kill "$HUB_FAKE" 2>/dev/null || true
+wait "$HUB_FAKE" 2>/dev/null || true
+rm -rf "$HUBS_TMP"
+pass "a VM run's agents are nudged through its own hub, and another run's hub is never used"
 
 echo "await-done.test.sh: all checks passed"

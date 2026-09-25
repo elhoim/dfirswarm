@@ -108,7 +108,7 @@ export function ReportPanel({ view }: { view: SwarmView }) {
         ) : null}
         {/*
           The report is agent-derived text rendered by the harness, so it goes
-          behind the same sandbox as any other artifact: scripts on, no
+          behind the same sandbox as any other artifact: no scripts, no
           same-origin, no network. The preview is `srcdoc`, not `src`: the
           report is one self-contained file, so handing the markup straight to
           the frame is one fewer request and nothing between the console and
@@ -126,7 +126,8 @@ export function ReportPanel({ view }: { view: SwarmView }) {
               <iframe
                 srcDoc={dossier.data.html}
                 title={`Report for ${id}`}
-                sandbox="allow-scripts"
+                // The report carries no script; it needs none to render.
+                sandbox=""
                 referrerPolicy="no-referrer"
                 className="h-full w-full border-0 bg-white"
               />

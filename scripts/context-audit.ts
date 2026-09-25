@@ -112,7 +112,10 @@ export function readRows(source: string): { rows: Row[]; bad: number; file: stri
         bad += 1;
         continue;
       }
-      rows.push({ ts: String(parsed.ts ?? ""), agent: parsed.agent, tool: parsed.tool, args: (parsed.args ?? {}) as Record<string, unknown>, result: (parsed.result ?? {}) as Record<string, unknown> });
+      // The host's clock where the collector stamped one (recv_ts): a guest's
+      // own `ts` is its word, and a VM's clock can run apart from the host's.
+      const when = typeof (parsed as { recv_ts?: unknown }).recv_ts === "string" && (parsed as { recv_ts: string }).recv_ts ? (parsed as { recv_ts: string }).recv_ts : String(parsed.ts ?? "");
+      rows.push({ ts: when, agent: parsed.agent, tool: parsed.tool, args: (parsed.args ?? {}) as Record<string, unknown>, result: (parsed.result ?? {}) as Record<string, unknown> });
     } catch {
       bad += 1;
     }

@@ -12,6 +12,11 @@
 # every refusal (unknown toolbox, catalog without inputs,
 # a cap that is not a number) has to be a refusal.
 set -uo pipefail
+# This suite tests host runs, and a run is in microVMs unless it says
+# otherwise: it names host. An image, a lock file or another pack home
+# exported in the shell would point its kickoffs somewhere else.
+unset SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
+export SWARM_ISOLATION=host
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/dfir-flags.XXXXXX")"
 trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
@@ -237,7 +242,17 @@ out="$(swarm tools "$id2" --save "$TMP/lib2")"
 printf '%s\n' "$out" | grep -q '^Saved 2 tool' || fail "tools --save says nothing useful: $out"
 out="$(swarm tools "$id2")"
 printf '%s\n' "$out" | grep -q 'evtx_filter v2 by s2cb903' || fail "tools with no --save should list them: $out"
-pass "tools lists a run's tools and --save copies them into a library"
+jq -e '.saved_from_run and .sha256 and (.forged_by == "s2cb903")' "$TMP/lib2/evtx_filter/provenance.json" >/dev/null \
+  || fail "a saved tool carries no provenance: $(cat "$TMP/lib2/evtx_filter/provenance.json" 2>/dev/null)"
+jq -e 'has("pack") | not' "$TMP/lib2/evtx_filter/manifest.json" >/dev/null || fail "a saved tool kept a pack field, which hands it a pack's secrets"
+# A script changed after it was forged stays behind, and so does a link.
+printf 'print("changed")\n' >> "$sb2/tools/fls_like/run.py"
+ln -s /etc/hosts "$sb2/tools/evtx_filter/hosts-link"
+out="$(swarm tools "$id2" --save "$TMP/lib3" 2>&1)"
+printf '%s\n' "$out" | grep -q 'Left out fls_like: its script does not match' || fail "a tampered tool was saved: $out"
+[[ ! -e "$TMP/lib3/fls_like" ]] || fail "the tampered tool reached the library"
+[[ ! -e "$TMP/lib3/evtx_filter/hosts-link" ]] || fail "a link in a tool's directory reached the library"
+pass "tools lists a run's tools; --save copies sealed ones as regular files, with provenance and without a pack field"
 
 # --- nobody is assigned anything --------------------------------------------------
 # The kickoff prepares a sandbox and a goal. It does not hand out work: agents
@@ -282,6 +297,15 @@ sb="$(sandbox_of "$out")"
 [[ "$(reg idle '.idle_nudge_sec')" == "120" ]] || fail "registry should record idle_nudge_sec=120"
 printf '%s\n' "$out" | grep -q '^Idle nudge:' || fail "no Idle nudge line in the kickoff output: $out"
 [[ ! -e "$sb/idle-nudge.pid" ]] || fail "--no-start must not start the watchdog"
+# Nor leave any daemon of the run alive: the collector, the gate, the broker
+# and the proxy a --no-start kickoff may have started for its checks.
+for f in collector.pid gate.pid nudge.pid netguard.pid idle-nudge.pid inhibit.pid hub.pid; do
+  p="$(cat "$sb/$f" 2>/dev/null || true)"
+  [[ -z "$p" ]] || ! kill -0 "$p" 2>/dev/null || fail "--no-start left $f's process ($p) running"
+done
+if pgrep -f -- "$sb" >/dev/null 2>&1; then
+  fail "--no-start left a process naming the sandbox: $(pgrep -fl -- "$sb")"
+fi
 out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$HELLO" --idle-nudge-sec soon)"; rc=$?
 [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep -q 'BLOCKER: --idle-nudge-sec' || fail "a non-numeric --idle-nudge-sec should be refused: $out"
 pass "--idle-nudge-sec is validated, recorded and announced; --no-start starts no watchdog"
@@ -297,7 +321,10 @@ touch -t 202601010000 "$sb/.pi-sessions/$a0/s.jsonl" "$sb/.pi-sessions/$a1/s.jso
 HERDR_LOG="$TMP/herdr.log" HERDR_BIN="$TMP/herdr-bin/herdr" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$sb" --idle-sec 60 --once >/dev/null 2>&1 || fail "idle-nudge.sh --once failed"
 grep -q "^agent prompt $a0 " "$TMP/herdr.log" || fail "the idle agent was not prompted: $(cat "$TMP/herdr.log" 2>/dev/null)"
 grep -q "^agent prompt $a1 " "$TMP/herdr.log" && fail "an agent with a done marker must be left alone"
-jq -e "select(.tool == \"idle_nudge\" and .args.agent == \"$a0\" and .result.ok == true)" "$sb/traces/events.jsonl" >/dev/null || fail "no idle_nudge event on the trace"
+# With no collector the line goes to the trace, or to the harness's spill
+# when the trace is already chained (scripts/lib/trace.sh); either is kept.
+{ cat "$sb/traces/events.jsonl" "$sb/traces/system-spill.jsonl" 2>/dev/null || true; } \
+  | jq -e "select(.tool == \"idle_nudge\" and .args.agent == \"$a0\" and .result.ok == true)" >/dev/null || fail "no idle_nudge event on the trace or the harness's spill"
 pass "the watchdog prompts an idle agent through herdr, skips a finished one, and logs idle_nudge"
 
 # --- toolbox -------------------------------------------------------------------------

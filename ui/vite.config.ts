@@ -9,7 +9,7 @@ const apiPort = process.env.SWARM_UI_PORT || "43173";
 
 // Dev: `npm run ui:dev` serves the React app and proxies /api to the node
 // server (`npm run ui:server`). Prod: `vite build` → ui/dist, served by that
-// same node server, so one process is the whole LAN app.
+// same node server, so one process is the whole local app.
 export default defineConfig({
   root: here,
   plugins: [react(), tailwindcss()],

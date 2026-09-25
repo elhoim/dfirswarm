@@ -7,6 +7,11 @@
 # distinct model has to reach the netguard allowlist, and the team has to be able
 # to see who is running what.
 set -uo pipefail
+# This suite tests host runs, and a run is in microVMs unless it says
+# otherwise: it names host. An image, a lock file or another pack home
+# exported in the shell would point its kickoffs somewhere else.
+unset SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
+export SWARM_ISOLATION=host
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/model-teams.XXXXXX")"
@@ -63,11 +68,16 @@ pass "a uniform contract does not repeat the model after every id"
 # Read the helper out of the script: starting for real would need Herdr.
 HELPERS="$TMP/helpers.sh"
 {
+  # Pi's store is read where the kickoff reads it (an --env value wins).
+  sed -n '/^pane_home() {/,/^}/p' "$ROOT/scripts/swarm.sh"
+  sed -n '/^pi_agent_dir() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^valid_model_ref() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^parse_model_teams() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^distinct_models() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^credential_models() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^provider_hosts_for_model() {/,/^}/p' "$ROOT/scripts/swarm.sh"
+  sed -n '/^provider_known_hosts() {/,/^}/p' "$ROOT/scripts/swarm.sh"
+  sed -n '/^models_json_base_url() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^provider_base_url() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^host_of_url() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^allow_entry_of_url() {/,/^}/p' "$ROOT/scripts/swarm.sh"
@@ -81,6 +91,7 @@ hosts_for() { # hosts_for <spec>
   local script="$TMP/hosts.sh"
   {
     echo 'set -u'
+    echo "ROOT=\"$ROOT\""
     echo "source \"$HELPERS\""
     echo "parse_model_teams \"\$1\""
     echo 'provider_hosts_for_models'
@@ -253,7 +264,7 @@ pass "per-model lines, the summary model and the inbox page are validated, recor
 # --- a local server: its host, its twin, and what it means for the caps -----
 # Nothing on the way resolves names: not Pi's own proxy matcher, not the
 # proxy's allowlist. So a loopback host reaches the allowlist with its other
-# spelling, an IPv6 literal keeps its colons, and Pi's llama.cpp provider,
+# spelling, an IPv6 literal is written [v6]:port, and Pi's llama.cpp provider,
 # which has no models.json entry, brings the host of LLAMA_BASE_URL.
 mkdir -p "$TMP/pi-local"
 cat > "$TMP/pi-local/models.json" <<'JSON'
@@ -275,7 +286,7 @@ got="$(PI_CODING_AGENT_DIR="$TMP/pi-local" hosts_for "ollama/qwen3:8b=2")"
 got="$(PI_CODING_AGENT_DIR="$TMP/pi-local" hosts_for "lmstudio/m=1")"
 [[ "$got" == "localhost:1234,127.0.0.1:1234" ]] || fail "localhost brings its address: $got"
 got="$(PI_CODING_AGENT_DIR="$TMP/pi-local" hosts_for "six/m=1")"
-[[ "$got" == "::1:8000" ]] || fail "an IPv6 literal keeps its colons and loses its brackets: $got"
+[[ "$got" == "[::1]:8000" ]] || fail "an IPv6 literal with a port is bracketed, the form netguard and a VM both read: $got"
 got="$(LLAMA_BASE_URL="" PI_CODING_AGENT_DIR="$TMP/pi-local" hosts_for "llama.cpp/qwen=1")"
 [[ "$got" == "127.0.0.1:8080,localhost:8080" ]] || fail "llama.cpp defaults to Pi's own base URL: $got"
 got="$(LLAMA_BASE_URL="http://gpu-box.local:8080" PI_CODING_AGENT_DIR="$TMP/pi-local" hosts_for "llama.cpp/qwen=1")"
@@ -360,6 +371,9 @@ printf '%s\n' "$out" | grep -q -- '--local-only, but deepseek/deepseek-v4-pro' |
 out="$(PI_CODING_AGENT_DIR="$TMP/pi-local" start --model ollama/qwen3:8b --n 1 --cap-tokens 1000 --local-only --no-netguard --no-start \
   --goal-file "$ROOT/prompts/goals/hello.md" --label lonlyopen)"
 printf '%s\n' "$out" | grep -q 'drop --no-netguard' || fail "--local-only without netguard should be refused: $out"
-pass "--local-only is recorded as a network mode, refused with a cloud model, and needs netguard"
+out="$(PI_CODING_AGENT_DIR="$TMP/pi-local" start --model ollama/qwen3:8b --n 1 --cap-tokens 1000 --local-only --compact-model deepseek/deepseek-v4-pro --no-start \
+  --goal-file "$ROOT/prompts/goals/hello.md" --label local-cloud-summary)" && fail "--local-only with a cloud summary model should be refused: $out"
+printf '%s\n' "$out" | grep -q -- '--compact-model deepseek/deepseek-v4-pro is not served from this machine' || fail "the refusal should name the summary model: $out"
+pass "--local-only is recorded as a network mode, refused with a cloud model or a cloud summary model, and needs netguard"
 
 echo "all model-team cases passed"

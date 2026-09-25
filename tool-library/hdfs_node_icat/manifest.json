@@ -25,6 +25,9 @@
   },
   "runtime": "python3",
   "entry": "run.py",
+  "requires": [
+    "icat"
+  ],
   "timeout_seconds": 60,
   "example": "{\"node\":\"slave2\",\"inode\":2229804,\"output\":\"work/s9a5f03/s2_cluster.service\"}",
   "by": "s9a5f03",

@@ -89,7 +89,29 @@ snapshot() {
     echo "(no traces/events.jsonl)"
   fi
   echo
-  if command -v herdr >/dev/null 2>&1; then
+  # A microVM run's agents are not Herdr agents (their panes run `msb exec`):
+  # the hub keeps their state, which each agent's extension reports.
+  local hub="" parent
+  if [[ -f "$SANDBOX/hub.dir" ]]; then
+    hub="$(cat "$SANDBOX/hub.dir" 2>/dev/null || true)"
+    # The hubs' parent as swarm.sh keeps it (hubs_parent): one per user,
+    # whatever this shell's TMPDIR, and only a directory of the user's own.
+    parent="${SWARM_HUBS_DIR:-${DFIRSWARM_HOME:-$HOME/.dfirswarm}/hubs}"
+    if [[ -d "$parent" && ! -L "$parent" && -O "$parent" ]]; then
+      parent="$(cd "$parent" 2>/dev/null && pwd -P || true)"
+    else
+      parent=""
+    fi
+    [[ -n "$parent" && "$hub" == "$parent"/dfs-* && "$hub" != *..* && "$(cat "$hub/sandbox" 2>/dev/null)" == "$(cd "$SANDBOX" && pwd -P)" ]] || hub=""
+  fi
+  if [[ -n "$hub" && -f "$hub/status.json" ]]; then
+    echo "VM AGENTS"
+    jq -r '
+      (.agents // {}) as $a
+      | "agents=\($a | length)  " + ([$a | to_entries | group_by(.value.state)[] | "\(.[0].value.state)=\(length)"] | join(" ")),
+        ($a | to_entries[] | "\(.key)\t\(.value.state // "?")\t\(if .value.connected then "linked" else "not linked" end)\tsince \(.value.since // "?")")
+    ' "$hub/status.json" 2>/dev/null || cat "$hub/status.json"
+  elif command -v herdr >/dev/null 2>&1; then
     echo "HERDR"
     herdr agent list 2>/dev/null | jq -r '
       (.result.agents // []) as $a

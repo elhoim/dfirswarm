@@ -2,7 +2,7 @@
   "name": "dfirswarm",
   "version": "0.3.0",
   "private": true,
-  "description": "DFIR Swarm: an agent swarm for digital forensics and incident response. Local, observable peer agents on Herdr + Pi: a sanctioned file board, enforced write leases, read-only evidence guarded at the kernel, a shared ledger, a harness-owned stop sentinel, spend, token and wall-clock caps, an egress allowlist and a live LAN console.",
+  "description": "DFIR Swarm: an agent swarm for digital forensics and incident response. Local, observable peer agents on Herdr + Pi: a sanctioned file board, enforced write leases, read-only evidence guarded at the kernel, a shared ledger, a harness-owned stop sentinel, spend, token and wall-clock caps, an egress allowlist and a live local web console.",
   "license": "AGPL-3.0-or-later",
   "author": "Halil Öztürkci",
   "repository": {
@@ -29,7 +29,7 @@
   ],
   "type": "module",
   "scripts": {
-    "test": "node --experimental-strip-types --test tests/dry-run.test.ts tests/plan.test.ts tests/summary.test.ts tests/ui-server.test.ts tests/extension-imports.test.ts tests/pi-load.test.ts tests/tool-library.test.ts tests/tool-library-parsers.test.ts tests/live-version.test.ts tests/overview-status.test.ts tests/artifacts.test.ts tests/report.test.ts tests/dossier.test.ts tests/thinking.test.ts tests/board.test.ts tests/trace-record.test.ts tests/pager.test.ts tests/sandbox-phase0.test.ts tests/sandbox-phase1.test.ts tests/nudge-broker.test.ts tests/model-caps.test.ts tests/turn-error.test.ts tests/finish-line.test.ts tests/append-only-watch.test.ts tests/library.test.ts tests/self-compact.test.ts tests/self-compact-e2e.test.ts tests/context-series.test.ts tests/context-audit.test.ts",
+    "test": "node --experimental-strip-types --test tests/dry-run.test.ts tests/plan.test.ts tests/summary.test.ts tests/ui-server.test.ts tests/extension-imports.test.ts tests/pi-load.test.ts tests/tool-library.test.ts tests/tool-library-parsers.test.ts tests/live-version.test.ts tests/overview-status.test.ts tests/artifacts.test.ts tests/report.test.ts tests/dossier.test.ts tests/thinking.test.ts tests/board.test.ts tests/trace-record.test.ts tests/pager.test.ts tests/sandbox-phase0.test.ts tests/sandbox-phase1.test.ts tests/nudge-broker.test.ts tests/model-caps.test.ts tests/turn-error.test.ts tests/finish-line.test.ts tests/append-only-watch.test.ts tests/library.test.ts tests/self-compact.test.ts tests/self-compact-e2e.test.ts tests/context-series.test.ts tests/context-audit.test.ts tests/vm-hub.test.ts tests/vm-manager.test.ts tests/custody.test.ts tests/reserved-names.test.ts tests/playwright-tool.test.ts tests/phase0.test.ts tests/model-gateway.test.ts tests/vm-egress.test.ts tests/tool-allowlist.test.ts",
     "test:server": "node --experimental-strip-types --test tests/ui-server.test.ts",
     "dry-run": "bash scripts/dry-run.sh",
     "typecheck": "tsc -p tsconfig.json && tsc -p ui/tsconfig.json",
@@ -43,13 +43,17 @@
     "ui:preview": "vite preview --config ui/vite.config.ts",
     "ui:fixture": "node --experimental-strip-types scripts/seed-fixture.ts",
     "summary": "node --experimental-strip-types scripts/summary.ts",
-    "test:bash": "bash scripts/test-bash.sh"
+    "test:bash": "bash scripts/test-bash.sh",
+    "test:vm": "node --experimental-strip-types --test --test-concurrency=1 tests/vm-integration.test.ts"
   },
   "engines": {
-    "node": ">=22.6"
+    "node": ">=22.19"
   },
   "dependencies": {
     "typebox": "^1.3.34"
+  },
+  "optionalDependencies": {
+    "microsandbox": "0.7.2"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.87.0",

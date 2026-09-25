@@ -56,3 +56,38 @@ printf '%s\n' "$out" | grep -q "aescrypt" || fail "the BLOCKER should name aescr
 jq -e '.missing[] | select(.name == "aescrypt")' "$TMP/sb/toolbox.json" >/dev/null \
   || fail "toolbox.json should list aescrypt as missing when the import fails"
 pass "toolbox crypto reports aescrypt missing when pyAesCrypt cannot be imported"
+
+# In a microVM run's image: every program the packs name is checked too, the
+# hints are the VM's, and --required holds only for what a pack requires.
+cat > "$TMP/image.json" <<'JSON'
+{"image": "dfirswarm-disk:dev-arm64", "programs": [
+  {"name": "dfs-needed-tool", "why": "a pack requires it", "pack": "p1", "required": true},
+  {"name": "dfs-nice-tool", "why": "a pack may use it", "pack": "p1", "required": false}
+]}
+JSON
+rm -f "$TMP/sb/toolbox.json"
+set +e
+out="$(bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" crypto --required --image "$TMP/image.json" 2>&1)"; rc=$?
+set -e
+[[ "$rc" -eq 3 ]] || fail "a program a pack requires, missing from the image, with --required should exit 3, got $rc: $out"
+printf '%s\n' "$out" | grep -q 'BLOCKER: --toolbox-required and these tools are missing: dfs-needed-tool\.' \
+  || fail "only the pack's required program should block, not the crypto presets the image lacks: $out"
+jq -e '.context == "image" and .image == "dfirswarm-disk:dev-arm64"' "$TMP/sb/toolbox.json" >/dev/null || fail "toolbox.json does not say it describes the image"
+jq -e '.missing[] | select(.name == "dfs-nice-tool") | .use == "a pack may use it (p1)"' "$TMP/sb/toolbox.json" >/dev/null || fail "an optional pack program is not listed with its pack"
+if jq -r '.missing[].install' "$TMP/sb/toolbox.json" | grep -q -E 'brew|--user'; then fail "a VM's install hint says brew or pip --user"; fi
+cat > "$TMP/image.json" <<'JSON'
+{"image": "x", "programs": [{"name": "dfs-nice-tool", "why": "optional", "pack": "p1", "required": false}]}
+JSON
+bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" crypto --required --image "$TMP/image.json" >/dev/null 2>&1 \
+  || fail "in an image, a preset tool or an optional pack program the image lacks should not block"
+pass "in an image, pack programs are checked, the hints are the VM's, and --required holds only for what packs require"
+
+# Each tool's fields, whole: the version probe has a pipe of its own, and the
+# use column once read " head -1" for every tool.
+rm -f "$TMP/sb/toolbox.json"
+bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" dfir >/dev/null 2>&1 || true
+if jq -r '(.present + .missing)[].use' "$TMP/sb/toolbox.json" | grep -q 'head -1'; then fail "a tool's use is the tail of its version probe"; fi
+jq -e '(.present + .missing)[] | select(.name == "mmls") | .use == "partition table of a disk image (The Sleuth Kit)"' "$TMP/sb/toolbox.json" >/dev/null \
+  || fail "mmls's use is not what the table says: $(jq -c '(.present + .missing)[] | select(.name == "mmls")' "$TMP/sb/toolbox.json")"
+if jq -r '.missing[].install' "$TMP/sb/toolbox.json" | grep -q '|'; then fail "an install hint carries another field"; fi
+pass "each tool's use and install hint are its own, not the tail of the version probe"

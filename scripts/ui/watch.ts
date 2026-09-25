@@ -13,7 +13,7 @@
  * neither the clients nor the finish line's change stamp ever see them.
  */
 import { watch, type FSWatcher } from "node:fs";
-import { stat } from "node:fs/promises";
+import { lstat, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 
 export type ChangeKind =
@@ -33,6 +33,8 @@ export type ChangeKind =
   | "inputs"
   /** SWARM.md, the rendered contract. */
   | "contract"
+  /** A live VM run's hub wrote its status (the seats' states): outside the runs directory, watched on its own. */
+  | "hub"
   | "other"
   // Never published: nothing the console shows comes from these.
   /** Pi's own session files under .pi-sessions/ and .pi/. */
@@ -303,5 +305,104 @@ export class ChangeBus {
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.listeners.clear();
+  }
+}
+
+/** A live VM run's hub directory: the run it belongs to and where it is. */
+export type HubDir = { id: string; dir: string };
+
+/**
+ * Whether a directory may be watched: a real directory, not a link to one,
+ * owned by the user the console runs as. The hubs' parent is checked the
+ * same way before any hub directory under it is named.
+ */
+export async function watchableDir(dir: string): Promise<boolean> {
+  const st = await lstat(dir).catch(() => null);
+  if (!st || st.isSymbolicLink() || !st.isDirectory()) return false;
+  return typeof process.getuid !== "function" || st.uid === process.getuid();
+}
+
+/**
+ * The hubs of live VM runs sit outside the runs directory
+ * (`<DFIRSWARM_HOME>/hubs/dfs-<run>.*`), so the runs watcher never hears
+ * their status.json, and the seats' states used to reach the console only
+ * with the next write in the sandbox or the poll. One non-recursive watch
+ * per live hub directory touches its run with kind `hub` when the status
+ * moves. The set follows the registry: `refresh` watches the directories
+ * `list` names now and lets go of the rest; a directory that is not
+ * watchable (a link, another user's, gone) is left alone.
+ */
+export class HubWatch {
+  private readonly watchers = new Map<string, { id: string; watcher: FSWatcher }>();
+  private timer: NodeJS.Timeout | null = null;
+  private refreshing: Promise<void> | null = null;
+  private closed = false;
+
+  private readonly bus: ChangeBus;
+  private readonly list: () => Promise<HubDir[]>;
+  private readonly everyMs: number;
+
+  constructor(bus: ChangeBus, list: () => Promise<HubDir[]>, everyMs = 15_000) {
+    this.bus = bus;
+    this.list = list;
+    this.everyMs = everyMs;
+  }
+
+  /** The directories watched now, by run id; for a test. */
+  watched(): HubDir[] {
+    return [...this.watchers.entries()].map(([dir, w]) => ({ id: w.id, dir })).sort((a, b) => a.dir.localeCompare(b.dir));
+  }
+
+  start(): void {
+    if (this.closed || this.timer) return;
+    void this.refresh();
+    this.timer = setInterval(() => void this.refresh(), this.everyMs);
+    this.timer.unref();
+  }
+
+  refresh(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    // One reconcile at a time; a refresh asked for during one joins it.
+    this.refreshing ??= this.reconcile().finally(() => {
+      this.refreshing = null;
+    });
+    return this.refreshing;
+  }
+
+  private async reconcile(): Promise<void> {
+    const want = new Map<string, string>();
+    for (const h of await this.list().catch(() => [] as HubDir[])) {
+      if (await watchableDir(h.dir)) want.set(h.dir, h.id);
+    }
+    for (const [dir, w] of this.watchers) {
+      if (want.get(dir) !== w.id) {
+        w.watcher.close();
+        this.watchers.delete(dir);
+      }
+    }
+    for (const [dir, id] of want) {
+      if (this.closed || this.watchers.has(dir)) continue;
+      try {
+        const watcher = watch(dir, { persistent: false }, (_type, filename) => {
+          const name = typeof filename === "string" ? filename : filename ? Buffer.from(filename).toString("utf8") : "";
+          // The status and its atomic rename; a report with no name may be either.
+          if (!name || name === "status.json" || name.startsWith("status.json")) this.bus.touch(id, "hub");
+        });
+        watcher.on("error", () => {
+          watcher.close();
+          if (this.watchers.get(dir)?.watcher === watcher) this.watchers.delete(dir);
+        });
+        this.watchers.set(dir, { id, watcher });
+      } catch {
+        // gone between the check and the watch: the next refresh says so
+      }
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+    if (this.timer) clearInterval(this.timer);
+    for (const w of this.watchers.values()) w.watcher.close();
+    this.watchers.clear();
   }
 }

@@ -16,75 +16,8 @@ import type { SwarmView } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ErrorState, LoadingState } from "@/components/states";
-import { inputsGuardSummary } from "./inputs-panel";
+import { frameFacts } from "@/lib/run-facts";
 import { cn } from "@/lib/utils";
-
-type Fact = { label: string; value: string; title?: string; tone?: "warn" };
-
-/**
- * Everything the kickoff decided, in one row, in the order an operator would
- * ask about it: where the agents run, what they may reach, what they may do
- * to the evidence, and what stops them.
- */
-function frameFacts(view: SwarmView): Fact[] {
-  const r = (view.registry ?? {}) as Record<string, unknown>;
-  const layout = (view.layout ?? {}) as Record<string, unknown>;
-  const s = view.summary;
-  const out: Fact[] = [];
-  if (s.workspace_id) {
-    const tabs = typeof layout.tabs === "number" ? `${layout.tabs} tab${layout.tabs === 1 ? "" : "s"} · ` : "";
-    out.push({ label: "Panes", value: `${s.workspace_id} · ${tabs}${s.n} panes`, title: "The Herdr workspace this run's agents live in" });
-  }
-  if (view.inputs) {
-    out.push({
-      label: "Inputs",
-      value: `read-only · ${inputsGuardSummary(view.inputs).text}`,
-      title: "Agents read inputs/ and can never write it; this is the guard each pane actually got",
-    });
-  }
-  out.push({
-    label: "Network",
-    value:
-      r.net === "open" ? "open" : r.net === "local" ? "local endpoints only" : r.net === "hosts" ? `allowlist + ${String(r.allow_hosts ?? "")}` : "allowlist only",
-    tone: r.net === "open" ? "warn" : undefined,
-    title: "What the panes could reach through netguard",
-  });
-  if (r.toolbox && r.toolbox !== "off") out.push({ label: "Toolbox", value: String(r.toolbox), title: "The tool sets checked on this host before the run started" });
-  if (r.catalog === true) out.push({ label: "Catalog", value: "first pass done", title: "The standard first pass over the evidence ran before any agent" });
-  if (r.quarantine === true) out.push({ label: "Quarantine", value: "no-exec on extracts", title: "Nothing under work/extracted or work/quarantine can execute" });
-  out.push({ label: "Forging", value: r.tool_forging ? "on" : "off", title: "Whether agents could write tools with make_tool and share them" });
-  // Absent on runs older than the feature; those say nothing rather than "off".
-  const selfCompact = view.registry?.self_compact;
-  if (selfCompact && typeof selfCompact === "object") {
-    // A line the operator left unset next to one they set is a default the
-    // extension may have fitted to it per seat; say so rather than show it as set.
-    const set = selfCompact.set;
-    const fitted = set && (set.notice_at || set.warn_at || set.compact_at);
-    const shown = (spec: string | undefined, fallback: string, isSet: boolean | undefined) => `${spec || fallback}${fitted && !isSet ? " (default)" : ""}`;
-    out.push({
-      label: "Self compaction",
-      value: selfCompact.enabled
-        ? `on · notice ${shown(selfCompact.notice_at, "40%", set?.notice_at)} · warning ${shown(selfCompact.warn_at, "50%", set?.warn_at)} · compact ${shown(selfCompact.compact_at, "60%", set?.compact_at)}${selfCompact.model ? ` · summaries by ${selfCompact.model}` : ""}`
-        : "off",
-      title:
-        "Whether agents compacted their own context, the three lines against each model's ceiling (per-model entries after a comma), and the model the summaries went to. A line marked default is fitted per seat to the lines the operator set where it would be out of order; each agent's compact_config trace row has the numbers it ran at",
-    });
-  }
-  // Absent on runs older than the bound; those say nothing rather than a number they never had.
-  if (typeof view.registry?.inbox_page_chars === "number") {
-    out.push({
-      label: "Inbox page",
-      value: view.registry.inbox_page_chars > 0 ? `${view.registry.inbox_page_chars.toLocaleString()} chars of post text per delivery` : "unbounded",
-      title: "How much post text one inbox or wait delivery carried; whole posts only, the rest stayed unread for the next call",
-    });
-  }
-  if (r.allow_install === true) out.push({ label: "Install", value: "pypi into the sandbox", title: "Agents could pip-install into work/.toolchain; no root, no system packages" });
-  out.push({ label: "Hard kill", value: view.budget?.hard_kill ? "on" : "off", title: "Whether a cap steer shuts the session down or waits out the grace period" });
-  if (typeof r.cap_per_agent_usd === "number" && r.cap_per_agent_usd > 0) {
-    out.push({ label: "Per agent", value: `$${r.cap_per_agent_usd}`, title: "What one agent may spend before it is steered to finish and stopped" });
-  }
-  return out;
-}
 
 export function GoalPanel({ view, version }: { view: SwarmView; version: number }) {
   const navigate = useNavigate();
@@ -181,7 +114,9 @@ export function GoalPanel({ view, version }: { view: SwarmView; version: number 
                 key={fact.label}
                 title={fact.title}
                 className={cn(
-                  "rounded-full border px-2.5 py-1 text-[11.5px]",
+                  // A fact can carry a long machine string (an image reference, a
+                  // commit): it breaks inside rather than pushing a phone sideways.
+                  "max-w-full rounded-full border px-2.5 py-1 text-[11.5px] [overflow-wrap:anywhere]",
                   fact.tone === "warn"
                     ? "border-saffron/40 bg-saffron-soft text-saffron-ink"
                     : "border-line bg-paper-2 text-ink-2",

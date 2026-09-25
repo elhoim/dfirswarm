@@ -14,6 +14,17 @@ netguard, and that the thing runs at N=30. The numbers are kept because they
 are real; a run against the current harness is the one thing on the roadmap
 that no fixture can stand in for.
 
+## Agents in microVMs (2026-09-24)
+
+The live runs under `--isolation microvm` so far are three CTF cases:
+`s640c` and `s0609` on the Mac, `s25d3` on the Linux droplet. All three
+authenticated with an OpenAI API key. The Anthropic and Azure credential
+placeholders (an Anthropic key or subscription token; an Azure OpenAI key
+with its `env` block, an Azure AI Foundry key in `models.json`) are built and
+bound by unit tests (`tests/vm-manager.test.ts`), but no live microVM run has
+exercised them yet, and no test has shown msb swapping one of them in on a
+real request.
+
 ## A local model, braked by tokens (2026-09-19)
 
 | Run | N | Model | Spent | Calls | What it proved |

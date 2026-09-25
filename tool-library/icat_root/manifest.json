@@ -21,6 +21,9 @@
   },
   "runtime": "python3",
   "entry": "run.py",
+  "requires": [
+    "icat"
+  ],
   "timeout_seconds": 30,
   "example": "{\"inode\": 1835260, \"output\": \"work/extracted/passwd\"}",
   "by": "s9d8306",

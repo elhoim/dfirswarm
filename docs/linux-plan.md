@@ -458,7 +458,7 @@ inside the sandbox, through the allowlist.
 | `iproute2` (`ip`) | bringing `lo` up inside the network namespace | no — `netguard.sh:114` has a python3 fallback |
 | `python3` | Landlock helper, contract rendering, catalog | already required |
 | `zsh` | the pane hook | already required, now checked |
-| `jq`, Node ≥ 22.6, Herdr, Pi | already required | — |
+| `jq`, Node ≥ 22.19, Herdr, Pi | already required | — |
 
 No forensic tooling. The `--toolbox` check reports what the host lacks; it is
 not a requirement and must not become one.

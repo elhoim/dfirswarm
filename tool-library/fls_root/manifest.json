@@ -21,6 +21,9 @@
   },
   "runtime": "python3",
   "entry": "run.py",
+  "requires": [
+    "fls"
+  ],
   "timeout_seconds": 30,
   "example": "{\"inode\": 1831425, \"recursive\": false}",
   "by": "s9d8306",

@@ -10,10 +10,10 @@
  * not the names agents choose for themselves.
  */
 
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { execFile, spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, createReadStream, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
-import { connect } from "node:net";
+import { connect, type Socket } from "node:net";
 import {
   appendFile,
   chmod,
@@ -30,7 +30,10 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 
 /**
  * Claims are short leases, renewed by re-claiming: make the edit, release,
@@ -91,6 +94,9 @@ export const PROTECTED_PREFIXES = [
   // page's text past what browser_check delivers). Written by the harness,
   // named from the trace with its size and hash; the record, not scratch.
   "tool-output/",
+  // What each agent's VM was (--isolation microvm): its image, its mounts,
+  // its network and its snapshot, written by the VM manager on the host.
+  "vm/",
 ] as const;
 
 export const PROTECTED_FILES = [
@@ -115,7 +121,30 @@ export const PROTECTED_FILES = [
   // What each agent calls itself, written only through the `name` tool: a
   // peer that could rewrite it could rename everyone else.
   "names.json",
+  // Read by `swarm.sh stop` outside every agent's reach, as the examiner:
+  // which process is the hub, and which directory is its to delete.
+  "hub.pid",
+  "hub.dir",
+  // The harness's own verdict on the run, taken on the host after it ended,
+  // its earlier verdicts (custody.<stamp>.json, custody.previous*.json:
+  // PROTECTED_ROOT_PATTERNS) and the index of the run's artifacts.
+  "custody.json",
+  "artifacts.json",
+  "compact-prompt.md",
+  // The kickoff each agent's Pi starts with.
+  ".kickoff",
+  // The host's spill of trace lines the collector did not take
+  // (TRACE_SPILL_REL): custody reads it as the harness's own record.
+  "work/.trace-spill.jsonl",
 ] as const;
+
+/**
+ * Harness files at the sandbox root named by a pattern: custody's earlier
+ * verdicts (custody.<stamp>.json, custody.previous.json,
+ * custody.previous-<stamp>.json) and a custody.json it moved aside. Keys
+ * are lower-cased before the test.
+ */
+export const PROTECTED_ROOT_PATTERNS: readonly RegExp[] = [/^custody\.[^/]*$/];
 
 /**
  * True when `pathKey` (sandbox-relative, forward slashes) belongs to the
@@ -127,6 +156,7 @@ export const PROTECTED_FILES = [
 export function isProtectedPath(pathKey: string): boolean {
   const key = pathKey.replace(/^\.\//, "").toLowerCase();
   if ((PROTECTED_FILES as readonly string[]).some((file) => file.toLowerCase() === key)) return true;
+  if (PROTECTED_ROOT_PATTERNS.some((re) => re.test(key))) return true;
   return (PROTECTED_PREFIXES as readonly string[]).some((prefix) =>
     key.startsWith(prefix.toLowerCase()),
   );
@@ -159,6 +189,12 @@ export type AgentBudget = {
   spent_usd: number;
   tokens: number;
   calls: number;
+  /**
+   * "model-gateway" when the row's spend was metered on the host, off the
+   * provider's own answers (scripts/model-gateway.ts); absent, it is what
+   * the seat reported about itself.
+   */
+  metered_by?: "model-gateway";
   input: number;
   output: number;
   cache_read: number;
@@ -229,7 +265,17 @@ export type SwarmEvent = {
   tool: string;
   args: Record<string, unknown>;
   result: unknown;
+  /** The sending process's id and its count of lines sent (appendEvent). */
+  sid?: string;
+  seq?: number;
+  /** The collector's clock when the line reached it; the sender's `ts` is, in a VM, the guest's. */
+  recv_ts?: string;
 };
+
+/** When a line happened by the host's clock: the collector's stamp when there is one. */
+export function hostTime(e: { ts: string; recv_ts?: string }): string {
+  return e.recv_ts || e.ts;
+}
 
 export const BUDGET_SOURCE = "pi.sessionManager.getEntries";
 export const EVENTS_REL = "traces/events.jsonl";
@@ -238,6 +284,19 @@ export const EVENTS_REL = "traces/events.jsonl";
  * file. A run should never have one; a run that does must be able to say so.
  */
 export const TRACE_SPILL_REL = "work/.trace-spill.jsonl";
+
+/**
+ * Where this process spills a trace line it could not hand to the collector.
+ * On the host, one shared file under work/. In a microVM a file two VMs
+ * append to loses lines (virtio-fs keeps no O_APPEND promise between guests:
+ * a spill shared by two agents was found torn at line 24, measured), so each
+ * agent spills into its own tool-output/ directory, which only its VM writes.
+ */
+export function traceSpillRel(env: NodeJS.ProcessEnv = process.env): string {
+  const agent = env.AGENT_ID?.trim() ?? "";
+  if (env.SWARM_ISOLATION === "microvm" && /^[a-z][a-z0-9_-]{0,31}$/.test(agent)) return `tool-output/${agent}/trace-spill.jsonl`;
+  return TRACE_SPILL_REL;
+}
 export const HISTORY_REL = "history";
 export const CAP_STEER =
   "Swarm spend cap hit. Call done with reason cannot_complete and stop. Do not start new work.";
@@ -280,6 +339,11 @@ export type PostRecord = {
   path: string;
   /** What the author calls itself, if it has said. */
   name?: string;
+  /**
+   * A harness post sent from inside an agent's VM: the agent whose harness
+   * hook said it. The hub sets it; nothing an agent passes can.
+   */
+  via?: string;
 };
 
 /** `threads/<name>/meta.json`. Membership decides who a no-arg `inbox` serves. */
@@ -403,6 +467,237 @@ export async function realPathKey(sandboxRoot: string, rawPath: string): Promise
     tail.unshift(basename(probe));
     probe = parent;
   }
+}
+
+/**
+ * The seat whose own directory `pathKey` is in: `work/<id>/`,
+ * `work/extracted/<id>/`, `work/quarantine/<id>/`, `tool-output/<id>/` or
+ * `.pi-sessions/<id>/`, for a seat on `ids`; null for any other path. In a
+ * microVM these are the only directories a seat can write, so they are also
+ * the only ones whose layout a seat controls while the run is up.
+ *
+ * Compared without regard to case: on a case-insensitive disk (macOS)
+ * `work/A1/x` is a1's file, and a check that took `A1` for a stranger let a
+ * seat publish over a peer's file.
+ */
+export function seatHoleOwner(pathKey: string, ids: readonly string[]): string | null {
+  const m = pathKey.toLowerCase().match(/^(?:work\/(?:extracted\/|quarantine\/)?|tool-output\/|\.pi-sessions\/)([a-z][a-z0-9_-]{0,31})(?:\/|$)/);
+  if (!m) return null;
+  return ids.find((id) => id.toLowerCase() === m[1]) ?? null;
+}
+
+/** The team's seat ids, or none when the team file cannot be read. */
+export async function teamIds(sandboxRoot: string): Promise<string[]> {
+  try {
+    return (await readTeam(sandboxRoot)).agents.map((a) => a.id);
+  } catch {
+    return [];
+  }
+}
+
+/** A file too large for what was asked of it; `code` is EFBIG. */
+export class FileTooLarge extends Error {
+  readonly code = "EFBIG";
+  readonly size: number;
+  constructor(pathKey: string, size: number, limit: number) {
+    super(`${pathKey} is ${size} bytes, more than the ${limit} this takes`);
+    this.size = size;
+  }
+}
+
+/**
+ * A file under the sandbox, opened for the harness on the host, without
+ * following a link an agent may have planted. An agent in a microVM writes
+ * its own directories through virtio-fs, and the link it makes there is a
+ * real link on the host (measured); the hub reads history and diffs as the
+ * operator's own user, so a link to the operator's home would read the
+ * operator's home.
+ *
+ * The path is resolved once (`realPathKey`, which refuses anything that
+ * leaves the sandbox), the resolved file is opened with O_NOFOLLOW, and the
+ * open file is compared by device and inode with what was resolved. O_NOFOLLOW
+ * guards only the last component, though: a directory on the way swapped for
+ * a link between the resolve and the open opens a file elsewhere (measured:
+ * 140 of 39,385 racing reads). So the path is resolved again after the open,
+ * and the file it names now must be the one that is open: a link still in
+ * place leaves the sandbox and is refused, and one swapped back names another
+ * file. On Linux the kernel names the file the descriptor holds
+ * (/proc/self/fd), which closes the race; macOS has no such name, and there
+ * the second resolve narrows it without closing it (measured: 1 of 9,055
+ * racing reads still got through). Nothing is truncated before that check,
+ * and a FIFO does not hold the open (O_NONBLOCK). So the hub never opens a
+ * file under a seat's own directory while the seat is up (`seatHoleOwner`):
+ * the seat sends the bytes instead, and the race has nothing to win.
+ */
+export async function openSandboxFile(
+  sandboxRoot: string,
+  rawPath: string,
+  mode: "read" | "write",
+): Promise<{ handle: Awaited<ReturnType<typeof open>>; pathKey: string; abs: string; size: number }> {
+  const pathKey = await realPathKey(sandboxRoot, rawPath);
+  const realRoot = await realpath(sandboxRoot).catch(() => resolve(sandboxRoot));
+  const abs = resolve(realRoot, pathKey);
+  const O = fsConstants;
+  if (mode === "write") await mkdir(dirname(abs), { recursive: true });
+  const before = await lstat(abs).catch(() => null);
+  if (before?.isSymbolicLink()) throw new Error(`symbolic link refused: ${pathKey}`);
+  if (before && !before.isFile()) throw new Error(`not a regular file: ${pathKey}`);
+  const flags = mode === "read" ? O.O_RDONLY | O.O_NOFOLLOW | O.O_NONBLOCK : O.O_WRONLY | O.O_CREAT | O.O_NOFOLLOW | O.O_NONBLOCK;
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(abs, flags, 0o644);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ELOOP" || code === "EMLINK") throw new Error(`symbolic link refused: ${pathKey}`);
+    throw err;
+  }
+  const after = await handle.stat();
+  let same = after.isFile() && (!before || (before.dev === after.dev && before.ino === after.ino));
+  if (same && process.platform === "linux") {
+    // Linux names the file an open descriptor holds: whatever the path did
+    // on the way, the file open is the one at `abs` or it is refused.
+    same = (await readlink(`/proc/self/fd/${handle.fd}`).catch(() => "")) === abs;
+  } else if (same) {
+    try {
+      const again = await realPathKey(sandboxRoot, pathKey);
+      const now = again === pathKey ? await lstat(resolve(realRoot, again)) : null;
+      same = now !== null && now.isFile() && now.dev === after.dev && now.ino === after.ino;
+    } catch {
+      same = false;
+    }
+  }
+  if (!same) {
+    await handle.close();
+    throw new Error(`the file changed under the harness: ${pathKey}`);
+  }
+  return { handle, pathKey, abs, size: after.size };
+}
+
+/**
+ * The bytes of a sandbox file, read without following a planted link; null
+ * when there is no such file. Past `maxBytes` it throws `FileTooLarge`
+ * instead of reading: a sparse file of a few gigabytes is a few bytes on the
+ * guest's side and all of the hub's memory on this one.
+ */
+export async function readSandboxFile(sandboxRoot: string, rawPath: string, options: { maxBytes?: number } = {}): Promise<{ pathKey: string; bytes: Buffer } | null> {
+  let opened: Awaited<ReturnType<typeof openSandboxFile>>;
+  try {
+    opened = await openSandboxFile(sandboxRoot, rawPath, "read");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  try {
+    if (options.maxBytes !== undefined && opened.size > options.maxBytes) throw new FileTooLarge(opened.pathKey, opened.size, options.maxBytes);
+    return { pathKey: opened.pathKey, bytes: await opened.handle.readFile() };
+  } finally {
+    await opened.handle.close();
+  }
+}
+
+/** The sha256 and size of a sandbox file, streamed: for a file too large to hold. */
+export async function hashSandboxFile(sandboxRoot: string, rawPath: string): Promise<{ pathKey: string; sha256: string; bytes: number } | null> {
+  let opened: Awaited<ReturnType<typeof openSandboxFile>>;
+  try {
+    opened = await openSandboxFile(sandboxRoot, rawPath, "read");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  try {
+    const hash = createHash("sha256");
+    let bytes = 0;
+    for await (const chunk of opened.handle.createReadStream({ autoClose: false })) {
+      hash.update(chunk as Buffer);
+      bytes += (chunk as Buffer).byteLength;
+    }
+    return { pathKey: opened.pathKey, sha256: hash.digest("hex"), bytes };
+  } finally {
+    await opened.handle.close();
+  }
+}
+
+/** Write a sandbox file in place, never through a link; emptied only once it is known to be the file resolved. */
+export async function writeSandboxFile(sandboxRoot: string, rawPath: string, bytes: Buffer | string): Promise<string> {
+  const opened = await openSandboxFile(sandboxRoot, rawPath, "write");
+  try {
+    await opened.handle.truncate(0);
+    await opened.handle.writeFile(bytes);
+    return opened.pathKey;
+  } finally {
+    await opened.handle.close();
+  }
+}
+
+export type PublishResult = { ok: true; path: string; from: string; sha256: string; bytes: number; rev: number | null } | { ok: false; reason: string; path?: string };
+
+/**
+ * Put a file of the agent's own into the shared part of `work/`. In a
+ * microVM `work/` is read-only but for the agent's own directories, so a
+ * shared deliverable (`work/report.md`, `work/timeline.md`) is written by the
+ * harness: the destination is claimed for the agent (or refused when a peer
+ * holds it, or when it is any seat's own directory), written in place, and
+ * recorded in history under the agent's name. On the host the bytes are read
+ * from the agent's directory without following a link; from a VM they come
+ * with the call (`options.bytes`), since the hub does not open a file under
+ * a directory a running seat can rearrange. On the host the same call does
+ * the same thing, so a goal reads the same either way.
+ */
+export async function publishFile(ctx: SwarmContext, fromRaw: string, toRaw?: string, options: { bytes?: Buffer; ids?: string[] } = {}): Promise<PublishResult> {
+  let fromKey: string;
+  try {
+    fromKey = await realPathKey(ctx.sandboxRoot, fromRaw);
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+  if (!isOwnScratch(fromKey, ctx.agentId)) {
+    return { ok: false, reason: `publish takes a file of your own: ${fromKey} is not under work/${ctx.agentId}/, work/extracted/${ctx.agentId}/ or work/quarantine/${ctx.agentId}/`, path: fromKey };
+  }
+  const lexicalTo = claimKey(ctx.sandboxRoot, toRaw && toRaw.trim() ? toRaw : `work/${basename(fromKey)}`);
+  // Every check on the destination is made on the path it really names:
+  // a lexical `work/A1/x` is a1's file on a disk that ignores case.
+  let toKey: string;
+  try {
+    toKey = await realPathKey(ctx.sandboxRoot, lexicalTo);
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message, path: lexicalTo };
+  }
+  if (!toKey.startsWith("work/") || toKey === "work/") return { ok: false, reason: `a file is published under work/: ${toKey}`, path: toKey };
+  // work/'s dot entries are the run's own: the trace spill custody reads,
+  // the shared install area, the panes' temp directory.
+  if (/^work\/\./.test(toKey) || isProtectedPath(toKey)) {
+    return { ok: false, reason: `${toKey} is the harness's, not a shared file: publish to a name under work/ that does not start with a dot`, path: toKey };
+  }
+  // Whose directories are whose: the hub's roster when it passes one, else
+  // the team file. With neither there is no telling a peer's directory from
+  // a shared one, and nothing is published.
+  const ids = options.ids?.length ? options.ids : await teamIds(ctx.sandboxRoot);
+  if (!ids.length) return { ok: false, reason: "the run's team cannot be read, so a peer's directory cannot be told from a shared one; nothing is published", path: toKey };
+  const owner = seatHoleOwner(toKey, [ctx.agentId, ...ids]) ?? seatHoleOwner(lexicalTo, ids);
+  if (owner && owner.toLowerCase() === ctx.agentId.toLowerCase()) return { ok: false, reason: `${toKey} is your own directory already; publish puts a file in the shared part of work/`, path: toKey };
+  if (owner) return { ok: false, reason: `${toKey} is ${owner}'s own directory; a peer's scratch is theirs to write`, path: toKey };
+  let bytes: Buffer;
+  if (options.bytes) {
+    bytes = options.bytes;
+  } else {
+    const read = await readSandboxFile(ctx.sandboxRoot, fromKey);
+    if (!read) return { ok: false, reason: `no such file: ${fromKey}`, path: fromKey };
+    bytes = read.bytes;
+  }
+  const held = await heldBy(ctx, toKey);
+  if (held && held.owner !== ctx.agentId) return { ok: false, reason: `claim violation: ${toKey} is held by ${held.owner}`, path: toKey };
+  const claim = held ? { ok: true } : await claimFile(ctx, toKey, { reason: "publish", implicit: true });
+  if (!claim.ok) return { ok: false, reason: `could not claim ${toKey}: ${"reason" in claim ? String((claim as { reason?: string }).reason) : "held by a peer"}`, path: toKey };
+  const guard = await guardWrite(ctx, toKey);
+  if (!guard.ok) return { ok: false, reason: guard.reason, path: toKey };
+  await recordFileVersion(ctx.sandboxRoot, toKey, ctx.agentId).catch(() => null);
+  try {
+    await writeSandboxFile(ctx.sandboxRoot, toKey, bytes);
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message, path: toKey };
+  }
+  const version = await recordFileVersion(ctx.sandboxRoot, toKey, ctx.agentId, { bytes }).catch(() => null);
+  return { ok: true, path: toKey, from: fromKey, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.byteLength, rev: version?.rev ?? null };
 }
 
 /** True when either the lexical path or what it really points at is harness-owned. */
@@ -650,17 +945,30 @@ function perModelCaps(raw: unknown): Record<string, number> {
   return caps;
 }
 
+/**
+ * A file every reader must see whole: written beside itself and renamed,
+ * which is atomic on POSIX. A plain writeFile truncates first, and a writer
+ * killed in between left budget.json empty, which the next usage fold then
+ * rebuilt from defaults: no cap, a fifteen-minute clock started now.
+ */
+export async function writeFileAtomic(path: string, text: string): Promise<void> {
+  const staging = join(dirname(path), `.${basename(path)}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`);
+  try {
+    await writeFile(staging, text, "utf8");
+    await rename(staging, path);
+  } catch (err) {
+    await rm(staging, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
 export async function readBudget(sandboxRoot: string): Promise<BudgetRecord> {
   const raw = await readFile(join(sandboxRoot, "budget.json"), "utf8");
   return normalizeBudget(JSON.parse(raw) as Partial<BudgetRecord>);
 }
 
 export async function writeBudget(sandboxRoot: string, budget: BudgetRecord): Promise<void> {
-  await writeFile(
-    join(sandboxRoot, "budget.json"),
-    `${JSON.stringify(normalizeBudget(budget), null, 2)}\n`,
-    "utf8",
-  );
+  await writeFileAtomic(join(sandboxRoot, "budget.json"), `${JSON.stringify(normalizeBudget(budget), null, 2)}\n`);
 }
 
 /**
@@ -1056,7 +1364,18 @@ export async function readPost(file: string): Promise<PostRecord> {
     body,
     path: file,
     ...(attrs.name ? { name: attrs.name } : {}),
+    ...(attrs.via ? { via: attrs.via } : {}),
   };
+}
+
+/**
+ * Who a post is from, as an agent reads it. A harness post sent from inside
+ * a VM (a seat's extension posting a veto or a notice) is the harness code
+ * in that seat's VM, which the seat's guest root controls: peers read it as
+ * that seat's, never as the harness's own.
+ */
+export function postSender(post: { from: string; via?: string }): string {
+  return post.via ? `${post.from} via ${post.via}` : post.from;
 }
 
 export function normalizeThreadName(raw: string | undefined): string {
@@ -1160,7 +1479,7 @@ export async function listThreadNames(sandboxRoot: string): Promise<string[]> {
 
 export async function postMessage(
   ctx: SwarmContext,
-  args: { thread?: string; to?: string; tag: string; body: string },
+  args: { thread?: string; to?: string; tag: string; body: string; via?: string },
 ): Promise<PostRecord> {
   if (!isPostTag(args.tag)) {
     throw new Error(`Unknown tag "${args.tag}". Use: ${POST_TAGS.join(", ")}`);
@@ -1179,13 +1498,14 @@ export async function postMessage(
     const filename = `${String(id).padStart(6, "0")}-${ctx.agentId}.md`;
     const path = join(dir, filename);
     const name = yamlOneLine((await nameOf(ctx.sandboxRoot, ctx.agentId).catch(() => undefined)) ?? "");
+    const via = yamlOneLine(args.via ?? "");
     const text = `---
 id: ${id}
 thread: ${thread}
 from: ${ctx.agentId}
 to: ${to}
 tag: ${tag}
-${name ? `name: ${name}\n` : ""}---
+${name ? `name: ${name}\n` : ""}${via ? `via: ${via}\n` : ""}---
 
 ${body}
 `;
@@ -1203,6 +1523,7 @@ ${body}
       body,
       path,
       ...(name ? { name } : {}),
+      ...(via ? { via } : {}),
     };
   });
 }
@@ -1210,7 +1531,7 @@ ${body}
 /** Harness announcement on the board. Never joins a thread, never claims. */
 export async function systemPost(
   sandboxRoot: string,
-  args: { tag: string; body: string; thread?: string; to?: string },
+  args: { tag: string; body: string; thread?: string; to?: string; via?: string },
 ): Promise<PostRecord> {
   return postMessage(systemContext(sandboxRoot), args);
 }
@@ -1477,25 +1798,23 @@ export async function claimFile(
       note: `${pathKey} belongs to the harness and cannot be claimed. Use post/done/file_restore instead of writing it.`,
     };
   }
+  const peer = await peerHoleOf(ctx, pathKey);
+  if (peer) {
+    return {
+      ok: false,
+      conflict: true,
+      path: pathKey,
+      owner: peer,
+      reason: `${peer}'s own directory`,
+      expires_at: "",
+      note: `${pathKey} is in ${peer}'s own directory, and a peer's scratch is theirs to write. Ask ${peer} on the board, or copy the file into your own directory and work there.`,
+    };
+  }
   const reason = (options.reason ?? "").trim();
   if (!reason) {
     throw new Error("claim_file requires a reason: say what you are about to do with the path.");
   }
   const seconds = clampClaimSeconds(options.seconds);
-  // A peer's scratch is the peer's: a lease taken there would make the
-  // owner's own write — which needs no claim — a conflict in its own directory.
-  const scratchOwner = await peerScratchOwner(ctx, pathKey);
-  if (scratchOwner) {
-    return {
-      ok: false,
-      conflict: true,
-      path: pathKey,
-      owner: scratchOwner,
-      reason: "own scratch",
-      expires_at: "",
-      note: `${pathKey} is in ${scratchOwner}'s own scratch directory and only ${scratchOwner} writes there. Ask on the board, or work on a copy under your own work/${ctx.agentId}/.`,
-    };
-  }
   return withTableLock(ctx.sandboxRoot, async () => {
     const file = lockPath(ctx.sandboxRoot, pathKey);
     const existing = await readLock(file);
@@ -1612,28 +1931,73 @@ export type AgentMarker = "done" | "dead" | "stalled" | "active";
 const eventLogCache = new Map<string, { size: number; mtimeMs: number; events: readonly SwarmEvent[] }>();
 const EVENT_LOG_CACHE_MAX = 64;
 
-export async function readEventLog(sandboxRoot: string): Promise<readonly SwarmEvent[]> {
+/** Why each sandbox's trace could not be read at its last read; absent when it was read, or is not there. */
+const eventLogProblems = new Map<string, string>();
+
+/**
+ * The event log and, when there is one but it could not be read, why: a
+ * trace that is a link, a directory or a FIFO, or a read that failed, is
+ * not "no trace". Read line by line, so a trace past the size one string
+ * can hold (512 MB) is read too, not dropped whole.
+ */
+export async function readEventLogChecked(sandboxRoot: string): Promise<{ events: readonly SwarmEvent[]; unreadable: string | null }> {
   const file = join(sandboxRoot, EVENTS_REL);
-  const info = await stat(file).catch(() => null);
-  if (!info) {
+  const fail = (why: string) => {
     eventLogCache.delete(file);
-    return [];
+    eventLogProblems.set(file, why);
+    return { events: [] as readonly SwarmEvent[], unreadable: why };
+  };
+  const info = await lstat(file).catch((err: NodeJS.ErrnoException) => (err.code === "ENOENT" || err.code === "ENOTDIR" ? null : err));
+  if (info === null) {
+    eventLogCache.delete(file);
+    eventLogProblems.delete(file);
+    return { events: [], unreadable: null };
   }
+  if (info instanceof Error) return fail(`unreadable (${(info as NodeJS.ErrnoException).code ?? info.message})`);
+  if (info.isSymbolicLink()) return fail("a link, not the trace");
+  if (!info.isFile()) return fail("not a regular file");
   const hit = eventLogCache.get(file);
-  if (hit && hit.size === info.size && hit.mtimeMs === info.mtimeMs) return hit.events;
-  const raw = await readFile(file, "utf8").catch(() => "");
+  if (hit && hit.size === info.size && hit.mtimeMs === info.mtimeMs) {
+    eventLogProblems.delete(file);
+    return { events: hit.events, unreadable: null };
+  }
   const events: SwarmEvent[] = [];
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      events.push(JSON.parse(line) as SwarmEvent);
-    } catch {
-      // a torn line is skipped, not fatal
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    handle = await open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    const lines = createInterface({ input: handle.createReadStream({ autoClose: false, encoding: "utf8" }), crlfDelay: Infinity });
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        events.push(JSON.parse(line) as SwarmEvent);
+      } catch {
+        // a torn line is skipped, not fatal
+      }
     }
+  } catch (err) {
+    return fail(`unreadable (${(err as NodeJS.ErrnoException).code ?? (err as Error).message})`);
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
   if (eventLogCache.size >= EVENT_LOG_CACHE_MAX) eventLogCache.clear();
   eventLogCache.set(file, { size: info.size, mtimeMs: info.mtimeMs, events });
-  return events;
+  eventLogProblems.delete(file);
+  return { events, unreadable: null };
+}
+
+/**
+ * The event log, parsed, for readers that want the lines only. A trace
+ * that is there and could not be read gives no lines here; `eventLogProblem`
+ * (or readEventLogChecked) says why, so a caller can say it too rather than
+ * report a run with no trace.
+ */
+export async function readEventLog(sandboxRoot: string): Promise<readonly SwarmEvent[]> {
+  return (await readEventLogChecked(sandboxRoot)).events;
+}
+
+/** Why the sandbox's trace could not be read at its last read, or null. */
+export function eventLogProblem(sandboxRoot: string): string | null {
+  return eventLogProblems.get(join(sandboxRoot, EVENTS_REL)) ?? null;
 }
 
 export async function lastAgentActivityMs(
@@ -1737,6 +2101,22 @@ export async function heldBy(ctx: SwarmContext, rawPath: string): Promise<LockRe
  * forensic cases — four in forty seconds on one run — so each has a corner of
  * its own, and the shared root is for what peers must read.
  */
+/**
+ * The peer whose own directory `pathKey` is in, when that is not the
+ * caller's: a claim there, and so a write, a restore or a publish there, is
+ * refused — a lease a peer took would also lock the owner out of its own
+ * directory, whose writes need no claim. Someone outside the team (the
+ * operator restoring a revision from the console, the harness) is not a
+ * peer and is not refused, and a team that cannot be read refuses nothing.
+ */
+async function peerHoleOf(ctx: SwarmContext, pathKey: string): Promise<string | null> {
+  if (ctx.agentId === SYSTEM_AGENT) return null;
+  const ids = await teamIds(ctx.sandboxRoot);
+  if (!ids.some((id) => id.toLowerCase() === ctx.agentId.toLowerCase())) return null;
+  const owner = seatHoleOwner(pathKey, ids);
+  return owner && owner.toLowerCase() !== ctx.agentId.toLowerCase() ? owner : null;
+}
+
 export function isOwnScratch(pathKey: string, agentId: string): boolean {
   if (!agentId || agentId === SYSTEM_AGENT) return false;
   return (
@@ -1744,20 +2124,6 @@ export function isOwnScratch(pathKey: string, agentId: string): boolean {
     pathKey.startsWith(`work/extracted/${agentId}/`) ||
     pathKey.startsWith(`work/quarantine/${agentId}/`)
   );
-}
-
-/**
- * The team agent whose own scratch `pathKey` is in, when the caller is a
- * different team agent. Someone outside the team — the operator restoring a
- * revision, the harness — is not a peer, and a team that cannot be read
- * refuses nothing.
- */
-async function peerScratchOwner(ctx: SwarmContext, pathKey: string): Promise<string | null> {
-  if (!/^work\/(?:(?:extracted|quarantine)\/)?[^/]+\//.test(pathKey)) return null;
-  const team = await readTeam(ctx.sandboxRoot).catch(() => null);
-  const ids = (team?.agents ?? []).map((agent) => agent.id);
-  if (!ids.includes(ctx.agentId)) return null;
-  return ids.find((id) => id !== ctx.agentId && isOwnScratch(pathKey, id)) ?? null;
 }
 
 export async function guardWrite(ctx: SwarmContext, rawPath: string): Promise<GuardResult> {
@@ -1783,6 +2149,10 @@ export async function guardWrite(ctx: SwarmContext, rawPath: string): Promise<Gu
       path: pathKey,
       protected: true,
     };
+  }
+  const peer = await peerHoleOf(ctx, pathKey);
+  if (peer) {
+    return { ok: false, reason: `claim violation: ${pathKey} is in ${peer}'s own directory; a peer's scratch is theirs to write`, path: pathKey, owner: peer };
   }
   const lock = await heldBy(ctx, pathKey);
   if (!lock) {
@@ -1858,6 +2228,8 @@ export async function markDone(
   const outputFile = yamlOneLine(args.outputFile);
   if (!reason) throw new Error("done requires a reason");
   if (!outputFile) throw new Error("done requires output_file");
+  // The report reads the output file back: it names a file in the run.
+  claimKey(ctx.sandboxRoot, outputFile);
 
   const by = ctx.agentId;
   const stamp = new Date().toISOString();
@@ -2060,90 +2432,107 @@ export type ChainAnchor = { lines: number; head: string; prev_head?: string; pen
  * reports that rather than calling it a failure.
  */
 export function verifyEventChain(text: string, anchor?: ChainAnchor | null): ChainCheck {
-  const lines = text.split("\n").filter(Boolean);
+  const verifier = eventChainVerifier(anchor);
+  for (const line of text.split("\n")) verifier.push(line);
+  return verifier.finish();
+}
+
+/**
+ * The same check, a line at a time: custody reads a trace of any size
+ * without holding it whole (a string past about 512 MB is not one Node can
+ * make). Empty lines are skipped, as a split and filter would.
+ */
+export function eventChainVerifier(anchor?: ChainAnchor | null): { push(line: string): void; finish(): ChainCheck } {
   let previous = "";
   let chained = 0;
   let unverified = 0;
   let disputed = 0;
   let started = false;
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    let record: { prev?: unknown; agent_unverified?: unknown; claimed_agent?: unknown };
-    try {
-      record = JSON.parse(line) as typeof record;
-    } catch {
-      return { ok: false, chained, total: lines.length, broken_at: i + 1, reason: "edited", unverified, disputed };
-    }
-    if (record.agent_unverified === true) unverified += 1;
-    if (typeof record.claimed_agent === "string") disputed += 1;
-    const prev = typeof record.prev === "string" ? record.prev : null;
-    if (prev === null) {
-      // Once the collector has written a line, every later line came through
-      // it too — the shell helpers send over the socket like everything else.
-      // An unchained line after that point is something else's append, which
-      // is exactly the case a growing file cannot notice on its own.
-      if (started) {
-        return { ok: false, chained, total: lines.length, broken_at: i + 1, reason: "appended", unverified, disputed };
+  let total = 0;
+  let failed: { broken_at: number; reason: ChainCheck["reason"] } | null = null;
+  const fail = (broken_at: number, reason: ChainCheck["reason"]) => {
+    failed = { broken_at, reason };
+  };
+  return {
+    push(line: string) {
+      if (line === "") return;
+      total += 1;
+      if (failed) return;
+      let record: { prev?: unknown; agent_unverified?: unknown; claimed_agent?: unknown };
+      try {
+        record = JSON.parse(line) as typeof record;
+      } catch {
+        fail(total, "edited");
+        return;
       }
-    } else {
-      chained += 1;
-      started = true;
-      if (prev !== previous) {
-        return { ok: false, chained, total: lines.length, broken_at: i + 1, reason: "edited", unverified, disputed };
+      if (record.agent_unverified === true) unverified += 1;
+      if (typeof record.claimed_agent === "string") disputed += 1;
+      const prev = typeof record.prev === "string" ? record.prev : null;
+      if (prev === null) {
+        // Once the collector has written a line, every later line came through
+        // it too — the shell helpers send over the socket like everything else.
+        // An unchained line after that point is something else's append, which
+        // is exactly the case a growing file cannot notice on its own.
+        if (started) {
+          fail(total, "appended");
+          return;
+        }
+      } else {
+        chained += 1;
+        started = true;
+        if (prev !== previous) {
+          fail(total, "edited");
+          return;
+        }
       }
-    }
-    previous = createHash("sha256").update(line).digest("hex");
-  }
-  // A file rewritten from the start carries a chain that verifies against
-  // itself. The anchor is what it cannot reproduce: it lives outside the
-  // sandbox, where the write guard keeps a pane from reaching it.
-  //
-  // This used to check two cases and let the rest through, which left the
-  // headline open: a line appended with a correctly computed `prev` — and the
-  // hash it needs is the previous line, which any pane can read — still came
-  // back `ok`. So did a whole rewrite padded out to more lines than the
-  // anchor names. And because it only ran `if (chained)`, stripping every
-  // `prev` in the file skipped the anchor entirely and reported the result as
-  // an unchained run, which reads as "this run had no collector".
-  //
-  // The anchor is a commitment to a length *and* an end. Every relation
-  // between the file and it is decided here, including the ones that mean the
-  // file is fine.
-  if (anchor) {
-    if (!chained && anchor.lines > 0) {
-      // Every `prev` gone, but the collector recorded a chain. Whatever this
-      // file is, it is not the record that was written.
-      return { ok: false, chained, total: lines.length, broken_at: 1, reason: "head", unverified, disputed };
-    }
-    if (lines.length > anchor.lines) {
-      return {
-        ok: false,
-        chained,
-        total: lines.length,
-        broken_at: anchor.lines + 1,
-        reason: "appended",
-        unverified,
-        disputed,
-      };
-    }
-    if (lines.length === anchor.lines) {
-      if (previous !== anchor.head) {
-        return { ok: false, chained, total: lines.length, broken_at: lines.length, reason: "head", unverified, disputed };
+      previous = createHash("sha256").update(line).digest("hex");
+    },
+    finish(): ChainCheck {
+      if (failed) return { ok: false, chained, total, broken_at: (failed as { broken_at: number }).broken_at, reason: (failed as { reason: ChainCheck["reason"] }).reason, unverified, disputed };
+      // A file rewritten from the start carries a chain that verifies against
+      // itself. The anchor is what it cannot reproduce: it lives outside the
+      // sandbox, where the write guard keeps a pane from reaching it.
+      //
+      // This used to check two cases and let the rest through, which left the
+      // headline open: a line appended with a correctly computed `prev` — and the
+      // hash it needs is the previous line, which any pane can read — still came
+      // back `ok`. So did a whole rewrite padded out to more lines than the
+      // anchor names. And because it only ran `if (chained)`, stripping every
+      // `prev` in the file skipped the anchor entirely and reported the result as
+      // an unchained run, which reads as "this run had no collector".
+      //
+      // The anchor is a commitment to a length *and* an end. Every relation
+      // between the file and it is decided here, including the ones that mean the
+      // file is fine.
+      if (anchor) {
+        if (!chained && anchor.lines > 0) {
+          // Every `prev` gone, but the collector recorded a chain. Whatever this
+          // file is, it is not the record that was written.
+          return { ok: false, chained, total, broken_at: 1, reason: "head", unverified, disputed };
+        }
+        if (total > anchor.lines) {
+          return { ok: false, chained, total, broken_at: anchor.lines + 1, reason: "appended", unverified, disputed };
+        }
+        if (total === anchor.lines) {
+          if (previous !== anchor.head) {
+            return { ok: false, chained, total, broken_at: total, reason: "head", unverified, disputed };
+          }
+        } else if (anchor.pending === true && total === anchor.lines - 1 && typeof anchor.prev_head === "string") {
+          // The collector brackets its append with two anchor writes, and this is
+          // the moment between them: the line is promised but not yet on disk.
+          // Only then may the file be one line short, and only if it ends exactly
+          // where the anchor says it did before. A committed anchor one line
+          // ahead of the file is the record's last line removed.
+          if (previous !== anchor.prev_head) {
+            return { ok: false, chained, total, broken_at: total, reason: "head", unverified, disputed };
+          }
+        } else {
+          return { ok: false, chained, total, broken_at: total, reason: "shortened", unverified, disputed };
+        }
       }
-    } else if (anchor.pending === true && lines.length === anchor.lines - 1 && typeof anchor.prev_head === "string") {
-      // The collector brackets its append with two anchor writes, and this is
-      // the moment between them: the line is promised but not yet on disk.
-      // Only then may the file be one line short, and only if it ends exactly
-      // where the anchor says it did before. A committed anchor one line
-      // ahead of the file is the record's last line removed.
-      if (previous !== anchor.prev_head) {
-        return { ok: false, chained, total: lines.length, broken_at: lines.length, reason: "head", unverified, disputed };
-      }
-    } else {
-      return { ok: false, chained, total: lines.length, broken_at: lines.length, reason: "shortened", unverified, disputed };
-    }
-  }
-  return { ok: true, chained, total: lines.length, unverified, disputed };
+      return { ok: true, chained, total, unverified, disputed };
+    },
+  };
 }
 
 /**
@@ -2192,9 +2581,329 @@ let collectorGaveUpAt = 0;
 /** Which socket those failures were against: a different one is a fresh start. */
 let collectorFailuresFor = "";
 
+/**
+ * A request or an answer larger than this travels between a VM and the hub
+ * in parts of this size, each acknowledged before the next goes. One
+ * multi-megabyte line stalled msb's vsock path from guest to host in two
+ * real runs (a seat's file recorded after an extraction: 6.6 MB and 10.6 MB
+ * left queued in the guest), and every later call on that connection waited
+ * behind it until the seat was stopped as cut off from the hub. Measured
+ * since with the guest's own board client: one write of about 215 KB passes,
+ * one of about 262 KB stalls the link for good, whatever went before (1.77 MB
+ * in small lines passed). A part is 32 KiB, about 44 KB of base64 on the
+ * wire. SWARM_TRANSFER_PART_BYTES changes it for an experiment, and belongs
+ * on both ends alike: the hub refuses a part larger than its own.
+ */
+export const TRANSFER_PART_BYTES = Math.max(4096, Number(process.env.SWARM_TRANSFER_PART_BYTES) || 32 * 1024);
+/**
+ * The largest line either end writes on a VM's hub link: a part in base64
+ * and its envelope. Anything larger goes in parts or not at all; a line past
+ * it is refused by name (WireLineTooLarge), never written.
+ */
+export const WIRE_LINE_MAX = Math.ceil(TRANSFER_PART_BYTES / 3) * 4 + 1024;
+/** A connection whose queued writes have not moved in this long carries nothing any more. */
+export const WRITE_STALL_MS = 20_000;
+
+/** A line for a VM's hub link past WIRE_LINE_MAX: it is not written. */
+export class WireLineTooLarge extends Error {
+  readonly bytes: number;
+  constructor(bytes: number, what = "a line") {
+    super(`${what} of ${bytes} bytes is past the ${WIRE_LINE_MAX}-byte line limit of a VM's hub link, and was not sent: one write that large stalls the link, so large things go in parts`);
+    this.name = "WireLineTooLarge";
+    this.bytes = bytes;
+  }
+}
+
+/** `line` unchanged, or WireLineTooLarge: every write on a VM's hub link is checked here. */
+export function wireChecked(line: string, what?: string): string {
+  const bytes = Buffer.byteLength(line);
+  if (bytes > WIRE_LINE_MAX) throw new WireLineTooLarge(bytes, what);
+  return line;
+}
+
+/** `body` as one line for a VM's hub link, or WireLineTooLarge. */
+export function wireLine(body: unknown, what?: string): string {
+  return wireChecked(`${JSON.stringify(body)}\n`, what);
+}
+
+/**
+ * Destroy `socket` when bytes wait to go out and none has left for
+ * `stallMs`: a link that stopped carrying data is replaced, not waited on.
+ * Progress is the queue emptying or shrinking (Node's buffer and libuv's);
+ * `bytesWritten` is no measure, since it counts what is only queued.
+ */
+export function watchWriteStall(socket: Socket, stallMs = WRITE_STALL_MS): void {
+  const queued = () => socket.writableLength + ((socket as unknown as { _handle?: { writeQueueSize?: number } })._handle?.writeQueueSize ?? 0);
+  let last = queued();
+  let since = Date.now();
+  const timer = setInterval(() => {
+    if (socket.destroyed) {
+      clearInterval(timer);
+      return;
+    }
+    const now = queued();
+    if (now === 0 || now < last) {
+      last = now;
+      since = Date.now();
+      return;
+    }
+    last = now;
+    if (Date.now() - since >= stallMs) {
+      clearInterval(timer);
+      socket.destroy(new Error(`nothing written for ${Math.round(stallMs / 1000)}s`));
+    }
+  }, Math.max(20, Math.min(5_000, Math.floor(stallMs / 4))));
+  timer.unref();
+  socket.once("close", () => clearInterval(timer));
+}
+
+/** What names a transfer: the hub holds its bytes under `id` until they are whole, or fetched. */
+export type TransferRef = { id: string; size: number; sha256: string };
+/** The hub's answer to one part: an upload's acknowledgement, or a download's bytes. */
+export type PartAnswer = { t?: string; id?: string; ok?: boolean; error?: string; got?: number; off?: number; b64?: string };
+
+/**
+ * The parts of every transfer on one connection to the hub, in turn: one
+ * part in flight on the connection at a time, answered before the next goes
+ * (several transfers take turns part by part), so however many wait, no
+ * more than one part's line is ever queued on the link. A part not answered
+ * in time closes the connection, which fails every transfer on it, and its
+ * owner opens another. Its errors come from `error`, so each owner reports
+ * them in its own terms; `lost` says the link went.
+ */
+export class TransferLane {
+  private readonly waits = new Map<string, { resolve: (answer: PartAnswer) => void; reject: (err: Error) => void }>();
+  private turn: Promise<unknown> = Promise.resolve();
+  private uploading: Promise<unknown> = Promise.resolve();
+  private readonly socket: Socket;
+  private readonly timeoutMs: number;
+  private readonly error: (message: string, lost: boolean) => Error;
+
+  constructor(socket: Socket, timeoutMs: number, error: (message: string, lost: boolean) => Error = (message) => new Error(message)) {
+    this.socket = socket;
+    this.timeoutMs = timeoutMs;
+    this.error = error;
+  }
+
+  /** A line read from the connection: true when it was a part's answer, which is then settled. */
+  take(message: PartAnswer | null | undefined): boolean {
+    if (!message || (message.t !== "up" && message.t !== "down") || typeof message.id !== "string") return false;
+    const key = `${message.t}:${message.id}`;
+    const wait = this.waits.get(key);
+    if (wait) {
+      this.waits.delete(key);
+      wait.resolve(message);
+    }
+    return true;
+  }
+
+  /** The connection closed: every part waiting on it fails. */
+  fail(why: string): void {
+    for (const [key, wait] of this.waits) {
+      this.waits.delete(key);
+      wait.reject(this.error(`${why} (${key})`, true));
+    }
+  }
+
+  /**
+   * `bytes` sent ahead in parts; the hub holds them under the name returned.
+   * One upload at a time on a connection: the hub takes a few per seat at
+   * once, and a burst of parallel publishes waits its turn rather than being
+   * refused.
+   */
+  upload(bytes: Buffer): Promise<TransferRef> {
+    const sent = this.uploading.then(async () => {
+      const id = randomUUID();
+      for (let off = 0; off < bytes.length; off += TRANSFER_PART_BYTES) {
+        const answer = await this.ask({ t: "up", id, size: bytes.length, off, b64: bytes.subarray(off, off + TRANSFER_PART_BYTES).toString("base64") });
+        if (!answer.ok) throw this.error(answer.error || "the hub refused a part", false);
+      }
+      return { id, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+    });
+    this.uploading = sent.catch(() => undefined);
+    return sent;
+  }
+
+  /**
+   * What the hub kept under `ref`, fetched in parts and checked whole; only
+   * then is the hub told it may drop it. A fetch that failed leaves it there
+   * until the connection closes or it idles out.
+   */
+  async download(ref: TransferRef): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    let got = 0;
+    while (got < ref.size) {
+      const answer = await this.ask({ t: "down", id: ref.id, off: got });
+      if (answer.ok === false || typeof answer.b64 !== "string" || answer.off !== got) throw this.error(answer.error || "the hub sent a part out of turn", true);
+      const bytes = Buffer.from(answer.b64, "base64");
+      if (!bytes.length) throw this.error("the hub sent an empty part before the whole had come", true);
+      chunks.push(bytes);
+      got += bytes.length;
+    }
+    const whole = Buffer.concat(chunks);
+    if (whole.length !== ref.size || createHash("sha256").update(whole).digest("hex") !== ref.sha256) {
+      throw this.error("what was fetched in parts does not match what the hub said it was", true);
+    }
+    try {
+      this.socket.write(wireLine({ t: "down", id: ref.id, done: true }));
+    } catch {
+      // the hub drops what it kept on its own, when the connection closes or idles
+    }
+    return whole;
+  }
+
+  /** One part out, and its answer back, when the part before it (of any transfer) has had its answer. */
+  private ask(message: { t: "up" | "down"; id: string } & Record<string, unknown>): Promise<PartAnswer> {
+    const key = `${message.t}:${message.id}`;
+    const asked = this.turn.then(
+      () =>
+        new Promise<PartAnswer>((resolve, reject) => {
+          if (this.socket.destroyed) {
+            reject(this.error("the hub link closed during a transfer", true));
+            return;
+          }
+          const timer = setTimeout(() => {
+            this.waits.delete(key);
+            if (!this.socket.destroyed) this.socket.destroy(new Error("a transfer part not answered"));
+            reject(this.error(`the hub did not answer a transfer part within ${Math.round(this.timeoutMs / 1000)}s; the link closed and a new one opens`, true));
+          }, this.timeoutMs);
+          this.waits.set(key, {
+            resolve: (answer) => {
+              clearTimeout(timer);
+              resolve(answer);
+            },
+            reject: (err) => {
+              clearTimeout(timer);
+              reject(err);
+            },
+          });
+          try {
+            this.socket.write(wireLine(message, "a transfer part"));
+          } catch (err) {
+            this.waits.delete(key);
+            clearTimeout(timer);
+            reject(err as Error);
+          }
+        }),
+    );
+    this.turn = asked.catch(() => undefined);
+    return asked;
+  }
+}
+
+/**
+ * In a microVM the trace goes to the hub on one held connection, line after
+ * line, each answered in order. A connection per line is what a pane on the
+ * host does; through a VM's vsock path, connections opened in a burst were
+ * refused (measured on the board's calls, extensions/board.ts), and a refused
+ * trace line lands in the spill instead of the chain. A line past a part (a
+ * tool's whole output is kept in the trace) goes ahead in parts, and the hub
+ * forwards it whole: nothing is cut, and no write on the link is large.
+ */
+type HeldTrace = { path: string; socket: Socket; waiting: Array<(ok: boolean) => void>; buffer: string; lane: TransferLane };
+let heldTrace: HeldTrace | null = null;
+let heldTraceOpening: Promise<HeldTrace> | null = null;
+
+function openHeldTrace(socketPath: string): Promise<HeldTrace> {
+  if (heldTrace && heldTrace.path === socketPath && !heldTrace.socket.destroyed) return Promise.resolve(heldTrace);
+  if (heldTraceOpening) return heldTraceOpening;
+  // Another socket than the held one's: that link is done with.
+  heldTrace?.socket.destroy();
+  heldTraceOpening = new Promise<HeldTrace>((resolve, reject) => {
+    const socket = connect(socketPath);
+    socket.once("error", reject);
+    socket.once("connect", () => {
+      const auth = seatAuthLine();
+      if (auth) socket.write(auth);
+      const ch: HeldTrace = { path: socketPath, socket, waiting: [], buffer: "", lane: new TransferLane(socket, COLLECTOR_TIMEOUT_MS * 5) };
+      socket.setEncoding("utf8");
+      socket.unref();
+      // A link whose writes stopped moving is closed, and the next line
+      // opens another: the lines waiting on it settle as not taken.
+      watchWriteStall(socket);
+      socket.on("data", (chunk: string) => {
+        ch.buffer += chunk;
+        let cut;
+        while ((cut = ch.buffer.indexOf("\n")) >= 0) {
+          const answer = ch.buffer.slice(0, cut);
+          ch.buffer = ch.buffer.slice(cut + 1);
+          let parsed: (PartAnswer & { ok?: unknown }) | null = null;
+          try {
+            parsed = JSON.parse(answer);
+          } catch {
+            parsed = null;
+          }
+          // A part's acknowledgement is the lane's; every other answer is
+          // the next waiting line's, in order.
+          if (ch.lane.take(parsed)) continue;
+          ch.waiting.shift()?.(parsed?.ok === true);
+        }
+      });
+      socket.on("close", () => {
+        if (heldTrace === ch) heldTrace = null;
+        ch.lane.fail("the trace link closed");
+        for (const settle of ch.waiting.splice(0)) settle(false);
+      });
+      socket.on("error", () => undefined);
+      heldTrace = ch;
+      resolve(ch);
+    });
+  }).finally(() => {
+    heldTraceOpening = null;
+  });
+  return heldTraceOpening;
+}
+
+async function sendHeldTrace(socketPath: string, line: string): Promise<boolean> {
+  let ch: HeldTrace;
+  try {
+    ch = await openHeldTrace(socketPath);
+  } catch {
+    return false;
+  }
+  let wire = line;
+  if (Buffer.byteLength(line) > TRANSFER_PART_BYTES) {
+    try {
+      const upload = await ch.lane.upload(Buffer.from(line.endsWith("\n") ? line.slice(0, -1) : line, "utf8"));
+      wire = wireLine({ t: "trace", upload }, "a trace line");
+    } catch {
+      return false;
+    }
+  }
+  try {
+    wireChecked(wire, "a trace line");
+  } catch {
+    return false;
+  }
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    const timer = setTimeout(() => {
+      ch.socket.destroy();
+      settle(false);
+    }, COLLECTOR_TIMEOUT_MS * 5);
+    if (ch.socket.destroyed) {
+      settle(false);
+      return;
+    }
+    ch.waiting.push(settle);
+    try {
+      ch.socket.write(wire);
+    } catch {
+      ch.socket.destroy();
+    }
+  });
+}
+
 async function sendToCollector(sandboxRoot: string, line: string): Promise<boolean> {
   const configured = process.env.SWARM_TRACE_SOCKET || "";
   if (!configured) return false;
+  if (process.env.SWARM_ISOLATION === "microvm") return sendHeldTrace(configured, line);
   if (configured !== collectorFailuresFor) {
     collectorFailuresFor = configured;
     collectorFailures = 0;
@@ -2305,7 +3014,7 @@ export async function nudgePeerViaBroker(sandboxRoot: string, peer: string, kind
         }
       });
       socket.on("connect", () => {
-        socket.write(`${JSON.stringify({ kind, peer, from })}\n`);
+        socket.write(`${seatAuthLine()}${JSON.stringify({ kind, peer, from })}\n`);
       });
     } catch {
       finish(false);
@@ -2318,6 +3027,20 @@ const COLLECTOR_TIMEOUT_MS = 2000;
 const NUDGE_TIMEOUT_MS = 8000;
 /** Below the ~104-byte `sun_path` limit with room for a prefix. */
 const SOCKET_PATH_SAFE = 96;
+
+/**
+ * The first line a VM's process writes on every connection it opens to its
+ * seat's hub socket: the seat token the kickoff gave that VM alone
+ * (SWARM_SEAT_TOKEN). The hub serves a seat's socket only after it, so a
+ * process outside the VM that can reach the socket file (a host-mode pane
+ * on a host where only Landlock guards, say) cannot speak as the seat. The
+ * hub answers a good one with nothing, so every client reads its replies as
+ * before. Empty outside a VM: no pane is ever given a seat token.
+ */
+export function seatAuthLine(env: NodeJS.ProcessEnv = process.env): string {
+  const token = env.SWARM_SEAT_TOKEN;
+  return token ? `${JSON.stringify({ t: "auth", token })}\n` : "";
+}
 /** Consecutive failures after which this pane stops trying the socket. */
 const COLLECTOR_GIVE_UP_AFTER = 3;
 /** How long a pane stays away before trying the collector again. */
@@ -2396,28 +3119,98 @@ async function tailRefusesAppend(file: string): Promise<boolean> {
   }
 }
 
+/**
+ * Each process's own count of the lines it sent, under an id of its own: a
+ * line that reached the chain and the spill both (a collector that answered
+ * late) is the same (sid, seq) twice, and a gap in a process's seq is a line
+ * that reached neither. Custody reads both.
+ */
+const TRACE_SID = createHash("sha256").update(`${process.pid}:${Date.now()}:${Math.random()}`).digest("hex").slice(0, 12);
+let traceSeq = 0;
+/** In a VM: lines went to this seat's spill, and how far into it has been sent on since. */
+let vmSpilled = false;
+let spillResent = 0;
+
+/**
+ * Once the link is back, what a VM spilled while it was down goes on to the
+ * chain, in order, under its own sid and seq: the lines were the seat's own
+ * and belong in the anchored record, not only in a file in the seat's own
+ * directory. The spill stays as it was (custody counts a line in both as a
+ * duplicate, not a loss), and a line the collector still refuses stops the
+ * resend until the next time.
+ */
+async function resendSpill(sandboxRoot: string, token: string): Promise<void> {
+  vmSpilled = false;
+  const file = join(sandboxRoot, traceSpillRel());
+  const text = await readFile(file, "utf8").catch(() => "");
+  if (text.length <= spillResent) return;
+  const lines = text.slice(spillResent).split("\n");
+  const tail = lines.pop() ?? "";
+  let sent = spillResent;
+  for (const l of lines) {
+    sent += l.length + 1;
+    if (!l.trim()) continue;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(l) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (!(await sendToCollector(sandboxRoot, `${JSON.stringify(token ? { ...parsed, token, resent: true } : { ...parsed, resent: true })}\n`))) {
+      vmSpilled = true;
+      return;
+    }
+    spillResent = sent;
+  }
+  if (tail) vmSpilled = true;
+}
+
 export async function appendEvent(
   sandboxRoot: string,
   event: Omit<SwarmEvent, "ts"> & { ts?: string },
 ): Promise<SwarmEvent> {
-  const record: SwarmEvent = {
-    ts: event.ts ?? new Date().toISOString(),
-    agent: event.agent,
-    tool: event.tool,
-    args: event.args ?? {},
-    result: event.result ?? {},
-  };
-  const file = join(sandboxRoot, EVENTS_REL);
   const token = traceToken();
+  // The token that attributes this line, and the console's mutation token,
+  // are credentials. A shell's `env`, a tool that prints its environment, and
+  // the whole output now kept in the trace would otherwise publish them to
+  // every reader of the trace — and one pane's token lets another speak as it.
+  const credentials: Record<string, string> = {};
+  if (token) credentials.SWARM_TRACE_TOKEN = token;
+  if (process.env.SWARM_UI_TOKEN) credentials.SWARM_UI_TOKEN = process.env.SWARM_UI_TOKEN;
+  const record: SwarmEvent = redactSecrets(
+    {
+      ts: event.ts ?? new Date().toISOString(),
+      agent: event.agent,
+      tool: event.tool,
+      args: event.args ?? {},
+      result: event.result ?? {},
+      sid: TRACE_SID,
+      seq: ++traceSeq,
+    },
+    credentials,
+  );
+  const file = join(sandboxRoot, EVENTS_REL);
   const line = `${JSON.stringify(token ? { ...record, token } : record)}\n`;
   // The collector, when this run has one: a process outside the pane's
   // sandbox profile, holding the only writable handle to the trace. The pane
   // may connect to its socket and may not write the directory, so an agent
   // cannot edit the record of what it did.
-  if (await sendToCollector(sandboxRoot, line)) return record;
+  if (await sendToCollector(sandboxRoot, line)) {
+    if (vmSpilled) await resendSpill(sandboxRoot, token);
+    return record;
+  }
   // The fallback writes the file itself, and the token is a secret, not a
   // field: it goes to the collector and nowhere else.
   const plain = `${JSON.stringify(record)}\n`;
+  // In a VM the trace directory is read-only and shared: the spill is the
+  // only place a line can go.
+  if (process.env.SWARM_ISOLATION === "microvm") {
+    // A line that reaches neither the collector nor the spill is lost, and a
+    // lost line must not pass for a recorded one.
+    await appendFile(join(sandboxRoot, traceSpillRel()), plain, "utf8");
+    vmSpilled = true;
+    return record;
+  }
   await mkdir(dirname(file), { recursive: true }).catch(() => undefined);
   // A chained record must not take an unchained line: the verifier reports it
   // as "appended" by something other than the collector — a tamper alarm the
@@ -2449,7 +3242,7 @@ export async function appendEvent(
     // the point — so a failed send leaves nowhere to write the line. Losing it
     // in silence is the one outcome a record cannot have: it goes to a spill
     // file in `work/`, which the report and the package name.
-    await appendFile(join(sandboxRoot, TRACE_SPILL_REL), plain, "utf8").catch(() => undefined);
+    await appendFile(join(sandboxRoot, traceSpillRel()), plain, "utf8").catch(() => undefined);
     throw err;
   }
   return record;
@@ -2469,19 +3262,38 @@ export function formatEventLine(event: SwarmEvent): string {
   return [event.ts, event.agent, event.tool, args, result].filter(Boolean).join("  ");
 }
 
+/** The counters of a seat's spend that only ever grow within a run. */
+export const MONOTONIC_USAGE_KEYS = ["spent_usd", "tokens", "calls", "input", "output", "cache_read", "cache_write"] as const;
+
 export async function applySessionUsage(
   sandboxRoot: string,
   agentId: string,
   slice: SessionUsageSlice,
+  options: { monotonic?: boolean } = {},
 ): Promise<{
   budget: BudgetRecord;
   over_budget: boolean;
   first_over: boolean;
 }> {
   return withTableLock(sandboxRoot, async () => {
-    const budget = await readBudget(sandboxRoot).catch(() =>
-      normalizeBudget({ started_at: new Date().toISOString() }),
-    );
+    // A sandbox with no budget yet starts one; a budget.json that is there
+    // and does not read is the run's caps, and is never rebuilt from
+    // defaults (no cap, a fifteen-minute clock started now).
+    const budget = await readBudget(sandboxRoot).catch((err: NodeJS.ErrnoException) => {
+      if (err?.code === "ENOENT") return normalizeBudget({ started_at: new Date().toISOString() });
+      throw new Error(`budget.json does not read (${err instanceof Error ? err.message : String(err)}); its caps are left as they are`);
+    });
+    if (options.monotonic) {
+      // Checked here, under the table lock, against the row this write
+      // replaces: two reports in flight at once cannot both pass a check made
+      // before either was written and leave the smaller one on disk.
+      const was = budget.agents[agentId];
+      for (const key of MONOTONIC_USAGE_KEYS) {
+        const before = Number(was?.[key] ?? 0);
+        const now = Number(slice[key] ?? 0);
+        if (now + 1e-9 < before) throw new Error(`usage went backwards: ${key} ${now} < ${before}; a seat's spend only grows`);
+      }
+    }
     // The kickoff wrote the seat's model once; a fold that dropped it would
     // take the seat out of its model's cap after the first provider call.
     const model = budget.agents[agentId]?.model ?? slice.model;
@@ -2514,7 +3326,17 @@ export type FileVersion = {
   bytes: number;
   /** Content hash. Agents quote the short form when signing off on a file. */
   sha256: string;
+  /** False when only the hash was kept: the file was past `HISTORY_STORE_MAX_BYTES`. */
+  stored?: false;
 };
+
+/**
+ * Past this a revision is recorded by its hash and size, not copied: an
+ * extracted disk image or a memory dump written into an agent's directory is
+ * not a document anyone restores, and a copy per revision would fill the
+ * disk (and, from a VM, travel the hub link whole).
+ */
+export const HISTORY_STORE_MAX_BYTES = 32 * 1024 * 1024;
 
 /** How many hex characters agents see and may pass back to `file_diff`. */
 export const SHORT_HASH_LENGTH = 8;
@@ -2527,11 +3349,35 @@ function historyDir(sandboxRoot: string, pathKey: string): string {
   return join(sandboxRoot, HISTORY_REL, lockHash(pathKey));
 }
 
+/** Where revision `rev` of a file's bytes is kept. */
+export function historyRevisionPath(sandboxRoot: string, pathKey: string, rev: number): string {
+  return join(historyDir(sandboxRoot, pathKey), `${String(rev).padStart(6, "0")}.bin`);
+}
+
+export function sha256Hex(bytes: Buffer | string): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/**
+ * How long a guest waits for a file the host wrote a moment ago: virtio-fs
+ * caches a file's size and existence for five seconds in each guest
+ * (docs/adr/0009), and this is that and a margin.
+ */
+export const GUEST_CACHE_WAIT_MS = 8_000;
+
 export async function listFileHistory(
   sandboxRoot: string,
   rawPath: string,
 ): Promise<FileVersion[]> {
-  const pathKey = claimKey(sandboxRoot, rawPath);
+  // History is kept by the path a file really has. A path that resolves out
+  // of the sandbox (a planted link) has none; the write watch asks about
+  // such paths and wants "no history", not a refusal.
+  let pathKey: string;
+  try {
+    pathKey = await realPathKey(sandboxRoot, rawPath);
+  } catch {
+    return [];
+  }
   const dir = historyDir(sandboxRoot, pathKey);
   try {
     const raw = await readFile(join(dir, "index.json"), "utf8");
@@ -2548,64 +3394,121 @@ export async function listFileHistory(
  * Content-identical writes do not create a revision, so the pre-write and
  * post-write snapshots around one edit collapse into a single entry.
  */
+/** What a revision records: the bytes (when they are kept), their hash and size. */
+async function takeRevisionBytes(
+  sandboxRoot: string,
+  rawPath: string,
+  options: { bytes?: Buffer; hashOnly?: { sha256: string; bytes: number } },
+): Promise<{ pathKey: string; bytes: Buffer | null; sha256: string; size: number } | null> {
+  if (options.bytes) {
+    const pathKey = await realPathKey(sandboxRoot, rawPath);
+    return { pathKey, bytes: options.bytes, sha256: createHash("sha256").update(options.bytes).digest("hex"), size: options.bytes.byteLength };
+  }
+  if (options.hashOnly) {
+    const pathKey = await realPathKey(sandboxRoot, rawPath);
+    return { pathKey, bytes: null, sha256: options.hashOnly.sha256, size: options.hashOnly.bytes };
+  }
+  try {
+    const read = await readSandboxFile(sandboxRoot, rawPath, { maxBytes: HISTORY_STORE_MAX_BYTES });
+    if (!read) return null;
+    return { pathKey: read.pathKey, bytes: read.bytes, sha256: createHash("sha256").update(read.bytes).digest("hex"), size: read.bytes.byteLength };
+  } catch (err) {
+    if (!(err instanceof FileTooLarge)) throw err;
+  }
+  const hashed = await hashSandboxFile(sandboxRoot, rawPath);
+  return hashed ? { pathKey: hashed.pathKey, bytes: null, sha256: hashed.sha256, size: hashed.bytes } : null;
+}
+
 export async function recordFileVersion(
   sandboxRoot: string,
   rawPath: string,
   agentId: string,
+  options: { bytes?: Buffer; hashOnly?: { sha256: string; bytes: number }; missing?: boolean } = {},
 ): Promise<FileVersion | null> {
-  const pathKey = claimKey(sandboxRoot, rawPath);
-  const abs = resolve(sandboxRoot, pathKey);
-  let bytes: Buffer;
-  try {
-    bytes = await readFile(abs);
-  } catch {
-    return null;
-  }
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  // Never through a link: the file is what the resolved path names, or
+  // nothing; a link out of the sandbox, or a link at all, is a refusal the
+  // caller hears about. From a VM the bytes (or, past the store limit, the
+  // hash) come with the call: the hub does not open a file under a
+  // directory a running seat can rearrange.
+  if (options.missing) return null;
+  const taken = await takeRevisionBytes(sandboxRoot, rawPath, options);
+  if (!taken) return null;
+  const { pathKey, sha256, size } = taken;
+  let bytes = taken.bytes;
+  if (bytes && bytes.byteLength > HISTORY_STORE_MAX_BYTES) bytes = null;
   // Allocating the next revision number is a read-modify-write on
   // index.json shared by every process (agents, the reaper, the web
   // operator). Without the mutex two writers take the same number, one
   // binary overwrites the other, and the surviving index entry names a hash
   // the stored bytes do not have.
+  const key = pathKey;
   return withTableLock(sandboxRoot, async () => {
-    const dir = historyDir(sandboxRoot, pathKey);
+    const dir = historyDir(sandboxRoot, key);
     await mkdir(dir, { recursive: true });
-    const versions = await listFileHistory(sandboxRoot, pathKey);
+    const versions = await listFileHistory(sandboxRoot, key);
     const last = versions.at(-1);
     if (last?.sha256 === sha256) return null;
     const rev = (last?.rev ?? 0) + 1;
-    await writeFile(join(dir, `${String(rev).padStart(6, "0")}.bin`), bytes);
+    if (bytes) await writeFile(join(dir, `${String(rev).padStart(6, "0")}.bin`), bytes);
     const record: FileVersion = {
       rev,
       ts: new Date().toISOString(),
       agent: agentId,
-      path: pathKey,
-      bytes: bytes.byteLength,
+      path: key,
+      bytes: size,
       sha256,
+      ...(bytes ? {} : { stored: false as const }),
     };
     versions.push(record);
-    await writeFile(join(dir, "index.json"), `${JSON.stringify(versions, null, 2)}\n`, "utf8");
+    await writeFileAtomic(join(dir, "index.json"), `${JSON.stringify(versions, null, 2)}\n`);
     return record;
   });
+}
+
+/** Why a revision's bytes cannot be read back, when they were not kept. */
+function notStored(pathKey: string, v: FileVersion): string {
+  return `${pathKey} rev ${v.rev} was recorded by its hash only (${v.bytes} bytes, past the ${HISTORY_STORE_MAX_BYTES}-byte store limit); its bytes were not kept`;
 }
 
 /**
  * Accept what an agent is likely to hold: a revision number, a short or full
  * content hash, or `latest` / `disk` for the bytes on disk right now.
  */
+/** Past this a file is not diffed: a diff of a disk image is not something anyone reads. */
+export const DIFF_MAX_BYTES = 16 * 1024 * 1024;
+
+export function isDiskRef(ref: number | string | undefined): boolean {
+  const token = String(ref ?? "").trim().toLowerCase();
+  return token === "disk" || token === "latest" || token === "working";
+}
+
 export async function resolveRevision(
   sandboxRoot: string,
   rawPath: string,
   ref: number | string,
+  options: { disk?: Buffer | null } = {},
 ): Promise<{ rev: number | null; sha256: string | null; text: string } | null> {
-  const pathKey = claimKey(sandboxRoot, rawPath);
+  const pathKey = await realPathKey(sandboxRoot, rawPath);
   const versions = await listFileHistory(sandboxRoot, pathKey);
   const token = String(ref).trim().toLowerCase();
 
-  if (token === "disk" || token === "latest" || token === "working") {
-    const text = await readFile(resolve(sandboxRoot, pathKey), "utf8").catch(() => null);
-    if (text === null) return null;
-    return { rev: null, sha256: createHash("sha256").update(text).digest("hex"), text };
+  if (isDiskRef(token)) {
+    // From a VM the bytes on disk come with the call (`options.disk`, null
+    // for no such file): the hub does not open a file under a directory a
+    // running seat can rearrange.
+    let bytes: Buffer | null;
+    if (options.disk !== undefined) {
+      bytes = options.disk;
+    } else {
+      try {
+        bytes = (await readSandboxFile(sandboxRoot, pathKey, { maxBytes: DIFF_MAX_BYTES }))?.bytes ?? null;
+      } catch (err) {
+        if (err instanceof FileTooLarge) throw new Error(`${pathKey} is too large to diff (${err.size} bytes; the limit is ${DIFF_MAX_BYTES})`);
+        bytes = null;
+      }
+    }
+    if (!bytes) return null;
+    return { rev: null, sha256: createHash("sha256").update(bytes).digest("hex"), text: bytes.toString("utf8") };
   }
 
   let match: FileVersion | undefined;
@@ -2624,6 +3527,8 @@ export async function resolveRevision(
     match = hits.at(-1);
   }
   if (!match) return null;
+  if (match.stored === false) throw new Error(notStored(pathKey, match));
+  if (match.bytes > DIFF_MAX_BYTES) throw new Error(`${pathKey} rev ${match.rev} is too large to diff (${match.bytes} bytes; the limit is ${DIFF_MAX_BYTES})`);
   const file = join(historyDir(sandboxRoot, pathKey), `${String(match.rev).padStart(6, "0")}.bin`);
   const text = await readFile(file, "utf8").catch(() => null);
   if (text === null) return null;
@@ -2635,9 +3540,11 @@ export async function readFileVersion(
   rawPath: string,
   rev: number,
 ): Promise<{ path: string; rev: number; text: string } | null> {
-  const pathKey = claimKey(sandboxRoot, rawPath);
+  const pathKey = await realPathKey(sandboxRoot, rawPath);
   const versions = await listFileHistory(sandboxRoot, pathKey);
-  if (!versions.some((v) => v.rev === rev)) return null;
+  const version = versions.find((v) => v.rev === rev);
+  if (!version) return null;
+  if (version.stored === false) throw new Error(notStored(pathKey, version));
   const file = join(historyDir(sandboxRoot, pathKey), `${String(rev).padStart(6, "0")}.bin`);
   const text = await readFile(file, "utf8");
   return { path: pathKey, rev, text };
@@ -2743,15 +3650,16 @@ export async function fileDiff(
   rawPath: string,
   fromRef?: number | string,
   toRef?: number | string,
+  options: { disk?: Buffer | null } = {},
 ): Promise<FileDiffResult> {
-  const pathKey = claimKey(sandboxRoot, rawPath);
+  const pathKey = await realPathKey(sandboxRoot, rawPath);
   const versions = await listFileHistory(sandboxRoot, pathKey);
   const from = fromRef ?? versions.at(-1)?.rev ?? "disk";
   const to = toRef ?? "disk";
 
-  const left = await resolveRevision(sandboxRoot, pathKey, from);
+  const left = await resolveRevision(sandboxRoot, pathKey, from, options);
   if (!left) throw new Error(`No revision "${from}" for ${pathKey}`);
-  const right = await resolveRevision(sandboxRoot, pathKey, to);
+  const right = await resolveRevision(sandboxRoot, pathKey, to, options);
   if (!right) throw new Error(`No revision "${to}" for ${pathKey}`);
 
   const rows = diffLines(splitLines(left.text), splitLines(right.text));
@@ -2774,27 +3682,34 @@ export async function restoreFileVersion(
   ctx: SwarmContext,
   rawPath: string,
   rev: number,
-): Promise<{ ok: boolean; path: string; rev: number; reason?: string; landed_rev?: number | null }> {
-  const pathKey = claimKey(ctx.sandboxRoot, rawPath);
+): Promise<{ ok: boolean; path: string; rev: number; reason?: string; landed_rev?: number | null; sha256?: string }> {
+  const pathKey = await realPathKey(ctx.sandboxRoot, rawPath);
   const guard = await guardWrite(ctx, pathKey);
   if (!guard.ok) {
     return { ok: false, path: pathKey, rev, reason: guard.reason };
   }
   const versions = await listFileHistory(ctx.sandboxRoot, pathKey);
-  if (!versions.some((v) => v.rev === rev)) {
+  const version = versions.find((v) => v.rev === rev);
+  if (!version) {
     return { ok: false, path: pathKey, rev, reason: `no history rev ${rev}` };
   }
+  if (version.stored === false) return { ok: false, path: pathKey, rev, reason: notStored(pathKey, version) };
   // Snapshot first, in case the bytes on disk drifted from the last recorded
   // revision (a bash write, say). Deduping makes this a no-op when they match.
   await recordFileVersion(ctx.sandboxRoot, pathKey, ctx.agentId);
   const src = join(historyDir(ctx.sandboxRoot, pathKey), `${String(rev).padStart(6, "0")}.bin`);
-  const dest = resolve(ctx.sandboxRoot, pathKey);
-  await mkdir(dirname(dest), { recursive: true });
-  await copyFile(src, dest);
+  // In place and never through a link: the destination is opened with
+  // O_NOFOLLOW and checked against what was resolved, so a link swapped in
+  // after the guard's check lands the bytes nowhere.
+  try {
+    await writeSandboxFile(ctx.sandboxRoot, pathKey, await readFile(src));
+  } catch (err) {
+    return { ok: false, path: pathKey, rev, reason: (err as Error).message };
+  }
   // Then record the restore itself, so history stays a truthful log of what
   // the file looked like over time and who put it that way.
   const landed = await recordFileVersion(ctx.sandboxRoot, pathKey, ctx.agentId);
-  return { ok: true, path: pathKey, rev, landed_rev: landed?.rev ?? null };
+  return { ok: true, path: pathKey, rev, landed_rev: landed?.rev ?? null, sha256: version.sha256 };
 }
 
 /**
@@ -3034,10 +3949,39 @@ const BASH_WATCH_FILES = ["SWARM.md", "team.json", "layout.json", SENTINEL_REL] 
  * whose prefix changed or that got shorter was rewritten. `edit` and `write`
  * already refuse both paths; this is the shell, which no hook can intercept.
  */
-const APPEND_ONLY_WATCH = ["ledger/entries.jsonl", "traces/events.jsonl"] as const;
+// The host's spill of trace lines the collector did not take is the record
+// too: a shell that rewrote it would unsay what the harness kept.
+const APPEND_ONLY_WATCH = ["ledger/entries.jsonl", "traces/events.jsonl", TRACE_SPILL_REL] as const;
 
-/** Size and full digest of an append-only record, taken before a shell call. */
-export type AppendOnlyMark = { size: number; sha: string };
+/**
+ * Size and full digest of an append-only record, taken before a shell call.
+ * The ledger also keeps the digest of its entries' chained cores: a merge
+ * (a second agent citing an entry) rewrites the file to add an author, which
+ * changes its bytes and not one chained core.
+ */
+export type AppendOnlyMark = { size: number; sha: string; cores?: { lines: number; digest: string } };
+
+const LEDGER_WATCH = "ledger/entries.jsonl";
+
+/** The digest of the first `limit` entries' chained cores (all, by default), and how many it covered. */
+function ledgerCoreDigest(text: string, limit = Infinity): { lines: number; digest: string } {
+  const hash = createHash("sha256");
+  let lines = 0;
+  for (const line of text.split("\n")) {
+    if (lines >= limit) break;
+    if (!line.trim()) continue;
+    lines += 1;
+    let e: LedgerEntry;
+    try {
+      e = JSON.parse(line) as LedgerEntry;
+    } catch {
+      hash.update(`raw\u0000${line}\u0000`);
+      continue;
+    }
+    hash.update(`${ledgerCore(e)}\u0000${e.prev ?? ""}\u0000${e.hash ?? ""}\u0000`);
+  }
+  return { lines, digest: hash.digest("hex") };
+}
 
 /**
  * Hash the first `bytes` of a file. Used to ask whether what a record used to
@@ -3065,6 +4009,24 @@ async function hashOfPrefix(sandboxRoot: string, pathKey: string, bytes: number)
   }
 }
 
+/** The first `bytes` of a file as text, or null when it cannot be read. */
+async function readPrefixText(sandboxRoot: string, pathKey: string, bytes: number): Promise<string | null> {
+  const handle = await open(resolve(sandboxRoot, pathKey), "r").catch(() => null);
+  if (!handle) return null;
+  try {
+    const buf = Buffer.alloc(bytes);
+    let read = 0;
+    while (read < bytes) {
+      const { bytesRead } = await handle.read(buf, read, bytes - read, read);
+      if (bytesRead <= 0) break;
+      read += bytesRead;
+    }
+    return buf.subarray(0, read).toString("utf8");
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
 /** Where each append-only record stood before the call. */
 async function appendOnlyMarks(sandboxRoot: string): Promise<Map<string, AppendOnlyMark>> {
   const marks = new Map<string, AppendOnlyMark>();
@@ -3078,7 +4040,12 @@ async function appendOnlyMarks(sandboxRoot: string): Promise<Map<string, AppendO
     // over S+delta bytes never matches the S-byte prefix hashed afterwards,
     // and run s7099 posted RECORD REWRITTEN for regipy reads that touched
     // nothing. Hash exactly the sized prefix, as the comparison does.
-    marks.set(pathKey, { size: info.size, sha: await hashOfPrefix(sandboxRoot, pathKey, info.size) });
+    const mark: AppendOnlyMark = { size: info.size, sha: await hashOfPrefix(sandboxRoot, pathKey, info.size) };
+    if (pathKey === LEDGER_WATCH) {
+      const text = await readPrefixText(sandboxRoot, pathKey, info.size);
+      if (text !== null) mark.cores = ledgerCoreDigest(text);
+    }
+    marks.set(pathKey, mark);
   }
   return marks;
 }
@@ -3118,21 +4085,32 @@ function capFingerprint(budget: BudgetRecord | null): string {
  */
 export const SHARED_WORK_DIRS = [".toolchain", ".tmp"] as const;
 
-async function listWorkFiles(sandboxRoot: string): Promise<{ files: string[]; truncated: boolean }> {
+/**
+ * The files under work/, or under `root` (a directory below work/) with a
+ * budget of its own: a VM seat's watch walks only its own directories, so a
+ * peer's extraction of thousands of files cannot use up the budget first.
+ */
+async function listWorkFiles(sandboxRoot: string, root = "work"): Promise<{ files: string[]; truncated: boolean }> {
   const out: string[] = [];
   let truncated = false;
+  const top = root === "work";
   async function walk(dir: string, depth: number): Promise<void> {
     const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       const abs = join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (depth === 0 && (SHARED_WORK_DIRS as readonly string[]).includes(entry.name)) continue;
+        if (top && depth === 0 && (SHARED_WORK_DIRS as readonly string[]).includes(entry.name)) continue;
         if (depth >= BASH_WATCH_MAX_DEPTH) {
           truncated = true;
           continue;
         }
         await walk(abs, depth + 1);
       } else if (entry.isFile()) {
+        // The harness's own spill of trace lines the collector did not take:
+        // it grows during a shell call because the harness writes it, and a
+        // watch that counted it blamed the agent's command (measured: a false
+        // CLAIM VIOLATION on the first microVM run).
+        if (top && depth === 0 && entry.name === ".trace-spill.jsonl") continue;
         if (out.length >= BASH_WATCH_MAX_WORK_FILES) {
           truncated = true;
           return;
@@ -3141,12 +4119,12 @@ async function listWorkFiles(sandboxRoot: string): Promise<{ files: string[]; tr
       }
     }
   }
-  await walk(join(sandboxRoot, "work"), 0);
+  await walk(join(sandboxRoot, root), 0);
   return { files: out, truncated };
 }
 
 /** sha256 of a file by streaming: a 25 GB disk image must not become a Buffer. */
-export async function sha256File(abs: string): Promise<string> {
+export async function sha256File(abs: string | Buffer): Promise<string> {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(abs)) hash.update(chunk as Buffer);
   return hash.digest("hex");
@@ -3194,10 +4172,34 @@ async function hashOfWatched(sandboxRoot: string, pathKey: string): Promise<stri
  * everything under work/ (the artifacts, claimed or not), the handful of
  * harness files above, every live claim, and the caps.
  */
+/**
+ * In a microVM a seat can write only its own directories: the rest of the
+ * run is read-only in its VM, and whatever changes there changed through the
+ * hub (a peer's publish, recorded with its author) or on the host. Watching
+ * it from here only read a five-second-old view of other seats' work and
+ * blamed this seat's command for it; so a VM's watch is its own directories.
+ */
+export function vmSeatScope(agentId: string | undefined, env: NodeJS.ProcessEnv = process.env): string[] | null {
+  if (env.SWARM_ISOLATION !== "microvm" || !agentId || agentId === SYSTEM_AGENT) return null;
+  return [`work/${agentId}/`, `work/extracted/${agentId}/`, `work/quarantine/${agentId}/`];
+}
+
 export async function watchedPathHashes(
   sandboxRoot: string,
+  agentId?: string,
   opts: { appendOnly?: boolean } = {},
 ): Promise<WatchSnapshot> {
+  const scope = vmSeatScope(agentId);
+  if (scope) {
+    const hashes = new Map<string, string>();
+    let truncated = false;
+    for (const dir of scope) {
+      const work = await listWorkFiles(sandboxRoot, dir.replace(/\/$/, ""));
+      truncated ||= work.truncated;
+      for (const file of work.files) hashes.set(file, await hashOfWatched(sandboxRoot, file));
+    }
+    return { hashes, caps: "", appendOnly: new Map(), truncated };
+  }
   const hashes = new Map<string, string>();
   const paths = new Set<string>((await listClaims(sandboxRoot)).map((c) => c.path));
   for (const file of BASH_WATCH_FILES) paths.add(file);
@@ -3241,8 +4243,19 @@ export type BashWriteReport = {
 };
 
 /** True when the bytes on disk are the newest thing history knows about. */
-async function accountedForByHistory(sandboxRoot: string, pathKey: string): Promise<boolean> {
-  const versions = await listFileHistory(sandboxRoot, pathKey);
+/**
+ * Where the write diff asks who holds a path and what its history says. On
+ * the host that is these files; in a VM it is the hub, because the VM reads
+ * locks/ and history/ through a share that caches attributes for 5 s, and a
+ * revision recorded a moment ago would look like an unaccounted write.
+ */
+export type WatchLookups = {
+  listClaims: (sandboxRoot: string) => Promise<LockRecord[]>;
+  listFileHistory: (sandboxRoot: string, rawPath: string) => Promise<FileVersion[]>;
+};
+
+async function accountedForByHistory(sandboxRoot: string, pathKey: string, lookups: WatchLookups): Promise<boolean> {
+  const versions = await lookups.listFileHistory(sandboxRoot, pathKey);
   const latest = versions.at(-1);
   if (!latest) return false;
   return (await hashOfWatched(sandboxRoot, pathKey)) === latest.sha256;
@@ -3265,9 +4278,10 @@ export async function diffWatchedPaths(
   sandboxRoot: string,
   before: WatchSnapshot,
   writer: string,
+  lookups: WatchLookups = { listClaims, listFileHistory },
 ): Promise<BashWriteReport[]> {
-  const after = await watchedPathHashes(sandboxRoot, { appendOnly: false });
-  const claims = new Map((await listClaims(sandboxRoot)).map((c) => [c.path, c]));
+  const after = await watchedPathHashes(sandboxRoot, writer, { appendOnly: false });
+  const claims = new Map((await lookups.listClaims(sandboxRoot)).map((c) => [c.path, c]));
   const out: BashWriteReport[] = [];
 
   if (before.caps && after.caps && before.caps !== after.caps) {
@@ -3290,6 +4304,15 @@ export async function diffWatchedPaths(
     const size = info && info.isFile() ? info.size : 0;
     const prefix = size >= mark.size ? await hashOfPrefix(sandboxRoot, pathKey, mark.size) : "";
     if (size >= mark.size && prefix === mark.sha) continue;
+    // A ledger whose earlier entries kept every chained core was merged
+    // into (an author added), not rewritten.
+    if (mark.cores && size > 0) {
+      const text = await readPrefixText(sandboxRoot, pathKey, size);
+      if (text !== null) {
+        const now = ledgerCoreDigest(text, mark.cores.lines);
+        if (now.lines === mark.cores.lines && now.digest === mark.cores.digest) continue;
+      }
+    }
     out.push({
       path: pathKey,
       owner: null,
@@ -3313,11 +4336,11 @@ export async function diffWatchedPaths(
         ? await hashOfCached(sandboxRoot, pathKey)
         : await hashOfWatched(sandboxRoot, pathKey);
     if (was === now) continue;
-    if (await accountedForByHistory(sandboxRoot, pathKey)) continue;
+    if (await accountedForByHistory(sandboxRoot, pathKey, lookups)) continue;
     const claim = claims.get(pathKey);
     const isProtected = isProtectedPath(pathKey);
     const isInput = isInputsPath(pathKey);
-    const versions = isInput ? [] : await listFileHistory(sandboxRoot, pathKey);
+    const versions = isInput ? [] : await lookups.listFileHistory(sandboxRoot, pathKey);
     out.push({
       path: pathKey,
       owner: claim?.owner ?? null,
@@ -3469,6 +4492,19 @@ export const TOOL_RESERVED_NAMES = new Set([
   // self-compaction: the tool, the per-turn context row and the hand-off events
   "self_compact", "context", "compact_notice", "compact_warning", "compact_forced", "compact_hold",
   "compact_note", "compact_start", "compact_done", "compact_failed", "compact_config",
+  // microVM runs: the tool that writes a shared file, the hub's own lines,
+  // and what an agent's extension says about the hub (tests/reserved-names)
+  "publish_file", "publish_needed", "skill", "finish_line", "hub_call", "hub_link", "hub_prompt",
+  "hub_lost", "hub_lost_stop", "hub_restarted", "hub_clear_up", "vm_finish", "custody", "record_violation",
+  // The keeper restarting the collector, an operator's own command or
+  // console action, and the console opening an artifact with its scripts.
+  "collector_restarted", "operator_action", "artifact_scripts",
+  // A long command run again pointed at its kept output, a seat stopped
+  // before a model call, a ledger correction, the operator's --notify hook,
+  // the hub's history quota and a connection refused its seat token.
+  "repeat_hint", "budget_precall_stop", "ledger_superseded", "notify", "history_quota", "seat_auth",
+  // The host-side model gateway (scripts/model-gateway.ts).
+  "model_gateway_started", "model_gateway_refused", "model_gateway_upstream_error", "model_gateway_restarted",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
@@ -3496,6 +4532,11 @@ export type ForgedToolManifest = {
   /** The pack this tool was seeded from, when a run carried one. Absent for a
    *  tool an agent forged during the run. */
   pack?: string;
+  /** Programs the script calls, as its author named them: what a later case
+   *  (or `tools --save` into a library) needs its image to hold. */
+  requires?: string[];
+  /** The image the tool was forged against, by digest, in a VM run. */
+  image_digest?: string;
 };
 
 export type ForgeToolSpec = {
@@ -3506,6 +4547,7 @@ export type ForgeToolSpec = {
   script: string;
   timeout_seconds?: number;
   example?: string;
+  requires?: string[];
 };
 
 export type ForgeResult =
@@ -3608,7 +4650,14 @@ export function validateToolSpec(spec: unknown): { ok: true; spec: ForgeToolSpec
   }
   const example = typeof spec.example === "string" && spec.example.trim() ? spec.example.trim() : undefined;
   if (example && example.length > TOOL_DESCRIPTION_MAX_CHARS) return { ok: false, reason: `example is longer than ${TOOL_DESCRIPTION_MAX_CHARS} chars` };
-  return { ok: true, spec: { name, description, params, runtime: runtime as ToolRuntime, script, timeout_seconds: timeout, ...(example ? { example } : {}) } };
+  let requires: string[] | undefined;
+  if (spec.requires !== undefined) {
+    if (!Array.isArray(spec.requires) || spec.requires.length > 32 || !spec.requires.every((r) => typeof r === "string" && /^[A-Za-z0-9._+-]{1,64}$/.test(r))) {
+      return { ok: false, reason: "requires must be a list of program names (at most 32)" };
+    }
+    requires = [...new Set(spec.requires as string[])];
+  }
+  return { ok: true, spec: { name, description, params, runtime: runtime as ToolRuntime, script, timeout_seconds: timeout, ...(example ? { example } : {}), ...(requires?.length ? { requires } : {}) } };
 }
 
 export function toolDir(sandboxRoot: string, name: string): string {
@@ -3639,6 +4688,8 @@ function parseManifest(raw: string): ForgedToolManifest | null {
       version: Number(m.version) || 1,
       sha256: m.sha256,
       ...(typeof m.pack === "string" && m.pack ? { pack: m.pack } : {}),
+      ...(Array.isArray(m.requires) && m.requires.every((r: unknown) => typeof r === "string") ? { requires: m.requires as string[] } : {}),
+      ...(typeof m.image_digest === "string" && m.image_digest ? { image_digest: m.image_digest } : {}),
     };
   } catch {
     return null;
@@ -3865,6 +4916,9 @@ export async function forgeTool(ctx: SwarmContext, rawSpec: unknown): Promise<Fo
     entry,
     timeout_seconds: spec.timeout_seconds ?? TOOL_TIMEOUT_DEFAULT_SECONDS,
     ...(spec.example ? { example: spec.example } : {}),
+    ...(spec.requires?.length ? { requires: spec.requires } : {}),
+    // In a VM run the hub forges on the host and knows the run's image.
+    ...(process.env.SWARM_VM_IMAGE_DIGEST ? { image_digest: process.env.SWARM_VM_IMAGE_DIGEST } : {}),
     by: ctx.agentId,
     at: new Date().toISOString(),
     version,
@@ -4018,6 +5072,11 @@ const FORGED_ENV_KEEP = new Set([
   "REQUESTS_CA_BUNDLE",
   "CURL_CA_BUNDLE",
   "NODE_EXTRA_CA_CERTS",
+  // Where an agent's own installs live. Without these a forged tool could not
+  // import a package the same agent had just installed with pip.
+  "PYTHONUSERBASE",
+  "PYTHONPATH",
+  "VIRTUAL_ENV",
 ]);
 
 /**
@@ -4038,6 +5097,101 @@ export function forgedToolEnv(
     if (FORGED_ENV_KEEP.has(key) || key.startsWith("SWARM_")) env[key] = value;
   }
   return { ...env, ...extra };
+}
+
+/**
+ * A pack's secrets, for that pack's own tools and nothing else
+ * (docs/packs.md §4).
+ *
+ * The kickoff describes them in SWARM_PACK_SECRETS as JSON:
+ * `{"<pack id>": {"names": ["VT_API_KEY"], "file": "<secrets.env>"}}`.
+ * - In a microVM the names are enough: each is already in the VM's
+ *   environment as a placeholder that the host swaps for the real value on
+ *   the way to the host the secret is bound to, so the value never enters the
+ *   VM. `file` is absent.
+ * - On the host, `file` is present only when the operator accepted, with
+ *   --allow-pack-secrets, that a pane can read what its own extension can;
+ *   the value is read at call time and handed to the tool's child process.
+ *
+ * A tool forged during the run has no pack and gets nothing.
+ */
+export type PackSecretsSpec = Record<string, { names?: string[]; file?: string }>;
+
+export function packSecretsSpec(env: NodeJS.ProcessEnv = process.env): PackSecretsSpec {
+  const raw = env.SWARM_PACK_SECRETS;
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as PackSecretsSpec) : {};
+  } catch {
+    return {};
+  }
+}
+
+const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/** KEY=VALUE lines, as `pack install` writes them; anything else is ignored. */
+export function parseSecretsEnv(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split(/\r?\n/)) {
+    const at = line.indexOf("=");
+    if (at <= 0) continue;
+    const key = line.slice(0, at).trim();
+    if (SECRET_NAME_RE.test(key)) out[key] = line.slice(at + 1);
+  }
+  return out;
+}
+
+export async function packSecretsFor(
+  manifest: { pack?: string },
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Record<string, string>> {
+  if (!manifest.pack) return {};
+  const spec = packSecretsSpec(env)[manifest.pack];
+  if (!spec) return {};
+  const out: Record<string, string> = {};
+  for (const name of spec.names ?? []) {
+    if (SECRET_NAME_RE.test(name) && typeof env[name] === "string") out[name] = env[name] as string;
+  }
+  if (spec.file) {
+    const text = await readFile(spec.file, "utf8").catch(() => "");
+    Object.assign(out, parseSecretsEnv(text));
+  }
+  return out;
+}
+
+/**
+ * Put `[secret NAME]` where a secret's value appears. The trace keeps every
+ * character an agent produced — except these, which the pack's author and the
+ * operator did not give to the record. Values shorter than 6 characters are
+ * left alone: they are not credentials, and replacing them would mangle text.
+ */
+export function redactSecrets<T>(value: T, secrets: Record<string, string>): T {
+  const pairs = Object.entries(secrets).filter(([, v]) => typeof v === "string" && v.length >= 6);
+  if (!pairs.length) return value;
+  const walk = (v: unknown): unknown => {
+    if (typeof v === "string") {
+      let t = v;
+      for (const [name, secret] of pairs) t = t.split(secret).join(`[secret ${name}]`);
+      return t;
+    }
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  return walk(value) as T;
+}
+
+/**
+ * The script hash a tool was sealed with, by name: what the hub answers a VM,
+ * read on the host, where the record is current (a guest reads tools/ and
+ * history/ up to five seconds old). Empty when there is no such tool.
+ */
+export async function forgedToolSeal(sandboxRoot: string, name: string): Promise<string> {
+  if (!/^[a-z][a-z0-9_]{2,31}$/.test(String(name))) return "";
+  const read = await readSandboxFile(sandboxRoot, `${TOOLS_DIR}/${name}/${TOOL_MANIFEST}`).catch(() => null);
+  const manifest = read ? parseManifest(read.bytes.toString("utf8")) : null;
+  return manifest ? expectedToolHash(sandboxRoot, manifest) : "";
 }
 
 /** The hash make_tool (or sealForgedTools) recorded, not whatever is on disk now. */
@@ -4066,7 +5220,7 @@ export async function runForgedTool(
   sandboxRoot: string,
   manifest: ForgedToolManifest,
   args: Record<string, unknown>,
-  options: { signal?: AbortSignal; env?: Record<string, string | undefined>; agentId?: string } = {},
+  options: { signal?: AbortSignal; env?: Record<string, string | undefined>; agentId?: string; sealed?: string } = {},
 ): Promise<ForgedRunResult> {
   const started = Date.now();
   const fail = (reason: string): ForgedRunResult => ({ ok: false, exit_code: null, signal: null, stdout: "", stderr: reason, duration_ms: Date.now() - started, timed_out: false, truncated: false });
@@ -4079,10 +5233,24 @@ export async function runForgedTool(
     );
   }
   const real = entry.real;
-  const bytes = await readFile(real).catch(() => null);
+  let bytes = await readFile(real).catch(() => null);
   if (!bytes) return fail(`tool "${manifest.name}" entry is unreadable`);
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
-  const expected = await expectedToolHash(sandboxRoot, manifest);
+  let sha256 = createHash("sha256").update(bytes).digest("hex");
+  // In a VM the seal comes from the hub (options.sealed), read on the host
+  // where the record is current: the guest's own tools/ and history/ are up
+  // to five seconds old, and both stale together read as the old version
+  // matching its old seal — v1 run while the record said v2. The bytes here
+  // are read again until they are the sealed ones, for as long as the cache
+  // can lag, and a tool that never gets there is not run.
+  const expected = options.sealed ?? (await expectedToolHash(sandboxRoot, manifest));
+  if (isToolHash(expected) && sha256 !== expected && process.env.SWARM_ISOLATION === "microvm") {
+    const deadline = Date.now() + GUEST_CACHE_WAIT_MS;
+    while (sha256 !== expected && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 250));
+      bytes = (await readFile(real).catch(() => null)) ?? bytes;
+      sha256 = createHash("sha256").update(bytes).digest("hex");
+    }
+  }
   if (!isToolHash(expected) || sha256 !== expected) {
     return fail(`tool "${manifest.name}" on disk (${shortHash(sha256)}) does not match its manifest (${shortHash(expected || "missing")}); re-forge it with make_tool`);
   }
@@ -4180,13 +5348,21 @@ export async function runForgedTool(
 export const INPUTS_DIR = "inputs";
 export const INPUTS_MANIFEST = "inputs.json";
 export const INPUTS_PRISTINE_DIR = ".inputs-pristine";
-/** How many files under inputs/ the watch and the check will look at. */
-export const INPUTS_MAX_FILES = 5000;
 
 export type InputFile = {
   path: string;
   bytes: number;
   sha256: string;
+  /** The digests courts and acquisition tools quote beside sha256, when the kickoff took them. sha256 decides. */
+  md5?: string;
+  sha1?: string;
+  /**
+   * A name in the evidence that is neither a file nor a link — a FIFO, a
+   * socket, a device node (an extracted Linux root has them) — recorded as
+   * the kind it is and never opened: every walk counts it, and a change of
+   * kind is a change.
+   */
+  special?: "fifo" | "socket" | "char" | "block";
   /** The stat the kickoff saw after locking the file, so a large input is
    *  not re-hashed while nothing about it has moved. */
   mtime_ms?: number;
@@ -4202,11 +5378,29 @@ export type InputFile = {
    */
   mode?: string;
   links?: number;
+  /**
+   * A symbolic link inside the evidence, recorded as the link it is: its
+   * target, never followed. Every walk over the evidence — this manifest,
+   * the agents' `inputs` check, the pack's check_inputs, host custody —
+   * treats a link the same way, so a link that was there at the start is
+   * never reported as a changed or an added file.
+   */
+  link?: string;
+  /**
+   * A name, or a link's target, whose bytes are not UTF-8 (a Windows-1254
+   * or Latin-1 name from an archive, on a filesystem that keeps bytes):
+   * `path` and `link` are then only for reading, and these hold the bytes,
+   * base64. Every walk compares names by their bytes.
+   */
+  path_b64?: string;
+  link_b64?: string;
 };
 
 export type InputsManifest = {
   /** Where the copy came from, as the operator named it. */
   source: string;
+  /** How the evidence is held: `copy`, `bind` (in place) or `image`. */
+  held?: string;
   copied_at: string;
   files: InputFile[];
   bytes: number;
@@ -4236,6 +5430,12 @@ export type InputsCheck = {
   missing: string[];
   /** Files and symlinks the manifest does not know. */
   added: string[];
+  /**
+   * Files whose bytes match the manifest's sha256 but not its md5 or sha1,
+   * as read again now: the manifest disagrees with itself (sha256 decides
+   * about the bytes; this says the record around them was changed).
+   */
+  digest_mismatch: string[];
   checked: number;
 };
 
@@ -4272,6 +5472,8 @@ export async function readInputsManifest(sandboxRoot: string): Promise<InputsMan
           path: f.path,
           bytes: Number(f.bytes) || 0,
           sha256: f.sha256,
+          ...(typeof f.md5 === "string" && /^[0-9a-fA-F]{32}$/.test(f.md5) ? { md5: f.md5.toLowerCase() } : {}),
+          ...(typeof f.sha1 === "string" && /^[0-9a-fA-F]{40}$/.test(f.sha1) ? { sha1: f.sha1.toLowerCase() } : {}),
           ...(typeof f.mtime_ms === "number" ? { mtime_ms: f.mtime_ms } : {}),
           ...(typeof f.ctime_ms === "number" ? { ctime_ms: f.ctime_ms } : {}),
           // How the file is held, when the kickoff recorded it rather than
@@ -4279,10 +5481,20 @@ export async function readInputsManifest(sandboxRoot: string): Promise<InputsMan
           // drift on its own first sweep.
           ...(typeof f.mode === "string" ? { mode: f.mode } : {}),
           ...(typeof f.links === "number" ? { links: f.links } : {}),
+          // A link inside the evidence, checked as a link by every walk.
+          ...(typeof f.link === "string" ? { link: f.link } : {}),
+          ...(typeof f.path_b64 === "string" ? { path_b64: f.path_b64 } : {}),
+          ...(typeof f.link_b64 === "string"
+            ? { link_b64: f.link_b64 }
+            : typeof (f as unknown as { target_b64?: unknown }).target_b64 === "string"
+              ? { link_b64: (f as unknown as { target_b64: string }).target_b64 }
+              : {}),
+          ...(f.special === "fifo" || f.special === "socket" || f.special === "char" || f.special === "block" ? { special: f.special } : {}),
         })),
       bytes: Number(parsed.bytes) || 0,
       enforce: typeof parsed.enforce === "string" ? parsed.enforce : "auto",
       guard: typeof parsed.guard === "string" ? parsed.guard : "none",
+      ...(typeof (parsed as { held?: unknown }).held === "string" ? { held: (parsed as { held: string }).held } : {}),
     };
   } catch {
     return null;
@@ -4291,30 +5503,100 @@ export async function readInputsManifest(sandboxRoot: string): Promise<InputsMan
 
 /**
  * Every regular file and symlink under inputs/, as sandbox-relative keys, in
- * byte order, capped at INPUTS_MAX_FILES (the kickoff refuses a larger
- * directory, so the cap and the manifest agree). A symlink can only be
- * foreign — the kickoff dereferenced every one it copied — so it is listed
- * to be found as an addition and removed.
+ * byte order. A symlink can only be foreign — the kickoff dereferenced every
+ * one it copied — so it is listed to be found as an addition and removed.
+ *
+ * There is no ceiling on the count or the depth. There used to be one, 5,000
+ * files and 12 levels, left behind when the kickoff dropped its own: every
+ * manifest file past the ceiling then read as "missing", and a KAPE-style
+ * triage set failed its custody check on every sweep while nothing had
+ * changed. The manifest lists every file, so the walk does too.
  */
 export async function listInputFiles(sandboxRoot: string): Promise<string[]> {
   const out: string[] = [];
-  async function walk(dir: string, depth: number): Promise<void> {
-    if (out.length >= INPUTS_MAX_FILES || depth > 12) return;
+  async function walk(dir: string): Promise<void> {
     const entries = (await readdir(dir, { withFileTypes: true }).catch(() => [])).sort((a, b) =>
       a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
     );
     for (const entry of entries) {
-      if (out.length >= INPUTS_MAX_FILES) return;
       const abs = join(dir, entry.name);
-      if (entry.isDirectory()) await walk(abs, depth + 1);
-      else if (entry.isFile() || entry.isSymbolicLink()) out.push(claimKey(sandboxRoot, abs));
+      if (entry.isDirectory()) await walk(abs);
+      // Every name that is not a directory: a file, a link, and a FIFO,
+      // socket or device node, which the manifest records by kind.
+      else out.push(claimKey(sandboxRoot, abs));
     }
   }
-  await walk(join(sandboxRoot, INPUTS_DIR), 0);
+  await walk(join(sandboxRoot, INPUTS_DIR));
   return out;
 }
 
-const inputHashCache = new Map<string, { size: number; mtimeMs: number; ctimeMs: number; sha: string }>();
+/** Whether these bytes are UTF-8 as they stand: decoding them and encoding back gives the same bytes. */
+function isUtf8(bytes: Buffer): boolean {
+  return Buffer.from(bytes.toString("utf8"), "utf8").equals(bytes);
+}
+
+/** A name's bytes as a map key: latin1 maps each byte to one character, so no two names share a key. */
+function byteKey(bytes: Buffer): string {
+  return bytes.toString("latin1");
+}
+
+/** The bytes of a manifest entry's name, as the kickoff read them. */
+function inputNameBytes(file: InputFile): Buffer {
+  return typeof file.path_b64 === "string" ? Buffer.from(file.path_b64, "base64") : Buffer.from(file.path, "utf8");
+}
+
+/**
+ * Every name under inputs/ that is not a directory, by its bytes: the key
+ * (see byteKey), the name as text for reading, and the path to open. A
+ * string walk turned a name that is not UTF-8 into a different name, which
+ * then read as one file missing and another added.
+ */
+async function listInputEntries(sandboxRoot: string): Promise<Map<string, { display: string; abs: Buffer }>> {
+  const out = new Map<string, { display: string; abs: Buffer }>();
+  const slash = Buffer.from("/");
+  async function walk(abs: Buffer, rel: Buffer): Promise<void> {
+    const entries = (await readdir(abs, { withFileTypes: true, encoding: "buffer" }).catch(() => [])).sort((a, b) =>
+      Buffer.compare(a.name as unknown as Buffer, b.name as unknown as Buffer),
+    );
+    for (const entry of entries) {
+      const name = entry.name as unknown as Buffer;
+      const childAbs = Buffer.concat([abs, slash, name]);
+      const childRel = Buffer.concat([rel, slash, name]);
+      if (entry.isDirectory()) await walk(childAbs, childRel);
+      else out.set(byteKey(childRel), { display: childRel.toString("utf8"), abs: childAbs });
+    }
+  }
+  await walk(Buffer.from(join(sandboxRoot, INPUTS_DIR)), Buffer.from(INPUTS_DIR));
+  return out;
+}
+
+/** The kind of a name in the evidence that is not a file, a link or a directory. */
+export function specialKind(st: { isFIFO(): boolean; isSocket(): boolean; isCharacterDevice(): boolean; isBlockDevice(): boolean }): InputFile["special"] | null {
+  if (st.isFIFO()) return "fifo";
+  if (st.isSocket()) return "socket";
+  if (st.isCharacterDevice()) return "char";
+  if (st.isBlockDevice()) return "block";
+  return null;
+}
+
+const inputHashCache = new Map<string, { size: number; mtimeMs: number; ctimeMs: number; sha: string; md5?: string; sha1?: string }>();
+
+/** sha256, sha1 and md5 of a file in one read. */
+async function digestsOfFile(abs: string | Buffer): Promise<{ sha256: string; sha1: string; md5: string } | null> {
+  try {
+    const h256 = createHash("sha256");
+    const h1 = createHash("sha1");
+    const h5 = createHash("md5");
+    for await (const chunk of createReadStream(abs)) {
+      h256.update(chunk as Buffer);
+      h1.update(chunk as Buffer);
+      h5.update(chunk as Buffer);
+    }
+    return { sha256: h256.digest("hex"), sha1: h1.digest("hex"), md5: h5.digest("hex") };
+  } catch {
+    return null;
+  }
+}
 
 /** inputs.json per sandbox, re-read when its mtime moves, for the manifest-seeded cache below. */
 const manifestCache = new Map<string, { mtimeMs: number; byPath: Map<string, InputFile> }>();
@@ -4341,22 +5623,28 @@ async function manifestEntry(sandboxRoot: string, pathKey: string): Promise<Inpu
  * write bit is the road to a later change, and the link count because a
  * second name for the inode outside inputs/ is a road around the path checks.
  */
-async function hashOfCached(sandboxRoot: string, pathKey: string): Promise<string> {
-  const abs = resolve(sandboxRoot, pathKey);
+async function hashOfCached(sandboxRoot: string, pathKey: string, opts: { abs?: Buffer; known?: InputFile } = {}): Promise<string> {
+  // A name whose bytes are not UTF-8 is opened by its bytes, and its
+  // manifest entry comes with it (two such names can read alike as text).
+  const abs: string | Buffer = opts.abs ?? resolve(sandboxRoot, pathKey);
+  const cacheKey = typeof abs === "string" ? abs : byteKey(abs);
   const info = await lstat(abs).catch(() => null);
   if (!info) {
-    inputHashCache.delete(abs);
+    inputHashCache.delete(cacheKey);
     return "";
   }
   if (info.isSymbolicLink()) {
-    inputHashCache.delete(abs);
-    return `link:${await readlink(abs).catch(() => "?")}`;
+    inputHashCache.delete(cacheKey);
+    const target = await readlink(abs, { encoding: "buffer" }).catch(() => null);
+    if (!target) return "link:?";
+    return isUtf8(target) ? `link:${target.toString("utf8")}` : `link-b64:${target.toString("base64")}`;
   }
   if (!info.isFile()) {
-    inputHashCache.delete(abs);
-    return "";
+    inputHashCache.delete(cacheKey);
+    const kind = specialKind(info);
+    return kind ? `special:${kind}` : "";
   }
-  const hit = inputHashCache.get(abs);
+  const hit = inputHashCache.get(cacheKey);
   let sha: string;
   if (hit && hit.size === info.size && hit.mtimeMs === info.mtimeMs && hit.ctimeMs === info.ctimeMs) {
     sha = hit.sha;
@@ -4364,7 +5652,7 @@ async function hashOfCached(sandboxRoot: string, pathKey: string): Promise<strin
     // The manifest is the first cache: while the size, mtime and ctime are
     // what the kickoff recorded after locking the file, its sha holds, and a
     // 25 GB image is never read again just to be sure.
-    const known = await manifestEntry(sandboxRoot, pathKey);
+    const known = opts.known ?? (await manifestEntry(sandboxRoot, pathKey));
     const unchanged =
       known &&
       known.bytes === info.size &&
@@ -4372,8 +5660,11 @@ async function hashOfCached(sandboxRoot: string, pathKey: string): Promise<strin
       typeof known.ctime_ms === "number" &&
       known.mtime_ms === Math.floor(info.mtimeMs) &&
       known.ctime_ms === Math.floor(info.ctimeMs);
-    sha = unchanged ? known.sha256 : await hashOf(sandboxRoot, pathKey);
-    inputHashCache.set(abs, { size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs, sha });
+    // A file read again is read for all three digests at once, so the
+    // manifest's md5 and sha1 are checked on the same bytes as its sha256.
+    const read = unchanged ? null : await digestsOfFile(abs);
+    sha = unchanged ? known.sha256 : (read?.sha256 ?? "");
+    inputHashCache.set(cacheKey, { size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs, sha, ...(read ? { md5: read.md5, sha1: read.sha1 } : {}) });
   }
   return `${sha}|mode=${(info.mode & 0o777).toString(8)}|links=${info.nlink}`;
 }
@@ -4385,7 +5676,10 @@ async function hashOfCached(sandboxRoot: string, pathKey: string): Promise<strin
  * `444|1` for a copy the kickoff locked itself; whatever was recorded for an
  * attached image, which it cannot lock and must therefore describe.
  */
-function expectedFingerprint(file: { sha256: string; mode?: string; links?: number }): string {
+function expectedFingerprint(file: { sha256: string; mode?: string; links?: number; link?: string; link_b64?: string; special?: string }): string {
+  if (typeof file.link_b64 === "string") return `link-b64:${file.link_b64}`;
+  if (typeof file.link === "string") return `link:${file.link}`;
+  if (file.special) return `special:${file.special}`;
   return `${file.sha256}|mode=${file.mode ?? "444"}|links=${file.links ?? 1}`;
 }
 
@@ -4393,25 +5687,35 @@ function expectedFingerprint(file: { sha256: string; mode?: string; links?: numb
 export async function verifyInputs(sandboxRoot: string): Promise<InputsCheck | null> {
   const manifest = await readInputsManifest(sandboxRoot);
   if (!manifest) return null;
-  const known = new Map(manifest.files.map((f) => [f.path, f]));
-  const onDisk = new Set(await listInputFiles(sandboxRoot));
+  // By the bytes of each name, on both sides (inputNameBytes, listInputEntries).
+  const known = new Map(manifest.files.map((f) => [byteKey(inputNameBytes(f)), f]));
+  const onDisk = await listInputEntries(sandboxRoot);
   const modified: string[] = [];
   const missing: string[] = [];
   const added: string[] = [];
   const metadata: string[] = [];
-  for (const [pathKey, file] of known) {
-    if (!onDisk.has(pathKey)) {
-      missing.push(pathKey);
+  const digestMismatch: string[] = [];
+  for (const [key, file] of known) {
+    const there = onDisk.get(key);
+    if (!there) {
+      missing.push(file.path);
       continue;
     }
-    const found = await hashOfCached(sandboxRoot, pathKey);
+    const raw = typeof file.path_b64 === "string" || !isUtf8(Buffer.from(key, "latin1"));
+    const found = await hashOfCached(sandboxRoot, file.path, raw ? { abs: there.abs, known: file } : {});
+    if (found.startsWith(`${file.sha256}|`)) {
+      // Read again now (not taken from the manifest on an unmoved stat): the
+      // other digests the manifest records must be these bytes' too.
+      const read = inputHashCache.get(raw ? byteKey(there.abs) : resolve(sandboxRoot, file.path));
+      if ((file.md5 && read?.md5 && read.md5 !== file.md5) || (file.sha1 && read?.sha1 && read.sha1 !== file.sha1)) digestMismatch.push(file.path);
+    }
     if (found === expectedFingerprint(file)) continue;
     // `<sha>|mode=<octal>|links=<n>`: the first field is the bytes and the
     // rest is how the file is held. Only the first one is the evidence.
-    if (found.startsWith(`${file.sha256}|`)) metadata.push(pathKey);
-    else modified.push(pathKey);
+    if (found.startsWith(`${file.sha256}|`)) metadata.push(file.path);
+    else modified.push(file.path);
   }
-  for (const pathKey of onDisk) if (!known.has(pathKey)) added.push(pathKey);
+  for (const [key, there] of onDisk) if (!known.has(key)) added.push(there.display);
   const contentOk = modified.length === 0 && missing.length === 0 && added.length === 0;
   return {
     ok: contentOk && metadata.length === 0,
@@ -4420,6 +5724,7 @@ export async function verifyInputs(sandboxRoot: string): Promise<InputsCheck | n
     metadata,
     missing,
     added,
+    digest_mismatch: digestMismatch,
     checked: known.size,
   };
 }
@@ -4496,7 +5801,12 @@ export async function healInputs(sandboxRoot: string, only?: string[]): Promise<
 export const LEDGER_DIR = "ledger";
 export const LEDGER_ENTRIES = "ledger/entries.jsonl";
 export const LEDGER_MD = "ledger/ledger.md";
-export const LEDGER_KINDS = ["event", "ioc", "finding"] as const;
+/**
+ * `absence`: a search that found nothing, when that matters to the case. It
+ * holds only for what was searched, with what and how far, so all of it is
+ * required (recordEntry).
+ */
+export const LEDGER_KINDS = ["event", "ioc", "finding", "absence"] as const;
 export const LEDGER_CONFIDENCE = ["high", "medium", "low"] as const;
 export const LEDGER_VALUE_MAX_CHARS = 2000;
 /**
@@ -4512,20 +5822,100 @@ export const LEDGER_MAX_ENTRIES = 5000;
 
 export type LedgerKind = (typeof LEDGER_KINDS)[number];
 export type LedgerEntry = {
+  /** 2: the chain covers the provenance too (ledgerCore). */
+  v?: 2;
   seq: number;
   kind: LedgerKind;
-  /** ISO 8601 for an event; optional for the other kinds. */
+  /** ISO 8601 for an event, in UTC; optional for the other kinds. */
   ts?: string;
+  /** What the agent wrote for `ts`, when it was not already the UTC value (an offset, a date alone). Not in the chain. */
+  ts_raw?: string;
   value: string;
   /** Where it was seen: a path, a log, a plugin, a registry key. */
   source?: string;
   /** How to check it: the command, the inode, the record id, the hash. */
   evidence?: string;
   confidence?: (typeof LEDGER_CONFIDENCE)[number];
+  /**
+   * The seq of the entry this one corrects. Nothing is deleted: the older
+   * entry stays where it was, and this one is the correction. In the chained
+   * core when present, so a correction cannot be moved to another entry.
+   */
+  supersedes?: number;
   by: string;
   authors: string[];
   at: string;
+  /** The chain: the previous entry's hash (or "genesis"), and this entry's own over its immutable core. */
+  prev?: string;
+  hash?: string;
 };
+
+/**
+ * What of a ledger entry never changes once written: a merge adds an author
+ * or a first citation, it does not move an event or reword a finding. The
+ * chain is over this, so a merge leaves it intact and a rewritten entry
+ * breaks it.
+ */
+/**
+ * An entry's immutable core. From version 2 its provenance is in it too —
+ * where it was seen, how to check it, how sure — since provenance is required
+ * at creation and a merge only fills it in when it was empty, which a
+ * version 2 entry never is: a rewritten source is a broken chain.
+ */
+export function ledgerCore(e: LedgerEntry): string {
+  if (e.v === 2) {
+    // `supersedes` only when there is one: every entry written before it
+    // existed keeps the core, and the hash, it was chained with.
+    return JSON.stringify({ v: 2, seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, source: e.source ?? "", evidence: e.evidence ?? "", confidence: e.confidence ?? "", ...(e.supersedes !== undefined ? { supersedes: e.supersedes } : {}), by: e.by, at: e.at });
+  }
+  return JSON.stringify({ seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, by: e.by, at: e.at });
+}
+
+export function ledgerHash(e: LedgerEntry, prev: string): string {
+  return createHash("sha256").update(`${prev}\n${ledgerCore(e)}`).digest("hex");
+}
+
+/**
+ * Walk the ledger's chain: every entry that carries `prev` must name the hash
+ * of the entry before it, and its own hash must be what its core gives.
+ * Entries written before the ledger was chained carry neither and are
+ * counted unchained, not broken — but only before the first chained entry:
+ * the first chained entry names the last of them (recordEntry links a legacy
+ * entry by its core's hash from genesis), and an unchained line after a
+ * chained one is a line added outside the chain, which breaks it. So is a
+ * version 1 entry after a version 2 one: the harness never writes one
+ * again, and its core leaves out the provenance a version 2 chain covers.
+ */
+export function verifyLedgerChain(text: string): { ok: boolean; total: number; chained: number; broken_at: number | null; reason: string | null; hashes: string[] } {
+  let total = 0;
+  let chained = 0;
+  let last = "genesis";
+  let sawV2 = false;
+  const hashes: string[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    total += 1;
+    let e: LedgerEntry;
+    try {
+      e = JSON.parse(line) as LedgerEntry;
+    } catch {
+      return { ok: false, total, chained, broken_at: total, reason: "not json", hashes };
+    }
+    if (sawV2 && e.v !== 2) return { ok: false, total, chained, broken_at: total, reason: "a version 1 entry after version 2 ones", hashes };
+    if (e.v === 2) sawV2 = true;
+    if (!e.prev && !e.hash) {
+      if (chained > 0) return { ok: false, total, chained, broken_at: total, reason: "an entry without the chain after chained ones", hashes };
+      last = ledgerHash(e, "genesis");
+      continue;
+    }
+    if (e.prev !== last) return { ok: false, total, chained, broken_at: total, reason: "prev does not name the entry before it", hashes };
+    if (e.hash !== ledgerHash(e, e.prev)) return { ok: false, total, chained, broken_at: total, reason: "the entry's core was rewritten", hashes };
+    chained += 1;
+    last = e.hash;
+    hashes.push(e.hash);
+  }
+  return { ok: true, total, chained, broken_at: null, reason: null, hashes };
+}
 
 export type LedgerInput = {
   kind: string;
@@ -4534,18 +5924,61 @@ export type LedgerInput = {
   source?: string;
   evidence?: string;
   confidence?: string;
+  /** The seq of an entry this one corrects. */
+  supersedes?: number | string;
 };
+
+/**
+ * The seq each corrected entry is superseded by. A correction of a correction
+ * names the one it replaces, so following the map from any entry reaches the
+ * one that stands.
+ */
+export function supersededBy(entries: LedgerEntry[]): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const e of entries) if (typeof e.supersedes === "number") out.set(e.supersedes, e.seq);
+  return out;
+}
 
 export type LedgerResult =
   | { ok: true; entry: LedgerEntry; merged: boolean; total: number }
   | { ok: false; reason: string };
 
-function normalizeTs(raw: string | undefined): { ok: true; ts?: string } | { ok: false; reason: string } {
+const TS_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const TS_DATE_TIME = /^(\d{4}-\d{2}-\d{2})[Tt ](\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?)(Z|z|[+-]\d{2}:?\d{2})?$/;
+
+/**
+ * An event's time, in UTC, from what the agent wrote. A date and a time
+ * must say their zone: `Z`, or the offset the source records. ECMAScript
+ * reads a date-time without one as the host's local time, so the same
+ * entry was 12:44Z on the droplet, 09:44Z on a Mac in Istanbul and 17:44Z
+ * in New York, and the text it came from was gone. A date alone is a date.
+ * Nothing else (01/02/2024 is two different days) is taken. What the agent
+ * wrote is kept beside the UTC value when the two differ.
+ */
+export function normalizeTs(raw: string | undefined): { ok: true; ts?: string; raw?: string } | { ok: false; reason: string } {
   const text = (raw ?? "").trim();
   if (!text) return { ok: true };
-  const ms = Date.parse(text);
-  if (!Number.isFinite(ms)) return { ok: false, reason: `ts must be ISO 8601 (got ${JSON.stringify(text)})` };
-  return { ok: true, ts: new Date(ms).toISOString() };
+  let iso: string;
+  if (TS_DATE.test(text)) {
+    iso = `${text}T00:00:00Z`;
+  } else {
+    const m = TS_DATE_TIME.exec(text);
+    if (!m) {
+      return { ok: false, reason: `ts must be ISO 8601 with its zone, e.g. 2024-01-15T12:44:22Z or 2024-01-15T15:44:22+03:00 (got ${JSON.stringify(text)})` };
+    }
+    if (!m[3]) {
+      return {
+        ok: false,
+        reason: `ts ${JSON.stringify(text)} has no zone: add Z if the source's time is UTC, or the offset the source records (+03:00). The time zone is part of the evidence; the harness does not guess it.`,
+      };
+    }
+    const zone = /^[Zz]$/.test(m[3]) ? "Z" : m[3].length === 5 ? `${m[3].slice(0, 3)}:${m[3].slice(3)}` : m[3];
+    iso = `${m[1]}T${m[2]}${zone}`;
+  }
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return { ok: false, reason: `ts is not a real time (got ${JSON.stringify(text)})` };
+  const ts = new Date(ms).toISOString();
+  return { ok: true, ts, ...(ts !== text ? { raw: text } : {}) };
 }
 
 export async function readLedger(sandboxRoot: string): Promise<LedgerEntry[]> {
@@ -4568,12 +6001,18 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
   if (!(LEDGER_KINDS as readonly string[]).includes(kind)) {
     return { ok: false, reason: `kind must be one of ${LEDGER_KINDS.join(", ")}` };
   }
+  const absence = kind === "absence";
   const value = String(input.value ?? "").trim();
-  if (!value) return { ok: false, reason: "value is required: the event, the indicator or the finding, in one sentence" };
+  if (!value) {
+    return {
+      ok: false,
+      reason: absence ? "value is required: what was looked for and not found, in one sentence" : "value is required: the event, the indicator or the finding, in one sentence",
+    };
+  }
   if (value.length > LEDGER_VALUE_MAX_CHARS) return { ok: false, reason: `value is over ${LEDGER_VALUE_MAX_CHARS} characters` };
   const ts = normalizeTs(input.ts);
   if (!ts.ok) return ts;
-  if (kind === "event" && !ts.ts) return { ok: false, reason: "an event needs a ts (ISO 8601, UTC)" };
+  if (kind === "event" && !ts.ts) return { ok: false, reason: "an event needs a ts (ISO 8601 with its zone: Z for UTC, or the source's offset)" };
   const confidence = String(input.confidence ?? "").trim().toLowerCase();
   if (confidence && !(LEDGER_CONFIDENCE as readonly string[]).includes(confidence)) {
     return { ok: false, reason: `confidence must be one of ${LEDGER_CONFIDENCE.join(", ")}` };
@@ -4584,43 +6023,79 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
   // cannot be checked, which is the one a reader has no way to spot.
   const source = String(input.source ?? "").trim();
   if (!source) {
-    return { ok: false, reason: "source is required: where it was seen — a path, a log, a plugin, a registry key" };
+    return {
+      ok: false,
+      reason: absence
+        ? "source is required: what was searched — the path, image, log or artefact the search ran over. 'Not found' is only ever 'not found there'."
+        : "source is required: where it was seen — a path, a log, a plugin, a registry key",
+    };
   }
   if (source.length > LEDGER_SOURCE_MAX_CHARS) {
     return { ok: false, reason: `source is over ${LEDGER_SOURCE_MAX_CHARS} characters: name where it was seen, and put the material itself in a work/ file` };
   }
   const evidence = String(input.evidence ?? "").trim();
   if (!evidence) {
-    return { ok: false, reason: "evidence is required: how to check it — the command, the inode, the record id, the hash" };
+    return {
+      ok: false,
+      reason: absence
+        ? "evidence is required: the query, the tool and its version, and the scope searched — allocated files only, or unallocated space and slack too, and the time range. An empty result holds only for that query and that scope."
+        : "evidence is required: how to check it — the command, the inode, the record id, the hash",
+    };
   }
   if (evidence.length > LEDGER_EVIDENCE_MAX_CHARS) {
     return { ok: false, reason: `evidence is over ${LEDGER_EVIDENCE_MAX_CHARS} characters: say how to check it, and put the material itself in a work/ file` };
   }
+  let supersedes: number | undefined;
+  if (input.supersedes !== undefined && input.supersedes !== null && String(input.supersedes).trim() !== "") {
+    const n = Number(String(input.supersedes).trim().replace(/^#/, ""));
+    if (!Number.isInteger(n) || n < 1) return { ok: false, reason: `supersedes names an entry by its seq, a whole number (got ${JSON.stringify(input.supersedes)})` };
+    supersedes = n;
+  }
   return withTableLock(ctx.sandboxRoot, async () => {
     const entries = await readLedger(ctx.sandboxRoot);
-    const same = entries.find((e) => e.kind === kind && e.value === value && (e.ts ?? "") === (ts.ts ?? ""));
+    if (supersedes !== undefined) {
+      const target = entries.find((e) => e.seq === supersedes);
+      if (!target) return { ok: false, reason: `supersedes #${supersedes}: there is no entry #${supersedes} in the ledger (list them with ledger)` };
+      const already = supersededBy(entries).get(supersedes);
+      if (already !== undefined) return { ok: false, reason: `#${supersedes} is already superseded by #${already}: correct #${already} instead, so the corrections stay one line` };
+      if (target.kind === kind && target.value === value && (target.ts ?? "") === (ts.ts ?? "")) {
+        return { ok: false, reason: `the correction repeats #${supersedes} word for word: a correction says what is right now` };
+      }
+    }
+    // A correction is always its own entry: merged into an equal one, the
+    // link to what it corrects would be lost.
+    const same = supersedes === undefined ? entries.find((e) => e.kind === kind && e.value === value && (e.ts ?? "") === (ts.ts ?? "")) : undefined;
     if (same) {
       if (!same.authors.includes(ctx.agentId)) same.authors.push(ctx.agentId);
       // A merge adds an author, it does not rewrite the first citation.
       if (!same.source) same.source = source;
       if (!same.evidence) same.evidence = evidence;
-      await writeFile(join(ctx.sandboxRoot, LEDGER_ENTRIES), entries.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+      // Whole or not at all: a writer killed mid-way must not leave the
+      // record of the case cut short.
+      await writeFileAtomic(join(ctx.sandboxRoot, LEDGER_ENTRIES), entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
       await renderLedger(ctx.sandboxRoot, entries);
       return { ok: true, entry: same, merged: true, total: entries.length };
     }
     if (entries.length >= LEDGER_MAX_ENTRIES) return { ok: false, reason: `the ledger holds ${LEDGER_MAX_ENTRIES} entries already` };
     const entry: LedgerEntry = {
+      v: 2,
       seq: (entries.at(-1)?.seq ?? 0) + 1,
       kind: kind as LedgerKind,
       ...(ts.ts ? { ts: ts.ts } : {}),
+      ...(ts.raw ? { ts_raw: ts.raw } : {}),
       value,
       source,
       evidence,
       ...(confidence ? { confidence: confidence as LedgerEntry["confidence"] } : {}),
+      ...(supersedes !== undefined ? { supersedes } : {}),
       by: ctx.agentId,
       authors: [ctx.agentId],
       at: new Date().toISOString(),
     };
+    // Chained like the trace: each entry names the one before it.
+    const previous = entries.at(-1);
+    entry.prev = previous?.hash ?? (previous ? ledgerHash(previous, "genesis") : "genesis");
+    entry.hash = ledgerHash(entry, entry.prev);
     await mkdir(join(ctx.sandboxRoot, LEDGER_DIR), { recursive: true });
     await appendFile(join(ctx.sandboxRoot, LEDGER_ENTRIES), `${JSON.stringify(entry)}\n`, "utf8");
     entries.push(entry);
@@ -4639,15 +6114,31 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   const events = all.filter((e) => e.kind === "event").sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? "") || a.seq - b.seq);
   const iocs = all.filter((e) => e.kind === "ioc");
   const findings = all.filter((e) => e.kind === "finding");
-  const lines: string[] = ["# Ledger", "", `${all.length} entries: ${events.length} events, ${iocs.length} indicators, ${findings.length} findings. Written by the harness from \`record\`; cite it as \`ledger/ledger.md\`.`, ""];
-  lines.push("## Timeline", "", "| Time (UTC) | Event | Source | Evidence | By |", "| --- | --- | --- | --- | --- |");
-  for (const e of events) lines.push(`| ${e.ts} | ${mdCell(e.value)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.authors.join(", ")} |`);
-  lines.push("", "## Indicators", "", "| Indicator | Source | Evidence | Confidence | By |", "| --- | --- | --- | --- | --- |");
-  for (const e of iocs) lines.push(`| ${mdCell(e.value)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.confidence ?? ""} | ${e.authors.join(", ")} |`);
+  const absences = all.filter((e) => e.kind === "absence");
+  const replaced = supersededBy(all);
+  const lines: string[] = [
+    "# Ledger",
+    "",
+    `${all.length} entries: ${events.length} events, ${iocs.length} indicators, ${findings.length} findings, ${absences.length} searches that found nothing${replaced.size ? `; ${replaced.size} corrected by a later entry, which stands` : ""}. Written by the harness from \`record\`; cite it as \`ledger/ledger.md\`.`,
+    "",
+  ];
+  // A corrected entry stays where it was, marked; its correction says what it corrects.
+  const mark = (e: LedgerEntry) =>
+    `${replaced.has(e.seq) ? ` **(superseded by #${replaced.get(e.seq)})**` : ""}${e.supersedes !== undefined ? ` (corrects #${e.supersedes})` : ""}`;
+  lines.push("## Timeline", "", "| # | Time (UTC) | Event | Source | Evidence | By |", "| --- | --- | --- | --- | --- | --- |");
+  // A time the source gave with an offset (or as a date) is shown as written too.
+  const asWritten = (e: LedgerEntry) => (e.ts_raw && !/[Zz]$/.test(e.ts_raw) ? ` (as written: ${mdCell(e.ts_raw)})` : "");
+  for (const e of events) lines.push(`| ${e.seq} | ${e.ts}${asWritten(e)} | ${mdCell(e.value)}${mark(e)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.authors.join(", ")} |`);
+  lines.push("", "## Indicators", "", "| # | Indicator | Source | Evidence | Confidence | By |", "| --- | --- | --- | --- | --- | --- |");
+  for (const e of iocs) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.confidence ?? ""} | ${e.authors.join(", ")} |`);
   lines.push("", "## Findings", "");
   for (const e of findings) {
-    lines.push(`- **#${e.seq}** ${e.value}${e.confidence ? ` _(${e.confidence})_` : ""}${e.source ? ` — source: ${e.source}` : ""}${e.evidence ? ` — evidence: ${e.evidence}` : ""} — by ${e.authors.join(", ")}`);
+    lines.push(`- **#${e.seq}** ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence})_` : ""}${e.source ? ` — source: ${e.source}` : ""}${e.evidence ? ` — evidence: ${e.evidence}` : ""} — by ${e.authors.join(", ")}`);
   }
+  // Searched and not found: what, where, and how far. Each holds for that
+  // query and that scope only.
+  lines.push("", "## Searched, not found", "", "| # | Looked for | Searched | Query, tool, scope | By |", "| --- | --- | --- | --- | --- |");
+  for (const e of absences) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${mdCell(e.source)} | ${mdCell(e.evidence)} | ${e.authors.join(", ")} |`);
   const text = lines.join("\n") + "\n";
   await mkdir(join(sandboxRoot, LEDGER_DIR), { recursive: true });
   await writeFile(join(sandboxRoot, LEDGER_MD), text, "utf8");
@@ -4659,7 +6150,9 @@ export async function listLedger(sandboxRoot: string, filter: { kind?: string; l
   const kind = (filter.kind ?? "").trim().toLowerCase();
   const picked = kind ? all.filter((e) => e.kind === kind) : all;
   const limit = Math.max(1, Math.min(500, Number(filter.limit) || 200));
-  return picked.slice(-limit);
+  // A corrected entry is listed with the entry that corrects it.
+  const replaced = supersededBy(all);
+  return picked.slice(-limit).map((e) => (replaced.has(e.seq) ? { ...e, superseded_by: replaced.get(e.seq) } : e));
 }
 
 /**
@@ -4703,6 +6196,34 @@ export function isSharedScratch(path: string): boolean {
   return (SHARED_WORK_DIRS as readonly string[]).some((dir) => path === `work/${dir}` || path.startsWith(`work/${dir}/`));
 }
 
+/** Where await-done.sh may read a finish line that certifies a run: the operator's copy. */
+export const FINISH_LINE_TRUSTED_SOURCES = new Set(["registry"]);
+
+/**
+ * The operator's finish line, run once, right now, by await-done.sh from the
+ * registry: what an agent's `done` runs before the sentinel, and what the VM
+ * hub runs again on the host before it lets a sentinel be written.
+ */
+export function runFinishLine(sandbox: string): Promise<FinishLineRun | null> {
+  const script = resolve(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "await-done.sh");
+  return new Promise((done) => {
+    execFile(
+      "bash",
+      [script, "--sandbox", sandbox, "--checks-json", "--check-timeout", "120"],
+      { cwd: sandbox, timeout: 15 * 60_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, CHECKS_SOURCE: "done" } },
+      (err, stdout) => {
+        try {
+          const parsed = JSON.parse(String(stdout || "").trim().split("\n").pop() || "") as FinishLineRun;
+          if (typeof parsed.total === "number" && Array.isArray(parsed.checks)) return done(parsed);
+        } catch {
+          /* fall through */
+        }
+        done(err ? { total: 0, passed: 0, checks: [], error: String(err.message || err) } : null);
+      },
+    );
+  });
+}
+
 /** What await-done.sh --checks-json prints: the finish line, run once, right now. */
 export type FinishLineRun = {
   total: number;
@@ -4730,6 +6251,25 @@ export function finishLineVerdict(
 ): { proceed: true; note?: string; reasonPrefix?: string } | { proceed: false; reason: string; failing: string } {
   if (!run) return { proceed: true, note: "the finish line could not be run; done proceeds unchecked" };
   if (run.error) return { proceed: true, note: `the finish line could not be run (${run.error}); done proceeds unchecked` };
+  // A finish line that is met, or has nothing to meet, proves something only
+  // if the checks are the operator's. Read from anywhere else they are checks
+  // an agent could have rewritten — on the host SWARM.md is writable from a
+  // shell — so passing them certifies nothing. The harness hands every pane
+  // the registry (SWARM_RUNS_DIR), and a microVM a read-only view of it, so a
+  // different source means something is wrong. A failing finish line is a
+  // refusal either way, and the check that fails is the useful thing to say.
+  const untrusted = Boolean(run.source) && !FINISH_LINE_TRUSTED_SOURCES.has(run.source as string);
+  if (untrusted && run.passed >= run.total) {
+    // Abandoning claims nothing, so it is still the way out.
+    if (abandon) return { proceed: true, reasonPrefix: "ABANDONED: ", note: `checks read from the ${run.source} were not trusted; abandoned on purpose` };
+    return {
+      proceed: false,
+      failing: `(checks read from ${run.source})`,
+      reason:
+        `The finish line was read from the ${run.source}, which agents can edit, not from the operator's registry, so it cannot certify the run. ` +
+        `This is the harness's problem, not yours: say so on the board and wait for the operator. If the goal cannot be met at all, call done again with abandon: true and say why.`,
+    };
+  }
   if (run.total === 0) return { proceed: true, note: "the goal has no checks" };
   if (run.passed >= run.total) return { proceed: true };
   if (abandon) return { proceed: true, reasonPrefix: "ABANDONED: ", note: `${run.passed} of ${run.total} checks pass; abandoned on purpose` };

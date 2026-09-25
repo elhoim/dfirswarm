@@ -8,7 +8,7 @@
     },
     "mount": {
       "type": "string",
-      "description": "Where to mount it, under work/"
+      "description": "Where to mount it: a directory under your own work/<your id>/ (the rest of work/ is read-only in a VM)"
     },
     "list": {
       "type": "string",
@@ -22,9 +22,9 @@
   "runtime": "python3",
   "entry": "run.py",
   "timeout_seconds": 600,
-  "example": "{\"path\": \"inputs/memory.raw\", \"mount\": \"work/mem\"}",
+  "example": "{\"path\": \"inputs/memory.raw\", \"mount\": \"work/<your id>/mem\"}",
   "by": "maintainer",
   "at": "2026-09-22T17:00:00.000Z",
   "version": 1,
-  "sha256": "2573511a5b6f4bdb9733c9f0a409e64b128a4fc2210362e61b7cd3f961e7c1c9"
+  "sha256": "f54395872ec21317b295dfe42b5bd8ba14a1ddc11c1f30e7e57a7ef175dd16e3"
 }

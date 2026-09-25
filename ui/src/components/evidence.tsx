@@ -133,7 +133,8 @@ export function EvidenceRow({
     <>
       <span className="text-ink-3 [&_svg]:size-4">{icon ?? <FileLock2 />}</span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate font-mono text-[12.5px] text-ink">{path}</span>
+        {/* The whole path, broken where it must: a name cut short is a different file to a reader. */}
+        <span className="block break-all font-mono text-[12.5px] text-ink">{path}</span>
         <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] tabular text-ink-3">
           {bytes === undefined ? null : <span>{formatBytes(bytes)}</span>}
           {meta}
@@ -183,28 +184,31 @@ export function DownloadRow({
   className?: string;
 }) {
   return (
-    <div
-      className={cn(
-        "flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-line bg-card px-3 py-2.5",
-        disabled && "opacity-60",
-        className,
-      )}
-    >
-      <span className="min-w-0 flex-1">
-        <span className="block font-mono text-[12.5px] text-ink">{name}</span>
+    // Two levels: the name and what it is get the row's whole width, and the
+    // size, the hash and the button go under them. Side by side, a 340px
+    // column squeezed the description to one word per line.
+    <div className={cn("flex min-w-0 flex-col gap-1.5 rounded-md border border-line bg-card px-3 py-2.5", disabled && "opacity-60", className)}>
+      <span className="min-w-0">
+        <span className="block font-mono text-[12.5px] text-ink [overflow-wrap:anywhere]">{name}</span>
         {description ? <span className="mt-0.5 block text-[11.5px] text-ink-2">{description}</span> : null}
       </span>
-      {bytes === undefined ? null : <span className="tabular text-[11.5px] text-ink-3">{formatBytes(bytes)}</span>}
-      {sha ? <HashChip sha={sha} /> : null}
-      {disabled ? (
-        <Chip tone="neutral">{disabledReason ?? "not produced"}</Chip>
-      ) : (
-        <Button asChild variant="secondary" size="sm">
-          <a href={href} download={name}>
-            <Download /> Download
-          </a>
-        </Button>
-      )}
+      <span className="flex min-w-0 flex-wrap items-center gap-2">
+        {bytes === undefined ? null : <span className="tabular text-[11.5px] text-ink-3">{formatBytes(bytes)}</span>}
+        {sha ? <HashChip sha={sha} /> : null}
+        <span className="ml-auto">
+          {disabled ? (
+            <Chip tone="neutral" wrap>
+              {disabledReason ?? "not produced"}
+            </Chip>
+          ) : (
+            <Button asChild variant="secondary" size="sm">
+              <a href={href} download={name}>
+                <Download /> Download
+              </a>
+            </Button>
+          )}
+        </span>
+      </span>
     </div>
   );
 }

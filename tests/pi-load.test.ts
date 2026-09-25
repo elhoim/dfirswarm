@@ -5,8 +5,11 @@
  *
  * Needs an installed @earendil-works/pi-coding-agent. Resolution order:
  *   1. $PI_PACKAGE_DIR/dist/core/extensions/loader.js
- *   2. `npm root -g`/@earendil-works/pi-coding-agent
- * Skips with a reason when neither exists.
+ *   2. the pinned devDependency, node_modules/@earendil-works/pi-coding-agent
+ *      (what `npm ci` installs, in CI too)
+ *   3. `npm root -g`/@earendil-works/pi-coding-agent
+ * The pinned one comes before a global Pi, so the version tested is the
+ * version package.json names. Skips with a reason when none exists.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -15,13 +18,14 @@ import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { EVENTS_REL, initSandbox } from "../extensions/protocol.ts";
+import { EVENTS_REL, initSandbox, sealForgedTools } from "../extensions/protocol.ts";
 
 const REPO = resolve(import.meta.dirname, "..");
 
 async function findLoader(): Promise<string | null> {
   const candidates: string[] = [];
   if (process.env.PI_PACKAGE_DIR) candidates.push(process.env.PI_PACKAGE_DIR);
+  candidates.push(join(REPO, "node_modules", "@earendil-works", "pi-coding-agent"));
   try {
     const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
     candidates.push(join(globalRoot, "@earendil-works", "pi-coding-agent"));
@@ -102,7 +106,10 @@ test("Pi loader: agent-swarm.ts loads and `playwright` is the real browser tool"
 
     const events = (await readFile(join(root, EVENTS_REL), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.ok(events.every((e) => e.tool === "playwright" && e.agent === "agent00"));
-    assert.deepEqual(Object.keys(events[0]).sort(), ["agent", "args", "result", "tool", "ts"]);
+    // sid and seq: the sending process and its count, so custody can tell a
+    // line that reached both the chain and a spill from one that reached neither.
+    assert.deepEqual(Object.keys(events[0]).sort(), ["agent", "args", "result", "seq", "sid", "tool", "ts"]);
+    assert.ok(events.every((e, i) => i === 0 || e.seq > events[i - 1].seq), "one process's lines count up");
   } finally {
     if (previousAgent === undefined) delete process.env.AGENT_ID;
     else process.env.AGENT_ID = previousAgent;
@@ -180,6 +187,12 @@ test("Pi loader: make_tool and tools exist only when the spawner turned forging 
     while (goal[lastCheck].trim() === "") lastCheck -= 1;
     goal.splice(lastCheck + 1, 0, "- `grep -q '\"tool\":\"inputs_check\"' traces/events.jsonl`");
     await writeFile(join(root, "SWARM.md"), goal.join("\n"));
+    // The finish line reads the operator's checks from the registry, never the
+    // agent-writable SWARM.md, as a real run does through SWARM_RUNS_DIR.
+    const runsDir = await mkdtemp(join(tmpdir(), "pi-load-runs-"));
+    await writeFile(join(runsDir, "registry.json"), JSON.stringify({ runs: [{ id: "t", sandbox: root, goal: goal.join("\n") }] }));
+    const priorRunsDir = process.env.SWARM_RUNS_DIR;
+    process.env.SWARM_RUNS_DIR = runsDir;
     // The finish line runs at the moment done is called. The hello goal wants
     // work/hello.txt with every id in team.json, and nothing has written it:
     // this done is refused, told which check fails, and the trace says so.
@@ -200,6 +213,9 @@ test("Pi loader: make_tool and tools exist only when the spawner turned forging 
     await writeFile(join(root, "work", "hello.txt"), team.agents.map((a) => a.id).join("\n") + "\n");
     const ended = await done.execute("t6", { reason: "definition_of_done_met", output_file: "work/hello.txt" }, undefined, undefined, ctx);
     assert.equal(ended.details.terminate, true, `done goes through once the checks, the inputs_check grep among them, pass: ${JSON.stringify(ended.details)}`);
+    if (priorRunsDir === undefined) delete process.env.SWARM_RUNS_DIR;
+    else process.env.SWARM_RUNS_DIR = priorRunsDir;
+    await rm(runsDir, { recursive: true, force: true });
     assert.equal(await readFile(join(root, "inputs", "a.txt"), "utf8"), "keep me\n", "done healed the background change");
     trace = (await readFile(join(root, EVENTS_REL), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     const viaDone = trace.find((e) => e.tool === "inputs_violation" && e.args.tool === "done");
@@ -275,5 +291,65 @@ test("Pi loader: record and ledger are real tools and the ledger renders after e
     else process.env.AGENT_ID = previousAgent;
     execFileSync("chmod", ["-R", "u+w", root]);
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Pi loader: a pack's seeded tools are in the list with forging off, and its secrets stay out of the record", async (t) => {
+  const loaderPath = await findLoader();
+  if (!loaderPath) {
+    t.skip("Pi package not found (set PI_PACKAGE_DIR or npm install -g @earendil-works/pi-coding-agent)");
+    return;
+  }
+  const { loadExtensions } = (await import(loaderPath)) as {
+    loadExtensions: (paths: string[], cwd: string) => Promise<{ extensions: LoadedExtension[]; errors: unknown[] }>;
+  };
+  const root = await mkdtemp(join(tmpdir(), "pi-load-pack-"));
+  const secretDir = await mkdtemp(join(tmpdir(), "pi-load-pack-secret-"));
+  const saved = { forging: process.env.SWARM_TOOL_FORGING, secrets: process.env.SWARM_PACK_SECRETS };
+  try {
+    await initSandbox(root, { reset: true });
+    process.env.AGENT_ID = "agent00";
+    // What swarm.sh leaves for a pack tool: the directory, a manifest naming
+    // the pack, and the seal in file history.
+    const script = "import json, os, sys\nargs = json.load(sys.stdin)\nprint('key=' + os.environ.get('VT_API_KEY', 'none') + ' q=' + args['q'])\n";
+    await mkdir(join(root, "tools", "pack_lookup"), { recursive: true });
+    await writeFile(join(root, "tools", "pack_lookup", "run.py"), script);
+    await writeFile(
+      join(root, "tools", "pack_lookup", "manifest.json"),
+      JSON.stringify({
+        name: "pack_lookup", description: "Look something up", params: { q: { type: "string", required: true } },
+        runtime: "python3", entry: "run.py", timeout_seconds: 30, by: "pack-author", at: new Date().toISOString(),
+        version: 1, sha256: createHash("sha256").update(script).digest("hex"), pack: "intel-pack",
+      }),
+    );
+    await sealForgedTools(root);
+    const secretFile = join(secretDir, "secrets.env");
+    await writeFile(secretFile, "VT_API_KEY=s3cr3t-value-123\n");
+    process.env.SWARM_PACK_SECRETS = JSON.stringify({ "intel-pack": { names: ["VT_API_KEY"], file: secretFile } });
+    delete process.env.SWARM_TOOL_FORGING;
+
+    const loaded = await loadExtensions([join(REPO, "extensions", "agent-swarm.ts")], root);
+    assert.deepEqual(loaded.errors, []);
+    const [swarm] = loaded.extensions;
+    const ctx = { cwd: root, hasUI: false, ui: {} };
+    for (const handler of (swarm.handlers.get("session_start") ?? []) as Array<(e: unknown, c: unknown) => Promise<unknown>>) {
+      await handler({}, ctx);
+    }
+    assert.ok(swarm.tools.has("pack_lookup"), "a pack tool is registered with forging off");
+    assert.ok(!swarm.tools.has("make_tool"), "and forging itself stays off");
+
+    const out = await swarm.tools.get("pack_lookup")!.definition.execute("p1", { q: "s3cr3t-value-123" }, undefined, undefined, ctx);
+    const text = JSON.stringify(out);
+    assert.ok(!text.includes("s3cr3t-value-123"), `the value is not handed back to the model: ${text}`);
+    assert.match(text, /key=\[secret VT_API_KEY\]/, "the tool had the secret in its own environment");
+    const trace = await readFile(join(root, EVENTS_REL), "utf8");
+    assert.ok(!trace.includes("s3cr3t-value-123"), "nor written to the trace");
+    const row = trace.trim().split("\n").map((l) => JSON.parse(l)).find((e) => e.tool === "pack_lookup");
+    assert.deepEqual(row.result.secrets, ["VT_API_KEY"], "the trace says which secret the call used");
+  } finally {
+    if (saved.forging === undefined) delete process.env.SWARM_TOOL_FORGING; else process.env.SWARM_TOOL_FORGING = saved.forging;
+    if (saved.secrets === undefined) delete process.env.SWARM_PACK_SECRETS; else process.env.SWARM_PACK_SECRETS = saved.secrets;
+    await rm(root, { recursive: true, force: true });
+    await rm(secretDir, { recursive: true, force: true });
   }
 });

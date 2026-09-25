@@ -49,6 +49,15 @@ def main():
     if offset is not None and (not isinstance(offset, int) or isinstance(offset, bool) or offset < 0):
         fail("offset must be a byte offset, not a sector offset", offset=args.get("offset"))
 
+    # Where a store would be mounted: the seat's own directory. The rest of
+    # work/ is read-only in a VM, and a mount is that VM's alone either way.
+    mount_dir = args.get("mount_dir")
+    if mount_dir is None:
+        mount_dir = "work/%s/vss" % (os.environ.get("AGENT_ID") or "<your id>")
+    elif not isinstance(mount_dir, str) or not mount_dir:
+        fail("mount_dir must be a directory path", mount_dir=mount_dir)
+    mount_dir = mount_dir.rstrip("/")
+
     if not shutil.which("vshadowinfo"):
         fail("vshadowinfo is not on PATH",
              install="brew install libvshadow, or apt-get install -y libvshadow-utils")
@@ -84,12 +93,13 @@ def main():
 
     mountable = shutil.which("vshadowmount") is not None
     for store in stores:
-        store["mount_with"] = "vshadowmount %s%s work/vss/  # then work/vss/vss%d" % (
-            ("-o %d " % offset) if offset is not None else "", image, store["store"])
+        store["mount_with"] = "mkdir -p %s && vshadowmount %s%s %s/  # then %s/vss%d" % (
+            mount_dir, ("-o %d " % offset) if offset is not None else "", image, mount_dir, mount_dir, store["store"])
 
     out = {
         "image": image,
         "offset_bytes": offset,
+        "mount_dir": mount_dir,
         "stores": stores,
         "store_count": len(stores),
         "stores_claimed": claimed,
@@ -106,9 +116,10 @@ def main():
         out["note"] = ("vshadowmount is not installed, so the stores cannot be opened here. "
                        "The list above, with the creation times, still belongs in the timeline.")
     else:
-        out["note"] = ("Mount a store, then run the ordinary toolkit against work/vss/vssN as if "
-                       "it were a volume. A hive or a log read there is the state at the store's "
-                       "creation time, not at acquisition: cite both times.")
+        out["note"] = ("Mount a store, then run the ordinary toolkit against %s/vssN as if "
+                       "it were a volume. The mount is yours alone: copy what you derive from it into "
+                       "your own directory and record it. A hive or a log read there is the state at "
+                       "the store's creation time, not at acquisition: cite both times." % mount_dir)
     print(json.dumps(out, indent=2))
 
 

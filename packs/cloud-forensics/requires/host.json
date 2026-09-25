@@ -7,7 +7,24 @@
       "why": "The Microsoft-Extractor-Suite and most Microsoft 365 acquisition tooling is PowerShell, and it runs on Linux and macOS.",
       "install": {
         "brew": "brew install --cask powershell",
-        "apt": "apt-get install -y powershell"
+        "apt": "pinned download 7.6.6 (install.download)",
+        "download": {
+          "version": "7.6.6",
+          "apt_deps": [
+            "libicu72",
+            "libssl3"
+          ],
+          "amd64": {
+            "url": "https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/powershell-7.6.6-linux-x64.tar.gz",
+            "sha256": "ddbc4a2d113bbd46d283cfedcbcd117a70caefd7673f41f2b4e0000badf103bc",
+            "bin": "pwsh"
+          },
+          "arm64": {
+            "url": "https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/powershell-7.6.6-linux-arm64.tar.gz",
+            "sha256": "924829e54c983648f6f1419a2dc7f9433c861b2fb5bd57736ff096c24f133729",
+            "bin": "pwsh"
+          }
+        }
       },
       "licence": "MIT",
       "redistributable": false

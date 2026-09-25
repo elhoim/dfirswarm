@@ -13,6 +13,11 @@
 # deny bites the path shapes a real host actually has, the kickoff really
 # emits it, and the broker refuses everything but the one call.
 set -euo pipefail
+# This suite tests host runs, and a run is in microVMs unless it says
+# otherwise: it names host. An image, a lock file or another pack home
+# exported in the shell would point its kickoffs somewhere else.
+unset SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
+export SWARM_ISOLATION=host
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pass=0
@@ -26,12 +31,16 @@ fail() { echo "not ok - $1" >&2; exit 1; }
 # uncanonical path is the point.
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/herdr-seal.XXXXXX")"
 REAL="$(cd "$TMP" && pwd -P)"
+# The VM hubs' directory is the test's own (the pane plans below name it),
+# never the operator's ~/.dfirswarm/hubs.
+HUBS_TMP="$(mktemp -d /tmp/dfh.XXXXXX)"
+export SWARM_HUBS_DIR="$HUBS_TMP/dfirswarm-hubs"
 BROKER_PID=""
 LISTENER=""
 cleanup() {
   [[ -n "$BROKER_PID" ]] && kill "$BROKER_PID" 2>/dev/null || true
   [[ -n "$LISTENER" ]] && kill "$LISTENER" 2>/dev/null || true
-  rm -rf "$TMP" "$REAL"
+  rm -rf "$TMP" "$REAL" "$HUBS_TMP"
 }
 trap cleanup EXIT
 
@@ -168,6 +177,8 @@ fi
 [[ "$(jq -r '.runs[-1].herdr_socket' "$TMP/runs/registry.json")" == "$want" ]] \
   || fail "the run record should say $want, got $(jq -r '.runs[-1].herdr_socket' "$TMP/runs/registry.json")"
 ok "a kickoff puts the deny in the pane profile and records it ($want)"
+grep -q 'dfirswarm-hubs' "$SB/.fsguard/plan.txt" 2>/dev/null || fail "a host pane is not denied the VM hubs' sockets"
+ok "a host pane is denied every VM run's hub sockets"
 
 out="$(SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" start \
   --model solo/model --n 1 --cap-usd 1 --no-start --no-seal-herdr \
@@ -175,8 +186,10 @@ out="$(SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" start \
 SB2="$(printf '%s\n' "$out" | sed -n 's/^SANDBOX=//p' | tail -1)"
 # The collector's own socket is masked on Linux whatever --no-seal-herdr says:
 # that deny is about attribution (the gate stands in front), not about Herdr.
-if grep -E 'network-outbound|^no-socket' "$SB2/.fsguard/plan.txt" 2>/dev/null | grep -qv 'collector\.sock'; then
-  fail "--no-seal-herdr still emitted a socket deny"
+# So are the VM hubs' sockets (dfirswarm-hubs/): a host pane must never speak
+# as a VM run's agent, and that is not Herdr's either.
+if grep -E 'network-outbound|^no-socket' "$SB2/.fsguard/plan.txt" 2>/dev/null | grep -v 'collector\.sock' | grep -qv 'dfirswarm-hubs'; then
+  fail "--no-seal-herdr still emitted a Herdr socket deny"
 fi
 [[ "$(jq -r '.runs[-1].herdr_socket' "$TMP/runs/registry.json")" == "open" ]] \
   || fail "--no-seal-herdr should record open, got $(jq -r '.runs[-1].herdr_socket' "$TMP/runs/registry.json")"

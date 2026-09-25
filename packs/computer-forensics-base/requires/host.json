@@ -78,6 +78,30 @@
       "redistributable": false
     },
     {
+      "name": "img_stat",
+      "package": "sleuthkit",
+      "optional": true,
+      "why": "The size and format of an image as The Sleuth Kit reads it, E01 included: the bound for a scan over the whole of it.",
+      "install": {
+        "brew": "brew install sleuthkit",
+        "apt": "apt-get install -y sleuthkit"
+      },
+      "licence": "CPL-1.0 core, IPL-1.0 in the TCT-derived parts",
+      "redistributable": false
+    },
+    {
+      "name": "img_cat",
+      "package": "sleuthkit",
+      "optional": true,
+      "why": "The raw bytes of an image, E01 included, over a range of sectors: a signature scan without converting the image first.",
+      "install": {
+        "brew": "brew install sleuthkit",
+        "apt": "apt-get install -y sleuthkit"
+      },
+      "licence": "CPL-1.0 core, IPL-1.0 in the TCT-derived parts",
+      "redistributable": false
+    },
+    {
       "name": "bdeinfo",
       "package": "libbde",
       "optional": true,
@@ -132,7 +156,7 @@
       "why": "Build a super timeline from a whole image in one pass: every parser Plaso carries, into one storage file. Older packages install it as log2timeline.py; the tool accepts either.",
       "install": {
         "brew": "python3 -m pip install plaso",
-        "apt": "apt-get install -y plaso-tools"
+        "apt": "python3 -m pip install plaso"
       },
       "licence": "Apache-2.0",
       "redistributable": false
@@ -144,7 +168,7 @@
       "why": "Filter, sort and export a Plaso storage file. The half of a super timeline an examiner actually reads. Older packages install it as psort.py; the tool accepts either.",
       "install": {
         "brew": "python3 -m pip install plaso",
-        "apt": "apt-get install -y plaso-tools"
+        "apt": "python3 -m pip install plaso"
       },
       "licence": "Apache-2.0",
       "redistributable": false
@@ -156,7 +180,7 @@
       "why": "Sweep a whole image for features at scale: addresses, URLs, card numbers, EXIF, and carved records, without a file system.",
       "install": {
         "brew": "brew install bulk_extractor",
-        "apt": "apt-get install -y bulk-extractor"
+        "apt": "https://github.com/simsong/bulk_extractor (not packaged for Debian 12; build from source)"
       },
       "licence": "MIT",
       "redistributable": false

@@ -33,18 +33,27 @@
  * `E-<seq>` and the console, the ledger and this document cite the same
  * thing.
  */
-import { readFile, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   EVENTS_REL,
+  claimKey,
+  hostTime,
   readNames,
-  verifyEventChain,
+  eventChainVerifier,
+  readSandboxFile,
+  supersededBy,
   type AgentBudget,
   type LedgerEntry,
 } from "../extensions/protocol.ts";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
+import { manifestMeta, verdictAnchorLine, verdictAnchorState } from "./custody.ts";
+import { hashRegularFile, openRegular, readRegularText } from "./regular-file.ts";
+import { createInterface } from "node:readline";
 import { loadRunContext, readJsonFile } from "./run-record.ts";
+import { coverageLine, coverageOf, type CoverageReport, type Grounding } from "./coverage.ts";
+import { ReviewFileError, ledgerHead, readReviews, reviewState, verifyReviewChain, type ReviewLine } from "./review.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -59,6 +68,14 @@ export type ReportOptions = {
   now?: string;
   /** Skip a second walk of work/ when the caller already hashed it. */
   artifacts?: ArtifactIndex;
+  /** The examiner's review, when the caller already read it; read from the runs directory otherwise. */
+  review?: ReviewState | null;
+  /**
+   * The files handed over with this report (the dossier's court set), each
+   * with its size and sha256 or why it is absent: printed in the custody
+   * section so the paper copy names what came with it.
+   */
+  handover?: Array<{ name: string; description: string; present: boolean; reason?: string; bytes: number | null; sha256: string | null }>;
 };
 
 // ---------------------------------------------------------------------------
@@ -117,7 +134,7 @@ export function lintReport(markdown: string): LintFinding[] {
 // Reading the sandbox
 // ---------------------------------------------------------------------------
 
-function parseFrontMatter(text: string): Record<string, string> {
+export function parseFrontMatter(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   const block = /^---\n([\s\S]*?)\n---/.exec(text);
   for (const line of (block ? block[1] : text).split("\n")) {
@@ -237,6 +254,20 @@ th.num, td.num { text-align: right; }
 .chip-slate { background: var(--slate-soft); color: var(--slate-ink); }
 .chip-moss { background: var(--moss-soft); color: var(--moss-ink); }
 .chip-none { background: var(--paper-3); color: var(--ink-2); }
+/* In a table cell or an exhibit's head a chip may wrap: a nowrap chip wider
+   than its column was cut off at the table's edge, on a phone and in the
+   console's narrow report pane. */
+td .chip, .exhibit .chips .chip { white-space: normal; }
+/* The artifact and hand-over tables: room for the path and the hash, and a
+   last column wide enough for its chip or its reason. */
+table.artifacts th:nth-child(1) { width: 36%; }
+table.artifacts th:nth-child(2) { width: 11%; }
+table.artifacts th:nth-child(3) { width: 37%; }
+table.artifacts th:nth-child(4) { width: 16%; }
+table.handover th:nth-child(1) { width: 22%; }
+table.handover th:nth-child(2) { width: 10%; }
+table.handover th:nth-child(3) { width: 33%; }
+table.handover th:nth-child(4) { width: 35%; }
 
 /* --- contents ------------------------------------------------------------- */
 .toc { padding-top: 2rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--line); }
@@ -286,13 +317,14 @@ section { padding-top: 2.5rem; }
 .exhibit { border: 1px solid var(--line); border-left: 3px solid var(--slate); border-radius: 8px; background: var(--card); padding: .75rem .95rem; margin: .6rem 0; }
 .exhibit .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem; }
 .exhibit .no { font-family: var(--mono); font-size: .74rem; color: var(--ink-3); font-weight: 650; }
-.exhibit .chips { margin-left: auto; display: flex; gap: .35rem; }
+.exhibit .chips { margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .35rem; }
 .exhibit .value { margin: .35rem 0 .5rem; font-size: .98rem; line-height: 1.45; }
 .exhibit dl { display: grid; grid-template-columns: 5.4rem minmax(0, 1fr); gap: .18rem .8rem; margin: 0; font-size: .82em; }
 .exhibit dt { color: var(--ink-3); }
 .exhibit dd { margin: 0; overflow-wrap: anywhere; color: var(--ink-2); }
 .exhibit-ioc { border-left-color: var(--saffron); }
 .exhibit-finding { border-left-color: var(--kelp); }
+.exhibit-absence { border-left-style: dashed; }
 
 /* --- spend ---------------------------------------------------------------- */
 .bars { margin: 1rem 0; display: flex; flex-direction: column; gap: .45rem; }
@@ -368,15 +400,29 @@ function chip(text: string, tone: "kelp" | "saffron" | "brick" | "slate" | "moss
   return `<span class="chip chip-${tone}">${escapeHtml(text)}</span>`;
 }
 
+/**
+ * The time as the agent gave it, when the ledger kept it and it is not the
+ * stored UTC instant itself: a reader checking the timeline against the
+ * source needs the source's own words, zone included.
+ */
+function givenTime(entry: LedgerEntry): string | null {
+  const e = entry as LedgerEntry & { ts_raw?: unknown; ts_source?: unknown };
+  const raw = typeof e.ts_raw === "string" ? e.ts_raw : typeof e.ts_source === "string" ? e.ts_source : null;
+  return raw && raw.trim() && raw.trim() !== entry.ts ? raw.trim() : null;
+}
+
 /** One dated event on the timeline rail: stamp, claim, then its citation. */
-function timelineRow(entry: LedgerEntry): string {
+function timelineRow(entry: LedgerEntry, correctedBy?: number): string {
   const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(entry.ts ?? "");
   const stamp = m
     ? `<span class="date">${m[1]}</span><span>${m[2]}Z</span>`
     : `<span class="date">${escapeHtml(entry.ts ?? "undated")}</span>`;
   const rows: string[] = [];
+  const given = givenTime(entry);
+  if (given) rows.push(`<dt>Time as given</dt><dd>${escapeHtml(given)}</dd>`);
   if (entry.source) rows.push(`<dt>Source</dt><dd>${inline(entry.source)}</dd>`);
   if (entry.evidence) rows.push(`<dt>Evidence</dt><dd>${inline(entry.evidence)}</dd>`);
+  if (correctedBy) rows.push(`<dt>Superseded by</dt><dd>E-${correctedBy}</dd>`);
   return `<li>
   <div class="stamp">${stamp}<span class="no">E-${entry.seq}</span></div>
   <div class="what">${inline(entry.value)}</div>
@@ -390,7 +436,7 @@ function timelineRow(entry: LedgerEntry): string {
  * scan, and confidence is the first thing they need: what this run stands
  * behind, and what it is only offering.
  */
-function verdictGroups(findings: LedgerEntry[]): string {
+function verdictGroups(findings: LedgerEntry[], corrections: Map<number, number> = new Map()): string {
   const order: Array<{ key: string; label: string; cls: string }> = [
     { key: "high", label: "High confidence", cls: "c-high" },
     { key: "medium", label: "Medium confidence", cls: "c-medium" },
@@ -406,10 +452,11 @@ function verdictGroups(findings: LedgerEntry[]): string {
       .reverse()
       .map((f) => {
         const source = f.source ? inline(f.source) : f.evidence ? inline(f.evidence) : "";
+        const by = corrections.get(f.seq);
         return `<div class="verdict ${group.cls}">
   <span class="no">E-${f.seq}</span>
   <div>
-    <div class="claim">${inline(f.value)}</div>
+    <div class="claim">${inline(f.value)}${by ? ` ${chip(`superseded by E-${by}`, "brick")}` : ""}</div>
     ${source ? `<div class="meta">${source}</div>` : ""}
   </div>
 </div>`;
@@ -421,24 +468,229 @@ function verdictGroups(findings: LedgerEntry[]): string {
   return out.join("\n");
 }
 
-function exhibitCard(entry: LedgerEntry): string {
-  const tone = entry.kind === "ioc" ? "ioc" : entry.kind === "finding" ? "finding" : "event";
+/**
+ * One exhibit: the claim, when, what it rests on, who recorded it and with
+ * which model, and the entry's own chain hash — what a reader needs to say
+ * whose conclusion this is and to find the very line in ledger.jsonl.
+ */
+/**
+ * What the report knows about an entry beyond the entry itself: whether the
+ * trace shows its source being read, the entry that corrects it, and the
+ * examiner's standing on it.
+ */
+export type ExhibitNotes = {
+  grounding?: Grounding;
+  supersededBy?: number;
+  review?: string;
+};
+
+function exhibitCard(entry: LedgerEntry, modelOf: (agent: string) => string | undefined = () => undefined, notes: ExhibitNotes = {}): string {
+  const tone = entry.kind === "ioc" ? "ioc" : entry.kind === "finding" ? "finding" : entry.kind === "event" ? "event" : "absence";
   const rows: string[] = [];
   if (entry.ts) rows.push(`<dt>When</dt><dd>${whenCell(entry.ts)}</dd>`);
+  const given = givenTime(entry);
+  if (given) rows.push(`<dt>Time as given</dt><dd>${escapeHtml(given)}</dd>`);
   rows.push(`<dt>Source</dt><dd>${inline(entry.source ?? "—")}</dd>`);
   rows.push(`<dt>Evidence</dt><dd>${inline(entry.evidence ?? "—")}</dd>`);
   rows.push(`<dt>Recorded by</dt><dd class="hash">${escapeHtml(entry.authors.join(", "))}</dd>`);
+  const models = [...new Set(entry.authors.map((a) => modelOf(a)).filter((m): m is string => Boolean(m)))];
+  if (models.length) rows.push(`<dt>Model</dt><dd>${escapeHtml(models.join(", "))}</dd>`);
+  if (entry.at) rows.push(`<dt>Recorded at</dt><dd class="tabular">${escapeHtml(entry.at)}</dd>`);
+  if (entry.hash) rows.push(`<dt>Entry hash</dt><dd class="hash">${escapeHtml(entry.hash)}</dd>`);
+  const corrects = Number((entry as { supersedes?: unknown }).supersedes);
+  if (Number.isInteger(corrects) && corrects > 0) rows.push(`<dt>Corrects</dt><dd><a href="#e-${corrects}">E-${corrects}</a>, which stays in the ledger as it was recorded</dd>`);
+  if (notes.supersededBy) rows.push(`<dt>Superseded by</dt><dd><a href="#e-${notes.supersededBy}">E-${notes.supersededBy}</a>: the swarm recorded a correction; this entry is shown as it was recorded</dd>`);
+  if (notes.grounding === "not in the trace") rows.push(`<dt>Grounding</dt><dd>NOT GROUNDED IN THE TRACE: no call before this entry was recorded named its source</dd>`);
+  else if (notes.grounding === "grounded") rows.push(`<dt>Grounding</dt><dd>a call before this entry named its source</dd>`);
+  if (notes.review) rows.push(`<dt>Examiner review</dt><dd>${escapeHtml(notes.review)}</dd>`);
   const confidence = entry.confidence
     ? ` ${chip(entry.confidence, entry.confidence === "high" ? "moss" : entry.confidence === "medium" ? "saffron" : "none")}`
     : "";
-  return `<div class="exhibit exhibit-${tone}">
-  <div class="head"><span class="no">E-${entry.seq}</span><span class="chips">${chip(entry.kind, entry.kind === "ioc" ? "saffron" : entry.kind === "finding" ? "kelp" : "slate")}${confidence}</span></div>
+  const superseded = notes.supersededBy ? ` ${chip(`superseded by E-${notes.supersededBy}`, "brick")}` : "";
+  const ungrounded = notes.grounding === "not in the trace" ? ` ${chip("not grounded in the trace", "saffron")}` : "";
+  // The examiner's standing, at a glance on the exhibit's head: the full
+  // words are in its Examiner review row.
+  const reviewChip = notes.review
+    ? ` ${
+        notes.review.startsWith("accepted")
+          ? chip("accepted by the examiner", "moss")
+          : notes.review.startsWith("REJECTED")
+            ? chip("rejected by the examiner", "brick")
+            : notes.review.startsWith("amended")
+              ? chip("amended by the examiner", "saffron")
+              : notes.review.startsWith("the examiner's review could not be read")
+                ? chip("review unreadable", "brick")
+                : chip("not reviewed", "none")
+      }`
+    : "";
+  return `<div class="exhibit exhibit-${tone}" id="e-${entry.seq}">
+  <div class="head"><span class="no">E-${entry.seq}</span><span class="chips">${chip(entry.kind, entry.kind === "ioc" ? "saffron" : entry.kind === "finding" ? "kelp" : "slate")}${confidence}${superseded}${ungrounded}${reviewChip}</span></div>
   <p class="value">${inline(entry.value)}</p>
   <dl>${rows.join("")}</dl>
 </div>`;
 }
 
 type Section = { n: number; title: string; html: string; breakBefore?: boolean; count?: string };
+
+/** An examiner's review of a run, as the report reads it (scripts/review.ts keeps the file). */
+export type ReviewState = {
+  lines: number;
+  /** Whether the review file's own chain holds, and where it does not. */
+  chain: { ok: boolean; reason?: string | null };
+  /** The examiner's latest word on each entry. */
+  byEntry: Map<number, ReviewLine>;
+  /** The last signature, over the ledger head it names. */
+  signed: ReviewLine | null;
+  /** The ledger's head now, to hold the signature to: the last chain hash, or file:<sha256>. */
+  head: string;
+  /** Why the review file could not be read (a link, not a regular file): said as that, never as "not reviewed". */
+  unreadable?: string;
+};
+
+/**
+ * The examiner's review of run `id`, from `<runs>/reviews/<id>.jsonl`, with
+ * its chain checked and the ledger's current head beside it; null when there
+ * is none.
+ */
+export async function readReviewState(runsDir: string, id: string, sandbox: string, ledger: readonly LedgerEntry[]): Promise<ReviewState | null> {
+  if (!id) return null;
+  let lines: Awaited<ReturnType<typeof readReviews>>;
+  try {
+    lines = await readReviews(runsDir, id);
+  } catch (err) {
+    if (!(err instanceof ReviewFileError)) throw err;
+    return { lines: 0, chain: { ok: false, reason: err.why }, byEntry: new Map(), signed: null, head: "", unreadable: err.why };
+  }
+  if (!lines.length) return null;
+  const parsed = lines.filter((l) => typeof (l as ReviewLine).action === "string") as ReviewLine[];
+  const { entries, signed } = reviewState(parsed);
+  const digest = await hashRegularFile(join(sandbox, "ledger", "entries.jsonl"));
+  const fileSha = digest && "sha256" in digest ? digest.sha256 : "";
+  const head = ledgerHead(ledger.map((e) => ({ ...(e as object), text: "" })) as Parameters<typeof ledgerHead>[0], fileSha);
+  return { lines: lines.length, chain: verifyReviewChain(lines), byEntry: entries, signed, head };
+}
+
+/** The examiner's standing on one entry, in the words of its exhibit. */
+export function reviewStatusOf(state: ReviewState | null, entry: LedgerEntry): string {
+  if (!state) return "not reviewed by an examiner";
+  if (state.unreadable) return `the examiner's review could not be read (${state.unreadable})`;
+  const l = state.byEntry.get(entry.seq);
+  if (!l) return "not reviewed";
+  const verb = l.action === "accept" ? "accepted" : l.action === "reject" ? "REJECTED" : "amended";
+  const other = l.entry_hash && entry.hash && l.entry_hash !== entry.hash ? `; reviewed against entry hash ${l.entry_hash}, which is not this entry's` : "";
+  return `${verb} by ${l.examiner} at ${l.at}${l.note ? `: ${l.note}` : ""}${other}`;
+}
+
+/** The report's "Examiner review" row. */
+export function reviewLine(state: ReviewState | null, ledger: readonly LedgerEntry[]): string {
+  if (state?.unreadable) return `the examiner's review could not be read: ${state.unreadable} (reviews/<run>.jsonl beside the registry); nothing here says whether it was reviewed`;
+  if (!state || !state.lines) return "not reviewed by an examiner: every finding here is the agents' conclusion";
+  const counts = { accept: 0, reject: 0, amend: 0 };
+  for (const l of state.byEntry.values()) if (l.action in counts) counts[l.action as "accept" | "reject" | "amend"] += 1;
+  // A review names the entry's hash as it was reviewed; one that no longer
+  // matches was a review of a different entry.
+  const stale = ledger.filter((e) => {
+    const l = state.byEntry.get(e.seq);
+    return Boolean(l?.entry_hash && e.hash && l.entry_hash !== e.hash);
+  }).length;
+  const reviewed = `${counts.accept} accepted, ${counts.reject} rejected, ${counts.amend} amended, ${ledger.length - state.byEntry.size} of ${ledger.length} entries not reviewed${stale ? `; ${stale} reviewed against an entry hash that is not the entry's now` : ""}`;
+  const chain = state.chain.ok ? "the review file's chain verifies" : `the review file's chain is BROKEN${state.chain.reason ? ` (${state.chain.reason})` : ""}`;
+  const head = state.head;
+  const sign = state.signed
+    ? `signed by ${state.signed.examiner} at ${state.signed.at} over ledger head ${state.signed.ledger_head ?? "not named"}${
+        state.signed.ledger_head && head ? (state.signed.ledger_head === head ? " (the ledger's current head)" : ` — NOT the ledger's current head (${head}): entries were recorded after the signature`) : ""
+      }`
+    : "not signed";
+  return `${reviewed}; ${sign}; ${chain}`;
+}
+
+/** The run's model gateway as the kickoff recorded it (`isolation.model_gateway`); null when it had none. */
+export type GatewayRecord = { providers: string[]; declined: Array<{ provider: string; reason: string }> };
+
+export function gatewayRecordOf(run: Record<string, unknown> | null | undefined): GatewayRecord | null {
+  const iso = run?.isolation && typeof run.isolation === "object" ? (run.isolation as { model_gateway?: unknown }) : null;
+  const g = iso?.model_gateway && typeof iso.model_gateway === "object" ? (iso.model_gateway as { on?: unknown; providers?: unknown; declined?: unknown }) : null;
+  if (!g || g.on !== true) return null;
+  const providers = Array.isArray(g.providers) ? g.providers.filter((p): p is string => typeof p === "string") : [];
+  const declined = Array.isArray(g.declined)
+    ? g.declined.flatMap((d) => (d && typeof d === "object" && typeof (d as { provider?: unknown }).provider === "string" ? [{ provider: (d as { provider: string }).provider, reason: String((d as { reason?: unknown }).reason ?? "") }] : []))
+    : [];
+  return { providers, declined };
+}
+
+/** The gateway's own totals (traces/model-gateway.json), as far as the report needs them. */
+export type GatewayTotals = { spent_usd?: number; seats?: Record<string, { calls?: number; refused?: number; spent_usd?: number; unpriced_calls?: number }> };
+
+/**
+ * Whose word a VM run's spend is. Without the gateway, each seat's own
+ * report (the wording is unchanged); with it, the host's meter, for the
+ * providers it fronted, and each seat's report for the ones it did not.
+ * Empty for a host run.
+ */
+export function vmSpendNote(run: Record<string, unknown> | null | undefined, totals: GatewayTotals | null): string {
+  const iso = run?.isolation as { mode?: unknown } | undefined;
+  if (iso?.mode !== "microvm") return "";
+  const gw = gatewayRecordOf(run);
+  if (!gw) return " (as each VM reported its own spend; the host did not meter it)";
+  const unpriced = Object.values(totals?.seats ?? {}).reduce((n, t) => n + (Number(t?.unpriced_calls) || 0), 0);
+  const unpricedNote = unpriced ? `; ${unpriced} call${unpriced === 1 ? "" : "s"} the gateway could not price` : "";
+  if (!gw.declined.length) return ` (metered on the host by the model gateway${unpricedNote})`;
+  return ` (metered on the host by the model gateway for ${gw.providers.join(", ") || "no provider"}; ${gw.declined.map((d) => d.provider).join(", ")} ${gw.declined.length === 1 ? "was" : "were"} not fronted, and that spend is what each VM reported${unpricedNote})`;
+}
+
+/** The custody row for the gateway: what it fronted, what it metered and refused, and custody's word on its log. */
+export function gatewayLine(gw: GatewayRecord, totals: GatewayTotals | null, log: { lines: number; intact: boolean; detail: string; refused?: string } | null | undefined): string {
+  const seats = Object.entries(totals?.seats ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const calls = seats.reduce((n, [, t]) => n + (Number(t?.calls) || 0), 0);
+  const refused = seats.filter(([, t]) => Number(t?.refused) > 0).map(([id, t]) => `${id} ${t?.refused}`);
+  const unpriced = seats.reduce((n, [, t]) => n + (Number(t?.unpriced_calls) || 0), 0);
+  const parts = [
+    `on for ${gw.providers.join(", ") || "no provider"}`,
+    totals ? `${usd(Number(totals.spent_usd) || 0)} metered on the host across ${calls} call${calls === 1 ? "" : "s"}` : "its totals were not found (traces/model-gateway.json)",
+    ...(gw.declined.length ? [`not fronted, so seat-reported: ${gw.declined.map((d) => `${d.provider}${d.reason ? ` (${d.reason})` : ""}`).join(", ")}`] : []),
+    ...(refused.length ? [`calls refused by the gateway: ${refused.join(", ")}`] : []),
+    ...(unpriced ? [`${unpriced} call${unpriced === 1 ? "" : "s"} it could not price`] : []),
+    log ? `its log: ${log.refused ? log.detail : log.intact ? `${log.lines} lines, chain intact (custody)` : `CHAIN BROKEN (${log.detail})`}` : "its log was not checked by custody",
+  ];
+  return parts.join("; ");
+}
+
+/**
+ * What the kickoff recorded about how the run was held that a custody
+ * record should carry: the disk's encryption, a legal hold, a notify hook
+ * (whether one was set; the command itself is never recorded, since it may
+ * carry a token), how a synced folder was allowed, an earlier run's ledger
+ * handed in as hypotheses, and a run started as root.
+ */
+export function heldRows(run: Record<string, unknown> | null | undefined): Array<[string, string]> {
+  if (!run) return [];
+  const rows: Array<[string, string]> = [];
+  const enc = run.disk_encryption;
+  if (enc === "on" || enc === "off" || enc === "unknown") {
+    rows.push(["Disk encryption", enc === "on" ? "on, where the run is kept" : enc === "off" ? "OFF where the run is kept: the evidence copy and the record sit on an unencrypted disk" : "not known where the run is kept"]);
+  }
+  if ("hold" in run || run.state === "purged") {
+    const h = run.hold && typeof run.hold === "object" ? (run.hold as { reason?: unknown; at?: unknown; by?: unknown }) : null;
+    rows.push([
+      "Legal hold",
+      run.state === "purged"
+        ? "the run was PURGED"
+        : h
+          ? `held${typeof h.reason === "string" && h.reason ? `: ${h.reason}` : ""}${typeof h.by === "string" ? `, by ${h.by}` : ""}${typeof h.at === "string" ? `, at ${h.at}` : ""}`
+          : "not held",
+    ]);
+  }
+  if (typeof run.notify === "boolean") rows.push(["Notify hook", run.notify ? "set (its command is not recorded)" : "none"]);
+  if (run.synced_folder_allowed_by === "flag" || run.synced_folder_allowed_by === "marker") {
+    rows.push(["Synced folder", `the run's files sit in a synced folder, allowed by ${run.synced_folder_allowed_by === "flag" ? "--allow-synced-folder" : "a marker in the folder"}: copies may leave this machine`]);
+  }
+  if (run.ledger_from && typeof run.ledger_from === "object") {
+    const l = run.ledger_from as { run?: unknown; entries?: unknown; reviewed?: unknown };
+    rows.push(["Prior ledger", `${Number(l.entries) || 0} entr${Number(l.entries) === 1 ? "y" : "ies"} from run ${String(l.run ?? "?")}${l.reviewed === true ? " (reviewed ones only)" : ""}, handed in as hypotheses to re-derive, not as evidence`]);
+  }
+  if (run.allow_root === true) rows.push(["Started as root", "yes, allowed by --allow-root"]);
+  return rows;
+}
 
 /**
  * How firmly the egress allowlist was held, in the report's own words.
@@ -476,6 +728,8 @@ export function writeGuardLine(mode: string | undefined): string {
       return "enforced (Landlock, no namespace: the panes could write inside this run and Pi's agent directory, and nowhere else)";
     case "mountns":
       return "enforced (bubblewrap: a read-only root with this run and Pi's agent directory bound back writable)";
+    case "microvm":
+      return "enforced (microVM: each agent could write only its own work/<id>/, work/extracted/<id>/, work/quarantine/<id>/, tool-output/<id>/ and Pi session; the rest of the run was read-only in its VM, shared files and the board were written by the hub on the host, and of the host the VM was given only what its record lists as mounted, all read-only: the harness code, the packs, the evidence, the run)";
     case "none":
       return "NONE — a pane could write anywhere this user can, including outside the run";
     default:
@@ -500,6 +754,8 @@ export function herdrSocketLine(state: string | undefined): string {
       return "hidden from the panes (an empty tmpfs over the socket's directory in their mount namespace)";
     case "open":
       return "REACHABLE — --no-seal-herdr was passed; a pane could start a process outside the write guard";
+    case "unreachable":
+      return "out of reach: the agents ran in microVMs, and no host socket but each one's own hub link was in its VM";
     case "unenforced":
       // Not always the host's fault: `--no-write-guard` turns the whole
       // profile off, and a run with nothing to point the rule at emits none
@@ -545,6 +801,8 @@ export function attributionLine(state: string | undefined): string {
       return "by process ancestry (the gate reads the sender's pid from the kernel and walks up to the pane; a token alone does not attribute)";
     case "token-exposed":
       return "BY TOKEN, EXPOSED — this host lets a pane read a peer's environment and the gate was not running; a line could carry a peer's token";
+    case "channel":
+      return "by channel (each agent's VM reached the hub on its own vsock port, and the hub named the sender from the port a line came in on; no agent held a token)";
     default:
       return "not recorded (this run predates the field)";
   }
@@ -565,6 +823,9 @@ export function anchorGuarded(writeGuard: string | undefined, hostCaps: Record<s
       return true;
     case "mountns":
       return hostCaps?.bwrap === true;
+    case "microvm":
+      // Beside the run on the host, and the host was not in any VM.
+      return true;
     default:
       return false;
   }
@@ -587,12 +848,86 @@ export function measuredGuardLine(state: string | undefined): string {
       return "not measured (no pane reported a probe in time)";
     case "not-applicable":
       return "no write guard on this run";
+    case "microvm":
+      return "every agent's VM was probed at kickoff (vm/<id>.json): the run's floor read-only, its own directories writable, the evidence read-only, the hub reachable";
     default:
       return "not recorded (this run predates the field)";
   }
 }
 
 /** What the trace's hash chain says, for the custody section. */
+/**
+ * What the run tried to reach and was refused. "Nothing was refused" is a
+ * claim only a log can back: without one the line used to say it anyway, and
+ * a run whose egress was enforced by something that keeps no log (or not
+ * enforced at all) read as if it had been watched and was clean.
+ */
+export function egressRefusedLine(
+  denied: Array<[string, number]>,
+  logPresent: boolean,
+  run: { netguard?: unknown; netguard_mode?: unknown; isolation?: { mode?: string } } | null | undefined,
+  secretViolations: string[] = [],
+  ownHostStops: string[] = [],
+): string {
+  if (denied.length) return denied.map(([host, n]) => `${host}${n > 1 ? ` (${n})` : ""}`).join(", ");
+  if (logPresent) return "nothing was refused";
+  if (run?.isolation?.mode === "microvm") {
+    // The one refusal msb writes down is a credential's placeholder aimed at
+    // a host it is not bound to; custody read those from each VM's log. A
+    // stop on the credential's own host is told apart: no leak, a failed
+    // request (msb 0.7.2 reads a body starting with % or \u that way).
+    const own = ownHostStops.length
+      ? `; msb also stopped ${ownHostStops.length} request${ownHostStops.length === 1 ? "" : "s"} to a credential's own host on a placeholder it found outside the headers (not a leak; each request failed): ${ownHostStops.join("; ")}`
+      : "";
+    const stopped = (secretViolations.length
+      ? `; msb stopped ${secretViolations.length} credential placeholder${secretViolations.length === 1 ? "" : "s"} aimed at a host not its own: ${secretViolations.join("; ")}`
+      : "; msb stopped no credential placeholder on its way to another host") + own;
+    if (run.netguard_mode === "microvm-open") return `not observable, and the network was open (--no-netguard): each VM could reach every public host${stopped}`;
+    return `not observable: each agent's microVM refused everything outside its rules, and that refusal leaves no log${stopped}`;
+  }
+  if (run?.netguard === false) return "not observable: no egress control was running";
+  return "not observable: no netguard log was kept";
+}
+
+type CustodyStops = { vms?: Array<{ agent?: string; secret_violations?: Array<{ env?: string; host?: string; method?: string; path?: string; location?: string; own_host?: boolean | null }> }> | null } | null | undefined;
+
+function stopLines(custody: CustodyStops, own: boolean): string[] {
+  return (custody?.vms ?? []).flatMap((v) =>
+    (v.secret_violations ?? [])
+      .filter((x) => (x.own_host === true) === own)
+      .map((x) => `${v.agent ?? "?"} ${x.env ?? ""} → ${x.host ?? ""} ${x.method ?? ""} ${x.path ?? ""}${x.location ? ` (${x.location})` : ""}`.replace(/\s+/g, " ").trim()),
+  );
+}
+
+/** Each placeholder msb stopped on its way to a host not its own (or not known to be), as custody read it from the VMs' logs. */
+export function custodyViolations(custody: CustodyStops): string[] {
+  return stopLines(custody, false);
+}
+
+/** Each request msb stopped on the credential's own host: a failed call, not a leak. */
+export function custodyOwnHostStops(custody: CustodyStops): string[] {
+  return stopLines(custody, true);
+}
+
+/**
+ * Where the evidence went. Every byte an agent reads is sent to its model's
+ * provider; on BelkaCTF #6 that included a BitLocker recovery key, sent to
+ * four providers. That is a case-acceptance decision, and this line is what
+ * lets a reader check it was made.
+ */
+export function providersLine(run: { providers?: unknown } | null | undefined): string {
+  const list = Array.isArray(run?.providers)
+    ? (run!.providers as Array<{ model?: string; hosts?: string[]; local?: boolean }>)
+    : [];
+  if (!list.length) return "not recorded";
+  return list
+    .map((p) => {
+      const where = p.local ? "this machine (local model)" : p.hosts?.length ? p.hosts.join(", ") : "its provider (host not recorded)";
+      return `${p.model ?? "?"}${(p as { role?: string }).role === "summary" ? " (the summary model self-compaction hands contexts to)" : ""} → ${where}`;
+    })
+    .join("; ");
+}
+
 export function chainLine(
   chain: {
     ok: boolean;
@@ -605,12 +940,14 @@ export function chainLine(
   },
   anchored = false,
   guarded = true,
+  operatorActions = 0,
 ): string {
-  if (!chain.total) return "no trace";
-  // The failure verdict comes first. A file with every `prev` stripped has no
-  // chain *and* contradicts the anchor; reported the other way round, the
-  // most complete rewrite possible printed as "this run had no trace
-  // collector" — the one sentence that tells the reader to stop worrying.
+  // The failure verdict comes first — before "no trace" as well. A file
+  // with every `prev` stripped has no chain *and* contradicts the anchor;
+  // reported the other way round, the most complete rewrite possible printed
+  // as "this run had no trace collector" — the one sentence that tells the
+  // reader to stop worrying. A trace emptied while its anchor names lines is
+  // the same case with nothing left.
   if (!chain.ok) {
     const what =
       chain.reason === "appended"
@@ -622,12 +959,15 @@ export function chainLine(
             : "the record was edited after it was written";
     return `BROKEN at line ${chain.broken_at} of ${chain.total} — ${what}`;
   }
+  if (!chain.total) return "no trace";
   if (!chain.chained) return `${chain.total} lines, not chained (this run had no trace collector)`;
   const notes: string[] = [];
   // Both are ordinary in an older run and a finding in a current one, so they
   // are stated rather than folded into "intact".
   if (chain.disputed) notes.push(`${chain.disputed} line(s) claimed another agent's name`);
-  if (chain.unverified) notes.push(`${chain.unverified} line(s) could not be attributed to a pane`);
+  const unattributed = Math.max(0, (chain.unverified ?? 0) - operatorActions);
+  if (operatorActions) notes.push(`${operatorActions} operator action(s) run from a shell outside the run (stop, reap, say), recorded as the operator's and also on runs/operator-audit.jsonl`);
+  if (unattributed) notes.push(`${unattributed} line(s) could not be attributed to a pane`);
   // Without the anchor, "intact" means the file agrees with itself — which a
   // wholesale rewrite also manages. Saying so is the difference between a
   // custody line a reader can rely on and one that sounds like it.
@@ -639,6 +979,111 @@ export function chainLine(
   return `intact: ${chain.chained} of ${chain.total} lines hash-chained${notes.length ? ` — ${notes.join("; ")}` : ""}`;
 }
 
+/**
+ * How the copy was held to its source at kickoff, as the manifest says: by
+ * name, kind and size, never by content — the source is not hashed. Null
+ * when the manifest says nothing (evidence used in place, an older run).
+ */
+export function sourceCheckedLine(sourceChecked: unknown): string | null {
+  // The content check: every copied file's source hashed again and compared
+  // with the manifest's sha256.
+  if (sourceChecked && typeof sourceChecked === "object") {
+    const c = sourceChecked as { by?: unknown; files?: unknown; mismatches?: unknown; seconds?: unknown };
+    if (c.by !== "content") return null;
+    const files = Number(c.files) || 0;
+    const mismatches = Number(c.mismatches) || 0;
+    const secs = Number(c.seconds);
+    return `the copy was checked against its source at kickoff by content: ${files} file${files === 1 ? "" : "s"} hashed again from the source, ${mismatches ? `${mismatches} MISMATCH${mismatches === 1 ? "" : "ES"}` : "0 mismatches"}${Number.isFinite(secs) && secs > 0 ? ` (${Math.round(secs)} s)` : ""}`;
+  }
+  if (typeof sourceChecked !== "string" || !sourceChecked) return null;
+  if (sourceChecked === "MISMATCH") return "the copy did NOT match its source by name, kind and size at kickoff";
+  return `the copy was checked against its source at kickoff by ${sourceChecked}, not by content (the source itself was not hashed)`;
+}
+
+type HostInputs = {
+  unverifiable?: unknown;
+  unchanged?: boolean;
+  files?: number;
+  changed?: unknown[];
+  missing?: unknown[];
+  added?: unknown[];
+  skipped?: unknown[];
+  unreadable?: unknown[];
+  manifest_anchored?: boolean | null;
+  checked?: { files?: number; links?: number; special?: number };
+  digests_compared?: { md5?: number; sha1?: number };
+};
+
+/**
+ * The host's re-hash of the evidence, as the custody row says it. Only what
+ * was read again is called intact: a custody that ran out of time before
+ * some files found nothing changed in the rest, which is not a "yes" and was
+ * printed as "NO — 0 changed, 0 missing, 0 added", as if the evidence had
+ * changed. Null when custody did not look at the evidence at all.
+ */
+export function hostEvidenceLine(inputs: unknown, at: string | undefined): string | null {
+  if (!inputs || typeof inputs !== "object") return null;
+  const i = inputs as HostInputs;
+  if (typeof i.unverifiable === "string") return `UNVERIFIABLE by the host — ${i.unverifiable}`;
+  const n = (v?: unknown[]) => (Array.isArray(v) ? v.length : 0);
+  const manifest =
+    i.manifest_anchored === true ? ", manifest anchored" : i.manifest_anchored === false ? "" : ", manifest not anchored (the kickoff recorded no hash of it)";
+  const notRead = `${n(i.skipped) ? `, ${n(i.skipped)} not re-read before custody's deadline` : ""}${n(i.unreadable) ? `, ${n(i.unreadable)} unreadable by the host` : ""}`;
+  if (n(i.changed) || n(i.missing) || n(i.added) || i.manifest_anchored === false) {
+    return `NO — the host's re-hash found ${n(i.changed)} changed, ${n(i.missing)} missing, ${n(i.added)} added${i.manifest_anchored === false ? "; the manifest was rewritten" : ""}${notRead ? `;${notRead.slice(1)}` : ""}`;
+  }
+  const files = i.files ?? 0;
+  if (i.unchanged) {
+    const how = [
+      `${files} file${files === 1 ? "" : "s"}`,
+      ...(i.checked?.links ? [`${i.checked.links} link${i.checked.links === 1 ? "" : "s"} checked by target`] : []),
+      ...(i.checked?.special ? [`${i.checked.special} special file${i.checked.special === 1 ? "" : "s"} checked by kind`] : []),
+      ...(i.digests_compared?.md5 || i.digests_compared?.sha1 ? ["md5 and sha1 compared beside sha256"] : []),
+    ];
+    return `yes — re-hashed in full by the host at ${at ?? "?"} (${how.join("; ")})${manifest}`;
+  }
+  return `NOT FULLY RE-HASHED — ${files - n(i.skipped) - n(i.unreadable)} of ${files} files checked unchanged by the host at ${at ?? "?"}${notRead}${manifest}; the rest are not covered`;
+}
+
+/**
+ * What a reader needs to say which software produced this run: the
+ * harness's commit (and whether it had local changes), the versions of Pi,
+ * Node and msb, the image digest and the models. Read from the registry,
+ * where the kickoff records them; null when it recorded none of them.
+ */
+export function reproducibilityLine(run: Record<string, unknown> | null | undefined, models: string[]): string | null {
+  const nested = run?.provenance && typeof run.provenance === "object" ? (run.provenance as Record<string, unknown>) : {};
+  const str = (k: string): string | null => {
+    const v = nested[k] ?? run?.[k];
+    return typeof v === "string" && v.trim() ? v.trim() : null;
+  };
+  const commit = str("harness_commit");
+  const dirty = nested.harness_dirty === true || run?.harness_dirty === true;
+  const pi = str("pi_version");
+  const node = str("node_version");
+  const msb = str("msb_version");
+  const image = str("image_digest") ?? ((run?.isolation as { image_digest?: unknown } | undefined)?.image_digest as string | undefined) ?? null;
+  if (!commit && !pi && !node && !msb) return null;
+  const parts = [
+    commit ? `harness commit ${commit}${dirty ? " with local changes" : ""}` : "harness commit not recorded",
+    ...(pi ? [`Pi ${pi}`] : []),
+    ...(node ? [`Node ${node}`] : []),
+    ...(msb ? [`msb ${msb}`] : []),
+    ...(image ? [`image ${image}`] : []),
+    ...(models.length ? [`models ${models.join(", ")}`] : []),
+  ];
+  return `${parts.join("; ")}. The models' outputs are not deterministic: the trace, the kept tool outputs and the sealed sessions are the reproducible record, not a re-run.`;
+}
+
+/** The examiner host's clock, as the kickoff recorded it; null when it recorded nothing. */
+export function hostClockLine(run: Record<string, unknown> | null | undefined): string | null {
+  const c = run?.host_clock && typeof run.host_clock === "object" ? (run.host_clock as { tz?: unknown; utc_offset?: unknown; synced?: unknown; source?: unknown }) : null;
+  const tz = typeof c?.tz === "string" ? c.tz : typeof run?.host_tz === "string" ? (run.host_tz as string) : null;
+  if (!c && !tz) return null;
+  const synced = c?.synced === true ? "yes" : c?.synced === false ? "NO" : "not known";
+  return `time zone ${tz ?? "not recorded"}${typeof c?.utc_offset === "string" ? ` (UTC${c.utc_offset})` : ""}; clock synchronised: ${synced}${typeof c?.source === "string" ? ` (${c.source})` : ""}. The harness stamps its own times in UTC.`;
+}
+
 export function egressLine(mode: string | undefined): string {
   switch (mode) {
     case "netns":
@@ -647,16 +1092,178 @@ export function egressLine(mode: string | undefined): string {
       return "ADVISORY (proxy environment only: it holds for anything that reads HTTP(S)_PROXY, not for a raw socket)";
     case "off":
       return "none (netguard was off for this run)";
+    case "microvm":
+      return "enforced (microVM network policy on the host: deny by default, each VM's allowed hosts only; a denied name does not resolve and a hard-coded address has no route)";
+    case "microvm-open":
+      return "OPEN (--no-netguard: each microVM could reach every public host; its secrets still went only to their own hosts)";
     default:
       return "not recorded (this run predates the field)";
   }
 }
 
+/**
+ * How the evidence reached the agents: copied into the run, used in place
+ * behind a host guard, or mounted read-only into each agent's microVM.
+ */
+export function evidenceArrival(inputs: { source?: string; copied_at?: string; guard?: string; held?: string; bound?: boolean }): string {
+  const source = `<code>${escapeHtml(inputs.source || "the operator")}</code>`;
+  const at = escapeHtml(inputs.copied_at || "—");
+  if (inputs.guard === "microvm" && inputs.held === "copy") {
+    return `<p>Copied from ${source} at ${at} into <code>inputs/</code>, read-only, as a second layer (<code>--inputs-copy</code>): each agent's microVM had the copy mounted read-only, and the host refused every write through that mount.</p>`;
+  }
+  if (inputs.guard === "microvm") {
+    return `<p>Used in place from ${source} (manifest taken ${at}), with no copy: each agent's microVM had it mounted read-only as <code>inputs/</code>, and the host refused every write through that mount. The harness also refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it. The source itself stayed as writable on the host as it was; the host's custody check at stop is what says it did not change.</p>`;
+  }
+  if (inputs.held === "image") {
+    return `<p>Attached from ${source} (manifest taken ${at}) as a read-only disk image at <code>inputs/</code>: the device refused every write. There is no pristine copy, and nothing to restore from.</p>`;
+  }
+  if (inputs.held === "bind" || inputs.bound) {
+    return `<p>Used in place from ${source} (manifest taken ${at}), with no copy: <code>inputs/</code> linked to it, and the kernel held the source read-only in every pane. The harness refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it.</p>`;
+  }
+  return `<p>Copied from ${source} at ${at} into <code>inputs/</code>, which no agent may write. The harness refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it, restores a shell write from a pristine copy, and where the host allows it runs each pane with <code>inputs/</code> read-only at the kernel.</p>`;
+}
+
+/** What the VM manager recorded about one agent's VM (scripts/vm.ts, vm/<id>.json). */
+export type VmRecordView = {
+  agent: string;
+  name?: string;
+  runtime?: { name?: string; version?: string };
+  image?: {
+    ref?: string;
+    manifest_digest?: string | null;
+    expected_digest?: string;
+    /** The image's own record, /etc/dfirswarm/image.json, as the VM's probe read it. */
+    description?: { profile?: string; pack_versions?: Record<string, { version?: string }>; redistributable?: boolean; nonredistributable?: string[]; downloads?: Record<string, { version?: string }> } | null;
+  };
+  cpus?: number;
+  memory_mib?: number;
+  mounts?: Array<{ host?: string; guest?: string; mode?: string; noexec?: boolean }>;
+  network?: { default?: string; allow_hosts?: string[]; host_ports?: number[] };
+  secrets?: Array<{ name?: string; hosts?: string[] }>;
+  snapshot?: { path?: string; sha256?: string; bytes?: number } | { error?: string };
+  created_at?: string;
+  stopped_at?: string;
+  /** What the VM held at stop that its image did not (scripts/vm.ts INVENTORY_SCRIPT). */
+  installed_outside_image?: { baseline?: boolean; apt?: Record<string, string>; venv?: Record<string, string>; error?: string };
+  /** What the finish that removed the VM did to msb's database: scrubbed, busy, no sqlite3, no database. */
+  msb_db?: string;
+};
+
+/**
+ * The custody rows a microVM run adds: what the agents ran in, and each
+ * agent's VM as the host recorded it. Whole — a reader checking a digest or
+ * a mount needs all of it.
+ */
+export function vmRows(records: VmRecordView[]): Array<[string, string]> {
+  if (!records.length) return [];
+  const first = records[0];
+  const images = [...new Set(records.map((r) => `${r.image?.ref ?? "?"} (${r.image?.manifest_digest ?? "digest not recorded"})`))];
+  const rows: Array<[string, string]> = [
+    ["Isolation", `one microVM per agent (${first.runtime?.name ?? "microsandbox"} ${first.runtime?.version ?? ""}`.trimEnd() + `), image ${images.join("; ")}`],
+  ];
+  // Every VM booted the digest the kickoff resolved, or it is said which did not.
+  const expected = first.image?.expected_digest;
+  if (expected) {
+    const off = records.filter((r) => r.image?.manifest_digest && r.image.manifest_digest !== expected);
+    rows.push(["Image digest", off.length ? `DIFFERS: ${off.map((r) => `${r.agent} booted ${r.image?.manifest_digest}`).join("; ")}; the run resolved ${expected}` : `every VM booted ${expected}, resolved once at kickoff`]);
+  }
+  const desc = first.image?.description;
+  if (desc && typeof desc === "object") {
+    const packs = Object.entries(desc.pack_versions ?? {}).map(([id, v]) => `${id} ${v.version ?? "?"}`).join(", ");
+    const downloads = Object.entries(desc.downloads ?? {}).map(([n, v]) => `${n} ${v.version ?? "?"}`).join(", ");
+    rows.push([
+      "Image record",
+      `profile ${desc.profile ?? "?"}; built from ${packs || "no recorded pack versions"}${downloads ? `; pinned downloads ${downloads}` : ""}; ${
+        desc.redistributable === false ? `NOT for redistribution (${(desc.nonredistributable ?? []).length} programs; see /etc/dfirswarm/NOTICE in the image)` : desc.redistributable === true ? "redistributable" : "redistribution not recorded"
+      }`,
+    ]);
+  }
+  for (const r of records) {
+    const writable = (r.mounts ?? []).filter((m) => m.mode === "rw").map((m) => `${m.guest ?? m.host}${m.noexec ? " (no-exec)" : ""}`);
+    const net = r.network?.default === "public"
+      ? "every public host (--no-netguard)"
+      : [...(r.network?.allow_hosts ?? []).map((h) => (/:\d+$/.test(h) && !h.endsWith("]") ? h : `${h}:443`)), ...(r.network?.host_ports ?? []).map((p) => `the host gateway :${p}`)].join(", ") || "nothing";
+    const secrets = (r.secrets ?? []).map((s) => `${s.name ?? "?"} → ${(s.hosts ?? []).join(", ")}`).join("; ") || "none";
+    const snap = !r.snapshot
+      ? "not kept"
+      : "error" in r.snapshot && r.snapshot.error
+        ? `NOT KEPT — ${r.snapshot.error}`
+        : `kept, sha256 ${(r.snapshot as { sha256?: string }).sha256 ?? "?"} (${(r.snapshot as { path?: string }).path ?? "?"})`;
+    const inv = r.installed_outside_image;
+    const added = inv && !inv.error ? [...Object.entries(inv.apt ?? {}).map(([k, v]) => `apt ${k} ${v}`), ...Object.entries(inv.venv ?? {}).map(([k, v]) => `venv ${k} ${v}`)] : [];
+    const installed = !inv
+      ? "not inventoried"
+      : inv.error
+        ? `not inventoried (${inv.error})`
+        : added.length
+          ? `INSTALLED OUTSIDE THE IMAGE: ${added.join(", ")}`
+          : inv.baseline === false
+            ? "nothing in the image's venv; apt not comparable (the image records no full package list)"
+            : "nothing outside the image";
+    rows.push([
+      `VM ${r.agent}`,
+      `${r.name ?? "?"}: ${r.cpus ?? "?"} vCPU, ${r.memory_mib ?? "?"} MiB; writable: ${writable.join(", ") || "nothing"}; everything else mounted read-only; could reach: ${net}; secrets swapped in on the way out: ${secrets}; installed at stop: ${installed}; disk at stop: ${snap}${
+        r.msb_db === "scrubbed"
+          ? "; msb's database cleared of it after removal"
+          : r.msb_db && r.msb_db !== "no database"
+            ? `; msb's database NOT cleared after removal (${r.msb_db}): a secret's value may remain in msb's database`
+            : ""
+      }`,
+    ]);
+  }
+  // msb keeps a live VM's secret values in its database; a finish that
+  // removed VMs rewrites it without them. Where it could not, it is said once
+  // more on its own line, since a reader scanning for secrets looks here.
+  const unscrubbed = records.filter((r) => r.msb_db && r.msb_db !== "scrubbed" && r.msb_db !== "no database");
+  if (unscrubbed.length) rows.push(["Secrets in msb's database", `NOT CLEARED after removing ${unscrubbed.map((r) => `${r.agent} (${r.msb_db})`).join(", ")}: a secret's value may remain in msb's database on the host`]);
+  return rows;
+}
+
+async function readVmRecords(sandbox: string): Promise<VmRecordView[]> {
+  const dir = join(sandbox, "vm");
+  const out: VmRecordView[] = [];
+  for (const name of (await readdir(dir).catch(() => [])).filter((n) => n.endsWith(".json")).sort()) {
+    const rec = await readJsonFile<VmRecordView>(join(dir, name));
+    if (rec?.agent) out.push(rec);
+  }
+  return out;
+}
+
+/** The trace's chain, read a line at a time from a regular file; why it was not read, when it is there and could not be. */
+async function streamedChain(file: string, anchor: Parameters<typeof eventChainVerifier>[0]): Promise<{ chain: ReturnType<ReturnType<typeof eventChainVerifier>["finish"]>; unread: string | null }> {
+  const verifier = eventChainVerifier(anchor);
+  const opened = await openRegular(file);
+  if ("why" in opened) return { chain: verifier.finish(), unread: opened.why === "missing" ? null : opened.why };
+  try {
+    const rl = createInterface({ input: opened.handle.createReadStream({ autoClose: false, encoding: "utf8" }), crlfDelay: Infinity });
+    for await (const line of rl) verifier.push(line);
+  } catch (err) {
+    return { chain: verifier.finish(), unread: `unreadable (${(err as NodeJS.ErrnoException).code ?? (err as Error).message})` };
+  } finally {
+    await opened.handle.close();
+  }
+  return { chain: verifier.finish(), unread: null };
+}
+
 export async function renderReport(sandboxArg: string, options: ReportOptions = {}): Promise<string> {
-  const { sandbox, run, team, budget, events, sentinel, ledger, inputs } = await loadRunContext(sandboxArg, {
+  const { sandbox, runsDir, run, team, budget, events, trace_unreadable, sentinel, ledger, inputs } = await loadRunContext(sandboxArg, {
     runsDir: options.runsDir,
     parseSentinel: parseFrontMatter,
   });
+  const vmRecords = await readVmRecords(sandbox);
+  const hostCustody = await readJsonFile<{ summary?: string; at?: string; inputs?: unknown; run?: string | null; vms?: Array<{ agent?: string; secret_violations?: Array<{ env?: string; host?: string; method?: string; path?: string; location?: string; own_host?: boolean | null }> }> | null; model_gateway?: { lines: number; intact: boolean; detail: string; refused?: string } | null }>(join(sandbox, "custody.json"));
+  // The model gateway's totals, host-written beside the trace, when the run had one.
+  const gatewayTotals = await (async (): Promise<GatewayTotals | null> => {
+    const read = await readRegularText(join(sandbox, "traces", "model-gateway.json"), 64 * 1024 * 1024);
+    if (!("text" in read)) return null;
+    try {
+      return JSON.parse(read.text) as GatewayTotals;
+    } catch {
+      return null;
+    }
+  })();
+  // Whether that custody.json is the verdict custody anchored outside the run.
+  const custodyAnchor = hostCustody ? await verdictAnchorState(sandbox) : null;
   // The manifest says what was copied; the trace says what each pane measured
   // and what the final check found. The console joins them the same way in
   // `inputsView`, and the report must not state a guard the panes did not
@@ -708,7 +1315,17 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
     typeof anchor?.lines === "number" && typeof anchor?.head === "string"
       ? { lines: anchor.lines, head: anchor.head, prev_head: anchor.prev_head, pending: anchor.pending }
       : null;
-  const chain = verifyEventChain(await readFile(join(sandbox, EVENTS_REL), "utf8").catch(() => ""), anchorPoint);
+  // The chain, a line at a time, so a trace of any size is checked. A trace
+  // that is there and cannot be read (a link, not a regular file, an open
+  // that failed) is said as such: read as empty, it printed as "no trace"
+  // or as a trace cut short, neither of which is what happened.
+  const streamed = await streamedChain(join(sandbox, EVENTS_REL), anchorPoint);
+  const chain = streamed.chain;
+  const traceUnread = trace_unreadable ?? streamed.unread;
+  // Operator actions run from a shell outside the run (stop, reap, say)
+  // reach the collector with no pane's token: that is who they are, not a
+  // line nobody can account for. Each is also on runs/operator-audit.jsonl.
+  const operatorActions = events.filter((e) => e.tool === "operator_action" && (e as { agent_unverified?: unknown }).agent_unverified === true).length;
   const toolchain = await readJsonFile<{ packages?: Array<{ name: string; version: string; record_sha256?: string }> }>(join(sandbox, "toolchain.json"));
   const artifacts = options.artifacts ?? (await hashArtifacts(sandbox));
   const version = (await readJsonFile<{ version?: string }>(join(ROOT, "package.json")))?.version ?? "0.0.0";
@@ -720,12 +1337,13 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   // file is kept now, and where an older run has lost it the proxy's log still
   // names every host it let through — a weaker source, and said to be one.
   const allowHosts = (await readFile(join(sandbox, "netguard.allow"), "utf8").catch(() => "")).trim();
-  const netguardLog = await readFile(join(sandbox, "traces", "netguard.log"), "utf8").catch(() => "");
+  // Null when there is no log: "nothing was refused" needs one behind it.
+  const netguardLog = await readFile(join(sandbox, "traces", "netguard.log"), "utf8").catch(() => null);
   const allowFromLog = allowHosts
     ? []
     : [
         ...new Set(
-          (netguardLog.match(/ALLOW connect ([^\s]+)/g) ?? []).map((m) =>
+          ((netguardLog ?? "").match(/ALLOW connect ([^\s]+)/g) ?? []).map((m) =>
             m.replace("ALLOW connect ", ""),
           ),
         ),
@@ -734,15 +1352,29 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   // `bit.ly` — an agent resolving a shortened link it had read inside the
   // seized phone. A custody section that prints only what was allowed cannot
   // show the reader that it happened.
-  const deniedHosts = countHosts(netguardLog, "DENY");
+  const deniedHosts = countHosts(netguardLog ?? "", "DENY");
   const names = await readNames(sandbox).catch(() => []);
   const chosen = new Map(names.map((n) => [n.id, n.doing ? `${n.name} — ${n.doing}` : n.name]));
 
   const id = run?.id ?? team.swarm_id ?? "";
+  // The examiner's review, kept beside the registry where no agent writes.
+  const review: ReviewState | null = options.review !== undefined ? options.review : await readReviewState(runsDir, id, sandbox, ledger);
+  // Which model each agent ran on, for the exhibits and the provenance row.
+  const modelOf = (agent: string): string | undefined => team.agents.find((a) => a.id === agent)?.model ?? run?.model;
+  const models = [...new Set(team.agents.map((a) => a.model ?? run?.model).filter((m): m is string => Boolean(m)))].sort();
+  const provenance = reproducibilityLine(run as Record<string, unknown> | null, models);
+  const runRecord = run as Record<string, unknown> | null;
+  const commit = (() => {
+    const nested = runRecord?.provenance && typeof runRecord.provenance === "object" ? (runRecord.provenance as Record<string, unknown>) : {};
+    const c = nested.harness_commit ?? runRecord?.harness_commit;
+    const dirty = nested.harness_dirty === true || runRecord?.harness_dirty === true;
+    return typeof c === "string" && c ? ` (commit ${c.slice(0, 12)}${dirty ? ", with local changes" : ""})` : "";
+  })();
   const caseId = options.caseId ?? run?.case_id ?? "";
   const examiner = options.examiner ?? run?.examiner ?? "";
   const startedAt = budget?.started_at ?? run?.started_at ?? events[0]?.ts ?? "";
-  const endedAt = sentinel?.at ?? events.at(-1)?.ts ?? "";
+  // The host's clock, where the collector stamped one: a guest's own `ts` is its word.
+  const endedAt = sentinel?.at ?? (events.length ? hostTime(events.at(-1) as { ts: string; recv_ts?: string }) : "");
   const durationMs = startedAt && endedAt ? Date.parse(endedAt) - Date.parse(startedAt) : Number.NaN;
   const generatedAt = options.now ?? new Date().toISOString();
   const unmetered = budget?.metered === false;
@@ -750,6 +1382,19 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   const timeline = ledger.filter((e) => e.kind === "event").sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? "") || a.seq - b.seq);
   const iocs = ledger.filter((e) => e.kind === "ioc");
   const findings = ledger.filter((e) => e.kind === "finding");
+  // Searches that found nothing, as the agents recorded them.
+  const absences = ledger.filter((e) => (e.kind as string) === "absence");
+  // Corrections: the corrected entry stays as it was recorded, marked.
+  const correctedBy = supersededBy(ledger);
+  // What the trace shows the swarm naming, and whether it shows each
+  // exhibit's source being read before the exhibit was recorded.
+  const coverage: CoverageReport = await coverageOf(sandbox, { events, ledger, traceUnreadable: traceUnread });
+  const notesFor = (e: LedgerEntry): ExhibitNotes => ({
+    grounding: coverage.grounding[String(e.seq)],
+    supersededBy: correctedBy.get(e.seq),
+    review: reviewStatusOf(review, e),
+  });
+  const ungrounded = ledger.filter((e) => coverage.grounding[String(e.seq)] === "not in the trace");
 
   const sections: Section[] = [];
 
@@ -760,25 +1405,48 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
     count: findings.length ? `${findings.length} recorded` : "none recorded",
     html: findings.length
       ? `<p class="lede">What the swarm concluded, strongest first. Each card carries the exhibit number its full entry has in §4, and the source it rests on. A claim with no evidence line is a claim this document does not stand behind.</p>
-${verdictGroups(findings)}`
+${verdictGroups(findings, correctedBy)}`
       : `<div class="note">The swarm recorded no findings. That is not the same as finding nothing: it means nothing was written to the ledger with <code>record</code>, so this report has no conclusions to carry. §7 says what was and was not covered.</div>`,
   });
 
   // --- 2. Scope and evidence ----------------------------------------------
   const guardWord = (g: string) => (g === "kernel" ? "kernel" : g === "mode" ? "permission bits" : "detect + heal");
   const enforcedSeen = Object.values(enforced);
+  // The digests an imager's log and an opposing expert's tools carry, beside
+  // sha256, when the kickoff took them.
+  const fileDigests = (f: unknown) => f as { md5?: string; sha1?: string };
+  const withSha1 = (inputs?.files ?? []).some((f) => typeof fileDigests(f).sha1 === "string");
+  const withMd5 = (inputs?.files ?? []).some((f) => typeof fileDigests(f).md5 === "string");
+  // How many commands on the trace named each file; "—" is a file no command named.
+  const withCoverage = !coverage.unavailable && coverage.inputs > 0;
+  const namedCell = (path: string) => {
+    if (!withCoverage) return "";
+    const n = coverage.touched[path] ?? 0;
+    const walked = coverage.under_named_dir[path] ?? 0;
+    return `<td class="num">${n ? String(n) : walked ? `— <span class="muted">(directory named ${walked}×)</span>` : "—"}</td>`;
+  };
   const evidenceRows = (inputs?.files ?? [])
     .map(
       (f) =>
-        `<tr><td><code>${escapeHtml(f.path)}</code></td><td class="num">${escapeHtml(bytesHuman(f.bytes))}</td><td class="hash">${escapeHtml(f.sha256)}</td></tr>`,
+        `<tr><td><code>${escapeHtml(f.path)}</code></td><td class="num">${escapeHtml(bytesHuman(f.bytes))}</td><td class="hash">${escapeHtml(f.sha256)}</td>${withSha1 ? `<td class="hash">${escapeHtml(fileDigests(f).sha1 ?? "—")}</td>` : ""}${withMd5 ? `<td class="hash">${escapeHtml(fileDigests(f).md5 ?? "—")}</td>` : ""}${namedCell(f.path)}</tr>`,
     )
     .join("");
+  const coverageHtml = inputs
+    ? `<h3>Coverage, from the trace</h3>
+<p>${escapeHtml(coverageLine(coverage))}${withCoverage ? " The table's last column counts the calls that named each file." : ""}</p>${
+        withCoverage && coverage.untouched.length
+          ? `<p>Named by no command: ${coverage.untouched.map((p) => `<code>${escapeHtml(p)}</code>`).join(", ")}.</p>`
+          : ""
+      }`
+    : "";
+  const manifest = inputs ? await manifestMeta(sandbox) : null;
+  const sourceCheck = sourceCheckedLine(manifest?.source_checked);
   sections.push({
     n: 2,
     title: "Scope and evidence",
     count: inputs ? `${inputs.files.length} file${inputs.files.length === 1 ? "" : "s"} · ${bytesHuman(inputs.bytes ?? 0)}` : "none given",
     html: inputs
-      ? `<p>Copied from <code>${escapeHtml(inputs.source || "the operator")}</code> at ${escapeHtml(inputs.copied_at || "—")} into <code>inputs/</code>, which no agent may write. The harness refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it, restores a shell write from a pristine copy, and where the host allows it runs each pane with <code>inputs/</code> read-only at the kernel.</p>
+      ? `${evidenceArrival(inputs as { source?: string; copied_at?: string; guard?: string; held?: string; bound?: boolean })}
 <p>Guard requested <code>${escapeHtml(inputs.enforce || "auto")}</code>, set up as <code>${escapeHtml(inputs.guard || "none")}</code>; measured per pane: ${
           enforcedSeen.length
             ? Object.entries(enforced)
@@ -786,8 +1454,9 @@ ${verdictGroups(findings)}`
                 .join(" ")
             : "no pane reported"
         }.</p>
-<table><thead><tr><th>File</th><th class="num">Size</th><th>sha256 at kickoff</th></tr></thead><tbody>${evidenceRows}</tbody></table>
-<p>${(inputs.files ?? []).length} file${(inputs.files ?? []).length === 1 ? "" : "s"}, ${escapeHtml(bytesHuman(inputs.bytes ?? 0))} in total.</p>`
+<table><thead><tr><th>File</th><th class="num">Size</th><th>sha256 at kickoff</th>${withSha1 ? "<th>sha1</th>" : ""}${withMd5 ? "<th>md5</th>" : ""}${withCoverage ? '<th class="num">Named by</th>' : ""}</tr></thead><tbody>${evidenceRows}</tbody></table>
+<p>${(inputs.files ?? []).length} file${(inputs.files ?? []).length === 1 ? "" : "s"}, ${escapeHtml(bytesHuman(inputs.bytes ?? 0))} in total.${sourceCheck ? ` ${escapeHtml(sourceCheck)}` : ""}</p>
+${coverageHtml}`
       : `<div class="note">This run was given no read-only inputs. Whatever the agents examined, they reached some other way, and this report cannot state a hash for it.</div>`,
   });
 
@@ -798,8 +1467,8 @@ ${verdictGroups(findings)}`
     count: timeline.length ? `${timeline.length} event${timeline.length === 1 ? "" : "s"}` : "none",
     breakBefore: true,
     html: timeline.length
-      ? `<p class="lede">${timeline.length} dated event${timeline.length === 1 ? "" : "s"}, in time order, every timestamp UTC. The exhibit number is the ledger's own sequence, so the console, <code>ledger.jsonl</code> and this rail all name the same row.</p>
-<ol class="tl">${timeline.map(timelineRow).join("")}</ol>`
+      ? `<p class="lede">${timeline.length} dated event${timeline.length === 1 ? "" : "s"}, in time order, in UTC as the ledger holds them: each is the time its agent recorded, converted from the zone the agent gave (where the ledger kept the source's own words, they are shown beside it). The exhibit number is the ledger's own sequence, so the console, <code>ledger.jsonl</code> and this rail all name the same row.</p>
+<ol class="tl">${timeline.map((e) => timelineRow(e, correctedBy.get(e.seq))).join("")}</ol>`
       : `<div class="note">No dated events were recorded, so this report has no timeline.</div>`,
   });
 
@@ -807,14 +1476,20 @@ ${verdictGroups(findings)}`
   sections.push({
     n: 4,
     title: "Indicators and findings",
-    count: `${iocs.length} indicator${iocs.length === 1 ? "" : "s"} · ${findings.length} finding${findings.length === 1 ? "" : "s"}`,
+    count: `${iocs.length} indicator${iocs.length === 1 ? "" : "s"} · ${findings.length} finding${findings.length === 1 ? "" : "s"}${absences.length ? ` · ${absences.length} searched and not found` : ""}`,
     html:
+      (ungrounded.length
+        ? `<p class="lede">${ungrounded.length} entr${ungrounded.length === 1 ? "y is" : "ies are"} marked <strong>not grounded in the trace</strong>: no call before ${ungrounded.length === 1 ? "it" : "each"} was recorded named its source. The source may still be right (a path inside an image a tool reached by inode, say), but the trace does not show the swarm reading it.</p>`
+        : "") +
       (iocs.length
-        ? `<h3>Indicators (${iocs.length})</h3>${iocs.map(exhibitCard).join("")}`
+        ? `<h3>Indicators (${iocs.length})</h3>${iocs.map((e) => exhibitCard(e, modelOf, notesFor(e))).join("")}`
         : `<h3>Indicators</h3><div class="note">None recorded.</div>`) +
       (findings.length
-        ? `<h3>Findings (${findings.length})</h3>${findings.map(exhibitCard).join("")}`
-        : `<h3>Findings</h3><div class="note">None recorded.</div>`),
+        ? `<h3>Findings (${findings.length})</h3>${findings.map((e) => exhibitCard(e, modelOf, notesFor(e))).join("")}`
+        : `<h3>Findings</h3><div class="note">None recorded.</div>`) +
+      (absences.length
+        ? `<h3>Searched and not found (${absences.length})</h3><p class="lede">Searches that found nothing, as recorded by the agents, valid only for the stated scope: what was looked for, where, and how (the query, the tool and its version, allocated space only or unallocated and slack too). Not found by that search is not absent from the evidence.</p>${absences.map((e) => exhibitCard(e, modelOf, notesFor(e))).join("")}`
+        : ""),
   });
 
   // --- 5. Method -----------------------------------------------------------
@@ -854,13 +1529,28 @@ ${verdictGroups(findings)}`
     })
     .join("");
   const contextHeaders = anyContext ? `<th class="num">Context</th><th class="num">Compactions</th>` : "";
+  // Tools the agents wrote for themselves: code nobody reviewed, which a
+  // finding may rest on. Named with who wrote it, how often it ran, and its
+  // hash where the trace kept one.
+  const forged = events.filter((e) => e.tool === "make_tool" && (e.result as { ok?: unknown } | undefined)?.ok === true);
+  const forgedHtml = forged.length
+    ? `<p>Tools the agents forged during the run with <code>make_tool</code>, <strong>not independently validated</strong>: ${forged
+        .map((e) => {
+          const name = String((e.args as { name?: unknown } | undefined)?.name ?? "?");
+          const calls = events.filter((x) => x.tool === name).length;
+          const sha = (e.result as { sha256?: unknown } | undefined)?.sha256;
+          const runtime = (e.args as { runtime?: unknown } | undefined)?.runtime;
+          return `<code>${escapeHtml(name)}</code> by ${escapeHtml(e.agent)}${typeof runtime === "string" ? ` (${escapeHtml(runtime)})` : ""}, called ${calls} time${calls === 1 ? "" : "s"}${typeof sha === "string" ? `, sha256 <span class="hash">${escapeHtml(sha)}</span>` : ""}`;
+        })
+        .join("; ")}. A finding that rests on one of them rests on code the swarm wrote and no one reviewed.</p>`
+    : "";
   sections.push({
     n: 5,
     title: "Method",
     html: `<p>${team.n} peer agent${team.n === 1 ? "" : "s"} shared one sandbox and coordinated through an append-only file board. Nobody planned, nobody was assigned a seat, and no agent could direct another.${anyNamed ? ' The "Calls itself" column is what each one decided to be, in its own words, after reading the goal.' : ""}</p>
 <table><thead><tr><th>Agent</th>${anyNamed ? "<th>Calls itself</th>" : ""}<th>Model</th><th class="num">Spent</th><th class="num">Calls</th><th class="num">Tokens</th>${contextHeaders}</tr></thead><tbody>${teamRows}</tbody></table>
 <p>
-  ${unmetered ? "Unmetered (local models)." : `${escapeHtml(usd(budget?.spent_usd ?? 0))} of a ${escapeHtml(usd(run?.cap_usd ?? budget?.cap_usd ?? 0))} cap`},
+  ${unmetered ? "Unmetered (local models)." : `${escapeHtml(usd(budget?.spent_usd ?? 0))} of a ${escapeHtml(usd(run?.cap_usd ?? budget?.cap_usd ?? 0))} cap${escapeHtml(vmSpendNote(runRecord, gatewayTotals))}`},
   ${(budget?.tokens ?? 0).toLocaleString("en-US")} tokens, ${events.length.toLocaleString("en-US")} tool calls in ${escapeHtml(durationHuman(durationMs))}.
   ${run?.wall_clock_minutes ? `Wall-clock cap ${run.wall_clock_minutes} min.` : ""}
   ${run?.cap_per_agent_usd ? `Per-agent cap ${escapeHtml(usd(run.cap_per_agent_usd))}.` : ""}
@@ -870,7 +1560,8 @@ ${
   toolbox
     ? `<p>Toolbox <code>${escapeHtml(toolbox.preset ?? "off")}</code>: ${(toolbox.present ?? []).length} tool${(toolbox.present ?? []).length === 1 ? "" : "s"} present${(toolbox.missing ?? []).length ? `, ${(toolbox.missing ?? []).length} missing (${(toolbox.missing ?? []).map((m) => escapeHtml(m.name)).join(", ")})` : ""}.</p>`
     : ""
-}`,
+}
+${forgedHtml}`,
   });
 
   // --- 6. Artifacts --------------------------------------------------------
@@ -885,7 +1576,7 @@ ${
     title: "Artifacts produced",
     count: artifacts.files.length ? `${artifacts.files.length} file${artifacts.files.length === 1 ? "" : "s"}` : "none",
     html: artifacts.files.length
-      ? `<table><thead><tr><th>Path</th><th class="num">Size</th><th>sha256</th><th>Where</th></tr></thead><tbody>${artifactRows}</tbody></table>
+      ? `<table class="artifacts"><thead><tr><th>Path</th><th class="num">Size</th><th>sha256</th><th>Where</th></tr></thead><tbody>${artifactRows}</tbody></table>
 <p>${artifacts.files.length} file${artifacts.files.length === 1 ? "" : "s"}, ${escapeHtml(bytesHuman(artifacts.bytes))} in total; ${escapeHtml(bytesHuman(artifacts.packaged_bytes))} of that travels with the package.</p>
 ${
   artifacts.files.some((f) => !f.packaged)
@@ -899,10 +1590,25 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
   // --- 7. Limitations ------------------------------------------------------
   const capHit = (budget?.spent_usd ?? 0) > 0 && (run?.cap_usd ?? 0) > 0 && (budget?.spent_usd ?? 0) >= (run?.cap_usd ?? 0) * 0.98;
   const limits: string[] = [];
+  // Whose conclusions these are, first: a reader deciding what to rely on
+  // needs to know an AI swarm wrote them before anything else.
+  limits.push(
+    review?.unreadable
+      ? `Prepared by an AI agent swarm. The examiner's review could not be read (${escapeHtml(review.unreadable)}), so this document cannot say whether any finding was reviewed.`
+      : review && review.signed
+      ? `Prepared by an AI agent swarm and reviewed by an examiner: ${escapeHtml(reviewLine(review, ledger))}. An entry the examiner did not review is still the agents' conclusion.`
+      : review && review.lines
+        ? `Prepared by an AI agent swarm. An examiner has reviewed some entries and has not signed the review (${escapeHtml(reviewLine(review, ledger))}); an entry not reviewed is the agents' conclusion.`
+        : "Prepared by an AI agent swarm. The findings are the agents' conclusions, each recorded with the source it rests on; none is an examiner's opinion until an examiner has reviewed it.",
+  );
+  limits.push("The models' output is not deterministic: running the case again would not give the same words. The reproducible record is the trace, the kept tool outputs and the sealed sessions, not a re-run.");
+  if (forged.length) limits.push(`${forged.length} tool${forged.length === 1 ? " was" : "s were"} written by the agents during the run and not independently validated (§5).`);
   if (!sentinel) limits.push("The swarm did not finish: there is no <code>done/SWARM_DONE</code>, so no agent stated that the definition of done was met.");
   if (capHit) limits.push(`Spend reached the cap (${escapeHtml(usd(budget?.spent_usd ?? 0))} of ${escapeHtml(usd(run?.cap_usd ?? 0))}). Work stopped because of the budget, not because the questions were answered.`);
   if (!findings.length) limits.push("No findings were recorded, so nothing in this report is stated as a conclusion.");
   if (!inputs) limits.push("No read-only inputs were given, so no evidence hash is stated.");
+  if (withCoverage && coverage.untouched.length) limits.push(`${coverage.untouched.length} of ${coverage.inputs} evidence file${coverage.inputs === 1 ? " was" : "s were"} named by no command on the trace (§2). An artefact nobody opened is not evidence of absence.`);
+  if (ungrounded.length) limits.push(`${ungrounded.length} ledger entr${ungrounded.length === 1 ? "y's" : "ies'"} source${ungrounded.length === 1 ? " was" : "s were"} named by no call before the entry was recorded (§4).`);
   const refusals = events.filter((e) => e.result && typeof e.result === "object" && (e.result as { ok?: boolean }).ok === false);
   if (refusals.length) limits.push(`${refusals.length} tool call${refusals.length === 1 ? "" : "s"} failed or were refused during the run; they are in <code>trace/events.jsonl</code>.`);
   limits.push("This document reports what the swarm recorded. An artefact nobody opened is not evidence of absence, and the trace is the record of what was actually read.");
@@ -916,25 +1622,38 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
   const custody: Array<[string, string]> = [
     ["Case", caseId || "—"],
     ["Examiner", examiner || "—"],
-    ["Tool", `DFIR Swarm ${version}`],
+    ["Tool", `DFIR Swarm ${version}${commit}`],
+    ...(provenance ? ([["Reproducibility", provenance]] as Array<[string, string]>) : []),
+    ...(hostClockLine(runRecord) ? ([["Host clock", hostClockLine(runRecord) as string]] as Array<[string, string]>) : []),
     ["Run", id || "—"],
     ["Started", startedAt || "—"],
     ["Ended", endedAt || "—"],
     ["Sandbox", sandbox],
-    ["Evidence", inputs ? `${inputs.files.length} file(s), ${bytesHuman(inputs.bytes ?? 0)}, from ${inputs.source || "the operator"}` : "none given"],
+    ["Evidence", inputs ? `${inputs.files.length} file(s), ${bytesHuman(inputs.bytes ?? 0)}, from ${inputs.source || "the operator"}${sourceCheck ? `; ${sourceCheck}` : ""}` : "none given"],
     [
       "Evidence intact at the end",
-      !inputsCheck
-        ? "not checked"
-        : inputsCheck.ok
-          ? `yes, ${inputsCheck.checked} checked by ${inputsCheck.by} at ${inputsCheck.at}`
-          : inputsCheck.content_ok
-            ? `bytes intact (${inputsCheck.checked} checked by ${inputsCheck.by} at ${inputsCheck.at}); ${inputsCheck.metadata.length} file(s) drifted in mode or link count only`
-            : `NO — ${inputsCheck.modified.length} modified, ${inputsCheck.missing.length} missing, ${inputsCheck.added.length} added`,
+      // The host's own re-hash, when the stop took one, is the verdict; an
+      // agent's check is the agent's word and is said as such beside it.
+      hostEvidenceLine(hostCustody?.inputs, hostCustody?.at) !== null
+        ? (hostEvidenceLine(hostCustody?.inputs, hostCustody?.at) as string) +
+            (inputsCheck ? `; the agents' own last check (${inputsCheck.by}, ${inputsCheck.at}) said ${inputsCheck.ok ? "intact" : "changed"}` : "")
+          : hostCustody && hostCustody.inputs === null
+            ? `no evidence to check: the host's custody (${hostCustody.at ?? "time not recorded"}) found none given to this run`
+          : !inputsCheck
+            ? "not checked (no host custody was taken; an agent's check is absent too)"
+            : inputsCheck.ok
+              ? `an agent's word only: ${inputsCheck.checked} checked by ${inputsCheck.by} at ${inputsCheck.at}; no host custody was taken (swarm.sh stop takes it)`
+              : inputsCheck.content_ok
+                ? `an agent's word only: bytes intact (${inputsCheck.checked} checked by ${inputsCheck.by} at ${inputsCheck.at}); ${inputsCheck.metadata.length} file(s) drifted in mode or link count only`
+                : `an agent's word only: NO — ${inputsCheck.modified.length} modified, ${inputsCheck.missing.length} missing, ${inputsCheck.added.length} added`,
     ],
     [
       "Network",
-      allowHosts
+      vmRecords.length && (run?.netguard_mode === "microvm-open" || vmRecords.some((r) => r.network?.default === "public"))
+        ? "each agent's VM, OPEN (--no-netguard): every public host; each credential still only to its own host"
+        : vmRecords.length
+        ? `each agent's VM, deny by default: ${[...new Set(vmRecords.flatMap((r) => r.network?.default === "public" ? ["every public host"] : [...(r.network?.allow_hosts ?? []), ...(r.network?.host_ports ?? []).map((p) => `host gateway :${p}`)]))].join(", ") || "nothing"}`
+        : allowHosts
         ? `netguard allowlist: ${allowHosts.split("\n").filter(Boolean).join(", ")}`
         : allowFromLog.length
           ? `netguard allowlist not kept; the proxy log shows it allowed ${allowFromLog.join(", ")}`
@@ -942,45 +1661,86 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ],
     // What the allowlist was is half the custody line; whether the host could
     // hold it is the other half, and the record used to carry only the first.
-    ["Egress enforcement", egressLine(run?.netguard === false ? "off" : (run?.netguard_mode as string | undefined))],
+    ["Egress enforcement", egressLine(run?.netguard === false && !String(run?.netguard_mode ?? "").startsWith("microvm") ? "off" : (run?.netguard_mode as string | undefined))],
     ["Write guard", writeGuardLine(run?.write_guard as string | undefined)],
     ["Terminal socket", herdrSocketLine(run?.herdr_socket as string | undefined)],
     ["Pi extensions", piExtensionsLine(run?.pi_extensions as string | undefined)],
     ["Attribution", attributionLine(run?.attribution as string | undefined)],
     ["Guard measured", measuredGuardLine(run?.write_guard_measured as string | undefined)],
+    ...vmRows(vmRecords),
+    // A host run says so beside the VM rows it does not have: every agent
+    // was a process on this machine, and a record with no isolation field is
+    // an old host run.
+    ...(run?.isolation?.mode === "microvm" ? [] : [["Isolation", "host, unisolated: every agent was a process on this machine (--isolation host); the host guards above are what held it"] as [string, string]]),
     [
       "Trace integrity",
-      chainLine(chain, Boolean(anchorPoint), anchorGuarded(run?.write_guard as string | undefined, run?.host_caps as Record<string, unknown> | undefined)),
+      traceUnread
+        ? `NOT READ HERE: the trace could not be read by this report (${traceUnread}); the host's custody check streams it, and its verdict is below`
+        : chainLine(chain, Boolean(anchorPoint), anchorGuarded(run?.write_guard as string | undefined, run?.host_caps as Record<string, unknown> | undefined), operatorActions),
     ],
-    [
-      "Egress refused",
-      deniedHosts.length
-        ? deniedHosts.map(([host, n]) => `${host}${n > 1 ? ` (${n})` : ""}`).join(", ")
-        : "nothing was refused",
-    ],
+    ["Egress refused", egressRefusedLine(deniedHosts, netguardLog !== null, run, custodyViolations(hostCustody), custodyOwnHostStops(hostCustody))],
+    ["Content sent to", providersLine(run)],
     [
       "Installed during the run",
       toolchain?.packages?.length
         ? toolchain.packages.map((p) => `${p.name} ${p.version}${p.record_sha256 ? ` (${p.record_sha256.slice(0, 12)})` : ""}`).join(", ")
         : "nothing",
     ],
-    ["Ledger", `${ledger.length} entries (${timeline.length} events, ${iocs.length} indicators, ${findings.length} findings)`],
-    ["Trace", `${events.length} tool calls`],
+    ["Ledger", `${ledger.length} entries (${timeline.length} events, ${iocs.length} indicators, ${findings.length} findings${absences.length ? `, ${absences.length} searched and not found` : ""}${correctedBy.size ? `; ${correctedBy.size} corrected by a later entry, kept as recorded` : ""})`],
+    ["Examiner review", reviewLine(review, ledger)],
+    ...(gatewayRecordOf(runRecord) ? ([["Model gateway", gatewayLine(gatewayRecordOf(runRecord) as GatewayRecord, gatewayTotals, hostCustody?.model_gateway)]] as Array<[string, string]>) : []),
+    ["Coverage", coverageLine(coverage)],
+    [
+      "Grounding",
+      coverage.unavailable
+        ? `not computed: ${coverage.unavailable}`
+        : `${ledger.length - ungrounded.length - Object.values(coverage.grounding).filter((g) => g === "not a path").length} entr${ledger.length === 1 ? "y" : "ies"} with a source a call named before it was recorded; ${ungrounded.length} not grounded in the trace${ungrounded.length ? ` (${ungrounded.map((e) => `E-${e.seq}`).join(", ")})` : ""}; ${Object.values(coverage.grounding).filter((g) => g === "not a path").length} whose source names no path`,
+    ],
+    ...heldRows(runRecord),
+    [
+      "Host custody check",
+      hostCustody?.summary
+        ? `${hostCustody.summary} (taken on the host after the run, ${hostCustody.at ?? "time not recorded"}; custody.json${custodyAnchor && custodyAnchor.state !== "no verdict" ? `, which ${verdictAnchorLine(custodyAnchor)}` : ""})`
+        : "not taken (swarm.sh stop takes it)",
+    ],
+    ["Trace", traceUnread ? `not read here (${traceUnread})` : `${events.length} tool calls`],
   ];
+  const handover = options.handover ?? [];
+  const handoverHtml = handover.length
+    ? `<h3>Files handed over with this report (${handover.length})</h3>
+<p>What a court or a counterparty receives beside this document, as the dossier read each file when it generated this report: its size and sha256, or why it is absent. This report is not in the list, since its own hash cannot be inside it; <code>court-set.json</code> carries it.</p>
+<table class="handover"><thead><tr><th>File</th><th class="num">Size</th><th>sha256</th><th>Contents</th></tr></thead><tbody>${handover
+        .map(
+          (f) =>
+            `<tr><td><code>${escapeHtml(f.name)}</code></td><td class="num">${f.present && f.bytes !== null ? escapeHtml(bytesHuman(f.bytes)) : "—"}</td><td class="hash">${f.present && f.sha256 ? escapeHtml(f.sha256) : escapeHtml(`absent: ${f.reason ?? "not there"}`)}</td><td>${escapeHtml(f.description)}</td></tr>`,
+        )
+        .join("")}</tbody></table>`
+    : "";
   sections.push({
     n: 8,
     title: "Chain of custody",
     html: `<table><thead><tr><th>Item</th><th>Recorded</th></tr></thead><tbody>${custody
       .map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td class="${k.startsWith("Sandbox") ? "hash" : ""}">${escapeHtml(v)}</td></tr>`)
-      .join("")}</tbody></table>`,
+      .join("")}</tbody></table>${handoverHtml}`,
   });
 
   // --- 9. The swarm's own report ------------------------------------------
   const own = await (async () => {
     for (const candidate of [sentinel?.output, "work/report.md", "work/notes.md"]) {
-      if (!candidate || !candidate.startsWith("work/") || !candidate.endsWith(".md")) continue;
-      const text = await readFile(join(sandbox, candidate), "utf8").catch(() => null);
-      if (text && text.trim()) return { path: candidate, text };
+      if (!candidate || !candidate.endsWith(".md")) continue;
+      // The sentinel's output is an agent's word: a path that leaves the run
+      // (`work/../..`) or a link an agent planted is not read into a report
+      // that leaves the building.
+      let key: string;
+      try {
+        key = claimKey(sandbox, candidate);
+      } catch {
+        continue;
+      }
+      if (!key.startsWith("work/")) continue;
+      const read = await readSandboxFile(sandbox, key, { maxBytes: 16 * 1024 * 1024 }).catch(() => null);
+      const text = read ? read.bytes.toString("utf8") : null;
+      if (text && text.trim()) return { path: key, text };
     }
     return null;
   })();
@@ -1052,7 +1812,8 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
       <dt>Examiner</dt><dd>${escapeHtml(examiner || "—")}</dd>
       <dt>Run</dt><dd class="hash">${escapeHtml(id || "—")}</dd>
       <dt>Period</dt><dd class="tabular">${escapeHtml(startedAt || "—")} → ${escapeHtml(endedAt || "—")}</dd>
-      <dt>Tool</dt><dd>DFIR Swarm ${escapeHtml(version)}</dd>
+      <dt>Tool</dt><dd>DFIR Swarm ${escapeHtml(version)}${escapeHtml(commit)}</dd>
+      <dt>Prepared by</dt><dd>an AI agent swarm (${team.n} agent${team.n === 1 ? "" : "s"}); ${review && review.signed ? `reviewed and signed by ${escapeHtml(review.signed.examiner)} at ${escapeHtml(review.signed.at)}` : "its findings are the agents' conclusions until an examiner reviews them"}</dd>
       <dt>Generated</dt><dd class="tabular">${escapeHtml(generatedAt)}</dd>
     </dl>
   </header>

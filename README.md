@@ -9,10 +9,10 @@
 
 [![CI](https://github.com/halilozturkci/dfirswarm/actions/workflows/ci.yml/badge.svg)](https://github.com/halilozturkci/dfirswarm/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
-[![Node 22+](https://img.shields.io/badge/node-%3E%3D22.6-brightgreen.svg)](.nvmrc)
+[![Node 22.19+](https://img.shields.io/badge/node-%3E%3D22.19-brightgreen.svg)](.nvmrc)
 [![Website](https://img.shields.io/badge/website-dfirswarm.ai-0e7c7b.svg)](https://dfirswarm.ai)
 
-**A swarm of forensic agents, on your machine, on the record.** N agents ([Pi](https://pi.dev) sessions) run side by side in [Herdr](https://herdr.dev) panes, share one sandbox, talk on a file board, lease a path before writing it, forge the tools the case needs, and stop when a sentinel appears. Every tool call, dollar and token goes to a hash-chained trace that a collector outside the panes writes, and to a live web console. There is no planner and no org chart: **the board is the product.**
+**A swarm of forensic agents, on your machine, on the record.** N agents ([Pi](https://pi.dev) sessions), each in its own microVM, run side by side in [Herdr](https://herdr.dev) panes, share one sandbox, talk on a file board, lease a path before writing it, forge the tools the case needs, and stop when a sentinel appears. Every tool call, dollar and token goes to a hash-chained trace that a collector outside the panes writes, and to a live web console. There is no planner and no org chart: **the board is the product.**
 
 Built and maintained by [Halil Öztürkci](https://github.com/halilozturkci). Free software under the GNU Affero General Public License v3 or later. The website, [dfirswarm.ai](https://dfirswarm.ai), explains the swarm, the harness, the published cases and the editions.
 
@@ -31,7 +31,7 @@ In the summer of 2026, agents in an OpenAI evaluation found a package service th
 | No safe exit from impossible tasks | A USD cap and a wall clock the agents cannot move; `done(cannot_complete)` is a rewarded exit; the harness writes the stop itself if they will not |
 | A grader to game | The checks that certify a run are read from the operator's registry, never from the sandbox |
 | Transcripts rewritten | The trace is written by a collector the panes cannot reach, hash-chained, anchored outside the sandbox, and attributed by a per-pane secret or, on Linux, by process ancestry |
-| Escape through shared services | A write allowlist at the kernel (seatbelt, Landlock, namespaces), the terminal's control socket denied, egress through an allowlist, and a run record that says which of these the host could enforce |
+| Escape through shared services | Each agent in its own microVM, with the run read-only there but for its own directories, the network closed but for its models and the hosts named, and no credential inside; a host run (`--isolation host`) has a write allowlist at the kernel (seatbelt, Landlock, namespaces), the terminal's control socket denied and egress through an allowlist; and the run record says which of these the host could enforce |
 
 The full mapping, in the write-up's own words, is in [docs/why-the-incident-inverted.md](docs/why-the-incident-inverted.md). Everything the swarm is allowed to decide, it decides on the board. Everything that must not be negotiable (the finish line, the money, the clock, who may write what) lives in the harness. And where a guard is only advisory, the report says so: on one published run an agent unset the proxy variables and installed a library, and the whole account is in the repository beside the run ([netguard-escape.md](docs/use-cases/belkactf/belkactf6-bogus-bill/netguard-escape.md)).
 
@@ -119,20 +119,22 @@ In [Challenge 3](docs/use-cases/dfir-c03-mystery-hacked-system/README.md) (`s9f2
 
 ![The budget tab: spend against the cap by provider, by model and by agent, with the wall clock beside it](docs/use-cases/belkactf/belkactf6-bogus-bill/run-2-screenshots/tab-budget.png)
 
-Every figure comes from each Pi session's own usage, folded into `budget.json` at each turn end, the same numbers Pi prints in its footer. `s83fd` spent $68.89 of a $100 cap over 1.2k provider calls and 103M tokens, split across Azure AI Foundry, OpenAI and a local LM Studio model that billed nothing and was braked by tokens instead. The per-agent cap works the same way: an agent that reaches its own ceiling is steered to finish and the swarm carries on without it.
+Every figure comes from each Pi session's own usage, folded into `budget.json` at each turn end, the same numbers Pi prints in its footer. In a VM run that is what each seat reports about itself, unless `--model-gateway` is on: then every call to a provider the gateway fronts goes through one process on the host that holds the key and meters the call from the provider's own answer, and that figure is the one the caps read ([docs/model-gateway.md](docs/model-gateway.md)). `s83fd` spent $68.89 of a $100 cap over 1.2k provider calls and 103M tokens, split across Azure AI Foundry, OpenAI and a local LM Studio model that billed nothing and was braked by tokens instead. The per-agent cap works the same way: an agent that reaches its own ceiling is steered to finish and the swarm carries on without it.
 
 ### A ledger rather than a wall of prose
 
 ![The ledger tab: dated events, indicators and findings, each with the artefact it rests on and a confidence](docs/use-cases/belkactf/belkactf6-bogus-bill/run-2-screenshots/tab-ledger47.png)
 
-`record` gives the agents one shared, append-only ledger of dated events, indicators and findings, every row carrying the evidence it rests on: an `$MFT` inode, a `Security.evtx` record, a path inside the iTunes backup. The report's timeline is built from it, which is how the finish line can check the report against the ledger.
+`record` gives the agents one shared, append-only ledger of dated events, indicators and findings, every row carrying the evidence it rests on: an `$MFT` inode, a `Security.evtx` record, a path inside the iTunes backup. The report's timeline is built from it, which is how the finish line can check the report against the ledger. A wrong entry is corrected by a new one that `supersedes` it, never deleted; a search that found nothing can be recorded as an `absence`, with the query, the tool and the scope it holds for; and a time without a zone is refused rather than read in the host's.
+
+The ledger is the agents' until an examiner reviews it. `swarm.sh review` accepts, rejects or amends each entry with a note and signs off the ledger's head, in a chained file beside the registry that no agent reaches; until then the report says every finding is the agents' conclusion. The report also says which evidence files no command on the trace named, and which entries no call before them named the source of: a named file is not necessarily an examined one, and the report says that too.
 
 ### Every call on the record, and what you hand over at the end
 
 | | |
 | --- | --- |
 | ![The raw trace: 2,339 tool calls, filterable per agent and per tool, one row expanded to its call and result](docs/use-cases/belkactf/belkactf6-bogus-bill/run-2-screenshots/tab-raw.png) | ![The report tab: the dossier built on demand from the run's own files, with its custody section](docs/use-cases/belkactf/belkactf6-bogus-bill/run-2-screenshots/tab-report.png) |
-| **The trace.** One line per tool call, written by a collector outside the panes. Each line names the hash of the line before; the head of the chain is anchored beside the run, where no pane can write; who wrote a line is decided by a per-pane secret the collector holds, not by what the line claims. The report walks the chain and says intact, edited, appended or shortened. | **The dossier.** Numbered sections that cite the artefacts they came from, a merged timeline, a findings table with confidence, and a chain-of-custody section that names every guard's enforcement level on that host. `swarm.sh package` ships all of it with a SHA-256 manifest. |
+| **The trace.** One line per tool call, written by a collector outside the panes. Each line names the hash of the line before; the head of the chain is anchored beside the run, where no pane can write; who wrote a line is decided by a per-pane secret the collector holds, not by what the line claims. The report walks the chain and says intact, edited, appended or shortened. | **The dossier.** Numbered sections that cite the artefacts they came from, a merged timeline, a findings table with confidence and each exhibit's review, and a chain-of-custody section that names every guard's enforcement level on that host, the operator's actions and what produced the run. `swarm.sh package` ships all of it with a SHA-256 manifest and a court set (every file handed over, hashed); `--sign` signs the manifest with the examiner's ssh key, and `swarm.sh verify` checks a package on the recipient's side. |
 
 ### The escape, published
 
@@ -144,28 +146,34 @@ More screens: [docs/screenshots.md](docs/screenshots.md). Every case with goals,
 
 ## Quick start
 
-You need **Node ≥ 22.6**, `jq`, `python3`, zsh or bash as the login shell, [Herdr](https://herdr.dev) and [Pi](https://pi.dev), and a Pi login (`pi /login`: an API key or a Claude / ChatGPT subscription). A live run costs real money; start small.
+You need **Node ≥ 22.19** (the pinned Pi needs it), `jq`, `python3`, zsh or bash as the login shell, [Herdr](https://herdr.dev) and [Pi](https://pi.dev), and a Pi login (`pi /login`: an API key or a Claude / ChatGPT subscription). Every agent runs in its own microVM by default, which needs a Mac on Apple silicon or Linux with KVM and glibc, `sqlite3` (to clear a removed VM's secrets from msb's database), and Docker once to build the agents' image. A live run costs real money; start small.
 
-macOS and Linux both run the swarm with its guards at the kernel: seatbelt on macOS, Landlock inside a user namespace on Linux. A Linux server needs a little setting up — the account's login shell has to be zsh or bash, and unprivileged user namespaces have to be allowed — and [docs/linux-server.md](docs/linux-server.md) is that page.
+A host that cannot boot the VMs is refused with what it lacks. `--isolation host` runs the agents as processes on this machine instead: unisolated, held by the host guards at the kernel (seatbelt on macOS, Landlock inside a user namespace on Linux). A Linux server needs a little setting up (KVM for the VMs; for host runs, zsh or bash as the login shell and unprivileged user namespaces allowed), and [docs/linux-server.md](docs/linux-server.md) is that page.
 
 ```bash
 git clone https://github.com/halilozturkci/dfirswarm && cd dfirswarm
-npm install
+npm install                                 # microsandbox's msb comes with it
 
 # no model, no key, no Herdr: the protocol on files
 npm test
+
+# the agents' VM image, once: a run with no packs boots the base
+# (amd64 in place of arm64 on an Intel or AMD Linux host)
+docker build -f images/base.Dockerfile -t dfirswarm-base:dev-arm64 images
+docker save dfirswarm-base:dev-arm64 -o /tmp/dfirswarm-base.tar
+"$(node --experimental-strip-types scripts/vm.ts msb-path)" load -i /tmp/dfirswarm-base.tar
 
 # Herdr must be running (open the app or `herdr server`)
 scripts/swarm.sh start --model deepseek/deepseek-v4-pro --cap-usd 1 --n 2 \
   --goal-file prompts/goals/hello.md
 
 scripts/swarm.sh status <id>                # the id is printed at kickoff
-scripts/swarm.sh ui                         # the console, on the LAN
+scripts/swarm.sh ui                         # the console, on 127.0.0.1 (--host 0.0.0.0 for the LAN)
 ```
 
-The goal is a markdown file that carries its own `## Definition of done` and `## Checks`; a goal without one does not start. `scripts/swarm.sh --help` lists the commands, `swarm.sh help start` every option. The console's **New swarm** form starts a swarm the same way, and defaults to a model Pi can use.
+The goal is a markdown file that carries its own `## Definition of done` and `## Checks`; a goal without one does not start. A run with no packs boots the base image; a run with packs boots the smallest image profile that serves them, which you build the same way ([images/README.md](images/README.md)). `scripts/swarm.sh --help` lists the commands, `swarm.sh help start` every option. `swarm.sh start … --check` runs every refusal and preflight of that start and writes nothing, and `swarm.sh image-for --pack …` names the image those packs would boot. The console's **New swarm** form starts a swarm the same way, and defaults to a model Pi can use.
 
-On macOS the egress guard is a proxy the panes are pointed at, which a process can ignore; on Linux it is a network namespace with no other route out. The kickoff line and the run record say which one you got. Step by step, with the dry run and the no-key proof run: [docs/quick-start.md](docs/quick-start.md).
+In a VM the network is closed but for the model's hosts and the ones you allow. In a host run the egress guard is, on macOS, a proxy the panes are pointed at, which a process can ignore, and on Linux a network namespace with no other route out. The kickoff line and the run record say which one you got. Step by step, with the dry run and the no-key proof run: [docs/quick-start.md](docs/quick-start.md).
 
 ## Which models
 
@@ -186,18 +194,25 @@ Two things to know before choosing. The netguard allowlist knows the hosts of Op
 
 ## What the harness enforces
 
-Each guard is enforced by the operating system where the host allows it, and the run record and the report's custody section say what was achieved on that host rather than what was asked for. [docs/safety.md](docs/safety.md) and [docs/sandbox-plan.md](docs/sandbox-plan.md) have the measurements.
+Each agent runs in its own microVM unless the run says `--isolation host`; the guards of a host run are the operating system's where the host allows them. Either way the run record and the report's custody section say what was achieved on that host rather than what was asked for. [docs/safety.md](docs/safety.md) and [docs/sandbox-plan.md](docs/sandbox-plan.md) have the measurements.
 
-- **A write allowlist around every pane.** A pane writes inside its own run and Pi's agent directory, and nowhere else: not the examiner's home, not another case, not the run registry. macOS seatbelt profiles; on Linux, Landlock inside a user namespace, or either alone, with the record naming which ([docs/linux-plan.md](docs/linux-plan.md)). `--no-write-guard` turns it off and the record says so.
-- **Evidence read-only at the kernel.** `--inputs DIR` copies the evidence in, hashes it and holds it read-only in every pane; `--inputs-bind` guards the source in place instead of copying 13 GB; `--inputs-image` attaches a disk image read-only. A write that lands by another route is healed from a pristine copy and announced on the board; every file is checked again at the end. `--catalog` runs the first pass over a disk or memory image before any agent spends a token; `--quarantine` makes anything extracted from the evidence unrunnable. [docs/inputs.md](docs/inputs.md).
+- **Each agent in its own microVM, by default.** On a Mac on Apple silicon or Linux with KVM, every agent's Pi runs in a VM of its own, built from the case's packs: the run is read-only in it but for the agent's own directories, the evidence is mounted read-only, the board is written for it on the host by one process that serves each seat's socket only to the VM holding that seat's token, the network is closed but for its models' hosts and the hosts you allow (every public host with `--no-netguard`), and no credential enters it, only a placeholder the host swaps on the way out, or with `--model-gateway` a seat token for a gateway on the host that holds the key. The stop, the snapshots of each VM's disk and a full re-hash of the evidence are taken on the host. A host that cannot boot the VMs is refused, with how to fix it; the kickoff never falls back to host processes on its own. [ADR 0009](docs/adr/0009-agents-live-in-microvms.md) has the design and its stated limits.
+- **Or, unisolated, on the host.** `--isolation host` runs every agent as a Pi process on this machine, held by the guards below and nothing else. The bullets that say "pane" are a host run's.
+- **A write allowlist around every pane (host runs).** A pane writes inside its own run and Pi's agent directory, and nowhere else: not the examiner's home, not another case, not the run registry. macOS seatbelt profiles; on Linux, Landlock inside a user namespace, or either alone, with the record naming which ([docs/linux-plan.md](docs/linux-plan.md)). `--no-write-guard` turns it off and the record says so.
+- **Evidence read-only at the kernel.** In a VM run `--inputs DIR` is hashed and mounted read-only into every VM (`--inputs-copy` for a copy in the run). In a host run it is copied in, hashed and held read-only in every pane; `--inputs-bind` guards the source in place instead of copying 13 GB; `--inputs-image` attaches a disk image read-only. A write that lands by another route is healed from a pristine copy and announced on the board; every file is checked again at the end. `--catalog` runs the first pass over a disk or memory image before any agent spends a token; `--quarantine` makes anything extracted from the evidence unrunnable. [docs/inputs.md](docs/inputs.md).
 - **A record the panes cannot forge.** The only writer of `traces/events.jsonl` runs outside the sandbox and is reached over a socket in a directory the panes cannot write. Each line names the hash of the line before; the head of the chain is anchored beside the run, past the write guard; each line is attributed by a per-pane secret the collector holds. On Linux, where one pane can read a peer's environment, a gate in front of the collector attributes by process ancestry instead. The report verifies the chain and counts what it could not attribute.
 - **Claims before writes.** `edit`/`write` without a live lease is blocked; a shell write to a leased path is detected, snapshotted and announced on the board with the agent's id. Harness-owned files (`SWARM.md`, `team.json`, `budget.json`, `done/`, `locks/`, `threads/`, `traces/`) are refused as write targets.
-- **Two caps, one stop.** At the USD cap, the token cap or the wall clock every agent is steered once to `done(cannot_complete)`; two minutes later the harness writes `done/SWARM_DONE` itself and ends every session, in-flight call included. `--cap-per-agent` stops one agent without stopping the swarm.
-- **Egress is an allowlist, and the record says how firm.** Only the model providers and the hosts the case names (`--allow-host`). On Linux the guard is a network namespace: fail-closed. On macOS it is a proxy the panes are pointed at through their environment: advisory, and printed as `ADVISORY` in the custody section. Every refused connection is counted and printed. `--allow-install` lets agents pip-install into the run, inventoried package by package; `--no-pypi` keeps the index off the allowlist while the machinery stays on.
+- **Two caps, one stop.** At the USD cap, the token cap or the wall clock every agent is steered once to `done(cannot_complete)`; two minutes later the harness writes `done/SWARM_DONE` itself and ends every session, in-flight call included. `--cap-per-agent` stops one agent without stopping the swarm. In a host run a stopped agent's next model call is not sent. In a VM run the hub holds the clock and applies the caps to what each seat reports; with `--model-gateway`, to what the host measured, and the gateway refuses a stopped seat's calls on the host.
+- **Egress is an allowlist, and the record says how firm.** Only the model providers and the hosts the case names (`--allow-host`). In a VM, msb holds the allowlist on the host, outside the guest: a host outside it does not resolve, and a placeholder sent to a host its secret is not bound to is refused and logged. In a host run on Linux the guard is a network namespace: fail-closed. On macOS it is a proxy the panes are pointed at through their environment: advisory, and printed as `ADVISORY` in the custody section. In a host run every refused connection is counted and printed. `--allow-install` lets agents pip-install into the run, inventoried package by package; `--no-pypi` keeps the index off the allowlist while the machinery stays on.
 - **Evidence is hostile input.** A URL in a chat log is a finding to record, never a link to fetch. The contract says it, the egress guard and the quarantine enforce it, and the trace shows every time it was tested. `--no-read DIR` keeps a directory the agents must not consult (a previous run's answers on the same evidence, above all) unreadable at the kernel, so a re-run is a re-run.
-- **The terminal's control socket is denied.** Herdr's socket authenticates nobody, and a process started through it would run outside every rule above; the write guard denies it to the panes, and a host that cannot mask it records `unenforced`.
+- **The terminal's control socket is denied.** A VM has no path to it. In a host run: Herdr's socket authenticates nobody, and a process started through it would run outside every rule above; the write guard denies it to the panes, and a host that cannot mask it records `unenforced`.
 - **Agents can forge tools, if you let them.** With `--allow-tool-forging`, an agent writes the parser or checker the goal needs with `make_tool`; every peer gets it as a real tool; the script, its author, its hash and every call are on the console; the library is kept between runs. [docs/forged-tools.md](docs/forged-tools.md).
-- **What it cannot do.** Reads are open by design: a pane can read anything this user can, outside the directories you name with `--no-read`. On macOS a process that ignores its proxy variables has egress, and one did. Run swarms on a machine you are willing to lose, and read [SECURITY.md](SECURITY.md).
+- **The operator is on the record too.** Every command that starts, stops, packages, reviews, exports, holds, releases, purges or verifies a run is a chained line in `runs/operator-audit.jsonl`, with the OS user and host; a live run's trace carries the same. The run records what produced it (the harness commit, Pi, Node, msb, the image digest) and the host's clock. `hold` keeps a run from being purged or reused; `purge` deletes a finished run's material and leaves a destruction record.
+- **What it cannot do.** In a host run, reads are open by design: a pane can read anything this user can, outside the directories you name with `--no-read`. On macOS a process that ignores its proxy variables has egress, and one did. Run swarms on a machine you are willing to lose, and read [SECURITY.md](SECURITY.md).
+
+## The console
+
+`swarm.sh ui` serves one page per run on `127.0.0.1`: the board as a story, the agents with the names they chose, the trace, the tools, the ledger, the claims, the budget, the files and the report, live over SSE. A microVM run shows each VM's probe (every check and what it means), its hub link, what the hub refused, restarts of the hub and the collector, the kept disks, and one timeline of the run's life across its VMs; the Custody tab shows the verdict, whether it matches the one anchored outside the run, and the operator's lines. The Ledger tab takes the examiner's review. The record dialog holds, releases, exports, packages (signed or not, downloaded as a zip), verifies and, behind the run id typed out, purges; each is on the operator's record as the console's. The **New swarm** form checks that the host can boot the VMs, shows the image the packs choose, and marks a host run unisolated. HTML an agent wrote is shown without scripts; **Open with scripts** runs one file's scripts after a warning, and is on the trace.
 
 ## Documentation
 
@@ -205,6 +220,10 @@ Each guard is enforced by the operating system where the host allows it, and the
 | --- | --- |
 | From a clean machine to a first swarm and the console | [docs/quick-start.md](docs/quick-start.md) |
 | Every command, flag, env var, API route, and how to write a goal | [docs/usage.md](docs/usage.md) |
+| The examiner's review, the signed package, export, hold and purge | [docs/usage.md](docs/usage.md#after-a-run-review-package---sign-verify-export-hold-release-purge) |
+| Agents in microVMs: the design, what holds, what does not | [docs/adr/0009-agents-live-in-microvms.md](docs/adr/0009-agents-live-in-microvms.md) |
+| Metering and stopping model calls on the host | [docs/model-gateway.md](docs/model-gateway.md) |
+| The agents' VM images, built from the packs | [images/README.md](images/README.md) |
 | What is on disk and on the wire | [docs/protocol.md](docs/protocol.md) |
 | The design and what runs where | [docs/architecture.md](docs/architecture.md), [docs/component-map.md](docs/component-map.md) |
 | What the harness enforces, what it measured, and what is left | [docs/safety.md](docs/safety.md), [docs/sandbox-plan.md](docs/sandbox-plan.md), [docs/linux-plan.md](docs/linux-plan.md), [SECURITY.md](SECURITY.md) |
@@ -213,6 +232,7 @@ Each guard is enforced by the operating system where the host allows it, and the
 | Agents writing their own tools | [docs/forged-tools.md](docs/forged-tools.md) |
 | Packs: skills, tools and method an operator imports | [docs/packs.md](docs/packs.md), [packs/](packs/) |
 | Files the swarm may read but never change | [docs/inputs.md](docs/inputs.md) |
+| Where a run sends the evidence's personal data, where it keeps it, and what the operator decides | [docs/data-protection.md](docs/data-protection.md) |
 | Seventeen forensic cases, end to end, with every artifact | [docs/use-cases/](docs/use-cases/README.md), [docs/use-cases/belkactf/](docs/use-cases/belkactf/README.md) |
 | The run an agent walked out of, end to end, with the tour | [netguard-escape.md](docs/use-cases/belkactf/belkactf6-bogus-bill/netguard-escape.md), [the tour](docs/use-cases/belkactf/belkactf6-bogus-bill/media/README.md) |
 | Live runs that proved a feature, with ids and costs | [docs/verified-runs.md](docs/verified-runs.md), [docs/feature-evidence.md](docs/feature-evidence.md) |

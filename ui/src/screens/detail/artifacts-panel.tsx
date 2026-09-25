@@ -10,7 +10,7 @@
  * file with no preview is not an empty state — for a carved executable the
  * size and the hash *are* the content.
  */
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Download, ExternalLink, FileCode2, FileImage, FileText, Files, FlaskConical, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,17 @@ import { api } from "@/lib/api";
 import { bytes, relTime } from "@/lib/format";
 import { useResource } from "@/lib/live";
 import type { ArtifactEntry, ArtifactIndex, SwarmView, WorkFile } from "@/lib/types";
+
+/** What the operator confirms before an HTML artifact runs its scripts. */
+const SCRIPTS_WARNING = [
+  "Open this file with its scripts running?",
+  "",
+  "Scripts in this file can send its contents, and anything it embeds, to any site through your browser. The VM's network allowlist does not apply here: this runs in your browser, not in the run.",
+  "",
+  "The page stays walled off from this console and its token, and the scripts run in this view only: open another file or reload, and they are off again. Opening it is recorded on the run's trace.",
+  "",
+  "Open it only if you trust the file.",
+].join("\n");
 
 function KindIcon({ kind }: { kind: WorkFile["kind"] }) {
   if (kind === "html") return <FileCode2 className="size-4 text-slate" />;
@@ -57,6 +68,10 @@ export function ArtifactsPanel({ view, selected, onSelect }: { view: SwarmView; 
   // Hashing is on demand: the extracted tree reaches gigabytes and the swarm
   // view is re-read on every change, so the index is its own request.
   const index = useResource<ArtifactIndex>(loadIndex, 0, [id]);
+  // When each file was opened with its scripts, from the run's own trace
+  // (the operator's artifact_scripts lines): who, when, and which bytes.
+  const loadOperator = useCallback(() => api.operator(id), [id]);
+  const operator = useResource(loadOperator, 0, [id, "operator"]);
   const pager = usePager(files, files.length);
   const hashes = new Map<string, ArtifactEntry>((index.data?.files ?? []).map((f) => [f.path, f]));
 
@@ -70,6 +85,27 @@ export function ArtifactsPanel({ view, selected, onSelect }: { view: SwarmView; 
     visibleFirst[0] ??
     null;
   const [reloadKey, setReloadKey] = useState(0);
+  // An HTML artifact opened with its scripts, for this file in this view
+  // only: another file, a reload of the preview or of the page, and the
+  // default is back. Nothing is remembered.
+  const [scripted, setScripted] = useState<{ path: string; url: string } | null>(null);
+  const [scriptsError, setScriptsError] = useState<string | null>(null);
+  const preferredPath = preferred?.path ?? null;
+  useEffect(() => {
+    setScripted(null);
+    setScriptsError(null);
+  }, [preferredPath, reloadKey]);
+  const openWithScripts = async (path: string) => {
+    const ok = window.confirm(SCRIPTS_WARNING);
+    if (!ok) return;
+    setScriptsError(null);
+    try {
+      const grant = await api.workScriptsGrant(id, path);
+      setScripted({ path, url: `${api.workUrl(id, path)}?scripts=${encodeURIComponent(grant.grant)}` });
+    } catch (err) {
+      setScriptsError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   if (!files.length) {
     return (
@@ -86,6 +122,7 @@ export function ArtifactsPanel({ view, selected, onSelect }: { view: SwarmView; 
   }
 
   const url = preferred ? `${api.workUrl(id, preferred.path)}${reloadKey ? `?v=${reloadKey}` : ""}` : "";
+  const scriptsUrl = preferred && scripted?.path === preferred.path ? scripted.url : null;
   const chosen = preferred ? hashes.get(preferred.path) : undefined;
   const unpackaged = (index.data?.files ?? []).filter((f) => !f.packaged);
 
@@ -153,7 +190,27 @@ export function ArtifactsPanel({ view, selected, onSelect }: { view: SwarmView; 
               {chosen ? <HashChip sha={chosen.sha256} /> : null}
               {chosen && !chosen.packaged ? <Chip tone="saffron">not packaged</Chip> : null}
               {preferred.path === output ? <Badge variant="moss">done.output_file{view.sentinel_info?.by ? ` · by ${view.sentinel_info.by}` : ""}</Badge> : null}
-              <div className="ml-auto flex items-center gap-2">
+              <div className="ml-auto flex flex-wrap items-center gap-2">
+                {preferred.kind === "html" ? (
+                  scriptsUrl ? (
+                    <>
+                      <Chip tone="saffron">scripts on, this view only</Chip>
+                      <Button variant="ghost" size="sm" onClick={() => setScripted(null)} title="Frame this file again with no scripts">
+                        Scripts off
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => void openWithScripts(preferred.path)}
+                      title="Run this file's scripts in this view, once, after a warning"
+                    >
+                      Open with scripts
+                    </Button>
+                  )
+                ) : null}
+                {preferred.kind === "html" && !scriptsUrl ? <Chip tone="neutral">scripts off</Chip> : null}
                 <Button variant="ghost" size="sm" onClick={() => setReloadKey((k) => k + 1)}>
                   Reload
                 </Button>
@@ -173,13 +230,28 @@ export function ArtifactsPanel({ view, selected, onSelect }: { view: SwarmView; 
                 </Button>
               </div>
             </div>
+            {scriptsError ? <InlineNote tone="warn">The file was not opened with its scripts: {scriptsError}</InlineNote> : null}
             <div className="card overflow-hidden">
-              {preferred.kind === "html" ? (
+              {preferred.kind === "html" && scriptsUrl ? (
+                // Opened with scripts on the operator's word: scripts, and
+                // nothing else — no same origin, no popups, no forms, no
+                // top-level navigation; the server's CSP keeps fetch off.
+                <iframe
+                  key={scriptsUrl}
+                  src={scriptsUrl}
+                  title={`${preferred.name} (scripts on)`}
+                  sandbox="allow-scripts"
+                  referrerPolicy="no-referrer"
+                  className="h-[70vh] w-full bg-white"
+                />
+              ) : preferred.kind === "html" ? (
                 <iframe
                   key={url}
                   src={url}
                   title={preferred.name}
-                  sandbox="allow-scripts"
+                  // No scripts: an agent's (or the evidence's) HTML could
+                  // navigate itself to any host with what it holds.
+                  sandbox=""
                   referrerPolicy="no-referrer"
                   className="h-[70vh] w-full bg-white"
                 />
@@ -207,7 +279,20 @@ export function ArtifactsPanel({ view, selected, onSelect }: { view: SwarmView; 
               )}
             </div>
             {preferred.kind === "html" ? (
-              <p className="text-[11.5px] text-ink-3">HTML runs in a sandboxed iframe (scripts on, same-origin and network off) so agent output cannot call this app or the internet.</p>
+              <div className="space-y-0.5 text-[11.5px] text-ink-3">
+                <p className="m-0">
+                  HTML is shown with no scripts, in a sandboxed frame with no same-origin and no network: agent output, or a page carved from the evidence, cannot call this app, the internet, or navigate away with what it holds. <em>Open with scripts</em> runs this one file's scripts once, in this view, after a warning; it is recorded on the run's trace as an operator action.
+                </p>
+                {(() => {
+                  const opened = (operator.data?.trace ?? []).filter((t) => t.tool === "artifact_scripts" && t.command === `work/${preferred.path}`);
+                  return opened.length ? (
+                    <p className="m-0 text-saffron-ink">
+                      Opened with scripts {opened.length}×, last at {opened[opened.length - 1].at}
+                      {opened[opened.length - 1].os_user !== "?" ? ` by ${opened[opened.length - 1].os_user}` : ""}.
+                    </p>
+                  ) : null;
+                })()}
+              </div>
             ) : null}
           </>
         ) : null}

@@ -4,6 +4,7 @@ import { ChevronRight, Layers, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Chip, FinishMeter, Meter, StatusDot, VitalsBand } from "@/components/console";
+import { isolationChip } from "@/components/swarm-bits";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { api } from "@/lib/api";
 import { compact, dateTime, liveElapsed, money, providerGlyph, shortDuration } from "@/lib/format";
@@ -11,7 +12,7 @@ import { useNow } from "@/lib/hooks";
 import { useLive, useResource } from "@/lib/live";
 import type { SwarmRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { harnessStopLabel, isCertifiedDone, isHarnessStop } from "@/lib/overview-status";
+import { harnessStopLabel, isCertifiedDone, isHarnessStop, phaseGroup, reachedDone } from "@/lib/overview-status";
 
 type Filter = "all" | "running" | "done" | "stopped";
 
@@ -29,6 +30,11 @@ function FleetBand({ rows }: { rows: SwarmRow[] }) {
   const cap = metered.reduce((a, r) => a + r.cap_usd, 0);
   const violations = rows.reduce((a, r) => a + r.violations, 0);
   const capStops = rows.filter((r) => isHarnessStop(r)).length;
+  // A VM run's own vitals: how many agents are in VMs right now, and whose
+  // hub is down with nothing to bring it back (its agents fail closed).
+  const vmRunning = running.filter((r) => r.isolation === "microvm");
+  const vmsUp = vmRunning.reduce((a, r) => a + Math.max(0, r.agents_total - r.agents_done - r.agents_dead), 0);
+  const hubsDown = vmRunning.filter((r) => r.hub_down === true).length;
   const cell = (label: string, big: string, tail: string, last = false) => (
     <div className={cn("flex min-w-0 flex-col gap-1 py-1 pr-7", !last && "border-r border-band-line", label !== "Running now" && "pl-7")}>
       <span className="label-caps text-band-ink-2">{label}</span>
@@ -41,7 +47,7 @@ function FleetBand({ rows }: { rows: SwarmRow[] }) {
     <VitalsBand>
       <div className="mx-auto grid w-full max-w-[1680px] grid-cols-2 gap-y-5 px-4 py-[26px] sm:px-10 lg:grid-cols-4" aria-label="Fleet vitals">
         {cell("Running now", String(running.length), `of ${rows.length} swarm${rows.length === 1 ? "" : "s"}`)}
-        {cell("Agents working", String(working), `· ${done} done · ${dead} dead`)}
+        {cell("Agents working", String(working), `· ${done} done · ${dead} dead${vmRunning.length ? ` · ${vmsUp} in VMs${hubsDown ? ` · ${hubsDown} hub${hubsDown === 1 ? "" : "s"} DOWN` : ""}` : ""}`)}
         {cell("Spend across the fleet", money(spent, 2), `of ${money(cap, 2)} in caps${free ? ` · ${free} free` : ""}`)}
         {cell("Harness interventions", String(violations + capStops), `· ${violations} blocked · ${capStops} cap stop${capStops === 1 ? "" : "s"}`, true)}
       </div>
@@ -58,10 +64,16 @@ function overCapOf(row: SwarmRow): boolean {
 
 function statusChip(row: SwarmRow, now: number) {
   if (row.phase === "running") return <Chip tone="kelp">running · {shortDuration(liveElapsed(row, now))}</Chip>;
+  // Before the harness-stop chip: whoever wrote the sentinel, what is
+  // happening now is the hub putting the VMs away, or having failed to.
+  if (row.finishing) return <Chip tone="moss">finishing · the hub is putting the VMs away</Chip>;
+  if (row.phase === "finish_failed") return <Chip tone="brick">finish failed · the hub could not put the VMs away</Chip>;
+  if (row.phase === "stop_incomplete") return <Chip tone="brick">stop incomplete · a VM is still up after the stop</Chip>;
   if (isHarnessStop(row)) return <Chip tone="brick">{harnessStopLabel(row)}</Chip>;
   if (row.phase === "done") return <Chip tone="moss">done</Chip>;
   if (row.phase === "stopped") return <Chip tone="neutral">stopped</Chip>;
   if (row.phase === "prepared") return <Chip tone="slate">prepared · not launched</Chip>;
+  if (row.phase === "failed") return <Chip tone="brick">failed · the kickoff did not get its agents running</Chip>;
   return <Chip tone="neutral">{row.phase}</Chip>;
 }
 
@@ -76,12 +88,20 @@ function SwarmLine({ row, now }: { row: SwarmRow; now: number }) {
       to={`/swarms/${row.id}`}
       className={cn("console-row", row.phase === "running" && "border-kelp shadow-[0_0_0_3px_var(--color-kelp-soft)]")}
     >
-      <StatusDot phase={isHarnessStop(row) ? "stopped" : row.phase} />
+      <StatusDot phase={row.finishing ? "finishing" : row.phase === "finish_failed" || row.phase === "stop_incomplete" ? row.phase : isHarnessStop(row) ? "stopped" : row.phase} />
       <div className="flex min-w-0 flex-col gap-1.5">
         <div className="flex flex-wrap items-center gap-2.5">
           <span className="serif text-[22px] leading-[1.1]">{row.label}</span>
           <span className="font-mono text-[12px] text-ink-3">{row.id}</span>
           {statusChip(row, now)}
+          {isolationChip(row)}
+          {row.hub_down ? <Chip tone="brick">hub down · the agents fail closed</Chip> : null}
+          {row.custody ? <Chip tone={row.custody === "clean" ? "moss" : "brick"}>custody {row.custody === "clean" ? "clean" : "needs attention"}</Chip> : null}
+          {row.hold ? (
+            <span title={row.hold.reason ?? undefined}>
+              <Chip tone="slate">on hold{row.hold.reason ? ` · ${row.hold.reason}` : ""}</Chip>
+            </span>
+          ) : null}
           <Chip tone="neutral">{row.agents_total} agent{row.agents_total === 1 ? "" : "s"}</Chip>
           {row.model ? (
             <span
@@ -130,7 +150,7 @@ function SwarmLine({ row, now }: { row: SwarmRow; now: number }) {
         </span>
       </div>
       <div className="console-cell flex flex-col gap-1.5">
-        <Meter pct={pct} tone={overCap ? "brick" : row.phase === "done" ? "moss" : "kelp"} />
+        <Meter pct={pct} tone={overCap ? "brick" : reachedDone(row.phase) ? "moss" : "kelp"} />
         <span className={cn("text-[12.5px]", overCap ? "text-brick-ink" : "text-ink-2")}>
           {free ? (
             <>
@@ -164,8 +184,7 @@ export function OverviewScreen() {
     const q = query.trim().toLowerCase();
     return all
       .filter((r) => {
-        if (filter === "stopped" && !(r.phase === "stopped" || r.phase === "prepared")) return false;
-        if ((filter === "running" || filter === "done") && r.phase !== filter) return false;
+        if (filter !== "all" && phaseGroup(r.phase) !== filter) return false;
         if (q && !`${r.id} ${r.label} ${r.model} ${r.goal} ${r.last_post?.body ?? ""} ${r.last_post?.from ?? ""}`.toLowerCase().includes(q)) return false;
         return true;
       })
@@ -179,9 +198,9 @@ export function OverviewScreen() {
     const all = swarms.data ?? [];
     return {
       all: all.length,
-      running: all.filter((r) => r.phase === "running").length,
-      done: all.filter((r) => r.phase === "done").length,
-      stopped: all.filter((r) => r.phase === "stopped" || r.phase === "prepared").length,
+      running: all.filter((r) => phaseGroup(r.phase) === "running").length,
+      done: all.filter((r) => phaseGroup(r.phase) === "done").length,
+      stopped: all.filter((r) => phaseGroup(r.phase) === "stopped").length,
     };
   }, [swarms.data]);
 

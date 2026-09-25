@@ -12,7 +12,7 @@
     },
     "csv": {
       "type": "boolean",
-      "description": "Emit CSV with headers via sqlite3 -header -csv when true."
+      "description": "Emit CSV with headers via sqlite3 -csv -header when true."
     },
     "readonly": {
       "type": "boolean",
@@ -21,10 +21,13 @@
   },
   "runtime": "python3",
   "entry": "run.py",
+  "requires": [
+    "sqlite3"
+  ],
   "timeout_seconds": 30,
   "example": "{\"db_path\":\"work/extracted/memory/chrome_History\",\"sql\":\"select count(*) from urls;\",\"csv\":true,\"readonly\":true}",
   "by": "s881002",
   "at": "2026-09-18T13:31:25.586Z",
-  "version": 1,
-  "sha256": "9bf7ca9d7dbc8ca4fc24efa94684815d8f424efde30215929347821409173ea4"
+  "version": 3,
+  "sha256": "3ad6285bd5141b880d5215186dd0b71b6cb570fb281db79c91ce71db315091dc"
 }

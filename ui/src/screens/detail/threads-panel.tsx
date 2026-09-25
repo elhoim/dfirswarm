@@ -21,9 +21,10 @@ import { DarkThreadMark } from "@/components/swarm-bits";
 import { BoardAnalytics } from "./board-analytics";
 import { useAgentColours } from "@/lib/agent-colour";
 import { api } from "@/lib/api";
-import { chars, clock, money, relTime, shortDuration } from "@/lib/format";
+import { chars, clock, eventTime, money, relTime, shortDuration } from "@/lib/format";
 import { useAgentNames } from "@/lib/hooks";
 import { useResource } from "@/lib/live";
+import { reachedDone } from "@/lib/overview-status";
 import type { AgentRow, SwarmEvent, SwarmView, ThreadRow, TimedPost } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -111,7 +112,7 @@ function ThreadLine({ t, view, colour, names, onOpen }: { t: ThreadRow; view: Sw
             {primary ? "Primary thread" : t.name}
           </span>
           {primary ? (
-            s.phase === "done" ? (
+            reachedDone(s.phase) ? (
               <span className="rounded-[3px] bg-moss px-1.5 font-mono text-[10px] font-semibold uppercase text-white">done</span>
             ) : s.phase === "running" ? (
               <span className="rounded-[3px] border border-moss px-1.5 font-mono text-[10px] font-semibold uppercase text-moss-ink">running</span>
@@ -190,7 +191,7 @@ function ThreadOverlay({ view, thread, version, onClose }: { view: SwarmView; th
       out.push({ kind: "post", badge: "goal / starting prompt", at: Number.isFinite(at) ? at : 0, post: { id: 0, thread: "main", from: "system", to: "all", tag: "intro", body: `MISSION — the starting prompt for this swarm.\n\n${view.goal_document}`, path: "", at: view.summary.started_at || null } });
     }
     if (showSystem && primary && !needle) {
-      for (const e of view.violations) out.push({ kind: "violation", event: e, at: Date.parse(e.ts) });
+      for (const e of view.violations) out.push({ kind: "violation", event: e, at: Date.parse(eventTime(e)) });
     }
     out.sort((a, b2) => a.at - b2.at || (a.kind === "post" && b2.kind === "post" ? a.post.id - b2.post.id : 0));
     return newestFirst ? out.reverse() : out;
@@ -291,11 +292,20 @@ function ThreadOverlay({ view, thread, version, onClose }: { view: SwarmView; th
                     <span className="pt-0.5 font-mono text-[11px] tabular text-ink-3" title={row.post.at ?? ""}>
                       {clock(row.post.at)}
                     </span>
-                    <div className="min-w-0 border-l-[3px] pl-3" style={{ borderColor: colour(row.post.from) }}>
+                    <div className="min-w-0 border-l-[3px] pl-3" style={{ borderColor: colour(row.post.via ?? row.post.from) }}>
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px]">
-                        {row.badge ? <span className="rounded-[3px] bg-brick px-1.5 font-mono text-[10px] font-semibold uppercase text-white">{row.badge}</span> : row.post.from === "system" ? <span className="rounded-[3px] bg-brick px-1.5 font-mono text-[10px] font-semibold uppercase text-white">harness</span> : null}
-                        <span className="font-mono font-semibold" style={{ color: colour(row.post.from) }}>
-                          {names(row.post.from)}
+                        {row.badge ? (
+                          <span className="rounded-[3px] bg-brick px-1.5 font-mono text-[10px] font-semibold uppercase text-white">{row.badge}</span>
+                        ) : row.post.from === "system" && row.post.via ? (
+                          // A seat's harness code in its VM: the seat's word, never the harness's.
+                          <span className="rounded-[3px] border border-line px-1.5 font-mono text-[10px] font-semibold uppercase text-ink-2" title={`Harness code in ${row.post.via}'s VM posted this with that seat's authority, not the harness's`}>
+                            via {row.post.via}
+                          </span>
+                        ) : row.post.from === "system" ? (
+                          <span className="rounded-[3px] bg-brick px-1.5 font-mono text-[10px] font-semibold uppercase text-white">harness</span>
+                        ) : null}
+                        <span className="font-mono font-semibold" style={{ color: colour(row.post.via ?? row.post.from) }}>
+                          {row.post.from === "system" && row.post.via ? `system via ${names(row.post.via)}` : names(row.post.from)}
                         </span>
                         {row.badge ? null : <Badge variant={tagVariant(row.post.tag)}>{row.post.tag}</Badge>}
                         {row.badge ? null : <span className="text-ink-3">→ {row.post.to}</span>}

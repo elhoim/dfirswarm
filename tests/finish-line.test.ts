@@ -64,3 +64,19 @@ test("the shared install area and the scratch dir are nobody's work product", ()
   assert.equal(isSharedScratch("tools/carve/manifest.json"), false);
   assert.equal(isSharedScratch("work/.toolchainx/evil"), false, "the prefix is the directory, not a string");
 });
+
+test("a finish line read from an agent-writable copy cannot certify a run", () => {
+  const passing = { total: 1, passed: 1, checks: [{ cmd: "true", ok: true }], source: "sandbox contract" };
+  const v = finishLineVerdict(passing, false);
+  assert.equal(v.proceed, false);
+  if (!v.proceed) assert.match(v.reason, /agents can edit/);
+  const abandon = finishLineVerdict(passing, true);
+  assert.equal(abandon.proceed, true, "abandoning claims nothing, so it stays the way out");
+  if (abandon.proceed) assert.equal(abandon.reasonPrefix, "ABANDONED: ");
+  const failing = finishLineVerdict({ ...passing, passed: 0, checks: [{ cmd: "test -f work/x", ok: false }] }, false);
+  assert.equal(failing.proceed, false);
+  if (!failing.proceed) assert.equal(failing.failing, "test -f work/x", "a failing check is named whatever the source");
+  const emptied = finishLineVerdict({ total: 0, passed: 0, checks: [], source: "sandbox contract" }, false);
+  assert.equal(emptied.proceed, false, "checks deleted from an editable copy do not pass vacuously");
+  assert.equal(finishLineVerdict({ ...passing, source: "registry" }, false).proceed, true);
+});

@@ -141,4 +141,126 @@ PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$LOCAL_SB" -
 [[ "$(grep -c '^L0	' "$PROMPT_LOG")" -eq 1 ]] || fail "a local seat that has worked is nudged like any other"
 pass "the first-turn grace is for the first turn only"
 
+# --- agents in microVMs: the hub, not Herdr ----------------------------------
+# A VM's pane runs `msb exec`: Herdr can neither read Pi's state off it nor
+# type a prompt Pi takes. The watchdog asks the hub instead, which hears each
+# agent's state up its link and puts the words down it.
+VM_SB="$TMP/vm"
+mkdir -p "$VM_SB"/{traces,done/agents,threads/main,inbox/v0,.pi-sessions/v0,locks}
+printf '{"swarm_id": "v", "n": 1, "agents": [{"id": "v0", "role": "worker"}]}\n' > "$VM_SB/team.json"
+: > "$VM_SB/traces/events.jsonl"
+printf -- '---\nid: 1\nthread: main\nfrom: system\nto: all\ntag: result\n---\n\nnews\n' > "$VM_SB/threads/main/000001-system.md"
+printf '{"main": 0}\n' > "$VM_SB/inbox/v0/cursors.json"
+: > "$VM_SB/.pi-sessions/v0/session.jsonl"
+touch -t "$old" "$VM_SB/.pi-sessions/v0/session.jsonl"
+HUB_DIR="$(mktemp -d "/tmp/dfh.XXXXXX")"
+printf '{"agents":["v0"],"tokens":{},"collector":"%s/none.sock"}' "$HUB_DIR" \
+  | node --experimental-strip-types --no-warnings "$ROOT/scripts/vm-hub.ts" "$VM_SB" --dir "$HUB_DIR" --quiet >"$TMP/hub.log" 2>&1 &
+HUB_PID=$!
+trap 'kill "$HUB_PID" "${LINK_PID:-}" 2>/dev/null; rm -rf "$TMP" "$HUB_DIR"' EXIT
+for _ in $(seq 50); do [[ -S "$HUB_DIR/admin.sock" ]] && break; sleep 0.1; done
+[[ -S "$HUB_DIR/admin.sock" ]] || fail "the hub did not come up: $(cat "$TMP/hub.log")"
+# v0's link: says it is idle, writes down every prompt it is given.
+node -e '
+const net = require("node:net"); const fs = require("node:fs");
+const s = net.connect(process.argv[1]); let b = "";
+s.on("connect", () => s.write(JSON.stringify({ t: "hello" }) + "\n" + JSON.stringify({ t: "state", state: "idle" }) + "\n"));
+s.on("data", (d) => { b += d; let i; while ((i = b.indexOf("\n")) >= 0) { const m = JSON.parse(b.slice(0, i)); b = b.slice(i + 1); if (m.t === "prompt") fs.appendFileSync(process.argv[2], m.text + "\n"); } });
+' "$HUB_DIR/v0.sock" "$TMP/vm-prompts.txt" &
+LINK_PID=$!
+# Until the hub has the link, not a fixed half second.
+for _ in $(seq 100); do jq -e '.agents.v0.connected == true' "$HUB_DIR/status.json" >/dev/null 2>&1 && break; sleep 0.05; done
+jq -e '.agents.v0.connected == true' "$HUB_DIR/status.json" >/dev/null 2>&1 || fail "v0's link never reached the hub: $(cat "$HUB_DIR/status.json" 2>/dev/null)"
+printf '#!/usr/bin/env bash\necho "$@" >> "%s"\nexit 1\n' "$TMP/herdr-used.txt" > "$TMP/bin/herdr-broken"
+chmod +x "$TMP/bin/herdr-broken"
+HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HUB_STATUS="$HUB_DIR/status.json" \
+  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$VM_SB" --once --news-sec 45 --idle-sec 180 >"$TMP/nudge1.log" 2>&1 \
+  || fail "the watchdog failed: $(cat "$TMP/nudge1.log")"
+for _ in $(seq 100); do grep -q '1 post(s) you have not read' "$TMP/vm-prompts.txt" 2>/dev/null && break; sleep 0.05; done
+grep -q '1 post(s) you have not read' "$TMP/vm-prompts.txt" 2>/dev/null || fail "a VM agent's nudge did not arrive through the hub: $(cat "$TMP/vm-prompts.txt" 2>/dev/null)"
+[[ ! -s "$TMP/herdr-used.txt" ]] || fail "the watchdog asked Herdr about a VM agent: $(cat "$TMP/herdr-used.txt")"
+grep -q '"tool":"idle_nudge"' "$VM_SB/traces/events.jsonl" "$VM_SB/traces/system-spill.jsonl" 2>/dev/null || fail "the VM nudge is not recorded"
+pass "an agent in a microVM is nudged through the hub, and Herdr is never asked"
+
+printf '{"agents":{"v0":{"state":"working","connected":true}}}\n' > "$TMP/working.json"
+: > "$TMP/vm-prompts.txt"
+: > "$VM_SB/traces/idle-nudge.state"
+# The watchdog's own verdict, not its silence: a watchdog that crashed would
+# also nudge nobody.
+nudges_before="$(cat "$VM_SB/traces/events.jsonl" "$VM_SB/traces/system-spill.jsonl" 2>/dev/null | grep -c '"tool":"idle_nudge"')"
+HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HUB_STATUS="$TMP/working.json" \
+  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$VM_SB" --once --news-sec 45 --idle-sec 180 >"$TMP/nudge2.log" 2>&1 \
+  || fail "the watchdog failed: $(cat "$TMP/nudge2.log")"
+sleep 0.3
+[[ ! -s "$TMP/vm-prompts.txt" ]] || fail "a VM agent the hub says is working was nudged"
+[[ "$(cat "$VM_SB/traces/events.jsonl" "$VM_SB/traces/system-spill.jsonl" 2>/dev/null | grep -c '"tool":"idle_nudge"')" == "$nudges_before" ]] || fail "a nudge was recorded for the working agent"
+pass "an agent the hub says is working is left to work"
+
+# --- a hub that died is brought back by the watchdog, from what the hub kept ----
+kill "$HUB_PID" 2>/dev/null; wait "$HUB_PID" 2>/dev/null || true
+for _ in $(seq 30); do [[ ! -S "$HUB_DIR/admin.sock" ]] && break; sleep 0.1; done
+echo "$HUB_PID" > "$VM_SB/hub.pid"
+[[ -f "$HUB_DIR/hub-input.json" ]] || fail "the hub kept nothing to resume from"
+HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HUB_STATUS="$HUB_DIR/status.json" SWARM_HUB_DIR="$HUB_DIR" \
+  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$VM_SB" --once --news-sec 45 --idle-sec 180 >"$TMP/restart.log" 2>&1
+HUB_PID="$(cat "$VM_SB/hub.pid")"
+[[ -S "$HUB_DIR/admin.sock" ]] || fail "the watchdog did not bring the hub back: $(cat "$TMP/restart.log"; cat "$TMP/hub.log")"
+kill -0 "$HUB_PID" 2>/dev/null || fail "hub.pid does not name the resumed hub"
+answer="$(node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_DIR/admin.sock" '{"op":"status"}')"
+printf '%s' "$answer" | jq -e '.ok == true and (.agents | has("v0"))' >/dev/null || fail "the resumed hub does not know the run's agents: $answer"
+grep -q 'hub_restarted' "$VM_SB/traces/events.jsonl" "$HUB_DIR/hub-spill.jsonl" 2>/dev/null || fail "the restart is not on the record"
+pass "a hub that died is brought back by the watchdog with the run's agents, and the restart is on the record"
+
+# --- a host run's stop from outside the panes ---------------------------------
+BS="$TMP/backstop"
+mkdir -p "$BS"/{traces,done/agents,threads/main,inbox/b00,.pi-sessions/b00,locks}
+printf '{"swarm_id":"bs","n":1,"agents":[{"id":"b00","role":"worker"}]}\n' > "$BS/team.json"
+long_ago="$(date -u -d '@'$(( $(date +%s) - 1800 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r $(( $(date +%s) - 1800 )) +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"cap_usd":5,"spent_usd":0,"wall_clock_minutes":1,"started_at":"%s","agents":{}}\n' "$long_ago" > "$BS/budget.json"
+HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$BS" --once >"$TMP/bs1.log" 2>&1
+[[ -n "$(jq -r '.stop_steer_at // empty' "$BS/budget.json")" ]] || fail "past the wall clock the watchdog did not start the stop clock: $(cat "$TMP/bs1.log")"
+ls "$BS/threads/main"/*.md >/dev/null 2>&1 || fail "the steer was not said on the board"
+[[ ! -f "$BS/done/SWARM_DONE" ]] || fail "the watchdog stopped the swarm before the grace period"
+# The grace period passed with nobody stopping: the harness writes the sentinel.
+jq --arg t "$long_ago" '.stop_steer_at = $t' "$BS/budget.json" > "$BS/b.tmp" && mv "$BS/b.tmp" "$BS/budget.json"
+HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$BS" --once >"$TMP/bs2.log" 2>&1
+[[ -f "$BS/done/SWARM_DONE" ]] || fail "past the grace period the watchdog did not stop the swarm: $(cat "$TMP/bs2.log")"
+grep -q '^by: harness' "$BS/done/SWARM_DONE" || fail "the sentinel is not the harness's"
+grep -q '"tool":"harness_stop"' "$BS/traces/events.jsonl" "$BS/traces/system-spill.jsonl" 2>/dev/null || fail "the stop is not on the record"
+pass "a host run past its wall clock is steered from outside the panes, and stopped by the harness after the grace period"
+
+# --- the operator hears the swarm's cap --------------------------------------------
+CB="$TMP/nruns/scap1"
+mkdir -p "$CB"/{traces,done/agents,threads/main,inbox/c00,.pi-sessions/c00,locks} "$TMP/nruns/notify"
+printf '{"swarm_id":"scap1","n":1,"agents":[{"id":"c00","role":"worker"}]}\n' > "$CB/team.json"
+printf '{"cap_usd":5,"spent_usd":6,"wall_clock_minutes":600,"started_at":"%s","agents":{}}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$CB/budget.json"
+jq -n --arg sb "$CB" '{runs: [{id: "scap1", state: "running", sandbox: $sb, notify: true}]}' > "$TMP/nruns/registry.json"
+printf 'cat >> %q\n' "$TMP/cap-events.jsonl" > "$TMP/nruns/notify/scap1.cmd"
+chmod 600 "$TMP/nruns/notify/scap1.cmd"
+SWARM_RUNS_DIR="$TMP/nruns" HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$CB" --once >"$TMP/cap.log" 2>&1
+for i in $(seq 1 50); do [[ -s "$TMP/cap-events.jsonl" ]] && break; sleep 0.1; done
+jq -e 'select(.event == "budget_cap" and .run == "scap1" and .detail.spent_usd == 6 and .detail.cap_usd == 5)' "$TMP/cap-events.jsonl" >/dev/null \
+  || fail "the cap was not notified: $(cat "$TMP/cap-events.jsonl" 2>/dev/null; cat "$TMP/cap.log")"
+pass "a host run past its cap tells the operator's notify command (budget_cap)"
+
+# --- where nobody has looked, at a quarter, a half and three quarters -------------
+CV="$TMP/coverage"
+mkdir -p "$CV"/{traces,done/agents,threads/main,inbox/d00,.pi-sessions/d00,locks,inputs}
+printf '{"swarm_id":"cov","n":1,"agents":[{"id":"d00","role":"worker"}]}\n' > "$CV/team.json"
+: > "$CV/done/agents/d00.done"
+printf '{"files":[{"path":"inputs/named.bin","bytes":1,"sha256":"x"},{"path":"inputs/nobody.bin","bytes":1,"sha256":"y"}]}\n' > "$CV/inputs.json"
+printf '%s\n' '{"ts":"2026-01-01T00:00:00Z","agent":"d00","tool":"bash","args":{"command":"xxd inputs/named.bin | head"},"result":{"ok":true}}' > "$CV/traces/events.jsonl"
+started="$(date -u -d '@'$(( $(date +%s) - 3000 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r $(( $(date +%s) - 3000 )) +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"cap_usd":5,"spent_usd":0,"wall_clock_minutes":60,"started_at":"%s","agents":{}}\n' "$started" > "$CV/budget.json"
+HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$CV" --once >"$TMP/cov1.log" 2>&1
+post="$(cat "$CV"/threads/main/*.md 2>/dev/null || true)"
+printf '%s\n' "$post" | grep -q 'no command has named these inputs yet' || fail "the uncovered inputs were not posted: $(cat "$TMP/cov1.log")"
+printf '%s\n' "$post" | grep -q 'inputs/nobody.bin' || fail "the input nobody named is not listed: $post"
+printf '%s\n' "$post" | grep -q 'inputs/named.bin' && fail "an input a command named is listed as untouched"
+printf '%s\n' "$post" | grep -q 'At 75%' || fail "the post does not say where in the run it is: $post"
+[[ "$(tr '\n' ' ' < "$CV/traces/idle-nudge.coverage")" == "25 50 75 " ]] || fail "the marks passed are not spent: $(cat "$CV/traces/idle-nudge.coverage")"
+HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$CV" --once >"$TMP/cov2.log" 2>&1
+[[ "$(ls "$CV"/threads/main/*.md | wc -l | tr -d ' ')" == 1 ]] || fail "the coverage was posted twice"
+pass "past three quarters of the wall clock the inputs no command named are posted once, naming none that was named"
+
 echo "idle-nudge.test.sh: all checks passed"

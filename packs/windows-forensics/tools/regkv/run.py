@@ -9,9 +9,22 @@ def ft_to_iso(ft):
     except Exception:
         return str(ft)
 
+def rooted_key(hive, path):
+    """The key at `path`, from the hive's root. regipy's get_key takes the
+    first part of a path that does not start with a backslash for the root's
+    own name and drops it: "Local Settings\\...\\BagMRU" in a UsrClass.dat was
+    not found, and in an NTUSER.DAT it answered Software\\...\\BagMRU under
+    the name asked for. The path is rooted here, the root's name dropped when
+    the caller gave it, and / taken for \\."""
+    parts = [p for p in str(path).replace("/", "\\").split("\\") if p]
+    if parts and parts[0].lower() == (hive.root.name or "").lower():
+        parts = parts[1:]
+    return hive.get_key("\\" + "\\".join(parts)) if parts else hive.root
+
+
 def dump(hive, key, recurse=False, depth=2):
     h = RegistryHive(hive)
-    k = h.get_key(key)
+    k = rooted_key(h, key)
     out = {'key': key, 'values': {}, 'subkeys': []}
     for v in k.iter_values():
         val = v.value
@@ -23,7 +36,7 @@ def dump(hive, key, recurse=False, depth=2):
         out['last_modified'] = ft_to_iso(hdr.last_modified)
     def walk(node_path, d):
         try:
-            node = h.get_key(node_path)
+            node = rooted_key(h, node_path)
         except Exception:
             return []
         res = []

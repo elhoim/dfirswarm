@@ -61,9 +61,10 @@ count_lines({ path: "team.json" }) → {"path": "team.json", "lines": 14}
 
 ## What it does not do
 
-A forged tool is a `bash` with a schema and a name. It runs as the user, in
-the sandbox, with the pane's environment — the same containment as every
-other shell command, which is to say the netguard proxy and nothing else. Read
+A forged tool is a `bash` with a schema and a name. On the host it runs as the
+user, in the sandbox, with the pane's environment — the same containment as
+every other shell command, which is to say the netguard proxy and the write
+guard and nothing else; in a VM it has the VM's containment (below). Read
 [SECURITY.md](../SECURITY.md) before turning it on, and keep it off for goals
 that do not need it.
 
@@ -74,6 +75,28 @@ author and version kept, and [`tool-library/`](../tool-library/README.md) in
 this repository holds the thirty-two written during the forensic cases.
 `make_tool` also answers a near-duplicate of a tool already on disk with that
 tool's name and author rather than forging the same capability twice.
+
+## Under `--isolation microvm`
+
+The contract for a script is the same; where it is written and where it runs
+are not.
+
+- `make_tool` is a call to the hub, which forges on the host: it writes
+  `tools/<name>/` and its history, as the seat whose channel asked. With
+  forging off the hub refuses the call, whatever the extension in the VM
+  believes.
+- `tools/` is on the run's read-only floor in every VM, so no shell in a VM
+  can rewrite a tool. The byte check still runs before every call.
+- A tool runs inside the VM of the agent that calls it, as a process of that
+  VM: the VM's network policy, the calling seat's writable directories, root
+  in that VM. A peer's tool runs in your VM with your seat's reach, and its
+  output goes to your `tool-output/<id>/`.
+- A process in a VM speaks to the hub as that VM's seat, so a tool can post,
+  publish or call `done` as the agent that ran it.
+- A tool forged or re-forged a moment ago can read as its old bytes for about
+  five seconds in another VM (virtio-fs caches what the host wrote). On a
+  hash mismatch the runner waits six seconds and reads once more before it
+  refuses the call.
 
 ## How it is wired
 
@@ -105,3 +128,15 @@ tool's name and author rather than forging the same capability twice.
   provider: one forges `count_lines`, the other wakes, sees `new_tools`, calls
   it by name; a reserved name and a takeover are refused; a failing tool is
   reported as a failure. See [verified-runs.md](verified-runs.md).
+
+## What a manifest says about where a tool can run
+
+`make_tool` takes an optional `requires`, the programs the script calls; the
+manifest keeps it, and a VM run forged through the hub also records the
+image the tool was forged against (`image_digest`). `tools --save` copies a
+tool only as the version sealed into file history (a script and a manifest
+rewritten together on disk are not that version) and writes, beside it, what
+it ran with: the run, its image, its packs, and what the run installed.
+In a VM a tool runs only as the bytes the hub says were sealed: the guest's
+own view of `tools/` can lag five seconds behind a re-forge, and the bytes
+are read again until they are the sealed ones or the tool is refused.

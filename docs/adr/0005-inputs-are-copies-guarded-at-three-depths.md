@@ -4,7 +4,11 @@ Date: 2026-09-18
 
 ## Status
 
-Accepted
+Accepted. Under `--isolation microvm` ([ADR 0009](0009-agents-live-in-microvms.md))
+the evidence is used in place by default and mounted read-only into each VM,
+with no pristine copy and nothing to heal from; `--inputs-copy` restores a
+read-only copy as a second layer. Links inside the evidence are recorded and
+checked as links everywhere.
 
 ## Context
 

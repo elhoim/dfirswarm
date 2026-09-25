@@ -121,6 +121,47 @@ out="$("$PACK" resolve child-pack)"
 [[ "$(sed -n 2p <<<"$out")" == *"child-pack" ]] || fail "resolve should then give the pack itself"
 pass "dependencies resolve, in order"
 
+# A name its dependency carries is no warning, where the dependency sits
+# beside the pack: in the checkout when sealing, installed when verifying.
+# One no pack in the set carries still is, and so is a dependency that is
+# not there. (Kickoffs printed a warning per dependency tool on every run.)
+mk_pack "$WORK/src" uses-dep base-pack
+sed -i.bak 's/tools: \[echo_tool\]/tools: [echo_tool, base_only_tool]/' "$WORK/src/uses-dep/skills/alpha/first.md"
+rm -f "$WORK/src/uses-dep/skills/alpha/first.md.bak"
+mkdir -p "$WORK/src/base-pack/tools/base_only_tool"
+cp "$WORK/src/base-pack/tools/echo_tool/run.py" "$WORK/src/base-pack/tools/base_only_tool/run.py"
+sed 's/"echo_tool"/"base_only_tool"/' "$WORK/src/base-pack/tools/echo_tool/manifest.json" > "$WORK/src/base-pack/tools/base_only_tool/manifest.json"
+"$PACK" seal "$WORK/src/base-pack" >/dev/null 2>&1 || fail "reseal base-pack with its new tool"
+warn="$("$PACK" seal "$WORK/src/uses-dep" 2>&1 >/dev/null)" || fail "seal uses-dep"
+grep -q "base_only_tool" <<<"$warn" && fail "a tool the dependency beside it carries was still warned about: $warn"
+sed -i.bak 's/base_only_tool\]/base_only_tool, nowhere_tool]/' "$WORK/src/uses-dep/skills/alpha/first.md"
+rm -f "$WORK/src/uses-dep/skills/alpha/first.md.bak"
+warn="$("$PACK" seal "$WORK/src/uses-dep" 2>&1 >/dev/null)" || fail "seal uses-dep again"
+grep -q "nowhere_tool.*neither this pack nor its dependencies carry" <<<"$warn" || fail "a tool no pack in the set carries was not named: $warn"
+mk_pack "$WORK/src" orphan-dep not-here-pack
+sed -i.bak 's/tools: \[echo_tool\]/tools: [elsewhere_tool]/' "$WORK/src/orphan-dep/skills/alpha/first.md"
+rm -f "$WORK/src/orphan-dep/skills/alpha/first.md.bak"
+warn="$("$PACK" seal "$WORK/src/orphan-dep" 2>&1 >/dev/null)" || fail "seal orphan-dep"
+grep -q "elsewhere_tool.*not-here-pack is not beside it" <<<"$warn" || fail "a missing dependency was not named: $warn"
+pass "a name a dependency carries is no warning; one no pack carries, or a dependency that is absent, is"
+
+# Two packs with a tool of the same name: one run holds one tool per name, so
+# the kickoff is told which packs collide. The same script twice is one tool.
+mk_pack "$WORK/src" twin-pack
+printf 'print("the twin")\n' >> "$WORK/src/twin-pack/tools/echo_tool/run.py"
+"$PACK" seal "$WORK/src/twin-pack" >/dev/null || fail "seal twin"
+"$PACK" install "$WORK/src/twin-pack" --no-secrets >/dev/null || fail "install twin"
+out="$("$PACK" resolve base-pack,twin-pack 2>"$WORK/resolve.err")" || fail "resolve refused two packs that share a tool name"
+[[ "$(wc -l <<<"$out" | tr -d ' ')" == 2 ]] || fail "resolve should still give both packs, got: $out"
+grep -q 'packs base-pack and twin-pack both carry a tool named echo_tool' "$WORK/resolve.err" \
+  || fail "resolve did not name both packs and the tool they share: $(cat "$WORK/resolve.err")"
+mk_pack "$WORK/src" same-pack
+"$PACK" seal "$WORK/src/same-pack" >/dev/null || fail "seal same"
+"$PACK" install "$WORK/src/same-pack" --no-secrets >/dev/null || fail "install same"
+"$PACK" resolve base-pack,same-pack >/dev/null 2>"$WORK/resolve.err" || fail "resolve refused two packs with the same tool"
+[[ ! -s "$WORK/resolve.err" ]] || fail "the same script in two packs is one tool, not a collision: $(cat "$WORK/resolve.err")"
+pass "two packs carrying different tools of one name are named at resolve; the same tool twice is not"
+
 "$PACK" remove base-pack >/dev/null
 "$PACK" resolve child-pack >/dev/null 2>&1 && fail "resolve should refuse when a dependency is gone"
 pass "a missing dependency is refused"
@@ -155,7 +196,9 @@ json.dump(m, open(sys.argv[1], "w"), indent=2)
 EOF
 "$PACK" seal "$WORK/src/secret-pack" >/dev/null || fail "seal secret pack"
 TEST_API_KEY=hunter2 "$PACK" install "$WORK/src/secret-pack" >/dev/null 2>&1 || fail "install should take a secret from the environment"
-env_file="$DFIRSWARM_HOME/packs/secret-pack/secrets.env"
+env_file="$DFIRSWARM_HOME/secrets/secret-pack.env"
+[[ ! -e "$DFIRSWARM_HOME/packs/secret-pack/secrets.env" ]] || fail "the secret was written inside the pack directory, which every VM mounts"
+"$PACK" verify secret-pack >/dev/null || fail "a pack with a stored secret must still verify"
 [[ -f "$env_file" ]] || fail "the secret should be stored"
 grep -q 'TEST_API_KEY=hunter2' "$env_file" || fail "the stored secret should hold the value"
 # GNU stat first: its -f means --file-system, so asking BSD-style first prints a
@@ -163,6 +206,23 @@ grep -q 'TEST_API_KEY=hunter2' "$env_file" || fail "the stored secret should hol
 perm="$(stat -c '%a' "$env_file" 2>/dev/null || stat -f '%Lp' "$env_file")"
 [[ "$perm" == "600" ]] || fail "secrets.env should be 0600, got $perm"
 pass "a declared secret is stored 0600, outside the pack's sealed files"
+
+# A saved tool taken into a pack: sealed, reduced to what a pack tool says.
+mkdir -p "$WORK/saved/carve_it"
+printf 'print("carved")\n' > "$WORK/saved/carve_it/run.py"
+csha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$WORK/saved/carve_it/run.py")"
+printf '{"name": "carve_it", "description": "Carve it.", "params": {}, "runtime": "python3", "entry": "run.py", "timeout_seconds": 30, "by": "s1", "at": "t", "version": 3, "sha256": "%s", "pack": "other-pack"}\n' "$csha" > "$WORK/saved/carve_it/manifest.json"
+printf '{"saved_from_run": "s1"}\n' > "$WORK/saved/carve_it/provenance.json"
+mk_pack "$WORK/src" adopt-pack
+"$PACK" adopt "$WORK/saved/carve_it" "$WORK/src/adopt-pack" >/dev/null || fail "adopt refused a sealed tool"
+jq -e '(has("by") or has("pack") or has("sha256") or has("version")) | not' "$WORK/src/adopt-pack/tools/carve_it/manifest.json" >/dev/null \
+  || fail "the adopted manifest kept the run's fields: $(cat "$WORK/src/adopt-pack/tools/carve_it/manifest.json")"
+[[ -f "$WORK/src/adopt-pack/tools/carve_it/provenance.json" ]] || fail "the provenance did not come along"
+"$PACK" seal "$WORK/src/adopt-pack" >/dev/null 2>&1 || fail "a pack with an adopted tool does not seal"
+"$PACK" adopt "$WORK/saved/carve_it" "$WORK/src/adopt-pack" >/dev/null 2>&1 && fail "adopt replaced a tool without --replace"
+printf 'print("changed")\n' >> "$WORK/saved/carve_it/run.py"
+"$PACK" adopt "$WORK/saved/carve_it" "$WORK/src/adopt-pack" --replace >/dev/null 2>&1 && fail "adopt took a tool whose script no longer matches its sha256"
+pass "adopt takes a sealed saved tool into a pack without the run's fields, and refuses a changed one"
 
 # Every shipped pack must be sealed, must install and must verify. Install in
 # dependency order rather than alphabetically: a pack whose dependency is not

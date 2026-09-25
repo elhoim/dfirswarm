@@ -2270,3 +2270,24 @@ test("the event log and a thread's posts are served from memory until the files 
     assert.equal((await readThreadPosts(root, "main")).length, 2);
   });
 });
+
+test("a forged tool names the programs it calls and, in a VM run, the image it was forged against", async () => {
+  await withSandbox(async (root) => {
+    const a0 = createContext(root, "agent00");
+    const was = process.env.SWARM_VM_IMAGE_DIGEST;
+    process.env.SWARM_VM_IMAGE_DIGEST = `sha256:${"b".repeat(64)}`;
+    try {
+      const forged = await forgeTool(a0, { name: "list_files", description: "List a partition's files", runtime: "bash", script: "fls -r \"$1\"\n", requires: ["fls", "fls"] });
+      assert.ok(forged.ok);
+      if (!forged.ok) return;
+      assert.deepEqual(forged.manifest.requires, ["fls"], "each program once");
+      assert.equal(forged.manifest.image_digest, `sha256:${"b".repeat(64)}`);
+      const listed = (await listForgedTools(root)).find((t) => t.name === "list_files");
+      assert.deepEqual(listed?.requires, ["fls"], "the manifest keeps them when read back");
+    } finally {
+      if (was === undefined) delete process.env.SWARM_VM_IMAGE_DIGEST;
+      else process.env.SWARM_VM_IMAGE_DIGEST = was;
+    }
+    assert.equal(validateToolSpec({ name: "bad_req", description: "x", runtime: "bash", script: "x", requires: ["rm -rf /"] }).ok, false, "a program name is a name");
+  });
+});

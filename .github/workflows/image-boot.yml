@@ -1,0 +1,119 @@
+# Every image profile booted as an agent's VM, once a week. images.yml builds
+# each profile and checks it from the inside with Docker; CI's microVM job
+# boots base and disk on every pull request. Nothing booted the other
+# profiles, `full` included, or anything on arm64, although the development
+# Mac is arm64. This does, on a schedule: it is long, and it tests the images
+# rather than a change.
+#
+# For each profile, on a runner with KVM:
+#   1. build it as a community user would (images/README.md) and load it into
+#      msb;
+#   2. boot it through the harness's own path (the VM suite's floor test and
+#      its end-to-end Pi run, with VM_TEST_IMAGE naming the profile), so the
+#      probe and its verdict run on that image;
+#   3. run the toolbox check in a throwaway VM of it with the profile's packs,
+#      and hand what the VM lacks to imageFit, the function the kickoff uses,
+#      with the image's own record. A blocker fails the job.
+#
+# Nothing is pushed: images bundle separately licensed programs that are not
+# ours to redistribute until each licence has been reviewed (see images.yml).
+name: image boot
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  boot:
+    name: boot · ${{ matrix.profile }}${{ matrix.arch == 'arm64' && ' · arm64' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [base, re, memory, disk, network, linux, mobile, web, full]
+        arch: [amd64]
+        include:
+          - { profile: base, arch: arm64 }
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    env:
+      TAG: dev-${{ matrix.arch }}
+      IMAGE: dfirswarm-${{ matrix.profile }}:dev-${{ matrix.arch }}
+    steps:
+      - run: git config --global init.defaultBranch main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: sqlite3, for the msb database scrub
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q sqlite3
+      # GitHub's amd64 runners expose /dev/kvm; whether the arm64 ones do is
+      # measured here rather than assumed. Without it the image is still
+      # built and checked from the inside, and the job says what it skipped.
+      - name: KVM for this user
+        id: kvm
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+            ls -la /dev/kvm
+            echo "available=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::no /dev/kvm on this ${{ matrix.arch }} runner: $IMAGE is built and checked from the inside, not booted"
+            echo "available=0" >> "$GITHUB_OUTPUT"
+          fi
+      - run: npm ci
+      - name: Build
+        run: |
+          docker build -f images/base.Dockerfile -t "dfirswarm-base:$TAG" images
+          if [ "${{ matrix.profile }}" != base ]; then
+            # Built here, never pushed: the flag is for this runner's copy.
+            python3 images/recipe.py build "${{ matrix.profile }}" --out ctx --base "dfirswarm-base:$TAG" --allow-nonredistributable
+            docker build -t "$IMAGE" ctx
+          fi
+          docker run --rm "$IMAGE" cat /etc/dfirswarm/image.json > "$RUNNER_TEMP/image.json"
+      - name: Load into msb
+        if: steps.kvm.outputs.available == '1'
+        run: |
+          docker save "$IMAGE" -o "$RUNNER_TEMP/image.tar"
+          msb="$(node --experimental-strip-types --no-warnings scripts/vm.ts msb-path)"
+          "$msb" doctor
+          "$msb" load -i "$RUNNER_TEMP/image.tar"
+      - name: Boot it as an agent's VM (probe, verdict, Pi end to end)
+        if: steps.kvm.outputs.available == '1'
+        env:
+          DFIRSWARM_VM_TESTS: "1"
+          VM_TEST_IMAGE: ${{ env.IMAGE }}
+        run: >-
+          node --experimental-strip-types --test --test-concurrency=1
+          --test-name-pattern="^(guest root cannot change|end to end: Pi runs in its VM)"
+          tests/vm-integration.test.ts
+      - name: The profile's packs against what the VM has (toolbox, imageFit)
+        if: steps.kvm.outputs.available == '1'
+        run: |
+          packs="$(python3 images/recipe.py list | jq -r --arg p "${{ matrix.profile }}" '.[$p].packs[]? | "packs/" + .' | paste -sd: -)"
+          echo "packs: ${packs:-none}"
+          set +e
+          node --experimental-strip-types --no-warnings scripts/vm.ts toolbox --image "$IMAGE" --out "$RUNNER_TEMP/toolbox.json" ${packs:+--packs "$packs"} --required
+          code=$?
+          set -e
+          echo "toolbox exit: $code (3: a required program is missing)"
+          test -s "$RUNNER_TEMP/toolbox.json" || { echo "the toolbox check wrote nothing" >&2; exit 1; }
+          PACKS="$packs" node --experimental-strip-types --no-warnings -e '
+            import("./scripts/vm.ts").then((m) => {
+              const fs = require("node:fs");
+              const tb = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/toolbox.json", "utf8"));
+              const image = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/image.json", "utf8"));
+              const probe = { missing_binaries: (tb.missing ?? []).map((t) => t.name), image };
+              const fit = m.imageFit(probe, m.packNeeds((process.env.PACKS ?? "").split(":")), false);
+              for (const w of fit.warnings) console.log("WARN: " + w);
+              for (const b of fit.blockers) console.log("BLOCKER: " + b);
+              process.exit(fit.blockers.length ? 1 : 0);
+            });'
+          exit "$code"

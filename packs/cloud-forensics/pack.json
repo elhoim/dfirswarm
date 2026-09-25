@@ -1,7 +1,7 @@
 {
   "id": "cloud-forensics",
   "name": "Cloud and SaaS Forensics Pack",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Method and tooling for logs that belong to somebody else's computer: what each provider keeps and for how long, the Microsoft 365 unified audit log, Entra sign-ins and the tokens behind them, AWS CloudTrail, Google Workspace, and the mailbox rules and application consents that are how a cloud account is actually kept.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -32,7 +32,7 @@
       "skills/m365/unified-audit-log.md": "0a383c97395c67d23e3c52101b042feee2e5d9dd6d555eedc329ee2b4ab4294c",
       "skills/aws/cloudtrail.md": "ebabbd35e18df011cbfbde33623dc45fab9bfc983760bf199d0e6d250f34f13d",
       "skills/entra/signins.md": "e8ffd61841b26c2dfb7fe679cdcfcea58b62e63a5915e4e15bb843974ce9df27",
-      "requires/host.json": "e0def2a69a18c5173af4f3d3fd55c4d31a9257ec5212650893a6fd695b534843",
+      "requires/host.json": "d087cbbf9d215fe8adc5b6f4d4e344c3ce33f27d96116a8c67b14918aa2bb485",
       "requires/python.txt": "eb9148a62031d80af4795335b759dbe15552ed2df3b5b97648fbcda6b32b64de",
       "skills/INDEX.md": "fe953eb77754f23b01157513c95d322c7830162cc0224ea2729b6361163a3a21"
     }

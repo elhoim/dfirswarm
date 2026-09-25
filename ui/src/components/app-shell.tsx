@@ -125,8 +125,8 @@ export function AppShell({ children }: { children: ReactNode }) {
       </header>
       <main className="flex w-full flex-1 flex-col">{children}</main>
       <footer className="border-t border-line">
-        <div className="mx-auto flex h-10 w-full max-w-[1680px] flex-wrap items-center justify-between gap-2 px-4 text-[12px] text-ink-3 sm:px-10">
-          <span>Reads runs/ · every action goes through scripts/swarm.sh · watching is open on the LAN, spending needs the token</span>
+        <div className="mx-auto flex min-h-10 w-full max-w-[1680px] flex-wrap items-center justify-between gap-2 px-4 py-1.5 text-[12px] text-ink-3 sm:px-10">
+          <span>Reads runs/ · every action goes through scripts/swarm.sh · watching is open to whoever reaches this address (this machine only unless started with --host 0.0.0.0), spending needs the token</span>
           {/* AGPL s13: whoever reaches this console over the network is offered
               the source of the version serving it. An unmodified run is already
               covered by this link; a modified one points it at its own source. */}

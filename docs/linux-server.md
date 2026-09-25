@@ -7,13 +7,18 @@ measured on that host. What the kernel can enforce and how is in
 [linux-plan.md](linux-plan.md); this page is what an operator has to get
 right.
 
+Every agent runs in its own microVM unless the run says `--isolation host`,
+so a Linux host needs KVM first ([Agents in microVMs](#agents-in-microvms)).
+The account and namespace sections below matter for host runs, which are
+unisolated: every agent is a process on the machine.
+
 ## Packages
 
 ```
 apt-get install -y zsh bubblewrap util-linux iproute2 sqlite3 p7zip-full jq python3
 ```
 
-Node ≥ 22.6 from your usual source, then Pi and Herdr as the
+Node ≥ 22.19 from your usual source, then Pi and Herdr as the
 [quick start](quick-start.md) has them. Nothing forensic: the agents install
 what a case needs, inside the run.
 
@@ -111,6 +116,37 @@ The run's daemons are detached from whatever terminal started the kickoff
 egress proxy or the trace collector with it. `swarm.sh stop <id>` ends them;
 after it, `pgrep -f 'trace-collector|trace-gate|nudge-broker|netguard-proxy'`
 should find nothing.
+
+## Agents in microVMs
+
+A run is in microVMs by default (`--isolation microvm`), which needs
+`/dev/kvm` for the account (`ls -l /dev/kvm`; a
+group or a udev rule, as CI's microVM job sets one) and the image loaded into
+msb (`images/README.md`; `msb load -i` a `docker save` of it). On a small
+server the kickoff sizes each VM at 1 GiB when the host has under 8 GiB, and
+refuses N VMs that would not fit its memory; `--vm-memory` and `--vm-disk`
+say otherwise. The host guards above are not started for a VM run (the VM is
+the guard), so the account's shell and user namespaces matter only for host
+runs. The hub's sockets live under `~/.dfirswarm/hubs/` (`SWARM_HUBS_DIR`
+moves it), one directory per user, which a reboot does not clear: after a
+restart, `swarm.sh stop <id>` finds the hub's state and says the host
+restarted or the run crashed. A host-mode pane
+of another run on the same account is kept from them by its guard's mount
+namespace (the directory is masked) or, on macOS, by sandbox-exec; with
+Landlock alone, or with no write guard, it is not, and a host kickoff that
+finds a VM run up says so. Run such hosts one run at a time. `swarm.sh netcheck` shows what a run's VMs
+would reach (`--isolation host` checks netguard instead); `swarm.sh status <id>` lists each agent's state from its hub; a
+stop keeps each VM's disk beside the run (`<sandbox>.vm-snapshots/`) with its
+logs, and custody checks it with msb.
+
+Plan the disk for it: each kept snapshot can be as large as that VM's root
+disk (`--vm-disk`, 8 GiB by default), per agent. The stop keeps a VM rather
+than snapshot it when less than 4 GiB is free where the disks go
+(`SWARM_SNAPSHOT_MIN_FREE_BYTES`), which is a floor, not the disk's size; a
+VM whose snapshot fails is kept and named, not removed. Plan the time too:
+custody at stop reads every evidence file once more, so on a small droplet a
+stop over tens of gigabytes of evidence takes as long as hashing them again
+(`--custody-timeout SEC` bounds it, `--no-custody` skips it for later).
 
 ## What the record will say on a good host
 

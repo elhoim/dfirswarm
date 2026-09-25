@@ -778,3 +778,327 @@ test("icat_root and master_icat read the image they are given, not the one they 
   });
 });
 
+
+// Every Python tool a pack or the library ships, read for a name it uses at
+// module level and never binds: a NameError waits for the first call that
+// reaches it. catalog_search read `d` for `args` and failed every call in a
+// real run.
+test("no pack or library tool uses a module-level name it never binds", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const scan = `
+import builtins, glob, symtable, sys
+bad = []
+for p in sorted(glob.glob("packs/*/tools/*/*.py") + glob.glob("tool-library/*/*.py")):
+    src = open(p, encoding="utf-8", errors="replace").read()
+    st = symtable.symtable(src, p, "exec")
+    for s in st.get_symbols():
+        if s.is_referenced() and not (s.is_assigned() or s.is_imported() or s.is_parameter()) and s.get_name() not in dir(builtins):
+            bad.append("%s: %s" % (p, s.get_name()))
+print("\\n".join(bad))
+`;
+  const r = spawnSync("python3", ["-c", scan], { cwd: join(LIB, ".."), encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "", `unbound names:\n${r.stdout}`);
+});
+
+test("catalog_search finds the filesystem the catalogue names by its sector, and asks which when there are several", async () => {
+  await withCwd(async (cwd) => {
+    const script = join(LIB, "..", "packs", "computer-forensics-base", "tools", "catalog_search", "run.py");
+    // As scripts/evidence-catalog.sh writes it: one directory per filesystem,
+    // named by its first sector; a usual first partition is p2048.
+    await mkdir(join(cwd, "catalog", "Case4", "p2048"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "Case4", "p2048", "filelist.txt"), "Users/alice/NTUSER.DAT\nWindows/Prefetch/CHROME.EXE-1.pf\n");
+    await writeFile(join(cwd, "catalog", "Case4", "partitions.txt"), "002:  000:000   0000002048   ...   NTFS\n");
+    let r = await runPy(script, cwd, { pattern: "prefetch", which: "filelist" });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /CHROME\.EXE-1\.pf/);
+    assert.match(r.stdout, /"partition": "p2048"/);
+    assert.doesNotMatch(r.stdout, /NTUSER/);
+    r = await runPy(script, cwd, { pattern: "NTFS", which: "partitions" });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    // A second filesystem: the caller says which, by directory or by sector.
+    await mkdir(join(cwd, "catalog", "Case4", "p409600"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "Case4", "p409600", "filelist.txt"), "Data/secret.txt\n");
+    r = await runPy(script, cwd, { pattern: "secret", which: "filelist" });
+    assert.notEqual(r.code, 0);
+    assert.match(r.stdout, /several filesystems.*pass partition=/);
+    assert.match(r.stdout, /p409600/);
+    r = await runPy(script, cwd, { pattern: "secret", which: "filelist", partition: "409600" });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /Data\/secret\.txt/);
+    // A file the catalogue did not write is said, never a traceback.
+    r = await runPy(script, cwd, { pattern: "x", which: "timeline", partition: "p2048" });
+    assert.notEqual(r.code, 0);
+    assert.match(r.stdout, /is not in the catalogue/);
+    assert.doesNotMatch(r.stdout + r.stderr, /Traceback/);
+    // A second catalogue: catalog= names it.
+    await mkdir(join(cwd, "catalog", "Other", "p0"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "Other", "p0", "filelist.txt"), "Other/file.txt\n");
+    await writeFile(join(cwd, "catalog", "Other", "partitions.txt"), "No partition table: inputs/Other is one NTFS volume starting at sector 0.\n");
+    r = await runPy(script, cwd, { pattern: "file", which: "filelist", partition: "p2048" });
+    assert.match(r.stdout + r.stderr, /several catalogues; pass catalog=/);
+    r = await runPy(script, cwd, { pattern: "file", which: "filelist", catalog: join("catalog", "Other") });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /Other\/file\.txt/);
+  });
+});
+
+test("icat_extract and chunk_needles find an image by its catalogue when it has no extension, and the offset with it", async () => {
+  // Run 2 on Linux: the evidence was a raw dd named after the host
+  // (inputs/s4a-challenge4), and every icat_extract call answered "no disk
+  // image under inputs/". On macOS the same tool read Case4.E01 at sector 0
+  // and icat said "Cannot determine file system type": the filesystem the
+  // catalogue lists is at 2048.
+  const tools = join(LIB, "..", "packs", "computer-forensics-base", "tools");
+  await withCwd(async (cwd, bin) => {
+    await rm(join(cwd, "inputs", "AF-Case2.E01"));
+    await rm(join(cwd, "inputs", "Webserver.E01"));
+    await writeFile(join(cwd, "inputs", "s4a-challenge4"), "raw\n");
+    await writeFile(join(cwd, "inputs", "memdump.mem"), "mem\n");
+    await mkdir(join(cwd, "catalog", "s4a-challenge4", "p2048"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "s4a-challenge4", "partitions.txt"), "002:  000:000   0000002048   ...   Linux (0x83)\n");
+    await mkdir(join(cwd, "catalog", "memdump.mem"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "memdump.mem", "pslist.txt"), "PID\n");
+
+    let r = await runPy(join(tools, "icat_extract", "run.py"), cwd, { inode: 12, output: "work/x.bin" }, bin);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    let body = JSON.parse(r.stdout) as { image: string; offset: number };
+    assert.equal(body.image, "inputs/s4a-challenge4");
+    assert.equal(body.offset, 2048);
+    assert.equal(await readFile(join(cwd, "icat-args.txt"), "utf8"), "-o\n2048\ninputs/s4a-challenge4\n12\n");
+
+    r = await runPy(join(tools, "chunk_needles", "run.py"), cwd, { needles: "extracted", inode: 12 }, bin);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.equal(await readFile(join(cwd, "icat-args.txt"), "utf8"), "-o\n2048\ninputs/s4a-challenge4\n12\n");
+    assert.equal((JSON.parse(r.stdout) as { hits: Record<string, { ascii: number }> }).hits.extracted.ascii, 1);
+
+    // A second filesystem: the caller says which; a given 0 is 0.
+    await mkdir(join(cwd, "catalog", "s4a-challenge4", "p409600"), { recursive: true });
+    r = await runPy(join(tools, "icat_extract", "run.py"), cwd, { inode: 12, output: "work/x.bin" }, bin);
+    assert.notEqual(r.code, 0);
+    assert.match(r.stdout + r.stderr, /several filesystems in inputs\/s4a-challenge4; pass offset=/);
+    assert.match(r.stdout + r.stderr, /\[2048, 409600\]/);
+    r = await runPy(join(tools, "icat_extract", "run.py"), cwd, { inode: 12, output: "work/x.bin", offset: 0 }, bin);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.equal(await readFile(join(cwd, "icat-args.txt"), "utf8"), "-o\n0\ninputs/s4a-challenge4\n12\n");
+  });
+
+  // A nested input with a space and a non-ASCII letter: the catalogue's name
+  // for it is what evidence-catalog.sh's `tr` makes of its bytes.
+  await withCwd(async (cwd, bin) => {
+    await rm(join(cwd, "inputs", "AF-Case2.E01"));
+    await rm(join(cwd, "inputs", "Webserver.E01"));
+    const rel = "olay ş/disk";
+    await mkdir(join(cwd, "inputs", "olay ş"), { recursive: true });
+    await writeFile(join(cwd, "inputs", rel), "raw\n");
+    const { spawnSync } = await import("node:child_process");
+    const slug = spawnSync("bash", ["-c", "printf '%s' \"$1\" | tr -c 'A-Za-z0-9._-' '_'", "_", rel], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).stdout;
+    await mkdir(join(cwd, "catalog", slug, "p63"), { recursive: true });
+    await writeFile(join(cwd, "catalog", slug, "partitions.txt"), "002:  000:000   0000000063   ...   NTFS\n");
+    const r = await runPy(join(tools, "icat_extract", "run.py"), cwd, { inode: 5, output: "work/y.bin" }, bin);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    const body = JSON.parse(r.stdout) as { image: string; offset: number };
+    assert.equal(body.image, `inputs/${rel}`);
+    assert.equal(body.offset, 63);
+  });
+});
+
+test("sqlite_query opens a database read-only by URI, on a read-only directory, whatever its name", async (t) => {
+  // It passed `sqlite3 -uri`, an option the shell does not have: every call
+  // with readonly=true (the default) failed in the macOS run. A WAL database
+  // in another agent's read-only work directory is the case immutable=1 is for.
+  const { spawnSync } = await import("node:child_process");
+  if (spawnSync("sqlite3", ["-version"]).status !== 0) {
+    t.skip("no sqlite3 shell on this host");
+    return;
+  }
+  for (const script of [
+    join(LIB, "..", "packs", "computer-forensics-base", "tools", "sqlite_query", "run.py"),
+    join(LIB, "sqlite_query", "run.py"),
+  ]) {
+    await withCwd(async (cwd) => {
+      const dir = join(cwd, "work", "agent 03 #1");
+      await mkdir(dir, { recursive: true });
+      const db = join(dir, "ActivitiesCache.db");
+      const made = spawnSync("sqlite3", [db, "pragma journal_mode=wal; create table a(x); insert into a values(7);"], { encoding: "utf8" });
+      assert.equal(made.status, 0, made.stderr);
+      await chmod(dir, 0o555);
+      try {
+        const r = await runPy(script, cwd, { db_path: "work/agent 03 #1/ActivitiesCache.db", sql: "select x from a;", csv: true });
+        assert.equal(r.code, 0, r.stderr + r.stdout);
+        const out = JSON.parse(r.stdout) as { ok: boolean; stdout: string };
+        assert.equal(out.ok, true);
+        assert.equal(out.stdout, "x\n7\n");
+      } finally {
+        await chmod(dir, 0o755);
+      }
+    });
+  }
+});
+
+// regipy's get_key, as regipy 6 has it: a path with a backslash loses its
+// first part (taken for the root's name) unless it starts with one.
+const ROOTED_DRIVER = [
+  "import importlib.util, json, sys, types",
+  "class NotFound(Exception): pass",
+  "class Key:",
+  "    def __init__(self, name, path, kids=()):",
+  "        self.name, self.path, self.kids = name, path, {k.name.lower(): k for k in kids}",
+  "    def get_subkey(self, name, raise_on_missing=True):",
+  "        return self.kids.get(name.lower())",
+  "def tree(name, path, spec):",
+  "    return Key(name, path, [tree(k, path + '\\\\' + k, v) for k, v in spec.items()])",
+  "shell = {'Microsoft': {'Windows': {'Shell': {'BagMRU': {}}}}}",
+  "class Hive:",
+  "    def __init__(self):",
+  "        self.root = Key('S-1-5-21-1_Classes', '', [tree('Local Settings', '\\\\Local Settings', {'Software': shell}), tree('Software', '\\\\Software', shell)])",
+  "        self.root.kids = {k.name.lower(): k for k in self.root.kids.values()}",
+  "    def get_key(self, key_path):",
+  "        if key_path == '\\\\': return self.root",
+  "        parts = key_path.split('\\\\')[1:] if '\\\\' in key_path else [key_path]",
+  "        k = self.root.get_subkey(parts.pop(0))",
+  "        for p in parts:",
+  "            if not k: break",
+  "            k = k.get_subkey(p)",
+  "        if not k: raise NotFound(key_path)",
+  "        return k",
+  "for name, attrs in {'regipy': {}, 'regipy.registry': {'RegistryHive': Hive}, 'regipy.exceptions': {'RegistryKeyNotFoundException': NotFound}}.items():",
+  "    m = types.ModuleType(name)",
+  "    for k, v in attrs.items(): setattr(m, k, v)",
+  "    sys.modules[name] = m",
+  "spec = importlib.util.spec_from_file_location('tool', sys.argv[1])",
+  "mod = importlib.util.module_from_spec(spec)",
+  "spec.loader.exec_module(mod)",
+  "out = []",
+  "for p in json.load(sys.stdin):",
+  "    try: out.append(mod.rooted_key(Hive(), p).path)",
+  "    except NotFound: out.append(None)",
+  "print(json.dumps(out))",
+].join("\n");
+
+test("the registry tools read a key from the hive's root, whatever form the path comes in", async () => {
+  // Without a leading backslash regipy dropped the path's first part:
+  // shellbags looked for Local Settings\...\BagMRU in a UsrClass.dat that has
+  // it and said "no BagMRU root" (third CTF round), and in an NTUSER.DAT the
+  // same path answered Software\...\BagMRU under the name asked for.
+  const bag = "Local Settings\\Software\\Microsoft\\Windows\\Shell\\BagMRU";
+  for (const script of [
+    join(LIB, "..", "packs", "windows-forensics", "tools", "shellbags", "run.py"),
+    join(LIB, "..", "packs", "windows-forensics", "tools", "regkv", "run.py"),
+    join(LIB, "regkv", "run.py"),
+    join(LIB, "regkeys", "run.py"),
+  ]) {
+    const out = await runPySnippet(ROOTED_DRIVER, [script], [bag, `\\${bag}`, `S-1-5-21-1_Classes\\${bag}`, bag.replaceAll("\\", "/"), "Software\\Microsoft", "Microsoft\\Windows", ""]);
+    assert.equal(out.code, 0, `${script}: ${out.stderr}`);
+    assert.deepEqual(JSON.parse(out.stdout), [`\\${bag}`, `\\${bag}`, `\\${bag}`, `\\${bag}`, "\\Software\\Microsoft", null, ""], script);
+  }
+});
+
+test("shellbags decodes the shell items regipy hands over as hex, with the GUID in its place", async () => {
+  // regipy gives a REG_BINARY value as a hex string; the tool took only
+  // bytes, so no item was ever decoded (third CTF round). And a root
+  // folder's GUID read its last two groups two bytes early.
+  const driver = [
+    "import importlib.util, json, sys",
+    "spec = importlib.util.spec_from_file_location('shellbags', sys.argv[1])",
+    "mod = importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "cases = json.load(sys.stdin)",
+    "print(json.dumps({",
+    "  'items': [mod.decode_item(mod.binary(h)) for h in cases['items']],",
+    "  'order': mod.mru_order({'MRUListEx': mod.binary(cases['mru'])}),",
+    "  'not_hex': mod.binary('MRUListEx'),",
+    "}, default=str))",
+  ].join("\n");
+  const out = await runPySnippet(driver, [join(LIB, "..", "packs", "windows-forensics", "tools", "shellbags", "run.py")], {
+    items: ["14001f50e04fd020ea3a6910a2d808002b30309d", "14001f80cb859f6720028040b29b5540cc05aab6", "19002f5a3a5c000000000000000000000000000000000000"],
+    mru: "03000000010000000200000000000000ffffffff",
+  });
+  assert.equal(out.code, 0, out.stderr);
+  const got = JSON.parse(out.stdout) as { items: Array<{ type: string; guid?: string; name: string }>; order: number[]; not_hex: null };
+  assert.equal(got.items[0].type, "root folder");
+  assert.equal(got.items[0].guid, "{20D04FE0-3AEA-1069-A2D8-08002B30309D}", "My Computer");
+  assert.equal(got.items[1].guid, "{679F85CB-0220-4080-B29B-5540CC05AAB6}", "Quick access");
+  assert.equal(got.items[2].type, "volume");
+  assert.equal(got.items[2].name, "Z:\\");
+  assert.deepEqual(got.order, [3, 1, 2, 0]);
+  assert.equal(got.not_hex, null);
+});
+
+test("catalog_search takes a catalogue by the name the index gives it, and bad input is an answer, not a traceback", async () => {
+  // Third CTF round: catalog=Case4.E01 (the name catalog/README.md lists)
+  // was FileNotFoundError; sqlite_query without sql= was KeyError; ioc_scan
+  // on a missing path was FileNotFoundError.
+  const tools = join(LIB, "..", "packs", "computer-forensics-base", "tools");
+  await withCwd(async (cwd) => {
+    for (const [dir, line] of [["p2048", "Users/alice/NTUSER.DAT"], ["p409600", "Data/secret.txt"]]) {
+      await mkdir(join(cwd, "catalog", "Case4.E01", dir), { recursive: true });
+      await writeFile(join(cwd, "catalog", "Case4.E01", dir, "filelist.txt"), `${line}\n`);
+    }
+    await mkdir(join(cwd, "catalog", "memdump.mem"), { recursive: true });
+    let r = await runPy(join(tools, "catalog_search", "run.py"), cwd, { pattern: "NTUSER", which: "filelist", catalog: "Case4.E01", partition: "2048" });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /NTUSER\.DAT/);
+    r = await runPy(join(tools, "catalog_search", "run.py"), cwd, { pattern: "secret", which: "filelist", catalog: "Case4.E01/p409600" });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /Data\/secret\.txt/);
+    r = await runPy(join(tools, "catalog_search", "run.py"), cwd, { pattern: "x", which: "filelist", catalog: "Case5.E01" });
+    assert.notEqual(r.code, 0);
+    assert.deepEqual(JSON.parse(r.stdout + r.stderr), { ok: false, error: "no catalogue Case5.E01", candidates: ["Case4.E01", "memdump.mem"] });
+    // A disk and a memory catalogue: the disk's is the one with filesystems.
+    await writeFile(join(cwd, "catalog", "Case4.E01", "partitions.txt"), "002:  000:000   0000002048   ...   NTFS\n");
+    r = await runPy(join(tools, "catalog_search", "run.py"), cwd, { pattern: "NTUSER", which: "filelist", partition: "p2048" });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /NTUSER\.DAT/);
+    // Two disks: the caller says which, from a JSON list.
+    await mkdir(join(cwd, "catalog", "Other.E01"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "Other.E01", "partitions.txt"), "\n");
+    r = await runPy(join(tools, "catalog_search", "run.py"), cwd, { pattern: "x", which: "filelist" });
+    assert.deepEqual(JSON.parse(r.stdout + r.stderr).candidates, ["Case4.E01", "Other.E01", "memdump.mem"], "several catalogues are a JSON list");
+
+    r = await runPy(join(tools, "ioc_scan", "run.py"), cwd, { path: "work/nothing-here.txt", needles: "x" });
+    assert.notEqual(r.code, 0);
+    assert.deepEqual(JSON.parse(r.stdout), { error: "no such file", path: "work/nothing-here.txt" });
+    r = await runPy(join(tools, "ioc_scan", "run.py"), cwd, { path: "work", needles: "x" });
+    assert.match(JSON.parse(r.stdout).error, /a directory, not a file/);
+    for (const lnk of [join(LIB, "lnk_parse", "run.py"), join(LIB, "..", "packs", "windows-forensics", "tools", "lnk_parse", "run.py")]) {
+      r = await runPy(lnk, cwd, { path: "work/missing.lnk" });
+      assert.deepEqual(JSON.parse(r.stdout), { error: "no such file", path: "work/missing.lnk" }, lnk);
+    }
+    r = await runPy(join(tools, "sqlite_query", "run.py"), cwd, { db_path: "work/x.db", query: "tables" });
+    assert.notEqual(r.code, 0);
+    assert.match(r.stdout, /"error": "need sql"/);
+    assert.doesNotMatch(r.stdout + r.stderr, /Traceback/);
+  });
+});
+
+test("icat_extract refuses an inode the catalogue lists only as a directory, and names a file's catalogued path", async () => {
+  // Third CTF round: d/d 84284 (Edge's History directory) extracted as
+  // EdgeHistory.db, 272 bytes of $INDEX_ROOT, then "file is not a database".
+  const tool = join(LIB, "..", "packs", "computer-forensics-base", "tools", "icat_extract", "run.py");
+  await withCwd(async (cwd, bin) => {
+    await rm(join(cwd, "inputs", "Webserver.E01"));
+    await mkdir(join(cwd, "catalog", "AF-Case2.E01", "p2048"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "AF-Case2.E01", "partitions.txt"), "002:  000:000   0000002048   ...   NTFS\n");
+    await writeFile(
+      join(cwd, "catalog", "AF-Case2.E01", "p2048", "filelist.txt"),
+      [
+        "d/d 84284-144-1:\tUsers/IEUser/AppData/Local/Packages/Edge/AC/MicrosoftEdge/History",
+        "r/r 87381-128-1:\tUsers/IEUser/AppData/Local/Microsoft/Windows/AppCache/container.dat",
+        "r/r * 842840-128-4(realloc):\tUsers/x/other.etl",
+        "",
+      ].join("\n"),
+    );
+    let r = await runPy(tool, cwd, { inode: 84284, output: "work/EdgeHistory.db" }, bin);
+    assert.notEqual(r.code, 0);
+    const refused = JSON.parse(r.stdout) as { error: string; path: string };
+    assert.match(refused.error, /inode 84284 is a directory/);
+    assert.equal(refused.path, "Users/IEUser/AppData/Local/Packages/Edge/AC/MicrosoftEdge/History");
+    r = await runPy(tool, cwd, { inode: 87381, output: "work/container.dat" }, bin);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.equal((JSON.parse(r.stdout) as { catalog_path: string }).catalog_path, "Users/IEUser/AppData/Local/Microsoft/Windows/AppCache/container.dat");
+    // An attribute named on purpose is the caller's call.
+    r = await runPy(tool, cwd, { inode: "84284-144-1", output: "work/index.bin" }, bin);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+  });
+});

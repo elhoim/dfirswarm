@@ -23,6 +23,9 @@
   },
   "runtime": "python3",
   "entry": "run.py",
+  "requires": [
+    "icat"
+  ],
   "timeout_seconds": 30,
   "by": "s864a08",
   "at": "2026-09-18T16:09:29.146Z",

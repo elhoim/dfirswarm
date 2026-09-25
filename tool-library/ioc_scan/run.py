@@ -40,6 +40,12 @@ for n in needles:
         needles_b.append(("ascii", n, b))
         needles_b.append(("utf16", n, n.encode("utf-16le")))
 
+if os.path.isdir(path):
+    print(json.dumps({"error": "a directory, not a file: scan one file at a time", "path": path}))
+    sys.exit(1)
+if not os.path.isfile(path):
+    print(json.dumps({"error": "no such file", "path": path}))
+    sys.exit(1)
 size = os.path.getsize(path)
 end = size if length is None else min(size, start + int(length))
 hits = []

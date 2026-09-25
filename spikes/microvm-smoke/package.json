@@ -1,0 +1,9 @@
+{
+  "name": "microvm-smoke",
+  "private": true,
+  "type": "module",
+  "description": "Smoke test: can microsandbox hold evidence read-only, close egress and stream tool output losslessly?",
+  "dependencies": {
+    "microsandbox": "0.7.2"
+  }
+}

@@ -3,6 +3,17 @@
 Two things a reader will look for and not find. Both are refused on the same
 grounds: each one would take away a guard this project's claims rest on.
 
+> **Amended by [ADR 0009](0009-agents-live-in-microvms.md) (2026-09-24).** An
+> isolation now exists that is not a container, and it is the default:
+> `--isolation microvm` runs each agent in a microVM whose guards are the host's (read-only mounts
+> enforced on the host side, a deny-by-default network policy). Two claims
+> below change for that mode: a refused connection is not on the run's log
+> (msb enforces the policy and the report says so rather than counting), and
+> the images do ship — built from the packs, published privately, recorded by
+> digest. The condition this ADR sets, that the guard is measured in the
+> pane, is kept for host mode; in VM mode the kickoff's probe measures it in
+> each VM and a real-VM test holds it in CI.
+
 ## Context
 
 The harness makes two enforcement claims that are not marketing. Every

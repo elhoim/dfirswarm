@@ -2,6 +2,7 @@ import { Check, Moon } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { compact, money, pct } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { Chip } from "@/components/console";
 import type { AgentMarker } from "@/lib/types";
 
 /** ✓ done · ? dead/stalled · ● active. */
@@ -85,4 +86,9 @@ export function DarkThreadMark({ className }: { className?: string }) {
       <TooltipContent>Idle past the dim threshold, or last tag was hold / veto / stop.</TooltipContent>
     </Tooltip>
   );
+}
+
+/** Where the agents ran: one microVM each, or host processes, unisolated. A record from before the field is a host run. */
+export function isolationChip(row: { isolation?: "microvm" | "host" }) {
+  return row.isolation === "microvm" ? <Chip tone="kelp">microVM</Chip> : <Chip tone="saffron">host · unisolated</Chip>;
 }

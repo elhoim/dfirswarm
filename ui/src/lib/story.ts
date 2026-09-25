@@ -40,7 +40,9 @@ function isSentinelPost(post: TimedPost): boolean {
 }
 
 function kindOf(post: TimedPost, current: PhaseKind | null): PhaseKind {
-  if (post.from === "system") return post.tag === "stop" && isSentinelPost(post) ? "stopped" : "harness";
+  // `system via <seat>` is a seat's harness code in its VM: the seat's
+  // word, placed in the story as the seat's post, never the harness's.
+  if (post.from === "system" && !post.via) return post.tag === "stop" && isSentinelPost(post) ? "stopped" : "harness";
   // Once the sentinel is announced, whatever the agents still say is
   // aftermath — a late approval or a last note — not a new phase of work.
   if (current === "stopped" || current === "aftermath") return "aftermath";

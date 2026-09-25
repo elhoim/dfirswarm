@@ -40,6 +40,7 @@ export function PacksPanel({ view }: { view: SwarmView }) {
   const colour = useAgentColours(view.agents);
   const names = useAgentNames(view.agents);
   const packs = view.packs ?? [];
+  const secrets = (view.registry as { pack_secrets?: Record<string, { names?: string[]; mode?: string }> } | null)?.pack_secrets;
 
   const { fetches, bySkill, indexReads, packOf } = useMemo(() => {
     const fetches: Fetch[] = [];
@@ -117,6 +118,14 @@ export function PacksPanel({ view }: { view: SwarmView }) {
                 manifest {p.manifest_sha256.slice(0, 16)}
                 {p.installed ? "" : " · no longer installed on this host"}
               </p>
+              {secrets?.[p.id] ? (
+                // What the kickoff did with the pack's secrets, from the run
+                // record: injected into VMs bound to their hosts, exposed to
+                // host panes, withheld, or never set.
+                <p className={cn("text-xs [overflow-wrap:anywhere]", secrets[p.id].mode === "exposed" ? "text-brick-ink" : secrets[p.id].mode === "withheld" || secrets[p.id].mode === "not-set" ? "text-saffron-ink" : "text-muted-foreground")}>
+                  secrets {(secrets[p.id].names ?? []).join(", ")} · {secrets[p.id].mode ?? "?"}
+                </p>
+              ) : null}
             </div>
           );
         })}

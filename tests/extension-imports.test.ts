@@ -29,8 +29,12 @@ test("the extension imports every protocol function it calls", async () => {
 
   const importBlock = extension.match(/import \{([^}]*)\} from "\.\/protocol\.ts";/s);
   assert.ok(importBlock, "the extension imports from the protocol");
+  // The board's functions come from board.ts, which answers them locally on
+  // the host and through the hub in a VM, under the protocol's own names.
+  const boardBlock = extension.match(/import \{([^}]*)\} from "\.\/board\.ts";/s);
+  assert.ok(boardBlock, "the extension imports the board from board.ts");
   const imported = new Set(
-    importBlock[1]
+    (importBlock[1] + "," + boardBlock[1])
       .split(",")
       .map((s) => s.replace(/^\s*type\s+/, "").trim())
       .filter(Boolean),

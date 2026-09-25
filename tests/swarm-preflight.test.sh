@@ -13,6 +13,11 @@
 #   * that the models.json helper behind the *diagnostic* still reads an apiKey
 #     the way Pi resolves one, since it is what explains a refusal.
 set -uo pipefail
+# This suite tests host runs, and a run is in microVMs unless it says
+# otherwise: it names host. An image, a lock file or another pack home
+# exported in the shell would point its kickoffs somewhere else.
+unset SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
+export SWARM_ISOLATION=host
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/swarm-preflight.XXXXXX")"
@@ -345,6 +350,9 @@ pass "SWARM_RUNS_DIR still overrides both"
 # OpenAI-style /v1/models, plus Ollama's /api/version and /api/show.
 LOCAL_HELPERS="$TMP/local-helpers.sh"
 {
+  # Pi's store is read where the kickoff reads it (an --env value wins).
+  sed -n '/^pane_home() {/,/^}/p' "$ROOT/scripts/swarm.sh"
+  sed -n '/^pi_agent_dir() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^provider_base_url() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^host_of_url() {/,/^}/p' "$ROOT/scripts/swarm.sh"
   sed -n '/^host_is_local() {/,/^}/p' "$ROOT/scripts/swarm.sh"
@@ -572,11 +580,23 @@ pane_env_argv() { # pane_env_argv <getent body> [start args...] -> the argv Herd
 env_values() { # env_values <argv> <KEY> -> each value passed as --env KEY=..., one per line
   awk -v key="$2=" 'prev == "--env" && index($0, key) == 1 { print substr($0, length(key) + 1) } { prev = $0 }' <<<"$1"
 }
+# --allow-install on the host: pip installs into the run, past Debian's
+# externally-managed guard, and the panes are told so.
+argv="$(pane_env_argv 'echo "u:x:1000:1000::/home/u:/bin/bash"' --allow-install)"
+expect "an --allow-install pane lets pip install into the run (PEP 668)" "1" "$(env_values "$argv" PIP_BREAK_SYSTEM_PACKAGES)"
 argv="$(pane_env_argv 'echo "u:x:1000:1000::/home/u:/bin/bash"' --env HOME=/x)"
 sandbox_dir="$(awk 'prev == "--cwd" { print; exit } { prev = $0 }' <<<"$argv")"
 [[ -n "$sandbox_dir" ]] || fail "herdr workspace create got no --cwd: $argv"
 expect "a bash login shell's panes get HOME=<sandbox>/.bash, once, in place of an operator's --env HOME" \
   "$sandbox_dir/.bash" "$(env_values "$argv" HOME)"
+# This kickoff then stops: the stand-in Herdr returns no pane. What it
+# started is put away and the run is recorded as failed, not left running.
+grep -q 'Kickoff did not finish' "$TMP/pane-env.out" || fail "a kickoff that stopped after registering did not say it was putting things away: $(cat "$TMP/pane-env.out")"
+[[ "$(jq -r '[.runs[] | select(.label == "pane-env")] | last | .state' "$TMP/runs/registry.json")" == failed ]] \
+  || fail "a kickoff that stopped after registering left the run as $(jq -r '[.runs[] | select(.label == "pane-env")] | last | .state' "$TMP/runs/registry.json")"
+[[ ! -f "$sandbox_dir/collector.pid" ]] || fail "a kickoff that stopped left its collector running"
+[[ ! -d "$TMP/runs/registry.json.lock" ]] || fail "the registry lock was left behind"
+pass "a kickoff that stops after registering puts away its daemons and records the run as failed"
 if [[ -z "$guard_here" || "$guard_here" == "none" ]]; then
   echo "skip - Herdr's env with --no-write-guard --inputs (no kernel guard on this host, so no hook)"
 else

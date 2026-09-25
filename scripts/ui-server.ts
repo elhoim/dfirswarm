@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * LAN web app for DFIR Swarm: swarms → threads → agents → traces, plus
+ * Local web app for DFIR Swarm: swarms → threads → agents → traces, plus
  * kickoff / stop / reap through scripts/swarm.sh. Reads runs/,
- * pushes changes over SSE, serves the Vite bundle from ui/dist.
+ * pushes changes over SSE, serves the Vite bundle from ui/dist. It binds
+ * 127.0.0.1 unless told otherwise; --host 0.0.0.0 opens it to the LAN.
  *
  *   node --experimental-strip-types scripts/ui-server.ts [--port N] [--host H] [--runs-dir DIR]
  */
@@ -16,7 +17,10 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 function parseArgs(argv: string[]) {
   const out = {
     port: Number(process.env.SWARM_UI_PORT || 43173),
-    host: process.env.SWARM_UI_HOST || "0.0.0.0",
+    // Loopback unless the operator asks for more. What the console shows is
+    // case data — the board, the trace, what came out of the evidence — and
+    // reads need no token.
+    host: process.env.SWARM_UI_HOST || "127.0.0.1",
     runsDir: process.env.SWARM_RUNS_DIR || defaultRunsDir(ROOT),
   };
   for (let i = 0; i < argv.length; i++) {
@@ -41,8 +45,9 @@ function parseArgs(argv: string[]) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-// Anyone on the LAN may watch; starting a swarm spends money, so that needs
-// the token. SWARM_UI_TOKEN="" turns the check off deliberately.
+// Whoever can reach the bound address may watch (this machine only unless
+// --host says otherwise); starting a swarm spends money, so that needs the
+// token. SWARM_UI_TOKEN="" turns the check off deliberately.
 const token =
   process.env.SWARM_UI_TOKEN === undefined
     ? randomBytes(16).toString("hex")
@@ -53,11 +58,14 @@ const shown = args.host === "0.0.0.0" ? "127.0.0.1" : args.host;
 // The fragment is never sent to a server, so it does not land in a proxy
 // log or a Referer header the way a query parameter would.
 const suffix = token ? `/#token=${encodeURIComponent(token)}` : "";
-console.log(`DFIR Swarm web app v${await readVersion(ROOT)} at http://${shown}:${port}${suffix}  (bound ${args.host}, LAN reachable)`);
+const lan = !["127.0.0.1", "::1", "localhost"].includes(args.host);
+console.log(`DFIR Swarm web app v${await readVersion(ROOT)} at http://${shown}:${port}${suffix}  (bound ${args.host}${lan ? ", LAN reachable" : ", this machine only"})`);
 console.log(`Reads ${args.runsDir}; actions run scripts/swarm.sh start|stop|reap`);
 console.log(
   token
-    ? "Watching is open to the LAN; start / stop / reap / restore need the token in this URL."
+    ? lan
+      ? "Watching is open to anyone who can reach this port — the board, the trace and what came out of the evidence; start / stop / reap / restore need the token in this URL."
+      : "Reached from this machine only (use an SSH tunnel from elsewhere; --host 0.0.0.0 opens it to the LAN). Start / stop / reap / restore need the token in this URL."
     : "SWARM_UI_TOKEN is empty: anyone who can reach this port can start and stop swarms.",
 );
 // AGPL s13. Serving this console to other machines is the network interaction

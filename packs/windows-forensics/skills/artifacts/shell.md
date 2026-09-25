@@ -42,8 +42,9 @@ machine's local time, to two seconds.
 Cross-check the volume serial from a link against `fsstat` on the image. If they
 differ, the file came from another volume, and that is usually the point.
 
-Where the host carries them, `lnkinfo`, `fwsiinfo` and `olecfexport` read the
-same three artefacts with a different implementation. Use one of them on
+Where the host carries them, `lnkinfo`, `olecfexport` and the `pyfwsi` module
+(libfwsi-python, which has no program of its own) read the same three
+artefacts with a different implementation. Use one of them on
 anything you intend to put in the report: a shell bag name this pack had to
 recover by searching, confirmed by a parser that read it from the documented
 layout, is a much stronger line in a report than either alone.

@@ -14,7 +14,17 @@ function sequences(events: SwarmEvent[]): Sequence[] {
   const open = new Map<string, Sequence>();
   const out: Sequence[] = [];
   for (const e of events) {
-    const path = typeof e.args.path === "string" ? e.args.path : null;
+    // publish_file names its target `to` (a VM seat's write to a shared
+    // file goes through the hub); every other step names it `path`.
+    const target =
+      e.tool === "publish_file"
+        ? typeof e.args.to === "string" && e.args.to
+          ? e.args.to
+          : typeof e.args.path === "string"
+            ? `work/${e.args.path.split("/").pop()}`
+            : null
+        : e.args.path;
+    const path = typeof target === "string" ? target : null;
     if (!path) continue;
     const key = `${e.agent}\u0000${path}`;
     if (e.tool === "claim_file") {
@@ -26,7 +36,7 @@ function sequences(events: SwarmEvent[]): Sequence[] {
         out.push(seq);
       }
       open.get(key)!.steps.push(e);
-    } else if (["write", "edit", "file_restore", "file_history"].includes(e.tool)) {
+    } else if (["write", "edit", "file_restore", "file_history", "publish_file", "publish_needed"].includes(e.tool)) {
       open.get(key)?.steps.push(e);
     } else if (e.tool === "release_file") {
       const seq = open.get(key);

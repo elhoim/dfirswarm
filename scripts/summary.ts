@@ -18,17 +18,23 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   SENTINEL_REL,
+  hostTime,
   agentDeadPath,
   agentDonePath,
   isSharedScratch,
   leadingCommand,
   readNames,
+  supersededBy,
   type AgentBudget,
   type LedgerEntry,
   type SwarmEvent,
   type TeamRecord,
 } from "../extensions/protocol.ts";
 import { loadRunContext, readJsonFile } from "./run-record.ts";
+import { manifestMeta, verdictAnchorLine, verdictAnchorState } from "./custody.ts";
+import { gatewayRecordOf, heldRows, readReviewState, reviewLine, sourceCheckedLine, vmSpendNote, type GatewayTotals } from "./report.ts";
+import { coverageLine, coverageOf } from "./coverage.ts";
+import { readRegularText } from "./regular-file.ts";
 
 type Marker = { id: string; marker: "done" | "dead" | "none"; reason: string; at: string };
 
@@ -140,7 +146,7 @@ function resultOf(event: SwarmEvent): Record<string, unknown> {
 }
 
 export async function summarize(sandboxArg: string, options: { runsDir?: string } = {}): Promise<string> {
-  const { sandbox, run, team, budgetRaw, budget, events, sentinel, ledger, inputs } = await loadRunContext(sandboxArg, {
+  const { sandbox, runsDir, run, team, budgetRaw, budget, events, trace_unreadable, sentinel, ledger, inputs } = await loadRunContext(sandboxArg, {
     runsDir: options.runsDir,
     parseSentinel: parseFrontMatter,
   });
@@ -155,8 +161,10 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
 
   const id = run?.id ?? team.swarm_id ?? "";
   const label = run?.label ?? "";
+  // What the trace shows the swarm naming, and the ledger's grounding in it.
+  const coverage = await coverageOf(sandbox, { events, ledger, traceUnreadable: trace_unreadable });
   const startedAt = budget?.started_at ?? events[0]?.ts ?? "";
-  const endedAt = sentinel?.at ?? events.at(-1)?.ts ?? "";
+  const endedAt = sentinel?.at ?? (events.length ? hostTime(events.at(-1)!) : "");
   const durationMs = startedAt && endedAt ? Date.parse(endedAt) - Date.parse(startedAt) : Number.NaN;
   const lines: string[] = [];
 
@@ -165,6 +173,55 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   lines.push(`- State: ${run?.state ?? "unknown (no registry entry)"} · sentinel ${sentinel ? "present" : "absent"}`);
   lines.push(`- Started: ${startedAt || "unknown"} · Duration: ${durationHuman(durationMs)}${endedAt ? ` (to ${sentinel ? "the sentinel" : "the last trace event"} at ${endedAt})` : ""}`);
   if (run?.case_id || run?.examiner) lines.push(`- Case: ${run?.case_id || "—"} · Examiner: ${run?.examiner || "—"}`);
+  // How the agents were held, and what the host could say once they were gone.
+  const iso = (run as { isolation?: { mode?: string; image?: string; image_digest?: string } } | null)?.isolation;
+  const gateway = gatewayRecordOf(run as Record<string, unknown> | null);
+  const gatewayTotalsRead = gateway ? await readRegularText(join(sandbox, "traces", "model-gateway.json"), 64 * 1024 * 1024) : null;
+  let gatewayTotals: GatewayTotals | null = null;
+  try {
+    gatewayTotals = gatewayTotalsRead && "text" in gatewayTotalsRead ? (JSON.parse(gatewayTotalsRead.text) as GatewayTotals) : null;
+  } catch {
+    gatewayTotals = null;
+  }
+  lines.push(`- Isolation: ${iso?.mode === "microvm" ? `one microVM per agent${iso.image ? ` (${iso.image}${iso.image_digest ? ` ${iso.image_digest}` : ""})` : ""}; spend ${gateway ? vmSpendNote(run as Record<string, unknown> | null, gatewayTotals).replace(/^ \(|\)$/g, "") : "is what each VM reported"}` : "host, unisolated (every agent a process on this machine)"}`);
+  if (gateway) {
+    lines.push(`- Model gateway: on for ${gateway.providers.join(", ") || "no provider"}; ${gatewayTotals ? `$${(Number(gatewayTotals.spent_usd) || 0).toFixed(2)} metered on the host` : "its totals were not found (traces/model-gateway.json)"}${gateway.declined.length ? `; ${gateway.declined.map((d) => d.provider).join(", ")} as reported by the seats` : ""}`);
+  }
+  // A removed VM whose finish could not clear msb's database of it: its
+  // secret values may still be there, on the host.
+  if (iso?.mode === "microvm") {
+    const unscrubbed: string[] = [];
+    for (const name of (await readdir(join(sandbox, "vm")).catch(() => [])).filter((n) => n.endsWith(".json")).sort()) {
+      const rec = await readRegularText(join(sandbox, "vm", name), 16 * 1024 * 1024);
+      if (!("text" in rec)) continue;
+      try {
+        const v = JSON.parse(rec.text) as { agent?: unknown; msb_db?: unknown };
+        if (typeof v.msb_db === "string" && v.msb_db !== "scrubbed" && v.msb_db !== "no database") unscrubbed.push(`${String(v.agent ?? name.replace(/\.json$/, ""))} (${v.msb_db})`);
+      } catch {
+        // a torn record is custody's to name
+      }
+    }
+    if (unscrubbed.length) lines.push(`- msb's database: NOT cleared after removing ${unscrubbed.join(", ")}; a secret's value may remain in msb's database on the host`);
+  }
+  // custody.json is read as a regular file, never through a link a host
+  // run's shell planted, and checked against the verdict anchored outside
+  // the run: a verdict edited after the stop is said to be one.
+  const custodyRead = await readRegularText(join(sandbox, "custody.json"), 256 * 1024 * 1024);
+  let custodySummary: string | null = null;
+  try {
+    custodySummary = "text" in custodyRead ? ((JSON.parse(custodyRead.text) as { summary?: string }).summary ?? null) : null;
+  } catch {
+    custodySummary = null;
+  }
+  const custodyAnchor = custodySummary ? verdictAnchorLine(await verdictAnchorState(sandbox)) : "";
+  if (custodySummary) lines.push(`- Custody: ${custodySummary}${custodyAnchor ? ` (custody.json ${custodyAnchor})` : ""}`);
+  else if ("why" in custodyRead && custodyRead.why !== "missing") lines.push(`- Custody: custody.json is ${custodyRead.why}; not read`);
+  else lines.push("- Custody: not taken (swarm.sh stop takes it)");
+  // Whether an examiner has reviewed the agents' conclusions, from the
+  // review file beside the registry.
+  const review = await readReviewState(runsDir, id, sandbox, ledger);
+  lines.push(`- Examiner review: ${reviewLine(review, ledger)}`);
+  for (const [k, v] of heldRows(run as Record<string, unknown> | null)) lines.push(`- ${k}: ${v}`);
   const flags: string[] = [];
   if (run?.model) flags.push(`model ${run.model}`);
   if (run?.catalog) flags.push("catalog");
@@ -273,7 +330,18 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
 
   // --- activity -----------------------------------------------------------
   lines.push("## Activity", "");
-  lines.push(`${events.length} trace events${events.length ? ` from ${events[0].ts} to ${events.at(-1)?.ts}` : ""}.`, "");
+  // A trace that is there and could not be read is not a run with no events.
+  if (trace_unreadable) lines.push(`The trace is there and could not be read (${trace_unreadable}): the counts below are not the run's. The host's custody check says what it found.`, "");
+  lines.push(`${events.length} trace events${events.length ? ` from ${hostTime(events[0])} to ${hostTime(events.at(-1)!)} (the host's clock where the collector stamped it)` : ""}.`, "");
+  // Operator actions run from a shell outside the run reach the collector
+  // with no pane's token: the operator's, not lines nobody can account for.
+  const operatorActions = events.filter((e) => e.tool === "operator_action");
+  if (operatorActions.length) {
+    lines.push(
+      `${operatorActions.length} operator action${operatorActions.length === 1 ? "" : "s"} on the trace (${[...new Set(operatorActions.map((e) => String((e.args as { command?: unknown } | undefined)?.command ?? "?")))].join(", ")}); each is also on runs/operator-audit.jsonl, with the OS user and host.`,
+      "",
+    );
+  }
   if (events.length) {
     const byAgent = new Map<string, SwarmEvent[]>();
     for (const e of events) {
@@ -316,11 +384,11 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
     lines.push("");
     const forged = events.filter((e) => e.tool === "make_tool" && resultOf(e).ok === true);
     if (forged.length) {
-      lines.push("Forged tools:", "");
+      lines.push("Forged tools (written by the agents during the run; not independently validated):", "");
       for (const e of forged) {
         const name = String(e.args?.name ?? "?");
         const calls = toolCount(name);
-        lines.push(`- \`${name}\` by ${e.agent} at ${e.ts} (${String(e.args?.runtime ?? "?")}; called ${calls} time${calls === 1 ? "" : "s"})`);
+        lines.push(`- \`${name}\` by ${e.agent} at ${hostTime(e)} (${String(e.args?.runtime ?? "?")}; called ${calls} time${calls === 1 ? "" : "s"})`);
       }
       lines.push("");
     }
@@ -339,10 +407,15 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
     lines.push("No ledger: nothing was recorded with `record`.", "");
   } else {
     const kinds = count(ledger, (e) => e.kind);
+    const corrected = supersededBy(ledger);
     lines.push(
-      `${ledger.length} entries: ${["event", "ioc", "finding"].map((k) => `${kinds.get(k) ?? 0} ${k === "ioc" ? "indicators" : `${k}s`}`).join(", ")} (\`ledger/ledger.md\`).`,
+      `${ledger.length} entries: ${["event", "ioc", "finding"].map((k) => `${kinds.get(k) ?? 0} ${k === "ioc" ? "indicators" : `${k}s`}`).join(", ")}${kinds.get("absence") ? `, ${kinds.get("absence")} searched and not found (valid only for the scope each states)` : ""} (\`ledger/ledger.md\`).${corrected.size ? ` ${corrected.size} corrected by a later entry, kept as recorded: ${[...corrected].map(([old, by]) => `E-${old} by E-${by}`).join(", ")}.` : ""}`,
       "",
     );
+    const ungrounded = Object.entries(coverage.grounding).filter(([, g]) => g === "not in the trace").map(([seq]) => `E-${seq}`);
+    if (!coverage.unavailable || Object.keys(coverage.grounding).length) {
+      lines.push(`Grounding: ${ungrounded.length ? `${ungrounded.length} entr${ungrounded.length === 1 ? "y's" : "ies'"} source named by no call before the entry was recorded (${ungrounded.join(", ")})` : "every entry that names a path had it named by an earlier call"}.`, "");
+    }
     const timeline: LedgerEntry[] = ledger
       .filter((e) => e.kind === "event")
       .sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? "") || a.seq - b.seq)
@@ -397,17 +470,41 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
 
   // --- custody ------------------------------------------------------------
   lines.push("## Custody", "");
+  // The host's own verdict first: what custody.json says was re-hashed,
+  // sealed and checked after the run, which no agent could write.
+  const hostCustody = await readJsonFile<{ summary?: string; at?: string; incomplete?: string | null; trace?: { spilled?: Array<{ path: string; lines: number; bad?: number }> } }>(join(sandbox, "custody.json"));
+  if (hostCustody?.summary && custodySummary) {
+    lines.push(`Host custody (taken ${hostCustody.at ?? "at an unknown time"}, \`custody.json\`${custodyAnchor ? `, which ${custodyAnchor}` : ""}): ${hostCustody.summary}`, "");
+  } else {
+    lines.push("No host custody was taken yet: what follows is what the agents said about the evidence, and `swarm.sh stop` takes the host's own verdict.", "");
+  }
   if (!inputs) {
     lines.push("No read-only inputs were given to this swarm.", "");
   } else {
+    const arrived = (inputs as { held?: string }).held === "bind"
+      ? `used in place from \`${inputs.source}\` (no copy; ${inputs.guard === "microvm" ? "mounted read-only into every VM" : "kernel guard " + inputs.guard})`
+      : (inputs as { held?: string }).held === "image"
+        ? `attached as a read-only image from \`${inputs.source}\``
+        : `copied from \`${inputs.source}\` ${inputs.copied_at || "at an unknown time"}`;
     lines.push(
-      `Inputs from \`${inputs.source}\`, copied ${inputs.copied_at || "at an unknown time"}: ${inputs.files.length} file${inputs.files.length === 1 ? "" : "s"}, ${bytesHuman(inputs.bytes)}; enforcement asked ${inputs.enforce}, kickoff guard ${inputs.guard}.`,
+      `Inputs ${arrived}: ${inputs.files.length} file${inputs.files.length === 1 ? "" : "s"}, ${bytesHuman(inputs.bytes)}; enforcement asked ${inputs.enforce}, kickoff guard ${inputs.guard}.`,
       "",
-      "| Input | Bytes | SHA-256 |",
-      "| --- | --- | --- |",
     );
-    for (const f of inputs.files) lines.push(`| \`${cell(f.path)}\` | ${f.bytes.toLocaleString("en-US")} | \`${f.sha256}\` |`);
+    // sha1 and md5 beside sha256 when the kickoff took them: the digests an
+    // imager's log carries.
+    const dig = (f: unknown) => f as { sha1?: string; md5?: string };
+    const withSha1 = inputs.files.some((f) => typeof dig(f).sha1 === "string");
+    const withMd5 = inputs.files.some((f) => typeof dig(f).md5 === "string");
+    lines.push(
+      `| Input | Bytes | SHA-256 |${withSha1 ? " SHA-1 |" : ""}${withMd5 ? " MD5 |" : ""}`,
+      `| --- | --- | --- |${withSha1 ? " --- |" : ""}${withMd5 ? " --- |" : ""}`,
+    );
+    for (const f of inputs.files) {
+      lines.push(`| \`${cell(f.path)}\` | ${f.bytes.toLocaleString("en-US")} | \`${f.sha256}\` |${withSha1 ? ` \`${dig(f).sha1 ?? "—"}\` |` : ""}${withMd5 ? ` \`${dig(f).md5 ?? "—"}\` |` : ""}`);
+    }
     lines.push("");
+    const sourceCheck = sourceCheckedLine((await manifestMeta(sandbox))?.source_checked);
+    if (sourceCheck) lines.push(`${sourceCheck.charAt(0).toUpperCase()}${sourceCheck.slice(1)}.`, "");
     const checks = events.filter((e) => e.tool === "inputs_check");
     if (checks.length) {
       lines.push("| Inputs check | By | Result |", "| --- | --- | --- |");
@@ -423,7 +520,7 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
         // `ok` is the only answer there is.
         const contentOk = r.content_ok === undefined ? r.ok === true : r.content_ok === true;
         const verdict = r.ok === true ? "intact" : contentOk ? `bytes intact, ${metadata} held differently` : "CHANGED";
-        lines.push(`| ${e.ts} | ${e.agent} | ${verdict}: ${String(r.checked ?? 0)} checked, ${modified} modified, ${missing} missing, ${added} added |`);
+        lines.push(`| ${hostTime(e)} | ${e.agent} | ${verdict}: ${String(r.checked ?? 0)} checked, ${modified} modified, ${missing} missing, ${added} added |`);
       }
       lines.push("");
     } else {
@@ -436,6 +533,7 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
     lines.push(`Toolbox (${toolbox.preset ?? "?"}): ${present.length} present${present.length ? ` — ${present.join(", ")}` : ""}; ${missing.length} missing${missing.length ? ` — ${missing.join(", ")}` : ""}.`, "");
   }
   if (catalogSummary) lines.push(`Evidence catalog: ${catalogSummary}.`, "");
+  if (inputs) lines.push(`Coverage: ${coverageLine(coverage)}`, "");
 
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }

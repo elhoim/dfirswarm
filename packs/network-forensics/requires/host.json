@@ -7,7 +7,7 @@
       "why": "Turn a capture into structured logs per protocol \u2014 conn, dns, http, ssl, files \u2014 which is the form every later question wants.",
       "install": {
         "brew": "brew install zeek",
-        "apt": "apt-get install -y zeek"
+        "apt": "https://software.opensuse.org/download.html?project=security%3Azeek&package=zeek (the Zeek project's own packages: zeek is in neither Debian's nor Ubuntu's archive)"
       },
       "licence": "BSD-3-Clause",
       "redistributable": false
@@ -43,7 +43,7 @@
       "why": "Run a signature set over a capture. GPL-2.0-only, so it is invoked as an executable and never imported.",
       "install": {
         "brew": "brew install suricata",
-        "apt": "apt-get install -y suricata"
+        "apt": "not in Debian 12's main archive: apt-get install -t bookworm-backports suricata, once bookworm-backports is a source (Debian 13 and Ubuntu carry it as suricata)"
       },
       "licence": "GPL-2.0-only",
       "redistributable": false

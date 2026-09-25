@@ -37,6 +37,10 @@
   },
   "runtime": "python3",
   "entry": "run.py",
+  "requires": [
+    "img_stat",
+    "img_cat"
+  ],
   "timeout_seconds": 120,
   "by": "s5d1001",
   "at": "2026-09-18T18:56:41.306Z",

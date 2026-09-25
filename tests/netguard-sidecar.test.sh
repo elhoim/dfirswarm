@@ -2,11 +2,19 @@
 # A second start --sandbox DIR must not keep the previous proxy allowlist or
 # a leftover idle-nudge after overwriting the pid file.
 set -euo pipefail
+# This suite tests host runs, and a run is in microVMs unless it says
+# otherwise: it names host. An image, a lock file or another pack home
+# exported in the shell would point its kickoffs somewhere else.
+unset SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
+export SWARM_ISOLATION=host
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/netguard-sidecar.XXXXXX")"
+# The VM hubs' directory is the suite's own (a kickoff makes it for its pane
+# guard), never the operator's ~/.dfirswarm/hubs.
+export SWARM_HUBS_DIR="$TMP/dfirswarm-hubs"
 NG_PID=""
 NG2_PID=""
 cleanup() {
@@ -29,13 +37,18 @@ eval "$(sed -n '/^start_netguard_sidecar()/,/^}/p' "$ROOT/scripts/swarm.sh")"
 [[ "$(type -t detach_exec)" == function ]] || fail "detach_exec missing from swarm.sh"
 
 mkdir -p "$TMP/sb/traces" "$TMP/runs"
-# Leftover daemons from a previous run in this directory.
-sleep 3600 &
+# Leftover daemons from a previous run in this directory. stop ends a daemon
+# only when its command line is that daemon's for this sandbox (a pid file
+# can name any process after a reboot), so these look like the run's own:
+# its netguard with its log, its idle watchdog with its sandbox, by the
+# resolved path, as the kickoff resolves the sandbox.
+SBR="$(cd "$TMP/sb" && pwd -P)"
+bash -c "exec -a 'bash netguard.sh --mode proxy-only --log $SBR/traces/netguard.log' sleep 3600" >/dev/null 2>&1 &
 old_ng=$!
 echo "$old_ng" > "$TMP/sb/netguard.pid"
 echo 43178 > "$TMP/sb/netguard.port"
 echo "old.example" > "$TMP/sb/netguard.allow"
-sleep 3600 &
+bash -c "exec -a 'bash idle-nudge.sh --sandbox $SBR' sleep 3600" >/dev/null 2>&1 &
 old_idle=$!
 echo "$old_idle" > "$TMP/sb/idle-nudge.pid"
 kill -0 "$old_ng" && kill -0 "$old_idle" || fail "fixture daemons did not start"

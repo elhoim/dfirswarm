@@ -27,8 +27,30 @@ async function collectorOn(root: string): Promise<string> {
   const proc = spawn("node", [join(ROOT, "scripts", "trace-collector.mjs"), root, "--quiet"], { stdio: "ignore" });
   started.push(proc);
   const socket = join(root, COLLECTOR_SOCKET_REL);
-  for (let i = 0; i < 80; i += 1) {
-    if (await stat(socket).then((s) => s.isSocket()).catch(() => false)) return socket;
+  return collectorUp(socket);
+}
+
+/**
+ * The collector's socket once it accepts a connection, not merely once the
+ * file exists: the file appears at bind, before listen, and a connect in
+ * between is ECONNREFUSED (a CI run of the torn-append test, cb2f0be). The
+ * probe sends nothing. A path past the kernel's limit cannot be dialled
+ * from here as it is, so there the file is what is waited for.
+ */
+async function collectorUp(socket: string): Promise<string> {
+  const accepts = () =>
+    new Promise<boolean>((resolve) => {
+      const s = connect(socket);
+      s.on("connect", () => {
+        s.destroy();
+        resolve(true);
+      });
+      s.on("error", () => resolve(false));
+    });
+  const dialable = Buffer.byteLength(socket) < 100;
+  for (let i = 0; i < 200; i += 1) {
+    const there = await stat(socket).then((st) => st.isSocket()).catch(() => false);
+    if (there && (!dialable || (await accepts()))) return socket;
     await new Promise((r) => setTimeout(r, 25));
   }
   throw new Error("the collector did not come up");
@@ -286,11 +308,7 @@ async function collectorWithTokens(root: string, map: Record<string, unknown>, a
   const line = typeof map.tokens === "object" && map.tokens !== null ? map : { tokens: map, gate: "" };
   proc.stdin?.end(JSON.stringify(line));
   const socket = join(root, COLLECTOR_SOCKET_REL);
-  for (let i = 0; i < 80; i += 1) {
-    if (await stat(socket).then((s) => s.isSocket()).catch(() => false)) return socket;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  throw new Error("the collector did not come up");
+  return collectorUp(socket);
 }
 
 function sendRaw(socket: string, payload: unknown): Promise<void> {
@@ -382,13 +400,18 @@ test("with a gate in front, a token attributes only on a line the gate vouched f
   await sendRaw(socket, { ts: "t2", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "tok-a1", gate: "k-0123" });
   // a guessed key
   await sendRaw(socket, { ts: "t3", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "tok-a0", gate: "k-9999" });
-  await new Promise((r) => setTimeout(r, 150));
 
-  const written = (await readFile(join(root, "traces", "events.jsonl"), "utf8"))
-    .trim()
-    .split("\n")
-    .map((l) => JSON.parse(l));
-  assert.equal(written.length, 3);
+  // Waited for, not slept on: a fixed 150 ms was short on a loaded CI
+  // runner. Three connections may land in any order; each line is found by
+  // its own ts.
+  let lines: Record<string, unknown>[] = [];
+  for (let i = 0; i < 100 && lines.length < 3; i++) {
+    await new Promise((r) => setTimeout(r, 50));
+    const text = await readFile(join(root, "traces", "events.jsonl"), "utf8").catch(() => "");
+    lines = text.trim() ? text.trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>) : [];
+  }
+  assert.equal(lines.length, 3);
+  const written = ["t1", "t2", "t3"].map((ts) => lines.find((l) => l.ts === ts) as Record<string, unknown>);
   assert.equal(written[0].agent_unverified, true, "a token without the gate's key does not attribute");
   assert.equal(written[1].agent, "a1", "the gate's token decides, whatever the body claims");
   assert.equal(written[1].claimed_agent, "a0");

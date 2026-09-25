@@ -104,11 +104,36 @@ table_lock() {
 }
 table_unlock() { rm -rf "$TABLE_LOCK"; }
 
+# The hub directory a sandbox names, if it is one the harness made: under
+# the hubs' parent, which no pane can write. hub.dir itself is only
+# tool-protected, and a pane that wrote it a path to its own status.json
+# would never be reaped. The parent is swarm.sh's hubs_parent: one per user,
+# whatever this process's TMPDIR, and only a directory of this user's own.
+hub_dir_of() { # <sandbox>
+  local dir parent
+  [[ -f "$1/hub.dir" ]] || return 1
+  dir="$(cat "$1/hub.dir" 2>/dev/null || true)"
+  parent="${SWARM_HUBS_DIR:-${DFIRSWARM_HOME:-$HOME/.dfirswarm}/hubs}"
+  [[ -d "$parent" && ! -L "$parent" && -O "$parent" ]] || return 1
+  parent="$(cd "$parent" 2>/dev/null && pwd -P)" || return 1
+  [[ -n "$dir" && "$dir" == "$parent"/dfs-* && "$dir" != *..* && -d "$dir" ]] || return 1
+  # Made for this sandbox (the kickoff wrote which), not another run's.
+  [[ "$(cat "$dir/sandbox" 2>/dev/null)" == "$(cd "$1" 2>/dev/null && pwd -P)" ]] || return 1
+  printf '%s\n' "$dir"
+}
+
 # A long `vol` / `fls` writes nothing to the session or the trace until it
 # returns. Herdr already knows the pane is working; idle-nudge.sh asks it
 # before nudging, and the reaper must ask before declaring the seat dead.
 agent_working() {
-  local id="$1" status
+  local id="$1" status hub
+  # An agent in a microVM is not a Herdr agent: its pane runs `msb exec`. Its
+  # own extension reports working/idle to the hub, which writes status.json.
+  if hub="$(hub_dir_of "$SANDBOX")"; then
+    status="$(jq -r --arg id "$id" '.agents[$id].state // empty' "$hub/status.json" 2>/dev/null || true)"
+    [[ "$status" == "working" ]]
+    return
+  fi
   status="$("$HERDR" agent get "$id" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)"
   [[ "$status" == "working" ]]
 }
@@ -196,6 +221,14 @@ EOF
       # pane_id anywhere in the result.
       local pane
       pane="$(herdr agent get "$id" 2>/dev/null | jq -r '[.. | objects | .pane_id? // empty] | first // empty' 2>/dev/null || true)"
+      # A microVM agent's pane is not known to Herdr as an agent; layout.json
+      # says which pane is whose. Closing it ends the `msb exec`, and `stop`
+      # puts the VM away.
+      if [[ -z "$pane" && -f "$SANDBOX/hub.dir" && -f "$SANDBOX/layout.json" ]]; then
+        local idx
+        idx="$(jq -r --arg id "$id" '[.agents[].id] | index($id) // empty' "$SANDBOX/team.json" 2>/dev/null || true)"
+        [[ -n "$idx" ]] && pane="$(jq -r --argjson i "$idx" '.panes[$i] // empty' "$SANDBOX/layout.json" 2>/dev/null || true)"
+      fi
       if [[ -n "$pane" ]] && herdr pane close "$pane" >/dev/null 2>&1; then
         log "  herdr pane close $pane ($id): ok"
       else
@@ -204,8 +237,23 @@ EOF
     else
       log "  herdr not installed; skipping pane close"
     fi
+    # A microVM agent's VM outlives its pane: put it away as stop would (its
+    # disk kept), so a reaped seat holds no VM and the hub serves nobody.
+    local run_id
+    run_id="$(jq -r '.run // empty' "$SANDBOX/vm/$id.json" 2>/dev/null || true)"
+    if [[ -n "$run_id" ]] && hub_dir_of "$SANDBOX" >/dev/null; then
+      if node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" finish --run "$run_id" --sandbox "$SANDBOX" --agent "$id" \
+          ${SWARM_REGISTRY:+--registry "$SWARM_REGISTRY"} >>"$SANDBOX/traces/vm-finish.log" 2>&1; then
+        log "  VM of $id put away (disk kept)"
+      else
+        log "  VM of $id: finish failed; see traces/vm-finish.log"
+      fi
+    fi
   fi
   echo "reaped $id (idle ${idle}s, released ${released} lock(s)) -> done/agents/$id.dead"
+  # The operator's notify command, when the run has one.
+  SWARM_RUNS_DIR="${SWARM_RUNS_DIR:-${SWARM_REGISTRY:+$(dirname "$SWARM_REGISTRY")}}" \
+    bash "$ROOT/scripts/notify.sh" "$SANDBOX" agent_dead "$(jq -nc --arg a "$id" --argjson idle "$idle" '{agent: $a, idle_seconds: $idle, reason: "stall"}')" >/dev/null 2>&1 </dev/null || true
 }
 
 reaped=0
@@ -227,7 +275,7 @@ while IFS= read -r id; do
   fi
   if (( idle > TIMEOUT )); then
     if agent_working "$id"; then
-      log "work $id: idle ${idle}s but herdr says working; leaving alone"
+      log "work $id: idle ${idle}s but $(hub_dir_of "$SANDBOX" >/dev/null && echo "its VM's extension" || echo herdr) says working; leaving alone"
       continue
     fi
     if [[ "$DRY_RUN" -eq 1 ]]; then

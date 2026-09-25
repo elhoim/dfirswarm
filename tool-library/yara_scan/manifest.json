@@ -17,6 +17,9 @@
   },
   "runtime": "python3",
   "entry": "run.py",
+  "requires": [
+    "yara"
+  ],
   "timeout_seconds": 120,
   "example": "{\"rules\": \"work/rules/webshells.yar\", \"target\": \"work/extracted\"}",
   "by": "maintainer",

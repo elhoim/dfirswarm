@@ -22,6 +22,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,53 +36,30 @@ import {
   agentDeadPath,
   agentDonePath,
   finishLineVerdict,
+  runFinishLine,
   classifyTurnError,
   CAP_STEER,
   TOKEN_CAP_STEER,
   overCap,
   STOP_GRACE_MS,
   appendEvent,
-  applySessionUsage,
   budgetPressure,
-  claimFile,
-  clearStopSteer,
   createContext,
   diffWatchedPaths,
   extractWritePath,
-  fileDiff,
-  guardWrite,
-  harnessStop,
   inboxLogResult,
   keepToolOutputFromFile,
   toolOutputRel,
   type FullOutputRef,
-  listClaims,
-  listFileHistory,
-  listTeam,
-  markDone,
-  markStopSteer,
-  postMessage,
-  readBudget,
-  readBudgetStatus,
-  readInbox,
-  recordFileVersion,
-  releaseAllOwned,
-  releaseFile,
   resolveAgentId,
-  restoreFileVersion,
   shortHash,
   stopNetguardSidecarIfOver,
   summarizeArgs,
-  swarmDoneExists,
-  systemPost,
-  threadJoin,
-  threadOpen,
   toolText,
   usageFromSessionEntries,
-  waitForSwarmChange,
-  forgeTool,
-  listForgedTools,
   runForgedTool,
+  packSecretsFor,
+  redactSecrets,
   healInputs,
   type InputsHeal,
   readInputsManifest,
@@ -89,8 +67,6 @@ import {
   INPUTS_DIR,
   agentPressure,
   modelPressure,
-  listLedger,
-  recordEntry,
   LEDGER_KINDS,
   LEDGER_CONFIDENCE,
   LEDGER_MD,
@@ -108,15 +84,56 @@ import {
   type SwarmContext,
   type WatchSnapshot,
   isOwnScratch,
+  realPathKey,
+  nudgePeerViaBroker,
+  postSender,
+} from "./protocol.ts";
+// The board: protocol.ts on the host, the hub on the other side of a VM's wall (board.ts says why).
+import {
+  applySessionUsage,
+  claimFile,
+  clearStopSteer,
+  fileDiff,
+  guardWrite,
+  harnessStop,
+  listClaims,
+  listFileHistory,
+  listTeam,
+  markDone,
+  markStopSteer,
+  postMessage,
+  publishFile,
+  readBudget,
+  readBudgetLive,
+  readBudgetStatus,
+  readInbox,
+  recordFileVersion,
+  releaseAllOwned,
+  releaseFile,
+  restoreFileVersion,
+  swarmDoneExists,
+  systemPost,
+  threadJoin,
+  threadOpen,
+  waitForSwarmChange,
+  forgeTool,
+  forgedToolSeal,
+  listForgedTools,
+  listLedger,
+  recordEntry,
   heldBy,
   claimName,
   correctionsAfter,
   nameOf,
   readNames,
-  nudgePeerViaBroker,
-} from "./protocol.ts";
+  updateToolchainRecord,
+  boardSocket,
+  openHubLink,
+  type HubLink,
+} from "./board.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
-import { newPackages, readToolchain, TOOLCHAIN_DIR, TOOLCHAIN_REL, type ToolchainRecord } from "./toolchain.ts";
+import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
+import { installChunkedEgress } from "./vm-egress.ts";
 
 type ToolCtx = { cwd: string };
 
@@ -232,6 +249,31 @@ export function isPeersScratch(pathKey: string, agentId: string, peers?: Readonl
 
 export { leadingCommand } from "./protocol.ts";
 
+/**
+ * A shell command that took this long and left its whole output under
+ * tool-output/ is not worth running again: the second run is told where the
+ * first one's output is (SWARM_REPEAT_HINT_MIN_MS overrides, in ms).
+ */
+export const REPEAT_HINT_MIN_MS = 60_000;
+
+export function repeatHintMinMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SWARM_REPEAT_HINT_MIN_MS);
+  return Number.isFinite(n) && n >= 0 && env.SWARM_REPEAT_HINT_MIN_MS !== "" && env.SWARM_REPEAT_HINT_MIN_MS !== undefined ? n : REPEAT_HINT_MIN_MS;
+}
+
+/** The same command, whatever its spacing: what the repeat hint compares. Not its meaning. */
+export function normalizeShellCommand(command: string): string {
+  return command.trim().replace(/\s+/g, " ");
+}
+
+/** A long shell call whose whole output was kept: how long it ran and where the output is. */
+export type KeptRun = { ms: number; path: string };
+
+/** What the second run of a long command is told, once, with its own output. */
+export function repeatHintText(run: KeptRun): string {
+  return `Note from the harness: this same command ran for ${Math.round(run.ms / 1000)} s earlier in this session, and its whole output is kept at ${run.path}. Next time, grep or read that file instead of running the command again.`;
+}
+
 function ctxFrom(cwd: string, agentId?: string): SwarmContext {
   return createContext(cwd, agentId ?? resolveAgentId());
 }
@@ -249,7 +291,40 @@ function okResult(payload: unknown, extra: { terminate?: true } = {}) {
   };
 }
 
-async function logEvent(
+/** How long a VM's seat goes on without its hub: told after the first, stopped after the second. */
+export const HUB_LOST_STEER_MS = 60_000;
+export const HUB_LOST_STOP_MS = 4 * 60_000;
+export type HubLostState = { since: number; told: boolean };
+
+/**
+ * One check of the hub from a VM's seat: back, it forgets; lost for a
+ * minute, the agent is told once; lost for four, the seat is stopped. A seat
+ * with no hub has no record and no brake, and does not go on as if it had.
+ */
+export function hubLostStep(state: HubLostState, ok: boolean, now: number): { state: HubLostState; steer: boolean; stop: boolean } {
+  if (ok) return { state: { since: 0, told: false }, steer: false, stop: false };
+  const since = state.since || now;
+  const lost = now - since;
+  const steer = lost >= HUB_LOST_STEER_MS && !state.told;
+  return { state: { since, told: state.told || steer }, steer, stop: lost >= HUB_LOST_STOP_MS };
+}
+
+/**
+ * Lines this process could put neither on the chain nor in its spill. The
+ * tool call goes on — a record that cannot be written must not stop the
+ * work — but the loss is not silent: the next line that is written says how
+ * many went before it (custody adds them up), and the pane's stderr says so
+ * at once. A loss at the very end of a run, with no later line, is what
+ * custody's per-sender gaps and a missing last line are left to show.
+ */
+let traceLinesLost = 0;
+
+/** How many trace lines were lost and not yet told on a later line (tests read it). */
+export function traceLinesLostCount(): number {
+  return traceLinesLost;
+}
+
+export async function logEvent(
   cwd: string,
   agentId: string,
   tool: string,
@@ -257,18 +332,30 @@ async function logEvent(
   result: unknown,
   durationMs?: number,
 ): Promise<void> {
+  // Taken, not read: two lines written at once (a tool's call and its
+  // result, parallel tools) must not both carry the same count, which
+  // custody would add up twice.
+  const lost = traceLinesLost;
+  traceLinesLost = 0;
   try {
     await appendEvent(cwd, {
       agent: agentId || "unknown",
       tool,
-      args: summarizeArgs(args),
+      args: { ...summarizeArgs(args), ...(lost ? { trace_lines_lost_before: lost } : {}) },
       result:
         durationMs === undefined || result === null || typeof result !== "object"
           ? result
           : { ...(result as Record<string, unknown>), duration_ms: durationMs },
     });
-  } catch {
-    // observability must not break the protocol
+  } catch (err) {
+    // observability must not break the protocol, and must not go quiet
+    // either: this line and the count it carried go to the next one.
+    traceLinesLost += lost + 1;
+    try {
+      process.stderr.write(`dfirswarm: a trace line (${tool}) reached neither the collector nor the spill: ${err instanceof Error ? err.message : String(err)}\n`);
+    } catch {
+      // no stderr either
+    }
   }
 }
 
@@ -281,6 +368,9 @@ function entriesFrom(ctx: { sessionManager?: { getEntries?: () => unknown[] } })
 }
 
 export default function (pi: ExtensionAPI) {
+  // In a VM, before Pi's first model call: a body to a host msb swaps a
+  // credential in for goes chunked (vm-egress.ts says why).
+  installChunkedEgress();
   let agentId = process.env.AGENT_ID?.trim() ?? "";
   /** Start times per tool call, so every trace row can carry its duration. */
   const toolStarts = new Map<string, number>();
@@ -289,6 +379,8 @@ export default function (pi: ExtensionAPI) {
   /** Limits this process has already steered on; the clock itself is shared. */
   const steeredHere = new Set<string>();
   let capTimer: ReturnType<typeof setInterval> | null = null;
+  /** The hub's link, when this agent lives in a microVM; null on the host. */
+  let hubLink: HubLink | null = null;
   /** Forged tools: on when the spawner said so (see the block near the end). */
   const forging = process.env.SWARM_TOOL_FORGING === "1";
   /**
@@ -304,6 +396,9 @@ export default function (pi: ExtensionAPI) {
   /** Leading word of each bash command this agent ran, counted for the forge hint. */
   const bashCommandCounts = new Map<string, number>();
   const forgeHinted = new Set<string>();
+  /** Long shell calls whose whole output is kept, by command (normalizeShellCommand), and the ones already pointed back. */
+  const longRuns = new Map<string, KeptRun>();
+  const repeatHinted = new Set<string>();
   /** When this agent was steered for its own cap, if it was. */
   let agentCapSteeredAt: number | null = null;
   /** The watch outgrowing work/ is said once per session, not per shell call. */
@@ -382,8 +477,34 @@ export default function (pi: ExtensionAPI) {
     budget: BudgetRecord,
     ctx: { shutdown?: () => void },
   ): Promise<void> {
-    await enforceStops(cwd, budget, ctx);
+    // In a microVM the swarm's stop is the hub's, from outside: the clock
+    // and the sentinel are not this process's to move, and the hub does not
+    // take those calls from a VM (scripts/vm-hub.ts). This seat's own cap is
+    // still its own to honour.
+    if (!boardSocket()) await enforceStops(cwd, budget, ctx);
     await enforceAgentCap(cwd, budget, ctx);
+  }
+
+  /**
+   * In a microVM the hub is the board, the trace's door and the stop. A hub
+   * that cannot be reached leaves this seat with no record and no brake, so
+   * it does not go on as if it had one: told once, then stopped, unless the
+   * hub is back (the watchdog restarts it).
+   */
+  let hubLost: HubLostState = { since: 0, told: false };
+  async function hubReachable(cwd: string, ctx: { shutdown?: () => void }, ok: boolean): Promise<void> {
+    if (!boardSocket()) return;
+    const step = hubLostStep(hubLost, ok, Date.now());
+    hubLost = step.state;
+    if (step.steer) {
+      steer("The harness hub cannot be reached from this VM: nothing you post or record lands, and no cap is enforced. Stop tool calls and wait; if it is not back within three minutes this seat is stopped.");
+      await logEvent(cwd, agentId, "hub_lost", {}, { since: new Date(hubLost.since).toISOString() }).catch(() => undefined);
+    }
+    if (step.stop && typeof ctx.shutdown === "function") {
+      stoppedByHarness = "hub_unreachable";
+      await logEvent(cwd, agentId, "hub_lost_stop", {}, { since: new Date(hubLost.since).toISOString() }).catch(() => undefined);
+      ctx.shutdown();
+    }
   }
 
   /**
@@ -598,7 +719,8 @@ export default function (pi: ExtensionAPI) {
     if (!agentId) return;
     if (Date.now() - lastStopCheck < STOP_CHECK_INTERVAL_MS) return;
     lastStopCheck = Date.now();
-    const budget = await readBudget(cwd).catch(() => null);
+    const budget = await readBudgetLive(cwd).catch(() => null);
+    await hubReachable(cwd, ctx, budget !== null);
     if (budget) await enforceAllCaps(cwd, budget, ctx).catch(() => undefined);
   }
 
@@ -611,7 +733,8 @@ export default function (pi: ExtensionAPI) {
     if (capTimer) return;
     capTimer = setInterval(() => {
       void (async () => {
-        const budget = await readBudget(ctx.cwd).catch(() => null);
+        const budget = await readBudgetLive(ctx.cwd).catch(() => null);
+        await hubReachable(ctx.cwd, ctx, budget !== null);
         if (budget) await enforceAllCaps(ctx.cwd, budget, ctx).catch(() => undefined);
       })();
     }, STOP_CHECK_INTERVAL_MS);
@@ -632,6 +755,30 @@ export default function (pi: ExtensionAPI) {
     await logEvent(ctx.cwd, agentId, "agent_start", {}, { ok: true });
     await logInputsGuard(ctx.cwd);
     watchCaps(ctx);
+    // In a microVM the harness can neither type into this pane nor read its
+    // screen — the pane runs `msb exec`, and Herdr sees only that. The hub
+    // keeps a link instead: its prompts arrive here as user messages, and
+    // this agent's working/idle state goes back up it (board.ts).
+    const hubSocket = boardSocket();
+    if (hubSocket && !hubLink) {
+      const cwd = ctx.cwd;
+      hubLink = openHubLink(hubSocket, (message) => {
+        try {
+          pi.sendUserMessage(message.text, { deliverAs: message.deliver ?? "followUp" });
+        } catch {
+          steer(message.text);
+        }
+        void logEvent(cwd, agentId, "hub_prompt", { kind: message.kind ?? "prompt" }, { ok: true });
+      });
+    }
+  });
+
+  pi.on("agent_start", async () => {
+    hubLink?.state("working");
+  });
+
+  pi.on("agent_end", async () => {
+    hubLink?.state("idle");
   });
 
   /**
@@ -699,6 +846,30 @@ export default function (pi: ExtensionAPI) {
     const check = await verifyInputs(cwd).catch(() => null);
     if (!check || check.ok) return;
     const content = [...check.modified, ...check.missing, ...check.added];
+    const held = (await readInputsManifest(cwd).catch(() => null))?.held;
+    if (boardSocket() || held === "bind") {
+      // Evidence held in place (a VM's read-only mount, or --inputs-bind):
+      // there is no pristine copy to heal from, and nothing in this pane
+      // wrote it. What the check sees changed is a change on the host, and
+      // it is said as that — once per path — for the host's custody to
+      // confirm or not.
+      const fresh = content.filter((p) => {
+        const last = metadataReportedAt.get(p) ?? 0;
+        if (Date.now() - last < METADATA_QUIET_MS) return false;
+        metadataReportedAt.set(p, Date.now());
+        return true;
+      });
+      for (const path of fresh) {
+        await logEvent(cwd, agentId, "inputs_violation", { tool: via, path }, { blocked: false, detected: true, kind: "content", via, healed: "none", held: held ?? "bind" });
+      }
+      if (fresh.length) {
+        await systemPost(cwd, {
+          tag: "veto",
+          body: `INPUTS CHANGED: ${fresh.join(", ")} no longer match the manifest, seen from ${agentId}'s ${boardSocket() ? "VM" : "pane"}. The evidence is held in place, read-only to every agent, so this is a change on the host or in the source, not in any pane; there is no pristine copy to restore. Stop relying on those files and say so in the report; the host's custody check at stop is the verdict.`,
+        }).catch(() => undefined);
+      }
+      return;
+    }
     const healed = await healInputs(cwd, [...content, ...check.metadata]);
     const contentSet = new Set(content);
     for (const heal of healed) {
@@ -764,15 +935,11 @@ export default function (pi: ExtensionAPI) {
     if (Date.now() - lastToolchainAt < TOOLCHAIN_INTERVAL_MS) return;
     lastToolchainAt = Date.now();
     try {
-      const record = await readToolchain(cwd);
-      const file = join(cwd, TOOLCHAIN_REL);
-      const before = await readFile(file, "utf8")
-        .then((text) => JSON.parse(text) as ToolchainRecord)
-        .catch(() => null);
-      const fresh = newPackages(before, record);
-      if (!before || fresh.length || before.packages.length !== record.packages.length) {
-        await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, "utf8");
-      }
+      // In a VM the prefix is the seat's own disk, which the host cannot
+      // read: the inventory is taken here and sent to the hub.
+      const { fresh } = boardSocket() && process.env.SWARM_TOOLCHAIN
+        ? await updateToolchainRecord(cwd, { agent: agentId, inventory: await readToolchainAt(process.env.SWARM_TOOLCHAIN) })
+        : await updateToolchainRecord(cwd);
       for (const pkg of fresh) {
         await logEvent(cwd, agentId, "toolchain", { name: pkg.name, version: pkg.version }, {
           ok: true,
@@ -893,30 +1060,52 @@ export default function (pi: ExtensionAPI) {
    * operator's checks from the registry, by scripts/await-done.sh. Null when
    * the runner itself could not answer; the verdict then proceeds unchecked.
    */
-  async function runFinishLine(cwd: string): Promise<FinishLineRun | null> {
-    const script = fileURLToPath(new URL("../scripts/await-done.sh", import.meta.url));
-    return new Promise((resolve) => {
-      execFile(
-        "bash",
-        [script, "--sandbox", cwd, "--checks-json", "--check-timeout", "120"],
-        { cwd, timeout: 15 * 60_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, CHECKS_SOURCE: "done" } },
-        (err, stdout) => {
-          try {
-            const parsed = JSON.parse(String(stdout || "").trim().split("\n").pop() || "") as FinishLineRun;
-            if (typeof parsed.total === "number" && Array.isArray(parsed.checks)) return resolve(parsed);
-          } catch {
-            /* fall through */
-          }
-          resolve(err ? { total: 0, passed: 0, checks: [], error: String(err.message || err).slice(0, 200) } : null);
-        },
-      );
-    });
-  }
-
   /** The provider error this session has already reported, so it says it once. */
   let providerErrorTold = "";
   /** Set when the harness itself stops this agent, so the abort that follows is not blamed on the provider. */
   let stoppedByHarness: string | null = null;
+
+  /**
+   * The caps, before each model call. Spend is folded in at the end of a
+   * turn and the stops were acted on at the next tool result or timer tick,
+   * so a seat past its grace period, or one whose swarm the sentinel ended,
+   * could still make the call it was about to. Here the caps are taken just
+   * before the call (a first breach is steered as ever, and its grace period
+   * runs), and a seat that is to stop is stopped before the call goes out:
+   * the turn is aborted and the session shut down, with the same outcome as
+   * the stop it replaces (its done file, its trace line) and a
+   * `budget_precall_stop` line saying it was taken here.
+   *
+   * On the host this is the brake. In a microVM this hook runs in the guest,
+   * under the agent's own root, and is advisory like the rest of the
+   * extension: the hub's cap stop (scripts/vm-hub.ts, seatBackstop) and its
+   * wall clock are the brakes the host holds.
+   */
+  let precallStopped = false;
+  pi.on("context", async (_event, ctx) => {
+    if (!agentId || precallStopped) return;
+    // A VM whose hub is down has no budget or sentinel to read; the lost-hub
+    // steer and stop (hubReachable) handle it, and a call must not wait out
+    // two timeouts first.
+    if (boardSocket() && hubLost.since) return;
+    const cwd = ctx.cwd;
+    // The short deadline: a dead link is replaced, not waited on for two minutes before every model call.
+    const budget = await readBudgetLive(cwd).catch(() => null);
+    if (budget) await enforceAllCaps(cwd, budget, ctx).catch(() => undefined);
+    const sentinel = !stoppedByHarness && (await swarmDoneExists(cwd).catch(() => false));
+    if (!stoppedByHarness && !sentinel) return;
+    precallStopped = true;
+    if (sentinel) {
+      // As the tool-call hook does once the sentinel stands: this seat's
+      // done file, its leases released, and the process ended.
+      const result = await markDone(ctxFrom(cwd, agentId), { reason: "sentinel_present", outputFile: "(stopped after the sentinel)" }).catch(() => null);
+      await logEvent(cwd, agentId, "agent_stop", { reason: "sentinel_present" }, { ok: true, via: "precall", created_sentinel: result?.created_sentinel ?? false }).catch(() => undefined);
+      stoppedByHarness = "sentinel_present";
+    }
+    await logEvent(cwd, agentId, "budget_precall_stop", { reason: stoppedByHarness }, { ok: true, brake: boardSocket() ? "advisory (in the VM; the hub holds the brake)" : "host" }).catch(() => undefined);
+    ctx.abort();
+    ctx.shutdown();
+  });
 
   /**
    * A turn that ends in a provider error ends the agent, and used to end it in
@@ -983,9 +1172,13 @@ export default function (pi: ExtensionAPI) {
         // best-effort reap
       }
       await logStop(ctx.cwd, "shutdown");
-      // The last agent out ends the egress proxy this swarm was given.
-      await stopNetguardSidecarIfOver(ctx.cwd).catch(() => false);
+      // The last agent out ends the egress proxy this swarm was given. A VM
+      // has none: its pid file would name a process on the host.
+      if (!boardSocket()) await stopNetguardSidecarIfOver(ctx.cwd).catch(() => false);
     }
+    hubLink?.state("idle", "session ended");
+    hubLink?.close();
+    hubLink = null;
   });
 
   // Layer B: harness blocks edit/write without a live claim.
@@ -1037,7 +1230,7 @@ export default function (pi: ExtensionAPI) {
       if (callId) {
         try {
           const command = (event as { input?: { command?: unknown } }).input?.command;
-          const snapshot = await watchedPathHashes(ctx.cwd);
+          const snapshot = await watchedPathHashes(ctx.cwd, agentId);
           bashSnapshots.set(callId, { at: Date.now(), snapshot, command: typeof command === "string" ? command : "" });
           if (snapshot.truncated) await reportWatchTruncated(ctx.cwd);
         } catch {
@@ -1063,6 +1256,16 @@ export default function (pi: ExtensionAPI) {
         reason: "edit/write missing path",
       });
       return { block: true, reason: "claim violation: edit/write missing path" };
+    }
+    if (boardSocket()) {
+      // In a VM the shared part of work/ is read-only: a deliverable is put
+      // there through publish_file. Said before the write fails with EROFS.
+      const key = await realPathKey(ctx.cwd, path).catch(() => "");
+      if (key.startsWith("work/") && !isOwnScratch(key, agentId) && !isSharedScratch(key)) {
+        const reason = `${key} is in the shared part of work/, which is read-only in your VM. Write it under work/${agentId}/ and call publish_file(path, to: "${key}"); it is claimed for you and recorded.`;
+        await logEvent(ctx.cwd, agentId, "publish_needed", { tool: event.toolName, path: key }, { blocked: true }).catch(() => undefined);
+        return { block: true, reason };
+      }
     }
     const guard = await guardWrite(ctxFrom(ctx.cwd, agentId), path);
     if (guard.ok && !guard.refreshed && isOwnScratch(guard.path, agentId)) {
@@ -1254,12 +1457,18 @@ export default function (pi: ExtensionAPI) {
           { tool: via, path: report.path },
           { blocked: false, detected: true, via, healed: action, ...(heal?.error ? { error: heal.error } : {}) },
         );
+        // Only a copied run has a pristine copy: evidence held in place, from an
+        // image or in a VM has none to heal from, and saying one exists
+        // would send the operator looking for it.
+        const hasPristine = existsSync(join(cwd, ".inputs-pristine"));
         const outcome =
           action === "restored"
             ? "It was restored from the pristine copy."
             : action === "removed"
               ? "The new file was removed again."
-              : `It could NOT be healed (${heal?.error ?? "unknown error"}); the operator has the pristine copy under .inputs-pristine/.`;
+              : hasPristine
+                ? `It could NOT be healed (${heal?.error ?? "unknown error"}); the operator has the pristine copy under .inputs-pristine/.`
+                : `It could NOT be healed: this run holds its evidence in place, with no pristine copy to restore from (${heal?.error ?? "no copy"}). The change stands; the host's custody check at stop names it.`;
         await systemPost(cwd, {
           tag: "veto",
           body: `INPUTS VIOLATION: ${agentId}'s ${via} call changed \`${report.path}\`, which is a read-only input. ${outcome} Never write under inputs/; copy the file into work/ if you need a version you can change.`,
@@ -1322,15 +1531,15 @@ export default function (pi: ExtensionAPI) {
         cwd,
         agentId,
         "claim_violation",
-        { tool: "bash", path: report.path },
+        { tool: via, path: report.path },
         {
           blocked: false,
           detected: true,
-          via: "bash",
+          via,
           owner: report.owner,
           protected: report.protected,
           rev: version?.rev ?? null,
-          reason: `bash write to ${report.path}${held}`,
+          reason: `${via} write to ${report.path}${held}`,
         },
       );
       const recovery = report.recoverable
@@ -1346,7 +1555,7 @@ export default function (pi: ExtensionAPI) {
       claimViolationPostedAt.set(report.path, Date.now());
       await systemPost(cwd, {
         tag: "veto",
-        body: `CLAIM VIOLATION: ${agentId}'s bash call modified \`${report.path}\`${held}.${
+        body: `CLAIM VIOLATION: ${agentId}'s ${via} call modified \`${report.path}\`${held}.${
           version ? ` The result was snapshotted as rev ${version.rev} (${shortHash(version.sha256)}).` : ""
         } ${recovery}${repeats ? ` (${repeats} more write${repeats === 1 ? "" : "s"} to this path since the last notice, each on the trace as claim_violation.)` : ""}`,
       }).catch(() => undefined);
@@ -1452,6 +1661,22 @@ export default function (pi: ExtensionAPI) {
         fullOutputError = error instanceof Error ? error.message : String(error);
       }
     }
+    // The same long command a second time: told, once, where the first
+    // run's whole output is, with this run's result. Generic: any command
+    // whose earlier run was long and whose output was kept whole.
+    if ((name === "bash" || name === "powershell") && agentId && typeof input?.command === "string") {
+      const key = normalizeShellCommand(input.command);
+      const earlier = longRuns.get(key);
+      if (earlier && !repeatHinted.has(key)) {
+        repeatHinted.add(key);
+        content = [...(Array.isArray(content) ? content : []), { type: "text", text: repeatHintText(earlier) }];
+        contentChanged = true;
+        await logEvent(ctx.cwd, agentId, "repeat_hint", { command: leadingCommand(input.command) ?? "" }, { ok: true, earlier_ms: earlier.ms, full_output: earlier.path }).catch(() => undefined);
+      }
+      if (fullOutput && !fullOutput.write_error && !isError && durationMs !== undefined && durationMs >= repeatHintMinMs()) {
+        longRuns.set(key, { ms: durationMs, path: fullOutput.path });
+      }
+    }
     const override = contentChanged ? ({ content } as never) : undefined;
 
     if ((name === "bash" || name === "powershell") && callId) {
@@ -1462,7 +1687,7 @@ export default function (pi: ExtensionAPI) {
           // Let a peer's concurrent legal write record its revision first, so
           // it accounts for itself instead of looking like our shell's doing.
           await new Promise((r) => setTimeout(r, BASH_SETTLE_MS));
-          const reports = await attributeToThisCall(ctx.cwd, await diffWatchedPaths(ctx.cwd, before.snapshot, agentId), before.command);
+          const reports = await attributeToThisCall(ctx.cwd, await diffWatchedPaths(ctx.cwd, before.snapshot, agentId, { listClaims, listFileHistory }), before.command);
           if (reports.length) await reportBashWrites(ctx.cwd, reports, "bash", before.snapshot);
         } catch {
           // detection is best-effort; never break the agent's turn
@@ -1590,7 +1815,8 @@ export default function (pi: ExtensionAPI) {
         posts: box.posts.map((p) => ({
           id: p.id,
           thread: p.thread,
-          from: p.from,
+          from: postSender(p),
+          ...(p.via ? { via: p.via } : {}),
           to: p.to,
           tag: p.tag,
           path: p.path,
@@ -1846,7 +2072,8 @@ export default function (pi: ExtensionAPI) {
           box?.posts.map((p) => ({
             id: p.id,
             thread: p.thread,
-            from: p.from,
+            from: postSender(p),
+            ...(p.via ? { via: p.via } : {}),
             to: p.to,
             tag: p.tag,
             body: p.body,
@@ -1863,7 +2090,7 @@ export default function (pi: ExtensionAPI) {
           reason: result.reason,
           waited_ms: result.waited_ms,
           n: payload.posts.length,
-          ...(box ? { from: box.posts.map((p) => p.from), ids: box.posts.map((p) => p.id), remaining } : {}),
+          ...(box ? { from: box.posts.map((p) => postSender(p)), ids: box.posts.map((p) => p.id), remaining } : {}),
         },
         Date.now() - started,
       );
@@ -1902,6 +2129,27 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const result = await restoreFileVersion(ctxFrom(toolCtx.cwd, agentId), params.path, params.rev);
       await logEvent(toolCtx.cwd, agentId, "file_restore", params, result);
+      return okResult(result);
+    },
+  });
+
+  pi.registerTool({
+    name: "publish_file",
+    label: "Publish file",
+    description:
+      "Put a file of your own (under work/<your id>/) into the shared part of work/ — work/report.md, work/timeline.md, a shared CSV. The destination is claimed for you (refused when a peer holds it), the bytes are copied by the harness and the revision is recorded. In a microVM this is the only way a shared file is written; on the host it works the same.",
+    promptSnippet: "Publish a file of your own into the shared work/ (claimed and recorded for you)",
+    promptGuidelines: ["Write a shared deliverable under work/<your id>/ first, then publish_file it. To change a shared file, copy it into your directory, edit, publish."],
+    parameters: Type.Object({
+      path: Type.String({ description: "Your own file, under work/<your id>/" }),
+      to: Type.Optional(Type.String({ description: "Where it goes under work/; default: work/<basename>" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const result = await publishFile(ctxFrom(toolCtx.cwd, agentId), params.path, params.to);
+      await logEvent(toolCtx.cwd, agentId, "publish_file", params, result);
+      if (!result.ok) {
+        return { content: [{ type: "text" as const, text: result.reason }], details: result, isError: true };
+      }
       return okResult(result);
     },
   });
@@ -2068,15 +2316,31 @@ export default function (pi: ExtensionAPI) {
         // A forged tool is a subprocess with the same reach as bash, so it
         // gets the same treatment: a snapshot of every watched path before,
         // a diff after, and the same reports (claims, harness files, inputs).
-        const before = await watchedPathHashes(toolCtx.cwd).catch(() => null);
+        const before = await watchedPathHashes(toolCtx.cwd, agentId).catch(() => null);
+        // A pack tool gets its pack's secrets in its own environment; the
+        // trace row below has their values replaced by their names.
+        const secrets = await packSecretsFor(manifest);
+        // In a VM the seal is the hub's word, read where the record is current.
+        const sealed = boardSocket() ? await forgedToolSeal(toolCtx.cwd, manifest.name).catch(() => undefined) : undefined;
         const run = await runForgedTool(toolCtx.cwd, manifest, (params ?? {}) as Record<string, unknown>, {
           signal: signal as AbortSignal | undefined,
           agentId,
+          env: secrets,
+          ...(sealed ? { sealed } : {}),
         });
         if (before && agentId) {
           try {
             await new Promise((resolve) => setTimeout(resolve, BASH_SETTLE_MS));
-            const reports = await diffWatchedPaths(toolCtx.cwd, before, agentId);
+            // The same attribution a shell call gets: a change this call's
+            // arguments do not name, in a peer's own directory, is the peer's
+            // concurrent work. Without it, every file a peer's parallel
+            // icat_extract wrote showed up as this agent's claim violation
+            // (six on the first microVM case run, and on host runs before it).
+            const reports = await attributeToThisCall(
+              toolCtx.cwd,
+              await diffWatchedPaths(toolCtx.cwd, before, agentId, { listClaims, listFileHistory }),
+              JSON.stringify(params ?? {}),
+            );
             if (reports.length) await reportBashWrites(toolCtx.cwd, reports, manifest.name, before);
           } catch {
             // the run's own result still goes back; a missed diff is not a reason to fail it
@@ -2086,8 +2350,8 @@ export default function (pi: ExtensionAPI) {
           toolCtx.cwd,
           agentId,
           manifest.name,
-          (params ?? {}) as Record<string, unknown>,
-          {
+          redactSecrets((params ?? {}) as Record<string, unknown>, secrets),
+          redactSecrets({
             ok: run.ok,
             forged: true,
             by: manifest.by,
@@ -2104,9 +2368,14 @@ export default function (pi: ExtensionAPI) {
             ...(run.full_output ? { full_output: run.full_output } : {}),
             ...(run.full_stderr ? { full_stderr: run.full_stderr } : {}),
             ...(run.ok ? {} : { error: run.stderr.trim() || `exit ${run.exit_code ?? "?"}` }),
-          },
+            ...(Object.keys(secrets).length ? { secrets: Object.keys(secrets) } : {}),
+          }, secrets),
           run.duration_ms,
         );
+        if (Object.keys(secrets).length) {
+          run.stdout = redactSecrets(run.stdout, secrets);
+          run.stderr = redactSecrets(run.stderr, secrets);
+        }
         if (run.ok) {
           return {
             content: [{ type: "text" as const, text: run.stdout || "(no output)" }],
@@ -2130,8 +2399,15 @@ export default function (pi: ExtensionAPI) {
    * turn end — so a peer's forge reaches everyone within one turn. Returns
    * what was new, for the caller to tell the model.
    */
+  // Seeded tools — a pack's, or a library handed over with --tools-from —
+  // are registered whether or not forging is on: the contract lists them as
+  // ready, and a run with packs but no forging used to get none of them.
+  // Without forging nothing can add a tool mid-run, so after the first load
+  // the wake points have nothing to pick up.
+  let seededLoaded = false;
   async function loadForgedTools(cwd: string): Promise<ForgedToolManifest[]> {
-    if (!forging) return [];
+    if (!forging && seededLoaded) return [];
+    seededLoaded = true;
     const fresh: ForgedToolManifest[] = [];
     for (const manifest of await listForgedTools(cwd).catch(() => [] as ForgedToolManifest[])) {
       const key = `${manifest.version}:${manifest.sha256}`;
@@ -2153,6 +2429,14 @@ export default function (pi: ExtensionAPI) {
       new_tools: fresh.map((m) => ({ name: m.name, by: m.by, version: m.version, description: m.description, params: paramSummary(m) })),
       note: "These forged tools are now in your tool list. Call them directly.",
     };
+  }
+
+  if (!forging) {
+    pi.on("session_start", async (_event, ctx) => {
+      // swarm.sh named every seeded tool in --tools, so registering them is
+      // all it takes for them to be in the list from the first turn.
+      await loadForgedTools(ctx.cwd);
+    });
   }
 
   if (forging) {
@@ -2201,6 +2485,7 @@ export default function (pi: ExtensionAPI) {
         ),
         timeout_seconds: Type.Optional(Type.Number({ description: `Kill the script after this long (default ${TOOL_TIMEOUT_DEFAULT_SECONDS}, max ${TOOL_TIMEOUT_MAX_SECONDS})` })),
         example: Type.Optional(Type.String({ description: "One example call, shown to peers" })),
+        requires: Type.Optional(Type.Array(Type.String(), { description: "Programs the script calls (e.g. fls, yara), so a later case knows what its image must hold" })),
       }),
       async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
         const started = Date.now();
@@ -2325,20 +2610,23 @@ export default function (pi: ExtensionAPI) {
     name: "record",
     label: "Record",
     description:
-      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 UTC), ioc (an indicator: address, hash, file, account) or finding (a conclusion). Both source and evidence are required: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. The harness renders ledger/ledger.md — timeline, indicators, findings — after every record; cite that file in the report.",
+      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (a conclusion) or absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope). Both source and evidence are required: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq>: nothing is deleted, and the newer entry is the correction. The harness renders ledger/ledger.md — timeline, indicators, findings, searches that found nothing — after every record; cite that file in the report.",
     promptSnippet: "Record a dated event, an indicator or a finding with its evidence",
     promptGuidelines: [
       "Record every dated event you establish as kind=event with ts in UTC; the timeline is built from them.",
       "Record indicators and findings as you confirm them, with the evidence that proves them.",
       "source and evidence are required on every record: where you saw it, and the command or id that lets somebody else see it too.",
+      "A wrong entry is corrected, never deleted: record the right one with supersedes=<seq of the wrong one>.",
+      "kind=absence is optional: record a search that found nothing only when the absence matters to the case, with the scope it holds for.",
     ],
     parameters: Type.Object({
-      kind: Type.Union(LEDGER_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding" }),
-      value: Type.String({ description: "The event, indicator or finding, in one sentence" }),
-      ts: Type.Optional(Type.String({ description: "ISO 8601 UTC time of an event" })),
+      kind: Type.Union(LEDGER_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding | absence" }),
+      value: Type.String({ description: "The event, indicator or finding, in one sentence; for absence, what was looked for" }),
+      ts: Type.Optional(Type.String({ description: "The event's time, ISO 8601 with its zone: 2024-01-15T12:44:22Z, or 2024-01-15T15:44:22+03:00 as the source records it. A time without a zone is refused." })),
       source: Type.String({ description: "Where it was seen: a path, log, plugin, registry key. Required." }),
       evidence: Type.String({ description: "How to check it: command, inode, record id, hash. Required." }),
       confidence: Type.Optional(Type.Union(LEDGER_CONFIDENCE.map((c) => Type.Literal(c)))),
+      supersedes: Type.Optional(Type.Number({ description: "The seq of an entry this one corrects. The older entry stays, marked superseded." })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
@@ -2349,23 +2637,32 @@ export default function (pi: ExtensionAPI) {
         source: params.source,
         evidence: params.evidence,
         confidence: params.confidence,
+        ...(params.supersedes !== undefined ? { supersedes: params.supersedes } : {}),
       });
       if (!result.ok) {
         await logEvent(toolCtx.cwd, agentId, "record", { kind: params.kind }, { ok: false, reason: result.reason }, Date.now() - started);
         return { content: [{ type: "text" as const, text: `record refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
       }
-      await logEvent(toolCtx.cwd, agentId, "record", { kind: params.kind, ts: params.ts, value: params.value }, { ok: true, seq: result.entry.seq, merged: result.merged, total: result.total }, Date.now() - started);
-      return okResult({ ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, rendered: LEDGER_MD });
+      // The entry's hash goes on the trace, which is anchored outside the
+      // run: custody holds the ledger to it, so an entry deleted from the
+      // tail, or one written into the file without this tool, is named.
+      await logEvent(toolCtx.cwd, agentId, "record", { kind: params.kind, ts: params.ts, value: params.value, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}) }, { ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.hash ? { hash: result.entry.hash } : {}) }, Date.now() - started);
+      // A correction is said on the trace as itself, so a reader of the
+      // record sees which entry stopped standing, when, and by whom.
+      if (result.entry.supersedes !== undefined && !result.merged) {
+        await logEvent(toolCtx.cwd, agentId, "ledger_superseded", { seq: result.entry.supersedes }, { ok: true, by_seq: result.entry.seq });
+      }
+      return okResult({ ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), rendered: LEDGER_MD });
     },
   });
 
   pi.registerTool({
     name: "ledger",
     label: "Ledger",
-    description: "List the swarm's ledger: every event, indicator and finding recorded so far, with authors and evidence. Filter by kind; the rendered file is ledger/ledger.md.",
+    description: "List the swarm's ledger: every event, indicator, finding and search that found nothing, recorded so far, with authors and evidence; a corrected entry carries superseded_by. Filter by kind; the rendered file is ledger/ledger.md.",
     promptSnippet: "See what the swarm has recorded so far",
     parameters: Type.Object({
-      kind: Type.Optional(Type.String({ description: "event | ioc | finding" })),
+      kind: Type.Optional(Type.String({ description: "event | ioc | finding | absence" })),
       limit: Type.Optional(Type.Number({ description: "Newest N entries (default 200)" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
@@ -2461,6 +2758,7 @@ export default function (pi: ExtensionAPI) {
           metadata: inputsCheck.metadata,
           missing: inputsCheck.missing,
           added: inputsCheck.added,
+          ...(inputsCheck.digest_mismatch.length ? { digest_mismatch: inputsCheck.digest_mismatch } : {}),
         });
       }
       // The finish line, before the sentinel: the operator's checks, run now.
@@ -2505,7 +2803,7 @@ export default function (pi: ExtensionAPI) {
       await logStop(toolCtx.cwd, "done", result.reason);
       // `terminate` ends the session without a session_shutdown, so the
       // last agent out has to turn the proxy off from here.
-      await stopNetguardSidecarIfOver(toolCtx.cwd).catch(() => false);
+      if (!boardSocket()) await stopNetguardSidecarIfOver(toolCtx.cwd).catch(() => false);
       return okResult(result, { terminate: true });
     },
   });

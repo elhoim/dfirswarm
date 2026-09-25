@@ -1,6 +1,6 @@
 {
   "name": "vss_stores",
-  "description": "List the volume shadow copies on an image with vshadowinfo: one store per snapshot, with its identifier, creation time and size, and the vshadowmount command that exposes it as a volume to list and extract from.",
+  "description": "List the volume shadow copies on an image with vshadowinfo: one store per snapshot, with its identifier, creation time and size, and the vshadowmount command that exposes it as a volume under your own work/<your id>/ directory, to list and extract from.",
   "params": {
     "image": {
       "type": "string",
@@ -9,6 +9,10 @@
     "offset": {
       "type": "integer",
       "description": "Volume offset in BYTES (vshadowinfo takes bytes, not sectors)"
+    },
+    "mount_dir": {
+      "type": "string",
+      "description": "Where the vshadowmount command it suggests mounts the stores (default work/<your id>/vss: your own directory, the part of work/ a VM can write)"
     }
   },
   "runtime": "python3",
@@ -18,5 +22,5 @@
   "by": "maintainer",
   "at": "2026-09-22T09:00:00.000Z",
   "version": 1,
-  "sha256": "c60af2ad91535597708502fb1b5e283a7f1eccaaab8794a4d0380e2261861e40"
+  "sha256": "abc0cdbb17c1b574319b8f5f3f4f6866b480751fd05b226f2eb2887ae3204a9a"
 }

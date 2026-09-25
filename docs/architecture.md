@@ -2,13 +2,18 @@
 
 What runs where: the operator's scripts, the Herdr panes, the Pi extension, the sandbox on disk, the egress proxy and the web app.
 
+Every agent runs in its own microVM unless the run says `--isolation host`.
+The first diagram is a host run (unisolated: every agent a Pi process on
+this machine); [With a microVM per agent](#with-a-microvm-per-agent---isolation-microvm)
+is the default, and changes only where Pi runs and who writes the board.
+
 
 ```mermaid
 flowchart TB
   subgraph OP["Operator"]
     CLI["scripts/swarm.sh<br/>start · list · status · stop · reap · netcheck · ui"]
     TAIL["scripts/watch.sh<br/>scripts/await-done.sh"]
-    BROWSER["Any browser on the LAN"]
+    BROWSER["A browser on this machine (the LAN with --host 0.0.0.0)"]
   end
 
   subgraph HERDR["Herdr workspace (one pane per agent, √N grid, tab/workspace spill)"]
@@ -55,7 +60,7 @@ flowchart TB
   PW --> CHROME --> WORK
   UI -->|fs.watch recursive| FS
   UI -->|bash scripts/swarm.sh start / stop / reap| CLI
-  BROWSER <-->|HTTP + SSE, port 43173, 0.0.0.0<br/>reads open, mutations need the token| UI
+  BROWSER <-->|HTTP + SSE, port 43173, 127.0.0.1 by default<br/>reads open, mutations need the token| UI
   TAIL --> FS
   TAIL -->|polls| REAP
   TAIL -->|runs the goal's ## Checks| FS
@@ -72,3 +77,70 @@ Reading the diagram:
 - **The filesystem is the protocol.** Posts are files, locks are files, done is a file, the log is a file. Anything that can `ls` the sandbox can observe or drive the swarm.
 - **The web app** never writes protocol files itself (one exception: operator file restore, which goes through the same `protocol.ts` claim path). Every mutation shells out to `scripts/swarm.sh`, so the UI and the terminal can never disagree.
 - **Netguard** is on by default and gives each `pi` process egress to the provider host only. **Reaper** and **Playwright** are optional side paths.
+
+## With a microVM per agent (`--isolation microvm`)
+
+The default. The same extension, the same protocol and the same files, with the agents
+moved behind a VM's wall and one process on the host writing the board for
+them. [ADR 0009](adr/0009-agents-live-in-microvms.md) says why.
+
+```mermaid
+flowchart TB
+  subgraph HOST["The examiner's machine"]
+    CLI["scripts/swarm.sh start --isolation microvm"]
+    VMM["scripts/vm.ts<br/>microsandbox SDK: create · probe · finish · reap"]
+    HUB["scripts/vm-hub.ts<br/>the board's only writer · one socket per agent<br/>trace forward · nudges · host backstop"]
+    COL["scripts/trace-collector.mjs<br/>hash chain · anchor · recv_ts"]
+    FS["runs/ID/ on the host"]
+    EV["evidence directory (in place)"]
+    PANES["Herdr panes: msb exec -t dfs-ID-AGENT"]
+    CUST["scripts/custody.ts at stop<br/>custody.json"]
+  end
+  subgraph VM0["microVM · agent 00"]
+    PI0["Pi + extensions/agent-swarm.ts<br/>board.ts → one held connection"]
+    BR0["socat bridge<br/>/run/dfirswarm/hub.sock ↔ vsock 5000"]
+  end
+  subgraph VM1["microVM · agent 01"]
+    PI1["Pi + extensions"]
+    BR1["socat bridge"]
+  end
+  CLI --> VMM --> VM0 & VM1
+  CLI --> HUB
+  CLI --> PANES --> PI0 & PI1
+  PI0 --> BR0 -->|vsock → <dir>/agent00.sock| HUB
+  PI1 --> BR1 -->|vsock → <dir>/agent01.sock| HUB
+  HUB -->|protocol.ts| FS
+  HUB --> COL --> FS
+  FS -.->|read-only floor · work/ID, work/extracted/ID, work/quarantine/ID, tool-output/ID, .pi-sessions/ID writable| VM0 & VM1
+  EV -.->|read-only, same path| VM0 & VM1
+  VMM -->|finish: snapshot + remove| VM0 & VM1
+  CUST --> FS
+```
+
+- **Everything is mounted at its host path.** The sandbox, the evidence, the
+  harness code and each agent's writable directories appear in the guest
+  where they are on the host, so a path in a post, the trace, the registry or
+  a check means the same file on both sides.
+- **The floor is read-only; the holes are the agent's own.** The run's root is
+  one read-only share, `work/` included, and each seat's own `work/<id>/`,
+  `work/extracted/<id>/`, `work/quarantine/<id>/` (the last two no-exec),
+  `tool-output/<id>/` and `.pi-sessions/<id>/` are writable shares on top of
+  it; unmounting a hole leaves the read-only floor. Nothing writable is
+  shared between VMs: a shared file under `work/` (`work/report.md`, a
+  timeline) goes through `publish_file`, and the hub writes it on the host,
+  claimed and recorded for the agent that asked. The board's files are
+  read-only in every VM.
+- **The board is a call, not a file.** `extensions/board.ts` exports the
+  protocol's own functions; with `SWARM_BOARD_SOCKET` set they go to the hub
+  over one held connection per process, each call with an id. The hub runs
+  `protocol.ts` on the host, as the agent its socket belongs to. Without the
+  variable they run locally, which is host mode.
+- **The harness's voice reaches Pi directly.** A pane runs `msb exec`, which
+  Herdr can neither read nor type into as Pi; each extension keeps a link to
+  the hub, reports working/idle up it, and takes the harness's prompts (a
+  nudge, a stop) down it as user messages. The hub reports each agent's state
+  to Herdr for the panes' badges.
+- **No credential crosses.** `scripts/vm.ts` asks Pi on the host for each
+  provider's key or subscription token, gives it to msb as a secret bound to
+  that provider's hosts, and writes the guest's `~/.pi/agent/auth.json` with
+  placeholders only.

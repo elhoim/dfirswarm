@@ -44,6 +44,13 @@ MAX_NUDGES=3
 LOCAL_FIRST_TURN_SEC="${SWARM_LOCAL_FIRST_TURN_SEC:-600}"
 ONCE=0
 HERDR="${HERDR_BIN:-herdr}"
+# Agents in microVMs (--isolation microvm): the pane runs `msb exec`, so
+# Herdr can neither see Pi's state on the screen nor type a prompt Pi will
+# take. The hub has both — each agent's extension reports working/idle up its
+# link, and a prompt goes down it as a user message.
+HUB_ADMIN="${SWARM_HUB_ADMIN:-}"
+HUB_STATUS="${SWARM_HUB_STATUS:-}"
+HUB_DIR="${SWARM_HUB_DIR:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -70,8 +77,17 @@ is_local_model() { # <agent id>
     lmstudio|ollama|vllm|llamacpp|llama.cpp|local) return 0 ;;
   esac
   host="$(jq -r --arg p "${model%%/*}" '.providers[$p].baseUrl // empty' "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/models.json" 2>/dev/null || true)"
+  # The host part of the base URL, not any "10." in it: a public name such
+  # as api10.example.com is not local.
+  host="$(printf '%s' "$host" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[^@/]*@##; s#[/?].*$##')"
+  if [[ "$host" == \[* ]]; then
+    host="${host#[}"
+    host="${host%%]*}"
+  else
+    host="${host%:*}"
+  fi
   case "$host" in
-    *127.0.0.1*|*localhost*|*192.168.*|*10.*|*.local*) return 0 ;;
+    127.*|localhost|::1|0.0.0.0|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|169.254.*|fc*|fd*|fe80:*|*.local|*.localhost|host.microsandbox.internal) return 0 ;;
   esac
   return 1
 }
@@ -114,8 +130,10 @@ try:
         # written by "system" and names the agent in its arguments.
         if event.get("agent") != aid:
             continue
+        # The collector's clock, the host's: a VM's own `ts` is the guest's,
+        # and a guest whose clock runs ahead would never look idle.
         try:
-            last = max(last, datetime.fromisoformat(event["ts"].replace("Z", "+00:00")).timestamp())
+            last = max(last, datetime.fromisoformat((event.get("recv_ts") or event["ts"]).replace("Z", "+00:00")).timestamp())
         except Exception:
             pass
         break
@@ -160,9 +178,96 @@ log_event() { # log_event <agent> <idle> <ok> <count>
   trace_emit "$ROOT" "$SANDBOX" "$line"
 }
 
+# The stop from outside the panes, for a host run. Each pane's extension
+# steers its agent and writes the sentinel itself past a cap or the wall
+# clock plus the grace period — from inside the pane, where an agent that
+# never ends a turn, or a pane whose extension is wedged, never gets there.
+# This watchdog runs for the length of the run outside every pane: past a
+# limit it claims the stop clock (and says so on the board) when no pane
+# has, and past the grace period it writes the sentinel as the harness. A VM
+# run's hub does the same from its own process; this is the host's.
+host_backstop() {
+  [[ -z "$HUB_DIR" ]] || return 0
+  local said
+  said="$(node --experimental-strip-types --no-warnings -e '
+    const [protocol, S] = process.argv.slice(1);
+    import(protocol).then(async (P) => {
+      if (await P.swarmDoneExists(S)) return;
+      const budget = await P.readBudget(S).catch(() => null);
+      if (!budget) return;
+      const pressure = P.budgetPressure(budget);
+      if (!pressure.reason) return;
+      const mark = await P.markStopSteer(S, pressure.reason);
+      if (mark.claimed) {
+        const text = pressure.reason === "cap" ? P.CAP_STEER : `Swarm wall clock hit (${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes). Call done with reason cannot_complete and stop. Do not start new work.`;
+        await P.systemPost(S, { tag: "stop", body: text }).catch(() => undefined);
+        console.log(`steered ${pressure.reason}`);
+      }
+      if (Date.now() - Date.parse(mark.at) < P.STOP_GRACE_MS) return;
+      const stop = await P.harnessStop(S, pressure.reason, `The harness watchdog stopped the swarm: ${pressure.reason} passed and the agents did not stop within the grace period.`, { verify: true });
+      if (stop.created) console.log(`stopped ${pressure.reason}`);
+    }).catch(() => undefined);
+  ' "$ROOT/extensions/protocol.ts" "$SANDBOX" 2>/dev/null || true)"
+  local what reason ts line
+  while read -r what reason; do
+    [[ -n "$what" ]] || continue
+    ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+    line="$(jq -cn --arg ts "$ts" --arg t "$(if [[ "$what" == stopped ]]; then echo harness_stop; elif [[ "$reason" == cap ]]; then echo cap_steer; else echo wall_steer; fi)" --arg r "$reason" \
+      '{ts: $ts, agent: "system", tool: $t, args: {via: "idle-nudge", reason: $r}, result: {ok: true}}')"
+    trace_emit "$ROOT" "$SANDBOX" "$line"
+    echo "idle-nudge: $what the swarm ($reason)" >&2
+    # The operator's notify command, once, when the swarm's cap is reached.
+    if [[ "$what" == steered && "$reason" == cap ]]; then
+      bash "$ROOT/scripts/notify.sh" "$SANDBOX" budget_cap "$(jq -c '{spent_usd: (.spent_usd // null), cap_usd: (.cap_usd // null)}' "$SANDBOX/budget.json" 2>/dev/null || echo '{}')" >/dev/null 2>&1 </dev/null || true
+    fi
+  done <<< "$said"
+}
+
+# Where nobody has looked, three times a run: at a quarter, a half and three
+# quarters of the wall clock, one harness post lists the inputs no command
+# has named yet (scripts/coverage.ts, read off the trace). A named input is
+# not an examined one, and an unnamed one is only unnamed: the post says
+# which, and assigns nothing. Skipped when every input has been named, or
+# when this checkout has no coverage.ts.
+coverage_hint() {
+  local cov="$ROOT/scripts/coverage.ts" mark="$SANDBOX/traces/idle-nudge.coverage" pct at due="" list body
+  [[ -f "$cov" && -f "$SANDBOX/inputs.json" && -f "$SANDBOX/budget.json" ]] || return 0
+  pct="$(jq -r 'if (.started_at // "") == "" or ((.wall_clock_minutes // 0) | tonumber) <= 0 then empty
+    else (((now - (.started_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) / 60) / (.wall_clock_minutes | tonumber) * 100 | floor) end' "$SANDBOX/budget.json" 2>/dev/null || true)"
+  [[ "$pct" =~ ^-?[0-9]+$ ]] || return 0
+  for at in 25 50 75; do
+    [[ "$pct" -ge "$at" ]] && ! grep -qx "$at" "$mark" 2>/dev/null && due="$at"
+  done
+  [[ -n "$due" ]] || return 0
+  # Every mark passed is spent by this one post: a watchdog that started
+  # late does not post three times in a row.
+  for at in 25 50 75; do
+    [[ "$at" -le "$due" ]] && ! grep -qx "$at" "$mark" 2>/dev/null && echo "$at" >> "$mark"
+  done
+  list="$(node --experimental-strip-types --no-warnings "$cov" "$SANDBOX" --json 2>/dev/null | jq -r '.untouched[]? // empty' 2>/dev/null || true)"
+  [[ -n "$list" ]] || return 0
+  body="$(printf 'At %s%% of the wall clock, no command has named these inputs yet (read off the trace; a named input is not always an examined one):\n\n%s\n\nNobody is assigned to them. If one matters to the goal and nobody has it, say on the board that you are taking it.' \
+    "$due" "$(printf '%s\n' "$list" | sed 's/^/- `/; s/$/`/')")"
+  node --experimental-strip-types --no-warnings -e '
+    const [protocol, S, body] = process.argv.slice(1);
+    import(protocol).then((P) => P.systemPost(S, { tag: "ask", body })).catch(() => process.exit(1));
+  ' "$ROOT/extensions/protocol.ts" "$SANDBOX" "$body" >/dev/null 2>&1 || return 0
+  echo "idle-nudge: posted the inputs no command has named yet ($(printf '%s\n' "$list" | wc -l | tr -d ' ') at ${due}%)" >&2
+}
+
 # "id n idle_at_last_nudge" lines. The count is per silence: if the agent has
 # done anything since we last nudged it — its idle clock is shorter than it was
 # then — this is a new silence and the budget starts again.
+# Words in front of an agent: through the hub for a VM, through Herdr otherwise.
+prompt_agent() { # <agent id> <text>
+  if [[ -n "$HUB_ADMIN" ]]; then
+    node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_ADMIN" \
+      "$(jq -nc --arg a "$1" --arg t "$2" '{op: "prompt", agent: $a, text: $t, kind: "idle_nudge"}')" >/dev/null 2>&1
+  else
+    "$HERDR" agent prompt "$1" "$2" >/dev/null 2>&1
+  fi
+}
+
 STATE="$SANDBOX/traces/idle-nudge.state"
 [[ -f "$STATE" ]] || : > "$STATE"
 count_of() { awk -v id="$1" '$1 == id { print $2; found = 1 } END { if (!found) print 0 }' "$STATE"; }
@@ -173,9 +278,47 @@ set_count() {
   mv "$tmp" "$STATE"
 }
 
+# The hub is the VMs' board, trace door and stop: a run whose hub died has
+# none of the three until it is back. The hub kept what the kickoff gave it
+# in its own directory, so it resumes with the same tokens and the same
+# clock; this watchdog, which already runs for the length of the run, is
+# what notices.
+ensure_hub() {
+  [[ -n "$HUB_DIR" && -d "$HUB_DIR" && ! -e "$HUB_DIR/.stop" ]] || return 0
+  # A keeper that gave up on a hub dying in a row has said why in the hub's
+  # log; restarting it here every pass would only repeat the crash.
+  [[ -e "$HUB_DIR/.keeper-gave-up" ]] && return 0
+  local pid keeper script
+  pid="$(cat "$SANDBOX/hub.pid" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then return 0; fi
+  # The hub's own keeper (hub-supervise.sh) brings it back; two restarting
+  # it at once would start two hubs.
+  keeper="$(cat "$HUB_DIR/supervisor.pid" 2>/dev/null || true)"
+  if [[ -n "$keeper" ]] && ps -o command= -p "$keeper" 2>/dev/null | grep -q "hub-supervise.sh"; then return 0; fi
+  [[ -f "$HUB_DIR/hub-input.json" ]] || return 0
+  script="$ROOT/scripts/vm-hub.ts"
+  [[ -f "$HUB_DIR/host/scripts/vm-hub.ts" ]] && script="$HUB_DIR/host/scripts/vm-hub.ts"
+  nohup node --experimental-strip-types --no-warnings "$script" --resume "$HUB_DIR" >>"$SANDBOX/traces/vm-hub.log" 2>&1 </dev/null &
+  echo $! > "$SANDBOX/hub.pid"
+  local i
+  for ((i = 0; i < 50; i++)); do
+    [[ -S "$HUB_DIR/admin.sock" ]] && break
+    sleep 0.1
+  done
+  local ok=false line
+  [[ -S "$HUB_DIR/admin.sock" ]] && ok=true
+  line="$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg d "$HUB_DIR" --argjson ok "$ok" \
+    '{ts: $ts, agent: "system", tool: "hub_restarted", args: {dir: $d}, result: {ok: $ok}}')"
+  printf '%s' "$line" | node "$ROOT/scripts/trace-emit.mjs" "$SANDBOX" >/dev/null 2>&1 || printf '%s\n' "$line" >> "$HUB_DIR/hub-spill.jsonl"
+  echo "idle-nudge: the hub was down; restarted (ok=$ok)" >&2
+}
+
 while :; do
   [[ -d "$SANDBOX" ]] || exit 0
   [[ -f "$SANDBOX/done/SWARM_DONE" ]] && exit 0
+  ensure_hub
+  host_backstop
+  coverage_hint
   for id in $(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null); do
     [[ -e "$SANDBOX/done/agents/$id.done" || -e "$SANDBOX/done/agents/$id.dead" ]] && continue
     idle="$(idle_seconds "$id")"
@@ -190,7 +333,11 @@ while :; do
     fi
     # A long tool call writes nothing to the session or the trace until it
     # ends; Herdr knows the pane is still working, so ask it before nudging.
-    status="$("$HERDR" agent get "$id" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)"
+    if [[ -n "$HUB_STATUS" ]]; then
+      status="$(jq -r --arg id "$id" '.agents[$id].state // empty' "$HUB_STATUS" 2>/dev/null || true)"
+    else
+      status="$("$HERDR" agent get "$id" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)"
+    fi
     [[ "$status" == "working" ]] && continue
     # An agent whose last turn ended in a provider error is not idle, it is
     # finished: every nudge buys another identical failure. Both DeepSeek
@@ -229,7 +376,7 @@ while :; do
     # "0 posts you have not read" is worse than saying nothing.
     news_line=""
     [[ "$unread" -gt 0 ]] 2>/dev/null && news_line="You have ${unread} post(s) you have not read. "
-    if "$HERDR" agent prompt "$id" "You ended your turn ${minutes} minutes ago and the swarm is not done. Ending a turn is not waiting: nothing prompts you again. ${news_line}Read inbox, see what your peers have taken, and get on with what you said you were doing (name() if that has changed); when there is nothing left to take, call the wait tool and keep it open, and call it again each time it returns. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.} Nudge ${n} of ${MAX_NUDGES}." >/dev/null 2>&1; then
+    if prompt_agent "$id" "You ended your turn ${minutes} minutes ago and the swarm is not done. Ending a turn is not waiting: nothing prompts you again. ${news_line}Read inbox, see what your peers have taken, and get on with what you said you were doing (name() if that has changed); when there is nothing left to take, call the wait tool and keep it open, and call it again each time it returns. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.} Nudge ${n} of ${MAX_NUDGES}." >/dev/null 2>&1; then
       log_event "$id" "$idle" true "$n"
       echo "idle-nudge: prompted $id after ${idle}s (nudge $n/$MAX_NUDGES)"
     else

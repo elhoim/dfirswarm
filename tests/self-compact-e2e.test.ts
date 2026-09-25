@@ -244,6 +244,30 @@ test("a failing summary falls back to Pi's own summarizer and the note still com
   }
 });
 
+test("when Pi's own summary fails after ours, the trace names both failures", async (t) => {
+  if (!haveCli()) {
+    t.skip("pi is not on PATH");
+    return;
+  }
+  const d = await makeSandbox("summary-both-fail");
+  // Every summary call fails: our two attempts, then Pi's fallback (run se064eb:
+  // msb closed each one, and the trace named only ours).
+  const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, SC_FAKE_SUMMARY_FAIL: "99", SC_FAKE_TRACE: d.traceFile }, logFile: d.logFile });
+  try {
+    await client.request({ type: "prompt", message: "Start the scripted work." });
+    let failed: { args: { stage: string; attempt?: number }; result: { reason: string } } | undefined;
+    for (let i = 0; i < 180 && !failed; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      failed = trace(d).find((e) => e.tool === "compact_failed" && (e.args as { stage?: string }).stage === "compaction") as typeof failed;
+    }
+    assert.ok(failed, "the failed compaction is on the trace");
+    assert.match(failed.result.reason, /^our summary failed after 2 attempts: fake summary failure #2; then Pi's own summary: .*fake summary failure #3/);
+  } finally {
+    await client.close();
+    await cleanup(d);
+  }
+});
+
 test("with self-compaction off nothing is locked and no self_compact tool exists", async (t) => {
   if (!haveCli()) {
     t.skip("pi is not on PATH");

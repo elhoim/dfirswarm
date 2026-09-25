@@ -11,6 +11,20 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The suites choose where their runs are: an operator's exported isolation,
+# image, lock file or pack home would have pointed their kickoffs somewhere
+# else. A run is in microVMs unless it says otherwise, so each suite that
+# tests host runs exports SWARM_ISOLATION=host itself (and holds for a run of
+# one), and microvm-flags checks the default with nothing set.
+unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
+# Nor do they reach the operator's own msb database (a finish that removes a
+# stand-in VM scrubs it) or the VM hubs' directory: both are the suite run's.
+# Under /tmp, not the per-user TMPDIR: a hub's socket path must stay under
+# the 104 bytes macOS allows, and /var/folders/… leaves no room for it.
+SUITE_HOME="$(mktemp -d /tmp/dfh.XXXXXX)"
+trap 'rm -rf "$SUITE_HOME"' EXIT
+export MSB_HOME="$SUITE_HOME/msb-home" SWARM_HUBS_DIR="$SUITE_HOME/dfirswarm-hubs"
+mkdir -p "$MSB_HOME"
 # Every tests/*.test.sh, so adding a suite needs no edit here.
 ALL=()
 for f in "$ROOT"/tests/*.test.sh; do

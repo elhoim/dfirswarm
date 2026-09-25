@@ -562,6 +562,16 @@ that test it does not ship.
 `process.kill(pid, 0)` liveness to become a heartbeat first, because PID
 namespaces make that check collide across containers.
 
+**Phases 3 and 4, as built (2026-09-24):** one microVM per agent, not one
+container per run — `--isolation microvm`,
+[ADR 0009](adr/0009-agents-live-in-microvms.md). The condition above is kept:
+`tests/vm-integration.test.ts` runs on a KVM runner on every pull request and
+fails unless guest root cannot modify the evidence, the run's floor or the
+trace, by writing, remounting or unmounting, and unless a VM reaches no host
+outside its rules. Liveness no longer rests on a pid: each agent's
+extension reports working/idle over its hub link, and the hub's status file
+is what the watchdog reads.
+
 ---
 
 ## 9. What this does not solve
@@ -757,11 +767,14 @@ Reviewing the change against itself turned up four defects, all fixed here:
 
 ### Still open
 
-- The container **run mode** (`--isolation container`): the Dockerfile, panes
-  over `docker exec`, the proxy sidecar on an `--internal` network, the image
-  digest in the run record, and ADR 0007's CI test for the whole thing.
-- Per-agent isolation, which needs `process.kill(pid, 0)` liveness to become
-  a heartbeat first.
+- ~~The container **run mode** (`--isolation container`)~~ — not built:
+  `--isolation microvm` took its place, one VM per agent rather than one
+  container per run (Phases 3 and 4 above; ADR 0009 says why a container's
+  root was not the boundary). The image digest is in the run record, and ADR
+  0007's CI test runs against the VMs.
+- ~~Per-agent isolation~~ — shipped 2026-09-24 as `--isolation microvm`
+  ([ADR 0009](adr/0009-agents-live-in-microvms.md)): one microVM per agent,
+  and liveness is each agent's report over its hub link, not a pid.
 - ~~The write guard on Linux~~ — shipped 2026-09-21: Landlock holds the write
   allowlist on every Linux kernel from 5.13, a user namespace (bubblewrap or
   `unshare`) adds the read-only root, the masks and the pid tree where the

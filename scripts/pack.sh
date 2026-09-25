@@ -10,10 +10,17 @@
 #   pack.sh seal <dir>          author-side: write checksums into pack.json
 #   pack.sh path <id>           print where a pack is installed
 #   pack.sh resolve <id>[,<id>] print every pack dir, dependencies first
+#   pack.sh adopt <tool dir> <pack dir> [--replace]
+#                               author-side: take a saved tool into a pack
 set -euo pipefail
 
 HOME_DIR="${DFIRSWARM_HOME:-$HOME/.dfirswarm}"
 PACKS="$HOME_DIR/packs"
+# A pack's secrets live beside the packs, never inside one: a pack directory
+# is mounted read-only into every agent's VM, and `verify` checks it against
+# its own checksums, which a file the operator wrote would fail.
+SECRETS="$HOME_DIR/secrets"
+secrets_file() { printf '%s/%s.env\n' "$SECRETS" "$1"; }
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${PYTHON:-python3}"
 
@@ -126,14 +133,55 @@ if os.path.isdir(tdir):
             errors.append("tools/%s has an empty description" % name)
         tools[name] = tm
 
+# What the dependencies carry, from the packs beside this one: the installed
+# set when an installed pack is verified, the checkout's packs/ when one is
+# sealed there. A name a dependency carries is no warning; one no pack in
+# the set carries is, and one whose dependency is not there says so.
+def _dep_names(pack_dir, seen, acc):
+    try:
+        dm = json.load(open(os.path.join(pack_dir, "pack.json")))
+    except Exception:
+        acc["missing"].add(os.path.basename(pack_dir))
+        return
+    tdir = os.path.join(pack_dir, "tools")
+    if os.path.isdir(tdir):
+        acc["tools"].update(n for n in os.listdir(tdir) if os.path.isdir(os.path.join(tdir, n)))
+    for dirpath, _d, files in os.walk(os.path.join(pack_dir, "skills")):
+        for f in files:
+            if f.endswith(".md"):
+                m = FM.match(open(os.path.join(dirpath, f), encoding="utf-8", errors="replace").read())
+                if m:
+                    sid = re.search(r"^id:\s*(\S+)", m.group(1), re.M)
+                    if sid:
+                        acc["skills"].add(sid.group(1).strip("'\""))
+    try:
+        for b in json.load(open(os.path.join(pack_dir, "requires", "host.json"))).get("binaries", []):
+            acc["host"].add(b.get("name"))
+    except Exception:
+        pass
+    for spec in dm.get("depends", []) or []:
+        did = re.split(r"[<>=!~ ]", str(spec), maxsplit=1)[0]
+        if did and did not in seen:
+            seen.add(did)
+            _dep_names(os.path.join(os.path.dirname(pack_dir), did), seen, acc)
+
+deps = {"tools": set(), "skills": set(), "host": set(), "missing": set()}
+_seen = {pid}
+for spec in man.get("depends", []) or []:
+    did = re.split(r"[<>=!~ ]", str(spec), maxsplit=1)[0]
+    if did and did not in _seen:
+        _seen.add(did)
+        _dep_names(os.path.join(os.path.dirname(os.path.abspath(root)), did), _seen, deps)
+_where = ("this pack does not carry (a dependency must: %s is not beside it)" % ", ".join(sorted(deps["missing"]))
+          if deps["missing"] else
+          ("neither this pack nor its dependencies carry" if man.get("depends") else "this pack does not carry"))
+
 for t in sorted(skill_tools):
-    if t not in tools:
-        # A dependency may carry it; the full set is resolved at kickoff.
-        warnings.append("a skill names the tool %r, which this pack does not carry (a dependency must)" % t)
+    if t not in tools and t not in deps["tools"]:
+        warnings.append("a skill names the tool %r, which %s" % (t, _where))
 for n in sorted(skill_needs):
-    if n not in skills:
-        # A dependency may carry it; resolve names across packs at kickoff, not here.
-        warnings.append("a skill needs %r, which this pack does not carry (a dependency must)" % n)
+    if n not in skills and n not in deps["skills"]:
+        warnings.append("a skill needs %r, which %s" % (n, _where))
 
 # --- host requirements ------------------------------------------------------
 host_names = set()
@@ -147,12 +195,31 @@ if os.path.isfile(hj):
                     errors.append("requires/host.json: a binary entry is missing %s" % key)
             if "redistributable" not in b:
                 errors.append("requires/host.json: %s does not say whether it is redistributable" % b.get("name"))
+            # A pinned download is fetched and run inside an image: its URL
+            # is HTTPS, its sha256 whole, its program a path inside it.
+            dl = (b.get("install") or {}).get("download")
+            if dl is not None:
+                where = "requires/host.json: %s's download" % b.get("name")
+                if not isinstance(dl, dict) or not dl.get("version"):
+                    errors.append("%s needs a version" % where)
+                else:
+                    arches = [a for a in ("amd64", "arm64") if a in dl]
+                    if not arches:
+                        errors.append("%s names no architecture (amd64, arm64)" % where)
+                    for a in arches:
+                        e = dl[a]
+                        if not isinstance(e, dict) or not str(e.get("url", "")).startswith("https://"):
+                            errors.append("%s for %s needs an https url" % (where, a))
+                        elif not re.fullmatch(r"(sha256:)?[0-9a-f]{64}", str(e.get("sha256", ""))):
+                            errors.append("%s for %s needs the sha256 of what the url serves" % (where, a))
+                        elif "bin" in e and (str(e["bin"]).startswith("/") or ".." in str(e["bin"]).split("/")):
+                            errors.append("%s for %s: bin must be a path inside the download" % (where, a))
             host_names.add(b.get("name"))
     except Exception as e:
         errors.append("requires/host.json is not valid JSON: %s" % e)
 for h in sorted(skill_host):
-    if h not in host_names:
-        warnings.append("a skill calls %r, which requires/host.json does not declare" % h)
+    if h not in host_names and h not in deps["host"]:
+        warnings.append("a skill calls %r, which requires/host.json does not declare%s" % (h, " (nor does a dependency's)" if man.get("depends") and not deps["missing"] else ""))
 
 # --- vendored code has to carry its licence ---------------------------------
 for v in man.get("vendor", []) or []:
@@ -175,6 +242,12 @@ for s in man.get("secrets", []) or []:
             errors.append("a secret entry is missing %s" % key)
     if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", s.get("name", "")):
         errors.append("a secret name must be upper case with underscores: %r" % s.get("name"))
+    # The hosts the secret is for. Under --isolation microvm a secret is only
+    # ever injected on the way to these; without them it cannot be used there.
+    hosts = s.get("hosts")
+    if hosts is not None and (not isinstance(hosts, list) or not all(
+            isinstance(h, str) and re.fullmatch(r"(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+", h) for h in hosts)):
+        errors.append("secret %s: hosts must be a list of host names" % s.get("name"))
 
 # --- checksums --------------------------------------------------------------
 def walk_files():
@@ -304,8 +377,9 @@ for s in m.get("secrets") or []:
     print("%s\t%s\t%s\t%s\t%s" % (s["name"], s["title"], s["why"], "required" if s.get("required") else "optional", s.get("url","")))
 ' "$src/pack.json")"
   [[ -n "$names" ]] || return 0
-  install -d -m 700 "$dst"
-  local env_file="$dst/secrets.env"
+  install -d -m 700 "$SECRETS"
+  local env_file
+  env_file="$(secrets_file "$(basename "$dst")")"
   : > "$env_file"; chmod 600 "$env_file"
   while IFS=$'\t' read -r name title why need url; do
     [[ -n "$name" ]] || continue
@@ -391,7 +465,15 @@ sys.exit(0 if t(sys.argv[1]) >= t(sys.argv[2]) else 1)' "$have" "$dep_min" \
   find "$dst" -type d -exec chmod 755 {} +
   find "$dst" -type f -exec chmod 644 {} +
   find "$dst/tools" -name '*.py' -exec chmod 755 {} + 2>/dev/null || true
-  [[ -d "$dst.old" ]] && { cp -R "$dst.old/secrets.env" "$dst/secrets.env" 2>/dev/null || true; rm -rf "$dst.old"; }
+  if [[ -d "$dst.old" ]]; then
+    # A store from before secrets moved out of the pack directory: carried
+    # over once, then the old copy goes with the old install.
+    if [[ -f "$dst.old/secrets.env" && ! -f "$(secrets_file "$id")" ]]; then
+      install -d -m 700 "$SECRETS"
+      cp "$dst.old/secrets.env" "$(secrets_file "$id")" && chmod 600 "$(secrets_file "$id")"
+    fi
+    rm -rf "$dst.old"
+  fi
 
   [[ "$secrets" == "1" ]] && collect_secrets "$dst" "$dst" "$([[ -t 0 ]] && echo 1 || echo 0)"
   echo "installed $id $ver into $dst"
@@ -409,8 +491,8 @@ cmd_list() {
     "$PY" -c '
 import json,sys,os
 d=json.load(open(sys.argv[1]))
-sec = os.path.isfile(os.path.join(os.path.dirname(sys.argv[1]), "secrets.env"))
-print("  %-28s %-8s %s%s" % (d["id"], d["version"], d.get("description","")[:60], "  [secrets set]" if sec else ""))' "$d/pack.json"
+sec = os.path.isfile(sys.argv[2])
+print("  %-28s %-8s %s%s" % (d["id"], d["version"], d.get("description","")[:60], "  [secrets set]" if sec else ""))' "$d/pack.json" "$(secrets_file "$(basename "$d")")"
   done
   [[ "$any" == "1" ]] || echo "no packs installed"
 }
@@ -418,7 +500,7 @@ print("  %-28s %-8s %s%s" % (d["id"], d["version"], d.get("description","")[:60]
 cmd_show() {
   local id="${1:?pack id}"; local d="$PACKS/$id"
   [[ -f "$d/pack.json" ]] || die "$id is not installed"
-  "$PY" - "$d" <<'PYEOF'
+  "$PY" - "$d" "$(secrets_file "$id")" <<'PYEOF'
 import json, os, sys, re
 d = sys.argv[1]
 m = json.load(open(os.path.join(d, "pack.json")))
@@ -446,7 +528,7 @@ if os.path.isfile(hj):
         state = "present" if have else ("optional" if b.get("optional") else "MISSING")
         print("  %-16s %-8s %s" % (b["name"], state, b["why"]))
 if m.get("secrets"):
-    env = os.path.join(d, "secrets.env")
+    env = sys.argv[2]
     have = set()
     if os.path.isfile(env):
         have = {l.split("=",1)[0] for l in open(env) if "=" in l}
@@ -497,9 +579,78 @@ def visit(pid, chain):
     seen.add(pid); order.append(pid)
 for p in want:
     visit(p.strip(), [])
+# A run holds one tool per name, so two packs that carry a tool of the same
+# name with different scripts leave one pack's skills calling the other's
+# tool. Said here, before the kickoff copies either; the same script in both
+# is the same tool and says nothing.
+held = {}
+for p in order:
+    td = os.path.join(packs, p, "tools")
+    if not os.path.isdir(td):
+        continue
+    for name in sorted(os.listdir(td)):
+        mf = os.path.join(td, name, "manifest.json")
+        if not os.path.isfile(mf):
+            continue
+        try:
+            sha = json.load(open(mf)).get("sha256")
+        except Exception:
+            sha = None
+        if name not in held:
+            held[name] = (p, sha)
+        elif held[name][1] != sha:
+            print("WARN: packs %s and %s both carry a tool named %s, with different scripts; a run holds one "
+                  "tool per name, so one pack's skills would call the other's. Rename one of them."
+                  % (held[name][0], p, name), file=sys.stderr)
 for p in order:
     print(os.path.join(packs, p))
 PYEOF
+}
+
+# A tool a run forged and `swarm.sh tools --save` kept, taken into a pack's
+# source: its script checked against the sha256 its manifest carries, its
+# manifest reduced to what a pack tool declares (the run's by/at/version and
+# any pack field stay behind), its provenance kept beside it. The author reads
+# it and seals the pack; nothing here seals for them.
+cmd_adopt() {
+  local tool="${1:-}" pack="${2:-}" replace=0
+  [[ "${3:-}" == "--replace" ]] && replace=1
+  [[ -n "$tool" && -n "$pack" ]] || die "usage: pack.sh adopt <tool dir> <pack dir> [--replace]"
+  [[ -f "$tool/manifest.json" ]] || die "$tool has no manifest.json"
+  [[ -f "$pack/pack.json" ]] || die "$pack is not a pack (no pack.json)"
+  "$PY" - "$tool" "$pack" "$replace" <<'ADOPT_EOF'
+import hashlib, json, os, re, shutil, sys
+tool, pack, replace = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+m = json.load(open(os.path.join(tool, "manifest.json")))
+name = m.get("name", "")
+if not re.fullmatch(r"[a-z][a-z0-9_]{2,31}", name):
+    sys.exit(f"BLOCKER: {name!r} is not a tool name")
+entry = m.get("entry", "")
+body = os.path.join(tool, entry)
+if not entry or "/" in entry or not os.path.isfile(body) or os.path.islink(body):
+    sys.exit(f"BLOCKER: {name}: entry {entry!r} is not a file in the tool's directory")
+digest = hashlib.sha256(open(body, "rb").read()).hexdigest()
+if m.get("sha256") != digest:
+    sys.exit(f"BLOCKER: {name}: its script does not match the sha256 in its manifest; it was changed after it was forged")
+dest = os.path.join(pack, "tools", name)
+if os.path.exists(dest) and not replace:
+    sys.exit(f"BLOCKER: {pack} already has a tool {name}; --replace to take this one instead")
+shutil.rmtree(dest, ignore_errors=True)
+os.makedirs(dest)
+for root, dirs, files in os.walk(tool):
+    for f in files:
+        src = os.path.join(root, f)
+        rel = os.path.relpath(src, tool)
+        if rel == "manifest.json" or os.path.islink(src):
+            continue
+        os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)
+        shutil.copyfile(src, os.path.join(dest, rel))
+keep = {k: m[k] for k in ("name", "description", "params", "runtime", "entry", "timeout_seconds", "example") if k in m}
+with open(os.path.join(dest, "manifest.json"), "w", encoding="utf-8") as fh:
+    json.dump(keep, fh, ensure_ascii=False, indent=2)
+    fh.write("\n")
+print(f"adopted {name} into {pack}/tools/{name}; read it, then: pack.sh seal {pack}")
+ADOPT_EOF
 }
 
 case "${1:-}" in
@@ -511,6 +662,7 @@ case "${1:-}" in
   seal) shift; cmd_seal "$@" ;;
   path) shift; cmd_path "$@" ;;
   resolve) shift; cmd_resolve "$@" ;;
-  ""|-h|--help|help) sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+  adopt) shift; cmd_adopt "$@" ;;
+  ""|-h|--help|help) sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
   *) die "unknown command $1" ;;
 esac

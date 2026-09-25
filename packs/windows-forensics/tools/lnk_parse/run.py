@@ -188,6 +188,8 @@ def main():
     src = dump or path
     if not src:
         print(json.dumps({'error':'need path or dump'})); sys.exit(1)
+    if not os.path.isfile(src):
+        print(json.dumps({'error':'no such file', 'path': src})); sys.exit(1)
     with open(src,'rb') as f:
         f.seek(offset)
         data = f.read(size)

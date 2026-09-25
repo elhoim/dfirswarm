@@ -10,7 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import {
   SENTINEL_REL,
   normalizeBudget,
-  readEventLog,
+  readEventLogChecked,
   readInputsManifest,
   readLedger,
   type BudgetRecord,
@@ -51,12 +51,30 @@ export type RegistryRun = {
   host_caps?: Record<string, unknown>;
   /** The packs this run carried, with the checksum of each manifest. */
   packs?: Array<{ id: string; version: string; manifest_sha256: string }>;
+  /** Per pack with secrets: their names and how the panes got them (exposed · injected · withheld · not-set). */
+  pack_secrets?: Record<string, { names: string[]; mode: string }>;
+  /** Where each model's traffic went: every byte an agent read went there too. */
+  providers?: Array<{ model: string; hosts: string[]; local: boolean }>;
+  /** How the agents were isolated, and what each agent's VM was built from. */
+  isolation?: { mode?: string; [key: string]: unknown };
   /** "token", "ancestry" or "token-exposed": how the collector decided whose line each one was. */
   attribution?: string;
   /** "kernel", "partial", "none" or "unmeasured": what the panes' own probes said the guard was. */
   write_guard_measured?: string;
   started_at?: string;
   inputs?: { source?: string; files?: number; bytes?: number; enforce?: string; guard?: string; held?: string };
+  /** Whether the disk the run is kept on is encrypted: on · off · unknown. */
+  disk_encryption?: string;
+  /** A legal hold on the run, or null; a purged run's state is "purged". */
+  hold?: { reason?: string; at?: string; by?: string } | null;
+  /** Whether a notify hook was set; its command is never recorded. */
+  notify?: boolean;
+  /** How the run's files were let into a synced folder: "flag", "marker" or null. */
+  synced_folder_allowed_by?: string | null;
+  /** An earlier run's ledger handed in as hypotheses (--ledger-from), or null. */
+  ledger_from?: { run?: string; entries?: number; reviewed?: boolean } | null;
+  /** Started as root, by --allow-root. */
+  allow_root?: boolean;
   /** The kickoff's self-compaction options; absent on runs older than the feature. */
   self_compact?: { enabled?: boolean; notice_at?: string; warn_at?: string; compact_at?: string; prompt?: string | null; set?: { notice_at?: boolean; warn_at?: boolean; compact_at?: boolean } } | null;
 };
@@ -93,6 +111,12 @@ export type RunContext = {
   budgetRaw: Partial<BudgetRecord> | null;
   budget: BudgetRecord | null;
   events: SwarmEvent[];
+  /**
+   * Why the trace could not be read, when it is there and could not be (a
+   * link, not a regular file, an open that failed); null when it was read or
+   * is absent. A reader must say this, never "no trace".
+   */
+  trace_unreadable: string | null;
   sentinel: Record<string, string> | null;
   ledger: LedgerEntry[];
   inputs: InputsManifest | null;
@@ -118,10 +142,11 @@ export async function loadRunContext(
   };
   const budgetRaw = await readJsonFile<Partial<BudgetRecord>>(join(sandbox, "budget.json"));
   const budget: BudgetRecord | null = budgetRaw ? normalizeBudget(budgetRaw) : null;
-  const events = [...(await readEventLog(sandbox))];
+  const trace = await readEventLogChecked(sandbox);
+  const events = [...trace.events];
   const sentinelText = await readFile(join(sandbox, SENTINEL_REL), "utf8").catch(() => null);
   const sentinel = sentinelText === null ? null : opts.parseSentinel(sentinelText);
   const ledger = await readLedger(sandbox);
   const inputs = await readInputsManifest(sandbox);
-  return { sandbox, runsDir, run, team, budgetRaw, budget, events, sentinel, ledger, inputs };
+  return { sandbox, runsDir, run, team, budgetRaw, budget, events, trace_unreadable: trace.unreadable, sentinel, ledger, inputs };
 }

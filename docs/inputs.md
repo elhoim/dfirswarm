@@ -16,18 +16,41 @@ it is refused or undone. Results go in `work/`, where the usual claims apply.
 
 | Step | What lands in the sandbox |
 | --- | --- |
-| Copy | `inputs/` — a dereferenced copy (`cp -RL`), so a symlink in the source becomes a plain file and nothing outside the copy is reachable through it. |
+| Copy | `inputs/` — a copy with the evidence's links kept as the links they are, never followed: an extracted root's `etc/hosts -> /etc/hosts` stays a link to a path, and does not become this machine's own file. Only a link at the top of `--inputs` (the operator's, `ln -s /mnt/evidence/case.E01 ./`) is followed, to the file or directory it names. Links that lead out of the evidence are listed at kickoff. The copy is then checked against its source: first by name, kind and size (names merged on a case-insensitive volume, or a short read, stop the kickoff), then by content, each copied file's source read again and its SHA-256 compared with the manifest's (a progress line every 2 GiB on a large set). A mismatch, or a source that cannot be read again, stops the kickoff. `--no-verify-copy` keeps the first check only, and reads the evidence once instead of twice. `inputs.json` records which it was (`source_checked`: `{by: "content", files, mismatches, seconds}`, or the names-kinds-sizes form). |
 | Lock | Every file `r--r--r--`, every directory `r-xr-xr-x`. |
 | Clone | `.inputs-pristine/` — the same bytes once more (an APFS clone or a reflink where the filesystem has them, a copy elsewhere). The harness heals from it. |
-| Manifest | `inputs.json` — the source path, when it was copied, every file with its size and sha256, and which guard the panes got. |
+| Manifest | `inputs.json` — the source path, when it was copied, every file with its size and its sha256, sha1 and md5 (from one read, to set beside an imager's acquisition hashes), every link with its target, every FIFO, socket or device by its kind, `source_checked`, and which guard the panes got. A name that is not UTF-8 (a Windows-1254 name from an archive, on ext4) is kept exactly as base64 in `path_b64` (`link_b64` for a link's target) beside a readable `path`, and every check compares names as those bytes. |
 | Contract | `SWARM.md` gains an **Inputs (read-only)** section: the rule, the file list, what happens on a write. |
 | Registry | `inputs: {source, files, bytes, enforce, guard}` on the run, so the console can show it. |
 | Pane hook | With a kernel guard available, `.zsh/.zshenv`, `.bash/.bashrc` + `.bash/.bash_profile` and `.fsguard/plan.txt`; the workspace gets `ZDOTDIR` pointing at the first, and `HOME` at `.bash/` when the account's login shell is bash (below). |
 
-Limits: `--inputs-max-mb` (default 512) refuses a larger directory before
-anything is copied, and so does a directory with more than 5000 files: that
-is how many the watch and the checks cover, and the promise is not made
-where it cannot be kept.
+Limits: none by default, on size or on file count: evidence is as large as
+the case is. `--inputs-max-mb N` and `--inputs-max-files N` (or
+`SWARM_INPUTS_MAX_MB` and `SWARM_INPUTS_MAX_FILES` in the environment) are
+opt-in limits an operator may set; a directory above either is refused
+before anything is copied. What grows with the file count is the integrity
+sweep, which fingerprints every input.
+
+### Under `--isolation microvm`
+
+No copy and no pristine clone: the evidence is used where it is, mounted
+read-only and no-exec into every agent's VM, and the host refuses every
+write through that mount whatever the guest does. The no-exec is a flag in
+the guest's mount: each VM's probe reads it from the guest kernel's mount
+table, and a VM whose evidence mount allows execution is refused. The
+guest's root could remount it, so it guards against running evidence by
+mistake, not against a root that means to. `inputs/` is a
+link to it and `inputs.json` records `guard: "microvm"` and `held: "bind"`,
+links inside the evidence recorded as links. A link that leads out of the
+evidence is refused at kickoff, naming it, since no VM could follow it. When
+the examiner's account can write the evidence, the kickoff warns;
+`--inputs-copy` gives the run its own read-only copy instead
+(`held: "copy"`), which lies on the run's read-only floor in each VM and so
+is read-only but not no-exec. The manifest's sha256 is anchored outside the
+run at kickoff, and custody re-hashes the evidence in full at stop against it
+(a custody that runs out of time says which files it did not re-read).
+`--inputs-image` is macOS-only (`hdiutil`) in either mode: there is no Linux
+path and no read-only virtio-blk attach to a VM yet.
 
 ## Three layers, from the tool call down to the kernel
 
@@ -45,8 +68,8 @@ where it cannot be kept.
    size and mtime back with `touch -t`; ctime needs root), a write bit given
    back counts as a change, and so does a second name for the inode (a hard
    link out of `inputs/`, which is how a path-based check would be walked
-   around). A symlink planted inside is an addition: the kickoff dereferenced
-   every one it copied, so none is legitimate. A changed, re-permissioned or
+   around). A link planted inside is an addition: the manifest lists every
+   link the evidence had, with its target, so any other is new. A changed, re-permissioned or
    deleted file is put back from `.inputs-pristine/` at a fresh inode, a
    planted file or link is removed, the trace gets an `inputs_violation` line
    naming the agent, the path and the tool it came through, and the board
@@ -55,7 +78,11 @@ where it cannot be kept.
    turn ends (at most every 15 s per agent; a stat per file) and again inside
    `done`, which heals first and then records
    an `inputs_check` line: an `ok: false` there means a heal failed, not that
-   nobody looked.
+   nobody looked. A file the check reads again is held to the manifest's
+   sha1 and md5 too; sha256 decides, and a file whose sha256 matches while
+   another digest does not is listed as `digest_mismatch` in the `inputs`
+   tool's answer, since the record around the bytes then disagrees with
+   itself.
 3. **The kernel says no** where the host can do it (`scripts/fsguard.sh`; the
    same wrapper takes `--noexec DIR` for `--quarantine`, a seatbelt
    `process-exec*` deny or a `noexec` bind mount over `work/extracted/` and
@@ -137,12 +164,14 @@ token adds an absolute, existing directory, kept in `inputs-roots.json`
 under the runs directory so it survives a restart, and `DELETE
 /api/inputs/roots/N` removes one that was added that way (a root named at
 start cannot be removed from the form). The flag is off by default on
-purpose: anyone on the LAN holding the token could otherwise expose any
-directory on the machine, which is what the names-not-paths rule exists to
-prevent. `GET /api/inputs` is open
-like every other read on this app (the LAN can watch; the token gates what
-starts, stops or changes a run), so set names and a few file names per set
-are visible to the LAN: keep the root to what the LAN may know exists.
+purpose: anyone who can reach the console and holds the token could
+otherwise expose any directory on the machine, which is what the
+names-not-paths rule exists to prevent. `GET /api/inputs` is open like
+every other read on this app (whoever can reach it can watch; the token
+gates what starts, stops or changes a run). The console binds `127.0.0.1`,
+so by default that is this machine; started with `--host 0.0.0.0` it is the
+LAN, and set names and a few file names per set are then visible to it:
+keep the root to what the LAN may know exists.
 
 On a run, the header carries an **inputs read-only** chip with the guard
 summary, and the **Files** tab opens with the inputs: source, every file with

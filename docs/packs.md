@@ -129,32 +129,68 @@ named, with the version it wanted.
 
 ---
 
-## 4. Secrets never reach a pane
+## 4. Secrets
 
-A pack may declare secrets. The rule the harness already holds is that no
-credential is handed to an agent's pane, and a pack gets no exception.
+A pack may declare secrets. The rule the harness holds for a provider key is
+that no credential is handed to an agent's pane. A pack's secret keeps that
+rule in a microVM, where only a placeholder enters. On the host it keeps it
+only by withholding the secret, and hands it to the pack's tools only when
+the operator accepts that the agents can reach it too.
 
 - At install, `pack install` asks for each declared secret and writes it to
-  `~/.dfirswarm/packs/<id>/secrets.env`, mode 0600, owned by the operator. A
+  `~/.dfirswarm/secrets/<id>.env`, mode 0600, owned by the operator — beside
+  the packs, never inside one: a pack's directory is mounted read-only into
+  every agent's VM, and `verify` checks it against the pack's own checksums. A
   secret that is not required may be skipped; the tools that need it say so when
   they run.
 - At kickoff the secret is not exported into the pane environment and is not
-  written into the sandbox.
-- When an agent calls a pack tool, the secret is passed in the environment of
-  that tool's own child process. The tool reads it there. It is never in the
-  pane's own environment, so `env` in an agent's shell shows nothing.
-- The file itself is put out of the agent's reach by the same mechanism that
-  keeps a previous run's findings unreadable: a tmpfs over the directory inside
-  the namespace, or a Landlock rule denying the read. This is the honest part:
-  the extension runs inside the pane, so without that denial an agent could read
-  `secrets.env` with its own shell. Where the host cannot enforce the denial the
-  kickoff says so and the run record carries it, exactly as it does for every
-  other guard.
+  written into the sandbox. (A VM's environment gets a placeholder; below.)
+- When an agent calls a pack tool on the host, the secret is passed in the
+  environment of that tool's own child process. The tool reads it there. It
+  is never in the pane's own environment, so `env` in an agent's shell shows
+  nothing. (In a VM the environment holds a placeholder instead; below.)
+- The design also put the file itself out of the agent's reach, with the
+  mechanism that keeps a previous run's findings unreadable (a tmpfs over the
+  directory inside the namespace, or a Landlock rule denying the read). That
+  denial is not built. The extension runs inside the pane, so on the host an
+  agent can read the secrets file with its own shell, and that is why a pack
+  tool gets a secret there only when the operator accepts it (below).
 - The trace records the call and its parameters. It does not record the secret.
 
-A pack that declares a required secret on a host that cannot deny the read is
-refused at kickoff unless the operator says to go ahead, and the record names
-the gap.
+A pack's secrets are handed over only when the operator passes
+`--allow-pack-secrets`, on the host and in a VM alike, and a pack that
+requires one is refused without it; `--local-only` withholds them all and
+opens none of their hosts. The record's `pack_secrets` says, per pack, the
+mode and what happened to each secret by name.
+
+How this is implemented:
+
+- A secret entry may name the `hosts` its value is for:
+  `{"name": "VT_API_KEY", "title": "…", "why": "…", "hosts": ["www.virustotal.com"]}`.
+  Each is a host name, not a suffix: a VM whose secret is bound to `*.name`
+  is refused, since msb would swap the value in for any host under it.
+- On the host the extension cannot be kept from what its own pane can read, so
+  a pack tool gets its pack's secrets only when the operator passes
+  `--allow-pack-secrets`, and a pack that requires one is refused without it.
+  The run record's `pack_secrets` says, per pack, `exposed`, `withheld` or
+  `not-set`.
+- Under `--isolation microvm` the value never enters the VM. With
+  `--allow-pack-secrets` each secret is given to the VM as a placeholder
+  bound to the pack's `hosts`; the host swaps the real value in on the way to
+  those hosts only, and a placeholder sent anywhere else is refused. The
+  placeholder is in the whole VM's environment, so any process there can use
+  it against those hosts: that is why the flag is needed here too. The
+  record says `injected`. A secret with no `hosts` cannot be bound, and is
+  withheld; a required secret that cannot be bound stops the kickoff.
+- On the host, only the pack's own tools get the secret, in their child
+  process's environment; a tool forged during the run gets none. In a VM the
+  placeholder is in the environment of the whole VM, under the secret's own
+  name, so any process in that VM, an agent's shell included, can use the
+  secret at the pack's `hosts` (look up a hash, or upload a file there). The
+  value itself never enters the VM, and the placeholder is refused anywhere
+  but those hosts.
+- The trace row of the call, and the output handed back to the model, carry
+  `[secret NAME]` where the value would have been.
 
 ---
 
@@ -165,9 +201,19 @@ and says so in `NOTICE`, with the licence text beside the code in
 `vendor/<project>/LICENCE`.
 
 Anything that may not be redistributed is declared in `requires/host.json`
-instead, with the reason and the install line per platform. The kickoff checks
-for it and records what the host had. A missing binary is named in the record
-and the run goes ahead rather than refusing to start.
+instead, with the reason and the install line per platform. What the kickoff
+does with it depends on the mode:
+
+- **Host runs** do not read it. The agents install what they need
+  (`--allow-install`) or work without it, and the pack's tools say what is
+  missing when they run.
+- **Under `--isolation microvm`** each VM's probe looks for every program a
+  pack marks as required (not `optional`). One missing from the image stops
+  the kickoff, unless the agents may install (`--allow-install`), in which
+  case it is a warning they are told about. An image built from another
+  version of a pack is a warning, recorded in `vm/<id>.json`, not a refusal.
+  `--toolbox` in a VM run also lists every program the packs name, required
+  or optional, in `toolbox.json`.
 
     {
       "binaries": [
@@ -200,9 +246,10 @@ At kickoff:
 
 The last one is a run with no pack at all, exactly as before.
 
-`--pack` seeds the pack's tools into the run the way `--tools-from` does, adds
-its host requirements to the toolbox check, puts the skill index in front of
-every agent, and lets `skill` fetch any body. The run record names every pack,
+`--pack` seeds the pack's tools into the run the way `--tools-from` does, puts
+the skill index in front of every agent, and lets `skill` fetch any body.
+Under `--isolation microvm` it also picks the image and adds the pack's host
+requirements to the VM's probe and to the toolbox check (§5). The run record names every pack,
 its version and its checksum, so a reader knows which method produced the
 result.
 
@@ -260,3 +307,15 @@ Volatility would be a derived work of Volatility rather than of this
 repository. And almost every host binary is marked **optional**: the packs'
 own tools use the standard library, so a host with none of them still works,
 and each host tool widens what can be established rather than being required.
+
+## Tools that call programs, and tools that mount
+
+A tool's manifest may name the programs it calls, `"requires": ["fls",
+"icat"]` (the tool library's manifests do; `make_tool` takes the same list).
+The image choice for a VM run counts them, each VM's probe looks for them,
+and a program the image lacks is said at kickoff: the run goes on, and that
+tool will fail when it is called. In a VM an agent writes only its own
+directories, so a tool that mounts something (a volume shadow copy, a
+memory filesystem) mounts it under `work/<agent id>/`, which is where
+`vss_stores` and `mem_fs` put theirs; the mount is that VM's alone, and what
+is derived from it counts once it is a file there.

@@ -1,6 +1,6 @@
 # DFIR Swarm web app — design
 
-The LAN web app for `runs/`. Hierarchy stays **swarms → threads → agents → traces**; the look is ours. Not a dark terminal. Working name for the visual language: **field notebook** — warm paper, ink, a few coloured pens.
+The local web app for `runs/`: it binds `127.0.0.1`, and `--host 0.0.0.0` opens it to the LAN. Hierarchy stays **swarms → threads → agents → traces**; the look is ours. Not a dark terminal. Working name for the visual language: **field notebook** — warm paper, ink, a few coloured pens.
 
 Stack: Vite + React 19 + TypeScript + Tailwind v4, shadcn-style primitives on Radix (`ui/src/components/ui/*`). Server: `scripts/ui-server.ts` → `scripts/ui/app.ts` on `node:http` (no runtime deps), JSON API + SSE, static `ui/dist`.
 

@@ -17,10 +17,13 @@
   },
   "runtime": "python3",
   "entry": "run.py",
+  "requires": [
+    "esedbexport"
+  ],
   "timeout_seconds": 120,
   "example": "{\"path\": \"work/extracted/WebCacheV01.dat\", \"table\": \"Containers\", \"limit\": 50}",
   "by": "maintainer",
   "at": "2026-09-20T12:00:00.000Z",
-  "version": 1,
-  "sha256": "22a2f5e8803750340cc85f13ebac9b6c36d18cd1a1350c1a87f084ab5cebcc48"
+  "version": 3,
+  "sha256": "9880918c09099bee364da4c766a37b804c152f2f2b6e0d2857541b09d7788fe7"
 }
