@@ -48,7 +48,10 @@ cmd=['sqlite3']
 if csv:
     cmd += ['-csv','-header']
 cmd += [db_arg, sql]
-proc=subprocess.run(cmd, capture_output=True, text=True)
+# A text column can hold bytes that are not UTF-8 (an ActivitiesCache
+# Payload was, on the sixth CTF round, and the tool died decoding it):
+# they come back as \\xNN escapes, every byte still said.
+proc=subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='backslashreplace')
 print(json.dumps({'ok': proc.returncode==0, 'returncode': proc.returncode, 'stdout': proc.stdout, 'stderr': proc.stderr}))
 if proc.returncode != 0:
     raise SystemExit(proc.returncode)

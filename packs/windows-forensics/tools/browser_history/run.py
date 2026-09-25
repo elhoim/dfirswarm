@@ -53,6 +53,24 @@ def fail(message, **extra):
     raise SystemExit(1)
 
 
+def statements(sql):
+    """The statements of `sql`, each whole: split at a ";" only where SQLite
+    says the text so far is a complete statement, so one inside a string or
+    a comment stays where it is."""
+    out, buf = [], ""
+    for part in sql.split(";"):
+        buf += part + ";"
+        if sqlite3.complete_statement(buf):
+            s = buf.strip().rstrip(";").strip()
+            if s:
+                out.append(s)
+            buf = ""
+    rest = buf.rstrip(";").strip()
+    if rest:
+        out.append(rest)
+    return out
+
+
 def main():
     try:
         args = json.load(sys.stdin)
@@ -73,9 +91,16 @@ def main():
         if query not in QUERIES:
             fail("unknown query", query=query, known=sorted(QUERIES))
         sql = QUERIES[query]
-    if not sql.lstrip().lower().startswith(("select", "with", "pragma")):
-        # This reads evidence. A statement that could write does not belong.
-        fail("sql must be a SELECT, WITH or PRAGMA")
+    # Several statements are run one by one: sqlite3's execute takes one,
+    # and "You can only execute one statement at a time" was the answer two
+    # agents got for "schema; count" (sixth CTF round).
+    stmts = statements(sql)
+    if not stmts:
+        fail("sql is empty")
+    for s in stmts:
+        if not s.lower().startswith(("select", "with", "pragma")):
+            # This reads evidence. A statement that could write does not belong.
+            fail("sql must be SELECT, WITH or PRAGMA statements", statement=s)
 
     limit = args.get("limit", 200)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
@@ -96,26 +121,25 @@ def main():
         # Read-write on the *copy*, so SQLite replays and checkpoints the WAL.
         conn = sqlite3.connect(copy)
         conn.row_factory = sqlite3.Row
+        results = []
         try:
-            cur = conn.execute(sql)
-            rows = [dict(r) for r in cur.fetchmany(limit)]
-            truncated = cur.fetchone() is not None
-            columns = [d[0] for d in (cur.description or [])]
-        except sqlite3.Error as exc:
-            fail("sqlite refused the query", reason=str(exc), sql=sql[:400])
+            for s in stmts:
+                try:
+                    cur = conn.execute(s)
+                    rows = [dict(r) for r in cur.fetchmany(limit)]
+                    truncated = cur.fetchone() is not None
+                    columns = [d[0] for d in (cur.description or [])]
+                except sqlite3.Error as exc:
+                    fail("sqlite refused the query", reason=str(exc), sql=s, done=len(results))
+                results.append({"sql": s, "columns": columns, "rows": rows, "row_count": len(rows), "truncated": truncated})
         finally:
             conn.close()
 
-        print(json.dumps({
-            "path": path,
-            "query": None if args.get("sql") else query,
-            "columns": columns,
-            "rows": rows,
-            "row_count": len(rows),
-            "truncated": truncated,
-            "sidecars_copied": sidecars,
-            "wal_replayed": any(s.endswith("-wal") for s in sidecars),
-        }, indent=2, default=str))
+        out = {"path": path, "query": None if args.get("sql") else query}
+        # One statement answers as it always has; several answer each in turn.
+        out.update({k: v for k, v in results[0].items() if k != "sql"} if len(results) == 1 else {"results": results})
+        out.update({"sidecars_copied": sidecars, "wal_replayed": any(s.endswith("-wal") for s in sidecars)})
+        print(json.dumps(out, indent=2, default=str))
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

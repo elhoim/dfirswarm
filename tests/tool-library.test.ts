@@ -1054,6 +1054,81 @@ test("sqlite_query says a file is not SQLite, and whether it looks encrypted, in
   }
 });
 
+test("chunk_needles streams what icat gives it, never holding it whole, and says why icat failed", async () => {
+  // Sixth CTF round: chunk_needles on pagefile.sys held icat's output in
+  // memory until the VM's kernel killed it, twice, and nothing was said.
+  for (const script of [
+    join(LIB, "..", "packs", "computer-forensics-base", "tools", "chunk_needles", "run.py"),
+    join(LIB, "chunk_needles", "run.py"),
+  ]) {
+    assert.doesNotMatch(await readFile(script, "utf8"), /BytesIO\(r\.stdout\)/, `${script} reads icat's output whole`);
+    await withCwd(async (cwd, bin) => {
+      const icat = join(bin, "icat");
+      await writeFile(icat, `#!/bin/sh\npython3 -c 'import sys; w = sys.stdout.buffer.write\nfor _ in range(48): w(b"." * 1048576)\nw(b"NEEDLEX")'\n`, "utf8");
+      await chmod(icat, 0o755);
+      let r = await runPy(script, cwd, { needles: "NEEDLEX", inode: 80513, image: "inputs/AF-Case2.E01", offset: 2048 }, bin);
+      assert.equal(r.code, 0, r.stderr + r.stdout);
+      const body = JSON.parse(r.stdout) as { scanned_bytes: number; hits: Record<string, { ascii: number }> };
+      assert.equal(body.scanned_bytes, 48 * 1048576 + 7);
+      assert.equal(body.hits.NEEDLEX.ascii, 1, "a needle at the very end of the stream is found");
+      await writeFile(icat, `#!/bin/sh\necho "Cannot determine file system type" >&2\nexit 1\n`, "utf8");
+      r = await runPy(script, cwd, { needles: "x", inode: 5, image: "inputs/AF-Case2.E01", offset: 0 }, bin);
+      assert.notEqual(r.code, 0);
+      assert.match((JSON.parse(r.stdout) as { error: string }).error, /Cannot determine file system type/);
+    });
+  }
+});
+
+test("sqlite_query gives back bytes that are not UTF-8 as escapes instead of dying on them", async (t) => {
+  // Sixth CTF round: an ActivitiesCache Payload with such bytes was a
+  // UnicodeDecodeError traceback.
+  const { spawnSync } = await import("node:child_process");
+  if (spawnSync("sqlite3", ["-version"]).status !== 0) {
+    t.skip("no sqlite3 shell on this host");
+    return;
+  }
+  for (const script of [
+    join(LIB, "..", "packs", "computer-forensics-base", "tools", "sqlite_query", "run.py"),
+    join(LIB, "sqlite_query", "run.py"),
+  ]) {
+    await withCwd(async (cwd) => {
+      await mkdir(join(cwd, "work"), { recursive: true });
+      const made = spawnSync("sqlite3", [join(cwd, "work", "a.db"), "create table a(x); insert into a values(cast(x'ff41' as text));"], { encoding: "utf8" });
+      assert.equal(made.status, 0, made.stderr);
+      const r = await runPy(script, cwd, { db_path: "work/a.db", sql: "select x from a;" });
+      assert.equal(r.code, 0, r.stderr + r.stdout);
+      assert.equal((JSON.parse(r.stdout) as { stdout: string }).stdout, "\\xffA\n");
+    });
+  }
+});
+
+test("browser_history runs several statements one by one, and still refuses one that could write", async () => {
+  // Sixth CTF round: "schema; count" answered "You can only execute one
+  // statement at a time", to two agents.
+  const { spawnSync } = await import("node:child_process");
+  for (const script of [
+    join(LIB, "..", "packs", "windows-forensics", "tools", "browser_history", "run.py"),
+    join(LIB, "browser_history", "run.py"),
+  ]) {
+    await withCwd(async (cwd) => {
+      await mkdir(join(cwd, "work"), { recursive: true });
+      const made = spawnSync("python3", ["-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.executescript(\"create table urls(url); insert into urls values('http://a;b'),('http://c');\"); c.commit()", join(cwd, "work", "h.db")], { encoding: "utf8" });
+      assert.equal(made.status, 0, made.stderr);
+      let r = await runPy(script, cwd, { path: "work/h.db", sql: "select count(*) n from urls; select url from urls where url like '%;%';" });
+      assert.equal(r.code, 0, r.stderr + r.stdout);
+      const many = JSON.parse(r.stdout) as { results: Array<{ sql: string; rows: Array<Record<string, unknown>> }> };
+      assert.deepEqual(many.results.map((x) => x.rows), [[{ n: 2 }], [{ url: "http://a;b" }]], "a ; inside a string stays in its statement");
+      r = await runPy(script, cwd, { path: "work/h.db", sql: "select count(*) n from urls" });
+      const one = JSON.parse(r.stdout) as { rows: unknown[]; results?: unknown };
+      assert.deepEqual(one.rows, [{ n: 2 }]);
+      assert.equal(one.results, undefined, "one statement answers as it always has");
+      r = await runPy(script, cwd, { path: "work/h.db", sql: "select 1; delete from urls" });
+      assert.notEqual(r.code, 0);
+      assert.deepEqual(JSON.parse(r.stdout), { error: "sql must be SELECT, WITH or PRAGMA statements", statement: "delete from urls" });
+    });
+  }
+});
+
 test("shellbags decodes the shell items regipy hands over as hex, with the GUID in its place", async () => {
   // regipy gives a REG_BINARY value as a hex string; the tool took only
   // bytes, so no item was ever decoded (third CTF round). And a root

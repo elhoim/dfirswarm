@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import io, json, sys, subprocess, os
+import json, sys, subprocess, os
 args = json.load(sys.stdin)
 needles = args.get("needles") or ""
 path = args.get("path") or ""
@@ -68,11 +68,17 @@ else:
     if offset is not None:
         cmd += ["-o", str(offset)]
     cmd += [image, str(inode)]
-    r = subprocess.run(cmd, capture_output=True)
-    if r.returncode != 0:
-        err = r.stderr.decode("utf-8", "replace").strip() or f"icat exit {r.returncode}"
-        print(json.dumps({"error": err, "image": image, "inode": inode}))
+    # Streamed, never held whole: capture_output kept a pagefile's gigabytes
+    # in memory until the VM's kernel killed the tool (sixth CTF round).
+    import tempfile
+    with tempfile.TemporaryFile() as errf:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf)
+        hits, scanned = scan_fh(proc.stdout)
+        rc = proc.wait()
+        errf.seek(0)
+        err_text = errf.read().decode("utf-8", "replace").strip()
+    if rc != 0:
+        print(json.dumps({"error": err_text or f"icat exit {rc}", "image": image, "inode": inode, "scanned_bytes": scanned}))
         sys.exit(1)
-    hits, scanned = scan_fh(io.BytesIO(r.stdout))
     src = f"icat:{inode}"
 print(json.dumps({"source": src, "scanned_bytes": scanned, "hits": hits}))

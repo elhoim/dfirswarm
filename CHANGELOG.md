@@ -684,6 +684,17 @@ not surprised:
   the deepest key that is and the names under it (windows-forensics 1.2.9,
   the tool library's regkv 3 and regkeys 4). regkv printed regipy's
   traceback, twice on the sixth CTF round, for keys an agent had guessed.
+- **`chunk_needles` streams what `icat` gives it** (computer-forensics-base
+  1.2.13, the tool library's 3). It held icat's whole output in memory, and on
+  a pagefile the VM's kernel killed it with nothing said, twice on the sixth
+  CTF round. A failed icat says why, with how far the scan got.
+- **`sqlite_query` gives back bytes that are not UTF-8 as `\xNN` escapes**
+  where it died on a `UnicodeDecodeError` (an ActivitiesCache Payload).
+- **`browser_history` runs several statements one by one** (windows-forensics
+  1.2.9, the tool library's 2), each answered in `results`, where "schema;
+  count" was "You can only execute one statement at a time". A `;` inside a
+  string stays in its statement, every statement must still be a SELECT, WITH
+  or PRAGMA, and a refused query is quoted whole.
 - **`sqlite_query` says when a file is not SQLite** (computer-forensics-base
   1.2.13, the tool library's 4): its header, the first page's entropy, and
   whether that reads as an encrypted database (SQLCipher or an app's own) or
