@@ -68,7 +68,7 @@ runs one of them without saying so.
 | `hdfs_node_icat` | python3 | `s9a5f03` | 2 | Extract an inode from a cluster node's image with icat and hash what it wrote. node picks one of the HDFS cas… |
 | `icat_extract` | python3 | `s864a08` | 3 | Extract a file from the E01 image by inode to a specified output path. Returns JSON with path, size, and sha2… |
 | `icat_root` | python3 | `s9d8306` | 5 | Extract an inode from an EXT4 volume with icat. The Webserver case's image and its 503808-sector offset are t… |
-| `ioc_scan` | python3 | `s183900` | 1 | Stream a large binary for ASCII and UTF-16LE needles; return offsets, unique strings, and context snippets. |
+| `ioc_scan` | python3 | `s183900` | 2 | Stream a large binary for ASCII and UTF-16LE needles; return offsets, unique strings, and context snippets. |
 | `lnk_parse` | python3 | `s183902` | 1 | Parse a Windows LNK (or a dump slice) and return flags, FILETIME timestamps, local/common paths, arguments, a… |
 | `mam_pf_parse` | python3 | `s2f6600` | 1 | Decompress a MAM-wrapped Windows prefetch file and return executable name, version, run count, and non-zero l… |
 | `mam_scan` | python3 | `s183901` | 1 | Scan a raw dump for MAM\x04 prefetch, decompress LZXPRESS Huffman, return name, run count, last-run FILETIMEs… |
@@ -80,7 +80,7 @@ runs one of them without saying so.
 | `regkv` | python3 | `s9f2005` | 2 | Read a Windows registry hive with regipy and dump a key's values plus subkeys with their last-modified (FILET… |
 | `sig_carve` | python3 | `s183906` | 1 | Scan a binary file for multiple file signatures (magic bytes) and return offsets, context, and estimated size… |
 | `sigscan_e01` | python3 | `s5d1001` | 3 | Scan an E01/raw image for a byte signature via TSK img_cat (logical media, not the EWF wrapper). Returns offs… |
-| `sqlite_query` | python3 | `s881002` | 2 | Run a read-only sqlite3 query against a database file and return stdout/stderr plus exit code. |
+| `sqlite_query` | python3 | `s881002` | 3 | Run a read-only sqlite3 query against a database file and return stdout/stderr plus exit code. |
 | `usn_journal` | python3 | `maintainer` | 1 | Parse an NTFS change journal ($UsnJrnl:$J) into records: name, USN, timestamp, reason bits and file reference… |
 | `utf16_urls` | python3 | `s5d1003` | 1 | Extract UTF-16LE and ASCII URL/Visited strings from a local file; filter optional substrings. Returns unique … |
 | `volrun` | python3 | `s69d306` | 2 | Run a Volatility 3 plugin against a memory image with typed arguments. Returns stdout/stderr. |

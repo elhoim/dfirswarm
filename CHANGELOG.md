@@ -677,8 +677,11 @@ not surprised:
   and, like `regkv` and `regkeys`, looked keys up without a leading
   backslash, which regipy answers by dropping the path's first part: a
   UsrClass.dat's BagMRU was "not there", and an NTUSER.DAT answered
-  Software\...\BagMRU under the Local Settings name.
-  computer-forensics-base 1.2.6, windows-forensics 1.2.5.
+  Software\...\BagMRU under the Local Settings name. `catalog_search`
+  takes a catalogue by the name the index lists (`catalog=Case4.E01`, or
+  `Case4.E01/p2048`), which was a traceback; `sqlite_query` without `sql`
+  and `ioc_scan` on a missing path answer in JSON instead of raising.
+  computer-forensics-base 1.2.7, windows-forensics 1.2.5.
 
 - **The venv was 642 claims and seven violations, and the panes' temp
   files were more.** With `--allow-install` one agent's pip created

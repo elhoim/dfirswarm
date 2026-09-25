@@ -58,21 +58,24 @@ def _resolve_offset(image, explicit=None):
 
 
 def _resolve_catalog(explicit=None):
-    """The catalogue directory for the one image the kickoff catalogued."""
+    """The catalogue directory for the one image the kickoff catalogued, or
+    the one named: by its name under catalog/, as the index lists it
+    (catalog=Case4.E01 was a traceback), or by its path."""
     import os
-    if explicit:
-        return explicit
     root = "catalog"
+    subs = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))) if os.path.isdir(root) else []
+    if explicit:
+        for cand in (explicit, os.path.join(root, explicit)):
+            if os.path.isdir(cand):
+                return cand
+        raise SystemExit(json.dumps({"ok": False, "error": "no catalogue %s" % explicit, "candidates": subs}))
     if not os.path.isdir(root):
         raise SystemExit('{"ok": false, "error": "no catalog/ in this run; pass catalog="}')
-    subs = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
     if len(subs) == 1:
         return os.path.join(root, subs[0])
     if not subs:
         raise SystemExit('{"ok": false, "error": "catalog/ is empty; pass catalog="}')
-    raise SystemExit('{"ok": false, "error": "several catalogues; pass catalog=", "candidates": %s}' % subs)
-
-
+    raise SystemExit('{"ok": false, "error": "several catalogues; pass catalog=", "candidates": %s}' % json.dumps(subs))
 
 def fail(msg, **extra):
     print(json.dumps({"error": msg, **extra}))

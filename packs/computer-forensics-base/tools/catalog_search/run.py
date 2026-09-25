@@ -36,19 +36,24 @@ def _resolve_image(explicit=None):
 
 
 def _resolve_catalog(explicit=None):
-    """The catalogue directory for the one image the kickoff catalogued."""
+    """The catalogue directory for the one image the kickoff catalogued, or
+    the one named: by its name under catalog/, as the index lists it
+    (catalog=Case4.E01 was a traceback), or by its path."""
     import os
-    if explicit:
-        return explicit
     root = "catalog"
+    subs = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))) if os.path.isdir(root) else []
+    if explicit:
+        for cand in (explicit, os.path.join(root, explicit)):
+            if os.path.isdir(cand):
+                return cand
+        raise SystemExit(json.dumps({"ok": False, "error": "no catalogue %s" % explicit, "candidates": subs}))
     if not os.path.isdir(root):
         raise SystemExit('{"ok": false, "error": "no catalog/ in this run; pass catalog="}')
-    subs = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
     if len(subs) == 1:
         return os.path.join(root, subs[0])
     if not subs:
         raise SystemExit('{"ok": false, "error": "catalog/ is empty; pass catalog="}')
-    raise SystemExit('{"ok": false, "error": "several catalogues; pass catalog=", "candidates": %s}' % subs)
+    raise SystemExit('{"ok": false, "error": "several catalogues; pass catalog=", "candidates": %s}' % json.dumps(subs))
 
 args = json.load(sys.stdin)
 pattern = args.get("pattern") or ""
@@ -62,12 +67,16 @@ except re.error as e:
     print(json.dumps({"error": str(e)}))
     sys.exit(1)
 ex = re.compile(exclude, flags) if exclude else None
-base = _resolve_catalog(args.get("catalog") if isinstance(args, dict) else None)
+base = os.path.normpath(_resolve_catalog(args.get("catalog") if isinstance(args, dict) else None))
+# catalog=Case4.E01/p2048 names the filesystem as well.
+named_part = ""
+if re.fullmatch(r"p\d+", os.path.basename(base)):
+    base, named_part = os.path.dirname(base), os.path.basename(base)
 # The catalog keeps one directory per filesystem, named by its first sector
 # (p0 for an image with no partition table, p2048 for a usual first
 # partition): the one there is, or the one the caller names.
 parts = sorted(n for n in os.listdir(base) if re.fullmatch(r"p\d+", n) and os.path.isdir(os.path.join(base, n)))
-want = str(args.get("partition") or "").strip()
+want = str(args.get("partition") or named_part).strip()
 if want and not want.startswith("p"):
     want = "p" + want
 if which == "partitions":

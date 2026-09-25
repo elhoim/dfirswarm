@@ -40,6 +40,9 @@ for n in needles:
         needles_b.append(("ascii", n, b))
         needles_b.append(("utf16", n, n.encode("utf-16le")))
 
+if not os.path.isfile(path):
+    print(json.dumps({"error": "no such file", "path": path}))
+    sys.exit(1)
 size = os.path.getsize(path)
 end = size if length is None else min(size, start + int(length))
 hits = []

@@ -1,5 +1,9 @@
 import json, subprocess, sys, os, shlex, urllib.parse
 obj=json.load(sys.stdin)
+missing=[k for k in ('db_path','sql') if not isinstance(obj.get(k), str) or not obj.get(k)]
+if missing:
+    print(json.dumps({'ok': False, 'error': 'need ' + ' and '.join(missing), 'params': ['db_path', 'sql', 'csv', 'readonly']}))
+    raise SystemExit(1)
 db=obj['db_path']
 sql=obj['sql']
 csv=bool(obj.get('csv', False))

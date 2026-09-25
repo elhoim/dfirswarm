@@ -44,6 +44,6 @@
   "example": "{\"pattern\": \"SysInternal\", \"which\": \"filelist\"}",
   "by": "sd1d100",
   "at": "2026-09-18T14:14:47.839Z",
-  "version": 4,
-  "sha256": "2a8c2b5571307ba1f00cc883009a26bd50fd1aee38046813411024a0588b4e1b"
+  "version": 5,
+  "sha256": "36b3df5c9827c6f68fbdd03f9f5e38a8b3afbad3d609cf5b6f8a8a72b4023a46"
 }

@@ -1023,3 +1023,36 @@ test("shellbags decodes the shell items regipy hands over as hex, with the GUID 
   assert.deepEqual(got.order, [3, 1, 2, 0]);
   assert.equal(got.not_hex, null);
 });
+
+test("catalog_search takes a catalogue by the name the index gives it, and bad input is an answer, not a traceback", async () => {
+  // Third CTF round: catalog=Case4.E01 (the name catalog/README.md lists)
+  // was FileNotFoundError; sqlite_query without sql= was KeyError; ioc_scan
+  // on a missing path was FileNotFoundError.
+  const tools = join(LIB, "..", "packs", "computer-forensics-base", "tools");
+  await withCwd(async (cwd) => {
+    for (const [dir, line] of [["p2048", "Users/alice/NTUSER.DAT"], ["p409600", "Data/secret.txt"]]) {
+      await mkdir(join(cwd, "catalog", "Case4.E01", dir), { recursive: true });
+      await writeFile(join(cwd, "catalog", "Case4.E01", dir, "filelist.txt"), `${line}\n`);
+    }
+    await mkdir(join(cwd, "catalog", "memdump.mem"), { recursive: true });
+    let r = await runPy(join(tools, "catalog_search", "run.py"), cwd, { pattern: "NTUSER", which: "filelist", catalog: "Case4.E01", partition: "2048" });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /NTUSER\.DAT/);
+    r = await runPy(join(tools, "catalog_search", "run.py"), cwd, { pattern: "secret", which: "filelist", catalog: "Case4.E01/p409600" });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /Data\/secret\.txt/);
+    r = await runPy(join(tools, "catalog_search", "run.py"), cwd, { pattern: "x", which: "filelist", catalog: "Case5.E01" });
+    assert.notEqual(r.code, 0);
+    assert.deepEqual(JSON.parse(r.stdout + r.stderr), { ok: false, error: "no catalogue Case5.E01", candidates: ["Case4.E01", "memdump.mem"] });
+    r = await runPy(join(tools, "catalog_search", "run.py"), cwd, { pattern: "x", which: "filelist" });
+    assert.deepEqual(JSON.parse(r.stdout + r.stderr).candidates, ["Case4.E01", "memdump.mem"], "several catalogues are a JSON list");
+
+    r = await runPy(join(tools, "ioc_scan", "run.py"), cwd, { path: "work/nothing-here.txt", needles: "x" });
+    assert.notEqual(r.code, 0);
+    assert.deepEqual(JSON.parse(r.stdout), { error: "no such file", path: "work/nothing-here.txt" });
+    r = await runPy(join(tools, "sqlite_query", "run.py"), cwd, { db_path: "work/x.db", query: "tables" });
+    assert.notEqual(r.code, 0);
+    assert.match(r.stdout, /"error": "need sql"/);
+    assert.doesNotMatch(r.stdout + r.stderr, /Traceback/);
+  });
+});
