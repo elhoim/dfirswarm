@@ -135,7 +135,9 @@ def decode_item(data):
     if klass == 0x1F:
         item["type"] = "root folder"
         if len(data) >= 20:
-            guid = struct.unpack_from("<IHH", data, 4) + (data[10:12].hex(), data[12:18].hex())
+            # Data1-3 little-endian at 4, Data4 as stored at 12 (it was read
+            # at 10, two bytes early: My Computer came out -6910-A2D808002B30).
+            guid = struct.unpack_from("<IHH", data, 4) + (data[12:14].hex().upper(), data[14:20].hex().upper())
             item["guid"] = "{%08X-%04X-%04X-%s-%s}" % guid
         item["decoded"] = "layout"
         item["name"] = item.get("guid", "")
@@ -164,6 +166,18 @@ def decode_item(data):
     return item
 
 
+def binary(value):
+    """A REG_BINARY value as bytes. regipy hands one over as a hex string (5.x
+    and 6.x alike), and this tool took only bytes: in the third CTF round no
+    shell item was ever decoded, every entry said "no shell item on the
+    parent" and MRUListEx gave no order."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    if isinstance(value, str) and len(value) % 2 == 0 and re.fullmatch(r"[0-9A-Fa-f]*", value):
+        return bytes.fromhex(value)
+    return None
+
+
 def mru_order(values):
     raw = values.get("MRUListEx")
     if not isinstance(raw, (bytes, bytearray)):
@@ -175,6 +189,19 @@ def mru_order(values):
             break
         order.append(index)
     return order
+
+
+def rooted_key(hive, path):
+    """The key at `path`, from the hive's root. regipy's get_key takes the
+    first part of a path that does not start with a backslash for the root's
+    own name and drops it: "Local Settings\\...\\BagMRU" in a UsrClass.dat was
+    not found, and in an NTUSER.DAT it answered Software\\...\\BagMRU under
+    the name asked for. The path is rooted here, the root's name dropped when
+    the caller gave it, and / taken for \\."""
+    parts = [p for p in str(path).replace("/", "\\").split("\\") if p]
+    if parts and parts[0].lower() == (hive.root.name or "").lower():
+        parts = parts[1:]
+    return hive.get_key("\\" + "\\".join(parts)) if parts else hive.root
 
 
 def main():
@@ -212,7 +239,7 @@ def main():
     tried = []
     for candidate in roots:
         try:
-            root_key = hive.get_key(candidate)
+            root_key = rooted_key(hive, candidate)
             root_path = candidate
             break
         except Exception as exc:
@@ -230,7 +257,8 @@ def main():
         values = {}
         try:
             for value in key.iter_values():
-                values[value.name] = value.value
+                raw = binary(value.value)
+                values[value.name] = raw if raw is not None else value.value
         except Exception as exc:
             problems.append({"key": key_path, "why": "values unreadable: %s" % exc})
         order = mru_order(values)

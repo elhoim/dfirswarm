@@ -53,6 +53,19 @@ def node(key):
         out["values"].append(entry)
     return out
 
+def rooted_key(hive, path):
+    """The key at `path`, from the hive's root. regipy's get_key takes the
+    first part of a path that does not start with a backslash for the root's
+    own name and drops it: "Local Settings\\...\\BagMRU" in a UsrClass.dat was
+    not found, and in an NTUSER.DAT it answered Software\\...\\BagMRU under
+    the name asked for. The path is rooted here, the root's name dropped when
+    the caller gave it, and / taken for \\."""
+    parts = [p for p in str(path).replace("/", "\\").split("\\") if p]
+    if parts and parts[0].lower() == (hive.root.name or "").lower():
+        parts = parts[1:]
+    return hive.get_key("\\" + "\\".join(parts)) if parts else hive.root
+
+
 def main():
     data = json.load(sys.stdin)
     hive_path = data["hive"]
@@ -62,7 +75,7 @@ def main():
     h = RegistryHive(hive_path)
     if key_path:
         try:
-            k = h.get_key(key_path)
+            k = rooted_key(h, key_path)
         except RegistryKeyNotFoundException:
             print(json.dumps({"error": "key not found: " + key_path}))
             return 1

@@ -76,8 +76,8 @@ runs one of them without saying so.
 | `prefetch_mam` | python3 | `sbe1803` | 2 | Decompresses MAM-compressed or plain Windows Prefetch files and returns header fields, last-run FILETIMEs, an… |
 | `recyclebin_i` | python3 | `maintainer` | 1 | Parse $Recycle.Bin $I metadata: original path, original size and deletion time, for one file or every $I unde… |
 | `reg_hive_query` | python3 | `sbe1805` | 1 | Query a Windows registry hive file (regipy) and return a key's values and subkey names as JSON. |
-| `regkeys` | python3 | `sf4b205` | 2 | Dump a registry key's values and subkeys from a hive with regipy. Text values are decoded, REG_BINARY comes b… |
-| `regkv` | python3 | `s9f2005` | 1 | Read a Windows registry hive with regipy and dump a key's values plus subkeys with their last-modified (FILET… |
+| `regkeys` | python3 | `sf4b205` | 3 | Dump a registry key's values and subkeys from a hive with regipy. Text values are decoded, REG_BINARY comes b… |
+| `regkv` | python3 | `s9f2005` | 2 | Read a Windows registry hive with regipy and dump a key's values plus subkeys with their last-modified (FILET… |
 | `sig_carve` | python3 | `s183906` | 1 | Scan a binary file for multiple file signatures (magic bytes) and return offsets, context, and estimated size… |
 | `sigscan_e01` | python3 | `s5d1001` | 3 | Scan an E01/raw image for a byte signature via TSK img_cat (logical media, not the EWF wrapper). Returns offs… |
 | `sqlite_query` | python3 | `s881002` | 2 | Run a read-only sqlite3 query against a database file and return stdout/stderr plus exit code. |

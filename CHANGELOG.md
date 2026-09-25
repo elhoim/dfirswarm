@@ -671,8 +671,14 @@ not surprised:
   catalogue lists (`icat` at sector 0 of Case4.E01 said "Cannot determine
   file system type"). `esedb_query` named each table by libesedb's
   export file (`Container_1.6`), so `table=Container_1` was "no such
-  table"; it now lists and reads tables by their own names.
-  computer-forensics-base 1.2.6, windows-forensics 1.2.4.
+  table"; it now lists and reads tables by their own names. `shellbags`
+  never decoded a shell item (regipy gives a REG_BINARY as a hex string,
+  the tool took only bytes), read a root folder's GUID two bytes early,
+  and, like `regkv` and `regkeys`, looked keys up without a leading
+  backslash, which regipy answers by dropping the path's first part: a
+  UsrClass.dat's BagMRU was "not there", and an NTUSER.DAT answered
+  Software\...\BagMRU under the Local Settings name.
+  computer-forensics-base 1.2.6, windows-forensics 1.2.5.
 
 - **The venv was 642 claims and seven violations, and the panes' temp
   files were more.** With `--allow-install` one agent's pip created

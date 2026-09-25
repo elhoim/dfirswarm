@@ -934,3 +934,92 @@ test("sqlite_query opens a database read-only by URI, on a read-only directory, 
     });
   }
 });
+
+// regipy's get_key, as regipy 6 has it: a path with a backslash loses its
+// first part (taken for the root's name) unless it starts with one.
+const ROOTED_DRIVER = [
+  "import importlib.util, json, sys, types",
+  "class NotFound(Exception): pass",
+  "class Key:",
+  "    def __init__(self, name, path, kids=()):",
+  "        self.name, self.path, self.kids = name, path, {k.name.lower(): k for k in kids}",
+  "    def get_subkey(self, name, raise_on_missing=True):",
+  "        return self.kids.get(name.lower())",
+  "def tree(name, path, spec):",
+  "    return Key(name, path, [tree(k, path + '\\\\' + k, v) for k, v in spec.items()])",
+  "shell = {'Microsoft': {'Windows': {'Shell': {'BagMRU': {}}}}}",
+  "class Hive:",
+  "    def __init__(self):",
+  "        self.root = Key('S-1-5-21-1_Classes', '', [tree('Local Settings', '\\\\Local Settings', {'Software': shell}), tree('Software', '\\\\Software', shell)])",
+  "        self.root.kids = {k.name.lower(): k for k in self.root.kids.values()}",
+  "    def get_key(self, key_path):",
+  "        if key_path == '\\\\': return self.root",
+  "        parts = key_path.split('\\\\')[1:] if '\\\\' in key_path else [key_path]",
+  "        k = self.root.get_subkey(parts.pop(0))",
+  "        for p in parts:",
+  "            if not k: break",
+  "            k = k.get_subkey(p)",
+  "        if not k: raise NotFound(key_path)",
+  "        return k",
+  "for name, attrs in {'regipy': {}, 'regipy.registry': {'RegistryHive': Hive}, 'regipy.exceptions': {'RegistryKeyNotFoundException': NotFound}}.items():",
+  "    m = types.ModuleType(name)",
+  "    for k, v in attrs.items(): setattr(m, k, v)",
+  "    sys.modules[name] = m",
+  "spec = importlib.util.spec_from_file_location('tool', sys.argv[1])",
+  "mod = importlib.util.module_from_spec(spec)",
+  "spec.loader.exec_module(mod)",
+  "out = []",
+  "for p in json.load(sys.stdin):",
+  "    try: out.append(mod.rooted_key(Hive(), p).path)",
+  "    except NotFound: out.append(None)",
+  "print(json.dumps(out))",
+].join("\n");
+
+test("the registry tools read a key from the hive's root, whatever form the path comes in", async () => {
+  // Without a leading backslash regipy dropped the path's first part:
+  // shellbags looked for Local Settings\...\BagMRU in a UsrClass.dat that has
+  // it and said "no BagMRU root" (third CTF round), and in an NTUSER.DAT the
+  // same path answered Software\...\BagMRU under the name asked for.
+  const bag = "Local Settings\\Software\\Microsoft\\Windows\\Shell\\BagMRU";
+  for (const script of [
+    join(LIB, "..", "packs", "windows-forensics", "tools", "shellbags", "run.py"),
+    join(LIB, "..", "packs", "windows-forensics", "tools", "regkv", "run.py"),
+    join(LIB, "regkv", "run.py"),
+    join(LIB, "regkeys", "run.py"),
+  ]) {
+    const out = await runPySnippet(ROOTED_DRIVER, [script], [bag, `\\${bag}`, `S-1-5-21-1_Classes\\${bag}`, bag.replaceAll("\\", "/"), "Software\\Microsoft", "Microsoft\\Windows", ""]);
+    assert.equal(out.code, 0, `${script}: ${out.stderr}`);
+    assert.deepEqual(JSON.parse(out.stdout), [`\\${bag}`, `\\${bag}`, `\\${bag}`, `\\${bag}`, "\\Software\\Microsoft", null, ""], script);
+  }
+});
+
+test("shellbags decodes the shell items regipy hands over as hex, with the GUID in its place", async () => {
+  // regipy gives a REG_BINARY value as a hex string; the tool took only
+  // bytes, so no item was ever decoded (third CTF round). And a root
+  // folder's GUID read its last two groups two bytes early.
+  const driver = [
+    "import importlib.util, json, sys",
+    "spec = importlib.util.spec_from_file_location('shellbags', sys.argv[1])",
+    "mod = importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "cases = json.load(sys.stdin)",
+    "print(json.dumps({",
+    "  'items': [mod.decode_item(mod.binary(h)) for h in cases['items']],",
+    "  'order': mod.mru_order({'MRUListEx': mod.binary(cases['mru'])}),",
+    "  'not_hex': mod.binary('MRUListEx'),",
+    "}, default=str))",
+  ].join("\n");
+  const out = await runPySnippet(driver, [join(LIB, "..", "packs", "windows-forensics", "tools", "shellbags", "run.py")], {
+    items: ["14001f50e04fd020ea3a6910a2d808002b30309d", "14001f80cb859f6720028040b29b5540cc05aab6", "19002f5a3a5c000000000000000000000000000000000000"],
+    mru: "03000000010000000200000000000000ffffffff",
+  });
+  assert.equal(out.code, 0, out.stderr);
+  const got = JSON.parse(out.stdout) as { items: Array<{ type: string; guid?: string; name: string }>; order: number[]; not_hex: null };
+  assert.equal(got.items[0].type, "root folder");
+  assert.equal(got.items[0].guid, "{20D04FE0-3AEA-1069-A2D8-08002B30309D}", "My Computer");
+  assert.equal(got.items[1].guid, "{679F85CB-0220-4080-B29B-5540CC05AAB6}", "Quick access");
+  assert.equal(got.items[2].type, "volume");
+  assert.equal(got.items[2].name, "Z:\\");
+  assert.deepEqual(got.order, [3, 1, 2, 0]);
+  assert.equal(got.not_hex, null);
+});
