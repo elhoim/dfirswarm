@@ -8,6 +8,7 @@ inputs: one memory image of a Windows host (raw, .dmp, .vmem, hiberfil) and, if 
 seats: 4
 cap_usd: 20
 wall_clock: 60
+toolbox: dfir
 ---
 ## Goal
 

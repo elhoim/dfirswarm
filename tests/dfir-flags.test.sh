@@ -364,6 +364,33 @@ sb="$(sandbox_of "$out")"
 [[ "$(reg tbauto '.toolbox')" == "off" ]] || fail "registry toolbox should resolve auto to off without a catalog"
 pass "--toolbox auto is off unless a catalog is built"
 
+# --toolbox auto with a catalog reads the goal for the sets it needs. A library
+# entry's metadata block is not the case (its inputs: and tags: lines name
+# VHDX and encryption for every Windows entry), an explicit `toolbox:` key is
+# taken as written, and a virtual disk under the inputs adds crypto whatever
+# the goal says, because its readers (pyvhdi, qemu-img) are in that set.
+mkgoal() { # <file> <metadata lines or empty> <extra body text>
+  { if [[ -n "$2" ]]; then printf -- '---\ntitle: t\n%s\n---\n' "$2"; fi; cat "$HELLO"; printf '\n%s\n' "$3"; } > "$1"
+}
+autoset() { # <label> <goal file> [inputs dir]
+  start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$2" --label "$1" --inputs "${3:-$TMP/src}" --catalog --toolbox auto >/dev/null
+  reg "$1" '.toolbox'
+}
+mkgoal "$TMP/g-meta.md" $'inputs: one disk image (E01, raw or VHDX)\ntags: encryption, gpg, container' ""
+[[ "$(autoset hintmeta "$TMP/g-meta.md")" == "dfir" ]] || fail "words in the metadata block asked for a toolbox set: $(reg hintmeta .toolbox)"
+mkgoal "$TMP/g-key.md" "toolbox: dfir, crypto" ""
+[[ "$(autoset hintkey "$TMP/g-key.md")" == "dfir,crypto" ]] || fail "an explicit toolbox: key was not honoured: $(reg hintkey .toolbox)"
+mkgoal "$TMP/g-keyonly.md" "toolbox: dfir" "Read keys with gpg; the container store is under /var/lib."
+[[ "$(autoset hintkeyonly "$TMP/g-keyonly.md")" == "dfir" ]] || fail "a toolbox: key should stop the body's words from adding sets: $(reg hintkeyonly .toolbox)"
+mkgoal "$TMP/g-words.md" "" "The case turns on a BitLocker volume."
+[[ "$(autoset hintwords "$TMP/g-words.md")" == "dfir,crypto" ]] || fail "a goal without a key should still be read for its words: $(reg hintwords .toolbox)"
+mkdir -p "$TMP/src-vhdx"; cp "$TMP/src/readings.csv" "$TMP/src-vhdx/"; head -c 4096 /dev/zero > "$TMP/src-vhdx/disk.VHDX"
+[[ "$(autoset hintvhdx "$TMP/g-keyonly.md" "$TMP/src-vhdx")" == "dfir,crypto" ]] || fail "a VHDX under the inputs should add the crypto set: $(reg hintvhdx .toolbox)"
+mkgoal "$TMP/g-bad.md" "toolbox: dfir,everything" ""
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$TMP/g-bad.md" --label hintbad --inputs "$TMP/src" --catalog --toolbox auto)" && fail "an unknown set in toolbox: was accepted: $out"
+printf '%s\n' "$out" | grep -q 'BLOCKER: .*toolbox: dfir,everything' || fail "expected a BLOCKER naming the bad toolbox key: $out"
+pass "--toolbox auto reads a goal's toolbox: key, ignores its metadata words, and adds crypto for a VHDX input"
+
 # --toolbox-required on a PATH that hides the forensic tools: a BLOCKER, exit 3.
 mkdir -p "$TMP/bin" "$TMP/tb"
 ln -s "$(command -v jq)" "$TMP/bin/jq"

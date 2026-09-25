@@ -80,6 +80,7 @@ inputs: one disk image of a Windows workstation or server (E01, raw, VHDX)
 seats: 5
 cap_usd: 30
 wall_clock: 90
+toolbox: dfir
 ---
 ## Goal
 
@@ -124,6 +125,7 @@ from the CLI; the contract starts at `## Goal`.
 | `tags` | words the picker's filter should match |
 | `inputs` | what the operator is expected to put under `inputs/` |
 | `seats`, `cap_usd`, `wall_clock` | suggestions the form offers to apply; not settings |
+| `toolbox` | the toolbox sets the case needs, from `dfir`, `crypto`, `linux`; read by `swarm.sh start --goal-file ... --catalog --toolbox auto`, which takes it in place of guessing from the goal's words (a virtual or encrypted volume under `inputs/` still adds `crypto`). The console strips the block, so there the form's toolbox field decides |
 
 **The document** is the swarm contract's goal part, in the shape the
 eighteen published runs converged on:

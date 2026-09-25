@@ -69,6 +69,10 @@ TOOLS=(
 # formats as files, decrypt in user space and hand back a byte stream. A run
 # with no root can still read a BitLocker volume inside a VHDX inside an
 # alternate data stream — but only if those libraries are there.
+# Shadow copies are the same kind of thing: libvshadow reads a VSS store in
+# place, so it sits here beside dfvfs, which needs pyvshadow to open one. The
+# Linux set's XFS and LVM readers (xfsprogs' xfs_db -r, libvslvm) follow the
+# same rule: no mount, no device mapper.
 CRYPTO_TOOLS=(
   "aescrypt|python3 -c 'import pyAesCrypt; print(\"pyAesCrypt ok\")'|AES Crypt containers (pyAesCrypt)|python3 -m pip install --user pyAesCrypt"
   "dislocker|dislocker -V 2>&1 | head -1|BitLocker volumes|brew install dislocker"
@@ -83,11 +87,16 @@ CRYPTO_TOOLS=(
   "openssl|openssl version 2>&1|keys, certificates, raw ciphers|preinstalled"
   "gpg|gpg --version 2>&1 | head -1|OpenPGP keys and messages|brew install gnupg"
   "john|john --list=build-info 2>&1 | head -1|passphrases on recovered key material|brew install john-jumbo"
+  "vshadowinfo|vshadowinfo -V 2>&1 | head -1|Volume Shadow Copy stores on an NTFS volume, without mounting (libvshadow)|apt-get install libvshadow-utils"
+  "pyvshadow|python3 -c 'import pyvshadow; print(pyvshadow.get_version())'|read each shadow copy as a byte stream, and what dfvfs needs to open one (libvshadow python bindings)|python3 -m pip install --user libvshadow-python"
 )
 LINUX_TOOLS=(
   "ext4fuse|ext4fuse --version 2>&1 | head -1|reading ext4 without root|brew install ext4fuse"
   "journalctl|journalctl --version 2>&1 | head -1|systemd journals from a mounted root|apt-get install systemd"
   "bulk_extractor|bulk_extractor -V 2>&1 | head -1|carving features out of a raw image|brew install bulk_extractor"
+  "xfs_db|xfs_db -V 2>&1 | head -1|XFS without mounting: xfs_db -r -f <image> reads the superblock, inodes and directories (xfsprogs)|apt-get install xfsprogs"
+  "vslvminfo|vslvminfo -V 2>&1 | head -1|LVM volume groups: every logical volume and its segments, without mapping them (libvslvm)|apt-get install libvslvm-utils"
+  "pyvslvm|python3 -c 'import pyvslvm; print(pyvslvm.get_version())'|read a logical volume as one byte stream across its segments, and what dfvfs needs for LVM (libvslvm python bindings)|python3 -m pip install --user libvslvm-python"
 )
 for one in "${PRESETS[@]}"; do
   case "$one" in
@@ -122,8 +131,10 @@ for spec in "${TOOLS[@]}"; do
   name="${spec%%|*}"; rest="${spec#*|}"
   install="${rest##*|}"; rest="${rest%|*}"
   use="${rest##*|}"; probe="${rest%|*}"
-  case "$name" in
-    regipy-dump|evtx_dump|aescrypt)
+  # A Python library is not on PATH by its name: it is there when the probe's
+  # import works. Only binaries are looked up with command -v.
+  case "$probe" in
+    "python3 -c "*)
       if version="$(bash -c "$probe" 2>/dev/null | head -1)" && [[ -n "$version" ]]; then ok=1; else ok=0; version=""; fi ;;
     *) if command -v "$name" >/dev/null 2>&1; then ok=1; version="$(bash -c "$probe" 2>/dev/null | head -1 | tr -d '\r' || true)"; else ok=0; version=""; fi ;;
   esac

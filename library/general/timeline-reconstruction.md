@@ -8,6 +8,7 @@ inputs: whatever one incident yielded, in any mix: disk images, memory dumps, ev
 seats: 6
 cap_usd: 35
 wall_clock: 120
+toolbox: dfir
 ---
 ## Goal
 

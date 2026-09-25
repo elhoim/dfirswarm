@@ -8,6 +8,7 @@ inputs: the identity provider's exports for the window as CSV or JSON (Okta Syst
 seats: 4
 cap_usd: 20
 wall_clock: 60
+toolbox: dfir
 ---
 ## Goal
 

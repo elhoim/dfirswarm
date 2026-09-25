@@ -2138,10 +2138,37 @@ import("'"$ROOT"'/extensions/protocol.ts").then((m) =>
 # Which toolbox sets a goal document is asking for. The operator names the
 # sets; this is the second pair of eyes, because the cost of the wrong answer
 # is a run that does the forensics and cannot open what it found.
-toolbox_sets_from_goal() { # <goal file or empty>
-  local file="$1" text sets=""
-  [[ -n "$file" && -f "$file" ]] || return 0
-  text="$(tr 'A-Z' 'a-z' < "$file")"
+#
+# A library entry that says which sets it needs (`toolbox: dfir,crypto` in its
+# metadata block) is taken at its word, and the words are not read: every
+# Windows entry names `gpg` in its tool list and "container" in its ground
+# rules, so matching the text asked for the crypto set in most entries.
+# Without the key, only the goal after its metadata block is read (the block's
+# `inputs:` and `tags:` lines are the picker's, not the case's). Either way,
+# what is actually under the inputs has the last word: a virtual or encrypted
+# volume there needs the crypto set's readers whatever the goal says.
+toolbox_sets_from_goal() { # <goal file, metadata block removed> [<explicit sets>] [<inputs dir>]
+  local file="$1" explicit="${2:-}" inputs="${3:-}" text sets="" one
+  if [[ -n "$explicit" ]]; then
+    for one in ${explicit//,/ }; do
+      [[ "$one" == dfir ]] || sets="${sets:+$sets,}$one"
+    done
+  elif [[ -n "$file" && -f "$file" ]]; then
+    text="$(tr 'A-Z' 'a-z' < "$file")"
+    sets="$(toolbox_sets_from_text "$text")"
+  fi
+  case ",$sets," in
+    *,crypto,*) ;;
+    *)
+      if [[ -n "$inputs" && -d "$inputs" ]] && [[ -n "$(find -H "$inputs" -type f \( -iname '*.vhd' -o -iname '*.vhdx' -o -iname '*.vmdk' -o -iname '*.qcow2' -o -iname '*.luks' -o -iname '*.hc' -o -iname '*.tc' \) -print 2>/dev/null | head -1)" ]]; then
+        sets="crypto${sets:+,$sets}"
+      fi ;;
+  esac
+  printf '%s' "$sets"
+}
+
+toolbox_sets_from_text() { # <lower-cased goal text>
+  local text="$1" sets=""
   case "$text" in
     *encrypt*|*bitlocker*|*luks*|*veracrypt*|*truecrypt*|*filevault*|*passphrase*|*vhdx*|*container*|*gpg*|*pgp*|*keychain*)
       sets="crypto" ;;
@@ -3401,15 +3428,26 @@ cmd_start() {
   # between two `---` lines: the picker's title, summary and suggestions. The
   # contract starts after it, and the console strips it before it sends the
   # text; a file launched from the CLI is stripped here, the same way.
-  python3 - "$goal_file" <<'STRIP'
+  # The one key the kickoff itself reads from the block is `toolbox:`, the
+  # sets the entry needs; it is printed here before the block goes.
+  local goal_toolbox
+  goal_toolbox="$(python3 - "$goal_file" <<'STRIP'
 import re, sys
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
 m = re.match(r"^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)", text)
 if m:
+    key = re.search(r"^toolbox:[ \t]*(.*?)[ \t]*\r?$", m.group(0), re.M)
+    if key:
+        print(re.sub(r"[ \t]", "", key.group(1)))
     with open(path, "w", encoding="utf-8") as f:
         f.write(text[m.end():].lstrip("\r\n"))
 STRIP
+)"
+  if [[ -n "$goal_toolbox" && ! "$goal_toolbox" =~ ^(dfir|crypto|linux)(,(dfir|crypto|linux))*$ ]]; then
+    echo "BLOCKER: the goal's metadata block says toolbox: $goal_toolbox; it must be sets from dfir,crypto,linux ($goal_source)." >&2
+    exit 2
+  fi
   local goal_bytes
   goal_bytes="$(wc -c < "$goal_file" | tr -d ' ')"
   if [[ "$goal_bytes" -gt "$GOAL_MAX_BYTES" ]]; then
@@ -3429,7 +3467,10 @@ STRIP
         # ran with the dfir set alone; the BitLocker reader it wanted is in
         # crypto, and nothing connected the two until minute forty.
         local goal_hint
-        goal_hint="$(toolbox_sets_from_goal "$goal_source")"
+        # A goal given inline (the console's --goal) is not read for words:
+        # it has no metadata block to say otherwise, and the console's form
+        # names the sets itself.
+        goal_hint="$(toolbox_sets_from_goal "$(if [[ "$goal_source" != "--goal" ]]; then echo "$goal_file"; fi)" "$goal_toolbox" "$inputs_dir")"
         if [[ -n "$goal_hint" ]]; then
           toolbox="$toolbox,$goal_hint"
           echo "NOTE: --toolbox auto reads the goal and adds: $goal_hint (say --toolbox dfir to refuse)." >&2

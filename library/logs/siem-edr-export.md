@@ -8,6 +8,7 @@ inputs: CSV or JSON exports of alerts and of process, network, file, registry an
 seats: 5
 cap_usd: 25
 wall_clock: 75
+toolbox: dfir
 ---
 ## Goal
 

@@ -8,6 +8,7 @@ inputs: the host's log directory or a selection from it (auth.log or secure, sys
 seats: 4
 cap_usd: 20
 wall_clock: 60
+toolbox: dfir,linux
 ---
 ## Goal
 

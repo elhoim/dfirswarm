@@ -91,3 +91,41 @@ jq -e '(.present + .missing)[] | select(.name == "mmls") | .use == "partition ta
   || fail "mmls's use is not what the table says: $(jq -c '(.present + .missing)[] | select(.name == "mmls")' "$TMP/sb/toolbox.json")"
 if jq -r '.missing[].install' "$TMP/sb/toolbox.json" | grep -q '|'; then fail "an install hint carries another field"; fi
 pass "each tool's use and install hint are its own, not the tail of the version probe"
+
+# A Python library is present when its import works, whatever its name: the
+# probe used to be honoured for three names only, so pybde, pyvhdi, pytsk3
+# and dfvfs were listed missing on a host that had them.
+cat > "$TMP/bin/python3" <<'PYFAKE'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--version" ]] && { echo "Python 3.12.0"; exit 0; }
+if [[ "${1:-}" == "-c" ]]; then
+  case "${2:-}" in
+    *"import pybde"*|*"import pyvhdi"*|*"import pyvshadow"*|*"import pyvslvm"*) echo "20240101"; exit 0 ;;
+  esac
+fi
+exit 1
+PYFAKE
+chmod +x "$TMP/bin/python3"
+for b in vshadowinfo xfs_db vslvminfo; do printf '#!/usr/bin/env bash\necho "%s 20240101"\n' "$b" > "$TMP/bin/$b"; chmod +x "$TMP/bin/$b"; done
+rm -f "$TMP/sb/toolbox.json"
+bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" crypto,linux >/dev/null 2>&1 || true
+for n in pybde pyvhdi pyvshadow pyvslvm vshadowinfo xfs_db vslvminfo; do
+  jq -e --arg n "$n" '.present[] | select(.name == $n)' "$TMP/sb/toolbox.json" >/dev/null \
+    || fail "$n is on this host but toolbox.json does not list it present: $(jq -c '.missing | map(.name)' "$TMP/sb/toolbox.json")"
+done
+jq -e '.missing[] | select(.name == "pytsk3")' "$TMP/sb/toolbox.json" >/dev/null \
+  || fail "pytsk3 cannot be imported here and should be missing"
+pass "python libraries are probed by import, and the VSS, XFS and LVM readers are checked"
+
+# Each reader is in the set that its cases ask for, and only there.
+rm -f "$TMP/sb/toolbox.json"
+bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" crypto >/dev/null 2>&1 || true
+names="$(jq -r '[.present[], .missing[]] | map(.name) | join(" ")' "$TMP/sb/toolbox.json")"
+[[ " $names " == *" vshadowinfo "* && " $names " == *" pyvshadow "* ]] || fail "the crypto set should check libvshadow: $names"
+[[ " $names " == *" xfs_db "* || " $names " == *" vslvminfo "* ]] && fail "XFS and LVM readers belong to the linux set: $names"
+rm -f "$TMP/sb/toolbox.json"
+bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" linux >/dev/null 2>&1 || true
+names="$(jq -r '[.present[], .missing[]] | map(.name) | join(" ")' "$TMP/sb/toolbox.json")"
+[[ " $names " == *" xfs_db "* && " $names " == *" vslvminfo "* && " $names " == *" pyvslvm "* ]] || fail "the linux set should check xfsprogs and libvslvm: $names"
+[[ " $names " == *" vshadowinfo "* ]] && fail "libvshadow belongs to the crypto set: $names"
+pass "libvshadow is in the crypto set; xfsprogs and libvslvm are in the linux set"
