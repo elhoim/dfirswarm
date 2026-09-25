@@ -4001,7 +4001,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   rm -f "$sandbox"/threads/main/*.md
   rm -f "$sandbox"/threads/main/meta.json
   rm -f "$sandbox"/locks/*.json
-  rm -f "$sandbox/done/SWARM_DONE"
+  rm -f "$sandbox/done/SWARM_DONE" "$sandbox/done/ALL_AGENTS_DEAD"
   rm -f "$sandbox"/done/agents/*.done
   # Artifacts are whatever the goal names, so a stale one from a previous run
   # in this directory could satisfy the new goal's checks on its own.

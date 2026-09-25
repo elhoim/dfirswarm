@@ -89,7 +89,9 @@ echo "# tiny timeout reaps the live agent too, exactly once"
 sleep 1.1
 bash "$ROOT/scripts/reap.sh" --sandbox "$SB" --timeout 0 --quiet >/dev/null
 [[ -f "$SB/done/agents/agent00.dead" ]] || fail "agent00 should be reaped at timeout 0"
-[[ "$(jq -c 'select(.tool == "reap")' "$SB/traces/events.jsonl" | wc -l)" -eq 2 ]] || fail "expected two reaped events total"
+[[ "$(jq -c 'select(.tool == "reap" and .args.reason == "stall")' "$SB/traces/events.jsonl" | wc -l)" -eq 2 ]] || fail "expected two reaped events total"
+# agent02 was done and both others are now dead, with no sentinel: the stop is recorded too.
+[[ -f "$SB/done/ALL_AGENTS_DEAD" ]] || fail "every seat is marked and there is no sentinel: expected done/ALL_AGENTS_DEAD"
 pass "timeout 0 reaps remaining agent once"
 
 echo "# default timeout is above a 10-minute forensic tool"
@@ -145,5 +147,59 @@ echo "# status must not reap"
 grep -A 30 '^cmd_status()' "$ROOT/scripts/swarm.sh" | grep -q 'reap.sh' \
   && fail "swarm.sh status must not run reap.sh"
 pass "status does not reap"
+
+echo "# every agent dead: a stop, not a finish"
+# If every pane dies no live extension is left to write done/SWARM_DONE, so
+# the stop was never recorded. The reaper records it as its own outcome,
+# done/ALL_AGENTS_DEAD, and never as the sentinel, which means "finished".
+SB4="$(mktemp -d "${TMPDIR:-/tmp}/reap-alldead.XXXXXX")"
+mkdir -p "$SB4/done/agents" "$SB4/traces" "$SB4/bin"
+printf '{ "swarm_id": "dead", "n": 2, "agents": [ { "id": "agent00" }, { "id": "agent01" } ] }\n' > "$SB4/team.json"
+printf '{ "cap_usd": 1, "spent_usd": 0, "wall_clock_minutes": 15, "started_at": "%s" }\n' "$old_iso" > "$SB4/budget.json"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$SB4/bin/herdr"; chmod +x "$SB4/bin/herdr"
+out="$(HERDR_BIN="$SB4/bin/herdr" bash "$ROOT/scripts/reap.sh" --sandbox "$SB4" --timeout 300 --dry-run)"
+[[ -e "$SB4/done/ALL_AGENTS_DEAD" ]] && fail "dry-run must not record the stop"
+out="$(HERDR_BIN="$SB4/bin/herdr" bash "$ROOT/scripts/reap.sh" --sandbox "$SB4" --timeout 300 --quiet)"
+[[ -f "$SB4/done/agents/agent00.dead" && -f "$SB4/done/agents/agent01.dead" ]] || fail "both silent agents should be reaped: $out"
+[[ -f "$SB4/done/ALL_AGENTS_DEAD" ]] || fail "no done/ALL_AGENTS_DEAD after every agent died: $out"
+grep -qx 'reason: all_agents_dead' "$SB4/done/ALL_AGENTS_DEAD" || fail "the marker should carry reason all_agents_dead: $(cat "$SB4/done/ALL_AGENTS_DEAD")"
+[[ -e "$SB4/done/SWARM_DONE" ]] && fail "a crashed run must not get done/SWARM_DONE"
+grep -q "done/ALL_AGENTS_DEAD" <<< "$out" || fail "the stop should be printed even under --quiet: $out"
+[[ "$(grep -c '"reason":"all_agents_dead"' "$SB4/traces/events.jsonl")" -eq 1 ]] || fail "one all_agents_dead line on the trace: $(cat "$SB4/traces/events.jsonl")"
+first="$(cat "$SB4/done/ALL_AGENTS_DEAD")"
+HERDR_BIN="$SB4/bin/herdr" bash "$ROOT/scripts/reap.sh" --sandbox "$SB4" --timeout 300 --quiet >/dev/null
+[[ "$(cat "$SB4/done/ALL_AGENTS_DEAD")" == "$first" ]] || fail "a second run rewrote the marker"
+[[ "$(grep -c '"reason":"all_agents_dead"' "$SB4/traces/events.jsonl")" -eq 1 ]] || fail "a second run traced the stop again"
+pass "every agent dead and no sentinel: done/ALL_AGENTS_DEAD once, never SWARM_DONE"
+
+# await-done reads it as a failure at once, not "DoD met" and not a timeout.
+start_s=$SECONDS
+set +e
+aw="$(SWARM_RUNS_DIR="$SB4/none" HERDR_BIN="$SB4/bin/herdr" bash "$ROOT/scripts/await-done.sh" --sandbox "$SB4" --timeout 60 --interval 1 --quiet 2>&1)"; rc=$?
+set -e
+[[ "$rc" -eq 1 ]] || fail "await-done should fail on an all-dead run, got $rc: $aw"
+grep -q 'FAILED: every agent died' <<< "$aw" || fail "await-done should say every agent died: $aw"
+grep -q 'DoD met' <<< "$aw" && fail "an all-dead run was reported as DoD met: $aw"
+(( SECONDS - start_s < 30 )) || fail "await-done waited for its timeout instead of failing at once"
+cj="$(SWARM_RUNS_DIR="$SB4/none" bash "$ROOT/scripts/await-done.sh" --sandbox "$SB4" --checks-json 2>/dev/null)"
+[[ "$(jq -r '.all_agents_dead' <<< "$cj")" == true && "$(jq -r '.sentinel' <<< "$cj")" == false ]] || fail "--checks-json should report all_agents_dead: $cj"
+pass "await-done fails an all-dead run at once, and --checks-json says why"
+
+# One seat done and one dead is still no finish if nobody wrote the sentinel;
+# a sentinel present means the run finished and nothing is recorded.
+SB5="$(mktemp -d "${TMPDIR:-/tmp}/reap-alldead.XXXXXX")"
+mkdir -p "$SB5/done/agents" "$SB5/traces"
+cp "$SB4/team.json" "$SB4/budget.json" "$SB5/"
+printf -- '---\nby: agent00\n---\n' > "$SB5/done/agents/agent00.done"
+printf -- '---\nby: harness\nreason: cap\n---\n' > "$SB5/done/SWARM_DONE"
+HERDR_BIN="$SB4/bin/herdr" bash "$ROOT/scripts/reap.sh" --sandbox "$SB5" --timeout 300 --quiet >/dev/null
+[[ -f "$SB5/done/agents/agent01.dead" ]] || fail "agent01 should be reaped in SB5"
+[[ -e "$SB5/done/ALL_AGENTS_DEAD" ]] && fail "a run with a sentinel must not be marked all-dead"
+rm -f "$SB5/done/SWARM_DONE" "$SB5/done/agents/agent01.dead"
+printf '{"ts":"%s","agent":"agent01","tool":"post","args":{},"result":{}}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$SB5/traces/events.jsonl"
+HERDR_BIN="$SB4/bin/herdr" bash "$ROOT/scripts/reap.sh" --sandbox "$SB5" --timeout 300 --quiet >/dev/null
+[[ -e "$SB5/done/ALL_AGENTS_DEAD" ]] && fail "a live agent remains; nothing should be recorded"
+rm -rf "$SB4" "$SB5"
+pass "no marker while an agent lives or when the sentinel exists"
 
 echo "reap.test.sh: all checks passed"

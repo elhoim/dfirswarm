@@ -65,6 +65,8 @@ export const tableLockTiming = {
 export const DEFAULT_SWARM_ID = "hello-n2";
 export const DEFAULT_AGENT_IDS = ["agent00", "agent01"] as const;
 export const SENTINEL_REL = "done/SWARM_DONE";
+/** Written by scripts/reap.sh when every seat is marked done or dead and no sentinel exists: a stop, not a finish. */
+export const ALL_DEAD_REL = "done/ALL_AGENTS_DEAD";
 export const HELLO_REL = "work/hello.txt";
 /** An agent silent this long is stalled and shown as "?"; a local choice. */
 export const DEFAULT_STALL_MS = 90_000;

@@ -262,6 +262,21 @@ test("a run with nothing recorded says so instead of printing empty sections", a
   }
 });
 
+test("a run whose every agent died is reported as a failure, not as finished", async () => {
+  const root = await mkdtemp(join(tmpdir(), "report-dead-"));
+  try {
+    await initSandbox(root, { reset: true, swarmId: "sr003", agentIds: ["sr00300"], capUsd: 1, wallClockMinutes: 5, goal: "Nobody finished." });
+    await mkdir(join(root, "done"), { recursive: true });
+    await writeFile(join(root, "done", "ALL_AGENTS_DEAD"), "---\nby: reaper\nreason: all_agents_dead\nagents_dead: sr00300\nat: 2026-02-12T08:00:00Z\n---\n\nx\n", "utf8");
+    const html = await renderReport(root, { runsDir: join(root, ".."), now: "2026-02-12T09:00:00.000Z" });
+    assert.match(html, /every agent died/);
+    assert.doesNotMatch(html, />finished</);
+    assert.match(html, /The swarm did not finish: every agent died/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the print stylesheet keeps the rules that decide whether the PDF is usable", async () => {
   const root = await sandboxWithLedger();
   try {

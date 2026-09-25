@@ -19,6 +19,8 @@
 # pane id -> `herdr pane close <pane_id>`. Failure is tolerated.
 #
 # Idempotent: a reaped agent has a .dead marker and is skipped on later runs.
+# When every seat is marked and there is no done/SWARM_DONE, the reaper writes
+# done/ALL_AGENTS_DEAD (reason: all_agents_dead) once: a stop, not a finish.
 # Requires: bash 4+, jq, GNU or BSD stat/date (both handled).
 
 set -euo pipefail
@@ -357,6 +359,47 @@ while IFS= read -r id; do
     log "live $id: idle ${idle}s"
   fi
 done < <(jq -r '.agents[].id' "$SANDBOX/team.json")
+
+# Every seat marked and no sentinel: nobody is left to call `done`, and no
+# harness stop can be written from a pane that no longer runs. Record that as
+# its own outcome, never as done/SWARM_DONE, which means "finished" to every
+# reader, so await-done.sh and the report can call it what it is: a failure.
+record_all_dead() {
+  local marker="$SANDBOX/done/ALL_AGENTS_DEAD" id ids=() dead=0 total=0
+  [[ -e "$SANDBOX/done/SWARM_DONE" || -e "$marker" ]] && return 0
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    total=$((total + 1))
+    if [[ -e "$SANDBOX/done/agents/$id.dead" ]]; then
+      dead=$((dead + 1)); ids+=("$id")
+    elif [[ ! -e "$SANDBOX/done/agents/$id.done" ]]; then
+      return 0
+    fi
+  done < <(jq -r '.agents[].id' "$SANDBOX/team.json")
+  [[ "$total" -gt 0 && "$dead" -gt 0 ]] || return 0
+  table_lock
+  if [[ -e "$SANDBOX/done/SWARM_DONE" || -e "$marker" ]]; then
+    table_unlock
+    return 0
+  fi
+  mkdir -p "$SANDBOX/done"
+  printf -- '---\nby: reaper\nreason: all_agents_dead\nagents_dead: %s\nat: %s\n---\n\n%s\n' \
+    "${ids[*]}" "$(now_iso)" \
+    "Every agent is marked done or dead and none wrote done/SWARM_DONE: the swarm stopped without meeting its definition of done. Recorded by scripts/reap.sh." \
+    > "$marker"
+  local line
+  line="$(jq -cn --arg ts "$(now_iso)" --arg ids "${ids[*]}" \
+    '{ts: $ts, agent: "harness", tool: "reap",
+      args: {reason: "all_agents_dead"},
+      result: {stopped: true, finished: false, agents_dead: ($ids | split(" "))}}')"
+  trace_emit "$ROOT" "$SANDBOX" "$line"
+  table_unlock
+  echo "all agents dead (${ids[*]}) and no sentinel -> done/ALL_AGENTS_DEAD"
+}
+
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  record_all_dead
+fi
 
 log "reaped $reaped agent(s)"
 exit 0
