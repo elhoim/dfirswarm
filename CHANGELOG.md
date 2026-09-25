@@ -687,7 +687,8 @@ not surprised:
   (an agent extracted Edge's History directory as `EdgeHistory.db`: 272
   bytes of `$INDEX_ROOT`, then "file is not a database") and answers a
   file's catalogued path with it.
-  computer-forensics-base 1.2.9, windows-forensics 1.2.5.
+  `lnk_parse` on a missing path says so instead of raising.
+  computer-forensics-base 1.2.9, windows-forensics 1.2.6.
 
 - **The venv was 642 claims and seven violations, and the panes' temp
   files were more.** With `--allow-install` one agent's pip created

@@ -69,7 +69,7 @@ runs one of them without saying so.
 | `icat_extract` | python3 | `s864a08` | 3 | Extract a file from the E01 image by inode to a specified output path. Returns JSON with path, size, and sha2… |
 | `icat_root` | python3 | `s9d8306` | 5 | Extract an inode from an EXT4 volume with icat. The Webserver case's image and its 503808-sector offset are t… |
 | `ioc_scan` | python3 | `s183900` | 2 | Stream a large binary for ASCII and UTF-16LE needles; return offsets, unique strings, and context snippets. |
-| `lnk_parse` | python3 | `s183902` | 1 | Parse a Windows LNK (or a dump slice) and return flags, FILETIME timestamps, local/common paths, arguments, a… |
+| `lnk_parse` | python3 | `s183902` | 2 | Parse a Windows LNK (or a dump slice) and return flags, FILETIME timestamps, local/common paths, arguments, a… |
 | `mam_pf_parse` | python3 | `s2f6600` | 1 | Decompress a MAM-wrapped Windows prefetch file and return executable name, version, run count, and non-zero l… |
 | `mam_scan` | python3 | `s183901` | 1 | Scan a raw dump for MAM\x04 prefetch, decompress LZXPRESS Huffman, return name, run count, last-run FILETIMEs… |
 | `master_icat` | bash | `s9a5f06` | 3 | Extract a file by inode from an E01 with icat. The HDFS master image and sector offset 2048 are the defaults;… |

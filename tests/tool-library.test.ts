@@ -1059,6 +1059,10 @@ test("catalog_search takes a catalogue by the name the index gives it, and bad i
     r = await runPy(join(tools, "ioc_scan", "run.py"), cwd, { path: "work/nothing-here.txt", needles: "x" });
     assert.notEqual(r.code, 0);
     assert.deepEqual(JSON.parse(r.stdout), { error: "no such file", path: "work/nothing-here.txt" });
+    for (const lnk of [join(LIB, "lnk_parse", "run.py"), join(LIB, "..", "packs", "windows-forensics", "tools", "lnk_parse", "run.py")]) {
+      r = await runPy(lnk, cwd, { path: "work/missing.lnk" });
+      assert.deepEqual(JSON.parse(r.stdout), { error: "no such file", path: "work/missing.lnk" }, lnk);
+    }
     r = await runPy(join(tools, "sqlite_query", "run.py"), cwd, { db_path: "work/x.db", query: "tables" });
     assert.notEqual(r.code, 0);
     assert.match(r.stdout, /"error": "need sql"/);
