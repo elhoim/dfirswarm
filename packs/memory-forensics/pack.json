@@ -1,7 +1,7 @@
 {
   "id": "memory-forensics",
   "name": "Memory Forensics Pack",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Method and tooling for a memory image: what the container is before anything else, what can be read with no framework at all, processes and injection, network state, credential material, and the discipline that keeps a string in memory from becoming a claim about behaviour.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -19,7 +19,7 @@
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
       "README.md": "dbcbf62f0db2a7df208ee56f72d57f4e08e346ddc993926b3608116b0c9857a4",
-      "tools/mem_carve/manifest.json": "5c8a2f48e9684d844f7eacdbb93785900b3e2af73204cf3fc0340f50435e6510",
+      "tools/mem_carve/manifest.json": "c80c7fe049ee7f19b8f853cfbef940f9d0e372650c8a71aa3d5b85037cb0df3c",
       "tools/mem_carve/run.py": "b5433bfd378f9ea296bfe2cfedba85ecca8d0a13a412b96ea114a143bf114ee9",
       "tools/mem_profile/manifest.json": "6a1eeeaa707f0798eda712ba6df73dc9487738128ba1478ed5f2588cfe912dd2",
       "tools/mem_profile/run.py": "7db7f599712a43d4dda6d87e9ea4d2d1b724bd038ec4bee5624122ac5e47cfc2",

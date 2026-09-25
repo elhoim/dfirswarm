@@ -1,7 +1,7 @@
 {
   "id": "computer-forensics-base",
   "name": "Computer Forensics Base Pack",
-  "version": "1.2.10",
+  "version": "1.2.11",
   "description": "Method and tooling every examination needs, whatever the platform: read the container and find the volume, verify the evidence, read the catalogue, extract and carve, tell an encrypted volume from an unreadable one, keep a timeline, cite what you claim.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -19,7 +19,7 @@
       "README.md": "d95e6fdbee9e99160425cdcfaff6e794c8ebc558e222f7bcad0adbc1de2f3faa",
       "tools/image_layout/manifest.json": "71f590482dc30c8eef21c71b033561ba57da84eb592a05d0b7e022fff1be107e",
       "tools/image_layout/run.py": "d6ef22837f519ec5d4626aeb39db2fccc790a81ead886a4cf29bf2389e4c1a82",
-      "tools/file_carver/manifest.json": "a8db615a867cb7c42326f84c003459d0ca98f55361bc03f1f9c4995e51d3170f",
+      "tools/file_carver/manifest.json": "bf22d17fd7445287e5d24e39c1a04f35b9328abe2e5addfad2173c33c0255f2e",
       "tools/file_carver/run.py": "7df02268895e94928b9f3d8f3dc54b37349c72466b0a85b0f12839cba6b7af38",
       "tools/check_inputs/manifest.json": "ad2a127826cf688da2cc4b71a8b60ccd41d6edb24eb90e18f82e03be5884c3d7",
       "tools/check_inputs/run.py": "bd79f2cbff81154a30a5d1901bb6894d0290f564490b17efdedf54c54d799561",
@@ -41,7 +41,7 @@
       "tools/sig_carve/run.py": "4ab399bbb560a3a80249a4b0733014f0ace5f9a4c7801207ac30815fb795de7f",
       "tools/timestamp_decode/manifest.json": "972d4c9d9ff0f9466511a042871894d3382aee6c3fc6f1264a38b890b2447784",
       "tools/timestamp_decode/run.py": "9b9b08bb27f2d00c020e1bfe603681d0b46763df74206a55c9b524c058e23021",
-      "tools/timeline_super/manifest.json": "0b9fb003218995e9487447478e12a0e5735d455fb7302438572a9c9abc3c4754",
+      "tools/timeline_super/manifest.json": "6482055a037e582051525a67441453637589037be294235a13dd76f19f3f5e4e",
       "tools/timeline_super/run.py": "a10eca3eefe2bef30e031ef7df7fcb2502114903a5df0ea321e9a5669e410510",
       "skills/reporting/citations.md": "b8e4ce786be10c0cc734232314f1ef2bd1208ebabf7ed0f41cfb7d8ee48694d9",
       "skills/reporting/disagreement.md": "1e454010c3dbc6feadd4128ad23363fb2e1f0b0097f72906c3c4841c84507b77",
