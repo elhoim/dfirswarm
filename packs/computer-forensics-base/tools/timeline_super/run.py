@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 DEFAULT_TIMEOUT = 1800
 
@@ -32,6 +33,26 @@ DEFAULT_TIMEOUT = 1800
 def fail(message, **extra):
     print(json.dumps({"error": message, **extra}))
     raise SystemExit(1)
+
+
+def resolve_output(out):
+    """Where `out` really lands, refusing anything outside the run directory.
+
+    A string check is not enough: `work/../inputs/x` and an absolute path
+    both name a file the tool must not write, and neither starts with
+    "inputs/". Resolving first and comparing directories is what actually
+    holds, and the read-only inputs are the one place extracted bytes must
+    never appear -- a later integrity check would report the evidence as
+    modified.
+    """
+    root = Path.cwd().resolve()
+    dest = (root / out).resolve() if not Path(out).is_absolute() else Path(out).resolve()
+    if dest != root and root not in dest.parents:
+        fail("output must stay inside the run directory", output=str(out))
+    inputs = root / "inputs"
+    if dest == inputs or inputs in dest.parents:
+        fail("output cannot be under inputs/", output=str(out))
+    return dest
 
 
 def readable(stamp):
@@ -62,6 +83,7 @@ def main():
     out_dir = args.get("out_dir")
     if not isinstance(out_dir, str) or not out_dir:
         fail("out_dir is required: a directory under work/ for the storage file and the output")
+    resolve_output(out_dir)
 
     l2t = shutil.which("log2timeline.py") or shutil.which("log2timeline")
     psort = shutil.which("psort.py") or shutil.which("psort")

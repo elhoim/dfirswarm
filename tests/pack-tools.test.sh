@@ -367,4 +367,31 @@ assert "install" in d, d
   pass "vss_stores names the missing binary and how to install it, rather than failing silently"
 fi
 
+# --- carving and timeline output stays in the run directory -------------------
+# icat_extract has always refused an output outside the run directory or under
+# inputs/; file_carver, mem_carve and timeline_super wrote wherever the path
+# pointed, so a mistyped `../` or `inputs/` landed a carving beside the
+# evidence and the integrity check then reported the evidence modified.
+OUT="$WORK/outpaths"; mkdir -p "$OUT/run/work" "$OUT/run/inputs" "$OUT/bin"
+{ printf 'PK\003\004zip'; head -c 2048 /dev/zero; printf 'regf'; head -c 8192 /dev/zero; } > "$OUT/run/inputs/blob.bin"
+printf '#!/usr/bin/env bash\nwhile [[ $# -gt 0 ]]; do [[ "$1" == --storage_file ]] && echo s > "$2"; shift; done\n' > "$OUT/bin/log2timeline.py"
+printf '#!/usr/bin/env bash\nwhile [[ $# -gt 0 ]]; do [[ "$1" == -w ]] && echo "{}" > "$2"; shift; done\n' > "$OUT/bin/psort.py"
+chmod +x "$OUT/bin/"*
+carve() { (cd "$OUT/run" && printf '{"path":"inputs/blob.bin","offset":0,"sig_type":"UNKNOWN","max_size":64,"output":"%s"}' "$1" | "$PY" "$BASE/tools/file_carver/run.py"); }
+memc() { (cd "$OUT/run" && printf '{"path":"inputs/blob.bin","extract_to":"%s","max_extract":1}' "$1" | "$PY" "$ROOT/packs/memory-forensics/tools/mem_carve/run.py"); }
+plaso() { (cd "$OUT/run" && printf '{"source":"inputs/blob.bin","out_dir":"%s"}' "$1" | PATH="$OUT/bin:$PATH" "$PY" "$BASE/tools/timeline_super/run.py"); }
+for bad in ../escaped inputs/planted work/../inputs/planted "$OUT/abs"; do
+  carve "$bad.bin" >/dev/null 2>&1 && fail "file_carver wrote output=$bad.bin"
+  memc "$bad-mem" >/dev/null 2>&1 && fail "mem_carve wrote extract_to=$bad-mem"
+  plaso "$bad-plaso" >/dev/null 2>&1 && fail "timeline_super wrote out_dir=$bad-plaso"
+done
+leaked="$(find "$OUT" -path "$OUT/run/work" -prune -o \( -name 'escaped*' -o -name 'planted*' -o -name 'abs*' \) -print)"
+[[ -z "$leaked" ]] || fail "a refused output was still written: $leaked"
+carve work/c.bin >/dev/null || fail "file_carver refused an output under work/"
+memc work/m >/dev/null || fail "mem_carve refused an extract_to under work/"
+plaso work/p >/dev/null || fail "timeline_super refused an out_dir under work/"
+[[ -s "$OUT/run/work/c.bin" && -n "$(ls "$OUT/run/work/m")" && -f "$OUT/run/work/p/timeline.plaso" ]] || fail "outputs under work/ were not written"
+cmp -s "$BASE/tools/file_carver/run.py" "$ROOT/tool-library/file_carver/run.py" || fail "the tool-library copy of file_carver has drifted from the pack's"
+pass "file_carver, mem_carve and timeline_super write under the run directory and never under inputs/"
+
 echo "pack-tools: all checks passed"

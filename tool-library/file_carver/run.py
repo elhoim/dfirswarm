@@ -1,4 +1,31 @@
 import sys, json, struct, hashlib, os
+from pathlib import Path
+
+
+def fail(message, **extra):
+    print(json.dumps({"ok": False, "error": message, **extra}))
+    raise SystemExit(1)
+
+
+def resolve_output(out):
+    """Where `out` really lands, refusing anything outside the run directory.
+
+    A string check is not enough: `work/../inputs/x` and an absolute path
+    both name a file the tool must not write, and neither starts with
+    "inputs/". Resolving first and comparing directories is what actually
+    holds, and the read-only inputs are the one place extracted bytes must
+    never appear -- a later integrity check would report the evidence as
+    modified.
+    """
+    root = Path.cwd().resolve()
+    dest = (root / out).resolve() if not Path(out).is_absolute() else Path(out).resolve()
+    if dest != root and root not in dest.parents:
+        fail("output must stay inside the run directory", output=str(out))
+    inputs = root / "inputs"
+    if dest == inputs or inputs in dest.parents:
+        fail("output cannot be under inputs/", output=str(out))
+    return dest
+
 
 def carve_pe(data, off):
     """PE file: use section headers to find actual file size"""
@@ -105,6 +132,8 @@ def main():
     sig_type = args['sig_type']
     max_size = args.get('max_size', 100_000_000)
     output = args.get('output')
+    if output:
+        resolve_output(output)
 
     with open(path, 'rb') as f:
         f.seek(offset)
