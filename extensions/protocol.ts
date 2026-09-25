@@ -4970,6 +4970,9 @@ export const TOOL_RESERVED_NAMES = new Set([
   "repeat_hint", "budget_precall_stop", "ledger_superseded", "notify", "history_quota", "seat_auth",
   // The host-side model gateway (scripts/model-gateway.ts).
   "model_gateway_started", "model_gateway_refused", "model_gateway_upstream_error", "model_gateway_restarted",
+  // A budget fold refused over an unreadable budget.json, and what a
+  // collector restarted over a torn or mismatched trace records.
+  "budget_unreadable", "trace_anchor_mismatch", "trace_fragment_cut",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
