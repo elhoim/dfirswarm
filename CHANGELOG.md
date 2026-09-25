@@ -688,7 +688,7 @@ not surprised:
   bytes of `$INDEX_ROOT`, then "file is not a database") and answers a
   file's catalogued path with it.
   `lnk_parse` on a missing path says so instead of raising.
-  computer-forensics-base 1.2.9, windows-forensics 1.2.6.
+  computer-forensics-base 1.2.10, windows-forensics 1.2.6.
 
 - **The venv was 642 claims and seven violations, and the panes' temp
   files were more.** With `--allow-install` one agent's pip created
