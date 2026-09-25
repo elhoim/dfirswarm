@@ -1065,3 +1065,34 @@ test("catalog_search takes a catalogue by the name the index gives it, and bad i
     assert.doesNotMatch(r.stdout + r.stderr, /Traceback/);
   });
 });
+
+test("icat_extract refuses an inode the catalogue lists only as a directory, and names a file's catalogued path", async () => {
+  // Third CTF round: d/d 84284 (Edge's History directory) extracted as
+  // EdgeHistory.db, 272 bytes of $INDEX_ROOT, then "file is not a database".
+  const tool = join(LIB, "..", "packs", "computer-forensics-base", "tools", "icat_extract", "run.py");
+  await withCwd(async (cwd, bin) => {
+    await rm(join(cwd, "inputs", "Webserver.E01"));
+    await mkdir(join(cwd, "catalog", "AF-Case2.E01", "p2048"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "AF-Case2.E01", "partitions.txt"), "002:  000:000   0000002048   ...   NTFS\n");
+    await writeFile(
+      join(cwd, "catalog", "AF-Case2.E01", "p2048", "filelist.txt"),
+      [
+        "d/d 84284-144-1:\tUsers/IEUser/AppData/Local/Packages/Edge/AC/MicrosoftEdge/History",
+        "r/r 87381-128-1:\tUsers/IEUser/AppData/Local/Microsoft/Windows/AppCache/container.dat",
+        "r/r * 842840-128-4(realloc):\tUsers/x/other.etl",
+        "",
+      ].join("\n"),
+    );
+    let r = await runPy(tool, cwd, { inode: 84284, output: "work/EdgeHistory.db" }, bin);
+    assert.notEqual(r.code, 0);
+    const refused = JSON.parse(r.stdout) as { error: string; path: string };
+    assert.match(refused.error, /inode 84284 is a directory/);
+    assert.equal(refused.path, "Users/IEUser/AppData/Local/Packages/Edge/AC/MicrosoftEdge/History");
+    r = await runPy(tool, cwd, { inode: 87381, output: "work/container.dat" }, bin);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.equal((JSON.parse(r.stdout) as { catalog_path: string }).catalog_path, "Users/IEUser/AppData/Local/Microsoft/Windows/AppCache/container.dat");
+    // An attribute named on purpose is the caller's call.
+    r = await runPy(tool, cwd, { inode: "84284-144-1", output: "work/index.bin" }, bin);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+  });
+});

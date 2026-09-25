@@ -82,6 +82,27 @@ def _resolve_catalog(explicit=None):
         return os.path.join(root, disks[0])
     raise SystemExit('{"ok": false, "error": "several catalogues; pass catalog=", "candidates": %s}' % json.dumps(subs))
 
+def _catalogued(image, offset, inode):
+    """What the catalogue's path list says `inode` is on this filesystem:
+    [{"type", "path", "deleted"}], [] when there is no list or no line."""
+    import os, re
+    listing = os.path.join("catalog", _catalogue_slug(image), "p%s" % offset, "filelist.txt")
+    if not os.path.isfile(listing):
+        return []
+    want = str(inode).split("-")[0]
+    marks = (" %s-" % want, " %s:" % want, " %s(" % want)
+    rx = re.compile(r"^\S/(\S) (\* )?(\d+)(?:-\d+-\d+)?(?:\([^)]*\))?:\t(.*)$")
+    out = []
+    with open(listing, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if not any(m in line for m in marks):
+                continue
+            m = rx.match(line.rstrip("\n"))
+            if m and m.group(3) == want:
+                out.append({"type": m.group(1), "path": m.group(4), "deleted": bool(m.group(2))})
+    return out
+
+
 def fail(msg, **extra):
     print(json.dumps({"error": msg, **extra}))
     sys.exit(1)
@@ -117,6 +138,14 @@ dest = resolve_output(output)
 if not os.path.isfile(image):
     fail(f"image not found: {image}")
 offset = _resolve_offset(image, d.get("offset"))
+# A directory's inode gives icat its index, not a file: an agent extracted
+# Edge's History directory (d/d 84284) as "EdgeHistory.db", 272 bytes of
+# $INDEX_ROOT, and read "file is not a database" from it. Said here when the
+# catalogue lists the inode only as a directory and no attribute was named.
+listed = _catalogued(image, offset, inode)
+if listed and "-" not in str(inode) and all(e["type"] == "d" for e in listed):
+    fail("inode %s is a directory, not a file: icat would give its index" % inode, path=listed[0]["path"],
+         hint="take the file's own inode from the catalogue's filelist.txt, or name an attribute (inode-type-id)")
 r = subprocess.run(
     ["icat", "-o", str(offset), image, str(inode)],
     capture_output=True,
@@ -127,4 +156,6 @@ if r.returncode != 0:
 dest.parent.mkdir(parents=True, exist_ok=True)
 dest.write_bytes(r.stdout)
 digest = hashlib.sha256(r.stdout).hexdigest()
-print(json.dumps({"path": output, "size": len(r.stdout), "sha256": digest, "image": image, "offset": offset}))
+files = [e for e in listed if e["type"] != "d"]
+catalogued = (next((e for e in files if not e["deleted"]), None) or (files or [None])[0] or {}).get("path")
+print(json.dumps({"path": output, "size": len(r.stdout), "sha256": digest, "image": image, "offset": offset, "catalog_path": catalogued}))

@@ -1,6 +1,6 @@
 {
   "name": "icat_extract",
-  "description": "Extract a file from the E01 image by inode to a specified output path. Returns JSON with path, size, and sha256 hash.",
+  "description": "Extract a file from a disk image by inode to a path under the run. Refuses an inode the catalogue lists only as a directory (icat would give its index). Returns JSON with path, size, sha256, image, offset and the file's catalogued path.",
   "params": {
     "inode": {
       "type": "integer",
@@ -26,6 +26,6 @@
   "timeout_seconds": 30,
   "by": "s864a08",
   "at": "2026-09-18T16:09:29.146Z",
-  "version": 6,
-  "sha256": "6272d68ff75006152945e5006ae53cd5d884b87506816f292de4c345e96fec04"
+  "version": 7,
+  "sha256": "de21ef8e5359ad84ddbe08478afbffa40880fa205606387e373d9a728af6f9a8"
 }
