@@ -1,7 +1,7 @@
 {
   "id": "network-forensics",
   "name": "Network Forensics Pack",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Method and tooling for captures and flow logs: what the capture can and cannot contain, session reconstruction, DNS and TLS metadata when the payload is encrypted, beacon detection by timing, exfiltration by volume, and tying all of it back to the host timeline.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -32,7 +32,7 @@
       "skills/correlate/host.md": "dd9f12201855272d2262aece9ddccad7427666cec8e3bf801e16362d07326d4d",
       "skills/metadata/dns-tls.md": "ae25ea8c2c9c1292c3c801a2099cb61cba2d06a0188766ab76e677aa85bf38f0",
       "skills/beacons/periodicity.md": "ff555a901d3a03c0efe70ba8ec38bccb71974eab1e06cc72fc68ccd0c9159265",
-      "requires/host.json": "c58d472301dde5519d42cd88677d987f22429bc9cfb0b60c783a0d1faa69ed20",
+      "requires/host.json": "8ea083793abfb90256e54737f91696c5a844cfa1103f3d3971a17b56ae6f2140",
       "requires/python.txt": "d5768d4bec0bea8ec8e736e2710a757309af18fa3f862dae2db201e154d45a4a",
       "skills/INDEX.md": "d2d1ace13a2b25afaa97e26f3147d9561a769f1fa8434b72a5e8a23a213f2163"
     }

@@ -258,6 +258,38 @@ not surprised:
 
 ### Added
 
+- **Every program a pack names is in the image profile that holds it, or
+  said not to belong in one.** The recipe knew an apt line, a pip line and a
+  pinned download, and listed everything else as manual, never installed:
+  Eric Zimmerman's tools, RegRipper, Zircolite, bulk_extractor, mac_apt,
+  UnifiedLogReader, iLEAPP, ALEAPP, Zeek, Suricata and radare2 were in no
+  image. A pack's `requires/host.json` now says how, as data, and the harness
+  knows only the kinds: a pinned `.deb` per architecture, handed to apt
+  (radare2 6.2.2, Zeek 8.0.10 from the Zeek project's Debian 12 packages); a
+  tag's source (`install.source`) unpacked under `/opt/dfir/src/<name>`, its
+  requirements in a venv of its own, its entry on PATH through its
+  interpreter (Zircolite 4.0.0, UnifiedLogReader, iLEAPP 2026.4.2, ALEAPP
+  2026.4.1, and mac_apt 1.33.2 for amd64 only: on Linux arm64 it stops at
+  import, and an arm64 image says so); `env` and `arches` on a source or a
+  build say what its build needs and which architectures it is for; a
+  program run by another the image holds
+  (`run`: MFTECmd, EvtxECmd and RECmd 2026.5.0 on the .NET 9.0.20 runtime,
+  which the pack pins as a download of its own); a source compiled in a
+  builder stage (`install.build`), so the image carries the program and not
+  the compiler (bulk_extractor 2.2.0); and an apt line from the image's own
+  backports (Suricata 7.0.10 from bookworm-backports). RegRipper is Debian
+  12's `regripper`. Each artefact is checked against its sha256 before
+  anything is unpacked, installed or built, and is in `image.json`, the
+  NOTICE and the SBOM with its kind; an optional one that fails is recorded,
+  not fatal. Apple's `log` and CyLR are marked `not_in_image`: `image.json`,
+  the NOTICE and a VM's toolbox check list them as not applicable, never as
+  missing, the probe asks no image for them, and `pack.sh seal` refuses one a
+  pack requires. Every profile was built on arm64 and each program run in
+  it, in a container and in a VM (`images/README.md`). Resealed:
+  computer-forensics-base 1.2.12, windows-forensics 1.2.8, macos-forensics
+  1.0.3, mobile-forensics 1.0.3, network-forensics 1.0.3,
+  reverse-engineering 1.0.3, triage-collection 1.0.3.
+
 - **The examiner's review of the ledger** (`swarm.sh review <id>`): accept,
   reject (with a note) or amend (with a note) each entry, and sign off the
   ledger once the run has ended, over its current head. Kept beside the
@@ -608,6 +640,20 @@ not surprised:
 
 ### Fixed
 
+- **`sigma_hunt` passed Zircolite `--noexternal`**, which Zircolite 3
+  removed and refuses. Its `auto` engine prefers Zircolite, so once the disk
+  image held Zircolite it would have failed at the argument error where it
+  ran hayabusa before. It no longer passes the flag (2.x without it uses its
+  bundled evtx_dump).
+- **`unified_log` gave UnifiedLogReader three places where it takes
+  four** (uuidtext, timesync, the tracev3 files, and its output), so off a
+  Mac it only ever got an argparse error. It now passes all four, for a
+  `.logarchive` and for a copy of `/private/var/db`.
+- The windows-forensics pack named RegRipper `rip` under "GPL". Debian
+  installs it as `regripper`, and it is MIT, by its own licence file and
+  Debian's copyright. computer-forensics-base called bulk_extractor MIT; its
+  2.2.0 release says GPL-3.0-or-later for the code since 2015, public domain
+  for the original NPS work, and bundled third-party code under its own.
 - **A seat's large file froze its link to the hub, and the seat was
   stopped mid-case** (real CTF runs on macOS and Linux). Recording a file
   a seat had just extracted sent its bytes as one RPC line; msb's vsock

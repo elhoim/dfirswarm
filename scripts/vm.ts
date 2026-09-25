@@ -723,8 +723,9 @@ export function packNeeds(packDirs: string[]): PackNeed[] {
       const manifest = JSON.parse(readFileSync(join(dir, "pack.json"), "utf8")) as { id?: string; version?: string; checksums?: { sha256?: Record<string, string> } };
       let required: string[] = [];
       try {
-        const host = JSON.parse(readFileSync(join(dir, "requires", "host.json"), "utf8")) as { binaries?: Array<{ name?: string; optional?: boolean }> };
-        required = (host.binaries ?? []).filter((b) => b.name && !b.optional).map((b) => b.name as string);
+        const host = JSON.parse(readFileSync(join(dir, "requires", "host.json"), "utf8")) as { binaries?: Array<{ name?: string; optional?: boolean; not_in_image?: string }> };
+        // Another system's program (not_in_image) is asked of no image.
+        required = (host.binaries ?? []).filter((b) => b.name && !b.optional && !b.not_in_image).map((b) => b.name as string);
       } catch {
         required = [];
       }
@@ -1728,13 +1729,17 @@ export async function imageToolbox(image: string, preset: string, required: bool
   try {
     await copyFile(join(ROOT, "scripts", "toolbox.sh"), join(tmp, "toolbox.sh"));
     await mkdir(join(tmp, "sbx"), { recursive: true });
-    // Every program the run's packs name, for the check to look for in the image.
-    const programs: Array<{ name: string; why: string; pack: string; required: boolean }> = [];
+    // Every program the run's packs name, for the check to look for in the
+    // image; one that belongs to another system (not_in_image) is said as
+    // such, not looked for.
+    const programs: Array<{ name: string; why: string; pack: string; required: boolean; not_in_image?: string }> = [];
     for (const dir of packDirs.filter(Boolean)) {
       try {
         const id = (JSON.parse(readFileSync(join(dir, "pack.json"), "utf8")) as { id?: string }).id ?? dir;
-        const host = JSON.parse(readFileSync(join(dir, "requires", "host.json"), "utf8")) as { binaries?: Array<{ name?: string; why?: string; optional?: boolean }> };
-        for (const b of host.binaries ?? []) if (b.name) programs.push({ name: b.name, why: b.why ?? "", pack: id, required: !b.optional });
+        const host = JSON.parse(readFileSync(join(dir, "requires", "host.json"), "utf8")) as { binaries?: Array<{ name?: string; why?: string; optional?: boolean; not_in_image?: string }> };
+        for (const b of host.binaries ?? []) {
+          if (b.name) programs.push({ name: b.name, why: b.why ?? "", pack: id, required: !b.optional && !b.not_in_image, ...(b.not_in_image ? { not_in_image: b.not_in_image } : {}) });
+        }
       } catch {
         // a pack without host requirements names no program
       }

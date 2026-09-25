@@ -10,10 +10,13 @@
 #
 # --image FILE: this is a microVM run's image, checked inside a throwaway VM
 # of it (scripts/vm.ts toolbox). FILE is {"image", "programs": [{name, why,
-# pack, required}]}: every program the run's packs name is checked too, the
-# install hints are the VM's (nobody here runs brew), and --required holds
-# only for what a pack requires — the presets are advisory in a VM, where the
-# image is the toolset and no preset set is in every image.
+# pack, required, not_in_image}]}: every program the run's packs name is
+# checked too, the install hints are the VM's (nobody here runs brew), and
+# --required holds only for what a pack requires — the presets are advisory in
+# a VM, where the image is the toolset and no preset set is in every image. A
+# program that belongs to another system (not_in_image: Apple's log, a
+# collector run on the source host) is listed under not_applicable, never
+# missing.
 set -euo pipefail
 
 sandbox="${1:-}"
@@ -108,9 +111,11 @@ done
 # In an image: the packs' own programs, and the VM's install hint.
 image_ref=""
 pack_required=" "
+not_applicable="[]"
 VM_HINT="not in this image: an agent may pip-install it into its own VM (--allow-install), or build an image that has it (images/README.md)"
 if [[ -n "$image_file" ]]; then
   image_ref="$(jq -r '.image // ""' "$image_file")"
+  not_applicable="$(jq -c '[.programs[]? | select(.not_in_image) | {name, pack: (.pack // ""), why: .not_in_image}]' "$image_file")"
   while IFS=$'\t' read -r pname pwhy ppack preq; do
     [[ -n "$pname" ]] || continue
     [[ "$preq" == "true" ]] && pack_required+="$pname "
@@ -118,7 +123,7 @@ if [[ -n "$image_file" ]]; then
     for spec in "${TOOLS[@]}"; do [[ "${spec%%|*}" == "$pname" ]] && dup=1; done
     [[ "$dup" -eq 1 ]] && continue
     TOOLS+=("$pname|$pname --version 2>&1 | head -1|$pwhy ($ppack)|$VM_HINT")
-  done < <(jq -r '.programs[]? | [.name, (.why // ""), (.pack // ""), (.required | tostring)] | @tsv' "$image_file")
+  done < <(jq -r '.programs[]? | select(.not_in_image | not) | [.name, (.why // ""), (.pack // ""), (.required | tostring)] | @tsv' "$image_file")
 fi
 
 present=()
@@ -149,8 +154,10 @@ done
 
 printf '%s\n' "${present[@]+"${present[@]}"}" | jq -s --arg preset "$preset" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg image "$image_ref" --argjson missing "$(printf '%s\n' "${missing[@]+"${missing[@]}"}" | jq -s '.')" \
+  --argjson na "$not_applicable" \
   '{preset: $preset, checked_at: $at, present: ., missing: $missing}
-   + (if $image == "" then {context: "host"} else {context: "image", image: $image} end)' > "$sandbox/toolbox.json"
+   + (if $image == "" then {context: "host"} else {context: "image", image: $image} end)
+   + (if ($na | length) > 0 then {not_applicable: $na} else {} end)' > "$sandbox/toolbox.json"
 
 if [[ "${#warn[@]}" -gt 0 ]]; then
   blocking=("${warn[@]}")

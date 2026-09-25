@@ -40,11 +40,33 @@ A program a pack marks `redistributable: false` stops the build unless
 in a private registry, never one published for others to pull. The image then
 says so (image.json, its label, its NOTICE).
 
-A program no package manager has may carry a pinned download in its pack
-(`install.download`: a version, and per architecture a URL, its sha256 and the
-program's path inside the archive). install.py fetches it, checks the sha256
-and puts the program on PATH; an architecture with no entry is recorded as not
-installed. Anything else is listed under `manual` and never installed.
+A program no package manager has may carry a pinned artefact in its pack,
+each fetched by install.py and refused unless its sha256 is the pinned one:
+
+  install.download   a version, and per architecture a URL, its sha256 and the
+                     program's path inside the archive. A `.deb` is installed
+                     by apt, so its dependencies come from Debian; its `bin`,
+                     when it has one, is where the package puts the program.
+                     An architecture with no entry is recorded as not installed.
+  install.source     one archive for every architecture (a tag's tarball),
+                     unpacked under /opt/dfir/src/<name>, its `pip` arguments
+                     run in a venv of its own there, its `entry` put on PATH.
+  install.build      a source archive compiled in a builder stage of the
+                     image (`./configure --prefix`, `make`, `make install`),
+                     so the image carries the program and not the compiler.
+                     `env` is the environment of a source's pip, or of a
+                     build's configure and make; `arches`, the architectures
+                     a source or a build is for (every one when absent).
+
+`run` names the interpreter a download's or a source's program needs:
+`python` (the program's own venv, else the image's), or any program the image
+holds (`perl`, `dotnet`, which a pack may pin as a download of its own). An apt
+line with `-t <codename>-backports` comes from the image's Debian backports.
+
+A program marked `not_in_image` (with why) belongs to another system than the
+analysis image — Apple's `log`, a collector run on the source host — and is
+listed as not applicable, not as missing. Anything else no line above installs
+is listed under `manual` and never installed.
 """
 import argparse
 import hashlib
@@ -62,6 +84,8 @@ PACKS = HERE.parent / "packs"
 BASE_PROGRAMS = {"python3", "node", "jq", "sqlite3", "file", "xxd", "socat", "strings", "hexdump", "unzip",
                  "7z", "xz", "bzip2", "zstd", "curl", "exiftool"}
 APT = re.compile(r"^(?:sudo\s+)?apt(?:-get)?\s+install\s+(.+)$")
+# apt's own ways of naming the release a package comes from.
+RELEASE_FLAGS = {"-t", "--target-release", "--default-release"}
 PIP = re.compile(r"^python3\s+-m\s+pip\s+install\s+(.+)$")
 
 
@@ -111,6 +135,24 @@ def words(tail: str) -> list:
     return [w for w in tail.split() if not w.startswith("-")]
 
 
+def apt_words(tail: str) -> tuple:
+    """The packages an apt line installs, and the release it takes them from
+    (`-t bookworm-backports`), if it names one."""
+    toks, pkgs, release = tail.split(), [], None
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t in RELEASE_FLAGS and i + 1 < len(toks):
+            release, i = toks[i + 1], i + 2
+            continue
+        if t.startswith("--target-release=") or t.startswith("--default-release="):
+            release = t.split("=", 1)[1]
+        elif not t.startswith("-"):
+            pkgs.append(t)
+        i += 1
+    return pkgs, release
+
+
 def pack_version(packs, name: str) -> dict:
     """The pack's version and seal (sha256 of its sorted checksums), as vm.ts packSeal computes it."""
     manifest = json.loads((pack_dir(packs, name) / "pack.json").read_text())
@@ -120,25 +162,43 @@ def pack_version(packs, name: str) -> dict:
     return {"version": manifest.get("version", "?"), "seal": seal}
 
 
+KINDS = ("apt", "pip", "apt_release", "requirements", "binaries", "manual", "downloads", "sources", "builds",
+         "not_applicable")
+
+
+def empty() -> dict:
+    return {k: ({} if k in ("apt", "pip", "apt_release") else []) for k in KINDS}
+
+
 def read_pack(packs, name: str) -> dict:
-    spec = {"apt": {}, "pip": {}, "requirements": [], "binaries": [], "manual": [], "downloads": []}
+    spec = empty()
     host = pack_dir(packs, name) / "requires" / "host.json"
     if host.exists():
         for b in json.loads(host.read_text())["binaries"]:
             install = b.get("install") or {}
             line = install.get("apt", "").strip()
             required = not b.get("optional", False)
+            # Another system's program (Apple's log, a collector run on the
+            # source host): no Linux image holds it, and none lacks it.
+            if b.get("not_in_image"):
+                spec["not_applicable"].append({"name": b["name"], "pack": name, "why": b["not_in_image"]})
+                continue
             spec["binaries"].append({"name": b["name"], "pack": name, "required": required,
                                      "licence": b.get("licence"),
                                      "redistributable": b.get("redistributable", True) is not False,
                                      "source": line})
-            if isinstance(install.get("download"), dict):
-                spec["downloads"].append({"name": b["name"], "pack": name, "required": required,
-                                          **install["download"]})
-                spec["binaries"][-1]["source"] = f"download {install['download'].get('version', '?')}"
+            pinned = [k for k in ("build", "source", "download") if isinstance(install.get(k), dict)]
+            if pinned:
+                kind = pinned[0]
+                spec[kind + "s"].append({"name": b["name"], "pack": name, "required": required, **install[kind]})
+                spec["binaries"][-1]["source"] = {"download": "download", "source": "source",
+                                                  "build": "built from source"}[kind] + f" {install[kind].get('version', '?')}"
             elif m := APT.match(line):
-                for p in words(m.group(1)):
+                pkgs, release = apt_words(m.group(1))
+                for p in pkgs:
                     spec["apt"][p] = spec["apt"].get(p, False) or required
+                    if release:
+                        spec["apt_release"][p] = release
             elif m := PIP.match(line):
                 for p in words(m.group(1)):
                     spec["pip"][p] = spec["pip"].get(p, False) or required
@@ -154,17 +214,20 @@ def read_pack(packs, name: str) -> dict:
 
 
 def merge(specs: list) -> dict:
-    out = {"apt": {}, "pip": {}, "requirements": [], "binaries": [], "manual": [], "downloads": []}
+    out = empty()
     for s in specs:
         for kind in ("apt", "pip"):
             for p, req in s[kind].items():
                 out[kind][p] = out[kind].get(p, False) or req
+        out["apt_release"].update(s["apt_release"])
         out["requirements"] += [r for r in s["requirements"] if r not in out["requirements"]]
         out["binaries"] += s["binaries"]
         out["manual"] += s["manual"]
-        for d in s["downloads"]:
-            if not any(x["name"] == d["name"] for x in out["downloads"]):
-                out["downloads"].append(d)
+        # A program two packs pin is installed once, as the first pins it.
+        for kind in ("downloads", "sources", "builds", "not_applicable"):
+            for d in s[kind]:
+                if not any(x["name"] == d["name"] for x in out[kind]):
+                    out[kind].append(d)
     return out
 
 
@@ -185,6 +248,12 @@ def notice(spec: dict) -> str:
         for arch in ("amd64", "arm64"):
             if isinstance(d.get(arch), dict):
                 lines.append(f"  {d['name']} {arch}: {d[arch].get('url')}  sha256 {d[arch].get('sha256')}")
+    for kind in ("sources", "builds"):
+        for d in spec.get(kind, []):
+            lines.append(f"  {d['name']} {'source' if kind == 'sources' else 'built from'}: {d.get('url')}  sha256 {d.get('sha256')}")
+    if spec.get("not_applicable"):
+        lines += ["", "Named by a pack, and not in this image because they belong to another system:"]
+        lines += [f"{d['name']}  ({d['pack']})  {d['why']}" for d in spec["not_applicable"]]
     return "\n".join(lines) + "\n"
 
 
@@ -343,10 +412,23 @@ def build(a) -> int:
     (a.out / "spec.json").write_text(json.dumps(spec, indent=1) + "\n")
     (a.out / "NOTICE").write_text(notice(spec))
     shutil.copy(HERE / "install.py", a.out / "install.py")
+    # A program built from source is built in a stage of its own, from the
+    # same base, and only what `make install` put under its prefix is copied
+    # across: the compiler and the -dev packages stay behind. Each stage reads
+    # its own file, so every profile that builds the program shares its cache.
+    stages, copies = [], []
+    for d in spec["builds"]:
+        stage = "build-" + re.sub(r"[^a-z0-9]+", "-", d["name"].lower()).strip("-")
+        (a.out / f"{stage}.json").write_text(json.dumps(d, indent=1) + "\n")
+        stages.append(f"""FROM ${{BASE}} AS {stage}
+COPY install.py {stage}.json /tmp/dfirswarm-build/
+RUN python3 /tmp/dfirswarm-build/install.py --build /tmp/dfirswarm-build/{stage}.json
+""")
+        copies.append(f"COPY --from={stage} /opt/dfir/tools/{d['name']} /opt/dfir/tools/{d['name']}\n")
     (a.out / "Dockerfile").write_text(f"""# Generated by images/recipe.py from packs: {", ".join(packs) or "none"}. Do not edit.
 ARG BASE={a.base}
-FROM ${{BASE}}
-COPY install.py spec.json NOTICE /tmp/dfirswarm-build/
+{"".join(s + chr(10) for s in stages)}FROM ${{BASE}}
+{"".join(copies)}COPY install.py spec.json NOTICE /tmp/dfirswarm-build/
 RUN python3 /tmp/dfirswarm-build/install.py /tmp/dfirswarm-build/spec.json \\
  && rm -rf /tmp/dfirswarm-build
 ENV PATH=/opt/dfir/venv/bin:$PATH
@@ -357,7 +439,8 @@ LABEL org.opencontainers.image.title="dfirswarm-{a.profile}" \\
     req_apt = sum(spec["apt"].values())
     print(f"{a.profile}: {len(packs)} pack(s), {len(spec['apt'])} apt ({req_apt} required), {len(spec['pip'])} pip, "
           f"{len(spec['requirements'])} python requirements, {len(spec['downloads'])} pinned downloads, "
-          f"{len(spec['manual'])} neither"
+          f"{len(spec['sources'])} pinned sources, {len(spec['builds'])} built from source, "
+          f"{len(spec['manual'])} neither, {len(spec['not_applicable'])} not applicable"
           + (f"; NOT for redistribution ({len(held_back)} programs)" if held_back else ""))
     return 0
 

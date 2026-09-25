@@ -1,7 +1,7 @@
 {
   "id": "windows-forensics",
   "name": "Windows Forensics Pack",
-  "version": "1.2.7",
+  "version": "1.2.8",
   "description": "Artefact-by-artefact method and tooling for a Windows examination: the file system and its journals, the hives, execution evidence, the event logs and the records inside a cleared one, accounts and remote access, persistence, PowerShell, browsers, shadow copies, memory, and the traces anti-forensics leaves.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -18,9 +18,9 @@
   "checksums": {
     "sha256": {
       "LICENCE": "617dec43b30845a8c7d062db3f6d892400d96796b91f363586beacfbdffd1721",
-      "README.md": "6070bc89e1eef61c4ebec4da8a70c957329cadb91f2423393b0a9d4e07abf051",
-      "tools/sigma_hunt/manifest.json": "be8180d00ff10b702d6b8cf7d38c352b57130757712af36e8d57972d6581c111",
-      "tools/sigma_hunt/run.py": "c8c7030b7efd814642203e44f46231ac1917bb91a692b32b772fad844e49aada",
+      "README.md": "2a06317f36049f85350185b3c3bc95e9f1cf9ff5319427e1561340a250011c09",
+      "tools/sigma_hunt/manifest.json": "04b87ba00ebf500cb6c32d1cdac37db711dd900f70148ad02032f260e275198d",
+      "tools/sigma_hunt/run.py": "336dc7d605f5c470e34a37a41ce29487cca52112448cde9ae941a2980be1e4dd",
       "tools/lnk_parse/manifest.json": "30734be5630e0d1cc47fcccc2402cf488677ca5cf550add92ce140de890ef870",
       "tools/lnk_parse/run.py": "fbdee2d7a751201354960f7585cebf049ceae3ba3098ded13069418b0ece012a",
       "tools/regkv/manifest.json": "c86197717e2bb714065426c78b441f679abf224fd2f5e7849688494ab1cc8efc",
@@ -86,7 +86,7 @@
       "skills/registry/overview.md": "a645987cbbbe4c610e7701e41788e067f880d3d5729a31d2ae4569a8fdee625a",
       "skills/registry/system-profile.md": "931b25341d637782c5f21c34cdfbe6bda8709486a16280ce29a0b54b0f7b75b0",
       "skills/antiforensics/traces.md": "c87467f49a555613b42c980c1ef084d98fd6f8e3e7ac438243084e7443cf2748",
-      "requires/host.json": "480cbe539c35f88b31380b440e456a0760b65dbda0cc2c667b1876a2bf0bfa49",
+      "requires/host.json": "33835fffa4e3b94295274b74ce0871bf6cf0ef32f42fe143d425ebf07f0939c4",
       "requires/python.txt": "c82e082a319cb54264a5028d908b36e9cf63540fdfc476956cac67959f1b5bd3",
       "skills/INDEX.md": "8c386266c502dc85a1c46b2896421ab3bc4f82c5a28a72b2518bd5ffeebe45c7"
     }

@@ -179,6 +179,155 @@ res="$(tail -1 <<<"$res")"
 [[ "$(jq -r '.no_arch[0]' <<<"$res")" == false ]] && jq -r '.no_arch[1]' <<<"$res" | grep -q 'build pinned' || fail "an architecture with no pin was not recorded as such: $res"
 pass "a pinned download is linked onto PATH when its sha256 matches, and refused when its bytes differ, its archive climbs out, or its architecture has no pin"
 
+# --- the other pinned kinds -----------------------------------------------------
+# A pack names what no package manager has as data: an apt line from the
+# image's backports, a .deb per architecture, a tag's source with its entry and
+# its interpreter, a source compiled in a builder stage, and a program that
+# belongs to another system. The recipe turns each into its part of the spec
+# and of the Dockerfile; nothing of any one program is in the harness.
+fake="$TMP/fakepacks/reverse-engineering"
+mkdir -p "$fake/requires"
+printf '{"id": "reverse-engineering", "name": "f", "version": "1.0.0", "description": "f", "licence": "MIT", "depends": []}\n' > "$fake/pack.json"
+cat > "$fake/requires/host.json" <<JSON
+{"binaries": [
+ {"name": "bp-tool", "optional": true, "why": "t", "licence": "t", "redistributable": false,
+  "install": {"apt": "apt-get install -y -t bookworm-backports bp-tool"}},
+ {"name": "deb-tool", "optional": true, "why": "t", "licence": "t", "redistributable": false,
+  "install": {"apt": "x", "download": {"version": "1", "arm64": {"url": "https://example.org/deb-tool_1_arm64.deb", "sha256": "$sha", "bin": "/opt/deb-tool/bin/deb-tool"}}}},
+ {"name": "src-tool", "optional": true, "why": "t", "licence": "t", "redistributable": false,
+  "install": {"apt": "x", "source": {"version": "2", "url": "https://example.org/src-tool-2.tar.gz", "sha256": "$sha", "entry": "scripts/tool.py", "run": "python", "pip": ["-r", "requirements.txt"], "skip": ["tests/data"]}}},
+ {"name": "built-tool", "optional": true, "why": "t", "licence": "t", "redistributable": false,
+  "install": {"apt": "x", "build": {"version": "3", "url": "https://example.org/built-tool-3.tar.gz", "sha256": "$sha", "bin": "bin/built-tool", "build_deps": ["libz-dev"], "apt_deps": ["zlib1g"]}}},
+ {"name": "mac-only", "optional": true, "why": "t", "licence": "t", "redistributable": false,
+  "not_in_image": "Only macOS has it."}
+]}
+JSON
+python3 "$R" build re --packs "$TMP/fakepacks" --out "$TMP/ctx-kinds" --allow-nonredistributable >/dev/null || fail "a context of every pinned kind could not be written"
+spec="$TMP/ctx-kinds/spec.json"
+jq -e '.apt["bp-tool"] == false and .apt_release == {"bp-tool": "bookworm-backports"} and (.apt | has("bookworm-backports") | not)' "$spec" >/dev/null \
+  || fail "an apt line's -t release is where its package comes from, not a package: $(jq -c '{apt, apt_release}' "$spec")"
+jq -e '[.downloads[].name] == ["deb-tool"] and [.sources[].name] == ["src-tool"] and [.builds[].name] == ["built-tool"]' "$spec" >/dev/null \
+  || fail "each pinned kind is not where the spec keeps it: $(jq -c '{d: [.downloads[].name], s: [.sources[].name], b: [.builds[].name]}' "$spec")"
+jq -e '.manual == [] and .not_applicable == [{"name": "mac-only", "pack": "reverse-engineering", "why": "Only macOS has it."}]
+       and ([.binaries[].name] | index("mac-only") == null)' "$spec" >/dev/null \
+  || fail "another system's program is not listed as not applicable, or is still expected in the image: $(jq -c '{manual, not_applicable}' "$spec")"
+grep -q '^mac-only  (reverse-engineering)  Only macOS has it.' "$TMP/ctx-kinds/NOTICE" || fail "the NOTICE does not say which programs belong to another system"
+df="$TMP/ctx-kinds/Dockerfile"
+grep -q '^FROM ${BASE} AS build-built-tool$' "$df" || fail "a program built from source has no builder stage: $(cat "$df")"
+grep -q '^RUN python3 /tmp/dfirswarm-build/install.py --build /tmp/dfirswarm-build/build-built-tool.json$' "$df" || fail "the builder stage does not build from its own file"
+jq -e '.name == "built-tool" and .bin == "bin/built-tool"' "$TMP/ctx-kinds/build-built-tool.json" >/dev/null || fail "the builder stage's file is not the program's build"
+copy="$(grep -n '^COPY --from=build-built-tool /opt/dfir/tools/built-tool /opt/dfir/tools/built-tool$' "$df" | cut -d: -f1)"
+spec_copy="$(grep -n '^COPY install.py spec.json NOTICE' "$df" | cut -d: -f1)"
+[[ -n "$copy" && -n "$spec_copy" && "$copy" -lt "$spec_copy" ]] || fail "what the builder installed is not copied before the profile's install runs: $(cat "$df")"
+pass "an apt line's backports release, a .deb, a pinned source, a build in its own stage and another system's program each land in the spec and the Dockerfile"
+
+# install.py on each kind, with apt, the venv, the tools, the sources and bin
+# all in the test's own directories. apt is a script that says what it was asked.
+# (No AppleDouble ._ entries from macOS tar: a tag's tarball has none.)
+export COPYFILE_DISABLE=1
+K="$TMP/kinds"
+mkdir -p "$K/src/proj-2.0/scripts" "$K/src/proj-2.0/tests/data" "$K/venv/bin" "$K/opt/deb-tool/bin" "$K/apt-sources"
+printf 'GREETING = "helper ran"\n' > "$K/src/proj-2.0/helper.py"
+printf 'import helper, sys\nprint(helper.GREETING, *sys.argv[1:])\n' > "$K/src/proj-2.0/scripts/tool.py"
+printf 'big\n' > "$K/src/proj-2.0/tests/data/sample.bin"
+: > "$K/src/proj-2.0/requirements.txt"
+tar -czf "$K/proj-2.0.tar.gz" -C "$K/src" proj-2.0
+src_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$K/proj-2.0.tar.gz")"
+ln -s "$(command -v python3)" "$K/venv/bin/python"
+printf 'not really a package\n' > "$K/deb-tool_1.deb"
+deb_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$K/deb-tool_1.deb")"
+printf '#!/bin/sh\necho deb-tool ran\n' > "$K/opt/deb-tool/bin/deb-tool"
+printf '#!/bin/sh\necho "$@" >> "%s/apt.log"\n' "$K" > "$K/apt"
+chmod +x "$K/apt" "$K/opt/deb-tool/bin/deb-tool"
+# A source that builds the way autotools does: configure writes a Makefile
+# whose install puts the program under the prefix it was given.
+mkdir -p "$K/bsrc/built-3" "$K/bsrc-bad/built-3"
+cat > "$K/bsrc/built-3/configure" <<'SH'
+#!/bin/sh
+prefix="${1#--prefix=}"
+printf 'all:\n\t@echo built\ninstall:\n\tmkdir -p %s/bin\n\tprintf "#!/bin/sh\\necho built-tool ran%s\\n" > %s/bin/built-tool\n' "$prefix" "${BUILD_NOTE:+ $BUILD_NOTE}" "$prefix" > Makefile
+SH
+printf '#!/bin/sh\nexit 1\n' > "$K/bsrc-bad/built-3/configure"
+chmod +x "$K/bsrc/built-3/configure" "$K/bsrc-bad/built-3/configure"
+tar -czf "$K/built-3.tar.gz" -C "$K/bsrc" built-3
+tar -czf "$K/built-bad.tar.gz" -C "$K/bsrc-bad" built-3
+b_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$K/built-3.tar.gz")"
+bad_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$K/built-bad.tar.gz")"
+printf 'Types: deb\nURIs: http://mirror.example/debian\nSuites: bookworm\n\nTypes: deb\nURIs: http://mirror.example/debian-security\nSuites: bookworm-security\n' > "$K/apt-sources/debian.sources"
+printf 'ID=debian\nVERSION_ID="12"\nVERSION_CODENAME=bookworm\n' > "$K/os-release"
+res="$(DFIRSWARM_TOOLS_DIR="$K/tools" DFIRSWARM_SRC_DIR="$K/opt-src" DFIRSWARM_BIN_DIR="$TMP/bin" DFIRSWARM_VENV="$K/venv" \
+       DFIRSWARM_APT_SOURCES_DIR="$K/apt-sources" DFIRSWARM_OS_RELEASE="$K/os-release" DFIRSWARM_BUILD_DIR="$K/work" \
+       python3 - "$ROOT/images" "$K" "$src_sha" "$deb_sha" "$b_sha" "$bad_sha" <<'EOF'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import install
+K, src_sha, deb_sha, b_sha, bad_sha = sys.argv[2:7]
+apt = [f"{K}/apt"]
+a = install.arch()
+out = {}
+src = {"name": "src-tool", "version": "2", "url": f"file://{K}/proj-2.0.tar.gz", "sha256": src_sha,
+       "entry": "scripts/tool.py", "run": "python", "skip": ["tests/data"]}
+got, why = install.fetch_source(src, apt)
+out["source"] = [bool(got), why, (got or {}).get("kind")]
+got, why = install.fetch_source({**src, "name": "src-venv", "pip": ["--no-index", "-r", "requirements.txt"]}, apt)
+out["source_venv"] = [bool(got), why, (got or {}).get("venv")]
+got, why = install.fetch_source({**src, "name": "src-bad", "sha256": "0" * 64}, apt)
+out["source_bad_sha"] = [bool(got), why]
+got, why = install.fetch_source({**src, "name": "src-shell", "entry": "helper.py", "run": "no-such-runtime"}, apt)
+out["no_runtime"] = [bool(got), why]
+got, why = install.fetch_source({**src, "name": "src-elsewhere", "arches": ["no-such-arch"]}, apt)
+out["other_arch"] = [bool(got), why]
+deb = {"name": "deb-tool", "version": "1", a: {"url": f"file://{K}/deb-tool_1.deb", "sha256": deb_sha, "bin": f"{K}/opt/deb-tool/bin/deb-tool"}}
+got, why = install.fetch(deb, apt)
+out["deb"] = [bool(got), why, (got or {}).get("kind")]
+got, why = install.fetch({**deb, "name": "deb-bad", a: {**deb[a], "sha256": "0" * 64}}, apt)
+out["deb_bad_sha"] = [bool(got), why]
+good = {"name": "built-tool", "version": "3", "url": f"file://{K}/built-3.tar.gz", "sha256": b_sha, "bin": "bin/built-tool",
+        "env": {"BUILD_NOTE": "with its env"}}
+spec = f"{K}/build.json"
+open(spec, "w").write(json.dumps(good))
+out["build_rc"] = install.build_source(spec)
+got, why = install.link_build(good, apt)
+out["build"] = [bool(got), why, (got or {}).get("kind")]
+open(spec, "w").write(json.dumps({**good, "name": "built-bad", "url": f"file://{K}/built-bad.tar.gz", "sha256": bad_sha}))
+out["bad_optional_rc"] = install.build_source(spec)
+out["bad_link"] = list(install.link_build({**good, "name": "built-bad"}, apt))
+open(spec, "w").write(json.dumps({**good, "name": "built-req", "url": f"file://{K}/built-bad.tar.gz", "sha256": bad_sha, "required": True}))
+out["bad_required_rc"] = install.build_source(spec)
+out["backports"] = install.enable_release("bookworm-backports")
+out["other_release"] = install.enable_release("trixie")
+print(json.dumps(out))
+EOF
+)" || fail "install.py could not be driven over the pinned kinds: $res"
+res="$(tail -1 <<<"$res")"
+[[ "$(jq -r '.source[0]' <<<"$res")" == true ]] || fail "a pinned source was not installed: $res"
+[[ "$("$TMP/bin/src-tool" a b)" == "helper ran a b" ]] || fail "a pinned source's entry does not run through its interpreter with the checkout's modules: $("$TMP/bin/src-tool" 2>&1)"
+[[ -f "$K/opt-src/src-tool/helper.py" && ! -e "$K/opt-src/src-tool/proj-2.0" ]] || fail "the archive's top directory was not dropped"
+[[ ! -e "$K/opt-src/src-tool/tests/data" ]] || fail "a path the pack skips was unpacked"
+[[ "$(jq -r '.source_venv[0]' <<<"$res")" == true && -x "$K/opt-src/src-venv/.venv/bin/python" ]] || fail "a source with pip arguments did not get a venv of its own: $res"
+grep -q 'opt-src/src-venv/.venv/bin/python" ' "$TMP/bin/src-venv" || fail "a source with its own venv is not run by that venv's python: $(cat "$TMP/bin/src-venv")"
+[[ "$(jq -r '.source_bad_sha[0]' <<<"$res")" == false ]] && jq -r '.source_bad_sha[1]' <<<"$res" | grep -q 'is not the pinned' || fail "a source with other bytes was unpacked: $res"
+[[ ! -e "$K/opt-src/src-bad/helper.py" ]] || fail "a source whose sha256 failed left its files"
+jq -r '.no_runtime[1]' <<<"$res" | grep -q 'its runtime no-such-runtime is not in the image' || fail "a program whose interpreter the image lacks was linked: $res"
+[[ "$(jq -r '.other_arch[0]' <<<"$res")" == false && ! -e "$K/opt-src/src-elsewhere" ]] && jq -r '.other_arch[1]' <<<"$res" | grep -q 'pins it for no-such-arch only' \
+  || fail "a source its pack pins for other architectures was installed here: $res"
+[[ "$(jq -r '.deb[0]' <<<"$res")" == true && "$("$TMP/bin/deb-tool")" == "deb-tool ran" ]] || fail "a pinned .deb's program is not on PATH: $res"
+[[ "$(jq -r '.deb[2]' <<<"$res")" == deb && "$(jq -r '.source[2]' <<<"$res")" == source ]] || fail "the image does not record each artefact's kind: $res"
+grep -q "deb-tool_1.deb" "$K/apt.log" || fail "a pinned .deb was not handed to apt: $(cat "$K/apt.log")"
+grep -q 'deb-bad' "$K/apt.log" && fail "apt was handed a .deb whose sha256 is not the pinned one"
+[[ "$(jq -r '.deb_bad_sha[0]' <<<"$res")" == false ]] || fail "a .deb with other bytes was installed: $res"
+[[ "$(jq -r '.build_rc' <<<"$res")" == 0 && "$(jq -r '.build[0]' <<<"$res")" == true ]] || fail "a source that builds was not built and linked: $res"
+[[ "$("$TMP/bin/built-tool")" == "built-tool ran with its env" ]] || fail "a built program is not on PATH, or its env did not reach its configure: $("$TMP/bin/built-tool")"
+jq -e '.ok == true and .kind == "build"' "$K/tools/built-tool/.dfirswarm-build.json" >/dev/null || fail "a build does not say beside its program that it built"
+[[ "$(jq -r '.bad_optional_rc' <<<"$res")" == 0 ]] || fail "an optional program that does not build stopped the image: $res"
+jq -r '.bad_link[1]' <<<"$res" | grep -q 'configure failed' || fail "an optional program that did not build is not recorded with why: $res"
+[[ "$(jq -r '.bad_required_rc' <<<"$res")" == 1 ]] || fail "a required program that does not build did not stop the image: $res"
+[[ "$(jq -r '.backports' <<<"$res")" == null ]] || fail "the image's own backports were refused: $res"
+grep -q '^URIs: http://mirror.example/debian$' "$K/apt-sources/dfirswarm-bookworm-backports.sources" && grep -q '^Suites: bookworm-backports$' "$K/apt-sources/dfirswarm-bookworm-backports.sources" \
+  || fail "backports do not come from the image's own mirror: $(cat "$K/apt-sources/dfirswarm-bookworm-backports.sources")"
+jq -r '.other_release' <<<"$res" | grep -q "is not this image's backports" || fail "a release other than the image's backports was added: $res"
+pass "install.py puts a pinned source, a .deb and a built program on PATH only when their bytes are the pinned ones, gives a source's requirements a venv of its own, builds with the pack's env, records a failed build, and adds only its own backports"
+
 # --- what an image records ------------------------------------------------------
 # The base records what a profile does: the venv as `pip list` names it (a VM's
 # inventory at stop is diffed against it, so the base's own packages are not
@@ -247,6 +396,34 @@ for bad in '{"amd64": {"url": "https://example.org/t", "sha256": "'"$sha"'"}}' \
   bash "$ROOT/scripts/pack.sh" seal "$TMP/p/bad-pack" >/dev/null 2>&1 && fail "a download entry that cannot be checked was sealed: $bad"
 done
 pass "a pack's download needs a version, an https url, a whole sha256 and a program path inside it"
+
+mk_entry() { # <dir> <binary entry json>
+  mk "$1" '{"version": "1", "amd64": {"url": "https://example.org/t", "sha256": "'"$sha"'"}}'
+  printf '{"binaries": [%s]}\n' "$2" > "$1/requires/host.json"
+}
+e='"name": "tool", "why": "Test.", "licence": "MIT", "redistributable": true, "optional": true'
+u='"url": "https://example.org/t.tar.gz", "sha256": "'"$sha"'"'
+for good in '{'"$e"', "install": {"source": {"version": "1", '"$u"', "entry": "bin/t.py", "run": "python", "pip": ["-r", "requirements.txt"], "skip": ["tests"]}}}' \
+            '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "bin/t", "configure": ["--disable-x"], "build_deps": ["gcc"], "apt_deps": ["zlib1g"], "env": {"CFLAGS": "-O2"}}}}' \
+            '{'"$e"', "install": {"download": {"version": "1", "arm64": {"url": "https://example.org/t_1_arm64.deb", "sha256": "'"$sha"'", "bin": "/opt/t/bin/t"}}}}' \
+            '{'"$e"', "not_in_image": "Only macOS has it."}'; do
+  mk_entry "$TMP/p/good-kind" "$good"
+  bash "$ROOT/scripts/pack.sh" seal "$TMP/p/good-kind" >/dev/null 2>&1 || fail "a well-formed entry was refused: $good"
+done
+for bad in '{'"$e"', "install": {"source": {"version": "1", '"$u"'}}}' \
+           '{'"$e"', "install": {"source": {"version": "1", "url": "http://example.org/t.tar.gz", "sha256": "'"$sha"'", "entry": "t.py"}}}' \
+           '{'"$e"', "install": {"source": {"version": "1", '"$u"', "entry": "../t.py"}}}' \
+           '{'"$e"', "install": {"source": {"version": "1", '"$u"', "entry": "t.py", "pip": "-r requirements.txt"}}}' \
+           '{'"$e"', "install": {"source": {"version": "1", '"$u"', "entry": "t.py", "env": {"X": 1}}}}' \
+           '{'"$e"', "install": {"build": {'"$u"', "bin": "bin/t"}}}' \
+           '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "/usr/bin/t"}}}' \
+           '{'"$e"', "install": {"download": {"version": "1", "arm64": {"url": "https://example.org/t_1_arm64.deb", "sha256": "'"$sha"'", "bin": "opt/t/bin/t"}}}}' \
+           '{"name": "tool", "why": "Test.", "licence": "MIT", "redistributable": true, "not_in_image": "Only macOS has it."}' \
+           '{'"$e"', "not_in_image": ""}'; do
+  mk_entry "$TMP/p/bad-kind" "$bad"
+  bash "$ROOT/scripts/pack.sh" seal "$TMP/p/bad-kind" >/dev/null 2>&1 && fail "an entry that cannot be checked, or another system's program required of an image, was sealed: $bad"
+done
+pass "a pinned source needs its entry, a build its program inside its prefix, a .deb the path it installs, and another system's program is never required"
 
 # --- the tool library's imports are in every image ----------------------------
 missing_lib="$(python3 - "$ROOT" <<'EOF'

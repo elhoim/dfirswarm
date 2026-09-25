@@ -60,7 +60,8 @@
         "apt": "https://github.com/orlikoski/CyLR/releases"
       },
       "licence": "GPL-3.0-or-later",
-      "redistributable": false
+      "redistributable": false,
+      "not_in_image": "A collector, run on the live host whose files it pulls; the analysis image receives its zip and has no use for the program."
     }
   ]
 }

@@ -325,7 +325,8 @@ test("a pack's needs come from its installed directory: its version, its seal an
   const { mkdir } = await import("node:fs/promises");
   await mkdir(join(dir, "requires"), { recursive: true });
   await writeFile(join(dir, "pack.json"), JSON.stringify({ id: "demo", version: "1.2.3", checksums: { sha256: { "b.md": "22", "a.md": "11" } } }));
-  await writeFile(join(dir, "requires", "host.json"), JSON.stringify({ binaries: [{ name: "fls" }, { name: "vol", optional: true }, { name: "fls" }] }));
+  // Another system's program (not_in_image) is asked of no image, even unmarked optional.
+  await writeFile(join(dir, "requires", "host.json"), JSON.stringify({ binaries: [{ name: "fls" }, { name: "vol", optional: true }, { name: "fls" }, { name: "log", not_in_image: "Only macOS has it." }] }));
   const [need] = packNeeds([dir]);
   assert.deepEqual({ ...need, seal: undefined }, { id: "demo", version: "1.2.3", seal: undefined, required: ["fls"] });
   // The seal is the sha256 of the sorted checksums, as images/recipe.py computes it.
