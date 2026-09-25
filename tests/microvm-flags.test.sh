@@ -234,6 +234,12 @@ done
 out="$(start --isolation microvm --pack memory-forensics --label vm-mem)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a microvm run with a pack exited $rc: $out"
 [[ "$(reg vm-mem '.isolation.image')" == "dfirswarm-memory:dev-$ARCH" ]] || fail "memory-forensics should boot the memory image, got $(reg vm-mem '.isolation.image')"
+# --pack given twice adds up: the second used to replace the first, and a run
+# asked for windows-forensics and memory-forensics got only the latter.
+bash "$ROOT/scripts/pack.sh" install "$ROOT/packs/windows-forensics" --yes >/dev/null 2>&1 || fail "could not install pack windows-forensics into the test's home"
+out="$(start --isolation microvm --pack windows-forensics --pack memory-forensics --label vm-two-packs)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a run with two --pack flags exited $rc: $out"
+[[ "$(reg vm-two-packs '.isolation.image')" == "dfirswarm-full:dev-$ARCH" ]] || fail "the first of two --pack flags was dropped: image $(reg vm-two-packs '.isolation.image')"
 out="$(start --isolation microvm --image registry.example/dfirswarm-custom@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --label vm-img)"
 [[ "$(reg vm-img '.isolation.image')" == "registry.example/dfirswarm-custom@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]] || fail "--image was not honoured"
 out="$(start --label vm-default)"

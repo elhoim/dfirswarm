@@ -3121,7 +3121,9 @@ cmd_start() {
       --catalog) catalog=1; shift ;;
       --toolbox) toolbox="$2"; shift 2 ;;
       --tools-from) tools_from="$2"; shift 2 ;;
-      --pack) packs="$2"; shift 2 ;;
+      # Repeated, the packs add up (as in image-for): a second --pack used to
+      # replace the first without a word.
+      --pack) packs="${packs:+$packs,}$2"; shift 2 ;;
       --toolbox-required) toolbox_required=1; shift ;;
       --quarantine) quarantine=1; shift ;;
       --no-write-guard) write_guard=0; shift ;;

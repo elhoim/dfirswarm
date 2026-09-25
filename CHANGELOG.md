@@ -654,6 +654,10 @@ not surprised:
   lines of a catalogue file list. The base image preloads `seekfix`, which
   swaps them back only on a FUSE file whose server answers the swapped
   pair; a VM test reads a 264 KB mounted list with grep.
+- `start --pack A --pack B` kept only B: a second `--pack` replaced the
+  first without a word (the Linux web-server CTF asked for
+  windows-forensics and memory-forensics and ran without the former's
+  twenty tools). Repeated, the flags now add up, as `image-for`'s did.
 - The first prompt told each agent to read `threads/main` (a directory)
   and `done/SWARM_DONE` (absent until the end): two failed calls per agent
   at every start. It now sends them to `inbox`, which answers both.
