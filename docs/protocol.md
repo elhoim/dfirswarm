@@ -158,7 +158,9 @@ reason**, not an open-ended lock:
   cannot both break one lock. Age is read on the filesystem's clock: the
   lock and `beat` are stamped by the filesystem, and so is a probe file
   (`locks/.probe.<token>`) the waiter writes next to them, so a lock stamped
-  from a microVM guest or an NFS client is not aged on the host's clock. The
+  through an NFS client is not aged on the host's clock. (In a microVM run no
+  guest takes this lock: the run is read-only in the VMs, and only the hub,
+  `reap.sh` and `swarm.sh say` take it, on the host.) The
   heartbeat stops once the lock is no longer its holder's. A holder removes only a lock whose `owner`
   token is its own, and warns (`DFIRSWARM_TABLE_LOCK_LOST`; on stderr from
   bash) when it finds its lock was taken over. `reap.sh` and `swarm.sh say`

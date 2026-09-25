@@ -1179,6 +1179,8 @@ test("helpers: path classification and callsign heuristic", () => {
   assert.equal(classifyPath("/runs", "s7a1c/.pi-sessions/s7a1c00/session.jsonl").kind, "sessions");
   assert.equal(classifyPath("/runs", "s7a1c/inbox/s7a1c00/cursors.json").kind, "internal");
   assert.equal(classifyPath("/runs", "s7a1c/locks/.table.lock/pid").kind, "internal");
+  // The lock's other bookkeeping (#30) is no claim either.
+  for (const f of [".table.lock.break", ".probe.4f2a", ".table.lock.released.9c1e"]) assert.equal(classifyPath("/runs", `s7a1c/locks/${f}`).kind, "internal", f);
   assert.equal(classifyPath("/runs", "s7a1c/.budget.json.4242.a1b2c3d4e5f6.tmp").kind, "internal");
   assert.equal(classifyPath("/runs", "s7a1c/locks/abc.json").kind, "locks");
   assert.equal(classifyPath("/runs", "s7a1c/tools/csv_stats/manifest.json").kind, "tools");
