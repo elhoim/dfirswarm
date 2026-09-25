@@ -427,4 +427,37 @@ assert det["rule"] == "Bitsadmin Download" and det["record_id"] == 7 and det["le
 ' "$out" || fail "sigma_hunt did not read what Zircolite matched: $out"
 pass "sigma_hunt runs Zircolite without --noexternal, which Zircolite 3 and later refuse, and reads its detections"
 
+# --- unified_log gives UnifiedLogReader its four places --------------------------
+# UnifiedLogReader.py takes uuidtext_path, timesync_path, tracev3_path and
+# output_path; unified_log passed three and an argparse error was all it got.
+UL="$WORK/ulog"; mkdir -p "$UL/bin" "$UL/run/x.logarchive/timesync" "$UL/run/db/diagnostics/timesync" "$UL/run/db/uuidtext"
+cat > "$UL/bin/UnifiedLogReader.py" <<'ULR'
+#!/usr/bin/env python3
+import argparse, json, os
+ap = argparse.ArgumentParser()
+for name in ("uuidtext_path", "timesync_path", "tracev3_path", "output_path"):
+    ap.add_argument(name)
+ap.add_argument("-f", "--output_format")
+a = ap.parse_args()
+json.dump(vars(a), open(os.path.join(a.output_path, "args.json"), "w"))
+ULR
+chmod +x "$UL/bin/UnifiedLogReader.py"
+# Only this bin on PATH: a Mac's own /usr/bin/log would be chosen first.
+ln -s "$(command -v "$PY")" "$UL/bin/python3"
+ulog() { (cd "$UL/run" && printf '{"path": "%s", "out_dir": "work/%s"}' "$1" "$2" | PATH="$UL/bin" "$UL/bin/python3" "$ROOT/packs/macos-forensics/tools/unified_log/run.py"); }
+ulog x.logarchive a >/dev/null || fail "unified_log could not run UnifiedLogReader on a .logarchive"
+"$PY" -c '
+import json, sys
+a = json.load(open(sys.argv[1]))
+assert a == {"uuidtext_path": "x.logarchive", "timesync_path": "x.logarchive/timesync", "tracev3_path": "x.logarchive",
+             "output_path": "work/a", "output_format": "SQLITE"}, a
+' "$UL/run/work/a/args.json" || fail "unified_log did not give UnifiedLogReader a .logarchive's four places"
+ulog db b >/dev/null || fail "unified_log could not run UnifiedLogReader on a copy of /private/var/db"
+"$PY" -c '
+import json, sys
+a = json.load(open(sys.argv[1]))
+assert (a["uuidtext_path"], a["timesync_path"], a["tracev3_path"]) == ("db/uuidtext", "db/diagnostics/timesync", "db/diagnostics"), a
+' "$UL/run/work/b/args.json" || fail "unified_log did not give UnifiedLogReader a /private/var/db copy's four places"
+pass "unified_log gives UnifiedLogReader uuidtext, timesync, the tracev3 files and its output, for a .logarchive and for a /private/var/db copy"
+
 echo "pack-tools: all checks passed"

@@ -81,8 +81,16 @@ def main():
                 argv += [flag, str(args[key])]
     else:
         engine = "UnifiedLogReader"
-        argv = [reader, path, os.path.join(path, "uuidtext") if os.path.isdir(path) else path,
-                out_dir, "-f", "SQLITE"]
+        # Its four places: uuidtext, timesync, the tracev3 files, and where to
+        # write. A .logarchive holds all three itself (its README: point
+        # uuidtext_path at the archive, timesync is inside it); a copy of
+        # /private/var/db holds uuidtext beside diagnostics.
+        if os.path.isdir(os.path.join(path, "diagnostics")):
+            places = [os.path.join(path, "uuidtext"), os.path.join(path, "diagnostics", "timesync"),
+                      os.path.join(path, "diagnostics")]
+        else:
+            places = [path, os.path.join(path, "timesync"), path]
+        argv = [reader, *places, out_dir, "-f", "SQLITE"]
 
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
