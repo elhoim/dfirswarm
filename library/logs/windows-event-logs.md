@@ -8,6 +8,7 @@ inputs: the .evtx files exported from one or several Windows hosts (Security, Sy
 seats: 5
 cap_usd: 25
 wall_clock: 75
+toolbox: dfir
 ---
 ## Goal
 

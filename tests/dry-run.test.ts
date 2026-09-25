@@ -9,6 +9,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, symlink, utimes, writeFile } fro
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
 import { chmod, link, stat } from "node:fs/promises";
 import {
   INPUTS_DIR,
@@ -24,6 +25,8 @@ import {
   appendEvent,
   agentPressure,
   applySessionUsage,
+  isBudgetUnreadable,
+  reportBudgetUnreadable,
   claimName,
   nameOf,
   readPost,
@@ -52,6 +55,7 @@ import {
   resolveAgentId,
   shortHash,
   subscribedThreads,
+  EVENTS_REL,
   SYSTEM_AGENT,
   systemPost,
   threadJoin,
@@ -1423,6 +1427,280 @@ test("budget: the per-agent cap survives every fold of session usage", async () 
   });
 });
 
+test("budget: a seat whose Pi session restarts keeps what it already spent", async () => {
+  await withSandbox(async (root) => {
+    const seeded = await readBudget(root);
+    seeded.cap_usd = 1;
+    await writeBudget(root, seeded);
+    const usage = (spent_usd: number, calls: number) => ({
+      spent_usd,
+      tokens: calls * 100,
+      calls,
+      input: calls * 100,
+      output: 0,
+      cache_read: 0,
+      cache_write: 0,
+    });
+
+    await applySessionUsage(root, "agent00", usage(0.7, 7));
+    const over = await applySessionUsage(root, "agent01", usage(0.4, 4));
+    assert.equal(over.over_budget, true, "$1.10 of a $1 cap is over it");
+
+    // agent01's pane starts a new Pi session, which reports from zero again.
+    const reset = await applySessionUsage(root, "agent01", usage(0.005, 1));
+    assert.equal(reset.over_budget, true, "a new session does not hand back money already spent");
+    assert.equal(reset.budget.agents.agent01.spent_usd, 0.405);
+    assert.equal(reset.budget.agents.agent01.calls, 5);
+    assert.equal(reset.budget.spent_usd, 1.105);
+
+    // Later folds of the new session add to the carried total once, not again.
+    const later = await applySessionUsage(root, "agent01", usage(0.02, 2));
+    assert.equal(later.budget.agents.agent01.spent_usd, 0.42);
+    assert.equal(later.budget.agents.agent01.calls, 6);
+    assert.equal((await readBudget(root)).spent_usd, 1.12);
+  });
+});
+
+test("budget: a report of nothing is not a new session", async () => {
+  await withSandbox(async (root) => {
+    const usage = (spent_usd: number, calls: number) => ({
+      spent_usd,
+      tokens: calls * 100,
+      calls,
+      input: calls * 100,
+      output: 0,
+      cache_read: 0,
+      cache_write: 0,
+    });
+    await applySessionUsage(root, "agent00", usage(4, 4));
+    // A session read that failed reports zero; the next good read reports 5.
+    const blank = await applySessionUsage(root, "agent00", { ...usage(0, 0), context_tokens: 1234 });
+    assert.equal(blank.budget.agents.agent00.spent_usd, 4);
+    assert.equal(blank.budget.agents.agent00.context_tokens, 1234, "decoration still lands");
+    const after = await applySessionUsage(root, "agent00", usage(5, 5));
+    assert.equal(after.budget.agents.agent00.spent_usd, 5, "not 4 + 5");
+    assert.equal(after.budget.agents.agent00.calls, 5);
+    assert.equal(after.budget.agents.agent00.earlier_sessions, undefined);
+  });
+});
+
+test("budget: with a session id, a resumed or shared session is counted once", async () => {
+  await withSandbox(async (root) => {
+    const usage = (session_id: string, spent_usd: number, calls: number, extra: Record<string, number> = {}) => ({
+      session_id,
+      spent_usd,
+      tokens: calls * 100,
+      calls,
+      input: calls * 100,
+      output: 0,
+      cache_read: 0,
+      cache_write: 0,
+      ...extra,
+    });
+    // /new then /resume back: A 5, B 0.5, A again at 5 then 5.2.
+    await applySessionUsage(root, "agent00", usage("A", 5, 50, { compactions: 1, compaction_usd: 0.3, handoffs: 1 }));
+    await applySessionUsage(root, "agent00", usage("B", 0.5, 5));
+    await applySessionUsage(root, "agent00", usage("A", 5, 50, { compactions: 1, compaction_usd: 0.3, handoffs: 1 }));
+    const resumed = await applySessionUsage(root, "agent00", usage("A", 5.2, 52, { compactions: 1, compaction_usd: 0.3, handoffs: 1 }));
+    const row = resumed.budget.agents.agent00;
+    assert.equal(row.spent_usd, 5.7, "not 10.2");
+    assert.equal(row.calls, 57);
+    assert.equal(row.session_id, "A");
+    assert.deepEqual(Object.keys(row.sessions ?? {}).sort(), ["A", "B"]);
+    assert.equal(row.earlier_sessions?.spent_usd, 0.5);
+    assert.equal(row.compactions, 1, "hand-off counters are the whole run's too");
+    assert.equal(row.handoffs, 1);
+
+    // Two processes on one AGENT_ID, alternating: each keeps its own entry.
+    for (let i = 1; i <= 4; i++) {
+      await applySessionUsage(root, "agent01", usage("P", i, i));
+      await applySessionUsage(root, "agent01", usage("Q", i / 10, i));
+    }
+    const shared = (await readBudget(root)).agents.agent01;
+    assert.equal(shared.spent_usd, 4.4);
+    assert.equal(shared.calls, 8);
+
+    // A session whose report goes down is not believed.
+    const dropped = await applySessionUsage(root, "agent01", usage("P", 1, 1));
+    assert.equal(dropped.budget.agents.agent01.spent_usd, 4.4);
+  });
+});
+
+test("budget: a restart carries the compaction and hand-off counters forward", async () => {
+  await withSandbox(async (root) => {
+    const usage = (spent_usd: number, calls: number, extra: Record<string, number>) => ({
+      spent_usd,
+      tokens: calls * 100,
+      calls,
+      input: calls * 100,
+      output: 0,
+      cache_read: 0,
+      cache_write: 0,
+      ...extra,
+    });
+    await applySessionUsage(root, "agent00", usage(2, 20, { compactions: 2, compaction_tokens: 900, compaction_usd: 0.4, handoffs: 2 }));
+    const after = await applySessionUsage(root, "agent00", usage(0.1, 1, { handoffs: 0 }));
+    const row = after.budget.agents.agent00;
+    assert.equal(row.spent_usd, 2.1);
+    assert.equal(row.compactions, 2);
+    assert.equal(row.compaction_tokens, 900);
+    assert.equal(row.compaction_usd, 0.4);
+    assert.equal(row.handoffs, 2);
+    const again = await applySessionUsage(root, "agent00", usage(0.3, 3, { compactions: 1, compaction_tokens: 100, compaction_usd: 0.05, handoffs: 1 }));
+    assert.equal(again.budget.agents.agent00.compactions, 3);
+    assert.equal(again.budget.agents.agent00.compaction_usd, 0.45);
+    assert.equal(again.budget.agents.agent00.handoffs, 3);
+  });
+});
+
+test("budget: an unreadable budget.json does not take the caps off the run", async () => {
+  await withSandbox(async (root) => {
+    const seeded = await readBudget(root);
+    seeded.cap_usd = 1;
+    seeded.cap_tokens = 5000;
+    seeded.cap_per_agent_usd = 0.5;
+    seeded.wall_clock_minutes = 90;
+    await writeBudget(root, seeded);
+    await applySessionUsage(root, "agent00", { spent_usd: 0.1, tokens: 10, calls: 1, input: 10, output: 0, cache_read: 0, cache_write: 0 });
+
+    // A file that stays unparseable past the second read: the fold is
+    // refused and nothing is written over it (neither defaults nor a copy).
+    await writeFile(join(root, "budget.json"), "{ this is not json", "utf8");
+    const report = { spent_usd: 2, tokens: 20, calls: 2, input: 20, output: 0, cache_read: 0, cache_write: 0 };
+    await assert.rejects(applySessionUsage(root, "agent00", report), /does not read/);
+    assert.equal(await readFile(join(root, "budget.json"), "utf8"), "{ this is not json", "the file is left alone");
+
+    // Put back, the next fold sees the run's caps.
+    await writeBudget(root, { ...seeded, agents: { ...seeded.agents, agent00: { ...seeded.agents.agent00, spent_usd: 0.1, tokens: 10, calls: 1, input: 10 } } });
+    const applied = await applySessionUsage(root, "agent00", report);
+    assert.equal(applied.over_budget, true, "$2 is over the $1 cap the run was started with");
+    const reread = await readBudget(root);
+    assert.equal(reread.cap_usd, 1);
+    assert.equal(reread.cap_tokens, 5000);
+    assert.equal(reread.cap_per_agent_usd, 0.5);
+    assert.equal(reread.wall_clock_minutes, 90);
+  });
+});
+
+test("budget: a refused fold is put on the board as a veto once per process", async () => {
+  await withSandbox(async (root) => {
+    assert.equal(await reportBudgetUnreadable(root, "agent00", "Unexpected token"), true);
+    assert.equal(await reportBudgetUnreadable(root, "agent01", "Unexpected token"), false);
+    const box = await readInbox(createContext(root, "agent00"));
+    const vetoes = box.posts.filter((post) => post.from === SYSTEM_AGENT && post.tag === "veto" && /BUDGET UNREADABLE/.test(post.body));
+    assert.equal(vetoes.length, 1);
+    const rows = (await readFile(join(root, EVENTS_REL), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { tool: string });
+    assert.equal(rows.filter((row) => row.tool === "budget_unreadable").length, 1);
+  });
+});
+
+test("budget: only a refusal over an unreadable budget.json is taken for one, and the veto goes where the caller posts", async () => {
+  await withSandbox(async (root) => {
+    await writeFile(join(root, "budget.json"), "{ this is not json", "utf8");
+    const refused = await applySessionUsage(root, "agent00", { spent_usd: 1, tokens: 1, calls: 1, input: 1, output: 0, cache_read: 0, cache_write: 0 }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    assert.equal(isBudgetUnreadable(refused), true);
+    // What crosses a VM hub's socket is the message alone.
+    assert.equal(isBudgetUnreadable((refused as Error).message), true);
+    // A lock timeout, a lost hub or a report that went backwards is not this.
+    assert.equal(isBudgetUnreadable(new Error("usage went backwards: spent_usd 0.5 < 0.7; a seat's spend only grows")), false);
+    assert.equal(isBudgetUnreadable(new Error("Timed out waiting for locks/.table.lock")), false);
+
+    const posted: string[] = [];
+    const post = (async (_root: string, message: { body: string }) => {
+      posted.push(message.body);
+    }) as unknown as Parameters<typeof reportBudgetUnreadable>[3];
+    assert.equal(await reportBudgetUnreadable(root, "agent00", (refused as Error).message, post), true);
+    assert.equal(posted.length, 1);
+    assert.match(posted[0], /BUDGET UNREADABLE/);
+    const box = await readInbox(createContext(root, "agent00"));
+    assert.equal(box.posts.filter((p) => /BUDGET UNREADABLE/.test(p.body)).length, 0, "not written to this sandbox's board by hand");
+  });
+});
+
+test("budget: writeBudget replaces the record whole and leaves no temp file", async () => {
+  await withSandbox(async (root) => {
+    const before = statSync(join(root, "budget.json")).ino;
+    const budget = await readBudget(root);
+    budget.cap_usd = 3;
+    await writeBudget(root, budget);
+    assert.notEqual(statSync(join(root, "budget.json")).ino, before, "a new inode: renamed over, not truncated in place");
+    assert.equal((await readBudget(root)).cap_usd, 3);
+    assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".tmp")), []);
+  });
+});
+
+test("budget: a write that fails after the temp file was opened leaves no temp file behind", async () => {
+  await withSandbox(async (root) => {
+    // `ulimit -f 0` with SIGXFSZ ignored: the open succeeds and the first
+    // write fails with EFBIG, as it would on a full disk or a spent quota.
+    const protocol = join(import.meta.dirname, "..", "extensions", "protocol.ts");
+    const script = `const m = await import(${JSON.stringify(protocol)}); const b = await m.readBudget(${JSON.stringify(root)}); try { await m.writeBudget(${JSON.stringify(root)}, b); process.exit(0); } catch (e) { process.exit(e.code === "EFBIG" ? 7 : 9); }`;
+    const status = spawnSync("bash", ["-c", 'trap "" XFSZ; ulimit -f 0; exec "$0" --experimental-strip-types --input-type=module -e "$1"', process.execPath, script], { stdio: "ignore" }).status;
+    assert.equal(status, 7, "the write failed with EFBIG");
+    assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".tmp")), []);
+    await readBudget(root); // the old record is still there, whole
+  });
+});
+
+test(
+  "budget: where nothing can be created beside budget.json it is still written, in place",
+  { skip: process.getuid?.() === 0 && "root ignores file modes" },
+  async () => {
+    await withSandbox(async (root) => {
+      const before = statSync(join(root, "budget.json")).ino;
+      const budget = await readBudget(root);
+      budget.cap_usd = 4;
+      // What Landlock alone does to the sandbox root once inputs/ is carved
+      // out of it: a listing, no create, no rename; budget.json stays writable.
+      await chmod(root, 0o555);
+      try {
+        await writeBudget(root, budget);
+      } finally {
+        await chmod(root, 0o755);
+      }
+      assert.equal(statSync(join(root, "budget.json")).ino, before);
+      assert.equal((await readBudget(root)).cap_usd, 4);
+    });
+  },
+);
+
+test("budget: under Landlock alone budget.json keeps its inode, whoever writes it", async () => {
+  await withSandbox(async (root) => {
+    await mkdir(join(root, ".fsguard"), { recursive: true });
+    await writeFile(join(root, ".fsguard", "plan.txt"), "mode: landlock\nread-only: inputs\n", "utf8");
+    const before = statSync(join(root, "budget.json")).ino;
+    const budget = await readBudget(root);
+    budget.cap_usd = 6;
+    await writeBudget(root, budget);
+    assert.equal(statSync(join(root, "budget.json")).ino, before, "a confined pane's rule is on this inode");
+    assert.equal((await readBudget(root)).cap_usd, 6);
+  });
+});
+
+test("budget: a fold reads a budget.json caught mid-save once more before refusing it", async () => {
+  await withSandbox(async (root) => {
+    const seeded = await readBudget(root);
+    seeded.cap_usd = 1;
+    await writeBudget(root, seeded);
+    await applySessionUsage(root, "agent00", { spent_usd: 0.1, tokens: 10, calls: 1, input: 10, output: 0, cache_read: 0, cache_write: 0 });
+
+    // An editor raising the cap to 5, caught between truncate and write.
+    const raised = { ...seeded, cap_usd: 5 };
+    await writeFile(join(root, "budget.json"), "", "utf8");
+    const finished = new Promise((done) => setTimeout(done, 20)).then(() =>
+      writeFile(join(root, "budget.json"), JSON.stringify(raised), "utf8"),
+    );
+    const applied = await applySessionUsage(root, "agent00", { spent_usd: 2, tokens: 20, calls: 2, input: 20, output: 0, cache_read: 0, cache_write: 0 });
+    await finished;
+    assert.equal(applied.budget.cap_usd, 5, "the raised cap, read on the second try");
+    assert.equal(applied.over_budget, false);
+    assert.equal((await readBudget(root)).cap_usd, 5);
+  });
+});
+
 test("a bash write that changes the caps is reported", async () => {
   await withSandbox(async (root) => {
     const before = await watchedPathHashes(root);
@@ -1749,12 +2027,17 @@ test("forged tools: pane API keys are not in the child environment", async () =>
     // pass: it has to be denied by name or a forged tool could drive the
     // console's start / stop / reap routes from inside the sandbox.
     const prevToken = process.env.SWARM_UI_TOKEN;
+    const prevTrace = process.env.SWARM_TRACE_TOKEN;
     process.env.SWARM_UI_TOKEN = "console-token";
+    process.env.SWARM_TRACE_TOKEN = "pane-trace-token";
     process.env.SWARM_QUARANTINE = "1";
     const picked = forgedToolEnv();
     assert.equal(picked.OPENAI_API_KEY, undefined);
     assert.equal(picked.ANTHROPIC_API_KEY, undefined);
     assert.equal(picked.SWARM_UI_TOKEN, undefined, "the console's token is not context");
+    assert.equal(picked.SWARM_TRACE_TOKEN, undefined, "the calling pane's trace identity is not context");
+    if (prevTrace === undefined) delete process.env.SWARM_TRACE_TOKEN;
+    else process.env.SWARM_TRACE_TOKEN = prevTrace;
     assert.equal(picked.SWARM_QUARANTINE, "1", "the run's own context still passes");
     assert.ok(picked.PATH, "PATH must remain so python3/bash can start");
     if (prevToken === undefined) delete process.env.SWARM_UI_TOKEN;

@@ -696,6 +696,87 @@ not surprised:
   file's catalogued path with it.
   `lnk_parse` on a missing path says so instead of raising.
   computer-forensics-base 1.2.10, windows-forensics 1.2.6.
+- A forged tool's environment carried the calling pane's
+  `SWARM_TRACE_TOKEN` in a host run, and the tool may be another agent's
+  code. The token is a credential and is kept out now, like the console's.
+  From @elhoim (#36).
+- **The spend brake could come off.** A seat whose Pi session restarted
+  reported from zero and its row was replaced, so a swarm over its cap read
+  as under it and the stop steer was cleared; the fold now keeps each
+  session's last report by session id, and a seat's row only grows. (In a
+  microVM the hub refuses a report smaller than the row, so a restarted
+  session counts once it passes the old one.) Under Landlock alone the
+  sandbox root allows no new file, so the atomic write of `budget.json`
+  failed on every fold; it is written in place there. An unparseable
+  `budget.json` is read once more, then left alone with a
+  `BUDGET UNREADABLE` veto on the board (through the hub from a VM).
+  `--cap-usd 0` is refused for a team that bills. From @elhoim (#28).
+- **Two processes could be inside the table lock at once.** Two waiters
+  could both break one stale lock, the second removing the lock the first
+  had just taken; release removed the lock whoever held it; and staleness
+  was asked of a pid, which says nothing across a Linux host's per-pane pid
+  namespaces. A holder now heartbeats its lock, a break happens under
+  `<lock>.break`, release removes only its own lock, and a claim, a budget
+  fold, a ledger entry or a history write checks the lock is still its own
+  before it commits. A pid is trusted only in the waiter's own namespace:
+  pid namespace and boot on Linux, the boot session on macOS (not the host
+  name, which can follow the network across a sleep). From @elhoim (#30).
+- **A collector restarted mid-run fused the next line onto a torn one.** In
+  a microVM run the keeper restarts a dead collector with the same anchor;
+  one killed mid-append left part of a line, the keeper's own
+  `collector_restarted` line landed on it, and custody called the harness's
+  record "edited". A restarted collector now cuts a fragment the anchor
+  accounts for into `traces/events.fragment-<ts>.partial` and says so on
+  the chain (`trace_fragment_cut`, size and sha256), keeps an anchor the
+  file does not match as `<run>.trace-anchor.prev.json`
+  (`trace_anchor_mismatch`), and refuses a line onto any other torn tail;
+  the watchdogs' shell fallback spills around one too. `package` carries
+  the fragment and the kept anchor. From @elhoim (#27).
+- **A run whose every agent died waited out its timeout, and in a microVM
+  it was then called finished.** The reaper writes `done/ALL_AGENTS_DEAD`,
+  never the sentinel, once every seat is done or dead and one is dead;
+  `await-done.sh` fails at once, the watchdog and the VM hub's backstop stop
+  for it instead of writing `done/SWARM_DONE` past the wall clock, and the
+  summary and the report say every agent died. From @elhoim (#45).
+- The report, the dossier and the console's preview took seconds on a long
+  line of `|` after a table header, or of `[` or `[a](` (100,000 pipes: 11
+  s). The table divider and the link are read in linear time. From @elhoim
+  (#37).
+- `cron_dump` took time quadratic in a timer's blank lines (about 40,000
+  passed its 60 s timeout, and the sweep printed nothing), and gave an
+  empty `Unit=` the next line as its value. It reads a unit line by line.
+  linux-forensics 1.0.1. From @elhoim (#38).
+- `file_carver`, `mem_carve` and `timeline_super` wrote wherever their
+  output path pointed, `../` and `inputs/` included; like `icat_extract`,
+  they refuse a path outside the run or under `inputs/`.
+  computer-forensics-base 1.2.11, memory-forensics 1.0.3. From @elhoim
+  (#44).
+- A malware entry's checks could not tell a run without `--quarantine`: the
+  flag was only in the registry. `inputs.json` says whether the no-exec
+  held (`"quarantine": true` in every microVM run, and in a host run with a
+  kernel guard; false with `--inputs-enforce off` or no guard, whatever the
+  flag), and the five malware entries check it. From @elhoim (#40).
+- `--toolbox auto` read a goal's metadata block with its text, and the
+  library's common words (`gpg`, "container") asked for the crypto set in
+  most entries. A goal's `toolbox:` key names its sets now (every library
+  entry has one, an unknown set is a BLOCKER); without it only the body is
+  read, and a VHD(X), VMDK, QCOW2 or encrypted container under the inputs
+  adds crypto. A Python library is found by its import (pybde, pyvhdi,
+  pytsk3 and dfvfs were always "missing"), the crypto set checks libvshadow
+  (`vshadowinfo`, `pyvshadow`) and the linux set xfsprogs (`xfs_db`) and
+  libvslvm (`vslvminfo`, `pyvslvm`). So on a host, `--toolbox-required`
+  now also requires these VSS, XFS and LVM readers wherever their set is
+  asked for; in a microVM run it still blocks only on what a pack requires.
+  From @elhoim (#41).
+- The Windows Q1s (host intrusion, domain controller, ransomware host, IIS)
+  ask for the audit policy in force and each log's range, so an absent
+  event reads as not audited, rolled over or cleared, not as never
+  happened. Pack and prompt goals use the library's sign-off and
+  `inputs_check` checks, and a lint holds them to it. cloud-forensics
+  1.0.2, encrypted-containers 1.1.1, linux-forensics 1.0.2, macos-forensics
+  1.0.2, memory-forensics 1.0.4, mobile-forensics 1.0.2, network-forensics
+  1.0.2, ransomware-response 1.0.1, reverse-engineering 1.0.2,
+  triage-collection 1.0.2, windows-forensics 1.2.7. From @elhoim (#43).
 
 - **The venv was 642 claims and seven violations, and the panes' temp
   files were more.** With `--allow-install` one agent's pip created

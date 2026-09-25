@@ -211,6 +211,48 @@ readings = {r["epoch"]: r["when"] for r in got.get("readings", [])}
 check("timestamp_decode reads a FILETIME as a FILETIME",
       readings.get("FILETIME (100 ns)") == "2024-01-21T07:40:00Z", json.dumps(readings))
 
+# --- linux-forensics/cron_dump: systemd timers, as systemd.timer(5) writes them
+def timers_under(name, files):
+    units = os.path.join(WORK, name, "etc", "systemd", "system")
+    os.makedirs(units)
+    for fname, text in files.items():
+        open(os.path.join(units, fname), "w").write(text)
+    try:
+        out = subprocess.run([sys.executable, os.path.join(PACKS, "linux-forensics/tools/cron_dump/run.py")],
+                             input=json.dumps({"root": os.path.join(WORK, name)}),
+                             capture_output=True, text=True, timeout=15)
+        got = json.loads(out.stdout)
+    except (subprocess.TimeoutExpired, ValueError) as exc:
+        got = {"_error": type(exc).__name__}
+    return got, {os.path.basename(e.get("file", "")): e
+                 for e in got.get("entries", []) if e.get("source") == "systemd"}
+
+
+got, timers = timers_under("cron-crlf", {"backup.timer":
+    "[Unit]\r\nDescription=Nightly backup\r\n\r\n[Timer]\r\n  OnCalendar = *-*-* 02:00:00 \r\nPersistent=true\r\nUnit=\nDescription=x\n"})
+backup = timers.get("backup.timer", {})
+check("cron_dump reads a CRLF timer and does not take the next line for an empty key",
+      backup.get("schedule") == "*-*-* 02:00:00" and backup.get("persistent") == "true"
+      and backup.get("unit") == "backup.service", json.dumps(got)[:300])
+
+# Blank lines are legal anywhere in a unit file. Before the parser kept its
+# whitespace to one line, these took minutes (quadratic in the line count) and
+# the tool's 60 s timeout ended the sweep with nothing printed.
+got, timers = timers_under("cron-blank", {"zz.timer": "\n" * 100000 + "[Timer]\nOnBootSec=5min\n"})
+check("cron_dump reads a timer padded with blank lines in linear time",
+      timers.get("zz.timer", {}).get("schedule") == "5min" and timers["zz.timer"].get("at_reboot") is True,
+      json.dumps(got)[:300])
+
+# An empty key followed by a long run of spaces: a pattern that backtracks
+# between the spaces and the value spends seconds per key on this.
+pad = " " * 100000
+got, timers = timers_under("cron-spaces", {"sp.timer":
+    "[Timer]\nOnCalendar=%s\nUnit=%s\nPersistent=%s\nOnBootSec=5min\n" % (pad, pad, pad)})
+sp = timers.get("sp.timer", {})
+check("cron_dump reads a timer whose empty keys are padded with spaces in linear time",
+      sp.get("schedule") == "5min" and sp.get("unit") == "sp.service" and sp.get("persistent") is None,
+      json.dumps(got)[:300])
+
 raise SystemExit(1 if failures else 0)
 EOF
 echo "pack-parsers: all checks passed"

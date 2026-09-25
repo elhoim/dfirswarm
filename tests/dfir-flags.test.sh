@@ -364,6 +364,33 @@ sb="$(sandbox_of "$out")"
 [[ "$(reg tbauto '.toolbox')" == "off" ]] || fail "registry toolbox should resolve auto to off without a catalog"
 pass "--toolbox auto is off unless a catalog is built"
 
+# --toolbox auto with a catalog reads the goal for the sets it needs. A library
+# entry's metadata block is not the case (its inputs: and tags: lines name
+# VHDX and encryption for every Windows entry), an explicit `toolbox:` key is
+# taken as written, and a virtual disk under the inputs adds crypto whatever
+# the goal says, because its readers (pyvhdi, qemu-img) are in that set.
+mkgoal() { # <file> <metadata lines or empty> <extra body text>
+  { if [[ -n "$2" ]]; then printf -- '---\ntitle: t\n%s\n---\n' "$2"; fi; cat "$HELLO"; printf '\n%s\n' "$3"; } > "$1"
+}
+autoset() { # <label> <goal file> [inputs dir]
+  start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$2" --label "$1" --inputs "${3:-$TMP/src}" --catalog --toolbox auto >/dev/null
+  reg "$1" '.toolbox'
+}
+mkgoal "$TMP/g-meta.md" $'inputs: one disk image (E01, raw or VHDX)\ntags: encryption, gpg, container' ""
+[[ "$(autoset hintmeta "$TMP/g-meta.md")" == "dfir" ]] || fail "words in the metadata block asked for a toolbox set: $(reg hintmeta .toolbox)"
+mkgoal "$TMP/g-key.md" "toolbox: dfir, crypto" ""
+[[ "$(autoset hintkey "$TMP/g-key.md")" == "dfir,crypto" ]] || fail "an explicit toolbox: key was not honoured: $(reg hintkey .toolbox)"
+mkgoal "$TMP/g-keyonly.md" "toolbox: dfir" "Read keys with gpg; the container store is under /var/lib."
+[[ "$(autoset hintkeyonly "$TMP/g-keyonly.md")" == "dfir" ]] || fail "a toolbox: key should stop the body's words from adding sets: $(reg hintkeyonly .toolbox)"
+mkgoal "$TMP/g-words.md" "" "The case turns on a BitLocker volume."
+[[ "$(autoset hintwords "$TMP/g-words.md")" == "dfir,crypto" ]] || fail "a goal without a key should still be read for its words: $(reg hintwords .toolbox)"
+mkdir -p "$TMP/src-vhdx"; cp "$TMP/src/readings.csv" "$TMP/src-vhdx/"; head -c 4096 /dev/zero > "$TMP/src-vhdx/disk.VHDX"
+[[ "$(autoset hintvhdx "$TMP/g-keyonly.md" "$TMP/src-vhdx")" == "dfir,crypto" ]] || fail "a VHDX under the inputs should add the crypto set: $(reg hintvhdx .toolbox)"
+mkgoal "$TMP/g-bad.md" "toolbox: dfir,everything" ""
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$TMP/g-bad.md" --label hintbad --inputs "$TMP/src" --catalog --toolbox auto)" && fail "an unknown set in toolbox: was accepted: $out"
+printf '%s\n' "$out" | grep -q 'BLOCKER: .*toolbox: dfir,everything' || fail "expected a BLOCKER naming the bad toolbox key: $out"
+pass "--toolbox auto reads a goal's toolbox: key, ignores its metadata words, and adds crypto for a VHDX input"
+
 # --toolbox-required on a PATH that hides the forensic tools: a BLOCKER, exit 3.
 mkdir -p "$TMP/bin" "$TMP/tb"
 ln -s "$(command -v jq)" "$TMP/bin/jq"
@@ -444,6 +471,29 @@ sb="$(sandbox_of "$out")"
 printf '%s\n' "$out" | grep -q '^Quarantine: *work/extracted and work/quarantine are no-exec' || fail "no Quarantine line in the kickoff output: $out"
 pass "--quarantine creates the no-exec directories and says so"
 
+# A goal's checks run in the sandbox and cannot read the registry, so the
+# kickoff records the flag in inputs.json, which is harness-written and
+# protected. The malware entries check it with exactly this line.
+qcheck=$'grep -q \'"quarantine": true\' inputs.json'
+# The record is whether the no-exec holds, so on a host with no kernel guard
+# even --quarantine records false.
+if [[ "$(jq -r '.guard' "$sb/inputs.json")" != "none" ]]; then
+  (cd "$sb" && bash -c "$qcheck") || fail "--quarantine should be recorded in inputs.json: $(jq -c '{quarantine}' "$sb/inputs.json")"
+  cat_sb="$(reg catalog '.sandbox')"
+  [[ "$(jq -r '.quarantine' "$cat_sb/inputs.json")" == "true" ]] || fail "--catalog implies quarantine and inputs.json should say so"
+fi
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$HELLO" --label noquarantine --inputs "$TMP/src")"
+sbq="$(sandbox_of "$out")"
+[[ "$(jq -r '.quarantine' "$sbq/inputs.json")" == "false" ]] || fail "a kickoff without --quarantine should record quarantine: false: $(jq -c '{quarantine}' "$sbq/inputs.json")"
+(cd "$sbq" && bash -c "$qcheck") && fail "the quarantine check passed for a kickoff without --quarantine"
+# --inputs-enforce off drops the kernel guard, and the no-exec with it: the
+# flag was given, the quarantine did not hold, and the record says so.
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$HELLO" --label quarantine-noguard --inputs "$TMP/src" --inputs-enforce off --quarantine)"
+sbq="$(sandbox_of "$out")"
+[[ "$(jq -r '.quarantine' "$sbq/inputs.json")" == "false" ]] || fail "--quarantine without a guard should record quarantine: false: $(jq -c '{guard, quarantine}' "$sbq/inputs.json")"
+(cd "$sbq" && bash -c "$qcheck") && fail "the quarantine check passed for a run whose no-exec did not hold"
+pass "inputs.json records whether the quarantine held, and a goal check can read it"
+
 if [[ -f "$sb/.fsguard/plan.txt" ]] && ! grep -q '^mode: none' "$sb/.fsguard/plan.txt"; then
   grep -q "^no-exec: $sb/work/extracted\$" "$sb/.fsguard/plan.txt" || fail "the guard plan should list work/extracted as no-exec: $(cat "$sb/.fsguard/plan.txt")"
   grep -q "^no-exec: $sb/work/quarantine\$" "$sb/.fsguard/plan.txt" || fail "the guard plan should list work/quarantine as no-exec"
@@ -518,8 +568,11 @@ if [[ -f "$ROOT/scripts/summary.ts" ]]; then
   printf 'live sample\n' > "$sb/work/extracted/sample.bin"
   printf '{"name":"demo_tool","entry":"run.py"}\n' > "$sb/tools/demo_tool/manifest.json"
   printf 'print("hi")\n' > "$sb/tools/demo_tool/run.py"
+  # What a restarted collector keeps: the anchor it did not match, and a cut fragment.
+  printf '{"lines":1}\n' > "$sb.trace-anchor.prev.json"
+  printf 'cut sh' > "$sb/traces/events.fragment-2026-01-01T00-00-00-000Z.partial"
   out="$(swarm package "$id")" || fail "package failed: $out"
-  for f in summary.md MANIFEST.txt trace/events.jsonl SWARM.md team.json budget.json inputs.json toolbox.json \
+  for f in trace/trace-anchor.prev.json trace/events.fragment-2026-01-01T00-00-00-000Z.partial summary.md MANIFEST.txt trace/events.jsonl SWARM.md team.json budget.json inputs.json toolbox.json \
            work/report.md work/timeline.csv work/exports/findings.json \
            tools/demo_tool/manifest.json tools/demo_tool/run.py board/main.md; do
     [[ -f "$sb/package/$f" ]] || fail "package/ is missing $f: $(cd "$sb/package" && find . -type f | sort)"

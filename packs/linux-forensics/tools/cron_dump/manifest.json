@@ -21,6 +21,6 @@
   "example": "{\"root\": \"work/extracted\"}",
   "by": "maintainer",
   "at": "2026-09-22T15:00:00.000Z",
-  "version": 1,
-  "sha256": "7e596e3eb2f29b37fc25c6ed5f470a123e946586d71770b4c783951e43c7a09b"
+  "version": 2,
+  "sha256": "6aac7ee317ddb8b62644715fcb01af5895298086860f0f69cadc8b59d608fe57"
 }

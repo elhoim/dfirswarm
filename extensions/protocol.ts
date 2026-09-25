@@ -10,9 +10,18 @@
  * not the names agents choose for themselves.
  */
 
-import { execFile, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import { closeSync, createReadStream, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import {
+  closeSync,
+  createReadStream,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  writeSync,
+} from "node:fs";
 import { connect, type Socket } from "node:net";
 import {
   appendFile,
@@ -45,9 +54,19 @@ export const DEFAULT_CLAIM_SECONDS = 120;
 export const MAX_CLAIM_SECONDS = 600;
 export const TABLE_LOCK_WAIT_MS = 10_000;
 export const TABLE_LOCK_STALE_MS = 15_000;
+/** How often a holder refreshes its table lock; well inside the stale window. */
+export const TABLE_LOCK_HEARTBEAT_MS = 3_000;
+/** The table lock's timings. Only tests change them, to shorten a stall. */
+export const tableLockTiming = {
+  waitMs: TABLE_LOCK_WAIT_MS,
+  staleMs: TABLE_LOCK_STALE_MS,
+  heartbeatMs: TABLE_LOCK_HEARTBEAT_MS,
+};
 export const DEFAULT_SWARM_ID = "hello-n2";
 export const DEFAULT_AGENT_IDS = ["agent00", "agent01"] as const;
 export const SENTINEL_REL = "done/SWARM_DONE";
+/** Written by scripts/reap.sh when every seat is marked done or dead and no sentinel exists: a stop, not a finish. */
+export const ALL_DEAD_REL = "done/ALL_AGENTS_DEAD";
 export const HELLO_REL = "work/hello.txt";
 /** An agent silent this long is stalled and shown as "?"; a local choice. */
 export const DEFAULT_STALL_MS = 90_000;
@@ -218,7 +237,31 @@ export type AgentBudget = {
   /** The seat's model, `provider/id`, as the kickoff assigned it. It rides
    *  here so a per-model cap can be summed from this record alone. */
   model?: string;
+  /** What the seat's Pi sessions other than the live one spent (a restart,
+   *  `/new`). The counters above are the seat's whole run: this plus the
+   *  live session. See foldSessionSlice. */
+  earlier_sessions?: CarriedCounters;
+  /** The Pi session this row's live counters come from, when Pi says. */
+  session_id?: string;
+  /** Each session's last report, by session id, when reports carry one. The
+   *  counters above are their sum; see foldSessionSlice. */
+  sessions?: Record<string, CarriedCounters>;
 };
+
+/** The counters a Pi session reports and a fold adds up. */
+export const SESSION_COUNTERS = [
+  "spent_usd",
+  "tokens",
+  "calls",
+  "input",
+  "output",
+  "cache_read",
+  "cache_write",
+] as const;
+export type SessionCounters = Record<(typeof SESSION_COUNTERS)[number], number>;
+/** SessionCounters plus the compaction and hand-off counts, present when non-zero. */
+export type CarriedCounters = SessionCounters &
+  Partial<Record<"compactions" | "compaction_tokens" | "compaction_usd" | "handoffs", number>>;
 
 export type BudgetRecord = {
   cap_usd: number;
@@ -798,30 +841,196 @@ export async function swarmDoneExists(sandboxRoot: string): Promise<boolean> {
   }
 }
 
-async function maybeBreakStaleTableLock(lockDir: string): Promise<void> {
+let lockNamespaceCache: string | undefined;
+
+/**
+ * Where a pid recorded in a lock can be checked: this pid namespace and boot
+ * on Linux, this boot on macOS. Two processes that print the same string
+ * number their processes alike, so one can ask whether the other's pid is
+ * live. "" when it cannot be told, and then only the lock's age counts.
+ * The bash copies in reap.sh and swarm.sh print the same string.
+ *
+ * On macOS the boot is the boot session's UUID, not the host's name: a Mac
+ * with no HostName set takes its name from the network it is on, so after a
+ * sleep on another network reap.sh or `swarm.sh say` would print another
+ * string than the panes stamped, and a stalled holder's lock would be judged
+ * by its age alone.
+ */
+export function lockNamespace(): string {
+  if (lockNamespaceCache !== undefined) return lockNamespaceCache;
+  let ns = "";
   try {
-    const info = await stat(lockDir);
-    const age = Date.now() - info.mtimeMs;
-    if (age < TABLE_LOCK_STALE_MS) return;
-    const pidRaw = await readFile(join(lockDir, "pid"), "utf8").catch(() => "");
-    const pid = Number.parseInt(pidRaw.trim(), 10);
-    if (Number.isFinite(pid)) {
-      try {
-        process.kill(pid, 0);
-        return;
-      } catch {
-        // process is gone
-      }
+    if (process.platform === "linux") {
+      const pidNs = readlinkSync("/proc/self/ns/pid");
+      const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      if (pidNs && boot) ns = `linux:${pidNs}:${boot}`;
+    } else if (process.platform === "darwin") {
+      const session = execFileSync("sysctl", ["-n", "kern.bootsessionuuid"], { encoding: "utf8", timeout: 2_000 }).trim();
+      if (/^[0-9A-Fa-f-]+$/.test(session)) ns = `darwin:${session}`;
     }
-    await rm(lockDir, { recursive: true, force: true });
   } catch {
-    // lock vanished
+    ns = "";
+  }
+  lockNamespaceCache = ns;
+  return ns;
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: it exists, it just is not ours to signal.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 
+/** What a holder writes into a lock directory it has just made. */
+async function stampLock(dir: string, token: string): Promise<void> {
+  await writeFile(join(dir, "pid"), String(process.pid), "utf8");
+  await writeFile(join(dir, "ns"), lockNamespace(), "utf8");
+  await writeFile(join(dir, "owner"), token, "utf8");
+}
+
+/**
+ * "Now" by the clock that stamps the lock: the mtime of a probe file written
+ * just now next to it. A holder in a microVM or on an NFS client stamps its
+ * lock through the filesystem, and so does the probe, so the two are compared
+ * on one clock whatever the host's and the guest's clocks say. Falls back to
+ * our own clock when the probe cannot be written.
+ */
+async function filesystemNow(probe: string): Promise<number> {
+  try {
+    await writeFile(probe, String(process.pid), "utf8");
+    return (await stat(probe)).mtimeMs;
+  } catch {
+    return Date.now();
+  }
+}
+
+/**
+ * How long since a lock last changed: made, or its `beat` file rewritten by
+ * the holder's heartbeat. null when the lock is gone.
+ */
+async function lockAgeMs(dir: string, probe: string): Promise<number | null> {
+  const now = await filesystemNow(probe);
+  const info = await stat(dir).catch(() => null);
+  if (info === null) return null;
+  const beat = await stat(join(dir, "beat")).catch(() => null);
+  return now - Math.max(info.mtimeMs, beat?.mtimeMs ?? 0);
+}
+
+/**
+ * A lock is stale once it is older than the stale age, unless its holder is
+ * known to be alive. Its holder is known to be alive only when it recorded the
+ * same namespace as ours and its pid is live here; anything else — another
+ * pane's pid namespace, another VM, an older lock with no `ns` — is judged by
+ * age alone. So a holder that stalls (SIGSTOP, swap, a laptop asleep) keeps
+ * its lock from a peer that can see it, and loses it after the stale age only
+ * to a peer that cannot.
+ */
+async function lockIsStale(dir: string, probe: string): Promise<boolean> {
+  const age = await lockAgeMs(dir, probe);
+  if (age === null || age < tableLockTiming.staleMs) return false;
+  const ns = (await readFile(join(dir, "ns"), "utf8").catch(() => "")).trim();
+  if (ns && ns === lockNamespace()) {
+    const pid = (await readFile(join(dir, "pid"), "utf8").catch(() => "")).trim();
+    if (/^[1-9]\d*$/.test(pid) && pidAlive(Number(pid))) return false;
+  }
+  return true;
+}
+
+/** Say that a holder's lock was taken over while it held it. */
+export function warnLockLost(message: string): void {
+  process.emitWarning(message, { code: "DFIRSWARM_TABLE_LOCK_LOST" });
+}
+
+/**
+ * Break a lock whose holder has stopped (see lockIsStale).
+ *
+ * A holder refreshes its lock's mtime every TABLE_LOCK_HEARTBEAT_MS, so an old
+ * lock has no live holder unless that holder has stalled; a stalled holder is
+ * kept by its pid where a peer can check it. The pid alone used to decide and
+ * cannot: under fsguard's pid namespaces each pane numbers its own processes,
+ * so a live holder in another pane looked dead and lost its lock after 15 s,
+ * and an unrelated live pid could keep a dead lock standing.
+ *
+ * Breaking takes a second mkdir lock, `<lock>.break`, and judges the lock
+ * again under it. Two waiters could otherwise both judge one dead lock stale:
+ * the first removed it and took the lock, and the second's rm then removed
+ * that live lock, putting both in the critical section.
+ */
+async function maybeBreakStaleTableLock(lockDir: string, token: string, probe: string): Promise<void> {
+  if (!(await lockIsStale(lockDir, probe))) return;
+  const breakDir = `${lockDir}.break`;
+  try {
+    await mkdir(breakDir);
+  } catch {
+    // Someone else is breaking it. One that died mid-break leaves its own
+    // lock behind, cleared here once that is stale too.
+    if (await lockIsStale(breakDir, probe)) await rm(breakDir, { recursive: true, force: true }).catch(() => undefined);
+    return;
+  }
+  try {
+    await stampLock(breakDir, token);
+    if (await lockIsStale(lockDir, probe)) await rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+  } finally {
+    await releaseLockDir(breakDir, token);
+  }
+}
+
+/**
+ * Remove a lock directory only while it is still ours.
+ *
+ * Reading `owner` and then removing the path left a gap in which the lock
+ * could be broken and taken by someone else, whose lock the rm then removed.
+ * So the lock is first renamed to a name only we use, and `owner` is read
+ * from there: what was renamed is exactly what gets judged. If it turns out
+ * not to be ours (taken over between the read and the rename), it is renamed
+ * back unless a new lock has appeared at the path meanwhile. That last step
+ * still has a gap, but reaching it takes a stall, a break and a new mkdir
+ * inside two renames.
+ */
+async function releaseLockDir(dir: string, token: string): Promise<void> {
+  const lost = () =>
+    warnLockLost(`${basename(dir)} was taken over while this process held it; another process may have been inside with it`);
+  const owner = await readFile(join(dir, "owner"), "utf8").catch(() => "");
+  if (owner !== token) return lost();
+  const tomb = `${dir}.released.${token}`;
+  try {
+    await rename(dir, tomb);
+  } catch {
+    return lost();
+  }
+  if ((await readFile(join(tomb, "owner"), "utf8").catch(() => "")) === token) {
+    await rm(tomb, { recursive: true, force: true });
+    return;
+  }
+  const occupied = await stat(dir).then(() => true, () => false);
+  if (occupied || !(await rename(tomb, dir).then(() => true, () => false))) {
+    await rm(tomb, { recursive: true, force: true });
+  }
+  lost();
+}
+
+/** Thrown when a holder finds, before a write, that its lock was taken over. */
+export class TableLockLostError extends Error {}
+
+/** What a holder can ask of the lock it holds. */
+export type HeldLock = {
+  /**
+   * Throws TableLockLostError when the lock is no longer ours: it was broken
+   * while we stalled and someone else may be inside. Called just before a
+   * read-modify-write commits, so a lost lock costs the write rather than
+   * overwriting the other holder's. The check and the write are still two
+   * steps, so this narrows the window; it does not close it.
+   */
+  assertOwned(): Promise<void>;
+};
+
 export async function withTableLock<T>(
   sandboxRoot: string,
-  fn: () => Promise<T>,
+  fn: (lock: HeldLock) => Promise<T>,
 ): Promise<T> {
   return withNamedLock(sandboxRoot, ".table.lock", fn);
 }
@@ -838,30 +1047,66 @@ export async function withTableLock<T>(
 export async function withNamedLock<T>(
   sandboxRoot: string,
   name: string,
-  fn: () => Promise<T>,
+  fn: (lock: HeldLock) => Promise<T>,
 ): Promise<T> {
   const lockDir = join(sandboxRoot, "locks", name);
   await mkdir(join(sandboxRoot, "locks"), { recursive: true });
-  const deadline = Date.now() + TABLE_LOCK_WAIT_MS;
-  while (true) {
-    try {
-      await mkdir(lockDir);
-      await writeFile(join(lockDir, "pid"), String(process.pid), "utf8");
-      break;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") throw err;
-      await maybeBreakStaleTableLock(lockDir);
-      if (Date.now() > deadline) {
-        throw new Error(`Timed out waiting for locks/${name}`);
-      }
-      await sleep(20);
-    }
-  }
+  const deadline = Date.now() + tableLockTiming.waitMs;
+  const token = `${process.pid}-${randomUUID()}`;
+  const probe = join(sandboxRoot, "locks", `.probe.${token}`);
   try {
-    return await fn();
+    while (true) {
+      try {
+        await mkdir(lockDir);
+        await stampLock(lockDir, token);
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST") throw err;
+        await maybeBreakStaleTableLock(lockDir, token, probe);
+        if (Date.now() > deadline) {
+          throw new Error(`Timed out waiting for locks/${name}`);
+        }
+        await sleep(20);
+      }
+    }
   } finally {
-    await rm(lockDir, { recursive: true, force: true });
+    await rm(probe, { force: true }).catch(() => undefined);
+  }
+  // The heartbeat that keeps a held lock from ever looking stale. It writes a
+  // file rather than setting a time, so the filesystem stamps it (see
+  // filesystemNow), and it stops once the lock is no longer ours: a holder
+  // whose lock was broken while it stalled must not keep the next holder's
+  // lock fresh.
+  const heartbeat = setInterval(() => {
+    readFile(join(lockDir, "owner"), "utf8")
+      .then((owner) => {
+        if (owner !== token) {
+          clearInterval(heartbeat);
+          return;
+        }
+        return writeFile(join(lockDir, "beat"), token, "utf8");
+      })
+      .catch(() => undefined);
+  }, tableLockTiming.heartbeatMs);
+  heartbeat.unref();
+  const held: HeldLock = {
+    async assertOwned() {
+      const owner = await readFile(join(lockDir, "owner"), "utf8").catch(() => "");
+      if (owner !== token) {
+        throw new TableLockLostError(
+          `locks/${name} was taken over while this call held it, so its write was not made. Try again.`,
+        );
+      }
+    },
+  };
+  try {
+    return await fn(held);
+  } finally {
+    clearInterval(heartbeat);
+    // Remove only our own lock. One broken while its holder stalled may
+    // already belong to someone else, and that is said rather than ignored.
+    await releaseLockDir(lockDir, token);
   }
 }
 
@@ -962,13 +1207,181 @@ export async function writeFileAtomic(path: string, text: string): Promise<void>
   }
 }
 
+/** How long a fold waits before reading an unreadable budget.json again. */
+const BUDGET_REREAD_MS = 100;
+
 export async function readBudget(sandboxRoot: string): Promise<BudgetRecord> {
   const raw = await readFile(join(sandboxRoot, "budget.json"), "utf8");
   return normalizeBudget(JSON.parse(raw) as Partial<BudgetRecord>);
 }
 
+/** True when the run's guard holds budget.json by its inode (Landlock alone). */
+async function budgetPinnedByInode(sandboxRoot: string): Promise<boolean> {
+  const plan = await readFile(join(sandboxRoot, ".fsguard", "plan.txt"), "utf8").catch(() => "");
+  return /^mode: landlock$/m.test(plan);
+}
+
+/**
+ * Replace budget.json whole: a temp file beside it, then `rename` over it, so
+ * a reader outside the table lock (`maybeEnforceStops`, `watchCaps`, the UI,
+ * observe) sees the old record or the new one, never half of one, and a
+ * crash mid-write leaves the old record in place.
+ *
+ * The temp file sits in budget.json's own directory, the sandbox root, since
+ * `rename` does not cross filesystems.
+ *
+ * Under Landlock alone (`mode: landlock` in the kickoff's .fsguard/plan.txt)
+ * the record is written in place, as it always was, by every process of the
+ * run. There inputs/ is carved out of the sandbox, so the root is
+ * listing-only (scripts/landlock.py `plan`) and budget.json's rights are a
+ * rule on its inode, taken when each pane started. A rename cannot happen
+ * inside such a pane, and one from a pane that runs without the guard would
+ * put a new inode at the name that no confined pane could read or write
+ * again. An EACCES or EPERM on the temp file falls back the same way.
+ * Any other failure (a full disk) is thrown, not retried in place:
+ * truncating the live file on a disk that cannot take the new bytes is how a
+ * torn record is made.
+ */
 export async function writeBudget(sandboxRoot: string, budget: BudgetRecord): Promise<void> {
-  await writeFileAtomic(join(sandboxRoot, "budget.json"), `${JSON.stringify(normalizeBudget(budget), null, 2)}\n`);
+  const normalized = normalizeBudget(budget);
+  const target = join(sandboxRoot, "budget.json");
+  const body = `${JSON.stringify(normalized, null, 2)}\n`;
+  if (await budgetPinnedByInode(sandboxRoot)) {
+    await writeFile(target, body, "utf8");
+    return;
+  }
+  const temp = join(dirname(target), `.budget.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  try {
+    // `wx`: never through a link or over a file someone put at that name.
+    await writeFile(temp, body, { encoding: "utf8", flag: "wx", mode: 0o644 });
+    await rename(temp, target);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // A write that failed after the open (a full disk) leaves a partial temp
+    // file behind; EEXIST means the name was someone else's, so leave it.
+    if (code !== "EEXIST") await rm(temp, { force: true }).catch(() => undefined);
+    if (code !== "EACCES" && code !== "EPERM") throw err;
+    await writeFile(target, body, "utf8");
+  }
+}
+
+/** Session-scoped counters that are not spend but ride with it: what the
+ *  session's compactions cost and how many hand-offs it completed. Carried
+ *  forward like the spend, so a restart does not reset "hand-offs cost X"
+ *  next to a whole-run total. Left out of a row that never had them. */
+export const SESSION_EXTRAS = ["compactions", "compaction_tokens", "compaction_usd", "handoffs"] as const;
+/** Stands for what a seat recorded before its reports carried a session id. */
+export const UNKEYED_SESSION = "unkeyed";
+
+function countersOf(row: Partial<AgentBudget> | undefined): CarriedCounters {
+  const out = { spent_usd: 0, tokens: 0, calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 } as CarriedCounters;
+  for (const key of SESSION_COUNTERS) out[key] = Number(row?.[key]) || 0;
+  for (const key of SESSION_EXTRAS) {
+    const value = Number(row?.[key]) || 0;
+    if (value > 0) out[key] = value;
+  }
+  return out;
+}
+
+function addCounters(a: CarriedCounters, b: CarriedCounters, sign = 1): CarriedCounters {
+  const out = { ...a } as CarriedCounters;
+  const round = (key: string, value: number) => (key.endsWith("_usd") ? Number(value.toFixed(6)) : value);
+  for (const key of SESSION_COUNTERS) out[key] = round(key, (a[key] || 0) + sign * (b[key] || 0));
+  for (const key of SESSION_EXTRAS) {
+    const value = round(key, (a[key] || 0) + sign * (b[key] || 0));
+    if (value > 0) out[key] = value;
+    else delete out[key];
+  }
+  return out;
+}
+
+function anyCounter(counters: CarriedCounters): boolean {
+  return [...SESSION_COUNTERS, ...SESSION_EXTRAS].some((key) => (counters[key] || 0) > 0);
+}
+
+/**
+ * A seat's row after a fold, never smaller than before it. Pi reports a
+ * session's own totals, so a pane whose session restarts reports from zero
+ * again; replacing the row with that would hand back money already spent
+ * and could lift a swarm over its cap back under it.
+ *
+ * With a session id on the report (`sessionManager.getSessionId()`), the row
+ * keeps each session's last report under its id in `sessions` and its
+ * counters are their sum: a restart adds a session, `/new` then `/resume`
+ * back replaces the resumed session's entry instead of adding it again, and
+ * two processes sharing one AGENT_ID each keep their own entry. A session
+ * whose report goes down is not believed (sessions are append-only); its
+ * last report stands.
+ *
+ * Without an id, a counter going down is what says a new session began: the
+ * seat's totals so far are carried forward in `earlier_sessions` and the new
+ * session adds to them. That heuristic over-counts where the id does not:
+ * `/new` then `/resume` back adds the resumed session again (5 -> 0.5 -> 5 ->
+ * 5.2 records 10.2, not 5.7), and two live processes with one AGENT_ID add a
+ * full copy at every alternation.
+ *
+ * Either way, `/fork` over-counts: the new session starts with a copy of the
+ * prefix's entries, usage included, and gets a new id, so the prefix is
+ * counted in both sessions (5 USD forked at call 31 records about 8.1). A
+ * report that switches between having an id and not (getSessionId failing
+ * now and then) counts the live session twice. Every one of these errs high,
+ * which for a brake is the safe side, and none occurs in a headless swarm.
+ */
+export function foldSessionSlice(previous: AgentBudget | undefined, slice: SessionUsageSlice): AgentBudget {
+  // A report of nothing at all is not a new session: it is what a failed read
+  // of the session looks like, and folding it as one would add the whole old
+  // session again on the next good read (4 -> 0 -> 5 recorded 9). A session
+  // that really is new has nothing to add yet, so keeping the counters loses
+  // nothing; its first real report starts the carry.
+  const kept = new Set<string>([...SESSION_COUNTERS, ...SESSION_EXTRAS, "session_id", "sessions", "earlier_sessions"]);
+  if (previous && SESSION_COUNTERS.every((key) => !(Number(slice[key]) > 0))) {
+    const row: AgentBudget = { ...previous };
+    for (const [key, value] of Object.entries(slice)) {
+      if (!kept.has(key) && value !== undefined) (row as Record<string, unknown>)[key] = value;
+    }
+    return row;
+  }
+  const row: AgentBudget = { ...emptyAgentBudget(), ...slice };
+  delete row.earlier_sessions;
+  delete row.sessions;
+  delete row.session_id;
+  const put = (counters: CarriedCounters) => {
+    for (const key of SESSION_EXTRAS) delete row[key];
+    Object.assign(row, counters);
+  };
+  const live = countersOf(slice);
+  const sessionId = typeof slice.session_id === "string" && slice.session_id ? slice.session_id : undefined;
+
+  if (sessionId) {
+    const sessions: Record<string, CarriedCounters> = {};
+    for (const [id, counters] of Object.entries(previous?.sessions ?? {})) sessions[id] = countersOf(counters);
+    // A row folded before reports carried an id: all of it is an earlier session.
+    if (previous && !previous.sessions && anyCounter(countersOf(previous))) sessions[UNKEYED_SESSION] = countersOf(previous);
+    const before = sessions[sessionId];
+    if (!before || !SESSION_COUNTERS.some((key) => live[key] < before[key] - 1e-9)) sessions[sessionId] = live;
+    let total = countersOf(undefined);
+    for (const counters of Object.values(sessions)) total = addCounters(total, counters);
+    put(total);
+    row.session_id = sessionId;
+    row.sessions = sessions;
+    const earlier = addCounters(total, sessions[sessionId], -1);
+    if (Object.keys(sessions).length > 1) row.earlier_sessions = earlier;
+    return row;
+  }
+
+  let carried = countersOf(undefined);
+  if (previous) {
+    const before = countersOf(previous.earlier_sessions);
+    // What the live session had reported at the last fold.
+    const lastLive = addCounters(countersOf(previous), before, -1);
+    const restarted = SESSION_COUNTERS.some((key) => live[key] < lastLive[key] - 1e-9);
+    carried = restarted ? countersOf(previous) : before;
+  }
+  if (anyCounter(carried)) {
+    put(addCounters(carried, live));
+    row.earlier_sessions = carried;
+  }
+  return row;
 }
 
 /**
@@ -1815,7 +2228,7 @@ export async function claimFile(
     throw new Error("claim_file requires a reason: say what you are about to do with the path.");
   }
   const seconds = clampClaimSeconds(options.seconds);
-  return withTableLock(ctx.sandboxRoot, async () => {
+  return withTableLock(ctx.sandboxRoot, async (held) => {
     const file = lockPath(ctx.sandboxRoot, pathKey);
     const existing = await readLock(file);
     const now = Date.now();
@@ -1847,6 +2260,7 @@ export async function claimFile(
       ...(options.implicit ? { implicit: true as const } : {}),
     };
     await mkdir(join(ctx.sandboxRoot, "locks"), { recursive: true });
+    await held.assertOwned();
     await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, "utf8");
     return {
       ok: true,
@@ -3265,6 +3679,48 @@ export function formatEventLine(event: SwarmEvent): string {
 /** The counters of a seat's spend that only ever grow within a run. */
 export const MONOTONIC_USAGE_KEYS = ["spent_usd", "tokens", "calls", "input", "output", "cache_read", "cache_write"] as const;
 
+/** What applySessionUsage throws when budget.json is there and does not parse. */
+const BUDGET_UNREADABLE_PREFIX = "budget.json does not read";
+
+/**
+ * Whether an error from applySessionUsage is its refusal to fold over an
+ * unreadable budget.json. Read from the message, which is what survives the
+ * hub's socket in a microVM; any other failure (a lock timeout, a lost hub,
+ * a report that went backwards) is not this and is not reported as it.
+ */
+export function isBudgetUnreadable(err: unknown): boolean {
+  return (err instanceof Error ? err.message : String(err)).includes(BUDGET_UNREADABLE_PREFIX);
+}
+
+/** Sandboxes whose unreadable budget.json this process has already reported. */
+const budgetUnreadableTold = new Set<string>();
+
+/**
+ * Say, once per process, that a fold was refused because budget.json could
+ * not be read. While that lasts no cap and no wall clock is enforced from
+ * this pane (the stop checks skip an unreadable file too, and so does the
+ * hub's backstop in a microVM run), which is worth a veto on the board: a
+ * trace row on every turn end is where nobody looks. `post` is the board's
+ * system post as the caller reaches it (the hub, from a VM). Returns whether
+ * this call told.
+ */
+export async function reportBudgetUnreadable(
+  sandboxRoot: string,
+  agentId: string,
+  error: string,
+  post: typeof systemPost = systemPost,
+): Promise<boolean> {
+  const key = resolve(sandboxRoot);
+  if (budgetUnreadableTold.has(key)) return false;
+  budgetUnreadableTold.add(key);
+  await appendEvent(sandboxRoot, { agent: agentId || "unknown", tool: "budget_unreadable", args: {}, result: { error } }).catch(() => undefined);
+  await post(sandboxRoot, {
+    tag: "veto",
+    body: `BUDGET UNREADABLE: budget.json does not parse, so ${agentId}'s spend is not being folded into it and no cap or wall clock is enforced while it stays that way. Put a valid budget.json back (the caps from the kickoff) and the next turn folds again. (${error})`,
+  }).catch(() => undefined);
+  return true;
+}
+
 export async function applySessionUsage(
   sandboxRoot: string,
   agentId: string,
@@ -3275,14 +3731,21 @@ export async function applySessionUsage(
   over_budget: boolean;
   first_over: boolean;
 }> {
-  return withTableLock(sandboxRoot, async () => {
+  return withTableLock(sandboxRoot, async (held) => {
     // A sandbox with no budget yet starts one; a budget.json that is there
     // and does not read is the run's caps, and is never rebuilt from
-    // defaults (no cap, a fifteen-minute clock started now).
-    const budget = await readBudget(sandboxRoot).catch((err: NodeJS.ErrnoException) => {
-      if (err?.code === "ENOENT") return normalizeBudget({ started_at: new Date().toISOString() });
-      throw new Error(`budget.json does not read (${err instanceof Error ? err.message : String(err)}); its caps are left as they are`);
-    });
+    // defaults (no cap, a fifteen-minute clock started now). It is read once
+    // more first: the harness's own writes are whole (writeBudget), but an
+    // operator raising a cap in an editor may be caught mid-save.
+    const budget = await readBudget(sandboxRoot)
+      .catch(async (err: NodeJS.ErrnoException) => {
+        if (err?.code === "ENOENT") return normalizeBudget({ started_at: new Date().toISOString() });
+        await sleep(BUDGET_REREAD_MS);
+        return readBudget(sandboxRoot);
+      })
+      .catch((err: unknown) => {
+        throw new Error(`${BUDGET_UNREADABLE_PREFIX} (${err instanceof Error ? err.message : String(err)}); its caps are left as they are`);
+      });
     if (options.monotonic) {
       // Checked here, under the table lock, against the row this write
       // replaces: two reports in flight at once cannot both pass a check made
@@ -3297,7 +3760,7 @@ export async function applySessionUsage(
     // The kickoff wrote the seat's model once; a fold that dropped it would
     // take the seat out of its model's cap after the first provider call.
     const model = budget.agents[agentId]?.model ?? slice.model;
-    budget.agents[agentId] = { ...emptyAgentBudget(), ...slice, ...(model ? { model } : {}) };
+    budget.agents[agentId] = { ...foldSessionSlice(budget.agents[agentId], slice), ...(model ? { model } : {}) };
     let spent = 0;
     let tokens = 0;
     let calls = 0;
@@ -3313,6 +3776,7 @@ export async function applySessionUsage(
     const over = overCap(budget).over;
     const first_over = over && !budget.cap_steer_sent;
     if (first_over) budget.cap_steer_sent = true;
+    await held.assertOwned();
     await writeBudget(sandboxRoot, budget);
     return { budget, over_budget: over, first_over };
   });
@@ -3442,13 +3906,14 @@ export async function recordFileVersion(
   // binary overwrites the other, and the surviving index entry names a hash
   // the stored bytes do not have.
   const key = pathKey;
-  return withTableLock(sandboxRoot, async () => {
+  return withTableLock(sandboxRoot, async (held) => {
     const dir = historyDir(sandboxRoot, key);
     await mkdir(dir, { recursive: true });
     const versions = await listFileHistory(sandboxRoot, key);
     const last = versions.at(-1);
     if (last?.sha256 === sha256) return null;
     const rev = (last?.rev ?? 0) + 1;
+    await held.assertOwned();
     if (bytes) await writeFile(join(dir, `${String(rev).padStart(6, "0")}.bin`), bytes);
     const record: FileVersion = {
       rev,
@@ -4505,6 +4970,9 @@ export const TOOL_RESERVED_NAMES = new Set([
   "repeat_hint", "budget_precall_stop", "ledger_superseded", "notify", "history_quota", "seat_auth",
   // The host-side model gateway (scripts/model-gateway.ts).
   "model_gateway_started", "model_gateway_refused", "model_gateway_upstream_error", "model_gateway_restarted",
+  // A budget fold refused over an unreadable budget.json, and what a
+  // collector restarted over a torn or mismatched trace records.
+  "budget_unreadable", "trace_anchor_mismatch", "trace_fragment_cut",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
@@ -5080,12 +5548,15 @@ const FORGED_ENV_KEEP = new Set([
 ]);
 
 /**
- * SWARM_ variables tell a tool about its run, so they pass — except this one,
- * which is not context but a credential: the console's mutation token, which
- * starts, stops and reaps swarms. A pane inherits it whenever the operator
- * exported it before starting Herdr, and a forged tool is agent-written code.
+ * SWARM_ variables tell a tool about its run, so they pass — except these,
+ * which are not context but credentials. SWARM_UI_TOKEN is the console's
+ * mutation token, which starts, stops and reaps swarms; a pane inherits it
+ * whenever the operator exported it before starting Herdr. SWARM_TRACE_TOKEN
+ * is the calling pane's own trace identity, and a forged tool is code another
+ * agent may have written: the harness records the call itself, so the tool
+ * never needs it.
  */
-export const FORGED_ENV_DENY = new Set(["SWARM_UI_TOKEN"]);
+export const FORGED_ENV_DENY = new Set(["SWARM_UI_TOKEN", "SWARM_TRACE_TOKEN"]);
 
 /** What a forged subprocess may see: PATH, proxy, locale — not the pane's API keys. */
 export function forgedToolEnv(
@@ -6051,7 +6522,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
     if (!Number.isInteger(n) || n < 1) return { ok: false, reason: `supersedes names an entry by its seq, a whole number (got ${JSON.stringify(input.supersedes)})` };
     supersedes = n;
   }
-  return withTableLock(ctx.sandboxRoot, async () => {
+  return withTableLock(ctx.sandboxRoot, async (held) => {
     const entries = await readLedger(ctx.sandboxRoot);
     if (supersedes !== undefined) {
       const target = entries.find((e) => e.seq === supersedes);
@@ -6070,6 +6541,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
       // A merge adds an author, it does not rewrite the first citation.
       if (!same.source) same.source = source;
       if (!same.evidence) same.evidence = evidence;
+      await held.assertOwned();
       // Whole or not at all: a writer killed mid-way must not leave the
       // record of the case cut short.
       await writeFileAtomic(join(ctx.sandboxRoot, LEDGER_ENTRIES), entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
@@ -6097,6 +6569,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
     entry.prev = previous?.hash ?? (previous ? ledgerHash(previous, "genesis") : "genesis");
     entry.hash = ledgerHash(entry, entry.prev);
     await mkdir(join(ctx.sandboxRoot, LEDGER_DIR), { recursive: true });
+    await held.assertOwned();
     await appendFile(join(ctx.sandboxRoot, LEDGER_ENTRIES), `${JSON.stringify(entry)}\n`, "utf8");
     entries.push(entry);
     await renderLedger(ctx.sandboxRoot, entries);

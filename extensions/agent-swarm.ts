@@ -43,6 +43,8 @@ import {
   overCap,
   STOP_GRACE_MS,
   appendEvent,
+  isBudgetUnreadable,
+  reportBudgetUnreadable,
   budgetPressure,
   createContext,
   diffWatchedPaths,
@@ -359,11 +361,13 @@ export async function logEvent(
   }
 }
 
-function entriesFrom(ctx: { sessionManager?: { getEntries?: () => unknown[] } }): unknown[] {
+/** The session's entries, or null when there is no session to read or the read failed. */
+function entriesFrom(ctx: { sessionManager?: { getEntries?: () => unknown[] } }): unknown[] | null {
   try {
-    return ctx.sessionManager?.getEntries?.() ?? [];
+    const entries = ctx.sessionManager?.getEntries?.();
+    return Array.isArray(entries) ? entries : null;
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -444,13 +448,31 @@ export default function (pi: ExtensionAPI) {
   async function refreshBudget(
     cwd: string,
     ctx: {
-      sessionManager?: { getEntries?: () => unknown[] };
+      sessionManager?: { getEntries?: () => unknown[]; getSessionId?: () => string };
       shutdown?: () => void;
       getContextUsage?: () => { tokens: number | null; contextWindow: number } | undefined;
     },
   ): Promise<void> {
     if (!agentId) return;
-    const slice = usageFromSessionEntries(entriesFrom(ctx));
+    const entries = entriesFrom(ctx);
+    if (!entries) {
+      // No session to read, or the read threw: that is no report, not a
+      // report of zero. Folding it would look like a new session and count
+      // the old one twice on the next good read. Enforce from the file as it
+      // stands instead.
+      const budget = await readBudget(cwd).catch(() => null);
+      if (budget) await enforceAllCaps(cwd, budget, ctx);
+      return;
+    }
+    const slice = usageFromSessionEntries(entries);
+    try {
+      // Keys the fold per session, so a resumed or shared session replaces
+      // its own entry rather than being added again (foldSessionSlice).
+      const sessionId = ctx.sessionManager?.getSessionId?.();
+      if (typeof sessionId === "string" && sessionId) slice.session_id = sessionId;
+    } catch {
+      // without it the fold falls back to watching for a counter that drops
+    }
     try {
       const context = ctx.getContextUsage?.();
       if (context && typeof context.tokens === "number") {
@@ -467,7 +489,18 @@ export default function (pi: ExtensionAPI) {
         // the level is decoration too
       }
     }
-    const applied = await applySessionUsage(cwd, agentId, slice);
+    let applied: Awaited<ReturnType<typeof applySessionUsage>>;
+    try {
+      applied = await applySessionUsage(cwd, agentId, slice);
+    } catch (err) {
+      // budget.json is there and does not parse: the fold was refused and the
+      // file and the stop clock are as they were, since a fold over defaults
+      // would have dropped every cap. Said once, on the board (the hub's, from
+      // a VM). Any other failure is not this one and goes on as before.
+      if (!isBudgetUnreadable(err)) throw err;
+      await reportBudgetUnreadable(cwd, agentId, err instanceof Error ? err.message : String(err), systemPost);
+      return;
+    }
     lastStopCheck = Date.now();
     await enforceAllCaps(cwd, applied.budget, ctx);
   }
@@ -1118,7 +1151,7 @@ export default function (pi: ExtensionAPI) {
    */
   async function reportProviderError(ctx: { cwd: string; sessionManager?: { getEntries?: () => unknown[] } }): Promise<void> {
     if (!agentId) return;
-    const entries = entriesFrom(ctx);
+    const entries = entriesFrom(ctx) ?? [];
     let last: Record<string, unknown> | undefined;
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i] as Record<string, unknown> | undefined;

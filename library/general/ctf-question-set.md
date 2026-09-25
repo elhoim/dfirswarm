@@ -8,6 +8,7 @@ inputs: the challenge's evidence as published (images, dumps, archives, exports)
 seats: 6
 cap_usd: 40
 wall_clock: 120
+toolbox: dfir,crypto
 ---
 ## Goal
 

@@ -8,6 +8,7 @@ inputs: the web server's access and error logs (Apache, nginx or IIS; plain, gzi
 seats: 4
 cap_usd: 15
 wall_clock: 60
+toolbox: dfir
 ---
 ## Goal
 

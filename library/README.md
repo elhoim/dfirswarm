@@ -14,7 +14,10 @@ scripts/swarm.sh start --goal-file library/windows/host-intrusion.md \
 `work/extracted/` and `work/quarantine/` and makes both no-exec where the
 host has a kernel guard. A case that pulls samples, carvings or decoded
 stages out of loose files is launched with `--quarantine` whether or not it
-takes the catalog; without either flag nothing there is protected.
+takes the catalog; without either flag nothing there is protected. The
+kickoff records whether the no-exec holds as `"quarantine": true|false` in
+`inputs.json` (a run in microVMs always holds it; a host run only with a
+kernel guard), and the malware entries' checks read it.
 
 Every entry is a starting point, not a script. Load it, name the evidence it
 should read where the document says so, tighten or drop the questions the
@@ -77,6 +80,7 @@ inputs: one disk image of a Windows workstation or server (E01, raw, VHDX)
 seats: 5
 cap_usd: 30
 wall_clock: 90
+toolbox: dfir
 ---
 ## Goal
 
@@ -121,6 +125,7 @@ from the CLI; the contract starts at `## Goal`.
 | `tags` | words the picker's filter should match |
 | `inputs` | what the operator is expected to put under `inputs/` |
 | `seats`, `cap_usd`, `wall_clock` | suggestions the form offers to apply; not settings |
+| `toolbox` | the toolbox sets the case needs, from `dfir`, `crypto`, `linux`; read by `swarm.sh start --goal-file ... --catalog --toolbox auto`, which takes it in place of guessing from the goal's words (a virtual or encrypted volume under `inputs/` still adds `crypto`). The console strips the block, so there the form's toolbox field decides |
 
 **The document** is the swarm contract's goal part, in the shape the
 eighteen published runs converged on:
@@ -297,7 +302,12 @@ table for a question set, an extracted-artefact directory for a memory dump.
 A case that extracts samples, carvings or decoded stages adds
 `test -z "$(find work -path work/.toolchain -prune -o -type f \( -perm -u+x -o -perm -g+x -o -perm -o+x \) -print 2>/dev/null | head -1)"`:
 no file under `work/` carries an execute bit (pip's `work/.toolchain/`
-aside), which is the part of the quarantine a check can see.
+aside). A case that must not extract without the kernel's no-exec adds
+`grep -q '"quarantine": true' inputs.json` as well: the kickoff records in
+`inputs.json`, which the harness writes and no agent can, whether the no-exec
+holds (`--quarantine` or `--catalog` with a kernel guard, or any microVM
+run), so a run without it fails the check whatever it found. The malware
+entries carry both.
 
 Where the definition of done promises extracted files with their hashes,
 name the manifest (`sha256sum` output in a `SHA256SUMS` file beside them)

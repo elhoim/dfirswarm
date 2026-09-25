@@ -1845,6 +1845,11 @@ export class Hub {
     }
     const done = await P.swarmDoneExists(S);
     if (!done) {
+      // The reaper found every seat done or dead and nobody wrote the
+      // sentinel (done/ALL_AGENTS_DEAD): there is no one left to steer, and a
+      // harness stop now would record the run as finished. The idle watchdog
+      // stops for the same file.
+      if (existsSync(join(S, P.ALL_DEAD_REL))) return;
       await this.foldGatewaySpend().catch((err: Error) => this.log(`gateway fold: ${err.message}`));
       const budget = await P.readBudget(S).catch(() => null);
       if (!budget) return;

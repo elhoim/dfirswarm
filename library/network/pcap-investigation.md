@@ -8,6 +8,7 @@ inputs: one or more packet captures (pcap or pcapng, plain or gzipped) with, if 
 seats: 5
 cap_usd: 25
 wall_clock: 75
+toolbox: dfir
 ---
 ## Goal
 

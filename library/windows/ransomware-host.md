@@ -8,6 +8,7 @@ inputs: one disk image of a Windows host with encrypted files or a ransom note (
 seats: 5
 cap_usd: 35
 wall_clock: 90
+toolbox: dfir,crypto
 ---
 ## Goal
 
@@ -35,8 +36,14 @@ Read `catalog/` before running the same commands again.
    SOFTWARE, SYSTEM), the volumes, the security tooling and its state
    (Defender keys and `Windows Defender/Operational`), and the state of
    the image itself: whether it was shut down cleanly, whether it booted
-   again after the encryption, and where the logs stop (`$LogFile`, the
-   last System record, hiberfil).
+   again after the encryption, where the logs stop (`$LogFile`, the
+   last System record, hiberfil), and the audit policy in force: which
+   categories were audited (SECURITY `Policy\PolAdtEv`, and any advanced
+   policy in `System32\GroupPolicy\Machine\Microsoft\Windows NT\Audit\audit.csv`),
+   whether process creation (4688) and PowerShell script blocks (4104)
+   were logged, and policy changes (4719). An event the later answers do
+   not find is then "not audited", "rolled over" or "cleared", never
+   simply "did not happen".
 2. Arrival and execution: the initial-access hypothesis and its evidence
    (4624 type 10 and a 4625 burst for an exposed RDP, a mail attachment or
    a download with its `Zone.Identifier` stream, a remote-support tool,
@@ -108,9 +115,8 @@ Read `catalog/` before running the same commands again.
   raw layer and a forged pool-tag scanner: every `windows.*` plugin needs
   the ISF. Say what a symbol table would have added.
 - Read shadow copies in place with `vshadowinfo` and `pyvshadow`
-  (libvshadow) where this host has them; the toolbox does not ship them, and
-  `dfvfs` from `--toolbox crypto` reads a shadow store only with `pyvshadow`
-  beside it. If neither is here, say so and report only the evidence of VSS
+  (libvshadow), which `--toolbox crypto` checks for beside `dfvfs`
+  (itself able to open a shadow store only with `pyvshadow` there). If neither is here, say so and report only the evidence of VSS
   state (the catalog file `{3808876b-c176-4e48-b7ae-04046e6cc752}` under
   `System Volume Information`, its size, the VSS events), never "no shadow
   copies".

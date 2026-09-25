@@ -8,6 +8,7 @@ inputs: one memory capture of a Linux host (LiME or AVML output, raw or compress
 seats: 4
 cap_usd: 20
 wall_clock: 60
+toolbox: dfir
 ---
 ## Goal
 

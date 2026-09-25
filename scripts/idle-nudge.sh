@@ -315,7 +315,7 @@ ensure_hub() {
 
 while :; do
   [[ -d "$SANDBOX" ]] || exit 0
-  [[ -f "$SANDBOX/done/SWARM_DONE" ]] && exit 0
+  [[ -f "$SANDBOX/done/SWARM_DONE" || -f "$SANDBOX/done/ALL_AGENTS_DEAD" ]] && exit 0
   ensure_hub
   host_backstop
   coverage_hint

@@ -59,7 +59,7 @@ runs one of them without saying so.
 | `evtx_filter` | python3 | `sd1d101` | 1 | Parse a local EVTX; return EventID/TimeCreated/EventData for matching IDs or a time prefix |
 | `evtx_query` | python3 | `sbe1801` | 1 | Parse an EVTX file and return filtered events with timestamp, event_id, channel, computer, record_id, and nam… |
 | `extract_stream` | bash | `sfcc303` | 2 | Extract a data stream from an NTFS E01 image using icat. Returns the raw bytes (base64-encoded); a failure co… |
-| `file_carver` | python3 | `s183904` | 1 | Carve files from a raw binary dump by header/footer signatures. Given a path, an offset, and a signature type… |
+| `file_carver` | python3 | `s183904` | 2 | Carve files from a raw binary dump by header/footer signatures. Given a path, an offset, and a signature type… |
 | `fls_root` | python3 | `s9d8306` | 2 | Run fls on an EXT4 volume (default offset 503808, image inputs/Webserver.E01). Reads inode/recursive/image/of… |
 | `ftk_csv` | python3 | `s9d8303` | 1 | Query the UTF-16 FTK Imager CSV for path/date/deleted filters; return matching rows as JSON. |
 | `fve_metadata` | python3 | `s864a05` | 2 | Parse a BitLocker -FVE-FS- volume (raw image or VHD partition) and return metadata: GUID, encryption method, … |

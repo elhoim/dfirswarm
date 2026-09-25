@@ -1410,7 +1410,7 @@ copy_tree_as_is() { # <src dir> <dst dir>
 }
 
 install_inputs() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4" verify="${5:-1}" entry name
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" verify="${5:-1}" quarantine="${6:-0}" entry name
   mkdir -p "$sandbox/inputs" "$sandbox/.inputs-pristine"
   # A link inside the evidence is the evidence's own and is copied as the
   # link it is. `cp -RL` followed every link on this host: an extracted
@@ -1469,7 +1469,7 @@ PY
   # modes here, once, before anything is read-only.
   find "$sandbox/inputs" "$sandbox/.inputs-pristine" -type f -exec chmod a-x {} + 2>/dev/null || true
   chmod -R a-w "$sandbox/inputs" "$sandbox/.inputs-pristine"
-  write_inputs_manifest "$sandbox" "$src" "$enforce" "$guard" copy "$verify"
+  write_inputs_manifest "$sandbox" "$src" "$enforce" "$guard" copy "$verify" "$quarantine"
 }
 
 # The one walk over inputs/ that every way of holding the evidence writes
@@ -1479,11 +1479,15 @@ PY
 # are the operator's and the manifest describes how they are held rather
 # than dictating it; `image` skips symlinks, which an attached volume may
 # carry and a copy dereferenced.
+#
+# `quarantine` is the kickoff's --quarantine (on by --catalog too), recorded
+# here because a goal's checks run in the sandbox and cannot read the
+# registry: a case that must not extract without it checks this key.
 write_inputs_manifest() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4" held="$5" verify="${6:-0}"
-  python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" "$verify" <<'PY'
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" held="$5" verify="${6:-0}" quarantine="${7:-0}"
+  python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" "$verify" "$quarantine" <<'PY'
 import base64, hashlib, json, os, stat as _stat, sys, time
-sandbox, src, enforce, guard, held, verify = sys.argv[1:]
+sandbox, src, enforce, guard, held, verify, quarantine = sys.argv[1:]
 root = os.path.join(sandbox, "inputs")
 
 def named(entry, key, value):
@@ -1654,7 +1658,8 @@ manifest = {
     "bytes": total,
     "enforce": enforce,
     "guard": guard,
-    "digests": ["sha256", "sha1", "md5"]}
+    "digests": ["sha256", "sha1", "md5"],
+    "quarantine": quarantine == "1"}
 if held == "copy":
     if problems:
         manifest["source_checked"] = "MISMATCH" if content_check is None else dict(content_check)
@@ -1698,7 +1703,7 @@ PY
 # guarded. A Linux mount namespace does this best; seatbelt's deny on the
 # resolved path does it too.
 bind_inputs() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4"
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" quarantine="${5:-0}"
   if [[ "$guard" == "none" ]]; then
     echo "BLOCKER: --inputs-bind needs a kernel guard (seatbelt, a Linux namespace, or Landlock); this host has none, so the source would be writable by the panes. Use --inputs to copy." >&2
     exit 2
@@ -1707,15 +1712,15 @@ bind_inputs() {
   real="$(cd "$src" && pwd -P)"
   rm -rf "${sandbox:?}/inputs"
   ln -s "$real" "$sandbox/inputs"
-  write_inputs_manifest "$sandbox" "$real" "$enforce" "$guard" bind
+  write_inputs_manifest "$sandbox" "$real" "$enforce" "$guard" bind 0 "$quarantine"
 }
 
 # The manifest for an attached image. Same shape as install_inputs writes, so
 # every reader downstream is unchanged; what is missing is the pristine clone,
 # because there is nothing to heal from and nothing that can change.
 manifest_attached_inputs() {
-  local sandbox="$1" src="$2"
-  write_inputs_manifest "$sandbox" "$src" on image image
+  local sandbox="$1" src="$2" quarantine="${3:-0}"
+  write_inputs_manifest "$sandbox" "$src" on image image 0 "$quarantine"
 }
 
 inputs_record() {
@@ -2133,10 +2138,37 @@ import("'"$ROOT"'/extensions/protocol.ts").then((m) =>
 # Which toolbox sets a goal document is asking for. The operator names the
 # sets; this is the second pair of eyes, because the cost of the wrong answer
 # is a run that does the forensics and cannot open what it found.
-toolbox_sets_from_goal() { # <goal file or empty>
-  local file="$1" text sets=""
-  [[ -n "$file" && -f "$file" ]] || return 0
-  text="$(tr 'A-Z' 'a-z' < "$file")"
+#
+# A library entry that says which sets it needs (`toolbox: dfir,crypto` in its
+# metadata block) is taken at its word, and the words are not read: every
+# Windows entry names `gpg` in its tool list and "container" in its ground
+# rules, so matching the text asked for the crypto set in most entries.
+# Without the key, only the goal after its metadata block is read (the block's
+# `inputs:` and `tags:` lines are the picker's, not the case's). Either way,
+# what is actually under the inputs has the last word: a virtual or encrypted
+# volume there needs the crypto set's readers whatever the goal says.
+toolbox_sets_from_goal() { # <goal file, metadata block removed> [<explicit sets>] [<inputs dir>]
+  local file="$1" explicit="${2:-}" inputs="${3:-}" text sets="" one
+  if [[ -n "$explicit" ]]; then
+    for one in ${explicit//,/ }; do
+      [[ "$one" == dfir ]] || sets="${sets:+$sets,}$one"
+    done
+  elif [[ -n "$file" && -f "$file" ]]; then
+    text="$(tr 'A-Z' 'a-z' < "$file")"
+    sets="$(toolbox_sets_from_text "$text")"
+  fi
+  case ",$sets," in
+    *,crypto,*) ;;
+    *)
+      if [[ -n "$inputs" && -d "$inputs" ]] && [[ -n "$(find -H "$inputs" -type f \( -iname '*.vhd' -o -iname '*.vhdx' -o -iname '*.vmdk' -o -iname '*.qcow2' -o -iname '*.luks' -o -iname '*.hc' -o -iname '*.tc' \) -print 2>/dev/null | head -1)" ]]; then
+        sets="crypto${sets:+,$sets}"
+      fi ;;
+  esac
+  printf '%s' "$sets"
+}
+
+toolbox_sets_from_text() { # <lower-cased goal text>
+  local text="$1" sets=""
   case "$text" in
     *encrypt*|*bitlocker*|*luks*|*veracrypt*|*truecrypt*|*filevault*|*passphrase*|*vhdx*|*container*|*gpg*|*pgp*|*keychain*)
       sets="crypto" ;;
@@ -3396,15 +3428,26 @@ cmd_start() {
   # between two `---` lines: the picker's title, summary and suggestions. The
   # contract starts after it, and the console strips it before it sends the
   # text; a file launched from the CLI is stripped here, the same way.
-  python3 - "$goal_file" <<'STRIP'
+  # The one key the kickoff itself reads from the block is `toolbox:`, the
+  # sets the entry needs; it is printed here before the block goes.
+  local goal_toolbox
+  goal_toolbox="$(python3 - "$goal_file" <<'STRIP'
 import re, sys
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
 m = re.match(r"^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)", text)
 if m:
+    key = re.search(r"^toolbox:[ \t]*(.*?)[ \t]*\r?$", m.group(0), re.M)
+    if key:
+        print(re.sub(r"[ \t]", "", key.group(1)))
     with open(path, "w", encoding="utf-8") as f:
         f.write(text[m.end():].lstrip("\r\n"))
 STRIP
+)"
+  if [[ -n "$goal_toolbox" && ! "$goal_toolbox" =~ ^(dfir|crypto|linux)(,(dfir|crypto|linux))*$ ]]; then
+    echo "BLOCKER: the goal's metadata block says toolbox: $goal_toolbox; it must be sets from dfir,crypto,linux ($goal_source)." >&2
+    exit 2
+  fi
   local goal_bytes
   goal_bytes="$(wc -c < "$goal_file" | tr -d ' ')"
   if [[ "$goal_bytes" -gt "$GOAL_MAX_BYTES" ]]; then
@@ -3424,7 +3467,10 @@ STRIP
         # ran with the dfir set alone; the BitLocker reader it wanted is in
         # crypto, and nothing connected the two until minute forty.
         local goal_hint
-        goal_hint="$(toolbox_sets_from_goal "$goal_source")"
+        # A goal given inline (the console's --goal) is not read for words:
+        # it has no metadata block to say otherwise, and the console's form
+        # names the sets itself.
+        goal_hint="$(toolbox_sets_from_goal "$(if [[ "$goal_source" != "--goal" ]]; then echo "$goal_file"; fi)" "$goal_toolbox" "$inputs_dir")"
         if [[ -n "$goal_hint" ]]; then
           toolbox="$toolbox,$goal_hint"
           echo "NOTE: --toolbox auto reads the goal and adds: $goal_hint (say --toolbox dfir to refuse)." >&2
@@ -3631,6 +3677,12 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
   if [[ "$metered" -eq 1 ]]; then
     if [[ -z "$cap" ]]; then
       echo "start requires --cap-usd" >&2
+      exit 2
+    fi
+    # The USD brake only fires on a cap above zero, so on a team that bills
+    # a cap of 0 would mean no spend cap at all rather than none allowed.
+    if awk -v c="$cap" 'BEGIN { exit !(c <= 0) }'; then
+      echo "BLOCKER: --cap-usd must be above zero for a team that bills (got $cap); a cap of 0 would never stop it." >&2
       exit 2
     fi
   elif [[ -z "$cap_tokens" ]]; then
@@ -3995,7 +4047,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   rm -f "$sandbox"/threads/main/*.md
   rm -f "$sandbox"/threads/main/meta.json
   rm -f "$sandbox"/locks/*.json
-  rm -f "$sandbox/done/SWARM_DONE"
+  rm -f "$sandbox/done/SWARM_DONE" "$sandbox/done/ALL_AGENTS_DEAD"
   rm -f "$sandbox"/done/agents/*.done
   # Artifacts are whatever the goal names, so a stale one from a previous run
   # in this directory could satisfy the new goal's checks on its own.
@@ -4012,10 +4064,19 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     rm -rf "${sandbox:?}/work"
   fi
   mkdir -p "$sandbox/work"
-  : > "$sandbox/traces/events.jsonl"
 
   clear_inputs "$sandbox"
   stop_sandbox_daemons "$sandbox"
+  # Emptied only once the previous run's collector and watchdogs are stopped,
+  # so none of them can land a stray line in the new run's trace.
+  : > "$sandbox/traces/events.jsonl"
+  # The trace was just emptied for the new run, so the previous run's anchor
+  # goes with it. A collector keeps any anchor it finds — an anchor must not
+  # drop to match a shortened file — and would read the new run as cut short.
+  local old_anchor
+  old_anchor="$(trace_anchor_path "$sandbox")"
+  # With the one a restarted collector kept because the trace did not match it.
+  rm -f "$old_anchor" "${old_anchor%.json}.prev.json"
   rm -rf "${sandbox:?}/catalog" "${sandbox:?}/ledger" "$sandbox/toolbox.json" "$sandbox/catalog.json"
   # Everything else a previous run in this directory left that the next one
   # would read as its own: its VMs' records, its custody verdicts, its
@@ -4026,15 +4087,22 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     "${sandbox:?}/vm-prepared" "$sandbox/vm-spec.json" "$sandbox/compact-prompt.md" "$sandbox/toolchain.json"
   rm -f "$sandbox"/custody.json "$sandbox"/custody.*.json
   mkdir -p "$sandbox/history" "$sandbox/tools"
+  # The manifest records whether the no-exec holds, not whether it was asked
+  # for: with no guard (--inputs-enforce off, or a host without one) the flag
+  # makes the directories and nothing stops a file there from running, so a
+  # goal check that read the flag would pass a run that was not quarantined.
+  # A VM run always holds it (each seat's holes are no-exec in its VM).
+  local quarantine_held=0
+  if [[ "$quarantine" -eq 1 && "$inputs_guard" != "none" ]]; then quarantine_held=1; fi
   if [[ -n "$inputs_dir" ]]; then
     if [[ "$inputs_bind" -eq 1 ]]; then
-      bind_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard"
+      bind_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$quarantine_held"
     else
-      install_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$verify_copy"
+      install_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$verify_copy" "$quarantine_held"
     fi
   elif [[ -n "$inputs_image" ]]; then
     attach_inputs_image "$sandbox" "$inputs_image" >/dev/null
-    manifest_attached_inputs "$sandbox" "$inputs_image"
+    manifest_attached_inputs "$sandbox" "$inputs_image" "$quarantine_held"
   fi
   # The kickoff's own record of what the run started with, outside the run
   # where no agent (and no catalog parser) reaches it: custody compares the
@@ -5853,6 +5921,11 @@ trace_token_for() {
   printf ''
 }
 
+# Where a sandbox's trace anchor lives: beside it, outside the panes' reach.
+trace_anchor_path() {
+  printf '%s/%s.trace-anchor.json' "$(cd "$(dirname "$1")" && pwd -P)" "$(basename "$1")"
+}
+
 start_trace_collector() {
   local sandbox="$1" pid
   mkdir -p "$sandbox/traces"
@@ -5873,7 +5946,7 @@ start_trace_collector() {
   # report found none and said the record was intact without ever consulting
   # it. Still outside the sandbox, so the write guard keeps it out of reach.
   local anchor
-  anchor="$(cd "$(dirname "$sandbox")" && pwd -P)/$(basename "$sandbox").trace-anchor.json"
+  anchor="$(trace_anchor_path "$sandbox")"
   # Keyed only when the gate is up: a collector keyed for a gate that is not
   # there would write every pane's line unverified.
   local shape="open"
@@ -7226,31 +7299,97 @@ import("'"$ROOT"'/extensions/protocol.ts").then((m) => {
   printf '%s\n' "$names"
 }
 
-# The lock-table mutex protocol.ts and reap.sh use: an exclusive mkdir of
-# locks/.table.lock, a 10 s wait, and a stale lock (older than 15 s, its pid
-# gone) broken. Post ids are allocated under it too, so a post written from
-# here cannot take the same id as one an agent is writing at the same moment.
-table_lock() {
-  local sandbox="$1" dir="$1/locks/.table.lock" deadline=$((SECONDS + 10)) age pid
-  mkdir -p "$sandbox/locks"
+# >>> table lock: this block is identical in scripts/reap.sh and scripts/swarm.sh
+# (tests/table-lock.test.sh checks that). The lock-table mutex protocol.ts
+# uses, from bash: an exclusive mkdir of the lock and a 10 s wait. A lock older
+# than 15 s has no live holder (protocol.ts refreshes its lock while it holds
+# it; holders here hold it for a few seconds at most) unless that holder
+# stalled. A stalled holder keeps its lock where its pid can be checked: when
+# it recorded the same namespace as ours (table_lock_ns) and its pid is live.
+# Elsewhere, as for a holder in another pane's pid namespace, age alone
+# decides. A stale lock is broken under <lock>.break and judged again there,
+# so two waiters cannot both break it. kill -0 fails on a pid we may not
+# signal; the panes of one run share a user, so that is a dead one.
+TABLE_LOCK_TOKEN="$$.$RANDOM$RANDOM"
+# Where a recorded pid can be checked: this pid namespace and boot on Linux,
+# this boot session on macOS (not the host's name, which can follow the
+# network across a sleep); empty when it cannot be told. protocol.ts prints
+# the same string (lockNamespace).
+table_lock_ns() {
+  local ns boot
+  if ns="$(readlink /proc/self/ns/pid 2>/dev/null)" && boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"; then
+    printf 'linux:%s:%s' "$ns" "$boot"
+  elif boot="$(sysctl -n kern.bootsessionuuid 2>/dev/null)" && [[ "$boot" =~ ^[0-9A-Fa-f-]+$ ]]; then
+    printf 'darwin:%s' "$boot"
+  fi
+}
+# Stale: older than 15 s and no live holder we can see. A lock that is gone
+# (released between the mkdir and the stat) is not stale.
+table_lock_stale() {
+  local m b now pid ns probe="${1%/*}/.probe.$TABLE_LOCK_TOKEN"
+  m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)" || return 1
+  # protocol.ts's heartbeat rewrites <lock>/beat.
+  if b="$(stat -c %Y "$1/beat" 2>/dev/null || stat -f %m "$1/beat" 2>/dev/null)" && (( b > m )); then m=$b; fi
+  # "Now" by the clock that stamped the lock: a probe file touched next to it,
+  # so a lock stamped through NFS or a microVM's shared directory is aged on
+  # the same clock. Our own clock only when the probe cannot be made.
+  if touch "$probe" 2>/dev/null && now="$(stat -c %Y "$probe" 2>/dev/null || stat -f %m "$probe" 2>/dev/null)"; then :; else now="$(date +%s)"; fi
+  rm -f "$probe"
+  (( now - m >= 15 )) || return 1
+  : "${TABLE_LOCK_NS=$(table_lock_ns)}"
+  ns="$(cat "$1/ns" 2>/dev/null || true)"
+  pid="$(cat "$1/pid" 2>/dev/null || true)"
+  if [[ -n "$TABLE_LOCK_NS" && "$ns" == "$TABLE_LOCK_NS" && "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
+  return 0
+}
+table_lock_stamp() {
+  : "${TABLE_LOCK_NS=$(table_lock_ns)}"
+  echo $$ > "$1/pid"
+  printf '%s' "$TABLE_LOCK_NS" > "$1/ns"
+  echo "$TABLE_LOCK_TOKEN" > "$1/owner"
+}
+table_lock_acquire() {
+  local dir="$1" deadline=$((SECONDS + 10))
   while ! mkdir "$dir" 2>/dev/null; do
-    if [[ -d "$dir" ]]; then
-      age=$(( $(date +%s) - $(stat -c %Y "$dir" 2>/dev/null || stat -f %m "$dir" 2>/dev/null || echo 0) ))
-      pid="$(cat "$dir/pid" 2>/dev/null || true)"
-      if [[ "$age" -ge 15 ]] && { [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; }; then
-        rm -rf "$dir"
+    if table_lock_stale "$dir"; then
+      if mkdir "$dir.break" 2>/dev/null; then
+        table_lock_stamp "$dir.break"
+        if table_lock_stale "$dir"; then rm -rf "$dir"; fi
+        table_lock_release "$dir.break"
         continue
       fi
+      if table_lock_stale "$dir.break"; then rm -rf "$dir.break"; fi
     fi
     if (( SECONDS >= deadline )); then
-      echo "Timed out waiting for locks/.table.lock" >&2
+      echo "Timed out waiting for locks/${dir##*/}" >&2
       return 1
     fi
     sleep 0.05
   done
-  echo $$ > "$dir/pid"
+  table_lock_stamp "$dir"
 }
-table_unlock() { rm -rf "$1/locks/.table.lock"; }
+# Only our own lock: one broken while we stalled may be someone else's now,
+# and that is said rather than ignored. The lock is renamed to a name only we
+# use before its owner is read, so what is removed is what was judged ours;
+# one taken over in between is put back unless a new lock has appeared.
+table_lock_release() {
+  local tomb="$1.released.$TABLE_LOCK_TOKEN"
+  if [[ "$(cat "$1/owner" 2>/dev/null || true)" == "$TABLE_LOCK_TOKEN" ]] && mv "$1" "$tomb" 2>/dev/null; then
+    if [[ "$(cat "$tomb/owner" 2>/dev/null || true)" == "$TABLE_LOCK_TOKEN" ]]; then
+      rm -rf "$tomb"
+      return 0
+    fi
+    if [[ -e "$1" ]] || ! mv "$tomb" "$1" 2>/dev/null; then rm -rf "$tomb"; fi
+  fi
+  echo "warning: ${1##*/} was taken over while this process held it; another process may have been inside with it" >&2
+}
+# <<< table lock
+# Post ids are allocated under it too, so a post written from here cannot take
+# the same id as one an agent is writing at the same moment.
+table_lock() { mkdir -p "$1/locks"; table_lock_acquire "$1/locks/.table.lock"; }
+table_unlock() { table_lock_release "$1/locks/.table.lock"; }
 
 # A message from the examiner to a swarm that is already running.
 #
@@ -7529,8 +7668,15 @@ PY
   # never made the chain (spilled, per agent and the hub's), every whole
   # tool output the trace points to, and each earlier custody verdict.
   local anc
-  for anc in "$sandbox.trace-anchor.json" "$sandbox.custody-anchor.json"; do
+  # With the anchor a restarted collector found the trace did not match, kept
+  # beside it, and any partial line it cut off the trace's end: the record
+  # names both (trace_anchor_mismatch, trace_fragment_cut).
+  for anc in "$sandbox.trace-anchor.json" "$sandbox.trace-anchor.prev.json" "$sandbox.custody-anchor.json"; do
     [[ -f "$anc" ]] && cp "$anc" "$out/trace/$(basename "$anc" | sed "s/^$(basename "$sandbox")\.//")"
+  done
+  local frag
+  for frag in "$sandbox"/traces/events.fragment-*.partial; do
+    pkg_copy "$frag" "$out/trace/$(basename "$frag")"
   done
   pkg_copy "$sandbox/work/.trace-spill.jsonl" "$out/trace/spill-host.jsonl" non-empty
   pkg_copy "$sandbox/traces/hub-spill.jsonl" "$out/trace/spill-hub.jsonl" non-empty

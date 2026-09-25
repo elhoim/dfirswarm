@@ -19,6 +19,8 @@
 # pane id -> `herdr pane close <pane_id>`. Failure is tolerated.
 #
 # Idempotent: a reaped agent has a .dead marker and is skipped on later runs.
+# When every seat is marked and there is no done/SWARM_DONE, the reaper writes
+# done/ALL_AGENTS_DEAD (reason: all_agents_dead) once: a stop, not a finish.
 # Requires: bash 4+, jq, GNU or BSD stat/date (both handled).
 
 set -euo pipefail
@@ -82,27 +84,96 @@ NOW="$(date +%s)"
 
 max() { if [[ "$1" -ge "$2" ]]; then echo "$1"; else echo "$2"; fi; }
 
-# Same table lock as protocol.ts: exclusive mkdir locks/.table.lock, 10s wait,
-# break stale (>15s) locks whose pid is gone.
-TABLE_LOCK="$SANDBOX/locks/.table.lock"
-table_lock() {
-  mkdir -p "$SANDBOX/locks"
-  local deadline=$((SECONDS + 10))
-  while ! mkdir "$TABLE_LOCK" 2>/dev/null; do
-    if [[ -d "$TABLE_LOCK" ]]; then
-      local age=$(( $(date +%s) - $(mtime "$TABLE_LOCK") ))
-      local pid; pid="$(cat "$TABLE_LOCK/pid" 2>/dev/null || true)"
-      if [[ "$age" -ge 15 ]] && { [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; }; then
-        rm -rf "$TABLE_LOCK"
+# >>> table lock: this block is identical in scripts/reap.sh and scripts/swarm.sh
+# (tests/table-lock.test.sh checks that). The lock-table mutex protocol.ts
+# uses, from bash: an exclusive mkdir of the lock and a 10 s wait. A lock older
+# than 15 s has no live holder (protocol.ts refreshes its lock while it holds
+# it; holders here hold it for a few seconds at most) unless that holder
+# stalled. A stalled holder keeps its lock where its pid can be checked: when
+# it recorded the same namespace as ours (table_lock_ns) and its pid is live.
+# Elsewhere, as for a holder in another pane's pid namespace, age alone
+# decides. A stale lock is broken under <lock>.break and judged again there,
+# so two waiters cannot both break it. kill -0 fails on a pid we may not
+# signal; the panes of one run share a user, so that is a dead one.
+TABLE_LOCK_TOKEN="$$.$RANDOM$RANDOM"
+# Where a recorded pid can be checked: this pid namespace and boot on Linux,
+# this boot session on macOS (not the host's name, which can follow the
+# network across a sleep); empty when it cannot be told. protocol.ts prints
+# the same string (lockNamespace).
+table_lock_ns() {
+  local ns boot
+  if ns="$(readlink /proc/self/ns/pid 2>/dev/null)" && boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"; then
+    printf 'linux:%s:%s' "$ns" "$boot"
+  elif boot="$(sysctl -n kern.bootsessionuuid 2>/dev/null)" && [[ "$boot" =~ ^[0-9A-Fa-f-]+$ ]]; then
+    printf 'darwin:%s' "$boot"
+  fi
+}
+# Stale: older than 15 s and no live holder we can see. A lock that is gone
+# (released between the mkdir and the stat) is not stale.
+table_lock_stale() {
+  local m b now pid ns probe="${1%/*}/.probe.$TABLE_LOCK_TOKEN"
+  m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)" || return 1
+  # protocol.ts's heartbeat rewrites <lock>/beat.
+  if b="$(stat -c %Y "$1/beat" 2>/dev/null || stat -f %m "$1/beat" 2>/dev/null)" && (( b > m )); then m=$b; fi
+  # "Now" by the clock that stamped the lock: a probe file touched next to it,
+  # so a lock stamped through NFS or a microVM's shared directory is aged on
+  # the same clock. Our own clock only when the probe cannot be made.
+  if touch "$probe" 2>/dev/null && now="$(stat -c %Y "$probe" 2>/dev/null || stat -f %m "$probe" 2>/dev/null)"; then :; else now="$(date +%s)"; fi
+  rm -f "$probe"
+  (( now - m >= 15 )) || return 1
+  : "${TABLE_LOCK_NS=$(table_lock_ns)}"
+  ns="$(cat "$1/ns" 2>/dev/null || true)"
+  pid="$(cat "$1/pid" 2>/dev/null || true)"
+  if [[ -n "$TABLE_LOCK_NS" && "$ns" == "$TABLE_LOCK_NS" && "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
+  return 0
+}
+table_lock_stamp() {
+  : "${TABLE_LOCK_NS=$(table_lock_ns)}"
+  echo $$ > "$1/pid"
+  printf '%s' "$TABLE_LOCK_NS" > "$1/ns"
+  echo "$TABLE_LOCK_TOKEN" > "$1/owner"
+}
+table_lock_acquire() {
+  local dir="$1" deadline=$((SECONDS + 10))
+  while ! mkdir "$dir" 2>/dev/null; do
+    if table_lock_stale "$dir"; then
+      if mkdir "$dir.break" 2>/dev/null; then
+        table_lock_stamp "$dir.break"
+        if table_lock_stale "$dir"; then rm -rf "$dir"; fi
+        table_lock_release "$dir.break"
         continue
       fi
+      if table_lock_stale "$dir.break"; then rm -rf "$dir.break"; fi
     fi
-    if (( SECONDS >= deadline )); then echo "Timed out waiting for locks/.table.lock" >&2; return 1; fi
+    if (( SECONDS >= deadline )); then
+      echo "Timed out waiting for locks/${dir##*/}" >&2
+      return 1
+    fi
     sleep 0.05
   done
-  echo $$ > "$TABLE_LOCK/pid"
+  table_lock_stamp "$dir"
 }
-table_unlock() { rm -rf "$TABLE_LOCK"; }
+# Only our own lock: one broken while we stalled may be someone else's now,
+# and that is said rather than ignored. The lock is renamed to a name only we
+# use before its owner is read, so what is removed is what was judged ours;
+# one taken over in between is put back unless a new lock has appeared.
+table_lock_release() {
+  local tomb="$1.released.$TABLE_LOCK_TOKEN"
+  if [[ "$(cat "$1/owner" 2>/dev/null || true)" == "$TABLE_LOCK_TOKEN" ]] && mv "$1" "$tomb" 2>/dev/null; then
+    if [[ "$(cat "$tomb/owner" 2>/dev/null || true)" == "$TABLE_LOCK_TOKEN" ]]; then
+      rm -rf "$tomb"
+      return 0
+    fi
+    if [[ -e "$1" ]] || ! mv "$tomb" "$1" 2>/dev/null; then rm -rf "$tomb"; fi
+  fi
+  echo "warning: ${1##*/} was taken over while this process held it; another process may have been inside with it" >&2
+}
+# <<< table lock
+TABLE_LOCK="$SANDBOX/locks/.table.lock"
+table_lock() { mkdir -p "$SANDBOX/locks"; table_lock_acquire "$TABLE_LOCK"; }
+table_unlock() { table_lock_release "$TABLE_LOCK"; }
 
 # The hub directory a sandbox names, if it is one the harness made: under
 # the hubs' parent, which no pane can write. hub.dir itself is only
@@ -288,6 +359,47 @@ while IFS= read -r id; do
     log "live $id: idle ${idle}s"
   fi
 done < <(jq -r '.agents[].id' "$SANDBOX/team.json")
+
+# Every seat marked and no sentinel: nobody is left to call `done`, and no
+# harness stop can be written from a pane that no longer runs. Record that as
+# its own outcome, never as done/SWARM_DONE, which means "finished" to every
+# reader, so await-done.sh and the report can call it what it is: a failure.
+record_all_dead() {
+  local marker="$SANDBOX/done/ALL_AGENTS_DEAD" id ids=() dead=0 total=0
+  [[ -e "$SANDBOX/done/SWARM_DONE" || -e "$marker" ]] && return 0
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    total=$((total + 1))
+    if [[ -e "$SANDBOX/done/agents/$id.dead" ]]; then
+      dead=$((dead + 1)); ids+=("$id")
+    elif [[ ! -e "$SANDBOX/done/agents/$id.done" ]]; then
+      return 0
+    fi
+  done < <(jq -r '.agents[].id' "$SANDBOX/team.json")
+  [[ "$total" -gt 0 && "$dead" -gt 0 ]] || return 0
+  table_lock
+  if [[ -e "$SANDBOX/done/SWARM_DONE" || -e "$marker" ]]; then
+    table_unlock
+    return 0
+  fi
+  mkdir -p "$SANDBOX/done"
+  printf -- '---\nby: reaper\nreason: all_agents_dead\nagents_dead: %s\nat: %s\n---\n\n%s\n' \
+    "${ids[*]}" "$(now_iso)" \
+    "Every agent is marked done or dead and none wrote done/SWARM_DONE: the swarm stopped without meeting its definition of done. Recorded by scripts/reap.sh." \
+    > "$marker"
+  local line
+  line="$(jq -cn --arg ts "$(now_iso)" --arg ids "${ids[*]}" \
+    '{ts: $ts, agent: "system", tool: "reap",
+      args: {reason: "all_agents_dead"},
+      result: {stopped: true, finished: false, agents_dead: ($ids | split(" "))}}')"
+  trace_emit "$ROOT" "$SANDBOX" "$line"
+  table_unlock
+  echo "all agents dead (${ids[*]}) and no sentinel -> done/ALL_AGENTS_DEAD"
+}
+
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  record_all_dead
+fi
 
 log "reaped $reaped agent(s)"
 exit 0

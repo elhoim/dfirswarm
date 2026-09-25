@@ -8,6 +8,7 @@ inputs: one disk image of a Windows host (E01, raw or VHDX) and one memory image
 seats: 6
 cap_usd: 40
 wall_clock: 120
+toolbox: dfir
 ---
 ## Goal
 

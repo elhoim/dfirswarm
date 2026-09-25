@@ -27,7 +27,9 @@ export function inline(text: string): string {
   out = escapeHtml(out);
   out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, href: string) =>
+  // Neither the label nor the target may hold the bracket that opens it, so
+  // a line of unclosed `[` or `](` is scanned once rather than once per start.
+  out = out.replace(/\[([^[\]]+)\]\(([^()]+)\)/g, (_m, label: string, href: string) =>
     // The report has no outbound links: a destination that is not in this
     // file cannot be part of the record. The text stays, the target is shown.
     /^https?:/i.test(href) ? `${label} <span class="url">(${escapeHtml(href)})</span>` : label,
@@ -42,7 +44,15 @@ function tableRow(line: string): string[] {
     .map((c) => c.trim());
 }
 
-const DIVIDER = /^\|?[\s:|-]+\|[\s:|-]*$/;
+/**
+ * A table's divider row: nothing but pipes, colons, dashes and spaces, with a
+ * pipe somewhere after the first character. The same rule as
+ * `/^\|?[\s:|-]+\|[\s:|-]*$/`, which backtracks quadratically on a long run
+ * of pipes that does not end like a divider.
+ */
+function isDivider(line: string): boolean {
+  return /^[\s:|-]+$/.test(line) && line.indexOf("|", 1) !== -1;
+}
 
 /**
  * Markdown to HTML, for the vocabulary the delivered reports actually use:
@@ -94,7 +104,7 @@ export function markdownToHtml(markdown: string, headingOffset = 0): string {
     }
 
     // A pipe table needs its divider row; without one it is just text.
-    if (line.includes("|") && i + 1 < lines.length && DIVIDER.test(lines[i + 1])) {
+    if (line.includes("|") && i + 1 < lines.length && isDivider(lines[i + 1])) {
       closeAll();
       const head = tableRow(line);
       i += 2;
