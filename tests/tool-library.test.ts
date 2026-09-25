@@ -1124,7 +1124,7 @@ test("browser_history runs several statements one by one, and still refuses one 
       assert.equal(one.results, undefined, "one statement answers as it always has");
       r = await runPy(script, cwd, { path: "work/h.db", sql: "select 1; delete from urls" });
       assert.notEqual(r.code, 0);
-      assert.deepEqual(JSON.parse(r.stdout), { error: "sql must be SELECT, WITH or PRAGMA statements", statement: "delete from urls" });
+      assert.deepEqual(JSON.parse(r.stdout), { error: "sql must be a SELECT, WITH or PRAGMA", statement: "delete from urls" });
     });
   }
 });

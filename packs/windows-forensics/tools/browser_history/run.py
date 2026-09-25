@@ -100,7 +100,7 @@ def main():
     for s in stmts:
         if not s.lower().startswith(("select", "with", "pragma")):
             # This reads evidence. A statement that could write does not belong.
-            fail("sql must be SELECT, WITH or PRAGMA statements", statement=s)
+            fail("sql must be a SELECT, WITH or PRAGMA", statement=s)
 
     limit = args.get("limit", 200)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
