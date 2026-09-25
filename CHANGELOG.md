@@ -268,8 +268,11 @@ not surprised:
   (radare2 6.2.2, Zeek 8.0.10 from the Zeek project's Debian 12 packages); a
   tag's source (`install.source`) unpacked under `/opt/dfir/src/<name>`, its
   requirements in a venv of its own, its entry on PATH through its
-  interpreter (Zircolite 4.0.0, mac_apt 1.33.2, UnifiedLogReader, iLEAPP
-  2026.4.2, ALEAPP 2026.4.1); a program run by another the image holds
+  interpreter (Zircolite 4.0.0, UnifiedLogReader, iLEAPP 2026.4.2, ALEAPP
+  2026.4.1, and mac_apt 1.33.2 for amd64 only: on Linux arm64 it stops at
+  import, and an arm64 image says so); `env` and `arches` on a source or a
+  build say what its build needs and which architectures it is for; a
+  program run by another the image holds
   (`run`: MFTECmd, EvtxECmd and RECmd 2026.5.0 on the .NET 9.0.20 runtime,
   which the pack pins as a download of its own); a source compiled in a
   builder stage (`install.build`), so the image carries the program and not
