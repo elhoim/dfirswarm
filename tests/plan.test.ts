@@ -189,14 +189,14 @@ test("per-agent cap: pressure is per seat and only when a cap is set", () => {
       a01: { spent_usd: 1.5, tokens: 0, calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 },
     },
   } as BudgetRecord;
-  assert.deepEqual(agentPressure(base, "a00"), { over: false, spent_usd: 3.5, cap_usd: 0 });
+  assert.deepEqual(agentPressure(base, "a00"), { over: false, by: null, spent_usd: 3.5, cap_usd: 0, tokens: 0, cap_tokens: 0 });
   const capped = { ...base, cap_per_agent_usd: 3 };
-  assert.deepEqual(agentPressure(capped, "a00"), { over: true, spent_usd: 3.5, cap_usd: 3 });
-  assert.deepEqual(agentPressure(capped, "a01"), { over: false, spent_usd: 1.5, cap_usd: 3 });
-  assert.deepEqual(agentPressure(capped, "a99"), { over: false, spent_usd: 0, cap_usd: 3 }, "an agent with no spend yet is under");
+  assert.deepEqual(agentPressure(capped, "a00"), { over: true, by: "usd", spent_usd: 3.5, cap_usd: 3, tokens: 0, cap_tokens: 0 });
+  assert.deepEqual(agentPressure(capped, "a01"), { over: false, by: null, spent_usd: 1.5, cap_usd: 3, tokens: 0, cap_tokens: 0 });
+  assert.deepEqual(agentPressure(capped, "a99"), { over: false, by: null, spent_usd: 0, cap_usd: 3, tokens: 0, cap_tokens: 0 }, "an agent with no spend yet is under");
   const rebuilt = normalizeBudget({ ...capped } as Partial<BudgetRecord>);
   assert.equal(rebuilt.cap_per_agent_usd, 3, "the per-agent cap survives a rebuild of the record");
-  assert.deepEqual(agentPressure(rebuilt, "a00"), { over: true, spent_usd: 3.5, cap_usd: 3 });
+  assert.deepEqual(agentPressure(rebuilt, "a00"), { over: true, by: "usd", spent_usd: 3.5, cap_usd: 3, tokens: 0, cap_tokens: 0 });
   assert.equal(
     normalizeBudget({ ...base } as Partial<BudgetRecord>).cap_per_agent_usd,
     undefined,

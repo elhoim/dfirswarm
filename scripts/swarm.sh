@@ -107,7 +107,7 @@ Commands:
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   review verify export hold release purge image-for   After a run: sign-off, checks, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
-  say <id> "<msg>"   Post to a running swarm as the examiner
+  say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> changes its caps (help cap)
   stop <id>          Stop a run and record how it ended
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
@@ -170,7 +170,7 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
       [--models "<provider/id>=<k>[@USD],..."] [--goal-file FILE | --goal "<markdown>"]
       [--sandbox DIR] [--allow-synced-folder] [--custody-timeout SEC] [--label NAME] [--wall-clock MIN] [--hard-kill] [--no-start]
       [--notify CMD] [--ledger-from RUN] [--no-verify-copy] [--allow-root] [--model-gateway] [--check]
-      [--cap-per-agent USD] [--cap-tokens N] [--idle-nudge-sec N] [--allow-tool-forging]
+      [--cap-per-agent USD] [--cap-per-agent-tokens N] [--cap-tokens N] [--idle-nudge-sec N] [--allow-tool-forging]
       [--no-self-compact] [--compact-at SPEC] [--compact-warn-at SPEC] [--compact-notice-at SPEC]
       [--compact-prompt-file FILE] [--compact-model P/ID] [--inbox-page-chars N]
       [--allow-install] [--no-pypi] [--no-read DIR]...
@@ -252,13 +252,19 @@ The goal
 Limits
   --cap-usd USD       What the swarm may spend in total.
   --cap-per-agent USD What one agent may spend. Over it, that agent is steered to
-                      finish and then stopped; the swarm goes on.
+                      finish and then stopped; the swarm goes on. Only where the
+                      team's dollars are charged.
+  --cap-per-agent-tokens N  The same in tokens: the per-agent brake of a team on a
+                      subscription or local models.
   --cap-tokens N      What the swarm may consume in tokens, over every turn. The
-                      brake for a team of local models, which bill nothing and so
-                      cannot be stopped by --cap-usd: required for such a team,
-                      an optional second brake for any other. The context is
-                      re-sent each turn, so a small goal on two agents is a few
-                      million; a seven-agent case runs to tens of millions.
+                      brake for a team whose dollars are not charged: local
+                      models, which bill nothing, and a subscription (OAuth) such
+                      as openai-codex, where Pi's dollars are an estimate and not
+                      comparable across models. Required for such a team, an
+                      optional second brake for any other. The context is re-sent
+                      each turn, so a small goal on two agents is a few million;
+                      the ten-agent BelkaCTF #6 run on a subscription used 277M.
+                      Every cap can be changed while the run goes on: swarm.sh cap.
   --wall-clock MIN    How long the run may take.
   --hard-kill         After a cap steer, shut the session down rather than waiting
                       out the grace period. Default off.
@@ -2638,6 +2644,7 @@ write_team_budget() {
   # Each agent's model rides in team.json so peers can see who is running what
   # and hand a slice to whoever suits it — the point of a mixed team.
   SWARM_CAP_PER_AGENT="$cap_per_agent" \
+  SWARM_CAP_PER_AGENT_TOKENS="${cap_per_agent_tokens:-}" \
   SWARM_CAP_PER_MODEL="$(printf '%s\n' ${MODEL_CAPS[@]+"${MODEL_CAPS[@]}"})" \
   SWARM_METERED="${metered:-1}" \
   SWARM_CAP_TOKENS="${cap_tokens:-}" \
@@ -2650,6 +2657,7 @@ swarm_id, n, cap, wall, hard = sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
 ids = sys.argv[7:]
 models = [line for line in os.environ.get("SWARM_AGENT_MODELS", "").splitlines() if line.strip()]
 cap_per_agent = os.environ.get("SWARM_CAP_PER_AGENT", "").strip()
+cap_per_agent_tokens = os.environ.get("SWARM_CAP_PER_AGENT_TOKENS", "").strip()
 # One "provider/id=cap" line per model the spec capped; a model id never
 # carries "=", so the last one is the split.
 cap_per_model = {}
@@ -2681,6 +2689,7 @@ budget = {
     "hard_kill": hard,
     "cap_steer_sent": False,
     **({"cap_per_agent_usd": float(cap_per_agent)} if cap_per_agent else {}),
+    **({"cap_per_agent_tokens": int(cap_per_agent_tokens)} if cap_per_agent_tokens else {}),
     **({"cap_per_model_usd": cap_per_model} if cap_per_model else {}),
     # False when no model on the team bills: spend stays an exact zero, the
     # USD cap cannot fire, and cap_tokens is the brake.
@@ -3110,7 +3119,7 @@ cmd_start() {
   local sandbox="" label="" wall=8 wall_set=0 hard=0 start_agents=1 playwright=0 probe=0
   local use_netguard=1 key_from_env=0 forging=0 allow_install=0 install_hosts=1 allow_pack_secrets=0
   local inputs_dir="" inputs_image="" inputs_enforce="auto" inputs_bind=0 inputs_max_mb="${SWARM_INPUTS_MAX_MB:-}" inputs_max_files="${SWARM_INPUTS_MAX_FILES:-}" inputs_guard="none"
-  local allow_hosts="" tools_from="" catalog=0 toolbox="off" toolbox_required=0 quarantine=0 cap_per_agent="" case_id="" examiner=""
+  local allow_hosts="" tools_from="" catalog=0 toolbox="off" toolbox_required=0 quarantine=0 cap_per_agent="" cap_per_agent_tokens="" case_id="" examiner=""
   local packs=""
   local allow_synced=0 custody_timeout="${SWARM_CUSTODY_TIMEOUT:-14400}"
   local notify_cmd="" allow_root=0 verify_copy=1 ledger_from="" synced_allowed_by="" disk_encryption="unknown" model_gateway=0
@@ -3134,7 +3143,7 @@ cmd_start() {
   # the reader the socket was denied when nothing had been denied.
   local herdr_sealed=0
   local no_read_applied=0
-  local cap_tokens="" local_only=0 metered=1 all_local=0 local_models_csv="" cloud_models_csv=""
+  local cap_tokens="" local_only=0 metered=1 all_local=0 local_models_csv="" cloud_models_csv="" subscription_models_csv=""
   local idle_nudge_sec="${SWARM_IDLE_SEC:-180}"
   # Self-compaction is the default: each agent watches its own context and
   # hands off to itself at the compact line (extensions/self-compact.ts). The
@@ -3211,6 +3220,7 @@ cmd_start() {
       --no-seal-herdr) seal_herdr=0; shift ;;
       --no-read) no_read+=("$2"); shift 2 ;;
       --cap-per-agent) cap_per_agent="$2"; shift 2 ;;
+      --cap-per-agent-tokens) cap_per_agent_tokens="$2"; shift 2 ;;
       --cap-tokens) cap_tokens="$2"; shift 2 ;;
       --local-only) local_only=1; shift ;;
       --allow-host) allow_hosts+="${allow_hosts:+,}$2"; shift 2 ;;
@@ -3574,6 +3584,10 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
     echo "BLOCKER: --tools-from $tools_from is not a directory." >&2
     exit 2
   fi
+  if [[ -n "$cap_per_agent_tokens" ]] && ! [[ "$cap_per_agent_tokens" =~ ^[1-9][0-9]*$ ]]; then
+    echo "BLOCKER: --cap-per-agent-tokens must be a whole number of tokens above zero (got $cap_per_agent_tokens)." >&2
+    exit 2
+  fi
   if [[ -n "$cap_per_agent" ]] && ! [[ "$cap_per_agent" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
     echo "BLOCKER: --cap-per-agent must be a number of USD (got $cap_per_agent)." >&2
     exit 2
@@ -3699,7 +3713,11 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
   while IFS= read -r one_model; do
     [[ -n "$one_model" ]] || continue
     if [[ "$seen_model" -eq 0 ]]; then seen_model=1; metered=0; all_local=1; fi
-    if model_is_metered "$one_model"; then metered=1; fi
+    if model_is_subscription "$one_model"; then
+      subscription_models_csv+="${subscription_models_csv:+,}$one_model"
+    elif model_is_metered "$one_model"; then
+      metered=1
+    fi
     if provider_is_local "$one_model"; then
       local_models_csv+="${local_models_csv:+,}$one_model"
     else
@@ -3736,8 +3754,14 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
     fi
   elif [[ -z "$cap_tokens" ]]; then
     {
-      echo "BLOCKER: no model on this team declares a cost — a local server, or a models.json provider"
-      echo "without a cost block — so Pi will report \$0 whatever happens and --cap-usd cannot stop it."
+      if [[ -n "$subscription_models_csv" ]]; then
+        echo "BLOCKER: ${subscription_models_csv//,/, } run on a subscription (OAuth): the dollars Pi reports"
+        echo "for it are an estimate from a price list, not a charge, and not comparable across models, so"
+        echo "--cap-usd does not brake this team."
+      else
+        echo "BLOCKER: no model on this team declares a cost — a local server, or a models.json provider"
+        echo "without a cost block — so Pi will report \$0 whatever happens and --cap-usd cannot stop it."
+      fi
       echo
       echo "Give the run a token cap instead: --cap-tokens N. Tokens are Pi's own totals over"
       echo "every turn, and the context is re-sent each turn, so a seven-agent hour on a case"
@@ -4594,6 +4618,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson quarantine "$quarantine" \
     --arg toolbox "$toolbox" \
     --arg cap_per_agent "$cap_per_agent" \
+    --arg cap_per_agent_tokens "$cap_per_agent_tokens" \
     --argjson cap_per_model "$(model_caps_json)" \
     --arg case_id "$case_id" \
     --arg examiner "$examiner" \
@@ -4660,6 +4685,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       quarantine: ($quarantine == 1),
       toolbox: $toolbox,
       cap_per_agent_usd: (if $cap_per_agent == "" then null else ($cap_per_agent | tonumber) end),
+      cap_per_agent_tokens: (if $cap_per_agent_tokens == "" then null else ($cap_per_agent_tokens | tonumber) end),
       cap_per_model_usd: (if ($cap_per_model | length) == 0 then null else $cap_per_model end),
       case_id: $case_id,
       examiner: $examiner,
@@ -4763,6 +4789,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   fi
   if [[ "$metered" -eq 1 ]]; then
     echo "Cap:          \$$cap / ${wall}m${cap_tokens:+ / ${cap_tokens} tokens}"
+  elif [[ -n "$subscription_models_csv" ]]; then
+    echo "Cap:          ${cap_tokens} tokens / ${wall}m (on a subscription: Pi's dollars are an estimate and brake nothing)"
   else
     echo "Cap:          ${cap_tokens} tokens / ${wall}m (no USD cap: nothing on this team bills)"
   fi
@@ -4835,11 +4863,20 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   if [[ "$idle_nudge_sec" -gt 0 ]]; then
     echo "Idle nudge:   an agent silent for ${idle_nudge_sec}s is prompted to continue (up to 3 times)"
   fi
-  if [[ -n "$cap_per_agent" ]]; then
+  if [[ -n "$cap_per_agent" && "$metered" -eq 1 ]]; then
     echo "Per-agent cap: \$$cap_per_agent (an agent over it is steered, then stopped on its own)"
+  elif [[ -n "$cap_per_agent" ]]; then
+    echo "WARN: --cap-per-agent \$$cap_per_agent brakes nothing on this team: its dollars are not charged. Use --cap-per-agent-tokens." >&2
+  fi
+  if [[ -n "$cap_per_agent_tokens" ]]; then
+    echo "Per-agent cap: ${cap_per_agent_tokens} tokens (an agent over it is steered, then stopped on its own)"
   fi
   for model_cap in ${MODEL_CAPS[@]+"${MODEL_CAPS[@]}"}; do
-    echo "Per-model cap: \$${model_cap#*=} on ${model_cap%=*} (its agents together; over it each is steered, then stopped on its own)"
+    if [[ "$metered" -eq 1 ]]; then
+      echo "Per-model cap: \$${model_cap#*=} on ${model_cap%=*} (its agents together; over it each is steered, then stopped on its own)"
+    else
+      echo "WARN: the \$${model_cap#*=} cap on ${model_cap%=*} brakes nothing on this team: its dollars are not charged." >&2
+    fi
   done
   if [[ -n "$case_id" || -n "$examiner" ]]; then
     echo "Case:         ${case_id:-—} · examiner ${examiner:-—}"
@@ -5596,6 +5633,18 @@ provider_is_local() {
 # zero when the block is absent or all zero, which is what a local server
 # is. A cloud provider Pi knows on its own bills; so does an unknown one,
 # because assuming otherwise is the expensive mistake.
+# A seat on a subscription: an OAuth login in Pi's store. The provider is paid
+# by the month, and the dollars Pi reports for it are an estimate from a price
+# list, not a charge, and not comparable across models: on the BelkaCTF #6 run a
+# GPT-6-Luna seat with ten million tokens read $0.13 beside a Daybreak Blue
+# seat's $14. Such a seat is braked by tokens, as a local one is.
+model_is_subscription() { # <provider/id>
+  local auth_file provider="${1%%/*}"
+  auth_file="$(pi_auth_file)"
+  [[ -f "$auth_file" ]] || return 1
+  [[ "$(jq -r --arg p "$provider" '.[$p].type // empty' "$auth_file" 2>/dev/null)" == "oauth" ]]
+}
+
 model_is_metered() {
   local provider="${1%%/*}" id="${1#*/}"
   case "$provider" in
@@ -7477,6 +7526,34 @@ cmd_say() {
   echo "Posted to $id as the examiner (#$next). Agents see it on their next inbox or wait."
 }
 
+# Change a running swarm's caps: raise the spend or the token cap, give it
+# more time, set a per-agent cap. The change is taken under the lock every fold
+# of usage takes, kept in budget.json's cap_changes (so the shell watch does not
+# call it an agent's), put on the trace as the operator's, and said on the
+# board; a stop the run is no longer over is withdrawn.
+cmd_cap() {
+  local id="${1:-}"
+  [[ -n "$id" && "$id" != -* ]] || { echo "BLOCKER: cap needs <id> and at least one of --usd, --tokens, --per-agent-usd, --per-agent-tokens, --wall-clock." >&2; exit 2; }
+  shift
+  [[ $# -gt 0 ]] || { echo "BLOCKER: cap needs at least one of --usd, --tokens, --per-agent-usd, --per-agent-tokens, --wall-clock." >&2; exit 2; }
+  ensure_registry
+  local rec sandbox state
+  rec="$(json_get "$id")"
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  state="$(jq -r '.state // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+  [[ "$state" == running || "$state" == prepared ]] || { echo "BLOCKER: $id is $state; caps change only on a run that is going." >&2; exit 2; }
+  local out
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/caps.ts" "$sandbox" --by operator "$@")" || {
+    echo "BLOCKER: $(jq -r '.error // "the caps could not be changed"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2
+    exit 2
+  }
+  operator_trace "$sandbox" cap "$id" "$@"
+  # The run record follows, so the list and the console show the caps in force.
+  registry_merge "$id" "$(jq -c '.after' <<<"$out")"
+  echo "$(jq -r '.said' <<<"$out")"
+}
+
 # The tools a run forged, copied out so the next swarm can start with them.
 cmd_tools() {
   local id="${1:-}" dest=""
@@ -8158,6 +8235,14 @@ EOF
     image-for) echo "  image-for [--pack ID]... [--tools-from DIR] [--playwright]   the image a kickoff would boot, as JSON: ref, digest (null when neither the lock nor msb has it), profile, pinned_by, reason; read only" ;;
     export) echo "  export <id> --format csv|timesketch [--out FILE]   the ledger as CSV or a Timesketch CSV import (default: <sandbox>/exports/)" ;;
     hold|release) echo "  hold <id> [--reason TEXT] / release <id>   a held run's material is kept from purge and from a new run in its sandbox" ;;
+    cap) cat <<'EOF'
+  cap <id> [--usd N] [--tokens N] [--per-agent-usd N] [--per-agent-tokens N] [--wall-clock MIN]
+Changes a running swarm's caps, under the lock every fold of usage takes. Kept in budget.json's
+cap_changes, on the trace as the operator's, in the run record, and said on the board. A stop the
+run is no longer over is withdrawn. The run keeps its brake: a dollar cap above zero where dollars
+are charged, a token cap where they are not (a subscription, local models).
+EOF
+      ;;
     purge) echo "  purge <id> --yes   delete a finished run's sandbox, kept VM disks and hub directory; the registry keeps it as purged, and runs/operator-audit.jsonl gets the destruction record" ;;
     *) die_usage "no help for '$topic'" ;;
   esac
@@ -8173,7 +8258,7 @@ main() {
   # What changes or leaves a run is on the operator's record; what only reads
   # it (list, status, summary, context, help) is not.
   case "$cmd" in
-    start|stop|reap|say|package|report|tools|review|export|hold|release|purge|verify)
+    start|stop|reap|say|cap|package|report|tools|review|export|hold|release|purge|verify)
       # A start --check writes nothing, the audit included.
       case " $* " in *" -h "*|*" --help "*|*" --check "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
   esac
@@ -8190,6 +8275,7 @@ main() {
     package) cmd_package "$@" ;;
     tools) cmd_tools "$@" ;;
     say) cmd_say "$@" ;;
+    cap) cmd_cap "$@" ;;
     netcheck) cmd_netcheck "$@" ;;
     review) cmd_review "$@" ;;
     image-for) cmd_image_for "$@" ;;

@@ -647,6 +647,24 @@ not surprised:
 
 ### Changed
 
+- **A team on a subscription is braked by tokens (breaking for such runs).**
+  A seat whose provider is an OAuth login in Pi's store (`openai-codex`) no
+  longer makes a team metered: Pi's dollars for it are an estimate, and on the
+  BelkaCTF #6 run a Luna seat with ten million tokens read $0.13 beside a
+  Daybreak seat's $14. A team with no metered seat needs `--cap-tokens`, as a
+  team of local models does; `--cap-usd`, `--cap-per-agent` and a `@cap` on a
+  model are said to brake nothing there. New: `--cap-per-agent-tokens`, the
+  per-seat brake in tokens (budget.json and the registry as
+  `cap_per_agent_tokens`).
+- **Caps change while the run goes on: `swarm.sh cap <id>`** with `--usd`,
+  `--tokens`, `--per-agent-usd`, `--per-agent-tokens`, `--wall-clock`. Made
+  under the table lock the usage folds take, kept in `budget.json` as
+  `cap_changes` with the caps each left (the shell watch no longer reports
+  such a change as the agent's write, and now also watches the per-agent and
+  per-model caps), put on the trace as the operator's, merged into the run
+  record and said on the board. A swarm-wide stop the run is no longer over
+  is withdrawn; a seat's own cap steer lifts on its next check. The run keeps
+  its brake and a finished run stays finished.
 - **`wait` sleeps through posts addressed only to other agents.** A post on
   `main` whose `to` names teammates and not the waiting agent no longer wakes
   it; it stays unread and the next delivery carries it, and the result counts

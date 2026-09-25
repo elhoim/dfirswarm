@@ -170,5 +170,8 @@ export function frameFacts(view: SwarmView): Fact[] {
   if (typeof r.cap_per_agent_usd === "number" && r.cap_per_agent_usd > 0) {
     out.push({ label: "Per agent", value: `$${r.cap_per_agent_usd}`, title: "What one agent may spend before it is steered to finish and stopped" });
   }
+  if (typeof r.cap_per_agent_tokens === "number" && r.cap_per_agent_tokens > 0) {
+    out.push({ label: "Per agent", value: `${r.cap_per_agent_tokens.toLocaleString("en-US")} tokens`, title: "What one agent may use in tokens before it is steered to finish and stopped" });
+  }
   return out;
 }

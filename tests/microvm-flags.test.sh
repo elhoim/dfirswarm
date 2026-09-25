@@ -371,7 +371,7 @@ printf '{"openai-codex": {"type": "oauth", "access": "not-real", "refresh": "not
 out="$(PI_CODING_AGENT_DIR="$TMP/pi" start --isolation microvm --model openai-codex/gpt-5.4 --label bad-oauth)"; rc=$?
 [[ $rc -eq 2 ]] || fail "a subscription provider under microvm exited $rc, wanted 2: $out"
 printf '%s\n' "$out" | grep -q 'subscription' || fail "the refusal does not name the subscription: $out"
-out="$(PI_CODING_AGENT_DIR="$TMP/pi" start --isolation microvm --model openai-codex/gpt-5.4 --allow-oauth-in-vm --label ok-oauth)"; rc=$?
+out="$(PI_CODING_AGENT_DIR="$TMP/pi" start --isolation microvm --model openai-codex/gpt-5.4 --allow-oauth-in-vm --cap-tokens 1000000 --label ok-oauth)"; rc=$?
 [[ $rc -eq 0 ]] || fail "--allow-oauth-in-vm did not let the run through: $out"
 [[ "$(reg ok-oauth '.isolation.oauth_allowed')" == "true" ]] || fail "the record does not say the subscription was let in on purpose"
 sbx="$(sandbox_of "$out")"

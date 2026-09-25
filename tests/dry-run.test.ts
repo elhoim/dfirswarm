@@ -24,6 +24,7 @@ import {
 import {
   appendEvent,
   agentPressure,
+  setCaps,
   applySessionUsage,
   isBudgetUnreadable,
   reportBudgetUnreadable,
@@ -1423,8 +1424,8 @@ test("budget: the per-agent cap survives every fold of session usage", async () 
 
     const reread = await readBudget(root);
     assert.equal(reread.cap_per_agent_usd, 3, "and it is still on disk");
-    assert.deepEqual(agentPressure(reread, "agent00"), { over: true, spent_usd: 3.5, cap_usd: 3 });
-    assert.deepEqual(agentPressure(reread, "agent01"), { over: false, spent_usd: 0, cap_usd: 3 });
+    assert.deepEqual(agentPressure(reread, "agent00"), { over: true, by: "usd", spent_usd: 3.5, cap_usd: 3, tokens: 10, cap_tokens: 0 });
+    assert.deepEqual(agentPressure(reread, "agent01"), { over: false, by: null, spent_usd: 0, cap_usd: 3, tokens: 0, cap_tokens: 0 });
   });
 });
 
@@ -1699,6 +1700,68 @@ test("budget: a fold reads a budget.json caught mid-save once more before refusi
     assert.equal(applied.budget.cap_usd, 5, "the raised cap, read on the second try");
     assert.equal(applied.over_budget, false);
     assert.equal((await readBudget(root)).cap_usd, 5);
+  });
+});
+
+test("setCaps raises a live run's caps, keeps the record, withdraws a stop it is no longer over, and the shell watch does not call it an agent's", async () => {
+  await withSandbox(async (root) => {
+    const seeded = await readBudget(root);
+    seeded.cap_usd = 1;
+    await writeBudget(root, seeded);
+    await applySessionUsage(root, "agent00", { spent_usd: 1.5, tokens: 100, calls: 1, input: 100, output: 0, cache_read: 0, cache_write: 0 });
+    await markStopSteer(root, "cap");
+    assert.equal(budgetPressure(await readBudget(root)).reason, "cap");
+
+    const before = await watchedPathHashes(root);
+    const r = await setCaps(root, { cap_usd: 5, wall_clock_minutes: 90 }, "operator");
+    assert.equal(r.withdrawn, true, "the swarm is under its cap again, so the stop is withdrawn");
+    assert.deepEqual(r.before, { cap_usd: 1, wall_clock_minutes: 15 });
+    const after = await readBudget(root);
+    assert.equal(after.cap_usd, 5);
+    assert.equal(after.wall_clock_minutes, 90);
+    assert.equal(after.cap_steer_sent, false);
+    assert.equal(after.stop_steer_at, undefined);
+    assert.equal(after.cap_changes?.length, 1);
+    assert.equal(after.cap_changes?.[0].by, "operator");
+    const reports = await diffWatchedPaths(root, before, "agent01");
+    assert.equal(reports.find((r2) => r2.path === "budget.json"), undefined, "the operator's change is not the agent's shell write");
+
+    // A write that is not setCaps is still the shell's.
+    const again = await watchedPathHashes(root);
+    const forged = await readBudget(root);
+    forged.cap_usd = 999;
+    await writeBudget(root, forged);
+    assert.ok((await diffWatchedPaths(root, again, "agent01")).find((r2) => r2.path === "budget.json"));
+
+    // A paid team keeps a dollar cap; a free one keeps a token cap; a finished run stays finished.
+    await assert.rejects(setCaps(root, { cap_usd: 0 }, "operator"), /stays above zero/);
+    await assert.rejects(setCaps(root, {}, "operator"), /no cap to set/);
+    await harnessStop(root, "cap", "done");
+    await assert.rejects(setCaps(root, { cap_usd: 50 }, "operator"), /finished/);
+  });
+});
+
+test("agentPressure: a seat's token cap holds on any team, its dollar cap only where dollars are charged", async () => {
+  await withSandbox(async (root) => {
+    const b = await readBudget(root);
+    b.cap_per_agent_usd = 1;
+    b.cap_per_agent_tokens = 1000;
+    b.agents.agent00 = { ...b.agents.agent00, spent_usd: 2, tokens: 500 };
+    let p = agentPressure(b, "agent00");
+    assert.equal(p.over, true);
+    assert.equal(p.by, "usd");
+    b.metered = false;
+    p = agentPressure(b, "agent00");
+    assert.equal(p.over, false, "on a subscription the dollars are an estimate and brake nothing");
+    b.agents.agent00.tokens = 1200;
+    p = agentPressure(b, "agent00");
+    assert.equal(p.over, true);
+    assert.equal(p.by, "tokens");
+    assert.equal(p.cap_tokens, 1000);
+    // The per-agent token cap survives a fold, as the dollar cap does.
+    await writeBudget(root, b);
+    await applySessionUsage(root, "agent01", { spent_usd: 0, tokens: 1, calls: 1, input: 1, output: 0, cache_read: 0, cache_write: 0 });
+    assert.equal((await readBudget(root)).cap_per_agent_tokens, 1000);
   });
 });
 

@@ -565,22 +565,25 @@ export default function (pi: ExtensionAPI) {
     const byModel = !mine.over;
     const spent = byModel ? group.spent_usd : mine.spent_usd;
     const cap = byModel ? group.cap_usd : mine.cap_usd;
-    const capArgs = byModel ? { cap_usd: cap, model } : { cap_usd: cap };
+    // A seat's own cap may be in tokens (a subscription team's): said in tokens.
+    const byTokens = !byModel && mine.by === "tokens";
+    const used = byTokens ? `${mine.tokens.toLocaleString("en-US")} of ${mine.cap_tokens.toLocaleString("en-US")} tokens` : `$${spent.toFixed(2)} of $${cap}`;
+    const capArgs = byModel ? { cap_usd: cap, model } : byTokens ? { cap_tokens: mine.cap_tokens } : { cap_usd: cap };
     if (await swarmDoneExists(cwd)) return;
     if (agentCapSteeredAt === null) {
       agentCapSteeredAt = Date.now();
       const delivered = steer(
         byModel
           ? `The spend cap on ${model} is reached ($${spent.toFixed(2)} of $${cap} across its ${group.agents} agent${group.agents === 1 ? "" : "s"}). Post what you have to the board, then call done(reason=agent_cap). Do not start new work.`
-          : `Your own spend cap is reached ($${spent.toFixed(2)} of $${cap}). Post what you have to the board, then call done(reason=agent_cap). Do not start new work.`,
+          : `Your own cap is reached (${used}). Post what you have to the board, then call done(reason=agent_cap). Do not start new work.`,
       );
-      await logEvent(cwd, agentId, "agent_cap_steer", capArgs, { spent_usd: spent, delivered });
+      await logEvent(cwd, agentId, "agent_cap_steer", capArgs, { spent_usd: spent, ...(byTokens ? { tokens: mine.tokens } : {}), delivered });
       await systemPost(cwd, {
         tag: "stop",
         to: agentId,
         body: byModel
           ? `${agentId} is on ${model}, whose cap is reached ($${spent.toFixed(2)} of $${cap} across its agents); it will post its findings and stop. The swarm continues.`
-          : `${agentId} reached its own cap ($${spent.toFixed(2)} of $${cap}); it will post its findings and stop. The swarm continues.`,
+          : `${agentId} reached its own cap (${used}); it will post its findings and stop. The swarm continues.`,
       }).catch(() => undefined);
       return;
     }
