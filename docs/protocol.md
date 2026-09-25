@@ -23,7 +23,7 @@ runs/<id>/
   tools/<name>/manifest.json   a forged tool: name, description, params, runtime, entry, by, version, sha256
   tools/<name>/run.py|mjs|sh   its script (harness-owned; written only by make_tool)
   inputs/                      read-only copy of what --inputs named (no write bits; harness-owned)
-  inputs.json                  its manifest: source, every file with size, sha256, sha1 and md5, enforce, guard
+  inputs.json                  its manifest: source, every file with size, sha256, sha1 and md5, enforce, guard, quarantine
   .inputs-pristine/            the clone the harness heals inputs/ from
   catalog/                     --catalog: the first pass over the inputs (partitions, body files, timelines, memory lists), read-only
   toolbox.json                 --toolbox: the forensic tools found on the host, and the missing ones with install commands

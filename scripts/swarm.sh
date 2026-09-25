@@ -1410,7 +1410,7 @@ copy_tree_as_is() { # <src dir> <dst dir>
 }
 
 install_inputs() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4" verify="${5:-1}" entry name
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" verify="${5:-1}" quarantine="${6:-0}" entry name
   mkdir -p "$sandbox/inputs" "$sandbox/.inputs-pristine"
   # A link inside the evidence is the evidence's own and is copied as the
   # link it is. `cp -RL` followed every link on this host: an extracted
@@ -1469,7 +1469,7 @@ PY
   # modes here, once, before anything is read-only.
   find "$sandbox/inputs" "$sandbox/.inputs-pristine" -type f -exec chmod a-x {} + 2>/dev/null || true
   chmod -R a-w "$sandbox/inputs" "$sandbox/.inputs-pristine"
-  write_inputs_manifest "$sandbox" "$src" "$enforce" "$guard" copy "$verify"
+  write_inputs_manifest "$sandbox" "$src" "$enforce" "$guard" copy "$verify" "$quarantine"
 }
 
 # The one walk over inputs/ that every way of holding the evidence writes
@@ -1479,11 +1479,15 @@ PY
 # are the operator's and the manifest describes how they are held rather
 # than dictating it; `image` skips symlinks, which an attached volume may
 # carry and a copy dereferenced.
+#
+# `quarantine` is the kickoff's --quarantine (on by --catalog too), recorded
+# here because a goal's checks run in the sandbox and cannot read the
+# registry: a case that must not extract without it checks this key.
 write_inputs_manifest() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4" held="$5" verify="${6:-0}"
-  python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" "$verify" <<'PY'
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" held="$5" verify="${6:-0}" quarantine="${7:-0}"
+  python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" "$verify" "$quarantine" <<'PY'
 import base64, hashlib, json, os, stat as _stat, sys, time
-sandbox, src, enforce, guard, held, verify = sys.argv[1:]
+sandbox, src, enforce, guard, held, verify, quarantine = sys.argv[1:]
 root = os.path.join(sandbox, "inputs")
 
 def named(entry, key, value):
@@ -1654,7 +1658,8 @@ manifest = {
     "bytes": total,
     "enforce": enforce,
     "guard": guard,
-    "digests": ["sha256", "sha1", "md5"]}
+    "digests": ["sha256", "sha1", "md5"],
+    "quarantine": quarantine == "1"}
 if held == "copy":
     if problems:
         manifest["source_checked"] = "MISMATCH" if content_check is None else dict(content_check)
@@ -1698,7 +1703,7 @@ PY
 # guarded. A Linux mount namespace does this best; seatbelt's deny on the
 # resolved path does it too.
 bind_inputs() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4"
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" quarantine="${5:-0}"
   if [[ "$guard" == "none" ]]; then
     echo "BLOCKER: --inputs-bind needs a kernel guard (seatbelt, a Linux namespace, or Landlock); this host has none, so the source would be writable by the panes. Use --inputs to copy." >&2
     exit 2
@@ -1707,15 +1712,15 @@ bind_inputs() {
   real="$(cd "$src" && pwd -P)"
   rm -rf "${sandbox:?}/inputs"
   ln -s "$real" "$sandbox/inputs"
-  write_inputs_manifest "$sandbox" "$real" "$enforce" "$guard" bind
+  write_inputs_manifest "$sandbox" "$real" "$enforce" "$guard" bind 0 "$quarantine"
 }
 
 # The manifest for an attached image. Same shape as install_inputs writes, so
 # every reader downstream is unchanged; what is missing is the pristine clone,
 # because there is nothing to heal from and nothing that can change.
 manifest_attached_inputs() {
-  local sandbox="$1" src="$2"
-  write_inputs_manifest "$sandbox" "$src" on image image
+  local sandbox="$1" src="$2" quarantine="${3:-0}"
+  write_inputs_manifest "$sandbox" "$src" on image image 0 "$quarantine"
 }
 
 inputs_record() {
@@ -4043,13 +4048,13 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   mkdir -p "$sandbox/history" "$sandbox/tools"
   if [[ -n "$inputs_dir" ]]; then
     if [[ "$inputs_bind" -eq 1 ]]; then
-      bind_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard"
+      bind_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$quarantine"
     else
-      install_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$verify_copy"
+      install_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$verify_copy" "$quarantine"
     fi
   elif [[ -n "$inputs_image" ]]; then
     attach_inputs_image "$sandbox" "$inputs_image" >/dev/null
-    manifest_attached_inputs "$sandbox" "$inputs_image"
+    manifest_attached_inputs "$sandbox" "$inputs_image" "$quarantine"
   fi
   # The kickoff's own record of what the run started with, outside the run
   # where no agent (and no catalog parser) reaches it: custody compares the
