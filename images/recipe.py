@@ -55,7 +55,8 @@ each fetched by install.py and refused unless its sha256 is the pinned one:
                      image (`./configure --prefix`, `make`, `make install`),
                      so the image carries the program and not the compiler.
                      `env` is the environment of a source's pip, or of a
-                     build's configure and make.
+                     build's configure and make; `arches`, the architectures
+                     a source or a build is for (every one when absent).
 
 `run` names the interpreter a download's or a source's program needs:
 `python` (the program's own venv, else the image's), or any program the image

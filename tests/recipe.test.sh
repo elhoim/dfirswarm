@@ -275,6 +275,8 @@ got, why = install.fetch_source({**src, "name": "src-bad", "sha256": "0" * 64}, 
 out["source_bad_sha"] = [bool(got), why]
 got, why = install.fetch_source({**src, "name": "src-shell", "entry": "helper.py", "run": "no-such-runtime"}, apt)
 out["no_runtime"] = [bool(got), why]
+got, why = install.fetch_source({**src, "name": "src-elsewhere", "arches": ["no-such-arch"]}, apt)
+out["other_arch"] = [bool(got), why]
 deb = {"name": "deb-tool", "version": "1", a: {"url": f"file://{K}/deb-tool_1.deb", "sha256": deb_sha, "bin": f"{K}/opt/deb-tool/bin/deb-tool"}}
 got, why = install.fetch(deb, apt)
 out["deb"] = [bool(got), why, (got or {}).get("kind")]
@@ -307,6 +309,8 @@ grep -q 'opt-src/src-venv/.venv/bin/python" ' "$TMP/bin/src-venv" || fail "a sou
 [[ "$(jq -r '.source_bad_sha[0]' <<<"$res")" == false ]] && jq -r '.source_bad_sha[1]' <<<"$res" | grep -q 'is not the pinned' || fail "a source with other bytes was unpacked: $res"
 [[ ! -e "$K/opt-src/src-bad/helper.py" ]] || fail "a source whose sha256 failed left its files"
 jq -r '.no_runtime[1]' <<<"$res" | grep -q 'its runtime no-such-runtime is not in the image' || fail "a program whose interpreter the image lacks was linked: $res"
+[[ "$(jq -r '.other_arch[0]' <<<"$res")" == false && ! -e "$K/opt-src/src-elsewhere" ]] && jq -r '.other_arch[1]' <<<"$res" | grep -q 'pins it for no-such-arch only' \
+  || fail "a source its pack pins for other architectures was installed here: $res"
 [[ "$(jq -r '.deb[0]' <<<"$res")" == true && "$("$TMP/bin/deb-tool")" == "deb-tool ran" ]] || fail "a pinned .deb's program is not on PATH: $res"
 grep -q "deb-tool_1.deb" "$K/apt.log" || fail "a pinned .deb was not handed to apt: $(cat "$K/apt.log")"
 grep -q 'deb-bad' "$K/apt.log" && fail "apt was handed a .deb whose sha256 is not the pinned one"

@@ -269,6 +269,8 @@ def fetch_source(d: dict, apt: list) -> tuple:
     """Install one pinned source: checked, unpacked under SRC/<name>, its
     Python requirements in a venv of its own, its entry on PATH. Returns
     (record, failure reason)."""
+    if d.get("arches") and arch() not in d["arches"]:
+        return None, f"not for {arch()}: its pack pins it for {', '.join(d['arches'])} only"
     if not d.get("url") or not d.get("sha256") or not d.get("entry"):
         return None, "no url, sha256 and entry pinned"
     if d.get("apt_deps") and not run(apt + list(d["apt_deps"])):

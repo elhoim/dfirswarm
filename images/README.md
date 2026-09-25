@@ -118,7 +118,11 @@ anything is unpacked, installed or built.
   mac_apt pins pytsk3 20230125, an sdist whose bundled Sleuth Kit finds the
   libbfio headers the image has for libewf and is then built against libbfio
   without being linked to it, so it would not import; its pack sets
-  `ac_cv_header_libbfio_h=no` and the build leaves libbfio out.
+  `ac_cv_header_libbfio_h=no` and the build leaves libbfio out. `arches`
+  names the architectures a source is for: mac_apt 1.33.2 looks its statx
+  syscall up by `platform.machine()` and knows `arm64` (macOS's name) but
+  not `aarch64` (Linux's), so it stops at import on Linux arm64; its packs
+  pin it for amd64, and an arm64 image records it as not installed, with why.
 - `install.build` — a source archive compiled in a builder stage of its own
   (`./configure --prefix=/opt/dfir/tools/<name>`, `make`, `make
   install-strip`), from the same base; only the prefix is copied into the
