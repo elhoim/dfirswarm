@@ -382,13 +382,18 @@ test("with a gate in front, a token attributes only on a line the gate vouched f
   await sendRaw(socket, { ts: "t2", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "tok-a1", gate: "k-0123" });
   // a guessed key
   await sendRaw(socket, { ts: "t3", agent: "a0", tool: "bash", args: {}, result: { ok: true }, token: "tok-a0", gate: "k-9999" });
-  await new Promise((r) => setTimeout(r, 150));
 
-  const written = (await readFile(join(root, "traces", "events.jsonl"), "utf8"))
-    .trim()
-    .split("\n")
-    .map((l) => JSON.parse(l));
-  assert.equal(written.length, 3);
+  // Waited for, not slept on: a fixed 150 ms was short on a loaded CI
+  // runner. Three connections may land in any order; each line is found by
+  // its own ts.
+  let lines: Record<string, unknown>[] = [];
+  for (let i = 0; i < 100 && lines.length < 3; i++) {
+    await new Promise((r) => setTimeout(r, 50));
+    const text = await readFile(join(root, "traces", "events.jsonl"), "utf8").catch(() => "");
+    lines = text.trim() ? text.trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>) : [];
+  }
+  assert.equal(lines.length, 3);
+  const written = ["t1", "t2", "t3"].map((ts) => lines.find((l) => l.ts === ts) as Record<string, unknown>);
   assert.equal(written[0].agent_unverified, true, "a token without the gate's key does not attribute");
   assert.equal(written[1].agent, "a1", "the gate's token decides, whatever the body claims");
   assert.equal(written[1].claimed_agent, "a0");
