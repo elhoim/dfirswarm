@@ -114,12 +114,17 @@ anything is unpacked, installed or built.
   tool library's; `entry` goes on PATH as the pack names the program, run
   with the checkout on `PYTHONPATH`, as from a clone. Zircolite, mac_apt,
   UnifiedLogReader, iLEAPP and ALEAPP come this way; `build_deps` are there
-  for the build only, `apt_deps` stay.
+  for the build only, `apt_deps` stay. `env` is the environment of its pip:
+  mac_apt pins pytsk3 20230125, an sdist whose bundled Sleuth Kit finds the
+  libbfio headers the image has for libewf and is then built against libbfio
+  without being linked to it, so it would not import; its pack sets
+  `ac_cv_header_libbfio_h=no` and the build leaves libbfio out.
 - `install.build` — a source archive compiled in a builder stage of its own
   (`./configure --prefix=/opt/dfir/tools/<name>`, `make`, `make
   install-strip`), from the same base; only the prefix is copied into the
   image, so the compiler and the `-dev` packages are not in it, and every
-  profile that builds the program shares the stage's cache. A build that
+  profile that builds the program shares the stage's cache; `env` is the
+  environment of its configure and make. A build that
   fails is recorded beside what it left, and an optional program's failure
   does not stop the image. bulk_extractor (not packaged for Debian 12) comes
   this way.

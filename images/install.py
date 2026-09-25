@@ -69,9 +69,9 @@ BUILT = ".dfirswarm-build.json"
 os.environ.setdefault("DEBIAN_FRONTEND", "noninteractive")
 
 
-def run(cmd: list[str], cwd=None) -> bool:
+def run(cmd: list[str], cwd=None, env: dict | None = None) -> bool:
     print("+", " ".join(cmd), flush=True)
-    return subprocess.run(cmd, cwd=cwd).returncode == 0
+    return subprocess.run(cmd, cwd=cwd, env={**os.environ, **env} if env else None).returncode == 0
 
 
 def arch() -> str:
@@ -292,7 +292,8 @@ def fetch_source(d: dict, apt: list) -> tuple:
         venv = dest / ".venv"
         if not run([sys.executable, "-m", "venv", str(venv)]):
             return None, "its venv could not be made"
-        if not run([str(venv / "bin" / "pip"), "install", "--no-cache-dir", *d["pip"]], cwd=dest):
+        # `env` reaches what pip builds: an sdist's own configure reads it.
+        if not run([str(venv / "bin" / "pip"), "install", "--no-cache-dir", *d["pip"]], cwd=dest, env=d.get("env")):
             return None, f"its Python requirements (pip install {' '.join(d['pip'])}) did not install"
     program = dest / d["entry"]
     if not program.is_file():
@@ -348,13 +349,14 @@ def build_source(spec_path: str) -> int:
     except (ValueError, OSError, tarfile.TarError, zipfile.BadZipFile) as e:
         return done(f"could not unpack: {e}")
     jobs = str(os.cpu_count() or 2)
-    if not run(["./configure", f"--prefix={dest}", *d.get("configure", [])], cwd=work):
+    env = d.get("env")
+    if not run(["./configure", f"--prefix={dest}", *d.get("configure", [])], cwd=work, env=env):
         return done("./configure failed")
-    if not run(["make", f"-j{jobs}"], cwd=work):
+    if not run(["make", f"-j{jobs}"], cwd=work, env=env):
         return done("make failed")
     # install-strip where the build has it: a program's debug symbols are
     # most of its size and no examination reads them.
-    if not (run(["make", "install-strip"], cwd=work) or run(["make", "install"], cwd=work)):
+    if not (run(["make", "install-strip"], cwd=work, env=env) or run(["make", "install"], cwd=work, env=env)):
         return done("make install failed")
     shutil.rmtree(work, ignore_errors=True)
     if not (dest / d["bin"]).is_file():

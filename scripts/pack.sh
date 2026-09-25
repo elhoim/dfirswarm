@@ -237,6 +237,8 @@ if os.path.isfile(hj):
                 for key in ("pip", "skip", "configure", "apt_deps", "build_deps", "arches"):
                     if key in src and not (isinstance(src[key], list) and all(isinstance(x, str) for x in src[key])):
                         errors.append("%s: %s must be a list of strings" % (where, key))
+                if "env" in src and not (isinstance(src["env"], dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in src["env"].items())):
+                    errors.append("%s: env must map names to strings" % where)
             # Another system's program (Apple's log, a Windows collector): no
             # image holds it, so no pack may require it of one.
             if "not_in_image" in b:

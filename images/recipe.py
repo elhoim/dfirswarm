@@ -54,6 +54,8 @@ each fetched by install.py and refused unless its sha256 is the pinned one:
   install.build      a source archive compiled in a builder stage of the
                      image (`./configure --prefix`, `make`, `make install`),
                      so the image carries the program and not the compiler.
+                     `env` is the environment of a source's pip, or of a
+                     build's configure and make.
 
 `run` names the interpreter a download's or a source's program needs:
 `python` (the program's own venv, else the image's), or any program the image

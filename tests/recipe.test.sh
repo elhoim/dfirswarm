@@ -245,7 +245,7 @@ mkdir -p "$K/bsrc/built-3" "$K/bsrc-bad/built-3"
 cat > "$K/bsrc/built-3/configure" <<'SH'
 #!/bin/sh
 prefix="${1#--prefix=}"
-printf 'all:\n\t@echo built\ninstall:\n\tmkdir -p %s/bin\n\tprintf "#!/bin/sh\\necho built-tool ran\\n" > %s/bin/built-tool\n' "$prefix" "$prefix" > Makefile
+printf 'all:\n\t@echo built\ninstall:\n\tmkdir -p %s/bin\n\tprintf "#!/bin/sh\\necho built-tool ran%s\\n" > %s/bin/built-tool\n' "$prefix" "${BUILD_NOTE:+ $BUILD_NOTE}" "$prefix" > Makefile
 SH
 printf '#!/bin/sh\nexit 1\n' > "$K/bsrc-bad/built-3/configure"
 chmod +x "$K/bsrc/built-3/configure" "$K/bsrc-bad/built-3/configure"
@@ -280,7 +280,8 @@ got, why = install.fetch(deb, apt)
 out["deb"] = [bool(got), why, (got or {}).get("kind")]
 got, why = install.fetch({**deb, "name": "deb-bad", a: {**deb[a], "sha256": "0" * 64}}, apt)
 out["deb_bad_sha"] = [bool(got), why]
-good = {"name": "built-tool", "version": "3", "url": f"file://{K}/built-3.tar.gz", "sha256": b_sha, "bin": "bin/built-tool"}
+good = {"name": "built-tool", "version": "3", "url": f"file://{K}/built-3.tar.gz", "sha256": b_sha, "bin": "bin/built-tool",
+        "env": {"BUILD_NOTE": "with its env"}}
 spec = f"{K}/build.json"
 open(spec, "w").write(json.dumps(good))
 out["build_rc"] = install.build_source(spec)
@@ -311,7 +312,7 @@ grep -q "deb-tool_1.deb" "$K/apt.log" || fail "a pinned .deb was not handed to a
 grep -q 'deb-bad' "$K/apt.log" && fail "apt was handed a .deb whose sha256 is not the pinned one"
 [[ "$(jq -r '.deb_bad_sha[0]' <<<"$res")" == false ]] || fail "a .deb with other bytes was installed: $res"
 [[ "$(jq -r '.build_rc' <<<"$res")" == 0 && "$(jq -r '.build[0]' <<<"$res")" == true ]] || fail "a source that builds was not built and linked: $res"
-[[ "$("$TMP/bin/built-tool")" == "built-tool ran" ]] || fail "a built program is not on PATH"
+[[ "$("$TMP/bin/built-tool")" == "built-tool ran with its env" ]] || fail "a built program is not on PATH, or its env did not reach its configure: $("$TMP/bin/built-tool")"
 jq -e '.ok == true and .kind == "build"' "$K/tools/built-tool/.dfirswarm-build.json" >/dev/null || fail "a build does not say beside its program that it built"
 [[ "$(jq -r '.bad_optional_rc' <<<"$res")" == 0 ]] || fail "an optional program that does not build stopped the image: $res"
 jq -r '.bad_link[1]' <<<"$res" | grep -q 'configure failed' || fail "an optional program that did not build is not recorded with why: $res"
@@ -320,7 +321,7 @@ jq -r '.bad_link[1]' <<<"$res" | grep -q 'configure failed' || fail "an optional
 grep -q '^URIs: http://mirror.example/debian$' "$K/apt-sources/dfirswarm-bookworm-backports.sources" && grep -q '^Suites: bookworm-backports$' "$K/apt-sources/dfirswarm-bookworm-backports.sources" \
   || fail "backports do not come from the image's own mirror: $(cat "$K/apt-sources/dfirswarm-bookworm-backports.sources")"
 jq -r '.other_release' <<<"$res" | grep -q "is not this image's backports" || fail "a release other than the image's backports was added: $res"
-pass "install.py puts a pinned source, a .deb and a built program on PATH only when their bytes are the pinned ones, gives a source's requirements a venv of its own, records a failed build, and adds only its own backports"
+pass "install.py puts a pinned source, a .deb and a built program on PATH only when their bytes are the pinned ones, gives a source's requirements a venv of its own, builds with the pack's env, records a failed build, and adds only its own backports"
 
 # --- what an image records ------------------------------------------------------
 # The base records what a profile does: the venv as `pip list` names it (a VM's
@@ -398,7 +399,7 @@ mk_entry() { # <dir> <binary entry json>
 e='"name": "tool", "why": "Test.", "licence": "MIT", "redistributable": true, "optional": true'
 u='"url": "https://example.org/t.tar.gz", "sha256": "'"$sha"'"'
 for good in '{'"$e"', "install": {"source": {"version": "1", '"$u"', "entry": "bin/t.py", "run": "python", "pip": ["-r", "requirements.txt"], "skip": ["tests"]}}}' \
-            '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "bin/t", "configure": ["--disable-x"], "build_deps": ["gcc"], "apt_deps": ["zlib1g"]}}}' \
+            '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "bin/t", "configure": ["--disable-x"], "build_deps": ["gcc"], "apt_deps": ["zlib1g"], "env": {"CFLAGS": "-O2"}}}}' \
             '{'"$e"', "install": {"download": {"version": "1", "arm64": {"url": "https://example.org/t_1_arm64.deb", "sha256": "'"$sha"'", "bin": "/opt/t/bin/t"}}}}' \
             '{'"$e"', "not_in_image": "Only macOS has it."}'; do
   mk_entry "$TMP/p/good-kind" "$good"
@@ -408,6 +409,7 @@ for bad in '{'"$e"', "install": {"source": {"version": "1", '"$u"'}}}' \
            '{'"$e"', "install": {"source": {"version": "1", "url": "http://example.org/t.tar.gz", "sha256": "'"$sha"'", "entry": "t.py"}}}' \
            '{'"$e"', "install": {"source": {"version": "1", '"$u"', "entry": "../t.py"}}}' \
            '{'"$e"', "install": {"source": {"version": "1", '"$u"', "entry": "t.py", "pip": "-r requirements.txt"}}}' \
+           '{'"$e"', "install": {"source": {"version": "1", '"$u"', "entry": "t.py", "env": {"X": 1}}}}' \
            '{'"$e"', "install": {"build": {'"$u"', "bin": "bin/t"}}}' \
            '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "/usr/bin/t"}}}' \
            '{'"$e"', "install": {"download": {"version": "1", "arm64": {"url": "https://example.org/t_1_arm64.deb", "sha256": "'"$sha"'", "bin": "opt/t/bin/t"}}}}' \
