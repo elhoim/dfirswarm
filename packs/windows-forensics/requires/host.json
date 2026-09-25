@@ -200,7 +200,20 @@
       "why": "Run thousands of Sigma rules over EVTX and return the detections. The fastest of the three engines and the lightest on memory.",
       "install": {
         "brew": "https://github.com/wagga40/Zircolite/releases",
-        "apt": "https://github.com/wagga40/Zircolite/releases"
+        "apt": "pinned source 4.0.0 (install.source)",
+        "source": {
+          "version": "4.0.0",
+          "url": "https://github.com/wagga40/Zircolite/archive/refs/tags/v4.0.0.tar.gz",
+          "sha256": "2d71b9d11773070176f75856004624c45704ab6a24b974711886e25a4b4eba65",
+          "entry": "zircolite.py",
+          "run": "python",
+          "pip": [
+            "."
+          ],
+          "skip": [
+            "pics"
+          ]
+        }
       },
       "licence": "LGPL-3.0-or-later",
       "redistributable": false
@@ -232,13 +245,56 @@
       "redistributable": false
     },
     {
+      "name": "dotnet",
+      "package": ".NET runtime",
+      "optional": true,
+      "why": "The runtime Eric Zimmerman's MFTECmd, EvtxECmd and RECmd run on (their net9 builds): installed once, and each of them runs through it.",
+      "install": {
+        "brew": "brew install --cask dotnet",
+        "apt": "pinned download 9.0.20 (install.download)",
+        "download": {
+          "version": "9.0.20",
+          "apt_deps": [
+            "libicu72",
+            "libssl3"
+          ],
+          "amd64": {
+            "url": "https://builds.dotnet.microsoft.com/dotnet/Runtime/9.0.20/dotnet-runtime-9.0.20-linux-x64.tar.gz",
+            "sha256": "8aee9b39327d622a2becac4942af3fa601fff58f5f38207052a8fe8dc65a05ab",
+            "bin": "dotnet"
+          },
+          "arm64": {
+            "url": "https://builds.dotnet.microsoft.com/dotnet/Runtime/9.0.20/dotnet-runtime-9.0.20-linux-arm64.tar.gz",
+            "sha256": "4287e6023f8a9abe9654bc2a8420e500216dbdc68260dbe3c6df19de31732a1d",
+            "bin": "dotnet"
+          }
+        }
+      },
+      "licence": "MIT",
+      "redistributable": false
+    },
+    {
       "name": "MFTECmd",
       "package": "Eric Zimmerman's tools",
       "optional": true,
       "why": "The $MFT, $J, $Boot and $SDS parser most reports cite. Needs the .NET runtime; MIT licensed.",
       "install": {
         "brew": "https://ericzimmerman.github.io/",
-        "apt": "https://ericzimmerman.github.io/"
+        "apt": "pinned download 2026.5.0 (install.download), run by the .NET runtime (dotnet)",
+        "download": {
+          "version": "2026.5.0",
+          "run": "dotnet",
+          "amd64": {
+            "url": "https://download.ericzimmermanstools.com/net9/MFTECmd.zip",
+            "sha256": "60ae857a554b830243e38e91fafdfdf6066f31c703282c5c6f40daf3b64d3160",
+            "bin": "MFTECmd.dll"
+          },
+          "arm64": {
+            "url": "https://download.ericzimmermanstools.com/net9/MFTECmd.zip",
+            "sha256": "60ae857a554b830243e38e91fafdfdf6066f31c703282c5c6f40daf3b64d3160",
+            "bin": "MFTECmd.dll"
+          }
+        }
       },
       "licence": "MIT",
       "redistributable": false
@@ -250,7 +306,21 @@
       "why": "Event log parser with maps that normalise the payload differences between event ids. Needs the .NET runtime.",
       "install": {
         "brew": "https://ericzimmerman.github.io/",
-        "apt": "https://ericzimmerman.github.io/"
+        "apt": "pinned download 2026.5.0 (install.download), run by the .NET runtime (dotnet)",
+        "download": {
+          "version": "2026.5.0",
+          "run": "dotnet",
+          "amd64": {
+            "url": "https://download.ericzimmermanstools.com/net9/EvtxECmd.zip",
+            "sha256": "4d740e51c4532c340d080f832c766c2acb0351832dae118d1abe9bb49203faa4",
+            "bin": "EvtxeCmd/EvtxECmd.dll"
+          },
+          "arm64": {
+            "url": "https://download.ericzimmermanstools.com/net9/EvtxECmd.zip",
+            "sha256": "4d740e51c4532c340d080f832c766c2acb0351832dae118d1abe9bb49203faa4",
+            "bin": "EvtxeCmd/EvtxECmd.dll"
+          }
+        }
       },
       "licence": "MIT",
       "redistributable": false
@@ -262,21 +332,35 @@
       "why": "Registry hive search and export with batch files for whole artefact families. Needs the .NET runtime.",
       "install": {
         "brew": "https://ericzimmerman.github.io/",
-        "apt": "https://ericzimmerman.github.io/"
+        "apt": "pinned download 2026.5.0 (install.download), run by the .NET runtime (dotnet)",
+        "download": {
+          "version": "2026.5.0",
+          "run": "dotnet",
+          "amd64": {
+            "url": "https://download.ericzimmermanstools.com/net9/RECmd.zip",
+            "sha256": "4a4e2f4beba54fdb9ba4eeb5e6f9d323e666b309e407ac89e047f82be0c963a2",
+            "bin": "RECmd/RECmd.dll"
+          },
+          "arm64": {
+            "url": "https://download.ericzimmermanstools.com/net9/RECmd.zip",
+            "sha256": "4a4e2f4beba54fdb9ba4eeb5e6f9d323e666b309e407ac89e047f82be0c963a2",
+            "bin": "RECmd/RECmd.dll"
+          }
+        }
       },
       "licence": "MIT",
       "redistributable": false
     },
     {
-      "name": "rip",
-      "package": "RegRipper3.0",
+      "name": "regripper",
+      "package": "regripper",
       "optional": true,
-      "why": "Hundreds of registry plugins, each written for one question. Perl; invoked as an executable.",
+      "why": "Hundreds of registry plugins, each written for one question (RegRipper's rip.pl, which Debian installs as regripper). Perl; invoked as an executable.",
       "install": {
-        "brew": "https://github.com/keydet89/RegRipper3.0",
-        "apt": "https://github.com/keydet89/RegRipper3.0"
+        "brew": "https://github.com/keydet89/RegRipper3.0 (perl rip.pl, with Parse::Win32Registry)",
+        "apt": "apt-get install -y regripper"
       },
-      "licence": "GPL",
+      "licence": "MIT",
       "redistributable": false
     }
   ]

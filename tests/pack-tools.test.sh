@@ -394,4 +394,37 @@ plaso work/p >/dev/null || fail "timeline_super refused an out_dir under work/"
 cmp -s "$BASE/tools/file_carver/run.py" "$ROOT/tool-library/file_carver/run.py" || fail "the tool-library copy of file_carver has drifted from the pack's"
 pass "file_carver, mem_carve and timeline_super write under the run directory and never under inputs/"
 
+# --- sigma_hunt speaks the Zircolite the images carry ----------------------------
+# Zircolite 3 dropped --noexternal and refuses it, as argparse does any flag
+# it does not know; sigma_hunt passed it, so with Zircolite in the disk image
+# its auto engine stopped finding anything. This stand-in refuses what
+# Zircolite 4 does not take and writes its result shape: a list of rules, each
+# with the events it matched.
+SH="$WORK/sigma"; mkdir -p "$SH/bin" "$SH/run/work"
+printf 'evtx' > "$SH/run/Security.evtx"
+cat > "$SH/bin/zircolite" <<'ZC'
+#!/usr/bin/env python3
+import argparse, json
+ap = argparse.ArgumentParser()
+ap.add_argument("-e", "--evtx", "--events")
+ap.add_argument("-o", "--outfile")
+ap.add_argument("-r", "--ruleset", action="append", nargs="+")
+a = ap.parse_args()
+json.dump([{"title": "Bitsadmin Download", "id": "r1", "rule_level": "high", "matches": [
+    {"SystemTime": "2026-09-01T10:00:00Z", "EventID": 59, "Channel": "Microsoft-Windows-Bits-Client/Operational",
+     "Computer": "WS01", "EventRecordID": 7}]}], open(a.outfile, "w"))
+ZC
+chmod +x "$SH/bin/zircolite"
+out="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/hunt", "engine": "zircolite"}' | PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)" \
+  || fail "sigma_hunt could not run the Zircolite the images carry: $out"
+"$PY" -c '
+import json, sys
+d = json.loads(sys.argv[1])
+assert d["engine"] == "zircolite", d
+assert "--noexternal" not in d.get("command", ""), d
+det = d["detections"][0]
+assert det["rule"] == "Bitsadmin Download" and det["record_id"] == 7 and det["level"] == "high", det
+' "$out" || fail "sigma_hunt did not read what Zircolite matched: $out"
+pass "sigma_hunt runs Zircolite without --noexternal, which Zircolite 3 and later refuse, and reads its detections"
+
 echo "pack-tools: all checks passed"

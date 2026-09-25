@@ -150,7 +150,10 @@ def main():
     result = os.path.join(out_dir, "%s.json" % engine)
 
     if engine == "zircolite":
-        argv = [binary, "--evtx", path, "--outfile", result, "--noexternal"]
+        # No --noexternal: Zircolite 3 removed it (it reads EVTX through its
+        # Python bindings only) and refuses the flag; 2.x without it uses its
+        # own bundled evtx_dump.
+        argv = [binary, "--evtx", path, "--outfile", result]
         if args.get("rules"):
             argv += ["--ruleset", str(args["rules"])]
     else:

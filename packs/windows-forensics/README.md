@@ -44,6 +44,9 @@ done and checks: `intrusion-triage.md`, `data-left-the-building.md`,
 The pack's Python requirements are in `requires/python.txt` and its host
 binaries in `requires/host.json`. Nothing third-party is redistributed here: the
 parsers install from PyPI and the binaries from the platform's own package
-manager, so no licence travels with this pack but its own. Volatility is
+manager, or, in a VM image, from the pinned artefacts `host.json` names and the
+image build checks by sha256 (Eric Zimmerman's tools with the .NET runtime they
+run on, Zircolite from its tagged source; `images/README.md`), so no licence
+travels with this pack but its own. Volatility is
 declared as an optional host binary for the same reason: it is invoked as an
 executable or not at all.
