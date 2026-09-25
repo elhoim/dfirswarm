@@ -1749,12 +1749,17 @@ test("forged tools: pane API keys are not in the child environment", async () =>
     // pass: it has to be denied by name or a forged tool could drive the
     // console's start / stop / reap routes from inside the sandbox.
     const prevToken = process.env.SWARM_UI_TOKEN;
+    const prevTrace = process.env.SWARM_TRACE_TOKEN;
     process.env.SWARM_UI_TOKEN = "console-token";
+    process.env.SWARM_TRACE_TOKEN = "pane-trace-token";
     process.env.SWARM_QUARANTINE = "1";
     const picked = forgedToolEnv();
     assert.equal(picked.OPENAI_API_KEY, undefined);
     assert.equal(picked.ANTHROPIC_API_KEY, undefined);
     assert.equal(picked.SWARM_UI_TOKEN, undefined, "the console's token is not context");
+    assert.equal(picked.SWARM_TRACE_TOKEN, undefined, "the calling pane's trace identity is not context");
+    if (prevTrace === undefined) delete process.env.SWARM_TRACE_TOKEN;
+    else process.env.SWARM_TRACE_TOKEN = prevTrace;
     assert.equal(picked.SWARM_QUARANTINE, "1", "the run's own context still passes");
     assert.ok(picked.PATH, "PATH must remain so python3/bash can start");
     if (prevToken === undefined) delete process.env.SWARM_UI_TOKEN;

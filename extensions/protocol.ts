@@ -5080,12 +5080,15 @@ const FORGED_ENV_KEEP = new Set([
 ]);
 
 /**
- * SWARM_ variables tell a tool about its run, so they pass — except this one,
- * which is not context but a credential: the console's mutation token, which
- * starts, stops and reaps swarms. A pane inherits it whenever the operator
- * exported it before starting Herdr, and a forged tool is agent-written code.
+ * SWARM_ variables tell a tool about its run, so they pass — except these,
+ * which are not context but credentials. SWARM_UI_TOKEN is the console's
+ * mutation token, which starts, stops and reaps swarms; a pane inherits it
+ * whenever the operator exported it before starting Herdr. SWARM_TRACE_TOKEN
+ * is the calling pane's own trace identity, and a forged tool is code another
+ * agent may have written: the harness records the call itself, so the tool
+ * never needs it.
  */
-export const FORGED_ENV_DENY = new Set(["SWARM_UI_TOKEN"]);
+export const FORGED_ENV_DENY = new Set(["SWARM_UI_TOKEN", "SWARM_TRACE_TOKEN"]);
 
 /** What a forged subprocess may see: PATH, proxy, locale — not the pane's API keys. */
 export function forgedToolEnv(
