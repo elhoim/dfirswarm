@@ -677,17 +677,23 @@ test("a call a seat sends again after a dropped link is run once: the same reque
 test("a seat that posts in a loop is slowed, its peers are not, and the refusals are counted rather than written each time", async () => {
   const { hub, lines } = await setup();
   const results: string[] = [];
+  const started = Date.now();
   for (let i = 0; i < 46; i++) {
     results.push(await board.callBoard(hub.socketFor("a0"), "postMessage", [null, { tag: "intro", body: `post ${i}` }]).then(() => "ok", (e: Error) => e.message));
   }
-  assert.equal(results.filter((r) => r === "ok").length, 40, "a burst up to the bucket goes through");
-  assert.ok(results.slice(40).every((r) => /slow down/.test(r)), results.slice(40).join(" | "));
+  // The bucket refills at half a post a second while the loop runs: a slow
+  // runner (macOS CI took over two seconds) lets one more through.
+  const refilled = Math.floor(((Date.now() - started) / 1000) * 0.5);
+  const ok = results.filter((r) => r === "ok").length;
+  assert.ok(ok >= 40 && ok <= 40 + refilled, `a burst up to the bucket goes through, and only what refilled while it ran (${ok} ok, ${refilled} refilled)`);
+  const refused = results.filter((r) => r !== "ok");
+  assert.ok(refused.length >= 1 && refused.every((r) => /slow down/.test(r)), refused.join(" | "));
   assert.equal(await board.callBoard(hub.socketFor("a1"), "postMessage", [null, { tag: "intro", body: "a1 is fine" }]).then(() => "ok"), "ok", "a peer is not slowed");
   await until(() => lines.some((l) => l.tool === "hub_call" && (l.args as { fn?: string }).fn === "postMessage"), "the first refusal is on the trace");
   const refusalLines = lines.filter((l) => l.tool === "hub_call" && (l.args as { fn?: string }).fn === "postMessage" && (l.result as { ok?: boolean }).ok === false);
-  assert.equal(refusalLines.length, 1, "six identical refusals in a minute are one line and a count");
+  assert.equal(refusalLines.length, 1, "identical refusals in a minute are one line and a count");
   await hub.flushRefusals();
-  await until(() => lines.some((l) => (l.result as { repeated?: number }).repeated === 5), "the count is written on the flush");
+  await until(() => lines.some((l) => (l.result as { repeated?: number }).repeated === refused.length - 1), "the count is written on the flush");
 });
 
 test("one seat cannot hold more connections than its cap, and a peer's calls still answer", async () => {
