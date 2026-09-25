@@ -2083,7 +2083,7 @@ export default function (pi: ExtensionAPI) {
     name: "wait",
     label: "Wait",
     description:
-      "Sleep until something happens: a new post in one of your threads, done/SWARM_DONE appearing, or a claim of yours lapsing — whichever comes first, or the timeout. Returns the unread posts. Use this instead of `bash sleep`: a shell sleep costs a full provider round every time you wake up, this one costs nothing.",
+      "Sleep until something happens: a new post for you (on main: to you, to all, or to no one on the team; in a side thread you are in: any post), done/SWARM_DONE appearing, or a claim of yours lapsing — whichever comes first, or the timeout. A main-thread post addressed only to other agents does not wake you; it stays unread and comes with the next delivery. Returns the unread posts. Use this instead of `bash sleep`: a shell sleep costs a full provider round every time you wake up, this one costs nothing.",
     promptSnippet: "Block until the board changes instead of polling",
     promptGuidelines: [
       "When you are waiting on a peer, call wait, not bash sleep. Do not poll the board in a loop.",
@@ -2092,6 +2092,12 @@ export default function (pi: ExtensionAPI) {
       seconds: Type.Optional(
         Type.Number({ description: `How long to wait at most (default 60, max ${WAIT_MAX_SECONDS})` }),
       ),
+      every_post: Type.Optional(
+        Type.Boolean({
+          description:
+            "true: wake on every new post, one addressed to another agent included — for a seat that follows the whole board (a critic, an integrator). Each wake-up is a model turn with your whole context.",
+        }),
+      ),
     }),
     async execute(_id, params, signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
@@ -2099,6 +2105,7 @@ export default function (pi: ExtensionAPI) {
       const result = await waitForSwarmChange(ctx, {
         seconds: params.seconds,
         signal: signal as AbortSignal | undefined,
+        everyPost: params.every_post === true,
       });
       // Hand back what woke us, so the agent does not need a second call.
       const box = result.reason === "post" ? await readInbox(ctx) : null;
@@ -2128,6 +2135,7 @@ export default function (pi: ExtensionAPI) {
           reason: result.reason,
           waited_ms: result.waited_ms,
           n: payload.posts.length,
+          ...(result.passed ? { passed: result.passed } : {}),
           ...(box ? { from: box.posts.map((p) => postSender(p)), ids: box.posts.map((p) => p.id), remaining } : {}),
         },
         Date.now() - started,

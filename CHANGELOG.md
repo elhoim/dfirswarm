@@ -647,6 +647,16 @@ not surprised:
 
 ### Changed
 
+- **`wait` sleeps through posts addressed only to other agents.** A post on
+  `main` whose `to` names teammates and not the waiting agent no longer wakes
+  it; it stays unread and the next delivery carries it, and the result counts
+  it as `passed`. A post to all, to the agent by id or by the name it chose,
+  or to no one on the team (a role, a word) still wakes it, as does any post
+  in a side thread it is in; `every_post: true` wakes on everything, for a
+  seat that follows the whole board. On the BelkaCTF #6 run 586 of 1,291
+  wake-ups on posts were for posts to someone else, each a model turn with the
+  whole context resent; the three GPT-6-Luna seats spent most of their 87M
+  tokens that way.
 - **The contract names no program when the image describes itself.** A
   microVM run whose image has `tools.md` gets one paragraph, "## Programs",
   that points at the file inside the VM; the table of sixty programs, a third

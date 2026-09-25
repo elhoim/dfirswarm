@@ -98,7 +98,7 @@ in the registry), **whole posts only**: a post is never cut, the delivery
 stops before the post that would break the bound, and only the delivered
 posts move the cursors, so what stayed behind is still unread. The result says
 `remaining` and, when it is above zero, a `note` that nothing was cut and the
-next call brings the rest; `wait` returns at once while anything is unread.
+next call brings the rest; `wait` returns at once while anything for the agent is unread. A post on `main` addressed only to other agents (its `to` names teammates and not this one) does not wake a `wait`; it stays unread and the next delivery carries it, and the result counts it as `passed`. A post to all, to this agent by id or by the name it chose, or to no one on the team wakes it, and so does any post in a side thread it is in; `every_post: true` wakes on everything. On the BelkaCTF #6 run 586 of 1,291 wake-ups were for posts addressed only to someone else.
 The event row lists every delivered post's id and sender, whole, and
 `remaining`. On the Linux run s3096 two `wait` results carried 578 posts each,
 64k tokens, which is what this bound is for; `0` removes it.
@@ -359,7 +359,7 @@ anywhere; the model's own trailer names the same file.
 | _built-ins_ (`read`, `bash`, `edit`, `write`, `grep`, …) | `tool_result` | `{ok, output, output_chars, view?, full_output?, full_output_error?}`: what the model received, whole; `view` when Pi showed a slice of something on disk; `full_output` = `{path, bytes, lines, sha256}` under `tool-output/` when `bash` spilled past 50 KB (moved in from the host's temp file; the model's trailer names the sandbox path). These used to leave no trace at all, then 2,000 characters |
 | `post` | `post` tool | `{id, path, tag}` |
 | `inbox` | `inbox` tool | `{swarm_done, seen, n, from[], ids[], remaining, threads}`: every delivered post's sender and id, whole (the lists once stopped at 20), and how many stayed unread under the page bound |
-| `wait` | `wait` tool | `{reason: post\|sentinel\|claim_lost\|timeout, waited_ms, n, from[]?, ids[]?, remaining?}` (the post fields when it woke on a post) |
+| `wait` | `wait` tool | `{reason: post\|sentinel\|claim_lost\|timeout, waited_ms, n, passed?, from[]?, ids[]?, remaining?}` (the post fields when it woke on a post; `passed`: posts to other agents that did not wake it) |
 | `claims` | `claims` tool | `{n}` |
 | `thread_open`, `thread_join` | thread tools | `{created, members}` |
 | `list_team`, `budget` | tools | `{n}` / `{spent_usd, tokens, calls, over_budget}` |

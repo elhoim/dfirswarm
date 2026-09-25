@@ -4336,7 +4336,30 @@ export type WaitResult = {
   reason: WaitOutcome;
   waited_ms: number;
   detail: string;
+  /** Posts on the primary thread addressed only to other agents that arrived and did not wake this one. */
+  passed?: number;
 };
+
+/**
+ * Whether a post on the primary thread is for `agentId`, as `wait` decides
+ * whether to wake it: yes when its `to` is empty or everyone ("all"), names
+ * this agent by id or by the name it chose, or names nobody on the team (a
+ * role, a word: better woken than missing it). No only when it names
+ * teammates and not this agent. The BelkaCTF #6 run's ten agents woke 1,291
+ * times for posts, and 586 of those wake-ups were for posts addressed only
+ * to someone else, each a model turn with the whole context resent.
+ */
+export function postIsFor(to: string, agentId: string, team: ReadonlyArray<{ id: string; name?: string }>): boolean {
+  const t = (to ?? "").trim().toLowerCase();
+  if (!t || /(^|[\s,;/])(all|everyone|everybody|team)([\s,;/.!]|$)/.test(t)) return true;
+  const me = agentId.toLowerCase();
+  const named = (m: { id: string; name?: string }) => {
+    const name = (m.name ?? "").trim().toLowerCase();
+    return t.includes(m.id.toLowerCase()) || (name.length >= 3 && t.includes(name));
+  };
+  if (named({ id: agentId, name: team.find((m) => m.id.toLowerCase() === me)?.name })) return true;
+  return !team.some((m) => m.id.toLowerCase() !== me && named(m));
+}
 
 export const WAIT_MAX_SECONDS = 300;
 export const WAIT_POLL_MS = 500;
@@ -4345,11 +4368,14 @@ export const WAIT_POLL_MS = 500;
  * Block until something the agent cares about happens, so an idle worker does
  * not burn a provider round per poll (`sleep 30` then `cat done/SWARM_DONE`
  * costs a full turn each time). Returns on a new post in a subscribed thread,
- * the sentinel appearing, losing a claim it held, or the deadline.
+ * the sentinel appearing, losing a claim it held, or the deadline. A post on
+ * the primary thread addressed only to other agents (postIsFor) does not wake
+ * it unless `everyPost` is set: it stays unread, and the delivery that follows
+ * the next wake carries it. A post in a side thread always wakes its members.
  */
 export async function waitForSwarmChange(
   ctx: SwarmContext,
-  options: { seconds?: number; signal?: AbortSignal; pollMs?: number } = {},
+  options: { seconds?: number; signal?: AbortSignal; pollMs?: number; everyPost?: boolean } = {},
 ): Promise<WaitResult> {
   const seconds = Math.min(Math.max(1, Math.round(options.seconds ?? 60)), WAIT_MAX_SECONDS);
   const pollMs = options.pollMs ?? WAIT_POLL_MS;
@@ -4364,17 +4390,51 @@ export async function waitForSwarmChange(
       .map((c) => c.path),
   );
   const elapsed = () => Date.now() - started;
+  // How far this wait has looked in each thread: from the cursor, so an
+  // unread post already there is judged too, and past each post that was
+  // someone else's, so it is judged once.
+  const seen: Record<string, number> = { ...cursors };
+  let passed = 0;
+  const withPassed = <T extends WaitResult>(r: T): T => (passed > 0 ? { ...r, passed } : r);
 
   for (;;) {
     if (await swarmDoneExists(ctx.sandboxRoot)) {
-      return { reason: "sentinel", waited_ms: elapsed(), detail: "done/SWARM_DONE exists. Call done and stop." };
+      return withPassed({ reason: "sentinel", waited_ms: elapsed(), detail: "done/SWARM_DONE exists. Call done and stop." });
     }
 
     const latest = await latestPostIds(ctx.sandboxRoot, threads);
-    const fresh = Object.entries(latest).filter(([thread, id]) => id > (cursors[thread] ?? 0));
+    const fresh = Object.entries(latest).filter(([thread, id]) => id > (seen[thread] ?? 0));
     if (fresh.length > 0) {
-      const names = fresh.map(([thread]) => thread).join(", ");
-      return { reason: "post", waited_ms: elapsed(), detail: `New posts in: ${names}. Call inbox.` };
+      const waking: string[] = [];
+      let team: Array<{ id: string; name?: string }> | null = null;
+      for (const [thread, id] of fresh) {
+        if (options.everyPost || thread !== PRIMARY_THREAD) {
+          waking.push(thread);
+          continue;
+        }
+        if (!team) {
+          const names = await readNames(ctx.sandboxRoot);
+          team = (await teamIds(ctx.sandboxRoot)).map((tid) => ({ id: tid, name: names.find((n) => n.id === tid)?.name }));
+        }
+        let forMe = false;
+        for (const file of await listPostFiles(ctx.sandboxRoot, thread)) {
+          const n = Number.parseInt(basename(file).slice(0, 6), 10);
+          if (!(n > (seen[thread] ?? 0) && n <= id)) continue;
+          const post = await readPost(file).catch(() => null);
+          // A post that cannot be read is not known to be someone else's.
+          if (!post || postIsFor(post.to, ctx.agentId, team)) {
+            forMe = true;
+            break;
+          }
+          passed += 1;
+        }
+        if (forMe) waking.push(thread);
+        else seen[thread] = id;
+      }
+      if (waking.length > 0) {
+        const note = passed > 0 ? ` ${passed} post(s) to other agents came in as well; the delivery has them.` : "";
+        return withPassed({ reason: "post", waited_ms: elapsed(), detail: `New posts in: ${waking.join(", ")}. Call inbox.${note}` });
+      }
     }
 
     if (mine.size > 0) {
@@ -4385,19 +4445,20 @@ export async function waitForSwarmChange(
       );
       const lost = [...mine].filter((path) => !held.has(path));
       if (lost.length > 0) {
-        return {
+        return withPassed({
           reason: "claim_lost",
           waited_ms: elapsed(),
           detail: `Your lease lapsed on: ${lost.join(", ")}. Re-claim before writing.`,
-        };
+        });
       }
     }
 
     if (Date.now() >= deadline) {
-      return { reason: "timeout", waited_ms: elapsed(), detail: `Nothing changed in ${seconds}s.` };
+      const note = passed > 0 ? ` ${passed} post(s) to other agents came in; inbox has them.` : "";
+      return withPassed({ reason: "timeout", waited_ms: elapsed(), detail: `Nothing for you in ${seconds}s.${note}` });
     }
     if (options.signal?.aborted) {
-      return { reason: "timeout", waited_ms: elapsed(), detail: "Wait aborted." };
+      return withPassed({ reason: "timeout", waited_ms: elapsed(), detail: "Wait aborted." });
     }
     await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
   }

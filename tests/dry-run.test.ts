@@ -41,6 +41,7 @@ import {
   recordEntry,
   harnessStop,
   waitForSwarmChange,
+  postIsFor,
   watchedPathHashes,
   readFileVersion,
   resolvesToProtected,
@@ -1805,6 +1806,58 @@ test("wait returns on a post, on the sentinel, and on a lost claim", async () =>
     await harnessStop(root, "cap", "done");
     const stopped = await waitForSwarmChange(a0, { seconds: 5, pollMs: 50 });
     assert.equal(stopped.reason, "sentinel");
+  });
+});
+
+test("postIsFor: to all, to me by id or name, or to no one on the team is mine; to teammates only is not", () => {
+  const team = [{ id: "s1a00", name: "Mobile Messages" }, { id: "s1a01", name: "PrintLab" }, { id: "s1a02" }];
+  assert.ok(postIsFor("all", "s1a00", team));
+  assert.ok(postIsFor("", "s1a00", team));
+  assert.ok(postIsFor("s1a01, all", "s1a00", team), "all among others is everyone");
+  assert.ok(postIsFor("s1a00", "s1a00", team));
+  assert.ok(postIsFor("s1a01, s1a00", "s1a00", team));
+  assert.ok(postIsFor("Mobile Messages", "s1a00", team), "by the name it chose");
+  assert.ok(postIsFor("critic", "s1a00", team), "a role nobody on the team is named for wakes everyone");
+  assert.ok(!postIsFor("s1a01", "s1a00", team));
+  assert.ok(!postIsFor("PrintLab", "s1a00", team));
+  assert.ok(!postIsFor("s1a01, s1a02", "s1a00", team));
+});
+
+test("wait sleeps through posts to other agents, wakes for its own, and says how many passed", async () => {
+  // BelkaCTF #6, ten agents: 586 of 1,291 wake-ups on posts were for posts
+  // addressed only to someone else, each a model turn.
+  await withSandbox(async (root) => {
+    const teamPath = join(root, "team.json");
+    const team = JSON.parse(await readFile(teamPath, "utf8")) as { agents: Array<Record<string, unknown>> };
+    team.agents.push({ ...team.agents[1], id: "agent02" });
+    await writeFile(teamPath, `${JSON.stringify(team, null, 2)}\n`, "utf8");
+    const a0 = createContext(root, "agent00");
+    const a1 = createContext(root, "agent01");
+    await readInbox(a0);
+
+    // A post from agent01 to agent02 only: agent00 sleeps through it.
+    await postMessage(a1, { tag: "ask", to: "agent02", body: "check the SYSTEM hive" });
+    const slept = await waitForSwarmChange(a0, { seconds: 1, pollMs: 50 });
+    assert.equal(slept.reason, "timeout");
+    assert.equal(slept.passed, 1);
+    assert.match(slept.detail, /1 post\(s\) to other agents came in; inbox has them/);
+
+    // It is still unread: the next delivery brings it with what woke it.
+    const woke = waitForSwarmChange(a0, { seconds: 5, pollMs: 50 });
+    setTimeout(() => void postMessage(a1, { tag: "result", to: "all", body: "Q5 verified" }), 120);
+    const r = await woke;
+    assert.equal(r.reason, "post");
+    assert.equal(r.passed, 1);
+    const box = await readInbox(a0);
+    assert.deepEqual(box.posts.map((p) => p.body), ["check the SYSTEM hive", "Q5 verified"]);
+
+    // By the name it chose, and with every_post, it wakes.
+    await claimName(root, "agent00", "Timeline Critic");
+    await postMessage(a1, { tag: "ask", to: "Timeline Critic", body: "is row 12 right?" });
+    assert.equal((await waitForSwarmChange(a0, { seconds: 2, pollMs: 50 })).reason, "post");
+    await readInbox(a0);
+    await postMessage(a1, { tag: "ask", to: "agent02", body: "and the NTUSER hive" });
+    assert.equal((await waitForSwarmChange(a0, { seconds: 2, pollMs: 50, everyPost: true })).reason, "post");
   });
 });
 
