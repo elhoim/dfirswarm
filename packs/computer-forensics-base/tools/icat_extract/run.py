@@ -75,6 +75,11 @@ def _resolve_catalog(explicit=None):
         return os.path.join(root, subs[0])
     if not subs:
         raise SystemExit('{"ok": false, "error": "catalog/ is empty; pass catalog="}')
+    # A disk and a memory image catalogue two directories, and only the
+    # disk's has filesystems (partitions.txt): with one such, it is the one.
+    disks = [d for d in subs if os.path.isfile(os.path.join(root, d, "partitions.txt"))]
+    if len(disks) == 1:
+        return os.path.join(root, disks[0])
     raise SystemExit('{"ok": false, "error": "several catalogues; pass catalog=", "candidates": %s}' % json.dumps(subs))
 
 def fail(msg, **extra):

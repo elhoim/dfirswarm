@@ -834,6 +834,7 @@ test("catalog_search finds the filesystem the catalogue names by its sector, and
     // A second catalogue: catalog= names it.
     await mkdir(join(cwd, "catalog", "Other", "p0"), { recursive: true });
     await writeFile(join(cwd, "catalog", "Other", "p0", "filelist.txt"), "Other/file.txt\n");
+    await writeFile(join(cwd, "catalog", "Other", "partitions.txt"), "No partition table: inputs/Other is one NTFS volume starting at sector 0.\n");
     r = await runPy(script, cwd, { pattern: "file", which: "filelist", partition: "p2048" });
     assert.match(r.stdout + r.stderr, /several catalogues; pass catalog=/);
     r = await runPy(script, cwd, { pattern: "file", which: "filelist", catalog: join("catalog", "Other") });
@@ -1044,8 +1045,16 @@ test("catalog_search takes a catalogue by the name the index gives it, and bad i
     r = await runPy(join(tools, "catalog_search", "run.py"), cwd, { pattern: "x", which: "filelist", catalog: "Case5.E01" });
     assert.notEqual(r.code, 0);
     assert.deepEqual(JSON.parse(r.stdout + r.stderr), { ok: false, error: "no catalogue Case5.E01", candidates: ["Case4.E01", "memdump.mem"] });
+    // A disk and a memory catalogue: the disk's is the one with filesystems.
+    await writeFile(join(cwd, "catalog", "Case4.E01", "partitions.txt"), "002:  000:000   0000002048   ...   NTFS\n");
+    r = await runPy(join(tools, "catalog_search", "run.py"), cwd, { pattern: "NTUSER", which: "filelist", partition: "p2048" });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /NTUSER\.DAT/);
+    // Two disks: the caller says which, from a JSON list.
+    await mkdir(join(cwd, "catalog", "Other.E01"), { recursive: true });
+    await writeFile(join(cwd, "catalog", "Other.E01", "partitions.txt"), "\n");
     r = await runPy(join(tools, "catalog_search", "run.py"), cwd, { pattern: "x", which: "filelist" });
-    assert.deepEqual(JSON.parse(r.stdout + r.stderr).candidates, ["Case4.E01", "memdump.mem"], "several catalogues are a JSON list");
+    assert.deepEqual(JSON.parse(r.stdout + r.stderr).candidates, ["Case4.E01", "Other.E01", "memdump.mem"], "several catalogues are a JSON list");
 
     r = await runPy(join(tools, "ioc_scan", "run.py"), cwd, { path: "work/nothing-here.txt", needles: "x" });
     assert.notEqual(r.code, 0);

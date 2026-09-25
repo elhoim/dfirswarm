@@ -681,7 +681,9 @@ not surprised:
   takes a catalogue by the name the index lists (`catalog=Case4.E01`, or
   `Case4.E01/p2048`), which was a traceback; `sqlite_query` without `sql`
   and `ioc_scan` on a missing path answer in JSON instead of raising.
-  computer-forensics-base 1.2.7, windows-forensics 1.2.5.
+  With a disk and a memory image catalogued, the disk's catalogue (the one
+  with `partitions.txt`) is the default instead of "several catalogues".
+  computer-forensics-base 1.2.8, windows-forensics 1.2.5.
 
 - **The venv was 642 claims and seven violations, and the panes' temp
   files were more.** With `--allow-install` one agent's pip created
