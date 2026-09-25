@@ -258,6 +258,21 @@ not surprised:
 
 ### Added
 
+- **Every image says what it holds, in the VM: `/etc/dfirswarm/tools.md`.**
+  One line a program: its name, what it is for (its pack's own `why`), its
+  pack, and the version its package record holds (a `--version` probe had
+  answered "invalid option" for a third of them); then the Python libraries
+  the packs and the tool library install, with the note on each one's line;
+  then what a pack names that the image does not hold. `install.py` writes it
+  beside `image.json`, the NOTICE and the SBOM, in the base and in every
+  profile, and the image check records it in `toolbox.json` (`tools_md`).
+- **GnuPG in the encrypted-containers images** (encrypted-containers 1.1.2):
+  `gpg`, to read an OpenPGP message's packets before any key is known, import
+  a private key found on the evidence, and decrypt once its passphrase is. Only
+  `gpgv` was there; on the sixth CTF round an agent on "Encrypt Them All"
+  spent its turns looking for an OpenPGP reader on PyPI, where `gpg` needs
+  `gpgme.h` to build.
+
 - **Every program a pack names is in the image profile that holds it, or
   said not to belong in one.** The recipe knew an apt line, a pip line and a
   pinned download, and listed everything else as manual, never installed:
@@ -632,6 +647,26 @@ not surprised:
 
 ### Changed
 
+- **The contract names no program when the image describes itself.** A
+  microVM run whose image has `tools.md` gets one paragraph, "## Programs",
+  that points at the file inside the VM; the table of sixty programs, a third
+  of `SWARM.md` and read by every agent at every start, is gone for it. An
+  image without the file, and a host run, keep the checked table.
+- **A pack's tools are said to be in the tool list, not listed as another
+  case's.** They sat under "Seeded tools (case-specific) … written against
+  another case", with "baked: offset 20000" for a limit and an example
+  FILETIME taken for an offset. The contract now says the packs put N tools
+  in the tool list, each described there, general and fed by the arguments.
+  Only `--tools-from` copies are listed as another case's, and "baked" is an
+  `inputs/` path or an offset their example gives.
+- **A shell write in the writer's own directories takes no lease.** No peer
+  may claim or write there, so the implicit claim protected nothing: one
+  ileapp run was 507 of a run's 644 `claim_file` lines, each a lock file. The
+  write is still snapshotted.
+- **The kickoff's encrypted-volume warning is not given to a VM run that has
+  `encrypted-containers`**: it told operators who had passed the pack to start
+  again with it.
+
 - The pinned `@earendil-works/pi-coding-agent` is **0.87.0** (was 0.85.1):
   npm `latest`, and what the Linux host already ran. The provider contract
   changed between the two (a transcript with system messages instead of
@@ -639,6 +674,21 @@ not surprised:
   e2e speaks both, and the suite passes on both.
 
 ### Fixed
+
+- **A VM's probe asks the hub again.** With eighteen VMs running and a third
+  run coming up, two seats of eight had their first connection close with no
+  answer, twice, and the kickoff stopped with "no answer" and nothing else.
+  The probe tries five times, three seconds apart, and records what the hub
+  said, or that it said nothing, and how many tries it took.
+- **`regkv`, `regkeys` and `shellbags` answer a key that is not there** with
+  the deepest key that is and the names under it (windows-forensics 1.2.9,
+  the tool library's regkv 3 and regkeys 4). regkv printed regipy's
+  traceback, twice on the sixth CTF round, for keys an agent had guessed.
+- **`sqlite_query` says when a file is not SQLite** (computer-forensics-base
+  1.2.13, the tool library's 4): its header, the first page's entropy, and
+  whether that reads as an encrypted database (SQLCipher or an app's own) or
+  another format, where sqlite3 said only "file is not a database". A missing
+  database is a JSON answer too.
 
 - **`sigma_hunt` passed Zircolite `--noexternal`**, which Zircolite 3
   removed and refuses. Its `auto` engine prefers Zircolite, so once the disk

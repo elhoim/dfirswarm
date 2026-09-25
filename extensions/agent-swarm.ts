@@ -1522,6 +1522,11 @@ export default function (pi: ExtensionAPI) {
       // Snapshot first: the announcement promises the change is undoable.
       const version = await recordFileVersion(cwd, report.path, agentId).catch(() => null);
       await quarantineIfExtracted(cwd, report.path);
+      // The writer's own directories need no lease: no peer may claim or
+      // write there (peerHoleOf refuses it), so a claim protects nothing. On
+      // the sixth CTF round one ileapp run in an agent's own directory was
+      // 507 of 644 claim_file lines on the trace, each a lock file too.
+      if (isOwnScratch(report.path, agentId)) continue;
       if (!report.legitimate && !report.protected && !report.owner) {
         // Nobody holds it: the shell writer gets the lease it did not ask for.
         // From here on a peer writing the same file is a real conflict, and

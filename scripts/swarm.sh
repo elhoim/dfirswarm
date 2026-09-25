@@ -2184,9 +2184,15 @@ toolbox_sets_from_text() { # <lower-cased goal text>
 # volume or a virtual disk among them is a fact the kickoff can act on. This
 # only warns — the run has started by now — but it names the flag, which is
 # what the operator needs at the moment they read it.
-warn_on_catalog_signatures() { # <sandbox> <toolbox sets in force>
-  local sandbox="$1" sets="$2" hits
+warn_on_catalog_signatures() { # <sandbox> <toolbox sets in force> [packs]
+  local sandbox="$1" sets="$2" run_packs="${3:-}" hits
   case ",$sets," in *,crypto,*) return 0 ;; esac
+  # In a VM run the image comes from the packs, and with encrypted-containers
+  # among them its readers are in every VM already: "start again with
+  # --pack encrypted-containers" told operators who had passed it to redo it.
+  if [[ "${isolation:-host}" == "microvm" ]]; then
+    case ",$run_packs," in *,encrypted-containers,*) return 0 ;; esac
+  fi
   # `grep` finding nothing is the common case, and under `set -e` with
   # pipefail a command substitution that ends in a failed grep ends the
   # kickoff. It did, once, between writing this and running the tests.
@@ -2429,21 +2435,36 @@ if os.path.isdir(tools_dir):
                 man = json.load(f)
         except Exception:
             continue
+        if man.get("pack"):
+            packed.setdefault(man["pack"], []).append(man.get("name", name))
+            continue
         desc = " ".join((man.get("description") or "").split())
-        blob = " ".join([desc, str(man.get("example") or ""), json.dumps(man.get("params") or {})])
         baked = []
-        for m in re.findall(r"inputs/[A-Za-z0-9._/-]+", blob):
+        for m in re.findall(r"inputs/[A-Za-z0-9._/-]+", " ".join([desc, str(man.get("example") or "")])):
             if m not in baked:
                 baked.append(m)
-        for m in re.findall(r"\b\d{5,}\b", blob):
-            if m not in baked:
-                baked.append("offset " + m if m.isdigit() else m)
+        try:
+            example = json.loads(man.get("example") or "{}")
+        except (TypeError, ValueError):
+            example = {}
+        if isinstance(example, dict):
+            for k, v in example.items():
+                if "offset" in str(k).lower() and isinstance(v, (int, str)) and str(v).isdigit() and f"{k} {v}" not in baked:
+                    baked.append(f"{k} {v}")
         params = man.get("params") or {}
         param_s = ", ".join(params.keys()) if isinstance(params, dict) else ""
         note = f" — baked: {', '.join(baked)}" if baked else ""
         rows.append(f"| `{man.get('name', name)}` | {param_s or '—'} | {desc}{note} |")
+if packed:
+    count = sum(len(v) for v in packed.values())
+    tools_section += (
+        "## Pack tools\n\n"
+        f"This run's packs ({', '.join(sorted(packed))}) put {count} tools in your tool list; each one's "
+        "description there says what it does. They are general: the image, offset and paths come from the "
+        "arguments you give, never from another case.\n\n"
+    )
 if rows:
-    tools_section = (
+    tools_section += (
         "## Seeded tools (case-specific)\n\n"
         "The kickoff copied these into `tools/`. They were written against **another case**. "
         "Do not assume a baked `inputs/*.E01` path or partition offset applies here. "
@@ -4202,7 +4223,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
       echo "WARN: the catalog left what is not a file; removed before the contract reads it: $(tr '\n' ' ' <<<"$odd")" >&2
       find "$sandbox/catalog" ! -type f ! -type d -delete 2>/dev/null || true
     fi
-    warn_on_catalog_signatures "$sandbox" "$toolbox"
+    warn_on_catalog_signatures "$sandbox" "$toolbox" "$packs"
     chmod -R a-w "$sandbox/catalog" 2>/dev/null || true
   fi
   # The trace's own writer comes up before the guard hook, because the hook

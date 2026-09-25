@@ -323,6 +323,25 @@ test("a forged tool's writes are attributed by what its arguments name, like a s
   assert.doesNotMatch(source, /reason: `bash write to \$\{report\.path\}/, "a violation names the tool that made it, not always bash");
 });
 
+test("a shell write in the writer's own directories takes no lease: it is snapshotted and left alone", async () => {
+  // Sixth CTF round: one ileapp run in an agent's own directory was 507 of
+  // 644 claim_file lines, each a lock file, and no peer could have written
+  // there anyway. The own-directory check comes after the snapshot and
+  // before the implicit claim.
+  assert.ok(isOwnScratch("work/a00/ileapp/parsed/x.html", "a00"));
+  assert.ok(isOwnScratch("work/extracted/a00/SYSTEM", "a00"));
+  assert.ok(!isOwnScratch("work/report.md", "a00") && !isOwnScratch("work/a01/x", "a00"));
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../extensions/agent-swarm.ts", import.meta.url), "utf8");
+  const at = source.indexOf("// Snapshot first: the announcement promises the change is undoable.");
+  assert.ok(at > 0);
+  const block = source.slice(at, source.indexOf("reason: `${via} write`", at));
+  const snapshot = block.indexOf("recordFileVersion(");
+  const skip = block.indexOf("if (isOwnScratch(report.path, agentId)) continue;");
+  const claim = block.indexOf("claimFile(");
+  assert.ok(snapshot >= 0 && skip > snapshot && claim > skip, "snapshot, then the own-directory skip, then the implicit claim");
+});
+
 test("a forged tool cannot take the name of a harness event, and is told who writes it", () => {
   for (const name of ["inputs_check", "claim_violation", "idle_nudge", "record", "sentinel_nudge"]) {
     const result = validateToolSpec({ name, description: "x", params: {}, runtime: "python3", script: "print(1)" });

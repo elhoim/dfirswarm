@@ -654,26 +654,40 @@ for target in [t for t in os.environ.get("SWARM_PROBE_TARGETS", "").split(",") i
     except Exception as e:
         reach.append({"target": target, "ok": False, "error": str(e)})
 out["reach"] = reach
-try:
-    s = socket.socket(socket.AF_UNIX)
-    s.settimeout(10)
-    s.connect("${GUEST_HUB_SOCKET}")
-    # The seat's token first, when the run has one: the hub takes nothing
-    # else on this seat's socket before it.
-    token = os.environ.get("SWARM_SEAT_TOKEN", "")
-    if token:
-        s.sendall(json.dumps({"t": "auth", "token": token}).encode() + b"\\n")
-    s.sendall(b'{"t":"rpc","fn":"swarmDoneExists","args":[null]}\\n')
-    data = b""
-    while not data.endswith(b"\\n"):
-        chunk = s.recv(4096)
-        if not chunk:
+# Up to five tries, three seconds apart: on a host bringing up its third run
+# beside eighteen running VMs, two seats of eight had their connection close
+# with no answer, twice, and the kickoff stopped (sixth CTF round). What the
+# hub said, or that it said nothing, is kept for the record.
+out["hub"] = False
+for attempt in range(5):
+    if attempt:
+        time.sleep(3)
+    try:
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(10)
+        s.connect("${GUEST_HUB_SOCKET}")
+        # The seat's token first, when the run has one: the hub takes nothing
+        # else on this seat's socket before it.
+        token = os.environ.get("SWARM_SEAT_TOKEN", "")
+        if token:
+            s.sendall(json.dumps({"t": "auth", "token": token}).encode() + b"\\n")
+        s.sendall(b'{"t":"rpc","fn":"swarmDoneExists","args":[null]}\\n')
+        data = b""
+        while not data.endswith(b"\\n"):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        s.close()
+        reply = data.decode(errors="replace")
+        if json.loads(reply or "{}").get("ok") is True:
+            out["hub"] = True
+            out.pop("hub_error", None)
             break
-        data += chunk
-    out["hub"] = json.loads(data.decode() or "{}").get("ok") is True
-except Exception as e:
-    out["hub"] = False
-    out["hub_error"] = str(e)
+        out["hub_error"] = "the hub answered " + reply.strip() if reply.strip() else "the connection closed with no answer"
+    except Exception as e:
+        out["hub_error"] = str(e)
+out["hub_attempts"] = attempt + 1
 try:
     out["pi"] = subprocess.run(["pi", "--version"], capture_output=True, text=True, timeout=60).stdout.strip()
 except Exception as e:
