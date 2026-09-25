@@ -1,4 +1,4 @@
-import json, subprocess, sys, os, shlex, urllib.parse
+import json, subprocess, sys, os, shlex, urllib.parse, math, collections
 obj=json.load(sys.stdin)
 missing=[k for k in ('db_path','sql') if not isinstance(obj.get(k), str) or not obj.get(k)]
 if missing:
@@ -9,7 +9,30 @@ sql=obj['sql']
 csv=bool(obj.get('csv', False))
 readonly=bool(obj.get('readonly', True))
 if not os.path.exists(db):
-    raise SystemExit(f'database not found: {db}')
+    print(json.dumps({'ok': False, 'error': 'database not found', 'db_path': db}))
+    raise SystemExit(1)
+# sqlite3 says only "file is not a database" for anything else, and the
+# sixth CTF round's agents met it on Element's SQLCipher events.db without
+# learning why. The first page says it: a SQLite file starts with its magic,
+# an encrypted one (SQLCipher, or an app's own) is random from byte 0, and
+# another format has a header of its own.
+if os.path.isfile(db) and os.path.getsize(db) > 0:
+    with open(db, 'rb') as fh:
+        page = fh.read(4096)
+    if not page.startswith(b'SQLite format 3\x00'):
+        counts = collections.Counter(page)
+        entropy = -sum(c / len(page) * math.log2(c / len(page)) for c in counts.values())
+        print(json.dumps({
+            'ok': False,
+            'error': 'not a SQLite file: its first bytes are not the SQLite magic',
+            'db_path': db,
+            'header_hex': page[:16].hex(),
+            'first_page_entropy_bits_per_byte': round(entropy, 3),
+            'reading': ('random from the first byte: an encrypted database (SQLCipher or an app\'s own); '
+                        'no query runs without its key' if entropy > 7.5 else
+                        'another format: identify it from its header (file_type)'),
+        }))
+        raise SystemExit(1)
 # Use immutable URI for read-only safety when requested. The sqlite3 shell
 # reads a file: name as a URI by itself; it has no -uri option (every call
 # with readonly=true failed on "unknown option: -uri"). immutable=1 also opens

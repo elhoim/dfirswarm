@@ -1,5 +1,6 @@
-import sys, json, datetime
+import sys, json, datetime, os
 from regipy.registry import RegistryHive
+from regipy.exceptions import RegistryKeyNotFoundException
 
 def ft_to_iso(ft):
     # ft is FILETIME 100ns since 1601-01-01
@@ -20,6 +21,26 @@ def rooted_key(hive, path):
     if parts and parts[0].lower() == (hive.root.name or "").lower():
         parts = parts[1:]
     return hive.get_key("\\" + "\\".join(parts)) if parts else hive.root
+
+
+def nearest_key(hive, path):
+    """Where `path` stops existing: the deepest key of it the hive has, the
+    part that is not there, and the names that are. A caller who guessed a
+    key (a printer key one Windows version keeps and another does not, a
+    control set an offline SYSTEM hive numbers) picks from these instead of
+    guessing again."""
+    parts = [p for p in str(path).replace("/", "\\").split("\\") if p]
+    if parts and parts[0].lower() == (hive.root.name or "").lower():
+        parts = parts[1:]
+    node, found = hive.root, []
+    for part in parts:
+        kids = list(node.iter_subkeys())
+        match = next((k for k in kids if k.name.lower() == part.lower()), None)
+        if match is None:
+            return {"deepest_found": "\\" + "\\".join(found), "missing": part,
+                    "subkeys_there": sorted(k.name for k in kids)}
+        node, found = match, found + [match.name]
+    return {"deepest_found": "\\" + "\\".join(found), "missing": None, "subkeys_there": []}
 
 
 def dump(hive, key, recurse=False, depth=2):
@@ -58,10 +79,21 @@ def main():
     if not raw.strip():
         print(json.dumps({'error': 'no JSON input'})); sys.exit(1)
     args = json.loads(raw)
-    hive = args['hive']; key = args['key']
+    hive = args.get('hive'); key = args.get('key')
+    if not hive or key is None:
+        print(json.dumps({'ok': False, 'error': 'hive and key are required'})); sys.exit(1)
+    if not os.path.isfile(hive):
+        print(json.dumps({'ok': False, 'error': 'no such hive', 'hive': hive})); sys.exit(1)
     recurse = bool(args.get('recurse', False))
     depth = int(args.get('depth', 2))
-    out = dump(hive, key, recurse, depth)
+    try:
+        out = dump(hive, key, recurse, depth)
+    except RegistryKeyNotFoundException:
+        # The sixth CTF round's agent asked for ControlSet001\Enum\USBPRINT
+        # and ...\Print\Printers and got regipy's traceback twice; the names
+        # that are there are what it needed to ask again.
+        where = nearest_key(RegistryHive(hive), key)
+        print(json.dumps({'ok': False, 'error': 'key not found', 'key': key, **where}, indent=1)); sys.exit(1)
     print(json.dumps(out, indent=1, default=str))
 
 if __name__ == '__main__':

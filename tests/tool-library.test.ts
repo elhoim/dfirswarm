@@ -946,6 +946,8 @@ const ROOTED_DRIVER = [
   "        self.name, self.path, self.kids = name, path, {k.name.lower(): k for k in kids}",
   "    def get_subkey(self, name, raise_on_missing=True):",
   "        return self.kids.get(name.lower())",
+  "    def iter_subkeys(self):",
+  "        return iter(self.kids.values())",
   "def tree(name, path, spec):",
   "    return Key(name, path, [tree(k, path + '\\\\' + k, v) for k, v in spec.items()])",
   "shell = {'Microsoft': {'Windows': {'Shell': {'BagMRU': {}}}}}",
@@ -991,6 +993,64 @@ test("the registry tools read a key from the hive's root, whatever form the path
     const out = await runPySnippet(ROOTED_DRIVER, [script], [bag, `\\${bag}`, `S-1-5-21-1_Classes\\${bag}`, bag.replaceAll("\\", "/"), "Software\\Microsoft", "Microsoft\\Windows", ""]);
     assert.equal(out.code, 0, `${script}: ${out.stderr}`);
     assert.deepEqual(JSON.parse(out.stdout), [`\\${bag}`, `\\${bag}`, `\\${bag}`, `\\${bag}`, "\\Software\\Microsoft", null, ""], script);
+  }
+});
+
+test("a registry key that is not there is answered with the deepest key that is, and the names under it", async () => {
+  // Sixth CTF round: regkv asked for ControlSet001\\Enum\\USBPRINT and
+  // ...\\Print\\Printers and answered regipy's traceback twice; the agent
+  // needed the names that were there to ask again.
+  const driver = ROOTED_DRIVER.replace(
+    /out = \[\][\s\S]*$/,
+    ["out = [mod.nearest_key(Hive(), p) for p in json.load(sys.stdin)]", "print(json.dumps(out))"].join("\n"),
+  );
+  for (const script of [
+    join(LIB, "..", "packs", "windows-forensics", "tools", "shellbags", "run.py"),
+    join(LIB, "..", "packs", "windows-forensics", "tools", "regkv", "run.py"),
+    join(LIB, "regkv", "run.py"),
+    join(LIB, "regkeys", "run.py"),
+  ]) {
+    const out = await runPySnippet(driver, [script], [
+      "Local Settings\\Software\\Microsoft\\Windows\\Shell\\Printers",
+      "\\Software\\Nope\\Deeper",
+      "S-1-5-21-1_Classes/Software/microsoft",
+    ]);
+    assert.equal(out.code, 0, `${script}: ${out.stderr}`);
+    assert.deepEqual(JSON.parse(out.stdout), [
+      { deepest_found: "\\Local Settings\\Software\\Microsoft\\Windows\\Shell", missing: "Printers", subkeys_there: ["BagMRU"] },
+      { deepest_found: "\\Software", missing: "Nope", subkeys_there: ["Microsoft"] },
+      { deepest_found: "\\Software\\Microsoft", missing: null, subkeys_there: [] },
+    ], script);
+  }
+});
+
+test("sqlite_query says a file is not SQLite, and whether it looks encrypted, instead of \"file is not a database\"", async () => {
+  // Sixth CTF round: Element's SQLCipher events.db answered only sqlite3's
+  // "file is not a database", twice, to two agents.
+  const { randomBytes } = await import("node:crypto");
+  for (const script of [
+    join(LIB, "..", "packs", "computer-forensics-base", "tools", "sqlite_query", "run.py"),
+    join(LIB, "sqlite_query", "run.py"),
+  ]) {
+    await withCwd(async (cwd) => {
+      await mkdir(join(cwd, "work"), { recursive: true });
+      await writeFile(join(cwd, "work", "events.db"), randomBytes(8192));
+      await writeFile(join(cwd, "work", "notes.db"), Buffer.from("PK\u0003\u0004" + "just some text in a zip-ish file ".repeat(40)));
+      let r = await runPy(script, cwd, { db_path: "work/events.db", sql: "select 1;" });
+      assert.notEqual(r.code, 0);
+      let body = JSON.parse(r.stdout) as { ok: boolean; error: string; header_hex: string; first_page_entropy_bits_per_byte: number; reading: string };
+      assert.equal(body.ok, false);
+      assert.match(body.error, /not a SQLite file/);
+      assert.equal(body.header_hex.length, 32);
+      assert.ok(body.first_page_entropy_bits_per_byte > 7.5, String(body.first_page_entropy_bits_per_byte));
+      assert.match(body.reading, /encrypted database/);
+      r = await runPy(script, cwd, { db_path: "work/notes.db", sql: "select 1;" });
+      body = JSON.parse(r.stdout);
+      assert.equal(body.header_hex.slice(0, 8), "504b0304");
+      assert.match(body.reading, /another format/);
+      r = await runPy(script, cwd, { db_path: "work/none.db", sql: "select 1;" });
+      assert.deepEqual(JSON.parse(r.stdout), { ok: false, error: "database not found", db_path: "work/none.db" });
+    });
   }
 });
 

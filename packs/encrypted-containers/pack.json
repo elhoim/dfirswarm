@@ -1,7 +1,7 @@
 {
   "id": "encrypted-containers",
   "name": "Encrypted Containers Pack",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Telling one kind of encryption from another before spending anything on it: volume headers and their key protectors, LUKS key slots, the container that has no signature at all, password-protected archives and documents, and where the key material a case needs is usually found.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -31,7 +31,7 @@
       "skills/keys/where-they-hide.md": "925b2ddf294240834268cb51b60d6f343289a3b45e9dbc2c59574ecbb4e7210b",
       "skills/volumes/bitlocker.md": "70734cc51e280f19256f9220b8798408075366ec28fe819e735d628a9536e189",
       "skills/volumes/luks-filevault.md": "030c14f2455a6bdcd7128c30baf8738d042474280602abced52e83750feb8a85",
-      "requires/host.json": "8a0c3e7f859a181297cb88e43fa6783a1f462bae850a6a740b534ddc8fac0e00",
+      "requires/host.json": "91933040b9ed188d0882eb94f1259179bf29cee9339ac62137d7a0aad5910729",
       "requires/python.txt": "58b4ff1925c2c96d0982a45e73cb1c1f7b9dd7f07074662ac560747f68522070",
       "skills/INDEX.md": "4cd78a06bb4b2259cf40767049037c450bab73c7941c0b2ac3a14b64392b068c"
     }

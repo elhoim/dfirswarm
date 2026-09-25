@@ -71,6 +71,18 @@
       },
       "licence": "GPL-2.0-or-later",
       "redistributable": false
+    },
+    {
+      "name": "gpg",
+      "package": "gnupg",
+      "optional": true,
+      "why": "Read an OpenPGP message's packets (recipients, algorithms, the key it wants) with --list-packets before any key is known, import a private key found on the evidence, and decrypt once its passphrase is.",
+      "install": {
+        "brew": "brew install gnupg",
+        "apt": "apt-get install -y gnupg"
+      },
+      "licence": "GPL-3.0-or-later",
+      "redistributable": false
     }
   ]
 }

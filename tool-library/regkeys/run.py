@@ -66,6 +66,26 @@ def rooted_key(hive, path):
     return hive.get_key("\\" + "\\".join(parts)) if parts else hive.root
 
 
+def nearest_key(hive, path):
+    """Where `path` stops existing: the deepest key of it the hive has, the
+    part that is not there, and the names that are. A caller who guessed a
+    key (a printer key one Windows version keeps and another does not, a
+    control set an offline SYSTEM hive numbers) picks from these instead of
+    guessing again."""
+    parts = [p for p in str(path).replace("/", "\\").split("\\") if p]
+    if parts and parts[0].lower() == (hive.root.name or "").lower():
+        parts = parts[1:]
+    node, found = hive.root, []
+    for part in parts:
+        kids = list(node.iter_subkeys())
+        match = next((k for k in kids if k.name.lower() == part.lower()), None)
+        if match is None:
+            return {"deepest_found": "\\" + "\\".join(found), "missing": part,
+                    "subkeys_there": sorted(k.name for k in kids)}
+        node, found = match, found + [match.name]
+    return {"deepest_found": "\\" + "\\".join(found), "missing": None, "subkeys_there": []}
+
+
 def main():
     data = json.load(sys.stdin)
     hive_path = data["hive"]
@@ -77,7 +97,7 @@ def main():
         try:
             k = rooted_key(h, key_path)
         except RegistryKeyNotFoundException:
-            print(json.dumps({"error": "key not found: " + key_path}))
+            print(json.dumps({"ok": False, "error": "key not found", "key": key_path, **nearest_key(h, key_path)}))
             return 1
     else:
         k = h.root

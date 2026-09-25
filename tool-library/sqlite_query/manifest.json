@@ -28,6 +28,6 @@
   "example": "{\"db_path\":\"work/extracted/memory/chrome_History\",\"sql\":\"select count(*) from urls;\",\"csv\":true,\"readonly\":true}",
   "by": "s881002",
   "at": "2026-09-18T13:31:25.586Z",
-  "version": 3,
-  "sha256": "3ad6285bd5141b880d5215186dd0b71b6cb570fb281db79c91ce71db315091dc"
+  "version": 4,
+  "sha256": "db83b66c9943c632dd8a8000d90d4db11b1a137aaa712d44aa19f1fab99111f2"
 }
