@@ -11,7 +11,7 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { closeSync, createReadStream, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import {
@@ -218,7 +218,31 @@ export type AgentBudget = {
   /** The seat's model, `provider/id`, as the kickoff assigned it. It rides
    *  here so a per-model cap can be summed from this record alone. */
   model?: string;
+  /** What the seat's Pi sessions other than the live one spent (a restart,
+   *  `/new`). The counters above are the seat's whole run: this plus the
+   *  live session. See foldSessionSlice. */
+  earlier_sessions?: CarriedCounters;
+  /** The Pi session this row's live counters come from, when Pi says. */
+  session_id?: string;
+  /** Each session's last report, by session id, when reports carry one. The
+   *  counters above are their sum; see foldSessionSlice. */
+  sessions?: Record<string, CarriedCounters>;
 };
+
+/** The counters a Pi session reports and a fold adds up. */
+export const SESSION_COUNTERS = [
+  "spent_usd",
+  "tokens",
+  "calls",
+  "input",
+  "output",
+  "cache_read",
+  "cache_write",
+] as const;
+export type SessionCounters = Record<(typeof SESSION_COUNTERS)[number], number>;
+/** SessionCounters plus the compaction and hand-off counts, present when non-zero. */
+export type CarriedCounters = SessionCounters &
+  Partial<Record<"compactions" | "compaction_tokens" | "compaction_usd" | "handoffs", number>>;
 
 export type BudgetRecord = {
   cap_usd: number;
@@ -962,13 +986,181 @@ export async function writeFileAtomic(path: string, text: string): Promise<void>
   }
 }
 
+/** How long a fold waits before reading an unreadable budget.json again. */
+const BUDGET_REREAD_MS = 100;
+
 export async function readBudget(sandboxRoot: string): Promise<BudgetRecord> {
   const raw = await readFile(join(sandboxRoot, "budget.json"), "utf8");
   return normalizeBudget(JSON.parse(raw) as Partial<BudgetRecord>);
 }
 
+/** True when the run's guard holds budget.json by its inode (Landlock alone). */
+async function budgetPinnedByInode(sandboxRoot: string): Promise<boolean> {
+  const plan = await readFile(join(sandboxRoot, ".fsguard", "plan.txt"), "utf8").catch(() => "");
+  return /^mode: landlock$/m.test(plan);
+}
+
+/**
+ * Replace budget.json whole: a temp file beside it, then `rename` over it, so
+ * a reader outside the table lock (`maybeEnforceStops`, `watchCaps`, the UI,
+ * observe) sees the old record or the new one, never half of one, and a
+ * crash mid-write leaves the old record in place.
+ *
+ * The temp file sits in budget.json's own directory, the sandbox root, since
+ * `rename` does not cross filesystems.
+ *
+ * Under Landlock alone (`mode: landlock` in the kickoff's .fsguard/plan.txt)
+ * the record is written in place, as it always was, by every process of the
+ * run. There inputs/ is carved out of the sandbox, so the root is
+ * listing-only (scripts/landlock.py `plan`) and budget.json's rights are a
+ * rule on its inode, taken when each pane started. A rename cannot happen
+ * inside such a pane, and one from a pane that runs without the guard would
+ * put a new inode at the name that no confined pane could read or write
+ * again. An EACCES or EPERM on the temp file falls back the same way.
+ * Any other failure (a full disk) is thrown, not retried in place:
+ * truncating the live file on a disk that cannot take the new bytes is how a
+ * torn record is made.
+ */
 export async function writeBudget(sandboxRoot: string, budget: BudgetRecord): Promise<void> {
-  await writeFileAtomic(join(sandboxRoot, "budget.json"), `${JSON.stringify(normalizeBudget(budget), null, 2)}\n`);
+  const normalized = normalizeBudget(budget);
+  const target = join(sandboxRoot, "budget.json");
+  const body = `${JSON.stringify(normalized, null, 2)}\n`;
+  if (await budgetPinnedByInode(sandboxRoot)) {
+    await writeFile(target, body, "utf8");
+    return;
+  }
+  const temp = join(dirname(target), `.budget.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  try {
+    // `wx`: never through a link or over a file someone put at that name.
+    await writeFile(temp, body, { encoding: "utf8", flag: "wx", mode: 0o644 });
+    await rename(temp, target);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // A write that failed after the open (a full disk) leaves a partial temp
+    // file behind; EEXIST means the name was someone else's, so leave it.
+    if (code !== "EEXIST") await rm(temp, { force: true }).catch(() => undefined);
+    if (code !== "EACCES" && code !== "EPERM") throw err;
+    await writeFile(target, body, "utf8");
+  }
+}
+
+/** Session-scoped counters that are not spend but ride with it: what the
+ *  session's compactions cost and how many hand-offs it completed. Carried
+ *  forward like the spend, so a restart does not reset "hand-offs cost X"
+ *  next to a whole-run total. Left out of a row that never had them. */
+export const SESSION_EXTRAS = ["compactions", "compaction_tokens", "compaction_usd", "handoffs"] as const;
+/** Stands for what a seat recorded before its reports carried a session id. */
+export const UNKEYED_SESSION = "unkeyed";
+
+function countersOf(row: Partial<AgentBudget> | undefined): CarriedCounters {
+  const out = { spent_usd: 0, tokens: 0, calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 } as CarriedCounters;
+  for (const key of SESSION_COUNTERS) out[key] = Number(row?.[key]) || 0;
+  for (const key of SESSION_EXTRAS) {
+    const value = Number(row?.[key]) || 0;
+    if (value > 0) out[key] = value;
+  }
+  return out;
+}
+
+function addCounters(a: CarriedCounters, b: CarriedCounters, sign = 1): CarriedCounters {
+  const out = { ...a } as CarriedCounters;
+  const round = (key: string, value: number) => (key.endsWith("_usd") ? Number(value.toFixed(6)) : value);
+  for (const key of SESSION_COUNTERS) out[key] = round(key, (a[key] || 0) + sign * (b[key] || 0));
+  for (const key of SESSION_EXTRAS) {
+    const value = round(key, (a[key] || 0) + sign * (b[key] || 0));
+    if (value > 0) out[key] = value;
+    else delete out[key];
+  }
+  return out;
+}
+
+function anyCounter(counters: CarriedCounters): boolean {
+  return [...SESSION_COUNTERS, ...SESSION_EXTRAS].some((key) => (counters[key] || 0) > 0);
+}
+
+/**
+ * A seat's row after a fold, never smaller than before it. Pi reports a
+ * session's own totals, so a pane whose session restarts reports from zero
+ * again; replacing the row with that would hand back money already spent
+ * and could lift a swarm over its cap back under it.
+ *
+ * With a session id on the report (`sessionManager.getSessionId()`), the row
+ * keeps each session's last report under its id in `sessions` and its
+ * counters are their sum: a restart adds a session, `/new` then `/resume`
+ * back replaces the resumed session's entry instead of adding it again, and
+ * two processes sharing one AGENT_ID each keep their own entry. A session
+ * whose report goes down is not believed (sessions are append-only); its
+ * last report stands.
+ *
+ * Without an id, a counter going down is what says a new session began: the
+ * seat's totals so far are carried forward in `earlier_sessions` and the new
+ * session adds to them. That heuristic over-counts where the id does not:
+ * `/new` then `/resume` back adds the resumed session again (5 -> 0.5 -> 5 ->
+ * 5.2 records 10.2, not 5.7), and two live processes with one AGENT_ID add a
+ * full copy at every alternation.
+ *
+ * Either way, `/fork` over-counts: the new session starts with a copy of the
+ * prefix's entries, usage included, and gets a new id, so the prefix is
+ * counted in both sessions (5 USD forked at call 31 records about 8.1). A
+ * report that switches between having an id and not (getSessionId failing
+ * now and then) counts the live session twice. Every one of these errs high,
+ * which for a brake is the safe side, and none occurs in a headless swarm.
+ */
+export function foldSessionSlice(previous: AgentBudget | undefined, slice: SessionUsageSlice): AgentBudget {
+  // A report of nothing at all is not a new session: it is what a failed read
+  // of the session looks like, and folding it as one would add the whole old
+  // session again on the next good read (4 -> 0 -> 5 recorded 9). A session
+  // that really is new has nothing to add yet, so keeping the counters loses
+  // nothing; its first real report starts the carry.
+  const kept = new Set<string>([...SESSION_COUNTERS, ...SESSION_EXTRAS, "session_id", "sessions", "earlier_sessions"]);
+  if (previous && SESSION_COUNTERS.every((key) => !(Number(slice[key]) > 0))) {
+    const row: AgentBudget = { ...previous };
+    for (const [key, value] of Object.entries(slice)) {
+      if (!kept.has(key) && value !== undefined) (row as Record<string, unknown>)[key] = value;
+    }
+    return row;
+  }
+  const row: AgentBudget = { ...emptyAgentBudget(), ...slice };
+  delete row.earlier_sessions;
+  delete row.sessions;
+  delete row.session_id;
+  const put = (counters: CarriedCounters) => {
+    for (const key of SESSION_EXTRAS) delete row[key];
+    Object.assign(row, counters);
+  };
+  const live = countersOf(slice);
+  const sessionId = typeof slice.session_id === "string" && slice.session_id ? slice.session_id : undefined;
+
+  if (sessionId) {
+    const sessions: Record<string, CarriedCounters> = {};
+    for (const [id, counters] of Object.entries(previous?.sessions ?? {})) sessions[id] = countersOf(counters);
+    // A row folded before reports carried an id: all of it is an earlier session.
+    if (previous && !previous.sessions && anyCounter(countersOf(previous))) sessions[UNKEYED_SESSION] = countersOf(previous);
+    const before = sessions[sessionId];
+    if (!before || !SESSION_COUNTERS.some((key) => live[key] < before[key] - 1e-9)) sessions[sessionId] = live;
+    let total = countersOf(undefined);
+    for (const counters of Object.values(sessions)) total = addCounters(total, counters);
+    put(total);
+    row.session_id = sessionId;
+    row.sessions = sessions;
+    const earlier = addCounters(total, sessions[sessionId], -1);
+    if (Object.keys(sessions).length > 1) row.earlier_sessions = earlier;
+    return row;
+  }
+
+  let carried = countersOf(undefined);
+  if (previous) {
+    const before = countersOf(previous.earlier_sessions);
+    // What the live session had reported at the last fold.
+    const lastLive = addCounters(countersOf(previous), before, -1);
+    const restarted = SESSION_COUNTERS.some((key) => live[key] < lastLive[key] - 1e-9);
+    carried = restarted ? countersOf(previous) : before;
+  }
+  if (anyCounter(carried)) {
+    put(addCounters(carried, live));
+    row.earlier_sessions = carried;
+  }
+  return row;
 }
 
 /**
@@ -3265,6 +3457,28 @@ export function formatEventLine(event: SwarmEvent): string {
 /** The counters of a seat's spend that only ever grow within a run. */
 export const MONOTONIC_USAGE_KEYS = ["spent_usd", "tokens", "calls", "input", "output", "cache_read", "cache_write"] as const;
 
+/** Sandboxes whose unreadable budget.json this process has already reported. */
+const budgetUnreadableTold = new Set<string>();
+
+/**
+ * Say, once per process, that a fold was refused because budget.json could
+ * not be read and this process had no earlier copy of it. While that lasts
+ * no cap and no wall clock is enforced from this pane (the stop checks skip
+ * an unreadable file too), which is worth a veto on the board: a trace row
+ * on every turn end is where nobody looks. Returns whether this call told.
+ */
+export async function reportBudgetUnreadable(sandboxRoot: string, agentId: string, error: string): Promise<boolean> {
+  const key = resolve(sandboxRoot);
+  if (budgetUnreadableTold.has(key)) return false;
+  budgetUnreadableTold.add(key);
+  await appendEvent(sandboxRoot, { agent: agentId || "unknown", tool: "budget_unreadable", args: {}, result: { error } }).catch(() => undefined);
+  await systemPost(sandboxRoot, {
+    tag: "veto",
+    body: `BUDGET UNREADABLE: ${agentId}'s pane cannot parse budget.json and has no earlier copy of it, so its spend is not being folded and no cap or wall clock is enforced from it. Put a valid budget.json back (the caps from the kickoff) and the next turn folds again. (${error})`,
+  }).catch(() => undefined);
+  return true;
+}
+
 export async function applySessionUsage(
   sandboxRoot: string,
   agentId: string,
@@ -3278,11 +3492,18 @@ export async function applySessionUsage(
   return withTableLock(sandboxRoot, async () => {
     // A sandbox with no budget yet starts one; a budget.json that is there
     // and does not read is the run's caps, and is never rebuilt from
-    // defaults (no cap, a fifteen-minute clock started now).
-    const budget = await readBudget(sandboxRoot).catch((err: NodeJS.ErrnoException) => {
-      if (err?.code === "ENOENT") return normalizeBudget({ started_at: new Date().toISOString() });
-      throw new Error(`budget.json does not read (${err instanceof Error ? err.message : String(err)}); its caps are left as they are`);
-    });
+    // defaults (no cap, a fifteen-minute clock started now). It is read once
+    // more first: the harness's own writes are whole (writeBudget), but an
+    // operator raising a cap in an editor may be caught mid-save.
+    const budget = await readBudget(sandboxRoot)
+      .catch(async (err: NodeJS.ErrnoException) => {
+        if (err?.code === "ENOENT") return normalizeBudget({ started_at: new Date().toISOString() });
+        await sleep(BUDGET_REREAD_MS);
+        return readBudget(sandboxRoot);
+      })
+      .catch((err: unknown) => {
+        throw new Error(`budget.json does not read (${err instanceof Error ? err.message : String(err)}); its caps are left as they are`);
+      });
     if (options.monotonic) {
       // Checked here, under the table lock, against the row this write
       // replaces: two reports in flight at once cannot both pass a check made
@@ -3297,7 +3518,7 @@ export async function applySessionUsage(
     // The kickoff wrote the seat's model once; a fold that dropped it would
     // take the seat out of its model's cap after the first provider call.
     const model = budget.agents[agentId]?.model ?? slice.model;
-    budget.agents[agentId] = { ...emptyAgentBudget(), ...slice, ...(model ? { model } : {}) };
+    budget.agents[agentId] = { ...foldSessionSlice(budget.agents[agentId], slice), ...(model ? { model } : {}) };
     let spent = 0;
     let tokens = 0;
     let calls = 0;

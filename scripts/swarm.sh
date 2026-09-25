@@ -3633,6 +3633,12 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
       echo "start requires --cap-usd" >&2
       exit 2
     fi
+    # The USD brake only fires on a cap above zero, so on a team that bills
+    # a cap of 0 would mean no spend cap at all rather than none allowed.
+    if awk -v c="$cap" 'BEGIN { exit !(c <= 0) }'; then
+      echo "BLOCKER: --cap-usd must be above zero for a team that bills (got $cap); a cap of 0 would never stop it." >&2
+      exit 2
+    fi
   elif [[ -z "$cap_tokens" ]]; then
     {
       echo "BLOCKER: no model on this team declares a cost — a local server, or a models.json provider"
