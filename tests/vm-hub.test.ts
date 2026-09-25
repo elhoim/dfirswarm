@@ -339,6 +339,20 @@ test("the backstop writes the sentinel past the wall clock and the grace period,
   assert.ok(posts.some((p) => p.endsWith("-system.md")), "and on the board");
 });
 
+test("the backstop does not stop a run the reaper recorded as every agent dead", async () => {
+  const { hub, sandbox, lines, agents } = await setup({ wall: 1 });
+  for (const a of agents) await writeFile(agentDeadPath(sandbox, a), `---\nby: reaper\nagent: ${a}\nreason: stall\n---\n`);
+  await writeFile(join(sandbox, "done", "ALL_AGENTS_DEAD"), "---\nby: reaper\nreason: all_agents_dead\n---\n");
+  const budgetFile = join(sandbox, "budget.json");
+  const budget = JSON.parse(await readFile(budgetFile, "utf8")) as Record<string, unknown>;
+  budget.started_at = new Date(Date.now() - 2 * 60_000).toISOString();
+  await writeFile(budgetFile, JSON.stringify(budget));
+  await hub.backstop();
+  await hub.backstop(Date.now() + 3 * 60_000);
+  assert.equal(existsSync(join(sandbox, SENTINEL_REL)), false, "no done/SWARM_DONE over an all-dead run: it did not finish");
+  assert.equal(lines.some((l) => l.tool === "harness_stop" || l.tool === "wall_steer"), false, "nobody is steered or stopped");
+});
+
 test("the harness's own functions are not on the agent channel: a VM cannot stop the swarm or move its clock", async () => {
   const { hub, sandbox } = await setup();
   for (const fn of ["harnessStop", "markStopSteer", "clearStopSteer"]) {

@@ -166,6 +166,9 @@ grep -qx 'reason: all_agents_dead' "$SB4/done/ALL_AGENTS_DEAD" || fail "the mark
 [[ -e "$SB4/done/SWARM_DONE" ]] && fail "a crashed run must not get done/SWARM_DONE"
 grep -q "done/ALL_AGENTS_DEAD" <<< "$out" || fail "the stop should be printed even under --quiet: $out"
 [[ "$(grep -c '"reason":"all_agents_dead"' "$SB4/traces/events.jsonl")" -eq 1 ]] || fail "one all_agents_dead line on the trace: $(cat "$SB4/traces/events.jsonl")"
+# The harness's own line: the name the collector keys the system's token to,
+# not a name nobody holds a token for.
+[[ "$(grep '"reason":"all_agents_dead"' "$SB4/traces/events.jsonl" | jq -r .agent)" == system ]] || fail "the all_agents_dead line is not the system's: $(cat "$SB4/traces/events.jsonl")"
 first="$(cat "$SB4/done/ALL_AGENTS_DEAD")"
 HERDR_BIN="$SB4/bin/herdr" bash "$ROOT/scripts/reap.sh" --sandbox "$SB4" --timeout 300 --quiet >/dev/null
 [[ "$(cat "$SB4/done/ALL_AGENTS_DEAD")" == "$first" ]] || fail "a second run rewrote the marker"

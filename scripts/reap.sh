@@ -389,7 +389,7 @@ record_all_dead() {
     > "$marker"
   local line
   line="$(jq -cn --arg ts "$(now_iso)" --arg ids "${ids[*]}" \
-    '{ts: $ts, agent: "harness", tool: "reap",
+    '{ts: $ts, agent: "system", tool: "reap",
       args: {reason: "all_agents_dead"},
       result: {stopped: true, finished: false, agents_dead: ($ids | split(" "))}}')"
   trace_emit "$ROOT" "$SANDBOX" "$line"
