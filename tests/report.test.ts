@@ -855,3 +855,29 @@ test("rendered in a browser, no table and no exhibit head overflows, on a phone,
     await rm(runs, { recursive: true, force: true });
   }
 });
+
+test("a long line of table or link punctuation renders in linear time", () => {
+  // Each of these used to be scanned once per starting position: 20,000
+  // characters took seconds, and the report and the artifact preview both
+  // render whatever markdown work/ holds.
+  const lines = {
+    pipes: `| a | b |\n${"|".repeat(20_000)}x`,
+    cells: `| a | b |\n${"| -".repeat(7_000)}x`,
+    brackets: "[".repeat(20_000),
+    links: "[a](".repeat(5_000),
+  };
+  for (const [name, md] of Object.entries(lines)) {
+    const started = performance.now();
+    markdownToHtml(md);
+    const ms = performance.now() - started;
+    assert.ok(ms < 3_000, `${name}: ${Math.round(ms)} ms`);
+  }
+  // What the rewrite must still do: a divider is recognised with or without
+  // outer pipes and alignment colons, a pipe-free rule is not a divider, and
+  // a link keeps its label and shows its target.
+  assert.match(markdownToHtml("| A | B |\n|:---|---:|\n| 1 | 2 |"), /<th>A<\/th><th>B<\/th>/);
+  assert.match(markdownToHtml("A | B\n--- | ---\n1 | 2"), /<th>A<\/th><th>B<\/th>/);
+  assert.doesNotMatch(markdownToHtml("A | B\n---\n"), /<table>/);
+  assert.doesNotMatch(markdownToHtml("| A | B |\n|---|x|\n"), /<table>/);
+  assert.match(markdownToHtml("See [the log](https://example.org/a) now."), /See the log <span class="url">\(https:\/\/example\.org\/a\)<\/span> now\./);
+});
