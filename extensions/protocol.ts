@@ -3749,10 +3749,19 @@ export async function applySessionUsage(
     if (options.monotonic) {
       // Checked here, under the table lock, against the row this write
       // replaces: two reports in flight at once cannot both pass a check made
-      // before either was written and leave the smaller one on disk.
+      // before either was written and leave the smaller one on disk. A report
+      // under a session id is checked against that session's last report: a
+      // new id is a Pi that restarted, whose totals begin again at zero and
+      // are added to the seat's (foldSessionSlice). Checked against the whole
+      // row, a restarted seat's reports were refused until its new session
+      // alone passed the old total, and the spend between went uncounted.
+      // Without an id, the whole row, as before. Either way the row never
+      // goes down.
       const was = budget.agents[agentId];
+      const id = typeof slice.session_id === "string" && slice.session_id ? slice.session_id : undefined;
+      const against: Partial<Record<(typeof MONOTONIC_USAGE_KEYS)[number], number>> | undefined = id ? was?.sessions?.[id] : was;
       for (const key of MONOTONIC_USAGE_KEYS) {
-        const before = Number(was?.[key] ?? 0);
+        const before = Number(against?.[key] ?? 0);
         const now = Number(slice[key] ?? 0);
         if (now + 1e-9 < before) throw new Error(`usage went backwards: ${key} ${now} < ${before}; a seat's spend only grows`);
       }
@@ -4403,7 +4412,9 @@ export async function waitForSwarmChange(
  * write guard; only the shell can touch them unseen, and that is a documented
  * limit rather than something this comparison can close.
  */
-const BASH_WATCH_FILES = ["SWARM.md", "team.json", "layout.json", SENTINEL_REL] as const;
+// The all-dead marker is as much the harness's as the sentinel: a pane's
+// shell that wrote it would end the run as a failure no one had.
+const BASH_WATCH_FILES = ["SWARM.md", "team.json", "layout.json", SENTINEL_REL, ALL_DEAD_REL] as const;
 
 /**
  * The two records a case rests on: what the agents found, and what the harness

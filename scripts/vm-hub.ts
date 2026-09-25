@@ -265,6 +265,8 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 /** The context levels a seat can be at (extensions/context-ceiling.ts). */
 const CONTEXT_LEVELS = new Set(["unknown", "idle", "notice", "warning", "forced"]);
+/** A Pi session id as a seat reports it (a UUID in practice): short, and nothing that could be a path or a key of another kind. */
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 function finiteNonNegative(value: unknown): number {
   const n = typeof value === "number" ? value : Number(value);
@@ -449,6 +451,12 @@ export function boardTable(hub: {
         const row = (await P.readBudget(S).catch(() => null))?.agents[who];
         if (row) for (const key of P.MONOTONIC_USAGE_KEYS) slice[key] = Math.max(Number(slice[key] ?? 0), Number(row[key] ?? 0));
         slice.metered_by = "model-gateway";
+      } else if (typeof raw.session_id === "string" && SESSION_ID.test(raw.session_id)) {
+        // The Pi session the report is from: a seat whose Pi restarted in its
+        // VM reports from zero under a new id, and the fold adds it to what
+        // the seat had. Dropped here, every such report was refused as going
+        // backwards. A gateway seat is metered whole by the host instead.
+        slice.session_id = raw.session_id;
       }
       return P.applySessionUsage(S, who, slice as never, { monotonic: true });
     },

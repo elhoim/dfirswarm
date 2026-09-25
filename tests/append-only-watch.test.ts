@@ -12,7 +12,7 @@
  * collector does; the other two make sure a real rewrite is still caught.
  */
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -140,6 +140,24 @@ test("a budget.json that does not read is left alone by a usage report, never re
     await writeFile(file, torn, "utf8");
     await assert.rejects(applySessionUsage(root, "a0", { spent_usd: 1 } as never), /does not read/);
     assert.equal(await readFile(file, "utf8"), torn, "the file is as it was");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a shell that writes the sentinel or the all-dead marker is caught like any harness file", async () => {
+  // done/ALL_AGENTS_DEAD (#45) ends a run as a failure; a pane's shell that
+  // made one would end it as a failure no one had. It is watched like the sentinel.
+  const root = await sandbox();
+  try {
+    for (const rel of ["done/SWARM_DONE", "done/ALL_AGENTS_DEAD"]) {
+      const before = await watchedPathHashes(root, "a1");
+      await mkdir(join(root, "done"), { recursive: true });
+      await writeFile(join(root, rel), "by: a1\n", "utf8");
+      const hit = (await diffWatchedPaths(root, before, "a1")).find((r) => r.path === rel);
+      assert.ok(hit, `a shell write of ${rel} must be reported`);
+      await rm(join(root, rel));
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

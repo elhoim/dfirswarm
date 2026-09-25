@@ -497,6 +497,39 @@ test("a seat's spend report may only grow: a smaller, negative or non-numeric re
   assert.equal(JSON.parse(await readFile(join(sandbox, "budget.json"), "utf8")).agents.a0.spent_usd, 0.75, "a larger report is taken");
 });
 
+test("a seat whose Pi restarts is counted from its new session on, and its cap still trips", async () => {
+  // The hub dropped the session id and checked each report against the whole
+  // row, so a restarted Pi's reports (its own totals, from zero again) were
+  // refused as going backwards until the new session alone passed the old
+  // total: a seat really at $1.5 stayed recorded at $0.8, under a $1 cap.
+  const { hub, sandbox } = await setup();
+  const budgetPath = join(sandbox, "budget.json");
+  const b = JSON.parse(await readFile(budgetPath, "utf8"));
+  await writeFile(budgetPath, JSON.stringify({ ...b, cap_usd: 1 }));
+  const call = (usage: Record<string, unknown>) => board.callBoard(hub.socketFor("a0"), "applySessionUsage", [sandbox, "a0", { ...emptyAgentBudget(), ...usage }]);
+  const row = async () => JSON.parse(await readFile(budgetPath, "utf8")) as { spent_usd: number; agents: Record<string, { spent_usd: number; calls: number; sessions?: Record<string, unknown> }> };
+
+  await call({ session_id: "s-one", spent_usd: 0.8, tokens: 8000, calls: 8 });
+  // Pi restarts in the VM: a new session, reporting from zero.
+  const after = (await call({ session_id: "s-two", spent_usd: 0.3, tokens: 3000, calls: 3 })) as { over_budget: boolean };
+  let r = await row();
+  assert.equal(r.agents.a0.spent_usd, 1.1, "both sessions count");
+  assert.equal(r.agents.a0.calls, 11);
+  assert.deepEqual(Object.keys(r.agents.a0.sessions ?? {}).sort(), ["s-one", "s-two"]);
+  assert.equal(after.over_budget, true, "the cap trips on the sum");
+  await call({ session_id: "s-two", spent_usd: 0.7, tokens: 7000, calls: 7 });
+  assert.equal((await row()).agents.a0.spent_usd, 1.5);
+
+  // A session's own report still may only grow, and a new id cannot lower the row.
+  await assert.rejects(call({ session_id: "s-two", spent_usd: 0.2 }), /went backwards/);
+  await assert.rejects(call({ session_id: "s-one", spent_usd: 0.1 }), /went backwards/);
+  await call({ session_id: "s-three", spent_usd: 0 });
+  r = await row();
+  assert.equal(r.agents.a0.spent_usd, 1.5, "a refused or empty report leaves the row");
+  // An id that is not one is not taken as one: the report is checked against the whole row.
+  await assert.rejects(call({ session_id: "../budget", spent_usd: 0.2 }), /went backwards/);
+});
+
 test("the sentinel is written only when the operator's finish line passes on the host", async () => {
   const { hub, sandbox, base } = await setup();
   const was = process.env.SWARM_RUNS_DIR;

@@ -70,7 +70,11 @@ function kindOf(second: string, third: string): ChangeKind {
     case "threads":
       return "threads";
     case "locks":
-      return third === ".table.lock" ? "internal" : "locks";
+      // A claim is `<hash>.json`; every dot-file beside it is the table
+      // lock's own bookkeeping (the mutex, its `.break`, the renamed lock a
+      // release judges, the waiter's `.probe.<token>`), rewritten every few
+      // seconds and no change a claim view needs.
+      return third.startsWith(".") ? "internal" : "locks";
     case "done":
       return "done";
     case "budget.json":
