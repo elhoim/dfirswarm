@@ -25,6 +25,7 @@ import {
   appendEvent,
   agentPressure,
   applySessionUsage,
+  isBudgetUnreadable,
   reportBudgetUnreadable,
   claimName,
   nameOf,
@@ -1562,17 +1563,16 @@ test("budget: an unreadable budget.json does not take the caps off the run", asy
     await writeBudget(root, seeded);
     await applySessionUsage(root, "agent00", { spent_usd: 0.1, tokens: 10, calls: 1, input: 10, output: 0, cache_read: 0, cache_write: 0 });
 
-    // A write cut short by a crash or a full disk.
+    // A file that stays unparseable past the second read: the fold is
+    // refused and nothing is written over it (neither defaults nor a copy).
     await writeFile(join(root, "budget.json"), "{ this is not json", "utf8");
-    const applied = await applySessionUsage(root, "agent00", {
-      spent_usd: 2,
-      tokens: 20,
-      calls: 2,
-      input: 20,
-      output: 0,
-      cache_read: 0,
-      cache_write: 0,
-    });
+    const report = { spent_usd: 2, tokens: 20, calls: 2, input: 20, output: 0, cache_read: 0, cache_write: 0 };
+    await assert.rejects(applySessionUsage(root, "agent00", report), /does not read/);
+    assert.equal(await readFile(join(root, "budget.json"), "utf8"), "{ this is not json", "the file is left alone");
+
+    // Put back, the next fold sees the run's caps.
+    await writeBudget(root, { ...seeded, agents: { ...seeded.agents, agent00: { ...seeded.agents.agent00, spent_usd: 0.1, tokens: 10, calls: 1, input: 10 } } });
+    const applied = await applySessionUsage(root, "agent00", report);
     assert.equal(applied.over_budget, true, "$2 is over the $1 cap the run was started with");
     const reread = await readBudget(root);
     assert.equal(reread.cap_usd, 1);
@@ -1580,20 +1580,6 @@ test("budget: an unreadable budget.json does not take the caps off the run", asy
     assert.equal(reread.cap_per_agent_usd, 0.5);
     assert.equal(reread.wall_clock_minutes, 90);
   });
-
-  // With no earlier copy to fold into, the fold is refused and the file left alone.
-  const root = await mkdtemp(join(tmpdir(), "dfirswarm-budget-"));
-  try {
-    await mkdir(join(root, "locks"), { recursive: true });
-    await writeFile(join(root, "budget.json"), "{ this is not json", "utf8");
-    await assert.rejects(
-      applySessionUsage(root, "agent00", { spent_usd: 2, tokens: 20, calls: 2, input: 20, output: 0, cache_read: 0, cache_write: 0 }),
-      /unreadable/,
-    );
-    assert.equal(await readFile(join(root, "budget.json"), "utf8"), "{ this is not json", "defaults are not written over it");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
 });
 
 test("budget: a refused fold is put on the board as a veto once per process", async () => {
@@ -1605,6 +1591,32 @@ test("budget: a refused fold is put on the board as a veto once per process", as
     assert.equal(vetoes.length, 1);
     const rows = (await readFile(join(root, EVENTS_REL), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { tool: string });
     assert.equal(rows.filter((row) => row.tool === "budget_unreadable").length, 1);
+  });
+});
+
+test("budget: only a refusal over an unreadable budget.json is taken for one, and the veto goes where the caller posts", async () => {
+  await withSandbox(async (root) => {
+    await writeFile(join(root, "budget.json"), "{ this is not json", "utf8");
+    const refused = await applySessionUsage(root, "agent00", { spent_usd: 1, tokens: 1, calls: 1, input: 1, output: 0, cache_read: 0, cache_write: 0 }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    assert.equal(isBudgetUnreadable(refused), true);
+    // What crosses a VM hub's socket is the message alone.
+    assert.equal(isBudgetUnreadable((refused as Error).message), true);
+    // A lock timeout, a lost hub or a report that went backwards is not this.
+    assert.equal(isBudgetUnreadable(new Error("usage went backwards: spent_usd 0.5 < 0.7; a seat's spend only grows")), false);
+    assert.equal(isBudgetUnreadable(new Error("Timed out waiting for locks/.table.lock")), false);
+
+    const posted: string[] = [];
+    const post = (async (_root: string, message: { body: string }) => {
+      posted.push(message.body);
+    }) as unknown as Parameters<typeof reportBudgetUnreadable>[3];
+    assert.equal(await reportBudgetUnreadable(root, "agent00", (refused as Error).message, post), true);
+    assert.equal(posted.length, 1);
+    assert.match(posted[0], /BUDGET UNREADABLE/);
+    const box = await readInbox(createContext(root, "agent00"));
+    assert.equal(box.posts.filter((p) => /BUDGET UNREADABLE/.test(p.body)).length, 0, "not written to this sandbox's board by hand");
   });
 });
 
@@ -1668,7 +1680,7 @@ test("budget: under Landlock alone budget.json keeps its inode, whoever writes i
   });
 });
 
-test("budget: a fold reads a budget.json caught mid-save once more before falling back", async () => {
+test("budget: a fold reads a budget.json caught mid-save once more before refusing it", async () => {
   await withSandbox(async (root) => {
     const seeded = await readBudget(root);
     seeded.cap_usd = 1;
@@ -1683,33 +1695,9 @@ test("budget: a fold reads a budget.json caught mid-save once more before fallin
     );
     const applied = await applySessionUsage(root, "agent00", { spent_usd: 2, tokens: 20, calls: 2, input: 20, output: 0, cache_read: 0, cache_write: 0 });
     await finished;
-    assert.equal(applied.budget.cap_usd, 5, "the raised cap, not the cached $1");
+    assert.equal(applied.budget.cap_usd, 5, "the raised cap, read on the second try");
     assert.equal(applied.over_budget, false);
     assert.equal((await readBudget(root)).cap_usd, 5);
-  });
-});
-
-test("budget: a fold from the cached copy changes this seat's row and the totals only", async () => {
-  await withSandbox(async (root) => {
-    const seeded = await readBudget(root);
-    seeded.cap_usd = 1;
-    seeded.stop_steer_at = "2026-01-01T00:00:00.000Z";
-    seeded.stop_reason = "wall_clock";
-    await writeBudget(root, seeded);
-    await applySessionUsage(root, "agent00", { spent_usd: 0.1, tokens: 10, calls: 1, input: 10, output: 0, cache_read: 0, cache_write: 0 });
-    await applySessionUsage(root, "agent01", { spent_usd: 0.2, tokens: 20, calls: 2, input: 20, output: 0, cache_read: 0, cache_write: 0 });
-
-    await writeFile(join(root, "budget.json"), "{ this is not json", "utf8");
-    const applied = await applySessionUsage(root, "agent00", { spent_usd: 2, tokens: 30, calls: 3, input: 30, output: 0, cache_read: 0, cache_write: 0 });
-    assert.equal(applied.over_budget, true);
-    assert.equal(applied.first_over, false, "the first-over steer is not claimed from a cached copy");
-    const reread = await readBudget(root);
-    assert.equal(reread.cap_steer_sent, false);
-    assert.equal(reread.stop_steer_at, "2026-01-01T00:00:00.000Z");
-    assert.equal(reread.stop_reason, "wall_clock");
-    assert.equal(reread.agents.agent00.spent_usd, 2);
-    assert.equal(reread.agents.agent01.spent_usd, 0.2);
-    assert.equal(reread.spent_usd, 2.2);
   });
 });
 

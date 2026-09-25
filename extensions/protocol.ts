@@ -3457,24 +3457,44 @@ export function formatEventLine(event: SwarmEvent): string {
 /** The counters of a seat's spend that only ever grow within a run. */
 export const MONOTONIC_USAGE_KEYS = ["spent_usd", "tokens", "calls", "input", "output", "cache_read", "cache_write"] as const;
 
+/** What applySessionUsage throws when budget.json is there and does not parse. */
+const BUDGET_UNREADABLE_PREFIX = "budget.json does not read";
+
+/**
+ * Whether an error from applySessionUsage is its refusal to fold over an
+ * unreadable budget.json. Read from the message, which is what survives the
+ * hub's socket in a microVM; any other failure (a lock timeout, a lost hub,
+ * a report that went backwards) is not this and is not reported as it.
+ */
+export function isBudgetUnreadable(err: unknown): boolean {
+  return (err instanceof Error ? err.message : String(err)).includes(BUDGET_UNREADABLE_PREFIX);
+}
+
 /** Sandboxes whose unreadable budget.json this process has already reported. */
 const budgetUnreadableTold = new Set<string>();
 
 /**
  * Say, once per process, that a fold was refused because budget.json could
- * not be read and this process had no earlier copy of it. While that lasts
- * no cap and no wall clock is enforced from this pane (the stop checks skip
- * an unreadable file too), which is worth a veto on the board: a trace row
- * on every turn end is where nobody looks. Returns whether this call told.
+ * not be read. While that lasts no cap and no wall clock is enforced from
+ * this pane (the stop checks skip an unreadable file too, and so does the
+ * hub's backstop in a microVM run), which is worth a veto on the board: a
+ * trace row on every turn end is where nobody looks. `post` is the board's
+ * system post as the caller reaches it (the hub, from a VM). Returns whether
+ * this call told.
  */
-export async function reportBudgetUnreadable(sandboxRoot: string, agentId: string, error: string): Promise<boolean> {
+export async function reportBudgetUnreadable(
+  sandboxRoot: string,
+  agentId: string,
+  error: string,
+  post: typeof systemPost = systemPost,
+): Promise<boolean> {
   const key = resolve(sandboxRoot);
   if (budgetUnreadableTold.has(key)) return false;
   budgetUnreadableTold.add(key);
   await appendEvent(sandboxRoot, { agent: agentId || "unknown", tool: "budget_unreadable", args: {}, result: { error } }).catch(() => undefined);
-  await systemPost(sandboxRoot, {
+  await post(sandboxRoot, {
     tag: "veto",
-    body: `BUDGET UNREADABLE: ${agentId}'s pane cannot parse budget.json and has no earlier copy of it, so its spend is not being folded and no cap or wall clock is enforced from it. Put a valid budget.json back (the caps from the kickoff) and the next turn folds again. (${error})`,
+    body: `BUDGET UNREADABLE: budget.json does not parse, so ${agentId}'s spend is not being folded into it and no cap or wall clock is enforced while it stays that way. Put a valid budget.json back (the caps from the kickoff) and the next turn folds again. (${error})`,
   }).catch(() => undefined);
   return true;
 }
@@ -3502,7 +3522,7 @@ export async function applySessionUsage(
         return readBudget(sandboxRoot);
       })
       .catch((err: unknown) => {
-        throw new Error(`budget.json does not read (${err instanceof Error ? err.message : String(err)}); its caps are left as they are`);
+        throw new Error(`${BUDGET_UNREADABLE_PREFIX} (${err instanceof Error ? err.message : String(err)}); its caps are left as they are`);
       });
     if (options.monotonic) {
       // Checked here, under the table lock, against the row this write

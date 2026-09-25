@@ -43,6 +43,7 @@ import {
   overCap,
   STOP_GRACE_MS,
   appendEvent,
+  isBudgetUnreadable,
   reportBudgetUnreadable,
   budgetPressure,
   createContext,
@@ -492,10 +493,12 @@ export default function (pi: ExtensionAPI) {
     try {
       applied = await applySessionUsage(cwd, agentId, slice);
     } catch (err) {
-      // budget.json could not be read and there was no earlier copy to fold
-      // into. Leave the file and the stop clock as they are: a fold over
-      // defaults would have dropped every cap. Said once, on the board.
-      await reportBudgetUnreadable(cwd, agentId, (err as Error).message);
+      // budget.json is there and does not parse: the fold was refused and the
+      // file and the stop clock are as they were, since a fold over defaults
+      // would have dropped every cap. Said once, on the board (the hub's, from
+      // a VM). Any other failure is not this one and goes on as before.
+      if (!isBudgetUnreadable(err)) throw err;
+      await reportBudgetUnreadable(cwd, agentId, err instanceof Error ? err.message : String(err), systemPost);
       return;
     }
     lastStopCheck = Date.now();
