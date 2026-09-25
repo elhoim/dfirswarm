@@ -16,6 +16,7 @@ caller did not ask for.
 import csv
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -72,17 +73,21 @@ def main():
                 stderr=proc.stderr.decode("utf-8", "replace").strip()[:2000],
             )
 
-        names = sorted(
-            f[: -len(".csv")] if f.endswith(".csv") else f
-            for f in os.listdir(export)
-            if os.path.isfile(os.path.join(export, f))
-        )
+        # libesedb names each export file <table>.<its index> (Containers.4,
+        # Container_1.6): the table is the part before the index, the name
+        # an agent knows it by. Taking the whole file name made every
+        # table=Container_1 "no such table" in a real run.
+        files = {}
+        for f in os.listdir(export):
+            if os.path.isfile(os.path.join(export, f)):
+                base = f[: -len(".csv")] if f.endswith(".csv") else f
+                m = re.fullmatch(r"(.+)\.(\d+)", base)
+                files[f] = m.group(1) if m else base
+        names = sorted(set(files.values()))
         if table is None:
             sizes = {}
-            for f in os.listdir(export):
-                abs_f = os.path.join(export, f)
-                if os.path.isfile(abs_f):
-                    sizes[f.rsplit(".", 1)[0]] = os.path.getsize(abs_f)
+            for f, name in files.items():
+                sizes[name] = sizes.get(name, 0) + os.path.getsize(os.path.join(export, f))
             print(json.dumps({
                 "path": path,
                 "tables": names,
@@ -92,18 +97,14 @@ def main():
             }, indent=2))
             return
 
-        matches = [n for n in names if n.lower() == table.lower()]
-        if not matches:
+        # By its name, or by the export file's own name (index and all).
+        wanted = table.lower()
+        hits = sorted(f for f, name in files.items() if wanted in (name.lower(), f.lower(), f.lower().removesuffix(".csv")))
+        if not hits:
             fail("no such table", table=table, tables=names)
-        chosen = matches[0]
-        # libesedb writes <name>.csv, tab-separated despite the extension.
-        candidates = [
-            os.path.join(export, chosen + ".csv"),
-            os.path.join(export, chosen),
-        ]
-        src = next((c for c in candidates if os.path.isfile(c)), None)
-        if src is None:
-            fail("the table exported no file", table=chosen)
+        chosen = files[hits[0]]
+        # Tab-separated, whatever the extension says.
+        src = os.path.join(export, hits[0])
 
         rows = []
         truncated = False

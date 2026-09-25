@@ -211,6 +211,7 @@ while i < len(args) - 1:
     sys.exit(1)
 os.makedirs(target + ".export", exist_ok=True)
 open(os.path.join(target + ".export", "Containers.0"), "w").write("ContainerId\\tName\\n1\\tContent\\n")
+open(os.path.join(target + ".export", "Container_1.6"), "w").write("EntryId\\tUrl\\n7\\thttps://example.test/a\\n")
 `,
       "utf8",
     );
@@ -218,7 +219,15 @@ open(os.path.join(target + ".export", "Containers.0"), "w").write("ContainerId\\
     for (const script of [join(LIB, "esedb_query", "run.py"), join(LIB, "..", "packs", "windows-forensics", "tools", "esedb_query", "run.py")]) {
       const r = await runPy(script, cwd, { path: "work/WebCacheV01.dat" }, bin);
       assert.doesNotMatch(r.stdout + r.stderr, /invalid option/, `${script}: ${r.stdout}${r.stderr}`);
-      assert.match(r.stdout, /Containers/, `${script}: ${r.stdout}${r.stderr}`);
+      // libesedb names a file <table>.<index>: the list gives the table's
+      // own name, and that name reads it (table=Container_1 was "no such
+      // table" in a real run, the file being Container_1.6).
+      assert.deepEqual((JSON.parse(r.stdout) as { tables: string[] }).tables, ["Container_1", "Containers"], `${script}: ${r.stdout}`);
+      const one = await runPy(script, cwd, { path: "work/WebCacheV01.dat", table: "Container_1" }, bin);
+      assert.equal(one.code, 0, `${script}: ${one.stdout}${one.stderr}`);
+      assert.match(one.stdout, /https:\/\/example\.test\/a/);
+      const byFile = await runPy(script, cwd, { path: "work/WebCacheV01.dat", table: "Containers.0" }, bin);
+      assert.match(byFile.stdout, /"Content"/, `${script}: ${byFile.stdout}${byFile.stderr}`);
     }
   });
 });

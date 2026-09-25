@@ -669,8 +669,10 @@ not surprised:
   now find an image without an extension by its catalogue (a raw `dd` named
   after the host) and default the offset to the one filesystem the
   catalogue lists (`icat` at sector 0 of Case4.E01 said "Cannot determine
-  file system type"). computer-forensics-base 1.2.6, windows-forensics
-  1.2.3.
+  file system type"). `esedb_query` named each table by libesedb's
+  export file (`Container_1.6`), so `table=Container_1` was "no such
+  table"; it now lists and reads tables by their own names.
+  computer-forensics-base 1.2.6, windows-forensics 1.2.4.
 
 - **The venv was 642 claims and seven violations, and the panes' temp
   files were more.** With `--allow-install` one agent's pip created
