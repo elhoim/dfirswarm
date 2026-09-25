@@ -377,6 +377,39 @@ jq -e --arg sha "$sha" '[.components[] | select(.name == "tool") | .hashes[0].co
   "$TMP/rec/etc/sbom.json" >/dev/null || fail "a pinned download is not in the SBOM with its sha256"
 pass "every image records its Debian list and venv for the inventory diff, a NOTICE, a CycloneDX SBOM, and the base's redistribution flag carries into a profile"
 
+# tools.md: what an agent reads to learn what its VM holds. The base lists the
+# tool library's Python packages with the note on each line; a profile adds its
+# packs' programs, one a line, with what each is for, its pack and the version
+# the package records hold, and says what a pack names that is not there.
+tm="$TMP/rec/etc/tools.md"
+[[ -f "$tm" ]] || fail "an image wrote no tools.md"
+grep -q '^- `dissect.util` 3.20 — AGPL-3.0, Fox-IT. lzxpress_huffman' "$tm" || fail "tools.md does not list the base's libraries with version and note: $(cat "$tm")"
+( export PATH="$TMP/rec/fakebin:$PATH" DFIRSWARM_VENV="$TMP/rec/venv" DFIRSWARM_ETC_DIR="$TMP/rec/etc"
+  python3 - "$ROOT/images" <<'EOF'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import install
+record = json.loads(install.RECORD.read_text())
+record.update({"profile": "disk", "packs": ["p1"], "apt": {"sleuthkit": "4.11.1"},
+               "binaries": {"mmls": "/usr/bin/mmls", "evtxecmd": "/usr/local/bin/evtxecmd", "gpg": None}})
+spec = {"binaries": [
+    {"name": "mmls", "pack": "p1", "why": "Partition table of a disk image.", "apt": ["sleuthkit"], "source": "apt-get install -y sleuthkit"},
+    {"name": "mmls", "pack": "p2", "why": "Named twice.", "apt": ["sleuthkit"]},
+    {"name": "evtxecmd", "pack": "p1", "why": "Event logs.", "source": "download 2026.5.0"},
+    {"name": "gpg", "pack": "p1", "why": "OpenPGP.", "apt": ["gnupg"], "source": "apt-get install -y gnupg"}],
+  "python_notes": [{"requirement": "pyAesCrypt>=6", "pack": "p1", "note": "AES Crypt containers."}],
+  "not_applicable": [{"name": "log", "pack": "p3", "why": "Only macOS has it."}]}
+install.TOOLS_MD.write_text(install.tools_md(record, spec))
+EOF
+) || fail "a profile's tools.md could not be written"
+grep -q '^- `mmls` — Partition table of a disk image. (p1, p2; sleuthkit 4.11.1)$' "$tm" || fail "a program is not one line with its use, packs and package version: $(cat "$tm")"
+grep -q '^- `evtxecmd` — Event logs. (p1; download 2026.5.0)$' "$tm" || fail "a pinned download does not carry its pinned version: $(cat "$tm")"
+grep -q '^- `pyAesCrypt` (not installed) — AES Crypt containers. (p1)$' "$tm" || fail "a pack's library is not listed, or claims a version pip does not have: $(cat "$tm")"
+grep -q '^- `gpg` (p1) — not found after the build' "$tm" || fail "a program the build left out is not said to be missing: $(cat "$tm")"
+grep -q '^- `log` (p3) — Only macOS has it.$' "$tm" || fail "another system's program is not said: $(cat "$tm")"
+[[ "$(grep -c '`mmls`' "$tm")" == 1 ]] || fail "a program two packs name is listed twice"
+pass "every image writes tools.md: its programs and libraries one a line, with use, pack and recorded version, and what it does not hold"
+
 # --- what a pack may declare ---------------------------------------------------
 mk() { # <dir> <download json>
   mkdir -p "$1/requires" "$1/skills/a"

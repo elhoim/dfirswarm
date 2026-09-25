@@ -57,6 +57,9 @@ ETC = Path(os.environ.get("DFIRSWARM_ETC_DIR", "/etc/dfirswarm"))
 RECORD = ETC / "image.json"
 NOTICE = ETC / "NOTICE"
 SBOM = ETC / "sbom.json"
+# What an agent in a VM reads to learn what its image holds: one line a
+# program, grep-able. The run's contract names this file and no program.
+TOOLS_MD = ETC / "tools.md"
 # Where pinned downloads go, where pinned sources are unpacked, where their
 # programs are linked, and where apt's sources are; a test sets them.
 TOOLS = Path(os.environ.get("DFIRSWARM_TOOLS_DIR", "/opt/dfir/tools"))
@@ -599,18 +602,110 @@ def notice(head: str, record: dict, python_rows: list, npm_rows: list, own_rows:
     return "\n".join(lines) + "\n"
 
 
-def write_record(record: dict, head: str) -> None:
-    """image.json with the whole package inventory, the NOTICE and the SBOM."""
+def requirement_notes(path: Path) -> list:
+    """A requirements file's packages with the comment on each one's line."""
+    notes = []
+    if path.exists():
+        for raw in path.read_text().splitlines():
+            line, _, note = raw.partition("#")
+            if line.strip():
+                notes.append({"requirement": line.strip(), "note": " ".join(note.split())})
+    return notes
+
+
+def dist_name(requirement: str) -> str:
+    return re.split(r"[<>=!~\[; ]", requirement.strip(), maxsplit=1)[0]
+
+
+def norm(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def tools_md(record: dict, spec: dict | None) -> str:
+    """/etc/dfirswarm/tools.md: every program the image's packs put in it, what
+    it is for (the pack's own words), its pack and the version installed, one
+    line each; the Python libraries likewise; and what a pack names that this
+    image does not hold. Versions come from the package records, not from
+    running each program: a --version probe answered "invalid option" for a
+    third of them."""
+    pip = {norm(k): v for k, v in (record.get("pip") or {}).items()}
+    apt = record.get("apt") or {}
+    on_path = record.get("binaries") or {}
+    packs = record.get("packs") or []
+    lines = [f"# Programs in this VM ({record.get('profile', '?')} image)", "",
+             f"Packs: {', '.join(packs) if packs else 'none (the base image: the shell, Python and the tool library)'}.",
+             "One program or library a line: its name, what it is for, its pack, the version installed.",
+             "Find one with `grep -i <word> /etc/dfirswarm/tools.md`. Programs are on PATH; the libraries",
+             "import in `python3` (the image's venv comes first on PATH). What this file does not name is",
+             "not in the image.", ""]
+    rows, gone, seen = [], [], {}
+    for b in (spec or {}).get("binaries", []):
+        if b["name"] in seen:
+            seen[b["name"]]["packs"].append(b["pack"])
+            continue
+        entry = {**b, "packs": [b["pack"]]}
+        seen[b["name"]] = entry
+        if on_path.get(b["name"]):
+            rows.append(entry)
+        else:
+            gone.append(entry)
+
+    def version(b: dict) -> str:
+        if b.get("apt"):
+            got = [f"{p} {apt[p]}" for p in b["apt"] if apt.get(p)]
+            if got:
+                return ", ".join(got)
+        if b.get("pip"):
+            got = [f"{dist_name(p)} {pip[norm(dist_name(p))]}" for p in b["pip"] if pip.get(norm(dist_name(p)))]
+            if got:
+                return ", ".join(got)
+        src = b.get("source") or ""
+        return src if isinstance(src, str) and re.match(r"(download|source|built from source) ", src) else ""
+
+    if rows:
+        lines += ["## Programs", ""]
+        for b in sorted(rows, key=lambda x: x["name"].lower()):
+            v = version(b)
+            lines.append(f"- `{b['name']}` — {b.get('why') or 'no description'} ({', '.join(b['packs'])}{'; ' + v if v else ''})")
+        lines.append("")
+    libs = []
+    for n in list(record.get("python_library") or []) + list((spec or {}).get("python_notes") or []):
+        name = dist_name(n["requirement"])
+        if any(norm(name) == norm(x[0]) for x in libs):
+            continue
+        libs.append((name, n.get("note", ""), n.get("pack", "base image")))
+    if libs:
+        lines += ["## Python libraries", ""]
+        for name, note, pack in sorted(libs, key=lambda x: x[0].lower()):
+            v = pip.get(norm(name))
+            lines.append(f"- `{name}` {v or '(not installed)'} — {note or 'no description'} ({pack})")
+        lines.append("")
+    na = (spec or {}).get("not_applicable") or record.get("not_applicable") or []
+    if gone or na:
+        lines += ["## Named by a pack, not in this image", ""]
+        for b in sorted(gone, key=lambda x: x["name"].lower()):
+            lines.append(f"- `{b['name']}` ({', '.join(b['packs'])}) — not found after the build ({b.get('source') or 'no install line'})")
+        for d in na:
+            lines.append(f"- `{d['name']}` ({d.get('pack', '')}) — {d.get('why', 'another system')}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def write_record(record: dict, head: str, spec: dict | None = None) -> None:
+    """image.json with the whole package inventory, the NOTICE, the SBOM, and
+    tools.md, the list an agent reads."""
     record["arch"] = arch()
     record["dpkg_all"] = dpkg_versions()
     record["pip"] = pip_versions()
     record["sbom"] = str(SBOM)
+    record["tools_md"] = str(TOOLS_MD)
     python_rows, npm_rows = python_packages(), npm_packages()
     own_rows = {name: python_packages(venv) for name, venv in source_venvs(record)}
     ETC.mkdir(parents=True, exist_ok=True)
     RECORD.write_text(json.dumps(record, indent=1, sort_keys=True) + "\n")
     NOTICE.write_text(notice(head, record, python_rows, npm_rows, own_rows))
     SBOM.write_text(json.dumps(sbom(record, python_rows, npm_rows, own_rows), indent=1) + "\n")
+    TOOLS_MD.write_text(tools_md(record, spec))
 
 
 def base() -> int:
@@ -637,6 +732,9 @@ def base() -> int:
         "downloads": {},
         "binaries": {},
         "not_installed": {"apt": [], "pip": [], "download": [], "manual": []},
+        # What the tool library imports, with the note on each line: every
+        # image's tools.md lists them, a profile's after its own packs'.
+        "python_library": requirement_notes(Path(__file__).parent / "library-python.txt"),
     }
     write_record(record, "dfirswarm-base: the agent runtime every seat boots, and the third-party software in it.\n"
                          "Each is its authors' work under its own licence; none is dfirswarm's.\n"
@@ -760,7 +858,7 @@ def main(spec_path: str) -> int:
 
     record = profile_record(json.loads(RECORD.read_text()) if RECORD.exists() else {}, spec, downloads, failed)
     here = Path(spec_path).parent / "NOTICE"
-    write_record(record, here.read_text() if here.exists() else f"dfirswarm-{spec['profile']}")
+    write_record(record, here.read_text() if here.exists() else f"dfirswarm-{spec['profile']}", spec)
     found = sum(1 for v in record["binaries"].values() if v)
     print(f"image.json: {found}/{len(record['binaries'])} binaries on PATH, "
           f"{len(failed['apt'])} apt, {len(failed['pip'])} pip, {len(failed['download'])} download, "

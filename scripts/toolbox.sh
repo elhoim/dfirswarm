@@ -152,12 +152,18 @@ for spec in "${TOOLS[@]}"; do
   fi
 done
 
+# An image that describes itself (images/install.py writes tools.md) is named
+# to the swarm by that file: the contract points at it and lists no program.
+tools_md=""
+[[ -n "$image_file" && -f "${DFIRSWARM_TOOLS_MD:-/etc/dfirswarm/tools.md}" ]] && tools_md="/etc/dfirswarm/tools.md"
+
 printf '%s\n' "${present[@]+"${present[@]}"}" | jq -s --arg preset "$preset" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg image "$image_ref" --argjson missing "$(printf '%s\n' "${missing[@]+"${missing[@]}"}" | jq -s '.')" \
-  --argjson na "$not_applicable" \
+  --argjson na "$not_applicable" --arg tools_md "$tools_md" \
   '{preset: $preset, checked_at: $at, present: ., missing: $missing}
    + (if $image == "" then {context: "host"} else {context: "image", image: $image} end)
-   + (if ($na | length) > 0 then {not_applicable: $na} else {} end)' > "$sandbox/toolbox.json"
+   + (if ($na | length) > 0 then {not_applicable: $na} else {} end)
+   + (if $tools_md != "" then {tools_md: $tools_md} else {} end)' > "$sandbox/toolbox.json"
 
 if [[ "${#warn[@]}" -gt 0 ]]; then
   blocking=("${warn[@]}")

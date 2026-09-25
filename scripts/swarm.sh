@@ -2356,13 +2356,26 @@ toolbox_path = os.path.join(sandbox, "toolbox.json")
 if os.path.isfile(toolbox_path):
     with open(toolbox_path, encoding="utf-8") as f:
         tb = json.load(f)
-    where = f"in the run's image (`{tb.get('image')}`), which every agent's VM boots" if tb.get("context") == "image" else "on this host"
-    lines = ["## Toolbox", "", f"Checked {where} at kickoff. Use these; do not spend turns discovering them.", "", "| Tool | Version | Use it for |", "| --- | --- | --- |"]
-    for t in tb.get("present", []):
-        lines.append(f"| `{t['name']}` | {t.get('version', '')} | {t.get('use', '')} |")
-    for t in tb.get("missing", []):
-        lines.append(f"| `{t['name']}` | missing | {t.get('use', '')} — install: `{t.get('install', '')}` |")
-    toolbox_section = "\n".join(lines) + "\n\n"
+    if tb.get("context") == "image" and tb.get("tools_md"):
+        # The image says what it holds, in the VM, where an agent reads it
+        # when it needs a program. The contract names no program: a table of
+        # sixty was a third of this file, read by every agent at every
+        # start, and most of it by no one who needed it (sixth CTF round).
+        toolbox_section = (
+            "## Programs\n\n"
+            f"Your VM boots `{tb.get('image')}`, which has forensic programs and Python libraries installed "
+            f"for this run's packs. Which ones, what each is for and the version installed is in "
+            f"`{tb['tools_md']}` inside your VM: `grep -i` it for what you need before you install or "
+            "write something. What it does not name is not in the image.\n\n"
+        )
+    else:
+        where = f"in the run's image (`{tb.get('image')}`), which every agent's VM boots" if tb.get("context") == "image" else "on this host"
+        lines = ["## Toolbox", "", f"Checked {where} at kickoff. Use these; do not spend turns discovering them.", "", "| Tool | Version | Use it for |", "| --- | --- | --- |"]
+        for t in tb.get("present", []):
+            lines.append(f"| `{t['name']}` | {t.get('version', '')} | {t.get('use', '')} |")
+        for t in tb.get("missing", []):
+            lines.append(f"| `{t['name']}` | missing | {t.get('use', '')} — install: `{t.get('install', '')}` |")
+        toolbox_section = "\n".join(lines) + "\n\n"
 # A case can need a library this host does not have — the BelkaCTF #6 run met a
 # BitLocker volume with the recovery key in hand and no reader on the machine,
 # and spent its remaining half hour on it. When the operator has allowed it,
@@ -2397,10 +2410,15 @@ elif os.environ.get("SWARM_CONTRACT_ALLOW_INSTALL") == "1":
     )
 text = text.replace("{{TOOLBOX}}\n\n", toolbox_section)
 
-# Seeded --tools-from copies: name, params, description, and any baked path/offset.
+# The tools in tools/. A pack's are general and each is in every agent's tool
+# list with its description, so the contract only says they are there. The
+# ones --tools-from copied were written on another case: those are listed,
+# with any inputs/ path or offset their example bakes in. A pack's tools once
+# sat under that warning too, and a limit of 20000 or an example FILETIME was
+# called a baked offset (sixth CTF round).
 tools_section = ""
 tools_dir = os.path.join(sandbox, "tools")
-rows = []
+rows, packed = [], {}
 if os.path.isdir(tools_dir):
     for name in sorted(os.listdir(tools_dir)):
         man_path = os.path.join(tools_dir, name, "manifest.json")
