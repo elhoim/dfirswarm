@@ -7232,31 +7232,97 @@ import("'"$ROOT"'/extensions/protocol.ts").then((m) => {
   printf '%s\n' "$names"
 }
 
-# The lock-table mutex protocol.ts and reap.sh use: an exclusive mkdir of
-# locks/.table.lock, a 10 s wait, and a stale lock (older than 15 s, its pid
-# gone) broken. Post ids are allocated under it too, so a post written from
-# here cannot take the same id as one an agent is writing at the same moment.
-table_lock() {
-  local sandbox="$1" dir="$1/locks/.table.lock" deadline=$((SECONDS + 10)) age pid
-  mkdir -p "$sandbox/locks"
+# >>> table lock: this block is identical in scripts/reap.sh and scripts/swarm.sh
+# (tests/table-lock.test.sh checks that). The lock-table mutex protocol.ts
+# uses, from bash: an exclusive mkdir of the lock and a 10 s wait. A lock older
+# than 15 s has no live holder (protocol.ts refreshes its lock while it holds
+# it; holders here hold it for a few seconds at most) unless that holder
+# stalled. A stalled holder keeps its lock where its pid can be checked: when
+# it recorded the same namespace as ours (table_lock_ns) and its pid is live.
+# Elsewhere, as for a holder in another pane's pid namespace, age alone
+# decides. A stale lock is broken under <lock>.break and judged again there,
+# so two waiters cannot both break it. kill -0 fails on a pid we may not
+# signal; the panes of one run share a user, so that is a dead one.
+TABLE_LOCK_TOKEN="$$.$RANDOM$RANDOM"
+# Where a recorded pid can be checked: this pid namespace and boot on Linux,
+# this host and boot on macOS; empty when it cannot be told. protocol.ts
+# prints the same string (lockNamespace).
+table_lock_ns() {
+  local ns boot
+  if ns="$(readlink /proc/self/ns/pid 2>/dev/null)" && boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"; then
+    printf 'linux:%s:%s' "$ns" "$boot"
+  elif boot="$(sysctl -n kern.boottime 2>/dev/null)" && [[ "$boot" == *"sec = "* ]]; then
+    boot="${boot#*sec = }"
+    printf 'darwin:%s:%s' "$(hostname)" "${boot%%,*}"
+  fi
+}
+# Stale: older than 15 s and no live holder we can see. A lock that is gone
+# (released between the mkdir and the stat) is not stale.
+table_lock_stale() {
+  local m b now pid ns probe="${1%/*}/.probe.$TABLE_LOCK_TOKEN"
+  m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)" || return 1
+  # protocol.ts's heartbeat rewrites <lock>/beat.
+  if b="$(stat -c %Y "$1/beat" 2>/dev/null || stat -f %m "$1/beat" 2>/dev/null)" && (( b > m )); then m=$b; fi
+  # "Now" by the clock that stamped the lock: a probe file touched next to it,
+  # so a lock stamped through NFS or a microVM's shared directory is aged on
+  # the same clock. Our own clock only when the probe cannot be made.
+  if touch "$probe" 2>/dev/null && now="$(stat -c %Y "$probe" 2>/dev/null || stat -f %m "$probe" 2>/dev/null)"; then :; else now="$(date +%s)"; fi
+  rm -f "$probe"
+  (( now - m >= 15 )) || return 1
+  : "${TABLE_LOCK_NS=$(table_lock_ns)}"
+  ns="$(cat "$1/ns" 2>/dev/null || true)"
+  pid="$(cat "$1/pid" 2>/dev/null || true)"
+  if [[ -n "$TABLE_LOCK_NS" && "$ns" == "$TABLE_LOCK_NS" && "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
+  return 0
+}
+table_lock_stamp() {
+  : "${TABLE_LOCK_NS=$(table_lock_ns)}"
+  echo $$ > "$1/pid"
+  printf '%s' "$TABLE_LOCK_NS" > "$1/ns"
+  echo "$TABLE_LOCK_TOKEN" > "$1/owner"
+}
+table_lock_acquire() {
+  local dir="$1" deadline=$((SECONDS + 10))
   while ! mkdir "$dir" 2>/dev/null; do
-    if [[ -d "$dir" ]]; then
-      age=$(( $(date +%s) - $(stat -c %Y "$dir" 2>/dev/null || stat -f %m "$dir" 2>/dev/null || echo 0) ))
-      pid="$(cat "$dir/pid" 2>/dev/null || true)"
-      if [[ "$age" -ge 15 ]] && { [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; }; then
-        rm -rf "$dir"
+    if table_lock_stale "$dir"; then
+      if mkdir "$dir.break" 2>/dev/null; then
+        table_lock_stamp "$dir.break"
+        if table_lock_stale "$dir"; then rm -rf "$dir"; fi
+        table_lock_release "$dir.break"
         continue
       fi
+      if table_lock_stale "$dir.break"; then rm -rf "$dir.break"; fi
     fi
     if (( SECONDS >= deadline )); then
-      echo "Timed out waiting for locks/.table.lock" >&2
+      echo "Timed out waiting for locks/${dir##*/}" >&2
       return 1
     fi
     sleep 0.05
   done
-  echo $$ > "$dir/pid"
+  table_lock_stamp "$dir"
 }
-table_unlock() { rm -rf "$1/locks/.table.lock"; }
+# Only our own lock: one broken while we stalled may be someone else's now,
+# and that is said rather than ignored. The lock is renamed to a name only we
+# use before its owner is read, so what is removed is what was judged ours;
+# one taken over in between is put back unless a new lock has appeared.
+table_lock_release() {
+  local tomb="$1.released.$TABLE_LOCK_TOKEN"
+  if [[ "$(cat "$1/owner" 2>/dev/null || true)" == "$TABLE_LOCK_TOKEN" ]] && mv "$1" "$tomb" 2>/dev/null; then
+    if [[ "$(cat "$tomb/owner" 2>/dev/null || true)" == "$TABLE_LOCK_TOKEN" ]]; then
+      rm -rf "$tomb"
+      return 0
+    fi
+    if [[ -e "$1" ]] || ! mv "$tomb" "$1" 2>/dev/null; then rm -rf "$tomb"; fi
+  fi
+  echo "warning: ${1##*/} was taken over while this process held it; another process may have been inside with it" >&2
+}
+# <<< table lock
+# Post ids are allocated under it too, so a post written from here cannot take
+# the same id as one an agent is writing at the same moment.
+table_lock() { mkdir -p "$1/locks"; table_lock_acquire "$1/locks/.table.lock"; }
+table_unlock() { table_lock_release "$1/locks/.table.lock"; }
 
 # A message from the examiner to a swarm that is already running.
 #

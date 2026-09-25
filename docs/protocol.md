@@ -38,7 +38,7 @@ runs/<id>/
   inbox/<id>/cursors.json      per-agent, per-thread: highest post id read
   work/                        the artifact(s); work/.browser/*.png from playwright
   locks/<sha256(path)>.json    live claims
-  locks/.table.lock/           mkdir mutex for lock-table changes (pid inside)
+  locks/.table.lock/           mkdir mutex for lock-table changes (pid, ns, owner token inside)
   history/<sha256(path)>/      000001.bin … + index.json (rev, ts, agent, bytes, sha256)
   done/agents/<id>.done        this worker exited
   done/agents/<id>.dead        this worker was reaped
@@ -146,8 +146,38 @@ reason**, not an open-ended lock:
 - `release_file` drops your own lease. `done`, `session_shutdown` and the
   reaper drop everything an agent owns.
 - All lock-table mutations run under `locks/.table.lock` (exclusive `mkdir`,
-  10 s wait, stale after 15 s if the recorded pid is gone). `reap.sh` uses the
-  same mutex from bash.
+  10 s wait). The holder rewrites `beat` inside it every 3 s, so a lock that
+  has not changed for 15 s has no live holder unless that holder has stalled (SIGSTOP, swap, a
+  laptop asleep). A stale lock is broken, except that a holder is kept while
+  its pid is live and it recorded the same `ns` as the waiter: the pid
+  namespace and boot id on Linux, the host name and boot time on macOS. A
+  waiter that cannot check the pid — another pane's pid namespace, another
+  VM, a lock with no `ns` — goes by age alone. A break happens under
+  `locks/.table.lock.break`, which re-checks the lock first, so two waiters
+  cannot both break one lock. Age is read on the filesystem's clock: the
+  lock and `beat` are stamped by the filesystem, and so is a probe file
+  (`locks/.probe.<token>`) the waiter writes next to them, so a lock stamped
+  from a microVM guest or an NFS client is not aged on the host's clock. The
+  heartbeat stops once the lock is no longer its holder's. A holder removes only a lock whose `owner`
+  token is its own, and warns (`DFIRSWARM_TABLE_LOCK_LOST`; on stderr from
+  bash) when it finds its lock was taken over. `reap.sh` and `swarm.sh say`
+  use the same mutex from bash, and hold it for a few seconds at most.
+- What the table lock does not guarantee. Each of these needs a process to
+  stall or die inside a window of a few filesystem calls:
+  - A holder that stalls past 15 s where its pid cannot be checked (another
+    pane's pid namespace, another VM) loses its lock. It finds out before its
+    next write in `claimFile`, the budget fold, `record` and file history,
+    which fail with `TableLockLostError` rather than commit, and at release,
+    which warns. The check and the write are still two steps.
+  - A holder whose recorded pid is reused by another live process in the
+    same namespace keeps a dead lock standing; waiters time out after 10 s.
+  - Clearing a stale `.break` repeats the break race one level down: two
+    waiters that both judge it stale can both remove it, the second removing
+    a `.break` the first has just taken.
+  - Release renames the lock to `<lock>.released.<token>` before judging it,
+    so it removes only what it judged its own. If the renamed lock turns out
+    not to be its own, it is renamed back unless a new lock has appeared at
+    the path meanwhile; that step has a gap of its own.
 
 ### Write guard and `claim_violation`
 

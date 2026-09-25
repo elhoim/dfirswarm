@@ -10,10 +10,20 @@
  * not the names agents choose for themselves.
  */
 
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { closeSync, createReadStream, mkdirSync, openSync, realpathSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  createReadStream,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  writeSync,
+} from "node:fs";
 import { connect, type Socket } from "node:net";
+import { hostname } from "node:os";
 import {
   appendFile,
   chmod,
@@ -45,6 +55,14 @@ export const DEFAULT_CLAIM_SECONDS = 120;
 export const MAX_CLAIM_SECONDS = 600;
 export const TABLE_LOCK_WAIT_MS = 10_000;
 export const TABLE_LOCK_STALE_MS = 15_000;
+/** How often a holder refreshes its table lock; well inside the stale window. */
+export const TABLE_LOCK_HEARTBEAT_MS = 3_000;
+/** The table lock's timings. Only tests change them, to shorten a stall. */
+export const tableLockTiming = {
+  waitMs: TABLE_LOCK_WAIT_MS,
+  staleMs: TABLE_LOCK_STALE_MS,
+  heartbeatMs: TABLE_LOCK_HEARTBEAT_MS,
+};
 export const DEFAULT_SWARM_ID = "hello-n2";
 export const DEFAULT_AGENT_IDS = ["agent00", "agent01"] as const;
 export const SENTINEL_REL = "done/SWARM_DONE";
@@ -822,30 +840,191 @@ export async function swarmDoneExists(sandboxRoot: string): Promise<boolean> {
   }
 }
 
-async function maybeBreakStaleTableLock(lockDir: string): Promise<void> {
+let lockNamespaceCache: string | undefined;
+
+/**
+ * Where a pid recorded in a lock can be checked: this pid namespace and boot
+ * on Linux, this host and boot on macOS. Two processes that print the same
+ * string number their processes alike, so one can ask whether the other's pid
+ * is live. "" when it cannot be told, and then only the lock's age counts.
+ * The bash copies in reap.sh and swarm.sh print the same string.
+ */
+export function lockNamespace(): string {
+  if (lockNamespaceCache !== undefined) return lockNamespaceCache;
+  let ns = "";
   try {
-    const info = await stat(lockDir);
-    const age = Date.now() - info.mtimeMs;
-    if (age < TABLE_LOCK_STALE_MS) return;
-    const pidRaw = await readFile(join(lockDir, "pid"), "utf8").catch(() => "");
-    const pid = Number.parseInt(pidRaw.trim(), 10);
-    if (Number.isFinite(pid)) {
-      try {
-        process.kill(pid, 0);
-        return;
-      } catch {
-        // process is gone
-      }
+    if (process.platform === "linux") {
+      const pidNs = readlinkSync("/proc/self/ns/pid");
+      const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      if (pidNs && boot) ns = `linux:${pidNs}:${boot}`;
+    } else if (process.platform === "darwin") {
+      const out = execFileSync("sysctl", ["-n", "kern.boottime"], { encoding: "utf8", timeout: 2_000 });
+      const sec = /sec = (\d+)/.exec(out)?.[1];
+      if (sec) ns = `darwin:${hostname()}:${sec}`;
     }
-    await rm(lockDir, { recursive: true, force: true });
   } catch {
-    // lock vanished
+    ns = "";
+  }
+  lockNamespaceCache = ns;
+  return ns;
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: it exists, it just is not ours to signal.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 
+/** What a holder writes into a lock directory it has just made. */
+async function stampLock(dir: string, token: string): Promise<void> {
+  await writeFile(join(dir, "pid"), String(process.pid), "utf8");
+  await writeFile(join(dir, "ns"), lockNamespace(), "utf8");
+  await writeFile(join(dir, "owner"), token, "utf8");
+}
+
+/**
+ * "Now" by the clock that stamps the lock: the mtime of a probe file written
+ * just now next to it. A holder in a microVM or on an NFS client stamps its
+ * lock through the filesystem, and so does the probe, so the two are compared
+ * on one clock whatever the host's and the guest's clocks say. Falls back to
+ * our own clock when the probe cannot be written.
+ */
+async function filesystemNow(probe: string): Promise<number> {
+  try {
+    await writeFile(probe, String(process.pid), "utf8");
+    return (await stat(probe)).mtimeMs;
+  } catch {
+    return Date.now();
+  }
+}
+
+/**
+ * How long since a lock last changed: made, or its `beat` file rewritten by
+ * the holder's heartbeat. null when the lock is gone.
+ */
+async function lockAgeMs(dir: string, probe: string): Promise<number | null> {
+  const now = await filesystemNow(probe);
+  const info = await stat(dir).catch(() => null);
+  if (info === null) return null;
+  const beat = await stat(join(dir, "beat")).catch(() => null);
+  return now - Math.max(info.mtimeMs, beat?.mtimeMs ?? 0);
+}
+
+/**
+ * A lock is stale once it is older than the stale age, unless its holder is
+ * known to be alive. Its holder is known to be alive only when it recorded the
+ * same namespace as ours and its pid is live here; anything else — another
+ * pane's pid namespace, another VM, an older lock with no `ns` — is judged by
+ * age alone. So a holder that stalls (SIGSTOP, swap, a laptop asleep) keeps
+ * its lock from a peer that can see it, and loses it after the stale age only
+ * to a peer that cannot.
+ */
+async function lockIsStale(dir: string, probe: string): Promise<boolean> {
+  const age = await lockAgeMs(dir, probe);
+  if (age === null || age < tableLockTiming.staleMs) return false;
+  const ns = (await readFile(join(dir, "ns"), "utf8").catch(() => "")).trim();
+  if (ns && ns === lockNamespace()) {
+    const pid = (await readFile(join(dir, "pid"), "utf8").catch(() => "")).trim();
+    if (/^[1-9]\d*$/.test(pid) && pidAlive(Number(pid))) return false;
+  }
+  return true;
+}
+
+/** Say that a holder's lock was taken over while it held it. */
+export function warnLockLost(message: string): void {
+  process.emitWarning(message, { code: "DFIRSWARM_TABLE_LOCK_LOST" });
+}
+
+/**
+ * Break a lock whose holder has stopped (see lockIsStale).
+ *
+ * A holder refreshes its lock's mtime every TABLE_LOCK_HEARTBEAT_MS, so an old
+ * lock has no live holder unless that holder has stalled; a stalled holder is
+ * kept by its pid where a peer can check it. The pid alone used to decide and
+ * cannot: under fsguard's pid namespaces each pane numbers its own processes,
+ * so a live holder in another pane looked dead and lost its lock after 15 s,
+ * and an unrelated live pid could keep a dead lock standing.
+ *
+ * Breaking takes a second mkdir lock, `<lock>.break`, and judges the lock
+ * again under it. Two waiters could otherwise both judge one dead lock stale:
+ * the first removed it and took the lock, and the second's rm then removed
+ * that live lock, putting both in the critical section.
+ */
+async function maybeBreakStaleTableLock(lockDir: string, token: string, probe: string): Promise<void> {
+  if (!(await lockIsStale(lockDir, probe))) return;
+  const breakDir = `${lockDir}.break`;
+  try {
+    await mkdir(breakDir);
+  } catch {
+    // Someone else is breaking it. One that died mid-break leaves its own
+    // lock behind, cleared here once that is stale too.
+    if (await lockIsStale(breakDir, probe)) await rm(breakDir, { recursive: true, force: true }).catch(() => undefined);
+    return;
+  }
+  try {
+    await stampLock(breakDir, token);
+    if (await lockIsStale(lockDir, probe)) await rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+  } finally {
+    await releaseLockDir(breakDir, token);
+  }
+}
+
+/**
+ * Remove a lock directory only while it is still ours.
+ *
+ * Reading `owner` and then removing the path left a gap in which the lock
+ * could be broken and taken by someone else, whose lock the rm then removed.
+ * So the lock is first renamed to a name only we use, and `owner` is read
+ * from there: what was renamed is exactly what gets judged. If it turns out
+ * not to be ours (taken over between the read and the rename), it is renamed
+ * back unless a new lock has appeared at the path meanwhile. That last step
+ * still has a gap, but reaching it takes a stall, a break and a new mkdir
+ * inside two renames.
+ */
+async function releaseLockDir(dir: string, token: string): Promise<void> {
+  const lost = () =>
+    warnLockLost(`${basename(dir)} was taken over while this process held it; another process may have been inside with it`);
+  const owner = await readFile(join(dir, "owner"), "utf8").catch(() => "");
+  if (owner !== token) return lost();
+  const tomb = `${dir}.released.${token}`;
+  try {
+    await rename(dir, tomb);
+  } catch {
+    return lost();
+  }
+  if ((await readFile(join(tomb, "owner"), "utf8").catch(() => "")) === token) {
+    await rm(tomb, { recursive: true, force: true });
+    return;
+  }
+  const occupied = await stat(dir).then(() => true, () => false);
+  if (occupied || !(await rename(tomb, dir).then(() => true, () => false))) {
+    await rm(tomb, { recursive: true, force: true });
+  }
+  lost();
+}
+
+/** Thrown when a holder finds, before a write, that its lock was taken over. */
+export class TableLockLostError extends Error {}
+
+/** What a holder can ask of the lock it holds. */
+export type HeldLock = {
+  /**
+   * Throws TableLockLostError when the lock is no longer ours: it was broken
+   * while we stalled and someone else may be inside. Called just before a
+   * read-modify-write commits, so a lost lock costs the write rather than
+   * overwriting the other holder's. The check and the write are still two
+   * steps, so this narrows the window; it does not close it.
+   */
+  assertOwned(): Promise<void>;
+};
+
 export async function withTableLock<T>(
   sandboxRoot: string,
-  fn: () => Promise<T>,
+  fn: (lock: HeldLock) => Promise<T>,
 ): Promise<T> {
   return withNamedLock(sandboxRoot, ".table.lock", fn);
 }
@@ -862,30 +1041,66 @@ export async function withTableLock<T>(
 export async function withNamedLock<T>(
   sandboxRoot: string,
   name: string,
-  fn: () => Promise<T>,
+  fn: (lock: HeldLock) => Promise<T>,
 ): Promise<T> {
   const lockDir = join(sandboxRoot, "locks", name);
   await mkdir(join(sandboxRoot, "locks"), { recursive: true });
-  const deadline = Date.now() + TABLE_LOCK_WAIT_MS;
-  while (true) {
-    try {
-      await mkdir(lockDir);
-      await writeFile(join(lockDir, "pid"), String(process.pid), "utf8");
-      break;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") throw err;
-      await maybeBreakStaleTableLock(lockDir);
-      if (Date.now() > deadline) {
-        throw new Error(`Timed out waiting for locks/${name}`);
-      }
-      await sleep(20);
-    }
-  }
+  const deadline = Date.now() + tableLockTiming.waitMs;
+  const token = `${process.pid}-${randomUUID()}`;
+  const probe = join(sandboxRoot, "locks", `.probe.${token}`);
   try {
-    return await fn();
+    while (true) {
+      try {
+        await mkdir(lockDir);
+        await stampLock(lockDir, token);
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST") throw err;
+        await maybeBreakStaleTableLock(lockDir, token, probe);
+        if (Date.now() > deadline) {
+          throw new Error(`Timed out waiting for locks/${name}`);
+        }
+        await sleep(20);
+      }
+    }
   } finally {
-    await rm(lockDir, { recursive: true, force: true });
+    await rm(probe, { force: true }).catch(() => undefined);
+  }
+  // The heartbeat that keeps a held lock from ever looking stale. It writes a
+  // file rather than setting a time, so the filesystem stamps it (see
+  // filesystemNow), and it stops once the lock is no longer ours: a holder
+  // whose lock was broken while it stalled must not keep the next holder's
+  // lock fresh.
+  const heartbeat = setInterval(() => {
+    readFile(join(lockDir, "owner"), "utf8")
+      .then((owner) => {
+        if (owner !== token) {
+          clearInterval(heartbeat);
+          return;
+        }
+        return writeFile(join(lockDir, "beat"), token, "utf8");
+      })
+      .catch(() => undefined);
+  }, tableLockTiming.heartbeatMs);
+  heartbeat.unref();
+  const held: HeldLock = {
+    async assertOwned() {
+      const owner = await readFile(join(lockDir, "owner"), "utf8").catch(() => "");
+      if (owner !== token) {
+        throw new TableLockLostError(
+          `locks/${name} was taken over while this call held it, so its write was not made. Try again.`,
+        );
+      }
+    },
+  };
+  try {
+    return await fn(held);
+  } finally {
+    clearInterval(heartbeat);
+    // Remove only our own lock. One broken while its holder stalled may
+    // already belong to someone else, and that is said rather than ignored.
+    await releaseLockDir(lockDir, token);
   }
 }
 
@@ -2007,7 +2222,7 @@ export async function claimFile(
     throw new Error("claim_file requires a reason: say what you are about to do with the path.");
   }
   const seconds = clampClaimSeconds(options.seconds);
-  return withTableLock(ctx.sandboxRoot, async () => {
+  return withTableLock(ctx.sandboxRoot, async (held) => {
     const file = lockPath(ctx.sandboxRoot, pathKey);
     const existing = await readLock(file);
     const now = Date.now();
@@ -2039,6 +2254,7 @@ export async function claimFile(
       ...(options.implicit ? { implicit: true as const } : {}),
     };
     await mkdir(join(ctx.sandboxRoot, "locks"), { recursive: true });
+    await held.assertOwned();
     await writeFile(file, `${JSON.stringify(record, null, 2)}\n`, "utf8");
     return {
       ok: true,
@@ -3509,7 +3725,7 @@ export async function applySessionUsage(
   over_budget: boolean;
   first_over: boolean;
 }> {
-  return withTableLock(sandboxRoot, async () => {
+  return withTableLock(sandboxRoot, async (held) => {
     // A sandbox with no budget yet starts one; a budget.json that is there
     // and does not read is the run's caps, and is never rebuilt from
     // defaults (no cap, a fifteen-minute clock started now). It is read once
@@ -3554,6 +3770,7 @@ export async function applySessionUsage(
     const over = overCap(budget).over;
     const first_over = over && !budget.cap_steer_sent;
     if (first_over) budget.cap_steer_sent = true;
+    await held.assertOwned();
     await writeBudget(sandboxRoot, budget);
     return { budget, over_budget: over, first_over };
   });
@@ -3683,13 +3900,14 @@ export async function recordFileVersion(
   // binary overwrites the other, and the surviving index entry names a hash
   // the stored bytes do not have.
   const key = pathKey;
-  return withTableLock(sandboxRoot, async () => {
+  return withTableLock(sandboxRoot, async (held) => {
     const dir = historyDir(sandboxRoot, key);
     await mkdir(dir, { recursive: true });
     const versions = await listFileHistory(sandboxRoot, key);
     const last = versions.at(-1);
     if (last?.sha256 === sha256) return null;
     const rev = (last?.rev ?? 0) + 1;
+    await held.assertOwned();
     if (bytes) await writeFile(join(dir, `${String(rev).padStart(6, "0")}.bin`), bytes);
     const record: FileVersion = {
       rev,
@@ -6295,7 +6513,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
     if (!Number.isInteger(n) || n < 1) return { ok: false, reason: `supersedes names an entry by its seq, a whole number (got ${JSON.stringify(input.supersedes)})` };
     supersedes = n;
   }
-  return withTableLock(ctx.sandboxRoot, async () => {
+  return withTableLock(ctx.sandboxRoot, async (held) => {
     const entries = await readLedger(ctx.sandboxRoot);
     if (supersedes !== undefined) {
       const target = entries.find((e) => e.seq === supersedes);
@@ -6314,6 +6532,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
       // A merge adds an author, it does not rewrite the first citation.
       if (!same.source) same.source = source;
       if (!same.evidence) same.evidence = evidence;
+      await held.assertOwned();
       // Whole or not at all: a writer killed mid-way must not leave the
       // record of the case cut short.
       await writeFileAtomic(join(ctx.sandboxRoot, LEDGER_ENTRIES), entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
@@ -6341,6 +6560,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
     entry.prev = previous?.hash ?? (previous ? ledgerHash(previous, "genesis") : "genesis");
     entry.hash = ledgerHash(entry, entry.prev);
     await mkdir(join(ctx.sandboxRoot, LEDGER_DIR), { recursive: true });
+    await held.assertOwned();
     await appendFile(join(ctx.sandboxRoot, LEDGER_ENTRIES), `${JSON.stringify(entry)}\n`, "utf8");
     entries.push(entry);
     await renderLedger(ctx.sandboxRoot, entries);
