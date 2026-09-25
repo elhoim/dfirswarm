@@ -195,9 +195,24 @@ if os.path.isfile(hj):
                     errors.append("requires/host.json: a binary entry is missing %s" % key)
             if "redistributable" not in b:
                 errors.append("requires/host.json: %s does not say whether it is redistributable" % b.get("name"))
-            # A pinned download is fetched and run inside an image: its URL
-            # is HTTPS, its sha256 whole, its program a path inside it.
-            dl = (b.get("install") or {}).get("download")
+            # A pinned artefact is fetched and run inside an image: its URL
+            # is HTTPS, its sha256 whole, its program a path inside it (or,
+            # for a .deb, where the package puts it).
+            def pinned(where, e, bin_key):
+                if not isinstance(e, dict) or not str(e.get("url", "")).startswith("https://"):
+                    errors.append("%s needs an https url" % where)
+                    return
+                if not re.fullmatch(r"(sha256:)?[0-9a-f]{64}", str(e.get("sha256", ""))):
+                    errors.append("%s needs the sha256 of what the url serves" % where)
+                deb = str(e["url"]).split("?")[0].lower().endswith(".deb")
+                if bin_key in e:
+                    path = str(e[bin_key])
+                    if deb and not (path.startswith("/") and ".." not in path.split("/")):
+                        errors.append("%s: %s must be the absolute path the package installs" % (where, bin_key))
+                    elif not deb and (path.startswith("/") or ".." in path.split("/")):
+                        errors.append("%s: %s must be a path inside the download" % (where, bin_key))
+            install = b.get("install") or {}
+            dl = install.get("download")
             if dl is not None:
                 where = "requires/host.json: %s's download" % b.get("name")
                 if not isinstance(dl, dict) or not dl.get("version"):
@@ -207,13 +222,28 @@ if os.path.isfile(hj):
                     if not arches:
                         errors.append("%s names no architecture (amd64, arm64)" % where)
                     for a in arches:
-                        e = dl[a]
-                        if not isinstance(e, dict) or not str(e.get("url", "")).startswith("https://"):
-                            errors.append("%s for %s needs an https url" % (where, a))
-                        elif not re.fullmatch(r"(sha256:)?[0-9a-f]{64}", str(e.get("sha256", ""))):
-                            errors.append("%s for %s needs the sha256 of what the url serves" % (where, a))
-                        elif "bin" in e and (str(e["bin"]).startswith("/") or ".." in str(e["bin"]).split("/")):
-                            errors.append("%s for %s: bin must be a path inside the download" % (where, a))
+                        pinned("%s for %s" % (where, a), dl[a], "bin")
+            for kind, bin_key in (("source", "entry"), ("build", "bin")):
+                src = install.get(kind)
+                if src is None:
+                    continue
+                where = "requires/host.json: %s's %s" % (b.get("name"), kind)
+                if not isinstance(src, dict) or not src.get("version"):
+                    errors.append("%s needs a version" % where)
+                    continue
+                if not src.get(bin_key):
+                    errors.append("%s needs %s: the program's path inside it" % (where, bin_key))
+                pinned(where, src, bin_key)
+                for key in ("pip", "skip", "configure", "apt_deps", "build_deps", "arches"):
+                    if key in src and not (isinstance(src[key], list) and all(isinstance(x, str) for x in src[key])):
+                        errors.append("%s: %s must be a list of strings" % (where, key))
+            # Another system's program (Apple's log, a Windows collector): no
+            # image holds it, so no pack may require it of one.
+            if "not_in_image" in b:
+                if not isinstance(b["not_in_image"], str) or not b["not_in_image"].strip():
+                    errors.append("requires/host.json: %s's not_in_image must say why" % b.get("name"))
+                elif not b.get("optional"):
+                    errors.append("requires/host.json: %s is not_in_image, so it cannot be required: mark it optional" % b.get("name"))
             host_names.add(b.get("name"))
     except Exception as e:
         errors.append("requires/host.json is not valid JSON: %s" % e)

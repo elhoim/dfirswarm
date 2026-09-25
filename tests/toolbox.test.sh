@@ -82,6 +82,28 @@ bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" crypto --required --image "$TMP/image.
   || fail "in an image, a preset tool or an optional pack program the image lacks should not block"
 pass "in an image, pack programs are checked, the hints are the VM's, and --required holds only for what packs require"
 
+# A program another system has (Apple's log, a collector run on the source
+# host) is said to be not applicable in an image: never missing, never
+# blocking, even when a pack were to require it.
+cat > "$TMP/image.json" <<'JSON'
+{"image": "x", "programs": [
+  {"name": "dfs-mac-only", "why": "Apple's reader", "pack": "p2", "required": true, "not_in_image": "Only macOS has it."},
+  {"name": "dfs-nice-tool", "why": "optional", "pack": "p1", "required": false}
+]}
+JSON
+rm -f "$TMP/sb/toolbox.json"
+bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" dfir --required --image "$TMP/image.json" >/dev/null 2>&1 \
+  || fail "another system's program blocked the image check"
+jq -e '.not_applicable == [{"name": "dfs-mac-only", "pack": "p2", "why": "Only macOS has it."}]' "$TMP/sb/toolbox.json" >/dev/null \
+  || fail "another system's program is not listed as not applicable: $(jq -c '.not_applicable' "$TMP/sb/toolbox.json")"
+jq -e '[.present[], .missing[]] | map(.name) | index("dfs-mac-only") == null' "$TMP/sb/toolbox.json" >/dev/null \
+  || fail "another system's program was looked for in the image"
+jq -e '.missing | map(.name) | index("dfs-nice-tool") != null' "$TMP/sb/toolbox.json" >/dev/null || fail "the other pack programs are still checked"
+rm -f "$TMP/sb/toolbox.json"
+bash "$ROOT/scripts/toolbox.sh" "$TMP/sb" dfir >/dev/null 2>&1 || true
+jq -e 'has("not_applicable") | not' "$TMP/sb/toolbox.json" >/dev/null || fail "a host check lists programs as not applicable"
+pass "in an image, a program another system has is listed as not applicable, never missing or blocking"
+
 # Each tool's fields, whole: the version probe has a pipe of its own, and the
 # use column once read " head -1" for every tool.
 rm -f "$TMP/sb/toolbox.json"
