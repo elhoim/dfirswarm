@@ -82,14 +82,18 @@ def parse_unit(path):
             text = fh.read()
     except OSError as exc:
         return {"file": path, "error": str(exc)}
-    # Whitespace but not a newline: `\s` also matches one, so a unit file
-    # with many blank lines made each search rescan the rest of the file from
-    # every line start (quadratic), and a key with an empty value took the
-    # next line as its value. The value is taken greedily up to its last
-    # non-space character, so a long run of spaces inside a line is linear too.
+    # One line at a time, without a regex: a pattern that let whitespace run
+    # on rescanned the rest of the file from every line start on a unit
+    # padded with blank lines, or the rest of a line from every space after
+    # an empty `Key=`, and a key given empty took the next line as its value.
+    # The first line that gives the key a value is the one read, as before.
+    lines = text.split("\n")
     def field(name):
-        found = re.search(r"^[^\S\n]*%s[^\S\n]*=[^\S\n]*(.*\S)" % name, text, re.M)
-        return found.group(1) if found else None
+        for line in lines:
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == name and value.strip():
+                return value.strip()
+        return None
     return {"source": "systemd", "file": path, "file_modified": mtime_of(path),
             "schedule": field("OnCalendar") or field("OnBootSec") or field("OnUnitActiveSec"),
             "unit": field("Unit") or os.path.basename(path).replace(".timer", ".service"),

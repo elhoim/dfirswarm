@@ -243,6 +243,16 @@ check("cron_dump reads a timer padded with blank lines in linear time",
       timers.get("zz.timer", {}).get("schedule") == "5min" and timers["zz.timer"].get("at_reboot") is True,
       json.dumps(got)[:300])
 
+# An empty key followed by a long run of spaces: a pattern that backtracks
+# between the spaces and the value spends seconds per key on this.
+pad = " " * 100000
+got, timers = timers_under("cron-spaces", {"sp.timer":
+    "[Timer]\nOnCalendar=%s\nUnit=%s\nPersistent=%s\nOnBootSec=5min\n" % (pad, pad, pad)})
+sp = timers.get("sp.timer", {})
+check("cron_dump reads a timer whose empty keys are padded with spaces in linear time",
+      sp.get("schedule") == "5min" and sp.get("unit") == "sp.service" and sp.get("persistent") is None,
+      json.dumps(got)[:300])
+
 raise SystemExit(1 if failures else 0)
 EOF
 echo "pack-parsers: all checks passed"
