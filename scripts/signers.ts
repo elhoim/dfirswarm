@@ -160,6 +160,16 @@ export function machineSigner(home = dfirswarmHome(), o: { create?: boolean } = 
   const meta = join(dir, "machine.json");
   const key = join(dir, "release_ed25519");
   if (existsSync(meta) && existsSync(key)) {
+    // Kept as it was made, each time it is used: the directory the owner's
+    // alone, the key and its record 0600. A copy restored from a backup, or
+    // a umask, may have left them readable by others.
+    try {
+      chmodSync(dir, 0o700);
+      chmodSync(key, 0o600);
+      chmodSync(meta, 0o600);
+    } catch (err) {
+      return { why: `${dir} could not be made its owner's alone (0700, the key and its record 0600): ${(err as Error).message}` };
+    }
     try {
       const m = JSON.parse(readFileSync(meta, "utf8")) as MachineSigner;
       return { ...m, key };
