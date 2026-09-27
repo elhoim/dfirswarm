@@ -322,3 +322,22 @@ test("the summary and the report say the same of the answers: how many, adopted 
     await rm(runs, { recursive: true, force: true });
   }
 });
+
+test("summary: the lead register is listed whole, each lead with its status, holder and how it ended", async () => {
+  const runs = await mkdtemp(join(tmpdir(), "summary."));
+  try {
+    const sb = join(runs, "leads01");
+    const { initSandbox } = await import("../extensions/protocol.ts");
+    const L = await import("../extensions/leads.ts");
+    await initSandbox(sb, { swarmId: "leads01", agentIds: ["l0", "l1"], capUsd: 1, wallClockMinutes: 10 });
+    assert.equal((await L.openLead({ sandboxRoot: sb, agentId: "l0" }, { title: "Open the vault | with a pipe", why: "q5", take: true })).ok, true);
+    assert.equal((await L.openLead({ sandboxRoot: sb, agentId: "l1" }, { title: "Read the notes", why: "the key", material: false })).ok, true);
+    const text = await summarize(sb);
+    assert.match(text, /^## Leads$/m);
+    assert.match(text, /2 leads \(`leads\/leads\.md`\): 1 open, 1 active, 0 blocked, 0 closed; chain intact, 2 events\./);
+    assert.match(text, /\| L-1 \| Open the vault \\\| with a pipe \| active \| l0 \|/);
+    assert.match(text, /\| L-2 \| Read the notes \| open \(not material\) \|/);
+  } finally {
+    await rm(runs, { recursive: true, force: true });
+  }
+});

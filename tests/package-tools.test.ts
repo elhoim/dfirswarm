@@ -154,7 +154,7 @@ test("a part the verdict sealed, or one the package lists as present, cannot be 
 });
 
 /** A run with custody taken and an examiner's sign-off, packaged as swarm.sh package lays it out. */
-async function sealedPackage(o: { dispute?: boolean } = {}): Promise<{ root: string; runs: string; pkg: string }> {
+async function sealedPackage(o: { dispute?: boolean; leads?: boolean } = {}): Promise<{ root: string; runs: string; pkg: string }> {
   const runs = await mkdtemp(join(tmpdir(), "pkg-sealed-"));
   dirs.push(runs);
   const root = join(runs, "sp001");
@@ -169,6 +169,13 @@ async function sealedPackage(o: { dispute?: boolean } = {}): Promise<{ root: str
   if (o.dispute) {
     const d = await disputeEntry({ sandboxRoot: root, agentId: "a1" }, { seq: 1, why: "the header date is the imager's clock, not checked" });
     assert.equal(d.ok, true, JSON.stringify(d));
+  }
+  if (o.leads) {
+    const L = await import("../extensions/leads.ts");
+    const opened = await L.openLead({ sandboxRoot: root, agentId: "a0" }, { title: "Check the imager's clock", why: "The date rests on it", take: true });
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const closed = await L.closeLead({ sandboxRoot: root, agentId: "a0" }, "L-1", { disposition: "resolved", ref: "E-1" });
+    assert.equal(closed.ok, true, JSON.stringify(closed));
   }
   await takeCustody(root, { runsDir: runs });
   await appendReview(runs, "sp001", root, { action: "sign", examiner: "H. Examiner" });
@@ -185,6 +192,10 @@ async function sealedPackage(o: { dispute?: boolean } = {}): Promise<{ root: str
   await cp(join(root, "traces", "events.jsonl"), join(pkg, "trace", "events.jsonl"));
   await cp(join(runs, "reviews", "sp001.jsonl"), join(pkg, "review.jsonl"));
   if (o.dispute) await cp(join(root, "ledger", "disputes.jsonl"), join(pkg, "ledger-disputes.jsonl"));
+  if (o.leads) {
+    await cp(join(root, "leads", "leads.jsonl"), join(pkg, "leads.jsonl"));
+    await cp(join(root, "leads", "leads.md"), join(pkg, "leads.md"));
+  }
   writeComponents(root, pkg);
   return { root, runs, pkg };
 }
@@ -241,4 +252,25 @@ test("the agents' disputes travel with the package: their chain is walked and he
   v = verifyPackage(pkg);
   assert.equal(v.ok, false);
   assert.match(v.lines.join("\n"), /ledger-disputes\.jsonl \(declared present\)/);
+});
+
+test("the lead register travels with the package, unsigned: its chain is walked and held to the head the verdict sealed", async () => {
+  const { pkg } = await sealedPackage({ leads: true });
+  let v = verifyPackage(pkg);
+  assert.equal(v.ok, true, v.lines.join("\n"));
+  assert.match(v.lines.join("\n"), /Leads:        2 events, chain intact; head sealed/);
+  const components = JSON.parse(await readFile(join(pkg, "COMPONENTS.json"), "utf8")) as { components: Array<{ path: string; present: boolean }> };
+  assert.equal(components.components.find((c) => c.path === "leads.jsonl")?.present, true);
+  assert.equal(components.components.find((c) => c.path === "leads.md")?.present, true);
+  // An event's words rewritten: the chain breaks.
+  const text = await readFile(join(pkg, "leads.jsonl"), "utf8");
+  await writeFile(join(pkg, "leads.jsonl"), text.replace("imager's clock", "imager's name"));
+  v = verifyPackage(pkg);
+  assert.equal(v.ok, false);
+  assert.match(v.lines.join("\n"), /Leads:        CHAIN BROKEN at line 1 \(the line was rewritten\)/);
+  // Taken out, and the verdict sealed it: named.
+  await rm(join(pkg, "leads.jsonl"));
+  v = verifyPackage(pkg);
+  assert.equal(v.ok, false);
+  assert.match(v.lines.join("\n"), /leads\.jsonl \(declared present\)/);
 });

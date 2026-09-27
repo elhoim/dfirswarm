@@ -43,6 +43,7 @@ import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, rea
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { attestationHash, disputeHash, ledgerHash, readLedger, type LedgerAttestation, type LedgerDispute, type LedgerEntry } from "../extensions/protocol.ts";
+import { leadEventHash, type LeadEvent } from "../extensions/leads.ts";
 import { REVIEW_ACTIONS } from "./review.ts";
 import { packageLayout, verifyReleases } from "./release-record.ts";
 
@@ -265,6 +266,14 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
     );
   }
   if (tokens.length) {
+    // A lead that repeats a sensitive entry's words: its event kept by what chains it.
+    chained("leads.jsonl", (_o, l) => byWords(l), (o, l) => ({ v: o.v, seq: o.seq, ev: o.ev, ...(o.lead ? { lead: o.lead } : {}), redacted: true, line_sha256: sha256(l), prev: o.prev, hash: o.hash }), "line", "lead event(s) holding a sensitive entry's words replaced, keeping seq, ev, lead, prev and hash");
+    if (existsSync(join(dir, "leads.md"))) {
+      const before = readFileSync(join(dir, "leads.md"));
+      const hit = holds(before.toString("utf8"));
+      handled.add("leads.md");
+      if (hit) change("leads.md", before, `${REDACTED}: the rendered lead register repeats a sensitive entry's words; leads.jsonl carries every event (those redacted by their hashes); its sha256 before redaction is ${sha256(before)}\n`, "the rendered register holds a sensitive entry's words, replaced whole", [{ what: "file", entry: hit.seq, sha256_of_original: sha256(before), why: "repeats a sensitive entry's words" }]);
+    }
     chained("trace/events.jsonl", (_o, l) => byWords(l), (_o, l) => ({ redacted: true, line_sha256: sha256(l) }), "line", "line(s) holding a sensitive entry's words replaced by their own sha256");
     chained("store/journal.jsonl", (_o, l) => byWords(l), (o, l) => ({ v: o.v, seq: o.seq, type: o.type, ...(o.job ? { job: o.job } : {}), redacted: true, line_sha256: sha256(l), prev: o.prev ?? null }), "line", "journal line(s) holding a sensitive entry's words replaced, keeping seq, prev and their own sha256");
     chained("review.jsonl", (_o, l) => byWords(l), (o, l) => ({ v: o.v, seq: o.seq, action: o.action, redacted: true, line_sha256: sha256(l), prev: o.prev ?? null }), "line", "review line(s) holding a sensitive entry's words replaced, keeping seq, action, prev and their own sha256");
@@ -494,7 +503,33 @@ function journalChain(text: string): { ok: boolean; lines: number; redacted: num
  * line's hash is recomputed. The same as verifyAttestationChain and
  * verifyDisputeChain on an unredacted chain.
  */
-export function actChain(text: string, hash: (line: Record<string, unknown>, prev: string) => string): { ok: boolean; total: number; redacted: number; head: string | null; broken_at: number | null; reason: string | null } {
+export /**
+ * The lead register's chain as a package holds it: each line chains to the
+ * one before by its hash; a redacted line keeps its hash, and only its link
+ * is checked, as the ledger's are.
+ */
+function leadChain(text: string): { ok: boolean; total: number; head: string | null; broken_at: number | null; reason: string | null; redacted: number } {
+  let prev = "genesis";
+  let total = 0;
+  let redacted = 0;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    total += 1;
+    let o: Record<string, unknown>;
+    try {
+      o = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      return { ok: false, total, head: null, broken_at: total, reason: "the line is not JSON", redacted };
+    }
+    if (o.prev !== prev) return { ok: false, total, head: null, broken_at: total, reason: "the line does not chain to the one before", redacted };
+    if (o.redacted === true) redacted += 1;
+    else if (o.hash !== leadEventHash(o as unknown as LeadEvent, prev)) return { ok: false, total, head: null, broken_at: total, reason: "the line was rewritten", redacted };
+    prev = String(o.hash);
+  }
+  return { ok: true, total, head: total ? prev : null, broken_at: null, reason: null, redacted };
+}
+
+function actChain(text: string, hash: (line: Record<string, unknown>, prev: string) => string): { ok: boolean; total: number; redacted: number; head: string | null; broken_at: number | null; reason: string | null } {
   let last = "genesis";
   let total = 0;
   let redacted = 0;
@@ -552,7 +587,7 @@ function reviewChain(text: string): { ok: boolean; lines: number; redacted: numb
  * of them; `since` parts were first packaged then, so a package from before
  * it carries none and says so.
  */
-export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; what: string; absent: string; core?: true; sealed?: "trace" | "ledger" | "attestations" | "disputes" | "journal" | "artifacts"; since?: string }> = [
+export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; what: string; absent: string; core?: true; sealed?: "trace" | "ledger" | "attestations" | "disputes" | "leads" | "journal" | "artifacts"; since?: string }> = [
   { path: "custody.json", source: "custody.json", what: "the custody verdict", absent: "no custody was taken for this run (swarm.sh stop takes it)", core: true },
   { path: "trace/custody-anchor.json", source: "<sandbox>.custody-anchor.json", what: "the verdict's anchor, kept outside the run", absent: "the kickoff wrote no custody anchor for this run", core: true },
   { path: "custody.json.sig", source: "custody.json.sig", what: "the verdict's signature", absent: "custody.json was not signed (--custody-sign-key)" },
@@ -563,6 +598,10 @@ export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; w
   { path: "ledger.jsonl", source: "ledger/entries.jsonl", what: "the ledger", absent: "nothing was recorded", sealed: "ledger" },
   { path: "ledger-attestations.jsonl", source: "ledger/attestations.jsonl", what: "the ledger's attestations", absent: "no entry has a second author", sealed: "attestations" },
   { path: "ledger-disputes.jsonl", source: "ledger/disputes.jsonl", what: "the agents' disputes of entries", absent: "no agent disputed an entry", sealed: "disputes", since: "2026-09-27" },
+  { path: "leads.jsonl", source: "leads/leads.jsonl", what: "the lead register: how the investigation proceeded (unsigned, sealed by custody)", absent: "no lead was opened", sealed: "leads", since: "2026-09-28" },
+  { path: "leads.md", source: "leads/leads.md", what: "the lead register, rendered", absent: "no lead was opened", since: "2026-09-28" },
+  { path: "operator-requests.jsonl", source: "operator-requests.jsonl", what: "what the agents asked of the operator", absent: "no lead was closed needs_operator", since: "2026-09-28" },
+  { path: "operator-hosts.jsonl", source: "operator-hosts.jsonl", what: "the hosts the operator allowed while the run went on", absent: "the operator allowed no host during the run", since: "2026-09-28" },
   { path: "store/journal.jsonl", source: "store/journal.jsonl", what: "the store's journal", absent: "the run had no job service", sealed: "journal" },
   { path: "trace/journal-anchor.json", source: "<sandbox>.journal-anchor.json", what: "the journal's anchor", absent: "the run had no job service" },
   { path: "review.jsonl", source: "<runs>/reviews/<run>.jsonl", what: "the examiner's review", absent: "no examiner has reviewed this run", since: "2026-09-27" },
@@ -618,7 +657,7 @@ function packagedFiles(dir: string, under: string): string[] {
   return walk(root).map((abs) => relative(dir, abs).split("\\").join("/")).sort();
 }
 
-type SealShape = { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; disputes?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
+type SealShape = { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; disputes?: { lines?: number; head?: string | null }; leads?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
 
 export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
   const out: string[] = [];
@@ -679,6 +718,8 @@ export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
         return (seal?.attestations?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.attestations?.lines} attestation lines` : null;
       case "disputes":
         return (seal?.disputes?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.disputes?.lines} dispute lines` : null;
+      case "leads":
+        return (seal?.leads?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.leads?.lines} lead events` : null;
       case "journal":
         return seal?.journal ? `the verdict sealed a journal of ${seal.journal.lines} lines` : null;
       case "artifacts":
@@ -759,6 +800,16 @@ export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
   } else if ((seal?.disputes?.lines ?? 0) > 0) {
     // Named by the components check above; said here too, beside the other chains.
     out.push(`Disputes:     NOT IN THE PACKAGE, and the verdict sealed ${seal?.disputes?.lines} lines`);
+  }
+  // The lead register: its own chain, sealed unsigned, held to the seal when the verdict sealed it.
+  const leadsText = read("leads.jsonl");
+  if (leadsText !== null) {
+    const l = leadChain(leadsText);
+    const sealed = !seal?.leads || ((seal.leads.head ?? null) === l.head && (seal.leads.lines === undefined || seal.leads.lines === l.total));
+    out.push(`Leads:        ${l.ok ? `${l.total} events, chain intact${l.redacted ? `, ${l.redacted} redacted (their hashes kept)` : ""}` : `CHAIN BROKEN at line ${l.broken_at} (${l.reason})`}${seal?.leads ? (sealed ? "; head sealed" : "; HEAD NOT THE ONE SEALED") : "; not sealed by this verdict (a custody from before the lead register was sealed)"}`);
+    ok &&= l.ok && sealed;
+  } else if ((seal?.leads?.lines ?? 0) > 0) {
+    out.push(`Leads:        NOT IN THE PACKAGE, and the verdict sealed ${seal?.leads?.lines} events`);
   }
   // The store's journal: the sealed line where the seal says, and only examiner notes after it.
   const journal = read("store/journal.jsonl");

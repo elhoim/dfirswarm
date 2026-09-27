@@ -691,3 +691,29 @@ test("several sets: each inputs/<set> link is held to the source inputs.json's s
   await mkdir(join(copied, "inputs", "laptop"), { recursive: true });
   assert.deepEqual(await evidenceLinks(copied, { ...manifest, held: "copy", sets: [{ name: "laptop", source: a }] }), { checked: 0, moved: [] });
 });
+
+test("the lead register is a chain custody seals, unsigned, beside the ledger: an event appended or rewritten after the stop is named by verify", async () => {
+  const L = await import("../extensions/leads.ts");
+  const { root, runs } = await sealedRun();
+  await writeFile(join(root, "team.json"), JSON.stringify({ swarm_id: "s1", n: 2, agents: [{ id: "a0", role: "w" }, { id: "a1", role: "w" }] }));
+  await mkdir(join(root, "done", "agents"), { recursive: true });
+  await mkdir(join(root, "locks"), { recursive: true });
+  assert.equal((await L.openLead({ sandboxRoot: root, agentId: "a0" }, { title: "Open the container", why: "q5", take: true })).ok, true);
+  const c = await takeCustody(root, { runsDir: runs });
+  assert.equal(c.leads?.intact, true);
+  const head = (await L.leadsSnapshot(root)).state.chain.head;
+  assert.deepEqual(c.seal.leads, { lines: 1, head });
+  assert.equal(c.checks.find((x) => x.name === "lead register")?.status, "passed");
+  assert.match(c.summary, /1 lead event, chain intact/);
+  assert.equal((await verifyCustody(root, { runsDir: runs })).ok, true);
+  // A lead opened after the stop: its register no longer matches the seal.
+  assert.equal((await L.openLead({ sandboxRoot: root, agentId: "a1" }, { title: "A late one", why: "after the stop" })).ok, true);
+  const v = await verifyCustody(root, { runsDir: runs });
+  assert.ok(v.seal_drift.some((d) => d.what === "lead register" && /^1 events, head /.test(d.sealed) && /^2 events, head /.test(d.now)), JSON.stringify(v.seal_drift));
+  assert.equal(v.ok, false);
+  // A rewritten event breaks the chain, and the check fails.
+  const text = await readFile(join(root, "leads", "leads.jsonl"), "utf8");
+  await writeFile(join(root, "leads", "leads.jsonl"), text.split("\n")[0].replace("Open the container", "Open another container") + "\n");
+  const b = await verifyCustody(root, { runsDir: runs });
+  assert.equal(b.now.find((x) => x.name === "lead register")?.status, "failed");
+});

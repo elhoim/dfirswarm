@@ -89,6 +89,7 @@ import { checkSshSignature, consoleRefusal, dfirswarmHome, keyNeeds, keyWords, l
 import { opensslBinary } from "./pkcs11.ts";
 import { confirmOnTty, hasTty, readFromTty, readSecretFromFd, wipe } from "./secret-io.ts";
 import { readLedger, supersededBy, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain, type LedgerEntry } from "../extensions/protocol.ts";
+import { verifyLeadChain } from "../extensions/leads.ts";
 import { verifyJournalText } from "./evidence-store.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -168,6 +169,12 @@ export async function asSealed(ctx: RunCtx, custody: { seal?: Record<string, { l
     if (!seal.disputes) {
       if (disp.lines) missing.push("the verdict did not seal the disputes (a custody from before they were sealed)");
     } else if (seal.disputes.lines !== disp.lines || (seal.disputes.head ?? null) !== disp.head) drift.push(`the disputes (sealed ${seal.disputes.lines} lines; now ${disp.lines})`);
+    // The lead register, sealed unsigned beside the ledger: how the investigation proceeded.
+    const leadsText = read("leads/leads.jsonl");
+    const lv2 = leadsText && leadsText.trim() ? verifyLeadChain(leadsText) : { total: 0, head: null };
+    if (!seal.leads) {
+      if (lv2.total) missing.push("the verdict did not seal the lead register (a custody from before it was sealed)");
+    } else if ((seal.leads.lines ?? 0) !== lv2.total || (seal.leads.head ?? null) !== lv2.head) drift.push(`the lead register (sealed ${seal.leads.lines} events; now ${lv2.total})`);
     const journalText = read("store/journal.jsonl");
     if (seal.journal) {
       const hashes = verifyJournalText(journalText ?? "").hashes;

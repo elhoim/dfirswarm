@@ -37,6 +37,7 @@ import { reportBodyFacts, type BodyFacts } from "./report-body.ts";
 import { bodyRelease } from "./release-record.ts";
 import { coverageLine, coverageOf } from "./coverage.ts";
 import { readRegularText } from "./regular-file.ts";
+import { leadsSnapshot, rankedLeads } from "../extensions/leads.ts";
 
 type Marker = { id: string; marker: "done" | "dead" | "none"; reason: string; at: string };
 
@@ -456,6 +457,20 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
       for (const e of timeline) lines.push(`| ${e.ts ?? ""} | ${cell(e.value)} | ${cell(e.source ?? "")} | ${(e.authors ?? [e.by]).join(", ")} |`);
       lines.push("");
     }
+  }
+
+  // --- leads --------------------------------------------------------------
+  // The lead register: the work the swarm found to follow, who held it and
+  // how each piece ended. Every lead is listed; none is cut.
+  const leadsSnap = await leadsSnapshot(sandbox).catch(() => null);
+  if (leadsSnap && leadsSnap.state.events.length) {
+    const ranked = rankedLeads(leadsSnap);
+    const by = (st: string) => ranked.filter((x) => x.status === st).length;
+    lines.push("## Leads", "");
+    lines.push(`${ranked.length} lead${ranked.length === 1 ? "" : "s"} (\`leads/leads.md\`): ${by("open")} open, ${by("active")} active, ${by("blocked")} blocked, ${by("closed")} closed; chain ${leadsSnap.state.chain.ok ? `intact, ${leadsSnap.state.events.length} events` : `BROKEN at line ${leadsSnap.state.chain.broken_at} (${leadsSnap.state.chain.reason})`}.`, "");
+    lines.push("| Lead | Title | Status | Holder | Disposition | Rests on |", "| --- | --- | --- | --- | --- | --- |");
+    for (const x of ranked) lines.push(`| ${x.id} | ${cell(x.title)} | ${x.status}${x.material ? "" : " (not material)"} | ${x.holder ?? ""} | ${x.disposition ?? ""} | ${cell(x.ref ?? "")} |`);
+    lines.push("");
   }
 
   // --- work ---------------------------------------------------------------

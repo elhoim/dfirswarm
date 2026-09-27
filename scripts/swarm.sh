@@ -8890,6 +8890,13 @@ PY
   pkg_copy "$sandbox/ledger/attestations.jsonl" "$out/ledger-attestations.jsonl" non-empty
   # An agent's dispute of an entry, and its withdrawal: a chain of its own.
   pkg_copy "$sandbox/ledger/disputes.jsonl" "$out/ledger-disputes.jsonl" non-empty
+  # The lead register (how the investigation proceeded): its chained events,
+  # sealed unsigned by custody, the rendering, what the agents asked of the
+  # operator and the hosts the operator allowed in answer.
+  pkg_copy "$sandbox/leads/leads.jsonl" "$out/leads.jsonl" non-empty
+  pkg_copy "$sandbox/leads/leads.md" "$out/leads.md" non-empty
+  pkg_copy "$sandbox/operator-requests.jsonl" "$out/operator-requests.jsonl" non-empty
+  pkg_copy "$sandbox/operator-hosts.jsonl" "$out/operator-hosts.jsonl" non-empty
   for f in inputs.json toolbox.json toolchain.json team.json budget.json layout.json netguard.allow SWARM.md custody.json; do
     pkg_copy "$sandbox/$f" "$out/$f"
   done
