@@ -4,8 +4,9 @@
 # (--ledger-from). No model, no Herdr, no VM.
 #
 # - accept, reject and amend name an entry by seq and keep its hash; reject
-#   and amend need a note; the sign-off is over the ledger's head and is
-#   refused while the run is running;
+#   and amend need a note; the sign-off is over the ledger's head and the
+#   report, is refused while the run is running and over no report, and
+#   `show` exits 4 once either has moved since;
 # - the review is a chain beside the registry: a line changed breaks it;
 # - --ledger-from brings only the accepted (or amended) entries when there
 #   is a review, every entry marked unreviewed when there is none, read-only,
@@ -55,6 +56,14 @@ out="$(swarm review srv1 --sign --examiner "H. Examiner")"; rc=$?
 set -e
 [[ $rc -eq 2 ]] && grep -q 'still running' <<<"$out" || fail "a running run's ledger was signed off (rc $rc): $out"
 jq '.runs[0].state = "done"' "$RUNS/registry.json" > "$TMP/r" && mv "$TMP/r" "$RUNS/registry.json"
+# A sign-off is over the report the examiner read: with none there, it is refused.
+set +e
+out="$(swarm review srv1 --sign)"; rc=$?
+set -e
+[[ $rc -ne 0 ]] && grep -q 'there is no work/report.md in run srv1 to sign over' <<<"$out" || fail "a sign-off over no report was taken (rc $rc): $out"
+[[ ! -e "$RUNS/reviews/srv1.jsonl" ]] || [[ "$(wc -l < "$RUNS/reviews/srv1.jsonl" | tr -d ' ')" == 3 ]] || fail "a refused sign-off wrote a line"
+mkdir -p "$OLD/work"
+printf '# Report\n\nPersistence by a scheduled task [#3].\n' > "$OLD/work/report.md"
 out="$(swarm review srv1 --sign)" || fail "the sign-off (examiner from the run's record) failed: $out"
 grep -q 'by Run Examiner' <<<"$out" || fail "the run's recorded examiner was not used: $out"
 F="$RUNS/reviews/srv1.jsonl"
@@ -66,6 +75,23 @@ jq -s -e '.[0].action == "accept" and .[0].entry_hash == "a1" and .[1].note == "
   || fail "the review lines are not what was done: $(cat "$F")"
 out="$(swarm review srv1 --show)" || fail "show failed: $out"
 grep -q 'the chain verifies' <<<"$out" && grep -q 'over ledger head a3' <<<"$out" || fail "show does not say what was reviewed: $out"
+# The report changed after the sign-off: show says so and exits 4, not 0.
+cp "$OLD/work/report.md" "$TMP/report.keep"
+printf 'and a line added afterwards\n' >> "$OLD/work/report.md"
+set +e
+out="$(swarm review srv1 --show)"; rc=$?
+set -e
+[[ $rc -eq 4 ]] && grep -q 'the report has changed since' <<<"$out" && grep -q 'THE SIGN-OFF DOES NOT COVER THE RUN AS IT STANDS' <<<"$out" || fail "a sign-off over an earlier report showed as current (rc $rc): $out"
+cp "$TMP/report.keep" "$OLD/work/report.md"
+# The ledger moved on after the sign-off: the same.
+cp "$OLD/ledger/entries.jsonl" "$TMP/ledger.keep"
+printf '%s\n' '{"v":2,"seq":4,"kind":"ioc","value":"late","by":"srv100","authors":["srv100"],"at":"t","prev":"a3","hash":"a4"}' >> "$OLD/ledger/entries.jsonl"
+set +e
+out="$(swarm review srv1 --show)"; rc=$?
+set -e
+[[ $rc -eq 4 ]] && grep -q 'the ledger has changed since' <<<"$out" || fail "a sign-off over an earlier ledger showed as current (rc $rc): $out"
+cp "$TMP/ledger.keep" "$OLD/ledger/entries.jsonl"
+out="$(swarm review srv1 --show)" || fail "show over the signed ledger and report failed: $out"
 grep -q '"command":"review"' "$RUNS/operator-audit.jsonl" || fail "the review is not on the operator's audit"
 pass "accept, reject and amend name the entry and its hash, a reject needs a note, and the sign-off is over the ledger's head once the run has ended"
 

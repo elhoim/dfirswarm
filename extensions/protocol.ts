@@ -162,10 +162,11 @@ export const PROTECTED_FILES = [
 /**
  * Harness files at the sandbox root named by a pattern: custody's earlier
  * verdicts (custody.<stamp>.json, custody.previous.json,
- * custody.previous-<stamp>.json) and a custody.json it moved aside. Keys
- * are lower-cased before the test.
+ * custody.previous-<stamp>.json), a custody.json it moved aside, and the
+ * index each earlier verdict sealed (artifacts.<stamp>.json). Keys are
+ * lower-cased before the test.
  */
-export const PROTECTED_ROOT_PATTERNS: readonly RegExp[] = [/^custody\.[^/]*$/];
+export const PROTECTED_ROOT_PATTERNS: readonly RegExp[] = [/^custody\.[^/]*$/, /^artifacts\.[^/]*$/];
 
 /**
  * True when `pathKey` (sandbox-relative, forward slashes) belongs to the

@@ -49,13 +49,14 @@ import {
   type AgentBudget,
   type LedgerEntry,
 } from "../extensions/protocol.ts";
+import { createHash } from "node:crypto";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
-import { custodyAnchorPath, manifestMeta, verdictAnchorLine, verdictAnchorState } from "./custody.ts";
+import { custodyAnchorPath, manifestMeta, sealedIndex, verdictAnchorLine, verdictAnchorState } from "./custody.ts";
 import { hashRegularFile, openRegular, readRegularText } from "./regular-file.ts";
 import { createInterface } from "node:readline";
 import { loadRunContext, readJsonFile } from "./run-record.ts";
 import { coverageLine, coverageOf, type CoverageReport, type Grounding } from "./coverage.ts";
-import { ReviewFileError, ledgerHead, readReviews, reviewState, verifyReviewChain, type ReviewLine } from "./review.ts";
+import { ReviewFileError, isSandboxPath, ledgerHead, readReviews, reviewState, signoffCoverage, verifyReviewChain, type ReviewLine } from "./review.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -572,6 +573,8 @@ export type ReviewState = {
   signed: ReviewLine | null;
   /** The ledger's head now, to hold the signature to: the last chain hash, or file:<sha256>. */
   head: string;
+  /** The sha256 of the report the sign-off names, as it is now: null when it is gone; undefined when there is no sign-off or it names none. */
+  reportNow?: string | null;
   /** Why the review file could not be read (a link, not a regular file): said as that, never as "not reviewed". */
   unreadable?: string;
 };
@@ -596,7 +599,35 @@ export async function readReviewState(runsDir: string, id: string, sandbox: stri
   const digest = await hashRegularFile(join(sandbox, "ledger", "entries.jsonl"));
   const fileSha = digest && "sha256" in digest ? digest.sha256 : "";
   const head = ledgerHead(ledger.map((e) => ({ ...(e as object), text: "" })) as Parameters<typeof ledgerHead>[0], fileSha);
-  return { lines: lines.length, chain: verifyReviewChain(lines), byEntry: entries, signed, head };
+  // The report the sign-off is over, hashed as it is now.
+  let reportNow: string | null | undefined;
+  if (signed?.report_path && isSandboxPath(signed.report_path)) {
+    const r = await hashRegularFile(join(sandbox, signed.report_path));
+    reportNow = r && "sha256" in r ? r.sha256 : null;
+  }
+  return { lines: lines.length, chain: verifyReviewChain(lines), byEntry: entries, signed, head, reportNow };
+}
+
+/**
+ * Whether the examiner's sign-off covers this run as it stands: the
+ * review's chain holds, and the ledger's head and the report's hash are the
+ * ones signed. Only then does the report say "reviewed and signed".
+ */
+export function signoffCurrent(state: ReviewState | null): boolean {
+  if (!state?.signed || state.unreadable) return false;
+  return signoffCoverage(state.signed, { chainOk: state.chain.ok, ledgerHead: state.head || null, reportSha: state.reportNow }).current;
+}
+
+/** What a sign-off that does not cover the run as it stands is over, in words. */
+export function signoffScope(state: ReviewState): string {
+  const s = state.signed as ReviewLine;
+  const c = signoffCoverage(s, { chainOk: state.chain.ok, ledgerHead: state.head || null, reportSha: state.reportNow });
+  const parts: string[] = [];
+  if (!state.chain.ok) parts.push("its review file's chain is broken, so what it says is not held to anything");
+  if (c.ledger === false) parts.push(`it is over an earlier ledger (head ${s.ledger_head}), and entries were recorded after it`);
+  if (!s.report_sha256) parts.push("it names no report");
+  else if (c.report === false) parts.push(`it is over ${s.report_path ?? "a report"} as it was (sha256 ${s.report_sha256}), and ${state.reportNow ? `that file is now ${state.reportNow}` : "that file is gone"}`);
+  return parts.join("; ");
 }
 
 /** The examiner's standing on one entry, in the words of its exhibit. */
@@ -628,9 +659,34 @@ export function reviewLine(state: ReviewState | null, ledger: readonly LedgerEnt
   const sign = state.signed
     ? `signed by ${state.signed.examiner} at ${state.signed.at} over ledger head ${state.signed.ledger_head ?? "not named"}${
         state.signed.ledger_head && head ? (state.signed.ledger_head === head ? " (the ledger's current head)" : ` — NOT the ledger's current head (${head}): entries were recorded after the signature`) : ""
+      }${
+        !state.signed.report_sha256
+          ? " and over no report"
+          : ` and ${state.signed.report_path ?? "the report"} sha256 ${state.signed.report_sha256}${state.reportNow === undefined ? "" : state.reportNow === state.signed.report_sha256 ? " (the report as it is)" : ` — NOT the report as it is (${state.reportNow ?? "gone"}): it changed after the signature`}`
       }`
     : "not signed";
   return `${reviewed}; ${sign}; ${chain}`;
+}
+
+/**
+ * The swarm's report held to the index custody sealed at stop: the sha256 of
+ * the bytes this document reproduces, labelled as that, and whether they are
+ * the ones sealed. A report changed after the stop says CHANGED SINCE
+ * CUSTODY with the sealed hash, rather than today's hash standing in for the
+ * record's.
+ */
+export async function ownReportSeal(sandbox: string, path: string, sha256: string, custody: { at?: string; artifacts?: { index_sha256?: string } | null } | null, anchored: string | null | undefined): Promise<string> {
+  const now = `Its sha256 as reproduced here: ${sha256}`;
+  if (!custody) return `${now}; not sealed: no custody was taken (swarm.sh stop takes it).`;
+  const when = custody.at ?? "stop";
+  const idx = await sealedIndex(sandbox, custody, anchored);
+  if (idx.state === "not sealed") return `${now}; not held to a seal: ${idx.why}.`;
+  if (idx.state === "differs") return `${now}; NOT HELD TO THE SEAL: ${idx.why}.`;
+  const sealed = (idx.index.files ?? []).find((f) => f.path === path);
+  if (!sealed) return `${now}. NOT SEALED: the index custody sealed at ${when} has no ${path}; it was written after the stop.`;
+  return sealed.sha256 === sha256
+    ? `${now}, the bytes custody sealed at ${when} (artifacts.json).`
+    : `${now}. CHANGED SINCE CUSTODY: custody sealed ${path} at ${when} with sha256 ${sealed.sha256}; these are not those bytes.`;
 }
 
 /** The run's model gateway as the kickoff recorded it (`isolation.model_gateway`); null when it had none. */
@@ -1297,6 +1353,7 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
     vms?: Array<{ agent?: string; secret_violations?: Array<{ env?: string; host?: string; method?: string; path?: string; location?: string; own_host?: boolean | null }> }> | null;
     model_gateway?: { lines: number; intact: boolean; detail: string; refused?: string } | null;
     checks?: Array<{ name: string; status: string; reason?: string; expected?: number; checked?: number }>;
+    artifacts?: { files?: number; index_sha256?: string } | null;
     seal?: { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
     acquisition?: { source: string | null; source_sha256: string | null; given: number; matched: number; mismatched: string[]; not_compared: string[] } | null;
     operator?: { lines: number; intact: boolean; detail: string; trace_actions: number; matched: number; unmatched: unknown[] } | null;
@@ -1305,7 +1362,7 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
     timing?: { total_ms: number; evidence_bytes: number; evidence_mb_per_s: number | null };
   }>(join(sandbox, "custody.json"));
   // The anchor outside the run: the kickoff's reference clock, and the last verdict's signature and timestamp.
-  const custodyAnchorFile = await readJsonFile<{ time_reference?: { url?: string; offset_ms?: number | null; precision_ms?: number; error?: string } | null; custody?: Array<{ signature?: { file?: string; key?: string | null; error?: string }; timestamp?: { authority?: string; gen_time?: string | null; error?: string } }> }>(custodyAnchorPath(sandbox));
+  const custodyAnchorFile = await readJsonFile<{ time_reference?: { url?: string; offset_ms?: number | null; precision_ms?: number; error?: string } | null; custody?: Array<{ artifacts_sha256?: string | null; signature?: { file?: string; key?: string | null; error?: string }; timestamp?: { authority?: string; gen_time?: string | null; error?: string; signature?: { verified?: boolean | null; ca?: string | null; detail?: string } } }> }>(custodyAnchorPath(sandbox));
   const lastAnchored = custodyAnchorFile?.custody?.at(-1);
   // The operator's own actions on this run, from the audit beside the registry.
   const operatorActs = await (async () => {
@@ -1712,8 +1769,10 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
   limits.push(
     review?.unreadable
       ? `Prepared by an AI agent swarm. The examiner's review could not be read (${escapeHtml(review.unreadable)}), so this document cannot say whether any finding was reviewed.`
-      : review && review.signed
+      : review && review.signed && signoffCurrent(review)
       ? `Prepared by an AI agent swarm and reviewed by an examiner: ${escapeHtml(reviewLine(review, ledger))}. An entry the examiner did not review is still the agents' conclusion.`
+      : review && review.signed
+      ? `Prepared by an AI agent swarm. An examiner signed off, and the sign-off does not cover this run as it stands: ${escapeHtml(signoffScope(review))}. What changed since is the agents' conclusion (${escapeHtml(reviewLine(review, ledger))}).`
       : review && review.lines
         ? `Prepared by an AI agent swarm. An examiner has reviewed some entries and has not signed the review (${escapeHtml(reviewLine(review, ledger))}); an entry not reviewed is the agents' conclusion.`
         : "Prepared by an AI agent swarm. The findings are the agents' conclusions, each recorded with the source it rests on; none is an examiner's opinion until an examiner has reviewed it.",
@@ -1759,7 +1818,13 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
   const timestampRow = lastAnchored?.timestamp
     ? lastAnchored.timestamp.error
       ? `NOT TIMESTAMPED: ${lastAnchored.timestamp.error}`
-      : `custody.json.tsr from ${lastAnchored.timestamp.authority}, ${lastAnchored.timestamp.gen_time ?? "time not read"} (RFC 3161; its signature: openssl ts -verify -in custody.json.tsr -data custody.json -CAfile <the authority's CA>)`
+      : `custody.json.tsr from ${lastAnchored.timestamp.authority}, ${lastAnchored.timestamp.gen_time ?? "time not read"} (RFC 3161; ${
+          lastAnchored.timestamp.signature?.verified === true
+            ? `its signature verified against ${lastAnchored.timestamp.signature.ca ?? "the authority's CA"} when custody took it (openssl ts -verify)`
+            : lastAnchored.timestamp.signature?.verified === false
+              ? `ITS SIGNATURE DID NOT VERIFY against ${lastAnchored.timestamp.signature.ca ?? "the CA named"}: ${lastAnchored.timestamp.signature.detail ?? "no detail"}`
+              : `imprint only: its signature was not verified${lastAnchored.timestamp.signature?.detail && lastAnchored.timestamp.signature.ca ? ` (${lastAnchored.timestamp.signature.detail})` : " (no CA named: --custody-timestamp-ca)"}; to check it: openssl ts -verify -in custody.json.tsr -data custody.json -CAfile <the authority's CA>, or swarm.sh custody-verify --tsa-ca FILE`
+        })`
     : "no trusted timestamp (--custody-timestamp-url)";
   const clockRef = (r: { url?: string; offset_ms?: number | null; precision_ms?: number; error?: string } | null | undefined, when: string) =>
     r ? (r.offset_ms === null || r.offset_ms === undefined ? `${when}: ${r.url} not read (${r.error ?? "no answer"})` : `${when}: the host ${r.offset_ms >= 0 ? "behind" : "ahead of"} ${r.url} by ${Math.abs(r.offset_ms)} ms (± ${r.precision_ms ?? 1000} ms)`) : null;
@@ -1862,7 +1927,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ...(modelsRow ? ([["Models", modelsRow]] as Array<[string, string]>) : []),
     ...(hostCustody?.timing ? ([["Custody's cost", `${Math.round(hostCustody.timing.total_ms / 1000)} s; ${bytesHuman(hostCustody.timing.evidence_bytes)} of evidence re-read${hostCustody.timing.evidence_mb_per_s ? ` at ${hostCustody.timing.evidence_mb_per_s} MB/s` : ""}`]] as Array<[string, string]>) : []),
     ["What the anchors are", "files of the operator's own account beside the run: they hold the agents to account, and a signature and a trusted timestamp hold the verdict itself; they do not hold the operator's account to account"],
-    ["Check it again", `swarm.sh custody-verify ${id || "<id>"} (writes nothing: every check, the sealed prefix, the lines after the seal, the signature and the timestamp token); a package: swarm.sh verify <package> --allowed-signers FILE`],
+    ["Check it again", `swarm.sh custody-verify ${id || "<id>"} (writes nothing in the run: every check, the sealed prefix and the lines after it, every chain's sealed length and head, every work file against the index custody sealed, the signature and the timestamp token, its signature too with --tsa-ca FILE); a package: swarm.sh verify <package> --allowed-signers FILE`],
   ];
   const operatorHtml = operatorActs.length
     ? `<h3>The operator's actions on this run (${operatorActs.length})</h3>
@@ -1906,7 +1971,8 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
       if (!key.startsWith("work/")) continue;
       const read = await readSandboxFile(sandbox, key, { maxBytes: 16 * 1024 * 1024 }).catch(() => null);
       const text = read ? read.bytes.toString("utf8") : null;
-      if (text && text.trim()) return { path: key, text };
+      // The hash of the bytes reproduced here, not of a read made before them.
+      if (text && text.trim() && read) return { path: key, text, sha256: createHash("sha256").update(read.bytes).digest("hex") };
     }
     return null;
   })();
@@ -1915,7 +1981,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
       n: 9,
       title: `The swarm's own report (${basename(own.path)})`,
       breakBefore: true,
-      html: `<p>Reproduced verbatim from <code>${escapeHtml(own.path)}</code>, sha256 <span class="hash">${escapeHtml(artifacts.files.find((f) => f.path === own.path)?.sha256 ?? "not hashed")}</span>. Its headings are demoted so this document keeps one outline; nothing else is changed.</p>
+      html: `<p>Reproduced verbatim from <code>${escapeHtml(own.path)}</code>. ${escapeHtml(await ownReportSeal(sandbox, own.path, own.sha256, hostCustody, lastAnchored?.artifacts_sha256))} Its headings are demoted so this document keeps one outline; nothing else is changed.</p>
 <div class="embedded">${markdownToHtml(own.text, 2)}</div>`,
     });
   }
@@ -1979,7 +2045,13 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
       <dt>Run</dt><dd class="hash">${escapeHtml(id || "—")}</dd>
       <dt>Period</dt><dd class="tabular">${escapeHtml(startedAt || "—")} → ${escapeHtml(endedAt || "—")}</dd>
       <dt>Tool</dt><dd>DFIR Swarm ${escapeHtml(version)}${escapeHtml(commit)}</dd>
-      <dt>Prepared by</dt><dd>an AI agent swarm (${team.n} agent${team.n === 1 ? "" : "s"}); ${review && review.signed ? `reviewed and signed by ${escapeHtml(review.signed.examiner)} at ${escapeHtml(review.signed.at)}` : "its findings are the agents' conclusions until an examiner reviews them"}</dd>
+      <dt>Prepared by</dt><dd>an AI agent swarm (${team.n} agent${team.n === 1 ? "" : "s"}); ${
+        review && review.signed && signoffCurrent(review)
+          ? `reviewed and signed by ${escapeHtml(review.signed.examiner)} at ${escapeHtml(review.signed.at)}, over this ledger and this report`
+          : review && review.signed && !review.unreadable
+            ? `signed off by ${escapeHtml(review.signed.examiner)} at ${escapeHtml(review.signed.at)}, and NOT OVER THIS RUN AS IT STANDS: ${escapeHtml(signoffScope(review))}`
+            : "its findings are the agents' conclusions until an examiner reviews them"
+      }</dd>
       <dt>Generated</dt><dd class="tabular">${escapeHtml(generatedAt)}</dd>
     </dl>
   </header>

@@ -73,8 +73,12 @@ Please report these privately (see below):
   provider's.
 - The review, the package and purge: a way for an agent to write the
   examiner's review file (`runs/reviews/`), a package change that `verify`
-  does not report, or a `purge` that deletes a held run or anything outside
-  the run it names.
+  does not report, a part taken out of a package (the verdict, an anchor, a
+  chain, the sealed index, the review) that it does not report, a work file
+  changed after the stop that `custody-verify` or `verify` passes, a
+  sign-off the report calls current when the ledger or the report moved
+  after it, or a `purge` that deletes a held run or anything outside the run
+  it names.
 - With `--allow-tool-forging` on: a way to put a script under `tools/`
   without `make_tool`, to run a tool whose bytes differ from its manifest,
   to replace a live author's tool as a peer, or to register a forged tool
@@ -138,8 +142,19 @@ Please report these privately (see below):
     review (`runs/reviews/`) are chained by hash, not signed: whoever can
     write them can rewrite them whole, and a trace line from a shell that is
     not the kickoff's is marked unverified;
-  - a signed package proves which key signed its manifest, not whose key it
-    is: that is the recipient's allowed-signers file;
+  - a signed package proves which key signed its manifest (and, since
+    2026-09-27, `SIGNER.txt` with it), not whose key it is: that is the
+    recipient's allowed-signers file;
+  - an RFC 3161 token is held to the authority's CA only when the operator
+    names one (`--custody-timestamp-ca`, `SWARM_CUSTODY_TSA_CA`,
+    `custody-verify --tsa-ca`); without it the token is checked for the
+    verdict's digest alone, which anyone can put in a token, and custody
+    says "imprint only";
+  - the anchors, the verdict, `artifacts.json` and the review are files of
+    the operator's own account: `custody-verify` and `verify` hold the run
+    and a package to them, which catches a change made after the stop to
+    one part (a report edited, an entry appended), not a rewrite of all of
+    them together by that account;
   - `purge` deletes files the ordinary way, without overwriting the blocks
     the filesystem freed, and knows nothing of copies made elsewhere.
 - The behaviour, cost or output of the model you point Pi at.

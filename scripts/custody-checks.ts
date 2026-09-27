@@ -11,8 +11,9 @@
  * - the acquisition hashes the operator gave at kickoff are compared with
  *   the evidence as custody re-hashed it;
  * - the verdict can be signed (ssh-keygen -Y, namespace dfirswarm-custody)
- *   and timestamped by an RFC 3161 authority, and a reference clock's offset
- *   can be recorded;
+ *   and timestamped by an RFC 3161 authority, the token's signature checked
+ *   against the authority's CA (openssl ts -verify) when the operator names
+ *   one, and a reference clock's offset can be recorded;
  * - a re-check names the lines written after the verdict's seal (the hub's
  *   custody and clear-up lines and the operator's stop) rather than reading
  *   them as tampering.
@@ -189,7 +190,7 @@ type CustodyLike = {
   sessions: { files: Array<{ sha256: string | null }>; not_files: string[] };
   tool_outputs: { referenced: number; verified: number; missing: string[]; mismatched: string[]; refused: string[] };
   trace: { lines: number; intact: boolean; detail: string };
-  ledger: { entries: number; intact: boolean; detail: string } | null;
+  ledger: { entries: number; intact: boolean; detail: string; missing_from_ledger?: string[]; not_on_trace?: number[] } | null;
   attestations?: { lines: number; intact: boolean; detail: string } | null;
   model_gateway: { intact: boolean; detail: string; refused?: string } | null;
   vms: Array<{ snapshot: unknown; stopped: boolean; kept: string | null }> | null;
@@ -248,7 +249,15 @@ export function checksOf(c: CustodyLike, errors: Record<string, string> = {}): C
   // The ledger and its attestations.
   if (!reached("the ledger")) add("ledger", "incomplete", "not reached");
   else if (!c.ledger) add("ledger", "not_applicable", "no ledger entries");
-  else add("ledger", c.ledger.intact ? "passed" : "failed", c.ledger.intact ? undefined : c.ledger.detail, { checked: c.ledger.entries });
+  else {
+    // Why it failed: its own chain, or the trace it is held to.
+    const l = c.ledger;
+    const held = [
+      ...(l.missing_from_ledger?.length ? [`${l.missing_from_ledger.length} on the trace and not in the ledger`] : []),
+      ...(l.not_on_trace?.length ? [`${l.not_on_trace.length} in the ledger and never on the trace (seq ${l.not_on_trace.join(", ")})`] : []),
+    ];
+    add("ledger", l.intact ? "passed" : "failed", l.intact ? undefined : held.length && !l.detail.startsWith("broken") ? held.join("; ") : l.detail, { checked: l.entries });
+  }
   if (c.attestations) add("ledger attestations", c.attestations.intact ? "passed" : "failed", c.attestations.intact ? undefined : c.attestations.detail, { checked: c.attestations.lines });
   // The model gateway log.
   if (c.model_gateway) add("model gateway log", c.model_gateway.refused ? "unavailable" : c.model_gateway.intact ? "passed" : "failed", c.model_gateway.intact ? undefined : c.model_gateway.detail);
@@ -308,10 +317,11 @@ export function checksLine(checks: Check[]): string {
 
 // --- signature, trusted time, a reference clock ----------------------------------------
 
-function run(cmd: string, args: string[], input?: Buffer): Promise<{ code: number; out: string; err: string }> {
+function run(cmd: string, args: string[], input?: Buffer): Promise<{ code: number; out: string; err: string; missing?: boolean }> {
   return new Promise((done) => {
     const child = execFile(cmd, args, { maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
-      done({ code: error ? (typeof (error as NodeJS.ErrnoException & { code?: unknown }).code === "number" ? Number((error as { code?: number }).code) : 1) : 0, out: String(stdout), err: String(stderr) });
+      const missing = (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
+      done({ code: error ? (typeof (error as NodeJS.ErrnoException & { code?: unknown }).code === "number" ? Number((error as { code?: number }).code) : 1) : 0, out: String(stdout), err: String(stderr), ...(missing ? { missing } : {}) });
     });
     if (input) child.stdin?.end(input);
     else child.stdin?.end();
@@ -370,8 +380,8 @@ export function timestampRequest(digestHex: string, nonce = Buffer.from(createHa
  * What a timestamp response says, read without a CMS library: the status
  * (granted is 0 or 1), whether it carries the digest it was asked for, and
  * the authority's time (the first GeneralizedTime in the token). Its
- * signature is not checked here: `openssl ts -verify` with the authority's
- * certificate does that, and the verify command says so.
+ * signature is not checked here: verifyTimestampToken does that, against
+ * the authority's CA, and without one the verdict says "imprint only".
  */
 export function readTimestampResponse(resp: Buffer, digestHex: string): { granted: boolean; status: number | null; imprint: boolean; gen_time: string | null } {
   // TimeStampResp ::= SEQUENCE { status PKIStatusInfo (SEQUENCE { status INTEGER ... }), token ... }
@@ -421,6 +431,25 @@ export async function timestampFile(file: string, url: string): Promise<{ ok: tr
   } catch (err) {
     return { ok: false, why: (err as Error).message };
   }
+}
+
+/**
+ * A timestamp response's signature and the authority's certificate, checked
+ * by `openssl ts -verify` against the CA certificates the operator named:
+ * that the token is over `data`'s sha256, signed by a timestamping
+ * certificate that chains to one of them. `verified` is openssl's answer;
+ * null when it never gave one (no openssl, no CA file), with why. A token
+ * that only carries the digest proves nothing about who issued it: the CA
+ * is what makes it the authority's.
+ */
+export async function verifyTimestampToken(tsr: string, data: string, caFile: string): Promise<{ verified: boolean | null; detail: string }> {
+  if (!existsSync(caFile)) return { verified: null, detail: `no CA file at ${caFile}` };
+  if (!existsSync(tsr)) return { verified: null, detail: `no token at ${tsr}` };
+  const r = await run("openssl", ["ts", "-verify", "-in", tsr, "-data", data, "-CAfile", caFile]);
+  if (r.missing) return { verified: null, detail: "openssl is not on this host" };
+  const said = `${r.out}${r.err}`.trim().split("\n").filter(Boolean);
+  const ok = r.code === 0 && said.some((l) => /^Verification: OK$/.test(l.trim()));
+  return { verified: ok, detail: `openssl ts -verify against ${caFile}: ${said.join(" ") || `exit ${r.code}`}` };
 }
 
 /** A reference clock's offset from this host's, from an https server's Date header (a second's precision). */

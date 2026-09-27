@@ -84,7 +84,9 @@ test("the court set is listed in the dossier itself: each file with its hash or 
     await writeFile(join(runs, "operator-audit.jsonl"), `${ours}\n${other}\n${ours2}\n`);
     const dossier = await buildDossier(sandbox, { runsDir: runs });
     const byName = new Map(dossier.court.map((f) => [f.name, f]));
-    assert.deepEqual([...byName.keys()], ["custody.json", "custody-anchor.json", "inputs.json", "vm-sc00100.json", "operator-audit.jsonl"]);
+    assert.deepEqual([...byName.keys()], ["custody.json", "custody-anchor.json", "inputs.json", "artifacts.sealed.json", "vm-sc00100.json", "operator-audit.jsonl", "review.jsonl"]);
+    assert.equal(byName.get("artifacts.sealed.json")?.reason, "no custody verdict indexed work/ (swarm.sh stop takes custody)");
+    assert.equal(byName.get("review.jsonl")?.reason, "no examiner has reviewed this run");
     assert.equal(byName.get("custody.json")?.sha256, sha(custody));
     assert.equal(byName.get("custody-anchor.json")?.present, false);
     assert.equal(byName.get("custody-anchor.json")?.reason, "not written for this run");
@@ -92,14 +94,14 @@ test("the court set is listed in the dossier itself: each file with its hash or 
     assert.equal(dossier.operatorAudit, `${ours}\n${ours2}\n`);
     assert.equal(byName.get("operator-audit.jsonl")?.sha256, sha(`${ours}\n${ours2}\n`));
     // The report names every file handed over with it, except itself.
-    assert.match(dossier.reportHtml, /<h3>Files handed over with this report \(10\)<\/h3>/);
+    assert.match(dossier.reportHtml, /<h3>Files handed over with this report \(12\)<\/h3>/);
     assert.match(dossier.reportHtml, new RegExp(`<code>custody.json</code></td><td class="num">[^<]+</td><td class="hash">${sha(custody)}</td>`));
     assert.match(dossier.reportHtml, /<code>custody-anchor.json<\/code><\/td><td class="num">—<\/td><td class="hash">absent: not written for this run<\/td>/);
     assert.doesNotMatch(dossier.reportHtml, /<code>report\.html<\/code><\/td>/);
     // court-set.json lists all of it, the report with its hash as generated.
     const list = JSON.parse(dossier.courtSetJson) as { run: string; files: Array<{ name: string; sha256: string | null; present: boolean; reason?: string }> };
     assert.equal(list.run, "sc001");
-    assert.deepEqual(list.files.map((f) => f.name), ["report.html", "summary.md", "artifacts.json", "ledger.jsonl", "ledger.md", "trace.jsonl", "custody.json", "custody-anchor.json", "inputs.json", "vm-sc00100.json", "operator-audit.jsonl"]);
+    assert.deepEqual(list.files.map((f) => f.name), ["report.html", "summary.md", "artifacts.json", "ledger.jsonl", "ledger.md", "trace.jsonl", "custody.json", "custody-anchor.json", "inputs.json", "artifacts.sealed.json", "vm-sc00100.json", "operator-audit.jsonl", "review.jsonl"]);
     assert.equal(list.files[0].sha256, sha(dossier.reportHtml));
     const out = join(runs, "package");
     await writeDossierFiles(out, dossier);
