@@ -6,6 +6,10 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Packs, as integrated
+
+- Two branches changed each of these packs, so the integrated packs take one more patch and are resealed over the merged files: computer-forensics-base 1.3.2, windows-forensics 1.3.2, cloud-forensics, linux-forensics, macos-forensics, memory-forensics, mobile-forensics, network-forensics, reverse-engineering and triage-collection 1.1.2.
+
 ### Changed: a lane for short jobs, more workers, room on the host, and the smallest image that holds a job's programs
 
 - **Workers**: unset, 6 on a host with 128 GiB or more and 4 with 64 GiB or
@@ -138,6 +142,40 @@ a test that failed before it.
   `unified_log` runs, not the retired UnifiedLogReader.py, so every pack
   seals without a warning; `pack-tools.test.sh` holds them to it.
 - Ten packs take a patch version and a new seal.
+
+### Added: a ledger that interprets, answers the critic checks, and a gate that names the fix (ledger v4)
+
+- **Findings interpret.** A finding carries `indicates` (what the observation
+  means), `confidence_why` (the quality of the evidence, not a count of
+  artefacts), `alternatives` or `alternatives_none_why` when it is inferred,
+  and `qualifies` when it rests on a job that did not succeed; `basis` and
+  `confidence` are required. The hub writes a canonical `method` record of
+  each cited job or import into the entry and its core.
+- **Answers are entries.** `record(kind=answer)` per question of the goal,
+  plus a summary and a narrative, citing entries by hash; every claimed
+  support is checked at record, a token check marks what no cited entry
+  holds, and an answer stops standing when what it rests on is superseded or
+  disputed, transitively.
+- **Acts.** `attest` (how an entry was re-derived, inside the hashed line;
+  attestations version 2) and `dispute` (its own chain,
+  `ledger/disputes.jsonl`), hub-written.
+- **The gate at done.** `check-answers.ts` reads the ledger's answers when no
+  `--report` is given; the finish line hands a failing check's output back,
+  so the first `done` is told each defect and its fix and the next passes
+  once a limitation names each one left. Every library goal names the report
+  author and the critic, the answer entries and the critic's acts; the
+  `SIGN-OFF:` post is gone from them, from the packs' own goals and from the
+  operator's shelf in `prompts/goals/` too. The packs whose goals changed
+  are one patch up and resealed: cloud-forensics 1.1.1, encrypted-containers
+  1.2.1, linux-forensics 1.1.1, macos-forensics 1.1.1, memory-forensics
+  1.1.1, mobile-forensics 1.1.1, network-forensics 1.1.1,
+  ransomware-response 1.0.3, reverse-engineering 1.1.1, triage-collection
+  1.1.1, windows-forensics 1.3.1.
+- **Old ledgers verify as they did**: explicit version dispatch keeps the v2
+  and v3 cores byte for byte, an unknown version is refused, and custody
+  holds every chained entry of any version to the trace.
+- `tests/fixtures/ledger-v4/` is a small run with every kind and act, for
+  the report renderer to build against.
 
 ### Changed: every image profile reviewed as a DFIR examiner would (Codex)
 

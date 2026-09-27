@@ -82,7 +82,7 @@ test("ledger: a record is validated, deduped across authors and rendered", async
     assert.ok(ioc.ok && ioc.entry.seq === 2);
     const later = await recordEntry(a, { kind: "event", value: "Shell dropped", ts: "2015-09-02T08:00:00Z", source: "work/webroot", evidence: "inode 126755" });
     assert.ok(later.ok && later.entry.seq === 3);
-    const finding = await recordEntry(a, { kind: "finding", value: "The box was breached through the web app", source: "work/notes.md", evidence: "the shell precedes every logon", confidence: "medium" });
+    const finding = await recordEntry(a, { kind: "finding", value: "The box was breached through the web app", source: "work/notes.md", evidence: "the shell precedes every logon", confidence: "medium", basis: "inferred", indicates: "The web app was the way in: nothing else ran before the shell.", confidence_why: "One timeline, read from two logs that agree.", alternatives_none_why: "no other entry point is in the evidence" });
     assert.ok(finding.ok);
 
     const entries = await readLedger(root);
@@ -96,7 +96,7 @@ test("ledger: a record is validated, deduped across authors and rendered", async
     assert.ok(timeline.indexOf("Shell dropped") < timeline.indexOf("Account hacker created"), "the timeline is in time order, not record order");
     assert.match(timeline, /a00, a01/);
     assert.match(md, /\| 192\.168\.56\.102 \| netscan \|.*\| high \| a01 \|/);
-    assert.match(md, /\*\*#4\*\* The box was breached through the web app _\(medium\)_/);
+    assert.match(md, /\*\*#4\*\* The box was breached through the web app \[inferred\] _\(medium\)_.* — indicates: The web app was the way in/);
 
     const events = await listLedger(root, { kind: "event" });
     assert.deepEqual(events.map((e) => e.seq), [1, 3]);
@@ -400,7 +400,7 @@ test("the sandbox starts with no ledger and gets one on the first record", async
   try {
     await assert.rejects(stat(join(root, LEDGER_MD)));
     assert.deepEqual(await listLedger(root), []);
-    const r = await recordEntry(createContext(root, "a00"), { kind: "finding", value: "nothing yet", source: "work/notes.md", evidence: "first pass" });
+    const r = await recordEntry(createContext(root, "a00"), { kind: "finding", value: "nothing yet", source: "work/notes.md", evidence: "first pass", basis: "observed", confidence: "low", indicates: "Nothing is established yet.", confidence_why: "A first pass only." });
     assert.ok(r.ok);
     assert.ok((await stat(join(root, LEDGER_MD))).isFile());
   } finally {

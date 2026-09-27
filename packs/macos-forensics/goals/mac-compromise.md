@@ -28,13 +28,31 @@ rather than text.
    the available parser cannot answer the question.
 8. The timeline in UTC, and what you could not establish.
 
+## How to divide the work
+
+**Report author and critic.** Two of you take these roles early with
+`name(doing=…)`, and they are different agents. The report author writes the
+answers from the ledger, not from memory: compact first, read `ledger`, then
+one `record(kind=answer)` per question (`section=question:<n>`) and one each
+for `summary` and `narrative`, citing `E-<seq>` for every claim and stating the
+confidence and its reason, the contrary evidence, the limitations, what else
+could explain it and what would change the answer. When the ledger cannot
+answer, reopen the investigation and say so on the board. The critic re-derives
+each finding an answer rests on from its sealed refs and records `attest` (what
+was re-derived, what only read) or `dispute` (why), then does the same for
+every answer. The critic writes no answer; the author attests nothing of their
+own. The sign-off is these acts, not a post. Nothing else is assigned.
+
 ## Definition of done
 
 `work/report.md` exists and answers questions 1 to 8 under the headings `## 1.`
 through `## 8.`. Every claim cites a path with a hash, a plist key, a log
-predicate, a knowledgeC stream, or the command that produced it. A critic has
-read the report against the board and posted a sign-off as a `result`
-post that starts a line with `SIGN-OFF:` and names what they verified. `inputs/` is unchanged.
+predicate, a knowledgeC stream, or the command that produced it. The ledger
+holds one `answer` entry per question (`question:1` to `question:8`) and one
+each for `summary` and `narrative`, with every defect the answers check names
+fixed or named by a limitation, and the critic, who wrote none of them, has
+recorded `attest` or `dispute` on each answer, saying what they verified.
+`inputs/` is unchanged.
 
 ## Checks
 
@@ -42,7 +60,7 @@ post that starts a line with `SIGN-OFF:` and names what they verified. `inputs/`
 - `for n in 1 2 3 4 5 6 7 8; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qiE 'UTC' work/report.md`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 8`
-- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,7,8,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for

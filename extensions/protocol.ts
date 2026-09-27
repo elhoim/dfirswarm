@@ -5212,6 +5212,7 @@ export const TOOL_RESERVED_NAMES = new Set([
   "post", "inbox", "wait", "claim_file", "release_file", "claims", "list_team", "budget",
   "file_history", "file_restore", "file_diff", "thread_open", "thread_join", "done",
   "playwright", "browser_check", "make_tool", "tools", "system", "inputs", "name", "record", "ledger",
+  "attest", "dispute",
   // the harness's own trace events: a forged tool with one of these names
   // would land its calls under the same name and be counted as the event
   "agent_start", "agent_stop", "thinking", "claim_violation", "inputs_guard", "inputs_violation",
@@ -6761,7 +6762,7 @@ export const LEDGER_MD = "ledger/ledger.md";
  * holds only for what was searched, with what and how far, so all of it is
  * required (recordEntry).
  */
-export const LEDGER_KINDS = ["event", "ioc", "finding", "absence", "hypothesis", "limitation"] as const;
+export const LEDGER_KINDS = ["event", "ioc", "finding", "absence", "hypothesis", "limitation", "answer"] as const;
 export const LEDGER_CONFIDENCE = ["high", "medium", "low"] as const;
 /**
  * Version 3 (2026-09-26, after Fable and Codex read 1,040 entries of 14 runs):
@@ -6803,14 +6804,48 @@ export const LEDGER_MAX_ENTRIES = 5000;
 /** A finding names the objects it rests on: at most this many, each this long. */
 export const LEDGER_MAX_REFS = 20;
 export const LEDGER_REF_MAX_CHARS = 300;
+/**
+ * Version 4 (2026-09-27, after two rounds between Claude, Fable and
+ * GPT-6-Astra on a report that interprets): a finding says what the
+ * observation indicates and why that confidence, what else could explain it,
+ * and, when it rests on a job that did not succeed, why those bytes still
+ * hold; the hub writes how each cited object was made into the entry. An
+ * `answer` is the swarm's answer to one question of the goal, or its summary
+ * or narrative, resting on entries it cites by hash. The versions a ledger
+ * may hold, oldest first: an entry of another is refused by the verifier.
+ */
+export const LEDGER_VERSIONS = [2, 3, 4] as const;
+export const LEDGER_VERSION = 4;
+export const LEDGER_ALTERNATIVE_STATUS = ["rejected", "open"] as const;
+/** A finding's interpretation: one to three sentences each; over these it is refused with the reason, never cut. */
+export const LEDGER_INDICATES_MAX_CHARS = 1500;
+export const LEDGER_WHY_MAX_CHARS = 1500;
+export const LEDGER_MAX_ALTERNATIVES = 10;
+export const LEDGER_MAX_QUALIFIES = 20;
+/** An answer's reasoning holds a narrative: room for one, still bounded. */
+export const LEDGER_REASONING_MAX_CHARS = 20000;
+/** How many entries one answer may cite, as support, contrary evidence or limitations. */
+export const LEDGER_MAX_CITATIONS = 200;
+export const LEDGER_SECTION_SPECIAL = ["summary", "narrative"] as const;
+/** Who re-derived an entry, and how, or disputed it: beside the ledger, each file its own chain. */
+export const LEDGER_DISPUTES = "ledger/disputes.jsonl";
+export const LEDGER_ACT_MAX_CHARS = 2000;
 
 export type LedgerKind = (typeof LEDGER_KINDS)[number];
 export type LedgerRel = { to: number; kind: (typeof LEDGER_REL_KINDS)[number] };
 export type LedgerLocator = { ref: string; at: string };
 export type LedgerAttribution = { subject: string; subject_type: (typeof LEDGER_SUBJECT_TYPES)[number]; basis_refs?: string[] };
+/** Something else that could explain an inferred finding: rejected with why, or left open; `test_refs` the objects that tested it. */
+export type LedgerAlternative = { explanation: string; status: (typeof LEDGER_ALTERNATIVE_STATUS)[number]; why: string; test_refs?: string[] };
+/** Why a ref's bytes still support the entry although its job did not succeed; on an answer, `ref` is a cited entry (E-<seq>). */
+export type LedgerQualify = { ref: string; why: string };
+/** An answer's edge to an entry it cites: the seq, and the entry's hash when the answer was recorded. */
+export type LedgerEdge = { seq: number; hash: string };
+/** How a cited object was made, as the run recorded it: canonical, keys sorted, no times (ledgerMethods). */
+export type LedgerMethod = Record<string, unknown>;
 export type LedgerEntry = {
-  /** 2: the chain covers the provenance too (ledgerCore). 3: and the fields below, when present. */
-  v?: 2 | 3;
+  /** 2: the chain covers the provenance too (ledgerCore). 3: and the fields below, when present. 4: and the interpretation and the answer's fields. */
+  v?: 2 | 3 | 4;
   seq: number;
   kind: LedgerKind;
   /** ISO 8601 for an event, in UTC; optional for the other kinds. */
@@ -6859,6 +6894,38 @@ export type LedgerEntry = {
   locators?: LedgerLocator[];
   /** Why a correction corrects. */
   because?: string;
+  /** Version 4, a finding: what the observation means, and the step from one to the other. */
+  indicates?: string;
+  /** Version 4: why that confidence — provenance, method, specificity, whether the sources depend on each other. */
+  confidence_why?: string;
+  /** Version 4, a finding: what else could explain it (required when basis is inferred). */
+  alternatives?: LedgerAlternative[];
+  /** Version 4, a finding: why no alternative was considered, in place of an empty list. */
+  alternatives_none_why?: string;
+  /** Version 4, a finding: what it means for the case, when the finder can say. */
+  significance?: string;
+  /** Version 4: why the kept output of a job that did not succeed still supports the entry. */
+  qualifies?: LedgerQualify[];
+  /** Version 4, written by the hub: how each cited object was made (a job, an import). */
+  method?: LedgerMethod[];
+  /** Version 4, an answer, written by the hub: hashes, paths, times, inodes, addresses and accounts in its text that no cited entry holds. */
+  unsupported_tokens?: string[];
+  /** Version 4, an answer: question:<id>, summary or narrative. */
+  section?: string;
+  /** Version 4, an answer: the reasoning, citing E-<seq> for each claim. */
+  reasoning?: string;
+  /** Version 4, an answer, written by the hub: the entries its text cites, by hash. */
+  support?: LedgerEdge[];
+  /** Version 4, an answer: the entries that say otherwise, by hash. */
+  contrary?: LedgerEdge[];
+  /** Version 4, an answer: the limitation entries that bound it, by hash. */
+  limitations?: LedgerEdge[];
+  /** Version 4, an answer: what else could still explain it. */
+  alternatives_open?: string;
+  /** Version 4, an answer: what evidence would change it. */
+  would_change?: string;
+  /** Version 4, an answer: expressly inconclusive. */
+  inconclusive?: boolean;
   by: string;
   authors: string[];
   at: string;
@@ -6898,26 +6965,88 @@ function ledgerV3Fields(e: LedgerEntry): Record<string, unknown> {
 }
 
 /**
+ * A value with every object's keys sorted, arrays in their order: the form a
+ * hub-written record takes in the core, so the line alone re-verifies
+ * whatever order its keys were written in.
+ */
+export function canonicalValue(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(canonicalValue);
+  if (v && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(o).sort().filter((k) => o[k] !== undefined).map((k) => [k, canonicalValue(o[k])]));
+  }
+  return v;
+}
+
+const edgesCore = (edges: LedgerEdge[]) => edges.map((x) => ({ seq: x.seq, hash: x.hash }));
+
+/**
+ * The fields version 4 adds to the core, each only when present: a finding's
+ * interpretation, the hub's method records and token marks, and an answer's
+ * fields. Nested objects are taken field by field, as version 3's are; the
+ * method records whole, canonical.
+ */
+function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
+  return {
+    ...(e.indicates ? { indicates: e.indicates } : {}),
+    ...(e.confidence_why ? { confidence_why: e.confidence_why } : {}),
+    ...(e.alternatives?.length ? { alternatives: e.alternatives.map((a) => ({ explanation: a.explanation, status: a.status, why: a.why, ...(a.test_refs?.length ? { test_refs: a.test_refs } : {}) })) } : {}),
+    ...(e.alternatives_none_why ? { alternatives_none_why: e.alternatives_none_why } : {}),
+    ...(e.significance ? { significance: e.significance } : {}),
+    ...(e.qualifies?.length ? { qualifies: e.qualifies.map((q) => ({ ref: q.ref, why: q.why })) } : {}),
+    ...(e.method?.length ? { method: e.method.map(canonicalValue) } : {}),
+    ...(e.section ? { section: e.section } : {}),
+    ...(e.reasoning ? { reasoning: e.reasoning } : {}),
+    ...(e.support?.length ? { support: edgesCore(e.support) } : {}),
+    ...(e.contrary?.length ? { contrary: edgesCore(e.contrary) } : {}),
+    ...(e.limitations?.length ? { limitations: edgesCore(e.limitations) } : {}),
+    ...(e.alternatives_open ? { alternatives_open: e.alternatives_open } : {}),
+    ...(e.would_change ? { would_change: e.would_change } : {}),
+    ...(e.inconclusive ? { inconclusive: true } : {}),
+    ...(e.unsupported_tokens?.length ? { unsupported_tokens: e.unsupported_tokens } : {}),
+  };
+}
+
+/**
  * What an entry says, without who said it or when: two entries with the same
  * content say the same thing. A correction that says the same thing is
- * refused; a second author saying the same thing is an attestation.
+ * refused; a second author saying the same thing is an attestation. From
+ * version 4 what a finding indicates is part of what it says (another
+ * indication is another claim), and so is why a failed job's bytes still
+ * hold; an answer is all of its fields. An entry of an older version gives
+ * the same content it always did.
  */
 export function ledgerContent(e: LedgerEntry): string {
   const { because: _because, ...v3 } = ledgerV3Fields(e);
-  return JSON.stringify({ kind: e.kind, ts: e.ts ?? "", value: e.value, source: e.source ?? "", evidence: e.evidence ?? "", confidence: e.confidence ?? "", refs: e.refs ?? [], ...v3 });
+  const v4 = e.kind === "answer" ? (({ unsupported_tokens: _tokens, ...rest }) => rest)(ledgerV4Fields(e)) : { ...(e.indicates ? { indicates: e.indicates } : {}), ...(e.qualifies?.length ? { qualifies: e.qualifies.map((q) => ({ ref: q.ref, why: q.why })) } : {}) };
+  return JSON.stringify({ kind: e.kind, ts: e.ts ?? "", value: e.value, source: e.source ?? "", evidence: e.evidence ?? "", confidence: e.confidence ?? "", refs: e.refs ?? [], ...v3, ...v4 });
 }
 
+/**
+ * An entry's chained core, by its version: each version's bytes exactly as
+ * they were when entries of it were written, so an old ledger verifies as it
+ * always did. A version this harness does not know has no core of its own:
+ * the whole line stands in, so nothing about it can change unseen, and the
+ * verifier refuses it (verifyLedgerChain).
+ */
 export function ledgerCore(e: LedgerEntry): string {
-  if (e.v === 3) {
-    return JSON.stringify({ v: 3, seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, source: e.source ?? "", evidence: e.evidence ?? "", confidence: e.confidence ?? "", ...(e.supersedes !== undefined ? { supersedes: e.supersedes } : {}), ...(e.refs?.length ? { refs: e.refs } : {}), ...ledgerV3Fields(e), by: e.by, at: e.at });
+  switch (e.v) {
+    case 4:
+      return JSON.stringify({ v: 4, seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, source: e.source ?? "", evidence: e.evidence ?? "", confidence: e.confidence ?? "", ...(e.supersedes !== undefined ? { supersedes: e.supersedes } : {}), ...(e.refs?.length ? { refs: e.refs } : {}), ...ledgerV3Fields(e), ...ledgerV4Fields(e), by: e.by, at: e.at });
+    case 3:
+      return JSON.stringify({ v: 3, seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, source: e.source ?? "", evidence: e.evidence ?? "", confidence: e.confidence ?? "", ...(e.supersedes !== undefined ? { supersedes: e.supersedes } : {}), ...(e.refs?.length ? { refs: e.refs } : {}), ...ledgerV3Fields(e), by: e.by, at: e.at });
+    case 2:
+      // `supersedes` only when there is one: every entry written before it
+      // existed keeps the core, and the hash, it was chained with.
+      // `refs` likewise: added, removed or changed after the fact, it breaks the chain.
+      return JSON.stringify({ v: 2, seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, source: e.source ?? "", evidence: e.evidence ?? "", confidence: e.confidence ?? "", ...(e.supersedes !== undefined ? { supersedes: e.supersedes } : {}), ...(e.refs?.length ? { refs: e.refs } : {}), by: e.by, at: e.at });
+    case undefined:
+      return JSON.stringify({ seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, by: e.by, at: e.at });
+    default: {
+      const { prev: _prev, hash: _hash, ...line } = e as LedgerEntry & Record<string, unknown>;
+      return JSON.stringify({ unknown_version: (e as { v?: unknown }).v ?? null, line: canonicalValue(line) });
+    }
   }
-  if (e.v === 2) {
-    // `supersedes` only when there is one: every entry written before it
-    // existed keeps the core, and the hash, it was chained with.
-    // `refs` likewise: added, removed or changed after the fact, it breaks the chain.
-    return JSON.stringify({ v: 2, seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, source: e.source ?? "", evidence: e.evidence ?? "", confidence: e.confidence ?? "", ...(e.supersedes !== undefined ? { supersedes: e.supersedes } : {}), ...(e.refs?.length ? { refs: e.refs } : {}), by: e.by, at: e.at });
-  }
-  return JSON.stringify({ seq: e.seq, kind: e.kind, ts: e.ts ?? "", value: e.value, by: e.by, at: e.at });
 }
 
 export function ledgerHash(e: LedgerEntry, prev: string): string {
@@ -6931,16 +7060,17 @@ export function ledgerHash(e: LedgerEntry, prev: string): string {
  * counted unchained, not broken — but only before the first chained entry:
  * the first chained entry names the last of them (recordEntry links a legacy
  * entry by its core's hash from genesis), and an unchained line after a
- * chained one is a line added outside the chain, which breaks it. So is a
- * version 1 entry after a version 2 one: the harness never writes one
- * again, and its core leaves out the provenance a version 2 chain covers.
+ * chained one is a line added outside the chain, which breaks it. So is an
+ * entry of an older version after a newer one (a version 1 entry after a
+ * version 2 one, a 3 after a 4): the harness never writes one again, and its
+ * core leaves out what the newer chain covers. A version this harness does
+ * not know is refused, never read as the nearest one it does.
  */
 export function verifyLedgerChain(text: string): { ok: boolean; total: number; chained: number; broken_at: number | null; reason: string | null; hashes: string[] } {
   let total = 0;
   let chained = 0;
   let last = "genesis";
-  let sawV2 = false;
-  let sawV3 = false;
+  let newest = 1;
   const hashes: string[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -6951,10 +7081,12 @@ export function verifyLedgerChain(text: string): { ok: boolean; total: number; c
     } catch {
       return { ok: false, total, chained, broken_at: total, reason: "not json", hashes };
     }
-    if (sawV3 && e.v !== 3) return { ok: false, total, chained, broken_at: total, reason: `a version ${e.v ?? 1} entry after version 3 ones`, hashes };
-    if (sawV2 && e.v !== 2 && e.v !== 3) return { ok: false, total, chained, broken_at: total, reason: "a version 1 entry after version 2 ones", hashes };
-    if (e.v === 2) sawV2 = true;
-    if (e.v === 3) sawV3 = true;
+    if (e.v !== undefined && !(LEDGER_VERSIONS as readonly unknown[]).includes(e.v)) {
+      return { ok: false, total, chained, broken_at: total, reason: `an entry of version ${JSON.stringify(e.v)}, which this harness does not know`, hashes };
+    }
+    const version = e.v ?? 1;
+    if (version < newest) return { ok: false, total, chained, broken_at: total, reason: `a version ${version} entry after version ${newest} ones`, hashes };
+    newest = version;
     if (!e.prev && !e.hash) {
       if (chained > 0) return { ok: false, total, chained, broken_at: total, reason: "an entry without the chain after chained ones", hashes };
       last = ledgerHash(e, "genesis");
@@ -6992,6 +7124,22 @@ export type LedgerInput = {
   attribution?: { subject?: string; subject_type?: string; basis_refs?: string[] | string };
   locators?: Array<{ ref?: string; at?: string }>;
   because?: string;
+  indicates?: string;
+  confidence_why?: string;
+  alternatives?: Array<{ explanation?: string; status?: string; why?: string; test_refs?: string[] | string }>;
+  alternatives_none_why?: string;
+  significance?: string;
+  qualifies?: Array<{ ref?: string; why?: string }>;
+  /** An answer's: question:<id> (or the id alone), summary or narrative. */
+  section?: string;
+  reasoning?: string;
+  /** An answer's: the entries that say otherwise, by seq (12, "#12", "E-12"). */
+  contrary?: Array<number | string> | string;
+  /** An answer's: the limitation entries that bound it, by seq. */
+  limitations?: Array<number | string> | string;
+  alternatives_open?: string;
+  would_change?: string;
+  inconclusive?: boolean;
 };
 
 function listOf(v: string[] | string | undefined): string[] {
@@ -7103,6 +7251,204 @@ async function ledgerV3Input(
   return { ok: true, fields, rel };
 }
 
+/** The fields only an answer takes, and only a finding takes: named in a refusal when they come with another kind. */
+const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive"] as const;
+const FINDING_ONLY_FIELDS = ["indicates", "alternatives", "alternatives_none_why", "significance"] as const;
+
+function given(v: unknown): boolean {
+  if (v === undefined || v === null) return false;
+  if (typeof v === "string") return v.trim() !== "";
+  if (Array.isArray(v)) return v.length > 0;
+  return true;
+}
+
+function boundedText(name: string, v: unknown, max: number): { ok: true; value: string } | { ok: false; reason: string } {
+  const text = String(v ?? "").trim();
+  if (text.length > max) return { ok: false, reason: `${name} is over ${max} characters: say it in fewer, and put the material itself in a work/ file cited by a job` };
+  return { ok: true, value: text };
+}
+
+/**
+ * The version 4 fields a non-answer input carries, checked. A finding is an
+ * observation and what the finder makes of it, written while the artefact is
+ * open: `basis`, `confidence`, `indicates` and `confidence_why` are required
+ * on it, and when it is inferred, what else could explain it (or why nothing
+ * else was considered: an invented alternative is worse than none). A ref
+ * whose job did not succeed needs `qualifies` on a finding (why those bytes
+ * are still usable), and can never show that something is absent. Nothing
+ * here weighs the confidence: it is the quality of the evidence, which the
+ * finder states and a reader judges.
+ */
+async function ledgerV4Input(
+  sandboxRoot: string,
+  input: LedgerInput,
+  kind: string,
+  refs: string[],
+  failed: Array<{ ref: string; status: string }>,
+  basis: string | undefined,
+  confidence: string,
+): Promise<{ ok: true; fields: Partial<LedgerEntry> } | { ok: false; reason: string }> {
+  const raw = input as Record<string, unknown>;
+  const answerOnly = ANSWER_ONLY_FIELDS.find((f) => given(raw[f]));
+  if (answerOnly) return { ok: false, reason: `${answerOnly} is an answer's: record kind=answer with its section to answer a question` };
+  if (kind !== "finding") {
+    const findingOnly = FINDING_ONLY_FIELDS.find((f) => given(raw[f]));
+    if (findingOnly) return { ok: false, reason: `${findingOnly} is a finding's: what an observation indicates and what else could explain it are recorded on kind=finding` };
+  }
+  const fields: Partial<LedgerEntry> = {};
+  const why = boundedText("confidence_why", input.confidence_why, LEDGER_WHY_MAX_CHARS);
+  if (!why.ok) return why;
+  if (why.value && !confidence) return { ok: false, reason: "confidence_why says why that confidence: give confidence too" };
+  if (why.value) fields.confidence_why = why.value;
+  // What a failed job's kept bytes are still good for, ref by ref.
+  const qualifies: LedgerQualify[] = [];
+  for (const q of Array.isArray(input.qualifies) ? input.qualifies : []) {
+    const ref = String(q?.ref ?? "").trim();
+    const text = boundedText("a qualifies why", q?.why, LEDGER_WHY_MAX_CHARS);
+    if (!text.ok) return text;
+    if (!ref || !text.value) return { ok: false, reason: "qualifies is [{ref, why}]: one of the entry's refs whose job did not succeed, and why its kept bytes still support this entry" };
+    if (!refs.includes(ref)) return { ok: false, reason: `qualifies names ${JSON.stringify(ref)}, which is not one of the entry's refs` };
+    if (!failed.some((f) => f.ref === ref)) return { ok: false, reason: `qualifies names ${ref}, whose job succeeded: it qualifies only the output of a job that did not` };
+    if (!qualifies.some((x) => x.ref === ref)) qualifies.push({ ref, why: text.value });
+  }
+  if (qualifies.length > LEDGER_MAX_QUALIFIES) return { ok: false, reason: `qualifies names more than ${LEDGER_MAX_QUALIFIES} refs` };
+  if (qualifies.length && (kind === "limitation" || kind === "absence")) {
+    return { ok: false, reason: `qualifies says why a failed job's bytes still support a claim; a ${kind} rests on what could not be done, and says so in its own fields` };
+  }
+  if (failed.length && kind === "absence" && (input.completion === undefined || String(input.completion).trim().toLowerCase() === "complete" || String(input.completion).trim() === "")) {
+    return { ok: false, reason: `the output of a job that did not succeed cannot show that something is absent (${failed.map((f) => `${f.ref}: ${f.status}`).join(", ")}): record the search with completion partial or failed, and what was not reached as kind=limitation` };
+  }
+  if (kind === "finding") {
+    const missing = failed.filter((f) => !qualifies.some((q) => q.ref === f.ref));
+    if (missing.length) {
+      return { ok: false, reason: `this finding rests on the kept output of a job that did not succeed (${missing.map((f) => `${f.ref}: ${f.status}`).join(", ")}): say in qualifies [{ref, why}] why those bytes are still usable, or cite the output of a job that worked` };
+    }
+  }
+  if (qualifies.length) fields.qualifies = qualifies;
+  if (kind !== "finding") return { ok: true, fields };
+  if (!basis) return { ok: false, reason: "a finding says whether it was seen in the evidence or reasoned from it: basis observed or inferred" };
+  if (!confidence) return { ok: false, reason: "a finding says how sure: confidence high, medium or low, with confidence_why" };
+  const indicates = boundedText("indicates", input.indicates, LEDGER_INDICATES_MAX_CHARS);
+  if (!indicates.ok) return indicates;
+  if (!indicates.value) return { ok: false, reason: "indicates is required on a finding: what the observation means, and the step from one to the other, in one to three sentences" };
+  fields.indicates = indicates.value;
+  if (!fields.confidence_why) {
+    return { ok: false, reason: "confidence_why is required on a finding: where the data came from, whether the method is reliable for it, how specific the observation is, and whether your sources depend on each other" };
+  }
+  const alternatives: LedgerAlternative[] = [];
+  for (const a of Array.isArray(input.alternatives) ? input.alternatives : []) {
+    const explanation = boundedText("an alternative's explanation", a?.explanation, LEDGER_WHY_MAX_CHARS);
+    if (!explanation.ok) return explanation;
+    const aWhy = boundedText("an alternative's why", a?.why, LEDGER_WHY_MAX_CHARS);
+    if (!aWhy.ok) return aWhy;
+    const status = oneOf("an alternative's status", a?.status, LEDGER_ALTERNATIVE_STATUS);
+    if (!status.ok) return status;
+    if (!explanation.value || !status.value || !aWhy.value) return { ok: false, reason: "an alternative is {explanation, status: rejected | open, why, test_refs?}: what else could explain it, whether it was rejected or is still open, and why" };
+    const testRefs = listOf(a?.test_refs);
+    if (testRefs.length > LEDGER_MAX_REFS) return { ok: false, reason: `an alternative's test_refs names more than ${LEDGER_MAX_REFS} objects` };
+    if (testRefs.length) {
+      const checked = await checkRefs(sandboxRoot, testRefs);
+      if (!checked.ok) return { ok: false, reason: `an alternative's test_refs: ${checked.reason}` };
+    }
+    alternatives.push({ explanation: explanation.value, status: status.value, why: aWhy.value, ...(testRefs.length ? { test_refs: testRefs } : {}) });
+  }
+  if (alternatives.length > LEDGER_MAX_ALTERNATIVES) return { ok: false, reason: `alternatives lists more than ${LEDGER_MAX_ALTERNATIVES}: keep the ones a reader must weigh` };
+  const noneWhy = boundedText("alternatives_none_why", input.alternatives_none_why, LEDGER_WHY_MAX_CHARS);
+  if (!noneWhy.ok) return noneWhy;
+  if (noneWhy.value && alternatives.length) return { ok: false, reason: "alternatives_none_why says no alternative was considered: give it or the alternatives, not both" };
+  if (basis === "inferred" && !alternatives.length && !noneWhy.value) {
+    return { ok: false, reason: "an inferred finding lists what else could explain it in alternatives [{explanation, status: rejected | open, why}], or says in alternatives_none_why why none was considered; never invent one" };
+  }
+  if (alternatives.length) fields.alternatives = alternatives;
+  if (noneWhy.value) fields.alternatives_none_why = noneWhy.value;
+  const significance = boundedText("significance", input.significance, LEDGER_WHY_MAX_CHARS);
+  if (!significance.ok) return significance;
+  if (significance.value) fields.significance = significance.value;
+  return { ok: true, fields };
+}
+
+/**
+ * How each object an entry cites was made, as the run recorded it: one
+ * canonical record per job (its kind, the command or the tool with its sha256
+ * and arguments, the recipe, the image and its digest, the scope it declared,
+ * its network, how it ended), or per import. It describes recorded
+ * execution, not the reads a tool made, and what the run did not record
+ * stays "unknown". No times: the same job gives the same record. A ref kind
+ * whose making is recorded elsewhere joins METHOD_DERIVERS; `tool:` and
+ * `trace:` refs join once their grammar is fixed with the job service.
+ */
+export async function ledgerMethods(sandboxRoot: string, refs: string[]): Promise<LedgerMethod[]> {
+  const out = new Map<string, LedgerMethod>();
+  for (const ref of refs) {
+    const m = /^([a-z0-9]+):(.*)$/s.exec(ref);
+    const derive = m ? METHOD_DERIVERS[m[1]] : undefined;
+    if (!derive || !m) continue;
+    const got = await derive(sandboxRoot, m[2]).catch(() => null);
+    if (got && !out.has(got.key)) out.set(got.key, canonicalValue(got.method) as LedgerMethod);
+  }
+  return [...out.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([, v]) => v);
+}
+
+type JobJson = {
+  id?: string;
+  spec?: { kind?: string; tool?: string; args?: unknown; command?: string; recipe?: string; target?: { ref?: string; name?: string }; targets?: Array<{ ref?: string; name?: string }>; inputs?: string[]; source?: string; network?: string; profile?: string };
+  requester?: { agent?: string };
+  status?: string;
+  exit?: number | null;
+  image?: string;
+  image_digest?: string;
+  tool_sha256?: string;
+};
+
+/** A job's method record, from its job.json beside its sealed output. */
+async function jobMethod(sandboxRoot: string, id: string): Promise<{ key: string; method: LedgerMethod } | null> {
+  if (!/^[a-z0-9-]{1,64}$/.test(id)) return null;
+  const job = await readFile(join(sandboxRoot, "store", "jobs", id, "job.json"), "utf8")
+    .then((t) => JSON.parse(t) as JobJson)
+    .catch(() => null);
+  if (!job) return { key: `job:${id}`, method: { kind: "job", job: id, record: "no job.json: how it was made is unknown" } };
+  const s = job.spec ?? {};
+  const method: LedgerMethod = {
+    kind: s.kind === "import" ? "import" : "job",
+    job: id,
+    job_kind: s.kind ?? "unknown",
+    status: job.status ?? "unknown",
+    ...(job.exit !== undefined ? { exit: job.exit } : {}),
+    image: job.image ?? "unknown",
+    image_digest: job.image_digest ?? "unknown",
+    declared_scope: Array.isArray(s.inputs) ? s.inputs : "unknown",
+    network: s.network ?? "unknown",
+    ...(s.profile ? { profile: s.profile } : {}),
+  };
+  if (s.kind === "tool") Object.assign(method, { tool: s.tool ?? "unknown", tool_sha256: job.tool_sha256 ?? "unknown", tool_version: "unknown", args: s.args ?? {} });
+  else if (s.kind === "command") Object.assign(method, { command: s.command ?? "" });
+  else if (s.kind === "recipe") Object.assign(method, { recipe: s.recipe ?? "unknown", recipe_sha256: job.tool_sha256 ?? "unknown", target: s.target?.ref ?? s.target?.name ?? "unknown" });
+  else if (s.kind === "detect") Object.assign(method, { targets: (s.targets ?? []).map((t) => t.ref ?? t.name ?? "unknown") });
+  else if (s.kind === "import") {
+    // The job copied the file; who made it, and how, the run did not record.
+    Object.assign(method, { source: s.source ?? "unknown", produced_by: `${job.requester?.agent ?? "unknown"}, in its own VM; how the file was made is not recorded`, copied_live: true });
+  }
+  return { key: `job:${id}`, method };
+}
+
+const METHOD_DERIVERS: Record<string, (sandboxRoot: string, value: string) => Promise<{ key: string; method: LedgerMethod } | null>> = {
+  job: (S, value) => jobMethod(S, value.split("/")[0]),
+  // A brain's own file brought into store/imports: its making is not recorded.
+  import: async (_S, value) => {
+    const id = value.split("/")[0];
+    return /^[a-z0-9-]{1,64}$/.test(id) ? { key: `import:${id}`, method: { kind: "import", import: id, produced_by: "unknown: a file brought into the store; how it was made is not recorded" } } : null;
+  },
+  // An archive member of the catalogue: the recipe job that listed it.
+  member: async (S, value) => {
+    const gen = /^([a-z0-9-]+)#\d+$/.exec(value)?.[1];
+    if (!gen) return null;
+    const g = await readFile(join(S, "catalog", "gen", gen, "generation.json"), "utf8")
+      .then((t) => JSON.parse(t) as { job?: string })
+      .catch(() => null);
+    return g?.job ? jobMethod(S, g.job) : null;
+  },
+};
+
 /**
  * The seq each corrected entry is superseded by. A correction of a correction
  * names the one it replaces, so following the map from any entry reaches the
@@ -7144,13 +7490,17 @@ function nearestNames(want: string, names: string[], n = 5): string[] {
  * with the names nearest to it: a typo costs one turn, where a wrong ref on
  * the chain would stand for good.
  */
-async function checkRefs(sandboxRoot: string, refs: string[]): Promise<{ ok: true } | { ok: false; reason: string }> {
+async function checkRefs(sandboxRoot: string, refs: string[]): Promise<{ ok: true; resolved: Array<{ ref: string; kind: string; status?: string }> } | { ok: false; reason: string }> {
   // Loaded when a ref is checked, not with the extension: a VM that mounts
   // only extensions/ still loads it, and in a VM the hub checks refs anyway.
   const { readManifest, resolveRef, storePaths } = await import("../scripts/evidence-store.ts");
+  const resolved: Array<{ ref: string; kind: string; status?: string }> = [];
   for (const ref of refs) {
     const r = await resolveRef(sandboxRoot, ref);
-    if (r.ok) continue;
+    if (r.ok) {
+      resolved.push({ ref, kind: r.kind, ...(r.status ? { status: r.status } : {}) });
+      continue;
+    }
     let near: string[] = [];
     const m = /^(job|import|input):(.*)$/s.exec(ref);
     try {
@@ -7170,7 +7520,7 @@ async function checkRefs(sandboxRoot: string, refs: string[]): Promise<{ ok: tru
     }
     return { ok: false, reason: `ref ${JSON.stringify(ref)} does not resolve: ${r.reason}${near.length ? `; nearest: ${near.join(", ")}` : ""}. A ref names an object of this run (input:<path>, job:<id>/<path>, import:<id>/<path>, member:<gen>#<n>, sha256:<hex>), or says why none can be named (unresolved:<why>).` };
   }
-  return { ok: true };
+  return { ok: true, resolved };
 }
 
 const TS_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -7236,6 +7586,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
   if (!(LEDGER_KINDS as readonly string[]).includes(kind)) {
     return { ok: false, reason: `kind must be one of ${LEDGER_KINDS.join(", ")}` };
   }
+  if (kind === "answer") return recordAnswer(ctx, input);
   const absence = kind === "absence";
   const limitation = kind === "limitation";
   const value = String(input.value ?? "").trim();
@@ -7295,9 +7646,12 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
   if (refs.length > LEDGER_MAX_REFS) return { ok: false, reason: `refs names ${refs.length} objects, more than ${LEDGER_MAX_REFS}: name the ones the entry rests on, and the rest in evidence` };
   const long = refs.find((r) => r.length > LEDGER_REF_MAX_CHARS);
   if (long) return { ok: false, reason: `a ref is over ${LEDGER_REF_MAX_CHARS} characters: ${JSON.stringify(long.slice(0, 80))}…` };
+  // The refs whose job did not succeed, as resolveRef reads the job's own status.
+  const failed: Array<{ ref: string; status: string }> = [];
   if (refs.length) {
     const checked = await checkRefs(ctx.sandboxRoot, refs);
     if (!checked.ok) return checked;
+    for (const r of checked.resolved) if (r.kind === "job" && r.status && r.status !== "ok") failed.push({ ref: r.ref, status: r.status });
   }
   // A finding with no ref is taken, and told what would let a reader check
   // it: the ask rides in the answer, never as an error.
@@ -7318,13 +7672,19 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
   }
   const v3 = await ledgerV3Input(ctx.sandboxRoot, input, kind, refs, Boolean(ts.ts), typeof input.ts === "string" ? input.ts : undefined, supersedes !== undefined);
   if (!v3.ok) return v3;
+  const v4 = await ledgerV4Input(ctx.sandboxRoot, input, kind, refs, failed, v3.fields.basis, confidence);
+  if (!v4.ok) return v4;
+  // How each cited object was made, as the run recorded it: written by the
+  // hub into the entry and its core, so the line alone says it.
+  const method = refs.length ? await ledgerMethods(ctx.sandboxRoot, refs) : [];
   // An object a failed or cancelled job left is kept and citable (ADR 0010),
-  // and said: an answer resting on it should not read as resting on a job that worked.
+  // and said: an answer resting on it should not read as resting on a job that
+  // worked. A finding says why in qualifies (ledgerV4Input); another kind is told.
   const notes: string[] = [];
   if (note) notes.push(note);
-  if (refs.length) {
-    const failed = await refsOnFailedJobs(ctx.sandboxRoot, refs);
-    if (failed.length) notes.push(`rests on the kept output of a job that did not succeed: ${failed.map((f) => `${f.ref} (job ${f.job}: ${f.status})`).join(", ")}; say so in the finding, or cite the output of a job that worked`);
+  const unqualified = failed.filter((f) => !(v4.fields.qualifies ?? []).some((q) => q.ref === f.ref));
+  if (unqualified.length) {
+    notes.push(`rests on the kept output of a job that did not succeed: ${unqualified.map((f) => `${f.ref} (job ${f.ref.slice(4).split("/")[0]}: ${f.status})`).join(", ")}; say why those bytes are still usable in qualifies [{ref, why}], or cite the output of a job that worked`);
   }
   if (v3.fields.completion && v3.fields.completion !== "complete") {
     notes.push(`the search was ${v3.fields.completion}: this absence holds only for what was searched; record what was not reached as kind=limitation (reason ${v3.fields.completion === "failed" ? "failed" : "partial"})`);
@@ -7340,7 +7700,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
       if (r.kind === "duplicates" && standing !== undefined) return { ok: false, reason: `#${r.to} is superseded by #${standing}: a duplicate names the entry that stands, #${standing}` };
     }
     const candidate: LedgerEntry = {
-      v: 3,
+      v: LEDGER_VERSION,
       seq: (entries.at(-1)?.seq ?? 0) + 1,
       kind: kind as LedgerKind,
       ...(ts.ts ? { ts: ts.ts } : {}),
@@ -7352,6 +7712,8 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
       ...(refs.length ? { refs } : {}),
       ...v3.fields,
       ...(v3.rel.length ? { rel: v3.rel } : {}),
+      ...v4.fields,
+      ...(method.length ? { method } : {}),
       by: ctx.agentId,
       authors: [ctx.agentId],
       at: new Date().toISOString(),
@@ -7362,6 +7724,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
       if (!target) return { ok: false, reason: `supersedes #${supersedes}: there is no entry #${supersedes} in the ledger (list them with ledger)` };
       const already = replaced.get(supersedes);
       if (already !== undefined) return { ok: false, reason: `#${supersedes} is already superseded by #${already}: correct #${already} instead, so the corrections stay one line` };
+      if (target.kind === "answer") return { ok: false, reason: `#${supersedes} is an answer: an answer is corrected by an answer to the same section (kind=answer, supersedes=${supersedes})` };
       // The whole of what it says, not the sentence alone: the same sentence
       // with another confidence, other refs or another status is a correction.
       if (ledgerContent(target) === content) {
@@ -7372,19 +7735,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
     // anyone, is the entry that stands: a second author is an attestation,
     // appended, and the entry is never rewritten.
     const sameContent = supersedes === undefined ? entries.filter((e) => !replaced.has(e.seq) && ledgerContent(e) === content) : [];
-    if (sameContent.length) {
-      const same = sameContent[0];
-      const attested = await readAttestations(ctx.sandboxRoot);
-      const already = same.by === ctx.agentId || same.authors.includes(ctx.agentId) || attested.some((a) => a.seq === same.seq && a.by === ctx.agentId);
-      if (!already) {
-        await held.assertOwned();
-        await appendAttestation(ctx.sandboxRoot, attested, { seq: same.seq, by: ctx.agentId, at: new Date().toISOString() });
-      }
-      const all = await withAttestations(ctx.sandboxRoot, await readLedger(ctx.sandboxRoot));
-      await renderLedger(ctx.sandboxRoot, all);
-      const stood = all.find((e) => e.seq === same.seq) ?? same;
-      return { ok: true, entry: stood, merged: true, total: all.length, note: already ? `#${same.seq} already says this, recorded by you` : `#${same.seq} already says this word for word: recorded as your attestation of it (ledger/attestations.jsonl), not as a new entry` };
-    }
+    if (sameContent.length) return mergeSameContent(ctx, held, sameContent[0]);
     // The same sentence, from anyone: with refs where the standing one has
     // none, it is recorded anew and corrects it; otherwise it is its own
     // entry and is told of the other.
@@ -7395,26 +7746,79 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
     } else if (words) {
       notes.push(`#${words.seq} says the same sentence with other provenance or fields; if this one corrects it, record it with supersedes=${words.seq}; if it restates it, link it with rel {to: ${words.seq}, kind: "duplicates"}`);
     }
-    if (entries.length >= LEDGER_MAX_ENTRIES) return { ok: false, reason: `the ledger holds ${LEDGER_MAX_ENTRIES} entries already` };
-    const entry: LedgerEntry = { ...candidate, ...(supersedes !== undefined ? { supersedes } : {}) };
-    // Keys in a stable order: the core is computed from the fields, not the line.
-    // Chained like the trace: each entry names the one before it.
-    const previous = entries.at(-1);
-    entry.prev = previous?.hash ?? (previous ? ledgerHash(previous, "genesis") : "genesis");
-    entry.hash = ledgerHash(entry, entry.prev);
-    await mkdir(join(ctx.sandboxRoot, LEDGER_DIR), { recursive: true });
-    await held.assertOwned();
-    await appendFile(join(ctx.sandboxRoot, LEDGER_ENTRIES), `${JSON.stringify(entry)}\n`, "utf8");
-    entries.push(entry);
-    await renderLedger(ctx.sandboxRoot, await withAttestations(ctx.sandboxRoot, entries));
-    return { ok: true, entry, merged: false, total: entries.length, ...(notes.length ? { note: notes.join("; ") } : {}) };
+    return appendLedgerEntry(ctx, held, entries, { ...candidate, ...(supersedes !== undefined ? { supersedes } : {}) }, notes);
   });
 }
 
-export type LedgerAttestation = { seq: number; by: string; at: string; prev?: string; hash?: string };
+/**
+ * The same content again, from anyone, is the entry that stands: a second
+ * author is an attestation of the kind "same content", appended, and the
+ * entry is never rewritten.
+ */
+async function mergeSameContent(ctx: SwarmContext, held: { assertOwned(): Promise<void> }, same: LedgerEntry): Promise<LedgerResult> {
+  const attested = await readAttestations(ctx.sandboxRoot);
+  const already = same.by === ctx.agentId || same.authors.includes(ctx.agentId) || attested.some((a) => a.seq === same.seq && a.by === ctx.agentId && attestationAct(a) === "same_content");
+  if (!already) {
+    await held.assertOwned();
+    await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "same_content", seq: same.seq, target: same.hash ?? ledgerHash(same, "genesis"), by: ctx.agentId, at: new Date().toISOString() });
+  }
+  const all = await withAttestations(ctx.sandboxRoot, await readLedger(ctx.sandboxRoot, { raw: true }));
+  await renderLedger(ctx.sandboxRoot, all);
+  const stood = all.find((e) => e.seq === same.seq) ?? same;
+  return { ok: true, entry: stood, merged: true, total: all.length, note: already ? `#${same.seq} already says this, recorded by you` : `#${same.seq} already says this word for word: recorded as your attestation of it (ledger/attestations.jsonl), not as a new entry` };
+}
+
+/** Chain and append one entry, and render ledger.md again. */
+async function appendLedgerEntry(ctx: SwarmContext, held: { assertOwned(): Promise<void> }, entries: LedgerEntry[], entry: LedgerEntry, notes: string[]): Promise<LedgerResult> {
+  if (entries.length >= LEDGER_MAX_ENTRIES) return { ok: false, reason: `the ledger holds ${LEDGER_MAX_ENTRIES} entries already` };
+  // Keys in a stable order: the core is computed from the fields, not the line.
+  // Chained like the trace: each entry names the one before it.
+  const previous = entries.at(-1);
+  entry.prev = previous?.hash ?? (previous ? ledgerHash(previous, "genesis") : "genesis");
+  entry.hash = ledgerHash(entry, entry.prev);
+  await mkdir(join(ctx.sandboxRoot, LEDGER_DIR), { recursive: true });
+  await held.assertOwned();
+  await appendFile(join(ctx.sandboxRoot, LEDGER_ENTRIES), `${JSON.stringify(entry)}\n`, "utf8");
+  entries.push(entry);
+  await renderLedger(ctx.sandboxRoot, await withAttestations(ctx.sandboxRoot, entries));
+  return { ok: true, entry, merged: false, total: entries.length, ...(notes.length ? { note: notes.join("; ") } : {}) };
+}
+
+/**
+ * A line of ledger/attestations.jsonl. Version 1 (no `v`) is a second author
+ * recording an entry word for word, hashed over {seq, by, at}. Version 2
+ * binds the entry's hash and says which act it is: `same_content`, the same
+ * second author, or `attest`, an agent other than the entry's authors saying
+ * what it re-derived, from which sealed objects, and what it only read, all
+ * inside the hashed record. A duplicate is co-authorship, never a check.
+ */
+export type LedgerAttestation = {
+  v?: 2;
+  act?: "same_content" | "attest";
+  seq: number;
+  /** The attested entry's hash. */
+  target?: string;
+  by: string;
+  at: string;
+  /** An attest's: what was re-derived from which sealed object, and what was only read. */
+  how?: string;
+  /** An attest's: the sealed objects it re-derived from, each resolved. */
+  refs?: string[];
+  prev?: string;
+  hash?: string;
+};
+
+/** The act of an attestation line: a version 1 line is a second author. */
+export function attestationAct(a: LedgerAttestation): "same_content" | "attest" {
+  return a.v === 2 && a.act === "attest" ? "attest" : "same_content";
+}
 
 function attestationHash(a: LedgerAttestation, prev: string): string {
-  return createHash("sha256").update(`${prev}\n${JSON.stringify({ seq: a.seq, by: a.by, at: a.at })}`).digest("hex");
+  const core =
+    a.v === 2
+      ? JSON.stringify({ v: 2, act: a.act, seq: a.seq, target: a.target, by: a.by, at: a.at, ...(a.how ? { how: a.how } : {}), ...(a.refs?.length ? { refs: a.refs } : {}) })
+      : JSON.stringify({ seq: a.seq, by: a.by, at: a.at });
+  return createHash("sha256").update(`${prev}\n${core}`).digest("hex");
 }
 
 export async function readAttestations(sandboxRoot: string): Promise<LedgerAttestation[]> {
@@ -7431,17 +7835,24 @@ export async function readAttestations(sandboxRoot: string): Promise<LedgerAttes
   return out;
 }
 
-async function appendAttestation(sandboxRoot: string, existing: LedgerAttestation[], a: LedgerAttestation): Promise<void> {
+async function appendAttestation(sandboxRoot: string, existing: LedgerAttestation[], a: LedgerAttestation): Promise<LedgerAttestation> {
   const prev = existing.at(-1)?.hash ?? "genesis";
   const line: LedgerAttestation = { ...a, prev, hash: attestationHash(a, prev) };
   await mkdir(join(sandboxRoot, LEDGER_DIR), { recursive: true });
   await appendFile(join(sandboxRoot, LEDGER_ATTESTATIONS), `${JSON.stringify(line)}\n`, "utf8");
+  return line;
 }
 
-/** The attestations' own chain: each line names the one before it. */
+/**
+ * The attestations' own chain: each line names the one before it, and its
+ * hash is over its version's record. A version 1 line after a version 2 one
+ * is refused (the harness writes none again), and so is a version it does
+ * not know, or a version 2 line that is neither act.
+ */
 export function verifyAttestationChain(text: string): { ok: boolean; total: number; broken_at: number | null; reason: string | null; head: string | null } {
   let last = "genesis";
   let total = 0;
+  let sawV2 = false;
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     total += 1;
@@ -7451,6 +7862,10 @@ export function verifyAttestationChain(text: string): { ok: boolean; total: numb
     } catch {
       return { ok: false, total, broken_at: total, reason: "not json", head: null };
     }
+    if (a.v !== undefined && a.v !== 2) return { ok: false, total, broken_at: total, reason: `an attestation of version ${JSON.stringify(a.v)}, which this harness does not know`, head: null };
+    if (a.v === 2 && a.act !== "same_content" && a.act !== "attest") return { ok: false, total, broken_at: total, reason: `an attestation whose act is ${JSON.stringify(a.act)}`, head: null };
+    if (a.v === undefined && sawV2) return { ok: false, total, broken_at: total, reason: "a version 1 attestation after version 2 ones", head: null };
+    if (a.v === 2) sawV2 = true;
     if (a.prev !== last) return { ok: false, total, broken_at: total, reason: "prev does not name the line before it", head: null };
     if (a.hash !== attestationHash(a, last)) return { ok: false, total, broken_at: total, reason: "the line was rewritten", head: null };
     last = a.hash;
@@ -7458,9 +7873,13 @@ export function verifyAttestationChain(text: string): { ok: boolean; total: numb
   return { ok: true, total, broken_at: null, reason: null, head: total ? last : null };
 }
 
-/** Entries with every attestation's author added to `authors`, in memory only. */
+/**
+ * Entries with every second author added to `authors`, in memory only. An
+ * attest is not authorship: the agent that re-derived an entry is its
+ * checker, and is never folded in.
+ */
 export async function withAttestations(sandboxRoot: string, entries: LedgerEntry[]): Promise<LedgerEntry[]> {
-  const attested = await readAttestations(sandboxRoot);
+  const attested = (await readAttestations(sandboxRoot)).filter((a) => attestationAct(a) === "same_content");
   if (!attested.length) return entries;
   const extra = new Map<number, string[]>();
   for (const a of attested) extra.set(a.seq, [...(extra.get(a.seq) ?? []), a.by]);
@@ -7500,17 +7919,28 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   const absences = all.filter((e) => e.kind === "absence");
   const hypotheses = all.filter((e) => e.kind === "hypothesis");
   const limitations = all.filter((e) => e.kind === "limitation");
+  const answers = all.filter((e) => e.kind === "answer");
   const replaced = supersededBy(all);
   const contradictions = standingContradictions(all);
+  // Who re-derived an entry, and who disputes it: read beside the ledger, never written into it.
+  const attests = (await readAttestations(sandboxRoot)).filter((a) => attestationAct(a) === "attest");
+  const disputes = standingDisputes(await readDisputes(sandboxRoot));
+  const problems = answers.length ? answerProblems(all, await readDisputes(sandboxRoot)) : new Map<number, string[]>();
   const lines: string[] = [
     "# Ledger",
     "",
-    `${all.length} entries: ${events.length} events, ${iocs.length} indicators, ${findings.length} findings, ${absences.length} searches that found nothing${hypotheses.length ? `, ${hypotheses.length} hypotheses` : ""}${limitations.length ? `, ${limitations.length} limitations` : ""}${replaced.size ? `; ${replaced.size} corrected by a later entry, which stands` : ""}${contradictions.length ? `; ${contradictions.length} standing contradiction${contradictions.length === 1 ? "" : "s"}` : ""}. Written by the harness from \`record\`; cite it as \`ledger/ledger.md\`.`,
+    `${all.length} entries: ${events.length} events, ${iocs.length} indicators, ${findings.length} findings, ${absences.length} searches that found nothing${hypotheses.length ? `, ${hypotheses.length} hypotheses` : ""}${limitations.length ? `, ${limitations.length} limitations` : ""}${answers.length ? `, ${answers.length} answers` : ""}${replaced.size ? `; ${replaced.size} corrected by a later entry, which stands` : ""}${contradictions.length ? `; ${contradictions.length} standing contradiction${contradictions.length === 1 ? "" : "s"}` : ""}. Written by the harness from \`record\`, \`attest\` and \`dispute\`; cite it as \`ledger/ledger.md\`.`,
     "",
   ];
+  const acts = (e: LedgerEntry) => {
+    const h = e.hash ?? ledgerHash(e, "genesis");
+    const by = attests.filter((a) => a.target === h).map((a) => a.by);
+    const against = disputes.filter((d) => d.target === h);
+    return `${by.length ? ` [attested by ${[...new Set(by)].join(", ")}]` : ""}${against.length ? ` **[disputed by ${against.map((d) => `${d.by}: ${mdCell(d.why)}`).join("; ")}]**` : ""}`;
+  };
   // A corrected entry stays where it was, marked; its correction says what it corrects.
   const mark = (e: LedgerEntry) =>
-    `${replaced.has(e.seq) ? ` **(superseded by #${replaced.get(e.seq)})**` : ""}${e.supersedes !== undefined ? ` (corrects #${e.supersedes}${e.because ? `: ${mdCell(e.because)}` : ""})` : ""}${ledgerFieldsText(e)}`;
+    `${replaced.has(e.seq) ? ` **(superseded by #${replaced.get(e.seq)})**` : ""}${e.supersedes !== undefined ? ` (corrects #${e.supersedes}${e.because ? `: ${mdCell(e.because)}` : ""})` : ""}${ledgerFieldsText(e)}${acts(e)}`;
   lines.push("## Timeline", "", "| # | Time (UTC) | Event | Source | Evidence | By |", "| --- | --- | --- | --- | --- | --- |");
   // A time the source gave with an offset (or as a date) is shown as written too.
   const asWritten = (e: LedgerEntry) => (e.ts_raw && !/[Zz]$/.test(e.ts_raw) && !(e.precision === "date" && e.ts_raw === (e.ts ?? "").slice(0, 10)) ? ` (as written: ${mdCell(e.ts_raw)})` : "");
@@ -7523,7 +7953,18 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   for (const e of iocs) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${mdCell(e.source)} | ${ev(e)} | ${e.confidence ?? ""} | ${e.authors.join(", ")} |`);
   lines.push("", "## Findings", "");
   for (const e of findings) {
-    lines.push(`- **#${e.seq}** ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence})_` : ""}${e.source ? ` — source: ${e.source}` : ""}${e.evidence ? ` — evidence: ${e.evidence}` : ""}${e.refs?.length ? ` — refs: ${e.refs.map((r) => `\`${r}\``).join(", ")}` : ""} — by ${e.authors.join(", ")}`);
+    lines.push(`- **#${e.seq}** ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence})_` : ""}${e.source ? ` — source: ${e.source}` : ""}${e.evidence ? ` — evidence: ${e.evidence}` : ""}${e.refs?.length ? ` — refs: ${e.refs.map((r) => `\`${r}\``).join(", ")}` : ""}${interpretationText(e)} — by ${e.authors.join(", ")}`);
+  }
+  if (answers.length) {
+    // The swarm's answers, each with what it rests on; one stands per section.
+    lines.push("", "## Answers", "");
+    for (const e of answers) {
+      const cites = (label: string, edges?: LedgerEdge[]) => (edges?.length ? ` — ${label}: ${edges.map((x) => `E-${x.seq}`).join(", ")}` : "");
+      const p = problems.get(e.seq);
+      lines.push(
+        `- **#${e.seq}** ${e.section}${e.inconclusive ? " (inconclusive)" : ""}: ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence}${e.confidence_why ? `: ${e.confidence_why}` : ""})_` : ""}${cites("rests on", e.support)}${cites("contrary", e.contrary)}${cites("limitations", e.limitations)}${e.qualifies?.length ? ` — qualifies: ${e.qualifies.map((q) => `${q.ref} (${q.why})`).join("; ")}` : ""}${e.alternatives_open ? ` — still open: ${e.alternatives_open}` : ""}${e.would_change ? ` — would change it: ${e.would_change}` : ""}${e.unsupported_tokens?.length ? ` — in none of the cited entries: ${e.unsupported_tokens.join(", ")}` : ""}${p?.length ? ` — **no longer stands on its support: ${p.join("; ")}**` : ""} — reasoning: ${e.reasoning ?? ""} — by ${e.authors.join(", ")}`,
+      );
+    }
   }
   if (hypotheses.length) {
     lines.push("", "## Hypotheses", "", "| # | Hypothesis | Status | Source | Evidence | By |", "| --- | --- | --- | --- | --- | --- |");
@@ -7538,13 +7979,41 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
     for (const e of limitations) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${e.reason ?? ""} | ${mdCell(e.source)} | ${ev(e)} | ${e.authors.join(", ")} |`);
   }
   if (contradictions.length) {
+    // Weighed: an answer holds both, one as contrary evidence, or a limitation names both.
+    const open = new Set(openContradictions(all).map((c) => `${c.from}:${c.to}`));
     lines.push("", "## Standing contradictions", "");
-    for (const c of contradictions) lines.push(`- #${c.from} contradicts #${c.to}; both stand`);
+    for (const c of contradictions) lines.push(`- #${c.from} contradicts #${c.to}; both stand${open.has(`${c.from}:${c.to}`) ? "" : " (weighed in an answer or named by a limitation)"}`);
   }
   const text = lines.join("\n") + "\n";
   await mkdir(join(sandboxRoot, LEDGER_DIR), { recursive: true });
   await writeFile(join(sandboxRoot, LEDGER_MD), text, "utf8");
   return text;
+}
+
+/**
+ * A finding's version 4 fields as a tail for a rendered line: what it
+ * indicates, why that confidence, what else could explain it, why a failed
+ * job's bytes still hold, and how its objects were made. A finding written
+ * before version 4 says its interpretation was not recorded.
+ */
+export function interpretationText(e: LedgerEntry): string {
+  if (e.kind !== "finding") return "";
+  if (!e.indicates && (e.v ?? 1) < 4) return " — interpretation not recorded";
+  const parts: string[] = [];
+  if (e.indicates) parts.push(`indicates: ${e.indicates}`);
+  if (e.confidence_why) parts.push(`why that confidence: ${e.confidence_why}`);
+  if (e.alternatives?.length) parts.push(`alternatives: ${e.alternatives.map((a) => `${a.explanation} (${a.status}: ${a.why}${a.test_refs?.length ? `; tested with ${a.test_refs.join(", ")}` : ""})`).join("; ")}`);
+  if (e.alternatives_none_why) parts.push(`no alternative considered: ${e.alternatives_none_why}`);
+  if (e.significance) parts.push(`significance: ${e.significance}`);
+  if (e.qualifies?.length) parts.push(`from a job that did not succeed: ${e.qualifies.map((q) => `${q.ref} (${q.why})`).join("; ")}`);
+  if (e.method?.length) parts.push(`made by: ${e.method.map(methodText).join("; ")}`);
+  return parts.map((p) => ` — ${p}`).join("");
+}
+
+/** One method record in a line: the job, what it ran, where, and how it ended. */
+export function methodText(m: LedgerMethod): string {
+  const what = m.tool ? `tool ${String(m.tool)}` : m.recipe ? `recipe ${String(m.recipe)}` : m.command !== undefined ? `command \`${String(m.command)}\`` : m.source ? `import of ${String(m.source)} (${String(m.produced_by ?? "producer unknown")})` : m.job_kind ? String(m.job_kind) : String(m.kind ?? "object");
+  return `${m.job ? `job ${String(m.job)}: ` : m.import ? `import ${String(m.import)}: ` : ""}${what}${m.image ? ` in ${String(m.image)} (${String(m.image_digest ?? "digest unknown")})` : ""}${m.status ? `, ${String(m.status)}` : ""}`;
 }
 
 /** The typed fields of an entry, as a short tail for a rendered line. */
@@ -7575,9 +8044,743 @@ export async function listLedger(sandboxRoot: string, filter: { kind?: string; l
   const kind = (filter.kind ?? "").trim().toLowerCase();
   const picked = kind ? all.filter((e) => e.kind === kind) : all;
   const limit = Math.max(1, Math.min(500, Number(filter.limit) || 200));
-  // A corrected entry is listed with the entry that corrects it.
+  // A corrected entry is listed with the entry that corrects it; every entry
+  // with who re-derived it and who disputes it; an answer with what keeps it
+  // from standing on its support, when anything does.
   const replaced = supersededBy(all);
-  return picked.slice(-limit).map((e) => (replaced.has(e.seq) ? { ...e, superseded_by: replaced.get(e.seq) } : e));
+  const attests = (await readAttestations(sandboxRoot)).filter((a) => attestationAct(a) === "attest");
+  const allDisputes = await readDisputes(sandboxRoot);
+  const disputes = standingDisputes(allDisputes);
+  const problems = all.some((e) => e.kind === "answer") ? answerProblems(all, allDisputes) : new Map<number, string[]>();
+  return picked.slice(-limit).map((e) => {
+    const h = e.hash ?? ledgerHash(e, "genesis");
+    const by = [...new Set(attests.filter((a) => a.target === h).map((a) => a.by))];
+    const against = disputes.filter((d) => d.target === h).map((d) => ({ by: d.by, why: d.why }));
+    return {
+      ...e,
+      ...(replaced.has(e.seq) ? { superseded_by: replaced.get(e.seq) } : {}),
+      ...(by.length ? { attested_by: by } : {}),
+      ...(against.length ? { disputed_by: against } : {}),
+      ...(problems.has(e.seq) ? { problems: problems.get(e.seq) } : {}),
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Interpretation, answers and the acts on them (ledger version 4).
+//
+// A finding says what it indicates; an `answer` is the swarm's answer to one
+// question of the goal (or its summary, or its narrative), resting on the
+// entries it cites by hash. A critic other than the author re-derives what an
+// answer rests on and says so with `attest`, or says why not with `dispute`;
+// both are hub-written, each in its own chain beside the ledger. Whether a
+// run may end is the goal's to say: its check reads the answers (the ledger
+// gate below, run by scripts/check-answers.ts), refuses a done that leaves a
+// mechanical defect, names the fix, and lets the next done through once a
+// limitation names each defect that is left. Nothing here judges whether an
+// answer is right: that is the critic's and the examiner's.
+// ---------------------------------------------------------------------------
+
+/** A goal section id as an answer names it: "3", "Q3" and "question:3" are question:3; summary and narrative are themselves. */
+export function answerSection(raw: string): { ok: true; section: string; id: string } | { ok: false; reason: string } {
+  const text = String(raw ?? "").trim();
+  const lower = text.toLowerCase();
+  if ((LEDGER_SECTION_SPECIAL as readonly string[]).includes(lower)) return { ok: true, section: lower, id: lower };
+  const id = sectionKey(lower.startsWith("question:") ? text.slice("question:".length) : text);
+  if (!id || !LEDGER_ANSWER_ID.test(id) || (LEDGER_SECTION_SPECIAL as readonly string[]).includes(id.toLowerCase())) {
+    return { ok: false, reason: `section is question:<id> (the goal's question, "question:3"), summary or narrative (got ${JSON.stringify(text)})` };
+  }
+  return { ok: true, section: `question:${id}`, id };
+}
+
+/** A section id as the goal numbers it: "3", "Q3" and "q3" are section 3. */
+export function sectionKey(id: string): string {
+  return String(id ?? "").trim().replace(/^q(?=\d)/i, "");
+}
+
+/** The goal id a section's entries name in `answers`: 3 for question:3, summary, narrative. */
+export function sectionAnswersId(section: string): string {
+  return section.startsWith("question:") ? section.slice("question:".length) : section;
+}
+
+/** The entries a text cites as E-<seq>, and every seq of a range E-12–E-15 (at most 50 a range). */
+export function answerCitations(text: string): number[] {
+  const out = new Set<number>();
+  for (const m of String(text ?? "").matchAll(/\bE-(\d{1,5})(?:\s*[–-]\s*E-?(\d{1,5}))?\b/g)) {
+    const a = Number(m[1]);
+    const b = m[2] ? Number(m[2]) : a;
+    if (b >= a && b - a <= 50) for (let n = a; n <= b; n += 1) out.add(n);
+    else out.add(a);
+  }
+  return [...out].filter((n) => n > 0);
+}
+
+/** A list of seqs as an agent writes them: 12, "12", "#12", "E-12", or one string of them. */
+function seqList(name: string, v: Array<number | string> | string | undefined): { ok: true; seqs: number[] } | { ok: false; reason: string } {
+  const items = Array.isArray(v) ? v.map(String) : String(v ?? "").split(/[\s,]+/);
+  const out: number[] = [];
+  for (const raw of items.map((x) => x.trim()).filter(Boolean)) {
+    const n = Number(raw.replace(/^(?:#|E-)/i, ""));
+    if (!Number.isInteger(n) || n < 1) return { ok: false, reason: `${name} names entries by seq (12, "#12" or "E-12"; got ${JSON.stringify(raw)})` };
+    if (!out.includes(n)) out.push(n);
+  }
+  return { ok: true, seqs: out };
+}
+
+/** Where a chain of corrections from `seq` ends: the entry that stands. */
+export function standingSeq(seq: number, replaced: Map<number, number>): number {
+  let at = seq;
+  for (let i = 0; i < 10_000 && replaced.has(at); i += 1) at = replaced.get(at) as number;
+  return at;
+}
+
+/** The seqs a limitation names: its links, and each E-<seq> in what it says. */
+export function limitationCites(e: LedgerEntry): Set<number> {
+  const out = new Set<number>((e.rel ?? []).map((r) => r.to));
+  for (const n of answerCitations(`${e.value}\n${e.source ?? ""}\n${e.evidence ?? ""}`)) out.add(n);
+  return out;
+}
+
+// --- the token check ------------------------------------------------------------------------
+
+/**
+ * The specifics an answer's text asserts that a reader could look up: hashes,
+ * paths (and registry keys), times, inodes, addresses and accounts. Each is
+ * kept as written and normalised for matching: hex lower-case; a path's
+ * separators as "/", its case folded and a drive letter dropped; a time to
+ * the second, in UTC when it says its zone (a date alone, or a time to the
+ * minute, matches any time within it); an NTFS `inode-type-id` by its first
+ * number. Token matching finds omissions, never entailment: a token in no
+ * cited entry is marked, never refused, and a legitimate transformation
+ * (a conversion, a sum) needs its derivation recorded as an entry.
+ */
+export type AnswerToken = { kind: "hash" | "path" | "time" | "inode" | "ip" | "account"; text: string; norm: string };
+
+const TOKEN_TIME = /\b(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?\s?(Z|z|UTC|[+-]\d{2}:?\d{2})?)?(?![\d:])/g;
+
+function normalizeTokenTime(m: RegExpMatchArray): string | null {
+  const [, y, mo, d, h, mi, sec, zone] = m;
+  if (Number(mo) < 1 || Number(mo) > 12 || Number(d) < 1 || Number(d) > 31) return null;
+  if (h === undefined) return `${y}-${mo}-${d}`;
+  const naive = `${y}-${mo}-${d}T${h}:${mi}${sec !== undefined ? `:${sec}` : ""}`;
+  if (!zone) return naive;
+  const z = /^(z|utc)$/i.test(zone) ? "Z" : zone.length === 5 ? `${zone.slice(0, 3)}:${zone.slice(3)}` : zone;
+  const ms = Date.parse(`${y}-${mo}-${d}T${h}:${mi}:${sec ?? "00"}${z}`);
+  if (!Number.isFinite(ms)) return naive;
+  const iso = new Date(ms).toISOString();
+  return sec !== undefined ? iso.slice(0, 19) : iso.slice(0, 16);
+}
+
+function normalizePathText(text: string): string {
+  return text.toLowerCase().replace(/\\+/g, "/").replace(/\/{2,}/g, "/").replace(/(^|[\s"'`(=])[a-z]:(?=\/)/g, "$1").replace(/\/$/, "");
+}
+
+/** The tokens of a text, each once by its normalised form, in the order they first appear. */
+export function answerTokens(text: string): AnswerToken[] {
+  const found: Array<{ at: number; t: AnswerToken }> = [];
+  const add = (at: number, t: AnswerToken) => found.push({ at, t });
+  const src = String(text ?? "");
+  for (const m of src.matchAll(TOKEN_TIME)) {
+    const norm = normalizeTokenTime(m);
+    if (norm) add(m.index ?? 0, { kind: "time", text: m[0].trim(), norm });
+  }
+  for (const m of src.matchAll(/(?<![0-9A-Za-z])(?:[0-9a-fA-F]{128}|[0-9a-fA-F]{64}|[0-9a-fA-F]{40}|[0-9a-fA-F]{32})(?![0-9A-Za-z])/g)) add(m.index ?? 0, { kind: "hash", text: m[0], norm: m[0].toLowerCase() });
+  for (const m of src.matchAll(/(?<![\d.])(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}(?![\d.]*\d)/g)) add(m.index ?? 0, { kind: "ip", text: m[0], norm: m[0] });
+  // An IPv6 address: eight groups, or fewer with one "::"; a time of day is not one.
+  for (const m of src.matchAll(/(?<![\w:.])[0-9a-fA-F]{0,4}(?::[0-9a-fA-F]{0,4}){2,7}(?![\w:])/g)) {
+    const v = m[0];
+    const gaps = (v.match(/::/g) ?? []).length;
+    const groups = v.split(":");
+    if (gaps > 1 || (gaps === 0 && groups.length !== 8) || v.includes(":::") || v === "::") continue;
+    if (gaps === 0 && groups.some((g) => !g)) continue;
+    if (/^\d{1,2}(:\d{2}){1,2}$/.test(v)) continue;
+    add(m.index ?? 0, { kind: "ip", text: v, norm: v.toLowerCase() });
+  }
+  // A SID's numbers are not an inode's: masked before inodes are read.
+  const unSid = src.replace(/\bS-1-\d{1,3}(?:-\d{1,12}){1,14}\b/gi, (x) => " ".repeat(x.length));
+  for (const m of unSid.matchAll(/\b(\d{1,12})-(\d{1,5})-(\d{1,5})\b/g)) {
+    if (/^\d{4}$/.test(m[1]) && /^\d{2}$/.test(m[2]) && /^\d{2}$/.test(m[3])) continue;
+    add(m.index ?? 0, { kind: "inode", text: m[0], norm: String(Number(m[1])) });
+  }
+  for (const m of src.matchAll(/\binode\s*[#:=]?\s*(\d{1,12})\b/gi)) add(m.index ?? 0, { kind: "inode", text: m[0], norm: String(Number(m[1])) });
+  for (const m of src.matchAll(/\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b/g)) add(m.index ?? 0, { kind: "account", text: m[0], norm: m[0].toLowerCase() });
+  for (const m of src.matchAll(/\bS-1-\d{1,3}(?:-\d{1,12}){1,14}\b/gi)) add(m.index ?? 0, { kind: "account", text: m[0], norm: m[0].toUpperCase() });
+  // Paths (and registry keys): a word with a separator that is rooted (a
+  // drive, a UNC share, /, ~), has two separators or ends in an extension;
+  // one backslash between two names is an account (DOMAIN\user). A URL,
+  // an E-<seq> pair and a number like 03/20/2024 are none of them.
+  for (const m of src.matchAll(/[^\s"'`<>|,;()[\]{}]+/g)) {
+    const v = m[0].replace(/^[*_]+/, "").replace(/[*_]+$/, "").replace(/[.:!?]+$/, "");
+    if (!/[\\/]/.test(v) || v.includes("://") || /^E-\d/i.test(v)) continue;
+    const segs = v.split(/[\\/]+/).filter(Boolean);
+    if (!segs.length || segs.every((x) => /^\d+$/.test(x))) continue;
+    const seps = (v.match(/[\\/]/g) ?? []).length;
+    const rooted = /^(?:[A-Za-z]:[\\/]|\\\\|\/|~\/)/.test(v);
+    const ext = /\.[A-Za-z0-9]{1,8}$/.test(segs.at(-1) ?? "");
+    if (!rooted && seps < 2 && !ext) {
+      if (seps === 1 && /^[A-Za-z][\w.-]*\\[A-Za-z][\w.$-]*$/.test(v)) add(m.index ?? 0, { kind: "account", text: v, norm: v.toLowerCase().replace(/\\/g, "/") });
+      continue;
+    }
+    add(m.index ?? 0, { kind: "path", text: v, norm: normalizePathText(v) });
+  }
+  const seen = new Set<string>();
+  const out: AnswerToken[] = [];
+  for (const { t } of found.sort((a, b) => a.at - b.at)) {
+    const key = `${t.kind}\u0000${t.norm}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
+/** Every string an entry holds, but who wrote it, when, and the chain's own hashes. */
+function entryText(e: LedgerEntry): string {
+  const skip = new Set(["by", "authors", "at", "prev", "hash", "support", "contrary", "limitations", "unsupported_tokens", "v", "seq", "kind"]);
+  const parts: string[] = [];
+  const walk = (v: unknown) => {
+    if (typeof v === "string") parts.push(v);
+    else if (typeof v === "number") parts.push(String(v));
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) walk(x);
+  };
+  for (const [k, v] of Object.entries(e)) if (!skip.has(k)) walk(v);
+  return parts.join("\n");
+}
+
+/**
+ * The tokens of an answer's text that none of the entries it rests on holds.
+ * An answer cited by another lends its own cited entries, never its text: a
+ * token an answer asserted without support does not become supported by
+ * being repeated in a summary.
+ */
+export function unsupportedTokens(text: string, cited: LedgerEntry[], bySeq: Map<number, LedgerEntry>): string[] {
+  const pool: LedgerEntry[] = [];
+  const seen = new Set<number>();
+  const visit = (e: LedgerEntry | undefined) => {
+    if (!e || seen.has(e.seq)) return;
+    seen.add(e.seq);
+    if (e.kind === "answer") for (const x of [...(e.support ?? []), ...(e.contrary ?? []), ...(e.limitations ?? [])]) visit(bySeq.get(x.seq));
+    else pool.push(e);
+  };
+  for (const e of cited) visit(e);
+  const raw = pool.map(entryText).join("\n");
+  const flat = normalizePathText(raw);
+  const lower = raw.toLowerCase();
+  const poolTokens = answerTokens(raw);
+  const times = poolTokens.filter((t) => t.kind === "time").map((t) => t.norm);
+  for (const e of pool) if (e.ts) times.push(e.ts.slice(0, 19));
+  const word = (hay: string, needle: string) => new RegExp(`(?<![\\w.])${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w])`).test(hay);
+  const out: string[] = [];
+  for (const t of answerTokens(text)) {
+    let ok = false;
+    if (t.kind === "time") ok = times.some((x) => x.startsWith(t.norm));
+    else if (t.kind === "hash") ok = lower.includes(t.norm);
+    else if (t.kind === "path") ok = flat.includes(t.norm);
+    else if (t.kind === "inode") ok = word(raw, t.norm);
+    else if (t.kind === "ip") ok = word(lower, t.norm);
+    else ok = flat.includes(t.norm) || lower.includes(t.norm) || raw.toUpperCase().includes(t.norm);
+    if (!ok) out.push(t.text);
+  }
+  return out;
+}
+
+// --- disputes -------------------------------------------------------------------------------
+
+/**
+ * A line of ledger/disputes.jsonl: an agent other than an entry's authors
+ * says why the entry does not hold (`dispute`), or takes that back
+ * (`withdraw`, its own dispute only). The why is inside the hashed record;
+ * the chain is the file's own.
+ */
+export type LedgerDispute = { v: 1; act: "dispute" | "withdraw"; seq: number; target: string; by: string; at: string; why: string; refs?: string[]; prev?: string; hash?: string };
+
+function disputeHash(d: LedgerDispute, prev: string): string {
+  const core = JSON.stringify({ v: d.v, act: d.act, seq: d.seq, target: d.target, by: d.by, at: d.at, why: d.why, ...(d.refs?.length ? { refs: d.refs } : {}) });
+  return createHash("sha256").update(`${prev}\n${core}`).digest("hex");
+}
+
+export async function readDisputes(sandboxRoot: string): Promise<LedgerDispute[]> {
+  const text = await readFile(join(sandboxRoot, LEDGER_DISPUTES), "utf8").catch(() => "");
+  const out: LedgerDispute[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line) as LedgerDispute);
+    } catch {
+      // a torn line is left for the chain check to name
+    }
+  }
+  return out;
+}
+
+/** The disputes' own chain: each line names the one before it; an unknown version or act is refused. */
+export function verifyDisputeChain(text: string): { ok: boolean; total: number; broken_at: number | null; reason: string | null; head: string | null } {
+  let last = "genesis";
+  let total = 0;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    total += 1;
+    let d: LedgerDispute;
+    try {
+      d = JSON.parse(line) as LedgerDispute;
+    } catch {
+      return { ok: false, total, broken_at: total, reason: "not json", head: null };
+    }
+    if (d.v !== 1) return { ok: false, total, broken_at: total, reason: `a dispute of version ${JSON.stringify(d.v)}, which this harness does not know`, head: null };
+    if (d.act !== "dispute" && d.act !== "withdraw") return { ok: false, total, broken_at: total, reason: `a dispute line whose act is ${JSON.stringify(d.act)}`, head: null };
+    if (d.prev !== last) return { ok: false, total, broken_at: total, reason: "prev does not name the line before it", head: null };
+    if (d.hash !== disputeHash(d, last)) return { ok: false, total, broken_at: total, reason: "the line was rewritten", head: null };
+    last = d.hash;
+  }
+  return { ok: true, total, broken_at: null, reason: null, head: total ? last : null };
+}
+
+/** The disputes that stand: each not withdrawn since by the agent that raised it. */
+export function standingDisputes(disputes: LedgerDispute[]): LedgerDispute[] {
+  const open = new Map<string, LedgerDispute>();
+  for (const d of disputes) {
+    const key = `${d.target}\u0000${d.by}`;
+    if (d.act === "dispute") open.set(key, d);
+    else open.delete(key);
+  }
+  return [...open.values()];
+}
+
+// --- attest and dispute ---------------------------------------------------------------------
+
+export type LedgerActInput = { seq?: number | string; how?: string; why?: string; refs?: string[] | string; withdraw?: boolean };
+export type LedgerActResult<T> = { ok: true; line: T; appended: boolean; note?: string } | { ok: false; reason: string };
+
+/** The entry an act names, standing, and not the actor's own. */
+function actTarget(entries: LedgerEntry[], raw: number | string | undefined, agentId: string, act: string): { ok: true; entry: LedgerEntry } | { ok: false; reason: string } {
+  const n = Number(String(raw ?? "").trim().replace(/^(?:#|E-)/i, ""));
+  if (!Number.isInteger(n) || n < 1) return { ok: false, reason: `${act} names an entry by its seq (12, "#12" or "E-12"; got ${JSON.stringify(raw)})` };
+  const entry = entries.find((e) => e.seq === n);
+  if (!entry) return { ok: false, reason: `there is no entry #${n} in the ledger (list them with ledger)` };
+  const replaced = supersededBy(entries);
+  if (replaced.has(n)) return { ok: false, reason: `#${n} is superseded by #${standingSeq(n, replaced)}: ${act} the entry that stands` };
+  if (entry.by === agentId || entry.authors.includes(agentId)) {
+    return { ok: false, reason: act === "attest" ? `#${n} is yours (you recorded it, or the same words): an attestation is somebody else re-deriving it` : `#${n} is yours: correct it with record(supersedes=${n}) instead of disputing it` };
+  }
+  return { ok: true, entry };
+}
+
+/**
+ * Attest an entry: an agent other than its authors re-derived it and says
+ * how — what it re-derived from which sealed objects, and what it only read.
+ * Hub-written into ledger/attestations.jsonl (version 2, the how inside the
+ * hashed record). The same agent attesting the same entry again is told so.
+ */
+export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Promise<LedgerActResult<LedgerAttestation>> {
+  const how = boundedText("how", input.how, LEDGER_ACT_MAX_CHARS);
+  if (!how.ok) return how;
+  if (!how.value) return { ok: false, reason: "how is required: what you re-derived, from which sealed object (job:<id>/<path>, input:<path>, …), and what you only read" };
+  const refs = listOf(input.refs);
+  if (refs.length > LEDGER_MAX_REFS) return { ok: false, reason: `refs names more than ${LEDGER_MAX_REFS} objects` };
+  if (refs.length) {
+    const checked = await checkRefs(ctx.sandboxRoot, refs);
+    if (!checked.ok) return checked;
+  }
+  return withTableLock(ctx.sandboxRoot, async (held) => {
+    const entries = await readLedger(ctx.sandboxRoot);
+    const t = actTarget(entries, input.seq, ctx.agentId, "attest");
+    if (!t.ok) return t;
+    const target = t.entry.hash ?? ledgerHash(t.entry, "genesis");
+    if (standingDisputes(await readDisputes(ctx.sandboxRoot)).some((d) => d.target === target && d.by === ctx.agentId)) {
+      return { ok: false, reason: `you dispute #${t.entry.seq}: withdraw the dispute (dispute withdraw=true, with why) before attesting it` };
+    }
+    const attested = await readAttestations(ctx.sandboxRoot);
+    const mine = attested.find((a) => attestationAct(a) === "attest" && a.target === target && a.by === ctx.agentId);
+    if (mine) return { ok: true, line: mine, appended: false, note: `you attested #${t.entry.seq} already` };
+    await held.assertOwned();
+    const line = await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "attest", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), how: how.value, ...(refs.length ? { refs } : {}) });
+    await renderLedger(ctx.sandboxRoot);
+    return { ok: true, line, appended: true };
+  });
+}
+
+/**
+ * Dispute an entry: why it does not hold, with the objects that show it.
+ * Or, with `withdraw`, take one's own dispute back and say why. Hub-written
+ * into ledger/disputes.jsonl. An answer resting on a disputed entry is marked
+ * until it is recorded again with the dispute answered.
+ */
+export async function disputeEntry(ctx: SwarmContext, input: LedgerActInput): Promise<LedgerActResult<LedgerDispute>> {
+  const why = boundedText("why", input.why, LEDGER_ACT_MAX_CHARS);
+  if (!why.ok) return why;
+  if (!why.value) return { ok: false, reason: input.withdraw ? "why is required: why the dispute no longer stands" : "why is required: what does not hold, and what shows it" };
+  const refs = listOf(input.refs);
+  if (refs.length > LEDGER_MAX_REFS) return { ok: false, reason: `refs names more than ${LEDGER_MAX_REFS} objects` };
+  if (refs.length) {
+    const checked = await checkRefs(ctx.sandboxRoot, refs);
+    if (!checked.ok) return checked;
+  }
+  return withTableLock(ctx.sandboxRoot, async (held) => {
+    const entries = await readLedger(ctx.sandboxRoot);
+    const t = actTarget(entries, input.seq, ctx.agentId, "dispute");
+    if (!t.ok) return t;
+    const target = t.entry.hash ?? ledgerHash(t.entry, "genesis");
+    const all = await readDisputes(ctx.sandboxRoot);
+    const standing = standingDisputes(all).find((d) => d.target === target && d.by === ctx.agentId);
+    if (input.withdraw && !standing) return { ok: false, reason: `you have no standing dispute of #${t.entry.seq} to withdraw` };
+    if (!input.withdraw && standing) return { ok: true, line: standing, appended: false, note: `you dispute #${t.entry.seq} already: ${standing.why}` };
+    const d: LedgerDispute = { v: 1, act: input.withdraw ? "withdraw" : "dispute", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), why: why.value, ...(refs.length ? { refs } : {}) };
+    const prev = all.at(-1)?.hash ?? "genesis";
+    const line: LedgerDispute = { ...d, prev, hash: disputeHash(d, prev) };
+    await held.assertOwned();
+    await mkdir(join(ctx.sandboxRoot, LEDGER_DIR), { recursive: true });
+    await appendFile(join(ctx.sandboxRoot, LEDGER_DISPUTES), `${JSON.stringify(line)}\n`, "utf8");
+    await renderLedger(ctx.sandboxRoot);
+    return { ok: true, line, appended: true };
+  });
+}
+
+// --- answers --------------------------------------------------------------------------------
+
+/** The fields an answer never takes: it rests on entries, not objects, and states no event. */
+const NOT_ANSWER_FIELDS = ["ts", "refs", "answers", "rel", "clock", "precision", "basis", "status", "reason", "completion", "attribution", "locators", "indicates", "alternatives", "alternatives_none_why", "significance"] as const;
+
+/** Each ref of an entry whose job did not succeed and that the entry does not qualify itself. */
+async function unqualifiedFailedRefs(sandboxRoot: string, e: LedgerEntry): Promise<string[]> {
+  if (!e.refs?.length) return [];
+  const { resolveRef } = await import("../scripts/evidence-store.ts");
+  const out: string[] = [];
+  for (const ref of e.refs) {
+    if (!ref.startsWith("job:")) continue;
+    const r = await resolveRef(sandboxRoot, ref).catch(() => null);
+    if (r?.ok && r.status && r.status !== "ok" && !(e.qualifies ?? []).some((q) => q.ref === ref)) out.push(`${ref} (${r.status})`);
+  }
+  return out;
+}
+
+/**
+ * Why each standing answer no longer stands on its own support, transitively:
+ * an entry it cites was superseded and its correction is not cited with it,
+ * or was disputed (or rests on a failed job) and the answer does not qualify
+ * it, or is an answer that itself no longer stands; or the cited hash is not
+ * the entry's. `failed` names, by seq, the entries resting on a failed job's
+ * output that they do not qualify themselves.
+ */
+export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[], failed: Map<number, string[]> = new Map()): Map<number, string[]> {
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  const disputed = new Map<string, LedgerDispute[]>();
+  for (const d of standingDisputes(disputes)) disputed.set(d.target, [...(disputed.get(d.target) ?? []), d]);
+  const memo = new Map<number, string[]>();
+  const visiting = new Set<number>();
+  const problemsOf = (a: LedgerEntry): string[] => {
+    const hit = memo.get(a.seq);
+    if (hit) return hit;
+    if (visiting.has(a.seq)) return [];
+    visiting.add(a.seq);
+    const out: string[] = [];
+    const qualified = (seq: number) => (a.qualifies ?? []).some((q) => q.ref === `E-${seq}`);
+    const cited = new Set([...(a.support ?? []), ...(a.limitations ?? [])].map((x) => x.seq));
+    for (const [edges, role] of [[a.support ?? [], "rests on"], [a.limitations ?? [], "is bounded by"]] as const) {
+      for (const edge of edges) {
+        const t = bySeq.get(edge.seq);
+        if (!t) {
+          out.push(`it ${role} E-${edge.seq}, which is not in the ledger`);
+          continue;
+        }
+        if ((t.hash ?? ledgerHash(t, "genesis")) !== edge.hash) {
+          out.push(`it ${role} E-${edge.seq} by a hash that is not that entry's`);
+          continue;
+        }
+        if (replaced.has(t.seq)) {
+          const now = standingSeq(t.seq, replaced);
+          if (!cited.has(now)) out.push(`it ${role} E-${t.seq}, superseded by #${now}, and does not cite the correction`);
+          continue;
+        }
+        const against = disputed.get(edge.hash);
+        if (against?.length && !qualified(t.seq)) out.push(`it ${role} E-${t.seq}, disputed by ${against.map((d) => `${d.by} (${d.why})`).join("; ")}`);
+        const bad = failed.get(t.seq);
+        if (bad?.length && !qualified(t.seq)) out.push(`it ${role} E-${t.seq}, which rests on the kept output of a job that did not succeed (${bad.join(", ")}) and says nothing of it`);
+        if (t.kind === "answer") {
+          const sub = problemsOf(t);
+          if (sub.length) out.push(`it ${role} E-${t.seq}, an answer that no longer stands on its own support`);
+        }
+      }
+    }
+    visiting.delete(a.seq);
+    memo.set(a.seq, out);
+    return out;
+  };
+  const result = new Map<number, string[]>();
+  for (const e of entries) {
+    if (e.kind !== "answer" || replaced.has(e.seq)) continue;
+    const p = problemsOf(e);
+    if (p.length) result.set(e.seq, p);
+  }
+  return result;
+}
+
+/** Record an answer (recordEntry with kind=answer): its checks need the ledger, so they run under the lock. */
+async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<LedgerResult> {
+  const raw = input as Record<string, unknown>;
+  const wrong = NOT_ANSWER_FIELDS.find((f) => given(raw[f]));
+  if (wrong) return { ok: false, reason: `${wrong} is not an answer's: an answer rests on ledger entries it cites as E-<seq>; record the fact itself as a finding, an event or an indicator first` };
+  const sec = answerSection(String(input.section ?? ""));
+  if (!sec.ok) return sec;
+  const question = sec.section.startsWith("question:");
+  const value = String(input.value ?? "").trim();
+  if (!value) return { ok: false, reason: question ? "value is required: the answer itself, as the reader is to be told it" : sec.section === "summary" ? "value is required: the summary a decision maker reads first" : "value is required: what happened, in a paragraph; the whole narrative goes in reasoning" };
+  if (value.length > LEDGER_VALUE_MAX_CHARS) return { ok: false, reason: `value is over ${LEDGER_VALUE_MAX_CHARS} characters: put the rest in reasoning` };
+  const reasoning = boundedText("reasoning", input.reasoning, LEDGER_REASONING_MAX_CHARS);
+  if (!reasoning.ok) return reasoning;
+  if (!reasoning.value) return { ok: false, reason: "reasoning is required: how the cited entries lead to the answer, citing E-<seq> for every claim" };
+  const confidence = String(input.confidence ?? "").trim().toLowerCase();
+  if (confidence && !(LEDGER_CONFIDENCE as readonly string[]).includes(confidence)) return { ok: false, reason: `confidence must be one of ${LEDGER_CONFIDENCE.join(", ")}` };
+  const why = boundedText("confidence_why", input.confidence_why, LEDGER_WHY_MAX_CHARS);
+  if (!why.ok) return why;
+  const openAlt = boundedText("alternatives_open", input.alternatives_open, LEDGER_WHY_MAX_CHARS);
+  if (!openAlt.ok) return openAlt;
+  const change = boundedText("would_change", input.would_change, LEDGER_WHY_MAX_CHARS);
+  if (!change.ok) return change;
+  if (question) {
+    if (!confidence) return { ok: false, reason: "an answer to a question says how sure: confidence high, medium or low, with confidence_why" };
+    if (!why.value) return { ok: false, reason: "confidence_why is required: the quality of the evidence the answer rests on, not a count of it" };
+    if (!openAlt.value) return { ok: false, reason: "alternatives_open is required: what else could still explain it, or that nothing remains open and why" };
+    if (!change.value) return { ok: false, reason: "would_change is required: what evidence would change this answer" };
+  } else if (why.value && !confidence) return { ok: false, reason: "confidence_why says why that confidence: give confidence too" };
+  if (input.inconclusive !== undefined && input.inconclusive !== null && typeof input.inconclusive !== "boolean") return { ok: false, reason: "inconclusive is true or false" };
+  if (input.sensitive !== undefined && input.sensitive !== null && typeof input.sensitive !== "boolean") return { ok: false, reason: "sensitive is true or false" };
+  const contrary = seqList("contrary", input.contrary);
+  if (!contrary.ok) return contrary;
+  const limits = seqList("limitations", input.limitations);
+  if (!limits.ok) return limits;
+  const quals: Array<{ seq: number; why: string }> = [];
+  for (const q of Array.isArray(input.qualifies) ? input.qualifies : []) {
+    const n = Number(String(q?.ref ?? "").trim().replace(/^(?:#|E-)/i, ""));
+    const text = boundedText("a qualifies why", q?.why, LEDGER_WHY_MAX_CHARS);
+    if (!text.ok) return text;
+    if (!Number.isInteger(n) || n < 1 || !text.value) return { ok: false, reason: "an answer's qualifies is [{ref: \"E-<seq>\", why}]: a cited entry that is disputed or rests on a failed job, and why it still supports the answer" };
+    if (!quals.some((x) => x.seq === n)) quals.push({ seq: n, why: text.value });
+  }
+  let supersedes: number | undefined;
+  if (input.supersedes !== undefined && input.supersedes !== null && String(input.supersedes).trim() !== "") {
+    const n = Number(String(input.supersedes).trim().replace(/^#/, ""));
+    if (!Number.isInteger(n) || n < 1) return { ok: false, reason: `supersedes names an entry by its seq, a whole number (got ${JSON.stringify(input.supersedes)})` };
+    supersedes = n;
+  }
+  const because = boundedText("because", input.because, LEDGER_BECAUSE_MAX_CHARS);
+  if (!because.ok) return because;
+  if (because.value && supersedes === undefined) return { ok: false, reason: "because says why a correction corrects: give supersedes too" };
+  const source = boundedText("source", input.source, LEDGER_SOURCE_MAX_CHARS);
+  if (!source.ok) return source;
+  const evidence = boundedText("evidence", input.evidence, LEDGER_EVIDENCE_MAX_CHARS);
+  if (!evidence.ok) return evidence;
+  const cited = answerCitations(`${value}\n${reasoning.value}`);
+  const support = cited.filter((n) => !contrary.seqs.includes(n) && !limits.seqs.includes(n));
+  if (support.length + contrary.seqs.length + limits.seqs.length > LEDGER_MAX_CITATIONS) return { ok: false, reason: `the answer cites more than ${LEDGER_MAX_CITATIONS} entries: cite the ones it rests on` };
+  return withTableLock(ctx.sandboxRoot, async (held) => {
+    const entries = await readLedger(ctx.sandboxRoot);
+    const disputes = await readDisputes(ctx.sandboxRoot);
+    const bySeq = new Map(entries.map((e) => [e.seq, e]));
+    const replaced = supersededBy(entries);
+    const hashOf = (e: LedgerEntry) => e.hash ?? ledgerHash(e, "genesis");
+    const standing = entries.find((e) => e.kind === "answer" && e.section === sec.section && !replaced.has(e.seq));
+    if (supersedes !== undefined) {
+      const target = bySeq.get(supersedes);
+      if (!target) return { ok: false, reason: `supersedes #${supersedes}: there is no entry #${supersedes} in the ledger (list them with ledger)` };
+      if (target.kind !== "answer") return { ok: false, reason: `#${supersedes} is a ${target.kind}: an answer corrects an answer; correct the ${target.kind} with a ${target.kind}` };
+      if (target.section !== sec.section) return { ok: false, reason: `#${supersedes} answers ${target.section}: an answer corrects the answer to its own section` };
+      const already = replaced.get(supersedes);
+      if (already !== undefined) return { ok: false, reason: `#${supersedes} is already superseded by #${already}: correct #${already} instead, so the corrections stay one line` };
+    }
+    for (const n of [...support, ...contrary.seqs, ...limits.seqs]) {
+      if (!bySeq.has(n)) return { ok: false, reason: `E-${n}: there is no entry #${n} in the ledger (list them with ledger)` };
+      if (n === supersedes) return { ok: false, reason: `E-${n} is the answer this one replaces: an answer does not rest on the answer it corrects` };
+    }
+    for (const n of limits.seqs) {
+      const l = bySeq.get(n) as LedgerEntry;
+      if (l.kind !== "limitation") return { ok: false, reason: `limitations names #${n}, a ${l.kind}: it takes limitation entries` };
+      if (replaced.has(n)) return { ok: false, reason: `limitations names #${n}, superseded by #${standingSeq(n, replaced)}: name the limitation that stands` };
+    }
+    // Every claimed support is checked, not one matching citation.
+    const disputedBy = new Map<string, LedgerDispute[]>();
+    for (const d of standingDisputes(disputes)) disputedBy.set(d.target, [...(disputedBy.get(d.target) ?? []), d]);
+    const problems = answerProblems(entries, disputes);
+    const needs = new Set<number>();
+    for (const n of support) {
+      const e = bySeq.get(n) as LedgerEntry;
+      if (replaced.has(n)) {
+        const now = standingSeq(n, replaced);
+        if (!cited.includes(now)) return { ok: false, reason: `E-${n} is superseded by #${now}: cite E-${now}, the correction, with it or instead (a superseded entry explains history; it supports nothing)` };
+        continue;
+      }
+      if (e.kind === "answer" && problems.has(n)) return { ok: false, reason: `E-${n} is an answer that no longer stands on its own support (${(problems.get(n) as string[]).join("; ")}): it is to be recorded again first` };
+      const against = disputedBy.get(hashOf(e));
+      const failed = await unqualifiedFailedRefs(ctx.sandboxRoot, e);
+      if (against?.length || failed.length) {
+        if (!quals.some((q) => q.seq === n)) {
+          return {
+            ok: false,
+            reason: against?.length
+              ? `E-${n} is disputed by ${against.map((d) => `${d.by}: ${d.why}`).join("; ")}; cite its correction, drop it, or say in qualifies [{ref: "E-${n}", why}] why it still supports this answer`
+              : `E-${n} rests on the kept output of a job that did not succeed (${failed.join(", ")}) and does not say why it still holds: say so in qualifies [{ref: "E-${n}", why}], or cite an entry resting on a job that worked`,
+          };
+        }
+        needs.add(n);
+      }
+    }
+    const extra = quals.find((q) => !needs.has(q.seq));
+    if (extra) return { ok: false, reason: `qualifies names E-${extra.seq}, which ${support.includes(extra.seq) ? "is neither disputed nor resting on a failed job" : "the answer does not cite as support"}: it qualifies only a cited entry that needs it` };
+    // What the answer stands on: an entry that names its question, or for a
+    // summary or a narrative any entry that stands.
+    const standingCites = [...support, ...limits.seqs].filter((n) => !replaced.has(n)).map((n) => bySeq.get(n) as LedgerEntry);
+    if (question) {
+      const id = sectionAnswersId(sec.section);
+      const names = standingCites.some((e) => (e.kind === "finding" || e.kind === "absence" || e.kind === "limitation") && (e.answers ?? []).some((a) => sectionKey(a) === id));
+      if (!names) {
+        return { ok: false, reason: `an answer to ${sec.section} rests on at least one standing finding, search or limitation recorded with answers=["${id}"] and cited as E-<seq>${standingCites.length ? ` (none of ${standingCites.map((e) => `E-${e.seq}`).join(", ")} names it)` : " (the answer cites no standing entry)"}` };
+      }
+    } else if (!standingCites.length) {
+      return { ok: false, reason: `a ${sec.section} cites at least one standing entry as E-<seq>` };
+    }
+    const edge = (n: number): LedgerEdge => ({ seq: n, hash: hashOf(bySeq.get(n) as LedgerEntry) });
+    const citedEntries = [...support, ...contrary.seqs, ...limits.seqs].map((n) => bySeq.get(n) as LedgerEntry);
+    const tokens = unsupportedTokens(`${value}\n${reasoning.value}`, citedEntries, bySeq);
+    const candidate: LedgerEntry = {
+      v: LEDGER_VERSION,
+      seq: (entries.at(-1)?.seq ?? 0) + 1,
+      kind: "answer",
+      value,
+      ...(source.value ? { source: source.value } : {}),
+      ...(evidence.value ? { evidence: evidence.value } : {}),
+      ...(confidence ? { confidence: confidence as LedgerEntry["confidence"] } : {}),
+      ...(input.sensitive === true ? { sensitive: true } : {}),
+      ...(because.value ? { because: because.value } : {}),
+      ...(why.value ? { confidence_why: why.value } : {}),
+      ...(quals.length ? { qualifies: quals.map((q) => ({ ref: `E-${q.seq}`, why: q.why })) } : {}),
+      section: sec.section,
+      reasoning: reasoning.value,
+      ...(support.length ? { support: support.map(edge) } : {}),
+      ...(contrary.seqs.length ? { contrary: contrary.seqs.map(edge) } : {}),
+      ...(limits.seqs.length ? { limitations: limits.seqs.map(edge) } : {}),
+      ...(openAlt.value ? { alternatives_open: openAlt.value } : {}),
+      ...(change.value ? { would_change: change.value } : {}),
+      ...(input.inconclusive === true ? { inconclusive: true } : {}),
+      ...(tokens.length ? { unsupported_tokens: tokens } : {}),
+      by: ctx.agentId,
+      authors: [ctx.agentId],
+      at: new Date().toISOString(),
+    };
+    const content = ledgerContent(candidate);
+    if (supersedes !== undefined && ledgerContent(bySeq.get(supersedes) as LedgerEntry) === content) {
+      return { ok: false, reason: `the correction repeats #${supersedes} word for word: a correction says what is right now` };
+    }
+    if (supersedes === undefined && standing && ledgerContent(standing) === content) return mergeSameContent(ctx, held, standing);
+    if (standing && supersedes !== standing.seq) {
+      return { ok: false, reason: `${sec.section} is answered by #${standing.seq} already: one answer stands for a section; to revise it, record this with supersedes=${standing.seq}` };
+    }
+    const notes: string[] = [];
+    if (tokens.length) notes.push(`in none of the cited entries: ${tokens.join(", ")}; cite the entry that holds each, or record how it was derived as its own entry and cite that (marked on the answer; the release counts them)`);
+    if (question && !candidate.inconclusive && standingCites.every((e) => e.kind === "limitation")) notes.push("it rests on limitations only: if the ledger cannot answer it, say so with inconclusive=true");
+    return appendLedgerEntry(ctx, held, entries, { ...candidate, ...(supersedes !== undefined ? { supersedes } : {}) }, notes);
+  });
+}
+
+// --- the gate at done -----------------------------------------------------------------------
+
+/**
+ * A mechanical defect the finish line names before the run may end, with
+ * what fixes it. `named_by` lists the standing limitations that name it:
+ * the gate lets a run end once each defect is fixed or named, and a named
+ * defect stays one (a limitation permits shutdown; it does not make an
+ * unsupported answer supported, and the release still counts it).
+ */
+export type LedgerDefect = {
+  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction";
+  section?: string;
+  seqs: number[];
+  what: string;
+  fix: string;
+  named_by: number[];
+};
+
+export type LedgerGate = {
+  /** Each wanted section's standing answer, or null. */
+  answers: Record<string, LedgerEntry | null>;
+  defects: LedgerDefect[];
+  /** The defects no limitation names: what keeps the run from ending. */
+  open: LedgerDefect[];
+  /** Every standing answer's unsupported tokens, by seq (the release counts them). */
+  unsupported: Record<number, string[]>;
+};
+
+/** Contradictions that stand and that nothing has weighed: no answer holds both with one as contrary evidence, no limitation names both. */
+export function openContradictions(entries: LedgerEntry[]): Array<{ from: number; to: number }> {
+  const replaced = supersededBy(entries);
+  const answers = entries.filter((e) => e.kind === "answer" && !replaced.has(e.seq));
+  const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
+  return standingContradictions(entries).filter(({ from, to }) => {
+    const weighed = answers.some((a) => {
+      const contra = new Set((a.contrary ?? []).map((x) => x.seq));
+      const all = new Set([...contra, ...(a.support ?? []).map((x) => x.seq)]);
+      return all.has(from) && all.has(to) && (contra.has(from) || contra.has(to));
+    });
+    const named = limits.some((l) => {
+      const c = limitationCites(l);
+      return c.has(from) && c.has(to);
+    });
+    return !weighed && !named;
+  });
+}
+
+/**
+ * The ledger gate: each wanted section's answer (question:<id>, summary,
+ * narrative), what keeps it from standing, whether a critic acted on it, and
+ * the contradictions left open. Pure over what was read: the caller reads
+ * the files (and which entries rest on a failed job) and verifies the chains.
+ */
+export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]> }): LedgerGate {
+  const { entries } = o;
+  const replaced = supersededBy(entries);
+  const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
+  const problems = answerProblems(entries, o.disputes, o.failed);
+  const standingD = standingDisputes(o.disputes);
+  const defects: LedgerDefect[] = [];
+  const answers: Record<string, LedgerEntry | null> = {};
+  const unsupported: Record<number, string[]> = {};
+  const namedFor = (seq: number) => limits.filter((l) => limitationCites(l).has(seq)).map((l) => l.seq);
+  for (const raw of o.sections) {
+    const sec = answerSection(raw);
+    if (!sec.ok) continue;
+    const a = entries.find((e) => e.kind === "answer" && e.section === sec.section && !replaced.has(e.seq)) ?? null;
+    answers[sec.section] = a;
+    const id = sectionAnswersId(sec.section);
+    if (!a) {
+      defects.push({
+        code: "no_answer",
+        section: sec.section,
+        seqs: [],
+        what: `${sec.section} has no answer`,
+        fix: `record kind=answer section=${sec.section} citing E-<seq> of the entries it rests on${sec.section.startsWith("question:") ? ` (at least one recorded with answers=["${id}"])` : ""}; if the ledger cannot answer it, record kind=limitation with answers=["${id}"] saying why`,
+        named_by: limits.filter((l) => (l.answers ?? []).some((x) => sectionKey(x) === id)).map((l) => l.seq),
+      });
+      continue;
+    }
+    if (a.unsupported_tokens?.length) unsupported[a.seq] = a.unsupported_tokens;
+    const p = problems.get(a.seq);
+    if (p?.length) {
+      defects.push({ code: "answer_support", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) no longer stands on its support: ${p.join("; ")}`, fix: `record the answer again with supersedes=${a.seq}, citing what stands now (a correction, or qualifies [{ref: "E-<seq>", why}] for a disputed or failed-job entry), or record a limitation citing E-${a.seq} that says why it stands as it is`, named_by: namedFor(a.seq) });
+    }
+    const target = a.hash ?? ledgerHash(a, "genesis");
+    const against = standingD.filter((d) => d.target === target);
+    if (against.length) {
+      defects.push({ code: "answer_disputed", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) is disputed by ${against.map((d) => `${d.by}: ${d.why}`).join("; ")}`, fix: `answer the dispute: record the answer again with supersedes=${a.seq}, or the disputer withdraws it (dispute withdraw=true, with why), or record a limitation citing E-${a.seq}`, named_by: namedFor(a.seq) });
+    }
+    const acted = o.attestations.some((x) => attestationAct(x) === "attest" && x.target === target && !a.authors.includes(x.by) && x.by !== a.by) || against.some((d) => !a.authors.includes(d.by));
+    if (!acted) {
+      defects.push({ code: "no_critic_act", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) has no critic act`, fix: `an agent other than its author re-derives what it rests on from the sealed refs and records attest (how) or dispute (why) on #${a.seq}`, named_by: namedFor(a.seq) });
+    }
+  }
+  for (const c of openContradictions(entries)) {
+    defects.push({ code: "open_contradiction", seqs: [c.from, c.to], what: `#${c.from} contradicts #${c.to} and both stand`, fix: `supersede the one that is wrong, weigh both in an answer (one as support, the other in contrary), or record a limitation citing E-${c.from} and E-${c.to}`, named_by: [] });
+  }
+  return { answers, defects, open: defects.filter((d) => !d.named_by.length), unsupported };
 }
 
 /**
@@ -7653,7 +8856,8 @@ export function runFinishLine(sandbox: string): Promise<FinishLineRun | null> {
 export type FinishLineRun = {
   total: number;
   passed: number;
-  checks: Array<{ cmd: string; ok: boolean; ms?: number; timed_out?: boolean }>;
+  /** A failing check's output, whole when it is at most 64 KiB (out), and its size (out_bytes). */
+  checks: Array<{ cmd: string; ok: boolean; ms?: number; timed_out?: boolean; out?: string; out_bytes?: number }>;
   source?: string | null;
   error?: string;
 };
@@ -7701,11 +8905,15 @@ export function finishLineVerdict(
   const first = run.checks.find((c) => !c.ok);
   const failing = first?.cmd ?? "(unknown check)";
   const why = first?.timed_out ? "timed out" : "fails";
+  // What the check said, when it said something: a check such as
+  // check-answers.ts names each defect and its fix there. Whole, or, past
+  // what the finish line hands back, its size and the way to read it all.
+  const said = first?.out !== undefined ? ` It says:\n${first.out.trimEnd()}\n` : first?.out_bytes ? ` It printed ${first.out_bytes} bytes; run it from the run's directory to read them. ` : " ";
   return {
     proceed: false,
     failing,
     reason:
-      `The finish line is not met: ${run.passed} of ${run.total} checks pass, and the first that ${why} is \`${failing}\`. ` +
+      `The finish line is not met: ${run.passed} of ${run.total} checks pass, and the first that ${why} is \`${failing}\`.${said}` +
       `done ends the whole swarm, not your slice. If your slice is finished, post it to the board and take the next one, or wait. ` +
       `If the finish line cannot be met, call done again with abandon: true and say why on the board.`,
   };

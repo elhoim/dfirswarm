@@ -220,22 +220,32 @@ test("every entry that ships keeps the library's contract", async () => {
       bad(id, "lists Volatility but does not name the symbol server (--allow-host isf-server.techanarchy.net)");
     }
     const divide = flat(section(body, /^##\s+How to divide the work\s*$/));
-    for (const must of ["name(name, doing)", "sign-off", "ledger/ledger.md", "cannot be the one who certifies"]) {
+    // The report author and the critic (ledger version 4): answers from the ledger, the critic's acts on them.
+    for (const must of ["name(name, doing)", "sign-off", "ledger/ledger.md", "cannot be the one who certifies", "**Report author and critic.**", "`record(kind=answer)`", "`summary` and `narrative`", "`attest`", "`dispute`", "The critic writes no answer; the author attests nothing of their own. The sign-off is these acts, not a post."]) {
       if (!divide.includes(must)) bad(id, `division of work does not say: ${must}`);
     }
     const dod = flat(section(body, /^##\s+Definition of done\s*$/));
-    for (const must of ["work/report.md", "sign-off", "`result` post", "`SIGN-OFF:`", "work/timeline.md", "inputs/` is unchanged"]) {
+    for (const must of ["work/report.md", "one `answer` entry per question", "one each for `summary` and `narrative`", "named by a limitation", "has recorded `attest` or `dispute` on each answer", "work/timeline.md", "inputs/` is unchanged"]) {
       if (!dod.includes(must)) bad(id, `definition of done does not mention ${must}`);
     }
+    if (/SIGN-OFF/.test(dod)) bad(id, "the definition of done still asks for a SIGN-OFF post; the sign-off is the critic's acts on the answers");
 
     // The checks: parseable, runnable, and none of the known traps.
     const checks = checksOf(body);
     if (checks.length < 6) bad(id, `${checks.length} checks; the standard set alone is seven`);
     if (countChecks(body) !== checks.length) bad(id, "the console would count the checks differently from this test");
     const text = checks.join("\n");
-    for (const must of ["test -f work/report.md", "test -f work/timeline.md", "ledger/entries.jsonl", `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`, `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`]) {
+    for (const must of ["test -f work/report.md", "test -f work/timeline.md", "ledger/entries.jsonl", `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections`, `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`]) {
       if (!text.includes(must)) bad(id, `standard check missing: ${must}`);
     }
+    // The answers check names every question the goal numbers, and the summary and the narrative;
+    // a brief's questions are counted from the brief.
+    const answersCheck = checks.find((c) => c.includes("scripts/check-answers.ts")) ?? "";
+    const want = [...numbers.map(String), "summary", "narrative"].join(",");
+    if (!answersCheck.endsWith(`--sections ${want}`) && !answersCheck.endsWith("--sections-in inputs/CASE.md --sections summary,narrative")) {
+      bad(id, `the answers check does not name questions 1..${numbers.length}, summary and narrative: ${answersCheck}`);
+    }
+    if (answersCheck.includes("--report")) bad(id, "the answers check reads the report; it reads the ledger's answers");
     if (/find +inputs\b/.test(text) && !/find -[HL] inputs/.test(text)) bad(id, "a check walks inputs/ with a bare find");
 
     // The timeline counts dated rows, with no header arithmetic, and the
@@ -319,10 +329,11 @@ test("the worker prompt carries the secrets and never-run rules the entries poin
 });
 
 // The goals that ship beside the library (a pack's own goals, and the
-// operator's shelf in prompts/goals/) are held to the same two standard
+// operator's shelf in prompts/goals/) are held to the library's standard
 // checks: a bare grep for "sign-off" passes on "who takes the sign-off?",
-// and a bare grep for the inputs_check event passes whatever it found.
-test("pack and prompt goals use the library's sign-off and inputs_check checks", async () => {
+// a bare grep for the inputs_check event passes whatever it found, and the
+// sign-off is the critic's acts on the ledger's answers, read by the answers check.
+test("pack and prompt goals use the library's answers and inputs_check checks", async () => {
   const problems: string[] = [];
   const files: string[] = [];
   for (const pack of await readdir(join(REPO, "packs"))) {
@@ -346,6 +357,22 @@ test("pack and prompt goals use the library's sign-off and inputs_check checks",
       if (!dod.includes("`SIGN-OFF:`")) problems.push(`${id}: the definition of done does not say how a sign-off starts`);
     }
     if (/inputs\/` is unchanged/.test(dod) && !checks.includes(inputsCheck)) problems.push(`${id}: inputs/ must be unchanged and no check reads inputs_check`);
+    // A goal whose report answers numbered questions is held to the library's model (ledger version 4):
+    // the report author and the critic, an answer entry per question plus the summary and the narrative,
+    // the critic's attest or dispute on each, and the answers check naming every question.
+    const loop = /for n in ((?:\d+ ?)+); do grep -q "\^## \$n\\\." work\/report\.md/.exec(body);
+    if (!loop) continue;
+    if (/SIGN-OFF/.test(body)) problems.push(`${id}: still asks for a SIGN-OFF post; the sign-off is the critic's acts on the answers`);
+    const divide = flat(section(body, /^##\s+How to divide the work\s*$/));
+    for (const must of ["**Report author and critic.**", "`record(kind=answer)`", "`summary` and `narrative`", "`attest`", "`dispute`", "The critic writes no answer; the author attests nothing of their own. The sign-off is these acts, not a post."]) {
+      if (!divide.includes(must)) problems.push(`${id}: the division of work does not say: ${must}`);
+    }
+    for (const must of ["one `answer` entry per question", "one each for `summary` and `narrative`", "named by a limitation", "has recorded `attest` or `dispute` on each answer"]) {
+      if (!dod.includes(must)) problems.push(`${id}: the definition of done does not mention ${must}`);
+    }
+    const ids = [...loop[1].trim().split(/\s+/), ...(checks.includes("grep -q '^## Bonus' work/report.md") ? ["bonus"] : [])];
+    const answers = checks.find((c) => c.includes("scripts/check-answers.ts")) ?? "";
+    if (!answers.endsWith(`--sections ${[...ids, "summary", "narrative"].join(",")}`)) problems.push(`${id}: the answers check does not name questions ${ids.join(",")}, summary and narrative: ${answers || "(none)"}`);
   }
   assert.deepEqual(problems, [], `goal problems:\n  ${problems.join("\n  ")}`);
 });

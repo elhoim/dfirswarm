@@ -104,13 +104,27 @@ settle it in a post. Say so again when you change course.
 There are two images of very different shapes and eighteen questions across
 them — do not all open the same one. Somebody has to keep `work/flags.md`
 current as answers land, somebody has to keep the timeline from
-`ledger/ledger.md`, and somebody has to verify every citation and assemble
-`work/report.md` and post the sign-off the definition of done requires. Agree
-between you who does, early: the run is not finished until all three exist.
+`ledger/ledger.md`, and somebody has to assemble `work/report.md` from the
+answers in the ledger. Agree between you who does, early: the run is not
+finished until all three exist.
 
 The team is mixed: agents run on different models, and `team.json` and the
 board say who runs what. A long grind through a file system and a short
 careful read of a database are not the same job — route work accordingly.
+
+**Report author and critic.** Two of you take these roles early with
+`name(doing=…)`, and they are different agents. The report author writes the
+answers from the ledger, not from memory: compact first, read `ledger`, then
+one `record(kind=answer)` per question (`section=question:<n>`) and one each
+for `summary` and `narrative`, citing `E-<seq>` for every claim and stating
+the confidence and its reason, the contrary evidence, the limitations, what
+else could explain it and what would change the answer. When the ledger cannot
+answer, reopen the investigation and say so on the board. The critic
+re-derives each finding an answer rests on from its sealed refs and records
+`attest` (what was re-derived, what only read) or `dispute` (why), then does
+the same for every answer. The critic writes no answer; the author attests
+nothing of their own. The sign-off is these acts, not a post. Nothing else is
+assigned.
 
 ## Definition of done
 
@@ -120,8 +134,11 @@ for and a citation to the artefact it came from. `work/flags.md` holds one row
 per question in a table (question number, short name, answer, confidence,
 evidence path). `work/dependencies.md` holds the dependency map the team
 inferred. `work/timeline.md` holds the merged timeline as a table with at
-least 15 dated rows built from the ledger. The critic has posted a sign-off on the board as a `result`
-post that starts a line with `SIGN-OFF:` and names what they verified. `inputs/` is unchanged.
+least 15 dated rows built from the ledger. The ledger holds one `answer` entry
+per question (`question:1` to `question:18`) and one each for `summary` and
+`narrative`, with every defect the answers check names fixed or named by a
+limitation, and the critic, who wrote none of them, has recorded `attest` or
+`dispute` on each answer, saying what they verified. `inputs/` is unchanged.
 
 ## Checks
 
@@ -133,7 +150,7 @@ post that starts a line with `SIGN-OFF:` and names what they verified. `inputs/`
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 15`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`
-- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for

@@ -28,6 +28,9 @@ import {
 } from "../extensions/protocol.ts";
 import { sealTree, storePaths } from "../scripts/evidence-store.ts";
 
+/** What a finding carries from version 4 on: how it was seen, how sure and why, what it indicates. */
+const F = { basis: "observed", confidence: "medium", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
+
 async function run() {
   const root = await mkdtemp(join(tmpdir(), "ledger-v3-"));
   await initSandbox(root, { reset: true, agentIds: ["a0", "a1"] });
@@ -55,28 +58,28 @@ test("a hypothesis has a status, a limitation a reason, and each field is checke
   const { a0 } = await run();
   const h = ok(await recordEntry(a0, { kind: "hypothesis", value: "The vault key was typed by hand", source: "notes app", evidence: "a 48-digit string", confidence: "low" }));
   assert.equal(h.entry.status, "open", "a hypothesis starts open");
-  assert.equal(h.entry.v, 3);
-  refused(await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", status: "open" }), /status is a hypothesis's/);
+  assert.equal(h.entry.v, 4, "written at the current version");
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "x", source: "s", evidence: "e", status: "open" }), /status is a hypothesis's/);
   refused(await recordEntry(a0, { kind: "limitation", value: "The vault's second volume", source: "vault.vhdx p2", evidence: "no key" }), /a limitation needs a reason/);
   const l = ok(await recordEntry(a0, { kind: "limitation", value: "The vault's second volume was not opened", source: "vault.vhdx p2", evidence: "bitlocker: no recovery key found", reason: "unavailable" }));
   assert.equal(l.entry.reason, "unavailable");
-  refused(await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", reason: "failed" }), /reason is a limitation's/);
-  refused(await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", answers: ["Q 3"] }), /section ids/);
-  refused(await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", clock: "NTFS $SI" }), /give ts too/);
-  refused(await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", completion: "partial" }), /completion is an absence's/);
-  refused(await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", because: "wrong" }), /give supersedes too/);
-  refused(await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", rel: [{ to: 40, kind: "supports" }] }), /no entry #40/);
-  refused(await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", rel: [{ to: 1, kind: "agrees" }] }), /rel.kind must be one of/);
-  refused(await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", refs: ["job:j000001/rows.json"], locators: [{ ref: "input:disk.E01", at: "row 3" }] }), /not one of the entry's refs/);
-  refused(await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", attribution: { subject: "", subject_type: "account" } }), /attribution.subject is required/);
-  refused(await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", attribution: { subject: "bob", subject_type: "account", basis_refs: ["job:j000009/x"] } }), /attribution.basis_refs/);
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "x", source: "s", evidence: "e", reason: "failed" }), /reason is a limitation's/);
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "x", source: "s", evidence: "e", answers: ["Q 3"] }), /section ids/);
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "x", source: "s", evidence: "e", clock: "NTFS $SI" }), /give ts too/);
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "x", source: "s", evidence: "e", completion: "partial" }), /completion is an absence's/);
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "x", source: "s", evidence: "e", because: "wrong" }), /give supersedes too/);
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "x", source: "s", evidence: "e", rel: [{ to: 40, kind: "supports" }] }), /no entry #40/);
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "x", source: "s", evidence: "e", rel: [{ to: 1, kind: "agrees" }] }), /rel.kind must be one of/);
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "x", source: "s", evidence: "e", refs: ["job:j000001/rows.json"], locators: [{ ref: "input:disk.E01", at: "row 3" }] }), /not one of the entry's refs/);
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "x", source: "s", evidence: "e", attribution: { subject: "", subject_type: "account" } }), /attribution.subject is required/);
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "x", source: "s", evidence: "e", attribution: { subject: "bob", subject_type: "account", basis_refs: ["job:j000009/x"] } }), /attribution.basis_refs/);
 });
 
 test("the typed fields are recorded, chained, rendered and listed", async () => {
   const { root, a0, a1 } = await run();
   const event = ok(await recordEntry(a0, { kind: "event", value: "Powder.exe created", ts: "2024-04-05", clock: "NTFS $SI created", source: "$MFT", evidence: "istat 1234", basis: "observed", answers: ["Q4"] }));
   assert.equal(event.entry.precision, "date", "a date alone is a day, said as one");
-  const finding = ok(await recordEntry(a1, { kind: "finding", value: "The suspect ran Powder.exe", source: "prefetch", evidence: "POWDER.EXE-1234.pf", refs: ["job:j000001/rows.json"], locators: [{ ref: "job:j000001/rows.json", at: "row 1" }], answers: ["Q4"], rel: [{ to: 1, kind: "derived_from" }], basis: "inferred", attribution: { subject: "laptop\\\\bob", subject_type: "account", basis_refs: ["input:disk.E01"] }, sensitive: true }));
+  const finding = ok(await recordEntry(a1, { kind: "finding", ...F, value: "The suspect ran Powder.exe", source: "prefetch", evidence: "POWDER.EXE-1234.pf", refs: ["job:j000001/rows.json"], locators: [{ ref: "job:j000001/rows.json", at: "row 1" }], answers: ["Q4"], rel: [{ to: 1, kind: "derived_from" }], basis: "inferred", alternatives: [{ explanation: "Powder.exe was copied by a sync client", status: "rejected", why: "the prefetch file records a run" }], attribution: { subject: "laptop\\\\bob", subject_type: "account", basis_refs: ["input:disk.E01"] }, sensitive: true }));
   const against = ok(await recordEntry(a0, { kind: "hypothesis", value: "Powder.exe was only copied, never run", source: "amcache", evidence: "no execution flag", rel: [{ to: finding.entry.seq, kind: "contradicts" }] }));
   const absence = ok(await recordEntry(a0, { kind: "absence", value: "No other Powder.exe", source: "C: allocated files", evidence: "fls -r | grep -i powder", completion: "partial" }));
   assert.match(absence.note ?? "", /record what was not reached as kind=limitation/);
@@ -104,7 +107,7 @@ test("a duplicate names the entry that stands; a second author is an attestation
   const { root, a0, a1 } = await run();
   ok(await recordEntry(a0, { kind: "ioc", value: "10.0.0.9", source: "netscan", evidence: "row 4" }));
   ok(await recordEntry(a0, { kind: "ioc", value: "10.0.0.9 (C2)", source: "netscan", evidence: "row 4, beaconing", supersedes: 1 }));
-  refused(await recordEntry(a1, { kind: "finding", value: "same host", source: "s", evidence: "e", rel: [{ to: 1, kind: "duplicates" }] }), /#1 is superseded by #2: a duplicate names the entry that stands, #2/);
+  refused(await recordEntry(a1, { kind: "finding", ...F, value: "same host", source: "s", evidence: "e", rel: [{ to: 1, kind: "duplicates" }] }), /#1 is superseded by #2: a duplicate names the entry that stands, #2/);
   const before = await readFile(join(root, LEDGER_ENTRIES), "utf8");
   const again = ok(await recordEntry(a1, { kind: "ioc", value: "10.0.0.9 (C2)", source: "netscan", evidence: "row 4, beaconing" }));
   assert.equal(again.merged, true);
@@ -119,17 +122,22 @@ test("a duplicate names the entry that stands; a second author is an attestation
   assert.match(await readFile(join(root, LEDGER_MD), "utf8"), /10\.0\.0\.9 \(C2\) \(corrects #1\).*\| a0, a1 \|/);
 });
 
-test("an entry resting on the kept output of a job that failed is told so", async () => {
+test("an entry resting on the kept output of a job that failed says why it still holds: a finding in qualifies, another kind is told", async () => {
   const { a0 } = await run();
-  const r = ok(await recordEntry(a0, { kind: "finding", value: "The message names the buyer", source: "q10_messages.json", evidence: "jq", refs: ["job:j000002/rows.json", "job:j000001/rows.json"] }));
-  assert.match(r.note ?? "", /rests on the kept output of a job that did not succeed: job:j000002\/rows\.json \(job j000002: failed\)/);
-  assert.doesNotMatch(r.note ?? "", /j000001/);
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "The message names the buyer", source: "q10_messages.json", evidence: "jq", refs: ["job:j000002/rows.json", "job:j000001/rows.json"] }), /rests on the kept output of a job that did not succeed \(job:j000002\/rows\.json: failed\): say in qualifies/);
+  refused(await recordEntry(a0, { kind: "finding", ...F, value: "The message names the buyer", source: "q10_messages.json", evidence: "jq", refs: ["job:j000002/rows.json", "job:j000001/rows.json"], qualifies: [{ ref: "job:j000001/rows.json", why: "x" }] }), /whose job succeeded/);
+  const r = ok(await recordEntry(a0, { kind: "finding", ...F, value: "The message names the buyer", source: "q10_messages.json", evidence: "jq", refs: ["job:j000002/rows.json", "job:j000001/rows.json"], qualifies: [{ ref: "job:j000002/rows.json", why: "the job failed after writing every row" }] }));
+  assert.deepEqual(r.entry.qualifies, [{ ref: "job:j000002/rows.json", why: "the job failed after writing every row" }]);
+  assert.equal(r.note, undefined, "a qualified ref needs no note");
+  const ioc = ok(await recordEntry(a0, { kind: "ioc", value: "buyer@example.org", source: "q10_messages.json", evidence: "jq", refs: ["job:j000002/rows.json"] }));
+  assert.match(ioc.note ?? "", /rests on the kept output of a job that did not succeed: job:j000002\/rows\.json \(job j000002: failed\)/);
+  refused(await recordEntry(a0, { kind: "absence", value: "No second buyer", source: "q10_messages.json", evidence: "jq", refs: ["job:j000002/rows.json"] }), /cannot show that something is absent/);
 });
 
 test("the report shows hypotheses, limitations, contradictions, the questions answered and what is sensitive", async () => {
   const { renderReport } = await import("../scripts/report.ts");
   const { root, a0, a1 } = await run();
-  const f = ok(await recordEntry(a0, { kind: "finding", value: "The suspect ran Powder.exe", source: "prefetch", evidence: "POWDER.EXE-1234.pf", refs: ["job:j000002/rows.json"], answers: ["Q4"], confidence: "high" }));
+  const f = ok(await recordEntry(a0, { kind: "finding", ...F, value: "The suspect ran Powder.exe", source: "prefetch", evidence: "POWDER.EXE-1234.pf", refs: ["job:j000002/rows.json"], answers: ["Q4"], confidence: "high", qualifies: [{ ref: "job:j000002/rows.json", why: "the prefetch rows were written before the job failed" }] }));
   ok(await recordEntry(a1, { kind: "hypothesis", value: "Powder.exe was only copied", source: "amcache", evidence: "no execution flag", rel: [{ to: f.entry.seq, kind: "contradicts" }] }));
   ok(await recordEntry(a0, { kind: "limitation", value: "The second volume was not opened", source: "vault p2", evidence: "no key", reason: "unavailable", answers: ["5"] }));
   ok(await recordEntry(a0, { kind: "ioc", value: "recovery key 111111-222222", source: "notes", evidence: "row 11", sensitive: true }));

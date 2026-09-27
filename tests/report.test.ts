@@ -190,9 +190,9 @@ async function sandboxWithLedger(): Promise<string> {
     { kind: "event", ts: "2026-02-11T02:57:12Z", value: "First request from 203.0.113.24", source: "inputs/u_ex.log", evidence: "line 4418" },
     { kind: "event", ts: "2026-02-11T02:57:52Z", value: "upload.aspx written", source: "MFT", evidence: "inode 33194-128-4" },
     { kind: "ioc", value: "203.0.113.24", source: "inputs/u_ex.log", evidence: "40 requests", confidence: "high" },
-    { kind: "finding", value: "Entry was an unauthenticated upload", source: "work/notes.md", evidence: "no 4624 before 02:57:12", confidence: "medium" },
+    { kind: "finding", value: "Entry was an unauthenticated upload", source: "work/notes.md", evidence: "no 4624 before 02:57:12", confidence: "medium", basis: "observed", indicates: "The way in needed no logon.", confidence_why: "Two logs agree on the order." },
   ] as const) {
-    const r = await recordEntry(a, entry);
+    const r = await recordEntry(a, entry as never);
     if (!r.ok) throw new Error(r.reason);
   }
   await mkdir(join(root, "work"), { recursive: true });
@@ -647,7 +647,7 @@ test("the report shows searches that found nothing, corrections, grounding, cove
     );
     for (const entry of [
       { kind: "absence", value: "No RDP logon (4624 type 10)", source: "inputs/Security.evtx", evidence: "evtx query event id 4624 LogonType 10, tool 1.5, allocated records only" },
-      { kind: "finding", value: "Entry was an authenticated upload", source: "work/notes.md", evidence: "a 4624 at 02:57:10", confidence: "medium", supersedes: 4 },
+      { kind: "finding", value: "Entry was an authenticated upload", source: "work/notes.md", evidence: "a 4624 at 02:57:10", confidence: "medium", basis: "observed", indicates: "The way in was a logon.", confidence_why: "A 4624 precedes the upload.", supersedes: 4 },
     ]) {
       const r = await recordEntry(a, entry as never);
       if (!r.ok) throw new Error(r.reason);
@@ -819,8 +819,8 @@ async function layoutSandbox(runs: string): Promise<string> {
   await writeFile(join(root, "work", "extracted", "sl00100", "a", "very", "deep", "folder", "carved-record-000123456.bin"), "y");
   const a = createContext(root, "sl00100");
   for (const entry of [
-    { kind: "finding", value: "v", source: "inputs/never-read/Security.evtx", evidence: "e", confidence: "high" },
-    { kind: "finding", value: "w", source: "inputs/never-read/Security.evtx", evidence: "e", confidence: "medium", supersedes: 1 },
+    { kind: "finding", value: "v", source: "inputs/never-read/Security.evtx", evidence: "e", confidence: "high", basis: "observed", indicates: "i", confidence_why: "c" },
+    { kind: "finding", value: "w", source: "inputs/never-read/Security.evtx", evidence: "e", confidence: "medium", basis: "observed", indicates: "i", confidence_why: "c", supersedes: 1 },
   ]) {
     const r = await recordEntry(a, entry as never);
     if (!r.ok) throw new Error(r.reason);

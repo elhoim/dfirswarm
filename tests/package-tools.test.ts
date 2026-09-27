@@ -42,7 +42,7 @@ async function packaged(): Promise<{ root: string; pkg: string }> {
   dirs.push(root);
   await initSandbox(root, { reset: true, agentIds: ["a0", "a1"] });
   const a0 = { sandboxRoot: root, agentId: "a0" };
-  await recordEntry(a0, { kind: "finding", value: "The laptop was imaged on 2024-04-05", source: "E01 header", evidence: "ewfinfo" });
+  await recordEntry(a0, { kind: "finding", value: "The laptop was imaged on 2024-04-05", source: "E01 header", evidence: "ewfinfo", basis: "observed", confidence: "high", indicates: "The acquisition is dated.", confidence_why: "The E01 header records it." });
   await recordEntry(a0, { kind: "ioc", value: `BitLocker recovery key ${SECRET}`, source: "notes app", evidence: "sqlite3 NoteStore row 11", sensitive: true });
   await recordEntry({ sandboxRoot: root, agentId: "a1" }, { kind: "ioc", value: `BitLocker recovery key ${SECRET}`, source: "notes app", evidence: "sqlite3 NoteStore row 11", sensitive: true });
   await recordEntry(a0, { kind: "event", ts: "2024-04-05T10:00:00Z", value: "The volume was unlocked", source: "System.evtx", evidence: "event 24577" });

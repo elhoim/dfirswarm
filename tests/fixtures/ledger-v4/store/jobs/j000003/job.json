@@ -1,0 +1,23 @@
+{
+  "id": "j000003",
+  "attempt": 1,
+  "state": "committed",
+  "spec": {
+    "kind": "import",
+    "inputs": [
+      "work/a1/proxy-grep.txt"
+    ],
+    "timeout_seconds": 120,
+    "network": "off",
+    "source": "work/a1/proxy-grep.txt"
+  },
+  "requester": {
+    "agent": "a1",
+    "name": "shell",
+    "doing": "what ran through the web shell"
+  },
+  "status": "ok",
+  "exit": 0,
+  "image": "dfirswarm-disk:dev-arm64",
+  "image_digest": "sha256:fd6fe83ad9f790c37d3b735c5cdc92615e7e115cb0de533169a8ff345365b702"
+}

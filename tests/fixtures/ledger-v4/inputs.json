@@ -1,0 +1,14 @@
+{
+  "files": [
+    {
+      "path": "inputs/web.E01",
+      "sha256": "958f16b7b8b669dcdd9e53d6d4d71a4569b7885bc8055e51708eaa8ab6d3ce8d",
+      "bytes": 1048576
+    },
+    {
+      "path": "inputs/web/access.log",
+      "sha256": "124c27215d415496f6189155cc61318ee34ee9ab2f8f292e5c33e9b6c32cf096",
+      "bytes": 20480
+    }
+  ]
+}
