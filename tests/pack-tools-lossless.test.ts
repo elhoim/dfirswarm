@@ -689,6 +689,23 @@ test("jumplist refuses an out_dir under inputs/ or outside the run directory", a
   });
 });
 
+test("jumplist never writes a link structure through a link left in out_dir", async () => {
+  // out_dir was checked, but each file in it was opened by name: a link there
+  // under the name a structure takes (a dangling one reads as absent) took the
+  // write wherever it pointed, inputs/ included.
+  await withCwd(async (cwd) => {
+    const { file, payloads } = customDestinations("x", 1);
+    await writeFile(join(cwd, "work", "x.customDestinations-ms"), file);
+    await mkdir(join(cwd, "work", "s1", "links"), { recursive: true });
+    await symlink("../../../inputs/planted.lnk", join(cwd, "work", "s1", "links", "x.customDestinations-ms-0000.lnk"));
+    const out = body<{ files: JumpFile[] }>(await tool(join(WIN, "jumplist", "run.py"), cwd, { path: "work/x.customDestinations-ms", out_dir: "work/s1/links" }));
+    const written = out.files[0].links[0].written_to as string;
+    assert.equal(written, "work/s1/links/x.customDestinations-ms-0000-2.lnk", "the next free name, not the link");
+    assert.deepEqual(await readFile(join(cwd, written)), payloads[0]);
+    assert.equal(await exists(join(cwd, "inputs", "planted.lnk")), false);
+  });
+});
+
 // olefile reads a compound file; this stub reads a JSON map of stream names
 // to hex, which is all read_automatic asks of it.
 const OLEFILE_STUB = String.raw`
@@ -987,6 +1004,29 @@ test("mem_fs refuses a mount outside work/<id>/ before it looks for MemProcFS", 
     const r = await tool(join(MEM, "mem_fs", "run.py"), cwd, { path: "inputs/memory.raw", mount: "work/s1/mem", timeout_seconds: 10 });
     const answer = JSON.parse(r.stdout) as { error?: string };
     assert.doesNotMatch(answer.error ?? "", /mount must/);
+  });
+});
+
+test("mem_fs rerun as a job mounts under its $OUT, where work/<id>/mem was mapped, and nowhere else", async () => {
+  // MemProcFS is not in the agents' base image, so mem_fs runs again as a job
+  // with work/<id>/mem given as $OUT/mem; the check took only work/<id>/, and
+  // refused the one place the worker may write.
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "inputs", "memory.raw"), Buffer.alloc(4096));
+    const out = join(cwd, ".jobs", "j000007");
+    await mkdir(out, { recursive: true });
+    const job = { JOB_ID: "j000007", OUT: out };
+    const passed = await tool(join(MEM, "mem_fs", "run.py"), cwd, { path: "inputs/memory.raw", mount: join(out, "mem"), timeout_seconds: 10 }, job);
+    assert.doesNotMatch((JSON.parse(passed.stdout) as { error?: string }).error ?? "", /mount must/);
+    for (const [mount, message] of [
+      [join(out, "..", "..", "inputs", "mnt"), /under your own work\/<your id>\//],
+      [join(out, "..", "..", "..", "mnt"), /mount must stay inside the run directory/],
+      [out, /under your own work\/<your id>\//],
+    ] as const) {
+      const r = refused(await tool(join(MEM, "mem_fs", "run.py"), cwd, { path: "inputs/memory.raw", mount }, job));
+      assert.match(r.error, message, mount);
+    }
+    assert.equal(await exists(join(cwd, "inputs", "mnt")), false);
   });
 });
 

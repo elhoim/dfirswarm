@@ -26,6 +26,7 @@ import os
 import re
 import sys
 import zipfile
+from pathlib import Path
 
 CODE_PARTS = ("vbaproject.bin", "vbadata.xml", "macros", "drs/", "activex")
 PDF_ACTIONS = [(b"/OpenAction", "runs when the document opens"),
@@ -46,6 +47,27 @@ def fail(message, **extra):
     raise SystemExit(1)
 
 
+def resolve_output(out, what="output"):
+    """Where `out` really lands, as a path under the run directory; a place
+    outside it, the run directory itself, or anything under inputs/ is refused.
+
+    A string check is not enough: `work/../inputs/x`, an absolute path and a
+    symlink that points out all name a place the tool must not write, and none
+    of them starts with "inputs/". Resolving first and comparing directories
+    is what actually holds, and the read-only inputs are the one place
+    extracted bytes must never appear -- a later integrity check would report
+    the evidence as modified. In a job $OUT is inside the run directory.
+    """
+    root = Path.cwd().resolve()
+    dest = (root / out).resolve() if not Path(out).is_absolute() else Path(out).resolve()
+    if dest == root or root not in dest.parents:
+        fail("%s must stay inside the run directory" % what, **{what: str(out)})
+    inputs = root / "inputs"
+    if dest == inputs or inputs in dest.parents:
+        fail("%s cannot be under inputs/" % what, **{what: str(out)})
+    return str(dest.relative_to(root))
+
+
 def probe_zip(path, extract_to):
     out = {"container": "OOXML or ZIP", "parts": [], "macro_parts": [], "external_targets": []}
     try:
@@ -64,7 +86,7 @@ def probe_zip(path, extract_to):
                 if extract_to:
                     os.makedirs(extract_to, exist_ok=True)
                     safe = "%06d-%s" % (index, re.sub(r"[^A-Za-z0-9._-]", "_", info.filename))
-                    target = os.path.join(extract_to, safe)
+                    target = resolve_output(os.path.join(extract_to, safe), "extract_to")
                     with open(target, "wb") as fh:
                         fh.write(archive.read(info))
                     entry["extracted_to"] = target
@@ -156,6 +178,8 @@ def main():
     extract_to = args.get("extract_to")
     if extract_to is not None and (not isinstance(extract_to, str) or not extract_to):
         fail("extract_to must be a non-empty path when supplied")
+    if extract_to is not None:
+        extract_to = resolve_output(extract_to, "extract_to")
 
     with open(path, "rb") as fh:
         head = fh.read(8)

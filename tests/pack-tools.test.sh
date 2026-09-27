@@ -401,6 +401,48 @@ plaso work/p >/dev/null || fail "timeline_super refused an out_dir under work/"
 cmp -s "$BASE/tools/file_carver/run.py" "$ROOT/tool-library/file_carver/run.py" || fail "the tool-library copy of file_carver has drifted from the pack's"
 pass "file_carver, mem_carve and timeline_super write under the run directory and never under inputs/"
 
+# feature_scan, zeek_run, sigma_hunt, unified_log and doc_probe wrote wherever
+# out_dir (extract_to) pointed too. Each refuses a place outside the run, the
+# run itself or under inputs/ before it looks for its program, and follows a
+# link to where it really lands. Only python3 on PATH, so no program is found
+# and a path the check lets through ends at "not on PATH", never at the check.
+mkdir -p "$OUT/pyonly"; ln -sf "$(command -v "$PY")" "$OUT/pyonly/python3"
+ln -s "$OUT" "$OUT/run/work/out-link"
+guarded() { # <run.py> <key> <path>
+  (cd "$OUT/run" && printf '{"path":"inputs/blob.bin","%s":"%s"}' "$2" "$3" | PATH="$OUT/pyonly" "$OUT/pyonly/python3" "$1")
+}
+refuses='must stay inside the run directory|cannot be under inputs/'
+for t in "$BASE/tools/feature_scan:out_dir" "$ROOT/packs/network-forensics/tools/zeek_run:out_dir" \
+         "$WIN/tools/sigma_hunt:out_dir" "$ROOT/packs/macos-forensics/tools/unified_log:out_dir" \
+         "$ROOT/packs/reverse-engineering/tools/doc_probe:extract_to"; do
+  tool="${t%%:*}/run.py"; key="${t##*:}"; name="$(basename "${t%%:*}")"
+  for bad in "../escaped-$name" "inputs/planted-$name" "work/../inputs/planted-$name" "$OUT/abs-$name" \
+             "work/out-link/escaped-$name" . inputs; do
+    got="$(guarded "$tool" "$key" "$bad" 2>&1)" && fail "$name wrote $key=$bad: $got"
+    grep -Eq "$refuses" <<<"$got" || fail "$name should refuse $key=$bad with the reason, not: $got"
+  done
+  got="$(guarded "$tool" "$key" "work/$name" 2>&1)"
+  grep -Eq "$refuses" <<<"$got" && fail "$name refused $key=work/$name: $got"
+done
+leaked="$(find "$OUT" -path "$OUT/run/work" -prune -o \( -name 'escaped*' -o -name 'planted*' -o -name 'abs*' \) -print)"
+[[ -z "$leaked" ]] || fail "a refused output was still written: $leaked"
+# doc_probe checks each part it extracts as well: a link left in extract_to,
+# named as the macro project would be, is not written through.
+"$PY" - "$OUT/run/work/macro.docm" <<'EOF'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    z.writestr("word/document.xml", "<w:document/>")
+    z.writestr("word/vbaProject.bin", b"\xd0\xcf\x11\xe0 macro project")
+EOF
+docp() { (cd "$OUT/run" && printf '{"path":"work/macro.docm","extract_to":"%s"}' "$1" | "$PY" "$ROOT/packs/reverse-engineering/tools/doc_probe/run.py"); }
+docp work/doc > "$OUT/doc.json" || fail "doc_probe did not extract into work/: $(cat "$OUT/doc.json")"
+[[ "$(jq -r '.parts[] | select(.carries_code) | .extracted_to' "$OUT/doc.json")" == work/doc/000001-word_vbaProject.bin && -s "$OUT/run/work/doc/000001-word_vbaProject.bin" ]] \
+  || fail "doc_probe should extract the macro project under extract_to: $(cat "$OUT/doc.json")"
+mkdir -p "$OUT/run/work/doc2"; ln -s ../../inputs/planted-part "$OUT/run/work/doc2/000001-word_vbaProject.bin"
+docp work/doc2 > "$OUT/doc2.json" 2>&1 && fail "doc_probe wrote through a link in extract_to: $(cat "$OUT/doc2.json")"
+grep -q 'cannot be under inputs/' "$OUT/doc2.json" && [[ ! -e "$OUT/run/inputs/planted-part" ]] || fail "doc_probe should refuse the part a link sends under inputs/: $(cat "$OUT/doc2.json")"
+pass "feature_scan, zeek_run, sigma_hunt, unified_log and doc_probe write under the run directory, never under inputs/ or through a link out of it"
+
 # --- sigma_hunt speaks the Zircolite the images carry ----------------------------
 # Zircolite 3 dropped --noexternal and refuses it, as argparse does any flag
 # it does not know; sigma_hunt passed it, so with Zircolite in the disk image
@@ -432,7 +474,13 @@ assert "--noexternal" not in d.get("command", ""), d
 det = d["detections"][0]
 assert det["rule"] == "Bitsadmin Download" and det["record_id"] == 7 and det["level"] == "high", det
 ' "$out" || fail "sigma_hunt did not read what Zircolite matched: $out"
-pass "sigma_hunt runs Zircolite without --noexternal, which Zircolite 3 and later refuse, and reads its detections"
+# The engine writes its result inside out_dir: a link left there under the
+# result's name is followed to where it lands, and refused under inputs/.
+mkdir -p "$SH/run/inputs" "$SH/run/work/hunt2"; ln -s ../../inputs/planted.json "$SH/run/work/hunt2/zircolite.json"
+out="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/hunt2", "engine": "zircolite"}' | PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)" \
+  && fail "sigma_hunt let its engine write through a link in out_dir: $out"
+grep -q 'cannot be under inputs/' <<<"$out" && [[ ! -e "$SH/run/inputs/planted.json" ]] || fail "sigma_hunt should refuse a result a link sends under inputs/: $out"
+pass "sigma_hunt runs Zircolite without --noexternal, which Zircolite 3 and later refuse, and reads its detections, and never through a link out of out_dir"
 
 # --- unified_log hands the reader one archive and keeps its whole output --------
 # The 2020 UnifiedLogReader crashed on modern archives and the wrapper still
@@ -483,6 +531,11 @@ r = json.load(open(sys.argv[1]))
 assert r["status"] == "partial" and r["exit_code"] == 101 and r["entry_count"] == 3, r
 assert os.path.getsize(sys.argv[2] + "/" + r["stderr"]) == r["stderr_bytes"] > 5000, r
 ' "$UL/c.json" "$UL/run" || fail "a failed reader is partial, with its whole stderr kept"
-pass "unified_log hands unifiedlog_iterator one archive (a /private/var/db copy staged as one), keeps the whole JSONL, and fails when the reader does"
+# A link left in out_dir under the name of the reader's output is followed to
+# where it lands, and refused under inputs/.
+mkdir -p "$UL/run/inputs" "$UL/run/work/d"; ln -s ../../inputs/planted.jsonl "$UL/run/work/d/unifiedlogs.jsonl"
+ulog x.logarchive d > "$UL/d.json" && fail "unified_log wrote through a link in out_dir: $(cat "$UL/d.json")"
+grep -q 'cannot be under inputs/' "$UL/d.json" && [[ ! -e "$UL/run/inputs/planted.jsonl" ]] || fail "unified_log should refuse an output a link sends under inputs/: $(cat "$UL/d.json")"
+pass "unified_log hands unifiedlog_iterator one archive (a /private/var/db copy staged as one), keeps the whole JSONL, fails when the reader does, and never writes through a link out of out_dir"
 
 echo "pack-tools: all checks passed"
