@@ -396,3 +396,28 @@ test("signRelease without a secret still signs with a key that has none, and rec
   assert.deepEqual(anchor.releases.map((x) => x.version), [0, 1]);
   await appendFile(join(r.root, "work", "unrelated.txt"), "x");
 });
+
+test("the release binds what the kickoff recorded of the signing keys' reach, and verify says when they were not hidden", async () => {
+  const exposed = await stoppedRun({
+    registry: {
+      isolation: { mode: "host" },
+      signer_keys_hidden: false,
+      signer_isolation: { isolation: "host", guard: "none", keys_hidden: false, hidden: [], agent_sockets: [], exposed: ["/home/x/.dfirswarm/machine/release_ed25519"], exposure_accepted: true, why: "no write guard on this host" },
+      earlier_runs_hidden: { by: null, sandboxes: 0, reviews: null, skipped: [], why: "no guard" },
+    },
+  });
+  const { draftRelease } = await import("../scripts/release.ts");
+  const d = await draftRelease(ctxOf(exposed), { home: exposed.home, say: quiet });
+  const host = d.written?.record.host;
+  assert.equal(host?.signer_keys_hidden, false);
+  assert.equal(host?.signer_isolation?.exposure_accepted, true);
+  assert.deepEqual(host?.signer_isolation?.exposed, ["/home/x/.dfirswarm/machine/release_ed25519"]);
+  assert.equal(host?.earlier_runs_hidden?.by, null);
+  assert.match(String(host?.note), /the signers' keys were NOT hidden from their panes \(no write guard on this host; started with --accept-signer-exposure\): .*rotate the machine key/);
+  const v = await verifyReleases(layout(exposed));
+  assert.match(v.lines[0], /the host: the agents ran on the host \(host mode\), and the signers' keys were NOT hidden/);
+  const hidden = await stoppedRun({ registry: { isolation: { mode: "host" }, signer_keys_hidden: true, signer_isolation: { isolation: "host", guard: "seatbelt", keys_hidden: true, hidden: ["/x"], agent_sockets: [], exposed: [], exposure_accepted: false, why: "denied at the kernel" } } });
+  await draftRelease(ctxOf(hidden), { home: hidden.home, say: quiet });
+  const v2 = await verifyReleases(layout(hidden));
+  assert.doesNotMatch(v2.lines[0], /the host:/, "keys hidden from the panes: nothing to say");
+});

@@ -244,17 +244,26 @@ async function sealableCustody(ctx: RunCtx, reportPath: string): Promise<{ custo
 
 type CustodyShape = { at?: string; summary?: string; seal?: Record<string, { lines?: number; entries?: number; head?: string | null; last_line_sha256?: string | null } | null>; artifacts?: { index_sha256?: string; files?: number } | null; models?: unknown };
 
+type SignerIsolation = { isolation?: string; guard?: string; keys_hidden?: boolean; hidden?: string[]; agent_sockets?: string[]; exposed?: string[]; exposure_accepted?: boolean; why?: string };
+type EarlierRunsHidden = { by?: string | null; sandboxes?: number; reviews?: string | null; skipped?: string[]; why?: string };
+
 /**
  * Where the run ran and whether the signers' keys were out of its agents'
- * reach, as the kickoff recorded it (`isolation.mode`, `signer_keys_hidden`):
- * a record without them says so, and is taken as unknown.
+ * reach, as the kickoff recorded it in the registry (docs/observability.md):
+ * `signer_keys_hidden`, `signer_isolation` (the isolation, the guard, what
+ * was hidden and what exposed, whether --accept-signer-exposure let it
+ * start) and `earlier_runs_hidden`. The release binds them as they are. A
+ * record without them was made before they existed, and what its agents
+ * could reach is unknown.
  */
 export function hostExposure(ctx: RunCtx): NonNullable<ReleaseRecord["host"]> {
   const rec = ctx.rec;
-  const iso = rec ? (((rec.isolation as { mode?: unknown } | undefined)?.mode as string | undefined) ?? "host") : null;
-  const hidden = typeof rec?.signer_keys_hidden === "boolean" ? rec.signer_keys_hidden : null;
-  const why = rec ? (rec.signer_keys_exposure ?? rec.signer_exposure ?? null) : null;
-  const said = why === null || why === undefined ? "" : ` (${typeof why === "string" ? why : JSON.stringify(why)})`;
+  const si = (rec?.signer_isolation ?? null) as SignerIsolation | null;
+  const earlier = (rec?.earlier_runs_hidden ?? null) as EarlierRunsHidden | null;
+  const iso = rec ? (si?.isolation ?? ((rec.isolation as { mode?: unknown } | undefined)?.mode as string | undefined) ?? "host") : null;
+  const hidden = typeof rec?.signer_keys_hidden === "boolean" ? rec.signer_keys_hidden : typeof si?.keys_hidden === "boolean" ? si.keys_hidden : null;
+  const why = si?.why ?? null;
+  const said = why ? ` (${why}${si?.exposure_accepted ? "; started with --accept-signer-exposure" : ""})` : si?.exposure_accepted ? " (started with --accept-signer-exposure)" : "";
   const note =
     iso === null
       ? "the run's registry record was not found: where it ran, and whether its agents could read the signers' keys, is unknown"
@@ -265,7 +274,7 @@ export function hostExposure(ctx: RunCtx): NonNullable<ReleaseRecord["host"]> {
           : hidden === false
             ? `the agents ran on the host (host mode), and the signers' keys were NOT hidden from their panes${said}: a key the panes could read may have been copied; rotate the machine key (swarm.sh machine rotate) and any examiner key without a passphrase`
             : "the agents ran on the host (host mode), and the kickoff did not record whether the signers' keys were hidden from their panes: unknown";
-  return { isolation: iso, signer_keys_hidden: hidden, note };
+  return { isolation: iso, signer_keys_hidden: hidden, note, ...(si ? { signer_isolation: si } : {}), ...(earlier ? { earlier_runs_hidden: earlier } : {}) };
 }
 
 /** Whether a seal needs a current technical review signed by its reviewer: the run's kickoff flag, or the environment's. */

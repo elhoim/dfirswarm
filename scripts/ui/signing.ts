@@ -130,7 +130,7 @@ export function createSigning(d: SigningDeps) {
   function liveHostRun(): string | null {
     for (const r of readRegistry().runs ?? []) {
       const state = String(r.state ?? "");
-      const mode = ((r.isolation as { mode?: string } | undefined)?.mode ?? "host") as string;
+      const mode = ((r.signer_isolation as { isolation?: string } | undefined)?.isolation ?? (r.isolation as { mode?: string } | undefined)?.mode ?? "host") as string;
       if (["running", "prepared", "finishing"].includes(state) && mode !== "microvm") return String(r.id ?? "?");
     }
     return null;

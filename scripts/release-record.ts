@@ -133,7 +133,14 @@ export type ReleaseRecord = {
   /** How the examiner signed it: prepared and shown, then confirmed and sealed (schema 2, an adoption). */
   signing?: ReleaseSigning;
   /** Where the run ran and whether the signers' keys were hidden from its agents, as the kickoff recorded it (null: not recorded). */
-  host?: { isolation: string | null; signer_keys_hidden: boolean | null; note: string };
+  host?: {
+    isolation: string | null;
+    signer_keys_hidden: boolean | null;
+    note: string;
+    /** The kickoff's record of how the signing keys were kept from the agents, bound as it was (docs/observability.md). */
+    signer_isolation?: { isolation?: string; guard?: string; keys_hidden?: boolean; hidden?: string[]; agent_sockets?: string[]; exposed?: string[]; exposure_accepted?: boolean; why?: string };
+    earlier_runs_hidden?: { by?: string | null; sandboxes?: number; reviews?: string | null; skipped?: string[]; why?: string };
+  };
   /** The technical-review policy in force when it was sealed. */
   policy?: { require_technical_review: boolean; source: string | null };
 };

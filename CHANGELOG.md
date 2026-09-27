@@ -6,6 +6,82 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: the examiner signs with their own secret, from the command line or the console; three kinds of key; a technical reviewer signs their own record
+
+- **Three kinds of key, two roles.** `swarm.sh examiner enroll` records a
+  key kind and a role (`--role examiner|reviewer`). An ssh key must have a
+  passphrase: `--generate-key` asks for it twice on the terminal (or takes
+  it on a descriptor) and feeds it to `ssh-keygen` on stdin in a session
+  with no terminal; `--key FILE` is checked to be encrypted (`ssh-keygen -y
+  -P ""` must fail). `--no-passphrase` stays, as a command-line trade the
+  console refuses. `--fido [--fido-verify-required] [--fido-resident]` makes
+  an ed25519-sk key on the authenticator with an `ssh-keygen` found to have
+  FIDO support from its files (Homebrew's openssh on macOS; the product
+  never probes the key). `--pkcs11-module PATH (--pkcs11-id HEX |
+  --pkcs11-uri URI) [--pkcs11-chain FILE]` enrols a token's X.509
+  certificate, read without the PIN, keeping its fingerprint, CN, issuer,
+  validity, key usage and qualified-certificate statement and refusing one
+  that cannot sign; its signatures are CAdES-BES CMS made through OpenSSL
+  3's PKCS#11 provider, with the issuing CA inside. A certificate's subject
+  is never shown beyond its CN. Older enrolments read as an examiner's ssh
+  key.
+- **One way for the secret.** A passphrase or a PIN reaches `ssh-keygen`
+  (through `SSH_ASKPASS` with `SSH_ASKPASS_REQUIRE=force` and
+  `scripts/askpass-fd3.sh`) or OpenSSL's provider (`pin-source=file:/dev/fd/3`)
+  only down a pipe on fd 3: never argv, the environment, a file, a job or a
+  log.
+- **Prepare, then seal.** An adoption renders its final bytes once, with a
+  fixed time, into `release/.pending-<nonce>/`, and says what will be
+  signed; the seal signs exactly those bytes, and refuses when they, the
+  review, custody, the report or the releases moved, after fifteen minutes,
+  or for a nonce already used. The gate runs again at the seal. A release
+  records `signing`: `via` (console or cli), the consent statement,
+  `consent` (`confirmed`, or `presented` with `--yes`), the sha256 shown,
+  when it was prepared and confirmed, the key's kind and fingerprint and the
+  program that signed; an e-signature is `release.json.p7s`, and a printed
+  PDF gets `report.pdf.p7s`. `swarm.sh review <id> --sign` prints the
+  summary, asks on the terminal, then takes the secret with echo off;
+  `--yes` skips only the confirmation. Release records are schema 2; schema
+  1 is still read.
+- **The console signs.** A Release tab (the run's releases, how each was
+  signed, what verify says, the technical reviews; the adoption: an enrolled
+  examiner, the prepared report in a frame with no scripts beside the sha256
+  of the bytes shown, the gate, the consent box, a dialog for the passphrase,
+  the touch and PIN, or the e-signature PIN), a Technical review tab and an
+  Examiners page, over new routes that need the token even when
+  `SWARM_UI_TOKEN` is empty, a loopback Host, the console's Origin and JSON,
+  refuse while a host-mode run is live, lock a person out for fifteen minutes
+  after five wrong secrets (on the operator's record), refuse keys without a
+  passphrase or in ssh-agent, and run their scripts directly, never as a job.
+  The Ledger tab's old sign button is gone, and the console no longer reads
+  the newer review acts as breaks in the chain.
+- **Two-stage signing.** A technical review names its outcome
+  (`--outcome agreed|issues-resolved|disagreement`, each disagreement with
+  `--disagreement`), when it was done, its scope (entries by seq and hash,
+  or `--all-answers`) and what it was over (report.md, the ledger's head,
+  custody, the dispositions' head). An enrolled reviewer writes and signs it
+  with a `countersign` line (SSHSIG in `dfirswarm-review`, or a CMS); a
+  record the examiner writes says the reviewer did not sign it, and can be
+  countersigned later (after a release, the countersign names it). A reviewer
+  elsewhere works from the package (`swarm.sh review <package-dir>
+  --technical-review …`, `review-import.jsonl`), and the examiner imports it
+  (`--import FILE`), checked against the register and the review's head. A
+  reviewer with the examiner's id, name or key is refused.
+  `--require-technical-review` at kickoff, or
+  `SWARM_REQUIRE_TECHNICAL_REVIEW=1`, makes the seal wait for a current,
+  signed review that is not a disagreement. The report and verify list every
+  technical review in one of five wordings.
+- **Verify, by kind.** The machine's seal reads "machine seal, self-checked"
+  and is never checked against an examiner register; a run no examiner
+  adopted says "RELEASES HOLD". An e-signature is checked with `openssl cms
+  -verify` against `--ca FILE` (with `--ca-intermediate FILE`), naming each
+  trust anchor's sha256; without a CA it says "certificate chain not
+  checked". The release binds what the kickoff recorded of the signers' keys
+  (`signer_keys_hidden`, `signer_isolation`, `earlier_runs_hidden`).
+- **Hardware tests** in `tests/hw/` (a FIDO key, the e-signature token, the
+  console's seal path), run only with `DFIRSWARM_HW_TESTS=1`; the unit tests
+  use a throwaway SoftHSM2 token and skip, saying why, without it.
+
 ### Added: the report is released, adopted by a named examiner, and reproducible where it can be
 
 A report now has releases: signed records of which bytes were handed over,
