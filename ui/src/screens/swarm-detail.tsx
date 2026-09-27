@@ -502,7 +502,7 @@ export function SwarmDetailScreen() {
           <div className="grid items-start gap-x-8 gap-y-5 lg:grid-cols-[minmax(0,560px)_minmax(0,1fr)]">
           <div className="grid gap-x-8 gap-y-4 sm:grid-cols-3">
           <Vital
-            label={unmetered ? "Tokens / cap" : "Spend / cap"}
+            label={d.until_solved ? (unmetered ? "Tokens / advisory cap" : "Spend / advisory cap") : unmetered ? "Tokens / cap" : "Spend / cap"}
             value={unmetered ? compact(b.tokens) : money(s.spent_usd, 2)}
             tail={
               unmetered
@@ -526,9 +526,9 @@ export function SwarmDetailScreen() {
             }
           />
           <Vital
-            label={reachedDone(s.phase) ? "Took" : "Wall clock"}
+            label={reachedDone(s.phase) ? "Took" : d.until_solved ? "Running" : "Wall clock"}
             value={mmss(elapsedLive)}
-            tail={wallMs ? `of ${mmss(wallMs)}` : undefined}
+            tail={d.until_solved ? "until solved: no wall clock" : wallMs ? `of ${mmss(wallMs)}` : undefined}
             tone={overWall ? "saffron" : undefined}
             meter={<Meter pct={wallPct} tone={overWall ? "saffron" : "band"} onDark label="elapsed against wall clock" />}
           />

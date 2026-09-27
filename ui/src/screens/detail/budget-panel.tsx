@@ -64,8 +64,10 @@ export function BudgetPanel({ view, elapsedMs }: { view: SwarmView; elapsedMs: n
   const remainingTokens = capTokens > 0 ? Math.max(0, capTokens - b.tokens) : 0;
   const maxSpend = Math.max(0.0001, ...Object.values(b.agents).map((s) => s.spent_usd));
   const maxTokens = Math.max(1, ...Object.values(b.agents).map((s) => s.tokens));
-  const overUsd = !unmetered && b.cap_usd > 0 && b.spent_usd >= b.cap_usd;
-  const overTokens = capTokens > 0 && b.tokens >= capTokens;
+  // An until-solved run's caps are advisory: spend is shown against them, and nothing is stopped for it.
+  const advisory = view.until_solved === true || b.until_solved === true;
+  const overUsd = !advisory && !unmetered && b.cap_usd > 0 && b.spent_usd >= b.cap_usd;
+  const overTokens = !advisory && capTokens > 0 && b.tokens >= capTokens;
   const over = overUsd || overTokens;
   const models = byModel(view, names);
   const overOwnCount = rows.filter((r) => r.overOwn).length;
@@ -77,6 +79,11 @@ export function BudgetPanel({ view, elapsedMs }: { view: SwarmView; elapsedMs: n
 
   return (
     <div className="space-y-4">
+      {advisory ? (
+        <InlineNote tone="warn">
+          This run is until solved: there is no wall clock, and every cap below is advisory. Spend is recorded and shown, and nothing is stopped for it; only the operator's stop ends the run.
+        </InlineNote>
+      ) : null}
       {vmRun ? (
         <InlineNote>
           {spendSourceNote(true)}
@@ -137,12 +144,13 @@ export function BudgetPanel({ view, elapsedMs }: { view: SwarmView; elapsedMs: n
             {unmetered ? <Badge variant="kelp">not metered</Badge> : null}
             {capTokens > 0 && !unmetered ? <Badge variant="outline">token cap {compact(capTokens)}</Badge> : null}
             {over ? <Badge variant="brick">{overTokens && !overUsd ? "token cap hit" : "cap hit"} — agents are told to call done cannot_complete</Badge> : null}
+            {advisory && b.cap_usd > 0 && b.spent_usd >= b.cap_usd ? <Badge variant="outline">past the advisory cap: nothing is stopped for it</Badge> : null}
           </div>
         </section>
         <section className="card p-4">
           <h3 className="label-caps">Wall clock</h3>
           <div className="mt-2 text-[30px] font-semibold leading-none tabular text-ink">{shortDuration(elapsedMs)}</div>
-          <div className="mt-1 text-[12px] text-ink-3">of {b.wall_clock_minutes} min · started {new Date(b.started_at).toLocaleTimeString()}</div>
+          <div className="mt-1 text-[12px] text-ink-3">{advisory || wallMs <= 0 ? "no wall clock (until solved)" : `of ${b.wall_clock_minutes} min`} · started {new Date(b.started_at).toLocaleTimeString()}</div>
           <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-paper-3">
             <div className={cn("h-full rounded-full", wallPct >= 100 ? "bg-saffron" : "bg-slate")} style={{ width: `${wallPct}%` }} />
           </div>

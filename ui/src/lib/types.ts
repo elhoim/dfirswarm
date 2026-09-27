@@ -263,6 +263,9 @@ export type BudgetRecord = {
   tokens: number;
   calls: number;
   wall_clock_minutes: number;
+  /** An until-solved run: no wall clock, every cap advisory. */
+  until_solved?: boolean;
+  stall_minutes?: number;
   started_at: string;
   source: string;
   hard_kill: boolean;
