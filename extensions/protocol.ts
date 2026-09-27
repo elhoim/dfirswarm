@@ -4497,7 +4497,7 @@ export async function latestPostIds(
   return out;
 }
 
-export type WaitOutcome = "post" | "sentinel" | "claim_lost" | "timeout";
+export type WaitOutcome = "post" | "sentinel" | "claim_lost" | "timeout" | "prompt";
 
 export type WaitResult = {
   reason: WaitOutcome;
@@ -5219,7 +5219,7 @@ export const TOOL_RESERVED_NAMES = new Set([
   "extension_error", "watch_truncated", "agent_error", "toolchain",
   // self-compaction: the tool, the per-turn context row and the hand-off events
   "self_compact", "context", "compact_notice", "compact_warning", "compact_forced", "compact_hold",
-  "compact_note", "compact_start", "compact_done", "compact_failed", "compact_config",
+  "compact_note", "compact_start", "compact_done", "compact_failed", "compact_stalled", "compact_config",
   // microVM runs: the tool that writes a shared file, the hub's own lines,
   // and what an agent's extension says about the hub (tests/reserved-names)
   "publish_file", "publish_needed", "skill", "finish_line", "hub_call", "hub_link", "hub_prompt",

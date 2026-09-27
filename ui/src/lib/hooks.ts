@@ -88,6 +88,7 @@ export function toolTone(tool: string): ToolTone {
     // a compaction and a saved note are the hand-off working as designed.
     case "compact_forced":
     case "compact_failed":
+    case "compact_stalled":
       return "brick";
     case "compact_warning":
     case "compact_hold":
@@ -122,6 +123,7 @@ export function toolLabel(tool: string): string {
   if (tool === "compact_start") return "compaction start";
   if (tool === "compact_done") return "compaction";
   if (tool === "compact_failed") return "compaction failed";
+  if (tool === "compact_stalled") return "compaction stalled";
   if (tool === "compact_config") return "compact config";
   if (tool === "context") return "context";
   return tool;

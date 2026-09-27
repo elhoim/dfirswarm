@@ -85,7 +85,7 @@ export function describeEvent(e: { tool: string; agent: string; args?: unknown; 
     case "harness_stop":
       return `the harness stopped the run${a.reason ? `: ${str(a.reason)}` : ""}`;
     case "idle_nudge":
-      return `the idle watchdog nudged ${str(a.agent)}`;
+      return `the idle watchdog nudged ${str(a.agent)}${a.why === "waiting" ? ", which had only waited" : ""}`;
     case "notify":
       return `the notify command ran for ${str(a.event)}${failed ? ", and failed" : ""}`;
     case "repeat_hint":

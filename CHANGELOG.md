@@ -6,6 +6,32 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: a compaction that never ends, an agent that only waits, peers' sessions, a runtime's cache in work/
+
+- **A compaction is bounded.** Each summary attempt stops at 300 s or 48,000
+  characters (`SWARM_COMPACT_SUMMARY_SEC`), whatever the provider does with
+  `maxTokens`: the openai-codex API sends no output limit, and on run
+  sedf827 two summaries ran on to 128,000 output tokens. What a stopped
+  attempt wrote is kept whole under `tool-output/<id>/`. A compaction still
+  running after 900 s (`SWARM_COMPACT_TIMEOUT_SEC`) is stopped by the seat
+  and counted as failed (`compact_stalled`), so it is retried and then the
+  lock released, where on run s6895a8 a seat was silently lost. The idle
+  watchdog nudges no compacting seat (Pi refuses the prompt) and says a
+  compaction open past 1200 s on the board; a hub prompt refused during one
+  is recorded as refused.
+- **Waiting is idle after ten minutes.** An agent that has called only
+  `wait` and `inbox` for 600 s (`SWARM_WAIT_IDLE_SEC`) is steered, unless a
+  job of its own is running; a steer now ends an open `wait` (`reason:
+  prompt`). The echo of a nudge no longer counts as the agent's activity.
+- **A seat no longer reads its peers' Pi sessions** (run s306463): in a
+  microVM `.pi-sessions/` is a read-only veil holding only the seat's own
+  session; the VM's probe checks it and the kickoff refuses a VM that sees
+  a peer's. The host still reads and seals every session.
+- **Node's compile cache is out of work/.** The kickoff points
+  `NODE_COMPILE_CACHE` at the run's `.runtime-cache/`, so the artifact index
+  and the package no longer carry `work/.tmp/node-compile-cache/` (run
+  s2a59b2).
+
 ### Changed: every image profile reviewed as a DFIR examiner would (Codex)
 
 - Each of the nine profiles (base, disk, memory, linux, mobile, network, re,

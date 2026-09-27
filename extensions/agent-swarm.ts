@@ -50,6 +50,7 @@ import {
   diffWatchedPaths,
   extractWritePath,
   inboxLogResult,
+  keepToolOutput,
   keepToolOutputFromFile,
   toolOutputRel,
   type FullOutputRef,
@@ -834,6 +835,15 @@ export default function (pi: ExtensionAPI) {
     if (hubSocket && !hubLink) {
       const cwd = ctx.cwd;
       hubLink = openHubLink(hubSocket, (message) => {
+        // While a hand-off's compaction runs Pi refuses every prompt ("Cannot
+        // submit a prompt while compaction is in progress"), and says so only
+        // in the pane. On run s6895a8 the record read `ok: true` for four
+        // nudges nobody received. The hand-off that ends the compaction
+        // carries the sentinel and the unread posts.
+        if (selfCompact?.compacting()) {
+          void logEvent(cwd, agentId, "hub_prompt", { kind: message.kind ?? "prompt" }, { ok: false, reason: "a compaction is running and Pi takes no prompt until it ends; not delivered" });
+          return;
+        }
         try {
           pi.sendUserMessage(message.text, { deliverAs: message.deliver ?? "followUp" });
         } catch {
@@ -842,6 +852,30 @@ export default function (pi: ExtensionAPI) {
         void logEvent(cwd, agentId, "hub_prompt", { kind: message.kind ?? "prompt" }, { ok: true });
       });
     }
+  });
+
+  /**
+   * Every wait open in this pane, each ended by a steering message for this
+   * agent: typed into its pane, a peer's nudge, the idle watchdog, a stop.
+   * Pi delivers a steer only when the tool call it arrived during ends, and a
+   * wait holds its call for up to five minutes. A steer that came in before
+   * the wait began (while the call was being checked) is still waiting for
+   * the next turn, so that wait does not start. A follow-up ends no wait: it
+   * is for a turn's end, and an agent that waited again at once would be
+   * woken again at once.
+   */
+  const waitsOpen = new Set<() => void>();
+  let steerPending = false;
+  pi.on("input", async (event) => {
+    if (event.streamingBehavior === "steer") {
+      steerPending = true;
+      for (const wake of [...waitsOpen]) wake();
+    }
+    return { action: "continue" as const };
+  });
+  // Pi puts the steers it holds into the context before the next model call.
+  pi.on("turn_start", async () => {
+    steerPending = false;
   });
 
   pi.on("agent_start", async () => {
@@ -2139,7 +2173,7 @@ export default function (pi: ExtensionAPI) {
     name: "wait",
     label: "Wait",
     description:
-      "Sleep until something happens: a new post for you (on main: to you, to all, or to no one on the team; in a side thread you are in: any post), done/SWARM_DONE appearing, or a claim of yours lapsing — whichever comes first, or the timeout. A main-thread post addressed only to other agents does not wake you; it stays unread and comes with the next delivery. Returns the unread posts. Use this instead of `bash sleep`: a shell sleep costs a full provider round every time you wake up, this one costs nothing.",
+      "Sleep until something happens: a new post for you (on main: to you, to all, or to no one on the team; in a side thread you are in: any post), done/SWARM_DONE appearing, a claim of yours lapsing, or a message for you (it follows the result) — whichever comes first, or the timeout. A main-thread post addressed only to other agents does not wake you; it stays unread and comes with the next delivery. Returns the unread posts. Use this instead of `bash sleep`: a shell sleep costs a full provider round every time you wake up, this one costs nothing.",
     promptSnippet: "Block until the board changes instead of polling",
     promptGuidelines: [
       "When you are waiting on a peer, call wait, not bash sleep. Do not poll the board in a loop.",
@@ -2158,11 +2192,34 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
       const ctx = ctxFrom(toolCtx.cwd, agentId);
-      const result = await waitForSwarmChange(ctx, {
-        seconds: params.seconds,
-        signal: signal as AbortSignal | undefined,
-        everyPost: params.every_post === true,
-      });
+      // A steer for this agent ends the wait (waitsOpen), through the same
+      // signal Pi's own abort uses, so it ends a wait held by the hub too.
+      const outer = signal as AbortSignal | undefined;
+      const woken = new AbortController();
+      let steered = false;
+      const wake = () => {
+        steered = true;
+        woken.abort();
+      };
+      const follow = () => woken.abort();
+      if (outer?.aborted) woken.abort();
+      else outer?.addEventListener("abort", follow, { once: true });
+      if (steerPending) wake();
+      waitsOpen.add(wake);
+      let result: Awaited<ReturnType<typeof waitForSwarmChange>>;
+      try {
+        result = await waitForSwarmChange(ctx, {
+          seconds: params.seconds,
+          signal: woken.signal,
+          everyPost: params.every_post === true,
+        });
+      } finally {
+        waitsOpen.delete(wake);
+        outer?.removeEventListener("abort", follow);
+      }
+      if (steered && !outer?.aborted && result.reason === "timeout") {
+        result = { ...result, reason: "prompt", detail: "A message for you came in while you waited; it follows this result. Act on it before you wait again." };
+      }
       // Hand back what woke us, so the agent does not need a second call.
       const box = result.reason === "post" ? await readInbox(ctx) : null;
       const remaining = box?.remaining ?? 0;
@@ -3103,6 +3160,13 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  /** A positive whole number of seconds from the environment, in milliseconds; undefined when unset or not one. */
+  function secondsFromEnv(name: string): number | undefined {
+    const raw = process.env[name]?.trim();
+    if (!raw || !/^\d+$/.test(raw) || Number(raw) <= 0) return undefined;
+    return Number(raw) * 1000;
+  }
+
   /**
    * What the harness knows at hand-off time, from files rather than from the
    * model's memory: the header the returned note travels under. Every read is
@@ -3145,6 +3209,8 @@ export default function (pi: ExtensionAPI) {
       summaryModel: process.env.SWARM_COMPACT_MODEL?.trim() || undefined,
       specs,
       fromDefaults,
+      keepText: (cwd, text) => keepToolOutput(cwd, toolOutputRel(agentId, "compact_summary", "text"), text),
+      bounds: { summaryAttemptMs: secondsFromEnv("SWARM_COMPACT_SUMMARY_SEC"), compactionMs: secondsFromEnv("SWARM_COMPACT_TIMEOUT_SEC") },
     });
   }
 }
