@@ -894,7 +894,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const r = verifyPackage(a);
     console.log(r.lines.join("\n"));
     // The report's releases: every signature, the bytes each binds, the chain between them.
-    const rel = await verifyReleases(packageLayout(a), { allowedSigners: opt("--allowed-signers"), tsaCa: opt("--tsa-ca") });
+    const rel = await verifyReleases(packageLayout(a), { allowedSigners: opt("--allowed-signers"), tsaCa: opt("--tsa-ca"), ca: opt("--ca"), caIntermediate: opt("--ca-intermediate") });
     console.log(rel.lines.join("\n"));
     const unchecked = rel.signatures.some((s) => s.adopted && s.state !== "verified");
     process.exit(!r.ok || !rel.ok ? 1 : unchecked && opt("--allowed-signers") ? 3 : 0);

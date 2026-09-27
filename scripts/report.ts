@@ -55,7 +55,7 @@ import { hashRegularFile, openRegular, readRegularText } from "./regular-file.ts
 import { createInterface } from "node:readline";
 import { loadRunContext, readJsonFile } from "./run-record.ts";
 import { coverageLine, coverageOf, type CoverageReport, type Grounding } from "./coverage.ts";
-import { ReviewFileError, isSandboxPath, ledgerHead, readReviews, reviewState, signoffCoverage, verifyReviewChain, type ReviewLine } from "./review.ts";
+import { ReviewFileError, dispositionsHead, isSandboxPath, ledgerHead, readReviews, reviewState, signoffCoverage, technicalReviewsOf, verifyReviewChain, type ReviewLine, type TechnicalReview } from "./review.ts";
 import { bodyRelease, readReleases } from "./release-record.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -443,6 +443,8 @@ export type ReviewState = {
   unreadable?: string;
   /** The last technical reviewer's record: who, on what competence, what was checked. */
   technical?: { name: string; competence?: string; checked?: string } | null;
+  /** Every technical review, each with where it stands against the run as it is now (review.ts technicalReviewsOf). */
+  technicals?: TechnicalReview[];
 };
 
 /**
@@ -474,7 +476,11 @@ export async function readReviewState(runsDir: string, id: string, sandbox: stri
     reportNow = r && "sha256" in r ? r.sha256 : null;
   }
   const tr = [...parsed].reverse().find((l) => l.action === "technical_review" && l.reviewer);
-  return { lines: lines.length, chain: verifyReviewChain(lines), byEntry: entries, signed, head, reportNow, technical: tr?.reviewer ? { name: tr.reviewer.name, competence: tr.reviewer.competence, ...(tr.methods_checked ? { checked: tr.methods_checked } : {}) } : null };
+  // Every technical review, held to the run as it stands: the report's five wordings.
+  const custody = await hashRegularFile(join(sandbox, "custody.json"));
+  const report = await hashRegularFile(join(sandbox, "work", "report.md"));
+  const technicals = technicalReviewsOf(lines as Array<ReviewLine & { text: string }>, { report_sha256: report && "sha256" in report ? report.sha256 : null, ledger_head: head || null, custody_sha256: custody && "sha256" in custody ? custody.sha256 : null, dispositions_head: dispositionsHead(parsed) });
+  return { lines: lines.length, chain: verifyReviewChain(lines), byEntry: entries, signed, head, reportNow, technical: tr?.reviewer ? { name: tr.reviewer.name, competence: tr.reviewer.competence, ...(tr.methods_checked ? { checked: tr.methods_checked } : {}) } : null, technicals };
 }
 
 /**
@@ -509,7 +515,12 @@ export function bodyReview(review: ReviewState | null, examiner?: { name: string
   const h = humanReviewFrom(review, examiner ? { name: examiner.name, ...(examiner.organisation ? { organisation: examiner.organisation } : {}) } : null, review && current !== null ? { current, ...(current ? {} : { scope: signoffScope(review) }) } : undefined);
   if (!h) return h;
   // The adopting examiner's competence, and the technical reviewer, when there are.
-  return { ...h, ...(examiner?.competence && h.examiner ? { examiner: { ...h.examiner, competence: examiner.competence } } : {}), ...(review?.technical ? { technicalReviewer: review.technical } : {}) };
+  return {
+    ...h,
+    ...(examiner?.competence && h.examiner ? { examiner: { ...h.examiner, competence: examiner.competence } } : {}),
+    ...(review?.technical ? { technicalReviewer: review.technical } : {}),
+    ...(review && !review.unreadable ? { technicalReviews: (review.technicals ?? []).map((t) => ({ name: t.reviewer.name, organisation: t.reviewer.organisation, competence: t.reviewer.competence, checked: t.methods_checked, outcome: t.outcome ?? null, reviewed_at: t.reviewed_at ?? null, disagreements: t.disagreements ?? [], words: t.words ?? "" })) } : {}),
+  };
 }
 
 /** The examiner's standing on one entry, in the words of its exhibit. */
@@ -1399,7 +1410,7 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   const draftMark = !adoptedHere && !releasedRun;
   const adopter = adoptedHere?.examiner ?? null;
   const releaseBanner = adoptedHere
-    ? `Release v${adoptedHere.version}, adopted by ${adopter?.name ?? "the examiner"}${adopter?.organisation ? ` (${adopter.organisation})` : ""} at ${adoptedHere.at}, and signed with the key ${adopter?.fingerprint ?? "named in release.json"} (the signature is beside these bytes: release/v${adoptedHere.version}/release.json.sig). The conclusions the examiner adopted are the examiner's; every other one is the agents'.`
+    ? `Release v${adoptedHere.version}, adopted by ${adopter?.name ?? "the examiner"}${adopter?.organisation ? ` (${adopter.organisation})` : ""} at ${adoptedHere.at}, and signed with the key ${adopter?.fingerprint ?? "named in release.json"} (the signature is beside these bytes: release/v${adoptedHere.version}/${adopter?.fingerprint?.startsWith("X509-SHA256:") ? "release.json.p7s, an e-signature whose certificate travels inside it" : "release.json.sig"}). The conclusions the examiner adopted are the examiner's; every other one is the agents'.`
     : forRelease
       ? `DRAFT: release v${forRelease.version}, sealed at ${forRelease.at} by this install's machine key${forRelease.machine?.fingerprint ? ` (${forRelease.machine.fingerprint})` : ""} when custody was taken. The machine key is not an examiner: no one has adopted this report, and every conclusion in it is the agents'.`
       : releasedRun

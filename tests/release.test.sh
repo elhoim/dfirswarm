@@ -58,7 +58,7 @@ pass "stop seals the machine's draft once per verdict, and the machine key says 
 
 echo "# the examiner is enrolled; the release waits on every defective answer's disposition"
 set +e
-out="$(swarm review s9 --sign)"; rc=$?
+out="$(swarm review s9 --sign --yes)"; rc=$?
 set -e
 [[ $rc -ne 0 ]] && grep -q 'no examiner is enrolled on this install' <<<"$out" || fail "a sign-off with no examiner enrolled was taken (rc $rc): $out"
 out="$(swarm examiner enroll --name "Ada Examiner" --organisation "Lab One" --competence "GCFA; ten years of casework" --generate-key --no-passphrase </dev/null)" || fail "enrolment failed: $out"
@@ -67,7 +67,7 @@ REGISTER_LINE="$(grep 'ada-examiner namespaces=' <<<"$out" | sed 's/^ *//')"
 grep -q 'PRIVATE KEY' <<<"$out" && fail "enrolment printed a private key"
 swarm examiner list | grep -q '^ada-examiner	Ada Examiner	Lab One	SHA256:' || fail "the examiner is not listed"
 set +e
-out="$(swarm review s9 --sign)"; rc=$?
+out="$(swarm review s9 --sign --yes)"; rc=$?
 set -e
 [[ $rc -ne 0 ]] && grep -q 'E-16 (question:3) is not supported as it stands' <<<"$out" && grep -q 'E-17 (summary) is not supported as it stands' <<<"$out" || fail "the release was not refused on the defective answers (rc $rc): $out"
 set +e
@@ -77,8 +77,12 @@ set -e
 out="$(swarm review s9 --adopt 14)" && grep -q 'entry 14 adopted by Ada Examiner (enrolled examiner ada-examiner)' <<<"$out" || fail "adopt: $out"
 swarm review s9 --inconclusive 16 --note "the archive's hash is stated in no entry it rests on" >/dev/null || fail "inconclusive"
 swarm review s9 --reject 17 --note "it rests on the superseded answer to question 2" >/dev/null || fail "reject"
-out="$(swarm review s9 --technical-review --reviewer "Bo Reviewer" --competence "EnCE" --checked "re-ran fls and the proxy-log search" --entries 4,10)" || fail "technical review: $out"
-grep -q "methods, by Bo Reviewer (EnCE): re-ran fls" <<<"$out" || fail "technical review: $out"
+set +e
+out="$(swarm review s9 --technical-review --reviewer "Bo Reviewer" --competence "EnCE" --checked "re-ran fls and the proxy-log search" --entries 4,10)"; rc=$?
+set -e
+[[ $rc -ne 0 ]] && grep -q 'says its outcome (--outcome agreed|issues-resolved|disagreement)' <<<"$out" || fail "a technical review with no outcome was taken (rc $rc): $out"
+out="$(swarm review s9 --technical-review --reviewer "Bo Reviewer" --competence "EnCE" --checked "re-ran fls and the proxy-log search" --entries 4,10 --outcome agreed)" || fail "technical review: $out"
+grep -q "a technical review by Bo Reviewer (agreed), recorded by the examiner Ada Examiner; not signed by the reviewer" <<<"$out" || fail "technical review: $out"
 pass "enrolment gives the register line; adoption refuses an unsupported answer; the release waits on each defective answer"
 
 echo "# the sign-off is the examiner's release, printed with --pdf"
@@ -89,7 +93,16 @@ for a in "$@"; do case "$a" in --print-to-pdf=*) out="${a#--print-to-pdf=}" ;; e
 printf '%%PDF-1.4\n%% a stand-in print\n' > "$out"
 SH
 chmod +x "$SWARM_CHROME"
-out="$(swarm review s9 --sign --pdf)" || fail "the sign-off failed: $out"
+# With no terminal to confirm on, a sign-off without --yes is refused (only checked where this
+# shell has none: at a terminal it would ask there).
+if ! ( : </dev/tty ) 2>/dev/null; then
+  set +e
+  out="$(swarm review s9 --sign --pdf </dev/null)"; rc=$?
+  set -e
+  [[ $rc -ne 0 ]] && grep -q "asks for the examiner's confirmation on the terminal, and there is none" <<<"$out" || fail "a sign-off with no terminal and no --yes was taken (rc $rc): $out"
+fi
+out="$(swarm review s9 --sign --pdf --yes)" || fail "the sign-off failed: $out"
+grep -q 'Consent:      presented; its confirmation was skipped (--yes)' <<<"$out" || fail "the sign-off does not say the consent was only presented: $out"
 grep -q 'Release:      v1 ADOPTED by Ada Examiner (Lab One), signed with SHA256:.* (with report.pdf)' <<<"$out" || fail "no adopted release: $out"
 grep -q 'a new examination is a new run' <<<"$out" || fail "the evidence cutoff is not said: $out"
 [[ -f "$SB/release/v1/report.pdf" ]] || fail "no report.pdf in release v1"

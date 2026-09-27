@@ -97,8 +97,16 @@ export type ReportRelease = { version: number; at?: string; state?: "draft" | "a
  */
 export type HumanReview = {
   examiner?: { name: string; organisation?: string; competence?: string } | null;
-  /** A second human who checked the methods, when there was one. */
+  /** A second human who checked the methods, when there was one (the latest). */
   technicalReviewer?: { name: string; competence?: string; checked?: string } | null;
+  /**
+   * Every technical review, in order, each with where it stands in one of the
+   * five wordings (review.ts technicalWords): signed by the reviewer; recorded
+   * by the examiner, not signed by the reviewer; countersigned after a
+   * release; signed (or recorded) over an earlier state, not current. None at
+   * all reads "No technical review".
+   */
+  technicalReviews?: Array<{ name: string; organisation?: string | null; competence?: string; checked?: string; outcome?: string | null; reviewed_at?: string | null; disagreements?: string[]; words: string }>;
   /** The examiner's latest word on an entry, by seq. */
   entries?: Map<number, { action: string; by: string; at: string; note?: string; entry_hash?: string }>;
   /**
@@ -1397,7 +1405,10 @@ function humanChecked(run: Run): string {
   const parts: string[] = [];
   if (r?.examiner) parts.push(`Examiner: ${r.examiner.name}${r.examiner.organisation ? `, ${r.examiner.organisation}` : ""}.`);
   if (n) parts.push(`${plural(n, "entry", "entries")} reviewed by the examiner (§10).`);
-  if (r?.technicalReviewer) parts.push(`Technical reviewer: ${r.technicalReviewer.name}${r.technicalReviewer.checked ? `, who checked ${r.technicalReviewer.checked}` : ""}.`);
+  if (r?.technicalReviews?.length) {
+    for (const t of r.technicalReviews) parts.push(`Technical review by ${t.name}${t.checked ? `, who checked ${t.checked}` : ""}${t.outcome ? ` (${t.outcome}${t.reviewed_at ? `, ${t.reviewed_at}` : ""})` : ""}: ${t.words}.${t.disagreements?.length ? ` Disagreements: ${t.disagreements.join("; ")}.` : ""}`);
+  } else if (r?.technicalReviewer) parts.push(`Technical reviewer: ${r.technicalReviewer.name}${r.technicalReviewer.checked ? `, who checked ${r.technicalReviewer.checked}` : ""}.`);
+  else if (r && !r.unreadable) parts.push("No technical review.");
   if (r?.signed) parts.push(r.signed.current === false ? `Signed off by ${r.signed.by} at ${r.signed.at}, and NOT OVER THIS RUN AS IT STANDS${r.signed.scope ? `: ${r.signed.scope}` : ""}.` : `Signed by ${r.signed.by} at ${r.signed.at}.`);
   if (!n && !r?.signed) return `No human checked any of it: no examiner review is recorded for this run.${r?.examiner ? ` The examiner named for the case is ${r.examiner.name}${r.examiner.organisation ? `, ${r.examiner.organisation}` : ""}.` : ""}`;
   return parts.join(" ");
@@ -1861,7 +1872,16 @@ function reviewSection(run: Run, memo: Map<number, EntryState>): BodySection {
     k: "rows",
     rows: [
       { label: "Examiner", s: [r?.examiner ? `${r.examiner.name}${r.examiner.organisation ? `, ${r.examiner.organisation}` : ""}${r.examiner.competence ? ` — ${r.examiner.competence}` : ""}` : "not recorded"] },
-      { label: "Technical reviewer", s: [r?.technicalReviewer ? `${r.technicalReviewer.name}${r.technicalReviewer.competence ? ` — ${r.technicalReviewer.competence}` : ""}${r.technicalReviewer.checked ? `; checked ${r.technicalReviewer.checked}` : ""}` : "none recorded"] },
+      {
+        label: "Technical review",
+        s: [
+          r?.technicalReviews?.length
+            ? r.technicalReviews.map((t) => `${t.name}${t.competence ? ` — ${t.competence}` : ""}${t.checked ? `; checked ${t.checked}` : ""}${t.outcome ? `; ${t.outcome}` : ""}: ${t.words}`).join(". ")
+            : r?.technicalReviewer
+              ? `${r.technicalReviewer.name}${r.technicalReviewer.competence ? ` — ${r.technicalReviewer.competence}` : ""}${r.technicalReviewer.checked ? `; checked ${r.technicalReviewer.checked}` : ""}`
+              : "No technical review",
+        ],
+      },
       { label: "Signed", s: [r?.signed ? `by ${r.signed.by} at ${r.signed.at}${r.signed.ledger_head ? `, over ledger head ${r.signed.ledger_head}` : ""}${r.signed.current === false ? `; NOT OVER THIS RUN AS IT STANDS${r.signed.scope ? `: ${r.signed.scope}` : ""}` : r.signed.current ? "; over this ledger and this report" : ""}` : "not signed"] },
       { label: "Release", s: [run.draft ? (run.release ? `release v${run.release.version}, a draft sealed by the machine${run.release.at ? ` at ${run.release.at}` : ""}: adopted by no one` : "draft: no release v1 exists") : `release v${run.release?.version}${run.release?.at ? `, ${run.release.at}` : ""}`] },
     ],

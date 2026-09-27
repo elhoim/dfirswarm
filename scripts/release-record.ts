@@ -5,7 +5,8 @@
  * A release is what was handed over, as which bytes, sealed by whom:
  *
  *   release/v<N>/release.json       the record (below)
- *   release/v<N>/release.json.sig   its ssh signature (namespace dfirswarm-release)
+ *   release/v<N>/release.json.sig   its ssh signature (namespace dfirswarm-release): the machine's, an ssh or a FIDO key's
+ *   release/v<N>/release.json.p7s   or its CAdES-BES CMS, made on an e-signature token (and report.pdf.p7s beside a PDF)
  *   release/v<N>/report.html        the report's bytes this release is, rendered before signing
  *   release/v<N>/report.pdf         the printed PDF, when it was printed for this release
  *   release/v<N>/print-<k>.json     a later print of this release's HTML (with print-<k>.pdf)
@@ -16,10 +17,14 @@
  * install's machine key, binding the swarm's report and a rendering of it,
  * the custody verdict and its anchor, the index of work/ custody sealed, and
  * the head and length of every chain. It is the machine's record of what
- * the host held, adopted by no one. v1 is written when an enrolled examiner
- * signs (`swarm.sh review <id> --sign`): the examiner's key, the
- * dispositions of each answer, the report's final bytes rendered for that
- * release (no DRAFT mark) and printed when asked. Every later version names
+ * the host held, adopted by no one: it is sealed, never signed, and its seal
+ * is checked only as the machine's ("machine seal, self-checked"). v1 is
+ * written when an enrolled examiner signs (`swarm.sh review <id> --sign`, or
+ * the console's Release panel): prepared first (the final bytes rendered
+ * once, with no DRAFT mark, shown with their sha256), then sealed with the
+ * examiner's key over exactly those bytes, with how it was signed (`via`,
+ * the consent statement, the sha256 shown, when it was confirmed, the key's
+ * kind and fingerprint, the program that signed). Every later version names
  * the one before it (`prev`, its sha256) and why it was made. Nothing in a
  * release is written again: a correction is a new version.
  *
@@ -35,9 +40,13 @@ import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { readTimestampResponse, verifyTimestampToken } from "./custody-checks.ts";
 import { checkSshSignature, RELEASE_NAMESPACE, type SignatureState } from "./signers.ts";
+import { cmsVerify } from "./pkcs11.ts";
+import { dispositionsHead, technicalReviewsOf, satisfiesPolicy, NO_TECHNICAL_REVIEW, type ReviewLine, type TechnicalReview } from "./review.ts";
 
 export const RELEASE_DIR = "release";
-export const RELEASE_SCHEMA = 1;
+/** 2: a signer's key kind, how it was signed (`signing`), the host's exposure, the policy. 1 is still read. */
+export const RELEASE_SCHEMA = 2;
+export const RELEASE_SCHEMAS: readonly number[] = [1, 2];
 export const RELEASE_KIND = "dfirswarm-release";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
@@ -47,9 +56,13 @@ export type ChainHead = { lines: number; head: string | null };
 export type ReleaseSigner = {
   kind: "machine" | "examiner";
   principal: string;
-  /** The signing key's public half (an ssh public key line): public, and what a reader checks the signature against. */
+  /** The signing key's public half (an ssh public key line): public, and what a reader checks the signature against. Empty for a certificate, which travels inside the CMS. */
   public: string;
   fingerprint: string;
+  /** The key's kind: the machine's, an ssh key, a FIDO key, a token's certificate (absent: schema 1, an ssh key). */
+  key_kind?: "machine" | "ssh" | "fido" | "pkcs11";
+  /** A token's certificate, as shown: never its subject beyond the CN. */
+  certificate?: { sha256: string; cn: string | null; issuer: string; not_before: string; not_after: string; key_usage: string[]; qc_statement: boolean };
   /** The machine key: which install, and what it is. */
   machine?: { id: string; host: string; label: string };
   /** The enrolled examiner: who, for whom, on what competence, and the enrolment record's sha256. */
@@ -67,7 +80,7 @@ export type ReleaseAdoption = {
   not_adopted: Array<{ seq: number; hash: string | null; section: string | null }>;
   /** Answers whose support is defective, with the disposition that resolves each (withdrawn or inconclusive). */
   defects: Array<{ seq: number; defects: string[]; disposition: string }>;
-  technical_review: Array<{ reviewer: { name: string; organisation: string | null; competence: string }; methods_checked: string; entries: Array<{ seq: number; hash: string | null }>; note: string | null; at: string; review_seq: number; recorded_by: string }>;
+  technical_review: TechnicalReview[];
   open_rejections: number[];
   /** A ledger with no answer entries (before version 4): the release adopts the report as a whole. */
   scope: "answers" | "report";
@@ -117,7 +130,42 @@ export type ReleaseRecord = {
   timestamp: { authority: string | null; note: string };
   /** What this release could not bind, and why (an older run, a custody from before a part was sealed). */
   missing: string[];
+  /** How the examiner signed it: prepared and shown, then confirmed and sealed (schema 2, an adoption). */
+  signing?: ReleaseSigning;
+  /** Where the run ran and whether the signers' keys were hidden from its agents, as the kickoff recorded it (null: not recorded). */
+  host?: { isolation: string | null; signer_keys_hidden: boolean | null; note: string };
+  /** The technical-review policy in force when it was sealed. */
+  policy?: { require_technical_review: boolean; source: string | null };
 };
+
+/** What the examiner confirms, word for word, before a release is sealed. */
+export const CONSENT_STATEMENT = "I have read the report and the answers I adopt";
+
+export type ReleaseSigning = {
+  via: "console" | "cli";
+  /** confirmed: asked and answered; presented: shown, with the confirmation skipped (--yes). */
+  consent: "confirmed" | "presented";
+  statement: string;
+  /** report.html's sha256 as it was shown before the confirmation. */
+  shown_sha256: string;
+  nonce: string;
+  prepared_at: string;
+  confirmed_at: string;
+  key: { kind: "ssh" | "fido" | "pkcs11"; fingerprint: string };
+  /** The program that made the signature. */
+  ssh_keygen: string | null;
+  openssl: string | null;
+};
+
+/** The signature file beside a release.json: a CMS for a token's certificate, else an SSHSIG. */
+export function releaseSigName(x: Pick<ReleaseRecord, "signer"> | null | undefined): "release.json.p7s" | "release.json.sig" {
+  return x?.signer?.key_kind === "pkcs11" ? "release.json.p7s" : "release.json.sig";
+}
+
+/** The signature file in a release directory, whichever kind it is. */
+export function releaseSigPath(dir: string): string {
+  return existsSync(join(dir, "release.json.p7s")) ? join(dir, "release.json.p7s") : join(dir, "release.json.sig");
+}
 
 export function releaseDir(root: string, version: number): string {
   return join(root, RELEASE_DIR, `v${version}`);
@@ -358,7 +406,9 @@ export type ReleaseCheck = {
   lines: string[];
   releases: number;
   /** Each release's signature, by version: what it shows about who sealed it. */
-  signatures: Array<{ version: number; kind: "machine" | "examiner" | "unknown"; state: SignatureState; adopted: boolean }>;
+  signatures: Array<{ version: number; kind: "machine" | "examiner" | "unknown"; key_kind?: string; state: SignatureState; adopted: boolean }>;
+  /** Every technical review in the review here, against the run's latest release: the report's five wordings. */
+  technical?: TechnicalReview[];
 };
 
 const abs = (root: string, p: string) => (p.startsWith("/") ? p : join(root, p));
@@ -391,7 +441,7 @@ const fileSha = (p: string): string | null => {
  * beside the run, and a timestamp token over its signature, against the
  * authority's CA when one is given.
  */
-export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigners?: string; tsaCa?: string } = {}): Promise<ReleaseCheck> {
+export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigners?: string; tsaCa?: string; ca?: string; caIntermediate?: string } = {}): Promise<ReleaseCheck> {
   const all = readReleases(layout.root);
   const lines: string[] = [];
   const signatures: ReleaseCheck["signatures"] = [];
@@ -449,7 +499,7 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
     const x = r.record;
     const parts: string[] = [];
     const bad: string[] = [];
-    if (x.kind !== RELEASE_KIND || x.schema !== RELEASE_SCHEMA) bad.push(`a record of kind ${JSON.stringify(x.kind)} schema ${JSON.stringify(x.schema)}, which this verifier does not know`);
+    if (x.kind !== RELEASE_KIND || !RELEASE_SCHEMAS.includes(x.schema)) bad.push(`a record of kind ${JSON.stringify(x.kind)} schema ${JSON.stringify(x.schema)}, which this verifier does not know`);
     if (x.version !== r.version) bad.push(`it says it is version ${x.version}`);
     // Its place in the chain.
     if (r.version === 0) {
@@ -458,13 +508,29 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
     else if (!prev?.sha256) bad.push(`it names v${r.version - 1}, which cannot be read`);
     else if (x.prev.sha256 !== prev.sha256) bad.push(`the v${r.version - 1} it names (${x.prev.sha256}) is not the v${r.version - 1} here (${prev.sha256})`);
     else parts.push(`follows v${r.version - 1}`);
-    // Its signature.
-    const sigPath = join(r.dir, "release.json.sig");
-    const sig = checkSshSignature({ file: join(r.dir, "release.json"), sig: sigPath, namespace: RELEASE_NAMESPACE, principal: x.signer?.principal ?? "", publicKey: x.signer?.public ?? "", allowedSigners: opts.allowedSigners });
-    const who = x.signer?.kind === "examiner" ? `the examiner ${x.signer.examiner?.name ?? "?"} (${x.signer.fingerprint})` : x.signer?.kind === "machine" ? `this install's machine key (${x.signer.fingerprint}), not an examiner` : "an unknown signer";
+    // Its signature, by its kind: the machine's seal is checked only against the machine key it names, and is never "verified".
+    const sigPath = join(r.dir, releaseSigName(x));
+    const releaseFile = join(r.dir, "release.json");
+    let sig: { state: SignatureState; detail: string };
+    if (x.signer?.kind === "machine") {
+      const s = checkSshSignature({ file: releaseFile, sig: sigPath, namespace: RELEASE_NAMESPACE, principal: x.signer.principal ?? "", publicKey: x.signer.public ?? "" });
+      sig = s.state === "unchecked" ? { state: "self-checked", detail: "machine seal, self-checked (sound under the machine key it names: it shows the install's machine key sealed these bytes, no more)" } : s;
+    } else if (x.signer?.key_kind === "pkcs11") {
+      const v = cmsVerify({ file: releaseFile, sig: sigPath, certSha256: x.signer.certificate?.sha256 ?? "", ca: opts.ca, intermediates: opts.caIntermediate });
+      sig = { state: v.state, detail: v.detail };
+    } else sig = checkSshSignature({ file: releaseFile, sig: sigPath, namespace: RELEASE_NAMESPACE, principal: x.signer?.principal ?? "", publicKey: x.signer?.public ?? "", allowedSigners: opts.allowedSigners });
+    const kindWords = x.signer?.key_kind === "pkcs11" ? "e-signature certificate" : x.signer?.key_kind === "fido" ? "FIDO key" : "key";
+    const who = x.signer?.kind === "examiner" ? `the examiner ${x.signer.examiner?.name ?? "?"} (${kindWords} ${x.signer.fingerprint})` : x.signer?.kind === "machine" ? `this install's machine key (${x.signer.fingerprint}), not an examiner` : "an unknown signer";
     signatures.push({ version: r.version, kind: x.signer?.kind ?? "unknown", state: sig.state, adopted: x.state === "adopted" });
     if (sig.state === "bad" || sig.state === "wrong-principal") bad.push(`SIGNATURE: ${sig.detail}`);
-    else parts.push(`sealed by ${who}: signature ${sig.state === "verified" ? `verified, ${sig.detail}` : sig.detail}`);
+    else parts.push(`sealed by ${who}: ${sig.state === "self-checked" || x.signer?.key_kind === "pkcs11" ? sig.detail : `signature ${sig.state === "verified" ? `verified, ${sig.detail}` : sig.detail}`}`);
+    if (x.signing) parts.push(`signed ${x.signing.via === "console" ? "from the console" : "on the command line"}, the consent ${x.signing.consent === "confirmed" ? `confirmed at ${x.signing.confirmed_at}` : `presented and its confirmation skipped (--yes) at ${x.signing.confirmed_at}`} over report.html ${x.signing.shown_sha256 === x.report?.html?.sha256 ? "as shown" : `NOT AS SHOWN (${x.signing.shown_sha256})`}`);
+    if (x.signing && x.signing.shown_sha256 !== x.report?.html?.sha256) bad.push("the report.html it binds is not the one the examiner was shown");
+    // A PDF signed on the token beside it.
+    if (x.report?.pdf && x.signer?.key_kind === "pkcs11") {
+      const pdfSig = cmsVerify({ file: join(layout.root, x.report.pdf.path), sig: join(layout.root, `${x.report.pdf.path}.p7s`), certSha256: x.signer.certificate?.sha256 ?? "", ca: opts.ca, intermediates: opts.caIntermediate });
+      (pdfSig.state === "bad" ? bad : parts).push(`report.pdf's e-signature: ${pdfSig.detail}`);
+    }
     if (x.state === "adopted" && x.signer?.kind !== "examiner") bad.push("it says adopted and is not an examiner's");
     if (x.state === "draft" && x.signer?.kind === "examiner") parts.push("a draft sealed by an examiner's key: not an adoption");
     // The bytes it binds.
@@ -540,7 +606,7 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
       else parts.push("anchored beside the run");
     } else parts.push(layout.anchor ? "the anchor is not readable" : "no anchor here to hold it to");
     // A token over its signature.
-    const tsr = join(r.dir, "release.json.sig.tsr");
+    const tsr = `${sigPath}.tsr`;
     if (existsSync(tsr) && existsSync(sigPath)) {
       const sigSha = fileSha(sigPath) ?? "";
       const read = readTimestampResponse(readFileSync(tsr), sigSha);
@@ -558,10 +624,52 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
       else if (opts.tsaCa && checked?.verified !== true) bad.push(`its timestamp token was not checked against ${opts.tsaCa} (${checked?.detail ?? "no answer"})`);
       else parts.push(`timestamped ${read.gen_time ?? "(time unread)"}${checked?.verified ? ` (token verified against ${opts.tsaCa})` : " (imprint only: give --tsa-ca FILE to check the authority's signature)"}${later}`);
     } else parts.push("not timestamped");
+    // The technical reviews it binds as signed: still signed and over the state it binds.
+    if (x.adoption?.technical_review?.length && reviewText !== null && c?.review) {
+      const boundLines = reviewLines.slice(0, c.review.lines).map((l) => {
+        try {
+          return { ...(JSON.parse(l) as ReviewLine), text: l };
+        } catch {
+          return { text: l } as ReviewLine & { text: string };
+        }
+      });
+      const boundState = { report_sha256: x.report?.markdown?.sha256 ?? null, ledger_head: c.ledger?.head ?? null, custody_sha256: x.custody?.sha256 ?? null, dispositions_head: dispositionsHead(boundLines) };
+      const now = technicalReviewsOf(boundLines, boundState);
+      for (const t of x.adoption.technical_review) {
+        const again = now.find((n) => n.review_seq === t.review_seq);
+        const claimed = t.status === "signed" || t.status === "countersigned-after-release";
+        if (!again) bad.push(`the technical review at review line ${t.review_seq} it binds is not in the review here`);
+        else if (claimed && again.status !== t.status) bad.push(`the technical review by ${t.reviewer.name} (review line ${t.review_seq}) it binds as ${t.status} is now: ${again.words}`);
+        else if (again.status === "bad-signature") bad.push(`the technical review by ${t.reviewer.name}: ${again.words}`);
+        else parts.push(`technical review by ${t.reviewer.name}${t.outcome ? ` (${t.outcome})` : ""}: ${again.words}`);
+      }
+      if (x.policy?.require_technical_review && !now.some(satisfiesPolicy)) bad.push("it was sealed under --require-technical-review, and no technical review it binds is signed by the reviewer, current and other than a disagreement");
+    } else if (x.state === "adopted" && x.schema === 2) parts.push(`${NO_TECHNICAL_REVIEW.toLowerCase()} bound`);
+    // Where the run ran, when its agents may have reached the signers' keys (host mode, not recorded as hidden).
+    if (x.host && x.host.isolation !== "microvm" && x.host.signer_keys_hidden !== true) parts.push(`the host: ${x.host.note}`);
     if (x.missing?.length) parts.push(`could not bind: ${x.missing.join("; ")}`);
     if (bad.length) fail(`${tag}${x.state.toUpperCase()}, ${x.at}, NOT AS SEALED: ${bad.join("; ")}${parts.length ? ` (${parts.join("; ")})` : ""}`);
     else lines.push(`${tag}${x.state === "adopted" ? "ADOPTED" : "DRAFT"}, ${x.at}, ${x.reason}: ${parts.join("; ")}`);
     prev = r;
+  }
+  // Every technical review in the review, against the latest release's state: said, and a countersign that does not verify fails.
+  let technical: TechnicalReview[] | undefined;
+  const latest = all.at(-1)?.record;
+  if (reviewText !== null && latest) {
+    const parsed = reviewLines.map((l) => {
+      try {
+        return { ...(JSON.parse(l) as ReviewLine), text: l };
+      } catch {
+        return { text: l } as ReviewLine & { text: string };
+      }
+    });
+    technical = technicalReviewsOf(parsed, { report_sha256: latest.report?.markdown?.sha256 ?? null, ledger_head: latest.chains?.ledger?.head ?? null, custody_sha256: latest.custody?.sha256 ?? null, dispositions_head: dispositionsHead(parsed) });
+    if (!technical.length) lines.push(`Technical:    ${NO_TECHNICAL_REVIEW}.`);
+    for (const t of technical) {
+      const line = `Technical:    review line ${t.review_seq}, by ${t.reviewer.name}${t.outcome ? `, ${t.outcome}` : ""}: ${t.words}`;
+      if (t.status === "bad-signature") fail(line);
+      else lines.push(line);
+    }
   }
   // What the chain comes to.
   const last = all.at(-1)?.record;
@@ -570,5 +678,5 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
     `Releases:     ${all.length} (v0..v${all.at(-1)?.version}); ${adopted ? `the latest adoption is v${adopted.version} by ${adopted.record?.signer.examiner?.name ?? "?"}` : "none adopted by an examiner: every one is the machine's draft"}${last && adopted && last !== adopted.record ? `; v${all.at(-1)?.version} after it is a ${last.state}` : ""}`,
   );
 
-  return { ok, lines, releases: all.length, signatures };
+  return { ok, lines, releases: all.length, signatures, technical };
 }

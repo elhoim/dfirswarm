@@ -62,7 +62,7 @@ set -e
 jq '.runs[0].state = "done"' "$RUNS/registry.json" > "$TMP/r" && mv "$TMP/r" "$RUNS/registry.json"
 # The sign-off is an enrolled examiner's: with none enrolled it is refused, and the run's recorded examiner is not taken for one.
 set +e
-out="$(swarm review srv1 --sign)"; rc=$?
+out="$(swarm review srv1 --sign --yes)"; rc=$?
 set -e
 [[ $rc -ne 0 ]] && grep -q 'no examiner is enrolled on this install' <<<"$out" || fail "a sign-off with no enrolled examiner was taken (rc $rc): $out"
 out="$(swarm examiner enroll --name "H. Examiner" --organisation "Case Lab" --competence "Ten years of casework" --generate-key --no-passphrase </dev/null)" || fail "enrolment failed: $out"
@@ -70,7 +70,7 @@ grep -q "For the organisation's signer register" <<<"$out" && grep -q 'SHA256:' 
 grep -q 'PRIVATE KEY' <<<"$out" && fail "enrolment printed a private key"
 # A sign-off is over the report the examiner read: with none there, it is refused.
 set +e
-out="$(swarm review srv1 --sign)"; rc=$?
+out="$(swarm review srv1 --sign --yes)"; rc=$?
 set -e
 [[ $rc -ne 0 ]] && grep -q 'there is no work/report.md in run srv1 to sign over' <<<"$out" || fail "a sign-off over no report was taken (rc $rc): $out"
 [[ ! -e "$RUNS/reviews/srv1.jsonl" ]] || [[ "$(wc -l < "$RUNS/reviews/srv1.jsonl" | tr -d ' ')" == 3 ]] || fail "a refused sign-off wrote a line"
@@ -78,11 +78,11 @@ mkdir -p "$OLD/work"
 printf '# Report\n\nPersistence by a scheduled task [#3].\n' > "$OLD/work/report.md"
 # With no custody verdict there is nothing a release can bind.
 set +e
-out="$(swarm review srv1 --sign)"; rc=$?
+out="$(swarm review srv1 --sign --yes)"; rc=$?
 set -e
 [[ $rc -ne 0 ]] && grep -q 'no custody verdict to release' <<<"$out" || fail "a sign-off with no custody verdict was taken (rc $rc): $out"
 node --experimental-strip-types --no-warnings "$ROOT/scripts/custody.ts" "$OLD" --run srv1 --runs-dir "$RUNS" --quiet >/dev/null 2>&1 || true
-out="$(swarm review srv1 --sign)" || fail "the sign-off failed: $out"
+out="$(swarm review srv1 --sign --yes)" || fail "the sign-off failed: $out"
 grep -q 'v1 ADOPTED by H. Examiner (Case Lab)' <<<"$out" || fail "the sign-off is not the enrolled examiner's release: $out"
 grep -q 'Run Examiner' <<<"$out" && fail "the run's recorded examiner was taken for the examiner: $out"
 [[ -f "$OLD/release/v0/release.json" && -f "$OLD/release/v1/release.json.sig" ]] || fail "the sign-off wrote no release (v0, the machine's draft, and v1, the adoption)"

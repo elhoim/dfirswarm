@@ -100,7 +100,9 @@ test("the machine's draft binds the report, a rendering of it at the release's o
   assert.match(String(twice.skipped), /release v0 already binds this custody verdict/);
   const v = await verifyReleases(layout(r));
   assert.equal(v.ok, true, v.lines.join("\n"));
-  assert.match(v.lines[0], /^Release v0:   DRAFT, .*sealed by this install's machine key \(SHA256:\S+\), not an examiner: signature sound under the key the record names .*; report\.html as bound; work\/report\.md as bound; binds this custody verdict; every chain it binds is as bound; anchored beside the run; not timestamped$/);
+  assert.match(v.lines[0], /^Release v0:   DRAFT, .*sealed by this install's machine key \(SHA256:\S+\), not an examiner: machine seal, self-checked \(sound under the machine key it names: it shows the install's machine key sealed these bytes, no more\); report\.html as bound; work\/report\.md as bound; binds this custody verdict; every chain it binds is as bound; anchored beside the run; not timestamped; the host: the agents ran on the host \(host mode\), and the kickoff did not record whether the signers' keys were hidden from their panes: unknown$/);
+  assert.doesNotMatch(v.lines[0], /verified/, "the machine's seal is never called verified");
+  assert.deepEqual(rec.host, { isolation: "host", signer_keys_hidden: null, note: "the agents ran on the host (host mode), and the kickoff did not record whether the signers' keys were hidden from their panes: unknown" });
 });
 
 test("a draft is refused when the run is not as custody sealed it: the report edited, an entry appended, the verdict rewritten", async () => {
@@ -130,7 +132,7 @@ test("an enrolled examiner's adoption: refused while a defective conclusion has 
   await assert.rejects(signRelease(ctxOf(r), { home: r.home, say: quiet }), /the release is refused:\n {2}- E-16 \(question:3\) is not supported as it stands .*\n {2}- E-17 \(summary\) is not supported as it stands/);
   assert.equal(readReleases(r.root).length, 1, "a refused adoption writes no release");
   await dispose(r);
-  await appendReview(r.runs, r.id, r.root, { examiner: "Ada Examiner", examinerId: "ada-examiner", action: "technical_review", reviewer: { name: "Bo Reviewer", competence: "EnCE" }, methodsChecked: "re-ran fls" });
+  await appendReview(r.runs, r.id, r.root, { examiner: "Ada Examiner", examinerId: "ada-examiner", action: "technical_review", reviewer: { name: "Bo Reviewer", competence: "EnCE" }, methodsChecked: "re-ran fls", outcome: "agreed" });
   const before = (await readReviews(r.runs, r.id)).length;
   const w = await signRelease(ctxOf(r), { home: r.home, say: quiet });
   assert.equal(w.version, 1);
@@ -153,7 +155,7 @@ test("an enrolled examiner's adoption: refused while a defective conclusion has 
   assert.doesNotMatch(html, /class="watermark"/);
   assert.match(html, /<p class="release-banner adopted">Release v1, adopted by Ada Examiner \(Lab One\)/);
   assert.match(html, /<dt>Examiner<\/dt><dd>Ada Examiner, Lab One: GCFA; ten years of casework \(enrolled on this install; key SHA256:/);
-  assert.match(html, /<dt>Release<\/dt><dd>v1, adopted \S+: 1 conclusion\(s\) adopted, 1 qualified, 1 withdrawn, 1 rendered inconclusive, 1 not adopted \(the agents'\); methods checked by Bo Reviewer \(EnCE\): re-ran fls<\/dd>/);
+  assert.match(html, /<dt>Release<\/dt><dd>v1, adopted \S+: 1 conclusion\(s\) adopted, 1 qualified, 1 withdrawn, 1 rendered inconclusive, 1 not adopted \(the agents'\); methods checked by Bo Reviewer \(EnCE\), agreed: re-ran fls; recorded by the examiner; not signed by the reviewer<\/dd>/);
   // The review's sign-off, written after the signature, names the release.
   const lines = await readReviews(r.runs, r.id);
   const sign = lines.at(-1);
@@ -164,13 +166,13 @@ test("an enrolled examiner's adoption: refused while a defective conclusion has 
   // Verified: against the key the release names, and against the organisation's register.
   let v = await verifyReleases(layout(r));
   assert.equal(v.ok, true, v.lines.join("\n"));
-  assert.match(v.lines[1], /^Release v1:   ADOPTED, .*, adopted by the examiner: follows v0; sealed by the examiner Ada Examiner \(SHA256:\S+\): signature sound under the key the record names .*; the review's sign-off names it; anchored beside the run; not timestamped$/);
+  assert.match(v.lines[1], /^Release v1:   ADOPTED, .*, adopted by the examiner: follows v0; sealed by the examiner Ada Examiner \(key SHA256:\S+\): signature sound under the key the record names .*; signed on the command line, the consent presented and its confirmation skipped \(--yes\) at \S+ over report\.html as shown; .*; the review's sign-off names it; anchored beside the run; not timestamped; technical review by Bo Reviewer \(agreed\): recorded by the examiner; not signed by the reviewer; the host: .*$/);
   assert.equal(v.signatures.find((s) => s.version === 1)?.state, "unchecked");
   const register = join(r.home, "register");
   writeFileSync(register, `${e.register}\n`);
   v = await verifyReleases(layout(r), { allowedSigners: register });
   assert.equal(v.signatures.find((s) => s.version === 1)?.state, "verified");
-  assert.equal(v.signatures.find((s) => s.version === 0)?.state, "unlisted", "the machine key is in no examiner register");
+  assert.equal(v.signatures.find((s) => s.version === 0)?.state, "self-checked", "the machine's seal is checked against its own key, never against an examiner register");
   // A register that lists the examiner's key for someone else: not a verification.
   writeFileSync(register, `${e.register.replace(/^ada-examiner /, "mallory ")}\n`);
   v = await verifyReleases(layout(r), { allowedSigners: register });

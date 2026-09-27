@@ -96,22 +96,42 @@ test("a technical reviewer's record: who, on what competence, which methods were
   await assert.rejects(appendReview(r.runs, r.id, r.root, { ...ADA, action: "technical_review", reviewer: { name: "", competence: "EnCE" }, methodsChecked: "x" }), /names who did it/);
   await assert.rejects(appendReview(r.runs, r.id, r.root, { ...ADA, action: "technical_review", reviewer: { name: "Bo", competence: "" }, methodsChecked: "x" }), /what qualifies the reviewer/);
   await assert.rejects(appendReview(r.runs, r.id, r.root, { ...ADA, action: "technical_review", reviewer: { name: "Bo", competence: "EnCE" }, methodsChecked: " " }), /which methods were checked/);
-  await assert.rejects(appendReview(r.runs, r.id, r.root, { ...ADA, action: "technical_review", reviewer: { name: "Bo", competence: "EnCE" }, methodsChecked: "fls", entries: [99] }), /no ledger entry 99/);
-  await assert.rejects(appendReview(r.runs, r.id, r.root, { action: "technical_review", examiner: "Someone", reviewer: { name: "Bo", competence: "EnCE" }, methodsChecked: "fls" }), /technical review is an enrolled examiner's act/);
-  const l = await appendReview(r.runs, r.id, r.root, { ...ADA, action: "technical_review", reviewer: { name: "Bo Reviewer", organisation: "Lab Two", competence: "EnCE" }, methodsChecked: "re-ran fls on the image and the proxy-log search", entries: [4, 10] });
+  await assert.rejects(appendReview(r.runs, r.id, r.root, { ...ADA, action: "technical_review", reviewer: { name: "Bo", competence: "EnCE" }, methodsChecked: "fls" }), /says its outcome \(--outcome agreed\|issues-resolved\|disagreement\)/);
+  await assert.rejects(appendReview(r.runs, r.id, r.root, { ...ADA, action: "technical_review", reviewer: { name: "Bo", competence: "EnCE" }, methodsChecked: "fls", outcome: "disagreement" }), /a disagreement says what it is/);
+  await assert.rejects(appendReview(r.runs, r.id, r.root, { ...ADA, action: "technical_review", reviewer: { name: "Bo", competence: "EnCE" }, methodsChecked: "fls", outcome: "agreed", entries: [99] }), /no ledger entry 99/);
+  await assert.rejects(appendReview(r.runs, r.id, r.root, { action: "technical_review", examiner: "Someone", reviewer: { name: "Bo", competence: "EnCE" }, methodsChecked: "fls", outcome: "agreed" }), /technical review is an enrolled examiner's act/);
+  // The examiner is not their own technical reviewer, whatever the case or spacing of the name.
+  await assert.rejects(appendReview(r.runs, r.id, r.root, { ...ADA, action: "technical_review", reviewer: { name: "ada  EXAMINER", competence: "EnCE" }, methodsChecked: "fls", outcome: "agreed" }), /has the examiner's own name .*: a technical review is a second person's/);
+  const l = await appendReview(r.runs, r.id, r.root, { ...ADA, action: "technical_review", reviewer: { name: "Bo Reviewer", organisation: "Lab Two", competence: "EnCE" }, methodsChecked: "re-ran fls on the image and the proxy-log search", entries: [4, 10], outcome: "issues-resolved", disagreements: ["E-16's hash: rendered inconclusive by the examiner"], reviewedAt: "2026-09-27T09:00:00Z" });
   assert.deepEqual(l.reviewer, { name: "Bo Reviewer", organisation: "Lab Two", competence: "EnCE" });
+  assert.equal(l.outcome, "issues-resolved");
+  assert.equal(l.reviewed_at, "2026-09-27T09:00:00.000Z");
+  assert.equal(l.scope, "entries");
+  assert.equal(l.recorded_as, "examiner");
+  assert.deepEqual(l.disagreements, ["E-16's hash: rendered inconclusive by the examiner"]);
+  assert.match(String(l.report_sha256), /^[0-9a-f]{64}$/, "it names the report it was over");
+  assert.match(String(l.custody_sha256), /^[0-9a-f]{64}$/);
+  assert.match(String(l.dispositions_head), /^[0-9a-f]{64}$/);
+  assert.equal(l.ledger_head, "bf4dc7313c230c253afe8d8aa0fe6feab01787e3b9b00438433573923ad48eac");
   assert.deepEqual(l.entries?.map((e) => e.seq), [4, 10]);
   assert.equal(l.entries?.[0].hash, "dc310a6ef390874293d05c60cfa26246b279c4609891544beb7c28c80e2ef5c4");
   const st = await adoptionState({ runsDir: r.runs, run: r.id, sandbox: r.root });
   assert.equal(st.technical.length, 1);
   assert.equal(st.technical[0].reviewer.name, "Bo Reviewer");
   assert.match(st.technical[0].recorded_by, /^Ada Examiner \(/);
+  assert.equal(st.technical[0].status, "recorded");
+  assert.equal(st.technical[0].words, "recorded by the examiner; not signed by the reviewer");
+  // A disposition changed after it: the review is over an earlier state.
+  await appendReview(r.runs, r.id, r.root, { ...ADA, action: "adopt", entry_seq: 14 });
+  const moved = await adoptionState({ runsDir: r.runs, run: r.id, sandbox: r.root });
+  assert.equal(moved.technical[0].status, "stale");
+  assert.equal(moved.technical[0].words, "recorded over an earlier state, not current");
 });
 
 test("the state the report body takes: the enrolled examiner, the technical reviewer, each entry's latest act by hash, the sign-off", async () => {
   const r = await stoppedRun();
   await appendReview(r.runs, r.id, r.root, { ...ADA, action: "adopt", entry_seq: 14 });
-  await appendReview(r.runs, r.id, r.root, { ...ADA, action: "technical_review", reviewer: { name: "Bo Reviewer", competence: "EnCE" }, methodsChecked: "fls" });
+  await appendReview(r.runs, r.id, r.root, { ...ADA, action: "technical_review", reviewer: { name: "Bo Reviewer", competence: "EnCE" }, methodsChecked: "fls", outcome: "agreed" });
   const st = await adoptionState({ runsDir: r.runs, run: r.id, sandbox: r.root, examiner: { name: "Ada Examiner", organisation: "Lab One", competence: "GCFA" } });
   assert.deepEqual(st.review?.examiner, { name: "Ada Examiner", organisation: "Lab One", competence: "GCFA" });
   assert.deepEqual(st.review?.technicalReviewer, { name: "Bo Reviewer", competence: "EnCE", checked: "fls" });

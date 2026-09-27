@@ -22,14 +22,23 @@
  * into a supported conclusion; it is withdrawn or rendered inconclusive, and
  * repairing its support is further examination (a new run), not a review
  * act. `technical_review` records a second person who checked the methods:
- * who, on what competence, what was checked. These acts, and `sign`, are an
- * enrolled examiner's (scripts/signers.ts): the line names the examiner's
- * id and key; `sign` is written by scripts/release.ts after the release it
- * names was signed with that key, and names it (version, sha256, the
- * signature's sha256). accept, reject and amend of a finding may still name
- * an examiner who is not enrolled, and the line says so by carrying no id.
- * The run's registry `examiner` (what the kickoff was told) is never taken
- * for the examiner.
+ * who, on what competence, what was checked (by entry, or every answer), the
+ * outcome (agreed, issues-resolved, disagreement, with each disagreement and
+ * how it was resolved), when, and the state it was made over: report.md's
+ * sha256, the ledger's head, custody's sha256 and the dispositions' head. It
+ * is written by the examiner (the reviewer then did not sign it) or by an
+ * enrolled technical reviewer, who signs it: the `countersign` line after it
+ * carries `over_seq`, `over_sha256` (the record line's own hash), the
+ * signature over that line's bytes (SSHSIG in the dfirswarm-review
+ * namespace, or a CMS for a token's certificate) and the key. A review whose
+ * hashes no longer match the run is over an earlier state, and says so.
+ * These acts, and `sign`, are an enrolled person's (scripts/signers.ts): the
+ * line names the id and key; `sign` is written by scripts/release.ts after
+ * the release it names was signed with that key, and names it (version,
+ * sha256, the signature's sha256). accept, reject and amend of a finding may
+ * still name an examiner who is not enrolled, and the line says so by
+ * carrying no id. The run's registry `examiner` (what the kickoff was told)
+ * is never taken for the examiner.
  *
  * `entry_hash` is the entry's own hash from the ledger's chain (its
  * immutable core); `sign` records the head of the chain it signs, the
@@ -56,13 +65,19 @@ import { chmod, mkdir, open, rm, stat, writeFile } from "node:fs/promises";
 import { hostname, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { hashRegularFile, readRegularText } from "./regular-file.ts";
 import { dispositionsOf, dispositionWords, supportDefects, type Defect, type DispositionAct } from "./adoption.ts";
-import { loadExaminer } from "./signers.ts";
+import { checkSshSignature, loadExaminer, REVIEW_NAMESPACE, type SignatureState } from "./signers.ts";
+import { cmsVerify } from "./pkcs11.ts";
 import { supersededBy, type LedgerDispute, type LedgerEntry } from "../extensions/protocol.ts";
 
-export type ReviewAction = "accept" | "reject" | "amend" | "sign" | "adopt" | "qualify" | "inconclusive" | "technical_review";
-export const REVIEW_ACTIONS: readonly ReviewAction[] = ["accept", "reject", "amend", "sign", "adopt", "qualify", "inconclusive", "technical_review"];
+export type ReviewAction = "accept" | "reject" | "amend" | "sign" | "adopt" | "qualify" | "inconclusive" | "technical_review" | "countersign";
+export const REVIEW_ACTIONS: readonly ReviewAction[] = ["accept", "reject", "amend", "sign", "adopt", "qualify", "inconclusive", "technical_review", "countersign"];
+/** A technical review's outcome. */
+export type ReviewOutcome = "agreed" | "issues-resolved" | "disagreement";
+export const REVIEW_OUTCOMES: readonly ReviewOutcome[] = ["agreed", "issues-resolved", "disagreement"];
 /**
  * The acts only an enrolled examiner makes. A sign-off is one too; it is
  * written by scripts/release.ts once the release it names is signed with
@@ -88,10 +103,27 @@ export type ReviewLine = {
   examiner_id?: string;
   key?: string;
   note?: string;
-  /** technical_review: the second person, what qualifies them, what they checked, and over which entries. */
-  reviewer?: { name: string; organisation?: string; competence: string };
+  /** technical_review: the second person, what qualifies them, what they checked, and over which entries (an enrolled reviewer by id and key). */
+  reviewer?: { name: string; organisation?: string; competence: string; id?: string; fingerprint?: string; key_kind?: string };
   methods_checked?: string;
   entries?: Array<{ seq: number; hash: string }>;
+  /** technical_review: the outcome, when the review was done, its scope, and each disagreement with how it was resolved. */
+  outcome?: ReviewOutcome;
+  reviewed_at?: string;
+  scope?: "entries" | "all-answers";
+  disagreements?: string[];
+  /** technical_review: who wrote the record: the examiner (the reviewer did not sign it) or the reviewer. */
+  recorded_as?: "examiner" | "reviewer";
+  /** technical_review: custody.json's sha256 and the head of the dispositions, as the review saw them (with report_sha256 and ledger_head). */
+  custody_sha256?: string | null;
+  dispositions_head?: string;
+  /** countersign: the record signed, by its seq and its line's sha256, and the signature over that line's bytes. */
+  over_seq?: number;
+  over_sha256?: string;
+  signature?: { format: "sshsig" | "cms"; namespace: string; data: string };
+  signer?: { id: string; name: string; principal: string; kind: string; fingerprint: string; public?: string; certificate_sha256?: string };
+  /** countersign: the latest adopted release when it was made: a countersign after release names it, and the next amendment binds it. */
+  after_release?: { version: number; sha256: string } | null;
   /** sign: the release the examiner signed (scripts/release.ts), by version, sha256 and its signature's sha256. */
   release?: { version: number; sha256: string; signature_sha256: string };
   ledger_head?: string;
@@ -261,9 +293,14 @@ export type ReviewInput = {
   note?: string;
   report?: string;
   /** technical_review: who checked the methods, and what. */
-  reviewer?: { name: string; organisation?: string; competence: string };
+  reviewer?: { name: string; organisation?: string; competence: string; id?: string; fingerprint?: string; key_kind?: string };
   methodsChecked?: string;
   entries?: number[];
+  allAnswers?: boolean;
+  outcome?: string;
+  reviewedAt?: string;
+  disagreements?: string[];
+  recordedAs?: "examiner" | "reviewer";
   /** sign: the release it is over. */
   release?: { version: number; sha256: string; signature_sha256: string };
 };
@@ -361,6 +398,7 @@ async function attestationsHead(sandbox: string): Promise<string | null> {
 /** Append one act to a run's review, checked against its ledger. Returns the line written. */
 export async function appendReview(runsDir: string, runId: string, sandbox: string, input: ReviewInput): Promise<ReviewLine> {
   if (!REVIEW_ACTIONS.includes(input.action)) throw new Error(`action must be one of ${REVIEW_ACTIONS.join(", ")}`);
+  if (input.action === "countersign") throw new Error("a countersignature is written by scripts/technical-review.ts, over a record it signed with the reviewer's key");
   const examiner = (input.examiner ?? "").trim();
   if (!examiner) throw new Error("an examiner's name is required (--examiner)");
   if (ENROLLED_ACTIONS.includes(input.action) && !input.examinerId) throw new Error(`${input.action.replace("_", " ")} is an enrolled examiner's act: enrol with swarm.sh examiner enroll, and name the examiner by id (--examiner ID)`);
@@ -403,20 +441,41 @@ export async function appendReview(runsDir: string, runId: string, sandbox: stri
       line.open_rejections = [...reviewState(before).entries.values()].filter((l) => l.action === "reject" && l.entry_kind !== "answer").map((l) => l.entry_seq as number).sort((a, b) => a - b);
       if (input.release) line.release = input.release;
     } else if (input.action === "technical_review") {
-      // A second person who checked the methods: who, on what competence, what they checked.
+      // A second person who checked the methods: who, on what competence, what they checked, with what outcome, over what state.
       const r = input.reviewer;
       if (!r?.name?.trim()) throw new Error("a technical review names who did it (--reviewer NAME)");
       if (!r.competence?.trim()) throw new Error("a technical review says what qualifies the reviewer (--competence TEXT)");
       if (!input.methodsChecked?.trim()) throw new Error("a technical review says which methods were checked (--checked TEXT)");
-      line.reviewer = { name: r.name.trim(), ...(r.organisation?.trim() ? { organisation: r.organisation.trim() } : {}), competence: r.competence.trim() };
+      const outcome = input.outcome as ReviewOutcome | undefined;
+      if (!outcome || !REVIEW_OUTCOMES.includes(outcome)) throw new Error(`a technical review says its outcome (--outcome ${REVIEW_OUTCOMES.join("|")})`);
+      const disagreements = (input.disagreements ?? []).map((d) => d.trim()).filter(Boolean);
+      if (outcome === "disagreement" && !disagreements.length) throw new Error("a disagreement says what it is, and how it stands (--disagreement TEXT, once for each)");
+      if (input.allAnswers && input.entries?.length) throw new Error("a technical review's scope is entries by seq or every answer (--all-answers), not both");
+      if (input.reviewedAt !== undefined && !Number.isFinite(Date.parse(input.reviewedAt))) throw new Error(`${JSON.stringify(input.reviewedAt)} is not a date and time (--reviewed-at, ISO 8601)`);
+      // The examiner does not review their own work: by id, by name, by key.
+      const clash = independenceConflict({ id: r.id ?? null, name: r.name, fingerprint: r.fingerprint ?? null }, { id: input.examinerId ?? null, name: examiner, fingerprint: input.key ?? null });
+      if (input.recordedAs !== "reviewer" && clash) throw new Error(`the technical reviewer ${clash}: a technical review is a second person's`);
+      line.recorded_as = input.recordedAs === "reviewer" ? "reviewer" : "examiner";
+      line.reviewer = { name: r.name.trim(), ...(r.organisation?.trim() ? { organisation: r.organisation.trim() } : {}), competence: r.competence.trim(), ...(r.id ? { id: r.id } : {}), ...(r.fingerprint ? { fingerprint: r.fingerprint } : {}), ...(r.key_kind ? { key_kind: r.key_kind } : {}) };
       line.methods_checked = input.methodsChecked.trim();
+      line.outcome = outcome;
+      line.reviewed_at = input.reviewedAt ? new Date(input.reviewedAt).toISOString() : line.at;
       if (input.entries?.length) {
+        line.scope = "entries";
         line.entries = input.entries.map((seq) => {
           const e = ledger.entries.find((x) => x.seq === seq);
           if (!e) throw new Error(`run ${runId} has no ledger entry ${seq}`);
           return { seq, hash: entryHash(e) };
         });
-      }
+      } else if (input.allAnswers) line.scope = "all-answers";
+      if (disagreements.length) line.disagreements = disagreements;
+      // What the review was over: the report, the ledger, custody and the dispositions as they are now.
+      line.report_path = input.report ?? "work/report.md";
+      if (!isSandboxPath(line.report_path)) throw new Error(`${JSON.stringify(line.report_path)} is not a path under the run (--report work/…)`);
+      line.report_sha256 = await sandboxFileSha(sandbox, line.report_path);
+      line.ledger_head = ledgerHead(ledger.entries, ledger.sha256);
+      line.custody_sha256 = await sandboxFileSha(sandbox, "custody.json");
+      line.dispositions_head = dispositionsHead(before);
     } else {
       if (!Number.isInteger(input.entry_seq)) throw new Error(`${input.action} needs the entry's seq (--entry N)`);
       const entry = ledger.entries.find((e) => e.seq === input.entry_seq);
@@ -440,25 +499,264 @@ export async function appendReview(runsDir: string, runId: string, sandbox: stri
       }
     }
     if (note) line.note = note;
-    const text = JSON.stringify(line);
     // Appended through a handle that follows no link and waits on no FIFO,
     // and only to a regular file.
-    const handle = await open(file, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK, 0o600).catch((err: NodeJS.ErrnoException) => {
-      throw new ReviewFileError(file, err.code === "ELOOP" ? "a link" : `not writable (${err.code ?? "error"})`);
-    });
-    try {
-      if (!(await handle.stat()).isFile()) throw new ReviewFileError(file, "not a regular file");
-      await handle.write(`${text}\n`);
-    } finally {
-      await handle.close();
-    }
-    await chmod(file, 0o600).catch(() => undefined);
+    await appendLine(file, JSON.stringify(line));
     return line;
   });
 }
 
+/**
+ * Where a technical review stands, in one of the report's five wordings:
+ * - signed: the reviewer signed it (a countersign that verifies), over the
+ *   run as it stands;
+ * - recorded: the examiner (or the reviewer, unsigned) recorded it; the
+ *   reviewer did not sign it;
+ * - countersigned-after-release: signed, after release vN (the next
+ *   amendment binds it);
+ * - stale: signed or recorded over an earlier state (the report, the
+ *   ledger, custody or the dispositions changed since);
+ * - bad-signature: a countersign is there and does not verify.
+ * With none at all, the report says "No technical review".
+ */
+export type TechnicalStatus = "signed" | "recorded" | "countersigned-after-release" | "stale" | "bad-signature";
+
 /** A technical reviewer's record, as the release binds it. */
-export type TechnicalReview = { reviewer: { name: string; organisation: string | null; competence: string }; methods_checked: string; entries: Array<{ seq: number; hash: string | null }>; note: string | null; at: string; review_seq: number; recorded_by: string };
+export type TechnicalReview = {
+  reviewer: { name: string; organisation: string | null; competence: string; id?: string | null; fingerprint?: string | null; key_kind?: string | null };
+  methods_checked: string;
+  entries: Array<{ seq: number; hash: string | null }>;
+  note: string | null;
+  at: string;
+  review_seq: number;
+  recorded_by: string;
+  /** Who wrote the record (older records: the examiner). */
+  recorded_as?: "examiner" | "reviewer";
+  outcome?: ReviewOutcome | null;
+  reviewed_at?: string | null;
+  scope?: "entries" | "all-answers" | null;
+  disagreements?: string[];
+  /** What it was over: report.md's sha256, the ledger's head, custody's sha256, the dispositions' head (null: an older record that named none). */
+  over?: { report_path: string | null; report_sha256: string | null; ledger_head: string | null; custody_sha256: string | null; dispositions_head: string | null } | null;
+  /** The record line's own sha256: what a countersign names and signs. */
+  line_sha256?: string;
+  countersign?: { review_seq: number; line_sha256: string; format: string; kind: string; fingerprint: string; signer: string; at: string; after_release: { version: number; sha256: string } | null; signature: SignatureState | "not checked"; detail: string } | null;
+  status?: TechnicalStatus;
+  /** The status in the report's words. */
+  words?: string;
+};
+
+/** The wording the report and verify use when a run has no technical review. */
+export const NO_TECHNICAL_REVIEW = "No technical review";
+
+/**
+ * The dispositions' head: the sha256 of every entry's latest disposition (its
+ * seq, the entry hash it was made on, the act and its note), in seq order.
+ * A disposition changed after a technical review changes it, and the review
+ * is then over an earlier state.
+ */
+export function dispositionsHead(lines: ReadonlyArray<{ seq?: number; action?: string; entry_seq?: number; entry_hash?: string; note?: string; examiner?: string; examiner_id?: string; at?: string }>): string {
+  const rows = [...dispositionsOf(lines).values()].sort((a, b) => a.seq - b.seq).map((d) => [d.seq, d.hash, d.disposition, d.note]);
+  return sha256(JSON.stringify(rows));
+}
+
+/**
+ * Why a reviewer is not independent of an examiner: the same id, the same
+ * name (case and spacing aside) or the same key. Different names do not make
+ * two people; the register, not the keys, shows that. Null when none holds.
+ */
+export function independenceConflict(reviewer: { id?: string | null; name: string; fingerprint?: string | null }, examiner: { id?: string | null; name?: string | null; fingerprint?: string | null }): string | null {
+  const norm = (s: string | null | undefined) => (s ?? "").normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+  if (reviewer.id && examiner.id && reviewer.id === examiner.id) return `is enrolled under the examiner's own id (${reviewer.id})`;
+  if (norm(reviewer.name) && norm(reviewer.name) === norm(examiner.name)) return `has the examiner's own name (${reviewer.name})`;
+  if (reviewer.fingerprint && examiner.fingerprint && reviewer.fingerprint === examiner.fingerprint) return `signs with the examiner's own key (${reviewer.fingerprint})`;
+  return null;
+}
+
+/** The state a technical review is held to: the run now, or what a release bound. */
+export type ReviewedState = { report_sha256: string | null; ledger_head: string | null; custody_sha256: string | null; dispositions_head: string };
+
+/** Whether a countersign's signature is over the record line's bytes, under the key it names. */
+export function checkCountersign(recordText: string, cs: ReviewLine): { state: SignatureState; detail: string } {
+  if (!cs.signature?.data || !cs.signer) return { state: "bad", detail: "the countersign carries no signature" };
+  const dir = mkdtempSync(join(tmpdir(), "dfs-countersign-"));
+  try {
+    const file = join(dir, "record");
+    writeFileSync(file, recordText);
+    if (cs.signature.format === "cms") {
+      const sig = join(dir, "record.p7s");
+      writeFileSync(sig, Buffer.from(cs.signature.data, "base64"));
+      const v = cmsVerify({ file, sig, certSha256: cs.signer.certificate_sha256 ?? "" });
+      return { state: v.state, detail: v.detail };
+    }
+    const sig = join(dir, "record.sig");
+    writeFileSync(sig, cs.signature.data);
+    return checkSshSignature({ file, sig, namespace: cs.signature.namespace || REVIEW_NAMESPACE, principal: cs.signer.principal, publicKey: cs.signer.public ?? "" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** A technical review's status in the report's words. */
+export function technicalWords(t: TechnicalReview): string {
+  const who = t.countersign?.signer ?? t.reviewer.name;
+  switch (t.status) {
+    case "signed":
+      return `signed by the reviewer (${who}, ${t.countersign?.fingerprint ?? "key not named"})`;
+    case "countersigned-after-release":
+      return `countersigned by the reviewer (${who}) after release v${t.countersign?.after_release?.version ?? "?"}; the next amendment binds it`;
+    case "stale":
+      return t.countersign ? "signed over an earlier state, not current" : "recorded over an earlier state, not current";
+    case "bad-signature":
+      return `its countersignature DOES NOT VERIFY (${t.countersign?.detail ?? "not over this record"})`;
+    default:
+      return t.recorded_as === "reviewer" ? "recorded by the reviewer; not signed by the reviewer" : "recorded by the examiner; not signed by the reviewer";
+  }
+}
+
+/**
+ * Every technical review in the review's lines, each with its countersign
+ * (the first that names it and verifies, else the first that names it) and
+ * where it stands against `now`. `check: false` leaves signatures unchecked
+ * (a quick read); the release gate and verify check them.
+ */
+export function technicalReviewsOf(read: ReadonlyArray<ReviewLine & { text?: string }>, now: ReviewedState | null, o: { check?: boolean } = {}): TechnicalReview[] {
+  const out: TechnicalReview[] = [];
+  const lines = read.filter((l) => typeof l.action === "string");
+  for (const l of lines) {
+    if (l.action !== "technical_review" || !l.reviewer) continue;
+    const text = l.text ?? JSON.stringify(Object.fromEntries(Object.entries(l).filter(([k]) => k !== "text")));
+    const lineSha = sha256(text);
+    const t: TechnicalReview = {
+      reviewer: { name: l.reviewer.name ?? "?", organisation: l.reviewer.organisation ?? null, competence: l.reviewer.competence ?? "", id: l.reviewer.id ?? null, fingerprint: l.reviewer.fingerprint ?? null, key_kind: l.reviewer.key_kind ?? null },
+      methods_checked: l.methods_checked ?? "",
+      entries: (l.entries ?? []).map((x) => ({ seq: x.seq, hash: x.hash ?? null })),
+      note: l.note ?? null,
+      at: l.at,
+      review_seq: l.seq,
+      recorded_by: `${l.examiner} (${l.os_user}@${l.host})`,
+      recorded_as: l.recorded_as ?? "examiner",
+      outcome: l.outcome ?? null,
+      reviewed_at: l.reviewed_at ?? null,
+      scope: l.scope ?? (l.entries?.length ? "entries" : null),
+      disagreements: l.disagreements ?? [],
+      over: l.outcome ? { report_path: l.report_path ?? null, report_sha256: l.report_sha256 ?? null, ledger_head: l.ledger_head ?? null, custody_sha256: l.custody_sha256 ?? null, dispositions_head: l.dispositions_head ?? null } : null,
+      line_sha256: lineSha,
+      countersign: null,
+    };
+    const signs = lines.filter((c) => c.action === "countersign" && c.over_seq === l.seq && c.over_sha256 === lineSha);
+    let chosen: TechnicalReview["countersign"] = null;
+    for (const c of signs) {
+      const checked = o.check === false ? { state: "not checked" as const, detail: "not checked" } : checkCountersign(text, c);
+      const cs = { review_seq: c.seq, line_sha256: sha256((c as { text?: string }).text ?? JSON.stringify(c)), format: c.signature?.format ?? "?", kind: c.signer?.kind ?? "?", fingerprint: c.signer?.fingerprint ?? "?", signer: c.signer?.name ?? c.examiner, at: c.at, after_release: c.after_release ?? null, signature: checked.state, detail: checked.detail };
+      if (!chosen || (chosen.signature === "bad" && checked.state !== "bad")) chosen = cs;
+      if (checked.state !== "bad") break;
+    }
+    t.countersign = chosen;
+    const current = !now || !t.over ? null : t.over.report_sha256 === now.report_sha256 && t.over.ledger_head === now.ledger_head && t.over.custody_sha256 === now.custody_sha256 && t.over.dispositions_head === now.dispositions_head;
+    t.status = chosen?.signature === "bad" ? "bad-signature" : current === false ? "stale" : chosen && chosen.after_release ? "countersigned-after-release" : chosen ? "signed" : "recorded";
+    // An older record names no state: it is held to nothing, so it is taken as recorded (or signed) and never as current.
+    t.words = technicalWords(t);
+    out.push(t);
+  }
+  return out;
+}
+
+/** The state of the run now, as a technical review is held to it. */
+export async function reviewedStateNow(sandbox: string, lines: ReadonlyArray<ReviewLine>, reportPath = "work/report.md"): Promise<ReviewedState> {
+  const ledger = await readLedger(sandbox).catch(() => null);
+  return {
+    report_sha256: await sandboxFileSha(sandbox, reportPath),
+    ledger_head: ledger ? ledgerHead(ledger.entries, ledger.sha256) : null,
+    custody_sha256: await sandboxFileSha(sandbox, "custody.json"),
+    dispositions_head: dispositionsHead(lines),
+  };
+}
+
+/** Whether a technical review satisfies the policy: signed by the reviewer, current, and not a disagreement. */
+export function satisfiesPolicy(t: TechnicalReview): boolean {
+  return (t.status === "signed" || t.status === "countersigned-after-release") && t.outcome !== "disagreement" && t.outcome !== null && t.outcome !== undefined;
+}
+
+/**
+ * Append a reviewer's countersign over the technical review at `overSeq`: the
+ * record's own line is signed first (outside the lock: a touch or a PIN can
+ * take a while), then the countersign is chained after whatever the review
+ * holds by then. `sign` gets the record line's bytes and returns the
+ * signature; the line names the latest adopted release when there is one.
+ */
+export async function appendCountersign(
+  runsDir: string,
+  runId: string,
+  o: { overSeq: number; signer: NonNullable<ReviewLine["signer"]>; afterRelease: { version: number; sha256: string } | null; sign: (recordText: string) => Promise<{ format: "sshsig" | "cms"; namespace: string; data: string }> },
+): Promise<ReviewLine> {
+  const lines = await readReviews(runsDir, runId);
+  const rec = lines.find((l) => l.seq === o.overSeq);
+  if (!rec || rec.action !== "technical_review") throw new Error(`review line ${o.overSeq} of ${runId} is not a technical review`);
+  if (rec.reviewer?.id && rec.reviewer.id !== o.signer.id) throw new Error(`technical review ${o.overSeq} is ${rec.reviewer.name}'s (${rec.reviewer.id}), not ${o.signer.name}'s: only its reviewer countersigns it`);
+  if (!rec.reviewer?.id && rec.reviewer?.name?.normalize("NFKC").trim().toLowerCase() !== o.signer.name.normalize("NFKC").trim().toLowerCase()) throw new Error(`technical review ${o.overSeq} names ${rec.reviewer?.name ?? "?"}, not ${o.signer.name}: only its reviewer countersigns it`);
+  const overSha = sha256(rec.text);
+  const signature = await o.sign(rec.text);
+  const file = reviewsPath(runsDir, runId);
+  return withLock(file, async () => {
+    const before = await readReviews(runsDir, runId);
+    const chain = verifyReviewChain(before);
+    if (!chain.ok) throw new Error(`the review of ${runId} is broken (${chain.reason}); nothing is added to a broken chain`);
+    if (sha256(before.find((l) => l.seq === o.overSeq)?.text ?? "") !== overSha) throw new Error(`review line ${o.overSeq} changed while it was being signed`);
+    const line: ReviewLine = {
+      v: 1,
+      seq: before.length + 1,
+      at: new Date().toISOString(),
+      examiner: o.signer.name,
+      os_user: userInfo().username,
+      host: hostname(),
+      action: "countersign",
+      examiner_id: o.signer.id,
+      key: o.signer.fingerprint,
+      over_seq: o.overSeq,
+      over_sha256: overSha,
+      signature,
+      signer: o.signer,
+      after_release: o.afterRelease,
+      prev: before.length ? sha256(before[before.length - 1].text) : null,
+    };
+    await appendLine(file, JSON.stringify(line));
+    return line;
+  });
+}
+
+/** Append one line to the review file, through a handle that follows no link and waits on no FIFO. */
+async function appendLine(file: string, text: string): Promise<void> {
+  const handle = await open(file, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK, 0o600).catch((err: NodeJS.ErrnoException) => {
+    throw new ReviewFileError(file, err.code === "ELOOP" ? "a link" : `not writable (${err.code ?? "error"})`);
+  });
+  try {
+    if (!(await handle.stat()).isFile()) throw new ReviewFileError(file, "not a regular file");
+    await handle.write(`${text}\n`);
+  } finally {
+    await handle.close();
+  }
+  await chmod(file, 0o600).catch(() => undefined);
+}
+
+/**
+ * Lines made elsewhere (a reviewer working from a package), appended as they
+ * are: only when the first names this review's head as the one before it,
+ * so what was signed over the package's review is what is added here.
+ */
+export async function appendImported(runsDir: string, runId: string, texts: string[], check: (before: ReadReviewLine[]) => void): Promise<void> {
+  const file = reviewsPath(runsDir, runId);
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  await withLock(file, async () => {
+    const before = await readReviews(runsDir, runId);
+    const chain = verifyReviewChain(before);
+    if (!chain.ok) throw new Error(`the review of ${runId} is broken (${chain.reason}); nothing is added to a broken chain`);
+    check(before);
+    const after = verifyReviewChain([...before, ...texts.map((text) => ({ text }))]);
+    if (!after.ok) throw new Error(`the imported lines do not follow this review (${after.reason})`);
+    for (const t of texts) await appendLine(file, t);
+  });
+}
 
 /**
  * The examiner's review as the report body takes it (scripts/report-body.ts
@@ -511,7 +809,7 @@ export type AdoptionState = {
  * technical reviews; the review in the shape the report body takes.
  * `upTo` reads only the review's first lines (what a release bound).
  */
-export async function adoptionState(o: { runsDir: string; run: string; sandbox: string; upTo?: number; examiner?: { name: string; organisation?: string; competence?: string } | null }): Promise<AdoptionState> {
+export async function adoptionState(o: { runsDir: string; run: string; sandbox: string; upTo?: number; examiner?: { name: string; organisation?: string; competence?: string } | null; now?: ReviewedState | null; checkSignatures?: boolean }): Promise<AdoptionState> {
   let read: ReadReviewLine[];
   try {
     read = await readReviews(o.runsDir, o.run);
@@ -546,17 +844,7 @@ export async function adoptionState(o: { runsDir: string; run: string; sandbox: 
     });
   }
   const blocked = answers.filter((a) => a.superseded_by === null && a.defects.length && !(a.standing === "withdrawn" || a.standing === "inconclusive"));
-  const technical: TechnicalReview[] = lines
-    .filter((l) => l.action === "technical_review" && l.reviewer)
-    .map((l) => ({
-      reviewer: { name: l.reviewer?.name ?? "?", organisation: l.reviewer?.organisation ?? null, competence: l.reviewer?.competence ?? "" },
-      methods_checked: l.methods_checked ?? "",
-      entries: (l.entries ?? []).map((x) => ({ seq: x.seq, hash: x.hash ?? null })),
-      note: l.note ?? null,
-      at: l.at,
-      review_seq: l.seq,
-      recorded_by: `${l.examiner} (${l.os_user}@${l.host})`,
-    }));
+  const technical = technicalReviewsOf(read as ReadonlyArray<ReviewLine & { text: string }>, o.now === null ? null : (o.now ?? (await reviewedStateNow(o.sandbox, lines))), { check: o.checkSignatures ?? true });
   const tr = technical.at(-1);
   const review: ReviewForReport | null = lines.length || o.examiner
     ? {
@@ -636,6 +924,15 @@ function opt(args: string[], name: string): string | undefined {
   return i >= 0 ? args[i + 1] : undefined;
 }
 
+/** Every value of an option given more than once (--disagreement). */
+export function opts(args: string[], name: string): string[] {
+  const out: string[] = [];
+  args.forEach((a, i) => {
+    if (a === name && args[i + 1] !== undefined) out.push(args[i + 1]);
+  });
+  return out;
+}
+
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...args] = argv;
   const runsDir = opt(args, "--runs") ?? process.env.SWARM_RUNS_DIR;
@@ -677,6 +974,11 @@ async function main(argv: string[]): Promise<number> {
               reviewer: { name: opt(args, "--reviewer") ?? "", organisation: opt(args, "--organisation"), competence: opt(args, "--competence") ?? "" },
               methodsChecked: opt(args, "--checked"),
               entries: entries ? entries.split(",").map((s) => Number(s.trim().replace(/^(?:#|E-)/i, ""))).filter((n) => Number.isInteger(n) && n > 0) : undefined,
+              allAnswers: args.includes("--all-answers"),
+              outcome: opt(args, "--outcome"),
+              reviewedAt: opt(args, "--reviewed-at"),
+              disagreements: opts(args, "--disagreement"),
+              recordedAs: "examiner" as const,
             }
           : {}),
       });
@@ -707,7 +1009,7 @@ async function main(argv: string[]): Promise<number> {
         lines: lines.length,
         chain: v,
         entries: [...state.entries.values()].map((l) => ({ seq: l.entry_seq, action: l.action, examiner: l.examiner, enrolled: Boolean(l.examiner_id), at: l.at, note: l.note ?? null })),
-        technical_reviews: lines.filter((l) => l.action === "technical_review").map((l) => ({ reviewer: l.reviewer ?? null, checked: l.methods_checked ?? null, at: l.at })),
+        technical_reviews: technicalReviewsOf(lines, sandbox ? await reviewedStateNow(sandbox, lines) : null).map((t) => ({ reviewer: t.reviewer, checked: t.methods_checked, at: t.at, outcome: t.outcome ?? null, status: t.status, words: t.words })),
         signed: s0
           ? {
               examiner: s0.examiner,
@@ -731,7 +1033,8 @@ async function main(argv: string[]): Promise<number> {
         console.log(`Review of ${run}: ${lines.length} act(s); the chain ${v.ok ? "verifies" : `is BROKEN (${v.reason})`}.`);
         const verb: Record<string, string> = { accept: "accepted", reject: "rejected (for an answer: withdrawn)", amend: "amended", adopt: "adopted", qualify: "adopted with a qualification", inconclusive: "rendered inconclusive" };
         for (const e of summary.entries) console.log(`  #${e.seq}: ${verb[e.action] ?? e.action} by ${e.examiner}${e.enrolled ? "" : " (not an enrolled examiner)"} at ${e.at}${e.note ? ` (${e.note})` : ""}`);
-        for (const r of summary.technical_reviews) console.log(`  Technical review by ${r.reviewer?.name ?? "?"}${r.reviewer?.organisation ? `, ${r.reviewer.organisation}` : ""} (${r.reviewer?.competence ?? "competence not said"}) at ${r.at}: checked ${r.checked ?? "?"}`);
+        for (const r of summary.technical_reviews) console.log(`  Technical review by ${r.reviewer?.name ?? "?"}${r.reviewer?.organisation ? `, ${r.reviewer.organisation}` : ""} (${r.reviewer?.competence ?? "competence not said"}) at ${r.at}${r.outcome ? `, ${r.outcome}` : ""}: checked ${r.checked ?? "?"}; ${r.words}`);
+        if (!summary.technical_reviews.length) console.log(`  ${NO_TECHNICAL_REVIEW}.`);
         if (summary.signed) {
           console.log(`  Signed by ${summary.signed.examiner} at ${summary.signed.at}, over ledger head ${summary.signed.ledger_head}${summary.signed.current === false ? " (the ledger has changed since: the sign-off is over an earlier one)" : ""}.`);
           console.log(summary.signed.release ? `  With the enrolled examiner's key ${summary.signed.key ?? "?"}: release v${summary.signed.release.version} (release.json sha256 ${summary.signed.release.sha256}; swarm.sh releases ${run} --verify checks its signature).` : "  A sign-off from before releases: a chained record in this file, not a signature by the examiner's key.");

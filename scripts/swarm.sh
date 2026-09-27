@@ -494,6 +494,11 @@ Isolation
                       records custodian's share), or print (a line and a
                       QR-ready string for the case file). A signed git remote
                       is a witness, not a write-once store.
+  --require-technical-review  An examiner's release of this run is sealed only
+                      over a current technical review signed by its reviewer
+                      whose outcome is not a disagreement (two-stage signing;
+                      SWARM_REQUIRE_TECHNICAL_REVIEW=1 does the same for every
+                      run). Stored in the run's record.
   --allow-oauth-in-vm Let a subscription (OAuth) provider into the VMs; refused
                       otherwise, since its token is the operator's whole account.
   --no-vm-snapshot    At stop, remove each VM without keeping its disk. By default
@@ -3450,7 +3455,7 @@ cmd_start() {
   # Where the agents live: one microVM each (the default), or host
   # processes (--isolation host, unisolated). isolation_given says the
   # operator named it, so a refusal can say how to choose the other.
-  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" anchor_mirror="" brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}'
+  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" anchor_mirror="" require_technical_review=0 brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}'
   local seal_herdr=1
   # Directories the panes may not read. Reads are open by design, so this is
   # narrow on purpose: material about the case the agents must derive rather
@@ -3598,6 +3603,7 @@ cmd_start() {
       --custody-timestamp-ca) custody_tsa_ca="$2"; shift 2 ;;
       --time-reference) time_reference="$2"; shift 2 ;;
       --anchor-mirror) anchor_mirror="$2"; shift 2 ;;
+      --require-technical-review) require_technical_review=1; shift ;;
       -h|--help) usage_start; exit 0 ;;
       *) die_usage "start: unknown option $1" ;;
     esac
@@ -5216,6 +5222,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson provenance "$(provenance_json)" \
     --argjson custody_timeout "$custody_timeout" \
     --arg custody_sign_key "$custody_sign_key" --arg custody_tsa "$custody_tsa" --arg custody_tsa_ca "$custody_tsa_ca" --arg time_reference "$time_reference" --arg anchor_mirror "$anchor_mirror" \
+    --argjson require_technical_review "$require_technical_review" \
     --argjson host_clock "$host_clock" \
     --argjson notify "$([[ -n "$notify_cmd" ]] && echo true || echo false)" \
     --arg disk_encryption "$disk_encryption" \
@@ -5287,6 +5294,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       custody_timeout_sec: $custody_timeout,
       custody_seal: (if ($custody_sign_key + $custody_tsa + $custody_tsa_ca + $time_reference) == "" then null else {sign_key: (if $custody_sign_key == "" then null else $custody_sign_key end), timestamp_url: (if $custody_tsa == "" then null else $custody_tsa end), timestamp_ca: (if $custody_tsa_ca == "" then null else $custody_tsa_ca end), time_reference: (if $time_reference == "" then null else $time_reference end)} end),
       anchor_mirror: (if $anchor_mirror == "" then null else $anchor_mirror end),
+      require_technical_review: ($require_technical_review == 1),
       notify: $notify,
       disk_encryption: $disk_encryption,
       synced_folder_allowed_by: (if $synced_allowed_by == "" then null else $synced_allowed_by end),
@@ -8481,6 +8489,8 @@ PY
   # walks the chain.
   if [[ -d "$sandbox/release" && ! -L "$sandbox/release" ]]; then
     copy_tree "$sandbox/release" "$out/release"
+    # A prepared release not yet sealed is nobody's release: it stays behind.
+    rm -rf "$out/release"/.pending-* 2>/dev/null || true
     rm -rf "$out"/release/.*.tmp 2>/dev/null || true
     chmod -R u+w "$out/release" 2>/dev/null || true
   fi
@@ -8712,13 +8722,15 @@ cmd_custody_verify() {
 }
 
 cmd_verify() {
-  local target="${1:-}" allowed="" tsa_ca="" tmp="" dir
-  [[ -n "$target" && "$target" != -* ]] || die_usage "verify requires <package dir|zip> [--allowed-signers FILE] [--tsa-ca FILE]"
+  local target="${1:-}" allowed="" tsa_ca="" ca="" ca_inter="" tmp="" dir
+  [[ -n "$target" && "$target" != -* ]] || die_usage "verify requires <package dir|zip> [--allowed-signers FILE] [--ca FILE] [--tsa-ca FILE]"
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --allowed-signers) allowed="$2"; shift 2 ;;
       --tsa-ca) tsa_ca="$2"; shift 2 ;;
+      --ca) ca="$2"; shift 2 ;;
+      --ca-intermediate) ca_inter="$2"; shift 2 ;;
       *) die_usage "verify: unknown option $1" ;;
     esac
   done
@@ -8807,6 +8819,8 @@ PY
   local chains_out chains_ok=1 chains_rc=0 release_key_unchecked=0 pt_args=()
   [[ -n "$allowed" ]] && pt_args+=(--allowed-signers "$allowed")
   [[ -n "$tsa_ca" ]] && pt_args+=(--tsa-ca "$tsa_ca")
+  [[ -n "$ca" ]] && pt_args+=(--ca "$ca")
+  [[ -n "$ca_inter" ]] && pt_args+=(--ca-intermediate "$ca_inter")
   chains_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" verify "$dir" ${pt_args[@]+"${pt_args[@]}"} 2>&1)" || chains_rc=$?
   case "$chains_rc" in
     0) ;;
@@ -8844,16 +8858,24 @@ PY
 }
 
 # The examiner's review of a run's ledger (scripts/review.ts): accept,
-# reject or amend an entry, or sign off the ledger as it stands. Outside
-# the run, beside the registry, chained.
+# reject or amend an entry, each answer's disposition, a technical review,
+# and the sign-off as the examiner's signed release (scripts/release.ts
+# sign: prepared, shown, confirmed on the terminal, sealed with the
+# examiner's own secret). A technical reviewer enrolled with --role reviewer
+# records and signs their own review (scripts/technical-review.ts), here or,
+# from the run's package, on another machine (the examiner then --import's
+# it). Outside the run, beside the registry, chained.
 cmd_review() {
   local id="${1:-}" action="" entry="" note="" examiner="" report="" pdf=0 amend_reason="" no_ts=0 reviewer="" competence="" checked="" organisation="" entries=""
-  [[ -n "$id" && "$id" != -* ]] || die_usage "review requires <id> (--adopt N | --qualify N --note TEXT | --reject N --note TEXT | --inconclusive N --note TEXT | --accept N | --amend N --note TEXT | --technical-review ... | --sign [--pdf] [--amend-reason TEXT] | --show) [--examiner ID]"
+  local yes=0 secret_fd="" outcome="" reviewed_at="" all_answers=0 countersign="" import_file="" allowed="" ca="" ca_inter="" out="" disagreements=()
+  [[ -n "$id" && "$id" != -* ]] || die_usage "review requires <id> (--adopt N | --qualify N --note TEXT | --reject N --note TEXT | --inconclusive N --note TEXT | --accept N | --amend N --note TEXT | --technical-review ... | --countersign SEQ --reviewer ID | --import FILE | --sign [--pdf] [--amend-reason TEXT] [--yes] | --show) [--examiner ID]"
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --accept|--reject|--amend|--adopt|--qualify|--inconclusive) action="${1#--}"; entry="${2:-}"; shift 2 ;;
       --technical-review) action=technical_review; shift ;;
+      --countersign) action=countersign; countersign="${2:-}"; shift 2 ;;
+      --import) action=import; import_file="${2:-}"; shift 2 ;;
       --sign) action=sign; shift ;;
       --show) action=show; shift ;;
       --note) note="$2"; shift 2 ;;
@@ -8867,10 +8889,44 @@ cmd_review() {
       --checked) checked="$2"; shift 2 ;;
       --organisation|--organization) organisation="$2"; shift 2 ;;
       --entries) entries="$2"; shift 2 ;;
+      --all-answers) all_answers=1; shift ;;
+      --outcome) outcome="$2"; shift 2 ;;
+      --reviewed-at) reviewed_at="$2"; shift 2 ;;
+      --disagreement) disagreements+=(--disagreement "$2"); shift 2 ;;
+      --yes) yes=1; shift ;;
+      --secret-fd) secret_fd="$2"; shift 2 ;;
+      --allowed-signers) allowed="$2"; shift 2 ;;
+      --ca) ca="$2"; shift 2 ;;
+      --ca-intermediate) ca_inter="$2"; shift 2 ;;
+      --out) out="$2"; shift 2 ;;
       *) die_usage "review: unknown option $1" ;;
     esac
   done
-  [[ -n "$action" ]] || die_usage "review: say --adopt N, --qualify N, --reject N, --inconclusive N, --accept N, --amend N, --technical-review, --sign or --show"
+  [[ -n "$action" ]] || die_usage "review: say --adopt N, --qualify N, --reject N, --inconclusive N, --accept N, --amend N, --technical-review, --countersign SEQ, --import FILE, --sign or --show"
+  # What a technical review says, the same for every way it is recorded.
+  local tr_args=()
+  if [[ "$action" == technical_review ]]; then
+    tr_args=(--reviewer "$reviewer" --outcome "$outcome" --checked "$checked")
+    [[ -n "$competence" ]] && tr_args+=(--competence "$competence")
+    [[ -n "$organisation" ]] && tr_args+=(--organisation "$organisation")
+    [[ -n "$entries" ]] && tr_args+=(--entries "$entries")
+    [[ "$all_answers" -eq 1 ]] && tr_args+=(--all-answers)
+    [[ -n "$reviewed_at" ]] && tr_args+=(--reviewed-at "$reviewed_at")
+    [[ -n "$note" ]] && tr_args+=(--note "$note")
+    [[ -n "$report" ]] && tr_args+=(--report "$report")
+    [[ ${#disagreements[@]} -gt 0 ]] && tr_args+=("${disagreements[@]}")
+    [[ "$yes" -eq 1 ]] && tr_args+=(--yes)
+    [[ -n "$secret_fd" ]] && tr_args+=(--secret-fd "$secret_fd")
+  fi
+  # A reviewer elsewhere, working from the run's package: the review and its
+  # countersign go into review-import.jsonl for the examiner to --import.
+  if [[ -d "$id" && -f "$id/MANIFEST.txt" ]]; then
+    [[ "$action" == technical_review ]] || die_usage "review <package-dir> takes --technical-review --reviewer ID ... [--out FILE]: a reviewer's record made from a package"
+    local rargs=(remote --package "$id" "${tr_args[@]}")
+    [[ -n "$out" ]] && rargs+=(--out "$out")
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/technical-review.ts" "${rargs[@]}"
+    return $?
+  fi
   ensure_registry
   local rec sandbox state
   rec="$(json_get "$id")"
@@ -8882,29 +8938,56 @@ cmd_review() {
     node --experimental-strip-types --no-warnings "$ROOT/scripts/review.ts" show --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox"
     return $?
   fi
+  if [[ "$action" == import ]]; then
+    local iargs=(import --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox" --file "$import_file")
+    [[ -n "$allowed" ]] && iargs+=(--allowed-signers "$allowed")
+    [[ -n "$ca" ]] && iargs+=(--ca "$ca")
+    [[ -n "$ca_inter" ]] && iargs+=(--ca-intermediate "$ca_inter")
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/technical-review.ts" "${iargs[@]}"
+    return $?
+  fi
+  if [[ "$action" == countersign ]]; then
+    local cargs=(countersign --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox" --reviewer "$reviewer" --seq "$countersign")
+    [[ "$yes" -eq 1 ]] && cargs+=(--yes)
+    [[ -n "$secret_fd" ]] && cargs+=(--secret-fd "$secret_fd")
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/technical-review.ts" "${cargs[@]}"
+    return $?
+  fi
   # Who reviews: an enrolled examiner by id (swarm.sh examiner enroll), or
-  # the one enrolled when there is only one; a name given free only to
-  # accept, reject or amend a finding. What the kickoff was told about who
+  # the one examiner enrolled when there is only one; a name given free only
+  # to accept, reject or amend a finding. What the kickoff was told about who
   # ran the run is never taken for the examiner.
   if [[ -z "$examiner" ]]; then
     local enrolled
-    enrolled="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/signers.ts" list 2>/dev/null | awk -F'\t' 'NF >= 4 {print $1}')"
+    enrolled="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/signers.ts" list 2>/dev/null | awk -F'\t' 'NF >= 4 && $5 != "reviewer" {print $1}')"
     [[ -n "$enrolled" && "$(wc -l <<<"$enrolled" | tr -d ' ')" == 1 ]] && examiner="$enrolled"
   fi
   if [[ "$action" == sign ]]; then
     case "$state" in
       running|prepared|finishing) echo "BLOCKER: run $id is still $state; sign off its ledger once it has ended." >&2; exit 2 ;;
     esac
-    # The release is the sign-off: rendered, signed with the enrolled
-    # examiner's key, then named in the review (scripts/release.ts sign).
+    # The release is the sign-off: prepared and shown, confirmed on the
+    # terminal (--yes skips only that, and the release says so), sealed with
+    # the examiner's own secret, then named in the review (scripts/release.ts sign).
     local rargs=(sign --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox")
     [[ -n "$examiner" ]] && rargs+=(--examiner "$examiner")
     [[ -n "$report" ]] && rargs+=(--report "$report")
     [[ "$pdf" -eq 1 ]] && rargs+=(--pdf)
     [[ -n "$amend_reason" ]] && rargs+=(--amend-reason "$amend_reason")
     [[ "$no_ts" -eq 1 ]] && rargs+=(--no-timestamp)
+    [[ "$yes" -eq 1 ]] && rargs+=(--yes)
+    [[ -n "$secret_fd" ]] && rargs+=(--secret-fd "$secret_fd")
     node --experimental-strip-types --no-warnings "$ROOT/scripts/release.ts" "${rargs[@]}" || exit $?
     echo "Signed off:   run $id, in the release above; the review is $RUNS_DIR/reviews/$id.jsonl"
+    return 0
+  fi
+  if [[ "$action" == technical_review ]]; then
+    # An enrolled reviewer records and signs their own review; anyone else's
+    # is recorded by the examiner (--examiner ID), and says it is not signed.
+    local targs=(record --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox" "${tr_args[@]}")
+    [[ -n "$examiner" ]] && targs+=(--examiner "$examiner")
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/technical-review.ts" "${targs[@]}" || exit $?
+    [[ "$state" == running ]] && operator_trace "$sandbox" review "$id" "--technical-review"
     return 0
   fi
   [[ -n "$examiner" ]] || { echo "BLOCKER: who is reviewing? pass --examiner ID (an examiner enrolled with swarm.sh examiner enroll), or --examiner NAME to accept, reject or amend a finding." >&2; exit 2; }
@@ -8912,11 +8995,6 @@ cmd_review() {
   [[ -n "$entry" ]] && args+=(--entry "$entry")
   [[ -n "$note" ]] && args+=(--note "$note")
   [[ -n "$report" ]] && args+=(--report "$report")
-  if [[ "$action" == technical_review ]]; then
-    args+=(--reviewer "$reviewer" --competence "$competence" --checked "$checked")
-    [[ -n "$organisation" ]] && args+=(--organisation "$organisation")
-    [[ -n "$entries" ]] && args+=(--entries "$entries")
-  fi
   local line who
   line="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/review.ts" "${args[@]}")" || exit 1
   [[ "$state" == running ]] && operator_trace "$sandbox" review "$id" "--$action" ${entry:+"$entry"}
@@ -8930,11 +9008,7 @@ cmd_review() {
     qualify) verb="adopted with a qualification" ;;
     inconclusive) verb="rendered inconclusive" ;;
   esac
-  if [[ "$action" == technical_review ]]; then
-    echo "Reviewed:     run $id's methods, by $reviewer ($competence): $checked; recorded by $who"
-  else
-    echo "Reviewed:     run $id entry $entry $verb by $who$([[ -n "$note" ]] && printf ' (%s)' "$note")"
-  fi
+  echo "Reviewed:     run $id entry $entry $verb by $who$([[ -n "$note" ]] && printf ' (%s)' "$note")"
 }
 
 # A run's releases (scripts/release.ts): the machine's draft at stop, each
@@ -8946,7 +9020,7 @@ cmd_review() {
 # independent.
 cmd_releases() {
   local id="${1:-}" mode=show extra=() version=""
-  [[ -n "$id" && "$id" != -* ]] || die_usage "releases requires <id> [--draft [--reason TEXT] | --verify [--allowed-signers FILE] [--tsa-ca FILE] | --print [N] | --mirror TARGET [--version N] | --ots [--upgrade] | --transparency COMMAND | --json]"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "releases requires <id> [--draft [--reason TEXT] | --verify [--allowed-signers FILE] [--ca FILE] [--tsa-ca FILE] | --print [N] | --mirror TARGET [--version N] | --ots [--upgrade] | --transparency COMMAND | --json]"
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -8958,7 +9032,7 @@ cmd_releases() {
       --upgrade) extra+=(--upgrade); shift ;;
       --transparency) mode=transparency; extra+=(--log "$2"); shift 2 ;;
       --version) version="$2"; shift 2 ;;
-      --reason|--allowed-signers|--tsa-ca) extra+=("$1" "$2"); shift 2 ;;
+      --reason|--allowed-signers|--tsa-ca|--ca|--ca-intermediate) extra+=("$1" "$2"); shift 2 ;;
       --json) extra+=(--json); shift ;;
       *) die_usage "releases: unknown option $1" ;;
     esac
@@ -9072,12 +9146,15 @@ cmd_certify() {
   return 0
 }
 
-# The examiners enrolled on this install (scripts/signers.ts), outside every
-# run: who may adopt a report and sign its release. `machine` shows the
-# install's machine key, which seals the drafts and is no examiner.
+# The people enrolled on this install (scripts/signers.ts), outside every
+# run: examiners, who adopt a report and sign its release, and technical
+# reviewers (--role reviewer), who sign their own review. Each with one key:
+# an ssh key with a passphrase, a FIDO key, or an e-signature certificate on
+# a token. `machine` shows the install's machine key, which seals the drafts
+# and is no examiner.
 cmd_examiner() {
   local sub="${1:-}"
-  [[ -n "$sub" ]] || die_usage "examiner enroll --name NAME --organisation ORG --competence TEXT (--key FILE | --generate-key [--no-passphrase]) [--id ID] [--principal P] [--tsa-url URL --tsa-ca FILE] | examiner list | examiner show ID | examiner machine"
+  [[ -n "$sub" ]] || die_usage "examiner enroll --name NAME --organisation ORG --competence TEXT [--role examiner|reviewer] (--generate-key [--no-passphrase] | --key FILE [--no-passphrase] | --fido [--fido-verify-required] [--fido-resident] | --pkcs11-module PATH (--pkcs11-id HEX | --pkcs11-uri URI) [--pkcs11-chain FILE]) [--id ID] [--principal P] [--tsa-url URL --tsa-ca FILE] | examiner list | examiner show ID | examiner machine"
   shift
   case "$sub" in
     enroll|list|show|machine) node --experimental-strip-types --no-warnings "$ROOT/scripts/signers.ts" "$sub" "$@" ;;
@@ -9290,26 +9367,38 @@ cmd_help() {
   review <id> --reject N --note TEXT                  withdraw it (an answer), or reject an entry
   review <id> --inconclusive N --note TEXT            render it inconclusive
   review <id> --accept N | --amend N --note TEXT      accept an entry, or accept it with a correction
-  review <id> --technical-review --reviewer NAME --competence TEXT --checked TEXT [--organisation ORG] [--entries 4,10]
-  review <id> --sign [--pdf] [--amend-reason TEXT] [--report PATH] [--no-timestamp]
-                                                      adopt the report: release vN signed with the examiner's key
+  review <id> --technical-review --reviewer ID|NAME --outcome agreed|issues-resolved|disagreement --checked TEXT
+               [--entries 4,10 | --all-answers] [--disagreement TEXT]... [--reviewed-at ISO] [--competence TEXT]
+                                                      an enrolled reviewer (ID) records and signs their own review;
+                                                      anyone else's (NAME, --competence) the examiner records, unsigned
+  review <id> --countersign SEQ --reviewer ID         the reviewer signs review line SEQ, recorded earlier (after release: it names vN)
+  review <package-dir> --technical-review --reviewer ID ... [--out FILE]
+                                                      a reviewer elsewhere: review-import.jsonl, made over the package
+  review <id> --import FILE [--allowed-signers FILE | --ca FILE]
+                                                      the examiner adds it: hashes, signature, register and review head checked
+  review <id> --sign [--pdf] [--amend-reason TEXT] [--report PATH] [--no-timestamp] [--yes]
+                                                      adopt the report: shown, confirmed, release vN signed with the examiner's own secret
   review <id> --show                                  what has been reviewed, and whether the sign-off is current
 Every act names the examiner (--examiner ID, an examiner enrolled with swarm.sh examiner enroll; the
 only one enrolled when there is one). Adopting, qualifying, rendering inconclusive, a technical review
 and the sign-off are an enrolled examiner's; accept, reject and amend of a finding may name someone
 who is not enrolled, and say so. An answer whose support is defective cannot be adopted or qualified:
 withdraw it or render it inconclusive; repairing its support is a new examination (a new run). The
-sign-off renders the report's final bytes for the release (no DRAFT mark), prints them with --pdf,
-signs release.json with the examiner's key, and then names the release in the review; after an
-adoption, another is an amendment and says why (--amend-reason). What the kickoff recorded as who
-ran the run is never taken for the examiner. The review is kept beside the registry
-(runs/reviews/<id>.jsonl, 0600), chained, where no agent reaches.
+sign-off prepares the report's final bytes for the release (no DRAFT mark, printed with --pdf), shows
+their sha256, the gate's counts and the key, asks for confirmation on the terminal (--yes skips only
+that, and the release records the consent as presented), takes the key's passphrase or PIN with echo
+off (a FIDO key also wants a touch), signs exactly those bytes, and names the release in the review;
+after an adoption, another is an amendment and says why (--amend-reason). A technical reviewer's
+record names what they read (report.md, the ledger's head, custody, the dispositions) and is over an
+earlier state once any of them changes; a reviewer who is the examiner (id, name or key) is refused.
+What the kickoff recorded as who ran the run is never taken for the examiner. The review is kept
+beside the registry (runs/reviews/<id>.jsonl, 0600), chained, where no agent reaches.
 EOF
       ;;
     releases) cat <<'EOF'
   releases <id>                                   the run's releases: each version, who sealed it, what is beside it
   releases <id> --draft [--reason TEXT]           the machine's draft for a run with a verdict and none (or another, with a reason)
-  releases <id> --verify [--allowed-signers FILE] [--tsa-ca FILE]
+  releases <id> --verify [--allowed-signers FILE] [--ca FILE [--ca-intermediate FILE]] [--tsa-ca FILE]
                                                   every signature, the bytes and chains each binds, the chain between them
   releases <id> --print [N]                       release vN's HTML printed to PDF beside it (a print record the next release binds)
   releases <id> --mirror cmd:COMMAND|dir:PATH|print [--version N]
@@ -9317,21 +9406,31 @@ EOF
   releases <id> --ots [--upgrade]                 an OpenTimestamps proof of the signature, when the ots client is installed
   releases <id> --transparency COMMAND            a transparency log's receipt (the command gets the digest line on stdin)
 v0 is written when custody is taken at stop, sealed by this install's machine key: a DRAFT, adopted
-by no one. v1 is an enrolled examiner's adoption (review --sign); each later version names the one
-before it and why. Nothing in a release is written over. --verify exits 0 when every release holds
-and every adoption's key is one FILE allows, 3 when they hold and no register was given, 4 when one
-does not hold.
+by no one, and its seal is only ever "machine seal, self-checked". v1 is an enrolled examiner's
+adoption (review --sign, or the console's Release panel); each later version names the one before it
+and why. Nothing in a release is written over. --verify exits 0 when every release holds and every
+adoption's key is one FILE allows (an e-signature's chain one --ca FILE verifies), 3 when they hold
+and nothing was given to check the examiner's key against, 4 when one does not hold.
 EOF
       ;;
     examiner) cat <<'EOF'
-  examiner enroll --name NAME --organisation ORG --competence TEXT (--key FILE | --generate-key [--no-passphrase])
+  examiner enroll --name NAME --organisation ORG --competence TEXT [--role examiner|reviewer]
+                  (--generate-key [--no-passphrase] | --key FILE [--no-passphrase]
+                   | --fido [--fido-verify-required] [--fido-resident]
+                   | --pkcs11-module PATH (--pkcs11-id HEX | --pkcs11-uri URI) [--pkcs11-chain FILE])
                   [--id ID] [--principal P] [--tsa-url URL --tsa-ca FILE]
   examiner list | examiner show ID | examiner machine
-An examiner is enrolled on this install, outside every run ($DFIRSWARM_HOME/examiners/): the key is
-given, or made only when asked, and checked by signing a challenge. Enrolment prints the key's
-fingerprint and the line for the organisation's signer register (an ssh allowed-signers file): the
-register, checked in person, is what ties the key to the person. `machine` shows the install's
-machine key, which seals the drafts and is no examiner.
+A person is enrolled on this install, outside every run ($DFIRSWARM_HOME/examiners/), as an examiner
+(adopts a report, signs its release) or a technical reviewer (signs their own review), with one key:
+an ssh key with a passphrase (made here, the passphrase asked twice with echo off, or given and
+checked to be encrypted; --no-passphrase is a documented trade the console refuses), a FIDO key made
+on the authenticator by a FIDO-capable ssh-keygen (a touch per signature, and the PIN with
+--fido-verify-required), or an e-signature certificate on a token (read without the PIN; each
+signature is a CAdES CMS made on the token, with the PIN). A key is checked by signing a challenge.
+Enrolment prints the fingerprint and, for an ssh or FIDO key, the line for the organisation's signer
+register (an ssh allowed-signers file): the register, checked in person, is what ties the key to the
+person; a certificate's issuer does that for an e-signature. `machine` shows the install's machine
+key, which seals the drafts and is no examiner.
 EOF
       ;;
     certify) cat <<'EOF'
@@ -9374,15 +9473,16 @@ Exit 0: the run is as the verdict sealed it; 4: it is not, or a check does not p
 EOF
       ;;
     verify) cat <<'EOF'
-  verify <package dir|zip> [--allowed-signers FILE] [--tsa-ca FILE]
+  verify <package dir|zip> [--allowed-signers FILE] [--ca FILE [--ca-intermediate FILE]] [--tsa-ca FILE]
 Re-hashes every file against MANIFEST.txt (none missing, none added, none outside the package) and
 checks MANIFEST.txt.sig, which covers SIGNER.txt; every part in COMPONENTS.json is there or declared
 absent; then the chains the package carries (trace, ledger with every readable entry's core
 recomputed, attestations, journal, the examiner's review) against the custody verdict's seal, and
 every packaged work/ file against the index custody sealed (artifacts.sealed.json), held to the
 verdict and its anchor; and the report's releases (release/): each signature (against FILE, the
-signer register, when given), the bytes and the chains each binds, the chain between versions, its
-line in the anchor, its timestamp token (its signature checked with --tsa-ca FILE).
+signer register, when given; an e-signature against --ca FILE, its issuer's CA), the bytes and the
+chains each binds, the chain between versions, its line in the anchor, its timestamp token (its
+signature checked with --tsa-ca FILE).
 Exit 0: all of it holds and the signer is one FILE allows (and so is every adopting examiner's key);
 3: the files hold, the signature is sound, the signer (or an adopting examiner's key) was not checked;
 4: the files hold, the package is unsigned; 1: something does not hold.

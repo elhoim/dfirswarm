@@ -15,7 +15,7 @@ import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { allowedSignersLine, checkSshSignature, enrollExaminer, listExaminers, loadExaminer, machineSigner, sshSign, MACHINE_LABEL, RELEASE_NAMESPACE } from "../scripts/signers.ts";
+import { allowedSignersLine, checkSshSignature, enrollExaminer, listExaminers, loadExaminer, machineSigner, sshSign, MACHINE_LABEL, RELEASE_NAMESPACE, type SshKey } from "../scripts/signers.ts";
 
 const dirs: string[] = [];
 after(async () => {
@@ -67,7 +67,7 @@ test("an examiner is enrolled with a name, an organisation, a competence stateme
   refused({ ...base, name: " " }, /name is required/);
   refused({ ...base, organisation: "" }, /organisation the examiner signs for is required/);
   refused({ ...base, competence: "" }, /competence statement is required/);
-  refused({ ...base, generateKey: false }, /give the examiner's key \(--key FILE\) or ask for one to be made/);
+  refused({ ...base, generateKey: false }, /give the key \(--key FILE\) or ask for one to be made/);
   refused({ ...base, key: "/nonexistent" }, /one of the two/);
   refused({ ...base, id: "Ada Examiner" }, /is not an examiner id/);
   refused({ ...base, tsaCa: "/nonexistent.pem", tsaUrl: "http://tsa.test" }, /no CA file at/);
@@ -75,10 +75,14 @@ test("an examiner is enrolled with a name, an organisation, a competence stateme
   assert.ok(!("why" in r), JSON.stringify(r));
   if ("why" in r) return;
   assert.equal(r.examiner.id, "ada-examiner");
-  assert.equal(r.examiner.key.generated, true);
-  assert.ok(existsSync(r.examiner.key.path) && r.examiner.key.path.startsWith(join(home, "examiners", "keys")));
+  const key = r.examiner.key as SshKey;
+  assert.equal(key.kind, "ssh");
+  assert.equal(key.generated, true);
+  assert.equal(key.passphrase, false, "--no-passphrase is recorded as that");
+  assert.equal(r.examiner.role, "examiner");
+  assert.ok(existsSync(key.path) && key.path.startsWith(join(home, "examiners", "keys")));
   assert.equal(statSync(r.file).mode & 0o777, 0o600);
-  assert.equal(r.register, `ada-examiner namespaces="dfirswarm-release,dfirswarm-package" ${r.examiner.key.public.split(" ").slice(0, 2).join(" ")}`);
+  assert.equal(r.register, `ada-examiner namespaces="dfirswarm-release,dfirswarm-package" ${key.public.split(" ").slice(0, 2).join(" ")}`);
   assert.equal(allowedSignersLine(r.examiner), r.register);
   assert.doesNotMatch(readFileSync(r.file, "utf8"), /PRIVATE KEY/, "the record names the key's path, never its bytes");
   // Enrolled once under an id: a new key is a new enrolment.
@@ -94,16 +98,16 @@ test("a key given is checked by signing a challenge: a public half that is not t
   const keys = await tmp("signers-keys-");
   execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "bo@lab", "-f", join(keys, "bo")]);
   execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "other", "-f", join(keys, "other")]);
-  const ok = enrollExaminer({ name: "Bo Reviewer", organisation: "Lab Two", competence: "EnCE", key: join(keys, "bo"), principal: "bo@lab.example", tsaUrl: "https://tsa.example/tsr" }, home);
+  const ok = enrollExaminer({ name: "Bo Reviewer", organisation: "Lab Two", competence: "EnCE", key: join(keys, "bo"), principal: "bo@lab.example", tsaUrl: "https://tsa.example/tsr", noPassphrase: true }, home);
   assert.ok(!("why" in ok), JSON.stringify(ok));
   if (!("why" in ok)) {
-    assert.equal(ok.examiner.key.generated, false);
+    assert.equal((ok.examiner.key as SshKey).generated, false);
     assert.equal(ok.examiner.principal, "bo@lab.example");
     assert.deepEqual(ok.examiner.tsa, { url: "https://tsa.example/tsr", ca: null, ca_sha256: null });
   }
   // A .pub beside the key that is another key's: the challenge is refused (by ssh-keygen, or by the check), and nothing is enrolled.
   writeFileSync(join(keys, "bo.pub"), readFileSync(join(keys, "other.pub")));
-  const bad = enrollExaminer({ name: "Cy Other", organisation: "Lab", competence: "x", key: join(keys, "bo") }, home);
+  const bad = enrollExaminer({ name: "Cy Other", organisation: "Lab", competence: "x", key: join(keys, "bo"), noPassphrase: true }, home);
   assert.ok("why" in bad);
   assert.match((bad as { why: string }).why, /doesn't match|does not verify under its public half/);
   assert.equal(loadExaminer("cy-other", home).hasOwnProperty("examiner"), false);

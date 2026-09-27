@@ -18,7 +18,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { digestLine, pickRelease } from "./release-record.ts";
+import { digestLine, pickRelease, releaseSigPath } from "./release-record.ts";
 
 const fileSha = (p: string): string | null => {
   try {
@@ -37,7 +37,7 @@ function nextName(dir: string, stem: string, ext: string): string {
 /** An OpenTimestamps proof of a release's signature (release.json.sig.ots), when the ots client is on this host. */
 export function otsRelease(S: string, o: { version?: number; upgrade?: boolean } = {}): { ok: boolean; note: string } {
   const r = pickRelease(S, o.version);
-  const sig = join(r.dir, "release.json.sig");
+  const sig = releaseSigPath(r.dir);
   const which = spawnSync("ots", ["--version"], { encoding: "utf8" });
   if ((which.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return { ok: false, note: "unavailable: the OpenTimestamps client (ots) is not on this host; pip install opentimestamps-client adds it" };
   if (!existsSync(`${sig}.ots`)) {
@@ -62,9 +62,9 @@ export function otsRelease(S: string, o: { version?: number; upgrade?: boolean }
  */
 export function transparencyRelease(S: string, command: string, version?: number): { ok: boolean; note: string } {
   const r = pickRelease(S, version);
-  const sigSha = fileSha(join(r.dir, "release.json.sig"));
+  const sigSha = fileSha(releaseSigPath(r.dir));
   const line = digestLine(r.record, r.sha256, sigSha);
-  const p = spawnSync("bash", ["-c", command], { input: `${line}\n`, encoding: "utf8", timeout: 300_000, env: { ...process.env, DFS_RELEASE_JSON: join(r.dir, "release.json"), DFS_RELEASE_SIG: join(r.dir, "release.json.sig"), DFS_RELEASE_SHA256: r.sha256, DFS_RELEASE_VERSION: String(r.version), DFS_RUN: String(r.record.run ?? "") } });
+  const p = spawnSync("bash", ["-c", command], { input: `${line}\n`, encoding: "utf8", timeout: 300_000, env: { ...process.env, DFS_RELEASE_JSON: join(r.dir, "release.json"), DFS_RELEASE_SIG: releaseSigPath(r.dir), DFS_RELEASE_SHA256: r.sha256, DFS_RELEASE_VERSION: String(r.version), DFS_RUN: String(r.record.run ?? "") } });
   const file = nextName(r.dir, "transparency", "json");
   writeFileSync(file, `${JSON.stringify({ kind: "transparency-log", command, at: new Date().toISOString(), exit: p.status, stdout: p.stdout ?? "", stderr: p.stderr ?? "", line }, null, 2)}\n`, { mode: 0o444, flag: "wx" });
   return { ok: p.status === 0, note: p.status === 0 ? `the log answered; its receipt is ${basename(file)}` : `the log command exited ${p.status ?? p.signal}; what it said is in ${basename(file)}` };

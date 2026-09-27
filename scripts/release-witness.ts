@@ -22,7 +22,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { timestampFile, verifyTimestampToken } from "./custody-checks.ts";
-import { digestLine, pickRelease, qrString, RELEASE_DIR } from "./release-record.ts";
+import { digestLine, pickRelease, qrString, releaseSigPath, RELEASE_DIR } from "./release-record.ts";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 const fileSha = (p: string): string | null => {
@@ -34,15 +34,16 @@ const fileSha = (p: string): string | null => {
 };
 
 /**
- * An RFC 3161 token over a release's signature (release.json.sig), checked
+ * An RFC 3161 token over a release's signature (release.json.sig, or
+ * release.json.p7s for an e-signature), checked
  * against the authority's CA when one is named. The token dates the
  * signature, and with it the release, from the authority's time: obtained
  * later, the proof of existence is from then, and timestamp.json says so.
  */
 export async function timestampRelease(dir: string, o: { url: string; ca: string | null; releaseAt: string }): Promise<{ ok: true; note: string; verified: boolean | null } | { ok: false; why: string }> {
-  const sig = join(dir, "release.json.sig");
+  const sig = releaseSigPath(dir);
   if (!existsSync(sig)) return { ok: false, why: "the release has no signature to timestamp" };
-  if (existsSync(`${sig}.tsr`)) return { ok: false, why: "the release is timestamped already (release.json.sig.tsr)" };
+  if (existsSync(`${sig}.tsr`)) return { ok: false, why: `the release is timestamped already (${basename(sig)}.tsr)` };
   const r = await timestampFile(sig, o.url);
   if (!r.ok) return { ok: false, why: r.why };
   const checked = o.ca ? await verifyTimestampToken(r.tsr, sig, o.ca) : null;
@@ -53,8 +54,8 @@ export async function timestampRelease(dir: string, o: { url: string; ca: string
     obtained_at: obtained,
     authority: o.url,
     gen_time: r.gen_time,
-    token: { file: "release.json.sig.tsr", sha256: r.sha256 },
-    imprint_of: { file: "release.json.sig", sha256: sha256(readFileSync(sig)) },
+    token: { file: `${basename(sig)}.tsr`, sha256: r.sha256 },
+    imprint_of: { file: basename(sig), sha256: sha256(readFileSync(sig)) },
     signature: checked ? { verified: checked.verified, ca: o.ca, ca_sha256: o.ca && existsSync(o.ca) ? sha256(readFileSync(o.ca)) : null, detail: checked.detail } : { verified: null, ca: null, detail: "imprint only: no CA was named, so the authority's signature on the token was not checked" },
     note: later
       ? `Obtained ${obtained}, after the release was sealed (${o.releaseAt}): the release's proof of existence dates from the token's time (${r.gen_time ?? "unread"}), not from the release's own.`
@@ -87,7 +88,7 @@ function nextName(dir: string, stem: string, ext: string): string {
 export function mirrorRelease(S: string, dir: string, target: string): { ok: true; note: string } | { ok: false; why: string } {
   const version = Number(basename(dir).slice(1));
   const r = pickRelease(S, version);
-  const sigSha = fileSha(join(dir, "release.json.sig"));
+  const sigSha = fileSha(releaseSigPath(dir));
   const line = digestLine(r.record, r.sha256, sigSha);
   const qr = qrString(r.record, r.sha256);
   const at = new Date().toISOString();
@@ -95,7 +96,7 @@ export function mirrorRelease(S: string, dir: string, target: string): { ok: tru
   let result: { ok: true; note: string } | { ok: false; why: string };
   if (target.startsWith("cmd:")) {
     const cmd = target.slice(4);
-    const p = spawnSync("bash", ["-c", cmd], { input: `${line}\n`, encoding: "utf8", timeout: 120_000, env: { ...process.env, DFS_RELEASE_JSON: join(dir, "release.json"), DFS_RELEASE_SIG: join(dir, "release.json.sig"), DFS_RELEASE_SHA256: r.sha256, DFS_RELEASE_VERSION: String(r.version), DFS_RUN: String(r.record.run ?? "") } });
+    const p = spawnSync("bash", ["-c", cmd], { input: `${line}\n`, encoding: "utf8", timeout: 120_000, env: { ...process.env, DFS_RELEASE_JSON: join(dir, "release.json"), DFS_RELEASE_SIG: releaseSigPath(dir), DFS_RELEASE_SHA256: r.sha256, DFS_RELEASE_VERSION: String(r.version), DFS_RUN: String(r.record.run ?? "") } });
     rec = { kind: "command", command: cmd, at, exit: p.status, stdout: p.stdout ?? "", stderr: p.stderr ?? "", line };
     result = p.status === 0 ? { ok: true, note: `the digest line went to the command (exit 0); its receipt is kept whole in ${basename(nextName(dir, "mirror", "json"))}` } : { ok: false, why: `the command exited ${p.status ?? p.signal}` };
   } else if (target.startsWith("dir:")) {
