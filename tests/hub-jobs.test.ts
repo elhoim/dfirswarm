@@ -133,3 +133,24 @@ test("catalogRequest resolves the target, refuses what is not the run's, and wit
   assert.ok(posts.some(([to, b]) => to === "a1" && b.startsWith("No recipe of this run catalogues inputs/plain.txt")), JSON.stringify(posts));
   await svc.stop("over");
 });
+
+test("a page of a job's stdout that leaves bytes unread says how many, and how to read the next page", async () => {
+  const { jobPageNote } = await import("../extensions/protocol.ts");
+  const { svc, call } = rig();
+  await svc.start();
+  const sub = await call("a1", "jobSubmit", { command: "python3 -c \"import sys; sys.stdout.write('n' * 18206)\"", inputs: [] });
+  assert.equal(sub.ok, true, sub.reason);
+  await done(call, "a1", sub.job.job);
+  const first = await call("a1", "jobStatus", { job_id: sub.job.job, limit: 8192 });
+  assert.deepEqual([first.stdout.offset, first.stdout.bytes, first.stdout.total, first.stdout.next], [0, 8192, 18206, 8192]);
+  const note = jobPageNote(sub.job.job, first.stdout);
+  assert.ok(note, "a partial page says so");
+  assert.match(note!, /bytes 0-8192 of 18206/);
+  assert.match(note!, /10014 bytes are unread/);
+  assert.ok(note!.includes(`job_status(job_id: "${sub.job.job}", offset: 8192)`), note!);
+  assert.ok(note!.includes(`store/jobs/${sub.job.job}/stdout.log`));
+  const second = await call("a1", "jobStatus", { job_id: sub.job.job, offset: 8192, limit: 8192 });
+  assert.match(jobPageNote(sub.job.job, second.stdout)!, /bytes 8192-16384 of 18206 .*\(bytes 0-8192 came on earlier pages\): 1822 bytes are unread/);
+  const last = await call("a1", "jobStatus", { job_id: sub.job.job, offset: 16384, limit: 8192 });
+  assert.equal(jobPageNote(sub.job.job, last.stdout), null, "the last page leaves nothing unread and says nothing");
+});

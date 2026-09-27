@@ -8971,6 +8971,28 @@ export function classifyTurnError(
   return "provider";
 }
 
+/** A page of a job's stdout as the job service hands it back (job_run, job_status). */
+export type JobStdoutPage = { offset: number; bytes: number; total: number; text?: string; next: number | null; path: string };
+
+/**
+ * What a page of a job's stdout leaves unread, said plainly. On the Belka run
+ * s94e373 a job returned the first 8,192 of 18,206 bytes of a notes
+ * database; the note the three blocked agents needed began at byte 10,709,
+ * and nothing in the result said that most of the output was still unread.
+ * The key sat on the agent's screen, in the half it never read, for the
+ * rest of the run. Null when the page reaches the end.
+ */
+export function jobPageNote(job: string, page: JobStdoutPage): string | null {
+  const end = page.offset + page.bytes;
+  const unread = Math.max(0, page.total - end);
+  if (!unread) return null;
+  const before = page.offset > 0 ? ` (bytes 0-${page.offset} came on earlier pages)` : "";
+  return (
+    `This is bytes ${page.offset}-${end} of ${page.total} of ${job}'s stdout${before}: ${unread} bytes are unread. ` +
+    `Read the next page with job_status(job_id: "${job}", offset: ${end}), or read ${page.path} whole, before you draw a conclusion from this page.`
+  );
+}
+
 /**
  * What the board is told when a seat's turn ends in the provider's error.
  * It used to say the seat's work was "free", and on the Belka run s306463

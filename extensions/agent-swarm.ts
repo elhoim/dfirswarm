@@ -43,6 +43,8 @@ import {
   inboxPageChars,
   classifyTurnError,
   providerErrorPost,
+  jobPageNote,
+  type JobStdoutPage,
   CAP_STEER,
   TOKEN_CAP_STEER,
   overCap,
@@ -2346,6 +2348,12 @@ export default function (pi: ExtensionAPI) {
 
   // Tool jobs: work in throwaway worker VMs, sealed into store/ (job-service.ts).
   const jobDone = (state: unknown) => state === "committed" || state === "failed" || state === "cancelled";
+  /** A page of a job's stdout with what it leaves unread, in numbers and in words (jobPageNote). */
+  const stdoutWithNote = (job: string, page: JobStdoutPage) => {
+    const unread = Math.max(0, page.total - (page.offset + page.bytes));
+    const note = jobPageNote(job, page);
+    return { stdout: { ...page, unread_bytes: unread }, ...(note ? { stdout_unread: note } : {}) };
+  };
   /**
    * Submit a job and wait up to `wait` seconds for it. The result is the
    * job's record and a page of its stdout when it finished, or its id and
@@ -2365,7 +2373,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (jobDone(last.job?.state)) {
       const job = (last.job ?? {}) as Record<string, unknown>;
-      return { ok: job.state === "committed" && (job.status === undefined || job.status === "ok"), job: id, result: { ...job, ...(last.stdout ? { stdout: last.stdout } : {}) } };
+      return { ok: job.state === "committed" && (job.status === undefined || job.status === "ok"), job: id, result: { ...job, ...(last.stdout ? stdoutWithNote(id, last.stdout) : {}) } };
     }
     return { ok: true, job: id, result: { job: id, state: last.job?.state, note: `still ${last.job?.state === "accepted" ? "queued" : "running"}; a post tagged result will say when it is done (your wait wakes on it)` } };
   }
@@ -2436,7 +2444,7 @@ export default function (pi: ExtensionAPI) {
       const st = await jobStatus(toolCtx.cwd, { job_id: params.job_id, ...(params.offset !== undefined ? { offset: params.offset } : {}), ...(params.cancel ? { cancel: true } : {}), limit: 16384 });
       await logEvent(toolCtx.cwd, agentId, "job_status", params, { ok: st.ok, state: st.job?.state, ...(st.ok ? {} : { reason: st.reason }) }, Date.now() - started);
       if (!st.ok) return { content: [{ type: "text" as const, text: st.reason ?? "no answer" }], details: st, isError: true };
-      return okResult({ ok: true, ...st.job, ...(st.stdout ? { stdout: st.stdout } : {}) });
+      return okResult({ ok: true, ...st.job, ...(st.stdout ? stdoutWithNote(params.job_id, st.stdout) : {}) });
     },
   });
 
