@@ -298,21 +298,21 @@ export function readLocalProviders(agentDir = process.env.PI_CODING_AGENT_DIR ||
 
 export type ReapParams = { stall_sec?: number; stop?: boolean };
 
-/** An examiner's decision on one ledger entry, or the signature over the ledger head. */
-export type ReviewParams = { action: "accept" | "reject" | "amend" | "sign"; entry_seq?: number; note?: string; examiner: string };
+/** An examiner's decision on one ledger entry. The sign-off is a release, signed from the Release panel (scripts/ui/signing.ts), never a job. */
+export type ReviewParams = { action: "accept" | "reject" | "amend"; entry_seq?: number; note?: string; examiner: string };
 
-/** A review from the console's body, checked: a reject or an amend needs a note, a sign names no entry. */
+/** A review from the console's body, checked: a reject or an amend needs a note. */
 export function validateReview(input: unknown): { ok: true; params: ReviewParams } | { ok: false; error: string } {
   if (!input || typeof input !== "object") return { ok: false, error: "body must be an object" };
   const b = input as Record<string, unknown>;
   const action = b.action;
-  if (action !== "accept" && action !== "reject" && action !== "amend" && action !== "sign") return { ok: false, error: "action must be accept, reject, amend or sign" };
+  if (action === "sign") return { ok: false, error: "a sign-off is the examiner's release, signed from the Release panel with the examiner's own secret (or swarm.sh review <id> --sign): never a background job" };
+  if (action !== "accept" && action !== "reject" && action !== "amend") return { ok: false, error: "action must be accept, reject or amend" };
   const examiner = typeof b.examiner === "string" ? b.examiner.trim() : "";
   if (!examiner || examiner.length > 200 || /[\x00-\x1f\x7f]/.test(examiner)) return { ok: false, error: "examiner: the name the review is signed with, one line" };
   const note = typeof b.note === "string" ? b.note.trim() : "";
   if (note.length > 4000 || /[\x00-\x08\x0b-\x1f\x7f]/.test(note)) return { ok: false, error: "note: at most 4000 characters, no control characters" };
   if ((action === "reject" || action === "amend") && !note) return { ok: false, error: `${action} needs a note saying why` };
-  if (action === "sign") return { ok: true, params: { action, examiner, note: note || undefined } };
   const seq = Number(b.entry_seq);
   if (!Number.isInteger(seq) || seq < 1) return { ok: false, error: "entry_seq must be the ledger entry's seq" };
   return { ok: true, params: { action, entry_seq: seq, examiner, note: note || undefined } };
@@ -1104,9 +1104,7 @@ export class ActionRunner {
 
   /** One examiner review line, written by scripts/review.ts through swarm.sh (its one writer). */
   review(swarmId: string, r: ReviewParams): Job {
-    const argv = ["review", swarmId];
-    if (r.action === "sign") argv.push("--sign");
-    else argv.push(`--${r.action}`, String(r.entry_seq));
+    const argv = ["review", swarmId, `--${r.action}`, String(r.entry_seq)];
     if (r.note) argv.push("--note", r.note);
     argv.push("--examiner", r.examiner);
     return this.run("review", argv, swarmId);

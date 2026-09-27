@@ -1,4 +1,4 @@
-import type { ArtifactIndex, Coverage, Dossier, ImagePreview, Job, OperatorAudit, PackageInfo, StartCheck, PackRow, ReviewAction, ReviewState, VmReadiness, ModelList, SwarmRow, SwarmView, TimedPost, TracePage, WorkFile, FileVersion, Health, GoalSummary, StoreJobDetail, StoreJobsView, StoreLogPage,
+import type { ArtifactIndex, Coverage, Dossier, ImagePreview, Job, OperatorAudit, PackageInfo, StartCheck, PackRow, EntryReviewAction, ReviewState, ExaminersView, EnrolledPerson, ReleaseStateView, PreparedRelease, VmReadiness, ModelList, SwarmRow, SwarmView, TimedPost, TracePage, WorkFile, FileVersion, Health, GoalSummary, StoreJobDetail, StoreJobsView, StoreLogPage,
   LibraryDocument,
   LibraryEntry, GoalDocument, SwarmContract, ChecksReport, ReadinessReport, ForgedToolSource, InputsLibrary } from "./types";
 
@@ -198,8 +198,21 @@ export const api = {
     `/api/swarms/${encodeURIComponent(id)}/jobs/${encodeURIComponent(job)}/log/${encodeURIComponent(name)}?raw=1${download ? "&download=1" : ""}`,
   coverage: (id: string) => request<Coverage>(`/api/swarms/${encodeURIComponent(id)}/coverage`),
   review: (id: string) => request<ReviewState>(`/api/swarms/${encodeURIComponent(id)}/review`),
-  /** One examiner decision, or the signature over the ledger head; written by swarm.sh review. Needs the token. */
-  sendReview: (id: string, payload: { action: ReviewAction; entry_seq?: number; note?: string; examiner: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/review`, payload),
+  /** One examiner decision on an entry; written by swarm.sh review. Needs the token. The sign-off is the Release panel's. */
+  sendReview: (id: string, payload: { action: EntryReviewAction; entry_seq?: number; note?: string; examiner: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/review`, payload),
+  /** Who is enrolled on this install, and whether this console can sign. */
+  examiners: () => request<ExaminersView>("/api/examiners"),
+  /** Enrol an examiner or a reviewer: an ssh key made with a passphrase, a FIDO key (a touch), or a token's certificate. */
+  enroll: (payload: Record<string, unknown>) => postJson<{ ok: boolean; person: EnrolledPerson; register: string | null }>("/api/examiners/enroll", payload),
+  releaseState: (id: string) => request<ReleaseStateView>(`/api/runs/${encodeURIComponent(id)}/release`),
+  /** The first half of an adoption: the final bytes rendered once, and what will be signed. */
+  prepareRelease: (id: string, payload: { examiner: string; pdf?: boolean; amend_reason?: string }) => postJson<PreparedRelease>(`/api/runs/${encodeURIComponent(id)}/release/prepare`, payload),
+  /** The second half: the secret goes to the server once, over loopback, and down a pipe to the signing script. */
+  sealRelease: (id: string, payload: { nonce: string; shown_sha256: string; examiner: string; secret: string; consent: true }) => postJson<{ ok: boolean; version: number; sha256: string; line: string }>(`/api/runs/${encodeURIComponent(id)}/release/seal`, payload),
+  discardRelease: (id: string, nonce: string) => postJson<{ ok: boolean }>(`/api/runs/${encodeURIComponent(id)}/release/discard`, { nonce }),
+  technicalReview: (id: string, payload: { reviewer: string; outcome: string; checked: string; entries?: number[]; all_answers?: boolean; disagreements?: string[]; reviewed_at?: string; secret: string; consent: true }) =>
+    postJson<{ ok: boolean; seq: number; countersign_seq: number }>(`/api/runs/${encodeURIComponent(id)}/review/technical`, payload),
+  countersign: (id: string, payload: { reviewer: string; seq: number; secret: string; consent: true }) => postJson<{ ok: boolean; seq: number }>(`/api/runs/${encodeURIComponent(id)}/review/countersign`, payload),
   hold: (id: string, reason: string) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/hold`, { reason }),
   release: (id: string) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/release`, {}),
   exportLedger: (id: string, format: "csv" | "timesketch") => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/export`, { format }),

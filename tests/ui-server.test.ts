@@ -2615,8 +2615,10 @@ test("the review is read from outside the run, its chain checked; writing one ne
     assert.equal(job.status, "ok", job.stderr);
     assert.match(job.stdout, /ARGV=\[review svm1d --amend 3 --note the upload path is not in the log --examiner E\. Xaminer\]/);
     assert.match(job.stdout, /VIA=\[console\]/, "the operator's record says the console ran it");
+    // The sign-off is a release, signed from the Release panel with the examiner's own secret: never a job.
     const sign = await send("/api/swarms/svm1d/review", { action: "sign", examiner: "E" }, "t0k");
-    assert.match((await waitJobAt(at, ((await sign.json()) as { id: string }).id)).stdout, /ARGV=\[review svm1d --sign --examiner E\]/);
+    assert.equal(sign.status, 400);
+    assert.match(((await sign.json()) as { error: string }).error, /signed from the Release panel/);
 
     // The run's record: hold, export, package, verify, purge, each a swarm.sh command.
     const hold = await send("/api/swarms/svm1d/hold", { reason: "litigation hold 42" }, "t0k");
@@ -2860,6 +2862,16 @@ test("the review file's chain is checked line by line", async () => {
   const good = parseReviews(`${a}\n${b}\n`);
   assert.equal(good.chain.intact, true);
   assert.equal(good.signed?.ledger_head, "h");
+  // The newer acts (a disposition, a technical review, a countersign) are the chain's, not breaks in it.
+  const c = JSON.stringify({ v: 1, seq: 3, at: "t", examiner: "E", examiner_id: "e", action: "adopt", entry_seq: 2, prev: createHash("sha256").update(b).digest("hex") });
+  const d = JSON.stringify({ v: 1, seq: 4, at: "t", examiner: "R", action: "technical_review", reviewer: { name: "R", competence: "x" }, outcome: "agreed", prev: createHash("sha256").update(c).digest("hex") });
+  const e = JSON.stringify({ v: 1, seq: 5, at: "t", examiner: "R", action: "countersign", over_seq: 4, prev: createHash("sha256").update(d).digest("hex") });
+  const newer = parseReviews(`${a}\n${b}\n${c}\n${d}\n${e}\n`);
+  assert.equal(newer.chain.intact, true, newer.chain.detail);
+  assert.equal(newer.by_entry["2"]?.action, "adopt");
+  assert.deepEqual(newer.lines.map((l) => l.action), ["accept", "sign", "adopt", "technical_review", "countersign"]);
+  assert.equal(newer.lines[3].outcome, "agreed");
+  assert.equal(newer.lines[4].over_seq, 4);
   const tampered = parseReviews(`${a.replace('"accept"', '"reject"')}\n${b}\n`);
   assert.equal(tampered.chain.intact, false, "a changed line breaks the chain at the next one");
 });

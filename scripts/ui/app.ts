@@ -30,6 +30,7 @@ import { listLibrary, readLibraryEntry } from "./library.ts";
 import { describeRoots, InputsError, listInputSets, parseInputsRoots, resolveInputImage, resolveInputSet, RootStore } from "./inputs.ts";
 import { countForgedTools, findRun, listSwarmRows, listWorkFiles, liveHubDirs, operatorAudit, queryTraces, readAllPosts, readRunEvents, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
 import { readReviews } from "./reviews.ts";
+import { createSigning, SigningError } from "./signing.ts";
 import { readStoreJob, readStoreJobLog, readStoreJobs, storeJobLogFile } from "./store-jobs.ts";
 import { userInfo } from "node:os";
 import { hashArtifacts } from "../artifacts.ts";
@@ -86,6 +87,8 @@ export type UiAppOptions = {
   vmReadiness?: (q: VmReadinessQuery) => Promise<VmReadiness>;
   /** The flags `swarm.sh help start` lists; tests inject them. */
   startFlags?: () => Promise<string[]>;
+  /** Where the enrolled examiners and reviewers are, when not $SWARM_SIGNERS_HOME or $DFIRSWARM_HOME (tests). */
+  signersHome?: string;
 };
 
 export type UiApp = {
@@ -356,6 +359,9 @@ export function createUiApp(options: UiAppOptions): UiApp {
   const flagsOf = options.startFlags ?? (() => startFlags(root));
   let flagsCache: Promise<string[]> | null = null;
   const token = options.token ?? process.env.SWARM_UI_TOKEN ?? "";
+  // Signing from the console (scripts/ui/signing.ts): its own guard, stricter than the token check below.
+  let boundHost: string | null = null;
+  const signing = createSigning({ root, runsDir, token, boundHost: () => boundHost, home: options.signersHome });
   /**
    * One-time grants to open one HTML artifact with its scripts. The console
    * asks for one over its authenticated channel after the operator confirms;
@@ -766,6 +772,48 @@ export function createUiApp(options: UiAppOptions): UiApp {
       if (!job || job.kind !== "export" || !job.output_file) throw new HttpError(404, "no export with that id");
       if (job.status !== "ok") throw new HttpError(409, job.status === "running" ? "the export is still running" : "the export failed; its output says why");
       await sendFile(res, job.output_file, {}, true);
+      return;
+    }
+
+    // Signing: enrolment, a release's prepare and seal, a technical reviewer's
+    // record and countersign. Reading is open like the rest; every POST goes
+    // through signing.guard (the token even when it is empty, a loopback Host,
+    // the console's own Origin, no live host-mode run) and spawns its script
+    // directly with the secret on fd 3, never as a job.
+    if (path === "/api/examiners") {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      json(res, 200, signing.examiners());
+      return;
+    }
+    if (path === "/api/examiners/enroll") {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      signing.guard(req);
+      json(res, 200, await signing.enroll((await readBody(req)) as Record<string, unknown>));
+      return;
+    }
+    const pendingMatch = path.match(/^\/api\/runs\/([A-Za-z0-9_-]{1,32})\/release\/pending\/([0-9a-f]{32})\/report\.html$/);
+    if (pendingMatch) {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      // The prepared bytes, as the examiner is asked to read them: framed with no scripts, and never cached.
+      await sendFile(res, signing.pendingReport(pendingMatch[1], pendingMatch[2]), { "content-security-policy": ARTIFACT_CSP, "x-content-type-options": "nosniff", "cache-control": "no-store" });
+      return;
+    }
+    const signingMatch = path.match(/^\/api\/runs\/([A-Za-z0-9_-]{1,32})\/(release|release\/prepare|release\/seal|release\/discard|review\/technical|review\/countersign)$/);
+    if (signingMatch) {
+      const [, runId, act] = signingMatch;
+      if (act === "release") {
+        if (method !== "GET") throw new HttpError(405, "method not allowed");
+        json(res, 200, await signing.releaseState(runId));
+        return;
+      }
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      signing.guard(req);
+      const body = (await readBody(req)) as Record<string, unknown>;
+      if (act === "release/prepare") json(res, 200, await signing.prepare(runId, body));
+      else if (act === "release/seal") json(res, 200, await signing.seal(runId, body));
+      else if (act === "release/discard") json(res, 200, await signing.discard(runId, body));
+      else if (act === "review/technical") json(res, 200, await signing.technical(runId, body));
+      else json(res, 200, await signing.countersign(runId, body));
       return;
     }
 
@@ -1305,7 +1353,7 @@ export function createUiApp(options: UiAppOptions): UiApp {
         res.end();
         return;
       }
-      if (err instanceof HttpError) {
+      if (err instanceof HttpError || err instanceof SigningError) {
         json(res, err.status, { error: err.message });
         return;
       }
@@ -1325,6 +1373,7 @@ export function createUiApp(options: UiAppOptions): UiApp {
         server.once("error", fail);
         server.listen(port, host, () => done());
       });
+      boundHost = host;
       const addr = server.address();
       return { port: typeof addr === "object" && addr ? addr.port : port, host };
     },

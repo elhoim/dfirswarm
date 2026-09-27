@@ -38,6 +38,8 @@ import { GoalPanel } from "./detail/goal-panel";
 import { PacksPanel } from "./detail/packs-panel";
 import { ToolsPanel } from "./detail/tools-panel";
 import { LedgerPanel } from "./detail/ledger-panel";
+import { ReleasePanel } from "./detail/release-panel";
+import { ReviewerPanel } from "./detail/reviewer-panel";
 import { JobsPanel } from "./detail/jobs-panel";
 import { RecordActions } from "./detail/record-actions";
 import { isolationChip } from "@/components/swarm-bits";
@@ -52,7 +54,7 @@ const TAB_GROUPS = [
   { label: "The run", tabs: ["story", "threads", "traces", "agents"] },
   { label: "Evidence", tabs: ["files", "artifacts", "jobs", "ledger"] },
   { label: "The frame", tabs: ["goal", "packs", "tools", "claims", "budget"] },
-  { label: "Output", tabs: ["report", "custody"] },
+  { label: "Output", tabs: ["report", "release", "review", "custody"] },
 ] as const;
 const TABS = TAB_GROUPS.flatMap((g) => g.tabs);
 type Tab = (typeof TAB_GROUPS)[number]["tabs"][number];
@@ -71,6 +73,8 @@ const TAB_LABEL: Record<Tab, string> = {
   goal: "Goal",
   packs: "Packs",
   report: "Report",
+  release: "Release",
+  review: "Technical review",
   custody: "Custody",
 };
 
@@ -630,6 +634,8 @@ export function SwarmDetailScreen() {
           {tab === "jobs" ? <JobsPanel view={d} selected={sub ? decodeURIComponent(sub) : null} onSelect={(j) => setSub("jobs", j)} version={storeVersion} /> : null}
           {tab === "ledger" ? <LedgerPanel view={d} /> : null}
           {tab === "report" ? <ReportPanel view={d} /> : null}
+          {tab === "release" ? <ReleasePanel view={d} /> : null}
+          {tab === "review" ? <ReviewerPanel view={d} /> : null}
         </section>
 
         <aside className="flex flex-col gap-4">

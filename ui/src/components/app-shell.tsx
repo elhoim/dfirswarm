@@ -101,6 +101,9 @@ export function AppShell({ children }: { children: ReactNode }) {
               <NavLink to="/new" className={navClass}>
                 Kickoff
               </NavLink>
+              <NavLink to="/examiners" className={navClass}>
+                Examiners
+              </NavLink>
             </nav>
           </div>
           <div className="flex items-center gap-2.5">
