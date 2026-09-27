@@ -1,0 +1,1 @@
+{"v":1,"job":"j000003","attempt":1,"sealed_at":"2026-09-27T13:15:35.866Z","files":[{"path":"proxy-grep.txt","path_b64":"cHJveHktZ3JlcC50eHQ=","bytes":78,"sha256":"2d6a9fc13dbd36866ff0582bcc8c6da86c5e4b6c675cffc6750461a877a00b68","mode":"644"}],"dirs":[],"rejected":[],"totals":{"files":1,"bytes":78}}

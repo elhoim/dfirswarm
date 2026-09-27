@@ -1,0 +1,30 @@
+{
+  "id": "j000002",
+  "attempt": 1,
+  "state": "committed",
+  "spec": {
+    "kind": "tool",
+    "inputs": [
+      "input:web.E01"
+    ],
+    "timeout_seconds": 120,
+    "network": "off",
+    "tool": "cmdlog_parse",
+    "args": {
+      "image": "inputs/web.E01",
+      "inode": "90112-128-1",
+      "output": "{OUT}/partial.txt"
+    }
+  },
+  "requester": {
+    "agent": "a1",
+    "name": "shell",
+    "doing": "what ran through the web shell"
+  },
+  "status": "timed_out",
+  "exit": null,
+  "reason": "timed out after 120 s",
+  "tool_sha256": "086cf24c16c8c7b557cbcf4c77c8e487b2af7b264d3d63088fce0929b5fe2d8d",
+  "image": "dfirswarm-disk:dev-arm64",
+  "image_digest": "sha256:fd6fe83ad9f790c37d3b735c5cdc92615e7e115cb0de533169a8ff345365b702"
+}
