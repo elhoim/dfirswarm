@@ -89,3 +89,26 @@ passed`, or stops at the first `FAIL:`.
 token made by `tests/pkcs11-fixture.ts`, through a pseudo-terminal, before
 they were handed over. `fido.sh` and `console.sh` with a FIDO key have not
 been run: they need the key and a person to touch it.
+
+## Two-stage signing, and what has run on real hardware
+
+`two-stage.sh` enrols an examiner with a FIDO key and a technical reviewer with
+the e-signature certificate, turns the policy on (`SWARM_REQUIRE_TECHNICAL_REVIEW=1`),
+checks that the release is refused before any technical review, has the reviewer
+record and sign the review on the token (the PIN), has the examiner sign the
+release with a touch, and verifies both signatures: the examiner's against the
+register line, the reviewer's against the CA.
+
+```
+DFIRSWARM_HW_TESTS=1 DFIRSWARM_HW_CA=<root.pem> DFIRSWARM_HW_CA_INTERMEDIATE=<inter.pem> bash tests/hw/two-stage.sh
+```
+
+`console.sh` enrols through the console's API by default (`DFIRSWARM_HW_ENROLL=cli`
+enrols on the command line), then prepares and seals through it.
+
+Run on 2026-09-27 with a YubiKey 5 (firmware 5.7.4) and a SafeNet eToken 5110
+FIPS holding an E-GÜVEN qualified certificate, on macOS with Homebrew OpenSSH
+10.5, OpenSC and libp11: `fido.sh`, `eimza.sh` (with and without
+`DFIRSWARM_HW_PDF=1`), `console.sh` for both kinds (enrolment and seal from the
+console) and `two-stage.sh` all passed. Making a FIDO key takes two touches,
+sometimes three: ssh-keygen picks the authenticator by a touch first.

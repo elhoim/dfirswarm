@@ -9,15 +9,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 KIND="${DFIRSWARM_HW_KIND:-fido}"
 hw_run shwconsole "HW Examiner" hw-console
-case "$KIND" in
-  fido)
-    say "Touch the YubiKey every time it blinks, to make the key: two touches, sometimes three."
-    node_ts "$HW_ROOT/scripts/signers.ts" enroll --name "HW Examiner" --id hw-console --organisation "Hardware test" --competence "hardware test" --fido >/dev/null || fail "the FIDO key was not enrolled" ;;
-  pkcs11)
-    node_ts "$HW_ROOT/scripts/signers.ts" enroll --name "HW Examiner" --id hw-console --organisation "Hardware test" --competence "hardware test" \
-      --pkcs11-module "${DFIRSWARM_HW_PKCS11_MODULE:-/usr/local/lib/libeTPkcs11.dylib}" --pkcs11-id "${DFIRSWARM_HW_PKCS11_ID:-0416041476cf21a543b6b986e1106b6751705a1ac4ad1f06}" >/dev/null 2>&1 || fail "the certificate was not enrolled" ;;
-  *) fail "DFIRSWARM_HW_KIND is fido or pkcs11" ;;
-esac
 
 # A port nobody holds: a console left over from an earlier test would answer instead, from a
 # signers' home that is gone, and the test would read its refusal as this key's.
@@ -31,6 +22,31 @@ UI_PID=$!
 trap 'kill $UI_PID 2>/dev/null; wait $UI_PID 2>/dev/null; cleanup' EXIT
 for _ in $(seq 1 50); do curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && break; sleep 0.2; done
 api() { curl -sS -H "authorization: Bearer $TOKEN" -H "content-type: application/json" "$@"; }
+
+# Enrolment from the console by default (DFIRSWARM_HW_ENROLL=cli enrols on the command line instead).
+case "$KIND" in fido|pkcs11) ;; *) fail "DFIRSWARM_HW_KIND is fido or pkcs11" ;; esac
+if [[ "${DFIRSWARM_HW_ENROLL:-console}" == cli ]]; then
+  case "$KIND" in
+    fido)
+      say "Touch the YubiKey every time it blinks, to make the key: two touches, sometimes three."
+      node_ts "$HW_ROOT/scripts/signers.ts" enroll --name "HW Examiner" --id hw-console --organisation "Hardware test" --competence "hardware test" --fido >/dev/null || fail "the FIDO key was not enrolled" ;;
+    pkcs11)
+      node_ts "$HW_ROOT/scripts/signers.ts" enroll --name "HW Examiner" --id hw-console --organisation "Hardware test" --competence "hardware test" \
+        --pkcs11-module "${DFIRSWARM_HW_PKCS11_MODULE:-/usr/local/lib/libeTPkcs11.dylib}" --pkcs11-id "${DFIRSWARM_HW_PKCS11_ID:-0416041476cf21a543b6b986e1106b6751705a1ac4ad1f06}" >/dev/null 2>&1 || fail "the certificate was not enrolled" ;;
+    *) fail "DFIRSWARM_HW_KIND is fido or pkcs11" ;;
+  esac
+else
+  if [[ "$KIND" == fido ]]; then
+    say "Enrolling from the console: touch the YubiKey every time it blinks, two touches, sometimes three."
+    E="$(api -X POST --data '{"kind":"fido","name":"HW Examiner","id":"hw-console","organisation":"Hardware test","competence":"hardware test"}' "http://127.0.0.1:$PORT/api/examiners/enroll")"
+  else
+    say "Enrolling from the console: the token's certificate, read without the PIN."
+    E="$(jq -n --arg m "${DFIRSWARM_HW_PKCS11_MODULE:-/usr/local/lib/libeTPkcs11.dylib}" --arg i "${DFIRSWARM_HW_PKCS11_ID:-0416041476cf21a543b6b986e1106b6751705a1ac4ad1f06}" '{kind:"pkcs11",name:"HW Examiner",id:"hw-console",organisation:"Hardware test",competence:"hardware test",pkcs11_module:$m,pkcs11_id:$i}' | api -X POST --data-binary @- "http://127.0.0.1:$PORT/api/examiners/enroll")"
+  fi
+  [[ "$(jq -r '.ok // false' <<<"$E")" == true ]] || fail "console enrolment: $(jq -r '.error // .why // .' <<<"$E" | grep -v -i serialNumber)"
+  grep -q '"command":"examiner"' "$RUNS/operator-audit.jsonl" 2>/dev/null || fail "the console enrolment is not on the operator's record"
+  ok "enrolled from the console ($KIND)"
+fi
 
 jq -e '.people[] | select(.id == "hw-console") | .console == "ok"' <(curl -sS "http://127.0.0.1:$PORT/api/examiners") >/dev/null || fail "the console does not take the key"
 P="$(api -X POST --data "{\"examiner\":\"hw-console\"}" "http://127.0.0.1:$PORT/api/runs/$RUN_ID/release/prepare")"
