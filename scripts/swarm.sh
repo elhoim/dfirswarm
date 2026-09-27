@@ -106,7 +106,7 @@ Commands:
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   review verify export hold release purge image-for   After a run: sign-off, checks, export, retention; the image packs boot (help <command>)
-  releases examiner timestamp rerun   The report's releases, the examiners who adopt them, a token obtained later, a job run again (help <command>)
+  releases examiner timestamp rerun certify   The report's releases, the examiners who adopt them, a token obtained later, a job run again, a certification template (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
   say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> changes its caps (help cap)
   stop <id>          Stop a run and record how it ended
@@ -8653,11 +8653,12 @@ cmd_review() {
 # adoption an enrolled examiner signs, each amendment. Shown by default;
 # --draft writes one for a run that has a verdict and none (or, with
 # --reason, another); --verify checks every signature and what each binds;
-# --print N prints release vN's HTML to PDF beside it; --mirror TARGET
-# copies its digest line somewhere independent.
+# --print N prints release vN's HTML to PDF beside it; --mirror TARGET,
+# --ots and --transparency COMMAND copy its digest line somewhere
+# independent.
 cmd_releases() {
   local id="${1:-}" mode=show extra=() version=""
-  [[ -n "$id" && "$id" != -* ]] || die_usage "releases requires <id> [--draft [--reason TEXT] | --verify [--allowed-signers FILE] [--tsa-ca FILE] | --print [N] | --mirror TARGET [--version N] | --json]"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "releases requires <id> [--draft [--reason TEXT] | --verify [--allowed-signers FILE] [--tsa-ca FILE] | --print [N] | --mirror TARGET [--version N] | --ots [--upgrade] | --transparency COMMAND | --json]"
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -8665,6 +8666,9 @@ cmd_releases() {
       --verify) mode=verify; shift ;;
       --print) mode=print; if [[ "${2:-}" =~ ^[0-9]+$ ]]; then version="$2"; shift 2; else shift; fi ;;
       --mirror) mode=mirror; extra+=(--to "$2"); shift 2 ;;
+      --ots) mode=ots; shift ;;
+      --upgrade) extra+=(--upgrade); shift ;;
+      --transparency) mode=transparency; extra+=(--log "$2"); shift 2 ;;
       --version) version="$2"; shift 2 ;;
       --reason|--allowed-signers|--tsa-ca) extra+=("$1" "$2"); shift 2 ;;
       --json) extra+=(--json); shift ;;
@@ -8735,6 +8739,49 @@ cmd_rerun() {
     running|prepared|finishing) echo "BLOCKER: run $id is still running; a sealed job is run again once the run has ended." >&2; exit 2 ;;
   esac
   node --experimental-strip-types --no-warnings "$ROOT/scripts/rerun.ts" "$sandbox" "$job" --run "$id" --runs "$RUNS_DIR" ${extra[@]+"${extra[@]}"}
+}
+
+# A certification template for a package (scripts/certify.ts): what the
+# package says of itself, and `verify` run on it with its output verbatim,
+# for a qualified person to complete and sign. Read only: it writes the
+# template to --out FILE, or prints it.
+cmd_certify() {
+  local target="${1:-}" allowed="" tsa_ca="" out="" dir tmp="" vout vrc=0 cargs=()
+  [[ -n "$target" && "$target" != -* ]] || die_usage "certify requires <package dir|zip> [--allowed-signers FILE] [--tsa-ca FILE] [--out FILE]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --allowed-signers) allowed="$2"; shift 2 ;;
+      --tsa-ca) tsa_ca="$2"; shift 2 ;;
+      --out) out="$2"; shift 2 ;;
+      *) die_usage "certify: unknown option $1" ;;
+    esac
+  done
+  dir="$target"
+  if [[ -f "$target" ]]; then
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/dfs-certify.XXXXXX")"
+    python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$target" "$tmp" 2>/dev/null \
+      || { rm -rf "$tmp"; echo "NOT A PACKAGE: $target is not a zip this host can open" >&2; exit 2; }
+    dir="$(dirname "$(find "$tmp" -maxdepth 3 -name MANIFEST.txt -type f | head -1)")"
+  fi
+  [[ -f "$dir/MANIFEST.txt" ]] || { [[ -n "$tmp" ]] && rm -rf "$tmp"; echo "NOT A PACKAGE: no MANIFEST.txt in $target" >&2; exit 2; }
+  vout="$(mktemp "${TMPDIR:-/tmp}/dfs-certify-verify.XXXXXX")"
+  local vargs=()
+  [[ -n "$allowed" ]] && vargs+=(--allowed-signers "$allowed")
+  [[ -n "$tsa_ca" ]] && vargs+=(--tsa-ca "$tsa_ca")
+  ( cmd_verify "$dir" ${vargs[@]+"${vargs[@]}"} ) > "$vout" 2>&1 || vrc=$?
+  cargs=(--package "$dir" --target "$target" --verify-output "$vout" --verify-exit "$vrc")
+  [[ -n "$allowed" ]] && cargs+=(--allowed-signers "$allowed")
+  [[ -n "$tsa_ca" ]] && cargs+=(--tsa-ca "$tsa_ca")
+  if [[ -n "$out" ]]; then
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/certify.ts" "${cargs[@]}" > "$out" || { rm -f "$vout"; [[ -n "$tmp" ]] && rm -rf "$tmp"; exit 1; }
+    echo "Wrote $out: a certification template for $target (swarm.sh verify exit $vrc), for a qualified person to complete and sign"
+  else
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/certify.ts" "${cargs[@]}"
+  fi
+  rm -f "$vout"
+  [[ -n "$tmp" ]] && rm -rf "$tmp"
+  return 0
 }
 
 # The examiners enrolled on this install (scripts/signers.ts), outside every
@@ -8979,6 +9026,8 @@ EOF
   releases <id> --print [N]                       release vN's HTML printed to PDF beside it (a print record the next release binds)
   releases <id> --mirror cmd:COMMAND|dir:PATH|print [--version N]
                                                   the digest line to an independent copy (the run's --anchor-mirror by default)
+  releases <id> --ots [--upgrade]                 an OpenTimestamps proof of the signature, when the ots client is installed
+  releases <id> --transparency COMMAND            a transparency log's receipt (the command gets the digest line on stdin)
 v0 is written when custody is taken at stop, sealed by this install's machine key: a DRAFT, adopted
 by no one. v1 is an enrolled examiner's adoption (review --sign); each later version names the one
 before it and why. Nothing in a release is written over. --verify exits 0 when every release holds
@@ -8995,6 +9044,16 @@ given, or made only when asked, and checked by signing a challenge. Enrolment pr
 fingerprint and the line for the organisation's signer register (an ssh allowed-signers file): the
 register, checked in person, is what ties the key to the person. `machine` shows the install's
 machine key, which seals the drafts and is no examiner.
+EOF
+      ;;
+    certify) cat <<'EOF'
+  certify <package dir|zip> [--allowed-signers FILE] [--tsa-ca FILE] [--out FILE]
+A certification template of the kind FRE 902(13) and 902(14) contemplate: what the package says of
+itself (the manifest's sha256, who signed it, the custody verdict, every release of the report and who
+sealed each, the redactions), swarm.sh verify run on it with its output and exit verbatim, what the
+checks do not establish, and blank fields for the qualified person who completes and signs it. Nothing
+in it is true because this printed it; it is not legal advice. The report's PDF is bound in its release
+by sha256 and the release's detached ssh signature; it carries no signature of its own (no PAdES).
 EOF
       ;;
     rerun) cat <<'EOF'
@@ -9098,6 +9157,7 @@ main() {
     examiner) cmd_examiner "$@" ;;
     timestamp) cmd_timestamp "$@" ;;
     rerun) cmd_rerun "$@" ;;
+    certify) cmd_certify "$@" ;;
     help) cmd_help "$@" ;;
     *) die_usage "unknown command: $cmd" ;;
   esac

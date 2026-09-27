@@ -21,8 +21,9 @@
  *   record beside it, which the next release binds.
  * timestamp: an RFC 3161 token over a release's signature, obtained later
  *   (an air-gapped lab): the proof of existence dates from the token.
- * mirror: the release's digest line to an independent copy (a command, a
- *   directory another custodian keeps, a printed line for the case file).
+ * mirror, ots, transparency: the release's digest line to an independent
+ *   copy (a command, a directory, a printed line for the case file), an
+ *   OpenTimestamps proof, a transparency log's receipt.
  *
  * Nothing in a release directory is written over. A release changes by a
  * new version, which names the one before it and why it was made; a new
@@ -36,6 +37,8 @@
  *   node scripts/release.ts print <sandbox> [--version N]
  *   node scripts/release.ts timestamp <sandbox> [--run ID] [--runs DIR] [--version N] [--tsa-url URL] [--tsa-ca FILE]
  *   node scripts/release.ts mirror <sandbox> [--version N] --to cmd:COMMAND|dir:PATH|print
+ *   node scripts/release.ts ots <sandbox> [--version N] [--upgrade]
+ *   node scripts/release.ts transparency <sandbox> [--version N] --log COMMAND
  */
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -66,6 +69,7 @@ import {
   type ReleaseSigner,
 } from "./release-record.ts";
 import { mirrorRelease, timestampRelease } from "./release-witness.ts";
+import { otsRelease, transparencyRelease } from "./release-adapters.ts";
 import { checkSshSignature, dfirswarmHome, listExaminers, loadExaminer, machineSigner, sshSign, RELEASE_NAMESPACE, type Examiner, type MachineSigner } from "./signers.ts";
 import { readLedger, supersededBy, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain, type LedgerEntry } from "../extensions/protocol.ts";
 import { verifyJournalText } from "./evidence-store.ts";
@@ -617,7 +621,7 @@ async function main(argv: string[]): Promise<number> {
   const say = (s: string) => console.log(s);
   const sandboxArg = opt(args, "--sandbox") ?? positional;
   if (!sandboxArg) {
-    console.error("usage: release.ts draft|sign|show|verify|print|timestamp|mirror <sandbox> …");
+    console.error("usage: release.ts draft|sign|show|verify|print|timestamp|mirror|ots|transparency <sandbox> …");
     return 2;
   }
   const ctx = runContext(sandboxArg, { run: opt(args, "--run"), runsDir: opt(args, "--runs") });
@@ -700,8 +704,23 @@ async function main(argv: string[]): Promise<number> {
       console.log(`Mirror:       ${m.note}`);
       return 0;
     }
+    case "ots": {
+      const o = otsRelease(ctx.sandbox, { version, upgrade: args.includes("--upgrade") });
+      console.log(`OpenTimestamps: ${o.note}`);
+      return o.ok ? 0 : 3;
+    }
+    case "transparency": {
+      const command = opt(args, "--log") ?? process.env.SWARM_TRANSPARENCY_LOG;
+      if (!command) {
+        console.error("BLOCKER: no transparency log command (--log COMMAND or SWARM_TRANSPARENCY_LOG)");
+        return 2;
+      }
+      const t = transparencyRelease(ctx.sandbox, command, version);
+      console.log(`Transparency: ${t.note}`);
+      return t.ok ? 0 : 1;
+    }
     default:
-      console.error("usage: release.ts draft|sign|show|verify|print|timestamp|mirror <sandbox> …");
+      console.error("usage: release.ts draft|sign|show|verify|print|timestamp|mirror|ots|transparency <sandbox> …");
       return 2;
   }
 }
