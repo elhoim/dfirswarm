@@ -21,13 +21,15 @@
       "description": "Deadline for each family (default 1800)"
     }
   },
-  "requires": ["target-query"],
+  "requires": [
+    "target-query"
+  ],
   "runtime": "python3",
   "entry": "run.py",
   "timeout_seconds": 14400,
   "example": "{\"source\":\"inputs/server.E01\",\"out_dir\":\"work/linux-triage\"}",
   "by": "maintainer",
   "at": "2026-09-26T00:00:00.000Z",
-  "version": 1,
-  "sha256": "1c8c7d4d39b09413621e46dfaabb5b313cec9eddb00a7c0c8b7336ba0b5e1cef"
+  "version": 2,
+  "sha256": "f6765c25462ef59550a455f423aedcadc3f297877672c97a34a744c9df188e1f"
 }

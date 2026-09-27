@@ -37,6 +37,6 @@
   "example": "{\"path\": \"inputs/cloudtrail\", \"notable_only\": true, \"out_file\": \"work/cloudtrail.jsonl\"}",
   "by": "maintainer",
   "at": "2026-09-22T22:00:00.000Z",
-  "version": 1,
-  "sha256": "de17d67320a239b852a1d3e04f458dbcabc2eef63cf0944e1b954405cae0118d"
+  "version": 2,
+  "sha256": "824eb3b886f7c98c0f92025f2af34ed01957713b2254908dcdb96e2a6d497583"
 }

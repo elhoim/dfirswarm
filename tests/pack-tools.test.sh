@@ -443,6 +443,33 @@ docp work/doc2 > "$OUT/doc2.json" 2>&1 && fail "doc_probe wrote through a link i
 grep -q 'cannot be under inputs/' "$OUT/doc2.json" && [[ ! -e "$OUT/run/inputs/planted-part" ]] || fail "doc_probe should refuse the part a link sends under inputs/: $(cat "$OUT/doc2.json")"
 pass "feature_scan, zeek_run, sigma_hunt, unified_log and doc_probe write under the run directory, never under inputs/ or through a link out of it"
 
+# The tools that keep their whole result in an out_file or an out_dir of the
+# caller's naming wrote there unchecked as well: cloud, macOS, triage, network
+# and Linux. The same refusals, before anything is read or run.
+more() { # <run.py> <key> <path>
+  (cd "$OUT/run" && printf '{"path":"inputs/blob.bin","source":"inputs/blob.bin","db":"inputs/blob.bin","rules":"inputs/blob.bin","root":"inputs","%s":"%s"}' "$2" "$3" \
+    | PATH="$OUT/pyonly" "$OUT/pyonly/python3" "$1")
+}
+n=0
+for t in cloud-forensics/cloudtrail_parse:out_file cloud-forensics/signin_analyse:out_file cloud-forensics/ual_parse:out_file \
+         macos-forensics/fsevents_parse:out_file macos-forensics/knowledgec_query:out_file macos-forensics/plist_read:out_file \
+         triage-collection/collection_index:out_file network-forensics/network_log_summary:out_dir \
+         network-forensics/pcap_extract:out_dir network-forensics/pcap_summary:out_dir network-forensics/suricata_run:out_dir \
+         linux-forensics/linux_triage:out_dir; do
+  tool="$ROOT/packs/${t%%/*}/tools/$(basename "${t%%:*}")/run.py"; key="${t##*:}"; name="$(basename "${t%%:*}")"
+  for bad in "../escaped-$name" "inputs/planted-$name" "work/../inputs/planted-$name" "$OUT/abs-$name" \
+             "work/out-link/escaped-$name" . inputs; do
+    got="$(more "$tool" "$key" "$bad" 2>&1)" && fail "$name wrote $key=$bad: $got"
+    grep -Eq "$refuses" <<<"$got" || fail "$name should refuse $key=$bad with the reason, not: $got"
+  done
+  got="$(more "$tool" "$key" "work/more-$name" 2>&1)"
+  grep -Eq "$refuses" <<<"$got" && fail "$name refused $key=work/more-$name: $got"
+  n=$((n + 1))
+done
+leaked="$(find "$OUT" -path "$OUT/run/work" -prune -o \( -name 'escaped*' -o -name 'planted*' -o -name 'abs*' \) -print)"
+[[ -z "$leaked" ]] || fail "a refused output was still written: $leaked"
+pass "the $n tools that keep a whole result in an out_file or out_dir write it under the run directory, never under inputs/ or through a link out of it"
+
 # --- sigma_hunt speaks the Zircolite the images carry ----------------------------
 # Zircolite 3 dropped --noexternal and refuses it, as argparse does any flag
 # it does not know; sigma_hunt passed it, so with Zircolite in the disk image
