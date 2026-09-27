@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initSandbox, recordEntry } from "../extensions/protocol.ts";
+import { disputeEntry, initSandbox, recordEntry } from "../extensions/protocol.ts";
 import { ledgerChain, redactPackage, verifyPackage, writeComponents } from "../scripts/package-tools.ts";
 import { takeCustody } from "../scripts/custody.ts";
 import { appendReview } from "../scripts/review.ts";
@@ -81,7 +81,8 @@ test("a redacted package holds none of a sensitive entry's words, and its chains
   // The job log is cited by the sensitive entry through its refs in a real run; here it carries the words.
   const r = await redactPackage(root, pkg);
   assert.equal(r.entries, 1, "a1 recorded the same entry word for word: an attestation, not a second entry");
-  assert.equal(r.lines, 3, "one ledger entry, one trace line and one journal line");
+  assert.equal(r.lines, 4, "one ledger entry, the attestation of it (an act on a sensitive entry), one trace line and one journal line");
+  assert.deepEqual(r.leaks, [], "nothing of it is left anywhere in the package");
   for (const f of ["ledger.jsonl", "trace/events.jsonl", "board/main.md", "store/jobs/j000001/stdout.log", "ledger.md", "store/journal.jsonl"]) {
     assert.doesNotMatch(await readFile(join(pkg, f), "utf8"), new RegExp(SECRET), `${f} holds no secret`);
   }
@@ -92,9 +93,9 @@ test("a redacted package holds none of a sensitive entry's words, and its chains
   assert.equal(v.ok, true, v.lines.join("\n"));
   assert.match(v.lines.join("\n"), /Trace:        3 lines, chain intact, 1 redacted \(their hashes kept\); the 3 lines the verdict sealed are there, 0 after/);
   assert.match(v.lines.join("\n"), /Ledger:       3 entries, chain intact, 1 redacted/);
-  assert.match(v.lines.join("\n"), /Attestations: 1 lines, chain intact/);
+  assert.match(v.lines.join("\n"), /Attestations: 1 lines, chain intact, 1 redacted \(their hashes kept\)/);
   assert.match(v.lines.join("\n"), /Journal:      3 lines, chain intact, 1 redacted/);
-  assert.match(v.lines.join("\n"), /Redacted:     this package was made with --redact/);
+  assert.match(v.lines.join("\n"), /Redacted:     this package was made with --redact \(REDACTIONS\.txt\); REDACTIONS\.json records what \d+ redaction\(s\) replaced \(the sha256 of each original, why, which entry\); the leak scan after it found nothing over \d+ file\(s\)/);
 });
 
 test("the package's verify finds a chain edited after it was packaged, and a trace that is not the one sealed", async () => {
@@ -153,7 +154,7 @@ test("a part the verdict sealed, or one the package lists as present, cannot be 
 });
 
 /** A run with custody taken and an examiner's sign-off, packaged as swarm.sh package lays it out. */
-async function sealedPackage(): Promise<{ root: string; runs: string; pkg: string }> {
+async function sealedPackage(o: { dispute?: boolean } = {}): Promise<{ root: string; runs: string; pkg: string }> {
   const runs = await mkdtemp(join(tmpdir(), "pkg-sealed-"));
   dirs.push(runs);
   const root = join(runs, "sp001");
@@ -165,6 +166,10 @@ async function sealedPackage(): Promise<{ root: string; runs: string; pkg: strin
   await writeFile(join(root, "work", "report.md"), "# Report\n\nImaged on 2024-04-05 [#1].\n");
   await writeFile(join(root, "work", "a0", "big.bin"), Buffer.concat([Buffer.from([0]), Buffer.alloc(16, 1)]));
   await writeFile(join(runs, "registry.json"), JSON.stringify({ runs: [{ id: "sp001", sandbox: root }] }));
+  if (o.dispute) {
+    const d = await disputeEntry({ sandboxRoot: root, agentId: "a1" }, { seq: 1, why: "the header date is the imager's clock, not checked" });
+    assert.equal(d.ok, true, JSON.stringify(d));
+  }
   await takeCustody(root, { runsDir: runs });
   await appendReview(runs, "sp001", root, { action: "sign", examiner: "H. Examiner" });
   const pkg = join(root, "package");
@@ -179,6 +184,7 @@ async function sealedPackage(): Promise<{ root: string; runs: string; pkg: strin
   await cp(join(root, "ledger", "entries.jsonl"), join(pkg, "ledger.jsonl"));
   await cp(join(root, "traces", "events.jsonl"), join(pkg, "trace", "events.jsonl"));
   await cp(join(runs, "reviews", "sp001.jsonl"), join(pkg, "review.jsonl"));
+  if (o.dispute) await cp(join(root, "ledger", "disputes.jsonl"), join(pkg, "ledger-disputes.jsonl"));
   writeComponents(root, pkg);
   return { root, runs, pkg };
 }
@@ -215,4 +221,24 @@ test("the examiner's review travels with the package: its chain is walked and it
   v = verifyPackage(pkg);
   assert.equal(v.ok, false);
   assert.match(v.lines.join("\n"), /Review:       CHAIN BROKEN \(line 2 does not follow the line before it\)/);
+});
+
+test("the agents' disputes travel with the package: their chain is walked and held to the head the verdict sealed", async () => {
+  const { pkg } = await sealedPackage({ dispute: true });
+  let v = verifyPackage(pkg);
+  assert.equal(v.ok, true, v.lines.join("\n"));
+  assert.match(v.lines.join("\n"), /Disputes:     1 lines, chain intact; head sealed/);
+  const components = JSON.parse(await readFile(join(pkg, "COMPONENTS.json"), "utf8")) as { components: Array<{ path: string; present: boolean }> };
+  assert.equal(components.components.find((c) => c.path === "ledger-disputes.jsonl")?.present, true);
+  // A dispute's words rewritten: the chain breaks.
+  const text = await readFile(join(pkg, "ledger-disputes.jsonl"), "utf8");
+  await writeFile(join(pkg, "ledger-disputes.jsonl"), text.replace("not checked", "checked"));
+  v = verifyPackage(pkg);
+  assert.equal(v.ok, false);
+  assert.match(v.lines.join("\n"), /Disputes:     CHAIN BROKEN at line 1 \(the line was rewritten\)/);
+  // Taken out, and still declared present: named.
+  await rm(join(pkg, "ledger-disputes.jsonl"));
+  v = verifyPackage(pkg);
+  assert.equal(v.ok, false);
+  assert.match(v.lines.join("\n"), /ledger-disputes\.jsonl \(declared present\)/);
 });

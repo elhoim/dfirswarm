@@ -58,7 +58,8 @@ async function sandbox(): Promise<string> {
     bytes: 16,
     enforce: "auto",
     guard: "microvm",
-    held: "bind",
+    // A copy: inputs/ is the run's own directory (held in place, it would be a link to /evidence).
+    held: "copy",
     files: [
       { path: "inputs/notes.txt", bytes: 6, sha256: sha("notes\n") },
       { path: "inputs/mail/a.bin", bytes: 10, sha256: sha("attachment") },

@@ -83,8 +83,12 @@ import { escapeHtml, markdownToHtml } from "../ui/src/lib/markdown.ts";
 // Options
 // ---------------------------------------------------------------------------
 
-/** The release this render is for. Version 1 or later is a release; anything else is a draft. */
-export type ReportRelease = { version: number; at?: string };
+/**
+ * The release this render is for (release-record.ts bodyRelease). Version 1
+ * or later that an examiner adopted is a release; anything else, a machine's
+ * draft included, is a draft.
+ */
+export type ReportRelease = { version: number; at?: string; state?: "draft" | "adopted" };
 
 /**
  * A human's review of the run, as the caller read it (report.ts keeps the
@@ -519,7 +523,7 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
     review: opts.review ?? null,
     grounding: opts.grounding ?? {},
     release,
-    draft: !(release && Number(release.version) >= 1),
+    draft: !(release && Number(release.version) >= 1 && release.state !== "draft"),
     hasAnswers,
     gate,
     problems,
@@ -830,6 +834,9 @@ function reviewChip(r: EntryState["review"], unreadable?: string): Chip {
   if (unreadable) return { text: "review unreadable", tone: "brick" };
   if (!r) return { text: "not independently reviewed", tone: "none" };
   if (r.action === "accept") return { text: "accepted by the examiner", tone: "moss" };
+  if (r.action === "adopt") return { text: "adopted by the examiner", tone: "moss" };
+  if (r.action === "qualify") return { text: "adopted with a qualification", tone: "saffron" };
+  if (r.action === "inconclusive") return { text: "inconclusive (the examiner)", tone: "saffron" };
   if (r.action === "reject") return { text: "rejected by the examiner", tone: "brick" };
   return { text: `${r.action === "amend" ? "amended" : r.action} by the examiner`, tone: "saffron" };
 }
@@ -840,7 +847,7 @@ function reviewWords(run: Run, s: EntryState): string {
   if (!run.review) return "not reviewed by an examiner";
   const r = s.review;
   if (!r) return "not reviewed";
-  const verb = r.action === "accept" ? "accepted" : r.action === "reject" ? "REJECTED" : r.action === "amend" ? "amended" : r.action;
+  const verb = r.action === "accept" ? "accepted" : r.action === "adopt" ? "adopted" : r.action === "qualify" ? "adopted with a qualification" : r.action === "inconclusive" ? "rendered inconclusive" : r.action === "reject" ? "REJECTED" : r.action === "amend" ? "amended" : r.action;
   const other = r.entry_hash && r.entry_hash !== s.hash ? `; reviewed against entry hash ${r.entry_hash}, which is not this entry's` : "";
   return `${verb} by ${r.by} at ${r.at}${r.note ? `: ${r.note}` : ""}${other}`;
 }
@@ -1856,7 +1863,7 @@ function reviewSection(run: Run, memo: Map<number, EntryState>): BodySection {
       { label: "Examiner", s: [r?.examiner ? `${r.examiner.name}${r.examiner.organisation ? `, ${r.examiner.organisation}` : ""}${r.examiner.competence ? ` — ${r.examiner.competence}` : ""}` : "not recorded"] },
       { label: "Technical reviewer", s: [r?.technicalReviewer ? `${r.technicalReviewer.name}${r.technicalReviewer.competence ? ` — ${r.technicalReviewer.competence}` : ""}${r.technicalReviewer.checked ? `; checked ${r.technicalReviewer.checked}` : ""}` : "none recorded"] },
       { label: "Signed", s: [r?.signed ? `by ${r.signed.by} at ${r.signed.at}${r.signed.ledger_head ? `, over ledger head ${r.signed.ledger_head}` : ""}${r.signed.current === false ? `; NOT OVER THIS RUN AS IT STANDS${r.signed.scope ? `: ${r.signed.scope}` : ""}` : r.signed.current ? "; over this ledger and this report" : ""}` : "not signed"] },
-      { label: "Release", s: [run.draft ? "draft: no release v1 exists" : `release v${run.release?.version}${run.release?.at ? `, ${run.release.at}` : ""}`] },
+      { label: "Release", s: [run.draft ? (run.release ? `release v${run.release.version}, a draft sealed by the machine${run.release.at ? ` at ${run.release.at}` : ""}: adopted by no one` : "draft: no release v1 exists") : `release v${run.release?.version}${run.release?.at ? `, ${run.release.at}` : ""}`] },
     ],
   });
   return { id: "s10", n: "10", title: "Review and adoption", desc: "who reviewed it, what they adopted, and the release", blocks };
@@ -2303,9 +2310,9 @@ export type BodyFacts = {
   summary: { seq: number; value: string; stands: boolean } | null;
 };
 
-/** An answer the examiner accepted, against its own hash (a review of another version of it adopts nothing). */
+/** An answer the examiner adopted (accept, adopt, or qualify), against its own hash (a review of another version of it adopts nothing). */
 function adoptedBy(s: EntryState): boolean {
-  return s.review?.action === "accept" && (!s.review.entry_hash || s.review.entry_hash === s.hash);
+  return ["accept", "adopt", "qualify"].includes(s.review?.action ?? "") && (!s.review?.entry_hash || s.review.entry_hash === s.hash);
 }
 
 function factsOf(run: Run, memo: Map<number, EntryState>): BodyFacts {

@@ -56,11 +56,34 @@ import { createInterface } from "node:readline";
 import { loadRunContext, readJsonFile } from "./run-record.ts";
 import { coverageLine, coverageOf, type CoverageReport, type Grounding } from "./coverage.ts";
 import { ReviewFileError, isSandboxPath, ledgerHead, readReviews, reviewState, signoffCoverage, verifyReviewChain, type ReviewLine } from "./review.ts";
+import { bodyRelease, readReleases } from "./release-record.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+/**
+ * The release a rendering is for (scripts/release.ts): which version, a
+ * machine's draft or an examiner's adoption, when, and who seals it.
+ */
+export type RenderRelease = {
+  version: number;
+  state: "draft" | "adopted";
+  at: string;
+  examiner?: { id: string; name: string; organisation: string; competence: string; fingerprint: string } | null;
+  machine?: { fingerprint: string } | null;
+  /** What the examiner did with the conclusions, counted, and who checked the methods. */
+  adoption?: { adopted: number; qualified: number; withdrawn: number; inconclusive: number; not_adopted: number; scope: "answers" | "report"; technical: string[] } | null;
+};
+
 export type ReportOptions = {
   runsDir?: string;
+  /**
+   * The release this rendering is for. A draft, or no release at all,
+   * carries the DRAFT mark, decided now, when the bytes are rendered; a
+   * release an examiner adopts renders its own final bytes without it.
+   * Absent, the run's releases are read to say which one, if any, is the
+   * adopted report, and that this rendering is not it.
+   */
+  release?: RenderRelease | null;
   /** Overrides the registry's case id and examiner, for a one-off render. */
   caseId?: string;
   examiner?: string;
@@ -343,6 +366,9 @@ section { padding-top: 2.5rem; }
 .embedded { border: 1px solid var(--line); border-radius: 8px; padding: .3rem 1.1rem 1.1rem; background: var(--card); margin-top: 1rem; }
 .embedded h3 { margin-top: 1.4em; }
 footer { margin-top: 3rem; padding-top: 1.1rem; border-top: 1px solid var(--line); font-size: .8em; color: var(--ink-3); }
+.watermark { position: fixed; top: 40%; left: 0; right: 0; text-align: center; font: 700 110pt/1 var(--sans); letter-spacing: .12em; color: rgba(178, 58, 72, .10); transform: rotate(-28deg); pointer-events: none; z-index: 0; }
+.release-banner { margin: 1.4rem 0 0; padding: .6rem .85rem; border: 2px solid var(--brick); background: var(--brick-soft); color: var(--brick-ink); font-weight: 600; }
+.release-banner.adopted { border-color: var(--moss); background: var(--moss-soft); color: var(--moss-ink); }
 footer p { max-width: 44em; }
 
 @media (max-width: 34rem) {
@@ -415,6 +441,8 @@ export type ReviewState = {
   reportNow?: string | null;
   /** Why the review file could not be read (a link, not a regular file): said as that, never as "not reviewed". */
   unreadable?: string;
+  /** The last technical reviewer's record: who, on what competence, what was checked. */
+  technical?: { name: string; competence?: string; checked?: string } | null;
 };
 
 /**
@@ -422,11 +450,13 @@ export type ReviewState = {
  * its chain checked and the ledger's current head beside it; null when there
  * is none.
  */
-export async function readReviewState(runsDir: string, id: string, sandbox: string, ledger: readonly LedgerEntry[]): Promise<ReviewState | null> {
+export async function readReviewState(runsDir: string, id: string, sandbox: string, ledger: readonly LedgerEntry[], upTo?: number): Promise<ReviewState | null> {
   if (!id) return null;
   let lines: Awaited<ReturnType<typeof readReviews>>;
   try {
     lines = await readReviews(runsDir, id);
+    // A release renders the review as it bound it: its first lines only.
+    if (upTo !== undefined) lines = lines.slice(0, upTo);
   } catch (err) {
     if (!(err instanceof ReviewFileError)) throw err;
     return { lines: 0, chain: { ok: false, reason: err.why }, byEntry: new Map(), signed: null, head: "", unreadable: err.why };
@@ -443,7 +473,8 @@ export async function readReviewState(runsDir: string, id: string, sandbox: stri
     const r = await hashRegularFile(join(sandbox, signed.report_path));
     reportNow = r && "sha256" in r ? r.sha256 : null;
   }
-  return { lines: lines.length, chain: verifyReviewChain(lines), byEntry: entries, signed, head, reportNow };
+  const tr = [...parsed].reverse().find((l) => l.action === "technical_review" && l.reviewer);
+  return { lines: lines.length, chain: verifyReviewChain(lines), byEntry: entries, signed, head, reportNow, technical: tr?.reviewer ? { name: tr.reviewer.name, competence: tr.reviewer.competence, ...(tr.methods_checked ? { checked: tr.methods_checked } : {}) } : null };
 }
 
 /**
@@ -473,9 +504,12 @@ export function signoffScope(state: ReviewState): string {
  * sign-off covers the run as it stands: the report and the run summary pass
  * the same, so their counts of what was adopted agree.
  */
-export function bodyReview(review: ReviewState | null, examiner?: string | null, organisation?: string | null): HumanReview | null {
+export function bodyReview(review: ReviewState | null, examiner?: { name: string; organisation?: string; competence?: string } | null): HumanReview | null {
   const current = review?.signed && !review.unreadable ? signoffCurrent(review) : null;
-  return humanReviewFrom(review, examiner ? { name: examiner, ...(organisation ? { organisation } : {}) } : null, review && current !== null ? { current, ...(current ? {} : { scope: signoffScope(review) }) } : undefined);
+  const h = humanReviewFrom(review, examiner ? { name: examiner.name, ...(examiner.organisation ? { organisation: examiner.organisation } : {}) } : null, review && current !== null ? { current, ...(current ? {} : { scope: signoffScope(review) }) } : undefined);
+  if (!h) return h;
+  // The adopting examiner's competence, and the technical reviewer, when there are.
+  return { ...h, ...(examiner?.competence && h.examiner ? { examiner: { ...h.examiner, competence: examiner.competence } } : {}), ...(review?.technical ? { technicalReviewer: review.technical } : {}) };
 }
 
 /** The examiner's standing on one entry, in the words of its exhibit. */
@@ -1202,7 +1236,7 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
     model_gateway?: { lines: number; intact: boolean; detail: string; refused?: string } | null;
     checks?: Array<{ name: string; status: string; reason?: string; expected?: number; checked?: number }>;
     artifacts?: { files?: number; index_sha256?: string } | null;
-    seal?: { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
+    seal?: { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; disputes?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
     acquisition?: { source: string | null; source_sha256: string | null; given: number; matched: number; mismatched: string[]; not_compared: string[] } | null;
     operator?: { lines: number; intact: boolean; detail: string; trace_actions: number; matched: number; unmatched: unknown[] } | null;
     models?: { team: Array<{ agent: string; model: string | null }>; gateway_answered: string[] | null };
@@ -1348,7 +1382,35 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
     return typeof c === "string" && c ? ` (commit ${c.slice(0, 12)}${dirty ? ", with local changes" : ""})` : "";
   })();
   const caseId = options.caseId ?? run?.case_id ?? "";
+  // What the kickoff was told about who ran the run: its words, never taken for an enrolled examiner's.
   const examiner = options.examiner ?? run?.examiner ?? "";
+  // The run's releases, and the one this rendering is for: a machine's draft
+  // and an examiner's adoption are kept apart in every line below.
+  const releases = readReleases(sandbox);
+  const forRelease = options.release ?? null;
+  // The release state the body and the summary take (release-record.ts bodyRelease): this release's own, or the run's latest.
+  const rel = bodyRelease(sandbox, forRelease);
+  const adoptedHere = forRelease && forRelease.state === "adopted" && forRelease.version >= 1 ? forRelease : null;
+  // Only the releases before this one: what a release says of the others never depends on what came after it.
+  const earlier = forRelease ? releases.filter((r) => r.version < forRelease.version) : releases;
+  const adoptedElsewhere = [...earlier].reverse().find((r) => r.record?.state === "adopted") ?? null;
+  // A fresh rendering of a run whose latest release is adopted is not DRAFT (plan: the mark stands until release v1), and says it is not the signed bytes.
+  const releasedRun = !forRelease && rel.release?.state === "adopted" ? rel.latest : null;
+  const draftMark = !adoptedHere && !releasedRun;
+  const adopter = adoptedHere?.examiner ?? null;
+  const releaseBanner = adoptedHere
+    ? `Release v${adoptedHere.version}, adopted by ${adopter?.name ?? "the examiner"}${adopter?.organisation ? ` (${adopter.organisation})` : ""} at ${adoptedHere.at}, and signed with the key ${adopter?.fingerprint ?? "named in release.json"} (the signature is beside these bytes: release/v${adoptedHere.version}/release.json.sig). The conclusions the examiner adopted are the examiner's; every other one is the agents'.`
+    : forRelease
+      ? `DRAFT: release v${forRelease.version}, sealed at ${forRelease.at} by this install's machine key${forRelease.machine?.fingerprint ? ` (${forRelease.machine.fingerprint})` : ""} when custody was taken. The machine key is not an examiner: no one has adopted this report, and every conclusion in it is the agents'.`
+      : releasedRun
+        ? `NOT THE SIGNED BYTES: a fresh rendering of the run as it stands. The report ${releasedRun.record?.signer.examiner?.name ?? "an examiner"} adopted is release v${releasedRun.version} (release/v${releasedRun.version}/report.html, sha256 ${releasedRun.record?.report.html.sha256 ?? "?"}), signed with their key; what changed since is not adopted until a release says so.`
+      : adoptedElsewhere
+        ? `DRAFT: NOT THE ADOPTED REPORT. This is a fresh rendering of the run as it stands; the report ${adoptedElsewhere.record?.signer.examiner?.name ?? "an examiner"} adopted is release v${adoptedElsewhere.version} (release/v${adoptedElsewhere.version}/report.html, sha256 ${adoptedElsewhere.record?.report.html.sha256 ?? "?"}), signed with their key, and a later release is a machine's draft.`
+        : "DRAFT: no examiner has adopted this report. It is a rendering of the run's record as it stands, and every conclusion in it is the agents'.";
+  const releaseRow = [
+    ...earlier.map((r) => (r.record ? `v${r.version} ${r.record.state === "adopted" ? `adopted by ${r.record.signer.examiner?.name ?? "?"} (examiner's key ${r.record.signer.fingerprint})` : `draft sealed by the machine key (${r.record.signer.fingerprint}), adopted by no one`}, ${r.record.at}, release.json sha256 ${r.sha256}` : `v${r.version}: ${r.error ?? "unreadable"}`)),
+    ...(forRelease ? [`this document is v${forRelease.version}: its own hash cannot be inside it, and release/v${forRelease.version}/release.json binds it`] : []),
+  ].join("; ") || "none: no release was sealed (custody at stop writes v0; swarm.sh releases <id> --draft writes one for a run that has a verdict)";
   const startedAt = budget?.started_at ?? run?.started_at ?? events[0]?.ts ?? "";
   // The host's clock, where the collector stamped one: a guest's own `ts` is its word.
   const endedAt = sentinel?.at ?? (events.length ? hostTime(events.at(-1) as { ts: string; recv_ts?: string }) : "");
@@ -1561,7 +1623,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ? hostCustody.checks.map((c) => `${c.name}: ${c.status.replace("_", " ")}${c.reason ? ` (${c.reason})` : ""}${c.expected !== undefined ? ` [${c.checked ?? 0} of ${c.expected}]` : ""}`).join("; ")
     : null;
   const sealRow = hostCustody?.seal
-    ? `trace ${hostCustody.seal.trace?.lines ?? 0} lines (the last line's sha256 ${hostCustody.seal.trace?.last_line_sha256 ?? "none"}); ledger ${hostCustody.seal.ledger?.entries ?? 0} entries, head ${hostCustody.seal.ledger?.head ?? "none"}${hostCustody.seal.attestations?.lines ? `; attestations ${hostCustody.seal.attestations.lines} lines, head ${hostCustody.seal.attestations.head}` : ""}${hostCustody.seal.journal ? `; store journal ${hostCustody.seal.journal.lines} lines, head ${hostCustody.seal.journal.head}` : ""}`
+    ? `trace ${hostCustody.seal.trace?.lines ?? 0} lines (the last line's sha256 ${hostCustody.seal.trace?.last_line_sha256 ?? "none"}); ledger ${hostCustody.seal.ledger?.entries ?? 0} entries, head ${hostCustody.seal.ledger?.head ?? "none"}${hostCustody.seal.attestations?.lines ? `; attestations ${hostCustody.seal.attestations.lines} lines, head ${hostCustody.seal.attestations.head}` : ""}${hostCustody.seal.disputes?.lines ? `; disputes ${hostCustody.seal.disputes.lines} lines, head ${hostCustody.seal.disputes.head}` : ""}${hostCustody.seal.journal ? `; store journal ${hostCustody.seal.journal.lines} lines, head ${hostCustody.seal.journal.head}` : ""}`
     : null;
   const acquisitionRow = hostCustody?.acquisition
     ? hostCustody.acquisition.mismatched.length
@@ -1661,6 +1723,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ],
     ["Ledger", `${ledger.length} entries (${timeline.length} events, ${iocs.length} indicators, ${findings.length} findings${absences.length ? `, ${absences.length} searched and not found` : ""}${correctedBy.size ? `; ${correctedBy.size} corrected by a later entry, kept as recorded` : ""})`],
     ["Examiner review", reviewLine(review, ledger)],
+    ["Releases", releaseRow],
     ...(gatewayRecordOf(runRecord) ? ([["Model gateway", gatewayLine(gatewayRecordOf(runRecord) as GatewayRecord, gatewayTotals, hostCustody?.model_gateway)]] as Array<[string, string]>) : []),
     ["Coverage", coverageLine(coverage)],
     [
@@ -1742,13 +1805,14 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     return null;
   })();
   const body = await renderReportBody(sandbox, {
-    review: bodyReview(review, examiner, options.organisation),
+    review: bodyReview(review, rel.examiner),
+    release: rel.release,
     grounding: coverage.grounding,
     ...(run?.model ? { defaultModel: run.model } : {}),
     workingReport: own ? { path: own.path, text: own.text, seal: await ownReportSeal(sandbox, own.path, own.sha256, hostCustody, lastAnchored?.artifacts_sha256) } : null,
     html: { ...(evidenceHtml ? { evidence: evidenceHtml } : {}), method: methodHtml, limits: limitsHtml },
-    // No release is passed until the release record exists (track L): every
-    // render is a draft, and a release renders its own final bytes.
+    // The release this rendering is for, or the run's latest (bodyRelease):
+    // a draft unless an examiner adopted it; a release renders its own final bytes.
   });
   const sections: Section[] = [
     ...body.sections.map((b): Section => ({ id: b.id, n: b.n, title: /^[A-Z]$/.test(b.n) ? `Appendix ${b.n}: ${b.title}` : b.title, desc: b.desc, ...(b.count ? { count: b.count } : {}), html: b.html, ...(b.n === "A" || b.n === "C" ? { breakBefore: true } : {}) })),
@@ -1792,22 +1856,28 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
 <title>${escapeHtml(`${body.draft ? "DRAFT — " : ""}${title}`)}</title>
 <meta name="generator" content="DFIR Swarm ${escapeHtml(version)}">
 <meta name="dcterms.created" content="${escapeHtml(generatedAt)}">
+<meta name="dfirswarm.release" content="${escapeHtml(adoptedHere ? `v${adoptedHere.version} adopted` : forRelease ? `v${forRelease.version} draft` : "none: a draft rendering")}">
 <style>${STYLE}${body.style}</style>
 <body>
-<main>
+${draftMark ? '<div class="watermark" aria-hidden="true">DRAFT</div>\n' : ""}<main>
   <header class="cover">
     <div class="mark">${mark}<span class="wordmark">DFIR Swarm</span></div>
     <p class="kicker">${escapeHtml(options.organisation || "Forensic report")}</p>
     <h1>${escapeHtml(caseId || run?.label || id || "Untitled case")}</h1>
     <p class="case-line"><strong>${escapeHtml(headline)}</strong> ${stateChip}${body.draft ? ` ${chip("draft", "brick")}` : ""}</p>
+    <p class="release-banner${adoptedHere ? " adopted" : ""}">${escapeHtml(releaseBanner)}</p>
     ${scorecard}
     <dl class="facts">
-      <dt>Examiner</dt><dd>${escapeHtml(examiner || "—")}</dd>
+      <dt>Examiner</dt><dd>${escapeHtml(adopter ? `${adopter.name}, ${adopter.organisation}: ${adopter.competence} (enrolled on this install; key ${adopter.fingerprint})` : adoptedElsewhere ? `none for this rendering; release v${adoptedElsewhere.version} is adopted by ${adoptedElsewhere.record?.signer.examiner?.name ?? "an examiner"}` : "none: no enrolled examiner has adopted this report")}</dd>
+      ${examiner ? `<dt>Run by</dt><dd>${escapeHtml(`${examiner} (as the kickoff recorded who ran it; not an enrolled examiner, and not a signature)`)}</dd>` : ""}
+      <dt>Release</dt><dd>${escapeHtml(adoptedHere ? `v${adoptedHere.version}, adopted ${adoptedHere.at}${adoptedHere.adoption ? adoptedHere.adoption.scope === "answers" ? `: ${adoptedHere.adoption.adopted} conclusion(s) adopted, ${adoptedHere.adoption.qualified} qualified, ${adoptedHere.adoption.withdrawn} withdrawn, ${adoptedHere.adoption.inconclusive} rendered inconclusive, ${adoptedHere.adoption.not_adopted} not adopted (the agents')` : ": the report as a whole (a ledger with no answer entries)" : ""}${adoptedHere.adoption?.technical.length ? `; methods checked by ${adoptedHere.adoption.technical.join("; ")}` : ""}` : forRelease ? `v${forRelease.version}, a draft sealed by the machine at ${forRelease.at}` : "none: a rendering, not a release")}</dd>
       <dt>Run</dt><dd class="hash">${escapeHtml(id || "—")}</dd>
       <dt>Period</dt><dd class="tabular">${escapeHtml(startedAt || "—")} → ${escapeHtml(endedAt || "—")}</dd>
       <dt>Tool</dt><dd>DFIR Swarm ${escapeHtml(version)}${escapeHtml(commit)}</dd>
       <dt>Prepared by</dt><dd>an AI agent swarm (${team.n} agent${team.n === 1 ? "" : "s"}); ${
-        review && review.signed && signoffCurrent(review)
+        adoptedHere
+          ? `adopted by ${escapeHtml(adopter?.name ?? "the examiner")} in release v${adoptedHere.version}: the conclusions the examiner adopted or qualified are the examiner's, and every other one is the agents' conclusion, not adopted`
+          : review && review.signed && signoffCurrent(review)
           ? `reviewed and signed by ${escapeHtml(review.signed.examiner)} at ${escapeHtml(review.signed.at)}, over this ledger and this report`
           : review && review.signed && !review.unreadable
             ? `signed off by ${escapeHtml(review.signed.examiner)} at ${escapeHtml(review.signed.at)}, and NOT OVER THIS RUN AS IT STANDS: ${escapeHtml(signoffScope(review))}`

@@ -34,6 +34,7 @@ import { loadRunContext, readJsonFile } from "./run-record.ts";
 import { manifestMeta, verdictAnchorLine, verdictAnchorState } from "./custody.ts";
 import { bodyReview, gatewayRecordOf, heldRows, readReviewState, reviewLine, sourceCheckedLine, vmSpendNote, type GatewayTotals } from "./report.ts";
 import { reportBodyFacts, type BodyFacts } from "./report-body.ts";
+import { bodyRelease } from "./release-record.ts";
 import { coverageLine, coverageOf } from "./coverage.ts";
 import { readRegularText } from "./regular-file.ts";
 
@@ -183,7 +184,8 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   lines.push(`# Run summary: ${id || "(no id)"}${label ? ` — ${label}` : ""}`, "");
   lines.push(`- State: ${run?.state ?? "unknown (no registry entry)"} · sentinel ${sentinel ? "present" : "absent"}`);
   lines.push(`- Started: ${startedAt || "unknown"} · Duration: ${durationHuman(durationMs)}${endedAt ? ` (to ${sentinel ? "the sentinel" : "the last trace event"} at ${endedAt})` : ""}`);
-  if (run?.case_id || run?.examiner) lines.push(`- Case: ${run?.case_id || "—"} · Examiner: ${run?.examiner || "—"}`);
+  // What the kickoff was told about who ran the run: never the examiner who adopts a report (swarm.sh releases says who did).
+  if (run?.case_id || run?.examiner) lines.push(`- Case: ${run?.case_id || "—"} · Run by: ${run?.examiner ? `${run.examiner} (as the kickoff recorded it; not an enrolled examiner)` : "—"}`);
   // How the agents were held, and what the host could say once they were gone.
   const iso = (run as { isolation?: { mode?: string; image?: string; image_digest?: string } } | null)?.isolation;
   const gateway = gatewayRecordOf(run as Record<string, unknown> | null);
@@ -234,7 +236,9 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   lines.push(`- Examiner review: ${reviewLine(review, ledger)}`);
   // The answers as the report's cover counts them, from the same facts
   // (scripts/report-body.ts) with the same review: the two never disagree.
-  const facts = await reportBodyFacts(sandbox, { review: bodyReview(review, run?.examiner), ...(run?.model ? { defaultModel: run.model } : {}) });
+  // The release state, and the adopting examiner, read as the report reads them (release-record.ts bodyRelease): never the kickoff's examiner string.
+  const rel = bodyRelease(sandbox);
+  const facts = await reportBodyFacts(sandbox, { review: bodyReview(review, rel.examiner), release: rel.release, ...(run?.model ? { defaultModel: run.model } : {}) });
   lines.push(`- Answers: ${answersLine(facts)}`);
   for (const [k, v] of heldRows(run as Record<string, unknown> | null)) lines.push(`- ${k}: ${v}`);
   const flags: string[] = [];

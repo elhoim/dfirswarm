@@ -152,7 +152,7 @@ test("summary: a seeded sandbox produces every section with the right numbers", 
     assert.match(text, /^# Run summary: sum01 — summary-fixture/m);
     assert.match(text, /State: done · sentinel present/);
     assert.match(text, /Duration: 30m 0s/);
-    assert.match(text, /Case: CASE-0001 · Examiner: Jane Examiner/);
+    assert.match(text, /Case: CASE-0001 · Run by: Jane Examiner \(as the kickoff recorded it; not an enrolled examiner\)/);
     assert.match(text, /catalog · toolbox dfir · quarantine · allow-host isf-server\.techanarchy\.net/);
     // outcome
     assert.match(text, /Sentinel `done\/SWARM_DONE` by \*\*sum0102\*\* at 2026-09-18T10:30:00\.000Z: report signed off/);

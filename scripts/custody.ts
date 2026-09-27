@@ -62,7 +62,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
-import { eventChainVerifier, specialKind, verifyAttestationChain, verifyLedgerChain } from "../extensions/protocol.ts";
+import { eventChainVerifier, specialKind, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain } from "../extensions/protocol.ts";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
 import { checkStore, verifyJournalText, type StoreCheck } from "./evidence-store.ts";
 import {
@@ -454,6 +454,50 @@ export async function eachInputsFile(
   return "meta" in read ? { ok: true } : { why: read.why };
 }
 
+/**
+ * The links the evidence is read through, held to what the kickoff
+ * recorded: inputs/ itself when the evidence was held in place as one set
+ * (`held: "bind"`, or a link where the manifest names one source), or each
+ * inputs/<name> of several sets (inputs.json `sets`: name and source). Each
+ * must still be a link whose target is the source recorded, and resolve to
+ * it. A set that was copied in is a directory of the run's own, with no link
+ * to check.
+ */
+export async function evidenceLinks(sandbox: string, meta: Record<string, unknown>): Promise<{ checked: number; moved: string[] }> {
+  const moved: string[] = [];
+  let checked = 0;
+  const bound = meta.held === "bind" || meta.bound === true;
+  const targets: Array<{ rel: string; source: string }> = [];
+  const sets = Array.isArray(meta.sets) ? (meta.sets as Array<{ name?: unknown; source?: unknown }>) : [];
+  for (const s of sets) {
+    if (typeof s?.name === "string" && s.name && !s.name.includes("/") && s.name !== ".." && typeof s.source === "string") targets.push({ rel: `inputs/${s.name}`, source: s.source });
+  }
+  if (!sets.length && typeof meta.source === "string" && meta.source) {
+    const top = await lstat(join(sandbox, "inputs")).catch(() => null);
+    if (bound || top?.isSymbolicLink()) targets.push({ rel: "inputs", source: meta.source });
+  }
+  for (const t of targets) {
+    const lst = await lstat(join(sandbox, t.rel)).catch(() => null);
+    if (!lst) {
+      moved.push(`${t.rel} is gone (it led to ${t.source})`);
+      continue;
+    }
+    if (!lst.isSymbolicLink()) {
+      // A set copied in is the run's own directory; held in place, a link was made, and something else is there now.
+      if (bound) moved.push(`${t.rel} is no longer the link to ${t.source} the kickoff made: a ${lst.isDirectory() ? "directory" : "file"} is there`);
+      continue;
+    }
+    const target = await readlink(join(sandbox, t.rel)).catch(() => null);
+    const real = await realpath(join(sandbox, t.rel)).catch(() => null);
+    // The source as recorded, resolved the same way: a recorded path through a link of the system (/var on macOS) is the same place.
+    const source = await realpath(t.source).catch(() => t.source);
+    if (real === null) moved.push(`${t.rel} leads to ${target ?? "?"}, which is not there now (the kickoff recorded ${t.source})`);
+    else if (real !== source) moved.push(`${t.rel} leads to ${real}${target !== real ? ` (through ${target})` : ""}, not ${t.source}, the source the kickoff recorded`);
+    else checked += 1;
+  }
+  return { checked, moved };
+}
+
 export type Custody = {
   at: string;
   run: string | null;
@@ -483,6 +527,15 @@ export type Custody = {
         digests_compared: { sha256: number; md5: number; sha1: number };
         manifest_sha256: string;
         manifest_anchored: boolean | null;
+        /**
+         * The evidence held in place: inputs/ (one set) or each
+         * inputs/<set> (several) is a link the kickoff made to the source
+         * inputs.json records. How many were checked, and each that leads
+         * elsewhere now (or nowhere, or is no longer a link). A copy or an
+         * attached image has none. Absent from a verdict taken before this
+         * was checked.
+         */
+        links?: { checked: number; moved: string[] };
       };
   sessions: { files: Array<{ path: string; bytes: number; sha256: string | null }>; digest: string; not_files: string[] };
   tool_outputs: {
@@ -595,11 +648,15 @@ export type Custody = {
     trace: { lines: number; bytes: number; last_line_sha256: string | null };
     ledger: { entries: number; head: string | null };
     attestations: { lines: number; head: string | null };
+    /** The agents' disputes (ledger/disputes.jsonl, ledger version 4): absent from a verdict taken before they were sealed. */
+    disputes?: { lines: number; head: string | null };
     journal: { lines: number; head: string | null } | null;
     model_gateway: { lines: number; sha256: string | null } | null;
   };
   /** The ledger's attestations (a second author of an entry, appended beside it): their own chain. */
   attestations: { lines: number; intact: boolean; detail: string } | null;
+  /** The agents' disputes of entries and their withdrawals (ledger/disputes.jsonl): their own chain; null when there are none. */
+  disputes?: { lines: number; intact: boolean; detail: string } | null;
   /** The operator's audit beside the registry, and each operator line on the trace matched to it. */
   operator: OperatorAudit;
   /** The acquisition hashes given at kickoff (--inputs-hashes), against the evidence as re-hashed now. */
@@ -651,6 +708,7 @@ export type CustodyState = {
   incomplete?: string | null;
   seal?: Custody["seal"];
   attestations?: Custody["attestations"];
+  disputes?: Custody["disputes"];
   operator?: Custody["operator"];
   acquisition?: Custody["acquisition"];
   models?: Custody["models"];
@@ -1116,11 +1174,15 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
         }, sets);
         added.sort();
       }
+      // Evidence held in place is read through links the kickoff made: one
+      // that leads elsewhere now is evidence read from another place,
+      // whatever its bytes say.
+      const links = await evidenceLinks(sandbox, streamed.meta);
       const metaBytes = Number(streamed.meta.bytes);
       state.inputs = {
         files: total,
         bytes: Number.isFinite(metaBytes) && metaBytes > 0 ? metaBytes : totalBytes,
-        unchanged: !changed.length && !missing.length && !added.length && !skipped.length && !unreadable.length && anchored !== false,
+        unchanged: !changed.length && !missing.length && !added.length && !skipped.length && !unreadable.length && anchored !== false && !links.moved.length,
         complete: !skipped.length && !unreadable.length,
         changed,
         missing,
@@ -1131,6 +1193,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
         digests_compared: digests,
         manifest_sha256: streamed.sha256,
         manifest_anchored: anchored,
+        links,
       };
       // The imager's numbers, when the operator gave them at kickoff (inputs.json, anchored with it).
       state.acquisition = compareAcquisition(streamed.meta.acquisition as Parameters<typeof compareAcquisition>[0], actual);
@@ -1368,6 +1431,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     trace: { lines, bytes: traceBytes, last_line_sha256: lastLine === null ? null : createHash("sha256").update(lastLine).digest("hex") },
     ledger: { entries: 0, head: null },
     attestations: { lines: 0, head: null },
+    disputes: { lines: 0, head: null },
     journal: null,
     model_gateway: null,
   };
@@ -1467,6 +1531,15 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   } else if ("why" in attRead && attRead.why !== "missing") {
     state.attestations = { lines: 0, intact: false, detail: `the attestations are ${attRead.why}` };
   } else state.attestations = null;
+  // A dispute of an entry, and its withdrawal: a chain of its own beside the ledger.
+  const dispRead = await readRegularText(join(sandbox, "ledger", "disputes.jsonl"));
+  if ("text" in dispRead && dispRead.text.trim()) {
+    const d = verifyDisputeChain(dispRead.text);
+    state.disputes = { lines: d.total, intact: d.ok, detail: d.ok ? `${d.total} lines, chain intact` : `broken at line ${d.broken_at} (${d.reason})` };
+    if (state.seal) state.seal.disputes = { lines: d.total, head: d.head };
+  } else if ("why" in dispRead && dispRead.why !== "missing") {
+    state.disputes = { lines: 0, intact: false, detail: `the disputes are ${dispRead.why}` };
+  } else state.disputes = null;
   state.ledgerDone = true;
 
   // --- the model gateway's log -----------------------------------------------
@@ -1791,8 +1864,9 @@ export function verdictOf(state: CustodyState, incomplete: string | null): Custo
     artifacts: state.artifacts ?? null,
     model_gateway: state.model_gateway ?? null,
     store: state.store ?? null,
-    seal: state.seal ?? { trace: { lines: 0, bytes: 0, last_line_sha256: null }, ledger: { entries: 0, head: null }, attestations: { lines: 0, head: null }, journal: null, model_gateway: null },
+    seal: state.seal ?? { trace: { lines: 0, bytes: 0, last_line_sha256: null }, ledger: { entries: 0, head: null }, attestations: { lines: 0, head: null }, disputes: { lines: 0, head: null }, journal: null, model_gateway: null },
     attestations: state.attestations ?? null,
+    disputes: state.disputes ?? null,
     operator: state.operator ?? null,
     acquisition: state.acquisition ?? null,
     checks: [],
@@ -1835,8 +1909,13 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
       : acq.mismatched.length
         ? `; DOES NOT MATCH THE ACQUISITION HASHES GIVEN: ${acq.mismatched.join(", ")}`
         : `; matches the acquisition hashes given (${acq.matched} of ${acq.given}${acq.not_compared.length ? `, ${acq.not_compared.length} NOT COMPARED` : ""})`;
+    const movedLinks = inputs.links?.moved ?? [];
+    if (movedLinks.length) parts.push(`EVIDENCE READ THROUGH A LINK THAT MOVED: ${movedLinks.join("; ")}`);
+    else if (inputs.links?.checked) how.push(`${plural(inputs.links.checked, "link")} to where it was held still leading there`);
     parts.push(inputs.unchanged
       ? `evidence unchanged since the run began (${how.join(", ")}${inputs.manifest_anchored === true ? ", manifest anchored" : inputs.manifest_anchored === null ? ", manifest not anchored" : ""})${acqText}`
+      : movedLinks.length && !changedAny && inputs.complete
+        ? `the files read through it hash as the kickoff recorded (${how.join(", ")}), which does not make them the source it recorded${acqText}`
       : changedAny
         ? `EVIDENCE CHANGED: ${inputs.changed.length} changed, ${inputs.missing.length} missing, ${inputs.added.length} added${inputs.manifest_anchored === false ? ", MANIFEST REWRITTEN" : ""}${inputs.skipped.length ? `; ${inputs.skipped.length} NOT RE-READ` : ""}${unreadable.length ? `; ${unreadable.length} UNREADABLE BY THE HOST (${unreadable.join(", ")})` : ""}`
         : `EVIDENCE NOT FULLY RE-HASHED: ${inputs.files - inputs.skipped.length - unreadable.length} of ${inputs.files} checked unchanged${inputs.skipped.length ? `, ${inputs.skipped.length} not re-read before the deadline` : ""}${unreadable.length ? `, ${unreadable.length} unreadable by the host (${unreadable.join(", ")})` : ""}${inputs.manifest_anchored === null ? ", manifest not anchored" : ""}`);
@@ -1887,6 +1966,7 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
     if (l.claimed_by_seat.length) parts.push(`${plural(l.claimed_by_seat.length, "ledger hash", "ledger hashes")} a seat's own record line carried and the hub never logged (a guest's word, not counted against the ledger)`);
   }
   if (c.attestations) parts.push(c.attestations.intact ? `${plural(c.attestations.lines, "ledger attestation")}, chain intact` : `LEDGER ATTESTATIONS CHAIN BROKEN (${c.attestations.detail})`);
+  if (c.disputes) parts.push(c.disputes.intact ? `${plural(c.disputes.lines, "ledger dispute line")}, chain intact` : `LEDGER DISPUTES CHAIN BROKEN (${c.disputes.detail})`);
   if (c.operator && !c.operator.intact) parts.push(`OPERATOR AUDIT CHAIN BROKEN (${c.operator.detail})`);
   if (c.model_gateway) {
     const g = c.model_gateway;
@@ -2207,7 +2287,7 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
   const drift: Array<{ what: string; sealed: string; now: string }> = [];
   const after: string[] = [];
   const notSealed: string[] = [];
-  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the store journal", "the model gateway log"] };
+  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the store journal", "the model gateway log"] };
   const chain = (n: number, head: string | null, unit: string) => `${n} ${unit}, head ${head ?? "none"}`;
   if (!sealed.ledger) notSealed.push("the ledger");
   else if (sealed.ledger.entries !== now.ledger.entries || sealed.ledger.head !== now.ledger.head) {
@@ -2216,6 +2296,12 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
   if (!sealed.attestations) notSealed.push("the attestations");
   else if (sealed.attestations.lines !== now.attestations.lines || sealed.attestations.head !== now.attestations.head) {
     drift.push({ what: "ledger attestations", sealed: chain(sealed.attestations.lines, sealed.attestations.head, "lines"), now: chain(now.attestations.lines, now.attestations.head, "lines") });
+  }
+  // A verdict from before the disputes were sealed does not hold them; one that sealed none holds them to none.
+  const nowDisputes = now.disputes ?? { lines: 0, head: null };
+  if (!sealed.disputes) notSealed.push("the disputes");
+  else if (sealed.disputes.lines !== nowDisputes.lines || sealed.disputes.head !== nowDisputes.head) {
+    drift.push({ what: "ledger disputes", sealed: chain(sealed.disputes.lines, sealed.disputes.head, "lines"), now: chain(nowDisputes.lines, nowDisputes.head, "lines") });
   }
   if (sealed.journal === undefined) notSealed.push("the store journal");
   else if (sealed.journal === null && now.journal) drift.push({ what: "store journal", sealed: "none", now: chain(now.journal.lines, now.journal.head, "lines") });

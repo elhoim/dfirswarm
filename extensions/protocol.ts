@@ -7967,7 +7967,7 @@ export function attestationAct(a: LedgerAttestation): "same_content" | "attest" 
   return a.v === 2 && a.act === "attest" ? "attest" : "same_content";
 }
 
-function attestationHash(a: LedgerAttestation, prev: string): string {
+export function attestationHash(a: LedgerAttestation, prev: string): string {
   const core =
     a.v === 2
       ? JSON.stringify({ v: 2, act: a.act, seq: a.seq, target: a.target, by: a.by, at: a.at, ...(a.how ? { how: a.how } : {}), ...(a.refs?.length ? { refs: a.refs } : {}) })
@@ -8449,7 +8449,7 @@ export function unsupportedTokens(text: string, cited: LedgerEntry[], bySeq: Map
  */
 export type LedgerDispute = { v: 1; act: "dispute" | "withdraw"; seq: number; target: string; by: string; at: string; why: string; refs?: string[]; prev?: string; hash?: string };
 
-function disputeHash(d: LedgerDispute, prev: string): string {
+export function disputeHash(d: LedgerDispute, prev: string): string {
   const core = JSON.stringify({ v: d.v, act: d.act, seq: d.seq, target: d.target, by: d.by, at: d.at, why: d.why, ...(d.refs?.length ? { refs: d.refs } : {}) });
   return createHash("sha256").update(`${prev}\n${core}`).digest("hex");
 }

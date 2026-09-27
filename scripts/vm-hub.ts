@@ -2351,6 +2351,23 @@ export class Hub {
       this.log(`custody: ${c.ok ? (c.adverse ? "done, with checks that did not pass" : "ok") : "failed"} ${c.out}`);
       await this.event("custody", { via: "hub" }, { ok: c.ok, ...(c.adverse ? { adverse: true } : {}), ...(c.ok ? {} : { error: c.out }) });
       this.copySpill();
+      // The machine's draft of the report, sealed beside the verdict
+      // (scripts/release.ts draft): here, so a run the hub ended has it
+      // without waiting for an operator's stop, which then finds it. Its
+      // record is the release and its line in the anchor, not the trace:
+      // nothing is added after custody's own closing lines.
+      const release = join(dirname(this.cfg.vmCli), "release.ts");
+      if (c.ok && existsSync(release)) {
+        const r = await new Promise<{ ok: boolean; out: string }>((done) => {
+          execFile(
+            process.execPath,
+            ["--experimental-strip-types", "--no-warnings", release, "draft", this.cfg.sandbox, "--run", this.cfg.run as string, ...(this.cfg.registry ? ["--runs", dirname(resolve(this.cfg.registry))] : []), "--quiet"],
+            { timeout: 15 * 60_000, maxBuffer: 16 * 1024 * 1024 },
+            (err, stdout, stderr) => done({ ok: !err, out: `${String(stdout).trim()} ${String(stderr).trim()}`.trim() }),
+          );
+        });
+        this.log(`release: ${r.ok ? "the draft is sealed" : "the draft was not written"} ${r.out}`);
+      }
     }
     this.finishDone = true;
     this.saveState();

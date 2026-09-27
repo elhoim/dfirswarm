@@ -36,6 +36,8 @@ fi
 # worth running.
 TMP="$(mktemp -d "/private/tmp/evidence-image.XXXXXX")"
 TMP="$(cd "$TMP" && pwd -P)"
+# A stop seals a draft release with the machine key: this suite's, in its own home.
+export SWARM_SIGNERS_HOME="$TMP/signers"
 SANDBOX=""
 cleanup() {
   [[ -n "$SANDBOX" ]] && hdiutil detach "$SANDBOX/inputs" -force -quiet 2>/dev/null || true

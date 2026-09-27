@@ -30,6 +30,8 @@ fail() { echo "not ok - $1" >&2; exit 1; }
 # version of this file canonicalised here and hid exactly that defect, so the
 # uncanonical path is the point.
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/herdr-seal.XXXXXX")"
+# A stop seals a draft release with the machine key: this suite's, in its own home.
+export SWARM_SIGNERS_HOME="$TMP/signers"
 REAL="$(cd "$TMP" && pwd -P)"
 # The VM hubs' directory is the test's own (the pane plans below name it),
 # never the operator's ~/.dfirswarm/hubs.
