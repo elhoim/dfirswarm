@@ -2714,6 +2714,19 @@ test("the console's event lanes: infrastructure and operator lines are told apar
   assert.equal(describeEvent({ tool: "bash", agent: "a1", args: {}, result: {} }), null);
 });
 
+test("a stop before a model call says the reason its trace line gives, not the cap every time", async () => {
+  const { describeEvent } = await import("../ui/src/lib/event-taxonomy.ts");
+  const words = (reason: unknown) => describeEvent({ tool: "budget_precall_stop", agent: "a1", args: { reason }, result: { ok: true, brake: "advisory (in the VM; the hub holds the brake)" } }) ?? "";
+  // Run s306463: every seat still working met the sentinel at its next call.
+  assert.equal(words("sentinel_present"), "a1 was stopped before a model call: the run was over (done/SWARM_DONE stood)");
+  assert.match(words("agent_cap"), /: at its cap/);
+  assert.match(words("hub_unreachable"), /: the hub could not be reached$/);
+  assert.match(words("hard_kill"), /with hard kill$/);
+  assert.match(words("a_new_reason"), /: a_new_reason$/, "a reason the console does not know is shown as the line has it");
+  assert.match(words("constructor"), /: constructor$/);
+  assert.match(words(undefined), /: the line names no reason$/);
+});
+
 test("the review file's chain is checked line by line", async () => {
   const { parseReviews } = await import("../scripts/ui/reviews.ts");
   const a = JSON.stringify({ v: 1, seq: 1, at: "t", examiner: "E", action: "accept", entry_seq: 1, prev: null });

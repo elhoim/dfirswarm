@@ -51,6 +51,25 @@ function str(v: unknown): string {
 }
 
 /**
+ * Why the harness stopped a seat before a model call, as the line's
+ * `args.reason` names it (extensions/agent-swarm.ts, the `context` hook):
+ * most often the run's sentinel, which every seat still working meets at its
+ * next call once the run is over. A reason not listed here is shown as is.
+ */
+const PRECALL_REASONS: Record<string, string> = {
+  sentinel_present: "the run was over (done/SWARM_DONE stood)",
+  agent_cap: "at its cap (its own, or its model's)",
+  hard_kill: "the swarm's cap or wall clock, with hard kill",
+  hub_unreachable: "the hub could not be reached",
+};
+
+function precallReason(reason: unknown): string {
+  const key = str(reason);
+  if (Object.prototype.hasOwnProperty.call(PRECALL_REASONS, key)) return PRECALL_REASONS[key];
+  return key || "the line names no reason";
+}
+
+/**
  * One line in words for an infrastructure or operator event; null for an
  * agent's own call (the trace shows its arguments). Nothing is cut: the
  * words name what the record holds, and the row unfolds to the whole line.
@@ -91,7 +110,7 @@ export function describeEvent(e: { tool: string; agent: string; args?: unknown; 
     case "repeat_hint":
       return `${e.agent} was told its long command's whole output is already kept`;
     case "budget_precall_stop":
-      return `${e.agent} was stopped before a model call: at its cap`;
+      return `${e.agent} was stopped before a model call: ${precallReason(a.reason)}`;
     case "operator_action":
       return `the operator ran ${str(a.command)}${Array.isArray(a.argv) && a.argv.length ? ` ${(a.argv as unknown[]).map(str).join(" ")}` : ""}${a.via ? ` via ${str(a.via)}` : ""}${a.os_user ? ` as ${str(a.os_user)}` : ""}`;
     case "artifact_scripts":
