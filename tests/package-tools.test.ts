@@ -158,7 +158,9 @@ async function sealedPackage(): Promise<{ root: string; runs: string; pkg: strin
   dirs.push(runs);
   const root = join(runs, "sp001");
   await initSandbox(root, { reset: true, swarmId: "sp001", agentIds: ["a0"] });
-  await recordEntry({ sandboxRoot: root, agentId: "a0" }, { kind: "finding", value: "The laptop was imaged on 2024-04-05", source: "E01 header", evidence: "ewfinfo" });
+  // A finding as ledger version 4 takes one; refused, the ledger stays empty and there is nothing to sign.
+  const r = await recordEntry({ sandboxRoot: root, agentId: "a0" }, { kind: "finding", value: "The laptop was imaged on 2024-04-05", source: "E01 header", evidence: "ewfinfo", basis: "observed", confidence: "high", indicates: "The image is of the laptop as it stood that day.", confidence_why: "The acquisition header, read directly." });
+  if (!r.ok) throw new Error(r.reason);
   await mkdir(join(root, "work", "a0"), { recursive: true });
   await writeFile(join(root, "work", "report.md"), "# Report\n\nImaged on 2024-04-05 [#1].\n");
   await writeFile(join(root, "work", "a0", "big.bin"), Buffer.concat([Buffer.from([0]), Buffer.alloc(16, 1)]));

@@ -345,7 +345,9 @@ test("review: said plainly when no human reviewed it; an examiner's word is the 
   const html = (await renderReportBody(FIXTURE, { review })).html;
   assert.doesNotMatch(slice(html, "s10", "sA"), /No human has reviewed this report/);
   assert.match(slice(html, "s10", "sA"), /Examiner<\/dt><dd>E\. Xaminer, Lab/);
-  assert.match(slice(html, "e-14", "e-15"), /chip-moss">accepted by E\. Xaminer \(examiner\)</);
+  assert.match(slice(html, "e-14", "e-15"), /chip-moss">accepted by the examiner</);
+  assert.match(slice(html, "e-14", "e-15"), /Examiner review<\/dt><dd>accepted by E\. Xaminer at 2026-10-01T00:00:00Z: re-checked the \$MFT row</);
+  assert.match(slice(html, "e-19", "e-20"), /Examiner review<\/dt><dd>not reviewed</);
   // Question 1 was accepted; question 2 is still the swarm's alone, attested or not.
   assert.doesNotMatch(slice(html, "e-14", "e-15").split("<dl>")[0], /not independently reviewed/);
   assert.match(slice(html, "e-19", "e-20").split("<dl>")[0], /attested by a2<\/span> <span class="chip chip-none">not independently reviewed/);
@@ -371,7 +373,7 @@ test("an old run renders as what it is: no structured answers, interpretation no
   assert.match(slice(html, "e-1", "e-2"), /Interpretation<\/dt><dd><span class="chip chip-none">interpretation not recorded<\/span> this finding was recorded before findings said what they indicate/);
   const c = slice(html, "sC");
   assert.match(c, /predates structured answers \(ledger version 4\): the answers it gives exist only in this working report, which the ledger does not check/);
-  assert.match(c, /The agents' working document\. <\/strong>Reproduced verbatim from work\/report\.md \(sha256 [0-9a-f]{64}\)\. It carries no evidentiary authority/);
+  assert.match(c, /The agents' working document\. <\/strong>Reproduced verbatim from <code>work\/report\.md<\/code>\. Its sha256 as reproduced here: [0-9a-f]{64}\. Its headings are demoted so this document keeps one outline \(the Markdown fences it instead\); nothing else is changed\. It carries no evidentiary authority/);
   assert.match(c, /Through the VPN \(#1\)\./);
   // No answers, so no gate: the ledger's defects are not invented for it.
   assert.doesNotMatch(html, /Defects left in the ledger/);
@@ -456,8 +458,8 @@ test("report.ts's review state maps onto the body's without either importing the
   const review = humanReviewFrom(state);
   assert.deepEqual(review?.signed, { by: "E. Xaminer", at: "2026-10-01T01:00:00Z", ledger_head: "abc" });
   const html = (await renderReportBody(FIXTURE, { review })).html;
-  assert.match(slice(html, "e-16", "e-17"), /chip-brick">rejected by E\. Xaminer \(examiner\)</);
-  assert.match(slice(html, "q-3", "s6"), /The examiner's word: rejected by E\. Xaminer \(examiner\): the proxy log is not the only way out\./);
+  assert.match(slice(html, "e-16", "e-17"), /chip-brick">rejected by the examiner</);
+  assert.match(slice(html, "q-3", "s6"), /The examiner's word: REJECTED by E\. Xaminer at 2026-10-01T00:00:00Z: the proxy log is not the only way out\./);
   assert.deepEqual(humanReviewFrom({ byEntry: new Map(), signed: null, unreadable: "a link, not a file" }), { unreadable: "a link, not a file" });
   assert.equal(humanReviewFrom(null), null);
 });
@@ -477,7 +479,7 @@ test("the caller's trace grounding reaches the exhibit; the cover's facts are co
   assert.deepEqual(body.facts, { questions: 3, answered: 3, hasAnswers: true, entries: 21 });
   assert.match(slice(body.html, "e-6", "e-7"), /chip-saffron">not grounded in the trace</);
   assert.match(slice(body.html, "e-6", "e-7"), /Grounding<\/dt><dd>NOT GROUNDED IN THE TRACE/);
-  assert.match(slice(body.html, "e-5", "e-6"), /Grounding<\/dt><dd>a call before this entry was recorded named its source/);
+  assert.match(slice(body.html, "e-5", "e-6"), /Grounding<\/dt><dd>a call before this entry named its source/);
   assert.doesNotMatch(slice(body.html, "e-5", "e-6"), /not grounded in the trace/);
 });
 

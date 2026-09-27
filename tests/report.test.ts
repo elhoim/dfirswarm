@@ -225,18 +225,29 @@ test("the report is one self-contained file that cites the ledger's own sequence
     // this document all name the same row.
     assert.match(html, /E-1/);
     assert.match(html, /E-4/);
-    // The section head is a number beside the title, not "4." inside it.
-    assert.match(html, /<span class="n">4<\/span><h2>Indicators and findings<\/h2>/);
-    // The cover carries the numbers a reader needs before the fold.
+    // The section head is a number beside the title, not "5." inside it;
+    // the body's sections first, then custody and the artifacts as appendices.
+    assert.match(html, /<span class="n">5<\/span><h2>Answers<\/h2>/);
+    assert.match(html, /<span class="n">A<\/span><h2>Appendix A: Exhibits<\/h2>/);
+    assert.match(html, /<span class="n">D<\/span><h2>Appendix D: Chain of custody<\/h2>/);
+    const order = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "sA", "sB", "sC", "sD", "sE"].map((id) => html.indexOf(`<section id="${id}"`));
+    assert.deepEqual([...order].sort((a, b) => a - b), order, "the sections in their order");
+    assert.ok(order.every((i) => i > 0), "every section present");
+    // The cover carries the numbers a reader needs before the fold, and says it is a draft.
     assert.match(html, /class="scorecard"/, "the cover has its scorecard");
+    assert.match(html, /<span class="chip chip-brick">draft<\/span>/);
+    assert.match(html, /<div class="draft-mark" aria-hidden="true">DRAFT<\/div>/);
     assert.match(html, /class="tl"/, "the timeline is a rail, not a five-column table");
-    assert.match(html, /class="verdict /, "the findings are verdict cards");
+    // A run whose ledger holds findings and no answers says so, and does not call itself old.
+    assert.match(html, /The swarm recorded no answers: the ledger holds what it found/);
+    assert.doesNotMatch(html, /predates structured answers/);
     assert.match(html, /203\.0\.113\.24/);
     assert.match(html, /inode 33194-128-4/);
 
     // The swarm's own report is reproduced, with its headings demoted so the
     // document keeps one outline.
-    assert.match(html, /The swarm's own report \(report\.md\)/);
+    assert.match(html, /<h2>Appendix C: The swarm's working report<\/h2>/);
+    assert.match(html, /The agents' working document\. <\/strong>Reproduced verbatim from <code>work\/report\.md<\/code>\./);
     assert.match(html, /<h4>1\. Entry<\/h4>/);
 
     // Two renders with the same `now` are byte-identical.
@@ -349,7 +360,7 @@ test("the report discloses the AI, names each exhibit's model and hash, lists fo
     assert.match(html, /Prepared by an AI agent swarm\. The findings are the agents' conclusions/);
     assert.match(html, /not deterministic/);
     assert.match(html, /<dt>Model<\/dt><dd>openai\/gpt-5\.4<\/dd>/);
-    assert.match(html, /<dt>Entry hash<\/dt><dd class="hash">[0-9a-f]{64}<\/dd>/);
+    assert.match(html, /<dt>Entry hash<\/dt><dd><code>[0-9a-f]{64}<\/code><\/dd>/);
     assert.match(html, /<code>evtx_grep<\/code> by sr00100 \(python3\), called 1 time, sha256 <span class="hash">e{64}<\/span>/);
     assert.match(html, /not independently validated/);
     // custody.json, then edited after the stop.
@@ -834,7 +845,8 @@ test("each exhibit shows the examiner's standing on it, reviewed or not, and an 
     const root = await layoutSandbox(runs);
     // No review at all: every exhibit says so, on its head and in its rows.
     let html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
-    assert.equal((html.match(/<span class="chip chip-none">not reviewed<\/span>/g) ?? []).length, 2);
+    const exhibits = (h: string) => h.slice(h.indexOf('<section id="sA"'), h.indexOf('<section id="sB"'));
+    assert.equal((exhibits(html).match(/<span class="chip chip-none">not independently reviewed<\/span>/g) ?? []).length, 2);
     assert.equal((html.match(/<dt>Examiner review<\/dt><dd>not reviewed by an examiner<\/dd>/g) ?? []).length, 2);
     // Reviewed: the chip carries the standing.
     const { appendReview } = await import("../scripts/review.ts");
