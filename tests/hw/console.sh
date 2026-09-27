@@ -19,12 +19,16 @@ case "$KIND" in
   *) fail "DFIRSWARM_HW_KIND is fido or pkcs11" ;;
 esac
 
-PORT="${DFIRSWARM_HW_PORT:-43977}"
+# A port nobody holds: a console left over from an earlier test would answer instead, from a
+# signers' home that is gone, and the test would read its refusal as this key's.
+PORT="${DFIRSWARM_HW_PORT:-$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')}"
+curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && fail "port $PORT already answers: stop what holds it or set DFIRSWARM_HW_PORT"
 TOKEN="$(openssl rand -hex 16)"
-SWARM_UI_TOKEN="$TOKEN" node_ts "$HW_ROOT/scripts/ui-server.ts" --port "$PORT" --host 127.0.0.1 > "$HW_TMP/ui.log" 2>&1 &
+# node itself, not the node_ts function: `&` on a function forks a subshell, and killing the
+# subshell's pid would leave the console running after the test.
+SWARM_UI_TOKEN="$TOKEN" node --experimental-strip-types --no-warnings "$HW_ROOT/scripts/ui-server.ts" --port "$PORT" --host 127.0.0.1 > "$HW_TMP/ui.log" 2>&1 &
 UI_PID=$!
-disown "$UI_PID" 2>/dev/null || true
-trap 'kill $UI_PID 2>/dev/null; cleanup' EXIT
+trap 'kill $UI_PID 2>/dev/null; wait $UI_PID 2>/dev/null; cleanup' EXIT
 for _ in $(seq 1 50); do curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && break; sleep 0.2; done
 api() { curl -sS -H "authorization: Bearer $TOKEN" -H "content-type: application/json" "$@"; }
 
