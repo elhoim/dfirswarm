@@ -261,6 +261,89 @@ test("a declared directory of the evidence and a job's whole output are bound as
   await svc.stop("over");
 });
 
+test("a scope that covers a whole evidence set binds the set as it is: one image and its segments, alone or as one of several sets", async () => {
+  // One set: inputs/ holds the image's two segments and nothing else.
+  const S = join(mkdtempSync(join(tmpdir(), "scope-")), "run");
+  for (const d of ["inputs", "tools", "catalog", "work/a1"]) mkdirSync(join(S, d), { recursive: true });
+  writeFileSync(join(S, "inputs", "disk.E01"), "E01-segment-one");
+  writeFileSync(join(S, "inputs", "disk.E02"), "E02-segment-two");
+  listInputs(S);
+  writeFileSync(join(S, "catalog", "plan.json"), JSON.stringify({ recipes: [], collections: [{ input: "inputs/disk.E01", members: ["inputs/disk.E01", "inputs/disk.E02"] }] }));
+  await initStore(S);
+  const { svc, specs } = service(S);
+  await svc.start();
+  const r = await svc.submit("a1", { kind: "command", command: "ls inputs; cat inputs/disk.E02", inputs: ["input:disk.E01"] });
+  assert.ok(r.ok, !r.ok ? r.reason : "");
+  const job = await until(svc, r.job.id);
+  assert.equal(stdout(S, job.id), "disk.E01\ndisk.E02\nE02-segment-two");
+  const bound = specs.at(-1)!.mounts.find((m) => m.guest === join(S, "inputs"))!;
+  assert.equal(bound.host, realpathSync(join(S, "inputs")), "the set's own directory, bound, not a view of copies");
+  assert.ok(bound.readonly && bound.noexec && bound.expect && !bound.view);
+  const m = JSON.parse(readFileSync(join(storePaths(S).jobs, job.id, "scope.1.json"), "utf8"));
+  assert.deepEqual(m.accessible.map((e: { path: string; how: string }) => `${e.path} ${e.how}`), ["inputs/ bound"]);
+  assert.match(m.accessible[0].why, /every file of the evidence set inputs\/ is in the scope \(2 file\(s\)\): bound whole/);
+  assert.deepEqual(m.expanded.map((x: { path: string }) => x.path), ["inputs/disk.E01", "inputs/disk.E02"], "what the declaration resolved to stays file by file");
+  await svc.stop("over");
+  // Several sets held in place: the laptop's set is bound where its link leads, the phone's is not given.
+  const S2 = join(mkdtempSync(join(tmpdir(), "scope-")), "run");
+  const ev = mkdtempSync(join(tmpdir(), "sets-"));
+  for (const d of ["laptop", "phone"]) mkdirSync(join(ev, d));
+  writeFileSync(join(ev, "laptop", "disk.E01"), "the laptop");
+  writeFileSync(join(ev, "phone", "sms.db"), "the phone");
+  for (const d of ["inputs", "tools", "catalog"]) mkdirSync(join(S2, d), { recursive: true });
+  symlinkSync(join(ev, "laptop"), join(S2, "inputs", "laptop"));
+  symlinkSync(join(ev, "phone"), join(S2, "inputs", "phone"));
+  const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+  writeFileSync(join(S2, "inputs.json"), JSON.stringify({ sets: [{ name: "laptop" }, { name: "phone" }], files: [{ path: "inputs/laptop/disk.E01", bytes: 10, sha256: sha("the laptop") }, { path: "inputs/phone/sms.db", bytes: 9, sha256: sha("the phone") }] }));
+  const two = service(S2);
+  await two.svc.start();
+  const r2 = await two.svc.submit("a1", { kind: "command", command: "ls inputs; cat inputs/laptop/disk.E01; cat inputs/phone/sms.db 2>&1", inputs: ["input:laptop/disk.E01"] });
+  assert.ok(r2.ok, !r2.ok ? r2.reason : "");
+  const j2 = await until(two.svc, r2.job.id);
+  assert.match(stdout(S2, j2.id), /^laptop\nthe laptop.*sms\.db: No such file/s);
+  const laptop = two.specs.at(-1)!.mounts.find((m) => m.guest === join(S2, "inputs", "laptop"))!;
+  assert.equal(laptop.host, realpathSync(join(ev, "laptop")));
+  assert.ok(!two.specs.at(-1)!.mounts.some((m) => m.host === realpathSync(join(ev, "phone"))), "the other set is not given");
+  const m2 = JSON.parse(readFileSync(join(storePaths(S2).jobs, j2.id, "scope.1.json"), "utf8"));
+  assert.match(m2.accessible[0].why, /every file of the evidence set inputs\/laptop\/ is in the scope/);
+  await two.svc.stop("over");
+});
+
+test("a scope that covers part of a set is given file by file: nothing beside it is bound, each file cloned or taken from the run's one copy", async () => {
+  const S = sandbox();
+  await censused(S);
+  const { svc, specs } = service(S);
+  await svc.start();
+  const r = await svc.submit("a1", { kind: "command", command: "ls inputs/case", inputs: ["input:case/disk.E01"] });
+  assert.ok(r.ok);
+  const job = await until(svc, r.job.id);
+  assert.equal(stdout(S, job.id), "disk.E01\ndisk.E02\n", "memory.raw beside them is not shown");
+  assert.ok(!specs.at(-1)!.mounts.some((m) => m.host === realpathSync(join(S, "inputs", "case")) || m.host === realpathSync(join(S, "inputs"))), "no evidence directory bound");
+  const m = JSON.parse(readFileSync(join(storePaths(S).jobs, job.id, "scope.1.json"), "utf8"));
+  for (const e of m.accessible) assert.ok(e.how === "clone" || e.how === "the run's copy, linked", `${e.path}: ${e.how}`);
+  await svc.stop("over");
+});
+
+test("the kickoff's recipes take the same rule: a set that is all their target is bound, and they run in their target's scope", async () => {
+  const S = join(mkdtempSync(join(tmpdir(), "scope-")), "run");
+  for (const d of ["inputs", "tools", "catalog"]) mkdirSync(join(S, d), { recursive: true });
+  spawnSync("python3", ["-c", "import zipfile,sys\nwith zipfile.ZipFile(sys.argv[1],'w') as z: z.writestr('x.txt','x'*100)", join(S, "inputs", "a.zip")]);
+  listInputs(S);
+  writeFileSync(join(S, "catalog", "plan.json"), JSON.stringify({ recipes: [{ input: "inputs/a.zip", recipe: "computer-forensics-base/archive-members", target: { paths: [join(S, "inputs", "a.zip")], name: "inputs/a.zip", ref: "input:a.zip" } }] }));
+  const { svc, specs } = service(S);
+  await svc.start();
+  const [id] = [...svc.jobs.keys()];
+  const job = await until(svc, id);
+  assert.equal(job.status, "ok", job.reason);
+  assert.equal(job.scope?.kind, "declared");
+  const inputs = specs[0].mounts.find((m) => m.guest === join(S, "inputs"))!;
+  assert.equal(inputs.host, realpathSync(join(S, "inputs")), "the whole set, bound");
+  // The generation is published just after the commit.
+  for (let i = 0; i < 400 && !svc.jobs.get(id)?.generation; i += 1) await new Promise((res) => setTimeout(res, 50));
+  assert.ok(existsSync(join(S, "catalog", "gen", "g0001", "members.tsv")), "the recipe read its target through the bound set");
+  await svc.stop("over");
+});
+
 test("a job that declares nothing keeps the broad view, recorded as the default, and all said is the same view", async () => {
   const S = sandbox();
   const specs: WorkerSpec[] = [];

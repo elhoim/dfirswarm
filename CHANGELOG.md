@@ -13,8 +13,9 @@ All notable changes to this project. The format follows
   (`default-all`, `all`, `declared`). A declared job's worker is given a view
   the hub builds for it, outside every VM, holding only what it named at the
   paths its brain sees: a declared directory of the evidence or a job's whole
-  output bound, a file of the evidence cloned (or linked from the run's one
-  checked copy where the file system cannot clone), a store file linked, an
+  output bound, and so a whole evidence set the scope covers (one image and
+  its segments), a file of a set it covers only in part cloned (or linked
+  from the run's one checked copy where the file system cannot clone), a store file linked, an
   agent's file snapshotted by clone or copy and hashed at the start; never a
   hard link to the evidence or to live scratch. A segment set comes whole,
   from the census's record (`catalog/plan.json` `collections`, journalled as

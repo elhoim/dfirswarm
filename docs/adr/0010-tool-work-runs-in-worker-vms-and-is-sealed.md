@@ -201,9 +201,15 @@ tool-output/ that the agent could still rewrite.
   evidence no-exec.
   - A declared directory of the evidence, a job's whole output or a
     generation is bound whole, up to eight per job.
-  - A file of the evidence is cloned from a descriptor (APFS clonefile, a
-    reflink). Where the file system cannot clone, it is linked from the one
-    copy the hub makes of it for the run, checked against inputs.json.
+  - So is an evidence set, or any directory of it, whose every name in
+    inputs.json is in the scope: the common set of one image, or of one
+    image's segments, is bound as it is, and scope.json says why. The
+    kickoff's recipes and the derived passes take the same rule.
+  - Only a scope that covers part of a set is given file by file. A file of
+    the evidence is cloned from a descriptor (APFS clonefile, a reflink).
+    Where the file system cannot clone, it is linked from the one copy the
+    hub makes of it for the run, checked against inputs.json; with no room
+    for that copy the job is refused, with the reason.
   - A file of the store is linked, cloned or copied.
   - An agent's file or directory (work/, tool-output/) is cloned or copied
     from a descriptor opened without following a link, the path held to the

@@ -15,11 +15,15 @@
  *
  * How an object gets into a view, by what it is:
  * - The evidence: a declared directory is bound whole, read-only and
- *   no-exec. A file is cloned from a descriptor (APFS clonefile, a reflink),
- *   or, where the file system cannot clone, linked from one copy the hub made
- *   for the run and checked against inputs.json. Never a hard link to the
- *   evidence itself: its link count and ctime are the examiner's, and the
- *   inputs guard counts a second name as a change.
+ *   no-exec, and so is an evidence set, or any directory of it, whose every
+ *   name inputs.json lists is in the scope (the common case: a set of one
+ *   image, or of one image's segments; nothing beside them is shown). Only
+ *   a scope that covers part of one is given file by file: each file cloned
+ *   from a descriptor (APFS clonefile, a reflink), or, where the file system
+ *   cannot clone, linked from one copy the hub made for the run and checked
+ *   against inputs.json. Never a hard link to the evidence itself: its link
+ *   count and ctime are the examiner's, and the inputs guard counts a second
+ *   name as a change.
  * - The store and the catalogue (sealed, read-only): a job's whole output or a
  *   generation is bound; a file is linked, cloned or copied.
  * - A work file (an agent's live scratch, tool-output/): opened without
@@ -423,6 +427,8 @@ export type ViewEntry = {
   files?: number;
   /** A name under a declared directory of the agents' work that is not a regular file: named, not given. */
   left_out?: string;
+  /** Why a directory the job did not name is bound whole: every name under it is in the scope. */
+  why?: string;
 };
 
 export type View = {
@@ -661,6 +667,15 @@ export async function buildView(objects: ScopeObject[], o: ViewOptions): Promise
     return { entry: { path: x.path, ref: x.ref, how: "copy" }, area, fh, st, lexical, dest, bytes: st.size };
   };
 
+  // An evidence set, or a directory of it, whose every name is in the scope
+  // is bound whole rather than given file by file (while the binds last).
+  const whole = ix ? coveredDirs(objects, ix, SCOPE_DIR_BINDS_MAX - objects.filter((x) => x.shape === "dir" && x.area !== "work").length) : [];
+  for (const d of whole) {
+    if (isCovered(d.path)) continue;
+    covered.push(d.path);
+    await bind(d);
+    entries[entries.length - 1].why = d.from;
+  }
   // Directories, the shallowest first.
   for (const d of objects.filter((x) => x.shape === "dir").sort((a, b) => a.path.length - b.path.length)) {
     if (isCovered(d.path)) continue;
@@ -745,6 +760,44 @@ export async function buildView(objects: ScopeObject[], o: ViewOptions): Promise
 
 function depth(p: string): number {
   return p.split("/").filter(Boolean).length;
+}
+
+/**
+ * The directories of the evidence whose every name inputs.json lists under
+ * them is a file in the scope (declared, or the rest of a declared file's
+ * set): the highest such, at most `room` of them, as directory objects. A
+ * link or a special file under one is a name no job can declare, so a
+ * directory holding one is never bound this way. With several sets inputs/
+ * itself holds only their links, and is never one: each set is.
+ */
+function coveredDirs(objects: ScopeObject[], ix: InputsIndex, room: number): ScopeObject[] {
+  const files = objects.filter((x) => x.area === "inputs" && x.shape === "file");
+  if (!files.length || room <= 0) return [];
+  const inScope = new Set(files.map((x) => x.path));
+  const declaredDirs = objects.filter((x) => x.area === "inputs" && x.shape === "dir").map((x) => x.path);
+  const given = (p: string) => inScope.has(p) || declaredDirs.some((d) => p.startsWith(`${d}/`));
+  const candidates = new Set<string>();
+  for (const f of files) {
+    for (let d = f.path.slice(0, f.path.lastIndexOf("/")); d.includes("/") || d === "inputs"; d = d.slice(0, Math.max(d.lastIndexOf("/"), 0))) {
+      if (!(d === "inputs" && ix.sets.length)) candidates.add(d);
+      if (d === "inputs") break;
+    }
+  }
+  const picked: ScopeObject[] = [];
+  for (const d of [...candidates].sort((a, b) => depth(a) - depth(b) || (a < b ? -1 : 1))) {
+    if (picked.length >= room) break;
+    if (picked.some((p) => d.startsWith(`${p.path}/`))) continue;
+    const names = under(ix.sorted, d);
+    const plain = names.every((p) => {
+      const row = ix.rows.get(p);
+      return row && row.link === undefined && !row.special && given(p);
+    });
+    if (!names.length || !plain) continue;
+    const bytes = names.reduce((a, p) => a + Number(ix.rows.get(p)?.bytes ?? 0), 0);
+    const set = d === "inputs" || (ix.sets.length > 0 && depth(d) === 2) ? "the evidence set" : "the directory";
+    picked.push({ ref: `input:${d === "inputs" ? "" : `${d.slice(7)}/`}`, path: d, area: "inputs", shape: "dir", from: `every file of ${set} ${d}/ is in the scope (${names.length} file(s)): bound whole, not given file by file`, files: names.length, bytes });
+  }
+  return picked;
 }
 
 /**
