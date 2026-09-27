@@ -257,6 +257,16 @@ export function machineSigner(home = dfirswarmHome(), o: { create?: boolean } = 
   const meta = join(dir, "machine.json");
   const key = join(dir, "release_ed25519");
   if (existsSync(meta) && existsSync(key)) {
+    // Kept as it was made, each time it is used: the directory the owner's
+    // alone, the key and its record 0600. A copy restored from a backup, or
+    // a umask, may have left them readable by others.
+    try {
+      chmodSync(dir, 0o700);
+      chmodSync(key, 0o600);
+      chmodSync(meta, 0o600);
+    } catch (err) {
+      return { why: `${dir} could not be made its owner's alone (0700, the key and its record 0600): ${(err as Error).message}` };
+    }
     try {
       const m = JSON.parse(readFileSync(meta, "utf8")) as MachineSigner;
       return { ...m, key };
@@ -345,7 +355,12 @@ export type Pkcs11Key = {
 export type PersonKey = SshKey | FidoKey | Pkcs11Key;
 
 export type Person = {
-  kind: "person";
+  /**
+   * The register the record is in: every enrolled person's record is an
+   * examiners/ record, and `role` says which role it is for. (The host-mode
+   * kickoff reads the key paths of every record of this kind to hide them.)
+   */
+  kind: "examiner";
   v: 2;
   id: string;
   name: string;
@@ -379,13 +394,13 @@ export function allowedSignersLine(e: Pick<Person, "principal" | "key"> & { role
 
 /** A record as enrolment wrote it, read into this shape: an enrolment from before kinds and roles is an examiner's ssh key. */
 function normalise(raw: Record<string, unknown>): Person | null {
-  if (raw.kind === "person" && raw.v === 2) return raw as unknown as Person;
   if (raw.kind !== "examiner") return null;
+  if (raw.v === 2) return raw as unknown as Person;
   const k = (raw.key ?? {}) as { path?: string; public?: string; fingerprint?: string; generated?: boolean };
   const path = String(k.path ?? "");
   return {
     ...(raw as unknown as Omit<Person, "kind" | "v" | "role" | "key">),
-    kind: "person",
+    kind: "examiner",
     v: 2,
     role: "examiner",
     key: { kind: "ssh", path, public: String(k.public ?? ""), fingerprint: String(k.fingerprint ?? ""), generated: Boolean(k.generated), passphrase: null, agent: path.endsWith(".pub") },
@@ -651,7 +666,7 @@ export function enrollPerson(input: EnrollInput, home = dfirswarmHome(), secret:
       const challenge = join(scratch, "challenge");
       writeFileSync(challenge, `DFIR Swarm enrolment ${id} ${randomBytes(16).toString("hex")}\n`);
       if (key.kind === "fido") say("Touch the FIDO key to prove it holds this key.");
-      const tmpPerson = { kind: "person", v: 2, id, name, organisation, competence, principal, role, key } as Person;
+      const tmpPerson = { kind: "examiner", v: 2, id, name, organisation, competence, principal, role, key } as Person;
       const signed = signAs(tmpPerson, challenge, ns, secret, { dropAgent: false });
       if (!signed.ok) {
         if (input.generateKey) {
@@ -668,7 +683,7 @@ export function enrollPerson(input: EnrollInput, home = dfirswarmHome(), secret:
   }
   const tsaCaSha = input.tsaCa ? sha256(readFileSync(input.tsaCa)) : null;
   const p: Person = {
-    kind: "person",
+    kind: "examiner",
     v: 2,
     id,
     name,

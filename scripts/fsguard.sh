@@ -42,9 +42,13 @@
 #   agent can write anywhere the examiner can", which detection cannot. On
 #   Linux it is Landlock, or bubblewrap's read-only root, or both.
 #
-#   --no-read DIR denies reading a directory and everything under it. Reads
-#   are otherwise open, which is deliberate; this is for material about the
-#   case itself that the agents must not simply find.
+#   --no-read PATH denies reading a directory and everything under it, or one
+#   file. Reads are otherwise open, which is deliberate. It is for two kinds
+#   of thing: what the agents must derive rather than find (an earlier run on
+#   the same evidence, the examiner's review), and what they must never hold
+#   (the keys the releases are signed with, and the directories they live in).
+#   A path that does not exist yet is denied all the same where the mechanism
+#   allows it (seatbelt, Landlock); a mount namespace masks what exists.
 #
 #   --no-socket PATH denies connecting to one Unix socket; --no-socket-tree
 #   DIR denies every socket under a directory. A control socket in reach of a
@@ -57,7 +61,7 @@
 #
 #   fsguard.sh [--ro DIR ...] [--rw DIR ...] [--noexec DIR ...]
 #              [--no-socket PATH ...] [--no-socket-tree DIR ...]
-#              [--no-read DIR ...] [--mode auto|seatbelt|mountns|landlock|linux|none]
+#              [--no-read PATH ...] [--mode auto|seatbelt|mountns|landlock|linux|none]
 #              [--in-place]
 #              [--dry-run] -- <command> [args...]
 #
@@ -235,7 +239,21 @@ landlock_args() {
     [[ "$inner" -eq 1 ]] || LL_ARGS+=(--ro "$p")
   done
   for p in ${NOEXEC_ABS[@]+"${NOEXEC_ABS[@]}"}; do LL_ARGS+=(--noexec "$p"); done
-  for p in ${NOREAD_ABS[@]+"${NOREAD_ABS[@]}"}; do LL_ARGS+=(--no-read "$p"); done
+  # A --no-read path that exists is the mount layer's in `linux` mode (a tmpfs
+  # over a directory, /dev/null over a file), and is left out of Landlock.
+  # Landlock can only carve: the parent of a carved path becomes listing-only
+  # for the whole run, and its children keep the rights they had at the start.
+  # Carved under runs/, that cut the panes off registry.json the first time the
+  # kickoff rewrote it (a rename is a new inode), and the finish line fell
+  # back to SWARM.md, which it does not trust. The mask is not walked around
+  # through a process outside it: /proc/<pid>/root/<masked path> is refused
+  # from inside the namespace (measured in Docker, with and without Landlock).
+  # A path that does not exist yet has nothing to mount over, so Landlock
+  # carves that one.
+  for p in ${NOREAD_ABS[@]+"${NOREAD_ABS[@]}"}; do
+    [[ "$MODE" == "linux" && -e "$p" ]] && continue
+    LL_ARGS+=(--no-read "$p")
+  done
 }
 
 # The pane's root reaps its own orphans, so the trace gate's walk up the
@@ -353,15 +371,18 @@ seatbelt_profile() {
   for p in ${NOSOCKTREE_ABS[@]+"${NOSOCKTREE_ABS[@]}"}; do
     printf '(deny network-outbound (subpath "%s"))\n' "$(sb_quote "$p")"
   done
-  # A directory the guarded process may not read.
+  # A directory (or a file) the guarded process may not read.
   #
   # The write allowlist leaves reads open on purpose — a deny-default profile
   # cannot start `/bin/echo` (measured) — so everything on this machine is
   # legible to a pane. That is usually right: an examiner's tools live out
-  # there. It is wrong for one thing, and only one: material about the case
-  # the agents are working, which they are supposed to derive from the
-  # evidence rather than find lying about. A previous run's findings on the
-  # same case are exactly that.
+  # there. It is wrong for two kinds of thing. Material about the case the
+  # agents are working, which they are supposed to derive from the evidence
+  # rather than find lying about: an earlier run's sandbox, the examiner's
+  # review. And the signers' keys: the install's machine key, which seals a
+  # draft unattended and so has no passphrase, an examiner's key made
+  # without one, the directories they live in. A pane that can read those
+  # can sign as the machine or as the examiner.
   for p in ${NOREAD_ABS[@]+"${NOREAD_ABS[@]}"}; do
     printf '(deny file-read* (subpath "%s"))\n' "$(sb_quote "$p")"
   done
@@ -447,7 +468,11 @@ ns_exec() {
     [[ "$NS_PIDNS" -eq 1 ]] && args+=(--unshare-pid --proc /proc)
     for p in ${RW_ABS[@]+"${RW_ABS[@]}"}; do args+=(--bind "$p" "$p"); done
     for p in ${ABS[@]+"${ABS[@]}"}; do [[ -e "$p" ]] && args+=(--ro-bind "$p" "$p"); done
-    for p in ${NOREAD_ABS[@]+"${NOREAD_ABS[@]}"}; do [[ -d "$p" ]] && args+=(--tmpfs "$p"); done
+    # A directory is hidden under an empty tmpfs; a file (a key) is covered
+    # by /dev/null, so it reads as empty.
+    for p in ${NOREAD_ABS[@]+"${NOREAD_ABS[@]}"}; do
+      if [[ -d "$p" ]]; then args+=(--tmpfs "$p"); elif [[ -e "$p" ]]; then args+=(--ro-bind /dev/null "$p"); fi
+    done
     for p in ${NOSOCKTREE_ABS[@]+"${NOSOCKTREE_ABS[@]}"}; do [[ -d "$p" ]] && args+=(--tmpfs "$p"); done
     for p in ${NOSOCK_ABS[@]+"${NOSOCK_ABS[@]}"}; do [[ -e "$p" ]] && args+=(--ro-bind /dev/null "$p"); done
     exec bwrap "${args[@]}" -- "$@"
@@ -472,8 +497,13 @@ ns_exec() {
       mount --bind "$p" "$p" && mount -o remount,bind,noexec "$p"
     done <<< "$FSGUARD_NOEXEC_LIST"
     while IFS= read -r p; do
-      [ -n "$p" ] && [ -d "$p" ] || continue
-      mount -t tmpfs -o ro,size=1k none "$p"
+      [ -n "$p" ] || continue
+      if [ -d "$p" ]; then
+        mount -t tmpfs -o ro,size=1k none "$p"
+      elif [ -e "$p" ]; then
+        # A --no-read file (a key): /dev/null over it, as over a socket.
+        mount --bind /dev/null "$p"
+      fi
     done <<< "$FSGUARD_MASK_LIST"
     while IFS= read -r p; do
       [ -n "$p" ] && [ -e "$p" ] || continue

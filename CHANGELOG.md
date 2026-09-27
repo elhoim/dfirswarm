@@ -81,6 +81,46 @@ All notable changes to this project. The format follows
 - **Hardware tests** in `tests/hw/` (a FIDO key, the e-signature token, the
   console's seal path), run only with `DFIRSWARM_HW_TESTS=1`; the unit tests
   use a throwaway SoftHSM2 token and skip, saying why, without it.
+### Security: the signing keys are kept from a host run's agents
+
+The machine key seals a draft release at stop, unattended, so it has no
+passphrase, and an examiner's key may have none either or sit in an
+ssh-agent. A microVM mounts none of them; a host run's panes could read them.
+
+- **Denied at the kernel.** A host run's panes are denied each home's
+  `machine/` and `examiners/` (made 0700 first, so a mount namespace has
+  something to mask), `SWARM_SIGNERS_HOME`, each enrolled examiner's key
+  file as its record names it (the key is never read), the custody key, and
+  the ssh-agent: `SSH_AUTH_SOCK` is dropped from every pane and its hook,
+  its socket is denied (launchd's on macOS by its directory), and
+  `--env SSH_AUTH_SOCK=` is refused.
+- **Fail closed.** A guard that cannot deny one of them (Landlock alone and
+  an agent's socket, a key inside the run, a signers' home that holds what
+  the panes need, a key inside something every VM mounts) refuses the run.
+  With no guard at all (`--no-write-guard`, or a host without one) the run
+  is refused while a signing key exists, `--check` included, unless
+  `--accept-signer-exposure`: the run then records `signer_keys_hidden:
+  false` and what was exposed, and the kickoff says to rotate.
+- **Recorded for every run**: `signer_keys_hidden` and `signer_isolation`
+  (isolation, guard, what was denied or exposed, why) in the registry, for
+  the draft release to bind; see docs/observability.md.
+- **Earlier runs and the reviews.** Every earlier run's sandbox in the
+  registry and `runs/reviews/` are denied to a host run's panes where the
+  guard can mask a directory (not the whole runs directory: this run and the
+  registry are in it); `earlier_runs_hidden` says which, and why not under
+  Landlock alone. Until now only `--no-read` hid an earlier run.
+- **`swarm.sh machine rotate`** retires the machine key into
+  `machine/retired/<id>/` (never deleted; the drafts it sealed carry its
+  public key), makes the next one and prints both fingerprints.
+  `machineSigner` puts the directory back to 0700 and the key and its record
+  to 0600 each time the key is used.
+- **fsguard.** A `--no-read` file is covered by `/dev/null` in a mount
+  namespace (a directory by an empty tmpfs, as before). In `linux` mode a
+  `--no-read` path that exists is left to the mount layer and not carved by
+  Landlock: a carve under `runs/` froze that directory for the panes, and
+  the registry, rewritten by rename, stopped being readable to the finish
+  line. The comment that said only case material warrants a read denial now
+  names the signing keys too.
 
 ### Added: the report is released, adopted by a named examiner, and reproducible where it can be
 

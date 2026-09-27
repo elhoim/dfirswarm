@@ -86,7 +86,7 @@ if PATH="$bin:/usr/bin:/bin" command -v herdr >/dev/null 2>&1; then
   echo "ok - skipped: herdr is in /usr/bin or /bin here"
 else
   set +e
-  out="$(PATH="$bin:/usr/bin:/bin" SWARM_RUNS_DIR="$TMP/runs-check" bash "$ROOT/scripts/swarm.sh" start --check --isolation host "${base[@]}" --no-write-guard 2>&1)"
+  out="$(PATH="$bin:/usr/bin:/bin" SWARM_RUNS_DIR="$TMP/runs-check" bash "$ROOT/scripts/swarm.sh" start --check --isolation host "${base[@]}" --no-write-guard --accept-signer-exposure 2>&1)"
   rc=$?
   set -e
   [[ $rc -eq 2 ]] && grep -q 'BLOCKER: missing herdr' <<<"$out" || fail "--check did not run the program check (rc $rc): $out"

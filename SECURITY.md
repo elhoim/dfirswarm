@@ -31,6 +31,30 @@ command can read or write anything the user running the swarm can, and no
 hook can stop it mid-command. The harness *detects* shell writes to leased
 paths, snapshots them and announces them on the board, after the fact.
 
+**What host mode hides from the agents, and what it cannot.** Reads are open
+in host mode except what the kernel guard denies, so the kickoff denies the
+things an agent must never hold or simply find: where this install's
+signing keys are kept (each home's `machine/` and `examiners/`, made 0700
+first; `SWARM_SIGNERS_HOME`; each enrolled examiner's key file as its record
+names it; the custody key), the ssh-agent (`SSH_AUTH_SOCK` is dropped from
+the panes and its socket denied, launchd's on macOS by its directory),
+every earlier run's sandbox in the registry, and the examiners' reviews.
+Where the guard cannot deny a signing key's path or the agent's socket
+(Landlock alone cannot refuse a socket) the run is refused; with no guard at
+all (`--no-write-guard`, or a host without one) it is refused while a
+signing key exists, unless `--accept-signer-exposure`, and then the run's
+record says `signer_keys_hidden: false` with what was exposed, and the
+operator is told to rotate (`swarm.sh machine rotate`; an examiner's new key
+is a new enrolment). It cannot hide: whatever else the account can read
+(other ssh keys, a browser's stores, the credentials a pane is handed), an
+agent socket `SSH_AUTH_SOCK` does not name at kickoff (a gpg-agent's, one
+another shell started), a key or a run made after the kickoff where a mount
+namespace is the guard (it masks what exists then; seatbelt and Landlock
+refuse by path), and earlier runs under Landlock alone (a carve beneath
+`runs/` would freeze it for the panes, the registry included), which the
+record says. Hidden from the agents is not protected from the account: the
+operator holds every one of these keys.
+
 In either mode, **run swarms on a machine or account you are willing to
 lose, with credentials you are willing to rotate.**
 
@@ -45,6 +69,12 @@ Please report these privately (see below):
 - A way to create or delete `done/SWARM_DONE` that the harness does not record.
 - Egress that bypasses the netguard proxy from inside a pane when netguard is
   on (other than by `--no-netguard`, which is the documented opt-out).
+- A host-mode pane that reads a signing key of the install (the machine key,
+  an enrolled examiner's key file, the custody key), reaches the ssh-agent,
+  or reads an earlier run's sandbox or the reviews, in a run whose record
+  says they were hidden (`signer_keys_hidden: true`, `earlier_runs_hidden`);
+  or a run that starts unguarded while a signing key exists without
+  `--accept-signer-exposure`.
 - A path-traversal or symlink escape in the web app (`/api/swarms/:id/work/…`,
   `/api/goals/:name`, history restore, the contract route).
 - A way to call a token-gated route (start, stop, reap, restore, save goal,
