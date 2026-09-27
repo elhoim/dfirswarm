@@ -3,56 +3,16 @@ import { Lock, LockOpen, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/states";
 import { clock, duration } from "@/lib/format";
+import { claimSequences } from "@/lib/claim-sequences";
 import { useAgentNames } from "@/lib/hooks";
-import type { SwarmEvent, SwarmView } from "@/lib/types";
+import type { SwarmView } from "@/lib/types";
 import { cn } from "@/lib/utils";
-
-type Sequence = { agent: string; path: string; steps: SwarmEvent[]; open: boolean };
-
-/** Group claim → write/edit → release runs per (agent, path); inventory §5 #20. */
-function sequences(events: SwarmEvent[]): Sequence[] {
-  const open = new Map<string, Sequence>();
-  const out: Sequence[] = [];
-  for (const e of events) {
-    // publish_file names its target `to` (a VM seat's write to a shared
-    // file goes through the hub); every other step names it `path`.
-    const target =
-      e.tool === "publish_file"
-        ? typeof e.args.to === "string" && e.args.to
-          ? e.args.to
-          : typeof e.args.path === "string"
-            ? `work/${e.args.path.split("/").pop()}`
-            : null
-        : e.args.path;
-    const path = typeof target === "string" ? target : null;
-    if (!path) continue;
-    const key = `${e.agent}\u0000${path}`;
-    if (e.tool === "claim_file") {
-      const r = e.result as { ok?: boolean } | null;
-      if (r && r.ok === false) continue;
-      if (!open.has(key)) {
-        const seq: Sequence = { agent: e.agent, path, steps: [], open: true };
-        open.set(key, seq);
-        out.push(seq);
-      }
-      open.get(key)!.steps.push(e);
-    } else if (["write", "edit", "file_restore", "file_history", "publish_file", "publish_needed"].includes(e.tool)) {
-      open.get(key)?.steps.push(e);
-    } else if (e.tool === "release_file") {
-      const seq = open.get(key);
-      if (seq) {
-        seq.steps.push(e);
-        seq.open = false;
-        open.delete(key);
-      }
-    }
-  }
-  return out.reverse();
-}
 
 export function ClaimsPanel({ view, now }: { view: SwarmView; now: number }) {
   const names = useAgentNames(view.agents);
-  const seqs = useMemo(() => sequences(view.traces), [view.traces]);
+  // Over the whole trace, from the server; an older payload has only the
+  // tail, which is what this tab used to read.
+  const seqs = useMemo(() => view.claim_sequences ?? claimSequences(view.traces), [view.claim_sequences, view.traces]);
   // The server filters expired leases out of `claims`. An older payload has
   // only the raw lock directory, so derive the live ones from it rather than
   // reporting that nobody holds anything.
@@ -68,6 +28,10 @@ export function ClaimsPanel({ view, now }: { view: SwarmView; now: number }) {
       }));
   }, [view.claims, view.locks, now]);
   const reaps = view.traces.filter((e) => e.tool === "reap" || e.tool === "reaped");
+  // A run with no release on the trace is still held only while its lease
+  // is live: a seat's finish drops its leases without a release_file line,
+  // and a lease that is not renewed expires.
+  const held = useMemo(() => new Set(claims.map((l) => `${l.owner}\u0000${l.path}`)), [claims]);
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -171,31 +135,38 @@ export function ClaimsPanel({ view, now }: { view: SwarmView; now: number }) {
         <h3 className="label-caps">Claim → work → release</h3>
         {seqs.length ? (
           <ol className="space-y-2">
-            {seqs.map((s, i) => (
-              <li key={i} className={cn("card p-3", s.open && "border-slate/40")}>
-                <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
-                  <span className="font-semibold text-ink">{names(s.agent)}</span>
-                  <code className="text-ink-2">{s.path}</code>
-                  <Badge variant={s.open ? "slate" : "moss"} className="ml-auto">
-                    {s.open ? "still held" : "released"}
-                  </Badge>
-                </div>
-                <ol className="mt-2 flex flex-wrap items-center gap-1">
-                  {s.steps.map((st, j) => (
-                    <li key={j} className="flex items-center gap-1">
-                      <Badge variant={st.tool === "claim_file" ? "slate" : st.tool === "release_file" ? "moss" : "neutral"} className="font-mono" title={st.ts}>
-                        {st.tool}
-                      </Badge>
-                      {j < s.steps.length - 1 ? <span className="text-ink-3">→</span> : null}
-                    </li>
-                  ))}
-                  {s.open ? <span className="text-[11px] text-ink-3">→ …</span> : null}
-                </ol>
-                <div className="mt-1 text-[11px] tabular text-ink-3">
-                  {clock(s.steps[0].ts)} – {clock(s.steps[s.steps.length - 1].ts)}
-                </div>
-              </li>
-            ))}
+            {seqs.map((s, i) => {
+              const live = s.open && held.has(`${s.agent}\u0000${s.path}`);
+              return (
+                <li key={i} className={cn("card p-3", live && "border-slate/40")}>
+                  <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
+                    <span className="font-semibold text-ink">{names(s.agent)}</span>
+                    <code className="text-ink-2">{s.path}</code>
+                    <Badge
+                      variant={live ? "slate" : s.open ? "neutral" : "moss"}
+                      className="ml-auto"
+                      title={s.open && !live ? "No release_file on the trace, and the lease is no longer held: it expired, or the seat's finish let it go." : undefined}
+                    >
+                      {live ? "still held" : s.open ? "lease ended" : "released"}
+                    </Badge>
+                  </div>
+                  <ol className="mt-2 flex flex-wrap items-center gap-1">
+                    {s.steps.map((st, j) => (
+                      <li key={j} className="flex items-center gap-1">
+                        <Badge variant={st.tool === "claim_file" ? "slate" : st.tool === "release_file" ? "moss" : "neutral"} className="font-mono" title={st.ts}>
+                          {st.tool}
+                        </Badge>
+                        {j < s.steps.length - 1 ? <span className="text-ink-3">→</span> : null}
+                      </li>
+                    ))}
+                    {live ? <span className="text-[11px] text-ink-3">→ …</span> : null}
+                  </ol>
+                  <div className="mt-1 text-[11px] tabular text-ink-3">
+                    {clock(s.steps[0].ts)} – {clock(s.steps[s.steps.length - 1].ts)}
+                  </div>
+                </li>
+              );
+            })}
           </ol>
         ) : (
           <EmptyState title="No claim sequences yet" hint="Once an agent claims a path you will see its claim → write → release run here." className="py-6" />

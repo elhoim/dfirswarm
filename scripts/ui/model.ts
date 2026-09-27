@@ -33,6 +33,7 @@ import {
   type SwarmSummary,
 } from "../../extensions/observe.ts";
 import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
+import { claimSequences, type ClaimSequence } from "../../ui/src/lib/claim-sequences.ts";
 import { isFailureEvent } from "../../ui/src/lib/event-taxonomy.ts";
 import { vmTimeline, type VmTimeline } from "../../ui/src/lib/vm-timeline.ts";
 import { countChecks } from "./goals.ts";
@@ -521,6 +522,8 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   work: WorkFile[];
   layout: Record<string, unknown> | null;
   violations: SwarmEvent[];
+  /** Claim → work → release runs over the whole trace: the view's trace is a tail, and a run's claims are mostly before it. */
+  claim_sequences: ClaimSequence[];
   sentinel_info: SentinelInfo | null;
   activity: ActivitySeries;
   /** Tools the agents forged, with usage from the event log. */
@@ -1026,6 +1029,7 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     work: await listWorkFiles(sandbox),
     layout,
     violations: events.filter((e) => e.tool === "claim_violation"),
+    claim_sequences: claimSequences(events),
     sentinel_info: sentinelInfo,
     activity: activitySeries(events, summary.started_at || null, summary.finished_at),
     tools: await forgedToolRows(sandbox, events),

@@ -1,4 +1,5 @@
 /** Wire types. Mirrors scripts/ui/model.ts + extensions/*.ts; keep in sync by hand. */
+import type { ClaimSequence } from "./claim-sequences.ts";
 import type { VmTimeline } from "./vm-timeline.ts";
 
 /**
@@ -416,6 +417,8 @@ export type SwarmView = {
   agents: AgentRow[];
   locks: LockRecord[];
   claims: ClaimRow[];
+  /** Claim → work → release runs over the whole trace (`traces` is its tail); absent from an older server. */
+  claim_sequences?: ClaimSequence[];
   sentinel: boolean;
   sentinel_info: SentinelInfo | null;
   traces: SwarmEvent[];

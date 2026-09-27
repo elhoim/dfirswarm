@@ -2727,6 +2727,42 @@ test("a stop before a model call says the reason its trace line gives, not the c
   assert.match(words(undefined), /: the line names no reason$/);
 });
 
+test("the Claims tab's runs are built over the whole trace, not the view's tail", async () => {
+  // A tail of one line: the claims, writes and releases are all before it.
+  const { body } = await get<{ traces: unknown[]; claim_sequences: Array<{ agent: string; path: string; open: boolean; steps: Array<Record<string, unknown>> }> }>("/api/swarms/s7a1c?traces=1");
+  assert.equal(body.traces.length, 1);
+  const released = body.claim_sequences.find((s) => s.agent === "s7a1c01" && s.path === "work/attack-path.svg");
+  assert.equal(released?.open, false);
+  assert.deepEqual(released?.steps.map((st) => st.tool), ["claim_file", "write", "release_file"]);
+  assert.deepEqual(Object.keys(released?.steps[0] ?? {}).sort(), ["tool", "ts"], "a step carries its call and time; the trace has the rest");
+  const open = body.claim_sequences.find((s) => s.agent === "s7a1c00" && s.path === "work/attack-path.svg");
+  assert.equal(open?.open, true);
+  assert.deepEqual(open?.steps.map((st) => st.tool), ["claim_file", "edit", "file_history"]);
+
+  // As a microVM seat traces them: an own-scratch implicit claim, a publish
+  // to a shared file named by `to`, and releases after a long stretch.
+  const { claimSequences } = await import("../ui/src/lib/claim-sequences.ts");
+  const line = (agent: string, tool: string, args: Record<string, unknown>, result: unknown = { ok: true }) => ({ ts: "2026-09-26T21:30:00.000Z", agent, tool, args, result });
+  const trace = [
+    line("v01", "claim_file", { path: "work/v01/notes.md", reason: "own scratch", implicit: true }, { ok: true, implicit: true, via: "write" }),
+    line("v01", "claim_file", { path: "work/bitlocker.md", reason: "own the deliverable", seconds: 600 }),
+    line("v01", "publish_file", { path: "work/v01/bitlocker.md", to: "work/bitlocker.md" }),
+    line("v02", "claim_file", { path: "work/bitlocker.md" }, { ok: false, owner: "v01" }),
+    ...Array.from({ length: 500 }, () => line("v02", "bash", { command: "true" })),
+    line("v01", "release_file", { path: "work/bitlocker.md" }),
+  ];
+  const seqs = claimSequences(trace);
+  assert.deepEqual(
+    seqs.map((s) => [s.agent, s.path, s.open, s.steps.map((st) => st.tool).join(" → ")]),
+    [
+      ["v01", "work/bitlocker.md", false, "claim_file → publish_file → release_file"],
+      ["v01", "work/v01/notes.md", true, "claim_file"],
+    ],
+    "newest first; a refused claim is no run",
+  );
+  assert.deepEqual(claimSequences(trace.slice(-400)), [], "the tail alone holds a release and no claim: the empty tab this replaces");
+});
+
 test("the review file's chain is checked line by line", async () => {
   const { parseReviews } = await import("../scripts/ui/reviews.ts");
   const a = JSON.stringify({ v: 1, seq: 1, at: "t", examiner: "E", action: "accept", entry_seq: 1, prev: null });
