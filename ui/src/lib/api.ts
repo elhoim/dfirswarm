@@ -1,6 +1,6 @@
 import type { ArtifactIndex, Coverage, Dossier, ImagePreview, Job, OperatorAudit, PackageInfo, StartCheck, PackRow, EntryReviewAction, ReviewState, ExaminersView, EnrolledPerson, ReleaseStateView, PreparedRelease, VmReadiness, ModelList, SwarmRow, SwarmView, TimedPost, TracePage, WorkFile, FileVersion, Health, GoalSummary, StoreJobDetail, StoreJobsView, StoreLogPage,
   LibraryDocument,
-  LibraryEntry, GoalDocument, SwarmContract, ChecksReport, ReadinessReport, ForgedToolSource, InputsLibrary } from "./types";
+  LibraryEntry, GoalDocument, SwarmContract, ChecksReport, ReadinessReport, ForgedToolSource, InputsLibrary, LeadsPanelView } from "./types";
 
 /**
  * The token that lets this browser start, stop, reap and restore. The server
@@ -185,6 +185,10 @@ export const api = {
   /** The start flags this harness documents (swarm.sh help start). */
   kickoffFlags: () => request<{ flags: string[] }>("/api/kickoff/flags"),
   operator: (id: string) => request<OperatorAudit>(`/api/swarms/${encodeURIComponent(id)}/operator`),
+  /** The lead register: every lead, the operator's queue first, and the questions nobody covers. */
+  leads: (id: string) => request<LeadsPanelView>(`/api/swarms/${encodeURIComponent(id)}/leads`),
+  /** The operator's answer to a lead (note, with a host to allow for the run's jobs), or a reopen: run as swarm.sh lead. Needs the token. */
+  leadAct: (id: string, payload: { action: "note" | "reopen"; lead: string; text?: string; allow_host?: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/leads`, payload),
   /** The run's tool jobs from the job service's journal: a page, with the totals over all of them. */
   storeJobs: (id: string, q: { offset: number; limit: number }) =>
     request<StoreJobsView>(`/api/swarms/${encodeURIComponent(id)}/jobs?offset=${q.offset}&limit=${q.limit}`),

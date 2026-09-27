@@ -312,6 +312,15 @@ export type BudgetRecord = {
   /** A cap in tokens over every turn: what the kickoff requires for an
    *  unmetered team, and an optional second brake for any other. */
   cap_tokens?: number;
+  /**
+   * The run was started until solved (--until-solved, or the goal's
+   * `until_solved: true`): no wall clock, every cap advisory (spend is
+   * recorded and shown, nothing is stopped for it), no abandon, and done
+   * only when every question is answered. Only the operator ends it.
+   */
+  until_solved?: boolean;
+  /** Until solved: minutes without progress before the watchdog posts a regroup (default 15). */
+  stall_minutes?: number;
   agents: Record<string, AgentBudget>;
 };
 
@@ -1201,7 +1210,8 @@ export function normalizeBudget(raw: Partial<BudgetRecord> | null | undefined): 
     spent_usd: Number(raw?.spent_usd) || 0,
     tokens: Number(raw?.tokens) || 0,
     calls: Number(raw?.calls) || 0,
-    wall_clock_minutes: Number(raw?.wall_clock_minutes) || 15,
+    // An until-solved run has no wall clock: its zero is kept, not read as unset.
+    wall_clock_minutes: raw?.until_solved === true ? Math.max(0, Number(raw?.wall_clock_minutes) || 0) : Number(raw?.wall_clock_minutes) || 15,
     started_at: raw?.started_at ?? new Date().toISOString(),
     source: raw?.source ?? BUDGET_SOURCE,
     hard_kill: Boolean(raw?.hard_kill),
@@ -1225,6 +1235,8 @@ export function normalizeBudget(raw: Partial<BudgetRecord> | null | undefined): 
     ...(Number(raw?.cap_tokens) > 0 ? { cap_tokens: Number(raw?.cap_tokens) } : {}),
     ...(raw?.stop_steer_at ? { stop_steer_at: raw.stop_steer_at } : {}),
     ...(raw?.stop_reason ? { stop_reason: raw.stop_reason } : {}),
+    ...(raw?.until_solved === true ? { until_solved: true } : {}),
+    ...(Number(raw?.stall_minutes) > 0 ? { stall_minutes: Number(raw?.stall_minutes) } : {}),
     agents,
   };
 }

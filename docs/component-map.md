@@ -63,6 +63,7 @@ The files you would actually open, what they do, and when you would touch them. 
 | `ui/src/screens/detail/agents-panel.tsx` | Agent cards (✓ done / ? dead / ? stalled / ● working), search, agent detail. | Agent view. |
 | `ui/src/screens/detail/traces-panel.tsx` | `events.jsonl` humanised, filters, follow mode, raw JSON. | Trace rendering per tool. |
 | `ui/src/screens/detail/claims-panel.tsx` | Live locks with TTL, violations, reaped agents, claim → work → release sequences. | Lock view. |
+| `ui/src/screens/detail/leads-panel.tsx` | The lead register: what waits on the operator first, with the form that answers it (a note, a host for the run's jobs), then active, blocked, open and closed leads with their needs, holders and dispositions, the questions nobody covers, and the jobs awaiting an interpretation. | Lead view, the operator lane. |
 | `ui/src/screens/detail/budget-panel.tsx` | Cap vs spent, wall clock, per-agent table. | Budget view. |
 | `ui/src/screens/detail/files-panel.tsx` | `history/` revisions per `work/` file, viewer, **Restore**. | File history view. |
 | `ui/src/screens/detail/artifacts-panel.tsx` | `work/*.html` in a sandboxed iframe, SVG/PNG as images, text inline. | Artifact preview. |

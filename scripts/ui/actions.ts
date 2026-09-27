@@ -10,7 +10,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review";
+export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead";
 export type JobStatus = "running" | "ok" | "failed";
 
 export type Job = {
@@ -1080,6 +1080,16 @@ export class ActionRunner {
 
   release(swarmId: string): Job {
     return this.run("release", ["release", swarmId], swarmId);
+  }
+
+  /**
+   * The operator's answer to a lead (swarm.sh lead <id> note L-n TEXT
+   * [--allow-host HOST]), or a reopen: recorded on the register, posted to
+   * the board as the examiner, on the trace and the operator's record.
+   */
+  lead(swarmId: string, p: { action: "note" | "reopen"; lead: string; text?: string; allowHost?: string }): Job {
+    const args = p.action === "note" ? ["lead", swarmId, "note", p.lead, p.text ?? "", ...(p.allowHost ? ["--allow-host", p.allowHost] : [])] : ["lead", swarmId, "reopen", p.lead, ...(p.text ? [p.text] : [])];
+    return this.run("lead", args, swarmId);
   }
 
   /** The ledger as CSV or a Timesketch import, written to `out` (a file of the console's own). */

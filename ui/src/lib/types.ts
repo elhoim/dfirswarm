@@ -468,6 +468,52 @@ export type SwarmView = {
   vm_timeline?: VmTimeline | null;
   /** What the last custody check found (custody.json); null before a stop or the hub's finish took one. */
   custody?: CustodyView | null;
+  /** The lead register in numbers; null when the run opened no lead. Absent from a server that predates it. */
+  leads?: LeadsBrief | null;
+  /** The run was started until solved: no wall clock, caps advisory, only the operator ends it. */
+  until_solved?: boolean;
+};
+
+/** Mirrors `LeadsBrief` in `scripts/ui/model.ts`. */
+export type LeadsBrief = { open: number; active: number; blocked: number; closed: number; waiting_on_operator: number; uncovered: number; chain_ok: boolean };
+
+/** A lead as the register shows it; mirrors `LeadView` in `extensions/leads.ts`. */
+export type LeadView = {
+  id: string;
+  title: string;
+  why: string;
+  origin: string;
+  status: "open" | "active" | "blocked" | "closed";
+  material: boolean;
+  holder: string | null;
+  generation: number;
+  needs: Array<{ need: string; met: boolean; why?: string }>;
+  answers: string[];
+  disposition?: "resolved" | "negative" | "duplicate" | "deferred" | "infeasible" | "needs_operator";
+  ref?: string;
+  closed_by?: string;
+  closed_at?: string;
+  close_why?: string;
+  opened_by: string;
+  opened_at: string;
+  held_since: string | null;
+  priority: number;
+  waiting_on_it: { leads: string[]; questions: string[] };
+  stale: { at: string; holder: string; generation: number; idle_seconds: number; last_activity: string | null } | null;
+  jobs: string[];
+  notes: Array<{ at: string; by: string; text: string; allow_host?: string }>;
+  reopened: Array<{ at: string; by: string; why: string; cause: string }>;
+};
+
+/** The Leads tab; mirrors `LeadsPanelView` in `scripts/ui/model.ts`. */
+export type LeadsPanelView = {
+  leads: LeadView[];
+  chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null; events: number };
+  waiting_on_operator: LeadView[];
+  requests: Array<Record<string, unknown>>;
+  hosts: string[];
+  coverage: { questions: string[]; existence: string[]; unanswered: string[]; uncovered: string[]; open_leads_for: Record<string, string[]> };
+  awaiting: Array<{ job: string; agent: string; lead: string | null; why: string; unread_bytes?: number; total_bytes?: number; next_offset?: number }>;
 };
 
 /** What produced the run, as the kickoff recorded it. */
@@ -789,6 +835,8 @@ export type ChangeKind =
   | "contract"
   /** store/: the job service's journal and each job's sealed output. */
   | "store"
+  /** leads/: the lead register, and what the agents asked of the operator. */
+  | "leads"
   /** A live VM run's hub wrote its status: the seats' states moved. */
   | "hub"
   | "other";

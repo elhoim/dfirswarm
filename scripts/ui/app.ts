@@ -28,7 +28,7 @@ import { coverageOf } from "../coverage.ts";
 import { deleteGoal, GoalError, listGoals, readGoal, saveGoal } from "./goals.ts";
 import { listLibrary, readLibraryEntry } from "./library.ts";
 import { describeRoots, InputsError, listInputSets, parseInputsRoots, resolveInputImage, resolveInputSet, RootStore } from "./inputs.ts";
-import { countForgedTools, findRun, listSwarmRows, listWorkFiles, liveHubDirs, operatorAudit, queryTraces, readAllPosts, readRunEvents, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
+import { countForgedTools, findRun, listSwarmRows, listWorkFiles, liveHubDirs, operatorAudit, queryTraces, readAllPosts, readLeads, readRunEvents, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
 import { readReviews } from "./reviews.ts";
 import { createSigning, SigningError } from "./signing.ts";
 import { readStoreJob, readStoreJobLog, readStoreJobs, storeJobLogFile } from "./store-jobs.ts";
@@ -1229,6 +1229,33 @@ export function createUiApp(options: UiAppOptions): UiApp {
         const stall = body.stall_sec === undefined ? undefined : Number(body.stall_sec);
         if (stall !== undefined && (!Number.isInteger(stall) || stall < 1)) throw new HttpError(400, "stall_sec must be a positive integer");
         json(res, 202, runner.reap(id, { stall_sec: stall, stop: body.stop === true }));
+        return;
+      }
+      /**
+       * The lead register (extensions/leads.ts): every lead with what is
+       * derived beside it, what waits on the operator first, and the goal's
+       * questions nobody covers. A POST is the operator's answer to a lead
+       * (a note, with a host to allow) or a reopen, run as swarm.sh lead so
+       * it lands on the trace and the operator's record like the CLI's.
+       */
+      case "leads": {
+        if (method === "GET") {
+          json(res, 200, await readLeads(sandbox));
+          return;
+        }
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        const body = (await readBody(req)) as { action?: unknown; lead?: unknown; text?: unknown; allow_host?: unknown };
+        const action = body.action === "reopen" ? "reopen" : body.action === "note" ? "note" : null;
+        if (!action) throw new HttpError(400, "action is note or reopen");
+        const lead = String(body.lead ?? "").trim().toUpperCase();
+        if (!/^L-[1-9]\d{0,5}$/.test(lead)) throw new HttpError(400, "lead is L-<n>");
+        const text = typeof body.text === "string" ? body.text.trim() : "";
+        if (action === "note" && !text) throw new HttpError(400, "a note needs its text");
+        if (text.length > 4000) throw new HttpError(400, "a note is at most 4000 characters: nothing is cut, so a longer one is refused");
+        const host = typeof body.allow_host === "string" ? body.allow_host.trim() : "";
+        if (host && !/^(\*\.)?[A-Za-z0-9.-]{1,253}(:\d{1,5})?$/.test(host)) throw new HttpError(400, "allow_host is a host name (example.org, *.example.org, example.org:8443)");
+        json(res, 202, runner.lead(id, { action, lead, ...(text ? { text } : {}), ...(host ? { allowHost: host } : {}) }));
         return;
       }
       // Who did what to this run: its lines in runs/operator-audit.jsonl

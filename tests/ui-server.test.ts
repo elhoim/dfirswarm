@@ -3386,3 +3386,34 @@ test("no key screen of the console scrolls sideways at 390 px (a real browser; s
     await rm(standIn, { recursive: true, force: true });
   }
 });
+
+test("the Leads tab: the register over the API, what waits on the operator in the view, and the operator's answer run as swarm.sh lead", async () => {
+  const L = await import("../extensions/leads.ts");
+  const registry = JSON.parse(await readFile(join(runsDir, "registry.json"), "utf8")) as { runs: Array<{ id: string; sandbox: string }> };
+  const run = registry.runs.find((r) => r.id === "s7a1c")!;
+  const S = run.sandbox;
+  const a0 = { sandboxRoot: S, agentId: (JSON.parse(await readFile(join(S, "team.json"), "utf8")) as { agents: Array<{ id: string }> }).agents[0].id };
+  assert.equal((await L.openLead(a0, { title: "Reach the outside resource", why: "the key is there", take: true })).ok, true);
+  assert.equal((await L.closeLead(a0, "L-1", { disposition: "needs_operator", ref: "Allow the host the plaintext names, so a job can fetch the key" })).ok, true);
+  assert.equal(classifyPath(runsDir, join(S, "leads", "leads.jsonl")).kind, "leads");
+  assert.equal(classifyPath(runsDir, join(S, "operator-requests.jsonl")).kind, "leads");
+  const view = await get<Record<string, any>>("/api/swarms/s7a1c");
+  assert.equal(view.body.leads.waiting_on_operator, 1, "the header knows a request waits on the operator");
+  const leads = await get<Record<string, any>>("/api/swarms/s7a1c/leads");
+  assert.equal(leads.status, 200);
+  assert.deepEqual(leads.body.waiting_on_operator.map((l: { id: string }) => l.id), ["L-1"]);
+  assert.equal(leads.body.requests.length, 1);
+  assert.equal(leads.body.chain.ok, true);
+  assert.equal((await post("/api/swarms/s7a1c/leads", { action: "note", lead: "L-1" })).status, 400, "a note needs its text");
+  assert.equal((await post("/api/swarms/s7a1c/leads", { action: "delete", lead: "L-1", text: "x" })).status, 400);
+  assert.equal((await post("/api/swarms/s7a1c/leads", { action: "note", lead: "L-1; rm -rf", text: "x" })).status, 400);
+  const note = await post<{ id: string }>("/api/swarms/s7a1c/leads", { action: "note", lead: "L-1", text: "Fetched it for you: the key file is under inputs now" });
+  assert.equal(note.status, 202);
+  const job = await waitJob(note.body.id);
+  assert.equal(job.status, "ok", job.stderr);
+  assert.match(job.stdout, /Recorded on L-1, reopened/);
+  const after = await get<Record<string, any>>("/api/swarms/s7a1c/leads");
+  const l1 = after.body.leads.find((l: { id: string }) => l.id === "L-1");
+  assert.equal(l1.status, "open");
+  assert.match(l1.notes[0].text, /Fetched it for you/);
+});

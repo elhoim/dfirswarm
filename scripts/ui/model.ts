@@ -34,6 +34,7 @@ import {
   type SwarmSummary,
 } from "../../extensions/observe.ts";
 import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
+import { awaitingInterpretation, leadsSnapshot, OPERATOR_REQUESTS, operatorHosts, questionCoverage, rankedLeads, type AwaitingJob, type LeadView } from "../../extensions/leads.ts";
 import { claimSequences, type ClaimSequence } from "../../ui/src/lib/claim-sequences.ts";
 import { isFailureEvent } from "../../ui/src/lib/event-taxonomy.ts";
 import { vmTimeline, type VmTimeline } from "../../ui/src/lib/vm-timeline.ts";
@@ -550,7 +551,59 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   vm_timeline: VmTimeline | null;
   /** What the last custody check found (custody.json), or null before any stop or hub finish took one. */
   custody: CustodyView | null;
+  /** The lead register in brief, for the header: what waits on the operator above all. Null when the run opened no lead. */
+  leads: LeadsBrief | null;
+  /** Whether the run was started until solved: no wall clock, caps advisory, only the operator ends it. */
+  until_solved: boolean;
 };
+
+/** The register in numbers, for the header and the tab strip. */
+export type LeadsBrief = { open: number; active: number; blocked: number; closed: number; waiting_on_operator: number; uncovered: number; chain_ok: boolean };
+
+/** The Leads tab: every lead with what is derived beside it, the operator's queue first. */
+export type LeadsPanelView = {
+  leads: LeadView[];
+  chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null; events: number };
+  waiting_on_operator: LeadView[];
+  /** Every line of operator-requests.jsonl, whole. */
+  requests: Array<Record<string, unknown>>;
+  hosts: string[];
+  coverage: { questions: string[]; existence: string[]; unanswered: string[]; uncovered: string[]; open_leads_for: Record<string, string[]> };
+  awaiting: AwaitingJob[];
+};
+
+/** The lead register as the console shows it (extensions/leads.ts), read from the files. */
+export async function readLeads(sandbox: string): Promise<LeadsPanelView> {
+  const snap = await leadsSnapshot(sandbox);
+  const leads = rankedLeads(snap);
+  const cov = questionCoverage(snap);
+  const requests: Array<Record<string, unknown>> = [];
+  for (const line of (await readFile(join(sandbox, OPERATOR_REQUESTS), "utf8").catch(() => "")).split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      requests.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      requests.push({ unreadable: line });
+    }
+  }
+  return {
+    leads,
+    chain: { ...snap.state.chain, events: snap.state.events.length },
+    waiting_on_operator: leads.filter((l) => l.disposition === "needs_operator"),
+    requests,
+    hosts: await operatorHosts(sandbox),
+    coverage: { questions: snap.goal.questions, existence: snap.goal.existence, ...cov },
+    awaiting: await awaitingInterpretation(sandbox, snap.state, snap.jobs),
+  };
+}
+
+async function leadsBrief(sandbox: string): Promise<LeadsBrief | null> {
+  const snap = await leadsSnapshot(sandbox).catch(() => null);
+  if (!snap || !snap.state.events.length) return null;
+  const leads = rankedLeads(snap);
+  const n = (st: string) => leads.filter((l) => l.status === st).length;
+  return { open: n("open"), active: n("active"), blocked: n("blocked"), closed: n("closed"), waiting_on_operator: leads.filter((l) => l.disposition === "needs_operator").length, uncovered: questionCoverage(snap).uncovered.length, chain_ok: snap.state.chain.ok };
+}
 
 /** ledger/entries.jsonl as the agents wrote it, and whether ledger.md exists. */
 export type LedgerView = {
@@ -1051,6 +1104,8 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     vms,
     vm_timeline: vmTimeline({ started_at: summary.started_at || null, finished_at: summary.finished_at, now: Date.now(), vms, events: events.map((e) => ({ ...e, ts: hostTime(e) })) }),
     custody: await readCustody(sandbox),
+    leads: await leadsBrief(sandbox),
+    until_solved: detail.budget.until_solved === true,
   };
 }
 
