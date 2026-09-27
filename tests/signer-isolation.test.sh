@@ -101,8 +101,9 @@ const m = machineSigner();
 if ("why" in m) { console.error(m.why); process.exit(1); }' || fail "the machine key was not made"
 [[ -f "$H/machine/release_ed25519" ]] || fail "the machine key is not where signers.ts keeps it"
 ssh-keygen -q -t ed25519 -N "" -C examiner-test -f "$TMP/keys/examiner_ed25519" </dev/null
+# A key with no passphrase is taken only as the documented trade (--no-passphrase).
 swarm examiner enroll --name "Test Examiner" --organisation "Test Lab" --competence "a test" \
-  --key "$TMP/keys/examiner_ed25519" --id test-examiner >/dev/null || fail "the examiner was not enrolled"
+  --key "$TMP/keys/examiner_ed25519" --no-passphrase --id test-examiner >/dev/null || fail "the examiner was not enrolled"
 EXKEY="$TMP/keys/examiner_ed25519"
 
 echo "# the no-read list"

@@ -796,7 +796,9 @@ async function enrolmentSecret(args: string[], kind: KeyKind): Promise<Buffer | 
     }
     return a;
   }
-  if (kind === "ssh" && opt(args, "--key") && !noPass && !String(opt(args, "--key")).endsWith(".pub")) {
+  // A key given: its passphrase is asked only when it has one (one without is refused, or taken with --no-passphrase).
+  const given = opt(args, "--key");
+  if (kind === "ssh" && given && !given.endsWith(".pub") && keyFileEncrypted(resolve(given)) === true) {
     if (!hasTty()) throw new Error("there is no terminal to ask the key's passphrase on (to prove it signs): run it at a terminal, or --passphrase-fd N");
     return readFromTty("The key's passphrase, to prove it signs (not shown): ");
   }
