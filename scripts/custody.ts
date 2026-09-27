@@ -201,9 +201,11 @@ async function walk(dir: string): Promise<string[]> {
  * link is a name of its own and is never followed (a loop would never end,
  * and what is under a directory link is another directory's); the top of
  * the evidence may itself be a link (--inputs in place), so the caller gives
- * its real path.
+ * its real path. So may each of several sets directly under it: `sets` are
+ * those names (latin1 keys of their bytes, as the manifest lists them), and
+ * a link by one of them at the top is walked through as the set it is.
  */
-async function walkEvidence(root: Buffer, onName: (abs: Buffer) => void): Promise<void> {
+async function walkEvidence(root: Buffer, onName: (abs: Buffer) => void, sets: Set<string> = new Set()): Promise<void> {
   const stack: Buffer[] = [root];
   while (stack.length) {
     const dir = stack.pop() as Buffer;
@@ -214,8 +216,9 @@ async function walkEvidence(root: Buffer, onName: (abs: Buffer) => void): Promis
       continue;
     }
     for (const entry of entries) {
-      const abs = Buffer.concat([dir, SLASH, entry.name as unknown as Buffer]);
-      if (entry.isDirectory()) stack.push(abs);
+      const name = entry.name as unknown as Buffer;
+      const abs = Buffer.concat([dir, SLASH, name]);
+      if (entry.isDirectory() || (dir === root && entry.isSymbolicLink() && sets.has(name.toString("latin1")))) stack.push(abs);
       else onName(abs); // a file, a link, and anything else (a FIFO, a socket, a device) is a name
     }
   }
@@ -1070,10 +1073,17 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
       const anchored = anchor?.inputs_manifest_sha256 ? anchor.inputs_manifest_sha256 === streamed.sha256 : null;
       const added: string[] = [];
       if (existsSync(join(sandbox, "inputs"))) {
+        // Several sets, each at inputs/<name>/ (the manifest's `sets`): one
+        // held in place is a link there, walked through.
+        const sets = new Set(
+          (Array.isArray(streamed.meta.sets) ? streamed.meta.sets : [])
+            .map((set) => (set && typeof set === "object" && typeof (set as { name?: unknown }).name === "string" ? fsEncode((set as { name: string }).name).toString("latin1") : null))
+            .filter((key): key is string => key !== null && key !== "" && !key.includes("/")),
+        );
         await walkEvidence(evidenceRoot, (abs) => {
           const rel = abs.subarray(evidenceRoot.length + 1);
           if (!listed.has(rel.toString("latin1"))) added.push(`inputs/${fsDecode(rel)}`);
-        });
+        }, sets);
         added.sort();
       }
       const metaBytes = Number(streamed.meta.bytes);

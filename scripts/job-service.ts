@@ -23,7 +23,7 @@
  * beside the scope the agent declared; what it actually read is not measured
  * and is said to be unknown.
  */
-import { existsSync, statfsSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statfsSync } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { Journal, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, type JournalLine } from "./evidence-store.ts";
@@ -236,9 +236,45 @@ function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * The directories of several evidence sets held in place, resolved: each
+ * set inputs.json names whose inputs/<name> is a link. Empty for one set
+ * (inputs/ is itself the link, or the copy) and for a copy of several. The
+ * manifest, which can be hundreds of megabytes, is read only when a link at
+ * the top of inputs/ may be a set.
+ */
+export function boundInputSets(S: string): string[] {
+  const top = join(S, "inputs");
+  try {
+    if (lstatSync(top).isSymbolicLink() || !readdirSync(top, { withFileTypes: true }).some((e) => e.isSymbolicLink())) return [];
+  } catch {
+    return [];
+  }
+  let sets: unknown;
+  try {
+    sets = (JSON.parse(readFileSync(join(S, "inputs.json"), "utf8")) as { sets?: unknown }).sets;
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const set of Array.isArray(sets) ? sets : []) {
+    const name = set && typeof set === "object" ? (set as { name?: unknown }).name : undefined;
+    if (typeof name !== "string" || !name || name.includes("/") || name === "." || name === "..") continue;
+    const link = join(S, "inputs", name);
+    try {
+      if (lstatSync(link).isSymbolicLink()) out.push(realpathSync(link));
+    } catch {
+      // A set whose link leads nowhere is not mounted; the job sees it missing.
+    }
+  }
+  return out;
+}
+
 export class JobService {
   readonly o: Required<Pick<JobServiceOptions, "perRequesterRunning" | "perRequesterQueued" | "minFreeMb" | "derived">> & JobServiceOptions;
   readonly S: string;
+  /** Several sets held in place: their directories, read once (the sets do not change during a run). */
+  private boundSets?: string[];
   journal!: Journal;
   readonly jobs = new Map<string, JobRecord>();
   private readonly queue: string[] = [];
@@ -765,7 +801,14 @@ export class JobService {
     const S = this.S;
     const mounts: Array<Mount & { note?: string }> = [];
     const inputs = join(S, "inputs");
-    if (existsSync(inputs)) mounts.push({ host: inputs, guest: inputs, readonly: true, noexec: true });
+    if (existsSync(inputs)) {
+      mounts.push({ host: inputs, guest: inputs, readonly: true, noexec: true });
+      // Several sets held in place: inputs/ holds a link per set, and each
+      // set's directory is mounted at its own path, where its link leads, as
+      // in the agents' VMs.
+      this.boundSets ??= boundInputSets(S);
+      for (const dir of this.boundSets) mounts.push({ host: dir, guest: dir, readonly: true, noexec: true });
+    }
     for (const rel of ["store", "catalog", "tools", "tool-output"]) if (existsSync(join(S, rel))) mounts.push({ host: join(S, rel), guest: join(S, rel), readonly: true });
     if (existsSync(join(S, "work"))) {
       mounts.push({ host: join(S, "work"), guest: join(S, "work"), readonly: true, note: "every agent's live scratch and the shared files: they may change while the job runs" });

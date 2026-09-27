@@ -861,31 +861,41 @@ export default function (pi: ExtensionAPI) {
   async function logInputsGuard(cwd: string): Promise<void> {
     const manifest = await readInputsManifest(cwd);
     if (!manifest) return;
-    const probe = join(cwd, INPUTS_DIR, ".fsguard-probe");
-    let enforced: "kernel" | "mode" | "none" = "none";
-    try {
-      await writeFile(probe, "probe\n");
-      await rm(probe, { force: true }).catch(() => undefined);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      // EPERM is the seatbelt/mount-namespace refusal; EROFS is what a
-      // read-only mount answers (a container's `:ro` bind, a read-only disk
-      // image attached on the host). Both are the kernel saying no.
-      //
-      // EACCES is ambiguous and the answer depends on what is guarding this
-      // pane. Landlock refuses with EACCES, not EPERM (measured on 6.8), so
-      // under a Landlock-backed guard EACCES is the kernel; anywhere else it
-      // is the permission bits, which the file's owner can take back. Reading
-      // the mode the pane was actually started under is what makes the
-      // difference legible — a pane that has no kernel guard cannot claim one
-      // here, because the variable is set by the guard itself.
-      const guardMode = process.env.SWARM_FSGUARD || "none";
-      const landlockBacked = guardMode === "landlock" || guardMode === "linux";
-      enforced = code === "EPERM" || code === "EROFS" || (landlockBacked && code === "EACCES")
-        ? "kernel"
-        : code === "EACCES"
-          ? "mode"
-          : "none";
+    const probeDir = async (dir: string): Promise<"kernel" | "mode" | "none"> => {
+      const probe = join(dir, ".fsguard-probe");
+      try {
+        await writeFile(probe, "probe\n");
+        await rm(probe, { force: true }).catch(() => undefined);
+        return "none";
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        // EPERM is the seatbelt/mount-namespace refusal; EROFS is what a
+        // read-only mount answers (a container's `:ro` bind, a read-only disk
+        // image attached on the host). Both are the kernel saying no.
+        //
+        // EACCES is ambiguous and the answer depends on what is guarding this
+        // pane. Landlock refuses with EACCES, not EPERM (measured on 6.8), so
+        // under a Landlock-backed guard EACCES is the kernel; anywhere else it
+        // is the permission bits, which the file's owner can take back. Reading
+        // the mode the pane was actually started under is what makes the
+        // difference legible — a pane that has no kernel guard cannot claim one
+        // here, because the variable is set by the guard itself.
+        const guardMode = process.env.SWARM_FSGUARD || "none";
+        const landlockBacked = guardMode === "landlock" || guardMode === "linux";
+        return code === "EPERM" || code === "EROFS" || (landlockBacked && code === "EACCES")
+          ? "kernel"
+          : code === "EACCES"
+            ? "mode"
+            : "none";
+      }
+    };
+    // Several sets: inputs/ and each set under it, each held by its own rule
+    // when it is held in place; the pane has the weakest of what they say.
+    const rank = { none: 0, mode: 1, kernel: 2 } as const;
+    let enforced: "kernel" | "mode" | "none" = await probeDir(join(cwd, INPUTS_DIR));
+    for (const set of manifest.sets ?? []) {
+      const one = await probeDir(join(cwd, set.path));
+      if (rank[one] < rank[enforced]) enforced = one;
     }
     inputsEnforced = enforced;
     await logEvent(cwd, agentId, "inputs_guard", { files: manifest.files.length }, {
@@ -1095,8 +1105,12 @@ export default function (pi: ExtensionAPI) {
     if (inputs) {
       const kb = Math.max(1, Math.round(inputs.bytes / 1024));
       const consequence = inputsEnforced === "kernel" ? "refused by the kernel" : "refused, or detected and undone";
+      // Several sets, each at inputs/<name>/: every one named.
+      const where = inputs.sets?.length
+        ? `in ${inputs.sets.length} sets, ${inputs.sets.map((set) => `${set.path}/ (from ${set.source || "the operator"})`).join(", ")}`
+        : `under inputs/ (from ${inputs.source || "the operator"})`;
       inputsLine =
-        `\n\nRead-only inputs: ${inputs.files.length} file(s), ${kb} KB under inputs/ (from ${inputs.source || "the operator"}). ` +
+        `\n\nRead-only inputs: ${inputs.files.length} file(s), ${kb} KB ${where}. ` +
         `Read them with read, grep or bash as much as you like. Never write, delete, move or chmod anything under inputs/: every such write is ${consequence} and announced on the board. ` +
         `Put every result in work/ (claim first); copy an input there if you need a version you can change. Call \`inputs\` to list them.`;
     }
@@ -2965,6 +2979,7 @@ export default function (pi: ExtensionAPI) {
       return okResult({
         inputs: true,
         source: manifest.source,
+        ...(manifest.sets?.length ? { sets: manifest.sets.map((set) => ({ name: set.name, path: `${set.path}/`, source: set.source, count: set.files, bytes: set.bytes })) } : {}),
         count: manifest.files.length,
         bytes: manifest.bytes,
         files: manifest.files.map((f) => ({ path: f.path, bytes: f.bytes, sha256: f.sha256.slice(0, 12) })),
