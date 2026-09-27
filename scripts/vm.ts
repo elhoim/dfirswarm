@@ -52,11 +52,11 @@
  *
  * SWARM_MSB_BIN names another msb (tests stand one in).
  */
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, realpathSync } from "node:fs";
 import { isIPv4, isIPv6 } from "node:net";
-import { availableParallelism, totalmem } from "node:os";
+import { availableParallelism, freemem, totalmem } from "node:os";
 import { chmod, mkdir, readFile, rename, rm, stat, utimes, writeFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
@@ -2480,6 +2480,41 @@ export function capacityVerdict(n: number, cpusEach: number, memEach: number, ho
   if (cpus > host.cpus * 4) blockers.push(`${n} VMs of ${cpusEach} vCPU are ${cpus} vCPUs on ${host.cpus} cores: lower --vm-cpus or --n`);
   else if (cpus > host.cpus) warnings.push(`${cpus} vCPUs on ${host.cpus} cores: the agents' tools will share them`);
   return { blockers, warnings };
+}
+
+/**
+ * Memory this host could give a new VM now, in MiB, or null when it cannot
+ * be read: Linux's MemAvailable; on macOS the kernel's memory-status level
+ * (the free percentage memory_pressure prints) of the total, since what
+ * Node calls free there leaves out what the kernel would reclaim at once.
+ */
+export function hostAvailableMib(): number | null {
+  if (process.platform === "linux") {
+    try {
+      const m = /^MemAvailable:\s+(\d+) kB$/m.exec(readFileSync("/proc/meminfo", "utf8"));
+      if (m) return Math.floor(Number(m[1]) / 1024);
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === "darwin") {
+    const r = spawnSync("sysctl", ["-n", "kern.memorystatus_level"], { encoding: "utf8", timeout: 5000 });
+    const pct = Number(r.stdout.trim());
+    if (r.status === 0 && Number.isFinite(pct) && pct >= 0 && pct <= 100) return Math.floor((totalmem() / 1048576) * (pct / 100));
+    return null;
+  }
+  return Math.floor(freemem() / 1048576);
+}
+
+/**
+ * Whether one more worker of `memEach` MiB fits beside what this host runs
+ * now, keeping 15% of its memory free (the kickoff refuses to plan past 85%).
+ * Asked before each worker starts: several runs may share a host, and a run's
+ * workers were fitted only once, at its kickoff. Unreadable, it fits.
+ */
+export function roomForWorker(memEach: number, host: { mem_mib: number; available_mib: number | null } = { mem_mib: Math.floor(totalmem() / 1048576), available_mib: hostAvailableMib() }): { ok: boolean; available_mib: number | null; needed_mib: number } {
+  const needed = memEach + Math.ceil(host.mem_mib * 0.15);
+  return { ok: host.available_mib === null || host.available_mib >= needed, available_mib: host.available_mib, needed_mib: needed };
 }
 
 export async function probeHost(image?: string): Promise<{ ok: boolean; msb: string; version: string; reasons: string[]; image_present?: boolean; image_digest?: string | null; doctor_output?: string; host?: { mem_mib: number; cpus: number } }>{

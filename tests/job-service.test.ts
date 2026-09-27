@@ -3,8 +3,8 @@
  * job's own run.sh on this machine (its /job and $OUT mapped to the host
  * directories the VM would have mounted): acceptance before work, the
  * journal's order, sealing, failures kept, cancellation, fencing, the
- * catalogue's generations, and recovery after a crash at
- * each durable step.
+ * catalogue's generations, the lanes and limits of the queue, room on the
+ * host, and recovery after a crash at each durable step.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -13,9 +13,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { JobService, type JobServiceOptions } from "../scripts/job-service.ts";
+import { DERIVED, JobService, SHORT_JOB_SECONDS, type JobServiceOptions } from "../scripts/job-service.ts";
 import { storePaths, verifyJournalText } from "../scripts/evidence-store.ts";
 import { localWorker } from "./job-service-worker.ts";
+import type { WorkerSpec } from "../scripts/vm.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const CFB = join(ROOT, "packs", "computer-forensics-base");
@@ -417,6 +418,141 @@ test("with too little free disk a job waits in the queue rather than start", asy
   assert.ok(lines.some((l) => l.includes("waits") && l.includes("MB free")));
   await svc.stop("over");
   assert.equal(svc.jobs.get(r.job.id)!.state, "cancelled", "stopping the run cancels what is queued, on the record");
+});
+
+/**
+ * A worker whose jobs are held until let go: one whose command says `hold`
+ * waits for `release()`, any other answers at once. It writes the job's exit
+ * status as run.sh would, and counts what runs at once, by requester.
+ */
+function heldWorker() {
+  let release!: () => void;
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  const live = new Map<string, number>();
+  const most = new Map<string, number>();
+  const scripts: string[] = [];
+  const runWorker = async (spec: WorkerSpec) => {
+    const ctl = spec.mounts.find((m) => m.guest === "/job")!.host;
+    const who = String(spec.env.AGENT_ID);
+    live.set(who, (live.get(who) ?? 0) + 1);
+    most.set(who, Math.max(most.get(who) ?? 0, live.get(who)!));
+    scripts.push(readFileSync(join(ctl, "run.sh"), "utf8"));
+    if (existsSync(join(ctl, "command.sh")) && readFileSync(join(ctl, "command.sh"), "utf8").includes("hold")) await held;
+    writeFileSync(join(ctl, "exit"), "0\n");
+    live.set(who, live.get(who)! - 1);
+    return { code: 0, fenced: true };
+  };
+  return { runWorker, release, most, scripts };
+}
+
+test("the queue counts the jobs it has handed a worker, not only those whose start is written: an agent gets its own limit and the derived lane one job", async () => {
+  // Every job queued first (too little disk), then the queue let go at once:
+  // a job picked a moment ago is still "accepted" until its job_started line
+  // is written, and counting by that state started them all (the derived
+  // ceiling test that timed out on a Linux runner ran two recipes at once).
+  const S = sandbox();
+  const w = heldWorker();
+  const { svc } = service(S, { workers: 4, perRequesterRunning: 2, minFreeMb: 1e12, runWorker: w.runWorker });
+  await svc.start();
+  const mine = await Promise.all([1, 2, 3].map(() => svc.submit("a1", { kind: "command", command: "hold", inputs: [] })));
+  assert.ok(mine.every((r) => r.ok));
+  svc.o.minFreeMb = 1;
+  await svc.pump();
+  await eventually(() => (w.most.get("a1") ?? 0) >= 2, "a1's first two run");
+  await new Promise((res) => setTimeout(res, 300));
+  assert.equal(w.most.get("a1"), 2, "no more than its own limit at once");
+  w.release();
+  for (const r of mine) await until(svc, r.ok ? r.job.id : "");
+  await svc.stop("over");
+  const S2 = sandbox();
+  const w2 = heldWorker();
+  const two = service(S2, { workers: 4, minFreeMb: 1e12, runWorker: w2.runWorker });
+  await two.svc.start();
+  const derived = await Promise.all([1, 2].map(() => two.svc.submit(DERIVED, { kind: "command", command: "hold", inputs: [] })));
+  two.svc.o.minFreeMb = 1;
+  await two.svc.pump();
+  await eventually(() => (w2.most.get(DERIVED) ?? 0) >= 1, "the derived lane's first runs");
+  await new Promise((res) => setTimeout(res, 300));
+  assert.equal(w2.most.get(DERIVED), 1, "the derived lane runs one job at a time");
+  w2.release();
+  for (const r of derived) await until(two.svc, r.ok ? r.job.id : "");
+  await two.svc.stop("over");
+});
+
+test("a long job on every general worker does not delay a short one; the worker kept for short jobs is never a longer job's, the kickoff's or the derived catalogue's", async () => {
+  const S = sandbox();
+  const w = heldWorker();
+  const { svc } = service(S, { workers: 3, runWorker: w.runWorker });
+  await svc.start();
+  assert.equal(svc.shortSlots(), 1, "three workers: one kept for short jobs");
+  const long1 = await svc.submit("a1", { kind: "command", command: "hold 1", inputs: [] });
+  const long2 = await svc.submit("a2", { kind: "command", command: "hold 2", inputs: [] });
+  assert.ok(long1.ok && long2.ok);
+  await until(svc, long1.job.id, ["running"]);
+  await until(svc, long2.job.id, ["running"]);
+  // Every general worker is taken: a longer job, the kickoff's (whatever its
+  // limit) and the derived catalogue's wait, the kept worker idle.
+  const long3 = await svc.submit("a3", { kind: "command", command: "hold 3", inputs: [], timeout_seconds: SHORT_JOB_SECONDS + 1 });
+  const kickoff = await svc.submit("system", { kind: "command", command: "hold k", inputs: [], timeout_seconds: 60 });
+  const derived = await svc.submit(DERIVED, { kind: "command", command: "hold d", inputs: [], timeout_seconds: 60 });
+  assert.ok(long3.ok && kickoff.ok && derived.ok);
+  await new Promise((res) => setTimeout(res, 300));
+  for (const r of [long3, kickoff, derived]) assert.equal(svc.jobs.get(r.job.id)!.state, "accepted", `${r.job.id} waits`);
+  // a1's quick look runs now, beside its own long parse.
+  const quick = await svc.submit("a1", { kind: "command", command: "echo quick", inputs: [], timeout_seconds: SHORT_JOB_SECONDS });
+  assert.ok(quick.ok);
+  const q = await until(svc, quick.job.id);
+  assert.equal(q.status, "ok");
+  assert.equal(svc.jobs.get(long1.job.id)!.state, "running", "done while the long ones still run");
+  assert.ok(w.scripts.some((t) => t.includes(`timeout --kill-after=10 ${SHORT_JOB_SECONDS} bash /job/command.sh`)), "a short job is killed at its own limit, so the kept worker is not held longer");
+  w.release();
+  for (const r of [long1, long2, long3, kickoff, derived]) await until(svc, r.job.id);
+  const lane = new Map(verifyJournalText(readFileSync(storePaths(S).journal, "utf8")).lines.filter((l) => l.type === "job_started").map((l) => [String(l.job), l.lane]));
+  assert.deepEqual([long1, long2, long3, kickoff, derived, quick].map((r) => lane.get(r.job.id)), ["general", "general", "general", "kickoff", "derived", "short"], "each job_started names its lane");
+  await svc.stop("over");
+  // Two workers: none is kept, and two long jobs run at once.
+  const S2 = sandbox();
+  const w2 = heldWorker();
+  const two = service(S2, { workers: 2, runWorker: w2.runWorker });
+  await two.svc.start();
+  assert.equal(two.svc.shortSlots(), 0);
+  const a = await two.svc.submit("a1", { kind: "command", command: "hold a", inputs: [] });
+  const b = await two.svc.submit("a2", { kind: "command", command: "hold b", inputs: [] });
+  assert.ok(a.ok && b.ok);
+  await until(two.svc, a.job.id, ["running"]);
+  await until(two.svc, b.job.id, ["running"]);
+  w2.release();
+  for (const r of [a, b]) await until(two.svc, r.job.id);
+  await two.svc.stop("over");
+});
+
+test("without room on the host a job waits, said once on the journal, and starts when there is room, its wait on job_started", async () => {
+  const S = sandbox();
+  let room = false;
+  const asked: number[] = [];
+  const { svc } = service(S, {
+    workerMemoryMib: 2048,
+    hostRoom: async (mib) => {
+      asked.push(mib);
+      return { ok: room, available_mib: room ? 65536 : 1024, needed_mib: mib + 4096 };
+    },
+  });
+  await svc.start();
+  const r = await svc.submit("a1", { kind: "command", command: "true", inputs: [] });
+  assert.ok(r.ok);
+  await eventually(() => asked.length >= 2, "asked again");
+  assert.equal(svc.jobs.get(r.job.id)!.state, "accepted", "it waits rather than fail");
+  const journal = () => verifyJournalText(readFileSync(storePaths(S).journal, "utf8")).lines;
+  const waits = journal().filter((l) => l.type === "job_waits_for_host");
+  assert.equal(waits.length, 1, "said once, however often it is asked");
+  assert.deepEqual([waits[0].job, waits[0].available_mib, waits[0].needed_mib, waits[0].worker_memory_mib], [r.job.id, 1024, 6144, 2048]);
+  room = true;
+  assert.equal((await until(svc, r.job.id)).status, "ok");
+  const started = journal().find((l) => l.type === "job_started" && l.job === r.job.id)!;
+  assert.ok(Number(started.host_wait_ms) > 0, `the wait is on its start: ${JSON.stringify(started)}`);
+  await svc.stop("over");
 });
 
 /** Start the service in a child process that dies at `step`, then recover in this one. */

@@ -123,7 +123,8 @@ what was deferred until the first CTF round is listed at the end.
   agent that produced it.
 - Worker VMs cost a boot per job: about half a second on the Mac with the
   full image, plus 0.2 s for the process that makes it. They count against
-  the host's capacity with the seats (`--workers`, default 2).
+  the host's capacity with the seats (`--workers`, default 2; more on a
+  large host, below).
 - A host run and `--no-jobs` keep the previous behaviour: the kickoff builds
   the catalogue before the agents start, with the same recipes.
 - APFS refuses a name that is not UTF-8: on a Mac, a worker cannot write
@@ -169,9 +170,55 @@ After the review:
 - **A dedicated catalog agent**: not built. `catalog_request` was used 1,
   1, 0 and 0 times, and no experimental recipe was written. A
   harness-appointed agent would also be a role the harness assigns.
-- **A short-job lane**: after the four-worker default is measured, and only
-  with job_run text asking for a declared short timeout. Short jobs queued
-  up to p95 189 s behind long ones on the confirmation run.
+
+## Lanes, room on the host, and the image a job that names none runs in (2026-09-27)
+
+In the three runs after the basic flow (s306463, s2a59b2, s6895a8; three
+runs at once on the 128 GiB Mac, the kickoff fitting 3, 2 and 2 workers),
+the queue waited p95 16, 106 and 85 s (max 180, 143, 156 s), though 231 of
+236, 68 of 69 and 85 of 89 jobs ran in two minutes or less; a worker boots
+in about half a second. Replayed over those arrivals and run times, 4
+workers put the p95 wait at 0-2 s and 6 at 0 s.
+
+- **More workers where they fit**: unset, 6 on a host with 128 GiB or
+  more, 4 with 64 GiB or more, 2 otherwise; the kickoff's capacity check
+  still lowers the default to what fits beside the seats.
+- **A lane for short jobs**: from 3 workers one is kept for an agent's job
+  that declares `timeout_seconds` of 120 or less, and it is stopped there,
+  so a long job cannot hold that worker by claiming otherwise. Such a job
+  may take any free worker; an agent's other jobs and the kickoff's recipes
+  take the rest; the derived catalogue stays the lowest lane. An agent's
+  limit of running jobs counts each lane apart, so its quick look does not
+  wait behind its own long parse. With 2 workers none is kept: replayed,
+  keeping one put the longer jobs' p95 wait at 354-1951 s against
+  71-210 s. job_run and SWARM.md ask for the short timeout; only 31 of 236,
+  8 of 69 and 8 of 89 jobs declared one, so the lane is only as good as
+  that text. `job_started` names the lane, so the wait is measured per lane
+  (target: p95 under 10 s).
+- **Room on the host**: a worker starts only while the host keeps 15% of
+  its memory free beside it (Linux's MemAvailable; macOS's memory-status
+  level), asked before each start, since runs share a host and the kickoff
+  fitted its workers once. Until then the job waits, said once on the
+  journal (`job_waits_for_host`), and its `job_started` carries the wait.
+- **The queue counts what it handed a worker**: an agent's limit and the
+  derived lane's one-at-a-time counted jobs whose `job_started` line was
+  written, and a job picked a moment earlier was not one yet, so one pass
+  of the queue could start them all. The derived catalogue then ran two
+  recipes at once past a ceiling of one generation (a test that timed out
+  on a Linux runner). The count is now of the jobs handed a worker, and one
+  pass of the queue runs at a time.
+- **A command that names no profile** (61 of 236, 16 of 71, 12 of 90 in
+  those runs, all in the image that holds every pack) runs in the smallest
+  job image whose own record holds every program it runs: the first word of
+  each simple command, and every word naming a program some image holds and
+  another does not (a program run through timeout, xargs or `bash -c`).
+  Whenever that is not sure — a heredoc, a quoted script, an import, a
+  program named by an expansion or a path, a file of the agents' scratch —
+  the job keeps the default image; `job_started` says which image and why.
+  The records are the images' own: install.py now writes `on_path`, every
+  program on the image's PATH, beside `binaries`, the packs' programs. An
+  image built before lists only the packs' programs, so a command that
+  runs a shell utility keeps the default until the images are rebuilt.
 
 ## The agents boot the base; the programs are in the job images (2026-09-26)
 

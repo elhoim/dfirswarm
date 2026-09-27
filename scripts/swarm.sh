@@ -432,14 +432,19 @@ Isolation
                       host's memory are refused, more than 60% warned about.
   --vm-disk MIB       Root disk per agent VM in MiB (default 8192): where a VM's own
                       installs and /tmp live.
-  --workers N         Tool-job worker VMs that may run at once (default 2, 4 on a host
-                      with 64 GiB or more; at most
+  --workers N         Tool-job worker VMs that may run at once (default 2; 4 on a
+                      host with 64 GiB or more, 6 with 128 GiB or more; at most
                       16): each job (job_run, catalog_request, the kickoff's
                       recipes) runs in a VM of its own, made for it and removed
                       after, and its outputs are sealed into store/. Counted with
                       the seats against this host's capacity: unset, as many as
                       fit up to that default (none fitting: no job service,
-                      said); given, kept or refused.
+                      said); given, kept or refused. From 3, one is kept for
+                      short jobs (an agent's timeout_seconds of 120 or less), so
+                      a quick look never waits behind long parses. Each worker
+                      starts only while the host keeps 15% of its memory free
+                      beside it (several runs may share it); until then its job
+                      waits, on the journal.
   --worker-cpus N     vCPUs per worker VM (default 2).
   --worker-memory MIB Memory per worker VM in MiB (default 4096 on a host with 64 GiB
                       or more, 2048 otherwise).
@@ -2647,6 +2652,10 @@ if caps:
                 "## Tool jobs\n\n"
                 f"`job_run` runs work in a worker VM of this run's image: up to {jb.get('workers')} at a time, "
                 f"{jb.get('cpus')} vCPU and {jb.get('memoryMib')} MiB each (stream a large file; do not read it whole). "
+                + ("One of them is kept for short jobs: give a job that needs two minutes or less `timeout_seconds` of 120 or "
+                   "less and it does not wait behind long parses (it is stopped at that limit; leave a long parse at its default). "
+                   if int(jb.get('workers') or 0) >= 3 else "")
+                +
                 "A worker sees what you see, read-only — inputs/, store/, catalog/, tools/, all of work/ and tool-output/ — "
                 "and writes only its own $OUT, sealed into store/jobs/<id>/out/. It has the image's programs "
                 "(/etc/dfirswarm/tools.md) and nothing installed in an agent's own VM; with network=allowlist it reaches "
@@ -2669,8 +2678,11 @@ if caps:
                     "Your own VM is the base image: a shell, Python and the tool library, and none of the packs' forensic programs. "
                     "They are in the job images below, each one a worker VM of its own: run the work there with "
                     "`job_run profile=<name> command=...`, and read which programs an image has in images/<name>/tools.md. "
-                    "A recipe, or a pack tool given to `job_run tool=`, runs in its own pack's image by itself; a job that names "
-                    f"no profile runs in {jb.get('image') or 'the image that holds every pack'}. A pack tool you call directly "
+                    "A recipe, or a pack tool given to `job_run tool=`, runs in its own pack's image by itself. A command that names "
+                    "no profile runs in the smallest of them whose own record (images/<name>/image.json) holds every program it "
+                    f"runs, and otherwise, or whenever that is not sure (a heredoc, a script of yours, an import), in "
+                    f"{jb.get('image') or 'the image that holds every pack'}; job_status says which, and why. Name the profile when "
+                    "you know it. A pack tool you call directly "
                     "runs in your own VM when it has what the tool needs, and otherwise again as a job in its pack's image, by "
                     "itself: its answer then names the job (`ran_as_job`), and an output path you gave under work/<your id>/ "
                     "is that job's $OUT, sealed into store/jobs/<id>/out/. What a job writes is sealed in the store whichever "
@@ -3426,13 +3438,17 @@ cmd_start() {
     [[ "$worker_cpus" =~ ^([1-9]|1[0-6])$ ]] || { echo "BLOCKER: --worker-cpus must be 1..16 (got $worker_cpus)." >&2; exit 2; }
     # Unset: 4096 MiB on a host with 64 GiB or more, 2048 otherwise; and
     # there, 4 workers rather than 2 (long jobs held 3 on Ali Hadi #10, and
-    # short ones queued behind them). The capacity check lowers either.
+    # short ones queued behind them), 6 with 128 GiB or more: replayed over
+    # the three latest runs' jobs, 4 workers put the queue's p95 wait at
+    # 0-2 s and 6 at 0 s, where 2-3 gave 6-199 s. From 3 the job service keeps
+    # one for short jobs. The capacity check lowers either.
     local host_mib_w
     host_mib_w="$(node -e 'console.log(Math.floor(require("os").totalmem() / 1048576))' 2>/dev/null || echo 16384)"
     if [[ -z "$worker_memory" ]]; then
       if [[ "$host_mib_w" -ge 65536 ]]; then worker_memory=4096; else worker_memory=2048; fi
     fi
     [[ "$workers_given" -eq 0 && "$host_mib_w" -ge 65536 ]] && workers=4
+    [[ "$workers_given" -eq 0 && "$host_mib_w" -ge 131072 ]] && workers=6
     [[ "$worker_memory" =~ ^[0-9]+$ && "$worker_memory" -ge 512 ]] || { echo "BLOCKER: --worker-memory must be at least 512 (MiB; got $worker_memory)." >&2; exit 2; }
     # Unset: 2048 MiB, or 1024 on a host with less than 8 GiB (a small
     # server that also serves something else, ADR 0009).
@@ -7279,7 +7295,7 @@ launch_vm_agents() {
       --argjson derived "$([[ "$derived_catalog" -eq 1 ]] && echo true || echo false)" \
       --argjson images "$job_images_json" --argjson pack_profiles "$pack_profiles_json" \
       '{image: $image, workers: $workers, cpus: $cpus, memoryMib: $mem, allowHosts: ($hosts | split(",") | map(select(length > 0))), openNet: $open, packDirs: ($packs | split("\n") | map(select(length > 0)))} + {derived: $derived} + (if ($images | length) > 0 then {images: $images, packProfiles: $pack_profiles} else {} end)')"
-    echo "Jobs:         up to $workers worker VM(s) at a time, ${worker_cpus} vCPU and ${worker_memory} MiB each, no network unless a job asks for the run's allowlist"
+    echo "Jobs:         up to $workers worker VM(s) at a time$([[ "$workers" -ge 3 ]] && printf ', one kept for short jobs'), ${worker_cpus} vCPU and ${worker_memory} MiB each, no network unless a job asks for the run's allowlist"
     if [[ "$(jq 'length' <<<"$job_images_json")" -gt 0 ]]; then
       echo "              job images: $(jq -r 'to_entries | map("\(.key) \(.value)") | join("; ")' <<<"$job_images_json"); a job names one with profile=, a pack tool or a recipe runs in its pack's, and one with none in ${job_image}"
     fi
