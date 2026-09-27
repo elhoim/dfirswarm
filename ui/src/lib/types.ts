@@ -55,6 +55,8 @@ export type SwarmRow = {
   tools_forged: number;
   /** The evidence directory the run was given, or null: what a clean room is about. */
   inputs_source: string | null;
+  /** Every set's directory (one for a run of one set), or null. Absent from an older server. */
+  inputs_sources?: string[] | null;
   /** Where the agents ran; a record from before isolation was recorded is a host run. Absent from an older server. */
   isolation?: "microvm" | "host";
   /** The last custody verdict, or null before any stop or hub finish took one. */
@@ -426,7 +428,7 @@ export type SwarmView = {
     tool_forging?: boolean;
     self_compact?: SelfCompactOptions;
     inbox_page_chars?: number;
-    inputs?: { source: string; files: number; bytes: number; enforce: string; guard: string } | null;
+    inputs?: { source: string; files: number; bytes: number; enforce: string; guard: string; sets?: Array<{ name: string; source: string; files: number; bytes: number }> } | null;
     isolation?: { mode?: string; image?: string; image_digest?: string | null; cpus?: number; memory_mib?: number; disk_mib?: number; snapshot?: boolean; oauth_allowed?: boolean; snapshot_dir?: string | null };
     provenance?: RunProvenance;
     host_clock?: HostClock;
@@ -618,9 +620,14 @@ export type InputFile = {
   link_b64?: string;
 };
 
+/** One of several evidence sets, at inputs/<name>/. */
+export type InputsSet = { name: string; path: string; source: string; files: number; bytes: number };
+
 /** The read-only inputs a swarm was given, with what the trace says about them. */
 export type InputsView = {
   source: string;
+  /** Several sets, each at inputs/<name>/; null (or absent, from an older server) for one. */
+  sets?: InputsSet[] | null;
   /** copy, bind (in place) or image; null on an older manifest. */
   held?: string | null;
   /** In a VM run the evidence is a read-only, no-exec mount in every VM. */
