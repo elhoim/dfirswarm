@@ -27,9 +27,37 @@ import { existsSync, statfsSync } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { Journal, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, type JournalLine } from "./evidence-store.ts";
+import { chooseImage, readImageRecords, type ImageChoice, type ImageRecord } from "./image-choice.ts";
 import type { Mount, WorkerSpec } from "./vm.ts";
 
 export type JobKind = "tool" | "command" | "recipe" | "detect" | "import";
+
+/**
+ * A job an agent declares short: its own limit is at most this many seconds,
+ * and it is killed there (timeout(1) in its worker, the VM's own limit two
+ * minutes later), so the worker kept for short jobs cannot be held by a long
+ * job that claimed otherwise.
+ */
+export const SHORT_JOB_SECONDS = 120;
+
+/**
+ * From this many workers one is kept for short jobs. With two, keeping one
+ * halves what the longer ones have: replayed over the arrivals and run times
+ * of the three latest runs (s306463, s2a59b2, s6895a8), two workers with one
+ * kept put the longer jobs' p95 wait at 354-1951 s, against 71-210 s with
+ * none kept.
+ */
+export const SHORT_LANE_FROM_WORKERS = 3;
+
+/**
+ * The lane a job waits in. An agent's short job may take any free worker,
+ * the one kept for short jobs too, so a quick look never waits behind long
+ * parses; an agent's other jobs and the kickoff's recipes take the rest; the
+ * derived catalogue's work is the lowest lane (one at a time, only when no
+ * other job waits, within its budget). Neither the kickoff's recipes nor the
+ * derived catalogue ever take the worker kept for short jobs.
+ */
+export type Lane = "short" | "general" | "kickoff" | "derived";
 
 /** An import hashes its source before and after the copy up to this size; above it, size and mtime only. */
 export const IMPORT_HASH_BOUND = 2 * 1024 * 1024 * 1024;
@@ -144,6 +172,8 @@ export type JobRecord = {
   /** A recipe job's identity (recipe, its sha256, the image, the target): the same key is the same result. */
   dedup_key?: string;
   cancel_requested?: string;
+  lane?: Lane;
+  image_choice?: ImageChoice;
 };
 
 /**
@@ -204,6 +234,13 @@ export type JobServiceOptions = {
   derived?: boolean;
   derivedLimits?: Partial<DerivedLimits>;
   runWorker: (spec: WorkerSpec) => Promise<{ code: number | null; digest?: string; error?: string; fenced: boolean; fence_error?: string; boot_retry?: string; create_ms?: number }>;
+  /**
+   * Whether this host has room now for one more worker of this much memory:
+   * asked before each worker starts, since several runs may share a host and
+   * the kickoff fitted this run's workers only once. No room, the job waits
+   * (said on the journal), and is asked again. Absent, there is always room.
+   */
+  hostRoom?: (memoryMib: number) => Promise<{ ok: boolean; available_mib: number | null; needed_mib: number }>;
   destroyWorker: (name: string) => Promise<{ ok: boolean; error?: string }>;
   notify: (to: string, body: string) => Promise<void>;
   identity: (agent: string) => Promise<{ name?: string; doing?: string }>;
@@ -248,8 +285,15 @@ export class JobService {
   /** Agents whose request was answered with another's job still under way: told too, once it is done (job → agent → end of its wait). */
   private readonly alsoTell = new Map<string, Map<string, number>>();
   private readonly waitingForSpace = new Set<string>();
+  /** Jobs waiting for room on the host, and since when. */
+  private readonly waitingForHost = new Map<string, number>();
   private rotation = 0;
   private stopping = false;
+  /** One pump at a time: a call while one runs asks it to go round again. */
+  private pumping = false;
+  private pumpAgain = false;
+  /** The run's job images as their own records have them, read once. */
+  private imageRecords: Promise<ImageRecord[]> | null = null;
   /** Jobs in a row that ran in no worker, and whether the agents were told. */
   private unrun = 0;
   private degraded = false;
@@ -322,7 +366,7 @@ export class JobService {
           this.jobs.set(id, { id, attempt: 1, spec: l.spec as JobSpec, requester: l.requester as Requester, state: "accepted", accepted_at: l.at, ...(l.dedup_key ? { dedup_key: String(l.dedup_key) } : {}) });
           break;
         case "job_started":
-          if (j) Object.assign(j, { state: "running", attempt: Number(l.attempt), started_at: l.at, worker: l.worker, image: l.image, tool_sha256: l.tool_sha256, accessible: l.accessible, network: l.network, ...(l.cpus ? { worker_size: `${l.cpus} vCPU, ${l.memory_mib} MiB` } : {}) });
+          if (j) Object.assign(j, { state: "running", attempt: Number(l.attempt), started_at: l.at, worker: l.worker, image: l.image, tool_sha256: l.tool_sha256, accessible: l.accessible, network: l.network, ...(l.cpus ? { worker_size: `${l.cpus} vCPU, ${l.memory_mib} MiB` } : {}), ...(l.lane ? { lane: l.lane as Lane } : {}), ...(l.image_choice ? { image_choice: l.image_choice as ImageChoice } : {}) });
           break;
         case "job_finished":
           if (j) Object.assign(j, { state: "finished", exit: l.exit as number | null, finished_at: l.at, status: l.status, reason: l.reason });
@@ -600,26 +644,45 @@ export class JobService {
   }
 
   /**
-   * The image a job runs in: the profile it names; a pack tool's or a
-   * recipe's own pack's profile (a recipe may name one in recipe.json); else
-   * the run's worker image. Nothing here knows what a profile holds.
+   * The image a job runs in, and why: the profile it names; a pack tool's or
+   * a recipe's own pack's profile (a recipe may name one in recipe.json); for
+   * a command or an import that names none, the smallest job image whose own
+   * record holds every program it runs (scripts/image-choice.ts); else the
+   * run's worker image. Nothing here knows what a profile holds.
    */
-  async imageFor(spec: JobSpec): Promise<{ profile: string | null; ref: string }> {
+  async imageFor(spec: JobSpec): Promise<{ profile: string | null; ref: string; choice: ImageChoice }> {
     const images = this.o.images ?? {};
     const byProfile = (p: string | undefined | null) => (p && images[p] ? { profile: p, ref: images[p] } : null);
-    if (spec.profile) return byProfile(spec.profile) ?? { profile: null, ref: this.o.image };
+    const dflt = { profile: null, ref: this.o.image };
+    if (spec.profile) {
+      const hit = byProfile(spec.profile);
+      return hit ? { ...hit, choice: { how: "named", why: `the job named the profile ${spec.profile}` } } : { profile: null, ref: this.o.image, choice: { how: "default", why: "the run declared no job images" } };
+    }
     if (spec.kind === "tool" && spec.tool) {
       const man = await readFile(join(this.S, "tools", spec.tool, "manifest.json"), "utf8").then((t) => JSON.parse(t) as { pack?: string; profile?: string }).catch(() => null);
-      const hit = byProfile(man?.profile) ?? byProfile(man?.pack ? this.o.packProfiles?.[man.pack] : null);
-      if (hit) return hit;
+      const own = byProfile(man?.profile);
+      if (own) return { ...own, choice: { how: "pack", why: `the tool's manifest names the profile ${own.profile}` } };
+      const hit = byProfile(man?.pack ? this.o.packProfiles?.[man.pack] : null);
+      if (hit) return { ...hit, choice: { how: "pack", why: `the tool's pack ${man?.pack} runs in ${hit.profile}` } };
     }
     if (spec.kind === "recipe" && spec.recipe && !spec.recipe.startsWith("tool:")) {
       const r = await this.recipe(spec.recipe).catch(() => null);
       const declared = r ? await readFile(join(r.dir, "recipe.json"), "utf8").then((t) => (JSON.parse(t) as { profile?: string }).profile).catch(() => undefined) : undefined;
-      const hit = byProfile(declared) ?? byProfile(this.o.packProfiles?.[spec.recipe.split("/")[0]]);
-      if (hit) return hit;
+      const own = byProfile(declared);
+      if (own) return { ...own, choice: { how: "pack", why: `the recipe names the profile ${own.profile}` } };
+      const pack = spec.recipe.split("/")[0];
+      const hit = byProfile(this.o.packProfiles?.[pack]);
+      if (hit) return { ...hit, choice: { how: "pack", why: `the recipe's pack ${pack} runs in ${hit.profile}` } };
     }
-    return { profile: null, ref: this.o.image };
+    if (!Object.keys(images).length) return { ...dflt, choice: { how: "default", why: "the run declared no job images" } };
+    // What the job runs, as text: a command's own, an import's copy script.
+    const text = spec.kind === "command" ? (spec.command ?? "") : spec.kind === "import" ? "python3 /job/import.py" : null;
+    if (text === null) {
+      const why = spec.kind === "detect" ? "a detect pass asks the recipes of every pack" : spec.kind === "tool" ? "the tool's pack, if it has one, has no job image of its own" : spec.recipe?.startsWith("tool:") ? "a forged tool's recipe, of no pack" : "the recipe's pack has no job image of its own";
+      return { ...dflt, choice: { how: "default", why } };
+    }
+    this.imageRecords ??= readImageRecords(this.S, images);
+    return chooseImage(text, await this.imageRecords, dflt);
   }
 
   private async recipeKey(spec: JobSpec): Promise<string> {
@@ -705,15 +768,64 @@ export class JobService {
 
   // --- the queue ----------------------------------------------------------------------------
 
-  private runningFor(agent: string): number {
-    return [...this.jobs.values()].filter((j) => j.state === "running" && j.requester.agent === agent).length;
+  /** The lane a job waits in (see Lane). */
+  laneOf(job: JobRecord): Lane {
+    if (job.requester.agent === DERIVED) return "derived";
+    if (job.requester.agent === "system") return "kickoff";
+    return job.spec.timeout_seconds <= SHORT_JOB_SECONDS ? "short" : "general";
   }
 
-  /** Start what may start: the run's worker limit, each agent's own limit, taken in turn, and free disk. */
+  /** Workers kept for short jobs: one, from SHORT_LANE_FROM_WORKERS workers. */
+  shortSlots(): number {
+    return this.o.workers >= SHORT_LANE_FROM_WORKERS ? 1 : 0;
+  }
+
+  /**
+   * Whether a queued job may take a free worker now. Counted over the jobs
+   * the queue has handed a worker and that are not done (this.running), not
+   * over those whose job_started line is written: a job picked a moment ago
+   * is still "accepted" until then, and counting by state let the derived
+   * lane run two recipes at once past its ceiling (tests/derived-catalog's
+   * ceiling test, which timed out on a Linux runner) and let one agent take
+   * more workers than its own limit.
+   */
+  private startable(job: JobRecord): boolean {
+    const lane = this.laneOf(job);
+    const running = [...this.running.keys()].map((id) => this.jobs.get(id)).filter((j): j is JobRecord => Boolean(j));
+    const short = running.filter((j) => this.laneOf(j) === "short").length;
+    // The worker kept for short jobs is never a longer one's, even when idle.
+    if (lane !== "short" && running.length - short >= this.o.workers - this.shortSlots()) return false;
+    if (lane === "derived") return !running.some((j) => this.laneOf(j) === "derived");
+    if (lane === "kickoff") return true;
+    // Each agent so many at once in each lane: its own long parses do not hold back its quick look.
+    return running.filter((j) => j.requester.agent === job.requester.agent && (this.laneOf(j) === "short") === (lane === "short")).length < this.o.perRequesterRunning;
+  }
+
+  /**
+   * Start what may start: the run's worker limit, the worker kept for short
+   * jobs, each agent's own limit, agents taken in turn, free disk, and room
+   * on the host. One pump at a time: its checks and its start are one step.
+   */
   async pump(): Promise<void> {
     if (this.stopping) return;
+    if (this.pumping) {
+      this.pumpAgain = true;
+      return;
+    }
+    this.pumping = true;
+    try {
+      do {
+        this.pumpAgain = false;
+        await this.pumpOnce();
+      } while (this.pumpAgain && !this.stopping);
+    } finally {
+      this.pumping = false;
+    }
+  }
+
+  private async pumpOnce(): Promise<void> {
     await this.maybeDrainDerived();
-    while (this.running.size < this.o.workers && this.queue.length) {
+    while (!this.stopping && this.running.size < this.o.workers && this.queue.length) {
       const requesters = [...new Set(this.queue.map((id) => this.jobs.get(id)?.requester.agent ?? ""))];
       // The derived catalogue's work is the lowest lane: one at a time,
       // started only when no other job waits, and only within its budget.
@@ -721,9 +833,15 @@ export class JobService {
       let picked: string | undefined;
       for (let k = 0; k < requesters.length && !picked; k += 1) {
         const agent = requesters[(this.rotation + k) % requesters.length];
-        if (agent === DERIVED && (othersWaiting || this.runningFor(DERIVED) >= 1 || !(await this.derivedMayRun()))) continue;
-        if (agent !== "system" && agent !== DERIVED && this.runningFor(agent) >= this.o.perRequesterRunning) continue;
-        picked = this.queue.find((id) => this.jobs.get(id)?.requester.agent === agent);
+        // Its oldest job that may start: a short one is not held behind its own long one.
+        const next = this.queue.find((id) => {
+          const j = this.jobs.get(id);
+          return j !== undefined && j.requester.agent === agent && this.startable(j);
+        });
+        if (!next) continue;
+        if (agent === DERIVED && (othersWaiting || !(await this.derivedMayRun()))) continue;
+        // A cancel while the budget was read takes it out of the queue.
+        if (this.queue.includes(next)) picked = next;
       }
       if (!picked) return;
       this.rotation += 1;
@@ -736,6 +854,18 @@ export class JobService {
         return;
       }
       this.waitingForSpace.delete(picked);
+      if (this.o.hostRoom) {
+        const room = await this.o.hostRoom(this.o.workerMemoryMib).catch(() => null);
+        if (room && !room.ok) {
+          if (!this.waitingForHost.has(picked)) {
+            this.waitingForHost.set(picked, Date.now());
+            this.log(`${picked} waits: ${room.available_mib ?? "?"} MiB available on this host, ${room.needed_mib} MiB needed to start a worker beside what runs`);
+            await this.journal.append({ type: "job_waits_for_host", job: picked, available_mib: room.available_mib, needed_mib: room.needed_mib, worker_memory_mib: this.o.workerMemoryMib });
+          }
+          return;
+        }
+        if (!this.queue.includes(picked)) continue;
+      }
       this.queue.splice(this.queue.indexOf(picked), 1);
       const job = this.jobs.get(picked)!;
       const p = this.execute(job).catch((err: Error) => this.log(`${job.id}: ${err.message}`)).finally(() => {
@@ -885,8 +1015,14 @@ export class JobService {
     const network = this.network(job);
     const worker = `dfs-${this.o.run}-job-${job.id}-${job.attempt}`;
     const netText = network.mode === "off" ? "none" : network.mode === "public" ? "every public host" : `the run's allowlist (${network.hosts.join(", ")})`;
-    await this.journal.append({ type: "job_started", job: job.id, attempt: job.attempt, worker, image: chosen.ref, ...(chosen.profile ? { profile: chosen.profile } : {}), ...(script.tool_sha256 ? { tool_sha256: script.tool_sha256 } : {}), declared: job.spec.inputs, accessible, observed: "unknown", network: netText, cpus: this.o.workerCpus, memory_mib: this.o.workerMemoryMib });
-    Object.assign(job, { state: "running", worker, worker_size: `${this.o.workerCpus} vCPU, ${this.o.workerMemoryMib} MiB`, started_at: new Date().toISOString(), image: chosen.ref, accessible, network: netText, ...(script.tool_sha256 ? { tool_sha256: script.tool_sha256 } : {}) });
+    // Which lane it took, how it came to its image, and how long it waited for room on the host.
+    const lane = this.laneOf(job);
+    const since = this.waitingForHost.get(job.id);
+    this.waitingForHost.delete(job.id);
+    const hostWait = since !== undefined ? { host_wait_ms: Date.now() - since } : {};
+    const imageChoice = Object.keys(this.o.images ?? {}).length ? { image_choice: chosen.choice } : {};
+    await this.journal.append({ type: "job_started", job: job.id, attempt: job.attempt, worker, image: chosen.ref, ...(chosen.profile ? { profile: chosen.profile } : {}), ...imageChoice, lane, ...hostWait, ...(script.tool_sha256 ? { tool_sha256: script.tool_sha256 } : {}), declared: job.spec.inputs, accessible, observed: "unknown", network: netText, cpus: this.o.workerCpus, memory_mib: this.o.workerMemoryMib });
+    Object.assign(job, { state: "running", worker, worker_size: `${this.o.workerCpus} vCPU, ${this.o.workerMemoryMib} MiB`, started_at: new Date().toISOString(), image: chosen.ref, lane, ...imageChoice, accessible, network: netText, ...(script.tool_sha256 ? { tool_sha256: script.tool_sha256 } : {}) });
     await this.project(job);
     maybeCrash("job:started");
     const started = Date.now();
@@ -1469,6 +1605,7 @@ export class JobService {
         await this.journal.append({ type: "job_cancel_requested", job: id, by: agent });
         if (job.state === "accepted") {
           this.queue.splice(this.queue.indexOf(id), 1);
+          this.waitingForHost.delete(id);
           await this.journal.append({ type: "job_cancelled", job: id, reason: `cancelled by ${agent} before it started` });
           Object.assign(job, { state: "cancelled", status: "cancelled" });
           await this.project(job);
@@ -1631,6 +1768,10 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number } =
     requester: job.requester.agent,
     ...(job.exit !== undefined ? { exit: job.exit } : {}),
     ...(job.worker_size ? { worker: job.worker_size } : {}),
+    // Where it ran and why, and the lane it took: a job that names no profile is placed by the images' records.
+    ...(job.image ? { image: job.image } : {}),
+    ...(job.image_choice ? { image_why: job.image_choice.why } : {}),
+    ...(job.lane ? { lane: job.lane } : {}),
     ...(job.generation ? { generation: job.generation, revision: job.revision } : {}),
   };
   if (job.state !== "committed" || !job.outputs) return view;

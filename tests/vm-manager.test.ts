@@ -16,6 +16,8 @@ import {
   bypassCovers,
   capacityVerdict,
   egressRules,
+  hostAvailableMib,
+  roomForWorker,
   gatewayPorts,
   imageFit,
   interceptPorts,
@@ -380,6 +382,16 @@ test("N VMs of a size are refused past 85% of the host's memory or four times it
   assert.match(warm.warnings.join("\n"), /10 vCPUs on 8 cores/);
   assert.match(capacityVerdict(30, 1, 1024 * 1024, host).blockers.join("\n"), /need 31457280 MiB, and this host has 16384 MiB/);
   assert.match(capacityVerdict(20, 2, 512, host).blockers.join("\n"), /40 vCPUs on 8 cores/);
+});
+
+test("a worker starts only while the host keeps 15% of its memory free beside it; memory that cannot be read does not hold jobs back", () => {
+  const host = { mem_mib: 131072, available_mib: 30000 };
+  assert.deepEqual(roomForWorker(4096, host), { ok: true, available_mib: 30000, needed_mib: 4096 + 19661 });
+  assert.equal(roomForWorker(4096, { ...host, available_mib: 23000 }).ok, false, "three runs on one Mac: no room for a fourth worker");
+  assert.equal(roomForWorker(4096, { ...host, available_mib: null }).ok, true);
+  // On this host, whatever it is, the figure is a number of MiB or unreadable.
+  const now = hostAvailableMib();
+  assert.ok(now === null || (Number.isInteger(now) && now >= 0), String(now));
 });
 
 test("a seat's probe tries each model host it needs: a local model through the gateway, a named host on its port", async () => {

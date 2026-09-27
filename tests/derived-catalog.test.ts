@@ -180,7 +180,14 @@ test("at the run's generations ceiling the lane stops, says so to all once, and 
   await svc.start();
   const r = await svc.submit("a1", { kind: "command", command: zipCommand([["a.zip", 900], ["b.zip", 500]]).replaceAll("'$OUT/", "os.environ['OUT']+'/"), inputs: [] });
   await until(svc, r.ok ? r.job.id : "");
-  await eventually(() => of(S, "generation_committed").length === 1, "one generation");
+  // Waited for as "at least one" and then counted: a second generation (the
+  // lane running two recipes at once past its ceiling, the race behind this
+  // test's timeout on a Linux runner, now tests/job-service.test.ts's) fails
+  // here by name, not as a wait that never ends. The wait is longer than the
+  // others: it spans a detect pass and a recipe after the job, and took up to
+  // 29 s with every core of a Mac busy twice over.
+  await eventually(() => of(S, "generation_committed").length >= 1, "one generation", 60000);
+  assert.equal(of(S, "generation_committed").length, 1, "one generation, not two");
   // The next object is asked about only once the lane may run again: it may not.
   const later = await svc.submit("a1", { kind: "command", command: tarCommand("later.tar"), inputs: [] });
   await until(svc, later.ok ? later.job.id : "");

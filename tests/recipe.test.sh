@@ -401,6 +401,10 @@ jq -e '.profile == "base" and (.dpkg_all | type == "object") and .pip == {"disse
   || fail "the base does not record its whole Debian list and its venv as pip lists it: $(cat "$rec")"
 jq -e '.redistributable == false and .nonredistributable == ["dissect.util"] and .pi == "0.87.0"' "$rec" >/dev/null \
   || fail "the base does not say it is not for redistribution, or which Pi it holds: $(cat "$rec")"
+# Every program on the image's PATH, the venv's first, by where it is: what
+# the job service matches a job's programs against.
+jq -e '(.on_path[0] | endswith("/rec/venv/bin/pip")) and (.on_path | all(startswith("/")))' "$rec" >/dev/null \
+  || fail "the base does not record every program on its PATH, the venv's first: $(jq -c '.on_path[:5]' "$rec")"
 grep -q '^Not cleared for redistribution: dissect.util' "$TMP/rec/etc/NOTICE" || fail "the base NOTICE does not say what holds it back"
 grep -q '^dissect.util 3.20  AGPL-3.0' "$TMP/rec/etc/NOTICE" || fail "the base NOTICE does not give the Python licences"
 grep -q '^left-pad 1.3.0  WTFPL' "$TMP/rec/etc/NOTICE" || fail "the base NOTICE does not give the npm licences, nested ones included"

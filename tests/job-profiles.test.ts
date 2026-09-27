@@ -2,10 +2,12 @@
  * The run's job images: the agents' own VMs boot the base, and the forensic
  * programs are in an image per profile. A job names one with `profile`; a
  * pack tool runs in its pack's, a recipe in its pack's (or the one its
- * recipe.json names); anything else in the image that holds every pack. The
- * images are declared on the journal before any job runs, and custody holds
- * each job to them. The worker is the local stand-in, which records the image
- * it was asked to boot.
+ * recipe.json names); a command that names none in the smallest image whose
+ * own record holds every program it runs, when that is sure; anything else in
+ * the image that holds every pack. The images are declared on the journal
+ * before any job runs, and custody holds each job to them. The worker is the
+ * local stand-in, which records the image it was asked to boot; the image
+ * records are fakes, with made-up program names.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -14,6 +16,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JobService, type JobRecord, type JobServiceOptions } from "../scripts/job-service.ts";
+import { chooseImage, commandShape, type ImageRecord } from "../scripts/image-choice.ts";
 import { checkStore, storePaths, verifyJournalText } from "../scripts/evidence-store.ts";
 import { localWorker } from "./job-service-worker.ts";
 import type { WorkerSpec } from "../scripts/vm.ts";
@@ -118,7 +121,110 @@ test("a recipe runs in its pack's image, or in the one its recipe.json names", a
   const S = sandbox();
   const { svc } = service(S);
   await svc.start();
-  assert.deepEqual(await svc.imageFor({ kind: "recipe", recipe: "computer-forensics-base/archive-members", inputs: [], timeout_seconds: 60, network: "off" }), { profile: "disk", ref: IMAGES.disk });
-  assert.deepEqual(await svc.imageFor({ kind: "detect", inputs: [], timeout_seconds: 60, network: "off" }), { profile: null, ref: IMAGES.full }, "a detect pass asks every recipe: the image that holds every pack");
+  assert.deepEqual(await svc.imageFor({ kind: "recipe", recipe: "computer-forensics-base/archive-members", inputs: [], timeout_seconds: 60, network: "off" }), { profile: "disk", ref: IMAGES.disk, choice: { how: "pack", why: "the recipe's pack computer-forensics-base runs in disk" } });
+  assert.deepEqual(await svc.imageFor({ kind: "detect", inputs: [], timeout_seconds: 60, network: "off" }), { profile: null, ref: IMAGES.full, choice: { how: "default", why: "a detect pass asks the recipes of every pack" } }, "a detect pass asks every recipe: the image that holds every pack");
+  await svc.stop("over");
+});
+
+/** A job image's record as install.py writes it: its packs, its packs' programs, every program on its PATH. */
+function record(S: string, profile: string, packs: string[], binaries: Record<string, string | null>, onPath?: string[]): void {
+  mkdirSync(join(S, "images", profile), { recursive: true });
+  writeFileSync(join(S, "images", profile, "image.json"), JSON.stringify({ profile, packs, binaries, ...(onPath ? { on_path: onPath } : {}) }));
+}
+
+const SHELL = ["/bin/bash", "/usr/bin/head", "/usr/bin/grep", "/usr/bin/sort", "/usr/bin/python3", "/usr/bin/timeout", "/usr/bin/find", "/usr/bin/xargs"];
+
+function fake(profile: string, packs: number, own: string[], ref = `img:${profile}`): ImageRecord {
+  const paths = [...SHELL, ...own.map((p) => `/usr/local/bin/${p}`)];
+  return { profile, ref, packs, programs: new Set(paths.map((p) => p.split("/").pop()!)), paths: new Set(paths), whole: true };
+}
+
+test("a command is read as bash reads it: the words that run, in pipelines, lists, substitutions and quotes, redirections aside", () => {
+  assert.deepEqual(commandShape(`FOO=1 partx -o 2048 "in puts/x" 2>/dev/null | head -n 5 && echo "$(lister -a)" > "$OUT/x"; for f in a b; do carver "$f"; done`), {
+    commands: [["FOO=1", "partx", "-o", "2048", "in puts/x"], ["head", "-n", "5"], ["lister", "-a"], ["echo", "$(lister -a)"], ["for", "f", "in", "a", "b"], ["do", "carver", "$f"], ["done"]],
+    hidden: null,
+  });
+  assert.equal(commandShape("paths=(\n'a b'\n'c')\nls \"${paths[@]}\"").hidden, null, "an array's elements are not commands");
+  assert.match(String(commandShape("python3 - <<'PY'\nprint(1)\nPY").hidden), /heredoc/);
+  assert.match(String(commandShape("tool <<< 'x'").hidden), /heredoc or here-string/);
+  assert.match(String(commandShape("bash -c 'a; b'").hidden), /quoted script/);
+});
+
+test("a command that names no profile runs in the smallest image whose record holds every program it runs, and in the default when that is not sure", () => {
+  const records = [fake("disk", 3, ["partx", "carver", "evtxparse"]), fake("linux", 2, ["extdump"]), fake("re", 4, ["lonely"]), fake("full", 12, ["partx", "carver", "evtxparse", "extdump", "memdump"])];
+  const dflt = { profile: null, ref: "img:full" };
+  const pick = (cmd: string) => chooseImage(cmd, records, dflt, new Set(["echo", "cd", "read", "export", "[", "true"]));
+  const smallest = pick("partx -o 2048 inputs/disk.raw | head -50");
+  assert.equal(smallest.profile, "disk");
+  assert.deepEqual(smallest.choice, { how: "programs", why: "the smallest job image that holds what the command runs: head and partx are in its record (also in full)", programs: ["head", "partx"] });
+  assert.equal(pick("grep -c x inputs/a.txt | sort").profile, "linux", "the fewest packs of those that hold it");
+  assert.equal(pick("cd \"$OUT\" && echo hi").profile, "linux", "bash's own builtins run anywhere");
+  // A program run through another is named, and moves the choice.
+  assert.equal(pick("timeout 60 carver -r inputs/x.raw > \"$OUT/c.txt\" 2>&1").profile, "disk");
+  assert.equal(pick("find inputs -name '*.evt' -exec evtxparse {} \\;").profile, "disk");
+  assert.equal(pick("bash -c 'carver inputs/x | head'").profile, "disk");
+  assert.equal(pick("exec carver inputs/x").profile, "disk", "a builtin that runs a program: that program");
+  assert.equal(pick("ls inputs | xargs -n1 extdump").ref, "img:full", "ls is on no record here: the default");
+  assert.equal(pick("find inputs | xargs -n1 extdump").profile, "linux");
+  assert.equal(pick("extdump a && memdump b").profile, "full", "only one image holds both");
+  const why = (cmd: string) => {
+    const c = pick(cmd);
+    assert.equal(c.ref, "img:full", cmd);
+    assert.equal(c.choice.how, "default", cmd);
+    return c.choice.why;
+  };
+  assert.match(why("python3 - <<'PY'\nimport os\nPY"), /^the run's default image: a heredoc/);
+  assert.match(why("python3 -c 'import libfoo'"), /imports a library/);
+  assert.match(why("python3 work/a1/parse.py inputs/x"), /agents' scratch/);
+  assert.match(why("cd work/a1 && python3 parse.py"), /agents' scratch/);
+  assert.match(why("./parse.sh inputs/x"), /relative path/);
+  assert.match(why("$TOOL inputs/x"), /named by an expansion/);
+  assert.match(why('eval "$CMD"'), /eval runs text as code/);
+  assert.match(why("nosuchprogram inputs/x | head"), /nosuchprogram is in no job image's record/);
+  assert.match(why("partx a | lonely b"), /no one job image's record holds lonely and partx/);
+  // Records written before they listed every program on PATH: a shell utility is on none.
+  const old = records.map((r) => ({ ...r, programs: new Set([...r.programs].filter((p) => !["bash", "head", "grep", "sort", "python3", "timeout", "find", "xargs"].includes(p))), whole: false }));
+  const c = chooseImage("partx a | head", old, dflt, new Set());
+  assert.equal(c.ref, "img:full");
+  assert.match(c.choice.why, /head is in no job image's record \(these records list only their packs' programs/);
+  assert.equal(chooseImage("partx -o 2048 inputs/x", old, dflt, new Set()).profile, "disk", "a pack's program alone is still found");
+  assert.equal(chooseImage("exec -a x mactime -b body", old, dflt, new Set(["exec"])).ref, "img:full", "a program run by a builtin, on no record: the default");
+  assert.match(chooseImage("partx", [], dflt).choice.why, /no job image's record could be read/);
+});
+
+test("a job that names no profile goes to the image the records choose, the choice and its reason on job_started", async () => {
+  const S = sandbox();
+  const shell = ["/usr/bin/head", "/usr/bin/python3"];
+  record(S, "disk", ["computer-forensics-base"], { partx: "/usr/bin/partx", gone: null }, [...shell, "/usr/bin/partx"]);
+  record(S, "memory", ["memory-forensics"], { memdump: "/usr/local/bin/memdump" }, [...shell, "/usr/local/bin/memdump"]);
+  record(S, "full", ["computer-forensics-base", "memory-forensics", "mobile-forensics"], { partx: "/usr/bin/partx", memdump: "/usr/local/bin/memdump" }, [...shell, "/usr/bin/partx", "/usr/local/bin/memdump"]);
+  const { svc, booted } = service(S);
+  await svc.start();
+  const runs = [
+    await svc.submit("a1", { kind: "command", command: "partx 2>/dev/null | head -5; true", inputs: [] }),
+    await svc.submit("a1", { kind: "command", command: "gone inputs/x || true", inputs: [] }),
+    await svc.submit("a1", { kind: "command", command: "python3 - <<'PY'\nprint(1)\nPY", inputs: [] }),
+  ];
+  assert.ok(runs.every((r) => r.ok));
+  for (const r of runs) await until(svc, r.ok ? r.job.id : "");
+  const started = new Map(journal(S).filter((l) => l.type === "job_started").map((l) => [String(l.job), l]));
+  const [smallest, missing, heredoc] = runs.map((r) => started.get(r.ok ? r.job.id : "")!);
+  assert.deepEqual([smallest.image, smallest.profile], [IMAGES.disk, "disk"], "the smallest image whose record holds partx and head (the mobile image has no record)");
+  assert.deepEqual(smallest.image_choice, { how: "programs", why: "the smallest job image that holds what the command runs: head and partx are in its record (also in full)", programs: ["head", "partx"] });
+  assert.equal(missing.image, IMAGES.full, "a program its pack names that the build left out is not held");
+  assert.match(String((missing.image_choice as { why: string }).why), /gone is in no job image's record/);
+  assert.equal(heredoc.image, IMAGES.full);
+  assert.equal((heredoc.image_choice as { how: string }).how, "default");
+  assert.ok(booted.includes(IMAGES.disk));
+  // Custody holds the chosen image to the declared ones.
+  assert.deepEqual((await checkStore(S))?.images?.undeclared, []);
+  // An import copies with python3: the smallest image that has it.
+  mkdirSync(join(S, "work", "a1"), { recursive: true });
+  writeFileSync(join(S, "work", "a1", "note.txt"), "n\n");
+  const imp = await svc.submit("a1", { kind: "import", source: "work/a1/note.txt" });
+  assert.ok(imp.ok);
+  await until(svc, imp.ok ? imp.job.id : "");
+  const impStarted = journal(S).find((l) => l.type === "job_started" && l.job === (imp.ok ? imp.job.id : ""))!;
+  assert.equal(impStarted.profile, "disk", "disk and memory both hold python3; disk sorts first by name");
   await svc.stop("over");
 });
