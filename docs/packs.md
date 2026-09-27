@@ -338,3 +338,20 @@ directories, so a tool that mounts something (a volume shadow copy, a
 memory filesystem) mounts it under `work/<agent id>/`, which is where
 `vss_stores` and `mem_fs` put theirs; the mount is that VM's alone, and what
 is derived from it counts once it is a file there.
+
+Run again as a job, a tool writes only the job's `$OUT`. Each path it was
+given in the agent's own directories (`work/<id>/`, `work/extracted/<id>/`,
+`work/quarantine/<id>/`, `tool-output/<id>/`, written relative or absolute)
+that held nothing when the agent called it is given as a place under `$OUT`
+(`work/<id>/x` as `$OUT/x`, `work/extracted/<id>/x` as `$OUT/extracted/x`,
+and so on), and the answer's `written_to` names where it is now,
+`store/jobs/<job>/out/…`; one that already held a file or a directory is what
+the tool reads, and the job reads it where it is. The harness knows the
+agent's directories, never a tool's parameters.
+
+A tool that writes where its caller says (an `output`, an `out_file`, an
+`out_dir`, a mount) resolves the path first, links included, and refuses a
+place outside the run directory, the run directory itself, or anything under
+`inputs/` (`resolve_output` in each such tool; in a job `$OUT` is inside the
+run directory). A file it then makes inside that directory is checked the
+same way, so a link left there cannot carry the write out of it.
