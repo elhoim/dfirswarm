@@ -214,10 +214,11 @@ export function checksOf(c: CustodyLike, errors: Record<string, string> = {}): C
   const reached = (part: string) => !c.not_reached.includes(part);
   const add = (name: string, status: CheckStatus, reason?: string, counts: { expected?: number; checked?: number } = {}) => out.push({ name, status, ...(reason ? { reason } : {}), ...counts });
   // The evidence.
-  const inputs = c.inputs as null | { unverifiable: string } | { files: number; unchanged: boolean; complete: boolean; changed: string[]; missing: string[]; added: string[]; skipped: string[]; unreadable: string[]; checked?: { files: number } };
+  const inputs = c.inputs as null | { unverifiable: string } | { files: number; unchanged: boolean; complete: boolean; changed: string[]; missing: string[]; added: string[]; skipped: string[]; unreadable: string[]; checked?: { files: number }; links?: { checked: number; moved: string[] } };
   if (!reached("the evidence")) add("evidence", "incomplete", "not reached before custody ended");
   else if (inputs === null) add("evidence", "not_applicable", "the run was given no evidence");
   else if ("unverifiable" in inputs) add("evidence", "failed", inputs.unverifiable);
+  else if (inputs.links?.moved.length) add("evidence", "failed", `read through a link that does not lead where the kickoff recorded: ${inputs.links.moved.join("; ")}`, { expected: inputs.files, checked: inputs.checked?.files });
   else if (inputs.changed.length || inputs.missing.length || inputs.added.length) add("evidence", "failed", `${inputs.changed.length} changed, ${inputs.missing.length} missing, ${inputs.added.length} added`, { expected: inputs.files, checked: inputs.checked?.files });
   else if (!inputs.complete) add("evidence", "incomplete", `${inputs.skipped.length} not re-read, ${inputs.unreadable.length} unreadable`, { expected: inputs.files, checked: inputs.checked?.files });
   else if (!inputs.unchanged) add("evidence", "failed", "the manifest does not match its anchor", { expected: inputs.files });

@@ -63,7 +63,8 @@ async function run(extra: { acquisition?: unknown; traceLines?: unknown[] } = {}
     JSON.stringify({
       source: "/evidence",
       bytes: 17,
-      held: "bind",
+      // A copy: inputs/ is the run's own directory (held in place, it would be a link to /evidence).
+      held: "copy",
       files: [
         { path: "inputs/disk.E01", bytes: 11, sha256: sha("disk bytes\n"), md5: md5("disk bytes\n") },
         { path: "inputs/notes.txt", bytes: 6, sha256: sha("notes\n") },
@@ -593,4 +594,100 @@ test("a verdict taken before disputes were sealed does not hold them, and says s
   const d = sealDrift(older, { ...verdict.seal, disputes: { lines: 2, head: "f".repeat(64) } }, null);
   assert.ok(d.not_sealed.includes("the disputes"));
   assert.ok(!d.drift.some((x) => x.what === "ledger disputes"));
+});
+
+/** Evidence held in place: a source directory with one file, and the manifest a --inputs-bind kickoff writes for it. */
+async function heldInPlace(root: string, name: string): Promise<string> {
+  const src = await realpathOf(await mkdtemp(join(tmpdir(), `custody-src-${name}-`)));
+  dirs.push(src);
+  await writeFile(join(src, "disk.E01"), `disk ${name}\n`);
+  return src;
+}
+async function realpathOf(p: string): Promise<string> {
+  const { realpath } = await import("node:fs/promises");
+  return realpath(p);
+}
+
+test("evidence held in place is read through the link the kickoff made: one set's inputs/ still leads to the source it recorded, and a link moved to an identical copy is named", async () => {
+  const { symlink, rm: remove, cp: copy } = await import("node:fs/promises");
+  const runs = await mkdtemp(join(tmpdir(), "custody-links-"));
+  dirs.push(runs);
+  const root = join(runs, "s1");
+  await mkdir(root, { recursive: true });
+  const src = await heldInPlace(root, "a");
+  await symlink(src, join(root, "inputs"));
+  await writeFile(join(root, "inputs.json"), JSON.stringify({ source: src, held: "bind", bound: true, bytes: 7, files: [{ path: "inputs/disk.E01", bytes: 7, sha256: sha("disk a\n") }] }));
+  await writeFile(custodyAnchorPath(root), JSON.stringify({ run: "s1" }));
+  const c = await takeCustody(root, { runsDir: runs });
+  const inputs = c.inputs as { links?: { checked: number; moved: string[] }; unchanged: boolean };
+  assert.deepEqual(inputs.links, { checked: 1, moved: [] });
+  assert.equal(inputs.unchanged, true);
+  assert.equal(c.checks.find((x) => x.name === "evidence")?.status, "passed");
+  assert.match(c.summary, /1 link to where it was held still leading there/);
+  // The same bytes in another place, and inputs/ made to lead there: the hashes hold, and the evidence is not the source recorded.
+  const other = await realpathOf(await mkdtemp(join(tmpdir(), "custody-src-copy-")));
+  dirs.push(other);
+  await copy(join(src, "disk.E01"), join(other, "disk.E01"));
+  await remove(join(root, "inputs"));
+  await symlink(other, join(root, "inputs"));
+  const moved = await takeCustody(root, { runsDir: runs });
+  const m = moved.inputs as { links?: { checked: number; moved: string[] }; unchanged: boolean; changed: string[] };
+  assert.deepEqual(m.changed, [], "the bytes are the same");
+  assert.equal(m.links?.moved.length, 1);
+  assert.match(m.links?.moved[0] ?? "", new RegExp(`^inputs leads to ${other.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, not ${src.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, the source the kickoff recorded$`));
+  assert.equal(m.unchanged, false);
+  const ev = moved.checks.find((x) => x.name === "evidence");
+  assert.equal(ev?.status, "failed");
+  assert.match(ev?.reason ?? "", /read through a link that does not lead where the kickoff recorded/);
+  assert.match(moved.summary, /EVIDENCE READ THROUGH A LINK THAT MOVED: .* · the files read through it hash as the kickoff recorded .*which does not make them the source it recorded/);
+  // Replaced by a directory of its own: no longer the link the kickoff made.
+  await remove(join(root, "inputs"));
+  await copy(src, join(root, "inputs"), { recursive: true });
+  const dir = await takeCustody(root, { runsDir: runs });
+  assert.match((dir.inputs as { links?: { moved: string[] } }).links?.moved[0] ?? "", /^inputs is no longer the link to .* the kickoff made: a directory is there$/);
+});
+
+test("several sets: each inputs/<set> link is held to the source inputs.json's sets records; a copied set has none to check", async () => {
+  const { symlink, rm: remove } = await import("node:fs/promises");
+  const runs = await mkdtemp(join(tmpdir(), "custody-sets-"));
+  dirs.push(runs);
+  const root = join(runs, "s2");
+  await mkdir(join(root, "inputs"), { recursive: true });
+  const a = await heldInPlace(root, "laptop");
+  const b = await heldInPlace(root, "phone");
+  await symlink(a, join(root, "inputs", "laptop"));
+  await symlink(b, join(root, "inputs", "phone"));
+  const manifest = {
+    source: `${a}, ${b}`,
+    held: "bind",
+    sets: [
+      { name: "laptop", path: "inputs/laptop", source: a, files: 1, bytes: 12 },
+      { name: "phone", path: "inputs/phone", source: b, files: 1, bytes: 11 },
+    ],
+    bytes: 23,
+    files: [
+      { path: "inputs/laptop/disk.E01", bytes: 12, sha256: sha("disk laptop\n") },
+      { path: "inputs/phone/disk.E01", bytes: 11, sha256: sha("disk phone\n") },
+    ],
+  };
+  await writeFile(join(root, "inputs.json"), JSON.stringify(manifest));
+  await writeFile(custodyAnchorPath(root), JSON.stringify({ run: "s2" }));
+  // What walking through the set links finds is PR #59's; the links themselves are checked here.
+  let c = await takeCustody(root, { runsDir: runs });
+  assert.deepEqual((c.inputs as { links?: unknown }).links, { checked: 2, moved: [] });
+  assert.deepEqual((c.inputs as { changed: string[] }).changed, []);
+  // One set's link made to lead to the other set's source.
+  await remove(join(root, "inputs", "phone"));
+  await symlink(a, join(root, "inputs", "phone"));
+  c = await takeCustody(root, { runsDir: runs });
+  const links = (c.inputs as { links?: { checked: number; moved: string[] } }).links;
+  assert.equal(links?.checked, 1);
+  assert.match(links?.moved.join("\n") ?? "", /^inputs\/phone leads to .*custody-src-laptop-.*, not .*custody-src-phone-.*, the source the kickoff recorded$/);
+  assert.equal(c.checks.find((x) => x.name === "evidence")?.status, "failed");
+  // Sets copied in: directories of the run's own, nothing to hold to a source.
+  const { evidenceLinks } = await import("../scripts/custody.ts");
+  assert.deepEqual(await evidenceLinks(root, { ...manifest, held: "copy", sets: [{ name: "gone", source: "/nowhere" }] }), { checked: 0, moved: ["inputs/gone is gone (it led to /nowhere)"] });
+  const copied = join(runs, "s3");
+  await mkdir(join(copied, "inputs", "laptop"), { recursive: true });
+  assert.deepEqual(await evidenceLinks(copied, { ...manifest, held: "copy", sets: [{ name: "laptop", source: a }] }), { checked: 0, moved: [] });
 });

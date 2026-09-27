@@ -451,6 +451,48 @@ export async function eachInputsFile(
   return "meta" in read ? { ok: true } : { why: read.why };
 }
 
+/**
+ * The links the evidence is read through, held to what the kickoff
+ * recorded: inputs/ itself when the evidence was held in place as one set
+ * (`held: "bind"`, or a link where the manifest names one source), or each
+ * inputs/<name> of several sets (inputs.json `sets`: name and source). Each
+ * must still be a link whose target is the source recorded, and resolve to
+ * it. A set that was copied in is a directory of the run's own, with no link
+ * to check.
+ */
+export async function evidenceLinks(sandbox: string, meta: Record<string, unknown>): Promise<{ checked: number; moved: string[] }> {
+  const moved: string[] = [];
+  let checked = 0;
+  const bound = meta.held === "bind" || meta.bound === true;
+  const targets: Array<{ rel: string; source: string }> = [];
+  const sets = Array.isArray(meta.sets) ? (meta.sets as Array<{ name?: unknown; source?: unknown }>) : [];
+  for (const s of sets) {
+    if (typeof s?.name === "string" && s.name && !s.name.includes("/") && s.name !== ".." && typeof s.source === "string") targets.push({ rel: `inputs/${s.name}`, source: s.source });
+  }
+  if (!sets.length && typeof meta.source === "string" && meta.source) {
+    const top = await lstat(join(sandbox, "inputs")).catch(() => null);
+    if (bound || top?.isSymbolicLink()) targets.push({ rel: "inputs", source: meta.source });
+  }
+  for (const t of targets) {
+    const lst = await lstat(join(sandbox, t.rel)).catch(() => null);
+    if (!lst) {
+      moved.push(`${t.rel} is gone (it led to ${t.source})`);
+      continue;
+    }
+    if (!lst.isSymbolicLink()) {
+      // A set copied in is the run's own directory; held in place, a link was made, and something else is there now.
+      if (bound) moved.push(`${t.rel} is no longer the link to ${t.source} the kickoff made: a ${lst.isDirectory() ? "directory" : "file"} is there`);
+      continue;
+    }
+    const target = await readlink(join(sandbox, t.rel)).catch(() => null);
+    const real = await realpath(join(sandbox, t.rel)).catch(() => null);
+    if (real === null) moved.push(`${t.rel} leads to ${target ?? "?"}, which is not there now (the kickoff recorded ${t.source})`);
+    else if (target !== t.source || real !== t.source) moved.push(`${t.rel} leads to ${real}${target !== real ? ` (through ${target})` : ""}, not ${t.source}, the source the kickoff recorded`);
+    else checked += 1;
+  }
+  return { checked, moved };
+}
+
 export type Custody = {
   at: string;
   run: string | null;
@@ -480,6 +522,15 @@ export type Custody = {
         digests_compared: { sha256: number; md5: number; sha1: number };
         manifest_sha256: string;
         manifest_anchored: boolean | null;
+        /**
+         * The evidence held in place: inputs/ (one set) or each
+         * inputs/<set> (several) is a link the kickoff made to the source
+         * inputs.json records. How many were checked, and each that leads
+         * elsewhere now (or nowhere, or is no longer a link). A copy or an
+         * attached image has none. Absent from a verdict taken before this
+         * was checked.
+         */
+        links?: { checked: number; moved: string[] };
       };
   sessions: { files: Array<{ path: string; bytes: number; sha256: string | null }>; digest: string; not_files: string[] };
   tool_outputs: {
@@ -1111,11 +1162,15 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
         });
         added.sort();
       }
+      // Evidence held in place is read through links the kickoff made: one
+      // that leads elsewhere now is evidence read from another place,
+      // whatever its bytes say.
+      const links = await evidenceLinks(sandbox, streamed.meta);
       const metaBytes = Number(streamed.meta.bytes);
       state.inputs = {
         files: total,
         bytes: Number.isFinite(metaBytes) && metaBytes > 0 ? metaBytes : totalBytes,
-        unchanged: !changed.length && !missing.length && !added.length && !skipped.length && !unreadable.length && anchored !== false,
+        unchanged: !changed.length && !missing.length && !added.length && !skipped.length && !unreadable.length && anchored !== false && !links.moved.length,
         complete: !skipped.length && !unreadable.length,
         changed,
         missing,
@@ -1126,6 +1181,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
         digests_compared: digests,
         manifest_sha256: streamed.sha256,
         manifest_anchored: anchored,
+        links,
       };
       // The imager's numbers, when the operator gave them at kickoff (inputs.json, anchored with it).
       state.acquisition = compareAcquisition(streamed.meta.acquisition as Parameters<typeof compareAcquisition>[0], actual);
@@ -1841,8 +1897,13 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
       : acq.mismatched.length
         ? `; DOES NOT MATCH THE ACQUISITION HASHES GIVEN: ${acq.mismatched.join(", ")}`
         : `; matches the acquisition hashes given (${acq.matched} of ${acq.given}${acq.not_compared.length ? `, ${acq.not_compared.length} NOT COMPARED` : ""})`;
+    const movedLinks = inputs.links?.moved ?? [];
+    if (movedLinks.length) parts.push(`EVIDENCE READ THROUGH A LINK THAT MOVED: ${movedLinks.join("; ")}`);
+    else if (inputs.links?.checked) how.push(`${plural(inputs.links.checked, "link")} to where it was held still leading there`);
     parts.push(inputs.unchanged
       ? `evidence unchanged since the run began (${how.join(", ")}${inputs.manifest_anchored === true ? ", manifest anchored" : inputs.manifest_anchored === null ? ", manifest not anchored" : ""})${acqText}`
+      : movedLinks.length && !changedAny && inputs.complete
+        ? `the files read through it hash as the kickoff recorded (${how.join(", ")}), which does not make them the source it recorded${acqText}`
       : changedAny
         ? `EVIDENCE CHANGED: ${inputs.changed.length} changed, ${inputs.missing.length} missing, ${inputs.added.length} added${inputs.manifest_anchored === false ? ", MANIFEST REWRITTEN" : ""}${inputs.skipped.length ? `; ${inputs.skipped.length} NOT RE-READ` : ""}${unreadable.length ? `; ${unreadable.length} UNREADABLE BY THE HOST (${unreadable.join(", ")})` : ""}`
         : `EVIDENCE NOT FULLY RE-HASHED: ${inputs.files - inputs.skipped.length - unreadable.length} of ${inputs.files} checked unchanged${inputs.skipped.length ? `, ${inputs.skipped.length} not re-read before the deadline` : ""}${unreadable.length ? `, ${unreadable.length} unreadable by the host (${unreadable.join(", ")})` : ""}${inputs.manifest_anchored === null ? ", manifest not anchored" : ""}`);
