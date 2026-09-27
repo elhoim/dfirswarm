@@ -54,12 +54,12 @@
  */
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { createReadStream, existsSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, constants as fsConstants, createReadStream, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { isIPv4, isIPv6 } from "node:net";
 import { availableParallelism, freemem, totalmem } from "node:os";
 import { chmod, mkdir, readFile, rename, rm, stat, utimes, writeFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { guestProviders, planGateway, type GatewayConfig } from "./model-gateway.ts";
 
@@ -91,7 +91,14 @@ export function registryLabel(registryPath: string): string {
 /** An OAuth credential in a guest never refreshes: its expiry is set past any run. */
 const GUEST_OAUTH_EXPIRES = Date.UTC(2099, 0, 1);
 
-export type Mount = { host: string; guest?: string; readonly?: boolean; noexec?: boolean };
+/**
+ * One share of a VM. `expect` is the host directory's device and inode as the
+ * hub saw it when it built a job's view: the binding is refused unless the
+ * directory is still that one, before the VM is made and again after, before
+ * anything runs. `view` marks a tree the hub built for one job: it may hold
+ * only directories and regular files, checked the same way.
+ */
+export type Mount = { host: string; guest?: string; readonly?: boolean; noexec?: boolean; expect?: { dev: number; ino: number }; view?: boolean };
 
 export type ProviderSpec = {
   provider: string;
@@ -2164,9 +2171,112 @@ async function runWorkerInChild(spec: WorkerSpec, hooks: { onCreated?: () => voi
   });
 }
 
+/**
+ * A worker's shares, checked before they are bound and held while the VM is
+ * made: what the check saw, and a descriptor on each directory so its inode
+ * cannot be freed and reused under the same number meanwhile.
+ */
+export type HeldMounts = { mounts: Array<{ mount: Mount; real: string; dev: number; ino: number; fd: number; tree?: string }>; release: () => void };
+
+/** An absolute path with no `.` or `..` part, and not the root: nothing that climbs or could be read two ways. */
+function plainAbsolute(p: string): boolean {
+  return p.startsWith("/") && posix.normalize(p) !== "/" && !p.includes("\0") && !p.split("/").some((s) => s === "." || s === "..");
+}
+
+/**
+ * A view's tree, by lstat: every name with its kind, device and inode, and a
+ * file's size and mtime, in order. Left out: a directory's own times (a mount
+ * on a directory in it is not a change) and a file's ctime (a sealed file
+ * linked into another job's view at the same moment changes its link count,
+ * not its bytes). A link or a special file refuses it.
+ */
+function viewFingerprint(root: string): string {
+  const h = createHash("sha256");
+  const visit = (dir: string, rel: string) => {
+    for (const name of readdirSync(dir).sort()) {
+      const p = join(dir, name);
+      const r = rel ? `${rel}/${name}` : name;
+      const st = lstatSync(p);
+      if (st.isSymbolicLink()) throw new Error(`the job's view holds a link at ${r}: refused`);
+      if (!st.isDirectory() && !st.isFile()) throw new Error(`the job's view holds a special file at ${r}: refused`);
+      h.update(st.isDirectory() ? `${r}\0d\0${st.dev}\0${st.ino}\n` : `${r}\0f\0${st.dev}\0${st.ino}\0${st.size}\0${st.mtimeMs}\n`);
+      if (st.isDirectory()) visit(p, r);
+    }
+  };
+  visit(root, "");
+  return h.digest("hex");
+}
+
+/**
+ * Check a worker's shares before they are bound: every host and guest path
+ * absolute and plain (no traversal), every host path a directory once
+ * resolved (msb binds directories), a share the hub built for the job still
+ * the directory it built (device and inode), a view holding nothing but
+ * directories and regular files. Each directory is opened and held. Throws
+ * with the reason.
+ */
+export function holdWorkerMounts(mounts: Mount[]): HeldMounts {
+  const held: HeldMounts["mounts"] = [];
+  const release = () => {
+    for (const h of held) {
+      try {
+        closeSync(h.fd);
+      } catch {
+        // closed already
+      }
+    }
+  };
+  try {
+    for (const m of mounts) {
+      const guest = m.guest ?? m.host;
+      if (!plainAbsolute(m.host)) throw new Error(`a share's host path is not plain and absolute: ${JSON.stringify(m.host)}`);
+      if (!plainAbsolute(guest)) throw new Error(`a share's guest path is not plain and absolute: ${JSON.stringify(guest)}`);
+      const real = realpathSync(m.host);
+      const st = lstatSync(real);
+      if (!st.isDirectory()) throw new Error(`${m.host} is not a directory`);
+      if (m.expect && (st.dev !== m.expect.dev || st.ino !== m.expect.ino)) throw new Error(`${m.host} is not the directory the hub built for the job (it was replaced): refused`);
+      const fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      const fst = fstatSync(fd);
+      if (fst.dev !== st.dev || fst.ino !== st.ino) {
+        closeSync(fd);
+        throw new Error(`${m.host} changed while it was checked: refused`);
+      }
+      held.push({ mount: m, real, dev: st.dev, ino: st.ino, fd, ...(m.view ? { tree: viewFingerprint(real) } : {}) });
+    }
+  } catch (err) {
+    release();
+    throw err;
+  }
+  return { mounts: held, release };
+}
+
+/**
+ * After the VM is made and before anything runs in it: every share still
+ * resolves where it did, to the same directory, and a view's tree is still
+ * what was checked. A substitution between the check and the binding is
+ * caught here, and nothing runs.
+ */
+export function recheckWorkerMounts(held: HeldMounts): string | null {
+  for (const h of held.mounts) {
+    try {
+      const real = realpathSync(h.mount.host);
+      const st = lstatSync(real);
+      const fst = fstatSync(h.fd);
+      if (real !== h.real || st.dev !== h.dev || st.ino !== h.ino || fst.dev !== h.dev || fst.ino !== h.ino) return `${h.mount.host} changed between its check and the VM's start`;
+      if (h.tree !== undefined && viewFingerprint(real) !== h.tree) return `the job's view under ${h.mount.host} changed between its check and the VM's start`;
+    } catch (err) {
+      return `${h.mount.host} could not be checked again: ${(err as Error).message}`;
+    }
+  }
+  return null;
+}
+
 async function runWorkerOnce(spec: WorkerSpec, hooks: { onCreated?: () => void }): Promise<WorkerRan> {
   let created = false;
+  let held: HeldMounts | null = null;
   try {
+    // The shares, checked and held before msb is asked to bind them.
+    held = holdWorkerMounts(spec.mounts);
     const M = await sdk();
     let builder = M.Sandbox.builder(spec.name)
       .image(spec.image)
@@ -2192,8 +2302,9 @@ async function runWorkerOnce(spec: WorkerSpec, hooks: { onCreated?: () => void }
       builder = builder.disableNetwork();
     }
     builder = builder.detached(true).workdir(spec.workdir).envs(spec.env);
-    for (const m of spec.mounts) {
-      const host = realpathSync(m.host);
+    for (const h of held.mounts) {
+      const m = h.mount;
+      const host = h.real;
       builder = builder.volume(m.guest ?? m.host, (v) => {
         let b = v.bind(host);
         if (m.readonly) b = b.readonly();
@@ -2204,11 +2315,16 @@ async function runWorkerOnce(spec: WorkerSpec, hooks: { onCreated?: () => void }
     const vm = await withTimeout(builder.create(), CREATE_TIMEOUT_MS, `the worker VM was not up within ${CREATE_TIMEOUT_MS / 1000} s`);
     created = true;
     hooks.onCreated?.();
+    // Bound: the same directories as checked, or nothing runs (the VM is removed by the caller).
+    const moved = recheckWorkerMounts(held);
+    if (moved) return { code: null, error: `not run: ${moved}`, phase: "exec" };
     const out = await vm.exec(spec.command[0], spec.command.slice(1));
     const digest = await imageDigest(spec.name);
     return { code: out.code, ...(digest ? { digest } : {}), phase: "exec" };
   } catch (err) {
     return { code: null, error: (err as Error).message, phase: created ? "exec" : "create" };
+  } finally {
+    held?.release();
   }
 }
 

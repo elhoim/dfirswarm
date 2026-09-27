@@ -180,9 +180,12 @@ assert r["recipe"] == "computer-forensics-base/disk-volumes" and r["input"] == "
 assert [os.path.basename(p) for p in r["target"]["paths"]] == ["disk.E01", "disk.E02"], r["target"]
 assert r["target"]["ref"] == "input:disk.E01" and r["alias"] == "catalog/disk.E01", r
 assert len(r["recipe_sha256"]) == 64 and r["seconds"] == 14400, r
+# Every segment set, planned or not, for the job service's scopes: a job that declares one segment is given the rest.
+sets = json.load(open(os.path.join(sys.argv[1], "catalog", "plan.json")))["collections"]
+assert sets == [{"input": "inputs/disk.E01", "members": ["inputs/disk.E01", "inputs/disk.E02"]}], sets
 PY
 grep -q '^Being built: ' "$PLAN/catalog/README.md" || fail "the index should say the catalogue is being built"
-pass "--plan-only lists every applicable recipe with its target for the job service, and runs none"
+pass "--plan-only lists every applicable recipe with its target for the job service, and every segment set, and runs none"
 
 # --- every input is accounted for ---------------------------------------------
 # BelkaCTF #6: a 5.1 GB iPhone tar sat beside the laptop E01, the catalogue

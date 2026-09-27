@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { boardTable } from "../scripts/vm-hub.ts";
 import { JobService, resolveTarget } from "../scripts/job-service.ts";
-import { localWorker } from "./job-service-worker.ts";
+import { listInputs, localWorker } from "./job-service-worker.ts";
 import type { WorkerSpec } from "../scripts/vm.ts";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -24,6 +24,7 @@ function rig(withJobs = true) {
   writeFileSync(join(S, "inputs.json"), JSON.stringify({ files: [] }));
   writeFileSync(join(S, "work", "a1", "notes.txt"), "mine\n");
   spawnSync("python3", ["-c", "import zipfile,sys\nwith zipfile.ZipFile(sys.argv[1],'w') as z: z.writestr('k.txt','key')", join(S, "inputs", "a.zip")]);
+  listInputs(S);
   const specs: WorkerSpec[] = [];
   const posts: Array<[string, string]> = [];
   const svc = new JobService({
@@ -90,6 +91,24 @@ test("a job is the calling seat's; a command naming its own scratch gets it read
   await svc.stop("over");
 });
 
+test("jobSubmit keeps inputs as said: left out is every object by default, [] a scope of nothing, [\"all\"] everything said, and a list resolved or refused", async () => {
+  const { svc, call } = rig();
+  await svc.start();
+  const scopeOf = async (arg: Record<string, unknown>) => {
+    const r = await call("a1", "jobSubmit", { command: "true", ...arg });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    return [r.job.scope, svc.jobs.get(r.job.job)?.spec.inputs];
+  };
+  assert.deepEqual(await scopeOf({}), ["default-all", []]);
+  assert.deepEqual(await scopeOf({ inputs: [] }), ["declared", []]);
+  assert.deepEqual(await scopeOf({ inputs: ["all"] }), ["all", ["all"]]);
+  assert.deepEqual(await scopeOf({ inputs: ["input:a.zip"] }), ["declared", ["input:a.zip"]]);
+  const bad = await call("a1", "jobSubmit", { command: "true", inputs: ["input:nothing.zip"] });
+  assert.equal(bad.ok, false);
+  assert.match(bad.reason, /not in inputs\.json/);
+  await svc.stop("over");
+});
+
 test("catalogRequest resolves the target, refuses what is not the run's, and without a recipe finds those that apply", async () => {
   const { S, svc, call, posts } = rig();
   await svc.start();
@@ -107,6 +126,7 @@ test("catalogRequest resolves the target, refuses what is not the run's, and wit
   assert.ok(posts.some(([to, b]) => to === "a1" && /recipe computer-forensics-base\/archive-members\) done/.test(b) && /Catalogued as g0001/.test(b)), JSON.stringify(posts));
   // Nothing applies: said so.
   writeFileSync(join(S, "inputs", "plain.txt"), "just text, nothing to catalogue here\n".repeat(10));
+  listInputs(S);
   const none = await call("a1", "catalogRequest", { target: "inputs/plain.txt" });
   assert.equal(none.ok, true);
   for (let i = 0; i < 400 && !posts.some(([, b]) => b.startsWith("No recipe of this run catalogues inputs/plain.txt")); i += 1) await new Promise((res) => setTimeout(res, 50));

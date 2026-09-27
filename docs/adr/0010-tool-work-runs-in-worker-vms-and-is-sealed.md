@@ -76,7 +76,9 @@ what was deferred until the first CTF round is listed at the end.
    job that named a peer's scratch, as its agent could see it, then failed.
    Parity with the brain was agreed with Codex after that run: read-only
    material is still readable and interpretable, and the record says it is
-   live.
+   live. Since 2026-09-27 that is the view of a job that declares nothing;
+   one that declares what it reads is given only that ("A job sees what it
+   declared", below).
 4. **The store.**
    - A committed job's output is `store/jobs/<id>/out/`: links, FIFOs,
      sockets and devices recorded and left out, names kept as bytes, files
@@ -170,6 +172,90 @@ After the review:
 - **A dedicated catalog agent**: not built. `catalog_request` was used 1,
   1, 0 and 0 times, and no experimental recipe was written. A
   harness-appointed agent would also be a role the harness assigns.
+
+## A job sees what it declared, and a brain's own output a finding cites is sealed (2026-09-27)
+
+Agreed with Fable and Astra over two rounds (D3 and D4 of the plan that also
+brought ledger version 4). Point 3 gave every job what its brain sees, and
+the record said what it could reach, not what it read. A finding could rest
+on a job whose reach was the whole run, and on a file in an agent's own
+tool-output/ that the agent could still rewrite.
+
+- **Three scopes, kept apart.** `inputs` left out is `default-all`,
+  `["all"]` is `all`, and a list, an empty one too, is `declared`. The spec,
+  `job_accepted` and `job_started` keep which; a job accepted before reads
+  as `default-all`. A list is resolved when the job is submitted: the
+  evidence through `inputs.json` and the set it belongs to (never a flat
+  `inputs/`), the store through its sealed manifests, a generation through
+  its record, an agent's file by lstat. One entry that does not resolve
+  refuses the job, with the reason and what to declare instead. Nothing
+  widens a scope to fit it.
+- **Segment sets come from the census's record.** The census writes every
+  segment set it saw into `catalog/plan.json` (`collections`, planned or
+  not), the store journals each as `input_collection`, and a job that
+  declares one member is given the rest; inputs.json may list collections of
+  its own. The harness knows no format. A hive's transaction logs or a tar's
+  own index come with a declared directory, or are named.
+- **A view per job.** The hub builds it beside the job's staging directory,
+  outside every VM, and mounts it at the run's path, read-only, with its
+  evidence no-exec.
+  - A declared directory of the evidence, a job's whole output or a
+    generation is bound whole, up to eight per job.
+  - A file of the evidence is cloned from a descriptor (APFS clonefile, a
+    reflink). Where the file system cannot clone, it is linked from the one
+    copy the hub makes of it for the run, checked against inputs.json.
+  - A file of the store is linked, cloned or copied.
+  - An agent's file or directory (work/, tool-output/) is cloned or copied
+    from a descriptor opened without following a link, the path held to the
+    same inode afterwards, and hashed: the job reads that snapshot while the
+    live file goes on changing. A link under a declared directory is named
+    and left out.
+  - Never a hard link to the evidence (its link count and ctime are the
+    examiner's, and the inputs guard counts a second name) and never to live
+    scratch.
+  - `tools/` and the packs are mounted as code, `$OUT` and `/job` writable.
+  - No parent directory is mounted that would show a sibling.
+- **Recorded apart.** `store/jobs/<id>/scope.<attempt>.json` holds what was
+  declared (as said), what it expanded to (each object, what the record says
+  of it, and why it is there) and what the worker could reach (each file of
+  the view, how it got there, its sha256 and where that sha256 comes from).
+  Its sha256 is on `job_started`, and custody holds the manifest to it and
+  counts the jobs by scope: "declared scope enforced; reads within it not
+  observed".
+- **The binding is checked.** `vm.ts` holds every share before msb binds
+  it: plain absolute paths, a directory, the view's device and inode as the
+  hub built it, a view holding only directories and regular files, and a
+  descriptor on each so its inode cannot be reused meanwhile. After the VM
+  is made, before anything runs, each is checked again. A substitution in
+  between leaves the job not run.
+- **An import is a declared job of its source.** The worker copies the
+  hub's snapshot, and the record says so (`copied_live: false`).
+- **Observation stays open.** What a job read within its scope is not
+  observed. A prototype observes opens with fanotify inside the worker
+  (`scripts/job-observe.py` and `scripts/job-observe.ts`, on with
+  `SWARM_JOB_OBSERVE=fanotify-experimental`, off by default): the job runs
+  unprivileged, the collector keys its log, a canary must be seen, and
+  dropped events, an unmarked mount or a stall read as partial, a dead
+  collector, a forged line or no fanotify as unknown, never complete. It was
+  written without booting a VM and is untested in one. Its acceptance tests
+  (`tests/job-observe-vm.test.ts`) run on the host's own kernel and
+  virtio-fs; until they pass, nothing it says is evidence. LD_PRELOAD, or a
+  log the job could write, never is.
+- **A brain's own output a finding cites is sealed.** `tool:<seat>/<file>`
+  names a whole output the harness kept under tool-output/<seat>/, and
+  `trace:<sha256>` one line of the trace.
+  - Either is found on the chained trace: the line attributed by the
+    collector to that seat, whose result names the file with its sha256, or
+    the line with that hash. Either line must be on the chain.
+  - The bytes are hashed at once and refused when they differ from the
+    trace's digest.
+  - An import job over the hub's snapshot, checked against the digest again
+    at its start, seals them. `store/imports/<job>/` publishes them with the
+    trace provenance (seat, tool, the tool's sha256 where the line records
+    one, args, both clocks, the line) and a `brain_output_sealed` line.
+  - The record cites `import:<job>/<file>` in its place.
+  - What the trace did not capture is not sealed: the work is run again as a
+    job. `catalog_search` needs no seal: its `member:` is cited.
 
 ## Lanes, room on the host, and the image a job that names none runs in (2026-09-27)
 

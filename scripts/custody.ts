@@ -1910,7 +1910,17 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
       bits.push(st.images.undeclared.length ? `${st.images.undeclared.length} JOB(S) RAN IN AN IMAGE THE RUN DID NOT DECLARE (${some(st.images.undeclared, 10, "store.images.undeclared")})` : `every job in one of the ${st.images.declared.length} job images the run declared`);
       if (many.length) bits.push(`AN IMAGE NAME BOOTED MORE THAN ONE DIGEST: ${many.map(([k, d]) => `${k} (${d.join(", ")})`).join("; ")}`);
     }
-    if (st.access) bits.push(`what each job read is not observed by the harness (${st.access.observed_unknown} of ${st.access.jobs} jobs: declared inputs and accessible mounts are recorded)`);
+    if (st.access) {
+      // Declared: the scope was enforced (a view of what the job named), the reads within it not observed. Else every object was in reach.
+      const sc = st.access.scopes;
+      const m = st.access.manifests;
+      bits.push(
+        sc && sc.declared
+          ? `${plural(sc.declared, "job")} ran in its declared scope, enforced (reads within it not observed${m?.mismatched.length ? `; ${m.mismatched.length} SCOPE MANIFEST(S) NOT MATCHING THE JOURNAL (${some(m.mismatched, 5, "store.access.manifests")})` : ""}); ${sc.all + sc.default_all} with every object of the run in reach (${sc.default_all} by default, having declared nothing), what they read not observed`
+          : `what each job read is not observed by the harness (${st.access.observed_unknown} of ${st.access.jobs} jobs: declared inputs and accessible mounts are recorded)`,
+      );
+    }
+    if (st.imports) bits.push(`${plural(st.imports.sealed, "brain-side output")} a finding cited sealed as imports, ${st.imports.verified} verified against the journal${st.imports.mismatched.length ? `, ${st.imports.mismatched.length} NOT MATCHING (${some(st.imports.mismatched, 5, "store.imports.mismatched")})` : ""}`);
     if (st.catalogue) {
       const c = st.catalogue;
       const bad = [...c.revisions_mismatched, ...c.generations_mismatched];

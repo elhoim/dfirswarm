@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { boundInputSets, DERIVED, JobService, SHORT_JOB_SECONDS, type JobServiceOptions } from "../scripts/job-service.ts";
 import { storePaths, verifyJournalText } from "../scripts/evidence-store.ts";
-import { localWorker } from "./job-service-worker.ts";
+import { listInputs, localWorker, mountedWorker } from "./job-service-worker.ts";
 import type { WorkerSpec } from "../scripts/vm.ts";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -166,8 +166,10 @@ test("a pack or forged tool runs sealed, its arguments checked against its manif
   await refused({ text: "x" }, /needs output/);
   await refused({ output: "{OUT}/a", text: 5 }, /text must be a string/);
   await refused({ output: "{OUT}/a", text: "x", extra: 1 }, /takes no extra/);
+  writeFileSync(join(S, "inputs", "x"), "evidence");
+  listInputs(S);
   const r = await svc.submit("a1", { kind: "tool", tool: "writer", args: { output: "{OUT}/sub/result.txt", text: "carved" }, inputs: ["input:x"] });
-  assert.ok(r.ok);
+  assert.ok(r.ok, !r.ok ? r.reason : "");
   const job = await until(svc, r.job.id);
   assert.equal(job.status, "ok");
   assert.equal(readFileSync(join(storePaths(S).jobs, job.id, "out", "sub", "result.txt"), "utf8"), "carved");
@@ -293,7 +295,7 @@ test("three jobs in a row that ran in no worker are told to every agent once, an
 
 test("an import seals an agent's own file or directory as it is now, links left out, and refuses what is not under work/ or tool-output/", async () => {
   const S = sandbox();
-  const { svc } = service(S);
+  const { svc } = service(S, { runWorker: mountedWorker() });
   await svc.start();
   mkdirSync(join(S, "work", "a1", "vdi", "deep"), { recursive: true });
   writeFileSync(join(S, "work", "a1", "runlist.tsv"), "run\tlcn\n0\t9884700\n");
@@ -306,8 +308,9 @@ test("an import seals an agent's own file or directory as it is now, links left 
   assert.equal(j1.status, "ok", j1.reason);
   assert.equal(readFileSync(join(storePaths(S).jobs, j1.id, "out", "runlist.tsv"), "utf8"), "run\tlcn\n0\t9884700\n");
   const rec = JSON.parse(readFileSync(join(storePaths(S).jobs, j1.id, "stdout.log"), "utf8"));
-  assert.equal(rec.copied_live, true);
-  assert.equal(rec.producer_fenced, false, "the record says the source was live");
+  assert.equal(rec.copied_live, false, "copied from the hub's snapshot, not the live file");
+  assert.match(rec.copied_from, /snapshot the hub took at the job's start/);
+  assert.equal(rec.producer_fenced, false, "the record says its producer was not stopped");
   assert.equal(rec.files[0].unchanged_while_copied, true);
   assert.equal(rec.files[0].hashed_before_and_after, true);
   assert.equal(rec.files[0].sha256, createHash("sha256").update("run\tlcn\n0\t9884700\n").digest("hex"));
@@ -316,8 +319,10 @@ test("an import seals an agent's own file or directory as it is now, links left 
   const j2 = await until(svc, dir.job.id);
   assert.equal(j2.status, "ok", j2.reason);
   const rec2 = JSON.parse(readFileSync(join(storePaths(S).jobs, j2.id, "stdout.log"), "utf8"));
-  assert.deepEqual(rec2.files.map((f: { path: string }) => f.path).sort(), ["vdi/deep/map.json", "vdi/header.bin", "vdi/link"]);
-  assert.equal(rec2.files.find((f: { path: string }) => f.path === "vdi/link").left_out, "not a regular file", "a link is named and left out, never followed");
+  assert.deepEqual(rec2.files.map((f: { path: string }) => f.path).sort(), ["vdi/deep/map.json", "vdi/header.bin"]);
+  // The link never reached the snapshot: the job's scope manifest names it, left out, never followed.
+  const manifest = JSON.parse(readFileSync(join(storePaths(S).jobs, j2.id, "scope.1.json"), "utf8"));
+  assert.equal(manifest.accessible.find((e: { path: string }) => e.path === "work/a1/vdi/link")?.left_out, "a link", "a link is named and left out, never followed");
   assert.ok(existsSync(join(storePaths(S).jobs, j2.id, "out", "vdi", "deep", "map.json")));
   for (const bad of ["inputs/case.zip", "work/../inputs.json", "/etc/passwd", "work/a1/nothing.txt", "store/jobs"]) {
     const r = await svc.submit("a1", { kind: "import", source: bad });
@@ -329,6 +334,7 @@ test("an import seals an agent's own file or directory as it is now, links left 
 test("a recipe job becomes a catalogue generation and revision; the same recipe over the same object is the same job, on the record, and both askers are told", async () => {
   const S = sandbox();
   spawnSync("python3", ["-c", "import tarfile,io,sys\nwith tarfile.open(sys.argv[1],'w') as t:\n  i=tarfile.TarInfo('private/sms.db'); d=b'SQLite format 3\\0'+b'x'*1000; i.size=len(d); t.addfile(i,io.BytesIO(d))", join(S, "inputs", "phone.tar")]);
+  listInputs(S);
   const { svc, posts } = service(S);
   await svc.start();
   const target = { paths: [join(S, "inputs", "phone.tar")], name: "inputs/phone.tar", ref: "input:phone.tar" };
@@ -364,6 +370,7 @@ test("a recipe job becomes a catalogue generation and revision; the same recipe 
 test("two recipe jobs committing at once take distinct generations and revisions", async () => {
   const S = sandbox();
   for (const n of ["a", "b", "c"]) spawnSync("python3", ["-c", "import zipfile,sys\nwith zipfile.ZipFile(sys.argv[1],'w') as z: z.writestr('x.txt','x'*100)", join(S, "inputs", `${n}.zip`)]);
+  listInputs(S);
   const { svc } = service(S, { workers: 3 });
   await svc.start();
   const ids: string[] = [];
@@ -421,6 +428,7 @@ await new Promise((r) => setTimeout(r, 20000));
 test("the kickoff's plan is queued once, however often the service starts", async () => {
   const S = sandbox();
   spawnSync("python3", ["-c", "import zipfile,sys\nwith zipfile.ZipFile(sys.argv[1],'w') as z: z.writestr('x.txt','x'*100)", join(S, "inputs", "a.zip")]);
+  listInputs(S);
   writeFileSync(join(S, "catalog", "plan.json"), JSON.stringify({ recipes: [{ input: "inputs/a.zip", recipe: "computer-forensics-base/archive-members", target: { paths: [join(S, "inputs", "a.zip")], name: "inputs/a.zip", ref: "input:a.zip" }, alias: "catalog/a.zip" }] }));
   const first = service(S);
   await first.svc.start();

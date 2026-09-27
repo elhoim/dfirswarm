@@ -7,7 +7,8 @@
  *   <sandbox>/store/jobs/<id>/out/…       a job's committed outputs, read-only
  *   <sandbox>/store/jobs/<id>/manifest.json   every file: name bytes, size, sha256
  *   <sandbox>/store/blobs/<sha256>        each file's bytes once (hard links)
- *   <sandbox>/store/imports/<id>/…        a brain's own file brought in
+ *   <sandbox>/store/imports/<id>/…        a brain's own output a finding cited (tool:, trace:), sealed by
+ *                                         an import job and published here with its trace provenance
  *   <sandbox>/catalog/gen/<gen>/          a recipe's committed result (a generation)
  *   <sandbox>/catalog/revisions/<n>/      the catalogue's index as of revision n
  *   <sandbox>.staging/<id>/               a running job's writable directory
@@ -430,7 +431,19 @@ export async function readManifest(path: string): Promise<{ manifest: Manifest; 
 // --- object references -------------------------------------------------------------
 
 export type Resolved =
-  | { ok: true; ref: string; kind: "input" | "job" | "import" | "member" | "sha256" | "unresolved"; sha256?: string; bytes?: number; path?: string; why?: string; status?: string }
+  | {
+      ok: true;
+      ref: string;
+      kind: "input" | "job" | "import" | "member" | "sha256" | "unresolved" | "tool" | "trace";
+      sha256?: string;
+      bytes?: number;
+      path?: string;
+      why?: string;
+      status?: string;
+      /** tool: and trace: once sealed: the import the record cites, and the trace line it was sealed against. */
+      import_ref?: string;
+      trace_line?: string;
+    }
   | { ok: false; ref: string; reason: string };
 
 /** What resolveRef may check besides existence: the bytes, against what was sealed. */
@@ -465,14 +478,29 @@ async function jobStatus(dir: string): Promise<string | undefined> {
  * `input:<path under inputs/>` (inputs.json), `job:<id>/<path>` and
  * `import:<id>/<path>` (their sealed manifests), `member:<generation>#<n>`
  * (a generation's member list), `sha256:<hex>` (the store or the inputs),
- * `unresolved:<why>` (said, not resolved).
+ * `unresolved:<why>` (said, not resolved), and a brain's own output:
+ * `tool:<seat>/<file>` (a whole output the harness kept under
+ * tool-output/<seat>/, by the trace line that recorded it) and
+ * `trace:<sha256>` (one line of the trace, by its hash). Those two resolve
+ * once sealed (the hub seals them when a record cites them; see
+ * traceOrigin): to the import they were sealed as.
  */
 export async function resolveRef(sandbox: string, ref: string, opts: ResolveOptions = {}): Promise<Resolved> {
   const S = resolve(sandbox);
   const P = storePaths(S);
   const m = /^([a-z0-9]+):(.*)$/s.exec(ref.trim());
-  if (!m) return { ok: false, ref, reason: "a reference is kind:value (input:, job:, import:, member:, sha256:, unresolved:)" };
+  if (!m) return { ok: false, ref, reason: "a reference is kind:value (input:, job:, import:, member:, sha256:, tool:, trace:, unresolved:)" };
   const [, kind, value] = m;
+  if (kind === "tool" || kind === "trace") {
+    const sealed = await sealedBrainOutput(S, ref.trim());
+    if (sealed) {
+      const imp = await resolveRef(S, sealed.import, opts);
+      return imp.ok ? { ...imp, ref, kind, import_ref: sealed.import, trace_line: sealed.trace_line } : { ok: false, ref, reason: `${ref} was sealed as ${sealed.import}, which does not resolve: ${imp.reason}` };
+    }
+    const origin = await traceOrigin(S, ref.trim());
+    if (!origin.ok) return { ok: false, ref, reason: origin.reason };
+    return { ok: false, ref, reason: `${ref} is on the trace (line ${origin.origin.line_sha256.slice(0, 12)}…) and not sealed: the hub seals it as an import when a record in a run with tool jobs cites it; where no job service runs, run the work again as a job and cite job:<id>/<path>` };
+  }
   if (kind === "unresolved") {
     return value.trim() ? { ok: true, ref, kind: "unresolved", why: value.trim() } : { ok: false, ref, reason: "unresolved: needs the why" };
   }
@@ -556,6 +584,200 @@ export async function resolveRef(sandbox: string, ref: string, opts: ResolveOpti
     return { ok: false, ref, reason: "no stored object or input has that sha256" };
   }
   return { ok: false, ref, reason: `${kind}: is not a kind of reference` };
+}
+
+// --- a brain's own output: tool: and trace: --------------------------------------------
+
+export const TRACE_REL = "traces/events.jsonl";
+
+/** Where one brain-side output came from, as the trace recorded it. */
+export type TraceOrigin = {
+  ref: string;
+  kind: "tool" | "trace";
+  /** The sha256 of the trace line that recorded it (the next line's `prev` names it, or the trace's anchor). */
+  line_sha256: string;
+  /** The seat that made the call, as the collector attributed the line (never a claim). */
+  seat: string;
+  tool: string;
+  args: unknown;
+  /** The sender's clock and the collector's. */
+  ts: string | null;
+  recv_ts: string | null;
+  /** The line's own sender id and count. */
+  sid: string | null;
+  seq: number | null;
+  /** The tool's sha256 where the line records one; a built-in tool has none, and none is invented. */
+  tool_sha256: string | null;
+  /** The kept bytes: tool-output/<seat>/<file> for tool:; the line itself for trace:. */
+  path: string | null;
+  /** Which field of the line's result named the kept file (full_output, full_stderr, …). */
+  field: string | null;
+  /** sha256 and size of the kept bytes, as the trace recorded them. */
+  digest: string;
+  bytes: number;
+};
+
+const SEAT = /^[a-z][a-z0-9_-]{0,31}$/;
+
+/** Every object under a line's result shaped like a kept output: a path, its sha256, its size. */
+function keptOutputs(v: unknown, at = "result", depth = 0): Array<{ field: string; path: string; sha256: string; bytes: number }> {
+  if (!v || typeof v !== "object" || depth > 5) return [];
+  const o = v as Record<string, unknown>;
+  const out: Array<{ field: string; path: string; sha256: string; bytes: number }> = [];
+  if (typeof o.path === "string" && typeof o.sha256 === "string" && /^[0-9a-f]{64}$/.test(o.sha256) && typeof o.bytes === "number" && o.write_error === undefined) out.push({ field: at, path: o.path, sha256: o.sha256, bytes: o.bytes });
+  for (const [k, x] of Object.entries(o)) if (x && typeof x === "object") out.push(...keptOutputs(x, `${at}.${k}`, depth + 1));
+  return out;
+}
+
+/** The trace's anchor head, when the run has one beside it. */
+function traceAnchorHead(S: string): { head: string | null; prev_head: string | null } | null {
+  try {
+    const a = JSON.parse(readFileSync(`${S}.trace-anchor.json`, "utf8")) as { head?: string; prev_head?: string };
+    return { head: typeof a.head === "string" ? a.head : null, prev_head: typeof a.prev_head === "string" ? a.prev_head : null };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Find a `tool:` or `trace:` ref's origin on the trace (traces/events.jsonl,
+ * the collector's chained record; never a spill, which a seat can write):
+ * - `tool:<seat>/<file>`: the line, attributed to that seat by the collector,
+ *   whose result names tool-output/<seat>/<file> as a kept output with its
+ *   sha256 and size.
+ * - `trace:<sha256>`: the line whose bytes hash to it; its kept bytes are the
+ *   line itself.
+ * The line must be on the chain: the next line names it as its `prev`, or,
+ * the last, the trace's anchor does. Nothing is sealed here.
+ */
+export async function traceOrigin(sandbox: string, ref: string): Promise<{ ok: true; origin: TraceOrigin } | { ok: false; reason: string }> {
+  const S = resolve(sandbox);
+  const m = /^(tool|trace):(.*)$/s.exec(ref.trim());
+  if (!m) return { ok: false, reason: `${ref}: tool:<seat>/<file> or trace:<sha256>` };
+  const [, kind, value] = m;
+  let want = "";
+  let seatWanted = "";
+  if (kind === "tool") {
+    const slash = value.indexOf("/");
+    seatWanted = slash < 0 ? "" : value.slice(0, slash);
+    const file = slash < 0 ? "" : value.slice(slash + 1);
+    if (!SEAT.test(seatWanted) || !file || file.includes("\0") || file.startsWith("/") || file.split("/").some((s) => s === "" || s === "." || s === "..")) return { ok: false, reason: `${ref}: tool:<seat>/<file under tool-output/<seat>/>` };
+    want = `tool-output/${seatWanted}/${file}`;
+  } else if (!/^[0-9a-f]{64}$/.test(value)) {
+    return { ok: false, reason: `${ref}: trace:<the sha256 of one line of traces/events.jsonl>` };
+  }
+  const file = join(S, TRACE_REL);
+  if (!existsSync(file)) return { ok: false, reason: `${ref}: the run has no trace (${TRACE_REL}) to resolve it against` };
+  type Hit = { line: string; hash: string; record: Record<string, unknown>; kept?: { field: string; path: string; sha256: string; bytes: number } };
+  let pending: Hit | null = null;
+  let confirmed: Hit | null = null;
+  const refusals: string[] = [];
+  const rl = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line) continue;
+    if (pending) {
+      // On the chain: this line names the one before it.
+      const prev = /"prev":"([0-9a-f]{64})"/.exec(line.slice(-100))?.[1] ?? (() => {
+        try {
+          return String((JSON.parse(line) as { prev?: unknown }).prev ?? "");
+        } catch {
+          return "";
+        }
+      })();
+      if (prev === pending.hash) {
+        confirmed = pending;
+        rl.close();
+        break;
+      }
+      refusals.push(`the line ${pending.hash.slice(0, 12)}… is not what the next line names as its parent (the trace was changed there)`);
+      pending = null;
+    }
+    if (kind === "tool" && !line.includes(want)) continue;
+    const hash = sha256Hex(line);
+    if (kind === "trace" && hash !== value) continue;
+    let record: Record<string, unknown>;
+    try {
+      record = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (kind === "tool") {
+      if (record.agent !== seatWanted || record.agent_unverified || record.claimed_agent !== undefined) {
+        refusals.push(`a line naming ${want} is not attributed to ${seatWanted} by the collector`);
+        continue;
+      }
+      const kept = keptOutputs(record.result).find((k) => k.path === want);
+      if (!kept) continue;
+      pending = { line, hash, record, kept };
+    } else {
+      pending = { line, hash, record };
+    }
+  }
+  if (!confirmed && pending) {
+    // The last line: the trace's anchor names it.
+    const anchor = traceAnchorHead(S);
+    if (anchor && (anchor.head === pending.hash || anchor.prev_head === pending.hash)) confirmed = pending;
+    else refusals.push(anchor ? `the line ${pending.hash.slice(0, 12)}… is the trace's last and its anchor names another` : `the line ${pending.hash.slice(0, 12)}… is the trace's last, and the run has no trace anchor to hold it to: cite it once another line follows`);
+  }
+  if (!confirmed) {
+    const why = refusals.length ? `: ${refusals.join("; ")}` : kind === "tool" ? `: no line of the trace, attributed to ${seatWanted}, records ${want} as a kept output with its sha256` : ": no line of the trace hashes to it";
+    return { ok: false, reason: `${ref} does not resolve against the trace${why}. What the trace did not capture cannot be sealed: run the work again as a job (job_run) and cite job:<id>/<path>` };
+  }
+  const r = confirmed.record;
+  const args = r.args ?? null;
+  const result = (r.result ?? {}) as Record<string, unknown>;
+  const shaOf = (x: unknown) => (typeof x === "string" && /^[0-9a-f]{64}$/.test(x) ? x : null);
+  const toolSha = shaOf(result.tool_sha256) ?? shaOf((args as Record<string, unknown> | null)?.tool_sha256) ?? null;
+  return {
+    ok: true,
+    origin: {
+      ref: ref.trim(),
+      kind: kind as "tool" | "trace",
+      line_sha256: confirmed.hash,
+      seat: String(r.agent ?? ""),
+      tool: String(r.tool ?? ""),
+      args,
+      ts: typeof r.ts === "string" ? r.ts : null,
+      recv_ts: typeof r.recv_ts === "string" ? r.recv_ts : null,
+      sid: typeof r.sid === "string" ? r.sid : null,
+      seq: typeof r.seq === "number" ? r.seq : null,
+      tool_sha256: toolSha,
+      path: confirmed.kept?.path ?? null,
+      field: confirmed.kept?.field ?? null,
+      digest: confirmed.kept?.sha256 ?? confirmed.hash,
+      bytes: confirmed.kept?.bytes ?? Buffer.byteLength(confirmed.line),
+    },
+  };
+}
+
+/** One line of the trace by its sha256, as its bytes (no newline): what a trace: seal copies. */
+export async function traceLineBytes(sandbox: string, sha256: string): Promise<Buffer | null> {
+  const file = join(resolve(sandbox), TRACE_REL);
+  if (!existsSync(file)) return null;
+  const rl = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (line && sha256Hex(line) === sha256) {
+      rl.close();
+      return Buffer.from(line, "utf8");
+    }
+  }
+  return null;
+}
+
+/** A brain-side output already sealed: the journal's brain_output_sealed line for the ref. */
+export async function sealedBrainOutput(sandbox: string, ref: string): Promise<{ import: string; job: string; digest: string; trace_line: string } | null> {
+  const text = await readFile(storePaths(resolve(sandbox)).journal, "utf8").catch(() => "");
+  let hit: { import: string; job: string; digest: string; trace_line: string } | null = null;
+  for (const line of text.split("\n")) {
+    if (!line.includes('"brain_output_sealed"')) continue;
+    try {
+      const l = JSON.parse(line) as { type?: string; ref?: string; import?: string; job?: string; digest?: string; trace_line?: string };
+      if (l.type === "brain_output_sealed" && l.ref === ref && l.import) hit = { import: l.import, job: String(l.job ?? ""), digest: String(l.digest ?? ""), trace_line: String(l.trace_line ?? "") };
+    } catch {
+      // a torn line is the journal check's to name
+    }
+  }
+  return hit;
 }
 
 // --- catalogue generations and revisions ---------------------------------------------
@@ -763,8 +985,11 @@ export async function initStore(sandbox: string): Promise<Journal> {
   if (journal.lines.length) return journal;
   const file = (rel: string) => (existsSync(join(S, rel)) ? sha256Hex(readFileSync(join(S, rel))) : null);
   let plan: Array<{ input: string; target?: { paths?: string[] } }> = [];
+  let sets: Array<{ input?: string; members?: string[] }> = [];
   try {
-    plan = (JSON.parse(readFileSync(join(S, "catalog", "plan.json"), "utf8")) as { recipes?: typeof plan }).recipes ?? [];
+    const parsed = JSON.parse(readFileSync(join(S, "catalog", "plan.json"), "utf8")) as { recipes?: typeof plan; collections?: typeof sets };
+    plan = parsed.recipes ?? [];
+    sets = Array.isArray(parsed.collections) ? parsed.collections : [];
   } catch {
     plan = [];
   }
@@ -772,6 +997,12 @@ export async function initStore(sandbox: string): Promise<Journal> {
   for (const r of plan) {
     const paths = (r.target?.paths ?? []).map((p) => relative(S, p));
     if (paths.length > 1) collections.set(r.input, paths);
+  }
+  // Every segment set the census saw, planned or not: a job that declares one
+  // segment is given the rest (job-scope.ts), by this record, not a guess.
+  for (const c of sets) {
+    const members = (c.members ?? []).filter((x) => typeof x === "string" && x.startsWith("inputs/"));
+    if (typeof c.input === "string" && members.length > 1 && !collections.has(c.input)) collections.set(c.input, members);
   }
   await journal.append({ type: "store_opened", inputs_sha256: file("inputs.json"), census_sha256: file("catalog/coverage.tsv"), plan_sha256: file("catalog/plan.json") });
   for (const [input, paths] of collections) await journal.append({ type: "input_collection", input, members: paths });
@@ -801,8 +1032,18 @@ export type StoreCheck = {
   logs?: { checked: number; mismatched: string[]; missing: string[] };
   /** Why the ledger could not be read for the findings, when it could not (not the same as no ledger). */
   ledger_unreadable?: string | null;
-  /** What each job was given and could reach, and whether what it read is known: the store records declared and accessible; observed is unknown unless a tool reports it. */
-  access?: { jobs: number; declared: number; observed_unknown: number };
+  /**
+   * What each job was given and could reach, and whether what it read is
+   * known: the store records declared and accessible; observed is unknown
+   * unless a tool reports it. `scopes` counts the jobs by scope: declared
+   * (enforced: the worker had a view of what it named), all (said) and
+   * default (nothing said, or a job from before scopes were enforced: every
+   * object of the run in reach). `manifests` are the declared jobs' scope
+   * manifests held to the sha256 their job_started line carries.
+   */
+  access?: { jobs: number; declared: number; observed_unknown: number; scopes?: { declared: number; all: number; default_all: number }; manifests?: { verified: number; mismatched: string[] } };
+  /** A brain's own outputs a finding cited, sealed as imports: each import's manifest and files held to its journal line. */
+  imports?: { sealed: number; verified: number; mismatched: string[] };
   /** The job images the run declared (job_images), each job held to them, and each image name to the digests it booted. */
   images?: { declared: string[]; jobs: number; undeclared: string[]; digests: Record<string, string[]> };
   /** Notes an examiner added to the record after the run (evidence-store.ts note), and the times the job service told the agents that workers were not running. */
@@ -956,7 +1197,39 @@ export async function checkStore(sandbox: string, before = Infinity): Promise<St
       digests: Object.fromEntries(Object.entries(digests).map(([k, v]) => [k, [...v].sort()])),
     };
   }
-  out.access = { jobs: started.length, declared: started.filter((l) => Array.isArray(l.declared) && (l.declared as unknown[]).length > 0).length, observed_unknown: started.filter((l) => l.observed === "unknown" || l.observed === undefined).length };
+  const kindOf = (l: JournalLine) => String((l.scope as { kind?: string } | undefined)?.kind ?? "default-all");
+  const manifests = { verified: 0, mismatched: [] as string[] };
+  for (const l of started) {
+    const sc = l.scope as { kind?: string; manifest?: string; manifest_sha256?: string } | undefined;
+    if (sc?.kind !== "declared" || !sc.manifest) continue;
+    const got = await readFile(join(S, sc.manifest)).then((b) => sha256Hex(b)).catch(() => null);
+    if (got && got === sc.manifest_sha256) manifests.verified += 1;
+    else manifests.mismatched.push(`${l.job} (${sc.manifest}${got ? "" : ", missing"})`);
+  }
+  out.access = {
+    jobs: started.length,
+    declared: started.filter((l) => Array.isArray(l.declared) && (l.declared as unknown[]).length > 0).length,
+    observed_unknown: started.filter((l) => l.observed === "unknown" || l.observed === undefined).length,
+    scopes: { declared: started.filter((l) => kindOf(l) === "declared").length, all: started.filter((l) => kindOf(l) === "all").length, default_all: started.filter((l) => kindOf(l) === "default-all").length },
+    manifests,
+  };
+  // A brain's own outputs sealed as imports: the manifest by its hash, each file by its manifest.
+  const sealedLines = checked.lines.filter((l) => l.type === "brain_output_sealed");
+  if (sealedLines.length) {
+    out.imports = { sealed: sealedLines.length, verified: 0, mismatched: [] };
+    for (const l of sealedLines) {
+      const dir = join(P.imports, String(l.job));
+      const m = await readManifest(join(dir, "manifest.json"));
+      let good = Boolean(m) && m!.sha256 === l.manifest_sha256;
+      for (const f of m?.manifest.files ?? []) {
+        if (!good || Date.now() > before) break;
+        const got = await sha256File(Buffer.concat([Buffer.from(join(dir, "out")), Buffer.from("/"), Buffer.from(f.path_b64, "base64")])).catch(() => null);
+        if (got !== f.sha256) good = false;
+      }
+      if (good) out.imports.verified += 1;
+      else out.imports.mismatched.push(`${l.import} (store/imports/${l.job})`);
+    }
+  }
   let ledgerText: string | null = null;
   try {
     ledgerText = await readFile(join(S, "ledger", "entries.jsonl"), "utf8");
@@ -1035,7 +1308,8 @@ export async function checkStore(sandbox: string, before = Infinity): Promise<St
     }
   }
   try {
-    out.staging_left = (await readdir(P.staging)).sort();
+    // A dot name there is the job service's own (the run's copies of inputs a file system could not clone), not a job's.
+    out.staging_left = (await readdir(P.staging)).filter((n) => !n.startsWith(".")).sort();
   } catch {
     out.staging_left = [];
   }

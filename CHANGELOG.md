@@ -6,6 +6,41 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: a job sees what it declared; a finding may cite a brain's own output, sealed
+
+- **Declared scope, enforced**: `job_run inputs` left out, `["all"]` and a
+  list (an empty one too) are kept apart in the spec and on the journal
+  (`default-all`, `all`, `declared`). A declared job's worker is given a view
+  the hub builds for it, outside every VM, holding only what it named at the
+  paths its brain sees: a declared directory of the evidence or a job's whole
+  output bound, a file of the evidence cloned (or linked from the run's one
+  checked copy where the file system cannot clone), a store file linked, an
+  agent's file snapshotted by clone or copy and hashed at the start; never a
+  hard link to the evidence or to live scratch. A segment set comes whole,
+  from the census's record (`catalog/plan.json` `collections`, journalled as
+  `input_collection`). A declaration that does not resolve refuses the job;
+  there is no broad fallback. Declared, expanded and accessible manifests go
+  in `store/jobs/<id>/scope.<attempt>.json`, its sha256 on `job_started`;
+  custody holds it and says a declared job's scope was enforced and its reads
+  within it not observed. `vm.ts` holds every share before binding it and
+  checks each again after the VM is made, before anything runs. An import's
+  scope is its source: the worker copies the hub's snapshot.
+- **`tool:<seat>/<file>` and `trace:<sha256>` refs**: a whole output the
+  harness kept under tool-output/, or one line of the trace, is found on the
+  chained trace (attributed by the collector, on the chain), held to the
+  trace's digest, sealed by an import job over the hub's snapshot and
+  published as `import:<job>/<file>` in `store/imports/<job>/` with its trace
+  provenance (`brain_output_sealed`); the record cites the import. Bytes that
+  changed since, or what the trace did not capture, are refused with the way
+  on: run the work again as a job.
+- `JobService.workerSpecFor(job, staging)` builds the worker a recorded job
+  had, for a rerun.
+- **Experimental, off by default, untested in a VM**: observing a declared
+  job's opens with fanotify inside its worker (`SWARM_JOB_OBSERVE=
+  fanotify-experimental`), read as complete, partial or unknown, never
+  complete when anything was dropped; its VM acceptance tests are
+  `tests/job-observe-vm.test.ts`.
+
 ### Added: several evidence sets in one run
 
 - `--inputs` may be given once per set (a laptop and a phone, the logs of

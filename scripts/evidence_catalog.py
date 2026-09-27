@@ -181,6 +181,7 @@ class Catalog:
         self.plan_only = plan_only
         self.recipes = list_recipes(packs)
         self.index, self.notes, self.coverage, self.plan = [], [], [], []
+        self.collections = []
         self.objects = {}
         for r in self.recipes:
             self.objects.setdefault(r["object"], 0)
@@ -226,6 +227,13 @@ class Catalog:
         for loop in LOOPS:
             self.notes.append("inputs/%s is a directory already walked by another path (a link loop): its files are listed once, under their first path" % shown(loop))
         segments_skipped, segment_sets = 0, []
+        # Every set, planned or not, for the record: a job that declares one
+        # segment is given the rest by it (the job service reads this; it
+        # knows no format).
+        inputs_dir = os.path.join(self.sandbox, "inputs")
+        self.collections = [{"input": "inputs/" + os.path.relpath(first, inputs_dir),
+                             "members": ["inputs/" + os.path.relpath(p, inputs_dir) for p in [first] + sorted(rest, key=os.fsencode)]}
+                            for first, rest in sorted(sets.items(), key=lambda kv: os.fsencode(kv[0]))]
         for img in found:
             rel_under = os.path.relpath(img, os.path.join(self.sandbox, "inputs"))
             rel_raw = "inputs/" + rel_under
@@ -349,7 +357,7 @@ class Catalog:
         self.add_index("coverage.tsv", "every input, one row each: path, bytes, status (catalogued, partial, planned, segment, not catalogued, not probed) and why")
         if self.plan_only:
             with open(os.path.join(self.out, "plan.json"), "w", encoding="utf-8") as fh:
-                json.dump({"recipes": self.plan}, fh, indent=2, ensure_ascii=False)
+                json.dump({"recipes": self.plan, "collections": self.collections}, fh, indent=2, ensure_ascii=False)
                 fh.write("\n")
             self.add_index("plan.json", "what the job service runs once the run is up: recipe, input, target")
         objects = "".join("%d %s(s), " % (n, obj) for obj, n in self.objects.items())
