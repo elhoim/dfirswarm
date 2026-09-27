@@ -78,11 +78,19 @@ export type StartParams = {
   inbox_page_chars?: number;
   /** Let agents pip-install into the sandbox from the package index. Off by default. */
   allow_install?: boolean;
-  /** A set name from the inputs library; the route resolves it to a path. */
+  /** A set name from the inputs library; the route resolves it to a path. With several sets, the first of `inputs_sets`. */
   inputs?: string;
+  /**
+   * Several sets, in order, when the request's `inputs` is a list of more
+   * than one: each lands at inputs/<name>/. Names, never paths; absent for
+   * one set, which is `inputs` alone as it always was.
+   */
+  inputs_sets?: string[];
   inputs_enforce?: InputsEnforce;
   /** The resolved directory, set by the server only, never from a client body. */
   inputs_dir?: string;
+  /** The resolved directories of `inputs_sets`, in order, set by the server only. */
+  inputs_dirs?: string[];
   /**
    * How the evidence is attached. `copy` (the default) puts a read-only copy
    * under inputs/. `bind` makes no copy: the source itself is held read-only by
@@ -443,8 +451,28 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
   }
   const label = typeof body.label === "string" ? body.label.trim() : "";
   if (label && !/^[A-Za-z0-9_-]{1,40}$/.test(label)) return { ok: false, error: "label must be [A-Za-z0-9_-]{1,40}" };
-  const inputsName = typeof body.inputs === "string" ? body.inputs.trim() : "";
-  if (inputsName && !INPUT_SET.test(inputsName)) return { ok: false, error: "inputs must name a set from the inputs library" };
+  // One set is a name; several are a list of names, each to land at
+  // inputs/<name>/ (a list of one is one set).
+  const inputsList = Array.isArray(body.inputs) ? body.inputs.map((x) => (typeof x === "string" ? x.trim() : "")) : typeof body.inputs === "string" && body.inputs.trim() ? [body.inputs.trim()] : [];
+  if (inputsList.some((x) => !INPUT_SET.test(x))) return { ok: false, error: `inputs must name ${inputsList.length > 1 ? "sets" : "a set"} from the inputs library` };
+  const inputsName = inputsList[0] ?? "";
+  if (inputsList.length > 1) {
+    const seen = new Map<string, string>();
+    for (const ref of inputsList) {
+      // `brief` is root 0's, like `0:brief`; a set lands under its own name,
+      // so two sets of one name (in two roots) would be one directory.
+      const qualified = ref.includes(":") ? ref : `0:${ref}`;
+      const name = qualified.slice(qualified.indexOf(":") + 1).toLowerCase();
+      const other = seen.get(name);
+      if (other !== undefined) {
+        return {
+          ok: false,
+          error: other === qualified ? `inputs names ${ref} twice` : `two sets would both be inputs/${qualified.slice(qualified.indexOf(":") + 1)}/ (${other}, ${qualified}): a set lands under its own name`,
+        };
+      }
+      seen.set(name, qualified);
+    }
+  }
   let inputsEnforce: InputsEnforce | undefined;
   if (body.inputs_enforce !== undefined && body.inputs_enforce !== null && body.inputs_enforce !== "") {
     if (body.inputs_enforce !== "auto" && body.inputs_enforce !== "on" && body.inputs_enforce !== "off") {
@@ -524,6 +552,7 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
   const inputsImage = typeof body.inputs_image === "string" ? body.inputs_image.trim() : "";
   if (inputsImage && !INPUT_IMAGE.test(inputsImage)) return { ok: false, error: "inputs_image must be <set>/<file>, a dmg, iso, img or sparseimage in a set from the inputs library" };
   if (inputsImage && inputsAttach === "bind") return { ok: false, error: "an image is attached as an image; inputs_attach does not apply" };
+  if (inputsImage && inputsList.length > 1) return { ok: false, error: "an image is one set's disk image; hand several sets over as directories" };
   let inputsMaxMb: number | undefined;
   if (body.inputs_max_mb !== undefined && body.inputs_max_mb !== null && body.inputs_max_mb !== "") {
     inputsMaxMb = Number(body.inputs_max_mb);
@@ -689,6 +718,7 @@ export function validateStart(input: unknown): { ok: true; params: StartParams }
       inbox_page_chars: inboxPageChars,
       allow_install: body.allow_install === true,
       inputs: inputsName || undefined,
+      inputs_sets: inputsList.length > 1 ? inputsList : undefined,
       inputs_enforce: inputsEnforce,
       inputs_attach: inputsAttach,
       inputs_image: inputsImage || undefined,
@@ -857,7 +887,8 @@ export function startArgv(p: StartParams): string[] {
     // An image is attached read-only in place of a directory; the harness forces the kernel guard on.
     argv.push("--inputs-image", p.inputs_image_path);
   } else if (p.inputs_dir) {
-    argv.push("--inputs", p.inputs_dir);
+    // Several sets: one --inputs each, in order; the flags below are all of theirs.
+    for (const dir of p.inputs_dirs && p.inputs_dirs.length > 1 ? p.inputs_dirs : [p.inputs_dir]) argv.push("--inputs", dir);
     if (p.inputs_attach === "bind") argv.push("--inputs-bind");
     // A VM run mounts --inputs in place unless told to copy it, so "copy",
     // the form's default, has to say so there, or it quietly becomes a bind.

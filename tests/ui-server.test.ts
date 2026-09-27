@@ -957,6 +957,42 @@ test("the six kickoff switches the form gained: validated, and mapped to the fla
   }
 });
 
+test("several input sets: names in a list, each checked, one --inputs each, and the rest of the flags for all of them", () => {
+  const base = { model: "a/b", cap_usd: 1, n: 1, isolation: "host" };
+  // A list of one is one set, sent and resolved as it always was.
+  const one = validateStart({ ...base, inputs: ["0:brief"] });
+  assert.ok(one.ok && one.params.inputs === "0:brief" && one.params.inputs_sets === undefined);
+  const two = validateStart({ ...base, inputs: ["0:brief", "1:images"], inputs_attach: "bind", inputs_enforce: "on", inputs_max_files: 10, inputs_dirs: ["/etc", "/root"] });
+  assert.ok(two.ok, two.ok ? "" : two.error);
+  if (two.ok) {
+    assert.equal(two.params.inputs, "0:brief");
+    assert.deepEqual(two.params.inputs_sets, ["0:brief", "1:images"]);
+    assert.equal(two.params.inputs_dirs, undefined, "the server resolves the sets; a client's paths are ignored");
+    assert.ok(!startArgv(two.params).includes("--inputs"), "no --inputs until the server resolved every set");
+    two.params.inputs_dirs = ["/srv/a/brief", "/srv/b/images"];
+    two.params.inputs_dir = "/srv/a/brief";
+    const argv = startArgv(two.params);
+    assert.deepEqual(argv.slice(argv.indexOf("--inputs"), argv.indexOf("--inputs") + 8), ["--inputs", "/srv/a/brief", "--inputs", "/srv/b/images", "--inputs-bind", "--inputs-enforce", "on", "--inputs-max-files"]);
+    assert.equal(argv.filter((a) => a === "--inputs").length, 2);
+  }
+  // Each name is a set; none twice; no two landing at one inputs/<name>/; no image with several.
+  assert.equal(validateStart({ ...base, inputs: ["0:brief", "../etc"] }).ok, false);
+  assert.equal(validateStart({ ...base, inputs: ["0:brief", 7] }).ok, false);
+  const twice = validateStart({ ...base, inputs: ["brief", "0:brief"] });
+  assert.ok(!twice.ok && /twice/.test(twice.error), "a bare name is root 0's");
+  const clash = validateStart({ ...base, inputs: ["0:Case", "1:case"] });
+  assert.ok(!clash.ok && /inputs\/case\//.test(clash.error), "two roots' sets of one name would be one directory, whatever the case");
+  assert.equal(validateStart({ ...base, inputs: ["0:brief", "1:images"], inputs_image: "0:brief/laptop.dmg" }).ok, false, "an image is one set's");
+  // In a VM run, copy (the form's default) says so once, for every set.
+  const vm = validateStart({ model: "a/b", cap_usd: 1, n: 1, inputs: ["0:brief", "1:images"] });
+  assert.ok(vm.ok);
+  if (vm.ok) {
+    vm.params.inputs_dirs = ["/srv/a/brief", "/srv/b/images"];
+    vm.params.inputs_dir = "/srv/a/brief";
+    assert.equal(startArgv(vm.params).filter((a) => a === "--inputs-copy").length, 1);
+  }
+});
+
 test("tools_from and no_read name runs; the server turns them into directories, or refuses", async () => {
   const start = (extra: Record<string, unknown>) =>
     post<{ id: string }>("/api/swarms", { model: "deepseek/deepseek-v4-pro", cap_usd: 0.5, n: 1, goal: FIXTURE_GOAL, no_start: true, ...extra });
@@ -1018,6 +1054,20 @@ test("several evidence roots, and one added from the form when the server allows
     // The kickoff runs as a job and writes into runs2 while it lasts: wait
     // for it, or the clean-up below races the swarm.sh it started.
     await waitJobAt(at, ((await started.json()) as { id: string }).id, 60_000);
+
+    // Several sets in one kickoff: each resolved under its own root, each at inputs/<name>/.
+    const kick = { model: "deepseek/deepseek-v4-pro", cap_usd: 0.5, n: 1, goal: FIXTURE_GOAL, no_start: true, inputs_enforce: "off", isolation: "host" };
+    assert.equal((await send("POST", "/api/swarms", { ...kick, inputs: ["0:brief", "1:brief"] })).status, 400, "two sets of one name would be one directory");
+    const both = await send("POST", "/api/swarms", { ...kick, label: "two-sets", inputs: ["1:brief", "2:images"] });
+    assert.equal(both.status, 202);
+    const bothJob = await waitJobAt(at, ((await both.json()) as { id: string }).id, 60_000);
+    assert.equal(bothJob.status, "ok", bothJob.stderr);
+    const bothView = (await (await fetch(`${at}/api/swarms/${bothJob.swarm_id}`)).json()) as { inputs: { sets: Array<{ name: string; path: string; source: string; files: number }> | null; files: Array<{ path: string }> } };
+    assert.deepEqual(
+      bothView.inputs.sets?.map((set) => [set.name, set.path, set.source, set.files]),
+      [["brief", "inputs/brief", await realpath(join(second, "brief")), 1], ["images", "inputs/images", await realpath(join(third, "images")), 1]],
+    );
+    assert.deepEqual(bothView.inputs.files.map((f) => f.path).sort(), ["inputs/brief/notes.md", "inputs/images/disk.E01"]);
 
     // A root named at start cannot be removed from the form; one added there can.
     assert.equal((await send("DELETE", "/api/inputs/roots/0")).status, 400);

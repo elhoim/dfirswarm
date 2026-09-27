@@ -1133,9 +1133,12 @@ export function egressLine(mode: string | undefined): string {
 /**
  * How the evidence reached the agents: copied into the run, used in place
  * behind a host guard, or mounted read-only into each agent's microVM.
+ * Several sets are each named, at inputs/<name>/, with where it came from.
  */
-export function evidenceArrival(inputs: { source?: string; copied_at?: string; guard?: string; held?: string; bound?: boolean }): string {
-  const source = `<code>${escapeHtml(inputs.source || "the operator")}</code>`;
+export function evidenceArrival(inputs: { source?: string; copied_at?: string; guard?: string; held?: string; bound?: boolean; sets?: Array<{ path?: string; source?: string; files?: number }> }): string {
+  const source = inputs.sets?.length
+    ? `${inputs.sets.length} sets (${inputs.sets.map((set) => `<code>${escapeHtml(set.source || "the operator")}</code> as <code>${escapeHtml(set.path ?? "inputs/?")}/</code>, ${set.files ?? 0} file${set.files === 1 ? "" : "s"}`).join("; ")})`
+    : `<code>${escapeHtml(inputs.source || "the operator")}</code>`;
   const at = escapeHtml(inputs.copied_at || "—");
   if (inputs.guard === "microvm" && inputs.held === "copy") {
     return `<p>Copied from ${source} at ${at} into <code>inputs/</code>, read-only, as a second layer (<code>--inputs-copy</code>): each agent's microVM had the copy mounted read-only, and the host refused every write through that mount.</p>`;
@@ -1150,6 +1153,12 @@ export function evidenceArrival(inputs: { source?: string; copied_at?: string; g
     return `<p>Used in place from ${source} (manifest taken ${at}), with no copy: <code>inputs/</code> linked to it, and the kernel held the source read-only in every pane. The harness refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it.</p>`;
   }
   return `<p>Copied from ${source} at ${at} into <code>inputs/</code>, which no agent may write. The harness refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it, restores a shell write from a pristine copy, and where the host allows it runs each pane with <code>inputs/</code> read-only at the kernel.</p>`;
+}
+
+/** Where the evidence came from, in words: its source, or each set's at inputs/<name>/. */
+export function evidenceFrom(inputs: { source?: string; sets?: Array<{ path?: string; source?: string; files?: number }> }): string {
+  if (!inputs.sets?.length) return `from ${inputs.source || "the operator"}`;
+  return `in ${inputs.sets.length} sets: ${inputs.sets.map((set) => `${set.path ?? "inputs/?"}/ from ${set.source || "the operator"} (${set.files ?? 0} file${set.files === 1 ? "" : "s"})`).join("; ")}`;
 }
 
 /** What the VM manager recorded about one agent's VM (scripts/vm.ts, vm/<id>.json). */
@@ -1545,7 +1554,7 @@ ${contradictionsHtml}${verdictGroups(findings, correctedBy)}${byQuestionHtml}${l
     title: "Scope and evidence",
     count: inputs ? `${inputs.files.length} file${inputs.files.length === 1 ? "" : "s"} · ${bytesHuman(inputs.bytes ?? 0)}` : "none given",
     html: inputs
-      ? `${evidenceArrival(inputs as { source?: string; copied_at?: string; guard?: string; held?: string; bound?: boolean })}
+      ? `${evidenceArrival(inputs as Parameters<typeof evidenceArrival>[0])}
 <p>Guard requested <code>${escapeHtml(inputs.enforce || "auto")}</code>, set up as <code>${escapeHtml(inputs.guard || "none")}</code>; measured per pane: ${
           enforcedSeen.length
             ? Object.entries(enforced)
@@ -1768,7 +1777,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ["Started", startedAt || "—"],
     ["Ended", endedAt || "—"],
     ["Sandbox", sandbox],
-    ["Evidence", inputs ? `${inputs.files.length} file(s), ${bytesHuman(inputs.bytes ?? 0)}, from ${inputs.source || "the operator"}${sourceCheck ? `; ${sourceCheck}` : ""}` : "none given"],
+    ["Evidence", inputs ? `${inputs.files.length} file(s), ${bytesHuman(inputs.bytes ?? 0)}, ${evidenceFrom(inputs)}${sourceCheck ? `; ${sourceCheck}` : ""}` : "none given"],
     [
       "Evidence intact at the end",
       // The host's own re-hash, when the stop took one, is the verdict; an

@@ -21,6 +21,21 @@ export function InputsPanel({ view }: { view: SwarmView }) {
   const summary = vmRun ? vmInputsSummary(view.vms ?? []) : inputsGuardSummary(inputs);
   const Icon = summary.tone === "kelp" ? ShieldCheck : summary.tone === "saffron" ? ShieldAlert : ShieldOff;
   const agents = view.agents.map((a) => a.id);
+  // Several sets, each at inputs/<name>/: each named with where it came from.
+  const sets = inputs.sets?.length ? inputs.sets : null;
+  const from = sets ? (
+    <>
+      {sets.length} sets,{" "}
+      {sets.map((set, i) => (
+        <span key={set.name}>
+          {i ? "; " : ""}
+          <code className="break-all">{set.source || "the operator"}</code> as <code>{set.path}/</code> ({set.files} file{set.files === 1 ? "" : "s"})
+        </span>
+      ))}
+    </>
+  ) : (
+    <code className="break-all">{inputs.source || "the operator"}</code>
+  );
   return (
     <section className="card space-y-3 p-4" aria-label="Read-only inputs">
       <div className="flex flex-wrap items-center gap-2">
@@ -37,12 +52,12 @@ export function InputsPanel({ view }: { view: SwarmView }) {
       </div>
       {vmRun ? (
         <p className="text-[12.5px] leading-[1.5] text-ink-2">
-          {inputs.held === "bind" ? "Used in place" : inputs.held === "image" ? "Attached as a disk image" : "Copied"} from <code className="break-all">{inputs.source || "the operator"}</code>
-          {inputs.held === "bind" ? "" : <> into <code>inputs/</code></>}, and mounted read-only and no-exec into every agent's microVM. Agents read and grep it; <code>edit</code>, <code>write</code> and <code>claim_file</code> refuse it, and the mount refuses any other write: inside a VM there is no pane guard to measure, the mount is the guard, and each VM's probe checked it at kickoff (the VMs on the Agents tab list each check).
+          {inputs.held === "bind" ? "Used in place" : inputs.held === "image" ? "Attached as a disk image" : "Copied"} from {from}
+          {inputs.held === "bind" || sets ? "" : <> into <code>inputs/</code></>}, and mounted read-only and no-exec into every agent's microVM. Agents read and grep it; <code>edit</code>, <code>write</code> and <code>claim_file</code> refuse it, and the mount refuses any other write: inside a VM there is no pane guard to measure, the mount is the guard, and each VM's probe checked it at kickoff (the VMs on the Agents tab list each check).
         </p>
       ) : (
         <p className="text-[12.5px] leading-[1.5] text-ink-2">
-          Copied from <code className="break-all">{inputs.source || "the operator"}</code> into <code>inputs/</code>. Agents read and grep it; <code>edit</code>, <code>write</code> and <code>claim_file</code> refuse it, a shell write is undone from the pristine copy and announced, and where the host allows it the pane runs with <code>inputs/</code> read-only at the kernel ({guardWord(inputs.guard)} was set up at kickoff; enforcement asked: <code>{inputs.enforce}</code>).
+          Copied from {from}{sets ? "" : <> into <code>inputs/</code></>}. Agents read and grep it; <code>edit</code>, <code>write</code> and <code>claim_file</code> refuse it, a shell write is undone from the pristine copy and announced, and where the host allows it the pane runs with <code>inputs/</code> read-only at the kernel ({guardWord(inputs.guard)} was set up at kickoff; enforcement asked: <code>{inputs.enforce}</code>).
         </p>
       )}
       {inputs.source_checked ? (

@@ -61,15 +61,21 @@ for entry in files:
     elif want_bytes is not None and int(want_bytes) != size:
         modified.append(rel)
 
+# Several sets, each at inputs/<name>/: one held in place is a link there,
+# walked through as the set it is.
+sets = [s.get("name") for s in (man.get("sets") or []) if isinstance(s, dict) and isinstance(s.get("name"), str)]
+
 added = []
 if os.path.isdir("inputs"):
     top = os.path.realpath("inputs")
-    for root, dirs, names in os.walk(top):
-        # A directory link is a name of its own, not a place to walk into.
-        for name in names + [d for d in dirs if os.path.islink(os.path.join(root, d))]:
-            rel = "inputs/" + os.path.relpath(os.path.join(root, name), top).replace("\\", "/")
-            if rel not in known:
-                added.append(rel)
+    held = [n for n in sets if "/" not in n and os.path.islink(os.path.join(top, n))]
+    for walked, under in [(top, "inputs/")] + [(os.path.realpath(os.path.join(top, n)), "inputs/" + n + "/") for n in held]:
+        for root, dirs, names in os.walk(walked):
+            # A directory link is a name of its own, not a place to walk into.
+            for name in names + [d for d in dirs if os.path.islink(os.path.join(root, d)) and not (root == top and d in held)]:
+                rel = under + os.path.relpath(os.path.join(root, name), walked).replace("\\", "/")
+                if rel not in known:
+                    added.append(rel)
 
 ok = not modified and not missing and not added
 print(json.dumps({

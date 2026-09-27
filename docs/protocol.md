@@ -22,8 +22,8 @@ runs/<id>/
   bin/pi                       netguard PATH shim
   tools/<name>/manifest.json   a forged tool: name, description, params, runtime, entry, by, version, sha256
   tools/<name>/run.py|mjs|sh   its script (harness-owned; written only by make_tool)
-  inputs/                      read-only copy of what --inputs named (no write bits; harness-owned)
-  inputs.json                  its manifest: source, every file with size, sha256, sha1 and md5, enforce, guard, quarantine
+  inputs/                      read-only copy of what --inputs named (no write bits; harness-owned); several sets, one at inputs/<name>/ each
+  inputs.json                  its manifest: source, every file with size, sha256, sha1 and md5, enforce, guard, quarantine (and sets, for several)
   .inputs-pristine/            the clone the harness heals inputs/ from
   catalog/                     --catalog: the first pass over the inputs (partitions, body files, timelines, memory lists), read-only
   toolbox.json                 --toolbox: the forensic tools found on the host, and the missing ones with install commands
@@ -228,7 +228,7 @@ shell write to a file the watch left out is not detected or snapshotted.
 
 ### Read-only inputs (`inputs/`, `inputs.json`, `inputs`)
 
-`--inputs DIR` copies a directory into `inputs/` and the harness keeps it as it was: `edit`, `write`, `claim_file` and `file_restore` refuse any path that is or resolves into `inputs/` (`read-only input: …`); the bash watch covers every file there through a stat cache, and a change, deletion or addition found after a shell call is healed from `.inputs-pristine/` and logged as `inputs_violation` with a `veto` post on the board; where the host allows it the pane runs with `inputs/` read-only at the kernel (`scripts/fsguard.sh`), and each agent records what it measured as `inputs_guard`. The `inputs` tool lists the manifest. `done` records an `inputs_check`. The whole design is in [inputs.md](inputs.md) and ADR 0005.
+`--inputs DIR` copies a directory into `inputs/` and the harness keeps it as it was: `edit`, `write`, `claim_file` and `file_restore` refuse any path that is or resolves into `inputs/` (`read-only input: …`); the bash watch covers every file there through a stat cache, and a change, deletion or addition found after a shell call is healed from `.inputs-pristine/` and logged as `inputs_violation` with a `veto` post on the board; where the host allows it the pane runs with `inputs/` read-only at the kernel (`scripts/fsguard.sh`), and each agent records what it measured as `inputs_guard`. The `inputs` tool lists the manifest. `done` records an `inputs_check`. Several `--inputs` land each at `inputs/<name>/`, named in the manifest's `sets`; a set held in place is a link there, and every check walks through it. The whole design is in [inputs.md](inputs.md) and ADR 0005.
 
 ### Ledger (`record`, `ledger`, `ledger/`)
 

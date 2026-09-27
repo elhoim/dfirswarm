@@ -6,7 +6,7 @@
  * touch. No VM is started here (tests/vm-integration.test.ts does that).
  */
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { execFileSync, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -550,6 +550,48 @@ test("a seat's hub token comes from the run's seat-tokens file, never the spec, 
   } catch (err) {
     assert.doesNotMatch(String(err), /0123456789abcdef/);
   }
+});
+
+test("the VM's probe walks each set held in place through its link, probes each set's own mount, and counts one set as it always did", async () => {
+  // The probe's evidence check, as the guest runs it; the write and no-exec
+  // probes are stand-ins that say what they were asked about.
+  const block = PROBE_SCRIPT.match(/inputs = os\.path\.join\(S, "inputs"\)\n[\s\S]*?\nelse:\n {4}out\["inputs"\] = "absent"\n/);
+  assert.ok(block, "the probe's evidence check was not found");
+  const dir = await mkdtemp(join(tmpdir(), "probe-sets-"));
+  after(() => rm(dir, { recursive: true, force: true }));
+  const ev = join(dir, "ev");
+  await mkdir(join(ev, "laptop", "users"), { recursive: true });
+  await mkdir(join(ev, "phone"), { recursive: true });
+  await writeFile(join(ev, "laptop", "users", "ntuser.dat"), "hive");
+  await symlink("users/ntuser.dat", join(ev, "laptop", "hive-link"));
+  await writeFile(join(ev, "phone", "sms.db"), "sqlite");
+  const probe = async (S: string, sets?: string[]): Promise<{ out: { inputs?: string; inputs_files?: number; inputs_exec?: string }; probed: Array<[string, string]> }> => {
+    const py = `import json, os\nS = ${JSON.stringify(S)}\nout = {}\nprobed = []\ndef can_write(path):\n    probed.append(["w", path])\n    return "ro"\ndef mount_noexec(path):\n    probed.append(["x", path])\n    return "noexec"\n${block![0]}print(json.dumps({"out": out, "probed": probed}))\n`;
+    const env = { ...process.env, SWARM_INPUT_SETS: sets ? JSON.stringify(sets) : "" };
+    return JSON.parse(execFileSync("python3", ["-c", py], { encoding: "utf8", env }));
+  };
+  // Two sets held in place: inputs/ holds a link per set, each set its own
+  // mount, and the kickoff names them to the VM (it does not read inputs.json).
+  const two = join(dir, "two");
+  await mkdir(join(two, "inputs"), { recursive: true });
+  await symlink(join(ev, "laptop"), join(two, "inputs", "laptop"));
+  await symlink(join(ev, "phone"), join(two, "inputs", "phone"));
+  const got = await probe(two, ["laptop", "phone", "../etc", "gone"]);
+  assert.equal(got.out.inputs_files, 3, "a file in each set and a link inside one, and neither set's own link");
+  assert.equal(got.out.inputs, "ro");
+  assert.equal(got.out.inputs_exec, "noexec");
+  const laptop = await realpath(join(ev, "laptop"));
+  const phone = await realpath(join(ev, "phone"));
+  for (const want of [["w", join(laptop, ".vm-probe")], ["w", join(phone, ".vm-probe")], ["x", join(laptop, ".probe")], ["x", join(phone, ".probe")]]) {
+    assert.ok(got.probed.some((p) => p[0] === want[0] && p[1] === want[1]), `the probe did not ask about ${want.join(" ")}: ${JSON.stringify(got.probed)}`);
+  }
+  // One set held in place: inputs/ is the link, as it always was.
+  const one = join(dir, "one");
+  await mkdir(one, { recursive: true });
+  await symlink(join(ev, "laptop"), join(one, "inputs"));
+  const single = await probe(one);
+  assert.equal(single.out.inputs_files, 2);
+  assert.deepEqual(single.probed, [["w", join(laptop, ".vm-probe")], ["x", join(laptop, ".probe")]]);
 });
 
 test("the VM's probe shows its seat's token before anything else on the hub socket, and nothing when the run has none", async () => {

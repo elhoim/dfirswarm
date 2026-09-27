@@ -21,7 +21,7 @@ it is refused or undone. Results go in `work/`, where the usual claims apply.
 | Clone | `.inputs-pristine/` — the same bytes once more (an APFS clone or a reflink where the filesystem has them, a copy elsewhere). The harness heals from it. |
 | Manifest | `inputs.json` — the source path, when it was copied, every file with its size and its sha256, sha1 and md5 (from one read, to set beside an imager's acquisition hashes), every link with its target, every FIFO, socket or device by its kind, `source_checked`, and which guard the panes got. A name that is not UTF-8 (a Windows-1254 name from an archive, on ext4) is kept exactly as base64 in `path_b64` (`link_b64` for a link's target) beside a readable `path`, and every check compares names as those bytes. |
 | Contract | `SWARM.md` gains an **Inputs (read-only)** section: the rule, the file list, what happens on a write. |
-| Registry | `inputs: {source, files, bytes, enforce, guard}` on the run, so the console can show it. |
+| Registry | `inputs: {source, files, bytes, enforce, guard}` on the run, so the console can show it (and `sets`, each with its own count, when there are several). |
 | Pane hook | With a kernel guard available, `.zsh/.zshenv`, `.bash/.bashrc` + `.bash/.bash_profile` and `.fsguard/plan.txt`; the workspace gets `ZDOTDIR` pointing at the first, and `HOME` at `.bash/` when the account's login shell is bash (below). |
 
 Limits: none by default, on size or on file count: evidence is as large as
@@ -51,6 +51,56 @@ run at kickoff, and custody re-hashes the evidence in full at stop against it
 (a custody that runs out of time says which files it did not re-read).
 `--inputs-image` is macOS-only (`hdiutil`) in either mode: there is no Linux
 path and no read-only virtio-blk attach to a VM yet.
+
+## Several sets
+
+A case can have more than one piece of evidence: a laptop and a phone, a
+disk image and a memory image taken apart, the logs of three servers.
+`--inputs` may be given once for each:
+
+```
+scripts/swarm.sh start … --inputs ~/cases/42/laptop --inputs ~/cases/42/phone
+```
+
+Each set lands at `inputs/<name>/`, `<name>` being its directory's name as
+given (`inputs/laptop/`, `inputs/phone/`); a link names a set otherwise
+(`ln -s /mnt/b/case case-b`, then `--inputs case-b` is `inputs/case-b/`).
+One set is `inputs/` itself, exactly as before: the same paths, the same
+manifest, nothing in it about sets.
+
+Every other flag applies to every set: all are copied, or all held in place
+(`--inputs-bind`, and a VM run's default), `--inputs-copy` copies all of
+them, and `--no-verify-copy`, `--inputs-enforce` and `--inputs-hashes` hold
+for all. The kickoff refuses, before anything is written: a directory given
+twice, one set inside another (the same evidence twice), two sets that
+would be one directory under `inputs/` (the same name, compared without
+regard to case, as a case-insensitive volume compares it), and a name that
+begins with a dot or is not UTF-8 on one line. `--inputs-image` stays one
+image and is not combined with `--inputs`.
+
+| | One set | Several sets |
+| --- | --- | --- |
+| Copied | `inputs/` is the copy; `.inputs-pristine/` its clone | `inputs/<name>/` each; `.inputs-pristine/<name>/` each; every set checked against its own source (a difference is named under its set) |
+| Held in place | `inputs/` is a link to the source | `inputs/` is the run's own directory, read-only, holding a link per set at `inputs/<name>` |
+| Ceilings | `--inputs-max-mb`, `--inputs-max-files` | the same ceilings, for the sets together |
+| Kernel guard (host run) | one `--ro` rule on `inputs/` | the rule on `inputs/`, and one per set held in place; the guard recorded is the weakest any set got |
+| Each VM | the source mounted read-only and no-exec where the link leads | each set's source mounted so; a link from one set into another stays within the evidence |
+| `inputs.json` | `source`, `files`, … | the same, with every set's files under `inputs/<name>/`, `source` naming every set's source (comma-separated, for a reader that shows one line), and `sets: [{name, path, source, files, bytes}]` in the order given |
+
+A citation of an input names its set: `input:laptop/Users/…/NTUSER.DAT`
+(the path under `inputs/`). An acquisition hash in `--inputs-hashes` is
+matched by its path under `inputs/` (`laptop/disk.E01`) or by a name that is
+unique across every set.
+
+Every check of the evidence goes through a set's link only when the
+manifest names that set: the agents' check and their bash watch, the pack's
+`check_inputs`, each VM's probe (which counts every set's names and probes
+each set's own mount), the job workers' mounts and host custody, which
+re-hashes each file through its set's link. Any other link directly under
+`inputs/` is a name of its own, found as an addition. The catalogue follows
+links as it always did, so it reaches every set. A manifest written before
+sets existed has no `sets`, and every one of these reads it as it always
+did.
 
 ## Three layers, from the tool call down to the kernel
 
@@ -149,6 +199,14 @@ refuses a symlink or anything that resolves outside it, and passes the path
 to `swarm.sh --inputs`. Without a root the form says so and prints the
 command that names one.
 
+Several sets are chosen one at a time: the same picker adds a set, and each
+chosen one is a chip beneath it that removes it again. A set whose name is
+already chosen (the same name under another root) is not offered, since
+both would be `inputs/<name>/`. The request's `inputs` is then a list of
+set ids (`["0:laptop", "1:phone"]`, one `--inputs` each, in order); one set
+is sent as it always was. A disk image is one set's, so it is offered only
+while one set is chosen.
+
 The card also chooses how the evidence is attached: *copy* (the default, a
 read-only copy under `inputs/`, with an optional size ceiling in MB), *bind
 in place* (`--inputs-bind`, no copy, the source itself held read-only by the
@@ -205,6 +263,9 @@ healed, and the final check.
 ## Proof
 
 `tests/inputs.test.sh` (kickoff behaviours and `fsguard.sh` on the host),
-`tests/dry-run.test.ts` § read-only inputs (refusals, detection, healing),
-`tests/ui-server.test.ts` (the library route, the kickoff, the view), and
-the runs in [verified-runs.md](verified-runs.md).
+`tests/inputs-copy.test.sh` (the copy and the manifest, one set and
+several), `tests/microvm-flags.test.sh` (a VM run's evidence, sets
+included), `tests/dry-run.test.ts` § read-only inputs (refusals, detection,
+healing), `tests/custody.test.ts`, `tests/ui-server.test.ts` (the library
+route, the kickoff, the view), and the runs in
+[verified-runs.md](verified-runs.md).

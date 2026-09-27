@@ -9,11 +9,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { DERIVED, JobService, SHORT_JOB_SECONDS, type JobServiceOptions } from "../scripts/job-service.ts";
+import { boundInputSets, DERIVED, JobService, SHORT_JOB_SECONDS, type JobServiceOptions } from "../scripts/job-service.ts";
 import { storePaths, verifyJournalText } from "../scripts/evidence-store.ts";
 import { localWorker } from "./job-service-worker.ts";
 import type { WorkerSpec } from "../scripts/vm.ts";
@@ -121,6 +121,36 @@ test("a command job is accepted before it runs, its output sealed and every step
   assert.match(posts[0][1], new RegExp(`Job ${job.id} \\(command\\) done: 1 file\\(s\\)`));
   assert.ok(existsSync(join(P.jobs, job.id, "job.json")));
   await svc.stop("test over");
+});
+
+test("several sets held in place: each set's directory is in a job's reach where its link leads, read-only and no-exec", async () => {
+  const S = sandbox();
+  const ev = mkdtempSync(join(tmpdir(), "jobs-sets-"));
+  mkdirSync(join(ev, "laptop"));
+  mkdirSync(join(ev, "phone"));
+  writeFileSync(join(ev, "phone", "sms.db"), "sqlite");
+  symlinkSync(join(ev, "laptop"), join(S, "inputs", "laptop"));
+  symlinkSync(join(ev, "phone"), join(S, "inputs", "phone"));
+  // Only a set the manifest names, whose link is there, and whose name is one directory.
+  writeFileSync(join(S, "inputs.json"), JSON.stringify({ files: [], sets: [{ name: "laptop" }, { name: "phone" }, { name: "../etc" }, { name: "gone" }] }));
+  const sets = [realpathSync(join(ev, "laptop")), realpathSync(join(ev, "phone"))];
+  assert.deepEqual(boundInputSets(S), sets);
+  const { svc } = service(S);
+  await svc.start();
+  const r = await svc.submit("a1", { kind: "command", command: "cat inputs/phone/sms.db", inputs: ["all"] });
+  assert.ok(r.ok, !r.ok ? r.reason : "");
+  const job = await until(svc, r.job.id);
+  assert.equal(job.status, "ok");
+  assert.equal(readFileSync(join(storePaths(S).jobs, job.id, "stdout.log"), "utf8"), "sqlite");
+  const started = verifyJournalText(readFileSync(storePaths(S).journal, "utf8")).lines.find((l) => l.type === "job_started" && l.job === job.id)!;
+  const acc = started.accessible as Array<{ path: string; access: string }>;
+  for (const path of [join(S, "inputs"), ...sets]) {
+    assert.ok(acc.some((a) => a.path === path && a.access === "read-only, no-exec"), `${path} is not in the job's reach, read-only and no-exec: ${JSON.stringify(acc)}`);
+  }
+  await svc.stop("test over");
+  // One set, or a copy: nothing beyond inputs/ itself.
+  writeFileSync(join(S, "inputs.json"), JSON.stringify({ files: [] }));
+  assert.deepEqual(boundInputSets(S), []);
 });
 
 test("a pack or forged tool runs sealed, its arguments checked against its manifest, {OUT} naming the job's directory", async () => {

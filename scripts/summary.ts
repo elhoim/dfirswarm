@@ -483,11 +483,15 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   if (!inputs) {
     lines.push("No read-only inputs were given to this swarm.", "");
   } else {
+    // Several sets: each named at inputs/<name>/ with its source.
+    const from = inputs.sets?.length
+      ? `${inputs.sets.length} sets (${inputs.sets.map((set) => `\`${set.path}/\` from \`${set.source}\``).join(", ")})`
+      : `\`${inputs.source}\``;
     const arrived = (inputs as { held?: string }).held === "bind"
-      ? `used in place from \`${inputs.source}\` (no copy; ${inputs.guard === "microvm" ? "mounted read-only into every VM" : "kernel guard " + inputs.guard})`
+      ? `used in place from ${from} (no copy; ${inputs.guard === "microvm" ? "mounted read-only into every VM" : "kernel guard " + inputs.guard})`
       : (inputs as { held?: string }).held === "image"
-        ? `attached as a read-only image from \`${inputs.source}\``
-        : `copied from \`${inputs.source}\` ${inputs.copied_at || "at an unknown time"}`;
+        ? `attached as a read-only image from ${from}`
+        : `copied from ${from} ${inputs.copied_at || "at an unknown time"}`;
     lines.push(
       `Inputs ${arrived}: ${inputs.files.length} file${inputs.files.length === 1 ? "" : "s"}, ${bytesHuman(inputs.bytes)}; enforcement asked ${inputs.enforce}, kickoff guard ${inputs.guard}.`,
       "",

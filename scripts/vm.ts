@@ -639,14 +639,29 @@ out["tool_output"] = can_write(os.path.join(S, "tool-output", A, ".vm-probe"))
 out["session"] = can_write(os.path.join(S, ".pi-sessions", A, ".vm-probe"))
 inputs = os.path.join(S, "inputs")
 if os.path.exists(inputs):
-    out["inputs"] = can_write(os.path.join(os.path.realpath(inputs), ".vm-probe"))
+    top = os.path.realpath(inputs)
+    # Several sets held in place: inputs/ holds a link per set, each to its
+    # own mount, and the kickoff names them (SWARM_INPUT_SETS, from
+    # inputs.json, which is not read here: it can be hundreds of megabytes).
+    # Each is probed and walked; one set, or a copy, is inputs/ alone.
+    try:
+        listed = json.loads(os.environ.get("SWARM_INPUT_SETS") or "[]")
+    except ValueError:
+        listed = []
+    sets = [x for x in listed if isinstance(x, str) and x and "/" not in x and os.path.islink(os.path.join(top, x))] if isinstance(listed, list) else []
+    held = [os.path.realpath(os.path.join(top, name)) for name in sets]
+    answers = [can_write(os.path.join(r, ".vm-probe")) for r in [top] + held]
+    out["inputs"] = next((a for a in answers if a != "ro"), "ro")
     # Names, the way the manifest counts them: files, and links as links
-    # (never followed — a link loop would never end).
+    # (never followed — a link loop would never end), a set's link only
+    # where it leads.
     n = 0
-    for root, dirs, files in os.walk(os.path.realpath(inputs)):
-        n += len(files) + sum(1 for d in dirs if os.path.islink(os.path.join(root, d)))
+    for walked in [top] + held:
+        for root, dirs, files in os.walk(walked):
+            n += len(files) + sum(1 for d in dirs if os.path.islink(os.path.join(root, d)) and not (root == top and d in sets))
     out["inputs_files"] = n
-    out["inputs_exec"] = mount_noexec(os.path.join(os.path.realpath(inputs), ".probe"))
+    execs = [mount_noexec(os.path.join(r, ".probe")) for r in (held or [top])]
+    out["inputs_exec"] = next((e for e in execs if e != "noexec"), "noexec")
 else:
     out["inputs"] = "absent"
 # The model's hosts, reached the way Pi will: a TCP connection through the

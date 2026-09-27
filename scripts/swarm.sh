@@ -130,7 +130,8 @@ The options a run usually needs:
   --isolation host   Agents as processes on this host, unisolated (default: a microVM each)
 
 Evidence, when the goal is a case rather than a task:
-  --inputs DIR       DIR, read-only in every VM (a host run gets a guarded copy)
+  --inputs DIR       DIR, read-only in every VM (a host run gets a guarded copy);
+                     repeat it for several sets, each at inputs/<name>/
   --catalog          Run the standard first pass over the inputs before agents start
   --toolbox SETS     Check the tools a case needs: dfir, crypto, linux (or auto, off)
   --quarantine       Nothing under work/extracted/ can execute (always, in a VM)
@@ -174,7 +175,7 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
       [--no-self-compact] [--compact-at SPEC] [--compact-warn-at SPEC] [--compact-notice-at SPEC]
       [--compact-prompt-file FILE] [--compact-model P/ID] [--inbox-page-chars N]
       [--allow-install] [--no-pypi] [--no-read DIR]...
-      [--tools-from DIR] [--inputs DIR] [--inputs-enforce auto|on|off]
+      [--tools-from DIR] [--inputs DIR]... [--inputs-enforce auto|on|off]
       [--inputs-max-mb N] [--inputs-max-files N] [--catalog] [--toolbox SETS|auto|off] [--toolbox-required]
       [--quarantine] [--case-id ID] [--examiner NAME] [--allow-host HOST]...
       [--no-netguard] [--local-only] [--playwright] [--probe-violation]
@@ -316,6 +317,10 @@ Evidence
                       detected and healed from a pristine copy; and where the host
                       allows it the panes run with inputs/ read-only at the kernel
                       (macOS sandbox-exec, Linux mount namespace: scripts/fsguard.sh).
+                      Repeatable: several sets each land at inputs/<name>/, <name>
+                      being the directory's name as given (a link names it
+                      otherwise); one set is inputs/ itself, as it always was.
+                      Every other --inputs flag applies to all of them.
   --inputs-bind       With --inputs DIR: no copy. inputs/ links to DIR and the
                       kernel holds DIR itself read-only in every pane (the same
                       --ro rule, on the resolved path). Needs a kernel guard —
@@ -324,9 +329,10 @@ Evidence
   --inputs-enforce M  auto (default): a kernel guard where the host can, otherwise a
                       warning and detect-and-heal. on: refuse to start without one.
                       off: detect and heal only.
-  --inputs-max-mb N   Refuse an inputs directory above N MB. Unset by default:
-                      evidence is as large as the case is, and a ceiling that
-                      refuses the real job is not a safety rail.
+  --inputs-max-mb N   Refuse an inputs directory above N MB (several sets:
+                      together). Unset by default: evidence is as large as the
+                      case is, and a ceiling that refuses the real job is not a
+                      safety rail.
   --inputs-max-files N  The same for the file count, also unset by default.
   --catalog           Before the agents start, run the standard first pass over the
                       inputs into catalog/, read-only: partition table, file list,
@@ -1304,6 +1310,25 @@ fsguard_mode() {
   echo "${mode:-none}"
 }
 
+# The weaker of two pane guards, for several evidence sets under one run:
+# nothing is weakest, then Landlock alone, then a mount namespace, then
+# both or seatbelt (never both on one host). An empty one is no guard yet.
+weaker_guard() { # <mode> <mode>
+  local a="$1" b="$2"
+  [[ -n "$a" ]] || { echo "$b"; return 0; }
+  [[ -n "$b" ]] || { echo "$a"; return 0; }
+  if [[ "$(guard_rank "$b")" -lt "$(guard_rank "$a")" ]]; then echo "$b"; else echo "$a"; fi
+}
+
+guard_rank() { # <mode>
+  case "$1" in
+    none) echo 0 ;;
+    landlock) echo 1 ;;
+    mountns) echo 2 ;;
+    *) echo 3 ;;
+  esac
+}
+
 # Whether a guard mode gives a write allowlist. seatbelt and landlock do by
 # construction; the namespace modes do when bubblewrap is there to make the
 # root read-only, and fsguard's dry run says so when it is not.
@@ -1459,31 +1484,48 @@ copy_tree_as_is() { # <src dir> <dst dir>
   fi
 }
 
-install_inputs() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4" verify="${5:-1}" quarantine="${6:-0}" entry name
-  mkdir -p "$sandbox/inputs" "$sandbox/.inputs-pristine"
-  # A link inside the evidence is the evidence's own and is copied as the
-  # link it is. `cp -RL` followed every link on this host: an extracted
-  # root's etc/hosts or etc/localtime (absolute links) became this
-  # machine's own files, in the evidence, vouched for by the manifest. Only a
-  # link the operator put at the top of --inputs (`ln -s
-  # /mnt/evidence/case.E01 ./`) is followed, to the file or directory it
-  # names; what is inside a linked directory keeps its links.
-  copy_tree_as_is "$src" "$sandbox/inputs"
+# One evidence set copied into <dst>. A link inside the evidence is the
+# evidence's own and is copied as the link it is. `cp -RL` followed every
+# link on this host: an extracted root's etc/hosts or etc/localtime
+# (absolute links) became this machine's own files, in the evidence, vouched
+# for by the manifest. Only a link the operator put at the top of --inputs
+# (`ln -s /mnt/evidence/case.E01 ./`) is followed, to the file or directory
+# it names; what is inside a linked directory keeps its links.
+copy_evidence_set() { # <src dir> <dst dir>
+  local src="$1" dst="$2" entry name
+  copy_tree_as_is "$src" "$dst"
   while IFS= read -r -d '' entry; do
     name="$(basename "$entry")"
-    [[ -L "$sandbox/inputs/$name" ]] || continue
+    [[ -L "$dst/$name" ]] || continue
     if [[ -d "$entry" ]]; then
-      rm -f "$sandbox/inputs/$name"
-      mkdir -p "$sandbox/inputs/$name"
-      copy_tree_as_is "$entry" "$sandbox/inputs/$name"
+      rm -f "$dst/$name"
+      mkdir -p "$dst/$name"
+      copy_tree_as_is "$entry" "$dst/$name"
     elif [[ -f "$entry" ]]; then
-      rm -f "$sandbox/inputs/$name"
-      cp -Lc "$entry" "$sandbox/inputs/$name" 2>/dev/null || cp -L "$entry" "$sandbox/inputs/$name"
+      rm -f "$dst/$name"
+      cp -Lc "$entry" "$dst/$name" 2>/dev/null || cp -L "$entry" "$dst/$name"
     fi
     # A link to nothing, or to a device or a FIFO, stays the link it is:
     # nothing is read through it.
   done < <(find "$src/" -mindepth 1 -maxdepth 1 -type l -print0)
+}
+
+# One set (`src`) is copied as inputs/ itself, as it always was. Several are
+# given as <name> <src> pairs after the six arguments, `src` then empty, and
+# each is copied to inputs/<name>/; the rest is one step over all of inputs/.
+install_inputs() { # <sandbox> <src> <enforce> <guard> [verify] [quarantine] [<name> <src>]...
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" verify="${5:-1}" quarantine="${6:-0}" set_i
+  shift "$(( $# < 6 ? $# : 6 ))"
+  local sets=("$@")
+  mkdir -p "$sandbox/inputs" "$sandbox/.inputs-pristine"
+  if [[ ${#sets[@]} -eq 0 ]]; then
+    copy_evidence_set "$src" "$sandbox/inputs"
+  else
+    for ((set_i = 0; set_i + 1 < ${#sets[@]}; set_i += 2)); do
+      mkdir -p "$sandbox/inputs/${sets[set_i]}"
+      copy_evidence_set "${sets[set_i + 1]}" "$sandbox/inputs/${sets[set_i]}"
+    done
+  fi
   # Said, not followed: links in the evidence that lead out of it (an
   # extracted root's absolute ones) name this host's files, not the case's.
   python3 - "$sandbox/inputs" <<'PY' >&2 || true
@@ -1519,7 +1561,7 @@ PY
   # modes here, once, before anything is read-only.
   find "$sandbox/inputs" "$sandbox/.inputs-pristine" -type f -exec chmod a-x {} + 2>/dev/null || true
   chmod -R a-w "$sandbox/inputs" "$sandbox/.inputs-pristine"
-  write_inputs_manifest "$sandbox" "$src" "$enforce" "$guard" copy "$verify" "$quarantine"
+  write_inputs_manifest "$sandbox" "$src" "$enforce" "$guard" copy "$verify" "$quarantine" ${sets[@]+"${sets[@]}"}
 }
 
 # The one walk over inputs/ that every way of holding the evidence writes
@@ -1533,12 +1575,21 @@ PY
 # `quarantine` is the kickoff's --quarantine (on by --catalog too), recorded
 # here because a goal's checks run in the sandbox and cannot read the
 # registry: a case that must not extract without it checks this key.
-write_inputs_manifest() {
+#
+# Several sets come as <name> <src> pairs after the seven arguments (`src`
+# then empty): each is walked at inputs/<name>/ and checked against its own
+# source, the file list is every set's, and `sets` says which is which. One
+# set writes the manifest it always did, with no `sets`.
+write_inputs_manifest() { # <sandbox> <src> <enforce> <guard> <held> [verify] [quarantine] [<name> <src>]...
   local sandbox="$1" src="$2" enforce="$3" guard="$4" held="$5" verify="${6:-0}" quarantine="${7:-0}"
-  python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" "$verify" "$quarantine" <<'PY'
+  shift "$(( $# < 7 ? $# : 7 ))"
+  python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" "$verify" "$quarantine" "$@" <<'PY'
 import base64, hashlib, json, os, stat as _stat, sys, time
-sandbox, src, enforce, guard, held, verify, quarantine = sys.argv[1:]
+sandbox, src, enforce, guard, held, verify, quarantine = sys.argv[1:8]
 root = os.path.join(sandbox, "inputs")
+# (name, source, where it is under inputs/): one set is inputs/ itself.
+pairs = sys.argv[8:]
+sets = [(pairs[i], pairs[i + 1], os.path.join(root, pairs[i])) for i in range(0, len(pairs) - 1, 2)] or [(None, src, root)]
 
 def named(entry, key, value):
     # A name is bytes on disk. One that is not UTF-8 (a Windows-1254 or
@@ -1558,65 +1609,72 @@ def rel(abs_path):
     return os.path.relpath(abs_path, sandbox).replace(os.sep, "/")
 
 files, total = [], 0
-for dirpath, dirnames, filenames in os.walk(root):
-    dirnames.sort()
-    # A link inside the evidence — to a file or to a directory — is recorded
-    # as the link it is, with its target, and never followed: the same rule
-    # the agents' check, the pack's check_inputs and host custody apply, so
-    # a link that was there at the start is never reported as changed.
-    for name in sorted(filenames + [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]):
-        abs_path = os.path.join(dirpath, name)
-        if os.path.islink(abs_path):
-            target = os.readlink(abs_path)
-            entry = {}
-            named(entry, "path", rel(abs_path))
-            entry["bytes"] = 0
-            entry["sha256"] = hashlib.sha256(b"link:" + os.fsencode(target)).hexdigest()
-            named(entry, "link", target)
-            files.append(entry)
-            continue
-        if not os.path.isfile(abs_path):
-            # A FIFO, a socket or a device node (an extracted Linux root has
-            # them): recorded by its kind and never opened, so every walk —
-            # the VMs' probe, the agents' check, custody — counts the same
-            # names and a change of kind is a change.
-            mode = os.lstat(abs_path).st_mode
-            kind = "fifo" if _stat.S_ISFIFO(mode) else "socket" if _stat.S_ISSOCK(mode) else "char" if _stat.S_ISCHR(mode) else "block" if _stat.S_ISBLK(mode) else None
-            if kind:
+# Each set's entries in `files`, [from, to), and its bytes.
+spans = []
+for set_name, set_src, set_root in sets:
+    start, start_total = len(files), total
+    # A set held in place is the link at inputs/<name> (or inputs/ itself):
+    # the walk starts through it.
+    for dirpath, dirnames, filenames in os.walk(set_root):
+        dirnames.sort()
+        # A link inside the evidence — to a file or to a directory — is recorded
+        # as the link it is, with its target, and never followed: the same rule
+        # the agents' check, the pack's check_inputs and host custody apply, so
+        # a link that was there at the start is never reported as changed.
+        for name in sorted(filenames + [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]):
+            abs_path = os.path.join(dirpath, name)
+            if os.path.islink(abs_path):
+                target = os.readlink(abs_path)
                 entry = {}
                 named(entry, "path", rel(abs_path))
                 entry["bytes"] = 0
-                entry["sha256"] = hashlib.sha256(("special:" + kind).encode()).hexdigest()
-                entry["special"] = kind
+                entry["sha256"] = hashlib.sha256(b"link:" + os.fsencode(target)).hexdigest()
+                named(entry, "link", target)
                 files.append(entry)
-            continue
-        # The three digests a court and an imager's log speak in, from one
-        # read: SHA-256 is what every check here compares; MD5 and SHA-1 are
-        # for matching the acquisition hashes an imager recorded.
-        sha256, sha1, md5 = hashlib.sha256(), hashlib.sha1(), hashlib.md5()
-        with open(abs_path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                sha256.update(chunk)
-                sha1.update(chunk)
-                md5.update(chunk)
-        st = os.stat(abs_path)
-        total += st.st_size
-        entry = {}
-        named(entry, "path", rel(abs_path))
-        entry.update({
-            "bytes": st.st_size,
-            "sha256": sha256.hexdigest(),
-            "sha1": sha1.hexdigest(),
-            "md5": md5.hexdigest(),
-            # The stat after the chmod (copy) or as found (bind, image); the
-            # harness trusts the sha while these hold.
-            "mtime_ms": st.st_mtime_ns // 1_000_000,
-            "ctime_ms": st.st_ctime_ns // 1_000_000,
-        })
-        if held != "copy":
-            entry["mode"] = oct(st.st_mode & 0o777)[2:]
-            entry["links"] = st.st_nlink
-        files.append(entry)
+                continue
+            if not os.path.isfile(abs_path):
+                # A FIFO, a socket or a device node (an extracted Linux root has
+                # them): recorded by its kind and never opened, so every walk —
+                # the VMs' probe, the agents' check, custody — counts the same
+                # names and a change of kind is a change.
+                mode = os.lstat(abs_path).st_mode
+                kind = "fifo" if _stat.S_ISFIFO(mode) else "socket" if _stat.S_ISSOCK(mode) else "char" if _stat.S_ISCHR(mode) else "block" if _stat.S_ISBLK(mode) else None
+                if kind:
+                    entry = {}
+                    named(entry, "path", rel(abs_path))
+                    entry["bytes"] = 0
+                    entry["sha256"] = hashlib.sha256(("special:" + kind).encode()).hexdigest()
+                    entry["special"] = kind
+                    files.append(entry)
+                continue
+            # The three digests a court and an imager's log speak in, from one
+            # read: SHA-256 is what every check here compares; MD5 and SHA-1 are
+            # for matching the acquisition hashes an imager recorded.
+            sha256, sha1, md5 = hashlib.sha256(), hashlib.sha1(), hashlib.md5()
+            with open(abs_path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    sha256.update(chunk)
+                    sha1.update(chunk)
+                    md5.update(chunk)
+            st = os.stat(abs_path)
+            total += st.st_size
+            entry = {}
+            named(entry, "path", rel(abs_path))
+            entry.update({
+                "bytes": st.st_size,
+                "sha256": sha256.hexdigest(),
+                "sha1": sha1.hexdigest(),
+                "md5": md5.hexdigest(),
+                # The stat after the chmod (copy) or as found (bind, image); the
+                # harness trusts the sha while these hold.
+                "mtime_ms": st.st_mtime_ns // 1_000_000,
+                "ctime_ms": st.st_ctime_ns // 1_000_000,
+            })
+            if held != "copy":
+                entry["mode"] = oct(st.st_mode & 0o777)[2:]
+                entry["links"] = st.st_nlink
+            files.append(entry)
+    spans.append((start, len(files), total - start_total))
 
 # A copy is checked against its source, name by name, kind and size: a
 # case-sensitive source (ext4, an SMB share) with File.txt and file.txt, or
@@ -1642,29 +1700,33 @@ if held == "copy":
                 p = os.path.join(dirpath, name)
                 seen[os.fsencode(os.path.relpath(p, top))] = kind_size(os.lstat(p))
         return seen
-    source = {}
-    for name in os.listdir(src):
-        p = os.path.join(src, name)
-        key = os.fsencode(name)
-        if os.path.islink(p) and os.path.isdir(p):
-            source[key] = ("dir", 0)
-            for sub, ks in walk(p).items():
-                source[key + b"/" + sub] = ks
-        elif os.path.islink(p) and os.path.isfile(p):
-            source[key] = kind_size(os.stat(p))
-        else:
-            source[key] = kind_size(os.lstat(p))
-            if source[key][0] == "dir":
+    # Each set against its own source; a name is said under inputs/, with
+    # its set's name in front when there are several.
+    for set_name, set_src, set_root in sets:
+        under = b"" if set_name is None else os.fsencode(set_name) + b"/"
+        source = {}
+        for name in os.listdir(set_src):
+            p = os.path.join(set_src, name)
+            key = os.fsencode(name)
+            if os.path.islink(p) and os.path.isdir(p):
+                source[key] = ("dir", 0)
                 for sub, ks in walk(p).items():
                     source[key + b"/" + sub] = ks
-    copy = walk(root)
-    for key in sorted(source):
-        if key not in copy:
-            problems.append("not in the copy: " + key.decode("utf-8", "replace"))
-        elif copy[key] != source[key]:
-            problems.append("differs from its source (%s %d, copied as %s %d): %s" % (source[key] + copy[key] + (key.decode("utf-8", "replace"),)))
-    for key in sorted(set(copy) - set(source)):
-        problems.append("in the copy but not in the source: " + key.decode("utf-8", "replace"))
+            elif os.path.islink(p) and os.path.isfile(p):
+                source[key] = kind_size(os.stat(p))
+            else:
+                source[key] = kind_size(os.lstat(p))
+                if source[key][0] == "dir":
+                    for sub, ks in walk(p).items():
+                        source[key + b"/" + sub] = ks
+        copy = walk(set_root)
+        for key in sorted(source):
+            if key not in copy:
+                problems.append("not in the copy: " + (under + key).decode("utf-8", "replace"))
+            elif copy[key] != source[key]:
+                problems.append("differs from its source (%s %d, copied as %s %d): %s" % (source[key] + copy[key] + ((under + key).decode("utf-8", "replace"),)))
+        for key in sorted(set(copy) - set(source)):
+            problems.append("in the copy but not in the source: " + (under + key).decode("utf-8", "replace"))
 
 def disp(value):
     return os.fsencode(value).decode("utf-8", "replace")
@@ -1677,12 +1739,17 @@ def disp(value):
 content_check = None
 if held == "copy" and verify == "1" and not problems:
     started = time.time()
-    regular = [e for e in files if "special" not in e and "link" not in e and "link_b64" not in e]
-    want_bytes = sum(e["bytes"] for e in regular)
+    # Each regular file with its set's source and where that set is under
+    # the sandbox: inputs/, or inputs/<name>/.
+    regular = []
+    for (set_name, set_src, set_root), (lo, hi, _) in zip(sets, spans):
+        under = b"inputs/" if set_name is None else b"inputs/" + os.fsencode(set_name) + b"/"
+        regular += [(e, os.fsencode(set_src), under) for e in files[lo:hi] if "special" not in e and "link" not in e and "link_b64" not in e]
+    want_bytes = sum(e["bytes"] for e, _, _ in regular)
     done_bytes, next_note, hashed, differ = 0, 2 << 30, 0, []
-    for e in regular:
+    for e, set_src_b, under in regular:
         raw = base64.b64decode(e["path_b64"]) if "path_b64" in e else e["path"].encode("utf-8")
-        source_path = os.path.join(os.fsencode(src), raw[len(b"inputs/"):])
+        source_path = os.path.join(set_src_b, raw[len(under):])
         digest = hashlib.sha256()
         try:
             with open(source_path, "rb") as f:
@@ -1701,15 +1768,21 @@ if held == "copy" and verify == "1" and not problems:
     content_check = {"by": "content", "files": hashed, "mismatches": len(differ), "seconds": round(time.time() - started, 1)}
     problems.extend(differ)
 
-manifest = {
-    "source": disp(src),
+# Several sets: `source` names every one, for a reader that shows one line,
+# and `sets` says which set each name under inputs/ is, and where it came from.
+manifest = {"source": disp(src) if sets[0][0] is None else ", ".join(disp(set_src) for _, set_src, _ in sets)}
+if sets[0][0] is not None:
+    manifest["sets"] = [
+        {"name": set_name, "path": "inputs/" + set_name, "source": disp(set_src), "files": hi - lo, "bytes": set_bytes}
+        for (set_name, set_src, _), (lo, hi, set_bytes) in zip(sets, spans)]
+manifest.update({
     "copied_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "files": files,
     "bytes": total,
     "enforce": enforce,
     "guard": guard,
     "digests": ["sha256", "sha1", "md5"],
-    "quarantine": quarantine == "1"}
+    "quarantine": quarantine == "1"})
 if held == "copy":
     if problems:
         manifest["source_checked"] = "MISMATCH" if content_check is None else dict(content_check)
@@ -1730,7 +1803,7 @@ with open(out_path, "w", encoding="utf-8") as f:
     json.dump(manifest, f, indent=2)
     f.write("\n")
 if problems:
-    sys.stderr.write("BLOCKER: the copy of the evidence in %s does not match its source %s (%d name%s):\n" % (root, disp(src), len(problems), "" if len(problems) == 1 else "s"))
+    sys.stderr.write("BLOCKER: the copy of the evidence in %s does not match its source %s (%d name%s):\n" % (root, manifest["source"], len(problems), "" if len(problems) == 1 else "s"))
     for line in problems:
         sys.stderr.write("  %s\n" % line)
     sys.stderr.write("A case-insensitive volume merges names that differ only in case or Unicode form, and a short read leaves a file short. Put the run on a volume that keeps the source's names (a case-sensitive APFS volume or the source's own file system), or use --inputs-bind to hold the evidence in place.\n")
@@ -1752,17 +1825,56 @@ PY
 # The point is 13.8 GB of evidence that no longer has to be copied to be
 # guarded. A Linux mount namespace does this best; seatbelt's deny on the
 # resolved path does it too.
-bind_inputs() {
+#
+# Several sets (<name> <src> pairs after the five arguments, `src` then
+# empty): inputs/ is a directory of the run's own, read-only, holding one
+# link per set at inputs/<name>, and the guard holds each source (one --ro
+# rule per set, as a VM mounts each).
+bind_inputs() { # <sandbox> <src> <enforce> <guard> [quarantine] [<name> <src>]...
   local sandbox="$1" src="$2" enforce="$3" guard="$4" quarantine="${5:-0}"
+  shift "$(( $# < 5 ? $# : 5 ))"
   if [[ "$guard" == "none" ]]; then
     echo "BLOCKER: --inputs-bind needs a kernel guard (seatbelt, a Linux namespace, or Landlock); this host has none, so the source would be writable by the panes. Use --inputs to copy." >&2
     exit 2
   fi
   local real
-  real="$(cd "$src" && pwd -P)"
   rm -rf "${sandbox:?}/inputs"
-  ln -s "$real" "$sandbox/inputs"
-  write_inputs_manifest "$sandbox" "$real" "$enforce" "$guard" bind 0 "$quarantine"
+  if [[ $# -lt 2 ]]; then
+    real="$(cd "$src" && pwd -P)"
+    ln -s "$real" "$sandbox/inputs"
+    write_inputs_manifest "$sandbox" "$real" "$enforce" "$guard" bind 0 "$quarantine"
+    return 0
+  fi
+  local sets=()
+  mkdir -p "$sandbox/inputs"
+  while [[ $# -ge 2 ]]; do
+    real="$(cd "$2" && pwd -P)"
+    ln -s "$real" "$sandbox/inputs/$1"
+    sets+=("$1" "$real")
+    shift 2
+  done
+  chmod a-w "$sandbox/inputs"
+  write_inputs_manifest "$sandbox" "" "$enforce" "$guard" bind 0 "$quarantine" "${sets[@]}"
+}
+
+# The directories of the evidence held in place, resolved, one per line: the
+# source inputs/ links to (one set), or each set's link under inputs/
+# (several, named in inputs.json). Nothing for a copy or an attached image.
+# Every reader that mounts or guards the evidence where it lies reads this.
+inputs_bound_dirs() { # <sandbox>
+  local sandbox="$1" name
+  if [[ -L "$sandbox/inputs" ]]; then
+    (cd "$sandbox/inputs" && pwd -P)
+    return 0
+  fi
+  # A copy has no link at the top of inputs/ (or one of the evidence's own):
+  # the manifest, which can be hundreds of megabytes, is read only when there
+  # is a link there that may be a set.
+  [[ -f "$sandbox/inputs.json" && -d "$sandbox/inputs" && -n "$(find "$sandbox/inputs" -mindepth 1 -maxdepth 1 -type l -print -quit 2>/dev/null)" ]] || return 0
+  while IFS= read -r name; do
+    [[ -n "$name" && -L "$sandbox/inputs/$name" ]] || continue
+    (cd "$sandbox/inputs/$name" 2>/dev/null && pwd -P) || echo "WARN: inputs/$name leads nowhere now; that set is not mounted or guarded." >&2
+  done < <(jq -r '.sets[]?.name' "$sandbox/inputs.json")
 }
 
 # The manifest for an attached image. Same shape as install_inputs writes, so
@@ -1773,10 +1885,11 @@ manifest_attached_inputs() {
   write_inputs_manifest "$sandbox" "$src" on image image 0 "$quarantine"
 }
 
+# Several sets are listed each with its own count, under `sets`.
 inputs_record() {
   local sandbox="$1"
   if [[ -f "$sandbox/inputs.json" ]]; then
-    jq -c '{source, files: (.files | length), bytes, enforce, guard}' "$sandbox/inputs.json"
+    jq -c '{source, files: (.files | length), bytes, enforce, guard} + (if (.sets | type) == "array" then {sets: [.sets[] | {name, source, files, bytes}]} else {} end)' "$sandbox/inputs.json"
   else
     echo "null"
   fi
@@ -1784,7 +1897,7 @@ inputs_record() {
 
 inputs_summary() {
   local sandbox="$1"
-  jq -r '"\(.files | length) file(s), \((.bytes / 1024 | floor)) KB"' "$sandbox/inputs.json"
+  jq -r '"\(.files | length) file(s), \((.bytes / 1024 | floor)) KB" + (if (.sets | type) == "array" then " in \(.sets | length) sets" else "" end)' "$sandbox/inputs.json"
 }
 
 # The pane's shell re-runs itself under fsguard. Herdr starts pi from the
@@ -2197,8 +2310,11 @@ import("'"$ROOT"'/extensions/protocol.ts").then((m) =>
 # `inputs:` and `tags:` lines are the picker's, not the case's). Either way,
 # what is actually under the inputs has the last word: a virtual or encrypted
 # volume there needs the crypto set's readers whatever the goal says.
-toolbox_sets_from_goal() { # <goal file, metadata block removed> [<explicit sets>] [<inputs dir>]
-  local file="$1" explicit="${2:-}" inputs="${3:-}" text sets="" one
+toolbox_sets_from_goal() { # <goal file, metadata block removed> [<explicit sets>] [<inputs dir>]...
+  local file="$1" explicit="${2:-}" text sets="" one inputs=()
+  shift
+  [[ $# -gt 0 ]] && shift
+  for one in "$@"; do [[ -n "$one" && -d "$one" ]] && inputs+=("$one"); done
   if [[ -n "$explicit" ]]; then
     for one in ${explicit//,/ }; do
       [[ "$one" == dfir ]] || sets="${sets:+$sets,}$one"
@@ -2210,7 +2326,7 @@ toolbox_sets_from_goal() { # <goal file, metadata block removed> [<explicit sets
   case ",$sets," in
     *,crypto,*) ;;
     *)
-      if [[ -n "$inputs" && -d "$inputs" ]] && [[ -n "$(find -H "$inputs" -type f \( -iname '*.vhd' -o -iname '*.vhdx' -o -iname '*.vmdk' -o -iname '*.qcow2' -o -iname '*.luks' -o -iname '*.hc' -o -iname '*.tc' \) -print 2>/dev/null | head -1)" ]]; then
+      if [[ ${#inputs[@]} -gt 0 ]] && [[ -n "$(find -H "${inputs[@]}" -type f \( -iname '*.vhd' -o -iname '*.vhdx' -o -iname '*.vmdk' -o -iname '*.qcow2' -o -iname '*.luks' -o -iname '*.hc' -o -iname '*.tc' \) -print 2>/dev/null | head -1)" ]]; then
         sets="crypto${sets:+,$sets}"
       fi ;;
   esac
@@ -2335,7 +2451,23 @@ if os.path.isfile(manifest_path):
         guard_line = "the host attached the image read-only, and its kernel refuses every write"
     else:
         guard_line = "a shell write is detected after the fact and undone from a pristine copy"
-    if m.get("held") == "bind" and guard == "microvm":
+    sets = m.get("sets") if isinstance(m.get("sets"), list) else []
+    if sets:
+        # Several sets, each at inputs/<name>/: every one named with where
+        # it came from, however many there are.
+        listed = "; ".join(
+            f"`{st.get('path', '')}/` from `{st.get('source', '')}` ({st.get('files', 0)} file(s))" for st in sets
+        )
+        if m.get("held") == "bind" and guard == "microvm":
+            how = "each mounted into your VM in place: there is no copy, and the host holds every source read-only for every agent. "
+        elif m.get("held") == "bind":
+            how = "each `inputs/<set>` a link to its source in place: there is no copy, and the kernel holds every source read-only in every pane. "
+        elif guard == "microvm":
+            how = "each copied into its `inputs/<set>/`, read-only, and mounted read-only into your VM. "
+        else:
+            how = "each copied into its `inputs/<set>/`. "
+        arrival = f"{len(files)} file(s), {kb} KB, in {len(sets)} sets: {listed}; {how}"
+    elif m.get("held") == "bind" and guard == "microvm":
         arrival = (
             f"{len(files)} file(s), {kb} KB, from `{m.get('source', '')}`, mounted into your VM in place: "
             "there is no copy, and the host holds the source read-only for every agent. "
@@ -3240,6 +3372,10 @@ cmd_start() {
   local sandbox="" label="" wall=8 wall_set=0 hard=0 start_agents=1 playwright=0 probe=0
   local use_netguard=1 key_from_env=0 forging=0 allow_install=0 install_hosts=1 allow_pack_secrets=0
   local inputs_dir="" inputs_image="" inputs_enforce="auto" inputs_bind=0 inputs_max_mb="${SWARM_INPUTS_MAX_MB:-}" inputs_max_files="${SWARM_INPUTS_MAX_FILES:-}" inputs_guard="none"
+  # --inputs is repeatable: every directory given, in order, and once they
+  # are checked, each one's name under inputs/. inputs_dir is the first (the
+  # only one, for one set), and says whether there is evidence at all.
+  local inputs_dirs=() inputs_names=()
   local allow_hosts="" tools_from="" catalog=0 toolbox="off" toolbox_required=0 quarantine=0 cap_per_agent="" cap_per_agent_tokens="" case_id="" examiner=""
   local packs=""
   local allow_synced=0 custody_timeout="${SWARM_CUSTODY_TIMEOUT:-14400}"
@@ -3326,9 +3462,12 @@ cmd_start() {
       --allow-install) allow_install=1; shift ;;
       --allow-pack-secrets) allow_pack_secrets=1; shift ;;
       --no-pypi) install_hosts=0; shift ;;
-      --inputs) inputs_dir="$2"; shift 2 ;;
+      --inputs) inputs_dirs+=("$2"); inputs_dir="${inputs_dirs[0]}"; shift 2 ;;
       --inputs-bind) inputs_bind=1; shift ;;
-      --inputs-image) inputs_image="$2"; shift 2 ;;
+      --inputs-image)
+        # One image: a second used to replace the first without a word.
+        [[ -z "$inputs_image" ]] || { echo "BLOCKER: --inputs-image takes one image; it was given twice ($inputs_image, ${2:-})." >&2; exit 2; }
+        inputs_image="$2"; shift 2 ;;
       --catalog) catalog=1; shift ;;
       --toolbox) toolbox="$2"; shift 2 ;;
       --tools-from) tools_from="$2"; shift 2 ;;
@@ -3545,11 +3684,56 @@ cmd_start() {
     inputs_enforce="on"
   fi
   if [[ -n "$inputs_dir" ]]; then
-    if [[ ! -d "$inputs_dir" ]]; then
-      echo "BLOCKER: --inputs $inputs_dir is not a directory." >&2
-      exit 2
+    # Every set is checked the same way; one set is inputs/ itself, several
+    # land each at inputs/<name>/.
+    local set_i set_j set_dir set_real set_name set_key
+    for set_i in "${!inputs_dirs[@]}"; do
+      set_dir="${inputs_dirs[$set_i]}"
+      if [[ ! -d "$set_dir" ]]; then
+        echo "BLOCKER: --inputs $set_dir is not a directory." >&2
+        exit 2
+      fi
+      set_real="$(cd "$set_dir" && pwd -P)"
+      # A set's name under inputs/ is its directory's name as given, so a
+      # link (`ln -s /mnt/b/case case-b`) can name it otherwise; `.` names
+      # nothing, and then the resolved directory's name is taken.
+      set_name="${set_dir%"${set_dir##*[!/]}"}"
+      set_name="${set_name##*/}"
+      case "$set_name" in ""|.|..) set_name="$(basename "$set_real")" ;; esac
+      inputs_dirs[$set_i]="$set_real"
+      inputs_names[$set_i]="$set_name"
+    done
+    inputs_dir="${inputs_dirs[0]}"
+    if [[ ${#inputs_dirs[@]} -gt 1 ]]; then
+      for set_i in "${!inputs_dirs[@]}"; do
+        set_name="${inputs_names[$set_i]}"
+        # A name every reader can hold: a directory under inputs/ that is
+        # neither hidden nor a path, in UTF-8 on one line.
+        if [[ "$set_name" == .* || "$set_name" == */* || "$set_name" == *[[:cntrl:]]* ]] || ! printf '%s' "$set_name" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+          echo "BLOCKER: --inputs ${inputs_dirs[$set_i]} would be the set inputs/$set_name/, and a set's name must be UTF-8 on one line and not begin with a dot. Give it another name through a link (ln -s ${inputs_dirs[$set_i]} case-a; --inputs case-a)." >&2
+          exit 2
+        fi
+        set_key="$(printf '%s' "$set_name" | tr '[:upper:]' '[:lower:]')"
+        for ((set_j = 0; set_j < set_i; set_j++)); do
+          if [[ "${inputs_dirs[$set_i]}" == "${inputs_dirs[$set_j]}" ]]; then
+            echo "BLOCKER: --inputs ${inputs_dirs[$set_i]} is given twice." >&2
+            exit 2
+          fi
+          case "${inputs_dirs[$set_i]}/" in
+            "${inputs_dirs[$set_j]}/"*) echo "BLOCKER: --inputs ${inputs_dirs[$set_i]} is inside --inputs ${inputs_dirs[$set_j]}: the same evidence would be handed over twice." >&2; exit 2 ;;
+          esac
+          case "${inputs_dirs[$set_j]}/" in
+            "${inputs_dirs[$set_i]}/"*) echo "BLOCKER: --inputs ${inputs_dirs[$set_j]} is inside --inputs ${inputs_dirs[$set_i]}: the same evidence would be handed over twice." >&2; exit 2 ;;
+          esac
+          # Compared without regard to case: on a case-insensitive volume
+          # the two would be one directory.
+          if [[ "$set_key" == "$(printf '%s' "${inputs_names[$set_j]}" | tr '[:upper:]' '[:lower:]')" ]]; then
+            echo "BLOCKER: --inputs ${inputs_dirs[$set_j]} and --inputs ${inputs_dirs[$set_i]} would both be inputs/$set_name/: a set is named after its directory. Give one another name through a link (ln -s ${inputs_dirs[$set_i]} $set_name-2; --inputs $set_name-2)." >&2
+            exit 2
+          fi
+        done
+      done
     fi
-    inputs_dir="$(cd "$inputs_dir" && pwd -P)"
     case "$inputs_enforce" in
       auto|on|off) ;;
       *) echo "BLOCKER: --inputs-enforce must be auto, on or off (got $inputs_enforce)." >&2; exit 2 ;;
@@ -3568,18 +3752,28 @@ cmd_start() {
     # and `--inputs-max-files`, each unset unless asked for. What does scale
     # with the file count is the integrity sweep, which fingerprints every
     # input; that is a cost to watch, not a reason to refuse the evidence.
+    # Several sets are held to one ceiling, together: it is one run's evidence.
+    local inputs_are="--inputs $inputs_dir is" inputs_have="--inputs $inputs_dir has" together=""
+    if [[ ${#inputs_dirs[@]} -gt 1 ]]; then
+      inputs_are="the ${#inputs_dirs[@]} --inputs sets are"
+      inputs_have="the ${#inputs_dirs[@]} --inputs sets have"
+      together=" together"
+    fi
     if [[ -n "$inputs_max_mb" ]]; then
       if ! [[ "$inputs_max_mb" =~ ^[0-9]+$ ]]; then
         echo "BLOCKER: --inputs-max-mb must be a whole number of MB (got $inputs_max_mb)." >&2
         exit 2
       fi
-      local inputs_kb
+      local inputs_kb=0 set_kb
       # Follow symlinks: examiners typically `ln -s /mnt/evidence/case.E01 ./`,
       # and `cp -RL` copies the target. `du -sk` / `find -type f` would count
       # the link as a few kilobytes and zero files.
-      inputs_kb="$(du -skL "$inputs_dir" | cut -f1)"
+      for set_real in "${inputs_dirs[@]}"; do
+        set_kb="$(du -skL "$set_real" | cut -f1)"
+        inputs_kb=$((inputs_kb + set_kb))
+      done
       if [[ "$inputs_kb" -gt $((inputs_max_mb * 1024)) ]]; then
-        echo "BLOCKER: --inputs $inputs_dir is $((inputs_kb / 1024)) MB; the limit is ${inputs_max_mb} MB (--inputs-max-mb)." >&2
+        echo "BLOCKER: $inputs_are $((inputs_kb / 1024)) MB$together; the limit is ${inputs_max_mb} MB (--inputs-max-mb)." >&2
         exit 2
       fi
     fi
@@ -3588,10 +3782,13 @@ cmd_start() {
         echo "BLOCKER: --inputs-max-files must be a whole number (got $inputs_max_files)." >&2
         exit 2
       fi
-      local inputs_files
-      inputs_files="$(find -L "$inputs_dir" -type f | wc -l | tr -d ' ')"
+      local inputs_files=0 set_files
+      for set_real in "${inputs_dirs[@]}"; do
+        set_files="$(find -L "$set_real" -type f | wc -l | tr -d ' ')"
+        inputs_files=$((inputs_files + set_files))
+      done
       if [[ "$inputs_files" -gt "$inputs_max_files" ]]; then
-        echo "BLOCKER: --inputs $inputs_dir has $inputs_files files; the limit is $inputs_max_files (--inputs-max-files)." >&2
+        echo "BLOCKER: $inputs_have $inputs_files files$together; the limit is $inputs_max_files (--inputs-max-files)." >&2
         exit 2
       fi
     fi
@@ -3599,38 +3796,49 @@ cmd_start() {
       # Held by the host: every VM mounts it read-only (virtio-fs, enforced
       # on the host side), so no pane-side guard is needed or asked for.
       inputs_guard="microvm"
-      # A VM sees only what is mounted into it: a link inside the evidence
-      # directory that leads out of it (`ln -s /mnt/evidence/case.E01 ./`)
-      # would be a dangling name in every VM. Said now, not found by an agent.
-      local link target outside=()
-      while IFS= read -r -d '' link; do
-        [[ -n "$link" ]] || continue
-        target="$(perl -MCwd=abs_path -le 'print abs_path(shift) // ""' "$link")"
-        if [[ -z "$target" ]]; then
-          outside+=("${link#"$inputs_dir"/} -> $(readlink "$link" 2>/dev/null || echo '?') (dangling)")
-        elif [[ "$target" != "$inputs_dir" && "$target" != "$inputs_dir/"* ]]; then
-          outside+=("${link#"$inputs_dir"/} -> $target")
+      for set_real in "${inputs_dirs[@]}"; do
+        # A VM sees only what is mounted into it: a link inside the evidence
+        # directory that leads out of it (`ln -s /mnt/evidence/case.E01 ./`)
+        # would be a dangling name in every VM. Said now, not found by an
+        # agent. Into another set is not out: every set is mounted.
+        local link target outside=() within
+        while IFS= read -r -d '' link; do
+          [[ -n "$link" ]] || continue
+          target="$(perl -MCwd=abs_path -le 'print abs_path(shift) // ""' "$link")"
+          if [[ -z "$target" ]]; then
+            outside+=("${link#"$set_real"/} -> $(readlink "$link" 2>/dev/null || echo '?') (dangling)")
+            continue
+          fi
+          within=0
+          for set_dir in "${inputs_dirs[@]}"; do
+            [[ "$target" == "$set_dir" || "$target" == "$set_dir/"* ]] && within=1
+          done
+          [[ "$within" -eq 1 ]] || outside+=("${link#"$set_real"/} -> $target")
+        done < <(find "$set_real" -type l -print0)
+        # Writable is a file's bit, or a directory's (a name can be added,
+        # removed or renamed in it), on a volume that is not mounted read-only.
+        local ro_fs writable
+        ro_fs="$(python3 -c 'import os, sys; print(1 if os.statvfs(sys.argv[1]).f_flag & os.ST_RDONLY else 0)' "$set_real" 2>/dev/null || echo 0)"
+        writable="$(find "$set_real" \( -type f -o -type d \) -perm -u+w -print -quit 2>/dev/null)"
+        if [[ "$inputs_bind" -eq 1 && "$ro_fs" != 1 && -n "$writable" ]]; then
+          echo "WARN: the evidence in $set_real is writable by this account (${writable#"$set_real"/} and perhaps more: a file, or a directory whose names can change), on a volume mounted read-write. In a VM run it is held by the VMs' read-only mount and nothing else: the host (you, a tool, a sync client) can still change it. Make it read-only (chmod -R a-w), mount its volume read-only, or pass --inputs-copy to give the run its own read-only copy." >&2
         fi
-      done < <(find "$inputs_dir" -type l -print0)
-      # Writable is a file's bit, or a directory's (a name can be added,
-      # removed or renamed in it), on a volume that is not mounted read-only.
-      local ro_fs writable
-      ro_fs="$(python3 -c 'import os, sys; print(1 if os.statvfs(sys.argv[1]).f_flag & os.ST_RDONLY else 0)' "$inputs_dir" 2>/dev/null || echo 0)"
-      writable="$(find "$inputs_dir" \( -type f -o -type d \) -perm -u+w -print -quit 2>/dev/null)"
-      if [[ "$inputs_bind" -eq 1 && "$ro_fs" != 1 && -n "$writable" ]]; then
-        echo "WARN: the evidence in $inputs_dir is writable by this account (${writable#"$inputs_dir"/} and perhaps more: a file, or a directory whose names can change), on a volume mounted read-write. In a VM run it is held by the VMs' read-only mount and nothing else: the host (you, a tool, a sync client) can still change it. Make it read-only (chmod -R a-w), mount its volume read-only, or pass --inputs-copy to give the run its own read-only copy." >&2
-      fi
-      # A copy follows only the links at the top of --inputs (the
-      # operator's); deeper ones are the evidence's own and stay links, as
-      # the copy's own NOTE says.
-      if [[ ${#outside[@]} -gt 0 && "$inputs_bind" -eq 1 ]]; then
-        echo "BLOCKER: under --isolation microvm, --inputs $inputs_dir is mounted into each VM as it is, and these links lead out of it, so no VM could read them:" >&2
-        printf '  %s\n' "${outside[@]}" >&2
-        echo "Point --inputs at the directory that holds the files, put the files themselves (not links) in $inputs_dir, or pass --inputs-copy to copy what the links at its top point at into the run (links deeper in the tree are the evidence's own and are copied as links)." >&2
-        exit 2
-      fi
+        # A copy follows only the links at the top of --inputs (the
+        # operator's); deeper ones are the evidence's own and stay links, as
+        # the copy's own NOTE says.
+        if [[ ${#outside[@]} -gt 0 && "$inputs_bind" -eq 1 ]]; then
+          echo "BLOCKER: under --isolation microvm, --inputs $set_real is mounted into each VM as it is, and these links lead out of it, so no VM could read them:" >&2
+          printf '  %s\n' "${outside[@]}" >&2
+          echo "Point --inputs at the directory that holds the files, put the files themselves (not links) in $set_real, or pass --inputs-copy to copy what the links at its top point at into the run (links deeper in the tree are the evidence's own and are copied as links)." >&2
+          exit 2
+        fi
+      done
     else
-      inputs_guard="$(fsguard_mode "$inputs_dir" "$inputs_enforce")"
+      # Several sets, one guard for all of them: the weakest any of them got.
+      inputs_guard=""
+      for set_real in "${inputs_dirs[@]}"; do
+        inputs_guard="$(weaker_guard "$inputs_guard" "$(fsguard_mode "$set_real" "$inputs_enforce")")"
+      done
     fi
     if [[ "$inputs_enforce" == "on" && "$inputs_guard" == "none" ]]; then
       echo "BLOCKER: --inputs-enforce on, but this host has no kernel read-only mechanism (macOS sandbox-exec or Linux unprivileged user namespaces). Use --inputs-enforce auto to run with detect + heal only." >&2
@@ -3693,7 +3901,7 @@ STRIP
         # A goal given inline (the console's --goal) is not read for words:
         # it has no metadata block to say otherwise, and the console's form
         # names the sets itself.
-        goal_hint="$(toolbox_sets_from_goal "$(if [[ "$goal_source" != "--goal" ]]; then echo "$goal_file"; fi)" "$goal_toolbox" "$inputs_dir")"
+        goal_hint="$(toolbox_sets_from_goal "$(if [[ "$goal_source" != "--goal" ]]; then echo "$goal_file"; fi)" "$goal_toolbox" ${inputs_dirs[@]+"${inputs_dirs[@]}"})"
         if [[ -n "$goal_hint" ]]; then
           toolbox="$toolbox,$goal_hint"
           echo "NOTE: --toolbox auto reads the goal and adds: $goal_hint (say --toolbox dfir to refuse)." >&2
@@ -4257,14 +4465,15 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
   if [[ "$disk_encryption" == off ]]; then
     echo "WARN: the volume this run is kept on ($(dirname "$sandbox")) is not encrypted at rest: a lost or stolen disk hands over the evidence copy, the VMs' disks and everything the agents derived. Turn on FileVault (macOS) or keep runs on an encrypted volume (SWARM_RUNS_DIR)." >&2
   fi
-  if [[ -n "$inputs_dir" ]]; then
-    case "$inputs_dir/" in
-      "$sandbox/"*) echo "BLOCKER: --inputs $inputs_dir is inside the sandbox it would be copied into." >&2; exit 2 ;;
+  local set_real
+  for set_real in ${inputs_dirs[@]+"${inputs_dirs[@]}"}; do
+    case "$set_real/" in
+      "$sandbox/"*) echo "BLOCKER: --inputs $set_real is inside the sandbox it would be copied into." >&2; exit 2 ;;
     esac
     case "$sandbox/" in
-      "$inputs_dir/"*) echo "BLOCKER: the sandbox $sandbox is inside --inputs $inputs_dir." >&2; exit 2 ;;
+      "$set_real/"*) echo "BLOCKER: the sandbox $sandbox is inside --inputs $set_real." >&2; exit 2 ;;
     esac
-  fi
+  done
   if [[ "$CHECK_ONLY" -eq 1 ]]; then
     # What a real start checks once the sandbox exists, on this host: the
     # programs, the login shell, the keys Pi would use. Nothing is written.
@@ -4372,10 +4581,17 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   local quarantine_held=0
   if [[ "$quarantine" -eq 1 && "$inputs_guard" != "none" ]]; then quarantine_held=1; fi
   if [[ -n "$inputs_dir" ]]; then
+    # One set is inputs/ itself, as it always was. Several are named, each
+    # to land at inputs/<name>/, and none of them is `src`.
+    local set_src="$inputs_dir" set_pairs=() set_i
+    if [[ ${#inputs_dirs[@]} -gt 1 ]]; then
+      set_src=""
+      for set_i in "${!inputs_dirs[@]}"; do set_pairs+=("${inputs_names[$set_i]}" "${inputs_dirs[$set_i]}"); done
+    fi
     if [[ "$inputs_bind" -eq 1 ]]; then
-      bind_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$quarantine_held"
+      bind_inputs "$sandbox" "$set_src" "$inputs_enforce" "$inputs_guard" "$quarantine_held" ${set_pairs[@]+"${set_pairs[@]}"}
     else
-      install_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$verify_copy" "$quarantine_held"
+      install_inputs "$sandbox" "$set_src" "$inputs_enforce" "$inputs_guard" "$verify_copy" "$quarantine_held" ${set_pairs[@]+"${set_pairs[@]}"}
     fi
   elif [[ -n "$inputs_image" ]]; then
     attach_inputs_image "$sandbox" "$inputs_image" >/dev/null
@@ -4452,8 +4668,8 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     # In a throwaway VM of the run's image, like the toolbox: the tools the
     # first pass calls are the image's, not this host's; it reaches only the
     # hosts the operator allowed for the run.
-    local catalog_evidence=()
-    [[ -L "$sandbox/inputs" ]] && catalog_evidence+=(--evidence "$(cd "$sandbox/inputs" && pwd -P)")
+    local catalog_evidence=() bound
+    while IFS= read -r bound; do catalog_evidence+=(--evidence "$bound"); done < <(inputs_bound_dirs "$sandbox")
     [[ -f "$sandbox/inputs.device" ]] && catalog_evidence+=(--evidence "$sandbox/inputs")
     [[ -n "$allow_hosts" ]] && catalog_evidence+=(--allow-host "$allow_hosts")
     [[ "$use_netguard" -eq 0 ]] && catalog_evidence+=(--open-net)
@@ -4624,7 +4840,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     # be hidden and must not be claimed as hidden.
     local nr mp nr_real mp_real mounted=() mount_roots=("$ROOT/extensions" "$ROOT/scripts" "$ROOT/prompts" "$ROOT/node_modules" "$sandbox")
     while read -r mp; do [[ -n "$mp" ]] && mount_roots+=("$mp"); done <<< "$pack_dirs"
-    [[ -L "$sandbox/inputs" ]] && mount_roots+=("$(cd "$sandbox/inputs" && pwd -P)")
+    while IFS= read -r mp; do [[ -n "$mp" ]] && mount_roots+=("$mp"); done < <(inputs_bound_dirs "$sandbox")
     for nr in "${no_read[@]}"; do
       nr_real="$(cd "$nr" 2>/dev/null && pwd -P || printf '%s' "$nr")"
       for mp in "${mount_roots[@]}"; do
@@ -4720,6 +4936,12 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   fi
   if [[ -n "$inputs_dir" && "$inputs_guard" != "none" ]]; then
     guard_args+=(--ro "$sandbox/inputs")
+    # Several sets held in place: inputs/ holds only their links, and each
+    # set's own directory gets its rule (one set's link is resolved above).
+    if [[ ! -L "$sandbox/inputs" ]]; then
+      local bound
+      while IFS= read -r bound; do [[ -n "$bound" ]] && guard_args+=(--ro "$bound"); done < <(inputs_bound_dirs "$sandbox")
+    fi
     [[ -d "$sandbox/catalog" ]] && guard_args+=(--ro "$sandbox/catalog")
   fi
   if [[ "$quarantine" -eq 1 ]]; then
@@ -5070,7 +5292,11 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     echo "Inputs:       $(inputs_summary "$sandbox") from the image $inputs_image, attached read-only; the host kernel refuses every write, including from a container with CAP_SYS_ADMIN"
   fi
   if [[ -n "$inputs_dir" ]]; then
-    echo "Inputs:       $(inputs_summary "$sandbox") from $inputs_dir, read-only under inputs/; kernel guard: $(inputs_guard_label "$inputs_guard")"
+    if [[ ${#inputs_dirs[@]} -gt 1 ]]; then
+      echo "Inputs:       $(inputs_summary "$sandbox"), read-only, each under inputs/<set>/: $(jq -r '[.sets[] | "\(.name) from \(.source) (\(.files) file(s))"] | join("; ")' "$sandbox/inputs.json"); kernel guard: $(inputs_guard_label "$inputs_guard")"
+    else
+      echo "Inputs:       $(inputs_summary "$sandbox") from $inputs_dir, read-only under inputs/; kernel guard: $(inputs_guard_label "$inputs_guard")"
+    fi
     if [[ "$inputs_guard" == "none" ]]; then
       echo "WARN: no kernel read-only mechanism on this host; inputs/ is protected by the tool guard and by detect + heal only." >&2
     fi
@@ -7111,10 +7337,12 @@ vm_build_spec() { # <hub dir> <out file>
     chmod 444 "$sandbox/compact-prompt.md"
     compact_prompt_vm="$sandbox/compact-prompt.md"
   fi
-  if [[ -L "$sandbox/inputs" ]]; then
-    real="$(cd "$sandbox/inputs" && pwd -P)"
-    mounts+=("$(jq -nc --arg h "$real" '{host: $h, readonly: true, noexec: true}')")
-  elif [[ -f "$sandbox/inputs.device" ]]; then
+  # The evidence in place: its directory, or each set's, at its own path,
+  # where the link (inputs/, or inputs/<name>) leads.
+  while IFS= read -r real; do
+    [[ -n "$real" ]] && mounts+=("$(jq -nc --arg h "$real" '{host: $h, readonly: true, noexec: true}')")
+  done < <(inputs_bound_dirs "$sandbox")
+  if [[ -f "$sandbox/inputs.device" ]]; then
     # An attached image is its own filesystem on the host; it is shared as
     # itself rather than trusted to show through the sandbox's share.
     mounts+=("$(jq -nc --arg h "$sandbox/inputs" '{host: $h, readonly: true, noexec: true}')")
@@ -7133,6 +7361,11 @@ vm_build_spec() { # <hub dir> <out file>
     --arg kick "$sandbox/.kickoff" \
     '{SWARM_ID: $id, SWARM_HARD_KILL: $hard, SWARM_RUNS_DIR: $runs, TMPDIR: "/tmp", SWARM_KICKOFF: $kick}')"
   add_env() { env_json="$(jq -c --arg k "$1" --arg v "$2" '. + {($k): $v}' <<<"$env_json")"; }
+  # Several sets held in place: their names, for each VM's probe to walk
+  # through their links without reading inputs.json in a VM's small memory.
+  if [[ ! -L "$sandbox/inputs" && -n "$(inputs_bound_dirs "$sandbox")" ]]; then
+    add_env SWARM_INPUT_SETS "$(jq -c '[.sets[]?.name]' "$sandbox/inputs.json")"
+  fi
   if [[ -n "$pack_dirs" ]]; then
     add_env SWARM_PACK_DIRS "$(paste -sd: - <<< "$pack_dirs")"
     [[ "$PACK_SECRETS_ENV" != "{}" ]] && add_env SWARM_PACK_SECRETS "$PACK_SECRETS_ENV"

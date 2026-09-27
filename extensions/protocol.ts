@@ -6180,9 +6180,26 @@ export type InputFile = {
   link_b64?: string;
 };
 
-export type InputsManifest = {
-  /** Where the copy came from, as the operator named it. */
+/**
+ * One evidence set of several, each at inputs/<name>/: a directory of the
+ * copy, or a link to the directory held in place. One set is inputs/ itself
+ * and the manifest has no `sets`.
+ */
+export type InputSet = {
+  name: string;
+  /** `inputs/<name>`, where its files are. */
+  path: string;
+  /** Where it came from (resolved, for a set held in place). */
   source: string;
+  files: number;
+  bytes: number;
+};
+
+export type InputsManifest = {
+  /** Where the copy came from, as the operator named it; every set's, comma-separated, when there are several. */
+  source: string;
+  /** Several sets, each at inputs/<name>/; absent for one. */
+  sets?: InputSet[];
   /** How the evidence is held: `copy`, `bind` (in place) or `image`. */
   held?: string;
   copied_at: string;
@@ -6279,10 +6296,29 @@ export async function readInputsManifest(sandboxRoot: string): Promise<InputsMan
       enforce: typeof parsed.enforce === "string" ? parsed.enforce : "auto",
       guard: typeof parsed.guard === "string" ? parsed.guard : "none",
       ...(typeof (parsed as { held?: unknown }).held === "string" ? { held: (parsed as { held: string }).held } : {}),
+      ...(Array.isArray(parsed.sets) ? { sets: inputSetsOf(parsed.sets) } : {}),
     };
   } catch {
     return null;
   }
+}
+
+/** The `sets` of a manifest, each with a name that is one directory under inputs/. */
+function inputSetsOf(raw: unknown): InputSet[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === "object" && typeof (x as { name?: unknown }).name === "string")
+    .filter((x) => {
+      const name = x.name as string;
+      return name !== "" && name !== "." && name !== ".." && !name.includes("/") && !name.includes("\0");
+    })
+    .map((x) => ({
+      name: x.name as string,
+      path: `${INPUTS_DIR}/${x.name as string}`,
+      source: typeof x.source === "string" ? x.source : "",
+      files: Number(x.files) || 0,
+      bytes: Number(x.bytes) || 0,
+    }));
 }
 
 /**
@@ -6298,19 +6334,21 @@ export async function readInputsManifest(sandboxRoot: string): Promise<InputsMan
  */
 export async function listInputFiles(sandboxRoot: string): Promise<string[]> {
   const out: string[] = [];
+  const top = join(sandboxRoot, INPUTS_DIR);
+  const sets = await inputSetNames(sandboxRoot);
   async function walk(dir: string): Promise<void> {
     const entries = (await readdir(dir, { withFileTypes: true }).catch(() => [])).sort((a, b) =>
       a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
     );
     for (const entry of entries) {
       const abs = join(dir, entry.name);
-      if (entry.isDirectory()) await walk(abs);
+      if (entry.isDirectory() || (dir === top && entry.isSymbolicLink() && sets.has(entry.name))) await walk(abs);
       // Every name that is not a directory: a file, a link, and a FIFO,
       // socket or device node, which the manifest records by kind.
       else out.push(claimKey(sandboxRoot, abs));
     }
   }
-  await walk(join(sandboxRoot, INPUTS_DIR));
+  await walk(top);
   return out;
 }
 
@@ -6338,6 +6376,8 @@ function inputNameBytes(file: InputFile): Buffer {
 async function listInputEntries(sandboxRoot: string): Promise<Map<string, { display: string; abs: Buffer }>> {
   const out = new Map<string, { display: string; abs: Buffer }>();
   const slash = Buffer.from("/");
+  const top = Buffer.from(INPUTS_DIR);
+  const sets = await inputSetNames(sandboxRoot);
   async function walk(abs: Buffer, rel: Buffer): Promise<void> {
     const entries = (await readdir(abs, { withFileTypes: true, encoding: "buffer" }).catch(() => [])).sort((a, b) =>
       Buffer.compare(a.name as unknown as Buffer, b.name as unknown as Buffer),
@@ -6346,11 +6386,11 @@ async function listInputEntries(sandboxRoot: string): Promise<Map<string, { disp
       const name = entry.name as unknown as Buffer;
       const childAbs = Buffer.concat([abs, slash, name]);
       const childRel = Buffer.concat([rel, slash, name]);
-      if (entry.isDirectory()) await walk(childAbs, childRel);
+      if (entry.isDirectory() || (rel.equals(top) && entry.isSymbolicLink() && isUtf8(name) && sets.has(name.toString("utf8")))) await walk(childAbs, childRel);
       else out.set(byteKey(childRel), { display: childRel.toString("utf8"), abs: childAbs });
     }
   }
-  await walk(Buffer.from(join(sandboxRoot, INPUTS_DIR)), Buffer.from(INPUTS_DIR));
+  await walk(Buffer.from(join(sandboxRoot, INPUTS_DIR)), top);
   return out;
 }
 
@@ -6383,19 +6423,38 @@ async function digestsOfFile(abs: string | Buffer): Promise<{ sha256: string; sh
 }
 
 /** inputs.json per sandbox, re-read when its mtime moves, for the manifest-seeded cache below. */
-const manifestCache = new Map<string, { mtimeMs: number; byPath: Map<string, InputFile> }>();
+const manifestCache = new Map<string, { mtimeMs: number; byPath: Map<string, InputFile>; sets: Set<string> }>();
 
-async function manifestEntry(sandboxRoot: string, pathKey: string): Promise<InputFile | null> {
+async function cachedManifest(sandboxRoot: string): Promise<{ byPath: Map<string, InputFile>; sets: Set<string> } | null> {
   const file = join(sandboxRoot, INPUTS_MANIFEST);
   const info = await stat(file).catch(() => null);
   if (!info) return null;
   let entry = manifestCache.get(sandboxRoot);
   if (!entry || entry.mtimeMs !== info.mtimeMs) {
     const manifest = await readInputsManifest(sandboxRoot);
-    entry = { mtimeMs: info.mtimeMs, byPath: new Map((manifest?.files ?? []).map((f) => [f.path, f])) };
+    entry = {
+      mtimeMs: info.mtimeMs,
+      byPath: new Map((manifest?.files ?? []).map((f) => [f.path, f])),
+      sets: new Set((manifest?.sets ?? []).map((set) => set.name)),
+    };
     manifestCache.set(sandboxRoot, entry);
   }
-  return entry.byPath.get(pathKey) ?? null;
+  return entry;
+}
+
+async function manifestEntry(sandboxRoot: string, pathKey: string): Promise<InputFile | null> {
+  return (await cachedManifest(sandboxRoot))?.byPath.get(pathKey) ?? null;
+}
+
+/**
+ * The names of the sets directly under inputs/, when the manifest has
+ * several. A set held in place is a link there (inputs/<name> -> its
+ * directory), and every walk over the evidence goes through it, as it goes
+ * through inputs/ when one set is held in place: the set is the evidence,
+ * the link only where it is. Any other link is a name of its own.
+ */
+export async function inputSetNames(sandboxRoot: string): Promise<Set<string>> {
+  return (await cachedManifest(sandboxRoot))?.sets ?? new Set();
 }
 
 /**

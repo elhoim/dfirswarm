@@ -40,6 +40,10 @@ for entry in files:
     elif want_bytes is not None and int(want_bytes) != size:
         modified.append(rel)
 
+# Several sets, each at inputs/<name>/: one held in place is a link there,
+# walked through as the set it is.
+sets = [s.get("name") for s in (man.get("sets") or []) if isinstance(s, dict) and isinstance(s.get("name"), str)]
+
 added = []
 if os.path.isdir("inputs"):
     for root, _dirs, names in os.walk("inputs"):
@@ -47,6 +51,14 @@ if os.path.isdir("inputs"):
             rel = os.path.join(root, name).replace("\\", "/")
             if rel not in known:
                 added.append(rel)
+    for name in sets:
+        if "/" in name or not os.path.islink(os.path.join("inputs", name)):
+            continue
+        for root, _dirs, names in os.walk(os.path.join("inputs", name)):
+            for leaf in names:
+                rel = os.path.join(root, leaf).replace("\\", "/")
+                if rel not in known:
+                    added.append(rel)
 
 ok = not modified and not missing and not added
 print(json.dumps({

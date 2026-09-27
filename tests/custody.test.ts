@@ -30,6 +30,7 @@ import {
   attributionLine,
   egressLine,
   evidenceArrival,
+  evidenceFrom,
   herdrSocketLine,
   measuredGuardLine,
   vmRows,
@@ -111,6 +112,50 @@ test("custody re-hashes the evidence in full and says what changed, went missing
   assert.deepEqual(evidence(c).missing, ["inputs/mail/a.bin"]);
   assert.deepEqual(evidence(c).added, ["inputs/planted.txt"]);
   assert.match(c.summary, /^EVIDENCE CHANGED: 1 changed, 1 missing, 1 added/);
+});
+
+test("several sets held in place: custody re-hashes each through its link, finds what appeared in one, and walks no link the manifest does not name as a set", async () => {
+  const root = await mkdtemp(join(tmpdir(), "custody-sets-"));
+  const outside = await mkdtemp(join(tmpdir(), "custody-sets-ev-"));
+  dirs.push(root, outside);
+  await mkdir(join(outside, "laptop", "users"), { recursive: true });
+  await mkdir(join(outside, "phone"), { recursive: true });
+  await mkdir(join(outside, "other"), { recursive: true });
+  await writeFile(join(outside, "laptop", "users", "ntuser.dat"), "hive");
+  await writeFile(join(outside, "phone", "sms.db"), "sqlite");
+  await symlink("users/ntuser.dat", join(outside, "laptop", "hive-link"));
+  // inputs/ is the run's own directory with a link per set (swarm.sh bind_inputs).
+  await mkdir(join(root, "inputs"));
+  await symlink(join(outside, "laptop"), join(root, "inputs", "laptop"));
+  await symlink(join(outside, "phone"), join(root, "inputs", "phone"));
+  await writeFile(join(root, "inputs.json"), JSON.stringify({
+    source: `${join(outside, "laptop")}, ${join(outside, "phone")}`,
+    sets: [
+      { name: "laptop", path: "inputs/laptop", source: join(outside, "laptop"), files: 2, bytes: 4 },
+      { name: "phone", path: "inputs/phone", source: join(outside, "phone"), files: 1, bytes: 6 },
+    ],
+    copied_at: "2026-09-27T00:00:00Z",
+    bytes: 10,
+    enforce: "auto",
+    guard: "microvm",
+    held: "bind",
+    files: [
+      { path: "inputs/laptop/hive-link", bytes: 0, sha256: sha("link:users/ntuser.dat"), link: "users/ntuser.dat" },
+      { path: "inputs/laptop/users/ntuser.dat", bytes: 4, sha256: sha("hive") },
+      { path: "inputs/phone/sms.db", bytes: 6, sha256: sha("sqlite") },
+    ],
+  }));
+  let c = await takeCustody(root);
+  assert.equal(evidence(c).unchanged, true, c.summary);
+  assert.deepEqual([evidence(c).checked?.files, evidence(c).checked?.links], [2, 1]);
+  assert.deepEqual(evidence(c).added, [], "a set's link is where the set is, not a name added to the evidence");
+  await writeFile(join(outside, "phone", "planted.db"), "new");
+  await writeFile(join(outside, "laptop", "users", "ntuser.dat"), "HIVE");
+  // A link at the top that the manifest does not name as a set is a name, and never walked.
+  await symlink(join(outside, "other"), join(root, "inputs", "other"));
+  c = await takeCustody(root);
+  assert.deepEqual(evidence(c).changed, ["inputs/laptop/users/ntuser.dat"]);
+  assert.deepEqual(evidence(c).added, ["inputs/other", "inputs/phone/planted.db"]);
 });
 
 test("the manifest is checked against the kickoff's anchor outside the run: a rewritten manifest is caught, a missing one is said", async () => {
@@ -274,6 +319,11 @@ test("the report's custody lines know a microVM run", () => {
   assert.match(evidenceArrival({ source: "/ev", guard: "microvm", held: "bind" }), /mounted read-only/);
   assert.match(evidenceArrival({ source: "/ev", guard: "seatbelt", held: "bind" }), /linked to it/);
   assert.match(evidenceArrival({ source: "/ev", guard: "seatbelt" }), /^<p>Copied from/);
+  // Several sets: each named at inputs/<name>/ with where it came from.
+  const sets = [{ path: "inputs/laptop", source: "/ev/laptop", files: 3 }, { path: "inputs/phone", source: "/ev/phone", files: 1 }];
+  assert.match(evidenceArrival({ source: "/ev/laptop, /ev/phone", guard: "microvm", held: "bind", sets }), /^<p>Used in place from 2 sets \(<code>\/ev\/laptop<\/code> as <code>inputs\/laptop\/<\/code>, 3 files; <code>\/ev\/phone<\/code> as <code>inputs\/phone\/<\/code>, 1 file\)/);
+  assert.equal(evidenceFrom({ source: "/ev/laptop, /ev/phone", sets }), "in 2 sets: inputs/laptop/ from /ev/laptop (3 files); inputs/phone/ from /ev/phone (1 file)");
+  assert.equal(evidenceFrom({ source: "/ev" }), "from /ev", "one set is said as it always was");
 });
 
 test("each agent's VM is a custody row: what it could write, reach and was given, and its disk", () => {

@@ -309,6 +309,12 @@ export function createUiApp(options: UiAppOptions): UiApp {
         const slash = check.params.inputs_image.indexOf("/");
         check.params.inputs_image_path = await resolveInputImage(await inputsRoots(), check.params.inputs_image.slice(0, slash), check.params.inputs_image.slice(slash + 1));
         check.params.inputs = undefined;
+      } else if (check.params.inputs_sets?.length) {
+        // Several sets: each resolved under its root, in order.
+        const roots = await inputsRoots();
+        check.params.inputs_dirs = [];
+        for (const ref of check.params.inputs_sets) check.params.inputs_dirs.push(await resolveInputSet(roots, ref));
+        check.params.inputs_dir = check.params.inputs_dirs[0];
       } else if (check.params.inputs) {
         check.params.inputs_dir = await resolveInputSet(await inputsRoots(), check.params.inputs);
       }

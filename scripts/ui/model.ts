@@ -20,6 +20,7 @@ import {
   readNames,
   type ForgedToolManifest,
   type InputFile,
+  type InputSet,
   type LedgerEntry,
   type NameRecord,
 } from "../../extensions/protocol.ts";
@@ -55,7 +56,7 @@ export type RegistryRun = {
   self_compact?: { enabled: boolean; notice_at: string; warn_at: string; compact_at: string; prompt: string | null; model?: string | null; set?: { notice_at: boolean; warn_at: boolean; compact_at: boolean } };
   /** How much post text one inbox/wait delivery carries; absent on runs older than the bound. */
   inbox_page_chars?: number;
-  inputs?: { source: string; files: number; bytes: number; enforce: string; guard: string } | null;
+  inputs?: { source: string; files: number; bytes: number; enforce: string; guard: string; sets?: Array<{ name: string; source: string; files: number; bytes: number }> } | null;
   goal?: string;
   agents?: string[];
   started_at?: string;
@@ -174,6 +175,8 @@ export type SwarmRow = SwarmSummary & {
   tools_forged: number;
   /** The inputs directory the run was given, from inputs.json, or null: what a clean room is about. */
   inputs_source: string | null;
+  /** Every set's directory, one for a run of one set; null without inputs. The clean room matches any of them. */
+  inputs_sources: string[] | null;
   /** Where the agents ran. A record from before isolation was recorded is a host run. */
   isolation: "microvm" | "host";
   /** The last custody verdict, for a run that has one: clean, attention, or null before any stop or hub finish took one. */
@@ -307,6 +310,8 @@ export type SentinelInfo = {
 /** The read-only inputs a swarm was given, with what the trace says about them. */
 export type InputsView = {
   source: string;
+  /** Several sets, each at inputs/<name>/, with its source and its count; null for one. */
+  sets: InputSet[] | null;
   /** How the evidence is held: copy, bind (in place) or image; null on a manifest from before the field. */
   held: string | null;
   /** Where the agents ran: in a VM run the evidence is a read-only, no-exec mount in every VM, not a pane's guarded copy. */
@@ -641,7 +646,9 @@ async function enrichSummary(
   const run = runsById.get(summary.id);
   const sandbox = summary.sandbox;
   const toolsForged = await countForgedTools(sandbox);
-  const inputsSource = (await readInputsManifest(sandbox).catch(() => null))?.source ?? null;
+  const inputsManifest = await readInputsManifest(sandbox).catch(() => null);
+  const inputsSource = inputsManifest?.source ?? null;
+  const inputsSources = inputsManifest ? (inputsManifest.sets?.length ? inputsManifest.sets.map((set) => set.source) : [inputsManifest.source]) : null;
   const budgetRaw = await readFile(join(sandbox, "budget.json"), "utf8").catch(() => "{}");
   let started = run?.started_at ?? "";
   let wall = Number(run?.wall_clock_minutes) || 0;
@@ -731,6 +738,7 @@ async function enrichSummary(
     stop_reason: stopReason,
     tools_forged: toolsForged,
     inputs_source: inputsSource,
+    inputs_sources: inputsSources,
     isolation,
     custody: custodyView ? custodyView.verdict : null,
     hold: holdOf(run),
@@ -1763,6 +1771,7 @@ export async function inputsView(sandbox: string, events: readonly SwarmEvent[],
   const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
   return {
     source: manifest.source,
+    sets: manifest.sets?.length ? manifest.sets : null,
     held: typeof manifest.held === "string" ? manifest.held : null,
     isolation: run?.isolation?.mode === "microvm" ? "microvm" : "host",
     source_checked: extras.source_checked,
