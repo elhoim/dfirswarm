@@ -12,7 +12,7 @@ hw_run shwfido "HW Examiner" hw-examiner
 extra=()
 [[ "${DFIRSWARM_HW_FIDO_VERIFY:-}" == 1 ]] && extra+=(--fido-verify-required)
 
-say "Touch the YubiKey now, when it blinks, to make the key (type its FIDO PIN first if asked)."
+say "Touch the YubiKey every time it blinks, to make the key: two touches, sometimes three (type its FIDO PIN first if asked)."
 node_ts "$HW_ROOT/scripts/signers.ts" enroll --name "HW Examiner" --id hw-examiner --organisation "Hardware test" --competence "hardware test" --fido ${extra[@]+"${extra[@]}"} | tee "$HW_TMP/enrol.txt" || fail "the FIDO key was not enrolled"
 grep -q '^Key: *FIDO key SHA256:' "$HW_TMP/enrol.txt" || fail "the enrolment does not say it is a FIDO key"
 grep -E 'namespaces="dfirswarm-release,dfirswarm-package" sk-ssh-ed25519@openssh.com ' "$HW_TMP/enrol.txt" | sed 's/^ *//' > "$HW_TMP/register"

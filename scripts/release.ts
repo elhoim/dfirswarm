@@ -1028,7 +1028,7 @@ async function signOnTerminal(ctx: RunCtx, args: string[], say: (s: string) => v
         if (!tty) throw new Error(`the ${p.signer.secret === "passphrase" ? "key's passphrase" : "PIN"} is asked on the terminal, and there is none: run it at a terminal, or --secret-fd N`);
         secret = await readFromTty(prompt);
       }
-      if (p.signer.touch) say("Touch your key now, when it blinks.");
+      if (p.signer.touch) say("Touch your key now, every time it blinks.");
       return await sealPrepared(ctx, { nonce: p.nonce, shownSha256: p.report.html.sha256, examiner: p.signer.id, secret, consent, via: "cli", noTimestamp: args.includes("--no-timestamp"), say });
     } catch (err) {
       if (err instanceof WrongSecretError && fd === undefined && tty && attempt < 3) {

@@ -11,7 +11,7 @@ KIND="${DFIRSWARM_HW_KIND:-fido}"
 hw_run shwconsole "HW Examiner" hw-console
 case "$KIND" in
   fido)
-    say "Touch the YubiKey now, when it blinks, to make the key."
+    say "Touch the YubiKey every time it blinks, to make the key: two touches, sometimes three."
     node_ts "$HW_ROOT/scripts/signers.ts" enroll --name "HW Examiner" --id hw-console --organisation "Hardware test" --competence "hardware test" --fido >/dev/null || fail "the FIDO key was not enrolled" ;;
   pkcs11)
     node_ts "$HW_ROOT/scripts/signers.ts" enroll --name "HW Examiner" --id hw-console --organisation "Hardware test" --competence "hardware test" \

@@ -55,7 +55,7 @@ DFIRSWARM_HW_CA_INTERMEDIATE=/path/to/intermediate.pem \
 #    release prepared through its API, the prepared bytes fetched and hashed,
 #    and the seal sent with the secret read here with echo off and piped into
 #    the request body (never in an argument).
-DFIRSWARM_HW_TESTS=1 bash tests/hw/console.sh                          # a FIDO key: touch it twice
+DFIRSWARM_HW_TESTS=1 bash tests/hw/console.sh                          # a FIDO key: touch it every time it blinks
 DFIRSWARM_HW_TESTS=1 DFIRSWARM_HW_KIND=pkcs11 bash tests/hw/console.sh # the token: type the PIN once
 ```
 

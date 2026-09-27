@@ -587,13 +587,24 @@ export function enrollPerson(input: EnrollInput, home = dfirswarmHome(), secret:
     const opts = ["-O", `application=ssh:dfirswarm-${id}`];
     if (input.fidoVerifyRequired) opts.push("-O", "verify-required");
     if (input.fidoResident) opts.push("-O", "resident");
-    say("Touch the FIDO key when it blinks (twice if it asks for its PIN first).");
+    // Making a key takes more than one touch: ssh-keygen first picks the authenticator by a touch,
+    // and the key is made on the next one. Measured on a YubiKey 5 (OpenSSH 10.5).
+    say("Touch the FIDO key every time it blinks: making a key takes two touches, sometimes three.");
     // The key handle needs no passphrase of its own: the authenticator is what signs. The PIN, when asked, comes through askpass.
     const r = runWithSecret(keygen.path, ["-q", "-t", "ed25519-sk", ...opts, "-C", principal, "-N", "", "-f", keyPath], secret, { env: signingEnv(process.env, { askpass: true }), timeoutMs: 180_000, times: 3 });
     if (r.code !== 0 || !existsSync(`${keyPath}.pub`)) {
       rmSync(keyPath, { force: true });
       rmSync(`${keyPath}.pub`, { force: true });
-      return { why: `the FIDO key could not be made (${r.timedOut ? "timed out: was the key touched?" : r.err.trim().split("\n").filter((l) => !/touch your authenticator/i.test(l)).join(" ") || `exit ${r.code}`}): nothing was enrolled` };
+      // ssh-keygen reads an authenticator's "operation denied" (no touch in time) as a PIN it needs, asks
+      // askpass, and gives up after a few rounds with "Too many incorrect PINs". With no PIN given, an
+      // empty answer means no PIN (OpenSSH), so nothing reached the authenticator's PIN counter.
+      const pinLoop = /Too many incorrect PINs|PIN incorrect/.test(r.err) && !secret;
+      const why = r.timedOut
+        ? "timed out: was the key touched?"
+        : pinLoop
+          ? "the authenticator was not confirmed in time: touch it every time it blinks, two or three times; no PIN was sent to it"
+          : r.err.trim().split("\n").filter((l) => !/touch your authenticator/i.test(l)).join(" ") || `exit ${r.code}`;
+      return { why: `the FIDO key could not be made (${why}): nothing was enrolled` };
     }
     const pub = readFileSync(`${keyPath}.pub`, "utf8").trim();
     const fp = fingerprintOf(pub);

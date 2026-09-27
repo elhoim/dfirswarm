@@ -102,7 +102,7 @@ export function SecretDialog({
               <Input ref={ref} id="signing-secret" type="password" autoComplete="off" spellCheck={false} value={secret} onChange={(e) => setSecret(e.target.value)} disabled={busy} />
             </div>
           ) : null}
-          {kind === "fido" ? <InlineNote tone="neutral">Touch the FIDO key when it blinks, once the request is sent. It has to be plugged into this computer, the one the console runs on.</InlineNote> : null}
+          {kind === "fido" ? <InlineNote tone="neutral">Touch the FIDO key every time it blinks, once the request is sent (making a key takes two touches, sometimes three). It has to be plugged into this computer, the one the console runs on.</InlineNote> : null}
           {error ? <InlineNote tone="danger">{error}</InlineNote> : null}
           <div className="flex justify-end gap-2">
             <Button type="button" variant="secondary" disabled={busy} onClick={() => onOpenChange(false)}>

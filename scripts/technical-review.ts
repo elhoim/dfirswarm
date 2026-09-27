@@ -424,7 +424,7 @@ async function main(argv: string[]): Promise<number> {
           let secret: Buffer | null = null;
           try {
             secret = await takeSecret(reviewer, opt(args, "--secret-fd"));
-            if (keyNeeds(reviewer).touch) say("Touch your key now, when it blinks.");
+            if (keyNeeds(reviewer).touch) say("Touch your key now, every time it blinks.");
             const made = makeSignedRecord(place, reviewer, input, secret, { dropAgent: via === "console", home });
             await appendMade(runsDir, run, made.texts, made.base);
             say(`Signed:       review line ${made.record.seq}, ${reviewer.name}'s technical review (${made.record.outcome}), countersigned at line ${made.record.seq + 1} with ${reviewer.key.fingerprint}`);
@@ -465,7 +465,7 @@ async function main(argv: string[]): Promise<number> {
         let secret: Buffer | null = null;
         try {
           secret = await takeSecret(reviewer, opt(args, "--secret-fd"));
-          if (keyNeeds(reviewer).touch) say("Touch your key now, when it blinks.");
+          if (keyNeeds(reviewer).touch) say("Touch your key now, every time it blinks.");
           const line = await countersignRecord(runsDir, run, sandbox, reviewer.id, seq, secret, { via, home });
           say(`Signed:       review line ${seq}, countersigned at line ${line.seq}${line.after_release ? `, after release v${line.after_release.version}: the next amendment binds it` : ""}`);
           out({ ok: true, seq: line.seq, after_release: line.after_release ?? null });
@@ -492,7 +492,7 @@ async function main(argv: string[]): Promise<number> {
         let secret: Buffer | null = null;
         try {
           secret = await takeSecret(reviewer, opt(args, "--secret-fd"));
-          if (keyNeeds(reviewer).touch) say("Touch your key now, when it blinks.");
+          if (keyNeeds(reviewer).touch) say("Touch your key now, every time it blinks.");
           const made = makeSignedRecord(place, reviewer, input, secret, { dropAgent: false, home });
           const file = resolve(opt(args, "--out") ?? join(pkg, "review-import.jsonl"));
           writeFileSync(file, `${made.texts.join("\n")}\n`, { mode: 0o644, flag: "wx" });
