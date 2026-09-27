@@ -19,8 +19,8 @@
     "sha256": {
       "LICENCE": "617dec43b30845a8c7d062db3f6d892400d96796b91f363586beacfbdffd1721",
       "README.md": "2a06317f36049f85350185b3c3bc95e9f1cf9ff5319427e1561340a250011c09",
-      "tools/sigma_hunt/manifest.json": "e20142547b40f1b4690ff57af5feb99f92e1b01f5a77c8dda391865ed5746881",
-      "tools/sigma_hunt/run.py": "8b2b3856654dac1788eb4c22088381f6067ebe1affa2656a91ac48bb0b65e295",
+      "tools/sigma_hunt/manifest.json": "908427e7f727c62e23768e72f15e3040aef18c735f3f7b400cd168403a872b9f",
+      "tools/sigma_hunt/run.py": "2f5bf5e79c020ca394f75e9f57651db58a5c0c10bcd495555b5c1ee1b89c0459",
       "tools/lnk_parse/manifest.json": "b2075211309edfb89c7168ed76e09228f9ba26f7e5676ed93eaafeb67c0e6462",
       "tools/lnk_parse/run.py": "c55d9528dd4140eedb849c7082c182d90f6bff0592a1f4fdff9648b338c6e655",
       "tools/regkv/manifest.json": "648e42643a6cfcfb56f543eae93ce7d9f54524a2c44151dc9b69be5a95f1cd52",

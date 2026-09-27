@@ -249,16 +249,18 @@ def main():
     if complete:
         complete.close()
 
-    top = lambda d, n=20: [{"value": k, "count": v}
-                           for k, v in sorted(d.items(), key=lambda kv: -kv[1])[:n]]
+    # Every value, most frequent first: the tables were cut to their top 20
+    # or 30 and nothing said so, and a quiet user is often the one.
+    table = lambda d: [{"value": k, "count": v}
+                       for k, v in sorted(d.items(), key=lambda kv: (-kv[1], str(kv[0])))]
     print(json.dumps({
         "files": targets, "rows_read": read,
         "records": records, "record_count": matched, "records_inline": len(records),
         "complete_records": out_file,
         "first_record": earliest.isoformat().replace("+00:00", "Z") if earliest else None,
         "last_record": latest.isoformat().replace("+00:00", "Z") if latest else None,
-        "by_operation": top(by_operation, 30),
-        "by_user": top(by_user), "by_address": top(by_address),
+        "by_operation": table(by_operation),
+        "by_user": table(by_user), "by_address": table(by_address),
         "unreadable_audit_data": unreadable_audit,
         "inline_limited": bool(out_file and matched > len(records)),
         "note": "The flagged operations are a starting point, not a detection: every one of them "

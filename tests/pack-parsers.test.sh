@@ -186,6 +186,41 @@ check("collection_index maps a path back and spots a renamed stream",
       and paths.get(os.path.join("C", "Users", "a", "holiday_photos.jpg")) == r"C:\Users\a\holiday_photos.jpg",
       json.dumps(streams))
 
+# --- summary tables are whole: nothing past a top 10, 20 or 30 ------------------
+# collection_index kept the ten commonest modification dates, cloudtrail_parse
+# and ual_parse the top 20 or 30 of each table, and nothing said so.
+dated = os.path.join(WORK, "dated")
+for i in range(12):
+    os.makedirs(os.path.join(dated, "C"), exist_ok=True)
+    f = os.path.join(dated, "C", "f%02d.txt" % i)
+    open(f, "wb").write(b"x")
+    t = datetime.datetime(2026, 1, 1 + i, 12, tzinfo=datetime.timezone.utc).timestamp()
+    os.utime(f, (t, t))
+got = tool("triage-collection/tools/collection_index", {"root": dated})
+check("collection_index names every modification date, not the ten commonest",
+      len(got.get("modification_dates") or {}) == 12, json.dumps(got.get("modification_dates")))
+
+trail = os.path.join(WORK, "trail.json")
+json.dump({"Records": [{"eventTime": "2026-02-14T09:%02d:00Z" % i, "eventName": "Event%02d" % i,
+                        "eventSource": "iam.amazonaws.com", "sourceIPAddress": "198.51.100.%d" % i,
+                        "errorCode": "AccessDenied", "eventID": "e%02d" % i,
+                        "userIdentity": {"type": "IAMUser", "arn": "arn:aws:iam::111122223333:user/u%02d" % i}}
+                       for i in range(35)]}, open(trail, "w"))
+got = tool("cloud-forensics/tools/cloudtrail_parse", {"path": trail})
+check("cloudtrail_parse keeps every row of its tables and every identity refused",
+      [len(got.get(k) or []) for k in ("by_event", "by_identity", "by_address", "refusals_by_identity")] == [35, 35, 35, 35],
+      json.dumps({k: len(got.get(k) or []) for k in ("by_event", "by_identity", "by_address", "refusals_by_identity")}))
+
+ual = os.path.join(WORK, "ual.json")
+json.dump([{"CreationDate": "2026-02-14T09:%02d:00" % i, "Operations": "Op%02d" % i, "UserIds": "u%02d@example.org" % i,
+            "AuditData": json.dumps({"Operation": "Op%02d" % i, "UserId": "u%02d@example.org" % i,
+                                     "ClientIP": "203.0.113.%d" % i, "Id": "r%02d" % i})}
+           for i in range(35)], open(ual, "w"))
+got = tool("cloud-forensics/tools/ual_parse", {"path": ual})
+check("ual_parse keeps every row of its tables",
+      [len(got.get(k) or []) for k in ("by_operation", "by_user", "by_address")] == [35, 35, 35],
+      json.dumps({k: len(got.get(k) or []) for k in ("by_operation", "by_user", "by_address")}))
+
 # --- mobile-forensics/protobuf_peek: the wire format, built by hand ------------
 def varint(n):
     out = bytearray()

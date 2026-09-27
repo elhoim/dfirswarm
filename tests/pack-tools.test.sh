@@ -486,9 +486,24 @@ ap.add_argument("-e", "--evtx", "--events")
 ap.add_argument("-o", "--outfile")
 ap.add_argument("-r", "--ruleset", action="append", nargs="+")
 a = ap.parse_args()
-json.dump([{"title": "Bitsadmin Download", "id": "r1", "rule_level": "high", "matches": [
+import os, sys
+# SIGMA_STUB_MANY: that many rules fire, each on a record of 15 fields, and the
+# engine talks at length on both streams. SIGMA_STUB_FAIL: it writes no result.
+many = int(os.environ.get("SIGMA_STUB_MANY") or 0)
+if many or os.environ.get("SIGMA_STUB_FAIL"):
+    sys.stdout.write("o" * 3000 + "\n")
+    sys.stderr.write("e" * 5000 + "\n")
+if os.environ.get("SIGMA_STUB_FAIL"):
+    sys.exit(1)
+rules = [{"title": "Bitsadmin Download", "id": "r1", "rule_level": "high", "matches": [
     {"SystemTime": "2026-09-01T10:00:00Z", "EventID": 59, "Channel": "Microsoft-Windows-Bits-Client/Operational",
-     "Computer": "WS01", "EventRecordID": 7}]}], open(a.outfile, "w"))
+     "Computer": "WS01", "EventRecordID": 7}]}]
+for i in range(many):
+    match = {"SystemTime": "2026-09-01T11:%02d:00Z" % (i % 60), "EventID": 4688, "Channel": "Security",
+             "Computer": "WS01", "EventRecordID": 100 + i}
+    match.update({"Field%02d" % k: "v%d" % k for k in range(10)})
+    rules.append({"title": "Rule %02d" % i, "id": "m%d" % i, "rule_level": "medium", "matches": [match]})
+json.dump(rules, open(a.outfile, "w"))
 ZC
 chmod +x "$SH/bin/zircolite"
 out="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/hunt", "engine": "zircolite"}' | PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)" \
@@ -508,6 +523,41 @@ out="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/hunt2"
   && fail "sigma_hunt let its engine write through a link in out_dir: $out"
 grep -q 'cannot be under inputs/' <<<"$out" && [[ ! -e "$SH/run/inputs/planted.json" ]] || fail "sigma_hunt should refuse a result a link sends under inputs/: $out"
 pass "sigma_hunt runs Zircolite without --noexternal, which Zircolite 3 and later refuse, and reads its detections, and never through a link out of out_dir"
+
+# Nothing cut: every field of a matched record (it kept the first 12), every
+# rule that fired (it kept 25), and the engine's own stdout and stderr whole
+# in files it names (they were dropped on success and cut to their last 400
+# and 800 characters on failure). Past limit the detections are a page, and
+# all of them are in detections.jsonl.
+out="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/many", "engine": "zircolite", "limit": 5}' \
+  | SIGMA_STUB_MANY=40 PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)" || fail "sigma_hunt over forty rules: $out"
+"$PY" - "$out" "$SH/run" <<'EOF' || fail "sigma_hunt cut what the engine gave it: $out"
+import hashlib, json, os, sys
+d, run = json.loads(sys.argv[1]), sys.argv[2]
+# forty rules and the one the stand-in always fires
+assert d["detection_count"] == 41 and d["returned"] == 5 and d["truncated"], d
+assert len(d["rules_that_fired"]) == 41 and d["rules_fired"] == 41, d["rules_that_fired"]
+wide = [x for x in d["detections"] if x["rule"].startswith("Rule ")]
+assert wide and all(len(x["detail"]) == 15 for x in wide), d["detections"]
+def named(ref):
+    data = open(os.path.join(run, ref["path"]), "rb").read()
+    assert ref["bytes"] == len(data) and ref["sha256"] == hashlib.sha256(data).hexdigest(), ref
+    return data
+rows = [json.loads(l) for l in named(d["all_detections"]).decode().splitlines()]
+assert len(rows) == 41 == d["all_detections"]["rows"], len(rows)
+assert sum(1 for r in rows if len(r["detail"]) == 15) == 40, rows
+assert named(d["engine_stdout"]).count(b"o") == 3000 and named(d["engine_stderr"]).count(b"e") == 5000
+EOF
+out="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/failed", "engine": "zircolite"}' \
+  | SIGMA_STUB_FAIL=1 PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)" && fail "an engine that wrote no result should fail the tool: $out"
+"$PY" - "$out" "$SH/run" <<'EOF' || fail "sigma_hunt cut the failed engine's words: $out"
+import json, os, sys
+d, run = json.loads(sys.argv[1]), sys.argv[2]
+assert "wrote no result file" in d["error"], d
+assert os.path.getsize(os.path.join(run, d["stderr"]["path"])) == d["stderr"]["bytes"] == 5001, d["stderr"]
+assert os.path.getsize(os.path.join(run, d["stdout"]["path"])) == d["stdout"]["bytes"] == 3001, d["stdout"]
+EOF
+pass "sigma_hunt keeps every field, every rule and every detection, and the engine's stdout and stderr whole in files it names"
 
 # --- unified_log hands the reader one archive and keeps its whole output --------
 # The 2020 UnifiedLogReader crashed on modern archives and the wrapper still

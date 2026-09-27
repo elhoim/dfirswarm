@@ -194,7 +194,8 @@ def main():
         "complete_index": out_file,
         "inline_limited": bool(out_file and indexed > len(entries)),
         "possible_renamed_streams": stream_candidates,
-        "modification_dates": dict(mtimes.most_common(10)),
+        # Every date, most files first (it was cut to the top ten).
+        "modification_dates": dict(sorted(mtimes.items(), key=lambda kv: (-kv[1], kv[0]))),
         "flat_timestamps": flat_times,
         "note": "Cite both paths. 'C:\\\\Users\\\\alice\\\\NTUSER.DAT (in the collection at "
                 "C/Users/alice/NTUSER.DAT, sha256 …)' can be followed in either direction; one "

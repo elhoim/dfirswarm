@@ -265,17 +265,19 @@ def main():
 
     denial = [{"identity": who, "errors": counts, "total": sum(counts.values())}
               for who, counts in errors.items()]
-    denial.sort(key=lambda d: -d["total"])
-    top = lambda d, n=20: [{"value": k, "count": v}
-                           for k, v in sorted(d.items(), key=lambda kv: -kv[1])[:n]]
+    denial.sort(key=lambda d: (-d["total"], str(d["identity"])))
+    # Every value, most frequent first: the tables were cut to their top 20
+    # or 30 and nothing said so, and a quiet identity is often the one.
+    table = lambda d: [{"value": k, "count": v}
+                       for k, v in sorted(d.items(), key=lambda kv: (-kv[1], str(kv[0])))]
     print(json.dumps({
         "files": len(targets), "rows_read": read, "unreadable_files": unreadable,
         "records": records, "record_count": matched, "records_inline": len(records),
         "complete_records": out_file,
         "first_event": first, "last_event": last,
-        "by_event": top(by_event, 30), "by_identity": top(by_identity),
-        "by_address": top(by_address),
-        "refusals_by_identity": denial[:20],
+        "by_event": table(by_event), "by_identity": table(by_identity),
+        "by_address": table(by_address),
+        "refusals_by_identity": denial,
         "inline_limited": bool(out_file and matched > len(records)),
         "note": "An AssumedRole identity names a session, not a person: assumed_role and "
                 "session_started are resolved above, and the AssumeRole call earlier in the log "

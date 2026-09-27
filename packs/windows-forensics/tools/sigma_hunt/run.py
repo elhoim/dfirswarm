@@ -20,7 +20,14 @@ should not have to learn two formats — and because the thing that goes in the
 report is not the detection anyway. A rule firing is a hypothesis with a name.
 The evidence is the record it matched, which you then read with evtx_query and
 cite by its record id and channel.
+
+Nothing is cut. Every field of a matched record is kept, every rule that fired
+is counted, and the engine's own stdout and stderr are kept whole beside its
+result. Past `limit` the detections are a page, and all of them, normalised,
+are in detections.jsonl in out_dir; each file is named with its path, size and
+sha256.
 """
+import hashlib
 import json
 import os
 import shutil
@@ -58,6 +65,19 @@ def resolve_output(out, what="output"):
     return str(dest.relative_to(root))
 
 
+def kept_file(path, text=None, rows=None):
+    """Write the whole of something to `path` (text, or rows as JSON Lines) and
+    name it: path, bytes, sha256, and rows when it holds rows."""
+    body = text if rows is None else "".join(json.dumps(r, ensure_ascii=False, default=str) + "\n" for r in rows)
+    data = body.encode("utf-8", "surrogateescape")
+    with open(path, "wb") as fh:
+        fh.write(data)
+    named = {"path": path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    if rows is not None:
+        named["rows"] = len(rows)
+    return named
+
+
 def rank(level):
     try:
         return LEVELS.index(str(level).lower())
@@ -83,7 +103,7 @@ def from_zircolite(path):
                 "channel": match.get("Channel"),
                 "computer": match.get("Computer"),
                 "record_id": match.get("EventRecordID"),
-                "detail": {k: v for k, v in list(match.items())[:12]},
+                "detail": match,
             })
     return out
 
@@ -122,6 +142,12 @@ def from_hayabusa(path):
             "detail": details if isinstance(details, dict) else {"details": details},
         })
     return out
+
+
+def _text(value):
+    if value is None:
+        return ""
+    return value.decode("utf-8", "surrogateescape") if isinstance(value, bytes) else value
 
 
 def main():
@@ -185,18 +211,26 @@ def main():
         if args.get("rules"):
             argv += ["-r", str(args["rules"])]
 
+    # The engine's own words, whole, beside its result: they used to be
+    # dropped when it succeeded and cut to their last few hundred characters
+    # when it did not.
+    stdout_path = resolve_output(os.path.join(out_dir, "%s.stdout" % engine), "out_dir")
+    stderr_path = resolve_output(os.path.join(out_dir, "%s.stderr" % engine), "out_dir")
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        fail("%s did not finish in time" % engine, after_seconds=timeout, command=" ".join(argv))
+        proc = subprocess.run(argv, capture_output=True, text=True, errors="surrogateescape", timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        said = {"stdout": kept_file(stdout_path, text=_text(exc.stdout)),
+                "stderr": kept_file(stderr_path, text=_text(exc.stderr))}
+        fail("%s did not finish in time" % engine, after_seconds=timeout, command=" ".join(argv), **said)
+    said = {"stdout": kept_file(stdout_path, text=proc.stdout or ""),
+            "stderr": kept_file(stderr_path, text=proc.stderr or "")}
 
     if not os.path.isfile(result):
         fail("%s wrote no result file" % engine, exit_code=proc.returncode,
-             command=" ".join(argv),
-             stderr=(proc.stderr or "").strip()[-800:],
-             stdout=(proc.stdout or "").strip()[-400:],
+             command=" ".join(argv), **said,
              note="Engine command lines change between versions; the exact invocation is above "
-                  "so it can be corrected by hand and re-run.")
+                  "so it can be corrected by hand and re-run. Its whole stdout and stderr are "
+                  "the files named here.")
 
     try:
         detections = from_zircolite(result) if engine == "zircolite" else from_hayabusa(result)
@@ -209,18 +243,26 @@ def main():
     by_rule = {}
     for d in kept:
         by_rule[d["rule"]] = by_rule.get(d["rule"], 0) + 1
+    all_detections = kept_file(resolve_output(os.path.join(out_dir, "detections.jsonl"), "out_dir"), rows=kept)
 
     print(json.dumps({
         "path": path,
         "engine": engine,
+        "exit_code": proc.returncode,
+        "command": " ".join(argv),
         "result_file": result,
         "detections": kept[:limit],
         "detection_count": len(kept),
         "returned": min(len(kept), limit),
+        "truncated": len(kept) > limit,
+        "all_detections": all_detections,
         "below_min_level": len(detections) - len(kept),
         "min_level": min_level,
         "rules_that_fired": sorted(({"rule": r, "count": c} for r, c in by_rule.items()),
-                                   key=lambda x: -x["count"])[:25],
+                                   key=lambda x: (-x["count"], str(x["rule"]))),
+        "rules_fired": len(by_rule),
+        "engine_stdout": said["stdout"],
+        "engine_stderr": said["stderr"],
         "note": "A rule firing is a hypothesis with a name, not a finding. Take its record id and "
                 "channel to evtx_query, read the record, and cite the record. Community rulesets "
                 "are tuned for live estates and produce false positives on a forensic image: an "

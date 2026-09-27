@@ -19,8 +19,8 @@
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
       "README.md": "b521bae05db4fbb064565eb045867d740a4c0f9362b3791d3d461177180a40a6",
-      "tools/collection_index/manifest.json": "dee43a10283ad1a0eee845468841b33c492755424e73247f37328d0aac8a913a",
-      "tools/collection_index/run.py": "2c84ec4850dcbf67e46935cc473752792ace744a4345975b6d3ec40e46a4c770",
+      "tools/collection_index/manifest.json": "c19d75ee227dcd1a1f8102b4f19d73c00576520a79aad849f8e86c663ccc5b20",
+      "tools/collection_index/run.py": "6c6d753950f582f4f0ef58f1b1df548d8bbce24ff0cc8eaa7b3695ae582a09bc",
       "tools/collection_id/manifest.json": "a75d0ab1745f77d9585281d0958c073ceb37c615546ae4bc77c3f38cd2956281",
       "tools/collection_id/run.py": "9efd5ef70e5a07387258797864b2055c775b8c16744394526b3e7fb4eca33e73",
       "goals/collection-intake.md": "3b42b05159eb12d7efb10caeba5ab1bd48f15b40b0bca4e3a295837b979b8f2e",
