@@ -162,3 +162,20 @@ test("a shell that writes the sentinel or the all-dead marker is caught like any
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("the lead register is watched the same way: growth is not a rewrite, a changed line is", async () => {
+  const root = await sandbox();
+  try {
+    await mkdir(join(root, "leads"), { recursive: true });
+    await writeFile(join(root, "leads", "leads.jsonl"), '{"seq":1,"ev":"open"}\n', "utf8");
+    const before = await watchedPathHashes(root);
+    await appendFile(join(root, "leads", "leads.jsonl"), '{"seq":2,"ev":"claim"}\n', "utf8");
+    assert.equal((await diffWatchedPaths(root, before, "a0")).some((r) => r.path === "leads/leads.jsonl"), false, "an appended event is not a rewrite");
+    const again = await watchedPathHashes(root);
+    await writeFile(join(root, "leads", "leads.jsonl"), '{"seq":1,"ev":"open","holder":"a0"}\n{"seq":2,"ev":"claim"}\n', "utf8");
+    const hit = (await diffWatchedPaths(root, again, "a0")).find((r) => r.path === "leads/leads.jsonl");
+    assert.ok(hit && hit.rewritten === true, `a rewritten register must be reported: ${JSON.stringify(hit)}`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

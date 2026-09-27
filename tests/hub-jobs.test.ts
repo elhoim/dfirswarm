@@ -154,3 +154,26 @@ test("a page of a job's stdout that leaves bytes unread says how many, and how t
   const last = await call("a1", "jobStatus", { job_id: sub.job.job, offset: 16384, limit: 8192 });
   assert.equal(jobPageNote(sub.job.job, last.stdout), null, "the last page leaves nothing unread and says nothing");
 });
+
+test("a job run under a lead: only the lead's holder may, and the job goes on the lead's record", async () => {
+  const L = await import("../extensions/leads.ts");
+  const { S, svc, call } = rig();
+  await svc.start();
+  mkdirSync(join(S, "done", "agents"), { recursive: true });
+  writeFileSync(join(S, "team.json"), JSON.stringify({ swarm_id: "t", n: 2, agents: [{ id: "a1", role: "w" }, { id: "a2", role: "w" }] }));
+  const opened = await call("a1", "leadOpen", { title: "Parse the logs", why: "q2", take: true });
+  assert.equal(opened.ok, true, opened.reason);
+  const theirs = await call("a2", "jobSubmit", { command: "echo x", inputs: [], lead: "L-1" });
+  assert.equal(theirs.ok, false);
+  assert.match(theirs.reason, /L-1 is held by a1: claim it before running its jobs/);
+  const named = await call("a1", "jobSubmit", { command: "echo x", inputs: [], lead: "L-1" });
+  assert.deepEqual([named.ok, named.lead], [true, "L-1"]);
+  // With one active lead held, a job that names none is still that lead's.
+  const implied = await call("a1", "jobSubmit", { command: "echo y", inputs: [] });
+  assert.equal(implied.lead, "L-1");
+  // A peer's job is not the lead's.
+  const other = await call("a2", "jobSubmit", { command: "echo z", inputs: [] });
+  assert.equal(other.lead, undefined);
+  const snap = await L.leadsSnapshot(S);
+  assert.deepEqual(snap.state.leads.get("L-1")?.jobs, [named.job.job, implied.job.job]);
+});

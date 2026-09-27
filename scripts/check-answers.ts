@@ -62,6 +62,7 @@ import { fileURLToPath } from "node:url";
 import {
   answerSection,
   attestationAct,
+  briefQuestions,
   ledgerGate,
   readAttestations,
   readDisputes,
@@ -119,6 +120,9 @@ export function sections(report: string): Map<string, string> {
 }
 
 export type SectionOutcome = "answered" | "limited" | "unanswered";
+
+/** The prefix of the check's last line: its outcomes as JSON, for the finish line (scripts/finish-gate.ts). */
+export const ANSWERS_MARK = "CHECK_ANSWERS_JSON";
 
 /**
  * Whether a section's question asks whether something exists: only then does
@@ -234,21 +238,8 @@ export async function checkAnswers(sandbox: string, reportPath: string, wanted: 
   return { ok, lines, outcomes };
 }
 
-/**
- * The questions a brief numbers: the distinct numbers that open a line
- * (`1.`, `1)`, `1:`, `Q1`, `Question 1`, `**1.**`, `### 1.`), in the order
- * they first appear; the same count the goals' awk takes of inputs/CASE.md.
- */
-export function briefQuestions(text: string): string[] {
-  const out: string[] = [];
-  for (const line of text.split("\n")) {
-    const m = /^(#+ *)?(\*\* *)?([Qq](uestion)? *[0-9]+|[0-9]+[.):]([ *]|$))/.exec(line);
-    if (!m) continue;
-    const n = String(Number(m[0].replace(/[^0-9]/g, "")));
-    if (!out.includes(n)) out.push(n);
-  }
-  return out;
-}
+// The questions a brief numbers (protocol.ts): the lead register reads them too.
+export { briefQuestions };
 
 export type LedgerOutcome = "answered" | "limited" | "inconclusive" | "unanswered";
 
@@ -425,5 +416,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   }
   const r = report ? await checkAnswers(sandbox, report, wanted, existence) : await checkLedgerAnswers(sandbox, wanted, existence);
   process.stdout.write(`${r.lines.join("\n")}\n`);
+  // One machine line last, for the harness's finish line: each section's
+  // outcome and each defect a limitation names, so a run whose checks pass
+  // can still be told apart as examination-limited (await-done.sh hands it
+  // back with the check's row, passing or not).
+  const named = "defects" in r ? r.defects.filter((d) => d.named_by.length).map((d) => `${d.what} (named by ${d.named_by.map((n) => `#${n}`).join(", ")})`) : [];
+  process.stdout.write(`${ANSWERS_MARK} ${JSON.stringify({ outcomes: r.outcomes, named, existence, mode: report ? "report" : "ledger" })}\n`);
   process.exit(r.ok ? 0 : 1);
 }

@@ -142,6 +142,12 @@ export type HandoffFacts = {
   sentinel: boolean;
   spentUsd: number;
   capUsd?: number;
+  /**
+   * The lead register as this agent stands in it (leads.ts leadsDigest): the
+   * live leads it holds and their states, what is blocked on it, its jobs
+   * awaiting an interpretation. The note is prose; this is the record.
+   */
+  leads?: string;
 };
 
 export type SelfCompactDeps = {
@@ -372,6 +378,7 @@ export function handoffHeader(agentId: string, cycle: number, facts: HandoffFact
     `Live claims: ${claims}.`,
     `Unread posts: ${unread}`,
     `Ledger: ${facts.ledgerTotal} entries, ${facts.ledgerMine} yours. Sentinel: ${sentinel}. Spend: ${spend}.`,
+    ...(facts.leads ? [`The lead register now (your leads are yours: go on with them, or release them):\n${facts.leads}`] : []),
   ];
   // On run 6 all four agents answered this message, a few tool calls later,
   // with a status update to "the user" and ended their turns; three sat idle

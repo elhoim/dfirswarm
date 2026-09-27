@@ -291,18 +291,29 @@ import json, os, sys
 # bytes; past it only its size, since the check itself prints the whole when
 # it is run again. A passing check says nothing here.
 OUT_MAX = 65536
+# A check that reports its outcomes (check-answers.ts: each section answered,
+# examination-limited or unanswered) says so on a last line; that line is
+# handed back with the row, passing or not, for the finish line to tell a
+# limited run from a completed one.
+MARK = b"CHECK_ANSWERS_JSON "
 checks = []
 for raw in sys.stdin.read().splitlines():
     if not raw.strip():
         continue
     ok, ms, timed_out, n, cmd = raw.split("\t", 4)
     row = {"cmd": cmd, "ok": ok == "1", "ms": int(ms), "timed_out": timed_out == "1"}
+    try:
+        with open(os.path.join(os.environ["CHECKS_OUTS"], n), "rb") as f:
+            data = f.read()
+    except OSError:
+        data = b""
+    for line in data.splitlines():
+        if line.startswith(MARK):
+            try:
+                row["answers"] = json.loads(line[len(MARK):].decode("utf-8", "replace"))
+            except ValueError:
+                pass
     if ok != "1":
-        try:
-            with open(os.path.join(os.environ["CHECKS_OUTS"], n), "rb") as f:
-                data = f.read()
-        except OSError:
-            data = b""
         if data.strip():
             row["out_bytes"] = len(data)
             if len(data) <= OUT_MAX:

@@ -41,6 +41,7 @@ import { chooseImage, readImageRecords, type ImageChoice, type ImageRecord } fro
 import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolveScope, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
 import { CANARY_NAME, OBSERVE_GUEST, observedRun, observeWanted, readObservation } from "./job-observe.ts";
 import type { Mount, WorkerSpec } from "./vm.ts";
+import { operatorHostsSync } from "../extensions/leads.ts";
 
 export type JobKind = "tool" | "command" | "recipe" | "detect" | "import";
 
@@ -1133,7 +1134,12 @@ export class JobService {
   private network(job: JobRecord): WorkerSpec["network"] {
     if (job.spec.network !== "allowlist") return { mode: "off" };
     if (this.o.openNet) return { mode: "public" };
-    return this.o.allowHosts.length ? { mode: "hosts", hosts: this.o.allowHosts } : { mode: "off" };
+    // The kickoff's allowlist, and every host the operator allowed since
+    // (swarm.sh lead <run> note L-n TEXT --allow-host HOST): an agent's own
+    // VM keeps the network it booted with, and a job's worker is made new,
+    // so this is where a host allowed while the run goes on is reached.
+    const hosts = [...new Set([...this.o.allowHosts, ...operatorHostsSync(this.S)])];
+    return hosts.length ? { mode: "hosts", hosts } : { mode: "off" };
   }
 
   /**

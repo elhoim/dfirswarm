@@ -79,6 +79,7 @@ import { connect, createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as P from "../extensions/protocol.ts";
+import * as L from "../extensions/leads.ts";
 import * as T from "../extensions/toolchain.ts";
 import { claimHolds, messageFor, resolvePeer } from "./nudge-broker.mjs";
 import { GATEWAY_STATE_REL } from "./model-gateway.ts";
@@ -193,6 +194,13 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   threadOpen: { bucket: "post", capacity: 40, perSecond: 0.5 },
   claimName: { bucket: "post", capacity: 40, perSecond: 0.5 },
   recordEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  // The lead register grows as the ledger does: a burst, then a few a second.
+  leadOpen: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadClaim: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadRelease: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadClose: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadLink: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadInterpret: { bucket: "ledger", capacity: 200, perSecond: 5 },
   attestEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
   disputeEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
   // Each done that would end the swarm runs the operator's finish line on
@@ -243,7 +251,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest"]);
+const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -678,6 +686,18 @@ export function boardTable(hub: {
       askedBy.set(who, { ...line, at: Date.now() });
       return line.run;
     },
+    // The lead register (extensions/leads.ts): who acts is the channel's seat.
+    leadOpen: (who, a) => L.openLead(as(who), (isObject(a[1]) ? a[1] : {}) as L.LeadOpenInput),
+    leadClaim: (who, a) => L.claimLead(as(who), a[1]),
+    leadRelease: (who, a) => L.releaseLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { why?: string; generation?: number }),
+    leadClose: (who, a) => L.closeLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { disposition?: string; ref?: string; why?: string; generation?: number }),
+    leadLink: (who, a) => L.linkLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { add?: string[]; remove?: string[] }),
+    leadsView: (who, a) => {
+      const o = isObject(a[1]) ? a[1] : {};
+      return L.leadsView(as(who), { ...(typeof o.view === "string" ? { view: o.view } : {}), ...(typeof o.from === "string" ? { from: o.from } : {}), ...(typeof o.pageChars === "number" && Number.isFinite(o.pageChars) ? { pageChars: o.pageChars } : {}) });
+    },
+    leadsDigest: (who, a) => L.leadsDigest(as(who), { mark: isObject(a[1]) && a[1].mark === true }),
+    leadInterpret: (who, a) => L.recordInterpretations(S, who, Number(a[1]), Array.isArray(a[2]) ? (a[2] as L.InterpretInput[]) : []),
     postMessage: (who, a) => {
       // An agent's post is its own; `via` is the hub's to set.
       const { via: _via, ...args } = (a[1] as Record<string, unknown>) ?? {};
@@ -703,6 +723,8 @@ export function boardTable(hub: {
       const sealed = await sealCitedRefs(hub.jobs?.(), who, input);
       if (!sealed.ok) return { ok: false, reason: sealed.reason };
       const res = await P.recordEntry(as(who), sealed.input as never);
+      // A correction may take the ground from under a closed lead: it reopens.
+      if (res.ok && res.entry.supersedes !== undefined) await L.reopenOnLedger(S).catch(() => undefined);
       return res.ok && sealed.notes.length ? { ...res, note: [res.note, ...sealed.notes].filter(Boolean).join("; ") } : res;
     },
     // The acts on the ledger are the hub's to write, as its entries are.
@@ -713,7 +735,10 @@ export function boardTable(hub: {
     },
     disputeEntry: async (who, a) => {
       const sealed = await sealCitedRefs(hub.jobs?.(), who, isObject(a[1]) ? (a[1] as Record<string, unknown>) : {});
-      return sealed.ok ? P.disputeEntry(as(who), sealed.input as never) : { ok: false, reason: sealed.reason };
+      if (!sealed.ok) return { ok: false, reason: sealed.reason };
+      const res = await P.disputeEntry(as(who), sealed.input as never);
+      if (res.ok) await L.reopenOnLedger(S).catch(() => undefined);
+      return res;
     },
     recordFileVersion: async (who, a) => {
       const { key, owner } = await holeOf(String(a[1] ?? ""));
@@ -787,8 +812,14 @@ export function boardTable(hub: {
         ...(typeof raw.note === "string" ? { note: raw.note } : {}),
         ...(typeof raw.profile === "string" && raw.profile ? { profile: raw.profile } : {}),
       };
+      // A job run under a lead: the lead must be the seat's own, checked
+      // before the job is accepted, and the job goes on the lead's record.
+      const refusedLead = await L.jobLeadAllowed(S, who, raw.lead);
+      if (refusedLead) return { ok: false, reason: refusedLead };
       const r = await svc.submit(who, spec, { watch: typeof raw.wait === "number" ? raw.wait : 0 });
-      return r.ok ? { ok: true, job: await jobView(S, r.job) } : r;
+      if (!r.ok) return r;
+      const attached = r.job.requester.agent === who ? await L.attachJob(S, who, r.job.id, raw.lead).catch(() => null) : null;
+      return { ok: true, job: await jobView(S, r.job), ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}) };
     },
     jobStatus: async (who, a) => {
       const svc = hub.jobs?.();
@@ -826,7 +857,8 @@ export function boardTable(hub: {
     // loop of readdir on the hub's one event loop).
     waitForSwarmChange: (who, a, signal) => {
       const o = isObject(a[1]) ? (a[1] as { seconds?: unknown; everyPost?: unknown }) : {};
-      return P.waitForSwarmChange(as(who), { seconds: Number(o.seconds) || undefined, signal, ...(o.everyPost === true ? { everyPost: true } : {}) });
+      // The lead register's news for this seat wakes its wait too (leads.ts).
+      return P.waitForSwarmChange(as(who), { seconds: Number(o.seconds) || undefined, signal, ...(o.everyPost === true ? { everyPost: true } : {}), extraWake: L.leadsWaitCheck(as(who)) });
     },
   };
   return table;
@@ -2453,7 +2485,9 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
       // The host's own run of the operator's checks for a seat's done: the
       // seat's finish_line line is its VM's word, this one is the harness's.
       const failed = Array.isArray(result.checks) ? (result.checks as Array<{ cmd?: unknown; ok?: unknown }>).filter((c) => c.ok !== true).map((c) => String(c.cmd ?? "")) : [];
-      return { total: result.total, passed: result.passed, ...(failed.length ? { failing: failed } : {}), ...(result.error ? { error: result.error } : {}) };
+      const gate = isObject(result.gate) ? result.gate : null;
+      const gateDefects = gate && Array.isArray(gate.defects) ? (gate.defects as Array<{ code?: unknown; lead?: unknown; job?: unknown }>).map((d) => [d.code, d.lead, d.job].filter(Boolean).join(" ")) : [];
+      return { total: result.total, passed: result.passed, ...(failed.length ? { failing: failed } : {}), ...(result.error ? { error: result.error } : {}), ...(gateDefects.length ? { gate_defects: gateDefects } : {}), ...(gate && Array.isArray(gate.limited) && gate.limited.length ? { limited: gate.limited } : {}), ...(gate?.error ? { gate_error: gate.error } : {}) };
     }
     case "forgeTool":
       return { ok: result.ok, name: (result as { manifest?: { name?: string } }).manifest?.name ?? result.name };
@@ -2477,6 +2511,18 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
       const line = isObject(result.line) ? result.line : {};
       return { ok: result.ok, seq: line.seq, act: line.act, appended: result.appended, ...(typeof line.hash === "string" ? { hash: line.hash } : {}), ...(typeof line.target === "string" ? { target: line.target } : {}) };
     }
+    case "leadOpen":
+    case "leadClaim":
+    case "leadRelease":
+    case "leadClose":
+    case "leadLink": {
+      // The lead's id, state and holder as the call left them, on the
+      // harness's own line beside the register's chained event.
+      const lead = isObject(result.lead) ? result.lead : {};
+      return { ok: result.ok, lead: lead.id, status: lead.status, holder: lead.holder, generation: lead.generation, ...(lead.disposition ? { disposition: lead.disposition, ref: lead.ref } : {}), ...(result.reclaimed_from ? { reclaimed_from: result.reclaimed_from } : {}), ...(result.woke ? { woke: result.woke } : {}) };
+    }
+    case "leadInterpret":
+      return { ok: result.ok, interprets: result.interprets };
     default:
       return {};
   }

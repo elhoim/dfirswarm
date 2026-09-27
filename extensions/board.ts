@@ -24,6 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
+import * as L from "./leads.ts";
 import * as P from "./protocol.ts";
 import * as T from "./toolchain.ts";
 
@@ -59,7 +60,7 @@ function refused(err: unknown): boolean {
 type Pending = { fn: string; socket: Socket; answered: () => void; resolve: (value: unknown) => void; reject: (err: Error) => void };
 
 /** Calls that change the board, sent once more with the same request id when a link drops. */
-const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus"]);
+const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret"]);
 
 /** Timings a test shortens; the defaults are the run's. */
 export type HubClientTimings = { partTimeoutMs?: number; writeStallMs?: number };
@@ -352,6 +353,14 @@ export const REMOTE_FUNCTIONS = [
   "heldBy",
   "jobStatus",
   "jobSubmit",
+  "leadClaim",
+  "leadClose",
+  "leadInterpret",
+  "leadLink",
+  "leadOpen",
+  "leadRelease",
+  "leadsDigest",
+  "leadsView",
   "listClaims",
   "listFileHistory",
   "listForgedTools",
@@ -381,6 +390,18 @@ export const REMOTE_FUNCTIONS = [
 ] as const;
 
 export const applySessionUsage = remote("applySessionUsage", P.applySessionUsage);
+/**
+ * The lead register (leads.ts): on the host each pane writes it under its
+ * lock; in a VM the hub is its only writer, and who asks is the channel.
+ */
+export const leadOpen = remote("leadOpen", L.openLead);
+export const leadClaim = remote("leadClaim", (ctx: P.SwarmContext, id: unknown) => L.claimLead(ctx, id));
+export const leadRelease = remote("leadRelease", L.releaseLead);
+export const leadClose = remote("leadClose", L.closeLead);
+export const leadLink = remote("leadLink", L.linkLead);
+export const leadsView = remote("leadsView", L.leadsView);
+export const leadsDigest = remote("leadsDigest", L.leadsDigest);
+export const leadInterpret = remote("leadInterpret", (ctx: P.SwarmContext, entry: number, items: L.InterpretInput[]) => L.recordInterpretations(ctx.sandboxRoot, ctx.agentId, entry, items));
 /** What each peer is doing and found (list_team), from the host's board, store and ledger. */
 export const teamView = remote("teamView", P.teamView);
 
@@ -588,7 +609,8 @@ export const updateToolchainRecord = remote("updateToolchainRecord", T.updateToo
 export const waitForSwarmChange: typeof P.waitForSwarmChange = async (ctx, options = {}) => {
   const socket = boardSocket();
   if (!socket) return P.waitForSwarmChange(ctx, options);
-  const { signal, ...rest } = options;
+  // A function does not cross a socket: the hub checks the lead register for this seat itself.
+  const { signal, extraWake: _extraWake, ...rest } = options;
   const seconds = Math.min(Math.max(1, Math.round(rest.seconds ?? 60)), P.WAIT_MAX_SECONDS);
   const started = Date.now();
   try {

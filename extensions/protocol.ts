@@ -110,6 +110,9 @@ export const PROTECTED_PREFIXES = [
   // (through `record`, and at kickoff) and read by everyone.
   "ledger/",
   "catalog/",
+  // The lead register (extensions/leads.ts): written through the lead tools
+  // and by the hub, read by everyone.
+  "leads/",
   // The whole output of every tool call whose result reached the model as
   // a prefix (Pi's `bash` past its 50 KB, a forged tool past its 64 KB, a
   // page's text past what browser_check delivers). Written by the harness,
@@ -157,6 +160,10 @@ export const PROTECTED_FILES = [
   // The host's spill of trace lines the collector did not take
   // (TRACE_SPILL_REL): custody reads it as the harness's own record.
   "work/.trace-spill.jsonl",
+  // What the agents asked of the operator (a lead closed needs_operator), and
+  // the hosts the operator allowed in answer: the job service reaches those.
+  "operator-requests.jsonl",
+  "operator-hosts.jsonl",
 ] as const;
 
 /**
@@ -4659,7 +4666,61 @@ export async function latestPostIds(
   return out;
 }
 
-export type WaitOutcome = "post" | "sentinel" | "claim_lost" | "timeout" | "prompt";
+export type WaitOutcome = "post" | "sentinel" | "claim_lost" | "timeout" | "prompt" | "lead";
+
+/**
+ * When a seat began waiting, kept by the harness in inbox/<id>/waiting.json
+ * for the lead register, which wakes the seat idle longest for a lead nobody
+ * holds. A seat that waits again within WAIT_CHAIN_MS of its last wait ending
+ * has been waiting all along (a wait returns every minute or so, and the
+ * model's turn between two is not work); one that worked longer between two
+ * waits starts a new spell.
+ */
+export type WaitingMark = { since: string; started_at: string; ended_at?: string };
+export const WAIT_CHAIN_MS = 45_000;
+
+function waitingPath(sandboxRoot: string, agentId: string): string {
+  return join(sandboxRoot, "inbox", agentId, "waiting.json");
+}
+
+export async function readWaiting(sandboxRoot: string, agentId: string): Promise<WaitingMark | null> {
+  try {
+    const m = JSON.parse(await readFile(waitingPath(sandboxRoot, agentId), "utf8")) as WaitingMark;
+    return typeof m.since === "string" && typeof m.started_at === "string" ? m : null;
+  } catch {
+    return null;
+  }
+}
+
+/** When the spell of waiting now under way began, or null when the seat is not waiting now. */
+export function waitingSince(mark: WaitingMark | null, now = Date.now()): number | null {
+  if (!mark) return null;
+  const started = Date.parse(mark.started_at);
+  const ended = mark.ended_at ? Date.parse(mark.ended_at) : NaN;
+  if (Number.isFinite(ended) && ended >= started) return null;
+  const since = Date.parse(mark.since);
+  return Number.isFinite(since) && since <= now ? since : null;
+}
+
+async function markWaiting(sandboxRoot: string, agentId: string, ended: boolean): Promise<void> {
+  if (!/^[A-Za-z0-9_.-]{1,64}$/.test(agentId) || agentId === SYSTEM_AGENT) return;
+  const now = new Date();
+  const prev = await readWaiting(sandboxRoot, agentId);
+  let mark: WaitingMark;
+  if (ended) {
+    if (!prev) return;
+    mark = { ...prev, ended_at: now.toISOString() };
+  } else {
+    const lastEnd = prev?.ended_at ? Date.parse(prev.ended_at) : NaN;
+    const chained = prev && (!prev.ended_at || (Number.isFinite(lastEnd) && now.getTime() - lastEnd <= WAIT_CHAIN_MS));
+    mark = { since: chained ? prev!.since : now.toISOString(), started_at: now.toISOString() };
+  }
+  const path = waitingPath(sandboxRoot, agentId);
+  await mkdir(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(mark)}\n`, "utf8");
+  await rename(tmp, path);
+}
 
 export type WaitResult = {
   reason: WaitOutcome;
@@ -4704,7 +4765,19 @@ export const WAIT_POLL_MS = 500;
  */
 export async function waitForSwarmChange(
   ctx: SwarmContext,
-  options: { seconds?: number; signal?: AbortSignal; pollMs?: number; everyPost?: boolean } = {},
+  options: { seconds?: number; signal?: AbortSignal; pollMs?: number; everyPost?: boolean; extraWake?: () => Promise<string | null> } = {},
+): Promise<WaitResult> {
+  await markWaiting(ctx.sandboxRoot, ctx.agentId, false).catch(() => undefined);
+  try {
+    return await waitLoop(ctx, options);
+  } finally {
+    await markWaiting(ctx.sandboxRoot, ctx.agentId, true).catch(() => undefined);
+  }
+}
+
+async function waitLoop(
+  ctx: SwarmContext,
+  options: { seconds?: number; signal?: AbortSignal; pollMs?: number; everyPost?: boolean; extraWake?: () => Promise<string | null> },
 ): Promise<WaitResult> {
   const seconds = Math.min(Math.max(1, Math.round(options.seconds ?? 60)), WAIT_MAX_SECONDS);
   const pollMs = options.pollMs ?? WAIT_POLL_MS;
@@ -4766,6 +4839,14 @@ export async function waitForSwarmChange(
       }
     }
 
+    // The lead register's news for this seat: its lead ready, a need that
+    // will not come, its lead marked stale or taken over or reopened, the
+    // operator's note, or a wake for a ready lead nobody holds (leads.ts).
+    if (options.extraWake) {
+      const said = await options.extraWake().catch(() => null);
+      if (said) return withPassed({ reason: "lead", waited_ms: elapsed(), detail: `${said} The leads line of this delivery has the rest.` });
+    }
+
     if (mine.size > 0) {
       const held = new Set(
         (await listClaims(ctx.sandboxRoot))
@@ -4817,7 +4898,7 @@ const BASH_WATCH_FILES = ["SWARM.md", "team.json", "layout.json", SENTINEL_REL, 
  */
 // The host's spill of trace lines the collector did not take is the record
 // too: a shell that rewrote it would unsay what the harness kept.
-const APPEND_ONLY_WATCH = ["ledger/entries.jsonl", "traces/events.jsonl", TRACE_SPILL_REL] as const;
+const APPEND_ONLY_WATCH = ["ledger/entries.jsonl", "traces/events.jsonl", TRACE_SPILL_REL, "leads/leads.jsonl"] as const;
 
 /**
  * Size and full digest of an append-only record, taken before a shell call.
@@ -5401,6 +5482,10 @@ export const TOOL_RESERVED_NAMES = new Set([
   // A budget fold refused over an unreadable budget.json, and what a
   // collector restarted over a torn or mismatched trace records.
   "budget_unreadable", "trace_anchor_mismatch", "trace_fragment_cut",
+  // The lead register (extensions/leads.ts): its tools, what a record opened
+  // and interpreted, the watchdog's regroup in an until-solved run, and the
+  // operator's answer to a lead.
+  "lead_open", "lead_claim", "lead_release", "lead_close", "lead_link", "leads", "record_leads", "regroup", "operator_note",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
@@ -8254,6 +8339,22 @@ export function answerSection(raw: string): { ok: true; section: string; id: str
   return { ok: true, section: `question:${id}`, id };
 }
 
+/**
+ * The questions a brief numbers: the distinct numbers that open a line
+ * (`1.`, `1)`, `1:`, `Q1`, `Question 1`, `**1.**`, `### 1.`), in the order
+ * they first appear; the same count the goals' awk takes of inputs/CASE.md.
+ */
+export function briefQuestions(text: string): string[] {
+  const out: string[] = [];
+  for (const line of text.split("\n")) {
+    const m = /^(#+ *)?(\*\* *)?([Qq](uestion)? *[0-9]+|[0-9]+[.):]([ *]|$))/.exec(line);
+    if (!m) continue;
+    const n = String(Number(m[0].replace(/[^0-9]/g, "")));
+    if (!out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
 /** A section id as the goal numbers it: "3", "Q3" and "q3" are section 3. */
 export function sectionKey(id: string): string {
   return String(id ?? "").trim().replace(/^q(?=\d)/i, "");
@@ -9033,9 +9134,9 @@ export const FINISH_LINE_TRUSTED_SOURCES = new Set(["registry"]);
  * registry: what an agent's `done` runs before the sentinel, and what the VM
  * hub runs again on the host before it lets a sentinel be written.
  */
-export function runFinishLine(sandbox: string): Promise<FinishLineRun | null> {
+export async function runFinishLine(sandbox: string): Promise<FinishLineRun | null> {
   const script = resolve(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "await-done.sh");
-  return new Promise((done) => {
+  const run = await new Promise<FinishLineRun | null>((done) => {
     execFile(
       "bash",
       [script, "--sandbox", sandbox, "--checks-json", "--check-timeout", "120"],
@@ -9051,6 +9152,18 @@ export function runFinishLine(sandbox: string): Promise<FinishLineRun | null> {
       },
     );
   });
+  // The harness's own part (scripts/finish-gate.ts): the lead register's
+  // open work, and whether the run would end completed or examination-
+  // limited. Read after the goal's checks, from the same files; the caller
+  // binds both to one revision (runFinishLineBound, the hub's markDone).
+  if (!run) return run;
+  try {
+    const { finishGate } = (await import(resolve(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "finish-gate.ts"))) as typeof import("../scripts/finish-gate.ts");
+    run.gate = await finishGate(sandbox, run);
+  } catch (err) {
+    run.gate = { defects: [], limited: [], questions: [], until_solved: false, error: `the harness's gate could not be run: ${(err as Error).message}` };
+  }
+  return run;
 }
 
 /** The record a finish line reads that is not the goal's own files: where each lives. */
@@ -9141,8 +9254,19 @@ export type FinishLineRun = {
    * size (out_bytes): the runner's own words for the check. `fix` or
    * `output`, when a runner gives them, are the check's words too.
    */
-  checks: Array<{ cmd: string; ok: boolean; ms?: number; timed_out?: boolean; out?: string; out_bytes?: number; fix?: string; output?: string }>;
+  checks: Array<{ cmd: string; ok: boolean; ms?: number; timed_out?: boolean; out?: string; out_bytes?: number; fix?: string; output?: string; answers?: { outcomes?: Record<string, string>; named?: string[]; existence?: string[]; mode?: string } }>;
   source?: string | null;
+  error?: string;
+  /** The harness's part, beside the goal's checks (scripts/finish-gate.ts). */
+  gate?: FinishGateView;
+};
+
+/** What the harness's gate says (scripts/finish-gate.ts's FinishGate, as the verdict reads it). */
+export type FinishGateView = {
+  defects: Array<{ code: string; lead?: string; job?: string; what: string; fix: string }>;
+  limited: string[];
+  questions?: Array<{ id: string; outcome: string; blocks: string[] }>;
+  until_solved?: boolean;
   error?: string;
 };
 
@@ -9158,6 +9282,11 @@ export const FINISH_OUTCOMES = ["completed", "examination_limited", "abandoned",
 export type FinishOutcome = (typeof FINISH_OUTCOMES)[number];
 /** The reason prefix of a done the harness could not check. */
 export const VERIFICATION_UNAVAILABLE_PREFIX = "VERIFICATION UNAVAILABLE: ";
+
+/** The refusal of an abandon in an until-solved run: only the operator ends it. */
+export const UNTIL_SOLVED_NO_ABANDON =
+  "This run was started until solved: it ends when every question is answered, or when the operator stops it (swarm.sh stop). The agents cannot abandon it. " +
+  "Post what blocks you, open a lead for another route, or close a lead needs_operator for what only the operator can give, and keep working.";
 
 export type FinishVerdict =
   | { proceed: true; outcome: FinishOutcome; note?: string; reasonPrefix?: string }
@@ -9177,9 +9306,13 @@ export type FinishVerdict =
  * not a clean done either: it proceeds as `verification_unavailable`, the
  * sentinel's reason says so, and the trace records why.
  */
-export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean): FinishVerdict {
+export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean, opts: { untilSolved?: boolean } = {}): FinishVerdict {
+  // An until-solved run has one end the agents can reach: every question
+  // answered. Giving up is the operator's (swarm.sh stop), never a vote.
+  const until = opts.untilSolved === true || run?.gate?.until_solved === true;
   if (!run || run.error) {
     const why = run?.error ? ` (${run.error})` : "";
+    if (until) return { proceed: false, failing: "(finish line unavailable)", reason: `The finish line could not be run${why}, so nothing can show that every question is answered, and this run ends only then. Say so on the board and keep working; the operator sees the same.` };
     if (abandon) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `the finish line could not be run${why}; abandoned on purpose` };
     return { proceed: true, outcome: "verification_unavailable", reasonPrefix: VERIFICATION_UNAVAILABLE_PREFIX, note: `the finish line could not be run${why}; done proceeds as verification_unavailable, never as completed` };
   }
@@ -9193,7 +9326,7 @@ export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean): 
   const untrusted = Boolean(run.source) && !FINISH_LINE_TRUSTED_SOURCES.has(run.source as string);
   if (untrusted && run.passed >= run.total) {
     // Abandoning claims nothing, so it is still the way out.
-    if (abandon) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `checks read from the ${run.source} were not trusted; abandoned on purpose` };
+    if (abandon && !until) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `checks read from the ${run.source} were not trusted; abandoned on purpose` };
     return {
       proceed: false,
       failing: `(checks read from ${run.source})`,
@@ -9202,8 +9335,43 @@ export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean): 
         `This is the harness's problem, not yours: say so on the board and wait for the operator. If the goal cannot be met at all, call done again with abandon: true and say why.`,
     };
   }
-  if (run.total === 0) return { proceed: true, outcome: "completed", note: "the goal has no checks" };
-  if (run.passed >= run.total) return { proceed: true, outcome: "completed" };
+  if (run.total === 0 || run.passed >= run.total) {
+    // The goal's checks are met: an abandon asked for now is moot, as it
+    // always was; what the harness's gate says decides.
+    const noChecks = run.total === 0 ? "the goal has no checks" : undefined;
+    const gate = run.gate;
+    if (!gate) return { proceed: true, outcome: "completed", ...(noChecks ? { note: noChecks } : {}) };
+    if (gate.error) {
+      if (until) return { proceed: false, failing: "(gate unavailable)", reason: `The goal's checks pass, but ${gate.error}; this run ends only when every question is shown answered. Say so on the board; the operator sees the same.` };
+      return { proceed: true, outcome: "verification_unavailable", reasonPrefix: VERIFICATION_UNAVAILABLE_PREFIX, note: gate.error };
+    }
+    if (gate.defects.length) {
+      const each = gate.defects.map((d) => `- ${d.what}. Fix: ${d.fix}`).join("\n");
+      return {
+        proceed: false,
+        failing: `${gate.defects[0].code}${gate.defects[0].lead ? ` ${gate.defects[0].lead}` : ""}${gate.defects[0].job ? ` ${gate.defects[0].job}` : ""}`,
+        reason:
+          `The goal's checks pass, but material work is still open: ${gate.defects.length} item${gate.defects.length === 1 ? "" : "s"} the lead register holds against done:\n${each}\n` +
+          "A lead is disposed of with lead_close; a lead's job is interpreted by recording what its output shows with interprets naming it. Then call done again.",
+      };
+    }
+    if (until && (gate.limited.length || (gate.questions ?? []).some((q) => q.outcome !== "answered"))) {
+      const open = (gate.questions ?? []).filter((q) => q.outcome !== "answered");
+      const qs = open.map((q) => `- question:${q.id} is ${q.outcome}: ${q.blocks.join("; ")}`).join("\n");
+      const other = gate.limited.filter((l) => !open.some((q) => l.startsWith(`question:${q.id} `)));
+      return {
+        proceed: false,
+        failing: open[0] ? `question:${open[0].id}` : "(examination-limited)",
+        reason:
+          "This run ends only when every question is answered: no answer that is inconclusive, rests on a limitation or a deferral, and no examination-limited finish. " +
+          `${open.length ? `Not answered yet:\n${qs}\n` : ""}${other.length ? `Also limiting the run:\n${other.map((l) => `- ${l}`).join("\n")}\n` : ""}` +
+          "Take the next of these: find another route, open a lead for it (lead_open), or close a lead needs_operator when only the operator can unblock it. Only the operator can stop this run.",
+      };
+    }
+    if (gate.limited.length) return { proceed: true, outcome: "examination_limited", note: `examination-limited: ${gate.limited.join("; ")}` };
+    return { proceed: true, outcome: "completed", ...(noChecks ? { note: noChecks } : {}) };
+  }
+  if (until && abandon) return { proceed: false, failing: "(until solved)", reason: UNTIL_SOLVED_NO_ABANDON };
   if (abandon) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `${run.passed} of ${run.total} checks pass; abandoned on purpose` };
   const failed = run.checks.filter((c) => !c.ok);
   const failing = failed[0]?.cmd ?? "(unknown check)";

@@ -2211,3 +2211,30 @@ test("a burst of large calls and large answers at once is taken in turn, and non
   const diffs = await Promise.all(Array.from({ length: 12 }, () => board.callBoard(seat, "fileDiff", [sandbox, "work/shared.txt", 1, 2])));
   for (const d of diffs) assert.ok(JSON.stringify(d).includes("second 199"), "every large answer arrived whole");
 });
+
+test("the lead register goes through the hub as the channel's seat, and a wait held by the hub wakes on lead_ready", async () => {
+  const { hub, sandbox } = await setup();
+  // A seat that names another in its context still acts as itself.
+  const opened = (await asVm(hub.socketFor("a0"), () => board.leadOpen({ sandboxRoot: "/v", agentId: "a1" }, { title: "Read inside the vault", why: "q5", needs: [], take: true }))) as { ok: boolean; lead: { id: string; holder: string } };
+  assert.equal(opened.ok, true);
+  assert.equal(opened.lead.holder, "a0", "the holder is the channel's seat, not the one the call named");
+  const refused = (await asVm(hub.socketFor("a1"), () => board.leadClaim({ sandboxRoot: "/v", agentId: "a1" }, "L-1"))) as { ok: boolean; reason?: string };
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason ?? "", /held by a0/);
+  // a1 finds the key; a0's lead needs it.
+  const key = (await asVm(hub.socketFor("a1"), () => board.leadOpen({ sandboxRoot: "/v", agentId: "a1" }, { title: "Find the key", why: "the vault", take: true }))) as { lead: { id: string } };
+  const linked = (await asVm(hub.socketFor("a0"), () => board.leadLink({ sandboxRoot: "/v", agentId: "a0" }, "L-1", { add: [key.lead.id] }))) as { ok: boolean; lead: { status: string } };
+  assert.deepEqual([linked.ok, linked.lead.status], [true, "blocked"]);
+  await asVm(hub.socketFor("a0"), () => board.leadsDigest({ sandboxRoot: "/v", agentId: "a0" }, { mark: true }));
+  await asVm(hub.socketFor("a0"), () => board.readInbox({ sandboxRoot: "/v", agentId: "a0" }));
+  const waiting = asVm(hub.socketFor("a0"), () => board.waitForSwarmChange({ sandboxRoot: "/v", agentId: "a0" }, { seconds: 20 }));
+  await new Promise((r) => setTimeout(r, 300));
+  const f = (await board.callBoard(hub.socketFor("a1"), "recordEntry", [null, { kind: "finding", basis: "observed", confidence: "high", indicates: "It opens the vault.", confidence_why: "Read directly.", value: "The key is in a note", source: "notes", evidence: "row 3" }])) as { ok: boolean; entry: { seq: number } };
+  assert.equal(f.ok, true);
+  const closed = (await board.callBoard(hub.socketFor("a1"), "leadClose", [null, key.lead.id, { disposition: "resolved", ref: `E-${f.entry.seq}` }])) as { ok: boolean };
+  assert.equal(closed.ok, true);
+  const woke = await waiting;
+  assert.equal(woke.reason, "lead", JSON.stringify(woke));
+  assert.match(woke.detail, /lead_ready: every need of L-1/);
+  assert.ok(existsSync(join(sandbox, "leads", "leads.md")), "the hub renders the register");
+});

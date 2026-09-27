@@ -163,7 +163,17 @@ import {
   jobStatus,
   catalogRequest,
   runFinishLine,
+  leadOpen,
+  leadClaim,
+  leadRelease,
+  leadClose,
+  leadLink,
+  leadsView,
+  leadsDigest,
+  leadInterpret,
 } from "./board.ts";
+// The lead register's host-side pieces: a host run's wait checks it itself (a VM's hub does it there).
+import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
 import { installChunkedEgress } from "./vm-egress.ts";
@@ -222,6 +232,12 @@ export const SWARM_TOOLS = new Set([
   "job_run",
   "job_status",
   "catalog_request",
+  "lead_open",
+  "lead_claim",
+  "lead_release",
+  "lead_close",
+  "lead_link",
+  "leads",
 ]);
 
 /** A bash command run this many times by one agent earns a hint to forge a tool. */
@@ -1946,6 +1962,21 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  /**
+   * The lead register's header on every inbox and wait delivery: what is
+   * open by priority, what this agent holds, what is blocked on it, its jobs
+   * awaiting an interpretation, the questions nobody covers, and each notice
+   * since the last delivery. Whole; a register that cannot be read says so.
+   */
+  async function leadsHeader(cwd: string): Promise<{ leads?: string }> {
+    try {
+      const d = await leadsDigest(ctxFrom(cwd, agentId), { mark: true });
+      return { leads: d.text };
+    } catch (err) {
+      return { leads: `The lead register could not be read: ${(err as Error).message}` };
+    }
+  }
+
   pi.registerTool({
     name: "inbox",
     label: "Inbox",
@@ -1982,6 +2013,7 @@ export default function (pi: ExtensionAPI) {
         })),
         remaining: box.remaining,
         ...(box.remaining > 0 ? { note: pageNote(box.remaining, box.page_chars) } : {}),
+        ...(await leadsHeader(toolCtx.cwd)),
       };
       await logEvent(
         toolCtx.cwd,
@@ -2206,7 +2238,7 @@ export default function (pi: ExtensionAPI) {
     name: "wait",
     label: "Wait",
     description:
-      "Sleep until something happens: a new post for you (on main: to you, to all, or to no one on the team; in a side thread you are in: any post), done/SWARM_DONE appearing, a claim of yours lapsing, or a message for you (it follows the result) — whichever comes first, or the timeout. A main-thread post addressed only to other agents does not wake you; it stays unread and comes with the next delivery. Returns the unread posts. Use this instead of `bash sleep`: a shell sleep costs a full provider round every time you wake up, this one costs nothing.",
+      "Sleep until something happens: a new post for you (on main: to you, to all, or to no one on the team; in a side thread you are in: any post), done/SWARM_DONE appearing, a claim of yours lapsing, news from the lead register (a lead you hold becoming ready, a need of yours that will not come, your lead marked stale or taken over or reopened, the operator's note, or, when you have been idle, a ready lead nobody holds), or a message for you (it follows the result) — whichever comes first, or the timeout. A main-thread post addressed only to other agents does not wake you; it stays unread and comes with the next delivery. Returns the unread posts. Use this instead of `bash sleep`: a shell sleep costs a full provider round every time you wake up, this one costs nothing.",
     promptSnippet: "Block until the board changes instead of polling",
     promptGuidelines: [
       "When you are waiting on a peer, call wait, not bash sleep. Do not poll the board in a loop.",
@@ -2245,6 +2277,8 @@ export default function (pi: ExtensionAPI) {
           seconds: params.seconds,
           signal: woken.signal,
           everyPost: params.every_post === true,
+          // The lead register's news wakes the wait: here on the host; in a VM the hub checks it.
+          ...(boardSocket() ? {} : { extraWake: leadsWaitCheck(ctx) }),
         });
       } finally {
         waitsOpen.delete(wake);
@@ -2271,6 +2305,7 @@ export default function (pi: ExtensionAPI) {
           })) ?? [],
         remaining,
         ...(box && remaining > 0 ? { note: pageNote(remaining, box.page_chars) } : {}),
+        ...(await leadsHeader(toolCtx.cwd)),
       };
       await logEvent(
         toolCtx.cwd,
@@ -2364,6 +2399,7 @@ export default function (pi: ExtensionAPI) {
     const sub = await jobSubmit(cwd, { ...spec, ...(wait > 0 ? { wait: wait + 5 } : {}) });
     if (!sub.ok || !sub.job) return { ok: false, job: null, result: { reason: sub.reason ?? "the job was not accepted" } };
     const id = String(sub.job.job);
+    const underLead = (sub as { lead?: string }).lead;
     const until = Date.now() + wait * 1000;
     let last: Awaited<ReturnType<typeof jobStatus>> = sub;
     while (!jobDone(last.job?.state) && Date.now() < until && !signal?.aborted) {
@@ -2371,11 +2407,12 @@ export default function (pi: ExtensionAPI) {
       const st = await jobStatus(cwd, { job_id: id, limit: 8192, wait: Math.ceil((until - Date.now()) / 1000) + 5 }).catch(() => null);
       if (st?.ok) last = st;
     }
+    const leadNote = underLead ? { lead: underLead, lead_note: `run under ${underLead}: record what its output shows with interprets: ["${id}"] before the run can end` } : {};
     if (jobDone(last.job?.state)) {
       const job = (last.job ?? {}) as Record<string, unknown>;
-      return { ok: job.state === "committed" && (job.status === undefined || job.status === "ok"), job: id, result: { ...job, ...(last.stdout ? stdoutWithNote(id, last.stdout) : {}) } };
+      return { ok: job.state === "committed" && (job.status === undefined || job.status === "ok"), job: id, result: { ...job, ...(last.stdout ? stdoutWithNote(id, last.stdout) : {}), ...leadNote } };
     }
-    return { ok: true, job: id, result: { job: id, state: last.job?.state, note: `still ${last.job?.state === "accepted" ? "queued" : "running"}; a post tagged result will say when it is done (your wait wakes on it)` } };
+    return { ok: true, job: id, result: { job: id, state: last.job?.state, note: `still ${last.job?.state === "accepted" ? "queued" : "running"}; a post tagged result will say when it is done (your wait wakes on it)`, ...leadNote } };
   }
   pi.registerTool({
     name: "job_run",
@@ -2399,6 +2436,7 @@ export default function (pi: ExtensionAPI) {
       network: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("allowlist")], { description: "off (default) or the run's allowlist" })),
       profile: Type.Optional(Type.String({ description: "The job image to run in, by profile, as SWARM.md's Job images lists them (disk, memory, mobile, …); left out, the smallest job image whose record holds what the command runs, else the one that holds every pack" })),
       wait_seconds: Type.Optional(Type.Integer({ description: "How long to wait here for it (default 12, at most 100)" })),
+      lead: Type.Optional(Type.String({ description: "The lead (L-<n>, one you hold) this job is run under; left out, the one active lead you hold, if you hold exactly one. A lead's jobs wait for an interpretation (record with interprets) before the run may end." })),
     }),
     async execute(_id, params, signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
@@ -2415,6 +2453,7 @@ export default function (pi: ExtensionAPI) {
         ...(params.timeout_seconds ? { timeout_seconds: params.timeout_seconds } : {}),
         ...(params.network ? { network: params.network } : {}),
         ...(params.profile ? { profile: params.profile } : {}),
+        ...(params.lead ? { lead: params.lead } : {}),
       };
       const wait = Math.min(Math.max(params.wait_seconds ?? 12, 0), 100);
       const res = await submitAndWait(toolCtx.cwd, spec, wait, signal as AbortSignal | undefined);
@@ -2424,7 +2463,7 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text" as const, text: refused.reason }], details: refused, isError: true };
       }
       const result = { ok: true, ...res.result };
-      await logEvent(toolCtx.cwd, agentId, "job_run", params, { ok: true, job: res.job, state: res.result.state, status: res.result.status }, Date.now() - started);
+      await logEvent(toolCtx.cwd, agentId, "job_run", params, { ok: true, job: res.job, state: res.result.state, status: res.result.status, ...(res.result.lead ? { lead: res.result.lead } : {}) }, Date.now() - started);
       return okResult(result);
     },
   });
@@ -3022,11 +3061,29 @@ export default function (pi: ExtensionAPI) {
       attribution: Type.Optional(Type.Object({ subject: Type.String(), subject_type: Type.Optional(Type.Union(LEDGER_SUBJECT_TYPES.map((k) => Type.Literal(k)))), basis_refs: Type.Optional(Type.Array(Type.String())) }, { description: "Who or what an action is attributed to (account, device, person) and the objects that link them." })),
       locators: Type.Optional(Type.Array(Type.Object({ ref: Type.String(), at: Type.String() }), { description: "Where in a cited ref: a row, an offset, a record id." })),
       because: Type.Optional(Type.String({ description: "With supersedes: why the correction corrects." })),
+      opens: Type.Optional(
+        Type.Array(
+          Type.Object({
+            title: Type.String(),
+            why: Type.String(),
+            needs: Type.Optional(Type.Array(Type.String())),
+            answers: Type.Optional(Type.Array(Type.String())),
+            material: Type.Optional(Type.Boolean()),
+            take: Type.Optional(Type.Boolean()),
+          }),
+          { description: "The leads this entry opens: work it shows has to be followed, each {title, why, needs?, answers?, material?, take?} as lead_open takes it; each lead's origin is this entry. take: true keeps the follow-up yours." },
+        ),
+      ),
+      interprets: Type.Optional(
+        Type.Array(Type.Union([Type.String(), Type.Object({ job: Type.String(), rest: Type.Optional(Type.String()) })]), {
+          description: "The jobs whose output this entry interprets (j000123): the entry is what the output shows, its kind the disposition. A job's output is interpreted only this way; a bare citation in refs is not an interpretation. When you were handed only part of a job's stdout, give {job, rest}: how the rest was read, or why not.",
+        }),
+      ),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
       // Every field as given: the protocol checks which a kind takes and says which it does not.
-      const { kind, ...rest } = params;
+      const { kind, opens, interprets, ...rest } = params;
       const result = await recordEntry(ctxFrom(toolCtx.cwd, agentId), { kind, ...Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)) } as unknown as LedgerInput);
       if (!result.ok) {
         // What the agent tried to say goes on the trace whole: the args are the record, refused or not.
@@ -3041,8 +3098,22 @@ export default function (pi: ExtensionAPI) {
       // record sees which entry stopped standing, when, and by whom.
       if (result.entry.supersedes !== undefined && !result.merged) {
         await logEvent(toolCtx.cwd, agentId, "ledger_superseded", { seq: result.entry.supersedes }, { ok: true, by_seq: result.entry.seq });
+        // A lead closed on the corrected entry reopens: on the host here, in a VM at the hub.
+        if (!boardSocket()) await reopenOnLedger(toolCtx.cwd).catch(() => undefined);
       }
-      return okResult({ ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), ...(result.entry.refs?.length ? { refs: result.entry.refs } : {}), ...(result.entry.unsupported_tokens?.length ? { unsupported_tokens: result.entry.unsupported_tokens } : {}), ...(result.note ? { note: result.note } : {}), rendered: LEDGER_MD });
+      // What the entry interprets and the leads it opens, after it stands:
+      // the entry is kept whatever happens to these, and each says how it went.
+      const seq = result.entry.seq;
+      const leadsOpened: Array<Record<string, unknown>> = [];
+      for (const o of opens ?? []) {
+        const r = await leadOpen(ctxFrom(toolCtx.cwd, agentId), { ...o, origin: `E-${seq}` }).catch((err: Error) => ({ ok: false as const, reason: err.message }));
+        leadsOpened.push(r.ok ? { ok: true, lead: r.lead.id, status: r.lead.status, holder: r.lead.holder, ...(r.woke ? { woke: r.woke } : {}) } : { ok: false, title: o.title, reason: r.reason });
+      }
+      const interpreted = interprets?.length ? await leadInterpret(ctxFrom(toolCtx.cwd, agentId), seq, interprets).catch((err: Error) => ({ ok: false as const, reason: err.message })) : null;
+      if (leadsOpened.length || interpreted) {
+        await logEvent(toolCtx.cwd, agentId, "record_leads", { seq }, { ok: true, ...(leadsOpened.length ? { opened: leadsOpened } : {}), ...(interpreted ? { interprets: interpreted.ok ? interpreted.interprets : [], ...(interpreted.ok ? {} : { refused: interpreted.reason }) } : {}) }).catch(() => undefined);
+      }
+      return okResult({ ok: true, seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), ...(result.entry.refs?.length ? { refs: result.entry.refs } : {}), ...(result.entry.unsupported_tokens?.length ? { unsupported_tokens: result.entry.unsupported_tokens } : {}), ...(result.note ? { note: result.note } : {}), ...(leadsOpened.length ? { leads_opened: leadsOpened } : {}), ...(interpreted ? (interpreted.ok ? { interprets: interpreted.interprets } : { interprets_refused: `the entry stands, but its interpretation was not recorded: ${interpreted.reason}` }) : {}), rendered: LEDGER_MD });
     },
   });
 
@@ -3112,7 +3183,143 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text" as const, text: `dispute refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
       }
       await logEvent(toolCtx.cwd, agentId, "dispute", params as Record<string, unknown>, { ok: true, seq: result.line.seq, act: result.line.act, appended: result.appended, ...(result.line.hash ? { hash: result.line.hash } : {}), ...(result.note ? { note: result.note } : {}) }, Date.now() - started);
+      // A lead closed on the disputed entry no longer stands on it: on the
+      // host this pane reopens it; in a VM the hub already has.
+      if (!boardSocket()) await reopenOnLedger(toolCtx.cwd).catch(() => undefined);
       return okResult({ ok: true, seq: result.line.seq, act: result.line.act, appended: result.appended, ...(result.note ? { note: result.note } : {}), rendered: LEDGER_MD });
+    },
+  });
+
+  // The lead register (extensions/leads.ts): the swarm's open investigative
+  // work, opened, claimed and closed by the agents themselves.
+  /** A lead call's answer to the agent, and its line on the trace. */
+  async function leadAnswer(cwd: string, tool: string, params: Record<string, unknown>, started: number, r: { ok: boolean; reason?: string } & Record<string, unknown>) {
+    const lead = (r.lead ?? {}) as Record<string, unknown>;
+    await logEvent(cwd, agentId, tool, params, r.ok ? { ok: true, lead: lead.id, status: lead.status, holder: lead.holder, generation: lead.generation, ...(lead.disposition ? { disposition: lead.disposition, ref: lead.ref } : {}), ...(r.reclaimed_from ? { reclaimed_from: r.reclaimed_from } : {}), ...(r.woke ? { woke: r.woke } : {}) } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+    if (!r.ok) return { content: [{ type: "text" as const, text: `${tool} refused: ${r.reason}` }], details: r, isError: true };
+    return okResult(r);
+  }
+
+  pi.registerTool({
+    name: "lead_open",
+    label: "Open a lead",
+    description:
+      "Put a piece of material investigative work in the swarm's lead register: something found that has to be followed (a container to open, a key to find, an output to read to its end, an artefact nobody has examined). title says what, why says why it matters and what it would settle. needs names what it cannot go on without: a lead with the outcome it must reach (L-3 is L-3 resolved; L-3:negative) or a standing ledger entry (E-12); never a job, whose exit status settles nothing. answers names the goal's questions it serves. take: true holds it for you in the same step, the natural next step of your own work; left out, it is open to everyone and the seat idle longest is woken for it. material: false for work the finish line may leave open (a nice-to-have). Returns its id (L-<n>).",
+    promptSnippet: "Open a lead: work somebody has to follow",
+    promptGuidelines: [
+      "Open or claim a lead before you start work a peer could also be doing; keep the follow-ups of your own finding with take: true.",
+      "Say in needs what a lead cannot go on without (a lead's outcome or an entry), so its holder is woken when it comes.",
+    ],
+    parameters: Type.Object({
+      title: Type.String({ description: "What has to be done, in one line" }),
+      why: Type.String({ description: "Why it matters: what it would settle, what it rests on" }),
+      needs: Type.Optional(Type.Array(Type.String(), { description: "What it waits for: L-<n> (resolved), L-<n>:<disposition>, or E-<seq>" })),
+      answers: Type.Optional(Type.Array(Type.String(), { description: "The goal's questions it serves: \"3\", \"Q3\"" })),
+      material: Type.Optional(Type.Boolean({ description: "false: the finish line may leave it open (default true)" })),
+      take: Type.Optional(Type.Boolean({ description: "Hold it yourself at once" })),
+      origin: Type.Optional(Type.String({ description: "Where it came from: E-<seq>, a post (main#52), another lead" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadOpen(ctxFrom(toolCtx.cwd, agentId), params);
+      return leadAnswer(toolCtx.cwd, "lead_open", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_claim",
+    label: "Claim a lead",
+    description:
+      "Take a lead: atomically, with a new generation, so two agents never hold one. A lead a peer holds stays theirs until they release it or show as stale (silent past the stale limit, with no job running and no compaction under way): the first claim of a stale lead marks it and tells the holder, and a claim after the grace period takes it over. A turn that ended in an error frees nothing.",
+    promptSnippet: "Take a lead from the register",
+    promptGuidelines: ["When your slice ends, take the ready lead the register ranks first (leads) rather than inventing work."],
+    parameters: Type.Object({ id: Type.String({ description: "L-<n>" }) }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadClaim(ctxFrom(toolCtx.cwd, agentId), params.id);
+      return leadAnswer(toolCtx.cwd, "lead_claim", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_release",
+    label: "Release a lead",
+    description: "Give a lead you hold back to the register, open for anyone, and say why (what you did, what is left). Never leave a lead active and silent: release it or close it.",
+    promptSnippet: "Give a lead back",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>" }),
+      why: Type.Optional(Type.String({ description: "What you did on it and what is left" })),
+      generation: Type.Optional(Type.Integer({ description: "The generation you hold it at, when you want the release refused if it changed hands" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadRelease(ctxFrom(toolCtx.cwd, agentId), params.id, { ...(params.why ? { why: params.why } : {}), ...(params.generation !== undefined ? { generation: params.generation } : {}) });
+      return leadAnswer(toolCtx.cwd, "lead_release", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_close",
+    label: "Close a lead",
+    description:
+      "Close a lead with how it ended and what that cites: resolved (ref E-<seq>, the entry that settles it), negative (ref E-<seq> of the absence, the search that found nothing), duplicate (ref L-<n>, the lead it repeats), deferred (ref E-<seq> of the limitation saying why it waits), infeasible (ref E-<seq> of the limitation naming the methods tried and why none worked), needs_operator (ref: in words, what only the operator can do: the host to allow, the file to add, the question to answer; the operator sees it and can answer and reopen it). The holder closes its own lead; an unheld one anyone may close. A lead closed on an entry that is later superseded or disputed reopens by itself.",
+    promptSnippet: "Close a lead with its disposition",
+    promptGuidelines: [
+      "Close every lead you hold with a disposition; a material lead left open holds the finish line.",
+      "Use needs_operator for anything outside the evidence and the allowlist (a host to reach, a file the run does not have, a question only a person can answer); never fetch it yourself.",
+    ],
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>" }),
+      disposition: Type.Union(LEAD_DISPOSITIONS.map((d) => Type.Literal(d)), { description: LEAD_DISPOSITIONS.join(" | ") }),
+      ref: Type.String({ description: "E-<seq>, L-<n>, or for needs_operator what the operator must do" }),
+      why: Type.Optional(Type.String({ description: "Anything a reader should know about how it ended" })),
+      generation: Type.Optional(Type.Integer({ description: "The generation you hold it at" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadClose(ctxFrom(toolCtx.cwd, agentId), params.id, { disposition: params.disposition, ref: params.ref, ...(params.why ? { why: params.why } : {}), ...(params.generation !== undefined ? { generation: params.generation } : {}) });
+      if (r.ok && params.disposition === "needs_operator") {
+        // The operator reads the board too: the request is said there once, with the command that answers it.
+        const answer = (r as { operator_request?: string }).operator_request;
+        await systemPost(toolCtx.cwd, { tag: "ask", via: agentId, body: `OPERATOR REQUEST on ${params.id} from ${agentId}: ${params.ref}${answer ? ` The operator answers with: ${answer}` : ""}` }).catch(() => undefined);
+      }
+      return leadAnswer(toolCtx.cwd, "lead_close", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_link",
+    label: "Revise a lead's needs",
+    description: "Revise what a lead waits for: add a need (L-<n>, L-<n>:<disposition>, E-<seq>) or remove one that will not come, so another route stays open. A loop of needs is refused. The holder revises its own lead; an unheld one, anyone.",
+    promptSnippet: "Add or drop a lead's need",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>" }),
+      add: Type.Optional(Type.Array(Type.String(), { description: "Needs to add" })),
+      remove: Type.Optional(Type.Array(Type.String(), { description: "Needs to drop" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadLink(ctxFrom(toolCtx.cwd, agentId), params.id, { ...(params.add ? { add: params.add } : {}), ...(params.remove ? { remove: params.remove } : {}) });
+      return leadAnswer(toolCtx.cwd, "lead_link", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "leads",
+    label: "Leads",
+    description:
+      "Read the lead register: summary (default: what is open by priority, yours, what is blocked on you, your jobs awaiting interpretation, the questions nobody holds a lead for), open, active, blocked, closed, mine or all (whole leads a page at a time; from: next for the rest), jobs (every job awaiting an interpretation), questions (the goal's questions, answered or not, and who covers them), or one lead by id (L-3) with its whole history. Priority is how many leads and unanswered questions wait on a lead, then its age. The rendered register is leads/leads.md.",
+    promptSnippet: "See the swarm's open work",
+    parameters: Type.Object({
+      view: Type.Optional(Type.String({ description: "summary | open | active | blocked | closed | mine | all | jobs | questions | L-<n>" })),
+      from: Type.Optional(Type.String({ description: "The lead id a previous page named as next" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadsView(ctxFrom(toolCtx.cwd, agentId), { ...(params.view ? { view: params.view } : {}), ...(params.from ? { from: params.from } : {}), pageChars: inboxPageChars() });
+      await logEvent(toolCtx.cwd, agentId, "leads", params as Record<string, unknown>, { ok: r.ok !== false, view: params.view ?? "summary", ...(Array.isArray(r.leads) ? { n: (r.leads as unknown[]).length, remaining: r.remaining } : {}) }, Date.now() - started).catch(() => undefined);
+      if (r.ok === false) return { content: [{ type: "text" as const, text: `leads refused: ${String(r.reason)}` }], details: r, isError: true };
+      return okResult(r);
     },
   });
 
@@ -3305,13 +3512,14 @@ export default function (pi: ExtensionAPI) {
    */
   async function handoffFacts(cwd: string, id: string): Promise<HandoffFacts> {
     const sctx = ctxFrom(cwd, id);
-    const [claims, box, ledger, names, sentinel, status] = await Promise.all([
+    const [claims, box, ledger, names, sentinel, status, leads] = await Promise.all([
       listClaims(cwd).catch(() => []),
       readInbox(sctx, { markSeen: false }).catch(() => null),
       listLedger(cwd, { limit: 500 }).catch(() => []),
       readNames(cwd).catch(() => []),
       swarmDoneExists(cwd).catch(() => false),
       readBudgetStatus(sctx).catch(() => null),
+      leadsDigest(sctx, { mark: false }).catch(() => null),
     ]);
     const unread: Record<string, number> = {};
     for (const post of box?.posts ?? []) unread[post.thread] = (unread[post.thread] ?? 0) + 1;
@@ -3326,6 +3534,7 @@ export default function (pi: ExtensionAPI) {
       sentinel,
       spentUsd: status?.this_agent?.spent_usd ?? 0,
       capUsd: status?.budget.cap_per_agent_usd ?? undefined,
+      ...(leads ? { leads: leads.text } : {}),
     };
   }
 
