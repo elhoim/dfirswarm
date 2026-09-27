@@ -72,6 +72,9 @@ Work
 - When you walk a large artefact whole (a registry hive, an event log, a full file listing), write
   the whole output to a file under `work/<your id>/`, post its path on the board, and grep that
   file for later questions instead of walking the artefact again. Peers read it there too.
+- What your peers are doing and what they found is on `list_team` (each peer's name and slice,
+  its last post, its open jobs, its latest ledger entries), the board, `claims`, the ledger and the
+  store (`store/jobs/<id>/`); read those, not the trace or a peer's session or kept outputs.
 - Harness files (done/, locks/, traces/, history/, inbox/, threads/, SWARM.md, team.json,
   budget.json) are not yours to write. Use the tools.
 - `file_history` lists revisions with their content hashes; `file_diff` shows what changed between

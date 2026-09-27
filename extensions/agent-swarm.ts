@@ -36,7 +36,7 @@ import {
   agentDeadPath,
   agentDonePath,
   finishLineVerdict,
-  runFinishLine,
+  inboxPageChars,
   classifyTurnError,
   CAP_STEER,
   TOKEN_CAP_STEER,
@@ -50,6 +50,7 @@ import {
   diffWatchedPaths,
   extractWritePath,
   inboxLogResult,
+  keepToolOutput,
   keepToolOutputFromFile,
   toolOutputRel,
   type FullOutputRef,
@@ -117,6 +118,7 @@ import {
   listClaims,
   listFileHistory,
   listTeam,
+  teamView,
   markDone,
   markStopSteer,
   postMessage,
@@ -153,6 +155,7 @@ import {
   jobSubmit,
   jobStatus,
   catalogRequest,
+  runFinishLine,
 } from "./board.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
@@ -844,6 +847,15 @@ export default function (pi: ExtensionAPI) {
     if (hubSocket && !hubLink) {
       const cwd = ctx.cwd;
       hubLink = openHubLink(hubSocket, (message) => {
+        // While a hand-off's compaction runs Pi refuses every prompt ("Cannot
+        // submit a prompt while compaction is in progress"), and says so only
+        // in the pane. On run s6895a8 the record read `ok: true` for four
+        // nudges nobody received. The hand-off that ends the compaction
+        // carries the sentinel and the unread posts.
+        if (selfCompact?.compacting()) {
+          void logEvent(cwd, agentId, "hub_prompt", { kind: message.kind ?? "prompt" }, { ok: false, reason: "a compaction is running and Pi takes no prompt until it ends; not delivered" });
+          return;
+        }
         try {
           pi.sendUserMessage(message.text, { deliverAs: message.deliver ?? "followUp" });
         } catch {
@@ -852,6 +864,30 @@ export default function (pi: ExtensionAPI) {
         void logEvent(cwd, agentId, "hub_prompt", { kind: message.kind ?? "prompt" }, { ok: true });
       });
     }
+  });
+
+  /**
+   * Every wait open in this pane, each ended by a steering message for this
+   * agent: typed into its pane, a peer's nudge, the idle watchdog, a stop.
+   * Pi delivers a steer only when the tool call it arrived during ends, and a
+   * wait holds its call for up to five minutes. A steer that came in before
+   * the wait began (while the call was being checked) is still waiting for
+   * the next turn, so that wait does not start. A follow-up ends no wait: it
+   * is for a turn's end, and an agent that waited again at once would be
+   * woken again at once.
+   */
+  const waitsOpen = new Set<() => void>();
+  let steerPending = false;
+  pi.on("input", async (event) => {
+    if (event.streamingBehavior === "steer") {
+      steerPending = true;
+      for (const wake of [...waitsOpen]) wake();
+    }
+    return { action: "continue" as const };
+  });
+  // Pi puts the steers it holds into the context before the next model call.
+  pi.on("turn_start", async () => {
+    steerPending = false;
   });
 
   pi.on("agent_start", async () => {
@@ -1958,14 +1994,17 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "list_team",
     label: "List team",
-    description: "Read team.json. Lock owner ids come from this file, not callsigns.",
-    promptSnippet: "List assigned swarm agent ids",
-    promptGuidelines: ["Use list_team to learn peer ids before claiming."],
-    parameters: Type.Object({}),
-    async execute(_id, _params, _signal, _onUpdate, toolCtx: ToolCtx) {
-      const team = await listTeam(ctxFrom(toolCtx.cwd, agentId));
-      await logEvent(toolCtx.cwd, agentId, "list_team", {}, { n: team.n });
-      return okResult(team);
+    description:
+      "Read team.json (lock owner ids come from this file, not callsigns) and what each peer is doing and has found: its name and what it said it is doing, its last post, its open jobs (id, profile, the command or tool, state, since when) and its latest ledger entries (seq, kind, first line; the whole entry is `ledger`). Built from the board, the store and the ledger. Whole peers per page: when `next` is set, call again with from: next for the rest.",
+    promptSnippet: "List the team: peer ids, what each peer is doing, its open jobs and latest findings",
+    promptGuidelines: ["Use list_team to learn peer ids before claiming, and to see what each peer is doing and has found before you take work."],
+    parameters: Type.Object({
+      from: Type.Optional(Type.String({ description: "The peer id a previous list_team named as `next`: the page starts there" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const view = await teamView(ctxFrom(toolCtx.cwd, agentId), { ...(params.from ? { from: params.from } : {}), pageChars: inboxPageChars() });
+      await logEvent(toolCtx.cwd, agentId, "list_team", params.from ? { from: params.from } : {}, { n: view.n, peers: view.peers.map((p) => p.id), remaining: view.remaining });
+      return okResult(view);
     },
   });
 
@@ -2163,7 +2202,7 @@ export default function (pi: ExtensionAPI) {
     name: "wait",
     label: "Wait",
     description:
-      "Sleep until something happens: a new post for you (on main: to you, to all, or to no one on the team; in a side thread you are in: any post), done/SWARM_DONE appearing, or a claim of yours lapsing — whichever comes first, or the timeout. A main-thread post addressed only to other agents does not wake you; it stays unread and comes with the next delivery. Returns the unread posts. Use this instead of `bash sleep`: a shell sleep costs a full provider round every time you wake up, this one costs nothing.",
+      "Sleep until something happens: a new post for you (on main: to you, to all, or to no one on the team; in a side thread you are in: any post), done/SWARM_DONE appearing, a claim of yours lapsing, or a message for you (it follows the result) — whichever comes first, or the timeout. A main-thread post addressed only to other agents does not wake you; it stays unread and comes with the next delivery. Returns the unread posts. Use this instead of `bash sleep`: a shell sleep costs a full provider round every time you wake up, this one costs nothing.",
     promptSnippet: "Block until the board changes instead of polling",
     promptGuidelines: [
       "When you are waiting on a peer, call wait, not bash sleep. Do not poll the board in a loop.",
@@ -2182,11 +2221,34 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
       const ctx = ctxFrom(toolCtx.cwd, agentId);
-      const result = await waitForSwarmChange(ctx, {
-        seconds: params.seconds,
-        signal: signal as AbortSignal | undefined,
-        everyPost: params.every_post === true,
-      });
+      // A steer for this agent ends the wait (waitsOpen), through the same
+      // signal Pi's own abort uses, so it ends a wait held by the hub too.
+      const outer = signal as AbortSignal | undefined;
+      const woken = new AbortController();
+      let steered = false;
+      const wake = () => {
+        steered = true;
+        woken.abort();
+      };
+      const follow = () => woken.abort();
+      if (outer?.aborted) woken.abort();
+      else outer?.addEventListener("abort", follow, { once: true });
+      if (steerPending) wake();
+      waitsOpen.add(wake);
+      let result: Awaited<ReturnType<typeof waitForSwarmChange>>;
+      try {
+        result = await waitForSwarmChange(ctx, {
+          seconds: params.seconds,
+          signal: woken.signal,
+          everyPost: params.every_post === true,
+        });
+      } finally {
+        waitsOpen.delete(wake);
+        outer?.removeEventListener("abort", follow);
+      }
+      if (steered && !outer?.aborted && result.reason === "timeout") {
+        result = { ...result, reason: "prompt", detail: "A message for you came in while you waited; it follows this result. Act on it before you wait again." };
+      }
       // Hand back what woke us, so the agent does not need a second call.
       const box = result.reason === "post" ? await readInbox(ctx) : null;
       const remaining = box?.remaining ?? 0;
@@ -3076,7 +3138,7 @@ export default function (pi: ExtensionAPI) {
     name: "done",
     label: "Done",
     description:
-      "Write done/agents/<id>.done, create done/SWARM_DONE if missing (idempotent), drop this worker's locks, and terminate the session.",
+      "Write done/agents/<id>.done, create done/SWARM_DONE if missing (idempotent), drop this worker's locks, and terminate the session. Before the sentinel the harness runs the goal's checks itself (in a microVM run on the host, where the trace they read is): while any fails, done is refused, and the refusal names each check that fails and what makes it pass.",
     promptSnippet: "Stop this worker and signal the swarm sentinel",
     promptGuidelines: [
       "Use done when the definition of done is met and its checks pass, or when done/SWARM_DONE already exists. done ends the whole swarm, not your slice: a finished slice is posted to the board, not done. When the task is impossible or unsafe, call done with abandon: true and say why.",
@@ -3136,9 +3198,10 @@ export default function (pi: ExtensionAPI) {
           ...(inputsCheck.digest_mismatch.length ? { digest_mismatch: inputsCheck.digest_mismatch } : {}),
         });
       }
-      // The finish line, before the sentinel: the operator's checks, run now.
-      // A done that would end the swarm with them failing is refused and told
-      // which check fails; an abandoned run says so in its reason.
+      // The finish line, before the sentinel: the operator's checks, run now
+      // (in a VM by the hub, on the host: board.ts). A done that would end
+      // the swarm with them failing is refused and told each check that
+      // fails; an abandoned run says so in its reason.
       let reasonPrefix = "";
       if (!(await swarmDoneExists(toolCtx.cwd))) {
         const run = await runFinishLine(toolCtx.cwd).catch(() => null);
@@ -3201,6 +3264,13 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  /** A positive whole number of seconds from the environment, in milliseconds; undefined when unset or not one. */
+  function secondsFromEnv(name: string): number | undefined {
+    const raw = process.env[name]?.trim();
+    if (!raw || !/^\d+$/.test(raw) || Number(raw) <= 0) return undefined;
+    return Number(raw) * 1000;
+  }
+
   /**
    * What the harness knows at hand-off time, from files rather than from the
    * model's memory: the header the returned note travels under. Every read is
@@ -3243,6 +3313,8 @@ export default function (pi: ExtensionAPI) {
       summaryModel: process.env.SWARM_COMPACT_MODEL?.trim() || undefined,
       specs,
       fromDefaults,
+      keepText: (cwd, text) => keepToolOutput(cwd, toolOutputRel(agentId, "compact_summary", "text"), text),
+      bounds: { summaryAttemptMs: secondsFromEnv("SWARM_COMPACT_SUMMARY_SEC"), compactionMs: secondsFromEnv("SWARM_COMPACT_TIMEOUT_SEC") },
     });
   }
 }

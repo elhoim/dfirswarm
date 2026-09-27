@@ -149,11 +149,17 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   // Each done that would end the swarm runs the operator's finish line on
   // the host: a few in a row, then one a minute.
   markDone: { bucket: "done", capacity: 3, perSecond: 1 / 60 },
+  runFinishLine: { bucket: "finish_line", capacity: 3, perSecond: 1 / 60 },
   // A job is a VM: a burst, then one every few seconds; the queue's own
   // per-agent limits hold what is accepted.
   jobSubmit: { bucket: "job", capacity: 20, perSecond: 0.2 },
   catalogRequest: { bucket: "job", capacity: 20, perSecond: 0.2 },
 };
+/**
+ * How recent a finish-line run markDone takes as its own: the seat's `done`
+ * asked for it and calls markDone as soon as it passes.
+ */
+const FINISH_LINE_REUSE_MS = 30_000;
 /** A refusal repeated within this window is counted, not written again. */
 const REFUSAL_WINDOW_MS = 60_000;
 /** Request ids remembered, so a call sent again after a dropped link gets the first run's answer. */
@@ -188,7 +194,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest"]);
+const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -459,8 +465,20 @@ export function boardTable(hub: {
   };
   const as = (who: string): P.SwarmContext => ({ sandboxRoot: S, agentId: who });
   // One finish-line run on the host at a time: a done that arrives while
-  // one runs gets that run's answer.
-  let finishLine: Promise<Awaited<ReturnType<typeof P.runFinishLine>> | null> | null = null;
+  // one runs gets that run's answer. A seat's `done` asks for the run first
+  // (runFinishLine: its VM does not see the trace the checks read) and then
+  // calls markDone; markDone takes that same run when it met the finish line
+  // moments ago, so one done is one run of the operator's checks. Only the
+  // seat's own run, and only a passing one: a run that refused is run again.
+  type FinishLine = Awaited<ReturnType<typeof P.runFinishLine>> | null;
+  let finishLine: Promise<FinishLine> | null = null;
+  const askedBy = new Map<string, { run: FinishLine; at: number }>();
+  const sharedFinishLine = (): Promise<FinishLine> =>
+    (finishLine ??= P.runFinishLine(S)
+      .catch(() => null)
+      .finally(() => {
+        finishLine = null;
+      }));
   type Call = (who: string, a: unknown[], signal: AbortSignal) => Promise<unknown>;
   const table: Record<string, Call> = {
     applySessionUsage: async (who, a) => {
@@ -545,10 +563,18 @@ export function boardTable(hub: {
     listForgedTools: () => P.listForgedTools(S),
     listLedger: (_who, a) => P.listLedger(S, (a[1] as { kind?: string; limit?: number }) ?? {}),
     listTeam: (who) => P.listTeam(as(who)),
+    teamView: (who, a) => {
+      const o = isObject(a[1]) ? a[1] : {};
+      return P.teamView(as(who), {
+        ...(typeof o.from === "string" ? { from: o.from } : {}),
+        ...(typeof o.pageChars === "number" && Number.isFinite(o.pageChars) ? { pageChars: o.pageChars } : {}),
+      });
+    },
     markDone: async (who, a) => {
       // The sentinel ends every seat, so the finish line is run here, on the
-      // host, by the harness, before it is written: what the agent's own
-      // extension ran inside its VM is that VM's word. An abandoned run says
+      // host, by the harness, before it is written: the run the seat's own
+      // done asked for moments ago (runFinishLine), when it met the finish
+      // line, or a new one; a seat's VM runs none of it. An abandoned run says
       // so in its reason and is not held to the checks, but one seat's
       // abandon ends it only with a second's or with nobody else working
       // (P.abandonGate); a seat leaving on its own cap writes no sentinel and
@@ -557,14 +583,12 @@ export function boardTable(hub: {
       const reason = String(args.reason ?? "");
       const endsSwarm = args.createSentinel !== false && reason !== "agent_cap" && !reason.startsWith(P.ABANDON_PREFIX);
       if (endsSwarm && !(await P.swarmDoneExists(S))) {
-        finishLine ??= P.runFinishLine(S)
-          .catch(() => null)
-          .finally(() => {
-            finishLine = null;
-          });
-        const run = await finishLine;
+        const mine = askedBy.get(who);
+        askedBy.delete(who);
+        const recent = mine && Date.now() - mine.at <= FINISH_LINE_REUSE_MS && P.finishLineVerdict(mine.run, false).proceed ? mine : null;
+        const run = recent ? recent.run : await sharedFinishLine();
         const verdict = P.finishLineVerdict(run, false);
-        if (!verdict.proceed) throw new Error(`the harness re-ran the finish line on the host and it is not met: ${verdict.reason}`);
+        if (!verdict.proceed) throw new Error(`the harness ran the finish line on the host and it is not met: ${verdict.reason}`);
       }
       // An abandon one seat asks for while others work is a vote: the seat
       // stays, and markDone says so.
@@ -573,6 +597,13 @@ export function boardTable(hub: {
       return done;
     },
     nameOf: (_who, a) => P.nameOf(S, String(a[1] ?? "")),
+    // The operator's finish line for a seat's `done`, answered whole (the
+    // refusal is made from it in the seat, as on the host).
+    runFinishLine: async (who) => {
+      const run = await sharedFinishLine();
+      askedBy.set(who, { run, at: Date.now() });
+      return run;
+    },
     postMessage: (who, a) => {
       // An agent's post is its own; `via` is the hub's to set.
       const { via: _via, ...args } = (a[1] as Record<string, unknown>) ?? {};
@@ -2305,6 +2336,12 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
   switch (fn) {
     case "markDone":
       return { created_sentinel: result.created_sentinel === true, reason: result.reason, ...(result.terminate === false ? { refused: true, abandon: result.abandon } : {}) };
+    case "runFinishLine": {
+      // The host's own run of the operator's checks for a seat's done: the
+      // seat's finish_line line is its VM's word, this one is the harness's.
+      const failed = Array.isArray(result.checks) ? (result.checks as Array<{ cmd?: unknown; ok?: unknown }>).filter((c) => c.ok !== true).map((c) => String(c.cmd ?? "")) : [];
+      return { total: result.total, passed: result.passed, ...(failed.length ? { failing: failed } : {}), ...(result.error ? { error: result.error } : {}) };
+    }
     case "forgeTool":
       return { ok: result.ok, name: (result as { manifest?: { name?: string } }).manifest?.name ?? result.name };
     case "restoreFileVersion":

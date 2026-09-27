@@ -2179,6 +2179,160 @@ export async function listTeam(ctx: SwarmContext): Promise<TeamRecord> {
   return readTeam(ctx.sandboxRoot);
 }
 
+/** A peer's job still to finish, as the store's own record of it says. */
+export type PeerJob = {
+  id: string;
+  kind: string;
+  profile: string | null;
+  command?: string;
+  tool?: string;
+  args?: Record<string, unknown>;
+  recipe?: string;
+  source?: string;
+  state: string;
+  since: string | null;
+};
+
+/** One peer, as the board, the store and the ledger have it. Never the trace. */
+export type PeerView = {
+  id: string;
+  role: string;
+  model?: string;
+  name: string | null;
+  doing: string | null;
+  /** When it last said what it calls itself and what it is doing (names.json). */
+  named_at: string | null;
+  /** `done` or `dead` when its marker is there; null while it works. */
+  marker: "done" | "dead" | null;
+  /** Its latest post on any thread (the board's file, written when it was posted), and how many it has made. */
+  last_post: { id: number; thread: string; tag: string; to: string; at: string } | null;
+  posts: number;
+  /** Jobs it asked for that are not over (accepted, running, finished, fenced), from store/jobs/<id>/job.json. */
+  open_jobs: PeerJob[];
+  /** How many ledger entries it recorded, and its last few: the whole of each is `ledger` by seq. */
+  ledger: { total: number; last: Array<{ seq: number; kind: string; value_first_line: string; superseded_by?: number }> };
+};
+
+export type TeamView = TeamRecord & {
+  /** Every seat but the caller, in team order, from `from` on, as many whole peers as the page holds. */
+  peers: PeerView[];
+  /** Peers not in this page; call again with `from: next` for them. */
+  remaining: number;
+  next?: string;
+  note?: string;
+};
+
+/** How many of a peer's latest ledger entries list_team shows. */
+export const TEAM_VIEW_LEDGER_LAST = 3;
+const OPEN_JOB_STATES = new Set(["accepted", "running", "finished", "fenced"]);
+
+/**
+ * What each peer is doing and what it found, for `list_team`, built from the
+ * harness's own records: names.json and the board (who said what, when),
+ * the store's job records (what it asked the workers to run), the ledger
+ * (what it recorded). Never from the trace: in a microVM a seat does not see
+ * it, and a seat that is to re-derive a peer's finding reads what the peer
+ * recorded and sealed, not how it got there. The page is whole peers,
+ * bounded like an inbox delivery (`pageChars`, 0 for no bound); nothing in a
+ * peer is cut, except that a ledger entry is shown by its first line, the
+ * whole of it one `ledger` call away by its seq.
+ */
+export async function teamView(ctx: SwarmContext, opts: { from?: string; pageChars?: number } = {}): Promise<TeamView> {
+  const S = ctx.sandboxRoot;
+  const team = await readTeam(S);
+  const names = await readNames(S);
+  // The board: each author's latest post and its count, by the file names
+  // (`000123-<author>.md`), then that one post read for its thread and tag.
+  // When it was posted is when the harness wrote its file: posts are never
+  // rewritten.
+  const latest = new Map<string, { file: string; at: Date; count: number }>();
+  for (const thread of await listThreadNames(S)) {
+    for (const file of await listPostFiles(S, thread)) {
+      const m = /^\d{6}-(.+)\.md$/.exec(basename(file));
+      if (!m) continue;
+      const at = await stat(file).then((st) => st.mtime).catch(() => null);
+      if (!at) continue;
+      const was = latest.get(m[1]!);
+      latest.set(m[1]!, !was || at >= was.at ? { file, at, count: (was?.count ?? 0) + 1 } : { ...was, count: was.count + 1 });
+    }
+  }
+  // The store: every job's own record.
+  const jobsByAgent = new Map<string, PeerJob[]>();
+  const jobDirs = await readdir(join(S, "store", "jobs")).catch(() => [] as string[]);
+  for (const dir of jobDirs.sort()) {
+    const job = await readFile(join(S, "store", "jobs", dir, "job.json"), "utf8")
+      .then((t) => JSON.parse(t) as { id?: string; spec?: Record<string, unknown>; requester?: { agent?: string }; state?: string; accepted_at?: string; started_at?: string })
+      .catch(() => null);
+    const who = job?.requester?.agent;
+    if (!job || !who || !OPEN_JOB_STATES.has(String(job.state))) continue;
+    const spec = job.spec ?? {};
+    const view: PeerJob = {
+      id: String(job.id ?? dir),
+      kind: String(spec.kind ?? "?"),
+      profile: typeof spec.profile === "string" ? spec.profile : null,
+      ...(typeof spec.command === "string" ? { command: spec.command } : {}),
+      ...(typeof spec.tool === "string" ? { tool: spec.tool } : {}),
+      ...(spec.args && typeof spec.args === "object" ? { args: spec.args as Record<string, unknown> } : {}),
+      ...(typeof spec.recipe === "string" ? { recipe: spec.recipe } : {}),
+      ...(typeof spec.source === "string" ? { source: spec.source } : {}),
+      state: String(job.state),
+      since: job.started_at ?? job.accepted_at ?? null,
+    };
+    jobsByAgent.set(who, [...(jobsByAgent.get(who) ?? []), view]);
+  }
+  const ledger = await readLedger(S);
+  const replaced = supersededBy(ledger);
+  const peers: PeerView[] = [];
+  for (const a of team.agents) {
+    if (a.id === ctx.agentId) continue;
+    const named = names.find((n) => n.id === a.id);
+    const post = latest.get(a.id);
+    const record = post ? await readPost(post.file).catch(() => null) : null;
+    const theirs = ledger.filter((e) => e.by === a.id);
+    const there = (path: string) => stat(path).then(() => true, () => false);
+    const marker = (await there(agentDonePath(S, a.id))) ? "done" : (await there(agentDeadPath(S, a.id))) ? "dead" : null;
+    peers.push({
+      id: a.id,
+      role: a.role,
+      ...(a.model ? { model: a.model } : {}),
+      name: named?.name ?? null,
+      doing: named?.doing ?? null,
+      named_at: named?.at ?? null,
+      marker,
+      last_post: post && record ? { id: record.id, thread: record.thread, tag: record.tag, to: record.to, at: post.at.toISOString() } : null,
+      posts: post?.count ?? 0,
+      open_jobs: jobsByAgent.get(a.id) ?? [],
+      ledger: {
+        total: theirs.length,
+        last: theirs.slice(-TEAM_VIEW_LEDGER_LAST).map((e) => ({
+          seq: e.seq,
+          kind: e.kind,
+          value_first_line: String(e.value ?? "").split("\n")[0]!,
+          ...(replaced.has(e.seq) ? { superseded_by: replaced.get(e.seq) } : {}),
+        })),
+      },
+    });
+  }
+  // The page: whole peers from `from` on, until the next would break the bound.
+  const start = opts.from ? Math.max(0, peers.findIndex((p) => p.id === opts.from)) : 0;
+  const pageChars = opts.pageChars ?? inboxPageChars();
+  const page: PeerView[] = [];
+  let chars = 0;
+  for (const peer of peers.slice(start)) {
+    const size = JSON.stringify(peer).length;
+    if (pageChars > 0 && page.length > 0 && chars + size > pageChars) break;
+    page.push(peer);
+    chars += size;
+  }
+  const rest = peers.slice(start + page.length);
+  return {
+    ...team,
+    peers: page,
+    remaining: rest.length,
+    ...(rest.length ? { next: rest[0]!.id, note: `${rest.length} more peer(s) past this page's bound; call list_team with from: "${rest[0]!.id}" for them.` } : {}),
+  };
+}
+
 export async function readBudgetStatus(ctx: SwarmContext): Promise<{
   budget: BudgetRecord;
   remaining_usd: number;
@@ -4498,7 +4652,7 @@ export async function latestPostIds(
   return out;
 }
 
-export type WaitOutcome = "post" | "sentinel" | "claim_lost" | "timeout";
+export type WaitOutcome = "post" | "sentinel" | "claim_lost" | "timeout" | "prompt";
 
 export type WaitResult = {
   reason: WaitOutcome;
@@ -5221,7 +5375,7 @@ export const TOOL_RESERVED_NAMES = new Set([
   "extension_error", "watch_truncated", "agent_error", "toolchain",
   // self-compaction: the tool, the per-turn context row and the hand-off events
   "self_compact", "context", "compact_notice", "compact_warning", "compact_forced", "compact_hold",
-  "compact_note", "compact_start", "compact_done", "compact_failed", "compact_config",
+  "compact_note", "compact_start", "compact_done", "compact_failed", "compact_stalled", "compact_config",
   // microVM runs: the tool that writes a shared file, the hub's own lines,
   // and what an agent's extension says about the hub (tests/reserved-names)
   "publish_file", "publish_needed", "skill", "finish_line", "hub_call", "hub_link", "hub_prompt",
@@ -8852,12 +9006,20 @@ export function runFinishLine(sandbox: string): Promise<FinishLineRun | null> {
   });
 }
 
-/** What await-done.sh --checks-json prints: the finish line, run once, right now. */
+/**
+ * What await-done.sh --checks-json prints: the finish line, run once, right
+ * now. What a failing check said (`out`, and `fix` or `output` when a runner
+ * gives them) the refusal carries to the agent verbatim.
+ */
 export type FinishLineRun = {
   total: number;
   passed: number;
-  /** A failing check's output, whole when it is at most 64 KiB (out), and its size (out_bytes). */
-  checks: Array<{ cmd: string; ok: boolean; ms?: number; timed_out?: boolean; out?: string; out_bytes?: number }>;
+  /**
+   * A failing check's output, whole when it is at most 64 KiB (out), and its
+   * size (out_bytes): the runner's own words for the check. `fix` or
+   * `output`, when a runner gives them, are the check's words too.
+   */
+  checks: Array<{ cmd: string; ok: boolean; ms?: number; timed_out?: boolean; out?: string; out_bytes?: number; fix?: string; output?: string }>;
   source?: string | null;
   error?: string;
 };
@@ -8868,7 +9030,8 @@ export type FinishLineRun = {
  * rewrite them; but until now nothing ran them at the moment `done` was
  * called, and on run sb36f a nano agent ended a 25 GB case after four minutes
  * by calling done when its own slice was finished, with no report written. A
- * failing finish line is a refusal that names the first check that fails.
+ * failing finish line is a refusal that names every check that fails and
+ * what makes it pass (`failing` is the first, for the record's one field).
  * `abandon` is the way out the guidelines promise for a task that is
  * impossible or unsafe: the sentinel is written and says so. A run whose
  * checks cannot be read at all is not held hostage by the runner: it proceeds,
@@ -8902,18 +9065,29 @@ export function finishLineVerdict(
   if (run.total === 0) return { proceed: true, note: "the goal has no checks" };
   if (run.passed >= run.total) return { proceed: true };
   if (abandon) return { proceed: true, reasonPrefix: ABANDON_PREFIX, note: `${run.passed} of ${run.total} checks pass; abandoned on purpose` };
-  const first = run.checks.find((c) => !c.ok);
-  const failing = first?.cmd ?? "(unknown check)";
-  const why = first?.timed_out ? "timed out" : "fails";
-  // What the check said, when it said something: a check such as
-  // check-answers.ts names each defect and its fix there. Whole, or, past
-  // what the finish line hands back, its size and the way to read it all.
-  const said = first?.out !== undefined ? ` It says:\n${first.out.trimEnd()}\n` : first?.out_bytes ? ` It printed ${first.out_bytes} bytes; run it from the run's directory to read them. ` : " ";
+  const failed = run.checks.filter((c) => !c.ok);
+  const failing = failed[0]?.cmd ?? "(unknown check)";
+  // Each failing check, and what makes it pass. What the check said, when it
+  // said something, verbatim: a check such as check-answers.ts names each
+  // defect and its fix there (`out`, whole up to what the finish line hands
+  // back; past that, its size and the way to read it all). Otherwise the
+  // command itself, which is the test.
+  const each = failed.length
+    ? failed
+        .map((c) => {
+          const head = `- \`${c.cmd}\` ${c.timed_out ? "timed out" : "fails"}.`;
+          const said = [c.out, c.fix, c.output].filter((t): t is string => typeof t === "string" && t.trim().length > 0).map((t) => t.trimEnd());
+          if (said.length) return `${head} It says:\n${said.join("\n")}`;
+          if (c.out_bytes) return `${head} It printed ${c.out_bytes} bytes; run it from the run's directory to read them.`;
+          return `${head} Fix: ${c.timed_out ? "it has to finish within the check's time limit and succeed" : "make this command succeed when run from the run's directory"}`;
+        })
+        .join("\n")
+    : "- the runner reported fewer passing checks than it ran, and named none";
   return {
     proceed: false,
     failing,
     reason:
-      `The finish line is not met: ${run.passed} of ${run.total} checks pass, and the first that ${why} is \`${failing}\`.${said}` +
+      `The finish line is not met: ${run.passed} of ${run.total} checks pass. The harness ran the goal's checks when you called done; each that fails:\n${each}\n` +
       `done ends the whole swarm, not your slice. If your slice is finished, post it to the board and take the next one, or wait. ` +
       `If the finish line cannot be met, call done again with abandon: true and say why on the board.`,
   };

@@ -124,3 +124,30 @@ does not have. What shipped instead:
 
 The compaction count under the page bound and the quieter board is not yet
 measured on a real run; the audit is what will measure it.
+
+## Amendment (2026-09-27): a compaction is bounded
+
+A compaction that never ends is worse than one that fails: Pi takes no
+prompt while it runs, the watchdog's and the stop's included. On run
+s6895a8 a seat's second compaction started and was never heard from again;
+on run sedf827 two summaries ran on to 86,329 and 128,000 output tokens (26
+and 38 minutes), because the openai-codex API sends no output limit and
+`maxTokens` is only a request; both were then taken into the context they
+were meant to shrink.
+
+- **Each summary attempt is bounded** in time (`SWARM_COMPACT_SUMMARY_SEC`,
+  300 s; the longest of 419 measured was 175 s) and in length (48,000
+  characters, one and a half times the 8,192 tokens it asks for). The
+  summary is streamed so the bound holds whatever the provider does; a
+  stopped attempt is a `compact_failed` row naming what it wrote, which is
+  kept whole under `tool-output/<id>/`.
+- **The compaction as a whole is bounded** (`SWARM_COMPACT_TIMEOUT_SEC`, 900
+  s, our attempts and Pi's fallback together). Past it the seat stops the
+  compaction and counts it as failed (`compact_stalled`, then
+  `compact_failed` with `stalled: true`): retried while retries are left,
+  the lock released after, the note kept.
+- **What the seat cannot fix is said.** A compaction Pi does not let go of
+  is recorded by the seat, and one still open past
+  `SWARM_COMPACT_STALL_SEC` (1200 s) is posted on the board by the idle
+  watchdog, which nudges no compacting seat. A hub prompt refused because a
+  compaction is running is recorded as refused.

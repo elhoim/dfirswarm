@@ -16,12 +16,17 @@
  *   SC_FAKE_WINDOW       context window the model declares (default 200000)
  *   SC_FAKE_BASE         tokens reported on the first turn (default 5000)
  *   SC_FAKE_STEP         extra tokens per assistant message since the last hand-off (default 20000)
- *   SC_FAKE_SCENARIO     ignore-until-forced (default) | obey-warning | never-compact
+ *   SC_FAKE_SCENARIO     ignore-until-forced (default) | obey-warning | never-compact | wait-for-steer
+ *                        (calls wait until a message saying STEER-TEST reaches it, then stops)
  *   SC_FAKE_BIG_STEP     1 makes the first scripted bash step print 140 KB (20,000 lines), past Pi's 50 KB bound
  *   SC_FAKE_NOTE         the note_to_self the script hands off with
  *   SC_FAKE_RESULT_PATH  the file the script writes after the hand-off (default work/agent00/result.txt)
  *   SC_FAKE_CYCLES       hand-offs to complete before writing the result (default 1)
  *   SC_FAKE_SUMMARY_FAIL summary calls that fail before one succeeds (default 0)
+ *   SC_FAKE_SUMMARY_RUNAWAY summary calls, after the failing ones, that stream text without end
+ *                        and ignore maxTokens until they are aborted, as the openai-codex API
+ *                        let two summaries run on to 128,000 output tokens (default 0)
+ *   SC_FAKE_SUMMARY_HANG summary calls, after those, that answer nothing until aborted (default 0)
  *   SC_FAKE_TRACE        JSONL file that records every model request
  */
 import { appendFileSync } from "node:fs";
@@ -35,6 +40,10 @@ const SCENARIO = env("SC_FAKE_SCENARIO", "ignore-until-forced");
 const RESULT_PATH = env("SC_FAKE_RESULT_PATH", "work/agent00/result.txt");
 const CYCLES = Number(env("SC_FAKE_CYCLES", "1"));
 const SUMMARY_FAIL = Number(env("SC_FAKE_SUMMARY_FAIL", "0"));
+const SUMMARY_RUNAWAY = Number(env("SC_FAKE_SUMMARY_RUNAWAY", "0"));
+const SUMMARY_HANG = Number(env("SC_FAKE_SUMMARY_HANG", "0"));
+/** One chunk of a runaway summary; the harness's bound is 48,000 characters. */
+const RUNAWAY_CHUNK = "- the same line again, as a looping summarizer writes it\n".repeat(80);
 const TRACE = process.env.SC_FAKE_TRACE;
 const NOTE = env(
   "SC_FAKE_NOTE",
@@ -120,6 +129,11 @@ function decide(messages: Msg[]): Plan {
   const lastText = last ? textOf(last.content) : "";
 
   if (taskDone) return { text: "Task complete.", usageTotal: BASE, stopReason: "stop" };
+
+  if (SCENARIO === "wait-for-steer") {
+    if (last?.role === "user" && /STEER-TEST/.test(lastText)) return { text: "Task complete.", usageTotal, stopReason: "stop" };
+    return { toolCall: { name: "wait", arguments: { seconds: 120 } }, usageTotal, stopReason: "toolUse" };
+  }
 
   if (last?.role === "toolResult") {
     const trText = textOf(last.content);
@@ -246,6 +260,21 @@ function streamScripted(model: { api: string; provider: string; id: string }, ra
     timestamp: Date.now(),
   };
   const isSummary = !context.tools || context.tools.length === 0;
+  /** A call that goes on until it is aborted: then it ends the way a provider's aborted stream does. */
+  const untilAborted = (tick?: () => void) => {
+    const signal = options?.signal;
+    const end = () => {
+      if (timer) clearInterval(timer);
+      output.stopReason = "aborted";
+      output.errorMessage = "Request was aborted";
+      stream.push({ type: "error", reason: "aborted", error: output });
+      stream.finish(output);
+      stream.end();
+    };
+    const timer = tick ? setInterval(tick, 2) : undefined;
+    if (signal?.aborted) end();
+    else signal?.addEventListener("abort", end, { once: true });
+  };
   setTimeout(() => {
     try {
       stream.push({ type: "start", partial: output });
@@ -253,6 +282,19 @@ function streamScripted(model: { api: string; provider: string; id: string }, ra
         summaryCalls += 1;
         trace({ kind: "summary", call: summaryCalls, model: model.id, systemPrompt: (context.systemPrompt ?? "").slice(0, 160) });
         if (summaryCalls <= SUMMARY_FAIL) throw new Error(`fake summary failure #${summaryCalls}`);
+        if (summaryCalls <= SUMMARY_FAIL + SUMMARY_RUNAWAY) {
+          output.content.push({ type: "text", text: "" });
+          stream.push({ type: "text_start", contentIndex: 0, partial: output });
+          untilAborted(() => {
+            (output.content[0] as { text: string }).text += RUNAWAY_CHUNK;
+            stream.push({ type: "text_delta", contentIndex: 0, delta: RUNAWAY_CHUNK, partial: output });
+          });
+          return;
+        }
+        if (summaryCalls <= SUMMARY_FAIL + SUMMARY_RUNAWAY + SUMMARY_HANG) {
+          untilAborted();
+          return;
+        }
         // The summary names the model that wrote it, so a test can prove the
         // call went where --compact-model pointed.
         const text = `FAKE-SUMMARY[${(context.systemPrompt ?? "").slice(0, 60)}]\n## Goal\nScripted goal.\n## Next Steps\n1. Follow the note.\nMODEL: ${model.id}`;

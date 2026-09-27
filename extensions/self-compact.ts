@@ -21,6 +21,10 @@
  * - A summary that fails twice falls back to Pi's own summarizer rather than
  *   holding the lock; a compaction that fails past its retries releases the
  *   lock. A locked agent nobody can unlock is a dead agent.
+ * - Every summary attempt is bounded, in time and in length, and so is the
+ *   compaction as a whole: a provider may ignore the output limit it is
+ *   asked for, and a compaction that never ends leaves a seat that takes no
+ *   prompt from anyone. What a stopped attempt wrote is kept whole on disk.
  * - Every crossing, hold, note, start, success and failure is a trace event,
  *   and one `context` row per turn gives the run its context time series.
  *
@@ -57,6 +61,31 @@ export const LOCK_ALLOWED_TOOLS = new Set([SELF_COMPACT_TOOL, "budget", "done"])
 const MAX_AUTO_RETRIES = 3;
 const SUMMARY_ATTEMPTS = 2;
 const SUMMARY_MAX_TOKENS = 8_192;
+/**
+ * How long one summary attempt may run. The longest of the 419 compactions
+ * measured over the VM runs up to 2026-09-27 took 175 s, apart from the two
+ * runaways below.
+ */
+export const SUMMARY_ATTEMPT_MS = 5 * 60_000;
+/**
+ * How long a summary may grow before its attempt is stopped: one and a half
+ * times the 8,192 tokens it asks for, at four characters a token. `maxTokens`
+ * is a request a provider may drop: the openai-codex API sends no output
+ * limit at all, and on run sedf827 two summaries ran on to 86,329 and 128,000
+ * output tokens (294,822 and 388,389 characters, 26 and 38 minutes, each then
+ * taken into the context it was meant to shrink). The largest of the other
+ * 417 was 29,592 characters.
+ */
+export const SUMMARY_MAX_CHARS = 48_000;
+/**
+ * How long one compaction may run, both our attempts and Pi's fallback, before
+ * the seat stops it and counts it as failed. While a compaction runs Pi takes
+ * no prompt at all (the watchdog's nudges and the stop included): run
+ * s6895a8's s6895a803 started its second one and was never heard from again.
+ */
+export const COMPACTION_TIMEOUT_MS = 15 * 60_000;
+/** How long after stopping a compaction the seat waits for Pi to say it stopped before recording that it did not. */
+const ABORT_GRACE_MS = 60_000;
 
 /** The events this module writes to the trace; all reserved in protocol.ts. */
 export const SELF_COMPACT_EVENTS = [
@@ -69,6 +98,7 @@ export const SELF_COMPACT_EVENTS = [
   "compact_start",
   "compact_done",
   "compact_failed",
+  "compact_stalled",
   "compact_config",
 ] as const;
 
@@ -133,6 +163,14 @@ export type SelfCompactDeps = {
   specs: SpecLists;
   /** True when the kickoff set none of the three; a seat with no matching entry is on the defaults either way. */
   fromDefaults: boolean;
+  /**
+   * Keep a text whole in the run and say where (the extension's own
+   * `keepToolOutput`): what a stopped summary attempt wrote. Without it the
+   * text is not kept and the trace says so.
+   */
+  keepText?: (cwd: string, text: string) => Promise<KeptText>;
+  /** The bounds, when the operator changed them (SWARM_COMPACT_SUMMARY_SEC, SWARM_COMPACT_TIMEOUT_SEC); the constants above otherwise. */
+  bounds?: { summaryAttemptMs?: number; summaryMaxChars?: number; compactionMs?: number };
 };
 
 /** The model a summary call goes to, and why it is that one. */
@@ -170,6 +208,8 @@ export type SelfCompactHandle = {
   onTurnEnd(ctx: ExtensionContext): Promise<void>;
   /** The per-agent fields the budget fold writes. */
   budgetFields(ctx: ExtensionContext): { context_ceiling: number; context_level: UsageLevel; context_locked: boolean; handoffs: number };
+  /** True while a hand-off's compaction runs: Pi refuses every prompt until it ends. */
+  compacting(): boolean;
 };
 
 /** A minimal view of the session entries the recovery reducer reads (a subset of Pi's SessionEntry). */
@@ -350,6 +390,24 @@ function fmtPct(n: number | null | undefined): string {
   return n === null || n === undefined || !Number.isFinite(n) ? "?%" : `${n.toFixed(1)}%`;
 }
 
+function fmtDuration(ms: number): string {
+  return ms >= 60_000 && ms % 60_000 === 0 ? `${ms / 60_000} min` : `${Math.round(ms / 1000)} s`;
+}
+
+/** A whole text the seat kept in the run: where, how large, its hash. */
+export type KeptText = { path: string; bytes: number; sha256: string; write_error?: string };
+
+/** A summary attempt the seat stopped at one of its bounds; what it had written is kept, not dropped. */
+export class SummaryStopped extends Error {
+  readonly chars: number;
+  readonly kept: KeptText | null;
+  constructor(message: string, chars: number, kept: KeptText | null) {
+    super(message);
+    this.chars = chars;
+    this.kept = kept;
+  }
+}
+
 function guidanceMessage(text: string) {
   return { role: "custom" as const, customType: GUIDANCE_TYPE, content: text, display: false, timestamp: Date.now() };
 }
@@ -371,6 +429,13 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     retryTimer?: ReturnType<typeof setTimeout>;
     deliveryTimer?: ReturnType<typeof setTimeout>;
     recoveryTimer?: ReturnType<typeof setTimeout>;
+    /** The bound on the compaction that is running, and the grace after stopping it. */
+    boundTimer?: ReturnType<typeof setTimeout>;
+    abortTimer?: ReturnType<typeof setTimeout>;
+    /** Counts the compactions this seat started; the bound acts only on the one it was set for. */
+    compactionSeq: number;
+    /** The compaction the bound stopped, so its failure is counted as one and not as a cancel. */
+    stalledSeq?: number;
     alive: boolean;
     nudgedEpoch: number;
     configTold: boolean;
@@ -384,12 +449,18 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     state: emptyState(),
     epoch: 0,
     compactionInFlight: false,
+    compactionSeq: 0,
     alive: true,
     nudgedEpoch: -1,
     configTold: false,
   };
 
   const agentId = () => deps.agentId();
+  const bounds = {
+    summaryAttemptMs: deps.bounds?.summaryAttemptMs ?? SUMMARY_ATTEMPT_MS,
+    summaryMaxChars: deps.bounds?.summaryMaxChars ?? SUMMARY_MAX_CHARS,
+    compactionMs: deps.bounds?.compactionMs ?? COMPACTION_TIMEOUT_MS,
+  };
   const inert = (): string | undefined => R.configError;
   const handoff = (): Handoff | undefined => R.state.handoff;
   const activeHandoff = (): Handoff | undefined => {
@@ -411,7 +482,14 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
   }
 
   function clearTimers() {
-    for (const key of ["retryTimer", "deliveryTimer", "recoveryTimer"] as const) {
+    for (const key of ["retryTimer", "deliveryTimer", "recoveryTimer", "boundTimer", "abortTimer"] as const) {
+      if (R[key]) clearTimeout(R[key]);
+      R[key] = undefined;
+    }
+  }
+
+  function clearBound() {
+    for (const key of ["boundTimer", "abortTimer"] as const) {
       if (R[key]) clearTimeout(R[key]);
       R[key] = undefined;
     }
@@ -614,13 +692,48 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     }
   }
 
+  /**
+   * The bound on one compaction. Past it the seat stops the compaction (Pi's
+   * abort) and counts it as failed: retried while retries are left, the lock
+   * released after, the note kept. A compaction Pi has not let go of a minute
+   * after the stop is said too; only the operator can help that seat, and
+   * the idle watchdog says so on the board.
+   */
+  function armBound(ctx: ExtensionContext, seq: number) {
+    clearBound();
+    const limit = bounds.compactionMs;
+    const started = Date.now();
+    const current = () => R.alive && R.compactionInFlight && R.compactionSeq === seq;
+    const facts = () => ({ after_ms: Date.now() - started, cycle: R.state.cycle + 1, attempt: (handoff()?.attempts ?? 0) + 1 });
+    R.boundTimer = setTimeout(() => {
+      R.boundTimer = undefined;
+      if (!current()) return;
+      R.stalledSeq = seq;
+      void trace(ctx.cwd, "compact_stalled", { by: "seat", limit_ms: limit }, { ok: true, ...facts(), action: "stopped" });
+      try {
+        ctx.abort();
+      } catch {
+        // the session is going; nothing is left to stop
+      }
+      R.abortTimer = setTimeout(() => {
+        R.abortTimer = undefined;
+        if (!current()) return;
+        void trace(ctx.cwd, "compact_stalled", { by: "seat", limit_ms: limit }, { ok: false, ...facts(), action: "stop not taken", reason: `Pi had not ended the compaction ${fmtDuration(ABORT_GRACE_MS)} after it was stopped; until it does it takes no prompt` });
+      }, ABORT_GRACE_MS);
+      R.abortTimer.unref?.();
+    }, limit);
+    R.boundTimer.unref?.();
+  }
+
   function startCompaction(ctx: ExtensionContext, trigger: string) {
     const h = handoff();
     if (R.compactionInFlight || !h || (h.status !== "pending" && h.status !== "failed")) return;
     R.compactionInFlight = true;
+    const seq = ++R.compactionSeq;
     h.status = "compacting";
     save();
     void trace(ctx.cwd, "compact_start", { trigger }, { ok: true, tokens: R.usage.tokens, note_chars: h.note.length, cycle: R.state.cycle + 1, attempt: h.attempts + 1 });
+    armBound(ctx, seq);
     ctx.compact({
       onComplete: () => {
         R.compactionInFlight = false;
@@ -836,7 +949,13 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     else if (h.status === "pending" || (h.status === "failed" && h.attempts < MAX_AUTO_RETRIES && R.lastCompactionError)) startCompaction(ctx, h.status === "pending" ? "agent idle" : "retry after failure");
   });
 
-  /** Our summary, through the model registry with our prompt; Pi's own summarizer is the fallback. */
+  /**
+   * Our summary, through the model registry with our prompt; Pi's own
+   * summarizer is the fallback. Streamed, so the attempt can be held to its
+   * bounds whether or not the provider honours `maxTokens`: past
+   * `summaryMaxChars` of text or `summaryAttemptMs` of time it is stopped,
+   * and what it wrote is kept whole under tool-output/ (SummaryStopped).
+   */
   async function generateSummary(event: SessionBeforeCompactEvent, ctx: ExtensionContext, prompt: LoadedPrompt) {
     const chosen = R.summaryModel ?? summaryModelFor(ctx);
     const model = chosen.model;
@@ -860,12 +979,58 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
       previousSummary ? `<previous-summary>\n${previousSummary}\n</previous-summary>` : "",
       event.customInstructions ? `Additional summarization instructions from the operator: ${event.customInstructions}` : "",
     ].filter(Boolean);
-    const response = await ctx.modelRegistry.complete(
-      model,
-      { systemPrompt: prompt.text, messages: [{ role: "user", content: [{ type: "text", text: parts.join("\n\n") }], timestamp: Date.now() }], tools: [] },
-      { maxTokens, signal: event.signal, cacheRetention: "none", sessionId: randomUUID() } as never,
-    );
-    if (event.signal.aborted || response.stopReason === "aborted") throw new Error("compaction summary cancelled");
+    const controller = new AbortController();
+    let stopped: string | undefined;
+    let wake: () => void = () => undefined;
+    const woken = new Promise<"stopped">((resolve) => {
+      wake = () => resolve("stopped");
+    });
+    const stop = (why: string) => {
+      if (stopped === undefined) stopped = why;
+      controller.abort();
+      wake();
+    };
+    const follow = () => {
+      controller.abort();
+      wake();
+    };
+    if (event.signal.aborted) follow();
+    else event.signal.addEventListener("abort", follow, { once: true });
+    const timer = setTimeout(() => stop(`it ran past ${fmtDuration(bounds.summaryAttemptMs)}`), bounds.summaryAttemptMs);
+    let text = "";
+    let response: Awaited<ReturnType<typeof ctx.modelRegistry.complete>> | undefined;
+    try {
+      const stream = ctx.modelRegistry.stream(
+        model,
+        { systemPrompt: prompt.text, messages: [{ role: "user", content: [{ type: "text", text: parts.join("\n\n") }], timestamp: Date.now() }], tools: [] },
+        { maxTokens, signal: controller.signal, cacheRetention: "none", sessionId: randomUUID() } as never,
+      );
+      // Raced against the stop, so a provider that neither answers nor
+      // honours the abort cannot hold the attempt past its bound.
+      const parts$ = stream[Symbol.asyncIterator]();
+      for (;;) {
+        const next = await Promise.race([parts$.next(), woken]);
+        if (next === "stopped" || next.done) break;
+        if (next.value.type === "text_delta") {
+          text += next.value.delta;
+          if (text.length > bounds.summaryMaxChars) stop(`it passed ${fmt(bounds.summaryMaxChars)} characters`);
+        }
+      }
+      if (stopped === undefined && !event.signal.aborted) {
+        const done = await Promise.race([stream.result(), woken]);
+        if (done !== "stopped") response = done;
+      }
+    } finally {
+      clearTimeout(timer);
+      event.signal.removeEventListener("abort", follow);
+    }
+    if (event.signal.aborted) throw new Error("compaction summary cancelled");
+    if (stopped !== undefined || !response) {
+      let kept: KeptText | null = null;
+      if (text && deps.keepText) kept = await deps.keepText(ctx.cwd, text).catch((error) => ({ path: "", bytes: 0, sha256: "", write_error: error instanceof Error ? error.message : String(error) }));
+      throw new SummaryStopped(`the summary was stopped: ${stopped ?? "it did not finish"}`, text.length, kept);
+    }
+    if (response.stopReason === "aborted") throw new Error("compaction summary cancelled");
     if (response.stopReason === "error") throw new Error(response.errorMessage || "the summary call returned an error");
     const summary = response.content
       .filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -917,6 +1082,16 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
       } catch (error) {
         lastError = error instanceof Error ? error.message : String(error);
         if (event.signal.aborted) return { cancel: true };
+        if (error instanceof SummaryStopped) {
+          // What the stopped attempt wrote is named here, kept whole.
+          await trace(ctx.cwd, "compact_failed", { stage: "summary", attempt }, {
+            ok: false,
+            reason: error.message,
+            chars: error.chars,
+            full_output: error.kept,
+            retrying: attempt < SUMMARY_ATTEMPTS,
+          });
+        }
       }
     }
     R.lastCompactionError = `our summary failed after ${SUMMARY_ATTEMPTS} attempts: ${lastError}`;
@@ -928,6 +1103,8 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     R.epoch += 1;
     R.announcedLevel = "idle";
     R.compactionInFlight = false;
+    R.stalledSeq = undefined;
+    clearBound();
     const h = handoff();
     const entry = event.compactionEntry as { tokensBefore?: number; summary?: string; usage?: { totalTokens?: number; cost?: { total?: number } }; details?: { selfCompact?: { summaryModel?: string | null; summaryModelSource?: string } } };
     const summaryModel = entry.details?.selfCompact?.summaryModel ?? null;
@@ -958,6 +1135,11 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
 
   pi.on("session_compact_failed", async (event, ctx) => {
     R.compactionInFlight = false;
+    clearBound();
+    // Stopped by the seat's own bound: a failure to count and retry, not an
+    // operator's cancel.
+    const stalled = R.stalledSeq !== undefined && R.stalledSeq === R.compactionSeq;
+    R.stalledSeq = undefined;
     if (!R.alive) return;
     const h = handoff();
     if (!h || (h.status !== "compacting" && h.status !== "pending")) {
@@ -973,14 +1155,18 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     // summary failed", while Pi's pane said its turn-prefix summary had).
     const pis = event.errorMessage ?? (event.aborted ? "compaction was cancelled" : undefined);
     const ours = R.lastCompactionError;
-    const error = ours && pis && !pis.includes(ours) ? `${ours}; then Pi's own summary: ${pis}` : ours ?? pis ?? "compaction failed";
+    const error = stalled
+      ? `the compaction did not end within ${fmtDuration(bounds.compactionMs)} and the seat stopped it${ours ? ` (${ours})` : ""}`
+      : ours && pis && !pis.includes(ours)
+        ? `${ours}; then Pi's own summary: ${pis}`
+        : ours ?? pis ?? "compaction failed";
     R.state.handoff = { ...h, status: "failed", attempts: h.attempts + 1, error };
     const current = handoff()!;
-    const canRetry = !event.aborted && current.attempts < MAX_AUTO_RETRIES;
+    const canRetry = (!event.aborted || stalled) && current.attempts < MAX_AUTO_RETRIES;
     if (canRetry) {
       setLocked(true);
       save();
-      await trace(ctx.cwd, "compact_failed", { reason: event.reason, stage: "compaction", attempt: current.attempts }, { ok: false, reason: error, retrying: true });
+      await trace(ctx.cwd, "compact_failed", { reason: event.reason, stage: "compaction", attempt: current.attempts }, { ok: false, reason: error, retrying: true, ...(stalled ? { stalled: true } : {}) });
       scheduleRetry(ctx);
     } else {
       // Past the retries the lock is released: a locked agent nobody can
@@ -988,7 +1174,7 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
       // that lands (Pi's own overflow path, or a later hand-off) delivers it.
       setLocked(false);
       save();
-      await trace(ctx.cwd, "compact_failed", { reason: event.reason, stage: "compaction", attempt: current.attempts }, { ok: false, reason: error, retrying: false, lock_released: true });
+      await trace(ctx.cwd, "compact_failed", { reason: event.reason, stage: "compaction", attempt: current.attempts }, { ok: false, reason: error, retrying: false, lock_released: true, ...(stalled ? { stalled: true } : {}) });
     }
   });
 
@@ -1056,6 +1242,9 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     budgetFields(ctx) {
       snapshotUsage(ctx);
       return { context_ceiling: R.thresholds?.ceiling ?? R.usage.window, context_level: R.level, context_locked: locked(), handoffs: R.state.cycle };
+    },
+    compacting() {
+      return R.compactionInFlight;
     },
   };
 }

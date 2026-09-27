@@ -26,9 +26,28 @@
 # comes back and works starts again with a full budget, since the measurement
 # shows every agent that spent its three nudges did come back and keep working.
 #
+# An agent that only waits is idle too, after longer. `wait` holds a call open
+# and returns with each post, so an agent in a wait loop writes a trace row a
+# minute and Herdr and the hub see it working: on run s6895a8, s6895a806
+# called nothing but wait (and inbox) for 33 minutes and was never nudged.
+# So a second clock runs from the agent's last call that was neither a wait
+# nor an inbox read nor a row its harness writes for it, and an agent still
+# waiting past --wait-idle-sec (600 by default) is nudged, as a steer, since
+# its turn does not end. Over the 30 VM runs of 2026-09-24 to 26, 2,489
+# stretches of only waiting ended in a call of the agent's own; 98% of them
+# within 494 seconds, 34 after 600. Waiting on a job of its own that is still
+# running is never counted, and a peer's answer has the whole ten minutes
+# from the ask to come in.
+#
+# A seat whose compaction is running takes no prompt at all (Pi refuses it),
+# so it is not nudged; one open past --compact-stall-sec (1200 by default,
+# past the fifteen minutes after which the seat's own harness stops one) has
+# lost its seat, and that is said once on the board and the trace.
+#
 # Usage:
 #   idle-nudge.sh --sandbox DIR [--idle-sec 180] [--news-sec 45] [--interval 30]
-#                 [--max-nudges 3] [--local-first-turn-sec 600] [--once]
+#                 [--max-nudges 3] [--local-first-turn-sec 600]
+#                 [--wait-idle-sec 600] [--compact-stall-sec 1200] [--once]
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,6 +56,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SANDBOX=""
 IDLE_SEC="${SWARM_IDLE_SEC:-180}"
 NEWS_SEC="${SWARM_NEWS_SEC:-45}"
+WAIT_IDLE_SEC="${SWARM_WAIT_IDLE_SEC:-600}"
+COMPACT_STALL_SEC="${SWARM_COMPACT_STALL_SEC:-1200}"
+# How recent an agent's last wait must be for it to be waiting still: the
+# wait tool's longest call (WAIT_MAX_SECONDS, 300) and two minutes for the
+# model's turn around it.
+WAIT_LOOP_SEC=420
 INTERVAL=30
 MAX_NUDGES=3
 # How long a seat on a locally served model may take over its first turn
@@ -57,6 +82,8 @@ while [[ $# -gt 0 ]]; do
     --sandbox) SANDBOX="$2"; shift 2 ;;
     --idle-sec) IDLE_SEC="$2"; shift 2 ;;
     --news-sec) NEWS_SEC="$2"; shift 2 ;;
+    --wait-idle-sec) WAIT_IDLE_SEC="$2"; shift 2 ;;
+    --compact-stall-sec) COMPACT_STALL_SEC="$2"; shift 2 ;;
     --interval) INTERVAL="$2"; shift 2 ;;
     --max-nudges) MAX_NUDGES="$2"; shift 2 ;;
     --local-first-turn-sec) LOCAL_FIRST_TURN_SEC="$2"; shift 2 ;;
@@ -99,48 +126,106 @@ has_worked() { # <agent id>
     "$SANDBOX/traces/events.jsonl" 2>/dev/null
 }
 
-# seconds since the agent last did anything, or -1 when nothing is known
-idle_seconds() {
-  local id="$1"
-  python3 - "$SANDBOX" "$id" <<'PY'
+# Each agent's clocks, one line each, from one read of the trace:
+#   <id> <idle> <busy> <waiting> <compacting since>
+# idle: seconds since it last did anything (its Pi session files, which Pi
+# appends to on every message, or its last trace row, whichever is newer), -1
+# when nothing is known. A prompt arriving is not the agent doing anything:
+# the `hub_prompt` row its extension writes is the echo of this watchdog's own
+# nudge, and counting it gave s6895a803, whose prompts Pi refused, a fresh
+# nudge budget each time.
+# busy: seconds since its last call that was neither a wait nor an inbox read
+# nor a row its harness writes for it (or since its first row, when it has
+# made none), -1 when nothing is known.
+# waiting: 1 when it has waited since that call and its last wait is recent.
+# compacting since: when its last hand-off compaction started, in epoch
+# seconds, while no end of it is on the trace; -1 otherwise.
+agent_clocks() { # <agent id>...
+  python3 - "$SANDBOX" "$WAIT_LOOP_SEC" "$@" <<'PY'
 import glob, json, os, sys, time
 from datetime import datetime
-sandbox, aid = sys.argv[1], sys.argv[2]
-last = 0.0
-for f in glob.glob(os.path.join(sandbox, ".pi-sessions", aid, "*.jsonl")):
-    try:
-        last = max(last, os.path.getmtime(f))
-    except OSError:
-        pass
-trace = os.path.join(sandbox, "traces", "events.jsonl")
+sandbox, loop_sec, ids = sys.argv[1], float(sys.argv[2]), sys.argv[3:]
+# Rows an agent's harness writes for it without the agent doing anything: a
+# prompt arriving, its context gauge, its thinking, forged tools loading, and
+# the self-compaction's own bookkeeping. They say the seat is alive, not that
+# it works.
+BOOKKEEPING = {
+    "hub_prompt", "context", "thinking", "tool_loaded", "agent_start", "inputs_guard", "budget_precall_stop",
+    "self_compact", "compact_config", "compact_notice", "compact_warning", "compact_forced", "compact_hold",
+    "compact_note", "compact_start", "compact_done", "compact_failed", "compact_stalled",
+}
+WAITING = {"wait", "inbox"}
+now = time.time()
+seen = {a: {"last": 0.0, "first": 0.0, "work": 0.0, "wait": 0.0, "compact": 0.0} for a in ids}
 try:
-    with open(trace, "rb") as fh:
-        fh.seek(0, 2)
-        size = fh.tell()
-        fh.seek(max(0, size - 400000))
-        tail = fh.read().decode("utf-8", "replace").splitlines()
-    for line in reversed(tail):
-        if aid not in line:
-            continue
-        try:
-            event = json.loads(line)
-        except Exception:
-            continue
-        # The event's own agent, not any mention of it: an idle_nudge is
-        # written by "system" and names the agent in its arguments.
-        if event.get("agent") != aid:
-            continue
-        # The collector's clock, the host's: a VM's own `ts` is the guest's,
-        # and a guest whose clock runs ahead would never look idle.
-        try:
-            last = max(last, datetime.fromisoformat((event.get("recv_ts") or event["ts"]).replace("Z", "+00:00")).timestamp())
-        except Exception:
-            pass
-        break
+    with open(os.path.join(sandbox, "traces", "events.jsonl"), "rb") as fh:
+        for raw in fh:
+            try:
+                event = json.loads(raw)
+                agent = event.get("agent")
+                if agent not in seen:
+                    continue
+                # The collector's clock, the host's: a VM's own `ts` is the
+                # guest's, and a guest whose clock runs ahead would never
+                # look idle.
+                at = datetime.fromisoformat((event.get("recv_ts") or event["ts"]).replace("Z", "+00:00")).timestamp()
+            except Exception:
+                continue
+            tool = event.get("tool")
+            s = seen[agent]
+            s["first"] = s["first"] or at
+            if tool != "hub_prompt":
+                s["last"] = max(s["last"], at)
+            # A compaction ends with compact_done or a failure of the whole
+            # of it; a failed summary attempt inside it is not its end.
+            stage = (event.get("args") or {}).get("stage")
+            if tool == "compact_start":
+                s["compact"] = at
+            elif tool == "compact_done" or (tool == "compact_failed" and stage in ("compaction", "pi")):
+                s["compact"] = 0.0
+            if tool in WAITING:
+                s["wait"] = max(s["wait"], at)
+            elif tool not in BOOKKEEPING:
+                s["work"] = max(s["work"], at)
 except OSError:
     pass
-print(int(time.time() - last) if last else -1)
+for agent in ids:
+    s = seen[agent]
+    last = s["last"]
+    for f in glob.glob(os.path.join(sandbox, ".pi-sessions", agent, "*.jsonl")):
+        try:
+            last = max(last, os.path.getmtime(f))
+        except OSError:
+            pass
+    idle = int(now - last) if last else -1
+    base = s["work"] or s["first"]
+    busy = int(now - base) if base else -1
+    waiting = 1 if s["wait"] > s["work"] and now - s["wait"] <= loop_sec else 0
+    since = int(s["compact"]) if s["compact"] else -1
+    print(agent, idle, busy, waiting, since)
 PY
+}
+
+# Whether the agent has a job of its own still to finish: then its waiting is
+# what the job asked of it, and the job's post wakes it.
+has_open_job() { # <agent id>
+  local f
+  for f in "$SANDBOX"/store/jobs/*/job.json; do
+    [[ -f "$f" ]] || continue
+    jq -e --arg id "$1" '.requester.agent == $id and (.state | IN("accepted", "running", "finished", "fenced"))' "$f" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+# What an agent still holds, for the words in front of it and on the board.
+# The ninth case ended with two agents holding work/report.md and
+# work/crypto.md after half an hour of silence, and nobody — including them —
+# was told.
+held_by() { # <agent id>
+  [[ -d "$SANDBOX/locks" ]] || return 0
+  jq -r --arg id "$1" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    'select(.owner == $id and .expires_at > $now) | .path' "$SANDBOX/locks"/*.json 2>/dev/null \
+    | paste -sd ', ' - || true
 }
 
 # How many posts this agent has not read, across the primary thread and any
@@ -165,12 +250,12 @@ unread_for() {
   printf '%s\n' "$total"
 }
 
-log_event() { # log_event <agent> <idle> <ok> <count>
+log_event() { # log_event <agent> <idle> <ok> <count> [why]
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   local line
-  line="$(jq -cn --arg ts "$ts" --arg agent "$1" --argjson idle "$2" --argjson ok "$3" --argjson n "$4" \
-    '{ts: $ts, agent: "system", tool: "idle_nudge", args: {agent: $agent, idle_seconds: $idle}, result: {ok: $ok, nudges: $n}}')"
+  line="$(jq -cn --arg ts "$ts" --arg agent "$1" --argjson idle "$2" --argjson ok "$3" --argjson n "$4" --arg why "${5:-idle}" \
+    '{ts: $ts, agent: "system", tool: "idle_nudge", args: {agent: $agent, idle_seconds: $idle, why: $why}, result: {ok: $ok, nudges: $n}}')"
   # Through the collector, so this line is chained like every other. Appending
   # here directly used to break the chain for the *next* line the collector
   # wrote, which with this watchdog on by default meant a run reporting its
@@ -255,14 +340,37 @@ coverage_hint() {
   echo "idle-nudge: posted the inputs no command has named yet ($(printf '%s\n' "$list" | wc -l | tr -d ' ') at ${due}%)" >&2
 }
 
+# A compaction open this long is past the bound the seat's own harness holds
+# it to (it stops one at fifteen minutes and retries it or releases the
+# lock), so the seat's process is stuck or Pi did not let go when it was
+# stopped. Either way the seat takes no prompt, and on run s6895a8 its peers
+# were never told. Said once per compaction, on the board and the trace.
+report_stalled_compaction() { # <agent id> <started, epoch seconds> <open seconds>
+  local id="$1" since="$2" open="$3" mark="$SANDBOX/traces/idle-nudge.compact" held body posted=false line
+  grep -qx "$id $since" "$mark" 2>/dev/null && return 0
+  echo "$id $since" >> "$mark"
+  held="$(held_by "$id")"
+  body="COMPACTION STALLED: ${id}'s context compaction started $((open / 60)) minutes ago and has not ended. Until it does, Pi takes no prompt from anyone, this watchdog's and the stop's included, so ${id} may be lost for the rest of the run.${held:+ It still holds: ${held}; the leases lapse on their own.} If its slice matters to the goal, say on the board that you are taking it over. The operator can look at its pane."
+  node --experimental-strip-types --no-warnings -e '
+    const [protocol, S, body] = process.argv.slice(1);
+    import(protocol).then((P) => P.systemPost(S, { tag: "hold", body })).catch(() => process.exit(1));
+  ' "$ROOT/extensions/protocol.ts" "$SANDBOX" "$body" >/dev/null 2>&1 && posted=true
+  line="$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" --arg agent "$id" --argjson open "$open" --argjson limit "$((COMPACT_STALL_SEC * 1000))" --argjson posted "$posted" \
+    '{ts: $ts, agent: "system", tool: "compact_stalled", args: {agent: $agent, by: "watchdog", limit_ms: $limit}, result: {ok: true, open_seconds: $open, posted: $posted}}')"
+  trace_emit "$ROOT" "$SANDBOX" "$line"
+  echo "idle-nudge: ${id}'s compaction has been open ${open}s; said on the board (posted=$posted)" >&2
+}
+
 # "id n idle_at_last_nudge" lines. The count is per silence: if the agent has
 # done anything since we last nudged it — its idle clock is shorter than it was
 # then — this is a new silence and the budget starts again.
 # Words in front of an agent: through the hub for a VM, through Herdr otherwise.
-prompt_agent() { # <agent id> <text>
+# An agent in a turn (one that is waiting) is steered: a follow-up would wait
+# for a turn end that does not come. Herdr's typed words steer a working pane.
+prompt_agent() { # <agent id> <text> [followUp|steer]
   if [[ -n "$HUB_ADMIN" ]]; then
     node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_ADMIN" \
-      "$(jq -nc --arg a "$1" --arg t "$2" '{op: "prompt", agent: $a, text: $t, kind: "idle_nudge"}')" >/dev/null 2>&1
+      "$(jq -nc --arg a "$1" --arg t "$2" --arg d "${3:-followUp}" '{op: "prompt", agent: $a, text: $t, kind: "idle_nudge", deliver: $d}')" >/dev/null 2>&1
   else
     "$HERDR" agent prompt "$1" "$2" >/dev/null 2>&1
   fi
@@ -319,26 +427,48 @@ while :; do
   ensure_hub
   host_backstop
   coverage_hint
-  for id in $(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null); do
+  ids="$(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null | tr '\n' ' ')"
+  # shellcheck disable=SC2086
+  clocks="$([[ -n "${ids// /}" ]] && agent_clocks $ids)"
+  for id in $ids; do
     [[ -e "$SANDBOX/done/agents/$id.done" || -e "$SANDBOX/done/agents/$id.dead" ]] && continue
-    idle="$(idle_seconds "$id")"
-    [[ "$idle" -ge 0 ]] || continue
+    read -r idle busy waiting since <<<"$(awk -v id="$id" '$1 == id { print $2, $3, $4, $5 }' <<<"$clocks")"
+    [[ -n "$idle" ]] || continue
+    # A seat whose compaction runs refuses every prompt; a nudge would be
+    # dropped and counted. Past the bound it is reported instead.
+    if [[ "$since" -ge 0 ]]; then
+      open=$(( $(date +%s) - since ))
+      [[ "$open" -ge "$COMPACT_STALL_SEC" ]] && report_stalled_compaction "$id" "$since" "$open"
+      continue
+    fi
     # Something to read makes a short silence worth interrupting; an empty
     # inbox does not. 32 of the 34 stalls measured had a peer's post waiting.
     unread="$(unread_for "$id")"
-    if [[ "$unread" -gt 0 ]]; then
-      [[ "$idle" -ge "$NEWS_SEC" ]] || continue
+    why="idle"
+    clock="$idle"
+    deliver="followUp"
+    if [[ "$waiting" -eq 1 && "$busy" -ge "$WAIT_IDLE_SEC" ]] && ! has_open_job "$id"; then
+      # Waiting since its last call: the hub and Herdr both see it working,
+      # and it is, only at nothing. Its turn does not end, so it is steered.
+      why="waiting"
+      clock="$busy"
+      deliver="steer"
     else
-      [[ "$idle" -ge "$IDLE_SEC" ]] || continue
+      [[ "$idle" -ge 0 ]] || continue
+      if [[ "$unread" -gt 0 ]]; then
+        [[ "$idle" -ge "$NEWS_SEC" ]] || continue
+      else
+        [[ "$idle" -ge "$IDLE_SEC" ]] || continue
+      fi
+      # A long tool call writes nothing to the session or the trace until it
+      # ends; Herdr knows the pane is still working, so ask it before nudging.
+      if [[ -n "$HUB_STATUS" ]]; then
+        status="$(jq -r --arg id "$id" '.agents[$id].state // empty' "$HUB_STATUS" 2>/dev/null || true)"
+      else
+        status="$("$HERDR" agent get "$id" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)"
+      fi
+      [[ "$status" == "working" ]] && continue
     fi
-    # A long tool call writes nothing to the session or the trace until it
-    # ends; Herdr knows the pane is still working, so ask it before nudging.
-    if [[ -n "$HUB_STATUS" ]]; then
-      status="$(jq -r --arg id "$id" '.agents[$id].state // empty' "$HUB_STATUS" 2>/dev/null || true)"
-    else
-      status="$("$HERDR" agent get "$id" 2>/dev/null | jq -r '.result.agent.agent_status // empty' 2>/dev/null || true)"
-    fi
-    [[ "$status" == "working" ]] && continue
     # An agent whose last turn ended in a provider error is not idle, it is
     # finished: every nudge buys another identical failure. Both DeepSeek
     # agents on the BelkaCTF #6 run spent all three that way against a 402.
@@ -353,34 +483,31 @@ while :; do
     if [[ "$idle" -lt "$LOCAL_FIRST_TURN_SEC" ]] && is_local_model "$id" && ! has_worked "$id"; then
       continue
     fi
-    # What this agent is still holding. The ninth case ended with two agents
-    # holding work/report.md and work/crypto.md after half an hour of silence,
-    # and nobody — including them — was told.
-    held=""
-    if [[ -d "$SANDBOX/locks" ]]; then
-      held="$(jq -r --arg id "$id" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        'select(.owner == $id and .expires_at > $now) | .path' "$SANDBOX/locks"/*.json 2>/dev/null \
-        | paste -sd ', ' - || true)"
-    fi
-    # A shorter idle clock than when we last nudged means the agent worked in
+    held="$(held_by "$id")"
+    # A shorter clock than when we last nudged means the agent worked in
     # between: this is a new silence, and it gets a fresh budget.
     n="$(count_of "$id")"
     mark="$(mark_of "$id")"
-    if [[ "$mark" -gt 0 && "$idle" -lt "$mark" ]]; then
+    if [[ "$mark" -gt 0 && "$clock" -lt "$mark" ]]; then
       n=0
     fi
     [[ "$n" -lt "$MAX_NUDGES" ]] || continue
     n=$((n + 1))
-    set_count "$id" "$n" "$idle"
-    minutes=$((idle / 60))
+    set_count "$id" "$n" "$clock"
+    minutes=$((clock / 60))
     # "0 posts you have not read" is worse than saying nothing.
     news_line=""
     [[ "$unread" -gt 0 ]] 2>/dev/null && news_line="You have ${unread} post(s) you have not read. "
-    if prompt_agent "$id" "You ended your turn ${minutes} minutes ago and the swarm is not done. Ending a turn is not waiting: nothing prompts you again. ${news_line}Read inbox, see what your peers have taken, and get on with what you said you were doing (name() if that has changed); when there is nothing left to take, call the wait tool and keep it open, and call it again each time it returns. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.} Nudge ${n} of ${MAX_NUDGES}." >/dev/null 2>&1; then
-      log_event "$id" "$idle" true "$n"
-      echo "idle-nudge: prompted $id after ${idle}s (nudge $n/$MAX_NUDGES)"
+    if [[ "$why" == waiting ]]; then
+      text="For ${minutes} minutes you have called only wait and inbox: no post, no record, no command. Waiting is right while an answer you asked for is coming; past that it is idle. ${news_line}If a peer owes you an answer, ask them again by name. Otherwise read inbox, see what your peers have taken, take the next piece of the goal nobody holds and say so on the board; when nothing is left for you, keep waiting. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.} Nudge ${n} of ${MAX_NUDGES}."
     else
-      log_event "$id" "$idle" false "$n"
+      text="You ended your turn ${minutes} minutes ago and the swarm is not done. Ending a turn is not waiting: nothing prompts you again. ${news_line}Read inbox, see what your peers have taken, and get on with what you said you were doing (name() if that has changed); when there is nothing left to take, call the wait tool and keep it open, and call it again each time it returns. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.} Nudge ${n} of ${MAX_NUDGES}."
+    fi
+    if prompt_agent "$id" "$text" "$deliver" >/dev/null 2>&1; then
+      log_event "$id" "$clock" true "$n" "$why"
+      echo "idle-nudge: prompted $id after ${clock}s ${why} (nudge $n/$MAX_NUDGES)"
+    else
+      log_event "$id" "$clock" false "$n" "$why"
       echo "idle-nudge: could not prompt $id (pane gone?)" >&2
     fi
   done

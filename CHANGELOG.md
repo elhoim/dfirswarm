@@ -177,6 +177,40 @@ a test that failed before it.
 - `tests/fixtures/ledger-v4/` is a small run with every kind and act, for
   the report renderer to build against.
 
+### Fixed: a compaction that never ends, an agent that only waits, what a seat sees of its peers, a runtime's cache in work/
+
+- **A compaction is bounded.** Each summary attempt stops at 300 s or 48,000
+  characters (`SWARM_COMPACT_SUMMARY_SEC`), whatever the provider does with
+  `maxTokens`: the openai-codex API sends no output limit, and on run
+  sedf827 two summaries ran on to 128,000 output tokens. What a stopped
+  attempt wrote is kept whole under `tool-output/<id>/`. A compaction still
+  running after 900 s (`SWARM_COMPACT_TIMEOUT_SEC`) is stopped by the seat
+  and counted as failed (`compact_stalled`), so it is retried and then the
+  lock released, where on run s6895a8 a seat was silently lost. The idle
+  watchdog nudges no compacting seat (Pi refuses the prompt) and says a
+  compaction open past 1200 s on the board; a hub prompt refused during one
+  is recorded as refused.
+- **Waiting is idle after ten minutes.** An agent that has called only
+  `wait` and `inbox` for 600 s (`SWARM_WAIT_IDLE_SEC`) is steered, unless a
+  job of its own is running; a steer now ends an open `wait` (`reason:
+  prompt`). The echo of a nudge no longer counts as the agent's activity.
+- **A seat no longer reads the trace or its peers' sessions and kept
+  outputs** (run s306463 grepped its peers' transcripts). In a microVM,
+  `traces/` is an empty read-only veil, and `.pi-sessions/` and
+  `tool-output/` are veils holding only the seat's own directory; each VM's
+  probe checks all three and the kickoff refuses a VM that sees one. A
+  seat's `done` gets the finish line from the hub, which runs the
+  operator's checks on the host (they read the trace) and answers the whole
+  run; markDone takes that same run, and the refusal names each failing
+  check and what makes it pass. The host's collector, custody and console,
+  and a host run's `done`, are unchanged. `list_team` now shows, per peer,
+  its name and what it is doing, its last post, its open jobs and its latest
+  ledger entries, from the board, the store and the ledger, never the trace.
+- **Node's compile cache is out of work/.** The kickoff points
+  `NODE_COMPILE_CACHE` at the run's `.runtime-cache/`, so the artifact index
+  and the package no longer carry `work/.tmp/node-compile-cache/` (run
+  s2a59b2).
+
 ### Changed: every image profile reviewed as a DFIR examiner would (Codex)
 
 - Each of the nine profiles (base, disk, memory, linux, mobile, network, re,

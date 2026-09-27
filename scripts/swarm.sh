@@ -2706,7 +2706,7 @@ if caps:
         "linux": "Linux, a read-only root in your mount namespace with Landlock beneath it: writes are refused everywhere but this run and Pi's agent directory",
         "landlock": "Linux Landlock: writes are refused everywhere but this run and Pi's agent directory",
         "mountns": "Linux mount namespace: the evidence is read-only; the rest of the filesystem is as the host has it",
-        "microvm": "your own microVM: you can write your own `work/<id>/`, `work/extracted/<id>/`, `work/quarantine/<id>/`, `tool-output/<id>/` and your Pi session; the rest of the run is read-only, and of the host outside the run your VM has only the harness code, the packs and the evidence, read-only",
+        "microvm": "your own microVM: you can write your own `work/<id>/`, `work/extracted/<id>/`, `work/quarantine/<id>/`, `tool-output/<id>/` and your Pi session; the rest of the run is read-only, except that the trace and your peers' Pi sessions and tool outputs are not in your VM at all; and of the host outside the run your VM has only the harness code, the packs and the evidence, read-only",
         "none": "none — nothing at the kernel refuses a write; the tool guard and the sweep are what there is",
     }.get(write_guard, "not recorded")
     attribution_words = {
@@ -2847,6 +2847,23 @@ goal = re.sub(
     goal,
     flags=re.M,
 )
+# Who runs the checks, said under the goal's own: agents ran them from their
+# shells before done, and in a microVM the trace a check reads is not in the
+# seat's view. A heading of its own, so no line here is ever taken for a
+# check, and no backticks, which await-done would run.
+if os.environ.get("SWARM_CONTRACT_ISOLATION", "host") == "microvm":
+    runs_checks = (
+        "The harness runs the checks above itself when you call done, on the host, where the trace is: "
+        "your VM does not see traces/, your peers' Pi sessions or their tool-output directories, so a check "
+        "that reads the trace cannot be run from your shell. "
+    )
+else:
+    runs_checks = "The harness runs the checks above itself when you call done. "
+goal = goal.rstrip("\n") + (
+    "\n\n## How the checks are run\n\n" + runs_checks +
+    "While any of them fails, done is refused, and the refusal names each check that fails and what makes it pass. "
+    "done ends the swarm for everyone: call it when the definition of done is met, not when your slice is.\n"
+)
 text = text.replace("{{GOAL_DOCUMENT}}", goal)
 open(dst, "w", encoding="utf-8").write(text)
 PY
@@ -2972,6 +2989,26 @@ budget = {
 (sandbox / "team.json").write_text(json.dumps(team, indent=2) + "\n", encoding="utf-8")
 (sandbox / "budget.json").write_text(json.dumps(budget, indent=2) + "\n", encoding="utf-8")
 PY
+}
+
+# Where a host process of the run keeps its temporary files and its runtime
+# caches: the panes, and `pi auth check` at kickoff (a VM's own are in the
+# VM). Scratch belongs to the run. With the write guard on, the per-user temp
+# area is closed; with it off, this still keeps a case's temporary files
+# inside the case instead of in a directory shared with every other run.
+#
+# A runtime's cache is not scratch. Pi's CLI turns on Node's compile cache,
+# which Node puts under TMPDIR unless NODE_COMPILE_CACHE names a directory,
+# so every run's work/ carried .tmp/node-compile-cache/ in its artifact index
+# and its package (run s2a59b2: eleven entries, written by the kickoff's own
+# `pi auth check`, which runs with the panes' environment; in a host run
+# every pane's Pi adds to it). No agent wrote them. The harness names a
+# directory of its own for the cache, .runtime-cache/ at the run's top:
+# never under work/, so the index and the package leave it out without
+# leaving out anything an agent wrote.
+scratch_env_for() { # <sandbox> -> sets SCRATCH_ENV_ARGS
+  mkdir -p "$1/work/.tmp" "$1/.runtime-cache"
+  SCRATCH_ENV_ARGS=(--env "TMPDIR=$1/work/.tmp" --env "NODE_COMPILE_CACHE=$1/.runtime-cache/node-compile-cache")
 }
 
 # Herdr only splits right/down. There is no grid command and no published
@@ -5436,11 +5473,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # otherwise looks beside the sandbox, which under --sandbox DIR is not
   # where the registry lives).
   provider_env+=(--env "SWARM_RUNS_DIR=$RUNS_DIR")
-  # Scratch belongs to the run. With the write guard on, the per-user temp
-  # area is closed; with it off, this still keeps a case's temporary files
-  # inside the case instead of in a directory shared with every other run.
-  mkdir -p "$sandbox/work/.tmp"
-  provider_env+=(--env "TMPDIR=$sandbox/work/.tmp")
+  scratch_env_for "$sandbox"
+  provider_env+=("${SCRATCH_ENV_ARGS[@]}")
   # Packs: the extension reads the skill index and the bodies from these
   # directories. They sit outside the sandbox and the run only reads them.
   if [[ -n "$pack_dirs" ]]; then
