@@ -452,7 +452,6 @@ printf 'sqlite\n' > "$TMP/sets/phone/sms.db"
 ln -s "$TMP/sets/laptop/users/ntuser.dat" "$TMP/sets/phone/from-laptop"
 chmod -R a-w "$TMP/sets"
 out="$(start --isolation microvm --inputs "$TMP/sets/laptop" --inputs "$TMP/sets/phone" --label vm-sets)"; rc=$?
-chmod -R u+w "$TMP/sets"
 [[ $rc -eq 0 ]] || fail "two sets under microvm exited $rc: $out"
 sbx="$(sandbox_of "$out")"
 laptop_real="$(cd "$TMP/sets/laptop" && pwd -P)" phone_real="$(cd "$TMP/sets/phone" && pwd -P)"
@@ -476,6 +475,8 @@ node --experimental-strip-types --no-warnings --input-type=module -e "
   if (!c.ok || c.checked !== 3) { console.error(JSON.stringify(c)); process.exit(1); }
 " || fail "the agents' own inputs check does not walk both sets through their links"
 (cd "$sbx" && python3 "$ROOT/packs/computer-forensics-base/tools/check_inputs/run.py" >/dev/null) || fail "the pack's check_inputs takes a set's link for an added name"
+# The files stay as the manifest found them (read-only) until every check has run.
+chmod -R u+w "$TMP/sets"
 # A link out of a set, and into no other, dangles in every VM: refused, naming its set.
 ln -s "$TMP/elsewhere/case.E01" "$TMP/sets/phone/out.E01"
 out="$(start --isolation microvm --inputs "$TMP/sets/laptop" --inputs "$TMP/sets/phone" --label vm-sets-out)"; rc=$?
