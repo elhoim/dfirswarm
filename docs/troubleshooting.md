@@ -6,7 +6,7 @@ Every kickoff refusal below can be met before anything is written: add
 `--check` to the same `swarm.sh start` line, and it runs the start's own
 checks, prints what the start would, and exits 0 (it would go ahead) or 2
 (it would be refused). `swarm.sh image-for --pack …` says which image the
-packs choose.
+agents boot and which job images the packs choose.
 
 
 **`BLOCKER: this host cannot run the agents' VMs`.**
