@@ -130,8 +130,7 @@ The options a run usually needs:
   --isolation host   Agents as processes on this host, unisolated (default: a microVM each)
 
 Evidence, when the goal is a case rather than a task:
-  --inputs DIR       DIR, read-only in every VM (a host run gets a guarded copy);
-                     repeat it for several sets, each at inputs/<name>/
+  --inputs DIR       DIR, read-only in every VM (a host run gets a guarded copy); repeat it for sets at inputs/<name>/
   --catalog          Run the standard first pass over the inputs before agents start
   --toolbox SETS     Check the tools a case needs: dfir, crypto, linux (or auto, off)
   --quarantine       Nothing under work/extracted/ can execute (always, in a VM)
