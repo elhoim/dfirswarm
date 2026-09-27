@@ -2727,10 +2727,14 @@ test("a stop before a model call says the reason its trace line gives, not the c
   assert.match(words(undefined), /: the line names no reason$/);
 });
 
-test("the Claims tab's runs are built over the whole trace, not the view's tail", async () => {
+test("the Claims tab's runs and reaps are built over the whole trace, not the view's tail", async () => {
   // A tail of one line: the claims, writes and releases are all before it.
-  const { body } = await get<{ traces: unknown[]; claim_sequences: Array<{ agent: string; path: string; open: boolean; steps: Array<Record<string, unknown>> }> }>("/api/swarms/s7a1c?traces=1");
+  const { body } = await get<{ traces: Array<{ tool: string }>; claim_sequences: Array<{ agent: string; path: string; open: boolean; steps: Array<Record<string, unknown>> }>; reaps: Array<{ agent: string; tool: string }> }>("/api/swarms/s7a1c?traces=1");
   assert.equal(body.traces.length, 1);
+  // The tab's Reaped list too: the harness reaped the silent seat before the tail.
+  assert.ok(!body.traces.some((e) => e.tool === "reaped"));
+  assert.ok(body.reaps.some((e) => e.agent === "s7a1c04" && e.tool === "reaped"));
+  assert.ok(body.reaps.every((e) => e.tool === "reap" || e.tool === "reaped"));
   const released = body.claim_sequences.find((s) => s.agent === "s7a1c01" && s.path === "work/attack-path.svg");
   assert.equal(released?.open, false);
   assert.deepEqual(released?.steps.map((st) => st.tool), ["claim_file", "write", "release_file"]);

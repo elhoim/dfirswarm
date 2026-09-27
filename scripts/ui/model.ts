@@ -524,6 +524,8 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   violations: SwarmEvent[];
   /** Claim → work → release runs over the whole trace: the view's trace is a tail, and a run's claims are mostly before it. */
   claim_sequences: ClaimSequence[];
+  /** Every reap (reap.sh's `reap`, the harness's `reaped`) over the whole trace, for the same reason. */
+  reaps: SwarmEvent[];
   sentinel_info: SentinelInfo | null;
   activity: ActivitySeries;
   /** Tools the agents forged, with usage from the event log. */
@@ -1030,6 +1032,7 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     layout,
     violations: events.filter((e) => e.tool === "claim_violation"),
     claim_sequences: claimSequences(events),
+    reaps: events.filter((e) => e.tool === "reap" || e.tool === "reaped"),
     sentinel_info: sentinelInfo,
     activity: activitySeries(events, summary.started_at || null, summary.finished_at),
     tools: await forgedToolRows(sandbox, events),

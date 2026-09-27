@@ -27,7 +27,8 @@ export function ClaimsPanel({ view, now }: { view: SwarmView; now: number }) {
         expires_in_seconds: Math.max(0, Math.round((Date.parse(l.expires_at) - now) / 1000)),
       }));
   }, [view.claims, view.locks, now]);
-  const reaps = view.traces.filter((e) => e.tool === "reap" || e.tool === "reaped");
+  // Over the whole trace too; an older payload has only the tail.
+  const reaps = useMemo(() => view.reaps ?? view.traces.filter((e) => e.tool === "reap" || e.tool === "reaped"), [view.reaps, view.traces]);
   // A run with no release on the trace is still held only while its lease
   // is live: a seat's finish drops its leases without a release_file line,
   // and a lease that is not renewed expires.

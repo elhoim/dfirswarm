@@ -419,6 +419,8 @@ export type SwarmView = {
   claims: ClaimRow[];
   /** Claim → work → release runs over the whole trace (`traces` is its tail); absent from an older server. */
   claim_sequences?: ClaimSequence[];
+  /** Every reap over the whole trace; absent from an older server. */
+  reaps?: SwarmEvent[];
   sentinel: boolean;
   sentinel_info: SentinelInfo | null;
   traces: SwarmEvent[];
