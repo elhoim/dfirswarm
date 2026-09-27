@@ -207,7 +207,14 @@ does with it depends on the mode:
 - **Host runs** do not read it. The agents install what they need
   (`--allow-install`) or work without it, and the pack's tools say what is
   missing when they run.
-- **Under `--isolation microvm`** each VM's probe looks for every program a
+- **Under `--isolation microvm` with the job service** (the default) the
+  agents' VMs boot the base image and are not held to the packs' programs:
+  the job images are. Each records the programs it holds (`tools.md`,
+  `image.json`), a job image this host lacks is pulled, and the one holding
+  every pack of the run missing stops the kickoff, with how to build it. A
+  pack tool the agent's own VM cannot run is run again as a job in its pack's
+  image by itself.
+- **With `--brains-with-packs`, or with no job service,** each VM's probe looks for every program a
   pack marks as required (not `optional`). One missing from the image stops
   the kickoff, unless the agents may install (`--allow-install`), in which
   case it is a warning they are told about. An image built from another
@@ -257,8 +264,9 @@ The last one is a run with no pack at all, exactly as before.
 
 `--pack` seeds the pack's tools into the run the way `--tools-from` does, puts
 the skill index in front of every agent, and lets `skill` fetch any body.
-Under `--isolation microvm` it also picks the image and adds the pack's host
-requirements to the VM's probe and to the toolbox check (§5). The run record names every pack,
+Under `--isolation microvm` it also picks the job images (the agents' own
+image with `--brains-with-packs`) and adds the pack's host requirements to the
+toolbox check and, where the agents boot the packs' image, to the VM's probe (§5). The run record names every pack,
 its version and its checksum, so a reader knows which method produced the
 result.
 
@@ -321,9 +329,11 @@ and each host tool widens what can be established rather than being required.
 
 A tool's manifest may name the programs it calls, `"requires": ["fls",
 "icat"]` (the tool library's manifests do; `make_tool` takes the same list).
-The image choice for a VM run counts them, each VM's probe looks for them,
-and a program the image lacks is said at kickoff: the run goes on, and that
-tool will fail when it is called. In a VM an agent writes only its own
+The image choice for a VM run counts them, and where the agents boot the
+packs' image each VM's probe looks for them: a program the image lacks is said
+at kickoff, the run goes on, and that tool will fail when it is called. Where
+the agents boot the base, a pack tool that fails for want of a program is run
+again as a job in its pack's image. In a VM an agent writes only its own
 directories, so a tool that mounts something (a volume shadow copy, a
 memory filesystem) mounts it under `work/<agent id>/`, which is where
 `vss_stores` and `mem_fs` put theirs; the mount is that VM's alone, and what
