@@ -6,6 +6,23 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: several evidence sets in one run
+
+- `--inputs` may be given once per set (a laptop and a phone, the logs of
+  three servers), and the console's kickoff form adds sets one at a time,
+  each a removable chip. Each set lands at `inputs/<name>/`, named after its
+  directory; one set is `inputs/` itself, with the same paths and the same
+  manifest as before.
+- Every set is copied, or held in place, as one set is: each checked against
+  its own source, one kernel rule per set held in place, each mounted
+  read-only and no-exec into every VM and every job worker; the size and
+  file ceilings hold for the sets together. A directory given twice, one set
+  inside another, and two sets that would be one directory are refused.
+- `inputs.json` names the sets (`sets: [{name, path, source, files,
+  bytes}]`); the agents' check, the pack's `check_inputs` (base pack
+  1.3.1), each VM's probe and host custody walk each set through its link,
+  and read a manifest without `sets` as they always did.
+
 ### Changed: every image profile reviewed as a DFIR examiner would (Codex)
 
 - Each of the nine profiles (base, disk, memory, linux, mobile, network, re,
