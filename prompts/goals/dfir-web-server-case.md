@@ -45,14 +45,16 @@ Bonus: what are the directories and files that have been added by the attacker(s
 
 ## How to divide the work
 
-Suggested seats (change it on the board if you see a better split): one agent
-owns the master timeline (`work/timeline.md`) and folds in what the others
-find; one triages the disk (partitions, filesystems, the file list, the bonus
-question); one does accounts and registry (SAM/SYSTEM/SECURITY, user creation,
-logons, event logs); one hunts leftovers (web roots, temp, prefetch, tasks,
-tools the attacker dropped); one covers installed software and its provenance;
-one does memory forensics (processes, injections, network connections, the
-shellcode); one assembles `work/report.md` from the answers in the ledger.
+Nobody has been given a job. Read the goal and the board, see what your peers
+have taken, decide what you are going to do and say it with
+`name(name, doing)`. The case spans these areas, as suggestions for dividing
+it and not assignments: the master timeline (`work/timeline.md`), folding in
+what the others find; the disk (partitions, filesystems, the file list, the
+bonus question); accounts and registry (SAM/SYSTEM/SECURITY, user creation,
+logons, event logs); leftovers (web roots, temp, prefetch, tasks, tools the
+attacker dropped); installed software and its provenance; memory
+(processes, injections, network connections, the shellcode); and assembling
+`work/report.md` from the answers in the ledger.
 
 **Report author and critic.** Two of you take these roles early with
 `name(doing=…)`, and they are different agents. The report author writes the
@@ -65,8 +67,8 @@ answer, reopen the investigation and say so on the board. The critic
 re-derives each finding an answer rests on from its sealed refs and records
 `attest` (what was re-derived, what only read) or `dispute` (why), then does
 the same for every answer. The critic writes no answer; the author attests
-nothing of their own. The sign-off is these acts, not a post. The seats are
-suggestions for the rest of the work; change them on the board.
+nothing of their own. The sign-off is these acts, not a post. Nothing else is
+assigned.
 
 ## Definition of done
 

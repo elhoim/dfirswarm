@@ -46,11 +46,15 @@ The evidence is under `inputs/` (read-only; call `inputs` to list it):
 
 ## How to divide the work
 
-Seats are assigned in `SWARM.md` (change them on the board if you see a better
-split). One seat assembles `work/report.md` from the seats' notes and the
-answers in the ledger. The timeline seat builds `work/timeline.md` from
-`ledger/ledger.md`. Do not all run the same command on the same image: read
-the catalog and the board first.
+Nobody has been given a job. Read the goal and the evidence catalog, see on
+the board what your peers have taken, decide what you are going to do, and
+call `name(name, doing)` to say what to call you and what you are taking on. Fill what nobody has taken; if two of you want the same thing,
+settle it in a post. Say so again when you change course.
+
+Somebody has to keep the timeline from `ledger/ledger.md`, and somebody has to
+assemble `work/report.md` from the answers in the ledger. Agree between you
+who does, early, because the run is not finished until both exist. Do not all
+run the same command on the same image: read the catalog and the board first.
 
 **Report author and critic.** Two of you take these roles early with
 `name(doing=…)`, and they are different agents. The report author writes the
@@ -63,22 +67,23 @@ answer, reopen the investigation and say so on the board. The critic
 re-derives each finding an answer rests on from its sealed refs and records
 `attest` (what was re-derived, what only read) or `dispute` (why), then does
 the same for every answer. The critic writes no answer; the author attests
-nothing of their own. The sign-off is these acts, not a post. The seats are
-suggestions for the rest of the work; change them on the board.
+nothing of their own. The sign-off is these acts, not a post. Nothing else is
+assigned.
 
-## Seats
+## Areas of the case
 
-This case is three investigations in one image, so it runs nine seats. Take
-the one `SWARM.md` gives you and say on the board what you are doing; if two
-seats collide on a file, the one that owns it keeps it.
+This case is three investigations in one image. These are the areas it spans,
+as suggestions for dividing it; nobody is given one. Say on the board what you
+take (`name(doing=…)`), post the work you find and cannot take on yourself,
+and when two of you want the same file, settle it in a post.
 
-- Disk and file system: partitions and volumes (including the R2D2 volume and any BitLocker metadata `mmls`/`fsstat` reveal), $MFT, the file list, deleted entries; owns `work/disk.md`.
-- Recovery from file system journals: $LogFile, $UsnJrnl, volume shadow copies and unallocated space, for earlier copies of anything encrypted later; owns `work/recovery.md`.
-- Browser and application caches: browsers, mail, messaging and cloud clients, their caches, histories and databases, for the communication behind part 1; owns `work/caches.md`.
-- Registry and execution: SYSTEM/SOFTWARE/SAM/NTUSER, prefetch, shimcache, amcache, jump lists, LNK, scheduled tasks and services, to say what was run and when; owns `work/artifacts.md`.
-- Shell and user activity: PowerShell and cmd history, console host history, RunMRU, typed paths, recent documents, the Downloads and Documents folders as the user left them; owns `work/user-activity.md`.
-- BitLocker and volume encryption (part 2): the R2D2 volume, its recovery key or password wherever it was kept (registry, a printed key file, the user's own notes, Active Directory artefacts), the decryption itself, and what is inside; says exactly what this host cannot do; owns `work/bitlocker.md`.
-- Key material and cryptography (parts 1 and 3): the key pair and the keys file in Downloads, AES and OpenSSL/GPG artefacts, the decryption of the README and of the message, with the commands that prove each; owns `work/crypto.md`.
+- Disk and file system: partitions and volumes (including the R2D2 volume and any BitLocker metadata `mmls`/`fsstat` reveal), $MFT, the file list, deleted entries; notes in `work/disk.md`.
+- Recovery from file system journals: $LogFile, $UsnJrnl, volume shadow copies and unallocated space, for earlier copies of anything encrypted later; notes in `work/recovery.md`.
+- Browser and application caches: browsers, mail, messaging and cloud clients, their caches, histories and databases, for the communication behind part 1; notes in `work/caches.md`.
+- Registry and execution: SYSTEM/SOFTWARE/SAM/NTUSER, prefetch, shimcache, amcache, jump lists, LNK, scheduled tasks and services, to say what was run and when; notes in `work/artifacts.md`.
+- Shell and user activity: PowerShell and cmd history, console host history, RunMRU, typed paths, recent documents, the Downloads and Documents folders as the user left them; notes in `work/user-activity.md`.
+- BitLocker and volume encryption (part 2): the R2D2 volume, its recovery key or password wherever it was kept (registry, a printed key file, the user's own notes, Active Directory artefacts), the decryption itself, and what is inside; says exactly what this host cannot do; notes in `work/bitlocker.md`.
+- Key material and cryptography (parts 1 and 3): the key pair and the keys file in Downloads, AES and OpenSSL/GPG artefacts, the decryption of the README and of the message, with the commands that prove each; notes in `work/crypto.md`.
 - Timeline and ledger: records every dated event peers report with `record kind=event` and writes `work/timeline.md` from `ledger/ledger.md`.
 - Report author and critic: two agents, as above; the author assembles `work/report.md` from the answers, and the critic also challenges weak claims on the board.
 

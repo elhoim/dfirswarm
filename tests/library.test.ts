@@ -357,6 +357,12 @@ test("pack and prompt goals use the library's answers and inputs_check checks", 
       if (!dod.includes("`SIGN-OFF:`")) problems.push(`${id}: the definition of done does not say how a sign-off starts`);
     }
     if (/inputs\/` is unchanged/.test(dod) && !checks.includes(inputsCheck)) problems.push(`${id}: inputs/ must be unchanged and no check reads inputs_check`);
+    // The harness assigns nobody anything (worker-system.md), so a goal that
+    // says seats are assigned, or lists them, contradicts the contract the
+    // agents read beside it: the c09 goal still did, and agents spent turns on it.
+    for (const seat of [/seats are assigned/i, /^##\s+Seats\s*$/m, /\bseats are\s+suggestions\b/i, /\bthe (?:timeline|critic) seat\b/i, /\bSuggested seats\b/i, /\bruns \w+ seats\b/i, /\bone seat\b/i]) {
+      if (seat.test(body)) problems.push(`${id}: seat language (${seat.source}); nobody is given a seat`);
+    }
     // A goal whose report answers numbered questions is held to the library's model (ledger version 4):
     // the report author and the critic, an answer entry per question plus the summary and the narrative,
     // the critic's attest or dispute on each, and the answers check naming every question.

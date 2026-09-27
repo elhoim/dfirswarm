@@ -47,11 +47,15 @@ The evidence is under `inputs/` (read-only; call `inputs` to list it):
 
 ## How to divide the work
 
-Seats are assigned in `SWARM.md` (change them on the board if you see a better
-split). One seat assembles `work/report.md` from the seats' notes and the
-answers in the ledger. The timeline seat builds `work/timeline.md` from
-`ledger/ledger.md`. Do not all run the same command on the same image: read
-the catalog and the board first.
+Nobody has been given a job. Read the goal and the evidence catalog, see on
+the board what your peers have taken, decide what you are going to do, and
+call `name(name, doing)` to say what to call you and what you are taking on. Fill what nobody has taken; if two of you want the same thing,
+settle it in a post. Say so again when you change course.
+
+Somebody has to keep the timeline from `ledger/ledger.md`, and somebody has to
+assemble `work/report.md` from the answers in the ledger. Agree between you
+who does, early, because the run is not finished until both exist. Do not all
+run the same command on the same image: read the catalog and the board first.
 
 **Report author and critic.** Two of you take these roles early with
 `name(doing=…)`, and they are different agents. The report author writes the
@@ -64,14 +68,14 @@ answer, reopen the investigation and say so on the board. The critic
 re-derives each finding an answer rests on from its sealed refs and records
 `attest` (what was re-derived, what only read) or `dispute` (why), then does
 the same for every answer. The critic writes no answer; the author attests
-nothing of their own. The sign-off is these acts, not a post. The seats are
-suggestions for the rest of the work; change them on the board.
+nothing of their own. The sign-off is these acts, not a post. Nothing else is
+assigned.
 
-## Seats
+## Areas of the case
 
-- Disk and file system: partitions, $MFT, every file and stream the catalog lists, deleted and unallocated content; owns `work/disk.md`.
-- Artifacts and execution: registry hives, event logs, prefetch, LNK, jump lists, shimcache, amcache, browser and application traces; owns `work/artifacts.md`.
-- Recovery and analysis: carving, decoding, hashing and reading whatever the other seats pull out, with strings and parsers; owns `work/analysis.md`.
+- Disk and file system: partitions, $MFT, every file and stream the catalog lists, deleted and unallocated content; notes in `work/disk.md`.
+- Artifacts and execution: registry hives, event logs, prefetch, LNK, jump lists, shimcache, amcache, browser and application traces; notes in `work/artifacts.md`.
+- Recovery and analysis: carving, decoding, hashing and reading whatever the others pull out, with strings and parsers; notes in `work/analysis.md`.
 - Timeline and ledger: records every dated event peers report with `record kind=event` and writes `work/timeline.md` from `ledger/ledger.md`.
 - Report author and critic: two agents, as above; the author assembles `work/report.md` from the answers, and the critic also challenges weak claims on the board.
 
