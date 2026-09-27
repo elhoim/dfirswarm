@@ -486,8 +486,10 @@ export async function evidenceLinks(sandbox: string, meta: Record<string, unknow
     }
     const target = await readlink(join(sandbox, t.rel)).catch(() => null);
     const real = await realpath(join(sandbox, t.rel)).catch(() => null);
+    // The source as recorded, resolved the same way: a recorded path through a link of the system (/var on macOS) is the same place.
+    const source = await realpath(t.source).catch(() => t.source);
     if (real === null) moved.push(`${t.rel} leads to ${target ?? "?"}, which is not there now (the kickoff recorded ${t.source})`);
-    else if (target !== t.source || real !== t.source) moved.push(`${t.rel} leads to ${real}${target !== real ? ` (through ${target})` : ""}, not ${t.source}, the source the kickoff recorded`);
+    else if (real !== source) moved.push(`${t.rel} leads to ${real}${target !== real ? ` (through ${target})` : ""}, not ${t.source}, the source the kickoff recorded`);
     else checked += 1;
   }
   return { checked, moved };
