@@ -158,7 +158,7 @@ async function sealedPackage(): Promise<{ root: string; runs: string; pkg: strin
   dirs.push(runs);
   const root = join(runs, "sp001");
   await initSandbox(root, { reset: true, swarmId: "sp001", agentIds: ["a0"] });
-  await recordEntry({ sandboxRoot: root, agentId: "a0" }, { kind: "finding", value: "The laptop was imaged on 2024-04-05", source: "E01 header", evidence: "ewfinfo" });
+  await recordEntry({ sandboxRoot: root, agentId: "a0" }, { kind: "finding", value: "The laptop was imaged on 2024-04-05", source: "E01 header", evidence: "ewfinfo", basis: "observed", confidence: "high", indicates: "The acquisition is dated.", confidence_why: "The E01 header records it." });
   await mkdir(join(root, "work", "a0"), { recursive: true });
   await writeFile(join(root, "work", "report.md"), "# Report\n\nImaged on 2024-04-05 [#1].\n");
   await writeFile(join(root, "work", "a0", "big.bin"), Buffer.concat([Buffer.from([0]), Buffer.alloc(16, 1)]));
