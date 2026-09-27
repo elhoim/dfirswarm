@@ -532,3 +532,33 @@ test("Appendix B keeps every job: the cited ones first, the rest whole in a coll
   const md = await renderReportBodyMarkdown(run);
   assert.match(md, /### 2 jobs no entry cites\n\n#### Job j000002/);
 });
+
+test("§4 says how the investigation proceeded: each finding, the leads it opened, how each ended, and whether a drop was reviewed", async () => {
+  const P = await import("../extensions/protocol.ts");
+  const L = await import("../extensions/leads.ts");
+  const d = join(await tempDir(), "run");
+  await P.initSandbox(d, { swarmId: "rb1", agentIds: ["a0", "a1", "a2"], capUsd: 1, wallClockMinutes: 10 });
+  const F = { basis: "observed", confidence: "high", indicates: "The container holds the originals.", confidence_why: "Read directly." } as const;
+  const f = await P.recordEntry({ sandboxRoot: d, agentId: "a0" }, { kind: "finding", ...F, value: "An encrypted container sits in the user's profile", source: "the file list", evidence: "row 12" });
+  assert.ok(f.ok);
+  assert.equal((await L.openLead({ sandboxRoot: d, agentId: "a0" }, { title: "Open the container", why: "Five questions rest on its files", origin: "E-1", take: true })).ok, true);
+  assert.equal((await L.openLead({ sandboxRoot: d, agentId: "a1" }, { title: "Walk the second browser profile", why: "Nobody has looked", take: true })).ok, true);
+  const lim = await P.recordEntry({ sandboxRoot: d, agentId: "a0" }, { kind: "limitation", value: "No key opens the container", source: "the container", evidence: "every candidate tried", reason: "unavailable" });
+  assert.ok(lim.ok);
+  assert.equal((await L.closeLead({ sandboxRoot: d, agentId: "a0" }, "L-1", { disposition: "deferred", ref: "E-2" })).ok, true);
+  let md = await renderReportBodyMarkdown(d);
+  const s4 = mdSlice(md, "### How the investigation proceeded");
+  assert.match(s4, /2 leads in the register/);
+  assert.match(s4, /E-1.*\(finding\): An encrypted container sits in the user's profile opened:/);
+  assert.match(s4, /L-1.*Open the container: Five questions rest on its files\. Ended deferred \(a0\): .*E-2/);
+  assert.match(s4, /Review: \*?\*?not reviewed/);
+  assert.match(s4, /Opened by an agent, not from a recorded finding:/);
+  assert.match(s4, /L-2.*Walk the second browser profile.*Not ended: active, held by a1/);
+  assert.match(s4, /1 lead dropped or deferred; 1 of them not reviewed by an agent other than the one who closed it \(L-1\)/);
+  // The critic reviews the deferral: it attests the limitation it cites.
+  assert.ok((await P.attestEntry({ sandboxRoot: d, agentId: "a2" }, { seq: 2, how: "tried the candidates again from the sealed list" })).ok);
+  md = await renderReportBodyMarkdown(d);
+  assert.match(mdSlice(md, "### How the investigation proceeded"), /Review: attested by a2\./);
+  const html = await renderReportBody(d);
+  assert.match(html.html ?? JSON.stringify(html), /How the investigation proceeded/);
+});

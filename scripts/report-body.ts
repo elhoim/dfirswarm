@@ -78,6 +78,7 @@ import {
   type NameRecord,
 } from "../extensions/protocol.ts";
 import { escapeHtml, markdownToHtml } from "../ui/src/lib/markdown.ts";
+import { leadsSnapshot, rankedLeads, type LeadView } from "../extensions/leads.ts";
 
 // ---------------------------------------------------------------------------
 // Options
@@ -367,6 +368,8 @@ type Run = {
   failed: Map<number, Array<{ ref: string; job: string; status: string }>>;
   /** Methods for entries that carry none (before version 4), read from the job records now. */
   derivedMethods: Map<number, LedgerMethod[]>;
+  /** The lead register (extensions/leads.ts): every lead as it stands, and whether its chain holds; null when the run opened none. */
+  leads: { views: LeadView[]; chain: { ok: boolean; broken_at: number | null; reason: string | null }; events: number } | null;
 };
 
 async function readJson<T>(file: string): Promise<T | null> {
@@ -537,6 +540,10 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
     problems,
     failed,
     derivedMethods,
+    leads: await (async () => {
+      const snap = await leadsSnapshot(sandbox).catch(() => null);
+      return snap && snap.state.events.length ? { views: rankedLeads(snap), chain: snap.state.chain, events: snap.state.events.length } : null;
+    })(),
   };
 }
 
@@ -1279,6 +1286,79 @@ function custodySentence(c: CustodyView | null): string {
   return `At the end the host re-hashed ${files - n(i.skipped) - n(i.unreadable)} of ${files} files and found them unchanged; ${n(i.skipped)} were not re-read before custody's deadline and ${n(i.unreadable)} could not be read, so those are not covered (custody.json, ${at}).`;
 }
 
+/** The dispositions that drop or defer work: a critic reviews each, by attesting or disputing what it cites. */
+const DROPS = new Set(["negative", "duplicate", "deferred", "infeasible", "needs_operator"]);
+
+/**
+ * How the investigation proceeded: each finding, the leads it opened, and
+ * how each lead ended, from the lead register. A lead's origin is the entry
+ * (or the agent) that opened it and its disposition cites what it rests on,
+ * so the chain reads finding, lead, disposition, the finding that closed it,
+ * the leads that one opened. A drop or a deferral says whether an agent other
+ * than the one who closed it reviewed the entry it cites; an agent's review
+ * is still not a human's.
+ */
+function proceededBlocks(run: Run): Block[] {
+  const blocks: Block[] = [{ k: "h", level: 3, text: "How the investigation proceeded", id: "proceeded" }];
+  const leads = run.leads;
+  if (!leads) {
+    blocks.push({ k: "p", s: ["The swarm opened no lead: the order of its work is in the trace and the board, not in a register of what was found to follow."] });
+    return blocks;
+  }
+  blocks.push({
+    k: "p",
+    s: [
+      `${plural(leads.views.length, "lead")} in the register (`,
+      { code: "leads/leads.md" },
+      `, ${plural(leads.events, "event")}, chain ${leads.chain.ok ? "intact" : `BROKEN at line ${leads.chain.broken_at}: ${leads.chain.reason}`}). `,
+      "A lead is work an agent found had to be followed; the harness kept who held it and how it ended, and assigned none of it. Each finding is listed with the leads it opened, then how each ended and what that rests on.",
+    ],
+  });
+  const reviewOf = (x: LeadView): Span[] => {
+    if (!x.disposition || !DROPS.has(x.disposition)) return [];
+    const m = x.ref ? /^E-(\d+)$/.exec(x.ref) : null;
+    if (!m) return [" Review: not reviewable by an attestation (", x.disposition === "duplicate" ? "a duplicate cites a lead" : "an operator request cites no entry", ")."];
+    const e = run.bySeq.get(Number(m[1]));
+    if (!e) return [" Review: the entry it cites is not in the ledger."];
+    const target = e.hash ?? ledgerHash(e, "genesis");
+    const att = run.attestations.filter((a) => attestationAct(a) === "attest" && a.target === target && a.by !== x.closed_by && !e.authors.includes(a.by)).map((a) => a.by);
+    const dis = run.disputes.filter((d) => d.act === "dispute" && d.target === target).map((d) => d.by);
+    if (!att.length && !dis.length) return [" Review: ", { b: "not reviewed" }, ": no agent other than the one who closed it attested or disputed what it cites."];
+    return [` Review: ${[att.length ? `attested by ${[...new Set(att)].join(", ")}` : "", dis.length ? `disputed by ${[...new Set(dis)].join(", ")}` : ""].filter(Boolean).join("; ")}.`];
+  };
+  const leadLine = (x: LeadView): Span[] => {
+    const m = x.ref ? /^E-(\d+)$/.exec(x.ref) : null;
+    const ended: Span[] = x.disposition
+      ? [` Ended ${x.disposition}`, ...(x.closed_by ? [` (${x.closed_by})`] : []), ": ", ...(m ? [{ e: Number(m[1]) } as Span] : [x.ref ?? ""]), x.close_why ? ` (${x.close_why})` : "", "."]
+      : [` Not ended: ${x.status}${x.holder ? `, held by ${x.holder}` : ", held by nobody"}${x.needs.some((n) => !n.met) ? `, waiting on ${x.needs.filter((n) => !n.met).map((n) => n.need).join(", ")}` : ""}${x.material ? "" : " (not material)"}.`];
+    const reopened: Span[] = x.reopened.length ? [` Reopened ${plural(x.reopened.length, "time")}: ${x.reopened.map((r) => `${r.cause}, ${r.why}`).join("; ")}.`] : [];
+    const notes: Span[] = x.notes.length ? [` The operator: ${x.notes.map((n) => `${n.text}${n.allow_host ? ` (allowed ${n.allow_host})` : ""}`).join("; ")}.`] : [];
+    return [{ b: `${x.id} ` }, x.title, `: ${x.why}${/[.!?]$/.test(x.why) ? "" : "."}`, ...(x.jobs.length ? [` Jobs: ${x.jobs.join(", ")}.`] : []), ...ended, ...reviewOf(x), ...reopened, ...notes];
+  };
+  // Grouped by where each lead came from: a finding first, in ledger order, then the leads an agent opened on its own.
+  const byOrigin = new Map<string, LeadView[]>();
+  for (const x of [...leads.views].sort((a, b) => a.opened_at.localeCompare(b.opened_at) || a.id.localeCompare(b.id))) {
+    const key = /^E-\d+$/.test(x.origin) ? x.origin : "";
+    byOrigin.set(key, [...(byOrigin.get(key) ?? []), x]);
+  }
+  const fromEntries = [...byOrigin.keys()].filter(Boolean).sort((a, b) => Number(a.slice(2)) - Number(b.slice(2)));
+  for (const origin of fromEntries) {
+    const seq = Number(origin.slice(2));
+    const e = run.bySeq.get(seq);
+    blocks.push({ k: "p", s: [{ e: seq }, e ? ` (${e.kind}): ${e.value}` : " (not in the ledger)", " opened:"] });
+    blocks.push({ k: "list", items: (byOrigin.get(origin) ?? []).map(leadLine) });
+  }
+  const own = byOrigin.get("") ?? [];
+  if (own.length) {
+    blocks.push({ k: "p", s: [fromEntries.length ? "Opened by an agent, not from a recorded finding:" : "Every lead was opened by an agent, not from a recorded finding:"] });
+    blocks.push({ k: "list", items: own.map((x) => [...leadLine(x), ` (${x.origin})`]) });
+  }
+  const drops = leads.views.filter((x) => x.disposition && DROPS.has(x.disposition));
+  const unreviewed = drops.filter((x) => reviewOf(x).some((sp) => typeof sp === "object" && "b" in sp && sp.b === "not reviewed"));
+  if (drops.length) blocks.push({ k: "p", s: [`${plural(drops.length, "lead")} dropped or deferred; ${unreviewed.length ? `${unreviewed.length} of them not reviewed by an agent other than the one who closed it (${unreviewed.map((x) => x.id).join(", ")})` : "each reviewed by another agent"}.`] });
+  return blocks;
+}
+
 function methodSection(run: Run): BodySection {
   const blocks: Block[] = [];
   const agents = new Map<string, { model?: string }>();
@@ -1379,6 +1459,8 @@ function methodSection(run: Run): BodySection {
       "Each ref an entry rests on is traced to the evidence objects it came from: an input by its path; a job's output to the inputs that job declared (and a job over another job's output to that job's); an import or an agent's own file to itself, its origin not recorded. Refs that share an object are one corroboration group: two outputs of one disk image are one source. A group is a provenance group, not proof of independence: two different logs may still copy one another, and a job that declared scope all is its own group of unknown independence.",
     ],
   });
+
+  blocks.push(...proceededBlocks(run));
 
   // What agents checked, and what humans did.
   blocks.push({ k: "h", level: 3, text: "What an agent checked" });
