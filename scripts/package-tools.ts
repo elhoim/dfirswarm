@@ -38,6 +38,8 @@ import { existsSync, readFileSync, readdirSync, lstatSync, writeFileSync } from 
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ledgerHash, readLedger, verifyAttestationChain, verifyDisputeChain, type LedgerEntry } from "../extensions/protocol.ts";
+import { REVIEW_ACTIONS } from "./review.ts";
+import { packageLayout, verifyReleases } from "./release-record.ts";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 const REDACTED = "[redacted: marked sensitive]";
@@ -349,7 +351,7 @@ function reviewChain(text: string): { ok: boolean; lines: number; redacted: numb
     }
     if (o.seq !== n) return { ok: false, lines: n, redacted, detail: `BROKEN (line ${n} says seq ${o.seq})`, signed };
     if ((o.prev ?? null) !== prev) return { ok: false, lines: n, redacted, detail: `BROKEN (line ${n} does not follow the line before it)`, signed };
-    if (!["accept", "reject", "amend", "sign"].includes(String(o.action))) return { ok: false, lines: n, redacted, detail: `BROKEN (line ${n} has no known action)`, signed };
+    if (!(REVIEW_ACTIONS as readonly string[]).includes(String(o.action))) return { ok: false, lines: n, redacted, detail: `BROKEN (line ${n} has no known action)`, signed };
     if (o.redacted) redacted += 1;
     else if (o.action === "sign") signed = o as NonNullable<typeof signed>;
     prev = o.redacted && o.line_sha256 ? o.line_sha256 : sha256(raw);
@@ -378,6 +380,7 @@ export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; w
   { path: "store/journal.jsonl", source: "store/journal.jsonl", what: "the store's journal", absent: "the run had no job service", sealed: "journal" },
   { path: "trace/journal-anchor.json", source: "<sandbox>.journal-anchor.json", what: "the journal's anchor", absent: "the run had no job service" },
   { path: "review.jsonl", source: "<runs>/reviews/<run>.jsonl", what: "the examiner's review", absent: "no examiner has reviewed this run", since: "2026-09-27" },
+  { path: "release", source: "release/", what: "the report's releases: the machine's drafts and the examiner's adoptions, each signed", absent: "no release was sealed for this run (no custody taken, or a run from before releases)", since: "2026-09-27" },
 ];
 
 /** COMPONENTS.json for a package: each part present, or absent with why. */
@@ -456,6 +459,13 @@ export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
   } catch {
     fail("Anchor:       trace/custody-anchor.json is not JSON");
   }
+  let anchoredReleases = 0;
+  try {
+    const rs = anchorText ? (JSON.parse(anchorText) as { releases?: unknown }).releases : undefined;
+    anchoredReleases = Array.isArray(rs) ? rs.length : 0;
+  } catch {
+    anchoredReleases = 0;
+  }
   // A file whose sha256 is anchored: the same bytes, or redacted from those bytes (REDACTIONS.txt names its sha256 before).
   const heldTo = (rel: string, text: string, want: string | null | undefined): "matches" | "redacted" | "differs" => {
     const have = sha256(text);
@@ -488,6 +498,7 @@ export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
       case "artifacts":
         return custody?.artifacts?.index_sha256 ? "the verdict sealed an index of work/" : null;
       default:
+        if (c.path === "release" && anchoredReleases > 0) return `the anchor names ${anchoredReleases} release(s)`;
         if (c.path === "custody.json.sig" && lastAnchored?.signature?.file) return "the anchor says the verdict was signed";
         if (c.path === "custody.json.tsr" && lastAnchored?.timestamp?.file) return "the anchor says the verdict was timestamped";
         return null;
@@ -669,9 +680,15 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   } else if (cmd === "components" && a && b) {
     console.log(JSON.stringify(writeComponents(a, b)));
   } else if (cmd === "verify" && a) {
+    const rest = process.argv.slice(4);
+    const opt = (name: string) => (rest.indexOf(name) >= 0 ? rest[rest.indexOf(name) + 1] : undefined);
     const r = verifyPackage(a);
     console.log(r.lines.join("\n"));
-    process.exit(r.ok ? 0 : 1);
+    // The report's releases: every signature, the bytes each binds, the chain between them.
+    const rel = await verifyReleases(packageLayout(a), { allowedSigners: opt("--allowed-signers"), tsaCa: opt("--tsa-ca") });
+    console.log(rel.lines.join("\n"));
+    const unchecked = rel.signatures.some((s) => s.adopted && s.state !== "verified");
+    process.exit(!r.ok || !rel.ok ? 1 : unchecked && opt("--allowed-signers") ? 3 : 0);
   } else {
     console.error("usage: package-tools.ts redact <sandbox> <package dir> | components <sandbox> <package dir> | verify <package dir>");
     process.exit(2);

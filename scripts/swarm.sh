@@ -106,6 +106,7 @@ Commands:
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   review verify export hold release purge image-for   After a run: sign-off, checks, export, retention; the image packs boot (help <command>)
+  releases examiner   The report's releases and the examiners who adopt them (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
   say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> changes its caps (help cap)
   stop <id>          Stop a run and record how it ended
@@ -846,6 +847,13 @@ freeze_harness() { # <hub dir>
     rm -rf "${host:?}/$rel"
     cp -R "$ROOT/$rel" "$host/$rel"
   done
+  # The draft release the hub seals after custody renders the report, which
+  # reads the Markdown renderer, the version and the mark: frozen with it.
+  rm -rf "${host:?}/ui" "${host:?}/brand"
+  mkdir -p "$host/ui/src/lib" "$host/brand"
+  cp -R "$ROOT/ui/src/lib/." "$host/ui/src/lib/"
+  cp "$ROOT/package.json" "$host/package.json"
+  cp "$ROOT/brand/mark-mono.svg" "$host/brand/mark-mono.svg" 2>/dev/null || true
   # msb and its SDK are frozen with it: an `npm ci` in the checkout mid-run
   # removed node_modules for a while and then put in whatever it resolved,
   # and the hub's finish ran that msb against VMs another one had made. A
@@ -7658,8 +7666,14 @@ cmd_stop() {
       echo "WARN: the custody check did not finish (exit $custody_rc); see $sandbox/traces/custody.log" >&2
       [[ -n "$custody_at" ]] && echo "      The verdict in $sandbox/custody.json is an earlier one ($custody_at), not this stop's." >&2
     fi
-  elif [[ "$no_custody" -eq 1 ]]; then
+  elif [[ "$no_custody" -eq 1 && "$after_hub" -eq 0 ]]; then
     echo "Custody:      skipped (--no-custody); run scripts/custody.ts $sandbox later"
+  fi
+  # The machine's draft of the report, sealed beside the verdict: once per
+  # verdict (the hub's own finish writes it too; this one then finds it).
+  if [[ -n "$sandbox" && -d "$sandbox" ]] && [[ "$no_custody" -eq 0 || "$after_hub" -eq 1 ]]; then
+    stop_step="sealing the draft release"
+    release_draft "$sandbox" "$id"
   fi
   # An attached evidence image would otherwise outlive the run that needed it,
   # and the next kickoff on the same sandbox cannot clear a mount point.
@@ -8153,6 +8167,15 @@ PY
   # The examiner's review, kept beside the registry where no agent writes:
   # what the sign-off is over travels with what it is over.
   [[ "$id" =~ ^[A-Za-z0-9_-]+$ ]] && pkg_copy "$RUNS_DIR/reviews/$id.jsonl" "$out/review.jsonl" non-empty
+  # Every release of the report as it was sealed: the machine's drafts, the
+  # examiner's adoptions and amendments, each signature, token, print and
+  # mirror receipt. Carried byte for byte and never rendered again; verify
+  # walks the chain.
+  if [[ -d "$sandbox/release" && ! -L "$sandbox/release" ]]; then
+    copy_tree "$sandbox/release" "$out/release"
+    rm -rf "$out"/release/.*.tmp 2>/dev/null || true
+    chmod -R u+w "$out/release" 2>/dev/null || true
+  fi
   # What each agent's VM was, as the VM manager recorded it (image digest,
   # mounts, network, the secrets' names and hosts, the kept disk's sha256),
   # and the VM's own logs kept beside its disk (the runtime's, where msb
@@ -8371,12 +8394,13 @@ cmd_custody_verify() {
 }
 
 cmd_verify() {
-  local target="${1:-}" allowed="" tmp="" dir
-  [[ -n "$target" && "$target" != -* ]] || die_usage "verify requires <package dir|zip> [--allowed-signers FILE]"
+  local target="${1:-}" allowed="" tsa_ca="" tmp="" dir
+  [[ -n "$target" && "$target" != -* ]] || die_usage "verify requires <package dir|zip> [--allowed-signers FILE] [--tsa-ca FILE]"
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --allowed-signers) allowed="$2"; shift 2 ;;
+      --tsa-ca) tsa_ca="$2"; shift 2 ;;
       *) die_usage "verify: unknown option $1" ;;
     esac
   done
@@ -8459,9 +8483,18 @@ PY
       sig_state="bad"
     fi
   fi
-  # The chains the package carries, against the custody verdict's seal.
-  local chains_out chains_ok=1
-  chains_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" verify "$dir" 2>&1)" || chains_ok=0
+  # The chains the package carries, against the custody verdict's seal, and
+  # the report's releases: exit 3 there is a chain that holds and an adopted
+  # release whose examiner key no allowed-signers file was given to check.
+  local chains_out chains_ok=1 chains_rc=0 release_key_unchecked=0 pt_args=()
+  [[ -n "$allowed" ]] && pt_args+=(--allowed-signers "$allowed")
+  [[ -n "$tsa_ca" ]] && pt_args+=(--tsa-ca "$tsa_ca")
+  chains_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" verify "$dir" ${pt_args[@]+"${pt_args[@]}"} 2>&1)" || chains_rc=$?
+  case "$chains_rc" in
+    0) ;;
+    3) release_key_unchecked=1 ;;
+    *) chains_ok=0 ;;
+  esac
   # Whether who signed, and when, is under the signature (SIGNER.txt in the manifest), read before a zip's extraction goes.
   local signer_note="" signer_says=nobody
   if [[ -f "$dir/SIGNER.txt" ]]; then
@@ -8484,7 +8517,9 @@ PY
     exit 1
   fi
   case "$sig_state" in
-    verified) echo "VERIFIED: $target"; exit 0 ;;
+    verified)
+      if [[ "$release_key_unchecked" -eq 1 ]]; then echo "FILES VERIFIED, THE ADOPTING EXAMINER'S KEY IS NOT IN $allowed: $target"; exit 3; fi
+      echo "VERIFIED: $target"; exit 0 ;;
     unvalidated) echo "FILES VERIFIED, SIGNER NOT CHECKED: $target"; exit 3 ;;
     *) echo "FILES VERIFIED, UNSIGNED: $target"; exit 4 ;;
   esac
@@ -8494,21 +8529,29 @@ PY
 # reject or amend an entry, or sign off the ledger as it stands. Outside
 # the run, beside the registry, chained.
 cmd_review() {
-  local id="${1:-}" action="" entry="" note="" examiner="" report=""
-  [[ -n "$id" && "$id" != -* ]] || die_usage "review requires <id> (--accept N | --reject N --note TEXT | --amend N --note TEXT | --sign [--report PATH] | --show) [--examiner NAME]"
+  local id="${1:-}" action="" entry="" note="" examiner="" report="" pdf=0 amend_reason="" no_ts=0 reviewer="" competence="" checked="" organisation="" entries=""
+  [[ -n "$id" && "$id" != -* ]] || die_usage "review requires <id> (--adopt N | --qualify N --note TEXT | --reject N --note TEXT | --inconclusive N --note TEXT | --accept N | --amend N --note TEXT | --technical-review ... | --sign [--pdf] [--amend-reason TEXT] | --show) [--examiner ID]"
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --accept|--reject|--amend) action="${1#--}"; entry="${2:-}"; shift 2 ;;
+      --accept|--reject|--amend|--adopt|--qualify|--inconclusive) action="${1#--}"; entry="${2:-}"; shift 2 ;;
+      --technical-review) action=technical_review; shift ;;
       --sign) action=sign; shift ;;
       --show) action=show; shift ;;
       --note) note="$2"; shift 2 ;;
       --examiner) examiner="$2"; shift 2 ;;
       --report) report="$2"; shift 2 ;;
+      --pdf) pdf=1; shift ;;
+      --amend-reason) amend_reason="$2"; shift 2 ;;
+      --reviewer) reviewer="$2"; shift 2 ;;
+      --competence) competence="$2"; shift 2 ;;
+      --checked) checked="$2"; shift 2 ;;
+      --organisation|--organization) organisation="$2"; shift 2 ;;
+      --entries) entries="$2"; shift 2 ;;
       *) die_usage "review: unknown option $1" ;;
     esac
   done
-  [[ -n "$action" ]] || die_usage "review: say --accept N, --reject N, --amend N, --sign or --show"
+  [[ -n "$action" ]] || die_usage "review: say --adopt N, --qualify N, --reject N, --inconclusive N, --accept N, --amend N, --technical-review, --sign or --show"
   ensure_registry
   local rec sandbox state
   rec="$(json_get "$id")"
@@ -8520,25 +8563,119 @@ cmd_review() {
     node --experimental-strip-types --no-warnings "$ROOT/scripts/review.ts" show --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox"
     return $?
   fi
-  [[ -n "$examiner" ]] || examiner="$(jq -r '.examiner // empty' <<<"$rec")"
-  [[ -n "$examiner" ]] || { echo "BLOCKER: who is reviewing? pass --examiner NAME (the run recorded none)." >&2; exit 2; }
+  # Who reviews: an enrolled examiner by id (swarm.sh examiner enroll), or
+  # the one enrolled when there is only one; a name given free only to
+  # accept, reject or amend a finding. What the kickoff was told about who
+  # ran the run is never taken for the examiner.
+  if [[ -z "$examiner" ]]; then
+    local enrolled
+    enrolled="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/signers.ts" list 2>/dev/null | awk -F'\t' 'NF >= 4 {print $1}')"
+    [[ -n "$enrolled" && "$(wc -l <<<"$enrolled" | tr -d ' ')" == 1 ]] && examiner="$enrolled"
+  fi
   if [[ "$action" == sign ]]; then
     case "$state" in
       running|prepared|finishing) echo "BLOCKER: run $id is still $state; sign off its ledger once it has ended." >&2; exit 2 ;;
     esac
+    # The release is the sign-off: rendered, signed with the enrolled
+    # examiner's key, then named in the review (scripts/release.ts sign).
+    local rargs=(sign --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox")
+    [[ -n "$examiner" ]] && rargs+=(--examiner "$examiner")
+    [[ -n "$report" ]] && rargs+=(--report "$report")
+    [[ "$pdf" -eq 1 ]] && rargs+=(--pdf)
+    [[ -n "$amend_reason" ]] && rargs+=(--amend-reason "$amend_reason")
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/release.ts" "${rargs[@]}" || exit $?
+    echo "Signed off:   run $id, in the release above; the review is $RUNS_DIR/reviews/$id.jsonl"
+    return 0
   fi
+  [[ -n "$examiner" ]] || { echo "BLOCKER: who is reviewing? pass --examiner ID (an examiner enrolled with swarm.sh examiner enroll), or --examiner NAME to accept, reject or amend a finding." >&2; exit 2; }
   local args=(add --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox" --action "$action" --examiner "$examiner")
   [[ -n "$entry" ]] && args+=(--entry "$entry")
   [[ -n "$note" ]] && args+=(--note "$note")
   [[ -n "$report" ]] && args+=(--report "$report")
-  local line
+  if [[ "$action" == technical_review ]]; then
+    args+=(--reviewer "$reviewer" --competence "$competence" --checked "$checked")
+    [[ -n "$organisation" ]] && args+=(--organisation "$organisation")
+    [[ -n "$entries" ]] && args+=(--entries "$entries")
+  fi
+  local line who
   line="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/review.ts" "${args[@]}")" || exit 1
   [[ "$state" == running ]] && operator_trace "$sandbox" review "$id" "--$action" ${entry:+"$entry"}
-  if [[ "$action" == sign ]]; then
-    echo "Signed off:   run $id's ledger ($(jq -r '.ledger_entries' <<<"$line") entries, head $(jq -r '.ledger_head' <<<"$line")) and $(jq -r '.report_path' <<<"$line") ($(jq -r '.report_sha256 // "absent"' <<<"$line")) by $examiner$(jq -r 'if (.open_rejections // []) | length > 0 then ", with rejections standing: " + ((.open_rejections | map("#" + tostring)) | join(", ")) else "" end' <<<"$line"); the review is $RUNS_DIR/reviews/$id.jsonl"
+  who="$(jq -r '.examiner + (if .examiner_id then " (enrolled examiner " + .examiner_id + ")" else " (not an enrolled examiner)" end)' <<<"$line")"
+  local verb="$action"
+  case "$action" in
+    accept) verb=accepted ;;
+    reject) verb="rejected (an answer: withdrawn)" ;;
+    amend) verb=amended ;;
+    adopt) verb=adopted ;;
+    qualify) verb="adopted with a qualification" ;;
+    inconclusive) verb="rendered inconclusive" ;;
+  esac
+  if [[ "$action" == technical_review ]]; then
+    echo "Reviewed:     run $id's methods, by $reviewer ($competence): $checked; recorded by $who"
   else
-    echo "Reviewed:     run $id entry $entry $(case "$action" in accept) echo accepted ;; reject) echo rejected ;; amend) echo amended ;; esac) by $examiner$([[ -n "$note" ]] && printf ' (%s)' "$note")"
+    echo "Reviewed:     run $id entry $entry $verb by $who$([[ -n "$note" ]] && printf ' (%s)' "$note")"
   fi
+}
+
+# A run's releases (scripts/release.ts): the machine's draft at stop, each
+# adoption an enrolled examiner signs, each amendment. Shown by default;
+# --draft writes one for a run that has a verdict and none (or, with
+# --reason, another); --verify checks every signature and what each binds;
+# --print N prints release vN's HTML to PDF beside it.
+cmd_releases() {
+  local id="${1:-}" mode=show extra=() version=""
+  [[ -n "$id" && "$id" != -* ]] || die_usage "releases requires <id> [--draft [--reason TEXT] | --verify [--allowed-signers FILE] [--tsa-ca FILE] | --print [N] | --json]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --draft) mode=draft; shift ;;
+      --verify) mode=verify; shift ;;
+      --print) mode=print; if [[ "${2:-}" =~ ^[0-9]+$ ]]; then version="$2"; shift 2; else shift; fi ;;
+      --version) version="$2"; shift 2 ;;
+      --reason|--allowed-signers|--tsa-ca) extra+=("$1" "$2"); shift 2 ;;
+      --json) extra+=(--json); shift ;;
+      *) die_usage "releases: unknown option $1" ;;
+    esac
+  done
+  ensure_registry
+  local rec sandbox
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "BLOCKER: run $id's sandbox is not there." >&2; exit 2; }
+  if [[ "$mode" == draft ]]; then
+    case "$(jq -r '.state // empty' <<<"$rec")" in
+      running|prepared|finishing) echo "BLOCKER: run $id is still running; its draft is written when custody is taken at stop." >&2; exit 2 ;;
+    esac
+  fi
+  [[ -n "$version" ]] && extra+=(--version "$version")
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/release.ts" "$mode" "$sandbox" --run "$id" --runs "$RUNS_DIR" ${extra[@]+"${extra[@]}"}
+}
+
+# The examiners enrolled on this install (scripts/signers.ts), outside every
+# run: who may adopt a report and sign its release. `machine` shows the
+# install's machine key, which seals the drafts and is no examiner.
+cmd_examiner() {
+  local sub="${1:-}"
+  [[ -n "$sub" ]] || die_usage "examiner enroll --name NAME --organisation ORG --competence TEXT (--key FILE | --generate-key [--no-passphrase]) [--id ID] [--principal P] [--tsa-url URL --tsa-ca FILE] | examiner list | examiner show ID | examiner machine"
+  shift
+  case "$sub" in
+    enroll|list|show|machine) node --experimental-strip-types --no-warnings "$ROOT/scripts/signers.ts" "$sub" "$@" ;;
+    *) die_usage "examiner: enroll, list, show or machine" ;;
+  esac
+}
+
+# The machine's draft release once custody is taken (scripts/release.ts
+# draft): written once per verdict, and never holding the stop up.
+release_draft() { # <sandbox> <run id>
+  local sandbox="$1" id="$2" out
+  [[ -f "$sandbox/custody.json" ]] || return 0
+  if out="$(with_timeout 900 node --experimental-strip-types --no-warnings "$ROOT/scripts/release.ts" draft "$sandbox" --run "$id" --runs "$RUNS_DIR" --quiet 2>&1 </dev/null)"; then
+    [[ -n "$out" ]] && { grep -E '^(Release|Timestamp|Mirror|WARN):' <<<"$out" || true; }
+  else
+    echo "WARN: the draft release was not written: $(tail -1 <<<"$out"); swarm.sh releases $id --draft writes it" >&2
+  fi
+  return 0
 }
 
 # A run on hold keeps its material: purge refuses it, a new run in its
@@ -8728,43 +8865,51 @@ cmd_help() {
       usage | awk -v c="$topic" '$1 == c { print }'
       echo "docs/usage.md has the detail; start is the only command with a long page." ;;
     review) cat <<'EOF'
-  review <id> --accept N [--note TEXT] --examiner NAME     accept ledger entry N
-  review <id> --reject N --note TEXT --examiner NAME       reject it, saying why
-  review <id> --amend N --note TEXT --examiner NAME        accept it with a correction
-  review <id> --sign --examiner NAME [--report PATH]       sign off the ledger and the report as they stand (once the run has ended)
-  review <id> --show                                       what has been reviewed, and whether the sign-off is current
-The review is kept beside the registry (runs/reviews/<id>.jsonl, 0600), chained, where no agent reaches.
+  review <id> --adopt N [--note TEXT]                 adopt answer N as the examiner's conclusion
+  review <id> --qualify N --note TEXT                 adopt it with a stated qualification
+  review <id> --reject N --note TEXT                  withdraw it (an answer), or reject an entry
+  review <id> --inconclusive N --note TEXT            render it inconclusive
+  review <id> --accept N | --amend N --note TEXT      accept an entry, or accept it with a correction
+  review <id> --technical-review --reviewer NAME --competence TEXT --checked TEXT [--organisation ORG] [--entries 4,10]
+  review <id> --sign [--pdf] [--amend-reason TEXT] [--report PATH]
+                                                      adopt the report: release vN signed with the examiner's key
+  review <id> --show                                  what has been reviewed, and whether the sign-off is current
+Every act names the examiner (--examiner ID, an examiner enrolled with swarm.sh examiner enroll; the
+only one enrolled when there is one). Adopting, qualifying, rendering inconclusive, a technical review
+and the sign-off are an enrolled examiner's; accept, reject and amend of a finding may name someone
+who is not enrolled, and say so. An answer whose support is defective cannot be adopted or qualified:
+withdraw it or render it inconclusive; repairing its support is a new examination (a new run). The
+sign-off renders the report's final bytes for the release (no DRAFT mark), prints them with --pdf,
+signs release.json with the examiner's key, and then names the release in the review; after an
+adoption, another is an amendment and says why (--amend-reason). What the kickoff recorded as who
+ran the run is never taken for the examiner. The review is kept beside the registry
+(runs/reviews/<id>.jsonl, 0600), chained, where no agent reaches.
 EOF
       ;;
-    custody-verify) cat <<'EOF'
-  custody-verify <id> [--allowed-signers FILE --identity NAME] [--tsa-ca FILE] [--scratch DIR] [--json]
-Takes the run's custody again, writing nothing in the run, and holds it to the verdict it sealed:
-every check's status now, the sealed prefix of the trace, the lines written after the seal (the
-run's own closing lines are expected), each chain's sealed length and head (ledger, attestations,
-store journal, where an examiner's notes after the run are named and allowed, the gateway log),
-every work/ file against the index custody sealed (changed, removed, added, each named), the
-verdict against its anchor, its signature and its timestamp token. --tsa-ca (or
-SWARM_CUSTODY_TSA_CA, or the run's --custody-timestamp-ca) checks the token's signature with
-openssl ts -verify; without one it is "imprint only". A kept disk msb checks is loaded under
---scratch (the host's temporary directory by default), and what was touched there is said.
-Exit 0: the run is as the verdict sealed it; 4: it is not, or a check does not pass; 1: not checked.
+    releases) cat <<'EOF'
+  releases <id>                                   the run's releases: each version, who sealed it, what is beside it
+  releases <id> --draft [--reason TEXT]           the machine's draft for a run with a verdict and none (or another, with a reason)
+  releases <id> --verify [--allowed-signers FILE] [--tsa-ca FILE]
+                                                  every signature, the bytes and chains each binds, the chain between them
+  releases <id> --print [N]                       release vN's HTML printed to PDF beside it (a print record the next release binds)
+v0 is written when custody is taken at stop, sealed by this install's machine key: a DRAFT, adopted
+by no one. v1 is an enrolled examiner's adoption (review --sign); each later version names the one
+before it and why. Nothing in a release is written over. --verify exits 0 when every release holds
+and every adoption's key is one FILE allows, 3 when they hold and no register was given, 4 when one
+does not hold.
 EOF
       ;;
-    verify) cat <<'EOF'
-  verify <package dir|zip> [--allowed-signers FILE]
-Re-hashes every file against MANIFEST.txt (none missing, none added, none outside the package) and
-checks MANIFEST.txt.sig, which covers SIGNER.txt; every part in COMPONENTS.json is there or declared
-absent; then the chains the package carries (trace, ledger with every readable entry's core
-recomputed, attestations, journal, the examiner's review) against the custody verdict's seal, and
-every packaged work/ file against the index custody sealed (artifacts.sealed.json), held to the
-verdict and its anchor.
-Exit 0: all of it holds and the signer is one FILE allows; 3: the files hold, the signature is sound,
-the signer was not checked; 4: the files hold, the package is unsigned; 1: something does not hold.
+    examiner) cat <<'EOF'
+  examiner enroll --name NAME --organisation ORG --competence TEXT (--key FILE | --generate-key [--no-passphrase])
+                  [--id ID] [--principal P] [--tsa-url URL --tsa-ca FILE]
+  examiner list | examiner show ID | examiner machine
+An examiner is enrolled on this install, outside every run ($DFIRSWARM_HOME/examiners/): the key is
+given, or made only when asked, and checked by signing a challenge. Enrolment prints the key's
+fingerprint and the line for the organisation's signer register (an ssh allowed-signers file): the
+register, checked in person, is what ties the key to the person. `machine` shows the install's
+machine key, which seals the drafts and is no examiner.
 EOF
       ;;
-    image-for) echo "  image-for [--pack ID]... [--tools-from DIR] [--playwright] [--no-jobs] [--brains-with-packs]   the image a kickoff's agents would boot, as JSON: ref, digest (null when neither the lock nor msb has it), profile, pinned_by, reason, and jobs (each job image: profile, ref, the packs it serves); read only" ;;
-    export) echo "  export <id> --format csv|timesketch [--out FILE] [--redact]   the ledger as CSV or a Timesketch CSV import (default: <sandbox>/exports/); --redact replaces what a sensitive entry says" ;;
-    hold|release) echo "  hold <id> [--reason TEXT] / release <id>   a held run's material is kept from purge and from a new run in its sandbox" ;;
     cap) cat <<'EOF'
   cap <id> [--usd N] [--tokens N] [--per-agent-usd N] [--per-agent-tokens N] [--wall-clock MIN]
 Changes a running swarm's caps, under the lock every fold of usage takes. Kept in budget.json's
@@ -8788,7 +8933,7 @@ main() {
   # What changes or leaves a run is on the operator's record; what only reads
   # it (list, status, summary, context, help) is not.
   case "$cmd" in
-    start|stop|reap|say|cap|package|report|tools|review|export|hold|release|purge|verify)
+    start|stop|reap|say|cap|package|report|tools|review|export|hold|release|purge|verify|releases|examiner)
       # A start --check writes nothing, the audit included.
       case " $* " in *" -h "*|*" --help "*|*" --check "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
   esac
@@ -8815,6 +8960,8 @@ main() {
     purge) cmd_purge "$@" ;;
     verify) cmd_verify "$@" ;;
     custody-verify) cmd_custody_verify "$@" ;;
+    releases) cmd_releases "$@" ;;
+    examiner) cmd_examiner "$@" ;;
     help) cmd_help "$@" ;;
     *) die_usage "unknown command: $cmd" ;;
   esac
