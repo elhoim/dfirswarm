@@ -2,14 +2,16 @@
  * Agents on the base image, the packs' programs in the job images: a pack
  * tool that fails in the agent's VM for want of a program or a module runs
  * again as a job in its pack's image (extensions/agent-swarm.ts). These are
- * the two decisions that rerun rests on, and the pager's home inside a job.
+ * the decisions that rerun rests on — whether to rerun, and which of the
+ * paths it was given the job writes to its $OUT — and the pager's home
+ * inside a job.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { lacksProgram, ownPathsToOut } from "../extensions/protocol.ts";
-import { LIB, runPy, withCwd } from "./tool-library-harness.ts";
+import { heldOwnPaths, lacksProgram, ownPathsToOut, writtenToOf } from "../extensions/protocol.ts";
+import { LIB, ROOT, runPy, withCwd } from "./tool-library-harness.ts";
 
 const run = (stderr: string, exit_code: number | null = 1, stdout = "") => ({ exit_code, stdout, stderr });
 
@@ -34,6 +36,106 @@ test("a path under the agent's own work/ becomes the job's $OUT, and nothing els
     ownPathsToOut({ output: "work/extracted/s01/vault.vhdx", q: "work/quarantine/s01/x.exe", t: "tool-output/s01/big.json", peer: "work/extracted/s02/y" }, "s01"),
     { output: "{OUT}/extracted/vault.vhdx", q: "{OUT}/quarantine/x.exe", t: "{OUT}/tool-output/big.json", peer: "work/extracted/s02/y" },
   );
+});
+
+test("any way of naming a place in the agent's own directories maps alike, and nothing outside them does", () => {
+  const root = "/runs/s9";
+  assert.deepEqual(
+    ownPathsToOut({
+      abs: "/runs/s9/work/extracted/s01/places.sqlite",
+      dots: "work/s02/../s01/./carved//a.bin",
+      home: "work/s01",
+      slash: "work/extracted/s01/",
+      other_run: "/runs/s8/work/s01/x",
+      climbs: "work/s01/../../inputs/disk.E01",
+      peer: "/runs/s9/work/s02/x",
+      given: "{OUT}/already",
+      text: "alpha|beta",
+      inside: "sys/proc/proc.txt",
+    }, "s01", { root }),
+    {
+      abs: "{OUT}/extracted/places.sqlite",
+      dots: "{OUT}/carved/a.bin",
+      home: "{OUT}",
+      slash: "{OUT}/extracted",
+      other_run: "/runs/s8/work/s01/x",
+      climbs: "work/s01/../../inputs/disk.E01",
+      peer: "/runs/s9/work/s02/x",
+      given: "{OUT}/already",
+      text: "alpha|beta",
+      inside: "sys/proc/proc.txt",
+    },
+  );
+});
+
+test("a rerun reads what the agent's directories already hold where it is, writes the rest to $OUT, and says where each went", async () => {
+  await withCwd(async (cwd) => {
+    // What the agent extracted before (a database, a directory of hives) is
+    // an input: mapped, it would be looked for in an empty $OUT. What a failed
+    // attempt in the agent's VM left (an empty output file, an empty output
+    // directory) is still a place to write.
+    await mkdir(join(cwd, "work", "extracted", "s01"), { recursive: true });
+    await writeFile(join(cwd, "work", "extracted", "s01", "WebCacheV01.dat"), "ese");
+    await mkdir(join(cwd, "work", "s01", "hives"), { recursive: true });
+    await writeFile(join(cwd, "work", "s01", "hives", "SYSTEM"), "regf");
+    await mkdir(join(cwd, "work", "s01", "zeek"), { recursive: true });
+    await writeFile(join(cwd, "work", "s01", "partial.bin"), "");
+    const args = {
+      path: "work/extracted/s01/WebCacheV01.dat",
+      dir: `${cwd}/work/s01/hives`,
+      out_dir: "work/s01/zeek",
+      output: "work/s01/partial.bin",
+      out_file: "work/extracted/s01/rows.jsonl",
+      image: "inputs/disk.E01",
+    };
+    const held = await heldOwnPaths(cwd, args, "s01");
+    assert.deepEqual([...held].sort(), ["work/extracted/s01/WebCacheV01.dat", "work/s01/hives"]);
+    const mapped = ownPathsToOut(args, "s01", { root: cwd, held });
+    assert.deepEqual(mapped, {
+      path: "work/extracted/s01/WebCacheV01.dat",
+      dir: `${cwd}/work/s01/hives`,
+      out_dir: "{OUT}/zeek",
+      output: "{OUT}/partial.bin",
+      out_file: "{OUT}/extracted/rows.jsonl",
+      image: "inputs/disk.E01",
+    });
+    assert.deepEqual(writtenToOf(args, mapped, "j000013"), {
+      "work/s01/zeek": "store/jobs/j000013/out/zeek",
+      "work/s01/partial.bin": "store/jobs/j000013/out/partial.bin",
+      "work/extracted/s01/rows.jsonl": "store/jobs/j000013/out/extracted/rows.jsonl",
+    });
+    assert.deepEqual(writtenToOf({ out_dir: "work/s01" }, ownPathsToOut({ out_dir: "work/s01" }, "s01"), "j000014"), { "work/s01": "store/jobs/j000014/out" });
+  });
+});
+
+test("icat_extract, rerun as a job with the output it was given, writes it to $OUT, where unmapped the worker could not write it", async () => {
+  // The first basic-flow round: six icat_extract reruns with output under
+  // work/extracted/<id>/ each failed "Read-only file system" in the worker.
+  // Here the worker's view is made the same way: work/ read-only, $OUT the
+  // one place to write, and a stub icat on PATH.
+  await withCwd(async (cwd, bin) => {
+    const out = join(cwd, ".jobs", "j000013");
+    await mkdir(out, { recursive: true });
+    await mkdir(join(cwd, "work", "extracted", "s01"), { recursive: true });
+    await chmod(join(cwd, "work", "extracted", "s01"), 0o555);
+    await chmod(join(cwd, "work"), 0o555);
+    try {
+      const given = { image: "inputs/AF-Case2.E01", offset: 2048, inode: "102124-128-4", output: "work/extracted/s01/vault.vhdx" };
+      const mapped = ownPathsToOut(given, "s01", { root: cwd, held: await heldOwnPaths(cwd, given, "s01") });
+      const argsInJob = JSON.parse(JSON.stringify(mapped).split("{OUT}").join(out)) as Record<string, unknown>;
+      const script = join(ROOT, "packs", "computer-forensics-base", "tools", "icat_extract", "run.py");
+      const r = await runPy(script, cwd, argsInJob, bin, { AGENT_ID: "s01", JOB_ID: "j000013", OUT: out });
+      assert.equal(r.code, 0, r.stderr + r.stdout);
+      assert.equal(await readFile(join(out, "extracted", "vault.vhdx"), "utf8"), "extracted-bytes");
+      assert.deepEqual(writtenToOf(given, mapped, "j000013"), { "work/extracted/s01/vault.vhdx": "store/jobs/j000013/out/extracted/vault.vhdx" });
+      // Unmapped, the worker could not write it: what the round saw.
+      const unmapped = await runPy(script, cwd, given, bin, { AGENT_ID: "s01", JOB_ID: "j000013", OUT: out });
+      assert.notEqual(unmapped.code, 0);
+    } finally {
+      await chmod(join(cwd, "work"), 0o755);
+      await chmod(join(cwd, "work", "extracted", "s01"), 0o755);
+    }
+  });
 });
 
 test("inside a job a paging tool writes its whole result under $OUT and names it by where the store will hold it", async () => {
