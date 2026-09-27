@@ -2714,6 +2714,95 @@ test("the console's event lanes: infrastructure and operator lines are told apar
   assert.equal(describeEvent({ tool: "bash", agent: "a1", args: {}, result: {} }), null);
 });
 
+test("a stop before a model call says the reason its trace line gives, not the cap every time", async () => {
+  const { describeEvent } = await import("../ui/src/lib/event-taxonomy.ts");
+  const words = (reason: unknown) => describeEvent({ tool: "budget_precall_stop", agent: "a1", args: { reason }, result: { ok: true, brake: "advisory (in the VM; the hub holds the brake)" } }) ?? "";
+  // Run s306463: every seat still working met the sentinel at its next call.
+  assert.equal(words("sentinel_present"), "a1 was stopped before a model call: the run was over (done/SWARM_DONE stood)");
+  assert.match(words("agent_cap"), /: at its cap/);
+  assert.match(words("hub_unreachable"), /: the hub could not be reached$/);
+  assert.match(words("hard_kill"), /with hard kill$/);
+  assert.match(words("a_new_reason"), /: a_new_reason$/, "a reason the console does not know is shown as the line has it");
+  assert.match(words("constructor"), /: constructor$/);
+  assert.match(words(undefined), /: the line names no reason$/);
+});
+
+test("the Claims tab's runs and reaps are built over the whole trace, not the view's tail", async () => {
+  // A tail of one line: the claims, writes and releases are all before it.
+  const { body } = await get<{ traces: Array<{ tool: string }>; claim_sequences: Array<{ agent: string; path: string; open: boolean; steps: Array<Record<string, unknown>> }>; reaps: Array<{ agent: string; tool: string }> }>("/api/swarms/s7a1c?traces=1");
+  assert.equal(body.traces.length, 1);
+  // The tab's Reaped list too: the harness reaped the silent seat before the tail.
+  assert.ok(!body.traces.some((e) => e.tool === "reaped"));
+  assert.ok(body.reaps.some((e) => e.agent === "s7a1c04" && e.tool === "reaped"));
+  assert.ok(body.reaps.every((e) => e.tool === "reap" || e.tool === "reaped"));
+  const released = body.claim_sequences.find((s) => s.agent === "s7a1c01" && s.path === "work/attack-path.svg");
+  assert.equal(released?.open, false);
+  assert.deepEqual(released?.steps.map((st) => st.tool), ["claim_file", "write", "release_file"]);
+  assert.deepEqual(Object.keys(released?.steps[0] ?? {}).sort(), ["tool", "ts"], "a step carries its call and time; the trace has the rest");
+  const open = body.claim_sequences.find((s) => s.agent === "s7a1c00" && s.path === "work/attack-path.svg");
+  assert.equal(open?.open, true);
+  assert.deepEqual(open?.steps.map((st) => st.tool), ["claim_file", "edit", "file_history"]);
+
+  // As a microVM seat traces them: an own-scratch implicit claim, a publish
+  // to a shared file named by `to`, and releases after a long stretch.
+  const { claimSequences } = await import("../ui/src/lib/claim-sequences.ts");
+  const line = (agent: string, tool: string, args: Record<string, unknown>, result: unknown = { ok: true }) => ({ ts: "2026-09-26T21:30:00.000Z", agent, tool, args, result });
+  const trace = [
+    line("v01", "claim_file", { path: "work/v01/notes.md", reason: "own scratch", implicit: true }, { ok: true, implicit: true, via: "write" }),
+    line("v01", "claim_file", { path: "work/bitlocker.md", reason: "own the deliverable", seconds: 600 }),
+    line("v01", "publish_file", { path: "work/v01/bitlocker.md", to: "work/bitlocker.md" }),
+    line("v02", "claim_file", { path: "work/bitlocker.md" }, { ok: false, owner: "v01" }),
+    ...Array.from({ length: 500 }, () => line("v02", "bash", { command: "true" })),
+    line("v01", "release_file", { path: "work/bitlocker.md" }),
+  ];
+  const seqs = claimSequences(trace);
+  assert.deepEqual(
+    seqs.map((s) => [s.agent, s.path, s.open, s.steps.map((st) => st.tool).join(" → ")]),
+    [
+      ["v01", "work/bitlocker.md", false, "claim_file → publish_file → release_file"],
+      ["v01", "work/v01/notes.md", true, "claim_file"],
+    ],
+    "newest first; a refused claim is no run",
+  );
+  assert.deepEqual(claimSequences(trace.slice(-400)), [], "the tail alone holds a release and no claim: the empty tab this replaces");
+});
+
+test("the kickoff's default model under microVM is one the VM kickoff takes; a model the operator picked is left alone", async () => {
+  const { defaultModelMove } = await import("../ui/src/lib/kickoff-model.ts");
+  const models = ["anthropic/claude-fable-5", "openai/gpt-6-sol", "deepseek/deepseek-v4-pro", "mystery/m1"];
+  const oauth = { kind: "oauth" as const, lifted_by: "allow_oauth_in_vm" as const, reason: "a subscription (OAuth) token would go into the VMs" };
+  const unknownHost = { kind: "unknown_host" as const, lifted_by: "provider_hosts" as const, reason: "no host is known for mystery" };
+  const providers = {
+    anthropic: { status: "ready" as const, provider: "anthropic", auth_type: "oauth", vm_blockers: [oauth] },
+    openai: { status: "ready" as const, provider: "openai", auth_type: "api_key", vm_blockers: [] },
+    deepseek: { status: "not_ready" as const, provider: "deepseek" },
+    mystery: { status: "ready" as const, provider: "mystery", auth_type: "api_key", vm_blockers: [unknownHost] },
+  };
+  const vm = { allowOauth: false, named: new Set<string>() };
+  const move = (current: string, o: { touched?: boolean; vm?: typeof vm | null; providers?: Record<string, (typeof providers)[keyof typeof providers]> } = {}) =>
+    defaultModelMove({ models, current, touched: o.touched ?? false, providers: "providers" in o ? o.providers : providers, vm: "vm" in o ? (o.vm ?? null) : vm });
+
+  // A fresh form under microVM: the provider with a key, not the subscription the VMs refuse.
+  assert.equal(move(""), "openai/gpt-6-sol");
+  assert.equal(move("", { vm: null }), "anthropic/claude-fable-5", "on the host the first ready provider, as before");
+  // Before readiness answers the first model stands in; once it answers, the untouched default moves.
+  assert.equal(move("", { providers: undefined }), "anthropic/claude-fable-5");
+  assert.equal(move("anthropic/claude-fable-5"), "openai/gpt-6-sol");
+  // What the form's own settings lift counts: the OAuth switch, a host named for a provider.
+  assert.equal(move("anthropic/claude-fable-5", { vm: { allowOauth: true, named: new Set() } }), null);
+  assert.equal(move("mystery/m1", { vm: { allowOauth: false, named: new Set(["mystery"]) } }), null);
+  // A usable default stays put when microVM goes off.
+  assert.equal(move("openai/gpt-6-sol", { vm: null }), null);
+  // A model the operator picked is never changed; the red note stays for it.
+  assert.equal(move("anthropic/claude-fable-5", { touched: true }), null);
+  assert.equal(move("deepseek/deepseek-v4-pro", { touched: true }), null);
+  // No ready provider a VM takes: today's choice, and no move between two the VMs refuse.
+  const hostOnly = { ...providers, openai: { status: "not_ready" as const, provider: "openai" }, mystery: { status: "not_ready" as const, provider: "mystery" } };
+  assert.equal(move("", { providers: hostOnly }), "anthropic/claude-fable-5");
+  assert.equal(move("anthropic/claude-fable-5", { providers: hostOnly }), null);
+  assert.equal(move("deepseek/deepseek-v4-pro", { providers: hostOnly }), "anthropic/claude-fable-5", "a default that is not even ready moves to one that is");
+});
+
 test("the review file's chain is checked line by line", async () => {
   const { parseReviews } = await import("../scripts/ui/reviews.ts");
   const a = JSON.stringify({ v: 1, seq: 1, at: "t", examiner: "E", action: "accept", entry_seq: 1, prev: null });

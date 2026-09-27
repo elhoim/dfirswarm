@@ -10,8 +10,11 @@ import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, type SelectOption } from "@/components/ui/select";
+import { providerOf } from "@/lib/kickoff-model";
 import type { ProviderReadiness } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+export { providerOf };
 
 /** One line of a mixed team: the model, how many agents run it, and what those agents may spend together (USD, as typed; "" is no ceiling). */
 export type TeamRow = { model: string; count: number; cap: string };
@@ -20,11 +23,6 @@ export type TeamRow = { model: string; count: number; cap: string };
 export function rowCap(row: TeamRow): number | undefined {
   const n = Number(row.cap);
   return row.cap.trim() && Number.isFinite(n) && n > 0 ? n : undefined;
-}
-
-export function providerOf(model: string): string {
-  const slash = model.indexOf("/");
-  return slash === -1 ? model : model.slice(0, slash);
 }
 
 /** One line under a model in the picker: whether its provider can be used right now, and how. */
