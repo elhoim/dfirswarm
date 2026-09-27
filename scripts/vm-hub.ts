@@ -86,7 +86,7 @@ import { JobService, jobView, type JobSpec } from "./job-service.ts";
 
 /** What a job tool is told in a run with no job service. */
 const NO_JOBS = "this run has no job service (a host run, or --no-jobs): run the work in your own shell";
-import { destroyWorker, runWorker } from "./vm.ts";
+import { destroyWorker, roomForWorker, runWorker } from "./vm.ts";
 
 /**
  * One line from a VM: a trace line keeps a tool's whole input and output
@@ -1025,6 +1025,7 @@ export class Hub {
       ...(jobs.derived ? { derived: true } : {}),
       runWorker,
       destroyWorker,
+      hostRoom: async (mib) => roomForWorker(mib),
       notify: async (to, body) => {
         await P.systemPost(S, { tag: "result", to, body });
       },

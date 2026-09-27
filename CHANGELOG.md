@@ -23,6 +23,32 @@ All notable changes to this project. The format follows
   1.3.1), each VM's probe and host custody walk each set through its link,
   and read a manifest without `sets` as they always did.
 
+### Changed: a lane for short jobs, more workers, room on the host, and the smallest image that holds a job's programs
+
+- **Workers**: unset, 6 on a host with 128 GiB or more and 4 with 64 GiB or
+  more (2 otherwise), still lowered to what fits beside the seats.
+- **A lane for short jobs**: from 3 workers one is kept for an agent's job
+  that declares `timeout_seconds` of 120 or less (stopped at that limit), so
+  a quick look never waits behind long parses; the kickoff's recipes and the
+  derived catalogue never take it, and an agent's own limit counts each
+  lane apart. `job_started` names the lane; job_run and SWARM.md ask for the
+  short timeout.
+- **Room on the host**: a worker starts only while the host keeps 15% of its
+  memory free beside it, asked at each start (runs share a host); until then
+  the job waits, on the journal (`job_waits_for_host`, and `host_wait_ms` on
+  its start).
+- **Fixed**: the queue counted an agent's running jobs, and the derived
+  lane's one at a time, by their written start, so one pass of it could
+  start more than the limit, and the derived catalogue could run two recipes
+  past a ceiling of one generation (a flaky test on Linux CI). It counts the
+  jobs it has handed a worker, one pass at a time.
+- **A command that names no profile** runs in the smallest job image whose
+  own record holds every program it runs, and in the default image whenever
+  that is not sure (a heredoc, a quoted script, an import, a script of the
+  agents'); `job_started` and job_status say which image and why. Images
+  record every program on their PATH (`on_path` in image.json); one built
+  before keeps such commands in the default until it is rebuilt.
+
 ### Changed: every image profile reviewed as a DFIR examiner would (Codex)
 
 - Each of the nine profiles (base, disk, memory, linux, mobile, network, re,

@@ -272,6 +272,12 @@ sbx_mem="$(reg vm-mem '.sandbox')"
 grep -q '^## Job images' "$sbx_mem/SWARM.md" || fail "SWARM.md has no Job images section"
 grep -q 'job_run profile=<name>' "$sbx_mem/SWARM.md" || fail "SWARM.md does not say how to run in a job image"
 grep -q '`memory`: dfirswarm-memory:dev-'"$ARCH"' — the packs .*memory-forensics' "$sbx_mem/SWARM.md" || fail "SWARM.md does not map the pack to its image: $(grep -A8 '^## Job images' "$sbx_mem/SWARM.md")"
+grep -q 'A command that names no profile runs in the smallest of them whose own record (images/<name>/image.json) holds every program it runs' "$sbx_mem/SWARM.md" || fail "SWARM.md does not say where a job that names no profile runs: $(grep -A3 '^## Job images' "$sbx_mem/SWARM.md")"
+! grep -q 'kept for short jobs' "$sbx_mem/SWARM.md" || fail "one worker, and SWARM.md says one is kept for short jobs"
+# From three workers one is kept for short jobs, and the agents are told how to take it.
+out="$(start --isolation microvm --workers 3 --vm-memory 512 --worker-memory 512 --pack memory-forensics --label vm-lanes)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a microvm run with three workers exited $rc: $out"
+grep -q 'One of them is kept for short jobs: give a job that needs two minutes or less `timeout_seconds` of 120 or' "$(reg vm-lanes '.sandbox')/SWARM.md" || fail "SWARM.md does not tell the agents how to take the short-job worker"
 # --brains-with-packs: the agents boot the packs' image, as before.
 out="$(start --isolation microvm "${small[@]}" --brains-with-packs --pack memory-forensics --label vm-mem-brains)"; rc=$?
 [[ $rc -eq 0 ]] || fail "--brains-with-packs exited $rc: $out"
