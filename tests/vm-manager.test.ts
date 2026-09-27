@@ -27,8 +27,8 @@ import {
   seatProviders,
   hostGatewayUrl,
   mountsFor,
-  makeSessionsVeil,
-  sessionsVeil,
+  makeSeatVeils,
+  seatVeil,
   placeholderFor,
   probeVerdict,
   registryLabel,
@@ -171,49 +171,75 @@ test("a VM's mounts: the run's floor read-only first, then the agent's own writa
   const order = m.map((x) => x.host);
   assert.ok(order.indexOf("/runs/s1a2b/work/extracted") < order.indexOf("/runs/s1a2b/work/extracted/s1a2b00"), "the shared corner is mounted before the seat's own inside it");
   assert.ok(!writable.some((h) => h.includes("s1a2b01")), "never a peer's directory");
-  // The run's .pi-sessions/ is covered by the seat's veil, read-only and
-  // outside the run, and the seat's own session hole goes on top of it.
-  const veil = m.findIndex((x) => (x.guest ?? x.host) === "/runs/s1a2b/.pi-sessions");
-  assert.ok(veil > 0, "the floor's .pi-sessions/ is covered");
-  assert.deepEqual(m[veil], { host: sessionsVeil(spec(), "s1a2b00"), guest: "/runs/s1a2b/.pi-sessions", readonly: true });
-  assert.ok(!m[veil]!.host.startsWith("/runs/s1a2b/"), "the veil is not a directory of the run");
-  assert.ok(veil < order.indexOf("/runs/s1a2b/.pi-sessions/s1a2b00"), "the veil is mounted before the seat's own session inside it");
-  assert.notEqual(sessionsVeil(spec(), "s1a2b00"), sessionsVeil(spec(), "s1a2b01"), "each seat has its own veil");
+  // The run's traces/, tool-output/ and .pi-sessions/ are each covered by
+  // one of the seat's veils, read-only and outside the run; the seat's own
+  // hole goes on top where it has one.
+  for (const [dir, own] of [["traces", false], ["tool-output", true], [".pi-sessions", true]] as const) {
+    const veil = m.findIndex((x) => (x.guest ?? x.host) === `/runs/s1a2b/${dir}`);
+    assert.ok(veil > 0, `the floor's ${dir}/ is covered`);
+    assert.deepEqual(m[veil], { host: seatVeil(spec(), dir, "s1a2b00"), guest: `/runs/s1a2b/${dir}`, readonly: true });
+    assert.ok(!m[veil]!.host.startsWith("/runs/s1a2b/"), `the ${dir} veil is not a directory of the run`);
+    const hole = order.indexOf(`/runs/s1a2b/${dir}/s1a2b00`);
+    if (own) assert.ok(hole > veil, `the seat's own ${dir}/ hole is mounted on the veil, after it`);
+    else assert.equal(hole, -1, `nothing of ${dir}/ is the seat's own`);
+    assert.notEqual(seatVeil(spec(), dir, "s1a2b00"), seatVeil(spec(), dir, "s1a2b01"), "each seat has its own veil");
+  }
 });
 
-test("a seat sees its own Pi session and no peer's; the probe says which, and the kickoff refuses a VM that sees a peer's", async () => {
+test("a seat sees no peer's Pi session or tool output and no trace; the probe says which, and the kickoff refuses a VM that sees one", async () => {
   // Run s306463: a seat grepped its peers' session transcripts through the
-  // read-only floor and quoted what it found.
+  // read-only floor and quoted what it found. The trace carries every seat's
+  // calls and reasoning, and a critic re-deriving a finding must not read it.
   const dir = await mkdtemp(join("/tmp", "veil-"));
   after(() => rm(dir, { recursive: true, force: true }));
   const hub = { hub_dir: join(dir, "hub") };
-  const mine = await makeSessionsVeil(hub, "s1a2b00");
-  await makeSessionsVeil(hub, "s1a2b01");
-  assert.equal(mine, sessionsVeil(hub, "s1a2b00"));
-  assert.deepEqual(await readdir(mine), ["s1a2b00"], "the veil holds the seat's own mount point and nothing else");
-  assert.deepEqual(await readdir(sessionsVeil(hub, "s1a2b01")), ["s1a2b01"]);
+  const mine = await makeSeatVeils(hub, "s1a2b00");
+  await makeSeatVeils(hub, "s1a2b01");
+  assert.deepEqual(mine, [seatVeil(hub, "traces", "s1a2b00"), seatVeil(hub, "tool-output", "s1a2b00"), seatVeil(hub, ".pi-sessions", "s1a2b00")]);
+  assert.deepEqual(await readdir(seatVeil(hub, "traces", "s1a2b00")), [], "the trace's veil is empty");
+  assert.deepEqual(await readdir(seatVeil(hub, "tool-output", "s1a2b00")), ["s1a2b00"], "the tool-output veil holds the seat's own mount point and nothing else");
+  assert.deepEqual(await readdir(seatVeil(hub, ".pi-sessions", "s1a2b00")), ["s1a2b00"]);
+  assert.deepEqual(await readdir(seatVeil(hub, ".pi-sessions", "s1a2b01")), ["s1a2b01"]);
   // The probe's check, as the guest runs it: once over the floor as it is on
-  // the host (every seat's directory made at kickoff), once through the veil.
-  const block = PROBE_SCRIPT.match(/# What of the peers' sessions this seat can see[\s\S]*?out\["peers_sessions"\] = "error:"[^\n]*\n/);
-  assert.ok(block, "the probe's session check was not found");
-  const probe = async (sandbox: string): Promise<string> => {
+  // the host (every seat's directory and the trace made at kickoff), once
+  // through the veils.
+  const block = PROBE_SCRIPT.match(/# What of the peers' records this seat can see[\s\S]*?out\["trace"\] = [^\n]*\n/);
+  assert.ok(block, "the probe's veil check was not found");
+  const probe = async (sandbox: string): Promise<Record<string, string>> => {
     const py = `import errno, json, os\nS = ${JSON.stringify(sandbox)}\nA = "s1a2b00"\nout = {}\n${block![0]}print(json.dumps(out))\n`;
-    const text = execFileSync("python3", ["-c", py], { encoding: "utf8" });
-    return (JSON.parse(text.trim()) as { peers_sessions: string }).peers_sessions;
+    return JSON.parse(execFileSync("python3", ["-c", py], { encoding: "utf8" }).trim()) as Record<string, string>;
   };
   const floor = join(dir, "floor");
-  for (const id of ["s1a2b00", "s1a2b01", "s1a2b02"]) await mkdir(join(floor, ".pi-sessions", id), { recursive: true });
-  assert.equal(await probe(floor), "visible:s1a2b01,s1a2b02", "on the floor alone every peer's session is there");
+  for (const id of ["s1a2b00", "s1a2b01", "s1a2b02"]) {
+    await mkdir(join(floor, ".pi-sessions", id), { recursive: true });
+    await mkdir(join(floor, "tool-output", id), { recursive: true });
+  }
+  await mkdir(join(floor, "traces"), { recursive: true });
+  await writeFile(join(floor, "traces", "events.jsonl"), "{}\n");
+  assert.deepEqual(await probe(floor), {
+    peers_sessions: "visible:s1a2b01,s1a2b02",
+    peers_tool_output: "visible:s1a2b01,s1a2b02",
+    trace: "visible:events.jsonl",
+  }, "on the floor alone every peer's record and the trace are there");
   const guest = join(dir, "guest");
   await mkdir(guest, { recursive: true });
-  await symlink(mine, join(guest, ".pi-sessions"));
-  assert.equal(await probe(guest), "hidden", "through the veil only the seat's own");
+  await symlink(seatVeil(hub, ".pi-sessions", "s1a2b00"), join(guest, ".pi-sessions"));
+  await symlink(seatVeil(hub, "tool-output", "s1a2b00"), join(guest, "tool-output"));
+  await symlink(seatVeil(hub, "traces", "s1a2b00"), join(guest, "traces"));
+  assert.deepEqual(await probe(guest), { peers_sessions: "hidden", peers_tool_output: "hidden", trace: "hidden" }, "through the veils only the seat's own");
   const good = { base: "ro", work: "ro", scratch: "rw", extracted: "rw", extracted_exec: "noexec", quarantine_exec: "noexec", tool_output: "rw", session: "rw", inputs: "ro", hub: true, pi: "0.87.0" };
-  assert.deepEqual(probeVerdict({ ...good, peers_sessions: "hidden" }, true), []);
-  assert.match(probeVerdict({ ...good, peers_sessions: "visible:s1a2b01" }, true).join(), /a peer's Pi session is readable here \(visible:s1a2b01\)/);
-  assert.deepEqual(probeVerdict(good, true), [], "a probe from before the check is not refused for lacking it");
-  const row = probeChecks({ ...good, peers_sessions: "hidden" }, true).find((c) => c.check === "a peer's Pi sessions");
-  assert.deepEqual([row?.want, row?.got, row?.ok], ["hidden", "hidden", true]);
+  const veiled = { ...good, peers_sessions: "hidden", peers_tool_output: "hidden", trace: "hidden" };
+  assert.deepEqual(probeVerdict(veiled, true), []);
+  assert.match(probeVerdict({ ...veiled, peers_sessions: "visible:s1a2b01" }, true).join(), /a peer's Pi session is readable here \(visible:s1a2b01\)/);
+  assert.match(probeVerdict({ ...veiled, peers_tool_output: "visible:s1a2b01" }, true).join(), /a peer's tool-output\/ is readable here \(visible:s1a2b01\)/);
+  assert.match(probeVerdict({ ...veiled, trace: "visible:events.jsonl" }, true).join(), /the run's trace is readable here \(visible:events\.jsonl\)/);
+  assert.deepEqual(probeVerdict(good, true), [], "a probe from before the checks is not refused for lacking them");
+  const rows = probeChecks(veiled, true).filter((c) => ["a peer's Pi sessions", "a peer's tool-output/", "the run's trace"].includes(c.check));
+  assert.deepEqual(rows.map((c) => [c.check, c.want, c.got, c.ok]), [
+    ["a peer's Pi sessions", "hidden", "hidden", true],
+    ["a peer's tool-output/", "hidden", "hidden", true],
+    ["the run's trace", "hidden", "hidden", true],
+  ]);
 });
 
 test("the kickoff goes on only when a VM's own probe says what the run needs", () => {
