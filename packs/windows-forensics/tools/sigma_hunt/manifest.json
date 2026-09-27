@@ -20,11 +20,11 @@
     },
     "out_dir": {
       "type": "string",
-      "description": "Where the engine's own output is kept, under work/"
+      "description": "Where the engine's own output, its whole stdout and stderr, and every detection are kept, under work/"
     },
     "limit": {
       "type": "integer",
-      "description": "Maximum detections to return (default 200)"
+      "description": "Detections to return inline (default 200); all of them, normalised, are in detections.jsonl in out_dir, named in all_detections"
     },
     "timeout_seconds": {
       "type": "integer",
@@ -37,6 +37,6 @@
   "example": "{\"path\": \"work/extracted/winevt\", \"min_level\": \"high\", \"out_dir\": \"work/hunt\"}",
   "by": "maintainer",
   "at": "2026-09-22T14:00:00.000Z",
-  "version": 1,
-  "sha256": "336dc7d605f5c470e34a37a41ce29487cca52112448cde9ae941a2980be1e4dd"
+  "version": 2,
+  "sha256": "2f5bf5e79c020ca394f75e9f57651db58a5c0c10bcd495555b5c1ee1b89c0459"
 }

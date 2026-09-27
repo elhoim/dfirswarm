@@ -51,7 +51,8 @@ test("usn_journal skips the sparse front and decodes the reason bits", async () 
   await withCwd(async (cwd) => {
     const name = "upload.aspx";
     const nameBytes = Buffer.from(name, "utf16le");
-    const length = 0x3c + nameBytes.length;
+    // A record's length is quad-aligned: the name is followed by padding.
+    const length = (0x3c + nameBytes.length + 7) & ~7;
     const rec = Buffer.alloc(length);
     rec.writeUInt32LE(length, 0x00);
     rec.writeUInt16LE(2, 0x04);
@@ -91,7 +92,7 @@ test("usn_journal skips the sparse front and decodes the reason bits", async () 
     assert.equal(r.file_sequence, 1);
 
     // A filter that matches nothing is an empty list, not an error.
-    const none = await runPy(join(LIB, "usn_journal", "run.py"), cwd, { path: "work/UsnJrnl_J", name: ".docx" });
+    const none = await runPy(join(LIB, "usn_journal", "run.py"), cwd, { path: "work/UsnJrnl_J", name: "\\.docx$" });
     assert.equal(none.code, 0);
     assert.equal((JSON.parse(none.stdout) as { record_count: number }).record_count, 0);
 
@@ -99,7 +100,111 @@ test("usn_journal skips the sparse front and decodes the reason bits", async () 
     await writeFile(join(cwd, "work", "empty_J"), Buffer.alloc(8192));
     const bad = await runPy(join(LIB, "usn_journal", "run.py"), cwd, { path: "work/empty_J" });
     assert.notEqual(bad.code, 0);
-    assert.match(bad.stdout, /no USN_RECORD_V2 found/);
+    assert.match(bad.stdout, /no USN record \(v2, v3 or v4\) found/);
+  });
+});
+
+/** One USN record of the given version, laid out as usn_journal's docstring says. */
+function usnRecord(version: 2 | 3 | 4, o: { name?: string; usn: bigint; entry: bigint; seq: bigint; parent: bigint; reason: number; when?: Date }): Buffer {
+  const nameBytes = Buffer.from(o.name ?? "", "utf16le");
+  const head = version === 2 ? 0x3c : version === 3 ? 0x4c : 0x40;
+  const extents = version === 4 ? 2 : 0;
+  const raw = head + nameBytes.length + extents * 16;
+  const length = raw + ((8 - (raw % 8)) % 8);
+  const rec = Buffer.alloc(length);
+  rec.writeUInt32LE(length, 0x00);
+  rec.writeUInt16LE(version, 0x04);
+  const ref = (o.seq << 48n) | o.entry;
+  const filetime = (BigInt((o.when ?? new Date(Date.UTC(2026, 1, 11, 2, 57, 52))).getTime()) + 11644473600000n) * 10000n;
+  if (version === 2) {
+    rec.writeBigUInt64LE(ref, 0x08);
+    rec.writeBigUInt64LE(o.parent, 0x10);
+    rec.writeBigUInt64LE(o.usn, 0x18);
+    rec.writeBigInt64LE(filetime, 0x20);
+    rec.writeUInt32LE(o.reason, 0x28);
+    rec.writeUInt32LE(0x20, 0x34);
+    rec.writeUInt16LE(nameBytes.length, 0x38);
+    rec.writeUInt16LE(head, 0x3a);
+  } else {
+    // 128-bit references: on NTFS the NTFS reference is the low half.
+    rec.writeBigUInt64LE(ref, 0x08);
+    rec.writeBigUInt64LE(o.parent, 0x18);
+    rec.writeBigUInt64LE(o.usn, 0x28);
+    if (version === 3) {
+      rec.writeBigInt64LE(filetime, 0x30);
+      rec.writeUInt32LE(o.reason, 0x38);
+      rec.writeUInt32LE(0x20, 0x44);
+      rec.writeUInt16LE(nameBytes.length, 0x48);
+      rec.writeUInt16LE(head, 0x4a);
+    } else {
+      rec.writeUInt32LE(o.reason, 0x30);
+      rec.writeUInt16LE(extents, 0x3c);
+      rec.writeUInt16LE(16, 0x3e);
+      rec.writeBigInt64LE(0n, 0x40);
+      rec.writeBigInt64LE(65536n, 0x48);
+      rec.writeBigInt64LE(131072n, 0x50);
+      rec.writeBigInt64LE(4096n, 0x58);
+    }
+  }
+  nameBytes.copy(rec, head);
+  return rec;
+}
+
+test("usn_journal reads v2, v3 and v4 records behind megabytes of zeros, and a filter that matches nothing says the journal was read", async () => {
+  // A run's $J was 64 MiB of zeros and then the records; an alternation passed
+  // as name read as "0 records", which was taken for an empty journal. Both
+  // copies of the tool (the library's and the Windows pack's) are held to it.
+  const pack = join(LIB, "..", "packs", "windows-forensics", "tools", "usn_journal", "run.py");
+  assert.deepEqual(await readFile(pack), await readFile(join(LIB, "usn_journal", "run.py")), "the pack's usn_journal has drifted from the library's");
+  await withCwd(async (cwd) => {
+    const page = 4096;
+    const pad = (b: Buffer) => Buffer.concat([b, Buffer.alloc((page - (b.length % page)) % page)]);
+    const v2 = usnRecord(2, { name: "report.docx", usn: 9000n, entry: 33194n, seq: 3n, parent: 5n, reason: 0x100 });
+    const v3 = usnRecord(3, { name: "upload.aspx", usn: 9100n, entry: 40000n, seq: 2n, parent: 5n, reason: (0x200 | 0x80000000) >>> 0 });
+    const v4 = usnRecord(4, { usn: 9200n, entry: 40000n, seq: 2n, parent: 5n, reason: 0x1 });
+    // Not a record: a length that is not a multiple of 8, stepped over and counted.
+    const junk = Buffer.alloc(16, 0xff);
+    const zeros = 3 * 1024 * 1024 + page;
+    const journal = Buffer.concat([Buffer.alloc(zeros), pad(v2), junk, v3, v4, Buffer.alloc(page)]);
+    await writeFile(join(cwd, "work", "UsnJrnl_J"), journal);
+
+    type Row = { version: number; name: string | null; usn: number; file_reference: number | null; file_sequence: number | null; file_id?: string; reason: string[]; extents?: Array<{ offset: number; length: number }>; offset: number };
+    type Body = { first_record_offset: number; zero_bytes_skipped: number; records_read: number; records_by_version: Record<string, number>; record_count: number; malformed_skipped: number; records: Row[]; note?: string; error?: string };
+    for (const script of [pack, join(LIB, "usn_journal", "run.py")]) {
+      const all = await runPy(script, cwd, { path: "work/UsnJrnl_J" });
+      assert.equal(all.code, 0, all.stderr + all.stdout);
+      const body = JSON.parse(all.stdout) as Body;
+      assert.equal(body.first_record_offset, zeros, "the zeros in front are skipped, and it says where the first record was");
+      assert.ok(body.zero_bytes_skipped >= zeros, "and how many zero bytes it passed");
+      assert.equal(body.records_read, 3);
+      assert.deepEqual(body.records_by_version, { "2": 1, "3": 1, "4": 1 });
+      assert.equal(body.malformed_skipped, 2, "the 16 bytes that are not a record are stepped over 8 at a time and counted");
+      const [a, b, c] = body.records;
+      assert.deepEqual([a.version, a.name, a.usn, a.file_reference, a.file_sequence], [2, "report.docx", 9000, 33194, 3]);
+      assert.deepEqual(a.reason, ["FILE_CREATE"]);
+      assert.deepEqual([b.version, b.name, b.usn, b.file_reference, b.file_sequence], [3, "upload.aspx", 9100, 40000, 2]);
+      assert.equal(b.file_id, `${"0".repeat(16)}${((2n << 48n) | 40000n).toString(16).padStart(16, "0")}`);
+      assert.deepEqual(b.reason.sort(), ["CLOSE", "FILE_DELETE"]);
+      assert.deepEqual([c.version, c.name, c.usn, c.file_reference], [4, null, 9200, 40000]);
+      assert.deepEqual(c.extents, [{ offset: 0, length: 65536 }, { offset: 131072, length: 4096 }]);
+
+      // name is a case-insensitive regex: an alternation takes either.
+      const either = JSON.parse((await runPy(script, cwd, { path: "work/UsnJrnl_J", name: "REPORT|\\.aspx$" })).stdout) as Body;
+      assert.deepEqual(either.records.map((r) => r.name), ["report.docx", "upload.aspx"]);
+      assert.equal(either.records_read, 3, "the filter narrows what is returned, never what is read");
+
+      // Nothing matched: said as that, with every record still counted.
+      const none = await runPy(script, cwd, { path: "work/UsnJrnl_J", name: "nothing-called-this|nor-this" });
+      assert.equal(none.code, 0);
+      const empty = JSON.parse(none.stdout) as Body;
+      assert.equal(empty.record_count, 0);
+      assert.equal(empty.records_read, 3);
+      assert.match(empty.note ?? "", /3 records were read .* the journal is not empty/);
+
+      const badRegex = await runPy(script, cwd, { path: "work/UsnJrnl_J", name: "(unclosed" });
+      assert.notEqual(badRegex.code, 0);
+      assert.match((JSON.parse(badRegex.stdout) as Body).error ?? "", /not a valid regex/);
+    }
   });
 });
 

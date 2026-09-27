@@ -33,6 +33,6 @@
   "example": "{\"path\": \"inputs/disk.raw\", \"out_dir\": \"work/features\", \"only\": [\"email\", \"url\"]}",
   "by": "maintainer",
   "at": "2026-09-22T14:00:00.000Z",
-  "version": 1,
-  "sha256": "2ac6a9486dd2ddefb8817cf89ea657bd07d8338f747ff456fb3921a813b9297e"
+  "version": 2,
+  "sha256": "846b131be2e353ab4fb94f24fc489a38535d0165900db6a7dd24717abd3f863d"
 }

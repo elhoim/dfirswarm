@@ -111,9 +111,13 @@ def detect(path):
         return "zip", "zip end-of-central-directory record"
     # tarfile.is_tarfile says yes to a file of zeros (an empty tar is two
     # zero blocks), and a memory or disk image can start with zeros: a tar
-    # here is one whose first member header reads.
+    # here is one whose first member header reads. Compressed by its magic,
+    # as list_tar reads it: "r:*" tries every decompressor in turn, and the
+    # LZMA one reads a run of zeros as a stream (64 MiB of them took it half
+    # a minute), which the census pays for every input that starts so.
+    compressed = head[:2] == b"\x1f\x8b" or head[:3] == b"BZh" or head[:6] == b"\xfd7zXZ\x00"
     try:
-        with tarfile.open(path, mode="r:*") as tf:
+        with tarfile.open(path, mode="r|*" if compressed else "r:") as tf:
             first = tf.next()
         if first is not None:
             return "tar", "tar header"

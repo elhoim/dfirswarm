@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 NOTABLE = {
     "ConsoleLogin": "a console sign-in; check MFAUsed",
@@ -54,6 +55,27 @@ NOTABLE = {
 def fail(message, **extra):
     print(json.dumps({"error": message, **extra}))
     raise SystemExit(1)
+
+
+def resolve_output(out, what="output"):
+    """Where `out` really lands, as a path under the run directory; a place
+    outside it, the run directory itself, or anything under inputs/ is refused.
+
+    A string check is not enough: `work/../inputs/x`, an absolute path and a
+    symlink that points out all name a place the tool must not write, and none
+    of them starts with "inputs/". Resolving first and comparing directories
+    is what actually holds, and the read-only inputs are the one place
+    extracted bytes must never appear -- a later integrity check would report
+    the evidence as modified. In a job $OUT is inside the run directory.
+    """
+    root = Path.cwd().resolve()
+    dest = (root / out).resolve() if not Path(out).is_absolute() else Path(out).resolve()
+    if dest == root or root not in dest.parents:
+        fail("%s must stay inside the run directory" % what, **{what: str(out)})
+    inputs = root / "inputs"
+    if dest == inputs or inputs in dest.parents:
+        fail("%s cannot be under inputs/" % what, **{what: str(out)})
+    return str(dest.relative_to(root))
 
 
 def load(path):
@@ -134,6 +156,8 @@ def main():
     out_file = args.get("out_file")
     if out_file is not None and (not isinstance(out_file, str) or not out_file):
         fail("out_file must be a non-empty string")
+    if out_file is not None:
+        out_file = resolve_output(out_file, "out_file")
     wanted = {str(e) for e in (args.get("events") or [])}
     pattern = None
     if args.get("identity"):
@@ -241,17 +265,19 @@ def main():
 
     denial = [{"identity": who, "errors": counts, "total": sum(counts.values())}
               for who, counts in errors.items()]
-    denial.sort(key=lambda d: -d["total"])
-    top = lambda d, n=20: [{"value": k, "count": v}
-                           for k, v in sorted(d.items(), key=lambda kv: -kv[1])[:n]]
+    denial.sort(key=lambda d: (-d["total"], str(d["identity"])))
+    # Every value, most frequent first: the tables were cut to their top 20
+    # or 30 and nothing said so, and a quiet identity is often the one.
+    table = lambda d: [{"value": k, "count": v}
+                       for k, v in sorted(d.items(), key=lambda kv: (-kv[1], str(kv[0])))]
     print(json.dumps({
         "files": len(targets), "rows_read": read, "unreadable_files": unreadable,
         "records": records, "record_count": matched, "records_inline": len(records),
         "complete_records": out_file,
         "first_event": first, "last_event": last,
-        "by_event": top(by_event, 30), "by_identity": top(by_identity),
-        "by_address": top(by_address),
-        "refusals_by_identity": denial[:20],
+        "by_event": table(by_event), "by_identity": table(by_identity),
+        "by_address": table(by_address),
+        "refusals_by_identity": denial,
         "inline_limited": bool(out_file and matched > len(records)),
         "note": "An AssumedRole identity names a session, not a person: assumed_role and "
                 "session_started are resolved above, and the AssumeRole call earlier in the log "

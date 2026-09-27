@@ -62,6 +62,10 @@ import {
   runForgedTool,
   lacksProgram,
   ownPathsToOut,
+  heldOwnPaths,
+  writtenToOf,
+  stagedPaths,
+  stagedPathsIn,
   packSecretsFor,
   redactSecrets,
   healInputs,
@@ -2554,6 +2558,12 @@ export default function (pi: ExtensionAPI) {
         const secrets = await packSecretsFor(manifest);
         // In a VM the seal is the hub's word, read where the record is current.
         const sealed = boardSocket() ? await forgedToolSeal(toolCtx.cwd, manifest.name).catch(() => undefined) : undefined;
+        // A pack tool may be run again as a job (below): which of the paths it
+        // was given in the agent's own directories already hold something is
+        // taken now, before this attempt can create any, so a rerun reads those
+        // where they are and writes the rest to its $OUT.
+        const rerunnable = Boolean(manifest.pack && process.env.SWARM_PACK_PROGRAMS_IN_JOBS);
+        const held = rerunnable ? await heldOwnPaths(toolCtx.cwd, (params ?? {}) as Record<string, unknown>, agentId).catch(() => new Set<string>()) : new Set<string>();
         const run = await runForgedTool(toolCtx.cwd, manifest, (params ?? {}) as Record<string, unknown>, {
           signal: signal as AbortSignal | undefined,
           agentId,
@@ -2611,24 +2621,31 @@ export default function (pi: ExtensionAPI) {
         // Agents on the base image, the packs' programs in the job images: a
         // pack tool whose program or module is not in this VM runs again as a
         // job in its own pack's image, and its answer is that job's.
-        const missing = !run.ok && manifest.pack && process.env.SWARM_PACK_PROGRAMS_IN_JOBS ? lacksProgram(run) : null;
+        const missing = !run.ok && rerunnable ? lacksProgram(run) : null;
         if (missing) {
-          const args = ownPathsToOut((params ?? {}) as Record<string, unknown>, agentId);
+          const args = ownPathsToOut((params ?? {}) as Record<string, unknown>, agentId, { root: toolCtx.cwd, held });
           const started = Date.now();
           const res = await submitAndWait(toolCtx.cwd, { tool: manifest.name, args }, 100, signal as AbortSignal | undefined);
           // Where each output path the agent gave was written instead: the
           // job's sealed output, which it reads and cites from there.
-          const moved: Record<string, string> = {};
-          const given = JSON.stringify(params ?? {});
-          const walk = (a: unknown, b: unknown) => {
-            if (typeof a === "string" && typeof b === "string" && a !== b && b.startsWith("{OUT}/") && res.job) moved[a] = `store/jobs/${res.job}/out/${b.slice("{OUT}/".length)}`;
-            else if (a && b && typeof a === "object" && typeof b === "object") for (const k of Object.keys(a as object)) walk((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]);
-          };
-          walk(JSON.parse(given), args);
+          const moved = res.job ? writtenToOf(params ?? {}, args, res.job) : {};
+          // The job's output names the places it wrote as the worker saw them,
+          // under <run>/.jobs/<id>/, which is gone once the job is sealed. The
+          // output stays as sealed; `paths` says where each of those places is
+          // now. Read from the page the hub returned (current) and from the
+          // sealed stdout.log whole (this VM's view of it may lag, and then
+          // the page is what there is).
+          const paths: Record<string, string> = {};
+          if (res.job) {
+            const page = (res.result.stdout as { text?: unknown } | undefined)?.text;
+            if (typeof page === "string") Object.assign(paths, stagedPaths(page, toolCtx.cwd, res.job));
+            Object.assign(paths, await stagedPathsIn(join(toolCtx.cwd, "store", "jobs", res.job, "stdout.log"), toolCtx.cwd, res.job).catch(() => ({})));
+          }
           const answer = {
             ran_as_job: res.job,
             why: `${missing}: this VM is the base image, so ${manifest.name} ran in its pack's job image`,
             ...(Object.keys(moved).length ? { written_to: moved } : {}),
+            ...(Object.keys(paths).length ? { paths } : {}),
             ...res.result,
           };
           await logEvent(toolCtx.cwd, agentId, manifest.name, redactSecrets((params ?? {}) as Record<string, unknown>, secrets), redactSecrets({ ok: res.ok, forged: true, ran_as_job: res.job, why: answer.why, state: res.result.state, status: res.result.status }, secrets), Date.now() - started);

@@ -93,7 +93,7 @@ implementation is `_output.py`.
 | `sig_carve` | python3 | `s183906` | 1 | Scan a binary file for multiple file signatures (magic bytes) and return offsets, context, and estimated size… |
 | `sigscan_e01` | python3 | `s5d1001` | 3 | Scan an E01/raw image for a byte signature via TSK img_cat (logical media, not the EWF wrapper). Returns offs… |
 | `sqlite_query` | python3 | `s881002` | 4 | Run a read-only sqlite3 query against a database file and return stdout/stderr plus exit code. |
-| `usn_journal` | python3 | `maintainer` | 1 | Parse an NTFS change journal ($UsnJrnl:$J) into records: name, USN, timestamp, reason bits and file reference… |
+| `usn_journal` | python3 | `maintainer` | 2 | Parse an NTFS change journal ($UsnJrnl:$J) into records: name, USN, timestamp, reason bits and file reference… |
 | `utf16_urls` | python3 | `s5d1003` | 1 | Extract UTF-16LE and ASCII URL/Visited strings from a local file; filter optional substrings. Returns unique … |
 | `volrun` | python3 | `s69d306` | 2 | Run a Volatility 3 plugin against a memory image with typed arguments. Returns stdout/stderr. |
 | `yara_scan` | python3 | `maintainer` | 1 | Sweep a file or directory with a YARA rule file and report every match with its offset. No rules ship with th… |

@@ -90,8 +90,9 @@ jq -e '.packets == 1 and (.notes | any(test("captured shorter")))' <<<"$simple" 
   || fail "Simple Packet Block snap-length truncation/padding was not accounted for: $simple"
 pass "classic, little-endian and big-endian pcapng parse completely with nanosecond time resolution"
 
+# A tool writes only under the run directory it runs in: here, $TMP.
 printf '{"path":"%s/logs.txt","out_dir":"%s/log-out"}' "$TMP" "$TMP" | \
-  python3 "$PACK/tools/network_log_summary/run.py" > "$TMP/log-result.json"
+  (cd "$TMP" && python3 "$PACK/tools/network_log_summary/run.py") > "$TMP/log-result.json"
 jq -e '.lines == 4 and .parsed == 3 and .unparsed == 1' "$TMP/log-result.json" >/dev/null \
   || fail "network logs were not accounted for: $(cat "$TMP/log-result.json")"
 [[ "$(wc -l < "$TMP/log-out/normalized.tsv" | tr -d ' ')" -eq 4 ]] || fail "normalised TSV lost a parsed line"
@@ -123,7 +124,7 @@ SH
 chmod +x "$TMP/fake-bin/tshark" "$TMP/fake-bin/suricata" "$TMP/fake-bin/zeek"
 mkdir "$TMP/export-fail"
 if printf '{"path":"%s/one.pcap","out_dir":"%s/export-fail","protocols":["http"]}' "$TMP" "$TMP" | \
-  PATH="$TMP/fake-bin:$PATH" python3 "$PACK/tools/pcap_extract/run.py" >"$TMP/export-fail.json"; then
+  (cd "$TMP" && PATH="$TMP/fake-bin:$PATH" python3 "$PACK/tools/pcap_extract/run.py") >"$TMP/export-fail.json"; then
   fail "pcap_extract reported a failed tshark analysis as success"
 fi
 jq -e '.ok == false and .errors[0].exit_code == 7 and .errors[0].stderr' "$TMP/export-fail.json" >/dev/null \
@@ -133,7 +134,7 @@ jq -e '.ok == false and .errors[0].exit_code == 7 and .errors[0].stderr' "$TMP/e
 printf '%s\n' 'alert tcp any any -> any any (msg:"test"; sid:1; rev:1;)' >"$TMP/test.rules"
 mkdir "$TMP/suricata-fail"
 if printf '{"path":"%s/one.pcap","rules":"%s/test.rules","out_dir":"%s/suricata-fail"}' "$TMP" "$TMP" "$TMP" | \
-  PATH="$TMP/fake-bin:$PATH" python3 "$PACK/tools/suricata_run/run.py" >"$TMP/suricata-fail.json"; then
+  (cd "$TMP" && PATH="$TMP/fake-bin:$PATH" python3 "$PACK/tools/suricata_run/run.py") >"$TMP/suricata-fail.json"; then
   fail "suricata_run reported a failed Suricata analysis as success"
 fi
 jq -e '.exit_code == 8 and .stderr and .stdout' "$TMP/suricata-fail.json" >/dev/null \
@@ -142,7 +143,7 @@ jq -e '.exit_code == 8 and .stderr and .stdout' "$TMP/suricata-fail.json" >/dev/
   || fail "suricata_run truncated Suricata stderr"
 mkdir "$TMP/zeek-fail"
 if printf '{"path":"%s/one.pcap","out_dir":"%s/zeek-fail"}' "$TMP" "$TMP" | \
-  PATH="$TMP/fake-bin:$PATH" python3 "$PACK/tools/zeek_run/run.py" >"$TMP/zeek-fail.json"; then
+  (cd "$TMP" && PATH="$TMP/fake-bin:$PATH" python3 "$PACK/tools/zeek_run/run.py") >"$TMP/zeek-fail.json"; then
   fail "zeek_run reported a failed Zeek analysis as success"
 fi
 jq -e '.ok == false and .exit_code == 9 and .stderr and .stdout and .logs.conn.total == 1' "$TMP/zeek-fail.json" >/dev/null \

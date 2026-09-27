@@ -4,7 +4,7 @@ title: iOS unified logs on Linux
 when: The question depends on an iOS subsystem's diagnostic or operational log.
 needs: [ios/artifacts]
 tools: [unified_log]
-requires_host: [UnifiedLogReader.py]
+requires_host: [unifiedlog_iterator]
 ---
 
 An iOS full-file-system extraction can hold the same unified-log pieces as
@@ -13,9 +13,12 @@ a trace file without its UUIDText data can leave format strings unresolved,
 and without timesync the continuous clock cannot be placed safely on UTC.
 
 Use the `unified_log` pack tool on the directory that contains those pieces.
-It stages the expected layout for `UnifiedLogReader.py` and keeps the reader's
-stdout, stderr and generated files. Search that retained output; do not pipe
-the only copy through `grep`.
+It hands Mandiant's `unifiedlog_iterator` one log archive (a copy of
+`private/var/db`, with `diagnostics` and `uuidtext`, is staged as one) and
+keeps every decoded entry as JSONL, and the reader's stderr, whole. Search
+that retained output; do not pipe the only copy through `grep`. Do not use the
+archived Python UnifiedLogReader: its own upstream limits it to macOS
+10.15/iOS 12-era data.
 
 Absence is narrow. State the trace files, time range, subsystem/category or
 search expression, reader version, unresolved-format count and parse errors.

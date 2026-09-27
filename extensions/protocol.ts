@@ -40,7 +40,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -5974,31 +5974,142 @@ export function lacksProgram(run: { exit_code: number | null; stdout: string; st
 }
 
 /**
- * A tool's arguments for a run as a job: a path under one of the agent's own
- * writable directories becomes a place under {OUT}, since a worker writes
- * only its $OUT (sealed into store/jobs/<id>/out/) and sees the rest of the
- * run read-only. work/<id>/x is {OUT}/x; work/extracted/<id>/x is
- * {OUT}/extracted/x, work/quarantine/<id>/x {OUT}/quarantine/x and
- * tool-output/<id>/x {OUT}/tool-output/x (the first reruns wrote an
- * extraction to work/extracted/<id>/ and every one failed read-only).
+ * Where a string argument lies in one of the agent's own writable
+ * directories — the only places its VM lets a tool write — as a path relative
+ * to the run, normalised, with the place under {OUT} it takes in a job; null
+ * when it is not in one. A path is taken relative to the run or absolute under
+ * `root` (the run's directory, the same path in every VM), and `./`, `//`,
+ * `.` and `..` are resolved first, so each way of naming a place maps alike.
+ * Generic: it knows the agent's directories, never a tool or a parameter.
  */
-export function ownPathsToOut(args: Record<string, unknown>, agentId: string | undefined): Record<string, unknown> {
-  if (!agentId) return args;
+function ownPlace(value: string, agentId: string, root?: string): { rel: string; out: string } | null {
+  if (!value || value.includes("{OUT}") || value.includes("\0")) return null;
+  let path = value;
+  if (path.startsWith("/")) {
+    const base = root ? posix.normalize(root).replace(/\/+$/, "") : "";
+    if (!base || !(path === base || path.startsWith(`${base}/`))) return null;
+    path = path.slice(base.length + 1);
+  }
+  const rel = posix.normalize(path || ".").replace(/\/+$/, "");
+  if (rel === "." || rel === ".." || rel.startsWith("../")) return null;
   const homes: Array<[string, string]> = [
-    [`work/extracted/${agentId}/`, "{OUT}/extracted/"],
-    [`work/quarantine/${agentId}/`, "{OUT}/quarantine/"],
-    [`tool-output/${agentId}/`, "{OUT}/tool-output/"],
-    [`work/${agentId}/`, "{OUT}/"],
+    [`work/extracted/${agentId}`, "{OUT}/extracted"],
+    [`work/quarantine/${agentId}`, "{OUT}/quarantine"],
+    [`tool-output/${agentId}`, "{OUT}/tool-output"],
+    [`work/${agentId}`, "{OUT}"],
   ];
-  const one = (v: string): string => {
-    const path = v.startsWith("./") ? v.slice(2) : v;
-    for (const [from, to] of homes) if (path.startsWith(from)) return to + path.slice(from.length);
+  for (const [from, to] of homes) if (rel === from || rel.startsWith(`${from}/`)) return { rel, out: to + rel.slice(from.length) };
+  return null;
+}
+
+function mapStrings(v: unknown, fn: (s: string) => string): unknown {
+  return typeof v === "string" ? fn(v)
+    : Array.isArray(v) ? v.map((x) => mapStrings(x, fn))
+      : v && typeof v === "object" ? Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, mapStrings(x, fn)])) : v;
+}
+
+/**
+ * A tool's arguments for a run as a job: a place the tool would write in one
+ * of the agent's own writable directories becomes a place under {OUT}, since
+ * a worker writes only its $OUT (sealed into store/jobs/<id>/out/) and sees
+ * the rest of the run read-only. work/<id>/x is {OUT}/x; work/extracted/<id>/x
+ * is {OUT}/extracted/x, work/quarantine/<id>/x {OUT}/quarantine/x and
+ * tool-output/<id>/x {OUT}/tool-output/x (the first reruns wrote an
+ * extraction to work/extracted/<id>/ and every one failed read-only), however
+ * the path is written (relative, absolute under `root`, with ./ or ..).
+ *
+ * A path there that already held something when the agent called the tool
+ * (`held`, see heldOwnPaths) is what the tool reads, not where it writes: it
+ * stays as given, since the worker reads all of work/ where it is. Mapped,
+ * a database the agent had extracted would be looked for in an empty $OUT,
+ * and the job would find nothing to read.
+ */
+export function ownPathsToOut(
+  args: Record<string, unknown>,
+  agentId: string | undefined,
+  o: { root?: string; held?: ReadonlySet<string> } = {},
+): Record<string, unknown> {
+  if (!agentId) return args;
+  return mapStrings(args, (v) => {
+    const place = ownPlace(v, agentId, o.root);
+    return place && !o.held?.has(place.rel) ? place.out : v;
+  }) as Record<string, unknown>;
+}
+
+/**
+ * The places in a tool's arguments, in the agent's own writable directories,
+ * that hold something now: a file with bytes in it or a directory with
+ * entries. Taken before the tool runs in the agent's VM, so what a failed
+ * attempt there created (an empty output file, an output directory made
+ * before the missing program was called) is still a place to write.
+ */
+export async function heldOwnPaths(root: string, args: Record<string, unknown>, agentId: string | undefined): Promise<Set<string>> {
+  const held = new Set<string>();
+  if (!agentId) return held;
+  const places: string[] = [];
+  mapStrings(args, (v) => {
+    const place = ownPlace(v, agentId, root);
+    if (place) places.push(place.rel);
     return v;
+  });
+  for (const rel of places) {
+    const st = await stat(join(root, rel)).catch(() => null);
+    if (!st) continue;
+    if (st.isFile() ? st.size > 0 : st.isDirectory() && (await readdir(join(root, rel)).catch(() => [])).length > 0) held.add(rel);
+  }
+  return held;
+}
+
+/**
+ * For the answer of a tool rerun as a job: each path the agent gave that was
+ * mapped under {OUT}, and where it is now that the job is sealed,
+ * store/jobs/<id>/out/<rest>. The agent reads and cites it from there.
+ */
+export function writtenToOf(given: unknown, mapped: unknown, job: string): Record<string, string> {
+  const moved: Record<string, string> = {};
+  const walk = (a: unknown, b: unknown): void => {
+    if (typeof a === "string" && typeof b === "string") {
+      if (a !== b && (b === "{OUT}" || b.startsWith("{OUT}/"))) moved[a] = `store/jobs/${job}/out${b.slice("{OUT}".length)}`;
+    } else if (a && b && typeof a === "object" && typeof b === "object") {
+      for (const k of Object.keys(a as object)) walk((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]);
+    }
   };
-  const map = (v: unknown): unknown =>
-    typeof v === "string" ? one(v)
-      : Array.isArray(v) ? v.map(map) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, map(x)])) : v;
-  return map(args) as Record<string, unknown>;
+  walk(given, mapped);
+  return moved;
+}
+
+/**
+ * For the answer of a tool rerun as a job: each place under the job's staging
+ * directory its output names — <run>/.jobs/<id>/…, or .jobs/<id>/… from the
+ * run's directory, where the worker ran it — and where that place is now the
+ * job is sealed, store/jobs/<id>/out/…. The output itself is sealed and stays
+ * as it is; this says where to find what it names. Generic: it reads the
+ * job's own directory in any text, never a tool's format.
+ */
+export function stagedPaths(text: string, root: string, job: string): Record<string, string> {
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const base = posix.normalize(root).replace(/\/+$/, "");
+  const stage = `.jobs/${job}`;
+  const re = new RegExp(`(?<![\\w./-])(?:${base ? `${esc(base)}/|` : ""}\\./)?${esc(stage)}(?=$|[/\\s"'\`<>,;:)\\]}])(?:/[^\\s"'\`<>]*)?`, "g");
+  const paths: Record<string, string> = {};
+  for (const m of text.matchAll(re)) {
+    const printed = m[0].replace(/(?<=.)[.,;:)\]}]+$/, "");
+    paths[printed] = `store/jobs/${job}/out${printed.slice(printed.indexOf(stage) + stage.length).replace(/\/+$/, "")}`;
+  }
+  return paths;
+}
+
+/** stagedPaths over a whole file, a line at a time: a job's sealed stdout.log. */
+export async function stagedPathsIn(file: string, root: string, job: string): Promise<Record<string, string>> {
+  const handle = await open(file, "r");
+  try {
+    const paths: Record<string, string> = {};
+    const lines = createInterface({ input: handle.createReadStream({ autoClose: false, encoding: "utf8" }), crlfDelay: Infinity });
+    for await (const line of lines) Object.assign(paths, stagedPaths(line, root, job));
+    return paths;
+  } finally {
+    await handle.close();
+  }
 }
 
 export async function runForgedTool(

@@ -230,13 +230,20 @@ def write_stream(out_dir, name, payload):
         safe = safe[:160] + "-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
     target = os.path.join(out_dir, safe + ".lnk")
     n = 2
-    while os.path.exists(target):
-        with open(target, "rb") as fh:
-            if fh.read() == payload:
-                return target
+    # A name already taken, by a file or by a link, is never written through:
+    # out_dir was checked, but a link left inside it (dangling ones included,
+    # which os.path.exists calls absent) would take the write wherever it
+    # points, inputs/ as well. Only a regular file is read to compare, and the
+    # new file is created, never opened over something already there.
+    while os.path.lexists(target):
+        if os.path.isfile(target) and not os.path.islink(target):
+            with open(target, "rb") as fh:
+                if fh.read() == payload:
+                    return target
         target = os.path.join(out_dir, "%s-%d.lnk" % (safe, n))
         n += 1
-    with open(target, "wb") as fh:
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "wb") as fh:
         fh.write(payload)
     return target
 

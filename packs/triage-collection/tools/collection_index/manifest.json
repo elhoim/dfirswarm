@@ -29,6 +29,6 @@
   "example": "{\"root\": \"inputs/collection\", \"contains\": \"NTUSER\", \"out_file\": \"work/collection-index.jsonl\"}",
   "by": "maintainer",
   "at": "2026-09-22T23:30:00.000Z",
-  "version": 1,
-  "sha256": "6fe89e377aa3149734da6abf219ea13709224d9d0a414193c2e5b874ed20552f"
+  "version": 2,
+  "sha256": "6c6d753950f582f4f0ef58f1b1df548d8bbce24ff0cc8eaa7b3695ae582a09bc"
 }

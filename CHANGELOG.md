@@ -99,6 +99,46 @@ a test that failed before it.
   temporary directory by default) instead of beside the snapshots, and
   says what it touched outside the run.
 
+### Fixed: what the basic-flow CTF rounds found in the packs
+
+- **`usn_journal`** read every record of a `$J` all along: its `name` filter
+  was a substring match and a run passed it an alternation, so "0 records"
+  read as an empty journal. `name` is a case-insensitive regex now, as in
+  `mft_records` and `indx_carve`; `records_read` counts every record whatever
+  the filter kept, and a filter that keeps none says so. The journal is
+  mapped rather than read whole, its sparse front skipped in steps of up to a
+  megabyte, and v3 and v4 records are read as well as v2.
+- **A pack tool run again as a job** gives the job's `$OUT` every path in the
+  agent's own directories however it is written (relative, absolute under the
+  run, with `./` or `..`), except one that already held something when the
+  agent called the tool: that is its input, and the job reads it where it is.
+  `written_to` names where each moved path is sealed, `$OUT` itself included.
+- **The mobile recipes** take `--probe-out`, as the kickoff's census asks
+  every detect step; they refused it with a usage error, so a phone's tar was
+  catalogued as a member list only. `ios-filesystem` and `archive-members`
+  open a tar by its magic instead of trying every decompressor, which took the
+  LZMA one half a minute on 64 MiB of zeros for every such input.
+- **Output paths.** `feature_scan`, `zeek_run`, `sigma_hunt`, `unified_log`,
+  `doc_probe` and the twelve tools that keep a whole result in a caller's
+  `out_file` or `out_dir` (cloud, macOS, triage, network, Linux) refuse a place
+  outside the run directory, the run directory itself or under `inputs/`,
+  links resolved first; `jumplist` never writes through a link left in its
+  `out_dir`; `mem_fs` mounts under a job's `$OUT`, where a rerun sends it.
+- **Nothing cut.** `sigma_hunt` keeps every field of a matched record (it
+  kept 12), every rule that fired (25) and every detection, all of them in
+  `detections.jsonl` past the page, and the engine's stdout and stderr whole
+  in files named by path, size and sha256 (they were dropped, or cut to their
+  last 400 and 800 characters). `cloudtrail_parse` and `ual_parse` return
+  whole tables rather than their top 20 or 30, and `collection_index` every
+  modification date rather than ten.
+- **A rerun's answer says where its output's places went:** `paths` maps each
+  `<run>/.jobs/<id>/…` (or `.jobs/<id>/…`) its sealed stdout names to
+  `store/jobs/<id>/out/…`; the output itself stays as sealed.
+- The iOS unified-log method names `unifiedlog_iterator`, the reader
+  `unified_log` runs, not the retired UnifiedLogReader.py, so every pack
+  seals without a warning; `pack-tools.test.sh` holds them to it.
+- Ten packs take a patch version and a new seal.
+
 ### Changed: every image profile reviewed as a DFIR examiner would (Codex)
 
 - Each of the nine profiles (base, disk, memory, linux, mobile, network, re,

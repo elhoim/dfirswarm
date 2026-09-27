@@ -33,6 +33,6 @@
   "example": "{\"db\": \"work/extracted/knowledgeC.db\", \"stream\": \"/app/inFocus\", \"out_file\": \"work/knowledgec.jsonl\"}",
   "by": "maintainer",
   "at": "2026-09-22T16:00:00.000Z",
-  "version": 1,
-  "sha256": "c1f8cb7f983036a53f953935cefda74475939648e6f9b6620ce3f779b6675049"
+  "version": 2,
+  "sha256": "e666132e5fccd9f8c885c1e045eae929ed7cb4aa49502d95f62d0bb319283af7"
 }

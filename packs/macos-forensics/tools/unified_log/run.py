@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 DEFAULT_TIMEOUT = 900
 KEEP = ["timestamp", "processImagePath", "process", "subsystem", "category",
@@ -16,6 +17,27 @@ KEEP = ["timestamp", "processImagePath", "process", "subsystem", "category",
 def fail(message, **extra):
     print(json.dumps({"error": message, **extra}))
     raise SystemExit(1)
+
+
+def resolve_output(out, what="output"):
+    """Where `out` really lands, as a path under the run directory; a place
+    outside it, the run directory itself, or anything under inputs/ is refused.
+
+    A string check is not enough: `work/../inputs/x`, an absolute path and a
+    symlink that points out all name a place the tool must not write, and none
+    of them starts with "inputs/". Resolving first and comparing directories
+    is what actually holds, and the read-only inputs are the one place
+    extracted bytes must never appear -- a later integrity check would report
+    the evidence as modified. In a job $OUT is inside the run directory.
+    """
+    root = Path.cwd().resolve()
+    dest = (root / out).resolve() if not Path(out).is_absolute() else Path(out).resolve()
+    if dest == root or root not in dest.parents:
+        fail("%s must stay inside the run directory" % what, **{what: str(out)})
+    inputs = root / "inputs"
+    if dest == inputs or inputs in dest.parents:
+        fail("%s cannot be under inputs/" % what, **{what: str(out)})
+    return str(dest.relative_to(root))
 
 
 def digest(path):
@@ -51,6 +73,7 @@ def main():
     out_dir = args.get("out_dir")
     if not isinstance(out_dir, str) or not out_dir:
         fail("out_dir is required: a directory under work/ for the reader's complete output")
+    out_dir = resolve_output(out_dir, "out_dir")
     limit = args.get("limit", 500)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
         fail("limit must be a positive integer")
@@ -66,7 +89,7 @@ def main():
 
     os.makedirs(out_dir, exist_ok=True)
     entries, unparsed = [], 0
-    stderr_path = os.path.join(out_dir, "unifiedlog.stderr")
+    stderr_path = resolve_output(os.path.join(out_dir, "unifiedlog.stderr"), "out_dir")
     status = "complete"
     scratch = os.path.join(out_dir, ".logarchive-input")
     if os.path.lexists(scratch):
@@ -74,7 +97,7 @@ def main():
 
     if apple:
         engine = "log"
-        output_path = os.path.join(out_dir, "unifiedlogs.ndjson")
+        output_path = resolve_output(os.path.join(out_dir, "unifiedlogs.ndjson"), "out_dir")
         argv = [apple, "show", "--archive", path, "--style", "ndjson", "--info", "--debug"]
         for flag, key in (("--predicate", "predicate"), ("--start", "start"), ("--end", "end")):
             if args.get(key):
@@ -105,7 +128,7 @@ def main():
         engine = "unifiedlog_iterator"
         if any(args.get(k) for k in ("predicate", "start", "end")):
             fail("predicate/start/end require Apple's log command; unifiedlog_iterator keeps the full JSONL for downstream queries")
-        output_path = os.path.join(out_dir, "unifiedlogs.jsonl")
+        output_path = resolve_output(os.path.join(out_dir, "unifiedlogs.jsonl"), "out_dir")
         made_scratch = False
         try:
             input_path, made_scratch = merge_logarchive(path, scratch)
