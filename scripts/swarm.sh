@@ -2825,6 +2825,26 @@ budget = {
 PY
 }
 
+# Where a host process of the run keeps its temporary files and its runtime
+# caches: the panes, and `pi auth check` at kickoff (a VM's own are in the
+# VM). Scratch belongs to the run. With the write guard on, the per-user temp
+# area is closed; with it off, this still keeps a case's temporary files
+# inside the case instead of in a directory shared with every other run.
+#
+# A runtime's cache is not scratch. Pi's CLI turns on Node's compile cache,
+# which Node puts under TMPDIR unless NODE_COMPILE_CACHE names a directory,
+# so every run's work/ carried .tmp/node-compile-cache/ in its artifact index
+# and its package (run s2a59b2: eleven entries, written by the kickoff's own
+# `pi auth check`, which runs with the panes' environment; in a host run
+# every pane's Pi adds to it). No agent wrote them. The harness names a
+# directory of its own for the cache, .runtime-cache/ at the run's top:
+# never under work/, so the index and the package leave it out without
+# leaving out anything an agent wrote.
+scratch_env_for() { # <sandbox> -> sets SCRATCH_ENV_ARGS
+  mkdir -p "$1/work/.tmp" "$1/.runtime-cache"
+  SCRATCH_ENV_ARGS=(--env "TMPDIR=$1/work/.tmp" --env "NODE_COMPILE_CACHE=$1/.runtime-cache/node-compile-cache")
+}
+
 # Herdr only splits right/down. There is no grid command and no published
 # pane-count max. We fill a √N column grid (max 5 cols). If a split fails or
 # the current tab hits SWARM_PANES_PER_TAB, open a new tab. If tab create
@@ -5183,11 +5203,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # otherwise looks beside the sandbox, which under --sandbox DIR is not
   # where the registry lives).
   provider_env+=(--env "SWARM_RUNS_DIR=$RUNS_DIR")
-  # Scratch belongs to the run. With the write guard on, the per-user temp
-  # area is closed; with it off, this still keeps a case's temporary files
-  # inside the case instead of in a directory shared with every other run.
-  mkdir -p "$sandbox/work/.tmp"
-  provider_env+=(--env "TMPDIR=$sandbox/work/.tmp")
+  scratch_env_for "$sandbox"
+  provider_env+=("${SCRATCH_ENV_ARGS[@]}")
   # Packs: the extension reads the skill index and the bodies from these
   # directories. They sit outside the sandbox and the run only reads them.
   if [[ -n "$pack_dirs" ]]; then

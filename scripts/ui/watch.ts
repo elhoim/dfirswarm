@@ -110,6 +110,7 @@ function kindOf(second: string, third: string): ChangeKind {
     case ".fsguard":
     case ".zsh":
     case ".bash":
+    case ".runtime-cache":
     case "bin":
     case "package":
     case "netguard.pid":
