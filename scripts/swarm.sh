@@ -8138,6 +8138,8 @@ PY
   pkg_copy "$sandbox/ledger/entries.jsonl" "$out/ledger.jsonl"
   # A second author of an entry, appended beside it and chained.
   pkg_copy "$sandbox/ledger/attestations.jsonl" "$out/ledger-attestations.jsonl" non-empty
+  # An agent's dispute of an entry, and its withdrawal: a chain of its own.
+  pkg_copy "$sandbox/ledger/disputes.jsonl" "$out/ledger-disputes.jsonl" non-empty
   for f in inputs.json toolbox.json toolchain.json team.json budget.json layout.json netguard.allow SWARM.md custody.json; do
     pkg_copy "$sandbox/$f" "$out/$f"
   done

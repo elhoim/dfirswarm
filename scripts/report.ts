@@ -1345,7 +1345,7 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
     model_gateway?: { lines: number; intact: boolean; detail: string; refused?: string } | null;
     checks?: Array<{ name: string; status: string; reason?: string; expected?: number; checked?: number }>;
     artifacts?: { files?: number; index_sha256?: string } | null;
-    seal?: { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
+    seal?: { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; disputes?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
     acquisition?: { source: string | null; source_sha256: string | null; given: number; matched: number; mismatched: string[]; not_compared: string[] } | null;
     operator?: { lines: number; intact: boolean; detail: string; trace_actions: number; matched: number; unmatched: unknown[] } | null;
     models?: { team: Array<{ agent: string; model: string | null }>; gateway_answered: string[] | null };
@@ -1792,7 +1792,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ? hostCustody.checks.map((c) => `${c.name}: ${c.status.replace("_", " ")}${c.reason ? ` (${c.reason})` : ""}${c.expected !== undefined ? ` [${c.checked ?? 0} of ${c.expected}]` : ""}`).join("; ")
     : null;
   const sealRow = hostCustody?.seal
-    ? `trace ${hostCustody.seal.trace?.lines ?? 0} lines (the last line's sha256 ${hostCustody.seal.trace?.last_line_sha256 ?? "none"}); ledger ${hostCustody.seal.ledger?.entries ?? 0} entries, head ${hostCustody.seal.ledger?.head ?? "none"}${hostCustody.seal.attestations?.lines ? `; attestations ${hostCustody.seal.attestations.lines} lines, head ${hostCustody.seal.attestations.head}` : ""}${hostCustody.seal.journal ? `; store journal ${hostCustody.seal.journal.lines} lines, head ${hostCustody.seal.journal.head}` : ""}`
+    ? `trace ${hostCustody.seal.trace?.lines ?? 0} lines (the last line's sha256 ${hostCustody.seal.trace?.last_line_sha256 ?? "none"}); ledger ${hostCustody.seal.ledger?.entries ?? 0} entries, head ${hostCustody.seal.ledger?.head ?? "none"}${hostCustody.seal.attestations?.lines ? `; attestations ${hostCustody.seal.attestations.lines} lines, head ${hostCustody.seal.attestations.head}` : ""}${hostCustody.seal.disputes?.lines ? `; disputes ${hostCustody.seal.disputes.lines} lines, head ${hostCustody.seal.disputes.head}` : ""}${hostCustody.seal.journal ? `; store journal ${hostCustody.seal.journal.lines} lines, head ${hostCustody.seal.journal.head}` : ""}`
     : null;
   const acquisitionRow = hostCustody?.acquisition
     ? hostCustody.acquisition.mismatched.length

@@ -37,7 +37,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, lstatSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ledgerHash, readLedger, verifyAttestationChain, type LedgerEntry } from "../extensions/protocol.ts";
+import { ledgerHash, readLedger, verifyAttestationChain, verifyDisputeChain, type LedgerEntry } from "../extensions/protocol.ts";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 const REDACTED = "[redacted: marked sensitive]";
@@ -268,8 +268,7 @@ export function ledgerChain(text: string): { ok: boolean; entries: number; redac
   let last = "genesis";
   let chained = 0;
   let redacted = 0;
-  let sawV2 = false;
-  let sawV3 = false;
+  let newest = 1;
   let n = 0;
   const broken = (why: string) => ({ ok: false, entries: n, redacted, head: null, detail: `broken at entry ${n} (${why})` });
   for (const l of lines) {
@@ -280,10 +279,10 @@ export function ledgerChain(text: string): { ok: boolean; entries: number; redac
     } catch {
       return broken("not json");
     }
-    if (sawV3 && e.v !== 3) return broken(`a version ${e.v ?? 1} entry after version 3 ones`);
-    if (sawV2 && e.v !== 2 && e.v !== 3) return broken("a version 1 entry after version 2 ones");
-    if (e.v === 2) sawV2 = true;
-    if (e.v === 3) sawV3 = true;
+    // Versions only go up along the chain, as verifyLedgerChain holds them (ledgerHash dispatches on each).
+    const version = typeof e.v === "number" ? e.v : 1;
+    if (version < newest) return broken(`a version ${version} entry after version ${newest} ones`);
+    newest = version;
     if (e.redacted === true) {
       // Its core is not here: its hash is taken, and it must name the entry before it.
       if (e.prev !== last) return broken(`redacted entry ${e.seq}'s prev does not name the entry before it`);
@@ -365,7 +364,7 @@ function reviewChain(text: string): { ok: boolean; lines: number; redacted: numb
  * of them; `since` parts were first packaged then, so a package from before
  * it carries none and says so.
  */
-export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; what: string; absent: string; core?: true; sealed?: "trace" | "ledger" | "attestations" | "journal" | "artifacts"; since?: string }> = [
+export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; what: string; absent: string; core?: true; sealed?: "trace" | "ledger" | "attestations" | "disputes" | "journal" | "artifacts"; since?: string }> = [
   { path: "custody.json", source: "custody.json", what: "the custody verdict", absent: "no custody was taken for this run (swarm.sh stop takes it)", core: true },
   { path: "trace/custody-anchor.json", source: "<sandbox>.custody-anchor.json", what: "the verdict's anchor, kept outside the run", absent: "the kickoff wrote no custody anchor for this run", core: true },
   { path: "custody.json.sig", source: "custody.json.sig", what: "the verdict's signature", absent: "custody.json was not signed (--custody-sign-key)" },
@@ -375,6 +374,7 @@ export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; w
   { path: "trace/trace-anchor.json", source: "<sandbox>.trace-anchor.json", what: "the trace's anchor", absent: "no collector anchored the trace" },
   { path: "ledger.jsonl", source: "ledger/entries.jsonl", what: "the ledger", absent: "nothing was recorded", sealed: "ledger" },
   { path: "ledger-attestations.jsonl", source: "ledger/attestations.jsonl", what: "the ledger's attestations", absent: "no entry has a second author", sealed: "attestations" },
+  { path: "ledger-disputes.jsonl", source: "ledger/disputes.jsonl", what: "the agents' disputes of entries", absent: "no agent disputed an entry", sealed: "disputes", since: "2026-09-27" },
   { path: "store/journal.jsonl", source: "store/journal.jsonl", what: "the store's journal", absent: "the run had no job service", sealed: "journal" },
   { path: "trace/journal-anchor.json", source: "<sandbox>.journal-anchor.json", what: "the journal's anchor", absent: "the run had no job service" },
   { path: "review.jsonl", source: "<runs>/reviews/<run>.jsonl", what: "the examiner's review", absent: "no examiner has reviewed this run", since: "2026-09-27" },
@@ -429,7 +429,7 @@ function packagedFiles(dir: string, under: string): string[] {
   return walk(root).map((abs) => relative(dir, abs).split("\\").join("/")).sort();
 }
 
-type SealShape = { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
+type SealShape = { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; disputes?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
 
 export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
   const out: string[] = [];
@@ -481,6 +481,8 @@ export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
         return (seal?.ledger?.entries ?? 0) > 0 ? `the verdict sealed ${seal?.ledger?.entries} ledger entries` : null;
       case "attestations":
         return (seal?.attestations?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.attestations?.lines} attestation lines` : null;
+      case "disputes":
+        return (seal?.disputes?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.disputes?.lines} dispute lines` : null;
       case "journal":
         return seal?.journal ? `the verdict sealed a journal of ${seal.journal.lines} lines` : null;
       case "artifacts":
@@ -549,6 +551,17 @@ export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
     const sealed = !seal?.attestations || ((seal.attestations.head ?? null) === a.head && (seal.attestations.lines === undefined || seal.attestations.lines === a.total));
     out.push(`Attestations: ${a.ok ? `${a.total} lines, chain intact` : `CHAIN BROKEN at line ${a.broken_at} (${a.reason})`}${seal?.attestations ? (sealed ? "; head sealed" : "; HEAD NOT THE ONE SEALED") : ""}`);
     ok &&= a.ok && sealed;
+  }
+  // The agents' disputes: their own chain, held to the seal when the verdict sealed them.
+  const disp = read("ledger-disputes.jsonl");
+  if (disp !== null) {
+    const d = verifyDisputeChain(disp);
+    const sealed = !seal?.disputes || ((seal.disputes.head ?? null) === d.head && (seal.disputes.lines === undefined || seal.disputes.lines === d.total));
+    out.push(`Disputes:     ${d.ok ? `${d.total} lines, chain intact` : `CHAIN BROKEN at line ${d.broken_at} (${d.reason})`}${seal?.disputes ? (sealed ? "; head sealed" : "; HEAD NOT THE ONE SEALED") : "; not sealed by this verdict (a custody from before disputes were sealed)"}`);
+    ok &&= d.ok && sealed;
+  } else if ((seal?.disputes?.lines ?? 0) > 0) {
+    // Named by the components check above; said here too, beside the other chains.
+    out.push(`Disputes:     NOT IN THE PACKAGE, and the verdict sealed ${seal?.disputes?.lines} lines`);
   }
   // The store's journal: the sealed line where the seal says, and only examiner notes after it.
   const journal = read("store/journal.jsonl");

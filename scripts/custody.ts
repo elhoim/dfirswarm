@@ -62,7 +62,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
-import { eventChainVerifier, specialKind, verifyAttestationChain, verifyLedgerChain } from "../extensions/protocol.ts";
+import { eventChainVerifier, specialKind, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain } from "../extensions/protocol.ts";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
 import { checkStore, verifyJournalText, type StoreCheck } from "./evidence-store.ts";
 import {
@@ -592,11 +592,15 @@ export type Custody = {
     trace: { lines: number; bytes: number; last_line_sha256: string | null };
     ledger: { entries: number; head: string | null };
     attestations: { lines: number; head: string | null };
+    /** The agents' disputes (ledger/disputes.jsonl, ledger version 4): absent from a verdict taken before they were sealed. */
+    disputes?: { lines: number; head: string | null };
     journal: { lines: number; head: string | null } | null;
     model_gateway: { lines: number; sha256: string | null } | null;
   };
   /** The ledger's attestations (a second author of an entry, appended beside it): their own chain. */
   attestations: { lines: number; intact: boolean; detail: string } | null;
+  /** The agents' disputes of entries and their withdrawals (ledger/disputes.jsonl): their own chain; null when there are none. */
+  disputes?: { lines: number; intact: boolean; detail: string } | null;
   /** The operator's audit beside the registry, and each operator line on the trace matched to it. */
   operator: OperatorAudit;
   /** The acquisition hashes given at kickoff (--inputs-hashes), against the evidence as re-hashed now. */
@@ -648,6 +652,7 @@ export type CustodyState = {
   incomplete?: string | null;
   seal?: Custody["seal"];
   attestations?: Custody["attestations"];
+  disputes?: Custody["disputes"];
   operator?: Custody["operator"];
   acquisition?: Custody["acquisition"];
   models?: Custody["models"];
@@ -1358,6 +1363,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     trace: { lines, bytes: traceBytes, last_line_sha256: lastLine === null ? null : createHash("sha256").update(lastLine).digest("hex") },
     ledger: { entries: 0, head: null },
     attestations: { lines: 0, head: null },
+    disputes: { lines: 0, head: null },
     journal: null,
     model_gateway: null,
   };
@@ -1457,6 +1463,15 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   } else if ("why" in attRead && attRead.why !== "missing") {
     state.attestations = { lines: 0, intact: false, detail: `the attestations are ${attRead.why}` };
   } else state.attestations = null;
+  // A dispute of an entry, and its withdrawal: a chain of its own beside the ledger.
+  const dispRead = await readRegularText(join(sandbox, "ledger", "disputes.jsonl"));
+  if ("text" in dispRead && dispRead.text.trim()) {
+    const d = verifyDisputeChain(dispRead.text);
+    state.disputes = { lines: d.total, intact: d.ok, detail: d.ok ? `${d.total} lines, chain intact` : `broken at line ${d.broken_at} (${d.reason})` };
+    if (state.seal) state.seal.disputes = { lines: d.total, head: d.head };
+  } else if ("why" in dispRead && dispRead.why !== "missing") {
+    state.disputes = { lines: 0, intact: false, detail: `the disputes are ${dispRead.why}` };
+  } else state.disputes = null;
   state.ledgerDone = true;
 
   // --- the model gateway's log -----------------------------------------------
@@ -1781,8 +1796,9 @@ export function verdictOf(state: CustodyState, incomplete: string | null): Custo
     artifacts: state.artifacts ?? null,
     model_gateway: state.model_gateway ?? null,
     store: state.store ?? null,
-    seal: state.seal ?? { trace: { lines: 0, bytes: 0, last_line_sha256: null }, ledger: { entries: 0, head: null }, attestations: { lines: 0, head: null }, journal: null, model_gateway: null },
+    seal: state.seal ?? { trace: { lines: 0, bytes: 0, last_line_sha256: null }, ledger: { entries: 0, head: null }, attestations: { lines: 0, head: null }, disputes: { lines: 0, head: null }, journal: null, model_gateway: null },
     attestations: state.attestations ?? null,
+    disputes: state.disputes ?? null,
     operator: state.operator ?? null,
     acquisition: state.acquisition ?? null,
     checks: [],
@@ -1877,6 +1893,7 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
     if (l.claimed_by_seat.length) parts.push(`${plural(l.claimed_by_seat.length, "ledger hash", "ledger hashes")} a seat's own record line carried and the hub never logged (a guest's word, not counted against the ledger)`);
   }
   if (c.attestations) parts.push(c.attestations.intact ? `${plural(c.attestations.lines, "ledger attestation")}, chain intact` : `LEDGER ATTESTATIONS CHAIN BROKEN (${c.attestations.detail})`);
+  if (c.disputes) parts.push(c.disputes.intact ? `${plural(c.disputes.lines, "ledger dispute line")}, chain intact` : `LEDGER DISPUTES CHAIN BROKEN (${c.disputes.detail})`);
   if (c.operator && !c.operator.intact) parts.push(`OPERATOR AUDIT CHAIN BROKEN (${c.operator.detail})`);
   if (c.model_gateway) {
     const g = c.model_gateway;
@@ -2187,7 +2204,7 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
   const drift: Array<{ what: string; sealed: string; now: string }> = [];
   const after: string[] = [];
   const notSealed: string[] = [];
-  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the store journal", "the model gateway log"] };
+  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the store journal", "the model gateway log"] };
   const chain = (n: number, head: string | null, unit: string) => `${n} ${unit}, head ${head ?? "none"}`;
   if (!sealed.ledger) notSealed.push("the ledger");
   else if (sealed.ledger.entries !== now.ledger.entries || sealed.ledger.head !== now.ledger.head) {
@@ -2196,6 +2213,12 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
   if (!sealed.attestations) notSealed.push("the attestations");
   else if (sealed.attestations.lines !== now.attestations.lines || sealed.attestations.head !== now.attestations.head) {
     drift.push({ what: "ledger attestations", sealed: chain(sealed.attestations.lines, sealed.attestations.head, "lines"), now: chain(now.attestations.lines, now.attestations.head, "lines") });
+  }
+  // A verdict from before the disputes were sealed does not hold them; one that sealed none holds them to none.
+  const nowDisputes = now.disputes ?? { lines: 0, head: null };
+  if (!sealed.disputes) notSealed.push("the disputes");
+  else if (sealed.disputes.lines !== nowDisputes.lines || sealed.disputes.head !== nowDisputes.head) {
+    drift.push({ what: "ledger disputes", sealed: chain(sealed.disputes.lines, sealed.disputes.head, "lines"), now: chain(nowDisputes.lines, nowDisputes.head, "lines") });
   }
   if (sealed.journal === undefined) notSealed.push("the store journal");
   else if (sealed.journal === null && now.journal) drift.push({ what: "store journal", sealed: "none", now: chain(now.journal.lines, now.journal.head, "lines") });

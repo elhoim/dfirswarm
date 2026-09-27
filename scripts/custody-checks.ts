@@ -192,6 +192,7 @@ type CustodyLike = {
   trace: { lines: number; intact: boolean; detail: string };
   ledger: { entries: number; intact: boolean; detail: string; missing_from_ledger?: string[]; not_on_trace?: number[] } | null;
   attestations?: { lines: number; intact: boolean; detail: string } | null;
+  disputes?: { lines: number; intact: boolean; detail: string } | null;
   model_gateway: { intact: boolean; detail: string; refused?: string } | null;
   vms: Array<{ snapshot: unknown; stopped: boolean; kept: string | null }> | null;
   artifacts: { files: number; skipped: number } | null;
@@ -259,6 +260,7 @@ export function checksOf(c: CustodyLike, errors: Record<string, string> = {}): C
     add("ledger", l.intact ? "passed" : "failed", l.intact ? undefined : held.length && !l.detail.startsWith("broken") ? held.join("; ") : l.detail, { checked: l.entries });
   }
   if (c.attestations) add("ledger attestations", c.attestations.intact ? "passed" : "failed", c.attestations.intact ? undefined : c.attestations.detail, { checked: c.attestations.lines });
+  if (c.disputes) add("ledger disputes", c.disputes.intact ? "passed" : "failed", c.disputes.intact ? undefined : c.disputes.detail, { checked: c.disputes.lines });
   // The model gateway log.
   if (c.model_gateway) add("model gateway log", c.model_gateway.refused ? "unavailable" : c.model_gateway.intact ? "passed" : "failed", c.model_gateway.intact ? undefined : c.model_gateway.detail);
   else add("model gateway log", "not_applicable", "the run's model calls did not go through the host's gateway");

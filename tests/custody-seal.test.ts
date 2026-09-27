@@ -540,3 +540,57 @@ test("custody taken again keeps each earlier verdict with the index it sealed, s
   assert.equal(sha(await readFile(join(root, "artifacts.json"))), anchor.custody[1].artifacts_sha256);
   assert.notEqual(anchor.custody[0].artifacts_sha256, anchor.custody[1].artifacts_sha256);
 });
+
+/** Lines of ledger/disputes.jsonl chained as the hub writes them (protocol.ts disputeHash). */
+function disputeLines(items: Array<{ act: "dispute" | "withdraw"; seq: number; target: string; by: string; why: string }>): string {
+  let prev = "genesis";
+  let out = "";
+  items.forEach((d, i) => {
+    const line = { v: 1, act: d.act, seq: d.seq, target: d.target, by: d.by, at: `2026-09-27T00:01:0${i}Z`, why: d.why };
+    const hash = sha(`${prev}\n${JSON.stringify(line)}`);
+    out += `${JSON.stringify({ ...line, prev, hash })}\n`;
+    prev = hash;
+  });
+  return out;
+}
+
+test("the agents' disputes are a chain custody seals beside the ledger: its head and length in the seal, a line appended or rewritten after the stop named by verify", async () => {
+  const { root, runs, e1 } = await sealedRun();
+  const one = disputeLines([{ act: "dispute", seq: 1, target: e1.hash as string, by: "a1", why: "the host clock was not checked" }]);
+  await writeFile(join(root, "ledger", "disputes.jsonl"), one);
+  const c = await takeCustody(root, { runsDir: runs });
+  assert.equal(c.disputes?.intact, true);
+  assert.deepEqual(c.seal.disputes, { lines: 1, head: JSON.parse(one.trim()).hash });
+  assert.equal(c.checks.find((x) => x.name === "ledger disputes")?.status, "passed");
+  assert.match(c.summary, /1 ledger dispute line, chain intact/);
+  const anchor = JSON.parse(await readFile(custodyAnchorPath(root), "utf8")) as { custody: Array<{ seal?: { disputes?: unknown } }> };
+  assert.deepEqual(anchor.custody.at(-1)?.seal?.disputes, c.seal.disputes, "the anchor carries the sealed head too");
+  assert.equal((await verifyCustody(root, { runsDir: runs })).ok, true);
+  // A withdrawal appended after the stop, chained correctly.
+  const two = disputeLines([
+    { act: "dispute", seq: 1, target: e1.hash as string, by: "a1", why: "the host clock was not checked" },
+    { act: "withdraw", seq: 1, target: e1.hash as string, by: "a1", why: "it was" },
+  ]);
+  await writeFile(join(root, "ledger", "disputes.jsonl"), two);
+  const v = await verifyCustody(root, { runsDir: runs });
+  assert.ok(v.seal_drift.some((d) => d.what === "ledger disputes" && /^1 lines, head /.test(d.sealed) && /^2 lines, head /.test(d.now)), JSON.stringify(v.seal_drift));
+  assert.equal(v.ok, false);
+  // A line rewritten: the chain is broken, and the check fails.
+  await writeFile(join(root, "ledger", "disputes.jsonl"), one.replace("was not checked", "was checked"));
+  const b = await verifyCustody(root, { runsDir: runs });
+  assert.equal(b.now.find((x) => x.name === "ledger disputes")?.status, "failed");
+  assert.equal(b.ok, false);
+  await writeFile(join(root, "ledger", "disputes.jsonl"), one);
+  assert.equal((await verifyCustody(root, { runsDir: runs })).ok, true);
+});
+
+test("a verdict taken before disputes were sealed does not hold them, and says so", async () => {
+  const { root, runs } = await sealedRun();
+  const verdict = JSON.parse(await readFile(join(root, "custody.json"), "utf8")) as Custody;
+  const { sealDrift } = await import("../scripts/custody.ts");
+  const older = { ...verdict.seal } as Partial<Custody["seal"]>;
+  delete older.disputes;
+  const d = sealDrift(older, { ...verdict.seal, disputes: { lines: 2, head: "f".repeat(64) } }, null);
+  assert.ok(d.not_sealed.includes("the disputes"));
+  assert.ok(!d.drift.some((x) => x.what === "ledger disputes"));
+});
