@@ -30,6 +30,7 @@ import {
   attributionLine,
   egressLine,
   evidenceArrival,
+  evidenceFrom,
   herdrSocketLine,
   measuredGuardLine,
   vmRows,
@@ -318,6 +319,11 @@ test("the report's custody lines know a microVM run", () => {
   assert.match(evidenceArrival({ source: "/ev", guard: "microvm", held: "bind" }), /mounted read-only/);
   assert.match(evidenceArrival({ source: "/ev", guard: "seatbelt", held: "bind" }), /linked to it/);
   assert.match(evidenceArrival({ source: "/ev", guard: "seatbelt" }), /^<p>Copied from/);
+  // Several sets: each named at inputs/<name>/ with where it came from.
+  const sets = [{ path: "inputs/laptop", source: "/ev/laptop", files: 3 }, { path: "inputs/phone", source: "/ev/phone", files: 1 }];
+  assert.match(evidenceArrival({ source: "/ev/laptop, /ev/phone", guard: "microvm", held: "bind", sets }), /^<p>Used in place from 2 sets \(<code>\/ev\/laptop<\/code> as <code>inputs\/laptop\/<\/code>, 3 files; <code>\/ev\/phone<\/code> as <code>inputs\/phone\/<\/code>, 1 file\)/);
+  assert.equal(evidenceFrom({ source: "/ev/laptop, /ev/phone", sets }), "in 2 sets: inputs/laptop/ from /ev/laptop (3 files); inputs/phone/ from /ev/phone (1 file)");
+  assert.equal(evidenceFrom({ source: "/ev" }), "from /ev", "one set is said as it always was");
 });
 
 test("each agent's VM is a custody row: what it could write, reach and was given, and its disk", () => {
