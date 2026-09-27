@@ -48,8 +48,8 @@ docker save dfirswarm-memory:dev-arm64 -o /tmp/memory.tar
 ```
 
 (`amd64` on an Intel or AMD Linux host.) A kickoff with `--pack
-memory-forensics` then boots `dfirswarm-memory:dev-<arch>` on its own; name
-any other with `--image`.
+memory-forensics` then runs its jobs in `dfirswarm-memory:dev-<arch>` on its
+own, while its agents boot the base; name any other with `--image`.
 
 **`--allow-nonredistributable`.** Every program in the packs is marked
 `redistributable: false` until its licence has been reviewed for

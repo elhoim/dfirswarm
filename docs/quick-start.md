@@ -17,7 +17,7 @@ already installed, plus one image build.
 | **Pi** (`@earendil-works/pi-coding-agent`) | The agent harness. Verified against 0.85.1 and 0.87.0, the version `package.json` pins and the tests load; the extension APIs it uses date from 0.74. | `pi --version` |
 | **A provider login for Pi** | `pi /login` once: an API key **or a Claude / ChatGPT subscription**; see [Credentials](credentials-and-teams.md). `swarm.sh start` passes no credential to an agent; Pi on the host reads its own store, and a VM gets a placeholder the host swaps for the key on the way out. A subscription goes into a VM only with `--allow-oauth-in-vm`. A host run on a host with no persistent home can take an exported key with `--key-from-env` instead (see [ADR 0003](adr/0003-the-provider-key-comes-from-pis-own-store.md)). | `pi auth check --model <provider/id>` |
 | **A host that boots microVMs** | Every agent runs in its own microVM (microsandbox) unless the run says `--isolation host`: a Mac on Apple silicon, or Linux with KVM (`/dev/kvm` this user can open) and glibc. msb comes with `npm install`. `sqlite3` on the host, so that a stop can clear a removed VM's secrets out of msb's database (it warns when it cannot). A host without them is refused at kickoff, with what it lacks. | `ls -l /dev/kvm` on Linux; `sqlite3 --version` |
-| **Docker, once** | Builds the agents' VM image ([below](#the-agents-vm-image)); a machine that pulls the image from a registry does not need it. | `docker --version` |
+| **Docker, once** | Builds the agents' VM image and the job images a case's packs need ([below](#the-agents-vm-image)); a machine that pulls them from a registry does not need it. | `docker --version` |
 | Only for `--isolation host`: **a kernel guard** | A host run is unisolated: every agent is a process on this machine, held by the host guards. macOS has `sandbox-exec` built in. On Linux the write allowlist and the clean room need Landlock (kernel 5.13+, `python3`), and the socket mask and the fail-closed egress guard need unprivileged user namespaces (`unshare -rm`, `unshare -rn`); bubblewrap adds a read-only root when present. The kickoff measures what the host has and records it, so a host that lacks one still runs, and the record says so. | `unshare -rn true`; `python3 scripts/landlock.py --dry-run -- true` |
 | Optional: Chromium | `--playwright` tool. `npx playwright install chromium`, or point `BROWSER_CHECK_EXECUTABLE` at an installed Chrome. | |
 
@@ -41,9 +41,9 @@ npm install
 
 ### The agents' VM image
 
-Every VM boots an OCI image with Pi inside, loaded into msb. A run with no
-packs boots the base, `dfirswarm-base:dev-<arch>`; build it once (`amd64` in
-place of `arm64` on an Intel or AMD Linux host):
+Each VM boots an OCI image loaded into msb. The agents' VMs boot the base,
+`dfirswarm-base:dev-<arch>`: Pi, a shell, Python and the tool library.
+Build it once (`amd64` in place of `arm64` on an Intel or AMD Linux host):
 
 ```bash
 docker build -f images/base.Dockerfile -t dfirswarm-base:dev-arm64 images
@@ -51,11 +51,18 @@ docker save dfirswarm-base:dev-arm64 -o /tmp/dfirswarm-base.tar
 "$(node --experimental-strip-types scripts/vm.ts msb-path)" load -i /tmp/dfirswarm-base.tar
 ```
 
-A run with packs boots the smallest profile that serves them (`disk` for
-the Windows packs, `memory`, `re` and the rest); [images/README.md](../images/README.md)
-builds one the same way. A kickoff whose image this host does not have
-tries to pull it before anything is written, and when it cannot, stops with
-these commands for the image it wanted.
+The forensic programs are in the job images, one per profile (`disk`,
+`memory`, `mobile`, `network`, `linux`, `re`, `full`), built the same way
+([images/README.md](../images/README.md)). A run with packs runs its tool
+work in the images that hold them, and each image lists its programs in a
+file the agents read (`images/<profile>/tools.md` in the run). When this
+host lacks the base, or the job image that holds all of the run's packs,
+the kickoff tries to pull it before anything is written, and when it
+cannot, stops and says how to build it. Another job image that is missing
+and cannot be pulled is left out, and its packs' jobs run in the one that
+holds them all.
+With `--no-jobs` or `--brains-with-packs`, the agents' own VMs boot the
+image that holds the run's packs instead.
 
 ### 1. Dry run without a model (no keys, no Herdr, no network)
 
@@ -191,8 +198,12 @@ your own, and `SWARM_UI_TOKEN=` (empty) turns the check off deliberately.
 
 Swarms started from the terminal appear instantly; the **New swarm** form
 starts them through the same `swarm.sh`, with the goal document first and its
-finish line read back before a model is chosen. To browse the console without
-a model: `npm run ui:fixture` then `SWARM_RUNS_DIR=$PWD/runs-fixture scripts/swarm.sh ui`.
+finish line read back before a model is chosen. A run's **Jobs** tab lists
+every tool job from the store's journal, with its record, its manifest and
+its logs. In the ledger a sensitive entry stays blurred until you click it;
+`package --redact` is what takes it out of what you hand over. To browse the
+console without a model: `npm run ui:fixture` then
+`SWARM_RUNS_DIR=$PWD/runs-fixture scripts/swarm.sh ui`.
 
 ### 3b. Or start it from the console
 
@@ -206,7 +217,7 @@ same `swarm.sh start` underneath. In the order the form asks, on a first case:
 | ![The team card with provider readiness](screenshots/kickoff-03-team.png) | ![The caps card: USD cap, token cap, wall clock](screenshots/kickoff-04-caps.png) |
 | **3. The team.** One model or a mixed team with a count per model; the chips are what `pi auth check` answered for each provider right now. | **4. The caps.** A dollar cap for the swarm, a token cap (required for a team of local models), the wall clock. |
 | ![The read-only inputs card with an evidence set chosen](screenshots/kickoff-05-inputs.png) | ![The case card: catalog, install, quarantine, toolbox, per-agent cap, case id, examiner](screenshots/kickoff-06-case.png) |
-| **5. The evidence.** Sets under `SWARM_INPUTS_ROOT`, with file count and size; in a VM run each VM mounts the set read-only, and in a host run *auto* takes the kernel guard the host has. | **6. The case.** Catalog first pass, install, quarantine, the toolbox, a per-agent cap, the case id and the examiner, the packs, and the microVM switch: on by default, and off makes a host run, labelled unisolated. |
+| **5. The evidence.** Sets under `SWARM_INPUTS_ROOT`, with file count and size; in a VM run each VM mounts the set read-only, and in a host run *auto* takes the kernel guard the host has. | **6. The case.** The catalog, which takes the census of every input and plans the packs' recipes (in a microVM run they run as jobs while the agents work); install, quarantine, the toolbox, a per-agent cap, the case id and the examiner; the packs, which also choose the job images; and the microVM switch: on by default, and off makes a host run, labelled unisolated. |
 | ![The network card and the switches](screenshots/kickoff-07-network.png) | ![The label, the command the form built, and the Start button](screenshots/kickoff-08-command.png) |
 | **7. The network and the switches.** Guarded by default; hosts a case needs; local-only; browser tools, hard kill, tool writing, prepare only. | **8. The command, then Start.** The form shows the exact `swarm.sh start` line it will run. Starting needs the token from the server's startup line; watching never does. |
 
@@ -217,11 +228,12 @@ document, and the tools the agents will need. The flags below are the ones
 every published case ran with; `swarm.sh help start` explains each.
 
 ```bash
+# the method, fetched a skill at a time
 scripts/pack.sh install packs/computer-forensics-base
 scripts/pack.sh install packs/windows-forensics
 scripts/swarm.sh start \
   --models "openai/gpt-5.4=4,deepseek/deepseek-v4-pro=3" --n 7 \
-  --goal-file goals/case-42.md \
+  --goal-file library/windows/host-intrusion.md \
   --pack computer-forensics-base,windows-forensics \
   --inputs /evidence/case-42 \          # hashed, read-only in every VM
   --catalog --toolbox dfir --quarantine \
@@ -230,9 +242,14 @@ scripts/swarm.sh start \
   --case-id CASE-42 --examiner "Your name" --label case-42
 ```
 
-- **The image.** The packs choose it: these two boot the `disk` profile,
+- **The images.** The agents boot the base, and the packs choose the job
+  images: these two run their jobs in the `disk` profile,
   `dfirswarm-disk:dev-<arch>`, which holds the programs they name. Build it
-  as the base was built ([images/README.md](../images/README.md)).
+  as the base was built ([images/README.md](../images/README.md)); the build
+  fails if a program a pack requires is missing. A job names the image it
+  needs (`job_run profile=<name>`) or runs a pack tool in its pack's image,
+  and a pack tool the agent's own VM cannot run is run again there as a job
+  by itself.
 - **Evidence.** `--inputs DIR` hashes every file and mounts the directory
   read-only into every VM (`--inputs-copy` gives the run its own read-only
   copy), and `work/extracted/` and `work/quarantine/` are no-exec in every VM
@@ -241,17 +258,33 @@ scripts/swarm.sh start \
   copy, `--inputs-bind` guards the source directory in place; on macOS
   `--inputs-image case.dmg` attaches a disk image read-only; and nothing the
   agents extract can execute under `--quarantine`.
-- **The goal.** Copy a published one and change the questions: a case goal
-  carries the questions, a `## Definition of done` that names the report and
-  the ledger, and `## Checks` the agents cannot edit. The BelkaCTF goal is a
-  complete example:
+- **The goal.** The investigation library ([library/](../library/README.md))
+  ships an investigation for each kind of case: hosts, servers, memory, logs, captures,
+  malware, cloud tenants, phones, and the general work of triage, indicators
+  and timelines. Each carries the questions with the artefacts that answer
+  them, a `## Definition of done` that names the report and the ledger, and
+  `## Checks` the agents cannot edit. Load one in the console or name the
+  file with `--goal-file`, then change what your case asks. The BelkaCTF goal
+  is a worked example of the same shape:
   [docs/use-cases/belkactf/belkactf6-bogus-bill/goal.md](use-cases/belkactf/belkactf6-bogus-bill/goal.md).
+- **Method.** `--pack computer-forensics-base,windows-forensics` puts an
+  examiner's method in front of the swarm: the agents see a one-line index of
+  every skill and fetch a body only when they reach that artefact family, so
+  a pack the size of a textbook costs a few hundred tokens until it is used.
+  Twelve packs are in the repository ([packs.md](packs.md#7-the-packs-in-this-repository));
+  install what the case needs with `scripts/pack.sh install packs/<name>`, and
+  the console's **Packs** tab then says which skills the run read and which
+  it carried and never opened.
 - **Tools.** `--toolbox dfir` checks for Sleuth Kit, libewf, libbde,
   Volatility, YARA and the parsers a case needs and names what is missing
-  before the first agent starts: in a throwaway VM of the run's image, or on
-  the host in a host run. `--catalog` runs the first pass over the evidence
-  once, into `catalog/`, before any agent spends a token. With
-  `--allow-tool-forging` the agents write the tools the host does not have;
+  before the first agent starts: in a throwaway VM of the job image that
+  holds the run's packs, or on the host in a host run. `--catalog` takes the
+  census of the evidence and catalogues it with the packs' recipes into
+  `catalog/`. In a host run, or with `--no-jobs`, that is one first pass
+  before any agent spends a token; in a microVM run the recipes run as jobs
+  while the agents work, and what the jobs produce is catalogued in turn
+  (the derived catalogue; `--no-derived-catalog` turns it off). With
+  `--allow-tool-forging` the agents write the tools the image lacks;
   `swarm.sh tools <id> --save DIR` keeps them and `--tools-from DIR` hands them
   to the next swarm.
 - **The network.** Only the model providers are reachable. `--allow-host` adds
@@ -270,6 +303,14 @@ scripts/swarm.sh start \
   the kickoff's `Disk:` line says whether the volume that holds the runs is
   encrypted at rest. Keep the runs on a local, encrypted disk that is not
   synced: a copy of the evidence bound for a synced folder is refused.
+- **Custody.** `--inputs-hashes FILE` holds the evidence to the hashes your
+  imager recorded (md5sum, sha1sum or sha256sum lines), and a mismatch stops
+  the kickoff. `--custody-sign-key FILE` signs the custody verdict with your
+  ssh key, `--custody-timestamp-url URL` has it timestamped by an RFC 3161
+  authority, and `--time-reference URL` records a reference clock's offset
+  from this host's. Every check in the verdict has a status, and
+  `swarm.sh custody-verify <id>` checks the run against it later, writing
+  nothing.
 
 When the sentinel lands, `scripts/swarm.sh report <id>` renders the report
 with its custody section, `scripts/swarm.sh summary <id>` prints what the run
@@ -280,14 +321,20 @@ the whole run with a SHA-256 manifest. Every published case under
 Before you hand it over:
 
 ```bash
+scripts/swarm.sh custody-verify <id>                                  # the run, checked against its sealed custody verdict
 scripts/swarm.sh review <id> --accept 3 --examiner "Your name"        # or --reject / --amend N --note "why"
-scripts/swarm.sh review <id> --sign --examiner "Your name"            # sign off the ledger as it stands
+scripts/swarm.sh review <id> --sign --examiner "Your name"            # sign off the ledger and the report as they stand
 scripts/swarm.sh package <id> --sign                                  # sign the manifest with your ssh key
 scripts/swarm.sh verify runs/<id>/package --allowed-signers signers   # what the recipient runs
 ```
 
 Until an examiner reviews the ledger, the report says every finding is the
-agents' conclusion. `hold <id>` keeps a run from being purged or reused;
+agents' conclusion. The sign-off records the ledger's head and the report's
+hash (`work/report.md`, or the file `--report PATH` names), so an entry
+recorded or a report changed after it shows the sign-off is not current.
+`package --redact` takes out what a sensitive entry says and the files it
+cites, while every chain in the package still verifies, and `--with-outputs`
+adds the jobs' sealed outputs. `hold <id>` keeps a run from being purged or reused;
 `purge <id> --yes` deletes a finished run's material and leaves a
 destruction record. [usage.md](usage.md#after-a-run-review-package---sign-verify-export-hold-release-purge)
 has each command.

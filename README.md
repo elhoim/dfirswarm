@@ -79,12 +79,12 @@ The finish line on the right is the operator's: its checks are read from the reg
 | --- | --- | --- | --- |
 | `computer-forensics-base` | 11 | 13 | — |
 | `windows-forensics` | 24 | 20 | 3 |
-| `linux-forensics` | 8 | 5 | 2 |
+| `linux-forensics` | 10 | 6 | 2 |
 | `macos-forensics` | 8 | 4 | 1 |
-| `mobile-forensics` | 5 | 3 | 1 |
-| `memory-forensics` | 7 | 3 | 1 |
-| `network-forensics` | 6 | 3 | 1 |
-| `reverse-engineering` | 7 | 3 | 1 |
+| `mobile-forensics` | 7 | 3 | 1 |
+| `memory-forensics` | 9 | 3 | 1 |
+| `network-forensics` | 8 | 6 | 1 |
+| `reverse-engineering` | 7 | 4 | 1 |
 | `encrypted-containers` | 5 | 3 | 1 |
 | `cloud-forensics` | 6 | 3 | 1 |
 | `ransomware-response` | 7 | 2 | 1 |
@@ -93,7 +93,7 @@ The finish line on the right is the operator's: its checks are read from the reg
 A **pack** is a directory an operator installs once and names at kickoff: skills
 an agent fetches by name, tools seeded into the run, the host binaries the case
 needs, and goal templates with their own checks. **Twelve ship in this
-repository** under the same licence as the harness — 99 skills, 64 tools and 14
+repository** under the same licence as the harness: 107 skills, 69 tools and 14
 goal templates across Windows, Linux, macOS, mobile, memory, network, reverse
 engineering, encrypted containers, cloud, ransomware and triage collections,
 all on one base pack.
@@ -157,7 +157,7 @@ npm install                                 # microsandbox's msb comes with it
 # no model, no key, no Herdr: the protocol on files
 npm test
 
-# the agents' VM image, once: a run with no packs boots the base
+# the agents' VM image, once: every agent's VM boots the base
 # (amd64 in place of arm64 on an Intel or AMD Linux host)
 docker build -f images/base.Dockerfile -t dfirswarm-base:dev-arm64 images
 docker save dfirswarm-base:dev-arm64 -o /tmp/dfirswarm-base.tar
@@ -171,7 +171,7 @@ scripts/swarm.sh status <id>                # the id is printed at kickoff
 scripts/swarm.sh ui                         # the console, on 127.0.0.1 (--host 0.0.0.0 for the LAN)
 ```
 
-The goal is a markdown file that carries its own `## Definition of done` and `## Checks`; a goal without one does not start. A run with no packs boots the base image; a run with packs boots the smallest image profile that serves them, which you build the same way ([images/README.md](images/README.md)). `scripts/swarm.sh --help` lists the commands, `swarm.sh help start` every option. `swarm.sh start … --check` runs every refusal and preflight of that start and writes nothing, and `swarm.sh image-for --pack …` names the image those packs would boot. The console's **New swarm** form starts a swarm the same way, and defaults to a model Pi can use.
+The goal is a markdown file that carries its own `## Definition of done` and `## Checks`; a goal without one does not start. The agents boot the base image; a run with packs runs its tool work in job images, one per profile, which you build the same way ([images/README.md](images/README.md)) and which list their programs for the agents. `scripts/swarm.sh --help` lists the commands, `swarm.sh help start` every option. `swarm.sh start … --check` runs every refusal and preflight of that start and writes nothing, and `swarm.sh image-for --pack …` names the image that holds those packs. The console's **New swarm** form starts a swarm the same way, and defaults to a model Pi can use.
 
 In a VM the network is closed but for the model's hosts and the ones you allow. In a host run the egress guard is, on macOS, a proxy the panes are pointed at, which a process can ignore, and on Linux a network namespace with no other route out. The kickoff line and the run record say which one you got. Step by step, with the dry run and the no-key proof run: [docs/quick-start.md](docs/quick-start.md).
 
@@ -196,10 +196,10 @@ Two things to know before choosing. The netguard allowlist knows the hosts of Op
 
 Each agent runs in its own microVM unless the run says `--isolation host`; the guards of a host run are the operating system's where the host allows them. Either way the run record and the report's custody section say what was achieved on that host rather than what was asked for. [docs/safety.md](docs/safety.md) and [docs/sandbox-plan.md](docs/sandbox-plan.md) have the measurements.
 
-- **Each agent in its own microVM, by default.** On a Mac on Apple silicon or Linux with KVM, every agent's Pi runs in a VM of its own, built from the case's packs: the run is read-only in it but for the agent's own directories, the evidence is mounted read-only, the board is written for it on the host by one process that serves each seat's socket only to the VM holding that seat's token, the network is closed but for its models' hosts and the hosts you allow (every public host with `--no-netguard`), and no credential enters it, only a placeholder the host swaps on the way out, or with `--model-gateway` a seat token for a gateway on the host that holds the key. The stop, the snapshots of each VM's disk and a full re-hash of the evidence are taken on the host. A host that cannot boot the VMs is refused, with how to fix it; the kickoff never falls back to host processes on its own. [ADR 0009](docs/adr/0009-agents-live-in-microvms.md) has the design and its stated limits.
+- **Each agent in its own microVM, by default.** On a Mac on Apple silicon or Linux with KVM, every agent's Pi runs in a VM of its own, booted from the base image: the run is read-only in it but for the agent's own directories, the evidence is mounted read-only, the board is written for it on the host by one process that serves each seat's socket only to the VM holding that seat's token, the network is closed but for its models' hosts and the hosts you allow (every public host with `--no-netguard`), and no credential enters it, only a placeholder the host swaps on the way out, or with `--model-gateway` a seat token for a gateway on the host that holds the key. The packs' programs run in throwaway job VMs of their own images ([ADR 0010](docs/adr/0010-tool-work-runs-in-worker-vms-and-is-sealed.md)). The stop, the snapshots of each VM's disk and a full re-hash of the evidence are taken on the host. A host that cannot boot the VMs is refused, with how to fix it; the kickoff never falls back to host processes on its own. [ADR 0009](docs/adr/0009-agents-live-in-microvms.md) has the design and its stated limits.
 - **Or, unisolated, on the host.** `--isolation host` runs every agent as a Pi process on this machine, held by the guards below and nothing else. The bullets that say "pane" are a host run's.
 - **A write allowlist around every pane (host runs).** A pane writes inside its own run and Pi's agent directory, and nowhere else: not the examiner's home, not another case, not the run registry. macOS seatbelt profiles; on Linux, Landlock inside a user namespace, or either alone, with the record naming which ([docs/linux-plan.md](docs/linux-plan.md)). `--no-write-guard` turns it off and the record says so.
-- **Evidence read-only at the kernel.** In a VM run `--inputs DIR` is hashed and mounted read-only into every VM (`--inputs-copy` for a copy in the run). In a host run it is copied in, hashed and held read-only in every pane; `--inputs-bind` guards the source in place instead of copying 13 GB; `--inputs-image` attaches a disk image read-only. A write that lands by another route is healed from a pristine copy and announced on the board; every file is checked again at the end. `--catalog` runs the first pass over a disk or memory image before any agent spends a token; `--quarantine` makes anything extracted from the evidence unrunnable. [docs/inputs.md](docs/inputs.md).
+- **Evidence read-only at the kernel.** In a VM run `--inputs DIR` is hashed and mounted read-only into every VM (`--inputs-copy` for a copy in the run). In a host run it is copied in, hashed and held read-only in every pane; `--inputs-bind` guards the source in place instead of copying 13 GB; `--inputs-image` attaches a disk image read-only. A write that lands by another route is healed from a pristine copy and announced on the board; every file is checked again at the end. `--catalog` catalogues the evidence with the packs' recipes, before any agent spends a token in a host run and as jobs while the agents work in a microVM run; `--quarantine` makes anything extracted from the evidence unrunnable. [docs/inputs.md](docs/inputs.md).
 - **A record the panes cannot forge.** The only writer of `traces/events.jsonl` runs outside the sandbox and is reached over a socket in a directory the panes cannot write. Each line names the hash of the line before; the head of the chain is anchored beside the run, past the write guard; each line is attributed by a per-pane secret the collector holds. On Linux, where one pane can read a peer's environment, a gate in front of the collector attributes by process ancestry instead. The report verifies the chain and counts what it could not attribute.
 - **Claims before writes.** `edit`/`write` without a live lease is blocked; a shell write to a leased path is detected, snapshotted and announced on the board with the agent's id. Harness-owned files (`SWARM.md`, `team.json`, `budget.json`, `done/`, `locks/`, `threads/`, `traces/`) are refused as write targets.
 - **Two caps, one stop.** At the USD cap, the token cap or the wall clock every agent is steered once to `done(cannot_complete)`; two minutes later the harness writes `done/SWARM_DONE` itself and ends every session, in-flight call included. `--cap-per-agent` stops one agent without stopping the swarm. In a host run a stopped agent's next model call is not sent. In a VM run the hub holds the clock and applies the caps to what each seat reports; with `--model-gateway`, to what the host measured, and the gateway refuses a stopped seat's calls on the host.
