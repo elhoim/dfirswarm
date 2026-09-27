@@ -105,8 +105,7 @@ Commands:
   context <id>       Each agent's context history from the trace: peaks, lines crossed, hand-offs, summary cost
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
-  review verify export hold release purge image-for   After a run: sign-off, checks, export, retention; the image packs boot (help <command>)
-  releases examiner timestamp rerun certify   The report's releases, the examiners who adopt them, a token obtained later, a job run again, a certification template (help <command>)
+  examiner review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
   say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> changes its caps (help cap)
   stop <id>          Stop a run and record how it ended
