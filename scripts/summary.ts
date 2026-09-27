@@ -172,7 +172,8 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   lines.push(`# Run summary: ${id || "(no id)"}${label ? ` — ${label}` : ""}`, "");
   lines.push(`- State: ${run?.state ?? "unknown (no registry entry)"} · sentinel ${sentinel ? "present" : "absent"}`);
   lines.push(`- Started: ${startedAt || "unknown"} · Duration: ${durationHuman(durationMs)}${endedAt ? ` (to ${sentinel ? "the sentinel" : "the last trace event"} at ${endedAt})` : ""}`);
-  if (run?.case_id || run?.examiner) lines.push(`- Case: ${run?.case_id || "—"} · Examiner: ${run?.examiner || "—"}`);
+  // What the kickoff was told about who ran the run: never the examiner who adopts a report (swarm.sh releases says who did).
+  if (run?.case_id || run?.examiner) lines.push(`- Case: ${run?.case_id || "—"} · Run by: ${run?.examiner ? `${run.examiner} (as the kickoff recorded it; not an enrolled examiner)` : "—"}`);
   // How the agents were held, and what the host could say once they were gone.
   const iso = (run as { isolation?: { mode?: string; image?: string; image_digest?: string } } | null)?.isolation;
   const gateway = gatewayRecordOf(run as Record<string, unknown> | null);
