@@ -6077,6 +6077,40 @@ export function writtenToOf(given: unknown, mapped: unknown, job: string): Recor
   return moved;
 }
 
+/**
+ * For the answer of a tool rerun as a job: each place under the job's staging
+ * directory its output names — <run>/.jobs/<id>/…, or .jobs/<id>/… from the
+ * run's directory, where the worker ran it — and where that place is now the
+ * job is sealed, store/jobs/<id>/out/…. The output itself is sealed and stays
+ * as it is; this says where to find what it names. Generic: it reads the
+ * job's own directory in any text, never a tool's format.
+ */
+export function stagedPaths(text: string, root: string, job: string): Record<string, string> {
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const base = posix.normalize(root).replace(/\/+$/, "");
+  const stage = `.jobs/${job}`;
+  const re = new RegExp(`(?<![\\w./-])(?:${base ? `${esc(base)}/|` : ""}\\./)?${esc(stage)}(?=$|[/\\s"'\`<>,;:)\\]}])(?:/[^\\s"'\`<>]*)?`, "g");
+  const paths: Record<string, string> = {};
+  for (const m of text.matchAll(re)) {
+    const printed = m[0].replace(/(?<=.)[.,;:)\]}]+$/, "");
+    paths[printed] = `store/jobs/${job}/out${printed.slice(printed.indexOf(stage) + stage.length).replace(/\/+$/, "")}`;
+  }
+  return paths;
+}
+
+/** stagedPaths over a whole file, a line at a time: a job's sealed stdout.log. */
+export async function stagedPathsIn(file: string, root: string, job: string): Promise<Record<string, string>> {
+  const handle = await open(file, "r");
+  try {
+    const paths: Record<string, string> = {};
+    const lines = createInterface({ input: handle.createReadStream({ autoClose: false, encoding: "utf8" }), crlfDelay: Infinity });
+    for await (const line of lines) Object.assign(paths, stagedPaths(line, root, job));
+    return paths;
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function runForgedTool(
   sandboxRoot: string,
   manifest: ForgedToolManifest,

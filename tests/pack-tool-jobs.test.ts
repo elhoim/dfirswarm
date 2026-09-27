@@ -10,7 +10,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { heldOwnPaths, lacksProgram, ownPathsToOut, writtenToOf } from "../extensions/protocol.ts";
+import { heldOwnPaths, lacksProgram, ownPathsToOut, stagedPaths, stagedPathsIn, writtenToOf } from "../extensions/protocol.ts";
 import { LIB, ROOT, runPy, withCwd } from "./tool-library-harness.ts";
 
 const run = (stderr: string, exit_code: number | null = 1, stdout = "") => ({ exit_code, stdout, stderr });
@@ -128,6 +128,8 @@ test("icat_extract, rerun as a job with the output it was given, writes it to $O
       assert.equal(r.code, 0, r.stderr + r.stdout);
       assert.equal(await readFile(join(out, "extracted", "vault.vhdx"), "utf8"), "extracted-bytes");
       assert.deepEqual(writtenToOf(given, mapped, "j000013"), { "work/extracted/s01/vault.vhdx": "store/jobs/j000013/out/extracted/vault.vhdx" });
+      // What it printed names the staging place; `paths` names the sealed one.
+      assert.deepEqual(stagedPaths(r.stdout, cwd, "j000013"), { [join(out, "extracted", "vault.vhdx")]: "store/jobs/j000013/out/extracted/vault.vhdx" });
       // Unmapped, the worker could not write it: what the round saw.
       const unmapped = await runPy(script, cwd, given, bin, { AGENT_ID: "s01", JOB_ID: "j000013", OUT: out });
       assert.notEqual(unmapped.code, 0);
@@ -135,6 +137,38 @@ test("icat_extract, rerun as a job with the output it was given, writes it to $O
       await chmod(join(cwd, "work"), 0o755);
       await chmod(join(cwd, "work", "extracted", "s01"), 0o755);
     }
+  });
+});
+
+test("the places a rerun's output names under its staging directory are mapped to where the job sealed them", async () => {
+  // A tool run as a job prints what it wrote as the worker saw it: under
+  // <run>/.jobs/<id>/, or .jobs/<id>/ from the run's directory. That place is
+  // gone once the job is sealed; the output stays as it is, and `paths` says
+  // where each place it names is now.
+  const root = "/runs/s9";
+  const out = [
+    '{"path": "/runs/s9/.jobs/j000013/extracted/vault.vhdx", "size": 3}',
+    '{"out_dir": ".jobs/j000013/zeek", "logs": {"conn": {"file": ".jobs/j000013/zeek/conn.log"}}}',
+    "wrote ./.jobs/j000013/carved/a.bin, and /runs/s9/.jobs/j000013 holds the rest.",
+    "left alone: .jobs/j000014/other, foo.jobs/j000013/x, /elsewhere/.jobs/j000013/y, work/s01/.jobs/j000013/z",
+  ].join("\n");
+  assert.deepEqual(stagedPaths(out, root, "j000013"), {
+    "/runs/s9/.jobs/j000013/extracted/vault.vhdx": "store/jobs/j000013/out/extracted/vault.vhdx",
+    ".jobs/j000013/zeek": "store/jobs/j000013/out/zeek",
+    ".jobs/j000013/zeek/conn.log": "store/jobs/j000013/out/zeek/conn.log",
+    "./.jobs/j000013/carved/a.bin": "store/jobs/j000013/out/carved/a.bin",
+    "/runs/s9/.jobs/j000013": "store/jobs/j000013/out",
+  });
+  await withCwd(async (cwd) => {
+    // The sealed stdout.log is read whole, a line at a time: past the page an
+    // answer carries.
+    const lines = Array.from({ length: 3000 }, (_, i) => `row ${i}`);
+    lines.push(`${cwd}/.jobs/j000021/csv/usn.csv`);
+    await mkdir(join(cwd, "store", "jobs", "j000021"), { recursive: true });
+    await writeFile(join(cwd, "store", "jobs", "j000021", "stdout.log"), `${lines.join("\n")}\n`);
+    assert.deepEqual(await stagedPathsIn(join(cwd, "store", "jobs", "j000021", "stdout.log"), cwd, "j000021"), {
+      [`${cwd}/.jobs/j000021/csv/usn.csv`]: "store/jobs/j000021/out/csv/usn.csv",
+    });
   });
 });
 

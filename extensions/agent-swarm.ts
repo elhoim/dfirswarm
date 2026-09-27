@@ -64,6 +64,8 @@ import {
   ownPathsToOut,
   heldOwnPaths,
   writtenToOf,
+  stagedPaths,
+  stagedPathsIn,
   packSecretsFor,
   redactSecrets,
   healInputs,
@@ -2612,10 +2614,23 @@ export default function (pi: ExtensionAPI) {
           // Where each output path the agent gave was written instead: the
           // job's sealed output, which it reads and cites from there.
           const moved = res.job ? writtenToOf(params ?? {}, args, res.job) : {};
+          // The job's output names the places it wrote as the worker saw them,
+          // under <run>/.jobs/<id>/, which is gone once the job is sealed. The
+          // output stays as sealed; `paths` says where each of those places is
+          // now. Read from the page the hub returned (current) and from the
+          // sealed stdout.log whole (this VM's view of it may lag, and then
+          // the page is what there is).
+          const paths: Record<string, string> = {};
+          if (res.job) {
+            const page = (res.result.stdout as { text?: unknown } | undefined)?.text;
+            if (typeof page === "string") Object.assign(paths, stagedPaths(page, toolCtx.cwd, res.job));
+            Object.assign(paths, await stagedPathsIn(join(toolCtx.cwd, "store", "jobs", res.job, "stdout.log"), toolCtx.cwd, res.job).catch(() => ({})));
+          }
           const answer = {
             ran_as_job: res.job,
             why: `${missing}: this VM is the base image, so ${manifest.name} ran in its pack's job image`,
             ...(Object.keys(moved).length ? { written_to: moved } : {}),
+            ...(Object.keys(paths).length ? { paths } : {}),
             ...res.result,
           };
           await logEvent(toolCtx.cwd, agentId, manifest.name, redactSecrets((params ?? {}) as Record<string, unknown>, secrets), redactSecrets({ ok: res.ok, forged: true, ran_as_job: res.job, why: answer.why, state: res.result.state, status: res.result.status }, secrets), Date.now() - started);

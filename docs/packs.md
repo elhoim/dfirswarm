@@ -346,8 +346,11 @@ that held nothing when the agent called it is given as a place under `$OUT`
 (`work/<id>/x` as `$OUT/x`, `work/extracted/<id>/x` as `$OUT/extracted/x`,
 and so on), and the answer's `written_to` names where it is now,
 `store/jobs/<job>/out/…`; one that already held a file or a directory is what
-the tool reads, and the job reads it where it is. The harness knows the
-agent's directories, never a tool's parameters.
+the tool reads, and the job reads it where it is. The tool's own output names
+the places it wrote as the worker saw them, under `<run>/.jobs/<job>/`; the
+answer's `paths` maps each to where it is sealed, and the output stays as it
+is. The harness knows the agent's directories and the job's, never a tool's
+parameters or format.
 
 A tool that writes where its caller says (an `output`, an `out_file`, an
 `out_dir`, a mount) resolves the path first, links included, and refuses a
