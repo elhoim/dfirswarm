@@ -637,6 +637,14 @@ out["peers_extracted_exec"] = mount_noexec(os.path.join(S, "work", "extracted", 
 out["peers_quarantine_exec"] = mount_noexec(os.path.join(S, "work", "quarantine", ".peer"))
 out["tool_output"] = can_write(os.path.join(S, "tool-output", A, ".vm-probe"))
 out["session"] = can_write(os.path.join(S, ".pi-sessions", A, ".vm-probe"))
+# What of the peers' sessions this seat can see: names under .pi-sessions/
+# other than its own. The kickoff makes every seat's directory before the
+# VMs, so on the floor they would all be listed.
+try:
+    seen = [d for d in os.listdir(os.path.join(S, ".pi-sessions")) if d != A]
+    out["peers_sessions"] = "hidden" if not seen else "visible:" + ",".join(sorted(seen))
+except OSError as e:
+    out["peers_sessions"] = "error:" + errno.errorcode.get(e.errno, str(e.errno))
 inputs = os.path.join(S, "inputs")
 if os.path.exists(inputs):
     out["inputs"] = can_write(os.path.join(os.path.realpath(inputs), ".vm-probe"))
@@ -820,6 +828,7 @@ export function probeChecks(probe: Record<string, unknown>, expectInputs: boolea
   if (probe.peers_quarantine_exec !== undefined) add("a peer's work/quarantine/ executes", "noexec", probe.peers_quarantine_exec, probe.peers_quarantine_exec === "noexec", "what a peer quarantined cannot run here", `a peer's work/quarantine/ can execute here (${String(probe.peers_quarantine_exec)})`);
   add("its tool-output/", "rw", probe.tool_output, probe.tool_output === "rw", "the seat's whole tool outputs are kept", `its tool-output/ is ${String(probe.tool_output)}, not writable`);
   add("its Pi session directory", "rw", probe.session, probe.session === "rw", "the seat's Pi sessions are kept", `its Pi session directory is ${String(probe.session)}, not writable`);
+  if (probe.peers_sessions !== undefined) add("a peer's Pi sessions", "hidden", probe.peers_sessions, probe.peers_sessions === "hidden", "the seat sees its own Pi session and no peer's", `a peer's Pi session is readable here (${String(probe.peers_sessions)})`);
   if (expectInputs) {
     add("inputs/", "ro", probe.inputs, probe.inputs === "ro", "the evidence is read-only in the VM", `inputs/ is ${String(probe.inputs)}, not read-only`);
     if (probe.inputs_exec !== undefined) add("the evidence executes", "noexec", probe.inputs_exec, probe.inputs_exec === "noexec", "nothing in the evidence can run", `the evidence can execute in the VM (${String(probe.inputs_exec)})`);
@@ -861,6 +870,26 @@ export function probeTargets(providers: ProviderSpec[]): string[] {
   return [...out].sort();
 }
 
+/**
+ * What a seat's VM shows at the run's `.pi-sessions/`: a directory of the
+ * run's hub that holds one empty directory, the mount point of the seat's own
+ * session hole, and nothing else. A session transcript is its seat's private
+ * record (its system prompt, every message, its hand-off notes); through the
+ * read-only floor every seat could read all of them, and on run s306463 one
+ * grepped its peers' for an answer. The host reads and seals every session
+ * as before; only a seat's view of its peers' is covered.
+ */
+export function sessionsVeil(spec: Pick<VmSpec, "hub_dir">, agent: string): string {
+  return join(spec.hub_dir, "sessions-veil", agent);
+}
+
+/** Make a seat's veil before its VM mounts it: its own mount point in it, and nothing else. */
+export async function makeSessionsVeil(spec: Pick<VmSpec, "hub_dir">, agent: string): Promise<string> {
+  const veil = sessionsVeil(spec, agent);
+  await mkdir(join(veil, agent), { recursive: true });
+  return veil;
+}
+
 /** Every mount one agent's VM gets: the run's own, then this agent's writable holes. */
 export function mountsFor(spec: VmSpec, agent: string): Mount[] {
   const S = spec.sandbox;
@@ -873,6 +902,9 @@ export function mountsFor(spec: VmSpec, agent: string): Mount[] {
   // noexec — a peer's as well as one's own: the floor under it is not, and a
   // file a peer extracted and made executable would otherwise run here. (A
   // guest mount flag stops an accident, not a root that means to run it.)
+  // `.pi-sessions/` is covered the same way: the veil over it shows the seat
+  // its own session hole and no peer's (a guest root that unmounts the veil
+  // reads the floor under it, as with no-exec).
   return [
     { host: S, readonly: true },
     ...spec.mounts,
@@ -882,6 +914,7 @@ export function mountsFor(spec: VmSpec, agent: string): Mount[] {
     { host: join(S, "work", "extracted", agent), noexec: true },
     { host: join(S, "work", "quarantine", agent), noexec: true },
     { host: join(S, "tool-output", agent) },
+    { host: sessionsVeil(spec, agent), guest: join(S, ".pi-sessions"), readonly: true },
     { host: join(S, ".pi-sessions", agent) },
     ...(spec.late_mounts ?? []),
   ];
@@ -1050,6 +1083,7 @@ async function createOne(
   const name = vmName(spec.run, agent.id);
   const mounts = mountsFor(spec, agent.id);
   for (const m of mounts) if (!m.readonly) await mkdir(m.host, { recursive: true });
+  await makeSessionsVeil(spec, agent.id);
   // The shares every seat's corner sits in exist before they are mounted.
   for (const d of ["extracted", "quarantine"]) await mkdir(join(spec.sandbox, "work", d), { recursive: true });
   const plan = seatPlan(spec, agent, allSecrets, gateway);
