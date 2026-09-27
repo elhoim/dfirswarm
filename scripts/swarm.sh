@@ -105,7 +105,7 @@ Commands:
   context <id>       Each agent's context history from the trace: peaks, lines crossed, hand-offs, summary cost
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
-  examiner review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
+  examiner machine review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
   say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> changes its caps (help cap)
   stop <id>          Stop a run and record how it ended
@@ -173,7 +173,7 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
       [--cap-per-agent USD] [--cap-per-agent-tokens N] [--cap-tokens N] [--idle-nudge-sec N] [--allow-tool-forging]
       [--no-self-compact] [--compact-at SPEC] [--compact-warn-at SPEC] [--compact-notice-at SPEC]
       [--compact-prompt-file FILE] [--compact-model P/ID] [--inbox-page-chars N]
-      [--allow-install] [--no-pypi] [--no-read DIR]...
+      [--allow-install] [--no-pypi] [--no-read DIR]... [--accept-signer-exposure]
       [--tools-from DIR] [--inputs DIR]... [--inputs-enforce auto|on|off]
       [--inputs-max-mb N] [--inputs-max-files N] [--catalog] [--toolbox SETS|auto|off] [--toolbox-required]
       [--quarantine] [--case-id ID] [--examiner NAME] [--allow-host HOST]...
@@ -352,9 +352,23 @@ Evidence
   --no-read DIR       A directory the panes may not read, denied at the kernel;
                       repeatable. Reads are open by design, so this is narrow on
                       purpose: material about the case the agents must derive
-                      rather than find, a previous run's findings on the same
-                      evidence above all. The record says whether the host could
-                      apply it (no_read_applied).
+                      rather than find. Every earlier run's sandbox in the
+                      registry and the examiners' reviews are denied without it
+                      (earlier_runs_hidden), and so is where the signing keys
+                      are kept (signer_isolation). The record says whether the
+                      host could apply it (no_read_applied).
+  --accept-signer-exposure
+                      Start a host run whose panes no kernel guard holds
+                      (--no-write-guard, or a host without one) although a
+                      signing key of this install exists: the machine key, an
+                      enrolled examiner's key, the custody key. Without it that
+                      run is refused. The run records signer_keys_hidden: false
+                      and what was exposed, and the kickoff says to rotate
+                      (swarm.sh machine rotate; an examiner's new key is a new
+                      enrolment). With a guard the keys are denied to the panes
+                      (each home's machine/ and examiners/, SWARM_SIGNERS_HOME,
+                      each examiner's key file, the ssh-agent's socket), and a
+                      guard that cannot deny one of them refuses the run.
   --no-seal-herdr     Let the panes reach Herdr's control socket. By default
                       the write guard denies it: the socket authenticates
                       nobody, and `layout.apply` through it starts a process
@@ -1368,6 +1382,289 @@ fsguard_can_mask() {
   case "$1" in seatbelt|linux|mountns) return 0 ;; *) return 1 ;; esac
 }
 
+# --- the signers' keys, kept out of a host run's panes --------------------
+#
+# A release is sealed by the install's machine key (at stop, unattended, so
+# it has no passphrase) and adopted with an enrolled examiner's key
+# (scripts/signers.ts). A microVM mounts neither. A host run's panes can read
+# the whole machine but what is denied at the kernel, so every place those
+# keys are kept is denied, the ssh-agent that may hold one is refused, and a
+# run whose panes could reach a key is not started unless the operator says
+# so (--accept-signer-exposure), which the run then records.
+
+# Where signers.ts keeps the machine key and the examiners now.
+signers_home() {
+  printf '%s\n' "${SWARM_SIGNERS_HOME:-${DFIRSWARM_HOME:-$HOME/.dfirswarm}}"
+}
+
+# Every home that may hold signers: $DFIRSWARM_HOME, and SWARM_SIGNERS_HOME
+# when it is set (a key made before it was set is still where it was made).
+signer_homes() {
+  local dh="${DFIRSWARM_HOME:-$HOME/.dfirswarm}"
+  printf '%s\n' "$dh"
+  [[ -n "${SWARM_SIGNERS_HOME:-}" && "$SWARM_SIGNERS_HOME" != "$dh" ]] && printf '%s\n' "$SWARM_SIGNERS_HOME"
+  return 0
+}
+
+# Paths on stdin, resolved (against this directory when relative, links
+# followed, a missing tail kept), each once and in order. The kernel rules
+# match what a path really is; a relative DFIRSWARM_HOME is not dropped.
+real_paths() {
+  python3 -c '
+import os, sys
+seen = set()
+for line in sys.stdin:
+    p = line.rstrip("\n")
+    if not p:
+        continue
+    r = os.path.realpath(p)
+    if r not in seen:
+        seen.add(r)
+        print(r)
+'
+}
+
+# path_covers <a> <b>: whether b is a, or lies beneath it.
+path_covers() {
+  [[ "$2" == "$1" || "$2" == "${1%/}/"* ]]
+}
+
+# The key path each enrolled examiner's record names: read from the record,
+# never from the key.
+examiner_key_paths() {
+  local h rec
+  while IFS= read -r h; do
+    for rec in "$h"/examiners/*.json; do
+      [[ -f "$rec" ]] || continue
+      jq -r 'select(.kind == "examiner") | .key.path | strings | select(startswith("/"))' "$rec" 2>/dev/null || true
+    done
+  done < <(signer_homes)
+}
+
+# signer_paths [custody key]: every path a signing key of this install is
+# kept under, resolved, one a line: each home's machine/ and examiners/, the
+# whole of SWARM_SIGNERS_HOME when it is set, each examiner's key as its
+# record names it (and the private half beside a public one), and the key
+# custody is signed with, when one is given.
+signer_paths() {
+  local h key
+  {
+    while IFS= read -r h; do
+      printf '%s\n' "$h/machine" "$h/examiners"
+    done < <(signer_homes)
+    [[ -n "${SWARM_SIGNERS_HOME:-}" ]] && printf '%s\n' "$SWARM_SIGNERS_HOME"
+    while IFS= read -r key; do
+      printf '%s\n' "$key"
+      [[ "$key" == *.pub && -e "${key%.pub}" ]] && printf '%s\n' "${key%.pub}"
+    done < <(examiner_key_paths)
+    [[ -n "${1:-}" ]] && printf '%s\n' "$1"
+    true
+  } | real_paths
+}
+
+# signer_keys_present [custody key]: each signing key of this install whose
+# file is there (it is looked for, never opened), as "what<TAB>path".
+signer_keys_present() {
+  local h f rec id key
+  {
+    while IFS= read -r h; do
+      [[ -f "$h/machine/release_ed25519" ]] && printf 'the machine key\t%s\n' "$h/machine/release_ed25519"
+      for f in "$h"/machine/retired/*/release_ed25519; do
+        [[ -f "$f" ]] && printf 'a retired machine key\t%s\n' "$f"
+      done
+      for rec in "$h"/examiners/*.json; do
+        [[ -f "$rec" ]] || continue
+        id="$(jq -r '.id // "?"' "$rec" 2>/dev/null || echo "?")"
+        key="$(jq -r 'select(.kind == "examiner") | .key.path | strings' "$rec" 2>/dev/null || true)"
+        [[ "$key" == *.pub ]] && key="${key%.pub}"
+        [[ -n "$key" && -f "$key" ]] && printf "examiner %s's key\t%s\n" "$id" "$key"
+      done
+      for f in "$h"/examiners/keys/*; do
+        [[ -f "$f" && "$f" != *.pub ]] && printf 'an examiner key made at enrolment\t%s\n' "$f"
+      done
+    done < <(signer_homes)
+    [[ -n "${1:-}" && -f "$1" ]] && printf 'the custody signing key\t%s\n' "$1"
+    true
+  } | awk -F'\t' '!seen[$2]++'
+}
+
+# The ssh-agent sockets a pane could reach, as fsguard takes them:
+# "path<TAB>socket" for the one SSH_AUTH_SOCK names, "tree<TAB>dir" for
+# launchd's per-session agent on macOS (whose directory holds that socket
+# alone; launchd keeps it whether or not this shell names it). An agent
+# holds keys unlocked: whoever reaches its socket signs with them.
+agent_socket_rules() {
+  local s real seen=" " cands=("${SSH_AUTH_SOCK:-}")
+  if [[ "$(uname -s)" == Darwin ]]; then
+    cands+=("$(launchctl getenv SSH_AUTH_SOCK 2>/dev/null || true)")
+  fi
+  for s in "${cands[@]}"; do
+    [[ -n "$s" && "$s" == /* && -S "$s" ]] || continue
+    real="$(printf '%s\n' "$s" | real_paths)"
+    [[ -n "$real" ]] || continue
+    case "$seen" in *" $real "*) continue ;; esac
+    seen+="$real "
+    if [[ "$real" == */com.apple.launchd.*/Listeners ]]; then
+      printf 'tree\t%s\n' "$(dirname "$real")"
+    else
+      printf 'path\t%s\n' "$real"
+    fi
+  done
+  return 0
+}
+
+# The write guard a host run's panes would get, before the sandbox exists
+# (start --check): what fsguard picks on this host, and none without a write
+# allowlist or with --no-write-guard. The kickoff decides it again for real.
+predicted_write_guard_mode() { # <write_guard 0|1>
+  [[ "$1" -eq 1 ]] || { echo none; return 0; }
+  local m
+  m="$(fsguard_mode "$ROOT" auto)"
+  fsguard_rw_capable "$m" "$ROOT" || m="none"
+  echo "$m"
+}
+
+# signer_guard <mode> <accept 0|1> <custody key> [rw:PATH | keep:PATH | mount:PATH]...
+#
+# Whether this run's agents can be kept from the signing keys, and how.
+# <mode> is what holds them: microvm, or the host write guard (seatbelt,
+# linux, mountns, landlock, none). rw: paths are the ones the panes write
+# (the sandbox, Pi's agent directory): a key may not be kept inside one.
+# keep: paths are what they must still read (the harness, the evidence, the
+# packs): a denied path may not hold one. mount: paths are what every VM
+# mounts: a key may not lie in one. Sets
+#   SIGNER_NO_READ      the paths to deny to the panes (host guards only)
+#   SIGNER_SOCKETS      the agent sockets to deny, as agent_socket_rules gives them
+#   SIGNER_KEYS_HIDDEN  true | false
+#   SIGNER_EXPOSED      what a pane could reach, when they are not hidden
+#   SIGNER_ACCEPTED     1 when --accept-signer-exposure is what let the run start
+#   SIGNER_WHY          one sentence for the record
+# and returns 2, after saying why, when the run must not start.
+signer_guard() {
+  local mode="$1" accept="$2" custody_key="$3" p k line what
+  shift 3
+  local rw=() keep=() mounts=()
+  # Resolved as the signers' paths are, so a link or /var for /private/var
+  # does not make two names of one directory look apart.
+  while IFS= read -r p; do [[ -n "$p" ]] && rw+=("$p"); done < <(for p in "$@"; do [[ "$p" == rw:?* ]] && printf '%s\n' "${p#rw:}"; done | real_paths)
+  while IFS= read -r p; do [[ -n "$p" ]] && keep+=("$p"); done < <(for p in "$@"; do [[ "$p" == keep:?* ]] && printf '%s\n' "${p#keep:}"; done | real_paths)
+  while IFS= read -r p; do [[ -n "$p" ]] && mounts+=("$p"); done < <(for p in "$@"; do [[ "$p" == mount:?* ]] && printf '%s\n' "${p#mount:}"; done | real_paths)
+  SIGNER_NO_READ=() SIGNER_SOCKETS=() SIGNER_EXPOSED=() SIGNER_ACCEPTED=0 SIGNER_KEYS_HIDDEN=false SIGNER_WHY=""
+  while IFS= read -r p; do [[ -n "$p" ]] && SIGNER_NO_READ+=("$p"); done < <(signer_paths "$custody_key")
+  while IFS= read -r line; do [[ -n "$line" ]] && SIGNER_SOCKETS+=("$line"); done < <(agent_socket_rules)
+  case "$mode" in
+    microvm)
+      for p in ${SIGNER_NO_READ[@]+"${SIGNER_NO_READ[@]}"}; do
+        for k in ${mounts[@]+"${mounts[@]}"}; do
+          if path_covers "$k" "$p"; then
+            echo "BLOCKER: $p, where a signing key of this install is kept, lies in $k, which every VM mounts: the agents could read it. Keep the signers outside the harness, the packs, the evidence and the run (SWARM_SIGNERS_HOME)." >&2
+            return 2
+          fi
+        done
+      done
+      SIGNER_NO_READ=() SIGNER_SOCKETS=()
+      SIGNER_KEYS_HIDDEN=true
+      SIGNER_WHY="no VM mounts a path a signing key is kept under, and no VM reaches a socket of this host"
+      return 0 ;;
+    none)
+      while IFS=$'\t' read -r what p; do
+        [[ -n "$p" ]] && SIGNER_EXPOSED+=("$what ($p)")
+      done < <(signer_keys_present "$custody_key")
+      # An examiner whose record names a public key signs through an agent
+      # (or a hardware key): the agent's socket is where that key is.
+      local held
+      held="$(examiner_key_paths)"
+      if grep -q '\.pub$' <<<"$held"; then
+        for line in ${SIGNER_SOCKETS[@]+"${SIGNER_SOCKETS[@]}"}; do
+          SIGNER_EXPOSED+=("the ssh-agent at ${line#*$'\t'}, which may hold an enrolled examiner's key")
+        done
+      fi
+      SIGNER_NO_READ=() SIGNER_SOCKETS=()
+      if [[ ${#SIGNER_EXPOSED[@]} -eq 0 ]]; then
+        SIGNER_WHY="no kernel guard, so nothing was hidden; no signing key existed at kickoff"
+        return 0
+      fi
+      if [[ "$accept" -ne 1 ]]; then
+        local listed
+        listed="$(printf '%s; ' "${SIGNER_EXPOSED[@]}")"
+        echo "BLOCKER: no kernel guard holds this run's panes (write guard: none), and they could read what signs this install's releases: ${listed%; }." >&2
+        echo "         Run in microVMs (the default), keep the write guard on, or add --accept-signer-exposure to run anyway: the run then records that the keys were exposed, and they should be rotated after it (swarm.sh machine rotate; an examiner's new key is a new enrolment)." >&2
+        return 2
+      fi
+      SIGNER_ACCEPTED=1
+      SIGNER_WHY="no kernel guard, so nothing was hidden; the operator accepted the exposure (--accept-signer-exposure)"
+      return 0 ;;
+  esac
+  # A host guard. What it denies must not take away what the panes need,
+  # and it must be able to deny all of it.
+  for p in ${SIGNER_NO_READ[@]+"${SIGNER_NO_READ[@]}"}; do
+    for k in ${rw[@]+"${rw[@]}"}; do
+      if path_covers "$k" "$p"; then
+        echo "BLOCKER: $p, where a signing key of this install is kept, is inside $k, which the panes write. Keep keys out of the run and out of Pi's directory." >&2
+        return 2
+      fi
+    done
+    for k in ${rw[@]+"${rw[@]}"} ${keep[@]+"${keep[@]}"}; do
+      if path_covers "$p" "$k"; then
+        echo "BLOCKER: $p, where a signing key of this install is kept, holds $k, which the panes need: it cannot be denied to them without that. Keep the signers apart (SWARM_SIGNERS_HOME)." >&2
+        return 2
+      fi
+    done
+  done
+  if [[ ${#SIGNER_SOCKETS[@]} -gt 0 ]] && ! fsguard_can_mask "$mode"; then
+    echo "BLOCKER: this host's write guard ($mode) cannot refuse a socket, and an ssh-agent is reachable at ${SIGNER_SOCKETS[0]#*$'\t'}: a pane could sign with every key it holds. Stop that agent (or log in without agent forwarding), or run in microVMs (the default)." >&2
+    return 2
+  fi
+  SIGNER_KEYS_HIDDEN=true
+  SIGNER_WHY="denied to the panes at the kernel ($mode): ${#SIGNER_NO_READ[@]} path(s) where signing keys are kept"
+  [[ ${#SIGNER_SOCKETS[@]} -gt 0 ]] && SIGNER_WHY+=", and ${#SIGNER_SOCKETS[@]} ssh-agent socket(s)"
+  if [[ "$accept" -eq 1 ]]; then
+    echo "NOTE:         --accept-signer-exposure: nothing to accept, the signing keys are denied to the panes ($mode)"
+  fi
+  return 0
+}
+
+# earlier_run_sandboxes <registry> <this sandbox> [kept path]...: the earlier
+# runs' sandboxes a host run's panes are denied, from the registry: each that
+# is there, but this run's own. "hide<TAB>path", or "skip<TAB>path<TAB>why"
+# for one that cannot be denied without denying what the panes need (this
+# run's sandbox, the harness, Pi's directory, the evidence, the registry).
+# Not the whole runs directory: the registry the finish line is read from is
+# in it, and so is this run.
+earlier_run_sandboxes() {
+  python3 - "$@" <<'PY'
+import json, os, sys
+registry, current = sys.argv[1], os.path.realpath(sys.argv[2])
+kept = [os.path.realpath(p) for p in sys.argv[3:] if p]
+try:
+    runs = json.load(open(registry, encoding="utf-8")).get("runs", [])
+except Exception:
+    runs = []
+def under(a, b):
+    return a == b or a.startswith(b.rstrip("/") + "/")
+seen = set()
+for r in runs if isinstance(runs, list) else []:
+    sb = r.get("sandbox") if isinstance(r, dict) else None
+    if not isinstance(sb, str) or not sb.startswith("/") or not os.path.isdir(sb):
+        continue
+    real = os.path.realpath(sb)
+    if real in seen or real == current:
+        continue
+    seen.add(real)
+    if under(current, real):
+        print(f"skip\t{real}\tit holds this run's sandbox")
+        continue
+    if under(real, current):
+        print(f"skip\t{real}\tit is inside this run's sandbox")
+        continue
+    hit = next((k for k in kept if under(k, real)), None)
+    if hit:
+        print(f"skip\t{real}\tit holds {hit}, which the panes need")
+        continue
+    print(f"hide\t{real}")
+PY
+}
+
 # What this host can do, probed once at kickoff and written to the record.
 # The distribution is not the question; the capability is: Ubuntu 24.04
 # ships user namespaces switched off for unconfined programs, Docker's
@@ -1958,8 +2255,10 @@ write_fsguard_hook() {
 # hands ZDOTDIR back to the user's own configuration (or keeps this directory,
 # whose empty .zshrc keeps zsh's new-user wizard out of the pane, when the
 # home has none). HOME is put back first: on an account whose login shell is
-# bash, the pane was started with the sandbox's .bash/ as HOME.
+# bash, the pane was started with the sandbox's .bash/ as HOME. The
+# operator's ssh-agent is not the pane's: its keys sign as the examiner.
 export HOME=$(printf '%q' "$home")
+unset SSH_AUTH_SOCK
 if [[ -f "\$HOME/.zshrc" ]]; then
   export ZDOTDIR="\$HOME"
 else
@@ -1978,7 +2277,9 @@ HOOK
 # scripts/fsguard.sh so the guarded paths hold at the kernel for everything
 # started from it, and then reads the user's own bash configuration. The
 # shell re-run is \$BASH, the one Herdr started, not the first bash on PATH.
+# The operator's ssh-agent is not the pane's: its keys sign as the examiner.
 export HOME=$(printf '%q' "$home")
+unset SSH_AUTH_SOCK
 if [[ \$- == *i* && -z "\${SWARM_FSGUARD:-}" ]]; then
   if shopt -q login_shell; then
     exec bash $(printf '%q' "$ROOT")/scripts/fsguard.sh${quoted} --mode $(printf '%q' "$mode") --in-place -- "\$BASH" -l -i
@@ -3042,12 +3343,17 @@ scratch_env_for() { # <sandbox> -> sets SCRATCH_ENV_ARGS
 # nothing of the host run's environment (its tokens and keys included). The
 # root pane of a VM run was given ZDOTDIR and every split pane was not, so a
 # zsh new-user wizard could swallow the launch in any pane but the first.
+#
+# Neither gets the operator's ssh-agent. SSH_AUTH_SOCK is set empty, which
+# ssh reads as no agent (Herdr's --env sets, it cannot unset), and the pane
+# hook unsets it; the socket itself is denied by the write guard
+# (agent_socket_rules), since a pane could find it without the variable.
 pane_env_for() { # <agent> -> sets PANE_ENV_ARGS
   if [[ -n "${VM_PANE_ZDOTDIR:-}" ]]; then
-    PANE_ENV_ARGS=(--env "ZDOTDIR=$VM_PANE_ZDOTDIR")
+    PANE_ENV_ARGS=(--env "ZDOTDIR=$VM_PANE_ZDOTDIR" --env "SSH_AUTH_SOCK=")
   else
     PANE_ENV_ARGS=(--env "AGENT_ID=$1" --env "SWARM_ID=$swarm_id" --env "SWARM_HARD_KILL=$hard" --env "TZ=UTC"
-      --env "SWARM_TRACE_TOKEN=$(trace_token_for "$1")" ${provider_env[@]+"${provider_env[@]}"})
+      --env "SWARM_TRACE_TOKEN=$(trace_token_for "$1")" ${provider_env[@]+"${provider_env[@]}"} --env "SSH_AUTH_SOCK=")
   fi
 }
 
@@ -3447,6 +3753,9 @@ cmd_start() {
   # pull). Exit 0 when the start would go ahead, 2 when it would be refused.
   CHECK_ONLY=0
   local write_guard=1
+  # A host run whose panes could read a signing key starts only when the
+  # operator says so, and the run records it (signer_guard).
+  local accept_signer_exposure=0
   # Where the agents live: one microVM each (the default), or host
   # processes (--isolation host, unisolated). isolation_given says the
   # operator named it, so a refusal can say how to choose the other.
@@ -3539,6 +3848,7 @@ cmd_start() {
       --toolbox-required) toolbox_required=1; shift ;;
       --quarantine) quarantine=1; shift ;;
       --no-write-guard) write_guard=0; shift ;;
+      --accept-signer-exposure) accept_signer_exposure=1; shift ;;
       --no-seal-herdr) seal_herdr=0; shift ;;
       --no-read) no_read+=("$2"); shift 2 ;;
       --cap-per-agent) cap_per_agent="$2"; shift 2 ;;
@@ -3690,6 +4000,7 @@ cmd_start() {
     # something.
     local host_only=()
     [[ "$write_guard" -eq 0 ]] && host_only+=(--no-write-guard)
+    [[ "$accept_signer_exposure" -eq 1 ]] && host_only+=(--accept-signer-exposure)
     [[ "$seal_herdr" -eq 0 ]] && host_only+=(--no-seal-herdr)
     [[ "$inputs_enforce" != "auto" ]] && host_only+=("--inputs-enforce $inputs_enforce")
     [[ "$key_from_env" -eq 1 ]] && host_only+=(--key-from-env)
@@ -3742,6 +4053,9 @@ cmd_start() {
     case "$e" in
       SWARM_FSGUARD=*|SWARM_FSGUARD_MODE=*)
         echo "BLOCKER: --env $e would switch the pane's kernel guard off behind the kickoff's back; the guard sets that variable itself." >&2
+        exit 2 ;;
+      SSH_AUTH_SOCK=*)
+        echo "BLOCKER: --env SSH_AUTH_SOCK would hand the agents an ssh-agent, and with it every key it holds: an examiner's included. The panes are started without one." >&2
         exit 2 ;;
     esac
   done
@@ -4591,6 +4905,15 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
         fi
       done < <(credential_models | sed 's#/.*##' | awk '!seen[$0]++')
     fi
+    # The signing keys: refused here in the words the start would use, with
+    # the write guard this host would give the panes.
+    if [[ "$isolation" != "microvm" ]]; then
+      local sg_keep=("keep:$ROOT" "keep:$REGISTRY") sg_p
+      for sg_p in ${inputs_dirs[@]+"${inputs_dirs[@]}"} ${inputs_image:+"$inputs_image"}; do sg_keep+=("keep:$sg_p"); done
+      while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_keep+=("keep:$sg_p"); done <<< "$pack_dirs"
+      signer_guard "$(predicted_write_guard_mode "$write_guard")" "$accept_signer_exposure" "$custody_sign_key" \
+        "rw:$sandbox" "rw:$(pi_agent_dir)" "${sg_keep[@]}" >/dev/null || exit 2
+    fi
     echo "Check:        the start would go ahead ($isolation, $n agent(s), sandbox $sandbox); nothing was written"
     exit 0
   fi
@@ -4906,6 +5229,71 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
       write_guard_mode="none"
     fi
   fi
+  # The signing keys (signer_guard): out of every VM by construction; out of
+  # a host run's panes at the kernel, or the run is refused, or started on
+  # the operator's word and recorded as exposed. The directories are made
+  # first (0700) so a mount namespace has something to mask: a key made
+  # during the run lands under the mask. Where one cannot be made the rule
+  # still names it, and nothing is refused over it.
+  local sg_args=() sg_p
+  if [[ "$isolation" == "microvm" ]]; then
+    for sg_p in "$ROOT/extensions" "$ROOT/scripts" "$ROOT/prompts" "$ROOT/node_modules" "$sandbox"; do sg_args+=("mount:$sg_p"); done
+    while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_args+=("mount:$sg_p"); done <<< "$pack_dirs"
+    while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_args+=("mount:$sg_p"); done < <(inputs_bound_dirs "$sandbox")
+    signer_guard microvm 0 "$custody_sign_key" "${sg_args[@]}" || exit 2
+  else
+    if [[ "$write_guard_mode" != "none" ]]; then
+      for sg_p in "$(signers_home)" "$(signers_home)/machine" "$(signers_home)/examiners"; do
+        [[ -e "$sg_p" || -L "$sg_p" ]] || ( umask 077; mkdir -p "$sg_p" ) 2>/dev/null || true
+      done
+    fi
+    sg_args=("rw:$sandbox" "rw:$(pi_agent_dir)" "keep:$ROOT" "keep:$REGISTRY")
+    for sg_p in ${inputs_dirs[@]+"${inputs_dirs[@]}"} ${inputs_image:+"$inputs_image"}; do sg_args+=("keep:$sg_p"); done
+    while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_args+=("keep:$sg_p"); done <<< "$pack_dirs"
+    while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_args+=("keep:$sg_p"); done < <(inputs_bound_dirs "$sandbox")
+    signer_guard "$write_guard_mode" "$accept_signer_exposure" "$custody_sign_key" "${sg_args[@]}" || exit 2
+    for sg_p in ${SIGNER_NO_READ[@]+"${SIGNER_NO_READ[@]}"}; do guard_args+=(--no-read "$sg_p"); done
+    local sg_kind
+    for sg_p in ${SIGNER_SOCKETS[@]+"${SIGNER_SOCKETS[@]}"}; do
+      sg_kind="${sg_p%%$'\t'*}"
+      if [[ "$sg_kind" == tree ]]; then guard_args+=(--no-socket-tree "${sg_p#*$'\t'}"); else guard_args+=(--no-socket "${sg_p#*$'\t'}"); fi
+    done
+  fi
+  # Earlier runs: each one's sandbox in the registry, and the examiners'
+  # reviews beside it, are denied to a host run's panes — material the
+  # agents must derive from the evidence, never find. Not the whole runs
+  # directory: this run and the registry the finish line reads are in it.
+  # Landlock alone is left out: it can only carve, and a carve under runs/
+  # freezes that directory for the run, so the registry, which the kickoff
+  # rewrites by rename, would stop being readable and the finish line would
+  # fall back to SWARM.md, which it does not trust. A VM mounts none of them.
+  local earlier_hidden=() earlier_skipped=() reviews_hidden="" earlier_by="" earlier_why=""
+  if [[ "$isolation" == "microvm" ]]; then
+    earlier_by="microvm"
+    earlier_why="no VM mounts another run's sandbox or the reviews"
+  elif fsguard_can_mask "$write_guard_mode"; then
+    earlier_by="$write_guard_mode"
+    local eh_kind eh_path eh_why
+    sg_args=("$ROOT" "$(pi_agent_dir)" "$REGISTRY" ${inputs_dirs[@]+"${inputs_dirs[@]}"})
+    while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_args+=("$sg_p"); done < <(inputs_bound_dirs "$sandbox")
+    while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_args+=("$sg_p"); done <<< "$pack_dirs"
+    while IFS=$'\t' read -r eh_kind eh_path eh_why; do
+      case "$eh_kind" in
+        hide) earlier_hidden+=("$eh_path"); guard_args+=(--no-read "$eh_path") ;;
+        skip) earlier_skipped+=("$eh_path"); echo "NOTE:         the earlier run in $eh_path is not hidden from the panes: $eh_why" ;;
+      esac
+    done < <(earlier_run_sandboxes "$REGISTRY" "$sandbox" "${sg_args[@]}")
+    [[ -e "$RUNS_DIR/reviews" ]] || ( umask 077; mkdir -p "$RUNS_DIR/reviews" ) 2>/dev/null || true
+    if [[ -d "$RUNS_DIR/reviews" ]]; then
+      reviews_hidden="$(cd "$RUNS_DIR/reviews" && pwd -P)"
+      guard_args+=(--no-read "$reviews_hidden")
+    fi
+    earlier_why="denied to the panes at the kernel ($write_guard_mode)"
+  elif [[ "$write_guard_mode" == "landlock" ]]; then
+    earlier_why="Landlock alone cannot deny a directory under runs/ without cutting the panes off the registry the finish line reads"
+  else
+    earlier_why="no kernel guard"
+  fi
   if [[ "$write_guard_mode" != "none" && "$write_guard_mode" != "microvm" && ${#no_read[@]} -gt 0 ]]; then
     local nr
     for nr in "${no_read[@]}"; do
@@ -5183,6 +5571,16 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --arg write_guard "$write_guard_mode" \
     --argjson no_read "$(printf '%s\n' ${no_read[@]+"${no_read[@]}"} | jq -R . | jq -c -s 'map(select(. != ""))')" \
     --argjson no_read_applied "$no_read_applied" \
+    --argjson signer_keys_hidden "$SIGNER_KEYS_HIDDEN" \
+    --argjson signer_isolation "$(jq -nc --arg isolation "$isolation" --arg guard "$write_guard_mode" \
+      --argjson hidden "$(printf '%s\n' ${SIGNER_NO_READ[@]+"${SIGNER_NO_READ[@]}"} | jq -R . | jq -c -s 'map(select(. != ""))')" \
+      --argjson sockets "$(printf '%s\n' ${SIGNER_SOCKETS[@]+"${SIGNER_SOCKETS[@]}"} | cut -f2- | jq -R . | jq -c -s 'map(select(. != ""))')" \
+      --argjson exposed "$(printf '%s\n' ${SIGNER_EXPOSED[@]+"${SIGNER_EXPOSED[@]}"} | jq -R . | jq -c -s 'map(select(. != ""))')" \
+      --argjson accepted "$SIGNER_ACCEPTED" --arg why "$SIGNER_WHY" --argjson hid "$SIGNER_KEYS_HIDDEN" \
+      '{isolation: $isolation, guard: $guard, keys_hidden: $hid, hidden: $hidden, agent_sockets: $sockets, exposed: $exposed, exposure_accepted: ($accepted == 1), why: $why}')" \
+    --argjson earlier_runs_hidden "$(jq -nc --arg by "$earlier_by" --argjson count "${#earlier_hidden[@]}" --arg reviews "$reviews_hidden" --arg why "$earlier_why" \
+      --argjson skipped "$(printf '%s\n' ${earlier_skipped[@]+"${earlier_skipped[@]}"} | jq -R . | jq -c -s 'map(select(. != ""))')" \
+      '{by: (if $by == "" then null else $by end), sandboxes: $count, reviews: (if $reviews == "" then null else $reviews end), skipped: $skipped, why: $why}')" \
     --arg herdr_socket "$(if [[ "$isolation" == "microvm" ]]; then echo unreachable; elif [[ "$herdr_sealed" -eq 1 && "$write_guard_mode" == "seatbelt" ]]; then echo sealed; elif [[ "$herdr_sealed" -eq 1 ]]; then echo masked; elif [[ "$seal_herdr" -eq 0 ]]; then echo open; else echo unenforced; fi)" \
     --arg pi_extensions "$pi_extensions" \
     --arg attribution "$attribution" \
@@ -5260,6 +5658,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       host_caps: $host_caps,
       no_read: $no_read,
       no_read_applied: ($no_read_applied == 1),
+      signer_keys_hidden: $signer_keys_hidden,
+      signer_isolation: $signer_isolation,
+      earlier_runs_hidden: $earlier_runs_hidden,
       net: (if $netguard == 0 then "open" elif $local_only == 1 then "local" elif $allow_hosts == "" then "guarded" else "hosts" end),
       idle_nudge_sec: $idle_nudge_sec,
       self_compact: {
@@ -5410,6 +5811,25 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
          echo "Write guard:  off (--no-write-guard) — a pane can write anywhere this user can" >&2
        fi ;;
   esac
+  if [[ "$isolation" == "microvm" ]]; then
+    echo "Signers:      out of every VM: none mounts where the machine key and the examiners are kept"
+  elif [[ "$SIGNER_KEYS_HIDDEN" == true ]]; then
+    echo "Signers:      the machine key, the examiners and their keys are denied to the panes ($write_guard_mode)$([[ ${#SIGNER_SOCKETS[@]} -gt 0 ]] && printf ', and so is the ssh-agent')"
+  elif [[ "$SIGNER_ACCEPTED" -eq 1 ]]; then
+    local sg_listed
+    sg_listed="$(printf '%s; ' "${SIGNER_EXPOSED[@]}")"
+    echo "WARN: the panes can read what signs this install's releases (--accept-signer-exposure): ${sg_listed%; }. The run records it (signer_keys_hidden: false)." >&2
+    echo "      Rotate them after the run: swarm.sh machine rotate for the machine key; an examiner's new key is a new enrolment (swarm.sh examiner enroll)." >&2
+  else
+    echo "Signers:      not hidden ($SIGNER_WHY)"
+  fi
+  if [[ "$isolation" != "microvm" ]]; then
+    if [[ -n "$earlier_by" ]]; then
+      echo "Earlier runs: ${#earlier_hidden[@]} sandbox(es)$([[ -n "$reviews_hidden" ]] && printf " and the examiners' reviews") denied to the panes"
+    else
+      echo "Earlier runs: readable from the panes ($earlier_why)"
+    fi
+  fi
   if [[ "$toolbox" != "off" && -f "$sandbox/toolbox.json" ]]; then
     echo "Toolbox:      $(jq -r '"\(.present | length) present, \(.missing | length) missing"' "$sandbox/toolbox.json")$(jq -r 'if (.missing | length) > 0 then " (missing: " + (.missing | map(.name) | join(", ")) + ")" else "" end' "$sandbox/toolbox.json")"
   fi
@@ -9085,6 +9505,71 @@ cmd_examiner() {
   esac
 }
 
+# The install's machine key: `machine` shows it (as `examiner machine`
+# does); `machine rotate` retires it and makes the next one. A key a pane
+# may have read (a host run with --accept-signer-exposure) is rotated this
+# way. The retired key is moved, never deleted: the drafts it sealed are
+# checked against the public key each carries, and whoever reads one later
+# may ask which key that was.
+cmd_machine() {
+  local sub="${1:-show}"
+  [[ $# -gt 0 ]] && shift
+  case "$sub" in
+    show) node --experimental-strip-types --no-warnings "$ROOT/scripts/signers.ts" machine ;;
+    rotate) machine_rotate "$@" ;;
+    *) die_usage "machine: show or rotate" ;;
+  esac
+}
+
+machine_rotate() {
+  [[ $# -eq 0 ]] || die_usage "machine rotate takes no options"
+  local dir meta key id old_fp retired out new_id new_fp
+  dir="$(signers_home)/machine"
+  meta="$dir/machine.json"
+  key="$dir/release_ed25519"
+  if [[ ! -e "$key" && ! -e "$meta" ]]; then
+    echo "No machine key in $dir to rotate: the next seal makes the first one."
+    return 0
+  fi
+  if [[ ! -f "$key" || ! -f "$meta" ]]; then
+    echo "BLOCKER: $dir holds half a machine key (the key or its record without the other): look before anything is moved." >&2
+    exit 2
+  fi
+  id="$(jq -r '.id // empty' "$meta" 2>/dev/null || true)"
+  old_fp="$(jq -r '.fingerprint // empty' "$meta" 2>/dev/null || true)"
+  if ! [[ "$id" =~ ^[0-9a-f]{1,64}$ ]]; then
+    echo "BLOCKER: $meta names no machine key id; nothing was moved." >&2
+    exit 2
+  fi
+  retired="$dir/retired/$id"
+  if [[ -e "$retired" ]]; then
+    echo "BLOCKER: $retired is there already; nothing is moved over it." >&2
+    exit 2
+  fi
+  ( umask 077; mkdir -p "$retired" ) || exit 1
+  chmod 700 "$dir" "$dir/retired" "$retired"
+  mv "$key" "$retired/release_ed25519" || exit 1
+  [[ -f "$key.pub" ]] && { mv "$key.pub" "$retired/release_ed25519.pub" || exit 1; }
+  mv "$meta" "$retired/machine.json" || exit 1
+  ( umask 077; jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg by "$(id -un)@$(hostname)" --arg fp "$old_fp" \
+    '{retired_at: $at, by: $by, fingerprint: $fp, why: "swarm.sh machine rotate"}' > "$retired/retired.json" ) || true
+  echo "Retired:      ${old_fp:-fingerprint unknown} (machine key $id), kept in $retired"
+  # The next key now, so both fingerprints are said together; the next
+  # seal uses it. Made where and as a seal would make it (signers.ts).
+  if out="$(node --experimental-strip-types --no-warnings --input-type=module -e '
+import { machineSigner } from "'"$ROOT"'/scripts/signers.ts";
+const m = machineSigner();
+if ("why" in m) { console.error(m.why); process.exit(1); }
+console.log(`${m.id}\t${m.fingerprint}`);' 2>&1)"; then
+    new_id="${out%%$'\t'*}"
+    new_fp="${out#*$'\t'}"
+    echo "New:          $new_fp (machine key $new_id): the next draft is sealed with it"
+  else
+    echo "WARN: the next machine key was not made now ($out); the next seal makes it, and swarm.sh machine shows it." >&2
+  fi
+  echo "Drafts sealed before now are still checked against the public key each carries. Give the new fingerprint to wherever the old one was written down (an anchor mirror, the case file)."
+}
+
 # The machine's draft release once custody is taken (scripts/release.ts
 # draft): written once per verdict, and never holding the stop up.
 release_draft() { # <sandbox> <run id>
@@ -9334,6 +9819,16 @@ register, checked in person, is what ties the key to the person. `machine` shows
 machine key, which seals the drafts and is no examiner.
 EOF
       ;;
+    machine) cat <<'EOF'
+  machine                 the install's machine key: its fingerprint, when and where it was made
+  machine rotate          retire it and make the next one; the next draft is sealed with the new key
+The machine key seals the draft release at stop, unattended, so it has no passphrase. Rotate it
+when a pane may have read it: a host run started with --accept-signer-exposure records that it
+could. The old key is moved to machine/retired/<id>/ with a note of when and by whom, never
+deleted: every draft it sealed carries its public key and is still checked against it. Both
+fingerprints are printed; give the new one to wherever the old one was written down.
+EOF
+      ;;
     certify) cat <<'EOF'
   certify <package dir|zip> [--allowed-signers FILE] [--tsa-ca FILE] [--out FILE]
 A certification template of the kind FRE 902(13) and 902(14) contemplate: what the package says of
@@ -9414,7 +9909,7 @@ main() {
   # What changes or leaves a run is on the operator's record; what only reads
   # it (list, status, summary, context, help) is not.
   case "$cmd" in
-    start|stop|reap|say|cap|package|report|tools|review|export|hold|release|purge|verify|releases|examiner|timestamp|rerun)
+    start|stop|reap|say|cap|package|report|tools|review|export|hold|release|purge|verify|releases|examiner|machine|timestamp|rerun)
       # A start --check writes nothing, the audit included.
       case " $* " in *" -h "*|*" --help "*|*" --check "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
   esac
@@ -9443,6 +9938,7 @@ main() {
     custody-verify) cmd_custody_verify "$@" ;;
     releases) cmd_releases "$@" ;;
     examiner) cmd_examiner "$@" ;;
+    machine) cmd_machine "$@" ;;
     timestamp) cmd_timestamp "$@" ;;
     rerun) cmd_rerun "$@" ;;
     certify) cmd_certify "$@" ;;

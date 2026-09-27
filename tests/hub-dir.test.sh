@@ -91,6 +91,7 @@ VM_PANE_ZDOTDIR="" pane_env_for a0
 host_env="${PANE_ENV_ARGS[*]}"
 [[ "$host_env" == *"SWARM_TRACE_TOKEN=tok-a0"* && "$host_env" == *"HTTPS_PROXY="* && "$host_env" == *"AGENT_ID=a0"* ]] || fail "a host pane lost its environment: $host_env"
 VM_PANE_ZDOTDIR=/h/zdot pane_env_for a1
-[[ "${PANE_ENV_ARGS[*]}" == "--env ZDOTDIR=/h/zdot" ]] || fail "a VM run's pane got more than the quiet shell: ${PANE_ENV_ARGS[*]}"
-pass "every pane of a VM run gets the quiet shell and none of the host run's tokens or keys"
+# SSH_AUTH_SOCK set empty takes the operator's ssh-agent away; it adds nothing.
+[[ "${PANE_ENV_ARGS[*]}" == "--env ZDOTDIR=/h/zdot --env SSH_AUTH_SOCK=" ]] || fail "a VM run's pane got more than the quiet shell: ${PANE_ENV_ARGS[*]}"
+pass "every pane of a VM run gets the quiet shell and none of the host run's tokens or keys (nor the ssh-agent)"
 echo "hub-dir: all checks passed"

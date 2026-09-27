@@ -469,9 +469,11 @@ if command -v pi >/dev/null 2>&1; then
   report="$(auth_report "tuned/qwen3:8b" --env "PI_CODING_AGENT_DIR=$local_dir")"
   expect "a placeholder apiKey makes the same server ready" "ready" "$(printf '%s' "$report" | cut -f1)"
 
+  # Unguarded on purpose (--no-write-guard): the operator's own signing keys
+  # may exist, so the run says it accepts that (--accept-signer-exposure).
   if command -v herdr >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     out="$(PI_CODING_AGENT_DIR="$local_dir" SWARM_RUNS_DIR="$TMP/runs" SWARM_LOCAL_PROBE_TIMEOUT=2 \
-      bash "$ROOT/scripts/swarm.sh" start --model localmock/qwen3:8b --n 1 --cap-tokens 1000 --no-write-guard \
+      bash "$ROOT/scripts/swarm.sh" start --model localmock/qwen3:8b --n 1 --cap-tokens 1000 --no-write-guard --accept-signer-exposure \
       --goal-file "$ROOT/prompts/goals/hello.md" --label keyless --env "PI_CODING_AGENT_DIR=$local_dir" 2>&1)"
     grep -q 'BLOCKER: Pi will not use localmock/qwen3:8b without a credential, and a local server has none' <<<"$out" \
       || fail "a keyless local provider should get the local BLOCKER: $out"
@@ -540,12 +542,12 @@ guard_here="$(bash "$ROOT/scripts/fsguard.sh" --ro "$TMP/shell-inputs" --dry-run
 if [[ -z "$guard_here" || "$guard_here" == "none" ]]; then
   echo "skip - the login-shell check with --no-write-guard --inputs (no kernel guard on this host, so no hook)"
 else
-  out="$(login_shell_out /usr/bin/fish --no-write-guard --inputs "$TMP/shell-inputs")"
+  out="$(login_shell_out /usr/bin/fish --no-write-guard --accept-signer-exposure --inputs "$TMP/shell-inputs")"
   grep -q "WARN: this account's login shell is /usr/bin/fish, which reads neither pane hook" <<<"$out" \
     || fail "--no-write-guard --inputs with a fish login shell should warn that the hook will not be read: $out"
   grep -q "$past_shell_check" <<<"$out" || fail "--no-write-guard --inputs with fish should still start, as on main: $out"
   pass "--no-write-guard --inputs with a fish login shell warns and goes on ($guard_here)"
-  out="$(login_shell_out /usr/bin/fish --no-write-guard --inputs "$TMP/shell-inputs" --inputs-enforce on)"
+  out="$(login_shell_out /usr/bin/fish --no-write-guard --accept-signer-exposure --inputs "$TMP/shell-inputs" --inputs-enforce on)"
   grep -q "BLOCKER: this account's login shell is /usr/bin/fish" <<<"$out" \
     || fail "--inputs-enforce on with a fish login shell should be refused before any pane opens: $out"
   pass "--inputs-enforce on with a fish login shell is refused at the shell check"
@@ -600,10 +602,10 @@ pass "a kickoff that stops after registering puts away its daemons and records t
 if [[ -z "$guard_here" || "$guard_here" == "none" ]]; then
   echo "skip - Herdr's env with --no-write-guard --inputs (no kernel guard on this host, so no hook)"
 else
-  argv="$(pane_env_argv 'echo "u:x:1000:1000::/home/u:/usr/bin/fish"' --no-write-guard --inputs "$TMP/shell-inputs")"
+  argv="$(pane_env_argv 'echo "u:x:1000:1000::/home/u:/usr/bin/fish"' --no-write-guard --accept-signer-exposure --inputs "$TMP/shell-inputs")"
   [[ -n "$(env_values "$argv" ZDOTDIR)" ]] || fail "--inputs should still write the pane hook: $argv"
   expect "a fish login shell's panes keep their HOME (--no-write-guard --inputs)" "" "$(env_values "$argv" HOME)"
-  argv="$(pane_env_argv 'exit 2' --no-write-guard --inputs "$TMP/shell-inputs")"
+  argv="$(pane_env_argv 'exit 2' --no-write-guard --accept-signer-exposure --inputs "$TMP/shell-inputs")"
   expect "panes keep their HOME when the account database does not answer (getent exits 2)" "" "$(env_values "$argv" HOME)"
 fi
 

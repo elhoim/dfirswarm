@@ -45,6 +45,21 @@ export type RegistryRun = {
   netguard_mode?: string;
   /** seatbelt · mountns · none — where the panes could write. */
   write_guard?: string;
+  /** Whether no agent could read a signing key of this install or reach the ssh-agent (out of every VM, or denied at the kernel). Absent on runs started before it was recorded. */
+  signer_keys_hidden?: boolean;
+  /** How the signing keys were kept from the agents, or what was exposed (docs/observability.md). */
+  signer_isolation?: {
+    isolation: "microvm" | "host";
+    guard: string;
+    keys_hidden: boolean;
+    hidden: string[];
+    agent_sockets: string[];
+    exposed: string[];
+    exposure_accepted: boolean;
+    why: string;
+  };
+  /** Which earlier runs' sandboxes and whether runs/reviews/ were denied to the panes. */
+  earlier_runs_hidden?: { by: string | null; sandboxes: number; reviews: string | null; skipped: string[]; why: string };
   /** "sealed", "open" or "unenforced": could a pane reach Herdr's control socket. */
   herdr_socket?: string;
   /** "read-only", "writable" or "not-applicable": could a pane drop code into Pi's extensions/. */
