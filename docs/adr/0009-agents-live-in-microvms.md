@@ -59,11 +59,22 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   run is mounted read-only; the agent's own `work/<id>/`,
   `work/extracted/<id>/` and `work/quarantine/<id>/` (the last two no-exec),
   its own `tool-output/<id>/` and its own Pi session are mounted writable on
-  top. A peer's Pi session is not on the floor a seat sees: `.pi-sessions/`
-  is covered by a read-only veil from the run's hub directory that holds only
-  the seat's own mount point (added 2026-09-27, after a seat on run s306463
-  grepped its peers' transcripts; the host still reads and seals every
-  session). Nothing writable is shared between VMs: the shared part of `work/`
+  top. A seat does not see its peers' records (added 2026-09-27): over
+  `.pi-sessions/` and `tool-output/` a read-only veil from the run's hub
+  directory holds only the seat's own mount point, and over `traces/` an
+  empty one. A seat on run s306463 grepped its peers' session transcripts;
+  the trace carries every seat's calls, results, reasoning and hand-off
+  notes, and a critic that is to re-derive a peer's finding from the sealed
+  refs must not read how the peer got there. Nothing in a seat's VM needs
+  them: its trace lines go to the hub, its spill to its own `tool-output/`,
+  and the goal's checks, which read the trace, run on the host (below). The
+  host's collector, custody and console read, seal and serve all of them as
+  before, and a job's worker still sees `tool-output/`. Each VM's probe
+  lists what the seat sees there, and the kickoff refuses a VM that sees
+  the trace or a peer's session or tool output. What its peers are doing
+  and have found reaches a seat through the board, claims, the ledger, the
+  store and `list_team`, which the hub builds from those, never from the
+  trace. Nothing writable is shared between VMs: the shared part of `work/`
   (`work/report.md`, `work/timeline.md`) is written by the hub through
   `publish_file`, from the agent's own directory, claimed and recorded. A
   writable `work/` shared by every VM kept none of the promises below and
@@ -282,10 +293,17 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   mount flag in the guest: both are mounted whole, read-only and no-exec,
   with the seat's own corner writable and no-exec on top, so neither its own
   carved material nor a peer's runs by mistake. It does not stop a root that
-  means to run it. The veil over `.pi-sessions/` is the same kind of cover:
-  a seat's shell sees its own session and no peer's, and a guest root that
-  unmounts the veil reads the floor under it. Nothing the harness decides is read inside a VM: the
-  finish line, custody and the report run on the host.
+  means to run it. The veils over `traces/`, `tool-output/` and
+  `.pi-sessions/` are the same kind of cover: a seat's shell sees none of
+  its peers' records, and a guest root that unmounts a veil reads the floor
+  under it. Nothing the harness decides is read inside a VM: the finish
+  line, custody and the report run on the host. A seat's `done` asks the
+  hub for the finish line (`runFinishLine`, board.ts) instead of running it
+  in its VM, where the trace its checks read is not; the hub runs the
+  operator's checks once, on the host, answers the whole run, and markDone
+  takes that same run, so one `done` is one run and the refusal the seat
+  sees is the host's, word for word. A host run (no VM) runs the finish
+  line in the pane, as it always has.
 - The hub is one process on the host. A keeper (`scripts/hub-supervise.sh`)
   brings it back from the state it keeps (`hub-input.json`, the stop clock)
   until the run's stop, and the run's trace collector too, which in a VM run

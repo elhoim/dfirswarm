@@ -355,7 +355,9 @@ export const REMOTE_FUNCTIONS = [
   "listForgedTools",
   "listLedger",
   "listTeam",
+  "teamView",
   "markDone",
+  "runFinishLine",
   "nameOf",
   "postMessage",
   "publishFile",
@@ -377,6 +379,25 @@ export const REMOTE_FUNCTIONS = [
 ] as const;
 
 export const applySessionUsage = remote("applySessionUsage", P.applySessionUsage);
+/** What each peer is doing and found (list_team), from the host's board, store and ledger. */
+export const teamView = remote("teamView", P.teamView);
+
+/** The runner's own limit (15 minutes) and a minute for the answer to come back. */
+const FINISH_LINE_CALL_MS = 16 * 60_000;
+
+/**
+ * The operator's finish line, run once, right now: in this process on the
+ * host; in a VM by the hub, on the host, as the one run it makes for
+ * markDone (vm-hub.ts). A seat's VM does not see the trace, which a goal's
+ * checks read, and what a VM ran was only that VM's word. The runner's
+ * answer comes back whole, so the refusal made from it (finishLineVerdict)
+ * is the same wherever it ran.
+ */
+export async function runFinishLine(sandbox: string): Promise<P.FinishLineRun | null> {
+  const socket = boardSocket();
+  if (!socket) return P.runFinishLine(sandbox);
+  return (await callBoard(socket, "runFinishLine", [sandbox], { timeoutMs: FINISH_LINE_CALL_MS })) as P.FinishLineRun | null;
+}
 
 /**
  * Tool jobs, run by the hub's job service in worker VMs. A host run has no

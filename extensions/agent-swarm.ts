@@ -36,7 +36,7 @@ import {
   agentDeadPath,
   agentDonePath,
   finishLineVerdict,
-  runFinishLine,
+  inboxPageChars,
   classifyTurnError,
   CAP_STEER,
   TOKEN_CAP_STEER,
@@ -112,6 +112,7 @@ import {
   listClaims,
   listFileHistory,
   listTeam,
+  teamView,
   markDone,
   markStopSteer,
   postMessage,
@@ -146,6 +147,7 @@ import {
   jobSubmit,
   jobStatus,
   catalogRequest,
+  runFinishLine,
 } from "./board.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
@@ -1968,14 +1970,17 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "list_team",
     label: "List team",
-    description: "Read team.json. Lock owner ids come from this file, not callsigns.",
-    promptSnippet: "List assigned swarm agent ids",
-    promptGuidelines: ["Use list_team to learn peer ids before claiming."],
-    parameters: Type.Object({}),
-    async execute(_id, _params, _signal, _onUpdate, toolCtx: ToolCtx) {
-      const team = await listTeam(ctxFrom(toolCtx.cwd, agentId));
-      await logEvent(toolCtx.cwd, agentId, "list_team", {}, { n: team.n });
-      return okResult(team);
+    description:
+      "Read team.json (lock owner ids come from this file, not callsigns) and what each peer is doing and has found: its name and what it said it is doing, its last post, its open jobs (id, profile, the command or tool, state, since when) and its latest ledger entries (seq, kind, first line; the whole entry is `ledger`). Built from the board, the store and the ledger. Whole peers per page: when `next` is set, call again with from: next for the rest.",
+    promptSnippet: "List the team: peer ids, what each peer is doing, its open jobs and latest findings",
+    promptGuidelines: ["Use list_team to learn peer ids before claiming, and to see what each peer is doing and has found before you take work."],
+    parameters: Type.Object({
+      from: Type.Optional(Type.String({ description: "The peer id a previous list_team named as `next`: the page starts there" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const view = await teamView(ctxFrom(toolCtx.cwd, agentId), { ...(params.from ? { from: params.from } : {}), pageChars: inboxPageChars() });
+      await logEvent(toolCtx.cwd, agentId, "list_team", params.from ? { from: params.from } : {}, { n: view.n, peers: view.peers.map((p) => p.id), remaining: view.remaining });
+      return okResult(view);
     },
   });
 
@@ -3035,7 +3040,7 @@ export default function (pi: ExtensionAPI) {
     name: "done",
     label: "Done",
     description:
-      "Write done/agents/<id>.done, create done/SWARM_DONE if missing (idempotent), drop this worker's locks, and terminate the session.",
+      "Write done/agents/<id>.done, create done/SWARM_DONE if missing (idempotent), drop this worker's locks, and terminate the session. Before the sentinel the harness runs the goal's checks itself (in a microVM run on the host, where the trace they read is): while any fails, done is refused, and the refusal names each check that fails and what makes it pass.",
     promptSnippet: "Stop this worker and signal the swarm sentinel",
     promptGuidelines: [
       "Use done when the definition of done is met and its checks pass, or when done/SWARM_DONE already exists. done ends the whole swarm, not your slice: a finished slice is posted to the board, not done. When the task is impossible or unsafe, call done with abandon: true and say why.",
@@ -3095,9 +3100,10 @@ export default function (pi: ExtensionAPI) {
           ...(inputsCheck.digest_mismatch.length ? { digest_mismatch: inputsCheck.digest_mismatch } : {}),
         });
       }
-      // The finish line, before the sentinel: the operator's checks, run now.
-      // A done that would end the swarm with them failing is refused and told
-      // which check fails; an abandoned run says so in its reason.
+      // The finish line, before the sentinel: the operator's checks, run now
+      // (in a VM by the hub, on the host: board.ts). A done that would end
+      // the swarm with them failing is refused and told each check that
+      // fails; an abandoned run says so in its reason.
       let reasonPrefix = "";
       if (!(await swarmDoneExists(toolCtx.cwd))) {
         const run = await runFinishLine(toolCtx.cwd).catch(() => null);

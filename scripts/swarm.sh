@@ -2564,7 +2564,7 @@ if caps:
         "linux": "Linux, a read-only root in your mount namespace with Landlock beneath it: writes are refused everywhere but this run and Pi's agent directory",
         "landlock": "Linux Landlock: writes are refused everywhere but this run and Pi's agent directory",
         "mountns": "Linux mount namespace: the evidence is read-only; the rest of the filesystem is as the host has it",
-        "microvm": "your own microVM: you can write your own `work/<id>/`, `work/extracted/<id>/`, `work/quarantine/<id>/`, `tool-output/<id>/` and your Pi session; the rest of the run is read-only, and of the host outside the run your VM has only the harness code, the packs and the evidence, read-only",
+        "microvm": "your own microVM: you can write your own `work/<id>/`, `work/extracted/<id>/`, `work/quarantine/<id>/`, `tool-output/<id>/` and your Pi session; the rest of the run is read-only, except that the trace and your peers' Pi sessions and tool outputs are not in your VM at all; and of the host outside the run your VM has only the harness code, the packs and the evidence, read-only",
         "none": "none — nothing at the kernel refuses a write; the tool guard and the sweep are what there is",
     }.get(write_guard, "not recorded")
     attribution_words = {
@@ -2697,6 +2697,23 @@ goal = re.sub(
     r"\1 (the harness writes this line itself when done verifies the inputs; there is nothing to write or forge for it)",
     goal,
     flags=re.M,
+)
+# Who runs the checks, said under the goal's own: agents ran them from their
+# shells before done, and in a microVM the trace a check reads is not in the
+# seat's view. A heading of its own, so no line here is ever taken for a
+# check, and no backticks, which await-done would run.
+if os.environ.get("SWARM_CONTRACT_ISOLATION", "host") == "microvm":
+    runs_checks = (
+        "The harness runs the checks above itself when you call done, on the host, where the trace is: "
+        "your VM does not see traces/, your peers' Pi sessions or their tool-output directories, so a check "
+        "that reads the trace cannot be run from your shell. "
+    )
+else:
+    runs_checks = "The harness runs the checks above itself when you call done. "
+goal = goal.rstrip("\n") + (
+    "\n\n## How the checks are run\n\n" + runs_checks +
+    "While any of them fails, done is refused, and the refusal names each check that fails and what makes it pass. "
+    "done ends the swarm for everyone: call it when the definition of done is met, not when your slice is.\n"
 )
 text = text.replace("{{GOAL_DOCUMENT}}", goal)
 open(dst, "w", encoding="utf-8").write(text)

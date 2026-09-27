@@ -20,14 +20,30 @@ const run = (passed: number, cmds: Array<[string, boolean]>) => ({
   checks: cmds.map(([cmd, ok]) => ({ cmd, ok })),
 });
 
-test("a finish line that fails refuses done and names the first check that fails", () => {
+test("a finish line that fails refuses done and names every check that fails, and what makes it pass", () => {
   const v = finishLineVerdict(run(1, [["test -f work/report.md", false], ["test -f work/timeline.md", false], ["true", true]]), false);
   assert.equal(v.proceed, false);
   if (!v.proceed) {
-    assert.equal(v.failing, "test -f work/report.md");
+    assert.equal(v.failing, "test -f work/report.md", "the record's one field is the first");
     assert.match(v.reason, /1 of 3 checks pass/);
+    assert.match(v.reason, /The harness ran the goal's checks when you called done/);
+    assert.match(v.reason, /^- `test -f work\/report\.md` fails\. Fix: make this command succeed when run from the run's directory$/m);
+    assert.match(v.reason, /^- `test -f work\/timeline\.md` fails\. Fix: /m, "the second failing check is named too");
+    assert.doesNotMatch(v.reason, /`true`/, "a passing check is not");
     assert.match(v.reason, /ends the whole swarm, not your slice/);
     assert.match(v.reason, /abandon: true/);
+  }
+});
+
+test("what a check said about itself reaches the agent verbatim", () => {
+  // A gate run as a check (a ledger check that names the fix) says what to
+  // do; the refusal carries its words as they are, wherever the check ran.
+  const said = "record kind=limitation with answers=[\"3\"] saying why\nsecond line, kept";
+  const v = finishLineVerdict({ total: 2, passed: 0, checks: [{ cmd: "gate one", ok: false, fix: said }, { cmd: "gate two", ok: false, output: "the output\n  as printed" }] }, false);
+  assert.equal(v.proceed, false);
+  if (!v.proceed) {
+    assert.ok(v.reason.includes(`- \`gate one\` fails. Fix: ${said}\n`), v.reason);
+    assert.ok(v.reason.includes("- `gate two` fails. Fix: the output\n  as printed\n"), v.reason);
   }
 });
 
@@ -48,7 +64,7 @@ test("abandon writes the sentinel anyway and says so", () => {
 test("a check that timed out is reported as such, and still refuses", () => {
   const v = finishLineVerdict({ total: 1, passed: 0, checks: [{ cmd: "sleep 999", ok: false, timed_out: true }] }, false);
   assert.equal(v.proceed, false);
-  if (!v.proceed) assert.match(v.reason, /first that timed out/);
+  if (!v.proceed) assert.match(v.reason, /^- `sleep 999` timed out\. Fix: it has to finish within the check's time limit and succeed$/m);
 });
 
 test("a run whose checks cannot be run is not held hostage: done proceeds, and the note says why", () => {

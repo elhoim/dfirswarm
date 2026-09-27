@@ -6,7 +6,7 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
-### Fixed: a compaction that never ends, an agent that only waits, peers' sessions, a runtime's cache in work/
+### Fixed: a compaction that never ends, an agent that only waits, what a seat sees of its peers, a runtime's cache in work/
 
 - **A compaction is bounded.** Each summary attempt stops at 300 s or 48,000
   characters (`SWARM_COMPACT_SUMMARY_SEC`), whatever the provider does with
@@ -23,10 +23,18 @@ All notable changes to this project. The format follows
   `wait` and `inbox` for 600 s (`SWARM_WAIT_IDLE_SEC`) is steered, unless a
   job of its own is running; a steer now ends an open `wait` (`reason:
   prompt`). The echo of a nudge no longer counts as the agent's activity.
-- **A seat no longer reads its peers' Pi sessions** (run s306463): in a
-  microVM `.pi-sessions/` is a read-only veil holding only the seat's own
-  session; the VM's probe checks it and the kickoff refuses a VM that sees
-  a peer's. The host still reads and seals every session.
+- **A seat no longer reads the trace or its peers' sessions and kept
+  outputs** (run s306463 grepped its peers' transcripts). In a microVM,
+  `traces/` is an empty read-only veil, and `.pi-sessions/` and
+  `tool-output/` are veils holding only the seat's own directory; each VM's
+  probe checks all three and the kickoff refuses a VM that sees one. A
+  seat's `done` gets the finish line from the hub, which runs the
+  operator's checks on the host (they read the trace) and answers the whole
+  run; markDone takes that same run, and the refusal names each failing
+  check and what makes it pass. The host's collector, custody and console,
+  and a host run's `done`, are unchanged. `list_team` now shows, per peer,
+  its name and what it is doing, its last post, its open jobs and its latest
+  ledger entries, from the board, the store and the ledger, never the trace.
 - **Node's compile cache is out of work/.** The kickoff points
   `NODE_COMPILE_CACHE` at the run's `.runtime-cache/`, so the artifact index
   and the package no longer carry `work/.tmp/node-compile-cache/` (run

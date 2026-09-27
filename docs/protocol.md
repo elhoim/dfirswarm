@@ -18,7 +18,7 @@ runs/<id>/
   netguard.port                the sidecar's port (one per swarm)
   idle-nudge.pid               the idle watchdog's pid while running (scripts/idle-nudge.sh)
   .pi/SYSTEM.md                worker system prompt
-  .pi-sessions/<id>/           Pi session files per agent (also a reaper activity signal)
+  .pi-sessions/<id>/           Pi session files per agent (also a reaper activity signal); a seat's VM sees its own and no peer's
   .runtime-cache/              Node's compile cache for the run's host processes (NODE_COMPILE_CACHE); outside work/, so never indexed or packaged
   bin/pi                       netguard PATH shim
   tools/<name>/manifest.json   a forged tool: name, description, params, runtime, entry, by, version, sha256
@@ -45,11 +45,12 @@ runs/<id>/
   done/agents/<id>.dead        this worker was reaped
   done/SWARM_DONE              the collective is finished
   done/ALL_AGENTS_DEAD         reap.sh: every seat is marked done or dead and there is no sentinel (reason all_agents_dead); a failed stop, never a finish
-  traces/events.jsonl          append-only event log
+  traces/events.jsonl          append-only event log (not in a seat's VM: the veil over traces/ is empty)
   traces/netguard.log          ALLOW/DENY lines
   tool-output/<id>/<stamp>-<tool>.{out,err,text}.log
                                the whole output of a tool call whose result reached the
                                model as a prefix; named on the trace row with bytes and sha256
+                               (a seat's VM sees its own tool-output/<id>/ and no peer's)
 runs/registry.json     {runs:[…]} written by swarm.sh
 ```
 
@@ -276,7 +277,7 @@ The same idleness hurts mid-run: a session that ends its turn after its intro, o
 `done(reason, output_file, abandon?)`:
 
 1. heals whatever a background process changed under `inputs/` since the last tool call, verifies `inputs/` against its manifest and records `inputs_check` — before the checks, so a check may grep the trace for it,
-2. when `done/SWARM_DONE` does not exist yet, runs the finish line: the goal's `## Checks`, read from the operator's registry by `await-done.sh --checks-json`, the same way the console and the report run them. A check that fails is a refusal (`done` event with `ok:false`, a `finish_line` event with `passed`/`total`/`failing`), and the agent is told which check fails and that `done` ends the whole swarm, not its slice. `abandon: true` is the way out for a task that cannot be met: the sentinel is written with its reason prefixed `ABANDONED:`. One agent's abandon while others still work is a vote, not the end: it is recorded under `done/abandon/<id>.md`, the board is asked, and the agent is told to post what blocked its slice and carry on; the run ends when a second agent abandons too, or when no other agent is still working (each peer has a `.done` or `.dead` marker). Run sfeeebb is the reason: one seat of ten abandoned the case after six minutes because its own slice had not come together. A runner that cannot answer (no registry, an unreadable goal) does not hold the run: `done` proceeds and the `finish_line` event says why. Run `sb36f` is the reason this exists: a nano agent ended a 25 GB case after four minutes by calling `done` when its own slice was finished, with no report written,
+2. when `done/SWARM_DONE` does not exist yet, runs the finish line: the goal's `## Checks`, read from the operator's registry by `await-done.sh --checks-json`, the same way the console and the report run them. A host run runs it in the pane, as it always has. In a microVM run the seat asks the hub (`runFinishLine`), which runs it on the host, where the trace the checks read is (a seat's VM does not see `traces/`), and answers the runner's whole result; `markDone` takes that same run when it finished in the last 30 s, so one `done` is one run of the checks. A check that fails is a refusal (`done` event with `ok:false`, a `finish_line` event with `passed`/`total`/`failing`, the first failing check), and the agent is told each check that fails and what makes it pass (what the check said about itself, `fix` or `output` on its row, verbatim when the runner gives it; otherwise the command itself), and that `done` ends the whole swarm, not its slice. SWARM.md says so under the goal ("How the checks are run"). `abandon: true` is the way out for a task that cannot be met: the sentinel is written with its reason prefixed `ABANDONED:`. One agent's abandon while others still work is a vote, not the end: it is recorded under `done/abandon/<id>.md`, the board is asked, and the agent is told to post what blocked its slice and carry on; the run ends when a second agent abandons too, or when no other agent is still working (each peer has a `.done` or `.dead` marker). Run sfeeebb is the reason: one seat of ten abandoned the case after six minutes because its own slice had not come together. A runner that cannot answer (no registry, an unreadable goal) does not hold the run: `done` proceeds and the `finish_line` event says why. Run `sb36f` is the reason this exists: a nano agent ended a 25 GB case after four minutes by calling `done` when its own slice was finished, with no report written,
 3. writes `done/agents/<id>.done` (frontmatter `by`, `output`, `reason`, `at`),
 4. creates `done/SWARM_DONE` with the same frontmatter if it does not exist (idempotent; `created_sentinel` tells you who was first), unless `reason` is `agent_cap` — that is one seat leaving, and the swarm continues,
 5. releases every lock the agent owns,
@@ -369,7 +370,7 @@ anywhere; the model's own trailer names the same file.
 | `wait` | `wait` tool | `{reason: post\|sentinel\|claim_lost\|timeout\|prompt, waited_ms, n, passed?, from[]?, ids[]?, remaining?}` (the post fields when it woke on a post; `passed`: posts to other agents that did not wake it) |
 | `claims` | `claims` tool | `{n}` |
 | `thread_open`, `thread_join` | thread tools | `{created, members}` |
-| `list_team`, `budget` | tools | `{n}` / `{spent_usd, tokens, calls, over_budget}` |
+| `list_team`, `budget` | tools | `{n, peers[], remaining}` (`args` = `{from?}`) / `{spent_usd, tokens, calls, over_budget}`. `list_team` answers team.json and, per peer, its name and `doing`, `marker`, its last post (`{id, thread, tag, to, at}`, `at` the post file's time) and count, its open jobs (`{id, kind, profile, command\|tool+args\|recipe\|source, state, since}` from `store/jobs/<id>/job.json`) and its ledger total with its last three entries (`{seq, kind, value_first_line, superseded_by?}`), built from the board, the store and the ledger, never the trace; whole peers per page (`SWARM_INBOX_PAGE_CHARS`), `next` naming where the next page starts |
 | `claim_file`, `release_file` | tools | claim result / `{ok, released}` |
 | `claim_violation` | write guard, or the bash detector | `{blocked:true, reason, owner?}` for `edit`/`write`; `{detected:true, via:"bash", owner, protected, rev}` for a shell write. Both are announced on the board by `system`; for a shell write the board post comes once per path per minute and says how many repeats the minute held, while every write stays on the trace (a shell loop on s3096 produced 566 posts in fourteen minutes, and every peer read them all). |
 | `file_history` | tool, `tool_call`/`tool_result` hooks, bash detector | `{n}` on the tool; `{ok, bytes, sha256}` when a revision is recorded |
@@ -404,6 +405,7 @@ anywhere; the model's own trailer names the same file.
 | `ledger_superseded` | `record` with `supersedes` | `{ok, by_seq}`; `args` = `{seq}` |
 | `history_quota` | the hub, once per seat, when its stored file history reaches `SWARM_HISTORY_QUOTA_MB` | `{ok, used_bytes, quota_bytes}`; `args` = `{agent}`; also a board post to that seat |
 | `notify` | the hub, when it calls the run's `--notify` hook | `{ok}`; `args` = `{event}`. The hook's other events (stop, reap, the watchdogs) are called by those scripts; failures go to `traces/notify.log` |
+| `hub_call` with `args.fn:"runFinishLine"` | the hub, each run of the operator's finish line on the host for a seat's `done` | `{ok:true, total, passed, failing?[], error?}`: the harness's own record of the run; the seat's `finish_line` line is its VM's word |
 | `hub_call` with `args.fn:"seat_auth"` | the hub, a connection to a seat's socket that did not open with that seat's token | `{ok:false, error}` naming which (no token, a wrong one, a seat given none); repeats collapsed per minute |
 | `model_gateway_started`, `model_gateway_refused`, `model_gateway_upstream_error` | the model gateway (`--model-gateway`) | started: `{ok, port, providers, seats}`; refused: `{ok:false, status, message}`, `args` = `{agent, code}`, one line per seat and reason per minute; upstream error: `{ok:false, message}`, `args` = `{agent, provider}` |
 | `model_gateway_restarted` | `scripts/hub-supervise.sh`, the gateway brought back on its port | `{ok}`; `args` = `{by, restart, port}` |

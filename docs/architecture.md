@@ -125,9 +125,12 @@ flowchart TB
   one read-only share, `work/` included, and each seat's own `work/<id>/`,
   `work/extracted/<id>/`, `work/quarantine/<id>/` (the last two no-exec),
   `tool-output/<id>/` and `.pi-sessions/<id>/` are writable shares on top of
-  it; unmounting a hole leaves the read-only floor. Under a seat's own
-  session hole, `.pi-sessions/` is a read-only veil holding only that hole's
-  mount point, so a seat does not read its peers' transcripts. Nothing writable is
+  it; unmounting a hole leaves the read-only floor. `traces/`,
+  `tool-output/` and `.pi-sessions/` are each covered by a read-only veil
+  that holds only the seat's own mount point (none, for `traces/`), so a
+  seat reads neither the trace nor its peers' transcripts and kept outputs;
+  its `done` gets the finish line from the hub, which runs it on the host
+  where the trace is. Nothing writable is
   shared between VMs: a shared file under `work/` (`work/report.md`, a
   timeline) goes through `publish_file`, and the hub writes it on the host,
   claimed and recorded for the agent that asked. The board's files are
