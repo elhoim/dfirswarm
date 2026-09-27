@@ -9090,7 +9090,8 @@ export function jobPageNote(job: string, page: JobStdoutPage): string | null {
   const before = page.offset > 0 ? ` (bytes 0-${page.offset} came on earlier pages)` : "";
   return (
     `This is bytes ${page.offset}-${end} of ${page.total} of ${job}'s stdout${before}: ${unread} bytes are unread. ` +
-    `Read the next page with job_status(job_id: "${job}", offset: ${end}), or read ${page.path} whole, before you draw a conclusion from this page.`
+    `Read the next page with job_status(job_id: "${job}", offset: ${end}), or read ${page.path} whole, before you draw a conclusion from this page. ` +
+    `Until the rest is read, or an entry you record with interprets: [{job: "${job}", rest: "how you read the rest, or why not"}] says why not, ${job} stays on your list of jobs awaiting interpretation.`
   );
 }
 

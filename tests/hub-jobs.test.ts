@@ -149,6 +149,7 @@ test("a page of a job's stdout that leaves bytes unread says how many, and how t
   assert.match(note!, /10014 bytes are unread/);
   assert.ok(note!.includes(`job_status(job_id: "${sub.job.job}", offset: 8192)`), note!);
   assert.ok(note!.includes(`store/jobs/${sub.job.job}/stdout.log`));
+  assert.match(note!, /stays on your list of jobs awaiting interpretation/, "the unread rest keeps the job waiting for an interpretation");
   const second = await call("a1", "jobStatus", { job_id: sub.job.job, offset: 8192, limit: 8192 });
   assert.match(jobPageNote(sub.job.job, second.stdout)!, /bytes 8192-16384 of 18206 .*\(bytes 0-8192 came on earlier pages\): 1822 bytes are unread/);
   const last = await call("a1", "jobStatus", { job_id: sub.job.job, offset: 16384, limit: 8192 });
