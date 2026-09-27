@@ -8965,6 +8965,24 @@ export function classifyTurnError(
 }
 
 /**
+ * What the board is told when a seat's turn ends in the provider's error.
+ * It used to say the seat's work was "free", and on the Belka run s306463
+ * a peer began taking over an agent that had only lost one turn: the agent
+ * came back, the two collided, and the board spent four posts sorting it
+ * out. A failed turn transfers nothing. The work stands as the seat's until
+ * the seat itself, or the hub (a lead reclaimed from a stale holder), says
+ * otherwise.
+ */
+export function providerErrorPost(agentId: string, model: string, reason: string): string {
+  return (
+    `PROVIDER ERROR: ${agentId}'s turn on ${model} ended with: ${reason}. ` +
+    `Nothing this agent or a peer does will change that: it is the provider answering, not the harness. ` +
+    `Only this turn failed. ${agentId}'s work, its leads and its claims stand as its own until ${agentId} or the hub says otherwise; ` +
+    `do not take them over on the strength of this post. If ${agentId} stays silent, its leads show as stale in \`leads\` and can be reclaimed from there.`
+  );
+}
+
+/**
  * The shared install area and the scratch dir are nobody's work product. pip
  * writes hundreds of files under work/.toolchain/, a tool keeps its cache
  * there, and two agents installing at once are not in conflict over the case:

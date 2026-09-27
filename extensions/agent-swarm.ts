@@ -38,6 +38,7 @@ import {
   finishLineVerdict,
   inboxPageChars,
   classifyTurnError,
+  providerErrorPost,
   CAP_STEER,
   TOKEN_CAP_STEER,
   overCap,
@@ -1266,10 +1267,7 @@ export default function (pi: ExtensionAPI) {
     if (providerErrorTold === reason) return;
     providerErrorTold = reason;
     await logEvent(ctx.cwd, agentId, "agent_error", { model }, { ok: false, reason }).catch(() => undefined);
-    await systemPost(ctx.cwd, {
-      tag: "veto",
-      body: `PROVIDER ERROR: ${agentId}'s turn on ${model} ended with: ${reason}. Nothing this agent or a peer does will change that — it is the provider answering, not the harness. Whatever ${agentId} had taken on is free; read the board, and if the work matters to the finish line, take it.`,
-    }).catch(() => undefined);
+    await systemPost(ctx.cwd, { tag: "veto", body: providerErrorPost(agentId, model, reason) }).catch(() => undefined);
   }
 
   /**
