@@ -382,3 +382,31 @@ test("pack and prompt goals use the library's answers and inputs_check checks", 
   }
   assert.deepEqual(problems, [], `goal problems:\n  ${problems.join("\n  ")}`);
 });
+
+// The joint review's prompt list (2026-09-27): the lead register in the
+// worker prompt, the library's guidance and the three hardest CTF goals.
+test("the worker prompt, the library and the three CTF goals carry lead-first coordination", async () => {
+  const flat = (t: string) => t.replace(/\s+/g, " ");
+  const prompt = flat(await readFile(join(REPO, "prompts", "worker-system.md"), "utf8"));
+  for (const must of [
+    "Lead first: before you start work a peer could also be doing, read `leads` and claim the lead",
+    "`take: true`",
+    "Interpret every job you run",
+    "A citation in refs alone does not interpret it",
+    "When your slice ends, take the ready lead the header ranks first",
+    "Never leave a lead active and silent",
+    "needs_operator is for anything outside the evidence and the allowlist",
+    "A turn that ended in a provider error frees nothing",
+  ]) {
+    assert.ok(prompt.includes(must), `prompts/worker-system.md does not say: ${must}`);
+  }
+  const readme = flat(await readFile(join(REPO, "library", "README.md"), "utf8"));
+  assert.ok(readme.includes("**Leads.** The work you find along the way goes in the lead register."), "library/README.md has no leads paragraph");
+  assert.ok(readme.includes("--existence <n>"), "library/README.md does not say how an existence question is named");
+  for (const goal of ["belkactf6-bogus-bill.md", "dfir-c10-meeting-location.md", "dfir-c09-encrypt-them-all.md"]) {
+    const body = flat(await readFile(join(REPO, "prompts", "goals", goal), "utf8"));
+    for (const must of ["**Leads.**", "`lead_open`", "`interprets`", "take the ready lead the header ranks first", "`needs_operator`"]) {
+      assert.ok(body.includes(must), `${goal} does not say: ${must}`);
+    }
+  }
+});

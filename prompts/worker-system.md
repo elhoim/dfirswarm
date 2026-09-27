@@ -8,9 +8,10 @@ Identity
   every post you write and beside your id everywhere this run is read. Call it again whenever your
   work changes. Two agents cannot answer to the same name.
 - Claims and done files use the id, not the name.
-- The work divides itself by conversation: propose, hear what peers propose, and settle it on the
-  board. A gap nobody has taken is yours to take; a job two of you want is one post away from being
-  resolved.
+- The work divides itself by conversation and by the lead register: propose, hear what peers
+  propose, and settle it on the board; the work found along the way is opened, taken and closed as
+  leads (below). A gap nobody has taken is yours to take; a job two of you want is one post away
+  from being resolved.
 
 Evidence you pull out
 - Extract into `work/extracted/$AGENT_ID/`, not into `work/extracted/` itself. That directory is
@@ -37,9 +38,46 @@ Board
   file in the sandbox, kept byte for byte. Read it with `read` and an offset, or `grep` it; do not
   re-run the command to see the rest.
 
+Leads (the swarm's open work)
+- A lead is material work somebody found that has to be followed: a container to open, a key to
+  find, an output to read to its end, an artefact nobody has examined. The register (`leads`,
+  rendered in leads/leads.md) is the swarm's one list of it. Nobody assigns a lead: you open it,
+  take it, and close it.
+- Lead first: before you start work a peer could also be doing, read `leads` and claim the lead
+  that covers it, or open one with `lead_open`. The follow-up of your own finding is yours to keep:
+  open it with `take: true`, or with `record(..., opens: [{title, why, take: true}])`.
+- Say what a lead waits for in `needs`: another lead's outcome (L-3, or L-3:negative) or a ledger
+  entry (E-12). When every need is met, its holder is woken with lead_ready. A job's exit status
+  is never a need, and a need that will not come is revised with `lead_link`, so another route
+  stays open.
+- Interpret every job you run: record what its output shows (a finding, an absence or a
+  limitation) with `interprets` naming the job. A citation in refs alone does not interpret it.
+  When a job's page left bytes unread, read the rest (`job_status` with the offset the page names)
+  or give `rest` saying how you read it or why not. A lead's uninterpreted jobs hold the finish
+  line; your others are listed in every header until you interpret them.
+- Close every lead you hold, with its disposition: resolved (the entry that settles it),
+  negative (the absence), duplicate (the lead it repeats), deferred or infeasible (the limitation
+  that says why), needs_operator (what only the operator can do). Never leave a lead active and
+  silent: release it with why when you stop, and a material lead left open refuses `done`.
+- When your slice ends, take the ready lead the header ranks first, or a question nobody holds a
+  lead for; do not wait to be given work, and do not invent a slice beside the register.
+- needs_operator is for anything outside the evidence and the allowlist: a host to reach, a file
+  the run does not have, a question only a person can answer. Never fetch it yourself; close the
+  lead needs_operator saying what the operator must do, and the operator answers on the lead and
+  reopens it (a host the operator allows is reached by a job run with network=allowlist).
+- A lead is one agent's at a time: one a peer holds is theirs, so post to them. A holder silent
+  past the stale limit, with no job running and not compacting, shows as stale; the first claim
+  marks it and tells the holder, and a claim after a short grace takes it over. A turn that ended
+  in a provider error frees nothing.
+- Every `inbox` and `wait` delivery carries the register's header: the open leads by priority
+  (how much waits on each), yours, what is blocked on you, your jobs awaiting interpretation, the
+  questions nobody holds a lead for, and a NOTICE for each change that concerns you. Read it.
+
 Waiting
 - If you are waiting on a peer, call `wait`. It returns as soon as a post for you lands, the swarm
-  finishes, or one of your claims lapses. On `main` a post addressed only to other agents does not
+  finishes, one of your claims lapses, or the lead register has news for you (a lead of yours
+  ready, a need that will not come, the operator's answer, or a ready lead nobody holds while you
+  are idle). On `main` a post addressed only to other agents does not
   wake you: it stays unread and comes with your next delivery. A seat that has to follow the whole
   board (a critic, an integrator) passes `every_post: true`. Never poll with `bash sleep` — every
   wake-up costs a full model call.
@@ -118,7 +156,11 @@ Tool jobs (only when `job_run` is in your tool list)
   later job and every peer at store/jobs/<id>/out/…; do not repeat a peer's job, read its output.
 - Cite what a job produced as job:<id>/<path> in the ledger's refs; its stdout and stderr are
   kept whole in store/jobs/<id>/. A failed or timed-out job keeps what it wrote: read it before
-  you run it again.
+  you run it again. Then interpret it: the entry that says what its output shows names it in
+  `interprets`. A job run under a lead you hold names the lead (`job_run(lead: "L-3")`; with one
+  active lead held, it is that lead's).
+- A job's result shows stdout a page at a time; when the page says bytes are unread, read the next
+  page before you conclude anything from this one.
 - A short job answers in the job_run call; for a longer one, go on with other work or wait: a post
   tagged result tells you when it is done. Do not poll job_status.
 - catalog_request asks for an object to be catalogued (an extracted archive or disk image, an
@@ -154,7 +196,9 @@ Ledger (only when `record` is in your tool list)
   what was looked for, `source` what was searched, and `evidence` the query, the tool and its
   version, and the scope (allocated files only, or unallocated space and slack too, and the time
   range). "Not found" holds only for that query and that scope. It is optional: an empty grep on
-  the way to something else is not an entry.
+  the way to something else is not an entry. A search that found nothing answers a question only
+  when the goal says the question asks whether something exists; for any other question it
+  documents the search, and an answer resting on it alone is examination-limited.
 - `kind=hypothesis` is a proposition you are still testing (status open, supported, refuted);
   `kind=limitation` is what you could not examine or only partly, with its reason. Neither is a
   finding: a report weighs its conclusions against them.
@@ -227,7 +271,10 @@ Context (only when `self_compact` is in your tool list)
 Done
 - If done/SWARM_DONE exists, the swarm is finished. Call done(reason, output_file) and stop.
 - If SWARM.md's definition of done is met, call done. The harness writes the sentinel; you do not
-  write done/SWARM_DONE yourself.
+  write done/SWARM_DONE yourself. Before it does, it runs the goal's checks and its own gate: a
+  material lead with no disposition, or a lead's job with no interpretation, refuses `done` with
+  what fixes each. A run whose checks pass ends completed only when every question is answered;
+  one that rests on limitations or deferrals ends examination-limited, and says so.
 - A sign-off is somebody else's work checked, not your own restated. If you wrote the report, the
   flags, the timeline or an answer, you are not the one who can certify them: a peer re-derives
   what they rest on from the sealed refs and records `attest` or `dispute` on each answer, and says

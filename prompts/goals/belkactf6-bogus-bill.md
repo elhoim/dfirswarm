@@ -46,11 +46,15 @@ given, the answer is graded on that format.
 We do not know whether these eighteen questions are independent or whether
 some of them can only be answered once another has been. Nothing in this
 document tells you the order, because we do not have it. Work it out
-yourselves from the evidence and from what each question needs, write the
-dependency map you infer into `work/dependencies.md` as a table (question,
-depends on, why), and keep it current as you learn more. If you find a
-question that cannot be answered until another is solved, say so on the board
-so whoever holds the blocking question knows somebody is waiting.
+yourselves from the evidence and from what each question needs. Each
+dependency you find is a lead: the work one question waits on is a lead of
+its own, and the lead that waits names it in `needs`, so its holder is woken
+the moment it comes and `leads` ranks first what most others wait on. Write
+the map you infer into `work/dependencies.md` as a table (question, depends
+on, why) from the register, and keep it current as you learn more. If you
+find a question that cannot be answered until another is solved, open the
+lead for what it waits on, or name the lead that exists, rather than only
+saying so on the board.
 
 Two facts to save you time: the archive password for the laptop image was
 released to players only after question 5 during the live event, and both
@@ -125,6 +129,22 @@ re-derives each finding an answer rests on from its sealed refs and records
 the same for every answer. The critic writes no answer; the author attests
 nothing of their own. The sign-off is these acts, not a post. Nothing else is
 assigned.
+
+**Leads.** The work you find along the way goes in the lead register. Before
+you start work a peer could also be doing, read `leads` and claim the lead
+that covers it (`lead_claim`), or open one (`lead_open`); keep the follow-up of
+your own finding with `take: true`, or give it with `record(..., opens: [...])`.
+Say in `needs` what a lead waits for (a lead's outcome, or an entry), and its
+holder is woken when it comes. Interpret every job you run: the entry that
+says what its output shows names it in `interprets`, and a page that left
+bytes unread is read to its end or its `rest` explained. When your slice ends,
+take the ready lead the header ranks first, or a question nobody holds a lead
+for. Close every lead you hold with its disposition, and never leave one
+active and silent. Anything outside the evidence and the allowlist (a host to
+reach, a file the run does not have, a question only a person can answer) is
+`needs_operator`: close the lead so, saying what the operator must do, and the
+operator answers on it. The critic also reviews each lead dropped or deferred,
+by attesting or disputing the entry it cites.
 
 ## Definition of done
 
