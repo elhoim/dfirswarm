@@ -275,8 +275,11 @@ ships:
 - `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,summary,narrative`
   reads the ledger's answers (`kind=answer`, ledger version 4): each named
   question (`question:1` …), the summary and the narrative has its standing
-  answer, resting on a finding whose refs resolve, a complete search or a
-  limitation; no answer has lost its support (an entry it rests on
+  answer, resting on a finding whose refs resolve, a complete search where
+  the question asks whether something exists (`--existence 2,5` names those
+  questions; for any other, a search that found nothing documents the search
+  and the section is examination-limited) or a limitation; no answer has lost
+  its support (an entry it rests on
   superseded or disputed since, transitively); a critic other than its
   author has attested or disputed each; and no contradiction stands that no
   answer weighs. Each defect is printed with its fix, and one that a
@@ -286,8 +289,9 @@ ships:
   sure. With `--report work/report.md --sections 1,2,3` it checks a report
   instead, as goals did before version 4: each named section (`## 1.` …)
   cites (`#12`, `E-12`, `#10–#12`) at least one standing finding whose refs
-  all resolve, or one search that found nothing (`kind=absence`), and names
-  each section that does not, with why.
+  all resolve, or one search that found nothing (`kind=absence`, an answer
+  only for a question `--existence` names; otherwise examination-limited),
+  and names each section that does not, with why.
 
 A failing check is not fatal: the swarm may still be working, so it keeps
 polling until `--timeout`. Exit 1 on that timeout, or immediately when the

@@ -552,3 +552,16 @@ test("the brief's questions are counted as the goals' awk counts them, and the c
   const usage = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "check-answers.ts")], { cwd: root, encoding: "utf8" });
   assert.equal(usage.status, 2);
 });
+
+test("in ledger mode too, an answer resting only on a search that found nothing is examination-limited unless its question asks whether something exists", async () => {
+  const { a0, a2, a3, root } = await run();
+  const none = ok(await rec(a0, { kind: "absence", value: "No second wallet file", source: "inputs/disk.E01", evidence: "fls over the whole image, allocated and deleted", refs: ["job:j000001/rows.txt"], answers: ["1"] })).entry;
+  const q = ok(await rec(a3, { kind: "answer", section: "question:1", value: "There is no second wallet", reasoning: `E-${none.seq}`, ...Q })).entry;
+  assert.ok((await attestEntry(a2, { seq: q.seq, how: "re-ran the listing's search" })).ok);
+  const limited = await checkLedgerAnswers(root, ["1"]);
+  assert.equal(limited.ok, true, "limited is said apart, not failed");
+  assert.deepEqual(limited.outcomes, { "question:1": "limited" });
+  assert.match(limited.lines[0], /^question:1: examination-limited, #\d+ resting on #\d+ \(a search that found nothing: it documents the search, and the question asks for more than whether something exists\)/);
+  const existence = await checkLedgerAnswers(root, ["1"], ["1"]);
+  assert.deepEqual(existence.outcomes, { "question:1": "answered" }, "the goal said question 1 asks whether it exists");
+});

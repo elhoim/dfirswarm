@@ -12,8 +12,9 @@
  * attested or disputed it, it is not disputed itself, and no contradiction
  * stands that no answer weighs and no limitation names. A question's answer
  * rests on a standing finding whose refs resolve now, bytes checked where the
- * run sealed them (one of them an object of the run), a complete search, or a
- * limitation (examination-limited). Each defect is printed with what fixes
+ * run sealed them (one of them an object of the run), a complete search where
+ * the question asks whether something exists, or a limitation
+ * (examination-limited). Each defect is printed with what fixes
  * it; a defect a standing limitation names lets the run end and stays a
  * defect (the release counts it). So the finish line refuses a done once,
  * naming the fix, and the next done passes when each defect left is named.
@@ -27,7 +28,12 @@
  * - a finding with refs that all resolve, at least one of them an object of
  *   the run (unresolved:<why> alone names none): answered;
  * - a search that found nothing (absence), complete, with refs that resolve
- *   when it has any: answered, as not found;
+ *   when it has any: answered, as not found, when the question asks whether
+ *   something exists (the goal names those with --existence); for any other
+ *   question it documents the search and no more, and the section is
+ *   examination-limited. On the Belka run s306463 scoped negative searches
+ *   counted as answers and the check said 18 answered, 0 examination-limited,
+ *   while the critic's sign-off said several exact answers were unavailable;
  * - a limitation: the examination could not establish it, and says why:
  *   examination-limited, which a reader is told apart from answered.
  * A hypothesis never answers. A finding resting on the kept output of a job
@@ -43,6 +49,9 @@
  *     --sections 1,2,3,summary,narrative
  *   node … check-answers.ts --sections-in inputs/CASE.md --sections summary,narrative
  *   node … check-answers.ts --report work/report.md --sections 1,2,3        (report mode)
+ *   node … check-answers.ts --sections 1,2,3,summary,narrative --existence 2
+ *     (question 2 asks whether something exists: a complete search that found
+ *     nothing answers it; for 1 and 3 it documents the search and no more)
  *
  * Exit 0 when every section does; 1 when one does not (each named, with what
  * it rests on, why none of it counts and what fixes it); 2 on a usage error.
@@ -111,7 +120,17 @@ export function sections(report: string): Map<string, string> {
 
 export type SectionOutcome = "answered" | "limited" | "unanswered";
 
-export async function checkAnswers(sandbox: string, reportPath: string, wanted: string[]): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, SectionOutcome> }> {
+/**
+ * Whether a section's question asks whether something exists: only then does
+ * a complete search that found nothing answer it. The goal says which, with
+ * --existence; nothing here reads a question's words to guess.
+ */
+export function asksExistence(existence: readonly string[], section: string): boolean {
+  const id = sectionId(section.startsWith("question:") ? section.slice("question:".length) : section);
+  return existence.some((x) => sectionId(x) === id);
+}
+
+export async function checkAnswers(sandbox: string, reportPath: string, wanted: string[], existence: readonly string[] = []): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, SectionOutcome> }> {
   const S = resolve(sandbox);
   const outcomes: Record<string, SectionOutcome> = {};
   const report = await readFile(join(S, reportPath), "utf8").catch(() => null);
@@ -189,6 +208,12 @@ export async function checkAnswers(sandbox: string, reportPath: string, wanted: 
         continue;
       }
       const onFailed = failed.length ? `; on the kept output of a job that did not succeed: ${failed.join(", ")}` : "";
+      if (e.kind === "absence" && !asksExistence(existence, n)) {
+        // A search documents what was searched; it answers only a question
+        // that asks whether the thing exists at all.
+        limited ??= `#${seq} (a search that found nothing${via}${onFailed}: it documents the search, and the question asks for more than whether something exists)`;
+        continue;
+      }
       answered = e.kind === "absence" ? `#${seq} (a search that found nothing${via}${onFailed})` : `#${seq} (a finding with refs${via}${onFailed})`;
       break;
     }
@@ -251,7 +276,7 @@ async function jobStatuses(S: string, entries: LedgerEntry[]): Promise<Map<numbe
  * `wanted` takes goal question ids ("3", "Q3", "question:3") and summary and
  * narrative.
  */
-export async function checkLedgerAnswers(sandbox: string, wanted: string[]): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, LedgerOutcome>; defects: LedgerDefect[] }> {
+export async function checkLedgerAnswers(sandbox: string, wanted: string[], existence: readonly string[] = []): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, LedgerOutcome>; defects: LedgerDefect[] }> {
   const S = resolve(sandbox);
   const outcomes: Record<string, LedgerOutcome> = {};
   const text = await readFile(join(S, "ledger", "entries.jsonl"), "utf8").catch(() => "");
@@ -334,6 +359,10 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[]): Pro
         why.push(`#${e.seq} rests on unresolved: refs only`);
         continue;
       }
+      if (e.kind === "absence" && !asksExistence(existence, section)) {
+        limited ??= `#${e.seq} (a search that found nothing: it documents the search, and the question asks for more than whether something exists)`;
+        continue;
+      }
       rests = `#${e.seq} (${e.kind === "absence" ? "a search that found nothing" : "a finding with refs"})`;
       break;
     }
@@ -375,6 +404,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const report = opt("--report");
   const sandbox = opt("--sandbox") ?? process.cwd();
   const wanted = (opt("--sections") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const existence = (opt("--existence") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const briefPath = opt("--sections-in");
   if (briefPath) {
     const brief = await readFile(join(resolve(sandbox), briefPath), "utf8").catch(() => null);
@@ -390,10 +420,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     wanted.unshift(...questions);
   }
   if (!wanted.length) {
-    process.stderr.write("usage: check-answers.ts [--report <path>] --sections 1,2,3[,summary,narrative] [--sections-in inputs/CASE.md] [--sandbox DIR]\n");
+    process.stderr.write("usage: check-answers.ts [--report <path>] --sections 1,2,3[,summary,narrative] [--existence 2,…] [--sections-in inputs/CASE.md] [--sandbox DIR]\n");
     process.exit(2);
   }
-  const r = report ? await checkAnswers(sandbox, report, wanted) : await checkLedgerAnswers(sandbox, wanted);
+  const r = report ? await checkAnswers(sandbox, report, wanted, existence) : await checkLedgerAnswers(sandbox, wanted, existence);
   process.stdout.write(`${r.lines.join("\n")}\n`);
   process.exit(r.ok ? 0 : 1);
 }
