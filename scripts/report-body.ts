@@ -97,7 +97,12 @@ export type HumanReview = {
   technicalReviewer?: { name: string; competence?: string; checked?: string } | null;
   /** The examiner's latest word on an entry, by seq. */
   entries?: Map<number, { action: string; by: string; at: string; note?: string; entry_hash?: string }>;
-  signed?: { by: string; at: string; ledger_head?: string } | null;
+  /**
+   * The sign-off, and whether it covers the run as it stands (the ledger's
+   * head and the report's hash the ones signed); `scope` says what it is
+   * over when it does not. Only a current sign-off reads "signed".
+   */
+  signed?: { by: string; at: string; ledger_head?: string; current?: boolean; scope?: string } | null;
   /** Why the review could not be read: said as that, never as "not reviewed". */
   unreadable?: string;
 };
@@ -111,13 +116,15 @@ export type HumanReview = {
 export function humanReviewFrom(
   state: { byEntry: Map<number, { action: string; examiner: string; at: string; note?: string; entry_hash?: string }>; signed: { examiner: string; at: string; ledger_head?: string } | null; unreadable?: string } | null,
   examiner?: { name: string; organisation?: string } | null,
+  /** Whether the sign-off covers the run as it stands (report.ts: signoffCurrent, signoffScope). */
+  signoff?: { current: boolean; scope?: string },
 ): HumanReview | null {
   if (!state) return examiner ? { examiner } : null;
   if (state.unreadable) return { unreadable: state.unreadable };
   return {
     ...(examiner || state.signed ? { examiner: examiner ?? { name: (state.signed as { examiner: string }).examiner } } : {}),
     entries: new Map([...state.byEntry].map(([seq, l]) => [seq, { action: l.action, by: l.examiner, at: l.at, ...(l.note ? { note: l.note } : {}), ...(l.entry_hash ? { entry_hash: l.entry_hash } : {}) }])),
-    signed: state.signed ? { by: state.signed.examiner, at: state.signed.at, ...(state.signed.ledger_head ? { ledger_head: state.signed.ledger_head } : {}) } : null,
+    signed: state.signed ? { by: state.signed.examiner, at: state.signed.at, ...(state.signed.ledger_head ? { ledger_head: state.signed.ledger_head } : {}), ...(signoff ? { current: signoff.current, ...(signoff.scope ? { scope: signoff.scope } : {}) } : {}) } : null,
   };
 }
 
@@ -126,14 +133,29 @@ export type ReportBodyOptions = {
   review?: HumanReview | null;
   /** The goal's questions, when the caller knows them better than SWARM.md says. */
   questions?: Array<{ id: string; text: string }>;
-  /** The working report for Appendix C; read from work/report.md when not given, none when null. */
-  workingReport?: { path: string; text: string } | null;
+  /**
+   * The working report for Appendix C; read from work/report.md when not
+   * given, none when null. `seal` is what custody says of those bytes (report.ts:
+   * ownReportSeal), said in place of the body's own hash line.
+   */
+  workingReport?: { path: string; text: string; seal?: string } | null;
+  /**
+   * HTML a caller that knows more of the run adds to the HTML body (never
+   * to the Markdown): `evidence` in place of §3's file table (report.ts's,
+   * with the per-pane guard and what the trace named), `method` at the end of
+   * §4's account of the swarm (spend, calls, context, the tools the trace
+   * shows forged; the body's own list of forged tools is then left out),
+   * `limits` in §8 (the run's own limits). The caller escapes what it writes.
+   */
+  html?: { evidence?: string; method?: string; limits?: string };
   /**
    * Whether the trace shows each entry's source being read before the entry
    * was recorded, by seq (report.ts computes it: coverage.ts's grounding).
    * The body does not read the trace itself.
    */
   grounding?: Record<string, string>;
+  /** The run's model, for an agent team.json names without one (report.ts: the registry's). */
+  defaultModel?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -315,7 +337,13 @@ type Run = {
   team: Array<{ id: string; model?: string }>;
   names: NameRecord[];
   forged: ForgedToolManifest[];
-  working: { path: string; text: string; sha256: string } | { path: string; error: string } | null;
+  working: { path: string; text: string; sha256: string; seal?: string } | { path: string; error: string } | null;
+  html: { evidence?: string; method?: string; limits?: string };
+  /**
+   * What the ledger can hold: answers (it has some); no answers yet from a
+   * run whose ledger is version 4; a ledger that predates answers; nothing.
+   */
+  era: "answers" | "no answers" | "predates" | "empty";
   chains: { ledger: Chain & { chained: number }; attestations: Chain; disputes: Chain };
   review: HumanReview | null;
   grounding: Record<string, string>;
@@ -392,7 +420,7 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   const inputsRaw = await readJson<{ acquisition?: { entries?: Array<{ path?: string; algo?: string }> } }>(join(sandbox, "inputs.json"));
   const custody = await readJson<CustodyView>(join(sandbox, "custody.json"));
   const teamRaw = await readJson<{ swarm_id?: string; agents?: Array<{ id?: unknown; model?: unknown }> }>(join(sandbox, "team.json"));
-  const team = (teamRaw?.agents ?? []).filter((a) => typeof a?.id === "string").map((a) => ({ id: String(a.id), ...(typeof a.model === "string" ? { model: a.model } : {}) }));
+  const team = (teamRaw?.agents ?? []).filter((a) => typeof a?.id === "string").map((a) => ({ id: String(a.id), ...(typeof a.model === "string" ? { model: a.model } : opts.defaultModel ? { model: opts.defaultModel } : {}) }));
   const names = await readNames(sandbox).catch(() => []);
   const forged = (await listForgedTools(sandbox).catch(() => [])).filter((t) => !t.pack);
 
@@ -452,7 +480,7 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
 
   const working = await (async (): Promise<Run["working"]> => {
     if (opts.workingReport === null) return null;
-    if (opts.workingReport) return { path: opts.workingReport.path, text: opts.workingReport.text, sha256: createHash("sha256").update(opts.workingReport.text).digest("hex") };
+    if (opts.workingReport) return { path: opts.workingReport.path, text: opts.workingReport.text, sha256: createHash("sha256").update(opts.workingReport.text).digest("hex"), ...(opts.workingReport.seal ? { seal: opts.workingReport.seal } : {}) };
     try {
       const read = await readSandboxFile(sandbox, "work/report.md", { maxBytes: 64 * 1024 * 1024 });
       if (!read) return null;
@@ -485,6 +513,8 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
     names,
     forged,
     working,
+    html: opts.html ?? {},
+    era: hasAnswers ? "answers" : !entries.length ? "empty" : entries.some((e) => (e.v ?? 1) >= 4) ? "no answers" : "predates",
     chains,
     review: opts.review ?? null,
     grounding: opts.grounding ?? {},
@@ -683,6 +713,8 @@ type Block =
   | { k: "cite"; seq: number; head: Span[]; chips: Chip[]; rows: Row[] }
   | { k: "timeline"; rows: Array<{ seq: number; when: string; what: Span[]; meta: string }> }
   | { k: "details"; summary: string; body: Block[] }
+  /** HTML a caller wrote and escaped itself (ReportBodyOptions.html): in the HTML only. */
+  | { k: "html"; html: string }
   | { k: "md"; text: string }
   | { k: "verbatim"; text: string }
   | { k: "box"; cls: string; id?: string; level: 3 | 4; title: Span[]; chips: Chip[]; body: Block[] };
@@ -714,6 +746,8 @@ type EntryState = {
   review: { action: string; by: string; at: string; note?: string; entry_hash?: string } | null;
   /** The trace's word on the entry's source, when the caller gave it. */
   grounding: string | undefined;
+  /** Why the examiner's review could not be read, when it could not. */
+  reviewUnreadable: string | undefined;
 };
 
 function stateOf(e: LedgerEntry, run: Run, memo: Map<number, EntryState>): EntryState {
@@ -744,6 +778,7 @@ function stateOf(e: LedgerEntry, run: Run, memo: Map<number, EntryState>): Entry
     problems: run.problems.get(e.seq) ?? [],
     review: run.review?.entries?.get(e.seq) ?? null,
     grounding: run.grounding[String(e.seq)],
+    reviewUnreadable: run.review?.unreadable,
   };
   memo.set(e.seq, s);
   return s;
@@ -785,15 +820,29 @@ function chipsOf(e: LedgerEntry, s: EntryState): Chip[] {
   if (e.unsupported_tokens?.length) out.push({ text: "unsupported tokens", tone: "brick" });
   if (e.kind === "finding" || e.kind === "answer") {
     out.push(s.attests.length ? { text: `attested by ${[...new Set(s.attests.map((a) => a.by))].join(", ")}`, tone: "kelp" } : { text: "not attested", tone: "none" });
-    out.push(reviewChip(s.review));
+    out.push(reviewChip(s.review, s.reviewUnreadable));
   }
   return out;
 }
 
-function reviewChip(r: EntryState["review"]): Chip {
+/** The examiner's standing on an entry, as a chip: a human's word, never an agent's. */
+function reviewChip(r: EntryState["review"], unreadable?: string): Chip {
+  if (unreadable) return { text: "review unreadable", tone: "brick" };
   if (!r) return { text: "not independently reviewed", tone: "none" };
-  const verb = r.action === "accept" ? "accepted" : r.action === "reject" ? "rejected" : r.action === "amend" ? "amended" : r.action;
-  return { text: `${verb} by ${r.by} (examiner)`, tone: r.action === "accept" ? "moss" : r.action === "reject" ? "brick" : "saffron" };
+  if (r.action === "accept") return { text: "accepted by the examiner", tone: "moss" };
+  if (r.action === "reject") return { text: "rejected by the examiner", tone: "brick" };
+  return { text: `${r.action === "amend" ? "amended" : r.action} by the examiner`, tone: "saffron" };
+}
+
+/** The examiner's standing on an entry, in words (report.ts's reviewStatusOf): who, when, what, and against which hash. */
+function reviewWords(run: Run, s: EntryState): string {
+  if (run.review?.unreadable) return `the examiner's review could not be read (${run.review.unreadable})`;
+  if (!run.review) return "not reviewed by an examiner";
+  const r = s.review;
+  if (!r) return "not reviewed";
+  const verb = r.action === "accept" ? "accepted" : r.action === "reject" ? "REJECTED" : r.action === "amend" ? "amended" : r.action;
+  const other = r.entry_hash && r.entry_hash !== s.hash ? `; reviewed against entry hash ${r.entry_hash}, which is not this entry's` : "";
+  return `${verb} by ${r.by} at ${r.at}${r.note ? `: ${r.note}` : ""}${other}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -952,7 +1001,7 @@ function answerHistory(run: Run, section: string): LedgerEntry[] {
 /** A question's status in a few words, with the chips that say why. */
 function questionStatus(q: Question, run: Run, memo: Map<number, EntryState>): { status: Chip; answer: LedgerEntry | null; chips: Chip[] } {
   const a = standingAnswer(run, `question:${q.id}`);
-  if (!a) return { status: run.hasAnswers ? { text: "not answered", tone: "brick" } : { text: "no structured answer", tone: "none" }, answer: null, chips: [] };
+  if (!a) return { status: run.era === "predates" ? { text: "no structured answer", tone: "none" } : { text: "not answered", tone: "brick" }, answer: null, chips: [] };
   const s = stateOf(a, run, memo);
   const status: Chip = a.inconclusive
     ? { text: "inconclusive", tone: "saffron" }
@@ -973,7 +1022,7 @@ function legendBlocks(run: Run): Block[] {
             draft: true,
             s: [
               { b: "DRAFT." },
-              ` No release v1 exists for this run: this is a working render of what the ledger holds now, not an adopted report. ${run.review?.signed ? "" : "No human has reviewed it."}`,
+              ` No release v1 exists for this run: this is a working render of what the ledger holds now, not an adopted report.${run.review?.signed || run.review?.entries?.size || run.review?.unreadable ? "" : " No human has reviewed it."}`,
             ],
           } as Block,
         ]
@@ -1024,6 +1073,10 @@ function summarySection(run: Run, memo: Map<number, EntryState>): BodySection {
     if (summary.unsupported_tokens?.length) blocks.push(tokensNote(summary));
   } else if (run.hasAnswers) {
     blocks.push({ k: "note", s: ["The swarm recorded no summary. The status of each question follows; the answers are in §5."] });
+  } else if (run.era === "empty") {
+    blocks.push({ k: "note", s: ["The swarm recorded no findings and no answers: nothing was written to the ledger, so this report has no conclusions to carry. That is not the same as finding nothing; §8 says what limited the run."] });
+  } else if (run.era === "no answers") {
+    blocks.push({ k: "note", s: ["The swarm recorded no answers: the ledger holds what it found (Appendix A), and no answer to any question drawn from it. Its working report (Appendix C) is its prose, which the ledger does not check."] });
   } else {
     blocks.push({
       k: "note",
@@ -1062,6 +1115,7 @@ function questionName(q: Question): string {
 function reviewSentence(run: Run): string {
   const r = run.review;
   if (r?.unreadable) return `Prepared by an AI agent swarm. The examiner's review could not be read (${r.unreadable}), so this document cannot say whether anything in it was reviewed.`;
+  if (r?.signed && r.signed.current === false) return `Prepared by an AI agent swarm. An examiner signed off (${r.signed.by}, ${r.signed.at}), and the sign-off does not cover this run as it stands${r.signed.scope ? `: ${r.signed.scope}` : ""}. What changed since is the swarm's (§10).`;
   if (r?.signed) return `Prepared by an AI agent swarm and signed by ${r.signed.by} at ${r.signed.at}; §10 says what the examiner adopted. An answer the examiner did not review is still the swarm's.`;
   if (r?.entries?.size) return "Prepared by an AI agent swarm. An examiner has reviewed some entries and has not signed; §10 says which. An entry not reviewed is the swarm's.";
   return "Prepared by an AI agent swarm. No human has reviewed it: every answer here is the swarm's until an examiner adopts it (§10).";
@@ -1121,7 +1175,9 @@ function requestSection(run: Run): BodySection {
 function evidenceSection(run: Run): BodySection {
   const blocks: Block[] = [];
   const inputs = run.inputs;
-  if (inputs && inputs.files.length) {
+  if (run.html.evidence) {
+    blocks.push({ k: "html", html: run.html.evidence });
+  } else if (inputs && inputs.files.length) {
     const withSha1 = inputs.files.some((f) => f.sha1);
     const withMd5 = inputs.files.some((f) => f.md5);
     blocks.push({
@@ -1252,6 +1308,8 @@ function methodSection(run: Run): BodySection {
     rows: [...agents.entries()].map(([id, a]) => [[{ code: id }], [name.get(id)?.name ?? "—"], [name.get(id)?.doing ?? "—"], [a.model ?? "not recorded"], [recorded(id)], [acts(id)]]),
   });
 
+  if (run.html.method) blocks.push({ k: "html", html: run.html.method });
+
   // Jobs, images and tools.
   blocks.push({ k: "h", level: 3, text: "Jobs, images and tools" });
   if (run.jobs.size) {
@@ -1286,7 +1344,7 @@ function methodSection(run: Run): BodySection {
     if (commands) lines.push([`${plural(commands, "shell command job")}: each command is in Appendix B, whole.`]);
     if (lines.length) blocks.push({ k: "list", items: lines });
   } else blocks.push({ k: "p", s: ["No job ran in a worker VM."] });
-  if (run.forged.length) {
+  if (run.forged.length && !run.html.method) {
     blocks.push({
       k: "p",
       s: [
@@ -1333,8 +1391,9 @@ function humanChecked(run: Run): string {
   if (r?.examiner) parts.push(`Examiner: ${r.examiner.name}${r.examiner.organisation ? `, ${r.examiner.organisation}` : ""}.`);
   if (n) parts.push(`${plural(n, "entry", "entries")} reviewed by the examiner (§10).`);
   if (r?.technicalReviewer) parts.push(`Technical reviewer: ${r.technicalReviewer.name}${r.technicalReviewer.checked ? `, who checked ${r.technicalReviewer.checked}` : ""}.`);
-  if (r?.signed) parts.push(`Signed by ${r.signed.by} at ${r.signed.at}.`);
-  return parts.length ? parts.join(" ") : "No human checked any of it: no examiner review is recorded for this run.";
+  if (r?.signed) parts.push(r.signed.current === false ? `Signed off by ${r.signed.by} at ${r.signed.at}, and NOT OVER THIS RUN AS IT STANDS${r.signed.scope ? `: ${r.signed.scope}` : ""}.` : `Signed by ${r.signed.by} at ${r.signed.at}.`);
+  if (!n && !r?.signed) return `No human checked any of it: no examiner review is recorded for this run.${r?.examiner ? ` The examiner named for the case is ${r.examiner.name}${r.examiner.organisation ? `, ${r.examiner.organisation}` : ""}.` : ""}`;
+  return parts.join(" ");
 }
 
 const STEPS = ["How it was obtained", "What it indicates", "Why this confidence", "What else could explain it", "Contrary evidence", "Limitations", "What would change it", "Exhibits"] as const;
@@ -1345,7 +1404,9 @@ function answerSectionOf(run: Run, memo: Map<number, EntryState>): BodySection {
   if (!run.hasAnswers && run.questions.length) {
     blocks.push({
       k: "note",
-      s: ["This run predates structured answers (ledger version 4). For each question below, the ledger holds only the entries that name it; the swarm's prose answer is in its working report (Appendix C), which the ledger does not check."],
+      s: [
+        `${run.era === "predates" ? "This run predates structured answers (ledger version 4)." : "The swarm recorded no answers."} For each question below, the ledger holds only the entries that name it; the swarm's prose is in its working report (Appendix C), which the ledger does not check.`,
+      ],
     });
   }
   for (const q of run.questions) blocks.push(questionBlock(q, run, memo));
@@ -1421,7 +1482,7 @@ function answerSteps(a: LedgerEntry, s: EntryState, run: Run, memo: Map<number, 
     k: "list",
     items: [
       [s.attests.length ? s.attests.map((x) => `Attested by ${x.by}${x.how ? `: ${x.how}` : ""}.`).join(" ") : "Not attested: no agent other than its author re-derived what it rests on."],
-      [s.review ? `The examiner's word: ${reviewChip(s.review).text}${s.review.note ? `: ${s.review.note}` : ""}.` : "Not independently reviewed: no human has checked it."],
+      [s.review || s.reviewUnreadable ? `The examiner's word: ${reviewWords(run, s)}.` : "Not independently reviewed: no human has checked it."],
     ],
   });
 
@@ -1507,7 +1568,7 @@ function answerSteps(a: LedgerEntry, s: EntryState, run: Run, memo: Map<number, 
 
 function unansweredBody(q: Question, run: Run, memo: Map<number, EntryState>): Block[] {
   const out: Block[] = [];
-  out.push({ k: "note", s: [run.hasAnswers ? "No answer was recorded for this question." : "No structured answer: the run predates answers in the ledger."] });
+  out.push({ k: "note", s: [run.era === "predates" ? "No structured answer: the run predates answers in the ledger." : "No answer was recorded for this question."] });
   const named = run.entries.filter((e) => !run.replaced.has(e.seq) && e.kind !== "answer" && (e.answers ?? []).some((x) => sectionKey(x) === q.id));
   const limits = named.filter((e) => e.kind === "limitation");
   const rest = named.filter((e) => e.kind !== "limitation");
@@ -1539,7 +1600,7 @@ function narrativeSection(run: Run, memo: Map<number, EntryState>): BodySection 
     if (n.unsupported_tokens?.length) blocks.push(tokensNote(n));
     blocks.push({ k: "voice", voice: "computed", label: VOICE_LABEL.computed, s: [groupsSentence(s.groups)] });
   } else {
-    blocks.push({ k: "note", s: [run.hasAnswers ? "No narrative answer was recorded: the timeline below is the ledger's dated events, in order, without the swarm's account of them." : "This run predates structured answers: the timeline below is the ledger's dated events, in order."] });
+    blocks.push({ k: "note", s: [run.era === "predates" ? "This run predates structured answers: the timeline below is the ledger's dated events, in order." : "No narrative answer was recorded: the timeline below is the ledger's dated events, in order, without the swarm's account of them."] });
   }
   const events = run.entries.filter((e) => e.kind === "event").sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? "") || a.seq - b.seq);
   blocks.push({ k: "h", level: 3, text: "Timeline" });
@@ -1559,7 +1620,7 @@ function narrativeSection(run: Run, memo: Map<number, EntryState>): BodySection 
         };
       }),
     });
-  } else blocks.push({ k: "p", s: ["No dated events were recorded."] });
+  } else blocks.push({ k: "p", s: ["No dated events were recorded, so this report has no timeline."] });
   blocks.push({ k: "h", level: 3, text: "Clocks and precision" });
   blocks.push({ k: "voice", voice: "computed", label: VOICE_LABEL.computed, s: [clockParagraph(events)] });
   return { id: "s6", n: "6", title: "What happened", desc: "the swarm's account, the timeline, and how far its times can be trusted", count: plural(events.length, "event"), blocks };
@@ -1608,7 +1669,7 @@ function conclusionsSection(run: Run, memo: Map<number, EntryState>): BodySectio
       ],
     });
   }
-  if (!answers.length) blocks.push({ k: "note", s: [run.hasAnswers ? "No question has a standing answer, so the swarm offers no conclusion here." : "This run predates structured answers: its conclusions are in the working report (Appendix C), without the ledger's check."] });
+  if (!answers.length) blocks.push({ k: "note", s: [run.hasAnswers || run.era !== "predates" ? "No question has a standing answer, so the swarm offers no conclusion here." : "This run predates structured answers: its conclusions are in the working report (Appendix C), without the ledger's check."] });
   const significant = run.entries.filter((e) => e.significance && !run.replaced.has(e.seq));
   if (significant.length) {
     blocks.push({ k: "h", level: 3, text: "What finders said their findings mean for the case" });
@@ -1643,7 +1704,7 @@ function limitsSection(run: Run, memo: Map<number, EntryState>): BodySection {
 
   blocks.push({ k: "h", level: 3, text: "Searched and not found" });
   const absences = run.entries.filter((e) => e.kind === "absence");
-  blocks.push({ k: "p", s: ["Each holds only for what was searched, where, and how: not found by that search is not absent from the evidence."] });
+  blocks.push({ k: "p", s: ["Each is valid only for the stated scope: what was searched, where, and how. Not found by that search is not absent from the evidence."] });
   if (absences.length) {
     for (const e of absences) out(e, [{ label: "Search", s: [e.completion === "complete" ? "complete over its stated scope" : `${e.completion ?? "completion not recorded"}: holds for the part searched only`] }]);
   } else blocks.push({ k: "p", s: ["No search that found nothing was recorded."] });
@@ -1668,6 +1729,21 @@ function limitsSection(run: Run, memo: Map<number, EntryState>): BodySection {
   if (open.length) blocks.push({ k: "list", items: open });
   else blocks.push({ k: "p", s: [run.questions.length ? "Every question has a standing answer." : "No question was named."] });
 
+  // Contradictions that stand, whether or not the run has answers to weigh them.
+  const contradictions = standingContradictions(run.entries);
+  if (contradictions.length) {
+    const openOnes = new Set(openContradictions(run.entries).map((c) => `${c.from}:${c.to}`));
+    blocks.push({ k: "h", level: 3, text: "Contradictions that stand" });
+    blocks.push({
+      k: "p",
+      s: [
+        `${plural(contradictions.length, "standing contradiction")}: `,
+        ...contradictions.flatMap((c, i): Span[] => [...(i ? ["; "] : []), { e: c.from }, " contradicts ", { e: c.to }, openOnes.has(`${c.from}:${c.to}`) ? "" : " (weighed in an answer or named by a limitation)"]),
+        ". Both entries of each stand; neither was corrected.",
+      ],
+    });
+  }
+
   if (run.gate) {
     blocks.push({ k: "h", level: 3, text: "Defects left in the ledger" });
     const g = run.gate;
@@ -1680,10 +1756,9 @@ function limitsSection(run: Run, memo: Map<number, EntryState>): BodySection {
     } else blocks.push({ k: "p", s: ["None: every section has a standing answer resting on standing support, and every answer has a critic's act."] });
     const tokens = Object.entries(g.unsupported);
     if (tokens.length) blocks.push({ k: "list", items: tokens.map(([seq, t]): Span[] => [{ e: Number(seq) }, " states ", ...t.flatMap((x, i): Span[] => [...(i ? [", "] : []), { code: x }]), ", in none of the entries it cites."]) });
-    const openC = openContradictions(run.entries);
-    if (openC.length) blocks.push({ k: "list", items: openC.map((c): Span[] => [{ e: c.from }, " contradicts ", { e: c.to }, "; both stand, and nothing weighs them."]) });
   }
 
+  if (run.html.limits) blocks.push({ k: "h", level: 3, text: "The limits of this run" }, { k: "html", html: run.html.limits });
   blocks.push({ k: "h", level: 3, text: "What this report does not claim" });
   blocks.push({
     k: "list",
@@ -1755,7 +1830,7 @@ function reviewSection(run: Run, memo: Map<number, EntryState>): BodySection {
   const r = run.review;
   const reviewed = r?.entries?.size ?? 0;
   if (r?.unreadable) blocks.push({ k: "note", s: [`The examiner's review could not be read: ${r.unreadable}. Nothing here says whether anything was reviewed.`] });
-  else if (!r || (!reviewed && !r.signed && !r.examiner)) {
+  else if (!r || (!reviewed && !r.signed)) {
     blocks.push({
       k: "note",
       s: [
@@ -1771,7 +1846,7 @@ function reviewSection(run: Run, memo: Map<number, EntryState>): BodySection {
       head: ["Answer", "Examiner's word"],
       rows: answers.map((a) => {
         const st = stateOf(a, run, memo);
-        return [[{ e: a.seq }, ` ${sectionName(a.section)}`], [st.review ? `${reviewChip(st.review).text}, ${st.review.at}${st.review.note ? `: ${st.review.note}` : ""}${st.review.entry_hash && st.review.entry_hash !== st.hash ? " — reviewed against another hash: a review of a different entry" : ""}` : "not reviewed"]];
+        return [[{ e: a.seq }, ` ${sectionName(a.section)}`], [reviewWords(run, st)]];
       }),
     });
   }
@@ -1780,7 +1855,7 @@ function reviewSection(run: Run, memo: Map<number, EntryState>): BodySection {
     rows: [
       { label: "Examiner", s: [r?.examiner ? `${r.examiner.name}${r.examiner.organisation ? `, ${r.examiner.organisation}` : ""}${r.examiner.competence ? ` — ${r.examiner.competence}` : ""}` : "not recorded"] },
       { label: "Technical reviewer", s: [r?.technicalReviewer ? `${r.technicalReviewer.name}${r.technicalReviewer.competence ? ` — ${r.technicalReviewer.competence}` : ""}${r.technicalReviewer.checked ? `; checked ${r.technicalReviewer.checked}` : ""}` : "none recorded"] },
-      { label: "Signed", s: [r?.signed ? `by ${r.signed.by} at ${r.signed.at}${r.signed.ledger_head ? `, over ledger head ${r.signed.ledger_head}` : ""}` : "not signed"] },
+      { label: "Signed", s: [r?.signed ? `by ${r.signed.by} at ${r.signed.at}${r.signed.ledger_head ? `, over ledger head ${r.signed.ledger_head}` : ""}${r.signed.current === false ? `; NOT OVER THIS RUN AS IT STANDS${r.signed.scope ? `: ${r.signed.scope}` : ""}` : r.signed.current ? "; over this ledger and this report" : ""}` : "not signed"] },
       { label: "Release", s: [run.draft ? "draft: no release v1 exists" : `release v${run.release?.version}${run.release?.at ? `, ${run.release.at}` : ""}`] },
     ],
   });
@@ -1860,14 +1935,15 @@ function exhibitBox(e: LedgerEntry, run: Run, memo: Map<number, EntryState>): Bl
   for (const d of s.disputes) rows.push({ label: "Disputed", s: [`by ${d.by} at ${d.at}: ${d.why}${d.refs?.length ? ` (from ${d.refs.join(", ")})` : ""}`] });
   for (const w of s.withdrawn) rows.push({ label: "Dispute withdrawn", s: [`${w.dispute.by} disputed it (${w.dispute.why}) and withdrew at ${w.withdrawal.at}: ${w.withdrawal.why}`] });
   if (s.grounding === "not in the trace") rows.push({ label: "Grounding", s: ["NOT GROUNDED IN THE TRACE: no call before this entry was recorded named its source"] });
-  else if (s.grounding === "grounded") rows.push({ label: "Grounding", s: ["a call before this entry was recorded named its source"] });
-  if (s.review) rows.push({ label: "Examiner", s: [`${reviewChip(s.review).text}, ${s.review.at}${s.review.note ? `: ${s.review.note}` : ""}`] });
+  else if (s.grounding === "grounded") rows.push({ label: "Grounding", s: ["a call before this entry named its source"] });
+  rows.push({ label: "Examiner review", s: [reviewWords(run, s)] });
   if (e.sensitive) rows.push({ label: "Sensitive", s: ["it, or what it cites, holds a credential, a key or personal data"] });
   rows.push({ label: "Recorded by", s: [e.authors.join(", ")] });
   const models = [...new Set(e.authors.map((id) => run.team.find((t) => t.id === id)?.model).filter((m): m is string => Boolean(m)))];
   if (models.length) rows.push({ label: "Model", s: [models.join(", ")] });
   rows.push({ label: "Recorded at", s: [e.at] });
-  rows.push({ label: "Entry", s: [`ledger version ${e.v ?? 1}${e.hash ? `, hash ${e.hash}` : ", not chained"}`] });
+  rows.push({ label: "Ledger version", s: [`${e.v ?? 1}${e.hash ? "" : ", not chained"}`] });
+  if (e.hash) rows.push({ label: "Entry hash", s: [{ code: e.hash }] });
   return { k: "box", cls: `exhibit exhibit-${e.kind}`, id: `e-${e.seq}`, level: 4, title: [{ plain: `E-${e.seq}` }], chips: chipsOf(e, s), body: [{ k: "rows", rows }] };
 }
 
@@ -1917,7 +1993,8 @@ function jobsSection(run: Run): BodySection {
 function workingSection(run: Run): BodySection {
   const blocks: Block[] = [];
   const w = run.working;
-  if (!run.hasAnswers) blocks.push({ k: "note", s: ["This run predates structured answers (ledger version 4): the answers it gives exist only in this working report, which the ledger does not check."] });
+  if (run.era === "predates") blocks.push({ k: "note", s: ["This run predates structured answers (ledger version 4): the answers it gives exist only in this working report, which the ledger does not check."] });
+  else if (!run.hasAnswers && w) blocks.push({ k: "note", s: ["The swarm recorded no answers in the ledger: what this working report says is its prose alone, which the ledger does not check."] });
   if (!w) blocks.push({ k: "p", s: ["The swarm left no working report (work/report.md)."] });
   else if ("error" in w) blocks.push({ k: "note", s: [`The working report (${w.path}) could not be read: ${w.error}.`] });
   else {
@@ -1925,7 +2002,9 @@ function workingSection(run: Run): BodySection {
       k: "note",
       s: [
         { b: "The agents' working document. " },
-        `Reproduced verbatim from ${w.path} (sha256 ${w.sha256}). It carries no evidentiary authority: the answers in §5 and the exhibits in Appendix A are the record, and where this document says something they do not, it is the agents' prose, unchecked by the ledger.`,
+        "Reproduced verbatim from ",
+        { code: w.path },
+        `. ${w.seal ?? `Its sha256 as reproduced here: ${w.sha256}.`} Its headings are demoted so this document keeps one outline (the Markdown fences it instead); nothing else is changed. It carries no evidentiary authority: the answers in §5 and the exhibits in Appendix A are the record, and where this document says something they do not, it is the agents' prose, unchecked by the ledger.`,
       ],
     });
     blocks.push({ k: "verbatim", text: w.text });
@@ -2033,6 +2112,8 @@ function blockHtml(b: Block, ctx: Ctx): string {
       return `<div class="cite"><div class="ch">${spansHtml(b.head, ctx)}</div>${b.chips.length ? `<div class="chips">${b.chips.map(chipHtml).join(" ")}</div>` : ""}${b.rows.length ? rowsHtml(b.rows, ctx) : ""}</div>`;
     case "timeline":
       return `<ol class="tl">${b.rows.map((r) => `<li><div class="stamp"><span class="date">${escapeHtml(r.when)}</span><span class="no">${spansHtml([{ e: r.seq }], ctx)}</span></div><div class="what">${spansHtml(r.what, ctx)}</div><div class="meta">${escapeHtml(r.meta)}</div></li>`).join("")}</ol>`;
+    case "html":
+      return b.html;
     case "details":
       return `<details class="uncited"><summary>${escapeHtml(b.summary)}</summary>${b.body.map((x) => blockHtml(x, ctx)).join("\n")}</details>`;
     case "md":
@@ -2335,6 +2416,8 @@ function blockMd(b: Block): string {
       return [`- ${spansMd(b.head, "  ")}${b.chips.length ? `  \n  ${chipsMd(b.chips)}` : ""}`, ...b.rows.map((r) => (r.label ? `  - ${mdText(r.label, "")}${voiceTag(r.label, r.voice)}: ${spansMd(r.s, "    ")}` : `    - ${spansMd(r.s, "      ")}`))].join("\n");
     case "timeline":
       return b.rows.map((r) => `- ${mdText(r.when, "")} — ${spansMd(r.what, "  ")} — ${mdText(r.meta, "")} — E-${r.seq}`).join("\n");
+    case "html":
+      return "";
     case "details":
       return [`### ${mdText(b.summary, "")}`, ...b.body.map(blockMd)].join("\n\n");
     case "md":
@@ -2361,7 +2444,7 @@ export async function renderReportBodyMarkdown(sandbox: string, opts: ReportBody
   parts.push(...preamble.map(blockMd));
   for (const s of sections) {
     parts.push(`## ${/^[A-Z]$/.test(s.n) ? `Appendix ${s.n}: ${mdText(s.title, "")}` : `${s.n}. ${mdText(s.title, "")}`}${s.count ? ` (${mdText(s.count, "")})` : ""}`);
-    parts.push(...s.blocks.map(blockMd));
+    parts.push(...s.blocks.map(blockMd).filter(Boolean));
   }
   return `${parts.join("\n\n")}\n`;
 }
