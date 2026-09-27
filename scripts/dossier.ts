@@ -12,9 +12,9 @@
  * The court set is listed in the dossier itself: every file a court or a
  * counterparty receives beside the report (the generated ones, the ledger,
  * the trace, and the custody verdict, its anchor outside the run, the
- * evidence manifest, each VM's record and this run's lines of the
- * operator's record), each with its size and sha256 or the reason it is
- * absent. The report prints that list, and `--write` writes it as
+ * evidence manifest, the index of work/ custody sealed, each VM's record,
+ * this run's lines of the operator's record and the examiner's review),
+ * each with its size and sha256 or the reason it is absent. The report prints that list, and `--write` writes it as
  * court-set.json with the operator's lines beside it.
  */
 import { createHash } from "node:crypto";
@@ -25,6 +25,7 @@ import { EVENTS_REL } from "../extensions/protocol.ts";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
 import { hashRegularFile, readRegularText } from "./regular-file.ts";
 import { renderReport, type ReportOptions } from "./report.ts";
+import { reviewsPath } from "./review.ts";
 import { findRunBySandbox } from "./run-record.ts";
 import { summarize } from "./summary.ts";
 
@@ -92,6 +93,7 @@ export async function courtSet(sandboxArg: string, runId: string, runsDir: strin
     await listedFile(join(sandbox, "custody.json"), "custody.json", "The host's custody verdict at stop: the evidence re-hashed, the trace and ledger chains, the kept outputs, each VM.", JSON_TYPE, "not written for this run (swarm.sh stop takes custody)"),
     await listedFile(`${sandbox}.custody-anchor.json`, "custody-anchor.json", "The kickoff's anchor outside the run, with each verdict's hash: custody.json is checked against it.", JSON_TYPE, "not written for this run"),
     await listedFile(join(sandbox, "inputs.json"), "inputs.json", "The evidence manifest the kickoff wrote: every name with its sha256, and md5 and sha1 when taken.", JSON_TYPE, "no evidence was given to this run"),
+    await listedFile(join(sandbox, "artifacts.json"), "artifacts.sealed.json", "The index of work/ custody wrote at stop, byte for byte: the one custody.json and its anchor name, which every handed-over work/ file is held to. artifacts.json beside the report is generated when it is.", JSON_TYPE, "no custody verdict indexed work/ (swarm.sh stop takes custody)"),
   ];
   for (const f of (await readdir(join(sandbox, "vm")).catch(() => [] as string[])).sort()) {
     const m = /^([A-Za-z0-9][A-Za-z0-9_-]{0,63})\.json$/.exec(f);
@@ -103,6 +105,13 @@ export async function courtSet(sandboxArg: string, runId: string, runsDir: strin
     audit.text
       ? fileOf("operator-audit.jsonl", "This run's lines of the operator's record (who ran which command, from where), as written; the record's chain runs over the whole file in the runs directory.", "application/x-ndjson; charset=utf-8", audit.text, "")
       : { name: "operator-audit.jsonl", description: "This run's lines of the operator's record.", type: "application/x-ndjson; charset=utf-8", present: false, reason: audit.reason, bytes: null, sha256: null },
+  );
+  // The examiner's review, beside the registry where no agent writes: what the sign-off is over, with it.
+  const reviewDescription = "The examiner's review: each entry accepted, rejected or amended, and the sign-off over the ledger's head and the report's sha256, chained.";
+  files.push(
+    /^[A-Za-z0-9_-]+$/.test(runId)
+      ? await listedFile(reviewsPath(runsDir, runId), "review.jsonl", reviewDescription, "application/x-ndjson; charset=utf-8", "no examiner has reviewed this run")
+      : { name: "review.jsonl", description: reviewDescription, type: "application/x-ndjson; charset=utf-8", present: false, reason: "the run's id is not known, so its review cannot be found", bytes: null, sha256: null },
   );
   return { files, operatorAudit: audit.text };
 }
@@ -205,7 +214,7 @@ export async function buildDossier(sandboxArg: string, options: ReportOptions = 
     ),
     fileOf(
       "artifacts.json",
-      "Every file under work/, with its sha256 — including what stays in the sandbox.",
+      "Every file under work/, with its sha256 as it is now — including what stays in the sandbox. The index custody sealed at stop is artifacts.sealed.json.",
       "application/json; charset=utf-8",
       artifactsJson,
       "not produced",

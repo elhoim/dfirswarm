@@ -6,6 +6,56 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: the record and the report hold to what custody sealed
+
+Three reviews of the reporting path (Claude, Fable, GPT-6-Astra) found that
+the verification commands compared less than the seal promised. Each fix has
+a test that failed before it.
+
+- **`custody-verify` enforces the seal.** It compared each check's status
+  only, so a `work/report.md` edited after the stop, a work file removed or
+  added, or a correctly chained ledger entry appended all passed. It now
+  holds every chain to the length and head the verdict sealed (the ledger,
+  its attestations, the store journal, where examiner notes after the run
+  are named and allowed, the gateway log) and every file under `work/` to
+  the index custody wrote (`artifacts.json`, whose sha256 the verdict and
+  the anchor name), naming each drift.
+- **A version 3 ledger is held to the trace.** "Every chained entry is on
+  the trace" ran for version 2 entries only, so every current run skipped
+  it. The ledger check's reason now says which entries the trace never
+  carried.
+- **A package carries the seal.** `artifacts.sealed.json` (the index custody
+  sealed, byte for byte), `review.jsonl` (the examiner's review) and
+  `COMPONENTS.json` (each part present, or absent with why) go into the
+  package under its manifest. `verify` fails on a part missing and not
+  declared absent, or declared absent against the verdict's seal; holds
+  every packaged work file to the sealed index; recomputes every ledger
+  entry's core a redaction left readable (it used to recompute the first
+  only); lets only examiner notes follow the journal's sealed line; walks
+  the review and says what its sign-off is over. `SIGNER.txt` and
+  `signer.pub` are written before the manifest, so who signed and when are
+  under the signature.
+- **The report labels its own report's hash.** §9 prints the sha256 of the
+  bytes it reproduces and whether they are the ones custody sealed, and
+  "CHANGED SINCE CUSTODY" with the sealed hash when they are not.
+- **RFC 3161 tokens are checked against the authority's CA.**
+  `--custody-timestamp-ca FILE` (or `SWARM_CUSTODY_TSA_CA`) has custody run
+  `openssl ts -verify` on each token and record the result in the anchor;
+  `custody-verify --tsa-ca FILE` checks it again and fails on a token that
+  does not verify. Without a CA both say "imprint only, signature not
+  verified".
+- **A sign-off is over a report, and says when it no longer covers it.**
+  `review --sign` is refused when there is no report at the path it names;
+  `review --show` exits 4 when the ledger's head or the report's hash moved
+  since the sign-off; the report's cover says "reviewed and signed" only
+  when the sign-off covers the ledger and the report as they stand, and
+  otherwise what it is over.
+- **A read-only verify writes nothing in the run.** It no longer removes a
+  `.verify-*` directory an ended custody left beside the snapshots (it names
+  it), loads a kept disk for msb's check under `--scratch` (the host's
+  temporary directory by default) instead of beside the snapshots, and
+  says what it touched outside the run.
+
 ### Changed: every image profile reviewed as a DFIR examiner would (Codex)
 
 - Each of the nine profiles (base, disk, memory, linux, mobile, network, re,

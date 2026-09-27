@@ -44,10 +44,11 @@
  * What it writes (`custody.json`, the previous verdict beside it, dated, and
  * `artifacts.json`) goes to a fresh file renamed into place: a link a pane
  * planted at one of those names is replaced, never written through. The
- * previous verdict is moved aside before anything is checked, so the
- * `custody.json` in the run is this custody's or none. Adds the verdict's
- * sha256 to the anchor the kickoff wrote outside the run, and prints its
- * summary line.
+ * previous verdict is moved aside before anything is checked, with the
+ * index it sealed (`artifacts.<its time>.json`), so the `custody.json` in
+ * the run is this custody's or none, and every verdict the anchor names
+ * keeps the index it sealed. Adds the verdict's sha256 to the anchor the
+ * kickoff wrote outside the run, and prints its summary line.
  *
  *   node --experimental-strip-types scripts/custody.ts <sandbox> [--timeout SEC] [--run ID] [--quiet]
  */
@@ -57,12 +58,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { lstat, mkdtemp, readdir, readlink, realpath, rename, rm, unlink } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
 import { eventChainVerifier, specialKind, verifyAttestationChain, verifyLedgerChain } from "../extensions/protocol.ts";
-import { hashArtifacts } from "./artifacts.ts";
-import { checkStore, type StoreCheck } from "./evidence-store.ts";
+import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
+import { checkStore, verifyJournalText, type StoreCheck } from "./evidence-store.ts";
 import {
   afterSeal,
   checksLine,
@@ -72,6 +74,7 @@ import {
   signFile,
   timestampFile,
   verifyOperatorAudit,
+  verifyTimestampToken,
   type Acquisition,
   type Check,
   type OperatorAudit,
@@ -810,8 +813,14 @@ export async function confinedOutput(sandbox: string, rel: string): Promise<{ ab
  * `verified` is msb's answer; null when msb never gave one (not installed,
  * the archive would not load, out of time), with the reason. A load that
  * failed is not a disk that failed msb's check.
+ *
+ * A read-only check (custody --verify) loads it under `scratch.root`
+ * instead, outside the run and its snapshot directory, and says in
+ * `scratch.touched` what it wrote there and what it put in msb's index and
+ * took out again: a check that writes nothing into the run still uses msb,
+ * and says so.
  */
-async function msbSnapshotVerify(file: string, deadline: Deadline): Promise<{ verified: boolean | null; note?: string }> {
+async function msbSnapshotVerify(file: string, deadline: Deadline, scratch?: { root: string; touched: string[] }): Promise<{ verified: boolean | null; note?: string }> {
   let msb: string;
   try {
     msb = (await import("./vm.ts")).msbBinary();
@@ -834,9 +843,9 @@ async function msbSnapshotVerify(file: string, deadline: Deadline): Promise<{ ve
   if (deadline.over) return { verified: null, note: "the deadline passed before msb's check" };
   let dest: string;
   try {
-    dest = await mkdtemp(join(dirname(file), ".verify-"));
+    dest = await mkdtemp(join(scratch?.root ?? dirname(file), ".verify-"));
   } catch (err) {
-    return { verified: null, note: `no room to load the snapshot beside it (${(err as NodeJS.ErrnoException).code ?? "error"})` };
+    return { verified: null, note: `no room to load the snapshot ${scratch ? `in ${scratch.root}` : "beside it"} (${(err as NodeJS.ErrnoException).code ?? "error"})` };
   }
   let digest = "";
   try {
@@ -855,8 +864,12 @@ async function msbSnapshotVerify(file: string, deadline: Deadline): Promise<{ ve
   } catch (err) {
     return { verified: null, note: `msb's check could not run: ${(err as Error).message}` };
   } finally {
-    if (digest) await run(["snapshot", "remove", "--force", "--quiet", digest]);
-    await rm(dest, { recursive: true, force: true }).catch(() => undefined);
+    if (digest) {
+      const removed = await run(["snapshot", "remove", "--force", "--quiet", digest]);
+      scratch?.touched.push(`msb's index: loaded ${basename(file)} as ${digest}, and ${removed.code === 0 ? "removed it again" : "COULD NOT REMOVE IT"}`);
+    }
+    const gone = await rm(dest, { recursive: true, force: true }).then(() => true, () => false);
+    scratch?.touched.push(`made ${dest} to load ${basename(file)} into, and ${gone ? "removed it" : "COULD NOT REMOVE IT"}`);
   }
 }
 
@@ -891,6 +904,10 @@ async function setAsidePrevious(sandbox: string): Promise<string | null> {
     // kept under a name of this custody's own time: it is what was there
   }
   writeFileNoFollowSync(sandbox, name, read.text);
+  // The index that verdict sealed goes aside with it (artifacts.<its time>.json):
+  // the anchor names its sha256, which stays checkable once a new index replaces it.
+  const index = await readRegularText(join(sandbox, "artifacts.json"));
+  if ("text" in index) writeFileNoFollowSync(sandbox, name.replace(/^custody\./, "artifacts."), index.text);
   await unlink(file).catch(() => undefined);
   return name;
 }
@@ -900,12 +917,25 @@ export type CustodyOptions = {
   run?: string;
   progress?: (line: string) => void;
   state?: CustodyState;
-  /** Check and return the verdict without writing anything: no verdict, no anchor, no artifacts.json, nothing set aside. */
+  /**
+   * Check and return the verdict without writing anything in the run: no
+   * verdict, no anchor, no artifacts.json, nothing set aside, nothing a
+   * custody that was ended left beside the snapshots removed. A kept disk
+   * msb checks is loaded under `scratchDir` (the host's temporary directory
+   * by default), and `touched` gets a line for each thing written there or
+   * put in msb's index, and for each thing found and left alone.
+   */
   readOnly?: boolean;
+  scratchDir?: string;
+  touched?: string[];
+  /** Handed the index of work/ as this custody hashed it, so a verify holds it to the sealed one without hashing work/ twice. */
+  onIndex?: (index: ArtifactIndex) => void;
   /** Sign custody.json with this SSH key (ssh-keygen -Y, namespace dfirswarm-custody). */
   signKey?: string;
   /** Ask this RFC 3161 authority to timestamp custody.json's sha256. */
   timestampUrl?: string;
+  /** The authority's CA certificates (PEM): the token's signature is checked against them (openssl ts -verify) and the result recorded. */
+  timestampCa?: string;
   /** Record this https server's clock offset from the host's (its Date header). */
   timeReference?: string;
   /** Where the operator's audit is: the runs directory beside the run, by default. */
@@ -1383,8 +1413,10 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     // ledger's own chain cannot see), and every chained entry must be on the
     // trace (one written into the file without the tool is). Version 2
     // entries and the record line's hash shipped together, so a version 2
-    // entry the trace never carried was not written by the tool; nor was an
-    // older-shaped entry after the first version 2 one.
+    // or later entry the trace never carried was not written by the tool;
+    // nor was an older-shaped entry after the first of them. (Only version 2
+    // was held to it until 2026-09-27, so an all-version-3 ledger, every run
+    // since, skipped the check.)
     const inLedger = new Set(v.hashes);
     const missingFromLedger = [...recordHashes].filter((h) => !inLedger.has(h));
     const notOnTrace: number[] = [];
@@ -1394,7 +1426,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
         if (!line.trim()) continue;
         try {
           const e = JSON.parse(line) as { v?: number; seq?: number; hash?: string };
-          if (e.v === 2) {
+          if (typeof e.v === "number" && e.v >= 2) {
             seenV2 = true;
             if (!e.hash || !recordHashes.has(e.hash)) notOnTrace.push(Number(e.seq));
           } else if (seenV2) notOnTrace.push(Number(e.seq));
@@ -1506,12 +1538,16 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     state.vms = vms;
     const unreadableRecords: string[] = [];
     const snapRoot = await realpath(`${sandbox}.vm-snapshots`).catch(() => null);
-    // A loaded disk a killed custody left beside the snapshots is removed first.
+    // A loaded disk a killed custody left beside the snapshots is removed
+    // first; a read-only check removes nothing, and names it.
     if (snapRoot) {
       for (const name of await readdir(snapRoot).catch(() => [])) {
-        if (name.startsWith(".verify-")) await rm(join(snapRoot, name), { recursive: true, force: true }).catch(() => undefined);
+        if (!name.startsWith(".verify-")) continue;
+        if (options.readOnly) options.touched?.push(`found ${join(snapRoot, name)}, a disk a custody that was ended left loaded; not removed (a read-only check removes nothing)`);
+        else await rm(join(snapRoot, name), { recursive: true, force: true }).catch(() => undefined);
       }
     }
+    const scratch = options.readOnly ? { root: options.scratchDir ?? process.env.SWARM_VERIFY_SCRATCH ?? tmpdir(), touched: options.touched ?? [] } : undefined;
     const recorded = new Set<string>();
     for (const name of (await readdir(vmDir)).filter((n) => n.endsWith(".json")).sort()) {
       if (tooLate("the VM check")) break;
@@ -1552,7 +1588,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
           const hashed = await hashRegular(real as string, deadline);
           if (hashed === null) tooLate("the snapshot check");
           const ok = !!hashed && !("why" in hashed) && hashed.sha256 === snap.sha256;
-          const msb = ok ? await msbSnapshotVerify(real as string, deadline) : { verified: null, note: hashed === null ? "the deadline passed before msb's check" : "not asked: the disk does not match its record" };
+          const msb = ok ? await msbSnapshotVerify(real as string, deadline, scratch) : { verified: null, note: hashed === null ? "the deadline passed before msb's check" : "not asked: the disk does not match its record" };
           snapshot = {
             path: snap.path,
             sha256: snap.sha256,
@@ -1618,6 +1654,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   if (!tooLate("the artifact index")) {
     try {
       const index = await hashArtifacts(sandbox, { expiry: deadline });
+      options.onIndex?.(index);
       if (index.skipped.some((s) => s.reason === "not hashed: the deadline passed")) tooLate("the artifact index");
       const text = `${JSON.stringify(index, null, 2)}\n`;
       if (!options.readOnly) writeFileNoFollowSync(sandbox, "artifacts.json", text);
@@ -1656,12 +1693,18 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   if (!written.anchored) say(`custody: WARN: the verdict could not be added to the anchor outside the run (${written.why}); custody.json cannot be checked against it`);
   // Signed and timestamped, when the operator set it up: the signature and
   // the authority's token beside custody.json, their hashes in the anchor.
-  await sealVerdict(sandbox, anchorFile, { signKey: options.signKey ?? process.env.SWARM_CUSTODY_SIGN_KEY, timestampUrl: options.timestampUrl ?? process.env.SWARM_CUSTODY_TSA_URL }, say);
+  await sealVerdict(sandbox, anchorFile, { signKey: options.signKey ?? process.env.SWARM_CUSTODY_SIGN_KEY, timestampUrl: options.timestampUrl ?? process.env.SWARM_CUSTODY_TSA_URL, timestampCa: options.timestampCa ?? process.env.SWARM_CUSTODY_TSA_CA }, say);
   return custody;
 }
 
-/** Sign custody.json and have it timestamped, as set up; each result added to the last verdict in the anchor. */
-export async function sealVerdict(sandbox: string, anchorFile: string, how: { signKey?: string; timestampUrl?: string }, say: (line: string) => void = () => undefined): Promise<{ signature?: Record<string, unknown>; timestamp?: Record<string, unknown> }> {
+/**
+ * Sign custody.json and have it timestamped, as set up; each result added to
+ * the last verdict in the anchor. A token is checked for the digest it was
+ * asked for; its signature and the authority's certificate only against a
+ * CA the operator named (openssl ts -verify), and the anchor says which it
+ * was: verified, not verified with why, or imprint only.
+ */
+export async function sealVerdict(sandbox: string, anchorFile: string, how: { signKey?: string; timestampUrl?: string; timestampCa?: string }, say: (line: string) => void = () => undefined): Promise<{ signature?: Record<string, unknown>; timestamp?: Record<string, unknown> }> {
   const file = join(sandbox, CUSTODY_REL);
   const out: { signature?: Record<string, unknown>; timestamp?: Record<string, unknown> } = {};
   if (how.signKey) {
@@ -1671,7 +1714,15 @@ export async function sealVerdict(sandbox: string, anchorFile: string, how: { si
   }
   if (how.timestampUrl) {
     const r = await timestampFile(file, how.timestampUrl);
-    out.timestamp = r.ok ? { file: `${CUSTODY_REL}.tsr`, sha256: r.sha256, authority: how.timestampUrl, gen_time: r.gen_time } : { authority: how.timestampUrl, error: r.why };
+    if (r.ok) {
+      const checked = how.timestampCa ? await verifyTimestampToken(r.tsr, file, how.timestampCa) : null;
+      const caSha = how.timestampCa ? await hashRegularFile(how.timestampCa).then((h) => (h && "sha256" in h ? h.sha256 : null)).catch(() => null) : null;
+      const signature = checked
+        ? { verified: checked.verified, ca: how.timestampCa, ca_sha256: caSha, detail: checked.detail }
+        : { verified: null, ca: null, detail: "imprint only, signature not verified (no CA named: --custody-timestamp-ca)" };
+      out.timestamp = { file: `${CUSTODY_REL}.tsr`, sha256: r.sha256, authority: how.timestampUrl, gen_time: r.gen_time, signature };
+      if (checked && checked.verified !== true) say(`custody: WARN: the timestamp token ${checked.verified === false ? "DOES NOT VERIFY" : "could not be checked"} against ${how.timestampCa}: ${checked.detail}`);
+    } else out.timestamp = { authority: how.timestampUrl, error: r.why };
     if (!r.ok) say(`custody: WARN: custody.json was not timestamped: ${r.why}`);
   }
   if (out.signature || out.timestamp) {
@@ -2020,33 +2071,195 @@ export function adverse(c: Pick<Custody, "checks">): Check[] {
   return c.checks.filter((x) => x.status === "failed" || x.status === "incomplete" || x.status === "unavailable");
 }
 
+/**
+ * The index custody wrote of work/ at stop (artifacts.json beside the
+ * verdict), held to the verdict that names its sha256 and to the anchor
+ * outside the run that names it too. `sealed` carries the index itself, for
+ * every file to be held to it; `not sealed` is a verdict that indexed
+ * nothing (an older custody, or one that never reached the index), said as
+ * that; `differs` is an index that is gone or is not the one sealed.
+ */
+export type SealedIndex =
+  | { state: "sealed"; sha256: string; index: ArtifactIndex }
+  | { state: "not sealed"; why: string }
+  | { state: "differs"; why: string };
+
+export async function sealedIndex(sandboxInput: string, sealed: { artifacts?: { index_sha256?: string } | null } | null, anchored?: string | null): Promise<SealedIndex> {
+  const sandbox = resolve(sandboxInput);
+  const want = sealed?.artifacts?.index_sha256;
+  if (!sealed) return { state: "not sealed", why: "there is no verdict to hold work/ to" };
+  if (!want) return { state: "not sealed", why: "the verdict indexed no work files (a custody from before the index was sealed, or one that did not reach it)" };
+  if (anchored !== undefined && anchored !== null && anchored !== want) return { state: "differs", why: `the anchor names another index (${anchored}) than the verdict (${want})` };
+  const read = await readRegularText(join(sandbox, "artifacts.json"));
+  if ("why" in read) return { state: "differs", why: `artifacts.json, the index the verdict sealed (${want}), is ${read.why}` };
+  const sha256 = createHash("sha256").update(read.text).digest("hex");
+  if (sha256 !== want) return { state: "differs", why: `artifacts.json is not the index the verdict sealed: its sha256 is ${sha256}, the sealed one ${want}` };
+  try {
+    return { state: "sealed", sha256, index: JSON.parse(read.text) as ArtifactIndex };
+  } catch {
+    return { state: "differs", why: "artifacts.json has the sealed sha256 and is not JSON" };
+  }
+}
+
+/** Each work/ file that is not what the sealed index says, by what happened to it. */
+export type WorkDrift = {
+  /** Sealed paths whose bytes are not the sealed ones now (or that are no longer a regular file). */
+  changed: string[];
+  /** Sealed paths that are gone. */
+  removed: string[];
+  /** Files under work/ the index did not have. */
+  added: string[];
+  /** Files the index named as not hashed at custody (the deadline, a read that failed): there, and never sealed. */
+  unsealed: string[];
+  /** Files not hashed now before the deadline. */
+  not_checked: string[];
+};
+
+/**
+ * Every file under work/ held to the index custody sealed. The walk is
+ * today's (hashArtifacts); a sealed path the walk no longer lists (a rule
+ * that now leaves it out) is hashed where the index says it is, so a
+ * change in what is indexed is never read as a file removed.
+ */
+export async function workDrift(sandboxInput: string, index: ArtifactIndex, expiry?: { over: boolean }, walked?: ArtifactIndex | null): Promise<WorkDrift> {
+  const sandbox = resolve(sandboxInput);
+  const out: WorkDrift = { changed: [], removed: [], added: [], unsealed: [], not_checked: [] };
+  const live = walked ?? (await hashArtifacts(sandbox, { expiry }));
+  const now = new Map(live.files.map((f) => [f.path, f.sha256]));
+  const sealed = new Map((index.files ?? []).map((f) => [f.path, f.sha256]));
+  const sealedSkipped = new Set((index.skipped ?? []).map((s) => s.path));
+  const liveSkipped = new Map(live.skipped.map((s) => [s.path, s.reason]));
+  for (const [path, sha] of sealed) {
+    if (!/^work\//.test(path) || path.split("/").includes("..")) {
+      out.changed.push(`${path} (not a path under work/)`);
+      continue;
+    }
+    const current = now.get(path);
+    if (current !== undefined) {
+      if (current !== sha) out.changed.push(path);
+      continue;
+    }
+    if (liveSkipped.get(path) === "not hashed: the deadline passed") {
+      out.not_checked.push(path);
+      continue;
+    }
+    const direct = await hashRegularFile(join(sandbox, path), { expiry });
+    if (direct === null) out.not_checked.push(path);
+    else if ("why" in direct) (direct.why === "missing" ? out.removed : out.changed).push(direct.why === "missing" ? path : `${path} (now ${direct.why})`);
+    else if (direct.sha256 !== sha) out.changed.push(path);
+  }
+  for (const [path] of now) {
+    if (sealed.has(path)) continue;
+    (sealedSkipped.has(path) ? out.unsealed : out.added).push(path);
+  }
+  for (const [path, reason] of liveSkipped) {
+    if (sealed.has(path) || sealedSkipped.has(path)) continue;
+    if (reason === "not hashed: the deadline passed") out.not_checked.push(path);
+    else out.added.push(`${path} (${reason})`);
+  }
+  for (const k of Object.keys(out) as Array<keyof WorkDrift>) out[k].sort();
+  return out;
+}
+
+/** A drift, in words: nothing when there is none. */
+export function workDriftLine(d: WorkDrift): string {
+  const parts = [
+    ...(d.changed.length ? [`${d.changed.length} CHANGED (${d.changed.join(", ")})`] : []),
+    ...(d.removed.length ? [`${d.removed.length} REMOVED (${d.removed.join(", ")})`] : []),
+    ...(d.added.length ? [`${d.added.length} ADDED (${d.added.join(", ")})`] : []),
+    ...(d.unsealed.length ? [`${d.unsealed.length} never sealed (not hashed at custody: ${d.unsealed.join(", ")})`] : []),
+    ...(d.not_checked.length ? [`${d.not_checked.length} NOT CHECKED before the deadline (${d.not_checked.join(", ")})`] : []),
+  ];
+  return parts.join("; ");
+}
+
+type Seal = Custody["seal"];
+
+/**
+ * Each chain the verdict sealed, held to what the run holds now: the
+ * ledger's entries and head, the attestations' lines and head, the store
+ * journal's lines and head (examiner notes after the seal are named, and
+ * are the only lines that may follow it), the model gateway log's lines and
+ * sha256. A part the verdict did not seal (an older custody) is not held,
+ * and is said as not sealed; one that appeared or went since is a drift.
+ */
+export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal: { hashes: string[]; types: string[] } | null): { drift: Array<{ what: string; sealed: string; now: string }>; after: string[]; not_sealed: string[] } {
+  const drift: Array<{ what: string; sealed: string; now: string }> = [];
+  const after: string[] = [];
+  const notSealed: string[] = [];
+  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the store journal", "the model gateway log"] };
+  const chain = (n: number, head: string | null, unit: string) => `${n} ${unit}, head ${head ?? "none"}`;
+  if (!sealed.ledger) notSealed.push("the ledger");
+  else if (sealed.ledger.entries !== now.ledger.entries || sealed.ledger.head !== now.ledger.head) {
+    drift.push({ what: "ledger", sealed: chain(sealed.ledger.entries, sealed.ledger.head, "entries"), now: chain(now.ledger.entries, now.ledger.head, "entries") });
+  }
+  if (!sealed.attestations) notSealed.push("the attestations");
+  else if (sealed.attestations.lines !== now.attestations.lines || sealed.attestations.head !== now.attestations.head) {
+    drift.push({ what: "ledger attestations", sealed: chain(sealed.attestations.lines, sealed.attestations.head, "lines"), now: chain(now.attestations.lines, now.attestations.head, "lines") });
+  }
+  if (sealed.journal === undefined) notSealed.push("the store journal");
+  else if (sealed.journal === null && now.journal) drift.push({ what: "store journal", sealed: "none", now: chain(now.journal.lines, now.journal.head, "lines") });
+  else if (sealed.journal && !now.journal) drift.push({ what: "store journal", sealed: chain(sealed.journal.lines, sealed.journal.head, "lines"), now: "none (gone, or not readable)" });
+  else if (sealed.journal && now.journal && (sealed.journal.lines !== now.journal.lines || sealed.journal.head !== now.journal.head)) {
+    // The sealed line is still there, and every line after it is an examiner's note: the record after the run, not a change to it.
+    const at = sealed.journal.lines > 0 ? journal?.hashes[sealed.journal.lines - 1] ?? null : null;
+    const prefix = sealed.journal.lines === 0 ? sealed.journal.head === null : at === sealed.journal.head;
+    const rest = journal ? journal.types.slice(sealed.journal.lines) : [];
+    if (prefix && now.journal.lines > sealed.journal.lines && rest.every((t) => t === "note")) after.push(`store journal: ${rest.length} examiner note(s) after the seal`);
+    else drift.push({ what: "store journal", sealed: chain(sealed.journal.lines, sealed.journal.head, "lines"), now: `${chain(now.journal.lines, now.journal.head, "lines")}${prefix ? `; after the sealed line: ${[...new Set(rest)].join(", ") || "nothing"}` : "; the sealed line is not there"}` });
+  }
+  if (sealed.model_gateway === undefined) notSealed.push("the model gateway log");
+  else if ((sealed.model_gateway?.lines ?? null) !== (now.model_gateway?.lines ?? null) || (sealed.model_gateway?.sha256 ?? null) !== (now.model_gateway?.sha256 ?? null)) {
+    const g = (x: Seal["model_gateway"]) => (x ? `${x.lines} lines, sha256 ${x.sha256 ?? "none"}` : "none");
+    drift.push({ what: "model gateway log", sealed: g(sealed.model_gateway), now: g(now.model_gateway) });
+  }
+  return { drift, after, not_sealed: notSealed };
+}
+
+export type TimestampCheck = { present: boolean; imprint: boolean | null; gen_time: string | null; signature: { verified: boolean | null; ca: string | null; detail: string } | null; note: string };
+
 export type VerifyReport = {
   sandbox: string;
   verdict: { at: string | null; anchor: string };
   prefix: { sealed_lines: number; intact: boolean; detail: string };
   after_seal: { lines: number; tools: string[]; closure_only: boolean };
   changed: Array<{ check: string; sealed: string | null; now: string }>;
+  /** Each sealed chain that is not as sealed; `seal_after` what followed the seal and may (examiner notes); `not_sealed` what the verdict did not seal. */
+  seal_drift: Array<{ what: string; sealed: string; now: string }>;
+  seal_after: string[];
+  not_sealed: string[];
+  /** work/ held to the index custody sealed. */
+  work: { index: SealedIndex["state"]; detail: string; drift: WorkDrift | null };
   now: Check[];
   signature: { present: boolean; ok: boolean | null; how: string; detail: string };
-  timestamp: { present: boolean; imprint: boolean | null; gen_time: string | null; note: string };
+  timestamp: TimestampCheck;
+  /** What the check wrote outside the run, or found and left alone. */
+  touched: string[];
   ok: boolean;
 };
 
 /**
- * What a third party runs: the checks again, writing nothing, against the
- * verdict that was sealed. The sealed prefix of the trace must be the same
- * bytes; lines after it are named (the run's own closing lines are
- * expected); each check's status then and now; the signature and the
- * timestamp token, when there are any.
+ * What a third party runs: the checks again, writing nothing in the run,
+ * against the verdict that was sealed. The sealed prefix of the trace must
+ * be the same bytes; lines after it are named (the run's own closing lines
+ * are expected); every chain the verdict sealed must have the length and
+ * the head it sealed; every file under work/ must be the one the sealed
+ * index names, and none added; each check's status then and now; the
+ * signature and the timestamp token, when there are any, the token's own
+ * signature against the authority's CA when one is given.
  */
-export async function verifyCustody(sandboxInput: string, opts: { timeoutSec?: number; allowedSigners?: string; identity?: string; runsDir?: string } = {}): Promise<VerifyReport> {
+export async function verifyCustody(sandboxInput: string, opts: { timeoutSec?: number; allowedSigners?: string; identity?: string; runsDir?: string; tsaCa?: string; scratchDir?: string } = {}): Promise<VerifyReport> {
   const sandbox = resolve(sandboxInput);
   const { verifySignature } = await import("./custody-checks.ts");
   const { readTimestampResponse } = await import("./custody-checks.ts");
   const sealedText = await readRegularText(join(sandbox, CUSTODY_REL));
   const sealed = "text" in sealedText ? (JSON.parse(sealedText.text) as Custody) : null;
   const anchor = await verdictAnchorState(sandbox);
-  const now = await takeCustody(sandbox, { readOnly: true, timeoutSec: opts.timeoutSec, runsDir: opts.runsDir });
+  const lastAnchored = await lastAnchoredVerdict(sandbox);
+  const touched: string[] = [];
+  const deadline = new Deadline(opts.timeoutSec ?? 4 * 3600);
+  let walked: ArtifactIndex | null = null;
+  const now = await takeCustody(sandbox, { readOnly: true, timeoutSec: opts.timeoutSec, runsDir: opts.runsDir, scratchDir: opts.scratchDir, touched, onIndex: (i) => (walked = i) });
   const traceText = await readRegularText(join(sandbox, "traces", "events.jsonl"), 1 << 30);
   const text = "text" in traceText ? traceText.text : "";
   const sealedLines = sealed?.seal?.trace?.lines ?? 0;
@@ -2056,13 +2269,44 @@ export async function verifyCustody(sandboxInput: string, opts: { timeoutSec?: n
   const tail = afterSeal(text, sealedLines);
   const before = new Map((sealed?.checks ?? []).map((x) => [x.name, x.status]));
   const changed = now.checks.filter((x) => (before.get(x.name) ?? null) !== x.status).map((x) => ({ check: x.name, sealed: before.get(x.name) ?? null, now: x.status }));
+  // Every chain against the head and the length the verdict sealed.
+  const journalRead = await readRegularText(join(sandbox, "store", "journal.jsonl"), 1 << 30);
+  const journal = "text" in journalRead ? (() => {
+    const j = verifyJournalText(journalRead.text);
+    return { hashes: j.hashes, types: j.lines.map((l) => String((l as { type?: unknown }).type ?? "")) };
+  })() : null;
+  const seal = sealDrift(sealed?.seal, now.seal, journal);
+  // work/ against the index custody sealed.
+  const idx = await sealedIndex(sandbox, sealed, lastAnchored?.artifacts_sha256);
+  const drift = idx.state === "sealed" ? await workDrift(sandbox, idx.index, deadline, walked) : null;
+  const driftLine = drift ? workDriftLine(drift) : "";
+  const work: VerifyReport["work"] = {
+    index: idx.state,
+    detail: idx.state === "sealed"
+      ? driftLine ? `NOT AS SEALED: ${driftLine}` : `every one of the ${idx.index.files?.length ?? 0} files the sealed index names is as sealed, and none was added`
+      : idx.state === "differs" ? `THE SEALED INDEX CANNOT BE HELD TO: ${idx.why}` : `not held to an index: ${idx.why}`,
+    drift,
+  };
   const sigPath = join(sandbox, `${CUSTODY_REL}.sig`);
   const sig = existsSync(sigPath) ? await verifySignature(join(sandbox, CUSTODY_REL), sigPath, opts.allowedSigners, opts.identity) : null;
   const tsrPath = join(sandbox, `${CUSTODY_REL}.tsr`);
-  let ts: VerifyReport["timestamp"] = { present: false, imprint: null, gen_time: null, note: "no timestamp token" };
+  let ts: TimestampCheck = { present: false, imprint: null, gen_time: null, signature: null, note: "no timestamp token" };
   if (existsSync(tsrPath) && "text" in sealedText) {
     const read = readTimestampResponse(readFileSync(tsrPath), createHash("sha256").update(sealedText.text).digest("hex"));
-    ts = { present: true, imprint: read.imprint, gen_time: read.gen_time, note: `the token names this verdict's sha256: ${read.imprint ? "yes" : "NO"}; its signature: openssl ts -verify -in ${CUSTODY_REL}.tsr -data ${CUSTODY_REL} -CAfile <the authority's CA>` };
+    const recorded = (lastAnchored?.timestamp as { signature?: { verified?: boolean | null; ca?: string; detail?: string } } | undefined)?.signature;
+    const ca = opts.tsaCa ?? null;
+    const signature = ca
+      ? { ...(await verifyTimestampToken(tsrPath, join(sandbox, CUSTODY_REL), ca)), ca }
+      : recorded?.verified === false
+        ? { verified: false, ca: recorded.ca ?? null, detail: `the token did not verify when custody took it (${recorded.detail ?? "no detail"}), and no CA is given here to check it again` }
+        : { verified: null, ca: null, detail: recorded?.verified === true ? `imprint only, signature not verified here (no CA given: --tsa-ca FILE); the anchor says it verified against ${recorded.ca ?? "a CA"} when custody took it` : "imprint only, signature not verified (no CA given: --tsa-ca FILE)" };
+    ts = {
+      present: true,
+      imprint: read.imprint,
+      gen_time: read.gen_time,
+      signature,
+      note: `the token names this verdict's sha256: ${read.imprint ? "yes" : "NO"}; its signature: ${signature.verified === true ? `verified against ${signature.ca}` : signature.verified === false ? `DOES NOT VERIFY (${signature.detail})` : ca ? `NOT CHECKED (${signature.detail})` : signature.detail}`,
+    };
   }
   const report: VerifyReport = {
     sandbox,
@@ -2070,23 +2314,56 @@ export async function verifyCustody(sandboxInput: string, opts: { timeoutSec?: n
     prefix: { sealed_lines: sealedLines, intact: prefixOk, detail: !sealed ? "no verdict to hold the run to" : !sealed.seal ? "the verdict predates the seal (no sealed prefix to compare)" : prefixOk ? `the first ${sealedLines} lines are the ones sealed` : `THE SEALED PREFIX CHANGED: line ${sealedLines} is not the line the verdict sealed` },
     after_seal: tail,
     changed,
+    seal_drift: seal.drift,
+    seal_after: seal.after,
+    not_sealed: seal.not_sealed,
+    work,
     now: now.checks,
     signature: sig ? { present: true, ok: sig.ok, how: sig.how, detail: sig.detail } : { present: false, ok: null, how: "none", detail: "custody.json is not signed" },
     timestamp: ts,
+    touched,
     ok: false,
   };
-  report.ok = Boolean(sealed) && anchor.state === "matches" && prefixOk && tail.closure_only && !adverse(now).length && (sig ? sig.ok : true) && (ts.present ? ts.imprint === true : true);
+  // A token's signature fails the check when it does not verify, and when a CA was given and it could not be checked.
+  const tsOk = !ts.present || (ts.imprint === true && ts.signature?.verified !== false && !(opts.tsaCa && ts.signature?.verified !== true));
+  report.ok =
+    Boolean(sealed) &&
+    anchor.state === "matches" &&
+    prefixOk &&
+    tail.closure_only &&
+    !adverse(now).length &&
+    !seal.drift.length &&
+    work.index !== "differs" &&
+    !driftLine &&
+    (sig ? sig.ok : true) &&
+    tsOk;
   return report;
 }
 
-/** The run's custody set-up from the registry beside it: sign key, timestamp authority, reference clock. */
-async function registrySeal(sandbox: string, run: string | undefined): Promise<{ signKey?: string; timestampUrl?: string; timeReference?: string }> {
+/** The last verdict the anchor outside the run names, as written there; null when there is none. */
+async function lastAnchoredVerdict(sandbox: string): Promise<Record<string, unknown> & { artifacts_sha256?: string | null; timestamp?: unknown } | null> {
   try {
-    const runsDir = dirname(await realpath(sandbox).catch(() => sandbox));
+    const anchor = JSON.parse(await readRegularTextOutside(await anchorPathFor(sandbox))) as { custody?: unknown };
+    const verdicts = Array.isArray(anchor.custody) ? (anchor.custody as Array<Record<string, unknown>>) : [];
+    return (verdicts.at(-1) as (Record<string, unknown> & { artifacts_sha256?: string | null }) | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The run's custody set-up from the registry beside it: sign key, timestamp authority and its CA, reference clock. */
+async function registrySeal(sandbox: string, run: string | undefined, runsDirGiven?: string): Promise<{ signKey?: string; timestampUrl?: string; timestampCa?: string; timeReference?: string }> {
+  try {
+    const runsDir = runsDirGiven ?? dirname(await realpath(sandbox).catch(() => sandbox));
     const reg = JSON.parse(readFileSync(join(runsDir, "registry.json"), "utf8")) as { runs?: Array<Record<string, unknown>> };
     const rec = (reg.runs ?? []).find((r) => (run && r.id === run) || r.sandbox === sandbox) ?? null;
-    const seal = (rec?.custody_seal ?? {}) as { sign_key?: string; timestamp_url?: string; time_reference?: string };
-    return { ...(seal.sign_key ? { signKey: seal.sign_key } : {}), ...(seal.timestamp_url ? { timestampUrl: seal.timestamp_url } : {}), ...(seal.time_reference ? { timeReference: seal.time_reference } : {}) };
+    const seal = (rec?.custody_seal ?? {}) as { sign_key?: string; timestamp_url?: string; timestamp_ca?: string; time_reference?: string };
+    return {
+      ...(seal.sign_key ? { signKey: seal.sign_key } : {}),
+      ...(seal.timestamp_url ? { timestampUrl: seal.timestamp_url } : {}),
+      ...(seal.timestamp_ca ? { timestampCa: seal.timestamp_ca } : {}),
+      ...(seal.time_reference ? { timeReference: seal.time_reference } : {}),
+    };
   } catch {
     return {};
   }
@@ -2094,29 +2371,35 @@ async function registrySeal(sandbox: string, run: string | undefined): Promise<{
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const args = process.argv.slice(2);
-  const sandbox = args.find((a, i) => !a.startsWith("--") && !["--timeout", "--run", "--sign-key", "--timestamp-url", "--time-reference", "--runs-dir", "--allowed-signers", "--identity"].includes(args[i - 1] ?? ""));
+  const sandbox = args.find((a, i) => !a.startsWith("--") && !["--timeout", "--run", "--sign-key", "--timestamp-url", "--timestamp-ca", "--tsa-ca", "--time-reference", "--runs-dir", "--allowed-signers", "--identity", "--scratch"].includes(args[i - 1] ?? ""));
   const opt = (name: string) => {
     const i = args.indexOf(name);
     return i >= 0 ? args[i + 1] : undefined;
   };
   if (!sandbox || !existsSync(sandbox)) {
-    console.error("usage: custody.ts <sandbox> [--timeout SEC] [--run ID] [--quiet] [--sign-key FILE] [--timestamp-url URL] [--time-reference URL] [--runs-dir DIR]\n       custody.ts <sandbox> --verify [--allowed-signers FILE --identity NAME] [--json]");
+    console.error("usage: custody.ts <sandbox> [--timeout SEC] [--run ID] [--quiet] [--sign-key FILE] [--timestamp-url URL] [--timestamp-ca FILE] [--time-reference URL] [--runs-dir DIR]\n       custody.ts <sandbox> --verify [--allowed-signers FILE --identity NAME] [--tsa-ca FILE] [--scratch DIR] [--json]");
     process.exit(2);
   }
   const timeoutSec = opt("--timeout") ? Number(opt("--timeout")) : 4 * 3600;
   if (args.includes("--verify")) {
     // Exit 0: the run is as the verdict sealed it; 4: something differs or a check does not pass; 1: the verify could not run.
-    verifyCustody(sandbox, { timeoutSec, allowedSigners: opt("--allowed-signers"), identity: opt("--identity"), runsDir: opt("--runs-dir") })
+    // The authority's CA: the flag, the environment, or the run's own set-up.
+    const fromRegistry = await registrySeal(resolve(sandbox), opt("--run"), opt("--runs-dir"));
+    const tsaCa = opt("--tsa-ca") ?? process.env.SWARM_CUSTODY_TSA_CA ?? fromRegistry.timestampCa;
+    verifyCustody(sandbox, { timeoutSec, allowedSigners: opt("--allowed-signers"), identity: opt("--identity"), runsDir: opt("--runs-dir"), tsaCa, scratchDir: opt("--scratch") })
       .then((r) => {
         if (args.includes("--json")) console.log(JSON.stringify(r, null, 2));
         else {
           console.log(`Verdict:      ${r.verdict.at ?? "none"} (${r.verdict.anchor})`);
           console.log(`Sealed:       ${r.prefix.detail}`);
-          console.log(`After seal:   ${r.after_seal.lines} line(s)${r.after_seal.lines ? `: ${r.after_seal.tools.join(", ")}${r.after_seal.closure_only ? " (the run's own closing lines)" : " (NOT ONLY THE RUN'S CLOSING LINES)"}` : ""}`);
+          console.log(`After seal:   ${r.after_seal.lines} line(s)${r.after_seal.lines ? `: ${r.after_seal.tools.join(", ")}${r.after_seal.closure_only ? " (the run's own closing lines)" : " (NOT ONLY THE RUN'S CLOSING LINES)"}` : ""}${r.seal_after.length ? `; ${r.seal_after.join("; ")}` : ""}`);
+          console.log(`Chains:       ${r.seal_drift.length ? `NOT AS SEALED: ${r.seal_drift.map((d) => `${d.what} sealed ${d.sealed}, now ${d.now}`).join("; ")}` : "each chain has the length and the head the verdict sealed"}${r.not_sealed.length ? ` (not sealed by this verdict: ${r.not_sealed.join(", ")})` : ""}`);
+          console.log(`Work files:   ${r.work.detail}`);
           console.log(`Checks now:   ${checksLine(r.now)}`);
           if (r.changed.length) console.log(`Changed:      ${r.changed.map((x) => `${x.check} ${x.sealed ?? "absent"} → ${x.now}`).join("; ")}`);
           console.log(`Signature:    ${r.signature.present ? `${r.signature.ok ? "valid" : "NOT VALID"} (${r.signature.how})` : r.signature.detail}`);
           console.log(`Timestamp:    ${r.timestamp.present ? `${r.timestamp.gen_time ?? "time unread"}; ${r.timestamp.note}` : r.timestamp.note}`);
+          if (r.touched.length) console.log(`Outside run:  ${r.touched.join("; ")}`);
           console.log(r.ok ? "VERIFIED: the run is as the verdict sealed it." : "NOT VERIFIED: see above.");
         }
         process.exit(r.ok ? 0 : 4);
@@ -2168,6 +2451,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       progress: args.includes("--quiet") ? undefined : (line) => console.error(line),
       signKey: opt("--sign-key") ?? fromRegistry.signKey,
       timestampUrl: opt("--timestamp-url") ?? fromRegistry.timestampUrl,
+      timestampCa: opt("--timestamp-ca") ?? fromRegistry.timestampCa,
       timeReference: opt("--time-reference") ?? fromRegistry.timeReference,
       runsDir: opt("--runs-dir"),
     })

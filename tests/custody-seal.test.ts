@@ -10,20 +10,25 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { custodyAnchorPath, takeCustody, verdictOf, verifyCustody, type Custody } from "../scripts/custody.ts";
 import { afterSeal, checksOf, parseAcquisitionHashes, readTimestampResponse, timestampRequest, verifySignature } from "../scripts/custody-checks.ts";
+import { ledgerHash, type LedgerEntry } from "../extensions/protocol.ts";
 import { readCustody } from "../scripts/ui/model.ts";
 import { renderReport } from "../scripts/report.ts";
 
 const dirs: string[] = [];
 after(async () => {
-  for (const d of dirs) await rm(d, { recursive: true, force: true });
+  for (const d of dirs) {
+    // A store leaves its sealed directories read-only.
+    spawnSync("chmod", ["-R", "u+w", d]);
+    await rm(d, { recursive: true, force: true });
+  }
 });
 const sha = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
 const md5 = (s: string) => createHash("md5").update(s).digest("hex");
@@ -231,7 +236,7 @@ test("the verdict is signed with an SSH key and timestamped by an RFC 3161 autho
     assert.match(c.summary, /the host's clock behind http:\/\/127\.0\.0\.1:\d+\/tsa by \d+ ms/);
     assert.ok(existsSync(join(root, "custody.json.sig")));
     assert.ok(existsSync(join(root, "custody.json.tsr")));
-    const anchor = JSON.parse(await readFile(custodyAnchorPath(root), "utf8")) as { custody: Array<{ signature?: { sha256?: string }; timestamp?: { gen_time?: string }; seal?: unknown }> };
+    const anchor = JSON.parse(await readFile(custodyAnchorPath(root), "utf8")) as { custody: Array<{ signature?: { sha256?: string }; timestamp?: { gen_time?: string; signature?: unknown }; seal?: unknown }> };
     const last = anchor.custody.at(-1);
     assert.match(String(last?.signature?.sha256), /^[0-9a-f]{64}$/);
     assert.equal(last?.timestamp?.gen_time, "2026-09-26T12:00:00Z");
@@ -251,7 +256,19 @@ test("the verdict is signed with an SSH key and timestamped by an RFC 3161 autho
     const v = await verifyCustody(root, { runsDir: runs });
     assert.equal(v.signature.ok, true);
     assert.equal(v.timestamp.imprint, true);
+    // No CA was named: the token is held to the digest only, and says so.
+    assert.equal(v.timestamp.signature?.verified, null);
+    assert.match(v.timestamp.note, /imprint only, signature not verified/);
+    assert.equal((last?.timestamp as { signature?: { verified?: unknown; detail?: string } } | undefined)?.signature?.verified, null);
     assert.equal(v.ok, true, JSON.stringify(v, null, 1));
+    // Given a CA, a token that is not the authority's signature does not verify, and the check fails.
+    if (opensslTs()) {
+      const pki = await testPki();
+      const withCa = await verifyCustody(root, { runsDir: runs, tsaCa: pki.ca });
+      assert.equal(withCa.timestamp.signature?.verified, false, withCa.timestamp.note);
+      assert.match(withCa.timestamp.note, /DOES NOT VERIFY/);
+      assert.equal(withCa.ok, false);
+    }
     // An edited verdict: the signature no longer holds, nor does the anchor or the token.
     const text = await readFile(join(root, "custody.json"), "utf8");
     await writeFile(join(root, "custody.json"), text.replace('"run": "s1"', '"run": "s2"'));
@@ -289,4 +306,237 @@ test("custody's CLI exits 4 when a check does not pass, 0 when all do", async ()
   assert.equal(cli(root), 4, "the evidence changed: a verdict, and not a pass");
   const c = JSON.parse(await readFile(join(root, "custody.json"), "utf8")) as Custody;
   assert.equal(c.checks.find((x) => x.name === "evidence")?.status, "failed");
+});
+
+/** Whether this host's openssl has the ts command. */
+function opensslTs(): boolean {
+  const r = spawnSync("openssl", ["ts", "-help"], { encoding: "utf8" });
+  return !r.error && /-verify|-reply/.test(`${r.stdout}${r.stderr}`);
+}
+
+/** A CA and a timestamping certificate it signed, and an openssl ts config for the authority: made for the test. */
+async function testPki(): Promise<{ dir: string; ca: string; otherCa: string; reply: (query: Buffer) => Buffer }> {
+  const dir = await mkdtemp(join(tmpdir(), "custody-tsa-"));
+  dirs.push(dir);
+  const ssl = (...args: string[]) => execFileSync("openssl", args, { cwd: dir, stdio: "pipe" });
+  for (const name of ["ca", "other"]) ssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", `${name}.key`, "-out", `${name}.pem`, "-days", "2", "-subj", `/CN=Test ${name}`, "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign");
+  ssl("req", "-newkey", "rsa:2048", "-nodes", "-keyout", "tsa.key", "-out", "tsa.csr", "-subj", "/CN=Test TSA");
+  await writeFile(join(dir, "ext.cnf"), "extendedKeyUsage=critical,timeStamping\nbasicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\n");
+  ssl("x509", "-req", "-in", "tsa.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "tsa.pem", "-days", "2", "-extfile", "ext.cnf");
+  await writeFile(join(dir, "serial"), "01\n");
+  await writeFile(
+    join(dir, "tsa.cnf"),
+    `[ tsa ]\ndefault_tsa = tsa1\n[ tsa1 ]\nserial = ${join(dir, "serial")}\ncrypto_device = builtin\nsigner_digest = sha256\ndefault_policy = 1.2.3.4.1\ndigests = sha256\naccuracy = secs:1\nordering = no\ntsa_name = no\ness_cert_id_chain = no\ness_cert_id_alg = sha256\n`,
+  );
+  let n = 0;
+  const reply = (query: Buffer) => {
+    n += 1;
+    const q = join(dir, `q${n}.tsq`);
+    const r = join(dir, `r${n}.tsr`);
+    writeFileSync(q, query);
+    ssl("ts", "-reply", "-config", "tsa.cnf", "-queryfile", q, "-signer", "tsa.pem", "-inkey", "tsa.key", "-out", r);
+    return readFileSync(r);
+  };
+  return { dir, ca: join(dir, "ca.pem"), otherCa: join(dir, "other.pem"), reply };
+}
+
+/** A v3 ledger entry chained on `prev`, with the refs and provenance the hub records. */
+function v3(seq: number, value: string, prev: string): LedgerEntry {
+  const e: LedgerEntry = { v: 3, seq, kind: "finding", value, source: "inputs/notes.txt", evidence: "line 1", confidence: "high", refs: ["input:inputs/notes.txt"], by: "a0", authors: ["a0"], at: `2026-09-27T00:00:0${seq}Z` };
+  e.prev = prev;
+  e.hash = ledgerHash(e, prev);
+  return e;
+}
+
+/** A finished run with a report, a note and a ledger entry the trace carries, and its custody taken. */
+async function sealedRun(): Promise<{ root: string; runs: string; e1: LedgerEntry }> {
+  const e1 = v3(1, "The notes were written on the host", "genesis");
+  const { root, runs } = await run({ traceLines: [{ ts: "2026-09-26T10:00:00Z", agent: "a0", tool: "record", args: {}, result: { ok: true, seq: 1, hash: e1.hash } }] });
+  await mkdir(join(root, "ledger"), { recursive: true });
+  await writeFile(join(root, "ledger", "entries.jsonl"), `${JSON.stringify(e1)}\n`);
+  await mkdir(join(root, "work", "a0"), { recursive: true });
+  await writeFile(join(root, "work", "report.md"), "# Report\n\nThe notes were written on the host [#1].\n");
+  await writeFile(join(root, "work", "a0", "notes.md"), "scratch\n");
+  const c = await takeCustody(root, { runsDir: runs });
+  assert.equal(c.artifacts?.files, 2);
+  return { root, runs, e1 };
+}
+
+test("verify holds work/ to the index custody sealed: a report edited, a file removed or added after the stop is named, and fails", async () => {
+  const { root, runs } = await sealedRun();
+  const ok = await verifyCustody(root, { runsDir: runs });
+  assert.equal(ok.work.index, "sealed");
+  assert.match(ok.work.detail, /every one of the 2 files the sealed index names is as sealed, and none was added/);
+  assert.equal(ok.ok, true, JSON.stringify(ok, null, 1));
+  // The report edited after the stop: every check still passes (each file hashed), and the seal does not.
+  const report = join(root, "work", "report.md");
+  const text = await readFile(report, "utf8");
+  await writeFile(report, text.replace("on the host", "somewhere else"));
+  const edited = await verifyCustody(root, { runsDir: runs });
+  assert.deepEqual(edited.changed, [], "no check's status moved: the verdict's statuses alone never saw this");
+  assert.deepEqual(edited.work.drift?.changed, ["work/report.md"]);
+  assert.match(edited.work.detail, /NOT AS SEALED: 1 CHANGED \(work\/report\.md\)/);
+  assert.equal(edited.ok, false);
+  await writeFile(report, text);
+  // A file removed, and one added.
+  await rm(join(root, "work", "a0", "notes.md"));
+  await writeFile(join(root, "work", "late.md"), "written after the stop\n");
+  const moved = await verifyCustody(root, { runsDir: runs });
+  assert.deepEqual(moved.work.drift?.removed, ["work/a0/notes.md"]);
+  assert.deepEqual(moved.work.drift?.added, ["work/late.md"]);
+  assert.equal(moved.ok, false);
+  await writeFile(join(root, "work", "a0", "notes.md"), "scratch\n");
+  await rm(join(root, "work", "late.md"));
+  assert.equal((await verifyCustody(root, { runsDir: runs })).ok, true, "as sealed again");
+  // The index itself replaced: it is not the one the verdict and the anchor name.
+  const index = await readFile(join(root, "artifacts.json"), "utf8");
+  await writeFile(join(root, "artifacts.json"), index.replace(/"generated_at": "[^"]+"/, '"generated_at": "2030-01-01T00:00:00.000Z"'));
+  const swapped = await verifyCustody(root, { runsDir: runs });
+  assert.equal(swapped.work.index, "differs");
+  assert.match(swapped.work.detail, /THE SEALED INDEX CANNOT BE HELD TO: artifacts\.json is not the index the verdict sealed/);
+  assert.equal(swapped.ok, false);
+  await writeFile(join(root, "artifacts.json"), index);
+  // The CLI says it too, and exits 4.
+  await writeFile(report, `${text}tampered\n`);
+  let out = "";
+  let code = 0;
+  try {
+    out = execFileSync(process.execPath, ["--experimental-strip-types", "--no-warnings", join(import.meta.dirname, "..", "scripts", "custody.ts"), root, "--verify", "--runs-dir", runs], { encoding: "utf8" });
+  } catch (err) {
+    code = (err as { status: number }).status;
+    out = String((err as { stdout: string }).stdout);
+  }
+  assert.equal(code, 4, out);
+  assert.match(out, /^Work files:   NOT AS SEALED: 1 CHANGED \(work\/report\.md\)$/m);
+});
+
+test("verify holds every chain to the length and head sealed: an appended, correctly chained entry is named; examiner notes after the run are said and allowed", async () => {
+  const { root, runs, e1 } = await sealedRun();
+  // A second entry appended after the stop, chained correctly on the first.
+  const e2 = v3(2, "An entry nobody recorded through the tool", e1.hash as string);
+  await appendFile(join(root, "ledger", "entries.jsonl"), `${JSON.stringify(e2)}\n`);
+  const v = await verifyCustody(root, { runsDir: runs });
+  assert.deepEqual(v.seal_drift.map((d) => d.what), ["ledger"]);
+  assert.equal(v.seal_drift[0].sealed, `1 entries, head ${e1.hash}`);
+  assert.equal(v.seal_drift[0].now, `2 entries, head ${e2.hash}`);
+  assert.ok(v.changed.some((x) => x.check === "ledger" && x.now === "failed"), "and the ledger is not on the trace (a version 3 entry)");
+  assert.equal(v.ok, false);
+  await writeFile(join(root, "ledger", "entries.jsonl"), `${JSON.stringify(e1)}\n`);
+  // An attestation appended.
+  await writeFile(join(root, "ledger", "attestations.jsonl"), `${JSON.stringify({ seq: 1, by: "a1", at: "t", prev: "genesis", hash: "0".repeat(64) })}\n`);
+  const a = await verifyCustody(root, { runsDir: runs });
+  assert.ok(a.seal_drift.some((d) => d.what === "ledger attestations" && d.sealed === "0 lines, head none"), JSON.stringify(a.seal_drift));
+  assert.equal(a.ok, false);
+  await rm(join(root, "ledger", "attestations.jsonl"));
+  assert.equal((await verifyCustody(root, { runsDir: runs })).ok, true);
+});
+
+test("the store journal: an examiner's note after the run is said and allowed; any other line after the seal is not", async () => {
+  const { root, runs } = await sealedRun();
+  const { initStore, appendNote } = await import("../scripts/evidence-store.ts");
+  await initStore(root);
+  // A journal custody sealed: custody taken again with the store there.
+  await takeCustody(root, { runsDir: runs });
+  const sealed = JSON.parse(await readFile(join(root, "custody.json"), "utf8")) as Custody;
+  assert.ok(sealed.seal.journal && sealed.seal.journal.lines >= 1);
+  assert.equal((await verifyCustody(root, { runsDir: runs })).ok, true);
+  await appendNote(root, { by: "H. Examiner", text: "j000001's partial output is not relied on" });
+  const noted = await verifyCustody(root, { runsDir: runs });
+  assert.deepEqual(noted.seal_drift, []);
+  assert.deepEqual(noted.seal_after, ["store journal: 1 examiner note(s) after the seal"]);
+  // A line that is not a note, chained on correctly, is a drift.
+  const journal = join(root, "store", "journal.jsonl");
+  const lines = (await readFile(journal, "utf8")).trim().split("\n");
+  const raw = JSON.stringify({ v: 1, seq: lines.length, at: "t", type: "job_committed", job: "j000009", prev: sha(lines.at(-1) as string) });
+  await appendFile(journal, `${raw}\n`);
+  const bad = await verifyCustody(root, { runsDir: runs });
+  assert.ok(bad.seal_drift.some((d) => d.what === "store journal" && /after the sealed line: note, job_committed/.test(d.now)), JSON.stringify(bad.seal_drift));
+  assert.equal(bad.ok, false);
+});
+
+test("a token's signature is checked against the authority's CA when one is named: verified, recorded in the anchor, and a token from another authority fails", { skip: !opensslTs() && "no openssl ts on this host" }, async () => {
+  const { root, runs } = await run();
+  const pki = await testPki();
+  const server: Server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/timestamp-reply" });
+      res.end(pki.reply(Buffer.concat(chunks)));
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/tsa`;
+  try {
+    await takeCustody(root, { runsDir: runs, timestampUrl: url, timestampCa: pki.ca });
+    const anchor = JSON.parse(await readFile(custodyAnchorPath(root), "utf8")) as { custody: Array<{ timestamp?: { signature?: { verified?: boolean | null; ca?: string; ca_sha256?: string; detail?: string } } }> };
+    const recorded = anchor.custody.at(-1)?.timestamp?.signature;
+    assert.equal(recorded?.verified, true, recorded?.detail);
+    assert.equal(recorded?.ca, pki.ca);
+    assert.equal(recorded?.ca_sha256, sha(await readFile(pki.ca)));
+    const v = await verifyCustody(root, { runsDir: runs, tsaCa: pki.ca });
+    assert.equal(v.timestamp.signature?.verified, true, v.timestamp.note);
+    assert.match(v.timestamp.note, /its signature: verified against /);
+    assert.equal(v.ok, true, JSON.stringify(v, null, 1));
+    // Held to a CA that did not issue it: the chain does not verify.
+    const other = await verifyCustody(root, { runsDir: runs, tsaCa: pki.otherCa });
+    assert.equal(other.timestamp.signature?.verified, false);
+    assert.equal(other.ok, false);
+    // No CA here: the anchor's record is named, and the check is imprint only.
+    const none = await verifyCustody(root, { runsDir: runs });
+    assert.match(none.timestamp.note, /imprint only, signature not verified here \(no CA given: --tsa-ca FILE\); the anchor says it verified against /);
+    assert.equal(none.ok, true);
+    // A CA file that is not there: named, and a check that was asked for and not made fails.
+    const missing = await verifyCustody(root, { runsDir: runs, tsaCa: join(pki.dir, "nope.pem") });
+    assert.equal(missing.timestamp.signature?.verified, null);
+    assert.match(missing.timestamp.note, /NOT CHECKED \(no CA file at /);
+    assert.equal(missing.ok, false);
+  } finally {
+    server.close();
+  }
+});
+
+test("a read-only verify writes nothing in the run: a kept disk is loaded outside it, a disk an ended custody left is named and left, and it says what it touched", async () => {
+  const { root, runs } = await run();
+  const anchorText = JSON.parse(await readFile(custodyAnchorPath(root), "utf8")) as Record<string, unknown>;
+  await writeFile(custodyAnchorPath(root), JSON.stringify({ ...anchorText, isolation: "microvm" }));
+  await mkdir(join(root, "vm"), { recursive: true });
+  const snaps = `${root}.vm-snapshots`;
+  await mkdir(snaps, { recursive: true });
+  await writeFile(join(snaps, "a0.msb"), "disk bytes");
+  await writeFile(join(root, "vm", "a0.json"), JSON.stringify({ agent: "a0", stopped_at: "t", snapshot: { path: join(snaps, "a0.msb"), sha256: sha("disk bytes") } }));
+  // A stand-in msb that loads (it names a digest) and verifies.
+  const bin = join(await mkdtemp(join(tmpdir(), "msb-stand-in-")), "msb");
+  dirs.push(dirname(bin));
+  await writeFile(bin, `#!/bin/sh\ncase "$2" in\n  load) mkdir -p "$4/x" && echo '{}' > "$4/x/snapshot.json" && echo "loaded sha256:${"d".repeat(64)}" ;;\n  verify) echo "Verification: verified" ;;\nesac\nexit 0\n`, { mode: 0o755 });
+  const was = process.env.SWARM_MSB_BIN;
+  process.env.SWARM_MSB_BIN = bin;
+  try {
+    await takeCustody(root, { runsDir: runs });
+    await mkdir(join(snaps, ".verify-left"), { recursive: true });
+    const scratch = await mkdtemp(join(tmpdir(), "verify-scratch-"));
+    dirs.push(scratch);
+    const v = await verifyCustody(root, { runsDir: runs, scratchDir: scratch });
+    assert.ok(v.touched.some((t) => t.includes(join(snaps, ".verify-left")) && /not removed/.test(t)), v.touched.join("\n"));
+    assert.ok(v.touched.some((t) => t.startsWith(`made ${join(scratch, ".verify-")}`) && t.endsWith("and removed it")), v.touched.join("\n"));
+    assert.ok(v.touched.some((t) => /msb's index: loaded a0\.msb as sha256:d{64}, and removed it again/.test(t)), v.touched.join("\n"));
+    assert.deepEqual((await readdir(snaps)).sort(), [".verify-left", "a0.msb"], "nothing added beside the snapshots, and what was there is left");
+    assert.deepEqual(await readdir(scratch), [], "the scratch is cleared");
+  } finally {
+    if (was === undefined) delete process.env.SWARM_MSB_BIN;
+    else process.env.SWARM_MSB_BIN = was;
+    await rm(snaps, { recursive: true, force: true });
+  }
+});
+
+test("custody taken again keeps each earlier verdict with the index it sealed, so every index the anchor names can still be checked", async () => {
+  const { root, runs } = await sealedRun();
+  const first = JSON.parse(await readFile(join(root, "custody.json"), "utf8")) as Custody;
+  await writeFile(join(root, "work", "a0", "notes.md"), "scratch, changed\n");
+  await takeCustody(root, { runsDir: runs });
+  const aside = join(root, `artifacts.${first.at.replace(/[^0-9A-Za-z]/g, "")}.json`);
+  const anchor = JSON.parse(await readFile(custodyAnchorPath(root), "utf8")) as { custody: Array<{ artifacts_sha256: string }> };
+  assert.equal(sha(await readFile(aside)), anchor.custody[0].artifacts_sha256, "the first verdict's index, as it sealed it");
+  assert.equal(sha(await readFile(join(root, "artifacts.json"))), anchor.custody[1].artifacts_sha256);
+  assert.notEqual(anchor.custody[0].artifacts_sha256, anchor.custody[1].artifacts_sha256);
 });

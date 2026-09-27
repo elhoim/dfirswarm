@@ -2882,6 +2882,8 @@ test("a run's package: what swarm.sh package left, and the directory as one zip 
   await mkdir(join(pkg, "work"), { recursive: true });
   await writeFile(join(pkg, "report.md"), "# Report\n", "utf8");
   await writeFile(join(pkg, "work", "timeline.csv"), "ts,what\n2026-02-03T09:12:41Z,GET /shell.php\n".repeat(50), "utf8");
+  // A run that was never stopped: the package declares its custody and chains absent, as package does.
+  execFileSync(process.execPath, ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "package-tools.ts"), "components", join(pkg, "no-such-run"), pkg]);
   execFileSync("bash", ["-c", 'cd "$1" && find . -type f ! -name MANIFEST.txt | sort | while read -r f; do shasum -a 256 "$f" 2>/dev/null || sha256sum "$f"; done > MANIFEST.txt', "manifest", pkg]);
   // Not handed over: a link out of the package, and a FIFO.
   await symlink("/etc/hosts", join(pkg, "hosts-link"));
@@ -2890,7 +2892,7 @@ test("a run's package: what swarm.sh package left, and the directory as one zip 
   try {
     const info = await get<{ present: boolean; files: number; manifest_sha256: string; signed: boolean; dir: string }>("/api/swarms/svm1d/package");
     assert.equal(info.body.present, true);
-    assert.equal(info.body.files, 2);
+    assert.equal(info.body.files, 3);
     assert.equal(info.body.signed, false);
     assert.equal(info.body.manifest_sha256, createHash("sha256").update(await readFile(join(pkg, "MANIFEST.txt"))).digest("hex"));
     const res = await fetch(`${base}/api/swarms/svm1d/package.zip`);
@@ -2900,7 +2902,7 @@ test("a run's package: what swarm.sh package left, and the directory as one zip 
     const zip = join(dl, "svm1d-package.zip");
     await writeFile(zip, Buffer.from(await res.arrayBuffer()));
     const names = execFileSync("python3", ["-c", "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); assert z.testzip() is None; print('\\n'.join(sorted(z.namelist())))", zip], { encoding: "utf8" }).trim().split("\n");
-    assert.deepEqual(names, ["svm1d-package/MANIFEST.txt", "svm1d-package/report.md", "svm1d-package/work/timeline.csv"]);
+    assert.deepEqual(names, ["svm1d-package/COMPONENTS.json", "svm1d-package/MANIFEST.txt", "svm1d-package/report.md", "svm1d-package/work/timeline.csv"]);
     // The harness's own check of a package: files hold, unsigned (exit 4).
     const verify = spawnSync("bash", [join(ROOT, "scripts", "swarm.sh"), "verify", zip], { encoding: "utf8", env: { ...process.env, SWARM_RUNS_DIR: runsDir } });
     assert.equal(verify.status, 4, `${verify.stdout}\n${verify.stderr}`);

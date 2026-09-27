@@ -624,6 +624,30 @@ test("the ledger is held to the trace whatever the trace carries: a forged ledge
   assert.ok(c.ledger?.not_on_trace.includes(2), JSON.stringify(c.ledger));
 });
 
+test("a version 3 ledger is held to the trace too: an entry the trace never carried is named, however well it is chained", async () => {
+  const root = await sandbox();
+  await anchor(root, { isolation: "microvm" });
+  await mkdir(join(root, "ledger"), { recursive: true });
+  const v3 = (seq: number, value: string, prev: string): LedgerEntry => {
+    const e: LedgerEntry = { v: 3, seq, kind: "finding", value, source: "inputs/notes.txt", evidence: "line 1", confidence: "high", refs: ["input:inputs/notes.txt"], by: "a0", authors: ["a0"], at: `2026-09-27T00:00:0${seq}Z` };
+    e.prev = prev;
+    e.hash = ledgerHash(e, prev);
+    return e;
+  };
+  const e1 = v3(1, "recorded through the hub", "genesis");
+  const e2 = v3(2, "written into the file by hand", e1.hash as string);
+  await writeFile(join(root, "ledger", "entries.jsonl"), `${JSON.stringify(e1)}\n${JSON.stringify(e2)}\n`);
+  // The hub logged e1 only.
+  await writeFile(join(root, "traces", "events.jsonl"), `${JSON.stringify({ ts: "t", agent: "system", tool: "hub_call", args: { fn: "recordEntry", seat: "a0" }, result: { ok: true, hash: e1.hash }, sid: "hub", seq: 1 })}\n`);
+  const c = await takeCustody(root);
+  assert.equal(c.ledger?.detail, "2 of 2 entries chained", "its own chain holds");
+  assert.deepEqual(c.ledger?.not_on_trace, [2], JSON.stringify(c.ledger));
+  assert.equal(c.ledger?.intact, false);
+  assert.equal(c.checks.find((x) => x.name === "ledger")?.status, "failed");
+  assert.equal(c.checks.find((x) => x.name === "ledger")?.reason, "1 in the ledger and never on the trace (seq 2)", "the check says why, not only that the chain holds");
+  assert.match(c.summary, /in the ledger never on the trace \(seq 2\)/);
+});
+
 test("in a microVM run the ledger is held to the hub's lines, and a seat's lines and spill speak for that seat only", async () => {
   const root = await sandbox();
   await anchor(root, { isolation: "microvm" });

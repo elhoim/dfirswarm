@@ -19,12 +19,17 @@
  * report's own hash and the head of the attestations, and the entries the
  * examiner had rejected and not since accepted, so a sign-off over a ledger
  * or a report that changed afterwards is seen to be over another, and a
- * sign-off with objections standing says so.
+ * sign-off with objections standing says so. A sign-off is over a report:
+ * with no report at the path it names, it is refused, never written over
+ * nothing. `show` exits 4 when the ledger or the report has moved since the
+ * sign-off: a sign-off that covers something else is not a pass.
  *
  * Usage:
  *   node scripts/review.ts add --runs DIR --run ID --sandbox DIR --examiner NAME
  *        --action accept|reject|amend|sign [--entry SEQ] [--note TEXT]
  *   node scripts/review.ts show --runs DIR --run ID [--sandbox DIR] [--json]
+ *        (exit 1: the review's chain is broken; 4: the sign-off does not cover
+ *        the ledger head or the report as they are now)
  *   node scripts/review.ts verify --runs DIR --run ID
  *   node scripts/review.ts prior --runs DIR --run ID --sandbox DIR --out FILE
  */
@@ -34,7 +39,7 @@ import { chmod, mkdir, open, rm, stat, writeFile } from "node:fs/promises";
 import { hostname, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { readRegularText } from "./regular-file.ts";
+import { hashRegularFile, readRegularText } from "./regular-file.ts";
 
 export type ReviewAction = "accept" | "reject" | "amend" | "sign";
 export const REVIEW_ACTIONS: readonly ReviewAction[] = ["accept", "reject", "amend", "sign"];
@@ -209,10 +214,28 @@ async function withLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
 
 export type ReviewInput = { action: ReviewAction; examiner: string; entry_seq?: number; note?: string; report?: string };
 
-/** The sha256 of a regular file under the sandbox, or null when there is none. */
+/** A relative path that stays under the run: no leading slash, no "..". */
+export function isSandboxPath(rel: string): boolean {
+  return Boolean(rel) && !rel.startsWith("/") && !rel.split("/").includes("..");
+}
+
+/**
+ * What a sign-off covers, against the run as it is now: whether the
+ * ledger's head and the report's hash are still the ones it names. A
+ * sign-off that names no report (one written before a report was required)
+ * covers none; null is a part that was not read. `current` is true only
+ * when the review's chain holds and both are the ones signed.
+ */
+export function signoffCoverage(signed: ReviewLine, now: { chainOk: boolean; ledgerHead: string | null; reportSha: string | null | undefined }): { ledger: boolean | null; report: boolean | null; current: boolean } {
+  const ledger = now.ledgerHead === null || !signed.ledger_head ? null : signed.ledger_head === now.ledgerHead;
+  const report = !signed.report_sha256 ? false : now.reportSha === undefined ? null : signed.report_sha256 === now.reportSha;
+  return { ledger, report, current: now.chainOk && ledger === true && report === true };
+}
+
+/** The sha256 of a regular file's bytes under the sandbox (as the report and custody hash it), or null when there is none. */
 async function sandboxFileSha(sandbox: string, rel: string): Promise<string | null> {
-  const r = await readRegularText(join(sandbox, rel), READ_MAX_BYTES).catch(() => null);
-  return r && "text" in r ? sha256(r.text) : null;
+  const r = await hashRegularFile(join(sandbox, rel)).catch(() => null);
+  return r && "sha256" in r ? r.sha256 : null;
 }
 
 /** The attestations' head: the last line's hash, or null. */
@@ -259,7 +282,10 @@ export async function appendReview(runsDir: string, runId: string, sandbox: stri
       line.ledger_entries = ledger.entries.length;
       // The report the examiner read, and what still stood against it.
       line.report_path = input.report ?? "work/report.md";
+      if (!isSandboxPath(line.report_path)) throw new Error(`${JSON.stringify(line.report_path)} is not a path under the run (--report work/…)`);
       line.report_sha256 = await sandboxFileSha(sandbox, line.report_path);
+      // A sign-off names the report the examiner read; over nothing, it would read as over whatever is there later.
+      if (!line.report_sha256) throw new Error(`there is no ${line.report_path} in run ${runId} to sign over: a sign-off is over the report the examiner read (--report PATH names another)`);
       line.attestations_head = await attestationsHead(sandbox);
       line.open_rejections = [...reviewState(before).entries.values()].filter((l) => l.action === "reject").map((l) => l.entry_seq as number).sort((a, b) => a - b);
     } else {
@@ -386,9 +412,10 @@ async function main(argv: string[]): Promise<number> {
       if (sandbox) {
         const ledger = await readLedger(sandbox).catch(() => null);
         if (ledger) head = ledgerHead(ledger.entries, ledger.sha256);
-        if (state.signed?.report_path) reportNow = await sandboxFileSha(sandbox, state.signed.report_path);
+        if (state.signed?.report_path && isSandboxPath(state.signed.report_path)) reportNow = await sandboxFileSha(sandbox, state.signed.report_path);
       }
       const s0 = state.signed;
+      const covers = s0 && sandbox ? signoffCoverage(s0, { chainOk: v.ok, ledgerHead: head, reportSha: reportNow }) : null;
       const summary = {
         run,
         lines: lines.length,
@@ -403,6 +430,7 @@ async function main(argv: string[]): Promise<number> {
               report_path: s0.report_path ?? null,
               report_sha256: s0.report_sha256 ?? null,
               report_current: reportNow === undefined || s0.report_sha256 === undefined ? null : reportNow === s0.report_sha256,
+              covers_current: covers ? covers.current : null,
               open_rejections: s0.open_rejections ?? [],
             }
           : null,
@@ -414,13 +442,16 @@ async function main(argv: string[]): Promise<number> {
         for (const e of summary.entries) console.log(`  #${e.seq}: ${e.action} by ${e.examiner} at ${e.at}${e.note ? ` (${e.note})` : ""}`);
         if (summary.signed) {
           console.log(`  Signed by ${summary.signed.examiner} at ${summary.signed.at}, over ledger head ${summary.signed.ledger_head}${summary.signed.current === false ? " (the ledger has changed since: the sign-off is over an earlier one)" : ""}.`);
-          if (summary.signed.report_path) console.log(`  Over ${summary.signed.report_path} ${summary.signed.report_sha256 ?? "(absent when signed)"}${summary.signed.report_current === false ? " (the report has changed since)" : ""}.`);
+          if (summary.signed.report_path) console.log(`  Over ${summary.signed.report_path} ${summary.signed.report_sha256 ?? "(absent when signed)"}${summary.signed.report_current === false ? ` (the report has changed since: it is ${reportNow ?? "gone"} now)` : ""}.`);
+          else console.log("  Over no report (a sign-off from before one was named).");
           if (summary.signed.open_rejections.length) console.log(`  Signed with rejections standing: ${summary.signed.open_rejections.map((n) => `#${n}`).join(", ")}.`);
+          if (covers && !covers.current && v.ok) console.log("  THE SIGN-OFF DOES NOT COVER THE RUN AS IT STANDS: what changed since is the agents' word, not the examiner's.");
         } else {
           console.log("  Not signed.");
         }
       }
-      return v.ok ? 0 : 1;
+      // 1: the review's own chain is broken; 4: it holds, and the sign-off does not cover the ledger or the report as they are now.
+      return !v.ok ? 1 : covers && !covers.current ? 4 : 0;
     }
     case "prior": {
       const sandbox = opt(args, "--sandbox");

@@ -470,6 +470,11 @@ Isolation
                       (ssh-keygen -Y, namespace dfirswarm-custody).
   --custody-timestamp-url URL  Have each verdict's sha256 timestamped by this
                       RFC 3161 authority (custody.json.tsr beside it).
+  --custody-timestamp-ca FILE  The authority's CA certificates (PEM): each token's
+                      signature and certificate are checked against them
+                      (openssl ts -verify) and the result recorded in the
+                      anchor; custody-verify checks it again. Without it, a
+                      token is held to its digest only ("imprint only").
   --time-reference URL  Record this https server's clock offset from the host's
                       at kickoff and at custody.
   --allow-oauth-in-vm Let a subscription (OAuth) provider into the VMs; refused
@@ -3240,7 +3245,7 @@ cmd_start() {
   # Where the agents live: one microVM each (the default), or host
   # processes (--isolation host, unisolated). isolation_given says the
   # operator named it, so a refusal can say how to choose the other.
-  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" time_reference="" brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}'
+  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}'
   local seal_herdr=1
   # Directories the panes may not read. Reads are open by design, so this is
   # narrow on purpose: material about the case the agents must derive rather
@@ -3382,6 +3387,7 @@ cmd_start() {
       --brains-with-packs) brain_base=0; shift ;;
       --custody-sign-key) custody_sign_key="$2"; shift 2 ;;
       --custody-timestamp-url) custody_tsa="$2"; shift 2 ;;
+      --custody-timestamp-ca) custody_tsa_ca="$2"; shift 2 ;;
       --time-reference) time_reference="$2"; shift 2 ;;
       -h|--help) usage_start; exit 0 ;;
       *) die_usage "start: unknown option $1" ;;
@@ -3397,6 +3403,11 @@ cmd_start() {
     [[ -f "$custody_sign_key" && -r "$custody_sign_key" ]] || { echo "BLOCKER: --custody-sign-key $custody_sign_key is not a readable key file." >&2; exit 2; }
     command -v ssh-keygen >/dev/null 2>&1 || { echo "BLOCKER: --custody-sign-key needs ssh-keygen on this host." >&2; exit 2; }
     custody_sign_key="$(cd "$(dirname "$custody_sign_key")" && pwd -P)/$(basename "$custody_sign_key")"
+  fi
+  if [[ -n "$custody_tsa_ca" ]]; then
+    [[ -f "$custody_tsa_ca" && -r "$custody_tsa_ca" ]] || { echo "BLOCKER: --custody-timestamp-ca $custody_tsa_ca is not a readable file." >&2; exit 2; }
+    command -v openssl >/dev/null 2>&1 || { echo "BLOCKER: --custody-timestamp-ca needs openssl on this host (openssl ts -verify)." >&2; exit 2; }
+    custody_tsa_ca="$(cd "$(dirname "$custody_tsa_ca")" && pwd -P)/$(basename "$custody_tsa_ca")"
   fi
   local seal_url
   for seal_url in "$custody_tsa" "$time_reference"; do
@@ -4346,7 +4357,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   chmod -R u+w "$sandbox/.pi-sessions" "$sandbox/tool-output" "$sandbox/history" "$sandbox/tools" 2>/dev/null || true
   rm -rf "${sandbox:?}/vm" "${sandbox:?}/.pi-sessions" "${sandbox:?}/tool-output" "${sandbox:?}/history" "${sandbox:?}/tools" \
     "${sandbox:?}/vm-prepared" "$sandbox/vm-spec.json" "$sandbox/compact-prompt.md" "$sandbox/toolchain.json"
-  rm -f "$sandbox"/custody.json "$sandbox"/custody.*.json
+  rm -f "$sandbox"/custody.json "$sandbox"/custody.*.json "$sandbox"/artifacts.json "$sandbox"/artifacts.*.json
   mkdir -p "$sandbox/history" "$sandbox/tools"
   # The manifest records whether the no-exec holds, not whether it was asked
   # for: with no guard (--inputs-enforce off, or a host without one) the flag
@@ -4898,7 +4909,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson allow_oauth_in_vm "$allow_oauth_in_vm" \
     --argjson provenance "$(provenance_json)" \
     --argjson custody_timeout "$custody_timeout" \
-    --arg custody_sign_key "$custody_sign_key" --arg custody_tsa "$custody_tsa" --arg time_reference "$time_reference" \
+    --arg custody_sign_key "$custody_sign_key" --arg custody_tsa "$custody_tsa" --arg custody_tsa_ca "$custody_tsa_ca" --arg time_reference "$time_reference" \
     --argjson host_clock "$host_clock" \
     --argjson notify "$([[ -n "$notify_cmd" ]] && echo true || echo false)" \
     --arg disk_encryption "$disk_encryption" \
@@ -4968,7 +4979,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       provenance: $provenance,
       host_clock: $host_clock,
       custody_timeout_sec: $custody_timeout,
-      custody_seal: (if ($custody_sign_key + $custody_tsa + $time_reference) == "" then null else {sign_key: (if $custody_sign_key == "" then null else $custody_sign_key end), timestamp_url: (if $custody_tsa == "" then null else $custody_tsa end), time_reference: (if $time_reference == "" then null else $time_reference end)} end),
+      custody_seal: (if ($custody_sign_key + $custody_tsa + $custody_tsa_ca + $time_reference) == "" then null else {sign_key: (if $custody_sign_key == "" then null else $custody_sign_key end), timestamp_url: (if $custody_tsa == "" then null else $custody_tsa end), timestamp_ca: (if $custody_tsa_ca == "" then null else $custody_tsa_ca end), time_reference: (if $time_reference == "" then null else $time_reference end)} end),
       notify: $notify,
       disk_encryption: $disk_encryption,
       synced_folder_allowed_by: (if $synced_allowed_by == "" then null else $synced_allowed_by end),
@@ -8133,6 +8144,13 @@ PY
   # The verdict's signature and the authority's timestamp token, when custody made them.
   pkg_copy "$sandbox/custody.json.sig" "$out/custody.json.sig"
   pkg_copy "$sandbox/custody.json.tsr" "$out/custody.json.tsr"
+  # The index of work/ custody wrote at stop, byte for byte: the one the
+  # verdict and its anchor name. The package's artifacts.json is generated
+  # now; `verify` holds every packaged work/ file to this one.
+  pkg_copy "$sandbox/artifacts.json" "$out/artifacts.sealed.json"
+  # The examiner's review, kept beside the registry where no agent writes:
+  # what the sign-off is over travels with what it is over.
+  [[ "$id" =~ ^[A-Za-z0-9_-]+$ ]] && pkg_copy "$RUNS_DIR/reviews/$id.jsonl" "$out/review.jsonl" non-empty
   # What each agent's VM was, as the VM manager recorded it (image digest,
   # mounts, network, the secrets' names and hosts, the kept disk's sha256),
   # and the VM's own logs kept beside its disk (the runtime's, where msb
@@ -8230,7 +8248,8 @@ PY
       pkg_copy "$sandbox/$to_rel" "$out/$to_rel"
     done < <(cd "$sandbox" && find tool-output -type f -print0 2>/dev/null)
   fi
-  for f in "$sandbox"/custody.*.json; do [[ -f "$f" && ! -L "$f" ]] && { mkdir -p "$out/custody-history"; pkg_copy "$f" "$out/custody-history/$(basename "$f")"; }; done
+  # Each earlier verdict, with the index of work/ it sealed.
+  for f in "$sandbox"/custody.*.json "$sandbox"/artifacts.*.json; do [[ -f "$f" && ! -L "$f" ]] && { mkdir -p "$out/custody-history"; pkg_copy "$f" "$out/custody-history/$(basename "$f")"; }; done
   local t
   for t in "$sandbox"/threads/*/; do
     [[ -d "$t" && ! -L "${t%/}" ]] || continue
@@ -8247,12 +8266,20 @@ PY
   fi
   # What kind of package this is, said in it.
   printf '%s\n' "$([[ "$with_outputs" -eq 1 ]] && echo "with outputs: the jobs' sealed outputs are included" || echo "record only: the jobs' outputs stay in the run, each named by its sha256")$([[ "$redact" -eq 1 ]] && echo "; redacted (REDACTIONS.txt)")" > "$out/PACKAGE-KIND.txt"
+  # Each part a recipient holds the record to, present or absent with why:
+  # under the manifest, so a part taken out, and out of the list, breaks it.
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" components "$sandbox" "$out" >/dev/null || { echo "BLOCKER: the package's components could not be listed; nothing was handed over." >&2; rm -rf "$out"; exit 1; }
+  # Who signs, and when, inside the bytes the signature covers: SIGNER.txt
+  # and signer.pub are written before the manifest and listed in it.
+  if [[ "$sign" -eq 1 ]]; then
+    signer_files "$out" "$key" "$(json_get "$id" | jq -r '.examiner // empty')" || { rm -rf "$out"; exit 1; }
+  fi
   ( cd "$out" && find . -type f ! -name MANIFEST.txt | sort | while read -r f; do
       if command -v sha256sum >/dev/null 2>&1; then sha256sum "$f"; else shasum -a 256 "$f"; fi
     done > MANIFEST.txt )
   echo "Packaged $id -> $out ($(find "$out" -type f | wc -l | tr -d ' ') files; MANIFEST.txt has the hashes)"
   if [[ "$sign" -eq 1 ]]; then
-    sign_package "$out" "$key" "$(json_get "$id" | jq -r '.examiner // empty')" || exit 1
+    sign_package "$out" || exit 1
   fi
   if [[ "${skipped:-0}" -gt 0 ]]; then
     echo "Left in the sandbox: ${skipped} file(s) under work/extracted and work/quarantine, which came out of the evidence."
@@ -8263,10 +8290,14 @@ PY
 }
 
 # A package's manifest signed with the examiner's ssh key (ssh-keygen -Y,
-# namespace dfirswarm-package): MANIFEST.txt.sig beside it, the public key
-# as signer.pub and who signed as SIGNER.txt. `swarm.sh verify` checks it.
-sign_package() { # <package dir> <key file or ""> <examiner or "">
-  local out="$1" key="$2" examiner="$3" k principal fingerprint err
+# namespace dfirswarm-package): MANIFEST.txt.sig beside it. Who signs, with
+# which key and when (SIGNER.txt) and the public key (signer.pub) are
+# written first, by signer_files, and listed in the manifest the signature
+# covers: an examiner's name or a time changed afterwards breaks it.
+# `swarm.sh verify` checks it.
+SIGN_KEY=""
+signer_files() { # <package dir> <key file or ""> <examiner or "">
+  local out="$1" key="$2" examiner="$3" k principal fingerprint
   if [[ -z "$key" ]]; then
     for k in "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_ecdsa"; do
       [[ -f "$k" ]] && { key="$k"; break; }
@@ -8280,11 +8311,7 @@ sign_package() { # <package dir> <key file or ""> <examiner or "">
   # An allowed-signers principal is one word.
   principal="$(id -un)@$(hostname -s 2>/dev/null || hostname)"
   rm -f "$out/MANIFEST.txt.sig" "$out/signer.pub" "$out/SIGNER.txt"
-  if ! err="$(ssh-keygen -Y sign -f "$key" -n dfirswarm-package "$out/MANIFEST.txt" 2>&1 >/dev/null)" || [[ ! -s "$out/MANIFEST.txt.sig" ]]; then
-    echo "BLOCKER: ssh-keygen could not sign $out/MANIFEST.txt with $key: $err" >&2
-    return 1
-  fi
-  if [[ -f "$key.pub" ]]; then cp "$key.pub" "$out/signer.pub"; else ssh-keygen -y -f "$key" > "$out/signer.pub"; fi
+  if [[ -f "$key.pub" ]]; then cp "$key.pub" "$out/signer.pub"; else ssh-keygen -y -f "$key" > "$out/signer.pub" || { echo "BLOCKER: the public half of $key could not be read; the package is not signed." >&2; return 1; }; fi
   fingerprint="$(ssh-keygen -lf "$out/signer.pub" 2>/dev/null | awk '{print $2}')"
   {
     printf 'principal %s\n' "$principal"
@@ -8293,7 +8320,17 @@ sign_package() { # <package dir> <key file or ""> <examiner or "">
     printf 'signed_at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'namespace dfirswarm-package\n'
   } > "$out/SIGNER.txt"
-  echo "Signed:       MANIFEST.txt with $fingerprint as $principal (MANIFEST.txt.sig). A recipient checks it with: swarm.sh verify <package> --allowed-signers FILE, where FILE has the line: $principal $(awk '{print $1, $2}' "$out/signer.pub")"
+  SIGN_KEY="$key"
+}
+
+sign_package() { # <package dir>, after signer_files and the manifest
+  local out="$1" key="$SIGN_KEY" principal err
+  principal="$(awk '$1 == "principal" {print $2; exit}' "$out/SIGNER.txt")"
+  if ! err="$(ssh-keygen -Y sign -f "$key" -n dfirswarm-package "$out/MANIFEST.txt" 2>&1 >/dev/null)" || [[ ! -s "$out/MANIFEST.txt.sig" ]]; then
+    echo "BLOCKER: ssh-keygen could not sign $out/MANIFEST.txt with $key: $err" >&2
+    return 1
+  fi
+  echo "Signed:       MANIFEST.txt with $(awk '$1 == "key" {print $2; exit}' "$out/SIGNER.txt") as $principal (MANIFEST.txt.sig; SIGNER.txt and signer.pub are in the manifest it covers). A recipient checks it with: swarm.sh verify <package> --allowed-signers FILE, where FILE has the line: $principal $(awk '{print $1, $2}' "$out/signer.pub")"
 }
 
 # A package checked where it lands: every file against MANIFEST.txt, no
@@ -8302,17 +8339,19 @@ sign_package() { # <package dir> <key file or ""> <examiner or "">
 # hold and the signature is sound but who signed was not checked (no
 # --allowed-signers); 4 when the files hold and the package is unsigned; 1
 # when anything does not hold; 2 on a usage error.
-# A run's custody checked again by anyone, writing nothing: the evidence,
-# every chain, the sealed prefix, the lines after the seal, the signature and
-# the timestamp token (scripts/custody.ts --verify). Exit 0 when the run is
+# A run's custody checked again by anyone, writing nothing in the run: the
+# evidence, every chain and its sealed length and head, the sealed prefix,
+# the lines after the seal, every work/ file against the index custody
+# sealed, the signature and the timestamp token, its signature too against
+# the authority's CA (scripts/custody.ts --verify). Exit 0 when the run is
 # as its verdict sealed it, 4 when it is not, 1 when it could not be checked.
 cmd_custody_verify() {
   local id="${1:-}" extra=()
-  [[ -n "$id" && "$id" != -* ]] || die_usage "custody-verify requires <id> [--allowed-signers FILE --identity NAME] [--json]"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "custody-verify requires <id> [--allowed-signers FILE --identity NAME] [--tsa-ca FILE] [--scratch DIR] [--json]"
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --allowed-signers|--identity) extra+=("$1" "$2"); shift 2 ;;
+      --allowed-signers|--identity|--tsa-ca|--scratch) extra+=("$1" "$2"); shift 2 ;;
       --json) extra+=(--json); shift ;;
       *) die_usage "custody-verify: unknown option $1" ;;
     esac
@@ -8372,7 +8411,9 @@ for n, line in enumerate(open(os.path.join(root, "MANIFEST.txt"), encoding="utf-
         bad.append("outside the package: " + rel)
         continue
     listed[rel] = m.group(1)
-meta = {"MANIFEST.txt", "MANIFEST.txt.sig", "SIGNER.txt", "signer.pub"}
+# The signature is beside the manifest it covers. SIGNER.txt and signer.pub
+# are in the manifest since 2026-09-27; in an older package they are beside it.
+meta = {"MANIFEST.txt", "MANIFEST.txt.sig"} | ({"SIGNER.txt", "signer.pub"} - set(listed))
 present = set()
 for dirpath, dirs, files in os.walk(root):
     for name in files:
@@ -8419,12 +8460,19 @@ PY
   # The chains the package carries, against the custody verdict's seal.
   local chains_out chains_ok=1
   chains_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" verify "$dir" 2>&1)" || chains_ok=0
+  # Whether who signed, and when, is under the signature (SIGNER.txt in the manifest), read before a zip's extraction goes.
+  local signer_note="" signer_says=nobody
+  if [[ -f "$dir/SIGNER.txt" ]]; then
+    signer_says="$(awk '$1 == "principal" {print $2}' "$dir/SIGNER.txt" 2>/dev/null)"
+    if grep -qE '^[0-9a-f]{64} [ *](\./)?SIGNER\.txt$' "$dir/MANIFEST.txt"; then signer_note="; SIGNER.txt (who, which key, when) is in the manifest it covers"
+    else signer_note="; SIGNER.txt IS OUTSIDE THE SIGNED MANIFEST (a package made before 2026-09-27): who and when it names are not signed"; fi
+  fi
   [[ -n "$tmp" ]] && rm -rf "$tmp"
   echo "Files:        ${counts%% *} of ${counts##* } re-hashed against MANIFEST.txt$([[ "$files_ok" -eq 1 ]] && printf ', all match, none missing, none added' || printf ':')"
   [[ "$files_ok" -eq 1 ]] || tail -n +2 <<<"$files_out" | sed 's/^/  /'
   case "$sig_state" in
-    verified) echo "Signature:    valid, by $principal, a signer $allowed allows" ;;
-    unvalidated) echo "Signature:    sound, but who signed was not checked (pass --allowed-signers FILE); SIGNER.txt says $(awk '$1 == "principal" {print $2}' "$dir/SIGNER.txt" 2>/dev/null || echo nobody)" ;;
+    verified) echo "Signature:    valid, by $principal, a signer $allowed allows$signer_note" ;;
+    unvalidated) echo "Signature:    sound, but who signed was not checked (pass --allowed-signers FILE); SIGNER.txt says ${signer_says:-nobody}$signer_note" ;;
     unsigned) echo "Signature:    none (the package was not signed)" ;;
     bad) echo "Signature:    DOES NOT VERIFY: $sig_err" ;;
   esac
@@ -8687,18 +8735,27 @@ The review is kept beside the registry (runs/reviews/<id>.jsonl, 0600), chained,
 EOF
       ;;
     custody-verify) cat <<'EOF'
-  custody-verify <id> [--allowed-signers FILE --identity NAME] [--json]
-Takes the run's custody again, writing nothing, and holds it to the verdict it sealed: every check's
-status now, the sealed prefix of the trace, the lines written after the seal (the run's own closing
-lines are expected), the verdict against its anchor, its signature and its timestamp token.
+  custody-verify <id> [--allowed-signers FILE --identity NAME] [--tsa-ca FILE] [--scratch DIR] [--json]
+Takes the run's custody again, writing nothing in the run, and holds it to the verdict it sealed:
+every check's status now, the sealed prefix of the trace, the lines written after the seal (the
+run's own closing lines are expected), each chain's sealed length and head (ledger, attestations,
+store journal, where an examiner's notes after the run are named and allowed, the gateway log),
+every work/ file against the index custody sealed (changed, removed, added, each named), the
+verdict against its anchor, its signature and its timestamp token. --tsa-ca (or
+SWARM_CUSTODY_TSA_CA, or the run's --custody-timestamp-ca) checks the token's signature with
+openssl ts -verify; without one it is "imprint only". A kept disk msb checks is loaded under
+--scratch (the host's temporary directory by default), and what was touched there is said.
 Exit 0: the run is as the verdict sealed it; 4: it is not, or a check does not pass; 1: not checked.
 EOF
       ;;
     verify) cat <<'EOF'
   verify <package dir|zip> [--allowed-signers FILE]
 Re-hashes every file against MANIFEST.txt (none missing, none added, none outside the package) and
-checks MANIFEST.txt.sig; then the chains the package carries (trace, ledger, attestations, journal)
-against the custody verdict's seal, and the verdict's own signature and timestamp token.
+checks MANIFEST.txt.sig, which covers SIGNER.txt; every part in COMPONENTS.json is there or declared
+absent; then the chains the package carries (trace, ledger with every readable entry's core
+recomputed, attestations, journal, the examiner's review) against the custody verdict's seal, and
+every packaged work/ file against the index custody sealed (artifacts.sealed.json), held to the
+verdict and its anchor.
 Exit 0: all of it holds and the signer is one FILE allows; 3: the files hold, the signature is sound,
 the signer was not checked; 4: the files hold, the package is unsigned; 1: something does not hold.
 EOF

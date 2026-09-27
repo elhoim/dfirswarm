@@ -13,6 +13,7 @@
  * a forensic citation is usually an inode, a record id or a registry key.
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -671,8 +672,8 @@ test("the report shows searches that found nothing, corrections, grounding, cove
     assert.match(html, /checked against its source at kickoff by content: 2 files hashed again from the source, 0 mismatches \(3 s\)/);
     assert.match(html, /id="e-3">[\s\S]*?<dt>Examiner review<\/dt><dd>accepted by H\. Examiner at /);
     assert.match(html, /id="e-4">[\s\S]*?<dt>Examiner review<\/dt><dd>REJECTED by H\. Examiner at [^:]+:\d\d:[^:]+: not supported by the logon record<\/dd>/);
-    assert.match(html, /<td>Examiner review<\/td><td class="">1 accepted, 1 rejected, 0 amended, 4 of 6 entries not reviewed; signed by H\. Examiner at \S+ over ledger head [0-9a-f]{64} \(the ledger's current head\); the review file's chain verifies<\/td>/);
-    assert.match(html, /<dt>Prepared by<\/dt><dd>an AI agent swarm \(2 agents\); reviewed and signed by H\. Examiner at /);
+    assert.match(html, /<td>Examiner review<\/td><td class="">1 accepted, 1 rejected, 0 amended, 4 of 6 entries not reviewed; signed by H\. Examiner at \S+ over ledger head [0-9a-f]{64} \(the ledger's current head\) and work\/report\.md sha256 [0-9a-f]{64} \(the report as it is\); the review file's chain verifies<\/td>/);
+    assert.match(html, /<dt>Prepared by<\/dt><dd>an AI agent swarm \(2 agents\); reviewed and signed by H\. Examiner at \S+, over this ledger and this report<\/dd>/);
     assert.match(html, /<td>Disk encryption<\/td><td class="">OFF where the run is kept/);
     assert.match(html, /<td>Legal hold<\/td><td class="">held: litigation, by counsel, at 2026-02-12T00:00:00Z<\/td>/);
     assert.match(html, /<td>Notify hook<\/td><td class="">set \(its command is not recorded\)<\/td>/);
@@ -682,6 +683,10 @@ test("the report shows searches that found nothing, corrections, grounding, cove
     if (!late.ok) throw new Error(late.reason);
     html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
     assert.match(html, /NOT the ledger's current head/);
+    // The cover no longer says reviewed and signed: it says what the sign-off is over.
+    assert.doesNotMatch(html, /reviewed and signed by/);
+    assert.match(html, /<dt>Prepared by<\/dt><dd>an AI agent swarm \(2 agents\); signed off by H\. Examiner at \S+, and NOT OVER THIS RUN AS IT STANDS: it is over an earlier ledger \(head [0-9a-f]{64}\), and entries were recorded after it<\/dd>/);
+    assert.match(html, /An examiner signed off, and the sign-off does not cover this run as it stands/);
     const summary = await summarize(root, { runsDir: runs });
     assert.match(summary, /^- Examiner review: 1 accepted, 1 rejected, 0 amended, 5 of 7 entries not reviewed; signed by H\. Examiner/m);
     assert.match(summary, /^- Disk encryption: OFF/m);
@@ -695,6 +700,54 @@ test("the report shows searches that found nothing, corrections, grounding, cove
     await writeFile(file, text.replace("not supported by the logon record", "supported after all"));
     html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
     assert.match(html, /the review file's chain is BROKEN/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(runs, { recursive: true, force: true });
+  }
+});
+
+test("a sign-off over a report that changed afterwards is not 'reviewed and signed', and one over no report is refused", async () => {
+  const root = await sandboxWithLedger();
+  const runs = await mkdtemp(join(tmpdir(), "report-runs-"));
+  try {
+    await writeFile(join(runs, "registry.json"), JSON.stringify({ runs: [{ id: "sr001", sandbox: root }] }));
+    const { appendReview } = await import("../scripts/review.ts");
+    // A report path that is not there: no sign-off over nothing.
+    await assert.rejects(appendReview(runs, "sr001", root, { action: "sign", examiner: "H. Examiner", report: "work/final.md" }), /there is no work\/final\.md in run sr001 to sign over/);
+    await assert.rejects(appendReview(runs, "sr001", root, { action: "sign", examiner: "H. Examiner", report: "../elsewhere.md" }), /not a path under the run/);
+    const signed = await appendReview(runs, "sr001", root, { action: "sign", examiner: "H. Examiner" });
+    let html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
+    assert.match(html, /reviewed and signed by H\. Examiner at \S+, over this ledger and this report/);
+    // The report edited after the sign-off: the ledger is current, the report is not.
+    await writeFile(join(root, "work", "report.md"), "## 1. Entry\n\nSomething else entirely.\n");
+    html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
+    assert.doesNotMatch(html, /reviewed and signed by/);
+    assert.match(html, new RegExp(`NOT OVER THIS RUN AS IT STANDS: it is over work/report\\.md as it was \\(sha256 ${signed.report_sha256}\\), and that file is now [0-9a-f]{64}`));
+    assert.match(html, /— NOT the report as it is \([0-9a-f]{64}\): it changed after the signature/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(runs, { recursive: true, force: true });
+  }
+});
+
+test("the swarm's own report is labelled with the hash of the bytes reproduced, and a report changed since custody says so with the sealed hash", async () => {
+  const root = await sandboxWithLedger();
+  const runs = await mkdtemp(join(tmpdir(), "report-runs-"));
+  try {
+    await writeFile(join(runs, "registry.json"), JSON.stringify({ runs: [{ id: "sr001", sandbox: root }] }));
+    const own = (html: string) => (/Reproduced verbatim from <code>work\/report\.md<\/code>\. ([^<]*) Its headings are demoted/.exec(html) ?? [])[1] ?? "";
+    // No custody yet: the hash is today's, and said to be unsealed.
+    const text = await readFile(join(root, "work", "report.md"));
+    const now = createHash("sha256").update(text).digest("hex");
+    let html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
+    assert.equal(own(html), `Its sha256 as reproduced here: ${now}; not sealed: no custody was taken (swarm.sh stop takes it).`);
+    const c = await takeCustody(root, { runsDir: runs });
+    html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
+    assert.equal(own(html), `Its sha256 as reproduced here: ${now}, the bytes custody sealed at ${c.at} (artifacts.json).`);
+    // Edited after the stop.
+    await writeFile(join(root, "work", "report.md"), `${text}Added after the stop.\n`);
+    html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
+    assert.match(own(html), new RegExp(`^Its sha256 as reproduced here: [0-9a-f]{64}\\. CHANGED SINCE CUSTODY: custody sealed work/report\\.md at ${c.at.replace(/\./g, "\\.")} with sha256 ${now}; these are not those bytes\\.$`));
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(runs, { recursive: true, force: true });
