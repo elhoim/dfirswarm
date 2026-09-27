@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -62,7 +62,7 @@ test("what a check said about itself reaches the agent verbatim", () => {
 
 test("a finish line that passes lets done through, with nothing added to the reason", () => {
   const v = finishLineVerdict(run(2, [["true", true], ["true", true]]), false);
-  assert.deepEqual(v, { proceed: true });
+  assert.deepEqual(v, { proceed: true, outcome: "completed" });
 });
 
 test("abandon writes the sentinel anyway and says so", () => {
@@ -80,12 +80,44 @@ test("a check that timed out is reported as such, and still refuses", () => {
   if (!v.proceed) assert.match(v.reason, /^- `sleep 999` timed out\. Fix: it has to finish within the check's time limit and succeed$/m);
 });
 
-test("a run whose checks cannot be run is not held hostage: done proceeds, and the note says why", () => {
-  assert.equal(finishLineVerdict(null, false).proceed, true);
+test("a run whose checks cannot be run is not held hostage, and is never a clean done: it ends as verification_unavailable", () => {
+  const none = finishLineVerdict(null, false);
+  assert.equal(none.proceed, true);
+  if (none.proceed) {
+    assert.equal(none.outcome, "verification_unavailable", "a runner that could not answer establishes nothing");
+    assert.equal(none.reasonPrefix, "VERIFICATION UNAVAILABLE: ", "the sentinel's reason says so");
+  }
   const v = finishLineVerdict({ total: 0, passed: 0, checks: [], error: "no registry" }, false);
   assert.equal(v.proceed, true);
-  if (v.proceed) assert.match(v.note ?? "", /no registry/);
-  assert.equal(finishLineVerdict(run(0, []), false).proceed, true, "a goal with no checks has nothing to fail");
+  if (v.proceed) {
+    assert.match(v.note ?? "", /no registry/);
+    assert.equal(v.outcome, "verification_unavailable");
+    assert.notEqual(v.outcome, "completed");
+  }
+  const gaveUp = finishLineVerdict(null, true);
+  assert.ok(gaveUp.proceed && gaveUp.outcome === "abandoned" && gaveUp.reasonPrefix === "ABANDONED: ", "an abandon with no runner is an abandon");
+  const empty = finishLineVerdict(run(0, []), false);
+  assert.ok(empty.proceed && empty.outcome === "completed", "a goal with no checks has nothing to fail");
+});
+
+test("the sentinel and the done file say how the run ended; a seat's own leave and an abandon say it their way", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fin-outcome-"));
+  try {
+    await initSandbox(dir, { swarmId: "t", agentIds: ["a0", "a1"], capUsd: 1, wallClockMinutes: 10 });
+    const r = await markDone({ sandboxRoot: dir, agentId: "a0" }, { reason: "VERIFICATION UNAVAILABLE: report written", outputFile: "work/report.md", outcome: "verification_unavailable" });
+    assert.equal(r.terminate, true);
+    if (r.terminate) assert.equal(r.outcome, "verification_unavailable");
+    const sentinel = await readFile(join(dir, SENTINEL_REL), "utf8");
+    assert.match(sentinel, /^outcome: verification_unavailable$/m);
+    assert.match(sentinel, /^reason: VERIFICATION UNAVAILABLE: report written$/m);
+    assert.match(await readFile(agentDonePath(dir, "a0"), "utf8"), /^outcome: verification_unavailable$/m);
+    // A seat leaving on its own cap writes no outcome: it ends nothing.
+    const seat = await markDone({ sandboxRoot: dir, agentId: "a1" }, { reason: "agent_cap", outputFile: "work/report.md", outcome: "completed" });
+    if (seat.terminate) assert.equal(seat.outcome, undefined);
+    assert.doesNotMatch(await readFile(agentDonePath(dir, "a1"), "utf8"), /^outcome:/m);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("the shared install area and the scratch dir are nobody's work product", () => {

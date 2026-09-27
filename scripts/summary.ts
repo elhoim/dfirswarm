@@ -253,7 +253,7 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   // --- outcome ------------------------------------------------------------
   lines.push("## Outcome", "");
   if (sentinel) {
-    lines.push(`Sentinel \`${SENTINEL_REL}\` by **${sentinel.by ?? "?"}** at ${sentinel.at ?? "?"}: ${sentinel.reason ?? ""}${sentinel.output ? ` (output: \`${sentinel.output}\`)` : ""}`, "");
+    lines.push(`Sentinel \`${SENTINEL_REL}\` by **${sentinel.by ?? "?"}** at ${sentinel.at ?? "?"}: ${sentinel.reason ?? ""}${sentinel.output ? ` (output: \`${sentinel.output}\`)` : ""}${sentinel.outcome ? `. Outcome: **${sentinel.outcome}**` : ""}`, "");
   } else if (allDead) {
     lines.push(`No sentinel: every agent died (\`done/ALL_AGENTS_DEAD\`, ${allDead.reason ?? "all_agents_dead"}, at ${allDead.at ?? "?"}). The swarm stopped without meeting its definition of done.`, "");
   } else {

@@ -460,6 +460,8 @@ export type DoneResult = {
   created_sentinel: boolean;
   reason: string;
   output_file: string;
+  /** How the run ended, when the finish line said (FinishOutcome). */
+  outcome?: string;
 };
 
 /** Who has asked to abandon the run, and who is still working. */
@@ -2837,7 +2839,7 @@ export function extractWritePath(input: Record<string, unknown> | undefined): st
 
 export async function markDone(
   ctx: SwarmContext,
-  args: { reason: string; outputFile: string; createSentinel?: boolean },
+  args: { reason: string; outputFile: string; createSentinel?: boolean; outcome?: FinishOutcome },
 ): Promise<DoneResult | DoneRefused> {
   const reason = yamlOneLine(args.reason);
   const outputFile = yamlOneLine(args.outputFile);
@@ -2873,11 +2875,15 @@ export async function markDone(
   const sentinel = sentinelPath(ctx.sandboxRoot);
 
   await mkdir(dirname(agentFile), { recursive: true });
+  // How the run ended, when the finish line said (FinishOutcome): an
+  // abandon is abandoned whatever the caller passed.
+  const outcome: FinishOutcome | undefined = reason.startsWith(ABANDON_PREFIX) ? "abandoned" : args.outcome && (FINISH_OUTCOMES as readonly string[]).includes(args.outcome) ? args.outcome : undefined;
+  const outcomeLine = outcome && !seatOnly ? `outcome: ${outcome}\n` : "";
   const agentBody = `---
 by: ${by}
 output: ${outputFile}
 reason: ${reason}
-at: ${stamp}
+${outcomeLine}at: ${stamp}
 ---
 
 Worker ${by} is exiting.
@@ -2892,7 +2898,7 @@ Worker ${by} is exiting.
 by: ${by}
 output: ${outputFile}
 reason: ${reason}
-at: ${stamp}
+${outcomeLine}at: ${stamp}
 ---
 
 Collective finished. Presence of this file is the clock. Call done and stop.
@@ -2908,6 +2914,7 @@ Collective finished. Presence of this file is the clock. Call done and stop.
     created_sentinel: created,
     reason,
     output_file: outputFile,
+    ...(outcome && !seatOnly ? { outcome } : {}),
   };
 }
 
@@ -9043,6 +9050,23 @@ export type FinishLineRun = {
 };
 
 /**
+ * How a run ended, as the sentinel and the record say it. `completed`: the
+ * finish line was run and met. `examination_limited`: it was met, and the
+ * run says what it could not establish (a limitation never reads as an
+ * answer). `abandoned`: given up without its checks. `verification_unavailable`:
+ * the harness could not run the finish line at all, so nothing was
+ * established either way; it never reads as completed.
+ */
+export const FINISH_OUTCOMES = ["completed", "examination_limited", "abandoned", "verification_unavailable"] as const;
+export type FinishOutcome = (typeof FINISH_OUTCOMES)[number];
+/** The reason prefix of a done the harness could not check. */
+export const VERIFICATION_UNAVAILABLE_PREFIX = "VERIFICATION UNAVAILABLE: ";
+
+export type FinishVerdict =
+  | { proceed: true; outcome: FinishOutcome; note?: string; reasonPrefix?: string }
+  | { proceed: false; reason: string; failing: string };
+
+/**
  * Whether a `done` that would write the sentinel may go ahead. The checks are
  * the operator's, read from the registry by await-done.sh, so an agent cannot
  * rewrite them; but until now nothing ran them at the moment `done` was
@@ -9052,15 +9076,16 @@ export type FinishLineRun = {
  * what makes it pass (`failing` is the first, for the record's one field).
  * `abandon` is the way out the guidelines promise for a task that is
  * impossible or unsafe: the sentinel is written and says so. A run whose
- * checks cannot be read at all is not held hostage by the runner: it proceeds,
- * and the trace records why.
+ * checks cannot be run at all is not held hostage by the runner, but it is
+ * not a clean done either: it proceeds as `verification_unavailable`, the
+ * sentinel's reason says so, and the trace records why.
  */
-export function finishLineVerdict(
-  run: FinishLineRun | null,
-  abandon: boolean,
-): { proceed: true; note?: string; reasonPrefix?: string } | { proceed: false; reason: string; failing: string } {
-  if (!run) return { proceed: true, note: "the finish line could not be run; done proceeds unchecked" };
-  if (run.error) return { proceed: true, note: `the finish line could not be run (${run.error}); done proceeds unchecked` };
+export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean): FinishVerdict {
+  if (!run || run.error) {
+    const why = run?.error ? ` (${run.error})` : "";
+    if (abandon) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `the finish line could not be run${why}; abandoned on purpose` };
+    return { proceed: true, outcome: "verification_unavailable", reasonPrefix: VERIFICATION_UNAVAILABLE_PREFIX, note: `the finish line could not be run${why}; done proceeds as verification_unavailable, never as completed` };
+  }
   // A finish line that is met, or has nothing to meet, proves something only
   // if the checks are the operator's. Read from anywhere else they are checks
   // an agent could have rewritten — on the host SWARM.md is writable from a
@@ -9071,7 +9096,7 @@ export function finishLineVerdict(
   const untrusted = Boolean(run.source) && !FINISH_LINE_TRUSTED_SOURCES.has(run.source as string);
   if (untrusted && run.passed >= run.total) {
     // Abandoning claims nothing, so it is still the way out.
-    if (abandon) return { proceed: true, reasonPrefix: ABANDON_PREFIX, note: `checks read from the ${run.source} were not trusted; abandoned on purpose` };
+    if (abandon) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `checks read from the ${run.source} were not trusted; abandoned on purpose` };
     return {
       proceed: false,
       failing: `(checks read from ${run.source})`,
@@ -9080,9 +9105,9 @@ export function finishLineVerdict(
         `This is the harness's problem, not yours: say so on the board and wait for the operator. If the goal cannot be met at all, call done again with abandon: true and say why.`,
     };
   }
-  if (run.total === 0) return { proceed: true, note: "the goal has no checks" };
-  if (run.passed >= run.total) return { proceed: true };
-  if (abandon) return { proceed: true, reasonPrefix: ABANDON_PREFIX, note: `${run.passed} of ${run.total} checks pass; abandoned on purpose` };
+  if (run.total === 0) return { proceed: true, outcome: "completed", note: "the goal has no checks" };
+  if (run.passed >= run.total) return { proceed: true, outcome: "completed" };
+  if (abandon) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `${run.passed} of ${run.total} checks pass; abandoned on purpose` };
   const failed = run.checks.filter((c) => !c.ok);
   const failing = failed[0]?.cmd ?? "(unknown check)";
   // Each failing check, and what makes it pass. What the check said, when it

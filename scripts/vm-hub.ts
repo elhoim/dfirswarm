@@ -628,8 +628,9 @@ export function boardTable(hub: {
       // abandon ends it only with a second's or with nobody else working
       // (P.abandonGate); a seat leaving on its own cap writes no sentinel and
       // is not held to them either.
-      const args = (a[1] as { reason?: string; outputFile?: string; createSentinel?: boolean }) ?? {};
-      const reason = String(args.reason ?? "");
+      const { outcome: _saidOutcome, ...said } = (a[1] as { reason?: string; outputFile?: string; createSentinel?: boolean; outcome?: string }) ?? {};
+      const args: { reason?: string; outputFile?: string; createSentinel?: boolean; outcome?: P.FinishOutcome } = said;
+      let reason = String(args.reason ?? "");
       const endsSwarm = args.createSentinel !== false && reason !== "agent_cap" && !reason.startsWith(P.ABANDON_PREFIX);
       if (endsSwarm && !(await P.swarmDoneExists(S))) {
         const mine = askedBy.get(who);
@@ -638,6 +639,12 @@ export function boardTable(hub: {
         const run = recent ? recent.run : await sharedFinishLine();
         const verdict = P.finishLineVerdict(run, false);
         if (!verdict.proceed) throw new Error(`the harness ran the finish line on the host and it is not met: ${verdict.reason}`);
+        // How the run ended is the hub's to say, from its own run: a seat's
+        // word for it is dropped, and a finish line the host could not run
+        // is said in the sentinel's reason whatever the seat wrote there.
+        args.outcome = verdict.outcome;
+        if (verdict.outcome === "verification_unavailable" && !reason.startsWith(P.VERIFICATION_UNAVAILABLE_PREFIX)) reason = P.VERIFICATION_UNAVAILABLE_PREFIX + reason;
+        args.reason = reason;
       }
       // An abandon one seat asks for while others work is a vote: the seat
       // stays, and markDone says so.

@@ -571,6 +571,25 @@ test("the sentinel is written only when the operator's finish line passes on the
   assert.equal(done.created_sentinel, true, "with the check passing, the sentinel is written");
 });
 
+test("a finish line the host cannot read ends the run as verification_unavailable, whatever the seat said: never a clean done", async () => {
+  const { hub, sandbox, base } = await setup();
+  const was = process.env.SWARM_RUNS_DIR;
+  process.env.SWARM_RUNS_DIR = join(base, "no-registry-here");
+  cleanups.push(async () => {
+    if (was === undefined) delete process.env.SWARM_RUNS_DIR;
+    else process.env.SWARM_RUNS_DIR = was;
+  });
+  // No registry and no contract: there is no finish line to run.
+  await rm(join(sandbox, "SWARM.md"));
+  const done = (await board.callBoard(hub.socketFor("a0"), "markDone", [null, { reason: "finished", outputFile: "work/report.md", outcome: "completed" }])) as { created_sentinel: boolean; outcome?: string; reason: string };
+  assert.equal(done.created_sentinel, true, "an unreadable finish line does not hold the run hostage");
+  assert.equal(done.outcome, "verification_unavailable", "the seat's own word (completed) is not taken");
+  assert.match(done.reason, /^VERIFICATION UNAVAILABLE: finished$/);
+  const sentinel = await readFile(join(sandbox, SENTINEL_REL), "utf8");
+  assert.match(sentinel, /^outcome: verification_unavailable$/m);
+  assert.doesNotMatch(sentinel, /^outcome: completed$/m);
+});
+
 test("list_team shows what each peer is doing and found, from the board, the store and the ledger, the same on the host and through the hub", async () => {
   // A seat's VM does not see the trace or its peers' records: this is how it
   // sees them working instead. Built with no trace at all.

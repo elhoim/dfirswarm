@@ -31,6 +31,7 @@ import { specsFromEnv } from "./context-ceiling.ts";
 import { registerSelfCompact, type HandoffFacts, type SelfCompactHandle } from "./self-compact.ts";
 import {
   type FinishLineRun,
+  type FinishOutcome,
   leadingCommand,
   isSharedScratch,
   agentDeadPath,
@@ -3201,6 +3202,7 @@ export default function (pi: ExtensionAPI) {
       // the swarm with them failing is refused and told each check that
       // fails; an abandoned run says so in its reason.
       let reasonPrefix = "";
+      let outcome: FinishOutcome | undefined;
       if (!(await swarmDoneExists(toolCtx.cwd))) {
         const run = await runFinishLine(toolCtx.cwd).catch(() => null);
         const verdict = finishLineVerdict(run, params.abandon === true);
@@ -3208,7 +3210,7 @@ export default function (pi: ExtensionAPI) {
           ok: verdict.proceed,
           total: run?.total ?? 0,
           passed: run?.passed ?? 0,
-          ...(verdict.proceed ? (verdict.note ? { note: verdict.note } : {}) : { failing: verdict.failing }),
+          ...(verdict.proceed ? { outcome: verdict.outcome, ...(verdict.note ? { note: verdict.note } : {}) } : { failing: verdict.failing }),
         }).catch(() => undefined);
         if (!verdict.proceed) {
           await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: verdict.reason }).catch(() => undefined);
@@ -3219,10 +3221,12 @@ export default function (pi: ExtensionAPI) {
           };
         }
         reasonPrefix = verdict.reasonPrefix ?? "";
+        outcome = verdict.outcome;
       }
       const result = await markDone(ctxFrom(toolCtx.cwd, agentId), {
         reason: reasonPrefix + params.reason,
         outputFile: params.output_file,
+        ...(outcome ? { outcome } : {}),
       });
       if (!result.terminate) {
         // One agent's abandon while others work is a vote, not the end.
@@ -3246,6 +3250,7 @@ export default function (pi: ExtensionAPI) {
         reason: result.reason,
         output_file: result.output_file,
         created_sentinel: result.created_sentinel,
+        ...(result.outcome ? { outcome: result.outcome } : {}),
       });
       if (result.created_sentinel) {
         await systemPost(toolCtx.cwd, {

@@ -260,9 +260,16 @@ if [[ "$CHECKS_JSON" -eq 1 ]]; then
   # check's is handed back with its row.
   outs="$(mktemp -d "${TMPDIR:-/tmp}/checks-json.XXXXXX")"
   n=0
+  # A finish line that could not be read is not a finish line with nothing
+  # in it: said as an error, so done ends as verification_unavailable
+  # (finishLineVerdict), never as completed. A goal with no checks section
+  # is the goal's own choice and stays an empty list.
+  goal_error=""
   if load_goal; then
     source_name="$GOAL_SOURCE"
     checks="$(printf '%s\n' "$GOAL_TEXT" | extract_checks)" && rc=0 || rc=$?
+    # 3 is a goal with no checks; anything else, checks that could not be read.
+    [[ "$rc" -ne 0 && "$rc" -ne 3 ]] && goal_error="the checks could not be read out of the goal ($GOAL_SOURCE, exit $rc)"
     if [[ "$rc" -eq 0 ]]; then
       while IFS= read -r line; do
         [[ -z "$line" ]] && continue
@@ -275,8 +282,10 @@ if [[ "$CHECKS_JSON" -eq 1 ]]; then
         rows+="${ok}"$'\t'"$((end_ms - start_ms))"$'\t'"${timed_out}"$'\t'"${n}"$'\t'"${line}"$'\n'
       done <<< "$checks"
     fi
+  else
+    goal_error="no goal document for this run: neither the registry nor the sandbox has one"
   fi
-  printf '%s' "$rows" | CHECKS_OUTS="$outs" CHECKS_SENTINEL="$sentinel" CHECKS_ALL_DEAD="$all_dead" CHECKS_SOURCE="$source_name" python3 -c '
+  printf '%s' "$rows" | CHECKS_OUTS="$outs" CHECKS_SENTINEL="$sentinel" CHECKS_ALL_DEAD="$all_dead" CHECKS_SOURCE="$source_name" CHECKS_ERROR="$goal_error" python3 -c '
 import json, os, sys
 # A failing check says why in its output: handed back whole up to this many
 # bytes; past it only its size, since the check itself prints the whole when
@@ -299,14 +308,17 @@ for raw in sys.stdin.read().splitlines():
             if len(data) <= OUT_MAX:
                 row["out"] = data.decode("utf-8", "replace")
     checks.append(row)
-print(json.dumps({
+out = {
     "sentinel": os.environ.get("CHECKS_SENTINEL") == "true",
     "all_agents_dead": os.environ.get("CHECKS_ALL_DEAD") == "true",
     "source": os.environ.get("CHECKS_SOURCE") or None,
     "total": len(checks),
     "passed": sum(1 for c in checks if c["ok"]),
     "checks": checks,
-}))
+}
+if os.environ.get("CHECKS_ERROR"):
+    out["error"] = os.environ["CHECKS_ERROR"]
+print(json.dumps(out))
 '
   rm -rf "$outs"
   exit 0
