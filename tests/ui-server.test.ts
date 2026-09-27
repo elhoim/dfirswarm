@@ -2763,6 +2763,42 @@ test("the Claims tab's runs are built over the whole trace, not the view's tail"
   assert.deepEqual(claimSequences(trace.slice(-400)), [], "the tail alone holds a release and no claim: the empty tab this replaces");
 });
 
+test("the kickoff's default model under microVM is one the VM kickoff takes; a model the operator picked is left alone", async () => {
+  const { defaultModelMove } = await import("../ui/src/lib/kickoff-model.ts");
+  const models = ["anthropic/claude-fable-5", "openai/gpt-6-sol", "deepseek/deepseek-v4-pro", "mystery/m1"];
+  const oauth = { kind: "oauth" as const, lifted_by: "allow_oauth_in_vm" as const, reason: "a subscription (OAuth) token would go into the VMs" };
+  const unknownHost = { kind: "unknown_host" as const, lifted_by: "provider_hosts" as const, reason: "no host is known for mystery" };
+  const providers = {
+    anthropic: { status: "ready" as const, provider: "anthropic", auth_type: "oauth", vm_blockers: [oauth] },
+    openai: { status: "ready" as const, provider: "openai", auth_type: "api_key", vm_blockers: [] },
+    deepseek: { status: "not_ready" as const, provider: "deepseek" },
+    mystery: { status: "ready" as const, provider: "mystery", auth_type: "api_key", vm_blockers: [unknownHost] },
+  };
+  const vm = { allowOauth: false, named: new Set<string>() };
+  const move = (current: string, o: { touched?: boolean; vm?: typeof vm | null; providers?: Record<string, (typeof providers)[keyof typeof providers]> } = {}) =>
+    defaultModelMove({ models, current, touched: o.touched ?? false, providers: "providers" in o ? o.providers : providers, vm: "vm" in o ? (o.vm ?? null) : vm });
+
+  // A fresh form under microVM: the provider with a key, not the subscription the VMs refuse.
+  assert.equal(move(""), "openai/gpt-6-sol");
+  assert.equal(move("", { vm: null }), "anthropic/claude-fable-5", "on the host the first ready provider, as before");
+  // Before readiness answers the first model stands in; once it answers, the untouched default moves.
+  assert.equal(move("", { providers: undefined }), "anthropic/claude-fable-5");
+  assert.equal(move("anthropic/claude-fable-5"), "openai/gpt-6-sol");
+  // What the form's own settings lift counts: the OAuth switch, a host named for a provider.
+  assert.equal(move("anthropic/claude-fable-5", { vm: { allowOauth: true, named: new Set() } }), null);
+  assert.equal(move("mystery/m1", { vm: { allowOauth: false, named: new Set(["mystery"]) } }), null);
+  // A usable default stays put when microVM goes off.
+  assert.equal(move("openai/gpt-6-sol", { vm: null }), null);
+  // A model the operator picked is never changed; the red note stays for it.
+  assert.equal(move("anthropic/claude-fable-5", { touched: true }), null);
+  assert.equal(move("deepseek/deepseek-v4-pro", { touched: true }), null);
+  // No ready provider a VM takes: today's choice, and no move between two the VMs refuse.
+  const hostOnly = { ...providers, openai: { status: "not_ready" as const, provider: "openai" }, mystery: { status: "not_ready" as const, provider: "mystery" } };
+  assert.equal(move("", { providers: hostOnly }), "anthropic/claude-fable-5");
+  assert.equal(move("anthropic/claude-fable-5", { providers: hostOnly }), null);
+  assert.equal(move("deepseek/deepseek-v4-pro", { providers: hostOnly }), "anthropic/claude-fable-5", "a default that is not even ready moves to one that is");
+});
+
 test("the review file's chain is checked line by line", async () => {
   const { parseReviews } = await import("../scripts/ui/reviews.ts");
   const a = JSON.stringify({ v: 1, seq: 1, at: "t", examiner: "E", action: "accept", entry_seq: 1, prev: null });

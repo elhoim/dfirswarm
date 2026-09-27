@@ -11,8 +11,9 @@ import { CUSTOM_MODEL, MODEL_REF, ModelTeamEditor, modelOptions, providerOf, Rea
 import { InlineNote } from "@/components/states";
 import { JobCard } from "@/components/jobs-drawer";
 import { api, ApiError } from "@/lib/api";
+import { activeVmBlockers, defaultModelMove } from "@/lib/kickoff-model";
 import { useLive, useResource, type Resource } from "@/lib/live";
-import type { ImagePreview, InputsLibrary, Job, NetMode, ProviderReadiness, StartCheck, SwarmRow, VmBlocker, VmReadiness } from "@/lib/types";
+import type { ImagePreview, InputsLibrary, Job, NetMode, StartCheck, SwarmRow, VmBlocker, VmReadiness } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -124,14 +125,6 @@ function readGoal(text: string) {
 const COMPACT_SPEC = /^(?:[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)?=)?\d+(?:\.\d+)?[kKmM%]?(?:\s*,\s*(?:[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)?=)?\d+(?:\.\d+)?[kKmM%]?)*$/;
 /** provider=host, the pattern swarm.sh start checks --provider-host against. */
 const PROVIDER_HOST = /^[a-z0-9][a-z0-9._-]*=[^=,\s]+$/;
-
-/**
- * What the VM kickoff would still refuse about a provider, once the form's
- * own settings are counted: OAuth allowed in the VMs, a host named for it.
- */
-function activeVmBlockers(r: ProviderReadiness | undefined, allowOauth: boolean, named: Set<string>): VmBlocker[] {
-  return (r?.vm_blockers ?? []).filter((b) => !(b.lifted_by === "allow_oauth_in_vm" && allowOauth) && !(b.lifted_by === "provider_hosts" && named.has(r?.provider ?? "")));
-}
 
 type FormState = {
   mode: "single" | "team";
@@ -520,18 +513,21 @@ export function KickoffScreen() {
     [form.self_compact, form.compact_notice_at, form.compact_warn_at, form.compact_at],
   );
 
-  // The default is the first model whose provider is actually usable, not the
-  // first in the list — a kickoff that swarm.sh would refuse is a bad default.
-  // Until readiness answers, the first model stands in; once it answers, a
-  // default the operator has not touched moves to a ready one.
+  // The default is the first model whose provider is actually usable, and
+  // under microVM one the VM kickoff takes (lib/kickoff-model). Until
+  // readiness answers, the first model stands in; once it answers, a default
+  // the operator has not touched moves to a usable one.
   const [modelTouched, setModelTouched] = useState(false);
   useEffect(() => {
-    const list = models.data?.models ?? [];
-    if (!list.length) return;
-    const ready = providers ? list.find((m) => providers[providerOf(m)]?.status === "ready") : undefined;
-    if (!form.model) setForm((f) => ({ ...f, model: ready ?? list[0] }));
-    else if (!modelTouched && ready && form.model !== ready && providers?.[providerOf(form.model)]?.status !== "ready") setForm((f) => ({ ...f, model: ready }));
-  }, [models.data, providers, form.model, modelTouched]);
+    const next = defaultModelMove({
+      models: models.data?.models ?? [],
+      current: form.model,
+      touched: modelTouched,
+      providers,
+      vm: form.microvm ? { allowOauth: form.allow_oauth_in_vm, named: namedProviders } : null,
+    });
+    if (next !== null) setForm((f) => ({ ...f, model: next }));
+  }, [models.data, providers, form.model, modelTouched, form.microvm, form.allow_oauth_in_vm, namedProviders]);
 
   const job: Job | null = jobId ? live.jobs[jobId] ?? null : null;
   const effectiveModel = form.model === CUSTOM_MODEL ? form.customModel.trim() : form.model;

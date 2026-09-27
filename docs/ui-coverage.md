@@ -72,7 +72,7 @@ A second pass over the console inventory, against the re-skin. Each row is a con
 | “N swarms \| N live” and `find a signal… ( / )` | Overview header line; `/` focuses the first `[data-find]` box on any screen (overview, threads, traces, agents) |
 | Side threads in the story | `SideThreads` block after the phases, with purpose, pulse and members |
 | Agent card context-window bar | `ContextBar` on every agent card and in the agent detail |
-| Kickoff: the default model is one that will actually start | `/api/models/readiness` → `ReadyDot`, option labels “ready (subscription)”, a Credentials row per provider, a warning when the chosen provider is not logged in; blank wall clock explains swarm.sh's default for the team size |
+| Kickoff: the default model is one that will actually start | `/api/models/readiness` → `ReadyDot`, option labels “ready (subscription)”, a Credentials row per provider, a warning when the chosen provider is not logged in; under microVM an untouched default is a provider the VM kickoff takes, when one is ready; blank wall clock explains swarm.sh's default for the team size |
 
 Threads are now listed main first, then by most recent post (was alphabetical).
 
