@@ -108,6 +108,8 @@ Commands:
   examiner machine review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
   say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> changes its caps (help cap)
+  lead <id> list     The run's leads, the ones waiting on the operator first; lead <id> note <L-n> "<answer>"
+                     [--allow-host HOST] answers one (recorded, reopened, posted); lead <id> reopen <L-n>
   stop <id>          Stop a run and record how it ended
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
@@ -8622,9 +8624,18 @@ cmd_say() {
   sandbox="$(json_get "$id" | jq -r '.sandbox // empty')"
   [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
   operator_trace "$sandbox" say "$id" "$message"
+  local next
+  next="$(examiner_post "$sandbox" all "$message")" || exit 1
+  echo "Posted to $id as the examiner (#$next). Agents see it on their next inbox or wait."
+}
+
+# One post on the primary thread in the examiner's voice, to <to>: the post
+# id is printed. Taken under the table lock, as every post id is.
+examiner_post() { # <sandbox> <to> <message>
+  local sandbox="$1" to="$2" message="$3"
   local dir="$sandbox/threads/main"
   mkdir -p "$dir"
-  table_lock "$sandbox" || exit 1
+  table_lock "$sandbox" || return 1
   local next
   next="$(ls "$dir" 2>/dev/null | sed -n 's/^\([0-9]\{6\}\)-.*/\1/p' | sort -n | tail -1)"
   next="$(( 10#${next:-0} + 1 ))"
@@ -8635,14 +8646,85 @@ cmd_say() {
     printf 'id: %d\n' "$next"
     printf 'thread: main\n'
     printf 'from: examiner\n'
-    printf 'to: all\n'
+    printf 'to: %s\n' "$to"
     printf 'tag: ask\n'
     printf -- '---\n\n'
     printf '%s\n' "$message"
   } > "$file.tmp"
   mv "$file.tmp" "$file"
   table_unlock "$sandbox"
-  echo "Posted to $id as the examiner (#$next). Agents see it on their next inbox or wait."
+  printf '%s\n' "$next"
+}
+
+# The lead register from the operator's side (extensions/leads.ts):
+#   lead <id> list                               every lead, the ones waiting on the operator first
+#   lead <id> note <L-n> TEXT [--allow-host HOST] the operator's answer: on the lead, the lead reopened,
+#                                                 posted to the board, and a host allowed for jobs
+#   lead <id> reopen <L-n> [TEXT]                reopen a closed lead
+# A lead an agent closed needs_operator is the swarm asking for something only
+# the operator can give: a host to reach, a file, an answer. On c09 the pointer
+# to the third part's key was found in every run and asked of nobody.
+cmd_lead() {
+  local id="${1:-}" sub="${2:-}"
+  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: lead needs <id> and list, note <L-n> TEXT [--allow-host HOST], or reopen <L-n> [TEXT]." >&2; exit 2; }
+  shift 2
+  ensure_registry
+  local rec sandbox isolation
+  rec="$(json_get "$id")"
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  isolation="$(jq -r '.isolation.mode // "host"' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+  local cli="$ROOT/scripts/leads-cli.ts"
+  case "$sub" in
+    list)
+      node --experimental-strip-types --no-warnings "$cli" list "$sandbox" "$@" ;;
+    note)
+      local lead="${1:-}" text="" host=""
+      [[ -n "$lead" ]] || { echo "BLOCKER: lead note needs <L-n> and the text." >&2; exit 2; }
+      shift
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --allow-host) host="${2:-}"; [[ -n "$host" ]] || { echo "BLOCKER: --allow-host takes a host." >&2; exit 2; }; shift 2 ;;
+          *) text="${text:+$text }$1"; shift ;;
+        esac
+      done
+      [[ -n "$text" ]] || { echo "BLOCKER: lead note needs the text of your answer." >&2; exit 2; }
+      if [[ -n "$host" && "$isolation" != "microvm" ]]; then
+        echo "BLOCKER: --allow-host works live only in a microVM run, whose jobs run in workers made after the note; a host run's netguard reads its allowlist once, at start. Post the note without it, and restart with --allow-host $host if the run needs it." >&2
+        exit 2
+      fi
+      local out
+      out="$(node --experimental-strip-types --no-warnings "$cli" note "$sandbox" "$lead" "$text" ${host:+--allow-host "$host"})" || {
+        echo "BLOCKER: $(jq -r '.reason // "the note was not recorded"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2
+        exit 2
+      }
+      operator_trace "$sandbox" lead "$id" note "$lead" "$text" ${host:+--allow-host "$host"}
+      local holder reopened words post
+      # To whoever had the lead last: its news reaches them, and everyone sees it.
+      holder="$(jq -r '.to // "all"' <<<"$out" 2>/dev/null || echo all)"
+      reopened="$(jq -r '.reopened' <<<"$out")"
+      words="OPERATOR NOTE on $lead: $text"
+      [[ -n "$host" ]] && words+=" The operator allowed $host for jobs run with network=allowlist from now on (job_run network: \"allowlist\"); your own VM keeps the network it booted with, so fetch it in a job."
+      [[ "$reopened" == true ]] && words+=" $lead is open again: lead_claim $lead to go on with it."
+      post="$(examiner_post "$sandbox" "${holder:-all}" "$words")" || exit 1
+      echo "Recorded on $lead$([[ "$reopened" == true ]] && echo ", reopened")$([[ -n "$host" ]] && echo ", $host allowed for the run's jobs"), and posted to the board as the examiner (#$post)."
+      ;;
+    reopen)
+      local lead="${1:-}"
+      [[ -n "$lead" ]] || { echo "BLOCKER: lead reopen needs <L-n>." >&2; exit 2; }
+      shift
+      local out
+      out="$(node --experimental-strip-types --no-warnings "$cli" reopen "$sandbox" "$lead" "$*")" || {
+        echo "BLOCKER: $(jq -r '.reason // "the lead was not reopened"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2
+        exit 2
+      }
+      operator_trace "$sandbox" lead "$id" reopen "$lead" "$@"
+      local post
+      post="$(examiner_post "$sandbox" all "OPERATOR: $lead is reopened${*:+: $*}. lead_claim $lead to take it.")" || exit 1
+      echo "$lead reopened, and said on the board as the examiner (#$post)."
+      ;;
+    *) echo "BLOCKER: lead takes list, note or reopen (got $sub)." >&2; exit 2 ;;
+  esac
 }
 
 # Change a running swarm's caps: raise the spend or the token cap, give it
@@ -10002,6 +10084,20 @@ are charged, a token cap where they are not (a subscription, local models).
 EOF
       ;;
     purge) echo "  purge <id> --yes   delete a finished run's sandbox, kept VM disks and hub directory; the registry keeps it as purged, and runs/operator-audit.jsonl gets the destruction record" ;;
+    lead) cat <<'EOF'
+  lead <id> list [--json]                      every lead: the ones waiting on the operator first, then
+                                               active, blocked, open and closed, with needs and dispositions
+  lead <id> note <L-n> "TEXT" [--allow-host H] the operator's answer to a lead: recorded on it (leads.jsonl),
+                                               the lead reopened when it was closed, posted to the board as
+                                               the examiner to whoever held it; --allow-host adds H to the hosts
+                                               the run's jobs reach with network=allowlist (a microVM run: each
+                                               job's worker is made new; the agents' own VMs keep their network)
+  lead <id> reopen <L-n> ["TEXT"]              reopen a closed lead
+A lead an agent closes needs_operator writes its request to <run>/operator-requests.jsonl and to the
+board; the console shows it on the Leads tab with a form for the note. Each note and reopen is on the
+trace and the operator's record.
+EOF
+      ;;
     *) die_usage "no help for '$topic'" ;;
   esac
 }
@@ -10019,6 +10115,8 @@ main() {
     start|stop|reap|say|cap|package|report|tools|review|export|hold|release|purge|verify|releases|examiner|machine|timestamp|rerun)
       # A start --check writes nothing, the audit included.
       case " $* " in *" -h "*|*" --help "*|*" --check "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
+    # The operator's answer to a lead, and a reopen, change the run; a list reads it.
+    lead) [[ "${2:-}" == list ]] || operator_audit "$cmd" "$@" ;;
   esac
   case "$cmd" in
     start) cmd_start "$@" ;;
@@ -10034,6 +10132,7 @@ main() {
     tools) cmd_tools "$@" ;;
     say) cmd_say "$@" ;;
     cap) cmd_cap "$@" ;;
+    lead) cmd_lead "$@" ;;
     netcheck) cmd_netcheck "$@" ;;
     review) cmd_review "$@" ;;
     image-for) cmd_image_for "$@" ;;

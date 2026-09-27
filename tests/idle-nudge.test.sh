@@ -402,4 +402,33 @@ printf '{"ts":"t1","agent":"a0","tool":"bash","args":{},"result":{"ok":true}}\n'
 [[ "$(wc -l < "$PLAIN_SB/traces/events.jsonl" | tr -d ' ')" -eq 2 ]] || fail "an unchained trace no longer takes the fallback append"
 pass "an unchained trace with whole lines still takes the fallback append"
 
+# --- the lead register in the nudge -------------------------------------------
+# An idle agent is told what the register would have it take: the ready lead
+# it ranks first, and the questions nobody holds a lead for.
+LD="$TMP/leads"
+mkdir -p "$LD"/{traces,done/agents,threads/main,inbox/a00,inbox/a01,.pi-sessions/a00,.pi-sessions/a01,locks}
+cat > "$LD/team.json" <<'JSON'
+{"swarm_id": "t", "n": 2, "agents": [{"id": "a00", "role": "worker"}, {"id": "a01", "role": "worker"}]}
+JSON
+: > "$LD/traces/events.jsonl"
+printf '# Contract\n\n## Checks\n\n- `node x "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,summary,narrative`\n' > "$LD/SWARM.md"
+for id in a00 a01; do
+  : > "$LD/.pi-sessions/$id/session.jsonl"
+  touch -t "$(date -v-300S +%Y%m%d%H%M.%S 2>/dev/null || date -d '300 seconds ago' +%Y%m%d%H%M.%S)" "$LD/.pi-sessions/$id/session.jsonl"
+done
+node --experimental-strip-types --no-warnings -e '
+  const [leads, S] = process.argv.slice(1);
+  import(leads).then(async (L) => {
+    const r = await L.openLead({ sandboxRoot: S, agentId: "a01" }, { title: "Open the encrypted container", why: "question 2 rests on it", answers: ["2"] });
+    if (!r.ok) { console.error(r.reason); process.exit(1); }
+  });
+' "$ROOT/extensions/leads.ts" "$LD" || fail "could not open a lead"
+: > "$PROMPT_LOG"
+SWARM_RUNS_DIR="$TMP/no-registry" HERDR_BIN="$TMP/bin/herdr" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$LD" --once --idle-sec 180 >/dev/null 2>&1
+nudge="$(grep '^a00	' "$PROMPT_LOG" | tail -1)"
+[[ -n "$nudge" ]] || fail "the idle agent was not nudged"
+grep -q 'The ready lead the register ranks first is L-1 "Open the encrypted container"' <<<"$nudge" || fail "the nudge does not name the ready lead: $nudge"
+grep -q 'Questions nobody holds a lead for: question:1, question:2 (open: L-1)' <<<"$nudge" || fail "the nudge does not name the uncovered questions: $nudge"
+pass "an idle agent's nudge names the ready lead the register ranks first and the questions nobody holds"
+
 echo "idle-nudge.test.sh: all checks passed"

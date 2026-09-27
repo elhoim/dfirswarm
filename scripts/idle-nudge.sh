@@ -498,10 +498,15 @@ while :; do
     # "0 posts you have not read" is worse than saying nothing.
     news_line=""
     [[ "$unread" -gt 0 ]] 2>/dev/null && news_line="You have ${unread} post(s) you have not read. "
+    # What the lead register would have this agent take: the top question
+    # nobody covers or the ready lead it ranks first, what it holds, and its
+    # jobs awaiting interpretation (scripts/leads-cli.ts nudge-line).
+    leads_line="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" nudge-line "$SANDBOX" "$id" 2>/dev/null || true)"
+    [[ -n "$leads_line" ]] && leads_line=" ${leads_line}"
     if [[ "$why" == waiting ]]; then
-      text="For ${minutes} minutes you have called only wait and inbox: no post, no record, no command. Waiting is right while an answer you asked for is coming; past that it is idle. ${news_line}If a peer owes you an answer, ask them again by name. Otherwise read inbox, see what your peers have taken, take the next piece of the goal nobody holds and say so on the board; when nothing is left for you, keep waiting. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.} Nudge ${n} of ${MAX_NUDGES}."
+      text="For ${minutes} minutes you have called only wait and inbox: no post, no record, no command. Waiting is right while an answer you asked for is coming; past that it is idle. ${news_line}If a peer owes you an answer, ask them again by name. Otherwise read inbox, see what your peers have taken, take the next piece of the goal nobody holds and say so on the board; when nothing is left for you, keep waiting. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.}${leads_line} Nudge ${n} of ${MAX_NUDGES}."
     else
-      text="You ended your turn ${minutes} minutes ago and the swarm is not done. Ending a turn is not waiting: nothing prompts you again. ${news_line}Read inbox, see what your peers have taken, and get on with what you said you were doing (name() if that has changed); when there is nothing left to take, call the wait tool and keep it open, and call it again each time it returns. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.} Nudge ${n} of ${MAX_NUDGES}."
+      text="You ended your turn ${minutes} minutes ago and the swarm is not done. Ending a turn is not waiting: nothing prompts you again. ${news_line}Read inbox, see what your peers have taken, and get on with what you said you were doing (name() if that has changed); when there is nothing left to take, call the wait tool and keep it open, and call it again each time it returns. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.}${leads_line} Nudge ${n} of ${MAX_NUDGES}."
     fi
     if prompt_agent "$id" "$text" "$deliver" >/dev/null 2>&1; then
       log_event "$id" "$clock" true "$n" "$why"
