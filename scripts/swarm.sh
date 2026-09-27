@@ -2792,12 +2792,19 @@ if caps:
                    "less and it does not wait behind long parses (it is stopped at that limit; leave a long parse at its default). "
                    if int(jb.get('workers') or 0) >= 3 else "")
                 +
-                "A worker sees what you see, read-only — inputs/, store/, catalog/, tools/, all of work/ and tool-output/ — "
-                "and writes only its own $OUT, sealed into store/jobs/<id>/out/. It has the image's programs "
+                "Declare what a job reads (`inputs`: `input:<path>`, `input:<dir>/`, `job:<id>[/<path>]`, `work/<you>/<file>`, …) "
+                "and its worker is given that and nothing else, read-only, at the paths you see; a segment set comes whole with "
+                "its first segment, and a file of yours is copied as it is when the job starts, and hashed. A declaration that does "
+                "not resolve refuses the job. Left out, or `[\"all\"]`, the worker sees what you see — inputs/, store/, catalog/, "
+                "tools/, all of work/ and tool-output/, live — and the record says so. A job "
+                "writes only its own $OUT, sealed into store/jobs/<id>/out/. It has the image's programs "
                 "(/etc/dfirswarm/tools.md) and nothing installed in an agent's own VM; with network=allowlist it reaches "
                 f"{hosts}. An exit status of 0 is not the work's success: read what the job wrote, and its stderr. "
                 "A file you made in your own VM is not an object of the run until it is sealed: `job_run import=work/<you>/<file>` "
-                "copies it into the store as it is now, and a finding then cites it as job:<id>/<file> in its refs.\n\n"
+                "copies it into the store as it is now, and a finding then cites it as job:<id>/<file> in its refs. A whole "
+                "output the harness kept for you under tool-output/<you>/ is cited as `tool:<you>/<file>` (one line of the "
+                "trace as `trace:<sha256>`): the record is sealed first, against the digest the trace recorded, and cites "
+                "the import it became; bytes that changed since are refused, and the work is then run again as a job.\n\n"
             )
             imgs = jb.get("images") or {}
             if imgs:

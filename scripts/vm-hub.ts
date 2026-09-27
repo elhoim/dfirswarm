@@ -86,6 +86,55 @@ import { JobService, jobView, type JobSpec } from "./job-service.ts";
 
 /** What a job tool is told in a run with no job service. */
 const NO_JOBS = "this run has no job service (a host run, or --no-jobs): run the work in your own shell";
+
+/** How long a record waits for the seal of a brain-side output it cites (an import job on the short lane). */
+const SEAL_WAIT_SECONDS = 45;
+
+/**
+ * Every ref an entry or an act on the ledger carries, mapped: `refs`,
+ * `attribution.basis_refs`, each alternative's `test_refs`, each
+ * `qualifies[].ref` (a list given as text is split as the ledger splits it).
+ */
+function mapLedgerRefs(input: Record<string, unknown>, f: (ref: string) => string): Record<string, unknown> {
+  const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : typeof v === "string" ? v.split(/[\s,]+/) : null);
+  const mapped = (v: unknown) => {
+    const l = list(v);
+    return l ? [...new Set(l.map((r) => r.trim()).filter(Boolean).map(f))] : v;
+  };
+  const out: Record<string, unknown> = { ...input };
+  if (input.refs !== undefined) out.refs = mapped(input.refs);
+  if (isObject(input.attribution) && (input.attribution as Record<string, unknown>).basis_refs !== undefined) out.attribution = { ...(input.attribution as Record<string, unknown>), basis_refs: mapped((input.attribution as Record<string, unknown>).basis_refs) };
+  if (Array.isArray(input.alternatives)) out.alternatives = input.alternatives.map((x) => (isObject(x) && (x as Record<string, unknown>).test_refs !== undefined ? { ...(x as Record<string, unknown>), test_refs: mapped((x as Record<string, unknown>).test_refs) } : x));
+  if (Array.isArray(input.qualifies)) out.qualifies = input.qualifies.map((x) => (isObject(x) && typeof (x as Record<string, unknown>).ref === "string" ? { ...(x as Record<string, unknown>), ref: f(String((x as Record<string, unknown>).ref).trim()) } : x));
+  return out;
+}
+
+/**
+ * An entry, or an attest or dispute, with every tool: and trace: ref it
+ * carries sealed and replaced by the import it became (JobService.sealCited),
+ * and a note per seal. The first that cannot be sealed refuses it with the
+ * reason; without a job service there is nothing to seal with, and it is
+ * refused so.
+ */
+export async function sealCitedRefs(svc: JobService | undefined, who: string, input: Record<string, unknown>): Promise<{ ok: true; input: Record<string, unknown>; notes: string[] } | { ok: false; reason: string }> {
+  const cited = new Set<string>();
+  mapLedgerRefs(input, (r) => {
+    if (/^(tool|trace):/.test(r)) cited.add(r);
+    return r;
+  });
+  if (!cited.size) return { ok: true, input, notes: [] };
+  const first = [...cited][0];
+  if (!svc) return { ok: false, reason: `${first}: a brain's own output is sealed by the job service before a record cites it, and ${NO_JOBS}; run the work as a job and cite job:<id>/<path>` };
+  const notes: string[] = [];
+  const replaced = new Map<string, string>();
+  for (const ref of cited) {
+    const r = await svc.sealCited(who, ref, { wait: SEAL_WAIT_SECONDS });
+    if (!r.ok) return { ok: false, reason: r.reason };
+    replaced.set(ref, r.import_ref);
+    notes.push(`${ref} sealed as ${r.import_ref} (job ${r.job}), which it cites`);
+  }
+  return { ok: true, input: mapLedgerRefs(input, (r) => replaced.get(r) ?? r), notes };
+}
 import { destroyWorker, roomForWorker, runWorker } from "./vm.ts";
 
 /**
@@ -621,10 +670,26 @@ export function boardTable(hub: {
     readBudgetStatus: (who) => P.readBudgetStatus(as(who)),
     readInbox: (who, a) => P.readInbox(as(who), (a[1] as never) ?? {}),
     readNames: () => P.readNames(S),
-    recordEntry: (who, a) => P.recordEntry(as(who), a[1] as never),
+    recordEntry: async (who, a) => {
+      // A brain's own output the entry cites (tool:<seat>/<file>, trace:<sha256>)
+      // is sealed first, through the job service, and the entry cites the
+      // import it became: the ledger never rests on a file a seat can still write.
+      const input = isObject(a[1]) ? (a[1] as Record<string, unknown>) : {};
+      const sealed = await sealCitedRefs(hub.jobs?.(), who, input);
+      if (!sealed.ok) return { ok: false, reason: sealed.reason };
+      const res = await P.recordEntry(as(who), sealed.input as never);
+      return res.ok && sealed.notes.length ? { ...res, note: [res.note, ...sealed.notes].filter(Boolean).join("; ") } : res;
+    },
     // The acts on the ledger are the hub's to write, as its entries are.
-    attestEntry: (who, a) => P.attestEntry(as(who), a[1] as never),
-    disputeEntry: (who, a) => P.disputeEntry(as(who), a[1] as never),
+    // An attest's or a dispute's refs are sealed the same way.
+    attestEntry: async (who, a) => {
+      const sealed = await sealCitedRefs(hub.jobs?.(), who, isObject(a[1]) ? (a[1] as Record<string, unknown>) : {});
+      return sealed.ok ? P.attestEntry(as(who), sealed.input as never) : { ok: false, reason: sealed.reason };
+    },
+    disputeEntry: async (who, a) => {
+      const sealed = await sealCitedRefs(hub.jobs?.(), who, isObject(a[1]) ? (a[1] as Record<string, unknown>) : {});
+      return sealed.ok ? P.disputeEntry(as(who), sealed.input as never) : { ok: false, reason: sealed.reason };
+    },
     recordFileVersion: async (who, a) => {
       const { key, owner } = await holeOf(String(a[1] ?? ""));
       if (owner && owner !== who) throw new Error(`${key} is ${owner}'s own directory; a seat records its own files`);
@@ -690,7 +755,8 @@ export function boardTable(hub: {
         ...(typeof raw.tool === "string" ? { tool: raw.tool } : {}),
         ...(isObject(raw.args) ? { args: raw.args as Record<string, unknown> } : {}),
         ...(typeof raw.command === "string" ? { command: raw.command } : {}),
-        inputs: Array.isArray(raw.inputs) && raw.inputs.length ? raw.inputs.map(String) : ["all"],
+        // As said: left out (every object, by default), ["all"], or a list, possibly empty (job-scope.ts).
+        ...(Array.isArray(raw.inputs) ? { inputs: raw.inputs.map(String) } : typeof raw.inputs === "string" ? { inputs: [raw.inputs] } : {}),
         timeout_seconds: typeof raw.timeout_seconds === "number" ? raw.timeout_seconds : 900,
         network: raw.network === "allowlist" ? "allowlist" : "off",
         ...(typeof raw.note === "string" ? { note: raw.note } : {}),

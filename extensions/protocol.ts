@@ -7672,7 +7672,7 @@ async function checkRefs(sandboxRoot: string, refs: string[]): Promise<{ ok: tru
     } catch {
       near = [];
     }
-    return { ok: false, reason: `ref ${JSON.stringify(ref)} does not resolve: ${r.reason}${near.length ? `; nearest: ${near.join(", ")}` : ""}. A ref names an object of this run (input:<path>, job:<id>/<path>, import:<id>/<path>, member:<gen>#<n>, sha256:<hex>), or says why none can be named (unresolved:<why>).` };
+    return { ok: false, reason: `ref ${JSON.stringify(ref)} does not resolve: ${r.reason}${near.length ? `; nearest: ${near.join(", ")}` : ""}. A ref names an object of this run (input:<path>, job:<id>/<path>, import:<id>/<path>, member:<gen>#<n>, sha256:<hex>, or a brain's own output: tool:<seat>/<file> under tool-output/, trace:<sha256> of one trace line, which the hub seals first and cites as the import it became), or says why none can be named (unresolved:<why>).` };
   }
   return { ok: true, resolved };
 }

@@ -274,6 +274,9 @@ grep -q 'job_run profile=<name>' "$sbx_mem/SWARM.md" || fail "SWARM.md does not 
 grep -q '`memory`: dfirswarm-memory:dev-'"$ARCH"' — the packs .*memory-forensics' "$sbx_mem/SWARM.md" || fail "SWARM.md does not map the pack to its image: $(grep -A8 '^## Job images' "$sbx_mem/SWARM.md")"
 grep -q 'A command that names no profile runs in the smallest of them whose own record (images/<name>/image.json) holds every program it runs' "$sbx_mem/SWARM.md" || fail "SWARM.md does not say where a job that names no profile runs: $(grep -A3 '^## Job images' "$sbx_mem/SWARM.md")"
 ! grep -q 'kept for short jobs' "$sbx_mem/SWARM.md" || fail "one worker, and SWARM.md says one is kept for short jobs"
+# What a job reads: declared, and given nothing beside it; a kept output cited as tool:, sealed first.
+grep -q 'Declare what a job reads (`inputs`: `input:<path>`' "$sbx_mem/SWARM.md" || fail "SWARM.md does not tell the agents to declare what a job reads: $(grep -A6 '^## Tool jobs' "$sbx_mem/SWARM.md")"
+grep -q 'is cited as `tool:<you>/<file>`' "$sbx_mem/SWARM.md" || fail "SWARM.md does not say how a kept output is cited"
 # From three workers one is kept for short jobs, and the agents are told how to take it.
 out="$(start --isolation microvm --workers 3 --vm-memory 512 --worker-memory 512 --pack memory-forensics --label vm-lanes)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a microvm run with three workers exited $rc: $out"
