@@ -317,6 +317,26 @@ test("wait through the hub returns on a peer's post, and an aborted wait ends th
   }
 });
 
+test("wait through the hub keeps every_post: a seat following the whole board wakes on a post to a peer, and one that is not does not", async () => {
+  const { hub, sandbox } = await setup({ agents: ["a0", "a1", "a2"] });
+  const ctx = { sandboxRoot: sandbox, agentId: "a1" };
+  await asVm(hub.socketFor("a1"), () => board.readInbox(ctx));
+  // Following every post: a post addressed only to a2 wakes a1.
+  const following = asVm(hub.socketFor("a1"), () => board.waitForSwarmChange(ctx, { seconds: 20, everyPost: true }));
+  await new Promise((r) => setTimeout(r, 300));
+  await board.callBoard(hub.socketFor("a0"), "postMessage", [null, { tag: "ask", to: "a2", body: "for a2 only" }]);
+  const woke = await following;
+  assert.equal(woke.reason, "post", "every_post reached the hub: a post to a peer woke the seat");
+  await asVm(hub.socketFor("a1"), () => board.readInbox(ctx));
+  // Not following: the same kind of post passes it by, and the wait times out.
+  const plain = asVm(hub.socketFor("a1"), () => board.waitForSwarmChange(ctx, { seconds: 2 }));
+  await new Promise((r) => setTimeout(r, 300));
+  await board.callBoard(hub.socketFor("a0"), "postMessage", [null, { tag: "ask", to: "a2", body: "for a2 again" }]);
+  const slept = await plain;
+  assert.equal(slept.reason, "timeout");
+  assert.equal(slept.passed, 1, "the post to a2 was seen and passed by");
+});
+
 test("the backstop writes the sentinel past the wall clock and the grace period, and says so as the harness", async () => {
   const { hub, sandbox, lines } = await setup({ wall: 1 });
   const prompts: string[] = [];

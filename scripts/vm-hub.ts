@@ -794,10 +794,15 @@ export function boardTable(hub: {
     threadJoin: (who, a) => P.threadJoin(as(who), String(a[1] ?? "")),
     threadOpen: (who, a) => P.threadOpen(as(who), a[1] as never),
     updateToolchainRecord: (who, a) => T.updateToolchainRecord(S, isObject(a[1]) ? { agent: who, inventory: a[1] as never } : undefined),
-    // Only how long: how often the hub polls is the hub's (a guest's
-    // pollMs of 0 was a tight loop of readdir on the hub's one event loop).
-    waitForSwarmChange: (who, a, signal) =>
-      P.waitForSwarmChange(as(who), { seconds: Number((a[1] as { seconds?: unknown } | null)?.seconds) || undefined, signal }),
+    // How long, and whether every post wakes it (a critic's or an
+    // integrator's every_post: dropped here, a VM seat that asked to follow
+    // the whole board slept through every post addressed to a peer). How
+    // often the hub polls is the hub's (a guest's pollMs of 0 was a tight
+    // loop of readdir on the hub's one event loop).
+    waitForSwarmChange: (who, a, signal) => {
+      const o = isObject(a[1]) ? (a[1] as { seconds?: unknown; everyPost?: unknown }) : {};
+      return P.waitForSwarmChange(as(who), { seconds: Number(o.seconds) || undefined, signal, ...(o.everyPost === true ? { everyPost: true } : {}) });
+    },
   };
   return table;
 }
