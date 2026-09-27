@@ -81,7 +81,8 @@ test("a redacted package holds none of a sensitive entry's words, and its chains
   // The job log is cited by the sensitive entry through its refs in a real run; here it carries the words.
   const r = await redactPackage(root, pkg);
   assert.equal(r.entries, 1, "a1 recorded the same entry word for word: an attestation, not a second entry");
-  assert.equal(r.lines, 3, "one ledger entry, one trace line and one journal line");
+  assert.equal(r.lines, 4, "one ledger entry, the attestation of it (an act on a sensitive entry), one trace line and one journal line");
+  assert.deepEqual(r.leaks, [], "nothing of it is left anywhere in the package");
   for (const f of ["ledger.jsonl", "trace/events.jsonl", "board/main.md", "store/jobs/j000001/stdout.log", "ledger.md", "store/journal.jsonl"]) {
     assert.doesNotMatch(await readFile(join(pkg, f), "utf8"), new RegExp(SECRET), `${f} holds no secret`);
   }
@@ -92,9 +93,9 @@ test("a redacted package holds none of a sensitive entry's words, and its chains
   assert.equal(v.ok, true, v.lines.join("\n"));
   assert.match(v.lines.join("\n"), /Trace:        3 lines, chain intact, 1 redacted \(their hashes kept\); the 3 lines the verdict sealed are there, 0 after/);
   assert.match(v.lines.join("\n"), /Ledger:       3 entries, chain intact, 1 redacted/);
-  assert.match(v.lines.join("\n"), /Attestations: 1 lines, chain intact/);
+  assert.match(v.lines.join("\n"), /Attestations: 1 lines, chain intact, 1 redacted \(their hashes kept\)/);
   assert.match(v.lines.join("\n"), /Journal:      3 lines, chain intact, 1 redacted/);
-  assert.match(v.lines.join("\n"), /Redacted:     this package was made with --redact/);
+  assert.match(v.lines.join("\n"), /Redacted:     this package was made with --redact \(REDACTIONS\.txt\); REDACTIONS\.json records what \d+ redaction\(s\) replaced \(the sha256 of each original, why, which entry\); the leak scan after it found nothing over \d+ file\(s\)/);
 });
 
 test("the package's verify finds a chain edited after it was packaged, and a trace that is not the one sealed", async () => {

@@ -8074,14 +8074,15 @@ pkg_copy() { # <src> <dst> [non-empty]
 }
 
 cmd_package() {
-  local id="${1:-}" sign=0 key="" redact=0 with_outputs=0
-  [[ -n "$id" && "$id" != -* ]] || { echo "package requires <id> [--sign [--key FILE]] [--redact] [--with-outputs]" >&2; exit 2; }
+  local id="${1:-}" sign=0 key="" redact=0 with_outputs=0 leaks=fail
+  [[ -n "$id" && "$id" != -* ]] || { echo "package requires <id> [--sign [--key FILE]] [--redact [--redact-leaks list]] [--with-outputs]" >&2; exit 2; }
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --sign) sign=1; shift ;;
       --key) key="$2"; sign=1; shift 2 ;;
       --redact) redact=1; shift ;;
+      --redact-leaks) leaks="$2"; shift 2 ;;
       --with-outputs) with_outputs=1; shift ;;
       *) echo "package: unknown option $1" >&2; exit 2 ;;
     esac
@@ -8304,9 +8305,19 @@ PY
   # before it is hashed: the chained files keep their chains (a redacted line
   # carries its own hash), and REDACTIONS.txt says what changed.
   if [[ "$redact" -eq 1 ]]; then
-    local redacted
-    redacted="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" redact "$sandbox" "$out")" || { echo "BLOCKER: the package could not be redacted; nothing was handed over." >&2; rm -rf "$out"; exit 1; }
-    echo "Redacted:     $(jq -r '.entries' <<<"$redacted") sensitive entr$([[ "$(jq -r '.entries' <<<"$redacted")" == 1 ]] && echo y || echo ies), $(jq -r '.lines' <<<"$redacted") chained line(s) and $(jq -r '.files' <<<"$redacted") other file(s) (REDACTIONS.txt)"
+    [[ "$leaks" == fail || "$leaks" == list ]] || { echo "BLOCKER: --redact-leaks takes list (a leak refuses the package without it)." >&2; rm -rf "$out"; exit 2; }
+    local redacted redact_rc=0
+    redacted="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" redact "$sandbox" "$out" --leaks "$leaks" 2>"$out.leaks")" || redact_rc=$?
+    if [[ "$redact_rc" -eq 5 ]]; then
+      # What should have been taken out is still in the package: named by file, entry and the word's hash, never the word.
+      echo "BLOCKER: after redaction, $(jq -r '.leaks' <<<"$redacted") place(s) in the package still hold a sensitive entry's words; nothing was handed over:" >&2
+      cat "$out.leaks" >&2
+      echo "Mark the entries that say them sensitive too, or hand the package over with the hits listed in it (--redact-leaks list)." >&2
+      rm -rf "$out" "$out.leaks"; exit 1
+    fi
+    [[ "$redact_rc" -eq 0 ]] || { cat "$out.leaks" >&2; echo "BLOCKER: the package could not be redacted; nothing was handed over." >&2; rm -rf "$out" "$out.leaks"; exit 1; }
+    rm -f "$out.leaks"
+    echo "Redacted:     $(jq -r '.entries' <<<"$redacted") sensitive entr$([[ "$(jq -r '.entries' <<<"$redacted")" == 1 ]] && echo y || echo ies), $(jq -r '.lines' <<<"$redacted") chained line(s) and $(jq -r '.files' <<<"$redacted") other file(s) (REDACTIONS.txt; what each replaced in REDACTIONS.json); the leak scan over $(jq -r '.scanned' <<<"$redacted") file(s) $([[ "$(jq -r '.leaks' <<<"$redacted")" == 0 ]] && echo "found nothing" || echo "FOUND $(jq -r '.leaks' <<<"$redacted") HIT(S), listed in REDACTIONS.json (--redact-leaks list)")"
   fi
   # What kind of package this is, said in it.
   printf '%s\n' "$([[ "$with_outputs" -eq 1 ]] && echo "with outputs: the jobs' sealed outputs are included" || echo "record only: the jobs' outputs stay in the run, each named by its sha256")$([[ "$redact" -eq 1 ]] && echo "; redacted (REDACTIONS.txt)")" > "$out/PACKAGE-KIND.txt"
