@@ -8,12 +8,14 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { leadingCommand, summarize } from "../scripts/summary.ts";
+import { renderReport } from "../scripts/report.ts";
+import { reportBodyFacts } from "../scripts/report-body.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -285,4 +287,38 @@ test("summary: the leading command ignores env prefixes, cd chains and paths", (
   assert.equal(leadingCommand("FOO=1 BAR=2 /opt/bin/vol -f x"), "vol");
   assert.equal(leadingCommand("  python3 tool.py"), "python3");
   assert.equal(leadingCommand("$(evil)"), "");
+});
+
+test("the summary and the report say the same of the answers: how many, adopted or not, a draft", async () => {
+  const runs = await mkdtemp(join(tmpdir(), "summary-answers-"));
+  try {
+    const sb = join(runs, "sfix01");
+    await cp(join(ROOT, "tests", "fixtures", "ledger-v4"), sb, { recursive: true });
+    await writeFile(join(runs, "registry.json"), JSON.stringify({ runs: [{ id: "sfix01", sandbox: sb }] }));
+    const { appendReview } = await import("../scripts/review.ts");
+    await appendReview(runs, "sfix01", sb, { action: "accept", examiner: "H. Examiner", entry_seq: 14 });
+    const text = await summarize(sb, { runsDir: runs });
+    const html = await renderReport(sb, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
+    // One set of facts, read the way both documents read them.
+    const { readReviewState, bodyReview } = await import("../scripts/report.ts");
+    const { readLedger } = await import("../extensions/protocol.ts");
+    const facts = await reportBodyFacts(sb, { review: bodyReview(await readReviewState(runs, "sfix01", sb, await readLedger(sb))) });
+    assert.equal(facts.answered, 3);
+    assert.equal(facts.adopted, 1);
+    assert.match(text, /^- Answers: 3 of 3 questions answered, 1 adopted by the examiner; not signed off; a draft: no release v1$/m);
+    assert.match(text, /^\| Question 1 \| answered, high confidence \| E-14: The intruder uploaded shell\.php .* \| yes, by the examiner \|$/m);
+    assert.match(text, /^\| Question 2 \| answered, medium confidence \| E-19: .* \| no \|$/m);
+    assert.match(text, /^Summary \(E-17, no longer standing on its support\): /m);
+    assert.match(html, /<div class="k">Questions answered<\/div><div class="v">3 of 3<\/div><div class="s">1 adopted by the examiner<\/div>/);
+    assert.match(html, /<span class="chip chip-brick">draft<\/span>/);
+    assert.match(html, /id="e-14">[\s\S]*?chip-moss">accepted by the examiner</);
+    // A run whose ledger predates answers: said so in both.
+    const old = join(runs, "sold01");
+    await mkdir(join(old, "ledger"), { recursive: true });
+    await writeFile(join(old, "ledger", "entries.jsonl"), `${JSON.stringify({ v: 3, seq: 1, kind: "finding", value: "v", source: "s", evidence: "e", answers: ["1"], by: "a0", authors: ["a0"], at: "2026-01-01T00:00:00Z" })}\n`);
+    assert.match(await summarize(old, { runsDir: runs }), /^- Answers: none in the ledger: the run predates structured answers \(ledger version 4\), so its answers are its working report's prose; a draft: no release v1$/m);
+    assert.match(await renderReport(old, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" }), /This run predates structured answers \(ledger version 4\)/);
+  } finally {
+    await rm(runs, { recursive: true, force: true });
+  }
 });

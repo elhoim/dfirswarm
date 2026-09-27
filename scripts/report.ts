@@ -49,7 +49,7 @@ import {
 } from "../extensions/protocol.ts";
 import { createHash } from "node:crypto";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
-import { humanReviewFrom, renderReportBody } from "./report-body.ts";
+import { humanReviewFrom, renderReportBody, type HumanReview } from "./report-body.ts";
 import { custodyAnchorPath, manifestMeta, sealedIndex, verdictAnchorLine, verdictAnchorState } from "./custody.ts";
 import { hashRegularFile, openRegular, readRegularText } from "./regular-file.ts";
 import { createInterface } from "node:readline";
@@ -466,6 +466,16 @@ export function signoffScope(state: ReviewState): string {
   if (!s.report_sha256) parts.push("it names no report");
   else if (c.report === false) parts.push(`it is over ${s.report_path ?? "a report"} as it was (sha256 ${s.report_sha256}), and ${state.reportNow ? `that file is now ${state.reportNow}` : "that file is gone"}`);
   return parts.join("; ");
+}
+
+/**
+ * The examiner's review as the report's body takes it, with whether the
+ * sign-off covers the run as it stands: the report and the run summary pass
+ * the same, so their counts of what was adopted agree.
+ */
+export function bodyReview(review: ReviewState | null, examiner?: string | null, organisation?: string | null): HumanReview | null {
+  const current = review?.signed && !review.unreadable ? signoffCurrent(review) : null;
+  return humanReviewFrom(review, examiner ? { name: examiner, ...(organisation ? { organisation } : {}) } : null, review && current !== null ? { current, ...(current ? {} : { scope: signoffScope(review) }) } : undefined);
 }
 
 /** The examiner's standing on one entry, in the words of its exhibit. */
@@ -1731,9 +1741,8 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     }
     return null;
   })();
-  const current = review?.signed && !review.unreadable ? signoffCurrent(review) : null;
   const body = await renderReportBody(sandbox, {
-    review: humanReviewFrom(review, examiner ? { name: examiner, ...(options.organisation ? { organisation: options.organisation } : {}) } : null, review && current !== null ? { current, ...(current ? {} : { scope: signoffScope(review) }) } : undefined),
+    review: bodyReview(review, examiner, options.organisation),
     grounding: coverage.grounding,
     ...(run?.model ? { defaultModel: run.model } : {}),
     workingReport: own ? { path: own.path, text: own.text, seal: await ownReportSeal(sandbox, own.path, own.sha256, hostCustody, lastAnchored?.artifacts_sha256) } : null,
@@ -1748,13 +1757,14 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
   ];
 
   const toc = sections
-    .map((s) => `<li><span class="n">${escapeHtml(s.n)}</span><a href="#${s.id}">${escapeHtml(s.title)}</a>${s.desc ? `<span class="desc">${escapeHtml(s.desc)}</span>` : ""}</li>`)
+    // A section's number in the margin; an appendix says its letter in its title, once.
+    .map((s) => `<li><span class="n">${/^\d+$/.test(s.n) ? escapeHtml(s.n) : ""}</span><a href="#${s.id}">${escapeHtml(s.title)}</a>${s.desc ? `<span class="desc">${escapeHtml(s.desc)}</span>` : ""}</li>`)
     .join("");
   // The cover's scorecard: the six numbers a reader wants before they decide
   // how much of the rest to read.
   const scoreCells: Array<[string, string, string]> = [
     body.facts.questions
-      ? [`${body.facts.answered} of ${body.facts.questions}`, "Questions answered", body.facts.hasAnswers ? "an answer stands, §5" : "no answer in the ledger"]
+      ? [`${body.facts.answered} of ${body.facts.questions}`, "Questions answered", body.facts.hasAnswers ? `${body.facts.adopted} adopted by the examiner` : "no answer in the ledger"]
       : [String(findings.length), "Findings", `${findings.filter((f) => f.confidence === "high").length} at high confidence`],
     [String(iocs.length), "Indicators", "recorded with their source"],
     [String(timeline.length), "Dated events", "on the timeline"],
@@ -1818,7 +1828,7 @@ ${body.preamble}
 ${sections
     .map(
       (s) => `  <section id="${s.id}"${s.breakBefore ? ' class="page-break"' : ""}>
-    <div class="sec-head"><span class="n">${escapeHtml(s.n)}</span><h2>${escapeHtml(s.title)}</h2>${s.count ? `<span class="count">${escapeHtml(s.count)}</span>` : ""}</div>
+    <div class="sec-head">${/^\d+$/.test(s.n) ? `<span class="n">${escapeHtml(s.n)}</span>` : ""}<h2>${escapeHtml(s.title)}</h2>${s.count ? `<span class="count">${escapeHtml(s.count)}</span>` : ""}</div>
 ${s.html}
   </section>`,
     )

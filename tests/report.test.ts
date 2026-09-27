@@ -228,8 +228,11 @@ test("the report is one self-contained file that cites the ledger's own sequence
     // The section head is a number beside the title, not "5." inside it;
     // the body's sections first, then custody and the artifacts as appendices.
     assert.match(html, /<span class="n">5<\/span><h2>Answers<\/h2>/);
-    assert.match(html, /<span class="n">A<\/span><h2>Appendix A: Exhibits<\/h2>/);
-    assert.match(html, /<span class="n">D<\/span><h2>Appendix D: Chain of custody<\/h2>/);
+    // An appendix says its letter once: in its title, in the contents and at its head.
+    assert.match(html, /<div class="sec-head"><h2>Appendix A: Exhibits<\/h2>/);
+    assert.match(html, /<div class="sec-head"><h2>Appendix D: Chain of custody<\/h2>/);
+    assert.match(html, /<li><span class="n"><\/span><a href="#sA">Appendix A: Exhibits<\/a>/);
+    assert.doesNotMatch(html, /<span class="n">[A-E]<\/span>/);
     const order = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "sA", "sB", "sC", "sD", "sE"].map((id) => html.indexOf(`<section id="${id}"`));
     assert.deepEqual([...order].sort((a, b) => a - b), order, "the sections in their order");
     assert.ok(order.every((i) => i > 0), "every section present");

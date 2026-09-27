@@ -32,7 +32,8 @@ import {
 } from "../extensions/protocol.ts";
 import { loadRunContext, readJsonFile } from "./run-record.ts";
 import { manifestMeta, verdictAnchorLine, verdictAnchorState } from "./custody.ts";
-import { gatewayRecordOf, heldRows, readReviewState, reviewLine, sourceCheckedLine, vmSpendNote, type GatewayTotals } from "./report.ts";
+import { bodyReview, gatewayRecordOf, heldRows, readReviewState, reviewLine, sourceCheckedLine, vmSpendNote, type GatewayTotals } from "./report.ts";
+import { reportBodyFacts, type BodyFacts } from "./report-body.ts";
 import { coverageLine, coverageOf } from "./coverage.ts";
 import { readRegularText } from "./regular-file.ts";
 
@@ -79,6 +80,16 @@ function durationHuman(ms: number): string {
   if (h) return `${h}h ${m}m`;
   if (m) return `${m}m ${rest}s`;
   return `${rest}s`;
+}
+
+/** The answers in one line, in the words the report's cover and §1 use. */
+function answersLine(f: BodyFacts): string {
+  const release = f.draft ? "a draft: no release v1" : "released";
+  if (f.era === "predates") return `none in the ledger: the run predates structured answers (ledger version 4), so its answers are its working report's prose; ${release}`;
+  if (f.era === "empty") return `none: nothing was recorded in the ledger; ${release}`;
+  if (f.era === "no answers") return `none recorded${f.questions ? ` for ${f.questions} question${f.questions === 1 ? "" : "s"}` : ""}; ${release}`;
+  const signoff = f.signoff === "current" ? "signed off over this run" : f.signoff === "not current" ? "signed off, NOT over this run as it stands" : f.signoff === "unreadable" ? "the examiner's review could not be read" : "not signed off";
+  return `${f.answered} of ${f.questions} question${f.questions === 1 ? "" : "s"} answered, ${f.adopted} adopted by the examiner; ${signoff}; ${release}`;
 }
 
 function cell(text: unknown): string {
@@ -221,6 +232,10 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   // review file beside the registry.
   const review = await readReviewState(runsDir, id, sandbox, ledger);
   lines.push(`- Examiner review: ${reviewLine(review, ledger)}`);
+  // The answers as the report's cover counts them, from the same facts
+  // (scripts/report-body.ts) with the same review: the two never disagree.
+  const facts = await reportBodyFacts(sandbox, { review: bodyReview(review, run?.examiner), ...(run?.model ? { defaultModel: run.model } : {}) });
+  lines.push(`- Answers: ${answersLine(facts)}`);
   for (const [k, v] of heldRows(run as Record<string, unknown> | null)) lines.push(`- ${k}: ${v}`);
   const flags: string[] = [];
   if (run?.model) flags.push(`model ${run.model}`);
@@ -401,6 +416,16 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
       for (const [command, n] of topCommands) lines.push(`| \`${cell(command)}\` | ${n} |`);
       lines.push("");
     }
+  }
+
+  // --- answers ------------------------------------------------------------
+  if (facts.questions) {
+    lines.push("## Answers", "", `${answersLine(facts)}. The report's §5 has each answer with what it rests on.`, "", "| Question | Status | Answer | Adopted |", "| --- | --- | --- | --- |");
+    for (const q of facts.questionStatus) {
+      lines.push(`| ${cell(q.label)} | ${cell(`${q.status}${q.confidence ? `, ${q.confidence} confidence` : ""}`)} | ${q.answer !== null ? `E-${q.answer}: ${cell(q.value)}` : "—"} | ${q.answer === null ? "—" : q.adopted ? "yes, by the examiner" : "no"} |`);
+    }
+    lines.push("");
+    if (facts.summary) lines.push(`Summary (E-${facts.summary.seq}${facts.summary.stands ? "" : ", no longer standing on its support"}): ${cell(facts.summary.value)}`, "");
   }
 
   // --- ledger -------------------------------------------------------------
