@@ -106,7 +106,7 @@ Commands:
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   review verify export hold release purge image-for   After a run: sign-off, checks, export, retention; the image packs boot (help <command>)
-  releases examiner   The report's releases and the examiners who adopt them (help <command>)
+  releases examiner timestamp   The report's releases, the examiners who adopt them, a token obtained later (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
   say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> changes its caps (help cap)
   stop <id>          Stop a run and record how it ended
@@ -478,6 +478,13 @@ Isolation
                       token is held to its digest only ("imprint only").
   --time-reference URL  Record this https server's clock offset from the host's
                       at kickoff and at custody.
+  --anchor-mirror TARGET  Copy each release's digest line somewhere this account
+                      does not keep: cmd:COMMAND (the line on its stdin, its
+                      output kept as the receipt), dir:PATH (a file per release,
+                      never written over: an object-locked bucket's mount or a
+                      records custodian's share), or print (a line and a
+                      QR-ready string for the case file). A signed git remote
+                      is a witness, not a write-once store.
   --allow-oauth-in-vm Let a subscription (OAuth) provider into the VMs; refused
                       otherwise, since its token is the operator's whole account.
   --no-vm-snapshot    At stop, remove each VM without keeping its disk. By default
@@ -3253,7 +3260,7 @@ cmd_start() {
   # Where the agents live: one microVM each (the default), or host
   # processes (--isolation host, unisolated). isolation_given says the
   # operator named it, so a refusal can say how to choose the other.
-  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}'
+  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" anchor_mirror="" brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}'
   local seal_herdr=1
   # Directories the panes may not read. Reads are open by design, so this is
   # narrow on purpose: material about the case the agents must derive rather
@@ -3397,6 +3404,7 @@ cmd_start() {
       --custody-timestamp-url) custody_tsa="$2"; shift 2 ;;
       --custody-timestamp-ca) custody_tsa_ca="$2"; shift 2 ;;
       --time-reference) time_reference="$2"; shift 2 ;;
+      --anchor-mirror) anchor_mirror="$2"; shift 2 ;;
       -h|--help) usage_start; exit 0 ;;
       *) die_usage "start: unknown option $1" ;;
     esac
@@ -3416,6 +3424,16 @@ cmd_start() {
     [[ -f "$custody_tsa_ca" && -r "$custody_tsa_ca" ]] || { echo "BLOCKER: --custody-timestamp-ca $custody_tsa_ca is not a readable file." >&2; exit 2; }
     command -v openssl >/dev/null 2>&1 || { echo "BLOCKER: --custody-timestamp-ca needs openssl on this host (openssl ts -verify)." >&2; exit 2; }
     custody_tsa_ca="$(cd "$(dirname "$custody_tsa_ca")" && pwd -P)/$(basename "$custody_tsa_ca")"
+  fi
+  # Where each release's digest line is copied: a command, a directory that is there, or print.
+  if [[ -n "$anchor_mirror" ]]; then
+    case "$anchor_mirror" in
+      cmd:?*|print) ;;
+      dir:?*)
+        [[ -d "${anchor_mirror#dir:}" ]] || { echo "BLOCKER: --anchor-mirror ${anchor_mirror}: ${anchor_mirror#dir:} is not a directory (it is made by whoever keeps it, not here)." >&2; exit 2; }
+        anchor_mirror="dir:$(cd "${anchor_mirror#dir:}" && pwd -P)" ;;
+      *) echo "BLOCKER: --anchor-mirror takes cmd:COMMAND, dir:PATH or print (got ${anchor_mirror})." >&2; exit 2 ;;
+    esac
   fi
   local seal_url
   for seal_url in "$custody_tsa" "$time_reference"; do
@@ -4917,7 +4935,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson allow_oauth_in_vm "$allow_oauth_in_vm" \
     --argjson provenance "$(provenance_json)" \
     --argjson custody_timeout "$custody_timeout" \
-    --arg custody_sign_key "$custody_sign_key" --arg custody_tsa "$custody_tsa" --arg custody_tsa_ca "$custody_tsa_ca" --arg time_reference "$time_reference" \
+    --arg custody_sign_key "$custody_sign_key" --arg custody_tsa "$custody_tsa" --arg custody_tsa_ca "$custody_tsa_ca" --arg time_reference "$time_reference" --arg anchor_mirror "$anchor_mirror" \
     --argjson host_clock "$host_clock" \
     --argjson notify "$([[ -n "$notify_cmd" ]] && echo true || echo false)" \
     --arg disk_encryption "$disk_encryption" \
@@ -4988,6 +5006,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       host_clock: $host_clock,
       custody_timeout_sec: $custody_timeout,
       custody_seal: (if ($custody_sign_key + $custody_tsa + $custody_tsa_ca + $time_reference) == "" then null else {sign_key: (if $custody_sign_key == "" then null else $custody_sign_key end), timestamp_url: (if $custody_tsa == "" then null else $custody_tsa end), timestamp_ca: (if $custody_tsa_ca == "" then null else $custody_tsa_ca end), time_reference: (if $time_reference == "" then null else $time_reference end)} end),
+      anchor_mirror: (if $anchor_mirror == "" then null else $anchor_mirror end),
       notify: $notify,
       disk_encryption: $disk_encryption,
       synced_folder_allowed_by: (if $synced_allowed_by == "" then null else $synced_allowed_by end),
@@ -8543,6 +8562,7 @@ cmd_review() {
       --report) report="$2"; shift 2 ;;
       --pdf) pdf=1; shift ;;
       --amend-reason) amend_reason="$2"; shift 2 ;;
+      --no-timestamp) no_ts=1; shift ;;
       --reviewer) reviewer="$2"; shift 2 ;;
       --competence) competence="$2"; shift 2 ;;
       --checked) checked="$2"; shift 2 ;;
@@ -8583,6 +8603,7 @@ cmd_review() {
     [[ -n "$report" ]] && rargs+=(--report "$report")
     [[ "$pdf" -eq 1 ]] && rargs+=(--pdf)
     [[ -n "$amend_reason" ]] && rargs+=(--amend-reason "$amend_reason")
+    [[ "$no_ts" -eq 1 ]] && rargs+=(--no-timestamp)
     node --experimental-strip-types --no-warnings "$ROOT/scripts/release.ts" "${rargs[@]}" || exit $?
     echo "Signed off:   run $id, in the release above; the review is $RUNS_DIR/reviews/$id.jsonl"
     return 0
@@ -8621,16 +8642,18 @@ cmd_review() {
 # adoption an enrolled examiner signs, each amendment. Shown by default;
 # --draft writes one for a run that has a verdict and none (or, with
 # --reason, another); --verify checks every signature and what each binds;
-# --print N prints release vN's HTML to PDF beside it.
+# --print N prints release vN's HTML to PDF beside it; --mirror TARGET
+# copies its digest line somewhere independent.
 cmd_releases() {
   local id="${1:-}" mode=show extra=() version=""
-  [[ -n "$id" && "$id" != -* ]] || die_usage "releases requires <id> [--draft [--reason TEXT] | --verify [--allowed-signers FILE] [--tsa-ca FILE] | --print [N] | --json]"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "releases requires <id> [--draft [--reason TEXT] | --verify [--allowed-signers FILE] [--tsa-ca FILE] | --print [N] | --mirror TARGET [--version N] | --json]"
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --draft) mode=draft; shift ;;
       --verify) mode=verify; shift ;;
       --print) mode=print; if [[ "${2:-}" =~ ^[0-9]+$ ]]; then version="$2"; shift 2; else shift; fi ;;
+      --mirror) mode=mirror; extra+=(--to "$2"); shift 2 ;;
       --version) version="$2"; shift 2 ;;
       --reason|--allowed-signers|--tsa-ca) extra+=("$1" "$2"); shift 2 ;;
       --json) extra+=(--json); shift ;;
@@ -8650,6 +8673,28 @@ cmd_releases() {
   fi
   [[ -n "$version" ]] && extra+=(--version "$version")
   node --experimental-strip-types --no-warnings "$ROOT/scripts/release.ts" "$mode" "$sandbox" --run "$id" --runs "$RUNS_DIR" ${extra[@]+"${extra[@]}"}
+}
+
+# An RFC 3161 token over a release's signature, obtained after the release
+# (an air-gapped lab): the latest release by default. The token dates the
+# release's proof of existence from its own time, and timestamp.json says so.
+cmd_timestamp() {
+  local id="${1:-}" extra=()
+  [[ -n "$id" && "$id" != -* ]] || die_usage "timestamp requires <id> [--version N] [--tsa-url URL] [--tsa-ca FILE]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --version|--tsa-url|--tsa-ca) extra+=("$1" "$2"); shift 2 ;;
+      *) die_usage "timestamp: unknown option $1" ;;
+    esac
+  done
+  ensure_registry
+  local rec sandbox
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "BLOCKER: run $id's sandbox is not there." >&2; exit 2; }
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/release.ts" timestamp "$sandbox" --run "$id" --runs "$RUNS_DIR" ${extra[@]+"${extra[@]}"}
 }
 
 # The examiners enrolled on this install (scripts/signers.ts), outside every
@@ -8871,7 +8916,7 @@ cmd_help() {
   review <id> --inconclusive N --note TEXT            render it inconclusive
   review <id> --accept N | --amend N --note TEXT      accept an entry, or accept it with a correction
   review <id> --technical-review --reviewer NAME --competence TEXT --checked TEXT [--organisation ORG] [--entries 4,10]
-  review <id> --sign [--pdf] [--amend-reason TEXT] [--report PATH]
+  review <id> --sign [--pdf] [--amend-reason TEXT] [--report PATH] [--no-timestamp]
                                                       adopt the report: release vN signed with the examiner's key
   review <id> --show                                  what has been reviewed, and whether the sign-off is current
 Every act names the examiner (--examiner ID, an examiner enrolled with swarm.sh examiner enroll; the
@@ -8892,6 +8937,8 @@ EOF
   releases <id> --verify [--allowed-signers FILE] [--tsa-ca FILE]
                                                   every signature, the bytes and chains each binds, the chain between them
   releases <id> --print [N]                       release vN's HTML printed to PDF beside it (a print record the next release binds)
+  releases <id> --mirror cmd:COMMAND|dir:PATH|print [--version N]
+                                                  the digest line to an independent copy (the run's --anchor-mirror by default)
 v0 is written when custody is taken at stop, sealed by this install's machine key: a DRAFT, adopted
 by no one. v1 is an enrolled examiner's adoption (review --sign); each later version names the one
 before it and why. Nothing in a release is written over. --verify exits 0 when every release holds
@@ -8910,6 +8957,39 @@ register, checked in person, is what ties the key to the person. `machine` shows
 machine key, which seals the drafts and is no examiner.
 EOF
       ;;
+    timestamp) echo "  timestamp <id> [--version N] [--tsa-url URL] [--tsa-ca FILE]   an RFC 3161 token over the latest release's signature, obtained now (an air-gapped lab's later step): the release's proof of existence dates from the token, and timestamp.json says so; --tsa-ca checks the authority's signature (exit 0 verified, 3 imprint only, 4 does not verify)" ;;
+    custody-verify) cat <<'EOF'
+  custody-verify <id> [--allowed-signers FILE --identity NAME] [--tsa-ca FILE] [--scratch DIR] [--json]
+Takes the run's custody again, writing nothing in the run, and holds it to the verdict it sealed:
+every check's status now, the sealed prefix of the trace, the lines written after the seal (the
+run's own closing lines are expected), each chain's sealed length and head (ledger, attestations,
+store journal, where an examiner's notes after the run are named and allowed, the gateway log),
+every work/ file against the index custody sealed (changed, removed, added, each named), the
+verdict against its anchor, its signature and its timestamp token. --tsa-ca (or
+SWARM_CUSTODY_TSA_CA, or the run's --custody-timestamp-ca) checks the token's signature with
+openssl ts -verify; without one it is "imprint only". A kept disk msb checks is loaded under
+--scratch (the host's temporary directory by default), and what was touched there is said.
+Exit 0: the run is as the verdict sealed it; 4: it is not, or a check does not pass; 1: not checked.
+EOF
+      ;;
+    verify) cat <<'EOF'
+  verify <package dir|zip> [--allowed-signers FILE] [--tsa-ca FILE]
+Re-hashes every file against MANIFEST.txt (none missing, none added, none outside the package) and
+checks MANIFEST.txt.sig, which covers SIGNER.txt; every part in COMPONENTS.json is there or declared
+absent; then the chains the package carries (trace, ledger with every readable entry's core
+recomputed, attestations, journal, the examiner's review) against the custody verdict's seal, and
+every packaged work/ file against the index custody sealed (artifacts.sealed.json), held to the
+verdict and its anchor; and the report's releases (release/): each signature (against FILE, the
+signer register, when given), the bytes and the chains each binds, the chain between versions, its
+line in the anchor, its timestamp token (its signature checked with --tsa-ca FILE).
+Exit 0: all of it holds and the signer is one FILE allows (and so is every adopting examiner's key);
+3: the files hold, the signature is sound, the signer (or an adopting examiner's key) was not checked;
+4: the files hold, the package is unsigned; 1: something does not hold.
+EOF
+      ;;
+    image-for) echo "  image-for [--pack ID]... [--tools-from DIR] [--playwright] [--no-jobs] [--brains-with-packs]   the image a kickoff's agents would boot, as JSON: ref, digest (null when neither the lock nor msb has it), profile, pinned_by, reason, and jobs (each job image: profile, ref, the packs it serves); read only" ;;
+    export) echo "  export <id> --format csv|timesketch [--out FILE] [--redact]   the ledger as CSV or a Timesketch CSV import (default: <sandbox>/exports/); --redact replaces what a sensitive entry says" ;;
+    hold|release) echo "  hold <id> [--reason TEXT] / release <id>   a held run's material is kept from purge and from a new run in its sandbox" ;;
     cap) cat <<'EOF'
   cap <id> [--usd N] [--tokens N] [--per-agent-usd N] [--per-agent-tokens N] [--wall-clock MIN]
 Changes a running swarm's caps, under the lock every fold of usage takes. Kept in budget.json's
@@ -8933,7 +9013,7 @@ main() {
   # What changes or leaves a run is on the operator's record; what only reads
   # it (list, status, summary, context, help) is not.
   case "$cmd" in
-    start|stop|reap|say|cap|package|report|tools|review|export|hold|release|purge|verify|releases|examiner)
+    start|stop|reap|say|cap|package|report|tools|review|export|hold|release|purge|verify|releases|examiner|timestamp)
       # A start --check writes nothing, the audit included.
       case " $* " in *" -h "*|*" --help "*|*" --check "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
   esac
@@ -8962,6 +9042,7 @@ main() {
     custody-verify) cmd_custody_verify "$@" ;;
     releases) cmd_releases "$@" ;;
     examiner) cmd_examiner "$@" ;;
+    timestamp) cmd_timestamp "$@" ;;
     help) cmd_help "$@" ;;
     *) die_usage "unknown command: $cmd" ;;
   esac

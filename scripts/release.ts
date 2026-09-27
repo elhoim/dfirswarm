@@ -19,6 +19,10 @@
  *   names the release. A later adoption is an amendment and says why.
  * print: a PDF of a release's HTML, printed after it was sealed: a print
  *   record beside it, which the next release binds.
+ * timestamp: an RFC 3161 token over a release's signature, obtained later
+ *   (an air-gapped lab): the proof of existence dates from the token.
+ * mirror: the release's digest line to an independent copy (a command, a
+ *   directory another custodian keeps, a printed line for the case file).
  *
  * Nothing in a release directory is written over. A release changes by a
  * new version, which names the one before it and why it was made; a new
@@ -26,10 +30,12 @@
  * evidence cutoff and is a new run, not an amendment.
  *
  *   node scripts/release.ts draft <sandbox> [--run ID] [--runs DIR] [--reason TEXT] [--quiet]
- *   node scripts/release.ts sign --runs DIR --run ID --sandbox DIR [--examiner ID] [--pdf] [--amend-reason TEXT] [--report PATH]
+ *   node scripts/release.ts sign --runs DIR --run ID --sandbox DIR [--examiner ID] [--pdf] [--amend-reason TEXT] [--report PATH] [--no-timestamp]
  *   node scripts/release.ts show <sandbox> [--run ID] [--runs DIR] [--json]
  *   node scripts/release.ts verify <sandbox> [--run ID] [--runs DIR] [--allowed-signers FILE] [--tsa-ca FILE]
  *   node scripts/release.ts print <sandbox> [--version N]
+ *   node scripts/release.ts timestamp <sandbox> [--run ID] [--runs DIR] [--version N] [--tsa-url URL] [--tsa-ca FILE]
+ *   node scripts/release.ts mirror <sandbox> [--version N] --to cmd:COMMAND|dir:PATH|print
  */
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -59,6 +65,7 @@ import {
   type ReleaseRecord,
   type ReleaseSigner,
 } from "./release-record.ts";
+import { mirrorRelease, timestampRelease } from "./release-witness.ts";
 import { checkSshSignature, dfirswarmHome, listExaminers, loadExaminer, machineSigner, sshSign, RELEASE_NAMESPACE, type Examiner, type MachineSigner } from "./signers.ts";
 import { readLedger, supersededBy, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain, type LedgerEntry } from "../extensions/protocol.ts";
 import { verifyJournalText } from "./evidence-store.ts";
@@ -375,6 +382,12 @@ function draftTsa(ctx: RunCtx): { url: string | null; ca: string | null } {
   return { url: seal?.timestamp_url ?? process.env.SWARM_CUSTODY_TSA_URL ?? null, ca: seal?.timestamp_ca ?? process.env.SWARM_CUSTODY_TSA_CA ?? null };
 }
 
+/** Where a release's digest line is copied to: the run's --anchor-mirror, or the environment's. */
+function mirrorTarget(ctx: RunCtx): string | null {
+  const m = ctx.rec?.anchor_mirror;
+  return typeof m === "string" && m ? m : process.env.SWARM_ANCHOR_MIRROR || null;
+}
+
 function printPdf(html: string, pdf: string): { ok: true; printer: string } | { ok: false; why: string } {
   const r = spawnSync("bash", [join(ROOT, "scripts", "print-pdf.sh"), html, pdf], { encoding: "utf8", timeout: 10 * 60_000 });
   if (r.status !== 0 || !existsSync(pdf)) return { ok: false, why: `${r.stderr || r.stdout}`.trim() || `exit ${r.status}` };
@@ -408,6 +421,7 @@ export async function draftRelease(ctx: RunCtx, o: { reason?: string; home?: str
     },
     say,
   );
+  await afterRelease(ctx, written, { tsa: draftTsa(ctx), say });
   return { written, skipped: null };
 }
 
@@ -416,6 +430,19 @@ function readCustodyAt(ctx: RunCtx): string | null {
     return String((JSON.parse(readFileSync(join(ctx.sandbox, "custody.json"), "utf8")) as { at?: string }).at ?? "") || null;
   } catch {
     return null;
+  }
+}
+
+/** What follows a release, none of it blocking: a timestamp when an authority is set up, a mirror when one is named. */
+async function afterRelease(ctx: RunCtx, w: Written, o: { tsa: { url: string | null; ca: string | null }; noTimestamp?: boolean; say: (s: string) => void }): Promise<void> {
+  if (o.tsa.url && !o.noTimestamp) {
+    const t = await timestampRelease(w.dir, { url: o.tsa.url, ca: o.tsa.ca, releaseAt: w.record.at });
+    o.say(t.ok ? `Timestamp:    ${t.note}` : `WARN: release v${w.version} was not timestamped (${t.why}); swarm.sh timestamp ${ctx.run ?? "<id>"} obtains a token later`);
+  }
+  const target = mirrorTarget(ctx);
+  if (target) {
+    const m = mirrorRelease(ctx.sandbox, w.dir, target);
+    o.say(m.ok ? `Mirror:       ${m.note}` : `WARN: the release's digest line did not reach ${target} (${m.why})`);
   }
 }
 
@@ -522,6 +549,7 @@ export async function signRelease(ctx: RunCtx, o: { examiner?: string; pdf?: boo
   } catch (err) {
     say(`WARN: release v${written.version} is signed and in place, and the review's sign-off line naming it was not written (${(err as Error).message}); verify will say so`);
   }
+  await afterRelease(ctx, written, { tsa: { url: ex.examiner.tsa?.url ?? null, ca: ex.examiner.tsa?.ca ?? null }, noTimestamp: o.noTimestamp, say });
   return written;
 }
 
@@ -589,7 +617,7 @@ async function main(argv: string[]): Promise<number> {
   const say = (s: string) => console.log(s);
   const sandboxArg = opt(args, "--sandbox") ?? positional;
   if (!sandboxArg) {
-    console.error("usage: release.ts draft|sign|show|verify|print <sandbox> …");
+    console.error("usage: release.ts draft|sign|show|verify|print|timestamp|mirror <sandbox> …");
     return 2;
   }
   const ctx = runContext(sandboxArg, { run: opt(args, "--run"), runsDir: opt(args, "--runs") });
@@ -607,7 +635,7 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "sign": {
-      const w = await signRelease(ctx, { examiner: opt(args, "--examiner"), pdf: args.includes("--pdf"), amendReason: opt(args, "--amend-reason"), report: opt(args, "--report"), say });
+      const w = await signRelease(ctx, { examiner: opt(args, "--examiner"), pdf: args.includes("--pdf"), amendReason: opt(args, "--amend-reason"), report: opt(args, "--report"), noTimestamp: args.includes("--no-timestamp"), say });
       const a = w.record.adoption;
       console.log(`Release:      v${w.version} ADOPTED by ${w.record.signer.examiner?.name} (${w.record.signer.examiner?.organisation}), signed with ${w.record.signer.fingerprint}: ${join(RELEASE_DIR, `v${w.version}`)}${w.record.report.pdf ? " (with report.pdf)" : ""}`);
       if (a) console.log(`Adoption:     ${a.scope === "answers" ? `${a.dispositions.filter((d) => d.kind === "answer").length} answer disposition(s); ${a.not_adopted.length} standing answer(s) not adopted, which the report shows as the agents' conclusions` : "the report as a whole: this ledger has no answer entries (recorded before ledger version 4)"}`);
@@ -640,10 +668,50 @@ async function main(argv: string[]): Promise<number> {
       console.log(`Printed:      ${p.pdf} (sha256 ${p.sha256}); ${basename(p.record)} beside it, which the next release binds`);
       return 0;
     }
+    case "timestamp": {
+      const r = pickRelease(ctx.sandbox, version);
+      const url = opt(args, "--tsa-url") ?? (r.record.signer.kind === "examiner" ? loadExaminerTsa(r.record) : null)?.url ?? draftTsa(ctx).url;
+      const ca = opt(args, "--tsa-ca") ?? (r.record.signer.kind === "examiner" ? loadExaminerTsa(r.record) : null)?.ca ?? draftTsa(ctx).ca;
+      if (!url) {
+        console.error("BLOCKER: no timestamp authority: pass --tsa-url URL (and --tsa-ca FILE to check its signature), or enrol the examiner with one");
+        return 2;
+      }
+      const t = await timestampRelease(r.dir, { url, ca: ca ?? null, releaseAt: r.record.at });
+      if (!t.ok) {
+        console.error(`BLOCKER: release v${r.version} was not timestamped: ${t.why}`);
+        return 1;
+      }
+      console.log(`Timestamp:    release v${r.version}: ${t.note}`);
+      if (t.verified === false) return 4;
+      return t.verified === true ? 0 : 3;
+    }
+    case "mirror": {
+      const r = pickRelease(ctx.sandbox, version);
+      const target = opt(args, "--to") ?? mirrorTarget(ctx);
+      if (!target) {
+        console.error("BLOCKER: no mirror: --to cmd:COMMAND|dir:PATH|print, or the run's --anchor-mirror");
+        return 2;
+      }
+      const m = mirrorRelease(ctx.sandbox, r.dir, target);
+      if (!m.ok) {
+        console.error(`BLOCKER: ${m.why}`);
+        return 1;
+      }
+      console.log(`Mirror:       ${m.note}`);
+      return 0;
+    }
     default:
-      console.error("usage: release.ts draft|sign|show|verify|print <sandbox> …");
+      console.error("usage: release.ts draft|sign|show|verify|print|timestamp|mirror <sandbox> …");
       return 2;
   }
+}
+
+/** The enrolled examiner's authority, when the examiner who signed a release is still enrolled here. */
+function loadExaminerTsa(r: ReleaseRecord): { url: string | null; ca: string | null } | null {
+  const id = r.signer.examiner?.id;
+  if (!id) return null;
+  const e = loadExaminer(id);
+  return "examiner" in e ? { url: e.examiner.tsa?.url ?? null, ca: e.examiner.tsa?.ca ?? null } : null;
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

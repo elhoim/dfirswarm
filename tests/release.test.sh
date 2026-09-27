@@ -3,9 +3,10 @@
 # takes custody, an examiner enrolled on the install, each answer's
 # disposition, the sign-off as the examiner's signed release (printed with
 # --pdf), releases shown and verified (exit 3 without the organisation's
-# register, 0 with it), and the package carrying every release and verify
-# walking it. No model, no Herdr, no VM, no network: the run is track P's
-# ledger version 4 fixture.
+# register, 0 with it), a mirror line for the case file, a later timestamp
+# refused without an authority, the package carrying every release and
+# verify walking it, and --anchor-mirror at kickoff. No model, no Herdr, no
+# VM, no network: the run is track P's ledger version 4 fixture.
 set -euo pipefail
 unset SWARM_VM_IMAGE SWARM_IMAGES_LOCK
 export SWARM_ISOLATION=host
@@ -104,10 +105,19 @@ out="$(swarm review s9 --show)"
 grep -q "With the enrolled examiner's key SHA256:.*: release v1" <<<"$out" || fail "show does not name the release: $out"
 pass "the sign-off renders, prints and signs release v1 with the examiner's key; verify says who, against the register"
 
+echo "# a mirror line for the case file; a later timestamp needs an authority"
+out="$(swarm releases s9 --mirror print)" || fail "mirror: $out"
+grep -Eq 'QR-ready: DFSR1:S9:V1:[0-9A-F]{64}' <<<"$out" && [[ -f "$SB/release/v1/case-file.txt" ]] || fail "no case-file line: $out"
+set +e
+out="$(swarm timestamp s9)"; rc=$?
+set -e
+[[ $rc -eq 2 ]] && grep -q 'no timestamp authority' <<<"$out" || fail "a timestamp with no authority (rc $rc): $out"
+pass "the digest line is printed for the case file; swarm.sh timestamp names the authority it needs"
+
 echo "# the package carries every release; verify walks them"
 out="$(swarm package s9)" || fail "package: $out"
 PKG="$SB/package"
-for f in release/v0/release.json release/v0/release.json.sig release/v1/release.json release/v1/report.html release/v1/report.pdf ledger-disputes.jsonl; do
+for f in release/v0/release.json release/v0/release.json.sig release/v1/release.json release/v1/report.html release/v1/report.pdf release/v1/case-file.txt ledger-disputes.jsonl; do
   [[ -f "$PKG/$f" ]] || fail "the package has no $f"
 done
 jq -e '.components[] | select(.path == "release") | .present == true' "$PKG/COMPONENTS.json" >/dev/null || fail "COMPONENTS.json does not list the releases"
@@ -123,5 +133,21 @@ out="$(swarm verify "$PKG" --allowed-signers "$TMP/register")"; rc=$?
 set -e
 [[ $rc -eq 1 ]] && grep -q 'report.html NOT THE BOUND BYTES' <<<"$out" || fail "an edited release in the package passed (rc $rc): $out"
 pass "the package carries every release byte for byte, and verify names an edited one"
+
+echo "# --anchor-mirror at kickoff: checked, and recorded"
+HELLO="$ROOT/prompts/goals/hello.md"
+kick() { swarm start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$HELLO" --toolbox off "$@"; }
+set +e
+out="$(kick --label m1 --anchor-mirror "dir:$TMP/absent")"; rc=$?
+set -e
+[[ $rc -eq 2 ]] && grep -q 'is not a directory (it is made by whoever keeps it, not here)' <<<"$out" || fail "a mirror directory that is not there was taken (rc $rc): $out"
+set +e
+out="$(kick --label m2 --anchor-mirror "ftp://x")"; rc=$?
+set -e
+[[ $rc -eq 2 ]] && grep -q 'takes cmd:COMMAND, dir:PATH or print' <<<"$out" || fail "a mirror that is none of the three was taken (rc $rc): $out"
+out="$(kick --label m3 --anchor-mirror print)" || fail "kickoff with --anchor-mirror print: $out"
+jq -e '.runs[] | select(.label == "m3") | .anchor_mirror == "print"' "$RUNS/registry.json" >/dev/null || fail "the registry does not record the mirror"
+grep -q '"command":"releases"' "$RUNS/operator-audit.jsonl" && grep -q '"command":"examiner"' "$RUNS/operator-audit.jsonl" || fail "releases and examiner are not on the operator's audit"
+pass "--anchor-mirror is checked and recorded; releases and examiner are on the operator's audit"
 
 echo "release.test.sh: all checks passed"
