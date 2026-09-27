@@ -107,9 +107,7 @@ Commands:
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   examiner machine review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
-  say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> changes its caps (help cap)
-  lead <id> list     The run's leads, the ones waiting on the operator first; lead <id> note <L-n> "<answer>"
-                     [--allow-host HOST] answers one (recorded, reopened, posted); lead <id> reopen <L-n>
+  say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> its caps; lead <id> list|note its leads
   stop <id>          Stop a run and record how it ended
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
@@ -127,8 +125,7 @@ The options a run usually needs:
   --cap-per-agent U  What one agent may spend before it is steered and stopped
   --cap-tokens N     The brake for local models, which bill nothing
   --wall-clock MIN   How long the run may take
-  --until-solved     No wall clock, caps advisory, no abandon: the run ends when every question
-                     is answered, or when the operator stops it (help start)
+  --until-solved     No wall clock, caps advisory: it ends when every question is answered, or you stop it
   --goal-file FILE   The goal document, which carries its own finish line
   --label NAME       A name for the run, shown in the list and the console
   --isolation host   Agents as processes on this host, unisolated (default: a microVM each)
@@ -150,8 +147,7 @@ Tools the agents write:
   --pack ID[,ID]         Installed packs: their skills, tools and host checks
 
 Network, which is closed by default:
-  --allow-host HOST  Add one host to the allowlist; repeatable
-  --no-netguard      Open it entirely
+  --allow-host HOST  Add one host to the allowlist; repeatable (--no-netguard opens it entirely)
 
   swarm.sh help start     every option, with what it does and its default
   docs/usage.md           the same, with the reasoning
@@ -5872,6 +5868,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   fi
   echo "Goal:         $goal_source"
   echo "DoD:          from the goal document; checks run by scripts/await-done.sh"
+  echo "Operator:     what an agent needs from you (a lead closed needs_operator) is in operator-requests.jsonl and the console's Leads tab; answer it with swarm.sh lead $swarm_id note L-<n> \"<answer>\""
   echo "Panes:        Herdr right/down grid; tab then workspace fallback if a split fails"
   if [[ "$forging" -eq 1 ]]; then
     echo "Tools:        forging on (make_tool / tools; scripts under tools/<name>/ run as subprocesses)"
