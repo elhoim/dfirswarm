@@ -1,7 +1,7 @@
 {
   "id": "memory-forensics",
   "name": "Memory Forensics Pack",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Method and tooling for a memory image: what the container is before anything else, what can be read with no framework at all, processes and injection, network state, credential material, and the discipline that keeps a string in memory from becoming a claim about behaviour.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -25,7 +25,7 @@
       "tools/mem_profile/run.py": "9903dd4b596b9dd930a02de8be0d4f0e5ee6a08759b591faeef569daedbc763d",
       "tools/mem_fs/manifest.json": "9b478a36184d7e62b5bebbfc227e1750fa925acab85603bb0980a19bbaa174e5",
       "tools/mem_fs/run.py": "76a835988721aae84a4ddf35f066f2cea03ae361c33d55ec8bc1ccf8191986f0",
-      "goals/memory-triage.md": "c79828ec6683fdd5d09db4355bf8636dc8fbd2133ef541b50ce51d631e434b86",
+      "goals/memory-triage.md": "2e27e156c48a7e5279d257e33aeefd2b4189cee0986e9580dddae75ac9c4c5f5",
       "skills/strings/discipline.md": "0514bdcd974e43c094df4c2020dc70509a8b1e8e179a4de4a23e559dd91285b2",
       "skills/patterns/yara.md": "4ca2a2c8a8ae40865d86eb6946145762559aff92d9a77625e1104638428c6c54",
       "skills/processes/injection.md": "97323de52a6486b7ccd13f522dd282576dd2603c872701630aa88b9838a8ea2b",

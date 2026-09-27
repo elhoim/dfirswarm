@@ -1,7 +1,7 @@
 {
   "id": "network-forensics",
   "name": "Network Forensics Pack",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Method and tooling for captures and flow logs: what the capture can and cannot contain, session reconstruction, DNS and TLS metadata when the payload is encrypted, beacon detection by timing, exfiltration by volume, and tying all of it back to the host timeline.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -31,7 +31,7 @@
       "tools/zeek_run/run.py": "82e7d20790ea209be3edd0554545ac7b040b09893bbdf730bdaada840bdfc577",
       "tools/pcap_summary/manifest.json": "ea02cbcb8e9ed2156ca246b8c7f5c55b17bac002aba3966be976986130abbb47",
       "tools/pcap_summary/run.py": "6c91c7a4b91095ed4049aaf551a0b771a6a0b4906b198c6264d49295c6d43e4d",
-      "goals/what-left-the-network.md": "65b30cc40308fa72dcb2a6753cc4d5fdcb8aabd9a90f195f20ba99ec61060104",
+      "goals/what-left-the-network.md": "55090003a43f45004ae4cc233357816a6c3710e919eaab80b14b180109c5b418",
       "tests/pack.test.sh": "b76cd60237861735a8047ffe0225166e244fb0c2cbece1bf01abf0d79bec27f8",
       "recipes/network-capture/recipe.json": "ee7eb16c0cdd66f7bffba61fc1567444930fa451222c541e9b3a5e49be731b22",
       "recipes/network-capture/run.py": "32547b436c83c8ef7bd6fc5398e99ab01109c159f182de58eeef976ff33b9b3e",

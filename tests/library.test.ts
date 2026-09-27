@@ -329,10 +329,11 @@ test("the worker prompt carries the secrets and never-run rules the entries poin
 });
 
 // The goals that ship beside the library (a pack's own goals, and the
-// operator's shelf in prompts/goals/) are held to the same two standard
+// operator's shelf in prompts/goals/) are held to the library's standard
 // checks: a bare grep for "sign-off" passes on "who takes the sign-off?",
-// and a bare grep for the inputs_check event passes whatever it found.
-test("pack and prompt goals use the library's sign-off and inputs_check checks", async () => {
+// a bare grep for the inputs_check event passes whatever it found, and the
+// sign-off is the critic's acts on the ledger's answers, read by the answers check.
+test("pack and prompt goals use the library's answers and inputs_check checks", async () => {
   const problems: string[] = [];
   const files: string[] = [];
   for (const pack of await readdir(join(REPO, "packs"))) {
@@ -356,6 +357,22 @@ test("pack and prompt goals use the library's sign-off and inputs_check checks",
       if (!dod.includes("`SIGN-OFF:`")) problems.push(`${id}: the definition of done does not say how a sign-off starts`);
     }
     if (/inputs\/` is unchanged/.test(dod) && !checks.includes(inputsCheck)) problems.push(`${id}: inputs/ must be unchanged and no check reads inputs_check`);
+    // A goal whose report answers numbered questions is held to the library's model (ledger version 4):
+    // the report author and the critic, an answer entry per question plus the summary and the narrative,
+    // the critic's attest or dispute on each, and the answers check naming every question.
+    const loop = /for n in ((?:\d+ ?)+); do grep -q "\^## \$n\\\." work\/report\.md/.exec(body);
+    if (!loop) continue;
+    if (/SIGN-OFF/.test(body)) problems.push(`${id}: still asks for a SIGN-OFF post; the sign-off is the critic's acts on the answers`);
+    const divide = flat(section(body, /^##\s+How to divide the work\s*$/));
+    for (const must of ["**Report author and critic.**", "`record(kind=answer)`", "`summary` and `narrative`", "`attest`", "`dispute`", "The critic writes no answer; the author attests nothing of their own. The sign-off is these acts, not a post."]) {
+      if (!divide.includes(must)) problems.push(`${id}: the division of work does not say: ${must}`);
+    }
+    for (const must of ["one `answer` entry per question", "one each for `summary` and `narrative`", "named by a limitation", "has recorded `attest` or `dispute` on each answer"]) {
+      if (!dod.includes(must)) problems.push(`${id}: the definition of done does not mention ${must}`);
+    }
+    const ids = [...loop[1].trim().split(/\s+/), ...(checks.includes("grep -q '^## Bonus' work/report.md") ? ["bonus"] : [])];
+    const answers = checks.find((c) => c.includes("scripts/check-answers.ts")) ?? "";
+    if (!answers.endsWith(`--sections ${[...ids, "summary", "narrative"].join(",")}`)) problems.push(`${id}: the answers check does not name questions ${ids.join(",")}, summary and narrative: ${answers || "(none)"}`);
   }
   assert.deepEqual(problems, [], `goal problems:\n  ${problems.join("\n  ")}`);
 });

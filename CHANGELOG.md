@@ -27,7 +27,13 @@ All notable changes to this project. The format follows
   so the first `done` is told each defect and its fix and the next passes
   once a limitation names each one left. Every library goal names the report
   author and the critic, the answer entries and the critic's acts; the
-  `SIGN-OFF:` post is gone from them.
+  `SIGN-OFF:` post is gone from them, from the packs' own goals and from the
+  operator's shelf in `prompts/goals/` too. The packs whose goals changed
+  are one patch up and resealed: cloud-forensics 1.1.1, encrypted-containers
+  1.2.1, linux-forensics 1.1.1, macos-forensics 1.1.1, memory-forensics
+  1.1.1, mobile-forensics 1.1.1, network-forensics 1.1.1,
+  ransomware-response 1.0.3, reverse-engineering 1.1.1, triage-collection
+  1.1.1, windows-forensics 1.3.1.
 - **Old ledgers verify as they did**: explicit version dispatch keeps the v2
   and v3 cores byte for byte, an unknown version is refused, and custody
   holds every chained entry of any version to the trace.
