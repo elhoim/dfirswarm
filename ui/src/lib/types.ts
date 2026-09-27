@@ -859,6 +859,8 @@ export type ImagePreview = {
   packs: string[];
   pinned_by: string | null;
   reason: string | null;
+  /** The job images when the agents boot the base: each profile, its reference and the packs it serves. */
+  jobs: { profile: string; ref: string; packs: string[] }[];
   said: string[];
   error: string | null;
 };

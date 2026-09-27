@@ -3010,7 +3010,11 @@ case "$1" in
       case "$1" in --pack) packs="$packs $2"; shift 2 ;; --playwright) pw=1; shift ;; *) shift ;; esac
     done
     case "$packs" in *no-such-pack*) echo "BLOCKER: pack no-such-pack is not installed" >&2; exit 2 ;; esac
-    echo '{"ref":"dfirswarm-dfir:dev-arm64","digest":"sha256:${"a".repeat(64)}","profile":"dfir","arch":"arm64","packs":["windows-forensics"],"pinned_by":"","reason":"the smallest profile that serves the packs windows-forensics: dfir; a local build'"'"'s name (no lock pins it: build and load it, or set SWARM_IMAGES_LOCK)"}'
+    if [ -n "$pw" ]; then
+      echo '{"ref":"dfirswarm-dfir:dev-arm64","digest":"sha256:${"a".repeat(64)}","profile":"dfir","arch":"arm64","packs":["windows-forensics"],"pinned_by":"","reason":"the smallest profile that serves the packs windows-forensics: dfir; a local build'"'"'s name (no lock pins it: build and load it, or set SWARM_IMAGES_LOCK)","jobs":[]}'
+    else
+      echo '{"ref":"dfirswarm-base:dev-arm64","digest":null,"profile":"base","arch":"arm64","packs":["windows-forensics"],"pinned_by":null,"reason":"the agents boot the base, and the programs of the packs windows-forensics are in the job images","jobs":[{"profile":"disk","ref":"dfirswarm-disk:dev-arm64","packs":["windows-forensics"]},{"profile":"full","ref":"dfirswarm-full:dev-arm64"},{"profile":7}]}'
+    fi
     ;;
   start)
     for a in "$@"; do
@@ -3079,6 +3083,15 @@ test("the kickoff's image preview is swarm.sh image-for, rendered as it answers"
     assert.equal(body.pinned_by, null, "an empty pin is no pin");
     assert.match(body.reason, /the smallest profile that serves the packs windows-forensics: dfir/);
     assert.equal(body.error, null);
+    assert.deepEqual((body as unknown as { jobs: unknown[] }).jobs, [], "with the browser the agents boot the packs' image, and no job image is named");
+    // Without the browser the agents boot the base, and the job images say which packs each serves; a malformed one is left out.
+    const brains = (await (await fetch(`http://127.0.0.1:${port}/api/vm/image?packs=windows-forensics`)).json()) as { ref: string; profile: string; jobs: { profile: string; ref: string; packs: string[] }[] };
+    assert.equal(brains.ref, "dfirswarm-base:dev-arm64");
+    assert.equal(brains.profile, "base");
+    assert.deepEqual(brains.jobs, [
+      { profile: "disk", ref: "dfirswarm-disk:dev-arm64", packs: ["windows-forensics"] },
+      { profile: "full", ref: "dfirswarm-full:dev-arm64", packs: [] },
+    ]);
     const missing = (await (await fetch(`http://127.0.0.1:${port}/api/vm/image?packs=no-such-pack`)).json()) as { ref: string | null; error: string };
     assert.equal(missing.ref, null);
     assert.equal(missing.error, "BLOCKER: pack no-such-pack is not installed");
@@ -3199,8 +3212,8 @@ test("no key screen of the console scrolls sideways at 390 px (a real browser; s
     await page.goto(`${at}/new`, { waitUntil: "load" });
     await page.waitForTimeout(1500);
     const kickoff = await page.evaluate(() => document.body.innerText);
-    assert.match(kickoff, /swarm\.sh boots dfirswarm-dfir:dev-arm64/);
-    assert.match(kickoff, /the smallest profile that serves the packs windows-forensics: dfir/);
+    assert.match(kickoff, /the agents' VMs boot dfirswarm-base:dev-arm64/);
+    assert.match(kickoff, /the tool jobs run in\s+dfirswarm-disk:dev-arm64 · windows-forensics\s+dfirswarm-full:dev-arm64 · a job that names no image/);
     await page.getByRole("textbox", { name: "Extra environment" }).fill("EXTRA_TOKEN=s3cr3t-value");
     const checkButton = page.getByRole("button", { name: "Check the start" });
     assert.equal(await checkButton.isEnabled(), true, `the form has problems of its own: ${await page.locator("form li").allInnerTexts()}`);

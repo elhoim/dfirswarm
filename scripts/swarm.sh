@@ -6644,16 +6644,23 @@ vm_default_image() { # <pack dirs, one per line> [playwright 0|1]  (returns 1 on
   printf '%s\n' "${ref:-dfirswarm-$profile:dev-$(vm_arch)}"
 }
 
-# The image a kickoff would boot for these packs (vm_default_image), read
-# only: the reference, its digest when the lock pins it or msb holds it,
-# and why this one. For the console's preview, before anything is started.
+# The image a kickoff would boot for these packs, read only, decided as the
+# kickoff decides it: with packs and tool jobs the agents boot the base and
+# the packs' programs are in the job images (plan_job_images, without
+# pulling anything). The reference, its digest when the lock pins it or msb
+# holds it, why this one, and the job images with the packs each serves. For
+# the console's preview, before anything is started.
 cmd_image_for() {
-  local packs="" tools_from="" playwright=0 pack_dirs="" out ref digest="" reason
+  local packs="" tools_from="" playwright=0 pack_dirs="" out ref digest="" reason jobs=1 brain_base=1 jobs_json='[]'
+  # plan_job_images looks for no image when nothing is started.
+  local start_agents=0 job_images_json='{}' pack_profiles_json='{}'
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --pack) packs="${packs:+$packs,}$2"; shift 2 ;;
       --tools-from) tools_from="$2"; shift 2 ;;
       --playwright) playwright=1; shift ;;
+      --no-jobs) jobs=0; shift ;;
+      --brains-with-packs) brain_base=0; shift ;;
       *) die_usage "image-for: unknown option $1" ;;
     esac
   done
@@ -6671,6 +6678,16 @@ cmd_image_for() {
   fi
   ref="$(cat "$out")"
   rm -f "$out"
+  # The same condition as the kickoff's: the packs' image becomes the jobs'.
+  if [[ "$jobs" -eq 1 && "$brain_base" -eq 1 && "$playwright" -eq 0 && -n "$pack_dirs" ]]; then
+    plan_job_images "$pack_dirs" "$ref" || exit 2
+    jobs_json="$(jq -c --argjson packs "$pack_profiles_json" \
+      'to_entries | map(.key as $p | {profile: $p, ref: .value, packs: [$packs | to_entries[] | select(.value == $p) | .key]})' <<<"$job_images_json")"
+    ref="$(vm_ref_for_profile base)"
+    VM_DEFAULT_PROFILE=base
+    VM_DEFAULT_PINNED_BY=""
+    [[ "$ref" == *@sha256:* ]] && VM_DEFAULT_PINNED_BY="${SWARM_IMAGES_LOCK:-$ROOT/images/images.lock.json}"
+  fi
   if [[ "$ref" == *@sha256:* ]]; then
     digest="${ref##*@}"
   else
@@ -6678,6 +6695,8 @@ cmd_image_for() {
   fi
   if [[ -z "$packs" && "$VM_DEFAULT_PROFILE" == base ]]; then
     reason="no packs: the base image"
+  elif [[ "$jobs_json" != '[]' ]]; then
+    reason="the agents boot the base, and the programs of the packs ${packs//,/, } are in the job images (--brains-with-packs boots the packs' image instead)"
   else
     local serves="the tools" also="" browser=""
     [[ -n "$packs" ]] && serves="the packs ${packs//,/, }"
@@ -6691,9 +6710,9 @@ cmd_image_for() {
     reason+="; a local build's name (no lock pins it: build and load it, or set SWARM_IMAGES_LOCK)"
   fi
   jq -nc --arg ref "$ref" --arg digest "$digest" --arg profile "$VM_DEFAULT_PROFILE" --arg lock "$VM_DEFAULT_PINNED_BY" --arg reason "$reason" \
-    --argjson packs "$(jq -nc --arg p "$packs" '$p | split(",") | map(select(. != ""))')" --arg arch "$(vm_arch)" \
+    --argjson packs "$(jq -nc --arg p "$packs" '$p | split(",") | map(select(. != ""))')" --arg arch "$(vm_arch)" --argjson jobs "$jobs_json" \
     '{ref: $ref, digest: (if $digest == "" then null else $digest end), profile: $profile, arch: $arch, packs: $packs,
-      pinned_by: (if $lock == "" then null else $lock end), reason: $reason}'
+      pinned_by: (if $lock == "" then null else $lock end), reason: $reason, jobs: $jobs}'
 }
 
 # The sha256 of one file, with whichever tool this host has.
@@ -8684,7 +8703,7 @@ Exit 0: all of it holds and the signer is one FILE allows; 3: the files hold, th
 the signer was not checked; 4: the files hold, the package is unsigned; 1: something does not hold.
 EOF
       ;;
-    image-for) echo "  image-for [--pack ID]... [--tools-from DIR] [--playwright]   the image a kickoff would boot, as JSON: ref, digest (null when neither the lock nor msb has it), profile, pinned_by, reason; read only" ;;
+    image-for) echo "  image-for [--pack ID]... [--tools-from DIR] [--playwright] [--no-jobs] [--brains-with-packs]   the image a kickoff's agents would boot, as JSON: ref, digest (null when neither the lock nor msb has it), profile, pinned_by, reason, and jobs (each job image: profile, ref, the packs it serves); read only" ;;
     export) echo "  export <id> --format csv|timesketch [--out FILE] [--redact]   the ledger as CSV or a Timesketch CSV import (default: <sandbox>/exports/); --redact replaces what a sensitive entry says" ;;
     hold|release) echo "  hold <id> [--reason TEXT] / release <id>   a held run's material is kept from purge and from a new run in its sandbox" ;;
     cap) cat <<'EOF'

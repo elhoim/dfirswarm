@@ -1699,11 +1699,23 @@ function ImagePreviewLine({ state }: { state: Resource<ImagePreview> }) {
   return (
     <span className="flex min-w-0 flex-col gap-0.5 text-[11.5px] text-ink-3 [overflow-wrap:anywhere]">
       <span>
-        swarm.sh boots <span className="font-mono text-ink-2">{d.ref}</span>
+        {d.jobs?.length ? "the agents' VMs boot " : "swarm.sh boots "}
+        <span className="font-mono text-ink-2">{d.ref}</span>
         {d.profile ? ` (the ${d.profile} profile${d.arch ? `, ${d.arch}` : ""})` : ""}
       </span>
       {d.reason ? <span>{d.reason}</span> : null}
       <span className="font-mono">{d.digest ? `digest ${d.digest}` : "no digest known here yet"}</span>
+      {d.jobs?.length ? (
+        <span className="flex flex-col gap-0.5">
+          <span>the tool jobs run in</span>
+          {d.jobs.map((j) => (
+            <span key={j.profile}>
+              <span className="font-mono text-ink-2">{j.ref}</span>
+              {j.packs.length ? ` · ${j.packs.join(", ")}` : " · a job that names no image"}
+            </span>
+          ))}
+        </span>
+      ) : null}
       {d.said.map((l) => (
         <span key={l} className="text-saffron-ink">
           {l}
