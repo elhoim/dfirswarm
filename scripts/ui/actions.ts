@@ -812,11 +812,15 @@ export type ImagePreview = {
   packs: string[];
   pinned_by: string | null;
   reason: string | null;
+  /** The job images, when the agents boot the base and the packs' programs run in jobs: each profile, its reference and the packs it serves. */
+  jobs: ImageJob[];
   /** What swarm.sh said beside the JSON (a WARN, a BLOCKER), whole. */
   said: string[];
   /** Why no image was named, in swarm.sh's or pack.sh's words; null when one was. */
   error: string | null;
 };
+
+export type ImageJob = { profile: string; ref: string; packs: string[] };
 
 export type ImagePreviewQuery = { packs: string[]; playwright: boolean; tools_from_dir?: string };
 
@@ -948,7 +952,7 @@ export class ActionRunner {
     const argv = ["image-for", ...q.packs.flatMap((p) => ["--pack", p]), ...(q.tools_from_dir ? ["--tools-from", q.tools_from_dir] : []), ...(q.playwright ? ["--playwright"] : [])];
     return this.exec(argv, timeoutMs).then(({ code, stdout, stderr }) => {
       const said = stderr.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim());
-      const none: ImagePreview = { ref: null, digest: null, profile: null, arch: null, packs: q.packs, pinned_by: null, reason: null, said, error: null };
+      const none: ImagePreview = { ref: null, digest: null, profile: null, arch: null, packs: q.packs, pinned_by: null, reason: null, jobs: [], said, error: null };
       const line = stdout.trim().split("\n").pop() ?? "";
       let parsed: Record<string, unknown> | null = null;
       try {
@@ -968,6 +972,12 @@ export class ActionRunner {
         packs: Array.isArray(parsed.packs) ? parsed.packs.map(String) : q.packs,
         pinned_by: str(parsed.pinned_by),
         reason: str(parsed.reason),
+        jobs: Array.isArray(parsed.jobs)
+          ? parsed.jobs.flatMap((j: unknown) => {
+              const o = (j ?? {}) as Record<string, unknown>;
+              return typeof o.profile === "string" && typeof o.ref === "string" ? [{ profile: o.profile, ref: o.ref, packs: Array.isArray(o.packs) ? o.packs.map(String) : [] }] : [];
+            })
+          : [],
         said,
         error: null,
       };

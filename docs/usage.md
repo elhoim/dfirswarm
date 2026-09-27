@@ -22,7 +22,7 @@ scripts/swarm.sh start --model <provider/id> --cap-usd <n> --n <N>
     [--probe-violation] [--no-netguard] [--open-net] [--net-allow] [--local-only] [--no-start]
     [--key-from-env] [--env KEY=VALUE]...
     [--notify CMD] [--ledger-from RUN] [--no-verify-copy] [--allow-root] [--model-gateway] [--check]
-scripts/swarm.sh image-for [--pack ID]... [--tools-from DIR] [--playwright]
+scripts/swarm.sh image-for [--pack ID]... [--tools-from DIR] [--playwright] [--no-jobs] [--brains-with-packs]
 scripts/swarm.sh list
 scripts/swarm.sh status <id>
 scripts/swarm.sh stop <id> [--no-custody] [--custody-timeout SEC]
@@ -165,7 +165,7 @@ Each of these goes on the operator's record (`runs/operator-audit.jsonl`: who, f
 
 Three read-only helpers:
 
-- `image-for [--pack ID]... [--tools-from DIR] [--playwright]` prints the image a kickoff with these packs would choose, by the kickoff's own rule (with jobs, the job image that holds every pack), as one JSON line: `ref`, `digest` (null when neither the images lock nor msb has it), `profile`, `arch`, `packs`, `pinned_by` (the lock that pins it, or null for a local build's name) and `reason`. It starts, pulls and writes nothing; a pack that does not resolve or a lock that pins by tag exits 2. The console's New swarm form shows its answer.
+- `image-for [--pack ID]... [--tools-from DIR] [--playwright] [--no-jobs] [--brains-with-packs]` prints the image a kickoff with these packs would boot its agents on, by the kickoff's own rule (with packs and tool jobs, the base, and the packs' programs in job images; with `--playwright`, `--no-jobs` or `--brains-with-packs`, the image that holds every pack), as one JSON line: `ref`, `digest` (null when neither the images lock nor msb has it), `profile`, `arch`, `packs`, `pinned_by` (the lock that pins it, or null for a local build's name), `reason` and `jobs` (each job image's `profile`, `ref` and the `packs` it serves; empty when the agents boot the packs' image). It starts, pulls and writes nothing; a pack that does not resolve or a lock that pins by tag exits 2. The console's New swarm form shows its answer.
 
 - `node --experimental-strip-types scripts/coverage.ts <sandbox> [--json]` lists the evidence files no command on the trace named, and, for each ledger entry, whether a call before it named its source (grounding). It matches paths in every call's arguments and knows no tool. A file a command named was not necessarily examined, and a file under a directory a command named is counted apart. The report and the summary carry the same figures, and the idle watchdog posts the unnamed inputs at a quarter, a half and three quarters of the wall clock, assigning them to nobody.
 - `node --experimental-strip-types scripts/score.ts <sandbox> --answers FILE.json` checks a run against an answers file of your own (`[{id, question, accept: [...], reject?: [...]}]`, a `/regex/` or plain text). It prints found, not found or contradicted for each question, and writes nothing anywhere.

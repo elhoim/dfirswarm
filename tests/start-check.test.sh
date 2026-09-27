@@ -107,19 +107,28 @@ d="sha256:$(printf 'x%.0s' {1..64} | tr x a)"
 jq -n --arg a "$ARCH" --arg r "ghcr.io/example/dfirswarm-base@$d" '{images: {base: {($a): $r}}}' > "$TMP/images.lock.json"
 out="$(SWARM_IMAGES_LOCK="$TMP/images.lock.json" SWARM_MSB_BIN="$TMP/msb" bash "$ROOT/scripts/swarm.sh" image-for 2>/dev/null)" || fail "image-for with a lock failed"
 jq -e --arg d "$d" --arg l "$TMP/images.lock.json" '.digest == $d and .pinned_by == $l and (.reason | contains("pinned by digest"))' <<<"$out" >/dev/null || fail "image-for does not take the lock's digest: $out"
-# A pack: the smallest profile that serves it.
+# A pack, as the kickoff decides it: the agents boot the base and the pack's
+# programs are in the job image of the smallest profile that serves it.
 export DFIRSWARM_HOME="$TMP/home"
 bash "$ROOT/scripts/pack.sh" install "$ROOT/packs/computer-forensics-base" --yes >/dev/null 2>&1 || fail "the pack did not install"
 out="$(SWARM_MSB_BIN="$TMP/msb" bash "$ROOT/scripts/swarm.sh" image-for --pack computer-forensics-base 2>/dev/null)" || fail "image-for with a pack failed"
-jq -e '(.packs == ["computer-forensics-base"]) and (.profile | length > 0) and (.ref == "dfirswarm-\(.profile):dev-\(.arch)") and (.reason | contains("computer-forensics-base"))' <<<"$out" >/dev/null \
-  || fail "image-for with a pack does not name the pack's image: $out"
+jq -e '(.packs == ["computer-forensics-base"]) and .profile == "base" and (.ref == "dfirswarm-base:dev-\(.arch)") and (.reason | contains("the agents boot the base"))
+  and (.jobs | length == 1) and (.jobs[0].profile | length > 0) and .jobs[0].profile != "base"
+  and (.jobs[0].ref == "dfirswarm-\(.jobs[0].profile):dev-\(.arch)") and .jobs[0].packs == ["computer-forensics-base"]' <<<"$out" >/dev/null \
+  || fail "image-for with a pack does not boot the agents on the base with the pack's job image: $out"
+# --brains-with-packs and --no-jobs: the agents boot the pack's image, and there are no job images.
+for flag in --brains-with-packs --no-jobs; do
+  out="$(SWARM_MSB_BIN="$TMP/msb" bash "$ROOT/scripts/swarm.sh" image-for --pack computer-forensics-base "$flag" 2>/dev/null)" || fail "image-for $flag failed"
+  jq -e '(.profile | length > 0) and .profile != "base" and (.ref == "dfirswarm-\(.profile):dev-\(.arch)") and (.reason | contains("computer-forensics-base")) and .jobs == []' <<<"$out" >/dev/null \
+    || fail "image-for $flag does not name the pack's image for the agents: $out"
+done
 set +e
 out="$(SWARM_MSB_BIN="$TMP/msb" bash "$ROOT/scripts/swarm.sh" image-for --pack no-such-pack 2>&1)"; rc=$?
 set -e
 [[ $rc -eq 2 ]] && grep -q 'no-such-pack is not installed' <<<"$out" || fail "a pack that is not installed was not refused (rc $rc): $out"
 unset DFIRSWARM_HOME
 nothing_written "$TMP/runs-check" "image-for"
-pass "image-for says the image, its digest when a lock pins it or msb has it, the profile and why, and writes nothing"
+pass "image-for says the agents' image as the kickoff decides it, the job images and their packs, its digest when a lock pins it or msb has it, the profile and why, and writes nothing"
 
 echo "# the check says what the start would set up"
 run "$TMP/runs-plan" --check "${base[@]}" --isolation host --no-start
