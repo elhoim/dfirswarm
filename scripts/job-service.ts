@@ -202,6 +202,12 @@ export type JobRecord = {
   dedup_of?: string;
   /** A recipe job's identity (recipe, its sha256, the image, the target): the same key is the same result. */
   dedup_key?: string;
+  /**
+   * A command's or a tool's identity for the merge that is only measured
+   * (shadowKey): the same spec, byte for byte, over the same inputs by
+   * digest. Never used to merge; a job_would_merge line says when it would.
+   */
+  shadow_key?: string;
   cancel_requested?: string;
   lane?: Lane;
   image_choice?: ImageChoice;
@@ -418,7 +424,7 @@ export class JobService {
       const j = this.jobs.get(id);
       switch (l.type) {
         case "job_accepted":
-          this.jobs.set(id, { id, attempt: 1, spec: l.spec as JobSpec, requester: l.requester as Requester, state: "accepted", accepted_at: l.at, ...(l.dedup_key ? { dedup_key: String(l.dedup_key) } : {}) });
+          this.jobs.set(id, { id, attempt: 1, spec: l.spec as JobSpec, requester: l.requester as Requester, state: "accepted", accepted_at: l.at, ...(l.dedup_key ? { dedup_key: String(l.dedup_key) } : {}), ...(l.shadow_key ? { shadow_key: String(l.shadow_key) } : {}) });
           break;
         case "job_started":
           if (j) Object.assign(j, { state: "running", attempt: Number(l.attempt), started_at: l.at, worker: l.worker, image: l.image, tool_sha256: l.tool_sha256, accessible: l.accessible, network: l.network, ...(l.scope ? { scope: l.scope as JobScope } : {}), ...(l.cpus ? { worker_size: `${l.cpus} vCPU, ${l.memory_mib} MiB` } : {}), ...(l.lane ? { lane: l.lane as Lane } : {}), ...(l.image_choice ? { image_choice: l.image_choice as ImageChoice } : {}) });
@@ -688,9 +694,17 @@ export class JobService {
     }
     const requester = await this.requesterOf(agent);
     const id = this.nextId();
-    await this.journal.append({ type: "job_accepted", job: id, spec, requester, ...(key ? { dedup_key: key } : {}) });
+    // Merging a command or a tool with an earlier identical job is measured
+    // before it is done (joint review, 2026-09-27): the key is kept and a
+    // would-be merge is written to the journal; the job runs as asked.
+    const shadow = !key ? await this.shadowKey(spec).catch(() => undefined) : undefined;
+    await this.journal.append({ type: "job_accepted", job: id, spec, requester, ...(key ? { dedup_key: key } : {}), ...(shadow ? { shadow_key: shadow } : {}) });
     maybeCrash("job:accepted");
-    const job: JobRecord = { id, attempt: 1, spec, requester, state: "accepted", accepted_at: new Date().toISOString(), ...(key ? { dedup_key: key } : {}) };
+    const job: JobRecord = { id, attempt: 1, spec, requester, state: "accepted", accepted_at: new Date().toISOString(), ...(key ? { dedup_key: key } : {}), ...(shadow ? { shadow_key: shadow } : {}) };
+    if (shadow) {
+      const same = [...this.jobs.values()].find((j) => j.shadow_key === shadow && (j.state === "accepted" || j.state === "running" || j.state === "finished" || j.state === "fenced" || (j.state === "committed" && j.status === "ok")));
+      if (same) await this.journal.append({ type: "job_would_merge", job: id, same_as: same.id, same_state: same.state, by: requester, first_by: same.requester, shadow_key: shadow });
+    }
     this.jobs.set(id, job);
     // The agent waits for it in job_run from this moment: a job that is done
     // before its first status call is answered there, not posted as well.
@@ -741,6 +755,28 @@ export class JobService {
     }
     this.imageRecords ??= readImageRecords(this.S, images);
     return chooseImage(text, await this.imageRecords, dflt);
+  }
+
+  /**
+   * The key a merge of raw jobs would use, were it on: a command or a tool,
+   * reading a declared scope (never inputs=["all"], which reads live work/),
+   * every object of which is known by its digest now (an input, a job's
+   * output, a stored blob; a file of an agent's own is copied only when the
+   * job starts, so it is not), and the spec itself byte for byte. Undefined
+   * when the job would never be merged.
+   */
+  private async shadowKey(spec: JobSpec): Promise<string | undefined> {
+    if (spec.kind !== "command" && spec.kind !== "tool") return undefined;
+    if (spec.scope !== "declared" || spec.seal || spec.inputs.includes("all")) return undefined;
+    const r = await resolveScope(this.S, spec.inputs, { collections: this.collections(), targets: targetPaths(spec) });
+    if (!r.ok) return undefined;
+    const digests: Array<[string, string]> = [];
+    for (const o of r.objects) {
+      if (!o.sha256 || o.area === "work") return undefined;
+      digests.push([o.ref, o.sha256]);
+    }
+    digests.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+    return sha256Hex(canonical({ kind: spec.kind, command: spec.command ?? null, tool: spec.tool ?? null, args: spec.args ?? null, inputs: spec.inputs, timeout_seconds: spec.timeout_seconds, network: spec.network, profile: spec.profile ?? null, scratch: spec.scratch ?? false, digests }));
   }
 
   private async recipeKey(spec: JobSpec): Promise<string> {

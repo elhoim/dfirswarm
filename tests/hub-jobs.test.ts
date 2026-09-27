@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { boardTable } from "../scripts/vm-hub.ts";
@@ -176,4 +176,27 @@ test("a job run under a lead: only the lead's holder may, and the job goes on th
   assert.equal(other.lead, undefined);
   const snap = await L.leadsSnapshot(S);
   assert.deepEqual(snap.state.leads.get("L-1")?.jobs, [named.job.job, implied.job.job]);
+});
+
+test("raw jobs are never merged, only measured: the same spec over the same inputs by digest is logged as job_would_merge, and both run", async () => {
+  const { S, svc, call } = rig();
+  await svc.start();
+  const journal = () => readFileSync(join(S, "store", "journal.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+  const spec = { command: "unzip -l inputs/a.zip", inputs: ["input:a.zip"] };
+  const first = await call("a1", "jobSubmit", spec);
+  const second = await call("a2", "jobSubmit", spec);
+  assert.equal(first.ok && second.ok, true);
+  assert.notEqual(first.job.job, second.job.job, "the second request is a job of its own: nothing was merged");
+  const would = journal().filter((l) => l.type === "job_would_merge");
+  assert.equal(would.length, 1);
+  assert.deepEqual([would[0].job, would[0].same_as], [second.job.job, first.job.job]);
+  // Different bytes of spec, inputs=["all"] (live work/), and a file of one's own are never candidates.
+  await call("a2", "jobSubmit", { ...spec, timeout_seconds: 60 });
+  await call("a1", "jobSubmit", { command: "unzip -l inputs/a.zip", inputs: ["all"] });
+  await call("a1", "jobSubmit", { command: "unzip -l inputs/a.zip", inputs: ["all"] });
+  await call("a1", "jobSubmit", { command: "cat work/a1/notes.txt", inputs: ["work/a1/notes.txt"] });
+  await call("a1", "jobSubmit", { command: "cat work/a1/notes.txt", inputs: ["work/a1/notes.txt"] });
+  assert.equal(journal().filter((l) => l.type === "job_would_merge").length, 1, "only the identical declared-by-digest pair would merge");
+  await done(call, "a1", first.job.job);
+  await done(call, "a2", second.job.job);
 });
