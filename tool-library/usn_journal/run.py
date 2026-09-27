@@ -5,11 +5,21 @@ Asked for in two of the measured cases and forged badly in one. The journal
 is the closest thing NTFS has to an audit log of file names: every create,
 rename, write and delete, with a timestamp and the reason bits that say which.
 
-$J is sparse — the front of it is usually a long run of zeros — so this scans
-forward for the first plausible record rather than assuming an offset, and
-says where it started.
+$J is sparse. Extracted with icat, its front is a run of zeros as long as
+everything the journal has already let go (tens of megabytes, or gigabytes on
+a volume that has lived), and the live records sit at the end. So the file is
+mapped, never read whole; zeros are skipped in steps of up to a megabyte, at
+the front and wherever they pad a page inside the live part; and the output
+says where the first record was and how many zero bytes it passed.
 
-USN_RECORD_V2:
+Every record is read. `name` narrows what is returned, never what is read:
+records_read says how many records the journal holds, so a filter that
+matched nothing reads as that and not as an empty journal. `name` is a
+case-insensitive regex over the file name, as in mft_records and indx_carve
+(a|b for either); a run passed an alternation to the substring match this
+tool used to do, and read "0 records" as "the journal is empty".
+
+USN_RECORD_V2 (the usual one):
   0x00  4  RecordLength
   0x04  2  MajorVersion (2)
   0x06  2  MinorVersion
@@ -23,9 +33,23 @@ USN_RECORD_V2:
   0x34  4  FileAttributes
   0x38  2  FileNameLength
   0x3A  2  FileNameOffset
+
+USN_RECORD_V3 (ReFS, and NTFS with 128-bit file ids): the two references are
+16 bytes each, so everything after them is 0x10 further on (Usn at 0x28, the
+name's length and offset at 0x48 and 0x4A).
+
+USN_RECORD_V4 (range tracking, written after a v3 record): the two 16-byte
+references, Usn at 0x28, Reason 0x30, SourceInfo 0x34, RemainingExtents 0x38,
+NumberOfExtents 0x3C, ExtentSize 0x3E, then the extents (offset and length,
+8 bytes each). It has no name and no timestamp.
+
+A record's length is a multiple of 8 and records start on 8-byte boundaries.
 """
 import datetime
 import json
+import mmap
+import os
+import re
 import struct
 import sys
 from pathlib import Path
@@ -105,6 +129,7 @@ class LosslessPage:
             result["all_results_format"] = "JSON Lines, one complete result per line"
         return result
 
+
 FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc)
 
 REASONS = [
@@ -126,6 +151,14 @@ ATTRIBUTES = [
 ]
 
 
+# The fixed part of each version: a record shorter than this is not one.
+HEAD = {2: 0x3C, 3: 0x4C, 4: 0x40}
+# Where each version keeps the name's length and offset.
+NAME_AT = {2: 0x38, 3: 0x48}
+MAX_RECORD = 0x10000
+ZERO_STEP = 1 << 20
+
+
 def fail(message, **extra):
     print(json.dumps({"error": message, **extra}))
     raise SystemExit(1)
@@ -144,6 +177,76 @@ def filetime(value):
         return None
 
 
+def next_nonzero(data, offset, end):
+    """The first 8-byte boundary at or after `offset` whose 8 bytes are not all
+    zero, or `end`. The look ahead doubles up to a megabyte: a record starts
+    within the first few bytes, and the sparse front of $J, which can be
+    gigabytes, would take minutes 8 bytes at a time."""
+    step = 64
+    while offset < end:
+        chunk = data[offset:min(offset + step, end)]
+        rest = chunk.lstrip(b"\0")
+        if rest:
+            return offset + ((len(chunk) - len(rest)) & ~7)
+        offset += len(chunk)
+        step = min(step * 2, ZERO_STEP)
+    return end
+
+
+def reference(raw):
+    """A 128-bit file id: the NTFS reference (entry and sequence) when the high
+    half is zero, as it is on NTFS; the whole id, in hex, either way."""
+    low, high = struct.unpack("<QQ", raw)
+    out = {"id": "%016x%016x" % (high, low)}
+    if high == 0:
+        out["entry"] = low & 0x0000FFFFFFFFFFFF
+        out["sequence"] = low >> 48
+    return out
+
+
+def record_at(data, offset, end):
+    """The record at `offset` as a dict with its length, or None when the bytes
+    there are not a plausible v2, v3 or v4 record."""
+    if offset + 8 > end:
+        return None
+    length, major = struct.unpack_from("<IH", data, offset)
+    head = HEAD.get(major)
+    if head is None or not (head <= length <= MAX_RECORD) or length % 8 or offset + length > end:
+        return None
+    if major == 4:
+        ref, parent = reference(data[offset + 0x08:offset + 0x18]), reference(data[offset + 0x18:offset + 0x28])
+        usn, reason, source, remaining, count, size = struct.unpack_from("<QIIIHH", data, offset + 0x28)
+        if size != 16 or 0x40 + count * size > length:
+            return None
+        extents = [dict(zip(("offset", "length"), struct.unpack_from("<qq", data, offset + 0x40 + i * 16)))
+                   for i in range(count)]
+        return {"length": length, "row": {
+            "version": 4, "usn": usn, "name": None,
+            "file_reference": ref.get("entry"), "file_sequence": ref.get("sequence"), "file_id": ref["id"],
+            "parent_reference": parent.get("entry"), "parent_id": parent["id"],
+            "reason": flags(reason, REASONS), "reason_raw": reason, "source_info": source,
+            "extents": extents, "remaining_extents": remaining, "offset": offset,
+        }}
+    name_len, name_off = struct.unpack_from("<HH", data, offset + NAME_AT[major])
+    if name_off < head or name_off + name_len > length or name_len % 2:
+        return None
+    name = data[offset + name_off:offset + name_off + name_len].decode("utf-16-le", "replace")
+    if major == 2:
+        ref, parent, usn, stamp, reason, source, sec, attrs = struct.unpack_from("<QQQqIIII", data, offset + 0x08)
+        row = {"version": 2, "usn": usn, "timestamp": filetime(stamp), "name": name,
+               "file_reference": ref & 0x0000FFFFFFFFFFFF, "file_sequence": ref >> 48,
+               "parent_reference": parent & 0x0000FFFFFFFFFFFF}
+    else:
+        ref, parent = reference(data[offset + 0x08:offset + 0x18]), reference(data[offset + 0x18:offset + 0x28])
+        usn, stamp, reason, source, sec, attrs = struct.unpack_from("<QqIIII", data, offset + 0x28)
+        row = {"version": 3, "usn": usn, "timestamp": filetime(stamp), "name": name,
+               "file_reference": ref.get("entry"), "file_sequence": ref.get("sequence"), "file_id": ref["id"],
+               "parent_reference": parent.get("entry"), "parent_id": parent["id"]}
+    row.update({"reason": flags(reason, REASONS), "reason_raw": reason,
+                "attributes": flags(attrs, ATTRIBUTES), "offset": offset})
+    return {"length": length, "row": row}
+
+
 def main():
     try:
         args = json.load(sys.stdin)
@@ -159,72 +262,79 @@ def main():
     limit = min(limit, 100000)
     name_filter = args.get("name")
     if name_filter is not None and not isinstance(name_filter, str):
-        fail("name must be a string")
-    needle = name_filter.lower() if name_filter else None
+        fail("name must be a string: a case-insensitive regex over the file name")
+    pattern = None
+    if name_filter:
+        try:
+            pattern = re.compile(name_filter, re.I)
+        except re.error as exc:
+            fail("name is not a valid regex", name=name_filter, reason=str(exc))
 
     try:
-        with open(path, "rb") as fh:
-            data = fh.read()
+        fh = open(path, "rb")
+        size = os.fstat(fh.fileno()).st_size
     except OSError as exc:
         fail("could not read the journal", path=path, reason=str(exc))
-
-    if len(data) < 0x3C:
-        fail("too short to hold a record", bytes=len(data))
-
-    # The sparse front of $J is zeros. Walk forward to the first record whose
-    # length and version are plausible, and report where that was.
-    start = 0
-    while start + 0x3C <= len(data):
-        length, major = struct.unpack_from("<IH", data, start)
-        if 0x3C <= length <= 0x10000 and major == 2:
-            break
-        start += 8
-    else:
-        fail("no USN_RECORD_V2 found", bytes=len(data), hint="is this the $J stream rather than $Max?")
+    if size < HEAD[2]:
+        fail("too short to hold a record", bytes=size)
+    try:
+        data = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
+    except (OSError, ValueError) as exc:
+        fail("could not map the journal", path=path, reason=str(exc))
 
     records = LosslessPage("usn_journal", [path, name_filter], limit)
-    offset = start
-    skipped = 0
-    while offset + 0x3C <= len(data):
-        length, major, minor = struct.unpack_from("<IHH", data, offset)
-        if length == 0:
+    versions = {}
+    start = None
+    read = skipped = zeros = 0
+    offset = 0
+    while offset < size:
+        # The sparse front, and the zeros that pad the end of each page.
+        ahead = next_nonzero(data, offset, size)
+        zeros += ahead - offset
+        offset = ahead
+        if offset >= size:
+            break
+        found = record_at(data, offset, size)
+        if found is None:
+            # Before the first record this is the search for it; after it, a
+            # stretch that is not a record, counted and stepped over.
+            if start is not None:
+                skipped += 1
             offset += 8
             continue
-        if not (0x3C <= length <= 0x10000) or major != 2 or offset + length > len(data):
-            skipped += 1
-            offset += 8
-            continue
-        ref, parent, usn, stamp, reason, source, sec, attrs, name_len, name_off = struct.unpack_from(
-            "<QQQqIIIIHH", data, offset + 0x08
-        )
-        name = ""
-        if 0 < name_len and name_off + name_len <= length:
-            name = data[offset + name_off:offset + name_off + name_len].decode("utf-16-le", "replace")
-        if needle is None or needle in name.lower():
-            records.add({
-                "usn": usn,
-                "timestamp": filetime(stamp),
-                "name": name,
-                "file_reference": ref & 0x0000FFFFFFFFFFFF,
-                "file_sequence": ref >> 48,
-                "parent_reference": parent & 0x0000FFFFFFFFFFFF,
-                "reason": flags(reason, REASONS),
-                "reason_raw": reason,
-                "attributes": flags(attrs, ATTRIBUTES),
-                "offset": offset,
-            })
-        offset += length
+        if start is None:
+            start = offset
+        row = found["row"]
+        read += 1
+        versions[str(row["version"])] = versions.get(str(row["version"]), 0) + 1
+        if pattern is None or (row["name"] is not None and pattern.search(row["name"])):
+            records.add(row)
+        offset += found["length"]
+    data.close()
+    fh.close()
+
+    if start is None:
+        fail("no USN record (v2, v3 or v4) found", bytes=size, zero_bytes=zeros,
+             hint="is this the $J stream rather than $Max?")
 
     page = records.finish()
-    print(json.dumps({
+    result = {
         "path": path,
-        "bytes": len(data),
+        "bytes": size,
         "first_record_offset": start,
+        "zero_bytes_skipped": zeros,
+        "records_read": read,
+        "records_by_version": versions,
+        "name_filter": name_filter,
         "records": records.page,
         "record_count": page["matched"],
         "malformed_skipped": skipped,
         **page,
-    }, indent=2))
+    }
+    if pattern is not None and not page["matched"]:
+        result["note"] = ("%d records were read and none has a file name matching %r "
+                          "(a case-insensitive regex); the journal is not empty" % (read, name_filter))
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":
