@@ -6,6 +6,34 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: a ledger that interprets, answers the critic checks, and a gate that names the fix (ledger v4)
+
+- **Findings interpret.** A finding carries `indicates` (what the observation
+  means), `confidence_why` (the quality of the evidence, not a count of
+  artefacts), `alternatives` or `alternatives_none_why` when it is inferred,
+  and `qualifies` when it rests on a job that did not succeed; `basis` and
+  `confidence` are required. The hub writes a canonical `method` record of
+  each cited job or import into the entry and its core.
+- **Answers are entries.** `record(kind=answer)` per question of the goal,
+  plus a summary and a narrative, citing entries by hash; every claimed
+  support is checked at record, a token check marks what no cited entry
+  holds, and an answer stops standing when what it rests on is superseded or
+  disputed, transitively.
+- **Acts.** `attest` (how an entry was re-derived, inside the hashed line;
+  attestations version 2) and `dispute` (its own chain,
+  `ledger/disputes.jsonl`), hub-written.
+- **The gate at done.** `check-answers.ts` reads the ledger's answers when no
+  `--report` is given; the finish line hands a failing check's output back,
+  so the first `done` is told each defect and its fix and the next passes
+  once a limitation names each one left. Every library goal names the report
+  author and the critic, the answer entries and the critic's acts; the
+  `SIGN-OFF:` post is gone from them.
+- **Old ledgers verify as they did**: explicit version dispatch keeps the v2
+  and v3 cores byte for byte, an unknown version is refused, and custody
+  holds every chained entry of any version to the trace.
+- `tests/fixtures/ledger-v4/` is a small run with every kind and act, for
+  the report renderer to build against.
+
 ### Changed: every image profile reviewed as a DFIR examiner would (Codex)
 
 - Each of the nine profiles (base, disk, memory, linux, mobile, network, re,

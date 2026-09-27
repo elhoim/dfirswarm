@@ -123,7 +123,7 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--allow-oauth-in-vm` | no | off | Let a subscription (OAuth) provider into the VMs. Refused otherwise under `--isolation microvm`: a subscription token is the operator's account at the provider, and the VM that holds its placeholder could use it beyond inference (an Anthropic token can create API keys; a Codex token is the ChatGPT account). An API key needs no flag, but it is not limited to inference either: its placeholder reaches every endpoint on the provider's host, so the VM can do there whatever that key may do (files, batches, fine-tuning, where the provider allows them). The refresh endpoint is never bound either way, since the guest never refreshes. Recorded as `isolation.oauth_allowed`. |
 | `--inputs-copy` | no | off | Under `--isolation microvm`, copy `--inputs` into the run, read-only, instead of mounting the directory in place: a second layer for evidence the examiner's own account can write (the kickoff warns when it can), and the way to bring in files the directory only links to. The manifest records `held: copy`. |
 
-What `start` does, in order, for a host run (`--isolation host`): read and validate the goal document (no definition of done, no swarm) → allocate id → resolve the sandbox path and reset per-run files, including `work/` → render `SWARM.md` → write `team.json` + `budget.json` → copy `prompts/worker-system.md` to `<sandbox>/.pi/SYSTEM.md` → registry `prepared` → check `herdr`, `pi`, `jq` → check the credential store → start netguard sidecar + shim → `herdr workspace create --cwd <sandbox>` → pane grid (`√N` columns, max 5; new tab at `SWARM_PANES_PER_TAB`, default 30; new workspace if tab create fails) → `herdr agent start <id> --kind pi --pane <p> -- --approve --name <id> --session-dir <sandbox>/.pi-sessions/<id> -e extensions/agent-swarm.ts --tools read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,thread_open,thread_join,inputs,name,record,ledger,done --model <model>` for each agent (with `--allow-tool-forging` the list travels in `SWARM_TOOLS` instead, so `make_tool`, `tools` and every forged tool can join it) → `herdr agent prompt <id> "Join swarm <id>. …"` → write `layout.json` → registry `running`.
+What `start` does, in order, for a host run (`--isolation host`): read and validate the goal document (no definition of done, no swarm) → allocate id → resolve the sandbox path and reset per-run files, including `work/` → render `SWARM.md` → write `team.json` + `budget.json` → copy `prompts/worker-system.md` to `<sandbox>/.pi/SYSTEM.md` → registry `prepared` → check `herdr`, `pi`, `jq` → check the credential store → start netguard sidecar + shim → `herdr workspace create --cwd <sandbox>` → pane grid (`√N` columns, max 5; new tab at `SWARM_PANES_PER_TAB`, default 30; new workspace if tab create fails) → `herdr agent start <id> --kind pi --pane <p> -- --approve --name <id> --session-dir <sandbox>/.pi-sessions/<id> -e extensions/agent-swarm.ts --tools read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,done --model <model>` for each agent (with `--allow-tool-forging` the list travels in `SWARM_TOOLS` instead, so `make_tool`, `tools` and every forged tool can join it) → `herdr agent prompt <id> "Join swarm <id>. …"` → write `layout.json` → registry `running`.
 
 In a microVM run (the default) the order differs: before anything is written the host is probed and the image pulled when it is missing (`scripts/vm.ts probe`, `pull`); `--toolbox` and then `--catalog` run in a throwaway VM of the run's image rather than on the host (in the catalog's VM only `catalog/` is writable; the rest of the run is read-only there, the evidence read-only and no-exec, and it has no network but the run's `--allow-host` entries, which is how Volatility reaches a symbol server, or every public host under `--no-netguard`; `scripts/vm.ts catalog`), the collector and then the hub start, the VMs are created in parallel and each one's own probe must say the floor is read-only, its holes writable, the evidence read-only, the hub reachable and Pi running (`vm/<id>.json`), or the kickoff stops; then the pane grid, and in each pane `msb exec -t dfs-<run>-<id> -- /.msb/scripts/dfirswarm-pi <the same Pi arguments>`, which bridges the hub link and starts Pi with the kickoff as its first message. The idle watchdog asks the hub, not Herdr, who is working, and prompts through it.
 
@@ -235,13 +235,22 @@ closed and a time limit, so one that reads a FIFO an agent left behind cannot
 hang the wait. `SWARM_HARNESS` names the harness in a check, for the checks it
 ships:
 
-- `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --report work/report.md --sections 1,2,3`
-  passes when each named section (`## 1.` …) cites (`#12`, `E-12`, `#10–#12`)
-  at least one standing finding whose refs all resolve, or one search that
-  found nothing (`kind=absence`), and names each section that does not, with
-  why. It asks for an answer resting on the run's objects, or a search that
-  says where it looked; it does not ask how sure the swarm was, which would
-  teach a swarm to say it is sure.
+- `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,summary,narrative`
+  reads the ledger's answers (`kind=answer`, ledger version 4): each named
+  question (`question:1` …), the summary and the narrative has its standing
+  answer, resting on a finding whose refs resolve, a complete search or a
+  limitation; no answer has lost its support (an entry it rests on
+  superseded or disputed since, transitively); a critic other than its
+  author has attested or disputed each; and no contradiction stands that no
+  answer weighs. Each defect is printed with its fix, and one that a
+  limitation names lets the run end (the check still lists it).
+  `--sections-in inputs/CASE.md` takes a brief's numbered questions. It does
+  not ask how sure the swarm was, which would teach a swarm to say it is
+  sure. With `--report work/report.md --sections 1,2,3` it checks a report
+  instead, as goals did before version 4: each named section (`## 1.` …)
+  cites (`#12`, `E-12`, `#10–#12`) at least one standing finding whose refs
+  all resolve, or one search that found nothing (`kind=absence`), and names
+  each section that does not, with why.
 
 A failing check is not fatal: the swarm may still be working, so it keeps
 polling until `--timeout`. Exit 1 on that timeout, or immediately when the
