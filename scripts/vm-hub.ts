@@ -144,6 +144,8 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   threadOpen: { bucket: "post", capacity: 40, perSecond: 0.5 },
   claimName: { bucket: "post", capacity: 40, perSecond: 0.5 },
   recordEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  attestEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  disputeEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
   // Each done that would end the swarm runs the operator's finish line on
   // the host: a few in a row, then one a minute.
   markDone: { bucket: "done", capacity: 3, perSecond: 1 / 60 },
@@ -186,7 +188,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "jobSubmit", "catalogRequest"]);
+const AUDITED = new Set(["markDone", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -589,6 +591,9 @@ export function boardTable(hub: {
     readInbox: (who, a) => P.readInbox(as(who), (a[1] as never) ?? {}),
     readNames: () => P.readNames(S),
     recordEntry: (who, a) => P.recordEntry(as(who), a[1] as never),
+    // The acts on the ledger are the hub's to write, as its entries are.
+    attestEntry: (who, a) => P.attestEntry(as(who), a[1] as never),
+    disputeEntry: (who, a) => P.disputeEntry(as(who), a[1] as never),
     recordFileVersion: async (who, a) => {
       const { key, owner } = await holeOf(String(a[1] ?? ""));
       if (owner && owner !== who) throw new Error(`${key} is ${owner}'s own directory; a seat records its own files`);
@@ -2314,6 +2319,12 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
       // the ledger to it.
       const entry = isObject(result.entry) ? result.entry : {};
       return { ok: result.ok, seq: entry.seq, merged: result.merged, ...(typeof entry.hash === "string" ? { hash: entry.hash } : {}) };
+    }
+    case "attestEntry":
+    case "disputeEntry": {
+      // The act's line hash, on the harness's own line, as an entry's is.
+      const line = isObject(result.line) ? result.line : {};
+      return { ok: result.ok, seq: line.seq, act: line.act, appended: result.appended, ...(typeof line.hash === "string" ? { hash: line.hash } : {}), ...(typeof line.target === "string" ? { target: line.target } : {}) };
     }
     default:
       return {};

@@ -59,7 +59,7 @@ function refused(err: unknown): boolean {
 type Pending = { fn: string; socket: Socket; answered: () => void; resolve: (value: unknown) => void; reject: (err: Error) => void };
 
 /** Calls that change the board, sent once more with the same request id when a link drops. */
-const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus"]);
+const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus"]);
 
 /** Timings a test shortens; the defaults are the run's. */
 export type HubClientTimings = { partTimeoutMs?: number; writeStallMs?: number };
@@ -339,10 +339,12 @@ function remote<F extends AnyFn>(name: string, local: F): F {
  */
 export const REMOTE_FUNCTIONS = [
   "applySessionUsage",
+  "attestEntry",
   "catalogRequest",
   "claimFile",
   "claimName",
   "correctionsAfter",
+  "disputeEntry",
   "fileDiff",
   "forgeTool",
   "forgedToolSeal",
@@ -547,6 +549,8 @@ export const readBudgetStatus = remote("readBudgetStatus", P.readBudgetStatus);
 export const readInbox = remote("readInbox", P.readInbox);
 export const readNames = remote("readNames", P.readNames);
 export const recordEntry = remote("recordEntry", P.recordEntry);
+export const attestEntry = remote("attestEntry", P.attestEntry);
+export const disputeEntry = remote("disputeEntry", P.disputeEntry);
 export const releaseAllOwned = remote("releaseAllOwned", P.releaseAllOwned);
 export const releaseFile = remote("releaseFile", P.releaseFile);
 export const swarmDoneExists = remote("swarmDoneExists", P.swarmDoneExists);

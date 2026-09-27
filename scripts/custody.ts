@@ -1394,7 +1394,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
         if (!line.trim()) continue;
         try {
           const e = JSON.parse(line) as { v?: number; seq?: number; hash?: string };
-          if (e.v === 2) {
+          if (typeof e.v === "number" && e.v >= 2) {
             seenV2 = true;
             if (!e.hash || !recordHashes.has(e.hash)) notOnTrace.push(Number(e.seq));
           } else if (seenV2) notOnTrace.push(Number(e.seq));

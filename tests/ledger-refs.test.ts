@@ -13,6 +13,9 @@ import { join } from "node:path";
 import { initSandbox, ledgerCore, listLedger, readLedger, recordEntry, verifyLedgerChain, type LedgerEntry } from "../extensions/protocol.ts";
 import { sealTree, storePaths } from "../scripts/evidence-store.ts";
 
+/** What a finding carries from version 4 on: how it was seen, how sure and why, what it indicates. */
+const F = { basis: "observed", confidence: "medium", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
+
 async function run() {
   const root = await mkdtemp(join(tmpdir(), "ledger-refs-"));
   await initSandbox(root, { reset: true, agentIds: ["a0", "a1"] });
@@ -27,28 +30,28 @@ async function run() {
 
 test("refs are checked when written, and a typo is refused with the nearest names", async () => {
   const { root, a0 } = await run();
-  const ok = await recordEntry(a0, { kind: "finding", value: "The key is 1234", source: "the job's report", evidence: "cat", refs: ["job:j000001/report/out.txt", "input:disk.E01"], confidence: "high" });
+  const ok = await recordEntry(a0, { kind: "finding", ...F, value: "The key is 1234", source: "the job's report", evidence: "cat", refs: ["job:j000001/report/out.txt", "input:disk.E01"], confidence: "high" });
   assert.ok(ok.ok, (ok as { reason?: string }).reason);
   const entry = (ok as { entry: LedgerEntry }).entry;
   assert.deepEqual(entry.refs, ["job:j000001/report/out.txt", "input:disk.E01"]);
   assert.equal((ok as { note?: string }).note, undefined, "a finding with refs needs no note");
   assert.match(ledgerCore(entry), /"refs":\["job:j000001\/report\/out.txt","input:disk.E01"\]/, "the refs are in the chained core");
-  const typo = await recordEntry(a0, { kind: "finding", value: "Another", source: "s", evidence: "e", refs: ["job:j000001/report/outt.txt"] });
+  const typo = await recordEntry(a0, { kind: "finding", ...F, value: "Another", source: "s", evidence: "e", refs: ["job:j000001/report/outt.txt"] });
   assert.equal(typo.ok, false);
   assert.match((typo as { reason: string }).reason, /is not in job j000001's manifest; nearest: job:j000001\/report\/out\.txt/);
-  const input = await recordEntry(a0, { kind: "finding", value: "Another", source: "s", evidence: "e", refs: "input:dsk.E01" });
+  const input = await recordEntry(a0, { kind: "finding", ...F, value: "Another", source: "s", evidence: "e", refs: "input:dsk.E01" });
   assert.match((input as { reason: string }).reason, /not in inputs\.json; nearest: input:disk\.E01/);
-  const job = await recordEntry(a0, { kind: "finding", value: "Another", source: "s", evidence: "e", refs: ["job:j000002/report/out.txt"] });
+  const job = await recordEntry(a0, { kind: "finding", ...F, value: "Another", source: "s", evidence: "e", refs: ["job:j000002/report/out.txt"] });
   assert.match((job as { reason: string }).reason, /has no sealed manifest; nearest: job:j000001/);
-  assert.equal((await recordEntry(a0, { kind: "finding", value: "Another", source: "s", evidence: "e", refs: ["unresolved:"] })).ok, false, "unresolved: needs its why");
-  assert.equal((await recordEntry(a0, { kind: "finding", value: "Another", source: "s", evidence: "e", refs: Array.from({ length: 21 }, (_, i) => `unresolved:${i}`) })).ok, false, "at most 20 refs");
+  assert.equal((await recordEntry(a0, { kind: "finding", ...F, value: "Another", source: "s", evidence: "e", refs: ["unresolved:"] })).ok, false, "unresolved: needs its why");
+  assert.equal((await recordEntry(a0, { kind: "finding", ...F, value: "Another", source: "s", evidence: "e", refs: Array.from({ length: 21 }, (_, i) => `unresolved:${i}`) })).ok, false, "at most 20 refs");
   // A job's sealed log, and the path as the store shows it (out/…), are refs too.
-  const logs = await recordEntry(a0, { kind: "finding", value: "The job printed the key", source: "stdout", evidence: "cat", refs: ["job:j000001/stdout.log", "job:j000001/out/report/out.txt"] });
+  const logs = await recordEntry(a0, { kind: "finding", ...F, value: "The job printed the key", source: "stdout", evidence: "cat", refs: ["job:j000001/stdout.log", "job:j000001/out/report/out.txt"] });
   assert.equal(logs.ok, false, "this job was sealed without logs: its stdout.log does not resolve");
   await writeFile(join(storePaths(root).jobs, "j000001", "stdout.log"), "key 1234\n");
-  const logs2 = await recordEntry(a0, { kind: "finding", value: "The job printed the key", source: "stdout", evidence: "cat", refs: ["job:j000001/stdout.log", "job:j000001/out/report/out.txt"] });
+  const logs2 = await recordEntry(a0, { kind: "finding", ...F, value: "The job printed the key", source: "stdout", evidence: "cat", refs: ["job:j000001/stdout.log", "job:j000001/out/report/out.txt"] });
   assert.ok(logs2.ok, (logs2 as { reason?: string }).reason);
-  const why = await recordEntry(a0, { kind: "finding", value: "The page was only on screen", source: "s", evidence: "e", refs: ["unresolved:seen in a screenshot the agent could not seal"] });
+  const why = await recordEntry(a0, { kind: "finding", ...F, value: "The page was only on screen", source: "s", evidence: "e", refs: ["unresolved:seen in a screenshot the agent could not seal"] });
   assert.ok(why.ok, "a ref may say why no object can be named");
   const md = await readFile(join(root, "ledger", "ledger.md"), "utf8");
   assert.match(md, /refs: `job:j000001\/report\/out\.txt`, `input:disk\.E01`/);
@@ -56,20 +59,20 @@ test("refs are checked when written, and a typo is refused with the nearest name
 
 test("a finding without refs is taken with a note; recorded again with refs, it becomes the correction; the chain holds and tampering breaks it", async () => {
   const { root, a0, a1 } = await run();
-  const bare = await recordEntry(a0, { kind: "finding", value: "The key is 1234", source: "a report", evidence: "cat" });
+  const bare = await recordEntry(a0, { kind: "finding", ...F, value: "The key is 1234", source: "a report", evidence: "cat" });
   assert.ok(bare.ok);
   assert.match((bare as { note?: string }).note ?? "", /no object of the run cited: add refs/);
-  const scratch = await recordEntry(a0, { kind: "finding", value: "The runlist has 65 extents", source: "work/a0/vdi_runlist.tsv (SHA-256 44a0…)", evidence: "decoded from the $LogFile" });
+  const scratch = await recordEntry(a0, { kind: "finding", ...F, value: "The runlist has 65 extents", source: "work/a0/vdi_runlist.tsv (SHA-256 44a0…)", evidence: "decoded from the $LogFile" });
   assert.match((scratch as { note?: string }).note ?? "", /work\/a0\/vdi_runlist\.tsv is a file in an agent's own work\/.*seal it with job_run import=work\/a0\/vdi_runlist\.tsv/, "a finding resting on a work/ file is told so, by name");
-  const withRefs = await recordEntry(a1, { kind: "finding", value: "The key is 1234", source: "the job's report", evidence: "cat", refs: ["job:j000001/report/out.txt"] });
+  const withRefs = await recordEntry(a1, { kind: "finding", ...F, value: "The key is 1234", source: "the job's report", evidence: "cat", refs: ["job:j000001/report/out.txt"] });
   assert.ok(withRefs.ok);
   const fix = (withRefs as { entry: LedgerEntry; merged: boolean }).entry;
   assert.equal((withRefs as { merged: boolean }).merged, false, "the refs cannot be merged into a core that has none");
   assert.equal(fix.supersedes, 1, "it corrects the entry without refs");
-  const again = await recordEntry(a0, { kind: "finding", value: "The key is 1234", source: "the job's report", evidence: "cat", refs: ["job:j000001/report/out.txt"] });
+  const again = await recordEntry(a0, { kind: "finding", ...F, value: "The key is 1234", source: "the job's report", evidence: "cat", refs: ["job:j000001/report/out.txt"] });
   assert.equal((again as { merged: boolean }).merged, true, "the same entry again, word for word: an attestation of the one that stands");
   assert.equal((again as { entry: LedgerEntry }).entry.seq, fix.seq);
-  const other = await recordEntry(a0, { kind: "finding", value: "The key is 1234", source: "x", evidence: "y", refs: ["job:j000001/report/other.txt"] });
+  const other = await recordEntry(a0, { kind: "finding", ...F, value: "The key is 1234", source: "x", evidence: "y", refs: ["job:j000001/report/other.txt"] });
   assert.equal((other as { merged: boolean }).merged, false, "other refs are their own entry, never dropped");
   assert.match((other as { note?: string }).note ?? "", /#3 says the same sentence .* supersedes=3/, "and told of the other");
   const entries = await listLedger(root, {});
