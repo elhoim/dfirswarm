@@ -141,7 +141,13 @@ export function Vital({
       <span className="label-caps text-band-ink-2">{label}</span>
       <span className={cn("serif text-[30px] leading-none tabular", tone === "brick" && "text-band-brick", tone === "saffron" && "text-saffron")}>
         {value}
-        {tail ? <span className="ml-1.5 text-[16px] text-band-ink-2">{tail}</span> : null}
+        {/* A tail wraps whole, flush under the figure, rather than breaking mid-phrase ("done · 1" | "unfinished"): a space, not a margin, sets it off. */}
+        {tail ? (
+          <>
+            {" "}
+            <span className="inline-block text-[16px] text-band-ink-2">{tail}</span>
+          </>
+        ) : null}
       </span>
       {meter}
       {sub ? <span className="text-[12px] text-band-ink-2">{sub}</span> : null}
