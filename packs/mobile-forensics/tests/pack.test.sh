@@ -60,12 +60,15 @@ PY
 
 IOS_TARGET="$(python3 -c 'import json,sys; print(json.dumps({"paths":[sys.argv[1]]}))' "$WORK/ios.tar")"
 python3 "$PACK/recipes/ios-filesystem/run.py" detect --target "$IOS_TARGET" | grep -q '"applies": true'
+# As the kickoff's census asks: with a directory for what the probe keeps.
+python3 "$PACK/recipes/ios-filesystem/run.py" detect --target "$IOS_TARGET" --probe-out "$WORK/ios-probe" | grep -q '"applies": true'
 python3 "$PACK/recipes/ios-filesystem/run.py" run --target "$IOS_TARGET" --out "$WORK/ios-out" >/dev/null
 jq -e '.status == "complete" and .categories["biome-segb"] == 1 and .categories["unified-log"] == 1' "$WORK/ios-out/coverage.json" >/dev/null
 grep -q $'private/var/mobile/Library/SMS/sms.db\t16\t3\t' "$WORK/ios-out/sqlite.tsv"
 
 AB_TARGET="$(python3 -c 'import json,sys; print(json.dumps({"paths":[sys.argv[1]]}))' "$WORK/android.ab")"
 python3 "$PACK/recipes/android-backup/run.py" detect --target "$AB_TARGET" | grep -q '"applies": true'
+python3 "$PACK/recipes/android-backup/run.py" detect --target "$AB_TARGET" --probe-out "$WORK/ab-probe" | grep -q '"applies": true'
 python3 "$PACK/recipes/android-backup/run.py" run --target "$AB_TARGET" --out "$WORK/ab-out" >/dev/null
 jq -e '.status == "complete" and .covered == "3 embedded tar members"' "$WORK/ab-out/coverage.json" >/dev/null
 [[ "$(($(wc -l < "$WORK/ab-out/members.tsv") - 1))" -eq 3 ]]

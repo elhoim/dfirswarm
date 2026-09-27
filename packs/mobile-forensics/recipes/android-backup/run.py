@@ -165,6 +165,12 @@ def main():
     parser.add_argument("command", choices=("detect", "run"))
     parser.add_argument("--target", required=True)
     parser.add_argument("--out")
+    # The kickoff's census asks every detect step with --probe-out DIR, a
+    # place for what the probe wants kept (evidence_catalog.py). Refused here,
+    # it was a usage error (exit 2) for every input of a run, and a phone's
+    # tar was catalogued as a member list only. Detect reads the backup's header
+    # and keeps nothing, so the directory is taken and left empty.
+    parser.add_argument("--probe-out")
     args = parser.parse_args()
     try:
         path = target_of(args.target)

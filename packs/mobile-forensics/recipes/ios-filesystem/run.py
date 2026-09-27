@@ -77,11 +77,24 @@ def sqlite_base(path):
     return None, None
 
 
+def tar_mode(path):
+    """How to open the tar: a compressed one by its magic, in stream mode, and
+    a plain one header to header. tarfile's "r:*" tries every decompressor in
+    turn, and the LZMA one reads a run of zeros as a stream: 64 MiB of them
+    took it half a minute, and the census asks this recipe about every input,
+    disk and memory images that start with zeros included."""
+    with open(path, "rb") as fh:
+        head = fh.read(6)
+    if head[:2] == b"\x1f\x8b" or head[:3] == b"BZh" or head[:6] == b"\xfd7zXZ\x00":
+        return "r|*"
+    return "r:"
+
+
 def detect(path):
     if not os.path.isfile(path):
         return False, "not a readable file"
     try:
-        with tarfile.open(path, "r:*") as archive:
+        with tarfile.open(path, tar_mode(path)) as archive:
             for member in archive:
                 low = member.name.lower().lstrip("./")
                 if any(marker in low for marker in IOS_MARKERS):
@@ -100,7 +113,7 @@ def run(path, out):
     members = 0
     errors = []
     try:
-        with tarfile.open(path, "r:*") as archive:
+        with tarfile.open(path, tar_mode(path)) as archive:
             for member in archive:
                 members += 1
                 name = member.name.lstrip("./")
@@ -153,6 +166,12 @@ def main():
     parser.add_argument("command", choices=("detect", "run"))
     parser.add_argument("--target", required=True)
     parser.add_argument("--out")
+    # The kickoff's census asks every detect step with --probe-out DIR, a
+    # place for what the probe wants kept (evidence_catalog.py). Refused here,
+    # it was a usage error (exit 2) for every input of a run, and a phone's
+    # tar was catalogued as a member list only. Detect reads tar headers
+    # and keeps nothing, so the directory is taken and left empty.
+    parser.add_argument("--probe-out")
     args = parser.parse_args()
     try:
         _, path = target_of(args.target)
