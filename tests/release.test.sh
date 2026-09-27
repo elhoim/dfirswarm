@@ -150,4 +150,15 @@ jq -e '.runs[] | select(.label == "m3") | .anchor_mirror == "print"' "$RUNS/regi
 grep -q '"command":"releases"' "$RUNS/operator-audit.jsonl" && grep -q '"command":"examiner"' "$RUNS/operator-audit.jsonl" || fail "releases and examiner are not on the operator's audit"
 pass "--anchor-mirror is checked and recorded; releases and examiner are on the operator's audit"
 
+echo "# rerun: a finished run's sealed job, refused with why when it cannot be"
+set +e
+out="$(swarm rerun s9 notajob)"; rc=$?
+set -e
+[[ $rc -eq 1 ]] && grep -q 'is not a job id' <<<"$out" || fail "rerun took a job id that is none (rc $rc): $out"
+set +e
+out="$(swarm rerun s9 j000001)"; rc=$?
+set -e
+[[ $rc -eq 1 ]] && grep -q 'the run has no store journal: it ran no jobs' <<<"$out" || fail "rerun of a run with no journal (rc $rc): $out"
+pass "rerun names why a job cannot be run again"
+
 echo "release.test.sh: all checks passed"

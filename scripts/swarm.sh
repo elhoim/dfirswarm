@@ -106,7 +106,7 @@ Commands:
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   review verify export hold release purge image-for   After a run: sign-off, checks, export, retention; the image packs boot (help <command>)
-  releases examiner timestamp   The report's releases, the examiners who adopt them, a token obtained later (help <command>)
+  releases examiner timestamp rerun   The report's releases, the examiners who adopt them, a token obtained later, a job run again (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
   say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> changes its caps (help cap)
   stop <id>          Stop a run and record how it ended
@@ -8697,6 +8697,35 @@ cmd_timestamp() {
   node --experimental-strip-types --no-warnings "$ROOT/scripts/release.ts" timestamp "$sandbox" --run "$id" --runs "$RUNS_DIR" ${extra[@]+"${extra[@]}"}
 }
 
+# A sealed job run again (scripts/rerun.ts): its recorded spec through the
+# job service's worker path, in the image it ran in, held to the digest the
+# journal recorded; its outputs in <sandbox>.reruns/<job>/<n>/, never in the
+# store, compared by their bytes with the sealed ones. Exit 0 when they are
+# the same, 4 when a file differs (an equivalence under --normalise is said
+# apart and does not change it), 1 when it could not be run.
+cmd_rerun() {
+  local id="${1:-}" job="${2:-}" extra=()
+  [[ -n "$id" && "$id" != -* && -n "$job" && "$job" != -* ]] || die_usage "rerun requires <id> <job> [--normalise timestamps@1] [--network] [--json]"
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --normalise|--normalize) extra+=(--normalise "$2"); shift 2 ;;
+      --network|--json) extra+=("$1"); shift ;;
+      *) die_usage "rerun: unknown option $1" ;;
+    esac
+  done
+  ensure_registry
+  local rec sandbox
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "BLOCKER: run $id's sandbox is not there." >&2; exit 2; }
+  case "$(jq -r '.state // empty' <<<"$rec")" in
+    running|prepared|finishing) echo "BLOCKER: run $id is still running; a sealed job is run again once the run has ended." >&2; exit 2 ;;
+  esac
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/rerun.ts" "$sandbox" "$job" --run "$id" --runs "$RUNS_DIR" ${extra[@]+"${extra[@]}"}
+}
+
 # The examiners enrolled on this install (scripts/signers.ts), outside every
 # run: who may adopt a report and sign its release. `machine` shows the
 # install's machine key, which seals the drafts and is no examiner.
@@ -8957,6 +8986,20 @@ register, checked in person, is what ties the key to the person. `machine` shows
 machine key, which seals the drafts and is no examiner.
 EOF
       ;;
+    rerun) cat <<'EOF'
+  rerun <id> <job> [--normalise timestamps@1] [--network] [--json]
+Runs a sealed job again: its recorded spec through the job service's own worker path, in the image
+it ran in, held to the image digest the journal recorded (another digest here is refused, never
+substituted) and to the tool's or recipe's sha256. The outputs go to <sandbox>.reruns/<job>/<n>/,
+never into the run's store, and each is compared by its bytes with the sealed manifest: the same,
+different (both hashes), not made, or added; stdout and stderr too. A byte mismatch is a mismatch.
+--normalise NAME@VERSION, asked for, says which of the files that differ are equal once that named,
+versioned normalisation is applied to both (timestamps@1: ISO 8601 and RFC 2822 date-times), apart
+from the verdict: an equivalence, never a reproduction. The rerun has no network unless --network
+gives it the job's own. Not re-run: which bytes the job read (not measured), what it fetched, an
+import (a live copy), the reasoning that asked for it. Exit 0 the same, 4 a file differs, 1 not run.
+EOF
+      ;;
     timestamp) echo "  timestamp <id> [--version N] [--tsa-url URL] [--tsa-ca FILE]   an RFC 3161 token over the latest release's signature, obtained now (an air-gapped lab's later step): the release's proof of existence dates from the token, and timestamp.json says so; --tsa-ca checks the authority's signature (exit 0 verified, 3 imprint only, 4 does not verify)" ;;
     custody-verify) cat <<'EOF'
   custody-verify <id> [--allowed-signers FILE --identity NAME] [--tsa-ca FILE] [--scratch DIR] [--json]
@@ -9013,7 +9056,7 @@ main() {
   # What changes or leaves a run is on the operator's record; what only reads
   # it (list, status, summary, context, help) is not.
   case "$cmd" in
-    start|stop|reap|say|cap|package|report|tools|review|export|hold|release|purge|verify|releases|examiner|timestamp)
+    start|stop|reap|say|cap|package|report|tools|review|export|hold|release|purge|verify|releases|examiner|timestamp|rerun)
       # A start --check writes nothing, the audit included.
       case " $* " in *" -h "*|*" --help "*|*" --check "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
   esac
@@ -9043,6 +9086,7 @@ main() {
     releases) cmd_releases "$@" ;;
     examiner) cmd_examiner "$@" ;;
     timestamp) cmd_timestamp "$@" ;;
+    rerun) cmd_rerun "$@" ;;
     help) cmd_help "$@" ;;
     *) die_usage "unknown command: $cmd" ;;
   esac
