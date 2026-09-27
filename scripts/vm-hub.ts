@@ -518,16 +518,22 @@ export function boardTable(hub: {
   // (runFinishLine: its VM does not see the trace the checks read) and then
   // calls markDone; markDone takes that same run when it met the finish line
   // moments ago, so one done is one run of the operator's checks. Only the
-  // seat's own run, and only a passing one: a run that refused is run again.
-  type FinishLine = Awaited<ReturnType<typeof P.runFinishLine>> | null;
+  // seat's own run, only a passing one, and only while the state it was run
+  // against still stands (P.stateRevision: the board, the ledger, the review
+  // and the leads); a run that refused, or one the state moved past, is run
+  // again. Each run carries the revision taken before it started.
+  type FinishLine = { run: Awaited<ReturnType<typeof P.runFinishLine>> | null; revision: string };
   let finishLine: Promise<FinishLine> | null = null;
-  const askedBy = new Map<string, { run: FinishLine; at: number }>();
+  const askedBy = new Map<string, FinishLine & { at: number }>();
+  const revisionNow = async () => (await P.stateRevision(S).catch(() => ({ revision: "" }))).revision;
   const sharedFinishLine = (): Promise<FinishLine> =>
-    (finishLine ??= P.runFinishLine(S)
-      .catch(() => null)
-      .finally(() => {
-        finishLine = null;
-      }));
+    (finishLine ??= (async () => {
+      const revision = await revisionNow();
+      const run = await P.runFinishLine(S).catch(() => null);
+      return { run, revision };
+    })().finally(() => {
+      finishLine = null;
+    }));
   type Call = (who: string, a: unknown[], signal: AbortSignal) => Promise<unknown>;
   const table: Record<string, Call> = {
     applySessionUsage: async (who, a) => {
@@ -635,8 +641,20 @@ export function boardTable(hub: {
       if (endsSwarm && !(await P.swarmDoneExists(S))) {
         const mine = askedBy.get(who);
         askedBy.delete(who);
-        const recent = mine && Date.now() - mine.at <= FINISH_LINE_REUSE_MS && P.finishLineVerdict(mine.run, false).proceed ? mine : null;
-        const run = recent ? recent.run : await sharedFinishLine();
+        const now = await revisionNow();
+        const recent = mine && Date.now() - mine.at <= FINISH_LINE_REUSE_MS && mine.revision === now && P.finishLineVerdict(mine.run, false).proceed ? mine : null;
+        // The revision is checked again just before the sentinel: a run the
+        // state moved under (a dispute, a new lead, an entry) is run again,
+        // a bounded number of times, and a state that never holds still is a
+        // refusal, not a sentinel written on a verdict it no longer matches.
+        let line: FinishLine = recent ?? (await sharedFinishLine());
+        let attempts = recent ? 0 : 1;
+        while ((await revisionNow()) !== line.revision) {
+          if (attempts >= P.FINISH_LINE_ATTEMPTS) throw new Error(P.FINISH_LINE_UNSETTLED);
+          line = await sharedFinishLine();
+          attempts += 1;
+        }
+        const run = line.run;
         const verdict = P.finishLineVerdict(run, false);
         if (!verdict.proceed) throw new Error(`the harness ran the finish line on the host and it is not met: ${verdict.reason}`);
         // How the run ended is the hub's to say, from its own run: a seat's
@@ -656,9 +674,9 @@ export function boardTable(hub: {
     // The operator's finish line for a seat's `done`, answered whole (the
     // refusal is made from it in the seat, as on the host).
     runFinishLine: async (who) => {
-      const run = await sharedFinishLine();
-      askedBy.set(who, { run, at: Date.now() });
-      return run;
+      const line = await sharedFinishLine();
+      askedBy.set(who, { ...line, at: Date.now() });
+      return line.run;
     },
     postMessage: (who, a) => {
       // An agent's post is its own; `via` is the hub's to set.

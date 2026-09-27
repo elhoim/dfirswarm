@@ -9031,6 +9031,81 @@ export function runFinishLine(sandbox: string): Promise<FinishLineRun | null> {
   });
 }
 
+/** The record a finish line reads that is not the goal's own files: where each lives. */
+export const REVISION_FILES = { ledger: LEDGER_ENTRIES, attestations: "ledger/attestations.jsonl", disputes: "ledger/disputes.jsonl", leads: "leads/leads.jsonl" } as const;
+
+/** Tags of a post that can change a verdict: a result, a veto, a hold, a stop. */
+const VERDICT_TAGS = new Set<string>(["result", "veto", "hold", "stop"]);
+/** A post never changes once written, so its tag and sender are read once per process. */
+const postTagCache = new Map<string, { tag: string; from: string }>();
+
+/**
+ * The state a finish line is judged against, as one revision: the board (per
+ * thread, the newest agent post that can change a verdict: a result, a veto,
+ * a hold or a stop; an intro or a claim cannot), the ledger (every byte: a
+ * merge rewrites an entry's authors, and an author may not attest), the
+ * review (the attestations and the disputes) and the leads. A finish line run
+ * against one revision holds only while the revision does: on the VM hub a
+ * passing run was reused for 30 s whatever had changed in between, and a
+ * dispute recorded in that window did not stop the sentinel.
+ */
+export async function stateRevision(sandboxRoot: string): Promise<{ revision: string; parts: Record<string, string> }> {
+  const parts: Record<string, string> = {};
+  const board: Record<string, number> = {};
+  for (const thread of await listThreadNames(sandboxRoot)) {
+    let newest = 0;
+    for (const file of await listPostFiles(sandboxRoot, thread)) {
+      let seen = postTagCache.get(file);
+      if (!seen) {
+        const post = await readPost(file).catch(() => null);
+        if (!post) continue;
+        seen = { tag: post.tag, from: post.from };
+        postTagCache.set(file, seen);
+      }
+      if (seen.from === SYSTEM_AGENT || !VERDICT_TAGS.has(seen.tag)) continue;
+      newest = Math.max(newest, Number.parseInt(basename(file).slice(0, 6), 10) || 0);
+    }
+    if (newest) board[thread] = newest;
+  }
+  parts.board = JSON.stringify(board);
+  for (const [name, rel] of Object.entries(REVISION_FILES)) {
+    const bytes = await readFile(join(sandboxRoot, rel)).catch(() => null);
+    parts[name] = bytes ? `${bytes.length}:${sha256Hex(bytes)}` : "none";
+  }
+  return { revision: sha256Hex(JSON.stringify(parts)), parts };
+}
+
+/** How many times a finish line is run again when the state moved under it, before done is refused. */
+export const FINISH_LINE_ATTEMPTS = 3;
+
+/**
+ * The finish line bound to a revision: the revision taken before the run, the
+ * run, and the revision again after it. A run the state moved under is run
+ * again, up to FINISH_LINE_ATTEMPTS times; `settled` false says it never held
+ * still, and the caller refuses rather than write a sentinel on a verdict the
+ * state no longer matches.
+ */
+export async function runFinishLineBound(
+  sandboxRoot: string,
+  runner: (sandbox: string) => Promise<FinishLineRun | null> = runFinishLine,
+  attempts = FINISH_LINE_ATTEMPTS,
+): Promise<{ run: FinishLineRun | null; revision: string; settled: boolean; runs: number }> {
+  let last: { run: FinishLineRun | null; revision: string } = { run: null, revision: "" };
+  for (let i = 1; i <= attempts; i++) {
+    const before = (await stateRevision(sandboxRoot).catch(() => ({ revision: "" }))).revision;
+    const run = await runner(sandboxRoot).catch(() => null);
+    const after = (await stateRevision(sandboxRoot).catch(() => ({ revision: "" }))).revision;
+    last = { run, revision: before };
+    if (before === after) return { ...last, settled: true, runs: i };
+  }
+  return { ...last, settled: false, runs: attempts };
+}
+
+/** The refusal of a done whose finish line never held still. */
+export const FINISH_LINE_UNSETTLED =
+  `The board, the ledger, the review or the leads changed while the finish line ran, ${FINISH_LINE_ATTEMPTS} times in a row, ` +
+  "so no verdict matches the state a sentinel would close. Read what landed (inbox, ledger, leads), then call done again.";
+
 /**
  * What await-done.sh --checks-json prints: the finish line, run once, right
  * now. What a failing check said (`out`, and `fix` or `output` when a runner

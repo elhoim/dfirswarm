@@ -690,6 +690,65 @@ test("a seat's done gets the finish line from the hub, run on the host whole, an
   ], "each host run of the checks is the harness's own line on the trace");
 });
 
+test("a passing finish line is reused by markDone only while the board, the ledger, the review and the leads stand as it was run against", async () => {
+  const { hub, sandbox, base } = await setup();
+  const was = process.env.SWARM_RUNS_DIR;
+  process.env.SWARM_RUNS_DIR = join(base, "runs");
+  cleanups.push(async () => {
+    if (was === undefined) delete process.env.SWARM_RUNS_DIR;
+    else process.env.SWARM_RUNS_DIR = was;
+  });
+  await registryWithChecks(base, sandbox, ["echo ran >> checks-ran.log; true"]);
+  const runs = async () => (await readFile(join(sandbox, "checks-ran.log"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).length;
+  // The seat's run passes; then a peer disputes something before the seat's
+  // markDone lands. The run no longer matches the state: it is run again.
+  assert.equal((await asVm(hub.socketFor("a0"), () => board.runFinishLine("/v")))?.passed, 1);
+  assert.equal(await runs(), 1);
+  await mkdir(join(sandbox, "ledger"), { recursive: true });
+  await writeFile(join(sandbox, "ledger", "disputes.jsonl"), `${JSON.stringify({ v: 1, act: "dispute", seq: 1, target: "x", by: "a1", at: new Date().toISOString(), why: "late" })}\n`);
+  const done = (await asVm(hub.socketFor("a0"), () => board.markDone({ sandboxRoot: "/v", agentId: "a0" }, { reason: "finished", outputFile: "work/report.md" }))) as { created_sentinel: boolean };
+  assert.equal(done.created_sentinel, true);
+  assert.equal(await runs(), 2, "the review moved after the seat's run: markDone ran the finish line again instead of reusing it");
+});
+
+test("the state revision moves with what a verdict rests on, and not with chatter", async () => {
+  const { sandbox } = await setup();
+  const { stateRevision, runFinishLineBound, FINISH_LINE_ATTEMPTS } = await import("../extensions/protocol.ts");
+  const rev = async () => (await stateRevision(sandbox)).revision;
+  const r0 = await rev();
+  await postMessage(createContext(sandbox, "a0"), { tag: "intro", body: "hello" } as never);
+  await postMessage(createContext(sandbox, "a0"), { tag: "claim", body: "taking the disk" } as never);
+  assert.equal(await rev(), r0, "an intro and a claim change no verdict");
+  await postMessage(createContext(sandbox, "a1"), { tag: "veto", body: "that answer is wrong" } as never);
+  const r1 = await rev();
+  assert.notEqual(r1, r0, "a veto does");
+  await mkdir(join(sandbox, "leads"), { recursive: true });
+  await writeFile(join(sandbox, "leads", "leads.jsonl"), '{"seq":1}\n');
+  const r2 = await rev();
+  assert.notEqual(r2, r1, "a lead does");
+  await mkdir(join(sandbox, "ledger"), { recursive: true });
+  await writeFile(join(sandbox, "ledger", "attestations.jsonl"), '{"v":1}\n');
+  assert.notEqual(await rev(), r2, "an attestation does");
+  // A run the state moves under is run again; one that never holds still is not settled.
+  let n = 0;
+  const moving = async (S: string) => {
+    n += 1;
+    await writeFile(join(S, "leads", "leads.jsonl"), `${"x".repeat(n)}\n`);
+    return { total: 1, passed: 1, checks: [{ cmd: "true", ok: true }] };
+  };
+  const never = await runFinishLineBound(sandbox, moving);
+  assert.deepEqual([never.settled, never.runs, n], [false, FINISH_LINE_ATTEMPTS, FINISH_LINE_ATTEMPTS]);
+  let m = 0;
+  const once = async (S: string) => {
+    m += 1;
+    if (m === 1) await writeFile(join(S, "leads", "leads.jsonl"), "moved once\n");
+    return { total: 1, passed: 1, checks: [{ cmd: "true", ok: true }] };
+  };
+  const settled = await runFinishLineBound(sandbox, once);
+  assert.deepEqual([settled.settled, settled.runs], [true, 2], "moved during the first run, held still during the second");
+  assert.equal(settled.revision, await rev(), "the verdict is bound to the revision it was run against");
+});
+
 test("a seat whose link went down mid-turn is 'gone', not 'working', so the watchdogs act on it", async () => {
   const { hub } = await setup();
   const link = board.openHubLink(hub.socketFor("a0"), () => undefined, { retryMs: 60_000 });

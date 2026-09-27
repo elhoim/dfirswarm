@@ -37,6 +37,9 @@ import {
   agentDeadPath,
   agentDonePath,
   finishLineVerdict,
+  runFinishLineBound,
+  stateRevision,
+  FINISH_LINE_UNSETTLED,
   inboxPageChars,
   classifyTurnError,
   providerErrorPost,
@@ -3204,7 +3207,19 @@ export default function (pi: ExtensionAPI) {
       let reasonPrefix = "";
       let outcome: FinishOutcome | undefined;
       if (!(await swarmDoneExists(toolCtx.cwd))) {
-        const run = await runFinishLine(toolCtx.cwd).catch(() => null);
+        // On the host the finish line is bound to the state it was run
+        // against (stateRevision: the board, the ledger, the review, the
+        // leads): run again while the state moves under it, and checked once
+        // more just before the sentinel. In a VM the hub does both, on the
+        // host's own files, when markDone reaches it.
+        const onHost = !boardSocket();
+        const bound = onHost ? await runFinishLineBound(toolCtx.cwd, runFinishLine) : { run: await runFinishLine(toolCtx.cwd).catch(() => null), revision: "", settled: true, runs: 1 };
+        const unsettled = async () => {
+          await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: FINISH_LINE_UNSETTLED, runs: bound.runs }).catch(() => undefined);
+          return { content: [{ type: "text" as const, text: FINISH_LINE_UNSETTLED }], details: { ok: false, reason: FINISH_LINE_UNSETTLED }, isError: true };
+        };
+        if (!bound.settled) return unsettled();
+        const run = bound.run;
         const verdict = finishLineVerdict(run, params.abandon === true);
         await logEvent(toolCtx.cwd, agentId, "finish_line", { abandon: params.abandon === true }, {
           ok: verdict.proceed,
@@ -3222,6 +3237,7 @@ export default function (pi: ExtensionAPI) {
         }
         reasonPrefix = verdict.reasonPrefix ?? "";
         outcome = verdict.outcome;
+        if (onHost && (await stateRevision(toolCtx.cwd).catch(() => ({ revision: "" }))).revision !== bound.revision) return unsettled();
       }
       const result = await markDone(ctxFrom(toolCtx.cwd, agentId), {
         reason: reasonPrefix + params.reason,
