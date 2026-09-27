@@ -6,6 +6,69 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: the report is released, adopted by a named examiner, and reproducible where it can be
+
+A report now has releases: signed records of which bytes were handed over,
+sealed by whom. Machine custody and human adoption are kept apart in every
+word.
+
+- **The machine's draft at stop.** When custody is taken (the hub's finish,
+  `swarm.sh stop`), `release/v0/` is written: a DRAFT sealed by the
+  install's machine key (made once outside every run; it says it is no
+  examiner), binding the swarm's report as custody sealed it, a rendering
+  of it generated at the release's own time with the DRAFT mark, the
+  custody verdict and its anchor, the sealed index of `work/`, the head and
+  length of the ledger, its attestations and disputes, the journal, the
+  trace and the review, the harness commit, the renderer's sha256 and the
+  models. Refused when the run is not as custody sealed it; once per
+  verdict; its line goes into the anchor beside the run.
+- **Examiners are enrolled.** `swarm.sh examiner enroll` (name,
+  organisation, competence statement, a key given or made only when asked,
+  checked by signing a challenge) prints the fingerprint and the line for
+  the organisation's signer register. The registry's kickoff `examiner`
+  string is no longer shown as the examiner.
+- **Each answer is adopted, qualified, withdrawn or rendered
+  inconclusive** by seq and hash (`review --adopt/--qualify/--reject/
+  --inconclusive`). An answer whose support is defective cannot be adopted
+  or qualified, and a release waits until it is withdrawn or inconclusive;
+  repairing it is a new examination. A technical reviewer's record says
+  who, on what competence, and which methods were checked.
+  `adoptionState()` gives the report body each answer's standing.
+- **The examiner's release.** `review --sign` renders the final bytes (no
+  DRAFT mark), prints them with `--pdf`, signs `release.json` with the
+  examiner's key, and names the release in the review. A later adoption is
+  an amendment with a reason (`--amend-reason`). `swarm.sh releases`
+  shows, prints, mirrors and verifies them; the package carries every one
+  byte for byte and `verify` walks the chain against the signer register.
+- **Witnesses.** `--anchor-mirror cmd:|dir:|print` copies each release's
+  digest line where the operator's account does not keep it (or prints it
+  with a QR-ready string for the case file); an RFC 3161 token over the
+  release's signature, checked against the authority's CA;
+  `swarm.sh timestamp` obtains one later and dates the proof from then.
+  `releases --ots` and `--transparency COMMAND` add an OpenTimestamps proof
+  and a transparency log's receipt when available.
+- **Custody holds the evidence links.** `inputs/` and each `inputs/<set>`
+  must still lead to the source the kickoff recorded; a link moved to
+  identical bytes fails the evidence check. Custody seals the agents'
+  disputes chain beside the ledger, and the package carries and walks it.
+- **`swarm.sh rerun <run> <job>`** runs a sealed job again through the job
+  service's worker path, in the image of the recorded digest (another is
+  refused), into `<sandbox>.reruns/`, never the store, and names each file
+  that differs. A byte mismatch stays one; an equivalence under a named,
+  versioned normalisation (`timestamps@1`) is said apart, only when asked.
+- **Redaction says what it replaced and what it missed.** `REDACTIONS.json`
+  records each change by the sha256 of what it replaced, why and which
+  entry; JSON is redacted field by field; a four-character PIN is taken
+  out; acts on a sensitive entry are redacted keeping their chain; a
+  release's PDF is withheld. A scan after it refuses the package on any
+  sensitive word left (case, path separators, JSON escapes, UTF-16),
+  naming the file and entry, never the word; `--redact-leaks list` hands it
+  over with the hits listed.
+- **`swarm.sh certify <package>`** writes a certification template of the
+  kind FRE 902(13)/(14) contemplate, with the verification run verbatim,
+  for a qualified person to complete and sign. No PAdES: the PDF's sha256
+  is bound in the release, under the examiner's detached signature.
+
 ### Fixed: the record and the report hold to what custody sealed
 
 Three reviews of the reporting path (Claude, Fable, GPT-6-Astra) found that

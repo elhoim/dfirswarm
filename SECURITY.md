@@ -79,6 +79,18 @@ Please report these privately (see below):
   sign-off the report calls current when the ledger or the report moved
   after it, or a `purge` that deletes a held run or anything outside the run
   it names.
+- Releases, examiners and redaction: a release written over, or one whose
+  changed bytes, record, signature, place in the chain or line in the
+  anchor `releases --verify` or `verify` passes; a machine's draft shown or
+  verified as an examiner's adoption; the registry's `examiner` string shown
+  as the examiner; an answer with defective support adopted or qualified,
+  or a release signed while one has no withdrawal or inconclusive
+  disposition; an evidence link moved (even to identical bytes) that
+  custody passes; a rerun that writes into the run's store, runs in an image
+  whose digest is not the recorded one, or reports a normalised equivalence
+  as a reproduction; a redaction that leaves a sensitive entry's words in a
+  package without the scan naming them, or a record of it that prints the
+  words.
 - With `--allow-tool-forging` on: a way to put a script under `tools/`
   without `make_tool`, to run a tool whose bytes differ from its manifest,
   to replace a live author's tool as a peer, or to register a forged tool
@@ -156,7 +168,63 @@ Please report these privately (see below):
     one part (a report edited, an entry appended), not a rewrite of all of
     them together by that account;
   - `purge` deletes files the ordinary way, without overwriting the blocks
-    the filesystem freed, and knows nothing of copies made elsewhere.
+    the filesystem freed, and knows nothing of copies made elsewhere;
+  - what each part of the record proves, and does not, is below.
+
+## What the record proves, and what it does not
+
+- **The custody verdict and its anchor.** That the evidence, the chains
+  and `work/` were as the host read them after the run, and that nothing
+  sealed changed since, as far as `custody-verify` can see: the anchor is a
+  file of the operator's own account, so a coherent rewrite of every part by
+  that account is not caught. Custody checks the links the evidence is read
+  through (`inputs/`, `inputs/<set>`) against the source recorded; it does
+  not know what the source was before the kickoff, unless acquisition hashes
+  were given.
+- **A machine's draft release (v0).** That the harness held these bytes at
+  stop, sealed by the install's machine key, which lives on the same host,
+  unprotected by a passphrase so that a stop can use it: it is the
+  machine's statement, not anyone's opinion, and anyone with the account can
+  sign with it. It adopts nothing.
+- **An examiner's release (v1 and after).** That the holder of an enrolled
+  examiner's key signed these exact bytes (the rendering, the PDF's sha256,
+  each disposition, every chain's head). Who holds the key is what the
+  organisation's signer register says, checked in person at enrolment;
+  without a register the tie is the fingerprint alone, and every check says
+  "not checked". A key with no passphrase can be used by anyone who can read
+  the account's files. An adoption is the examiner's opinion; it does not
+  make a conclusion true, and an unsupported one cannot be adopted.
+- **A technical reviewer's record.** That the examiner recorded who checked
+  the methods and what; it carries the examiner's signature through the
+  release, not the reviewer's own.
+- **An RFC 3161 token.** That the signed release existed by the authority's
+  time, when the token verifies against the authority's CA; without a CA,
+  only that a token names its digest, which anyone can make. A token
+  obtained later (`swarm.sh timestamp`) dates the proof from then, and says
+  so.
+- **An anchor mirror, an OpenTimestamps proof, a transparency log.** A copy
+  of a release's digest line held where this account cannot rewrite it,
+  when the target is such a place: an object-locked bucket or a records
+  custodian's separately administered archive is; a folder of the same
+  account is not; a signed git remote is a witness of when a line was
+  pushed, not a write-once store. An OpenTimestamps proof is pending until a
+  Bitcoin block commits it. A receipt is what the log's client printed; what
+  the log itself guarantees is the log's.
+- **A rerun.** That the job's spec, in the image of the recorded digest,
+  made the same bytes again, or which files it did not. It does not measure
+  which bytes the job read, re-fetch what it fetched, or reproduce the
+  reasoning that asked for it; an equivalence under a normalisation is not
+  a reproduction.
+- **A redaction's record and its leak scan.** What each redaction replaced,
+  by the sha256 of the original, and that no sensitive entry's words, as
+  the scan normalises them, are left in the package's text or bytes. It
+  does not find what is said in other words, a value no entry was marked
+  sensitive for, or text inside a compressed stream (a release's PDF is
+  withheld for that reason).
+- **The certification template.** Nothing, until a qualified person who
+  can attest to it completes and signs it. It is not legal advice.
+- **The agents' attestations and disputes.** Agents re-deriving agents'
+  work: never an independent review.
 - The behaviour, cost or output of the model you point Pi at.
 - Vulnerabilities in Herdr, Pi or a model provider. Report those upstream.
 
@@ -185,3 +253,10 @@ You will get an acknowledgement within a week. There is no bounty.
   the host and refuses a stopped seat's calls there.
 - Sign what you hand over (`swarm.sh package <id> --sign`), and give the
   recipient the allowed-signers line the command prints.
+- Enrol each examiner with a passphrase or a hardware key
+  (`swarm.sh examiner enroll`), put the line it prints in the organisation's
+  signer register after checking the fingerprint in person, and hand the
+  register to recipients apart from the package.
+- Name a timestamp authority and its CA at enrolment (`--tsa-url`,
+  `--tsa-ca`), or run `swarm.sh timestamp` once the lab is online; and set
+  `--anchor-mirror` to a place this account cannot rewrite.
