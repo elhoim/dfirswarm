@@ -476,7 +476,10 @@ test("the gate holds the run to the goal's questions; a section only an entry na
 
 test("the caller's trace grounding reaches the exhibit; the cover's facts are counted", async () => {
   const body = await renderReportBody(FIXTURE, { grounding: { "5": "grounded", "6": "not in the trace" } });
-  assert.deepEqual(body.facts, { questions: 3, answered: 3, hasAnswers: true, entries: 21 });
+  const { questionStatus, summary, ...counts } = body.facts;
+  assert.deepEqual(counts, { questions: 3, answered: 3, hasAnswers: true, entries: 21, era: "answers", draft: true, adopted: 0, signoff: "none" });
+  assert.deepEqual(questionStatus.map((q) => [q.id, q.status, q.answer, q.confidence, q.adopted]), [["1", "answered", 14, "high", false], ["2", "answered", 19, "medium", false], ["3", "answered", 16, "medium", false]]);
+  assert.deepEqual(summary, { seq: 17, value: "An intruder uploaded a web shell, ran commands through it and archived the web root; no transfer out is recorded in the hour examined.", stands: false });
   assert.match(slice(body.html, "e-6", "e-7"), /chip-saffron">not grounded in the trace</);
   assert.match(slice(body.html, "e-6", "e-7"), /Grounding<\/dt><dd>NOT GROUNDED IN THE TRACE/);
   assert.match(slice(body.html, "e-5", "e-6"), /Grounding<\/dt><dd>a call before this entry named its source/);

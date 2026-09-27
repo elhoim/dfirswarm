@@ -999,7 +999,7 @@ function answerHistory(run: Run, section: string): LedgerEntry[] {
 }
 
 /** A question's status in a few words, with the chips that say why. */
-function questionStatus(q: Question, run: Run, memo: Map<number, EntryState>): { status: Chip; answer: LedgerEntry | null; chips: Chip[] } {
+function questionStatus_(q: Question, run: Run, memo: Map<number, EntryState>): { status: Chip; answer: LedgerEntry | null; chips: Chip[] } {
   const a = standingAnswer(run, `question:${q.id}`);
   if (!a) return { status: run.era === "predates" ? { text: "no structured answer", tone: "none" } : { text: "not answered", tone: "brick" }, answer: null, chips: [] };
   const s = stateOf(a, run, memo);
@@ -1092,7 +1092,7 @@ function summarySection(run: Run, memo: Map<number, EntryState>): BodySection {
       cls: "status",
       head: ["Question", "Status", "Answer"],
       rows: run.questions.map((q) => {
-        const st = questionStatus(q, run, memo);
+        const st = questionStatus_(q, run, memo);
         const named = run.entries.filter((e) => !run.replaced.has(e.seq) && (e.answers ?? []).some((x) => sectionKey(x) === q.id));
         return [
           [{ a: `#${questionAnchor(q.id)}`, text: questionName(q) }],
@@ -1416,7 +1416,7 @@ function answerSectionOf(run: Run, memo: Map<number, EntryState>): BodySection {
 function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Block {
   const a = standingAnswer(run, `question:${q.id}`);
   const title: Span[] = [`${questionName(q)}${q.text ? `: ${q.text}` : ""}`];
-  if (!a) return { k: "box", cls: "answer unanswered", id: questionAnchor(q.id), level: 3, title, chips: [questionStatus(q, run, memo).status], body: unansweredBody(q, run, memo) };
+  if (!a) return { k: "box", cls: "answer unanswered", id: questionAnchor(q.id), level: 3, title, chips: [questionStatus_(q, run, memo).status], body: unansweredBody(q, run, memo) };
   const s = stateOf(a, run, memo);
   const body: Block[] = [];
   const history = answerHistory(run, `question:${q.id}`).filter((x) => x.seq !== a.seq);
@@ -1432,7 +1432,7 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
     ],
   });
   body.push(...answerSteps(a, s, run, memo));
-  return { k: "box", cls: "answer", id: questionAnchor(q.id), level: 3, title, chips: [questionStatus(q, run, memo).status], body };
+  return { k: "box", cls: "answer", id: questionAnchor(q.id), level: 3, title, chips: [questionStatus_(q, run, memo).status], body };
 }
 
 /** The fixed block after the answer: eight steps, always in this order, each saying so when it has nothing. */
@@ -1712,7 +1712,7 @@ function limitsSection(run: Run, memo: Map<number, EntryState>): BodySection {
   blocks.push({ k: "h", level: 3, text: "Questions not answered" });
   const open: Span[][] = [];
   for (const q of run.questions) {
-    const st = questionStatus(q, run, memo);
+    const st = questionStatus_(q, run, memo);
     if (st.status.text === "answered") continue;
     const limitsFor = limits.filter((l) => (l.answers ?? []).some((x) => sectionKey(x) === q.id));
     const would = st.answer?.would_change;
@@ -2024,8 +2024,7 @@ function bytesHuman(n: number): string {
   return `${i === 0 ? value : value.toFixed(1)} ${units[i]}`;
 }
 
-function buildSections(run: Run): { preamble: Block[]; sections: BodySection[] } {
-  const memo = new Map<number, EntryState>();
+function buildSections(run: Run, memo = new Map<number, EntryState>()): { preamble: Block[]; sections: BodySection[] } {
   return {
     preamble: legendBlocks(run),
     sections: [
@@ -2278,9 +2277,63 @@ export type ReportBody = {
   draft: boolean;
   /** A title for the case: the case id and the run id, as far as the run says them. */
   title: string;
-  /** What a cover says before the fold: how many questions, how many have a standing answer, whether the run has answers at all. */
-  facts: { questions: number; answered: number; hasAnswers: boolean; entries: number };
+  facts: BodyFacts;
 };
+
+/**
+ * What a cover or a run summary says of the answers, computed once from the
+ * run as the body reads it, so the report and the summary never disagree:
+ * how many questions, how many have a standing answer, how many of those the
+ * examiner adopted, whether the sign-off covers the run, whether it is a
+ * draft, and each question's standing.
+ */
+export type BodyFacts = {
+  questions: number;
+  answered: number;
+  hasAnswers: boolean;
+  entries: number;
+  /** What the ledger can hold: answers, none yet (version 4), none (it predates them), nothing at all. */
+  era: "answers" | "no answers" | "predates" | "empty";
+  draft: boolean;
+  /** Standing answers to questions the examiner accepted, reviewed against the answer's own hash. */
+  adopted: number;
+  signoff: "current" | "not current" | "none" | "unreadable";
+  questionStatus: Array<{ id: string; label: string; status: string; answer: number | null; confidence: string | null; adopted: boolean; value: string | null }>;
+  /** The standing summary answer, and whether it still stands on its support. */
+  summary: { seq: number; value: string; stands: boolean } | null;
+};
+
+/** An answer the examiner accepted, against its own hash (a review of another version of it adopts nothing). */
+function adoptedBy(s: EntryState): boolean {
+  return s.review?.action === "accept" && (!s.review.entry_hash || s.review.entry_hash === s.hash);
+}
+
+function factsOf(run: Run, memo: Map<number, EntryState>): BodyFacts {
+  const questionStatus = run.questions.map((q) => {
+    const st = questionStatus_(q, run, memo);
+    const a = st.answer;
+    return { id: q.id, label: questionName(q), status: st.status.text, answer: a?.seq ?? null, confidence: a?.confidence ?? null, adopted: a ? adoptedBy(stateOf(a, run, memo)) : false, value: a?.value ?? null };
+  });
+  const summary = standingAnswer(run, "summary");
+  const r = run.review;
+  return {
+    questions: run.questions.length,
+    answered: questionStatus.filter((q) => q.answer !== null).length,
+    hasAnswers: run.hasAnswers,
+    entries: run.entries.length,
+    era: run.era,
+    draft: run.draft,
+    adopted: questionStatus.filter((q) => q.adopted).length,
+    signoff: r?.unreadable ? "unreadable" : !r?.signed ? "none" : r.signed.current === false ? "not current" : "current",
+    questionStatus,
+    summary: summary ? { seq: summary.seq, value: summary.value, stands: !stateOf(summary, run, memo).problems.length } : null,
+  };
+}
+
+/** The facts alone, for a caller that prints no body (the run summary): the same numbers the report's cover shows. */
+export async function reportBodyFacts(sandbox: string, opts: ReportBodyOptions = {}): Promise<BodyFacts> {
+  return factsOf(await loadRun(sandbox, opts), new Map());
+}
 
 function titleOf(run: Run): string {
   return `${run.caseId ? `${run.caseId} — ` : ""}Forensic report, run ${run.runId}`;
@@ -2289,7 +2342,8 @@ function titleOf(run: Run): string {
 /** The body of the report for a run: HTML, per section, with its stylesheet. */
 export async function renderReportBody(sandbox: string, opts: ReportBodyOptions = {}): Promise<ReportBody> {
   const run = await loadRun(sandbox, opts);
-  const { preamble, sections } = buildSections(run);
+  const memo = new Map<number, EntryState>();
+  const { preamble, sections } = buildSections(run, memo);
   const ctx: Ctx = { known: new Set(run.entries.map((e) => e.seq)) };
   const mark = run.draft ? `<div class="draft-mark" aria-hidden="true">DRAFT</div>\n` : "";
   const pre = `${mark}<div class="preamble rb">${preamble.map((b) => blockHtml(b, ctx)).join("\n")}</div>`;
@@ -2298,13 +2352,12 @@ export async function renderReportBody(sandbox: string, opts: ReportBodyOptions 
     pre,
     ...rendered.map(
       (s) => `<section id="${s.id}"${/^[A-Z]$/.test(s.n) ? ' class="appendix"' : ""}>
-  <div class="sec-head"><span class="n">${escapeHtml(s.n)}</span><h2>${escapeHtml(/^[A-Z]$/.test(s.n) ? `Appendix ${s.n}: ${s.title}` : s.title)}</h2>${s.count ? `<span class="count">${escapeHtml(s.count)}</span>` : ""}</div>
+  <div class="sec-head">${/^[A-Z]$/.test(s.n) ? "" : `<span class="n">${escapeHtml(s.n)}</span>`}<h2>${escapeHtml(/^[A-Z]$/.test(s.n) ? `Appendix ${s.n}: ${s.title}` : s.title)}</h2>${s.count ? `<span class="count">${escapeHtml(s.count)}</span>` : ""}</div>
 ${s.html}
 </section>`,
     ),
   ].join("\n\n");
-  const facts = { questions: run.questions.length, answered: run.questions.filter((q) => standingAnswer(run, `question:${q.id}`)).length, hasAnswers: run.hasAnswers, entries: run.entries.length };
-  return { html, sections: rendered, preamble: pre, style: REPORT_BODY_STYLE, draft: run.draft, title: titleOf(run), facts };
+  return { html, sections: rendered, preamble: pre, style: REPORT_BODY_STYLE, draft: run.draft, title: titleOf(run), facts: factsOf(run, memo) };
 }
 
 /** A standalone page around a body: what the CLI prints for a preview. */
