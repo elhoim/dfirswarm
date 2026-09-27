@@ -130,6 +130,21 @@ raise SystemExit(1 if bad else 0)
 EOF
 pass "every shipped tool manifest carries the hash of its entry script, so none is silently left out"
 
+# --- every shipped pack seals clean, and is checked in sealed --------------------
+# A skill that calls a program no pack of its dependency set declares is a
+# warning at seal: the mobile pack's iOS unified-log method still named the
+# retired UnifiedLogReader.py after the macOS pack replaced it with
+# unifiedlog_iterator. Sealed again from a copy (its dependencies beside it),
+# each pack says nothing, and its pack.json is the one checked in.
+cp -R "$ROOT/packs" "$WORK/sealed"
+for d in "$WORK/sealed"/*/; do
+  id="$(basename "$d")"
+  said="$(bash "$ROOT/scripts/pack.sh" seal "$d" 2>&1 >/dev/null)" || fail "packs/$id does not seal: $said"
+  [[ -z "$said" ]] || fail "packs/$id seals with a warning: $said"
+  [[ "$(jq -S . "$d/pack.json")" == "$(jq -S . "$ROOT/packs/$id/pack.json")" ]] || fail "packs/$id is not checked in as sealed: seal it"
+done
+pass "every shipped pack seals without a warning, and is checked in as sealed"
+
 # --- mft_records: a synthetic $MFT built from the documented layout ----------
 "$PY" - "$WORK/MFT" <<'EOF' || fail "could not build the synthetic \$MFT"
 import struct, sys, datetime

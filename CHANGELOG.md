@@ -31,6 +31,19 @@ All notable changes to this project. The format follows
   outside the run directory, the run directory itself or under `inputs/`,
   links resolved first; `jumplist` never writes through a link left in its
   `out_dir`; `mem_fs` mounts under a job's `$OUT`, where a rerun sends it.
+- **Nothing cut.** `sigma_hunt` keeps every field of a matched record (it
+  kept 12), every rule that fired (25) and every detection, all of them in
+  `detections.jsonl` past the page, and the engine's stdout and stderr whole
+  in files named by path, size and sha256 (they were dropped, or cut to their
+  last 400 and 800 characters). `cloudtrail_parse` and `ual_parse` return
+  whole tables rather than their top 20 or 30, and `collection_index` every
+  modification date rather than ten.
+- **A rerun's answer says where its output's places went:** `paths` maps each
+  `<run>/.jobs/<id>/…` (or `.jobs/<id>/…`) its sealed stdout names to
+  `store/jobs/<id>/out/…`; the output itself stays as sealed.
+- The iOS unified-log method names `unifiedlog_iterator`, the reader
+  `unified_log` runs, not the retired UnifiedLogReader.py, so every pack
+  seals without a warning; `pack-tools.test.sh` holds them to it.
 - Ten packs take a patch version and a new seal.
 
 ### Changed: every image profile reviewed as a DFIR examiner would (Codex)
