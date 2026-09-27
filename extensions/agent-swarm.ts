@@ -80,7 +80,9 @@ import {
   LEDGER_BASIS,
   LEDGER_COMPLETION,
   LEDGER_SUBJECT_TYPES,
+  LEDGER_ALTERNATIVE_STATUS,
   LEDGER_MD,
+  type LedgerInput,
   TOOLS_DIR,
   TOOL_TIMEOUT_DEFAULT_SECONDS,
   TOOL_TIMEOUT_MAX_SECONDS,
@@ -133,6 +135,8 @@ import {
   listForgedTools,
   listLedger,
   recordEntry,
+  attestEntry,
+  disputeEntry,
   heldBy,
   claimName,
   correctionsAfter,
@@ -189,6 +193,8 @@ export const SWARM_TOOLS = new Set([
   "record_violation",
   "record",
   "ledger",
+  "attest",
+  "dispute",
   "sentinel_nudge",
   "forge_hint",
   "agent_cap_steer",
@@ -2854,35 +2860,60 @@ export default function (pi: ExtensionAPI) {
     name: "record",
     label: "Record",
     description:
-      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (a conclusion), absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope), hypothesis (a proposition under test, with status open, supported or refuted) or limitation (what the examination could not establish, with reason not_examined, unavailable, failed, partial or excluded). Both source and evidence are required: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. refs names the run's objects it rests on, each checked when it is written: input:<path> (under inputs/), job:<id>/<path> (a job's sealed output), import:<id>/<path>, member:<generation>#<n> (an archive member in the catalogue), sha256:<hex> (a sealed blob), or unresolved:<why> when none can be named; a file only in your own work/ is not an object of the run: run the work as a job and cite job:. To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> (and because=<why>): nothing is deleted, and the newer entry is the correction; the same sentence with another confidence, refs or status is a correction too. The optional fields are for the reader: answers (the goal sections it answers), rel (supports, contradicts, duplicates or derived_from another entry), sensitive (it or what it cites holds a secret or personal data), clock and precision (on a dated entry: which clock the time came from, how precise it is), basis (observed or inferred), completion (on an absence: complete, partial or failed), attribution (who or what an action is attributed to, and on what), locators (where in a cited object). The harness renders ledger/ledger.md — timeline, indicators, findings, searches that found nothing — after every record; cite that file in the report.",
-    promptSnippet: "Record a dated event, an indicator or a finding with its evidence",
+      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (an observation and what you make of it), absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope), hypothesis (a proposition under test, with status open, supported or refuted), limitation (what the examination could not establish, with reason not_examined, unavailable, failed, partial or excluded) or answer (the swarm's answer to one question of the goal, or its summary or narrative). Every kind but answer needs source and evidence: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. refs names the run's objects it rests on, each checked when it is written: input:<path> (under inputs/), job:<id>/<path> (a job's sealed output), import:<id>/<path>, member:<generation>#<n> (an archive member in the catalogue), sha256:<hex> (a sealed blob), or unresolved:<why> when none can be named; a file only in your own work/ is not an object of the run: run the work as a job and cite job:. The harness writes how each cited job or import was made into the entry. " +
+      "A finding needs basis (observed or inferred), confidence with confidence_why (where the data came from, whether the method is reliable for it, how specific the observation is, whether your sources depend on each other: the quality of the evidence, not a count), and indicates (what the observation means and the step from one to the other, one to three sentences); an inferred finding lists alternatives (what else could explain it, each rejected with why or left open) or says in alternatives_none_why why none was considered; a finding resting on a job that did not succeed says in qualifies why those bytes are still usable, and can never support a claim that something is absent. " +
+      "An answer names its section (question:<id>, summary or narrative), gives the answer in value and the reasoning citing E-<seq> for every claim, and for a question confidence with confidence_why, contrary (entries that say otherwise), limitations (limitation entries that bound it), alternatives_open and would_change; it rests on at least one standing entry that names its question in answers, cites a superseded entry only with its correction, and a disputed entry or one resting on a failed job only with qualifies [{ref: E-<seq>, why}]. One answer stands per section: revise it with supersedes. Tokens in an answer (hashes, paths, times, inodes, addresses, accounts) that no cited entry holds are marked on it. " +
+      "To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> (and because=<why>): nothing is deleted, and the newer entry is the correction. The optional fields are for the reader: answers (the goal sections it answers), rel (supports, contradicts, duplicates or derived_from another entry), sensitive, clock and precision, completion, attribution, locators, significance. The harness renders ledger/ledger.md after every record; cite that file in the report.",
+    promptSnippet: "Record an event, an indicator, a finding with what it indicates, or an answer",
     promptGuidelines: [
       "Record every dated event you establish as kind=event with ts in UTC; the timeline is built from them.",
-      "Record indicators and findings as you confirm them, with the evidence that proves them.",
-      "source and evidence are required on every record: where you saw it, and the command or id that lets somebody else see it too.",
-      "A finding names the objects it rests on in refs (job:<id>/<path>, input:<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>).",
+      "Record a finding while the artefact is open: value is what you saw, indicates what it means, confidence_why why that confidence, basis observed or inferred; an inferred one lists alternatives or says in alternatives_none_why why none was considered.",
+      "source and evidence are required on every record but an answer: where you saw it, and the command or id that lets somebody else see it too.",
+      "A finding names the objects it rests on in refs (job:<id>/<path>, input:<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>); one resting on a job that did not succeed says why in qualifies.",
       "A wrong entry is corrected, never deleted: record the right one with supersedes=<seq of the wrong one>.",
       "kind=absence is optional: record a search that found nothing only when the absence matters to the case, with the scope it holds for.",
       "Name the goal section an entry answers in answers; link an entry that supports or contradicts another with rel.",
       "Record what you could not examine, or could only partly, as kind=limitation with its reason; a proposition you are still testing as kind=hypothesis.",
+      "An answer (kind=answer) is written from the ledger, not from memory: one per question, one summary, one narrative, each citing E-<seq> for every claim.",
     ],
     parameters: Type.Object({
-      kind: Type.Union(LEDGER_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding | absence | hypothesis | limitation" }),
-      value: Type.String({ description: "The event, indicator or finding, in one sentence; for absence, what was looked for" }),
+      kind: Type.Union(LEDGER_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding | absence | hypothesis | limitation | answer" }),
+      value: Type.String({ description: "The event, indicator or observation, in one sentence; for absence, what was looked for; for an answer, the answer itself" }),
       ts: Type.Optional(Type.String({ description: "The event's time, ISO 8601 with its zone: 2024-01-15T12:44:22Z, or 2024-01-15T15:44:22+03:00 as the source records it. A time without a zone is refused." })),
-      source: Type.String({ description: "Where it was seen: a path, log, plugin, registry key. Required." }),
-      evidence: Type.String({ description: "How to check it: command, inode, record id, hash. Required." }),
-      confidence: Type.Optional(Type.Union(LEDGER_CONFIDENCE.map((c) => Type.Literal(c)))),
+      source: Type.Optional(Type.String({ description: "Where it was seen: a path, log, plugin, registry key. Required on every kind but answer." })),
+      evidence: Type.Optional(Type.String({ description: "How to check it: command, inode, record id, hash. Required on every kind but answer." })),
+      confidence: Type.Optional(Type.Union(LEDGER_CONFIDENCE.map((c) => Type.Literal(c)), { description: "Required on a finding and on an answer to a question." })),
+      confidence_why: Type.Optional(Type.String({ description: "Why that confidence: provenance, method, specificity, whether the sources depend on each other. Required with a finding's or a question answer's confidence." })),
+      indicates: Type.Optional(Type.String({ description: "A finding's: what the observation means, and the step from one to the other, in one to three sentences. Required on a finding." })),
+      alternatives: Type.Optional(
+        Type.Array(Type.Object({ explanation: Type.String(), status: Type.Union(LEDGER_ALTERNATIVE_STATUS.map((k) => Type.Literal(k))), why: Type.String(), test_refs: Type.Optional(Type.Array(Type.String())) }), {
+          description: "A finding's: what else could explain it, each rejected (with why) or left open; test_refs the objects that tested it. Required on an inferred finding unless alternatives_none_why says why none was considered.",
+        }),
+      ),
+      alternatives_none_why: Type.Optional(Type.String({ description: "A finding's: why no alternative was considered. Never invent one." })),
+      significance: Type.Optional(Type.String({ description: "A finding's: what it means for the case, when you can say." })),
+      qualifies: Type.Optional(
+        Type.Array(Type.Object({ ref: Type.String(), why: Type.String() }), {
+          description: "Why the kept output of a job that did not succeed still supports this entry: {ref: that ref, why}. Required on a finding for each such ref. On an answer, ref is a cited entry (E-<seq>) that is disputed or rests on a failed job.",
+        }),
+      ),
+      section: Type.Optional(Type.String({ description: "An answer's: question:<id> (the goal's question: question:3), summary or narrative." })),
+      reasoning: Type.Optional(Type.String({ description: "An answer's: how the cited entries lead to the answer, citing E-<seq> for every claim. For the narrative, the narrative." })),
+      contrary: Type.Optional(Type.Array(Type.Union([Type.Number(), Type.String()]), { description: "An answer's: the entries that say otherwise, by seq." })),
+      limitations: Type.Optional(Type.Array(Type.Union([Type.Number(), Type.String()]), { description: "An answer's: the limitation entries that bound it, by seq." })),
+      alternatives_open: Type.Optional(Type.String({ description: "An answer's: what else could still explain it, or that nothing remains open and why. Required on a question's answer." })),
+      would_change: Type.Optional(Type.String({ description: "An answer's: what evidence would change it. Required on a question's answer." })),
+      inconclusive: Type.Optional(Type.Boolean({ description: "An answer's: the ledger cannot answer the question; say why in reasoning and cite the limitations." })),
       supersedes: Type.Optional(Type.Number({ description: "The seq of an entry this one corrects. The older entry stays, marked superseded." })),
-      refs: Type.Optional(Type.Array(Type.String(), { description: "The run's objects it rests on: input:<path>, job:<id>/<path>, import:<id>/<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>. Each is checked; one that does not resolve is refused with the nearest names." })),
-      answers: Type.Optional(Type.Array(Type.String(), { description: "The goal sections it answers: \"3\", \"Q3\"." })),
+      refs: Type.Optional(Type.Array(Type.String(), { description: "The run's objects it rests on: input:<path>, job:<id>/<path>, import:<id>/<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>. Each is checked; one that does not resolve is refused with the nearest names. Not on an answer." })),
+      answers: Type.Optional(Type.Array(Type.String(), { description: "The goal sections it answers: \"3\", \"Q3\", summary, narrative." })),
       rel: Type.Optional(Type.Array(Type.Object({ to: Type.Number(), kind: Type.Union(LEDGER_REL_KINDS.map((k) => Type.Literal(k))) }), { description: "Links to other entries by seq: supports, contradicts, duplicates, derived_from." })),
       sensitive: Type.Optional(Type.Boolean({ description: "It, or what it cites, holds a credential, a key or personal data: a package redacts it." })),
       status: Type.Optional(Type.Union(LEDGER_HYPOTHESIS_STATUS.map((k) => Type.Literal(k)), { description: "A hypothesis's status." })),
       reason: Type.Optional(Type.Union(LEDGER_LIMITATION_REASONS.map((k) => Type.Literal(k)), { description: "A limitation's reason." })),
       clock: Type.Optional(Type.String({ description: "On a dated entry: the clock its time came from (\"NTFS $SI created\", \"device local, offset unknown\")." })),
       precision: Type.Optional(Type.Union(LEDGER_PRECISION.map((k) => Type.Literal(k)), { description: "How precise ts is; a date alone is recorded as date." })),
-      basis: Type.Optional(Type.Union(LEDGER_BASIS.map((k) => Type.Literal(k)), { description: "observed in the evidence, or inferred from it." })),
+      basis: Type.Optional(Type.Union(LEDGER_BASIS.map((k) => Type.Literal(k)), { description: "observed in the evidence, or inferred from it. Required on a finding." })),
       completion: Type.Optional(Type.Union(LEDGER_COMPLETION.map((k) => Type.Literal(k)), { description: "On an absence: how far the search got." })),
       attribution: Type.Optional(Type.Object({ subject: Type.String(), subject_type: Type.Optional(Type.Union(LEDGER_SUBJECT_TYPES.map((k) => Type.Literal(k)))), basis_refs: Type.Optional(Type.Array(Type.String())) }, { description: "Who or what an action is attributed to (account, device, person) and the objects that link them." })),
       locators: Type.Optional(Type.Array(Type.Object({ ref: Type.String(), at: Type.String() }), { description: "Where in a cited ref: a row, an offset, a record id." })),
@@ -2890,28 +2921,9 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const result = await recordEntry(ctxFrom(toolCtx.cwd, agentId), {
-        kind: params.kind,
-        value: params.value,
-        ts: params.ts,
-        source: params.source,
-        evidence: params.evidence,
-        confidence: params.confidence,
-        ...(params.supersedes !== undefined ? { supersedes: params.supersedes } : {}),
-        ...(params.refs?.length ? { refs: params.refs } : {}),
-        ...(params.answers?.length ? { answers: params.answers } : {}),
-        ...(params.rel?.length ? { rel: params.rel } : {}),
-        ...(params.sensitive !== undefined ? { sensitive: params.sensitive } : {}),
-        ...(params.status ? { status: params.status } : {}),
-        ...(params.reason ? { reason: params.reason } : {}),
-        ...(params.clock ? { clock: params.clock } : {}),
-        ...(params.precision ? { precision: params.precision } : {}),
-        ...(params.basis ? { basis: params.basis } : {}),
-        ...(params.completion ? { completion: params.completion } : {}),
-        ...(params.attribution ? { attribution: params.attribution } : {}),
-        ...(params.locators?.length ? { locators: params.locators } : {}),
-        ...(params.because ? { because: params.because } : {}),
-      });
+      // Every field as given: the protocol checks which a kind takes and says which it does not.
+      const { kind, ...rest } = params;
+      const result = await recordEntry(ctxFrom(toolCtx.cwd, agentId), { kind, ...Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)) } as unknown as LedgerInput);
       if (!result.ok) {
         // What the agent tried to say goes on the trace whole: the args are the record, refused or not.
         await logEvent(toolCtx.cwd, agentId, "record", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
@@ -2926,17 +2938,18 @@ export default function (pi: ExtensionAPI) {
       if (result.entry.supersedes !== undefined && !result.merged) {
         await logEvent(toolCtx.cwd, agentId, "ledger_superseded", { seq: result.entry.supersedes }, { ok: true, by_seq: result.entry.seq });
       }
-      return okResult({ ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), ...(result.entry.refs?.length ? { refs: result.entry.refs } : {}), ...(result.note ? { note: result.note } : {}), rendered: LEDGER_MD });
+      return okResult({ ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), ...(result.entry.refs?.length ? { refs: result.entry.refs } : {}), ...(result.entry.unsupported_tokens?.length ? { unsupported_tokens: result.entry.unsupported_tokens } : {}), ...(result.note ? { note: result.note } : {}), rendered: LEDGER_MD });
     },
   });
 
   pi.registerTool({
     name: "ledger",
     label: "Ledger",
-    description: "List the swarm's ledger: every event, indicator, finding and search that found nothing, recorded so far, with authors and evidence; a corrected entry carries superseded_by. Filter by kind; the rendered file is ledger/ledger.md.",
+    description:
+      "List the swarm's ledger: every event, indicator, finding, search that found nothing, hypothesis, limitation and answer recorded so far, with authors and evidence; a corrected entry carries superseded_by, an entry somebody re-derived attested_by, one somebody contests disputed_by, and an answer that no longer stands on what it cites its problems. Filter by kind; the rendered file is ledger/ledger.md.",
     promptSnippet: "See what the swarm has recorded so far",
     parameters: Type.Object({
-      kind: Type.Optional(Type.String({ description: "event | ioc | finding | absence | hypothesis | limitation" })),
+      kind: Type.Optional(Type.String({ description: "event | ioc | finding | absence | hypothesis | limitation | answer" })),
       limit: Type.Optional(Type.Number({ description: "Newest N entries (default 200)" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
@@ -2944,6 +2957,58 @@ export default function (pi: ExtensionAPI) {
       const entries = await listLedger(toolCtx.cwd, params ?? {});
       await logEvent(toolCtx.cwd, agentId, "ledger", params ?? {}, { ok: true, n: entries.length }, Date.now() - started);
       return okResult({ entries, rendered: LEDGER_MD });
+    },
+  });
+
+  pi.registerTool({
+    name: "attest",
+    label: "Attest",
+    description:
+      "Say that you re-derived a ledger entry somebody else recorded (a finding, an answer, any kind): how names what you re-derived and from which sealed object (job:<id>/<path>, input:<path>, …), and what you only read. refs lists the objects you re-derived from, each checked. The harness writes it, chained, into ledger/attestations.jsonl. You cannot attest your own entry; an attestation is a check by somebody else, not agreement.",
+    promptSnippet: "Record that you re-derived a peer's entry, and how",
+    promptGuidelines: [
+      "attest only what you re-derived from the sealed refs yourself, and say in how what you re-derived and what you only read.",
+      "A critic attests or disputes every answer before the run ends; the author of an entry never attests it.",
+    ],
+    parameters: Type.Object({
+      seq: Type.Number({ description: "The entry's seq (standing, not your own)." }),
+      how: Type.String({ description: "What you re-derived, from which sealed object, and what you only read." }),
+      refs: Type.Optional(Type.Array(Type.String(), { description: "The objects you re-derived from: input:<path>, job:<id>/<path>, member:<gen>#<n>, sha256:<hex>." })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const result = await attestEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, how: params.how, ...(params.refs?.length ? { refs: params.refs } : {}) });
+      if (!result.ok) {
+        await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
+        return { content: [{ type: "text" as const, text: `attest refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
+      }
+      await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: true, seq: result.line.seq, appended: result.appended, ...(result.line.hash ? { hash: result.line.hash } : {}), ...(result.note ? { note: result.note } : {}) }, Date.now() - started);
+      return okResult({ ok: true, seq: result.line.seq, appended: result.appended, ...(result.note ? { note: result.note } : {}), rendered: LEDGER_MD });
+    },
+  });
+
+  pi.registerTool({
+    name: "dispute",
+    label: "Dispute",
+    description:
+      "Say why a ledger entry somebody else recorded does not hold (a finding, an answer, any kind), with the objects that show it in refs; or, with withdraw: true, take back your own dispute and say why. The harness writes it, chained, into ledger/disputes.jsonl. An answer resting on a disputed entry stops standing until its author records it again with the dispute answered; to correct your own entry, record the correction with supersedes instead.",
+    promptSnippet: "Record why a peer's entry does not hold",
+    promptGuidelines: ["dispute says what does not hold and what shows it; a wrong entry of your own is corrected with record(supersedes), never disputed."],
+    parameters: Type.Object({
+      seq: Type.Number({ description: "The entry's seq (standing, not your own)." }),
+      why: Type.String({ description: "What does not hold and what shows it; with withdraw, why the dispute no longer stands." }),
+      refs: Type.Optional(Type.Array(Type.String(), { description: "The objects that show it." })),
+      withdraw: Type.Optional(Type.Boolean({ description: "Take back your own standing dispute of this entry." })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const result = await disputeEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, why: params.why, ...(params.refs?.length ? { refs: params.refs } : {}), ...(params.withdraw ? { withdraw: true } : {}) });
+      if (!result.ok) {
+        await logEvent(toolCtx.cwd, agentId, "dispute", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
+        return { content: [{ type: "text" as const, text: `dispute refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
+      }
+      await logEvent(toolCtx.cwd, agentId, "dispute", params as Record<string, unknown>, { ok: true, seq: result.line.seq, act: result.line.act, appended: result.appended, ...(result.line.hash ? { hash: result.line.hash } : {}), ...(result.note ? { note: result.note } : {}) }, Date.now() - started);
+      return okResult({ ok: true, seq: result.line.seq, act: result.line.act, appended: result.appended, ...(result.note ? { note: result.note } : {}), rendered: LEDGER_MD });
     },
   });
 

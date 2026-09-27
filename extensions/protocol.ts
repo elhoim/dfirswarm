@@ -5212,6 +5212,7 @@ export const TOOL_RESERVED_NAMES = new Set([
   "post", "inbox", "wait", "claim_file", "release_file", "claims", "list_team", "budget",
   "file_history", "file_restore", "file_diff", "thread_open", "thread_join", "done",
   "playwright", "browser_check", "make_tool", "tools", "system", "inputs", "name", "record", "ledger",
+  "attest", "dispute",
   // the harness's own trace events: a forged tool with one of these names
   // would land its calls under the same name and be counted as the event
   "agent_start", "agent_stop", "thinking", "claim_violation", "inputs_guard", "inputs_violation",
@@ -8015,13 +8016,19 @@ export function answerTokens(text: string): AnswerToken[] {
   }
   for (const m of src.matchAll(/(?<![0-9A-Za-z])(?:[0-9a-fA-F]{128}|[0-9a-fA-F]{64}|[0-9a-fA-F]{40}|[0-9a-fA-F]{32})(?![0-9A-Za-z])/g)) add(m.index ?? 0, { kind: "hash", text: m[0], norm: m[0].toLowerCase() });
   for (const m of src.matchAll(/(?<![\d.])(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}(?![\d.]*\d)/g)) add(m.index ?? 0, { kind: "ip", text: m[0], norm: m[0] });
-  for (const m of src.matchAll(/(?<![\w:.])(?:[0-9a-fA-F]{1,4}:){2,7}(?::|[0-9a-fA-F]{1,4})(?![\w:])/g)) {
+  // An IPv6 address: eight groups, or fewer with one "::"; a time of day is not one.
+  for (const m of src.matchAll(/(?<![\w:.])[0-9a-fA-F]{0,4}(?::[0-9a-fA-F]{0,4}){2,7}(?![\w:])/g)) {
     const v = m[0];
-    if (!v.includes("::") && (v.match(/:/g) ?? []).length < 4) continue;
+    const gaps = (v.match(/::/g) ?? []).length;
+    const groups = v.split(":");
+    if (gaps > 1 || (gaps === 0 && groups.length !== 8) || v.includes(":::") || v === "::") continue;
+    if (gaps === 0 && groups.some((g) => !g)) continue;
     if (/^\d{1,2}(:\d{2}){1,2}$/.test(v)) continue;
     add(m.index ?? 0, { kind: "ip", text: v, norm: v.toLowerCase() });
   }
-  for (const m of src.matchAll(/\b(\d{1,12})-(\d{1,5})-(\d{1,5})\b/g)) {
+  // A SID's numbers are not an inode's: masked before inodes are read.
+  const unSid = src.replace(/\bS-1-\d{1,3}(?:-\d{1,12}){1,14}\b/gi, (x) => " ".repeat(x.length));
+  for (const m of unSid.matchAll(/\b(\d{1,12})-(\d{1,5})-(\d{1,5})\b/g)) {
     if (/^\d{4}$/.test(m[1]) && /^\d{2}$/.test(m[2]) && /^\d{2}$/.test(m[3])) continue;
     add(m.index ?? 0, { kind: "inode", text: m[0], norm: String(Number(m[1])) });
   }
@@ -8679,7 +8686,8 @@ export function runFinishLine(sandbox: string): Promise<FinishLineRun | null> {
 export type FinishLineRun = {
   total: number;
   passed: number;
-  checks: Array<{ cmd: string; ok: boolean; ms?: number; timed_out?: boolean }>;
+  /** A failing check's output, whole when it is at most 64 KiB (out), and its size (out_bytes). */
+  checks: Array<{ cmd: string; ok: boolean; ms?: number; timed_out?: boolean; out?: string; out_bytes?: number }>;
   source?: string | null;
   error?: string;
 };
@@ -8727,11 +8735,15 @@ export function finishLineVerdict(
   const first = run.checks.find((c) => !c.ok);
   const failing = first?.cmd ?? "(unknown check)";
   const why = first?.timed_out ? "timed out" : "fails";
+  // What the check said, when it said something: a check such as
+  // check-answers.ts names each defect and its fix there. Whole, or, past
+  // what the finish line hands back, its size and the way to read it all.
+  const said = first?.out !== undefined ? ` It says:\n${first.out.trimEnd()}\n` : first?.out_bytes ? ` It printed ${first.out_bytes} bytes; run it from the run's directory to read them. ` : " ";
   return {
     proceed: false,
     failing,
     reason:
-      `The finish line is not met: ${run.passed} of ${run.total} checks pass, and the first that ${why} is \`${failing}\`. ` +
+      `The finish line is not met: ${run.passed} of ${run.total} checks pass, and the first that ${why} is \`${failing}\`.${said}` +
       `done ends the whole swarm, not your slice. If your slice is finished, post it to the board and take the next one, or wait. ` +
       `If the finish line cannot be met, call done again with abandon: true and say why on the board.`,
   };

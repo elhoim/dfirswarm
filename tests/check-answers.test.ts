@@ -17,6 +17,9 @@ import { initSandbox, recordEntry } from "../extensions/protocol.ts";
 import { sealTree, storePaths } from "../scripts/evidence-store.ts";
 import { checkAnswers, citedSeqs } from "../scripts/check-answers.ts";
 
+/** What a finding carries from version 4 on: how it was seen, how sure and why, what it indicates. */
+const F = { basis: "observed", confidence: "medium", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
+
 const ROOT = join(import.meta.dirname, "..");
 
 async function run() {
@@ -28,12 +31,12 @@ async function run() {
   await writeFile(join(staging, "key.txt"), "1234\n");
   await sealTree(S, staging, join(storePaths(S).jobs, "j000001", "out"), "j000001", 1);
   const a0 = { sandboxRoot: S, agentId: "a0" };
-  await recordEntry(a0, { kind: "finding", value: "The key is 1234", source: "a job", evidence: "cat", refs: ["job:j000001/key.txt"] }); // #1
-  await recordEntry(a0, { kind: "finding", value: "The volume is BitLocker", source: "the image", evidence: "fsstat" }); // #2 (no refs)
+  await recordEntry(a0, { kind: "finding", ...F, value: "The key is 1234", source: "a job", evidence: "cat", refs: ["job:j000001/key.txt"] }); // #1
+  await recordEntry(a0, { kind: "finding", ...F, value: "The volume is BitLocker", source: "the image", evidence: "fsstat" }); // #2 (no refs)
   await recordEntry(a0, { kind: "absence", value: "a PGP private key", source: "inputs/disk.E01", evidence: "grep -a 'BEGIN PGP PRIVATE' over the whole image" }); // #3
   await recordEntry(a0, { kind: "event", ts: "2024-01-01T00:00:00Z", value: "logon", source: "Security.evtx", evidence: "4624" }); // #4
-  await recordEntry(a0, { kind: "finding", value: "The README was AES-encrypted", source: "a job", evidence: "header", refs: ["job:j000001/key.txt"] }); // #5
-  await recordEntry(a0, { kind: "finding", value: "The README was AES Crypt v2", source: "a job", evidence: "header", refs: ["input:disk.E01"], supersedes: 5 }); // #6
+  await recordEntry(a0, { kind: "finding", ...F, value: "The README was AES-encrypted", source: "a job", evidence: "header", refs: ["job:j000001/key.txt"] }); // #5
+  await recordEntry(a0, { kind: "finding", ...F, value: "The README was AES Crypt v2", source: "a job", evidence: "header", refs: ["input:disk.E01"], supersedes: 5 }); // #6
   return S;
 }
 
@@ -77,8 +80,8 @@ test("an entry tagged for a section answers it; unresolved-only refs, a hypothes
   await writeFile(join(staging, "msgs.json"), "[]\n");
   await sealTree(S, staging, join(storePaths(S).jobs, "j000002", "out"), "j000002", 1);
   await writeFile(join(storePaths(S).jobs, "j000002", "job.json"), JSON.stringify({ id: "j000002", status: "failed" }));
-  await recordEntry(a0, { kind: "finding", value: "The buyer is named in a message", source: "a job", evidence: "jq", refs: ["job:j000002/msgs.json"], answers: ["Q7"] }); // #7
-  await recordEntry(a0, { kind: "finding", value: "The page was only on screen", source: "s", evidence: "e", refs: ["unresolved:seen in a screenshot"] }); // #8
+  await recordEntry(a0, { kind: "finding", ...F, value: "The buyer is named in a message", source: "a job", evidence: "jq", refs: ["job:j000002/msgs.json"], answers: ["Q7"], qualifies: [{ ref: "job:j000002/msgs.json", why: "the job failed after writing the whole message list" }] }); // #7
+  await recordEntry(a0, { kind: "finding", ...F, value: "The page was only on screen", source: "s", evidence: "e", refs: ["unresolved:seen in a screenshot"] }); // #8
   await recordEntry(a0, { kind: "hypothesis", value: "The key was typed by hand", source: "s", evidence: "e" }); // #9
   await recordEntry(a0, { kind: "absence", value: "no second wallet", source: "C:", evidence: "grep over allocated files", completion: "partial" }); // #10
   await recordEntry(a0, { kind: "limitation", value: "The second volume was not opened", source: "vault p2", evidence: "no key", reason: "unavailable", answers: ["11"] }); // #11

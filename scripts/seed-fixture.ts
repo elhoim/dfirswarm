@@ -478,9 +478,9 @@ async function seedWebServer(root: string, spec: RunSpec): Promise<void> {
     [a1, { kind: "event", ts: "2026-02-11T02:57:12Z", value: "First request from 203.0.113.24 reaches /upload.aspx", source: "inputs/logs/u_ex260211.log", evidence: "line 4418, sc-status 200" }],
     [a5, { kind: "event", ts: "2026-02-11T02:57:52Z", value: "upload.aspx written to the web root", source: "work/attack-path.svg", evidence: "inode 33194-128-4, MFT $SI created" }],
     [a0, { kind: "ioc", value: "203.0.113.24", source: "inputs/logs/u_ex260211.log", evidence: "40 requests between 02:57 and 03:11", confidence: "high" }],
-    [a5, { kind: "finding", value: "Entry was an unauthenticated upload to /upload.aspx, not a stolen credential", source: "work/notes.md", evidence: "no 4624 before 02:57:12 in Security.evtx; the upload precedes every logon", confidence: "medium" }],
+    [a5, { kind: "finding", value: "Entry was an unauthenticated upload to /upload.aspx, not a stolen credential", source: "work/notes.md", evidence: "no 4624 before 02:57:12 in Security.evtx; the upload precedes every logon", confidence: "medium", basis: "inferred", indicates: "The first bad request needed no session, so the way in was the upload form, not a login.", confidence_why: "Two logs agree on the order, but the absence of a logon is read from one Security.evtx.", alternatives: [{ explanation: "A stolen credential used over a channel the web log does not show", status: "open", why: "RDP and VPN logs were not in the acquisition" }] }],
   ] as const) {
-    const r = await recordEntry(ctx, entry);
+    const r = await recordEntry(ctx, entry as Parameters<typeof recordEntry>[1]);
     if (!r.ok) throw new Error(r.reason);
   }
   await mkdir(join(root, "work", ".browser"), { recursive: true });
@@ -660,8 +660,8 @@ async function seedMicroVm(root: string, spec: RunSpec, runsDir: string): Promis
   await mkdir(join(root, "work"), { recursive: true });
   await writeFile(join(root, "work", "report.md"), "# Web server\n\nA web shell (inputs/web/shell.php) was requested at 2026-02-03T09:12:41Z.\n", "utf8");
   const e1 = await recordEntry(a0, { kind: "event", ts: "2026-02-03T09:12:41Z", value: "GET /shell.php answered 200", source: "inputs/web/access.log", evidence: "line 1" });
-  const f1 = await recordEntry(a1, { kind: "finding", value: "The web shell was uploaded through the admin panel", source: "inputs/web/access.log", evidence: "line 1", confidence: "low" });
-  await recordEntry(a1, { kind: "finding", value: "The web shell was requested once; how it arrived is not in the log", source: "inputs/web/access.log", evidence: "line 1; no POST to the admin panel", confidence: "medium", supersedes: (f1 as { entry: { seq: number } }).entry.seq } as Parameters<typeof recordEntry>[1]);
+  const f1 = await recordEntry(a1, { kind: "finding", value: "The web shell was uploaded through the admin panel", source: "inputs/web/access.log", evidence: "line 1", confidence: "low", basis: "inferred", indicates: "A shell served by the site arrived through its own upload path.", confidence_why: "One log line and no upload request seen.", alternatives_none_why: "recorded before the rest of the log was read" });
+  await recordEntry(a1, { kind: "finding", value: "The web shell was requested once; how it arrived is not in the log", source: "inputs/web/access.log", evidence: "line 1; no POST to the admin panel", confidence: "medium", basis: "observed", indicates: "The log shows the shell in use, not its arrival: how it came is another source's to say.", confidence_why: "The whole access log was read; it has one request and no upload.", supersedes: (f1 as { entry: { seq: number } }).entry.seq } as Parameters<typeof recordEntry>[1]);
   await recordEntry(a2, { kind: "absence", value: "a POST to /admin/upload", source: "inputs/web/access.log", evidence: "grep -c 'POST /admin' (GNU grep 3.11) · the whole log, allocated file only" } as Parameters<typeof recordEntry>[1]);
   void e1;
   await applySessionUsage(root, a0.agentId, usage(0.41, 520_000, 44));
