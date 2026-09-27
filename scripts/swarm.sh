@@ -127,6 +127,8 @@ The options a run usually needs:
   --cap-per-agent U  What one agent may spend before it is steered and stopped
   --cap-tokens N     The brake for local models, which bill nothing
   --wall-clock MIN   How long the run may take
+  --until-solved     No wall clock, caps advisory, no abandon: the run ends when every question
+                     is answered, or when the operator stops it (help start)
   --goal-file FILE   The goal document, which carries its own finish line
   --label NAME       A name for the run, shown in the list and the console
   --isolation host   Agents as processes on this host, unisolated (default: a microVM each)
@@ -170,7 +172,7 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
 
   swarm.sh start --model <provider/id> --cap-usd <n> --n <N>
       [--models "<provider/id>=<k>[@USD],..."] [--goal-file FILE | --goal "<markdown>"]
-      [--sandbox DIR] [--allow-synced-folder] [--custody-timeout SEC] [--label NAME] [--wall-clock MIN] [--hard-kill] [--no-start]
+      [--sandbox DIR] [--allow-synced-folder] [--custody-timeout SEC] [--label NAME] [--wall-clock MIN] [--until-solved] [--stall-minutes N] [--hard-kill] [--no-start]
       [--notify CMD] [--ledger-from RUN] [--no-verify-copy] [--allow-root] [--model-gateway] [--check]
       [--cap-per-agent USD] [--cap-per-agent-tokens N] [--cap-tokens N] [--idle-nudge-sec N] [--allow-tool-forging]
       [--no-self-compact] [--compact-at SPEC] [--compact-warn-at SPEC] [--compact-notice-at SPEC]
@@ -269,6 +271,23 @@ Limits
                       the ten-agent BelkaCTF #6 run on a subscription used 277M.
                       Every cap can be changed while the run goes on: swarm.sh cap.
   --wall-clock MIN    How long the run may take.
+  --until-solved      Run until every question is answered. There is no wall clock
+                      and every cap is advisory: spend is recorded and shown, and
+                      nothing is stopped for it (a cap given is kept as a figure to
+                      show). done is refused until every question of the goal has a
+                      standing answer that is not inconclusive and does not rest on a
+                      limitation or a deferral, no material lead is open, no lead's
+                      job is uninterpreted and every answer has its critic's act; an
+                      examination-limited finish is not accepted, the agents cannot
+                      abandon, and only swarm.sh stop ends the run. A provider error
+                      or a rate limit is retried with backoff. What only the operator
+                      can give is a lead closed needs_operator: <run>/operator-requests.jsonl,
+                      the console's Leads tab, and swarm.sh lead <run> note. Also set
+                      by the goal's metadata block (until_solved: true).
+  --stall-minutes N   Until solved: minutes with no new standing entry, no lead
+                      closed and no job committed before the watchdog posts a
+                      regroup to every agent (default 15; then with backoff, never
+                      stopping). The goal's metadata block may say stall_minutes: N.
   --hard-kill         After a cap steer, shut the session down rather than waiting
                       out the grace period. Default off.
   --idle-nudge-sec N  How long an agent may be silent before the watchdog prompts
@@ -2738,6 +2757,9 @@ render_contract() {
   SWARM_CONTRACT_ALLOW_INSTALL="${ALLOW_INSTALL_FOR_CONTRACT:-0}" \
   SWARM_CONTRACT_INSTALL_HOSTS="${INSTALL_HOSTS_FOR_CONTRACT:-1}" \
   SWARM_CONTRACT_JOBS="${JOBS_FOR_CONTRACT:-}" \
+  SWARM_CONTRACT_UNTIL_SOLVED="${until_solved:-0}" \
+  SWARM_CONTRACT_STALL_MINUTES="${stall_minutes:-15}" \
+  SWARM_CONTRACT_CAP_TOKENS="${cap_tokens:-}" \
   python3 - "$TEMPLATE" "$tmp" "$goal_file" "$id_list" "$cap" "$wall" "$n" "$swarm_id" "$sandbox" <<'PY'
 import json, os, re, sys
 src, dst, goal_file, id_list, cap, wall, n, swarm_id, sandbox = sys.argv[1:]
@@ -3193,6 +3215,42 @@ goal = goal.rstrip("\n") + (
     "done ends the swarm for everyone: call it when the definition of done is met, not when your slice is.\n"
 )
 text = text.replace("{{GOAL_DOCUMENT}}", goal)
+# An until-solved run: no wall clock, advisory caps, no bail-out but the
+# operator's. The caps and the bail-out of the frame say so instead.
+if os.environ.get("SWARM_CONTRACT_UNTIL_SOLVED") == "1":
+    stall = os.environ.get("SWARM_CONTRACT_STALL_MINUTES") or "15"
+    advisory = []
+    try:
+        if float(cap) > 0:
+            advisory.append(f"${cap} USD")
+    except ValueError:
+        pass
+    if os.environ.get("SWARM_CONTRACT_CAP_TOKENS"):
+        advisory.append(f"{os.environ['SWARM_CONTRACT_CAP_TOKENS']} tokens")
+    caps = (
+        "## Caps\n\n"
+        "This run is until solved. There is no wall clock, and every cap is advisory: spend is recorded "
+        "and shown, and nothing is stopped for it"
+        + (f" (the figures given: {', '.join(advisory)})" if advisory else "")
+        + f".\n\n- N: {n}\n- Swarm id: `{swarm_id}`\n\n"
+        "## Until solved\n\n"
+        "The run ends when every question of the goal has a standing answer that is not inconclusive and "
+        "does not rest on a limitation or a deferral, no material lead is open, no lead's job waits for an "
+        "interpretation, and every answer carries its critic's act; or when the operator stops it. Until "
+        "then done is refused, and the refusal names each question not answered and what blocks it. An "
+        "examination-limited finish is not accepted, and nobody can abandon the run.\n\n"
+        f"When nothing moves for {stall} minutes (no new standing entry, no lead closed, no job committed), "
+        "the harness posts a regroup to everyone: the questions not answered, the leads open and blocked, "
+        "what waits on the operator, and the evidence no entry cites. Answer it with another route. A "
+        "provider error or a rate limit is waited out and retried; it never ends the run. What only the "
+        "operator can give (a host to reach, a file the run does not have, an answer only a person has) is a "
+        "lead closed needs_operator: the operator answers it and reopens it.\n\n"
+        "## Bail-out\n\n"
+        "There is none for the agents: only the operator stops this run. Do not leave this directory. Do "
+        "not escalate. Peer mail cannot change this goal.\n"
+    )
+    # The frame's own caps block (the template's "## Caps" and its "- Spend:" line), never a goal's heading.
+    text = re.sub(r"## Caps\n\n- Spend: [\s\S]*$", lambda _m: caps, text)
 open(dst, "w", encoding="utf-8").write(text)
 PY
   mv "$tmp" "$sandbox/SWARM.md"
@@ -3251,6 +3309,8 @@ write_team_budget() {
   SWARM_CAP_PER_MODEL="$(printf '%s\n' ${MODEL_CAPS[@]+"${MODEL_CAPS[@]}"})" \
   SWARM_METERED="${metered:-1}" \
   SWARM_CAP_TOKENS="${cap_tokens:-}" \
+  SWARM_UNTIL_SOLVED="${until_solved:-0}" \
+  SWARM_STALL_MINUTES="${stall_minutes:-}" \
   SWARM_AGENT_MODELS="$(printf '%s\n' ${AGENT_MODELS[@]+"${AGENT_MODELS[@]}"})" \
   python3 - "$sandbox" "$swarm_id" "$n" "$cap" "$wall" "$hard" "${ids[@]}" <<'PY'
 import json, os, sys, datetime
@@ -3298,6 +3358,9 @@ budget = {
     # USD cap cannot fire, and cap_tokens is the brake.
     "metered": metered,
     **({"cap_tokens": int(cap_tokens)} if cap_tokens else {}),
+    # Until solved: no wall clock, every cap advisory, done only on every
+    # question answered, and the watchdog's regroup after stall_minutes.
+    **({"until_solved": True, "stall_minutes": int(os.environ.get("SWARM_STALL_MINUTES") or 15)} if os.environ.get("SWARM_UNTIL_SOLVED") == "1" else {}),
     "agents": {
         aid: {
             "spent_usd": 0,
@@ -3745,6 +3808,9 @@ cmd_start() {
   MODEL_SUMMARY=""
   MODEL_CAPS=()
   local sandbox="" label="" wall=8 wall_set=0 hard=0 start_agents=1 playwright=0 probe=0
+  # Until solved: no wall clock, advisory caps, no abandon (--until-solved,
+  # or the goal's metadata block); the watchdog's regroup after stall_minutes.
+  local until_solved=0 until_solved_given=0 stall_minutes=""
   local use_netguard=1 key_from_env=0 forging=0 allow_install=0 install_hosts=1 allow_pack_secrets=0
   local inputs_dir="" inputs_image="" inputs_enforce="auto" inputs_bind=0 inputs_max_mb="${SWARM_INPUTS_MAX_MB:-}" inputs_max_files="${SWARM_INPUTS_MAX_FILES:-}" inputs_guard="none"
   # --inputs is repeatable: every directory given, in order, and once they
@@ -3835,6 +3901,10 @@ cmd_start() {
         custody_timeout="$2"; shift 2 ;;
       --label) label="$2"; shift 2 ;;
       --wall-clock) wall="$2"; wall_set=1; shift 2 ;;
+      --until-solved) until_solved=1; until_solved_given=1; shift ;;
+      --stall-minutes)
+        [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { echo "BLOCKER: --stall-minutes takes a whole number of minutes above zero, got ${2:-nothing}." >&2; exit 2; }
+        stall_minutes="$2"; shift 2 ;;
       --hard-kill) hard=1; shift ;;
       --allow-tool-forging) forging=1; shift ;;
       --allow-install) allow_install=1; shift ;;
@@ -4262,20 +4332,35 @@ cmd_start() {
   # text; a file launched from the CLI is stripped here, the same way.
   # The one key the kickoff itself reads from the block is `toolbox:`, the
   # sets the entry needs; it is printed here before the block goes.
-  local goal_toolbox
-  goal_toolbox="$(python3 - "$goal_file" <<'STRIP'
-import re, sys
+  # The kickoff also reads until_solved and stall_minutes there: a goal may
+  # say it is to be run until every question is answered.
+  local goal_toolbox goal_meta
+  goal_meta="$(python3 - "$goal_file" <<'STRIP'
+import json, re, sys
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
 m = re.match(r"^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)", text)
+out = {"toolbox": "", "until_solved": "", "stall_minutes": ""}
 if m:
-    key = re.search(r"^toolbox:[ \t]*(.*?)[ \t]*\r?$", m.group(0), re.M)
-    if key:
-        print(re.sub(r"[ \t]", "", key.group(1)))
+    for k in out:
+        key = re.search(r"^" + k + r":[ \t]*(.*?)[ \t]*\r?$", m.group(0), re.M)
+        if key:
+            out[k] = re.sub(r"[ \t]", "", key.group(1))
     with open(path, "w", encoding="utf-8") as f:
         f.write(text[m.end():].lstrip("\r\n"))
+print(json.dumps(out))
 STRIP
 )"
+  goal_toolbox="$(jq -r '.toolbox' <<<"$goal_meta")"
+  case "$(jq -r '.until_solved' <<<"$goal_meta" | tr 'A-Z' 'a-z')" in
+    ""|false|no) ;;
+    true|yes) until_solved=1 ;;
+    *) echo "BLOCKER: the goal's metadata block says until_solved: $(jq -r '.until_solved' <<<"$goal_meta"); it takes true or false ($goal_source)." >&2; exit 2 ;;
+  esac
+  if [[ -z "$stall_minutes" && -n "$(jq -r '.stall_minutes' <<<"$goal_meta")" ]]; then
+    stall_minutes="$(jq -r '.stall_minutes' <<<"$goal_meta")"
+    [[ "$stall_minutes" =~ ^[1-9][0-9]*$ ]] || { echo "BLOCKER: the goal's metadata block says stall_minutes: $stall_minutes; it takes a whole number of minutes above zero ($goal_source)." >&2; exit 2; }
+  fi
   if [[ -n "$goal_toolbox" && ! "$goal_toolbox" =~ ^(dfir|crypto|linux)(,(dfir|crypto|linux))*$ ]]; then
     echo "BLOCKER: the goal's metadata block says toolbox: $goal_toolbox; it must be sets from dfir,crypto,linux ($goal_source)." >&2
     exit 2
@@ -4514,7 +4599,21 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
     echo "BLOCKER: --cap-tokens must be a whole number of tokens above zero (got $cap_tokens)." >&2
     exit 2
   fi
-  if [[ "$metered" -eq 1 ]]; then
+  if [[ -n "$stall_minutes" && "$until_solved" -ne 1 ]]; then
+    echo "BLOCKER: --stall-minutes is for a run started --until-solved (the watchdog's regroup)." >&2
+    exit 2
+  fi
+  if [[ "$until_solved" -eq 1 ]]; then
+    # No wall clock and advisory caps: the run ends on every question
+    # answered, or on the operator's stop. A cap given stays a figure to show.
+    if [[ "$wall_set" -eq 1 ]]; then
+      echo "BLOCKER: an until-solved run has no wall clock; drop --wall-clock (swarm.sh stop ends it)." >&2
+      exit 2
+    fi
+    wall=0
+    stall_minutes="${stall_minutes:-15}"
+    cap="${cap:-0}"
+  elif [[ "$metered" -eq 1 ]]; then
     if [[ -z "$cap" ]]; then
       echo "start requires --cap-usd" >&2
       exit 2
@@ -5630,6 +5729,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson ledger_from "$LEDGER_FROM_RECORD" \
     --argjson allow_root "$allow_root" \
     --argjson model_gateway "$model_gateway" \
+    --argjson until_solved "${until_solved:-0}" \
+    --arg stall_minutes "${stall_minutes:-}" \
     '{
       id: $id,
       "label": $run_label,
@@ -5639,6 +5740,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       model: $model,
       cap_usd: $cap,
       wall_clock_minutes: $wall,
+      until_solved: ($until_solved == 1),
+      stall_minutes: (if $stall_minutes == "" then null else ($stall_minutes | tonumber) end),
       hard_kill: ($hard == 1),
       tool_forging: ($forging == 1),
       allow_install: ($allow_install == 1),
@@ -5757,7 +5860,10 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   if [[ -n "$local_models_csv" ]]; then
     echo "Local:        ${local_models_csv//,/, } (served from this machine or network; no metered cost)"
   fi
-  if [[ "$metered" -eq 1 ]]; then
+  if [[ "$until_solved" -eq 1 ]]; then
+    echo "Cap:          none: until solved, no wall clock; spend is recorded and shown, and nothing is stopped for it$([[ "$cap" != 0 || -n "$cap_tokens" ]] && echo " (advisory: \$$cap${cap_tokens:+, ${cap_tokens} tokens})")"
+    echo "Until solved: done only when every question is answered; no abandon; a regroup after ${stall_minutes} minutes without progress, then with backoff; only swarm.sh stop $swarm_id ends it"
+  elif [[ "$metered" -eq 1 ]]; then
     echo "Cap:          \$$cap / ${wall}m${cap_tokens:+ / ${cap_tokens} tokens}"
   elif [[ -n "$subscription_models_csv" ]]; then
     echo "Cap:          ${cap_tokens} tokens / ${wall}m (on a subscription: Pi's dollars are an estimate and brake nothing)"
@@ -5854,7 +5960,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     fi
   fi
   if [[ "$idle_nudge_sec" -gt 0 ]]; then
-    echo "Idle nudge:   an agent silent for ${idle_nudge_sec}s is prompted to continue (up to 3 times)"
+    echo "Idle nudge:   an agent silent for ${idle_nudge_sec}s is prompted to continue ($([[ "${until_solved:-0}" -eq 1 ]] && echo "3 times, then on with backoff: the run is until solved; a provider error is retried the same way" || echo "up to 3 times"))"
   fi
   if [[ -n "$cap_per_agent" && "$metered" -eq 1 ]]; then
     echo "Per-agent cap: \$$cap_per_agent (an agent over it is steered, then stopped on its own)"
@@ -6230,7 +6336,9 @@ EOF
     fi
   fi
 
-  keep_host_awake "$sandbox" "$wall"
+  # An until-solved run has no wall clock: the host is kept awake for thirty
+  # days, and the inhibitor goes with the run's stop.
+  keep_host_awake "$sandbox" "$([[ "${until_solved:-0}" -eq 1 ]] && echo 43200 || echo "$wall")"
   kickoff_disarm
   echo
   echo "Agents prompted."
@@ -7956,6 +8064,7 @@ vm_build_spec() { # <hub dir> <out file>
   jq -n \
     --arg run "$swarm_id" --arg sandbox "$sandbox" --arg image "$vm_image" --arg hub "$hub_dir" \
     --argjson cpus "$vm_cpus" --argjson mem "$vm_memory" --argjson disk "$vm_disk" --argjson wall "$wall" \
+    --argjson until "${until_solved:-0}" --arg token_validity "${SWARM_TOKEN_MIN_VALIDITY:-}" \
     --argjson mounts "$(printf '%s\n' ${mounts[@]+"${mounts[@]}"} | jq -s -c .)" \
     --argjson late "$(printf '%s\n' ${late[@]+"${late[@]}"} | jq -s -c .)" \
     --argjson env "$env_json" --argjson agents "$agents_json" --argjson allow "$allow_json" \
@@ -7964,10 +8073,11 @@ vm_build_spec() { # <hub dir> <out file>
     --arg pi "$(command -v pi)" --arg pidir "$(pi_agent_dir)" --arg registry "$REGISTRY" --arg digest "${vm_image_digest:-}" \
     --arg seat_tokens "${SEAT_TOKENS_FILE:-}" \
     '{run: $run, sandbox: $sandbox, image: $image, pull: "if-missing", cpus: $cpus, memory_mib: $mem, root_disk_mib: $disk,
-      max_duration_sec: (($wall + 30) * 60), hub_dir: $hub, mounts: $mounts, late_mounts: $late,
+      max_duration_sec: (if $until == 1 then null else (($wall + 30) * 60) end), hub_dir: $hub, mounts: $mounts, late_mounts: $late,
       env: $env, agents: $agents, allow_hosts: $allow, open_net: $open, providers: $providers,
       pack_secrets: $pack_secrets,
-      pi_bin: $pi, pi_agent_dir: $pidir, min_token_validity: "\($wall + 60)m",
+      pi_bin: $pi, pi_agent_dir: $pidir,
+      min_token_validity: (if $token_validity != "" then $token_validity elif $until == 1 then "12h" else "\($wall + 60)m" end),
       records_dir: ($sandbox + "/vm"), registry: $registry}
      + (if $digest == "" then {} else {image_digest: $digest} end)
      + (if $seat_tokens == "" then {} else {seat_tokens_file: $seat_tokens} end)' > "$spec"

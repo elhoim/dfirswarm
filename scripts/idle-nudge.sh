@@ -340,6 +340,45 @@ coverage_hint() {
   echo "idle-nudge: posted the inputs no command has named yet ($(printf '%s\n' "$list" | wc -l | tr -d ' ') at ${due}%)" >&2
 }
 
+# An until-solved run (budget.json until_solved) never ends on a clock, a cap
+# or an abandon, so a swarm that stops moving would wait forever. When
+# nothing has moved for the run's stall_minutes (no new standing entry, no
+# lead closed, no job committed), one post to everyone lists the questions
+# not answered, the leads open and blocked, what waits on the operator and
+# the evidence no entry cites, and asks for another route; again, with
+# backoff, while nothing moves (scripts/leads-cli.ts regroup). Never stops.
+until_solved() {
+  [[ "$(jq -r '.until_solved // false' "$SANDBOX/budget.json" 2>/dev/null)" == true ]]
+}
+regroup_check() {
+  until_solved || return 0
+  local out ts line
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" regroup "$SANDBOX" 2>/dev/null || true)"
+  [[ "$(jq -r '.posted // false' <<<"$out" 2>/dev/null)" == true ]] || return 0
+  ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  line="$(jq -cn --arg ts "$ts" --argjson r "$out" '{ts: $ts, agent: "system", tool: "regroup", args: {since: $r.since}, result: {ok: true, count: $r.count, post: $r.post, next_minutes: $r.next_minutes}}')"
+  trace_emit "$ROOT" "$SANDBOX" "$line"
+  echo "idle-nudge: regroup $(jq -r '.count' <<<"$out") posted (#$(jq -r '.post' <<<"$out")); nothing had moved since $(jq -r '.since' <<<"$out")" >&2
+}
+
+# What the agents asked of the operator (a lead closed needs_operator, one
+# line each in operator-requests.jsonl): the operator's notify command runs
+# once for each new one, with the command that answers it.
+operator_requests_check() {
+  local file="$SANDBOX/operator-requests.jsonl" mark="$SANDBOX/traces/idle-nudge.requests" seen total line
+  [[ -f "$file" ]] || return 0
+  total="$(grep -c . "$file" 2>/dev/null || echo 0)"
+  seen="$(cat "$mark" 2>/dev/null || echo 0)"
+  [[ "$seen" =~ ^[0-9]+$ ]] || seen=0
+  [[ "$total" -gt "$seen" ]] || return 0
+  tail -n +"$((seen + 1))" "$file" | while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    bash "$ROOT/scripts/notify.sh" "$SANDBOX" operator_request "$line" >/dev/null 2>&1 </dev/null || true
+    echo "idle-nudge: an agent asks the operator: $(jq -r '"\(.lead) \(.request)"' <<<"$line" 2>/dev/null). Answer: $(jq -r '.answer' <<<"$line" 2>/dev/null)" >&2
+  done
+  echo "$total" > "$mark"
+}
+
 # A compaction open this long is past the bound the seat's own harness holds
 # it to (it stops one at fifteen minutes and retries it or releases the
 # lock), so the seat's process is stuck or Pi did not let go when it was
@@ -378,6 +417,15 @@ prompt_agent() { # <agent id> <text> [followUp|steer]
 
 STATE="$SANDBOX/traces/idle-nudge.state"
 [[ -f "$STATE" ]] || : > "$STATE"
+# Until solved: per agent, how many times in a row it was prompted after a
+# provider error, and when last; the wait doubles each time, up to half an hour.
+ERRSTATE="$SANDBOX/traces/idle-nudge.errors"
+[[ -f "$ERRSTATE" ]] || : > "$ERRSTATE"
+set_err() { # <id> <count> <epoch>
+  local tmp="$ERRSTATE.tmp.$$"
+  awk -v id="$1" -v n="$2" -v t="$3" 'NF && $1 == id { $2 = n; $3 = t; found = 1 } NF { print } END { if (!found) print id, n, t }' "$ERRSTATE" > "$tmp"
+  mv "$tmp" "$ERRSTATE"
+}
 count_of() { awk -v id="$1" '$1 == id { print $2; found = 1 } END { if (!found) print 0 }' "$STATE"; }
 mark_of() { awk -v id="$1" '$1 == id { print ($3 == "" ? 0 : $3); found = 1 } END { if (!found) print 0 }' "$STATE"; }
 set_count() {
@@ -427,6 +475,10 @@ while :; do
   ensure_hub
   host_backstop
   coverage_hint
+  regroup_check
+  operator_requests_check
+  US=0
+  until_solved && US=1
   ids="$(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null | tr '\n' ' ')"
   # shellcheck disable=SC2086
   clocks="$([[ -n "${ids// /}" ]] && agent_clocks $ids)"
@@ -472,9 +524,28 @@ while :; do
     # An agent whose last turn ended in a provider error is not idle, it is
     # finished: every nudge buys another identical failure. Both DeepSeek
     # agents on the BelkaCTF #6 run spent all three that way against a 402.
+    # In an until-solved run a provider error never ends the run: the agent
+    # is prompted again, with backoff (below), and a rate limit that lifts
+    # finds it working.
+    provider_error=0
     if grep -q "\"agent\":\"$id\",\"tool\":\"agent_error\"" "$SANDBOX/traces/events.jsonl" 2>/dev/null; then
       last_tool="$(grep "\"agent\":\"$id\"" "$SANDBOX/traces/events.jsonl" 2>/dev/null | tail -1 | jq -r '.tool // empty' 2>/dev/null || true)"
-      [[ "$last_tool" == "agent_error" ]] && continue
+      if [[ "$last_tool" == "agent_error" ]]; then
+        [[ "$US" -eq 1 ]] || continue
+        provider_error=1
+      fi
+    fi
+    if [[ "$provider_error" -eq 1 ]]; then
+      read -r ek elast <<<"$(awk -v id="$id" '$1 == id { print $2, $3 }' "$ERRSTATE")"
+      ek="${ek:-0}"
+      elast="${elast:-0}"
+      eback=$(( IDLE_SEC * (1 << (ek > 4 ? 4 : ek)) ))
+      [[ "$eback" -gt 1800 ]] && eback=1800
+      [[ $(( $(date +%s) - elast )) -ge "$eback" ]] || continue
+      set_err "$id" $((ek + 1)) "$(date +%s)"
+    elif grep -q "^$id " "$ERRSTATE" 2>/dev/null; then
+      # It worked since: the next error starts the backoff again.
+      set_err "$id" 0 0
     fi
     # A model served from this machine can take minutes to answer its first
     # turn on a long contract — the LM Studio seat on BelkaCTF #6 took four,
@@ -491,7 +562,14 @@ while :; do
     if [[ "$mark" -gt 0 && "$clock" -lt "$mark" ]]; then
       n=0
     fi
-    [[ "$n" -lt "$MAX_NUDGES" ]] || continue
+    if [[ "$n" -ge "$MAX_NUDGES" && "$provider_error" -eq 0 ]]; then
+      # Past the budget an until-solved run keeps nudging, each wait twice
+      # the last, up to half an hour: it never gives an agent up.
+      [[ "$US" -eq 1 ]] || continue
+      backoff=$(( IDLE_SEC * (1 << (n - MAX_NUDGES + 1)) ))
+      [[ "$backoff" -gt 1800 ]] && backoff=1800
+      [[ $(( clock - mark )) -ge "$backoff" ]] || continue
+    fi
     n=$((n + 1))
     set_count "$id" "$n" "$clock"
     minutes=$((clock / 60))
@@ -503,11 +581,17 @@ while :; do
     # jobs awaiting interpretation (scripts/leads-cli.ts nudge-line).
     leads_line="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" nudge-line "$SANDBOX" "$id" 2>/dev/null || true)"
     [[ -n "$leads_line" ]] && leads_line=" ${leads_line}"
-    if [[ "$why" == waiting ]]; then
+    budget_words="Nudge ${n} of ${MAX_NUDGES}."
+    if [[ "$US" -eq 1 && "$n" -gt "$MAX_NUDGES" ]]; then budget_words="Nudge ${n}: this run is until solved, and the nudges go on."; fi
+    if [[ "$provider_error" -eq 1 ]]; then
+      why="provider_error"
+      text="Your last turn ended in a provider error, and this run is until solved: an error or a rate limit is waited out and retried, and never ends the run. Pick up where you left off: read inbox, go on with what you hold, or take the next thing nobody holds.${held:+ You still hold: ${held}.}${leads_line} ${budget_words}"
+    elif [[ "$why" == waiting ]]; then
       text="For ${minutes} minutes you have called only wait and inbox: no post, no record, no command. Waiting is right while an answer you asked for is coming; past that it is idle. ${news_line}If a peer owes you an answer, ask them again by name. Otherwise read inbox, see what your peers have taken, take the next piece of the goal nobody holds and say so on the board; when nothing is left for you, keep waiting. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.}${leads_line} Nudge ${n} of ${MAX_NUDGES}."
     else
       text="You ended your turn ${minutes} minutes ago and the swarm is not done. Ending a turn is not waiting: nothing prompts you again. ${news_line}Read inbox, see what your peers have taken, and get on with what you said you were doing (name() if that has changed); when there is nothing left to take, call the wait tool and keep it open, and call it again each time it returns. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.}${leads_line} Nudge ${n} of ${MAX_NUDGES}."
     fi
+    text="${text//Nudge ${n} of ${MAX_NUDGES}./$budget_words}"
     if prompt_agent "$id" "$text" "$deliver" >/dev/null 2>&1; then
       log_event "$id" "$clock" true "$n" "$why"
       echo "idle-nudge: prompted $id after ${clock}s ${why} (nudge $n/$MAX_NUDGES)"

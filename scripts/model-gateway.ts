@@ -566,6 +566,7 @@ type BudgetView = {
   metered: boolean;
   wall_clock_minutes: number;
   started_at: string;
+  until_solved: boolean;
 };
 
 function readBudgetView(sandbox: string): BudgetView | null {
@@ -579,6 +580,7 @@ function readBudgetView(sandbox: string): BudgetView | null {
       metered: raw.metered !== false,
       wall_clock_minutes: num(raw.wall_clock_minutes),
       started_at: typeof raw.started_at === "string" ? raw.started_at : "",
+      until_solved: raw.until_solved === true,
     };
   } catch {
     return null;
@@ -611,6 +613,9 @@ export function refusalFor(
   }
   const b = readBudgetView(sandbox);
   if (!b) return null;
+  // An until-solved run has no wall clock and advisory caps: a call is
+  // refused only for the stops above, the run's end and a seat's own.
+  if (b.until_solved) return null;
   if (b.wall_clock_minutes > 0 && b.started_at) {
     const end = Date.parse(b.started_at) + b.wall_clock_minutes * 60_000;
     if (Number.isFinite(end) && now >= end + graceMs) return { code: "wall_clock", message: `the run's wall clock (${b.wall_clock_minutes} min) and its grace have run out` };

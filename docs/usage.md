@@ -235,6 +235,24 @@ Three decisions about a VM's network, said so nobody assumes otherwise:
 - **DNS.** msb's DNS rebinding protection is left at the SDK's default (on), and its strict mode is not enabled: a host-name rule admits the addresses that name resolves to, and msb does not require the connection's own TLS server name or HTTP `Host` to be that name. A local model reached by a host name that resolves to a private address may be refused by the rebinding protection (UNKNOWN, not measured); name it by address.
 - **No TLS-inspecting corporate proxy.** A network that reaches the internet only through a proxy that decrypts TLS is not supported in VM mode: the VMs do not trust the host's certificate store (msb's `trustHostCAs` is off), and no upstream proxy is configured for them.
 
+#### The lead register and until-solved runs
+
+`swarm.sh lead <run> list` prints every lead, the ones an agent closed
+`needs_operator` first with the request and the command that answers it;
+`lead <run> note L-n "TEXT" [--allow-host HOST]` answers one (recorded on the
+lead, the lead reopened, posted to the board as the examiner, and in a microVM
+run the host allowed for the run's jobs); `lead <run> reopen L-n` reopens a
+closed lead. Each is on the trace and the operator's record. The console's
+Leads tab does the same.
+
+`swarm.sh start --until-solved [--stall-minutes N]` runs until every question
+is answered: no wall clock, every cap advisory, no abandon, and a regroup post
+when nothing moves for N minutes (15). Only `swarm.sh stop` ends it. A goal can
+ask for it in its metadata block (`until_solved: true`, `stall_minutes: N`).
+In a microVM run on a subscription (OAuth) provider, each VM's token is minted
+once, at its start, valid for at least 12 hours (`SWARM_TOKEN_MIN_VALIDITY`
+overrides it); a token that expires in a running VM is not refreshed there.
+
 ### `scripts/spawn.sh`
 
 ```

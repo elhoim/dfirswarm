@@ -646,11 +646,12 @@ export function boardTable(hub: {
       const args: { reason?: string; outputFile?: string; createSentinel?: boolean; outcome?: P.FinishOutcome } = said;
       let reason = String(args.reason ?? "");
       const endsSwarm = args.createSentinel !== false && reason !== "agent_cap" && !reason.startsWith(P.ABANDON_PREFIX);
+      const untilSolved = (await P.readBudget(S).catch(() => null))?.until_solved === true;
       if (endsSwarm && !(await P.swarmDoneExists(S))) {
         const mine = askedBy.get(who);
         askedBy.delete(who);
         const now = await revisionNow();
-        const recent = mine && Date.now() - mine.at <= FINISH_LINE_REUSE_MS && mine.revision === now && P.finishLineVerdict(mine.run, false).proceed ? mine : null;
+        const recent = mine && Date.now() - mine.at <= FINISH_LINE_REUSE_MS && mine.revision === now && P.finishLineVerdict(mine.run, false, { untilSolved }).proceed ? mine : null;
         // The revision is checked again just before the sentinel: a run the
         // state moved under (a dispute, a new lead, an entry) is run again,
         // a bounded number of times, and a state that never holds still is a
@@ -663,7 +664,7 @@ export function boardTable(hub: {
           attempts += 1;
         }
         const run = line.run;
-        const verdict = P.finishLineVerdict(run, false);
+        const verdict = P.finishLineVerdict(run, false, { untilSolved });
         if (!verdict.proceed) throw new Error(`the harness ran the finish line on the host and it is not met: ${verdict.reason}`);
         // How the run ended is the hub's to say, from its own run: a seat's
         // word for it is dropped, and a finish line the host could not run

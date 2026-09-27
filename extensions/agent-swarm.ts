@@ -3428,6 +3428,9 @@ export default function (pi: ExtensionAPI) {
         // more just before the sentinel. In a VM the hub does both, on the
         // host's own files, when markDone reaches it.
         const onHost = !boardSocket();
+        // An until-solved run ends only on every question answered; even a
+        // finish line that could not be run is a refusal there.
+        const untilSolved = (await readBudget(toolCtx.cwd).catch(() => null))?.until_solved === true;
         const bound = onHost ? await runFinishLineBound(toolCtx.cwd, runFinishLine) : { run: await runFinishLine(toolCtx.cwd).catch(() => null), revision: "", settled: true, runs: 1 };
         const unsettled = async () => {
           await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: FINISH_LINE_UNSETTLED, runs: bound.runs }).catch(() => undefined);
@@ -3435,7 +3438,7 @@ export default function (pi: ExtensionAPI) {
         };
         if (!bound.settled) return unsettled();
         const run = bound.run;
-        const verdict = finishLineVerdict(run, params.abandon === true);
+        const verdict = finishLineVerdict(run, params.abandon === true, { untilSolved });
         await logEvent(toolCtx.cwd, agentId, "finish_line", { abandon: params.abandon === true }, {
           ok: verdict.proceed,
           total: run?.total ?? 0,

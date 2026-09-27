@@ -1736,3 +1736,116 @@ export async function writeLeadsMd(sandboxRoot: string): Promise<void> {
   await mkdir(join(sandboxRoot, LEADS_DIR), { recursive: true });
   await P.writeFileAtomic(join(sandboxRoot, LEADS_MD), renderLeadsMd(snap));
 }
+
+// --- until solved: the regroup ------------------------------------------------------------------
+
+/** The last moment the run moved: a standing entry recorded, a lead closed, a job committed. */
+export async function lastProgress(sandboxRoot: string, snap: LeadsSnapshot, startedAt: string): Promise<{ at: number; what: string }> {
+  let best = { at: Date.parse(startedAt) || 0, what: "the run's start" };
+  const take = (iso: string | undefined, what: string) => {
+    const t = iso ? Date.parse(iso) : NaN;
+    if (Number.isFinite(t) && t > best.at) best = { at: t, what };
+  };
+  for (const e of snap.ledger.entries) if (!snap.ledger.replaced.has(e.seq)) take(e.at, `E-${e.seq} (${e.kind})`);
+  for (const e of snap.state.events) if (e.ev === "close") take(e.at, `${e.lead} closed ${e.disposition}`);
+  for (const j of snap.jobs) if (j.state === "committed") take(j.finished_at, `${j.id} committed`);
+  return best;
+}
+
+/**
+ * The evidence the catalogue knows that no standing entry cites: an input
+ * file no ref names (directly, or through a catalogued member of it), and a
+ * catalogued object (an archive's members, a disk's volumes) no ref reaches.
+ * Generic: the catalogue says what it holds; nothing here reads a format.
+ */
+export async function uncitedEvidence(sandboxRoot: string, snap: LeadsSnapshot): Promise<string[]> {
+  const refs = new Set<string>();
+  for (const e of snap.ledger.entries) if (!snap.ledger.replaced.has(e.seq)) for (const r of e.refs ?? []) refs.add(r);
+  const gens: Array<{ id: string; ref: string; name: string; what: string }> = [];
+  for (const g of await readdir(join(sandboxRoot, "catalog", "gen")).catch(() => [] as string[])) {
+    const raw = await readFile(join(sandboxRoot, "catalog", "gen", g, "generation.json"), "utf8").catch(() => null);
+    if (!raw) continue;
+    try {
+      const j = JSON.parse(raw) as { id?: string; target?: { ref?: string; name?: string }; coverage?: { covered?: string; members?: number }; recipe?: string };
+      gens.push({ id: j.id ?? g, ref: j.target?.ref ?? "", name: j.target?.name ?? j.target?.ref ?? g, what: [j.coverage?.covered, j.coverage?.members !== undefined ? `${j.coverage.members} listed` : ""].filter(Boolean).join(", ") || (j.recipe ?? "") });
+    } catch {
+      // skipped
+    }
+  }
+  const cited = (ref: string) => [...refs].some((r) => r === ref || r.startsWith(`${ref}/`));
+  const genCited = (g: { id: string; ref: string }) => [...refs].some((r) => r.startsWith(`member:${g.id}#`)) || (g.ref ? cited(g.ref) : false);
+  const out: string[] = [];
+  const manifest = await P.readInputsManifest(sandboxRoot).catch(() => null);
+  for (const f of manifest?.files ?? []) {
+    const ref = `input:${f.path.replace(/^inputs\//, "")}`;
+    const viaGen = gens.some((g) => g.ref === ref && genCited(g));
+    if (!cited(ref) && !viaGen) out.push(`${f.path} (${f.bytes} bytes)`);
+  }
+  // A catalogued object made from a job's output (an extracted archive, a
+  // decrypted volume) that no ref reaches; one made from an input is said
+  // with its input above.
+  for (const g of gens) if (!genCited(g) && !g.ref.startsWith("input:")) out.push(`catalogue ${g.id}: ${g.name}${g.what ? ` (${g.what})` : ""}`);
+  return out;
+}
+
+/** How each goal question stands for the regroup: no answer, or an answer that does not settle it. */
+export function questionStanding(snap: LeadsSnapshot): Array<{ id: string; why: string; blocks: string[] }> {
+  const out: Array<{ id: string; why: string; blocks: string[] }> = [];
+  for (const q of snap.goal.questions) {
+    const a = snap.ledger.entries.find((e) => e.kind === "answer" && e.section === `question:${q}` && !snap.ledger.replaced.has(e.seq));
+    let why = "";
+    if (!a) why = "no answer";
+    else if (a.inconclusive) why = `answer E-${a.seq} is inconclusive`;
+    else if (!(a.support ?? []).length && (a.limitations ?? []).length) why = `answer E-${a.seq} rests on limitations only`;
+    else if (snap.goal.existence.length && !snap.goal.existence.includes(q)) {
+      const kinds = (a.support ?? []).map((x) => snap.ledger.bySeq.get(x.seq)?.kind);
+      if (kinds.length && kinds.every((k) => k === "absence")) why = `answer E-${a.seq} rests on a search that found nothing, and the question asks for more than whether it exists`;
+    }
+    if (!why) continue;
+    const blocks: string[] = [];
+    for (const l of snap.state.leads.values()) {
+      if (!l.answers.includes(q)) continue;
+      const st = leadStatus(l, snap.state, snap.ledger);
+      if (st === "closed") {
+        if (LIMITING_DISPOSITIONS.has(l.closed!.disposition)) blocks.push(`${l.id} closed ${l.closed!.disposition}: ${l.closed!.ref}`);
+        continue;
+      }
+      blocks.push(`${l.id} ${st}${l.holder ? ` (${l.holder})` : " (nobody holds it)"}${st === "blocked" ? ` on ${l.needs.filter((n) => !needState(n, snap.state, snap.ledger).met).join(", ")}` : ""}`);
+    }
+    out.push({ id: q, why, blocks });
+  }
+  return out;
+}
+
+/** The regroup post: what is open, what is blocked, what waits on the operator, and what nobody has cited. */
+export async function regroupMessage(sandboxRoot: string, snap: LeadsSnapshot, o: { minutes: number; since: { at: number; what: string }; count: number; nextMinutes: number }): Promise<string> {
+  const ranked = rankedLeads(snap);
+  const qs = questionStanding(snap);
+  const open = ranked.filter((v) => v.status === "open");
+  const blocked = ranked.filter((v) => v.status === "blocked");
+  const operator = ranked.filter((v) => v.disposition === "needs_operator");
+  const uncited = await uncitedEvidence(sandboxRoot, snap);
+  const lines: string[] = [];
+  lines.push(`REGROUP ${o.count}: nothing has moved for ${o.minutes} minutes: no new standing entry, no lead closed and no job committed since ${new Date(o.since.at).toISOString()} (${o.since.what}). This run is until solved, so it goes on until every question is answered; find another route.`);
+  lines.push("", `Questions not answered (${qs.length}):`);
+  for (const q of qs) lines.push(`- question:${q.id}: ${q.why}${q.blocks.length ? `; ${q.blocks.join("; ")}` : "; no lead names it"}`);
+  if (!qs.length) lines.push("- none by the ledger: the finish line says what still holds done (call done, and read its refusal).");
+  lines.push("", `Leads open, held by nobody (${open.length}):`);
+  for (const v of open) lines.push(`- ${v.id} "${v.title}"${v.priority ? ` (${v.priority} waiting on it)` : ""}`);
+  if (!open.length) lines.push("- none");
+  lines.push("", `Leads blocked (${blocked.length}):`);
+  for (const v of blocked) lines.push(`- ${v.id} "${v.title}"${v.holder ? ` (${v.holder})` : ""} waiting on ${v.needs.filter((n) => !n.met).map((n) => `${n.need}: ${n.why}`).join("; ")}`);
+  if (!blocked.length) lines.push("- none");
+  lines.push("", `Waiting on the operator (${operator.length}):`);
+  for (const v of operator) lines.push(`- ${v.id} "${v.title}": ${v.ref}`);
+  if (!operator.length) lines.push("- none");
+  lines.push("", `Evidence no standing entry cites (${uncited.length}):`);
+  for (const u of uncited) lines.push(`- ${u}`);
+  if (!uncited.length) lines.push("- none");
+  lines.push(
+    "",
+    "Each of you: say on the board which route you take next. An artefact above that no entry cites, a lead nobody holds (lead_claim), a need that can be met another way (lead_link), a question with no lead (lead_open), a job whose output nobody read to its end, or what only the operator can give (lead_close needs_operator, saying what). " +
+      `If nothing moves, the next regroup comes in ${o.nextMinutes} minutes.`,
+  );
+  return lines.join("\n");
+}

@@ -275,6 +275,11 @@ Done
   material lead with no disposition, or a lead's job with no interpretation, refuses `done` with
   what fixes each. A run whose checks pass ends completed only when every question is answered;
   one that rests on limitations or deferrals ends examination-limited, and says so.
+- When SWARM.md says the run is until solved, it ends only when every question is answered, or
+  when the operator stops it: there is no wall clock, the caps are advisory, an abandon is refused,
+  and a limitation or a deferral is not an answer. A provider error or a rate limit is waited out;
+  it never ends the run. When nothing moves, the harness posts a regroup listing what is open: take
+  another route, and close a lead needs_operator for what only the operator can give.
 - A sign-off is somebody else's work checked, not your own restated. If you wrote the report, the
   flags, the timeline or an answer, you are not the one who can certify them: a peer re-derives
   what they rest on from the sealed refs and records `attest` or `dispute` on each answer, and says

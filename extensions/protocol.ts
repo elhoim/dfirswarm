@@ -393,6 +393,9 @@ export const TOKEN_CAP_STEER =
  * which is the state local models were in before this existed.
  */
 export function overCap(budget: BudgetRecord): { over: boolean; by: "usd" | "tokens" | null } {
+  // An until-solved run's caps are advisory: spend is recorded and shown,
+  // and nothing is stopped for it.
+  if (budget.until_solved === true) return { over: false, by: null };
   const usd = budget.metered !== false && budget.cap_usd > 0 && budget.spent_usd >= budget.cap_usd;
   const capTokens = Number(budget.cap_tokens) || 0;
   const tokens = capTokens > 0 && budget.tokens >= capTokens;
@@ -2870,6 +2873,11 @@ export async function markDone(
   // A per-agent cap stop is one seat leaving. The swarm's clock is
   // done/SWARM_DONE; writing it here would shut every other pane.
   const seatOnly = args.createSentinel === false || reason === "agent_cap";
+  // An until-solved run takes no abandon, a vote or not: only the operator
+  // ends it (swarm.sh stop), and only every question answered finishes it.
+  if (!seatOnly && reason.startsWith(ABANDON_PREFIX) && (await readBudget(ctx.sandboxRoot).catch(() => null))?.until_solved === true) {
+    throw new Error(UNTIL_SOLVED_NO_ABANDON);
+  }
   if (!seatOnly && reason.startsWith(ABANDON_PREFIX) && !(await swarmDoneExists(ctx.sandboxRoot))) {
     const gate = await abandonGate(ctx.sandboxRoot, ctx.agentId, reason);
     if (!gate.proceed) {
@@ -4488,7 +4496,8 @@ export type BudgetPressure = {
 export function budgetPressure(budget: BudgetRecord, now = Date.now()): BudgetPressure {
   const started = Date.parse(budget.started_at);
   const elapsedMs = Number.isFinite(started) ? Math.max(0, now - started) : 0;
-  const wallMs = budget.wall_clock_minutes * 60_000;
+  // An until-solved run has no wall clock, and its caps are advisory.
+  const wallMs = budget.until_solved === true ? 0 : budget.wall_clock_minutes * 60_000;
   const overBudget = overCap(budget).over;
   const overTime = wallMs > 0 && elapsedMs >= wallMs;
   return {
@@ -4529,10 +4538,11 @@ export async function setCaps(
       before[k] = (budget[k] as number | undefined) ?? null;
       (budget as Record<CapField, number | undefined>)[k] = v;
     }
-    if (budget.metered !== false && !(budget.cap_usd > 0)) {
+    // An until-solved run's caps are advisory: the brake is the operator's stop.
+    if (budget.until_solved !== true && budget.metered !== false && !(budget.cap_usd > 0)) {
       throw new Error("this team's dollars are charged, so its dollar cap stays above zero");
     }
-    if (budget.metered === false && !(Number(budget.cap_tokens) > 0)) {
+    if (budget.until_solved !== true && budget.metered === false && !(Number(budget.cap_tokens) > 0)) {
       throw new Error("this team's dollars are not charged, so its token cap stays above zero");
     }
     let withdrawn = false;
@@ -4562,8 +4572,10 @@ export function agentPressure(
   budget: BudgetRecord,
   agentId: string,
 ): { over: boolean; by: "usd" | "tokens" | null; spent_usd: number; cap_usd: number; tokens: number; cap_tokens: number } {
-  const capUsd = budget.metered !== false ? Number(budget.cap_per_agent_usd) || 0 : 0;
-  const capTokens = Number(budget.cap_per_agent_tokens) || 0;
+  // Advisory in an until-solved run: shown, never a stop.
+  const advisory = budget.until_solved === true;
+  const capUsd = budget.metered !== false && !advisory ? Number(budget.cap_per_agent_usd) || 0 : 0;
+  const capTokens = advisory ? 0 : Number(budget.cap_per_agent_tokens) || 0;
   const row = budget.agents?.[agentId];
   const spent = row?.spent_usd ?? 0;
   const tokens = row?.tokens ?? 0;
@@ -4582,8 +4594,9 @@ export function modelPressure(
   budget: BudgetRecord,
   model: string | undefined,
 ): { over: boolean; spent_usd: number; cap_usd: number; agents: number } {
-  // A per-model cap is dollars, and holds only where dollars are charged.
-  const cap = model && budget.metered !== false ? Number(budget.cap_per_model_usd?.[model]) || 0 : 0;
+  // A per-model cap is dollars, and holds only where dollars are charged;
+  // in an until-solved run it is advisory.
+  const cap = model && budget.metered !== false && budget.until_solved !== true ? Number(budget.cap_per_model_usd?.[model]) || 0 : 0;
   let spent = 0;
   let agents = 0;
   if (model) {

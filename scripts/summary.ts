@@ -183,7 +183,8 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
 
   // --- header -------------------------------------------------------------
   lines.push(`# Run summary: ${id || "(no id)"}${label ? ` — ${label}` : ""}`, "");
-  lines.push(`- State: ${run?.state ?? "unknown (no registry entry)"} · sentinel ${sentinel ? "present" : "absent"}`);
+  lines.push(`- State: ${run?.state ?? "unknown (no registry entry)"} · sentinel ${sentinel ? "present" : "absent"}${sentinel?.outcome ? ` · outcome ${sentinel.outcome}` : ""}`);
+  if (budget?.until_solved) lines.push(`- Mode: until solved: no wall clock, every cap advisory (spend recorded, nothing stopped for it), no abandon, a regroup after ${budget.stall_minutes ?? 15} minutes without progress`);
   lines.push(`- Started: ${startedAt || "unknown"} · Duration: ${durationHuman(durationMs)}${endedAt ? ` (to ${sentinel ? "the sentinel" : "the last trace event"} at ${endedAt})` : ""}`);
   // What the kickoff was told about who ran the run: never the examiner who adopts a report (swarm.sh releases says who did).
   if (run?.case_id || run?.examiner) lines.push(`- Case: ${run?.case_id || "—"} · Run by: ${run?.examiner ? `${run.examiner} (as the kickoff recorded it; not an enrolled examiner)` : "—"}`);

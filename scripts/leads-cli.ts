@@ -9,14 +9,18 @@
  *                                                   the lead reopened, a host allowed for jobs
  *   leads-cli.ts reopen <sandbox> <L-n> [why]       the operator reopens a closed lead
  *   leads-cli.ts nudge-line <sandbox> <agent>       one line for the idle watchdog's nudge
+ *   leads-cli.ts regroup <sandbox> [--now ISO]      an until-solved run's regroup, when one is due:
+ *                                                   posted to everyone, printed as one JSON line
  *
  * swarm.sh lead <run> list|note|reopen calls this with the run's sandbox,
  * puts the operator's act on the trace and the operator's record, and posts
  * the note to the board as the examiner.
  */
-import { resolve } from "node:path";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as L from "../extensions/leads.ts";
+import * as P from "../extensions/protocol.ts";
 
 function words(v: L.LeadView): string {
   const needs = v.needs.length ? ` needs ${v.needs.map((n) => `${n.need}${n.met ? " (met)" : ` (unmet: ${n.why})`}`).join(", ")}` : "";
@@ -71,10 +75,52 @@ export async function nudgeLine(sandbox: string, agent: string): Promise<string>
   return parts.join(" ");
 }
 
+/** Where the watchdog keeps what it last regrouped on: the harness's own, under traces/. */
+export const REGROUP_STATE = "traces/regroup.json";
+/** The longest wait between two regroups while nothing moves. */
+export const REGROUP_MAX_MINUTES = 240;
+
+type RegroupState = { progress_at: number; count: number; last_at: number };
+
+/**
+ * An until-solved run's regroup, when one is due: nothing has moved (no new
+ * standing entry, no lead closed, no job committed) for the run's
+ * stall_minutes, and, after the first, for twice as long as the wait before
+ * the last one, up to REGROUP_MAX_MINUTES. It never stops. The post goes to
+ * everyone; the answer is null when none is due.
+ */
+export async function regroup(sandbox: string, now = Date.now()): Promise<{ posted: false; why: string } | { posted: true; count: number; post: number; since: string; next_minutes: number }> {
+  const budget = await P.readBudget(sandbox).catch(() => null);
+  if (!budget?.until_solved) return { posted: false, why: "not an until-solved run" };
+  if (await P.swarmDoneExists(sandbox)) return { posted: false, why: "the run is over" };
+  const stall = (budget.stall_minutes ?? 15) * 60_000;
+  const snap = await L.leadsSnapshot(sandbox);
+  const since = await L.lastProgress(sandbox, snap, budget.started_at);
+  const path = join(sandbox, REGROUP_STATE);
+  let state: RegroupState = { progress_at: since.at, count: 0, last_at: 0 };
+  try {
+    const was = JSON.parse(await readFile(path, "utf8")) as RegroupState;
+    if (was.progress_at === since.at) state = was;
+  } catch {
+    // none yet: the first
+  }
+  if (now - since.at < stall) return { posted: false, why: `the run moved ${Math.round((now - since.at) / 60_000)} min ago` };
+  const wait = state.count === 0 ? 0 : Math.min(stall * 2 ** state.count, REGROUP_MAX_MINUTES * 60_000);
+  if (state.count > 0 && now - state.last_at < wait) return { posted: false, why: `regroup ${state.count} was ${Math.round((now - state.last_at) / 60_000)} min ago` };
+  const count = state.count + 1;
+  const nextMinutes = Math.round(Math.min(stall * 2 ** count, REGROUP_MAX_MINUTES * 60_000) / 60_000);
+  const body = await L.regroupMessage(sandbox, snap, { minutes: Math.round((now - since.at) / 60_000), since, count, nextMinutes });
+  const post = await P.systemPost(sandbox, { tag: "ask", body });
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(`${path}.tmp`, `${JSON.stringify({ progress_at: since.at, count, last_at: now })}\n`, "utf8");
+  await rename(`${path}.tmp`, path);
+  return { posted: true, count, post: post.id, since: new Date(since.at).toISOString(), next_minutes: nextMinutes };
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [cmd, sandboxArg, ...rest] = process.argv.slice(2);
   const usage = () => {
-    process.stderr.write("usage: leads-cli.ts list|note|reopen|nudge-line <sandbox> ...\n");
+    process.stderr.write("usage: leads-cli.ts list|note|reopen|nudge-line|regroup <sandbox> ...\n");
     process.exit(2);
   };
   if (!cmd || !sandboxArg) usage();
@@ -112,6 +158,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       const r = await L.reopenLead(sandbox, lead, "operator", why.join(" ") || "the operator reopened it", "operator");
       process.stdout.write(`${JSON.stringify(r)}\n`);
       process.exit(r.ok ? 0 : 1);
+      break;
+    }
+    case "regroup": {
+      const at = opt("--now");
+      const r = await regroup(sandbox, at ? Date.parse(at) : Date.now());
+      process.stdout.write(`${JSON.stringify(r)}\n`);
       break;
     }
     case "nudge-line": {
