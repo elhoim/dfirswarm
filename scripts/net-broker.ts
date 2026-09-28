@@ -19,7 +19,7 @@
  * recorded as contamination: revoking access cannot make a seat forget it.
  */
 import { createReadStream, existsSync, readFileSync } from "node:fs";
-import { appendFile, readFile, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { join, resolve } from "node:path";
 import * as L from "../extensions/leads.ts";

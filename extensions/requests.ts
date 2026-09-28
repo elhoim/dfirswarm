@@ -36,7 +36,7 @@
  * question's id), never what was asked: a notification leaves the host.
  * Nothing here knows a case or a tool.
  */
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -657,11 +657,17 @@ export async function openHarnessRequest(sandboxRoot: string, d: { kind: Request
   return { rid: r.rid, created: r.created };
 }
 
-/** How many requests of a kind the chain holds (a stop proposal's D-n counts from it). */
+/**
+ * How many requests of a kind the run holds (a stop proposal's D-n counts
+ * from it): the chain's, or, in a run whose requests predate the chain and
+ * were not imported yet, the view's lines of that kind.
+ */
 export async function countKind(sandboxRoot: string, kind: RequestKind): Promise<number> {
   const s = await requestsSnapshot(sandboxRoot);
   let n = 0;
   for (const r of s.requests.values()) if (r.kind === kind) n += 1;
+  if (s.events.length) return n;
+  for (const l of await readRequestLines(sandboxRoot)) if ((l.kind ?? "lead") === kind) n += 1;
   return n;
 }
 
@@ -807,8 +813,13 @@ export function scriptNotifier(runsDir?: string): Notifier {
     if (!targets.length) return { targets: [] };
     const script = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "notify.sh");
     if (!existsSync(script)) return { targets: [] };
-    const r = spawnSync("bash", [script, sandboxRoot, event, JSON.stringify(notice)], { env: { ...process.env, SWARM_RUNS_DIR: dir }, stdio: "ignore", timeout: 20_000 });
-    return r.status === 0 ? { targets } : { targets: [] };
+    // notify.sh hands each target the notice detached and returns: waited for here without blocking the hub.
+    const status = await new Promise<number | null>((done) => {
+      const child = spawn("bash", [script, sandboxRoot, event, JSON.stringify(notice)], { env: { ...process.env, SWARM_RUNS_DIR: dir }, stdio: "ignore", timeout: 20_000 });
+      child.on("error", () => done(null));
+      child.on("close", (code) => done(code));
+    });
+    return status === 0 ? { targets } : { targets: [] };
   };
 }
 

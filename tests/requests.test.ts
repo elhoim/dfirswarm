@@ -247,12 +247,15 @@ test("a run from before the chain keeps its request lines: the first write impor
     { at: "2026-09-27T22:00:00.000Z", run: "r1", kind: "decision", id: "D-1", by: "harness", title: "A stop is proposed", request: "nothing yielded", answer: "swarm.sh stop r1" },
   ];
   await writeFile(join(S, L.OPERATOR_REQUESTS), legacy.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  assert.equal(await R.countKind(S, "decision"), 1, "before the chain, the view's lines are counted");
   ok(await L.openLead(a0, { title: "t", why: "w", take: true }));
   ok(await L.closeLead(a0, "L-1", { disposition: "needs_operator", ref: "allow the host example.org for a job" }));
   const view = (await readFile(join(S, L.OPERATOR_REQUESTS), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
   assert.deepEqual(view.map((v) => [v.rid, v.kind, v.request]), [["R-1", "lead", "old words"], ["R-2", "decision", "nothing yielded"], ["R-3", "lead", "allow the host example.org for a job"]]);
   const s = await R.requestsSnapshot(S);
   assert.ok(s.requests.get("R-1")?.imported);
+  // A stop proposed before the first write counts the decisions the run's lines hold: D-2, not D-1 again.
+  assert.equal(await R.countKind(S, "decision"), 1);
   // An imported request is not notified again.
   const rec = recorder();
   await R.dispatchRequests(S, { notifier: rec.notifier });
