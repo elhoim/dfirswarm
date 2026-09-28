@@ -17,6 +17,14 @@ All notable changes to this project. The format follows
   revision of each. `record` now turns such a citation into the symbolic
   `question:N` (bound to the answer's conclusion, not its seq) and says so;
   a reworded correction keeps the summary standing.
+- **The finish register from the first header, and reviews before any
+  done.** The pilot had no `leads/finish.jsonl`: its five finish calls were
+  four status reads and an objection refused because no done had named the
+  report yet, and readiness was recorded only when it turned. The first
+  readiness is now recorded (not posted when not ready), and an ack or
+  objection before any done names the report and holds the coordinator's
+  done that names it. The writer, the docs, the metrics and the report all
+  use `leads/finish.jsonl`.
 - **Reviews are offered to one seat.** The pilot had six seats review one
   deferred lead's route within minutes. A limiting route's review (once its
   questions are answered, bound to those answers) and a material negative's

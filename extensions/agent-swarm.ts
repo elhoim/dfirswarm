@@ -3655,11 +3655,12 @@ export default function (pi: ExtensionAPI) {
     name: "finish",
     label: "The finish",
     description:
-      "The run's finish, one seat's to call (the coordinator's, named in every header). status: where it stands (ready by the registers or what holds it, the coordinator, the last check at which revision, the report's reviews, what is late against it). ack (any other seat): your review of the report's current digest, verdict no_objection, or objection with why; an ack is not a late post, and an objection holds the finish until the coordinator resolves it. resolve (the coordinator): answer a result or veto posted after the report, or an objection, how: folded (the report says it now, and where) or not_material (with why it changes nothing the report concludes). Reading a late post is not answering it.",
+      "The run's finish, one seat's to call (the coordinator's, named in every header). status: where it stands (ready by the registers or what holds it, the coordinator, the last check at which revision, the report's reviews, what is late against it). ack (any other seat): your review of the report's current digest, verdict no_objection, or objection with why (before any done names the report, name it: report); an ack is not a late post, and an objection holds the finish until the coordinator resolves it. resolve (the coordinator): answer a result or veto posted after the report, or an objection, how: folded (the report says it now, and where) or not_material (with why it changes nothing the report concludes). Reading a late post is not answering it.",
     promptSnippet: "See or act on the run's finish",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("status"), Type.Literal("ack"), Type.Literal("resolve")]),
       digest: Type.Optional(Type.String({ description: "ack: the report's digest you read (its current one when left out)" })),
+      report: Type.Optional(Type.String({ description: "ack: the report you reviewed (e.g. work/report.md), needed while no coordinator's done has named it; your objection then holds that done" })),
       verdict: Type.Optional(Type.Union([Type.Literal("no_objection"), Type.Literal("objection")], { description: "ack: your verdict on the report" })),
       why: Type.Optional(Type.String({ description: "ack objection: what does not hold; resolve: where it was folded, or why it is not material" })),
       post: Type.Optional(Type.Union([Type.Number(), Type.String()], { description: "resolve: the late post's id (#123)" })),

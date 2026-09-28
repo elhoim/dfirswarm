@@ -77,7 +77,7 @@ export type FinishEvent = {
    * stays so through every later version of it until a resolution answers it.
    */
   since?: number;
-  /** ack: the report's digest the review is of, and its verdict. */
+  /** ack: the report it reviewed (named by the reviewer before a coordinator's done named one), the report's digest the review is of, and its verdict. */
   digest?: string;
   verdict?: "no_objection" | "objection";
   /** resolve: the late post (its id) or the objection (its ack's seq) it resolves, and how; ack and resolve: the report's digest (a folded resolution names the version it was folded into). */
@@ -100,7 +100,7 @@ export type FinishEvent = {
 export type FinishState = {
   events: FinishEvent[];
   lease: { holder: string; generation: number; at: string; why: string; report: string | null; since: number | null; from?: string } | null;
-  acks: Array<{ seq: number; at: string; by: string; digest: string; verdict: "no_objection" | "objection"; why: string }>;
+  acks: Array<{ seq: number; at: string; by: string; digest: string; verdict: "no_objection" | "objection"; why: string; report?: string }>;
   resolutions: Array<{ seq: number; at: string; by: string; post?: number; ack?: number; how: "folded" | "not_material"; why: string; digest: string | null }>;
   readiness: { ready: boolean; revision: string; items: string[]; at: string } | null;
   checks: Array<{ seq: number; at: string; by: string; revision: string; proceed: boolean; outcome?: string; reason?: string; run?: unknown }>;
@@ -130,7 +130,7 @@ export async function readFinish(sandboxRoot: string): Promise<FinishState> {
         }
         break;
       case "ack":
-        if (e.digest && e.verdict) st.acks.push({ seq: e.seq, at: e.at, by: e.by, digest: e.digest, verdict: e.verdict, why: e.why ?? "" });
+        if (e.digest && e.verdict) st.acks.push({ seq: e.seq, at: e.at, by: e.by, digest: e.digest, verdict: e.verdict, why: e.why ?? "", ...(e.report ? { report: e.report } : {}) });
         break;
       case "resolve":
         if (e.how) st.resolutions.push({ seq: e.seq, at: e.at, by: e.by, ...(e.post !== undefined ? { post: e.post } : {}), ...(e.ack !== undefined ? { ack: e.ack } : {}), how: e.how, why: e.why ?? "", digest: e.digest ?? null });
@@ -260,7 +260,7 @@ export async function finishTurnFor(ctx: P.SwarmContext, input: { output_file?: 
 }
 
 /** The finish tool's acts: status for anyone, ack for a reviewer, resolve for the coordinator. */
-export async function finishAct(ctx: P.SwarmContext, input: { action?: string; digest?: string; verdict?: string; why?: string; post?: unknown; ack?: unknown; how?: string }): Promise<Record<string, unknown>> {
+export async function finishAct(ctx: P.SwarmContext, input: { action?: string; digest?: string; verdict?: string; why?: string; post?: unknown; ack?: unknown; how?: string; report?: string }): Promise<Record<string, unknown>> {
   const action = String(input.action ?? "status").trim();
   if (action === "status") return finishStatus(ctx);
   if (action === "ack") return ackReport(ctx, input);
@@ -434,7 +434,8 @@ export async function lateItems(sandboxRoot: string, coordinator: string, report
   const out: LateItem[] = [];
   for (const p of posts) if (!st.resolutions.some((r) => r.post === p.id)) out.push({ kind: "post", id: p.id, by: p.from, tag: p.tag });
   for (const a of st.acks) {
-    if (a.verdict !== "objection") continue;
+    // An objection is of the report it names (a review made before any done named it itself), else of the lease's.
+    if (a.verdict !== "objection" || (a.report && a.report !== report)) continue;
     if (st.resolutions.some((r) => r.ack === a.seq)) continue;
     // A later ack by the same seat, of any version, answers its own objection.
     if (st.acks.some((b) => b.by === a.by && b.seq > a.seq)) continue;
@@ -449,23 +450,29 @@ export async function lateItems(sandboxRoot: string, coordinator: string, report
  * never a late post; an objection says why and holds the coordinator's done
  * until the coordinator resolves it.
  */
-export async function ackReport(ctx: P.SwarmContext, input: { digest?: string; verdict?: string; why?: string }): Promise<{ ok: true; seq: number; digest: string } | { ok: false; reason: string }> {
+export async function ackReport(ctx: P.SwarmContext, input: { digest?: string; verdict?: string; why?: string; report?: string }): Promise<{ ok: true; seq: number; digest: string; report: string } | { ok: false; reason: string }> {
   const verdict = String(input.verdict ?? "").trim();
   if (verdict !== "no_objection" && verdict !== "objection") return { ok: false, reason: "verdict is no_objection or objection" };
   const why = String(input.why ?? "").trim();
   if (verdict === "objection" && !why) return { ok: false, reason: "an objection says why: what in the report does not hold, and what shows it" };
   if (why.length > L.LEAD_WHY_MAX) return { ok: false, reason: `why is over ${L.LEAD_WHY_MAX} characters: nothing is cut, so a longer text is refused` };
+  const named = String(input.report ?? "").trim().replace(/^\.\//, "") || null;
   return withFinish(ctx.sandboxRoot, async (held) => {
     const st = await readFinish(ctx.sandboxRoot);
-    const report = st.lease?.report ?? null;
-    if (!report) return { ok: false as const, reason: "no report is named yet: the coordinator's done names it" };
+    // The report reviewed: the finish's, once a coordinator's done named it;
+    // before that, the one the reviewer names (the c10 pilot's objection
+    // was refused for want of a done, and lost).
+    const leased = st.lease?.report ?? null;
+    if (leased && named && named !== leased) return { ok: false as const, reason: `the finish's report is ${leased}: ack that one (a review of another file is a post)` };
+    const report = leased ?? named;
+    if (!report) return { ok: false as const, reason: "no coordinator's done has named the report yet: name the report you reviewed (report, e.g. work/report.md)" };
     const current = await reportDigest(ctx.sandboxRoot, report);
     if (!current) return { ok: false as const, reason: `${report} does not exist yet` };
     const digest = String(input.digest ?? "").trim() || current;
     if (digest !== current) return { ok: false as const, reason: `${report} is at digest ${current} now, not ${digest}: read it again, then ack what you read` };
     if (st.lease?.holder === ctx.agentId) return { ok: false as const, reason: "you coordinate the finish: an ack is another seat's review of your report" };
-    const [e] = await appendFinish(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "ack", digest, verdict, ...(why ? { why } : {}) }], held);
-    return { ok: true as const, seq: e.seq, digest };
+    const [e] = await appendFinish(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "ack", digest, verdict, ...(why ? { why } : {}), ...(leased ? {} : { report }) }], held);
+    return { ok: true as const, seq: e.seq, digest, report };
   });
 }
 
@@ -630,12 +637,15 @@ export async function syncReadiness(sandboxRoot: string, r: Readiness): Promise<
   const st = await readFinish(sandboxRoot);
   const last = st.readiness;
   if (last && last.ready === r.ready) return false;
-  if (!last && !r.ready) return false;
   if (await P.swarmDoneExists(sandboxRoot)) return false;
   return withFinish(sandboxRoot, async (held) => {
     const again = (await readFinish(sandboxRoot)).readiness;
     if (again && again.ready === r.ready) return false;
     await appendFinish(sandboxRoot, [{ by: "system", ev: "readiness", ready: r.ready, revision: r.revision, items: r.items }], held);
+    // The first state is recorded (the register then exists from the first
+    // header, and the metrics read readiness from it); not ready from the
+    // start is nothing to post.
+    if (!again && !r.ready) return false;
     const lease = st.lease;
     const who = lease ? `${lease.holder} coordinates the finish (generation ${lease.generation})` : "the first seat to call done coordinates the finish (normally whoever publishes the report)";
     const body = r.ready

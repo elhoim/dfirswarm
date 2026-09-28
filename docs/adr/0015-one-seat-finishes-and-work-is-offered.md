@@ -165,7 +165,12 @@ have lost its provider.
     again answers none of them, and they are read again in the transaction
     that writes the sentinel, so one acked while the checks ran holds it.
     Reading it is not answering it. The once-only "late posts" refusal
-    addressed to every seat is gone.
+    addressed to every seat is gone. A review made before any done has
+    named the report names it itself (the c10 pilot's objection to a stale
+    line in the report was refused for want of a done, and lost), and holds
+    the done that names the same report. The first readiness state is
+    recorded (not posted when not ready): the register exists from the
+    first header, where the metrics and the report read it.
 11. **A summary cites questions symbolically.** A summary or narrative that
     names `Q-<n>` binds each to its answer's fingerprint (the result, the
     question revision, the hashes of its support, contrary evidence and

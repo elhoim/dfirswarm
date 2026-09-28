@@ -186,3 +186,36 @@ test("readiness is never cached for a revision its snapshot was not read at: a l
   assert.equal(r.ready, false);
   assert.ok(r.items.some((i) => /L-1 "A late avenue"/.test(i)), r.items.join("\n"));
 });
+
+test("the finish register is written where the metrics and the report read it: the first readiness is recorded (never posted when not ready), and a review before the coordinator's done names the report and holds its done (the c10 pilot)", async () => {
+  const { S, a0, a2 } = await run();
+  const lead = await L.openLead(a2, { title: "A late avenue", why: "found", take: true });
+  assert.ok(lead.ok);
+  const finishLog = join(S, "leads", "finish.jsonl");
+  assert.equal(await readFile(finishLog, "utf8").catch(() => null), null, "nothing yet");
+  // The first header: readiness recorded (not ready), nothing posted.
+  const posts = async () => (await P.readInbox({ sandboxRoot: S, agentId: "a0" }, { markSeen: false })).posts.filter((p) => /FINISH/.test(p.body)).length;
+  await F.finishHeader(S, "a0");
+  assert.deepEqual((await F.readFinish(S)).events.map((e) => [e.ev, e.ready]), [["readiness", false]]);
+  assert.equal(await posts(), 0, "not ready from the start is recorded, not posted");
+  await F.finishHeader(S, "a1");
+  assert.equal((await F.readFinish(S)).events.length, 1, "recorded once");
+  // A reviewer objects before any done: it names the report, and the objection is kept.
+  await publish(S, "a0", "# report\n\nL-28 and L-29 remain active.\n");
+  const refusedNoReport = await F.ackReport(a2, { verdict: "objection", why: "L-29 was closed duplicate" });
+  assert.equal(refusedNoReport.ok, false);
+  assert.match((refusedNoReport as { reason: string }).reason, /name the report you reviewed \(report, e\.g\. work\/report\.md\)/);
+  const obj = await F.ackReport(a2, { verdict: "objection", why: "L-29 was closed duplicate; only L-28 is active", report: "work/report.md" });
+  assert.ok(obj.ok, (obj as { reason?: string }).reason);
+  // The coordinator's done names the same report: the objection holds it until resolved.
+  await F.finishTurn(a0, { output_file: "work/report.md" });
+  assert.deepEqual((await F.lateItems(S, "a0", "work/report.md")).map((x) => [x.kind, x.by]), [["objection", "a2"]]);
+  // The metrics and the report read the same file.
+  const { measureRun } = await import("../scripts/metrics.ts");
+  const m = await measureRun(S);
+  assert.equal(m.tail.ready_source, null, "readiness is recorded, and it never turned ready");
+  assert.equal(F.FINISH_LOG, "leads/finish.jsonl");
+  assert.ok((await readFile(finishLog, "utf8")).includes('"ev":"ack"'));
+  const { renderReportBodyMarkdown } = await import("../scripts/report-body.ts");
+  assert.match(await renderReportBodyMarkdown(S), /\d+ events? in leads\/finish\.jsonl; chain intact/);
+});
