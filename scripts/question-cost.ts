@@ -162,21 +162,21 @@ export function apportion(calls: readonly TokenCall[], intervals: Map<string, In
 
 /**
  * Round the parts of a total so that they still add up to it (the largest
- * remainder: each part rounded down, and the units left over given to the
- * parts that lost the most). `step` is the unit (1 for tokens, 0.0001 for
- * dollars). Rounded one by one, parts of 1/3 each shown as 0 add up to
- * nothing: the run total would no longer be the sum of its parts.
+ * remainder: each part rounded down, and the units left over given one at a
+ * time to the parts that lost the most, ties by the parts' order). `step` is
+ * the unit (1 for tokens, 0.000001 for dollars); `total`, in units, is the
+ * whole to share when the caller has it exactly, else the parts' own sum
+ * rounded. Rounded one by one, parts of 1/3 each shown as 0 add up to
+ * nothing: the run total would no longer be the sum of its parts. The one
+ * rounding the report and the metrics use.
  */
-export function roundParts<K>(parts: ReadonlyArray<readonly [K, number]>, step = 1): Map<K, number> {
-  const units = parts.map(([k, v]) => ({ k, v: v / step }));
-  const target = Math.round(units.reduce((a, x) => a + x.v, 0));
-  const floor = units.map((x) => ({ k: x.k, n: Math.floor(x.v + 1e-9), r: x.v - Math.floor(x.v + 1e-9) }));
+export function roundParts<K>(parts: ReadonlyArray<readonly [K, number]>, step = 1, total?: number): Map<K, number> {
+  const units = parts.map(([k, v], i) => ({ k, v: v / step, i }));
+  const target = total ?? Math.round(units.reduce((a, x) => a + x.v, 0));
+  const floor = units.map((x) => ({ k: x.k, n: Math.floor(x.v + 1e-9), r: x.v - Math.floor(x.v + 1e-9), i: x.i }));
   let left = target - floor.reduce((a, x) => a + x.n, 0);
-  for (const x of [...floor].sort((a, b) => b.r - a.r)) {
-    if (left <= 0) break;
-    x.n += 1;
-    left -= 1;
-  }
+  const order = [...floor].sort((a, b) => b.r - a.r || a.i - b.i);
+  for (let j = 0; left > 0 && order.length; j = (j + 1) % order.length, left -= 1) order[j].n += 1;
   const decimals = step < 1 ? Math.round(-Math.log10(step)) : 0;
   return new Map(floor.map((x) => [x.k, Number((x.n * step).toFixed(decimals))]));
 }

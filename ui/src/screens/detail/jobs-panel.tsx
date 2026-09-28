@@ -26,7 +26,7 @@ import { bytes, dateTime, duration } from "@/lib/format";
 import { useAgentNames } from "@/lib/hooks";
 import { useResource } from "@/lib/live";
 import { paginate } from "@/lib/pager";
-import type { StoreJobDetail, StoreJobRow, StoreJobsView, SwarmView } from "@/lib/types";
+import type { StoreJobDetail, StoreJobRow, StoreJobsView, StoreSameAs, StoreSimilar, SwarmView } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const OUTCOME: Record<string, { label: string; tone: Tone }> = {
@@ -259,12 +259,69 @@ function JobsTable({ rows, colour, onOpen }: { rows: StoreJobRow[]; colour: (id:
                 {r.outputs ? `${plural(r.outputs.files, "file")} · ${bytes(r.outputs.bytes)}` : "—"}
                 {r.outputs?.rejected ? <div className="text-ink-3">{r.outputs.rejected} left out</div> : null}
                 {r.generation ? <div className="text-ink-3">catalogued {r.generation}</div> : null}
+                {r.similar.length ? <div className="text-ink-3">similar to {plural(r.similar.length, "job")} of other seats</div> : null}
+                {r.same_as.length ? <div className="text-ink-3">{plural(r.same_as.length, "file")} an earlier job's bytes</div> : null}
+                {r.independent ? <div className="text-ink-3">an independent reproduction</div> : null}
               </td>
             </tr>
           ))}
         </tbody>
       </table>
     </div>
+  );
+}
+
+/**
+ * A list shown whole: the first `first` at once, and every other one a click
+ * away on the same page (never cut, never "and N more" with nowhere to read them).
+ */
+function ShownWhole<T>({ items, first, unit, render }: { items: T[]; first: number; unit: string; render: (item: T, i: number) => React.ReactNode }) {
+  const head = items.slice(0, first);
+  const rest = items.slice(first);
+  return (
+    <>
+      {head.map((x, i) => (
+        <span key={i}>{render(x, i)}</span>
+      ))}
+      {rest.length ? (
+        <details>
+          <summary className="cursor-pointer text-ink-3">{`the other ${plural(rest.length, unit)}`}</summary>
+          <div className="mt-1 flex flex-col gap-1">
+            {rest.map((x, i) => (
+              <span key={first + i}>{render(x, first + i)}</span>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </>
+  );
+}
+
+/** One similar job, as its job_similar entry names it: whose, under which lead, where it stands, what it made, how alike. */
+function SimilarLine({ s, onOpen }: { s: StoreSimilar; onOpen: (id: string) => void }) {
+  return (
+    <span className="[overflow-wrap:anywhere]">
+      <button type="button" className="font-mono font-semibold text-ink hover:underline" onClick={() => onOpen(s.job)}>
+        {s.job}
+      </button>{" "}
+      by {s.name ? `${s.name} (${s.seat})` : s.seat}
+      {s.lead ? ` · under ${s.lead}` : ""} · {s.state}
+      {s.status ? ` ${s.status}` : ""} · {s.match}
+      {s.op ? ` (${s.op})` : ""} · {s.objects === "same" ? "the same objects" : `${plural(s.shared, "object")} in common`}
+      {s.outputs ? ` · ${plural(s.outputs.files, "file")}, ${bytes(s.outputs.bytes)} in ${s.outputs.path}/` : ""}
+      {s.independent ? " · itself an independent reproduction" : ""}
+    </span>
+  );
+}
+
+function SameAsLine({ x, onOpen }: { x: StoreSameAs; onOpen: (id: string) => void }) {
+  return (
+    <span className="[overflow-wrap:anywhere]">
+      <span className="font-mono text-ink">{x.path}</span> ({bytes(x.bytes)}) is byte for byte{" "}
+      <button type="button" className="font-mono text-ink hover:underline" onClick={() => onOpen(x.job)}>
+        job:{x.job}/{x.file}
+      </button>
+    </span>
   );
 }
 
@@ -354,7 +411,7 @@ function LogView({ run, job, log, version }: { run: string; job: string; log: St
   );
 }
 
-function JobDetail({ view, jobId, version, onBack }: { view: SwarmView; jobId: string; version: number; onBack: () => void }) {
+function JobDetail({ view, jobId, version, onBack, onOpen }: { view: SwarmView; jobId: string; version: number; onBack: () => void; onOpen: (id: string) => void }) {
   const id = view.summary.id;
   const colour = useAgentColours(view.agents);
   const names = useAgentNames(view.agents);
@@ -475,6 +532,19 @@ function JobDetail({ view, jobId, version, onBack }: { view: SwarmView; jobId: s
             {r.notified.length ? r.notified.map((n, i) => <span key={i}>{`${n.to} by ${n.how === "status" ? "its own job_status or job_run" : "a post"} · ${dateTime(n.at)}`}</span>) : <span>{r.state === "committed" || r.state === "failed" || r.state === "cancelled" ? "no one told yet" : "not done yet"}</span>}
             {r.deduplicated ? <span className="text-ink-3">{plural(r.deduplicated, "later request")} answered with this job</span> : null}
           </Fact>
+          {r.independent || r.similar.length ? (
+            <Fact label="Similar work">
+              {r.independent ? <span>asked as an independent reproduction: a second run of another seat's work, on purpose</span> : null}
+              {r.similar.length ? <span className="text-ink-3">other seats' jobs doing the same over the same objects when it was accepted (its job_similar line, whole); it ran as asked</span> : <span className="text-ink-3">no other seat's job was doing the same when it was accepted</span>}
+              <ShownWhole items={r.similar} first={10} unit="similar job" render={(s) => <SimilarLine s={s} onOpen={onOpen} />} />
+            </Fact>
+          ) : null}
+          {r.same_as.length ? (
+            <Fact label="Same bytes as">
+              <span className="text-ink-3">files it wrote that an earlier job had written byte for byte (its job_same_as line, whole); they are its own either way</span>
+              <ShownWhole items={r.same_as} first={10} unit="file" render={(x) => <SameAsLine x={x} onOpen={onOpen} />} />
+            </Fact>
+          ) : null}
           {r.generation ? (
             <Fact label="Catalogue">
               {r.generation} · {r.generation_status ?? "status not said"} · catalog/gen/{r.generation}/
@@ -613,7 +683,7 @@ export function JobsPanel({ view, selected, onSelect, version }: { view: SwarmVi
   const loader = useCallback(() => api.storeJobs(id, { offset: (wanted - 1) * size, limit: size }), [id, wanted, size]);
   // Not asked for while one job is open: the detail reads what it shows itself.
   const jobs = useResource(selected ? null : loader, version, [id, wanted, size, Boolean(selected)]);
-  if (selected) return <JobDetail view={view} jobId={selected} version={version} onBack={() => onSelect(null)} />;
+  if (selected) return <JobDetail view={view} jobId={selected} version={version} onBack={() => onSelect(null)} onOpen={(j) => onSelect(j)} />;
   if (jobs.error && !jobs.data) return <ErrorState error={jobs.error} onRetry={jobs.reload} title="Could not read the run's jobs" />;
   if (!jobs.data) return <LoadingState label="Reading the job journal" rows={4} />;
   const d = jobs.data;

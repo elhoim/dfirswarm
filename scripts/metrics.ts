@@ -19,9 +19,13 @@
  * has no offer events, one from before the reuse hints no job_similar lines.
  *
  * Each figure is a count of named records, and the JSON lists them (ids,
- * sections, seats, times), so a figure can be checked against the register
- * it came from. No answer value, no finding's text and no command is printed:
- * a metric says what the process did, never what the case holds.
+ * sections, seats, times, reason codes), so a figure can be checked against
+ * the register it came from. No free text a record carries is copied, in
+ * the table or the JSON: no answer value, no finding, no command, no
+ * dispute's or done's why. A metric says what the process did, never what
+ * the case holds. The questions a run is measured against are the ones in
+ * its scope at its end (Q.liveInScope); an answer to a question since
+ * withdrawn or excluded is listed apart, as history.
  *
  * `--compare` sets two runs of the same goal side by side, question by
  * question: each one's standing result, whether it was reviewed, its
@@ -92,34 +96,43 @@ export type RunMetrics = {
   run: string;
   run_dir: string;
   measured_at: string;
-  outcome: { outcome: string | null; by: string | null; at: string | null; why: string | null };
+  /** How the run ended, without the free text a done or a stop carries. */
+  outcome: { outcome: string | null; by: string | null; at: string | null };
   registers: Record<string, boolean>;
   questions: { in_scope: QuestionRef[]; source: "register" | "goal" | "ledger" };
   negatives: {
-    closes: number;
-    quick: { count: number; items: Array<{ lead: string; seq: number; questions: string[]; held_seconds: number; jobs: number; objects: number }> };
+    /** Whether the ledger is there to count answers from. */
+    recorded: boolean;
+    quick: { recorded: boolean; closes: number; count: number; items: Array<{ lead: string; seq: number; questions: string[]; held_seconds: number; jobs: number; objects: number }> };
     answers: number;
     reviewed: number;
-    unreviewed_material: Array<{ section: string; id: string | null; answer: string; result: string }>;
-    unreviewed_background: Array<{ section: string; id: string | null; answer: string; result: string }>;
+    unreviewed_material: NegativeRow[];
+    unreviewed_background: NegativeRow[];
+    /** Negative answers still standing for questions no longer in scope (withdrawn, excluded, or a follow-up after done): history, not counted above. */
+    out_of_scope: NegativeRow[];
   };
   coverage: {
+    recorded: boolean;
     records: number;
     reviewed: number;
+    /** Standing records whose results still stand, by the hub's field; a stale record is counted apart, never as complete. */
     complete: number;
     partial: number;
     not_computed: number;
-    stale: Array<{ record: string; problems: string[] }>;
+    stale: Array<{ record: string; field: string | null; results: StaleResult[] }>;
     negatives_on_partial: Array<{ section: string; id: string | null; answer: string; coverage: string[] }>;
     negatives_without_coverage: Array<{ section: string; id: string | null; answer: string }>;
   };
   offers: {
+    /** Whether the registers hold offer events at all (a run from before offers has none). */
     recorded: boolean;
     leads: OfferCounts & { by_reason: Record<string, OfferCounts> };
     questions: { made: number; accepted: number; declined: number; not_taken_up: number };
-    wakes_before_offers: { made: number; taken_by_woken: number; taken_by_another: number; not_taken: number };
+    wakes_before_offers: { recorded: boolean; made: number; taken_by_woken: number; taken_by_another: number; not_taken: number };
   };
   done: {
+    /** Whether the trace is there to count them from. */
+    recorded: boolean;
     calls: number;
     accepted: number;
     created_sentinel: number;
@@ -127,9 +140,11 @@ export type RunMetrics = {
     refused_by: Record<string, number>;
     hub_refused: number;
     not_yours: number;
-    items: Array<{ at: string; agent: string; how: string; reason?: string }>;
+    items: Array<{ at: string; agent: string; how: string }>;
   };
   tail: {
+    /** Whether the ledger holds answers to measure the answer tails from. */
+    recorded: boolean;
     end_at: string | null;
     end: "sentinel" | "stopped" | "paused" | null;
     ready_at: string | null;
@@ -142,6 +157,9 @@ export type RunMetrics = {
     unanswered: string[];
   };
   acquisition: {
+    /** Whether the requests register is there; evidence_recorded, whether the store's journal is. */
+    recorded: boolean;
+    evidence_recorded: boolean;
     requests: number;
     by_stage: Record<string, number>;
     declined_by_policy: number;
@@ -151,6 +169,7 @@ export type RunMetrics = {
     evidence_added_for_request: number;
   };
   interpretations: {
+    recorded: boolean;
     total: number;
     valid: number;
     superseded: number;
@@ -161,6 +180,9 @@ export type RunMetrics = {
     jobs_without_valid: string[];
   };
   reversals: {
+    /** Whether the ledger is there (answer changes); leads_recorded, whether the lead register is (reopens). */
+    recorded: boolean;
+    leads_recorded: boolean;
     answer_supersessions: number;
     corrections: number;
     result_changes: Array<{ section: string; from: string; to: string; from_result: string | null; to_result: string | null; cause: "new_evidence" | "discoverable" }>;
@@ -207,6 +229,9 @@ export type RunMetrics = {
 };
 
 type OfferCounts = { made: number; accepted: number; declined: number; taken_by_another: number; lapsed: number; open: number };
+export type NegativeRow = { section: string; id: string | null; answer: string; result: string };
+/** A result of a coverage record that no longer stands, by code, with the entry that replaced it or the seats that dispute it: never their words. */
+export type StaleResult = { result: string; code: "missing" | "rebound" | "superseded" | "disputed"; superseded_by?: string; disputed_by?: string[] };
 
 // --- reading ---------------------------------------------------------------------------------------
 
@@ -221,6 +246,7 @@ type Context = {
   qs: Q.QuestionsSnapshot | null;
   journal: Rec[];
   evidenceTimes: number[];
+  have: { ledger: boolean; leads: boolean; journal: boolean; requests: boolean; trace: boolean; finish: boolean; questions: boolean; network: boolean };
   notes: string[];
 };
 
@@ -242,13 +268,27 @@ async function readContext(S: string): Promise<Context> {
   }
   const journal = await jsonl(storePaths(S).journal);
   const evidenceTimes = journal.filter((l) => l.type === "evidence_added").map((l) => ms(l.at)).filter((t): t is number => t !== null).sort((a, b) => a - b);
-  return { S, entries, attestations, disputes, replaced: P.supersededBy(entries), leadEvents, leads, qs, journal, evidenceTimes, notes };
+  const have = {
+    ledger: existsSync(join(S, "ledger", "entries.jsonl")),
+    leads: existsSync(join(S, L.LEADS_LOG)),
+    journal: existsSync(storePaths(S).journal),
+    requests: existsSync(join(S, R.REQUESTS_LOG)),
+    trace: existsSync(join(S, P.EVENTS_REL)),
+    finish: existsSync(join(S, "leads", "finish.jsonl")),
+    questions: existsSync(join(S, Q.QUESTIONS_LOG)),
+    network: existsSync(join(S, "network", "grants.jsonl")) || existsSync(join(S, "network", "fetches.jsonl")),
+  };
+  return { S, entries, attestations, disputes, replaced: P.supersededBy(entries), leadEvents, leads, qs, journal, evidenceTimes, have, notes };
 }
 
-/** The questions in scope at the end of the run: the register's (not withdrawn), else the goal's, else those the ledger answers. */
+/**
+ * The questions in scope at the end of the run: the register's live ones (in
+ * scope, not withdrawn, not a follow-up admitted after its done: a resume's
+ * work, not this run's), else the goal's, else those the ledger answers.
+ */
 function inScope(c: Context): RunMetrics["questions"] {
   if (c.qs) {
-    const list = [...c.qs.state.questions.values()].filter((q) => q.scope === "in_scope" && !q.withdrawn).sort((a, b) => a.n - b.n);
+    const list = [...c.qs.state.questions.values()].filter((q) => Q.liveInScope(q)).sort((a, b) => a.n - b.n);
     return { in_scope: list.map((q) => ({ section: q.section, id: q.id })), source: c.qs.seeded ? "register" : "goal" };
   }
   const sections = [...new Set(c.entries.filter((e) => e.kind === "answer" && str(e.section).startsWith("question:")).map((e) => sectionOf(str(e.section), null)))].sort();
@@ -258,6 +298,32 @@ function inScope(c: Context): RunMetrics["questions"] {
 function isMaterial(section: string, c: Context): boolean {
   const q = c.qs?.bySection.get(section);
   return !q || q.materiality === "material";
+}
+
+/** The standing entries an answer cites for its own question (the gate's citedForQuestion). */
+function citedOf(c: Context, e: P.LedgerEntry, section: string): P.LedgerEntry[] {
+  return P.citedForQuestion(e, new Map(c.entries.map((x) => [x.seq, x])), c.replaced, section);
+}
+
+/** Whether a standing answer is a negative the bar holds: the finish gate's own test (a premise rejected on a search alone included). */
+function isNegative(c: Context, e: P.LedgerEntry, section: string): boolean {
+  return P.negativeByResult(NB.answerResult(e), citedOf(c, e, section));
+}
+
+/** A coverage record's results that no longer stand, as codes and ids. */
+function staleResults(c: Context, rec: P.LedgerEntry): StaleResult[] {
+  return P.coverageStaleness(rec, c.entries, c.disputes).map((x) => ({
+    result: `E-${x.result}`,
+    code: x.code,
+    ...(x.by_seq !== undefined ? { superseded_by: `E-${x.by_seq}` } : {}),
+    ...(x.disputes ? { disputed_by: [...new Set(x.disputes.map((d) => d.by))].sort() } : {}),
+  }));
+}
+
+/** A coverage record as a comparison or a negative shows it: its field while its results stand, else stale. */
+function coverageState(c: Context, rec: P.LedgerEntry): "complete" | "partial" | "not computed" | "stale" {
+  if (staleResults(c, rec).length) return "stale";
+  return rec.coverage === "complete" ? "complete" : rec.coverage === "partial" ? "partial" : "not computed";
 }
 
 /** The standing answer of each question section at the end of the run. */
@@ -274,7 +340,7 @@ function standingAnswers(c: Context): Map<string, P.LedgerEntry> {
 
 // --- the metrics ---------------------------------------------------------------------------------
 
-function negativesAndCoverage(c: Context): Pick<RunMetrics, "negatives" | "coverage"> {
+function negativesAndCoverage(c: Context, scope: RunMetrics["questions"]): Pick<RunMetrics, "negatives" | "coverage"> {
   const closes = c.leadEvents.filter((e) => e.ev === "close" && e.disposition === "negative");
   const quick = closes.filter((e) => e.quick_negative).map((e) => ({
     lead: str(e.lead),
@@ -285,34 +351,52 @@ function negativesAndCoverage(c: Context): Pick<RunMetrics, "negatives" | "cover
     objects: num(e.quick_negative?.objects),
   }));
   const bySeq = new Map(c.entries.map((e) => [e.seq, e]));
-  const answers = standingAnswers(c);
-  const negatives = [...answers.entries()].filter(([, e]) => NB.NEGATIVE_RESULTS.has(NB.answerResult(e) ?? ""));
+  const live = new Set(scope.in_scope.map((q) => q.section));
+  const negatives = [...standingAnswers(c).entries()].filter(([section, e]) => isNegative(c, e, section));
   let reviewed = 0;
-  const unreviewedMaterial: RunMetrics["negatives"]["unreviewed_material"] = [];
-  const unreviewedBackground: RunMetrics["negatives"]["unreviewed_background"] = [];
+  let counted = 0;
+  const unreviewedMaterial: NegativeRow[] = [];
+  const unreviewedBackground: NegativeRow[] = [];
+  const history: NegativeRow[] = [];
   const onPartial: RunMetrics["coverage"]["negatives_on_partial"] = [];
   const without: RunMetrics["coverage"]["negatives_without_coverage"] = [];
   for (const [section, e] of negatives) {
-    const r = P.negativeReview(e, c.entries, c.attestations, c.disputes);
     const id = c.qs?.bySection.get(section)?.id ?? null;
     const row = { section, id, answer: `E-${e.seq}`, result: NB.answerResult(e) ?? "" };
+    if (!live.has(section)) {
+      history.push(row);
+      continue;
+    }
+    counted += 1;
+    const r = P.negativeReview(e, c.entries, c.attestations, c.disputes);
     if (r.reviewed) reviewed += 1;
     else if (isMaterial(section, c)) unreviewedMaterial.push(row);
     else unreviewedBackground.push(row);
     const cov = (e.support ?? []).map((x) => bySeq.get(x.seq)).filter((x): x is P.LedgerEntry => x?.kind === "coverage" && !c.replaced.has(x.seq));
+    const states = cov.map((x) => coverageState(c, x));
     if (!cov.length) without.push({ section, id, answer: `E-${e.seq}` });
-    else if (cov.every((x) => x.coverage !== "complete")) onPartial.push({ section, id, answer: `E-${e.seq}`, coverage: cov.map((x) => `E-${x.seq} ${str(x.coverage) || "not computed"}`) });
+    else if (!states.includes("complete")) onPartial.push({ section, id, answer: `E-${e.seq}`, coverage: cov.map((x, i) => `E-${x.seq} ${states[i]}`) });
   }
   const records = c.entries.filter((e) => e.kind === "coverage" && !c.replaced.has(e.seq));
-  const stale = records.map((x) => ({ record: `E-${x.seq}`, problems: P.coverageProblems(x, c.entries, c.disputes) })).filter((x) => x.problems.length);
+  const stale = records.map((x) => ({ record: `E-${x.seq}`, field: typeof x.coverage === "string" ? x.coverage : null, results: staleResults(c, x) })).filter((x) => x.results.length);
+  const current = records.filter((x) => !stale.some((st) => st.record === `E-${x.seq}`));
   return {
-    negatives: { closes: closes.length, quick: { count: quick.length, items: quick }, answers: negatives.length, reviewed, unreviewed_material: unreviewedMaterial, unreviewed_background: unreviewedBackground },
+    negatives: {
+      recorded: c.have.ledger,
+      quick: { recorded: c.have.leads, closes: closes.length, count: quick.length, items: quick },
+      answers: counted,
+      reviewed,
+      unreviewed_material: unreviewedMaterial,
+      unreviewed_background: unreviewedBackground,
+      out_of_scope: history,
+    },
     coverage: {
+      recorded: c.have.ledger,
       records: records.length,
       reviewed: records.filter((x) => P.negativeReview(x, c.entries, c.attestations, c.disputes).reviewed).length,
-      complete: records.filter((x) => x.coverage === "complete").length,
-      partial: records.filter((x) => x.coverage === "partial").length,
-      not_computed: records.filter((x) => x.coverage !== "complete" && x.coverage !== "partial").length,
+      complete: current.filter((x) => x.coverage === "complete").length,
+      partial: current.filter((x) => x.coverage === "partial").length,
+      not_computed: current.filter((x) => x.coverage !== "complete" && x.coverage !== "partial").length,
       stale,
       negatives_on_partial: onPartial,
       negatives_without_coverage: without,
@@ -374,12 +458,12 @@ function offers(c: Context): RunMetrics["offers"] {
   const answeredQ = (seq: number, what: string) => qev.some((x) => x.ev === what && (x as Rec).offer === seq);
   const questions = { made: qOffers.length, accepted: qOffers.filter((o) => answeredQ(o.seq, "offer_accept")).length, declined: qOffers.filter((o) => answeredQ(o.seq, "offer_decline")).length, not_taken_up: 0 };
   questions.not_taken_up = questions.made - questions.accepted - questions.declined;
-  return { recorded: recorded || qOffers.length > 0, leads, questions, wakes_before_offers: wakes };
+  return { recorded: recorded || qOffers.length > 0, leads, questions, wakes_before_offers: { recorded: c.have.leads, ...wakes } };
 }
 
 /** done calls, from the trace: each seat's own line, the hub's refusals of markDone, and a finish that was not the seat's (done_deferred). */
-function doneCalls(events: readonly P.SwarmEvent[]): RunMetrics["done"] {
-  const out: RunMetrics["done"] = { calls: 0, accepted: 0, created_sentinel: 0, refused: 0, refused_by: {}, hub_refused: 0, not_yours: 0, items: [] };
+function doneCalls(events: readonly P.SwarmEvent[], recorded: boolean): RunMetrics["done"] {
+  const out: RunMetrics["done"] = { recorded, calls: 0, accepted: 0, created_sentinel: 0, refused: 0, refused_by: {}, hub_refused: 0, not_yours: 0, items: [] };
   const why = (reason: string, r: Rec): string => {
     if (r.late !== undefined || /landed (?:after|against)/i.test(reason)) return "late posts";
     if (r.abandon !== undefined) return "abandon vote";
@@ -448,6 +532,7 @@ async function tail(c: Context, scope: RunMetrics["questions"], outcome: RunMetr
   const hasReadiness = finish.some((f) => f.ev === "readiness");
   const ready = hasReadiness ? readyAt : allFirst;
   return {
+    recorded: c.have.ledger,
     end_at: iso(endAt),
     end,
     ready_at: iso(ready),
@@ -475,6 +560,8 @@ async function acquisition(c: Context): Promise<RunMetrics["acquisition"]> {
   }
   const added = c.journal.filter((l) => l.type === "evidence_added");
   return {
+    recorded: c.have.requests,
+    evidence_recorded: c.have.journal,
     requests: list.length,
     by_stage: byStage,
     declined_by_policy: byPolicy,
@@ -509,6 +596,7 @@ function interpretations(c: Context): RunMetrics["interpretations"] {
   }
   const underLeads = [...c.leads.jobLead.keys()];
   return {
+    recorded: c.have.leads,
     total,
     valid,
     superseded,
@@ -560,6 +648,8 @@ function reversals(c: Context): RunMetrics["reversals"] {
   }
   const all = [...changes.map((x) => x.cause), ...reopens.map((x) => x.cause)];
   return {
+    recorded: c.have.ledger,
+    leads_recorded: c.have.leads,
     answer_supersessions: supersessions,
     corrections,
     result_changes: changes,
@@ -570,19 +660,32 @@ function reversals(c: Context): RunMetrics["reversals"] {
 }
 
 /**
+ * Whole units shared among buckets in proportion to their exact shares, so
+ * that the parts add up to the whole (the largest remainder method): each
+ * bucket gets its share rounded down, and what is left goes one unit at a
+ * time to the largest remainders, ties by the buckets' order. The rounding
+ * of scripts/question-cost.ts (roundParts), which the report uses too.
+ */
+export function apportion(total: number, shares: Array<[string, number]>): Map<string, number> {
+  return roundParts(shares, 1, total);
+}
+
+/**
  * Tokens apportioned by lead (scripts/question-cost.ts, the report's own
  * method): each call's tokens go to the leads its seat held when it was
  * made, in equal parts, and a lead's part to the questions it answers, in
  * equal parts. A call made while the seat held no lead is counted as
- * unheld; a lead that answers no question is counted apart. Rounded so the
- * parts still add up to the run's total.
+ * unheld; a lead that answers no question is counted apart. The parts are
+ * exact until the end, then rounded to whole tokens and millionths of a
+ * dollar so that they add up to the run's totals.
  */
 async function cost(c: Context): Promise<RunMetrics["cost"]> {
   const qc = await questionCost(c.S, c.leadEvents, (lead) => [...new Set((c.leads.leads.get(lead)?.answers ?? []).map((a) => sectionOf(a, c.qs)))]);
   const source: RunMetrics["cost"]["source"] = qc.source === "gateway" ? "model-gateway" : qc.source === "sessions" ? "pi-sessions" : qc.source === "trace" ? "trace-estimate" : null;
-  // The tokens exactly as the report shows them (qc.shown); the dollars rounded to 1/10000 the same way, so both add up.
-  const usd = roundParts<string>([...[...qc.byQuestionUsd].map(([k, v]) => [`q\u0000${k}`, v] as const), ["u", qc.unheldUsd] as const, ["n", qc.noQuestionUsd] as const], 0.0001);
-  const dollars = (x: number) => Number(x.toFixed(4));
+  // The tokens exactly as the report shows them (qc.shown); the dollars in millionths, rounded the same way, so both add up.
+  const MICRO = 0.000001;
+  const usd = roundParts<string>([...[...qc.byQuestionUsd].map(([k, v]) => [`q\u0000${k}`, v] as const), ["u", qc.unheldUsd] as const, ["n", qc.noQuestionUsd] as const], MICRO, Math.round(qc.totalUsd / MICRO));
+  const dollars = (x: number) => Number(x.toFixed(6));
   return {
     source,
     tokens: qc.shown.total,
@@ -624,7 +727,8 @@ async function duplicates(c: Context): Promise<RunMetrics["duplicates"]> {
   };
 }
 
-async function network(S: string): Promise<RunMetrics["network"]> {
+/** The network's records; a grant's status is read at `now`: the run's end when it ended, so a finished run measures the same whenever it is read. */
+async function network(S: string, now: number): Promise<RunMetrics["network"]> {
   const st = await readNetState(S).catch(() => null);
   const recorded = Boolean(st && (st.events.length || st.fetchEvents.length));
   const out: RunMetrics["network"] = { recorded, requests: 0, granted: 0, denied: 0, denied_by_code: {}, operator_items: 0, operator_items_open: 0, grants: 0, grants_by_status: {}, fetches: 0, captures: 0, captures_complete: 0, fetch_refusals: 0, contamination: 0 };
@@ -638,7 +742,7 @@ async function network(S: string): Promise<RunMetrics["network"]> {
   out.operator_items_open = [...st.items.values()].filter((i) => !i.closed).length;
   out.grants = st.grants.size;
   for (const g of st.grants.values()) {
-    const s = grantStatus(g, st).status;
+    const s = grantStatus(g, st, now).status;
     out.grants_by_status[s] = (out.grants_by_status[s] ?? 0) + 1;
   }
   const fetches = [...st.fetches.values()].flat();
@@ -652,30 +756,24 @@ async function network(S: string): Promise<RunMetrics["network"]> {
 
 // --- one run --------------------------------------------------------------------------------------
 
-export async function measureRun(runDirArg: string): Promise<RunMetrics> {
+/** `now`: when a grant's status is read for a run still going (tests fix it); a run that ended is read at its end. */
+export async function measureRun(runDirArg: string, o: { now?: number } = {}): Promise<RunMetrics> {
   const S = resolve(runDirArg);
   const c = await readContext(S);
-  const outcome = await P.runOutcome(S).catch(() => ({ outcome: null, by: null, at: null, why: null }));
+  const ended = await P.runOutcome(S).catch(() => ({ outcome: null, by: null, at: null, why: null }));
+  const outcome = { outcome: ended.outcome, by: ended.by, at: ended.at };
   const { events, unreadable } = await P.readEventLogChecked(S);
   if (unreadable) c.notes.push(`the trace is ${unreadable}: done calls are not counted`);
   const scope = inScope(c);
-  const registers: Record<string, boolean> = {
-    leads: existsSync(join(S, L.LEADS_LOG)),
-    finish: existsSync(join(S, "leads", "finish.jsonl")),
-    questions: existsSync(join(S, Q.QUESTIONS_LOG)),
-    ledger: existsSync(join(S, "ledger", "entries.jsonl")),
-    requests: existsSync(join(S, R.REQUESTS_LOG)),
-    journal: existsSync(storePaths(S).journal),
-    network: existsSync(join(S, "network", "grants.jsonl")),
-    trace: existsSync(join(S, P.EVENTS_REL)),
-  };
-  const nc = negativesAndCoverage(c);
+  const registers: Record<string, boolean> = { ...c.have };
+  const nc = negativesAndCoverage(c, scope);
   const off = offers(c);
-  if (!off.recorded) c.notes.push("no offer events in the registers (a run from before offers): offers are not counted; its wakes are");
+  if (c.have.leads && !off.recorded) c.notes.push("no offer events in the registers (a run from before offers): offers are not counted; its wakes are");
   const dup = await duplicates(c);
   if (!dup.recorded && c.journal.some((l) => l.type === "job_accepted")) c.notes.push("no reuse hints on the journal (a run from before them): duplicates are not counted");
   const t = await tail(c, scope, outcome);
-  if (!registers.finish) c.notes.push("no finish register (a run from before readiness was recorded): the tail is measured from the first answers");
+  if (!c.have.finish) c.notes.push("no finish register (a run from before readiness was recorded): the tail is measured from the first answers");
+  const endAt = ms(outcome.at);
   const m: RunMetrics = {
     format: METRICS_FORMAT,
     run: basename(S),
@@ -686,14 +784,14 @@ export async function measureRun(runDirArg: string): Promise<RunMetrics> {
     questions: scope,
     ...nc,
     offers: off,
-    done: doneCalls(events),
+    done: doneCalls(events, c.have.trace && !unreadable),
     tail: t,
     acquisition: await acquisition(c),
     interpretations: interpretations(c),
     reversals: reversals(c),
     cost: await cost(c),
     duplicates: dup,
-    network: await network(S),
+    network: await network(S, endAt ?? o.now ?? Date.now()),
     notes: c.notes,
   };
   if (!m.cost.source) m.notes.push("no per-call token record (no model gateway log, no Pi sessions, and no seat total with calls on the trace): cost per question is not measured");
@@ -702,31 +800,56 @@ export async function measureRun(runDirArg: string): Promise<RunMetrics> {
 
 // --- two runs --------------------------------------------------------------------------------------
 
-export type QuestionSide = { answer: string | null; result: string | null; reviewed: boolean | null; coverage: string[]; accepted: string | null };
+/**
+ * A result's kind: it asserts (established, partial), it is a negative the
+ * bar holds (bounded_negative, not_determinable, a premise rejected on a
+ * search alone), a premise a finding shows false, out of scope, or unknown
+ * (an answer recorded before results, which is not guessed at).
+ */
+export type ResultKind = "asserts" | "negative" | "premise_rejected" | "out_of_scope" | "unknown";
+
+export type QuestionSide = {
+  /** Whether the question is in this run's scope at its end. */
+  in_scope: boolean;
+  answer: string | null;
+  result: string | null;
+  kind: ResultKind | null;
+  reviewed: boolean | null;
+  coverage: string[];
+  /** The operator's acceptance while it stands (Q.acceptanceStands); one that no longer does is acceptance_lapsed. */
+  accepted: string | null;
+  acceptance_lapsed: string | null;
+  /** The answer still standing for a question that is no longer in scope: history, not compared. */
+  history: { answer: string; result: string | null } | null;
+};
+export type Verdict = "agree" | "class_differs" | "disagree" | "unknown" | "only_a" | "only_b" | "neither";
 export type Comparison = {
   format: typeof COMPARE_FORMAT;
   a: { run: string; run_dir: string };
   b: { run: string; run_dir: string };
   compared_at: string;
   same_questions: boolean;
-  questions: Array<{ section: string; id: string | null; a: QuestionSide; b: QuestionSide; verdict: "agree" | "class_differs" | "disagree" | "only_a" | "only_b" | "neither"; flags: string[] }>;
-  summary: { questions: number; agree: number; class_differs: number; disagree: number; one_sided: number; neither: number; negative_disagreements: number; shared_partial_negatives: number };
+  questions: Array<{ section: string; id: string | null; a: QuestionSide; b: QuestionSide; verdict: Verdict; flags: string[] }>;
+  summary: { questions: number; agree: number; class_differs: number; disagree: number; unknown: number; one_sided: number; neither: number; negative_disagreements: number; shared_partial_negatives: number };
   notes: string[];
 };
 
-const sideOf = (c: Context, section: string, standing: Map<string, P.LedgerEntry>): QuestionSide => {
+function sideOf(c: Context, section: string, live: Set<string>, standing: Map<string, P.LedgerEntry>): QuestionSide {
   const e = standing.get(section);
   const q = c.qs?.bySection.get(section);
-  const accepted = q?.accepted ? q.accepted.as : null;
-  if (!e) return { answer: null, result: null, reviewed: null, coverage: [], accepted };
+  const stands = q?.accepted ? Q.acceptanceStands(q, L.ledgerView(c.entries, c.disputes)) : false;
+  const accepted = q?.accepted && stands ? q.accepted.as : null;
+  const lapsed = q?.accepted && !stands ? q.accepted.as : null;
+  const blank: QuestionSide = { in_scope: live.has(section), answer: null, result: null, kind: null, reviewed: null, coverage: [], accepted, acceptance_lapsed: lapsed, history: null };
+  if (!e) return blank;
   const result = NB.answerResult(e);
+  if (!live.has(section)) return { ...blank, history: { answer: `E-${e.seq}`, result } };
+  const negative = isNegative(c, e, section);
+  const kind: ResultKind = result === null ? "unknown" : negative ? "negative" : result === "established" || result === "partial" ? "asserts" : result === "premise_not_supported" ? "premise_rejected" : result === "out_of_scope" ? "out_of_scope" : "unknown";
   const bySeq = new Map(c.entries.map((x) => [x.seq, x]));
-  const cov = (e.support ?? []).map((x) => bySeq.get(x.seq)).filter((x): x is P.LedgerEntry => x?.kind === "coverage" && !c.replaced.has(x.seq)).map((x) => str(x.coverage) || "not computed");
-  return { answer: `E-${e.seq}`, result, reviewed: NB.NEGATIVE_RESULTS.has(result ?? "") ? P.negativeReview(e, c.entries, c.attestations, c.disputes).reviewed : null, coverage: cov, accepted };
-};
-
-/** Results of one kind: established and partial both assert; the negatives (a bounded negative, not determinable, a premise not supported) do not. */
-const family = (r: string | null): string => (r === "established" || r === "partial" ? "positive" : r === "bounded_negative" || r === "not_determinable" || r === "premise_not_supported" ? "negative" : r ?? "none");
+  const cov = (e.support ?? []).map((x) => bySeq.get(x.seq)).filter((x): x is P.LedgerEntry => x?.kind === "coverage" && !c.replaced.has(x.seq)).map((x) => coverageState(c, x));
+  return { ...blank, answer: `E-${e.seq}`, result, kind, reviewed: negative ? P.negativeReview(e, c.entries, c.attestations, c.disputes).reviewed : null, coverage: cov };
+}
 
 export async function compareRuns(aDir: string, bDir: string): Promise<Comparison> {
   const A = await readContext(resolve(aDir));
@@ -734,34 +857,39 @@ export async function compareRuns(aDir: string, bDir: string): Promise<Compariso
   const notes = [...A.notes.map((n) => `A: ${n}`), ...B.notes.map((n) => `B: ${n}`)];
   const sa = inScope(A);
   const sb = inScope(B);
+  const liveA = new Set(sa.in_scope.map((q) => q.section));
+  const liveB = new Set(sb.in_scope.map((q) => q.section));
   const text = (c: Context, s: string) => c.qs?.bySection.get(s)?.text ?? null;
-  const sections = [...new Set([...sa.in_scope, ...sb.in_scope].map((q) => q.section))].sort((x, y) => (/^\d+$/.test(x) && /^\d+$/.test(y) ? Number(x) - Number(y) : x.localeCompare(y)));
-  const sameQuestions = sa.in_scope.length === sb.in_scope.length && sa.in_scope.every((q) => sb.in_scope.some((r) => r.section === q.section && text(A, q.section) === text(B, q.section)));
-  if (!sameQuestions) notes.push("the two runs' questions differ (in number, or in their text): compared by section, and a question one run has alone is one-sided");
+  const sections = [...new Set([...liveA, ...liveB])].sort((x, y) => (/^\d+$/.test(x) && /^\d+$/.test(y) ? Number(x) - Number(y) : x.localeCompare(y)));
+  const sameQuestions = liveA.size === liveB.size && [...liveA].every((s) => liveB.has(s) && text(A, s) === text(B, s));
+  if (!sameQuestions) notes.push("the two runs' questions in scope differ (in number, or in their text): compared by section, and a question in one run's scope alone is one-sided");
   const standA = standingAnswers(A);
   const standB = standingAnswers(B);
   const rows: Comparison["questions"] = [];
   for (const section of sections) {
-    const a = sideOf(A, section, standA);
-    const b = sideOf(B, section, standB);
+    const a = sideOf(A, section, liveA, standA);
+    const b = sideOf(B, section, liveB, standB);
     const flags: string[] = [];
-    const fa = family(a.result);
-    const fb = family(b.result);
-    let verdict: Comparison["questions"][number]["verdict"];
+    let verdict: Verdict;
     if (!a.answer && !b.answer) verdict = "neither";
     else if (!b.answer) verdict = "only_a";
     else if (!a.answer) verdict = "only_b";
-    else verdict = a.result === b.result ? "agree" : fa === fb ? "class_differs" : "disagree";
-    if (a.answer && b.answer && fa !== fb && (fa === "negative" || fb === "negative")) flags.push(`a negative in ${fa === "negative" ? "A" : "B"} (${fa === "negative" ? a.result : b.result}) is established in the other: re-examine the negative's coverage and detection assumptions`);
-    if (fa === "negative" && fb === "negative") {
-      const partial = (s: QuestionSide) => !s.coverage.length || s.coverage.every((x) => x !== "complete");
-      if (partial(a) && partial(b)) flags.push("both runs are negative and neither rests on complete coverage: agreement may be a shared blind spot");
+    else if (a.kind === "unknown" || b.kind === "unknown") verdict = "unknown";
+    else verdict = a.result === b.result ? "agree" : a.kind === b.kind ? "class_differs" : "disagree";
+    if (verdict === "unknown") flags.push(`${[a.kind === "unknown" ? "A" : "", b.kind === "unknown" ? "B" : ""].filter(Boolean).join(" and ")} recorded no result class: not compared`);
+    for (const [neg, other, n, o] of [[a, b, "A", "B"], [b, a, "B", "A"]] as const) {
+      if (neg.kind === "negative" && other.kind === "asserts") flags.push(`a negative in ${n} (${neg.result}) is asserted in ${o} (${other.result}): re-examine the negative's coverage and detection assumptions`);
+    }
+    if (a.kind === "negative" && b.kind === "negative") {
+      const partial = (s: QuestionSide) => !s.coverage.includes("complete");
+      if (partial(a) && partial(b)) flags.push("both runs are negative and neither rests on complete coverage that still stands: agreement may be a shared blind spot");
       if (a.reviewed === false || b.reviewed === false) flags.push(`a negative not reviewed by another seat in ${[a.reviewed === false ? "A" : "", b.reviewed === false ? "B" : ""].filter(Boolean).join(" and ")}`);
     }
-    if (verdict === "agree" && fa === "positive" && (a.accepted || b.accepted)) flags.push("agreement where one run's question was accepted by the operator as limited");
+    for (const [s, n] of [[a, "A"], [b, "B"]] as const) if (s.acceptance_lapsed) flags.push(`${n}'s acceptance (${s.acceptance_lapsed}) no longer stands`);
+    if (verdict === "agree" && (a.accepted || b.accepted)) flags.push("agreement where a run's question was accepted by the operator as limited");
     rows.push({ section, id: A.qs?.bySection.get(section)?.id ?? B.qs?.bySection.get(section)?.id ?? null, a, b, verdict, flags });
   }
-  const count = (v: string) => rows.filter((r) => r.verdict === v).length;
+  const count = (v: Verdict) => rows.filter((r) => r.verdict === v).length;
   return {
     format: COMPARE_FORMAT,
     a: { run: basename(resolve(aDir)), run_dir: resolve(aDir) },
@@ -774,6 +902,7 @@ export async function compareRuns(aDir: string, bDir: string): Promise<Compariso
       agree: count("agree"),
       class_differs: count("class_differs"),
       disagree: count("disagree"),
+      unknown: count("unknown"),
       one_sided: count("only_a") + count("only_b"),
       neither: count("neither"),
       negative_disagreements: rows.filter((r) => r.flags.some((f) => f.startsWith("a negative in"))).length,
@@ -794,6 +923,8 @@ const list = (xs: string[]): string => (xs.length ? xs.join(", ") : "none");
 const counts = (o: Record<string, number>): string => (Object.keys(o).length ? Object.entries(o).sort().map(([k, v]) => `${k} ${v}`).join(", ") : "none");
 const mins = (m: number | null): string => (m === null ? "-" : `${m} min`);
 const qname = (x: { section: string; id: string | null }): string => x.id ?? `question:${x.section}`;
+/** A metric whose register the run does not have: said, never a zero. */
+const absent = (what: string) => `not recorded (no ${what})`;
 
 export function metricsText(m: RunMetrics): string {
   const lines: string[] = [`Metrics: run ${m.run}${m.outcome.outcome ? ` (${m.outcome.outcome})` : ""}`, `Questions in scope: ${m.questions.in_scope.length} (from the ${m.questions.source})`, ""];
@@ -803,24 +934,30 @@ export function metricsText(m: RunMetrics): string {
   const i = m.interpretations;
   const r = m.reversals;
   const n = m.network;
+  const t = m.tail;
+  const neg = m.negatives;
+  const cov = m.coverage;
+  const LEDGER = "ledger/entries.jsonl";
+  const LEADS = "leads/leads.jsonl";
   const rows: string[][] = [
     ["Metric", "Value"],
-    ["Quick negatives", `${m.negatives.quick.count} of ${m.negatives.closes} negative closes${m.negatives.quick.count ? `: ${m.negatives.quick.items.map((x) => `${x.lead} (${x.held_seconds} s, ${x.jobs} job, ${x.objects} object)`).join(", ")}` : ""}`],
-    ["Negative answers", `${m.negatives.answers} standing; ${m.negatives.reviewed} reviewed`],
-    ["Unreviewed negatives", `${m.negatives.unreviewed_material.length} material (${list(m.negatives.unreviewed_material.map((x) => `${qname(x)} ${x.answer}`))}), ${m.negatives.unreviewed_background.length} background`],
-    ["Coverage records", `${m.coverage.records} standing: ${m.coverage.complete} complete, ${m.coverage.partial} partial, ${m.coverage.not_computed} not computed; ${m.coverage.reviewed} reviewed by another seat; ${m.coverage.stale.length} stale`],
-    ["Negatives on partial coverage", `${m.coverage.negatives_on_partial.length} (${list(m.coverage.negatives_on_partial.map((x) => `${qname(x)} ${x.answer}`))}); ${m.coverage.negatives_without_coverage.length} cite no coverage record`],
-    ["Offers (leads)", o.recorded ? `${o.leads.made} made: ${o.leads.accepted} accepted, ${o.leads.declined} declined, ${o.leads.taken_by_another} taken by another seat, ${o.leads.lapsed} lapsed, ${o.leads.open} with no outcome` : "not recorded"],
-    ["Offers (questions)", o.recorded ? `${o.questions.made} made: ${o.questions.accepted} accepted, ${o.questions.declined} declined, ${o.questions.not_taken_up} not taken up` : "not recorded"],
-    ["Wakes (before offers)", `${o.wakes_before_offers.made}: ${o.wakes_before_offers.taken_by_woken} taken by the woken seat, ${o.wakes_before_offers.taken_by_another} by another, ${o.wakes_before_offers.not_taken} not taken`],
-    ["done calls", `${d.calls}: ${d.accepted} accepted (${d.created_sentinel} wrote the sentinel), ${d.refused} refused by the seat's checks (${counts(d.refused_by)}), ${d.hub_refused} refused by the hub, ${d.not_yours} not the seat's finish`],
-    ["Tail to the end", `${mins(m.tail.minutes_from_ready)} from ready (${m.tail.ready_source ?? "never ready"}); ${mins(m.tail.minutes_from_first_answers)} from the first answers, ${mins(m.tail.minutes_from_final_answers)} from the final ones${m.tail.unanswered.length ? `; unanswered: ${list(m.tail.unanswered)}` : ""}`],
-    ["Acquisition", `${a.requests} request(s) (${counts(a.by_stage)}; ${a.declined_by_policy} declined by the case policy); ${a.gaps.length} gap(s)${a.questions_with_gap.length ? ` on ${list(a.questions_with_gap)}` : ""}; evidence added ${a.evidence_added} time(s), ${a.evidence_added_for_request} for a request`],
-    ["Interpretations", `${i.total}: ${i.valid} valid, ${i.superseded} on a superseded entry, ${i.disputed} on a disputed one${i.missing ? `, ${i.missing} on no entry` : ""}; ${i.jobs_uninterpreted.length} of ${i.jobs_under_leads} lead jobs uninterpreted, ${i.jobs_without_valid.length} with no valid interpretation`],
-    ["Reversals", `${r.result_changes.length + r.negative_reopens.length}: ${r.new_evidence} after new evidence, ${r.discoverable} discoverable in the original evidence (${r.result_changes.length} answer result changes, ${r.negative_reopens.length} negative leads reopened); ${r.corrections} corrections kept the result`],
-    ["Cost", m.cost.source ? `${m.cost.tokens} tokens, $${m.cost.usd} (from ${m.cost.source === "model-gateway" ? "the model gateway's log" : m.cost.source === "pi-sessions" ? "the seats' Pi sessions" : "each seat's total spread over its calls on the trace, an estimate"}); ${m.cost.unheld.tokens} spent holding no lead, ${m.cost.leads_without_question.tokens} on leads that answer no question` : "not measured"],
-    ["Duplicates", m.duplicates.recorded ? `${m.duplicates.jobs_with_similar.length} jobs with similar work by another seat (${m.duplicates.exact_repeats.length} exact repeats); ${m.duplicates.independent.length} independent reproductions; same_as ${m.duplicates.same_as.files} file(s), ${m.duplicates.same_as.bytes} bytes in ${m.duplicates.same_as.jobs.length} job(s), ${m.duplicates.same_as.whole.length} wholly; recipes merged ${m.duplicates.recipe_merged}` : `not recorded${m.duplicates.shadow_would_merge ? ` (the retired shadow merge said ${m.duplicates.shadow_would_merge})` : ""}`],
-    ["Network", n.recorded ? `${n.requests} request(s): ${n.granted} granted, ${n.denied} denied (${counts(n.denied_by_code)}); ${n.operator_items} operator item(s), ${n.operator_items_open} open; ${n.grants} grant(s) (${counts(n.grants_by_status)}); ${n.fetches} fetch(es), ${n.captures} capture(s), ${n.fetch_refusals} refused by the fetch service${n.contamination ? `; contamination ${n.contamination}` : ""}` : "not used"],
+    ["Quick negatives", neg.quick.recorded ? `${neg.quick.count} of ${neg.quick.closes} negative closes${neg.quick.count ? `: ${neg.quick.items.map((x) => `${x.lead} (${x.held_seconds} s, ${x.jobs} job, ${x.objects} object)`).join(", ")}` : ""}` : absent(LEADS)],
+    ["Negative answers", neg.recorded ? `${neg.answers} standing in scope; ${neg.reviewed} reviewed${neg.out_of_scope.length ? `; ${neg.out_of_scope.length} more on questions no longer in scope (${list(neg.out_of_scope.map((x) => `${qname(x)} ${x.answer}`))}), not counted` : ""}` : absent(LEDGER)],
+    ["Unreviewed negatives", neg.recorded ? `${neg.unreviewed_material.length} material (${list(neg.unreviewed_material.map((x) => `${qname(x)} ${x.answer}`))}), ${neg.unreviewed_background.length} background` : absent(LEDGER)],
+    ["Coverage records", cov.recorded ? `${cov.records} standing: ${cov.complete} complete, ${cov.partial} partial, ${cov.not_computed} not computed, ${cov.stale.length} stale (a result no longer stands: ${list(cov.stale.map((x) => `${x.record} ${x.results.map((y) => `${y.result} ${y.code}`).join(" ")}`))}); ${cov.reviewed} reviewed by another seat` : absent(LEDGER)],
+    ["Negatives on partial coverage", cov.recorded ? `${cov.negatives_on_partial.length} (${list(cov.negatives_on_partial.map((x) => `${qname(x)} ${x.answer}`))}); ${cov.negatives_without_coverage.length} cite no coverage record` : absent(LEDGER)],
+    ["Offers (leads)", o.recorded ? `${o.leads.made} made: ${o.leads.accepted} accepted, ${o.leads.declined} declined, ${o.leads.taken_by_another} taken by another seat, ${o.leads.lapsed} lapsed, ${o.leads.open} with no outcome` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
+    ["Offers (questions)", o.recorded ? `${o.questions.made} made: ${o.questions.accepted} accepted, ${o.questions.declined} declined, ${o.questions.not_taken_up} not taken up` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
+    ["Wakes (before offers)", o.wakes_before_offers.recorded ? `${o.wakes_before_offers.made}: ${o.wakes_before_offers.taken_by_woken} taken by the woken seat, ${o.wakes_before_offers.taken_by_another} by another, ${o.wakes_before_offers.not_taken} not taken` : absent(LEADS)],
+    ["done calls", d.recorded ? `${d.calls}: ${d.accepted} accepted (${d.created_sentinel} wrote the sentinel), ${d.refused} refused by the seat's checks (${counts(d.refused_by)}), ${d.hub_refused} refused by the hub, ${d.not_yours} not the seat's finish` : absent("readable traces/events.jsonl")],
+    ["Tail to the end", !t.end_at ? "not measured (the run has not ended)" : `${mins(t.minutes_from_ready)} from ready (${t.ready_source ?? "never ready"}); ${t.recorded ? `${mins(t.minutes_from_first_answers)} from the first answers, ${mins(t.minutes_from_final_answers)} from the final ones${t.unanswered.length ? `; unanswered: ${list(t.unanswered)}` : ""}` : `the answer tails ${absent(LEDGER)}`}`],
+    ["Acquisition", a.recorded ? `${a.requests} request(s) (${counts(a.by_stage)}; ${a.declined_by_policy} declined by the case policy); ${a.gaps.length} gap(s)${a.questions_with_gap.length ? ` on ${list(a.questions_with_gap)}` : ""}` : absent("requests/requests.jsonl")],
+    ["Evidence added", a.evidence_recorded ? `${a.evidence_added} time(s), ${a.evidence_added_for_request} for a request` : absent("store/journal.jsonl")],
+    ["Interpretations", i.recorded ? `${i.total}: ${i.valid} valid, ${i.superseded} on a superseded entry, ${i.disputed} on a disputed one${i.missing ? `, ${i.missing} on no entry` : ""}; ${i.jobs_uninterpreted.length} of ${i.jobs_under_leads} lead jobs uninterpreted, ${i.jobs_without_valid.length} with no valid interpretation` : absent(LEADS)],
+    ["Reversals", r.recorded ? `${r.result_changes.length + r.negative_reopens.length}: ${r.new_evidence} after new evidence, ${r.discoverable} discoverable in the original evidence (${r.result_changes.length} answer result changes, ${r.leads_recorded ? `${r.negative_reopens.length} negative leads reopened` : `negative reopens ${absent(LEADS)}`}); ${r.corrections} corrections kept the result` : absent(LEDGER)],
+    ["Cost", m.cost.source ? `${m.cost.tokens} tokens, $${m.cost.usd} (from ${m.cost.source === "model-gateway" ? "the model gateway's log" : m.cost.source === "pi-sessions" ? "the seats' Pi sessions" : "each seat's total spread over its calls on the trace, an estimate"}); ${m.cost.unheld.tokens} spent holding no lead, ${m.cost.leads_without_question.tokens} on leads that answer no question` : "not measured (no per-call token record)"],
+    ["Duplicates", m.duplicates.recorded ? `${m.duplicates.jobs_with_similar.length} jobs with similar work by another seat (${m.duplicates.exact_repeats.length} exact repeats); ${m.duplicates.independent.length} independent reproductions; same_as ${m.duplicates.same_as.files} file(s), ${m.duplicates.same_as.bytes} bytes in ${m.duplicates.same_as.jobs.length} job(s), ${m.duplicates.same_as.whole.length} wholly; recipes merged ${m.duplicates.recipe_merged}` : `not recorded${m.duplicates.shadow_would_merge ? ` (the retired shadow merge said ${m.duplicates.shadow_would_merge})` : " (no reuse hints on the store's journal)"}`],
+    ["Network", n.recorded ? `${n.requests} request(s): ${n.granted} granted, ${n.denied} denied (${counts(n.denied_by_code)}); ${n.operator_items} operator item(s), ${n.operator_items_open} open; ${n.grants} grant(s) (${counts(n.grants_by_status)}); ${n.fetches} fetch(es), ${n.captures} capture(s), ${n.fetch_refusals} refused by the fetch service${n.contamination ? `; contamination ${n.contamination}` : ""}` : "not used (no network/ records)"],
   ];
   lines.push(...table(rows));
   if (m.cost.per_question.length) {
@@ -832,7 +969,12 @@ export function metricsText(m: RunMetrics): string {
 }
 
 export function compareText(c: Comparison): string {
-  const side = (s: QuestionSide) => (s.answer ? `${s.result ?? "?"}${s.reviewed === false ? " (unreviewed)" : ""}${s.coverage.length ? ` [${s.coverage.join(", ")}]` : ""}${s.accepted ? ` accepted ${s.accepted}` : ""}` : "no answer");
+  const side = (s: QuestionSide) =>
+    s.answer
+      ? `${s.result ?? "no result class"}${s.reviewed === false ? " (unreviewed)" : ""}${s.coverage.length ? ` [${s.coverage.join(", ")}]` : ""}${s.accepted ? ` accepted ${s.accepted}` : ""}`
+      : !s.in_scope
+        ? `not in scope${s.history ? ` (${s.history.answer} ${s.history.result ?? "no result class"}, history)` : ""}`
+        : "no answer";
   const lines = [`Compare: A ${c.a.run}, B ${c.b.run}${c.same_questions ? "" : " (their questions differ)"}`, ""];
   lines.push(...table([["Question", "A", "B", "Verdict"], ...c.questions.map((q) => [q.id ?? `question:${q.section}`, side(q.a), side(q.b), q.verdict])]));
   const flagged = c.questions.filter((q) => q.flags.length);
@@ -841,7 +983,7 @@ export function compareText(c: Comparison): string {
     for (const q of flagged) for (const f of q.flags) lines.push(`Flag ${q.id ?? `question:${q.section}`}: ${f}`);
   }
   const s = c.summary;
-  lines.push("", `${s.questions} question(s): ${s.agree} agree, ${s.class_differs} of the same kind in another class, ${s.disagree} disagree, ${s.one_sided} answered in one run only, ${s.neither} in neither; ${s.negative_disagreements} negative(s) the other run established, ${s.shared_partial_negatives} shared negative(s) on partial coverage.`);
+  lines.push("", `${s.questions} question(s): ${s.agree} agree, ${s.class_differs} of the same kind in another class, ${s.disagree} disagree, ${s.unknown} with no result class to compare, ${s.one_sided} answered in one run only, ${s.neither} in neither; ${s.negative_disagreements} negative(s) the other run asserted, ${s.shared_partial_negatives} shared negative(s) without complete coverage.`);
   lines.push("Agreement is not confirmation: two runs of one harness can share a blind spot.");
   if (c.notes.length) lines.push("", ...c.notes.map((x) => `Note: ${x}`));
   return `${lines.join("\n")}\n`;

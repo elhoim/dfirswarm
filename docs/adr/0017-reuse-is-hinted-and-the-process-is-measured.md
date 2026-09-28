@@ -63,10 +63,16 @@ their own (`calibration/`, `scripts/calibrate.ts`).
    same or overlap, and how close the operation is (the same command, or the
    same tool with the same arguments, ranks first). The whole list is a
    `job_similar` line; the answer carries eight and names the line for the
-   rest. The job runs as asked; the agent may cancel it.
+   rest. The job runs as asked; the agent may cancel it. The hint is sought
+   after the job is registered and queued, and never holds it up: a line
+   that cannot be written leaves every similar job in the answer.
 4. **`same_as` at commit.** A committed job's non-empty file whose sha256 is
    an earlier job's output names that job and file, on a `job_same_as` line,
-   the job's record and its view. The file is the job's own either way.
+   the job's record and its view. The file is the job's own either way. The
+   index of earlier outputs is built from the manifests in the background,
+   off the store's one-at-a-time commit path; a commit only looks it up in
+   memory, and one made while it is still being built is answered once it
+   is. The console's Jobs tab shows both hints for a job, every entry.
 5. **`independent: true`** on `job_run` (a command or a tool) records an
    intended reproduction on the spec. `similar` is still shown; the metrics
    count reproductions apart from duplicates.
@@ -75,8 +81,14 @@ their own (`calibration/`, `scripts/calibrate.ts`).
    read the registers only (leads, the finish register where it exists,
    questions, the ledger with attestations and disputes, requests, the store
    journal, the network, the trace, the seats' token records) and write
-   nothing. Each figure is a count of named records, the JSON names them,
-   and no answer value, finding or command is printed. The set: quick
+   nothing. Each figure is a count of named records, the JSON names them by
+   id and code, and no free text a record carries is copied (no answer
+   value, finding or command, no dispute's why, no done's or stop's reason).
+   The answer metrics are over the questions in scope at the run's end (not
+   withdrawn, not a follow-up after done); older answers are history. A
+   negative is what the finish gate holds as one, a premise rejected on a
+   search alone included, and coverage whose results no longer stand is
+   stale, never complete. The set: quick
    negatives; unreviewed negatives, material and background; coverage
    completeness; offers by outcome (accepted, declined, taken by another
    seat, lapsed), with wakes from before offers apart; `done` calls, refusals
@@ -92,13 +104,16 @@ their own (`calibration/`, `scripts/calibrate.ts`).
    while its entry stands. The dependency and blocking figures are not in
    this set; a metric of either must keep satisfied from withdrawn and
    blocked time from a wake's latency.
-8. **A register a run does not have is absent, never zero.** A run from
-   before offers, the finish register or the reuse hints says so and is
-   measured on what it has.
+8. **A register a run does not have is absent, never zero.** Each metric
+   whose register is missing says "not recorded", in the table and as
+   `recorded: false`; a run from before offers, the finish register or the
+   reuse hints says so and is measured on what it has.
 9. **`--compare <run-A> <run-B>`** sets two runs of one goal side by side by
-   question section: each standing result, whether a negative was reviewed,
-   its coverage, any acceptance. It flags a negative the other run
-   established, and a negative both reached without complete coverage, as a
+   question section, each over its own scope: each standing result and its
+   kind, whether a negative was reviewed, its coverage, an acceptance while
+   it stands. A result class that was never recorded is not guessed at. It
+   flags a negative the other run asserts (established or partial), and a
+   negative both reached without complete coverage that still stands, as a
    possible shared blind spot, and says that agreement is not confirmation.
 
 ## Consequences

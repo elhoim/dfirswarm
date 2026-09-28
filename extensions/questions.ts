@@ -984,7 +984,12 @@ export async function viewContext(sandboxRoot: string): Promise<ViewContext> {
 
 /** The questions a finish line holds the run to beyond the goal's own check: in scope, not withdrawn, not a follow-up, asked by a person or an agent. */
 export function registerQuestions(snap: QuestionsSnapshot): Question[] {
-  return [...snap.state.questions.values()].filter((q) => q.origin.kind !== "goal" && q.scope === "in_scope" && !q.withdrawn && !q.after_done);
+  return [...snap.state.questions.values()].filter((q) => q.origin.kind !== "goal" && liveInScope(q));
+}
+
+/** A question this run's work is held to now: in scope, not withdrawn, and not a follow-up admitted after its done (that is a resume's). */
+export function liveInScope(q: Pick<Question, "scope" | "withdrawn" | "after_done">): boolean {
+  return q.scope === "in_scope" && !q.withdrawn && !q.after_done;
 }
 
 // --- who may do what ----------------------------------------------------------------------------

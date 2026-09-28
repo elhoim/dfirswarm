@@ -64,6 +64,8 @@ import {
   answerSection,
   attestationAct,
   attestEstablishes,
+  citedForQuestion,
+  negativeByResult,
   briefQuestions,
   ledgerGate,
   negativeReview,
@@ -468,7 +470,8 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
     // answered (B2): with no review that holds it established, it limits
     // the run, and an operator-stopped run waits for the route or for the
     // operator's acceptance.
-    if (outcome === "answered" && reviews.length && !reviews.some(attestEstablishes) && !NEGATIVE_RESULTS.has(result ?? "")) {
+    // A negative, by the gate's own test (negativeByResult: a premise rejected on a search alone is one), is held to the negative review, never to a strength.
+    if (outcome === "answered" && reviews.length && !reviews.some(attestEstablishes) && !negativeByResult(result, citedForQuestion(a, bySeq, replaced, id))) {
       bestCandidate.push(section);
       outcome = "limited";
       said = `examination-limited: a best candidate, not established (every review holds #${a.seq} a best candidate: ${[...new Set(reviews.map((x) => x.by))].join(", ")}${reviews.some((x) => x.capped?.length) ? `; ${[...new Set(reviews.flatMap((x) => x.capped ?? []))].join("; ")}` : ""}); ${said}`;

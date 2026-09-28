@@ -588,7 +588,8 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
     if (!a) continue;
     const reviews = attestations.filter((x) => P.attestationAct(x) === "attest" && x.target === a.hash && !a.authors.includes(x.by));
     const result = NB.answerResult(a);
-    if (reviews.length && !reviews.some(P.attestEstablishes) && !(result && NB.NEGATIVE_RESULTS.has(result))) {
+    // A negative, by the gate's own test (a premise rejected on a search alone is one), is held to the negative review, never to a strength.
+    if (reviews.length && !reviews.some(P.attestEstablishes) && !P.negativeByResult(result, P.citedForQuestion(a, s.ledger.bySeq, s.ledger.replaced, sec.slice("question:".length)))) {
       limited.push(`${sec} is a best candidate, not established (E-${a.seq})`);
       continue;
     }

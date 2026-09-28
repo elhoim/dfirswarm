@@ -78,6 +78,15 @@ export type StoreJobRow = {
   notified: Array<{ to: string; how: string; at: string }>;
   /** How many later requests were answered with this job. */
   deduplicated: number;
+  /** Asked as an intended reproduction of another seat's work (job_run independent: true). */
+  independent: boolean;
+  /**
+   * Other seats' jobs doing the same over the same objects when this one was
+   * accepted (its job_similar line, every entry as written: docs/adr/0017).
+   */
+  similar: Array<Record<string, unknown>>;
+  /** Its files that are an earlier job's output byte for byte (its job_same_as line, every entry as written). */
+  same_as: Array<Record<string, unknown>>;
   cancel_requested: string | null;
   parent: string | null;
   note: string | null;
@@ -348,6 +357,9 @@ function fold(lines: Array<Record<string, unknown>>): { rows: Map<string, StoreJ
         program_missing: null,
         notified: [],
         deduplicated: 0,
+        independent: spec.independent === true,
+        similar: [],
+        same_as: [],
         cancel_requested: null,
         parent: str(spec.parent),
         note: str(spec.note),
@@ -413,6 +425,12 @@ function fold(lines: Array<Record<string, unknown>>): { rows: Map<string, StoreJ
       case "job_deduplicated":
         j.deduplicated += 1;
         totals.deduplicated += 1;
+        break;
+      case "job_similar":
+        if (Array.isArray(l.similar)) j.similar = l.similar.filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === "object");
+        break;
+      case "job_same_as":
+        if (Array.isArray(l.same_as)) j.same_as = l.same_as.filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === "object");
         break;
       default:
         break;

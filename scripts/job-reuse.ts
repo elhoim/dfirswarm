@@ -148,11 +148,13 @@ export function rankSimilar(list: Similar[]): Similar[] {
 /**
  * What a job_run answer carries: the similar jobs worth reading, at most
  * SIMILAR_SHOWN (the rest counted, and named where every one is), and one
- * sentence on what to do with them. Nothing when there are none.
+ * sentence on what to do with them. Nothing when there are none. When the
+ * job_similar line could not be written (`recorded` false), nothing names
+ * the rest, so every one is in the answer.
  */
-export function similarView(job: string, similar: Similar[], independent: boolean): Record<string, unknown> {
+export function similarView(job: string, similar: Similar[], independent: boolean, recorded = true): Record<string, unknown> {
   if (!similar.length) return {};
-  const shown = similar.slice(0, SIMILAR_SHOWN);
+  const shown = recorded ? similar.slice(0, SIMILAR_SHOWN) : similar;
   const rest = similar.length - shown.length;
   const note = independent
     ? `Recorded as an independent reproduction: other seats ran the same work over the same objects (${shown.map((s) => s.job).join(", ")}${rest ? ", …" : ""}). Keep your result apart from theirs until yours is in, then compare.`

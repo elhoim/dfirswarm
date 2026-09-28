@@ -106,6 +106,23 @@ test("secret_output seals every output sensitive; a job reading one is derived; 
   await svc.stop("test over");
 });
 
+test("identical bytes of a sensitive output are sensitive at commit, while the same_as index (ADR 0017) is still being built", async () => {
+  const { S, svc } = await run();
+  const secret = await submitted(svc, "a1", { command: `printf '%s' '${VALUE}' > "$OUT/value.txt"`, inputs: [], secret_output: true });
+  assert.equal(secret.sensitive?.why, "secret_output");
+  // The same_as index as a restarted service has it while it reads the manifests: not built yet.
+  const inner = svc as unknown as { outputIndex: unknown };
+  inner.outputIndex = null;
+  // Another job writes the same bytes from nothing it declared as sensitive (it made them itself).
+  const again = await submitted(svc, "a2", { command: `printf '%s' '${VALUE}' > "$OUT/copy.txt"`, inputs: [] });
+  assert.deepEqual([again.sensitive?.why, again.sensitive?.from], ["derived", [secret.id]], "decided before job_committed, from the sensitive jobs' manifests, not from the index");
+  const journal = await readFile(storePaths(S).journal, "utf8");
+  const committed = journal.split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.type === "job_committed" && l.job === again.id);
+  assert.equal(committed.sensitive?.why, "derived", "the job_committed line says so");
+  assert.equal(again.same_as, undefined, "the hint waits for the index; the sensitivity did not");
+  await svc.stop("test over");
+});
+
 test("the derivation is by path, digest and generation for a declared scope, and by id for none; a small output is a scan word only when it is shaped like a secret", () => {
   const sensitive = new Set(["j000003"]);
   const at = (objects: Array<{ path: string; sha256?: string }> | null, text = "") => derivedFrom({ objects, text, sensitive, digestJob: (s) => (s === "a".repeat(64) ? "j000003" : null), generationJob: (g) => (g === "g000002" ? "j000003" : null) });

@@ -9405,6 +9405,22 @@ export function disputeWords(d: DisputeInForce): string {
 
 export type LedgerActInput = { seq?: number | string; how?: string; why?: string; refs?: string[] | string; withdraw?: boolean; review?: unknown; strength?: unknown; answer_review?: unknown };
 
+/** The standing entries an answer cites that were recorded for its own question (`id`, its section key). */
+export function citedForQuestion(a: LedgerEntry, bySeq: Map<number, LedgerEntry>, replaced: Map<number, number>, id: string): LedgerEntry[] {
+  return (a.support ?? []).map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => Boolean(e) && !replaced.has((e as LedgerEntry).seq) && ((e as LedgerEntry).answers ?? []).some((x) => sectionKey(x) === id));
+}
+
+/**
+ * Whether an answer's result makes it a negative the bar holds (the finish
+ * gate's own test): a bounded negative, not determinable, or a premise
+ * rejected on a search alone, where none of the standing entries it cites
+ * for its question (`cited`, citedForQuestion) is a finding that shows the
+ * premise false.
+ */
+export function negativeByResult(result: string | null, cited: LedgerEntry[]): boolean {
+  return Boolean(result && (NB.NEGATIVE_RESULTS.has(result) || (result === "premise_not_supported" && !cited.some((e) => e.kind === "finding"))));
+}
+
 /** Whether an entry is a negative the review bar holds: a coverage record, or an answer bounded_negative or not_determinable. */
 export function isNegativeEntry(e: LedgerEntry): boolean {
   if (e.kind === "coverage") return true;
@@ -9567,26 +9583,44 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
  * stands.
  */
 export function coverageProblems(c: LedgerEntry, entries: LedgerEntry[], disputes: LedgerDispute[] = []): string[] {
+  return coverageStaleness(c, entries, disputes).map((x) =>
+    x.code === "missing"
+      ? `its result E-${x.result} is not in the ledger`
+      : x.code === "rebound"
+        ? `its result E-${x.result} is not the entry it bound (the hash differs)`
+        : x.code === "superseded"
+          ? `its result E-${x.result} is superseded by #${x.by_seq}`
+          : `its result E-${x.result} is disputed by ${x.disputes!.map(disputeWords).join("; ")}`,
+  );
+}
+
+/**
+ * coverageProblems as data: each result of the record that no longer stands,
+ * by code (missing, rebound: another entry than the one bound, superseded,
+ * disputed), with the entry that superseded it or the disputes against it.
+ */
+export function coverageStaleness(c: LedgerEntry, entries: LedgerEntry[], disputes: LedgerDispute[] = []): Array<{ result: number; code: "missing" | "rebound" | "superseded" | "disputed"; by_seq?: number; disputes?: DisputeInForce[] }> {
   if (c.kind !== "coverage") return [];
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
+  // A dispute stays in force on the correction of the entry it named (B18, disputesInForce).
   const against = disputesInForce(entries, disputes);
-  const out: string[] = [];
+  const out: Array<{ result: number; code: "missing" | "rebound" | "superseded" | "disputed"; by_seq?: number; disputes?: DisputeInForce[] }> = [];
   for (const r of c.result_refs ?? []) {
     const m = /^E-(\d+)$/.exec(r);
     if (!m) continue;
     const seq = Number(m[1]);
     const e = bySeq.get(seq);
     if (!e) {
-      out.push(`its result E-${seq} is not in the ledger`);
+      out.push({ result: seq, code: "missing" });
       continue;
     }
     const hash = e.hash ?? ledgerHash(e, "genesis");
     const bound = c.result_bound?.find((x) => x.seq === seq);
-    if (bound && bound.hash !== hash) out.push(`its result E-${seq} is not the entry it bound (the hash differs)`);
-    if (replaced.has(seq)) out.push(`its result E-${seq} is superseded by #${standingSeq(seq, replaced)}`);
+    if (bound && bound.hash !== hash) out.push({ result: seq, code: "rebound" });
+    if (replaced.has(seq)) out.push({ result: seq, code: "superseded", by_seq: standingSeq(seq, replaced) });
     const d = against.filter((x) => x.target === hash);
-    if (d.length) out.push(`its result E-${seq} is disputed by ${d.map(disputeWords).join("; ")}`);
+    if (d.length) out.push({ result: seq, code: "disputed", disputes: d });
   }
   return out;
 }
@@ -10546,8 +10580,8 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
     // is excused by a limitation.
     const result = NB.answerResult(a);
     const bar = sec.section.startsWith("question:") ? (o.bar?.(id) ?? { material: true, existence: false }) : null;
-    const cited = (a.support ?? []).map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => Boolean(e) && !replaced.has((e as LedgerEntry).seq) && ((e as LedgerEntry).answers ?? []).some((x) => sectionKey(x) === id));
-    const negativeLike = Boolean(result && (NB.NEGATIVE_RESULTS.has(result) || (result === "premise_not_supported" && !cited.some((e) => e.kind === "finding"))));
+    const cited = citedForQuestion(a, bySeq, replaced, id);
+    const negativeLike = negativeByResult(result, cited);
     const review = negativeLike ? negativeReview(a, entries, o.attestations, o.disputes) : null;
     const cov = cited.filter((c) => c.kind === "coverage" && !review?.stale.some((x) => x.seq === c.seq));
     if (bar && result && negativeLike) {

@@ -902,7 +902,7 @@ export function boardTable(hub: {
         ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}),
         ...(coverage ? { coverage: { ...coverage, note: "a hint: another seat works the same questions or objects now; overlap is not identity, so read what they have (leads, list_team) before you duplicate it" } } : {}),
         // The reuse hint (ADR 0017): other seats' same operation over the same objects, under way or committed.
-        ...similarView(r.job.id, r.similar ?? [], r.job.spec.independent === true),
+        ...similarView(r.job.id, r.similar ?? [], r.job.spec.independent === true, r.similar_recorded !== false),
         ...(library ? { library } : {}),
       };
     },

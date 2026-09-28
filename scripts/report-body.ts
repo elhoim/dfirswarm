@@ -71,6 +71,8 @@ import {
   verifyDisputeChain,
   verifyLedgerChain,
   attestEstablishes,
+  citedForQuestion,
+  negativeByResult,
   type ForgedToolManifest,
   type InputsManifest,
   type LedgerAttestation,
@@ -1550,7 +1552,7 @@ function chainBlock(c: ChainQ, run: Run, memo: Map<number, EntryState>, limits: 
     const reviews = run.attestations.filter((x) => attestationAct(x) === "attest" && x.target === target && !a.authors.includes(x.by));
     if (reviews.length) {
       const best = !reviews.some(attestEstablishes);
-      body.push({ k: "p", s: [{ b: "Reviewed" }, `: ${reviews.map((x) => `by ${x.by} at ${x.at}, ${x.strength === "best_candidate" ? "a best candidate" : "established"}${x.capped?.length ? ` (capped: ${x.capped.join("; ")})` : ""}`).join("; ")}.`, ...(best && !(answerResult(a) && NEGATIVE_RESULTS.has(answerResult(a)!)) ? [" ", { b: "A best candidate, not established: every review holds it so, and the run is examination-limited on it." } as Span] : [])] });
+      body.push({ k: "p", s: [{ b: "Reviewed" }, `: ${reviews.map((x) => `by ${x.by} at ${x.at}, ${x.strength === "best_candidate" ? "a best candidate" : "established"}${x.capped?.length ? ` (capped: ${x.capped.join("; ")})` : ""}`).join("; ")}.`, ...(best && !negativeByResult(answerResult(a), citedForQuestion(a, run.bySeq, run.replaced, c.key)) ? [" ", { b: "A best candidate, not established: every review holds it so, and the run is examination-limited on it." } as Span] : [])] });
     }
   }
   // The operator's acceptance of what is left.
