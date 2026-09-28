@@ -835,7 +835,7 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
           const events = qLines.slice(0, x.questions.lines).map((l) => JSON.parse(l) as Parameters<typeof questionsBinding>[0][number]);
           const again = questionsBinding(events, { lines: x.questions.lines, head: x.questions.head });
           if (JSON.stringify(again.by_origin) !== JSON.stringify(x.questions.by_origin) || JSON.stringify(again.analysts) !== JSON.stringify(x.questions.analysts)) bad.push("what it says of the question register (by_origin, analysts) is not what the events it binds say");
-          else parts.push(`binds the question register's first ${x.questions.lines} events (${Object.entries(x.questions.by_origin).map(([k, n]) => `${n} ${k}`).join(", ") || "no question opened"}${x.questions.analysts.length ? `; asked or acted on by ${x.questions.analysts.map((a) => `${a.person} (${a.identity})`).join(", ")}` : ""})`);
+          else if (x.questions.lines) parts.push(`binds the question register's first ${x.questions.lines} events (${Object.entries(x.questions.by_origin).map(([k, n]) => `${n} ${k}`).join(", ") || "no question opened"}${x.questions.analysts.length ? `; asked or acted on by ${x.questions.analysts.map((a) => `${a.person} (${a.identity})`).join(", ")}` : ""})`);
         }
       } else if (x.questions.lines && hashFieldAt(qText, x.questions.lines) !== x.questions.head) {
         // A package: its own check (package-tools.ts) recomputes the chain; here the stored head at the bound length.
