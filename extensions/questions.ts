@@ -48,6 +48,7 @@ import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises
 import { dirname, isAbsolute, join, normalize } from "node:path";
 import * as L from "./leads.ts";
 import * as NB from "./negative-bar.ts";
+import * as O from "./offers.ts";
 import * as P from "./protocol.ts";
 
 // --- the files --------------------------------------------------------------------------------
@@ -119,9 +120,14 @@ function envMs(name: string, dfltSec: number): number {
   return n * 1000;
 }
 
-/** How long the seat an asker suggested has a question to itself before the pool is offered it (SWARM_QUESTION_OFFER_SEC, 60). */
+/**
+ * How long a seat a question is offered to has it first, from when the
+ * offer reached it (SWARM_QUESTION_OFFER_SEC, or the offers' own
+ * SWARM_OFFER_SEC, 60): one offer mechanism for both registers
+ * (extensions/offers.ts).
+ */
 export function firstOfferMs(): number {
-  return envMs("SWARM_QUESTION_OFFER_SEC", 60);
+  return process.env.SWARM_QUESTION_OFFER_SEC?.trim() ? envMs("SWARM_QUESTION_OFFER_SEC", 60) : O.offerTtlMs();
 }
 
 export type QuestionEventKind =
@@ -139,6 +145,9 @@ export type QuestionEventKind =
   | "sign"
   | "deliver"
   | "offer"
+  | "offer_seen"
+  | "offer_decline"
+  | "offer_accept"
   | "triage"
   | "continue";
 
@@ -242,6 +251,9 @@ export type QuestionEvent = {
   lead?: string;
   cause?: string;
   entries?: number[];
+  /** offer_seen, offer_decline, offer_accept: the offer (its event's seq) it answers. */
+  offer?: number;
+  max_until?: string;
   prev: string;
   hash: string;
 };
@@ -296,7 +308,7 @@ export type Question = {
   disposition: Record<string, unknown> | null;
   clarifications: Clarification[];
   delivered: Map<number, { at: string; post: { thread: string; id: number } | null; hypotheses: number[] }>;
-  offers: Array<{ at: string; to: string; rev: number; first: boolean; until: string | null; why: string; seq: number }>;
+  offers: Array<{ at: string; to: string; rev: number; first: boolean; until: string | null; why: string; seq: number; seen_at: string | null; declined: { at: string; why: string } | null; accepted: { at: string } | null }>;
   /** Acts on this question that carry a signature: the act's seq, and the sign event's. */
   signed: Array<{ act_seq: number; sign_seq: number; person: string; fingerprint: string }>;
   last_seq: number;
@@ -684,8 +696,18 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
         break;
       case "offer":
         if (!q || !e.to) break;
-        q.offers.push({ at: e.at, to: e.to, rev: e.rev ?? q.rev, first: e.first === true, until: e.until ?? null, why: e.why ?? "", seq: e.seq });
+        q.offers.push({ at: e.at, to: e.to, rev: e.rev ?? q.rev, first: e.first === true, until: e.until ?? null, why: e.why ?? "", seq: e.seq, seen_at: null, declined: null, accepted: null });
         break;
+      case "offer_seen":
+      case "offer_decline":
+      case "offer_accept": {
+        const o = q?.offers.find((x) => x.seq === e.offer);
+        if (!o) break;
+        if (e.ev === "offer_seen" && !o.seen_at) o.seen_at = e.at;
+        if (e.ev === "offer_decline" && !o.declined) o.declined = { at: e.at, why: e.why ?? "" };
+        if (e.ev === "offer_accept" && !o.accepted) o.accepted = { at: e.at };
+        break;
+      }
       case "triage":
         triage.push({ seq: e.seq, at: e.at, q: e.q ?? null, lead: e.lead ?? null, cause: e.cause ?? "", entries: e.entries ?? [], resolved: null });
         break;
@@ -1861,7 +1883,8 @@ export async function deliverPending(sandboxRoot: string, o: { now?: number } = 
   for (const q of [...ctx.questions.state.questions.values()].filter(due)) {
     const already = q.offers.find((x) => x.rev === q.rev);
     let offer: { to: string; first: boolean; until?: string; why: string } | null = already ? { to: already.to, first: already.first, why: already.why, ...(already.until ? { until: already.until } : {}) } : null;
-    if (!offer && q.suggested_to && seats.includes(q.suggested_to)) offer = { to: q.suggested_to, first: true, until: new Date(now + firstOfferMs()).toISOString(), why: `suggested by ${q.origin.name ?? q.origin.person}` };
+    // The asker's suggested seat first, when it can take it (not done, dead or compacting); its first claim counts from when the offer reaches it.
+    if (!offer && q.suggested_to && seats.includes(q.suggested_to) && (await L.seatAvailable(sandboxRoot, q.suggested_to, undefined, now)).available) offer = { to: q.suggested_to, first: true, why: `suggested by ${q.origin.name ?? q.origin.person}` };
     if (!offer) {
       const pick = rankSeats(q, idle, ctx)[0];
       if (pick) offer = { to: pick.agent, first: false, why: pick.why.length ? `idle and suited: ${pick.why.join("; ")}` : "idle longest" };
@@ -1890,7 +1913,7 @@ export async function deliverPending(sandboxRoot: string, o: { now?: number } = 
       const cur = snap.state.questions.get(q.id);
       if (!cur || cur.rev !== q.rev || cur.delivered.has(q.rev)) return;
       const drafts: QuestionDraft[] = [{ by: "system", ev: "deliver", q: q.id, rev: q.rev, post: { thread: post!.thread, id: post!.id }, to, hypotheses: hyp.seqs }];
-      if (offer && !cur.offers.some((x) => x.rev === q.rev)) drafts.push({ by: "system", ev: "offer", q: q.id, rev: q.rev, to: offer.to, first: offer.first, ...(offer.until ? { until: offer.until } : {}), why: offer.why });
+      if (offer && !cur.offers.some((x) => x.rev === q.rev)) drafts.push({ by: "system", ev: "offer", q: q.id, rev: q.rev, to: offer.to, first: offer.first, ...(offer.until ? { until: offer.until } : {}), why: offer.why, max_until: new Date(now + O.offerMaxAgeMs()).toISOString() });
       await appendQuestionEvents(sandboxRoot, drafts, held);
       await writeQuestionsMd(sandboxRoot).catch(() => undefined);
     }).catch(() => undefined);
@@ -1899,15 +1922,39 @@ export async function deliverPending(sandboxRoot: string, o: { now?: number } = 
   return out;
 }
 
-/** A question that should be offered now: a person's, delivered, in scope, with no answer and no open lead, and no offer standing for this revision. */
+/**
+ * A question's offer as the offers module reads it (extensions/offers.ts):
+ * its first claim counted from when it reached its seat, never past its age
+ * bound; accepted, it holds the question for the seat for one more window
+ * from the acceptance, while the seat opens its lead.
+ */
+export function asOffer(o: Question["offers"][number]): O.Offer {
+  return {
+    seq: o.seq,
+    at: o.at,
+    to: o.to,
+    rev: o.rev,
+    reason: "question",
+    seen_at: o.accepted ? o.accepted.at : o.seen_at,
+    declined: o.declined,
+    accepted: null,
+    lapsed_at: null,
+    ...(o.until && !o.seen_at && !o.accepted ? { until: o.until } : {}),
+  };
+}
+
+/** The offer that holds a question for one seat now, if any. */
+export function reservingQuestionOffer(q: Question, now: number): O.Offer | null {
+  return O.reservingOffer(q.offers.filter((x) => x.rev === q.rev).map(asOffer), now, q.rev);
+}
+
+/** A question that should be offered now: a person's, delivered, in scope, with no answer and no open lead, and no offer holding it for this revision. */
 function offerDue(q: Question, ctx: ViewContext, now: number): boolean {
   if (!HUMAN_ORIGINS.has(q.origin.kind) || q.scope !== "in_scope" || q.withdrawn || q.after_done || !q.delivered.has(q.rev)) return false;
   if (standingAnswer(ctx.ledger, q.section)) return false;
   if ([...ctx.leads.leads.values()].some((l) => !l.closed && l.answers.includes(q.section))) return false;
-  const these = q.offers.filter((x) => x.rev === q.rev);
-  if (!these.length) return true;
-  // The suggested seat's minute is over, and no seat has been offered it from the pool yet.
-  return these.every((x) => x.first && x.until !== null && Date.parse(x.until) <= now);
+  // The seat it is offered to has it first (the asker's suggested seat, then the pool's), until that offer ends.
+  return !reservingQuestionOffer(q, now);
 }
 
 /**
@@ -1916,7 +1963,7 @@ function offerDue(q: Question, ctx: ViewContext, now: number): boolean {
  * the most suited idle seat, once per revision. Taken under the lock, so two
  * waits never both take it. Returns the question offered to this seat.
  */
-export async function electQuestionOffer(ctx: P.SwarmContext, now = Date.now(), seen?: ViewContext): Promise<Question | null> {
+export async function electQuestionOffer(ctx: P.SwarmContext, now = Date.now(), seen?: ViewContext): Promise<{ q: Question; offer: O.Offer } | null> {
   // A wait polls this every few seconds: with the snapshot it already holds, nothing is read when nothing is due.
   if (seen && ![...seen.questions.state.questions.values()].some((q) => offerDue(q, seen, now))) return null;
   const outer = await viewContext(ctx.sandboxRoot);
@@ -1932,13 +1979,65 @@ export async function electQuestionOffer(ctx: P.SwarmContext, now = Date.now(), 
     const taken = await L.withRegisters(ctx.sandboxRoot, async (held) => {
       const inner = await viewContext(ctx.sandboxRoot);
       const cur = inner.questions.state.questions.get(q.id);
-      if (!cur || !offerDue(cur, inner, now)) return false;
-      await appendQuestionEvents(ctx.sandboxRoot, [{ by: "system", ev: "offer", q: q.id, rev: cur.rev, to: ctx.agentId, first: false, why: pick.why.length ? `idle and suited: ${pick.why.join("; ")}` : "idle longest" }], held);
-      return true;
-    }).catch(() => false);
-    if (taken) return q;
+      if (!cur || !offerDue(cur, inner, now)) return null;
+      // Made and delivered at once: the seat's wait returns it now.
+      const made = await appendQuestionEvents(ctx.sandboxRoot, [{ by: "system", ev: "offer", q: q.id, rev: cur.rev, to: ctx.agentId, first: false, why: pick.why.length ? `idle and suited: ${pick.why.join("; ")}` : "idle longest", max_until: new Date(now + O.offerMaxAgeMs()).toISOString() }], held);
+      const seq = made.at(-1)!.seq;
+      await appendQuestionEvents(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "offer_seen", q: q.id, offer: seq }], held);
+      return seq;
+    }).catch(() => null);
+    if (taken !== null) {
+      const cur = (await questionsSnapshot(ctx.sandboxRoot)).state.questions.get(q.id)!;
+      return { q: cur, offer: asOffer(cur.offers.find((x) => x.seq === taken)!) };
+    }
   }
   return null;
+}
+
+/** Record that question offers reached their seat: the first claim counts from here. */
+export async function markQuestionOffersSeen(sandboxRoot: string, agent: string, list: Array<{ q: string; offer: number }>): Promise<void> {
+  if (!list.length) return;
+  await L.withRegisters(sandboxRoot, async (held) => {
+    const snap = await questionsSnapshot(sandboxRoot);
+    const drafts: QuestionDraft[] = [];
+    for (const x of list) {
+      const o = snap.state.questions.get(x.q)?.offers.find((y) => y.seq === x.offer);
+      if (o && o.to === agent && !o.seen_at) drafts.push({ by: agent, ev: "offer_seen", q: x.q, offer: x.offer });
+    }
+    if (drafts.length) await appendQuestionEvents(sandboxRoot, drafts, held);
+  });
+}
+
+/**
+ * Answer a question's offer (A3, one mechanism with the leads'): accept
+ * holds it for the seat for one more window while it opens its lead
+ * (lead_open with answers naming it, take: true, the proposition, its
+ * negation and the routes); decline, with why, passes it to the next seat
+ * at once.
+ */
+export async function answerQuestionOffer(ctx: P.SwarmContext, raw: unknown, input: { action?: string; why?: string }, now = Date.now()): Promise<{ ok: true; q: string; action: string; until?: string } | Fail> {
+  const ref = qRef(raw);
+  if (!ref.ok) return ref;
+  const action = String(input.action ?? "").trim();
+  if (action !== "accept" && action !== "decline") return { ok: false, reason: "action is accept or decline" };
+  const why = bounded("why", input.why, QUESTION_WHY_MAX, action === "decline");
+  if (!why.ok) return { ok: false, reason: `${why.reason}: why you do not take it (the next seat reads it)` };
+  try {
+    return await L.withRegisters(ctx.sandboxRoot, async (held) => {
+      const snap = await questionsSnapshot(ctx.sandboxRoot);
+      const q = snap.state.questions.get(ref.id);
+      if (!q) return { ok: false as const, reason: `${ref.id} is not in the question register` };
+      const o = reservingQuestionOffer(q, now);
+      const mine = o ? q.offers.find((x) => x.seq === o.seq) : undefined;
+      if (!o || !mine || o.to !== ctx.agentId) return { ok: false as const, reason: `no offer of ${q.id} stands for you${o ? ` (it is offered to ${o.to})` : ""}` };
+      if (action === "accept" && mine.accepted) return { ok: true as const, q: q.id, action, until: new Date(O.offerStatus(o, now, q.rev).until).toISOString() };
+      await appendQuestionEvents(ctx.sandboxRoot, [{ by: ctx.agentId, ev: action === "accept" ? "offer_accept" : "offer_decline", q: q.id, offer: o.seq, ...(why.value ? { why: why.value } : {}) }], held);
+      await writeQuestionsMd(ctx.sandboxRoot).catch(() => undefined);
+      return { ok: true as const, q: q.id, action, ...(action === "accept" ? { until: new Date(now + O.offerTtlMs()).toISOString() } : {}) };
+    });
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
 }
 
 // --- dispositions ------------------------------------------------------------------------------
@@ -2102,7 +2201,7 @@ export async function markTold(sandboxRoot: string, agent: string, snap: Questio
   await rename(tmp, path);
 }
 
-export type QuestionNotice = { kind: "offer" | "clarified" | "amended" | "withdrawn" | "urgent" | "admitted" | "excluded" | "triage"; q: string; text: string; wakes: boolean };
+export type QuestionNotice = { kind: "offer" | "clarified" | "amended" | "withdrawn" | "urgent" | "admitted" | "excluded" | "triage"; q: string; text: string; wakes: boolean; offer?: number };
 
 /** The leads an agent holds, open, and the questions they serve. */
 function heldSections(agent: string, ctx: ViewContext): Set<string> {
@@ -2129,15 +2228,20 @@ export function questionNotices(agent: string, told: Told, ctx: ViewContext): Qu
     const q = e.q ? qs.questions.get(e.q) : undefined;
     if (!q) continue;
     switch (e.ev) {
-      case "offer":
+      case "offer": {
         if (e.to !== agent || q.withdrawn || standingAnswer(ctx.ledger, q.section) || [...ctx.leads.leads.values()].some((l) => !l.closed && l.answers.includes(q.section))) break;
+        // Only while it still holds the question for this seat.
+        const held = q.offers.find((x) => x.seq === e.seq);
+        if (!held || held.rev !== q.rev || !O.reserving(asOffer(held), Date.now(), q.rev)) break;
         out.push({
           kind: "offer",
           q: q.id,
+          offer: e.seq,
           wakes: true,
-          text: `${q.id} is offered to you${e.first ? ` first, for ${Math.round(firstOfferMs() / 1000)} s (${e.why})` : ` (${e.why})`}: "${q.text}" (${originWords(q.origin)}). Take it with lead_open(answers: ["${q.id}"], take: true, proposition, negation), or say on the board why not; nobody owns it.`,
+          text: `${q.id} is offered to you${e.first ? ` first, for ${Math.round(firstOfferMs() / 1000)} s from now (${e.why})` : ` for ${Math.round(firstOfferMs() / 1000)} s from now (${e.why})`}: "${q.text}" (${originWords(q.origin)}). Take it with lead_open(answers: ["${q.id}"], take: true, proposition, negation), or offer decline ${q.id} with why; nobody owns it.`,
         });
         break;
+      }
       case "clarify_answer": {
         const asker = String((e.decided as { asker?: string } | undefined)?.asker ?? "");
         if (asker !== agent) break;

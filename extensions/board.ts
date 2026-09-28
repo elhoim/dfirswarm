@@ -61,7 +61,7 @@ function refused(err: unknown): boolean {
 type Pending = { fn: string; socket: Socket; answered: () => void; resolve: (value: unknown) => void; reject: (err: Error) => void };
 
 /** Calls that change the board, sent once more with the same request id when a link drops. */
-const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "questionOpen", "questionAsk"]);
+const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "questionOpen", "questionAsk"]);
 
 /** Timings a test shortens; the defaults are the run's. */
 export type HubClientTimings = { partTimeoutMs?: number; writeStallMs?: number };
@@ -356,6 +356,8 @@ export const REMOTE_FUNCTIONS = [
   "jobSubmit",
   "leadClaim",
   "leadClose",
+  "leadConfirm",
+  "leadHandoff",
   "leadInterpret",
   "leadLink",
   "leadOpen",
@@ -372,6 +374,7 @@ export const REMOTE_FUNCTIONS = [
   "markDone",
   "runFinishLine",
   "nameOf",
+  "offerAnswer",
   "postMessage",
   "publishFile",
   "questionAsk",
@@ -411,6 +414,10 @@ export const leadInterpret = remote("leadInterpret", (ctx: P.SwarmContext, entry
 /** An agent reopens a closed lead (B4), and another seat reviews a limiting route (B3). */
 export const leadReopen = remote("leadReopen", L.agentReopenLead);
 export const routeReview = remote("routeReview", L.routeReview);
+/** A hand-off, a closure confirmed, and the answer to an offer of a lead or a question (A2, A3). */
+export const leadHandoff = remote("leadHandoff", L.handoffLead);
+export const leadConfirm = remote("leadConfirm", (ctx: P.SwarmContext, id: unknown, input: { expected_revision?: unknown; ref?: string; why?: string }) => L.confirmLead(ctx, id, input ?? {}));
+export const offerAnswer = remote("offerAnswer", L.answerOffer);
 /**
  * The question register (questions.ts): an agent opens a question, reads the
  * register, and asks what is unclear. Who asks is the channel's seat; the

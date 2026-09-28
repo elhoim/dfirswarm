@@ -338,7 +338,8 @@ test("withdrawal: its leads close withdrawn, a lead holding a material finding g
   const { S, a1, a2 } = await run();
   const q = ok(await Q.act(S, person("analyst", "ana"), "open", { text: "Did the user print the archive?", why: "paper", objective: "O-1" })).q!;
   const l1 = ok(await L.openLead(a1, { title: "Read the print spool", why: "printing", answers: [q], take: true, proposition: "the archive was printed", negation: "nothing was printed from it", routes: [{ source: "input:disk.E01", method: "read what the question names, looking for what would disconfirm it" }] })).lead;
-  const l2 = ok(await L.openLead(a2, { title: "Read the printer's own log", why: "printing", answers: [q], take: true })).lead;
+  // A second route on the same question, said so (A1: otherwise it is opened unheld, naming l1's holder).
+  const l2 = ok(await L.openLead(a2, { title: "Read the printer's own log", why: "printing", answers: [q], take: true, overlap: "second_route", overlap_why: "the printer's own log, not the spool" })).lead;
   // l2 found something: a job interpreted as a finding.
   const dir = join(S, "store", "jobs", "j000001");
   await mkdir(dir, { recursive: true });
@@ -560,7 +561,7 @@ test("end to end: a late analyst question is offered to its suggested seat for a
   const later = Date.now() + 61_000;
   assert.equal(await Q.electQuestionOffer(a2, later), null, "a2 has waited longer, but a1 is more suited");
   const offered = await Q.electQuestionOffer(a1, later);
-  assert.equal(offered?.id, q);
+  assert.equal(offered?.q.id, q);
   assert.equal(await Q.electQuestionOffer(a1, later), null, "one pool offer per revision");
   // a1 takes it as work: the first lead under it states the hypothesis.
   const lead = ok(await L.openLead(a1, { title: "Search the mail store for the archive", why: q, answers: [q], take: true, proposition: "the archive was attached to a mail", negation: "no mail carried the archive", routes: [{ source: "input:disk.E01", method: "read what the question names, looking for what would disconfirm it" }] })).lead;

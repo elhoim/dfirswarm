@@ -178,6 +178,9 @@ import {
   leadInterpret,
   leadReopen,
   routeReview,
+  leadHandoff,
+  leadConfirm,
+  offerAnswer,
   questionOpen,
   questionAsk,
   questionsView,
@@ -250,6 +253,9 @@ export const SWARM_TOOLS = new Set([
   "leads",
   "lead_reopen",
   "route_review",
+  "lead_handoff",
+  "lead_confirm",
+  "offer",
   "question_open",
   "questions",
   "question_ask",
@@ -2998,11 +3004,11 @@ export default function (pi: ExtensionAPI) {
     name: "name",
     label: "Name",
     description:
-      "Say what to call you and what you are taking on. Nobody assigns work here: you read the goal, you see on the board what your peers have taken, you decide, and you say it with this. The name goes on every post you write and beside your id everywhere the run is read. Call it again whenever what you are doing changes. Two agents cannot answer to the same name.",
+      "Say what to call you and what you are taking on. Nobody assigns work here: you read the goal, you see on the board and in the lead register what your peers have taken, you decide, and you say it with this. The name goes on every post you write and beside your id everywhere the run is read, and it is stable once given: what you work on shows from the lead you hold (your label), and a later call updates only what you say you are doing. Two agents cannot answer to the same name. When the run staggers first choices, your first name or lead waits for your turn and comes back with what the seats before you took.",
     promptSnippet: "Name yourself for the work you are taking on",
     promptGuidelines: [
-      "Name yourself in your first turn, after reading the goal and the board, and say what you are taking on.",
-      "Rename yourself when your work changes; the old name is replaced and the board is told.",
+      "Name yourself in your first turn, after reading the goal, the board and the leads, and say what you are taking on.",
+      "Your name stays; when your work changes, say so in doing, and hold the lead for it: the label peers see follows the lead you hold.",
     ],
     parameters: Type.Object({
       name: Type.String({ description: "What to call you: a few words for the work you are taking on" }),
@@ -3022,7 +3028,9 @@ export default function (pi: ExtensionAPI) {
         body:
           result.previous && result.previous !== result.name
             ? `${agentId} is now "${result.name}" (was "${result.previous}")${params.doing ? `: ${params.doing}` : ""}`
-            : result.previous
+            : result.asked
+              ? `${agentId} ("${result.name}")${params.doing ? ` is now on: ${params.doing}` : " updated what it is doing"}`
+              : result.previous
               ? `${agentId} ("${result.name}")${params.doing ? ` is now on: ${params.doing}` : " updated what it is doing"}`
               : `${agentId} is "${result.name}"${params.doing ? `: ${params.doing}` : ""}`,
       }).catch(() => undefined);
@@ -3037,6 +3045,8 @@ export default function (pi: ExtensionAPI) {
       return okResult({
         ok: true,
         name: result.name,
+        ...(result.asked ? { kept: `your name stays "${result.name}" (asked: "${result.asked}"): what you work on shows from the lead you hold` } : {}),
+        ...(result.admission ? { admission: result.admission } : {}),
         ...(result.previous ? { previous: result.previous } : {}),
         peers: result.peers,
         ...(result.overlaps?.length
@@ -3147,7 +3157,7 @@ export default function (pi: ExtensionAPI) {
             negation: Type.Optional(Type.String()),
             routes: Type.Optional(Type.Array(Type.Object({ source: Type.String(), method: Type.String() }))),
           }),
-          { description: "The leads this entry opens: work it shows has to be followed, each {title, why, needs?, answers?, material?, take?, proposition?, negation?, routes?} as lead_open takes it (answers takes Q-19 as well as question:3); each lead's origin is this entry. take: true keeps the follow-up yours." },
+          { description: "The leads this entry opens: work it shows has to be followed, each {title, why, needs?, answers?, material?, take?, proposition?, negation?, routes?} as lead_open takes it (answers takes Q-19 as well as question:3); each lead's origin is this entry. Each is opened unheld, offered to an idle seat, unless take: true, which is for a follow-up you start in your next turn." },
         ),
       ),
       interprets: Type.Optional(
@@ -3310,11 +3320,11 @@ export default function (pi: ExtensionAPI) {
     name: "lead_open",
     label: "Open a lead",
     description:
-      "Put a piece of material investigative work in the swarm's lead register: something found that has to be followed (a container to open, a key to find, an output to read to its end, an artefact nobody has examined). title says what, why says why it matters and what it would settle. needs names what it cannot go on without: a lead with the outcome it must reach (L-3 is L-3 resolved; L-3:negative) or a standing ledger entry (E-12); never a job, whose exit status settles nothing. answers names the goal's questions it serves. take: true holds it for you in the same step, the natural next step of your own work; left out, it is open to everyone and the seat idle longest is woken for it. material: false for work the finish line may leave open (a nice-to-have). Returns its id (L-<n>).",
+      "Put a piece of material investigative work in the swarm's lead register: something found that has to be followed (a container to open, a key to find, an output to read to its end, an artefact nobody has examined). title says what, why says why it matters and what it would settle. needs names what it waits for: another lead's outcome (L-3 is L-3 resolved; L-3:negative), never an entry that already stands (that is where it comes from: say it in why or origin) and never a job, whose exit status settles nothing. answers names the questions it serves. take: true holds it for you in the same step, only when you start it in your next turn; left out, it is open to everyone and offered to the seat idle longest, which has first claim for a minute. A take whose questions another seat's held lead covers is opened unheld, naming the holder, unless you say it is a second route or a verification (overlap, overlap_why). consumer: L-<n> opens this as a prerequisite of that lead and links it there in one step. The product contract (product, acceptance, inputs, next_action) says what another seat must deliver and what it starts from. material: false for work the finish line may leave open. Returns its id (L-<n>).",
     promptSnippet: "Open a lead: work somebody has to follow",
     promptGuidelines: [
-      "Open or claim a lead before you start work a peer could also be doing; keep the follow-ups of your own finding with take: true.",
-      "Say in needs what a lead cannot go on without (a lead's outcome or an entry), so its holder is woken when it comes.",
+      "Open or claim a lead before you start work a peer could also be doing. Open a follow-up unheld unless you will start it in your next turn: a lead you hold and do not work is a lead nobody works.",
+      "Say in needs what a lead waits for (another lead's outcome), so its holder is woken when it comes; open the prerequisite for a peer with consumer, and say its product and acceptance.",
     ],
     parameters: Type.Object({
       title: Type.String({ description: "What has to be done, in one line" }),
@@ -3332,6 +3342,15 @@ export default function (pi: ExtensionAPI) {
             "The route plan, before the search: each source you will examine (input:<path>, member:<gen>#<n>, job:<id>/<path>, a path of the run, or words when it is not an object yet) and how. The first lead under a question gives it (under a person's question it is required, with a route that could disconfirm it); a negative on a material question closes against it, and a source in it nothing examined is named as not examined.",
         }),
       ),
+      overlap: Type.Optional(Type.Union([Type.Literal("second_route"), Type.Literal("verification")], { description: "With take: its questions are covered by another seat's held lead, and this is a second route or an independent verification on purpose" })),
+      overlap_why: Type.Optional(Type.String({ description: "With overlap: how your route differs, or what you verify independently" })),
+      objects: Type.Optional(Type.Array(Type.String(), { description: "The objects the work is over (input:<path>, job:<id>/<path>, …): a coverage hint to peers, never a claim on them" })),
+      product: Type.Optional(Type.String({ description: "What it is to deliver: the product a consumer needs" })),
+      acceptance: Type.Optional(Type.String({ description: "What makes the product usable: how its consumer will know it is" })),
+      inputs: Type.Optional(Type.Array(Type.String(), { description: "The refs it starts from (input:<path>, job:<id>/<path>, E-<seq>), each checked" })),
+      next_action: Type.Optional(Type.String({ description: "The first thing to do on it" })),
+      consumer: Type.Optional(Type.String({ description: "L-<n>: open this as a prerequisite of that lead (yours, or unheld) and link it there as a need in the same step" })),
+      consumer_needs: Type.Optional(Type.String({ description: "With consumer: the outcome it needs of this lead (resolved by default, or negative, deferred, infeasible)" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
@@ -3344,7 +3363,7 @@ export default function (pi: ExtensionAPI) {
     name: "lead_claim",
     label: "Claim a lead",
     description:
-      "Take a lead: atomically, with a new generation, so two agents never hold one. A lead a peer holds stays theirs until they release it or show as stale (silent past the stale limit, with no job running and no compaction under way): the first claim of a stale lead marks it and tells the holder, and a claim after the grace period takes it over. A turn that ended in an error frees nothing. A directive (the operator's lead, with a product) under a person's question nobody has framed yet is claimed with proposition and negation: the first agent work on a person's question tests it.",
+      "Take a lead: atomically, with a new generation, so two agents never hold one. A lead offered to a seat (woken for it, handed over, parked, reopened for its previous holder) is that seat's to claim first while the offer holds. A lead a peer holds stays theirs until they release it or show as stale (silent past the stale limit, with no job running and no compaction under way): the first claim of a stale lead marks it and tells the holder, and a claim after the grace period takes it over; a parked lead offered to you is taken over at once. Claiming a lead you hold keeps it when it shows as parked. A lead whose questions another seat's held lead covers is claimed only with overlap and overlap_why. A directive (the operator's lead, with a product) under a person's question nobody has framed yet is claimed with proposition and negation: the first agent work on a person's question tests it.",
     promptSnippet: "Take a lead from the register",
     promptGuidelines: ["When your slice ends, take the ready lead the register ranks first (leads) rather than inventing work."],
     parameters: Type.Object({
@@ -3352,10 +3371,12 @@ export default function (pi: ExtensionAPI) {
       proposition: Type.Optional(Type.String({ description: "A directive (the operator's lead) under a person's question no lead has framed yet: what your work on it tests. Required on its first claim, with negation." })),
       negation: Type.Optional(Type.String({ description: "With proposition: what would hold if it is false." })),
       routes: Type.Optional(Type.Array(Type.Object({ source: Type.String(), method: Type.String() }), { description: "With the framing, when the question has no route plan yet: the sources you will examine and how, one able to disconfirm the proposition." })),
+      overlap: Type.Optional(Type.Union([Type.Literal("second_route"), Type.Literal("verification")], { description: "Its questions are covered by another seat's held lead, and you take it as a second route or an independent verification on purpose" })),
+      overlap_why: Type.Optional(Type.String({ description: "With overlap: how your route differs, or what you verify independently" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const { id, ...frame } = params as { id: string; proposition?: string; negation?: string; routes?: unknown };
+      const { id, ...frame } = params as { id: string; proposition?: string; negation?: string; routes?: unknown; overlap?: string; overlap_why?: string };
       const r = await leadClaim(ctxFrom(toolCtx.cwd, agentId), id, frame);
       return leadAnswer(toolCtx.cwd, "lead_claim", params as Record<string, unknown>, started, r as never);
     },
@@ -3394,10 +3415,11 @@ export default function (pi: ExtensionAPI) {
       ref: Type.String({ description: "E-<seq>, L-<n>, or for needs_operator what the operator must do" }),
       why: Type.Optional(Type.String({ description: "Anything a reader should know about how it ended" })),
       generation: Type.Optional(Type.Integer({ description: "The generation you hold it at" })),
+      result_refs: Type.Optional(Type.Array(Type.String(), { description: "The product it delivered, for its consumers: E-<seq> that stand, job:<id>/<path>, input:<path>" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const r = await leadClose(ctxFrom(toolCtx.cwd, agentId), params.id, { disposition: params.disposition, ref: params.ref, ...(params.why ? { why: params.why } : {}), ...(params.generation !== undefined ? { generation: params.generation } : {}) });
+      const r = await leadClose(ctxFrom(toolCtx.cwd, agentId), params.id, { disposition: params.disposition, ref: params.ref, ...(params.why ? { why: params.why } : {}), ...(params.generation !== undefined ? { generation: params.generation } : {}), ...(params.result_refs?.length ? { result_refs: params.result_refs } : {}) });
       if (r.ok && params.disposition === "needs_operator") {
         // The operator reads the board too: the request is said there once, with the command that answers it.
         const answer = (r as { operator_request?: string }).operator_request;
@@ -3410,17 +3432,18 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "lead_link",
     label: "Revise a lead's needs",
-    description: "Revise what a lead waits for: add a need (L-<n>, L-<n>:<disposition>, E-<seq>) or remove one that will not come, so another route stays open; or add to its route plan (routes [{source, method}]). A loop of needs is refused. The holder revises its own lead; an unheld one, anyone.",
+    description: "Revise what a lead waits for: add a need (L-<n>, L-<n>:<disposition>) or remove one that will not come, with why (it is recorded as withdrawn, never as met), so another route stays open; or add to its route plan (routes [{source, method}]). A loop of needs is refused, and so is an entry that already stands. The holder revises its own lead; an unheld one, anyone.",
     promptSnippet: "Add or drop a lead's need, or plan a route",
     parameters: Type.Object({
       id: Type.String({ description: "L-<n>" }),
       add: Type.Optional(Type.Array(Type.String(), { description: "Needs to add" })),
       remove: Type.Optional(Type.Array(Type.String(), { description: "Needs to drop" })),
       routes: Type.Optional(Type.Array(Type.Object({ source: Type.String(), method: Type.String() }), { description: "Routes to add to the lead's plan: a source to examine and how" })),
+      why: Type.Optional(Type.String({ description: "Required with remove: why the need will not come, and what the lead goes on without (a dropped need is withdrawn, never met)" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const r = await leadLink(ctxFrom(toolCtx.cwd, agentId), params.id, { ...(params.add ? { add: params.add } : {}), ...(params.remove ? { remove: params.remove } : {}), ...(params.routes ? { routes: params.routes } : {}) });
+      const r = await leadLink(ctxFrom(toolCtx.cwd, agentId), params.id, { ...(params.add ? { add: params.add } : {}), ...(params.remove ? { remove: params.remove } : {}), ...(params.routes ? { routes: params.routes } : {}), ...(params.why ? { why: params.why } : {}) });
       return leadAnswer(toolCtx.cwd, "lead_link", params as Record<string, unknown>, started, r as never);
     },
   });
@@ -3441,6 +3464,64 @@ export default function (pi: ExtensionAPI) {
       const started = Date.now();
       const r = await leadReopen(ctxFrom(toolCtx.cwd, agentId), params.id, { expected_revision: params.expected_revision, why: params.why, ...(params.take !== undefined ? { take: params.take } : {}) });
       return leadAnswer(toolCtx.cwd, "lead_reopen", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_handoff",
+    label: "Hand a lead over",
+    description:
+      "Hand a lead you hold to another seat: say what you did and what the next seat takes up (why); to names the seat (it must be able to take it: not done, dead or compacting), or leave it out and the seat idle longest is offered it. The seat offered it has first claim for a minute from when the offer reaches it; with nobody to offer it to, it is open to everyone. Recorded as a hand-off.",
+    promptSnippet: "Hand a lead to another seat",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>, held by you" }),
+      why: Type.String({ description: "What you did on it, and what the next seat takes up" }),
+      to: Type.Optional(Type.String({ description: "The seat to offer it to (its agent id); left out, the seat idle longest" })),
+      generation: Type.Optional(Type.Integer({ description: "The generation you hold it at" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadHandoff(ctxFrom(toolCtx.cwd, agentId), params.id, { why: params.why, ...(params.to ? { to: params.to } : {}), ...(params.generation !== undefined ? { generation: params.generation } : {}) });
+      return leadAnswer(toolCtx.cwd, "lead_handoff", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_confirm",
+    label: "Confirm a closure",
+    description:
+      "Confirm that a lead you closed still holds after the entry you closed it on was superseded: ref the entry that stands now (the correction, by default), with the lead's revision you read and why the closure still holds on it. You are offered this when it happens; unconfirmed within the offer, the lead reopens by itself. Nothing is re-pointed for you: a correction can reverse what the closure rested on. If it no longer holds, lead_reopen it.",
+    promptSnippet: "Confirm a closure on the corrected entry",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>" }),
+      expected_revision: Type.Integer({ description: "The lead's revision as you read it (rev)" }),
+      ref: Type.Optional(Type.String({ description: "The standing entry the closure rests on now (E-<seq>); the correction when left out" })),
+      why: Type.String({ description: "Why the closure still holds on it" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadConfirm(ctxFrom(toolCtx.cwd, agentId), params.id, { expected_revision: params.expected_revision, why: params.why, ...(params.ref ? { ref: params.ref } : {}) });
+      return leadAnswer(toolCtx.cwd, "lead_confirm", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "offer",
+    label: "Answer an offer",
+    description:
+      "Answer an offer made to you: a lead (L-<n>: woken for it, handed over, parked in a peer's hands, reopened for you) or a person's question (Q-<n>). accept takes a lead (the claim it reserves), or holds a question for you for another minute while you open its lead; decline, with why, passes it to the next seat at once. An offer you do not answer lapses a minute after it reached you.",
+    promptSnippet: "Accept or decline an offer",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n> or Q-<n>" }),
+      action: Type.Union([Type.Literal("accept"), Type.Literal("decline")]),
+      why: Type.Optional(Type.String({ description: "Required with decline: why you do not take it" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = (await offerAnswer(ctxFrom(toolCtx.cwd, agentId), params.id, { action: params.action, ...(params.why ? { why: params.why } : {}) })) as { ok: boolean; reason?: string } & Record<string, unknown>;
+      await logEvent(toolCtx.cwd, agentId, "offer", params as Record<string, unknown>, r.ok ? { ok: true, id: params.id, action: params.action } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+      if (!r.ok) return { content: [{ type: "text" as const, text: `offer refused: ${r.reason}` }], details: r, isError: true };
+      return okResult(r);
     },
   });
 

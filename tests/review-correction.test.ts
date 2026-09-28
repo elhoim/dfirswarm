@@ -151,7 +151,7 @@ test("B4: an agent reopens a closed lead with the revision it read and why; the 
   const c = await run();
   await planned(c.a0, "1");
   const f = ok(await rec(c.a0, { kind: "finding", ...F, value: "Bob", source: "the log", evidence: "line 1", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
-  const lid = okq(await L.openLead(c.a1, { title: "Who logged on", why: "question 1", answers: ["1"], take: true, routes: [{ source: "input:logs/a.log", method: "read it" }] })).lead.id;
+  const lid = okq(await L.openLead(c.a1, { title: "Who logged on", why: "question 1", answers: ["1"], take: true, routes: [{ source: "input:logs/a.log", method: "read it" }], overlap: "verification", overlap_why: "the log, independently of a0's disk search" })).lead.id;
   const closed = okq(await L.closeLead(c.a1, lid, { disposition: "resolved", ref: `E-${f.seq}` })).lead;
   refused(await L.agentReopenLead(c.a2, lid, { why: "the log is another host's" }), /expected_revision is the lead's revision/);
   refused(await L.agentReopenLead(c.a2, lid, { expected_revision: closed.rev - 1, why: "x" }), new RegExp(`${lid} is at revision ${closed.rev}, not ${closed.rev - 1}`));
@@ -160,7 +160,7 @@ test("B4: an agent reopens a closed lead with the revision it read and why; the 
   // (The dispute reopened it already; closed again on what stands, then reopened by an agent.)
   await L.reopenOnLedger(c.S);
   const f2 = ok(await rec(c.a0, { kind: "finding", ...F, value: "Bob at the console", source: "the log", evidence: "line 1 host field", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
-  okq(await L.claimLead(c.a1, lid));
+  okq(await L.claimLead(c.a1, lid, { overlap: "verification", overlap_why: "the log, independently of a0's disk search" }));
   const again = okq(await L.closeLead(c.a1, lid, { disposition: "resolved", ref: `E-${f2.seq}` })).lead;
   const r = await L.agentReopenLead(c.a2, lid, { expected_revision: again.rev, why: "the console login is a service account", take: true });
   const opened = okq(r);

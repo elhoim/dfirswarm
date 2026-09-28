@@ -337,6 +337,12 @@ export type BudgetRecord = {
   /** Until solved: minutes without progress before the watchdog posts a regroup (default 15). */
   stall_minutes?: number;
   /**
+   * How the seats coordinate (docs/adr/0015), from the kickoff: the seconds
+   * each seat's first choice waits for the seat before it, and the bound
+   * over all of them (leads.ts admitFirstChoice). Absent: no stagger.
+   */
+  coordination?: { first_choice_stagger_sec?: number; first_choice_bound_sec?: number };
+  /**
    * What reaching a cap does (the stop policy, docs/adr/0013): cap-pause
    * (the default) pauses the run for the operator to extend or stop it,
    * cap-stop stops it (an unattended run), operator is --until-solved (no
@@ -1307,6 +1313,8 @@ export function normalizeBudget(raw: Partial<BudgetRecord> | null | undefined): 
     ...(raw?.stop_reason ? { stop_reason: raw.stop_reason } : {}),
     ...(raw?.until_solved === true ? { until_solved: true } : {}),
     ...(Number(raw?.stall_minutes) > 0 ? { stall_minutes: Number(raw?.stall_minutes) } : {}),
+    // How the seats coordinate: kept by every fold, as the stop policy is.
+    ...(raw?.coordination && typeof raw.coordination === "object" ? { coordination: { ...(Number(raw.coordination.first_choice_stagger_sec) > 0 ? { first_choice_stagger_sec: Number(raw.coordination.first_choice_stagger_sec) } : {}), ...(Number(raw.coordination.first_choice_bound_sec) > 0 ? { first_choice_bound_sec: Number(raw.coordination.first_choice_bound_sec) } : {}) } } : {}),
     // The stop policy and its pauses: kept by every fold, or a pause would lift itself on the next model call's usage.
     ...((STOP_POLICIES as readonly string[]).includes(String(raw?.stop_policy)) ? { stop_policy: raw!.stop_policy as StopPolicy } : {}),
     ...(raw?.paused && typeof raw.paused === "object" && typeof raw.paused.at === "string" ? { paused: raw.paused } : {}),
@@ -1805,6 +1813,8 @@ export type NameRecord = {
   /** What it said it was taking on when it chose the name. */
   doing?: string;
   at: string;
+  /** When it first named itself: its first choice (A1), kept whatever it says since. */
+  first_at?: string;
 };
 
 export const NAMES_REL = "names.json";
@@ -1839,13 +1849,20 @@ export async function nameOf(sandboxRoot: string, agentId: string): Promise<stri
 
 /**
  * Take a name. Two agents may not answer to the same one, because the board
- * has to stay readable, and that is the only rule: an agent may rename itself
- * whenever what it is doing changes.
+ * has to stay readable. A seat's name is stable once given (A1): on ctf12
+ * Belka's seats renamed themselves 19 times in the first three minutes, and
+ * a rename was read as a claim on work. What a seat works on shows from the
+ * lead it holds (its label, leads.ts seatLabel); a later call updates what
+ * it says it is doing, and keeps the name.
  */
 export type NameResult =
   | {
       ok: true;
       name: string;
+      /** The name asked for, when the stable one was kept instead. */
+      asked?: string;
+      /** A first choice made in turn (leads.ts admitFirstChoice): the order, the wait and the register's coverage then. */
+      admission?: unknown;
       previous?: string;
       /** Everyone else who has said what they are doing. */
       peers: Array<{ id: string; name: string; doing?: string }>;
@@ -1860,10 +1877,15 @@ export async function claimName(
   rawName: string,
   doing?: string,
 ): Promise<NameResult> {
-  const name = tidyName(rawName);
-  if (!name) return { ok: false, error: "A name is one line of text; this one was empty." };
+  const asked = tidyName(rawName);
+  if (!asked) return { ok: false, error: "A name is one line of text; this one was empty." };
+  // A seat's first choice waits for its turn when the kickoff staggers them (leads.ts).
+  const admission = await import("./leads.ts").then((L) => L.admitFirstChoice(sandboxRoot, agentId)).catch(() => null);
   return withTableLock(sandboxRoot, async () => {
     const names = await readNames(sandboxRoot);
+    const had = names.find((n) => n.id === agentId);
+    // Stable once given: a later call keeps the name and updates what the seat is doing.
+    const name = had?.name ?? asked;
     // "dump5 hunter" and "dump5-hunter" are one name to a reader, and two
     // agents took exactly that pair on the memory case. Compare what a reader
     // sees: letters and digits, nothing else.
@@ -1872,12 +1894,13 @@ export async function claimName(
     if (clash) {
       return { ok: false as const, error: `${clash.id} already answers to "${name}". Pick another.`, taken_by: clash.id };
     }
-    const previous = names.find((n) => n.id === agentId)?.name;
+    const previous = had?.name;
     const next = names.filter((n) => n.id !== agentId);
     // Whole: what an agent says it is doing is part of the record, and a
     // sentence cut at 280 characters read as one the agent never wrote.
     const doingText = doing ? String(doing).trim() : "";
-    const mine = { id: agentId, name, ...(doingText ? { doing: doingText } : {}), at: new Date().toISOString() };
+    const at = new Date().toISOString();
+    const mine = { id: agentId, name, ...(doingText ? { doing: doingText } : had?.doing ? { doing: had.doing } : {}), at, first_at: had?.first_at ?? had?.at ?? at };
     next.push(mine);
     next.sort((a, b) => a.id.localeCompare(b.id));
     await writeFile(join(sandboxRoot, NAMES_REL), `${JSON.stringify({ names: next }, null, 2)}\n`, "utf8");
@@ -1891,6 +1914,8 @@ export async function claimName(
     return {
       ok: true as const,
       name,
+      ...(had && key(asked) !== key(had.name) ? { asked } : {}),
+      ...(admission ? { admission } : {}),
       ...(previous ? { previous } : {}),
       peers: peers.map((n) => ({ id: n.id, name: n.name, ...(n.doing ? { doing: n.doing } : {}) })),
       ...(close.length
@@ -2370,6 +2395,10 @@ export type PeerView = {
   open_jobs: PeerJob[];
   /** How many ledger entries it recorded, and its last few: the whole of each is `ledger` by seq. */
   ledger: { total: number; last: Array<{ seq: number; kind: string; value_first_line: string; superseded_by?: number }> };
+  /** The leads it holds (A1): what it works on shows from these, not from its name. */
+  holds?: Array<{ id: string; title: string; status: string }>;
+  /** Its visible label: its stable name, and the leads it holds. */
+  label?: string;
 };
 
 export type TeamView = TeamRecord & {
@@ -2441,10 +2470,14 @@ export async function teamView(ctx: SwarmContext, opts: { from?: string; pageCha
   }
   const ledger = await readLedger(S);
   const replaced = supersededBy(ledger);
+  // What each seat works on, from the lead register (A1: the label follows the held lead, the name stays).
+  const L = await import("./leads.ts");
+  const leadSnap = await L.leadsSnapshot(S).catch(() => null);
   const peers: PeerView[] = [];
   for (const a of team.agents) {
     if (a.id === ctx.agentId) continue;
     const named = names.find((n) => n.id === a.id);
+    const holds = leadSnap ? L.heldLeads(leadSnap, a.id) : [];
     const post = latest.get(a.id);
     const record = post ? await readPost(post.file).catch(() => null) : null;
     const theirs = ledger.filter((e) => e.by === a.id);
@@ -2461,6 +2494,7 @@ export async function teamView(ctx: SwarmContext, opts: { from?: string; pageCha
       last_post: post && record ? { id: record.id, thread: record.thread, tag: record.tag, to: record.to, at: post.at.toISOString() } : null,
       posts: post?.count ?? 0,
       open_jobs: jobsByAgent.get(a.id) ?? [],
+      ...(leadSnap ? { holds, label: L.seatLabel(a.id, named?.name ?? null, holds) } : {}),
       ledger: {
         total: theirs.length,
         last: theirs.slice(-TEAM_VIEW_LEDGER_LAST).map((e) => ({
@@ -5796,7 +5830,7 @@ export const TOOL_RESERVED_NAMES = new Set([
   "question_open", "questions", "question_ask",
   // The coordination of the work and of the finish (docs/adr/0015): a lead
   // reopened by an agent, a limiting route reviewed.
-  "lead_reopen", "route_review",
+  "lead_reopen", "route_review", "lead_handoff", "lead_confirm", "offer",
   // The stop policy (docs/adr/0013): a run paused at a cap, a seat's call held
   // by the pause, the seats woken after an extension, a stop proposed to the
   // operator, and a run resumed after a stop or a seal.

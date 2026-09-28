@@ -206,6 +206,9 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   leadInterpret: { bucket: "ledger", capacity: 200, perSecond: 5 },
   leadReopen: { bucket: "ledger", capacity: 200, perSecond: 5 },
   routeReview: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadHandoff: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadConfirm: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  offerAnswer: { bucket: "ledger", capacity: 200, perSecond: 5 },
   // The question register grows as the leads do.
   questionOpen: { bucket: "ledger", capacity: 200, perSecond: 5 },
   questionAsk: { bucket: "ledger", capacity: 200, perSecond: 5 },
@@ -259,7 +262,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "questionOpen", "questionAsk"]);
+const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "questionOpen", "questionAsk"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -712,6 +715,9 @@ export function boardTable(hub: {
     leadInterpret: (who, a) => L.recordInterpretations(S, who, Number(a[1]), Array.isArray(a[2]) ? (a[2] as L.InterpretInput[]) : []),
     leadReopen: (who, a) => L.agentReopenLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; why?: string; take?: boolean }),
     routeReview: (who, a) => L.routeReview(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { material?: unknown; why?: string }),
+    leadHandoff: (who, a) => L.handoffLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { why?: string; to?: string; generation?: number }),
+    leadConfirm: (who, a) => L.confirmLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; ref?: string; why?: string }),
+    offerAnswer: (who, a) => L.answerOffer(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { action?: string; why?: string }),
     // The question register (extensions/questions.ts): the seat is the channel's.
     questionOpen: (who, a) => Q.questionOpen(as(who), (isObject(a[1]) ? a[1] : {}) as Q.ActInput),
     questionAsk: (who, a) => Q.questionAsk(as(who), a[1], a[2]),
@@ -840,7 +846,9 @@ export function boardTable(hub: {
       const r = await svc.submit(who, spec, { watch: typeof raw.wait === "number" ? raw.wait : 0 });
       if (!r.ok) return r;
       const attached = r.job.requester.agent === who ? await L.attachJob(S, who, r.job.id, raw.lead).catch(() => null) : null;
-      return { ok: true, job: await jobView(S, r.job), ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}) };
+      // The coverage hint at admission (A1): who else works these questions or these objects now.
+      const coverage = r.job.requester.agent === who ? await L.jobAdmissionHint(S, who, attached?.ok ? attached.lead : raw.lead, r.job.spec.inputs ?? []).catch(() => null) : null;
+      return { ok: true, job: await jobView(S, r.job), ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}), ...(coverage ? { coverage: { ...coverage, note: "a hint: another seat works the same questions or objects now; overlap is not identity, so read what they have (leads, list_team) before you duplicate it" } } : {}) };
     },
     jobStatus: async (who, a) => {
       const svc = hub.jobs?.();
@@ -2588,7 +2596,9 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
     case "leadClose":
     case "leadLink":
     case "leadReopen":
-    case "routeReview": {
+    case "routeReview":
+    case "leadHandoff":
+    case "leadConfirm": {
       // The lead's id, state and holder as the call left them, on the
       // harness's own line beside the register's chained event.
       const lead = isObject(result.lead) ? result.lead : {};

@@ -3451,6 +3451,10 @@ budget = {
     **({"until_solved": True, "stall_minutes": int(os.environ.get("SWARM_STALL_MINUTES") or 15)} if os.environ.get("SWARM_UNTIL_SOLVED") == "1" else {}),
     # What a cap does: pause the run (the default), stop it, or nothing (the operator's).
     "stop_policy": os.environ.get("SWARM_STOP_POLICY") or "cap-pause",
+    # How the seats' first choices are staggered (docs/adr/0015): seconds a
+    # seat waits for the one before it, and the bound over all of them.
+    # SWARM_FIRST_CHOICE_STAGGER_SEC=0 turns it off.
+    **({"coordination": {"first_choice_stagger_sec": int(os.environ.get("SWARM_FIRST_CHOICE_STAGGER_SEC") or 20), "first_choice_bound_sec": int(os.environ.get("SWARM_FIRST_CHOICE_BOUND_SEC") or 90)}} if (os.environ.get("SWARM_FIRST_CHOICE_STAGGER_SEC") or "20") != "0" else {}),
     "agents": {
         aid: {
             "spent_usd": 0,
@@ -6249,7 +6253,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
 
   # The tools each Pi is given, known before a prepared run returns: a
   # prepared VM run writes them into vm-spec.json.
-  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,lead_reopen,route_review,question_open,questions,question_ask,done"
+  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,lead_reopen,route_review,lead_handoff,lead_confirm,offer,question_open,questions,question_ask,done"
   # Pi's --tools is an allowlist by name, so a tool the extension registers is
   # invisible until it is named here. The skill tool exists only when the run
   # carries packs.
