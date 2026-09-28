@@ -1,0 +1,173 @@
+/**
+ * The operator's stop policy (--stop operator, its alias --until-solved) and
+ * the negative bar (docs/adr/0013): the policy takes the caps and the wall
+ * clock away and adds no stricter answer requirement. A run under it ends,
+ * as any run does, when every question in scope has a disposition under the
+ * bar. A not_determinable answer on a coverage record another seat reviewed
+ * is one: the done proceeds, examination-limited. An unreviewed one, one
+ * behind a quick negative nobody attested, one whose coverage no longer
+ * stands, and a best candidate (B2) are none: the done is refused, with the
+ * way to a disposition said.
+ */
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import * as P from "../extensions/protocol.ts";
+import * as L from "../extensions/leads.ts";
+import { checkLedgerAnswers } from "../scripts/check-answers.ts";
+import { finishGate } from "../scripts/finish-gate.ts";
+import { A, coverage, ESTABLISHED, F, ok, planned, rec, REVIEW, run } from "./negative-bar-fixture.ts";
+
+const GOAL = [
+  "## Goal",
+  "",
+  "Examine the host.",
+  "",
+  "### Questions",
+  "",
+  "1. Who logged on?",
+  "2. Was a remote tool installed?",
+  "",
+  "## Definition of done",
+  "",
+  "d",
+  "",
+  "## Checks",
+  "",
+  '- `node x "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2 --existence 2`',
+  "",
+].join("\n");
+
+/** A run of two questions, its stop the operator's unless said otherwise. */
+async function operatorRun(o: { until?: boolean } = {}) {
+  const r = await run({ goal: GOAL });
+  if (o.until !== false) {
+    const b = await P.readBudget(r.S);
+    await P.writeBudget(r.S, { ...b, stop_policy: "operator", until_solved: true, wall_clock_minutes: 0 });
+  }
+  return r;
+}
+
+/** The finish line as the harness runs it: the goal's answers check, then the gate, then the verdict. */
+async function finish(S: string) {
+  const r = await checkLedgerAnswers(S, ["1", "2"], ["2"]);
+  const named = r.defects.filter((d) => d.named_by.length).map((d) => `${d.what} (named by ${d.named_by.map((n) => `#${n}`).join(", ")})`);
+  const checks = { total: 1, passed: r.ok ? 1 : 0, source: "registry", checks: [{ cmd: "check-answers --sections 1,2 --existence 2", ok: r.ok, out: r.lines.join("\n"), answers: { outcomes: r.outcomes, results: r.results, dispositions: r.dispositions, best_candidate: r.best_candidate, named } }] };
+  const gate = await finishGate(S, checks);
+  return { check: r, gate, verdict: P.finishLineVerdict({ ...checks, gate }, false) };
+}
+
+/** Question 1 answered on a finding, established by another seat, its lead closed. */
+async function answerOne(r: Awaited<ReturnType<typeof operatorRun>>, strength: "established" | "best_candidate" = "established") {
+  const lead = await planned(r.a0, "1", [{ source: "input:logs/a.log", method: "read the logons" }]);
+  const f = ok(await rec(r.a0, { kind: "finding", ...F, value: "alice logged on at 09:14", source: "the log", evidence: "line 12", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+  ok(await rec(r.a1, { kind: "answer", section: "question:1", value: "alice", reasoning: `E-${f.seq} shows the logon`, ...A, confidence: "high", result: "established" }));
+  const ans = (await P.readLedger(r.S)).find((e) => e.kind === "answer" && e.section === "question:1")!;
+  const att = await P.attestEntry(r.a2, { seq: ans.seq, how: "re-read the log line from job:j000002", ...ESTABLISHED, strength } as never);
+  assert.ok(att.ok, (att as { reason?: string }).reason);
+  assert.ok((await L.closeLead(r.a0, lead, { disposition: "resolved", ref: `E-${f.seq}` })).ok);
+}
+
+/** Question 2 answered not_determinable on a coverage record; the search's lead closed negative, quick when asked. */
+async function notDeterminable(r: Awaited<ReturnType<typeof operatorRun>>, o: { quick?: boolean } = {}) {
+  const lead = await planned(r.a0, "2");
+  // A lead closed at once after one job over one object is a quick negative; one whose job read everything is not.
+  await L.attachJob(r.S, "a0", o.quick ? "j000001" : "j000006", lead);
+
+  const job = o.quick ? "j000001" : "j000006";
+  const absence = ok(await rec(r.a0, { kind: "absence", value: "a remote tool", source: "inputs/disk.E01", evidence: "a search over the disk", completion: "complete", refs: [`job:${job}/hits.txt`], answers: ["2"] })).entry;
+  assert.ok((await L.recordInterpretations(r.S, "a0", absence.seq, [{ job }])).ok);
+  const closed = await L.closeLead(r.a0, lead, { disposition: "negative", ref: `E-${absence.seq}` });
+  assert.ok(closed.ok, (closed as { reason?: string }).reason);
+  assert.equal(Boolean((closed as { lead: L.LeadView }).lead.quick_negative), Boolean(o.quick));
+  const cov = ok(await rec(r.a0, coverage("2", ["input:disk.E01"], [`E-${absence.seq}`, `job:${job}/hits.txt`], { detection_opportunity: { trace_expected: "unknown", why: "the tool may leave nothing on disk" } }))).entry;
+  const ans = ok(await rec(r.a1, { kind: "answer", section: "question:2", value: "It cannot be determined from the disk whether a remote tool was installed", reasoning: `E-${cov.seq} over E-${absence.seq}`, ...A, result: "not_determinable" })).entry;
+  return { lead, absence, cov, ans };
+}
+
+test("under --stop operator, a not_determinable answer on a coverage record another seat reviewed is a disposition: the done proceeds, examination-limited", async () => {
+  const r = await operatorRun();
+  await answerOne(r);
+  const q2 = await notDeterminable(r);
+  let f = await finish(r.S);
+  assert.equal(f.gate.until_solved, true);
+  assert.equal(f.verdict.proceed, false, "unreviewed, it is no disposition yet: the answers check holds it");
+  if (!f.verdict.proceed) assert.match(f.verdict.reason, /negative \(unreviewed\)/);
+  assert.ok((await P.attestEntry(r.a2, { seq: q2.cov.seq, how: "ran the search again from job:j000001", review: REVIEW })).ok);
+  f = await finish(r.S);
+  assert.deepEqual(f.gate.questions.map((q) => [q.id, q.outcome, q.disposition]), [["1", "answered", "established"], ["2", "inconclusive", "not_determinable"]]);
+  assert.ok(f.verdict.proceed, JSON.stringify(f.verdict));
+  assert.equal(f.verdict.proceed && f.verdict.outcome, "examination_limited", "not determinable limits the run; it never holds it");
+  // The same answers under a cap policy end the same way: the operator's policy adds nothing to the bar.
+  const b = await P.readBudget(r.S);
+  await P.writeBudget(r.S, { ...b, stop_policy: "cap-pause", until_solved: false });
+  const capped = await finish(r.S);
+  assert.equal(capped.verdict.proceed && capped.verdict.outcome, "examination_limited");
+});
+
+test("under --stop operator, an unreviewed negative, a quick negative nobody attested, a coverage record that no longer stands and a best candidate each hold the done", async () => {
+  // Unreviewed: the answers check itself holds a material negative.
+  const unreviewed = await operatorRun();
+  await answerOne(unreviewed);
+  await notDeterminable(unreviewed);
+  let f = await finish(unreviewed.S);
+  assert.equal(f.check.ok, false);
+  assert.ok(f.check.defects.some((d) => d.code === "negative_unreviewed"));
+  assert.equal(f.verdict.proceed, false);
+  // A quick negative nobody attested holds its question, though the negative was reviewed.
+  const quick = await operatorRun();
+  await answerOne(quick);
+  const q = await notDeterminable(quick, { quick: true });
+  assert.ok((await P.attestEntry(quick.a2, { seq: q.cov.seq, how: "ran the search again", review: REVIEW })).ok);
+  f = await finish(quick.S);
+  assert.equal(f.check.ok, true, f.check.lines.join("\n"));
+  assert.equal(f.verdict.proceed, false);
+  if (!f.verdict.proceed) {
+    assert.match(f.verdict.reason, /- question:2 is inconclusive, with no disposition under the bar: L-\d+ "Work question 2" was closed a quick negative .* that nobody else has attested/);
+    assert.equal(f.verdict.failing, "question:2");
+  }
+  assert.ok((await P.attestEntry(quick.a3, { seq: q.absence.seq, how: "ran the search again from job:j000001 over the whole disk" })).ok);
+  f = await finish(quick.S);
+  assert.equal(f.verdict.proceed && f.verdict.outcome, "examination_limited", JSON.stringify(f.verdict));
+  // Its coverage no longer stands: the search it rests on corrected after the review.
+  const stale = await operatorRun();
+  await answerOne(stale);
+  const s = await notDeterminable(stale);
+  assert.ok((await P.attestEntry(stale.a2, { seq: s.cov.seq, how: "ran the search again", review: REVIEW })).ok);
+  assert.equal((await finish(stale.S)).verdict.proceed, true);
+  ok(await rec(stale.a0, { kind: "absence", value: "a remote tool", source: "inputs/disk.E01", evidence: "a search over one volume only", completion: "partial", refs: ["job:j000001/hits.txt"], answers: ["2"], supersedes: s.absence.seq, because: "the search stopped at the first volume" }));
+  f = await finish(stale.S);
+  assert.ok(f.check.defects.some((d) => d.code === "coverage_stale"));
+  assert.equal(f.gate.questions.find((x) => x.id === "2")?.disposition, undefined);
+  assert.equal(f.verdict.proceed, false);
+  // A best candidate is never a disposition (B2): every review holds question 1 so.
+  const best = await operatorRun();
+  await answerOne(best, "best_candidate");
+  const b = await notDeterminable(best);
+  assert.ok((await P.attestEntry(best.a2, { seq: b.cov.seq, how: "ran the search again", review: REVIEW })).ok);
+  f = await finish(best.S);
+  assert.equal(f.gate.questions.find((x) => x.id === "1")?.disposition, undefined);
+  assert.equal(f.verdict.proceed, false);
+  if (!f.verdict.proceed) assert.match(f.verdict.reason, /- question:1 is limited, with no disposition under the bar: its answer is a best candidate, not established/);
+});
+
+test("under --stop operator, a defect a limitation only names holds the done; the same run under a cap policy may end on it, examination-limited, as before", async () => {
+  const r = await operatorRun();
+  await answerOne(r);
+  const lead = await planned(r.a0, "2");
+  // Question 2 unanswered, and a limitation that names it.
+  const lim = ok(await rec(r.a0, { kind: "limitation", value: "The disk's second volume is encrypted and no key is in the case", source: "the disk", evidence: "the volume header", reason: "unavailable", answers: ["2"] })).entry;
+  const closed = await L.closeLead(r.a0, lead, { disposition: "infeasible", ref: `E-${lim.seq}` });
+  assert.ok(closed.ok, (closed as { reason?: string }).reason);
+  let f = await finish(r.S);
+  assert.equal(f.check.ok, true, "a named defect lets the check pass");
+  assert.equal(f.verdict.proceed, false);
+  if (!f.verdict.proceed) {
+    assert.match(f.verdict.reason, /- question:2 is limited, with no disposition under the bar: L-\d+ "Work question 2" was closed infeasible: E-\d+; no standing answer entry/);
+    assert.match(f.verdict.reason, /A defect is fixed, never only named:\n- a defect a limitation names: question:2 has no answer/);
+    assert.match(f.verdict.reason, /When the evidence cannot answer a question, that is an answer too: plan its routes .* record a coverage record .* have another seat review it .* then answer not_determinable/);
+  }
+  const b = await P.readBudget(r.S);
+  await P.writeBudget(r.S, { ...b, stop_policy: "cap-pause", until_solved: false });
+  f = await finish(r.S);
+  assert.equal(f.verdict.proceed && f.verdict.outcome, "examination_limited", JSON.stringify(f.verdict));
+});

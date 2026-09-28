@@ -3896,8 +3896,8 @@ export default function (pi: ExtensionAPI) {
         // more just before the sentinel. In a VM the hub does both, on the
         // host's own files, when markDone reaches it.
         const onHost = !boardSocket();
-        // An until-solved run ends only on every question answered; even a
-        // finish line that could not be run is a refusal there.
+        // An until-solved run ends only on every question disposed under the
+        // bar; even a finish line that could not be run is a refusal there.
         const untilSolved = (await readBudget(toolCtx.cwd).catch(() => null))?.until_solved === true;
         // One check result per revision (A4): a run recorded against the revision that still holds is taken, not run again.
         const shared = async (S: string) => {

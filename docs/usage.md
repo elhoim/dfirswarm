@@ -388,8 +388,15 @@ closed lead. Each is on the trace and the operator's record. The console's
 Leads tab does the same.
 
 `swarm.sh start --until-solved [--stall-minutes N]` (the same as `--stop
-operator`) runs until every question is answered, or accepted by the operator
-as far as it went: no wall clock, every cap advisory, no abandon, and a regroup
+operator`) runs until every question in scope has a disposition under the bar
+([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md)): established;
+partial; a bounded negative or not determinable, each on a coverage record
+another seat reviewed; a premise shown not to hold; out of scope; accepted by
+the operator; or withdrawn. It adds no stricter answer requirement than any run:
+a question the evidence cannot answer is answered `not_determinable` on its
+reviewed coverage record, and the run ends examination-limited. What it takes
+away is the caps and the clock: no wall clock, every cap advisory, no abandon,
+a defect a limitation only names holds it, and a regroup
 post when nothing moves for N minutes (15): first a nudge to the holder of a
 lead a job still runs under, with what the job is doing, then everyone a window
 later. Only `swarm.sh stop` ends it. A goal can
@@ -427,8 +434,11 @@ a second route with its reason and its product contract.
 #### The stop policy: `extend`, `stop`, `resume`
 
 A run ends one of six ways (`runOutcome`, `stop-policy.ts outcome`):
-`completed` (every question answered), `examination_limited` (it rests on
-limitations, deferrals or questions the operator accepted), `paused` (held at a
+`completed` (every question established, or settled by a bounded negative that
+says the event did not happen under the stronger bar), `examination_limited`
+(a question not determinable, partial, out of scope, a bounded negative short of
+that, accepted by the operator, or resting on limitations or deferrals),
+`paused` (held at a
 cap, waiting for you), `stopped` (`swarm.sh stop`, or `cap-stop` at a cap; never
 `completed`), `abandoned`, or `verification_unavailable`. The summary, the
 report and the console say which.

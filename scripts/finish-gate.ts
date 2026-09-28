@@ -18,9 +18,17 @@
  * question's last amendment is stale, and an accepted question limits the
  * run instead of holding it.
  *
- * In an until-solved run (budget.json until_solved, set at kickoff) nothing
- * short of every question answered ends the run: the refusal names each
- * question that is not, and what blocks it.
+ * The rule is the same under every stop policy: a run ends when every
+ * question in scope has a disposition under the bar (docs/adr/0013):
+ * established, partial, a bounded negative or not determinable resting on a
+ * coverage record another seat reviewed, a premise shown not to hold, out of
+ * scope, accepted by the operator, or withdrawn. Each question carries its
+ * disposition here. Under the operator's stop policy (--stop operator, its
+ * alias --until-solved, budget.json until_solved) nothing short of that
+ * ends the run: a question with no disposition, a defect a limitation only
+ * names, and a quick negative nobody has attested hold it, each named with
+ * what blocks it. The policy takes away the caps and the wall clock; it adds
+ * no stricter answer requirement.
  *
  * Read on the host, by the process that runs the finish line
  * (protocol.ts runFinishLine: the pane on a host run, the hub in a VM run),
@@ -34,7 +42,12 @@ import * as Q from "../extensions/questions.ts";
 import type { FinishLineRun } from "../extensions/protocol.ts";
 import { checkLedgerAnswers } from "./check-answers.ts";
 
-export type FinishGateQuestion = { id: string; outcome: string; blocks: string[] };
+/**
+ * A question and how it stands: the answers check's outcome (answered,
+ * limited, inconclusive, unanswered), or the register's (accepted,
+ * withdrawn); its disposition under the bar when it has one; what blocks it.
+ */
+export type FinishGateQuestion = { id: string; outcome: string; blocks: string[]; disposition?: string };
 
 /** What the question register holds against a done. */
 export type QuestionDefect = { code: "open_question" | "question_answer" | "stale_answer"; question: string; what: string; fix: string };
@@ -56,6 +69,13 @@ export type FinishGate = {
   register?: { head: string | null; events: number; in_scope: string[]; proposed: string[]; after_done: string[] };
   /** The lines of `limited` that are the operator's acceptances: a limit the operator took, which even a run under --stop operator may end on. */
   accepted?: string[];
+  /**
+   * What holds a run under the operator's stop policy beside its questions:
+   * a defect a limitation only names (a defect is fixed, and a named one is
+   * no disposition). Every other line of `limited` is a disposition's, and
+   * makes the end examination-limited.
+   */
+  holding?: string[];
 };
 
 /** Whether the run's stop policy is the operator's (--stop operator, or its alias --until-solved). */
@@ -100,9 +120,12 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
     const outcomes = new Map<string, string>();
     // The sections every review holds a best candidate only (B2).
     const best = new Set<string>();
+    // Each section's disposition under the bar, as the answers check found it.
+    const dispositions = new Map<string, string>();
+    const holding: string[] = [];
     let sawAnswers = false;
     for (const c of run?.checks ?? []) {
-      const a = c.answers as { outcomes?: Record<string, string>; named?: string[]; best_candidate?: string[] } | undefined;
+      const a = c.answers as { outcomes?: Record<string, string>; named?: string[]; best_candidate?: string[]; dispositions?: Record<string, string> } | undefined;
       if (!a) continue;
       sawAnswers = true;
       for (const [k, v] of Object.entries(a.outcomes ?? {})) {
@@ -110,9 +133,16 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
         outcomes.set(key, v);
       }
       for (const b of a.best_candidate ?? []) best.add(b.startsWith("question:") ? b : `question:${b}`);
-      for (const n of a.named ?? []) limited.push(`a defect a limitation names: ${n}`);
+      for (const [k, v] of Object.entries(a.dispositions ?? {})) dispositions.set(k.startsWith("question:") ? k : `question:${k}`, v);
+      for (const n of a.named ?? []) {
+        limited.push(`a defect a limitation names: ${n}`);
+        holding.push(`a defect a limitation names: ${n}`);
+      }
     }
     for (const [k, v] of outcomes) if (v !== "answered") limited.push(best.has(k) ? `${k} is a best candidate, not established (every review holds it so)` : `${k} is ${OUTCOME_WORDS[v] ?? v}`);
+    // A quick negative nobody else has attested holds its questions: its
+    // search is a cue for review, and a disposition on it waits for one.
+    const quick = await unattestedQuickNegatives(sandbox, snap);
     // Each goal question, and what stands in its way.
     const questions: FinishGateQuestion[] = [];
     for (const id of snap.goal.questions) {
@@ -127,7 +157,11 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
       }
       const outcome = said !== "answered" && reg && Q.acceptanceStands(reg, snap.ledger) ? "accepted" : said;
       const blocks: string[] = [];
-      if (outcome !== "answered" && outcome !== "accepted") {
+      // A quick negative holds a question that is not answered outright (an answer that settles it needs no other).
+      const held = outcome === "answered" || outcome === "accepted" ? [] : (quick.get(id) ?? []);
+      const disposition = outcome === "accepted" || held.length ? undefined : dispositions.get(key);
+      for (const h of held) blocks.push(h);
+      if (outcome !== "answered" && outcome !== "accepted" && !disposition) {
         if (best.has(key)) blocks.push("its answer is a best candidate, not established: every review holds it so; take the route that would settle it, or the operator accepts its limits");
         for (const l of snap.state.leads.values()) {
           if (!l.answers.includes(id)) continue;
@@ -140,12 +174,12 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
           blocks.push(`${l.id} "${l.title}" is ${st}${l.holder ? ` (held by ${l.holder})` : " (nobody holds it)"}${unmet.length ? `, waiting on ${unmet.map((x) => `${x.n}: ${x.s.why}`).join("; ")}` : ""}`);
         }
         if (!snap.answered.has(id)) blocks.push("no standing answer entry");
-        if (!blocks.length) blocks.push(`its answer is ${OUTCOME_WORDS[outcome] ?? outcome}: it rests on a limitation, a search that only documents one, or is marked inconclusive`);
+        if (!blocks.length) blocks.push(`its answer is ${OUTCOME_WORDS[outcome] ?? outcome} and no disposition under the bar: it rests on a limitation, a search that only documents one, a coverage record nobody else reviewed or that no longer stands, or is marked inconclusive`);
       }
-      questions.push({ id, outcome, blocks });
+      questions.push({ id, outcome, blocks, ...(disposition ? { disposition } : {}) });
     }
     const accepted: string[] = [];
-    const register = qs ? await registerGate(sandbox, snap, qs, defects, limited, questions, accepted) : undefined;
+    const register = qs ? await registerGate(sandbox, snap, qs, defects, limited, questions, accepted, holding, quick) : undefined;
     // A route lead (a material lead closed deferred, infeasible or
     // needs_operator) keeps its disposition in history and limits the run
     // until its questions are disposed under the bar and another seat holds
@@ -155,7 +189,7 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
     // matters.
     const disposed = (section: string): "answered" | "accepted" | null => {
       const q = questions.find((x) => x.id === section);
-      if (q?.outcome === "answered") return "answered";
+      if (q?.outcome === "answered" || q?.disposition) return "answered";
       if (q?.outcome === "accepted") return "accepted";
       const reg = qs?.bySection.get(section);
       if (reg && Q.acceptanceStands(reg, snap.ledger)) return "accepted";
@@ -166,7 +200,7 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
       const verdict = lead ? L.routeLimitation(lead, disposed) : { limiting: true, why: "" };
       if (verdict.limiting) limited.push(`${l.lead} was closed ${l.disposition} (${l.ref})${verdict.why ? `: ${verdict.why}` : ""}`);
     }
-    return { defects, limited, questions, until_solved: until, ...(register ? { register } : {}), ...(accepted.length ? { accepted } : {}) };
+    return { defects, limited, questions, until_solved: until, holding, ...(register ? { register } : {}), ...(accepted.length ? { accepted } : {}) };
   } catch (err) {
     return { defects: [], limited: [], questions: [], until_solved: until, error: `the lead register could not be read: ${(err as Error).message}` };
   }
@@ -174,6 +208,26 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
 
 /** The negative bar's defects, and an answer resting on material the case policy forbids: fixed, never named, and never excused by an acceptance. */
 const NEGATIVE_BAR_CODES = new Set(["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "material_use"]);
+
+/**
+ * The quick negatives nobody else has attested (a lead closed negative
+ * after one job over one object within two minutes, leads.ts), by the
+ * sections of the questions they serve: each a line saying so.
+ */
+async function unattestedQuickNegatives(sandbox: string, snap: L.LeadsSnapshot): Promise<Map<string, string[]>> {
+  const P = await import("../extensions/protocol.ts");
+  const attestations = await P.readAttestations(sandbox).catch(() => [] as Awaited<ReturnType<typeof P.readAttestations>>);
+  const out = new Map<string, string[]>();
+  for (const l of snap.state.leads.values()) {
+    if (!l.quick_negative || l.closed?.disposition !== "negative") continue;
+    const m = /^E-(\d+)$/.exec(l.closed.ref);
+    const e = m ? snap.ledger.bySeq.get(Number(m[1])) : undefined;
+    if (e && attestations.some((x) => P.attestationAct(x) === "attest" && x.target === (e.hash ?? P.ledgerHash(e, "genesis")) && !e.authors.includes(x.by))) continue;
+    const line = `${l.id} "${l.title}" was closed a quick negative (${Math.round(l.quick_negative.held_ms / 1000)} s, ${l.quick_negative.jobs} job(s), ${l.quick_negative.objects} object(s); ${l.closed.ref}) that nobody else has attested: another seat attests ${l.closed.ref} (what it ran again, from which object)`;
+    for (const q of l.answers) out.set(q, [...(out.get(q) ?? []), line]);
+  }
+  return out;
+}
 
 /** How a register question's blockers read: its leads, open or closed limiting. */
 function blocksOf(snap: L.LeadsSnapshot, section: string): string[] {
@@ -195,7 +249,17 @@ function blocksOf(snap: L.LeadsSnapshot, section: string): string[] {
  * question in scope, and every material question in scope beyond the goal's
  * own held to an answer the way the goal's check holds its questions.
  */
-async function registerGate(sandbox: string, snap: L.LeadsSnapshot, qs: Q.QuestionsSnapshot, defects: FinishGate["defects"], limited: string[], questions: FinishGateQuestion[], accepted: string[]): Promise<NonNullable<FinishGate["register"]>> {
+async function registerGate(
+  sandbox: string,
+  snap: L.LeadsSnapshot,
+  qs: Q.QuestionsSnapshot,
+  defects: FinishGate["defects"],
+  limited: string[],
+  questions: FinishGateQuestion[],
+  accepted: string[],
+  holding: string[],
+  quick: Map<string, string[]>,
+): Promise<NonNullable<FinishGate["register"]>> {
   const ctx: Q.ViewContext = { questions: qs, leads: snap.state, ledger: snap.ledger };
   const views = Q.questionViews(ctx);
   const inScope = views.filter((v) => v.scope === "in_scope" && !v.withdrawn && !v.after_done);
@@ -260,14 +324,24 @@ async function registerGate(sandbox: string, snap: L.LeadsSnapshot, qs: Q.Questi
           fix: `answer it in the ledger (record kind=answer, section=${key}, resting on entries recorded with answers=["${q.section}"]${Q.HUMAN_ORIGINS.has(q.origin.kind) ? ", with contrary or contrary_none_why" : ""}), or record a limitation with answers=["${q.section}"] saying why it cannot be answered`,
         });
       } else if (outcome !== "answered") limited.push(`${q.id} (${key}) is ${outcome === "limited" ? "examination-limited" : outcome}`);
-      questions.push({ id: q.section, outcome: outcome === "limited" ? "limited" : outcome, blocks: outcome === "answered" ? [] : [...blocksOf(snap, q.section), ...(outcome === "unanswered" ? ["no standing answer entry"] : [])] });
+      const held = outcome === "answered" ? [] : (quick.get(q.section) ?? []);
+      const disposition = held.length ? undefined : r.dispositions[key];
+      questions.push({
+        id: q.section,
+        outcome: outcome === "limited" ? "limited" : outcome,
+        blocks: outcome === "answered" && !held.length ? [] : [...held, ...(disposition ? [] : blocksOf(snap, q.section)), ...(outcome === "unanswered" ? ["no standing answer entry"] : [])],
+        ...(disposition ? { disposition } : {}),
+      });
     }
     const bySection = new Map(extra.map((q) => [`question:${q.section}`, q]));
     for (const d of r.defects) {
       const q = d.section ? bySection.get(d.section) : undefined;
       if (!q || d.code === "no_answer") continue;
-      if (d.named_by.length) limited.push(`a defect a limitation names: ${d.what} (named by ${d.named_by.map((n) => `#${n}`).join(", ")})`);
-      else defects.push({ code: "question_answer", question: q.id, what: d.what, fix: d.fix });
+      if (d.named_by.length) {
+        const line = `a defect a limitation names: ${d.what} (named by ${d.named_by.map((n) => `#${n}`).join(", ")})`;
+        limited.push(line);
+        holding.push(line);
+      } else defects.push({ code: "question_answer", question: q.id, what: d.what, fix: d.fix });
     }
   }
   return {

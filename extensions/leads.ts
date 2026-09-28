@@ -3425,7 +3425,7 @@ export async function regroupMessage(sandboxRoot: string, snap: LeadsSnapshot, o
   const operator = ranked.filter((v) => v.disposition === "needs_operator");
   const uncited = await uncitedEvidence(sandboxRoot, snap);
   const lines: string[] = [];
-  lines.push(`REGROUP ${o.count}: nothing has moved for ${o.minutes} minutes: no new standing entry, no lead closed and no job committed since ${new Date(o.since.at).toISOString()} (${o.since.what}). This run is until solved, so it goes on until every question is answered; find another route.`);
+  lines.push(`REGROUP ${o.count}: nothing has moved for ${o.minutes} minutes: no new standing entry, no lead closed and no job committed since ${new Date(o.since.at).toISOString()} (${o.since.what}). This run is until solved, so it goes on until every question has a disposition under the bar; find another route, or, where the evidence cannot answer a question, dispose of it under the bar (a coverage record over the routes searched, another seat's review, then not_determinable).`);
   lines.push("", `Questions not answered (${qs.length}):`);
   for (const q of qs) lines.push(`- question:${q.id}: ${q.why}${q.blocks.length ? `; ${q.blocks.join("; ")}` : "; no lead names it"}`);
   if (!qs.length) lines.push("- none by the ledger: the finish line says what still holds done (call done, and read its refusal).");
@@ -3447,7 +3447,7 @@ export async function regroupMessage(sandboxRoot: string, snap: LeadsSnapshot, o
   if (!uncited.length) lines.push("- none");
   lines.push(
     "",
-    "Each of you: say on the board which route you take next. An artefact above that no entry cites, a lead nobody holds (lead_claim), a need that can be met another way (lead_link), a question with no lead (lead_open), a job whose output nobody read to its end, or what only the operator can give (lead_close needs_operator, saying what). " +
+    "Each of you: say on the board which route you take next. An artefact above that no entry cites, a lead nobody holds (lead_claim), a need that can be met another way (lead_link), a question with no lead (lead_open), a job whose output nobody read to its end, a question whose routes are searched and which is to be disposed of under the bar (coverage record, review, not_determinable), or what only the operator can give (lead_close needs_operator, saying what). " +
       `If nothing moves, the next regroup comes in ${o.nextMinutes} minutes.`,
   );
   return lines.join("\n");

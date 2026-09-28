@@ -466,13 +466,21 @@ Done
   confirmation, or a lead's job with no interpretation refuses `done` with what fixes each, and the
   sentinel is written only while the report, the registers, the jobs, the policy and the operator's
   decisions stand as they were checked. A run whose checks pass ends completed only when every
-  question is answered; one that rests on limitations, deferrals or best candidates ends
-  examination-limited, and says so.
-- When SWARM.md says the run is until solved, it ends only when every question is answered, or
-  when the operator stops it: there is no wall clock, the caps are advisory, an abandon is refused,
-  and a limitation or a deferral is not an answer. A provider error or a rate limit is waited out;
-  it never ends the run. When nothing moves, the harness posts a regroup listing what is open: take
-  another route, and close a lead needs_operator for what only the operator can give.
+  question is answered (established, or a bounded negative that says the event did not happen under
+  the stronger bar); one that rests on a not_determinable, a partial, a bounded negative, an
+  acceptance, limitations, deferrals or best candidates ends examination-limited, and says so.
+- When SWARM.md says the run is until solved (--stop operator), there is no wall clock, the caps are
+  advisory and an abandon is refused; it asks nothing more of an answer than any run does. It ends
+  when every question in scope has a disposition under the bar: established; partial; a bounded
+  negative or not determinable resting on a coverage record another seat reviewed; a premise shown
+  not to hold; out of scope; accepted by the operator; or withdrawn. A question the evidence cannot
+  answer is not a reason to keep searching forever: plan its routes, search them, record the
+  coverage record, have another seat review it, and answer not_determinable; the run then ends
+  examination-limited, a proper end. A limitation or a deferral alone, a best candidate, and a
+  quick negative nobody attested are not dispositions. A provider error or a rate limit is waited
+  out; it never ends the run. When nothing moves, the harness posts a regroup listing what is open:
+  take another route, or dispose of the question under the bar, and close a lead needs_operator for
+  what only the operator can give.
 - A sign-off is somebody else's work checked, not your own restated. If you wrote the report, the
   flags, the timeline or an answer, you are not the one who can certify them: a peer re-derives
   what they rest on from the sealed refs and records `attest` or `dispute` on each answer, and says

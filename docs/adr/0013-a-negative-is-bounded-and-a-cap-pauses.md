@@ -47,9 +47,12 @@ register ([ADR 0011](0011-questions-are-a-register-with-their-askers.md)).
    standing finding. The answers check maps results onto its existing
    outcomes, so the finish line and old goals are unchanged: `established`
    and `premise_not_supported` answer the question; `bounded_negative`
-   answers an existence question only over complete, reviewed coverage, and
-   is examination-limited otherwise; `not_determinable` is inconclusive;
-   `partial` and `out_of_scope` are limited.
+   answers an existence question only under the stronger bar (complete
+   coverage with the trace expected, reviewed, and the answer saying the
+   event did not happen), and is examination-limited otherwise;
+   `not_determinable` is inconclusive; `partial` and `out_of_scope` are
+   limited. It also names each question's **disposition under the bar**
+   (below): what a run may end on.
 2. **Run outcomes.** `completed`, `examination_limited`, `paused`, `stopped`,
    `abandoned`, `verification_unavailable`, read from the run's files
    (`runOutcome`). An operator's stop of a run with no sentinel writes
@@ -123,6 +126,9 @@ register ([ADR 0011](0011-questions-are-a-register-with-their-askers.md)).
     each seat once; `swarm.sh stop` ends it as `stopped`. The time a run is
     paused, or stood stopped, does not count against its wall clock. The run
     never goes on by itself, and the operator's silence approves nothing.
+    `--stop operator` (and `--until-solved`) takes the caps and the wall
+    clock away, and nothing else: it adds no stricter answer requirement
+    (see "The end of a run" below).
 11. **Diminishing returns.** When no new finding, question disposition or
     coverage record has appeared across 20 committed jobs or 30 minutes
     (`SWARM_YIELD_JOBS`, `SWARM_YIELD_MINUTES`), the watchdog proposes a stop
@@ -148,6 +154,40 @@ register ([ADR 0011](0011-questions-are-a-register-with-their-askers.md)).
     it bound; the continuation's answers are adopted through a later version.
     The kickoff keeps its own options outside the run (0600), so the resume
     restarts the same team; a run started before that gives them after `--`.
+
+## The end of a run, under every stop policy
+
+A generic DFIR platform must allow a question to have no answer: the
+pressure goes on coverage, never on answers. A run ends when every question
+in scope has a **disposition under the bar**, no material lead is open, no
+defect stands and the goal's checks are met. The dispositions are:
+established; partial; `bounded_negative` resting on a coverage record
+another seat reviewed; `not_determinable` resting on one likewise; a
+premise shown not to hold, on a finding; out of scope; accepted by the
+operator; withdrawn. A best candidate is none (B2), and neither is an
+answer resting on a limitation alone, a negative whose coverage no longer
+stands, or a question behind a quick negative nobody has attested. The run
+ends `completed` when every question is established or settled by a
+bounded negative that says the event did not happen under the stronger
+bar, and `examination_limited` when any is not determinable, partial,
+out of scope, a bounded negative short of that, or accepted.
+
+Under `--stop operator` (its alias `--until-solved`) nothing short of that
+ends the run but the operator: no abandon, and a defect a limitation only
+names holds it (a defect is fixed). The same rule, and no stricter one: a
+reviewed `not_determinable` ends it examination-limited. Until 2026-09-28
+the policy still carried an older rule ("every question answered, an
+examination-limited finish is not accepted"), which left the operator's
+acceptance as the only way to end a run on a question the evidence could
+not answer; the CTF pilot on the integrated branch showed it, and it was
+removed. The checks report the dispositions (`dispositions` in the answers
+check's machine line, `disposition` on each question of the finish gate),
+the kickoff and SWARM.md tell the agents the path to one when a question
+cannot be determined (plan the routes, record the coverage, have another
+seat review it, answer `not_determinable`), and the refusal names each
+question with none and what blocks it. Under the cap policies a limitation
+that names a defect still lets a run end examination-limited, as before; a
+cap ends such a run in any case.
 
 ## After review
 

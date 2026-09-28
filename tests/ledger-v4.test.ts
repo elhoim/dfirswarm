@@ -564,7 +564,7 @@ test("the brief's questions are counted as the goals' awk counts them, and the c
   assert.equal(usage.status, 2);
 });
 
-test("in ledger mode too, a bounded negative is examination-limited unless its question asks whether something exists, and even then only covered and reviewed", async () => {
+test("in ledger mode too, a bounded negative is examination-limited unless its question asks whether something exists and it says the event did not happen under the stronger bar, covered and reviewed; it is a disposition either way", async () => {
   const { a0, a1, a2, a3, root } = await run();
   assert.ok((await openLead(a0, { title: "Look for a second wallet", why: "question 1", answers: ["1"], take: true, routes: [{ source: "input:disk.E01", method: "list every file, allocated and deleted" }] })).ok);
   const none = ok(await rec(a0, { kind: "absence", value: "No second wallet file", source: "inputs/disk.E01", evidence: "fls over the whole image, allocated and deleted", refs: ["job:j000001/rows.txt"], answers: ["1"] })).entry;
@@ -584,6 +584,13 @@ test("in ledger mode too, a bounded negative is examination-limited unless its q
   assert.deepEqual(limited.outcomes, { "question:1": "limited" });
   assert.deepEqual(limited.results, { "question:1": "bounded_negative" });
   assert.match(limited.lines[0], /^question:1: examination-limited \(a bounded negative: no evidence found in its scope; the question asks for more than whether something exists\)/);
+  assert.deepEqual(limited.dispositions, { "question:1": "bounded_negative" }, "a reviewed bounded negative on its coverage record is a disposition under the bar");
+  // An existence question (said here only on the command line), covered
+  // complete with the trace expected and reviewed: still examination-limited
+  // while the answer only says nothing was found.
   const existence = await checkLedgerAnswers(root, ["1"], ["1"]);
-  assert.deepEqual(existence.outcomes, { "question:1": "answered" }, "the goal said question 1 asks whether it exists, and the negative is covered and reviewed");
+  assert.deepEqual(existence.outcomes, { "question:1": "limited" });
+  assert.match(existence.lines[0], /the answer does not say the event did not happen/);
+  assert.deepEqual(existence.dispositions, { "question:1": "bounded_negative" });
+  // (That the stronger bar settles it, with asserts_absence, is tests/negative-bar.test.ts's: this goal does not declare question 1 an existence question, so the record refuses asserts_absence.)
 });

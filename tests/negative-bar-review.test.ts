@@ -39,7 +39,8 @@ test("a coverage record binds its results by hash: a result superseded or disput
   const ans = ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk", reasoning: `E-${cov.seq}`, ...A, result: "bounded_negative" })).entry;
   assert.ok((await P.attestEntry(a2, { seq: cov.seq, how: "ran the search again from job:j000001", review: REVIEW })).ok);
   let r = await checkLedgerAnswers(S, ["2"], ["2"]);
-  assert.deepEqual([r.ok, r.outcomes["question:2"]], [true, "answered"], r.lines.join("\n"));
+  // Reviewed on its coverage record: a disposition under the bar (examination-limited: the answer does not say the event did not happen).
+  assert.deepEqual([r.ok, r.outcomes["question:2"], r.dispositions["question:2"]], [true, "limited", "bounded_negative"], r.lines.join("\n"));
   // The search it rests on is corrected: it did not cover the whole disk.
   ok(await rec(a0, { kind: "absence", value: "a remote tool", source: "inputs/disk.E01", evidence: "a search over one volume only", completion: "partial", refs: ["job:j000001/hits.txt"], answers: ["2"], supersedes: absence.seq, because: "the search stopped at the first volume" }));
   r = await checkLedgerAnswers(S, ["2"], ["2"]);
@@ -49,6 +50,7 @@ test("a coverage record binds its results by hash: a result superseded or disput
   assert.match(stale!.what, new RegExp(`E-${cov.seq}.*its result E-${absence.seq} is superseded by #\\d+`));
   assert.deepEqual(stale!.named_by, [], "a stale coverage record is corrected, never named away");
   assert.notEqual(r.outcomes["question:2"], "answered");
+  assert.equal(r.dispositions["question:2"], undefined, "no disposition on a coverage record that no longer stands");
   const review = P.negativeReview(ans, await P.readLedger(S), await P.readAttestations(S), await P.readDisputes(S));
   assert.equal(review.reviewed, false, "the review was of a search that no longer stands");
   // A result disputed after the record: the same.

@@ -68,11 +68,11 @@ export async function job(root: string, id: string, file: string, record: Record
   await writeFile(join(storePaths(root).jobs, id, "job.json"), JSON.stringify({ id, state: "committed", requester: { agent: "a0" }, status: "ok", exit: 0, ...record }));
 }
 
-export async function run() {
+export async function run(o: { goal?: string } = {}) {
   const base = await mkdtemp(join(tmpdir(), "negative-bar-"));
   dirs.push(base);
   const S = join(base, "run");
-  await P.initSandbox(S, { swarmId: "nb1", agentIds: ["a0", "a1", "a2", "a3"], capUsd: 5, wallClockMinutes: 30, goal: GOAL });
+  await P.initSandbox(S, { swarmId: "nb1", agentIds: ["a0", "a1", "a2", "a3"], capUsd: 5, wallClockMinutes: 30, goal: o.goal ?? GOAL });
   await writeFile(
     join(S, "inputs.json"),
     JSON.stringify({ files: [{ path: "inputs/disk.E01", sha256: sha("disk"), bytes: 10 }, { path: "inputs/logs/a.log", sha256: sha("a"), bytes: 10 }, { path: "inputs/logs/b.log", sha256: sha("b"), bytes: 10 }] }),

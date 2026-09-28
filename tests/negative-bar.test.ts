@@ -243,8 +243,12 @@ test("a material negative nobody else reviewed holds the finish line; the review
   assert.equal(P.verifyAttestationChain(chain.replace("nothing", "something")).ok, false, "the review is in the hashed record");
   r = await checkLedgerAnswers(S, ["2"], ["2"]);
   assert.equal(r.ok, true, r.lines.join("\n"));
-  assert.deepEqual(r.outcomes, { "question:2": "answered" }, "an existence question, covered complete and reviewed");
-  assert.match(r.lines[0], /reviewed by a2/);
+  // An existence question, covered complete and reviewed: a disposition under
+  // the bar, and examination-limited while the answer only says nothing was
+  // found (the stronger words settle it: the wording test below).
+  assert.deepEqual(r.outcomes, { "question:2": "limited" });
+  assert.deepEqual(r.dispositions, { "question:2": "bounded_negative" });
+  assert.match(r.lines[0], /the answer does not say the event did not happen.*reviewed by a2/);
   assert.match(await readFile(join(S, P.LEDGER_MD), "utf8"), /question:2 \(bounded_negative\) \(negative, reviewed by a2\)/);
   // The register's question for the section says the same, and keeps the disposition on its chain.
   await L.leadsDigest(a3);
@@ -294,7 +298,9 @@ test("the wording: a negative says what was not found where; 'it did not happen'
   const said = ok(await rec(a1, { ...worded, reasoning: `E-${complete.seq}`, value: "No remote tool was installed on this host: it did not happen", asserts_absence: true })).entry;
   assert.equal(said.asserts_absence, true);
   assert.ok((await P.attestEntry(a2, { seq: said.seq, how: "ran it again", review: REVIEW })).ok);
-  assert.equal((await checkLedgerAnswers(S, ["2"], ["2"])).ok, true);
+  const strong = await checkLedgerAnswers(S, ["2"], ["2"]);
+  assert.equal(strong.ok, true);
+  assert.deepEqual([strong.outcomes["question:2"], strong.dispositions["question:2"]], ["answered", "bounded_negative"], "the stronger bar, said and reviewed, settles the question: the run may end completed on it");
   // The gate holds it again when what earned it no longer stands: the record corrected to one the hub finds partial.
   const corrected = ok(await rec(a0, { ...coverage("2", ["input:disk.E01"], [`E-${absence.seq}`, "job:j000003/hits.txt"], { settings: "one volume only" }), supersedes: complete.seq })).entry;
   assert.equal(corrected.coverage, "partial");

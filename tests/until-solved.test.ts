@@ -1,10 +1,11 @@
 /**
  * An until-solved run at the protocol level: every cap advisory and no wall
  * clock (each pressure the brakes read says nothing is over), no abandon (a
- * vote or not), and a finish line that takes only every question answered:
- * an examination-limited finish, a finish line that could not be run and an
- * abandon are all refused, each naming what is not answered and what blocks
- * it. The model gateway refuses no call for a cap. The regroup lists what is
+ * vote or not), and a finish line that takes every question in scope with a
+ * disposition under the bar, the same as any run (the dispositions
+ * themselves: tests/until-solved-dispositions.test.ts): a question with none,
+ * a finish line that could not be run and an abandon are all refused, each
+ * naming what is not disposed and what blocks it. The model gateway refuses no call for a cap. The regroup lists what is
  * open, blocked, waiting on the operator and uncited.
  */
 import assert from "node:assert/strict";
@@ -74,7 +75,7 @@ test("no abandon in an until-solved run: the verdict refuses it and markDone ref
   assert.equal(await P.swarmDoneExists(a0.sandboxRoot), false);
 });
 
-test("the until-solved gate refuses an examination-limited finish, and names each question not answered and what blocks it", async () => {
+test("the until-solved gate refuses a question with no disposition under the bar (an answer resting on a limitation), and names what blocks it", async () => {
   const { S, a0, a1 } = await run();
   // Question 1 answered; question 2 rests on a limitation, its lead closed needs_operator.
   const f = await P.recordEntry(a0, { kind: "finding", ...F, value: "The volume holds the notes", source: "the volume", evidence: "listing", answers: ["1"] });
@@ -94,10 +95,13 @@ test("the until-solved gate refuses an examination-limited finish, and names eac
   assert.equal(q2.outcome, "limited");
   assert.ok(q2.blocks.some((b) => /L-1 "Follow the pointer outside the image" was closed needs_operator: Allow the host the pointer names/.test(b)), JSON.stringify(q2.blocks));
   const v = P.finishLineVerdict({ ...checks, gate }, false);
-  assert.equal(v.proceed, false, "examination-limited is not accepted");
+  // Refused: question 2 rests on a limitation, which is no disposition under
+  // the bar (before 2026-09-28 this said "ends only when every question is
+  // answered", and refused a reviewed not_determinable too).
+  assert.equal(v.proceed, false, "a question with no disposition under the bar holds the run");
   if (!v.proceed) {
-    assert.match(v.reason, /ends only when every question is answered/);
-    assert.match(v.reason, /- question:2 is limited: .*L-1/);
+    assert.match(v.reason, /it ends when every question in scope has a disposition under the bar/);
+    assert.match(v.reason, /- question:2 is limited, with no disposition under the bar: .*L-1/);
     assert.match(v.reason, /Only the operator can stop this run/);
   }
   // The same run, not until solved, ends examination-limited.

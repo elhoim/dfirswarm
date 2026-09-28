@@ -295,15 +295,18 @@ Limits
                       proposed to you as an operator request (kind decision); your
                       silence is never taken for approval. Also set by the goal's
                       metadata block (stop: cap-pause).
-  --until-solved      --stop operator. Run until every question is answered. There is no wall clock
-                      and every cap is advisory: spend is recorded and shown, and
-                      nothing is stopped for it (a cap given is kept as a figure to
-                      show). done is refused until every question of the goal has a
-                      standing answer that is not inconclusive and does not rest on a
-                      limitation or a deferral, no material lead is open, no lead's
-                      job is uninterpreted and every answer has its critic's act; an
-                      examination-limited finish is not accepted, the agents cannot
-                      abandon, and only swarm.sh stop ends the run. A provider error
+  --until-solved      --stop operator. No wall clock, and every cap is advisory:
+                      spend is recorded and shown, and nothing is stopped for it (a
+                      cap given is kept as a figure to show). It adds no stricter
+                      answer requirement: done is refused until every question in
+                      scope has a disposition under the bar (established; partial; a
+                      bounded negative or not determinable on a coverage record
+                      another seat reviewed; a premise shown not to hold; out of
+                      scope; accepted by the operator; withdrawn), no material lead
+                      is open, no lead's job is uninterpreted and every answer has its
+                      critic's act. Not determinable ends the run examination-limited.
+                      The agents cannot abandon, and only swarm.sh stop ends the run
+                      otherwise. A provider error
                       or a rate limit is retried with backoff. What only the operator
                       can give is a lead closed needs_operator: an operator request
                       (swarm.sh requests <run> list, the console's Requests tab), answered
@@ -3369,11 +3372,24 @@ if os.environ.get("SWARM_CONTRACT_UNTIL_SOLVED") == "1":
         + (f" (the figures given: {', '.join(advisory)})" if advisory else "")
         + f".\n\n- N: {n}\n- Swarm id: `{swarm_id}`\n\n"
         "## Until solved\n\n"
-        "The run ends when every question of the goal has a standing answer that is not inconclusive and "
-        "does not rest on a limitation or a deferral, no material lead is open, no lead's job waits for an "
-        "interpretation, and every answer carries its critic's act; or when the operator stops it. Until "
-        "then done is refused, and the refusal names each question not answered and what blocks it. An "
-        "examination-limited finish is not accepted, and nobody can abandon the run.\n\n"
+        "No wall clock and no cap stops this run; it asks nothing more of an answer than any run does. It "
+        "ends when every question in scope has a disposition under the bar, no material lead is open, no "
+        "lead's job waits for an interpretation, every answer carries its critic's act and no defect "
+        "stands; or when the operator stops it. A disposition is: established; partial; a bounded negative "
+        "or not determinable, each resting on a coverage record another seat has reviewed; a premise shown "
+        "not to hold; out of scope; accepted by the operator; or withdrawn. Until then done is refused, and "
+        "the refusal names each question with no disposition and what blocks it. Nobody can abandon the "
+        "run.\n\n"
+        "A question may have no answer the evidence can give, and that is an answer too. When you cannot "
+        "determine it: plan its routes (lead_open or lead_link with routes), search them, record a coverage "
+        "record (kind=coverage: the proposition, the objects searched, the time range, the method and "
+        "settings, what was covered, skipped and failed, the results, what is still open, and whether the "
+        "event would have left a trace in these sources), have another seat review it (attest with review "
+        "{detection, reproduced, other_route}), then answer not_determinable (or bounded_negative when "
+        "nothing was found in that scope), resting on the coverage record. The run then ends "
+        "examination-limited, which is a proper end. A quick negative (one job over one object within two "
+        "minutes) holds its question until another seat attests its search; a best candidate is not a "
+        "disposition.\n\n"
         f"When nothing moves for {stall} minutes (no new standing entry, no lead closed, no job committed), "
         "the harness posts a regroup to everyone: the questions not answered, the leads open and blocked, "
         "what waits on the operator, and the evidence no entry cites. Answer it with another route. A "
@@ -3517,8 +3533,9 @@ budget = {
     # USD cap cannot fire, and cap_tokens is the brake.
     "metered": metered,
     **({"cap_tokens": int(cap_tokens)} if cap_tokens else {}),
-    # Until solved: no wall clock, every cap advisory, done only on every
-    # question answered, and the watchdog's regroup after stall_minutes.
+    # Until solved: no wall clock, every cap advisory, done on every question
+    # with a disposition under the bar (as any run), and the watchdog's
+    # regroup after stall_minutes.
     **({"until_solved": True, "stall_minutes": int(os.environ.get("SWARM_STALL_MINUTES") or 15)} if os.environ.get("SWARM_UNTIL_SOLVED") == "1" else {}),
     # What a cap does: pause the run (the default), stop it, or nothing (the operator's).
     "stop_policy": os.environ.get("SWARM_STOP_POLICY") or "cap-pause",
@@ -6295,7 +6312,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   fi
   if [[ "$until_solved" -eq 1 ]]; then
     echo "Cap:          none: until solved, no wall clock; spend is recorded and shown, and nothing is stopped for it$([[ "$cap" != 0 || -n "$cap_tokens" ]] && echo " (advisory: \$$cap${cap_tokens:+, ${cap_tokens} tokens})")"
-    echo "Until solved: done only when every question is answered; no abandon; a regroup after ${stall_minutes} minutes without progress, then with backoff; only swarm.sh stop $swarm_id ends it"
+    echo "Until solved: no caps and no wall clock; done when every question in scope has a disposition under the bar (a reviewed not_determinable included: examination-limited); no abandon; a regroup after ${stall_minutes} minutes without progress, then with backoff; otherwise only swarm.sh stop $swarm_id ends it"
   elif [[ "$metered" -eq 1 ]]; then
     echo "Cap:          \$$cap / ${wall}m${cap_tokens:+ / ${cap_tokens} tokens}$([[ "${cap_tokens_default:-0}" -eq 1 ]] && echo " (the default token cap)")"
   elif [[ -n "$subscription_models_csv" ]]; then
