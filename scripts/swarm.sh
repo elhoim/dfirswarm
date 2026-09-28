@@ -893,6 +893,17 @@ operator_trace() { # <sandbox> <command> [args...]
   trace_emit "$ROOT" "$sandbox" "$line" >/dev/null 2>&1 || true
 }
 
+# The harness's own line on a live run's trace: a reserved tool name
+# (extensions/protocol.ts), `system`, and what it records as args.
+system_trace() { # <sandbox> <tool> <args json>
+  local sandbox="$1" tool="$2" args="$3" line
+  [[ -n "$sandbox" && -d "$sandbox/traces" ]] && declare -F trace_emit >/dev/null || return 0
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$args" || args='{}'
+  line="$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" --arg tool "$tool" --argjson args "$args" \
+    '{ts: $ts, agent: "system", tool: $tool, args: $args, result: {ok: true}}')" || return 0
+  trace_emit "$ROOT" "$sandbox" "$line" >/dev/null 2>&1 || true
+}
+
 # The harness a VM run started with, whatever happens to the checkout while
 # it runs: a `git pull` or an edit mid-run used to reach agents that had not
 # loaded the extension yet, and a forged tool's runner, in the middle of a
@@ -5410,6 +5421,12 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     # operator's audit holds for it, not a start it never typed.
     if [[ -n "$resume_of" ]]; then
       SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" operator_trace "$sandbox" resume ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}
+      # And the harness's own line that the run goes on (the stop policy's
+      # reserved run_resumed): what it resumed from, the segment, and the
+      # follow-ups the resume took up as its work.
+      SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" system_trace "$sandbox" run_resumed \
+        "$(jq -cn --arg from "${RESUME_FROM:-}" --arg seg "${RESUME_SEGMENT:-}" --arg fu "${RESUME_FOLLOW_UPS:-}" \
+          '{from: (if $from == "" then null else $from end), segment: ($seg | tonumber? // null), follow_ups: ($fu | split(",") | map(select(. != "")))}')"
     else
       SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" operator_trace "$sandbox" start ${start_args[@]+"${start_args[@]}"}
     fi
@@ -9290,6 +9307,7 @@ cmd_resume() {
     exit 2
   fi
   local out who="${as:-operator}"
+  RESUME_FOLLOW_UPS=""
   if [[ "$prepared_resume" -eq 1 ]]; then
     echo "Resume:       run $id was prepared for its resume already (--no-start); it is started now"
     RESUME_FROM="$(jq -r '(.resumes // []) | last | .from // "it was stopped"' <<<"$rec")"
@@ -9303,9 +9321,14 @@ cmd_resume() {
   echo "Wall clock:   $(jq -r '.wall_used_minutes' <<<"$out") minute(s) used before the stop$(jq -r 'if (.set | length) > 0 then "; extended: " + (.set | to_entries | map("\(.key) \(.value)") | join(", ")) else "" end' <<<"$out")"
   jq -r '.handoffs[] | "Hand-off:     \(.agent) starts from \(if .kind then "its last \(.kind) (\(.chars) chars, \(.at))" else "the registers (it left no note)" end) in \(.file)"' <<<"$out"
   echo "Anchored:     $(jq -r '.anchored' <<<"$out")"
+  # Questions admitted or amended after the run's done were follow-ups; the resume takes them up as its work.
+  jq -r 'if (.follow_ups | type) == "array" and (.follow_ups | length) > 0 then "Follow-ups:   \(.follow_ups | join(", ")), recorded after the done, are work of the continuation now" elif (.follow_ups | type) == "string" then "WARN: follow-ups \(.follow_ups)" else empty end' <<<"$out"
+  RESUME_FOLLOW_UPS="$(jq -r 'if (.follow_ups | type) == "array" then .follow_ups | join(",") else "" end' <<<"$out")"
   # The questions asked for the continuation, admitted as analyst questions now that the run is no longer ended.
   RESUME_FROM="$(jq -r '.from' <<<"$out")"
   fi
+  # The segment the continuation is: the newest done/history/<k> the resume made.
+  RESUME_SEGMENT="$(ls "$sandbox/done/history" 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -n 1 || true)"
   RESUME_QUESTIONS=""
   local q qout
   for q in ${questions[@]+"${questions[@]}"}; do
@@ -9316,7 +9339,7 @@ cmd_resume() {
       echo "WARN: the question \"$q\" was not admitted: $(jq -r '.reason // "refused"' <<<"$qout" 2>/dev/null || printf '%s' "$qout"). Add it with swarm.sh question $id add once the run is going." >&2
     fi
   done
-  export RESUME_FROM RESUME_QUESTIONS
+  export RESUME_FROM RESUME_QUESTIONS RESUME_SEGMENT RESUME_FOLLOW_UPS
   local extra=(--resume-of "$id")
   [[ "$no_start" -eq 1 ]] && extra+=(--no-start)
   cmd_start ${start_argv[@]+"${start_argv[@]}"} "${extra[@]}"

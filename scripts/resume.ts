@@ -33,6 +33,7 @@ import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promi
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as P from "../extensions/protocol.ts";
+import * as Q from "../extensions/questions.ts";
 import { anchorResume, custodyAnchorPath } from "./custody.ts";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
@@ -202,7 +203,9 @@ export async function prepareResume(sandbox: string, o: { run: string; by: strin
   } catch (err) {
     anchored = `not anchored: ${(err as Error).message}`;
   }
-  return { ok: true, run: o.run, from, segment: k, moved, wall_used_minutes: Math.round(used / 60_000), set, handoffs, anchored, heads };
+  // The follow-ups recorded after the done (the question register's after_done) are the continuation's work: one event names them.
+  const followUps = await Q.continueFollowUps(sandbox, { segment: k, by: o.by }).catch((err: Error) => `not taken up: ${err.message}`);
+  return { ok: true, run: o.run, from, segment: k, moved, wall_used_minutes: Math.round(used / 60_000), set, handoffs, anchored, heads, follow_ups: followUps };
 }
 
 /** The chains' lengths and heads as the resume found them: what the first segment's seals are prefixes of. */
