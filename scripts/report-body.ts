@@ -2111,8 +2111,38 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
       ".",
     ],
   });
+  body.push(...downgradeBlocks(a, run));
   body.push(...answerSteps(a, s, run, memo));
   return { k: "box", cls: "answer", id: questionAnchor(q.id), level: 3, title, chips: [questionStatus_(q, run, memo).status], body };
+}
+
+/**
+ * Each downgrade in a question's answer chain (an answer moved from
+ * established or partial to not determinable or a bounded negative): the
+ * earlier answer, the disputes raised on it, and the counter-evidence the
+ * downgrade names. A reader sees why the answer went down, never only that
+ * it did.
+ */
+function downgradeBlocks(a: LedgerEntry, run: Run): Block[] {
+  const out: Block[] = [];
+  let cur: LedgerEntry | undefined = a;
+  while (cur) {
+    const prev: LedgerEntry | undefined = cur.supersedes !== undefined ? run.bySeq.get(cur.supersedes) : undefined;
+    if (cur.downgrade && prev) {
+      const hash = entryHash(prev);
+      const raised = run.disputes.filter((d) => d.act === "dispute" && d.target === hash);
+      out.push({
+        k: "rows",
+        rows: [
+          { label: "Downgraded", s: [{ e: cur.seq }, ` moved the answer from ${resultWords(answerResult(prev))} (`, { e: prev.seq }, `) to ${resultWords(answerResult(cur))}`] },
+          { label: "Counter-evidence", s: [...cur.downgrade.evidence.flatMap((r, i): Span[] => [...(i ? [", "] : []), /^E-\d+$/.test(r) ? { e: Number(r.slice(2)) } : { code: r }]), `: ${cur.downgrade.why}`] },
+          { label: "Disputes of the earlier answer", s: [raised.length ? raised.map((d) => `${d.by}: ${d.why}`).join("; ") : "none"] },
+        ],
+      });
+    }
+    cur = prev?.kind === "answer" ? prev : undefined;
+  }
+  return out;
 }
 
 /**

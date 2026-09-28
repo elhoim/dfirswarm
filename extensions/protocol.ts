@@ -7665,6 +7665,7 @@ export type LedgerEntry = {
   /** A coverage record, in place of looked_for: why no literal form exists. */
   looked_for_none_why?: string;
   /** An answer that moves its question from a positive result (established, partial) to a negative one: what undermines the earlier chain (entries E-<seq> or objects) and why. */
+  downgrade?: { evidence: string[]; why: string };
   /** A coverage record, written by the hub: whether the jobs behind it were given every object it names (negative-bar.ts). */
   coverage?: "complete" | "partial";
   coverage_detail?: { units: NB.CoverageUnit[]; jobs: string[]; why: string[] };
@@ -7757,6 +7758,7 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
     ...(e.question_refs?.length ? { question_refs: e.question_refs.map((r) => ({ q: r.q, section: r.section, answer: r.answer, fp: r.fp })) } : {}),
     ...(e.finish_material ? { finish_material: e.finish_material } : {}),
     ...(e.unsupported_tokens?.length ? { unsupported_tokens: e.unsupported_tokens } : {}),
+    ...(e.downgrade ? { downgrade: { evidence: e.downgrade.evidence, why: e.downgrade.why } } : {}),
     ...coverageFields(e),
     ...(e.source_class ? { source_class: e.source_class } : {}),
     ...(e.provenance ? { provenance: canonicalValue(e.provenance) } : {}),
@@ -7963,6 +7965,7 @@ export type LedgerInput = {
   /** A coverage record, in place of looked_for: why no literal form exists. */
   looked_for_none_why?: string;
   /** An answer from a positive result to a negative one: {evidence: [E-<seq> or refs], why}. */
+  downgrade?: unknown;
 };
 
 function listOf(v: string[] | string | undefined): string[] {
@@ -8075,7 +8078,7 @@ async function ledgerV3Input(
 }
 
 /** The fields only an answer takes, and only a finding takes: named in a refusal when they come with another kind. */
-const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why", "asserts_absence", "question_rev", "material"] as const;
+const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why", "asserts_absence", "question_rev", "material", "downgrade"] as const;
 const FINDING_ONLY_FIELDS = ["indicates", "alternatives", "alternatives_none_why", "significance"] as const;
 /** The fields only a coverage record takes. */
 const COVERAGE_ONLY_FIELDS = ["proposition", "inventory_rev", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures", "result_refs", "result_bound", "detection_opportunity", "areas", "acquisition_ask", "acquisition_none_why", "looked_for", "looked_for_none_why"] as const;
@@ -10596,6 +10599,26 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   const because = boundedText("because", input.because, LEDGER_BECAUSE_MAX_CHARS);
   if (!because.ok) return because;
   if (because.value && supersedes === undefined) return { ok: false, reason: "because says why a correction corrects: give supersedes too" };
+  // A downgrade names its counter-evidence (docs/adr/0013, round 13: a
+  // correct established answer was walked down to not determinable by a
+  // dispute that cited nothing against it).
+  let downgrade: { evidence: string[]; why: string } | undefined;
+  if (input.downgrade !== undefined && input.downgrade !== null) {
+    const shape = "downgrade is {evidence: [E-<seq> or objects], why}: what undermines the earlier answer's chain, and why";
+    if (typeof input.downgrade !== "object" || Array.isArray(input.downgrade)) return { ok: false, reason: shape };
+    const d = input.downgrade as Record<string, unknown>;
+    const dWhy = boundedText("downgrade.why", d.why, LEDGER_WHY_MAX_CHARS);
+    if (!dWhy.ok) return dWhy;
+    const ev = listOf(d.evidence as string[] | string | undefined).map((r) => (/^#\d+$/.test(r) ? `E-${r.slice(1)}` : /^e-\d+$/i.test(r) ? r.toUpperCase() : r));
+    if (!ev.length || !dWhy.value) return { ok: false, reason: shape };
+    if (ev.length > LEDGER_MAX_CITATIONS) return { ok: false, reason: `downgrade.evidence names more than ${LEDGER_MAX_CITATIONS}` };
+    const objects = ev.filter((r) => !/^E-\d+$/.test(r));
+    if (objects.length) {
+      const c = await checkRefs(ctx.sandboxRoot, objects);
+      if (!c.ok) return { ok: false, reason: `downgrade.evidence: ${c.reason}` };
+    }
+    downgrade = { evidence: ev, why: dWhy.value };
+  }
   // The finish phase (extensions/finish.ts): while the coordinator
   // assembles the finish (it holds the lease and the registers are met but
   // for what is late, a confirmation or a resolution), another seat's
@@ -10666,6 +10689,24 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         if (target.section !== sec.section) return { ok: false, reason: `#${supersedes} answers ${target.section}: an answer corrects the answer to its own section` };
         const already = replaced.get(supersedes);
         if (already !== undefined) return { ok: false, reason: `#${supersedes} is already superseded by #${already}: correct #${already} instead, so the corrections stay one line` };
+      }
+      // From a positive result to a negative one: a downgrade, which names what undermines the earlier chain.
+      const earlier = supersedes !== undefined ? (bySeq.get(supersedes) as LedgerEntry) : undefined;
+      const earlierResult = earlier ? NB.answerResult(earlier) : null;
+      const downgrading = Boolean(earlier) && (earlierResult === "established" || earlierResult === "partial") && (resultText === "not_determinable" || resultText === "bounded_negative");
+      if (downgrading && !downgrade) {
+        return {
+          ok: false,
+          reason: `#${supersedes} answered ${sec.section} ${NB.resultWords(earlierResult)}; recording it ${NB.resultWords(resultText)} is a downgrade, and a downgrade names what undermines the earlier chain: downgrade {evidence: [E-<seq> or objects that show it], why}. A doubt with no counter-evidence is not one: dispute #${supersedes} (why, refs), and if the doubt stands attest it best_candidate or record it again with confidence medium; the answer stays`,
+        };
+      }
+      if (downgrade && !downgrading) return { ok: false, reason: `downgrade is for a revision that moves an answer from established or partial to not_determinable or bounded_negative${earlier ? `; #${supersedes} is ${NB.resultWords(earlierResult)} and this is ${NB.resultWords(resultText)}` : "; give supersedes"}` };
+      for (const r of downgrade?.evidence ?? []) {
+        if (!/^E-\d+$/.test(r)) continue;
+        const n = Number(r.slice(2));
+        if (!bySeq.has(n)) return { ok: false, reason: `downgrade.evidence names ${r}: there is no entry #${n} in the ledger` };
+        if (n === supersedes) return { ok: false, reason: `downgrade.evidence names ${r}, the answer being downgraded: name what undermines it` };
+        if (replaced.has(n)) return { ok: false, reason: `downgrade.evidence names ${r}, superseded by #${standingSeq(n, replaced)}: name the entry that stands` };
       }
       // A summary or a narrative that cites a question's answer by its seq
       // (E-n) is bound to that question instead (question:N): the pilot's
@@ -10800,6 +10841,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         ...(materialWhy.value ? { finish_material: materialWhy.value } : {}),
         ...(input.asserts_absence === true ? { asserts_absence: true } : {}),
         ...(tokens.length ? { unsupported_tokens: tokens } : {}),
+        ...(downgrade ? { downgrade } : {}),
         by: ctx.agentId,
         authors: [ctx.agentId],
         at: new Date().toISOString(),
