@@ -19,7 +19,10 @@
  * "Suspected stall" only when all three are still for the stall window
  * (SWARM_JOB_STALL_SEC, 600) and the job is not within two minutes of its
  * timeout; "unknown" when the CPU and I/O signal is missing, since silence
- * alone proves nothing. The files are not sealed and not citable until the
+ * alone proves nothing. A measurement must be current: a heartbeat whose
+ * stamp has not advanced for a minute of samples is no CPU signal, a last
+ * sample older than two minutes says nothing now, and stillness is never
+ * counted across a gap between samples. The files are not sealed and not citable until the
  * job commits; cancelling a job keeps what it wrote; nothing here cancels
  * anything. Samples are kept beside the job's staging on the host
  * (telemetry.jsonl), so a restarted service reads them where they were.
@@ -33,6 +36,21 @@ import { join } from "node:path";
 export const OUT_WALK_MAX = 10_000;
 /** A job within this long of its timeout is ending, not stalled. */
 export const NEAR_TIMEOUT_MS = 2 * 60_000;
+/**
+ * The longest gap between two samples that stillness is counted across,
+ * and the oldest a last sample may be to say anything now: four of the
+ * service's half-minute samples missed. Past it the sampler is behind or
+ * stopped, and silence between samples is not measured silence.
+ */
+export const SAMPLE_GAP_MS = 2 * 60_000;
+/**
+ * How long, in the host's samples, a heartbeat may read the same before it
+ * is stale: four of the worker's 15 s beats missed. A heartbeat that stopped
+ * changing is a loop that died, not a still job. Judged by the heartbeat's
+ * own stamp not advancing across the host's samples, so a guest clock that
+ * differs from the host's changes nothing.
+ */
+export const HEARTBEAT_STALE_MS = 60_000;
 
 /** Whole seconds from the environment, in milliseconds, or the default. */
 function envMs(name: string, dfltSec: number): number {
@@ -172,24 +190,52 @@ export function assessJob(samples: TelemetrySample[], o: { started_at: string | 
   const hint = "Metadata only: the files are not sealed and not citable until the job commits. Cancelling it (job_status cancel: true) keeps what it wrote; nothing is cancelled for you.";
   const empty = { files: 0, bytes: 0, newest: null, newest_at: null, bounded: false, still_ms: null };
   if (!last) return { state: "unknown", why: "no sample of it yet", signals: { out: empty, logs: { stdout_bytes: 0, stderr_bytes: 0, still_ms: null }, cpu: { source: null, still_ms: null } }, running_ms: running, timeout_in_ms: timeoutIn, sealed: false, hint };
-  // How long a signal has held the value it has now, over the samples kept.
+  // A CPU and I/O signal is current when msb gave it at the sample, or the
+  // worker's heartbeat stamp advanced within HEARTBEAT_STALE_MS of the
+  // host's samples: a heartbeat file that stopped changing is a loop that
+  // died, never a still job. frozenFrom[i] is the first sample of the run
+  // of samples whose heartbeat read the same as sample i's.
+  const frozenFrom: number[] = [];
+  for (let i = 0; i < samples.length; i++) {
+    const x = samples[i]!;
+    const prev = i > 0 ? samples[i - 1]! : null;
+    const same = prev && x.cpu?.source === "heartbeat" && prev.cpu?.source === "heartbeat" && prev.cpu.at === x.cpu.at && x.at - prev.at <= SAMPLE_GAP_MS;
+    frozenFrom.push(same ? frozenFrom[i - 1]! : i);
+  }
+  const currentAt = (i: number) => {
+    const x = samples[i]!;
+    return Boolean(x.cpu && (x.cpu.source === "msb" || x.at - samples[frozenFrom[i]!]!.at <= HEARTBEAT_STALE_MS));
+  };
+  const indexOf = new Map(samples.map((x, i) => [x, i] as const));
+  const current = (x: TelemetrySample) => currentAt(indexOf.get(x) ?? samples.length - 1);
+  // How long a signal has held the value it has now, over the samples kept:
+  // never across a gap longer than SAMPLE_GAP_MS between two samples, which
+  // is time nobody measured.
   const stillSince = (same: (a: TelemetrySample, b: TelemetrySample) => boolean): number | null => {
     let since = last.at;
     for (let i = samples.length - 2; i >= 0; i--) {
-      if (!same(samples[i]!, last)) break;
+      if (samples[i + 1]!.at - samples[i]!.at > SAMPLE_GAP_MS || !same(samples[i]!, last)) break;
       since = samples[i]!.at;
     }
     return samples.length > 1 ? now - since : null;
   };
   const outStill = stillSince((a, b) => a.out.files === b.out.files && a.out.bytes === b.out.bytes && a.out.newest_ms === b.out.newest_ms);
   const logStill = stillSince((a, b) => a.stdout.bytes === b.stdout.bytes && a.stderr.bytes === b.stderr.bytes);
-  const cpuStill = last.cpu ? stillSince((a, b) => Boolean(a.cpu && b.cpu && a.cpu.cpu === b.cpu.cpu && a.cpu.io === b.cpu.io)) : null;
+  const cpuStill = last.cpu && current(last) ? stillSince((a, b) => Boolean(current(a) && a.cpu && b.cpu && a.cpu.cpu === b.cpu.cpu && a.cpu.io === b.cpu.io)) : null;
   const signals = {
     out: { files: last.out.files, bytes: last.out.bytes, newest: last.out.newest, newest_at: last.out.newest_ms ? new Date(last.out.newest_ms).toISOString() : null, bounded: last.out.bounded, still_ms: outStill },
     logs: { stdout_bytes: last.stdout.bytes, stderr_bytes: last.stderr.bytes, still_ms: logStill },
     cpu: { source: last.cpu?.source ?? null, still_ms: cpuStill },
   };
   const base = { signals, running_ms: running, timeout_in_ms: timeoutIn, sealed: false as const, hint };
+  // A measurement of now: the host sampled it lately.
+  if (now - last.at > SAMPLE_GAP_MS) {
+    return { state: "unknown", why: `it has not been sampled for ${Math.round((now - last.at) / 60_000)} min (the job service samples every half minute: its sampler is behind or stopped), so nothing says what it does now`, ...base };
+  }
+  if (last.cpu && !current(last)) {
+    const from = samples[frozenFrom[samples.length - 1]!]!.at;
+    return { state: "unknown", why: `its heartbeat has not been written since ${new Date(from).toISOString()} (the same stamp for ${Math.round((last.at - from) / 60_000)} min of samples): the CPU and I/O signal is stale, and silence alone proves nothing`, ...base };
+  }
   const window = stallMs();
   const outMoved = outStill === null || outStill < window;
   const logsMoved = logStill === null || logStill < window;

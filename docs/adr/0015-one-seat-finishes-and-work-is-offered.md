@@ -246,7 +246,10 @@ have lost its provider.
     script writes every 15 s from the VM's own `/proc` counters. "Suspected
     stall" only when all three are still for `SWARM_JOB_STALL_SEC` (600) and
     the job is not within two minutes of its timeout; "quiet" when it works
-    without writing; "unknown" without CPU and I/O. Metadata only, not sealed
+    without writing; "unknown" without CPU and I/O, or when they are not
+    current (a heartbeat whose stamp stopped advancing, a sampler more than
+    two minutes behind); stillness is never counted across a gap between
+    samples. Metadata only, not sealed
     and not citable; the hint says cancelling keeps what the job wrote;
     nothing is cancelled for anyone. `job_status` carries it, and the header
     names a seat's own suspected stalls.
@@ -254,10 +257,12 @@ have lost its provider.
     lead, the first regroup is a nudge to that lead's holder with what the
     job is doing; a window later everyone is asked, job or not; with no such
     job, everyone at once as before.
-20. **A missing program** (B17): exit 127, or the shell's "X: command not
-    found", is recorded as `program_missing` with the profile and image (a
-    journal line, the job record, its reason, `job_status`) and shown in the
-    console's job detail.
+20. **A missing program** (B17): exit 127, or a shell's own diagnostic
+    ("X: command not found", zsh's "command not found: X", dash's "sh: 1:
+    X: not found" with exit 127), is recorded as `program_missing` with the
+    profile and image (a journal line, the job record, its reason,
+    `job_status`) and shown in the console's job detail. An application's
+    own "X: not found" (a file or an object it looked for) is not one.
 21. **Credential renewal** (B10). Verified against a running microVM on msb
     0.7.2 (`tests/vm-secret-rotation.test.ts`, `npm run test:vm`):
     `Sandbox.modify({secrets: {NAME: {value}}})` plans the rotation as

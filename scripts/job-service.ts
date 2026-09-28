@@ -2157,15 +2157,23 @@ export class JobService {
 
 /**
  * The program a failed job's image did not hold (B17), from the generic
- * signs only: the shell's "X: command not found" on its stderr (the name
- * sanitised), or exit 127 with no name ("?"). Null when neither.
+ * signs only: a shell's own diagnostic on its stderr (bash's "X: command
+ * not found", zsh's "command not found: X", and dash's "sh: 1: X: not
+ * found" with the shell's exit 127; the name sanitised), or exit 127 with
+ * no name ("?"). An application's own "X: not found" (a file, an object it
+ * looked for) is no missing program: null, as when there is neither.
  */
 export async function programMissing(ctl: string, exit: number | null): Promise<string | null> {
   const err = await readFile(join(ctl, "stderr.log")).catch(() => Buffer.alloc(0));
   const text = err.subarray(Math.max(0, err.length - 65536)).toString("utf8");
-  const m = /(?:^|\n)(?:[^\n]*?: )?(?:line \d+: )?([A-Za-z0-9_.+-]{1,64}): (?:command )?not found/.exec(text);
-  if (m) return m[1]!;
-  return exit === 127 ? "?" : null;
+  // zsh first: its "zsh: command not found: X" would otherwise read as a program named "zsh".
+  const zsh = /(?:^|\n)[^\n]*?: command not found: ([A-Za-z0-9_.+-]{1,64})/.exec(text);
+  if (zsh) return zsh[1]!;
+  const bash = /(?:^|\n)(?:[^\n]*?: )?(?:line \d+: )?([A-Za-z0-9_.+-]{1,64}): command not found/.exec(text);
+  if (bash) return bash[1]!;
+  if (exit !== 127) return null;
+  const dash = /(?:^|\n)[^\n:]*: \d+: ([A-Za-z0-9_.+-]{1,64}): not found/.exec(text);
+  return dash ? dash[1]! : "?";
 }
 
 /** One post, for the agent that asked. */

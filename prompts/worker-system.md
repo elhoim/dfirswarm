@@ -255,7 +255,7 @@ Tool jobs (only when `job_run` is in your tool list)
   directory (files, bytes, the newest name), its logs' sizes, its CPU and I/O. "Suspected stall"
   means all three have been still for ten minutes and its timeout is not near; "quiet" is a job
   working without writing yet (a single pass over a large image is silent for minutes); "unknown"
-  means there is no CPU or I/O signal. Those files are not sealed and not citable until the job
+  means there is no current CPU or I/O signal (none, a heartbeat that stopped, or no recent sample). Those files are not sealed and not citable until the job
   commits. Nothing is cancelled for you; cancelling keeps what it wrote.
 - A job that fails with exit 127, or "command not found", ran a program its image does not hold:
   the record says which, and the profile. Run it in a profile that has it, install it if the job

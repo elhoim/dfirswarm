@@ -44,17 +44,17 @@ test("B11: the three signals decide: moving, quiet (a busy loop or a silent pass
   let p = T.assessJob([sample(at(0), { bytes: 10 }), sample(at(20), { bytes: 20 })], { started_at: started, timeout_seconds: 3600, now: at(20) });
   assert.equal(p.state, "moving");
   // A busy loop: nothing written for 20 min, the CPU moves: quiet, never a stall.
-  p = T.assessJob([sample(at(0), { cpu: 1 }), sample(at(10), { cpu: 500 }), sample(at(20), { cpu: 900 })], { started_at: started, timeout_seconds: 3600, now: at(20) });
+  p = T.assessJob(Array.from({ length: 41 }, (_, i) => sample(at(i / 2), { cpu: 1 + i * 20 })), { started_at: started, timeout_seconds: 3600, now: at(20) });
   assert.equal(p.state, "quiet");
   assert.match(p.why, /working without writing yet/);
-  // All three still past the window, far from its timeout: suspected stall.
-  p = T.assessJob([sample(at(0), {}), sample(at(5), {}), sample(at(15), {})], { started_at: started, timeout_seconds: 3600, now: at(15) });
+  // All three still past the window, far from its timeout, sampled all along: suspected stall.
+  p = T.assessJob(Array.from({ length: 31 }, (_, i) => sample(at(i / 2), {})), { started_at: started, timeout_seconds: 3600, now: at(15) });
   assert.equal(p.state, "suspected_stall");
   assert.match(p.why, /all been still for 15 min/);
   assert.equal(p.sealed, false);
   assert.match(p.hint, /not sealed and not citable.*keeps what it wrote; nothing is cancelled for you/);
   // Near its timeout: it ends by itself.
-  p = T.assessJob([sample(at(0), {}), sample(at(15), {})], { started_at: started, timeout_seconds: 16 * 60, now: at(15) });
+  p = T.assessJob(Array.from({ length: 31 }, (_, i) => sample(at(i / 2), {})), { started_at: started, timeout_seconds: 16 * 60, now: at(15) });
   assert.equal(p.state, "quiet");
   assert.match(p.why, /its timeout is \d+ s away/);
   // No CPU or I/O telemetry: unknown, whatever else is still.
@@ -110,7 +110,8 @@ test("B11: a running job's progress is read from disk as the service sampled it;
   await writeFile(join(jobDir, "job.json"), JSON.stringify({ id: "j000001", attempt: 1, state: "running", started_at: new Date(t0).toISOString(), requester: { agent: "a0" }, spec: { kind: "command", timeout_seconds: 3600 } }));
   const staging = join(storePaths(S).staging, "j000001-1");
   await mkdir(staging, { recursive: true });
-  for (const m of [0, 10, 25]) await T.keepSample(staging, sample(t0 + m * 60_000, {}));
+  // Sampled every half minute, as the service does, up to now: still throughout.
+  for (let s = 0; s <= 30 * 60; s += 30) await T.keepSample(staging, sample(t0 + s * 1000, {}));
   const p = await T.jobProgressOnDisk(S, "j000001");
   assert.equal(p?.state, "suspected_stall");
   const head = (await L.leadsDigest({ sandboxRoot: S, agentId: "a0" }, { mark: false })).text;
@@ -225,4 +226,60 @@ test("B10: the seats' tokens are renewed at half their validity, in place, only 
   const adds = async () => ({ Sandbox: { get: async () => ({ modify: async () => ({ status: "running", applied: false, policy: "no_restart", changes: [{ kind: "secret", field: "secret", name: "X", change: "added", disposition: "live", allowHosts: [] }], conflicts: [], warnings: [], resizeStatus: [] }) }) } }) as never;
   const none = await renewSeatSecrets(spec, { force: true, loader: adds, mint: async () => secrets });
   assert.deepEqual(none.seats.map((x) => x.outcome), ["nothing", "nothing", "nothing"]);
+});
+
+/** The service's samples every half minute from `fromMin` to `toMin` (inclusive), each as `o` says (its heartbeat at the sample's time unless `hbAt` fixes it). */
+const series = (t0: number, fromMin: number, toMin: number, o: Parameters<typeof sample>[1] & { hbAt?: number } = {}): T.TelemetrySample[] => {
+  const out: T.TelemetrySample[] = [];
+  for (let s = fromMin * 60; s <= toMin * 60; s += 30) {
+    const x = sample(t0 + s * 1000, o);
+    if (x.cpu && o.hbAt !== undefined) x.cpu = { ...x.cpu, at: o.hbAt };
+    out.push(x);
+  }
+  return out;
+};
+
+test("B11 under review: a frozen heartbeat is no CPU signal, a sampler that stopped is no measurement, and stillness is never counted across missing samples", () => {
+  const t0 = Date.parse("2026-09-28T10:00:00Z");
+  const min = 60_000;
+  const started = new Date(t0).toISOString();
+  const opts = (now: number) => ({ started_at: started, timeout_seconds: 3600, now });
+  // Sampled all along, everything still, the heartbeat current: a suspected stall.
+  assert.equal(T.assessJob(series(t0, 0, 12), opts(t0 + 12 * min)).state, "suspected_stall");
+  // The heartbeat file stopped being written at the start (the worker's loop died): its counters prove nothing.
+  let p = T.assessJob(series(t0, 0, 12, { hbAt: t0 }), opts(t0 + 12 * min));
+  assert.equal(p.state, "unknown", p.why);
+  assert.match(p.why, /heartbeat .*not been written since/);
+  // A guest clock an hour behind the host's, its heartbeat advancing: current, and a stall is still seen.
+  const skewed = series(t0, 0, 12).map((x) => ({ ...x, cpu: x.cpu ? { ...x.cpu, at: x.at - 60 * min } : null }));
+  assert.equal(T.assessJob(skewed, opts(t0 + 12 * min)).state, "suspected_stall");
+  // The host's sampler stopped after three minutes: seventeen minutes later nothing is measured.
+  p = T.assessJob(series(t0, 0, 3), opts(t0 + 20 * min));
+  assert.equal(p.state, "unknown", p.why);
+  assert.match(p.why, /not been sampled for 17 min/);
+  // A gap of ten minutes between samples: stillness counts from after it, never across it.
+  p = T.assessJob([...series(t0, 0, 2), ...series(t0, 12, 13)], opts(t0 + 13 * min));
+  assert.notEqual(p.state, "suspected_stall", p.why);
+  assert.ok((p.signals.cpu.still_ms ?? 0) <= 1.5 * min, JSON.stringify(p.signals));
+});
+
+test("B17 under review: an application's own \"not found\" is not a missing program; the shell's words for one are, and so is exit 127", async () => {
+  const ctl = await mkdtemp(join(tmpdir(), "pm2-"));
+  dirs.push(ctl);
+  const said = async (text: string, exit: number) => {
+    await writeFile(join(ctl, "stderr.log"), text);
+    return programMissing(ctl, exit);
+  };
+  // An existing program saying it could not find a file or an object: not the image's fault.
+  assert.equal(await said("evidence.raw: not found\n", 1), null);
+  assert.equal(await said("error: object 0x1f3a: not found\nvolume.vhd: not found\n", 2), null);
+  assert.equal(await said("grep: notes.txt: No such file or directory\n", 2), null);
+  // The shells' own diagnostics name the program.
+  assert.equal(await said("/runs/s/.jobs/j000002/command.sh: line 3: bulk_extractor: command not found\n", 127), "bulk_extractor");
+  assert.equal(await said("bash: yara: command not found\n", 127), "yara");
+  assert.equal(await said("zsh: command not found: plaso\n", 127), "plaso");
+  assert.equal(await said("sh: 1: volatility3: not found\n", 127), "volatility3");
+  // dash's form is only the shell's with the shell's exit code; exit 127 alone still says a program is missing.
+  assert.equal(await said("sh: 1: evidence.raw: not found\n", 1), null);
+  assert.equal(await said("evidence.raw: not found\n", 127), "?");
 });

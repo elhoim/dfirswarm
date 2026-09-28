@@ -66,9 +66,12 @@ All notable changes to this project. The format follows
   route and its product contract; `leads/leads.md` renders the same.
 - **The runtime.** A running job is seen by its outputs, its logs and its CPU
   and I/O (msb's metrics, or the worker's heartbeat): "suspected stall" is
-  shown, never acted on. The regroup nudges a running job's holder first. A
+  shown, never acted on, and only on current measurements (a frozen
+  heartbeat or a stopped sampler is "unknown", and stillness is not counted
+  across missing samples). The regroup nudges a running job's holder first. A
   program missing from a job's image is named with its profile in the job
-  record and the console. The seats' subscription tokens are renewed on the
+  record and the console, from the shell's own diagnostic or exit 127, never
+  from an application's "not found". The seats' subscription tokens are renewed on the
   host with msb's live secret update, verified against a running VM.
 
 ### Fixed: the question register, after an independent review
