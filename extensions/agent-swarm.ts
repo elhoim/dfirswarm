@@ -2512,7 +2512,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // The dynamic network (scripts/net-broker.ts, docs/adr/0011): a request
+  // The dynamic network (scripts/net-broker.ts, docs/adr/0012): a request
   // decided on the host by rules, a grant used through the fetch service.
   /** A network call's answer to the agent, and its line on the trace. */
   async function netAnswer(cwd: string, tool: string, params: Record<string, unknown>, started: number, r: { ok: boolean; reason?: string } & Record<string, unknown>) {

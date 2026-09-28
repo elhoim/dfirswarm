@@ -129,7 +129,7 @@ sys.exit(3 if changed else 0)
 `;
 
 /**
- * What a job with network grants runs to use one (docs/adr/0011): one call
+ * What a job with network grants runs to use one (docs/adr/0012): one call
  * to the fetch service on the host, as this job, for one grant. The request
  * is the grant's own; the body comes back and is written where the job says
  * (the capture is sealed in the store either way), the answer's other
@@ -202,7 +202,7 @@ export type JobSpec = {
   profile?: string;
   /**
    * The network grants its requester gave it (N-<k>, each asked for a job:
-   * docs/adr/0011): bound to this job when its worker is made, which then
+   * docs/adr/0012): bound to this job when its worker is made, which then
    * reaches the fetch service on the host and nothing else of it.
    */
   net_grants?: string[];

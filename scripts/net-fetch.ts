@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The fetch service (`--network dynamic`; docs/adr/0011): the one process of
+ * The fetch service (`--network dynamic`; docs/adr/0012): the one process of
  * a run that makes a research request to the outside, and only one a grant
  * permits, exactly.
  *

@@ -1260,7 +1260,7 @@ export function createUiApp(options: UiAppOptions): UiApp {
         return;
       }
       /**
-       * The dynamic network (docs/adr/0011): the case policy, what waits on
+       * The dynamic network (docs/adr/0012): the case policy, what waits on
        * the operator, requests, grants, captures. A POST is the operator's
        * act, run as swarm.sh net so it lands on the trace and the operator's
        * record like the CLI's: grant a request, decline an item or a request,

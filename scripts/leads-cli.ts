@@ -150,7 +150,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       const before = (await L.leadsSnapshot(sandbox)).state.leads.get(String(lead).toUpperCase());
       const to = before?.holder ?? before?.closed?.by ?? "all";
       // A host allowed while the run goes on is a socket grant (tier 2,
-      // docs/adr/0011): refused before anything is written where the case
+      // docs/adr/0012): refused before anything is written where the case
       // policy permits none, and recorded as one, with what it is.
       if (host && readCasePolicy(sandbox).sockets === "none") {
         const policy = readCasePolicy(sandbox).policy;

@@ -269,7 +269,7 @@ back to a host run on its own.
   that uses it.
   [ADR 0009](adr/0009-agents-live-in-microvms.md).
 - **The dynamic network (`--network dynamic`) is mediated, and says where it
-  stops.** ([ADR 0011](adr/0011-a-dynamic-network-decided-by-rules-and-made-on-the-host.md).)
+  stops.** ([ADR 0012](adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md).)
   No seat's VM gains a host: its msb policy is the one it booted with. A
   lookup is a request the hub decides by rules alone, in a fixed order, under
   the case policy the kickoff recorded (`network/policy.json`, read-only to

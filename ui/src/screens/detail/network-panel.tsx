@@ -1,5 +1,5 @@
 /**
- * The dynamic network (docs/adr/0011): the case policy in force, what waits
+ * The dynamic network (docs/adr/0012): the case policy in force, what waits
  * on the operator (one item per host and lead) with the form that answers
  * it, every grant with its state, uses and time left and a revoke, every
  * request with its decision and machine-readable reasons, every capture as

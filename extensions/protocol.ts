@@ -7044,7 +7044,7 @@ export const LEDGER_KINDS = ["event", "ioc", "finding", "absence", "hypothesis",
  * (recordExternal), and an examiner records what it establishes.
  */
 export const LEDGER_AGENT_KINDS = ["event", "ioc", "finding", "absence", "hypothesis", "limitation", "answer"] as const;
-/** Where external material came from (Plan 3 WP3 and WP6; docs/adr/0011). */
+/** Where external material came from (Plan 3 WP3 and WP6; docs/adr/0012). */
 export const LEDGER_SOURCE_CLASSES = ["acquired_evidence", "case_material", "operator_supplied", "external_capture"] as const;
 export const LEDGER_CONFIDENCE = ["high", "medium", "low"] as const;
 /**

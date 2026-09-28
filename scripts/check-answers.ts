@@ -382,7 +382,7 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const unsupported = Object.entries(gate.unsupported);
   if (unsupported.length) lines.push(`tokens in no cited entry (counted, not failed; the release weighs them): ${unsupported.map(([seq, t]) => `#${seq}: ${t.join(", ")}`).join("; ")}`);
   // What rests on external material (a capture the fetch service sealed, and
-  // whatever was derived from it: docs/adr/0011): named, never failed. A
+  // whatever was derived from it: docs/adr/0012): named, never failed. A
   // capture's hash proves its bytes, not their truth or their fit to the time
   // of the events; an examiner weighs it.
   const lineage = await externalLineage(S).catch(() => null);

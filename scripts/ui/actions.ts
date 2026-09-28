@@ -1094,7 +1094,7 @@ export class ActionRunner {
 
   /**
    * The operator's act on the dynamic network (swarm.sh net <id> grant|deny|revoke,
-   * docs/adr/0011): a reason always; on the trace and the operator's record,
+   * docs/adr/0012): a reason always; on the trace and the operator's record,
    * and posted to whoever asked, like the CLI's.
    */
   net(swarmId: string, p: { action: "grant" | "deny" | "revoke" | "socket"; target?: string; why: string; host?: string; lead?: string }): Job {

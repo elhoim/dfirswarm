@@ -1,5 +1,5 @@
 /**
- * The dynamic network mode on the hub's side (docs/adr/0011): an agent's
+ * The dynamic network mode on the hub's side (docs/adr/0012): an agent's
  * request decided by the policy engine and recorded, a seat's fetch carried
  * to the fetch service and its capture recorded as external material, a
  * job's grants bound to it, and the operator's own acts (grant, deny,

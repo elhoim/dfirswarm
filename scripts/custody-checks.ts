@@ -265,7 +265,7 @@ export function checksOf(c: CustodyLike, errors: Record<string, string> = {}): C
   if (c.attestations) add("ledger attestations", c.attestations.intact ? "passed" : "failed", c.attestations.intact ? undefined : c.attestations.detail, { checked: c.attestations.lines });
   if (c.disputes) add("ledger disputes", c.disputes.intact ? "passed" : "failed", c.disputes.intact ? undefined : c.disputes.detail, { checked: c.disputes.lines });
   if (c.leads) add("lead register", c.leads.intact ? "passed" : "failed", c.leads.intact ? undefined : c.leads.detail, { checked: c.leads.lines });
-  // The dynamic network's records (docs/adr/0011): both chains, and each sealed capture re-hashed.
+  // The dynamic network's records (docs/adr/0012): both chains, and each sealed capture re-hashed.
   if (c.network) {
     const n = c.network;
     const bad = [...(n.grants.intact ? [] : [`grants: ${n.grants.detail}`]), ...(n.fetches.intact ? [] : [`fetches: ${n.fetches.detail}`]), ...(n.fetches.unresolved ?? []).map((x) => `${x} was attempted and has no recorded outcome`), ...n.captures.mismatched.map((x) => `${x} differs from its seal`), ...n.captures.missing.map((x) => `${x} is missing`)];

@@ -33,7 +33,7 @@ establish, and nothing here settles it.
   registries it refers to, crt.sh, NVD, CISA, CIRCL, RIPEstat, Nominatim,
   Overpass, YouTube's oEmbed, the host of an evidence URL for a HEAD, and
   VirusTotal where the operator configured a key ([ADR
-  0011](adr/0011-a-dynamic-network-decided-by-rules-and-made-on-the-host.md)).
+  0012](adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md)).
   What leaves is the adapter's typed values (a domain, an address, a hash, a
   coordinate, a place name) and nothing else of the case. Each adapter
   declares the class of case data it carries, and the case policy says which

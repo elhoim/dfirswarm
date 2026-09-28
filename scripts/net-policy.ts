@@ -1,5 +1,5 @@
 /**
- * The dynamic network mode's policy engine (docs/adr/0011): whether one
+ * The dynamic network mode's policy engine (docs/adr/0012): whether one
  * request is granted, decided by rules alone, in a fixed order.
  *
  *   1. authentication   who asks is the channel (a seat's hub socket, the operator's CLI)

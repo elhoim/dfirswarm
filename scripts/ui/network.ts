@@ -1,5 +1,5 @@
 /**
- * The Network tab (docs/adr/0011): the run's case policy, what waits on the
+ * The Network tab (docs/adr/0012): the run's case policy, what waits on the
  * operator (one item per host and lead), every request with its decision
  * and reasons, every grant with its state and time left, every capture and
  * what the fetch service refused, contamination. Read from the run's own

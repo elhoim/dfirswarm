@@ -665,7 +665,7 @@ export type Custody = {
   disputes?: { lines: number; intact: boolean; detail: string } | null;
   /** The lead register's events (leads/leads.jsonl): their own chain, sealed unsigned; null when the run opened no lead. */
   leads?: { lines: number; intact: boolean; detail: string } | null;
-  /** The dynamic network's records: both chains, and every sealed capture re-hashed; null when the run made no request (docs/adr/0011). */
+  /** The dynamic network's records: both chains, and every sealed capture re-hashed; null when the run made no request (docs/adr/0012). */
   network?: NetworkCheck | null;
   /** The operator's audit beside the registry, and each operator line on the trace matched to it. */
   operator: OperatorAudit;
@@ -2344,7 +2344,7 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
   } else if (sealed.leads.lines !== nowLeads.lines || sealed.leads.head !== nowLeads.head) {
     drift.push({ what: "lead register", sealed: chain(sealed.leads.lines, sealed.leads.head, "events"), now: chain(nowLeads.lines, nowLeads.head, "events") });
   }
-  // The network records, the same way (docs/adr/0011).
+  // The network records, the same way (docs/adr/0012).
   const nowNet = now.network ?? { grants: { lines: 0, head: null }, fetches: { lines: 0, head: null } };
   if (!sealed.network) {
     if (nowNet.grants.lines || nowNet.fetches.lines) notSealed.push("the network records");

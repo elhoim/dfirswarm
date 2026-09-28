@@ -433,7 +433,7 @@ type JobAnswer = { ok: boolean; reason?: string; job?: Record<string, unknown>; 
 const noJobService = async (): Promise<JobAnswer> => ({ ok: false, reason: "this run has no job service (a host run): run the work in your own shell" });
 export const jobSubmit = remote("jobSubmit", noJobService as (sandboxRoot: string, spec: Record<string, unknown>) => Promise<JobAnswer>);
 /**
- * The dynamic network (scripts/net-broker.ts, docs/adr/0011): decided and
+ * The dynamic network (scripts/net-broker.ts, docs/adr/0012): decided and
  * carried out on the host, by the hub and the fetch service. A host run has
  * neither: the local answer says so.
  */

@@ -1,6 +1,6 @@
 /**
  * The adapter catalogue and the hard-deny list of the dynamic network mode
- * (network/adapters.json, network/deny.json; docs/adr/0011), and the typed
+ * (network/adapters.json, network/deny.json; docs/adr/0012), and the typed
  * values an adapter takes.
  *
  * An adapter is one exact host, method and path template. What an agent

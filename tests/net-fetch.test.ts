@@ -1,5 +1,5 @@
 /**
- * The dynamic network mode's enforcement (docs/adr/0011), against a local
+ * The dynamic network mode's enforcement (docs/adr/0012), against a local
  * mock HTTPS server: the fetch service makes exactly what a grant permits
  * and nothing else. HEAD cannot GET; an exact path cannot fetch the one
  * beside it; a query or a body cannot be added; a redirect does not widen

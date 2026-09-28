@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The case policy and the network mode at kickoff, and the operator's
-# network commands (docs/adr/0011): a policy that contradicts itself is
+# network commands (docs/adr/0012): a policy that contradicts itself is
 # refused before anything is written; a run's policy is recorded in
 # network/policy.json, SWARM.md and the registry; the goal's metadata block
 # sets it and a flag overrides it; `swarm.sh net` lists and acts, always with

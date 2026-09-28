@@ -50,7 +50,7 @@ All notable changes to this project. The format follows
   line, decides whether it is in force.
 - **`swarm.sh net <run> list|grant|deny|revoke`** and the console's
   **Network** tab; every act needs a reason. Custody seals both network
-  chains and re-hashes every capture. [ADR 0011](docs/adr/0011-a-dynamic-network-decided-by-rules-and-made-on-the-host.md).
+  chains and re-hashes every capture. [ADR 0012](docs/adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md).
 
 ### Added: the examiner signs with their own secret, from the command line or the console; three kinds of key; a technical reviewer signs their own record
 

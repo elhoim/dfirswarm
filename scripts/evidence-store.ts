@@ -484,7 +484,7 @@ async function jobStatus(dir: string): Promise<string | undefined> {
  * `trace:<sha256>` (one line of the trace, by its hash). Those two resolve
  * once sealed (the hub seals them when a record cites them; see
  * traceOrigin): to the import they were sealed as. `net:<k>/<n>[/<file>]` is
- * a capture the fetch service sealed (docs/adr/0011): external material,
+ * a capture the fetch service sealed (docs/adr/0012): external material,
  * by its own manifest.
  */
 export async function resolveRef(sandbox: string, ref: string, opts: ResolveOptions = {}): Promise<Resolved> {

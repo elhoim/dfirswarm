@@ -3,7 +3,7 @@
  * The case policy: what an examination permits to leave the run and to
  * reach outside it, set once at kickoff and recorded with the run.
  *
- * Two controls, kept apart (docs/adr/0011). The run's **network mode** says
+ * Two controls, kept apart (docs/adr/0012). The run's **network mode** says
  * how access is decided: `closed` (today's default: the models' hosts, the
  * package index when installs are allowed, and the operator's own hosts),
  * `dynamic` (an agent asks, the hub decides under this policy, a host-side

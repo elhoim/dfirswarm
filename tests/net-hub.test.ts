@@ -1,5 +1,5 @@
 /**
- * The dynamic network through the hub (docs/adr/0011): a seat's net_request
+ * The dynamic network through the hub (docs/adr/0012): a seat's net_request
  * and net_fetch arrive on its own socket (who asks is the channel, never an
  * argument), are decided and carried out on the host, and the capture lands
  * on the ledger; a job given a grant fetches it itself, as its own

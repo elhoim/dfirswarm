@@ -1,5 +1,5 @@
 /**
- * The dynamic network mode's records (docs/adr/0011): every request, every
+ * The dynamic network mode's records (docs/adr/0012): every request, every
  * decision, every grant and what became of it, in `network/grants.jsonl`;
  * every fetch the fetch service made, in `network/fetches.jsonl`. Both are
  * append-only chains with the lead register's own code (extensions/leads.ts:

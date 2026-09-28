@@ -2047,7 +2047,7 @@ export type WorkerSpec = {
   /**
    * Ports of this host the worker may reach through msb's host gateway, and
    * nothing else of the host: the fetch service's, for a job given network
-   * grants (docs/adr/0011), whatever its network mode says of the outside.
+   * grants (docs/adr/0012), whatever its network mode says of the outside.
    */
   hostPorts?: number[];
   /** The argv run in the guest; the job's own stdout and stderr go to files the command names, not through here. */

@@ -1,5 +1,5 @@
 /**
- * The dynamic network mode's decisions (docs/adr/0011): the case policy's
+ * The dynamic network mode's decisions (docs/adr/0012): the case policy's
  * presets and the conflicts a kickoff refuses; the adapter catalogue as the
  * spec lists it; and the policy engine, step by step, in its order, with
  * machine-readable reasons, the same answer for the same request, and an

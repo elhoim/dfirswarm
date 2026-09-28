@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The dynamic network from the operator's side (docs/adr/0011): what was
+ * The dynamic network from the operator's side (docs/adr/0012): what was
  * asked and decided, and the operator's acts on it. swarm.sh net <run> calls
  * this with the run's sandbox, puts each act on the trace and the operator's
  * record, and posts its text to whoever asked.

@@ -857,7 +857,7 @@ export function boardTable(hub: {
       const r = await svc.catalogRequest(who, String(raw.target ?? ""), typeof raw.recipe === "string" && raw.recipe ? raw.recipe : undefined, typeof raw.reason === "string" ? raw.reason : undefined);
       return r.ok ? { ok: true, job: await jobView(S, r.job) } : r;
     },
-    // The dynamic network (net-broker.ts, docs/adr/0011): who asks is the
+    // The dynamic network (net-broker.ts, docs/adr/0012): who asks is the
     // socket's seat; a request is decided on the host and recorded before it
     // is answered; a fetch goes to the fetch service as this seat.
     netRequest: async (who, a) => {

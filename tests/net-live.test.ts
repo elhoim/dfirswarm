@@ -1,5 +1,5 @@
 /**
- * The adapter catalogue against the real services (docs/adr/0011): each
+ * The adapter catalogue against the real services (docs/adr/0012): each
  * key-less adapter's request, made by the fetch service with its real
  * resolver and address check, answered and sealed. Off unless
  * SWARM_NET_LIVE=1 (it reaches the internet and the services' own limits);
