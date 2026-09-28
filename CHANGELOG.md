@@ -6,6 +6,57 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: the case contract: what may come in, what was asked of whom, and where the evidence ends
+
+- **The case policy, complete.** `--more-evidence no|ask|yes` says whether
+  evidence may arrive while the run goes on, `--material-use CLASS=USE,...`
+  what each class of material from outside the evidence may be used for
+  (`evidence`, `reference`, `none`), and `--legal`, `--provider-retention`
+  what the operator records beside them; each also from the goal's metadata
+  block. A contract that contradicts itself is refused at kickoff (a capture
+  as evidence, a published case taking evidence later). The policy is
+  written before the custody anchor, which holds its sha256; custody seals
+  it and names a rewrite; a release binds it; a resume keeps it and says what
+  its options would have changed. The services a goal names are held to the
+  policy and the adapter catalogue at kickoff, as warnings.
+- **Operator requests, with ids and an outbox.** A lead's needs, an
+  acquisition, a clarification, a network item and a stop proposal are each
+  a request `R-n` on a chain of their own (`requests/requests.jsonl`, sealed
+  by custody), derived from the record that commits it, written once, and
+  rendered where every reader has always read them
+  (`operator-requests.jsonl`). The lead's request is no longer appended after
+  the close with its failure swallowed: a request not yet written is said to
+  the agent and written at the next reconciliation. Its lifecycle is pending,
+  notified, acknowledged, then answered, declined or withdrawn; `swarm.sh
+  requests` and the console's Requests tab act on it, and the header's badge
+  counts what waits on the operator.
+- **Notifications fired by the hub, with ids only.** `--notify` takes
+  `desktop:`, `ntfy:<topic>`, `mailto:<address>` and a command, repeatable,
+  kept outside the run; an operator request is notified when it is
+  committed, by its id, its kind and the lead's or question's id, never by
+  what it asks. The watchdog's polling is now a fallback.
+- **The acquisition lane.** An agent asks for evidence the run does not have
+  on the lead that needs it (`ask: {kind: acquisition, source, where,
+  expected_value, urgency, ...}`); under `more_evidence: no` it is answered
+  at once, "no additional input under this case policy", never as a finding
+  that something is absent. `swarm.sh evidence <run> add PATH --for R-n`
+  seals the evidence in the store as an inventory revision, catalogues it,
+  answers the acquisition, and reopens the leads, answers and acceptances
+  that rested on the evidence as it was; the agents read it through jobs.
+  Calibration tells a late item added this way by its digest.
+- **Material with provenance.** `swarm.sh material <run> add` and a
+  question's attachment record supplied material as `external` with who
+  supplied it, when, from where, its sha256 and what it may be used for;
+  `check-answers`, the report and `release.json` name every answer resting on
+  external material with its classes, and a record citing a class the policy
+  says `none` for is refused.
+- **Where the evidence ends.** The report's section 8 gains "Evidence gaps and
+  acquisition requests", generated from the records: never collected,
+  unavailable, inaccessible, unexamined, inconclusive.
+- **Sensitivity.** A name, a `doing` label and a question's text are refused
+  when they hold any value the run marks sensitive, whatever its origin: no
+  answer-value concept, no exemption for the goal's own words.
+
 ### Fixed: the question register, after an independent review
 
 - **The hub is the register's one writer.** While a run's hub is up, the

@@ -23,8 +23,9 @@ scripts/swarm.sh start --model <provider/id> --cap-usd <n> --n <N>
     [--probe-violation] [--no-netguard] [--open-net] [--net-allow] [--local-only] [--no-start]
     [--network closed|dynamic|open] [--policy standard|live_adversary|internal|ctf]
     [--lookups none|reference|evidence_linked|any] [--contact passive|active] [--disclosure CLASSES]
+    [--more-evidence no|ask|yes] [--material-use CLASS=USE,...] [--legal TEXT] [--provider-retention TEXT]
     [--key-from-env] [--env KEY=VALUE]...
-    [--notify CMD] [--ledger-from RUN] [--no-verify-copy] [--allow-root] [--model-gateway] [--check]
+    [--notify TARGET]... [--ledger-from RUN] [--no-verify-copy] [--allow-root] [--model-gateway] [--check]
 scripts/swarm.sh image-for [--pack ID]... [--tools-from DIR] [--playwright] [--no-jobs] [--brains-with-packs]
 scripts/swarm.sh list
 scripts/swarm.sh status <id>
@@ -32,6 +33,10 @@ scripts/swarm.sh stop <id> [--no-custody] [--custody-timeout SEC]
 scripts/swarm.sh extend <id> [--minutes N] [--tokens N] [--usd N]
 scripts/swarm.sh resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
     [--minutes N] [--tokens N] [--usd N] [--no-start] [-- START OPTIONS]
+scripts/swarm.sh requests <id> list [--open] [--json] | show R-n [--json]
+scripts/swarm.sh requests <id> ack|answer|decline|withdraw|authorise|collecting|unavailable R-n [TEXT | --why TEXT] [--as ID]
+scripts/swarm.sh evidence <id> add PATH --why TEXT [--for R-n] [--question Q-n]... [--sha256 HEX] [--as ID] | list [--json]
+scripts/swarm.sh material <id> add PATH --why TEXT [--class operator_supplied|case_material] [--sensitive] [--as ID] | list [--json]
 scripts/swarm.sh summary <id>
 scripts/swarm.sh context <id> [--json]
 scripts/swarm.sh package <id> [--sign [--key FILE]] [--redact [--redact-leaks list]] [--with-outputs]
@@ -93,7 +98,7 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--time-reference URL` | no | — | Record this https server's clock offset from the host's (its `Date` header, a second's precision) in the anchor at kickoff and in the verdict at custody. |
 | `--anchor-mirror TARGET` | no | — | Copy each release's digest line somewhere this account does not keep: `cmd:COMMAND` (the line on its stdin; its output kept whole as the receipt, `mirror-<k>.json` beside the release), `dir:PATH` (a directory that exists: a file per release, never written over), or `print` (the line and a QR-ready string in `case-file.txt`, and printed). An object-locked bucket's mount or a records custodian's separately administered archive is the independent copy; a folder of the same account is not, and a signed git remote is a witness of when a line was pushed, not a write-once store. Recorded as `anchor_mirror`; `SWARM_ANCHOR_MIRROR` for a run without one. |
 | `--custody-timeout SEC` | no | 14400 (`SWARM_CUSTODY_TIMEOUT`) | How long custody may take at the run's end, whoever takes it: the hub at a microVM run's finish, or `stop`. Recorded as `custody_timeout_sec`; `stop --custody-timeout` overrides it for that stop. |
-| `--notify CMD` | no | none | A command of yours to run when something happens to the run: `finished`, `finish_failed`, `stop_incomplete`, `budget_cap`, `wall_clock`, `paused` (a `cap-pause` run held at a cap), `extended` (a pause lifted by `extend`), `operator_request` (a lead that needs you, a clarification, or a stop proposed when nothing yields), `evidence_changed`, `chain_broken`, `agent_dead`, `collector_unreachable`, `hub_down`. It gets one JSON line on stdin (`{event, run, at, detail}`), runs detached, and has 30 seconds; a failure or a timeout goes to `traces/notify.log` and never stops the run. The command is kept outside the run (`runs/notify/<id>.cmd`, 0600, run only when it is a regular file of yours); the registry records only that there is one (`notify: true`), and the operator's record shows its length, not its text. |
+| `--notify TARGET` | no | none | Who is told when something happens to the run; repeatable. `desktop:` (a desktop notification: `osascript` on macOS, `notify-send` elsewhere), `ntfy:<topic>` (a push through ntfy.sh, or `ntfy:https://host/topic` for a server of your own), `mailto:<address>` (this host's `mail` or `sendmail`), or a command of yours. The events: `finished`, `finish_failed`, `stop_incomplete`, `budget_cap`, `wall_clock`, `paused` (a `cap-pause` run held at a cap), `extended` (a pause lifted by `extend`), `operator_request` (an operator request committed: a lead that needs you, an acquisition, a clarification, a network item, a stop proposed when nothing yields; fired by the hub, [ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)), `evidence_changed`, `chain_broken`, `agent_dead`, `collector_unreachable`, `hub_down`. A command gets one JSON line on stdin (`{event, run, at, detail}`); a typed target gets the event and the run's id. An operator request is told by its ids only (`R-n`, its kind, the lead's or question's id, its urgency), never what it asks: the notification leaves the host. Each target runs detached and has 30 seconds; a failure or a timeout goes to `traces/notify.log` and never stops the run. The targets are kept outside the run (`runs/notify/<id>.cmd` and `<id>.targets`, 0600, read only when they are regular files of yours; an ntfy topic is its secret); the registry records only that there is one (`notify: true`), and the operator's record shows their length, not their text. |
 | `--ledger-from RUN` | no | none | An earlier, finished run's ledger handed in as hypotheses to re-derive or refute: `prior/ledger.md`, read-only (on a VM run it is on the read-only floor), never copied into the new ledger. When the earlier run has an examiner review whose chain verifies, only the entries whose latest review accepted or amended them (and whose entry hash still matches) come in; otherwise every entry, each marked unreviewed. Refused for a run that is running, purged, or held for another case. Recorded as `ledger_from`. |
 | `--no-verify-copy` | no | content check on | By default the evidence copy is checked against its source by content: each copied file's source is read again and its SHA-256 compared with the manifest's (progress every 2 GiB on large sets), and a mismatch is a BLOCKER. This keeps only the check by name, kind and size. Recorded in `inputs.json` as `source_checked`. |
 | `--allow-root` | no | refused | Start a host run (`--isolation host`) as root. Without it that is a BLOCKER: root is not bound by the read-only modes a host run relies on. A microVM run started as root is warned about, not refused. Recorded as `allow_root`. |
@@ -137,6 +142,9 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--network MODE` | no | `closed` | The run's network mode ([ADR 0012](adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md)). `closed`: the models' hosts, the package index with `--allow-install`, `--allow-host`, and what the operator allows later with `lead note --allow-host` (a socket grant). `dynamic` (microVM runs): an agent asks for one bounded lookup with `net_request`; the hub decides it by rules under the case policy and records the decision; a fetch service on this host (`scripts/net-fetch.ts`, started with the hub and kept by its keeper) makes exactly the granted request and seals the answer as a capture (`store/net/<k>/<n>/`), recorded on the ledger as external material; the agents get `net_request`, `net_fetch` and `network`. Refused with `--isolation host`. `open`: every public host (`--no-netguard`), with the tools too. The goal's metadata block may say `network: MODE`. Recorded in `network/policy.json`, SWARM.md and the registry's `case_policy`. |
 | `--policy PRESET` | no | `standard` | The case policy: what the examination permits to leave the run and to reach outside it, whatever the mode. `standard`: hashes and public indicators, to approved passive adapters; active contact (an evidence URL's HEAD) is the operator's. `live_adversary`: stricter; nothing the evidence names is ever contacted, no socket grant. `internal`: nothing leaves (with `--network open` or any lookup it is refused). `ctf`: a published case; no search, no write-up site, only reference or evidence-linked adapters, and every value sent must be found in the evidence the request cites; no socket grant (so no `--allow-host`). The goal's metadata block may say `policy: PRESET`, and `legal:`, `provider_retention:`, `more_evidence:`, `material_use:` as text; a flag overrides the goal's value and the kickoff says so. A combination that contradicts its preset is refused before anything is written, and so is a run whose direct egress does not fit it: under `ctf`, `internal` and `live_adversary` no host is reached without a grant, so `--allow-host`, the package index `--allow-install` would open (add `--no-pypi` to keep the install machinery without it) and a pack's secret hosts (`--allow-pack-secrets`) are each refused, naming where they came from. |
 | `--lookups L`, `--contact C`, `--disclosure LIST` | no | the preset's | Override one field of the preset: what the hub grants by itself (`none`, `reference`, `evidence_linked`, `any`), whether what the evidence names may be contacted (`passive`, `active`), and which classes of case data may leave (`hash`, `public_indicator`, `coordinate`, `internal_name`, `personal`, `file_upload`, or `none`). |
+| `--more-evidence M` | no | the preset's (`ask`; `ctf`: `no`) | Whether evidence may arrive while the run goes on ([ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)). `no`: a closed collection or a published case; an agent's acquisition is answered at once, "no additional input under this case policy", a constraint of the case and never a finding that something is absent, and `evidence add` is refused. `ask`: the operator authorises or declines each acquisition. `yes`: further collection is expected; an acquisition is authorised by the policy, and the operator collects it. Also `more_evidence:` in the goal's metadata block. `ctf` with `yes` is refused. |
+| `--material-use SPEC` | no | the preset's | What each class of material from outside the original evidence may be used for: `CLASS=USE` pairs (`,` between them), the classes `acquired_evidence`, `case_material`, `operator_supplied`, `external_capture`, the uses `evidence` (a finding may rest on it as on the original evidence), `reference` (it may be cited; what rests on it is flagged) and `none` (kept on the record, never citable: a record citing it is refused). A class left out keeps the preset's use (`acquired_evidence=evidence`, the rest `reference`; `internal`: `external_capture=none`). A capture is never evidence of the events: `external_capture=evidence` is refused. Also `material_use:` in the goal's metadata block. |
+| `--legal TEXT`, `--provider-retention TEXT` | no | none | The case's legal text (jurisdiction, warrant or engagement scope, "GDPR or similar laws") and what you know of how the model and lookup providers keep what they are sent: recorded in the policy, SWARM.md and the registry, never inferred. Also `legal:` and `provider_retention:` in the goal's metadata block; at most 2,000 characters each, nothing cut. |
 | `--local-only` | no | off | Every model on the team must be served from this machine or this network — a `models.json` `baseUrl` on loopback, a private range, link-local or `.local`, or Pi's built-in `llama.cpp` provider — and the netguard allowlist becomes those endpoints and nothing else (`netguard --only`): the eight cloud hosts of the default list drop out. Panes also get `PI_OFFLINE=1`, so Pi makes no catalog-refresh calls at startup. Refused with a cloud model on the team, with a cloud `--compact-model`, and with `--no-netguard`. Recorded as `net: "local"` in the registry. |
 | `--net-allow` | no | — | Alias of the default (kept for older scripts). |
 | `--no-start` | no | — | Prepare the sandbox, `SWARM.md`, `team.json`, `budget.json` and the registry entry, but start no Herdr/Pi. Used by the web API test and the UI's "Prepare only". Under `--isolation microvm` it boots no VM of any kind: the host is not probed and the image is not pulled, `--toolbox` and `--catalog` are not run, neither in a VM nor on the host (the kickoff says so), and `vm-spec.json` in the sandbox records what each VM would have been given. The checks that need no VM still run: the providers' hosts, the `--allow-host` entries, the capacity. |
@@ -267,6 +275,91 @@ commands. A host-managed adapter key (VirusTotal: `DFIRSWARM_VT_API_KEY` in the
 shell that starts the run) is read by the fetch service alone and given to no
 VM; `network view=adapters` tells the agents whether it is configured.
 
+#### The case contract: `requests`, `evidence`, `material`
+
+The case policy is fixed at kickoff ([ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)):
+written to `network/policy.json` before the custody anchor, which holds its
+sha256, and carried in SWARM.md and the registry's `case_policy`. Custody
+seals it by its sha256 and names a rewrite (`CASE POLICY REWRITTEN`, the
+`case policy` check failed); a release binds it (`release.json` `case_policy`).
+A resume keeps the policy its kickoff recorded and prints a `NOTE` for each
+field its options would have changed. At kickoff the services the goal names
+(a URL, a host, an adapter's name, a denied service by its own name) are held
+to the policy and the adapter catalogue and printed as `WARN` lines: a
+closed network, a lookup the policy does not allow, an adapter whose key is
+not configured, a host no adapter reaches or the hard denials refuse. Nothing
+is refused for it.
+
+Everything the run asks of a person is an operator request with a durable id
+(`R-n`): a lead closed `needs_operator`, an acquisition (evidence the run does
+not have), a clarification an agent asked of a question, a network item, and a
+stop the harness proposes when nothing yields. The record that makes it (the
+lead's close, the question's `clarify_ask`, the grants chain's `item`) is its
+commit; the request is derived from it and written once to
+`requests/requests.jsonl`, a chain custody seals, and rendered to
+`operator-requests.jsonl` (one line per request as it stands) and
+`requests/requests.md`. Its lifecycle is `pending` → `notified` (your
+`--notify` targets were handed its id) → `acknowledged` → `answered`,
+`declined` or `withdrawn`. The hub reconciles and notifies after every act
+that may open one and on every round, so a crash between the commit and the
+notification loses nothing; the watchdog is the fallback (every round in a
+host run, every five minutes with a hub).
+
+- `requests <id> list [--open] [--json]` lists them, open first, with how each
+  is answered; `show R-n [--json]` prints one whole with its history.
+- `requests <id> ack R-n [--why W]` acknowledges one; `answer R-n TEXT` answers
+  it where it is answered (a lead's: its note, and the lead reopens; a
+  clarification's: its reply; a stop proposal's: on the request);
+  `decline R-n --why W` and `withdraw R-n --why W` close it.
+- An acquisition carries what it asks for (`source`, `where`, `questions`,
+  `expected_value`, `urgency`: normal, urgent or volatile, `owner`,
+  `authority_needed`) and its stage: `requested` → `authorised` | `declined` →
+  `collecting` → `received` → `validated` | `unavailable`.
+  `requests <id> authorise|collecting|unavailable R-n [--why W]` moves it
+  (`unavailable` needs its reason); `evidence add --for R-n` makes it
+  `received` and `validated`. Under `--more-evidence no` it is declined at once
+  with "no additional input under this case policy"; under `yes` it is
+  authorised by the policy.
+- `evidence <id> add PATH --why W [--for R-n] [--question Q-n]... [--sha256 HEX]
+  [--as ID]` adds evidence acquired after the kickoff, a file or a directory
+  outside the run: each file is copied into a staging directory outside the
+  run and held to the sha256 its source had (and to `--sha256`, an acquisition
+  hash of the one file), then sealed in the store as `import:ev-<n>` (the store's
+  import path: read-only, in a manifest, the bytes kept once), written on the
+  store journal as an `evidence_added` line with its inventory revision and
+  every file's sha256, and recorded on the ledger as external material
+  (`acquired_evidence`, with its provenance). It answers `R-n`, reopens the
+  closed leads under the request's questions (and `--question`'s) and the
+  request's own lead, makes the answers to those questions recorded before it
+  stale until they are recorded again, lifts an acceptance made before it,
+  and, when the run's catalogue is on, runs a detect pass over each file (at
+  once when the hub runs, else at its next round). While the hub runs the act
+  is handed to it: it is the store journal's writer. **The agents' VMs keep the
+  view of the run they booted with: new evidence is read through jobs**
+  (`job_run` with `inputs: ["import:ev-<n>/<file>"]`); in a host run the panes
+  read `store/imports/ev-<n>/out/` directly. Refused under
+  `--more-evidence no`, for a path inside the run, and when a copy does not
+  hash as its source. `evidence <id> list [--json]` lists what was added.
+- `material <id> add PATH --why W [--class operator_supplied|case_material]
+  [--sensitive] [--as ID]` supplies material the same way (`import:mat-<n>`),
+  recorded as external with `{supplied_by, at, from, sha256, permitted_use}`;
+  `--sensitive` marks what its record says sensitive (no name, label or
+  question may carry it). `question add --attach FILE` supplies a file given on
+  this host the same way, and an attachment that is already an object of the
+  run is recorded as supplied material. `check-answers` names every answer that
+  rests on external material with its classes, the report marks it (§5) and
+  lists the evidence and material added (§3), and `release.json` binds them
+  (`external`, `acquisitions`). A record citing material whose class the policy
+  says `none` for is refused.
+
+The report's §8 carries "Evidence gaps and acquisition requests", generated
+from the records: every acquisition with its stage and outcome, and each gap
+told apart as never collected, unavailable, inaccessible, unexamined or
+inconclusive, with its questions, what it bounds and what would close it. A
+gap is never a finding that something is absent. The console's **Requests**
+tab lists every request, open ones first, with the acts above, and the
+header's badge counts the open ones.
+
 #### The lead register and until-solved runs
 
 `swarm.sh lead <run> list` prints every lead, the ones an agent closed
@@ -312,7 +405,7 @@ report and the console say which.
 - When nothing has yielded (no new finding, question disposition or coverage
   record) for 20 committed jobs or 30 minutes (`SWARM_YIELD_JOBS`,
   `SWARM_YIELD_MINUTES`), the watchdog proposes a stop: an operator request of
-  kind `decision` (`D-n`) in `operator-requests.jsonl`, with what is still open,
+  kind `decision` (`D-n`, with its `R-n`), with what is still open,
   on the trace (`stop_proposed`) and to the notify command. Nothing stops unless
   you act; another proposal comes only after a further window with nothing
   yielded. It is never an agent's vote.
@@ -492,7 +585,9 @@ invites a guess, a false premise, evidence that was never collected). Three
 cases: a USB drive image and a workstation's logs, a web server's logs, a
 mailbox export and a browser history database. Each has a held-back evidence
 item under `late/` that settles its missing question, for the operator to add
-while the run goes on. Python 3.8 and its standard library are all the
+while the run goes on: `swarm.sh evidence <run> add <case>/late/<file> --why
+TEXT [--for R-n]`, which the scorer tells by its digest on the store
+journal's `evidence_added` line (`--late auto`). Python 3.8 and its standard library are all the
 generator needs; the same seed gives the same bytes on any host (the history
 database's page layout follows the host's SQLite version).
 

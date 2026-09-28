@@ -230,9 +230,12 @@ the decision.
   with until it ends; revocation reaches the next one.
 - A job's capture reaches the ledger on the hub's next round (fifteen
   seconds), a seat's at once.
-- Operator items live in `operator-requests.jsonl` and on the board until
-  Plan 3's operator-request outbox (work package 3) replaces them; the report
-  and the release weigh external material in work packages 3 and 5.
+- Operator items are operator requests with their own ids since the case
+  contract ([ADR 0014](0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)):
+  the grants chain's `item` event is the commit, the request is derived from
+  it, and the hub notifies it by its ids; `check-answers`, the report and
+  `release.json` name every answer resting on external material with its
+  classes. The report's per-question weighing comes with work package 5.
 - Not built: a model steward (off by rule), amending the case policy while
   the run goes on (a new run, or the operator's grant), live DNS lookups as an
   adapter.

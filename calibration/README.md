@@ -146,17 +146,23 @@ so that nothing a run looks up reaches a real party.
 
 ### The late item
 
-`late/` holds one item per case that settles the missing question. Once the
-coming `swarm.sh evidence <run> add PATH --for REQ --why TEXT` exists, add it
-while the run goes on: when the swarm asks for that evidence (its acquisition
-request, or a lead closed `needs_operator`), or at a fixed point if you are
-measuring whether a run reopens a settled answer. The agents' VM shares stay
-as booted; new evidence is read through jobs. Until then, run the case twice:
-once as it is, and once with the item as a second set from the start
-(`--inputs <case>/inputs --inputs <case>/late`). The scorer finds the item by
-its SHA-256 in the run's manifest or inventory records, and scores the
-question it settles against the answer it makes possible; `--late
-added|absent` overrides what it finds.
+`late/` holds one item per case that settles the missing question. Add it
+while the run goes on with `swarm.sh evidence <run> add <case>/late/<file>
+--why TEXT [--for R-n]`: when the swarm asks for that evidence (its
+acquisition request, `R-n` in `swarm.sh requests <run> list`), or at a fixed
+point if you are measuring whether a run reopens a settled answer. It is
+sealed in the store as an inventory revision, the acquisition is answered,
+and the leads, answers and acceptances of the questions it bears on are
+reopened ([ADR 0014](../docs/adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)).
+The agents' VM shares stay as booted; new evidence is read through jobs. The
+goals say `more_evidence: ask`, so the operator decides each acquisition; a
+run started with `--more-evidence no` refuses the item. A second set from the
+start (`--inputs <case>/inputs --inputs <case>/late`) is still read, for a run
+that is to have the item from the beginning. The scorer finds the item by its
+SHA-256, first on the store journal's `evidence_added` line (it says the
+import, the inventory revision and the request), then in the run's manifest
+or other inventory records, and scores the question it settles against the
+answer it makes possible; `--late added|absent` overrides what it finds.
 
 ## Scoring a run
 

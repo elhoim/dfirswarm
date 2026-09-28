@@ -162,8 +162,10 @@ revision, and a directive is framed at its first claim (items 1, 5 to 10).
   history, and the report and `release.json` can bind it (Phase 3 renders
   it; the v1 signature binds the chain's head through custody).
 - The register's words are held to the run's sensitive values: a question
-  may not carry a value a ledger entry marks sensitive. A later phase widens
-  the hook to every sensitive value the run knows of.
+  may not carry a value a ledger entry marks sensitive. The case contract
+  ([ADR 0014](0014-the-case-contract-says-what-comes-in-and-what-is-asked.md))
+  widened the hook to every sensitive value the run knows of, whatever its
+  origin, and to names and `doing` labels.
 - What is not decided here: the result vocabulary and coverage records
   (Phase 1a, part 2), the acquisition lane, notifications and attachments as
   sealed material (Phase 1b), the full offer protocol and the reviewer's

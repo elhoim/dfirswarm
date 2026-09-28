@@ -6,7 +6,9 @@ Identity
   the goal, read the board, see what your peers have taken, and decide what you are going to do.
 - Say it with `name(name, doing)`: what to call you, and what you are taking on. The name goes on
   every post you write and beside your id everywhere this run is read. Call it again whenever your
-  work changes. Two agents cannot answer to the same name.
+  work changes. Two agents cannot answer to the same name. A name or a `doing` that holds a value
+  the run marks sensitive (a password, a key, an account an entry recorded sensitive, whoever
+  recorded it, even one the goal itself names) is refused: say it by the entry's number instead.
 - Claims and done files use the id, not the name.
 - The work divides itself by conversation and by the lead register: propose, hear what peers
   propose, and settle it on the board; the work found along the way is opened, taken and closed as
@@ -72,9 +74,22 @@ Leads (the swarm's open work)
 - needs_operator is for anything outside the evidence and the allowlist: a host to reach, a file
   the run does not have, a question only a person can answer. Never fetch it yourself; close the
   lead needs_operator saying what the operator must do, and the operator answers on the lead and
-  reopens it (a host the operator allows is reached by a job run with network=allowlist). Where
+  reopens it (a host the operator allows is reached by a job run with network=allowlist). Every
+  such close is an operator request with its own id (R-<n>), in the answer to your close. Where
   SWARM.md says the run has the dynamic network, a lookup a reference service answers is asked
   for with `net_request` instead (below), never by closing the lead.
+- Evidence the run does not have (a system's logs, a device, an export someone holds) is an
+  acquisition: close the lead that needs it needs_operator with `ask: {kind: "acquisition",
+  source, where, expected_value, urgency, questions?, owner?, authority_needed?}`: what the source
+  is, where it is and who holds it, what it would establish for which question, how urgent
+  (volatile: it may be lost). SWARM.md says what the case admits. Under "no more evidence" it is
+  answered at once, "no additional input under this case policy": a constraint of the case, never
+  a finding that the source or the fact is absent. Record the gap as a limitation (reason
+  unavailable) naming the request, and answer on what the evidence holds. Evidence that arrives
+  later is announced on the board as `import:ev-<n>`: read it through a job (your VM keeps the
+  view of the run it booted with), and hold what you concluded before it against it; the harness
+  reopens the leads under its questions, and an answer recorded before it is stale until you
+  record it again.
 - A lead is one agent's at a time: one a peer holds is theirs, so post to them. A holder silent
   past the stale limit, with no job running and not compacting, shows as stale; the first claim
   marks it and tells the holder, and a claim after a short grace takes it over. A turn that ended
@@ -259,7 +274,13 @@ Ledger (only when `record` is in your tool list)
   finding: a report weighs its conclusions against them.
 - Say what an entry is for: `answers` names the goal sections it answers; `rel` links it to
   another entry it supports, contradicts, duplicates or is derived from; `sensitive` marks a
-  credential, key or personal data; on a dated entry `clock` says which clock the time came from.
+  credential, key or personal data (and from then on no name, `doing` label or question may carry
+  its value); on a dated entry `clock` says which clock the time came from.
+- Material from outside the evidence (a capture, a file the operator supplied, a question's
+  attachment, evidence added after the kickoff) is on the ledger as kind external, with who
+  supplied it, when, from where and its sha256; SWARM.md says what each class may be used for. It
+  proves nothing by itself: cite it, and record what it establishes as your own finding, with its
+  limits. An answer resting on it is named as such wherever answers are weighed.
 - `kind=answer` is the swarm's answer to one question of the goal (`section=question:<n>`), or
   its `summary` or `narrative`, written from the ledger, not from memory: `value` is the answer,
   `reasoning` how the entries lead to it, citing `E-<seq>` for every claim; for a question also

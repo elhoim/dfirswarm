@@ -46,10 +46,17 @@ establish, and nothing here settles it.
   like a credential, never leaves. Every request, decision and answer is
   kept in the run (`network/`, `store/net/`), so the record of a run says
   what was sent where.
-- **The operator's `--notify` command** receives each event's details: the
-  run id, states, counts, and on `evidence_changed` the names of the
-  evidence files that changed, went missing or appeared. No evidence
-  content. Where that command sends them is the operator's choice.
+- **The operator's `--notify` targets.** The operator's own command receives
+  each event's details: the run id, states, counts, and on
+  `evidence_changed` the names of the evidence files that changed, went
+  missing or appeared; no evidence content. A typed target (`desktop:`,
+  `ntfy:<topic>`, which goes through ntfy.sh unless the operator names a
+  server of their own, `mailto:<address>`) receives the event and the run's
+  id alone. An operator request, whatever the target, is told by its ids
+  only (the request's `R-n`, its kind, the lead's or question's id, its
+  urgency), never by what it asks, which may be case content
+  ([ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)).
+  Where a target sends them is the operator's choice.
 - **Nothing to the harness's authors.** The harness sends no telemetry. Pi's
   own startup calls to `pi.dev` are not on netguard's list or a VM's
   allowlist and are refused; on a host run with `--no-netguard` they go
@@ -81,6 +88,16 @@ models.
   transfer stopped or broken off, an answer withheld because its grant
   ended. It is in no VM's reach, is packaged under `network/raw/`, and can
   hold personal data.
+- **What was asked of the operator, and what came in later.** The
+  operator requests (`requests/requests.jsonl`, rendered to
+  `operator-requests.jsonl`) hold what each request asked in the agents'
+  words, which can name the case's subjects. Evidence added after the
+  kickoff (`swarm.sh evidence add`) and material the operator supplied
+  (`swarm.sh material add`, a question's attachment) are copied into the
+  store (`store/imports/ev-<n>/`, `mat-<n>/`) and are evidence content like
+  `inputs/`; each record says who supplied it, when and from where. Material
+  added with `--sensitive` is held to the same rule as a sensitive entry: no
+  name, label or question may carry what it says.
 - **The package** (`swarm.sh package <id>` → `<sandbox>/package/`): the
   report, the summary, everything under `work/` except `work/extracted/` and
   `work/quarantine/`, the ledger, the trace and the board, `court-set.json`
@@ -134,8 +151,11 @@ derive.
   legal text the run records beside it (`legal:`, for instance "GDPR or
   similar laws" and the scope of the authority the examination runs under)
   and what the operator knows of the providers' retention
-  (`provider_retention:`). The harness records these and enforces the
-  network part; it does not decide what the law of a case requires.
+  (`provider_retention:`), whether evidence may arrive while the run goes on
+  (`more_evidence:`) and what supplied or captured material may be used for
+  (`material_use:`). The harness records these, anchors and seals them, and
+  enforces the network part and the material use; it does not decide what
+  the law of a case requires.
 
 - **Whether the evidence may be processed this way at all**, and on what
   basis: who the controller is, and what the engagement or the law allows.
