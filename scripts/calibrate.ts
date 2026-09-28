@@ -481,8 +481,11 @@ export async function scoreRun(runDirArg: string, truth: Truth, opts: { truthPat
     const falseNegative = scoredAs === "present" && answer ? negative : null;
     const forced = scoredAs !== "present" && answer ? answer.result === "established" || adopted : scoredAs !== "present" ? false : null;
 
+    // Counted by the question's state at the start: a question missing then
+    // is a missing-evidence question even once a late item made it present
+    // (the swarm should have asked for it before the item came).
     let acquisition: QuestionScore["acquisition"] = null;
-    if (q.kind === "missing" && !lateApplies) {
+    if (q.kind === "missing") {
       const pats = q.acquisition?.accept ?? [];
       const hits = requests.filter((r) => r.questions.includes(q.id) || (pats.length > 0 && matches(pats, r.text) && r.questions.length === 0));
       const gap = standing.filter((x) => x.kind === "limitation" && (Array.isArray(x.answers) ? (x.answers as unknown[]).map(questionKey).includes(q.id) : false) && (!pats.length || matches(pats, entryText(x))));

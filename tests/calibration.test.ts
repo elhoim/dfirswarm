@@ -335,7 +335,10 @@ test("the late item, found by its digest, turns a missing question into one its 
     assert.equal(q4.late_applies, true);
     assert.equal(q4.scored_as, "present");
     assert.equal(q4.verdict, "false negative", "an answer left at not determinable after the evidence came is stale");
-    assert.equal(q4.acquisition, null);
+    // Counted by its state at the start: missing then, it is a missing-evidence question, and the run asked for the evidence.
+    assert.equal(q4.acquisition?.requested, true);
+    assert.deepEqual([r.summary.acquisition.questions, r.summary.acquisition.requested], [1, 1]);
+    assert.match(scoreText(r), /Acquisition: +1 of 1 missing-evidence questions requested the evidence/);
     assert.deepEqual([r.summary.late.questions, r.summary.late.reflected], [1, 0]);
     const forced = (await scoreRun(S, miniTruth(), { late: "absent" })).questions.find((x) => x.id === "4")!;
     assert.equal(forced.scored_as, "missing", "--late absent overrides the digest");
@@ -434,7 +437,8 @@ async function faithfulRun(truth: Truth, withLate: boolean): Promise<string> {
     if (negative) attests.push(JSON.stringify({ v: 2, act: "attest", seq: answer, target: "h", by: "critic", at: "t", how: "re-derived" }));
     // An established answer attested established by another seat, naming the alternative it weighed: its high is recorded high.
     if (expected.result === "established") attests.push(JSON.stringify({ v: 2, act: "attest", seq: answer, target: ledgerHash(JSON.parse(line) as LedgerEntry, "genesis"), by: "critic", at: "t", how: "re-derived", strength: "established", answer_review: { reproduced: "the finding", read: "nothing else", parts: [{ part: "all", established: true, why: "the finding" }], inference: "direct", alternatives: [{ explanation: "a decoy", why: "the finding rules it out" }], other_family: { checked: false, text: "one family" } } }));
-    if (q.kind === "missing" && !late) requests.push(JSON.stringify({ lead: `L-${q.id}`, questions: [q.id], request: "the evidence that would settle it" }));
+    // A faithful run asks for a missing question's evidence at the start, whether or not a late item brings it.
+    if (q.kind === "missing") requests.push(JSON.stringify({ lead: `L-${q.id}`, questions: [q.id], request: "the evidence that would settle it" }));
   }
   await writeFile(join(S, "ledger", "entries.jsonl"), `${lines.join("\n")}\n`);
   await writeFile(join(S, "ledger", "attestations.jsonl"), attests.length ? `${attests.join("\n")}\n` : "");
