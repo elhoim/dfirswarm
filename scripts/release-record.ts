@@ -162,7 +162,67 @@ export type ReleaseRecord = {
   external?: { answers: Array<{ section: string; seq: number; hash: string | null; classes: string[]; via: string[] }>; note: string };
   /** The acquisition requests of the run as they stood (docs/adr/0014): what was asked for, and how each ended. */
   acquisitions?: Array<{ id: string; state: string; stage: string | null; source: string; questions: string[]; import: string | null }>;
+  /**
+   * The question register as this release binds it (docs/adr/0016): the
+   * length and head custody sealed, what those events say (the questions by
+   * origin, and every person who asked or acted, claimed or signed), and the
+   * events recorded after the verdict (a follow-up after the done, a resume's
+   * continuation), which the next release binds. Absent from a release made
+   * before it was bound.
+   */
+  questions?: QuestionsBinding;
 };
+
+/** What a release says of the question register it binds. */
+export type QuestionsBinding = {
+  lines: number;
+  head: string | null;
+  /** Whether the length and head are the ones the custody verdict sealed (false: a verdict from before the register was sealed, bound as it is). */
+  sealed: boolean;
+  /** Questions opened in the bound events, by origin; derived from the goal (and none written) when the register was never written. */
+  by_origin: Record<string, number>;
+  /** Each person who asked a question or acted on one in the bound events: whether enrolled, and whether any act was signed. */
+  analysts: Array<{ person: string; name: string | null; role: string | null; enrolled: boolean | null; identity: "claimed" | "signed"; asked: string[]; acts: number; signed_acts: number }>;
+  /** Events after the ones bound. */
+  post_seal: { lines: number; events: Array<{ seq: number; ev: string; q: string | null; at: string }>; note: string };
+  note: string;
+};
+
+/**
+ * The question register's binding for a release, from the chain's text and
+ * the verdict's seal of it: pure over the events. `derived` is the goal's
+ * seed as a reader derives it, for a register never written.
+ */
+export function questionsBinding(events: Array<{ seq: number; ev: string; q?: string; at: string; hash: string; origin?: { kind?: string; person?: string; name?: string; role?: string; enrolled?: boolean; identity?: string }; signature?: unknown }>, sealed: { lines?: number; head?: string | null } | null | undefined, derived: Record<string, number> = {}): QuestionsBinding {
+  const lines = sealed ? Number(sealed.lines ?? 0) : events.length;
+  const head = sealed ? (sealed.head ?? null) : (events.at(-1)?.hash ?? null);
+  const bound = events.slice(0, lines);
+  const byOrigin: Record<string, number> = {};
+  const persons = new Map<string, QuestionsBinding["analysts"][number]>();
+  for (const e of bound) {
+    const o = e.origin;
+    if (e.ev === "open" && e.q) byOrigin[o?.kind ?? "goal"] = (byOrigin[o?.kind ?? "goal"] ?? 0) + 1;
+    if (!o?.person || !["analyst", "reviewer", "observer"].includes(o.kind ?? "")) continue;
+    const p = persons.get(o.person) ?? { person: o.person, name: o.name ?? null, role: o.role ?? null, enrolled: typeof o.enrolled === "boolean" ? o.enrolled : null, identity: "claimed" as const, asked: [], acts: 0, signed_acts: 0 };
+    p.acts += 1;
+    if (e.signature || o.identity === "signed") {
+      p.signed_acts += 1;
+      p.identity = "signed";
+    }
+    if (e.ev === "open" && e.q && !p.asked.includes(e.q)) p.asked.push(e.q);
+    persons.set(o.person, p);
+  }
+  const after = events.slice(lines);
+  return {
+    lines,
+    head,
+    sealed: Boolean(sealed),
+    by_origin: lines ? byOrigin : derived,
+    analysts: [...persons.values()].sort((a, b) => a.person.localeCompare(b.person)),
+    post_seal: { lines: after.length, events: after.map((e) => ({ seq: e.seq, ev: e.ev, q: e.q ?? null, at: e.at })), note: "Recorded after the verdict this release binds (a question admitted after the done, a follow-up, a resume's continuation): the next custody seals them and the next release binds them." },
+    note: lines ? "The register's events up to its bound head: who asked each question, as a claim or signed, every revision, scope decision, clarification, withdrawal and acceptance. A signed act carries its own signature on its line." : "The register was never written: the goal's questions were derived from the goal when this release was made (by_origin), and nothing else was asked.",
+  };
+}
 
 /** What the examiner confirms, word for word, before a release is sealed. */
 export const CONSENT_STATEMENT = "I have read the report and the answers I adopt";
@@ -380,6 +440,8 @@ export type ReleaseLayout = {
   /** The dynamic network's two chains (docs/adr/0012), which custody seals the same way: held to the verdict a release binds too. */
   grants: string;
   fetches: string;
+  /** The operator requests' chain (docs/adr/0014), which custody seals the same way. */
+  requests: string;
   review: string | null;
   anchor: string | null;
   /** A package made with --redact: each changed file's sha256 before and after. */
@@ -412,6 +474,7 @@ export function runLayout(sandbox: string, reviewFile: string | null, anchorFile
     questions: "questions/questions.jsonl",
     grants: "network/grants.jsonl",
     fetches: "network/fetches.jsonl",
+    requests: "requests/requests.jsonl",
     review: reviewFile,
     anchor: anchorFile,
     redactions: new Map(),
@@ -446,6 +509,7 @@ export function packageLayout(dir: string): ReleaseLayout {
     questions: "questions.jsonl",
     grants: "network/grants.jsonl",
     fetches: "network/fetches.jsonl",
+    requests: "requests.jsonl",
     review: existsSync(join(dir, "review.jsonl")) ? join(dir, "review.jsonl") : null,
     anchor: existsSync(join(dir, "trace", "custody-anchor.json")) ? join(dir, "trace", "custody-anchor.json") : null,
     redactions: redactionRows(read("REDACTIONS.txt")),
@@ -607,6 +671,7 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
       ["the question register", layout.questions, (seal: SealRecord) => seal.questions as Sealed, "events"],
       ["the network grants", layout.grants, (seal: SealRecord) => net(seal, "grants"), "lines"],
       ["the network fetches", layout.fetches, (seal: SealRecord) => net(seal, "fetches"), "lines"],
+      ["the operator requests", layout.requests, (seal: SealRecord) => seal.requests as Sealed, "events"],
     ] as const
   ).map(([what, rel, sealedOf, unit]) => {
     const text = readText(abs(layout.root, rel));
@@ -748,6 +813,19 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
       const candidates = [layout.sealedIndex, ...layout.indexHistory];
       const hit = candidates.find((c) => ["matches", "redacted"].includes(held(c, x.sealed_index?.sha256)));
       if (!hit) bad.push(`the sealed index of work/ it binds (${x.sealed_index.sha256}) is not here`);
+    }
+    // The question register as the release says it bound it (docs/adr/0016): its head at its length, and what it says of them.
+    if (x.questions) {
+      const qText = readText(abs(layout.root, layout.questions)) ?? "";
+      const qLines = qText.split("\n").filter((l) => l.trim());
+      const at = x.questions.lines ? hashFieldAt(qText, x.questions.lines) : null;
+      if (x.questions.lines > qLines.length || at !== x.questions.head) bad.push(`the question register here is not the one it binds (${x.questions.lines} events, head ${x.questions.head ?? "none"}; here ${qLines.length})`);
+      else if (layout.where === "run" && x.questions.lines) {
+        const events = qLines.slice(0, x.questions.lines).map((l) => JSON.parse(l) as Parameters<typeof questionsBinding>[0][number]);
+        const again = questionsBinding(events, { lines: x.questions.lines, head: x.questions.head });
+        if (JSON.stringify(again.by_origin) !== JSON.stringify(x.questions.by_origin) || JSON.stringify(again.analysts) !== JSON.stringify(x.questions.analysts)) bad.push("what it says of the question register (by_origin, analysts) is not what the events it binds say");
+        else parts.push(`binds the question register's first ${x.questions.lines} events (${Object.entries(x.questions.by_origin).map(([k, n]) => `${n} ${k}`).join(", ") || "no question opened"}${x.questions.analysts.length ? `; asked or acted on by ${x.questions.analysts.map((a) => `${a.person} (${a.identity})`).join(", ")}` : ""})`);
+      }
     }
     // The chains custody sealed: as they are; the growing ones as prefixes.
     const c = x.chains;

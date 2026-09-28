@@ -2411,11 +2411,11 @@ type Seal = Custody["seal"];
  * sha256. A part the verdict did not seal (an older custody) is not held,
  * and is said as not sealed; one that appeared or went since is a drift.
  */
-export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal: { hashes: string[]; types: string[] } | null): { drift: Array<{ what: string; sealed: string; now: string }>; after: string[]; not_sealed: string[] } {
+export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal: { hashes: string[]; types: string[] } | null, chains: { requests?: string[] } = {}): { drift: Array<{ what: string; sealed: string; now: string }>; after: string[]; not_sealed: string[] } {
   const drift: Array<{ what: string; sealed: string; now: string }> = [];
   const after: string[] = [];
   const notSealed: string[] = [];
-  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the lead register", "the question register", "the network records", "the store journal", "the model gateway log"] };
+  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the lead register", "the question register", "the network records", "the operator requests", "the store journal", "the model gateway log"] };
   const chain = (n: number, head: string | null, unit: string) => `${n} ${unit}, head ${head ?? "none"}`;
   if (!sealed.ledger) notSealed.push("the ledger");
   else if (sealed.ledger.entries !== now.ledger.entries || sealed.ledger.head !== now.ledger.head) {
@@ -2453,6 +2453,18 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
     for (const k of ["grants", "fetches"] as const) {
       if (sealed.network[k].lines !== nowNet[k].lines || sealed.network[k].head !== nowNet[k].head) drift.push({ what: `network ${k}`, sealed: chain(sealed.network[k].lines, sealed.network[k].head, "lines"), now: chain(nowNet[k].lines, nowNet[k].head, "lines") });
     }
+  }
+  // The operator requests (docs/adr/0014), the same way; what the operator did
+  // with them after the stop (acknowledged, answered, declined) follows the
+  // sealed line and is named, not a change to it. A sealed line changed or gone is.
+  const nowRequests = now.requests ?? { lines: 0, head: null };
+  if (!sealed.requests) {
+    if (nowRequests.lines) notSealed.push("the operator requests");
+  } else if (sealed.requests.lines !== nowRequests.lines || sealed.requests.head !== nowRequests.head) {
+    const n = sealed.requests.lines;
+    const prefix = chains.requests !== undefined && (n === 0 ? sealed.requests.head === null : chains.requests[n - 1] === sealed.requests.head);
+    if (prefix && nowRequests.lines > n) after.push(`operator requests: ${nowRequests.lines - n} event(s) after the seal (the operator's acts on them after the stop)`);
+    else drift.push({ what: "operator requests", sealed: chain(n, sealed.requests.head, "events"), now: chain(nowRequests.lines, nowRequests.head, "events") });
   }
   if (sealed.journal === undefined) notSealed.push("the store journal");
   else if (sealed.journal === null && now.journal) drift.push({ what: "store journal", sealed: "none", now: chain(now.journal.lines, now.journal.head, "lines") });
@@ -2497,7 +2509,7 @@ function lineHashField(text: string): string[] {
  * closing lines of a stop) is allowed; a line it sealed that changed or went
  * is not. Pure over the texts read.
  */
-export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: string; ledger: string; attestations: string; disputes: string; leads: string; questions: string; grants: string; fetches: string; journal: string | null; gateway: string | null }): { ok: boolean; held: string[]; broken: string[] } {
+export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: string; ledger: string; attestations: string; disputes: string; leads: string; questions: string; grants: string; fetches: string; requests?: string; journal: string | null; gateway: string | null }): { ok: boolean; held: string[]; broken: string[] } {
   const held: string[] = [];
   const broken: string[] = [];
   if (!sealed) return { ok: false, held, broken: ["the verdict seals no chain (a custody from before the seal)"] };
@@ -2523,6 +2535,7 @@ export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: stri
   check("the question register", sealed.questions?.lines, sealed.questions?.head, lineHashField(now.questions));
   check("the network grants", sealed.network?.grants.lines, sealed.network?.grants.head, lineHashField(now.grants));
   check("the network fetches", sealed.network?.fetches.lines, sealed.network?.fetches.head, lineHashField(now.fetches));
+  if (now.requests !== undefined) check("the operator requests", sealed.requests?.lines, sealed.requests?.head, lineHashField(now.requests));
   if (sealed.journal) check("the store journal", sealed.journal.lines, sealed.journal.head, now.journal === null ? [] : verifyJournalText(now.journal).hashes);
   if (sealed.model_gateway && now.gateway === null && sealed.model_gateway.lines > 0) {
     broken.push(`the model gateway log it sealed (${sealed.model_gateway.lines} lines) is not here`);
@@ -2566,6 +2579,7 @@ export async function earlierSeals(sandbox: string): Promise<EarlierSeal[]> {
     questions: await read(join("questions", "questions.jsonl")),
     grants: await read(GRANTS_LOG),
     fetches: await read(FETCH_LOG),
+    requests: await read(join("requests", "requests.jsonl")),
     journal: "text" in journal ? journal.text : null,
     gateway: "text" in gateway ? gateway.text : null,
   };
@@ -2636,7 +2650,8 @@ export async function verifyCustody(sandboxInput: string, opts: { timeoutSec?: n
     const j = verifyJournalText(journalRead.text);
     return { hashes: j.hashes, types: j.lines.map((l) => String((l as { type?: unknown }).type ?? "")) };
   })() : null;
-  const seal = sealDrift(sealed?.seal, now.seal, journal);
+  const requestsRead = await readRegularText(join(sandbox, "requests", "requests.jsonl"), 1 << 30);
+  const seal = sealDrift(sealed?.seal, now.seal, journal, { requests: lineHashField("text" in requestsRead ? requestsRead.text : "") });
   // work/ against the index custody sealed.
   const idx = await sealedIndex(sandbox, sealed, lastAnchored?.artifacts_sha256);
   const drift = idx.state === "sealed" ? await workDrift(sandbox, idx.index, deadline, walked) : null;

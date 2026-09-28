@@ -65,7 +65,9 @@ import { adoptionState, appendReview, independenceConflict, isSandboxPath, readR
 import { dispositionsOf } from "./adoption.ts";
 import {
   digestLine,
+  hashFieldAt,
   hashFieldHead,
+  questionsBinding,
   pickRelease,
   lineHashes,
   lineHead,
@@ -183,6 +185,29 @@ export async function asSealed(ctx: RunCtx, custody: { seal?: Record<string, { l
     if (!seal.questions) {
       if (qv.total) missing.push("the verdict did not seal the question register (a custody from before it was sealed)");
     } else if ((seal.questions.lines ?? 0) !== qv.total || (seal.questions.head ?? null) !== qv.head) drift.push(`the question register (sealed ${seal.questions.lines} events; now ${qv.total})`);
+    // The dynamic network's two chains, the same way (docs/adr/0012).
+    const netSeal = seal.network as unknown as Record<string, { lines?: number; head?: string | null }> | undefined;
+    for (const [k, rel] of [["grants", "network/grants.jsonl"], ["fetches", "network/fetches.jsonl"]] as const) {
+      const t = read(rel);
+      const v = t && t.trim() ? verifyLeadChain(t) : { total: 0, head: null };
+      const sealedNet = netSeal?.[k];
+      if (!sealedNet) {
+        if (v.total) missing.push(`the verdict did not seal the network ${k} (a custody from before they were sealed)`);
+      } else if ((sealedNet.lines ?? 0) !== v.total || (sealedNet.head ?? null) !== v.head) drift.push(`the network ${k} (sealed ${sealedNet.lines} lines; now ${v.total})`);
+    }
+    // The operator requests (docs/adr/0014): what the operator did with them
+    // after the stop follows the sealed line, and is the next custody's; a
+    // sealed line changed or gone is a drift.
+    const reqText = read("requests/requests.jsonl");
+    const rv = reqText && reqText.trim() ? verifyLeadChain(reqText) : { total: 0, head: null };
+    if (!seal.requests) {
+      if (rv.total) missing.push("the verdict did not seal the operator requests (a custody from before they were sealed)");
+    } else if ((seal.requests.lines ?? 0) !== rv.total || (seal.requests.head ?? null) !== rv.head) {
+      const n = seal.requests.lines ?? 0;
+      const at = n ? hashFieldAt(reqText, n) : null;
+      if (rv.total > n && (n ? at === (seal.requests.head ?? null) : seal.requests.head === null || seal.requests.head === undefined)) missing.push(`${rv.total - n} operator request event(s) recorded after the verdict (the operator's acts after the stop): the next custody seals them`);
+      else drift.push(`the operator requests (sealed ${n} events; now ${rv.total})`);
+    }
     const journalText = read("store/journal.jsonl");
     if (seal.journal) {
       const hashes = verifyJournalText(journalText ?? "").hashes;
@@ -437,7 +462,33 @@ async function buildRelease(ctx: RunCtx, input: ReleaseInput, dir: string, o: { 
     host,
     ...(input.policy ? { policy: input.policy } : {}),
     ...(await caseContract(S, ledger)),
+    questions: await questionsOf(S, custody.seal?.questions ?? null),
   };
+}
+
+/**
+ * The question register as a release binds it (docs/adr/0016): the head and
+ * length custody sealed, what those events say (the questions by origin, the
+ * persons who asked or acted, claimed or signed), and what was recorded after.
+ * A register never written is bound as empty, with the goal's questions as a
+ * reader derives them.
+ */
+async function questionsOf(S: string, sealed: { lines?: number; head?: string | null } | null): Promise<NonNullable<ReleaseRecord["questions"]>> {
+  const text = existsSync(join(S, "questions", "questions.jsonl")) ? readFileSync(join(S, "questions", "questions.jsonl"), "utf8") : "";
+  const events = text.split("\n").filter((l) => l.trim()).flatMap((l) => {
+    try {
+      return [JSON.parse(l) as Parameters<typeof questionsBinding>[0][number]];
+    } catch {
+      return [];
+    }
+  });
+  const derived: Record<string, number> = {};
+  if (!events.length) {
+    const Q = await import("../extensions/questions.ts");
+    const snap = await Q.questionsSnapshot(S).catch(() => null);
+    for (const q of snap?.state.questions.values() ?? []) derived[q.origin.kind] = (derived[q.origin.kind] ?? 0) + 1;
+  }
+  return questionsBinding(events, sealed, derived);
 }
 
 /**
