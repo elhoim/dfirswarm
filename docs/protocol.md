@@ -565,6 +565,31 @@ the time the run went: `wall_used_ms` holds what earlier stretches used and
 run stood do not count. `resumes` lists each `swarm.sh resume` (`{at, by,
 from}`).
 
+Two pauses are not a cap's, and hold a run under every stop policy with the
+same brakes. `provider_limit`: the watchdog (`scripts/provider-limit.ts`)
+pauses the run when every live seat's last own row since the last lift is an
+`agent_error` and either one of those errors states a wait of 30 minutes or
+more still ahead ("try again in ~N min", "in N hours", "retry after N
+seconds", a Retry-After number, a time with its zone) or every one of those
+seats was prompted again after its first error (`idle_nudge`, `resume_wake`,
+`hub_prompt`) and refused again. The pause keeps `{at, reason:
+"provider_limit", detail, by: "harness", models, until?, since?}`: `detail`
+the distinct error texts, whole, one a line; `until` the earliest end the
+provider named, when it named one to every refused seat; `since` the start of
+the spell when this pause follows the harness's own try with no seat having
+worked since. The rule is read again under the table lock (`pauseRun`'s
+`recheck`). The harness tries again at `until` plus a minute, or 30 minutes
+after the pause when no end is known (`liftProviderLimit`, `resumed_by:
+"harness"`), and the watchdog wakes each seat; a run whose seats are all
+refused again is paused again. The operator is told once per spell
+(`pauseNoticeKey`), with `reason`, `until`, `retry_at` and the advice, and
+the board once, in one line. `operator`: `swarm.sh pause <run> [--why TEXT]`
+writes `{at, reason: "operator", detail, by: "operator"}`; `swarm.sh unpause
+<run>` (`unpauseRun`) lifts a pause whose cause is gone: the provider's limit
+and the operator's hold always, a cap's only when the caps leave room
+(refused otherwise). An extension does not lift a pause that is not a cap's.
+The wake's words (`pauseLiftedText`) say who lifted it and why.
+
 A run's outcome (`runOutcome`) is read from its files: `done/STOPPED`
 (`{outcome: "stopped", by, at, why}`, written by `swarm.sh stop` on a run with
 no sentinel) is `stopped`; a sentinel says its own `outcome:`, and one the
@@ -687,7 +712,9 @@ anywhere; the model's own trailer names the same file.
 | `cap_steer`, `wall_steer` | budget fold | `{reason:"cannot_complete", delivered}`, `args.hard_kill` |
 | `budget_unreadable` | budget fold, once per process | `{error}`: `budget.json` could not be parsed twice in a row, so the fold was refused and the file left alone; a `veto` post says the same on the board |
 | `harness_stop` | budget fold, past the grace period | `{created_sentinel:true}`, `args.reason` = `cap` / `wall_clock` (`cap-stop`) |
-| `run_paused` | budget fold, the hub or the watchdog, past the grace period (`cap-pause`) | `{ok}`, `args.reason`, `args.via`: the pause written into `budget.json` |
+| `run_paused` | budget fold, the hub or the watchdog, past the grace period (`cap-pause`); the watchdog at the provider's limit; `swarm.sh pause` | `{ok}`, `args.reason` (`cap`, `wall_clock`, `provider_limit`, `operator`), `args.via`: the pause written into `budget.json`; at the provider's limit also `args` = `{until, retry_at, models, spell, since}` and `result` = `{why, seats[{agent, model, errors, retried, until}]}` |
+| `run_unpaused` | the watchdog, at the harness's try under the provider's limit; `swarm.sh unpause` | `{ok}`, `args` = `{via, reason, by, paused_at}`: the pause lifted, before the seats are woken (`resume_wake`) |
+| `agent_error` | the extension, at a turn's end in a provider error | `{ok: false, reason}` (the provider's words, whole), `args.model`: each failed turn once; the board hears each new text once (a `veto` post) |
 | `pause_hold` | the extension's `context` hook, while the run is paused (the call whose check wrote the pause included) | a model call held: the turn aborted without shutting the session |
 | `compact_held` | self-compaction, while the run is paused | `{ok: false, cancelled: true}`, `args` = `{reason, since, attempt}`: the compaction cancelled before any summary attempt, retry or fallback called the provider |
 | `resume_wake` | the watchdog, once per lifted pause | `{ok}`, `args` = `{agent, resumed_at}`: the seat prompted to go on |

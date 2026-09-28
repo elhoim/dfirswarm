@@ -31,6 +31,8 @@ scripts/swarm.sh list
 scripts/swarm.sh status <id>
 scripts/swarm.sh stop <id> [--no-custody] [--custody-timeout SEC]
 scripts/swarm.sh extend <id> [--minutes N] [--tokens N] [--usd N]
+scripts/swarm.sh pause <id> [--why TEXT]
+scripts/swarm.sh unpause <id>
 scripts/swarm.sh resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
     [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]
 scripts/swarm.sh requests <id> list [--open] [--json] | show R-n [--json]
@@ -439,7 +441,7 @@ the last check and what is late against the report), the parked leads, and on
 each lead its standing offer, a closure waiting for its closer's confirmation,
 a second route with its reason and its product contract.
 
-#### The stop policy: `extend`, `stop`, `resume`
+#### The stop policy: `extend`, `pause`, `unpause`, `stop`, `resume`
 
 `done` finishes a run, under every stop policy, only when every question in
 scope has a disposition under the bar ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md)):
@@ -457,7 +459,7 @@ says the event did not happen under the stronger bar), `examination_limited`
 (a question not determinable, partial, out of scope, a bounded negative short of
 that, accepted by the operator, or resting on limitations or deferrals),
 `paused` (held at a
-cap, waiting for you), `stopped` (`swarm.sh stop`, or `cap-stop` at a cap; never
+cap, at the model provider's limit, or by you), `stopped` (`swarm.sh stop`, or `cap-stop` at a cap; never
 `completed`), `abandoned`, or `verification_unavailable`. The summary, the
 report and the console say which.
 
@@ -470,7 +472,30 @@ report and the console say which.
   cap is refused and changes nothing. On the board, the trace and the
   operator's record, and to the notify command (`extended`) when it lifts a
   pause. `cap <id>` changes caps too and lifts a pause
-  the same way.
+  the same way. A pause that is not a cap's (the provider's limit, your own
+  hold) stays under an extension: `unpause` lifts it.
+- When the model provider refuses every live seat at once (a subscription's
+  usage limit), the watchdog pauses the run, under every stop policy
+  (`paused.reason: provider_limit`): when every live seat's last turn since
+  the last lift ended in a provider error, and either one of them was told to
+  wait 30 minutes or more, or every one was prompted again and refused again.
+  One seat's error never pauses the run. While it holds, no seat is prompted,
+  no model call goes out and the wall clock does not run. The harness tries
+  again at the end the provider named (every refused seat having named one;
+  the earliest, plus a minute) or every 30 minutes when none is known, wakes
+  every seat, and pauses the run again if every seat is refused again. You are
+  told once per spell (the notify command's `paused`, with `reason:
+  provider_limit` and `until`), and the board once. A long wait holds every
+  VM: to free the machine, `stop` the run now (custody seals it) and `resume`
+  it after the limit lifts; `unpause` tries again at once.
+- `pause <id> [--why TEXT]` holds a going run under any stop policy: each seat
+  finishes its step and goes idle, no model call goes out, nobody is prompted,
+  and the wall clock stands (`paused.reason: operator`). `unpause <id>` lifts a
+  pause whose cause is gone and the watchdog wakes every seat: your hold and a
+  pause for the provider's limit always; a pause at a cap only when the caps
+  now leave room, and otherwise it is refused with nothing changed (`extend`
+  gives room). Both are on the board, the trace (`run_paused`,
+  `run_unpaused`) and the operator's record.
 - `stop <id>` on a run with no sentinel writes `done/STOPPED` (`{outcome:
   "stopped", by, at, why}`) before custody seals it: a stopped run is never
   read as completed.
@@ -523,7 +548,8 @@ report and the console say which.
   signed v1 stays untouched and valid for what it bound; the continuation's
   answers are adopted through a later version (`review --sign --amend-reason`).
   The console's run page has "Continue this run" (and Extend, and a paused
-  run's notice) for the same commands.
+  run's notice, which names its reason and, at the provider's limit, the end
+  the provider named) for the same commands.
 
 #### Questions: `swarm.sh question` and directives
 

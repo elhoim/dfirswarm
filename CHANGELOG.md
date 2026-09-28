@@ -6,6 +6,36 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: the model provider's limit on every seat pauses the run
+
+An until-solved run hit its provider's subscription usage limit on every
+seat at once ("Try again in ~6904 min.", "The usage limit has been
+reached"). The watchdog prompted each seat again, half an hour apart, for
+days, every VM and the hub up, and the operator was never told the run could
+not go on before a stated time (docs/adr/0013, "The provider's limit, and the
+operator's pause").
+
+- **A pause for the provider's limit.** When every live seat's last turn
+  since the last lift ended in a provider error, and either one of them was
+  told to wait 30 minutes or more or every one was refused again after a
+  prompt, the watchdog pauses the run (`paused.reason: provider_limit`), under
+  every stop policy. One seat's error never pauses it. The pause keeps the
+  provider's texts whole, the models, and the end the provider named
+  (`until`), read from the words; no seat is prompted, no model call goes
+  out and the wall clock does not run.
+- **The harness tries again** at that end, or every 30 minutes, wakes the
+  seats, and pauses the run again if every seat is refused again. The
+  operator is told once per spell (`paused`, with the end and the advice to
+  stop the run to free the machine and resume it after the limit lifts), and
+  the board once. `run_paused` and `run_unpaused` are on the trace, and each
+  failed turn is recorded once (a retry refused on the same words used to
+  leave no row).
+- **`swarm.sh pause` and `unpause`.** The operator can hold a going run under
+  any stop policy, and lift a pause whose cause is gone; a cap's pause still
+  over its cap is refused, pointing to `extend`. An extension no longer
+  reads a pause that is not a cap's as one it must lift. The console's
+  notice names the pause's reason and the provider's end.
+
 ### Fixed: what the first calibration run on the new flow showed (run sabfd76)
 
 Scored against a truth kept outside the repo, the run missed a third of the
