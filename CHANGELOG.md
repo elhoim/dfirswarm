@@ -35,6 +35,13 @@ All notable changes to this project. The format follows
   symbol, a capital inside the word, or a long random string; never an id,
   a number, a date or a time); ordinary words never refuse a question, a
   name or a doing label. The package's redaction scanner is unchanged.
+- **B9 takes the value-shaped words from the value only.** The next
+  pilot questions naming "PowerShell" and "meeting.txt" were refused
+  because a sensitive entry's method and notes named that tool and file.
+  The words that are values by their shape now come only from what an
+  entry records (its `value`, and the subject an attribution names), never
+  from its evidence, source, method or notes; the whole value is still
+  held as a phrase.
 
 - **An earlier seal recomputes the attestations and the disputes.** Like the
   lead, question, network and request chains, their first sealed lines are

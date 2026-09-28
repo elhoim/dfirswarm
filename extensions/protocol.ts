@@ -9951,20 +9951,8 @@ export function sensitiveTokens(entries: LedgerEntry[]): SensitiveToken[] {
   return [...out].map(([token, seq]) => ({ token, seq })).sort((a, b) => b.token.length - a.token.length || a.token.localeCompare(b.token));
 }
 
-/** The text fields of a sensitive entry, every one: B9 takes its distinctive values from each. */
-function sensitiveEntryTexts(e: LedgerEntry): string[] {
-  const raw = e as unknown as Record<string, unknown>;
-  const texts: string[] = [];
-  for (const f of ENTRY_TEXT_FIELDS) if (typeof raw[f] === "string") texts.push(raw[f] as string);
-  if (e.attribution?.subject) texts.push(e.attribution.subject);
-  for (const l of e.locators ?? []) texts.push(l.at);
-  for (const a of (raw.alternatives as Array<{ explanation?: string; why?: string }> | undefined) ?? []) texts.push(a.explanation ?? "", a.why ?? "");
-  for (const q of (raw.qualifies as Array<{ why?: string }> | undefined) ?? []) texts.push(q.why ?? "");
-  return texts;
-}
-
 /**
- * Whether a word taken out of a sensitive entry's text is a value on its own
+ * Whether a word taken out of a sensitive entry's value is a value on its own
  * (B9): distinctive by its shape, never because it happens to stand in a
  * sensitive sentence. Generic, with no dictionary: at least eight
  * characters (a short technical word such as SHA-256 or python3 is not a
@@ -10011,10 +9999,14 @@ export function distinctiveValue(word: string): boolean {
  * whole (`sensitive: true`), and its `value` is what it records, so that
  * value is held whole, as a phrase matched word for word (a short value
  * such as "Alice", a multi-word one such as "Secret Word", or the whole
- * sentence), never as its words one by one; and from every text field, the
+ * sentence), never as its words one by one; and from the fields that hold
+ * what it records (its value, and the subject an attribution names), the
  * words that are values on their own (distinctiveValue: a key, a password,
- * an address, a path, an account). The redaction scanner reads the broader
- * sensitiveTokens.
+ * an address, a path, an account). Never from its evidence, its source,
+ * its method, what it indicates or any other note: those say how the value
+ * was found, and name tools and files an analyst's question names too (the
+ * c10 pilot refused "PowerShell" and "meeting.txt" so). The redaction
+ * scanner reads the broader sensitiveTokens.
  */
 export function b9SensitiveValues(entries: LedgerEntry[]): SensitiveToken[] {
   const out = new Map<string, SensitiveToken>();
@@ -10022,7 +10014,7 @@ export function b9SensitiveValues(entries: LedgerEntry[]): SensitiveToken[] {
     if (!e.sensitive) continue;
     const value = String(e.value ?? "").trim();
     if (sensitiveFold(value).length >= 3 && !out.has(value)) out.set(value, { token: value, seq: e.seq, exact: true });
-    for (const text of sensitiveEntryTexts(e)) {
+    for (const text of [value, e.attribution?.subject ?? ""]) {
       for (const raw of String(text ?? "").split(/\s+/)) {
         const w = raw.replace(/^[(["'`<{]+/, "").replace(/[)\]"'`>},.;:!?]+$/, "").replace(/['’]s$/i, "");
         if (w && !out.has(w) && distinctiveValue(w)) out.set(w, { token: w, seq: e.seq });

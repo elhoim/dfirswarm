@@ -207,8 +207,11 @@ policy" only where the policy says no more evidence comes.
    sensitivity as a whole, and its `value` is what it records, so that value
    is held whole, as a phrase matched word for word (a short one such as
    "Alice", a multi-word one, or the whole sentence), never word by word;
-   and from every text field of the entry, only the words that are values
-   by their shape: eight characters or more, with a digit, a symbol (a
+   and from what the entry records (its value, and the subject an
+   attribution names; never its evidence, source, method or notes, which
+   name the tools and files a question names too: the second c10 pilot
+   refused "PowerShell" and "meeting.txt" so), only the words that are
+   values by their shape: eight characters or more, with a digit, a symbol (a
    path, an address, `Qx7!pass`) or a capital inside the word, or twelve
    letters or more that do not read as a word (a random string). The run's
    own ids, numbers, dates and times, and ordinary words ("activity",

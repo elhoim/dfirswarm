@@ -226,8 +226,10 @@ test("6: two additions at once take two ids, and each seals exactly its own file
 test("7: B9 holds the name as it is published, a short value marked sensitive, and Unicode that folds to a sensitive value", async () => {
   const { S, a0 } = await run();
   // An entry marks sensitivity as a whole; its value is what it records: a short one ("Alice", "Secret Word") is held whole, as a phrase.
-  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "Alice", source: "the notebook", evidence: "The vault word Secret77 is on page 3.", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
+  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "Alice", source: "the notebook", evidence: "page 3", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
   ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "Secret Word", source: "the notebook", evidence: "page 4", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
+  // A distinctive word the value holds is held on its own, wherever a text puts it.
+  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "The vault word is Secret77", source: "the notebook", evidence: "page 5", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
   for (const name of ["Sec**ret77", "Secret\nWord", "asking Alice", "Ｓｅｃｒｅｔ７７", "Sec\u200Bret77", "`secret`_77"]) {
     const r = await P.claimName(S, "a1", name);
     assert.equal(r.ok, false, `${JSON.stringify(name)} was taken`);
@@ -243,8 +245,9 @@ test("7b: B9 holds the sensitive values, never the ordinary words of a sensitive
   const { S, a0 } = await run();
   // A sensitive finding as a live run records one (c10, E-151): ordinary words, paths, timestamps, a job's name for its output.
   ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "Kali guest recent-file bookmark links /home/kali/Documents/meeting.txt to the Mousepad editor, recording added/visited at 2023-04-06T13:48:47Z and last modified at 13:48:47Z.", source: "Kali ext4 /home/kali/.local/share/recently-used.xbel", evidence: "j000129/file__home_kali_.local_share_recently-used.xbel bookmark href=file:///home/kali/Documents/meeting.txt added=2023-04-06T13:48:47.047028Z", indicates: "The named local guest file was opened at least once; the bookmark list holds its entries. Authentication and investigation remain open. It records user activity.", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
-  // And one that holds real values: a password, a sixteen-character token (mixed and letters only), an address, a multi-word value.
-  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "Purple Elephant Nine", source: "the keychain", evidence: "The clerk's password Qx7!pass, the API token k3J9xQ2mL8vN4pRt, a recovery code qzvxkplmwtrbnjhd, sent to clerk@example.org.", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
+  // And ones whose values are real: a multi-word value, and a password, a sixteen-character token (mixed and letters only), an address.
+  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "Purple Elephant Nine", source: "the keychain", evidence: "entry 3", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
+  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "The clerk's password Qx7!pass, the API token k3J9xQ2mL8vN4pRt, a recovery code qzvxkplmwtrbnjhd, sent to clerk@example.org.", source: "the keychain", evidence: "entry 4", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
   const operator: Q.Actor = { kind: "human", role: "operator", person: "t@lab", enrolled: false, os_user: "t", host: "lab", via: "cli", identity: "claimed" };
   // The c10 question, word for word: its common words ("activity", "entries") are no value.
   const c10 = "Is there evidence that any activity on this system ran automatically (scheduled tasks, services, startup entries), and if so what, when, and under which account?";
@@ -263,6 +266,22 @@ test("7b: B9 holds the sensitive values, never the ordinary words of a sensitive
     assert.equal(r.ok, false, `${JSON.stringify(name)} ${JSON.stringify(doing)} was taken`);
     assert.match((r as { error: string }).error, /holds a value the run marks sensitive/);
   }
+});
+
+test("7c: B9 takes the distinctive words from a sensitive entry's value only: a tool or a file name its evidence, method or notes use is admitted in a question; one in its value is refused (the c10 pilot)", async () => {
+  const { S, a0 } = await run();
+  // The names are in the entry's method and its notes, not in what it records.
+  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "The archive's password was reused for the mailbox", source: "PowerShell history of the clerk", evidence: "PowerShell's ConsoleHost_history.txt opened meeting.txt, then the mailbox", indicates: "Read with PowerShell from meeting.txt and ConsoleHost_history.txt: the same secret twice", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
+  const operator: Q.Actor = { kind: "human", role: "operator", person: "t@lab", enrolled: false, os_user: "t", host: "lab", via: "cli", identity: "claimed" };
+  for (const text of ["Was PowerShell used to open meeting.txt?", "What does ConsoleHost_history.txt show?"]) {
+    const r = await Q.act(S, operator, "open", { text, why: "the analyst asks" });
+    assert.equal(r.ok, true, `${text}: ${(r as { reason?: string }).reason}`);
+  }
+  assert.equal((await P.claimName(S, "a1", "PowerShell reader", "reading meeting.txt")).ok, true);
+  // A distinctive word inside the value is still refused, and so is the whole value.
+  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "The mailbox token is k3J9xQ2mL8vN4pRt", source: "the keychain", evidence: "entry 4", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
+  refused(await Q.act(S, operator, "open", { text: "Who issued k3J9xQ2mL8vN4pRt?", why: "w" }), /holds a value the run marks sensitive/);
+  refused(await Q.act(S, operator, "open", { text: "Is it so that the archive's password was reused for the mailbox?", why: "w" }), /holds a value the run marks sensitive/);
 });
 
 // --- 8 ---------------------------------------------------------------------------------------------
