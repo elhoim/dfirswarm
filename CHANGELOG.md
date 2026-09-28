@@ -57,6 +57,49 @@ All notable changes to this project. The format follows
   when they hold any value the run marks sensitive, whatever its origin: no
   answer-value concept, no exemption for the goal's own words.
 
+### Fixed: the case contract's independent review
+
+- **A resume's egress follows its recorded policy.** `--no-netguard` among a
+  resumed run's options no longer opens a run whose recorded case policy is
+  closed or dynamic; the generated VM and job specs are held to the policy
+  (`case-policy.ts check-spec`) before anything boots.
+- **Every notification is identifiers only.** Not only an operator request:
+  `evidence_changed`, `finish_failed` and every other event leave as an
+  envelope of ids, numbers and counts, the details kept in the run
+  (`traces/notify-events.jsonl`, by event id). `mailto:` takes one mailbox,
+  never an option, given after `--`.
+- **Added evidence and material, committed then applied.** An addition is
+  copied into a staging directory of its own, its id reserved by making its
+  directory, and committed (record and journal line) one at a time under the
+  run's material lock; what follows (the external entry, the acquisition's
+  stages, the leads and answers it reopens, the board post) is derived from
+  the record, each step once, and replayed after a crash by the hub's round,
+  the next addition or `evidence list`; the finish line waits for it
+  (`addition_incomplete`). A reason too long for the ledger's entry or a
+  lead's reopen is kept whole in the record and named, never cut. Leads
+  under a custom question section (`bonus`) are reopened. The documents say
+  what the mounts do: an addition is readable at once, read-only, in every
+  seat's VM, and its provenance is its ledger entry's.
+- **`material_use none` holds on what a record rests on.** A digest of the
+  same bytes, a job's output made from them, a coverage record and an
+  attestation or dispute are refused as the material's own ref is, and
+  `check-answers` fails an answer resting on it (`material_use`). A job's
+  output attached as material keeps its lineage downstream.
+- **B9 holds what is published.** A name is checked as it would appear
+  (tidied) with Unicode folded, and a short value marked sensitive is held
+  whole, as a word.
+- **Operator requests.** An interrupted migration no longer loses the lines
+  of a run from before the chain, and a line an older harness appends is
+  imported; a delivery is claimed on the chain before it is sent (never two
+  sends), tried again after a backoff, and an imported request the old
+  watchdog never notified is notified. The operator's acts go through the
+  hub while it runs, their board posts are made from the chain once, and
+  their outcome is on the operator's record.
+- **B16** names an adapter by its whole id (`rdap_domain`) and a tool name
+  built on its service (`virustotal_hash`).
+- **The fetch service's per-host interval** is held against when the
+  previous request to the host actually left (each hop records `sent_at`).
+
 ### Fixed: the question register, after an independent review
 
 - **The hub is the register's one writer.** While a run's hub is up, the

@@ -282,7 +282,7 @@ test("9: what the agents are told of added evidence matches the mounts: readable
   assert.match(s3, /mounts the run's directory read-only and live/);
   const brief = await readFile(join(ROOT, "scripts", "swarm.sh"), "utf8");
   assert.doesNotMatch(brief, /your VM keeps the view of the run it booted with/);
-  for (const doc of ["prompts/worker-system.md", "calibration/README.md"]) assert.doesNotMatch(await readFile(join(ROOT, doc), "utf8"), /keeps? the view of the run (it|they) booted with|shares stay as booted/, doc);
+  for (const doc of ["prompts/worker-system.md", "docs/usage.md", "docs/adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md", "calibration/README.md"]) assert.doesNotMatch(await readFile(join(ROOT, doc), "utf8"), /keeps? the view of the run (it|they) booted with|shares stay as booted/, doc);
 });
 
 // --- 10 --------------------------------------------------------------------------------------------

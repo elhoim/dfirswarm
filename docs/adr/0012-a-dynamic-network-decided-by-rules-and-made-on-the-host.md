@@ -146,7 +146,10 @@ the decision.
    a byte leaves; a log that cannot be written stops the fetch. The grant is
    held to again at every point where time has passed: under the log's lock
    before the attempt is written (after any wait for the adapter's rate, whose
-   per-host slot is reserved at once so two fetches cannot share it), after
+   per-host slot is reserved at once so two fetches cannot share it; the
+   interval itself is held, under the host's turn, against when the previous
+   request to that host actually left, and each hop records its `sent_at`),
+   after
    each DNS answer, during the transfer and before anything is published. A
    body over the limit is refused whole and its size recorded, never kept in
    part; a revocation or expiry during a transfer stops it, and what came is

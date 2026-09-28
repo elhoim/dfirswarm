@@ -98,7 +98,7 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--time-reference URL` | no | — | Record this https server's clock offset from the host's (its `Date` header, a second's precision) in the anchor at kickoff and in the verdict at custody. |
 | `--anchor-mirror TARGET` | no | — | Copy each release's digest line somewhere this account does not keep: `cmd:COMMAND` (the line on its stdin; its output kept whole as the receipt, `mirror-<k>.json` beside the release), `dir:PATH` (a directory that exists: a file per release, never written over), or `print` (the line and a QR-ready string in `case-file.txt`, and printed). An object-locked bucket's mount or a records custodian's separately administered archive is the independent copy; a folder of the same account is not, and a signed git remote is a witness of when a line was pushed, not a write-once store. Recorded as `anchor_mirror`; `SWARM_ANCHOR_MIRROR` for a run without one. |
 | `--custody-timeout SEC` | no | 14400 (`SWARM_CUSTODY_TIMEOUT`) | How long custody may take at the run's end, whoever takes it: the hub at a microVM run's finish, or `stop`. Recorded as `custody_timeout_sec`; `stop --custody-timeout` overrides it for that stop. |
-| `--notify TARGET` | no | none | Who is told when something happens to the run; repeatable. `desktop:` (a desktop notification: `osascript` on macOS, `notify-send` elsewhere), `ntfy:<topic>` (a push through ntfy.sh, or `ntfy:https://host/topic` for a server of your own), `mailto:<address>` (this host's `mail` or `sendmail`), or a command of yours. The events: `finished`, `finish_failed`, `stop_incomplete`, `budget_cap`, `wall_clock`, `paused` (a `cap-pause` run held at a cap; the operator is told of a pause once, whichever process wrote it), `extended` (a pause lifted by `extend`), `operator_request` (an operator request committed: a lead that needs you, an acquisition, a clarification, a network item, a stop proposed when nothing yields; fired by the hub, [ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)), `evidence_changed`, `chain_broken`, `agent_dead`, `collector_unreachable`, `hub_down`. A command gets one JSON line on stdin (`{event, run, at, detail}`); a typed target gets the event and the run's id. An operator request is told by its ids only (`R-n`, its kind, the lead's or question's id, its urgency), never what it asks: the notification leaves the host. Each target runs detached and has 30 seconds; a failure or a timeout goes to `traces/notify.log` and never stops the run. The targets are kept outside the run (`runs/notify/<id>.cmd` and `<id>.targets`, 0600, in a directory denied to a host run's panes wherever the guard can deny, read only when they are regular files of yours; an ntfy topic is its secret), never in the start options kept for a resume: `swarm.sh resume` gives the command and each target to the kickoff again from that store. The registry records only that there is one (`notify: true`), and the operator's record shows their length, not their text. |
+| `--notify TARGET` | no | none | Who is told when something happens to the run; repeatable. `desktop:` (a desktop notification: `osascript` on macOS, `notify-send` elsewhere), `ntfy:<topic>` (a push through ntfy.sh, or `ntfy:https://host/topic` for a server of your own), `mailto:<address>` (this host's `mail` or `sendmail`), or a command of yours. The events: `finished`, `finish_failed`, `stop_incomplete`, `budget_cap`, `wall_clock`, `paused` (a `cap-pause` run held at a cap; the operator is told of a pause once, whichever process wrote it), `extended` (a pause lifted by `extend`), `operator_request` (an operator request committed: a lead that needs you, an acquisition, a clarification, a network item, a stop proposed when nothing yields; fired by the hub, [ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)), `evidence_changed`, `chain_broken`, `agent_dead`, `collector_unreachable`, `hub_down`. A command gets one JSON line on stdin (`{event, run, at, event_id, detail, details}`), where `detail` holds only identifiers (a request's `R-n`, its kind, a lead's or question's id, an urgency, a state), numbers and yes/no values, and every list as its count; the event's whole details stay in the run, in `traces/notify-events.jsonl` under `event_id` (`details` says where). A typed target gets the event and the run's id. Nothing a notification carries is case content: it leaves the host. `mailto:` takes one mailbox (`local@domain`, never beginning with `-`), given to `mail` or `sendmail` after `--`. Each target runs detached and has 30 seconds; a failure or a timeout goes to `traces/notify.log` and never stops the run. The targets are kept outside the run (`runs/notify/<id>.cmd` and `<id>.targets`, 0600, in a directory denied to a host run's panes wherever the guard can deny, read only when they are regular files of yours; an ntfy topic is its secret), never in the start options kept for a resume: `swarm.sh resume` gives the command and each target to the kickoff again from that store. The registry records only that there is one (`notify: true`), and the operator's record shows their length, not their text. |
 | `--ledger-from RUN` | no | none | An earlier, finished run's ledger handed in as hypotheses to re-derive or refute: `prior/ledger.md`, read-only (on a VM run it is on the read-only floor), never copied into the new ledger. When the earlier run has an examiner review whose chain verifies, only the entries whose latest review accepted or amended them (and whose entry hash still matches) come in; otherwise every entry, each marked unreviewed. Refused for a run that is running, purged, or held for another case. Recorded as `ledger_from`. |
 | `--no-verify-copy` | no | content check on | By default the evidence copy is checked against its source by content: each copied file's source is read again and its SHA-256 compared with the manifest's (progress every 2 GiB on large sets), and a mismatch is a BLOCKER. This keeps only the check by name, kind and size. Recorded in `inputs.json` as `source_checked`. |
 | `--allow-root` | no | refused | Start a host run (`--isolation host`) as root. Without it that is a BLOCKER: root is not bound by the read-only modes a host run relies on. A microVM run started as root is warned about, not refused. Recorded as `allow_root`. |
@@ -284,7 +284,9 @@ seals it by its sha256 and names a rewrite (`CASE POLICY REWRITTEN`, the
 `case policy` check failed); a release binds it (`release.json` `case_policy`).
 A resume keeps the policy its kickoff recorded and prints a `NOTE` for each
 field its options would have changed. At kickoff the services the goal names
-(a URL, a host, an adapter's name, a denied service by its own name) are held
+(a URL, a host, an adapter's whole id such as `rdap_domain` or its service's
+name, alone or inside a tool's name such as `virustotal_hash`, a denied
+service by its own name) are held
 to the policy and the adapter catalogue and printed as `WARN` lines: a
 closed network, a lookup the policy does not allow, an adapter whose key is
 not configured, a host no adapter reaches or the hard denials refuse. Nothing
@@ -303,14 +305,22 @@ commit; the request is derived from it and written once to
 `declined` or `withdrawn`. The hub reconciles and notifies after every act
 that may open one and on every round, so a crash between the commit and the
 notification loses nothing; the watchdog is the fallback (every round in a
-host run, every five minutes with a hub).
+host run, every five minutes with a hub). A delivery is claimed on the chain
+before it is sent, so the hub and the fallback never both send one; a failed
+one is tried again after a backoff (a minute, doubling, at most an hour). A
+request imported from a run before the chain is notified unless that run's
+watchdog had notified it.
 
 - `requests <id> list [--open] [--json]` lists them, open first, with how each
   is answered; `show R-n [--json]` prints one whole with its history.
 - `requests <id> ack R-n [--why W]` acknowledges one; `answer R-n TEXT` answers
   it where it is answered (a lead's: its note, and the lead reopens; a
   clarification's: its reply; a stop proposal's: on the request);
-  `decline R-n --why W` and `withdraw R-n --why W` close it.
+  `decline R-n --why W` and `withdraw R-n --why W` close it. While the run's
+  hub runs, each act goes to it (it writes the chain), as a question's do;
+  the act is said on the board from its event on the chain, once, and a post
+  that fails is made at the next round. The outcome is on your record
+  (`requests_outcome` in `runs/operator-audit.jsonl`).
 - An acquisition carries what it asks for (`source`, `where`, `questions`,
   `expected_value`, `urgency`: normal, urgent or volatile, `owner`,
   `authority_needed`) and its stage: `requested` → `authorised` | `declined` →
@@ -322,8 +332,8 @@ host run, every five minutes with a hub).
   authorised by the policy.
 - `evidence <id> add PATH --why W [--for R-n] [--question Q-n]... [--sha256 HEX]
   [--as ID]` adds evidence acquired after the kickoff, a file or a directory
-  outside the run: each file is copied into a staging directory outside the
-  run and held to the sha256 its source had (and to `--sha256`, an acquisition
+  outside the run: each file is copied into a staging directory of its own
+  outside the run and held to the sha256 its source had (and to `--sha256`, an acquisition
   hash of the one file), then sealed in the store as `import:ev-<n>` (the store's
   import path: read-only, in a manifest, the bytes kept once), written on the
   store journal as an `evidence_added` line with its inventory revision and
@@ -334,10 +344,15 @@ host run, every five minutes with a hub).
   stale until they are recorded again, lifts an acceptance made before it,
   and, when the run's catalogue is on, runs a detect pass over each file (at
   once when the hub runs, else at its next round). While the hub runs the act
-  is handed to it: it is the store journal's writer. **The agents' VMs keep the
-  view of the run they booted with: new evidence is read through jobs**
-  (`job_run` with `inputs: ["import:ev-<n>/<file>"]`); in a host run the panes
-  read `store/imports/ev-<n>/out/` directly. Refused under
+  is handed to it: it is the store journal's writer. **Every seat's VM mounts
+  the run's directory read-only and live, so an addition is readable there at
+  once, at `store/imports/ev-<n>/out/`** (as it is to a host run's panes), and
+  in jobs (`job_run` with `inputs: ["import:ev-<n>/<file>"]`); a finding cites
+  it as `import:ev-<n>/<file>` however it was read, and its class and
+  provenance are its ledger entry's, never the path. What follows from an
+  addition is recorded once each, after its commit; a process that dies
+  between is caught up by the hub's next round (or `evidence <id> list` with no
+  hub), and the finish line waits for it. Refused under
   `--more-evidence no`, for a path inside the run, and when a copy does not
   hash as its source. `evidence <id> list [--json]` lists what was added.
 - `material <id> add PATH --why W [--class operator_supplied|case_material]

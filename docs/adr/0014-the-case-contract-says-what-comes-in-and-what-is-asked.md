@@ -85,7 +85,14 @@ policy" only where the policy says no more evidence comes.
    the operator's stop) or is the operator's act (`swarm.sh requests`).
    `operator-requests.jsonl`, which every older reader reads, is rendered
    from the chain, one line per request as it stands; a run from before the
-   chain has its lines imported whole at the first write.
+   chain has its lines imported whole at the first write, published at once
+   (written beside the chain and renamed onto it), and a line the chain does
+   not hold (one an older harness appended, or one left by a first write
+   that was cut off) is imported by its sha256 before anything is written,
+   never rendered away. The operator's acts on a request go to the hub while
+   it runs, as the question register's do; each act's board post is derived
+   from its event on the chain and made once, by its key, so a post that
+   fails after the commit is made at the next round.
 
 3. **The hub fires the notifications, with ids only.** After every act that
    may open a request and on every round, the hub reconciles and hands each
@@ -93,10 +100,17 @@ policy" only where the policy says no more evidence comes.
    notify-send), `ntfy:<topic>`, `mailto:<address>`, and the operator's own
    command, all kept outside the run (0600). A notification carries the
    request's id and kind and the lead's or question's id, never what was
-   asked. Delivery is at least once (a crash after the hand-over and before
-   `notified` sends it again, by its id). The watchdog keeps a fallback: in a
-   host run it is the delivery, with a hub it runs every five minutes and
-   sends only what the hub has not.
+   asked. Every other event leaves as an envelope of identifiers too: the
+   details stay in the run (`traces/notify-events.jsonl`, by event id).
+   Before a request is sent its delivery is claimed on the chain, so the hub
+   and the watchdog's fallback never both send it; a claim whose dispatcher
+   died is taken over once it is stale, and a failed delivery is tried again
+   after a backoff. Delivery is at least once (a crash after the hand-over
+   and before `notified` sends it again, by its id). A request imported from
+   a run before the chain is notified unless that run's watchdog had
+   notified it (its count mark). The watchdog keeps a fallback: in a host
+   run it is the delivery, with a hub it runs every five minutes and sends
+   only what the hub has not.
 
 4. **The acquisition lane.** An agent asks for evidence the run does not
    have on the lead that needs it: `lead_close needs_operator` with `ask:
@@ -125,10 +139,28 @@ policy" only where the policy says no more evidence comes.
    the ledger's last entry at that moment); and the acceptances made before
    it. When the run's catalogue is on, a detect pass runs over each file.
    While the hub runs it is the store journal's writer and the act is handed
-   to it. **Agent VMs keep the view of the run they booted with: new
-   evidence is read through jobs** (`job_run inputs ["import:ev-<n>/<file>"]`);
-   nothing is mounted into a running VM. Under `more_evidence: no` it is
-   refused.
+   to it. **Every seat's VM mounts the run's directory read-only and live**,
+   so an addition is readable there at once (`store/imports/ev-<n>/out/`), as
+   it is through jobs (`job_run inputs ["import:ev-<n>/<file>"]`). No frozen
+   view is promised: a mount list fixed at boot does not freeze what is under
+   it. Provenance therefore never rests on how a seat read the bytes: a
+   finding cites `import:ev-<n>/<file>` (or the same bytes by digest, or a
+   job's output made from them), and the lineage resolves every such
+   citation to the addition's external entry and its class. Under
+   `more_evidence: no` it is refused.
+
+   The addition is committed by its record and its store journal line, one
+   at a time under the run's material lock (an import id is reserved by
+   making its directory, the copy staged in a directory of its own); what
+   follows from it (the external entry, the acquisition's stages, the
+   reopened leads and questions, the catalogue, the board post) is derived
+   from the record, each step found again by the import's id, and the
+   journal's `addition_applied` says it is all recorded. A process that dies
+   in between leaves it to the next reconciliation (the hub's round, the next
+   addition, `evidence <run> list`), and the finish line refuses a done while
+   an addition is not applied (`addition_incomplete`). A reason too long for
+   the ledger's external entry or a lead's reopen stays whole in the record;
+   the entry names where.
 
 6. **Material has provenance, and is flagged.** `swarm.sh material <run> add
    FILE --why W [--class operator_supplied|case_material] [--sensitive]`, and
@@ -139,8 +171,16 @@ policy" only where the policy says no more evidence comes.
    evidence is not). The external lineage follows every class through the
    jobs that read it (by what they resolved and by digest) to every entry
    and answer resting on it; `check-answers`, the report and `release.json`
-   name each such answer with its classes. A record that cites material the
-   policy says `none` for is refused.
+   name each such answer with its classes. The lineage indexes every
+   external attachment by the object it resolves to and by its digest, a
+   job's output included. A record of any kind (a finding, an answer, a
+   coverage record, an attestation or a dispute) whose resolved lineage
+   reaches material the policy says `none` for is refused, however it cites
+   it: the material's own ref, the same bytes by `sha256:`, a job's output
+   made from it, a catalogue member of such a job, or an entry resting on
+   it. `check-answers` holds each answer to it again: an answer whose
+   lineage reaches such material is a `material_use` defect, fixed and never
+   named away by a limitation.
 
 7. **The report says where the evidence ends.** Section 8 gains "Evidence
    gaps and acquisition requests", generated from the records, never written:
@@ -158,13 +198,21 @@ policy" only where the policy says no more evidence comes.
    reasons and hints are refused when they hold a value the run marks
    sensitive, whatever its origin: any ledger entry recorded sensitive (an
    agent's finding, an answer, material supplied as sensitive), standing or
-   superseded, compared without regard to case. There is no "answer value"
+   superseded. The name is held as it would be published (tidied: markup
+   dropped, whitespace collapsed) and as given, and both sides are folded
+   the same way (Unicode compatibility form, invisible format characters
+   removed, case folded), so `Sec**ret77`, a line break inside a value and a
+   full-width spelling are the value. A short field marked sensitive (a
+   name such as "Alice") is held whole, as a whole word, whatever the
+   heuristics redaction uses for long ones. There is no "answer value"
    concept and no exemption for words the goal itself uses. The refusal
    names the entry, never the value.
 
 9. **The goal's services are held to the policy (B16).** At kickoff the
-   hosts and services a goal names (a URL, a host, an adapter's name, a
-   denied service by its own name) are checked against the case policy and
+   hosts and services a goal names (a URL, a host, an adapter's whole id such
+   as `rdap_domain`, its service's name alone or inside another tool's name
+   such as `virustotal_hash`, a denied service by its own name) are checked
+   against the case policy and
    the adapter catalogue (tolerated when absent): a closed network, a lookup
    the policy does not allow, an adapter that needs a key not configured, a
    host no adapter reaches or the hard denials refuse, each is a warning.

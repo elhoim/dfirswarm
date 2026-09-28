@@ -46,15 +46,18 @@ establish, and nothing here settles it.
   like a credential, never leaves. Every request, decision and answer is
   kept in the run (`network/`, `store/net/`), so the record of a run says
   what was sent where.
-- **The operator's `--notify` targets.** The operator's own command receives
-  each event's details: the run id, states, counts, and on
-  `evidence_changed` the names of the evidence files that changed, went
-  missing or appeared; no evidence content. A typed target (`desktop:`,
-  `ntfy:<topic>`, which goes through ntfy.sh unless the operator names a
-  server of their own, `mailto:<address>`) receives the event and the run's
-  id alone. An operator request, whatever the target, is told by its ids
-  only (the request's `R-n`, its kind, the lead's or question's id, its
-  urgency), never by what it asks, which may be case content
+- **The operator's `--notify` targets.** Every event leaves the host as an
+  envelope of identifiers only, whatever the event and whatever the target:
+  the event, the run's id, the time, an event id, and of its details only
+  what is an identifier (a request's `R-n`, its kind, a lead's or question's
+  id, an urgency, a state), a number or a yes/no; a list becomes its count.
+  No file name, summary, command output or request text is in it: the
+  details stay in the run (`traces/notify-events.jsonl`, under the event
+  id), where the operator reads them. The operator's own command gets that
+  envelope on stdin; a typed target (`desktop:`, `ntfy:<topic>`, which goes
+  through ntfy.sh unless the operator names a server of their own,
+  `mailto:<address>`, one mailbox, never an option to the mail program)
+  receives the event and the run's id alone
   ([ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)).
   Where a target sends them is the operator's choice.
 - **Nothing to the harness's authors.** The harness sends no telemetry. Pi's
