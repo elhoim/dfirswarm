@@ -70,14 +70,24 @@ async function submitted(svc: JobService, who: string, spec: Record<string, unkn
   return until(svc, r.job.id);
 }
 
+/** The job's job_committed line on the store journal, waited for: it may land just after the job reads committed. */
+async function committedLine(S: string, job: string): Promise<{ sensitive: { why?: string } } & Record<string, unknown>> {
+  for (let i = 0; i < 200; i++) {
+    const journal = await readFile(storePaths(S).journal, "utf8").catch(() => "");
+    const line = journal.split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.type === "job_committed" && l.job === job);
+    if (line) return line;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error(`no job_committed line for ${job}`);
+}
+
 test("secret_output seals every output sensitive; a job reading one is derived; an entry citing one is recorded sensitive", async () => {
   const { S, svc, a1 } = await run();
   const secret = await submitted(svc, "a1", { command: `printf '%s' '${VALUE}' > "$OUT/value.txt"; echo read one configuration file`, inputs: [], secret_output: true });
   assert.equal(secret.status, "ok");
   assert.equal(secret.sensitive?.why, "secret_output");
-  // On the journal (the record) and in the job's projection.
-  const journal = await readFile(storePaths(S).journal, "utf8");
-  const committed = journal.split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.type === "job_committed" && l.job === secret.id);
+  // On the journal (the record) and in the job's projection. The job_committed line may land just after the job reads committed: waited for.
+  const committed = await committedLine(S, secret.id);
   assert.equal(committed.sensitive.why, "secret_output");
   assert.equal(JSON.parse(await readFile(join(storePaths(S).jobs, secret.id, "job.json"), "utf8")).sensitive.why, "secret_output");
   assert.match(describe(secret), /Its outputs are sensitive \(it ran with secret_output\)/);
@@ -117,8 +127,7 @@ test("identical bytes of a sensitive output are sensitive at commit, while the s
   // Another job writes the same bytes from nothing it declared as sensitive (it made them itself).
   const again = await submitted(svc, "a2", { command: `printf '%s' '${VALUE}' > "$OUT/copy.txt"`, inputs: [] });
   assert.deepEqual([again.sensitive?.why, again.sensitive?.from], ["derived", [secret.id]], "decided before job_committed, from the journal's sensitive jobs and their manifests, not from the same_as index");
-  const journal = await readFile(storePaths(S).journal, "utf8");
-  const committed = journal.split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.type === "job_committed" && l.job === again.id);
+  const committed = await committedLine(S, again.id);
   assert.equal(committed.sensitive?.why, "derived", "the job_committed line says so");
   assert.equal(again.same_as, undefined, "the hint waits for the index; the sensitivity did not");
   await svc.stop("test over");

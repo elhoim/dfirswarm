@@ -339,3 +339,16 @@ test("an answer's fingerprint is computed as an earlier harness recorded it: the
   const earlier = P.sha256Hex(JSON.stringify({ result: "not_determinable", question_rev: 2, support: ["a".repeat(64), "b".repeat(64)], contrary: ["c".repeat(64)], limitations: [], inconclusive: false, asserts_absence: false }));
   assert.equal(P.answerFingerprint(e), earlier);
 });
+
+test("a result post that cites only its author's own answer chain is covered by the revision, whatever its prose says: a design limit, pinned (the Fable review's test gaps)", () => {
+  const e = (seq: number, more: Record<string, unknown>) => ({ v: 4, seq, kind: "answer", value: "v", by: "a1", authors: ["a1"], at: "2026-09-29T10:00:00.000Z", section: "question:1", ...more }) as unknown as P.LedgerEntry;
+  const entries = [e(5, {}), e(6, { supersedes: 5 })];
+  // A restatement of the revision: covered.
+  assert.equal(F.restatesRevision("RESULT: question 1 revised, E-6 (was E-5).", "a1", entries), true);
+  // A new objection in prose, citing only the same chain: covered too. The rule reads citations, never prose (no word list decides what a post means);
+  // an objection belongs in an objection ack or a dispute, which the gate holds.
+  assert.equal(F.restatesRevision("RESULT: E-6 revised; but E-5's premise does not hold and the summary is wrong.", "a1", entries), true);
+  // Anything else cited, or another seat's post: not covered.
+  assert.equal(F.restatesRevision("RESULT: E-6, see job:j000002/rows.csv", "a1", entries), false);
+  assert.equal(F.restatesRevision("RESULT: E-6 revised", "a2", entries), false);
+});
