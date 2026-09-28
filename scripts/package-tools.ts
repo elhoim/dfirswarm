@@ -468,8 +468,8 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
       `Withheld whole: ${withheld.length ? "" : "nothing"}`,
       ...withheld.map((w) => `${w.sha256_of_original}  ${String(w.bytes).padStart(12)}  ${w.path}  ${w.why}`),
       "",
-      "id (before)                       after sha256                                                     path  why",
-      ...changesOut.map((c) => `${c.replaced[0]?.sha256_of_original ?? c.before_sha256}  ${c.after_sha256}  ${c.path}  ${c.why}`),
+      "sha256 before                                                    sha256 after                                                     path  why",
+      ...changesOut.map((c) => `${c.before_sha256}  ${c.after_sha256}  ${c.path}  ${c.why}`),
       "",
     ].join("\n"),
   );

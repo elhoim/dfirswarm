@@ -195,7 +195,7 @@ test("a redacted package withholds sensitive outputs whole, names them, and scan
   assert.match(red.entries[0].why, /cites sensitive output/);
   const txt = await readFile(join(pkg, "REDACTIONS.txt"), "utf8");
   assert.match(txt, /Withheld whole: \nhidden-[0-9a-f]{24}\s+\d+\s+store\/jobs\/j\d+\/(out\/value\.txt|stdout\.log)/);
-  assert.doesNotMatch(txt.split("Withheld whole:")[1].split("id (before)")[0], /[0-9a-f]{64}/, "the withheld list carries no digest");
+  assert.doesNotMatch(txt.split("Withheld whole:")[1].split("sha256 before")[0], /[0-9a-f]{64}/, "the withheld list carries no digest, only keyed ids");
   // The private sidecar, outside the package, maps the ids to the real digests.
   const sidecar = JSON.parse(await readFile(join(pkg, "..", `${basename(pkg)}.private.json`), "utf8"));
   const ids = r.withheld.map((w) => w.sha256_of_original);

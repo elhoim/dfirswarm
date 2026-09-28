@@ -341,9 +341,14 @@ back to a host run on its own.
     credential, a key, personal data) and what it cites stay out of a package
     made with `package --redact` and an export made with `export --redact`:
     the chained records keep their chains by each redacted line's own hash,
-    and `REDACTIONS.txt` lists every change with the hashes before and after,
-    so the owner of the original can match it. What GDPR or similar laws ask
-    of a hand-over beyond that is the operator's to decide.
+    and `REDACTIONS.txt` lists every change. Sensitive content the package
+    withholds or matches is named by a keyed id, never by a hash a low-entropy
+    value (a PIN, a dictionary word) could be brute-forced from; the key and
+    each id's real digest, path and word live in a private sidecar
+    (`<dir>.private.json`) the run's owner keeps **outside** the hand-over, so
+    the owner can match the original and a recipient cannot recover the value.
+    What GDPR or similar laws ask of a hand-over beyond that is the operator's
+    to decide.
   - **Retention and legal hold.** Keep or destroy a run with its case, under
     the case's retention rules and any legal hold, and not before custody and
     the package are taken. `swarm.sh hold <id> [--reason TEXT]` keeps a run

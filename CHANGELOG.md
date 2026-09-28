@@ -23,27 +23,44 @@ All notable changes to this project. The format follows
 - **Cost per question.** Each model call the gateway recorded goes to the
   leads its seat held then, split evenly, and to their questions; a call
   outside every hold goes to no question and is shown on its own line. A
-  host run's seats' totals are spread over their tool calls, an estimate.
+  host run's seats' totals are spread over their tool calls, an estimate; a
+  seat with a budget the trace cannot place keeps its tokens in an explicit
+  unattributed bucket. The per-question figures shown are whole numbers that
+  sum to the displayed total (largest-remainder). Appendix F renders every
+  register event whole, including one tied to no lead.
 - **A release binds the question register.** `release.json.questions`: the
   length and head custody sealed, the questions by origin, every person who
   asked or acted (enrolled, claimed or signed), and what came after the
-  verdict; verification holds the chain to it. The operator requests' chain
-  is now held to its seal by custody-verify, an earlier verdict, a release
-  and a draft.
-- **Sensitive outputs.** `job_run(secret_output: true)` seals every output
-  sensitive; a job made from a sensitive output is sealed sensitive too, as
-  derived; an entry citing one is recorded sensitive. `package --redact`
-  withholds them and their logs whole, names each with its sha256, and scans
-  every file for the sensitive entries' words and a small output's own text;
-  a package without `--redact` names what in it is sensitive
-  (`HYGIENE.json`). An entry citing a cancelled or stopped job's output
-  without saying how it treats it is a `partial_output` defect.
+  verdict. Verification recomputes the bound prefix's own chain, not the
+  stored hash fields, whether or not the custody verdict sealed the questions;
+  the operator requests and the other register chains are held to a seal the
+  same way, by custody-verify, an earlier verdict, a release and a draft.
+- **Sensitive outputs, held by their bytes.** `job_run(secret_output: true)`
+  seals every output sensitive; a job that executed against a sensitive
+  output's bytes — read from the snapshot its scope manifest recorded, so a
+  work copy, a store blob, a catalogue link, generation or alias counts,
+  through chains of jobs — is sealed sensitive too, as derived; an entry
+  citing one is recorded sensitive; a sensitive generation withholds its
+  coverage detail from the catalogue projection at the source. `package
+  --redact` withholds every file whose bytes are a sensitive job's, wherever
+  they sit, names each by a keyed id (never a hash a low-entropy value could
+  be brute-forced from; the key and the real digests are in a private sidecar
+  kept outside the hand-over), and scans every file and the filenames for the
+  sensitive entries' words, a small output's text and the outputs' digests; a
+  package without `--redact` names what in it is sensitive (`HYGIENE.json`),
+  the same way. An entry citing a cancelled or stopped job's output without
+  saying how it treats it is a `partial_output` defect, resolved by the job
+  that wrote the bytes so a copy or a `sha256:` citation is held too.
 - **Tool harvesting and the library's hint.** `swarm.sh tools <id>
   --candidates` ranks the code agents wrote into command jobs by lines times
   reuse, with its jobs, seats, profiles and the library tools that may cover
-  it, and writes each script whole for the maintainer. A manifest's `use`
-  says what a tool reads; a command job that declares its inputs is told
-  which library tools read that kind of file.
+  it, and writes each script whole for the maintainer; a work file is taken
+  only when the command ran it as code (read no-follow, its bytes matching the
+  snapshot), and output hygiene withholds a candidate from a sensitive job or
+  one holding a sensitive value before any script is written. A manifest's
+  `use` says what a tool reads; a command job that declares its inputs is told
+  which library tools read that kind of file, from a cached manifest, bounded
+  and under a deadline.
 - ADR 0016; README, docs/usage.md, docs/protocol.md, tool-library/README.md
   and the worker prompt say it.
 
