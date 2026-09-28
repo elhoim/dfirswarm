@@ -10,7 +10,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "resume" | "net";
+export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "resume" | "net" | "requests";
 export type JobStatus = "running" | "ok" | "failed";
 
 export type Job = {
@@ -1190,6 +1190,16 @@ export class ActionRunner {
         ? ["net", swarmId, "grant", "--socket", p.host ?? "", ...(p.lead ? ["--lead", p.lead] : []), "--why", p.why]
         : ["net", swarmId, p.action, p.target ?? "", "--why", p.why];
     return this.run("net", args, swarmId);
+  }
+
+  /**
+   * An act on an operator request (swarm.sh requests <id> <sub> R-n …,
+   * docs/adr/0014): acknowledge, answer, decline, withdraw, or an
+   * acquisition's stage; on the trace and the operator's record, and said on
+   * the board to whoever asked.
+   */
+  requests(swarmId: string, sub: string, argv: string[]): Job {
+    return this.run("requests", ["requests", swarmId, sub, ...argv], swarmId);
   }
 
   /** The ledger as CSV or a Timesketch import, written to `out` (a file of the console's own). */

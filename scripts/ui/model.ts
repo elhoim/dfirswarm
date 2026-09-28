@@ -35,6 +35,8 @@ import {
 } from "../../extensions/observe.ts";
 import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, runOutcome, stopPolicyOf, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
 import { networkBrief, type NetworkBrief } from "./network.ts";
+import { requestsBrief } from "./requests.ts";
+import type { RequestsBrief } from "../../extensions/requests.ts";
 import { awaitingInterpretation, leadsSnapshot, OPERATOR_REQUESTS, operatorHosts, questionCoverage, rankedLeads, type AwaitingJob, type LeadView } from "../../extensions/leads.ts";
 import { HUMAN_ORIGINS, originWords, questionViews, viewContext, type QuestionView, type TriageItem } from "../../extensions/questions.ts";
 import { verifySignedActs, type SignedAct } from "../questions-cli.ts";
@@ -564,6 +566,8 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   custody: CustodyView | null;
   /** The lead register in brief, for the header: what waits on the operator above all. Null when the run opened no lead. */
   leads: LeadsBrief | null;
+  /** The operator requests in numbers (the header's badge); null when the run asked nothing of the operator. */
+  requests: RequestsBrief | null;
   /** The question register in brief, for the header and the tab strip: what waits for the operator's triage and answers. */
   questions: QuestionsBrief | null;
   /** Whether the run was started until solved: no wall clock, caps advisory, only the operator ends it. */
@@ -1212,6 +1216,7 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     questions: await questionsBrief(sandbox),
     until_solved: detail.budget.until_solved === true,
     network: await networkBrief(sandbox).catch(() => null),
+    requests: await requestsBrief(sandbox).catch(() => null),
   };
 }
 

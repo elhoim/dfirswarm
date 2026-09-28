@@ -1,6 +1,6 @@
 import type { ArtifactIndex, Coverage, Dossier, ImagePreview, Job, OperatorAudit, PackageInfo, StartCheck, PackRow, EntryReviewAction, ReviewState, ExaminersView, EnrolledPerson, ReleaseStateView, PreparedRelease, VmReadiness, ModelList, SwarmRow, SwarmView, TimedPost, TracePage, WorkFile, FileVersion, Health, GoalSummary, StoreJobDetail, StoreJobsView, StoreLogPage,
   LibraryDocument,
-  LibraryEntry, GoalDocument, SwarmContract, ChecksReport, ReadinessReport, ForgedToolSource, InputsLibrary, LeadsPanelView, QuestionsPanelView, NetworkPanelView } from "./types";
+  LibraryEntry, GoalDocument, SwarmContract, ChecksReport, ReadinessReport, ForgedToolSource, InputsLibrary, LeadsPanelView, QuestionsPanelView, NetworkPanelView, RequestsPanelView } from "./types";
 
 /**
  * The token that lets this browser start, stop, reap and restore. The server
@@ -200,6 +200,11 @@ export const api = {
   network: (id: string) => request<NetworkPanelView>(`/api/swarms/${encodeURIComponent(id)}/network`),
   /** The operator's act on the network, with its reason: run as swarm.sh net. Needs the token. */
   netAct: (id: string, payload: { action: "grant" | "deny" | "revoke" | "socket"; target?: string; why: string; host?: string; lead?: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/network`, payload),
+  /** The operator requests: everything the run asked of a person, with its id and how it stands; the evidence and material added. */
+  requests: (id: string) => request<RequestsPanelView>(`/api/swarms/${encodeURIComponent(id)}/requests`),
+  /** An act on an operator request (ack, answer, decline, withdraw, an acquisition's stage), run as swarm.sh requests. Needs the token. */
+  requestAct: (id: string, payload: { action: "ack" | "answer" | "decline" | "withdraw" | "authorise" | "collecting" | "unavailable"; request: string; text?: string; why?: string; as?: string }) =>
+    postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/requests`, payload),
   /** The run's tool jobs from the job service's journal: a page, with the totals over all of them. */
   storeJobs: (id: string, q: { offset: number; limit: number }) =>
     request<StoreJobsView>(`/api/swarms/${encodeURIComponent(id)}/jobs?offset=${q.offset}&limit=${q.limit}`),

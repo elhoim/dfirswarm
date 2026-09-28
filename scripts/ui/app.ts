@@ -32,6 +32,7 @@ import { countForgedTools, findRun, listSwarmRows, listWorkFiles, liveHubDirs, o
 import { directiveArgv, questionArgv, QuestionRequestError } from "./questions.ts";
 import { readReviews } from "./reviews.ts";
 import { readNetwork } from "./network.ts";
+import { readRequests, requestArgv, RequestActionError } from "./requests.ts";
 import { createSigning, SigningError } from "./signing.ts";
 import { readStoreJob, readStoreJobLog, readStoreJobs, storeJobLogFile } from "./store-jobs.ts";
 import { userInfo } from "node:os";
@@ -1355,6 +1356,29 @@ export function createUiApp(options: UiAppOptions): UiApp {
         const lead = typeof body.lead === "string" ? body.lead.trim().toUpperCase() : "";
         if (lead && !/^L-[1-9]\d{0,5}$/.test(lead)) throw new HttpError(400, "lead is L-<n>");
         json(res, 202, runner.net(id, { action, ...(action === "socket" ? { host, ...(lead ? { lead } : {}) } : { target }), why }));
+        return;
+      }
+      /**
+       * The operator requests (extensions/requests.ts, docs/adr/0014): every
+       * request with its id, kind, state and history, open first; the case
+       * policy's word on more evidence; the evidence and material added. A
+       * POST is an act on one, run as swarm.sh requests.
+       */
+      case "requests": {
+        if (method === "GET") {
+          json(res, 200, await readRequests(sandbox));
+          return;
+        }
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        let r: { sub: string; argv: string[] };
+        try {
+          r = requestArgv((await readBody(req)) as Record<string, unknown>);
+        } catch (err) {
+          if (err instanceof RequestActionError) throw new HttpError(400, err.message);
+          throw err;
+        }
+        json(res, 202, runner.requests(id, r.sub, r.argv));
         return;
       }
       // Who did what to this run: its lines in runs/operator-audit.jsonl

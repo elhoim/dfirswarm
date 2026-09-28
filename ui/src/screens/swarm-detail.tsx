@@ -44,6 +44,7 @@ import { JobsPanel } from "./detail/jobs-panel";
 import { LeadsPanel } from "./detail/leads-panel";
 import { QuestionsPanel } from "./detail/questions-panel";
 import { NetworkPanel } from "./detail/network-panel";
+import { RequestsPanel } from "./detail/requests-panel";
 import { RecordActions } from "./detail/record-actions";
 import { isolationChip } from "@/components/swarm-bits";
 
@@ -55,7 +56,7 @@ import { isolationChip } from "@/components/swarm-bits";
  */
 const TAB_GROUPS = [
   { label: "The run", tabs: ["story", "threads", "traces", "agents"] },
-  { label: "Evidence", tabs: ["questions", "leads", "network", "files", "artifacts", "jobs", "ledger"] },
+  { label: "Evidence", tabs: ["requests", "questions", "leads", "network", "files", "artifacts", "jobs", "ledger"] },
   { label: "The frame", tabs: ["goal", "packs", "tools", "claims", "budget"] },
   { label: "Output", tabs: ["report", "release", "review", "custody"] },
 ] as const;
@@ -71,6 +72,7 @@ const TAB_LABEL: Record<Tab, string> = {
   leads: "Leads",
   questions: "Questions",
   network: "Network",
+  requests: "Requests",
   claims: "Claims",
   budget: "Budget",
   files: "Files",
@@ -442,6 +444,8 @@ export function SwarmDetailScreen() {
   const questionsVersion = useSwarmVersion(id, ["questions", "leads", "ledger"]);
   // The network's records, and the ledger its captures are recorded on.
   const networkVersion = useSwarmVersion(id, ["network", "ledger", "store"]);
+  // The operator requests: their chain (under leads' kind), the registers they are derived from, and the store (evidence added).
+  const requestsVersion = useSwarmVersion(id, ["leads", "questions", "network", "store"]);
   const checksVersion = useSwarmVersion(id, CHECKS_CHANGE_KINDS);
   const loader = useCallback(() => api.swarm(id), [id]);
   const view = useResource(loader, version, [id]);
@@ -584,8 +588,18 @@ export function SwarmDetailScreen() {
                   <Chip tone="saffron">{d.layout.split_failures} pane split{d.layout.split_failures === 1 ? "" : "s"} fell back to a new tab</Chip>
                 </div>
               ) : null}
-              {/* What the swarm asked of the operator, above everything else the band says: it waits on a person. */}
-              {d.leads && d.leads.waiting_on_operator > 0 ? (
+              {/* What the run asked of the operator, above everything else the band says: it waits on a person. */}
+              {d.requests && d.requests.open > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={() => setTab("requests")} title={`Open operator requests: ${Object.entries(d.requests.by_kind).map(([k, n]) => `${n} ${k}`).join(", ")}`}>
+                    <Chip tone="brick" className="bg-brick text-white">
+                      {d.requests.open} request{d.requests.open === 1 ? "" : "s"} waiting on you
+                      {d.requests.acquisitions_open ? ` (${d.requests.acquisitions_open} acquisition${d.requests.acquisitions_open === 1 ? "" : "s"})` : ""}
+                    </Chip>
+                  </button>
+                </div>
+              ) : null}
+              {!d.requests && d.leads && d.leads.waiting_on_operator > 0 ? (
                 <div className="flex flex-wrap items-center gap-2">
                   <button type="button" onClick={() => setTab("leads")} title="Leads a swarm agent closed needs_operator: something only you can give">
                     <Chip tone="brick" className="bg-brick text-white">
@@ -737,6 +751,7 @@ export function SwarmDetailScreen() {
                       {t === "leads" && d.leads ? d.leads.open + d.leads.active + d.leads.blocked : ""}
                       {t === "questions" && d.questions ? d.questions.unanswered : ""}
                       {t === "network" && d.network ? d.network.requests : ""}
+                      {t === "requests" && d.requests ? d.requests.open : ""}
                     </span>
                   </button>
                 ))}
@@ -807,6 +822,7 @@ export function SwarmDetailScreen() {
           {tab === "leads" ? <LeadsPanel view={d} version={leadsVersion} /> : null}
           {tab === "questions" ? <QuestionsPanel view={d} version={questionsVersion} /> : null}
           {tab === "network" ? <NetworkPanel view={d} version={networkVersion} /> : null}
+          {tab === "requests" ? <RequestsPanel view={d} version={requestsVersion} /> : null}
           {tab === "report" ? <ReportPanel view={d} /> : null}
           {tab === "release" ? <ReleasePanel view={d} /> : null}
           {tab === "review" ? <ReviewerPanel view={d} /> : null}

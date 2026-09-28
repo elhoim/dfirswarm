@@ -109,6 +109,7 @@ function kindOf(second: string, third: string): ChangeKind {
     case "store":
       return "store";
     case "leads":
+    case "requests":
     case "operator-requests.jsonl":
     case "operator-hosts.jsonl":
       return "leads";

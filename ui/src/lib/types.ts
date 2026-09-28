@@ -487,6 +487,47 @@ export type SwarmView = {
   until_solved?: boolean;
   /** The dynamic network in brief; null when the network is closed and nothing was asked. Absent from a server that predates it. */
   network?: NetworkBrief | null;
+  /** The operator requests in numbers (the header's badge); null when nothing was asked of the operator. Absent from a server that predates it. */
+  requests?: RequestsBrief | null;
+};
+
+/** Mirrors `RequestsBrief` in `extensions/requests.ts`. */
+export type RequestsBrief = { total: number; open: number; by_kind: Record<string, number>; pending: number; acquisitions_open: number; chain_ok: boolean };
+
+/** What an acquisition asks for; mirrors `AcquisitionAsk` in `extensions/requests.ts`. */
+export type AcquisitionAsk = { kind: "acquisition"; source: string; where: string; questions: string[]; expected_value: string; urgency: "normal" | "urgent" | "volatile"; owner: string; authority_needed: string };
+
+/** One operator request; mirrors `OperatorRequest` in `extensions/requests.ts`. */
+export type OperatorRequest = {
+  rid: string;
+  n: number;
+  kind: "lead" | "acquisition" | "clarification" | "decision" | "network";
+  key: string;
+  at: string;
+  by: string;
+  line: Record<string, unknown>;
+  ask: AcquisitionAsk | null;
+  questions: string[];
+  lead: string | null;
+  imported: boolean;
+  state: "pending" | "notified" | "acknowledged" | "answered" | "declined" | "withdrawn";
+  stage: "requested" | "authorised" | "declined" | "collecting" | "received" | "validated" | "unavailable" | null;
+  notified: Array<{ at: string; targets: string[] }>;
+  acknowledged: { at: string; by: string } | null;
+  closed: { ev: "answered" | "declined" | "withdrawn"; at: string; by: string; text: string; cause: string } | null;
+  stages: Array<{ stage: string; at: string; by: string; why: string; import?: string; inventory_rev?: number; sha256?: string[] }>;
+  history: Array<{ seq: number; at: string; ev: string; by: string; text?: string; why?: string; cause?: string; stage?: string; targets?: string[] }>;
+  last_seq: number;
+};
+
+/** The Requests tab; mirrors `RequestsPanelView` in `scripts/ui/requests.ts`. */
+export type RequestsPanelView = {
+  brief: RequestsBrief;
+  chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null };
+  requests: OperatorRequest[];
+  more_evidence: string;
+  material: Array<Record<string, unknown>>;
+  now: string;
 };
 
 /** Mirrors `QuestionsBrief` in `scripts/ui/model.ts`. */
