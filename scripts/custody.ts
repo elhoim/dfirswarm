@@ -653,6 +653,8 @@ export type Custody = {
     disputes?: { lines: number; head: string | null };
     /** The lead register (leads/leads.jsonl): absent from a verdict taken before it was sealed. */
     leads?: { lines: number; head: string | null };
+    /** The question register (questions/questions.jsonl): absent from a verdict taken before it was sealed. */
+    questions?: { lines: number; head: string | null };
     journal: { lines: number; head: string | null } | null;
     model_gateway: { lines: number; sha256: string | null } | null;
   };
@@ -662,6 +664,8 @@ export type Custody = {
   disputes?: { lines: number; intact: boolean; detail: string } | null;
   /** The lead register's events (leads/leads.jsonl): their own chain, sealed unsigned; null when the run opened no lead. */
   leads?: { lines: number; intact: boolean; detail: string } | null;
+  /** The question register's events (questions/questions.jsonl): their own chain, sealed unsigned (a signed act carries its own signature); null when the run wrote none. */
+  questions?: { lines: number; intact: boolean; detail: string } | null;
   /** The operator's audit beside the registry, and each operator line on the trace matched to it. */
   operator: OperatorAudit;
   /** The acquisition hashes given at kickoff (--inputs-hashes), against the evidence as re-hashed now. */
@@ -715,6 +719,7 @@ export type CustodyState = {
   attestations?: Custody["attestations"];
   disputes?: Custody["disputes"];
   leads?: Custody["leads"];
+  questions?: Custody["questions"];
   operator?: Custody["operator"];
   acquisition?: Custody["acquisition"];
   models?: Custody["models"];
@@ -1555,6 +1560,15 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   } else if ("why" in leadsRead && leadsRead.why !== "missing") {
     state.leads = { lines: 0, intact: false, detail: `the lead register is ${leadsRead.why}` };
   } else state.leads = null;
+  // The question register: what the examination was asked and by whom, a chain of its own beside the leads.
+  const questionsRead = await readRegularText(join(sandbox, "questions", "questions.jsonl"));
+  if ("text" in questionsRead && questionsRead.text.trim()) {
+    const v = verifyLeadChain(questionsRead.text);
+    state.questions = { lines: v.total, intact: v.ok, detail: v.ok ? `${v.total} events, chain intact` : `broken at line ${v.broken_at} (${v.reason})` };
+    if (state.seal) state.seal.questions = { lines: v.total, head: v.head };
+  } else if ("why" in questionsRead && questionsRead.why !== "missing") {
+    state.questions = { lines: 0, intact: false, detail: `the question register is ${questionsRead.why}` };
+  } else state.questions = null;
   state.ledgerDone = true;
 
   // --- the model gateway's log -----------------------------------------------
@@ -1883,6 +1897,7 @@ export function verdictOf(state: CustodyState, incomplete: string | null): Custo
     attestations: state.attestations ?? null,
     disputes: state.disputes ?? null,
     leads: state.leads ?? null,
+    questions: state.questions ?? null,
     operator: state.operator ?? null,
     acquisition: state.acquisition ?? null,
     checks: [],
@@ -1984,6 +1999,7 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
   if (c.attestations) parts.push(c.attestations.intact ? `${plural(c.attestations.lines, "ledger attestation")}, chain intact` : `LEDGER ATTESTATIONS CHAIN BROKEN (${c.attestations.detail})`);
   if (c.disputes) parts.push(c.disputes.intact ? `${plural(c.disputes.lines, "ledger dispute line")}, chain intact` : `LEDGER DISPUTES CHAIN BROKEN (${c.disputes.detail})`);
   if (c.leads) parts.push(c.leads.intact ? `${plural(c.leads.lines, "lead event")}, chain intact` : `LEAD REGISTER CHAIN BROKEN (${c.leads.detail})`);
+  if (c.questions) parts.push(c.questions.intact ? `${plural(c.questions.lines, "question event")}, chain intact` : `QUESTION REGISTER CHAIN BROKEN (${c.questions.detail})`);
   if (c.operator && !c.operator.intact) parts.push(`OPERATOR AUDIT CHAIN BROKEN (${c.operator.detail})`);
   if (c.model_gateway) {
     const g = c.model_gateway;
@@ -2304,7 +2320,7 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
   const drift: Array<{ what: string; sealed: string; now: string }> = [];
   const after: string[] = [];
   const notSealed: string[] = [];
-  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the lead register", "the store journal", "the model gateway log"] };
+  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the lead register", "the question register", "the store journal", "the model gateway log"] };
   const chain = (n: number, head: string | null, unit: string) => `${n} ${unit}, head ${head ?? "none"}`;
   if (!sealed.ledger) notSealed.push("the ledger");
   else if (sealed.ledger.entries !== now.ledger.entries || sealed.ledger.head !== now.ledger.head) {
@@ -2326,6 +2342,13 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
     if (nowLeads.lines) notSealed.push("the lead register");
   } else if (sealed.leads.lines !== nowLeads.lines || sealed.leads.head !== nowLeads.head) {
     drift.push({ what: "lead register", sealed: chain(sealed.leads.lines, sealed.leads.head, "events"), now: chain(nowLeads.lines, nowLeads.head, "events") });
+  }
+  // The question register, the same way.
+  const nowQuestions = now.questions ?? { lines: 0, head: null };
+  if (!sealed.questions) {
+    if (nowQuestions.lines) notSealed.push("the question register");
+  } else if (sealed.questions.lines !== nowQuestions.lines || sealed.questions.head !== nowQuestions.head) {
+    drift.push({ what: "question register", sealed: chain(sealed.questions.lines, sealed.questions.head, "events"), now: chain(nowQuestions.lines, nowQuestions.head, "events") });
   }
   if (sealed.journal === undefined) notSealed.push("the store journal");
   else if (sealed.journal === null && now.journal) drift.push({ what: "store journal", sealed: "none", now: chain(now.journal.lines, now.journal.head, "lines") });

@@ -175,6 +175,12 @@ export async function asSealed(ctx: RunCtx, custody: { seal?: Record<string, { l
     if (!seal.leads) {
       if (lv2.total) missing.push("the verdict did not seal the lead register (a custody from before it was sealed)");
     } else if ((seal.leads.lines ?? 0) !== lv2.total || (seal.leads.head ?? null) !== lv2.head) drift.push(`the lead register (sealed ${seal.leads.lines} events; now ${lv2.total})`);
+    // The question register, the same way: what was asked, by whom, and how each question stood.
+    const questionsText = read("questions/questions.jsonl");
+    const qv = questionsText && questionsText.trim() ? verifyLeadChain(questionsText) : { total: 0, head: null };
+    if (!seal.questions) {
+      if (qv.total) missing.push("the verdict did not seal the question register (a custody from before it was sealed)");
+    } else if ((seal.questions.lines ?? 0) !== qv.total || (seal.questions.head ?? null) !== qv.head) drift.push(`the question register (sealed ${seal.questions.lines} events; now ${qv.total})`);
     const journalText = read("store/journal.jsonl");
     if (seal.journal) {
       const hashes = verifyJournalText(journalText ?? "").hashes;

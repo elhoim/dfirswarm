@@ -38,6 +38,7 @@ import { bodyRelease } from "./release-record.ts";
 import { coverageLine, coverageOf } from "./coverage.ts";
 import { readRegularText } from "./regular-file.ts";
 import { leadsSnapshot, rankedLeads } from "../extensions/leads.ts";
+import { questionViews, viewContext } from "../extensions/questions.ts";
 
 type Marker = { id: string; marker: "done" | "dead" | "none"; reason: string; at: string };
 
@@ -471,6 +472,19 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
     lines.push(`${ranked.length} lead${ranked.length === 1 ? "" : "s"} (\`leads/leads.md\`): ${by("open")} open, ${by("active")} active, ${by("blocked")} blocked, ${by("closed")} closed; chain ${leadsSnap.state.chain.ok ? `intact, ${leadsSnap.state.events.length} events` : `BROKEN at line ${leadsSnap.state.chain.broken_at} (${leadsSnap.state.chain.reason})`}.`, "");
     lines.push("| Lead | Title | Status | Holder | Disposition | Rests on |", "| --- | --- | --- | --- | --- | --- |");
     for (const x of ranked) lines.push(`| ${x.id} | ${cell(x.title)} | ${x.status}${x.material ? "" : " (not material)"} | ${x.holder ?? ""} | ${x.disposition ?? ""} | ${cell(x.ref ?? "")} |`);
+    lines.push("");
+  }
+
+  // --- questions ----------------------------------------------------------
+  // The question register: what the run was asked, by whom, and how each
+  // question stands. Listed when the chain holds more than the goal's seed.
+  const qctx = await viewContext(sandbox).catch(() => null);
+  if (qctx && qctx.questions.state.events.some((e) => e.ev !== "seed" && e.ev !== "objective" && !(e.ev === "open" && e.origin?.kind === "goal"))) {
+    const views = questionViews(qctx);
+    lines.push("## Questions", "");
+    lines.push(`${views.length} question${views.length === 1 ? "" : "s"} (\`questions/questions.md\`); chain ${qctx.questions.state.chain.ok ? `intact, ${qctx.questions.state.events.length} events` : `BROKEN at line ${qctx.questions.state.chain.broken_at} (${qctx.questions.state.chain.reason})`}.`, "");
+    lines.push("| Question | Asked by | Scope | Revision | Answer | Leads |", "| --- | --- | --- | --- | --- | --- |");
+    for (const v of views) lines.push(`| ${v.id}: ${cell(v.text)} | ${cell(v.author)} | ${v.withdrawn ? "withdrawn" : v.scope}${v.after_done ? " (after done)" : ""} | ${v.rev} | ${v.answer ? `E-${v.answer.seq}${v.answer.stale ? " (stale)" : ""}` : ""} | ${v.leads.map((l) => l.id).join(", ")} |`);
     lines.push("");
   }
 

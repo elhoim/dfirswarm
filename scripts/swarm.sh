@@ -9171,6 +9171,8 @@ PY
   # operator and the hosts the operator allowed in answer.
   pkg_copy "$sandbox/leads/leads.jsonl" "$out/leads.jsonl" non-empty
   pkg_copy "$sandbox/leads/leads.md" "$out/leads.md" non-empty
+  pkg_copy "$sandbox/questions/questions.jsonl" "$out/questions.jsonl" non-empty
+  pkg_copy "$sandbox/questions/questions.md" "$out/questions.md" non-empty
   pkg_copy "$sandbox/operator-requests.jsonl" "$out/operator-requests.jsonl" non-empty
   pkg_copy "$sandbox/operator-hosts.jsonl" "$out/operator-hosts.jsonl" non-empty
   for f in inputs.json toolbox.json toolchain.json team.json budget.json layout.json netguard.allow SWARM.md custody.json; do

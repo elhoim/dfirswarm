@@ -717,3 +717,29 @@ test("the lead register is a chain custody seals, unsigned, beside the ledger: a
   const b = await verifyCustody(root, { runsDir: runs });
   assert.equal(b.now.find((x) => x.name === "lead register")?.status, "failed");
 });
+
+test("the question register is a chain custody seals beside the leads: a question asked after the stop is a drift, and a rewritten event fails the check", async () => {
+  const Q = await import("../extensions/questions.ts");
+  const { root, runs } = await sealedRun();
+  await writeFile(join(root, "team.json"), JSON.stringify({ swarm_id: "s1", n: 2, agents: [{ id: "a0", role: "w" }, { id: "a1", role: "w" }] }));
+  await mkdir(join(root, "done", "agents"), { recursive: true });
+  await mkdir(join(root, "locks"), { recursive: true });
+  const operator = { kind: "human" as const, role: "operator" as const, person: "tester@lab", enrolled: false, os_user: "tester", host: "lab", via: "cli" as const, identity: "claimed" as const };
+  assert.equal((await Q.act(root, operator, "open", { text: "Was the container opened elsewhere?", why: "second machine" })).ok, true);
+  const c = await takeCustody(root, { runsDir: runs });
+  const head = (await Q.questionsSnapshot(root)).state.chain.head;
+  const lines = (await readFile(join(root, "questions", "questions.jsonl"), "utf8")).trim().split("\n").length;
+  assert.equal(c.questions?.intact, true);
+  assert.deepEqual(c.seal.questions, { lines, head });
+  assert.equal(c.checks.find((x) => x.name === "question register")?.status, "passed");
+  assert.match(c.summary, new RegExp(`${lines} question events, chain intact`));
+  assert.equal((await verifyCustody(root, { runsDir: runs })).ok, true);
+  assert.equal((await Q.act(root, operator, "open", { text: "Was it copied again?", why: "after the stop" })).ok, true);
+  const v = await verifyCustody(root, { runsDir: runs });
+  assert.ok(v.seal_drift.some((d) => d.what === "question register"), JSON.stringify(v.seal_drift));
+  assert.equal(v.ok, false);
+  const text = await readFile(join(root, "questions", "questions.jsonl"), "utf8");
+  await writeFile(join(root, "questions", "questions.jsonl"), text.replace("opened elsewhere", "opened somewhere"));
+  const b = await verifyCustody(root, { runsDir: runs });
+  assert.equal(b.now.find((x) => x.name === "question register")?.status, "failed");
+});
