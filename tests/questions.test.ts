@@ -27,7 +27,7 @@ after(async () => {
 });
 
 const F = { basis: "observed", confidence: "high", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
-const A = { confidence: "high", confidence_why: "The finding is read from the object.", alternatives_open: "none remains open: the record is direct", would_change: "a second record that disagrees" } as const;
+const A = { result: "established", confidence: "high", confidence_why: "The finding is read from the object.", alternatives_open: "none remains open: the record is direct", would_change: "a second record that disagrees" } as const;
 
 const GOAL = [
   "## Goal",
@@ -337,7 +337,7 @@ test("clarification: an agent asks, the request is the operator's with a durable
 test("withdrawal: its leads close withdrawn, a lead holding a material finding goes to triage instead, a follow-up waits for triage, and nothing is erased", async () => {
   const { S, a1, a2 } = await run();
   const q = ok(await Q.act(S, person("analyst", "ana"), "open", { text: "Did the user print the archive?", why: "paper", objective: "O-1" })).q!;
-  const l1 = ok(await L.openLead(a1, { title: "Read the print spool", why: "printing", answers: [q], take: true, proposition: "the archive was printed", negation: "nothing was printed from it" })).lead;
+  const l1 = ok(await L.openLead(a1, { title: "Read the print spool", why: "printing", answers: [q], take: true, proposition: "the archive was printed", negation: "nothing was printed from it", routes: [{ source: "input:disk.E01", method: "read what the question names, looking for what would disconfirm it" }] })).lead;
   const l2 = ok(await L.openLead(a2, { title: "Read the printer's own log", why: "printing", answers: [q], take: true })).lead;
   // l2 found something: a job interpreted as a finding.
   const dir = join(S, "store", "jobs", "j000001");
@@ -408,7 +408,7 @@ test("the finish line: an in-scope arrival makes it not ready, a proposed one do
   assert.deepEqual((await gate()).defects.map((d) => d.code), ["stale_answer"]);
   // Acceptance: refused while a lead is open, bound to its revision, and it limits the run.
   const other = ok(await Q.act(S, operator, "open", { text: "Was the archive altered after arrival?", why: "integrity" })).q!;
-  const lead = ok(await L.openLead(a1, { title: "Hash the copies", why: "integrity", answers: [other], take: true, proposition: "it was altered", negation: "it was not" })).lead;
+  const lead = ok(await L.openLead(a1, { title: "Hash the copies", why: "integrity", answers: [other], take: true, proposition: "it was altered", negation: "it was not", routes: [{ source: "input:disk.E01", method: "read what the question names, looking for what would disconfirm it" }] })).lead;
   refused(await Q.act(S, operator, "accept", { q: other, expected_rev: 1, as: "bounded", why: "enough" }), /a route is still open .*held by a1/);
   const lim = await P.recordEntry(a1, { kind: "limitation", value: "Only one copy could be read", source: "store", evidence: "the second copy is missing", reason: "unavailable", answers: [other] } as P.LedgerInput);
   assert.ok(lim.ok, (lim as { reason?: string }).reason);
@@ -473,7 +473,7 @@ test("hypothesis framing: the first agent lead under a person's question states 
   const direct = ok(await L.openLead({ sandboxRoot: S, agentId: "operator" }, { title: "List the USB devices", why: "directive", answers: [q], product: "a table of devices with first and last times", acceptance: "every device in the registry hives is listed" })).lead;
   assert.deepEqual([direct.product, direct.holder], ["a table of devices with first and last times", null]);
   refused(await L.openLead(a1, { title: "USB history", why: "the stick", answers: [q], take: true }), /first lead under it/);
-  const first = ok(await L.openLead(a1, { title: "USB history", why: "the stick", answers: [q], take: true, proposition: "the archive was copied to a removable stick", negation: "no removable device received the archive" })).lead;
+  const first = ok(await L.openLead(a1, { title: "USB history", why: "the stick", answers: [q], take: true, proposition: "the archive was copied to a removable stick", negation: "no removable device received the archive", routes: [{ source: "input:disk.E01", method: "read what the question names, looking for what would disconfirm it" }] })).lead;
   assert.deepEqual([first.proposition, first.negation], ["the archive was copied to a removable stick", "no removable device received the archive"]);
   ok(await L.openLead(a0, { title: "Cloud sync", why: "another route", answers: [q], take: true })); // a second lead needs no framing
   // The answer: contrary or why none; premise_not_supported is an answer.
@@ -483,7 +483,7 @@ test("hypothesis framing: the first agent lead under a person's question states 
   const base = { kind: "answer", section: `question:${q.slice(2)}`, value: "No: nothing shows a copy to a stick", reasoning: `E-${f.entry.seq}`, ...A } as const;
   refused(await P.recordEntry(a1, base as P.LedgerInput), /Name the entries that say otherwise \(contrary\), or say why none does \(contrary_none_why\)/);
   refused(await P.recordEntry(a1, { ...base, contrary: [f.entry.seq], contrary_none_why: "x" } as P.LedgerInput), /not both/);
-  refused(await P.recordEntry(a1, { ...base, result: "confirmed", contrary_none_why: "x" } as P.LedgerInput), /result is one of premise_not_supported/);
+  refused(await P.recordEntry(a1, { ...base, result: "confirmed", contrary_none_why: "x" } as P.LedgerInput), /result is one of established, partial, bounded_negative, not_determinable, out_of_scope, premise_not_supported/);
   const ans = await P.recordEntry(a1, { ...base, result: "premise_not_supported", contrary_none_why: "no device history, cloud log or mail shows a copy" } as P.LedgerInput);
   assert.ok(ans.ok, (ans as { reason?: string }).reason);
   if (!ans.ok) return;
@@ -538,7 +538,7 @@ test("end to end: a late analyst question is offered to its suggested seat for a
   // a1 has worked objective O-1 before (a lead under one of its questions, closed); a2 has not.
   const earlier = ok(await Q.act(S, operator, "open", { text: "Where was the archive stored first?", why: "origin", objective: "O-1" })).q!;
   await Q.deliverPending(S);
-  const held = ok(await L.openLead(a1, { title: "Walk the first folder", why: "origin", answers: [earlier], take: true, proposition: "it was first stored in Documents", negation: "it was first stored elsewhere" })).lead;
+  const held = ok(await L.openLead(a1, { title: "Walk the first folder", why: "origin", answers: [earlier], take: true, proposition: "it was first stored in Documents", negation: "it was first stored elsewhere", routes: [{ source: "input:disk.E01", method: "read what the question names, looking for what would disconfirm it" }] })).lead;
   const lim = await P.recordEntry(a1, { kind: "limitation", value: "The folder history is gone", source: "the folder", evidence: "no history", reason: "unavailable", answers: [earlier] } as P.LedgerInput);
   assert.ok(lim.ok);
   if (!lim.ok) return;
@@ -563,7 +563,7 @@ test("end to end: a late analyst question is offered to its suggested seat for a
   assert.equal(offered?.id, q);
   assert.equal(await Q.electQuestionOffer(a1, later), null, "one pool offer per revision");
   // a1 takes it as work: the first lead under it states the hypothesis.
-  const lead = ok(await L.openLead(a1, { title: "Search the mail store for the archive", why: q, answers: [q], take: true, proposition: "the archive was attached to a mail", negation: "no mail carried the archive" })).lead;
+  const lead = ok(await L.openLead(a1, { title: "Search the mail store for the archive", why: q, answers: [q], take: true, proposition: "the archive was attached to a mail", negation: "no mail carried the archive", routes: [{ source: "input:disk.E01", method: "read what the question names, looking for what would disconfirm it" }] })).lead;
   const ctx = await Q.viewContext(S);
   const v = Q.viewQuestion(ctx.questions.state.questions.get(q)!, ctx);
   assert.deepEqual([v.work, v.leads.map((l) => l.id)], ["working", [lead.id]]);

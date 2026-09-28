@@ -3010,9 +3010,9 @@ export default function (pi: ExtensionAPI) {
     name: "record",
     label: "Record",
     description:
-      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (an observation and what you make of it), absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope), hypothesis (a proposition under test, with status open, supported or refuted), limitation (what the examination could not establish, with reason not_examined, unavailable, failed, partial or excluded) or answer (the swarm's answer to one question of the goal, or its summary or narrative). Every kind but answer needs source and evidence: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. refs names the run's objects it rests on, each checked when it is written: input:<path> (under inputs/), job:<id>/<path> (a job's sealed output), import:<id>/<path>, member:<generation>#<n> (an archive member in the catalogue), sha256:<hex> (a sealed blob), or unresolved:<why> when none can be named; a file only in your own work/ is not an object of the run: run the work as a job and cite job:. The harness writes how each cited job or import was made into the entry. " +
+      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (an observation and what you make of it), absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope), hypothesis (a proposition under test, with status open, supported or refuted), limitation (what the examination could not establish, with reason not_examined, unavailable, failed, partial or excluded), coverage (what a negative, or a not_determinable answer, was searched over: the proposition, the objects in refs, time_range, search_method, settings, coverage_actual, skipped, failures, result_refs, alternatives and detection_opportunity; the harness adds whether the jobs behind it were given every object it names) or answer (the swarm's answer to one question of the goal, or its summary or narrative). Every kind but answer needs source and evidence: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. refs names the run's objects it rests on, each checked when it is written: input:<path> (under inputs/), job:<id>/<path> (a job's sealed output), import:<id>/<path>, member:<generation>#<n> (an archive member in the catalogue), sha256:<hex> (a sealed blob), or unresolved:<why> when none can be named; a file only in your own work/ is not an object of the run: run the work as a job and cite job:. The harness writes how each cited job or import was made into the entry. " +
       "A finding needs basis (observed or inferred), confidence with confidence_why (where the data came from, whether the method is reliable for it, how specific the observation is, whether your sources depend on each other: the quality of the evidence, not a count), and indicates (what the observation means and the step from one to the other, one to three sentences); an inferred finding lists alternatives (what else could explain it, each rejected with why or left open) or says in alternatives_none_why why none was considered; a finding resting on a job that did not succeed says in qualifies why those bytes are still usable, and can never support a claim that something is absent. " +
-      "An answer names its section (question:<id>, summary or narrative), gives the answer in value and the reasoning citing E-<seq> for every claim, and for a question confidence with confidence_why, contrary (entries that say otherwise), limitations (limitation entries that bound it), alternatives_open and would_change; it rests on at least one standing entry that names its question in answers, cites a superseded entry only with its correction, and a disputed entry or one resting on a failed job only with qualifies [{ref: E-<seq>, why}]. One answer stands per section: revise it with supersedes. Tokens in an answer (hashes, paths, times, inodes, addresses, accounts) that no cited entry holds are marked on it. " +
+      "An answer names its section (question:<id>, summary or narrative), gives the answer in value and the reasoning citing E-<seq> for every claim, and for a question its result (established, partial, bounded_negative, not_determinable, out_of_scope, premise_not_supported), confidence with confidence_why, contrary (entries that say otherwise), limitations (limitation entries that bound it), alternatives_open and would_change; a bounded_negative or not_determinable on a material question cites a coverage record naming it, is worded \"No evidence of <what> was found in <scope>\" (asserts_absence: true, \"it did not happen\", only on an existence question whose coverage is complete and would have shown it), and another seat reviews it (attest with review) before the run may end; it rests on at least one standing entry that names its question in answers, cites a superseded entry only with its correction, and a disputed entry or one resting on a failed job only with qualifies [{ref: E-<seq>, why}]. One answer stands per section: revise it with supersedes. Tokens in an answer (hashes, paths, times, inodes, addresses, accounts) that no cited entry holds are marked on it. " +
       "To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> (and because=<why>): nothing is deleted, and the newer entry is the correction. The optional fields are for the reader: answers (the goal sections it answers), rel (supports, contradicts, duplicates or derived_from another entry), sensitive, clock and precision, completion, attribution, locators, significance. The harness renders ledger/ledger.md after every record; cite that file in the report.",
     promptSnippet: "Record an event, an indicator, a finding with what it indicates, or an answer",
     promptGuidelines: [
@@ -3024,11 +3024,12 @@ export default function (pi: ExtensionAPI) {
       "kind=absence is optional: record a search that found nothing only when the absence matters to the case, with the scope it holds for.",
       "Name the goal section an entry answers in answers; link an entry that supports or contradicts another with rel.",
       "Record what you could not examine, or could only partly, as kind=limitation with its reason; a proposition you are still testing as kind=hypothesis.",
+      "Before a negative answer (bounded_negative) or a not_determinable one on a material question, record kind=coverage: what was searched, over which objects, how, what was covered, skipped and failed, the results, what is still open, and whether the event would have left a trace here at all.",
       "An answer (kind=answer) is written from the ledger, not from memory: one per question, one summary, one narrative, each citing E-<seq> for every claim.",
     ],
     parameters: Type.Object({
-      kind: Type.Union(LEDGER_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding | absence | hypothesis | limitation | answer" }),
-      value: Type.String({ description: "The event, indicator or observation, in one sentence; for absence, what was looked for; for an answer, the answer itself" }),
+      kind: Type.Union(LEDGER_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding | absence | hypothesis | limitation | answer | coverage" }),
+      value: Type.String({ description: "The event, indicator or observation, in one sentence; for absence, what was looked for; for coverage, the proposition the search tested; for an answer, the answer itself" }),
       ts: Type.Optional(Type.String({ description: "The event's time, ISO 8601 with its zone: 2024-01-15T12:44:22Z, or 2024-01-15T15:44:22+03:00 as the source records it. A time without a zone is refused." })),
       source: Type.Optional(Type.String({ description: "Where it was seen: a path, log, plugin, registry key. Required on every kind but answer." })),
       evidence: Type.Optional(Type.String({ description: "How to check it: command, inode, record id, hash. Required on every kind but answer." })),
@@ -3036,8 +3037,11 @@ export default function (pi: ExtensionAPI) {
       confidence_why: Type.Optional(Type.String({ description: "Why that confidence: provenance, method, specificity, whether the sources depend on each other. Required with a finding's or a question answer's confidence." })),
       indicates: Type.Optional(Type.String({ description: "A finding's: what the observation means, and the step from one to the other, in one to three sentences. Required on a finding." })),
       alternatives: Type.Optional(
-        Type.Array(Type.Object({ explanation: Type.String(), status: Type.Union(LEDGER_ALTERNATIVE_STATUS.map((k) => Type.Literal(k))), why: Type.String(), test_refs: Type.Optional(Type.Array(Type.String())) }), {
-          description: "A finding's: what else could explain it, each rejected (with why) or left open; test_refs the objects that tested it. Required on an inferred finding unless alternatives_none_why says why none was considered.",
+        Type.Union([
+          Type.Array(Type.Object({ explanation: Type.String(), status: Type.Union(LEDGER_ALTERNATIVE_STATUS.map((k) => Type.Literal(k))), why: Type.String(), test_refs: Type.Optional(Type.Array(Type.String())) })),
+          Type.String(),
+        ], {
+          description: "A finding's: what else could explain it, each rejected (with why) or left open; test_refs the objects that tested it. Required on an inferred finding unless alternatives_none_why says why none was considered. A coverage record's: in words, the explanations or routes still open, or none and why.",
         }),
       ),
       alternatives_none_why: Type.Optional(Type.String({ description: "A finding's: why no alternative was considered. Never invent one." })),
@@ -3051,7 +3055,23 @@ export default function (pi: ExtensionAPI) {
       reasoning: Type.Optional(Type.String({ description: "An answer's: how the cited entries lead to the answer, citing E-<seq> for every claim. For the narrative, the narrative." })),
       contrary: Type.Optional(Type.Array(Type.Union([Type.Number(), Type.String()]), { description: "An answer's: the entries that say otherwise, by seq. An answer to a person's question (the question register's analyst questions) names them, or says why there are none in contrary_none_why." })),
       contrary_none_why: Type.Optional(Type.String({ description: "An answer's, in place of contrary: why no entry says otherwise (what was looked at that could have)." })),
-      result: Type.Optional(Type.Union(LEDGER_ANSWER_RESULTS.map((k) => Type.Literal(k)), { description: "An answer's result: premise_not_supported when the evidence does not bear out what the question takes for granted; it is an answer." })),
+      result: Type.Optional(
+        Type.Union(LEDGER_ANSWER_RESULTS.map((k) => Type.Literal(k)), {
+          description:
+            "Required on a question's answer: established (on findings), partial (part of it, on findings), bounded_negative (no evidence found in a named scope: rests on a coverage record), not_determinable (the evidence cannot settle it: rests on a coverage record), out_of_scope (the case's evidence cannot bear on it), premise_not_supported (what the question takes for granted does not hold; it is an answer).",
+        }),
+      ),
+      asserts_absence: Type.Optional(Type.Boolean({ description: "An answer's: it says the event did not happen, not only that no evidence of it was found. Only with result bounded_negative on a question that asks whether something exists, resting on a coverage record the harness found complete that says the event would have left a trace." })),
+      time_range: Type.Optional(Type.String({ description: "A coverage record's: the time range the search covered, or why it has none." })),
+      search_method: Type.Optional(Type.String({ description: "A coverage record's: how the search was made." })),
+      settings: Type.Optional(Type.String({ description: "A coverage record's: the method's settings (the query, the options, the versions)." })),
+      coverage_actual: Type.Optional(Type.String({ description: "A coverage record's: what the search actually covered." })),
+      skipped: Type.Optional(Type.String({ description: "A coverage record's: what it skipped or could not read (\"none\", with how that is known)." })),
+      failures: Type.Optional(Type.String({ description: "A coverage record's: what failed (\"none\", with how that is known)." })),
+      result_refs: Type.Optional(Type.Array(Type.String(), { description: "A coverage record's: what the search produced: the entries (E-<seq>: absences, limitations, findings) and the job outputs (job:<id>[/<path>]). The harness reads the jobs behind them for what they declared." })),
+      detection_opportunity: Type.Optional(
+        Type.Object({ trace_expected: Type.Union(["yes", "no", "unknown"].map((k) => Type.Literal(k))), why: Type.String() }, { description: "A coverage record's: would the event have left a trace in these sources, given what was collected and what they keep, and why." }),
+      ),
       limitations: Type.Optional(Type.Array(Type.Union([Type.Number(), Type.String()]), { description: "An answer's: the limitation entries that bound it, by seq." })),
       alternatives_open: Type.Optional(Type.String({ description: "An answer's: what else could still explain it, or that nothing remains open and why. Required on a question's answer." })),
       would_change: Type.Optional(Type.String({ description: "An answer's: what evidence would change it. Required on a question's answer." })),
@@ -3081,8 +3101,9 @@ export default function (pi: ExtensionAPI) {
             take: Type.Optional(Type.Boolean()),
             proposition: Type.Optional(Type.String()),
             negation: Type.Optional(Type.String()),
+            routes: Type.Optional(Type.Array(Type.Object({ source: Type.String(), method: Type.String() }))),
           }),
-          { description: "The leads this entry opens: work it shows has to be followed, each {title, why, needs?, answers?, material?, take?, proposition?, negation?} as lead_open takes it (answers takes Q-19 as well as question:3); each lead's origin is this entry. take: true keeps the follow-up yours." },
+          { description: "The leads this entry opens: work it shows has to be followed, each {title, why, needs?, answers?, material?, take?, proposition?, negation?, routes?} as lead_open takes it (answers takes Q-19 as well as question:3); each lead's origin is this entry. take: true keeps the follow-up yours." },
         ),
       ),
       interprets: Type.Optional(
@@ -3155,15 +3176,26 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "attest only what you re-derived from the sealed refs yourself, and say in how what you re-derived and what you only read.",
       "A critic attests or disputes every answer before the run ends; the author of an entry never attests it.",
+      "A negative (a coverage record, or an answer bounded_negative or not_determinable) is attested with review: say whether you challenged the detection assumptions, reproduced a decisive check and tried a materially different route, and what you did or why not.",
     ],
     parameters: Type.Object({
       seq: Type.Number({ description: "The entry's seq (standing, not your own)." }),
       how: Type.String({ description: "What you re-derived, from which sealed object, and what you only read." }),
       refs: Type.Optional(Type.Array(Type.String(), { description: "The objects you re-derived from: input:<path>, job:<id>/<path>, member:<gen>#<n>, sha256:<hex>." })),
+      review: Type.Optional(
+        Type.Object(
+          {
+            detection: Type.Object({ done: Type.Boolean(), text: Type.String() }),
+            reproduced: Type.Object({ done: Type.Boolean(), text: Type.String() }),
+            other_route: Type.Object({ done: Type.Boolean(), text: Type.String() }),
+          },
+          { description: "Required when the entry is a negative (a coverage record, or an answer bounded_negative or not_determinable): whether you challenged the detection assumptions, reproduced a decisive check, tried a materially different route, each {done, text}: what you did, or why not. You recorded neither the answer nor its coverage record." },
+        ),
+      ),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const result = await attestEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, how: params.how, ...(params.refs?.length ? { refs: params.refs } : {}) });
+      const result = await attestEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, how: params.how, ...(params.refs?.length ? { refs: params.refs } : {}), ...(params.review ? { review: params.review } : {}) });
       if (!result.ok) {
         await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
         return { content: [{ type: "text" as const, text: `attest refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
@@ -3231,6 +3263,12 @@ export default function (pi: ExtensionAPI) {
       origin: Type.Optional(Type.String({ description: "Where it came from: E-<seq>, a post (main#52), another lead" })),
       proposition: Type.Optional(Type.String({ description: "Under a person's question: the proposition this lead tests. Required, with negation, on the first lead under one." })),
       negation: Type.Optional(Type.String({ description: "The proposition's negation: what would hold if it is false. Plan a route that could show it." })),
+      routes: Type.Optional(
+        Type.Array(Type.Object({ source: Type.String(), method: Type.String() }), {
+          description:
+            "The route plan, before the search: each source you will examine (input:<path>, member:<gen>#<n>, job:<id>/<path>, a path of the run, or words when it is not an object yet) and how. The first lead under a question gives it (under a person's question it is required, with a route that could disconfirm it); a negative on a material question closes against it, and a source in it nothing examined is named as not examined.",
+        }),
+      ),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
@@ -3303,16 +3341,17 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "lead_link",
     label: "Revise a lead's needs",
-    description: "Revise what a lead waits for: add a need (L-<n>, L-<n>:<disposition>, E-<seq>) or remove one that will not come, so another route stays open. A loop of needs is refused. The holder revises its own lead; an unheld one, anyone.",
-    promptSnippet: "Add or drop a lead's need",
+    description: "Revise what a lead waits for: add a need (L-<n>, L-<n>:<disposition>, E-<seq>) or remove one that will not come, so another route stays open; or add to its route plan (routes [{source, method}]). A loop of needs is refused. The holder revises its own lead; an unheld one, anyone.",
+    promptSnippet: "Add or drop a lead's need, or plan a route",
     parameters: Type.Object({
       id: Type.String({ description: "L-<n>" }),
       add: Type.Optional(Type.Array(Type.String(), { description: "Needs to add" })),
       remove: Type.Optional(Type.Array(Type.String(), { description: "Needs to drop" })),
+      routes: Type.Optional(Type.Array(Type.Object({ source: Type.String(), method: Type.String() }), { description: "Routes to add to the lead's plan: a source to examine and how" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const r = await leadLink(ctxFrom(toolCtx.cwd, agentId), params.id, { ...(params.add ? { add: params.add } : {}), ...(params.remove ? { remove: params.remove } : {}) });
+      const r = await leadLink(ctxFrom(toolCtx.cwd, agentId), params.id, { ...(params.add ? { add: params.add } : {}), ...(params.remove ? { remove: params.remove } : {}), ...(params.routes ? { routes: params.routes } : {}) });
       return leadAnswer(toolCtx.cwd, "lead_link", params as Record<string, unknown>, started, r as never);
     },
   });

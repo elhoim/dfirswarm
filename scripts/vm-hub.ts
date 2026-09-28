@@ -699,7 +699,7 @@ export function boardTable(hub: {
     leadClaim: (who, a) => L.claimLead(as(who), a[1]),
     leadRelease: (who, a) => L.releaseLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { why?: string; generation?: number }),
     leadClose: (who, a) => L.closeLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { disposition?: string; ref?: string; why?: string; generation?: number }),
-    leadLink: (who, a) => L.linkLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { add?: string[]; remove?: string[] }),
+    leadLink: (who, a) => L.linkLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { add?: string[]; remove?: string[]; routes?: unknown }),
     leadsView: (who, a) => {
       const o = isObject(a[1]) ? a[1] : {};
       return L.leadsView(as(who), { ...(typeof o.view === "string" ? { view: o.view } : {}), ...(typeof o.from === "string" ? { from: o.from } : {}), ...(typeof o.pageChars === "number" && Number.isFinite(o.pageChars) ? { pageChars: o.pageChars } : {}) });

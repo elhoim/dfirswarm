@@ -51,6 +51,7 @@ import { sealTree, storePaths } from "../scripts/evidence-store.ts";
 import { briefQuestions, checkLedgerAnswers } from "../scripts/check-answers.ts";
 import { takeCustody } from "../scripts/custody.ts";
 import { FIXTURE_SECTIONS } from "./fixtures/ledger-v4/generate.ts";
+import { openLead } from "../extensions/leads.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const FIXTURE = join(ROOT, "tests", "fixtures", "ledger-v4");
@@ -66,8 +67,8 @@ after(async () => {
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 /** A finding's version 4 fields, observed. */
 const F = { basis: "observed", confidence: "high", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
-/** A question's answer's required fields. */
-const Q = { confidence: "medium", confidence_why: "The cited entries are direct.", alternatives_open: "none open", would_change: "a second source that disagrees" } as const;
+/** A question's answer's required fields: an established result (the negative bar says what a negative needs). */
+const Q = { result: "established", confidence: "medium", confidence_why: "The cited entries are direct.", alternatives_open: "none open", would_change: "a second source that disagrees" } as const;
 
 async function job(root: string, id: string, file: string, text: string, record: Record<string, unknown>): Promise<void> {
   const staging = join(root, "..", `staging-${id}-${Math.random().toString(16).slice(2)}`);
@@ -265,7 +266,7 @@ test("an answer rests on the entries it cites by hash; every claimed support is 
   refused(await rec(a3, { ...ans, reasoning: `E-${f1.seq}`, would_change: "" }), /would_change is required/);
   refused(await rec(a3, { ...ans, reasoning: `E-${f1.seq}`, alternatives_open: "" }), /alternatives_open is required/);
   refused(await rec(a3, { ...ans, reasoning: "E-99" }), /E-99: there is no entry #99/);
-  refused(await rec(a3, { ...ans, reasoning: `E-${f2.seq} and E-${hyp.seq}` }), new RegExp(`rests on at least one standing finding, search or limitation recorded with answers=\\["1"\\].*none of E-${f2.seq}, E-${hyp.seq} names it`));
+  refused(await rec(a3, { ...ans, reasoning: `E-${f2.seq} and E-${hyp.seq}` }), new RegExp(`rests on at least one standing finding, search, limitation or coverage record recorded with answers=\\["1"\\].*none of E-${f2.seq}, E-${hyp.seq} names it`));
   refused(await rec(a3, { ...ans, reasoning: `E-${f1.seq}`, limitations: [f2.seq] }), /limitations names #\d+, a finding/);
   refused(await rec(a3, { ...ans, reasoning: `E-${f1.seq}`, qualifies: [{ ref: `E-${f1.seq}`, why: "w" }] }), /is neither disputed nor resting on a failed job/);
   const a = ok(await rec(a3, { ...ans, section: "Q1", reasoning: `Prefetch says so (E-${f1.seq}); it was on the desktop (E-${f2.seq}); a hypothesis (E-${hyp.seq}).`, contrary: [`E-${hyp.seq}`], limitations: [lim.seq] }));
@@ -293,12 +294,19 @@ test("an answer rests on the entries it cites by hash; every claimed support is 
   const s = ok(await rec(a3, { kind: "answer", section: "summary", value: "Powder.exe ran.", reasoning: `See E-${revised.entry.seq}.` }));
   assert.deepEqual(s.entry.support, [{ seq: revised.entry.seq, hash: revised.entry.hash }]);
   ok(await rec(a3, { kind: "answer", section: "narrative", value: "At 10:15Z Powder.exe ran from the desktop.", reasoning: `E-${f2.seq} then E-${f1.seq}.` }));
-  // An inconclusive answer rests on a limitation naming its question.
-  const inc = ok(await rec(a3, { kind: "answer", section: "question:2", value: "Not established", reasoning: `The volume was not opened (E-${lim.seq}).`, ...Q, inconclusive: true }));
+  // An inconclusive answer (the old word for not_determinable) rests on a
+  // coverage record of its material question, closed against its route plan.
+  const inconclusive = { kind: "answer", section: "question:2", value: "Not established", ...Q, result: undefined, inconclusive: true };
+  refused(await rec(a3, { ...inconclusive, reasoning: `The volume was not opened (E-${lim.seq}).` }), /question:2 is a material question with no route plan/);
+  assert.ok((await openLead(a1, { title: "Open the second volume", why: "question 2 rests on it", answers: ["2"], take: true, routes: [{ source: "input:disk.E01", method: "open the second volume with the recovered key" }] })).ok);
+  refused(await rec(a3, { ...inconclusive, reasoning: `The volume was not opened (E-${lim.seq}).` }), /a not determinable on a material question rests on a coverage record/);
+  const cov = ok(await rec(a1, { kind: "coverage", proposition: "The second volume holds the answer to question 2", refs: ["input:disk.E01"], answers: ["2"], time_range: "the whole image, no time bound", search_method: "open the volume", settings: "no key", coverage_actual: "the first volume only", skipped: "the second volume, which did not open", failures: "the volume would not decrypt", result_refs: [`E-${lim.seq}`], alternatives: "a key in memory, not examined", detection_opportunity: { trace_expected: "unknown", why: "what the volume holds was never read" } })).entry;
+  const inc = ok(await rec(a3, { ...inconclusive, reasoning: `The volume was not opened (E-${lim.seq}); what was searched is E-${cov.seq}.` }));
   assert.equal(inc.entry.inconclusive, true);
+  assert.equal(inc.entry.result, "not_determinable", "inconclusive is recorded as the result it is");
   const listed = await listLedger(root, { kind: "answer" });
   assert.equal(listed.length, 5);
-  assert.match(await readFile(join(root, LEDGER_MD), "utf8"), /## Answers[\s\S]*question:2 \(inconclusive\): Not established/);
+  assert.match(await readFile(join(root, LEDGER_MD), "utf8"), /## Answers[\s\S]*question:2 \(inconclusive\) \(not_determinable\) \*\*\(negative, unreviewed\)\*\*: Not established/);
 });
 
 test("a superseded entry is cited only with its correction and supports nothing; a disputed one, or one on a failed job, only with qualifies", async () => {
@@ -553,15 +561,26 @@ test("the brief's questions are counted as the goals' awk counts them, and the c
   assert.equal(usage.status, 2);
 });
 
-test("in ledger mode too, an answer resting only on a search that found nothing is examination-limited unless its question asks whether something exists", async () => {
-  const { a0, a2, a3, root } = await run();
+test("in ledger mode too, a bounded negative is examination-limited unless its question asks whether something exists, and even then only covered and reviewed", async () => {
+  const { a0, a1, a2, a3, root } = await run();
+  assert.ok((await openLead(a0, { title: "Look for a second wallet", why: "question 1", answers: ["1"], take: true, routes: [{ source: "input:disk.E01", method: "list every file, allocated and deleted" }] })).ok);
   const none = ok(await rec(a0, { kind: "absence", value: "No second wallet file", source: "inputs/disk.E01", evidence: "fls over the whole image, allocated and deleted", refs: ["job:j000001/rows.txt"], answers: ["1"] })).entry;
-  const q = ok(await rec(a3, { kind: "answer", section: "question:1", value: "There is no second wallet", reasoning: `E-${none.seq}`, ...Q })).entry;
-  assert.ok((await attestEntry(a2, { seq: q.seq, how: "re-ran the listing's search" })).ok);
+  const cov = ok(await rec(a0, { kind: "coverage", proposition: "A second wallet file exists on the disk", refs: ["input:disk.E01"], answers: ["1"], time_range: "no time bound", search_method: "a full file listing", settings: "fls -r, allocated and deleted", coverage_actual: "every file system entry of the image", skipped: "none: the listing ran to its end", failures: "none", result_refs: [`E-${none.seq}`, "job:j000001/rows.txt"], alternatives: "a wallet held only in memory", detection_opportunity: { trace_expected: "yes", why: "a wallet on this disk is a file the listing names" } })).entry;
+  assert.equal(cov.coverage, "complete", "the job behind it read the disk (no declared scope: everything)");
+  refused(await rec(a3, { kind: "answer", section: "question:1", value: "The second wallet did not happen", reasoning: `E-${cov.seq}`, ...Q, result: "bounded_negative" }), /worded as the event's absence/);
+  const q = ok(await rec(a3, { kind: "answer", section: "question:1", value: "No evidence of a second wallet was found on the disk", reasoning: `E-${cov.seq}, over E-${none.seq}`, ...Q, result: "bounded_negative" })).entry;
+  refused(await attestEntry(a2, { seq: q.seq, how: "re-ran the listing's search" }), /its attest is a review/);
+  const unreviewed = await checkLedgerAnswers(root, ["1"], ["1"]);
+  assert.equal(unreviewed.ok, false, "an unreviewed material negative holds the finish line");
+  assert.ok(unreviewed.defects.some((d) => d.code === "negative_unreviewed" && d.named_by.length === 0));
+  refused(await attestEntry(a0, { seq: q.seq, how: "mine", review: { detection: { done: true, text: "t" }, reproduced: { done: true, text: "t" }, other_route: { done: false, text: "none" } } }), /is yours|recorded the coverage record/);
+  assert.ok((await attestEntry(a2, { seq: q.seq, how: "re-ran the listing's search", review: { detection: { done: true, text: "a wallet is a file on this disk; the listing names deleted entries too" }, reproduced: { done: true, text: "ran the listing again: no wallet" }, other_route: { done: false, text: "no memory image in the case" } } })).ok);
+  void a1;
   const limited = await checkLedgerAnswers(root, ["1"]);
   assert.equal(limited.ok, true, "limited is said apart, not failed");
   assert.deepEqual(limited.outcomes, { "question:1": "limited" });
-  assert.match(limited.lines[0], /^question:1: examination-limited, #\d+ resting on #\d+ \(a search that found nothing: it documents the search, and the question asks for more than whether something exists\)/);
+  assert.deepEqual(limited.results, { "question:1": "bounded_negative" });
+  assert.match(limited.lines[0], /^question:1: examination-limited \(a bounded negative: no evidence found in its scope; the question asks for more than whether something exists\)/);
   const existence = await checkLedgerAnswers(root, ["1"], ["1"]);
-  assert.deepEqual(existence.outcomes, { "question:1": "answered" }, "the goal said question 1 asks whether it exists");
+  assert.deepEqual(existence.outcomes, { "question:1": "answered" }, "the goal said question 1 asks whether it exists, and the negative is covered and reviewed");
 });

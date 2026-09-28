@@ -51,12 +51,15 @@ export type FinishGate = {
   error?: string;
   /** The question register's head the gate read, what it holds in scope, and what waits outside the run's work. */
   register?: { head: string | null; events: number; in_scope: string[]; proposed: string[]; after_done: string[] };
+  /** The lines of `limited` that are the operator's acceptances: a limit the operator took, which even a run under --stop operator may end on. */
+  accepted?: string[];
 };
 
-/** Whether the run was started with --until-solved. */
+/** Whether the run's stop policy is the operator's (--stop operator, or its alias --until-solved). */
 export async function untilSolved(sandbox: string): Promise<boolean> {
   try {
-    return (JSON.parse(await readFile(join(sandbox, "budget.json"), "utf8")) as { until_solved?: unknown }).until_solved === true;
+    const b = JSON.parse(await readFile(join(sandbox, "budget.json"), "utf8")) as { until_solved?: unknown; stop_policy?: unknown };
+    return b.until_solved === true || b.stop_policy === "operator";
   } catch {
     return false;
   }
@@ -99,9 +102,12 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
     const questions: FinishGateQuestion[] = [];
     for (const id of snap.goal.questions) {
       const key = `question:${id}`;
-      const outcome = outcomes.get(key) ?? (sawAnswers ? "unanswered" : snap.answered.has(id) ? "has an answer (not checked)" : "unanswered");
+      const said = outcomes.get(key) ?? (sawAnswers ? "unanswered" : snap.answered.has(id) ? "has an answer (not checked)" : "unanswered");
+      // A goal question the operator accepted (bounded, or not determinable) for its current revision is disposed: it limits the run and holds nothing.
+      const reg = qs?.bySection.get(id);
+      const outcome = said !== "answered" && reg?.accepted && reg.accepted.rev === reg.rev ? "accepted" : said;
       const blocks: string[] = [];
-      if (outcome !== "answered") {
+      if (outcome !== "answered" && outcome !== "accepted") {
         for (const l of snap.state.leads.values()) {
           if (!l.answers.includes(id)) continue;
           const st = L.leadStatus(l, snap.state, snap.ledger);
@@ -117,8 +123,9 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
       }
       questions.push({ id, outcome, blocks });
     }
-    const register = qs ? await registerGate(sandbox, snap, qs, defects, limited, questions) : undefined;
-    return { defects, limited, questions, until_solved: until, ...(register ? { register } : {}) };
+    const accepted: string[] = [];
+    const register = qs ? await registerGate(sandbox, snap, qs, defects, limited, questions, accepted) : undefined;
+    return { defects, limited, questions, until_solved: until, ...(register ? { register } : {}), ...(accepted.length ? { accepted } : {}) };
   } catch (err) {
     return { defects: [], limited: [], questions: [], until_solved: until, error: `the lead register could not be read: ${(err as Error).message}` };
   }
@@ -144,7 +151,7 @@ function blocksOf(snap: L.LeadsSnapshot, section: string): string[] {
  * question in scope, and every material question in scope beyond the goal's
  * own held to an answer the way the goal's check holds its questions.
  */
-async function registerGate(sandbox: string, snap: L.LeadsSnapshot, qs: Q.QuestionsSnapshot, defects: FinishGate["defects"], limited: string[], questions: FinishGateQuestion[]): Promise<NonNullable<FinishGate["register"]>> {
+async function registerGate(sandbox: string, snap: L.LeadsSnapshot, qs: Q.QuestionsSnapshot, defects: FinishGate["defects"], limited: string[], questions: FinishGateQuestion[], accepted: string[]): Promise<NonNullable<FinishGate["register"]>> {
   const ctx: Q.ViewContext = { questions: qs, leads: snap.state, ledger: snap.ledger };
   const views = Q.questionViews(ctx);
   const inScope = views.filter((v) => v.scope === "in_scope" && !v.withdrawn && !v.after_done);
@@ -157,7 +164,11 @@ async function registerGate(sandbox: string, snap: L.LeadsSnapshot, qs: Q.Questi
         fix: `hold the answer to revision ${v.rev} (questions show ${v.id}) and record it again with supersedes=${v.answer.seq}`,
       });
     }
-    if (v.accepted?.stands) limited.push(`${v.id} was accepted as ${v.accepted.as === "bounded" ? "a bounded examination" : "not determinable"} by ${Q.originWords(v.accepted.origin)}: ${v.accepted.why}`);
+    if (v.accepted?.stands) {
+      const line = `${v.id} was accepted as ${v.accepted.as === "bounded" ? "a bounded examination" : "not determinable"} by ${Q.originWords(v.accepted.origin)}: ${v.accepted.why}`;
+      limited.push(line);
+      accepted.push(line);
+    }
   }
   const extra = Q.registerQuestions(qs).filter((q) => q.materiality === "material" && !(q.accepted && q.accepted.rev === q.rev));
   if (extra.length) {

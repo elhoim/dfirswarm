@@ -43,6 +43,7 @@ import { constants as fsConstants } from "node:fs";
 import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import * as NB from "./negative-bar.ts";
 
 /**
  * Claims are short leases, renewed by re-claiming: make the edit, release,
@@ -7111,8 +7112,15 @@ export const LEDGER_MD = "ledger/ledger.md";
  * `absence`: a search that found nothing, when that matters to the case. It
  * holds only for what was searched, with what and how far, so all of it is
  * required (recordEntry).
+ *
+ * `coverage`: what a negative, or a "not determinable", was searched over
+ * (the negative bar, extensions/negative-bar.ts): the proposition searched
+ * (value), the inventory revision, the objects (refs), the time range, the
+ * method and its settings, what was covered, skipped and failed, the
+ * results, the alternatives left open and the detection opportunity. The hub
+ * adds whether the jobs behind it were given every object it names.
  */
-export const LEDGER_KINDS = ["event", "ioc", "finding", "absence", "hypothesis", "limitation", "answer"] as const;
+export const LEDGER_KINDS = ["event", "ioc", "finding", "absence", "hypothesis", "limitation", "answer", "coverage"] as const;
 export const LEDGER_CONFIDENCE = ["high", "medium", "low"] as const;
 /**
  * Version 3 (2026-09-26, after Fable and Codex read 1,040 entries of 14 runs):
@@ -7171,12 +7179,16 @@ export const LEDGER_ALTERNATIVE_STATUS = ["rejected", "open"] as const;
 export const LEDGER_INDICATES_MAX_CHARS = 1500;
 export const LEDGER_WHY_MAX_CHARS = 1500;
 /**
- * An answer's result, when it says one. premise_not_supported answers a
- * question whose premise the evidence does not bear out ("when did X delete
- * the file" when nothing shows X deleted it): a valid answer to a person's
- * question, which is a proposition to test, never a conclusion to confirm.
+ * An answer's result (extensions/negative-bar.ts): established, partial,
+ * bounded_negative (no evidence found in a named scope), not_determinable
+ * (the old `inconclusive`, which is still taken and read as it), out_of_scope
+ * and premise_not_supported, which answers a question whose premise the
+ * evidence does not bear out ("when did X delete the file" when nothing
+ * shows X deleted it): a valid answer to a person's question, which is a
+ * proposition to test, never a conclusion to confirm. An answer without one
+ * (recorded before results) reads as it always did.
  */
-export const LEDGER_ANSWER_RESULTS = ["premise_not_supported"] as const;
+export const LEDGER_ANSWER_RESULTS = NB.ANSWER_RESULTS;
 export const LEDGER_MAX_ALTERNATIVES = 10;
 export const LEDGER_MAX_QUALIFIES = 20;
 /** An answer's reasoning holds a narrative: room for one, still bounded. */
@@ -7287,6 +7299,28 @@ export type LedgerEntry = {
   result?: (typeof LEDGER_ANSWER_RESULTS)[number];
   /** Version 4, an answer to a person's question: why no entry says otherwise, in place of an empty contrary. */
   contrary_none_why?: string;
+  /** Version 4, an answer: it says the event did not happen, not only that no evidence of it was found; the negative bar says when it may. */
+  asserts_absence?: boolean;
+  /** A coverage record: the inventory revision its search saw (negative-bar.ts inventoryRevision). */
+  inventory_rev?: string;
+  /** A coverage record: the time range the search covered, or why it has none. */
+  time_range?: string;
+  /** A coverage record: how the search was made (the method), and with what settings. */
+  search_method?: string;
+  settings?: string;
+  /** A coverage record: what the search actually covered, what it skipped or did not read, and what failed. */
+  coverage_actual?: string;
+  skipped?: string;
+  failures?: string;
+  /** A coverage record: the results the search produced: entries (E-<seq>) and job outputs (job:<id>[/<path>]). */
+  result_refs?: string[];
+  /** A coverage record: whether the event would have left a trace in these sources, given collection and retention, and why. */
+  detection_opportunity?: { trace_expected: NB.TraceExpected; why: string };
+  /** A coverage record, written by the hub: whether the jobs behind it were given every object it names (negative-bar.ts). */
+  coverage?: "complete" | "partial";
+  coverage_detail?: { units: NB.CoverageUnit[]; jobs: string[]; why: string[] };
+  /** A coverage record, written by the hub: the planned routes of its questions that nothing under them examined. */
+  not_examined?: Array<{ source: string; method: string; why: string }>;
   by: string;
   authors: string[];
   at: string;
@@ -7367,6 +7401,31 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
     ...(e.result ? { result: e.result } : {}),
     ...(e.contrary_none_why ? { contrary_none_why: e.contrary_none_why } : {}),
     ...(e.unsupported_tokens?.length ? { unsupported_tokens: e.unsupported_tokens } : {}),
+    ...coverageFields(e),
+  };
+}
+
+/**
+ * The negative bar's fields in the core, each only when present: an
+ * answer's assertion of absence, and a coverage record's own fields with
+ * what the hub computed for it, canonical. An entry from before them gives
+ * the core it always did.
+ */
+function coverageFields(e: LedgerEntry): Record<string, unknown> {
+  return {
+    ...(e.asserts_absence ? { asserts_absence: true } : {}),
+    ...(e.inventory_rev ? { inventory_rev: e.inventory_rev } : {}),
+    ...(e.time_range ? { time_range: e.time_range } : {}),
+    ...(e.search_method ? { search_method: e.search_method } : {}),
+    ...(e.settings ? { settings: e.settings } : {}),
+    ...(e.coverage_actual ? { coverage_actual: e.coverage_actual } : {}),
+    ...(e.skipped ? { skipped: e.skipped } : {}),
+    ...(e.failures ? { failures: e.failures } : {}),
+    ...(e.result_refs?.length ? { result_refs: e.result_refs } : {}),
+    ...(e.detection_opportunity ? { detection_opportunity: { trace_expected: e.detection_opportunity.trace_expected, why: e.detection_opportunity.why } } : {}),
+    ...(e.coverage ? { coverage: e.coverage } : {}),
+    ...(e.coverage_detail ? { coverage_detail: canonicalValue(e.coverage_detail) } : {}),
+    ...(e.not_examined?.length ? { not_examined: e.not_examined.map((r) => ({ source: r.source, method: r.method, why: r.why })) } : {}),
   };
 }
 
@@ -7381,7 +7440,12 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
  */
 export function ledgerContent(e: LedgerEntry): string {
   const { because: _because, ...v3 } = ledgerV3Fields(e);
-  const v4 = e.kind === "answer" ? (({ unsupported_tokens: _tokens, ...rest }) => rest)(ledgerV4Fields(e)) : { ...(e.indicates ? { indicates: e.indicates } : {}), ...(e.qualifies?.length ? { qualifies: e.qualifies.map((q) => ({ ref: q.ref, why: q.why })) } : {}) };
+  const v4 =
+    e.kind === "answer"
+      ? (({ unsupported_tokens: _tokens, ...rest }) => rest)(ledgerV4Fields(e))
+      : e.kind === "coverage"
+        ? (({ coverage: _c, coverage_detail: _d, not_examined: _n, ...rest }) => ({ ...rest, ...(e.alternatives_open ? { alternatives_open: e.alternatives_open } : {}) }))(coverageFields(e))
+        : { ...(e.indicates ? { indicates: e.indicates } : {}), ...(e.qualifies?.length ? { qualifies: e.qualifies.map((q) => ({ ref: q.ref, why: q.why })) } : {}) };
   return JSON.stringify({ kind: e.kind, ts: e.ts ?? "", value: e.value, source: e.source ?? "", evidence: e.evidence ?? "", confidence: e.confidence ?? "", refs: e.refs ?? [], ...v3, ...v4 });
 }
 
@@ -7503,10 +7567,23 @@ export type LedgerInput = {
   alternatives_open?: string;
   would_change?: string;
   inconclusive?: boolean;
-  /** An answer's result (premise_not_supported: the premise the question asks about does not hold). */
+  /** An answer's result (LEDGER_ANSWER_RESULTS; premise_not_supported: the premise the question asks about does not hold). */
   result?: string;
   /** An answer to a person's question: why no entry says otherwise. */
   contrary_none_why?: string;
+  /** An answer: it says the event did not happen (only on an existence question whose coverage is complete and would have shown it). */
+  asserts_absence?: boolean;
+  /** A coverage record's own fields (kind coverage); its value is the proposition searched, its refs the objects. */
+  proposition?: string;
+  inventory_rev?: string;
+  time_range?: string;
+  search_method?: string;
+  settings?: string;
+  coverage_actual?: string;
+  skipped?: string;
+  failures?: string;
+  result_refs?: string[] | string;
+  detection_opportunity?: { trace_expected?: string; why?: string };
 };
 
 function listOf(v: string[] | string | undefined): string[] {
@@ -7619,8 +7696,10 @@ async function ledgerV3Input(
 }
 
 /** The fields only an answer takes, and only a finding takes: named in a refusal when they come with another kind. */
-const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why"] as const;
+const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why", "asserts_absence"] as const;
 const FINDING_ONLY_FIELDS = ["indicates", "alternatives", "alternatives_none_why", "significance"] as const;
+/** The fields only a coverage record takes. */
+const COVERAGE_ONLY_FIELDS = ["proposition", "inventory_rev", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures", "result_refs", "detection_opportunity"] as const;
 
 function given(v: unknown): boolean {
   if (v === undefined || v === null) return false;
@@ -7658,6 +7737,8 @@ async function ledgerV4Input(
   const raw = input as Record<string, unknown>;
   const answerOnly = ANSWER_ONLY_FIELDS.find((f) => given(raw[f]));
   if (answerOnly) return { ok: false, reason: `${answerOnly} is an answer's: record kind=answer with its section to answer a question` };
+  const coverageOnly = COVERAGE_ONLY_FIELDS.find((f) => given(raw[f]));
+  if (coverageOnly) return { ok: false, reason: `${coverageOnly} is a coverage record's: record kind=coverage for what a negative was searched over` };
   if (kind !== "finding") {
     const findingOnly = FINDING_ONLY_FIELDS.find((f) => given(raw[f]));
     if (findingOnly) return { ok: false, reason: `${findingOnly} is a finding's: what an observation indicates and what else could explain it are recorded on kind=finding` };
@@ -7961,6 +8042,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
     return { ok: false, reason: `kind must be one of ${LEDGER_KINDS.join(", ")}` };
   }
   if (kind === "answer") return recordAnswer(ctx, input);
+  if (kind === "coverage") return recordCoverage(ctx, input);
   const absence = kind === "absence";
   const limitation = kind === "limitation";
   const value = String(input.value ?? "").trim();
@@ -8178,6 +8260,13 @@ export type LedgerAttestation = {
   how?: string;
   /** An attest's: the sealed objects it re-derived from, each resolved. */
   refs?: string[];
+  /**
+   * An attest of a negative (a coverage record, or an answer bounded_negative
+   * or not_determinable): whether the reviewer challenged the detection
+   * assumptions, reproduced a decisive check, tried a materially different
+   * route, each with what was done or why not. Inside the hashed record.
+   */
+  review?: NB.NegativeReview;
   prev?: string;
   hash?: string;
 };
@@ -8190,7 +8279,7 @@ export function attestationAct(a: LedgerAttestation): "same_content" | "attest" 
 export function attestationHash(a: LedgerAttestation, prev: string): string {
   const core =
     a.v === 2
-      ? JSON.stringify({ v: 2, act: a.act, seq: a.seq, target: a.target, by: a.by, at: a.at, ...(a.how ? { how: a.how } : {}), ...(a.refs?.length ? { refs: a.refs } : {}) })
+      ? JSON.stringify({ v: 2, act: a.act, seq: a.seq, target: a.target, by: a.by, at: a.at, ...(a.how ? { how: a.how } : {}), ...(a.refs?.length ? { refs: a.refs } : {}), ...(a.review ? { review: canonicalValue(a.review) } : {}) })
       : JSON.stringify({ seq: a.seq, by: a.by, at: a.at });
   return createHash("sha256").update(`${prev}\n${core}`).digest("hex");
 }
@@ -8294,16 +8383,18 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   const hypotheses = all.filter((e) => e.kind === "hypothesis");
   const limitations = all.filter((e) => e.kind === "limitation");
   const answers = all.filter((e) => e.kind === "answer");
+  const coverages = all.filter((e) => e.kind === "coverage");
   const replaced = supersededBy(all);
   const contradictions = standingContradictions(all);
   // Who re-derived an entry, and who disputes it: read beside the ledger, never written into it.
-  const attests = (await readAttestations(sandboxRoot)).filter((a) => attestationAct(a) === "attest");
+  const allAttestations = await readAttestations(sandboxRoot);
+  const attests = allAttestations.filter((a) => attestationAct(a) === "attest");
   const disputes = standingDisputes(await readDisputes(sandboxRoot));
   const problems = answers.length ? answerProblems(all, await readDisputes(sandboxRoot)) : new Map<number, string[]>();
   const lines: string[] = [
     "# Ledger",
     "",
-    `${all.length} entries: ${events.length} events, ${iocs.length} indicators, ${findings.length} findings, ${absences.length} searches that found nothing${hypotheses.length ? `, ${hypotheses.length} hypotheses` : ""}${limitations.length ? `, ${limitations.length} limitations` : ""}${answers.length ? `, ${answers.length} answers` : ""}${replaced.size ? `; ${replaced.size} corrected by a later entry, which stands` : ""}${contradictions.length ? `; ${contradictions.length} standing contradiction${contradictions.length === 1 ? "" : "s"}` : ""}. Written by the harness from \`record\`, \`attest\` and \`dispute\`; cite it as \`ledger/ledger.md\`.`,
+    `${all.length} entries: ${events.length} events, ${iocs.length} indicators, ${findings.length} findings, ${absences.length} searches that found nothing${hypotheses.length ? `, ${hypotheses.length} hypotheses` : ""}${limitations.length ? `, ${limitations.length} limitations` : ""}${coverages.length ? `, ${coverages.length} coverage records` : ""}${answers.length ? `, ${answers.length} answers` : ""}${replaced.size ? `; ${replaced.size} corrected by a later entry, which stands` : ""}${contradictions.length ? `; ${contradictions.length} standing contradiction${contradictions.length === 1 ? "" : "s"}` : ""}. Written by the harness from \`record\`, \`attest\` and \`dispute\`; cite it as \`ledger/ledger.md\`.`,
     "",
   ];
   const acts = (e: LedgerEntry) => {
@@ -8335,8 +8426,11 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
     for (const e of answers) {
       const cites = (label: string, edges?: LedgerEdge[]) => (edges?.length ? ` — ${label}: ${edges.map((x) => `E-${x.seq}`).join(", ")}` : "");
       const p = problems.get(e.seq);
+      const r = NB.answerResult(e);
+      const neg = r && NB.NEGATIVE_RESULTS.has(r) && e.section?.startsWith("question:") ? negativeReview(e, all, allAttestations) : null;
+      const negText = neg ? (neg.reviewed ? ` (negative, reviewed by ${neg.by.join(", ")})` : " **(negative, unreviewed)**") : "";
       lines.push(
-        `- **#${e.seq}** ${e.section}${e.inconclusive ? " (inconclusive)" : ""}${e.result ? ` (${e.result})` : ""}: ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence}${e.confidence_why ? `: ${e.confidence_why}` : ""})_` : ""}${cites("rests on", e.support)}${cites("contrary", e.contrary)}${e.contrary_none_why ? ` — nothing says otherwise: ${e.contrary_none_why}` : ""}${cites("limitations", e.limitations)}${e.qualifies?.length ? ` — qualifies: ${e.qualifies.map((q) => `${q.ref} (${q.why})`).join("; ")}` : ""}${e.alternatives_open ? ` — still open: ${e.alternatives_open}` : ""}${e.would_change ? ` — would change it: ${e.would_change}` : ""}${e.unsupported_tokens?.length ? ` — in none of the cited entries: ${e.unsupported_tokens.join(", ")}` : ""}${p?.length ? ` — **no longer stands on its support: ${p.join("; ")}**` : ""} — reasoning: ${e.reasoning ?? ""} — by ${e.authors.join(", ")}`,
+        `- **#${e.seq}** ${e.section}${e.inconclusive ? " (inconclusive)" : ""}${e.result ? ` (${e.result})` : ""}${e.asserts_absence ? " (asserts absence)" : ""}${negText}: ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence}${e.confidence_why ? `: ${e.confidence_why}` : ""})_` : ""}${cites("rests on", e.support)}${cites("contrary", e.contrary)}${e.contrary_none_why ? ` — nothing says otherwise: ${e.contrary_none_why}` : ""}${cites("limitations", e.limitations)}${e.qualifies?.length ? ` — qualifies: ${e.qualifies.map((q) => `${q.ref} (${q.why})`).join("; ")}` : ""}${e.alternatives_open ? ` — still open: ${e.alternatives_open}` : ""}${e.would_change ? ` — would change it: ${e.would_change}` : ""}${e.unsupported_tokens?.length ? ` — in none of the cited entries: ${e.unsupported_tokens.join(", ")}` : ""}${p?.length ? ` — **no longer stands on its support: ${p.join("; ")}**` : ""} — reasoning: ${e.reasoning ?? ""} — by ${e.authors.join(", ")}`,
       );
     }
   }
@@ -8351,6 +8445,16 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   if (limitations.length) {
     lines.push("", "## Limitations", "", "| # | Not established | Reason | Scope | What was tried | By |", "| --- | --- | --- | --- | --- | --- |");
     for (const e of limitations) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${e.reason ?? ""} | ${mdCell(e.source)} | ${ev(e)} | ${e.authors.join(", ")} |`);
+  }
+  if (coverages.length) {
+    // What each negative was searched over, what the hub found the jobs were given, and who reviewed it.
+    lines.push("", "## Coverage records", "");
+    for (const e of coverages) {
+      const neg = negativeReview(e, all, allAttestations);
+      lines.push(
+        `- **#${e.seq}** for ${(e.answers ?? []).map((a) => `question:${a}`).join(", ")}: proposition: ${e.value}${mark(e)} — objects: ${(e.refs ?? []).map((r) => `\`${r}\``).join(", ")} — time range: ${e.time_range ?? ""} — method: ${e.search_method ?? ""} (settings: ${e.settings ?? ""}) — covered: ${e.coverage_actual ?? ""} — skipped: ${e.skipped ?? ""} — failures: ${e.failures ?? ""} — results: ${(e.result_refs ?? []).join(", ")} — alternatives: ${e.alternatives_open ?? ""} — detection opportunity: trace expected ${e.detection_opportunity?.trace_expected ?? "?"}, ${e.detection_opportunity?.why ?? ""} — inventory ${e.inventory_rev ?? "?"} — **coverage ${e.coverage ?? "not computed"}**${e.coverage_detail?.why.length ? ` (${e.coverage_detail.why.join("; ")})` : ""}${e.not_examined?.length ? ` — planned routes not examined: ${e.not_examined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}` : ""} — ${neg.reviewed ? `reviewed by ${neg.by.join(", ")}: ${neg.reviews.map((x) => NB.reviewWords(x.review)).join(" / ")}` : "**unreviewed**"} — by ${e.authors.join(", ")}`,
+      );
+    }
   }
   if (contradictions.length) {
     // Weighed: an answer holds both, one as contrary evidence, or a limitation names both.
@@ -8740,7 +8844,14 @@ export function standingDisputes(disputes: LedgerDispute[]): LedgerDispute[] {
 
 // --- attest and dispute ---------------------------------------------------------------------
 
-export type LedgerActInput = { seq?: number | string; how?: string; why?: string; refs?: string[] | string; withdraw?: boolean };
+export type LedgerActInput = { seq?: number | string; how?: string; why?: string; refs?: string[] | string; withdraw?: boolean; review?: unknown };
+
+/** Whether an entry is a negative the review bar holds: a coverage record, or an answer bounded_negative or not_determinable. */
+export function isNegativeEntry(e: LedgerEntry): boolean {
+  if (e.kind === "coverage") return true;
+  const r = NB.answerResult(e);
+  return r !== null && NB.NEGATIVE_RESULTS.has(r) && Boolean(e.section?.startsWith("question:"));
+}
 export type LedgerActResult<T> = { ok: true; line: T; appended: boolean; note?: string } | { ok: false; reason: string };
 
 /** The entry an act names, standing, and not the actor's own. */
@@ -8773,11 +8884,32 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     const checked = await checkRefs(ctx.sandboxRoot, refs);
     if (!checked.ok) return checked;
   }
+  let review: NB.NegativeReview | null = null;
+  if (input.review !== undefined && input.review !== null) {
+    const r = NB.checkReview(input.review);
+    if (!r.ok) return r;
+    review = r.review;
+  }
   return withTableLock(ctx.sandboxRoot, async (held) => {
     const entries = await readLedger(ctx.sandboxRoot);
     const t = actTarget(entries, input.seq, ctx.agentId, "attest");
     if (!t.ok) return t;
     const target = t.entry.hash ?? ledgerHash(t.entry, "genesis");
+    // A negative is attested with its review: what was challenged, reproduced or tried, or why not.
+    const negative = isNegativeEntry(t.entry);
+    if (negative && !review) {
+      return {
+        ok: false,
+        reason: `#${t.entry.seq} is a ${t.entry.kind === "coverage" ? "coverage record" : `negative answer (${NB.resultWords(NB.answerResult(t.entry))})`}: its attest is a review. Give review {detection: {done, text}, reproduced: {done, text}, other_route: {done, text}}: whether you challenged the detection assumptions, reproduced a decisive check, tried a materially different route, each with what you did or why not`,
+      };
+    }
+    if (!negative && review) return { ok: false, reason: `review is for a negative (a coverage record, or an answer bounded_negative or not_determinable); #${t.entry.seq} is a ${t.entry.kind}: say in how what you re-derived` };
+    if (negative && t.entry.kind === "answer") {
+      // Whoever recorded a coverage record the answer rests on is not its reviewer either.
+      const bySeq = new Map(entries.map((e) => [e.seq, e]));
+      const covAuthors = (t.entry.support ?? []).map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => e?.kind === "coverage").flatMap((e) => e.authors);
+      if (covAuthors.includes(ctx.agentId)) return { ok: false, reason: `you recorded the coverage record #${t.entry.seq} rests on: a review of a negative is another seat's` };
+    }
     if (standingDisputes(await readDisputes(ctx.sandboxRoot)).some((d) => d.target === target && d.by === ctx.agentId)) {
       return { ok: false, reason: `you dispute #${t.entry.seq}: withdraw the dispute (dispute withdraw=true, with why) before attesting it` };
     }
@@ -8785,10 +8917,25 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     const mine = attested.find((a) => attestationAct(a) === "attest" && a.target === target && a.by === ctx.agentId);
     if (mine) return { ok: true, line: mine, appended: false, note: `you attested #${t.entry.seq} already` };
     await held.assertOwned();
-    const line = await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "attest", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), how: how.value, ...(refs.length ? { refs } : {}) });
+    const line = await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "attest", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), how: how.value, ...(refs.length ? { refs } : {}), ...(review ? { review } : {}) });
     await renderLedger(ctx.sandboxRoot);
-    return { ok: true, line, appended: true };
+    return { ok: true, line, appended: true, ...(review ? { note: `recorded as the review of a negative: ${NB.reviewWords(review)}` } : {}) };
   });
+}
+
+/**
+ * Whether a negative stands reviewed: an attest with its review, by a seat
+ * that recorded neither the answer nor a coverage record it rests on, on the
+ * answer or on one of those records. Who reviewed, and what they said.
+ */
+export function negativeReview(answer: LedgerEntry, entries: LedgerEntry[], attestations: LedgerAttestation[]): { reviewed: boolean; by: string[]; reviews: Array<{ by: string; seq: number; review: NB.NegativeReview }> } {
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  const cov = answer.kind === "coverage" ? [answer] : (answer.support ?? []).map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => e?.kind === "coverage" && !replaced.has(e.seq));
+  const authors = new Set([answer.by, ...answer.authors, ...cov.flatMap((c) => [c.by, ...c.authors])]);
+  const targets = new Map<string, number>([[answer.hash ?? ledgerHash(answer, "genesis"), answer.seq], ...cov.map((c): [string, number] => [c.hash ?? ledgerHash(c, "genesis"), c.seq])]);
+  const reviews = attestations.filter((a) => attestationAct(a) === "attest" && a.review && a.target && targets.has(a.target) && !authors.has(a.by)).map((a) => ({ by: a.by, seq: targets.get(a.target!)!, review: a.review! }));
+  return { reviewed: reviews.length > 0, by: [...new Set(reviews.map((r) => r.by))], reviews };
 }
 
 /**
@@ -8830,7 +8977,7 @@ export async function disputeEntry(ctx: SwarmContext, input: LedgerActInput): Pr
 // --- answers --------------------------------------------------------------------------------
 
 /** The fields an answer never takes: it rests on entries, not objects, and states no event. */
-const NOT_ANSWER_FIELDS = ["ts", "refs", "answers", "rel", "clock", "precision", "basis", "status", "reason", "completion", "attribution", "locators", "indicates", "alternatives", "alternatives_none_why", "significance"] as const;
+const NOT_ANSWER_FIELDS = ["ts", "refs", "answers", "rel", "clock", "precision", "basis", "status", "reason", "completion", "attribution", "locators", "indicates", "alternatives", "alternatives_none_why", "significance", ...COVERAGE_ONLY_FIELDS] as const;
 
 /** Each ref of an entry whose job did not succeed and that the entry does not qualify itself. */
 async function unqualifiedFailedRefs(sandboxRoot: string, e: LedgerEntry): Promise<string[]> {
@@ -8908,7 +9055,7 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
 }
 
 /** The fields of an entry, of any version, that can hold what it says. */
-const ENTRY_TEXT_FIELDS = ["value", "evidence", "source", "indicates", "confidence_why", "reasoning", "would_change", "alternatives_open", "alternatives_none_why", "because"] as const;
+const ENTRY_TEXT_FIELDS = ["value", "evidence", "source", "indicates", "confidence_why", "reasoning", "would_change", "alternatives_open", "alternatives_none_why", "because", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures"] as const;
 
 /** One of a sensitive entry's words, with the entry it came from. */
 export type SensitiveToken = { token: string; seq: number };
@@ -8965,6 +9112,187 @@ async function registerSection(sandboxRoot: string, raw: string): Promise<string
   return q ? `${m[1] ?? ""}${q.section}` : raw;
 }
 
+/**
+ * What the negative bar needs to know of a question section: whether it is
+ * material (the goal's always are; a register question says), whether it
+ * asks whether something exists (the goal's --existence, or the register's
+ * expects), its route plan (every route the leads under it planned), and the
+ * jobs run under those leads. Read from the registers, never from words.
+ */
+export async function questionBar(sandboxRoot: string, sectionId: string): Promise<{ material: boolean; existence: boolean; routes: NB.Route[]; jobs: string[]; question: string | null }> {
+  const L = await import("./leads.ts");
+  const snap = await L.leadsSnapshot(sandboxRoot);
+  const id = sectionKey(sectionId);
+  const q = snap.questions?.bySection.get(id) ?? null;
+  const goal = snap.goal.questions.map(sectionKey).includes(id);
+  const material = goal || !q ? true : q.materiality === "material";
+  const existence = snap.goal.existence.map(sectionKey).includes(id) || q?.expects === "existence";
+  const routes: NB.Route[] = [];
+  const jobs: string[] = [];
+  for (const l of snap.state.leads.values()) {
+    if (!l.answers.some((a) => sectionKey(a) === id)) continue;
+    for (const r of l.routes ?? []) if (!routes.some((x) => x.source === r.source && x.method === r.method)) routes.push(r);
+    for (const j of l.jobs) if (!jobs.includes(j)) jobs.push(j);
+  }
+  return { material, existence, routes, jobs, question: q?.id ?? null };
+}
+
+/**
+ * Record a coverage record (recordEntry with kind=coverage): what a negative,
+ * or a "not determinable", was searched over. Every field is required, each
+ * may say "none" with why; the hub adds the inventory revision, whether the
+ * jobs behind it were given every object it names (coverage complete or
+ * partial, with each unit and how), and the planned routes of its questions
+ * that nothing examined. A record is about questions: it names them in
+ * answers, and an answer cites it.
+ */
+async function recordCoverage(ctx: SwarmContext, input: LedgerInput): Promise<LedgerResult> {
+  const raw = input as Record<string, unknown>;
+  const notHere = [...ANSWER_ONLY_FIELDS.filter((f) => f !== "alternatives_open"), "indicates", "alternatives_none_why", "significance", "status", "reason", "completion", "ts", "clock", "precision", "basis", "attribution", "locators"].find((f) => given(raw[f]) && !(f === "alternatives" && typeof raw[f] === "string"));
+  if (notHere) return { ok: false, reason: `${notHere} is not a coverage record's: it says what a search covered, and the entries it rests on say what was found` };
+  const proposition = String(input.proposition ?? "").trim();
+  const said = String(input.value ?? "").trim();
+  if (proposition && said && proposition !== said) return { ok: false, reason: "value and proposition are the same field on a coverage record (the proposition searched): give one" };
+  const value = proposition || said;
+  if (!value) return { ok: false, reason: "proposition (or value) is required: the proposition the search tested, in one sentence (\"the account signed in from outside the office network\")" };
+  if (value.length > LEDGER_VALUE_MAX_CHARS) return { ok: false, reason: `the proposition is over ${LEDGER_VALUE_MAX_CHARS} characters` };
+  const text = (name: string, v: unknown, required = true): { ok: true; value: string } | { ok: false; reason: string } => {
+    const t = boundedText(name, v, NB.COVERAGE_TEXT_MAX);
+    if (!t.ok) return t;
+    if (required && !t.value) return { ok: false, reason: `${name} is required on a coverage record${name === "skipped" || name === "failures" ? ' ("none" when nothing was, with how that is known)' : ""}` };
+    return t;
+  };
+  const timeRange = text("time_range", input.time_range);
+  if (!timeRange.ok) return timeRange;
+  const method = text("search_method", input.search_method);
+  if (!method.ok) return method;
+  const settings = text("settings", input.settings);
+  if (!settings.ok) return settings;
+  const actual = text("coverage_actual", input.coverage_actual);
+  if (!actual.ok) return actual;
+  const skipped = text("skipped", input.skipped);
+  if (!skipped.ok) return skipped;
+  const failures = text("failures", input.failures);
+  if (!failures.ok) return failures;
+  const alternatives = text("alternatives", typeof raw.alternatives === "string" ? raw.alternatives : input.alternatives_open);
+  if (!alternatives.ok) return { ok: false, reason: alternatives.reason.replace("alternatives is required", "alternatives is required: the explanations or routes still open, or none and why") };
+  const d = (input.detection_opportunity ?? {}) as { trace_expected?: unknown; why?: unknown };
+  const expected = String(d.trace_expected ?? "").trim().toLowerCase();
+  if (!(NB.TRACE_EXPECTED as readonly string[]).includes(expected)) return { ok: false, reason: "detection_opportunity is {trace_expected: yes | no | unknown, why}: would the event have left a trace in these sources, given what was collected and what they keep, and why" };
+  const dWhy = text("detection_opportunity.why", d.why);
+  if (!dWhy.ok) return dWhy;
+  const source = boundedText("source", input.source, LEDGER_SOURCE_MAX_CHARS);
+  if (!source.ok) return source;
+  const evidence = boundedText("evidence", input.evidence, LEDGER_EVIDENCE_MAX_CHARS);
+  if (!evidence.ok) return evidence;
+  const answers = listOf(input.answers);
+  if (!answers.length) return { ok: false, reason: 'answers is required on a coverage record: the questions its search was for ("3", "Q-19")' };
+  if (answers.length > LEDGER_MAX_ANSWERS) return { ok: false, reason: `answers names more than ${LEDGER_MAX_ANSWERS} sections` };
+  const badAnswer = answers.find((a) => !LEDGER_ANSWER_ID.test(a));
+  if (badAnswer) return { ok: false, reason: `answers takes the questions' section ids (got ${JSON.stringify(badAnswer)})` };
+  const objects = [...new Set((Array.isArray(input.refs) ? input.refs.map(String) : String(input.refs ?? "").split(/[\s,]+/)).map((r) => r.trim()).filter(Boolean))];
+  if (!objects.length) return { ok: false, reason: "refs is required on a coverage record: the objects the search was over (input:<path>, member:<gen>#<n>, job:<id>/<path>, …); the hub holds the jobs behind it to them" };
+  if (objects.length > LEDGER_MAX_REFS) return { ok: false, reason: `refs names more than ${LEDGER_MAX_REFS} objects: name the directory or the container that holds them` };
+  const checked = await checkRefs(ctx.sandboxRoot, objects);
+  if (!checked.ok) return checked;
+  const results = [...new Set((Array.isArray(input.result_refs) ? input.result_refs.map(String) : String(input.result_refs ?? "").split(/[\s,]+/)).map((r) => r.trim()).filter(Boolean))].map((r) => (/^#\d+$/.test(r) ? `E-${r.slice(1)}` : /^e-\d+$/i.test(r) ? r.toUpperCase() : r));
+  if (!results.length) return { ok: false, reason: "result_refs is required: what the search produced, the entries (E-<seq>: an absence, a limitation, a finding) and the job outputs (job:<id>[/<path>])" };
+  if (results.length > LEDGER_MAX_CITATIONS) return { ok: false, reason: `result_refs names more than ${LEDGER_MAX_CITATIONS}` };
+  const jobRefs = results.filter((r) => !/^E-\d+$/.test(r));
+  const badResult = jobRefs.find((r) => !/^(job|import|member|sha256|input):/.test(r));
+  if (badResult) return { ok: false, reason: `result_refs names entries as E-<seq> and objects as job:<id>[/<path>] (got ${JSON.stringify(badResult)})` };
+  if (jobRefs.length) {
+    const c = await checkRefs(ctx.sandboxRoot, jobRefs);
+    if (!c.ok) return { ok: false, reason: `result_refs: ${c.reason}` };
+  }
+  const inventory = await NB.inventoryRevision(ctx.sandboxRoot);
+  const givenRev = String(input.inventory_rev ?? "").trim();
+  if (givenRev && givenRev !== inventory) return { ok: false, reason: `inventory_rev ${givenRev} is not the run's inventory now (${inventory}): the evidence changed since the search; leave it out, and the hub writes the one the record is made against` };
+  let supersedes: number | undefined;
+  if (input.supersedes !== undefined && input.supersedes !== null && String(input.supersedes).trim() !== "") {
+    const n = Number(String(input.supersedes).trim().replace(/^#/, ""));
+    if (!Number.isInteger(n) || n < 1) return { ok: false, reason: `supersedes names an entry by its seq, a whole number (got ${JSON.stringify(input.supersedes)})` };
+    supersedes = n;
+  }
+  const because = boundedText("because", input.because, LEDGER_BECAUSE_MAX_CHARS);
+  if (!because.ok) return because;
+  if (because.value && supersedes === undefined) return { ok: false, reason: "because says why a correction corrects: give supersedes too" };
+  if (input.sensitive !== undefined && input.sensitive !== null && typeof input.sensitive !== "boolean") return { ok: false, reason: "sensitive is true or false" };
+  // The planned routes of the questions it is for, and the jobs under them.
+  const bars = await Promise.all(answers.map((a) => questionBar(ctx.sandboxRoot, a)));
+  const L = await import("./leads.ts");
+  const leads = await L.leadsSnapshot(ctx.sandboxRoot);
+  const method2 = await ledgerMethods(ctx.sandboxRoot, objects);
+  return withTableLock(ctx.sandboxRoot, async (held) => {
+    const entries = await readLedger(ctx.sandboxRoot);
+    const bySeq = new Map(entries.map((e) => [e.seq, e]));
+    const replaced = supersededBy(entries);
+    for (const r of results.filter((x) => /^E-\d+$/.test(x))) {
+      const n = Number(r.slice(2));
+      const e = bySeq.get(n);
+      if (!e) return { ok: false, reason: `result_refs names ${r}: there is no entry #${n} in the ledger` };
+      if (replaced.has(n)) return { ok: false, reason: `result_refs names ${r}, superseded by #${standingSeq(n, replaced)}: name the entry that stands` };
+      if (e.kind === "answer" || e.kind === "coverage") return { ok: false, reason: `result_refs names ${r}, a ${e.kind}: a search's results are what it found or failed to (absences, limitations, findings, events)` };
+    }
+    if (supersedes !== undefined) {
+      const target = bySeq.get(supersedes);
+      if (!target) return { ok: false, reason: `supersedes #${supersedes}: there is no entry #${supersedes} in the ledger` };
+      if (target.kind !== "coverage") return { ok: false, reason: `#${supersedes} is a ${target.kind}: a coverage record corrects a coverage record` };
+      const already = replaced.get(supersedes);
+      if (already !== undefined) return { ok: false, reason: `#${supersedes} is already superseded by #${already}: correct #${already} instead` };
+    }
+    const cov = await NB.computeObjectCoverage(ctx.sandboxRoot, { objects, resultRefs: results, entries, interpretations: leads.state.interpretations });
+    // The planned routes nothing examined: said on the record, whatever the search found.
+    const notExamined: Array<{ source: string; method: string; why: string }> = [];
+    for (const b of bars) {
+      for (const r of b.routes) {
+        if (notExamined.some((x) => x.source === r.source && x.method === r.method)) continue;
+        const ex = await NB.routeExamined(ctx.sandboxRoot, r, { jobs: [...new Set([...b.jobs, ...cov.jobs])], objects });
+        if (!ex.examined) notExamined.push({ source: r.source, method: r.method, why: ex.how });
+      }
+    }
+    const candidate: LedgerEntry = {
+      v: LEDGER_VERSION,
+      seq: (entries.at(-1)?.seq ?? 0) + 1,
+      kind: "coverage",
+      value,
+      ...(source.value ? { source: source.value } : {}),
+      ...(evidence.value ? { evidence: evidence.value } : {}),
+      refs: objects,
+      answers,
+      ...(input.sensitive === true ? { sensitive: true } : {}),
+      ...(because.value ? { because: because.value } : {}),
+      ...(method2.length ? { method: method2 } : {}),
+      alternatives_open: alternatives.value,
+      inventory_rev: inventory,
+      time_range: timeRange.value,
+      search_method: method.value,
+      settings: settings.value,
+      coverage_actual: actual.value,
+      skipped: skipped.value,
+      failures: failures.value,
+      result_refs: results,
+      detection_opportunity: { trace_expected: expected as NB.TraceExpected, why: dWhy.value },
+      coverage: cov.coverage,
+      coverage_detail: { units: cov.units, jobs: cov.jobs, why: cov.why },
+      ...(notExamined.length ? { not_examined: notExamined } : {}),
+      by: ctx.agentId,
+      authors: [ctx.agentId],
+      at: new Date().toISOString(),
+    };
+    const notes: string[] = [];
+    notes.push(cov.coverage === "complete" ? "the hub finds the jobs behind it were given every object it names: coverage complete" : `the hub marks it coverage partial: ${cov.why.join("; ")}`);
+    if (notExamined.length) notes.push(`planned routes not examined: ${notExamined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}`);
+    if (bars.some((b) => b.material && !b.routes.length)) notes.push("a question it is for has no route plan: a negative on a material question closes against one (lead_link routes)");
+    notes.push("a material negative resting on it needs another seat's review: attest this record, or the answer, with review {detection, reproduced, other_route}");
+    if (supersedes === undefined) {
+      const same = entries.find((e) => !replaced.has(e.seq) && e.kind === "coverage" && ledgerContent(e) === ledgerContent(candidate));
+      if (same) return mergeSameContent(ctx, held, same);
+    }
+    return appendLedgerEntry(ctx, held, entries, { ...candidate, ...(supersedes !== undefined ? { supersedes } : {}) }, notes);
+  });
+}
+
 /** Record an answer (recordEntry with kind=answer): its checks need the ledger, so they run under the lock. */
 async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<LedgerResult> {
   const raw = input as Record<string, unknown>;
@@ -8999,11 +9327,25 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   if (!contrary.ok) return contrary;
   const limits = seqList("limitations", input.limitations);
   if (!limits.ok) return limits;
-  const resultText = String(input.result ?? "").trim().toLowerCase();
+  let resultText = String(input.result ?? "").trim().toLowerCase().replace(/-/g, "_");
   if (resultText && !(LEDGER_ANSWER_RESULTS as readonly string[]).includes(resultText)) return { ok: false, reason: `result is one of ${LEDGER_ANSWER_RESULTS.join(", ")} (got ${JSON.stringify(input.result)})` };
+  // The old way of saying it: inconclusive is not_determinable, and is recorded as both.
+  if (input.inconclusive === true) {
+    if (resultText && resultText !== "not_determinable") return { ok: false, reason: `inconclusive is the old word for result not_determinable: it cannot come with result ${resultText}` };
+    if (question) resultText = "not_determinable";
+  }
+  if (question && !resultText) {
+    return {
+      ok: false,
+      reason:
+        "an answer to a question states its result: established (answered on findings), partial (part of it), bounded_negative (no evidence of it found in a named scope: rests on a coverage record), not_determinable (the evidence cannot settle it: rests on a coverage record too), out_of_scope (the case's evidence cannot bear on it) or premise_not_supported (what it takes for granted does not hold)",
+    };
+  }
+  if (input.asserts_absence !== undefined && input.asserts_absence !== null && typeof input.asserts_absence !== "boolean") return { ok: false, reason: "asserts_absence is true or false" };
+  if (input.asserts_absence === true && resultText !== "bounded_negative") return { ok: false, reason: "asserts_absence says the event did not happen: it comes with result bounded_negative, on an existence question whose coverage record is complete and says the event would have left a trace" };
   const noneWhy = boundedText("contrary_none_why", input.contrary_none_why, LEDGER_WHY_MAX_CHARS);
   if (!noneWhy.ok) return noneWhy;
-  if (!question && (resultText || noneWhy.value)) return { ok: false, reason: "result and contrary_none_why are a question's answer's" };
+  if (!question && (resultText || noneWhy.value || input.asserts_absence === true)) return { ok: false, reason: "result, asserts_absence and contrary_none_why are a question's answer's" };
   if (noneWhy.value && contrary.seqs.length) return { ok: false, reason: "contrary_none_why says no entry says otherwise: give contrary or contrary_none_why, not both" };
   // A person's question is a hypothesis to test: its answer names what says
   // otherwise, or says why nothing does (extensions/questions.ts).
@@ -9035,6 +9377,16 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   const cited = answerCitations(`${value}\n${reasoning.value}`);
   const support = cited.filter((n) => !contrary.seqs.includes(n) && !limits.seqs.includes(n));
   if (support.length + contrary.seqs.length + limits.seqs.length > LEDGER_MAX_CITATIONS) return { ok: false, reason: `the answer cites more than ${LEDGER_MAX_CITATIONS} entries: cite the ones it rests on` };
+  // The negative bar (extensions/negative-bar.ts): what the question is, as the registers say.
+  const bar = question ? await questionBar(ctx.sandboxRoot, sec.id) : null;
+  const negative = NB.NEGATIVE_RESULTS.has(resultText);
+  const absolute = question ? NB.absoluteAbsenceForms(`${value}\n${reasoning.value}`) : [];
+  if (absolute.length && !input.asserts_absence && negative) {
+    return { ok: false, reason: `it is worded as the event's absence (${absolute.map((f) => `"${f}"`).join(", ")}): a negative says "No evidence of <what> was found in <scope>". "It did not happen" is for an existence question whose coverage record is complete and says the event would have left a trace there, recorded with asserts_absence: true` };
+  }
+  if (negative && bar?.material && !bar.routes.length) {
+    return { ok: false, reason: `${sec.section} is a material question with no route plan: a ${NB.resultWords(resultText)} closes against the sources and methods planned before the search. Give the lead under it its routes (lead_link with routes [{source, method}]), then record this again` };
+  }
   return withTableLock(ctx.sandboxRoot, async (held) => {
     const entries = await readLedger(ctx.sandboxRoot);
     const disputes = await readDisputes(ctx.sandboxRoot);
@@ -9093,9 +9445,25 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
     const standingCites = [...support, ...limits.seqs].filter((n) => !replaced.has(n)).map((n) => bySeq.get(n) as LedgerEntry);
     if (question) {
       const id = sectionAnswersId(sec.section);
-      const names = standingCites.some((e) => (e.kind === "finding" || e.kind === "absence" || e.kind === "limitation") && (e.answers ?? []).some((a) => sectionKey(a) === id));
-      if (!names) {
-        return { ok: false, reason: `an answer to ${sec.section} rests on at least one standing finding, search or limitation recorded with answers=["${id}"] and cited as E-<seq>${standingCites.length ? ` (none of ${standingCites.map((e) => `E-${e.seq}`).join(", ")} names it)` : " (the answer cites no standing entry)"}` };
+      const naming = (kinds: string[]) => standingCites.filter((e) => kinds.includes(e.kind) && (e.answers ?? []).some((a) => sectionKey(a) === id));
+      if (!naming(["finding", "absence", "limitation", "coverage"]).length) {
+        return { ok: false, reason: `an answer to ${sec.section} rests on at least one standing finding, search, limitation or coverage record recorded with answers=["${id}"] and cited as E-<seq>${standingCites.length ? ` (none of ${standingCites.map((e) => `E-${e.seq}`).join(", ")} names it)` : " (the answer cites no standing entry)"}` };
+      }
+      // The result says what the answer rests on: findings for what is established, a coverage record for a material negative.
+      if ((resultText === "established" || resultText === "partial") && !naming(["finding"]).length) {
+        return { ok: false, reason: `a result ${resultText} rests on a standing finding recorded with answers=["${id}"] and cited as E-<seq>; if nothing was found, the result is bounded_negative or not_determinable, resting on a coverage record` };
+      }
+      const coverage = naming(["coverage"]);
+      if (negative && bar?.material && !coverage.length) {
+        return {
+          ok: false,
+          reason: `a ${NB.resultWords(resultText)} on a material question rests on a coverage record: record kind=coverage with answers=["${id}"] (the proposition searched, the objects in refs, time_range, search_method, settings, coverage_actual, skipped, failures, result_refs, alternatives and detection_opportunity), and cite it as E-<seq>`,
+        };
+      }
+      if (input.asserts_absence === true) {
+        const complete = coverage.filter((c) => c.coverage === "complete" && c.detection_opportunity?.trace_expected === "yes");
+        if (!bar?.existence) return { ok: false, reason: `asserts_absence says the event did not happen: only an answer to a question that asks whether something exists may say that (the goal's --existence, or the register's expects existence); ${sec.section} does not. Say "No evidence of … was found in …"` };
+        if (!complete.length) return { ok: false, reason: `asserts_absence says the event did not happen: it rests on a coverage record the hub found complete and that says the event would have left a trace (detection_opportunity.trace_expected yes); ${coverage.length ? coverage.map((c) => `E-${c.seq} is coverage ${c.coverage ?? "unknown"}, trace expected ${c.detection_opportunity?.trace_expected ?? "?"}`).join("; ") : "it cites no coverage record"}. Say "No evidence of … was found in …" instead` };
       }
     } else if (!standingCites.length) {
       return { ok: false, reason: `a ${sec.section} cites at least one standing entry as E-<seq>` };
@@ -9125,6 +9493,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
       ...(input.inconclusive === true ? { inconclusive: true } : {}),
       ...(resultText ? { result: resultText as LedgerEntry["result"] } : {}),
       ...(noneWhy.value ? { contrary_none_why: noneWhy.value } : {}),
+      ...(input.asserts_absence === true ? { asserts_absence: true } : {}),
       ...(tokens.length ? { unsupported_tokens: tokens } : {}),
       by: ctx.agentId,
       authors: [ctx.agentId],
@@ -9140,7 +9509,12 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
     }
     const notes: string[] = [];
     if (tokens.length) notes.push(`in none of the cited entries: ${tokens.join(", ")}; cite the entry that holds each, or record how it was derived as its own entry and cite that (marked on the answer; the release counts them)`);
-    if (question && !candidate.inconclusive && standingCites.every((e) => e.kind === "limitation")) notes.push("it rests on limitations only: if the ledger cannot answer it, say so with inconclusive=true");
+    if (question && resultText !== "not_determinable" && standingCites.every((e) => e.kind === "limitation")) notes.push("it rests on limitations only: if the ledger cannot answer it, say so with result not_determinable, resting on a coverage record");
+    if (question && negative && bar?.material) {
+      const cov = standingCites.filter((e) => e.kind === "coverage");
+      if (cov.some((c) => c.coverage === "partial")) notes.push(`its coverage record${cov.length > 1 ? "s are" : " is"} partial (${cov.filter((c) => c.coverage === "partial").map((c) => `E-${c.seq}`).join(", ")}): the report says what was not covered`);
+      notes.push(`a material negative is reviewed by another seat before the run may end: an attest on this answer or on ${cov.map((c) => `E-${c.seq}`).join(", ")} with review {detection, reproduced, other_route}; until then it shows as negative (unreviewed)`);
+    }
     return appendLedgerEntry(ctx, held, entries, { ...candidate, ...(supersedes !== undefined ? { supersedes } : {}) }, notes);
   });
 }
@@ -9155,7 +9529,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
  * unsupported answer supported, and the release still counts it).
  */
 export type LedgerDefect = {
-  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction";
+  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording";
   section?: string;
   seqs: number[];
   what: string;
@@ -9198,8 +9572,9 @@ export function openContradictions(entries: LedgerEntry[]): Array<{ from: number
  * the contradictions left open. Pure over what was read: the caller reads
  * the files (and which entries rest on a failed job) and verifies the chains.
  */
-export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]> }): LedgerGate {
+export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean } }): LedgerGate {
   const { entries } = o;
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
   const problems = answerProblems(entries, o.disputes, o.failed);
@@ -9235,7 +9610,29 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
     if (against.length) {
       defects.push({ code: "answer_disputed", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) is disputed by ${against.map((d) => `${d.by}: ${d.why}`).join("; ")}`, fix: `answer the dispute: record the answer again with supersedes=${a.seq}, or the disputer withdraws it (dispute withdraw=true, with why), or record a limitation citing E-${a.seq}`, named_by: namedFor(a.seq) });
     }
-    const acted = o.attestations.some((x) => attestationAct(x) === "attest" && x.target === target && !a.authors.includes(x.by) && x.by !== a.by) || against.some((d) => !a.authors.includes(d.by));
+    // The negative bar, on an answer that states its result (one recorded
+    // before results reads as it always did): a material negative rests on
+    // a standing coverage record and is reviewed by another seat, and is
+    // worded as what was not found where, unless the bar for "it did not
+    // happen" is met. None of these is excused by a limitation.
+    const result = NB.answerResult(a);
+    const bar = sec.section.startsWith("question:") ? (o.bar?.(id) ?? { material: true, existence: false }) : null;
+    const review = result && NB.NEGATIVE_RESULTS.has(result) ? negativeReview(a, entries, o.attestations) : null;
+    if (bar && result && NB.NEGATIVE_RESULTS.has(result)) {
+      const cov = (a.support ?? []).map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => e?.kind === "coverage" && !replaced.has(e.seq) && (e.answers ?? []).some((x) => sectionKey(x) === id));
+      if (bar.material && !cov.length) {
+        defects.push({ code: "coverage_missing", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)} on a material question and rests on no standing coverage record`, fix: `record kind=coverage with answers=["${id}"] (what was searched, over which objects, how, what was covered, skipped and failed, the results, the alternatives, the detection opportunity) and record the answer again with supersedes=${a.seq} citing it`, named_by: [] });
+      }
+      if (bar.material && !review?.reviewed) {
+        defects.push({ code: "negative_unreviewed", section: sec.section, seqs: [a.seq, ...cov.map((c) => c.seq)], what: `answer #${a.seq} (${sec.section}) is a negative (unreviewed): ${NB.resultWords(result)} on a material question, and no other seat has reviewed it`, fix: `a seat that recorded neither it nor its coverage record attests #${a.seq}${cov.length ? ` or ${cov.map((c) => `#${c.seq}`).join(", ")}` : ""} with review {detection, reproduced, other_route}: whether it challenged the detection assumptions, reproduced a decisive check, tried a materially different route, each with what it did or why not`, named_by: [] });
+      }
+      const forms = NB.absoluteAbsenceForms(`${a.value}\n${a.reasoning ?? ""}`);
+      const earned = a.asserts_absence === true && result === "bounded_negative" && bar.existence && cov.some((c) => c.coverage === "complete" && c.detection_opportunity?.trace_expected === "yes");
+      if ((forms.length || a.asserts_absence) && !earned) {
+        defects.push({ code: "wording", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) says the event did not happen${forms.length ? ` (${forms.map((f) => `"${f}"`).join(", ")})` : ""}, and the bar for saying so is not met: ${!bar.existence ? "the question does not ask whether something exists" : !cov.some((c) => c.coverage === "complete") ? "no coverage record it rests on is complete" : "no coverage record it rests on says the event would have left a trace"}`, fix: `record the answer again with supersedes=${a.seq}, worded "No evidence of … was found in …" (the coverage record's scope)`, named_by: [] });
+      }
+    }
+    const acted = o.attestations.some((x) => attestationAct(x) === "attest" && x.target === target && !a.authors.includes(x.by) && x.by !== a.by) || against.some((d) => !a.authors.includes(d.by)) || Boolean(review?.reviewed);
     if (!acted) {
       defects.push({ code: "no_critic_act", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) has no critic act`, fix: `an agent other than its author re-derives what it rests on from the sealed refs and records attest (how) or dispute (why) on #${a.seq}`, named_by: namedFor(a.seq) });
     }
@@ -9469,6 +9866,8 @@ export type FinishGateView = {
   limited: string[];
   questions?: Array<{ id: string; outcome: string; blocks: string[] }>;
   until_solved?: boolean;
+  /** The lines of `limited` that are the operator's acceptances. */
+  accepted?: string[];
   error?: string;
 };
 
@@ -9557,15 +9956,21 @@ export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean, o
           "A lead is disposed of with lead_close; a lead's job is interpreted by recording what its output shows with interprets naming it; a question in scope is answered in the ledger in its section. Then call done again.",
       };
     }
-    if (until && (gate.limited.length || (gate.questions ?? []).some((q) => q.outcome !== "answered"))) {
-      const open = (gate.questions ?? []).filter((q) => q.outcome !== "answered");
+    // Under the operator's stop policy (--stop operator, --until-solved) a
+    // question the operator accepted is disposed, and its limit is the
+    // operator's to have taken: it holds nothing.
+    const acceptedIds = (gate.questions ?? []).filter((q) => q.outcome === "accepted").map((q) => q.id);
+    const byOperator = (l: string) => (gate.accepted ?? []).includes(l) || acceptedIds.some((id) => l.startsWith(`question:${id} `));
+    const openQs = (gate.questions ?? []).filter((q) => q.outcome !== "answered" && q.outcome !== "accepted");
+    if (until && (gate.limited.some((l) => !byOperator(l)) || openQs.length)) {
+      const open = openQs;
       const qs = open.map((q) => `- question:${q.id} is ${q.outcome}: ${q.blocks.join("; ")}`).join("\n");
-      const other = gate.limited.filter((l) => !open.some((q) => l.startsWith(`question:${q.id} `)));
+      const other = gate.limited.filter((l) => !open.some((q) => l.startsWith(`question:${q.id} `)) && !byOperator(l));
       return {
         proceed: false,
         failing: open[0] ? `question:${open[0].id}` : "(examination-limited)",
         reason:
-          "This run ends only when every question is answered: no answer that is inconclusive, rests on a limitation or a deferral, and no examination-limited finish. " +
+          "This run's stop is the operator's (--stop operator): it ends only when every question is answered, or the operator has accepted its limits (swarm.sh question accept), never on an answer that is inconclusive, a negative that does not settle it, a limitation or a deferral. " +
           `${open.length ? `Not answered yet:\n${qs}\n` : ""}${other.length ? `Also limiting the run:\n${other.map((l) => `- ${l}`).join("\n")}\n` : ""}` +
           "Take the next of these: find another route, open a lead for it (lead_open), or close a lead needs_operator when only the operator can unblock it. Only the operator can stop this run.",
       };

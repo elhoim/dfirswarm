@@ -37,6 +37,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir, open, readdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import * as NB from "./negative-bar.ts";
 import * as P from "./protocol.ts";
 
 // --- the files --------------------------------------------------------------------------------
@@ -100,7 +101,7 @@ export const LEAD_COMPACTION_BOUND_MS = 20 * 60_000;
 /** An idle seat is one that has waited at least this long, holding no active lead and no job. */
 export const IDLE_SEAT_MS = 60_000;
 
-export type LeadEventKind = "open" | "claim" | "release" | "close" | "link" | "reopen" | "stale" | "job" | "interpret" | "wake" | "note";
+export type LeadEventKind = "open" | "claim" | "release" | "close" | "link" | "reopen" | "stale" | "job" | "interpret" | "wake" | "note" | "route";
 
 export type LeadEvent = {
   v: 1;
@@ -149,6 +150,16 @@ export type LeadEvent = {
   /** A directive (the operator's lead under a question): what it is to produce, and what makes that product acceptable. */
   product?: string;
   acceptance?: string;
+  /**
+   * An open or a route event: the route plan, the sources to examine and how,
+   * listed before the search so that a source nobody examined stays visible
+   * (the negative bar, extensions/negative-bar.ts).
+   */
+  routes?: NB.Route[];
+  /** A close negative: the planned routes of its questions nothing examined, each with why (hub-computed). */
+  not_examined?: Array<{ source: string; method: string; why: string }>;
+  /** A close negative: held this long or less, one job, one object (a review cue, hub-computed). */
+  quick_negative?: { held_ms: number; jobs: number; objects: number };
   prev: string;
   hash: string;
 };
@@ -181,6 +192,11 @@ export type Lead = {
   negation?: string;
   product?: string;
   acceptance?: string;
+  /** The route plan: every route named at open and added since. */
+  routes: NB.Route[];
+  /** When it closed negative: the planned routes nothing examined, and whether it was a quick negative. */
+  not_examined?: Array<{ source: string; method: string; why: string }>;
+  quick_negative?: { held_ms: number; jobs: number; objects: number };
 };
 
 export type LeadsState = {
@@ -279,6 +295,7 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
           ...(e.negation ? { negation: e.negation } : {}),
           ...(e.product ? { product: e.product } : {}),
           ...(e.acceptance ? { acceptance: e.acceptance } : {}),
+          routes: [...(e.routes ?? [])],
         });
         break;
       }
@@ -302,6 +319,15 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         if (!l || !e.disposition) break;
         l.closed = { disposition: e.disposition, ref: e.ref ?? "", by: e.by, at: e.at, ...(e.why ? { why: e.why } : {}) };
         l.stale = null;
+        if (e.not_examined?.length) l.not_examined = e.not_examined;
+        else delete l.not_examined;
+        if (e.quick_negative) l.quick_negative = e.quick_negative;
+        else delete l.quick_negative;
+        l.last_seq = e.seq;
+        break;
+      case "route":
+        if (!l) break;
+        for (const r of e.routes ?? []) if (!l.routes.some((x) => x.source === r.source && x.method === r.method)) l.routes.push(r);
         l.last_seq = e.seq;
         break;
       case "reopen":
@@ -312,6 +338,8 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         l.stale = null;
         l.cycle += 1;
         l.reopened.push({ at: e.at, by: e.by, why: e.why ?? "", cause: e.cause ?? "agent" });
+        delete l.not_examined;
+        delete l.quick_negative;
         l.last_seq = e.seq;
         break;
       case "link":
@@ -878,6 +906,9 @@ export type LeadView = {
   negation?: string;
   product?: string;
   acceptance?: string;
+  routes: NB.Route[];
+  not_examined?: Array<{ source: string; method: string; why: string }>;
+  quick_negative?: { held_ms: number; jobs: number; objects: number };
 };
 
 export function viewLead(l: Lead, snap: LeadsSnapshot): LeadView {
@@ -911,6 +942,9 @@ export function viewLead(l: Lead, snap: LeadsSnapshot): LeadView {
     ...(l.negation ? { negation: l.negation } : {}),
     ...(l.product ? { product: l.product } : {}),
     ...(l.acceptance ? { acceptance: l.acceptance } : {}),
+    routes: l.routes,
+    ...(l.not_examined?.length ? { not_examined: l.not_examined } : {}),
+    ...(l.quick_negative ? { quick_negative: l.quick_negative } : {}),
   };
 }
 
@@ -1027,7 +1061,36 @@ export type LeadOpenInput = {
   /** A directive's product and acceptance (the operator's lead under a question). */
   product?: string;
   acceptance?: string;
+  /** The route plan: [{source, method}], the sources to examine and how, before the search (the negative bar). */
+  routes?: unknown;
 };
+
+/** A route plan as given: [{source, method}], each said, at most NB.MAX_ROUTES. */
+export function checkRoutes(raw: unknown): { ok: true; routes: NB.Route[] } | { ok: false; reason: string } {
+  if (raw === undefined || raw === null) return { ok: true, routes: [] };
+  if (!Array.isArray(raw)) return { ok: false, reason: 'routes is a list of {source, method}: each source to examine (input:<path>, member:<gen>#<n>, job:<id>/<path>, a path of the run, or words when it is not an object yet) and how' };
+  const out: NB.Route[] = [];
+  for (const r of raw) {
+    const o = (r && typeof r === "object" ? r : {}) as { source?: unknown; method?: unknown };
+    const source = bounded("a route's source", o.source, LEAD_WHY_MAX, true);
+    if (!source.ok) return { ok: false, reason: `${source.reason}: a route is {source, method}` };
+    const method = bounded("a route's method", o.method, LEAD_WHY_MAX, true);
+    if (!method.ok) return { ok: false, reason: `${method.reason}: a route is {source, method}` };
+    if (!out.some((x) => x.source === source.value && x.method === method.value)) out.push({ source: source.value, method: method.value });
+  }
+  if (out.length > NB.MAX_ROUTES) return { ok: false, reason: `a lead plans at most ${NB.MAX_ROUTES} routes` };
+  return { ok: true, routes: out };
+}
+
+/** Every route the leads under a question planned. */
+export function questionRoutes(s: LeadsState, section: string): NB.Route[] {
+  const out: NB.Route[] = [];
+  for (const l of s.leads.values()) {
+    if (!l.answers.includes(section)) continue;
+    for (const r of l.routes) if (!out.some((x) => x.source === r.source && x.method === r.method)) out.push(r);
+  }
+  return out;
+}
 
 function checkNeeds(raw: unknown, s: LeadsState, v: LedgerView, self?: string): { ok: true; needs: string[] } | { ok: false; reason: string } {
   const needs: string[] = [];
@@ -1099,7 +1162,7 @@ async function resolveAnswers(sandboxRoot: string, checked: { answers: string[];
  * step of its own work from under it). Without, it is open to everyone, and
  * when it is ready (no unmet need) the seat idle longest is woken for it.
  */
-export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promise<LeadResult<{ lead: LeadView; woke?: string }>> {
+export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promise<LeadResult<{ lead: LeadView; woke?: string; warning?: string }>> {
   const title = bounded("title", input.title, LEAD_TITLE_MAX, true);
   if (!title.ok) return title;
   const why = bounded("why", input.why, LEAD_WHY_MAX, true);
@@ -1119,8 +1182,10 @@ export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promi
   if (!product.ok) return product;
   const acceptance = bounded("acceptance", input.acceptance, LEAD_WHY_MAX, false);
   if (!acceptance.ok) return acceptance;
+  const routes = checkRoutes(input.routes);
+  if (!routes.ok) return routes;
   try {
-    const r = await transact<Fail | { ok: true; id: string; woke: string | undefined }>(ctx.sandboxRoot, async (snap) => {
+    const r = await transact<Fail | { ok: true; id: string; woke: string | undefined; warning?: string }>(ctx.sandboxRoot, async (snap) => {
       const needs = checkNeeds(input.needs, snap.state, snap.ledger);
       if (!needs.ok) return { append: [], result: { ok: false as const, reason: needs.reason } };
       const answers = checked.registered.length || checked.answers.length ? await resolveAnswers(ctx.sandboxRoot, checked) : { ok: true as const, answers: [] as string[], human: [] as Array<{ id: string; section: string }> };
@@ -1142,6 +1207,26 @@ export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promi
           }
         }
       }
+      // The route plan (the negative bar): the first lead under a question
+      // lists the sources it will examine and how, before the search. A
+      // person's question's first lead gives it (with a route that could
+      // disconfirm it); another question's is warned, and a negative on a
+      // material question closes against a plan and is refused without one.
+      let warning: string | undefined;
+      if (ctx.agentId !== "operator" && !routes.routes.length) {
+        const planless = answers.answers.filter((sec) => !questionRoutes(snap.state, sec).length);
+        const human = answers.human.find((h) => planless.includes(h.section) && ![...snap.state.leads.values()].some((l) => l.opened_by !== "operator" && l.answers.includes(h.section)));
+        if (human) {
+          return {
+            append: [],
+            result: {
+              ok: false as const,
+              reason: `${human.id} is a person's question and this is the first lead under it: give its route plan too, routes [{source, method}] (the sources you will examine and how, one of them able to disconfirm the proposition), so that a source nobody examined stays visible`,
+            },
+          };
+        }
+        if (planless.length) warning = `no route plan under ${planless.map((q) => `question:${q}`).join(", ")}: list the sources you will examine and how, before the search (routes [{source, method}], here or with lead_link). A negative on a material question closes against the plan, and is refused without one`;
+      }
       const id = `L-${snap.state.leads.size + 1}`;
       const take = input.take === true;
       const open = {
@@ -1158,6 +1243,7 @@ export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promi
         ...(proposition.value ? { proposition: proposition.value, negation: negation.value } : {}),
         ...(product.value ? { product: product.value } : {}),
         ...(acceptance.value ? { acceptance: acceptance.value } : {}),
+        ...(routes.routes.length ? { routes: routes.routes } : {}),
       };
       const append: Array<Omit<LeadEvent, "v" | "seq" | "at" | "prev" | "hash">> = [open];
       // Ready and unheld: the seat idle longest is woken for it, once.
@@ -1170,11 +1256,11 @@ export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promi
           append.push({ by: "system", ev: "wake", lead: id, to: pick.agent, cycle: 0 });
         }
       }
-      return { append, result: { ok: true as const, id, woke } };
+      return { append, result: { ok: true as const, id, woke, ...(warning ? { warning } : {}) } };
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
-    return { ok: true, lead: viewLead(snap.state.leads.get(r.id)!, snap), ...(r.woke ? { woke: r.woke } : {}) };
+    return { ok: true, lead: viewLead(snap.state.leads.get(r.id)!, snap), ...(r.woke ? { woke: r.woke } : {}), ...(r.warning ? { warning: r.warning } : {}) };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
@@ -1311,7 +1397,13 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
       }
       const checked = checkRef(disposition, refText.value, l, snap);
       if (!checked.ok) return { append: [], result: { ok: false as const, reason: checked.reason } };
-      return { append: [{ by: ctx.agentId, ev: "close", lead: l.id, generation: l.generation, disposition, ref: checked.ref, ...(why.value ? { why: why.value } : {}) }], result: { ok: true as const } };
+      // A negative closes against the plan: the planned routes of its
+      // questions nothing examined are named on the close, and a material
+      // lead under a material question with no plan is refused.
+      const negative = disposition === "negative" ? await negativeClose(ctx.sandboxRoot, l, snap) : null;
+      if (negative && !negative.ok) return { append: [], result: { ok: false as const, reason: negative.reason } };
+      const extra = negative?.ok ? { ...(negative.not_examined.length ? { not_examined: negative.not_examined } : {}), ...(negative.quick ? { quick_negative: negative.quick } : {}) } : {};
+      return { append: [{ by: ctx.agentId, ev: "close", lead: l.id, generation: l.generation, disposition, ref: checked.ref, ...(why.value ? { why: why.value } : {}), ...extra }], result: { ok: true as const } };
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
@@ -1322,6 +1414,50 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
+}
+
+/**
+ * What a negative close says of itself, computed by the hub: the planned
+ * routes of the questions the lead serves that no job under them declared
+ * and no coverage record names (each with why), and whether it was a quick
+ * negative (held NB.QUICK_NEGATIVE_HELD_MS or less, one job at most, one
+ * object at most): a review cue, never a refusal. A material lead under a
+ * material question with no route plan is refused: the negative would close
+ * against nothing.
+ */
+async function negativeClose(sandboxRoot: string, l: Lead, snap: LeadsSnapshot): Promise<{ ok: true; not_examined: Array<{ source: string; method: string; why: string }>; quick: { held_ms: number; jobs: number; objects: number } | null } | Fail> {
+  const routes: NB.Route[] = [];
+  const jobs = new Set<string>();
+  for (const section of l.answers) {
+    for (const r of questionRoutes(snap.state, section)) if (!routes.some((x) => x.source === r.source && x.method === r.method)) routes.push(r);
+    for (const o of snap.state.leads.values()) if (o.answers.includes(section)) for (const j of o.jobs) jobs.add(j);
+    if (!questionRoutes(snap.state, section).length && l.material) {
+      const q = snap.questions?.bySection.get(section);
+      const material = snap.goal.questions.includes(section) || !q || q.materiality === "material";
+      if (material) return { ok: false, reason: `${l.id} serves question:${section}, a material question with no route plan: a negative closes against the sources and methods planned before the search. Give the lead its routes (lead_link ${l.id} routes [{source, method}]), then close it` };
+    }
+  }
+  for (const j of l.jobs) jobs.add(j);
+  const coverageObjects = snap.ledger.entries.filter((e) => e.kind === "coverage" && !snap.ledger.replaced.has(e.seq) && (e.answers ?? []).some((a) => l.answers.includes(P.sectionKey(a)))).flatMap((e) => e.refs ?? []);
+  const notExamined: Array<{ source: string; method: string; why: string }> = [];
+  for (const r of routes) {
+    const ex = await NB.routeExamined(sandboxRoot, r, { jobs: [...jobs], objects: coverageObjects });
+    if (!ex.examined) notExamined.push({ source: r.source, method: r.method, why: ex.how });
+  }
+  // Held from its first holder to now; its jobs and the objects they declared.
+  const first = snap.state.events.find((e) => e.lead === l.id && ((e.ev === "open" && e.holder) || e.ev === "claim"));
+  const heldMs = first ? Math.max(0, Date.now() - Date.parse(first.at)) : 0;
+  const objects = new Set<string>();
+  // A job that read everything (scope all, or none said) is not a search over one object.
+  let everything = false;
+  for (const j of l.jobs) {
+    const d = await NB.jobDeclared(sandboxRoot, j);
+    if (!d) continue;
+    if (d.scope !== "declared") everything = true;
+    for (const x of d.inputs) objects.add(x);
+  }
+  const quick = heldMs <= NB.QUICK_NEGATIVE_HELD_MS && l.jobs.length <= 1 && objects.size <= 1 && !everything ? { held_ms: heldMs, jobs: l.jobs.length, objects: objects.size } : null;
+  return { ok: true, not_examined: notExamined, quick };
 }
 
 /** One line in operator-requests.jsonl, for the console and the CLI; the command that answers it. */
@@ -1338,9 +1474,11 @@ async function writeOperatorRequest(sandboxRoot: string, lead: LeadView, by: str
  * alternative stays open. The holder revises its own lead; an unheld one,
  * anyone. A loop is refused.
  */
-export async function linkLead(ctx: P.SwarmContext, rawId: unknown, input: { add?: string[] | string; remove?: string[] | string }): Promise<LeadResult<{ lead: LeadView }>> {
+export async function linkLead(ctx: P.SwarmContext, rawId: unknown, input: { add?: string[] | string; remove?: string[] | string; routes?: unknown }): Promise<LeadResult<{ lead: LeadView }>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
+  const routes = checkRoutes(input.routes);
+  if (!routes.ok) return routes;
   try {
     const r = await transact<Fail | { ok: true }>(ctx.sandboxRoot, async (snap) => {
       const l = snap.state.leads.get(ref.id);
@@ -1357,9 +1495,14 @@ export async function linkLead(ctx: P.SwarmContext, rawId: unknown, input: { add
         remove.push(p.need);
       }
       const fresh = add.needs.filter((n) => !l.needs.includes(n));
-      if (!fresh.length && !remove.length) return { append: [], result: { ok: false as const, reason: "give add, remove, or both: a need to add that it does not have, or one it has to drop" } };
+      const newRoutes = routes.routes.filter((r) => !l.routes.some((x) => x.source === r.source && x.method === r.method));
+      if (!fresh.length && !remove.length && !newRoutes.length) return { append: [], result: { ok: false as const, reason: "give add, remove, routes, or more than one: a need to add that it does not have, one it has to drop, or a route it does not plan yet" } };
       if (l.needs.length - remove.length + fresh.length > LEAD_MAX_NEEDS) return { append: [], result: { ok: false as const, reason: `a lead names at most ${LEAD_MAX_NEEDS} needs` } };
-      return { append: [{ by: ctx.agentId, ev: "link", lead: l.id, ...(fresh.length ? { add: fresh } : {}), ...(remove.length ? { remove } : {}) }], result: { ok: true as const } };
+      if (l.routes.length + newRoutes.length > NB.MAX_ROUTES) return { append: [], result: { ok: false as const, reason: `a lead plans at most ${NB.MAX_ROUTES} routes` } };
+      const append: Array<Omit<LeadEvent, "v" | "seq" | "at" | "prev" | "hash">> = [];
+      if (fresh.length || remove.length) append.push({ by: ctx.agentId, ev: "link", lead: l.id, ...(fresh.length ? { add: fresh } : {}), ...(remove.length ? { remove } : {}) });
+      if (newRoutes.length) append.push({ by: ctx.agentId, ev: "route", lead: l.id, routes: newRoutes });
+      return { append, result: { ok: true as const } };
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
@@ -1671,6 +1814,8 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   // first (a crash between an act and its post is made good here).
   const Q = await import("./questions.ts");
   await Q.deliverPending(ctx.sandboxRoot).catch(() => undefined);
+  // How each question stands, on the register's chain when it changed (an answer, a review, an acceptance).
+  await Q.syncDispositions(ctx.sandboxRoot).catch(() => undefined);
   const snap = await leadsSnapshot(ctx.sandboxRoot);
   const me = ctx.agentId;
   const ranked = rankedLeads(snap);
@@ -1694,6 +1839,7 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
     awaiting: awaiting.length,
     uncovered: cov.uncovered.length,
   };
+  lines.push(...(await negativeLines(ctx.sandboxRoot, snap)));
   lines.push(`Leads: ${counts.open} open, ${counts.active} active, ${counts.blocked} blocked, ${counts.closed} closed (leads for the whole register).`);
   for (const n of qd?.notices ?? []) lines.push(`NOTICE ${n.text}`);
   for (const n of notices) lines.push(`NOTICE ${n.text}`);
@@ -1707,6 +1853,43 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
     if (snap.questions) await Q.markTold(ctx.sandboxRoot, me, snap.questions);
   }
   return { text: lines.join("\n"), notices: [...notices, ...(qd?.notices ?? []).map((n) => ({ kind: `question_${n.kind}` as LeadNotice["kind"], lead: n.q, text: n.text, wakes: n.wakes }))], counts: { ...counts, ...(qd ? { questions: qd.counts } : {}) } };
+}
+
+/**
+ * The negative bar in the header: the material negatives nobody has
+ * reviewed yet (the finish line waits for each), and the quick negatives
+ * whose search nobody else has attested (a cue for review, never a
+ * refusal). Nothing when there are none.
+ */
+export async function negativeLines(sandboxRoot: string, snap: LeadsSnapshot): Promise<string[]> {
+  const out: string[] = [];
+  const attestations = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
+  const unreviewed: string[] = [];
+  for (const a of snap.ledger.entries) {
+    if (a.kind !== "answer" || snap.ledger.replaced.has(a.seq) || !a.section?.startsWith("question:")) continue;
+    const r = NB.answerResult(a);
+    if (!r || !NB.NEGATIVE_RESULTS.has(r)) continue;
+    const id = P.sectionKey(a.section.slice("question:".length));
+    const q = snap.questions?.bySection.get(id);
+    const material = snap.goal.questions.includes(id) || !q || q.materiality === "material";
+    if (!material) continue;
+    const rev = P.negativeReview(a, snap.ledger.entries, attestations);
+    if (rev.reviewed) continue;
+    const cov = (a.support ?? []).map((x) => snap.ledger.bySeq.get(x.seq)).filter((e): e is P.LedgerEntry => e?.kind === "coverage");
+    unreviewed.push(`${a.section} (E-${a.seq} ${NB.resultWords(r)}, by ${a.authors.join(", ")}${cov.length ? `; coverage ${cov.map((c) => `E-${c.seq} ${c.coverage ?? "?"}`).join(", ")}` : "; no coverage record"})`);
+  }
+  if (unreviewed.length) out.push(`Negatives awaiting review by another seat (the finish line waits for each; attest the answer or its coverage record with review {detection, reproduced, other_route}): ${unreviewed.join("; ")}.`);
+  const quick: string[] = [];
+  for (const l of snap.state.leads.values()) {
+    if (!l.quick_negative || l.closed?.disposition !== "negative") continue;
+    const m = /^E-(\d+)$/.exec(l.closed.ref);
+    const e = m ? snap.ledger.bySeq.get(Number(m[1])) : undefined;
+    const attested = e ? attestations.some((x) => P.attestationAct(x) === "attest" && x.target === (e.hash ?? P.ledgerHash(e, "genesis")) && !e.authors.includes(x.by)) : false;
+    if (attested) continue;
+    quick.push(`${l.id} "${l.title}" (held ${Math.round(l.quick_negative.held_ms / 1000)} s, ${l.quick_negative.jobs} job(s), ${l.quick_negative.objects} object(s); ${l.closed.ref})`);
+  }
+  if (quick.length) out.push(`Quick negatives, each a cue for review (a search held under ${Math.round(NB.QUICK_NEGATIVE_HELD_MS / 60_000)} minutes, one job, one object, that nobody else has attested): ${quick.join("; ")}.`);
+  return out;
 }
 
 async function writeTold(sandboxRoot: string, agent: string, told: Told): Promise<void> {
@@ -1917,9 +2100,12 @@ export function renderLeadsMd(snap: LeadsSnapshot): string {
       if (x.answers.length) lines.push(`- Answers: ${x.answers.map((a) => `question:${a}`).join(", ")}`);
       if (x.proposition) lines.push(`- Tests: ${x.proposition}; against: ${x.negation ?? ""}`);
       if (x.product) lines.push(`- Directive's product: ${x.product}; accepted when: ${x.acceptance ?? ""}`);
+      if (x.routes.length) lines.push(`- Route plan: ${x.routes.map(NB.routeWords).join("; ")}`);
       if (x.priority) lines.push(`- Waiting on it: ${x.waiting_on_it.leads.length} lead(s)${x.waiting_on_it.leads.length ? ` (${x.waiting_on_it.leads.join(", ")})` : ""}, ${x.waiting_on_it.questions.length} unanswered question(s)${x.waiting_on_it.questions.length ? ` (${x.waiting_on_it.questions.map((q) => `question:${q}`).join(", ")})` : ""}`);
       if (x.jobs.length) lines.push(`- Jobs: ${x.jobs.join(", ")}`);
       if (x.disposition) lines.push(`- Closed ${x.disposition} by ${x.closed_by} at ${x.closed_at}: ${x.ref}${x.close_why ? ` (${x.close_why})` : ""}`);
+      if (x.quick_negative) lines.push(`- Quick negative (a review cue): held ${Math.round(x.quick_negative.held_ms / 1000)} s, ${x.quick_negative.jobs} job(s), ${x.quick_negative.objects} object(s)`);
+      if (x.not_examined?.length) lines.push(`- Planned routes not examined: ${x.not_examined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}`);
       for (const r of x.reopened) lines.push(`- Reopened at ${r.at} by ${r.by} (${r.cause}): ${r.why}`);
       for (const n of x.notes) lines.push(`- Operator note at ${n.at}: ${n.text}${n.allow_host ? ` (allowed host: ${n.allow_host})` : ""}`);
       lines.push("");

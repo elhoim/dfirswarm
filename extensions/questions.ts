@@ -47,6 +47,7 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize } from "node:path";
 import * as L from "./leads.ts";
+import * as NB from "./negative-bar.ts";
 import * as P from "./protocol.ts";
 
 // --- the files --------------------------------------------------------------------------------
@@ -758,8 +759,13 @@ export type QuestionView = {
   accepted: (NonNullable<Question["accepted"]> & { stands: boolean }) | null;
   disposition: Question["disposition"];
   work: WorkState | null;
-  /** The standing answer entry in the question's section, and whether an amendment came after it. */
-  answer: { seq: number; at: string; inconclusive: boolean; result?: string; stale: boolean } | null;
+  /**
+   * The standing answer entry in the question's section, and whether an
+   * amendment came after it; its result (an older answer's read from
+   * inconclusive), and for a negative whether another seat reviewed it and
+   * what coverage it rests on (the negative bar).
+   */
+  answer: { seq: number; at: string; inconclusive: boolean; result?: string; stale: boolean; negative?: { reviewed: boolean; by: string[]; coverage: Array<{ seq: number; coverage: string | null }> } } | null;
   leads: Array<{ id: string; status: L.LeadStatus; holder: string | null; disposition?: string; opened_by: string }>;
   clarifications: Clarification[];
   pending_clarifications: string[];
@@ -770,7 +776,7 @@ export type QuestionView = {
   opened_by: string;
 };
 
-export type ViewContext = { questions: QuestionsSnapshot; leads: L.LeadsState; ledger: L.LedgerView; paused?: boolean };
+export type ViewContext = { questions: QuestionsSnapshot; leads: L.LeadsState; ledger: L.LedgerView; paused?: boolean; attestations?: P.LedgerAttestation[] };
 
 /** The standing answer entry of a section, if any. */
 function standingAnswer(ledger: L.LedgerView, section: string): P.LedgerEntry | null {
@@ -789,13 +795,23 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
   const work: WorkState | null = !inScope ? null : ctx.paused ? "paused" : pending.length ? "clarification_needed" : working ? "working" : "admitted";
   const a = standingAnswer(ctx.ledger, q.section);
   const lastText = q.revisions.at(-1);
+  const result = a ? NB.answerResult(a) : null;
+  const negative =
+    a && result && NB.NEGATIVE_RESULTS.has(result)
+      ? (() => {
+          const r = P.negativeReview(a, ctx.ledger.entries, ctx.attestations ?? []);
+          const coverage = (a.support ?? []).map((x) => ctx.ledger.bySeq.get(x.seq)).filter((e): e is P.LedgerEntry => e?.kind === "coverage").map((e) => ({ seq: e.seq, coverage: e.coverage ?? null }));
+          return { reviewed: r.reviewed, by: r.by, coverage };
+        })()
+      : null;
   const answer = a
     ? {
         seq: a.seq,
         at: a.at,
         inconclusive: a.inconclusive === true,
-        ...((a as { result?: string }).result ? { result: (a as { result?: string }).result } : {}),
+        ...(result ? { result } : {}),
         stale: q.rev > 1 && Boolean(lastText) && Date.parse(lastText!.at) > Date.parse(a.at),
+        ...(negative ? { negative } : {}),
       }
     : null;
   return {
@@ -852,7 +868,9 @@ export async function viewContext(sandboxRoot: string): Promise<ViewContext> {
   const ls = await L.leadsSnapshot(sandboxRoot);
   const questions = ls.questions ?? (await questionsSnapshot(sandboxRoot, { goal: ls.goal }));
   const budget = (await P.readBudget(sandboxRoot).catch(() => null)) as (P.BudgetRecord & { paused?: unknown }) | null;
-  return { questions, leads: ls.state, ledger: ls.ledger, paused: budget?.paused === true };
+  const attestations = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
+  // A paused run (the stop policy: a cap reached, the operator not yet asked) pauses every question in it.
+  return { questions, leads: ls.state, ledger: ls.ledger, paused: Boolean(budget?.paused), attestations };
 }
 
 /** The questions a finish line holds the run to beyond the goal's own check: in scope, not withdrawn, not a follow-up, asked by a person or an agent. */
@@ -1459,7 +1477,17 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
       const ls = await L.leadsSnapshot(sandboxRoot);
       const open = [...ls.state.leads.values()].filter((l) => !l.closed && l.answers.includes(q!.section));
       if (open.length) return fail(`a route is still open on ${q!.id}: ${open.map((l) => `${l.id} (${l.holder ? `held by ${l.holder}` : "unheld"})`).join(", ")}; it is accepted once its leads are closed`);
-      return { append: [{ ...base, ev: "accept", q: q!.id, rev: q!.rev, act: p.act, decided: { rev: q!.rev } }], result: { ok: true, q: q!.id, rev: q!.rev } };
+      // The acceptance comes after the negative bar, never instead of it: a
+      // negative nobody else has reviewed is reviewed first.
+      const vc = await viewContext(sandboxRoot);
+      const v = viewQuestion(q!, vc);
+      if (v.answer?.negative && !v.answer.negative.reviewed && q!.materiality === "material") {
+        return fail(`${q!.id}'s answer E-${v.answer.seq} is a negative (unreviewed): ${NB.resultWords(v.answer.result)}, and no other seat has reviewed it. An acceptance takes the examination's limits as they stand after review; it never stands in for one. It is accepted once a seat that recorded neither the answer nor its coverage record has attested it with review`);
+      }
+      return {
+        append: [{ ...base, ev: "accept", q: q!.id, rev: q!.rev, act: p.act, decided: { rev: q!.rev, outcome: "examination_limited", ...(v.answer ? { answer: `E-${v.answer.seq}`, ...(v.answer.result ? { result: v.answer.result } : {}) } : { answer: null }) } }],
+        result: { ok: true, q: q!.id, rev: q!.rev },
+      };
     }
   }
 }
@@ -1732,6 +1760,59 @@ export async function electQuestionOffer(ctx: P.SwarmContext, now = Date.now(), 
     if (taken) return q;
   }
   return null;
+}
+
+// --- dispositions ------------------------------------------------------------------------------
+
+/**
+ * A question's evidential disposition as the ledger and the register give
+ * it now: the standing answer and its result, for a negative whether
+ * another seat reviewed it and the coverage it rests on, whether the answer
+ * predates the last amendment, and the operator's acceptance when it
+ * stands. Null while there is neither an answer nor an acceptance.
+ */
+export function dispositionOf(v: QuestionView): Record<string, unknown> | null {
+  if (!v.answer && !v.accepted?.stands) return null;
+  return {
+    answer: v.answer ? `E-${v.answer.seq}` : null,
+    result: v.answer?.result ?? null,
+    ...(v.answer?.negative ? { reviewed: v.answer.negative.reviewed, reviewed_by: v.answer.negative.by, coverage: v.answer.negative.coverage.map((c) => `E-${c.seq} ${c.coverage ?? "not computed"}`) } : {}),
+    stale: v.answer?.stale ?? false,
+    ...(v.accepted?.stands ? { accepted: v.accepted.as } : {}),
+  };
+}
+
+const sameDisposition = (a: Record<string, unknown> | null, b: Record<string, unknown> | null): boolean => {
+  const strip = (x: Record<string, unknown> | null) => (x ? JSON.stringify(P.canonicalValue(Object.fromEntries(Object.entries(x).filter(([k]) => k !== "at" && k !== "by")))) : "null");
+  return strip(a) === strip(b);
+};
+
+/**
+ * Put each question's disposition on the chain when it changed: a `dispose`
+ * event, the harness's, written after an answer, a review or an acceptance
+ * changes how a question stands, so the register carries the history of
+ * its dispositions and custody seals it. Run on every header, never by the
+ * finish line (which reads the state and does not move it).
+ */
+export async function syncDispositions(sandboxRoot: string): Promise<string[]> {
+  const outer = await viewContext(sandboxRoot);
+  const due = questionViews(outer).filter((v) => !sameDisposition(dispositionOf(v), outer.questions.state.questions.get(v.id)?.disposition ?? null));
+  if (!due.length) return [];
+  return L.withRegisters(sandboxRoot, async (held) => {
+    const ctx = await viewContext(sandboxRoot);
+    const drafts: QuestionDraft[] = [];
+    for (const v of questionViews(ctx)) {
+      const now = dispositionOf(v);
+      const had = ctx.questions.state.questions.get(v.id)?.disposition ?? null;
+      if (sameDisposition(now, had)) continue;
+      drafts.push({ by: "system", ev: "dispose", q: v.id, rev: v.rev, decided: now ?? { answer: null, result: null, withdrawn_answer: true } });
+    }
+    if (!drafts.length) return [];
+    if (!ctx.questions.seeded) await ensureSeededHeld(sandboxRoot, held);
+    await appendQuestionEvents(sandboxRoot, drafts, held);
+    await writeQuestionsMd(sandboxRoot).catch(() => undefined);
+    return drafts.map((d) => d.q!);
+  }).catch(() => []);
 }
 
 // --- clarification ------------------------------------------------------------------------------
@@ -2061,7 +2142,7 @@ export function renderQuestionsMd(ctx: ViewContext): string {
       if (v.attachments.length) lines.push(`- Attachments: ${v.attachments.join(", ")}`);
       if (v.leading_forms.length) lines.push(`- Leading form: ${v.leading_forms.map((f) => `"${f}"`).join(", ")} (flagged for the critic)`);
       if (v.leads.length) lines.push(`- Leads: ${v.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}${l.disposition ? ` ${l.disposition}` : ""}`).join(", ")}`);
-      lines.push(`- Answer: ${v.answer ? `E-${v.answer.seq}${v.answer.inconclusive ? " (inconclusive)" : ""}${v.answer.result ? ` (${v.answer.result})` : ""}${v.answer.stale ? `; recorded before revision ${v.rev}: stale` : ""}` : "none yet"}`);
+      lines.push(`- Answer: ${v.answer ? `E-${v.answer.seq}${v.answer.inconclusive ? " (inconclusive)" : ""}${v.answer.result ? ` (${NB.resultWords(v.answer.result)})` : ""}${v.answer.negative ? (v.answer.negative.reviewed ? `; negative, reviewed by ${v.answer.negative.by.join(", ")}` : "; negative (unreviewed)") : ""}${v.answer.negative?.coverage.length ? `; coverage ${v.answer.negative.coverage.map((c) => `E-${c.seq} ${c.coverage ?? "not computed"}`).join(", ")}` : ""}${v.answer.stale ? `; recorded before revision ${v.rev}: stale` : ""}` : "none yet"}`);
       for (const c of v.clarifications) lines.push(`- Clarification ${c.id} (${c.by}, ${c.at}): ${c.what}${c.answer ? ` — answered by ${originWords(c.answer.origin)} at ${c.answer.at}: ${c.answer.text}` : " — not answered yet"}`);
       for (const o of v.offers) lines.push(`- Offered to ${o.to} at ${o.at}${o.first ? ` first, until ${o.until}` : ""} (${o.why})`);
       if (v.accepted) lines.push(`- Accepted as ${v.accepted.as} by ${originWords(v.accepted.origin)} at ${v.accepted.at} for revision ${v.accepted.rev}${v.accepted.stands ? "" : " (no longer stands: amended since)"}: ${v.accepted.why}`);

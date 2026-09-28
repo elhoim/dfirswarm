@@ -130,6 +130,12 @@ export async function operatorAct(sandbox: string, ev: Q.ActKind, input: Q.ActIn
   if (ev === "clarify_answer" && r.q && r.clarify) out.post = await Q.publishClarification(sandbox, r.q, r.clarify).catch(() => null);
   const delivered = await Q.deliverPending(sandbox).catch((err: Error) => ({ error: err.message }));
   out.delivered = delivered;
+  // An acceptance changes how the question stands: its disposition goes on the chain now.
+  if (ev === "accept") {
+    const disposed = await Q.syncDispositions(sandbox).catch(() => [] as string[]);
+    if (disposed.length) out.disposed = disposed;
+    out.outcome = "an acceptance makes the run examination-limited: the report says what was accepted, by whom, for which revision";
+  }
   return out;
 }
 

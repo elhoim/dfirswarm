@@ -52,6 +52,7 @@ import {
   ledgerMethods,
   limitationCites,
   listForgedTools,
+  negativeReview,
   openContradictions,
   readAttestations,
   readDisputes,
@@ -78,6 +79,8 @@ import {
   type NameRecord,
 } from "../extensions/protocol.ts";
 import { escapeHtml, markdownToHtml } from "../ui/src/lib/markdown.ts";
+import { answerResult, resultWords, reviewWords as negativeReviewWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
+import { sectionBars } from "./check-answers.ts";
 import { leadsSnapshot, rankedLeads, type LeadView } from "../extensions/leads.ts";
 
 // ---------------------------------------------------------------------------
@@ -370,6 +373,8 @@ type Run = {
   derivedMethods: Map<number, LedgerMethod[]>;
   /** The lead register (extensions/leads.ts): every lead as it stands, and whether its chain holds; null when the run opened none. */
   leads: { views: LeadView[]; chain: { ok: boolean; broken_at: number | null; reason: string | null }; events: number } | null;
+  /** What the negative bar holds each question to: material, and whether it asks whether something exists (the registers'). */
+  bar: (id: string) => { material: boolean; existence: boolean };
 };
 
 async function readJson<T>(file: string): Promise<T | null> {
@@ -487,7 +492,8 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   const asked = [...questions.values()].filter((q) => q.fromGoal);
   const sections = [...(asked.length ? asked : [...questions.values()]).map((q) => `question:${q.id}`), "summary", "narrative"];
   const problems = answerProblems(entries, disputes, unqualified);
-  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified }) : null;
+  const bar = await sectionBars(sandbox).catch(() => (() => ({ material: true, existence: false })) as (id: string) => { material: boolean; existence: boolean });
+  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar }) : null;
 
   const text = async (rel: string) => (await readFile(join(sandbox, rel), "utf8").catch(() => ""));
   const ledgerChain = verifyLedgerChain(await text("ledger/entries.jsonl"));
@@ -540,6 +546,7 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
     problems,
     failed,
     derivedMethods,
+    bar,
     leads: await (async () => {
       const snap = await leadsSnapshot(sandbox).catch(() => null);
       return snap && snap.state.events.length ? { views: rankedLeads(snap), chain: snap.state.chain, events: snap.state.events.length } : null;
@@ -804,11 +811,11 @@ function stateOf(e: LedgerEntry, run: Run, memo: Map<number, EntryState>): Entry
 }
 
 /** A count of entries of a kind, in words: "2 searches that found nothing". */
-const KIND_PLURAL: Record<string, string> = { event: "events", ioc: "indicators", finding: "findings", absence: "searches that found nothing", hypothesis: "hypotheses", limitation: "limitations", answer: "answers" };
+const KIND_PLURAL: Record<string, string> = { event: "events", ioc: "indicators", finding: "findings", absence: "searches that found nothing", hypothesis: "hypotheses", limitation: "limitations", answer: "answers", coverage: "coverage records" };
 const kindCount = (kind: string, n: number) => `${n} ${n === 1 ? (kind === "absence" ? "search that found nothing" : (KIND_LABEL[kind] ?? kind)) : (KIND_PLURAL[kind] ?? `${kind}s`)}`;
 
-const KIND_LABEL: Record<string, string> = { event: "event", ioc: "indicator", finding: "finding", absence: "searched, not found", hypothesis: "hypothesis", limitation: "limitation", answer: "answer" };
-const KIND_TONE: Record<string, Tone> = { ioc: "saffron", finding: "kelp", event: "slate", absence: "slate", hypothesis: "none", limitation: "brick", answer: "moss" };
+const KIND_LABEL: Record<string, string> = { event: "event", ioc: "indicator", finding: "finding", absence: "searched, not found", hypothesis: "hypothesis", limitation: "limitation", answer: "answer", coverage: "coverage record" };
+const KIND_TONE: Record<string, Tone> = { ioc: "saffron", finding: "kelp", event: "slate", absence: "slate", hypothesis: "none", limitation: "brick", answer: "moss", coverage: "slate" };
 
 const interpretationMissing = (e: LedgerEntry) => e.kind === "finding" && !e.indicates && (e.v ?? 1) < 4;
 
@@ -1025,13 +1032,23 @@ function questionStatus_(q: Question, run: Run, memo: Map<number, EntryState>): 
   const a = standingAnswer(run, `question:${q.id}`);
   if (!a) return { status: run.era === "predates" ? { text: "no structured answer", tone: "none" } : { text: "not answered", tone: "brick" }, answer: null, chips: [] };
   const s = stateOf(a, run, memo);
-  const status: Chip = a.inconclusive
-    ? { text: "inconclusive", tone: "saffron" }
-    : s.problems.length
-      ? { text: "no longer stands on its support", tone: "brick" }
-      : s.disputes.length
-        ? { text: "disputed", tone: "brick" }
-        : { text: "answered", tone: "moss" };
+  const result = answerResult(a);
+  const negative = result && NEGATIVE_RESULTS.has(result) ? negativeReview(a, run.entries, run.attestations) : null;
+  const status: Chip = s.problems.length
+    ? { text: "no longer stands on its support", tone: "brick" }
+    : s.disputes.length
+      ? { text: "disputed", tone: "brick" }
+      : negative && !negative.reviewed && run.bar(q.id).material
+        ? { text: "negative (unreviewed)", tone: "brick" }
+        : a.inconclusive || result === "not_determinable"
+          ? { text: result ? "not determinable" : "inconclusive", tone: "saffron" }
+          : result === "bounded_negative"
+            ? { text: "no evidence found (bounded negative)", tone: "saffron" }
+            : result === "partial" || result === "out_of_scope"
+              ? { text: resultWords(result), tone: "saffron" }
+              : result === "premise_not_supported"
+                ? { text: "premise not supported", tone: "moss" }
+                : { text: "answered", tone: "moss" };
   return { status, answer: a, chips: chipsOf(a, s).filter((c) => c.text !== "answer" && c.text !== "opinion" && c.text !== status.text) };
 }
 
@@ -1521,6 +1538,7 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
   const body: Block[] = [];
   const history = answerHistory(run, `question:${q.id}`).filter((x) => x.seq !== a.seq);
   body.push({ k: "voice", voice: "opinion", label: a.inconclusive ? "Answer (inconclusive)" : "Answer", s: [a.value], chips: chipsOf(a, s).filter((c) => c.text !== "answer") });
+  body.push(...resultBlocks(a, q, run));
   body.push({
     k: "p",
     s: [
@@ -1533,6 +1551,57 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
   });
   body.push(...answerSteps(a, s, run, memo));
   return { k: "box", cls: "answer", id: questionAnchor(q.id), level: 3, title, chips: [questionStatus_(q, run, memo).status], body };
+}
+
+/**
+ * What an answer's result says, and for a negative what it rests on (the
+ * negative bar): its coverage records, each as the hub found it, the
+ * planned routes nothing examined, and who reviewed it. A bounded negative
+ * reads "No evidence of <the proposition> was found in <the objects and the
+ * time range>"; "it did not happen" is kept for an answer that earned it
+ * (an existence question, a complete coverage record, a trace expected).
+ */
+function resultBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
+  const result = answerResult(a);
+  if (!result) return [{ k: "note", s: ["The answer states no result: it was recorded before results were, and reads as it always did."] }];
+  const out: Block[] = [];
+  const cov = (a.support ?? []).map((x) => run.bySeq.get(x.seq)).filter((e): e is LedgerEntry => e?.kind === "coverage" && !run.replaced.has(e.seq));
+  const scope = (c: LedgerEntry) => `${(c.refs ?? []).join(", ")}${c.time_range ? `, ${c.time_range}` : ""}`;
+  const earned = a.asserts_absence === true && run.bar(q.id).existence && cov.some((c) => c.coverage === "complete" && c.detection_opportunity?.trace_expected === "yes");
+  if (result === "bounded_negative") {
+    out.push({
+      k: "p",
+      s: earned
+        ? [`Result: it did not happen, as the answer says. The bar for saying so is met: the question asks whether it exists, `, ...cov.filter((c) => c.coverage === "complete").flatMap((c, i): Span[] => [i ? ", " : "", { e: c.seq }]), " is complete, and says the event would have left a trace there."]
+        : cov.length
+          ? [`Result: no evidence that ${cov.map((c) => c.value.replace(/\.$/, "").replace(/^(A|An|The) /, (x) => x.toLowerCase())).join("; ")} was found in ${cov.map(scope).join("; ")}. This is a bounded negative: it says what was not found where, not that it did not happen.`]
+          : ["Result: a bounded negative (no evidence found), with no coverage record naming its scope."],
+    });
+  } else out.push({ k: "p", s: [`Result: ${resultWords(result)}.`] });
+  for (const c of cov) {
+    out.push({
+      k: "rows",
+      rows: [
+        { label: "Coverage record", s: [{ e: c.seq }, `: ${c.value}`] },
+        { label: "Objects and time", s: [scope(c)] },
+        { label: "Method", s: [`${c.search_method ?? ""} (${c.settings ?? ""})`] },
+        { label: "Covered, skipped, failed", s: [`${c.coverage_actual ?? ""}; skipped: ${c.skipped ?? ""}; failures: ${c.failures ?? ""}`] },
+        { label: "Detection opportunity", s: [`trace expected ${c.detection_opportunity?.trace_expected ?? "?"}: ${c.detection_opportunity?.why ?? ""}`] },
+        { label: "Alternatives open", s: [c.alternatives_open ?? ""] },
+        { label: "Computed by the hub", s: [`coverage ${c.coverage ?? "not computed"}${c.coverage_detail?.why.length ? `: ${c.coverage_detail.why.join("; ")}` : ""}${c.coverage_detail?.jobs.length ? ` (jobs ${c.coverage_detail.jobs.join(", ")})` : ""}`] },
+        ...(c.not_examined?.length ? [{ label: "Planned, not examined", s: [c.not_examined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")] }] : []),
+      ],
+    });
+  }
+  if (NEGATIVE_RESULTS.has(result)) {
+    const r = negativeReview(a, run.entries, run.attestations);
+    out.push(
+      r.reviewed
+        ? { k: "p", s: [`Reviewed by ${r.by.join(", ")}: ${r.reviews.map((x) => negativeReviewWords(x.review)).join(" / ")}.`] }
+        : { k: "note", s: [run.bar(q.id).material ? "Negative (unreviewed): no seat other than its authors has reviewed it; the finish line held the run for it." : "Not reviewed by another seat (a background question: the finish line does not wait for it)."] },
+    );
+  }
+  return out;
 }
 
 /** The fixed block after the answer: eight steps, always in this order, each saying so when it has nothing. */
