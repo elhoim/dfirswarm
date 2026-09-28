@@ -36,7 +36,7 @@ import { createHash } from "node:crypto";
 import { constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { Journal, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, traceLineBytes, traceOrigin, type JournalLine, type TraceOrigin } from "./evidence-store.ts";
+import { Journal, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, traceLineBytes, traceOrigin, type JournalLine, type Manifest, type TraceOrigin } from "./evidence-store.ts";
 import { chooseImage, readImageRecords, type ImageChoice, type ImageRecord } from "./image-choice.ts";
 import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolveScope, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
 import { CANARY_NAME, OBSERVE_GUEST, observedRun, observeWanted, readObservation } from "./job-observe.ts";
@@ -458,6 +458,7 @@ export class JobService {
   async start(): Promise<void> {
     this.journal = await Journal.open(this.S);
     this.replay(this.journal.lines);
+    this.indexOutputsInBackground();
     // The images jobs may run in, on the record before any job does: custody
     // holds each job's image to them.
     if (this.o.images && Object.keys(this.o.images).length) {
@@ -731,7 +732,7 @@ export class JobService {
    * Accept a job, durably, or refuse it with the reason. The answer comes
    * once the acceptance is on disk; the work comes after.
    */
-  async submit(agent: string, raw: Partial<JobSpec>, o: { watch?: number; seal?: SealSpec } = {}): Promise<{ ok: true; job: JobRecord; similar?: Similar[] } | { ok: false; reason: string }> {
+  async submit(agent: string, raw: Partial<JobSpec>, o: { watch?: number; seal?: SealSpec } = {}): Promise<{ ok: true; job: JobRecord; similar?: Similar[]; similar_recorded?: boolean } | { ok: false; reason: string }> {
     if (this.stopping) return { ok: false, reason: "the run is stopping; no new jobs" };
     // A seal comes only from sealCited, never in what an agent sends.
     const { seal: _seal, scope: _scope, ...asked } = raw;
@@ -763,8 +764,6 @@ export class JobService {
     await this.journal.append({ type: "job_accepted", job: id, spec, requester, ...(key ? { dedup_key: key } : {}), ...(reuse ? { reuse } : {}) });
     maybeCrash("job:accepted");
     const job: JobRecord = { id, attempt: 1, spec, requester, state: "accepted", accepted_at: new Date().toISOString(), ...(key ? { dedup_key: key } : {}), ...(reuse ? { reuse } : {}) };
-    const similar = reuse ? await this.similarTo(job, reuse).catch(() => []) : [];
-    if (similar.length) await this.journal.append({ type: "job_similar", job: id, by: requester, ...(spec.independent ? { independent: true } : {}), similar });
     this.jobs.set(id, job);
     // The agent waits for it in job_run from this moment: a job that is done
     // before its first status call is answered there, not posted as well.
@@ -772,7 +771,16 @@ export class JobService {
     await this.project(job);
     this.queue.push(id);
     void this.pump();
-    return { ok: true, job, ...(similar.length ? { similar } : {}) };
+    // The hint, once the job is registered and queued: it never holds the job up.
+    const similar = reuse ? await this.similarTo(job, reuse).catch(() => []) : [];
+    let recorded = true;
+    if (similar.length) {
+      await this.journal.append({ type: "job_similar", job: id, by: requester, ...(spec.independent ? { independent: true } : {}), similar }).catch((err) => {
+        recorded = false;
+        this.log(`${id}: the job_similar line was not written: ${(err as Error).message}`);
+      });
+    }
+    return { ok: true, job, ...(similar.length ? { similar, similar_recorded: recorded } : {}) };
   }
 
   /**
@@ -1485,7 +1493,10 @@ export class JobService {
    */
   private async commit(job: JobRecord, r: { status: NonNullable<JobRecord["status"]>; exit: number | null; reason?: string }, where = "out"): Promise<void> {
     const recorded = await this.exclusive(() => this.sealAndRecord(job, r, where));
-    if (recorded) await this.afterCommit(job);
+    if (!recorded) return;
+    // The hint is written outside the store's one-at-a-time section: it never holds a commit up.
+    if (job.same_as?.length) await this.writeSameAs(job);
+    await this.afterCommit(job);
   }
 
   private async sealAndRecord(job: JobRecord, r: { status: NonNullable<JobRecord["status"]>; exit: number | null; reason?: string }, where: string): Promise<boolean> {
@@ -1494,7 +1505,7 @@ export class JobService {
     const jobDir = join(P.jobs, job.id);
     const dest = join(jobDir, where);
     await mkdir(jobDir, { recursive: true });
-    let sealed: { manifest: { totals: { files: number; bytes: number }; rejected: unknown[] }; manifestSha256: string };
+    let sealed: { manifest: Manifest; manifestSha256: string };
     const manifestPath = join(jobDir, where === "out" ? "manifest.json" : `${where}.manifest.json`);
     // Where a crash stopped decides the step: moved but not sealed is sealed
     // in place; sealed but not recorded is read back; not moved is sealed now.
@@ -1524,39 +1535,69 @@ export class JobService {
     await this.journal.append({ type: "job_committed", job: job.id, attempt: job.attempt, status: r.status, exit: r.exit, ...(r.reason ? { reason: r.reason } : {}), outputs, logs, ...(job.image_digest ? { image_digest: job.image_digest } : {}) });
     await rm(st.base, { recursive: true, force: true }).catch(() => undefined);
     if (where !== "out") return false;
-    // Before the record says committed, so whoever reads the job then reads its hint too. A hint never holds a commit up: what it could not say is logged.
-    await this.sameAs(job, manifestPath).catch((err) => this.log(`${job.id}: same_as not computed: ${(err as Error).message}`));
+    // In memory only, before the record says committed (whoever reads the
+    // job then reads its hint too): no read, no write, no wait here.
+    this.sameAsAtCommit(job, sealed.manifest.files ?? []);
     Object.assign(job, { state: "committed", status: r.status, outputs });
     await this.project(job);
     maybeCrash("job:committed");
     return true;
   }
 
-  /** Every committed job's output by content, the first job to write given bytes keeping them (built once, from the manifests). */
+  /**
+   * Every committed job's output by content, the first job to write given
+   * bytes keeping them. Built once from the manifests, off the commit path
+   * (indexOutputsInBackground); null until it is.
+   */
   private outputIndex: Map<string, { job: string; file: string }> | null = null;
+  /** Jobs committed while the index was being built, in commit order: their same_as is said once it is. */
+  private sameAsPending: Array<{ job: JobRecord; files: Manifest["files"] }> = [];
+
+  /**
+   * The index of every earlier job's output, read from the manifests of the
+   * jobs the journal says were committed, one at a time, in the background:
+   * a slow or unreadable manifest delays only the hints of the jobs committed
+   * meanwhile, never a commit. Those are then answered in order.
+   */
+  private indexOutputsInBackground(): void {
+    const ids = this.journal.of("job_committed").filter((l) => (l.outputs as { path?: string } | undefined)?.path === `store/jobs/${String(l.job ?? "")}/out`).map((l) => String(l.job));
+    void (async () => {
+      const index = new Map<string, { job: string; file: string }>();
+      for (const id of ids) {
+        const m = await readManifest(join(storePaths(this.S).jobs, id, "manifest.json")).catch(() => null);
+        if (m) indexOutputs(index, id, m.manifest.files);
+      }
+      this.outputIndex = index;
+      const pending = this.sameAsPending.splice(0);
+      for (const p of pending) {
+        this.sameAsAtCommit(p.job, p.files);
+        if (p.job.same_as?.length) {
+          await this.writeSameAs(p.job);
+          await this.project(p.job).catch(() => undefined);
+        }
+      }
+    })().catch((err) => this.log(`the output index for same_as was not built: ${(err as Error).message}`));
+  }
 
   /**
    * Which of a committed job's files are an earlier job's output byte for
-   * byte (docs/adr/0017): on the job's record and a job_same_as line. A hint:
-   * the files are sealed and cited as the job's own either way.
+   * byte (docs/adr/0017), set on its record from the index in memory, or
+   * left for the index to answer when it is still being built. A hint: the
+   * files are sealed and cited as the job's own either way.
    */
-  private async sameAs(job: JobRecord, manifestPath: string): Promise<void> {
-    const m = await readManifest(manifestPath);
-    if (!m) return;
+  private sameAsAtCommit(job: JobRecord, files: Manifest["files"]): void {
     if (!this.outputIndex) {
-      this.outputIndex = new Map();
-      for (const l of this.journal.of("job_committed")) {
-        const id = String(l.job ?? "");
-        if (id === job.id || (l.outputs as { path?: string } | undefined)?.path !== `store/jobs/${id}/out`) continue;
-        const earlier = await readManifest(join(storePaths(this.S).jobs, id, "manifest.json"));
-        if (earlier) indexOutputs(this.outputIndex, id, earlier.manifest.files);
-      }
+      this.sameAsPending.push({ job, files });
+      return;
     }
-    const same = sameAsOf(job.id, m.manifest.files, this.outputIndex);
-    indexOutputs(this.outputIndex, job.id, m.manifest.files);
-    if (!same.length) return;
-    job.same_as = same;
-    await this.journal.append({ type: "job_same_as", job: job.id, same_as: same });
+    const same = sameAsOf(job.id, files, this.outputIndex);
+    indexOutputs(this.outputIndex, job.id, files);
+    if (same.length) job.same_as = same;
+  }
+
+  /** The job_same_as line; a failure to write it is logged, never raised. */
+  private async writeSameAs(job: JobRecord): Promise<void> {
+    await this.journal.append({ type: "job_same_as", job: job.id, same_as: job.same_as ?? [] }).catch((err) => this.log(`${job.id}: the job_same_as line was not written: ${(err as Error).message}`));
   }
 
   /**

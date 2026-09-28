@@ -1282,10 +1282,35 @@ export type StoreJobRow = {
   generation_status: string | null;
   notified: Array<{ to: string; how: string; at: string }>;
   deduplicated: number;
+  /** Asked as an intended reproduction of another seat's work. */
+  independent: boolean;
+  /** Its job_similar line's entries, whole: other seats' jobs doing the same over the same objects when it was accepted. */
+  similar: StoreSimilar[];
+  /** Its job_same_as line's entries, whole: its files that are an earlier job's output byte for byte. */
+  same_as: StoreSameAs[];
   cancel_requested: string | null;
   parent: string | null;
   note: string | null;
 };
+
+/** A similar job as the journal names it (scripts/job-reuse.ts Similar). */
+export type StoreSimilar = {
+  job: string;
+  seat: string;
+  name?: string;
+  state: string;
+  status?: string;
+  outputs?: { files: number; bytes: number; path: string };
+  lead: string | null;
+  objects: "same" | "overlap";
+  shared: number;
+  match: string;
+  op: string | null;
+  independent?: boolean;
+};
+
+/** A file the same as an earlier job's output (scripts/job-reuse.ts SameAs). */
+export type StoreSameAs = { path: string; sha256: string; bytes: number; job: string; file: string };
 
 /** GET /api/swarms/:id/jobs: a page of the run's tool jobs, totals over all of them, the run's own journal lines and custody's store line. */
 export type StoreJobsView = {

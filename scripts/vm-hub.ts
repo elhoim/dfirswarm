@@ -853,7 +853,7 @@ export function boardTable(hub: {
       const r = await svc.submit(who, spec, { watch: typeof raw.wait === "number" ? raw.wait : 0 });
       if (!r.ok) return r;
       const attached = r.job.requester.agent === who ? await L.attachJob(S, who, r.job.id, raw.lead).catch(() => null) : null;
-      return { ok: true, job: await jobView(S, r.job), ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}), ...similarView(r.job.id, r.similar ?? [], r.job.spec.independent === true) };
+      return { ok: true, job: await jobView(S, r.job), ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}), ...similarView(r.job.id, r.similar ?? [], r.job.spec.independent === true, r.similar_recorded !== false) };
     },
     jobStatus: async (who, a) => {
       const svc = hub.jobs?.();

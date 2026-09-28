@@ -180,7 +180,7 @@ function runA(): string {
   write(S, "store/jobs/j000002/manifest.json", JSON.stringify({ files: [{ path: "a.txt", bytes: 10 }, { path: "empty", bytes: 0 }] }));
   write(S, "store/jobs/j000005/manifest.json", JSON.stringify({ files: [{ path: "x", bytes: 5 }, { path: "y", bytes: 7 }] }));
   // The network: one granted request used once, two denied (one opening an operator item), a revoked and an expired grant, a refused use.
-  const grant = (id: string, request: string, extra: Record<string, unknown>) => ({ at: T("10:03:00"), by: "policy", ev: "grant", grant: id, request, terms: { request, type: "fetch", principal: "seat:a2", lead: "L-2", adapter: "rdap", method: "GET", url: "https://rdap.org/x", scheme: "https", host: "rdap.org", port: 443, path: "/x", redirects: null, response_fields: null, max_requests: 1, max_bytes: 1000, ttl_seconds: 300, expires_at: T("23:59:00"), ...extra } });
+  const grant = (id: string, request: string, extra: Record<string, unknown>) => ({ at: T("10:03:00"), by: "policy", ev: "grant", grant: id, request, terms: { request, type: "fetch", principal: "seat:a2", lead: "L-2", adapter: "rdap", method: "GET", url: "https://rdap.org/x", scheme: "https", host: "rdap.org", port: 443, path: "/x", redirects: null, response_fields: null, max_requests: 1, max_bytes: 1000, ttl_seconds: 300, expires_at: null, ...extra } });
   write(S, "network/grants.jsonl", chained([
     { at: T("10:02:50"), by: "a2", ev: "request", request: "NR-1", principal: "seat:a2", lead: "L-2", digest: "d1", type: "fetch", host: "rdap.org", input: {} },
     { at: T("10:02:51"), by: "policy", ev: "decide", request: "NR-1", decision: "granted", reasons: [], grant: "N-1" },
@@ -216,15 +216,15 @@ test("every metric of a run, from its registers", async () => {
   const m = await measureRun(S);
   assert.deepEqual(m.questions.in_scope.map((q) => q.id), ["Q-1", "Q-2", "Q-3", "Q-4"], "the proposed Q-5 is not in scope");
   // Negatives and coverage.
-  assert.equal(m.negatives.closes, 2);
+  assert.equal(m.negatives.quick.closes, 2);
   assert.deepEqual(m.negatives.quick.items.map((x) => [x.lead, x.held_seconds, x.jobs, x.objects, x.questions]), [["L-1", 60, 1, 1, ["1"]]]);
   assert.equal(m.negatives.answers, 3, "Q-1, Q-2 and Q-4 stand negative; Q-3 was established");
   assert.equal(m.negatives.reviewed, 1, "Q-1's rests on a coverage record a3 reviewed");
   assert.deepEqual(m.negatives.unreviewed_material, [{ section: "2", id: "Q-2", answer: "E-11", result: "not_determinable" }]);
   assert.deepEqual(m.negatives.unreviewed_background, [{ section: "4", id: "Q-4", answer: "E-8", result: "not_determinable" }]);
-  assert.deepEqual([m.coverage.records, m.coverage.reviewed, m.coverage.complete, m.coverage.partial, m.coverage.not_computed], [2, 1, 1, 1, 0]);
-  assert.deepEqual(m.coverage.stale.map((x) => x.record), ["E-6"], "E-6's result E-4 was superseded");
-  assert.deepEqual(m.coverage.negatives_on_partial.map((x) => [x.section, x.answer]), [["2", "E-11"]]);
+  assert.deepEqual([m.coverage.records, m.coverage.reviewed, m.coverage.complete, m.coverage.partial, m.coverage.not_computed], [2, 1, 1, 0, 0], "the stale partial record is counted as stale, not by its field");
+  assert.deepEqual(m.coverage.stale, [{ record: "E-6", field: "partial", results: [{ result: "E-4", code: "superseded", superseded_by: "E-9" }] }], "E-6's result E-4 was superseded");
+  assert.deepEqual(m.coverage.negatives_on_partial.map((x) => [x.section, x.answer, x.coverage]), [["2", "E-11", ["E-6 stale"]]]);
   assert.deepEqual(m.coverage.negatives_without_coverage, [{ section: "4", id: "Q-4", answer: "E-8" }]);
   // Offers.
   assert.equal(m.offers.recorded, true);
@@ -232,7 +232,7 @@ test("every metric of a run, from its registers", async () => {
   assert.deepEqual({ made, accepted, declined, taken_by_another, lapsed, open }, { made: 5, accepted: 1, declined: 1, taken_by_another: 2, lapsed: 1, open: 0 });
   assert.equal(m.offers.leads.by_reason.parked.lapsed, 1);
   assert.deepEqual(m.offers.questions, { made: 3, accepted: 1, declined: 1, not_taken_up: 1 });
-  assert.deepEqual(m.offers.wakes_before_offers, { made: 2, taken_by_woken: 1, taken_by_another: 1, not_taken: 0 });
+  assert.deepEqual(m.offers.wakes_before_offers, { recorded: true, made: 2, taken_by_woken: 1, taken_by_another: 1, not_taken: 0 });
   // done calls.
   assert.deepEqual([m.done.calls, m.done.accepted, m.done.created_sentinel, m.done.refused, m.done.hub_refused, m.done.not_yours], [8, 1, 1, 2, 4, 1]);
   assert.deepEqual(m.done.refused_by, { "finish line not met": 1, "late posts": 1 });
@@ -294,13 +294,13 @@ test("a run from before offers, readiness and reuse hints says what it cannot co
   const m = await measureRun(S);
   assert.equal(m.questions.source, "ledger");
   assert.equal(m.offers.recorded, false);
-  assert.deepEqual(m.offers.wakes_before_offers, { made: 1, taken_by_woken: 0, taken_by_another: 0, not_taken: 1 });
+  assert.deepEqual(m.offers.wakes_before_offers, { recorded: true, made: 1, taken_by_woken: 0, taken_by_another: 0, not_taken: 1 });
   assert.equal(m.duplicates.recorded, false);
   assert.equal(m.network.recorded, false);
   assert.deepEqual([m.tail.ready_source, m.tail.minutes_from_ready, m.tail.minutes_from_first_answers], ["first answers", 10, 10]);
   assert.equal(m.cost.source, null);
   for (const said of [/before offers/, /before them/, /no finish register/, /no per-call token record/]) assert.ok(m.notes.some((x) => said.test(x)), `${said}: ${m.notes.join(" | ")}`);
-  assert.match(metricsText(m), /Offers \(leads\)\s+not recorded/);
+  assert.match(metricsText(m), /Offers \(leads\)\s+not recorded \(no offer events/);
 });
 
 test("two runs of the same goal compared: agreement, a negative the other established, and a shared negative on partial coverage", async () => {
@@ -320,13 +320,14 @@ test("two runs of the same goal compared: agreement, a negative the other establ
   assert.equal(c.same_questions, true);
   const row = (id: string) => c.questions.find((q) => q.id === id)!;
   assert.deepEqual([row("Q-1").a.result, row("Q-1").b.result, row("Q-1").verdict], ["bounded_negative", "established", "disagree"]);
-  assert.ok(row("Q-1").flags.some((f) => /a negative in A .* is established in the other/.test(f)), row("Q-1").flags.join(" | "));
+  assert.ok(row("Q-1").flags.some((f) => /a negative in A \(bounded_negative\) is asserted in B \(established\)/.test(f)), row("Q-1").flags.join(" | "));
   assert.equal(row("Q-2").verdict, "class_differs", "not_determinable against bounded_negative: both negative");
+  assert.deepEqual([row("Q-2").a.coverage, row("Q-2").b.coverage], [["stale"], ["partial"]]);
   assert.ok(row("Q-2").flags.some((f) => /shared blind spot/.test(f)), row("Q-2").flags.join(" | "));
   assert.ok(row("Q-2").flags.some((f) => /not reviewed by another seat in A and B/.test(f)));
   assert.equal(row("Q-3").verdict, "agree");
   assert.equal(row("Q-4").verdict, "only_a");
-  assert.deepEqual(c.summary, { questions: 4, agree: 1, class_differs: 1, disagree: 1, one_sided: 1, neither: 0, negative_disagreements: 1, shared_partial_negatives: 1 });
+  assert.deepEqual(c.summary, { questions: 4, agree: 1, class_differs: 1, disagree: 1, unknown: 0, one_sided: 1, neither: 0, negative_disagreements: 1, shared_partial_negatives: 1 });
   const text = compareText(c);
   assert.match(text, /Agreement is not confirmation/);
   assert.ok(!/entry \d+/.test(text), "no answer's value is printed");
@@ -334,7 +335,7 @@ test("two runs of the same goal compared: agreement, a negative the other establ
   write(B, "questions/questions.jsonl", "");
   const d = await compareRuns(A, B);
   assert.equal(d.same_questions, false);
-  assert.ok(d.notes.some((x) => /questions differ/.test(x)));
+  assert.ok(d.notes.some((x) => /questions in scope differ/.test(x)));
 });
 
 test("the command: a table or JSON for one run, --compare for two, and a usage error otherwise", () => {
