@@ -8,6 +8,17 @@ All notable changes to this project. The format follows
 
 ### Fixed: what the first pilot on the new flow showed (c10, run s6be12f)
 
+- **B9 holds the sensitive values, not every word of a sensitive entry.**
+  The operator's analyst question "Is there evidence that any activity on
+  this system ran automatically (…startup entries)…" was refused because
+  "activity." and "entries." ended sentences of sensitive entries, and the
+  identifier rule took a word with its full stop for an identifier. B9 now
+  holds each sensitive entry's recorded value whole, as a phrase, and from
+  its text only the words that are values by their shape (a digit, a
+  symbol, a capital inside the word, or a long random string; never an id,
+  a number, a date or a time); ordinary words never refuse a question, a
+  name or a doing label. The package's redaction scanner is unchanged.
+
 - **An earlier seal recomputes the attestations and the disputes.** Like the
   lead, question, network and request chains, their first sealed lines are
   now chained again with their own code; a sealed line rewritten with its

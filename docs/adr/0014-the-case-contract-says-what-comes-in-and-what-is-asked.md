@@ -202,11 +202,21 @@ policy" only where the policy says no more evidence comes.
    dropped, whitespace collapsed) and as given, and both sides are folded
    the same way (Unicode compatibility form, invisible format characters
    removed, case folded), so `Sec**ret77`, a line break inside a value and a
-   full-width spelling are the value. A short field marked sensitive (a
-   name such as "Alice") is held whole, as a whole word, whatever the
-   heuristics redaction uses for long ones. There is no "answer value"
-   concept and no exemption for words the goal itself uses. The refusal
-   names the entry, never the value.
+   full-width spelling are the value. B9 holds the values, never the
+   ordinary words a sensitive entry happens to use: an entry marks
+   sensitivity as a whole, and its `value` is what it records, so that value
+   is held whole, as a phrase matched word for word (a short one such as
+   "Alice", a multi-word one, or the whole sentence), never word by word;
+   and from every text field of the entry, only the words that are values
+   by their shape: eight characters or more, with a digit, a symbol (a
+   path, an address, `Qx7!pass`) or a capital inside the word, or twelve
+   letters or more that do not read as a word (a random string). The run's
+   own ids, numbers, dates and times, and ordinary words ("activity",
+   "entries") are never values, whatever sentence they came from: the
+   analyst's question of the first pilot on this flow (c10) was refused for
+   them. The redaction scanner of a package keeps its broader words. There
+   is no "answer value" concept and no exemption for words the goal itself
+   uses. The refusal names the entry, never the value.
 
 9. **The goal's services are held to the policy (B16).** At kickoff the
    hosts and services a goal names (a URL, a host, an adapter's whole id such

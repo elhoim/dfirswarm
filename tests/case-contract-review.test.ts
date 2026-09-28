@@ -225,9 +225,10 @@ test("6: two additions at once take two ids, and each seals exactly its own file
 
 test("7: B9 holds the name as it is published, a short value marked sensitive, and Unicode that folds to a sensitive value", async () => {
   const { S, a0 } = await run();
-  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "The vault word and its owner are recorded", source: "Alice", evidence: "Secret77", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
-  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "The second word is recorded", source: "the notebook", evidence: "Secret Word", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
-  for (const name of ["Sec**ret77", "Secret\nWord", "asking Alice", "Ｓｅｃｒｅｔ７７", "Sec​ret77", "`secret`_77"]) {
+  // An entry marks sensitivity as a whole; its value is what it records: a short one ("Alice", "Secret Word") is held whole, as a phrase.
+  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "Alice", source: "the notebook", evidence: "The vault word Secret77 is on page 3.", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
+  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "Secret Word", source: "the notebook", evidence: "page 4", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
+  for (const name of ["Sec**ret77", "Secret\nWord", "asking Alice", "Ｓｅｃｒｅｔ７７", "Sec\u200Bret77", "`secret`_77"]) {
     const r = await P.claimName(S, "a1", name);
     assert.equal(r.ok, false, `${JSON.stringify(name)} was taken`);
     assert.match((r as { error: string }).error, /holds a value the run marks sensitive/);
@@ -236,6 +237,32 @@ test("7: B9 holds the name as it is published, a short value marked sensitive, a
   const operator: Q.Actor = { kind: "human", role: "operator", person: "t@lab", enrolled: false, os_user: "t", host: "lab", via: "cli", identity: "claimed" };
   refused(await Q.act(S, operator, "open", { text: "Was Secret\nWord used elsewhere?", why: "reuse" }), /holds a value the run marks sensitive/);
   refused(await Q.act(S, operator, "open", { text: "What did alice send?", why: "w" }), /holds a value the run marks sensitive/);
+});
+
+test("7b: B9 holds the sensitive values, never the ordinary words of a sensitive entry: the analyst's question of a live run is admitted", async () => {
+  const { S, a0 } = await run();
+  // A sensitive finding as a live run records one (c10, E-151): ordinary words, paths, timestamps, a job's name for its output.
+  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "Kali guest recent-file bookmark links /home/kali/Documents/meeting.txt to the Mousepad editor, recording added/visited at 2023-04-06T13:48:47Z and last modified at 13:48:47Z.", source: "Kali ext4 /home/kali/.local/share/recently-used.xbel", evidence: "j000129/file__home_kali_.local_share_recently-used.xbel bookmark href=file:///home/kali/Documents/meeting.txt added=2023-04-06T13:48:47.047028Z", indicates: "The named local guest file was opened at least once; the bookmark list holds its entries. Authentication and investigation remain open. It records user activity.", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
+  // And one that holds real values: a password, a sixteen-character token (mixed and letters only), an address, a multi-word value.
+  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "Purple Elephant Nine", source: "the keychain", evidence: "The clerk's password Qx7!pass, the API token k3J9xQ2mL8vN4pRt, a recovery code qzvxkplmwtrbnjhd, sent to clerk@example.org.", refs: ["unresolved:the fixture"], sensitive: true } as P.LedgerInput));
+  const operator: Q.Actor = { kind: "human", role: "operator", person: "t@lab", enrolled: false, os_user: "t", host: "lab", via: "cli", identity: "claimed" };
+  // The c10 question, word for word: its common words ("activity", "entries") are no value.
+  const c10 = "Is there evidence that any activity on this system ran automatically (scheduled tasks, services, startup entries), and if so what, when, and under which account?";
+  const admitted = await Q.act(S, operator, "open", { text: c10, why: "persistence decides whether the intrusion outlived a reboot" });
+  assert.equal(admitted.ok, true, (admitted as { reason?: string }).reason);
+  for (const text of ["What happened at 2023-04-06T13:48:47Z, and at 13:48:47Z?", "What does E-151 show about the recently used files?", "Was the authentication of the investigation's accounts recorded?"]) {
+    const r = await Q.act(S, operator, "open", { text, why: "w" });
+    assert.equal(r.ok, true, `${text}: ${(r as { reason?: string }).reason}`);
+  }
+  assert.equal((await P.claimName(S, "a1", "activity-hunter", "checking the entries and the activity")).ok, true);
+  // The values are still refused: in a question, in its reason, in a name and a doing label, folded as a board would show them.
+  for (const text of ["Was Qx7!pass used elsewhere?", "Who issued K3J9XQ2ML8VN4PRT?", "Is qzvxkplmwtrbnjhd valid?", "Did clerk@example.org reply?", "Who knows purple elephant nine?", "Who is Purple\nElephant  Nine?"]) refused(await Q.act(S, operator, "open", { text, why: "w" }), /holds a value the run marks sensitive/);
+  refused(await Q.act(S, operator, "open", { text: "Was the password reused?", why: "it was Qx7!pass" }), /holds a value the run marks sensitive/);
+  for (const [name, doing] of [["Qx7!pass-hunter", undefined], ["token-tracer", "tracing k3J9xQ2mL8vN4pRt"], ["Ｑｘ７！ｐａｓｓ", undefined], ["`Qx7`!pass", undefined]] as const) {
+    const r = await P.claimName(S, "a2", name, doing);
+    assert.equal(r.ok, false, `${JSON.stringify(name)} ${JSON.stringify(doing)} was taken`);
+    assert.match((r as { error: string }).error, /holds a value the run marks sensitive/);
+  }
 });
 
 // --- 8 ---------------------------------------------------------------------------------------------
