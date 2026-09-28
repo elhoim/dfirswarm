@@ -56,7 +56,7 @@ export const NOT_YOURS = "not yours: ";
 /** The finish register's own lock: a lease is taken and a check recorded under it, never under the registers' (a done's sentinel is). */
 const FINISH_LOCK = ".finish.lock";
 
-export type FinishEventKind = "lease" | "ack" | "resolve" | "readiness" | "check";
+export type FinishEventKind = "lease" | "ack" | "resolve" | "readiness" | "check" | "phase";
 
 export type FinishEvent = {
   v: 1;
@@ -88,6 +88,8 @@ export type FinishEvent = {
   ready?: boolean;
   revision?: string;
   items?: string[];
+  /** phase: the finish being assembled by its coordinator (another seat's answer revision needs material), or open again. */
+  phase?: "assembling" | "open";
   /** check: what the finish line said at that revision. */
   proceed?: boolean;
   outcome?: string;
@@ -103,6 +105,8 @@ export type FinishState = {
   acks: Array<{ seq: number; at: string; by: string; digest: string; verdict: "no_objection" | "objection"; why: string; report?: string }>;
   resolutions: Array<{ seq: number; at: string; by: string; post?: number; ack?: number; how: "folded" | "not_material"; why: string; digest: string | null }>;
   readiness: { ready: boolean; revision: string; items: string[]; at: string } | null;
+  /** The finish phase as last recorded: assembling (by whom, since when) or open. */
+  phase: { phase: "assembling" | "open"; at: string; holder: string | null } | null;
   checks: Array<{ seq: number; at: string; by: string; revision: string; proceed: boolean; outcome?: string; reason?: string; run?: unknown }>;
   chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null };
 };
@@ -119,7 +123,7 @@ export async function readFinish(sandboxRoot: string): Promise<FinishState> {
       // The chain check names it.
     }
   }
-  const st: FinishState = { events, lease: null, acks: [], resolutions: [], readiness: null, checks: [], chain };
+  const st: FinishState = { events, lease: null, acks: [], resolutions: [], readiness: null, phase: null, checks: [], chain };
   for (const e of events) {
     switch (e.ev) {
       case "lease":
@@ -137,6 +141,9 @@ export async function readFinish(sandboxRoot: string): Promise<FinishState> {
         break;
       case "readiness":
         st.readiness = { ready: e.ready === true, revision: e.revision ?? "", items: e.items ?? [], at: e.at };
+        break;
+      case "phase":
+        if (e.phase === "assembling" || e.phase === "open") st.phase = { phase: e.phase, at: e.at, holder: e.holder ?? null };
         break;
       case "check":
         if (e.revision) st.checks.push({ seq: e.seq, at: e.at, by: e.by, revision: e.revision, proceed: e.proceed === true, ...(e.outcome ? { outcome: e.outcome } : {}), ...(e.reason ? { reason: e.reason } : {}), ...(e.run !== undefined ? { run: e.run } : {}) });
@@ -274,6 +281,27 @@ export async function mayFinish(sandboxRoot: string, agent: string, now = Date.n
   if (!lease || lease.holder === agent) return { ok: true };
   if (!(await coordinatorAvailable(sandboxRoot, lease.holder, now)).available) return { ok: true };
   return { ok: false, holder: lease.holder, reason: `${NOT_YOURS}${lease.holder} coordinates the finish (generation ${lease.generation}); its done ends the run` };
+}
+
+/**
+ * Whether a post only restates an answer's revision by its own author: the
+ * objects it cites are an answer that seat recorded (or is an author of)
+ * and entries that answer corrects, directly or through its chain, and
+ * nothing else (no job output, no input, no other entry). The revision is
+ * in the ledger, where the gate and the coordinator read it: the post adds
+ * nothing to answer.
+ */
+export function restatesRevision(body: string, by: string, entries: P.LedgerEntry[]): boolean {
+  const refs = [...new Set(String(body ?? "").match(/\b(?:E-\d+|(?:job|input|import|member|sha256|net|tool|trace):[^\s,;)]+)/g) ?? [])];
+  if (!refs.length || refs.some((r) => !/^E-\d+$/.test(r))) return false;
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const cited = refs.map((r) => Number(r.slice(2)));
+  const own = cited.map((n) => bySeq.get(n)).filter((e): e is P.LedgerEntry => Boolean(e) && e!.kind === "answer" && (e!.by === by || e!.authors.includes(by)) && e!.supersedes !== undefined);
+  return own.some((a) => {
+    const chain = new Set<number>([a.seq]);
+    for (let n = a.supersedes; n !== undefined && !chain.has(n); n = bySeq.get(n)?.supersedes) chain.add(n);
+    return cited.every((n) => chain.has(n));
+  });
 }
 
 /** How a sentinel held by what is late against the report is refused (finishTransaction). */
@@ -430,9 +458,15 @@ export async function lateItems(sandboxRoot: string, coordinator: string, report
   if (!report) return [];
   const st = await readFinish(sandboxRoot);
   const since = st.lease?.report === report && typeof st.lease.since === "number" ? st.lease.since : undefined;
-  const posts = await P.correctionsAfter(sandboxRoot, report, coordinator, since).catch(() => [] as Array<{ id: number; from: string; tag: P.PostTag }>);
+  const posts = await P.correctionsAfter(sandboxRoot, report, coordinator, since).catch(() => [] as Array<{ id: number; from: string; tag: P.PostTag; body: string }>);
   const out: LateItem[] = [];
-  for (const p of posts) if (!st.resolutions.some((r) => r.post === p.id)) out.push({ kind: "post", id: p.id, by: p.from, tag: p.tag });
+  const entries = posts.length ? await P.readLedger(sandboxRoot).catch(() => [] as P.LedgerEntry[]) : [];
+  for (const p of posts) {
+    if (st.resolutions.some((r) => r.post === p.id)) continue;
+    // A result that only restates its author's own answer revision is covered by that revision (the c10 pilot: each revision came with such a post, and each asked the coordinator for a resolution).
+    if (p.tag === "result" && restatesRevision(p.body, p.from, entries)) continue;
+    out.push({ kind: "post", id: p.id, by: p.from, tag: p.tag });
+  }
   for (const a of st.acks) {
     // An objection is of the report it names (a review made before any done named it itself), else of the lease's.
     if (a.verdict !== "objection" || (a.report && a.report !== report)) continue;
@@ -517,7 +551,8 @@ async function goalExtraSections(sandboxRoot: string): Promise<string[]> {
   return out;
 }
 
-export type Readiness = { ready: boolean; revision: string; items: string[]; limited: string[] };
+/** Readiness at a revision; `confirming`, the items among `items` that are closures waiting for their closer's confirmation. */
+export type Readiness = { ready: boolean; revision: string; items: string[]; limited: string[]; confirming: string[] };
 
 const readinessCache = new Map<string, Readiness>();
 
@@ -561,7 +596,11 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
   const items: string[] = [];
   const limited: string[] = [];
   const lead = await L.leadDefects(sandboxRoot, s);
-  for (const d of lead.defects) items.push(d.what);
+  const confirming: string[] = [];
+  for (const d of lead.defects) {
+    items.push(d.what);
+    if (d.lead && s.state.leads.get(d.lead)?.confirm) confirming.push(d.what);
+  }
   // An addition committed and not yet applied (docs/adr/0014): what it reopens may still look settled; the gate holds it too.
   const M = await import("../scripts/material.ts").catch(() => null);
   for (const a of (await M?.unappliedAdditions(sandboxRoot).catch(() => [])) ?? []) items.push(`import:${a.import} (${a.type === "evidence_added" ? "evidence" : "material"} added at ${a.at}) is committed and not all it implies is recorded yet (the hub records it at its next round)`);
@@ -624,7 +663,7 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
   const budget = await P.readBudget(sandboxRoot).catch(() => null);
   const operatorStop = P.stopPolicyOf(budget) === "operator";
   const blocking = operatorStop ? [...items, ...limited.filter((x) => !/accepted by the operator/.test(x))] : items;
-  return { ready: !blocking.length, revision, items: blocking, limited };
+  return { ready: !blocking.length, revision, items: blocking, limited, confirming: confirming.filter((c) => blocking.includes(c)) };
 }
 
 
@@ -656,6 +695,41 @@ export async function syncReadiness(sandboxRoot: string, r: Readiness): Promise<
   }).catch(() => false);
 }
 
+/**
+ * The finish phase: whether the coordinator is assembling the finish. It
+ * is, while a coordinator holds the lease and the registers are met but for
+ * what is late against the report, a closure waiting for its confirmation
+ * or a resolution (the c10 pilot's tail ran over 90 minutes as answers kept
+ * being revised in it). Then another seat's answer revision is recorded
+ * only with `material` (protocol.ts recordAnswer); a material one reopens
+ * readiness as ever, and the phase ends until the registers are met again.
+ */
+export type FinishPhase = { assembling: boolean; coordinator: string | null; generation: number; why: string; pending: string[] };
+
+export async function finishPhase(sandboxRoot: string): Promise<FinishPhase> {
+  if (await P.swarmDoneExists(sandboxRoot)) return { assembling: false, coordinator: null, generation: 0, why: "the run is finished", pending: [] };
+  const lease = (await readFinish(sandboxRoot)).lease;
+  if (!lease) return { assembling: false, coordinator: null, generation: 0, why: "no coordinator holds the finish yet", pending: [] };
+  const r = await readiness(sandboxRoot);
+  const open = r.items.filter((i) => !r.confirming.includes(i));
+  if (open.length) return { assembling: false, coordinator: lease.holder, generation: lease.generation, why: `the registers are not met: ${open.join("; ")}`, pending: [] };
+  const late = await lateItems(sandboxRoot, lease.holder, lease.report);
+  return { assembling: true, coordinator: lease.holder, generation: lease.generation, why: `${lease.holder} holds the finish and the registers are met${r.confirming.length || late.length ? ` but for ${[...r.confirming, ...late.map(lateWords)].join("; ")}` : ""}`, pending: [...r.confirming, ...late.map(lateWords)] };
+}
+
+/** The phase recorded in the finish register each time it turns (assembling, or open again). */
+export async function syncPhase(sandboxRoot: string, p: FinishPhase): Promise<boolean> {
+  const want = p.assembling ? "assembling" : "open";
+  const last = (await readFinish(sandboxRoot)).phase;
+  if ((last?.phase ?? "open") === want) return false;
+  return withFinish(sandboxRoot, async (held) => {
+    const again = (await readFinish(sandboxRoot)).phase;
+    if ((again?.phase ?? "open") === want) return false;
+    await appendFinish(sandboxRoot, [{ by: "system", ev: "phase", phase: want, ...(p.coordinator ? { holder: p.coordinator } : {}), why: p.why }], held);
+    return true;
+  }).catch(() => false);
+}
+
 /** The finish in the header (A4): readiness, the coordinator, and what this seat does about it. */
 export async function finishHeader(sandboxRoot: string, me: string): Promise<string | null> {
   if (await P.swarmDoneExists(sandboxRoot)) return null;
@@ -667,13 +741,17 @@ export async function finishHeader(sandboxRoot: string, me: string): Promise<str
   const who = lease ? `${lease.holder}${mine ? " (you)" : ""} coordinates it (generation ${lease.generation})` : "nobody coordinates it yet: the first done takes it (normally the report's publisher)";
   const state = r.ready ? `READY by the registers${r.limited.length ? `, limited: ${r.limited.join("; ")}` : ""}` : `not ready (${r.items.length}): ${r.items.join("; ")}`;
   let act = "";
+  // The finish phase: recorded when it turns, and said to every seat.
+  const phase = await finishPhase(sandboxRoot).catch(() => null);
+  if (phase) await syncPhase(sandboxRoot, phase).catch(() => false);
+  if (phase?.assembling) act += mine ? " ASSEMBLING: you assemble the finish; another seat's answer revision is admitted only with material (why it changes a conclusion); yours are free." : ` ASSEMBLING by ${phase.coordinator}: an answer revision from another seat is admitted only with material (why it changes a conclusion); a rewording or a restatement is not recorded now.`;
   if (mine) {
     const late = await lateItems(sandboxRoot, me, lease.report);
-    act = late.length ? ` Late against the report, each for your typed resolution (finish resolve): ${late.map((x) => (x.kind === "post" ? `post #${x.id} (${x.tag}) by ${x.by}` : `objection ${x.id} by ${x.by}: ${x.why}`)).join("; ")}.` : r.ready ? " Call done." : "";
+    act += late.length ? ` Late against the report, each for your typed resolution (finish resolve): ${late.map((x) => (x.kind === "post" ? `post #${x.id} (${x.tag}) by ${x.by}` : `objection ${x.id} by ${x.by}: ${x.why}`)).join("; ")}.` : r.ready ? " Call done." : "";
     const digest = await reportDigest(sandboxRoot, lease.report);
     const acks = st.acks.filter((a) => a.digest === digest && a.verdict === "no_objection").map((a) => a.by);
     if (acks.length) act += ` Reviewed with no objection: ${[...new Set(acks)].join(", ")}.`;
-  } else if (lease) act = " Your done is not the finish: when your slice ends, review the report (finish ack) or say on the board what is open, and wait.";
+  } else if (lease) act += " Your done is not the finish: when your slice ends, review the report (finish ack) or say on the board what is open, and wait.";
   return `Finish: ${state}; ${who}.${act}`;
 }
 

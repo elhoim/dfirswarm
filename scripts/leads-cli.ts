@@ -49,6 +49,8 @@ export async function finishText(sandbox: string): Promise<string> {
   const r = await F.readiness(sandbox);
   const st = await F.readFinish(sandbox);
   const lines = [`Finish: ${r.ready ? "READY by the registers" : `not ready (${r.items.length})`}${st.lease ? `; ${st.lease.holder} coordinates it (generation ${st.lease.generation}: ${st.lease.why})` : "; nobody coordinates it yet: the first done takes it"}.`];
+  const phase = await F.finishPhase(sandbox).catch(() => null);
+  if (phase?.assembling) lines.push(`  phase: assembling by ${phase.coordinator} (${phase.why}): another seat's answer revision is admitted only with material`);
   for (const i of r.items) lines.push(`  holds it: ${i}`);
   for (const i of r.limited) lines.push(`  limits it: ${i}`);
   const last = st.checks.at(-1);

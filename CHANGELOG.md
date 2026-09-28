@@ -8,6 +8,16 @@ All notable changes to this project. The format follows
 
 ### Fixed: what the first pilot on the new flow showed (c10, run s6be12f)
 
+- **The finish tail converges.** The resumed pilot sat in its finish tail
+  for over ninety minutes: answers kept being revised, and each revision
+  re-offered confirmations and made new late results. While a coordinator
+  holds the lease and the registers are met but for late items,
+  confirmations or resolutions, the finish is being assembled: another
+  seat's answer revision needs `material: why it changes a conclusion`,
+  and a rewording is refused quietly (not a refusal). The phase is in the
+  finish register, every header and `swarm.sh lead list`. A result post
+  that only restates its author's own revision is covered by it.
+
 - **B9 holds the sensitive values, not every word of a sensitive entry.**
   The operator's analyst question "Is there evidence that any activity on
   this system ran automatically (…startup entries)…" was refused because

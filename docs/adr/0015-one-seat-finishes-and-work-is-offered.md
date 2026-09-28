@@ -184,6 +184,17 @@ have lost its provider.
     same way (the c10 pilot's summary and narrative cited answers by seq
     and fell with every revision of each).
 
+10a. **The finish phase** (the c10 pilot, s6be12f: its tail ran past
+    ninety minutes). While a coordinator holds the lease and the registers
+    are met but for what is late, confirmations or resolutions, the finish
+    is being assembled: another seat's answer revision is recorded only
+    with `material` (why it changes a conclusion), a rewording is refused
+    quietly and not counted as a refusal, a material revision reopens
+    readiness as ever, and the coordinator's own folding is free. The phase
+    is recorded in the finish register and shown in every header and the
+    operator's list. A result post that only restates its author's own
+    revision is covered by the revision, not a late item.
+
 ### Coordination (A1–A3)
 
 12. **The coverage check at open and claim** (A1). `answers` is the

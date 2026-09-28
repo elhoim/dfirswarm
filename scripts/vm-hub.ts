@@ -2825,6 +2825,8 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
       // The ledger entry's hash, on the harness's own line: custody holds
       // the ledger to it.
       const entry = isObject(result.entry) ? result.entry : {};
+      // A revision held while the finish is assembled is not a refusal: said as deferred.
+      if (result.quiet === true) return { ok: true, deferred: result.deferred ?? true };
       return { ok: result.ok, seq: entry.seq, merged: result.merged, ...(typeof entry.hash === "string" ? { hash: entry.hash } : {}) };
     }
     case "attestEntry":

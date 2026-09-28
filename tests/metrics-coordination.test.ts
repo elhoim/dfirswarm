@@ -54,7 +54,7 @@ test("offers, done calls and the tail are measured from what the coordination co
   const dec = await L.answerLeadOffer(ctx("a2"), id2, { action: "decline", why: "I am on the attachments" });
   assert.ok(dec.ok, (dec as { reason?: string }).reason);
   // Readiness, recorded by the finish register's own writer: ready, then the run ends.
-  assert.equal(await F.syncReadiness(S, { ready: true, revision: "r-ready", items: [], limited: [] }), true);
+  assert.equal(await F.syncReadiness(S, { ready: true, revision: "r-ready", items: [], limited: [], confirming: [] }), true);
   // A seat's done that was not the finish, as the extension writes it on the trace.
   await appendFile(join(S, P.EVENTS_REL), `${JSON.stringify({ ts: new Date().toISOString(), agent: "a2", tool: "done_deferred", args: { output_file: "work/report.md" }, result: { ok: true, coordinator: "a0", generation: 1, ready: true } })}\n`);
   await new Promise((r) => setTimeout(r, 20));

@@ -56,7 +56,7 @@ test("the report shows a best candidate, a question's offers, a lead's coordinat
   const obj = await F.ackReport(c.a2, { verdict: "objection", why: "question 1 is a best candidate" });
   assert.ok(obj.ok);
   assert.ok((await F.resolveLate(c.a0, { ack: (obj as { seq: number }).seq, how: "folded", why: "the report says best candidate now" })).ok);
-  await F.syncReadiness(S, { ready: true, revision: "r-ready", items: [], limited: [] });
+  await F.syncReadiness(S, { ready: true, revision: "r-ready", items: [], limited: [], confirming: [] });
 
   const md = await renderReportBodyMarkdown(S);
   assert.match(md, /Reviewed.*by a2 at .*, a best candidate/, "the answer's review says how strongly it holds");

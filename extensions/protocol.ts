@@ -1786,14 +1786,14 @@ export async function correctionsAfter(
   outputFile: string,
   agentId: string,
   since?: number,
-): Promise<Array<{ id: number; from: string; tag: PostTag }>> {
+): Promise<Array<{ id: number; from: string; tag: PostTag; body: string }>> {
   // A missing output is not "no corrections": it has never answered the board.
   // `since` (the finish's anchor, extensions/finish.ts) keeps what was late
   // against an earlier version of the output late through the later ones.
   const writtenAt = typeof since === "number" && Number.isFinite(since) ? since : await outputWrittenAt(sandboxRoot, outputFile);
   const dir = join(sandboxRoot, "threads", PRIMARY_THREAD);
   const files = await readdir(dir).catch(() => [] as string[]);
-  const out: Array<{ id: number; from: string; tag: PostTag }> = [];
+  const out: Array<{ id: number; from: string; tag: PostTag; body: string }> = [];
   for (const name of files) {
     if (!name.endsWith(".md")) continue;
     const file = join(dir, name);
@@ -1803,7 +1803,7 @@ export async function correctionsAfter(
     if (!post) continue;
     if (post.from === agentId || post.from === SYSTEM_AGENT) continue;
     if (post.tag !== "result" && post.tag !== "veto") continue;
-    out.push({ id: post.id, from: post.from, tag: post.tag });
+    out.push({ id: post.id, from: post.from, tag: post.tag, body: post.body });
   }
   return out.sort((a, b) => a.id - b.id);
 }
@@ -5863,7 +5863,7 @@ export const TOOL_RESERVED_NAMES = new Set([
   "question_open", "questions", "question_ask",
   // The coordination of the work and of the finish (docs/adr/0015): a lead
   // reopened by an agent, a limiting route reviewed.
-  "lead_reopen", "route_review", "lead_handoff", "lead_confirm", "offer", "finish", "done_deferred", "review_deferred",
+  "lead_reopen", "route_review", "lead_handoff", "lead_confirm", "offer", "finish", "done_deferred", "review_deferred", "record_deferred",
   // The runtime (docs/adr/0015): the seats' tokens renewed on the host.
   "secrets_renewed",
   // The stop policy (docs/adr/0013): a run paused at a cap, a seat's call held
@@ -7614,6 +7614,12 @@ export type LedgerEntry = {
    * the question's is stale.
    */
   question_rev?: number;
+  /**
+   * An answer revised by another seat while the coordinator assembles the
+   * finish (the finish phase, extensions/finish.ts): why it changes a
+   * conclusion. A revision without it is not recorded in that phase.
+   */
+  finish_material?: string;
   /** Version 4, an answer: it says the event did not happen, not only that no evidence of it was found; the negative bar says when it may. */
   asserts_absence?: boolean;
   /**
@@ -7737,6 +7743,7 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
     ...(e.contrary_none_why ? { contrary_none_why: e.contrary_none_why } : {}),
     ...(e.question_rev !== undefined ? { question_rev: e.question_rev } : {}),
     ...(e.question_refs?.length ? { question_refs: e.question_refs.map((r) => ({ q: r.q, section: r.section, answer: r.answer, fp: r.fp })) } : {}),
+    ...(e.finish_material ? { finish_material: e.finish_material } : {}),
     ...(e.unsupported_tokens?.length ? { unsupported_tokens: e.unsupported_tokens } : {}),
     ...coverageFields(e),
     ...(e.source_class ? { source_class: e.source_class } : {}),
@@ -7891,6 +7898,8 @@ export type LedgerInput = {
   attribution?: { subject?: string; subject_type?: string; basis_refs?: string[] | string };
   locators?: Array<{ ref?: string; at?: string }>;
   because?: string;
+  /** An answer revised while the finish is assembled (extensions/finish.ts finishPhase): why it changes a conclusion. */
+  material?: string;
   indicates?: string;
   confidence_why?: string;
   alternatives?: Array<{ explanation?: string; status?: string; why?: string; test_refs?: string[] | string }>;
@@ -8038,7 +8047,7 @@ async function ledgerV3Input(
 }
 
 /** The fields only an answer takes, and only a finding takes: named in a refusal when they come with another kind. */
-const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why", "asserts_absence", "question_rev"] as const;
+const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why", "asserts_absence", "question_rev", "material"] as const;
 const FINDING_ONLY_FIELDS = ["indicates", "alternatives", "alternatives_none_why", "significance"] as const;
 /** The fields only a coverage record takes. */
 const COVERAGE_ONLY_FIELDS = ["proposition", "inventory_rev", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures", "result_refs", "result_bound", "detection_opportunity"] as const;
@@ -8252,7 +8261,7 @@ export function supersededBy(entries: LedgerEntry[]): Map<number, number> {
 
 export type LedgerResult =
   | { ok: true; entry: LedgerEntry; merged: boolean; total: number; note?: string }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; quiet?: true; deferred?: { coordinator: string; generation: number } };
 
 /** The names closest to `want`: the same base name first, then by edit distance. */
 function nearestNames(want: string, names: string[], n = 5): string[] {
@@ -10368,6 +10377,23 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   const because = boundedText("because", input.because, LEDGER_BECAUSE_MAX_CHARS);
   if (!because.ok) return because;
   if (because.value && supersedes === undefined) return { ok: false, reason: "because says why a correction corrects: give supersedes too" };
+  // The finish phase (extensions/finish.ts): while the coordinator
+  // assembles the finish (it holds the lease and the registers are met but
+  // for what is late, a confirmation or a resolution), another seat's
+  // revision of an answer is recorded only when it says why it changes a
+  // conclusion (material). A rewording or a restatement is refused
+  // quietly: on the c10 pilot's tail, answers revised again and again kept
+  // re-offering confirmations and making late results, and the finish never
+  // closed. The coordinator's own folding is free.
+  const materialWhy = boundedText("material", input.material, LEDGER_WHY_MAX_CHARS);
+  if (!materialWhy.ok) return materialWhy;
+  if (supersedes !== undefined && !materialWhy.value) {
+    const F = await import("./finish.ts");
+    const lease = (await F.readFinish(ctx.sandboxRoot).catch(() => null))?.lease ?? null;
+    if (lease && lease.holder !== ctx.agentId && (await F.finishPhase(ctx.sandboxRoot).catch(() => null))?.assembling) {
+      return { ok: false, quiet: true, deferred: { coordinator: lease.holder, generation: lease.generation }, reason: `the finish is being assembled by ${lease.holder}; revise only with material: why (what conclusion this revision changes: its result, its value, what it rests on). A rewording or a restatement is not recorded now, and nothing is lost: ${lease.holder} folds what stands into the report` };
+    }
+  }
   const source = boundedText("source", input.source, LEDGER_SOURCE_MAX_CHARS);
   if (!source.ok) return source;
   const evidence = boundedText("evidence", input.evidence, LEDGER_EVIDENCE_MAX_CHARS);
@@ -10552,6 +10578,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         ...(noneWhy.value ? { contrary_none_why: noneWhy.value } : {}),
         ...(questionRev !== undefined ? { question_rev: questionRev } : {}),
         ...(questionRefs.length ? { question_refs: questionRefs } : {}),
+        ...(materialWhy.value ? { finish_material: materialWhy.value } : {}),
         ...(input.asserts_absence === true ? { asserts_absence: true } : {}),
         ...(tokens.length ? { unsupported_tokens: tokens } : {}),
         by: ctx.agentId,

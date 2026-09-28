@@ -219,3 +219,60 @@ test("the finish register is written where the metrics and the report read it: t
   const { renderReportBodyMarkdown } = await import("../scripts/report-body.ts");
   assert.match(await renderReportBodyMarkdown(S), /\d+ events? in leads\/finish\.jsonl; chain intact/);
 });
+
+test("the finish phase: once the coordinator holds the lease and the registers are met but for what is late, another seat's answer revision needs material: why; a wording-only one is refused quietly; the coordinator's is free; nothing is refused outside the phase (the c10 pilot's tail)", async () => {
+  const { S, a0, a1, a2 } = await run();
+  const f = await P.recordEntry(a2, { kind: "finding", ...F4, value: "The logon was interactive", source: "log", evidence: "line 1" } as P.LedgerInput);
+  assert.ok(f.ok);
+  if (!f.ok) return;
+  const s1 = await P.recordEntry(a1, { kind: "answer", section: "summary", value: "An interactive logon.", reasoning: `E-${f.entry.seq}` } as P.LedgerInput);
+  assert.ok(s1.ok);
+  if (!s1.ok) return;
+  // Outside the phase (no coordinator yet): a wording revision is admitted as ever.
+  const s2 = await P.recordEntry(a1, { kind: "answer", section: "summary", value: "The logon was interactive.", reasoning: `E-${f.entry.seq}`, supersedes: s1.entry.seq } as P.LedgerInput);
+  assert.ok(s2.ok, (s2 as { reason?: string }).reason);
+  if (!s2.ok) return;
+  // The coordinator takes the lease; the registers are met: the finish is being assembled.
+  await publish(S, "a0", "# report\n");
+  await F.finishTurn(a0, { output_file: "work/report.md" });
+  assert.equal((await F.finishPhase(S)).assembling, true);
+  assert.match((await F.finishHeader(S, "a1")) ?? "", /ASSEMBLING by a0: an answer revision from another seat is admitted only with material/);
+  assert.ok((await F.readFinish(S)).events.some((e) => e.ev === "phase" && e.phase === "assembling"), "recorded in the finish register");
+  const { finishText } = await import("../scripts/leads-cli.ts");
+  assert.match(await finishText(S), /phase: assembling by a0/);
+  // A wording-only revision from another seat: refused quietly, nothing recorded, not a refusal to count.
+  const n = (await P.readLedger(S)).length;
+  const quiet = await P.recordEntry(a1, { kind: "answer", section: "summary", value: "The logon was an interactive one.", reasoning: `E-${f.entry.seq}`, supersedes: s2.entry.seq } as P.LedgerInput);
+  assert.equal(quiet.ok, false);
+  assert.equal((quiet as { quiet?: boolean }).quiet, true);
+  assert.match((quiet as { reason: string }).reason, /the finish is being assembled by a0; revise only with material: why/);
+  assert.equal((await P.readLedger(S)).length, n, "nothing recorded");
+  // A material revision is admitted, with its why on the entry.
+  const mat = await P.recordEntry(a1, { kind: "answer", section: "summary", value: "The logon was remote.", reasoning: `E-${f.entry.seq}`, supersedes: s2.entry.seq, material: "the log's logon type is 10, remote: the conclusion changes" } as P.LedgerInput);
+  assert.ok(mat.ok, (mat as { reason?: string }).reason);
+  if (!mat.ok) return;
+  assert.equal(mat.entry.finish_material, "the log's logon type is 10, remote: the conclusion changes");
+  // The coordinator's own folding stays free.
+  const own = await P.recordEntry(a0, { kind: "answer", section: "summary", value: "The logon was remote (type 10).", reasoning: `E-${f.entry.seq}`, supersedes: mat.entry.seq } as P.LedgerInput);
+  assert.ok(own.ok, (own as { reason?: string }).reason);
+});
+
+test("a result post that only restates an answer's own revision is covered by that revision: it needs no typed resolution; one with another ref still does", async () => {
+  const { S, a0, a1, a2 } = await run();
+  const f = await P.recordEntry(a2, { kind: "finding", ...F4, value: "The logon was interactive", source: "log", evidence: "line 1" } as P.LedgerInput);
+  assert.ok(f.ok);
+  if (!f.ok) return;
+  const s1 = await P.recordEntry(a1, { kind: "answer", section: "summary", value: "An interactive logon.", reasoning: `E-${f.entry.seq}` } as P.LedgerInput);
+  assert.ok(s1.ok);
+  if (!s1.ok) return;
+  await publish(S, "a0", "# report\n");
+  await F.finishTurn(a0, { output_file: "work/report.md" });
+  await tick();
+  const s2 = await P.recordEntry(a1, { kind: "answer", section: "summary", value: "An interactive logon at the console.", reasoning: `E-${f.entry.seq}`, supersedes: s1.entry.seq, material: "the console is where" } as P.LedgerInput);
+  assert.ok(s2.ok, (s2 as { reason?: string }).reason);
+  if (!s2.ok) return;
+  const restating = await P.postMessage(a1, { tag: "result", body: `Summary revised: E-${s2.entry.seq} (it supersedes E-${s1.entry.seq}).` });
+  const adding = await P.postMessage(a2, { tag: "result", body: `E-${s2.entry.seq} misses job:j000001/hits.txt, which shows a second logon.` });
+  const late = await F.lateItems(S, "a0", "work/report.md");
+  assert.deepEqual(late.map((x) => x.id), [adding.id], `the restating post #${restating.id} is covered by its revision`);
+});

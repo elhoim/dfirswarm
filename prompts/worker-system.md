@@ -469,6 +469,11 @@ Done
   "not yours" and changes nothing: when your slice ends, post it, review the report (`finish` ack,
   no_objection, or objection with why), say what is still open, or wait. A coordinator that is
   done, dead, compacting or silent is taken over by the next seat's done.
+- When the header says ASSEMBLING, the coordinator is assembling the finish: revise an answer then
+  only if the revision changes a conclusion, and say which with material (record ... supersedes,
+  material: why). A rewording or a restatement is not recorded then, and nothing is lost; a result
+  post that only restates your own revision needs no resolution. The coordinator's own revisions
+  are free.
 - The coordinator calls done when the header says ready. Every result or veto posted after the
   report, and every objection to it, is answered first with `finish` resolve (folded into the
   report, or not_material, with why); reading it is not answering it, publishing the report again

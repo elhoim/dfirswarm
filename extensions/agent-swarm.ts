@@ -3245,6 +3245,7 @@ export default function (pi: ExtensionAPI) {
       attribution: Type.Optional(Type.Object({ subject: Type.String(), subject_type: Type.Optional(Type.Union(LEDGER_SUBJECT_TYPES.map((k) => Type.Literal(k)))), basis_refs: Type.Optional(Type.Array(Type.String())) }, { description: "Who or what an action is attributed to (account, device, person) and the objects that link them." })),
       locators: Type.Optional(Type.Array(Type.Object({ ref: Type.String(), at: Type.String() }), { description: "Where in a cited ref: a row, an offset, a record id." })),
       because: Type.Optional(Type.String({ description: "With supersedes: why the correction corrects." })),
+      material: Type.Optional(Type.String({ description: "An answer's revision while the coordinator assembles the finish (the header says ASSEMBLING): why it changes a conclusion (its result, its value, what it rests on). Without it another seat's revision is not recorded then; a rewording waits." })),
       opens: Type.Optional(
         Type.Array(
           Type.Object({
@@ -3272,6 +3273,11 @@ export default function (pi: ExtensionAPI) {
       // Every field as given: the protocol checks which a kind takes and says which it does not.
       const { kind, opens, interprets, ...rest } = params;
       const result = await recordEntry(ctxFrom(toolCtx.cwd, agentId), { kind, ...Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)) } as unknown as LedgerInput);
+      // The finish being assembled: a revision without material is not recorded, quietly (not a refusal).
+      if (!result.ok && result.quiet) {
+        await logEvent(toolCtx.cwd, agentId, "record_deferred", { kind, section: (params as { section?: string }).section, supersedes: (params as { supersedes?: number }).supersedes }, { ok: true, deferred: result.deferred, note: result.reason }, Date.now() - started);
+        return okResult({ ok: true, recorded: false, deferred: result.deferred, note: result.reason });
+      }
       if (!result.ok) {
         // What the agent tried to say goes on the trace whole: the args are the record, refused or not.
         await logEvent(toolCtx.cwd, agentId, "record", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
