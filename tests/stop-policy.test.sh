@@ -137,3 +137,50 @@ grep -q '"kind":"decision"' "$SB/operator-requests.jsonl" || fail "no stop was p
 grep -q '"tool":"stop_proposed"' "$SB/traces/events.jsonl" || fail "the proposal is not on the trace"
 [[ ! -f "$SB/done/SWARM_DONE" && ! -f "$SB/done/STOPPED" ]] || fail "a proposal stopped the run"
 pass "diminishing returns: a stop is proposed to the operator (a request of kind decision), and nothing is stopped"
+
+echo "# the watchdog under review: a pause told once whoever wrote it, a wake retried until it lands, the stop policy at --idle-sec 0"
+id2="$(id_of p2)"
+mkdir -p "$TMP/runs/notify"
+printf 'cat >> %q\n' "$TMP/notified.jsonl" > "$TMP/runs/notify/$id2.cmd"
+chmod 600 "$TMP/runs/notify/$id2.cmd"
+: > "$TMP/notified.jsonl"
+# A pause a pane's own extension wrote: the watchdog did not make it, and tells it all the same, once.
+paused_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+tmp="$(mktemp)"; jq --arg at "$paused_at" '.tokens = 9000 | .paused = {at: $at, reason: "cap", detail: "a pane paused it"}' "$SB/budget.json" > "$tmp" && mv "$tmp" "$SB/budget.json"
+watch_life() { HERDR_BIN="$TMP/bin/herdr" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$SB" --once --idle-sec 0 >/dev/null 2>&1 || true; }
+watch_life
+for _ in $(seq 1 40); do grep -q '"event":"paused"' "$TMP/notified.jsonl" && break; sleep 0.25; done
+grep -q '"event":"paused"' "$TMP/notified.jsonl" || fail "a pause the watchdog did not write was never told: $(cat "$TMP/notified.jsonl")"
+watch_life
+sleep 1
+[[ "$(grep -c '"event":"paused"' "$TMP/notified.jsonl")" -eq 1 ]] || fail "the pause was told more than once: $(cat "$TMP/notified.jsonl")"
+# The extension lifts it; one seat cannot be reached the first time: it is tried again, and the other is not woken twice.
+cat > "$TMP/bin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "agent get") printf '{"result":{"agent":{"agent_status":"idle"}}}\n' ;;
+  "agent prompt")
+    if [[ -f "$UNREACHABLE" && "$3" == "$(cat "$UNREACHABLE")" ]]; then exit 1; fi
+    printf '%s\t%s\n' "$3" "$4" >> "$PROMPT_LOG" ;;
+  *) : ;;
+esac
+SH
+chmod +x "$TMP/bin/herdr"
+export UNREACHABLE="$TMP/unreachable"
+set -- $ids
+first="$1"; second="$2"
+printf '%s' "$first" > "$UNREACHABLE"
+: > "$PROMPT_LOG"
+node --experimental-strip-types --no-warnings "$ROOT/scripts/stop-policy.ts" extend "$SB" --tokens 50000 --by operator >/dev/null || fail "the extension failed"
+watch_life
+grep -q "^$second	The operator extended the run" "$PROMPT_LOG" || fail "$second was not woken: $(cat "$PROMPT_LOG")"
+if grep -q "^$first	" "$PROMPT_LOG"; then fail "$first was reached although it could not be"; fi
+rm -f "$UNREACHABLE"
+watch_life
+grep -q "^$first	The operator extended the run" "$PROMPT_LOG" || fail "$first was not woken when it could be reached again: $(cat "$PROMPT_LOG")"
+[[ "$(grep -c "^$second	" "$PROMPT_LOG")" -eq 1 ]] || fail "$second was woken twice: $(cat "$PROMPT_LOG")"
+# --idle-sec 0 prompts nobody for being idle, though every seat has been silent for ten minutes.
+if grep -v 'The operator extended the run' "$PROMPT_LOG" | grep -q .; then fail "a seat was nudged at --idle-sec 0: $(cat "$PROMPT_LOG")"; fi
+out="$(kick --cap-usd 5 --idle-nudge-sec 0 --label p8)" || fail "a kickoff with --idle-nudge-sec 0 was refused: $out"
+grep -q '^Idle nudge:   off (--idle-nudge-sec 0): no agent is prompted; the watchdog still runs the stop policy' <<<"$out" || fail "the kickoff does not say the watchdog still runs at --idle-nudge-sec 0: $out"
+pass "the watchdog: a pause is told once whoever wrote it, a wake that did not land is tried again, and --idle-sec 0 keeps the stop policy without nudging"

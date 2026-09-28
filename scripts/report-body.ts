@@ -1072,7 +1072,7 @@ function questionStatus_(q: Question, run: Run, memo: Map<number, EntryState>): 
   if (!a) return { status: run.era === "predates" ? { text: "no structured answer", tone: "none" } : { text: "not answered", tone: "brick" }, answer: null, chips: [] };
   const s = stateOf(a, run, memo);
   const result = answerResult(a);
-  const negative = result && NEGATIVE_RESULTS.has(result) ? negativeReview(a, run.entries, run.attestations) : null;
+  const negative = result && NEGATIVE_RESULTS.has(result) ? negativeReview(a, run.entries, run.attestations, run.disputes) : null;
   const status: Chip = s.problems.length
     ? { text: "no longer stands on its support", tone: "brick" }
     : s.disputes.length
@@ -1605,7 +1605,12 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
   const s = stateOf(a, run, memo);
   const body: Block[] = [];
   const history = answerHistory(run, `question:${q.id}`).filter((x) => x.seq !== a.seq);
-  body.push({ k: "voice", voice: "opinion", label: a.inconclusive ? "Answer (inconclusive)" : "Answer", s: [a.value], chips: chipsOf(a, s).filter((c) => c.text !== "answer") });
+  // A negative is stated as the harness makes it from its coverage record,
+  // what was not found where, unless the answer earned the stronger words;
+  // the agents' own words follow it, whole, and marked as theirs.
+  const bounded = boundedConclusion(a, q, run);
+  body.push({ k: "voice", voice: "opinion", label: a.inconclusive ? "Answer (inconclusive)" : "Answer", s: [bounded ?? a.value], chips: chipsOf(a, s).filter((c) => c.text !== "answer") });
+  if (bounded) body.push({ k: "p", s: [`As the agents worded it (not the conclusion: the bar for saying more is not met): ${a.value}`] });
   body.push(...resultBlocks(a, q, run));
   body.push({
     k: "p",
@@ -1629,12 +1634,44 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
  * time range>"; "it did not happen" is kept for an answer that earned it
  * (an existence question, a complete coverage record, a trace expected).
  */
+/** A proposition as the object of a sentence: its closing stop dropped, a leading article lowercased. */
+function propositionWords(value: string): string {
+  return value.trim().replace(/\.$/, "").replace(/^(A|An|The) /, (x) => x.toLowerCase());
+}
+
+/** The coverage records an answer rests on that stand, and what they searched. */
+function standingCoverage(a: LedgerEntry, run: Run): LedgerEntry[] {
+  return (a.support ?? []).map((x) => run.bySeq.get(x.seq)).filter((e): e is LedgerEntry => e?.kind === "coverage" && !run.replaced.has(e.seq));
+}
+
+const coverageScope = (c: LedgerEntry) => `${(c.refs ?? []).join(", ")}${c.time_range ? `, ${c.time_range}` : ""}`;
+
+/**
+ * A negative's conclusion as the report states it: made from the coverage
+ * records it rests on (their propositions and their scope), never from the
+ * agents' words, which no phrase list can hold to the bar. Null for an
+ * answer that is not a negative, and for a bounded negative that earned
+ * "it did not happen" (an existence question, a complete coverage record
+ * that says the event would have left a trace, asserts_absence).
+ */
+function boundedConclusion(a: LedgerEntry, q: Question, run: Run): string | null {
+  const result = answerResult(a);
+  if (!result || !NEGATIVE_RESULTS.has(result)) return null;
+  const cov = standingCoverage(a, run);
+  const earned = result === "bounded_negative" && a.asserts_absence === true && run.bar(q.id).existence && cov.some((c) => c.coverage === "complete" && c.detection_opportunity?.trace_expected === "yes");
+  if (earned) return null;
+  const what = cov.map((c) => propositionWords(c.value)).join("; ");
+  const where = cov.map(coverageScope).join("; ");
+  if (result === "bounded_negative") return cov.length ? `No evidence that ${what} was found in ${where}.` : "No evidence was found; the answer names no coverage record, so what was searched is not stated.";
+  return cov.length ? `It cannot be determined from ${where} whether ${what}.` : "It cannot be determined from the evidence examined; the answer names no coverage record, so what was examined is not stated.";
+}
+
 function resultBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
   const result = answerResult(a);
   if (!result) return [{ k: "note", s: ["The answer states no result: it was recorded before results were, and reads as it always did."] }];
   const out: Block[] = [];
-  const cov = (a.support ?? []).map((x) => run.bySeq.get(x.seq)).filter((e): e is LedgerEntry => e?.kind === "coverage" && !run.replaced.has(e.seq));
-  const scope = (c: LedgerEntry) => `${(c.refs ?? []).join(", ")}${c.time_range ? `, ${c.time_range}` : ""}`;
+  const cov = standingCoverage(a, run);
+  const scope = coverageScope;
   const earned = a.asserts_absence === true && run.bar(q.id).existence && cov.some((c) => c.coverage === "complete" && c.detection_opportunity?.trace_expected === "yes");
   if (result === "bounded_negative") {
     out.push({
@@ -1642,7 +1679,7 @@ function resultBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
       s: earned
         ? [`Result: it did not happen, as the answer says. The bar for saying so is met: the question asks whether it exists, `, ...cov.filter((c) => c.coverage === "complete").flatMap((c, i): Span[] => [i ? ", " : "", { e: c.seq }]), " is complete, and says the event would have left a trace there."]
         : cov.length
-          ? [`Result: no evidence that ${cov.map((c) => c.value.replace(/\.$/, "").replace(/^(A|An|The) /, (x) => x.toLowerCase())).join("; ")} was found in ${cov.map(scope).join("; ")}. This is a bounded negative: it says what was not found where, not that it did not happen.`]
+          ? [`Result: no evidence that ${cov.map((c) => propositionWords(c.value)).join("; ")} was found in ${cov.map(scope).join("; ")}. This is a bounded negative: it says what was not found where, not that it did not happen.`]
           : ["Result: a bounded negative (no evidence found), with no coverage record naming its scope."],
     });
   } else out.push({ k: "p", s: [`Result: ${resultWords(result)}.`] });
@@ -1662,7 +1699,7 @@ function resultBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
     });
   }
   if (NEGATIVE_RESULTS.has(result)) {
-    const r = negativeReview(a, run.entries, run.attestations);
+    const r = negativeReview(a, run.entries, run.attestations, run.disputes);
     out.push(
       r.reviewed
         ? { k: "p", s: [`Reviewed by ${r.by.join(", ")}: ${r.reviews.map((x) => negativeReviewWords(x.review)).join(" / ")}.`] }

@@ -177,6 +177,12 @@ export type SelfCompactDeps = {
   keepText?: (cwd: string, text: string) => Promise<KeptText>;
   /** The bounds, when the operator changed them (SWARM_COMPACT_SUMMARY_SEC, SWARM_COMPACT_TIMEOUT_SEC); the constants above otherwise. */
   bounds?: { summaryAttemptMs?: number; summaryMaxChars?: number; compactionMs?: number };
+  /**
+   * The run's pause, when it is paused (the stop policy): a compaction calls
+   * the provider itself, so while it stands no summary attempt, retry or
+   * fallback goes out, and the compaction is cancelled until the run goes on.
+   */
+  paused?: (cwd: string) => Promise<{ reason: string; since: string } | null>;
 };
 
 /** The model a summary call goes to, and why it is that one. */
@@ -1070,6 +1076,13 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     let lastError = "unknown error";
     for (let attempt = 1; attempt <= SUMMARY_ATTEMPTS; attempt++) {
       if (event.signal.aborted) return { cancel: true };
+      // Held while the run is paused: cancelled, so neither this attempt nor Pi's own summarizer calls the provider.
+      const held = deps.paused ? await deps.paused(ctx.cwd).catch(() => null) : null;
+      if (held) {
+        R.lastCompactionError = `the run is paused (${held.reason}, since ${held.since}): the compaction waits for the operator to extend it`;
+        await trace(ctx.cwd, "compact_held", { reason: held.reason, since: held.since, attempt }, { ok: false, cancelled: true });
+        return { cancel: true };
+      }
       try {
         const { summary, usage, truncated, model, modelSource } = await generateSummary(event, ctx, prompt);
         return {

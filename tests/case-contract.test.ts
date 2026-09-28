@@ -239,10 +239,10 @@ test("evidence add is refused under more_evidence: no, and an acceptance made be
   const { S, base, a0 } = await run();
   const operator: Q.Actor = { kind: "human", role: "operator", person: "t@lab", enrolled: false, os_user: "t", host: "lab", via: "cli", identity: "claimed" };
   ok(await Q.act(S, operator, "accept", { q: "Q-1", as: "not_determinable", why: "no message survives", expected_rev: 1 }));
-  assert.equal(Q.acceptanceStands((await Q.questionsSnapshot(S)).state.questions.get("Q-1")!), true);
+  assert.equal(Q.acceptanceStands((await Q.questionsSnapshot(S)).state.questions.get("Q-1")!, (await Q.viewContext(S)).ledger), true);
   added_(await admitMaterial(S, { mode: "evidence", path: await lateFile(base, "server.log", "line\n"), why: "the mail server's log", questions: ["Q-1"], supplied_by: "t", via: "cli" }));
   const q1 = (await Q.questionsSnapshot(S)).state.questions.get("Q-1")!;
-  assert.equal(Q.acceptanceStands(q1), false, "new evidence lifts the acceptance");
+  assert.equal(Q.acceptanceStands(q1, (await Q.viewContext(S)).ledger), false, "new evidence lifts the acceptance");
   void a0;
 });
 

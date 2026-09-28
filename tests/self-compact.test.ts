@@ -215,7 +215,7 @@ test("the recovery reducer rebuilds a hand-off from the branch", () => {
 });
 
 test("the trace names self-compaction writes are reserved from forged tools", () => {
-  for (const name of ["self_compact", "context", "compact_notice", "compact_warning", "compact_forced", "compact_hold", "compact_note", "compact_start", "compact_done", "compact_failed", "compact_config"]) {
+  for (const name of ["self_compact", "context", "compact_notice", "compact_warning", "compact_forced", "compact_hold", "compact_note", "compact_start", "compact_done", "compact_failed", "compact_config", "compact_held"]) {
     assert.ok(TOOL_RESERVED_NAMES.has(name), `${name} is reserved`);
   }
 });

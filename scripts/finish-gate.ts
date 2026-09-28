@@ -103,14 +103,14 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
     for (const id of snap.goal.questions) {
       const key = `question:${id}`;
       const said = outcomes.get(key) ?? (sawAnswers ? "unanswered" : snap.answered.has(id) ? "has an answer (not checked)" : "unanswered");
-      // A goal question the operator accepted (bounded, or not determinable) for its current revision is disposed: it limits the run and holds nothing.
+      // A goal question the operator accepted (bounded, or not determinable), for its current revision and the answer that stands now, is disposed: it limits the run and holds nothing.
       const reg = qs?.bySection.get(id);
       // A goal question the register holds as withdrawn is off what the run must answer: named, holding nothing.
       if (reg?.withdrawn) {
         questions.push({ id, outcome: "withdrawn", blocks: [] });
         continue;
       }
-      const outcome = said !== "answered" && reg && Q.acceptanceStands(reg) ? "accepted" : said;
+      const outcome = said !== "answered" && reg && Q.acceptanceStands(reg, snap.ledger) ? "accepted" : said;
       const blocks: string[] = [];
       if (outcome !== "answered" && outcome !== "accepted") {
         for (const l of snap.state.leads.values()) {
@@ -135,6 +135,9 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
     return { defects: [], limited: [], questions: [], until_solved: until, error: `the lead register could not be read: ${(err as Error).message}` };
   }
 }
+
+/** The negative bar's defects: fixed, never named, and never excused by an acceptance. */
+const NEGATIVE_BAR_CODES = new Set(["coverage_missing", "coverage_stale", "negative_unreviewed", "wording"]);
 
 /** How a register question's blockers read: its leads, open or closed limiting. */
 function blocksOf(snap: L.LeadsSnapshot, section: string): string[] {
@@ -181,7 +184,20 @@ async function registerGate(sandbox: string, snap: L.LeadsSnapshot, qs: Q.Questi
       accepted.push(line);
     }
   }
-  const extra = Q.registerQuestions(qs).filter((q) => q.materiality === "material" && !Q.acceptanceStands(q));
+  const material = Q.registerQuestions(qs).filter((q) => q.materiality === "material");
+  const extra = material.filter((q) => !Q.acceptanceStands(q, snap.ledger));
+  // An accepted question is excused its answer, never the negative bar: a
+  // negative it rests on is covered, reviewed and worded as one, whatever
+  // was accepted.
+  const acceptedQs = material.filter((q) => Q.acceptanceStands(q, snap.ledger));
+  if (acceptedQs.length) {
+    const r = await checkLedgerAnswers(sandbox, acceptedQs.map((q) => `question:${q.section}`), acceptedQs.filter((q) => q.expects === "existence").map((q) => q.section));
+    const bySection = new Map(acceptedQs.map((q) => [`question:${q.section}`, q]));
+    for (const d of r.defects) {
+      const q = d.section ? bySection.get(d.section) : undefined;
+      if (q && NEGATIVE_BAR_CODES.has(d.code)) defects.push({ code: "question_answer", question: q.id, what: d.what, fix: d.fix });
+    }
+  }
   if (extra.length) {
     const sections = extra.map((q) => `question:${q.section}`);
     const r = await checkLedgerAnswers(sandbox, sections, extra.filter((q) => q.expects === "existence").map((q) => q.section));

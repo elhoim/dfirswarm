@@ -2524,7 +2524,9 @@ export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: stri
   check("the network grants", sealed.network?.grants.lines, sealed.network?.grants.head, lineHashField(now.grants));
   check("the network fetches", sealed.network?.fetches.lines, sealed.network?.fetches.head, lineHashField(now.fetches));
   if (sealed.journal) check("the store journal", sealed.journal.lines, sealed.journal.head, now.journal === null ? [] : verifyJournalText(now.journal).hashes);
-  if (sealed.model_gateway && now.gateway !== null) {
+  if (sealed.model_gateway && now.gateway === null && sealed.model_gateway.lines > 0) {
+    broken.push(`the model gateway log it sealed (${sealed.model_gateway.lines} lines) is not here`);
+  } else if (sealed.model_gateway && now.gateway !== null) {
     const lines = now.gateway.split("\n").filter((l) => l.trim());
     const first = lines.slice(0, sealed.model_gateway.lines);
     const sha = first.length ? createHash("sha256").update(`${first.join("\n")}\n`).digest("hex") : null;

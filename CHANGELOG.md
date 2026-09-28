@@ -242,6 +242,23 @@ All notable changes to this project. The format follows
   characters), and a job's output is kept whole on disk and served whole
   (`/api/jobs/<id>/output`) where the list carries its last 64 KiB.
 - [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md).
+- **After review** (seventeen findings, each with a test that failed before
+  its fix): coverage records bind their results by hash (`coverage_stale`);
+  `premise_not_supported` rests on a finding and absolute wording is held
+  whatever the result; the report states a negative from its coverage
+  record; an acceptance is of the answer that stood; coverage names objects
+  as the job scopes do and takes directories; release verification runs the
+  chains' own verifiers and relaxes to a prefix only after a resume anchored
+  at a verified boundary; the bound report is kept at `release/bound/`; a
+  gone gateway log breaks an earlier seal; a resume is anchored before
+  anything moves; compaction and the pausing call are held while paused;
+  extend and stop are ordered under one lock; a pause is told once whoever
+  wrote it; the watchdog runs at `--idle-nudge-sec 0` and retries a wake;
+  the kept start options hold no secret a pane can read (`resume --env
+  KEY=VALUE`; the notify command and the typed `--notify` targets are given
+  to the resume's kickoff again from `runs/notify/`), and a resumed run's
+  evidence image is attached again. An acceptance also stands only until
+  new evidence arrives for its question (`evidence add`).
 
 ### Added: a dynamic network, decided by rules and made on the host
 

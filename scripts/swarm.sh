@@ -1884,6 +1884,42 @@ attach_inputs_image() {
   echo "$device"
 }
 
+# A resumed run whose evidence is an image the stop detached: attached again,
+# read-only, from the image the manifest names, and held to the manifest by
+# every file's name and size (a full re-hash is custody's, at the next stop).
+# An image that does not hold the manifest's files is detached again, and the
+# resume refused. Nothing to do for a run whose evidence is not an image, or
+# whose image is attached already.
+resume_inputs_image() {
+  local sandbox="$1" image verdict
+  [[ "$(jq -r '.guard // empty' "$sandbox/inputs.json" 2>/dev/null)" == image ]] || return 0
+  if [[ ! -f "$sandbox/inputs.device" ]]; then
+    image="$(jq -r '.source // empty' "$sandbox/inputs.json")"
+    [[ -n "$image" && -f "$image" ]] || { echo "BLOCKER: the run's evidence is the image $image, which is not there: a resume goes on with the evidence the run was given. Nothing was changed." >&2; return 1; }
+    ( attach_inputs_image "$sandbox" "$image" >/dev/null ) || return 1
+  fi
+  verdict="$(python3 - "$sandbox" <<'PY'
+import json, os, sys
+sb = sys.argv[1]
+m = json.load(open(os.path.join(sb, "inputs.json")))
+bad = []
+for f in m.get("files", []):
+    p = os.path.join(sb, f["path"])
+    if not os.path.isfile(p):
+        bad.append(f"{f['path']} is not there")
+    elif f.get("bytes") is not None and os.path.getsize(p) != f["bytes"]:
+        bad.append(f"{f['path']} is {os.path.getsize(p)} bytes, not {f['bytes']}")
+print("; ".join(bad[:10]) + (f"; and {len(bad) - 10} more" if len(bad) > 10 else ""))
+PY
+)"
+  if [[ -n "$verdict" ]]; then
+    detach_inputs_image "$sandbox"
+    echo "BLOCKER: the image attached for the resume does not hold the evidence the run was given ($verdict). It was detached again; nothing was changed." >&2
+    return 1
+  fi
+  echo "Inputs:       the image $(jq -r '.source' "$sandbox/inputs.json") attached again, read-only; it holds every file inputs.json names, by name and size"
+}
+
 detach_inputs_image() {
   local sandbox="$1" device
   [[ -f "$sandbox/inputs.device" ]] || return 0
@@ -5375,7 +5411,10 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   if [[ "$quarantine" -eq 1 && "$inputs_guard" != "none" ]]; then quarantine_held=1; fi
   if [[ -n "$resume_of" ]]; then
     # The inputs the run was given are the ones it goes on with: installed,
-    # manifested and anchored when it started, never again.
+    # manifested and anchored when it started, never again. An image the
+    # stop detached is attached again (swarm.sh resume did, before anything
+    # moved; a resume prepared earlier and started now, here).
+    resume_inputs_image "$sandbox" >/dev/null || exit 2
     [[ -f "$sandbox/inputs.json" ]] && echo "Inputs:       as the run was given them ($(jq -r '(.files // []) | length' "$sandbox/inputs.json") file(s), inputs.json unchanged)"
   elif [[ -n "$inputs_dir" ]]; then
     # One set is inputs/ itself, as it always was. Several are named, each
@@ -5683,7 +5722,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   # freezes that directory for the run, so the registry, which the kickoff
   # rewrites by rename, would stop being readable and the finish line would
   # fall back to SWARM.md, which it does not trust. A VM mounts none of them.
-  local earlier_hidden=() earlier_skipped=() reviews_hidden="" earlier_by="" earlier_why=""
+  local earlier_hidden=() earlier_skipped=() reviews_hidden="" earlier_by="" earlier_why="" stores_hidden=()
   if [[ "$isolation" == "microvm" ]]; then
     earlier_by="microvm"
     earlier_why="no VM mounts another run's sandbox or the reviews"
@@ -5704,6 +5743,19 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
       reviews_hidden="$(cd "$RUNS_DIR/reviews" && pwd -P)"
       guard_args+=(--no-read "$reviews_hidden")
     fi
+    # The operator's own stores beside the registry: the start options kept
+    # for a resume (an --env value may be a secret) and the notify commands
+    # (a webhook's URL often is). Made 0700 before any pane starts, and denied
+    # to the panes, of this run and of every other.
+    local store_dir
+    for store_dir in resume notify; do
+      [[ -e "$RUNS_DIR/$store_dir" ]] || ( umask 077; mkdir -p "$RUNS_DIR/$store_dir" ) 2>/dev/null || true
+      chmod 700 "$RUNS_DIR/$store_dir" 2>/dev/null || true
+      if [[ -d "$RUNS_DIR/$store_dir" ]]; then
+        guard_args+=(--no-read "$(cd "$RUNS_DIR/$store_dir" && pwd -P)")
+        stores_hidden+=("$store_dir")
+      fi
+    done
     earlier_why="denied to the panes at the kernel ($write_guard_mode)"
   elif [[ "$write_guard_mode" == "landlock" ]]; then
     earlier_why="Landlock alone cannot deny a directory under runs/ without cutting the panes off the registry the finish line reads"
@@ -6001,7 +6053,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       '{isolation: $isolation, guard: $guard, keys_hidden: $hid, hidden: $hidden, agent_sockets: $sockets, exposed: $exposed, exposure_accepted: ($accepted == 1), why: $why}')" \
     --argjson earlier_runs_hidden "$(jq -nc --arg by "$earlier_by" --argjson count "${#earlier_hidden[@]}" --arg reviews "$reviews_hidden" --arg why "$earlier_why" \
       --argjson skipped "$(printf '%s\n' ${earlier_skipped[@]+"${earlier_skipped[@]}"} | jq -R . | jq -c -s 'map(select(. != ""))')" \
-      '{by: (if $by == "" then null else $by end), sandboxes: $count, reviews: (if $reviews == "" then null else $reviews end), skipped: $skipped, why: $why}')" \
+      --argjson stores "$(printf '%s\n' ${stores_hidden[@]+"${stores_hidden[@]}"} | jq -R . | jq -c -s 'map(select(. != ""))')" \
+      '{by: (if $by == "" then null else $by end), sandboxes: $count, reviews: (if $reviews == "" then null else $reviews end), stores: $stores, skipped: $skipped, why: $why}')" \
     --arg herdr_socket "$(if [[ "$isolation" == "microvm" ]]; then echo unreachable; elif [[ "$herdr_sealed" -eq 1 && "$write_guard_mode" == "seatbelt" ]]; then echo sealed; elif [[ "$herdr_sealed" -eq 1 ]]; then echo masked; elif [[ "$seal_herdr" -eq 0 ]]; then echo open; else echo unenforced; fi)" \
     --arg pi_extensions "$pi_extensions" \
     --arg attribution "$attribution" \
@@ -6140,11 +6193,28 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # where no agent reaches it: custody compares the manifest against this,
   # so a manifest rewritten inside the run is caught rather than trusted.
   registry_upsert "$rec" || exit 1
-  # What the run was started with, whole, for swarm.sh resume: outside the
-  # run and 0600, since an --env value or the notify command may be a secret.
+  # What the run was started with, for swarm.sh resume: outside the run,
+  # 0600, in a directory denied to the panes where the guard can deny it (a
+  # VM mounts none of runs/). The notify command is never in it: it is kept
+  # once, in runs/notify/, and a resume takes it from there. An --env value
+  # is kept only where no pane can read it; elsewhere its name is, and the
+  # resume asks for the value again (swarm.sh resume --env KEY=VALUE).
   if [[ -z "$resume_of" ]]; then
+    local keep_env=0
+    [[ "$isolation" == "microvm" || " ${stores_hidden[*]-} " == *" resume "* ]] && keep_env=1
     ( umask 077; mkdir -p "$RUNS_DIR/resume" && chmod 700 "$RUNS_DIR/resume" && rm -f "$RUNS_DIR/resume/$swarm_id.argv.json" \
-      && node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)) + "\n")' -- ${start_args[@]+"${start_args[@]}"} > "$RUNS_DIR/resume/$swarm_id.argv.json" && chmod 600 "$RUNS_DIR/resume/$swarm_id.argv.json" ) \
+      && node -e '
+        const [keep, ...args] = process.argv.slice(1);
+        const argv = [];
+        const dropped = [];
+        let notify = false;
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === "--notify") { i++; notify = true; continue; }
+          if (args[i] === "--env" && keep !== "1") { dropped.push(String(args[++i] ?? "").split("=")[0]); continue; }
+          argv.push(args[i]);
+        }
+        process.stdout.write(JSON.stringify({ argv, dropped_env: dropped, notify }) + "\n");
+      ' -- "$keep_env" ${start_args[@]+"${start_args[@]}"} > "$RUNS_DIR/resume/$swarm_id.argv.json" && chmod 600 "$RUNS_DIR/resume/$swarm_id.argv.json" ) \
       || echo "WARN: the start options could not be kept in $RUNS_DIR/resume/; swarm.sh resume will need them after --." >&2
   fi
   # The question register opens with the goal's questions and objectives
@@ -6311,6 +6381,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   fi
   if [[ "$idle_nudge_sec" -gt 0 ]]; then
     echo "Idle nudge:   an agent silent for ${idle_nudge_sec}s is prompted to continue ($([[ "${until_solved:-0}" -eq 1 ]] && echo "3 times, then on with backoff: the run is until solved; a provider error is retried the same way" || echo "up to 3 times"))"
+  else
+    echo "Idle nudge:   off (--idle-nudge-sec 0): no agent is prompted; the watchdog still runs the stop policy (the pause and its notice, the wake after an extension, a stop proposed when nothing yields)"
   fi
   if [[ -n "$cap_per_agent" && "$metered" -eq 1 ]]; then
     echo "Per-agent cap: \$$cap_per_agent (an agent over it is steered, then stopped on its own)"
@@ -6668,45 +6740,46 @@ EOF
      | .write_guard_measured = $measured' <<<"$rec")"
   registry_upsert "$rec"
 
-  if [[ "$idle_nudge_sec" -gt 0 ]]; then
-    # The watchdog's own token, in its environment. Without it every line it
-    # wrote came back `agent_unverified: true` — a run with the watchdog on
-    # by default reported its own bookkeeping as unattributable for the whole
-    # run, which buries the count that is supposed to mean something.
-    #
-    # `swarm.sh reap` is a separate invocation and the tokens live only in the
-    # kickoff's memory, so its lines stay unverified. That is the honest
-    # answer rather than a wrong one: a token on disk would be readable by
-    # every pane, since the guard denies writes and leaves reads open.
-    local hub_env=() hub_dir_now="" nudge_script
-    if [[ "$isolation" == "microvm" ]] && hub_dir_now="$(hub_dir_of "$sandbox")"; then
-      hub_env=(SWARM_HUB_ADMIN="$hub_dir_now/admin.sock" SWARM_HUB_STATUS="$hub_dir_now/status.json" SWARM_HUB_DIR="$hub_dir_now")
-    fi
-    # The run's frozen copy when it has one, as the hub and its keeper.
-    nudge_script="$(run_script "$hub_dir_now" scripts/idle-nudge.sh)"
+  # The watchdog runs whatever --idle-nudge-sec says: with 0 it prompts
+  # nobody, and still holds the stop policy (the backstop, the pause's
+  # notice, the wake after an extension, the proposal of a stop).
+  # The watchdog's own token, in its environment. Without it every line it
+  # wrote came back `agent_unverified: true` — a run with the watchdog on
+  # by default reported its own bookkeeping as unattributable for the whole
+  # run, which buries the count that is supposed to mean something.
+  #
+  # `swarm.sh reap` is a separate invocation and the tokens live only in the
+  # kickoff's memory, so its lines stay unverified. That is the honest
+  # answer rather than a wrong one: a token on disk would be readable by
+  # every pane, since the guard denies writes and leaves reads open.
+  local hub_env=() hub_dir_now="" nudge_script
+  if [[ "$isolation" == "microvm" ]] && hub_dir_now="$(hub_dir_of "$sandbox")"; then
+    hub_env=(SWARM_HUB_ADMIN="$hub_dir_now/admin.sock" SWARM_HUB_STATUS="$hub_dir_now/status.json" SWARM_HUB_DIR="$hub_dir_now")
+  fi
+  # The run's frozen copy when it has one, as the hub and its keeper.
+  nudge_script="$(run_script "$hub_dir_now" scripts/idle-nudge.sh)"
+  detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
+    bash "$nudge_script" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
+    >"$sandbox/traces/idle-nudge.log" 2>&1 &
+  echo $! > "$sandbox/idle-nudge.pid"
+  # On the Linux runs 5 and 6 (2026-09-22) the watchdog started here was
+  # found dead a minute later: an empty log, no state file, nothing in the
+  # journal, while the same detach from the same tmux session survives a
+  # probe. The cause is not established. Until it is, the kickoff looks two
+  # seconds later, starts the watchdog once more with stdin closed when it
+  # is gone, and says which it was; an agent that ends its turn with no
+  # watchdog sits idle until the wall clock, which is what run 6 showed.
+  sleep 2
+  if ! kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
     detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
       bash "$nudge_script" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
-      >"$sandbox/traces/idle-nudge.log" 2>&1 &
+      >>"$sandbox/traces/idle-nudge.log" 2>&1 </dev/null &
     echo $! > "$sandbox/idle-nudge.pid"
-    # On the Linux runs 5 and 6 (2026-09-22) the watchdog started here was
-    # found dead a minute later: an empty log, no state file, nothing in the
-    # journal, while the same detach from the same tmux session survives a
-    # probe. The cause is not established. Until it is, the kickoff looks two
-    # seconds later, starts the watchdog once more with stdin closed when it
-    # is gone, and says which it was; an agent that ends its turn with no
-    # watchdog sits idle until the wall clock, which is what run 6 showed.
     sleep 2
-    if ! kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
-      detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
-        bash "$nudge_script" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
-        >>"$sandbox/traces/idle-nudge.log" 2>&1 </dev/null &
-      echo $! > "$sandbox/idle-nudge.pid"
-      sleep 2
-      if kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
-        echo "Idle nudge:   the watchdog exited right after it started and was started again; it is running now (traces/idle-nudge.log)"
-      else
-        echo "WARN: the idle watchdog exited right after it started, twice. Agents that end their turns will not be prompted; run it by hand: scripts/idle-nudge.sh --sandbox $sandbox" >&2
-      fi
+    if kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
+      echo "Idle nudge:   the watchdog exited right after it started and was started again; it is running now (traces/idle-nudge.log)"
+    else
+      echo "WARN: the idle watchdog exited right after it started, twice. Agents that end their turns will not be prompted; run it by hand: scripts/idle-nudge.sh --sandbox $sandbox" >&2
     fi
   fi
 
@@ -9641,9 +9714,9 @@ cmd_resume() {
   # As the operator typed it: the run's trace names the resume with these.
   RESUME_ARGS=("$@")
   local id="${1:-}"
-  [[ -n "$id" && "$id" != -* ]] || die_usage "resume requires <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--minutes N] [--tokens N] [--usd N] [--no-start] [-- START OPTIONS]"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "resume requires <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]"
   shift
-  local questions=() qfile="" as="" why="" no_start=0 prep=() given=() sep=0
+  local questions=() qfile="" as="" why="" no_start=0 prep=() given=() sep=0 env_given=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --question) [[ -n "${2:-}" ]] || die_usage "--question takes the question's text"; questions+=("$2"); shift 2 ;;
@@ -9652,6 +9725,7 @@ cmd_resume() {
       --why) why="${2:-}"; shift 2 ;;
       --minutes|--tokens|--usd) [[ "${2:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die_usage "$1 takes a number"; prep+=("$1" "$2"); shift 2 ;;
       --no-start) no_start=1; shift ;;
+      --env) [[ "${2:-}" == *=* ]] || die_usage "--env takes KEY=VALUE"; env_given+=("$2"); shift 2 ;;
       --) shift; given=("$@"); sep=1; break ;;
       *) die_usage "resume: unknown option $1" ;;
     esac
@@ -9690,11 +9764,21 @@ cmd_resume() {
     ' "$qfile")
   fi
   # The options it was started with: kept at kickoff, or given after --.
-  local start_argv=() a argv_file="$RUNS_DIR/resume/$id.argv.json"
+  local start_argv=() a argv_file="$RUNS_DIR/resume/$id.argv.json" dropped_env=() kept_notify=0 k
   if [[ "$sep" -eq 1 ]]; then
     start_argv=(${given[@]+"${given[@]}"})
   elif [[ -f "$argv_file" ]]; then
-    while IFS= read -r -d '' a; do start_argv+=("$a"); done < <(node -e 'for (const a of JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))) process.stdout.write(`${a}\0`)' "$argv_file")
+    # {argv, dropped_env, notify}; a plain list from before the notify
+    # command and the --env values were kept apart reads as the argv.
+    while IFS= read -r -d '' a; do start_argv+=("$a"); done < <(node -e '
+      const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      for (const a of Array.isArray(j) ? j : j.argv ?? []) process.stdout.write(`${a}\0`);
+    ' "$argv_file")
+    while IFS= read -r -d '' a; do [[ -n "$a" ]] && dropped_env+=("$a"); done < <(node -e '
+      const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      for (const k of Array.isArray(j) ? [] : j.dropped_env ?? []) process.stdout.write(`${k}\0`);
+    ' "$argv_file")
+    [[ "$(jq -r 'if type == "object" then (.notify // false) else false end' "$argv_file" 2>/dev/null)" == true ]] && kept_notify=1
   else
     echo "BLOCKER: run $id was started before its start options were kept for a resume. Give them after --: swarm.sh resume $id -- --model … --n … --cap-usd … (as it was started; swarm.sh status $id shows the command)." >&2
     exit 2
@@ -9716,6 +9800,31 @@ cmd_resume() {
     filtered+=("$a")
   done
   start_argv=(${filtered[@]+"${filtered[@]}"})
+  # An --env value that was not kept (no pane could be kept from reading it) is given again.
+  local missing_env=() e
+  for k in ${dropped_env[@]+"${dropped_env[@]}"}; do
+    a=0
+    for e in ${env_given[@]+"${env_given[@]}"}; do [[ "${e%%=*}" == "$k" ]] && a=1; done
+    [[ "$a" -eq 1 ]] || missing_env+=("$k")
+  done
+  if ((${#missing_env[@]})); then
+    echo "BLOCKER: run $id was started with --env ${missing_env[*]}, whose value was not kept: on this host the panes could have read it. Give it again: swarm.sh resume $id --env KEY=VALUE. Nothing was changed." >&2
+    exit 2
+  fi
+  for e in ${env_given[@]+"${env_given[@]}"}; do start_argv+=(--env "$e"); done
+  # The notify command and the typed targets (desktop:, ntfy:<topic>,
+  # mailto:<address>), from their own store (never from the kept options):
+  # given to the kickoff again, which checks each and writes the store as it
+  # was, so the resumed run is told as the first segment was and says so.
+  if [[ "$kept_notify" -eq 1 && -f "$RUNS_DIR/notify/$id.cmd" && ! -L "$RUNS_DIR/notify/$id.cmd" ]]; then
+    start_argv+=(--notify "$(cat "$RUNS_DIR/notify/$id.cmd")")
+  fi
+  if [[ "$kept_notify" -eq 1 && -f "$RUNS_DIR/notify/$id.targets" && ! -L "$RUNS_DIR/notify/$id.targets" ]]; then
+    while IFS= read -r a; do [[ -n "$a" ]] && start_argv+=(--notify "$a"); done < "$RUNS_DIR/notify/$id.targets"
+  fi
+  # Evidence held on an image is attached again, and held to the manifest,
+  # before anything of the run moves.
+  resume_inputs_image "$sandbox" || exit 2
   # The same seats, checked before anything moves: the start would refuse
   # another number only after the resume was prepared.
   local want_n="" have_n
@@ -10997,7 +11106,7 @@ EOF
       ;;
     resume) cat <<'EOF'
   resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
-              [--minutes N] [--tokens N] [--usd N] [--no-start] [-- START OPTIONS]
+              [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]
       Continue a run that ended (stopped, done, failed): the same run, in the same
       sandbox, on the same ledger, registers, board and trace. What marked its end
       (the sentinel, done/STOPPED, the seats' done files) moves whole to
@@ -11009,7 +11118,11 @@ EOF
       given (--question, or a file of them, one a line or a JSON list) are asked as
       analyst questions, with --why (default: asked when the run was resumed) and
       --as. The run starts with the options it was started with (kept at kickoff
-      outside the run, 0600); a run from before that gives them after --. The next
+      outside the run, 0600, denied to the panes where the guard can; the notify
+      command is taken from runs/notify/, and an --env value no pane could be kept
+      from reading is not kept: give it again with --env KEY=VALUE); a run from
+      before that gives them after --. Evidence on an image the stop detached is
+      attached again and held to the manifest before anything moves. The next
       stop seals the continuation anew (a new custody verdict and draft release);
       every earlier verdict still verifies as a prefix (custody-verify shows each),
       and a signed release stays valid for what it bound: the continuation's answers

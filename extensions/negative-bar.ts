@@ -31,7 +31,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 // --- the vocabulary ---------------------------------------------------------------------------
@@ -160,7 +160,13 @@ async function generations(sandboxRoot: string): Promise<GenRecord[]> {
   return out;
 }
 
-/** A ref or a run path as the hub compares it: located, with its digest when inputs.json or the store's manifest has one. */
+/**
+ * A ref or a run path as the hub compares it: located as the job scopes
+ * locate it, with its digest when inputs.json or the store's manifest has
+ * one. A digest names the object that has it (an input, or a stored file),
+ * and a path in the store names that job's output, so the same bytes are
+ * the same object whichever way a job or a record named them.
+ */
 async function objectOf(sandboxRoot: string, ref: string): Promise<Obj | { reason: string }> {
   const { locate } = await import("../scripts/job-scope.ts");
   const text = ref.trim();
@@ -169,6 +175,20 @@ async function objectOf(sandboxRoot: string, ref: string): Promise<Obj | { reaso
   const at = locate(text);
   if ("reason" in at) return { reason: at.reason };
   const obj: Obj = { ref: text, path: at.path, dir: at.dir, ...(at.sha ? { sha: at.sha } : {}) };
+  if (/^sha256:/.test(text)) {
+    // A digest is the input, or the stored file, that has it.
+    const { resolveRef } = await import("../scripts/evidence-store.ts");
+    const r = await resolveRef(sandboxRoot, text).catch(() => null);
+    if (r?.ok && "path" in r && typeof r.path === "string" && r.path) obj.path = r.path;
+    return obj;
+  }
+  const stored = /^store\/(jobs|imports)\/([a-z0-9-]+)\/out\/(.+)$/.exec(obj.path);
+  if (stored && !obj.dir && !obj.sha) {
+    // A path in the store is its job's output, by the digest its manifest seals.
+    const { resolveRef } = await import("../scripts/evidence-store.ts");
+    const r = await resolveRef(sandboxRoot, `${stored[1] === "jobs" ? "job" : "import"}:${stored[2]}/${stored[3]}`).catch(() => null);
+    if (r?.ok && "sha256" in r && typeof r.sha256 === "string") obj.sha = r.sha256;
+  }
   if (!obj.dir && !obj.sha && /^(input|job|import):/.test(text)) {
     const { resolveRef } = await import("../scripts/evidence-store.ts");
     const r = await resolveRef(sandboxRoot, text).catch(() => null);
@@ -207,11 +227,32 @@ async function inputFiles(sandboxRoot: string): Promise<Array<{ path: string; sh
 /** Whether `inner` is `outer` or inside it, by place or by digest. */
 function contains(outer: Obj, inner: Obj): boolean {
   if (outer.path === inner.path) return true;
+  // A member is inside its generation's directory, and inside the catalogue.
+  if (inner.member && outer.dir && (outer.path === "catalog" || outer.path === "catalog/gen" || outer.path === `catalog/gen/${inner.member.gen}`)) return true;
   if (outer.dir && inner.path.startsWith(`${outer.path}/`)) return true;
   if (outer.dir && outer.path === "inputs" && inner.path.startsWith("inputs/")) return true;
   if (outer.sha && inner.sha && outer.sha === inner.sha) return true;
   if (outer.member && inner.member) return outer.member.gen === inner.member.gen && outer.member.n === inner.member.n;
   return false;
+}
+
+/**
+ * Whether a coverage record may name `ref` as an object: a ref that
+ * resolves (checked by the caller), or a directory the job scopes take and
+ * the run holds: an evidence directory with files under it in inputs.json,
+ * a job's or an import's whole output, a catalogue generation. Its reason
+ * when not.
+ */
+export async function coverageDirectory(sandboxRoot: string, ref: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const obj = await objectOf(sandboxRoot, ref);
+  if ("reason" in obj) return { ok: false, reason: obj.reason };
+  if (!obj.dir) return { ok: false, reason: `${ref} is not a directory of the run's objects` };
+  if (obj.path === "inputs" || obj.path.startsWith("inputs/")) {
+    const files = await inputFiles(sandboxRoot);
+    return files.some((f) => obj.path === "inputs" || f.path.startsWith(`${obj.path}/`)) ? { ok: true } : { ok: false, reason: `inputs.json lists nothing under ${obj.path}/` };
+  }
+  const st = await stat(join(sandboxRoot, obj.path)).catch(() => null);
+  return st?.isDirectory() ? { ok: true } : { ok: false, reason: `${obj.path}/ is not in the run` };
 }
 
 // --- the jobs behind a record ---------------------------------------------------------------------

@@ -293,10 +293,13 @@ Ledger (only when `record` is in your tool list)
   An amendment makes the standing answer stale: read the new revision and record the answer
   again with `supersedes` and the new `question_rev`, the same words if they still hold. An answer to a question gives its `result`: established
   (a finding settles it), partial, bounded_negative (nothing found, within what was searched),
-  not_determinable (the evidence cannot say), out_of_scope, or premise_not_supported. A negative
-  is bounded: word it "No evidence of <what> was found in <which objects, which time range>", never
-  "<what> did not happen"; a bounded_negative or not_determinable on a material question cites a
-  coverage record naming the question. `asserts_absence: true` (it did not happen) is only for a
+  not_determinable (the evidence cannot say), out_of_scope, or premise_not_supported (it rests on
+  a finding that shows the premise false; a search that found nothing is a bounded_negative). A
+  negative is bounded: word it "No evidence of <what> was found in <which objects, which time
+  range>", never "<what> did not happen", whatever the result; a bounded_negative or
+  not_determinable on a material question cites a coverage record naming the question, and the
+  report states it from that record. A coverage record binds its results: correct one of them and
+  record the coverage again, and the answer, and have it reviewed again. `asserts_absence: true` (it did not happen) is only for a
   question that asks whether something exists, resting on coverage the harness found complete
   whose detection opportunity says the event would have left a trace. It rests on at
   least one standing entry that names its question in `answers`; a superseded entry is cited only

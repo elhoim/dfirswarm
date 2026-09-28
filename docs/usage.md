@@ -32,7 +32,7 @@ scripts/swarm.sh status <id>
 scripts/swarm.sh stop <id> [--no-custody] [--custody-timeout SEC]
 scripts/swarm.sh extend <id> [--minutes N] [--tokens N] [--usd N]
 scripts/swarm.sh resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
-    [--minutes N] [--tokens N] [--usd N] [--no-start] [-- START OPTIONS]
+    [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]
 scripts/swarm.sh requests <id> list [--open] [--json] | show R-n [--json]
 scripts/swarm.sh requests <id> ack|answer|decline|withdraw|authorise|collecting|unavailable R-n [TEXT | --why TEXT] [--as ID]
 scripts/swarm.sh evidence <id> add PATH --why TEXT [--for R-n] [--question Q-n]... [--sha256 HEX] [--as ID] | list [--json]
@@ -98,7 +98,7 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--time-reference URL` | no | — | Record this https server's clock offset from the host's (its `Date` header, a second's precision) in the anchor at kickoff and in the verdict at custody. |
 | `--anchor-mirror TARGET` | no | — | Copy each release's digest line somewhere this account does not keep: `cmd:COMMAND` (the line on its stdin; its output kept whole as the receipt, `mirror-<k>.json` beside the release), `dir:PATH` (a directory that exists: a file per release, never written over), or `print` (the line and a QR-ready string in `case-file.txt`, and printed). An object-locked bucket's mount or a records custodian's separately administered archive is the independent copy; a folder of the same account is not, and a signed git remote is a witness of when a line was pushed, not a write-once store. Recorded as `anchor_mirror`; `SWARM_ANCHOR_MIRROR` for a run without one. |
 | `--custody-timeout SEC` | no | 14400 (`SWARM_CUSTODY_TIMEOUT`) | How long custody may take at the run's end, whoever takes it: the hub at a microVM run's finish, or `stop`. Recorded as `custody_timeout_sec`; `stop --custody-timeout` overrides it for that stop. |
-| `--notify TARGET` | no | none | Who is told when something happens to the run; repeatable. `desktop:` (a desktop notification: `osascript` on macOS, `notify-send` elsewhere), `ntfy:<topic>` (a push through ntfy.sh, or `ntfy:https://host/topic` for a server of your own), `mailto:<address>` (this host's `mail` or `sendmail`), or a command of yours. The events: `finished`, `finish_failed`, `stop_incomplete`, `budget_cap`, `wall_clock`, `paused` (a `cap-pause` run held at a cap), `extended` (a pause lifted by `extend`), `operator_request` (an operator request committed: a lead that needs you, an acquisition, a clarification, a network item, a stop proposed when nothing yields; fired by the hub, [ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)), `evidence_changed`, `chain_broken`, `agent_dead`, `collector_unreachable`, `hub_down`. A command gets one JSON line on stdin (`{event, run, at, detail}`); a typed target gets the event and the run's id. An operator request is told by its ids only (`R-n`, its kind, the lead's or question's id, its urgency), never what it asks: the notification leaves the host. Each target runs detached and has 30 seconds; a failure or a timeout goes to `traces/notify.log` and never stops the run. The targets are kept outside the run (`runs/notify/<id>.cmd` and `<id>.targets`, 0600, read only when they are regular files of yours; an ntfy topic is its secret); the registry records only that there is one (`notify: true`), and the operator's record shows their length, not their text. |
+| `--notify TARGET` | no | none | Who is told when something happens to the run; repeatable. `desktop:` (a desktop notification: `osascript` on macOS, `notify-send` elsewhere), `ntfy:<topic>` (a push through ntfy.sh, or `ntfy:https://host/topic` for a server of your own), `mailto:<address>` (this host's `mail` or `sendmail`), or a command of yours. The events: `finished`, `finish_failed`, `stop_incomplete`, `budget_cap`, `wall_clock`, `paused` (a `cap-pause` run held at a cap; the operator is told of a pause once, whichever process wrote it), `extended` (a pause lifted by `extend`), `operator_request` (an operator request committed: a lead that needs you, an acquisition, a clarification, a network item, a stop proposed when nothing yields; fired by the hub, [ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)), `evidence_changed`, `chain_broken`, `agent_dead`, `collector_unreachable`, `hub_down`. A command gets one JSON line on stdin (`{event, run, at, detail}`); a typed target gets the event and the run's id. An operator request is told by its ids only (`R-n`, its kind, the lead's or question's id, its urgency), never what it asks: the notification leaves the host. Each target runs detached and has 30 seconds; a failure or a timeout goes to `traces/notify.log` and never stops the run. The targets are kept outside the run (`runs/notify/<id>.cmd` and `<id>.targets`, 0600, in a directory denied to a host run's panes wherever the guard can deny, read only when they are regular files of yours; an ntfy topic is its secret), never in the start options kept for a resume: `swarm.sh resume` gives the command and each target to the kickoff again from that store. The registry records only that there is one (`notify: true`), and the operator's record shows their length, not their text. |
 | `--ledger-from RUN` | no | none | An earlier, finished run's ledger handed in as hypotheses to re-derive or refute: `prior/ledger.md`, read-only (on a VM run it is on the read-only floor), never copied into the new ledger. When the earlier run has an examiner review whose chain verifies, only the entries whose latest review accepted or amended them (and whose entry hash still matches) come in; otherwise every entry, each marked unreviewed. Refused for a run that is running, purged, or held for another case. Recorded as `ledger_from`. |
 | `--no-verify-copy` | no | content check on | By default the evidence copy is checked against its source by content: each copied file's source is read again and its SHA-256 compared with the manifest's (progress every 2 GiB on large sets), and a mismatch is a BLOCKER. This keeps only the check by name, kind and size. Recorded in `inputs.json` as `source_checked`. |
 | `--allow-root` | no | refused | Start a host run (`--isolation host`) as root. Without it that is a BLOCKER: root is not bound by the read-only modes a host run relies on. A microVM run started as root is warned about, not refused. Recorded as `allow_root`. |
@@ -410,7 +410,7 @@ report and the console say which.
   you act; another proposal comes only after a further window with nothing
   yielded. It is never an agent's vote.
 - `resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
-  [--minutes N] [--tokens N] [--usd N] [--no-start] [-- START OPTIONS]`
+  [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]`
   continues a run that ended, the same run in the same sandbox on the same
   chains. It is refused for a running run (that is `extend`), a purged one, and
   a prepared run that never started. First the budget: the wall clock counts on
@@ -426,15 +426,28 @@ report and the console say which.
   each chain's length and head). The questions given are asked as analyst
   questions (`--why` defaults to "asked when the run was resumed"). The run
   restarts with the options it was started with, which the kickoff keeps outside
-  the run (`runs/resume/<id>.argv.json`, 0600, removed by `purge`); a run from
-  before that gives them after `--`, and another number of seats is refused.
+  the run (`runs/resume/<id>.argv.json`, 0600, removed by `purge`; `runs/resume`
+  and `runs/notify` are denied to a host run's panes wherever the guard can
+  deny, as the reviews are). The notify command is taken from `runs/notify/`,
+  never kept with the options; an `--env` value is kept only where no pane can
+  read it, and elsewhere the resume refuses until it is given again
+  (`--env KEY=VALUE`). A run from before that gives its options after `--`, and
+  another number of seats is refused. Evidence on an image (`--inputs-image`)
+  that the stop detached is attached again, read-only, and held to the
+  manifest by every file's name and size before anything moves; the resume is
+  anchored beside the run first of all, and one that cannot be is refused with
+  nothing changed.
   `--no-start` prepares it only; a later `resume <id>` starts it as prepared.
   The next stop seals the continuation anew: a new custody verdict (the earlier
   one kept beside it) and a new draft release. `custody-verify` holds every
   earlier verdict the anchor names to the run as a prefix of its chains and
   prints each (`Earlier seal: … before a resume: holds as a prefix: …`);
-  `releases --verify` accepts a release whose ledger, attestations or disputes
-  are a prefix of the run's only when the anchor records a resume after it. A
+  `releases --verify` verifies the chains each release binds with their own
+  verifiers, and accepts a release whose ledger, attestations or disputes are a
+  prefix of the run's only when the anchor records, after it, a resume at a
+  boundary the verified chains hold. The report each release binds is kept at
+  `release/bound/<sha256>` when the run is resumed, so an earlier release still
+  verifies after the continuation writes its own report. A
   signed v1 stays untouched and valid for what it bound; the continuation's
   answers are adopted through a later version (`review --sign --amend-reason`).
   The console's run page has "Continue this run" (and Extend, and a paused
