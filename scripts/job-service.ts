@@ -42,6 +42,7 @@ import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolve
 import { CANARY_NAME, OBSERVE_GUEST, observedRun, observeWanted, readObservation } from "./job-observe.ts";
 import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
+import { indexOutputs, objectsMatch, opMatch, rankSimilar, reuseOf, sameAsOf, sameAsView, type Reuse, type SameAs, type Similar } from "./job-reuse.ts";
 
 export type JobKind = "tool" | "command" | "recipe" | "detect" | "import";
 
@@ -206,6 +207,12 @@ export type JobSpec = {
    * reaches the fetch service on the host and nothing else of it.
    */
   net_grants?: string[];
+  /**
+   * An intended reproduction of work another seat did (docs/adr/0017): a
+   * command or a tool only. Recorded, and counted apart by the metrics; the
+   * similar jobs are still named.
+   */
+  independent?: boolean;
 };
 
 export type Requester = { agent: string; name?: string; doing?: string };
@@ -245,11 +252,12 @@ export type JobRecord = {
   /** A recipe job's identity (recipe, its sha256, the image, the target): the same key is the same result. */
   dedup_key?: string;
   /**
-   * A command's or a tool's identity for the merge that is only measured
-   * (shadowKey): the same spec, byte for byte, over the same inputs by
-   * digest. Never used to merge; a job_would_merge line says when it would.
+   * A command's or a tool's objects by digest and its operation, for the
+   * reuse hints (job-reuse.ts, docs/adr/0017): never used to merge.
    */
-  shadow_key?: string;
+  reuse?: Reuse;
+  /** Its outputs that are an earlier job's, byte for byte (the job_same_as line). */
+  same_as?: SameAs[];
   cancel_requested?: string;
   lane?: Lane;
   image_choice?: ImageChoice;
@@ -331,6 +339,8 @@ export type JobServiceOptions = {
    * a job given grants is not run.
    */
   netAccess?: (job: JobRecord) => Promise<{ ok: true; port: number; env: Record<string, string> } | { ok: false; reason: string }>;
+  /** The lead each of these jobs was run under (the lead register's), for the reuse hints; absent, none is named. */
+  leadsOf?: (jobs: string[]) => Promise<Map<string, string>>;
 };
 
 const JOB_ID = /^j\d{6}$/;
@@ -473,7 +483,10 @@ export class JobService {
       const j = this.jobs.get(id);
       switch (l.type) {
         case "job_accepted":
-          this.jobs.set(id, { id, attempt: 1, spec: l.spec as JobSpec, requester: l.requester as Requester, state: "accepted", accepted_at: l.at, ...(l.dedup_key ? { dedup_key: String(l.dedup_key) } : {}), ...(l.shadow_key ? { shadow_key: String(l.shadow_key) } : {}) });
+          this.jobs.set(id, { id, attempt: 1, spec: l.spec as JobSpec, requester: l.requester as Requester, state: "accepted", accepted_at: l.at, ...(l.dedup_key ? { dedup_key: String(l.dedup_key) } : {}), ...(l.reuse ? { reuse: l.reuse as Reuse } : {}) });
+          break;
+        case "job_same_as":
+          if (j) j.same_as = l.same_as as SameAs[];
           break;
         case "job_started":
           if (j) Object.assign(j, { state: "running", attempt: Number(l.attempt), started_at: l.at, worker: l.worker, image: l.image, tool_sha256: l.tool_sha256, accessible: l.accessible, network: l.network, ...(l.scope ? { scope: l.scope as JobScope } : {}), ...(l.cpus ? { worker_size: `${l.cpus} vCPU, ${l.memory_mib} MiB` } : {}), ...(l.lane ? { lane: l.lane as Lane } : {}), ...(l.image_choice ? { image_choice: l.image_choice as ImageChoice } : {}) });
@@ -718,7 +731,7 @@ export class JobService {
    * Accept a job, durably, or refuse it with the reason. The answer comes
    * once the acceptance is on disk; the work comes after.
    */
-  async submit(agent: string, raw: Partial<JobSpec>, o: { watch?: number; seal?: SealSpec } = {}): Promise<{ ok: true; job: JobRecord } | { ok: false; reason: string }> {
+  async submit(agent: string, raw: Partial<JobSpec>, o: { watch?: number; seal?: SealSpec } = {}): Promise<{ ok: true; job: JobRecord; similar?: Similar[] } | { ok: false; reason: string }> {
     if (this.stopping) return { ok: false, reason: "the run is stopping; no new jobs" };
     // A seal comes only from sealCited, never in what an agent sends.
     const { seal: _seal, scope: _scope, ...asked } = raw;
@@ -743,17 +756,15 @@ export class JobService {
     }
     const requester = await this.requesterOf(agent);
     const id = this.nextId();
-    // Merging a command or a tool with an earlier identical job is measured
-    // before it is done (joint review, 2026-09-27): the key is kept and a
-    // would-be merge is written to the journal; the job runs as asked.
-    const shadow = !key ? await this.shadowKey(spec).catch(() => undefined) : undefined;
-    await this.journal.append({ type: "job_accepted", job: id, spec, requester, ...(key ? { dedup_key: key } : {}), ...(shadow ? { shadow_key: shadow } : {}) });
+    // A command or a tool is never merged (docs/adr/0017): what it reads, by
+    // digest, and what it runs are kept, and the jobs of other seats that do
+    // the same over the same objects are named to its requester.
+    const reuse = !key ? await reuseOf(this.S, spec, { collections: this.collections(), targets: targetPaths(spec) }).catch(() => null) : null;
+    await this.journal.append({ type: "job_accepted", job: id, spec, requester, ...(key ? { dedup_key: key } : {}), ...(reuse ? { reuse } : {}) });
     maybeCrash("job:accepted");
-    const job: JobRecord = { id, attempt: 1, spec, requester, state: "accepted", accepted_at: new Date().toISOString(), ...(key ? { dedup_key: key } : {}), ...(shadow ? { shadow_key: shadow } : {}) };
-    if (shadow) {
-      const same = [...this.jobs.values()].find((j) => j.shadow_key === shadow && (j.state === "accepted" || j.state === "running" || j.state === "finished" || j.state === "fenced" || (j.state === "committed" && j.status === "ok")));
-      if (same) await this.journal.append({ type: "job_would_merge", job: id, same_as: same.id, same_state: same.state, by: requester, first_by: same.requester, shadow_key: shadow });
-    }
+    const job: JobRecord = { id, attempt: 1, spec, requester, state: "accepted", accepted_at: new Date().toISOString(), ...(key ? { dedup_key: key } : {}), ...(reuse ? { reuse } : {}) };
+    const similar = reuse ? await this.similarTo(job, reuse).catch(() => []) : [];
+    if (similar.length) await this.journal.append({ type: "job_similar", job: id, by: requester, ...(spec.independent ? { independent: true } : {}), similar });
     this.jobs.set(id, job);
     // The agent waits for it in job_run from this moment: a job that is done
     // before its first status call is answered there, not posted as well.
@@ -761,7 +772,40 @@ export class JobService {
     await this.project(job);
     this.queue.push(id);
     void this.pump();
-    return { ok: true, job };
+    return { ok: true, job, ...(similar.length ? { similar } : {}) };
+  }
+
+  /**
+   * The jobs of other seats, under way or committed, that read some of the
+   * same objects by digest with the same tool or the same leading command
+   * (job-reuse.ts), ranked, each with its lead and what it made so far.
+   */
+  private async similarTo(job: JobRecord, reuse: Reuse): Promise<Similar[]> {
+    if (job.requester.agent === "system" || job.requester.agent === DERIVED) return [];
+    const found: Array<Omit<Similar, "lead">> = [];
+    for (const j of this.jobs.values()) {
+      if (j.id === job.id || !j.reuse || j.requester.agent === job.requester.agent || j.requester.agent === "system" || j.requester.agent === DERIVED) continue;
+      if (j.state === "failed" || j.state === "cancelled" || (j.state === "committed" && j.status === "cancelled")) continue;
+      const match = opMatch(job.spec, j.spec, reuse.op, j.reuse.op);
+      if (!match) continue;
+      const objects = objectsMatch(reuse.objects, j.reuse.objects);
+      if (!objects) continue;
+      found.push({
+        job: j.id,
+        seat: j.requester.agent,
+        ...(j.requester.name ? { name: j.requester.name } : {}),
+        state: j.state,
+        ...(j.status ? { status: j.status } : {}),
+        ...(j.outputs ? { outputs: { files: j.outputs.files, bytes: j.outputs.bytes, path: j.outputs.path } } : {}),
+        ...objects,
+        match,
+        op: j.reuse.op,
+        ...(j.spec.independent ? { independent: true as const } : {}),
+      });
+    }
+    if (!found.length) return [];
+    const leads = this.o.leadsOf ? await this.o.leadsOf(found.map((f) => f.job)).catch(() => new Map<string, string>()) : new Map<string, string>();
+    return rankSimilar(found.map((f) => ({ ...f, lead: leads.get(f.job) ?? null })));
   }
 
   /**
@@ -804,28 +848,6 @@ export class JobService {
     }
     this.imageRecords ??= readImageRecords(this.S, images);
     return chooseImage(text, await this.imageRecords, dflt);
-  }
-
-  /**
-   * The key a merge of raw jobs would use, were it on: a command or a tool,
-   * reading a declared scope (never inputs=["all"], which reads live work/),
-   * every object of which is known by its digest now (an input, a job's
-   * output, a stored blob; a file of an agent's own is copied only when the
-   * job starts, so it is not), and the spec itself byte for byte. Undefined
-   * when the job would never be merged.
-   */
-  private async shadowKey(spec: JobSpec): Promise<string | undefined> {
-    if (spec.kind !== "command" && spec.kind !== "tool") return undefined;
-    if (spec.scope !== "declared" || spec.seal || spec.inputs.includes("all")) return undefined;
-    const r = await resolveScope(this.S, spec.inputs, { collections: this.collections(), targets: targetPaths(spec) });
-    if (!r.ok) return undefined;
-    const digests: Array<[string, string]> = [];
-    for (const o of r.objects) {
-      if (!o.sha256 || o.area === "work") return undefined;
-      digests.push([o.ref, o.sha256]);
-    }
-    digests.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
-    return sha256Hex(canonical({ kind: spec.kind, command: spec.command ?? null, tool: spec.tool ?? null, args: spec.args ?? null, inputs: spec.inputs, timeout_seconds: spec.timeout_seconds, network: spec.network, profile: spec.profile ?? null, scratch: spec.scratch ?? false, digests }));
   }
 
   private async recipeKey(spec: JobSpec): Promise<string> {
@@ -886,7 +908,7 @@ export class JobService {
     const grants = Array.isArray(raw.net_grants) ? [...new Set(raw.net_grants.map((g) => String(g).trim().toUpperCase()))].filter(Boolean) : [];
     if (grants.length && kind !== "command" && kind !== "tool") return { reason: "network grants go with a command or a tool job" };
     if (grants.some((g) => !/^N-[1-9]\d{0,6}$/.test(g)) || grants.length > 8) return { reason: "net_grants names up to 8 grants, N-<k>" };
-    const base = { kind, inputs, scope: declared.kind, timeout_seconds: timeout, network, ...(raw.scratch ? { scratch: true } : {}), ...(raw.note ? { note: String(raw.note) } : {}), ...(raw.parent ? { parent: String(raw.parent) } : {}), ...(profile ? { profile } : {}), ...(grants.length ? { net_grants: grants } : {}) } as JobSpec;
+    const base = { kind, inputs, scope: declared.kind, timeout_seconds: timeout, network, ...(raw.scratch ? { scratch: true } : {}), ...(raw.note ? { note: String(raw.note) } : {}), ...(raw.parent ? { parent: String(raw.parent) } : {}), ...(profile ? { profile } : {}), ...(grants.length ? { net_grants: grants } : {}), ...(raw.independent === true && (kind === "command" || kind === "tool") ? { independent: true } : {}) } as JobSpec;
     if (kind === "tool") {
       const args = raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : {};
       const checked = await this.toolCheck(String(raw.tool ?? ""), args);
@@ -1502,10 +1524,39 @@ export class JobService {
     await this.journal.append({ type: "job_committed", job: job.id, attempt: job.attempt, status: r.status, exit: r.exit, ...(r.reason ? { reason: r.reason } : {}), outputs, logs, ...(job.image_digest ? { image_digest: job.image_digest } : {}) });
     await rm(st.base, { recursive: true, force: true }).catch(() => undefined);
     if (where !== "out") return false;
+    // Before the record says committed, so whoever reads the job then reads its hint too. A hint never holds a commit up: what it could not say is logged.
+    await this.sameAs(job, manifestPath).catch((err) => this.log(`${job.id}: same_as not computed: ${(err as Error).message}`));
     Object.assign(job, { state: "committed", status: r.status, outputs });
     await this.project(job);
     maybeCrash("job:committed");
     return true;
+  }
+
+  /** Every committed job's output by content, the first job to write given bytes keeping them (built once, from the manifests). */
+  private outputIndex: Map<string, { job: string; file: string }> | null = null;
+
+  /**
+   * Which of a committed job's files are an earlier job's output byte for
+   * byte (docs/adr/0017): on the job's record and a job_same_as line. A hint:
+   * the files are sealed and cited as the job's own either way.
+   */
+  private async sameAs(job: JobRecord, manifestPath: string): Promise<void> {
+    const m = await readManifest(manifestPath);
+    if (!m) return;
+    if (!this.outputIndex) {
+      this.outputIndex = new Map();
+      for (const l of this.journal.of("job_committed")) {
+        const id = String(l.job ?? "");
+        if (id === job.id || (l.outputs as { path?: string } | undefined)?.path !== `store/jobs/${id}/out`) continue;
+        const earlier = await readManifest(join(storePaths(this.S).jobs, id, "manifest.json"));
+        if (earlier) indexOutputs(this.outputIndex, id, earlier.manifest.files);
+      }
+    }
+    const same = sameAsOf(job.id, m.manifest.files, this.outputIndex);
+    indexOutputs(this.outputIndex, job.id, m.manifest.files);
+    if (!same.length) return;
+    job.same_as = same;
+    await this.journal.append({ type: "job_same_as", job: job.id, same_as: same });
   }
 
   /**
@@ -2185,7 +2236,8 @@ export function describe(job: JobRecord): string {
   const files = o ? `${o.files} file(s), ${o.bytes} bytes in ${o.path}/${o.rejected ? ` (${o.rejected} link(s) or special file(s) left out, named in its manifest)` : ""}` : "no output";
   const head = job.status === "ok" ? "done" : `${job.status}${job.reason ? ` (${job.reason})` : ""}`;
   const cite = job.spec.seal && job.status === "ok" ? `record again citing ${job.spec.seal.ref}: it resolves to import:${job.id}/<name>` : `cite its files as job:${job.id}/<path>`;
-  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}`;
+  const same = job.same_as?.length ? ` ${job.same_as.length} of its files are an earlier job's output byte for byte (job_status ${job.id} names them).` : "";
+  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}${same}`;
 }
 
 
@@ -2215,6 +2267,7 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number } =
     ...(scopeKindOf(job.spec) === "declared" ? { declared: job.spec.inputs } : {}),
     ...(job.scope?.manifest ? { scope_manifest: job.scope.manifest } : {}),
     ...(job.generation ? { generation: job.generation, revision: job.revision } : {}),
+    ...(job.spec.independent ? { independent: true } : {}),
   };
   if (job.state !== "committed" || !job.outputs) return view;
   const dir = join(storePaths(S).jobs, job.id);
@@ -2241,6 +2294,7 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number } =
   } catch {
     // no stderr
   }
+  Object.assign(view, sameAsView(job.id, job.same_as ?? []));
   view.cite = `job:${job.id}/<path>`;
   return view;
 }
