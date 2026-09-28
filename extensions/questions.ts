@@ -106,7 +106,7 @@ export const QUESTION_MAX_ATTACHMENTS = 20;
  * that…", "which proves…", "did the log verify that…") asks, it does not
  * lead.
  */
-const CLAUSE_START = String.raw`(?:^|[.!?;:]\s+|\n\s*)["'\u201c\u2018(\[]*(?:(?:please|kindly),?\s+|(?:can|could|would)\s+you\s+(?:please\s+)?)?`;
+const CLAUSE_START = String.raw`(?:^|[.!?;:]\s+|\n\s*)["'\u201c\u2018(\[]*(?:(?:please|kindly),?\s+|(?:can|could|would)\s+you\s+(?:please\s+)?|(?:i|we)\s+(?:want|need|ask|would\s+like)\s+you\s+to\s+|(?:the|your|our)\s+(?:goal|task|aim|job)\s+is\s+to\s+)?`;
 export const LEADING_FORMS: ReadonlyArray<{ phrase: string; re: RegExp }> = [
   { phrase: "confirm that", re: new RegExp(`${CLAUSE_START}confirm\\s+that\\b`, "i") },
   { phrase: "show that", re: new RegExp(`${CLAUSE_START}show\\s+that\\b`, "i") },
@@ -126,12 +126,18 @@ export function leadingForms(text: string): string[] {
  * area by area (negative-bar.ts COVERAGE_AREAS): the calibration run sabfd76
  * answered "every file" and "every connection" established with no coverage
  * at all. A small word rule, set at the question's opening and at each new
- * revision of its text; the asker's own word (completeness true or false)
- * overrides it. "At all" asks whether, not how many, and does not count.
+ * revision of its text, whitespace folded first (a doubled space or a line
+ * break is one space); the asker's own word (completeness true or false)
+ * overrides it. "At all" asks whether, not how many; "at each" and "each
+ * time" say when, not how many: none of them counts. Its false positives are
+ * a question that asks for "each" item's detail ("which files were copied,
+ * each with its time?" is marked, and it is one), and "all" in a phrase that
+ * does not ask for a set ("all in all"); an asker who means otherwise says
+ * --no-completeness.
  */
-export const COMPLETENESS_WORDS = /\b(?:every|each)\b|(?<!\bat\s)\ball\b|\bcomplete\s+(?:list|set|inventory)\b/i;
+export const COMPLETENESS_WORDS = /\bevery\b|(?<!\bat )\beach\b(?! time\b)|(?<!\bat )\ball\b|\bcomplete (?:list|set|inventory)\b/i;
 export function completenessWords(text: string): boolean {
-  return COMPLETENESS_WORDS.test(text);
+  return COMPLETENESS_WORDS.test(text.replace(/\s+/g, " "));
 }
 
 /** Whole seconds from the environment, in milliseconds, or the default. */

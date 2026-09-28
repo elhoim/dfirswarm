@@ -475,6 +475,12 @@ test("hypothesis framing: the first agent lead under a person's question states 
   assert.deepEqual(Q.leadingForms("Can you prove the stick was his?"), ["prove"]);
   assert.deepEqual(Q.leadingForms("\"Show that it happened.\""), ["show that"]);
   assert.deepEqual(Q.leadingForms("Where was it sent?\nDemonstrate that it left by mail."), ["demonstrate that"]);
+  // The imperative wrapped in a request or a task is an imperative still (the Fable review, P3 11).
+  assert.deepEqual(Q.leadingForms("I want you to confirm that the stick was his."), ["confirm that"]);
+  assert.deepEqual(Q.leadingForms("The goal is to prove that he copied it."), ["prove"]);
+  assert.deepEqual(Q.leadingForms("Your task is to verify that the logon was his."), ["verify that"]);
+  assert.deepEqual(Q.leadingForms("We need you to show that it left."), ["show that"]);
+  assert.deepEqual(Q.leadingForms("Is the goal to prove anything?"), [], "a question about a goal asks");
   // The goal's own questions need no framing; a person's do, on the first agent lead.
   ok(await L.openLead(a0, { title: "Who made it", why: "q1", answers: ["1"], take: true }));
   refused(await L.openLead(a0, { title: "USB history", why: "the stick", answers: [q], take: true }), /first lead under it: it is a proposition to test/);

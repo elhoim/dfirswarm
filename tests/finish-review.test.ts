@@ -210,6 +210,10 @@ test("the finish register is written where the metrics and the report read it: t
   // The coordinator's done names the same report: the objection holds it until resolved.
   await F.finishTurn(a0, { output_file: "work/report.md" });
   assert.deepEqual((await F.lateItems(S, "a0", "work/report.md")).map((x) => [x.kind, x.by]), [["objection", "a2"]]);
+  // A coordinator whose report is another file still has it to answer, and is told it names another file (the Fable review, P3 7).
+  const other = await F.lateItems(S, "a0", "work/final-report.md");
+  assert.deepEqual(other.map((x) => [x.kind, x.by]), [["objection", "a2"]]);
+  assert.match(other[0].why ?? "", /^objection to work\/report\.md, not the finish's report \(work\/final-report\.md\): resolve it, or say it is another file\. L-29 was closed duplicate/);
   // The metrics and the report read the same file.
   const { measureRun } = await import("../scripts/metrics.ts");
   const m = await measureRun(S);

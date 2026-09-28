@@ -480,11 +480,18 @@ export async function lateItems(sandboxRoot: string, coordinator: string, report
     out.push({ kind: "post", id: p.id, by: p.from, tag: p.tag });
   }
   for (const a of st.acks) {
-    // An objection is of the report it names (a review made before any done named it itself), else of the lease's.
-    if (a.verdict !== "objection" || (a.report && a.report !== report)) continue;
+    if (a.verdict !== "objection") continue;
     if (st.resolutions.some((r) => r.ack === a.seq)) continue;
     // A later ack by the same seat, of any version, answers its own objection.
     if (st.acks.some((b) => b.by === a.by && b.seq > a.seq)) continue;
+    // An objection to another file than the finish's report (made before any
+    // done named it) is late too, and says so: it was lost quietly (the
+    // Fable review of batches 1-3). The coordinator resolves it, or says it
+    // is of another file.
+    if (a.report && a.report !== report) {
+      out.push({ kind: "objection", id: a.seq, by: a.by, why: `objection to ${a.report}, not the finish's report (${report}): resolve it, or say it is another file. ${a.why ?? ""}`.trim() });
+      continue;
+    }
     out.push({ kind: "objection", id: a.seq, by: a.by, why: a.why });
   }
   return out;

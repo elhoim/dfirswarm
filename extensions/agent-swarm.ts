@@ -3292,8 +3292,9 @@ export default function (pi: ExtensionAPI) {
       const result = await recordEntry(ctxFrom(toolCtx.cwd, agentId), { kind, ...Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)) } as unknown as LedgerInput);
       // The finish being assembled: a revision without material is not recorded, quietly (not a refusal).
       if (!result.ok && result.quiet) {
-        await logEvent(toolCtx.cwd, agentId, "record_deferred", { kind, section: (params as { section?: string }).section, supersedes: (params as { supersedes?: number }).supersedes }, { ok: true, deferred: result.deferred, note: result.reason }, Date.now() - started);
-        return okResult({ ok: true, recorded: false, deferred: result.deferred, note: result.reason });
+        // The whole of what the seat tried to record is on the trace, as a refusal's is (nothing is cut), and the reply opens with what happened: a seat that skims replies must not read success.
+        await logEvent(toolCtx.cwd, agentId, "record_deferred", params as Record<string, unknown>, { ok: true, recorded: false, deferred: result.deferred, note: result.reason }, Date.now() - started);
+        return okResult({ ok: true, recorded: false, deferred: result.deferred, note: `NOT RECORDED: ${result.reason}` });
       }
       if (!result.ok) {
         // What the agent tried to say goes on the trace whole: the args are the record, refused or not.

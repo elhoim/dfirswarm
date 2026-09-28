@@ -201,6 +201,9 @@ test("a question asking for every one, all or a complete list is a completeness 
   // The word rule, small on purpose.
   for (const t of ["List every file.", "all connections to the host", "each account that signed in", "a complete list of the transfers", "Give the complete inventory."]) assert.equal(Q.completenessWords(t), true, t);
   for (const t of ["Was the drive connected at all?", "Who used the workstation?", "Allocate the blame", "the overall picture", "Which file was the first?"]) assert.equal(Q.completenessWords(t), false, t);
+  // Whitespace folded; "at each" and "each time" say when, not how many (the Fable review, P3 10).
+  for (const t of ["Was the disk wiped at  all?", "Was the disk wiped at\nall?", "At each logon, which IP was used?", "Did it beacon each time the user logged on?"]) assert.equal(Q.completenessWords(t), false, JSON.stringify(t));
+  for (const t of ["Which files were copied, each with its time?", "List  every\nfile."]) assert.equal(Q.completenessWords(t), true, JSON.stringify(t));
   const { S, a0, a1, a2, a3 } = await run({ goal: COMPLETENESS_GOAL });
   const snap = await Q.questionsSnapshot(S);
   assert.deepEqual(["Q-1", "Q-2", "Q-3"].map((id) => [snap.state.questions.get(id)!.completeness, snap.state.questions.get(id)!.completeness_by]), [[true, "words"], [false, null], [false, null]]);
