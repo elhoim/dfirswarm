@@ -107,10 +107,8 @@ Commands:
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   examiner machine review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
-  say <id> "<msg>"   Post as the examiner; cap <id> its caps; lead <id> list|note its leads; question <id> add|list … asks it one
-  extend <id>        Give a paused (or running) run more: --minutes N, --tokens N, --usd N; the pause lifts
-  resume <id>        Continue a run that ended, the same run on the same chains: [--question TEXT] [--as ID] [--minutes N]
-  stop <id>          Stop a run and record how it ended (stopped, never completed)
+  say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a pause); lead <id> list|note its leads; question <id> add|list … asks it one
+  stop <id>          Stop a run (stopped, never completed); resume <id> [--question TEXT] continues one that ended, on its own chains
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
   netcheck           What a run's VM (or, --isolation host, the network guard) would allow
@@ -127,9 +125,7 @@ The options a run usually needs:
   --cap-per-agent U  What one agent may spend before it is steered and stopped
   --cap-tokens N     The brake for local models, which bill nothing
   --wall-clock MIN   How long the run may take
-  --stop POLICY      What a cap does: cap-pause (default: the run pauses for you to extend or stop it),
-                     cap-stop (it stops, for an unattended run), operator (no wall clock, caps advisory)
-  --until-solved     --stop operator: it ends when every question is answered or accepted, or you stop it
+  --stop POLICY      At a cap: cap-pause (default: the run pauses for you), cap-stop, or operator (= --until-solved: no wall clock)
   --goal-file FILE   The goal document, which carries its own finish line
   --label NAME       A name for the run, shown in the list and the console
   --isolation host   Agents as processes on this host, unisolated (default: a microVM each)

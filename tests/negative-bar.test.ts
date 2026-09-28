@@ -306,6 +306,9 @@ test("the quick negative: held under two minutes, one job, one object; shown in 
   assert.ok(q && q.jobs === 1 && q.objects === 1 && q.held_ms < NB.QUICK_NEGATIVE_HELD_MS, JSON.stringify(q));
   let header = (await L.leadsDigest(a2)).text;
   assert.match(header, new RegExp(`Quick negatives, each a cue for review .*${lead} "Work question 2" \\(held \\d+ s, 1 job\\(s\\), 1 object\\(s\\); E-${absence.seq}\\)`));
+  // The report says it beside the lead, with the plan it closed against.
+  const md = await renderReportBodyMarkdown(S);
+  assert.match(md, new RegExp(`${lead}\\*\\* .*Routes planned: input:disk\\.E01 \\(search the disk\\)\\..*Quick negative:\\*\\* closed \\d+ s after it was taken, on 1 job over 1 object; a cue for review, not a refusal\\.`));
   assert.ok((await P.attestEntry(a2, { seq: absence.seq, how: "ran the search again from job:j000001" })).ok);
   header = (await L.leadsDigest(a2)).text;
   assert.doesNotMatch(header, /Quick negatives/);

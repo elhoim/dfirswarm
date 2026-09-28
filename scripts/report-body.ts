@@ -1350,7 +1350,13 @@ function proceededBlocks(run: Run): Block[] {
       : [` Not ended: ${x.status}${x.holder ? `, held by ${x.holder}` : ", held by nobody"}${x.needs.some((n) => !n.met) ? `, waiting on ${x.needs.filter((n) => !n.met).map((n) => n.need).join(", ")}` : ""}${x.material ? "" : " (not material)"}.`];
     const reopened: Span[] = x.reopened.length ? [` Reopened ${plural(x.reopened.length, "time")}: ${x.reopened.map((r) => `${r.cause}, ${r.why}`).join("; ")}.`] : [];
     const notes: Span[] = x.notes.length ? [` The operator: ${x.notes.map((n) => `${n.text}${n.allow_host ? ` (allowed ${n.allow_host})` : ""}`).join("; ")}.`] : [];
-    return [{ b: `${x.id} ` }, x.title, `: ${x.why}${/[.!?]$/.test(x.why) ? "" : "."}`, ...(x.jobs.length ? [` Jobs: ${x.jobs.join(", ")}.`] : []), ...ended, ...reviewOf(x), ...reopened, ...notes];
+    // The route plan, what of it nobody examined at a negative close, and a close quick enough to be a cue for review.
+    const routes: Span[] = x.routes?.length ? [` Routes planned: ${x.routes.map((r) => `${r.source} (${r.method})`).join("; ")}.`] : [];
+    const notExamined: Span[] = x.not_examined?.length ? [` Planned, not examined at its close: ${x.not_examined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}.`] : [];
+    const quick: Span[] = x.quick_negative
+      ? [{ b: " Quick negative:" }, ` closed ${Math.round(x.quick_negative.held_ms / 1000)} s after it was taken, on ${plural(x.quick_negative.jobs, "job")} over ${plural(x.quick_negative.objects, "object")}; a cue for review, not a refusal.`]
+      : [];
+    return [{ b: `${x.id} ` }, x.title, `: ${x.why}${/[.!?]$/.test(x.why) ? "" : "."}`, ...routes, ...(x.jobs.length ? [` Jobs: ${x.jobs.join(", ")}.`] : []), ...ended, ...notExamined, ...quick, ...reviewOf(x), ...reopened, ...notes];
   };
   // Grouped by where each lead came from: a finding first, in ledger order, then the leads an agent opened on its own.
   const byOrigin = new Map<string, LeadView[]>();
