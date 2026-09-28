@@ -355,6 +355,9 @@ export type ReleaseLayout = {
   disputes: string;
   journal: string;
   trace: string;
+  /** The two registers custody seals by head and count (the lead and the question register): checked against the verdict a release binds. */
+  leads: string;
+  questions: string;
   review: string | null;
   anchor: string | null;
   /** A package made with --redact: each changed file's sha256 before and after. */
@@ -383,6 +386,8 @@ export function runLayout(sandbox: string, reviewFile: string | null, anchorFile
     disputes: "ledger/disputes.jsonl",
     journal: "store/journal.jsonl",
     trace: "traces/events.jsonl",
+    leads: "leads/leads.jsonl",
+    questions: "questions/questions.jsonl",
     review: reviewFile,
     anchor: anchorFile,
     redactions: new Map(),
@@ -413,6 +418,8 @@ export function packageLayout(dir: string): ReleaseLayout {
     disputes: "ledger-disputes.jsonl",
     journal: "store/journal.jsonl",
     trace: "trace/events.jsonl",
+    leads: "leads.jsonl",
+    questions: "questions.jsonl",
     review: existsSync(join(dir, "review.jsonl")) ? join(dir, "review.jsonl") : null,
     anchor: existsSync(join(dir, "trace", "custody-anchor.json")) ? join(dir, "trace", "custody-anchor.json") : null,
     redactions: redactionRows(read("REDACTIONS.txt")),
@@ -455,7 +462,9 @@ const fileSha = (p: string): string | null => {
  * one is given, else against the key the release names, said as that), the
  * bytes it binds (the report's HTML and PDF, the swarm's report, a print),
  * the custody verdict and the index it names (the current ones or ones
- * custody kept aside), the ledger, its attestations and disputes as they
+ * custody kept aside), the lead and question registers as that verdict
+ * sealed them (their heads and counts; appended to since is a prefix, cut
+ * or rewritten fails), the ledger, its attestations and disputes as they
  * are, the trace, the journal and the review as prefixes (lines may follow
  * a release; the ones it bound may not change), its line in the anchor
  * beside the run, and a timestamp token over its signature, against the
@@ -504,6 +513,16 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
   const ledgerNow = hashFieldHead(ledgerText);
   const attNow = hashFieldHead(attText);
   const dispNow = hashFieldHead(dispText);
+  // The registers custody seals by head and count, which a release binds through the verdict it binds.
+  // In a run, each is verified whole as well (every event's hash over its
+  // content); a package's may carry redacted events, which its own check
+  // (package-tools.ts) verifies by the hashes they keep.
+  const verifyChain = layout.where === "run" ? (await import("../extensions/leads.ts")).verifyLeadChain : null;
+  const registers = ([["the lead register", layout.leads, "leads"], ["the question register", layout.questions, "questions"]] as const).map(([what, rel, key]) => {
+    const text = readText(abs(layout.root, rel));
+    const v = verifyChain && text ? verifyChain(text) : null;
+    return { what, key, text, now: hashFieldHead(text), broken: v && !v.ok ? `broken at line ${v.broken_at} (${v.reason})` : null };
+  });
   /**
    * A chain bound as it is, or, when the anchor names a resume after the
    * release, as a prefix: the head it bound still at its place. What the
@@ -592,7 +611,37 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
       const candidates = [layout.custody, ...layout.custodyHistory];
       const hit = candidates.find((c) => held(c, x.custody?.sha256) !== "differs" && held(c, x.custody?.sha256) !== "missing");
       if (!hit) bad.push(`the custody verdict it binds (${x.custody.sha256}) is not here`);
-      else parts.push(hit === layout.custody ? "binds this custody verdict" : `binds an earlier custody verdict (${hit}); custody was taken again since`);
+      else {
+        parts.push(hit === layout.custody ? "binds this custody verdict" : `binds an earlier custody verdict (${hit}); custody was taken again since`);
+        // The registers that verdict sealed, held to what is here as the ledger is: as bound, or a prefix after a resume.
+        // A verdict from before the seal sealed no chain's head, and holds the registers to nothing.
+        let seal: Record<string, { lines?: number; head?: string | null } | undefined> | null = null;
+        let readable = true;
+        try {
+          seal = (JSON.parse(readText(abs(layout.root, hit)) ?? "{}") as { seal?: Record<string, { lines?: number; head?: string | null }> }).seal ?? null;
+        } catch {
+          readable = false;
+        }
+        if (!readable) bad.push("the custody verdict it binds is not JSON: the chains it sealed cannot be read");
+        else if (seal) {
+          for (const g of registers) {
+            const sealed = seal[g.key];
+            if (!sealed) continue; // a verdict taken before that register was sealed
+            const bound = { lines: Number(sealed.lines ?? 0), head: sealed.head ?? null };
+            if (g.broken) {
+              bad.push(`${g.what}'s chain here is ${g.broken}: it is not the one the custody verdict it binds sealed`);
+              continue;
+            }
+            if (bound.lines === g.now.lines && bound.head === g.now.head) continue;
+            // Appended to since (a follow-up recorded after the verdict, or the continuation of a resume), the part it binds intact.
+            if (g.now.lines > bound.lines && (bound.lines === 0 || hashFieldAt(g.text, bound.lines) === bound.head)) {
+              parts.push(`${g.what} it binds (${bound.lines} events) is a prefix of ${g.what} here (${g.now.lines}): what follows was recorded after the verdict`);
+              continue;
+            }
+            bad.push(`${g.what} here is not the one the custody verdict it binds sealed (${bound.lines} events, head ${bound.head ?? "none"}; here ${g.now.lines}, head ${g.now.head ?? "none"}): it was deleted, cut or rewritten`);
+          }
+        }
+      }
     }
     if (x.sealed_index) {
       const candidates = [layout.sealedIndex, ...layout.indexHistory];

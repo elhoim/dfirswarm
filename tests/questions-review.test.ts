@@ -493,3 +493,37 @@ test("a withdrawn goal question is not required by the answers check or the fini
   assert.deepEqual(g.questions.find((x) => x.id === "2"), { id: "2", outcome: "withdrawn", blocks: [] });
 });
 
+// --- 18: a release and the registers ----------------------------------------------------------------
+
+test("release verification holds the question register to the custody verdict the release binds: appended to is a prefix, cut or rewritten fails", async () => {
+  const r = await stoppedRun({ id: "sqrel" });
+  await writeFile(join(r.root, "team.json"), JSON.stringify({ swarm_id: r.id, n: 1, agents: [{ id: "a0", role: "worker" }] }));
+  ok(await Q.act(r.root, operator, "open", { text: "Was a web shell uploaded?", why: "the report says so" }));
+  await takeCustody(r.root, { runsDir: r.runs });
+  const ctx = runContext(r.root, { run: r.id, runsDir: r.runs });
+  await draftRelease(ctx, { home: r.home, say: () => undefined });
+  const layout = () => runLayout(r.root, reviewsPath(r.runs, r.id), custodyAnchorPath(r.root));
+  const good = await verifyReleases(layout());
+  assert.equal(good.ok, true, good.lines.join("\n"));
+  const text = await readFile(join(r.root, Q.QUESTIONS_LOG), "utf8");
+  // Appended to after the verdict (a follow-up): the part it binds is intact.
+  ok(await Q.act(r.root, operator, "open", { text: "Was the shell used?", why: "follow-up" }));
+  const grown = await verifyReleases(layout());
+  assert.equal(grown.ok, true, grown.lines.join("\n"));
+  assert.match(grown.lines.join("\n"), /the question register it binds \(\d+ events\) is a prefix/);
+  // Cut back past what it binds.
+  const lines = text.split("\n").filter((l) => l.trim());
+  await writeFile(join(r.root, Q.QUESTIONS_LOG), `${lines.slice(0, -1).join("\n")}\n`);
+  const cut = await verifyReleases(layout());
+  assert.equal(cut.ok, false);
+  assert.match(cut.lines.join("\n"), /the question register here is not the one the custody verdict it binds sealed/);
+  // Deleted.
+  await rm(join(r.root, Q.QUESTIONS_LOG));
+  assert.equal((await verifyReleases(layout())).ok, false);
+  // Rewritten in place, its hashes kept.
+  await writeFile(join(r.root, Q.QUESTIONS_LOG), text.replace("Was a web shell uploaded?", "Was nothing uploaded?"));
+  const rewritten = await verifyReleases(layout());
+  assert.equal(rewritten.ok, false);
+  assert.match(rewritten.lines.join("\n"), /the question register's chain here is broken/);
+});
+
