@@ -156,6 +156,9 @@ its URL. Open that URL once, or paste the token when prompted. `SWARM_UI_TOKEN=`
 **`BLOCKER: missing herdr` / `pi` / `jq`.**
 They must be on the `PATH` of the process that runs `swarm.sh start`. With nvm-installed `pi`, start the UI server from a shell where `nvm use` has run. `GET /api/models` falls back to a static list (`source: "static"`) when `pi` is not found; set `SWARM_PI_BIN` to point at it.
 
+**`BLOCKER: the Herdr server is not running`.**
+The kickoff asks `herdr status server` before it makes anything: every pane is made by the Herdr server, and a start that found it stopped only at the end had already booted every VM. Start it (run `herdr` in a terminal, which launches the persistent session and its server, or `herdr server` for a headless one), then run the start again. A `--check` says the same, with exit 2.
+
 **Web app shows "Web bundle not built" (503).**
 `ui/dist` is gitignored. Run `npm install && npm run ui:build`, or let `swarm.sh ui` build it (it does when `node_modules/vite` exists and you did not pass `--no-build`). `/api/*` works without the bundle. For development use `npm run ui:dev` (Vite on 43174, `/api` proxied to 43173).
 

@@ -3784,6 +3784,33 @@ start_check_host_tools() {
     echo "BLOCKER: missing ${missing[*]}." >&2
     exit 1
   fi
+  # Installed is not running. Every pane (a host agent, or the seat a VM's
+  # agent is shown in) is made by the Herdr server, at the end of the
+  # kickoff: found stopped there, it had already booted every VM (the c10
+  # pilot, s6be12f). So it is asked here, before anything is made.
+  if [[ "$(herdr_server_state)" == "not running" ]]; then
+    echo "BLOCKER: the Herdr server is not running (herdr status server). The agents' panes are made by it, so no pane and no VM was made." >&2
+    echo "         Start it, then run this start again: run \`herdr\` in a terminal (it launches the persistent session and its server), or \`herdr server\` for a headless one." >&2
+    exit 1
+  fi
+}
+
+# Whether the Herdr server runs: "running", "not running", or "unknown" (a
+# Herdr that cannot say; the kickoff then goes on as it always did).
+herdr_server_state() {
+  local out running
+  out="$(herdr status server --json 2>/dev/null)" || out=""
+  running="$(jq -r 'if type == "object" and has("running") then (.running | tostring) else empty end' <<<"$out" 2>/dev/null || true)"
+  case "$running" in
+    true) echo "running"; return 0 ;;
+    false) echo "not running"; return 0 ;;
+  esac
+  out="$(herdr status server 2>&1)" || true
+  case "$out" in
+    *"not running"*) echo "not running" ;;
+    *"status: running"*) echo "running" ;;
+    *) echo "unknown" ;;
+  esac
 }
 
 start_check_key_from_env() {

@@ -12,6 +12,11 @@ All notable changes to this project. The format follows
   lead, question, network and request chains, their first sealed lines are
   now chained again with their own code; a sealed line rewritten with its
   hash fields kept no longer passes as a prefix.
+- **The kickoff checks the Herdr server first.** `herdr status server` is
+  asked with the other host programs, before any pane or VM is made; a
+  stopped server refuses the start (and a `--check`) and says how to start
+  it. The pilot's kickoff had booted every VM before it found the server
+  stopped.
 - **A leading form is an imperative at the start of a clause.** "Confirm
   that…", "Show that…", "Prove…" at the start of the question or of a
   sentence are flagged; "…if not, what shows that" is not.

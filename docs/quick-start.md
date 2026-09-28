@@ -134,7 +134,7 @@ against the cap rather than "$0.00 spent".
 
 ### 2. First live run, N=2
 
-Herdr must be running before kickoff: open the Herdr app, or in a second terminal run `herdr server` (`swarm.sh` talks to it over the socket and does not start it for you). Make sure `herdr` is on `PATH` (`export PATH="$HOME/.local/bin:$PATH"` after the installer).
+Herdr must be running before kickoff: open the Herdr app, or in a second terminal run `herdr server` (`swarm.sh` talks to it over the socket and does not start it for you; it checks `herdr status server` before it makes anything, and refuses the start while the server is stopped). Make sure `herdr` is on `PATH` (`export PATH="$HOME/.local/bin:$PATH"` after the installer).
 
 ```bash
 pi /login                            # once; swarm.sh does not pass keys to panes
