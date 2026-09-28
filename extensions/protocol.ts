@@ -9774,7 +9774,9 @@ async function unqualifiedFailedRefs(sandboxRoot: string, e: LedgerEntry): Promi
  */
 export function answerFingerprint(a: LedgerEntry): string {
   const hashes = (edges: LedgerEdge[] | undefined) => (edges ?? []).map((x) => x.hash).sort();
-  return sha256Hex(JSON.stringify({ ...conclusionFields(a), support: hashes(a.support), contrary: hashes(a.contrary), limitations: hashes(a.limitations) }));
+  const c = conclusionFields(a);
+  // The keys in this order, always: a fingerprint recorded by an earlier harness is compared with this one.
+  return sha256Hex(JSON.stringify({ result: c.result, question_rev: c.question_rev, support: hashes(a.support), contrary: hashes(a.contrary), limitations: hashes(a.limitations), inconclusive: c.inconclusive, asserts_absence: c.asserts_absence }));
 }
 
 /**

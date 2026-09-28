@@ -8,6 +8,12 @@ All notable changes to this project. The format follows
 
 ### Fixed: what the first pilot on the new flow showed (c10, run s6be12f)
 
+- **A summary's symbolic citation recorded before still stands.** Reading
+  the finished pilot with the new code took down its summary and narrative:
+  the answer fingerprint's fields had been reordered, and every recorded
+  fingerprint differed. The order is the earlier one again, pinned by a
+  test.
+
 - **Confirmations come in batches, and a refresh is re-pointed.** One
   answer revision re-offered confirmation for four to six closures, several
   to one seat. A seat is now offered one confirmation per correction chain,

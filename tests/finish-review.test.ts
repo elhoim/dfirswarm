@@ -276,3 +276,21 @@ test("a result post that only restates an answer's own revision is covered by th
   const late = await F.lateItems(S, "a0", "work/report.md");
   assert.deepEqual(late.map((x) => x.id), [adding.id], `the restating post #${restating.id} is covered by its revision`);
 });
+
+test("an answer's fingerprint is computed as an earlier harness recorded it: the same keys in the same order, so a summary's symbolic citation recorded before still stands (a reordering took down every summary of the finished c10 pilot)", () => {
+  const e = {
+    v: 4,
+    seq: 12,
+    kind: "answer",
+    section: "question:3",
+    result: "not_determinable",
+    question_rev: 2,
+    support: [{ seq: 4, hash: "b".repeat(64) }, { seq: 3, hash: "a".repeat(64) }],
+    contrary: [{ seq: 5, hash: "c".repeat(64) }],
+    limitations: [],
+    inconclusive: false,
+    asserts_absence: false,
+  } as unknown as P.LedgerEntry;
+  const earlier = P.sha256Hex(JSON.stringify({ result: "not_determinable", question_rev: 2, support: ["a".repeat(64), "b".repeat(64)], contrary: ["c".repeat(64)], limitations: [], inconclusive: false, asserts_absence: false }));
+  assert.equal(P.answerFingerprint(e), earlier);
+});
