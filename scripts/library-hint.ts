@@ -205,7 +205,7 @@ export async function libraryHint(sandbox: string, objects: HintObject[], o: { s
   const heads = new Map<string, Buffer | null>();
   // The hint is worth having but not worth holding the job: past its deadline it gives what it has matched so far.
   for (const m of manifests) {
-    if (Date.now() > deadline) break;
+    if (Date.now() >= deadline) break;
     const matched: HintMatch[] = [];
     for (const f of files) {
       if (headBytes && m.use?.magic?.length && !heads.has(f.path)) heads.set(f.path, await headOf(join(S, f.path), headBytes));

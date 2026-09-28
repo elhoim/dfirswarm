@@ -219,7 +219,8 @@ test("a material negative nobody else reviewed holds the finish line; the review
   const ans = ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk", reasoning: `E-${cov.seq}`, ...A, result: "bounded_negative" })).entry;
   assert.match(await readFile(join(S, P.LEDGER_MD), "utf8"), /question:2 \(bounded_negative\) \*\*\(negative, unreviewed\)\*\*/);
   const header = (await L.leadsDigest(a3)).text;
-  assert.match(header, new RegExp(`Negatives awaiting review by another seat .*question:2 \\(E-${ans.seq} bounded negative, by a1; coverage E-${cov.seq} complete\\)`));
+  // Its review is offered to one seat (the c10 pilot's stampede), and the header says to whom.
+  assert.match(header, new RegExp(`Negatives awaiting review by another seat .*question:2 \\(E-${ans.seq} bounded negative, by a1; coverage E-${cov.seq} complete; its review is offered to a2\\)`));
   let r = await checkLedgerAnswers(S, ["2"], ["2"]);
   assert.equal(r.ok, false);
   const d = r.defects.find((x) => x.code === "negative_unreviewed")!;
