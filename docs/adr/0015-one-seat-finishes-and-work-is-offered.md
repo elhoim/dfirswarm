@@ -175,7 +175,9 @@ have lost its provider.
     as its support is: an entry it weighed that was corrected (and the
     correction not weighed) or disputed since takes the answer down, and
     the summary with it. The answer it names this way is not also held by
-    its seq.
+    its seq, and an answer it cites by its seq is bound to its question the
+    same way (the c10 pilot's summary and narrative cited answers by seq
+    and fell with every revision of each).
 
 ### Coordination (A1–A3)
 

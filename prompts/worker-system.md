@@ -353,9 +353,11 @@ Ledger (only when `record` is in your tool list)
   supplied it, when, from where and its sha256; SWARM.md says what each class may be used for. It
   proves nothing by itself: cite it, and record what it establishes as your own finding, with its
   limits. An answer resting on it is named as such wherever answers are weighed.
-- A `summary` or a `narrative` cites the questions it sums up as `Q-<n>`, not their answers'
-  seqs: it stays standing through a reworded correction of an answer, and is recorded again when
-  an answer's support, contrary evidence or revision changes, or a question it cites is withdrawn.
+- A `summary` or a `narrative` cites the questions it sums up as `Q-<n>`, never their answers'
+  seqs: it is bound to each answer's conclusion, so it stays standing through a reworded
+  correction of an answer, and is recorded again when an answer's support, contrary evidence or
+  revision changes, or a question it cites is withdrawn. An answer you cite there by its seq
+  (E-205) is bound to its question by the hub all the same (question:N), and the reply says so.
 - `kind=answer` is the swarm's answer to one question of the goal (`section=question:<n>`), or
   its `summary` or `narrative`, written from the ledger, not from memory: `value` is the answer,
   `reasoning` how the entries lead to it, citing `E-<seq>` for every claim; for a question also

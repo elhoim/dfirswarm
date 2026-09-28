@@ -12,6 +12,11 @@ All notable changes to this project. The format follows
   lead, question, network and request chains, their first sealed lines are
   now chained again with their own code; a sealed line rewritten with its
   hash fields kept no longer passes as a prefix.
+- **A summary citing an answer by its seq is bound to its question.** The
+  pilot's summary and narrative cited answers as E-n and fell with every
+  revision of each. `record` now turns such a citation into the symbolic
+  `question:N` (bound to the answer's conclusion, not its seq) and says so;
+  a reworded correction keeps the summary standing.
 - **The kickoff checks the Herdr server first.** `herdr status server` is
   asked with the other host programs, before any pane or VM is made; a
   stopped server refuses the start (and a `--check`) and says how to start

@@ -286,3 +286,30 @@ test("a summary cites questions symbolically: a reworded correction of an answer
   const gate = await finishGate(S, { total: 1, passed: 1, checks: [{ cmd: "true", ok: true }] });
   assert.ok(gate.defects.some((d) => /the summary E-\d+ cites Q-1 \(question:1\), withdrawn by ex@lab/.test(d.what)), JSON.stringify(gate.defects));
 });
+
+test("a summary or a narrative citing an answer by its seq is bound to its question: the hub turns E-n into question:N, says so, and a wording-only correction of that answer leaves it standing", async () => {
+  const { S, a0, a1, a2 } = await run(GOAL);
+  const f1 = await P.recordEntry(a0, { kind: "finding", ...F4, value: "Bob", source: "log", evidence: "line 1", refs: ["unresolved:fixture"], answers: ["1"] } as P.LedgerInput);
+  assert.ok(f1.ok);
+  if (!f1.ok) return;
+  const q1 = await P.recordEntry(a1, { kind: "answer", section: "question:1", value: "Bob", reasoning: `E-${f1.entry.seq}`, ...A } as P.LedgerInput);
+  assert.ok(q1.ok);
+  if (!q1.ok) return;
+  // The pilot's form: the summary names the answer by its seq, no Q-n anywhere.
+  const sum = await P.recordEntry(a2, { kind: "answer", section: "summary", value: "Bob logged on.", reasoning: `E-${q1.entry.seq} says who.` } as P.LedgerInput);
+  assert.ok(sum.ok, (sum as { reason?: string }).reason);
+  if (!sum.ok) return;
+  assert.deepEqual(sum.entry.question_refs?.map((r) => [r.section, r.answer]), [["question:1", q1.entry.seq]]);
+  assert.deepEqual(sum.entry.support ?? [], [], "the answer is not held by its seq");
+  assert.match(sum.note ?? "", new RegExp(`E-${q1.entry.seq} .*question:1.* cited as question:1`));
+  // A wording-only correction of the answer: the summary still stands.
+  const q1b = await P.recordEntry(a1, { kind: "answer", section: "question:1", value: "It was Bob", reasoning: `E-${f1.entry.seq} names him`, ...A, supersedes: q1.entry.seq } as P.LedgerInput);
+  assert.ok(q1b.ok);
+  const problems = P.answerProblems(await P.readLedger(S), await P.readDisputes(S));
+  assert.equal(problems.has(sum.entry.seq), false, JSON.stringify([...problems]));
+  // A narrative citing the superseded answer's seq is bound to the answer that stands now.
+  const nar = await P.recordEntry(a2, { kind: "answer", section: "narrative", value: "Bob logged on, then left.", reasoning: `E-${q1.entry.seq}` } as P.LedgerInput);
+  assert.ok(nar.ok, (nar as { reason?: string }).reason);
+  if (!nar.ok || !q1b.ok) return;
+  assert.deepEqual(nar.entry.question_refs?.map((r) => [r.section, r.answer]), [["question:1", q1b.entry.seq]]);
+});

@@ -294,7 +294,9 @@ test("an answer rests on the entries it cites by hash; every claimed support is 
   // A summary and a narrative need one standing citation; they name no question.
   refused(await rec(a3, { kind: "answer", section: "summary", value: "s", reasoning: "no citation" }), /a summary cites at least one standing entry/);
   const s = ok(await rec(a3, { kind: "answer", section: "summary", value: "Powder.exe ran.", reasoning: `See E-${revised.entry.seq}.` }));
-  assert.deepEqual(s.entry.support, [{ seq: revised.entry.seq, hash: revised.entry.hash }]);
+  // An answer a summary cites by its seq is bound to its question instead (the c10 pilot): not held by its seq.
+  assert.deepEqual(s.entry.support ?? [], []);
+  assert.deepEqual(s.entry.question_refs?.map((r) => [r.section, r.answer]), [["question:1", revised.entry.seq]]);
   ok(await rec(a3, { kind: "answer", section: "narrative", value: "At 10:15Z Powder.exe ran from the desktop.", reasoning: `E-${f2.seq} then E-${f1.seq}.` }));
   // An inconclusive answer (the old word for not_determinable) rests on a
   // coverage record of its material question, closed against its route plan.
@@ -425,10 +427,11 @@ test("invalidation is transitive: a finding superseded or disputed after an answ
   assert.ok((await disputeEntry(a2, { seq: f.seq, why: "the prefetch is of another user's profile" })).ok);
   let p = await problems();
   assert.match(p.get(q1.seq)?.[0] ?? "", new RegExp(`rests on E-${f.seq}, disputed by a2 \\(the prefetch is of another user's profile\\)`));
-  assert.match(p.get(sum.seq)?.[0] ?? "", new RegExp(`rests on E-${q1.seq}, an answer that no longer stands on its own support`));
+  // The summary cited E-q1 by its seq, which binds it to question:1 (the c10 pilot's fix): it falls with that question's answer.
+  assert.match(p.get(sum.seq)?.[0] ?? "", new RegExp(`it cites question:1 \\(question:1\\), whose answer E-${q1.seq} no longer stands on its own support`));
   assert.match(p.get(nar.seq)?.[0] ?? "", new RegExp(`rests on E-${sum.seq}, an answer that no longer stands`), "and on through every answer above it");
   // Citing a fallen answer is refused at record.
-  refused(await rec(a3, { kind: "answer", section: "narrative", value: "n", reasoning: `E-${q1.seq}`, supersedes: nar.seq }), new RegExp(`E-${q1.seq} is an answer that no longer stands on its own support`));
+  refused(await rec(a3, { kind: "answer", section: "narrative", value: "n", reasoning: `E-${q1.seq}`, supersedes: nar.seq }), new RegExp(`question:1's answer E-${q1.seq} no longer stands on its own support`));
   // The dispute withdrawn, the chain stands again; the finding superseded, it falls the other way.
   assert.ok((await disputeEntry(a2, { seq: f.seq, why: "same user after all", withdraw: true })).ok);
   assert.equal((await problems()).size, 0);
@@ -438,11 +441,11 @@ test("invalidation is transitive: a finding superseded or disputed after an answ
   assert.ok(p.has(sum.seq) && p.has(nar.seq));
   const md = await readFile(join(root, LEDGER_MD), "utf8");
   assert.match(md, /\*\*no longer stands on its support: it rests on E-\d+, superseded by #\d+/);
-  // Revised, the question's answer stands; the summary still cites the old one.
+  // Revised on another support, the question's answer stands; the summary bound to its earlier conclusion is recorded again.
   const q1b = ok(await rec(a3, { kind: "answer", section: "question:1", value: "Alice", reasoning: `E-${g.seq}`, ...Q, supersedes: q1.seq })).entry;
   p = await problems();
   assert.equal(p.has(q1b.seq), false);
-  assert.match(p.get(sum.seq)?.[0] ?? "", new RegExp(`rests on E-${q1.seq}, superseded by #${q1b.seq}`));
+  assert.match(p.get(sum.seq)?.[0] ?? "", new RegExp(`whose answer changed its support, scope or contrary evidence since it was cited \\(E-${q1.seq} → E-${q1b.seq}\\)`));
 });
 
 test("an open contradiction is two standing entries that contradict, weighed by no answer and named by no limitation", async () => {

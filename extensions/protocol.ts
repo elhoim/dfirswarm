@@ -10302,6 +10302,23 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         const already = replaced.get(supersedes);
         if (already !== undefined) return { ok: false, reason: `#${supersedes} is already superseded by #${already}: correct #${already} instead, so the corrections stay one line` };
       }
+      // A summary or a narrative that cites a question's answer by its seq
+      // (E-n) is bound to that question instead (question:N): the pilot's
+      // summary and narrative cited three answers by seq and fell with every
+      // revision of each. Its binding is then to the answer's conclusion (the
+      // fingerprint below), whichever answer stands for the question now,
+      // and the reply says so.
+      const bound: Array<{ seq: number; section: string; standing: number | null }> = [];
+      if (!question) {
+        for (let i = support.length - 1; i >= 0; i--) {
+          const e = bySeq.get(support[i]!);
+          if (e?.kind !== "answer" || !e.section?.startsWith("question:")) continue;
+          const standingNow = entries.find((x) => x.kind === "answer" && x.section === e.section && !replaced.has(x.seq));
+          bound.unshift({ seq: e.seq, section: e.section, standing: standingNow?.seq ?? null });
+          if (!symbolic.some((x) => x.section === e.section)) symbolic.push({ q: e.section, section: e.section });
+          support.splice(i, 1);
+        }
+      }
       // A question's answer cited symbolically is not cited by seq as well:
       // its correction would take the summary down with it.
       for (let i = support.length - 1; i >= 0; i--) {
@@ -10430,6 +10447,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         return { ok: false, reason: `${sec.section} is answered by #${standing.seq} already: one answer stands for a section; to revise it, record this with supersedes=${standing.seq}` };
       }
       const notes: string[] = [];
+      if (bound.length) notes.push(`${bound.map((b) => `E-${b.seq} (the answer to ${b.section}${b.standing !== null && b.standing !== b.seq ? `, now E-${b.standing}` : ""})`).join(", ")} ${bound.length === 1 ? "is" : "are"} cited as ${[...new Set(bound.map((b) => b.section))].join(", ")}: a ${sec.section} is bound to the questions it sums up, to each answer's conclusion (its result, the revision it answers, its support and contrary evidence), not to its seq, so a reworded correction of an answer keeps it standing. Cite Q-<n> or question:<n> for an answer in a ${sec.section}`);
       if (tokens.length) notes.push(`in none of the cited entries: ${tokens.join(", ")}; cite the entry that holds each, or record how it was derived as its own entry and cite that (marked on the answer; the release counts them)`);
       if (question && resultText !== "not_determinable" && standingCites.every((e) => e.kind === "limitation")) notes.push("it rests on limitations only: if the ledger cannot answer it, say so with result not_determinable, resting on a coverage record");
       if (question && negative && bar?.material) {
