@@ -514,29 +514,117 @@ done
 pass "a pinned source needs its entry, a build its program inside its prefix, a .deb the path it installs, and another system's program is never required"
 
 # --- the tool library's imports are in every image ----------------------------
-missing_lib="$(python3 - "$ROOT" <<'EOF'
-import re, sys, pathlib
+# Read from each script's syntax tree, not its lines: an import inside a
+# function or a try counts, and so does one by name (importlib.import_module,
+# __import__), which a line pattern never saw. A module only some images
+# carry is declared in the tool's manifest (optional_python) and imported
+# under a try that catches ImportError, so the tool says it is missing in the
+# images without it; a module imported by a computed name is refused, since
+# nothing could say what it needs.
+check_library_imports() { # <root>
+  python3 - "$1" <<'EOF'
+import ast, json, re, sys, pathlib
 root = pathlib.Path(sys.argv[1])
 # A module a tool imports -> the package that provides it.
 provides = {"cryptography": "cryptography", "regipy": "regipy", "Evtx": "python-evtx", "dissect": "dissect.util"}
 listed = {re.split(r"[<>=!~ ]", l.split("#")[0].strip())[0].lower() for l in (root / "images" / "library-python.txt").read_text().splitlines() if l.split("#")[0].strip()}
 stdlib = set(sys.stdlib_module_names) | {"__future__"}
+catch = {"ImportError", "ModuleNotFoundError"}
+
+def catches_import(t):
+    for h in t.handlers:
+        kinds = h.type.elts if isinstance(h.type, ast.Tuple) else [h.type] if h.type is not None else []
+        if any(isinstance(k, ast.Name) and k.id in catch for k in kinds):
+            return True
+    return False
+
+def imports(node, guarded=False):
+    # Each import with its line and whether a try that catches ImportError holds it.
+    if isinstance(node, ast.Try):
+        inner = guarded or catches_import(node)
+        for n in node.body:
+            yield from imports(n, inner)
+        for part in (node.handlers, node.orelse, node.finalbody):
+            for n in part:
+                yield from imports(n, guarded)
+        return
+    if isinstance(node, ast.Import):
+        for a in node.names:
+            yield a.name.split(".")[0], node.lineno, guarded
+    elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        yield node.module.split(".")[0], node.lineno, guarded
+    elif isinstance(node, ast.Call):
+        f = node.func
+        fn = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else None
+        if fn in ("import_module", "__import__"):
+            arg = node.args[0] if node.args else None
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                yield arg.value.split(".")[0], node.lineno, guarded
+            else:
+                yield None, node.lineno, guarded
+    for child in ast.iter_child_nodes(node):
+        yield from imports(child, guarded)
+
 out = set()
-for f in root.glob("tool-library/*/*.py"):
-    for m in re.finditer(r"^\s*(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)", f.read_text(), re.M):
-        mod = m.group(1)
+for f in sorted(root.glob("tool-library/*/*.py")):
+    tool = f.parent.name
+    mf = f.parent / "manifest.json"
+    optional = json.loads(mf.read_text()).get("optional_python") if mf.exists() else None
+    if optional is not None and not (isinstance(optional, list) and all(isinstance(m, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", m) for m in optional)):
+        out.add(f"{tool}: optional_python is a list of top-level module names")
+        optional = []
+    optional = set(optional or [])
+    seen = set()
+    for mod, line, guarded in imports(ast.parse(f.read_text(), str(f))):
+        if mod is None:
+            out.add(f"{tool} (line {line}): a module imported by a computed name, which this check cannot read; import it by name")
+            continue
         if mod in stdlib:
+            continue
+        seen.add(mod)
+        if mod in optional:
+            if not guarded:
+                out.add(f"{tool} (line {line}): {mod} is declared optional and imported outside a try that catches ImportError")
             continue
         pkg = provides.get(mod)
         if pkg is None:
-            out.add(f"{mod} (in {f.parent.name}: say which package provides it)")
+            out.add(f"{mod} (in {tool}: say which package provides it, or declare it in optional_python)")
         elif pkg.lower() not in listed:
-            out.add(f"{pkg} (imported by {f.parent.name})")
+            out.add(f"{pkg} (imported by {tool})")
+    for mod in sorted(optional - seen):
+        out.add(f"{tool}: optional_python names {mod}, which it never imports")
 print("\n".join(sorted(out)))
 EOF
-)"
+}
+missing_lib="$(check_library_imports "$ROOT")"
 [[ -z "$missing_lib" ]] || fail "the tool library imports what no image installs: $missing_lib"
 grep -q 'COPY library-python.txt' "$ROOT/images/base.Dockerfile" || fail "the base image does not install the tool library's imports"
-pass "every third-party module the tool library imports is in images/library-python.txt, which the base image installs"
+pass "every third-party module the tool library imports is in images/library-python.txt, which the base image installs, or declared optional and imported under a guard"
+
+# The check itself: a library with one tool per way of getting it wrong.
+lib="$TMP/libcheck"
+mkdir -p "$lib/images"
+cp "$ROOT/images/library-python.txt" "$lib/images/"
+mk_libtool() { # <name> <optional_python JSON or ""> <script>
+  mkdir -p "$lib/tool-library/$1"
+  if [[ -n "$2" ]]; then printf '{"name": "%s", "optional_python": %s}\n' "$1" "$2" > "$lib/tool-library/$1/manifest.json"
+  else printf '{"name": "%s"}\n' "$1" > "$lib/tool-library/$1/manifest.json"; fi
+  printf '%s\n' "$3" > "$lib/tool-library/$1/run.py"
+}
+mk_libtool guarded '["PIL"]' $'import json\ndef load():\n    try:\n        from PIL import Image\n    except ImportError:\n        return None\n    return Image'
+[[ -z "$(check_library_imports "$lib")" ]] || fail "a declared optional module under a guard was refused: $(check_library_imports "$lib")"
+mk_libtool by_name '' $'import importlib\ntry:\n    importlib.import_module("pytsk3")\nexcept ImportError:\n    pass'
+mk_libtool computed '' $'import importlib\nname = "pyewf"\nimportlib.import_module(name)'
+mk_libtool unguarded '["pyewf"]' $'import pyewf'
+mk_libtool broad '["pyewf"]' $'try:\n    import pyewf\nexcept ValueError:\n    pass'
+mk_libtool stale '["numpy"]' $'import json'
+got="$(check_library_imports "$lib")"
+grep -q '^pytsk3 (in by_name: ' <<<"$got" || fail "a module imported by name and not declared was not seen: $got"
+grep -q '^computed (line 3): a module imported by a computed name' <<<"$got" || fail "an import by a computed name was not refused: $got"
+grep -q '^unguarded (line 1): pyewf is declared optional and imported outside a try' <<<"$got" || fail "a declared optional module imported unguarded was not refused: $got"
+grep -q '^broad (line 2): pyewf is declared optional and imported outside a try' <<<"$got" || fail "a try that does not catch ImportError was taken for a guard: $got"
+grep -q '^stale: optional_python names numpy, which it never imports' <<<"$got" || fail "a declaration nothing imports was not named: $got"
+grep -q '^guarded' <<<"$got" && fail "the guarded tool was refused beside the others: $got"
+pass "the library check sees imports by name, refuses a computed one, and holds a declared optional module to a guard that catches ImportError"
 
 echo "recipe: all checks passed"

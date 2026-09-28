@@ -6,6 +6,54 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: three tools from later runs in the library, made general first
+
+- **`ledger_timeline`** (from run `se5fdcd`) writes a run's dated ledger
+  entries as one timeline in time order: Markdown, CSV or JSON Lines. It
+  reads any run's `ledger/entries.jsonl` with the attestations and disputes
+  beside it; kinds, a time range, a regex, excluded seqs, duplicates and
+  corrected entries are the caller's choice, and every entry left out is
+  counted by why. A sensitive entry is withheld unless asked, `redact` takes
+  patterns, and it writes nowhere under `ledger/`, `tools/` or `inputs/`.
+  The run's copy had one case's title, closing paragraph and password
+  pattern in its script.
+- **`contact_sheet`** (from run `s10d40e`, job `j000558`) tiles the images
+  of a directory, a list or a tar (read in place) into labelled sheets for
+  looking at: each distinct content once, exact duplicates (or look-alikes
+  by average hash) listed, not tiled again. Tile size, columns, rows, the
+  label format and dedup are parameters; `out_dir` keeps every tile, a
+  manifest row per file and an index from tile to file with the whole
+  label; a large set is done over several calls within the tool timeout.
+  Needs Pillow (pillow_heif for HEIC), and says so when it is missing.
+- **`nested_vdi`** (from run `sae6e7d`, job `j000136`) reads a VirtualBox
+  VDI that lies inside an E01 or raw image without writing it out: through
+  the NTFS data runs of the file holding it (a deleted one too; inline or
+  from a file, sparse runs as zeros) or at an offset, then through the
+  VDI's block map. `info` gives the header, the block counts and the
+  guest's partitions, `ls` lists a guest directory (recursive, paged,
+  nothing cut), `extract` writes one guest file, `read` gives guest bytes.
+  The job it came from had one case's partition offset and cluster size
+  written in and mounted the E01; the image, offset, runs, cluster size and
+  header location are parameters now. pyewf for an E01, pytsk3 for `ls` and
+  `extract`.
+- `tests/tool-library-folded.test.ts` builds every fixture itself: a ledger,
+  drawn images, and a FAT12 file system in a VDI with shuffled blocks inside
+  four data runs of an outer volume, one of them sparse. Without Pillow,
+  pytsk3 or pyewf the tests that need them are skipped; the header, the
+  block map and the two-level read are plain Python and always run.
+- **`optional_python` in a tool's manifest**: the Python modules only some
+  images carry (Pillow and pillow_heif for `contact_sheet`, pyewf and
+  pytsk3 for `nested_vdi`), imported under a `try` that catches
+  `ImportError` so the tool says one is missing. The library's import check
+  in `tests/recipe.test.sh` now reads each script's syntax tree: it sees an
+  import inside a function and one by name through `importlib`, refuses one
+  by a computed name, holds a declared module to its guard, and names a
+  declaration nothing imports.
+- The library's README says what each came from and how it was made
+  general, which modules only some images have, and which candidates
+  (the `$LogFile` scanner and mapping-pairs decoder of run `sae6e7d`) stay
+  out of Community.
+
 ### Added: results and the negative bar; caps pause the run; a run that ended can be resumed
 
 - **Results.** A question's answer carries `result`: `established`,

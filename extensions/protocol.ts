@@ -5818,6 +5818,14 @@ export type ForgedToolManifest = {
   /** Programs the script calls, as its author named them: what a later case
    *  (or `tools --save` into a library) needs its image to hold. */
   requires?: string[];
+  /**
+   * Python modules the script imports only when it is called, under a try
+   * that catches ImportError, because only some images carry them (Pillow,
+   * pytsk3, pyewf): the tool says one is missing rather than failing on an
+   * import line. The library's check (tests/recipe.test.sh) holds every
+   * other import to images/library-python.txt and these to their guard.
+   */
+  optional_python?: string[];
   /** The image the tool was forged against, by digest, in a VM run. */
   image_digest?: string;
 };
@@ -5973,6 +5981,7 @@ function parseManifest(raw: string): ForgedToolManifest | null {
       sha256: m.sha256,
       ...(typeof m.pack === "string" && m.pack ? { pack: m.pack } : {}),
       ...(Array.isArray(m.requires) && m.requires.every((r: unknown) => typeof r === "string") ? { requires: m.requires as string[] } : {}),
+      ...(Array.isArray(m.optional_python) && m.optional_python.every((r: unknown) => typeof r === "string") ? { optional_python: m.optional_python as string[] } : {}),
       ...(typeof m.image_digest === "string" && m.image_digest ? { image_digest: m.image_digest } : {}),
     };
   } catch {
