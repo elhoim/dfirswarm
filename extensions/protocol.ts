@@ -9931,18 +9931,42 @@ export function conclusionFields(e: LedgerEntry): { result: string | null; quest
 }
 
 /**
- * Whether a correction leaves what an entry concludes as it was: the same
- * kind, the same conclusion fields (conclusionFields), a limitation's same
- * reason, and the same value up to case, spacing and closing punctuation.
- * Only its refs, its evidence or its reasoning changed: a citation or
- * qualification refresh, on which a closure still holds (leads.ts
- * reopenOnLedger re-points it and says so). Any change of the value, the
- * result or the kind is a change of conclusion, for the closer to confirm
- * or reopen.
+ * The fields a correction of an entry other than an answer may change and
+ * still conclude what it concluded: what it cites and how a reader checks
+ * it (refs, evidence, source, locators, qualifies, the hub's method), why
+ * it was corrected, and the record's own bookkeeping. Anything else (the
+ * value, exactly; the time and its clock and precision; what a finding
+ * indicates and how sure it is; an attribution; a hypothesis's status; a
+ * search's completion; whether it is sensitive) is its conclusion.
+ */
+export const REFRESH_FIELDS: ReadonlySet<string> = new Set(["refs", "evidence", "source", "reasoning", "because", "locators", "method", "qualifies", "seq", "at", "by", "authors", "supersedes", "prev", "hash", "ts_raw", "v"]);
+
+/**
+ * Whether a correction leaves what an entry concludes as it was, so a
+ * closure resting on it still holds (leads.ts reopenOnLedger re-points it
+ * and says so). An answer: the same conclusion fields (conclusionFields)
+ * and the same value up to case, spacing and closing punctuation. Any other
+ * kind: every field outside REFRESH_FIELDS as it was, the value exactly (a
+ * case can be the conclusion: an account name). A change of the kind is a
+ * change of conclusion. Everything else is for the closer to confirm or
+ * reopen (the Fable review of batches 1-3: a finding's indicates, an
+ * event's time, a hypothesis's status re-pointed unasked).
  */
 export function sameConclusion(a: LedgerEntry, b: LedgerEntry): boolean {
-  const words = (v: unknown) => String(v ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim().replace(/[.;:!]+$/, "").trim();
-  return a.kind === b.kind && JSON.stringify(conclusionFields(a)) === JSON.stringify(conclusionFields(b)) && (a.reason ?? null) === (b.reason ?? null) && words(a.value) === words(b.value);
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "answer") {
+    const words = (v: unknown) => String(v ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim().replace(/[.;:!]+$/, "").trim();
+    return JSON.stringify(conclusionFields(a)) === JSON.stringify(conclusionFields(b)) && words(a.value) === words(b.value);
+  }
+  const ra = a as unknown as Record<string, unknown>;
+  const rb = b as unknown as Record<string, unknown>;
+  // Absent, empty and false say the same thing.
+  const norm = (v: unknown) => JSON.stringify(v === undefined || v === null || v === "" || v === false || (Array.isArray(v) && !v.length) ? null : canonicalValue(v));
+  for (const k of new Set([...Object.keys(ra), ...Object.keys(rb)])) {
+    if (REFRESH_FIELDS.has(k)) continue;
+    if (norm(ra[k]) !== norm(rb[k])) return false;
+  }
+  return true;
 }
 
 /** The questions a summary or a narrative names symbolically: Q-<n>, and question:<id>. */

@@ -241,8 +241,8 @@ test("a correction that changes no conclusion (only its refs or its wording) hol
   const f = ok(await rec(c.a1, { kind: "finding", ...F, value: "Account bob ran it", source: "prefetch", evidence: "row 1", refs: ["job:j000001/hits.txt"] })).entry;
   const l = okq(await L.openLead(c.a1, { title: "Which account ran it", why: "q1", take: true })).lead;
   okq(await L.closeLead(c.a1, l.id, { disposition: "resolved", ref: `E-${f.seq}` }));
-  // A citation refresh: another ref, other evidence words, the same value.
-  const f2 = ok(await rec(c.a0, { kind: "finding", ...F, value: "Account Bob ran it.", source: "prefetch", evidence: "row 1, and the job that parsed it", refs: ["job:j000001/hits.txt", "job:j000006/hits.txt"], supersedes: f.seq, because: "cite the parse too" })).entry;
+  // A citation refresh: another ref, other evidence words, the same value (exactly: for an entry other than an answer, a case can be the conclusion).
+  const f2 = ok(await rec(c.a0, { kind: "finding", ...F, value: "Account bob ran it", source: "prefetch", evidence: "row 1, and the job that parsed it", refs: ["job:j000001/hits.txt", "job:j000006/hits.txt"], supersedes: f.seq, because: "cite the parse too" })).entry;
   assert.deepEqual(await L.reopenOnLedger(c.S), []);
   let lv = (await L.leadsSnapshot(c.S)).state.leads.get(l.id)!;
   assert.deepEqual([lv.closed?.ref, lv.confirm, lv.offers.filter((o) => o.reason === "confirm").length], [`E-${f2.seq}`, null, 0], "held on the standing entry, nobody asked");
@@ -254,6 +254,31 @@ test("a correction that changes no conclusion (only its refs or its wording) hol
   lv = (await L.leadsSnapshot(c.S)).state.leads.get(l.id)!;
   assert.ok(lv.confirm, "offered to its closer");
   assert.equal(lv.confirm?.head, `E-${f3.seq}`);
+});
+
+test("a correction of an entry other than an answer holds a closure only when nothing but what it cites changed: its time, what it indicates, an attribution, its confidence, a hypothesis's status, a search's completion or the value's case each ask the closer (the Fable review)", () => {
+  const base = { v: 4, seq: 1, kind: "finding", value: "Account bob ran it", source: "prefetch", evidence: "row 1", refs: ["job:j000001/hits.txt"], basis: "observed", confidence: "high", confidence_why: "direct", indicates: "bob ran the tool", by: "a1", authors: ["a1"], at: "2026-09-29T10:00:00.000Z" } as unknown as P.LedgerEntry;
+  const fix = (more: Record<string, unknown>) => ({ ...base, seq: 2, supersedes: 1, by: "a0", authors: ["a0"], at: "2026-09-29T11:00:00.000Z", ...more }) as unknown as P.LedgerEntry;
+  // A citation refresh: what it cites, how a reader checks it, and why it was corrected.
+  assert.equal(P.sameConclusion(base, fix({ refs: ["job:j000001/hits.txt", "job:j000006/hits.txt"], evidence: "row 1, and the parse", source: "prefetch and its parse", because: "cite the parse", locators: [{ ref: "job:j000001/hits.txt", at: "row 1" }] })), true);
+  for (const [what, more] of [
+    ["the value's case", { value: "Account Bob ran it" }],
+    ["what it indicates", { indicates: "the vendor updater ran as bob" }],
+    ["its confidence", { confidence: "low" }],
+    ["an attribution", { attribution: { subject: "alice" } }],
+    ["whether it is sensitive", { sensitive: true }],
+  ] as const) assert.equal(P.sameConclusion(base, fix(more)), false, what);
+  const event = { ...base, kind: "event", ts: "2026-01-01T10:00:00Z", basis: undefined, confidence: undefined, confidence_why: undefined, indicates: undefined } as unknown as P.LedgerEntry;
+  assert.equal(P.sameConclusion(event, { ...event, seq: 2, supersedes: 1, ts: "2026-01-01T22:00:00Z" } as P.LedgerEntry), false, "an event's time");
+  assert.equal(P.sameConclusion(event, { ...event, seq: 2, supersedes: 1, precision: "date" } as P.LedgerEntry), false, "an event's precision");
+  const hyp = { ...base, kind: "hypothesis", status: "supported" } as unknown as P.LedgerEntry;
+  assert.equal(P.sameConclusion(hyp, { ...hyp, seq: 2, status: "refuted" } as P.LedgerEntry), false, "a hypothesis's status");
+  const abs = { ...base, kind: "absence", completion: "complete" } as unknown as P.LedgerEntry;
+  assert.equal(P.sameConclusion(abs, { ...abs, seq: 2, completion: "partial" } as P.LedgerEntry), false, "a search's completion");
+  // An answer keeps its rule: the same result, and the same value up to case, spacing and closing punctuation.
+  const ans = { ...base, kind: "answer", section: "question:1", value: "alice", result: "established" } as unknown as P.LedgerEntry;
+  assert.equal(P.sameConclusion(ans, { ...ans, seq: 2, value: "Alice." } as P.LedgerEntry), true);
+  assert.equal(P.sameConclusion(ans, { ...ans, seq: 2, result: "partial" } as P.LedgerEntry), false);
 });
 
 /** A bounded negative under question 2: a0 searched and recorded its coverage, a1 answered; its review is due. */

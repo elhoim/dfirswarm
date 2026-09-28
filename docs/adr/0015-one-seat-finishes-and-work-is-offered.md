@@ -261,10 +261,20 @@ have lost its provider.
     way of taking its work: an open with take, a claim, a reopen with take.
 17. **Confirm or reopen; re-pointed only when the conclusion is unchanged**
     (A3). When a closed lead's entry is superseded (not disputed) by a
-    correction that changes no conclusion (its kind, value, result and the
-    other fields the symbolic citation holds are as they were: only its
-    refs, evidence or reasoning changed), the closure is held on the entry
-    that stands and recorded `repoint (conclusion unchanged)`: Astra's
+    correction that changes no conclusion, the closure is held on the entry
+    that stands and recorded `repoint (conclusion unchanged)`. For an
+    answer, no conclusion changes when its kind, result, question revision,
+    inconclusive and asserts_absence are as they were and its value is the
+    same up to case, spacing and closing punctuation. For any other kind,
+    only what it cites and how a reader checks it may change (refs,
+    evidence, source, reasoning, because, locators, qualifies, the hub's
+    method, and the record's bookkeeping: `REFRESH_FIELDS`); every other
+    field (the value exactly, a time and its clock and precision, what a
+    finding indicates and its confidence, an attribution, a hypothesis's
+    status, a search's completion, sensitive) is its conclusion. The
+    Fable review of the batches found the first rule applied to every kind,
+    which re-pointed a closure unasked when an event's time moved twelve
+    hours or a hypothesis turned refuted. Astra's
     objection was to re-pointing when the basis can reverse, which a change
     of conclusion is. Otherwise, when its closer can take it, the closer is
     offered to confirm the closure on what stands now, one offer per seat
