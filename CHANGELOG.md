@@ -6,6 +6,59 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: the question register: what a run is asked, by the goal, an agent or a person, on one chain; analyst questions while it runs; the analyst and observer roles
+
+- **One register.** `questions/questions.jsonl` (rendered as
+  `questions/questions.md`), chained with the lead register's code and
+  written under its lock, holds every question as `Q-n`: the goal's (seeded
+  at kickoff, `Q-n` is `question:n`, so every goal and run keeps working),
+  the ones agents open (`question_open`, with the entry that raised it) and
+  the ones people ask while the run goes on. Each keeps every verbatim
+  revision, a neutral formulation, why, its objective or parent,
+  materiality, priority, what it expects, hints, attachments, a suggested
+  seat, a deadline, and its origin: who, in which role, from which account,
+  host and channel, enrolled or not, claimed or signed. Scope, work and the
+  evidential disposition are kept apart. Custody seals the chain; the
+  package carries and verifies it.
+- **Goals with objectives.** An `## Objectives` section (or a front-matter
+  `objectives:` list) declares `O-n`; a goal with objectives and no
+  questions is open-ended, and its first agents propose the questions.
+  `analyse-inputs.md` gains one.
+- **Scope rules and triage.** An agent's question is in scope inside an
+  objective or under a question in scope, otherwise proposed into a triage
+  queue; an examiner's and the operator's are in scope by authority and may
+  add an objective; an analyst's are in scope inside an objective; a
+  reviewer's and an observer's are proposed. Only the operator and an
+  examiner admit or exclude; an agent never changes a person's question.
+- **`swarm.sh question <run> add|list|show|amend|priority|scope|withdraw|clarify-reply|accept|verify`**
+  and `swarm.sh lead <run> direct`. `--as ID` names an enrolled person (a
+  claim); `--sign` signs the act with their key (namespace
+  `dfirswarm-question`, the secret on fd 3). An act is acknowledged only
+  after the chain holds it, and is on the operator's record twice: the
+  attempt and the outcome naming the event.
+- **Delivery.** A person's question is posted from `analyst:<person>`
+  (tagged `question`, addressed to the seat it is offered to), ranked first
+  in every agent's header, offered to the suggested seat for a minute and
+  then to the most suited idle seat; urgent tells the holders under the same
+  objective and cancels nothing. A crash between the chain write and the
+  post is made good at the next header, and posts nothing twice.
+- **Hypothesis framing.** The first agent lead under a person's question
+  records the proposition and its negation; its answer carries `contrary` or
+  `contrary_none_why`; `result: premise_not_supported` is an answer; leading
+  forms are flagged for the critic.
+- **The finish line.** Every material question in scope is held to an
+  answer; a stale answer (recorded before an amendment) refuses `done`; an
+  accepted question limits the run. The sentinel is written under the
+  registers' lock against the revision the finish line judged, so a question
+  admitted meanwhile refuses the done, and one after it is a follow-up.
+- **Roles.** `swarm.sh examiner enroll --role analyst|observer`: an analyst
+  adds questions and signs no release; an observer proposes. Every enrolled
+  person's register line admits `dfirswarm-question`.
+- **The console.** A Questions tab (the add form, the list with origin
+  badges and authors, the triage queue, the clarification threads, the
+  acting person for the session) and "Add directive" on the Leads tab.
+- [ADR 0011](docs/adr/0011-questions-are-a-register-with-their-askers.md).
+
 ### Added: the examiner signs with their own secret, from the command line or the console; three kinds of key; a technical reviewer signs their own record
 
 - **Three kinds of key, two roles.** `swarm.sh examiner enroll` records a

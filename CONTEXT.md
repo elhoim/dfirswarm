@@ -128,11 +128,38 @@ ledger entry. Never a job: a job's exit status settles nothing.
 
 **Disposition**:
 How a lead ended, and what that cites: resolved, negative, duplicate,
-deferred, infeasible, needs_operator.
+deferred, infeasible, needs_operator; withdrawn when the question it served
+was withdrawn (the harness's alone).
 
 **Interpretation**:
 A ledger entry recorded with `interprets` naming a job: what its output
 shows. A citation alone is not one.
+
+### Questions
+
+**Question**:
+What the examination is asked to establish, as `Q-n` in the question
+register (`questions/questions.jsonl`). Its answer is the ledger entry in
+section `question:n`; leads are the work done against it.
+_Avoid_: task, ticket, request
+
+**Origin**:
+Who asked a question: the goal, an agent (with the entry that raised it), or
+a person (an analyst, a reviewer, an observer; enrolled or not; claimed or
+signed). Kept apart from who found the answer and who adopted it.
+
+**Objective**:
+What the case is to establish, `O-n`, declared by the goal or added by an
+examiner or the operator. A question inside one is in scope.
+
+**Triage**:
+Where a proposed question, or a lead left holding a finding after its
+question was withdrawn, waits for the operator or an examiner to admit or
+exclude it.
+
+**Directive**:
+The operator's unheld lead under a question, with the product it is to make
+and what makes that acceptable. Never a held lead: nobody is assigned one.
 
 ### Stopping
 
