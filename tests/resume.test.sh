@@ -72,6 +72,9 @@ jq -e '(.resumes | length) == 1 and .resumes[0].from == "stopped" and (.wall_clo
 jq -e --arg id "$id" '.runs[] | select(.id == $id) | (.resumes | length) == 1 and .resumes[0].from == "stopped" and .state == "prepared"' "$TMP/runs/registry.json" >/dev/null || fail "the registry does not hold the resume"
 jq -e '(.resumes | length) == 1 and .resumes[0].by == "operator" and .resumes[0].segment == 1' "$sb.custody-anchor.json" >/dev/null || fail "the resume is not anchored beside the run: $(jq -c '.resumes' "$sb.custody-anchor.json")"
 grep -q '"command":"resume_prepared"' "$TMP/runs/operator-audit.jsonl" || fail "the resume is not on the operator's record"
+resumed="$(grep '"tool":"run_resumed"' "$sb/traces/events.jsonl" | tail -n 1 || true)"
+[[ -n "$resumed" ]] || fail "the resume is not on the run's trace as run_resumed"
+jq -e '.agent == "system" and .args.from == "stopped" and .args.segment == 1' <<<"$resumed" >/dev/null || fail "run_resumed does not say what it resumed from and the segment: $resumed"
 grep -q '"origin":{"kind":"analyst"' "$sb/questions/questions.jsonl" || fail "the continuation's question is not an analyst's"
 if grep -q '"after_done"' "$sb/questions/questions.jsonl"; then fail "the continuation's question was taken as a follow-up of an ended run"; fi
 pass "the resume: the stop moved aside, the question admitted, the hand-offs placed, on the budget, the registry, the anchor and the operator's record"

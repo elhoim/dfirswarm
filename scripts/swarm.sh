@@ -924,6 +924,17 @@ operator_trace() { # <sandbox> <command> [args...]
   trace_emit "$ROOT" "$sandbox" "$line" >/dev/null 2>&1 || true
 }
 
+# The harness's own line on a live run's trace: a reserved tool name
+# (extensions/protocol.ts), `system`, and what it records as args.
+system_trace() { # <sandbox> <tool> <args json>
+  local sandbox="$1" tool="$2" args="$3" line
+  [[ -n "$sandbox" && -d "$sandbox/traces" ]] && declare -F trace_emit >/dev/null || return 0
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$args" || args='{}'
+  line="$(jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" --arg tool "$tool" --argjson args "$args" \
+    '{ts: $ts, agent: "system", tool: $tool, args: $args, result: {ok: true}}')" || return 0
+  trace_emit "$ROOT" "$sandbox" "$line" >/dev/null 2>&1 || true
+}
+
 # The harness a VM run started with, whatever happens to the checkout while
 # it runs: a `git pull` or an edit mid-run used to reach agents that had not
 # loaded the extension yet, and a forged tool's runner, in the middle of a
@@ -5483,6 +5494,12 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     # operator's audit holds for it, not a start it never typed.
     if [[ -n "$resume_of" ]]; then
       SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" operator_trace "$sandbox" resume ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}
+      # And the harness's own line that the run goes on (the stop policy's
+      # reserved run_resumed): what it resumed from, the segment, and the
+      # follow-ups the resume took up as its work.
+      SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" system_trace "$sandbox" run_resumed \
+        "$(jq -cn --arg from "${RESUME_FROM:-}" --arg seg "${RESUME_SEGMENT:-}" --arg fu "${RESUME_FOLLOW_UPS:-}" \
+          '{from: (if $from == "" then null else $from end), segment: ($seg | tonumber? // null), follow_ups: ($fu | split(",") | map(select(. != "")))}')"
     else
       SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" operator_trace "$sandbox" start ${start_args[@]+"${start_args[@]}"}
     fi
@@ -7981,6 +7998,17 @@ hub_send() { # <admin socket> <json>
   node "$ROOT/scripts/vm-hub-send.mjs" "$1" "$2"
 }
 
+# The question register's admission (scripts/questions-cli.ts): the run's
+# hub, when one runs, is the register's one writer, and the operator's acts
+# go to it on its admin socket; with no hub (host isolation, or a run that is
+# not going) the CLI admits them itself under the registers' lock.
+question_admission_args() { # <sandbox>
+  local dir
+  if dir="$(hub_dir_of "$1" 2>/dev/null)" && [[ -S "$dir/admin.sock" ]]; then
+    printf '%s\n' --hub-admin "$dir/admin.sock"
+  fi
+}
+
 # The hub: the board's only writer for the VMs, the trace's door, and the
 # harness's voice in each pane. Tokens reach it the way they reach the
 # collector — on stdin, from the environment, never on argv.
@@ -9239,8 +9267,9 @@ cmd_lead() {
     direct)
       # A directive: an unheld lead under a question, with the product it is
       # to make and what makes it acceptable (a held one would be an assignment).
-      local out status=0
-      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" direct "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" "$@")" || status=$?
+      local out status=0 admission=()
+      while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
+      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" direct "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" ${admission[@]+"${admission[@]}"} "$@")" || status=$?
       [[ "$status" -eq 0 ]] || { echo "BLOCKER: $(jq -r '.reason // "the directive was not recorded"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2; exit 2; }
       operator_trace "$sandbox" lead "$id" direct "$@"
       echo "Directive $(jq -r '.lead' <<<"$out") opened under $(jq -r '.q' <<<"$out"), unheld$(jq -r 'if .woke then "; \(.woke) woken for it" else "" end' <<<"$out")."
@@ -9281,8 +9310,9 @@ cmd_question() {
     list|show|verify)
       SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" "$@" ;;
     add|amend|priority|scope|withdraw|clarify-reply|accept)
-      local out status=0
-      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" "$@")" || status=$?
+      local out status=0 admission=()
+      while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
+      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" ${admission[@]+"${admission[@]}"} "$@")" || status=$?
       # The outcome beside the attempt main() recorded: the event that holds it, by seq and hash.
       OPERATOR_AUDIT_DETAIL="$(jq -c '{question: {ok: (.ok != false), q: (.q // null), rev: (.rev // null), seq: (.seq // null), hash: (.hash // null), scope: (.scope // null), reason: (.reason // null)}}' <<<"$out" 2>/dev/null || echo null)" \
         operator_audit question_outcome "$id" "$sub"
@@ -9476,6 +9506,7 @@ cmd_resume() {
     exit 2
   fi
   local out who="${as:-operator}"
+  RESUME_FOLLOW_UPS=""
   if [[ "$prepared_resume" -eq 1 ]]; then
     echo "Resume:       run $id was prepared for its resume already (--no-start); it is started now"
     RESUME_FROM="$(jq -r '(.resumes // []) | last | .from // "it was stopped"' <<<"$rec")"
@@ -9489,9 +9520,14 @@ cmd_resume() {
   echo "Wall clock:   $(jq -r '.wall_used_minutes' <<<"$out") minute(s) used before the stop$(jq -r 'if (.set | length) > 0 then "; extended: " + (.set | to_entries | map("\(.key) \(.value)") | join(", ")) else "" end' <<<"$out")"
   jq -r '.handoffs[] | "Hand-off:     \(.agent) starts from \(if .kind then "its last \(.kind) (\(.chars) chars, \(.at))" else "the registers (it left no note)" end) in \(.file)"' <<<"$out"
   echo "Anchored:     $(jq -r '.anchored' <<<"$out")"
+  # Questions admitted or amended after the run's done were follow-ups; the resume takes them up as its work.
+  jq -r 'if (.follow_ups | type) == "array" and (.follow_ups | length) > 0 then "Follow-ups:   \(.follow_ups | join(", ")), recorded after the done, are work of the continuation now" elif (.follow_ups | type) == "string" then "WARN: follow-ups \(.follow_ups)" else empty end' <<<"$out"
+  RESUME_FOLLOW_UPS="$(jq -r 'if (.follow_ups | type) == "array" then .follow_ups | join(",") else "" end' <<<"$out")"
   # The questions asked for the continuation, admitted as analyst questions now that the run is no longer ended.
   RESUME_FROM="$(jq -r '.from' <<<"$out")"
   fi
+  # The segment the continuation is: the newest done/history/<k> the resume made.
+  RESUME_SEGMENT="$(ls "$sandbox/done/history" 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -n 1 || true)"
   RESUME_QUESTIONS=""
   local q qout
   for q in ${questions[@]+"${questions[@]}"}; do
@@ -9502,7 +9538,7 @@ cmd_resume() {
       echo "WARN: the question \"$q\" was not admitted: $(jq -r '.reason // "refused"' <<<"$qout" 2>/dev/null || printf '%s' "$qout"). Add it with swarm.sh question $id add once the run is going." >&2
     fi
   done
-  export RESUME_FROM RESUME_QUESTIONS
+  export RESUME_FROM RESUME_QUESTIONS RESUME_SEGMENT RESUME_FOLLOW_UPS
   local extra=(--resume-of "$id")
   [[ "$no_start" -eq 1 ]] && extra+=(--no-start)
   cmd_start ${start_argv[@]+"${start_argv[@]}"} "${extra[@]}"

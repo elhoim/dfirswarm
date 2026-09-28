@@ -305,6 +305,12 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         l.generation = e.generation ?? l.generation + 1;
         l.held_since = e.at;
         l.stale = null;
+        // A directive framed by its first claim: the proposition it tests, from then on.
+        if (e.proposition && !l.proposition) {
+          l.proposition = e.proposition;
+          l.negation = e.negation;
+        }
+        for (const r of e.routes ?? []) if (!l.routes.some((x) => x.source === r.source && x.method === r.method)) l.routes.push(r);
         l.last_seq = e.seq;
         break;
       case "release":
@@ -956,12 +962,19 @@ export function rankedLeads(snap: LeadsSnapshot): LeadView[] {
   return [...live, ...closed];
 }
 
+/** Whether the register holds a section's question as withdrawn: the goal's own included, whose withdrawal takes it off what the run must answer. */
+export function withdrawnSection(snap: LeadsSnapshot, section: string): boolean {
+  return Boolean(snap.questions?.bySection.get(P.sectionKey(section))?.withdrawn);
+}
+
 /**
- * The questions the run is to answer: the goal's, then every other question
- * the register holds in scope (a person's, an agent's), by their sections.
+ * The questions the run is to answer: the goal's that were not withdrawn,
+ * then every other question the register holds in scope (a person's, an
+ * agent's), by their sections. The goal keeps its questions, and the
+ * register its withdrawals; this is what they leave required.
  */
 export function caseQuestions(snap: LeadsSnapshot): string[] {
-  const out = [...snap.goal.questions];
+  const out = snap.goal.questions.filter((q) => !withdrawnSection(snap, q));
   for (const q of snap.questions?.state.questions.values() ?? []) {
     if (q.origin.kind === "goal" || q.scope !== "in_scope" || q.withdrawn || q.after_done) continue;
     if (!out.includes(q.section)) out.push(q.section);
@@ -1139,14 +1152,30 @@ function checkAnswers(raw: unknown): { ok: true; answers: string[]; registered: 
 async function resolveAnswers(sandboxRoot: string, checked: { answers: string[]; registered: string[] }): Promise<{ ok: true; answers: string[]; human: Array<{ id: string; section: string }> } | { ok: false; reason: string }> {
   const Q = await import("./questions.ts");
   const qs = await Q.questionsSnapshot(sandboxRoot);
-  const out = [...checked.answers];
+  const out: string[] = [];
   const human: Array<{ id: string; section: string }> = [];
+  // Every form a question is named by (Q-4, question:4, 4, Q4) is the same
+  // question, held to the same standing: canonical first, then checked.
+  const standing = (q: import("./questions.ts").Question, named: string): string | null => {
+    const as = named === q.id ? q.id : `${named} (${q.id})`;
+    if (q.withdrawn) return `${as} was withdrawn by ${Q.originWords(q.withdrawn.origin)}: ${q.withdrawn.why}`;
+    if (q.scope === "excluded") return `${as} is excluded from the case (${q.scope_why}); it is no lead's work`;
+    if (q.scope === "proposed") return `${as} is proposed and waits for the operator's triage: it is not the case's work until it is admitted`;
+    return null;
+  };
+  for (const section of checked.answers) {
+    const q = qs.bySection.get(section);
+    if (q) {
+      const why = standing(q, `question:${section}`);
+      if (why) return { ok: false, reason: why };
+    }
+    if (!out.includes(section)) out.push(section);
+  }
   for (const id of checked.registered) {
     const q = qs.state.questions.get(id);
     if (!q) return { ok: false, reason: `${id} is not in the question register (questions view=list names every question)` };
-    if (q.withdrawn) return { ok: false, reason: `${id} was withdrawn by ${Q.originWords(q.withdrawn.origin)}: ${q.withdrawn.why}` };
-    if (q.scope === "excluded") return { ok: false, reason: `${id} is excluded from the case (${q.scope_why}); it is no lead's work` };
-    if (q.scope === "proposed") return { ok: false, reason: `${id} is proposed and waits for the operator's triage: it is not the case's work until it is admitted` };
+    const why = standing(q, id);
+    if (why) return { ok: false, reason: why };
     if (!out.includes(q.section)) out.push(q.section);
   }
   for (const section of out) {
@@ -1273,23 +1302,47 @@ function leadRef(raw: unknown): { ok: true; id: string } | { ok: false; reason: 
   return { ok: true, id: `L-${Number(m[1])}` };
 }
 
+/** A claim's framing: what an unframed directive under a person's question is taken to test (the first agent to work it says). */
+export type LeadClaimInput = { proposition?: string; negation?: string; routes?: unknown };
+
 /**
  * Claim a lead: atomically, with a new generation. A lead someone else holds
  * is theirs until they release it or show as stale; a stale holder is marked
  * first (and told, through their header and wait), and the lead may be taken
  * only once that mark has stood reclaimGraceMs(). A turn error frees
  * nothing by itself.
+ *
+ * A directive (the operator's lead, which carries a product, not a
+ * hypothesis) under a person's question that no lead has framed yet is the
+ * first agent work on that question: its first claim states the
+ * proposition and its negation, kept on the claim, as the first agent lead
+ * under the question would have.
  */
-export async function claimLead(ctx: P.SwarmContext, rawId: unknown, now = Date.now()): Promise<LeadResult<{ lead: LeadView; reclaimed_from?: string; already?: true }>> {
+export async function claimLead(ctx: P.SwarmContext, rawId: unknown, input: LeadClaimInput = {}, now = Date.now()): Promise<LeadResult<{ lead: LeadView; reclaimed_from?: string; already?: true }>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
+  const proposition = bounded("proposition", input?.proposition, LEAD_WHY_MAX, false);
+  if (!proposition.ok) return proposition;
+  const negation = bounded("negation", input?.negation, LEAD_WHY_MAX, false);
+  if (!negation.ok) return negation;
+  if (Boolean(proposition.value) !== Boolean(negation.value)) return { ok: false, reason: "proposition and negation come together: the proposition the lead tests, and what would hold if it is false" };
+  const routes = checkRoutes(input?.routes);
+  if (!routes.ok) return routes;
   try {
     const r = await transact<Fail | { ok: true; already?: true; from?: string }>(ctx.sandboxRoot, async (snap) => {
       const l = snap.state.leads.get(ref.id);
       if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
       if (l.closed) return { append: [], result: { ok: false as const, reason: `${l.id} is closed (${l.closed.disposition}${l.closed.ref ? `, ${l.closed.ref}` : ""}, by ${l.closed.by}); open a new lead for new work, or ask the operator to reopen it` } };
       if (l.holder === ctx.agentId) return { append: [], result: { ok: true as const, already: true as const } };
-      if (!l.holder) return { append: [{ by: ctx.agentId, ev: "claim", lead: l.id, holder: ctx.agentId, generation: l.generation + 1 }], result: { ok: true as const } };
+      // An unframed directive under a person's question: framed by its first claim.
+      const framing = await directiveFraming(ctx.sandboxRoot, l, snap);
+      if (framing && !proposition.value) {
+        return { append: [], result: { ok: false as const, reason: `${l.id} is a directive under ${framing.id}, a person's question no lead has framed yet: the first agent to work it tests it, never confirms it. Claim it with proposition (what the work tests) and negation (what would hold if it is false)${framing.planless ? ", and routes [{source, method}] (a route that could disconfirm it)" : ""}` } };
+      }
+      if (framing?.planless && !routes.routes.length) return { append: [], result: { ok: false as const, reason: `${framing.id} has no route plan yet: give routes [{source, method}] with the claim, one of them able to disconfirm the proposition` } };
+      if (!framing && (proposition.value || routes.routes.length) && l.proposition) return { append: [], result: { ok: false as const, reason: `${l.id} is framed already (tests: ${l.proposition}); claim it without proposition, and add routes with lead_link` } };
+      const frame = { ...(proposition.value ? { proposition: proposition.value, negation: negation.value } : {}), ...(routes.routes.length ? { routes: routes.routes } : {}) };
+      if (!l.holder) return { append: [{ by: ctx.agentId, ev: "claim", lead: l.id, holder: ctx.agentId, generation: l.generation + 1, ...frame }], result: { ok: true as const } };
       // Held by a peer: only a stale holder gives it up, and only after being marked.
       const lastAct = Math.max(0, ...snap.state.events.filter((e) => e.by === l.holder && e.ev !== "stale").map((e) => Date.parse(e.at)).filter(Number.isFinite));
       const live = await holderLiveness(ctx.sandboxRoot, l.holder, snap.jobs, undefined, now, lastAct);
@@ -1304,7 +1357,7 @@ export async function claimLead(ctx: P.SwarmContext, rawId: unknown, now = Date.
       if (since < reclaimGraceMs()) {
         return { append: [], result: { ok: false as const, reason: `${l.id} was marked stale ${Math.round(since / 1000)} s ago; ${l.holder} has ${Math.round((reclaimGraceMs() - since) / 1000)} s more to answer before it can be taken over` } };
       }
-      return { append: [{ by: ctx.agentId, ev: "claim", lead: l.id, holder: ctx.agentId, generation: l.generation + 1, from: l.holder }], result: { ok: true as const, from: l.holder } };
+      return { append: [{ by: ctx.agentId, ev: "claim", lead: l.id, holder: ctx.agentId, generation: l.generation + 1, from: l.holder, ...frame }], result: { ok: true as const, from: l.holder } };
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
@@ -1312,6 +1365,25 @@ export async function claimLead(ctx: P.SwarmContext, rawId: unknown, now = Date.
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
+}
+
+/**
+ * Whether claiming this lead is the first agent work on a person's question
+ * nobody has framed: a directive (opened by the operator, with no
+ * proposition) under such a question, when no lead under it states one.
+ * Which question, and whether it has no route plan yet either.
+ */
+async function directiveFraming(sandboxRoot: string, l: Lead, snap: LeadsSnapshot): Promise<{ id: string; planless: boolean } | null> {
+  if (l.opened_by !== "operator" || l.proposition) return null;
+  const Q = await import("./questions.ts");
+  const qs = snap.questions ?? (await Q.questionsSnapshot(sandboxRoot));
+  for (const section of l.answers) {
+    const q = qs.bySection.get(section);
+    if (!q || !Q.HUMAN_ORIGINS.has(q.origin.kind)) continue;
+    const framed = [...snap.state.leads.values()].some((x) => x.proposition && x.answers.includes(section));
+    if (!framed) return { id: q.id, planless: !questionRoutes(snap.state, section).length };
+  }
+  return null;
 }
 
 function holderOnly(l: Lead, ctx: P.SwarmContext, generation: unknown, verb: string): string | null {
@@ -1810,9 +1882,12 @@ function lineOf(x: LeadView): string {
  */
 export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {}): Promise<LeadsDigest> {
   await reopenOnLedger(ctx.sandboxRoot).catch(() => undefined);
-  // What the question register committed and has not yet published goes out
-  // first (a crash between an act and its post is made good here).
+  // What the question register committed and has not yet made good goes
+  // first: what an act implies on the lead register (a withdrawal's leads
+  // closed or sent to triage), then what it publishes (a crash between an
+  // act and its effects, or its post, is made good here).
   const Q = await import("./questions.ts");
+  await Q.reconcile(ctx.sandboxRoot).catch(() => undefined);
   await Q.deliverPending(ctx.sandboxRoot).catch(() => undefined);
   // How each question stands, on the register's chain when it changed (an answer, a review, an acceptance).
   await Q.syncDispositions(ctx.sandboxRoot).catch(() => undefined);
@@ -2175,6 +2250,7 @@ export async function uncitedEvidence(sandboxRoot: string, snap: LeadsSnapshot):
 export function questionStanding(snap: LeadsSnapshot): Array<{ id: string; why: string; blocks: string[] }> {
   const out: Array<{ id: string; why: string; blocks: string[] }> = [];
   for (const q of snap.goal.questions) {
+    if (withdrawnSection(snap, q)) continue;
     const a = snap.ledger.entries.find((e) => e.kind === "answer" && e.section === `question:${q}` && !snap.ledger.replaced.has(e.seq));
     let why = "";
     if (!a) why = "no answer";

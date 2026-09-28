@@ -844,7 +844,8 @@ async function enrichSummary(
     ? {
         from: newest.from,
         tag: newest.tag,
-        body: newest.body.length > 240 ? `${newest.body.slice(0, 239)}…` : newest.body,
+        // Whole: the console bounds it on screen (a clamped line, the whole in its title), never here.
+        body: newest.body,
         at: await mtimeIso(newest.path),
       }
     : null;

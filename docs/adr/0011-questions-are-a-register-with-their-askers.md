@@ -12,6 +12,10 @@ rounds (Plan 3, rounds 3 and 4) and approved by the owner with the defaults
 below. It is the first part of Phase 1a; the negative bar (results, coverage
 records, review of negatives), the stop policy and resume come with the
 second part, and the mediated network with Phase 4, each with its own record.
+Revised the same day after an independent review of the first part: the hub
+admits the operator's acts, a signature is carried on the act it signs, an
+act's effects are reconciled after a crash, answers are bound to a
+revision, and a directive is framed at its first claim (items 1, 5 to 10).
 
 ## Context
 
@@ -33,12 +37,20 @@ second part, and the mediated network with Phase 4, each with its own record.
 
 ## Decision
 
-1. **One register.** `questions/questions.jsonl`, chained with the lead
-   register's code (the same hash, the same check), written under the same
-   lock, by the hub alone in a microVM run and by the operator's CLI on the
-   host. `questions/questions.md` is rendered from it. Custody seals it
-   beside the leads; the package carries it; a shell rewrite is caught by the
-   append-only watch.
+1. **One register, one writer.** `questions/questions.jsonl`, chained with
+   the lead register's code (the same hash, the same check), written under
+   the same lock. While a run's hub runs it is the register's one writer:
+   the operator's CLI and the console prepare an act (and sign it), then
+   hand it to the hub's admission on its admin socket (`<hub dir>/admin.sock`,
+   in the hub's own 0700 directory, which only the host account reaches and
+   no VM does), which prepares it again from what was said, checks the
+   signature against that statement, commits it and delivers it. With no
+   hub running (a host run, or a run that is not going) the CLI admits the
+   act itself under the same lock, and says so (`admitted_by: "cli, no hub
+   running"`). `questions/questions.md` is rendered from it. Custody seals
+   it beside the leads; the package carries it; a shell rewrite is caught by
+   the append-only watch; a release is held to the heads the custody verdict
+   it binds sealed.
 2. **Three origins, kept apart everywhere.** `goal` (seeded at kickoff, `Q-n`
    equal to `question:n`, so the alias holds for every existing goal and
    run), `agent` (with the entry that raised it) and a person (`analyst`,
@@ -64,26 +76,44 @@ second part, and the mediated network with Phase 4, each with its own record.
 5. **Identity from the examiner register.** `--as ID` names an enrolled
    person, as a claim; `--sign` signs the act's canonical statement with
    that person's key (ssh, FIDO or PKCS#11, the secret down fd 3, namespace
-   `dfirswarm-question`), before anything is written, and a `sign` event
-   follows the act naming its hash. An act with no person named is the OS
-   account's on that host, `enrolled: false`, with the operator's authority,
-   and is never promoted. Two roles join the register: `analyst` (adds
-   questions, signs no release) and `observer` (proposes). Every enrolled
-   person's register line admits the question namespace.
+   `dfirswarm-question`), before anything is written, and the signature is
+   carried on the act's own event, so a signed act and its signature are one
+   line, written whole or not at all. The act is kept exactly as signed;
+   what the harness decides about it (a new revision or not) is in
+   `decided`. A signature is attributed to the person the signed act names
+   (the origin is inside the statement; the envelope is not), with the key
+   fingerprint it names, which the key the signature carries must have; the
+   person enrolled on the verifying install under that id must hold that key
+   and principal (`wrong-principal` otherwise), and an allowed-signers file
+   given to `verify` is the organisation's word on it. Verification fails
+   on `bad` and `wrong-principal`, and on any act that says it is signed and
+   carries no signature. A directive is not signed (`--sign` is refused on
+   it): a person signs the question it serves. An act with no person named
+   is the OS account's on that host, `enrolled: false`, with the operator's
+   authority, and is never promoted. Two roles join the register: `analyst`
+   (adds questions, signs no release) and `observer` (proposes). Every
+   enrolled person's register line admits the question namespace.
 6. **Commit first, then publish, from the chain.** The acknowledgement is
    given after the write. Publication (the post from `analyst:<person>`
    tagged `question`, addressed to the offered seat so no other seat wakes;
    the hint hypotheses; the `deliver` and `offer` events) is re-derived on
-   every header and every act, and a post already made is found by its
-   marker, so a crash between the write and the post neither loses the
-   question nor posts it twice. The suggested seat has the first minute; then
+   every header and every act, and a post already made is found by an exact
+   key in its front matter (`question:Q-n:r<rev>`), never by its words, so a
+   crash between the write and the post neither loses the question nor
+   posts it twice. A revision whose post or hint hypotheses could not be
+   made gets no `deliver` event: it stays pending and is tried again.
+   Clarifications are published the same way: each request to the operator
+   and each answer's post to the asker is derived from the chain and written
+   once, keyed by its `C-n`. The suggested seat has the first minute; then
    the most suited idle seat (by hints meeting its entries' refs, by the
    objectives and parents it has worked, then by idle age) offers it to
    itself from its wait. Urgent orders the offers and tells the holders
    under the same objective; it cancels nothing and wakes nobody else. This
    is a minimal reservation; the full offer protocol comes with Phase 2.
 7. **A person's question is a hypothesis.** The first agent lead under it
-   records the proposition and its negation; its answer carries `contrary`
+   records the proposition and its negation, and so does the first claim of
+   a directive (the operator's lead, which carries a product) under a
+   question no lead has framed yet; its answer carries `contrary`
    or `contrary_none_why`; `premise_not_supported` is an answer. Leading
    forms ("confirm that", "show that", "prove", "demonstrate that", "verify
    that") are flagged for the critic and never refused. Authority and
@@ -92,16 +122,34 @@ second part, and the mediated network with Phase 4, each with its own record.
 8. **The finish line includes the register.** Its file is part of the state
    revision; every material question in scope beyond the goal's own is held
    to an answer the way the goal's answers check holds its questions; an
-   answer recorded before the last amendment is stale; an accepted question
+   answer says which revision it answers (`question_rev`, in the ledger's
+   hashed core, checked under the registers' lock and required once a
+   question has more than one revision), and one to an earlier revision is
+   stale until it is recorded again for the current one, unchanged words
+   included (a correction naming the new revision); an accepted question
    limits the run instead of holding it; a proposed one holds nothing. The
    sentinel is written under the registers' lock against the revision the
    finish line judged, so an admission and a terminal `done` are never
    interleaved: an admission before the line moved the state and the done is
-   run again; one after the sentinel is recorded as a follow-up receipt.
+   run again; one after the sentinel (a new question, an admission from the
+   triage, or an amendment that makes a new revision) is recorded as a
+   follow-up receipt, and a resume takes the follow-ups up as the
+   continuation's work (one `continue` event names them).
 9. **Withdrawal never erases evidence.** A withdrawal needs a reason; the
    leads that served only that question close `withdrawn` (the harness's
-   disposition), a material lead holding a standing finding goes to triage
-   instead, and follow-up questions go to triage.
+   disposition), a material lead holding a standing finding (one its jobs
+   found, the finding it was opened from, one it needs, or the one it closed
+   on) goes to triage instead, and follow-up questions go to triage. These
+   effects are derived from the chain and reconciled under the lock in the
+   act's own hold and again at every later act and header, so a process
+   that dies between the withdrawal and its effects leaves them undone only
+   until the next read. A withdrawn goal question is no longer required by
+   the answers check or the finish line; the goal keeps it, and the register
+   says who withdrew it and why.
+10. **One standing, whatever the name.** `Q-n`, `question:n`, `n` and `Qn`
+   are one question: every alias is resolved to it before the scope,
+   withdrawal and status checks, so a proposed, excluded or withdrawn
+   question takes no work under any of its names.
 
 ## Consequences
 

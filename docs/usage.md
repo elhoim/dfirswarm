@@ -362,9 +362,9 @@ questions with `question_open`.
 - `question <run> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n] [--materiality material|background] [--priority urgent --reason R] [--expects existence|value|narrative|timeline|list] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]`
   asks the running swarm a question. It is written to the chain first and acknowledged after (the last line printed is the JSON of the act: `q`, `rev`, `scope`, the event's `seq` and `hash`, and what was delivered); then posted from `analyst:<you>`, offered to the suggested seat for its first minute (`SWARM_QUESTION_OFFER_SEC`) or to the most suited idle seat, and ranked first in every agent's header. A hint says where to look (a ref such as `input:<path>`, or a path in the run); `--hint-value` after it records what the hint says as an open hypothesis in the ledger. `--submission` makes a retry the same question.
 - `question <run> list [--json]` and `show Q-n [--json]`: every question, the triage queue and the clarifications waiting first; one question whole, with every revision, its offers, its leads, its answer and each signed act checked.
-- `question <run> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] ...`: a new verbatim revision, refused unless N is the revision now; an answer recorded before it is stale until recorded again.
+- `question <run> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] ...`: a new verbatim revision, refused unless N is the revision now; the standing answer, which names the revision it answers (`question_rev`), is stale until it is recorded again for the new one.
 - `question <run> priority Q-n urgent|normal [--reason R]`, `withdraw Q-n --why W`, `clarify-reply Q-n C-n TEXT`, `scope Q-n|L-n in_scope|excluded --why W`, `accept Q-n --as bounded|not_determinable --why W --expect-rev N`, `verify [--allowed-signers FILE] [--ca FILE]`. An acceptance takes a question's limits as they stand for that revision; it is refused while a lead under the question is still open (a route not yet closed) or its answer is a negative no other seat has reviewed, and any acceptance makes the run's outcome `examination_limited`.
-- `lead <run> direct (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A`: a directive, an unheld lead under a question with the product it is to make and what makes that acceptable.
+- `lead <run> direct (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A`: a directive, an unheld lead under a question with the product it is to make and what makes that acceptable. A directive is not signed (`--sign` is refused; sign the question it serves). Under a person's question no lead has framed yet, the first agent to claim it states the proposition and its negation.
 
 Every act takes `--as ID` (an enrolled person: a claim) and `--sign` (signed
 with that person's enrolled key in the namespace `dfirswarm-question`; the
@@ -380,7 +380,22 @@ their own; a reviewer's question is a proposed review query; an observer
 (`--role observer`) proposes. Neither an analyst nor an observer signs a
 release. Each act is on the trace and on the operator's record twice: the
 attempt, and the outcome naming the event. The console's Questions tab runs
-the same commands, with the person the console session chose as `--as`.
+the same commands, with the person the console session chose as `--as`; an
+amend or accept form keeps the revision it was opened on until you refresh it,
+and a proposed question is a full card, so a clarification on it is answered
+before it is admitted.
+
+While the run's hub is up (a microVM run that is going) it is the register's
+one writer: `swarm.sh` hands each act, prepared and signed here, to the hub's
+admin socket, which checks and commits it. With no hub (a host run, or a run
+that is not going) the command admits the act itself under the registers'
+lock. The acknowledgement says which (`admitted_by`). `verify` fails on a
+signature that does not verify, on one whose key this install's enrolment or
+the `--allowed-signers` file names for someone else (`wrong-principal`), and
+on any act that says it is signed and carries no signature. A question
+withdrawn from the goal is no longer required by the answers check or the
+finish line; questions admitted or amended into new work after the run's
+done are follow-ups, which `resume` takes up as the continuation's work.
 
 ### `scripts/spawn.sh`
 

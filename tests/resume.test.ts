@@ -122,6 +122,29 @@ test("a question asked for the continuation is admitted as an analyst question, 
   assert.deepEqual(delivered.map((d) => d.q), [q.q]);
 });
 
+test("a resume takes up the follow-ups: a question admitted after the done is the continuation's work, named on one event", async () => {
+  const r = await stoppedRun({ id: "sres3" });
+  await asEnded(r);
+  await mkdir(join(r.root, "threads", "main"), { recursive: true });
+  const operator: Q.Actor = { kind: "human", role: "operator", person: "tester@lab", enrolled: false, os_user: "tester", host: "lab", via: "cli", identity: "claimed" };
+  const late = await Q.act(r.root, operator, "open", { text: "Was the web shell reached from a second address?", why: "asked after the run finished" });
+  assert.ok(late.ok, (late as { reason?: string }).reason);
+  if (!late.ok) return;
+  assert.equal(late.after_done, true, "a follow-up of the ended run");
+  const out = await prepareResume(r.root, { run: r.id, by: "operator" });
+  assert.deepEqual(out.follow_ups, [late.q]);
+  const snap = await Q.questionsSnapshot(r.root);
+  const q = snap.state.questions.get(late.q!)!;
+  assert.equal(q.after_done, false, "this run's work now");
+  assert.equal(q.continued?.segment, out.segment);
+  assert.deepEqual(snap.state.events.filter((e) => e.ev === "continue").map((e) => e.questions), [[late.q]]);
+  assert.deepEqual((await Q.deliverPending(r.root)).map((d) => d.q), [late.q], "and delivered to the seats");
+  // Resumed again with nothing left to take up: no event.
+  await writeFile(join(r.root, P.SENTINEL_REL), `---\nby: a0\noutput: work/report.md\nreason: finished\noutcome: completed\nat: ${new Date().toISOString()}\n---\n`);
+  assert.deepEqual((await prepareResume(r.root, { run: r.id, by: "operator" })).follow_ups, []);
+  assert.equal((await Q.questionsSnapshot(r.root)).state.events.filter((e) => e.ev === "continue").length, 1);
+});
+
 test("resume after a v0 seal: the continuation is sealed anew, the earlier verdict and the v0 draft verify as prefixes, and custody-verify shows both", async () => {
   const r = await stoppedRun({ id: "sres3" });
   const v0 = await draftRelease(ctxOf(r), { home: r.home, say: quiet });

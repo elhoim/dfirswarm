@@ -129,7 +129,7 @@ function SwarmLine({ row, now }: { row: SwarmRow; now: number }) {
           <span>{compact(row.calls)} calls</span>
           <span>{compact(row.tokens)} tok</span>
         </div>
-        <div className="truncate text-[13px] text-ink-2">
+        <div className="truncate text-[13px] text-ink-2" title={last ? `${last.from} · ${last.tag} · ${last.body}` : undefined}>
           {last ? (
             <>
               <span className={cn("font-mono", last.from === "system" ? "text-brick-ink" : "text-kelp-ink")}>{last.from}</span>

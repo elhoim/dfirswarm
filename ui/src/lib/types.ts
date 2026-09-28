@@ -540,7 +540,7 @@ export type QuestionView = {
   accepted: { at: string; as: string; why: string; rev: number; origin: QuestionOrigin; stands: boolean } | null;
   disposition: Record<string, unknown> | null;
   work: "admitted" | "working" | "clarification_needed" | "paused" | null;
-  answer: { seq: number; at: string; inconclusive: boolean; result?: string; stale: boolean } | null;
+  answer: { seq: number; at: string; inconclusive: boolean; result?: string; question_rev?: number; stale: boolean } | null;
   leads: Array<{ id: string; status: string; holder: string | null; disposition?: string; opened_by: string }>;
   clarifications: Array<{ id: string; at: string; by: string; what: string; to: string; answer: { at: string; by: string; text: string; origin: QuestionOrigin | null } | null }>;
   pending_clarifications: string[];
@@ -558,7 +558,7 @@ export type QuestionsPanelView = {
   triage: Array<{ seq: number; at: string; q: string | null; lead: string | null; cause: string; entries: number[]; resolved: { at: string; decision: string; why: string; origin: QuestionOrigin | null } | null }>;
   chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null; events: number };
   seeded: boolean;
-  signatures: Array<{ q: string | null; act_seq: number; sign_seq: number; person: string; fingerprint: string; key_kind: string; state: string; detail: string }>;
+  signatures: Array<{ q: string | null; act_seq: number; sign_seq: number | null; person: string; fingerprint: string; key_kind: string; state: string; detail: string }>;
   seats: string[];
   budget: { cap_usd: number; spent_usd: number; tokens: number; cap_tokens: number | null; until_solved: boolean } | null;
 };

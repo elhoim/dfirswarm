@@ -223,17 +223,17 @@ test("identity: an act with no --as is the OS account's, not enrolled, with the 
   assert.equal(wrong.ok, false);
   assert.match(String(wrong.reason), /not signed, so nothing was recorded/);
   assert.equal((await Q.questionsSnapshot(S)).state.events.length, eventsBefore);
-  // Signed: the act and a sign event naming its hash; the signature verifies under the enrolled key.
+  // Signed: the act carries its signature on its own event; it verifies under the enrolled key.
   const signed = await operatorAct(S, "open", { text: "Was the archive sent twice?", why: "two copies seen", objective: "O-1" }, { as: "ana", sign: true, secret: Buffer.from(pass) }, home);
   assert.equal(signed.ok, true, String(signed.reason));
   const qs = (await Q.questionsSnapshot(S)).state.questions.get(String(signed.q))!;
   assert.equal(qs.origin.identity, "signed");
   assert.equal(qs.signed.length, 1);
-  const checked = await verifySignedActs(S);
+  const checked = await verifySignedActs(S, { home });
   assert.deepEqual(checked.map((c) => [c.q, c.person, c.state]), [[qs.id, "ana", "unchecked"]]);
   // A forged sign event on a claimed act, with that signature copied onto it, does not verify.
   const { events } = await Q.readQuestionEvents(S);
-  const sign = events.find((x) => x.ev === "sign")!;
+  const sign = events.find((x) => x.signature)!;
   const target = events.find((x) => x.ev === "open" && x.q === qc.id)!;
   await L.withRegisters(S, async (held) => {
     void held;
@@ -242,7 +242,7 @@ test("identity: an act with no --as is the OS account's, not enrolled, with the 
     const draft = { v: 1 as const, seq: events.length + 1, at: new Date().toISOString(), by: "operator", ev: "sign" as const, q: qc.id, target_seq: target.seq, target_hash: target.hash, signature: sign.signature, prev: head };
     await appendFile(join(S, Q.QUESTIONS_LOG), `${JSON.stringify({ ...draft, hash: Q.questionEventHash(draft, head) })}\n`);
   });
-  const again = await verifySignedActs(S);
+  const again = await verifySignedActs(S, { home });
   assert.equal(again.find((c) => c.q === qc.id)?.state, "bad", "the claimed act is not the statement that was signed");
 });
 
@@ -296,9 +296,9 @@ test("a crash between the chain write and the post: the next header delivers it 
   await Q.deliverPending(S);
   await L.leadsDigest(a1, { mark: false });
   assert.equal((await posts(S)).length, 1, "delivered once");
-  // A crash after the post and before its record: the post is found by its marker.
+  // A crash after the post and before its record: the post is found by its key.
   const second = ok(await Q.act(S, operator, "open", { text: "Was the archive printed?", why: "paper trail", objective: "O-1" }));
-  await P.registerPost(S, { from: "analyst:tester@lab", to: "a1", tag: "question", body: `QUESTION ${Q.postMarker(second.q!, 1)} from the operator; answer it in section question:${second.q!.slice(2)}.` });
+  await P.registerPost(S, { from: "analyst:tester@lab", to: "a1", tag: "question", body: `QUESTION ${Q.postMarker(second.q!, 1)} from the operator; answer it in section question:${second.q!.slice(2)}.`, key: Q.postKey(second.q!, 1) });
   const delivered = await Q.deliverPending(S);
   assert.deepEqual(delivered.map((d) => d.q), [second.q]);
   const all = await posts(S);

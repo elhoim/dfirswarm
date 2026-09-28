@@ -45,9 +45,9 @@ function markOf(agent: AgentRow | undefined): string {
 }
 
 /** The first two lines of a post, for the list's preview. */
+/** A post on one line: its whitespace folded, nothing cut (the row clamps it on screen and carries the whole in its title). */
 function preview(body: string): string {
-  const flat = body.replace(/\s+/g, " ").trim();
-  return flat.length > 220 ? `${flat.slice(0, 219)}…` : flat;
+  return body.replace(/\s+/g, " ").trim();
 }
 
 function SegBar<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: Array<[T, string]>; onChange: (v: T) => void }) {
@@ -142,7 +142,11 @@ function ThreadLine({ t, view, colour, names, onOpen }: { t: ThreadRow; view: Sw
         </div>
       ) : null}
       {last ? (
-        <div className="line-clamp-2 border-l-2 pl-2.5 font-mono text-[12px] leading-[1.45] text-ink-2" style={{ borderColor: colour(last.from) }}>
+        <div
+          className="line-clamp-2 border-l-2 pl-2.5 font-mono text-[12px] leading-[1.45] text-ink-2"
+          style={{ borderColor: colour(last.from) }}
+          title={t.last_from === last.from && view.summary.last_post && t.name === "main" ? `${names(last.from)}: ${view.summary.last_post.body}` : undefined}
+        >
           <span className="font-semibold" style={{ color: colour(last.from) }}>
             {names(last.from)}:
           </span>{" "}
