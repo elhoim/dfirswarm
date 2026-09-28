@@ -7892,6 +7892,17 @@ hub_send() { # <admin socket> <json>
   node "$ROOT/scripts/vm-hub-send.mjs" "$1" "$2"
 }
 
+# The question register's admission (scripts/questions-cli.ts): the run's
+# hub, when one runs, is the register's one writer, and the operator's acts
+# go to it on its admin socket; with no hub (host isolation, or a run that is
+# not going) the CLI admits them itself under the registers' lock.
+question_admission_args() { # <sandbox>
+  local dir
+  if dir="$(hub_dir_of "$1" 2>/dev/null)" && [[ -S "$dir/admin.sock" ]]; then
+    printf '%s\n' --hub-admin "$dir/admin.sock"
+  fi
+}
+
 # The hub: the board's only writer for the VMs, the trace's door, and the
 # harness's voice in each pane. Tokens reach it the way they reach the
 # collector — on stdin, from the environment, never on argv.
@@ -9040,8 +9051,9 @@ cmd_lead() {
     direct)
       # A directive: an unheld lead under a question, with the product it is
       # to make and what makes it acceptable (a held one would be an assignment).
-      local out status=0
-      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" direct "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" "$@")" || status=$?
+      local out status=0 admission=()
+      while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
+      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" direct "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" ${admission[@]+"${admission[@]}"} "$@")" || status=$?
       [[ "$status" -eq 0 ]] || { echo "BLOCKER: $(jq -r '.reason // "the directive was not recorded"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2; exit 2; }
       operator_trace "$sandbox" lead "$id" direct "$@"
       echo "Directive $(jq -r '.lead' <<<"$out") opened under $(jq -r '.q' <<<"$out"), unheld$(jq -r 'if .woke then "; \(.woke) woken for it" else "" end' <<<"$out")."
@@ -9082,8 +9094,9 @@ cmd_question() {
     list|show|verify)
       SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" "$@" ;;
     add|amend|priority|scope|withdraw|clarify-reply|accept)
-      local out status=0
-      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" "$@")" || status=$?
+      local out status=0 admission=()
+      while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
+      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" ${admission[@]+"${admission[@]}"} "$@")" || status=$?
       # The outcome beside the attempt main() recorded: the event that holds it, by seq and hash.
       OPERATOR_AUDIT_DETAIL="$(jq -c '{question: {ok: (.ok != false), q: (.q // null), rev: (.rev // null), seq: (.seq // null), hash: (.hash // null), scope: (.scope // null), reason: (.reason // null)}}' <<<"$out" 2>/dev/null || echo null)" \
         operator_audit question_outcome "$id" "$sub"

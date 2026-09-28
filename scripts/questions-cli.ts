@@ -15,6 +15,7 @@
  *   questions-cli.ts accept <sandbox> Q-n --as bounded|not_determinable --why W --expect-rev N
  *                                                           (the person, when named, is a second --as ID)
  *   questions-cli.ts direct <sandbox> (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A
+ *                                                           (never --sign: a directive is not signed)
  *   questions-cli.ts deliver <sandbox>                      publish what was committed and not yet published
  *   questions-cli.ts verify <sandbox> [--json] [--allowed-signers FILE] [--ca FILE]
  *                                                           every signed act, its signature checked; fails on
@@ -27,10 +28,16 @@
  * --as the act is the OS account's on this host, not enrolled, with the
  * operator's authority, and is never promoted.
  *
+ * [--hub-admin SOCKET] names the run's hub admin socket (swarm.sh passes it
+ * while the hub is up): the act, prepared and signed here, is admitted by the
+ * hub, the register's one writer. With no hub listening there, the act is
+ * admitted here under the registers' lock; `admitted_by` says which.
+ *
  * An act prints one JSON line once the chain holds it (the acknowledgement
  * comes after the write, never before), then what its delivery did.
  */
 import { createHash } from "node:crypto";
+import { connect } from "node:net";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
@@ -109,12 +116,143 @@ async function runId(sandbox: string): Promise<string> {
   return (await P.readTeam(sandbox).catch(() => null))?.swarm_id ?? "";
 }
 
+// --- admission: the hub is the register's writer ------------------------------------------------
+
+/** An operator's act as it is handed to the admission: who acts, what they said, and their signature over its statement when they signed. */
+export type AdmissionRequest = { actor: Q.Actor; ev: Q.ActKind; input: Q.ActInput; signature?: Q.ActSignature };
+
+/** A directive as it is handed to the admission: the question it serves (or one to ask first) and the lead's words. */
+export type DirectiveRequest = { actor: Q.Actor; q?: string; question?: { text?: string; why?: string }; title?: string; why?: string; product?: string; acceptance?: string };
+
 /**
- * One act from the operator's side: prepared (its words checked), signed
- * when asked, committed under the registers' lock, and only then
- * acknowledged; then published.
+ * The admission of an operator's act, where the register is written: the act
+ * prepared again from what was said (what is committed is what the admission
+ * checked, not what a client computed), a signature checked against that
+ * statement before anything is written, the act committed under the
+ * registers' lock and only then acknowledged, then delivered. The hub runs
+ * this for its admin socket, so it is the register's one writer while it
+ * runs; the CLI runs it itself, under the same lock, only when no hub is
+ * running (docs/adr/0011).
  */
-export async function operatorAct(sandbox: string, ev: Q.ActKind, input: Q.ActInput, flags: Flags, home?: string): Promise<Record<string, unknown>> {
+export async function admitOperatorAct(sandbox: string, req: AdmissionRequest, o: { home?: string } = {}): Promise<Record<string, unknown>> {
+  if (!req || typeof req !== "object" || req.actor?.kind !== "human") return { ok: false, reason: "the operator's admission takes a person's act; an agent acts through its own tools" };
+  const prepared = await Q.prepareAct(sandbox, req.actor, req.ev, req.input ?? {});
+  if (!prepared.ok) return prepared;
+  const p = prepared.prepared;
+  if (req.signature) {
+    const statement = Q.statementOf(p, await runId(sandbox));
+    const probe = { v: 1, seq: 0, at: "", by: p.by, ev: p.ev, ...(p.q ? { q: p.q } : {}), act: p.act, origin: p.origin, prev: "", hash: "" } as Q.QuestionEvent;
+    const check = checkActSignature(probe, req.signature, statement, o);
+    if (FAILED_SIGNATURE.has(check.state)) return { ok: false, reason: `the signature was checked before anything was written, and does not hold (${check.state}: ${check.detail}); nothing was recorded` };
+  }
+  const r = await Q.commitAct(sandbox, p, req.signature ? { signature: req.signature } : {});
+  if (!r.ok) return r;
+  // Committed: the acknowledgement may be given. What it publishes follows.
+  const out: Record<string, unknown> = { ...r, by: Q.originWords(p.origin) };
+  if (req.ev === "clarify_answer" && r.q && r.clarify) out.post = await Q.publishClarification(sandbox, r.q, r.clarify).catch((err: Error) => ({ pending: err.message }));
+  const delivered = await Q.deliverPending(sandbox).catch((err: Error) => ({ error: err.message }));
+  out.delivered = delivered;
+  // An acceptance changes how the question stands: its disposition goes on the chain now.
+  if (req.ev === "accept") {
+    const disposed = await Q.syncDispositions(sandbox).catch(() => [] as string[]);
+    if (disposed.length) out.disposed = disposed;
+    out.outcome = "an acceptance makes the run examination-limited: the report says what was accepted, by whom, for which revision";
+  }
+  return out;
+}
+
+/**
+ * The admission of a directive: an unheld lead under a question, with the
+ * product it is to make and what makes it acceptable. Not signed: a directive
+ * is the operator's instruction to the team, recorded as the lead register's
+ * operator act; a person's signed word goes on the question it serves.
+ */
+export async function admitDirective(sandbox: string, req: DirectiveRequest, o: { home?: string } = {}): Promise<Record<string, unknown>> {
+  if (!req || typeof req !== "object" || req.actor?.kind !== "human") return { ok: false, reason: "a directive is a person's, from the operator's side" };
+  if (req.actor.identity === "signed") return { ok: false, reason: "a directive is not signed: sign the question it serves (question add --sign), then direct it without --sign" };
+  let q = req.q ? String(req.q) : "";
+  let created: Record<string, unknown> | null = null;
+  if (!q) {
+    if (!req.question?.text) return { ok: false, reason: "a directive is a lead under a question: --question Q-n, or --new-question TEXT --new-why WHY to ask one first" };
+  }
+  for (const [k, v] of [["--title", req.title], ["--why", req.why], ["--product", req.product], ["--acceptance", req.acceptance]] as const) {
+    if (!String(v ?? "").trim()) return { ok: false, reason: `a directive needs ${k} (title and why as a lead has them; product: what it is to produce; acceptance: what makes that product acceptable)` };
+  }
+  if (!q) {
+    created = await admitOperatorAct(sandbox, { actor: req.actor, ev: "open", input: { text: req.question!.text, why: req.question!.why } }, o);
+    if (created.ok === false) return created;
+    q = String(created.q);
+  }
+  const origin = Q.originOf(req.actor);
+  const r = await L.openLead({ sandboxRoot: sandbox, agentId: "operator" }, { title: req.title, why: req.why, answers: [q], product: req.product, acceptance: req.acceptance, origin: `directive by ${Q.originWords(origin)}` });
+  return r.ok ? { ok: true, lead: r.lead.id, q, ...(r.woke ? { woke: r.woke } : {}), ...(created ? { question: created } : {}) } : r;
+}
+
+/**
+ * One request to the run's hub on its admin socket: `reached` false when no
+ * hub listens there (the socket is gone, or nothing accepts on it), so the
+ * caller may admit the act itself; once connected, the hub's answer, or a
+ * failure that says the act may have been recorded.
+ */
+export function hubAdmission(socketPath: string, body: Record<string, unknown>, timeoutMs = 60_000): Promise<{ reached: false; why: string } | { reached: true; answer: Record<string, unknown> }> {
+  return new Promise((resolveP) => {
+    let settled = false;
+    let connected = false;
+    let answer = "";
+    const done = (v: { reached: false; why: string } | { reached: true; answer: Record<string, unknown> }) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolveP(v);
+    };
+    const socket = connect(socketPath);
+    socket.setEncoding("utf8");
+    socket.setTimeout(timeoutMs, () => done({ reached: true, answer: { ok: false, reason: `the hub took the act and did not answer within ${Math.round(timeoutMs / 1000)} s: questions list shows whether it was recorded` } }));
+    socket.on("error", (err: NodeJS.ErrnoException) => {
+      if (!connected) done({ reached: false, why: `${err.code ?? "error"}: ${err.message}` });
+      else done({ reached: true, answer: { ok: false, reason: `the connection to the hub failed after the act was sent (${err.message}): questions list shows whether it was recorded` } });
+    });
+    socket.on("connect", () => {
+      connected = true;
+      socket.write(`${JSON.stringify(body)}\n`);
+    });
+    socket.on("data", (chunk: string) => {
+      answer += chunk;
+      const cut = answer.indexOf("\n");
+      if (cut < 0) return;
+      try {
+        done({ reached: true, answer: JSON.parse(answer.slice(0, cut)) as Record<string, unknown> });
+      } catch {
+        done({ reached: true, answer: { ok: false, reason: "the hub's answer is not JSON" } });
+      }
+    });
+    socket.on("close", () => {
+      if (!connected) done({ reached: false, why: "closed before it connected" });
+      else done({ reached: true, answer: { ok: false, reason: "the hub closed the connection without an answer: questions list shows whether the act was recorded" } });
+    });
+  });
+}
+
+/**
+ * Hand an admission to the run's hub when one runs (its admin socket), or
+ * make it here under the registers' lock when none does: `admitted_by` says
+ * which.
+ */
+export async function admit(sandbox: string, hubAdmin: string | undefined, body: Record<string, unknown>, local: () => Promise<Record<string, unknown>>): Promise<Record<string, unknown>> {
+  if (hubAdmin) {
+    const r = await hubAdmission(hubAdmin, { ...body, sandbox });
+    if (r.reached) return { ...r.answer, admitted_by: "hub" };
+  }
+  return { ...(await local()), admitted_by: "cli, no hub running" };
+}
+
+/**
+ * One act from the operator's side: prepared here (its words checked before
+ * a secret is asked for), signed when asked, then handed to the admission:
+ * the run's hub when one runs (`hubAdmin`, its admin socket), else made here
+ * under the registers' lock. Acknowledged only once the chain holds it.
+ */
+export async function operatorAct(sandbox: string, ev: Q.ActKind, input: Q.ActInput, flags: Flags, home?: string, o: { hubAdmin?: string } = {}): Promise<Record<string, unknown>> {
   const who = actorFor(flags, home);
   if ("why" in who) return { ok: false, reason: who.why };
   const prepared = await Q.prepareAct(sandbox, who.actor, ev, input);
@@ -125,20 +263,17 @@ export async function operatorAct(sandbox: string, ev: Q.ActKind, input: Q.ActIn
     if ("why" in s) return { ok: false, reason: s.why, ...(s.wrongSecret ? { wrong_secret: true } : {}) };
     signature = s;
   }
-  const r = await Q.commitAct(sandbox, prepared.prepared, signature ? { signature } : {});
-  if (!r.ok) return r;
-  // Committed: the acknowledgement may be given. What it publishes follows.
-  const out: Record<string, unknown> = { ...r, by: Q.originWords(prepared.prepared.origin) };
-  if (ev === "clarify_answer" && r.q && r.clarify) out.post = await Q.publishClarification(sandbox, r.q, r.clarify).catch(() => null);
-  const delivered = await Q.deliverPending(sandbox).catch((err: Error) => ({ error: err.message }));
-  out.delivered = delivered;
-  // An acceptance changes how the question stands: its disposition goes on the chain now.
-  if (ev === "accept") {
-    const disposed = await Q.syncDispositions(sandbox).catch(() => [] as string[]);
-    if (disposed.length) out.disposed = disposed;
-    out.outcome = "an acceptance makes the run examination-limited: the report says what was accepted, by whom, for which revision";
-  }
-  return out;
+  const req: AdmissionRequest = { actor: who.actor, ev, input, ...(signature ? { signature } : {}) };
+  return admit(sandbox, o.hubAdmin, { op: "question", request: req }, () => admitOperatorAct(sandbox, req, { ...(home ? { home } : {}) }));
+}
+
+/** A directive from the operator's side, handed to the admission as an act is (operatorAct). `--sign` is refused: a directive is not signed. */
+export async function operatorDirective(sandbox: string, req: Omit<DirectiveRequest, "actor">, flags: Flags, home?: string, o: { hubAdmin?: string } = {}): Promise<Record<string, unknown>> {
+  if (flags.sign) return { ok: false, reason: "a directive is not signed: sign the question it serves (question add --sign), then direct it without --sign" };
+  const who = actorFor(flags, home);
+  if ("why" in who) return { ok: false, reason: who.why };
+  const full: DirectiveRequest = { ...req, actor: who.actor };
+  return admit(sandbox, o.hubAdmin, { op: "question_direct", request: full }, () => admitDirective(sandbox, full, { ...(home ? { home } : {}) }));
 }
 
 // --- signatures --------------------------------------------------------------------------------
@@ -331,7 +466,7 @@ function parseArgs(rest: string[]): { pos: string[]; opts: Map<string, string[]>
   const pos: string[] = [];
   const opts = new Map<string, string[]>();
   const flags = new Set<string>();
-  const valued = new Set(["--text", "--why", "--neutral", "--objective", "--objective-text", "--parent", "--materiality", "--priority", "--reason", "--expects", "--hint", "--hint-value", "--attach", "--suggest", "--deadline", "--submission", "--expect-rev", "--as", "--secret-fd", "--via", "--title", "--product", "--acceptance", "--question", "--new-question", "--new-why", "--allowed-signers", "--ca"]);
+  const valued = new Set(["--text", "--why", "--neutral", "--objective", "--objective-text", "--parent", "--materiality", "--priority", "--reason", "--expects", "--hint", "--hint-value", "--attach", "--suggest", "--deadline", "--submission", "--expect-rev", "--as", "--secret-fd", "--via", "--title", "--product", "--acceptance", "--question", "--new-question", "--new-why", "--allowed-signers", "--ca", "--hub-admin"]);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (valued.has(a)) {
@@ -375,6 +510,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const asValues = opts.get("--as") ?? [];
   const acceptAs = cmd === "accept" ? asValues.find((v) => (Q.ACCEPT_AS as readonly string[]).includes(v.replace(/-/g, "_"))) : undefined;
   const person = asValues.filter((v) => v !== acceptAs).at(-1);
+  // The run's hub, when one runs: the register's writer (swarm.sh names its admin socket).
+  const admission = one("--hub-admin") ? { hubAdmin: one("--hub-admin") } : {};
   const f: Flags = { ...(person ? { as: person } : {}), ...(flags.has("--sign") ? { sign: true } : {}), ...(fdRaw !== undefined ? { secretFd: Number(fdRaw) } : {}), ...(via === "console" || via === "cli" ? { via } : {}) };
   const shared = (): Q.ActInput => ({
     ...(one("--text") !== undefined ? { text: one("--text") } : {}),
@@ -431,54 +568,57 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
             ...(one("--submission") !== undefined ? { submission: one("--submission") } : {}),
           },
           f,
+          undefined,
+          admission,
         ),
       );
       break;
     case "amend":
       if (!pos[0]) usage();
-      emit(await operatorAct(sandbox, "amend", { q: pos[0], ...shared() }, f));
+      emit(await operatorAct(sandbox, "amend", { q: pos[0], ...shared() }, f, undefined, admission));
       break;
     case "priority":
       if (!pos[0] || !pos[1]) usage();
-      emit(await operatorAct(sandbox, "priority", { q: pos[0], priority: pos[1], ...(one("--reason") !== undefined ? { reason: one("--reason") } : {}), ...(one("--expect-rev") !== undefined ? { expected_rev: one("--expect-rev") } : {}) }, f));
+      emit(await operatorAct(sandbox, "priority", { q: pos[0], priority: pos[1], ...(one("--reason") !== undefined ? { reason: one("--reason") } : {}), ...(one("--expect-rev") !== undefined ? { expected_rev: one("--expect-rev") } : {}) }, f, undefined, admission));
       break;
     case "scope": {
       if (!pos[0] || !pos[1]) usage();
       const target = pos[0].toUpperCase();
-      emit(await operatorAct(sandbox, "scope", { ...(L.LEAD_ID.test(target) ? { lead: target } : { q: target }), scope: pos[1], ...(one("--why") !== undefined ? { why: one("--why") } : {}), ...(one("--expect-rev") !== undefined ? { expected_rev: one("--expect-rev") } : {}) }, f));
+      emit(await operatorAct(sandbox, "scope", { ...(L.LEAD_ID.test(target) ? { lead: target } : { q: target }), scope: pos[1], ...(one("--why") !== undefined ? { why: one("--why") } : {}), ...(one("--expect-rev") !== undefined ? { expected_rev: one("--expect-rev") } : {}) }, f, undefined, admission));
       break;
     }
     case "withdraw":
       if (!pos[0]) usage();
-      emit(await operatorAct(sandbox, "withdraw", { q: pos[0], ...(one("--why") !== undefined ? { why: one("--why") } : {}), ...(one("--expect-rev") !== undefined ? { expected_rev: one("--expect-rev") } : {}) }, f));
+      emit(await operatorAct(sandbox, "withdraw", { q: pos[0], ...(one("--why") !== undefined ? { why: one("--why") } : {}), ...(one("--expect-rev") !== undefined ? { expected_rev: one("--expect-rev") } : {}) }, f, undefined, admission));
       break;
     case "clarify-reply":
       if (!pos[0] || !pos[1] || pos.length < 3) usage();
-      emit(await operatorAct(sandbox, "clarify_answer", { q: pos[0], clarify: pos[1], answer: pos.slice(2).join(" ") }, f));
+      emit(await operatorAct(sandbox, "clarify_answer", { q: pos[0], clarify: pos[1], answer: pos.slice(2).join(" ") }, f, undefined, admission));
       break;
     case "accept":
       if (!pos[0]) usage();
-      emit(await operatorAct(sandbox, "accept", { q: pos[0], as: acceptAs ?? "", ...(one("--why") !== undefined ? { why: one("--why") } : {}), ...(one("--expect-rev") !== undefined ? { expected_rev: one("--expect-rev") } : {}) }, f));
+      emit(await operatorAct(sandbox, "accept", { q: pos[0], as: acceptAs ?? "", ...(one("--why") !== undefined ? { why: one("--why") } : {}), ...(one("--expect-rev") !== undefined ? { expected_rev: one("--expect-rev") } : {}) }, f, undefined, admission));
       break;
-    case "direct": {
-      const who = actorFor(f);
-      if ("why" in who) emit({ ok: false, reason: who.why });
-      let q = one("--question");
-      let created: Record<string, unknown> | null = null;
-      if (!q) {
-        if (!one("--new-question")) emit({ ok: false, reason: "a directive is a lead under a question: --question Q-n, or --new-question TEXT --new-why WHY to ask one first" });
-        created = await operatorAct(sandbox, "open", { text: one("--new-question"), why: one("--new-why") }, f);
-        if (created.ok === false) emit(created);
-        q = String(created.q);
-      }
-      for (const k of ["--title", "--why", "--product", "--acceptance"]) if (!one(k)) emit({ ok: false, reason: `a directive needs ${k} (title and why as a lead has them; product: what it is to produce; acceptance: what makes that product acceptable)` });
-      const origin = Q.originOf((who as { actor: Q.Actor }).actor);
-      const r = await L.openLead({ sandboxRoot: sandbox, agentId: "operator" }, { title: one("--title"), why: one("--why"), answers: [q!], product: one("--product"), acceptance: one("--acceptance"), origin: `directive by ${Q.originWords(origin)}` });
-      emit(r.ok ? { ok: true, lead: r.lead.id, q, ...(r.woke ? { woke: r.woke } : {}), ...(created ? { question: created } : {}) } : r);
+    case "direct":
+      emit(
+        await operatorDirective(
+          sandbox,
+          {
+            ...(one("--question") ? { q: one("--question") } : {}),
+            ...(one("--new-question") ? { question: { text: one("--new-question"), why: one("--new-why") } } : {}),
+            title: one("--title"),
+            why: one("--why"),
+            product: one("--product"),
+            acceptance: one("--acceptance"),
+          },
+          f,
+          undefined,
+          admission,
+        ),
+      );
       break;
-    }
     case "deliver":
-      emit({ ok: true, delivered: await Q.deliverPending(sandbox) });
+      emit(await admit(sandbox, admission.hubAdmin, { op: "question_deliver" }, async () => ({ ok: true, delivered: await Q.deliverPending(sandbox) })));
       break;
     case "verify": {
       const r = await verifySignedActs(sandbox, { ...(one("--allowed-signers") ? { allowedSigners: one("--allowed-signers") } : {}), ...(one("--ca") ? { ca: one("--ca") } : {}) });

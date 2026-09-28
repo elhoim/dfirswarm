@@ -161,6 +161,26 @@ test("every alias of a question is held to its standing: a proposed or withdrawn
   ok(await L.openLead(a0, { title: "Look for it", why: "w", answers: [`question:${n}`], take: true, proposition: "there is a second archive", negation: "there is none", routes: ROUTE }));
 });
 
+// --- 2: a directive is not signed ---------------------------------------------------------------------
+
+test("a directive with --sign is refused, and nothing is recorded as signed that was not signed", async () => {
+  const { S, base } = await run();
+  const { home, pass } = await enrolled("ana", base);
+  const q = String((await QC.operatorAct(S, "open", { text: "Where did the archive come from?", why: "provenance", objective: "O-1" }, { as: "ana" }, home)).q);
+  const before = (await L.leadsSnapshot(S)).state.leads.size;
+  const r = await QC.operatorDirective(S, { q, title: "List the mail", why: "directive", product: "a table", acceptance: "every mail" }, { as: "ana", sign: true, secret: Buffer.from(pass) }, home);
+  refused(r as { ok: boolean }, /a directive is not signed/);
+  assert.equal((await L.leadsSnapshot(S)).state.leads.size, before, "no lead was opened");
+  // Unsigned, it is the person's claim.
+  const d = await QC.operatorDirective(S, { q, title: "List the mail", why: "directive", product: "a table", acceptance: "every mail" }, { as: "ana" }, home);
+  assert.equal(d.ok, true, String(d.reason));
+  assert.match((await L.leadsSnapshot(S)).state.leads.get(String(d.lead))!.origin, /claimed/);
+  assert.doesNotMatch((await L.leadsSnapshot(S)).state.leads.get(String(d.lead))!.origin, /signed/);
+  // And the admission refuses a signed actor whatever calls it.
+  const who = QC.actorFor({ as: "ana", sign: true }, home) as { actor: Q.Actor };
+  refused((await QC.admitDirective(S, { actor: who.actor, q, title: "t", why: "w", product: "p", acceptance: "a" })) as { ok: boolean }, /not signed/);
+});
+
 // --- 3: a signed act and its effects ----------------------------------------------------------------
 
 test("a signed act carries its signature on its own event; a signed-labelled act without one fails verification and is refused at commit", async () => {
@@ -393,6 +413,33 @@ test("a clarification committed without its operator request, or without its ans
   await Q.deliverPending(S);
   assert.equal((await answered()).length, 1, "posted once");
   void a2;
+});
+
+// --- 14: the hub admits ---------------------------------------------------------------------------
+
+test("with a hub running, an operator's act and a directive are admitted by the hub on its admin socket; with none, by the CLI under the lock", async () => {
+  const { S } = await run();
+  const dir = await mkdtemp(join(tmpdir(), "dfh-"));
+  dirs.push(dir);
+  const hub = new Hub({ sandbox: S, dir, agents: ["a0", "a1", "a2"], tokens: { a0: "t0", a1: "t1", a2: "t2", system: "ts" }, collector: join(dir, "no-collector.sock"), backstop: false, quiet: true, settleMs: 0, herdrBin: "/usr/bin/false", forging: false });
+  await hub.start();
+  closers.push(() => hub.stop());
+  const sock = hub.adminSocket();
+  const r = await QC.operatorAct(S, "open", { text: "Was the archive encrypted?", why: "crypto", objective: "O-1" }, {}, undefined, { hubAdmin: sock });
+  assert.equal(r.ok, true, String(r.reason));
+  assert.equal(r.admitted_by, "hub");
+  assert.equal((await Q.questionsSnapshot(S)).state.questions.get(String(r.q))?.text, "Was the archive encrypted?");
+  const d = await QC.operatorDirective(S, { q: String(r.q), title: "Test the headers", why: "directive", product: "a table", acceptance: "every file" }, {}, undefined, { hubAdmin: sock });
+  assert.equal(d.ok, true, String(d.reason));
+  assert.equal(d.admitted_by, "hub");
+  // The hub admits only its own run's acts.
+  const other = await QC.hubAdmission(sock, { op: "question", sandbox: dir, request: { actor: operator, ev: "open", input: { text: "x", why: "y" } } });
+  assert.ok(other.reached);
+  if (other.reached) assert.match(String(other.answer.reason), /this hub serves another run/);
+  // No hub listening: the CLI admits it itself, and says so.
+  const local = await QC.operatorAct(S, "open", { text: "Was the archive signed?", why: "provenance", objective: "O-1" }, {}, undefined, { hubAdmin: join(dir, "gone.sock") });
+  assert.equal(local.ok, true, String(local.reason));
+  assert.equal(local.admitted_by, "cli, no hub running");
 });
 
 // --- 15: seeding ------------------------------------------------------------------------------------

@@ -47,7 +47,9 @@
  *
  * The admin socket, `<dir>/admin.sock`, is for the harness's own scripts on
  * the host (idle-nudge.sh, await-done.sh, swarm.sh): prompt an agent, read
- * who is working, tell the hub which Herdr pane is whose.
+ * who is working, tell the hub which Herdr pane is whose, and admit the
+ * operator's acts on the question register (scripts/questions-cli.ts), so
+ * the hub is that register's one writer while it runs.
  *
  * And the stop. The extension in each VM steers its own seat as it does on
  * the host; this process enforces the swarm's wall clock from outside, where
@@ -73,7 +75,7 @@
  */
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -2157,6 +2159,36 @@ export class Hub {
           // The harness's own board calls from the host, as `system`: the
           // admin socket is the harness's, and it does not act as a seat.
           const result = await this.call("system", String(msg.fn ?? ""), msg.args);
+          this.reply(socket, result, true);
+          return false;
+        }
+        case "question":
+        case "question_direct":
+        case "question_deliver": {
+          // The operator's acts on the question register, from the host's CLI
+          // and console: the hub admits them, so it is the register's one
+          // writer while it runs. The admin socket is in the hub's own 0700
+          // directory, the host account's and never a VM's; a request for
+          // another run's sandbox is refused.
+          const real = (x: string) => {
+            try {
+              return realpathSync(x);
+            } catch {
+              return resolve(x);
+            }
+          };
+          if (typeof msg.sandbox === "string" && real(msg.sandbox) !== real(this.cfg.sandbox)) {
+            this.reply(socket, { ok: false, reason: "this hub serves another run" }, true);
+            return false;
+          }
+          const QC = await import("./questions-cli.ts");
+          const request = (isObject(msg.request) ? msg.request : {}) as never;
+          const result = await (msg.op === "question"
+            ? QC.admitOperatorAct(this.cfg.sandbox, request)
+            : msg.op === "question_direct"
+              ? QC.admitDirective(this.cfg.sandbox, request)
+              : Q.deliverPending(this.cfg.sandbox).then((delivered) => ({ ok: true, delivered }))
+          ).catch((err: Error) => ({ ok: false, reason: err.message }));
           this.reply(socket, result, true);
           return false;
         }
