@@ -52,7 +52,11 @@ All notable changes to this project. The format follows
   verification; first choices are staggered at kickoff; names are stable and
   labels follow the held lead. A standing entry is no need; a dropped need is
   withdrawn with why; prerequisites open and link in one act, with a product
-  contract. The prompts, the library's leads paragraph and the three CTF goals
+  contract, and a loop is refused before either is written. A seat is offered
+  one thing at a time across both registers, and a person's question offered
+  to a seat holds against a peer's claim and reopen too. A lead is parked
+  only when its holder is seen working on another lead; a closure to confirm
+  reopens at once when its closer becomes unavailable. The prompts, the library's leads paragraph and the three CTF goals
   say so: a follow-up is opened unheld unless it is started next turn, and
   ending the run is the coordinator's done.
 - **The operator sees it.** The console's Leads tab and `swarm.sh lead <run>

@@ -235,6 +235,8 @@ test("A2: a lead parked in a busy holder's hands is offered to an idle seat; the
     await traceRow(S, "a0", "bash");
     const l = ok(await L.openLead(a0, { title: "Read the browser history", why: "q2", answers: ["2"], take: true })).lead;
     await new Promise((r) => setTimeout(r, 1_200));
+    // a0 works on another lead: the positive evidence that L-1 lies idle in busy hands.
+    const other = ok(await L.openLead(a0, { title: "Walk the registry", why: "q1", take: true })).lead;
     await traceRow(S, "a0", "bash");
     let snap = await L.leadsSnapshot(S);
     const parked = await L.parkedLeads(S, snap);
@@ -255,6 +257,7 @@ test("A2: a lead parked in a busy holder's hands is offered to an idle seat; the
     refused(await L.claimLead(a1, l.id), /is held by a0/);
     // Parked again, offered again, and this time taken over at once.
     await new Promise((r) => setTimeout(r, 1_200));
+    ok(await L.linkLead(a0, other.id, { routes: [{ source: "input:disk.E01", method: "the SYSTEM hive" }] }));
     await traceRow(S, "a0", "bash");
     await L.leadsDigest(a1, { mark: true });
     assert.match((await L.leadsWaitCheck(a1)()) ?? "", new RegExp(`${l.id} .* is parked in a0's hands`));
@@ -426,7 +429,10 @@ test("one offer mechanism: a question offered to its suggested seat counts its m
     const early = ok(await L.openLead(a1, { title: "Search the mail", why: q, answers: [q], take: true, proposition: "it was mailed", negation: "it was not mailed", routes: [{ source: "input:disk.E01", method: "the mail store" }] }));
     assert.equal(early.lead.holder, null);
     assert.match(early.coverage?.reserved ?? "", new RegExp(`${q} is offered to a3`));
-    ok(await L.claimLead(a3, early.lead.id, { proposition: "it was mailed", negation: "it was not mailed" }).catch((e) => ({ ok: false, reason: String(e) })).then((r) => (r.ok ? r : ({ ok: true } as never))));
+    // The peer's claim is refused while a3 holds the question; a3's own claim takes the lead (framed at its open already).
+    refused(await L.claimLead(a1, early.lead.id), new RegExp(`serves ${q}, which is offered to a3`));
+    const took = ok(await L.claimLead(a3, early.lead.id));
+    assert.equal(took.lead.holder, "a3");
     // Lapsed after its window: nobody holds it for anyone.
     await new Promise((r) => setTimeout(r, 1_300));
     assert.equal(Q.reservingQuestionOffer((await Q.questionsSnapshot(S)).state.questions.get(q)!, Date.now()), null);

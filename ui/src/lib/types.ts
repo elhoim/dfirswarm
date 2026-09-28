@@ -631,7 +631,7 @@ export type LeadsPanelView = {
   coverage: { questions: string[]; existence: string[]; unanswered: string[]; uncovered: string[]; open_leads_for: Record<string, string[]> };
   awaiting: Array<{ job: string; agent: string; lead: string | null; why: string; unread_bytes?: number; total_bytes?: number; next_offset?: number; reinterpret?: true }>;
   /** Held leads with nothing done on them while their holders work elsewhere, offered on. */
-  parked?: Array<{ lead: string; holder: string; idle_ms: number; since: string }>;
+  parked?: Array<{ lead: string; holder: string; idle_ms: number; since: string; elsewhere?: string }>;
   /** The finish: null once the run is finished. */
   finish?: FinishPanel | null;
 };

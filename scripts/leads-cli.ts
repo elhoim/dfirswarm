@@ -78,7 +78,7 @@ export async function listText(sandbox: string): Promise<string> {
   const cov = L.questionCoverage(snap);
   if (snap.goal.questions.length) lines.push("", `Questions: ${snap.goal.questions.length}; without an answer: ${cov.unanswered.map((q) => `question:${q}`).join(", ") || "none"}; of those, held by no lead: ${cov.uncovered.map((q) => `question:${q}`).join(", ") || "none"}.`);
   const parked = await L.parkedLeads(sandbox, snap).catch(() => [] as L.ParkedLead[]);
-  if (parked.length) lines.push("", `Parked (held, no job and no act on it while the holder works elsewhere; offered to an idle seat): ${parked.map((p) => `${p.lead} (${p.holder}, ${Math.round(p.idle_ms / 60_000)} min)`).join("; ")}.`);
+  if (parked.length) lines.push("", `Parked (held, no job and no act on it while the holder works elsewhere; offered to an idle seat): ${parked.map((p) => `${p.lead} (${p.holder}, ${Math.round(p.idle_ms / 60_000)} min; ${p.elsewhere})`).join("; ")}.`);
   const finish = await finishText(sandbox).catch((err: Error) => `Finish: could not be read (${err.message}).`);
   lines.push("", finish);
   return `${lines.join("\n")}\n`;

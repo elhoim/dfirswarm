@@ -273,7 +273,7 @@ headers say whether the registers make the finish ready. `leads/finish.jsonl`
 records the coordinator, the report's reviews, the late items it resolved and
 the check result per state revision. Work nobody holds is offered to one idle
 seat at a time, for a minute from when the offer reaches it; a lead held with
-nothing done on it for ten minutes while its holder works elsewhere is parked
+nothing done on it for ten minutes while its holder works on another lead is parked
 and offered too. First choices are staggered at the start of a run (20 s a
 seat, 90 s in all; `SWARM_FIRST_CHOICE_STAGGER_SEC=0` at kickoff turns it off,
 `SWARM_FIRST_CHOICE_BOUND_SEC` sets the bound). The timings are pilot

@@ -155,8 +155,9 @@ _Avoid_: wake, assignment
 
 **Parked lead**:
 A lead held with no job and no act on it for ten minutes while its holder
-works elsewhere: shown to everyone and offered to an idle seat unless the
-holder acts on it.
+is seen working on another lead: shown to everyone and offered to an idle
+seat unless the holder acts on it. Reading and analysing the lead's own
+output is working it, not parking it.
 
 **Hand-off**:
 A holder letting a lead go to another seat with what it did and what comes

@@ -67,15 +67,16 @@ Leads (the swarm's open work)
   invalidated when what met it stops standing.
 - A lead better in another seat's hands is handed over: `lead_handoff(id, why, to?)` says what you
   did and what the next seat takes up, and offers it to the seat you name or the one idle longest.
-- A lead you hold with no job and no act on it for ten minutes while you work elsewhere shows as
-  parked and is offered to an idle seat. Act on it (`lead_claim` of your own lead keeps it, or run
+- A lead you hold with no job and no act on it for ten minutes while you work on another lead shows
+  as parked and is offered to an idle seat. Act on it (`lead_claim` of your own lead keeps it, or run
   its job), hand it off, or let it go. While every lead you hold waits on a need you count as idle,
   and are offered other work: take it.
 - An offer is first claim for one seat for a minute from when it reaches you: a ready lead nobody
   holds, a lead handed to you or parked in a peer's hands, a lead reopened for you after the
   operator's note, or a person's question. Take it (`lead_claim`, or `offer accept`), or decline it
   with why (`offer decline`) so it passes to the next seat at once. Do not race for a lead offered to
-  a peer: your claim is refused while the offer holds.
+  a peer, or for the work of a question offered to a peer: your claim is refused while the offer
+  holds. You are offered one thing at a time.
 - When the entry you closed a lead on is corrected, nothing re-points the closure: you are offered
   to confirm it on what stands now (`lead_confirm` with the lead's revision, the ref and why) or to
   reopen it (`lead_reopen`). A correction can reverse what the closure rested on; unconfirmed, the

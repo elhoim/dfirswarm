@@ -382,7 +382,7 @@ export function LeadsPanel({ view, version }: { view: SwarmView; version: number
           <h3 className="label-caps m-0">Parked ({d.parked.length})</h3>
           <p className="m-0 text-[12.5px] text-ink-2">
             Held, with no job and no act on them while their holders work elsewhere; each is offered to an idle seat unless its holder acts:{" "}
-            {d.parked.map((p) => `${p.lead} (${names(p.holder)}, ${Math.round(p.idle_ms / 60_000)} min)`).join("; ")}.
+            {d.parked.map((p) => `${p.lead} (${names(p.holder)}, ${Math.round(p.idle_ms / 60_000)} min${p.elsewhere ? `; ${p.elsewhere}` : ""})`).join("; ")}.
           </p>
         </section>
       ) : null}

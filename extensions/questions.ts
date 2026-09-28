@@ -1879,16 +1879,20 @@ export async function deliverPending(sandboxRoot: string, o: { now?: number } = 
   const out: Delivery[] = [];
   const ctx = await viewContext(sandboxRoot);
   const seats = await liveSeats(sandboxRoot);
-  const idle = await L.idleSeats(sandboxRoot, ctx.leads, ctx.ledger, await jobsOf(sandboxRoot), now).catch(() => [] as Array<{ agent: string; since: number }>);
+  const idle = await L.idleSeats(sandboxRoot, ctx.leads, ctx.ledger, await jobsOf(sandboxRoot), now, ctx.questions).catch(() => [] as Array<{ agent: string; since: number }>);
+  // One offer at a time per seat, across both registers and across this
+  // batch: a seat offered one question here is not offered the next.
+  const busy = await L.offeredSeats(sandboxRoot, ctx.leads, now, ctx.questions).catch(() => new Set<string>());
   for (const q of [...ctx.questions.state.questions.values()].filter(due)) {
     const already = q.offers.find((x) => x.rev === q.rev);
     let offer: { to: string; first: boolean; until?: string; why: string } | null = already ? { to: already.to, first: already.first, why: already.why, ...(already.until ? { until: already.until } : {}) } : null;
-    // The asker's suggested seat first, when it can take it (not done, dead or compacting); its first claim counts from when the offer reaches it.
-    if (!offer && q.suggested_to && seats.includes(q.suggested_to) && (await L.seatAvailable(sandboxRoot, q.suggested_to, undefined, now)).available) offer = { to: q.suggested_to, first: true, why: `suggested by ${q.origin.name ?? q.origin.person}` };
+    // The asker's suggested seat first, when it can take it (not done, dead or compacting, and no offer standing for it); its first claim counts from when the offer reaches it.
+    if (!offer && q.suggested_to && seats.includes(q.suggested_to) && !busy.has(q.suggested_to) && (await L.seatAvailable(sandboxRoot, q.suggested_to, undefined, now)).available) offer = { to: q.suggested_to, first: true, why: `suggested by ${q.origin.name ?? q.origin.person}` };
     if (!offer) {
-      const pick = rankSeats(q, idle, ctx)[0];
+      const pick = rankSeats(q, idle.filter((x) => !busy.has(x.agent)), ctx)[0];
       if (pick) offer = { to: pick.agent, first: false, why: pick.why.length ? `idle and suited: ${pick.why.join("; ")}` : "idle longest" };
     }
+    if (offer && !already) busy.add(offer.to);
     // Nobody idle: the post goes to the seat most suited to it, so it wakes one seat, not all.
     const to = offer?.to ?? (seats.length ? rankSeats(q, seats.map((s) => ({ agent: s, since: 0 })), ctx)[0]?.agent : null) ?? "all";
     const hyp = await hintHypotheses(sandboxRoot, q);
@@ -1913,7 +1917,9 @@ export async function deliverPending(sandboxRoot: string, o: { now?: number } = 
       const cur = snap.state.questions.get(q.id);
       if (!cur || cur.rev !== q.rev || cur.delivered.has(q.rev)) return;
       const drafts: QuestionDraft[] = [{ by: "system", ev: "deliver", q: q.id, rev: q.rev, post: { thread: post!.thread, id: post!.id }, to, hypotheses: hyp.seqs }];
-      if (offer && !cur.offers.some((x) => x.rev === q.rev)) drafts.push({ by: "system", ev: "offer", q: q.id, rev: q.rev, to: offer.to, first: offer.first, ...(offer.until ? { until: offer.until } : {}), why: offer.why, max_until: new Date(now + O.offerMaxAgeMs()).toISOString() });
+      // Read again under the lock: a seat offered something since (a lead, or a question by a delivery racing this one) is offered nothing more; the question is offered later, from a wait.
+      const occupied = offer && !cur.offers.some((x) => x.rev === q.rev) ? await L.offeredSeats(sandboxRoot, L.foldLeads((await L.readLeadEvents(sandboxRoot)).events), now, snap) : null;
+      if (offer && occupied && !occupied.has(offer.to)) drafts.push({ by: "system", ev: "offer", q: q.id, rev: q.rev, to: offer.to, first: offer.first, ...(offer.until ? { until: offer.until } : {}), why: offer.why, max_until: new Date(now + O.offerMaxAgeMs()).toISOString() });
       await appendQuestionEvents(sandboxRoot, drafts, held);
       await writeQuestionsMd(sandboxRoot).catch(() => undefined);
     }).catch(() => undefined);
@@ -1969,7 +1975,7 @@ export async function electQuestionOffer(ctx: P.SwarmContext, now = Date.now(), 
   const outer = await viewContext(ctx.sandboxRoot);
   const due = [...outer.questions.state.questions.values()].filter((q) => offerDue(q, outer, now));
   if (!due.length) return null;
-  const idle = await L.idleSeats(ctx.sandboxRoot, outer.leads, outer.ledger, await jobsOf(ctx.sandboxRoot), now).catch(() => [] as Array<{ agent: string; since: number }>);
+  const idle = await L.idleSeats(ctx.sandboxRoot, outer.leads, outer.ledger, await jobsOf(ctx.sandboxRoot), now, outer.questions).catch(() => [] as Array<{ agent: string; since: number }>);
   if (!idle.some((x) => x.agent === ctx.agentId)) return null;
   const order = (a: Question, b: Question) => (a.priority === b.priority ? 0 : a.priority === "urgent" ? -1 : 1) || (a.deadline ?? "￿").localeCompare(b.deadline ?? "￿") || a.opened_at.localeCompare(b.opened_at);
   for (const q of due.sort(order)) {
@@ -1980,6 +1986,8 @@ export async function electQuestionOffer(ctx: P.SwarmContext, now = Date.now(), 
       const inner = await viewContext(ctx.sandboxRoot);
       const cur = inner.questions.state.questions.get(q.id);
       if (!cur || !offerDue(cur, inner, now)) return null;
+      // One offer at a time, across both registers, read again under the lock.
+      if ((await L.offeredSeats(ctx.sandboxRoot, inner.leads, now, inner.questions)).has(ctx.agentId)) return null;
       // Made and delivered at once: the seat's wait returns it now.
       const made = await appendQuestionEvents(ctx.sandboxRoot, [{ by: "system", ev: "offer", q: q.id, rev: cur.rev, to: ctx.agentId, first: false, why: pick.why.length ? `idle and suited: ${pick.why.join("; ")}` : "idle longest", max_until: new Date(now + O.offerMaxAgeMs()).toISOString() }], held);
       const seq = made.at(-1)!.seq;

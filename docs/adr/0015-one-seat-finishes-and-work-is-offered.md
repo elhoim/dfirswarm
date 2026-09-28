@@ -194,12 +194,16 @@ have lost its provider.
     lead comes from); a dropped need says why and is withdrawn, never met;
     a need's outcome is satisfied, pending, failed, or invalidated (it was
     met and what met it no longer stands). `lead_open(consumer: L-n)` opens a
-    prerequisite and links it in one act; the product contract is
+    prerequisite and links it in one act, the whole graph as it would stand
+    checked first so a loop is refused before either event; the product
+    contract is
     `product`, `acceptance`, `inputs`, `next_action`, and `result_refs` at
     close. `record(opens)` opens unheld (and the prompt says so);
     `lead_handoff(id, why, to?)` offers a held lead to a named seat or the
     one idle longest. A held lead with no job and no act on it for ten
-    minutes (`SWARM_LEAD_PARK_SEC`) while its holder works elsewhere is
+    minutes (`SWARM_LEAD_PARK_SEC`) while its holder works elsewhere (shown
+    positively: an act on another lead, or a job under one, since; a seat
+    analysing its only lead in the foreground is working it) is
     parked: shown to everyone, offered to an idle seat, kept by the
     holder's own `lead_claim`, taken over at once by the seat offered it. A
     seat whose held leads all wait on needs counts as idle. This replaces a
@@ -218,12 +222,16 @@ have lost its provider.
     any revision of what it offers, lapsed by time; all of it derived from
     the chains and the clock, so a restart finds it as it was. Seats that are
     done, dead or compacting are never offered anything, and a seat with an
-    offer standing is offered nothing more.
+    offer standing in either register is offered nothing more (read again
+    under the registers' lock for each offer, and across a batch of
+    deliveries). A person's question offered to a seat holds against every
+    way of taking its work: an open with take, a claim, a reopen with take.
 17. **Confirm or reopen, never re-point** (A3). When a closed lead's entry is
     superseded (not disputed) and its closer can take it, the closer is
     offered to confirm the closure on what stands now (`lead_confirm`, by
     revision, with the ref and why); declined or unconfirmed it reopens, and
-    a dead or compacting closer's lead reopens at once. A same-author
+    a dead or compacting closer's lead reopens at once, whether the closer
+    was so before the offer or became so after it. A same-author
     correction can reverse what a closure rested on, so nothing re-points it
     by itself. A closure waiting for confirmation meets no need and holds
     the finish.
