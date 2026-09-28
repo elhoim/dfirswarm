@@ -47,20 +47,41 @@ The evidence is under `inputs/` (read-only; call `inputs` to list it):
 
 ## How to divide the work
 
-Seats are assigned in `SWARM.md` (change them on the board if you see a
-better split). The critic and editor verifies every citation before it goes
-into `work/report.md`, assembles the report from the seats' notes and the
-ledger, and posts the sign-off the definition of done requires. The timeline
-seat builds `work/timeline.md` from `ledger/ledger.md`. Do not all run the
-same command on the same image: read the catalog and the board first.
+Nobody has been given a job. Read the goal and the evidence catalog, see on
+the board what your peers have taken, decide what you are going to do, and
+call `name(name, doing)` to say what to call you and what you are taking on. Fill what nobody has taken; if two of you want the same thing,
+settle it in a post. Say so again when you change course.
+
+Somebody has to keep the timeline from `ledger/ledger.md`, and somebody has to
+assemble `work/report.md` from the answers in the ledger. Agree between you
+who does, early, because the run is not finished until both exist. Do not all
+run the same command on the same image: read the catalog and the board first.
+
+**Report author and critic.** Two of you take these roles early with
+`name(doing=…)`, and they are different agents. The report author writes the
+answers from the ledger, not from memory: compact first, read `ledger`, then
+one `record(kind=answer)` per question (`section=question:<n>`) and one each
+for `summary` and `narrative`, citing `E-<seq>` for every claim and stating
+the confidence and its reason, the contrary evidence, the limitations, what
+else could explain it and what would change the answer. When the ledger cannot
+answer, reopen the investigation and say so on the board. The critic
+re-derives each finding an answer rests on from its sealed refs and records
+`attest` (what was re-derived, what only read) or `dispute` (why), then does
+the same for every answer. The critic writes no answer; the author attests
+nothing of their own. The sign-off is these acts, not a post. Nothing else is
+assigned.
 
 ## Definition of done
 
-`work/report.md` exists, answers every question under headings `## 1.`, `## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`,
-every answer cites evidence, the critic has posted a sign-off on the board as a `result`
-post that starts a line with `SIGN-OFF:` and names what they verified, `work/timeline.md` holds the merged timeline as a
-table with at least 30 dated rows built from the ledger, the ledger holds
-the dated events the timeline rests on, and `inputs/` is unchanged.
+`work/report.md` exists, answers every question under headings `## 1.`,
+`## 2.`, `## 3.`, `## 4.`, `## 5.`, `## 6.`, every answer cites evidence, the
+ledger holds one `answer` entry per question (`question:1` to `question:6`)
+and one each for `summary` and `narrative`, with every defect the answers
+check names fixed or named by a limitation, and the critic, who wrote none of
+them, has recorded `attest` or `dispute` on each answer, saying what they
+verified, `work/timeline.md` holds the merged timeline as a table with at
+least 30 dated rows built from the ledger, the ledger holds the dated events
+the timeline rests on, and `inputs/` is unchanged.
 
 ## Checks
 
@@ -69,7 +90,7 @@ the dated events the timeline rests on, and `inputs/` is unchanged.
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 30`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 10`
-- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for

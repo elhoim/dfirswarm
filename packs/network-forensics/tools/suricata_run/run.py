@@ -7,11 +7,33 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 
 def fail(message, **extra):
     print(json.dumps({"error": message, **extra}))
     raise SystemExit(1)
+
+
+def resolve_output(out, what="output"):
+    """Where `out` really lands, as a path under the run directory; a place
+    outside it, the run directory itself, or anything under inputs/ is refused.
+
+    A string check is not enough: `work/../inputs/x`, an absolute path and a
+    symlink that points out all name a place the tool must not write, and none
+    of them starts with "inputs/". Resolving first and comparing directories
+    is what actually holds, and the read-only inputs are the one place
+    extracted bytes must never appear -- a later integrity check would report
+    the evidence as modified. In a job $OUT is inside the run directory.
+    """
+    root = Path.cwd().resolve()
+    dest = (root / out).resolve() if not Path(out).is_absolute() else Path(out).resolve()
+    if dest == root or root not in dest.parents:
+        fail("%s must stay inside the run directory" % what, **{what: str(out)})
+    inputs = root / "inputs"
+    if dest == inputs or inputs in dest.parents:
+        fail("%s cannot be under inputs/" % what, **{what: str(out)})
+    return str(dest.relative_to(root))
 
 
 def main():
@@ -25,6 +47,7 @@ def main():
             fail("%s must name a readable file" % label, **{label: value})
     if not isinstance(out_dir, str) or not out_dir:
         fail("out_dir is required: an empty directory under work/")
+    out_dir = resolve_output(out_dir, "out_dir")
     if os.path.exists(out_dir) and os.listdir(out_dir):
         fail("out_dir already holds files", out_dir=out_dir)
     limit = args.get("return_alerts", 100)

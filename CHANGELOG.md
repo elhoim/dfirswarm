@@ -6,6 +6,425 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: the examiner signs with their own secret, from the command line or the console; three kinds of key; a technical reviewer signs their own record
+
+- **Three kinds of key, two roles.** `swarm.sh examiner enroll` records a
+  key kind and a role (`--role examiner|reviewer`). An ssh key must have a
+  passphrase: `--generate-key` asks for it twice on the terminal (or takes
+  it on a descriptor) and feeds it to `ssh-keygen` on stdin in a session
+  with no terminal; `--key FILE` is checked to be encrypted (`ssh-keygen -y
+  -P ""` must fail). `--no-passphrase` stays, as a command-line trade the
+  console refuses. `--fido [--fido-verify-required] [--fido-resident]` makes
+  an ed25519-sk key on the authenticator with an `ssh-keygen` found to have
+  FIDO support from its files (Homebrew's openssh on macOS; the product
+  never probes the key). `--pkcs11-module PATH (--pkcs11-id HEX |
+  --pkcs11-uri URI) [--pkcs11-chain FILE]` enrols a token's X.509
+  certificate, read without the PIN, keeping its fingerprint, CN, issuer,
+  validity, key usage and qualified-certificate statement and refusing one
+  that cannot sign; its signatures are CAdES-BES CMS made through OpenSSL
+  3's PKCS#11 provider, with the issuing CA inside. A certificate's subject
+  is never shown beyond its CN. Older enrolments read as an examiner's ssh
+  key.
+- **One way for the secret.** A passphrase or a PIN reaches `ssh-keygen`
+  (through `SSH_ASKPASS` with `SSH_ASKPASS_REQUIRE=force` and
+  `scripts/askpass-fd3.sh`) or OpenSSL's provider (`pin-source=file:/dev/fd/3`)
+  only down a pipe on fd 3: never argv, the environment, a file, a job or a
+  log.
+- **Prepare, then seal.** An adoption renders its final bytes once, with a
+  fixed time, into `release/.pending-<nonce>/`, and says what will be
+  signed; the seal signs exactly those bytes, and refuses when they, the
+  review, custody, the report or the releases moved, after fifteen minutes,
+  or for a nonce already used. The gate runs again at the seal. A release
+  records `signing`: `via` (console or cli), the consent statement,
+  `consent` (`confirmed`, or `presented` with `--yes`), the sha256 shown,
+  when it was prepared and confirmed, the key's kind and fingerprint and the
+  program that signed; an e-signature is `release.json.p7s`, and a printed
+  PDF gets `report.pdf.p7s`. `swarm.sh review <id> --sign` prints the
+  summary, asks on the terminal, then takes the secret with echo off;
+  `--yes` skips only the confirmation. Release records are schema 2; schema
+  1 is still read.
+- **The console signs.** A Release tab (the run's releases, how each was
+  signed, what verify says, the technical reviews; the adoption: an enrolled
+  examiner, the prepared report in a frame with no scripts beside the sha256
+  of the bytes shown, the gate, the consent box, a dialog for the passphrase,
+  the touch and PIN, or the e-signature PIN), a Technical review tab and an
+  Examiners page, over new routes that need the token even when
+  `SWARM_UI_TOKEN` is empty, a loopback Host, the console's Origin and JSON,
+  refuse while a host-mode run is live, lock a person out for fifteen minutes
+  after five wrong secrets (on the operator's record), refuse keys without a
+  passphrase or in ssh-agent, and run their scripts directly, never as a job.
+  The Ledger tab's old sign button is gone, and the console no longer reads
+  the newer review acts as breaks in the chain.
+- **Two-stage signing.** A technical review names its outcome
+  (`--outcome agreed|issues-resolved|disagreement`, each disagreement with
+  `--disagreement`), when it was done, its scope (entries by seq and hash,
+  or `--all-answers`) and what it was over (report.md, the ledger's head,
+  custody, the dispositions' head). An enrolled reviewer writes and signs it
+  with a `countersign` line (SSHSIG in `dfirswarm-review`, or a CMS); a
+  record the examiner writes says the reviewer did not sign it, and can be
+  countersigned later (after a release, the countersign names it). A reviewer
+  elsewhere works from the package (`swarm.sh review <package-dir>
+  --technical-review …`, `review-import.jsonl`), and the examiner imports it
+  (`--import FILE`), checked against the register and the review's head. A
+  reviewer with the examiner's id, name or key is refused.
+  `--require-technical-review` at kickoff, or
+  `SWARM_REQUIRE_TECHNICAL_REVIEW=1`, makes the seal wait for a current,
+  signed review that is not a disagreement. The report and verify list every
+  technical review in one of five wordings.
+- **Verify, by kind.** The machine's seal reads "machine seal, self-checked"
+  and is never checked against an examiner register; a run no examiner
+  adopted says "RELEASES HOLD". An e-signature is checked with `openssl cms
+  -verify` against `--ca FILE` (with `--ca-intermediate FILE`), naming each
+  trust anchor's sha256; without a CA it says "certificate chain not
+  checked". The release binds what the kickoff recorded of the signers' keys
+  (`signer_keys_hidden`, `signer_isolation`, `earlier_runs_hidden`).
+- **Hardware tests** in `tests/hw/` (a FIDO key, the e-signature token, the
+  console's seal path), run only with `DFIRSWARM_HW_TESTS=1`; the unit tests
+  use a throwaway SoftHSM2 token and skip, saying why, without it.
+### Security: the signing keys are kept from a host run's agents
+
+The machine key seals a draft release at stop, unattended, so it has no
+passphrase, and an examiner's key may have none either or sit in an
+ssh-agent. A microVM mounts none of them; a host run's panes could read them.
+
+- **Denied at the kernel.** A host run's panes are denied each home's
+  `machine/` and `examiners/` (made 0700 first, so a mount namespace has
+  something to mask), `SWARM_SIGNERS_HOME`, each enrolled examiner's key
+  file as its record names it (the key is never read), the custody key, and
+  the ssh-agent: `SSH_AUTH_SOCK` is dropped from every pane and its hook,
+  its socket is denied (launchd's on macOS by its directory), and
+  `--env SSH_AUTH_SOCK=` is refused.
+- **Fail closed.** A guard that cannot deny one of them (Landlock alone and
+  an agent's socket, a key inside the run, a signers' home that holds what
+  the panes need, a key inside something every VM mounts) refuses the run.
+  With no guard at all (`--no-write-guard`, or a host without one) the run
+  is refused while a signing key exists, `--check` included, unless
+  `--accept-signer-exposure`: the run then records `signer_keys_hidden:
+  false` and what was exposed, and the kickoff says to rotate.
+- **Recorded for every run**: `signer_keys_hidden` and `signer_isolation`
+  (isolation, guard, what was denied or exposed, why) in the registry, for
+  the draft release to bind; see docs/observability.md.
+- **Earlier runs and the reviews.** Every earlier run's sandbox in the
+  registry and `runs/reviews/` are denied to a host run's panes where the
+  guard can mask a directory (not the whole runs directory: this run and the
+  registry are in it); `earlier_runs_hidden` says which, and why not under
+  Landlock alone. Until now only `--no-read` hid an earlier run.
+- **`swarm.sh machine rotate`** retires the machine key into
+  `machine/retired/<id>/` (never deleted; the drafts it sealed carry its
+  public key), makes the next one and prints both fingerprints.
+  `machineSigner` puts the directory back to 0700 and the key and its record
+  to 0600 each time the key is used.
+- **fsguard.** A `--no-read` file is covered by `/dev/null` in a mount
+  namespace (a directory by an empty tmpfs, as before). In `linux` mode a
+  `--no-read` path that exists is left to the mount layer and not carved by
+  Landlock: a carve under `runs/` froze that directory for the panes, and
+  the registry, rewritten by rename, stopped being readable to the finish
+  line. The comment that said only case material warrants a read denial now
+  names the signing keys too.
+
+### Added: the report is released, adopted by a named examiner, and reproducible where it can be
+
+A report now has releases: signed records of which bytes were handed over,
+sealed by whom. Machine custody and human adoption are kept apart in every
+word.
+
+- **The machine's draft at stop.** When custody is taken (the hub's finish,
+  `swarm.sh stop`), `release/v0/` is written: a DRAFT sealed by the
+  install's machine key (made once outside every run; it says it is no
+  examiner), binding the swarm's report as custody sealed it, a rendering
+  of it generated at the release's own time with the DRAFT mark, the
+  custody verdict and its anchor, the sealed index of `work/`, the head and
+  length of the ledger, its attestations and disputes, the journal, the
+  trace and the review, the harness commit, the renderer's sha256 and the
+  models. Refused when the run is not as custody sealed it; once per
+  verdict; its line goes into the anchor beside the run.
+- **Examiners are enrolled.** `swarm.sh examiner enroll` (name,
+  organisation, competence statement, a key given or made only when asked,
+  checked by signing a challenge) prints the fingerprint and the line for
+  the organisation's signer register. The registry's kickoff `examiner`
+  string is no longer shown as the examiner.
+- **Each answer is adopted, qualified, withdrawn or rendered
+  inconclusive** by seq and hash (`review --adopt/--qualify/--reject/
+  --inconclusive`). An answer whose support is defective cannot be adopted
+  or qualified, and a release waits until it is withdrawn or inconclusive;
+  repairing it is a new examination. A technical reviewer's record says
+  who, on what competence, and which methods were checked.
+  `adoptionState()` gives the report body each answer's standing.
+- **The examiner's release.** `review --sign` renders the final bytes (no
+  DRAFT mark), prints them with `--pdf`, signs `release.json` with the
+  examiner's key, and names the release in the review. A later adoption is
+  an amendment with a reason (`--amend-reason`). `swarm.sh releases`
+  shows, prints, mirrors and verifies them; the package carries every one
+  byte for byte and `verify` walks the chain against the signer register.
+- **Witnesses.** `--anchor-mirror cmd:|dir:|print` copies each release's
+  digest line where the operator's account does not keep it (or prints it
+  with a QR-ready string for the case file); an RFC 3161 token over the
+  release's signature, checked against the authority's CA;
+  `swarm.sh timestamp` obtains one later and dates the proof from then.
+  `releases --ots` and `--transparency COMMAND` add an OpenTimestamps proof
+  and a transparency log's receipt when available.
+- **Custody holds the evidence links.** `inputs/` and each `inputs/<set>`
+  must still lead to the source the kickoff recorded; a link moved to
+  identical bytes fails the evidence check. Custody seals the agents'
+  disputes chain beside the ledger, and the package carries and walks it.
+- **`swarm.sh rerun <run> <job>`** runs a sealed job again through the job
+  service's worker path, in the image of the recorded digest (another is
+  refused), into `<sandbox>.reruns/`, never the store, and names each file
+  that differs. A byte mismatch stays one; an equivalence under a named,
+  versioned normalisation (`timestamps@1`) is said apart, only when asked.
+- **Redaction says what it replaced and what it missed.** `REDACTIONS.json`
+  records each change by the sha256 of what it replaced, why and which
+  entry; JSON is redacted field by field; a four-character PIN is taken
+  out; acts on a sensitive entry are redacted keeping their chain; a
+  release's PDF is withheld. A scan after it refuses the package on any
+  sensitive word left (case, path separators, JSON escapes, UTF-16),
+  naming the file and entry, never the word; `--redact-leaks list` hands it
+  over with the hits listed.
+- **`swarm.sh certify <package>`** writes a certification template of the
+  kind FRE 902(13)/(14) contemplate, with the verification run verbatim,
+  for a qualified person to complete and sign. No PAdES: the PDF's sha256
+  is bound in the release, under the examiner's detached signature.
+### Added: a job sees what it declared; a finding may cite a brain's own output, sealed
+
+- **Declared scope, enforced**: `job_run inputs` left out, `["all"]` and a
+  list (an empty one too) are kept apart in the spec and on the journal
+  (`default-all`, `all`, `declared`). A declared job's worker is given a view
+  the hub builds for it, outside every VM, holding only what it named at the
+  paths its brain sees: a declared directory of the evidence or a job's whole
+  output bound, and so a whole evidence set the scope covers (one image and
+  its segments), a file of a set it covers only in part cloned (or linked
+  from the run's one checked copy where the file system cannot clone), a store file linked, an
+  agent's file snapshotted by clone or copy and hashed at the start; never a
+  hard link to the evidence or to live scratch. A segment set comes whole,
+  from the census's record (`catalog/plan.json` `collections`, journalled as
+  `input_collection`). A declaration that does not resolve refuses the job;
+  there is no broad fallback. Declared, expanded and accessible manifests go
+  in `store/jobs/<id>/scope.<attempt>.json`, its sha256 on `job_started`;
+  custody holds it and says a declared job's scope was enforced and its reads
+  within it not observed. `vm.ts` holds every share before binding it and
+  checks each again after the VM is made, before anything runs. An import's
+  scope is its source: the worker copies the hub's snapshot.
+- **`tool:<seat>/<file>` and `trace:<sha256>` refs**: a whole output the
+  harness kept under tool-output/, or one line of the trace, is found on the
+  chained trace (attributed by the collector, on the chain), held to the
+  trace's digest, sealed by an import job over the hub's snapshot and
+  published as `import:<job>/<file>` in `store/imports/<job>/` with its trace
+  provenance (`brain_output_sealed`); the record cites the import. Bytes that
+  changed since, or what the trace did not capture, are refused with the way
+  on: run the work again as a job.
+- `JobService.workerSpecFor(job, staging)` builds the worker a recorded job
+  had, for a rerun.
+- **Experimental, off by default, untested in a VM**: observing a declared
+  job's opens with fanotify inside its worker (`SWARM_JOB_OBSERVE=
+  fanotify-experimental`), read as complete, partial or unknown, never
+  complete when anything was dropped; its VM acceptance tests are
+  `tests/job-observe-vm.test.ts`.
+
+### Packs, as integrated
+
+- Two branches changed each of these packs, so the integrated packs take one more patch and are resealed over the merged files: computer-forensics-base 1.3.2, windows-forensics 1.3.2, cloud-forensics, linux-forensics, macos-forensics, memory-forensics, mobile-forensics, network-forensics, reverse-engineering and triage-collection 1.1.2.
+
+### Changed: a lane for short jobs, more workers, room on the host, and the smallest image that holds a job's programs
+
+- **Workers**: unset, 6 on a host with 128 GiB or more and 4 with 64 GiB or
+  more (2 otherwise), still lowered to what fits beside the seats.
+- **A lane for short jobs**: from 3 workers one is kept for an agent's job
+  that declares `timeout_seconds` of 120 or less (stopped at that limit), so
+  a quick look never waits behind long parses; the kickoff's recipes and the
+  derived catalogue never take it, and an agent's own limit counts each
+  lane apart. `job_started` names the lane; job_run and SWARM.md ask for the
+  short timeout.
+- **Room on the host**: a worker starts only while the host keeps 15% of its
+  memory free beside it, asked at each start (runs share a host); until then
+  the job waits, on the journal (`job_waits_for_host`, and `host_wait_ms` on
+  its start).
+- **Fixed**: the queue counted an agent's running jobs, and the derived
+  lane's one at a time, by their written start, so one pass of it could
+  start more than the limit, and the derived catalogue could run two recipes
+  past a ceiling of one generation (a flaky test on Linux CI). It counts the
+  jobs it has handed a worker, one pass at a time.
+- **A command that names no profile** runs in the smallest job image whose
+  own record holds every program it runs, and in the default image whenever
+  that is not sure (a heredoc, a quoted script, an import, a script of the
+  agents'); `job_started` and job_status say which image and why. Images
+  record every program on their PATH (`on_path` in image.json); one built
+  before keeps such commands in the default until it is rebuilt.
+
+### Added: several evidence sets in one run
+
+- `--inputs` may be given once per set (a laptop and a phone, the logs of
+  three servers), and the console's kickoff form adds sets one at a time,
+  each a removable chip. Each set lands at `inputs/<name>/`, named after its
+  directory; one set is `inputs/` itself, with the same paths and the same
+  manifest as before.
+- Every set is copied, or held in place, as one set is: each checked against
+  its own source, one kernel rule per set held in place, each mounted
+  read-only and no-exec into every VM and every job worker; the size and
+  file ceilings hold for the sets together. A directory given twice, one set
+  inside another, and two sets that would be one directory are refused.
+- `inputs.json` names the sets (`sets: [{name, path, source, files,
+  bytes}]`); the agents' check, the pack's `check_inputs` (base pack
+  1.3.1), each VM's probe and host custody walk each set through its link,
+  and read a manifest without `sets` as they always did.
+
+### Fixed: the record and the report hold to what custody sealed
+
+Three reviews of the reporting path (Claude, Fable, GPT-6-Astra) found that
+the verification commands compared less than the seal promised. Each fix has
+a test that failed before it.
+
+- **`custody-verify` enforces the seal.** It compared each check's status
+  only, so a `work/report.md` edited after the stop, a work file removed or
+  added, or a correctly chained ledger entry appended all passed. It now
+  holds every chain to the length and head the verdict sealed (the ledger,
+  its attestations, the store journal, where examiner notes after the run
+  are named and allowed, the gateway log) and every file under `work/` to
+  the index custody wrote (`artifacts.json`, whose sha256 the verdict and
+  the anchor name), naming each drift.
+- **A version 3 ledger is held to the trace.** "Every chained entry is on
+  the trace" ran for version 2 entries only, so every current run skipped
+  it. The ledger check's reason now says which entries the trace never
+  carried.
+- **A package carries the seal.** `artifacts.sealed.json` (the index custody
+  sealed, byte for byte), `review.jsonl` (the examiner's review) and
+  `COMPONENTS.json` (each part present, or absent with why) go into the
+  package under its manifest. `verify` fails on a part missing and not
+  declared absent, or declared absent against the verdict's seal; holds
+  every packaged work file to the sealed index; recomputes every ledger
+  entry's core a redaction left readable (it used to recompute the first
+  only); lets only examiner notes follow the journal's sealed line; walks
+  the review and says what its sign-off is over. `SIGNER.txt` and
+  `signer.pub` are written before the manifest, so who signed and when are
+  under the signature.
+- **The report labels its own report's hash.** §9 prints the sha256 of the
+  bytes it reproduces and whether they are the ones custody sealed, and
+  "CHANGED SINCE CUSTODY" with the sealed hash when they are not.
+- **RFC 3161 tokens are checked against the authority's CA.**
+  `--custody-timestamp-ca FILE` (or `SWARM_CUSTODY_TSA_CA`) has custody run
+  `openssl ts -verify` on each token and record the result in the anchor;
+  `custody-verify --tsa-ca FILE` checks it again and fails on a token that
+  does not verify. Without a CA both say "imprint only, signature not
+  verified".
+- **A sign-off is over a report, and says when it no longer covers it.**
+  `review --sign` is refused when there is no report at the path it names;
+  `review --show` exits 4 when the ledger's head or the report's hash moved
+  since the sign-off; the report's cover says "reviewed and signed" only
+  when the sign-off covers the ledger and the report as they stand, and
+  otherwise what it is over.
+- **A read-only verify writes nothing in the run.** It no longer removes a
+  `.verify-*` directory an ended custody left beside the snapshots (it names
+  it), loads a kept disk for msb's check under `--scratch` (the host's
+  temporary directory by default) instead of beside the snapshots, and
+  says what it touched outside the run.
+
+### Fixed: what the basic-flow CTF rounds found in the packs
+
+- **`usn_journal`** read every record of a `$J` all along: its `name` filter
+  was a substring match and a run passed it an alternation, so "0 records"
+  read as an empty journal. `name` is a case-insensitive regex now, as in
+  `mft_records` and `indx_carve`; `records_read` counts every record whatever
+  the filter kept, and a filter that keeps none says so. The journal is
+  mapped rather than read whole, its sparse front skipped in steps of up to a
+  megabyte, and v3 and v4 records are read as well as v2.
+- **A pack tool run again as a job** gives the job's `$OUT` every path in the
+  agent's own directories however it is written (relative, absolute under the
+  run, with `./` or `..`), except one that already held something when the
+  agent called the tool: that is its input, and the job reads it where it is.
+  `written_to` names where each moved path is sealed, `$OUT` itself included.
+- **The mobile recipes** take `--probe-out`, as the kickoff's census asks
+  every detect step; they refused it with a usage error, so a phone's tar was
+  catalogued as a member list only. `ios-filesystem` and `archive-members`
+  open a tar by its magic instead of trying every decompressor, which took the
+  LZMA one half a minute on 64 MiB of zeros for every such input.
+- **Output paths.** `feature_scan`, `zeek_run`, `sigma_hunt`, `unified_log`,
+  `doc_probe` and the twelve tools that keep a whole result in a caller's
+  `out_file` or `out_dir` (cloud, macOS, triage, network, Linux) refuse a place
+  outside the run directory, the run directory itself or under `inputs/`,
+  links resolved first; `jumplist` never writes through a link left in its
+  `out_dir`; `mem_fs` mounts under a job's `$OUT`, where a rerun sends it.
+- **Nothing cut.** `sigma_hunt` keeps every field of a matched record (it
+  kept 12), every rule that fired (25) and every detection, all of them in
+  `detections.jsonl` past the page, and the engine's stdout and stderr whole
+  in files named by path, size and sha256 (they were dropped, or cut to their
+  last 400 and 800 characters). `cloudtrail_parse` and `ual_parse` return
+  whole tables rather than their top 20 or 30, and `collection_index` every
+  modification date rather than ten.
+- **A rerun's answer says where its output's places went:** `paths` maps each
+  `<run>/.jobs/<id>/…` (or `.jobs/<id>/…`) its sealed stdout names to
+  `store/jobs/<id>/out/…`; the output itself stays as sealed.
+- The iOS unified-log method names `unifiedlog_iterator`, the reader
+  `unified_log` runs, not the retired UnifiedLogReader.py, so every pack
+  seals without a warning; `pack-tools.test.sh` holds them to it.
+- Ten packs take a patch version and a new seal.
+
+### Added: a ledger that interprets, answers the critic checks, and a gate that names the fix (ledger v4)
+
+- **Findings interpret.** A finding carries `indicates` (what the observation
+  means), `confidence_why` (the quality of the evidence, not a count of
+  artefacts), `alternatives` or `alternatives_none_why` when it is inferred,
+  and `qualifies` when it rests on a job that did not succeed; `basis` and
+  `confidence` are required. The hub writes a canonical `method` record of
+  each cited job or import into the entry and its core.
+- **Answers are entries.** `record(kind=answer)` per question of the goal,
+  plus a summary and a narrative, citing entries by hash; every claimed
+  support is checked at record, a token check marks what no cited entry
+  holds, and an answer stops standing when what it rests on is superseded or
+  disputed, transitively.
+- **Acts.** `attest` (how an entry was re-derived, inside the hashed line;
+  attestations version 2) and `dispute` (its own chain,
+  `ledger/disputes.jsonl`), hub-written.
+- **The gate at done.** `check-answers.ts` reads the ledger's answers when no
+  `--report` is given; the finish line hands a failing check's output back,
+  so the first `done` is told each defect and its fix and the next passes
+  once a limitation names each one left. Every library goal names the report
+  author and the critic, the answer entries and the critic's acts; the
+  `SIGN-OFF:` post is gone from them, from the packs' own goals and from the
+  operator's shelf in `prompts/goals/` too. The packs whose goals changed
+  are one patch up and resealed: cloud-forensics 1.1.1, encrypted-containers
+  1.2.1, linux-forensics 1.1.1, macos-forensics 1.1.1, memory-forensics
+  1.1.1, mobile-forensics 1.1.1, network-forensics 1.1.1,
+  ransomware-response 1.0.3, reverse-engineering 1.1.1, triage-collection
+  1.1.1, windows-forensics 1.3.1.
+- **Old ledgers verify as they did**: explicit version dispatch keeps the v2
+  and v3 cores byte for byte, an unknown version is refused, and custody
+  holds every chained entry of any version to the trace.
+- `tests/fixtures/ledger-v4/` is a small run with every kind and act, for
+  the report renderer to build against.
+
+### Fixed: a compaction that never ends, an agent that only waits, what a seat sees of its peers, a runtime's cache in work/
+
+- **A compaction is bounded.** Each summary attempt stops at 300 s or 48,000
+  characters (`SWARM_COMPACT_SUMMARY_SEC`), whatever the provider does with
+  `maxTokens`: the openai-codex API sends no output limit, and on run
+  sedf827 two summaries ran on to 128,000 output tokens. What a stopped
+  attempt wrote is kept whole under `tool-output/<id>/`. A compaction still
+  running after 900 s (`SWARM_COMPACT_TIMEOUT_SEC`) is stopped by the seat
+  and counted as failed (`compact_stalled`), so it is retried and then the
+  lock released, where on run s6895a8 a seat was silently lost. The idle
+  watchdog nudges no compacting seat (Pi refuses the prompt) and says a
+  compaction open past 1200 s on the board; a hub prompt refused during one
+  is recorded as refused.
+- **Waiting is idle after ten minutes.** An agent that has called only
+  `wait` and `inbox` for 600 s (`SWARM_WAIT_IDLE_SEC`) is steered, unless a
+  job of its own is running; a steer now ends an open `wait` (`reason:
+  prompt`). The echo of a nudge no longer counts as the agent's activity.
+- **A seat no longer reads the trace or its peers' sessions and kept
+  outputs** (run s306463 grepped its peers' transcripts). In a microVM,
+  `traces/` is an empty read-only veil, and `.pi-sessions/` and
+  `tool-output/` are veils holding only the seat's own directory; each VM's
+  probe checks all three and the kickoff refuses a VM that sees one. A
+  seat's `done` gets the finish line from the hub, which runs the
+  operator's checks on the host (they read the trace) and answers the whole
+  run; markDone takes that same run, and the refusal names each failing
+  check and what makes it pass. The host's collector, custody and console,
+  and a host run's `done`, are unchanged. `list_team` now shows, per peer,
+  its name and what it is doing, its last post, its open jobs and its latest
+  ledger entries, from the board, the store and the ledger, never the trace.
+- **Node's compile cache is out of work/.** The kickoff points
+  `NODE_COMPILE_CACHE` at the run's `.runtime-cache/`, so the artifact index
+  and the package no longer carry `work/.tmp/node-compile-cache/` (run
+  s2a59b2).
+
 ### Changed: every image profile reviewed as a DFIR examiner would (Codex)
 
 - Each of the nine profiles (base, disk, memory, linux, mobile, network, re,

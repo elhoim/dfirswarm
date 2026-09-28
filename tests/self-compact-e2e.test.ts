@@ -268,6 +268,110 @@ test("when Pi's own summary fails after ours, the trace names both failures", as
   }
 });
 
+test("a summary that runs on past its length bound is stopped, kept whole under tool-output/, and the next attempt lands", async (t) => {
+  if (!haveCli()) {
+    t.skip("pi is not on PATH");
+    return;
+  }
+  const d = await makeSandbox("summary-runaway");
+  // Run sedf827: the openai-codex API sends no output limit, and two summaries
+  // ran on to 128,000 output tokens. Here the first summary call streams
+  // without end and ignores maxTokens; the second answers.
+  const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, SC_FAKE_SUMMARY_RUNAWAY: "1", SC_FAKE_TRACE: d.traceFile }, logFile: d.logFile });
+  try {
+    await client.request({ type: "prompt", message: "Start the scripted work." });
+    const handoff = await waitForCompletion(client);
+    const rows = trace(d);
+    const stopped = rows.find((e) => e.tool === "compact_failed" && (e.args as { stage?: string }).stage === "summary") as
+      | { args: { attempt?: number }; result: { reason: string; chars: number; retrying: boolean; full_output: { path: string; bytes: number; sha256: string } | null } }
+      | undefined;
+    assert.ok(stopped, "the stopped attempt is on the trace");
+    assert.equal(stopped.args.attempt, 1);
+    assert.match(stopped.result.reason, /the summary was stopped: it passed 48,000 characters/);
+    assert.equal(stopped.result.retrying, true);
+    const kept = stopped.result.full_output;
+    assert.ok(kept && kept.path.startsWith("tool-output/agent00/") && kept.path.includes("compact_summary"), `the text is kept under the seat's tool-output/: ${JSON.stringify(kept)}`);
+    const onDisk = readFileSync(join(d.root, kept!.path));
+    assert.equal(onDisk.length, kept!.bytes);
+    assert.equal(onDisk.toString("utf8").length, stopped.result.chars, "every character the attempt wrote is kept");
+    assert.ok(stopped.result.chars > 48_000);
+    assert.equal(createHash("sha256").update(onDisk).digest("hex"), kept!.sha256);
+    const done = rows.find((e) => e.tool === "compact_done") as { args: { via: string }; result: { summary_chars: number } };
+    assert.equal(done.args.via, "self");
+    assert.ok(done.result.summary_chars < 1_000, `the summary that landed is the second attempt's, not the runaway: ${done.result.summary_chars}`);
+    const compactionEnd = eventsOfType(client.events, "compaction_end")[0]!;
+    assert.equal((compactionEnd.result as { details?: { selfCompact?: { attempt?: number } } }).details?.selfCompact?.attempt, 2);
+    assert.match(messageText(handoff.message), /Your note follows verbatim/);
+    assert.equal(readFileSync(join(d.root, "work", "agent00", "result.txt"), "utf8").trim(), "done");
+  } finally {
+    await client.close();
+    await cleanup(d);
+  }
+});
+
+test("a summary that never answers is stopped at its time bound, and Pi's own summarizer lands the compaction", async (t) => {
+  if (!haveCli()) {
+    t.skip("pi is not on PATH");
+    return;
+  }
+  const d = await makeSandbox("summary-silent");
+  const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, SC_FAKE_SUMMARY_HANG: "2", SWARM_COMPACT_SUMMARY_SEC: "1", SC_FAKE_TRACE: d.traceFile }, logFile: d.logFile });
+  try {
+    await client.request({ type: "prompt", message: "Start the scripted work." });
+    const handoff = await waitForCompletion(client);
+    const rows = trace(d);
+    const attempts = rows.filter((e) => e.tool === "compact_failed" && typeof (e.args as { attempt?: number }).attempt === "number" && (e.args as { stage?: string }).stage === "summary") as Array<{ args: { attempt: number }; result: { reason: string; retrying: boolean; full_output: unknown } }>;
+    assert.deepEqual(attempts.map((a) => [a.args.attempt, a.result.retrying]), [[1, true], [2, false]]);
+    for (const a of attempts) assert.match(a.result.reason, /the summary was stopped: it ran past 1 s/);
+    assert.equal(attempts[0]!.result.full_output, null, "an attempt that wrote nothing has nothing to keep");
+    const failed = rows.find((e) => e.tool === "compact_failed" && (e.result as { fallback?: string }).fallback === "pi-summary");
+    assert.ok(failed, "the fall back to Pi's summarizer is on the trace");
+    assert.ok(rows.some((e) => e.tool === "compact_done"), "the compaction landed");
+    assert.match(messageText(handoff.message), /Your note follows verbatim/);
+    assert.equal(readFileSync(join(d.root, "work", "agent00", "result.txt"), "utf8").trim(), "done");
+  } finally {
+    await client.close();
+    await cleanup(d);
+  }
+});
+
+test("a compaction that does not end within its bound is stopped by the seat, counted as failed, and retried", async (t) => {
+  if (!haveCli()) {
+    t.skip("pi is not on PATH");
+    return;
+  }
+  const d = await makeSandbox("compaction-stalled");
+  // Run s6895a8: s6895a803's second compaction started and never ended, and
+  // Pi took no prompt after it. Here our two attempts and Pi's own fallback
+  // all answer nothing; the seat's bound stops the compaction, and the retry
+  // (the fake answers from then on) lands it.
+  const env = { ...ENV, SC_FAKE_SUMMARY_HANG: "4", SWARM_COMPACT_SUMMARY_SEC: "1", SWARM_COMPACT_TIMEOUT_SEC: "5", SC_FAKE_TRACE: d.traceFile };
+  const client = new RpcClient({ args: args(d), cwd: d.root, env, logFile: d.logFile });
+  try {
+    await client.request({ type: "prompt", message: "Start the scripted work." });
+    const handoff = await waitForCompletion(client);
+    const rows = trace(d);
+    const stalled = rows.find((e) => e.tool === "compact_stalled") as { args: { by: string; limit_ms: number }; result: { ok: boolean; action: string; after_ms: number } } | undefined;
+    assert.ok(stalled, "the stalled compaction is on the trace");
+    assert.deepEqual([stalled.args.by, stalled.args.limit_ms, stalled.result.ok, stalled.result.action], ["seat", 5_000, true, "stopped"]);
+    const failed = rows.find((e) => e.tool === "compact_failed" && (e.args as { stage?: string }).stage === "compaction") as { result: { reason: string; retrying: boolean; stalled?: boolean } } | undefined;
+    assert.ok(failed, "the stopped compaction is counted as a failure");
+    assert.match(failed.result.reason, /did not end within 5 s and the seat stopped it/);
+    assert.deepEqual([failed.result.retrying, failed.result.stalled], [true, true], "a stall is retried, not taken for an operator's cancel");
+    const starts = rows.filter((e) => e.tool === "compact_start") as Array<{ args: { trigger: string } }>;
+    assert.ok(starts.length >= 2 && /auto-retry/.test(starts.at(-1)!.args.trigger), `the compaction was started again: ${JSON.stringify(starts.map((s) => s.args))}`);
+    assert.ok(rows.some((e) => e.tool === "compact_done"), "the retry landed");
+    assert.ok(!rows.some((e) => e.tool === "compact_stalled" && (e.result as { ok?: boolean }).ok === false), "Pi let go of the stopped compaction");
+    assert.match(messageText(handoff.message), /Your note follows verbatim/);
+    assert.equal(readFileSync(join(d.root, "work", "agent00", "result.txt"), "utf8").trim(), "done");
+    const budget = JSON.parse(readFileSync(join(d.root, "budget.json"), "utf8")) as { agents: Record<string, { context_locked?: boolean }> };
+    assert.equal(budget.agents.agent00.context_locked, false, "the seat is not left locked");
+  } finally {
+    await client.close();
+    await cleanup(d);
+  }
+});
+
 test("with self-compaction off nothing is locked and no self_compact tool exists", async (t) => {
   if (!haveCli()) {
     t.skip("pi is not on PATH");
@@ -289,6 +393,38 @@ test("with self-compaction off nothing is locked and no self_compact tool exists
     const rows = trace(d);
     assert.ok(!rows.some((e) => /^compact_/.test(String(e.tool)) || e.tool === "context"), "no self-compaction event of any kind");
     assert.ok(!existsSync(join(d.root, "work", "agent00", "result.txt")));
+  } finally {
+    await client.close();
+    await cleanup(d);
+  }
+});
+
+test("a steer for an agent in a wait ends the wait at once, and the words reach its next turn", async (t) => {
+  if (!haveCli()) {
+    t.skip("pi is not on PATH");
+    return;
+  }
+  const d = await makeSandbox("wait-steer");
+  // The idle watchdog steers an agent that has only waited; Pi delivers a
+  // steer when the tool call ends, and a wait holds its call for minutes.
+  const env = { ...ENV, SWARM_SELF_COMPACT: "0", SC_FAKE_SCENARIO: "wait-for-steer", SC_FAKE_TRACE: d.traceFile };
+  const client = new RpcClient({ args: args(d, TOOLS.replace(",self_compact", "")), cwd: d.root, env, logFile: d.logFile });
+  try {
+    await client.request({ type: "prompt", message: "Start the scripted work." });
+    const started = await client.waitFor((e) => e.type === "tool_execution_start" && e.toolName === "wait", 30_000);
+    // Well inside the wait, not in the moment its call is still being checked.
+    await new Promise((r) => setTimeout(r, 1_500));
+    const at = Date.now();
+    const accepted = await client.request({ type: "steer", message: "STEER-TEST: for 11 minutes you have called only wait." });
+    assert.equal(accepted.success, true, JSON.stringify(accepted));
+    const ended = await client.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "wait", 30_000, { since: client.events.indexOf(started) });
+    assert.ok(Date.now() - at < 10_000, `the wait of 120 s ended when the steer came, after ${Date.now() - at} ms`);
+    assert.match(resultText(ended), /"reason":\s*"prompt"/);
+    await client.waitFor((e) => e.type === "agent_settled", 30_000, { since: client.events.indexOf(ended) });
+    const turns = readFileSync(d.traceFile, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { kind: string; lastRole?: string; lastText?: string });
+    assert.ok(turns.some((r) => r.kind === "turn" && r.lastRole === "user" && /STEER-TEST/.test(r.lastText ?? "")), "the model's next turn had the steer");
+    const row = trace(d).find((e) => e.tool === "wait") as { result: { reason: string } } | undefined;
+    assert.equal(row?.result.reason, "prompt", "the trace says what ended the wait");
   } finally {
     await client.close();
     await cleanup(d);

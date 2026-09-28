@@ -5,7 +5,10 @@
 # - the VM hubs' directory is one per user, not a link, not someone else's,
 #   and a run whose hub sockets would not fit a Unix socket path is refused;
 # - stop ends a daemon only when the pid names that daemon for that sandbox;
-# - a run id is not allocated past a failed `msb list`.
+# - a run id is not allocated past a failed `msb list`;
+# - a host process's temporary files go to work/.tmp and Node's compile cache
+#   to the run's .runtime-cache/, so neither the artifact index nor the
+#   package carries a runtime's cache as the run's work.
 set -euo pipefail
 unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 
@@ -19,7 +22,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 
 fn() { sed -n "/^$1() {/,/^}/p" "$ROOT/scripts/swarm.sh"; }
-for f in hubs_parent hubs_parent_path hub_socket_path_max vm_hub_dir hub_dir_of daemon_pid_ours stop_sandbox_daemons hub_pid_ours alloc_prefix; do
+for f in hubs_parent hubs_parent_path hub_socket_path_max vm_hub_dir hub_dir_of daemon_pid_ours stop_sandbox_daemons hub_pid_ours alloc_prefix scratch_env_for; do
   eval "$(fn "$f")"
   type "$f" >/dev/null 2>&1 || fail "$f was not found in swarm.sh"
 done
@@ -97,5 +100,45 @@ vm_cli() { printf '{"ok":true,"vms":[]}\n'; }
 id="$(isolation=microvm alloc_prefix)" || fail "an id was not allocated with msb answering"
 [[ "$id" =~ ^s[0-9a-f]{6}$ ]] || fail "the id is not s and three bytes: $id"
 pass "a failed msb list is said as that; with msb answering an id of three bytes is allocated"
+
+echo "# a runtime's cache is not the run's work"
+# Run s2a59b2 indexed and packaged eleven work/.tmp/node-compile-cache/ files:
+# Pi's CLI turns Node's compile cache on, Node puts it under TMPDIR, and the
+# kickoff's TMPDIR is work/.tmp. No agent wrote them.
+SC="$TMP/scratch-run"
+mkdir -p "$SC"
+SC="$(cd "$SC" && pwd -P)"
+scratch_env_for "$SC"
+env_of() { # <name> -> its value in SCRATCH_ENV_ARGS
+  local i
+  for ((i = 0; i + 1 < ${#SCRATCH_ENV_ARGS[@]}; i += 2)); do
+    [[ "${SCRATCH_ENV_ARGS[$i]}" == --env && "${SCRATCH_ENV_ARGS[$((i + 1))]}" == "$1="* ]] && printf '%s' "${SCRATCH_ENV_ARGS[$((i + 1))]#*=}"
+  done
+  return 0
+}
+[[ "$(env_of TMPDIR)" == "$SC/work/.tmp" ]] || fail "a pane's TMPDIR is not the run's work/.tmp: $(env_of TMPDIR)"
+cache="$(env_of NODE_COMPILE_CACHE)"
+[[ "$cache" == "$SC/.runtime-cache/node-compile-cache" ]] || fail "Node's compile cache is not pointed at the run's .runtime-cache/: '$cache'"
+[[ -d "$SC/work/.tmp" && -d "$SC/.runtime-cache" ]] || fail "the scratch and cache directories were not made"
+pass "a pane's scratch is work/.tmp and Node's compile cache is the run's .runtime-cache/, outside work/"
+if command -v pi >/dev/null 2>&1; then
+  # The same Pi, as the kickoff starts it: its cache lands where the harness
+  # points it, and the index of work/ has nothing of it.
+  env TMPDIR="$SC/work/.tmp" NODE_COMPILE_CACHE="$cache" pi --version >/dev/null 2>&1 || fail "pi --version failed"
+  [[ -n "$(find "$cache" -type f 2>/dev/null | head -1)" ]] || fail "Pi wrote no compile cache where the harness points it"
+  [[ -z "$(find "$SC/work" -type f 2>/dev/null | head -1)" ]] || fail "Pi wrote under work/: $(find "$SC/work" -type f | head -3)"
+  index="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/artifacts.ts" "$SC")"
+  jq -e '.files | length == 0' <<<"$index" >/dev/null || fail "the artifact index lists a runtime's cache: $(jq -c '[.files[].path]' <<<"$index")"
+  # Without it, the measured fault: the same Pi puts the cache under work/,
+  # and the index lists it as work.
+  CTRL="$TMP/scratch-control"
+  mkdir -p "$CTRL/work/.tmp"
+  env -u NODE_COMPILE_CACHE TMPDIR="$CTRL/work/.tmp" pi --version >/dev/null 2>&1 || fail "pi --version failed"
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/artifacts.ts" "$CTRL" | jq -e '[.files[].path | select(startswith("work/.tmp/node-compile-cache/"))] | length > 0' >/dev/null \
+    || fail "the control did not reproduce the cache under work/, so the check above proves nothing"
+  pass "Pi's compile cache lands in .runtime-cache/, and the artifact index of work/ has none of it (without the variable it would)"
+else
+  echo "skip - pi is not on PATH: where Pi puts its compile cache is not measured"
+fi
 
 echo "kickoff-guards.test.sh: all checks passed"

@@ -1,6 +1,6 @@
 {
   "name": "usn_journal",
-  "description": "Parse an NTFS change journal ($UsnJrnl:$J) into records: name, USN, timestamp, reason bits and file reference. Skips the sparse front and says where the first record was.",
+  "description": "Parse an NTFS change journal ($UsnJrnl:$J) into records: name, USN, timestamp, reason bits and file reference, from v2, v3 and v4 records. Skips the sparse front, says where the first record was, and says how many records it read whatever the name filter kept.",
   "params": {
     "path": {
       "type": "string",
@@ -12,15 +12,15 @@
     },
     "name": {
       "type": "string",
-      "description": "Only records whose file name contains this, case-insensitive"
+      "description": "Only records whose file name matches this case-insensitive regex (a|b for either); records_read still counts every record in the journal"
     }
   },
   "runtime": "python3",
   "entry": "run.py",
   "timeout_seconds": 120,
-  "example": "{\"path\": \"work/extracted/UsnJrnl_J\", \"name\": \".aspx\", \"limit\": 200}",
+  "example": "{\"path\": \"work/extracted/UsnJrnl_J\", \"name\": \"\\\\.aspx$\", \"limit\": 200}",
   "by": "maintainer",
   "at": "2026-09-20T12:00:00.000Z",
-  "version": 1,
-  "sha256": "ca39d175b24218f6b06b65d1eeb69555ab797982aeb8bf6a1c425d55b7bec90b"
+  "version": 2,
+  "sha256": "43b35ab6df03114104460e2b72aaf6acd87acd6127571c73e2eff0d5b78a36e7"
 }

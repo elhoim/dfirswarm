@@ -8,12 +8,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { boardTable } from "../scripts/vm-hub.ts";
 import { JobService, resolveTarget } from "../scripts/job-service.ts";
-import { localWorker } from "./job-service-worker.ts";
+import { listInputs, localWorker } from "./job-service-worker.ts";
 import type { WorkerSpec } from "../scripts/vm.ts";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -24,6 +24,7 @@ function rig(withJobs = true) {
   writeFileSync(join(S, "inputs.json"), JSON.stringify({ files: [] }));
   writeFileSync(join(S, "work", "a1", "notes.txt"), "mine\n");
   spawnSync("python3", ["-c", "import zipfile,sys\nwith zipfile.ZipFile(sys.argv[1],'w') as z: z.writestr('k.txt','key')", join(S, "inputs", "a.zip")]);
+  listInputs(S);
   const specs: WorkerSpec[] = [];
   const posts: Array<[string, string]> = [];
   const svc = new JobService({
@@ -90,6 +91,24 @@ test("a job is the calling seat's; a command naming its own scratch gets it read
   await svc.stop("over");
 });
 
+test("jobSubmit keeps inputs as said: left out is every object by default, [] a scope of nothing, [\"all\"] everything said, and a list resolved or refused", async () => {
+  const { svc, call } = rig();
+  await svc.start();
+  const scopeOf = async (arg: Record<string, unknown>) => {
+    const r = await call("a1", "jobSubmit", { command: "true", ...arg });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    return [r.job.scope, svc.jobs.get(r.job.job)?.spec.inputs];
+  };
+  assert.deepEqual(await scopeOf({}), ["default-all", []]);
+  assert.deepEqual(await scopeOf({ inputs: [] }), ["declared", []]);
+  assert.deepEqual(await scopeOf({ inputs: ["all"] }), ["all", ["all"]]);
+  assert.deepEqual(await scopeOf({ inputs: ["input:a.zip"] }), ["declared", ["input:a.zip"]]);
+  const bad = await call("a1", "jobSubmit", { command: "true", inputs: ["input:nothing.zip"] });
+  assert.equal(bad.ok, false);
+  assert.match(bad.reason, /not in inputs\.json/);
+  await svc.stop("over");
+});
+
 test("catalogRequest resolves the target, refuses what is not the run's, and without a recipe finds those that apply", async () => {
   const { S, svc, call, posts } = rig();
   await svc.start();
@@ -107,9 +126,78 @@ test("catalogRequest resolves the target, refuses what is not the run's, and wit
   assert.ok(posts.some(([to, b]) => to === "a1" && /recipe computer-forensics-base\/archive-members\) done/.test(b) && /Catalogued as g0001/.test(b)), JSON.stringify(posts));
   // Nothing applies: said so.
   writeFileSync(join(S, "inputs", "plain.txt"), "just text, nothing to catalogue here\n".repeat(10));
+  listInputs(S);
   const none = await call("a1", "catalogRequest", { target: "inputs/plain.txt" });
   assert.equal(none.ok, true);
   for (let i = 0; i < 400 && !posts.some(([, b]) => b.startsWith("No recipe of this run catalogues inputs/plain.txt")); i += 1) await new Promise((res) => setTimeout(res, 50));
   assert.ok(posts.some(([to, b]) => to === "a1" && b.startsWith("No recipe of this run catalogues inputs/plain.txt")), JSON.stringify(posts));
   await svc.stop("over");
+});
+
+test("a page of a job's stdout that leaves bytes unread says how many, and how to read the next page", async () => {
+  const { jobPageNote } = await import("../extensions/protocol.ts");
+  const { svc, call } = rig();
+  await svc.start();
+  const sub = await call("a1", "jobSubmit", { command: "python3 -c \"import sys; sys.stdout.write('n' * 18206)\"", inputs: [] });
+  assert.equal(sub.ok, true, sub.reason);
+  await done(call, "a1", sub.job.job);
+  const first = await call("a1", "jobStatus", { job_id: sub.job.job, limit: 8192 });
+  assert.deepEqual([first.stdout.offset, first.stdout.bytes, first.stdout.total, first.stdout.next], [0, 8192, 18206, 8192]);
+  const note = jobPageNote(sub.job.job, first.stdout);
+  assert.ok(note, "a partial page says so");
+  assert.match(note!, /bytes 0-8192 of 18206/);
+  assert.match(note!, /10014 bytes are unread/);
+  assert.ok(note!.includes(`job_status(job_id: "${sub.job.job}", offset: 8192)`), note!);
+  assert.ok(note!.includes(`store/jobs/${sub.job.job}/stdout.log`));
+  assert.match(note!, /stays on your list of jobs awaiting interpretation/, "the unread rest keeps the job waiting for an interpretation");
+  const second = await call("a1", "jobStatus", { job_id: sub.job.job, offset: 8192, limit: 8192 });
+  assert.match(jobPageNote(sub.job.job, second.stdout)!, /bytes 8192-16384 of 18206 .*\(bytes 0-8192 came on earlier pages\): 1822 bytes are unread/);
+  const last = await call("a1", "jobStatus", { job_id: sub.job.job, offset: 16384, limit: 8192 });
+  assert.equal(jobPageNote(sub.job.job, last.stdout), null, "the last page leaves nothing unread and says nothing");
+});
+
+test("a job run under a lead: only the lead's holder may, and the job goes on the lead's record", async () => {
+  const L = await import("../extensions/leads.ts");
+  const { S, svc, call } = rig();
+  await svc.start();
+  mkdirSync(join(S, "done", "agents"), { recursive: true });
+  writeFileSync(join(S, "team.json"), JSON.stringify({ swarm_id: "t", n: 2, agents: [{ id: "a1", role: "w" }, { id: "a2", role: "w" }] }));
+  const opened = await call("a1", "leadOpen", { title: "Parse the logs", why: "q2", take: true });
+  assert.equal(opened.ok, true, opened.reason);
+  const theirs = await call("a2", "jobSubmit", { command: "echo x", inputs: [], lead: "L-1" });
+  assert.equal(theirs.ok, false);
+  assert.match(theirs.reason, /L-1 is held by a1: claim it before running its jobs/);
+  const named = await call("a1", "jobSubmit", { command: "echo x", inputs: [], lead: "L-1" });
+  assert.deepEqual([named.ok, named.lead], [true, "L-1"]);
+  // With one active lead held, a job that names none is still that lead's.
+  const implied = await call("a1", "jobSubmit", { command: "echo y", inputs: [] });
+  assert.equal(implied.lead, "L-1");
+  // A peer's job is not the lead's.
+  const other = await call("a2", "jobSubmit", { command: "echo z", inputs: [] });
+  assert.equal(other.lead, undefined);
+  const snap = await L.leadsSnapshot(S);
+  assert.deepEqual(snap.state.leads.get("L-1")?.jobs, [named.job.job, implied.job.job]);
+});
+
+test("raw jobs are never merged, only measured: the same spec over the same inputs by digest is logged as job_would_merge, and both run", async () => {
+  const { S, svc, call } = rig();
+  await svc.start();
+  const journal = () => readFileSync(join(S, "store", "journal.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+  const spec = { command: "unzip -l inputs/a.zip", inputs: ["input:a.zip"] };
+  const first = await call("a1", "jobSubmit", spec);
+  const second = await call("a2", "jobSubmit", spec);
+  assert.equal(first.ok && second.ok, true);
+  assert.notEqual(first.job.job, second.job.job, "the second request is a job of its own: nothing was merged");
+  const would = journal().filter((l) => l.type === "job_would_merge");
+  assert.equal(would.length, 1);
+  assert.deepEqual([would[0].job, would[0].same_as], [second.job.job, first.job.job]);
+  // Different bytes of spec, inputs=["all"] (live work/), and a file of one's own are never candidates.
+  await call("a2", "jobSubmit", { ...spec, timeout_seconds: 60 });
+  await call("a1", "jobSubmit", { command: "unzip -l inputs/a.zip", inputs: ["all"] });
+  await call("a1", "jobSubmit", { command: "unzip -l inputs/a.zip", inputs: ["all"] });
+  await call("a1", "jobSubmit", { command: "cat work/a1/notes.txt", inputs: ["work/a1/notes.txt"] });
+  await call("a1", "jobSubmit", { command: "cat work/a1/notes.txt", inputs: ["work/a1/notes.txt"] });
+  assert.equal(journal().filter((l) => l.type === "job_would_merge").length, 1, "only the identical declared-by-digest pair would merge");
+  await done(call, "a1", first.job.job);
+  await done(call, "a2", second.job.job);
 });

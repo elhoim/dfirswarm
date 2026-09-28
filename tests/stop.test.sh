@@ -10,6 +10,8 @@ unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/stop-test.XXXXXX")"
+# A stop seals a draft release with the machine key: this suite's, in its own home.
+export SWARM_SIGNERS_HOME="$TMP/signers"
 trap 'rm -rf "$TMP"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

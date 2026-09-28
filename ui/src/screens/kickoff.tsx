@@ -11,8 +11,9 @@ import { CUSTOM_MODEL, MODEL_REF, ModelTeamEditor, modelOptions, providerOf, Rea
 import { InlineNote } from "@/components/states";
 import { JobCard } from "@/components/jobs-drawer";
 import { api, ApiError } from "@/lib/api";
+import { activeVmBlockers, defaultModelMove } from "@/lib/kickoff-model";
 import { useLive, useResource, type Resource } from "@/lib/live";
-import type { ImagePreview, InputsLibrary, Job, NetMode, ProviderReadiness, StartCheck, SwarmRow, VmBlocker, VmReadiness } from "@/lib/types";
+import type { ImagePreview, InputsLibrary, Job, NetMode, StartCheck, SwarmRow, VmBlocker, VmReadiness } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -125,14 +126,6 @@ const COMPACT_SPEC = /^(?:[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9.
 /** provider=host, the pattern swarm.sh start checks --provider-host against. */
 const PROVIDER_HOST = /^[a-z0-9][a-z0-9._-]*=[^=,\s]+$/;
 
-/**
- * What the VM kickoff would still refuse about a provider, once the form's
- * own settings are counted: OAuth allowed in the VMs, a host named for it.
- */
-function activeVmBlockers(r: ProviderReadiness | undefined, allowOauth: boolean, named: Set<string>): VmBlocker[] {
-  return (r?.vm_blockers ?? []).filter((b) => !(b.lifted_by === "allow_oauth_in_vm" && allowOauth) && !(b.lifted_by === "provider_hosts" && named.has(r?.provider ?? "")));
-}
-
 type FormState = {
   mode: "single" | "team";
   model: string;
@@ -162,8 +155,8 @@ type FormState = {
   compact_model: string;
   /** How much post text one inbox/wait delivery carries; empty means the default (40000), 0 removes the bound. */
   inbox_page_chars: string;
-  /** A set from the inputs library, handed to the swarm read-only. */
-  inputs: string;
+  /** Sets from the inputs library, in order, handed to the swarm read-only: one is inputs/, several each land at inputs/<name>/. */
+  inputs: string[];
   inputs_enforce: "auto" | "on" | "off";
   /** copy: a read-only copy under inputs/. bind: no copy, the source held read-only by the kernel. image: a disk image attached read-only. */
   inputs_attach: "copy" | "bind" | "image";
@@ -357,10 +350,12 @@ function InputsRootAdder({ onAdded }: { onAdded: () => void }) {
  * so a second swarm on the same evidence cannot read the back of the book.
  * The runs on this evidence come first; any run can be chosen.
  */
-function CleanRoom({ chosen, runs, evidence, onChange }: { chosen: string[]; runs: SwarmRow[]; evidence: string | null; onChange: (ids: string[]) => void }) {
+function CleanRoom({ chosen, runs, evidence, onChange }: { chosen: string[]; runs: SwarmRow[]; evidence: string[]; onChange: (ids: string[]) => void }) {
+  // The same evidence: any set the run was given is one this form hands over.
+  const same = (r: SwarmRow) => (r.inputs_sources ?? (r.inputs_source ? [r.inputs_source] : [])).some((source) => evidence.includes(source));
   const candidates = runs
     .filter((r) => !chosen.includes(r.id))
-    .sort((a, b) => Number(Boolean(b.inputs_source && b.inputs_source === evidence)) - Number(Boolean(a.inputs_source && a.inputs_source === evidence)) || b.started_at.localeCompare(a.started_at));
+    .sort((a, b) => Number(same(b)) - Number(same(a)) || b.started_at.localeCompare(a.started_at));
   return (
     <div className="flex flex-col gap-1.5">
       <span className="label-caps">Clean room<span className="ml-1 font-normal normal-case tracking-normal text-ink-3">· earlier runs kept unreadable · optional</span></span>
@@ -385,7 +380,7 @@ function CleanRoom({ chosen, runs, evidence, onChange }: { chosen: string[]; run
         options={candidates.map((r) => ({
           value: r.id,
           label: r.id,
-          hint: `${r.label || r.goal.slice(0, 50)}${r.inputs_source && r.inputs_source === evidence ? " · same evidence" : r.inputs_source ? " · other evidence" : " · no evidence"}`,
+          hint: `${r.label || r.goal.slice(0, 50)}${same(r) ? " · same evidence" : r.inputs_source ? " · other evidence" : " · no evidence"}`,
           meta: r.phase === "finish_failed" ? "finish failed" : r.finishing ? "finishing" : r.done ? "finished" : r.state,
           keywords: `${r.label} ${r.inputs_source ?? ""}`,
         }))}
@@ -453,7 +448,7 @@ export function KickoffScreen() {
     compact_at: "",
     compact_model: "",
     inbox_page_chars: "",
-    inputs: "",
+    inputs: [],
     inputs_enforce: "auto",
     inputs_attach: "copy",
     inputs_image: "",
@@ -520,18 +515,21 @@ export function KickoffScreen() {
     [form.self_compact, form.compact_notice_at, form.compact_warn_at, form.compact_at],
   );
 
-  // The default is the first model whose provider is actually usable, not the
-  // first in the list — a kickoff that swarm.sh would refuse is a bad default.
-  // Until readiness answers, the first model stands in; once it answers, a
-  // default the operator has not touched moves to a ready one.
+  // The default is the first model whose provider is actually usable, and
+  // under microVM one the VM kickoff takes (lib/kickoff-model). Until
+  // readiness answers, the first model stands in; once it answers, a default
+  // the operator has not touched moves to a usable one.
   const [modelTouched, setModelTouched] = useState(false);
   useEffect(() => {
-    const list = models.data?.models ?? [];
-    if (!list.length) return;
-    const ready = providers ? list.find((m) => providers[providerOf(m)]?.status === "ready") : undefined;
-    if (!form.model) setForm((f) => ({ ...f, model: ready ?? list[0] }));
-    else if (!modelTouched && ready && form.model !== ready && providers?.[providerOf(form.model)]?.status !== "ready") setForm((f) => ({ ...f, model: ready }));
-  }, [models.data, providers, form.model, modelTouched]);
+    const next = defaultModelMove({
+      models: models.data?.models ?? [],
+      current: form.model,
+      touched: modelTouched,
+      providers,
+      vm: form.microvm ? { allowOauth: form.allow_oauth_in_vm, named: namedProviders } : null,
+    });
+    if (next !== null) setForm((f) => ({ ...f, model: next }));
+  }, [models.data, providers, form.model, modelTouched, form.microvm, form.allow_oauth_in_vm, namedProviders]);
 
   const job: Job | null = jobId ? live.jobs[jobId] ?? null : null;
   const effectiveModel = form.model === CUSTOM_MODEL ? form.customModel.trim() : form.model;
@@ -553,7 +551,19 @@ export function KickoffScreen() {
   const allLocal = chosenModels.length > 0 && chosenModels.every(localOf);
   const notLocal = chosenModels.filter((m) => !localOf(m));
   const read = useMemo(() => readGoal(form.goal), [form.goal]);
-  const chosenSet = useMemo(() => inputsLib.data?.sets.find((s) => s.id === form.inputs) ?? null, [inputsLib.data, form.inputs]);
+  // The chosen sets, in order; one of them is `chosenSet`, which alone can be attached as a disk image.
+  const chosenSets = useMemo(
+    () => form.inputs.map((id) => inputsLib.data?.sets.find((s) => s.id === id)).filter((s): s is NonNullable<typeof s> => Boolean(s)),
+    [inputsLib.data, form.inputs],
+  );
+  const chosenSet = form.inputs.length === 1 ? (chosenSets[0] ?? null) : null;
+  const hasInputs = form.inputs.length > 0;
+  // One set is sent as its name, as it always was; several as the list.
+  const inputsRef = form.inputs.length === 1 ? form.inputs[0] : form.inputs;
+  const setPath = (id: string) => {
+    const set = inputsLib.data?.sets.find((s) => s.id === id);
+    return set ? `${set.root}/${set.name}` : "<set>";
+  };
 
   // Credentials are checked the way swarm.sh checks them; a model whose
   // provider is not ready is a warning here and a refusal there.
@@ -664,8 +674,8 @@ export function KickoffScreen() {
     const badProviderHost = providerHostList.find((e) => !PROVIDER_HOST.test(e));
     if (badProviderHost) out.push(`Provider host "${badProviderHost}" is not provider=host (a lower-case provider id, then the host its base URL names).`);
     if (providerHostList.length > ALLOW_HOSTS_MAX) out.push(`At most ${ALLOW_HOSTS_MAX} provider hosts.`);
-    if (form.inputs && form.inputs_attach === "image" && !imageAttachable) out.push(`A disk image is attached with hdiutil, which is macOS only, and this server runs on ${serverPlatform}. Hand the swarm the directory instead (copy or bind in place).`);
-    if (form.microvm && form.inputs && form.inputs_attach !== "image" && form.inputs_enforce !== "auto") out.push("The kernel guard is a host run's setting; a microVM run has none (each VM mounts the evidence read-only). Set it to auto.");
+    if (hasInputs && form.inputs_attach === "image" && !imageAttachable) out.push(`A disk image is attached with hdiutil, which is macOS only, and this server runs on ${serverPlatform}. Hand the swarm the directory instead (copy or bind in place).`);
+    if (form.microvm && hasInputs && form.inputs_attach !== "image" && form.inputs_enforce !== "auto") out.push("The kernel guard is a host run's setting; a microVM run has none (each VM mounts the evidence read-only). Set it to auto.");
     for (const { provider, blocker } of vmRefused) out.push(`${provider} cannot go into a VM: ${blocker.reason}.`);
     // This host cannot run the VMs: the kickoff would refuse, so say why
     // now, with the two ways on.
@@ -714,11 +724,11 @@ export function KickoffScreen() {
     compact_at: compactSpecs[2] || undefined,
     compact_model: form.self_compact && form.compact_model.trim() ? form.compact_model.trim() : undefined,
     inbox_page_chars: form.inbox_page_chars.trim() ? Number(form.inbox_page_chars.trim()) : undefined,
-    inputs: form.inputs && form.inputs_attach !== "image" ? form.inputs : undefined,
-    inputs_enforce: form.inputs && form.inputs_attach !== "image" ? form.inputs_enforce : undefined,
-    inputs_attach: form.inputs && form.inputs_attach === "bind" ? "bind" : undefined,
-    inputs_image: form.inputs && form.inputs_attach === "image" && form.inputs_image ? `${form.inputs}/${form.inputs_image}` : undefined,
-    inputs_max_mb: form.inputs && form.inputs_attach === "copy" && form.inputs_max_mb ? Number(form.inputs_max_mb) : undefined,
+    inputs: hasInputs && form.inputs_attach !== "image" ? inputsRef : undefined,
+    inputs_enforce: hasInputs && form.inputs_attach !== "image" ? form.inputs_enforce : undefined,
+    inputs_attach: hasInputs && form.inputs_attach === "bind" ? "bind" : undefined,
+    inputs_image: form.inputs.length === 1 && form.inputs_attach === "image" && form.inputs_image ? `${form.inputs[0]}/${form.inputs_image}` : undefined,
+    inputs_max_mb: hasInputs && form.inputs_attach === "copy" && form.inputs_max_mb ? Number(form.inputs_max_mb) : undefined,
     no_read: form.no_read.length ? form.no_read : undefined,
     tools_from: form.tools_from || undefined,
     toolbox_required: form.toolbox && form.toolbox !== "off" ? form.toolbox_required : undefined,
@@ -748,9 +758,9 @@ export function KickoffScreen() {
     notify: form.notify.trim() || undefined,
     env: envLines(form.env).length ? envLines(form.env) : undefined,
     ledger_from: form.ledger_from.trim() || undefined,
-    no_verify_copy: form.inputs && form.inputs_attach === "copy" && form.no_verify_copy ? true : undefined,
+    no_verify_copy: hasInputs && form.inputs_attach === "copy" && form.no_verify_copy ? true : undefined,
     allow_root: !form.microvm && form.allow_root ? true : undefined,
-    inputs_max_files: form.inputs && form.inputs_max_files.trim() ? Number(form.inputs_max_files.trim()) : undefined,
+    inputs_max_files: hasInputs && form.inputs_max_files.trim() ? Number(form.inputs_max_files.trim()) : undefined,
     model_gateway: form.microvm && gatewayOffered && form.model_gateway ? true : undefined,
     };
   }
@@ -796,7 +806,7 @@ export function KickoffScreen() {
     }
   }
 
-  const command = `swarm.sh start ${teamMode ? `--models "${teamSpec(form.team) || "?"}"` : `--model ${effectiveModel || "?"}`}${capNum > 0 ? ` --cap-usd ${form.cap_usd}` : allLocal ? "" : " --cap-usd ?"}${capTokensNum > 0 ? ` --cap-tokens ${capTokensNum}` : allLocal ? " --cap-tokens ?" : ""} --n ${effectiveN}${form.wall_clock ? ` --wall-clock ${form.wall_clock}` : ""}${form.net === "open" ? " --no-netguard" : form.net === "local" ? " --local-only" : form.net === "hosts" ? hostList.map((h) => ` --allow-host ${h}`).join("") : ""}${providerHostList.map((e) => ` --provider-host ${e}`).join("")}${form.playwright ? " --playwright" : ""}${form.hard_kill ? " --hard-kill" : ""}${form.tool_forging ? " --allow-tool-forging" : ""}${form.self_compact ? "" : " --no-self-compact"}${compactSpecs[0] ? ` --compact-notice-at ${compactSpecs[0]}` : ""}${compactSpecs[1] ? ` --compact-warn-at ${compactSpecs[1]}` : ""}${compactSpecs[2] ? ` --compact-at ${compactSpecs[2]}` : ""}${form.self_compact && form.compact_model.trim() ? ` --compact-model ${form.compact_model.trim()}` : ""}${form.inbox_page_chars.trim() ? ` --inbox-page-chars ${form.inbox_page_chars.trim()}` : ""}${form.inputs && form.inputs_attach === "image" ? ` --inputs-image ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}/${form.inputs_image || "<image>"}` : form.inputs ? ` --inputs ${chosenSet ? `${chosenSet.root}/${chosenSet.name}` : "<set>"}${form.inputs_attach === "bind" ? " --inputs-bind" : form.microvm ? " --inputs-copy" : ""}${form.inputs_enforce !== "auto" ? ` --inputs-enforce ${form.inputs_enforce}` : ""}${form.inputs_attach === "copy" && form.inputs_max_mb ? ` --inputs-max-mb ${form.inputs_max_mb}` : ""}` : ""}${form.no_read.map((id) => ` --no-read <runs>/${id}`).join("")}${form.tools_from ? ` --tools-from <runs>/${form.tools_from}/tools` : ""}${form.catalog ? " --catalog" : ""}${form.toolbox ? ` --toolbox ${form.toolbox}` : ""}${form.toolbox && form.toolbox !== "off" && form.toolbox_required ? " --toolbox-required" : ""}${form.quarantine ? " --quarantine" : ""}${form.allow_install ? " --allow-install" : ""}${form.allow_install && form.no_pypi ? " --no-pypi" : ""}${form.cap_per_agent ? ` --cap-per-agent ${form.cap_per_agent}` : ""}${form.case_id ? ` --case-id ${form.case_id}` : ""}${form.examiner ? ` --examiner "${form.examiner}"` : ""}${form.packs.length ? ` --pack ${form.packs.join(",")}` : ""}${form.microvm ? ` --isolation microvm${form.vm_image.trim() ? ` --image ${form.vm_image.trim()}` : ""}${form.vm_cpus.trim() ? ` --vm-cpus ${form.vm_cpus.trim()}` : ""}${form.vm_memory.trim() ? ` --vm-memory ${form.vm_memory.trim()}` : ""}${form.vm_disk.trim() ? ` --vm-disk ${form.vm_disk.trim()}` : ""}${form.vm_snapshot ? "" : " --no-vm-snapshot"}${form.allow_oauth_in_vm ? " --allow-oauth-in-vm" : ""}${form.vm_snapshot_dir.trim() ? ` --vm-snapshot-dir ${form.vm_snapshot_dir.trim()}` : ""}${gatewayOffered && form.model_gateway ? " --model-gateway" : ""}` : ` --isolation host${form.allow_root ? " --allow-root" : ""}`}${form.inputs && form.inputs_max_files.trim() ? ` --inputs-max-files ${form.inputs_max_files.trim()}` : ""}${form.inputs && form.inputs_attach === "copy" && form.no_verify_copy ? " --no-verify-copy" : ""}${form.allow_synced_folder ? " --allow-synced-folder" : ""}${form.allow_pack_secrets && packSecretNames.length ? " --allow-pack-secrets" : ""}${form.custody_timeout.trim() ? ` --custody-timeout ${form.custody_timeout.trim()}` : ""}${form.idle_nudge_sec.trim() ? ` --idle-nudge-sec ${form.idle_nudge_sec.trim()}` : ""}${form.notify.trim() ? " --notify '<command>'" : ""}${envLines(form.env).map((l) => ` --env ${l.slice(0, l.indexOf("=") + 1)}…`).join("")}${form.ledger_from.trim() ? ` --ledger-from ${form.ledger_from.trim()}` : ""}${form.no_start ? " --no-start" : ""}`;
+  const command = `swarm.sh start ${teamMode ? `--models "${teamSpec(form.team) || "?"}"` : `--model ${effectiveModel || "?"}`}${capNum > 0 ? ` --cap-usd ${form.cap_usd}` : allLocal ? "" : " --cap-usd ?"}${capTokensNum > 0 ? ` --cap-tokens ${capTokensNum}` : allLocal ? " --cap-tokens ?" : ""} --n ${effectiveN}${form.wall_clock ? ` --wall-clock ${form.wall_clock}` : ""}${form.net === "open" ? " --no-netguard" : form.net === "local" ? " --local-only" : form.net === "hosts" ? hostList.map((h) => ` --allow-host ${h}`).join("") : ""}${providerHostList.map((e) => ` --provider-host ${e}`).join("")}${form.playwright ? " --playwright" : ""}${form.hard_kill ? " --hard-kill" : ""}${form.tool_forging ? " --allow-tool-forging" : ""}${form.self_compact ? "" : " --no-self-compact"}${compactSpecs[0] ? ` --compact-notice-at ${compactSpecs[0]}` : ""}${compactSpecs[1] ? ` --compact-warn-at ${compactSpecs[1]}` : ""}${compactSpecs[2] ? ` --compact-at ${compactSpecs[2]}` : ""}${form.self_compact && form.compact_model.trim() ? ` --compact-model ${form.compact_model.trim()}` : ""}${form.inbox_page_chars.trim() ? ` --inbox-page-chars ${form.inbox_page_chars.trim()}` : ""}${form.inputs.length === 1 && form.inputs_attach === "image" ? ` --inputs-image ${setPath(form.inputs[0])}/${form.inputs_image || "<image>"}` : hasInputs ? `${form.inputs.map((id) => ` --inputs ${setPath(id)}`).join("")}${form.inputs_attach === "bind" ? " --inputs-bind" : form.microvm ? " --inputs-copy" : ""}${form.inputs_enforce !== "auto" ? ` --inputs-enforce ${form.inputs_enforce}` : ""}${form.inputs_attach === "copy" && form.inputs_max_mb ? ` --inputs-max-mb ${form.inputs_max_mb}` : ""}` : ""}${form.no_read.map((id) => ` --no-read <runs>/${id}`).join("")}${form.tools_from ? ` --tools-from <runs>/${form.tools_from}/tools` : ""}${form.catalog ? " --catalog" : ""}${form.toolbox ? ` --toolbox ${form.toolbox}` : ""}${form.toolbox && form.toolbox !== "off" && form.toolbox_required ? " --toolbox-required" : ""}${form.quarantine ? " --quarantine" : ""}${form.allow_install ? " --allow-install" : ""}${form.allow_install && form.no_pypi ? " --no-pypi" : ""}${form.cap_per_agent ? ` --cap-per-agent ${form.cap_per_agent}` : ""}${form.case_id ? ` --case-id ${form.case_id}` : ""}${form.examiner ? ` --examiner "${form.examiner}"` : ""}${form.packs.length ? ` --pack ${form.packs.join(",")}` : ""}${form.microvm ? ` --isolation microvm${form.vm_image.trim() ? ` --image ${form.vm_image.trim()}` : ""}${form.vm_cpus.trim() ? ` --vm-cpus ${form.vm_cpus.trim()}` : ""}${form.vm_memory.trim() ? ` --vm-memory ${form.vm_memory.trim()}` : ""}${form.vm_disk.trim() ? ` --vm-disk ${form.vm_disk.trim()}` : ""}${form.vm_snapshot ? "" : " --no-vm-snapshot"}${form.allow_oauth_in_vm ? " --allow-oauth-in-vm" : ""}${form.vm_snapshot_dir.trim() ? ` --vm-snapshot-dir ${form.vm_snapshot_dir.trim()}` : ""}${gatewayOffered && form.model_gateway ? " --model-gateway" : ""}` : ` --isolation host${form.allow_root ? " --allow-root" : ""}`}${hasInputs && form.inputs_max_files.trim() ? ` --inputs-max-files ${form.inputs_max_files.trim()}` : ""}${hasInputs && form.inputs_attach === "copy" && form.no_verify_copy ? " --no-verify-copy" : ""}${form.allow_synced_folder ? " --allow-synced-folder" : ""}${form.allow_pack_secrets && packSecretNames.length ? " --allow-pack-secrets" : ""}${form.custody_timeout.trim() ? ` --custody-timeout ${form.custody_timeout.trim()}` : ""}${form.idle_nudge_sec.trim() ? ` --idle-nudge-sec ${form.idle_nudge_sec.trim()}` : ""}${form.notify.trim() ? " --notify '<command>'" : ""}${envLines(form.env).map((l) => ` --env ${l.slice(0, l.indexOf("=") + 1)}…`).join("")}${form.ledger_from.trim() ? ` --ledger-from ${form.ledger_from.trim()}` : ""}${form.no_start ? " --no-start" : ""}`;
 
   return (
     <form onSubmit={submit} className="mx-auto grid w-full max-w-[1680px] grid-cols-1 gap-8 px-4 py-7 sm:px-10 lg:grid-cols-[minmax(0,1fr)_500px]">
@@ -1166,35 +1176,65 @@ export function KickoffScreen() {
             <>
               <InputsRoots lib={inputsLib.data} onChange={() => inputsLib.reload()} />
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto]">
-                <label className="flex flex-col gap-1">
-                  <span className="label-caps flex min-h-[2.1em] items-start leading-[1.35]">Input set</span>
+                <div className="flex flex-col gap-1">
+                  <span className="label-caps flex min-h-[2.1em] items-start leading-[1.35]">Input sets</span>
+                  {/* One Select adds a set; the chosen sets are chips beneath it, each removable. Each set lands at inputs/<name>/, so a second set of one name (from another root) is not offered. */}
                   <Select
                     mono
-                    value={form.inputs}
-                    onChange={(v) => setForm({ ...form, inputs: v })}
+                    value=""
+                    onChange={(v) => {
+                      if (!v || form.inputs.includes(v)) return;
+                      // A disk image is one set's: a second set is attached as a directory.
+                      setForm({ ...form, inputs: [...form.inputs, v], ...(form.inputs.length && form.inputs_attach === "image" ? { inputs_attach: "copy" as const, inputs_image: "" } : {}) });
+                    }}
                     disabled={inputsLib.loading}
-                    placeholder={inputsLib.loading ? "Reading the evidence roots…" : "none"}
+                    placeholder={inputsLib.loading ? "Reading the evidence roots…" : hasInputs ? "add another set…" : "none"}
                     searchPlaceholder="Filter sets…"
-                    aria-label="Input set"
+                    aria-label={hasInputs ? "Add another input set" : "Input set"}
                     options={[
-                      { value: "", label: "none", hint: "the swarm reads nothing but the goal" },
-                      ...(inputsLib.data?.sets ?? []).map((s) => ({
-                        value: s.id,
-                        label: s.name,
-                        group: (inputsLib.data?.roots.length ?? 0) > 1 ? s.root : undefined,
-                        meta: `${s.files} file${s.files === 1 ? "" : "s"} · ${humanSize(s.bytes)}`,
-                        hint: s.sample.slice(0, 3).join(", ") + (s.files > 3 ? ", …" : ""),
-                        keywords: `${s.root} ${s.sample.join(" ")}`,
-                      })),
+                      ...(hasInputs ? [] : [{ value: "", label: "none", hint: "the swarm reads nothing but the goal" }]),
+                      ...(inputsLib.data?.sets ?? [])
+                        .filter((s) => !form.inputs.includes(s.id))
+                        .map((s) => {
+                          const clash = chosenSets.find((c) => c.name.toLowerCase() === s.name.toLowerCase());
+                          return {
+                            value: s.id,
+                            label: s.name,
+                            group: (inputsLib.data?.roots.length ?? 0) > 1 ? s.root : undefined,
+                            meta: `${s.files} file${s.files === 1 ? "" : "s"} · ${humanSize(s.bytes)}`,
+                            hint: clash ? `a set named ${clash.name} is chosen already: each set lands at inputs/<name>/` : s.sample.slice(0, 3).join(", ") + (s.files > 3 ? ", …" : ""),
+                            keywords: `${s.root} ${s.sample.join(" ")}`,
+                            disabled: Boolean(clash),
+                          };
+                        }),
                     ]}
                   />
-                </label>
-                <label className={cn("flex flex-col gap-1", (!form.inputs || form.microvm) && "opacity-50")} title={form.microvm ? "A host run's guard; in a microVM run each VM mounts the evidence read-only, and nothing else applies" : undefined}>
+                  {chosenSets.length ? (
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {chosenSets.map((set) => (
+                        <Button
+                          key={set.id}
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          className="font-mono"
+                          title={`${set.root}/${set.name}${form.inputs.length > 1 ? ` → inputs/${set.name}/` : " → inputs/"}`}
+                          // An image is the removed set's: what is left is attached as a directory.
+                          onClick={() => setForm({ ...form, inputs: form.inputs.filter((x) => x !== set.id), ...(form.inputs_attach === "image" ? { inputs_attach: "copy" as const, inputs_image: "" } : {}) })}
+                          aria-label={`Remove input set ${set.name}`}
+                        >
+                          {set.name}{(inputsLib.data?.roots.length ?? 0) > 1 ? <span className="ml-1 font-normal text-ink-3">{set.root.split("/").pop()}</span> : null} ×
+                        </Button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <label className={cn("flex flex-col gap-1", (!hasInputs || form.microvm) && "opacity-50")} title={form.microvm ? "A host run's guard; in a microVM run each VM mounts the evidence read-only, and nothing else applies" : undefined}>
                   <span className="label-caps flex min-h-[2.1em] items-start leading-[1.35]">Kernel guard</span>
                   <Select
                     value={form.inputs_enforce}
                     onChange={(v) => setForm({ ...form, inputs_enforce: v as FormState["inputs_enforce"] })}
-                    disabled={!form.inputs || (form.microvm && form.inputs_enforce === "auto")}
+                    disabled={!hasInputs || (form.microvm && form.inputs_enforce === "auto")}
                     aria-label="Inputs enforcement"
                     options={[
                       { value: "auto", label: "auto", hint: form.microvm ? "a VM run: each VM's read-only mount is the guard" : "kernel when the host can" },
@@ -1204,7 +1244,7 @@ export function KickoffScreen() {
                   />
                 </label>
               </div>
-              {form.inputs ? (
+              {hasInputs ? (
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <label className="flex flex-col gap-1">
                     <span className="label-caps flex min-h-[2.1em] items-start leading-[1.35]">Attach as</span>
@@ -1230,11 +1270,13 @@ export function KickoffScreen() {
                           label: "disk image",
                           hint: !imageAttachable
                             ? `needs macOS (hdiutil); this server runs on ${serverPlatform}`
-                            : chosenSet?.images.length
-                              ? form.microvm
-                                ? "a dmg, iso or img attached read-only on this host (macOS) and mounted read-only into every VM"
-                                : "attach a dmg, iso or img read-only (macOS)"
-                              : "no dmg, iso or img in this set",
+                            : form.inputs.length > 1
+                              ? "one set's disk image: with several sets, copy or bind them in place"
+                              : chosenSet?.images.length
+                                ? form.microvm
+                                  ? "a dmg, iso or img attached read-only on this host (macOS) and mounted read-only into every VM"
+                                  : "attach a dmg, iso or img read-only (macOS)"
+                                : "no dmg, iso or img in this set",
                           disabled: !chosenSet?.images.length || !imageAttachable,
                         },
                       ]}
@@ -1285,14 +1327,24 @@ export function KickoffScreen() {
                             ? ". The image is attached read-only and used as inputs/; the kernel refuses every write to it."
                             : ". Copied into inputs/ at kickoff; edit, write and claim_file refuse it, a shell write is undone and announced, and on macOS and Linux the panes run with it read-only at the kernel."
                     }`
-                  : inputsLib.data?.sets.length
-                    ? "Pick a set to hand the swarm files to analyse. Results go in work/; the inputs stay as they were."
-                    : "No sets yet: a set is a directory directly under a root, so put the evidence for one case in its own directory there."}
+                  : chosenSets.length > 1
+                    ? `${chosenSets.length} sets, ${chosenSets.reduce((n, set) => n + set.files, 0)} files, ${humanSize(chosenSets.reduce((n, set) => n + set.bytes, 0))}: each at inputs/<name>/ (${chosenSets.map((set) => `inputs/${set.name}/`).join(", ")})${
+                        form.inputs_attach === "bind"
+                          ? form.microvm
+                            ? ", mounted read-only into every VM from where it is; nothing is copied."
+                            : ", held read-only in place by the kernel, one rule per set; nothing is copied."
+                          : form.microvm
+                            ? ", copied into the run at kickoff (--inputs-copy) and mounted read-only into every VM."
+                            : ", copied at kickoff and read-only. The size and file ceilings are for the sets together."
+                      }`
+                    : inputsLib.data?.sets.length
+                      ? "Pick a set to hand the swarm files to analyse, or several for one case (each lands at inputs/<name>/). Results go in work/; the inputs stay as they were."
+                      : "No sets yet: a set is a directory directly under a root, so put the evidence for one case in its own directory there."}
               </span>
               <CleanRoom
                 chosen={form.no_read}
                 runs={earlier.data ?? []}
-                evidence={chosenSet ? `${chosenSet.root}/${chosenSet.name}` : null}
+                evidence={chosenSets.map((set) => `${set.root}/${set.name}`)}
                 onChange={(no_read) => setForm({ ...form, no_read })}
               />
             </>
@@ -1311,7 +1363,7 @@ export function KickoffScreen() {
                   The standard first pass over the inputs before any agent starts: partition table, file list, body file and MAC timeline for a disk image; process, command line and injection lists for a memory image. Needs an input set.
                 </span>
               </span>
-              <Switch checked={form.catalog} onCheckedChange={(v) => setForm({ ...form, catalog: v })} aria-label="Evidence catalog" disabled={!form.inputs} />
+              <Switch checked={form.catalog} onCheckedChange={(v) => setForm({ ...form, catalog: v })} aria-label="Evidence catalog" disabled={!hasInputs} />
             </div>
             <div className="flex items-center justify-between gap-3 text-[13px]">
               <span>

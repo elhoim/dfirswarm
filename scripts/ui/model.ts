@@ -20,6 +20,7 @@ import {
   readNames,
   type ForgedToolManifest,
   type InputFile,
+  type InputSet,
   type LedgerEntry,
   type NameRecord,
 } from "../../extensions/protocol.ts";
@@ -33,6 +34,8 @@ import {
   type SwarmSummary,
 } from "../../extensions/observe.ts";
 import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
+import { awaitingInterpretation, leadsSnapshot, OPERATOR_REQUESTS, operatorHosts, questionCoverage, rankedLeads, type AwaitingJob, type LeadView } from "../../extensions/leads.ts";
+import { claimSequences, type ClaimSequence } from "../../ui/src/lib/claim-sequences.ts";
 import { isFailureEvent } from "../../ui/src/lib/event-taxonomy.ts";
 import { vmTimeline, type VmTimeline } from "../../ui/src/lib/vm-timeline.ts";
 import { countChecks } from "./goals.ts";
@@ -54,7 +57,7 @@ export type RegistryRun = {
   self_compact?: { enabled: boolean; notice_at: string; warn_at: string; compact_at: string; prompt: string | null; model?: string | null; set?: { notice_at: boolean; warn_at: boolean; compact_at: boolean } };
   /** How much post text one inbox/wait delivery carries; absent on runs older than the bound. */
   inbox_page_chars?: number;
-  inputs?: { source: string; files: number; bytes: number; enforce: string; guard: string } | null;
+  inputs?: { source: string; files: number; bytes: number; enforce: string; guard: string; sets?: Array<{ name: string; source: string; files: number; bytes: number }> } | null;
   goal?: string;
   agents?: string[];
   started_at?: string;
@@ -173,6 +176,8 @@ export type SwarmRow = SwarmSummary & {
   tools_forged: number;
   /** The inputs directory the run was given, from inputs.json, or null: what a clean room is about. */
   inputs_source: string | null;
+  /** Every set's directory, one for a run of one set; null without inputs. The clean room matches any of them. */
+  inputs_sources: string[] | null;
   /** Where the agents ran. A record from before isolation was recorded is a host run. */
   isolation: "microvm" | "host";
   /** The last custody verdict, for a run that has one: clean, attention, or null before any stop or hub finish took one. */
@@ -306,6 +311,8 @@ export type SentinelInfo = {
 /** The read-only inputs a swarm was given, with what the trace says about them. */
 export type InputsView = {
   source: string;
+  /** Several sets, each at inputs/<name>/, with its source and its count; null for one. */
+  sets: InputSet[] | null;
   /** How the evidence is held: copy, bind (in place) or image; null on a manifest from before the field. */
   held: string | null;
   /** Where the agents ran: in a VM run the evidence is a read-only, no-exec mount in every VM, not a pane's guarded copy. */
@@ -521,6 +528,10 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   work: WorkFile[];
   layout: Record<string, unknown> | null;
   violations: SwarmEvent[];
+  /** Claim → work → release runs over the whole trace: the view's trace is a tail, and a run's claims are mostly before it. */
+  claim_sequences: ClaimSequence[];
+  /** Every reap (reap.sh's `reap`, the harness's `reaped`) over the whole trace, for the same reason. */
+  reaps: SwarmEvent[];
   sentinel_info: SentinelInfo | null;
   activity: ActivitySeries;
   /** Tools the agents forged, with usage from the event log. */
@@ -540,7 +551,59 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   vm_timeline: VmTimeline | null;
   /** What the last custody check found (custody.json), or null before any stop or hub finish took one. */
   custody: CustodyView | null;
+  /** The lead register in brief, for the header: what waits on the operator above all. Null when the run opened no lead. */
+  leads: LeadsBrief | null;
+  /** Whether the run was started until solved: no wall clock, caps advisory, only the operator ends it. */
+  until_solved: boolean;
 };
+
+/** The register in numbers, for the header and the tab strip. */
+export type LeadsBrief = { open: number; active: number; blocked: number; closed: number; waiting_on_operator: number; uncovered: number; chain_ok: boolean };
+
+/** The Leads tab: every lead with what is derived beside it, the operator's queue first. */
+export type LeadsPanelView = {
+  leads: LeadView[];
+  chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null; events: number };
+  waiting_on_operator: LeadView[];
+  /** Every line of operator-requests.jsonl, whole. */
+  requests: Array<Record<string, unknown>>;
+  hosts: string[];
+  coverage: { questions: string[]; existence: string[]; unanswered: string[]; uncovered: string[]; open_leads_for: Record<string, string[]> };
+  awaiting: AwaitingJob[];
+};
+
+/** The lead register as the console shows it (extensions/leads.ts), read from the files. */
+export async function readLeads(sandbox: string): Promise<LeadsPanelView> {
+  const snap = await leadsSnapshot(sandbox);
+  const leads = rankedLeads(snap);
+  const cov = questionCoverage(snap);
+  const requests: Array<Record<string, unknown>> = [];
+  for (const line of (await readFile(join(sandbox, OPERATOR_REQUESTS), "utf8").catch(() => "")).split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      requests.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      requests.push({ unreadable: line });
+    }
+  }
+  return {
+    leads,
+    chain: { ...snap.state.chain, events: snap.state.events.length },
+    waiting_on_operator: leads.filter((l) => l.disposition === "needs_operator"),
+    requests,
+    hosts: await operatorHosts(sandbox),
+    coverage: { questions: snap.goal.questions, existence: snap.goal.existence, ...cov },
+    awaiting: await awaitingInterpretation(sandbox, snap.state, snap.jobs),
+  };
+}
+
+async function leadsBrief(sandbox: string): Promise<LeadsBrief | null> {
+  const snap = await leadsSnapshot(sandbox).catch(() => null);
+  if (!snap || !snap.state.events.length) return null;
+  const leads = rankedLeads(snap);
+  const n = (st: string) => leads.filter((l) => l.status === st).length;
+  return { open: n("open"), active: n("active"), blocked: n("blocked"), closed: n("closed"), waiting_on_operator: leads.filter((l) => l.disposition === "needs_operator").length, uncovered: questionCoverage(snap).uncovered.length, chain_ok: snap.state.chain.ok };
+}
 
 /** ledger/entries.jsonl as the agents wrote it, and whether ledger.md exists. */
 export type LedgerView = {
@@ -636,7 +699,9 @@ async function enrichSummary(
   const run = runsById.get(summary.id);
   const sandbox = summary.sandbox;
   const toolsForged = await countForgedTools(sandbox);
-  const inputsSource = (await readInputsManifest(sandbox).catch(() => null))?.source ?? null;
+  const inputsManifest = await readInputsManifest(sandbox).catch(() => null);
+  const inputsSource = inputsManifest?.source ?? null;
+  const inputsSources = inputsManifest ? (inputsManifest.sets?.length ? inputsManifest.sets.map((set) => set.source) : [inputsManifest.source]) : null;
   const budgetRaw = await readFile(join(sandbox, "budget.json"), "utf8").catch(() => "{}");
   let started = run?.started_at ?? "";
   let wall = Number(run?.wall_clock_minutes) || 0;
@@ -726,6 +791,7 @@ async function enrichSummary(
     stop_reason: stopReason,
     tools_forged: toolsForged,
     inputs_source: inputsSource,
+    inputs_sources: inputsSources,
     isolation,
     custody: custodyView ? custodyView.verdict : null,
     hold: holdOf(run),
@@ -1026,6 +1092,8 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     work: await listWorkFiles(sandbox),
     layout,
     violations: events.filter((e) => e.tool === "claim_violation"),
+    claim_sequences: claimSequences(events),
+    reaps: events.filter((e) => e.tool === "reap" || e.tool === "reaped"),
     sentinel_info: sentinelInfo,
     activity: activitySeries(events, summary.started_at || null, summary.finished_at),
     tools: await forgedToolRows(sandbox, events),
@@ -1036,6 +1104,8 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     vms,
     vm_timeline: vmTimeline({ started_at: summary.started_at || null, finished_at: summary.finished_at, now: Date.now(), vms, events: events.map((e) => ({ ...e, ts: hostTime(e) })) }),
     custody: await readCustody(sandbox),
+    leads: await leadsBrief(sandbox),
+    until_solved: detail.budget.until_solved === true,
   };
 }
 
@@ -1756,6 +1826,7 @@ export async function inputsView(sandbox: string, events: readonly SwarmEvent[],
   const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
   return {
     source: manifest.source,
+    sets: manifest.sets?.length ? manifest.sets : null,
     held: typeof manifest.held === "string" ? manifest.held : null,
     isolation: run?.isolation?.mode === "microvm" ? "microvm" : "host",
     source_checked: extras.source_checked,

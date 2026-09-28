@@ -28,8 +28,9 @@ import { coverageOf } from "../coverage.ts";
 import { deleteGoal, GoalError, listGoals, readGoal, saveGoal } from "./goals.ts";
 import { listLibrary, readLibraryEntry } from "./library.ts";
 import { describeRoots, InputsError, listInputSets, parseInputsRoots, resolveInputImage, resolveInputSet, RootStore } from "./inputs.ts";
-import { countForgedTools, findRun, listSwarmRows, listWorkFiles, liveHubDirs, operatorAudit, queryTraces, readAllPosts, readRunEvents, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
+import { countForgedTools, findRun, listSwarmRows, listWorkFiles, liveHubDirs, operatorAudit, queryTraces, readAllPosts, readLeads, readRunEvents, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
 import { readReviews } from "./reviews.ts";
+import { createSigning, SigningError } from "./signing.ts";
 import { readStoreJob, readStoreJobLog, readStoreJobs, storeJobLogFile } from "./store-jobs.ts";
 import { userInfo } from "node:os";
 import { hashArtifacts } from "../artifacts.ts";
@@ -86,6 +87,8 @@ export type UiAppOptions = {
   vmReadiness?: (q: VmReadinessQuery) => Promise<VmReadiness>;
   /** The flags `swarm.sh help start` lists; tests inject them. */
   startFlags?: () => Promise<string[]>;
+  /** Where the enrolled examiners and reviewers are, when not $SWARM_SIGNERS_HOME or $DFIRSWARM_HOME (tests). */
+  signersHome?: string;
 };
 
 export type UiApp = {
@@ -309,6 +312,12 @@ export function createUiApp(options: UiAppOptions): UiApp {
         const slash = check.params.inputs_image.indexOf("/");
         check.params.inputs_image_path = await resolveInputImage(await inputsRoots(), check.params.inputs_image.slice(0, slash), check.params.inputs_image.slice(slash + 1));
         check.params.inputs = undefined;
+      } else if (check.params.inputs_sets?.length) {
+        // Several sets: each resolved under its root, in order.
+        const roots = await inputsRoots();
+        check.params.inputs_dirs = [];
+        for (const ref of check.params.inputs_sets) check.params.inputs_dirs.push(await resolveInputSet(roots, ref));
+        check.params.inputs_dir = check.params.inputs_dirs[0];
       } else if (check.params.inputs) {
         check.params.inputs_dir = await resolveInputSet(await inputsRoots(), check.params.inputs);
       }
@@ -350,6 +359,9 @@ export function createUiApp(options: UiAppOptions): UiApp {
   const flagsOf = options.startFlags ?? (() => startFlags(root));
   let flagsCache: Promise<string[]> | null = null;
   const token = options.token ?? process.env.SWARM_UI_TOKEN ?? "";
+  // Signing from the console (scripts/ui/signing.ts): its own guard, stricter than the token check below.
+  let boundHost: string | null = null;
+  const signing = createSigning({ root, runsDir, token, boundHost: () => boundHost, home: options.signersHome });
   /**
    * One-time grants to open one HTML artifact with its scripts. The console
    * asks for one over its authenticated channel after the operator confirms;
@@ -394,15 +406,18 @@ export function createUiApp(options: UiAppOptions): UiApp {
 
   /**
    * The files an examiner hands over beside the report, by download name:
-   * custody.json, the verdict anchored outside the run, inputs.json, each
-   * vm/<id>.json, and this run's lines of runs/operator-audit.jsonl. A
-   * closed table of names; the abs path is the harness's, never a caller's.
+   * custody.json, the verdict anchored outside the run, inputs.json, the
+   * index of work/ custody sealed, each vm/<id>.json, this run's lines of
+   * runs/operator-audit.jsonl and the examiner's review. A closed table of
+   * names; the abs path is the harness's, never a caller's.
    */
   async function courtFile(sandbox: string, id: string, name: string): Promise<{ name: string; type: string; description: string; abs?: string; body?: string } | null> {
     const jsonType = "application/json; charset=utf-8";
     if (name === "custody.json") return { name, type: jsonType, abs: join(sandbox, "custody.json"), description: "The host's custody verdict at stop: the evidence re-hashed, the trace and ledger chains, the kept outputs, each VM" };
     if (name === "custody-anchor.json") return { name, type: jsonType, abs: `${sandbox}.custody-anchor.json`, description: "The verdict's hash, kept outside the run where no agent reaches: custody.json is checked against it" };
     if (name === "inputs.json") return { name, type: jsonType, abs: join(sandbox, "inputs.json"), description: "The evidence manifest the kickoff wrote: every name with its sha256, and md5 and sha1 when taken" };
+    if (name === "artifacts.sealed.json") return { name, type: jsonType, abs: join(sandbox, "artifacts.json"), description: "The index of work/ custody wrote at stop, byte for byte: the one custody.json and its anchor name" };
+    if (name === "review.jsonl" && /^[A-Za-z0-9_-]+$/.test(id)) return { name, type: "application/x-ndjson; charset=utf-8", abs: join(runsDir, "reviews", `${id}.jsonl`), description: "The examiner's review: each entry accepted, rejected or amended, and the sign-off over the ledger's head and the report's sha256, chained" };
     const vm = name.match(/^vm-([A-Za-z0-9][A-Za-z0-9_-]{0,63})\.json$/);
     if (vm) return { name, type: jsonType, abs: join(sandbox, "vm", `${vm[1]}.json`), description: `The record of ${vm[1]}'s VM: its image, size, mounts, network, placeholders, probe, and what its stop did` };
     if (name === "operator-audit.jsonl") {
@@ -413,11 +428,11 @@ export function createUiApp(options: UiAppOptions): UiApp {
     return null;
   }
   async function courtFiles(sandbox: string, id: string): Promise<Array<{ name: string; description: string; present: boolean; reason?: string; bytes: number | null; sha256: string | null; type: string }>> {
-    const names = ["custody.json", "custody-anchor.json", "inputs.json"];
+    const names = ["custody.json", "custody-anchor.json", "inputs.json", "artifacts.sealed.json"];
     for (const f of (await readdir(join(sandbox, "vm")).catch(() => [] as string[])).sort()) {
       if (/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.json$/.test(f)) names.push(`vm-${f}`);
     }
-    names.push("operator-audit.jsonl");
+    names.push("operator-audit.jsonl", "review.jsonl");
     const out = [];
     for (const n of names) {
       const f = await courtFile(sandbox, id, n);
@@ -757,6 +772,48 @@ export function createUiApp(options: UiAppOptions): UiApp {
       if (!job || job.kind !== "export" || !job.output_file) throw new HttpError(404, "no export with that id");
       if (job.status !== "ok") throw new HttpError(409, job.status === "running" ? "the export is still running" : "the export failed; its output says why");
       await sendFile(res, job.output_file, {}, true);
+      return;
+    }
+
+    // Signing: enrolment, a release's prepare and seal, a technical reviewer's
+    // record and countersign. Reading is open like the rest; every POST goes
+    // through signing.guard (the token even when it is empty, a loopback Host,
+    // the console's own Origin, no live host-mode run) and spawns its script
+    // directly with the secret on fd 3, never as a job.
+    if (path === "/api/examiners") {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      json(res, 200, signing.examiners());
+      return;
+    }
+    if (path === "/api/examiners/enroll") {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      signing.guard(req);
+      json(res, 200, await signing.enroll((await readBody(req)) as Record<string, unknown>));
+      return;
+    }
+    const pendingMatch = path.match(/^\/api\/runs\/([A-Za-z0-9_-]{1,32})\/release\/pending\/([0-9a-f]{32})\/report\.html$/);
+    if (pendingMatch) {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      // The prepared bytes, as the examiner is asked to read them: framed with no scripts, and never cached.
+      await sendFile(res, signing.pendingReport(pendingMatch[1], pendingMatch[2]), { "content-security-policy": ARTIFACT_CSP, "x-content-type-options": "nosniff", "cache-control": "no-store" });
+      return;
+    }
+    const signingMatch = path.match(/^\/api\/runs\/([A-Za-z0-9_-]{1,32})\/(release|release\/prepare|release\/seal|release\/discard|review\/technical|review\/countersign)$/);
+    if (signingMatch) {
+      const [, runId, act] = signingMatch;
+      if (act === "release") {
+        if (method !== "GET") throw new HttpError(405, "method not allowed");
+        json(res, 200, await signing.releaseState(runId));
+        return;
+      }
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      signing.guard(req);
+      const body = (await readBody(req)) as Record<string, unknown>;
+      if (act === "release/prepare") json(res, 200, await signing.prepare(runId, body));
+      else if (act === "release/seal") json(res, 200, await signing.seal(runId, body));
+      else if (act === "release/discard") json(res, 200, await signing.discard(runId, body));
+      else if (act === "review/technical") json(res, 200, await signing.technical(runId, body));
+      else json(res, 200, await signing.countersign(runId, body));
       return;
     }
 
@@ -1174,6 +1231,33 @@ export function createUiApp(options: UiAppOptions): UiApp {
         json(res, 202, runner.reap(id, { stall_sec: stall, stop: body.stop === true }));
         return;
       }
+      /**
+       * The lead register (extensions/leads.ts): every lead with what is
+       * derived beside it, what waits on the operator first, and the goal's
+       * questions nobody covers. A POST is the operator's answer to a lead
+       * (a note, with a host to allow) or a reopen, run as swarm.sh lead so
+       * it lands on the trace and the operator's record like the CLI's.
+       */
+      case "leads": {
+        if (method === "GET") {
+          json(res, 200, await readLeads(sandbox));
+          return;
+        }
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        const body = (await readBody(req)) as { action?: unknown; lead?: unknown; text?: unknown; allow_host?: unknown };
+        const action = body.action === "reopen" ? "reopen" : body.action === "note" ? "note" : null;
+        if (!action) throw new HttpError(400, "action is note or reopen");
+        const lead = String(body.lead ?? "").trim().toUpperCase();
+        if (!/^L-[1-9]\d{0,5}$/.test(lead)) throw new HttpError(400, "lead is L-<n>");
+        const text = typeof body.text === "string" ? body.text.trim() : "";
+        if (action === "note" && !text) throw new HttpError(400, "a note needs its text");
+        if (text.length > 4000) throw new HttpError(400, "a note is at most 4000 characters: nothing is cut, so a longer one is refused");
+        const host = typeof body.allow_host === "string" ? body.allow_host.trim() : "";
+        if (host && !/^(\*\.)?[A-Za-z0-9.-]{1,253}(:\d{1,5})?$/.test(host)) throw new HttpError(400, "allow_host is a host name (example.org, *.example.org, example.org:8443)");
+        json(res, 202, runner.lead(id, { action, lead, ...(text ? { text } : {}), ...(host ? { allowHost: host } : {}) }));
+        return;
+      }
       // Who did what to this run: its lines in runs/operator-audit.jsonl
       // (the chain checked over the whole file) and its operator lines on
       // the trace.
@@ -1296,7 +1380,7 @@ export function createUiApp(options: UiAppOptions): UiApp {
         res.end();
         return;
       }
-      if (err instanceof HttpError) {
+      if (err instanceof HttpError || err instanceof SigningError) {
         json(res, err.status, { error: err.message });
         return;
       }
@@ -1316,6 +1400,7 @@ export function createUiApp(options: UiAppOptions): UiApp {
         server.once("error", fail);
         server.listen(port, host, () => done());
       });
+      boundHost = host;
       const addr = server.address();
       return { port: typeof addr === "object" && addr ? addr.port : port, host };
     },

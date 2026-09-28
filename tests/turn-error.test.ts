@@ -10,7 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyTurnError } from "../extensions/protocol.ts";
+import { classifyTurnError, providerErrorPost } from "../extensions/protocol.ts";
 
 test("an abort after the harness stopped the agent is the harness, whichever way the process learns of it", () => {
   assert.equal(classifyTurnError("This operation was aborted", "sentinel_present", true), "harness");
@@ -37,4 +37,13 @@ test("a connection that died after the run was over is the teardown, not the pro
   assert.equal(classifyTurnError("Connection error.", "agent_cap", false), "harness");
   assert.equal(classifyTurnError("Connection error.", null, false), "provider", "with the run still on, a dropped connection is worth telling the board");
   assert.equal(classifyTurnError("terminated", null, false), "provider");
+});
+
+test("the provider-error post says only the turn failed: the work stands as the agent's own, nothing is declared free", () => {
+  const body = providerErrorPost("s30646305", "openai-codex/gpt-6-sol", "429 Too Many Requests");
+  assert.match(body, /PROVIDER ERROR: s30646305's turn on openai-codex\/gpt-6-sol ended with: 429 Too Many Requests/);
+  assert.match(body, /Only this turn failed/);
+  assert.match(body, /work, its leads and its claims stand as its own until s30646305 or the hub says otherwise/);
+  assert.doesNotMatch(body, /\bfree\b/i, "a turn error frees nothing");
+  assert.doesNotMatch(body, /take it\b/i, "the board is not told to take the agent's work over");
 });

@@ -31,13 +31,20 @@ import { specsFromEnv } from "./context-ceiling.ts";
 import { registerSelfCompact, type HandoffFacts, type SelfCompactHandle } from "./self-compact.ts";
 import {
   type FinishLineRun,
+  type FinishOutcome,
   leadingCommand,
   isSharedScratch,
   agentDeadPath,
   agentDonePath,
   finishLineVerdict,
-  runFinishLine,
+  runFinishLineBound,
+  stateRevision,
+  FINISH_LINE_UNSETTLED,
+  inboxPageChars,
   classifyTurnError,
+  providerErrorPost,
+  jobPageNote,
+  type JobStdoutPage,
   CAP_STEER,
   TOKEN_CAP_STEER,
   overCap,
@@ -50,6 +57,7 @@ import {
   diffWatchedPaths,
   extractWritePath,
   inboxLogResult,
+  keepToolOutput,
   keepToolOutputFromFile,
   toolOutputRel,
   type FullOutputRef,
@@ -62,6 +70,10 @@ import {
   runForgedTool,
   lacksProgram,
   ownPathsToOut,
+  heldOwnPaths,
+  writtenToOf,
+  stagedPaths,
+  stagedPathsIn,
   packSecretsFor,
   redactSecrets,
   healInputs,
@@ -80,7 +92,9 @@ import {
   LEDGER_BASIS,
   LEDGER_COMPLETION,
   LEDGER_SUBJECT_TYPES,
+  LEDGER_ALTERNATIVE_STATUS,
   LEDGER_MD,
+  type LedgerInput,
   TOOLS_DIR,
   TOOL_TIMEOUT_DEFAULT_SECONDS,
   TOOL_TIMEOUT_MAX_SECONDS,
@@ -111,6 +125,7 @@ import {
   listClaims,
   listFileHistory,
   listTeam,
+  teamView,
   markDone,
   markStopSteer,
   postMessage,
@@ -133,6 +148,8 @@ import {
   listForgedTools,
   listLedger,
   recordEntry,
+  attestEntry,
+  disputeEntry,
   heldBy,
   claimName,
   correctionsAfter,
@@ -145,7 +162,18 @@ import {
   jobSubmit,
   jobStatus,
   catalogRequest,
+  runFinishLine,
+  leadOpen,
+  leadClaim,
+  leadRelease,
+  leadClose,
+  leadLink,
+  leadsView,
+  leadsDigest,
+  leadInterpret,
 } from "./board.ts";
+// The lead register's host-side pieces: a host run's wait checks it itself (a VM's hub does it there).
+import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
 import { installChunkedEgress } from "./vm-egress.ts";
@@ -189,6 +217,8 @@ export const SWARM_TOOLS = new Set([
   "record_violation",
   "record",
   "ledger",
+  "attest",
+  "dispute",
   "sentinel_nudge",
   "forge_hint",
   "agent_cap_steer",
@@ -202,6 +232,12 @@ export const SWARM_TOOLS = new Set([
   "job_run",
   "job_status",
   "catalog_request",
+  "lead_open",
+  "lead_claim",
+  "lead_release",
+  "lead_close",
+  "lead_link",
+  "leads",
 ]);
 
 /** A bash command run this many times by one agent earns a hint to forge a tool. */
@@ -834,6 +870,15 @@ export default function (pi: ExtensionAPI) {
     if (hubSocket && !hubLink) {
       const cwd = ctx.cwd;
       hubLink = openHubLink(hubSocket, (message) => {
+        // While a hand-off's compaction runs Pi refuses every prompt ("Cannot
+        // submit a prompt while compaction is in progress"), and says so only
+        // in the pane. On run s6895a8 the record read `ok: true` for four
+        // nudges nobody received. The hand-off that ends the compaction
+        // carries the sentinel and the unread posts.
+        if (selfCompact?.compacting()) {
+          void logEvent(cwd, agentId, "hub_prompt", { kind: message.kind ?? "prompt" }, { ok: false, reason: "a compaction is running and Pi takes no prompt until it ends; not delivered" });
+          return;
+        }
         try {
           pi.sendUserMessage(message.text, { deliverAs: message.deliver ?? "followUp" });
         } catch {
@@ -842,6 +887,30 @@ export default function (pi: ExtensionAPI) {
         void logEvent(cwd, agentId, "hub_prompt", { kind: message.kind ?? "prompt" }, { ok: true });
       });
     }
+  });
+
+  /**
+   * Every wait open in this pane, each ended by a steering message for this
+   * agent: typed into its pane, a peer's nudge, the idle watchdog, a stop.
+   * Pi delivers a steer only when the tool call it arrived during ends, and a
+   * wait holds its call for up to five minutes. A steer that came in before
+   * the wait began (while the call was being checked) is still waiting for
+   * the next turn, so that wait does not start. A follow-up ends no wait: it
+   * is for a turn's end, and an agent that waited again at once would be
+   * woken again at once.
+   */
+  const waitsOpen = new Set<() => void>();
+  let steerPending = false;
+  pi.on("input", async (event) => {
+    if (event.streamingBehavior === "steer") {
+      steerPending = true;
+      for (const wake of [...waitsOpen]) wake();
+    }
+    return { action: "continue" as const };
+  });
+  // Pi puts the steers it holds into the context before the next model call.
+  pi.on("turn_start", async () => {
+    steerPending = false;
   });
 
   pi.on("agent_start", async () => {
@@ -861,31 +930,41 @@ export default function (pi: ExtensionAPI) {
   async function logInputsGuard(cwd: string): Promise<void> {
     const manifest = await readInputsManifest(cwd);
     if (!manifest) return;
-    const probe = join(cwd, INPUTS_DIR, ".fsguard-probe");
-    let enforced: "kernel" | "mode" | "none" = "none";
-    try {
-      await writeFile(probe, "probe\n");
-      await rm(probe, { force: true }).catch(() => undefined);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      // EPERM is the seatbelt/mount-namespace refusal; EROFS is what a
-      // read-only mount answers (a container's `:ro` bind, a read-only disk
-      // image attached on the host). Both are the kernel saying no.
-      //
-      // EACCES is ambiguous and the answer depends on what is guarding this
-      // pane. Landlock refuses with EACCES, not EPERM (measured on 6.8), so
-      // under a Landlock-backed guard EACCES is the kernel; anywhere else it
-      // is the permission bits, which the file's owner can take back. Reading
-      // the mode the pane was actually started under is what makes the
-      // difference legible — a pane that has no kernel guard cannot claim one
-      // here, because the variable is set by the guard itself.
-      const guardMode = process.env.SWARM_FSGUARD || "none";
-      const landlockBacked = guardMode === "landlock" || guardMode === "linux";
-      enforced = code === "EPERM" || code === "EROFS" || (landlockBacked && code === "EACCES")
-        ? "kernel"
-        : code === "EACCES"
-          ? "mode"
-          : "none";
+    const probeDir = async (dir: string): Promise<"kernel" | "mode" | "none"> => {
+      const probe = join(dir, ".fsguard-probe");
+      try {
+        await writeFile(probe, "probe\n");
+        await rm(probe, { force: true }).catch(() => undefined);
+        return "none";
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        // EPERM is the seatbelt/mount-namespace refusal; EROFS is what a
+        // read-only mount answers (a container's `:ro` bind, a read-only disk
+        // image attached on the host). Both are the kernel saying no.
+        //
+        // EACCES is ambiguous and the answer depends on what is guarding this
+        // pane. Landlock refuses with EACCES, not EPERM (measured on 6.8), so
+        // under a Landlock-backed guard EACCES is the kernel; anywhere else it
+        // is the permission bits, which the file's owner can take back. Reading
+        // the mode the pane was actually started under is what makes the
+        // difference legible — a pane that has no kernel guard cannot claim one
+        // here, because the variable is set by the guard itself.
+        const guardMode = process.env.SWARM_FSGUARD || "none";
+        const landlockBacked = guardMode === "landlock" || guardMode === "linux";
+        return code === "EPERM" || code === "EROFS" || (landlockBacked && code === "EACCES")
+          ? "kernel"
+          : code === "EACCES"
+            ? "mode"
+            : "none";
+      }
+    };
+    // Several sets: inputs/ and each set under it, each held by its own rule
+    // when it is held in place; the pane has the weakest of what they say.
+    const rank = { none: 0, mode: 1, kernel: 2 } as const;
+    let enforced: "kernel" | "mode" | "none" = await probeDir(join(cwd, INPUTS_DIR));
+    for (const set of manifest.sets ?? []) {
+      const one = await probeDir(join(cwd, set.path));
+      if (rank[one] < rank[enforced]) enforced = one;
     }
     inputsEnforced = enforced;
     await logEvent(cwd, agentId, "inputs_guard", { files: manifest.files.length }, {
@@ -1095,8 +1174,12 @@ export default function (pi: ExtensionAPI) {
     if (inputs) {
       const kb = Math.max(1, Math.round(inputs.bytes / 1024));
       const consequence = inputsEnforced === "kernel" ? "refused by the kernel" : "refused, or detected and undone";
+      // Several sets, each at inputs/<name>/: every one named.
+      const where = inputs.sets?.length
+        ? `in ${inputs.sets.length} sets, ${inputs.sets.map((set) => `${set.path}/ (from ${set.source || "the operator"})`).join(", ")}`
+        : `under inputs/ (from ${inputs.source || "the operator"})`;
       inputsLine =
-        `\n\nRead-only inputs: ${inputs.files.length} file(s), ${kb} KB under inputs/ (from ${inputs.source || "the operator"}). ` +
+        `\n\nRead-only inputs: ${inputs.files.length} file(s), ${kb} KB ${where}. ` +
         `Read them with read, grep or bash as much as you like. Never write, delete, move or chmod anything under inputs/: every such write is ${consequence} and announced on the board. ` +
         `Put every result in work/ (claim first); copy an input there if you need a version you can change. Call \`inputs\` to list them.`;
     }
@@ -1206,10 +1289,7 @@ export default function (pi: ExtensionAPI) {
     if (providerErrorTold === reason) return;
     providerErrorTold = reason;
     await logEvent(ctx.cwd, agentId, "agent_error", { model }, { ok: false, reason }).catch(() => undefined);
-    await systemPost(ctx.cwd, {
-      tag: "veto",
-      body: `PROVIDER ERROR: ${agentId}'s turn on ${model} ended with: ${reason}. Nothing this agent or a peer does will change that — it is the provider answering, not the harness. Whatever ${agentId} had taken on is free; read the board, and if the work matters to the finish line, take it.`,
-    }).catch(() => undefined);
+    await systemPost(ctx.cwd, { tag: "veto", body: providerErrorPost(agentId, model, reason) }).catch(() => undefined);
   }
 
   /**
@@ -1882,6 +1962,21 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  /**
+   * The lead register's header on every inbox and wait delivery: what is
+   * open by priority, what this agent holds, what is blocked on it, its jobs
+   * awaiting an interpretation, the questions nobody covers, and each notice
+   * since the last delivery. Whole; a register that cannot be read says so.
+   */
+  async function leadsHeader(cwd: string): Promise<{ leads?: string }> {
+    try {
+      const d = await leadsDigest(ctxFrom(cwd, agentId), { mark: true });
+      return { leads: d.text };
+    } catch (err) {
+      return { leads: `The lead register could not be read: ${(err as Error).message}` };
+    }
+  }
+
   pi.registerTool({
     name: "inbox",
     label: "Inbox",
@@ -1918,6 +2013,7 @@ export default function (pi: ExtensionAPI) {
         })),
         remaining: box.remaining,
         ...(box.remaining > 0 ? { note: pageNote(box.remaining, box.page_chars) } : {}),
+        ...(await leadsHeader(toolCtx.cwd)),
       };
       await logEvent(
         toolCtx.cwd,
@@ -1934,14 +2030,17 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "list_team",
     label: "List team",
-    description: "Read team.json. Lock owner ids come from this file, not callsigns.",
-    promptSnippet: "List assigned swarm agent ids",
-    promptGuidelines: ["Use list_team to learn peer ids before claiming."],
-    parameters: Type.Object({}),
-    async execute(_id, _params, _signal, _onUpdate, toolCtx: ToolCtx) {
-      const team = await listTeam(ctxFrom(toolCtx.cwd, agentId));
-      await logEvent(toolCtx.cwd, agentId, "list_team", {}, { n: team.n });
-      return okResult(team);
+    description:
+      "Read team.json (lock owner ids come from this file, not callsigns) and what each peer is doing and has found: its name and what it said it is doing, its last post, its open jobs (id, profile, the command or tool, state, since when) and its latest ledger entries (seq, kind, first line; the whole entry is `ledger`). Built from the board, the store and the ledger. Whole peers per page: when `next` is set, call again with from: next for the rest.",
+    promptSnippet: "List the team: peer ids, what each peer is doing, its open jobs and latest findings",
+    promptGuidelines: ["Use list_team to learn peer ids before claiming, and to see what each peer is doing and has found before you take work."],
+    parameters: Type.Object({
+      from: Type.Optional(Type.String({ description: "The peer id a previous list_team named as `next`: the page starts there" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const view = await teamView(ctxFrom(toolCtx.cwd, agentId), { ...(params.from ? { from: params.from } : {}), pageChars: inboxPageChars() });
+      await logEvent(toolCtx.cwd, agentId, "list_team", params.from ? { from: params.from } : {}, { n: view.n, peers: view.peers.map((p) => p.id), remaining: view.remaining });
+      return okResult(view);
     },
   });
 
@@ -2139,7 +2238,7 @@ export default function (pi: ExtensionAPI) {
     name: "wait",
     label: "Wait",
     description:
-      "Sleep until something happens: a new post for you (on main: to you, to all, or to no one on the team; in a side thread you are in: any post), done/SWARM_DONE appearing, or a claim of yours lapsing — whichever comes first, or the timeout. A main-thread post addressed only to other agents does not wake you; it stays unread and comes with the next delivery. Returns the unread posts. Use this instead of `bash sleep`: a shell sleep costs a full provider round every time you wake up, this one costs nothing.",
+      "Sleep until something happens: a new post for you (on main: to you, to all, or to no one on the team; in a side thread you are in: any post), done/SWARM_DONE appearing, a claim of yours lapsing, news from the lead register (a lead you hold becoming ready, a need of yours that will not come, your lead marked stale or taken over or reopened, the operator's note, or, when you have been idle, a ready lead nobody holds), or a message for you (it follows the result) — whichever comes first, or the timeout. A main-thread post addressed only to other agents does not wake you; it stays unread and comes with the next delivery. Returns the unread posts. Use this instead of `bash sleep`: a shell sleep costs a full provider round every time you wake up, this one costs nothing.",
     promptSnippet: "Block until the board changes instead of polling",
     promptGuidelines: [
       "When you are waiting on a peer, call wait, not bash sleep. Do not poll the board in a loop.",
@@ -2158,11 +2257,36 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
       const ctx = ctxFrom(toolCtx.cwd, agentId);
-      const result = await waitForSwarmChange(ctx, {
-        seconds: params.seconds,
-        signal: signal as AbortSignal | undefined,
-        everyPost: params.every_post === true,
-      });
+      // A steer for this agent ends the wait (waitsOpen), through the same
+      // signal Pi's own abort uses, so it ends a wait held by the hub too.
+      const outer = signal as AbortSignal | undefined;
+      const woken = new AbortController();
+      let steered = false;
+      const wake = () => {
+        steered = true;
+        woken.abort();
+      };
+      const follow = () => woken.abort();
+      if (outer?.aborted) woken.abort();
+      else outer?.addEventListener("abort", follow, { once: true });
+      if (steerPending) wake();
+      waitsOpen.add(wake);
+      let result: Awaited<ReturnType<typeof waitForSwarmChange>>;
+      try {
+        result = await waitForSwarmChange(ctx, {
+          seconds: params.seconds,
+          signal: woken.signal,
+          everyPost: params.every_post === true,
+          // The lead register's news wakes the wait: here on the host; in a VM the hub checks it.
+          ...(boardSocket() ? {} : { extraWake: leadsWaitCheck(ctx) }),
+        });
+      } finally {
+        waitsOpen.delete(wake);
+        outer?.removeEventListener("abort", follow);
+      }
+      if (steered && !outer?.aborted && result.reason === "timeout") {
+        result = { ...result, reason: "prompt", detail: "A message for you came in while you waited; it follows this result. Act on it before you wait again." };
+      }
       // Hand back what woke us, so the agent does not need a second call.
       const box = result.reason === "post" ? await readInbox(ctx) : null;
       const remaining = box?.remaining ?? 0;
@@ -2181,6 +2305,7 @@ export default function (pi: ExtensionAPI) {
           })) ?? [],
         remaining,
         ...(box && remaining > 0 ? { note: pageNote(remaining, box.page_chars) } : {}),
+        ...(await leadsHeader(toolCtx.cwd)),
       };
       await logEvent(
         toolCtx.cwd,
@@ -2258,6 +2383,12 @@ export default function (pi: ExtensionAPI) {
 
   // Tool jobs: work in throwaway worker VMs, sealed into store/ (job-service.ts).
   const jobDone = (state: unknown) => state === "committed" || state === "failed" || state === "cancelled";
+  /** A page of a job's stdout with what it leaves unread, in numbers and in words (jobPageNote). */
+  const stdoutWithNote = (job: string, page: JobStdoutPage) => {
+    const unread = Math.max(0, page.total - (page.offset + page.bytes));
+    const note = jobPageNote(job, page);
+    return { stdout: { ...page, unread_bytes: unread }, ...(note ? { stdout_unread: note } : {}) };
+  };
   /**
    * Submit a job and wait up to `wait` seconds for it. The result is the
    * job's record and a page of its stdout when it finished, or its id and
@@ -2268,6 +2399,7 @@ export default function (pi: ExtensionAPI) {
     const sub = await jobSubmit(cwd, { ...spec, ...(wait > 0 ? { wait: wait + 5 } : {}) });
     if (!sub.ok || !sub.job) return { ok: false, job: null, result: { reason: sub.reason ?? "the job was not accepted" } };
     const id = String(sub.job.job);
+    const underLead = (sub as { lead?: string }).lead;
     const until = Date.now() + wait * 1000;
     let last: Awaited<ReturnType<typeof jobStatus>> = sub;
     while (!jobDone(last.job?.state) && Date.now() < until && !signal?.aborted) {
@@ -2275,33 +2407,36 @@ export default function (pi: ExtensionAPI) {
       const st = await jobStatus(cwd, { job_id: id, limit: 8192, wait: Math.ceil((until - Date.now()) / 1000) + 5 }).catch(() => null);
       if (st?.ok) last = st;
     }
+    const leadNote = underLead ? { lead: underLead, lead_note: `run under ${underLead}: record what its output shows with interprets: ["${id}"] before the run can end` } : {};
     if (jobDone(last.job?.state)) {
       const job = (last.job ?? {}) as Record<string, unknown>;
-      return { ok: job.state === "committed" && (job.status === undefined || job.status === "ok"), job: id, result: { ...job, ...(last.stdout ? { stdout: last.stdout } : {}) } };
+      return { ok: job.state === "committed" && (job.status === undefined || job.status === "ok"), job: id, result: { ...job, ...(last.stdout ? stdoutWithNote(id, last.stdout) : {}), ...leadNote } };
     }
-    return { ok: true, job: id, result: { job: id, state: last.job?.state, note: `still ${last.job?.state === "accepted" ? "queued" : "running"}; a post tagged result will say when it is done (your wait wakes on it)` } };
+    return { ok: true, job: id, result: { job: id, state: last.job?.state, note: `still ${last.job?.state === "accepted" ? "queued" : "running"}; a post tagged result will say when it is done (your wait wakes on it)`, ...leadNote } };
   }
   pi.registerTool({
     name: "job_run",
     label: "Run a job",
     description:
       "Run work in a throwaway worker VM: evidence parsing, anything slow or heavy, and anything whose output you will cite or share. Quick looks stay in your own shell. " +
-      "Where the run declares job images (SWARM.md, Job images), your own VM is the base image and the forensic programs are in them: name the one the work needs with profile (disk, memory, mobile, …); a pack tool or a recipe picks its own, and a job with none runs in the image that holds every pack of the run. " +
-      "The worker sees what you see, read-only: inputs/, store/ (earlier jobs' outputs), catalog/, tools/, tool-output/ and all of work/, yours and your peers' (SQLite: open with ?mode=ro&immutable=1 or copy into $OUT). It has the image's programs, nothing installed in an agent's VM, no network unless network=allowlist, and writes only to $OUT. " +
+      "Where the run declares job images (SWARM.md, Job images), your own VM is the base image and the forensic programs are in them: name the one the work needs with profile (disk, memory, mobile, …); a pack tool or a recipe picks its own; a command with none runs in the smallest image whose own record holds every program it runs, and in the image that holds every pack of the run whenever that is not sure (a heredoc, a script of yours, an import). " +
+      "Declare what it reads in inputs and it is given that and nothing else, read-only, at the paths you see: input:<path> (a directory as input:<dir>/; a segment set comes whole with its first segment), job:<id> (its whole output) or job:<id>/<path>, member:<gen>#<n>, sha256:<hex>, and a file or directory of yours as work/<you>/<path> or tool-output/<you>/<path> (copied as it is when the job starts, and hashed: it reads that copy while yours goes on changing). A declaration that does not resolve refuses the job; [] gives it nothing. Left out, or inputs=[\"all\"], it sees what you see: inputs/, store/ (earlier jobs' outputs), catalog/, tools/, tool-output/ and all of work/, yours and your peers', live; the record says which. (SQLite: open with ?mode=ro&immutable=1 or copy into $OUT.) It has the image's programs, nothing installed in an agent's VM, no network unless network=allowlist, and writes only to $OUT. " +
       "What it writes there is sealed into store/jobs/<id>/out/ (read-only, hashed) and outlives the VM: any job or agent reads it there, and you cite it as job:<id>/<path>. An archive or disk image it writes is offered to the catalogue's recipes and, when catalogued, announced. " +
-      "Give command (bash, run from the run's directory; $OUT is also the OUT environment variable, for a script in another language or a quoted heredoc) or tool with args (a pack or forged tool; write {OUT}/<name> where it takes an output path), or import: a file or directory you made under work/ or tool-output/, sealed as it is now (copied live, hashed before and after; cite it as job:<id>/<name>). " +
+      "Give command (bash, run from the run's directory; $OUT is also the OUT environment variable, for a script in another language or a quoted heredoc) or tool with args (a pack or forged tool; write {OUT}/<name> where it takes an output path), or import: a file or directory you made under work/ or tool-output/, sealed as it is now (the hub copies it at the job's start and hashes it; cite it as job:<id>/<name>). A whole output the harness kept under tool-output/ needs no import: cite it in a record as tool:<you>/<file>, and the record is sealed against the trace. " +
       "A short job answers here; a longer one returns its id, and a post tagged result wakes your wait when it is done: do not poll job_status. A failed or timed-out job keeps what it wrote. " +
+      "Give a job that needs two minutes or less (a quick look with an image's programs) timeout_seconds of 120 or less: from three workers one is kept for such jobs, so it does not wait behind long parses (it is stopped at that limit; leave a long parse at the default). " +
       "stdout comes back a page at a time; all of it is store/jobs/<id>/stdout.log.",
     parameters: Type.Object({
       command: Type.Optional(Type.String({ description: "Bash, run from the run's directory; $OUT is the job's own directory" })),
       tool: Type.Optional(Type.String({ description: "A pack or forged tool's name, instead of a command" })),
       import: Type.Optional(Type.String({ description: "A file or directory under work/ or tool-output/ to seal into the store as it is now, instead of a command" })),
       args: Type.Optional(Type.Object({}, { additionalProperties: true, description: "The tool's arguments, as its manifest says" })),
-      inputs: Type.Optional(Type.Array(Type.String(), { description: "What it reads, for the record: input:<path>, job:<id>, or all (default)" })),
-      timeout_seconds: Type.Optional(Type.Integer({ description: "Stop it after this long (default 900, at most 14400)" })),
+      inputs: Type.Optional(Type.Array(Type.String(), { description: "What it reads, and all it is given: input:<path> (input:<dir>/ for a directory), job:<id>[/<path>], import:<id>[/<path>], member:<gen>#<n>, sha256:<hex>, work/<you>/<path>, tool-output/<you>/<path>; [] for nothing. Left out, or [\"all\"]: everything you see" })),
+      timeout_seconds: Type.Optional(Type.Integer({ description: "Stop it after this long (default 900, at most 14400); 120 or less takes the worker kept for short jobs" })),
       network: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("allowlist")], { description: "off (default) or the run's allowlist" })),
-      profile: Type.Optional(Type.String({ description: "The job image to run in, by profile, as SWARM.md's Job images lists them (disk, memory, mobile, …); left out, the run's worker image" })),
+      profile: Type.Optional(Type.String({ description: "The job image to run in, by profile, as SWARM.md's Job images lists them (disk, memory, mobile, …); left out, the smallest job image whose record holds what the command runs, else the one that holds every pack" })),
       wait_seconds: Type.Optional(Type.Integer({ description: "How long to wait here for it (default 12, at most 100)" })),
+      lead: Type.Optional(Type.String({ description: "The lead (L-<n>, one you hold) this job is run under; left out, the one active lead you hold, if you hold exactly one. A lead's jobs wait for an interpretation (record with interprets) before the run may end." })),
     }),
     async execute(_id, params, signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
@@ -2318,6 +2453,7 @@ export default function (pi: ExtensionAPI) {
         ...(params.timeout_seconds ? { timeout_seconds: params.timeout_seconds } : {}),
         ...(params.network ? { network: params.network } : {}),
         ...(params.profile ? { profile: params.profile } : {}),
+        ...(params.lead ? { lead: params.lead } : {}),
       };
       const wait = Math.min(Math.max(params.wait_seconds ?? 12, 0), 100);
       const res = await submitAndWait(toolCtx.cwd, spec, wait, signal as AbortSignal | undefined);
@@ -2327,7 +2463,7 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text" as const, text: refused.reason }], details: refused, isError: true };
       }
       const result = { ok: true, ...res.result };
-      await logEvent(toolCtx.cwd, agentId, "job_run", params, { ok: true, job: res.job, state: res.result.state, status: res.result.status }, Date.now() - started);
+      await logEvent(toolCtx.cwd, agentId, "job_run", params, { ok: true, job: res.job, state: res.result.state, status: res.result.status, ...(res.result.lead ? { lead: res.result.lead } : {}) }, Date.now() - started);
       return okResult(result);
     },
   });
@@ -2347,7 +2483,7 @@ export default function (pi: ExtensionAPI) {
       const st = await jobStatus(toolCtx.cwd, { job_id: params.job_id, ...(params.offset !== undefined ? { offset: params.offset } : {}), ...(params.cancel ? { cancel: true } : {}), limit: 16384 });
       await logEvent(toolCtx.cwd, agentId, "job_status", params, { ok: st.ok, state: st.job?.state, ...(st.ok ? {} : { reason: st.reason }) }, Date.now() - started);
       if (!st.ok) return { content: [{ type: "text" as const, text: st.reason ?? "no answer" }], details: st, isError: true };
-      return okResult({ ok: true, ...st.job, ...(st.stdout ? { stdout: st.stdout } : {}) });
+      return okResult({ ok: true, ...st.job, ...(st.stdout ? stdoutWithNote(params.job_id, st.stdout) : {}) });
     },
   });
 
@@ -2539,6 +2675,12 @@ export default function (pi: ExtensionAPI) {
         const secrets = await packSecretsFor(manifest);
         // In a VM the seal is the hub's word, read where the record is current.
         const sealed = boardSocket() ? await forgedToolSeal(toolCtx.cwd, manifest.name).catch(() => undefined) : undefined;
+        // A pack tool may be run again as a job (below): which of the paths it
+        // was given in the agent's own directories already hold something is
+        // taken now, before this attempt can create any, so a rerun reads those
+        // where they are and writes the rest to its $OUT.
+        const rerunnable = Boolean(manifest.pack && process.env.SWARM_PACK_PROGRAMS_IN_JOBS);
+        const held = rerunnable ? await heldOwnPaths(toolCtx.cwd, (params ?? {}) as Record<string, unknown>, agentId).catch(() => new Set<string>()) : new Set<string>();
         const run = await runForgedTool(toolCtx.cwd, manifest, (params ?? {}) as Record<string, unknown>, {
           signal: signal as AbortSignal | undefined,
           agentId,
@@ -2596,24 +2738,31 @@ export default function (pi: ExtensionAPI) {
         // Agents on the base image, the packs' programs in the job images: a
         // pack tool whose program or module is not in this VM runs again as a
         // job in its own pack's image, and its answer is that job's.
-        const missing = !run.ok && manifest.pack && process.env.SWARM_PACK_PROGRAMS_IN_JOBS ? lacksProgram(run) : null;
+        const missing = !run.ok && rerunnable ? lacksProgram(run) : null;
         if (missing) {
-          const args = ownPathsToOut((params ?? {}) as Record<string, unknown>, agentId);
+          const args = ownPathsToOut((params ?? {}) as Record<string, unknown>, agentId, { root: toolCtx.cwd, held });
           const started = Date.now();
           const res = await submitAndWait(toolCtx.cwd, { tool: manifest.name, args }, 100, signal as AbortSignal | undefined);
           // Where each output path the agent gave was written instead: the
           // job's sealed output, which it reads and cites from there.
-          const moved: Record<string, string> = {};
-          const given = JSON.stringify(params ?? {});
-          const walk = (a: unknown, b: unknown) => {
-            if (typeof a === "string" && typeof b === "string" && a !== b && b.startsWith("{OUT}/") && res.job) moved[a] = `store/jobs/${res.job}/out/${b.slice("{OUT}/".length)}`;
-            else if (a && b && typeof a === "object" && typeof b === "object") for (const k of Object.keys(a as object)) walk((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]);
-          };
-          walk(JSON.parse(given), args);
+          const moved = res.job ? writtenToOf(params ?? {}, args, res.job) : {};
+          // The job's output names the places it wrote as the worker saw them,
+          // under <run>/.jobs/<id>/, which is gone once the job is sealed. The
+          // output stays as sealed; `paths` says where each of those places is
+          // now. Read from the page the hub returned (current) and from the
+          // sealed stdout.log whole (this VM's view of it may lag, and then
+          // the page is what there is).
+          const paths: Record<string, string> = {};
+          if (res.job) {
+            const page = (res.result.stdout as { text?: unknown } | undefined)?.text;
+            if (typeof page === "string") Object.assign(paths, stagedPaths(page, toolCtx.cwd, res.job));
+            Object.assign(paths, await stagedPathsIn(join(toolCtx.cwd, "store", "jobs", res.job, "stdout.log"), toolCtx.cwd, res.job).catch(() => ({})));
+          }
           const answer = {
             ran_as_job: res.job,
             why: `${missing}: this VM is the base image, so ${manifest.name} ran in its pack's job image`,
             ...(Object.keys(moved).length ? { written_to: moved } : {}),
+            ...(Object.keys(paths).length ? { paths } : {}),
             ...res.result,
           };
           await logEvent(toolCtx.cwd, agentId, manifest.name, redactSecrets((params ?? {}) as Record<string, unknown>, secrets), redactSecrets({ ok: res.ok, forged: true, ran_as_job: res.job, why: answer.why, state: res.result.state, status: res.result.status }, secrets), Date.now() - started);
@@ -2854,64 +3003,88 @@ export default function (pi: ExtensionAPI) {
     name: "record",
     label: "Record",
     description:
-      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (a conclusion), absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope), hypothesis (a proposition under test, with status open, supported or refuted) or limitation (what the examination could not establish, with reason not_examined, unavailable, failed, partial or excluded). Both source and evidence are required: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. refs names the run's objects it rests on, each checked when it is written: input:<path> (under inputs/), job:<id>/<path> (a job's sealed output), import:<id>/<path>, member:<generation>#<n> (an archive member in the catalogue), sha256:<hex> (a sealed blob), or unresolved:<why> when none can be named; a file only in your own work/ is not an object of the run: run the work as a job and cite job:. To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> (and because=<why>): nothing is deleted, and the newer entry is the correction; the same sentence with another confidence, refs or status is a correction too. The optional fields are for the reader: answers (the goal sections it answers), rel (supports, contradicts, duplicates or derived_from another entry), sensitive (it or what it cites holds a secret or personal data), clock and precision (on a dated entry: which clock the time came from, how precise it is), basis (observed or inferred), completion (on an absence: complete, partial or failed), attribution (who or what an action is attributed to, and on what), locators (where in a cited object). The harness renders ledger/ledger.md — timeline, indicators, findings, searches that found nothing — after every record; cite that file in the report.",
-    promptSnippet: "Record a dated event, an indicator or a finding with its evidence",
+      "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (an observation and what you make of it), absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope), hypothesis (a proposition under test, with status open, supported or refuted), limitation (what the examination could not establish, with reason not_examined, unavailable, failed, partial or excluded) or answer (the swarm's answer to one question of the goal, or its summary or narrative). Every kind but answer needs source and evidence: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. refs names the run's objects it rests on, each checked when it is written: input:<path> (under inputs/), job:<id>/<path> (a job's sealed output), import:<id>/<path>, member:<generation>#<n> (an archive member in the catalogue), sha256:<hex> (a sealed blob), or unresolved:<why> when none can be named; a file only in your own work/ is not an object of the run: run the work as a job and cite job:. The harness writes how each cited job or import was made into the entry. " +
+      "A finding needs basis (observed or inferred), confidence with confidence_why (where the data came from, whether the method is reliable for it, how specific the observation is, whether your sources depend on each other: the quality of the evidence, not a count), and indicates (what the observation means and the step from one to the other, one to three sentences); an inferred finding lists alternatives (what else could explain it, each rejected with why or left open) or says in alternatives_none_why why none was considered; a finding resting on a job that did not succeed says in qualifies why those bytes are still usable, and can never support a claim that something is absent. " +
+      "An answer names its section (question:<id>, summary or narrative), gives the answer in value and the reasoning citing E-<seq> for every claim, and for a question confidence with confidence_why, contrary (entries that say otherwise), limitations (limitation entries that bound it), alternatives_open and would_change; it rests on at least one standing entry that names its question in answers, cites a superseded entry only with its correction, and a disputed entry or one resting on a failed job only with qualifies [{ref: E-<seq>, why}]. One answer stands per section: revise it with supersedes. Tokens in an answer (hashes, paths, times, inodes, addresses, accounts) that no cited entry holds are marked on it. " +
+      "To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> (and because=<why>): nothing is deleted, and the newer entry is the correction. The optional fields are for the reader: answers (the goal sections it answers), rel (supports, contradicts, duplicates or derived_from another entry), sensitive, clock and precision, completion, attribution, locators, significance. The harness renders ledger/ledger.md after every record; cite that file in the report.",
+    promptSnippet: "Record an event, an indicator, a finding with what it indicates, or an answer",
     promptGuidelines: [
       "Record every dated event you establish as kind=event with ts in UTC; the timeline is built from them.",
-      "Record indicators and findings as you confirm them, with the evidence that proves them.",
-      "source and evidence are required on every record: where you saw it, and the command or id that lets somebody else see it too.",
-      "A finding names the objects it rests on in refs (job:<id>/<path>, input:<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>).",
+      "Record a finding while the artefact is open: value is what you saw, indicates what it means, confidence_why why that confidence, basis observed or inferred; an inferred one lists alternatives or says in alternatives_none_why why none was considered.",
+      "source and evidence are required on every record but an answer: where you saw it, and the command or id that lets somebody else see it too.",
+      "A finding names the objects it rests on in refs (job:<id>/<path>, input:<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>); one resting on a job that did not succeed says why in qualifies.",
       "A wrong entry is corrected, never deleted: record the right one with supersedes=<seq of the wrong one>.",
       "kind=absence is optional: record a search that found nothing only when the absence matters to the case, with the scope it holds for.",
       "Name the goal section an entry answers in answers; link an entry that supports or contradicts another with rel.",
       "Record what you could not examine, or could only partly, as kind=limitation with its reason; a proposition you are still testing as kind=hypothesis.",
+      "An answer (kind=answer) is written from the ledger, not from memory: one per question, one summary, one narrative, each citing E-<seq> for every claim.",
     ],
     parameters: Type.Object({
-      kind: Type.Union(LEDGER_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding | absence | hypothesis | limitation" }),
-      value: Type.String({ description: "The event, indicator or finding, in one sentence; for absence, what was looked for" }),
+      kind: Type.Union(LEDGER_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding | absence | hypothesis | limitation | answer" }),
+      value: Type.String({ description: "The event, indicator or observation, in one sentence; for absence, what was looked for; for an answer, the answer itself" }),
       ts: Type.Optional(Type.String({ description: "The event's time, ISO 8601 with its zone: 2024-01-15T12:44:22Z, or 2024-01-15T15:44:22+03:00 as the source records it. A time without a zone is refused." })),
-      source: Type.String({ description: "Where it was seen: a path, log, plugin, registry key. Required." }),
-      evidence: Type.String({ description: "How to check it: command, inode, record id, hash. Required." }),
-      confidence: Type.Optional(Type.Union(LEDGER_CONFIDENCE.map((c) => Type.Literal(c)))),
+      source: Type.Optional(Type.String({ description: "Where it was seen: a path, log, plugin, registry key. Required on every kind but answer." })),
+      evidence: Type.Optional(Type.String({ description: "How to check it: command, inode, record id, hash. Required on every kind but answer." })),
+      confidence: Type.Optional(Type.Union(LEDGER_CONFIDENCE.map((c) => Type.Literal(c)), { description: "Required on a finding and on an answer to a question." })),
+      confidence_why: Type.Optional(Type.String({ description: "Why that confidence: provenance, method, specificity, whether the sources depend on each other. Required with a finding's or a question answer's confidence." })),
+      indicates: Type.Optional(Type.String({ description: "A finding's: what the observation means, and the step from one to the other, in one to three sentences. Required on a finding." })),
+      alternatives: Type.Optional(
+        Type.Array(Type.Object({ explanation: Type.String(), status: Type.Union(LEDGER_ALTERNATIVE_STATUS.map((k) => Type.Literal(k))), why: Type.String(), test_refs: Type.Optional(Type.Array(Type.String())) }), {
+          description: "A finding's: what else could explain it, each rejected (with why) or left open; test_refs the objects that tested it. Required on an inferred finding unless alternatives_none_why says why none was considered.",
+        }),
+      ),
+      alternatives_none_why: Type.Optional(Type.String({ description: "A finding's: why no alternative was considered. Never invent one." })),
+      significance: Type.Optional(Type.String({ description: "A finding's: what it means for the case, when you can say." })),
+      qualifies: Type.Optional(
+        Type.Array(Type.Object({ ref: Type.String(), why: Type.String() }), {
+          description: "Why the kept output of a job that did not succeed still supports this entry: {ref: that ref, why}. Required on a finding for each such ref. On an answer, ref is a cited entry (E-<seq>) that is disputed or rests on a failed job.",
+        }),
+      ),
+      section: Type.Optional(Type.String({ description: "An answer's: question:<id> (the goal's question: question:3), summary or narrative." })),
+      reasoning: Type.Optional(Type.String({ description: "An answer's: how the cited entries lead to the answer, citing E-<seq> for every claim. For the narrative, the narrative." })),
+      contrary: Type.Optional(Type.Array(Type.Union([Type.Number(), Type.String()]), { description: "An answer's: the entries that say otherwise, by seq." })),
+      limitations: Type.Optional(Type.Array(Type.Union([Type.Number(), Type.String()]), { description: "An answer's: the limitation entries that bound it, by seq." })),
+      alternatives_open: Type.Optional(Type.String({ description: "An answer's: what else could still explain it, or that nothing remains open and why. Required on a question's answer." })),
+      would_change: Type.Optional(Type.String({ description: "An answer's: what evidence would change it. Required on a question's answer." })),
+      inconclusive: Type.Optional(Type.Boolean({ description: "An answer's: the ledger cannot answer the question; say why in reasoning and cite the limitations." })),
       supersedes: Type.Optional(Type.Number({ description: "The seq of an entry this one corrects. The older entry stays, marked superseded." })),
-      refs: Type.Optional(Type.Array(Type.String(), { description: "The run's objects it rests on: input:<path>, job:<id>/<path>, import:<id>/<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>. Each is checked; one that does not resolve is refused with the nearest names." })),
-      answers: Type.Optional(Type.Array(Type.String(), { description: "The goal sections it answers: \"3\", \"Q3\"." })),
+      refs: Type.Optional(Type.Array(Type.String(), { description: "The run's objects it rests on: input:<path>, job:<id>/<path>, import:<id>/<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>. Each is checked; one that does not resolve is refused with the nearest names. Not on an answer." })),
+      answers: Type.Optional(Type.Array(Type.String(), { description: "The goal sections it answers: \"3\", \"Q3\", summary, narrative." })),
       rel: Type.Optional(Type.Array(Type.Object({ to: Type.Number(), kind: Type.Union(LEDGER_REL_KINDS.map((k) => Type.Literal(k))) }), { description: "Links to other entries by seq: supports, contradicts, duplicates, derived_from." })),
       sensitive: Type.Optional(Type.Boolean({ description: "It, or what it cites, holds a credential, a key or personal data: a package redacts it." })),
       status: Type.Optional(Type.Union(LEDGER_HYPOTHESIS_STATUS.map((k) => Type.Literal(k)), { description: "A hypothesis's status." })),
       reason: Type.Optional(Type.Union(LEDGER_LIMITATION_REASONS.map((k) => Type.Literal(k)), { description: "A limitation's reason." })),
       clock: Type.Optional(Type.String({ description: "On a dated entry: the clock its time came from (\"NTFS $SI created\", \"device local, offset unknown\")." })),
       precision: Type.Optional(Type.Union(LEDGER_PRECISION.map((k) => Type.Literal(k)), { description: "How precise ts is; a date alone is recorded as date." })),
-      basis: Type.Optional(Type.Union(LEDGER_BASIS.map((k) => Type.Literal(k)), { description: "observed in the evidence, or inferred from it." })),
+      basis: Type.Optional(Type.Union(LEDGER_BASIS.map((k) => Type.Literal(k)), { description: "observed in the evidence, or inferred from it. Required on a finding." })),
       completion: Type.Optional(Type.Union(LEDGER_COMPLETION.map((k) => Type.Literal(k)), { description: "On an absence: how far the search got." })),
       attribution: Type.Optional(Type.Object({ subject: Type.String(), subject_type: Type.Optional(Type.Union(LEDGER_SUBJECT_TYPES.map((k) => Type.Literal(k)))), basis_refs: Type.Optional(Type.Array(Type.String())) }, { description: "Who or what an action is attributed to (account, device, person) and the objects that link them." })),
       locators: Type.Optional(Type.Array(Type.Object({ ref: Type.String(), at: Type.String() }), { description: "Where in a cited ref: a row, an offset, a record id." })),
       because: Type.Optional(Type.String({ description: "With supersedes: why the correction corrects." })),
+      opens: Type.Optional(
+        Type.Array(
+          Type.Object({
+            title: Type.String(),
+            why: Type.String(),
+            needs: Type.Optional(Type.Array(Type.String())),
+            answers: Type.Optional(Type.Array(Type.String())),
+            material: Type.Optional(Type.Boolean()),
+            take: Type.Optional(Type.Boolean()),
+          }),
+          { description: "The leads this entry opens: work it shows has to be followed, each {title, why, needs?, answers?, material?, take?} as lead_open takes it; each lead's origin is this entry. take: true keeps the follow-up yours." },
+        ),
+      ),
+      interprets: Type.Optional(
+        Type.Array(Type.Union([Type.String(), Type.Object({ job: Type.String(), rest: Type.Optional(Type.String()) })]), {
+          description: "The jobs whose output this entry interprets (j000123): the entry is what the output shows, its kind the disposition. A job's output is interpreted only this way; a bare citation in refs is not an interpretation. When you were handed only part of a job's stdout, give {job, rest}: how the rest was read, or why not.",
+        }),
+      ),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const result = await recordEntry(ctxFrom(toolCtx.cwd, agentId), {
-        kind: params.kind,
-        value: params.value,
-        ts: params.ts,
-        source: params.source,
-        evidence: params.evidence,
-        confidence: params.confidence,
-        ...(params.supersedes !== undefined ? { supersedes: params.supersedes } : {}),
-        ...(params.refs?.length ? { refs: params.refs } : {}),
-        ...(params.answers?.length ? { answers: params.answers } : {}),
-        ...(params.rel?.length ? { rel: params.rel } : {}),
-        ...(params.sensitive !== undefined ? { sensitive: params.sensitive } : {}),
-        ...(params.status ? { status: params.status } : {}),
-        ...(params.reason ? { reason: params.reason } : {}),
-        ...(params.clock ? { clock: params.clock } : {}),
-        ...(params.precision ? { precision: params.precision } : {}),
-        ...(params.basis ? { basis: params.basis } : {}),
-        ...(params.completion ? { completion: params.completion } : {}),
-        ...(params.attribution ? { attribution: params.attribution } : {}),
-        ...(params.locators?.length ? { locators: params.locators } : {}),
-        ...(params.because ? { because: params.because } : {}),
-      });
+      // Every field as given: the protocol checks which a kind takes and says which it does not.
+      const { kind, opens, interprets, ...rest } = params;
+      const result = await recordEntry(ctxFrom(toolCtx.cwd, agentId), { kind, ...Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)) } as unknown as LedgerInput);
       if (!result.ok) {
         // What the agent tried to say goes on the trace whole: the args are the record, refused or not.
         await logEvent(toolCtx.cwd, agentId, "record", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
@@ -2925,18 +3098,33 @@ export default function (pi: ExtensionAPI) {
       // record sees which entry stopped standing, when, and by whom.
       if (result.entry.supersedes !== undefined && !result.merged) {
         await logEvent(toolCtx.cwd, agentId, "ledger_superseded", { seq: result.entry.supersedes }, { ok: true, by_seq: result.entry.seq });
+        // A lead closed on the corrected entry reopens: on the host here, in a VM at the hub.
+        if (!boardSocket()) await reopenOnLedger(toolCtx.cwd).catch(() => undefined);
       }
-      return okResult({ ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), ...(result.entry.refs?.length ? { refs: result.entry.refs } : {}), ...(result.note ? { note: result.note } : {}), rendered: LEDGER_MD });
+      // What the entry interprets and the leads it opens, after it stands:
+      // the entry is kept whatever happens to these, and each says how it went.
+      const seq = result.entry.seq;
+      const leadsOpened: Array<Record<string, unknown>> = [];
+      for (const o of opens ?? []) {
+        const r = await leadOpen(ctxFrom(toolCtx.cwd, agentId), { ...o, origin: `E-${seq}` }).catch((err: Error) => ({ ok: false as const, reason: err.message }));
+        leadsOpened.push(r.ok ? { ok: true, lead: r.lead.id, status: r.lead.status, holder: r.lead.holder, ...(r.woke ? { woke: r.woke } : {}) } : { ok: false, title: o.title, reason: r.reason });
+      }
+      const interpreted = interprets?.length ? await leadInterpret(ctxFrom(toolCtx.cwd, agentId), seq, interprets).catch((err: Error) => ({ ok: false as const, reason: err.message })) : null;
+      if (leadsOpened.length || interpreted) {
+        await logEvent(toolCtx.cwd, agentId, "record_leads", { seq }, { ok: true, ...(leadsOpened.length ? { opened: leadsOpened } : {}), ...(interpreted ? { interprets: interpreted.ok ? interpreted.interprets : [], ...(interpreted.ok ? {} : { refused: interpreted.reason }) } : {}) }).catch(() => undefined);
+      }
+      return okResult({ ok: true, seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), ...(result.entry.refs?.length ? { refs: result.entry.refs } : {}), ...(result.entry.unsupported_tokens?.length ? { unsupported_tokens: result.entry.unsupported_tokens } : {}), ...(result.note ? { note: result.note } : {}), ...(leadsOpened.length ? { leads_opened: leadsOpened } : {}), ...(interpreted ? (interpreted.ok ? { interprets: interpreted.interprets } : { interprets_refused: `the entry stands, but its interpretation was not recorded: ${interpreted.reason}` }) : {}), rendered: LEDGER_MD });
     },
   });
 
   pi.registerTool({
     name: "ledger",
     label: "Ledger",
-    description: "List the swarm's ledger: every event, indicator, finding and search that found nothing, recorded so far, with authors and evidence; a corrected entry carries superseded_by. Filter by kind; the rendered file is ledger/ledger.md.",
+    description:
+      "List the swarm's ledger: every event, indicator, finding, search that found nothing, hypothesis, limitation and answer recorded so far, with authors and evidence; a corrected entry carries superseded_by, an entry somebody re-derived attested_by, one somebody contests disputed_by, and an answer that no longer stands on what it cites its problems. Filter by kind; the rendered file is ledger/ledger.md.",
     promptSnippet: "See what the swarm has recorded so far",
     parameters: Type.Object({
-      kind: Type.Optional(Type.String({ description: "event | ioc | finding | absence | hypothesis | limitation" })),
+      kind: Type.Optional(Type.String({ description: "event | ioc | finding | absence | hypothesis | limitation | answer" })),
       limit: Type.Optional(Type.Number({ description: "Newest N entries (default 200)" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
@@ -2944,6 +3132,194 @@ export default function (pi: ExtensionAPI) {
       const entries = await listLedger(toolCtx.cwd, params ?? {});
       await logEvent(toolCtx.cwd, agentId, "ledger", params ?? {}, { ok: true, n: entries.length }, Date.now() - started);
       return okResult({ entries, rendered: LEDGER_MD });
+    },
+  });
+
+  pi.registerTool({
+    name: "attest",
+    label: "Attest",
+    description:
+      "Say that you re-derived a ledger entry somebody else recorded (a finding, an answer, any kind): how names what you re-derived and from which sealed object (job:<id>/<path>, input:<path>, …), and what you only read. refs lists the objects you re-derived from, each checked. The harness writes it, chained, into ledger/attestations.jsonl. You cannot attest your own entry; an attestation is a check by somebody else, not agreement.",
+    promptSnippet: "Record that you re-derived a peer's entry, and how",
+    promptGuidelines: [
+      "attest only what you re-derived from the sealed refs yourself, and say in how what you re-derived and what you only read.",
+      "A critic attests or disputes every answer before the run ends; the author of an entry never attests it.",
+    ],
+    parameters: Type.Object({
+      seq: Type.Number({ description: "The entry's seq (standing, not your own)." }),
+      how: Type.String({ description: "What you re-derived, from which sealed object, and what you only read." }),
+      refs: Type.Optional(Type.Array(Type.String(), { description: "The objects you re-derived from: input:<path>, job:<id>/<path>, member:<gen>#<n>, sha256:<hex>." })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const result = await attestEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, how: params.how, ...(params.refs?.length ? { refs: params.refs } : {}) });
+      if (!result.ok) {
+        await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
+        return { content: [{ type: "text" as const, text: `attest refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
+      }
+      await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: true, seq: result.line.seq, appended: result.appended, ...(result.line.hash ? { hash: result.line.hash } : {}), ...(result.note ? { note: result.note } : {}) }, Date.now() - started);
+      return okResult({ ok: true, seq: result.line.seq, appended: result.appended, ...(result.note ? { note: result.note } : {}), rendered: LEDGER_MD });
+    },
+  });
+
+  pi.registerTool({
+    name: "dispute",
+    label: "Dispute",
+    description:
+      "Say why a ledger entry somebody else recorded does not hold (a finding, an answer, any kind), with the objects that show it in refs; or, with withdraw: true, take back your own dispute and say why. The harness writes it, chained, into ledger/disputes.jsonl. An answer resting on a disputed entry stops standing until its author records it again with the dispute answered; to correct your own entry, record the correction with supersedes instead.",
+    promptSnippet: "Record why a peer's entry does not hold",
+    promptGuidelines: ["dispute says what does not hold and what shows it; a wrong entry of your own is corrected with record(supersedes), never disputed."],
+    parameters: Type.Object({
+      seq: Type.Number({ description: "The entry's seq (standing, not your own)." }),
+      why: Type.String({ description: "What does not hold and what shows it; with withdraw, why the dispute no longer stands." }),
+      refs: Type.Optional(Type.Array(Type.String(), { description: "The objects that show it." })),
+      withdraw: Type.Optional(Type.Boolean({ description: "Take back your own standing dispute of this entry." })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const result = await disputeEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, why: params.why, ...(params.refs?.length ? { refs: params.refs } : {}), ...(params.withdraw ? { withdraw: true } : {}) });
+      if (!result.ok) {
+        await logEvent(toolCtx.cwd, agentId, "dispute", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
+        return { content: [{ type: "text" as const, text: `dispute refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
+      }
+      await logEvent(toolCtx.cwd, agentId, "dispute", params as Record<string, unknown>, { ok: true, seq: result.line.seq, act: result.line.act, appended: result.appended, ...(result.line.hash ? { hash: result.line.hash } : {}), ...(result.note ? { note: result.note } : {}) }, Date.now() - started);
+      // A lead closed on the disputed entry no longer stands on it: on the
+      // host this pane reopens it; in a VM the hub already has.
+      if (!boardSocket()) await reopenOnLedger(toolCtx.cwd).catch(() => undefined);
+      return okResult({ ok: true, seq: result.line.seq, act: result.line.act, appended: result.appended, ...(result.note ? { note: result.note } : {}), rendered: LEDGER_MD });
+    },
+  });
+
+  // The lead register (extensions/leads.ts): the swarm's open investigative
+  // work, opened, claimed and closed by the agents themselves.
+  /** A lead call's answer to the agent, and its line on the trace. */
+  async function leadAnswer(cwd: string, tool: string, params: Record<string, unknown>, started: number, r: { ok: boolean; reason?: string } & Record<string, unknown>) {
+    const lead = (r.lead ?? {}) as Record<string, unknown>;
+    await logEvent(cwd, agentId, tool, params, r.ok ? { ok: true, lead: lead.id, status: lead.status, holder: lead.holder, generation: lead.generation, ...(lead.disposition ? { disposition: lead.disposition, ref: lead.ref } : {}), ...(r.reclaimed_from ? { reclaimed_from: r.reclaimed_from } : {}), ...(r.woke ? { woke: r.woke } : {}) } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+    if (!r.ok) return { content: [{ type: "text" as const, text: `${tool} refused: ${r.reason}` }], details: r, isError: true };
+    return okResult(r);
+  }
+
+  pi.registerTool({
+    name: "lead_open",
+    label: "Open a lead",
+    description:
+      "Put a piece of material investigative work in the swarm's lead register: something found that has to be followed (a container to open, a key to find, an output to read to its end, an artefact nobody has examined). title says what, why says why it matters and what it would settle. needs names what it cannot go on without: a lead with the outcome it must reach (L-3 is L-3 resolved; L-3:negative) or a standing ledger entry (E-12); never a job, whose exit status settles nothing. answers names the goal's questions it serves. take: true holds it for you in the same step, the natural next step of your own work; left out, it is open to everyone and the seat idle longest is woken for it. material: false for work the finish line may leave open (a nice-to-have). Returns its id (L-<n>).",
+    promptSnippet: "Open a lead: work somebody has to follow",
+    promptGuidelines: [
+      "Open or claim a lead before you start work a peer could also be doing; keep the follow-ups of your own finding with take: true.",
+      "Say in needs what a lead cannot go on without (a lead's outcome or an entry), so its holder is woken when it comes.",
+    ],
+    parameters: Type.Object({
+      title: Type.String({ description: "What has to be done, in one line" }),
+      why: Type.String({ description: "Why it matters: what it would settle, what it rests on" }),
+      needs: Type.Optional(Type.Array(Type.String(), { description: "What it waits for: L-<n> (resolved), L-<n>:<disposition>, or E-<seq>" })),
+      answers: Type.Optional(Type.Array(Type.String(), { description: "The goal's questions it serves: \"3\", \"Q3\"" })),
+      material: Type.Optional(Type.Boolean({ description: "false: the finish line may leave it open (default true)" })),
+      take: Type.Optional(Type.Boolean({ description: "Hold it yourself at once" })),
+      origin: Type.Optional(Type.String({ description: "Where it came from: E-<seq>, a post (main#52), another lead" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadOpen(ctxFrom(toolCtx.cwd, agentId), params);
+      return leadAnswer(toolCtx.cwd, "lead_open", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_claim",
+    label: "Claim a lead",
+    description:
+      "Take a lead: atomically, with a new generation, so two agents never hold one. A lead a peer holds stays theirs until they release it or show as stale (silent past the stale limit, with no job running and no compaction under way): the first claim of a stale lead marks it and tells the holder, and a claim after the grace period takes it over. A turn that ended in an error frees nothing.",
+    promptSnippet: "Take a lead from the register",
+    promptGuidelines: ["When your slice ends, take the ready lead the register ranks first (leads) rather than inventing work."],
+    parameters: Type.Object({ id: Type.String({ description: "L-<n>" }) }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadClaim(ctxFrom(toolCtx.cwd, agentId), params.id);
+      return leadAnswer(toolCtx.cwd, "lead_claim", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_release",
+    label: "Release a lead",
+    description: "Give a lead you hold back to the register, open for anyone, and say why (what you did, what is left). Never leave a lead active and silent: release it or close it.",
+    promptSnippet: "Give a lead back",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>" }),
+      why: Type.Optional(Type.String({ description: "What you did on it and what is left" })),
+      generation: Type.Optional(Type.Integer({ description: "The generation you hold it at, when you want the release refused if it changed hands" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadRelease(ctxFrom(toolCtx.cwd, agentId), params.id, { ...(params.why ? { why: params.why } : {}), ...(params.generation !== undefined ? { generation: params.generation } : {}) });
+      return leadAnswer(toolCtx.cwd, "lead_release", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_close",
+    label: "Close a lead",
+    description:
+      "Close a lead with how it ended and what that cites: resolved (ref E-<seq>, the entry that settles it), negative (ref E-<seq> of the absence, the search that found nothing), duplicate (ref L-<n>, the lead it repeats), deferred (ref E-<seq> of the limitation saying why it waits), infeasible (ref E-<seq> of the limitation naming the methods tried and why none worked), needs_operator (ref: in words, what only the operator can do: the host to allow, the file to add, the question to answer; the operator sees it and can answer and reopen it). The holder closes its own lead; an unheld one anyone may close. A lead closed on an entry that is later superseded or disputed reopens by itself.",
+    promptSnippet: "Close a lead with its disposition",
+    promptGuidelines: [
+      "Close every lead you hold with a disposition; a material lead left open holds the finish line.",
+      "Use needs_operator for anything outside the evidence and the allowlist (a host to reach, a file the run does not have, a question only a person can answer); never fetch it yourself.",
+    ],
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>" }),
+      disposition: Type.Union(LEAD_DISPOSITIONS.map((d) => Type.Literal(d)), { description: LEAD_DISPOSITIONS.join(" | ") }),
+      ref: Type.String({ description: "E-<seq>, L-<n>, or for needs_operator what the operator must do" }),
+      why: Type.Optional(Type.String({ description: "Anything a reader should know about how it ended" })),
+      generation: Type.Optional(Type.Integer({ description: "The generation you hold it at" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadClose(ctxFrom(toolCtx.cwd, agentId), params.id, { disposition: params.disposition, ref: params.ref, ...(params.why ? { why: params.why } : {}), ...(params.generation !== undefined ? { generation: params.generation } : {}) });
+      if (r.ok && params.disposition === "needs_operator") {
+        // The operator reads the board too: the request is said there once, with the command that answers it.
+        const answer = (r as { operator_request?: string }).operator_request;
+        await systemPost(toolCtx.cwd, { tag: "ask", via: agentId, body: `OPERATOR REQUEST on ${params.id} from ${agentId}: ${params.ref}${answer ? ` The operator answers with: ${answer}` : ""}` }).catch(() => undefined);
+      }
+      return leadAnswer(toolCtx.cwd, "lead_close", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_link",
+    label: "Revise a lead's needs",
+    description: "Revise what a lead waits for: add a need (L-<n>, L-<n>:<disposition>, E-<seq>) or remove one that will not come, so another route stays open. A loop of needs is refused. The holder revises its own lead; an unheld one, anyone.",
+    promptSnippet: "Add or drop a lead's need",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>" }),
+      add: Type.Optional(Type.Array(Type.String(), { description: "Needs to add" })),
+      remove: Type.Optional(Type.Array(Type.String(), { description: "Needs to drop" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadLink(ctxFrom(toolCtx.cwd, agentId), params.id, { ...(params.add ? { add: params.add } : {}), ...(params.remove ? { remove: params.remove } : {}) });
+      return leadAnswer(toolCtx.cwd, "lead_link", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "leads",
+    label: "Leads",
+    description:
+      "Read the lead register: summary (default: what is open by priority, yours, what is blocked on you, your jobs awaiting interpretation, the questions nobody holds a lead for), open, active, blocked, closed, mine or all (whole leads a page at a time; from: next for the rest), jobs (every job awaiting an interpretation), questions (the goal's questions, answered or not, and who covers them), or one lead by id (L-3) with its whole history. Priority is how many leads and unanswered questions wait on a lead, then its age. The rendered register is leads/leads.md.",
+    promptSnippet: "See the swarm's open work",
+    parameters: Type.Object({
+      view: Type.Optional(Type.String({ description: "summary | open | active | blocked | closed | mine | all | jobs | questions | L-<n>" })),
+      from: Type.Optional(Type.String({ description: "The lead id a previous page named as next" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadsView(ctxFrom(toolCtx.cwd, agentId), { ...(params.view ? { view: params.view } : {}), ...(params.from ? { from: params.from } : {}), pageChars: inboxPageChars() });
+      await logEvent(toolCtx.cwd, agentId, "leads", params as Record<string, unknown>, { ok: r.ok !== false, view: params.view ?? "summary", ...(Array.isArray(r.leads) ? { n: (r.leads as unknown[]).length, remaining: r.remaining } : {}) }, Date.now() - started).catch(() => undefined);
+      if (r.ok === false) return { content: [{ type: "text" as const, text: `leads refused: ${String(r.reason)}` }], details: r, isError: true };
+      return okResult(r);
     },
   });
 
@@ -2965,6 +3341,7 @@ export default function (pi: ExtensionAPI) {
       return okResult({
         inputs: true,
         source: manifest.source,
+        ...(manifest.sets?.length ? { sets: manifest.sets.map((set) => ({ name: set.name, path: `${set.path}/`, source: set.source, count: set.files, bytes: set.bytes })) } : {}),
         count: manifest.files.length,
         bytes: manifest.bytes,
         files: manifest.files.map((f) => ({ path: f.path, bytes: f.bytes, sha256: f.sha256.slice(0, 12) })),
@@ -2978,7 +3355,7 @@ export default function (pi: ExtensionAPI) {
     name: "done",
     label: "Done",
     description:
-      "Write done/agents/<id>.done, create done/SWARM_DONE if missing (idempotent), drop this worker's locks, and terminate the session.",
+      "Write done/agents/<id>.done, create done/SWARM_DONE if missing (idempotent), drop this worker's locks, and terminate the session. Before the sentinel the harness runs the goal's checks itself (in a microVM run on the host, where the trace they read is): while any fails, done is refused, and the refusal names each check that fails and what makes it pass.",
     promptSnippet: "Stop this worker and signal the swarm sentinel",
     promptGuidelines: [
       "Use done when the definition of done is met and its checks pass, or when done/SWARM_DONE already exists. done ends the whole swarm, not your slice: a finished slice is posted to the board, not done. When the task is impossible or unsafe, call done with abandon: true and say why.",
@@ -3038,18 +3415,35 @@ export default function (pi: ExtensionAPI) {
           ...(inputsCheck.digest_mismatch.length ? { digest_mismatch: inputsCheck.digest_mismatch } : {}),
         });
       }
-      // The finish line, before the sentinel: the operator's checks, run now.
-      // A done that would end the swarm with them failing is refused and told
-      // which check fails; an abandoned run says so in its reason.
+      // The finish line, before the sentinel: the operator's checks, run now
+      // (in a VM by the hub, on the host: board.ts). A done that would end
+      // the swarm with them failing is refused and told each check that
+      // fails; an abandoned run says so in its reason.
       let reasonPrefix = "";
+      let outcome: FinishOutcome | undefined;
       if (!(await swarmDoneExists(toolCtx.cwd))) {
-        const run = await runFinishLine(toolCtx.cwd).catch(() => null);
-        const verdict = finishLineVerdict(run, params.abandon === true);
+        // On the host the finish line is bound to the state it was run
+        // against (stateRevision: the board, the ledger, the review, the
+        // leads): run again while the state moves under it, and checked once
+        // more just before the sentinel. In a VM the hub does both, on the
+        // host's own files, when markDone reaches it.
+        const onHost = !boardSocket();
+        // An until-solved run ends only on every question answered; even a
+        // finish line that could not be run is a refusal there.
+        const untilSolved = (await readBudget(toolCtx.cwd).catch(() => null))?.until_solved === true;
+        const bound = onHost ? await runFinishLineBound(toolCtx.cwd, runFinishLine) : { run: await runFinishLine(toolCtx.cwd).catch(() => null), revision: "", settled: true, runs: 1 };
+        const unsettled = async () => {
+          await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: FINISH_LINE_UNSETTLED, runs: bound.runs }).catch(() => undefined);
+          return { content: [{ type: "text" as const, text: FINISH_LINE_UNSETTLED }], details: { ok: false, reason: FINISH_LINE_UNSETTLED }, isError: true };
+        };
+        if (!bound.settled) return unsettled();
+        const run = bound.run;
+        const verdict = finishLineVerdict(run, params.abandon === true, { untilSolved });
         await logEvent(toolCtx.cwd, agentId, "finish_line", { abandon: params.abandon === true }, {
           ok: verdict.proceed,
           total: run?.total ?? 0,
           passed: run?.passed ?? 0,
-          ...(verdict.proceed ? (verdict.note ? { note: verdict.note } : {}) : { failing: verdict.failing }),
+          ...(verdict.proceed ? { outcome: verdict.outcome, ...(verdict.note ? { note: verdict.note } : {}) } : { failing: verdict.failing }),
         }).catch(() => undefined);
         if (!verdict.proceed) {
           await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: verdict.reason }).catch(() => undefined);
@@ -3060,10 +3454,13 @@ export default function (pi: ExtensionAPI) {
           };
         }
         reasonPrefix = verdict.reasonPrefix ?? "";
+        outcome = verdict.outcome;
+        if (onHost && (await stateRevision(toolCtx.cwd).catch(() => ({ revision: "" }))).revision !== bound.revision) return unsettled();
       }
       const result = await markDone(ctxFrom(toolCtx.cwd, agentId), {
         reason: reasonPrefix + params.reason,
         outputFile: params.output_file,
+        ...(outcome ? { outcome } : {}),
       });
       if (!result.terminate) {
         // One agent's abandon while others work is a vote, not the end.
@@ -3087,6 +3484,7 @@ export default function (pi: ExtensionAPI) {
         reason: result.reason,
         output_file: result.output_file,
         created_sentinel: result.created_sentinel,
+        ...(result.outcome ? { outcome: result.outcome } : {}),
       });
       if (result.created_sentinel) {
         await systemPost(toolCtx.cwd, {
@@ -3103,6 +3501,13 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  /** A positive whole number of seconds from the environment, in milliseconds; undefined when unset or not one. */
+  function secondsFromEnv(name: string): number | undefined {
+    const raw = process.env[name]?.trim();
+    if (!raw || !/^\d+$/.test(raw) || Number(raw) <= 0) return undefined;
+    return Number(raw) * 1000;
+  }
+
   /**
    * What the harness knows at hand-off time, from files rather than from the
    * model's memory: the header the returned note travels under. Every read is
@@ -3110,13 +3515,14 @@ export default function (pi: ExtensionAPI) {
    */
   async function handoffFacts(cwd: string, id: string): Promise<HandoffFacts> {
     const sctx = ctxFrom(cwd, id);
-    const [claims, box, ledger, names, sentinel, status] = await Promise.all([
+    const [claims, box, ledger, names, sentinel, status, leads] = await Promise.all([
       listClaims(cwd).catch(() => []),
       readInbox(sctx, { markSeen: false }).catch(() => null),
       listLedger(cwd, { limit: 500 }).catch(() => []),
       readNames(cwd).catch(() => []),
       swarmDoneExists(cwd).catch(() => false),
       readBudgetStatus(sctx).catch(() => null),
+      leadsDigest(sctx, { mark: false }).catch(() => null),
     ]);
     const unread: Record<string, number> = {};
     for (const post of box?.posts ?? []) unread[post.thread] = (unread[post.thread] ?? 0) + 1;
@@ -3131,6 +3537,7 @@ export default function (pi: ExtensionAPI) {
       sentinel,
       spentUsd: status?.this_agent?.spent_usd ?? 0,
       capUsd: status?.budget.cap_per_agent_usd ?? undefined,
+      ...(leads ? { leads: leads.text } : {}),
     };
   }
 
@@ -3145,6 +3552,8 @@ export default function (pi: ExtensionAPI) {
       summaryModel: process.env.SWARM_COMPACT_MODEL?.trim() || undefined,
       specs,
       fromDefaults,
+      keepText: (cwd, text) => keepToolOutput(cwd, toolOutputRel(agentId, "compact_summary", "text"), text),
+      bounds: { summaryAttemptMs: secondsFromEnv("SWARM_COMPACT_SUMMARY_SEC"), compactionMs: secondsFromEnv("SWARM_COMPACT_TIMEOUT_SEC") },
     });
   }
 }

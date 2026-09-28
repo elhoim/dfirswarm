@@ -21,6 +21,6 @@
   "example": "{\"path\": \"work/extracted/AutomaticDestinations\", \"out_dir\": \"work/extracted/jumplinks\"}",
   "by": "maintainer",
   "at": "2026-09-22T09:00:00.000Z",
-  "version": 1,
-  "sha256": "5406c45cee2acb5f35b2ad4432a294ef81d627fe512b23dfa0f6a85ad83e34e0"
+  "version": 2,
+  "sha256": "fceaa8820cfbc7a327cfce608d35fcec52002482420263c431862f1a175372f7"
 }

@@ -46,36 +46,74 @@ The evidence is under `inputs/` (read-only; call `inputs` to list it):
 
 ## How to divide the work
 
-Seats are assigned in `SWARM.md` (change them on the board if you see a
-better split). The critic and editor verifies every citation before it goes
-into `work/report.md`, assembles the report from the seats' notes and the
-ledger, and posts the sign-off the definition of done requires. The timeline
-seat builds `work/timeline.md` from `ledger/ledger.md`. Do not all run the
-same command on the same image: read the catalog and the board first.
+Nobody has been given a job. Read the goal and the evidence catalog, see on
+the board what your peers have taken, decide what you are going to do, and
+call `name(name, doing)` to say what to call you and what you are taking on. Fill what nobody has taken; if two of you want the same thing,
+settle it in a post. Say so again when you change course.
 
-## Seats
+Somebody has to keep the timeline from `ledger/ledger.md`, and somebody has to
+assemble `work/report.md` from the answers in the ledger. Agree between you
+who does, early, because the run is not finished until both exist. Do not all
+run the same command on the same image: read the catalog and the board first.
 
-This case is three investigations in one image, so it runs nine seats. Take
-the one `SWARM.md` gives you and say on the board what you are doing; if two
-seats collide on a file, the one that owns it keeps it.
+**Report author and critic.** Two of you take these roles early with
+`name(doing=…)`, and they are different agents. The report author writes the
+answers from the ledger, not from memory: compact first, read `ledger`, then
+one `record(kind=answer)` per question (`section=question:<n>`) and one each
+for `summary` and `narrative`, citing `E-<seq>` for every claim and stating
+the confidence and its reason, the contrary evidence, the limitations, what
+else could explain it and what would change the answer. When the ledger cannot
+answer, reopen the investigation and say so on the board. The critic
+re-derives each finding an answer rests on from its sealed refs and records
+`attest` (what was re-derived, what only read) or `dispute` (why), then does
+the same for every answer. The critic writes no answer; the author attests
+nothing of their own. The sign-off is these acts, not a post. Nothing else is
+assigned.
 
-- Disk and file system: partitions and volumes (including the R2D2 volume and any BitLocker metadata `mmls`/`fsstat` reveal), $MFT, the file list, deleted entries; owns `work/disk.md`.
-- Recovery from file system journals: $LogFile, $UsnJrnl, volume shadow copies and unallocated space, for earlier copies of anything encrypted later; owns `work/recovery.md`.
-- Browser and application caches: browsers, mail, messaging and cloud clients, their caches, histories and databases, for the communication behind part 1; owns `work/caches.md`.
-- Registry and execution: SYSTEM/SOFTWARE/SAM/NTUSER, prefetch, shimcache, amcache, jump lists, LNK, scheduled tasks and services, to say what was run and when; owns `work/artifacts.md`.
-- Shell and user activity: PowerShell and cmd history, console host history, RunMRU, typed paths, recent documents, the Downloads and Documents folders as the user left them; owns `work/user-activity.md`.
-- BitLocker and volume encryption (part 2): the R2D2 volume, its recovery key or password wherever it was kept (registry, a printed key file, the user's own notes, Active Directory artefacts), the decryption itself, and what is inside; says exactly what this host cannot do; owns `work/bitlocker.md`.
-- Key material and cryptography (parts 1 and 3): the key pair and the keys file in Downloads, AES and OpenSSL/GPG artefacts, the decryption of the README and of the message, with the commands that prove each; owns `work/crypto.md`.
+**Leads.** The work you find along the way goes in the lead register. Before
+you start work a peer could also be doing, read `leads` and claim the lead
+that covers it (`lead_claim`), or open one (`lead_open`); keep the follow-up of
+your own finding with `take: true`, or give it with `record(..., opens: [...])`.
+Say in `needs` what a lead waits for (a lead's outcome, or an entry), and its
+holder is woken when it comes. Interpret every job you run: the entry that
+says what its output shows names it in `interprets`, and a page that left
+bytes unread is read to its end or its `rest` explained. When your slice ends,
+take the ready lead the header ranks first, or a question nobody holds a lead
+for. Close every lead you hold with its disposition, and never leave one
+active and silent. Anything outside the evidence and the allowlist (a host to
+reach, a file the run does not have, a question only a person can answer) is
+`needs_operator`: close the lead so, saying what the operator must do, and the
+operator answers on it. The critic also reviews each lead dropped or deferred,
+by attesting or disputing the entry it cites.
+
+## Areas of the case
+
+This case is three investigations in one image. These are the areas it spans,
+as suggestions for dividing it; nobody is given one. Say on the board what you
+take (`name(doing=…)`), post the work you find and cannot take on yourself,
+and when two of you want the same file, settle it in a post.
+
+- Disk and file system: partitions and volumes (including the R2D2 volume and any BitLocker metadata `mmls`/`fsstat` reveal), $MFT, the file list, deleted entries; notes in `work/disk.md`.
+- Recovery from file system journals: $LogFile, $UsnJrnl, volume shadow copies and unallocated space, for earlier copies of anything encrypted later; notes in `work/recovery.md`.
+- Browser and application caches: browsers, mail, messaging and cloud clients, their caches, histories and databases, for the communication behind part 1; notes in `work/caches.md`.
+- Registry and execution: SYSTEM/SOFTWARE/SAM/NTUSER, prefetch, shimcache, amcache, jump lists, LNK, scheduled tasks and services, to say what was run and when; notes in `work/artifacts.md`.
+- Shell and user activity: PowerShell and cmd history, console host history, RunMRU, typed paths, recent documents, the Downloads and Documents folders as the user left them; notes in `work/user-activity.md`.
+- BitLocker and volume encryption (part 2): the R2D2 volume, its recovery key or password wherever it was kept (registry, a printed key file, the user's own notes, Active Directory artefacts), the decryption itself, and what is inside; says exactly what this host cannot do; notes in `work/bitlocker.md`.
+- Key material and cryptography (parts 1 and 3): the key pair and the keys file in Downloads, AES and OpenSSL/GPG artefacts, the decryption of the README and of the message, with the commands that prove each; notes in `work/crypto.md`.
 - Timeline and ledger: records every dated event peers report with `record kind=event` and writes `work/timeline.md` from `ledger/ledger.md`.
-- Critic and editor: verifies every citation, challenges weak claims on the board, assembles `work/report.md` and posts the sign-off.
+- Report author and critic: two agents, as above; the author assembles `work/report.md` from the answers, and the critic also challenges weak claims on the board.
 
 ## Definition of done
 
-`work/report.md` exists, answers every question under headings `## 1.`, `## 2.`, `## 3.`, `## 4.`, `## 5.`,
-every answer cites evidence, the critic has posted a sign-off on the board as a `result`
-post that starts a line with `SIGN-OFF:` and names what they verified, `work/timeline.md` holds the merged timeline as a
-table with at least 15 dated rows built from the ledger, the ledger holds
-the dated events the timeline rests on, and `inputs/` is unchanged.
+`work/report.md` exists, answers every question under headings `## 1.`,
+`## 2.`, `## 3.`, `## 4.`, `## 5.`, every answer cites evidence, the ledger
+holds one `answer` entry per question (`question:1` to `question:5`) and one
+each for `summary` and `narrative`, with every defect the answers check names
+fixed or named by a limitation, and the critic, who wrote none of them, has
+recorded `attest` or `dispute` on each answer, saying what they verified,
+`work/timeline.md` holds the merged timeline as a table with at least 15 dated
+rows built from the ledger, the ledger holds the dated events the timeline
+rests on, and `inputs/` is unchanged.
 
 ## Checks
 
@@ -84,7 +122,7 @@ the dated events the timeline rests on, and `inputs/` is unchanged.
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 15`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 5`
-- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for

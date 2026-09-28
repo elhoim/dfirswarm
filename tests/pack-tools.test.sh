@@ -130,6 +130,21 @@ raise SystemExit(1 if bad else 0)
 EOF
 pass "every shipped tool manifest carries the hash of its entry script, so none is silently left out"
 
+# --- every shipped pack seals clean, and is checked in sealed --------------------
+# A skill that calls a program no pack of its dependency set declares is a
+# warning at seal: the mobile pack's iOS unified-log method still named the
+# retired UnifiedLogReader.py after the macOS pack replaced it with
+# unifiedlog_iterator. Sealed again from a copy (its dependencies beside it),
+# each pack says nothing, and its pack.json is the one checked in.
+cp -R "$ROOT/packs" "$WORK/sealed"
+for d in "$WORK/sealed"/*/; do
+  id="$(basename "$d")"
+  said="$(bash "$ROOT/scripts/pack.sh" seal "$d" 2>&1 >/dev/null)" || fail "packs/$id does not seal: $said"
+  [[ -z "$said" ]] || fail "packs/$id seals with a warning: $said"
+  [[ "$(jq -S . "$d/pack.json")" == "$(jq -S . "$ROOT/packs/$id/pack.json")" ]] || fail "packs/$id is not checked in as sealed: seal it"
+done
+pass "every shipped pack seals without a warning, and is checked in as sealed"
+
 # --- mft_records: a synthetic $MFT built from the documented layout ----------
 "$PY" - "$WORK/MFT" <<'EOF' || fail "could not build the synthetic \$MFT"
 import struct, sys, datetime
@@ -401,6 +416,75 @@ plaso work/p >/dev/null || fail "timeline_super refused an out_dir under work/"
 cmp -s "$BASE/tools/file_carver/run.py" "$ROOT/tool-library/file_carver/run.py" || fail "the tool-library copy of file_carver has drifted from the pack's"
 pass "file_carver, mem_carve and timeline_super write under the run directory and never under inputs/"
 
+# feature_scan, zeek_run, sigma_hunt, unified_log and doc_probe wrote wherever
+# out_dir (extract_to) pointed too. Each refuses a place outside the run, the
+# run itself or under inputs/ before it looks for its program, and follows a
+# link to where it really lands. Only python3 on PATH, so no program is found
+# and a path the check lets through ends at "not on PATH", never at the check.
+mkdir -p "$OUT/pyonly"; ln -sf "$(command -v "$PY")" "$OUT/pyonly/python3"
+ln -s "$OUT" "$OUT/run/work/out-link"
+guarded() { # <run.py> <key> <path>
+  (cd "$OUT/run" && printf '{"path":"inputs/blob.bin","%s":"%s"}' "$2" "$3" | PATH="$OUT/pyonly" "$OUT/pyonly/python3" "$1")
+}
+refuses='must stay inside the run directory|cannot be under inputs/'
+for t in "$BASE/tools/feature_scan:out_dir" "$ROOT/packs/network-forensics/tools/zeek_run:out_dir" \
+         "$WIN/tools/sigma_hunt:out_dir" "$ROOT/packs/macos-forensics/tools/unified_log:out_dir" \
+         "$ROOT/packs/reverse-engineering/tools/doc_probe:extract_to"; do
+  tool="${t%%:*}/run.py"; key="${t##*:}"; name="$(basename "${t%%:*}")"
+  for bad in "../escaped-$name" "inputs/planted-$name" "work/../inputs/planted-$name" "$OUT/abs-$name" \
+             "work/out-link/escaped-$name" . inputs; do
+    got="$(guarded "$tool" "$key" "$bad" 2>&1)" && fail "$name wrote $key=$bad: $got"
+    grep -Eq "$refuses" <<<"$got" || fail "$name should refuse $key=$bad with the reason, not: $got"
+  done
+  got="$(guarded "$tool" "$key" "work/$name" 2>&1)"
+  grep -Eq "$refuses" <<<"$got" && fail "$name refused $key=work/$name: $got"
+done
+leaked="$(find "$OUT" -path "$OUT/run/work" -prune -o \( -name 'escaped*' -o -name 'planted*' -o -name 'abs*' \) -print)"
+[[ -z "$leaked" ]] || fail "a refused output was still written: $leaked"
+# doc_probe checks each part it extracts as well: a link left in extract_to,
+# named as the macro project would be, is not written through.
+"$PY" - "$OUT/run/work/macro.docm" <<'EOF'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    z.writestr("word/document.xml", "<w:document/>")
+    z.writestr("word/vbaProject.bin", b"\xd0\xcf\x11\xe0 macro project")
+EOF
+docp() { (cd "$OUT/run" && printf '{"path":"work/macro.docm","extract_to":"%s"}' "$1" | "$PY" "$ROOT/packs/reverse-engineering/tools/doc_probe/run.py"); }
+docp work/doc > "$OUT/doc.json" || fail "doc_probe did not extract into work/: $(cat "$OUT/doc.json")"
+[[ "$(jq -r '.parts[] | select(.carries_code) | .extracted_to' "$OUT/doc.json")" == work/doc/000001-word_vbaProject.bin && -s "$OUT/run/work/doc/000001-word_vbaProject.bin" ]] \
+  || fail "doc_probe should extract the macro project under extract_to: $(cat "$OUT/doc.json")"
+mkdir -p "$OUT/run/work/doc2"; ln -s ../../inputs/planted-part "$OUT/run/work/doc2/000001-word_vbaProject.bin"
+docp work/doc2 > "$OUT/doc2.json" 2>&1 && fail "doc_probe wrote through a link in extract_to: $(cat "$OUT/doc2.json")"
+grep -q 'cannot be under inputs/' "$OUT/doc2.json" && [[ ! -e "$OUT/run/inputs/planted-part" ]] || fail "doc_probe should refuse the part a link sends under inputs/: $(cat "$OUT/doc2.json")"
+pass "feature_scan, zeek_run, sigma_hunt, unified_log and doc_probe write under the run directory, never under inputs/ or through a link out of it"
+
+# The tools that keep their whole result in an out_file or an out_dir of the
+# caller's naming wrote there unchecked as well: cloud, macOS, triage, network
+# and Linux. The same refusals, before anything is read or run.
+more() { # <run.py> <key> <path>
+  (cd "$OUT/run" && printf '{"path":"inputs/blob.bin","source":"inputs/blob.bin","db":"inputs/blob.bin","rules":"inputs/blob.bin","root":"inputs","%s":"%s"}' "$2" "$3" \
+    | PATH="$OUT/pyonly" "$OUT/pyonly/python3" "$1")
+}
+n=0
+for t in cloud-forensics/cloudtrail_parse:out_file cloud-forensics/signin_analyse:out_file cloud-forensics/ual_parse:out_file \
+         macos-forensics/fsevents_parse:out_file macos-forensics/knowledgec_query:out_file macos-forensics/plist_read:out_file \
+         triage-collection/collection_index:out_file network-forensics/network_log_summary:out_dir \
+         network-forensics/pcap_extract:out_dir network-forensics/pcap_summary:out_dir network-forensics/suricata_run:out_dir \
+         linux-forensics/linux_triage:out_dir; do
+  tool="$ROOT/packs/${t%%/*}/tools/$(basename "${t%%:*}")/run.py"; key="${t##*:}"; name="$(basename "${t%%:*}")"
+  for bad in "../escaped-$name" "inputs/planted-$name" "work/../inputs/planted-$name" "$OUT/abs-$name" \
+             "work/out-link/escaped-$name" . inputs; do
+    got="$(more "$tool" "$key" "$bad" 2>&1)" && fail "$name wrote $key=$bad: $got"
+    grep -Eq "$refuses" <<<"$got" || fail "$name should refuse $key=$bad with the reason, not: $got"
+  done
+  got="$(more "$tool" "$key" "work/more-$name" 2>&1)"
+  grep -Eq "$refuses" <<<"$got" && fail "$name refused $key=work/more-$name: $got"
+  n=$((n + 1))
+done
+leaked="$(find "$OUT" -path "$OUT/run/work" -prune -o \( -name 'escaped*' -o -name 'planted*' -o -name 'abs*' \) -print)"
+[[ -z "$leaked" ]] || fail "a refused output was still written: $leaked"
+pass "the $n tools that keep a whole result in an out_file or out_dir write it under the run directory, never under inputs/ or through a link out of it"
+
 # --- sigma_hunt speaks the Zircolite the images carry ----------------------------
 # Zircolite 3 dropped --noexternal and refuses it, as argparse does any flag
 # it does not know; sigma_hunt passed it, so with Zircolite in the disk image
@@ -417,9 +501,24 @@ ap.add_argument("-e", "--evtx", "--events")
 ap.add_argument("-o", "--outfile")
 ap.add_argument("-r", "--ruleset", action="append", nargs="+")
 a = ap.parse_args()
-json.dump([{"title": "Bitsadmin Download", "id": "r1", "rule_level": "high", "matches": [
+import os, sys
+# SIGMA_STUB_MANY: that many rules fire, each on a record of 15 fields, and the
+# engine talks at length on both streams. SIGMA_STUB_FAIL: it writes no result.
+many = int(os.environ.get("SIGMA_STUB_MANY") or 0)
+if many or os.environ.get("SIGMA_STUB_FAIL"):
+    sys.stdout.write("o" * 3000 + "\n")
+    sys.stderr.write("e" * 5000 + "\n")
+if os.environ.get("SIGMA_STUB_FAIL"):
+    sys.exit(1)
+rules = [{"title": "Bitsadmin Download", "id": "r1", "rule_level": "high", "matches": [
     {"SystemTime": "2026-09-01T10:00:00Z", "EventID": 59, "Channel": "Microsoft-Windows-Bits-Client/Operational",
-     "Computer": "WS01", "EventRecordID": 7}]}], open(a.outfile, "w"))
+     "Computer": "WS01", "EventRecordID": 7}]}]
+for i in range(many):
+    match = {"SystemTime": "2026-09-01T11:%02d:00Z" % (i % 60), "EventID": 4688, "Channel": "Security",
+             "Computer": "WS01", "EventRecordID": 100 + i}
+    match.update({"Field%02d" % k: "v%d" % k for k in range(10)})
+    rules.append({"title": "Rule %02d" % i, "id": "m%d" % i, "rule_level": "medium", "matches": [match]})
+json.dump(rules, open(a.outfile, "w"))
 ZC
 chmod +x "$SH/bin/zircolite"
 out="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/hunt", "engine": "zircolite"}' | PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)" \
@@ -432,7 +531,48 @@ assert "--noexternal" not in d.get("command", ""), d
 det = d["detections"][0]
 assert det["rule"] == "Bitsadmin Download" and det["record_id"] == 7 and det["level"] == "high", det
 ' "$out" || fail "sigma_hunt did not read what Zircolite matched: $out"
-pass "sigma_hunt runs Zircolite without --noexternal, which Zircolite 3 and later refuse, and reads its detections"
+# The engine writes its result inside out_dir: a link left there under the
+# result's name is followed to where it lands, and refused under inputs/.
+mkdir -p "$SH/run/inputs" "$SH/run/work/hunt2"; ln -s ../../inputs/planted.json "$SH/run/work/hunt2/zircolite.json"
+out="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/hunt2", "engine": "zircolite"}' | PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)" \
+  && fail "sigma_hunt let its engine write through a link in out_dir: $out"
+grep -q 'cannot be under inputs/' <<<"$out" && [[ ! -e "$SH/run/inputs/planted.json" ]] || fail "sigma_hunt should refuse a result a link sends under inputs/: $out"
+pass "sigma_hunt runs Zircolite without --noexternal, which Zircolite 3 and later refuse, and reads its detections, and never through a link out of out_dir"
+
+# Nothing cut: every field of a matched record (it kept the first 12), every
+# rule that fired (it kept 25), and the engine's own stdout and stderr whole
+# in files it names (they were dropped on success and cut to their last 400
+# and 800 characters on failure). Past limit the detections are a page, and
+# all of them are in detections.jsonl.
+out="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/many", "engine": "zircolite", "limit": 5}' \
+  | SIGMA_STUB_MANY=40 PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)" || fail "sigma_hunt over forty rules: $out"
+"$PY" - "$out" "$SH/run" <<'EOF' || fail "sigma_hunt cut what the engine gave it: $out"
+import hashlib, json, os, sys
+d, run = json.loads(sys.argv[1]), sys.argv[2]
+# forty rules and the one the stand-in always fires
+assert d["detection_count"] == 41 and d["returned"] == 5 and d["truncated"], d
+assert len(d["rules_that_fired"]) == 41 and d["rules_fired"] == 41, d["rules_that_fired"]
+wide = [x for x in d["detections"] if x["rule"].startswith("Rule ")]
+assert wide and all(len(x["detail"]) == 15 for x in wide), d["detections"]
+def named(ref):
+    data = open(os.path.join(run, ref["path"]), "rb").read()
+    assert ref["bytes"] == len(data) and ref["sha256"] == hashlib.sha256(data).hexdigest(), ref
+    return data
+rows = [json.loads(l) for l in named(d["all_detections"]).decode().splitlines()]
+assert len(rows) == 41 == d["all_detections"]["rows"], len(rows)
+assert sum(1 for r in rows if len(r["detail"]) == 15) == 40, rows
+assert named(d["engine_stdout"]).count(b"o") == 3000 and named(d["engine_stderr"]).count(b"e") == 5000
+EOF
+out="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/failed", "engine": "zircolite"}' \
+  | SIGMA_STUB_FAIL=1 PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)" && fail "an engine that wrote no result should fail the tool: $out"
+"$PY" - "$out" "$SH/run" <<'EOF' || fail "sigma_hunt cut the failed engine's words: $out"
+import json, os, sys
+d, run = json.loads(sys.argv[1]), sys.argv[2]
+assert "wrote no result file" in d["error"], d
+assert os.path.getsize(os.path.join(run, d["stderr"]["path"])) == d["stderr"]["bytes"] == 5001, d["stderr"]
+assert os.path.getsize(os.path.join(run, d["stdout"]["path"])) == d["stdout"]["bytes"] == 3001, d["stdout"]
+EOF
+pass "sigma_hunt keeps every field, every rule and every detection, and the engine's stdout and stderr whole in files it names"
 
 # --- unified_log hands the reader one archive and keeps its whole output --------
 # The 2020 UnifiedLogReader crashed on modern archives and the wrapper still
@@ -483,6 +623,11 @@ r = json.load(open(sys.argv[1]))
 assert r["status"] == "partial" and r["exit_code"] == 101 and r["entry_count"] == 3, r
 assert os.path.getsize(sys.argv[2] + "/" + r["stderr"]) == r["stderr_bytes"] > 5000, r
 ' "$UL/c.json" "$UL/run" || fail "a failed reader is partial, with its whole stderr kept"
-pass "unified_log hands unifiedlog_iterator one archive (a /private/var/db copy staged as one), keeps the whole JSONL, and fails when the reader does"
+# A link left in out_dir under the name of the reader's output is followed to
+# where it lands, and refused under inputs/.
+mkdir -p "$UL/run/inputs" "$UL/run/work/d"; ln -s ../../inputs/planted.jsonl "$UL/run/work/d/unifiedlogs.jsonl"
+ulog x.logarchive d > "$UL/d.json" && fail "unified_log wrote through a link in out_dir: $(cat "$UL/d.json")"
+grep -q 'cannot be under inputs/' "$UL/d.json" && [[ ! -e "$UL/run/inputs/planted.jsonl" ]] || fail "unified_log should refuse an output a link sends under inputs/: $(cat "$UL/d.json")"
+pass "unified_log hands unifiedlog_iterator one archive (a /private/var/db copy staged as one), keeps the whole JSONL, fails when the reader does, and never writes through a link out of out_dir"
 
 echo "pack-tools: all checks passed"

@@ -76,7 +76,9 @@ what was deferred until the first CTF round is listed at the end.
    job that named a peer's scratch, as its agent could see it, then failed.
    Parity with the brain was agreed with Codex after that run: read-only
    material is still readable and interpretable, and the record says it is
-   live.
+   live. Since 2026-09-27 that is the view of a job that declares nothing;
+   one that declares what it reads is given only that ("A job sees what it
+   declared", below).
 4. **The store.**
    - A committed job's output is `store/jobs/<id>/out/`: links, FIFOs,
      sockets and devices recorded and left out, names kept as bytes, files
@@ -123,7 +125,8 @@ what was deferred until the first CTF round is listed at the end.
   agent that produced it.
 - Worker VMs cost a boot per job: about half a second on the Mac with the
   full image, plus 0.2 s for the process that makes it. They count against
-  the host's capacity with the seats (`--workers`, default 2).
+  the host's capacity with the seats (`--workers`, default 2; more on a
+  large host, below).
 - A host run and `--no-jobs` keep the previous behaviour: the kickoff builds
   the catalogue before the agents start, with the same recipes.
 - APFS refuses a name that is not UTF-8: on a Mac, a worker cannot write
@@ -169,9 +172,145 @@ After the review:
 - **A dedicated catalog agent**: not built. `catalog_request` was used 1,
   1, 0 and 0 times, and no experimental recipe was written. A
   harness-appointed agent would also be a role the harness assigns.
-- **A short-job lane**: after the four-worker default is measured, and only
-  with job_run text asking for a declared short timeout. Short jobs queued
-  up to p95 189 s behind long ones on the confirmation run.
+
+## A job sees what it declared, and a brain's own output a finding cites is sealed (2026-09-27)
+
+Agreed with Fable and Astra over two rounds (D3 and D4 of the plan that also
+brought ledger version 4). Point 3 gave every job what its brain sees, and
+the record said what it could reach, not what it read. A finding could rest
+on a job whose reach was the whole run, and on a file in an agent's own
+tool-output/ that the agent could still rewrite.
+
+- **Three scopes, kept apart.** `inputs` left out is `default-all`,
+  `["all"]` is `all`, and a list, an empty one too, is `declared`. The spec,
+  `job_accepted` and `job_started` keep which; a job accepted before reads
+  as `default-all`. A list is resolved when the job is submitted: the
+  evidence through `inputs.json` and the set it belongs to (never a flat
+  `inputs/`), the store through its sealed manifests, a generation through
+  its record, an agent's file by lstat. One entry that does not resolve
+  refuses the job, with the reason and what to declare instead. Nothing
+  widens a scope to fit it.
+- **Segment sets come from the census's record.** The census writes every
+  segment set it saw into `catalog/plan.json` (`collections`, planned or
+  not), the store journals each as `input_collection`, and a job that
+  declares one member is given the rest; inputs.json may list collections of
+  its own. The harness knows no format. A hive's transaction logs or a tar's
+  own index come with a declared directory, or are named.
+- **A view per job.** The hub builds it beside the job's staging directory,
+  outside every VM, and mounts it at the run's path, read-only, with its
+  evidence no-exec.
+  - A declared directory of the evidence, a job's whole output or a
+    generation is bound whole, up to eight per job.
+  - So is an evidence set, or any directory of it, whose every name in
+    inputs.json is in the scope: the common set of one image, or of one
+    image's segments, is bound as it is, and scope.json says why. The
+    kickoff's recipes and the derived passes take the same rule.
+  - Only a scope that covers part of a set is given file by file. A file of
+    the evidence is cloned from a descriptor (APFS clonefile, a reflink).
+    Where the file system cannot clone, it is linked from the one copy the
+    hub makes of it for the run, checked against inputs.json; with no room
+    for that copy the job is refused, with the reason.
+  - A file of the store is linked, cloned or copied.
+  - An agent's file or directory (work/, tool-output/) is cloned or copied
+    from a descriptor opened without following a link, the path held to the
+    same inode afterwards, and hashed: the job reads that snapshot while the
+    live file goes on changing. A link under a declared directory is named
+    and left out.
+  - Never a hard link to the evidence (its link count and ctime are the
+    examiner's, and the inputs guard counts a second name) and never to live
+    scratch.
+  - `tools/` and the packs are mounted as code, `$OUT` and `/job` writable.
+  - No parent directory is mounted that would show a sibling.
+- **Recorded apart.** `store/jobs/<id>/scope.<attempt>.json` holds what was
+  declared (as said), what it expanded to (each object, what the record says
+  of it, and why it is there) and what the worker could reach (each file of
+  the view, how it got there, its sha256 and where that sha256 comes from).
+  Its sha256 is on `job_started`, and custody holds the manifest to it and
+  counts the jobs by scope: "declared scope enforced; reads within it not
+  observed".
+- **The binding is checked.** `vm.ts` holds every share before msb binds
+  it: plain absolute paths, a directory, the view's device and inode as the
+  hub built it, a view holding only directories and regular files, and a
+  descriptor on each so its inode cannot be reused meanwhile. After the VM
+  is made, before anything runs, each is checked again. A substitution in
+  between leaves the job not run.
+- **An import is a declared job of its source.** The worker copies the
+  hub's snapshot, and the record says so (`copied_live: false`).
+- **Observation stays open.** What a job read within its scope is not
+  observed. A prototype observes opens with fanotify inside the worker
+  (`scripts/job-observe.py` and `scripts/job-observe.ts`, on with
+  `SWARM_JOB_OBSERVE=fanotify-experimental`, off by default): the job runs
+  unprivileged, the collector keys its log, a canary must be seen, and
+  dropped events, an unmarked mount or a stall read as partial, a dead
+  collector, a forged line or no fanotify as unknown, never complete. It was
+  written without booting a VM and is untested in one. Its acceptance tests
+  (`tests/job-observe-vm.test.ts`) run on the host's own kernel and
+  virtio-fs; until they pass, nothing it says is evidence. LD_PRELOAD, or a
+  log the job could write, never is.
+- **A brain's own output a finding cites is sealed.** `tool:<seat>/<file>`
+  names a whole output the harness kept under tool-output/<seat>/, and
+  `trace:<sha256>` one line of the trace.
+  - Either is found on the chained trace: the line attributed by the
+    collector to that seat, whose result names the file with its sha256, or
+    the line with that hash. Either line must be on the chain.
+  - The bytes are hashed at once and refused when they differ from the
+    trace's digest.
+  - An import job over the hub's snapshot, checked against the digest again
+    at its start, seals them. `store/imports/<job>/` publishes them with the
+    trace provenance (seat, tool, the tool's sha256 where the line records
+    one, args, both clocks, the line) and a `brain_output_sealed` line.
+  - The record cites `import:<job>/<file>` in its place.
+  - What the trace did not capture is not sealed: the work is run again as a
+    job. `catalog_search` needs no seal: its `member:` is cited.
+
+## Lanes, room on the host, and the image a job that names none runs in (2026-09-27)
+
+In the three runs after the basic flow (s306463, s2a59b2, s6895a8; three
+runs at once on the 128 GiB Mac, the kickoff fitting 3, 2 and 2 workers),
+the queue waited p95 16, 106 and 85 s (max 180, 143, 156 s), though 231 of
+236, 68 of 69 and 85 of 89 jobs ran in two minutes or less; a worker boots
+in about half a second. Replayed over those arrivals and run times, 4
+workers put the p95 wait at 0-2 s and 6 at 0 s.
+
+- **More workers where they fit**: unset, 6 on a host with 128 GiB or
+  more, 4 with 64 GiB or more, 2 otherwise; the kickoff's capacity check
+  still lowers the default to what fits beside the seats.
+- **A lane for short jobs**: from 3 workers one is kept for an agent's job
+  that declares `timeout_seconds` of 120 or less, and it is stopped there,
+  so a long job cannot hold that worker by claiming otherwise. Such a job
+  may take any free worker; an agent's other jobs and the kickoff's recipes
+  take the rest; the derived catalogue stays the lowest lane. An agent's
+  limit of running jobs counts each lane apart, so its quick look does not
+  wait behind its own long parse. With 2 workers none is kept: replayed,
+  keeping one put the longer jobs' p95 wait at 354-1951 s against
+  71-210 s. job_run and SWARM.md ask for the short timeout; only 31 of 236,
+  8 of 69 and 8 of 89 jobs declared one, so the lane is only as good as
+  that text. `job_started` names the lane, so the wait is measured per lane
+  (target: p95 under 10 s).
+- **Room on the host**: a worker starts only while the host keeps 15% of
+  its memory free beside it (Linux's MemAvailable; macOS's memory-status
+  level), asked before each start, since runs share a host and the kickoff
+  fitted its workers once. Until then the job waits, said once on the
+  journal (`job_waits_for_host`), and its `job_started` carries the wait.
+- **The queue counts what it handed a worker**: an agent's limit and the
+  derived lane's one-at-a-time counted jobs whose `job_started` line was
+  written, and a job picked a moment earlier was not one yet, so one pass
+  of the queue could start them all. The derived catalogue then ran two
+  recipes at once past a ceiling of one generation (a test that timed out
+  on a Linux runner). The count is now of the jobs handed a worker, and one
+  pass of the queue runs at a time.
+- **A command that names no profile** (61 of 236, 16 of 71, 12 of 90 in
+  those runs, all in the image that holds every pack) runs in the smallest
+  job image whose own record holds every program it runs: the first word of
+  each simple command, and every word naming a program some image holds and
+  another does not (a program run through timeout, xargs or `bash -c`).
+  Whenever that is not sure — a heredoc, a quoted script, an import, a
+  program named by an expansion or a path, a file of the agents' scratch —
+  the job keeps the default image; `job_started` says which image and why.
+  The records are the images' own: install.py now writes `on_path`, every
+  program on the image's PATH, beside `binaries`, the packs' programs. An
+  image built before lists only the packs' programs, so a command that
+  runs a shell utility keeps the default until the images are rebuilt.
 
 ## The agents boot the base; the programs are in the job images (2026-09-26)
 

@@ -957,6 +957,42 @@ test("the six kickoff switches the form gained: validated, and mapped to the fla
   }
 });
 
+test("several input sets: names in a list, each checked, one --inputs each, and the rest of the flags for all of them", () => {
+  const base = { model: "a/b", cap_usd: 1, n: 1, isolation: "host" };
+  // A list of one is one set, sent and resolved as it always was.
+  const one = validateStart({ ...base, inputs: ["0:brief"] });
+  assert.ok(one.ok && one.params.inputs === "0:brief" && one.params.inputs_sets === undefined);
+  const two = validateStart({ ...base, inputs: ["0:brief", "1:images"], inputs_attach: "bind", inputs_enforce: "on", inputs_max_files: 10, inputs_dirs: ["/etc", "/root"] });
+  assert.ok(two.ok, two.ok ? "" : two.error);
+  if (two.ok) {
+    assert.equal(two.params.inputs, "0:brief");
+    assert.deepEqual(two.params.inputs_sets, ["0:brief", "1:images"]);
+    assert.equal(two.params.inputs_dirs, undefined, "the server resolves the sets; a client's paths are ignored");
+    assert.ok(!startArgv(two.params).includes("--inputs"), "no --inputs until the server resolved every set");
+    two.params.inputs_dirs = ["/srv/a/brief", "/srv/b/images"];
+    two.params.inputs_dir = "/srv/a/brief";
+    const argv = startArgv(two.params);
+    assert.deepEqual(argv.slice(argv.indexOf("--inputs"), argv.indexOf("--inputs") + 8), ["--inputs", "/srv/a/brief", "--inputs", "/srv/b/images", "--inputs-bind", "--inputs-enforce", "on", "--inputs-max-files"]);
+    assert.equal(argv.filter((a) => a === "--inputs").length, 2);
+  }
+  // Each name is a set; none twice; no two landing at one inputs/<name>/; no image with several.
+  assert.equal(validateStart({ ...base, inputs: ["0:brief", "../etc"] }).ok, false);
+  assert.equal(validateStart({ ...base, inputs: ["0:brief", 7] }).ok, false);
+  const twice = validateStart({ ...base, inputs: ["brief", "0:brief"] });
+  assert.ok(!twice.ok && /twice/.test(twice.error), "a bare name is root 0's");
+  const clash = validateStart({ ...base, inputs: ["0:Case", "1:case"] });
+  assert.ok(!clash.ok && /inputs\/case\//.test(clash.error), "two roots' sets of one name would be one directory, whatever the case");
+  assert.equal(validateStart({ ...base, inputs: ["0:brief", "1:images"], inputs_image: "0:brief/laptop.dmg" }).ok, false, "an image is one set's");
+  // In a VM run, copy (the form's default) says so once, for every set.
+  const vm = validateStart({ model: "a/b", cap_usd: 1, n: 1, inputs: ["0:brief", "1:images"] });
+  assert.ok(vm.ok);
+  if (vm.ok) {
+    vm.params.inputs_dirs = ["/srv/a/brief", "/srv/b/images"];
+    vm.params.inputs_dir = "/srv/a/brief";
+    assert.equal(startArgv(vm.params).filter((a) => a === "--inputs-copy").length, 1);
+  }
+});
+
 test("tools_from and no_read name runs; the server turns them into directories, or refuses", async () => {
   const start = (extra: Record<string, unknown>) =>
     post<{ id: string }>("/api/swarms", { model: "deepseek/deepseek-v4-pro", cap_usd: 0.5, n: 1, goal: FIXTURE_GOAL, no_start: true, ...extra });
@@ -1018,6 +1054,20 @@ test("several evidence roots, and one added from the form when the server allows
     // The kickoff runs as a job and writes into runs2 while it lasts: wait
     // for it, or the clean-up below races the swarm.sh it started.
     await waitJobAt(at, ((await started.json()) as { id: string }).id, 60_000);
+
+    // Several sets in one kickoff: each resolved under its own root, each at inputs/<name>/.
+    const kick = { model: "deepseek/deepseek-v4-pro", cap_usd: 0.5, n: 1, goal: FIXTURE_GOAL, no_start: true, inputs_enforce: "off", isolation: "host" };
+    assert.equal((await send("POST", "/api/swarms", { ...kick, inputs: ["0:brief", "1:brief"] })).status, 400, "two sets of one name would be one directory");
+    const both = await send("POST", "/api/swarms", { ...kick, label: "two-sets", inputs: ["1:brief", "2:images"] });
+    assert.equal(both.status, 202);
+    const bothJob = await waitJobAt(at, ((await both.json()) as { id: string }).id, 60_000);
+    assert.equal(bothJob.status, "ok", bothJob.stderr);
+    const bothView = (await (await fetch(`${at}/api/swarms/${bothJob.swarm_id}`)).json()) as { inputs: { sets: Array<{ name: string; path: string; source: string; files: number }> | null; files: Array<{ path: string }> } };
+    assert.deepEqual(
+      bothView.inputs.sets?.map((set) => [set.name, set.path, set.source, set.files]),
+      [["brief", "inputs/brief", await realpath(join(second, "brief")), 1], ["images", "inputs/images", await realpath(join(third, "images")), 1]],
+    );
+    assert.deepEqual(bothView.inputs.files.map((f) => f.path).sort(), ["inputs/brief/notes.md", "inputs/images/disk.E01"]);
 
     // A root named at start cannot be removed from the form; one added there can.
     assert.equal((await send("DELETE", "/api/inputs/roots/0")).status, 400);
@@ -2565,8 +2615,10 @@ test("the review is read from outside the run, its chain checked; writing one ne
     assert.equal(job.status, "ok", job.stderr);
     assert.match(job.stdout, /ARGV=\[review svm1d --amend 3 --note the upload path is not in the log --examiner E\. Xaminer\]/);
     assert.match(job.stdout, /VIA=\[console\]/, "the operator's record says the console ran it");
+    // The sign-off is a release, signed from the Release panel with the examiner's own secret: never a job.
     const sign = await send("/api/swarms/svm1d/review", { action: "sign", examiner: "E" }, "t0k");
-    assert.match((await waitJobAt(at, ((await sign.json()) as { id: string }).id)).stdout, /ARGV=\[review svm1d --sign --examiner E\]/);
+    assert.equal(sign.status, 400);
+    assert.match(((await sign.json()) as { error: string }).error, /signed from the Release panel/);
 
     // The run's record: hold, export, package, verify, purge, each a swarm.sh command.
     const hold = await send("/api/swarms/svm1d/hold", { reason: "litigation hold 42" }, "t0k");
@@ -2714,6 +2766,95 @@ test("the console's event lanes: infrastructure and operator lines are told apar
   assert.equal(describeEvent({ tool: "bash", agent: "a1", args: {}, result: {} }), null);
 });
 
+test("a stop before a model call says the reason its trace line gives, not the cap every time", async () => {
+  const { describeEvent } = await import("../ui/src/lib/event-taxonomy.ts");
+  const words = (reason: unknown) => describeEvent({ tool: "budget_precall_stop", agent: "a1", args: { reason }, result: { ok: true, brake: "advisory (in the VM; the hub holds the brake)" } }) ?? "";
+  // Run s306463: every seat still working met the sentinel at its next call.
+  assert.equal(words("sentinel_present"), "a1 was stopped before a model call: the run was over (done/SWARM_DONE stood)");
+  assert.match(words("agent_cap"), /: at its cap/);
+  assert.match(words("hub_unreachable"), /: the hub could not be reached$/);
+  assert.match(words("hard_kill"), /with hard kill$/);
+  assert.match(words("a_new_reason"), /: a_new_reason$/, "a reason the console does not know is shown as the line has it");
+  assert.match(words("constructor"), /: constructor$/);
+  assert.match(words(undefined), /: the line names no reason$/);
+});
+
+test("the Claims tab's runs and reaps are built over the whole trace, not the view's tail", async () => {
+  // A tail of one line: the claims, writes and releases are all before it.
+  const { body } = await get<{ traces: Array<{ tool: string }>; claim_sequences: Array<{ agent: string; path: string; open: boolean; steps: Array<Record<string, unknown>> }>; reaps: Array<{ agent: string; tool: string }> }>("/api/swarms/s7a1c?traces=1");
+  assert.equal(body.traces.length, 1);
+  // The tab's Reaped list too: the harness reaped the silent seat before the tail.
+  assert.ok(!body.traces.some((e) => e.tool === "reaped"));
+  assert.ok(body.reaps.some((e) => e.agent === "s7a1c04" && e.tool === "reaped"));
+  assert.ok(body.reaps.every((e) => e.tool === "reap" || e.tool === "reaped"));
+  const released = body.claim_sequences.find((s) => s.agent === "s7a1c01" && s.path === "work/attack-path.svg");
+  assert.equal(released?.open, false);
+  assert.deepEqual(released?.steps.map((st) => st.tool), ["claim_file", "write", "release_file"]);
+  assert.deepEqual(Object.keys(released?.steps[0] ?? {}).sort(), ["tool", "ts"], "a step carries its call and time; the trace has the rest");
+  const open = body.claim_sequences.find((s) => s.agent === "s7a1c00" && s.path === "work/attack-path.svg");
+  assert.equal(open?.open, true);
+  assert.deepEqual(open?.steps.map((st) => st.tool), ["claim_file", "edit", "file_history"]);
+
+  // As a microVM seat traces them: an own-scratch implicit claim, a publish
+  // to a shared file named by `to`, and releases after a long stretch.
+  const { claimSequences } = await import("../ui/src/lib/claim-sequences.ts");
+  const line = (agent: string, tool: string, args: Record<string, unknown>, result: unknown = { ok: true }) => ({ ts: "2026-09-26T21:30:00.000Z", agent, tool, args, result });
+  const trace = [
+    line("v01", "claim_file", { path: "work/v01/notes.md", reason: "own scratch", implicit: true }, { ok: true, implicit: true, via: "write" }),
+    line("v01", "claim_file", { path: "work/bitlocker.md", reason: "own the deliverable", seconds: 600 }),
+    line("v01", "publish_file", { path: "work/v01/bitlocker.md", to: "work/bitlocker.md" }),
+    line("v02", "claim_file", { path: "work/bitlocker.md" }, { ok: false, owner: "v01" }),
+    ...Array.from({ length: 500 }, () => line("v02", "bash", { command: "true" })),
+    line("v01", "release_file", { path: "work/bitlocker.md" }),
+  ];
+  const seqs = claimSequences(trace);
+  assert.deepEqual(
+    seqs.map((s) => [s.agent, s.path, s.open, s.steps.map((st) => st.tool).join(" → ")]),
+    [
+      ["v01", "work/bitlocker.md", false, "claim_file → publish_file → release_file"],
+      ["v01", "work/v01/notes.md", true, "claim_file"],
+    ],
+    "newest first; a refused claim is no run",
+  );
+  assert.deepEqual(claimSequences(trace.slice(-400)), [], "the tail alone holds a release and no claim: the empty tab this replaces");
+});
+
+test("the kickoff's default model under microVM is one the VM kickoff takes; a model the operator picked is left alone", async () => {
+  const { defaultModelMove } = await import("../ui/src/lib/kickoff-model.ts");
+  const models = ["anthropic/claude-fable-5", "openai/gpt-6-sol", "deepseek/deepseek-v4-pro", "mystery/m1"];
+  const oauth = { kind: "oauth" as const, lifted_by: "allow_oauth_in_vm" as const, reason: "a subscription (OAuth) token would go into the VMs" };
+  const unknownHost = { kind: "unknown_host" as const, lifted_by: "provider_hosts" as const, reason: "no host is known for mystery" };
+  const providers = {
+    anthropic: { status: "ready" as const, provider: "anthropic", auth_type: "oauth", vm_blockers: [oauth] },
+    openai: { status: "ready" as const, provider: "openai", auth_type: "api_key", vm_blockers: [] },
+    deepseek: { status: "not_ready" as const, provider: "deepseek" },
+    mystery: { status: "ready" as const, provider: "mystery", auth_type: "api_key", vm_blockers: [unknownHost] },
+  };
+  const vm = { allowOauth: false, named: new Set<string>() };
+  const move = (current: string, o: { touched?: boolean; vm?: typeof vm | null; providers?: Record<string, (typeof providers)[keyof typeof providers]> } = {}) =>
+    defaultModelMove({ models, current, touched: o.touched ?? false, providers: "providers" in o ? o.providers : providers, vm: "vm" in o ? (o.vm ?? null) : vm });
+
+  // A fresh form under microVM: the provider with a key, not the subscription the VMs refuse.
+  assert.equal(move(""), "openai/gpt-6-sol");
+  assert.equal(move("", { vm: null }), "anthropic/claude-fable-5", "on the host the first ready provider, as before");
+  // Before readiness answers the first model stands in; once it answers, the untouched default moves.
+  assert.equal(move("", { providers: undefined }), "anthropic/claude-fable-5");
+  assert.equal(move("anthropic/claude-fable-5"), "openai/gpt-6-sol");
+  // What the form's own settings lift counts: the OAuth switch, a host named for a provider.
+  assert.equal(move("anthropic/claude-fable-5", { vm: { allowOauth: true, named: new Set() } }), null);
+  assert.equal(move("mystery/m1", { vm: { allowOauth: false, named: new Set(["mystery"]) } }), null);
+  // A usable default stays put when microVM goes off.
+  assert.equal(move("openai/gpt-6-sol", { vm: null }), null);
+  // A model the operator picked is never changed; the red note stays for it.
+  assert.equal(move("anthropic/claude-fable-5", { touched: true }), null);
+  assert.equal(move("deepseek/deepseek-v4-pro", { touched: true }), null);
+  // No ready provider a VM takes: today's choice, and no move between two the VMs refuse.
+  const hostOnly = { ...providers, openai: { status: "not_ready" as const, provider: "openai" }, mystery: { status: "not_ready" as const, provider: "mystery" } };
+  assert.equal(move("", { providers: hostOnly }), "anthropic/claude-fable-5");
+  assert.equal(move("anthropic/claude-fable-5", { providers: hostOnly }), null);
+  assert.equal(move("deepseek/deepseek-v4-pro", { providers: hostOnly }), "anthropic/claude-fable-5", "a default that is not even ready moves to one that is");
+});
+
 test("the review file's chain is checked line by line", async () => {
   const { parseReviews } = await import("../scripts/ui/reviews.ts");
   const a = JSON.stringify({ v: 1, seq: 1, at: "t", examiner: "E", action: "accept", entry_seq: 1, prev: null });
@@ -2721,6 +2862,16 @@ test("the review file's chain is checked line by line", async () => {
   const good = parseReviews(`${a}\n${b}\n`);
   assert.equal(good.chain.intact, true);
   assert.equal(good.signed?.ledger_head, "h");
+  // The newer acts (a disposition, a technical review, a countersign) are the chain's, not breaks in it.
+  const c = JSON.stringify({ v: 1, seq: 3, at: "t", examiner: "E", examiner_id: "e", action: "adopt", entry_seq: 2, prev: createHash("sha256").update(b).digest("hex") });
+  const d = JSON.stringify({ v: 1, seq: 4, at: "t", examiner: "R", action: "technical_review", reviewer: { name: "R", competence: "x" }, outcome: "agreed", prev: createHash("sha256").update(c).digest("hex") });
+  const e = JSON.stringify({ v: 1, seq: 5, at: "t", examiner: "R", action: "countersign", over_seq: 4, prev: createHash("sha256").update(d).digest("hex") });
+  const newer = parseReviews(`${a}\n${b}\n${c}\n${d}\n${e}\n`);
+  assert.equal(newer.chain.intact, true, newer.chain.detail);
+  assert.equal(newer.by_entry["2"]?.action, "adopt");
+  assert.deepEqual(newer.lines.map((l) => l.action), ["accept", "sign", "adopt", "technical_review", "countersign"]);
+  assert.equal(newer.lines[3].outcome, "agreed");
+  assert.equal(newer.lines[4].over_seq, 4);
   const tampered = parseReviews(`${a.replace('"accept"', '"reject"')}\n${b}\n`);
   assert.equal(tampered.chain.intact, false, "a changed line breaks the chain at the next one");
 });
@@ -2882,6 +3033,8 @@ test("a run's package: what swarm.sh package left, and the directory as one zip 
   await mkdir(join(pkg, "work"), { recursive: true });
   await writeFile(join(pkg, "report.md"), "# Report\n", "utf8");
   await writeFile(join(pkg, "work", "timeline.csv"), "ts,what\n2026-02-03T09:12:41Z,GET /shell.php\n".repeat(50), "utf8");
+  // A run that was never stopped: the package declares its custody and chains absent, as package does.
+  execFileSync(process.execPath, ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "package-tools.ts"), "components", join(pkg, "no-such-run"), pkg]);
   execFileSync("bash", ["-c", 'cd "$1" && find . -type f ! -name MANIFEST.txt | sort | while read -r f; do shasum -a 256 "$f" 2>/dev/null || sha256sum "$f"; done > MANIFEST.txt', "manifest", pkg]);
   // Not handed over: a link out of the package, and a FIFO.
   await symlink("/etc/hosts", join(pkg, "hosts-link"));
@@ -2890,7 +3043,7 @@ test("a run's package: what swarm.sh package left, and the directory as one zip 
   try {
     const info = await get<{ present: boolean; files: number; manifest_sha256: string; signed: boolean; dir: string }>("/api/swarms/svm1d/package");
     assert.equal(info.body.present, true);
-    assert.equal(info.body.files, 2);
+    assert.equal(info.body.files, 3);
     assert.equal(info.body.signed, false);
     assert.equal(info.body.manifest_sha256, createHash("sha256").update(await readFile(join(pkg, "MANIFEST.txt"))).digest("hex"));
     const res = await fetch(`${base}/api/swarms/svm1d/package.zip`);
@@ -2900,7 +3053,7 @@ test("a run's package: what swarm.sh package left, and the directory as one zip 
     const zip = join(dl, "svm1d-package.zip");
     await writeFile(zip, Buffer.from(await res.arrayBuffer()));
     const names = execFileSync("python3", ["-c", "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); assert z.testzip() is None; print('\\n'.join(sorted(z.namelist())))", zip], { encoding: "utf8" }).trim().split("\n");
-    assert.deepEqual(names, ["svm1d-package/MANIFEST.txt", "svm1d-package/report.md", "svm1d-package/work/timeline.csv"]);
+    assert.deepEqual(names, ["svm1d-package/COMPONENTS.json", "svm1d-package/MANIFEST.txt", "svm1d-package/report.md", "svm1d-package/work/timeline.csv"]);
     // The harness's own check of a package: files hold, unsigned (exit 4).
     const verify = spawnSync("bash", [join(ROOT, "scripts", "swarm.sh"), "verify", zip], { encoding: "utf8", env: { ...process.env, SWARM_RUNS_DIR: runsDir } });
     assert.equal(verify.status, 4, `${verify.stdout}\n${verify.stderr}`);
@@ -3232,4 +3385,35 @@ test("no key screen of the console scrolls sideways at 390 px (a real browser; s
     await rm(home, { recursive: true, force: true });
     await rm(standIn, { recursive: true, force: true });
   }
+});
+
+test("the Leads tab: the register over the API, what waits on the operator in the view, and the operator's answer run as swarm.sh lead", async () => {
+  const L = await import("../extensions/leads.ts");
+  const registry = JSON.parse(await readFile(join(runsDir, "registry.json"), "utf8")) as { runs: Array<{ id: string; sandbox: string }> };
+  const run = registry.runs.find((r) => r.id === "s7a1c")!;
+  const S = run.sandbox;
+  const a0 = { sandboxRoot: S, agentId: (JSON.parse(await readFile(join(S, "team.json"), "utf8")) as { agents: Array<{ id: string }> }).agents[0].id };
+  assert.equal((await L.openLead(a0, { title: "Reach the outside resource", why: "the key is there", take: true })).ok, true);
+  assert.equal((await L.closeLead(a0, "L-1", { disposition: "needs_operator", ref: "Allow the host the plaintext names, so a job can fetch the key" })).ok, true);
+  assert.equal(classifyPath(runsDir, join(S, "leads", "leads.jsonl")).kind, "leads");
+  assert.equal(classifyPath(runsDir, join(S, "operator-requests.jsonl")).kind, "leads");
+  const view = await get<Record<string, any>>("/api/swarms/s7a1c");
+  assert.equal(view.body.leads.waiting_on_operator, 1, "the header knows a request waits on the operator");
+  const leads = await get<Record<string, any>>("/api/swarms/s7a1c/leads");
+  assert.equal(leads.status, 200);
+  assert.deepEqual(leads.body.waiting_on_operator.map((l: { id: string }) => l.id), ["L-1"]);
+  assert.equal(leads.body.requests.length, 1);
+  assert.equal(leads.body.chain.ok, true);
+  assert.equal((await post("/api/swarms/s7a1c/leads", { action: "note", lead: "L-1" })).status, 400, "a note needs its text");
+  assert.equal((await post("/api/swarms/s7a1c/leads", { action: "delete", lead: "L-1", text: "x" })).status, 400);
+  assert.equal((await post("/api/swarms/s7a1c/leads", { action: "note", lead: "L-1; rm -rf", text: "x" })).status, 400);
+  const note = await post<{ id: string }>("/api/swarms/s7a1c/leads", { action: "note", lead: "L-1", text: "Fetched it for you: the key file is under inputs now" });
+  assert.equal(note.status, 202);
+  const job = await waitJob(note.body.id);
+  assert.equal(job.status, "ok", job.stderr);
+  assert.match(job.stdout, /Recorded on L-1, reopened/);
+  const after = await get<Record<string, any>>("/api/swarms/s7a1c/leads");
+  const l1 = after.body.leads.find((l: { id: string }) => l.id === "L-1");
+  assert.equal(l1.status, "open");
+  assert.match(l1.notes[0].text, /Fetched it for you/);
 });

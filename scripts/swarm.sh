@@ -105,9 +105,9 @@ Commands:
   context <id>       Each agent's context history from the trace: peaks, lines crossed, hand-offs, summary cost
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
-  review verify export hold release purge image-for   After a run: sign-off, checks, export, retention; the image packs boot (help <command>)
+  examiner machine review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
-  say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> changes its caps (help cap)
+  say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> its caps; lead <id> list|note its leads
   stop <id>          Stop a run and record how it ended
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
@@ -125,12 +125,13 @@ The options a run usually needs:
   --cap-per-agent U  What one agent may spend before it is steered and stopped
   --cap-tokens N     The brake for local models, which bill nothing
   --wall-clock MIN   How long the run may take
+  --until-solved     No wall clock, caps advisory: it ends when every question is answered, or you stop it
   --goal-file FILE   The goal document, which carries its own finish line
   --label NAME       A name for the run, shown in the list and the console
   --isolation host   Agents as processes on this host, unisolated (default: a microVM each)
 
 Evidence, when the goal is a case rather than a task:
-  --inputs DIR       DIR, read-only in every VM (a host run gets a guarded copy)
+  --inputs DIR       DIR, read-only in every VM (a host run gets a guarded copy); repeat it for sets at inputs/<name>/
   --catalog          Run the standard first pass over the inputs before agents start
   --toolbox SETS     Check the tools a case needs: dfir, crypto, linux (or auto, off)
   --quarantine       Nothing under work/extracted/ can execute (always, in a VM)
@@ -146,8 +147,7 @@ Tools the agents write:
   --pack ID[,ID]         Installed packs: their skills, tools and host checks
 
 Network, which is closed by default:
-  --allow-host HOST  Add one host to the allowlist; repeatable
-  --no-netguard      Open it entirely
+  --allow-host HOST  Add one host to the allowlist; repeatable (--no-netguard opens it entirely)
 
   swarm.sh help start     every option, with what it does and its default
   docs/usage.md           the same, with the reasoning
@@ -168,13 +168,13 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
 
   swarm.sh start --model <provider/id> --cap-usd <n> --n <N>
       [--models "<provider/id>=<k>[@USD],..."] [--goal-file FILE | --goal "<markdown>"]
-      [--sandbox DIR] [--allow-synced-folder] [--custody-timeout SEC] [--label NAME] [--wall-clock MIN] [--hard-kill] [--no-start]
+      [--sandbox DIR] [--allow-synced-folder] [--custody-timeout SEC] [--label NAME] [--wall-clock MIN] [--until-solved] [--stall-minutes N] [--hard-kill] [--no-start]
       [--notify CMD] [--ledger-from RUN] [--no-verify-copy] [--allow-root] [--model-gateway] [--check]
       [--cap-per-agent USD] [--cap-per-agent-tokens N] [--cap-tokens N] [--idle-nudge-sec N] [--allow-tool-forging]
       [--no-self-compact] [--compact-at SPEC] [--compact-warn-at SPEC] [--compact-notice-at SPEC]
       [--compact-prompt-file FILE] [--compact-model P/ID] [--inbox-page-chars N]
-      [--allow-install] [--no-pypi] [--no-read DIR]...
-      [--tools-from DIR] [--inputs DIR] [--inputs-enforce auto|on|off]
+      [--allow-install] [--no-pypi] [--no-read DIR]... [--accept-signer-exposure]
+      [--tools-from DIR] [--inputs DIR]... [--inputs-enforce auto|on|off]
       [--inputs-max-mb N] [--inputs-max-files N] [--catalog] [--toolbox SETS|auto|off] [--toolbox-required]
       [--quarantine] [--case-id ID] [--examiner NAME] [--allow-host HOST]...
       [--no-netguard] [--local-only] [--playwright] [--probe-violation]
@@ -267,6 +267,23 @@ Limits
                       the ten-agent BelkaCTF #6 run on a subscription used 277M.
                       Every cap can be changed while the run goes on: swarm.sh cap.
   --wall-clock MIN    How long the run may take.
+  --until-solved      Run until every question is answered. There is no wall clock
+                      and every cap is advisory: spend is recorded and shown, and
+                      nothing is stopped for it (a cap given is kept as a figure to
+                      show). done is refused until every question of the goal has a
+                      standing answer that is not inconclusive and does not rest on a
+                      limitation or a deferral, no material lead is open, no lead's
+                      job is uninterpreted and every answer has its critic's act; an
+                      examination-limited finish is not accepted, the agents cannot
+                      abandon, and only swarm.sh stop ends the run. A provider error
+                      or a rate limit is retried with backoff. What only the operator
+                      can give is a lead closed needs_operator: <run>/operator-requests.jsonl,
+                      the console's Leads tab, and swarm.sh lead <run> note. Also set
+                      by the goal's metadata block (until_solved: true).
+  --stall-minutes N   Until solved: minutes with no new standing entry, no lead
+                      closed and no job committed before the watchdog posts a
+                      regroup to every agent (default 15; then with backoff, never
+                      stopping). The goal's metadata block may say stall_minutes: N.
   --hard-kill         After a cap steer, shut the session down rather than waiting
                       out the grace period. Default off.
   --idle-nudge-sec N  How long an agent may be silent before the watchdog prompts
@@ -316,6 +333,10 @@ Evidence
                       detected and healed from a pristine copy; and where the host
                       allows it the panes run with inputs/ read-only at the kernel
                       (macOS sandbox-exec, Linux mount namespace: scripts/fsguard.sh).
+                      Repeatable: several sets each land at inputs/<name>/, <name>
+                      being the directory's name as given (a link names it
+                      otherwise); one set is inputs/ itself, as it always was.
+                      Every other --inputs flag applies to all of them.
   --inputs-bind       With --inputs DIR: no copy. inputs/ links to DIR and the
                       kernel holds DIR itself read-only in every pane (the same
                       --ro rule, on the resolved path). Needs a kernel guard —
@@ -324,9 +345,10 @@ Evidence
   --inputs-enforce M  auto (default): a kernel guard where the host can, otherwise a
                       warning and detect-and-heal. on: refuse to start without one.
                       off: detect and heal only.
-  --inputs-max-mb N   Refuse an inputs directory above N MB. Unset by default:
-                      evidence is as large as the case is, and a ceiling that
-                      refuses the real job is not a safety rail.
+  --inputs-max-mb N   Refuse an inputs directory above N MB (several sets:
+                      together). Unset by default: evidence is as large as the
+                      case is, and a ceiling that refuses the real job is not a
+                      safety rail.
   --inputs-max-files N  The same for the file count, also unset by default.
   --catalog           Before the agents start, run the standard first pass over the
                       inputs into catalog/, read-only: partition table, file list,
@@ -347,9 +369,23 @@ Evidence
   --no-read DIR       A directory the panes may not read, denied at the kernel;
                       repeatable. Reads are open by design, so this is narrow on
                       purpose: material about the case the agents must derive
-                      rather than find, a previous run's findings on the same
-                      evidence above all. The record says whether the host could
-                      apply it (no_read_applied).
+                      rather than find. Every earlier run's sandbox in the
+                      registry and the examiners' reviews are denied without it
+                      (earlier_runs_hidden), and so is where the signing keys
+                      are kept (signer_isolation). The record says whether the
+                      host could apply it (no_read_applied).
+  --accept-signer-exposure
+                      Start a host run whose panes no kernel guard holds
+                      (--no-write-guard, or a host without one) although a
+                      signing key of this install exists: the machine key, an
+                      enrolled examiner's key, the custody key. Without it that
+                      run is refused. The run records signer_keys_hidden: false
+                      and what was exposed, and the kickoff says to rotate
+                      (swarm.sh machine rotate; an examiner's new key is a new
+                      enrolment). With a guard the keys are denied to the panes
+                      (each home's machine/ and examiners/, SWARM_SIGNERS_HOME,
+                      each examiner's key file, the ssh-agent's socket), and a
+                      guard that cannot deny one of them refuses the run.
   --no-seal-herdr     Let the panes reach Herdr's control socket. By default
                       the write guard denies it: the socket authenticates
                       nobody, and `layout.apply` through it starts a process
@@ -432,14 +468,19 @@ Isolation
                       host's memory are refused, more than 60% warned about.
   --vm-disk MIB       Root disk per agent VM in MiB (default 8192): where a VM's own
                       installs and /tmp live.
-  --workers N         Tool-job worker VMs that may run at once (default 2, 4 on a host
-                      with 64 GiB or more; at most
+  --workers N         Tool-job worker VMs that may run at once (default 2; 4 on a
+                      host with 64 GiB or more, 6 with 128 GiB or more; at most
                       16): each job (job_run, catalog_request, the kickoff's
                       recipes) runs in a VM of its own, made for it and removed
                       after, and its outputs are sealed into store/. Counted with
                       the seats against this host's capacity: unset, as many as
                       fit up to that default (none fitting: no job service,
-                      said); given, kept or refused.
+                      said); given, kept or refused. From 3, one is kept for
+                      short jobs (an agent's timeout_seconds of 120 or less), so
+                      a quick look never waits behind long parses. Each worker
+                      starts only while the host keeps 15% of its memory free
+                      beside it (several runs may share it); until then its job
+                      waits, on the journal.
   --worker-cpus N     vCPUs per worker VM (default 2).
   --worker-memory MIB Memory per worker VM in MiB (default 4096 on a host with 64 GiB
                       or more, 2048 otherwise).
@@ -470,8 +511,25 @@ Isolation
                       (ssh-keygen -Y, namespace dfirswarm-custody).
   --custody-timestamp-url URL  Have each verdict's sha256 timestamped by this
                       RFC 3161 authority (custody.json.tsr beside it).
+  --custody-timestamp-ca FILE  The authority's CA certificates (PEM): each token's
+                      signature and certificate are checked against them
+                      (openssl ts -verify) and the result recorded in the
+                      anchor; custody-verify checks it again. Without it, a
+                      token is held to its digest only ("imprint only").
   --time-reference URL  Record this https server's clock offset from the host's
                       at kickoff and at custody.
+  --anchor-mirror TARGET  Copy each release's digest line somewhere this account
+                      does not keep: cmd:COMMAND (the line on its stdin, its
+                      output kept as the receipt), dir:PATH (a file per release,
+                      never written over: an object-locked bucket's mount or a
+                      records custodian's share), or print (a line and a
+                      QR-ready string for the case file). A signed git remote
+                      is a witness, not a write-once store.
+  --require-technical-review  An examiner's release of this run is sealed only
+                      over a current technical review signed by its reviewer
+                      whose outcome is not a disagreement (two-stage signing;
+                      SWARM_REQUIRE_TECHNICAL_REVIEW=1 does the same for every
+                      run). Stored in the run's record.
   --allow-oauth-in-vm Let a subscription (OAuth) provider into the VMs; refused
                       otherwise, since its token is the operator's whole account.
   --no-vm-snapshot    At stop, remove each VM without keeping its disk. By default
@@ -841,6 +899,13 @@ freeze_harness() { # <hub dir>
     rm -rf "${host:?}/$rel"
     cp -R "$ROOT/$rel" "$host/$rel"
   done
+  # The draft release the hub seals after custody renders the report, which
+  # reads the Markdown renderer, the version and the mark: frozen with it.
+  rm -rf "${host:?}/ui" "${host:?}/brand"
+  mkdir -p "$host/ui/src/lib" "$host/brand"
+  cp -R "$ROOT/ui/src/lib/." "$host/ui/src/lib/"
+  cp "$ROOT/package.json" "$host/package.json"
+  cp "$ROOT/brand/mark-mono.svg" "$host/brand/mark-mono.svg" 2>/dev/null || true
   # msb and its SDK are frozen with it: an `npm ci` in the checkout mid-run
   # removed node_modules for a while and then put in whatever it resolved,
   # and the hub's finish ran that msb against VMs another one had made. A
@@ -1299,6 +1364,25 @@ fsguard_mode() {
   echo "${mode:-none}"
 }
 
+# The weaker of two pane guards, for several evidence sets under one run:
+# nothing is weakest, then Landlock alone, then a mount namespace, then
+# both or seatbelt (never both on one host). An empty one is no guard yet.
+weaker_guard() { # <mode> <mode>
+  local a="$1" b="$2"
+  [[ -n "$a" ]] || { echo "$b"; return 0; }
+  [[ -n "$b" ]] || { echo "$a"; return 0; }
+  if [[ "$(guard_rank "$b")" -lt "$(guard_rank "$a")" ]]; then echo "$b"; else echo "$a"; fi
+}
+
+guard_rank() { # <mode>
+  case "$1" in
+    none) echo 0 ;;
+    landlock) echo 1 ;;
+    mountns) echo 2 ;;
+    *) echo 3 ;;
+  esac
+}
+
 # Whether a guard mode gives a write allowlist. seatbelt and landlock do by
 # construction; the namespace modes do when bubblewrap is there to make the
 # root read-only, and fsguard's dry run says so when it is not.
@@ -1318,6 +1402,289 @@ fsguard_rw_capable() {
 # cannot (measured), and says so.
 fsguard_can_mask() {
   case "$1" in seatbelt|linux|mountns) return 0 ;; *) return 1 ;; esac
+}
+
+# --- the signers' keys, kept out of a host run's panes --------------------
+#
+# A release is sealed by the install's machine key (at stop, unattended, so
+# it has no passphrase) and adopted with an enrolled examiner's key
+# (scripts/signers.ts). A microVM mounts neither. A host run's panes can read
+# the whole machine but what is denied at the kernel, so every place those
+# keys are kept is denied, the ssh-agent that may hold one is refused, and a
+# run whose panes could reach a key is not started unless the operator says
+# so (--accept-signer-exposure), which the run then records.
+
+# Where signers.ts keeps the machine key and the examiners now.
+signers_home() {
+  printf '%s\n' "${SWARM_SIGNERS_HOME:-${DFIRSWARM_HOME:-$HOME/.dfirswarm}}"
+}
+
+# Every home that may hold signers: $DFIRSWARM_HOME, and SWARM_SIGNERS_HOME
+# when it is set (a key made before it was set is still where it was made).
+signer_homes() {
+  local dh="${DFIRSWARM_HOME:-$HOME/.dfirswarm}"
+  printf '%s\n' "$dh"
+  [[ -n "${SWARM_SIGNERS_HOME:-}" && "$SWARM_SIGNERS_HOME" != "$dh" ]] && printf '%s\n' "$SWARM_SIGNERS_HOME"
+  return 0
+}
+
+# Paths on stdin, resolved (against this directory when relative, links
+# followed, a missing tail kept), each once and in order. The kernel rules
+# match what a path really is; a relative DFIRSWARM_HOME is not dropped.
+real_paths() {
+  python3 -c '
+import os, sys
+seen = set()
+for line in sys.stdin:
+    p = line.rstrip("\n")
+    if not p:
+        continue
+    r = os.path.realpath(p)
+    if r not in seen:
+        seen.add(r)
+        print(r)
+'
+}
+
+# path_covers <a> <b>: whether b is a, or lies beneath it.
+path_covers() {
+  [[ "$2" == "$1" || "$2" == "${1%/}/"* ]]
+}
+
+# The key path each enrolled examiner's record names: read from the record,
+# never from the key.
+examiner_key_paths() {
+  local h rec
+  while IFS= read -r h; do
+    for rec in "$h"/examiners/*.json; do
+      [[ -f "$rec" ]] || continue
+      jq -r 'select(.kind == "examiner") | .key.path | strings | select(startswith("/"))' "$rec" 2>/dev/null || true
+    done
+  done < <(signer_homes)
+}
+
+# signer_paths [custody key]: every path a signing key of this install is
+# kept under, resolved, one a line: each home's machine/ and examiners/, the
+# whole of SWARM_SIGNERS_HOME when it is set, each examiner's key as its
+# record names it (and the private half beside a public one), and the key
+# custody is signed with, when one is given.
+signer_paths() {
+  local h key
+  {
+    while IFS= read -r h; do
+      printf '%s\n' "$h/machine" "$h/examiners"
+    done < <(signer_homes)
+    [[ -n "${SWARM_SIGNERS_HOME:-}" ]] && printf '%s\n' "$SWARM_SIGNERS_HOME"
+    while IFS= read -r key; do
+      printf '%s\n' "$key"
+      [[ "$key" == *.pub && -e "${key%.pub}" ]] && printf '%s\n' "${key%.pub}"
+    done < <(examiner_key_paths)
+    [[ -n "${1:-}" ]] && printf '%s\n' "$1"
+    true
+  } | real_paths
+}
+
+# signer_keys_present [custody key]: each signing key of this install whose
+# file is there (it is looked for, never opened), as "what<TAB>path".
+signer_keys_present() {
+  local h f rec id key
+  {
+    while IFS= read -r h; do
+      [[ -f "$h/machine/release_ed25519" ]] && printf 'the machine key\t%s\n' "$h/machine/release_ed25519"
+      for f in "$h"/machine/retired/*/release_ed25519; do
+        [[ -f "$f" ]] && printf 'a retired machine key\t%s\n' "$f"
+      done
+      for rec in "$h"/examiners/*.json; do
+        [[ -f "$rec" ]] || continue
+        id="$(jq -r '.id // "?"' "$rec" 2>/dev/null || echo "?")"
+        key="$(jq -r 'select(.kind == "examiner") | .key.path | strings' "$rec" 2>/dev/null || true)"
+        [[ "$key" == *.pub ]] && key="${key%.pub}"
+        [[ -n "$key" && -f "$key" ]] && printf "examiner %s's key\t%s\n" "$id" "$key"
+      done
+      for f in "$h"/examiners/keys/*; do
+        [[ -f "$f" && "$f" != *.pub ]] && printf 'an examiner key made at enrolment\t%s\n' "$f"
+      done
+    done < <(signer_homes)
+    [[ -n "${1:-}" && -f "$1" ]] && printf 'the custody signing key\t%s\n' "$1"
+    true
+  } | awk -F'\t' '!seen[$2]++'
+}
+
+# The ssh-agent sockets a pane could reach, as fsguard takes them:
+# "path<TAB>socket" for the one SSH_AUTH_SOCK names, "tree<TAB>dir" for
+# launchd's per-session agent on macOS (whose directory holds that socket
+# alone; launchd keeps it whether or not this shell names it). An agent
+# holds keys unlocked: whoever reaches its socket signs with them.
+agent_socket_rules() {
+  local s real seen=" " cands=("${SSH_AUTH_SOCK:-}")
+  if [[ "$(uname -s)" == Darwin ]]; then
+    cands+=("$(launchctl getenv SSH_AUTH_SOCK 2>/dev/null || true)")
+  fi
+  for s in "${cands[@]}"; do
+    [[ -n "$s" && "$s" == /* && -S "$s" ]] || continue
+    real="$(printf '%s\n' "$s" | real_paths)"
+    [[ -n "$real" ]] || continue
+    case "$seen" in *" $real "*) continue ;; esac
+    seen+="$real "
+    if [[ "$real" == */com.apple.launchd.*/Listeners ]]; then
+      printf 'tree\t%s\n' "$(dirname "$real")"
+    else
+      printf 'path\t%s\n' "$real"
+    fi
+  done
+  return 0
+}
+
+# The write guard a host run's panes would get, before the sandbox exists
+# (start --check): what fsguard picks on this host, and none without a write
+# allowlist or with --no-write-guard. The kickoff decides it again for real.
+predicted_write_guard_mode() { # <write_guard 0|1>
+  [[ "$1" -eq 1 ]] || { echo none; return 0; }
+  local m
+  m="$(fsguard_mode "$ROOT" auto)"
+  fsguard_rw_capable "$m" "$ROOT" || m="none"
+  echo "$m"
+}
+
+# signer_guard <mode> <accept 0|1> <custody key> [rw:PATH | keep:PATH | mount:PATH]...
+#
+# Whether this run's agents can be kept from the signing keys, and how.
+# <mode> is what holds them: microvm, or the host write guard (seatbelt,
+# linux, mountns, landlock, none). rw: paths are the ones the panes write
+# (the sandbox, Pi's agent directory): a key may not be kept inside one.
+# keep: paths are what they must still read (the harness, the evidence, the
+# packs): a denied path may not hold one. mount: paths are what every VM
+# mounts: a key may not lie in one. Sets
+#   SIGNER_NO_READ      the paths to deny to the panes (host guards only)
+#   SIGNER_SOCKETS      the agent sockets to deny, as agent_socket_rules gives them
+#   SIGNER_KEYS_HIDDEN  true | false
+#   SIGNER_EXPOSED      what a pane could reach, when they are not hidden
+#   SIGNER_ACCEPTED     1 when --accept-signer-exposure is what let the run start
+#   SIGNER_WHY          one sentence for the record
+# and returns 2, after saying why, when the run must not start.
+signer_guard() {
+  local mode="$1" accept="$2" custody_key="$3" p k line what
+  shift 3
+  local rw=() keep=() mounts=()
+  # Resolved as the signers' paths are, so a link or /var for /private/var
+  # does not make two names of one directory look apart.
+  while IFS= read -r p; do [[ -n "$p" ]] && rw+=("$p"); done < <(for p in "$@"; do [[ "$p" == rw:?* ]] && printf '%s\n' "${p#rw:}"; done | real_paths)
+  while IFS= read -r p; do [[ -n "$p" ]] && keep+=("$p"); done < <(for p in "$@"; do [[ "$p" == keep:?* ]] && printf '%s\n' "${p#keep:}"; done | real_paths)
+  while IFS= read -r p; do [[ -n "$p" ]] && mounts+=("$p"); done < <(for p in "$@"; do [[ "$p" == mount:?* ]] && printf '%s\n' "${p#mount:}"; done | real_paths)
+  SIGNER_NO_READ=() SIGNER_SOCKETS=() SIGNER_EXPOSED=() SIGNER_ACCEPTED=0 SIGNER_KEYS_HIDDEN=false SIGNER_WHY=""
+  while IFS= read -r p; do [[ -n "$p" ]] && SIGNER_NO_READ+=("$p"); done < <(signer_paths "$custody_key")
+  while IFS= read -r line; do [[ -n "$line" ]] && SIGNER_SOCKETS+=("$line"); done < <(agent_socket_rules)
+  case "$mode" in
+    microvm)
+      for p in ${SIGNER_NO_READ[@]+"${SIGNER_NO_READ[@]}"}; do
+        for k in ${mounts[@]+"${mounts[@]}"}; do
+          if path_covers "$k" "$p"; then
+            echo "BLOCKER: $p, where a signing key of this install is kept, lies in $k, which every VM mounts: the agents could read it. Keep the signers outside the harness, the packs, the evidence and the run (SWARM_SIGNERS_HOME)." >&2
+            return 2
+          fi
+        done
+      done
+      SIGNER_NO_READ=() SIGNER_SOCKETS=()
+      SIGNER_KEYS_HIDDEN=true
+      SIGNER_WHY="no VM mounts a path a signing key is kept under, and no VM reaches a socket of this host"
+      return 0 ;;
+    none)
+      while IFS=$'\t' read -r what p; do
+        [[ -n "$p" ]] && SIGNER_EXPOSED+=("$what ($p)")
+      done < <(signer_keys_present "$custody_key")
+      # An examiner whose record names a public key signs through an agent
+      # (or a hardware key): the agent's socket is where that key is.
+      local held
+      held="$(examiner_key_paths)"
+      if grep -q '\.pub$' <<<"$held"; then
+        for line in ${SIGNER_SOCKETS[@]+"${SIGNER_SOCKETS[@]}"}; do
+          SIGNER_EXPOSED+=("the ssh-agent at ${line#*$'\t'}, which may hold an enrolled examiner's key")
+        done
+      fi
+      SIGNER_NO_READ=() SIGNER_SOCKETS=()
+      if [[ ${#SIGNER_EXPOSED[@]} -eq 0 ]]; then
+        SIGNER_WHY="no kernel guard, so nothing was hidden; no signing key existed at kickoff"
+        return 0
+      fi
+      if [[ "$accept" -ne 1 ]]; then
+        local listed
+        listed="$(printf '%s; ' "${SIGNER_EXPOSED[@]}")"
+        echo "BLOCKER: no kernel guard holds this run's panes (write guard: none), and they could read what signs this install's releases: ${listed%; }." >&2
+        echo "         Run in microVMs (the default), keep the write guard on, or add --accept-signer-exposure to run anyway: the run then records that the keys were exposed, and they should be rotated after it (swarm.sh machine rotate; an examiner's new key is a new enrolment)." >&2
+        return 2
+      fi
+      SIGNER_ACCEPTED=1
+      SIGNER_WHY="no kernel guard, so nothing was hidden; the operator accepted the exposure (--accept-signer-exposure)"
+      return 0 ;;
+  esac
+  # A host guard. What it denies must not take away what the panes need,
+  # and it must be able to deny all of it.
+  for p in ${SIGNER_NO_READ[@]+"${SIGNER_NO_READ[@]}"}; do
+    for k in ${rw[@]+"${rw[@]}"}; do
+      if path_covers "$k" "$p"; then
+        echo "BLOCKER: $p, where a signing key of this install is kept, is inside $k, which the panes write. Keep keys out of the run and out of Pi's directory." >&2
+        return 2
+      fi
+    done
+    for k in ${rw[@]+"${rw[@]}"} ${keep[@]+"${keep[@]}"}; do
+      if path_covers "$p" "$k"; then
+        echo "BLOCKER: $p, where a signing key of this install is kept, holds $k, which the panes need: it cannot be denied to them without that. Keep the signers apart (SWARM_SIGNERS_HOME)." >&2
+        return 2
+      fi
+    done
+  done
+  if [[ ${#SIGNER_SOCKETS[@]} -gt 0 ]] && ! fsguard_can_mask "$mode"; then
+    echo "BLOCKER: this host's write guard ($mode) cannot refuse a socket, and an ssh-agent is reachable at ${SIGNER_SOCKETS[0]#*$'\t'}: a pane could sign with every key it holds. Stop that agent (or log in without agent forwarding), or run in microVMs (the default)." >&2
+    return 2
+  fi
+  SIGNER_KEYS_HIDDEN=true
+  SIGNER_WHY="denied to the panes at the kernel ($mode): ${#SIGNER_NO_READ[@]} path(s) where signing keys are kept"
+  [[ ${#SIGNER_SOCKETS[@]} -gt 0 ]] && SIGNER_WHY+=", and ${#SIGNER_SOCKETS[@]} ssh-agent socket(s)"
+  if [[ "$accept" -eq 1 ]]; then
+    echo "NOTE:         --accept-signer-exposure: nothing to accept, the signing keys are denied to the panes ($mode)"
+  fi
+  return 0
+}
+
+# earlier_run_sandboxes <registry> <this sandbox> [kept path]...: the earlier
+# runs' sandboxes a host run's panes are denied, from the registry: each that
+# is there, but this run's own. "hide<TAB>path", or "skip<TAB>path<TAB>why"
+# for one that cannot be denied without denying what the panes need (this
+# run's sandbox, the harness, Pi's directory, the evidence, the registry).
+# Not the whole runs directory: the registry the finish line is read from is
+# in it, and so is this run.
+earlier_run_sandboxes() {
+  python3 - "$@" <<'PY'
+import json, os, sys
+registry, current = sys.argv[1], os.path.realpath(sys.argv[2])
+kept = [os.path.realpath(p) for p in sys.argv[3:] if p]
+try:
+    runs = json.load(open(registry, encoding="utf-8")).get("runs", [])
+except Exception:
+    runs = []
+def under(a, b):
+    return a == b or a.startswith(b.rstrip("/") + "/")
+seen = set()
+for r in runs if isinstance(runs, list) else []:
+    sb = r.get("sandbox") if isinstance(r, dict) else None
+    if not isinstance(sb, str) or not sb.startswith("/") or not os.path.isdir(sb):
+        continue
+    real = os.path.realpath(sb)
+    if real in seen or real == current:
+        continue
+    seen.add(real)
+    if under(current, real):
+        print(f"skip\t{real}\tit holds this run's sandbox")
+        continue
+    if under(real, current):
+        print(f"skip\t{real}\tit is inside this run's sandbox")
+        continue
+    hit = next((k for k in kept if under(k, real)), None)
+    if hit:
+        print(f"skip\t{real}\tit holds {hit}, which the panes need")
+        continue
+    print(f"hide\t{real}")
+PY
 }
 
 # What this host can do, probed once at kickoff and written to the record.
@@ -1454,31 +1821,48 @@ copy_tree_as_is() { # <src dir> <dst dir>
   fi
 }
 
-install_inputs() {
-  local sandbox="$1" src="$2" enforce="$3" guard="$4" verify="${5:-1}" quarantine="${6:-0}" entry name
-  mkdir -p "$sandbox/inputs" "$sandbox/.inputs-pristine"
-  # A link inside the evidence is the evidence's own and is copied as the
-  # link it is. `cp -RL` followed every link on this host: an extracted
-  # root's etc/hosts or etc/localtime (absolute links) became this
-  # machine's own files, in the evidence, vouched for by the manifest. Only a
-  # link the operator put at the top of --inputs (`ln -s
-  # /mnt/evidence/case.E01 ./`) is followed, to the file or directory it
-  # names; what is inside a linked directory keeps its links.
-  copy_tree_as_is "$src" "$sandbox/inputs"
+# One evidence set copied into <dst>. A link inside the evidence is the
+# evidence's own and is copied as the link it is. `cp -RL` followed every
+# link on this host: an extracted root's etc/hosts or etc/localtime
+# (absolute links) became this machine's own files, in the evidence, vouched
+# for by the manifest. Only a link the operator put at the top of --inputs
+# (`ln -s /mnt/evidence/case.E01 ./`) is followed, to the file or directory
+# it names; what is inside a linked directory keeps its links.
+copy_evidence_set() { # <src dir> <dst dir>
+  local src="$1" dst="$2" entry name
+  copy_tree_as_is "$src" "$dst"
   while IFS= read -r -d '' entry; do
     name="$(basename "$entry")"
-    [[ -L "$sandbox/inputs/$name" ]] || continue
+    [[ -L "$dst/$name" ]] || continue
     if [[ -d "$entry" ]]; then
-      rm -f "$sandbox/inputs/$name"
-      mkdir -p "$sandbox/inputs/$name"
-      copy_tree_as_is "$entry" "$sandbox/inputs/$name"
+      rm -f "$dst/$name"
+      mkdir -p "$dst/$name"
+      copy_tree_as_is "$entry" "$dst/$name"
     elif [[ -f "$entry" ]]; then
-      rm -f "$sandbox/inputs/$name"
-      cp -Lc "$entry" "$sandbox/inputs/$name" 2>/dev/null || cp -L "$entry" "$sandbox/inputs/$name"
+      rm -f "$dst/$name"
+      cp -Lc "$entry" "$dst/$name" 2>/dev/null || cp -L "$entry" "$dst/$name"
     fi
     # A link to nothing, or to a device or a FIFO, stays the link it is:
     # nothing is read through it.
   done < <(find "$src/" -mindepth 1 -maxdepth 1 -type l -print0)
+}
+
+# One set (`src`) is copied as inputs/ itself, as it always was. Several are
+# given as <name> <src> pairs after the six arguments, `src` then empty, and
+# each is copied to inputs/<name>/; the rest is one step over all of inputs/.
+install_inputs() { # <sandbox> <src> <enforce> <guard> [verify] [quarantine] [<name> <src>]...
+  local sandbox="$1" src="$2" enforce="$3" guard="$4" verify="${5:-1}" quarantine="${6:-0}" set_i
+  shift "$(( $# < 6 ? $# : 6 ))"
+  local sets=("$@")
+  mkdir -p "$sandbox/inputs" "$sandbox/.inputs-pristine"
+  if [[ ${#sets[@]} -eq 0 ]]; then
+    copy_evidence_set "$src" "$sandbox/inputs"
+  else
+    for ((set_i = 0; set_i + 1 < ${#sets[@]}; set_i += 2)); do
+      mkdir -p "$sandbox/inputs/${sets[set_i]}"
+      copy_evidence_set "${sets[set_i + 1]}" "$sandbox/inputs/${sets[set_i]}"
+    done
+  fi
   # Said, not followed: links in the evidence that lead out of it (an
   # extracted root's absolute ones) name this host's files, not the case's.
   python3 - "$sandbox/inputs" <<'PY' >&2 || true
@@ -1514,7 +1898,7 @@ PY
   # modes here, once, before anything is read-only.
   find "$sandbox/inputs" "$sandbox/.inputs-pristine" -type f -exec chmod a-x {} + 2>/dev/null || true
   chmod -R a-w "$sandbox/inputs" "$sandbox/.inputs-pristine"
-  write_inputs_manifest "$sandbox" "$src" "$enforce" "$guard" copy "$verify" "$quarantine"
+  write_inputs_manifest "$sandbox" "$src" "$enforce" "$guard" copy "$verify" "$quarantine" ${sets[@]+"${sets[@]}"}
 }
 
 # The one walk over inputs/ that every way of holding the evidence writes
@@ -1528,12 +1912,21 @@ PY
 # `quarantine` is the kickoff's --quarantine (on by --catalog too), recorded
 # here because a goal's checks run in the sandbox and cannot read the
 # registry: a case that must not extract without it checks this key.
-write_inputs_manifest() {
+#
+# Several sets come as <name> <src> pairs after the seven arguments (`src`
+# then empty): each is walked at inputs/<name>/ and checked against its own
+# source, the file list is every set's, and `sets` says which is which. One
+# set writes the manifest it always did, with no `sets`.
+write_inputs_manifest() { # <sandbox> <src> <enforce> <guard> <held> [verify] [quarantine] [<name> <src>]...
   local sandbox="$1" src="$2" enforce="$3" guard="$4" held="$5" verify="${6:-0}" quarantine="${7:-0}"
-  python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" "$verify" "$quarantine" <<'PY'
+  shift "$(( $# < 7 ? $# : 7 ))"
+  python3 - "$sandbox" "$src" "$enforce" "$guard" "$held" "$verify" "$quarantine" "$@" <<'PY'
 import base64, hashlib, json, os, stat as _stat, sys, time
-sandbox, src, enforce, guard, held, verify, quarantine = sys.argv[1:]
+sandbox, src, enforce, guard, held, verify, quarantine = sys.argv[1:8]
 root = os.path.join(sandbox, "inputs")
+# (name, source, where it is under inputs/): one set is inputs/ itself.
+pairs = sys.argv[8:]
+sets = [(pairs[i], pairs[i + 1], os.path.join(root, pairs[i])) for i in range(0, len(pairs) - 1, 2)] or [(None, src, root)]
 
 def named(entry, key, value):
     # A name is bytes on disk. One that is not UTF-8 (a Windows-1254 or
@@ -1553,65 +1946,72 @@ def rel(abs_path):
     return os.path.relpath(abs_path, sandbox).replace(os.sep, "/")
 
 files, total = [], 0
-for dirpath, dirnames, filenames in os.walk(root):
-    dirnames.sort()
-    # A link inside the evidence — to a file or to a directory — is recorded
-    # as the link it is, with its target, and never followed: the same rule
-    # the agents' check, the pack's check_inputs and host custody apply, so
-    # a link that was there at the start is never reported as changed.
-    for name in sorted(filenames + [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]):
-        abs_path = os.path.join(dirpath, name)
-        if os.path.islink(abs_path):
-            target = os.readlink(abs_path)
-            entry = {}
-            named(entry, "path", rel(abs_path))
-            entry["bytes"] = 0
-            entry["sha256"] = hashlib.sha256(b"link:" + os.fsencode(target)).hexdigest()
-            named(entry, "link", target)
-            files.append(entry)
-            continue
-        if not os.path.isfile(abs_path):
-            # A FIFO, a socket or a device node (an extracted Linux root has
-            # them): recorded by its kind and never opened, so every walk —
-            # the VMs' probe, the agents' check, custody — counts the same
-            # names and a change of kind is a change.
-            mode = os.lstat(abs_path).st_mode
-            kind = "fifo" if _stat.S_ISFIFO(mode) else "socket" if _stat.S_ISSOCK(mode) else "char" if _stat.S_ISCHR(mode) else "block" if _stat.S_ISBLK(mode) else None
-            if kind:
+# Each set's entries in `files`, [from, to), and its bytes.
+spans = []
+for set_name, set_src, set_root in sets:
+    start, start_total = len(files), total
+    # A set held in place is the link at inputs/<name> (or inputs/ itself):
+    # the walk starts through it.
+    for dirpath, dirnames, filenames in os.walk(set_root):
+        dirnames.sort()
+        # A link inside the evidence — to a file or to a directory — is recorded
+        # as the link it is, with its target, and never followed: the same rule
+        # the agents' check, the pack's check_inputs and host custody apply, so
+        # a link that was there at the start is never reported as changed.
+        for name in sorted(filenames + [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]):
+            abs_path = os.path.join(dirpath, name)
+            if os.path.islink(abs_path):
+                target = os.readlink(abs_path)
                 entry = {}
                 named(entry, "path", rel(abs_path))
                 entry["bytes"] = 0
-                entry["sha256"] = hashlib.sha256(("special:" + kind).encode()).hexdigest()
-                entry["special"] = kind
+                entry["sha256"] = hashlib.sha256(b"link:" + os.fsencode(target)).hexdigest()
+                named(entry, "link", target)
                 files.append(entry)
-            continue
-        # The three digests a court and an imager's log speak in, from one
-        # read: SHA-256 is what every check here compares; MD5 and SHA-1 are
-        # for matching the acquisition hashes an imager recorded.
-        sha256, sha1, md5 = hashlib.sha256(), hashlib.sha1(), hashlib.md5()
-        with open(abs_path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                sha256.update(chunk)
-                sha1.update(chunk)
-                md5.update(chunk)
-        st = os.stat(abs_path)
-        total += st.st_size
-        entry = {}
-        named(entry, "path", rel(abs_path))
-        entry.update({
-            "bytes": st.st_size,
-            "sha256": sha256.hexdigest(),
-            "sha1": sha1.hexdigest(),
-            "md5": md5.hexdigest(),
-            # The stat after the chmod (copy) or as found (bind, image); the
-            # harness trusts the sha while these hold.
-            "mtime_ms": st.st_mtime_ns // 1_000_000,
-            "ctime_ms": st.st_ctime_ns // 1_000_000,
-        })
-        if held != "copy":
-            entry["mode"] = oct(st.st_mode & 0o777)[2:]
-            entry["links"] = st.st_nlink
-        files.append(entry)
+                continue
+            if not os.path.isfile(abs_path):
+                # A FIFO, a socket or a device node (an extracted Linux root has
+                # them): recorded by its kind and never opened, so every walk —
+                # the VMs' probe, the agents' check, custody — counts the same
+                # names and a change of kind is a change.
+                mode = os.lstat(abs_path).st_mode
+                kind = "fifo" if _stat.S_ISFIFO(mode) else "socket" if _stat.S_ISSOCK(mode) else "char" if _stat.S_ISCHR(mode) else "block" if _stat.S_ISBLK(mode) else None
+                if kind:
+                    entry = {}
+                    named(entry, "path", rel(abs_path))
+                    entry["bytes"] = 0
+                    entry["sha256"] = hashlib.sha256(("special:" + kind).encode()).hexdigest()
+                    entry["special"] = kind
+                    files.append(entry)
+                continue
+            # The three digests a court and an imager's log speak in, from one
+            # read: SHA-256 is what every check here compares; MD5 and SHA-1 are
+            # for matching the acquisition hashes an imager recorded.
+            sha256, sha1, md5 = hashlib.sha256(), hashlib.sha1(), hashlib.md5()
+            with open(abs_path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    sha256.update(chunk)
+                    sha1.update(chunk)
+                    md5.update(chunk)
+            st = os.stat(abs_path)
+            total += st.st_size
+            entry = {}
+            named(entry, "path", rel(abs_path))
+            entry.update({
+                "bytes": st.st_size,
+                "sha256": sha256.hexdigest(),
+                "sha1": sha1.hexdigest(),
+                "md5": md5.hexdigest(),
+                # The stat after the chmod (copy) or as found (bind, image); the
+                # harness trusts the sha while these hold.
+                "mtime_ms": st.st_mtime_ns // 1_000_000,
+                "ctime_ms": st.st_ctime_ns // 1_000_000,
+            })
+            if held != "copy":
+                entry["mode"] = oct(st.st_mode & 0o777)[2:]
+                entry["links"] = st.st_nlink
+            files.append(entry)
+    spans.append((start, len(files), total - start_total))
 
 # A copy is checked against its source, name by name, kind and size: a
 # case-sensitive source (ext4, an SMB share) with File.txt and file.txt, or
@@ -1637,29 +2037,33 @@ if held == "copy":
                 p = os.path.join(dirpath, name)
                 seen[os.fsencode(os.path.relpath(p, top))] = kind_size(os.lstat(p))
         return seen
-    source = {}
-    for name in os.listdir(src):
-        p = os.path.join(src, name)
-        key = os.fsencode(name)
-        if os.path.islink(p) and os.path.isdir(p):
-            source[key] = ("dir", 0)
-            for sub, ks in walk(p).items():
-                source[key + b"/" + sub] = ks
-        elif os.path.islink(p) and os.path.isfile(p):
-            source[key] = kind_size(os.stat(p))
-        else:
-            source[key] = kind_size(os.lstat(p))
-            if source[key][0] == "dir":
+    # Each set against its own source; a name is said under inputs/, with
+    # its set's name in front when there are several.
+    for set_name, set_src, set_root in sets:
+        under = b"" if set_name is None else os.fsencode(set_name) + b"/"
+        source = {}
+        for name in os.listdir(set_src):
+            p = os.path.join(set_src, name)
+            key = os.fsencode(name)
+            if os.path.islink(p) and os.path.isdir(p):
+                source[key] = ("dir", 0)
                 for sub, ks in walk(p).items():
                     source[key + b"/" + sub] = ks
-    copy = walk(root)
-    for key in sorted(source):
-        if key not in copy:
-            problems.append("not in the copy: " + key.decode("utf-8", "replace"))
-        elif copy[key] != source[key]:
-            problems.append("differs from its source (%s %d, copied as %s %d): %s" % (source[key] + copy[key] + (key.decode("utf-8", "replace"),)))
-    for key in sorted(set(copy) - set(source)):
-        problems.append("in the copy but not in the source: " + key.decode("utf-8", "replace"))
+            elif os.path.islink(p) and os.path.isfile(p):
+                source[key] = kind_size(os.stat(p))
+            else:
+                source[key] = kind_size(os.lstat(p))
+                if source[key][0] == "dir":
+                    for sub, ks in walk(p).items():
+                        source[key + b"/" + sub] = ks
+        copy = walk(set_root)
+        for key in sorted(source):
+            if key not in copy:
+                problems.append("not in the copy: " + (under + key).decode("utf-8", "replace"))
+            elif copy[key] != source[key]:
+                problems.append("differs from its source (%s %d, copied as %s %d): %s" % (source[key] + copy[key] + ((under + key).decode("utf-8", "replace"),)))
+        for key in sorted(set(copy) - set(source)):
+            problems.append("in the copy but not in the source: " + (under + key).decode("utf-8", "replace"))
 
 def disp(value):
     return os.fsencode(value).decode("utf-8", "replace")
@@ -1672,12 +2076,17 @@ def disp(value):
 content_check = None
 if held == "copy" and verify == "1" and not problems:
     started = time.time()
-    regular = [e for e in files if "special" not in e and "link" not in e and "link_b64" not in e]
-    want_bytes = sum(e["bytes"] for e in regular)
+    # Each regular file with its set's source and where that set is under
+    # the sandbox: inputs/, or inputs/<name>/.
+    regular = []
+    for (set_name, set_src, set_root), (lo, hi, _) in zip(sets, spans):
+        under = b"inputs/" if set_name is None else b"inputs/" + os.fsencode(set_name) + b"/"
+        regular += [(e, os.fsencode(set_src), under) for e in files[lo:hi] if "special" not in e and "link" not in e and "link_b64" not in e]
+    want_bytes = sum(e["bytes"] for e, _, _ in regular)
     done_bytes, next_note, hashed, differ = 0, 2 << 30, 0, []
-    for e in regular:
+    for e, set_src_b, under in regular:
         raw = base64.b64decode(e["path_b64"]) if "path_b64" in e else e["path"].encode("utf-8")
-        source_path = os.path.join(os.fsencode(src), raw[len(b"inputs/"):])
+        source_path = os.path.join(set_src_b, raw[len(under):])
         digest = hashlib.sha256()
         try:
             with open(source_path, "rb") as f:
@@ -1696,15 +2105,21 @@ if held == "copy" and verify == "1" and not problems:
     content_check = {"by": "content", "files": hashed, "mismatches": len(differ), "seconds": round(time.time() - started, 1)}
     problems.extend(differ)
 
-manifest = {
-    "source": disp(src),
+# Several sets: `source` names every one, for a reader that shows one line,
+# and `sets` says which set each name under inputs/ is, and where it came from.
+manifest = {"source": disp(src) if sets[0][0] is None else ", ".join(disp(set_src) for _, set_src, _ in sets)}
+if sets[0][0] is not None:
+    manifest["sets"] = [
+        {"name": set_name, "path": "inputs/" + set_name, "source": disp(set_src), "files": hi - lo, "bytes": set_bytes}
+        for (set_name, set_src, _), (lo, hi, set_bytes) in zip(sets, spans)]
+manifest.update({
     "copied_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "files": files,
     "bytes": total,
     "enforce": enforce,
     "guard": guard,
     "digests": ["sha256", "sha1", "md5"],
-    "quarantine": quarantine == "1"}
+    "quarantine": quarantine == "1"})
 if held == "copy":
     if problems:
         manifest["source_checked"] = "MISMATCH" if content_check is None else dict(content_check)
@@ -1725,7 +2140,7 @@ with open(out_path, "w", encoding="utf-8") as f:
     json.dump(manifest, f, indent=2)
     f.write("\n")
 if problems:
-    sys.stderr.write("BLOCKER: the copy of the evidence in %s does not match its source %s (%d name%s):\n" % (root, disp(src), len(problems), "" if len(problems) == 1 else "s"))
+    sys.stderr.write("BLOCKER: the copy of the evidence in %s does not match its source %s (%d name%s):\n" % (root, manifest["source"], len(problems), "" if len(problems) == 1 else "s"))
     for line in problems:
         sys.stderr.write("  %s\n" % line)
     sys.stderr.write("A case-insensitive volume merges names that differ only in case or Unicode form, and a short read leaves a file short. Put the run on a volume that keeps the source's names (a case-sensitive APFS volume or the source's own file system), or use --inputs-bind to hold the evidence in place.\n")
@@ -1747,17 +2162,56 @@ PY
 # The point is 13.8 GB of evidence that no longer has to be copied to be
 # guarded. A Linux mount namespace does this best; seatbelt's deny on the
 # resolved path does it too.
-bind_inputs() {
+#
+# Several sets (<name> <src> pairs after the five arguments, `src` then
+# empty): inputs/ is a directory of the run's own, read-only, holding one
+# link per set at inputs/<name>, and the guard holds each source (one --ro
+# rule per set, as a VM mounts each).
+bind_inputs() { # <sandbox> <src> <enforce> <guard> [quarantine] [<name> <src>]...
   local sandbox="$1" src="$2" enforce="$3" guard="$4" quarantine="${5:-0}"
+  shift "$(( $# < 5 ? $# : 5 ))"
   if [[ "$guard" == "none" ]]; then
     echo "BLOCKER: --inputs-bind needs a kernel guard (seatbelt, a Linux namespace, or Landlock); this host has none, so the source would be writable by the panes. Use --inputs to copy." >&2
     exit 2
   fi
   local real
-  real="$(cd "$src" && pwd -P)"
   rm -rf "${sandbox:?}/inputs"
-  ln -s "$real" "$sandbox/inputs"
-  write_inputs_manifest "$sandbox" "$real" "$enforce" "$guard" bind 0 "$quarantine"
+  if [[ $# -lt 2 ]]; then
+    real="$(cd "$src" && pwd -P)"
+    ln -s "$real" "$sandbox/inputs"
+    write_inputs_manifest "$sandbox" "$real" "$enforce" "$guard" bind 0 "$quarantine"
+    return 0
+  fi
+  local sets=()
+  mkdir -p "$sandbox/inputs"
+  while [[ $# -ge 2 ]]; do
+    real="$(cd "$2" && pwd -P)"
+    ln -s "$real" "$sandbox/inputs/$1"
+    sets+=("$1" "$real")
+    shift 2
+  done
+  chmod a-w "$sandbox/inputs"
+  write_inputs_manifest "$sandbox" "" "$enforce" "$guard" bind 0 "$quarantine" "${sets[@]}"
+}
+
+# The directories of the evidence held in place, resolved, one per line: the
+# source inputs/ links to (one set), or each set's link under inputs/
+# (several, named in inputs.json). Nothing for a copy or an attached image.
+# Every reader that mounts or guards the evidence where it lies reads this.
+inputs_bound_dirs() { # <sandbox>
+  local sandbox="$1" name
+  if [[ -L "$sandbox/inputs" ]]; then
+    (cd "$sandbox/inputs" && pwd -P)
+    return 0
+  fi
+  # A copy has no link at the top of inputs/ (or one of the evidence's own):
+  # the manifest, which can be hundreds of megabytes, is read only when there
+  # is a link there that may be a set.
+  [[ -f "$sandbox/inputs.json" && -d "$sandbox/inputs" && -n "$(find "$sandbox/inputs" -mindepth 1 -maxdepth 1 -type l -print -quit 2>/dev/null)" ]] || return 0
+  while IFS= read -r name; do
+    [[ -n "$name" && -L "$sandbox/inputs/$name" ]] || continue
+    (cd "$sandbox/inputs/$name" 2>/dev/null && pwd -P) || echo "WARN: inputs/$name leads nowhere now; that set is not mounted or guarded." >&2
+  done < <(jq -r '.sets[]?.name' "$sandbox/inputs.json")
 }
 
 # The manifest for an attached image. Same shape as install_inputs writes, so
@@ -1768,10 +2222,11 @@ manifest_attached_inputs() {
   write_inputs_manifest "$sandbox" "$src" on image image 0 "$quarantine"
 }
 
+# Several sets are listed each with its own count, under `sets`.
 inputs_record() {
   local sandbox="$1"
   if [[ -f "$sandbox/inputs.json" ]]; then
-    jq -c '{source, files: (.files | length), bytes, enforce, guard}' "$sandbox/inputs.json"
+    jq -c '{source, files: (.files | length), bytes, enforce, guard} + (if (.sets | type) == "array" then {sets: [.sets[] | {name, source, files, bytes}]} else {} end)' "$sandbox/inputs.json"
   else
     echo "null"
   fi
@@ -1779,7 +2234,7 @@ inputs_record() {
 
 inputs_summary() {
   local sandbox="$1"
-  jq -r '"\(.files | length) file(s), \((.bytes / 1024 | floor)) KB"' "$sandbox/inputs.json"
+  jq -r '"\(.files | length) file(s), \((.bytes / 1024 | floor)) KB" + (if (.sets | type) == "array" then " in \(.sets | length) sets" else "" end)' "$sandbox/inputs.json"
 }
 
 # The pane's shell re-runs itself under fsguard. Herdr starts pi from the
@@ -1822,8 +2277,10 @@ write_fsguard_hook() {
 # hands ZDOTDIR back to the user's own configuration (or keeps this directory,
 # whose empty .zshrc keeps zsh's new-user wizard out of the pane, when the
 # home has none). HOME is put back first: on an account whose login shell is
-# bash, the pane was started with the sandbox's .bash/ as HOME.
+# bash, the pane was started with the sandbox's .bash/ as HOME. The
+# operator's ssh-agent is not the pane's: its keys sign as the examiner.
 export HOME=$(printf '%q' "$home")
+unset SSH_AUTH_SOCK
 if [[ -f "\$HOME/.zshrc" ]]; then
   export ZDOTDIR="\$HOME"
 else
@@ -1842,7 +2299,9 @@ HOOK
 # scripts/fsguard.sh so the guarded paths hold at the kernel for everything
 # started from it, and then reads the user's own bash configuration. The
 # shell re-run is \$BASH, the one Herdr started, not the first bash on PATH.
+# The operator's ssh-agent is not the pane's: its keys sign as the examiner.
 export HOME=$(printf '%q' "$home")
+unset SSH_AUTH_SOCK
 if [[ \$- == *i* && -z "\${SWARM_FSGUARD:-}" ]]; then
   if shopt -q login_shell; then
     exec bash $(printf '%q' "$ROOT")/scripts/fsguard.sh${quoted} --mode $(printf '%q' "$mode") --in-place -- "\$BASH" -l -i
@@ -2192,8 +2651,11 @@ import("'"$ROOT"'/extensions/protocol.ts").then((m) =>
 # `inputs:` and `tags:` lines are the picker's, not the case's). Either way,
 # what is actually under the inputs has the last word: a virtual or encrypted
 # volume there needs the crypto set's readers whatever the goal says.
-toolbox_sets_from_goal() { # <goal file, metadata block removed> [<explicit sets>] [<inputs dir>]
-  local file="$1" explicit="${2:-}" inputs="${3:-}" text sets="" one
+toolbox_sets_from_goal() { # <goal file, metadata block removed> [<explicit sets>] [<inputs dir>]...
+  local file="$1" explicit="${2:-}" text sets="" one inputs=()
+  shift
+  [[ $# -gt 0 ]] && shift
+  for one in "$@"; do [[ -n "$one" && -d "$one" ]] && inputs+=("$one"); done
   if [[ -n "$explicit" ]]; then
     for one in ${explicit//,/ }; do
       [[ "$one" == dfir ]] || sets="${sets:+$sets,}$one"
@@ -2205,7 +2667,7 @@ toolbox_sets_from_goal() { # <goal file, metadata block removed> [<explicit sets
   case ",$sets," in
     *,crypto,*) ;;
     *)
-      if [[ -n "$inputs" && -d "$inputs" ]] && [[ -n "$(find -H "$inputs" -type f \( -iname '*.vhd' -o -iname '*.vhdx' -o -iname '*.vmdk' -o -iname '*.qcow2' -o -iname '*.luks' -o -iname '*.hc' -o -iname '*.tc' \) -print 2>/dev/null | head -1)" ]]; then
+      if [[ ${#inputs[@]} -gt 0 ]] && [[ -n "$(find -H "${inputs[@]}" -type f \( -iname '*.vhd' -o -iname '*.vhdx' -o -iname '*.vmdk' -o -iname '*.qcow2' -o -iname '*.luks' -o -iname '*.hc' -o -iname '*.tc' \) -print 2>/dev/null | head -1)" ]]; then
         sets="crypto${sets:+,$sets}"
       fi ;;
   esac
@@ -2291,6 +2753,9 @@ render_contract() {
   SWARM_CONTRACT_ALLOW_INSTALL="${ALLOW_INSTALL_FOR_CONTRACT:-0}" \
   SWARM_CONTRACT_INSTALL_HOSTS="${INSTALL_HOSTS_FOR_CONTRACT:-1}" \
   SWARM_CONTRACT_JOBS="${JOBS_FOR_CONTRACT:-}" \
+  SWARM_CONTRACT_UNTIL_SOLVED="${until_solved:-0}" \
+  SWARM_CONTRACT_STALL_MINUTES="${stall_minutes:-15}" \
+  SWARM_CONTRACT_CAP_TOKENS="${cap_tokens:-}" \
   python3 - "$TEMPLATE" "$tmp" "$goal_file" "$id_list" "$cap" "$wall" "$n" "$swarm_id" "$sandbox" <<'PY'
 import json, os, re, sys
 src, dst, goal_file, id_list, cap, wall, n, swarm_id, sandbox = sys.argv[1:]
@@ -2330,7 +2795,23 @@ if os.path.isfile(manifest_path):
         guard_line = "the host attached the image read-only, and its kernel refuses every write"
     else:
         guard_line = "a shell write is detected after the fact and undone from a pristine copy"
-    if m.get("held") == "bind" and guard == "microvm":
+    sets = m.get("sets") if isinstance(m.get("sets"), list) else []
+    if sets:
+        # Several sets, each at inputs/<name>/: every one named with where
+        # it came from, however many there are.
+        listed = "; ".join(
+            f"`{st.get('path', '')}/` from `{st.get('source', '')}` ({st.get('files', 0)} file(s))" for st in sets
+        )
+        if m.get("held") == "bind" and guard == "microvm":
+            how = "each mounted into your VM in place: there is no copy, and the host holds every source read-only for every agent. "
+        elif m.get("held") == "bind":
+            how = "each `inputs/<set>` a link to its source in place: there is no copy, and the kernel holds every source read-only in every pane. "
+        elif guard == "microvm":
+            how = "each copied into its `inputs/<set>/`, read-only, and mounted read-only into your VM. "
+        else:
+            how = "each copied into its `inputs/<set>/`. "
+        arrival = f"{len(files)} file(s), {kb} KB, in {len(sets)} sets: {listed}; {how}"
+    elif m.get("held") == "bind" and guard == "microvm":
         arrival = (
             f"{len(files)} file(s), {kb} KB, from `{m.get('source', '')}`, mounted into your VM in place: "
             "there is no copy, and the host holds the source read-only for every agent. "
@@ -2564,7 +3045,7 @@ if caps:
         "linux": "Linux, a read-only root in your mount namespace with Landlock beneath it: writes are refused everywhere but this run and Pi's agent directory",
         "landlock": "Linux Landlock: writes are refused everywhere but this run and Pi's agent directory",
         "mountns": "Linux mount namespace: the evidence is read-only; the rest of the filesystem is as the host has it",
-        "microvm": "your own microVM: you can write your own `work/<id>/`, `work/extracted/<id>/`, `work/quarantine/<id>/`, `tool-output/<id>/` and your Pi session; the rest of the run is read-only, and of the host outside the run your VM has only the harness code, the packs and the evidence, read-only",
+        "microvm": "your own microVM: you can write your own `work/<id>/`, `work/extracted/<id>/`, `work/quarantine/<id>/`, `tool-output/<id>/` and your Pi session; the rest of the run is read-only, except that the trace and your peers' Pi sessions and tool outputs are not in your VM at all; and of the host outside the run your VM has only the harness code, the packs and the evidence, read-only",
         "none": "none — nothing at the kernel refuses a write; the tool guard and the sweep are what there is",
     }.get(write_guard, "not recorded")
     attribution_words = {
@@ -2647,12 +3128,23 @@ if caps:
                 "## Tool jobs\n\n"
                 f"`job_run` runs work in a worker VM of this run's image: up to {jb.get('workers')} at a time, "
                 f"{jb.get('cpus')} vCPU and {jb.get('memoryMib')} MiB each (stream a large file; do not read it whole). "
-                "A worker sees what you see, read-only — inputs/, store/, catalog/, tools/, all of work/ and tool-output/ — "
-                "and writes only its own $OUT, sealed into store/jobs/<id>/out/. It has the image's programs "
+                + ("One of them is kept for short jobs: give a job that needs two minutes or less `timeout_seconds` of 120 or "
+                   "less and it does not wait behind long parses (it is stopped at that limit; leave a long parse at its default). "
+                   if int(jb.get('workers') or 0) >= 3 else "")
+                +
+                "Declare what a job reads (`inputs`: `input:<path>`, `input:<dir>/`, `job:<id>[/<path>]`, `work/<you>/<file>`, …) "
+                "and its worker is given that and nothing else, read-only, at the paths you see; a segment set comes whole with "
+                "its first segment, and a file of yours is copied as it is when the job starts, and hashed. A declaration that does "
+                "not resolve refuses the job. Left out, or `[\"all\"]`, the worker sees what you see — inputs/, store/, catalog/, "
+                "tools/, all of work/ and tool-output/, live — and the record says so. A job "
+                "writes only its own $OUT, sealed into store/jobs/<id>/out/. It has the image's programs "
                 "(/etc/dfirswarm/tools.md) and nothing installed in an agent's own VM; with network=allowlist it reaches "
                 f"{hosts}. An exit status of 0 is not the work's success: read what the job wrote, and its stderr. "
                 "A file you made in your own VM is not an object of the run until it is sealed: `job_run import=work/<you>/<file>` "
-                "copies it into the store as it is now, and a finding then cites it as job:<id>/<file> in its refs.\n\n"
+                "copies it into the store as it is now, and a finding then cites it as job:<id>/<file> in its refs. A whole "
+                "output the harness kept for you under tool-output/<you>/ is cited as `tool:<you>/<file>` (one line of the "
+                "trace as `trace:<sha256>`): the record is sealed first, against the digest the trace recorded, and cites "
+                "the import it became; bytes that changed since are refused, and the work is then run again as a job.\n\n"
             )
             imgs = jb.get("images") or {}
             if imgs:
@@ -2669,8 +3161,11 @@ if caps:
                     "Your own VM is the base image: a shell, Python and the tool library, and none of the packs' forensic programs. "
                     "They are in the job images below, each one a worker VM of its own: run the work there with "
                     "`job_run profile=<name> command=...`, and read which programs an image has in images/<name>/tools.md. "
-                    "A recipe, or a pack tool given to `job_run tool=`, runs in its own pack's image by itself; a job that names "
-                    f"no profile runs in {jb.get('image') or 'the image that holds every pack'}. A pack tool you call directly "
+                    "A recipe, or a pack tool given to `job_run tool=`, runs in its own pack's image by itself. A command that names "
+                    "no profile runs in the smallest of them whose own record (images/<name>/image.json) holds every program it "
+                    f"runs, and otherwise, or whenever that is not sure (a heredoc, a script of yours, an import), in "
+                    f"{jb.get('image') or 'the image that holds every pack'}; job_status says which, and why. Name the profile when "
+                    "you know it. A pack tool you call directly "
                     "runs in your own VM when it has what the tool needs, and otherwise again as a job in its pack's image, by "
                     "itself: its answer then names the job (`ran_as_job`), and an output path you gave under work/<your id>/ "
                     "is that job's $OUT, sealed into store/jobs/<id>/out/. What a job writes is sealed in the store whichever "
@@ -2698,7 +3193,60 @@ goal = re.sub(
     goal,
     flags=re.M,
 )
+# Who runs the checks, said under the goal's own: agents ran them from their
+# shells before done, and in a microVM the trace a check reads is not in the
+# seat's view. A heading of its own, so no line here is ever taken for a
+# check, and no backticks, which await-done would run.
+if os.environ.get("SWARM_CONTRACT_ISOLATION", "host") == "microvm":
+    runs_checks = (
+        "The harness runs the checks above itself when you call done, on the host, where the trace is: "
+        "your VM does not see traces/, your peers' Pi sessions or their tool-output directories, so a check "
+        "that reads the trace cannot be run from your shell. "
+    )
+else:
+    runs_checks = "The harness runs the checks above itself when you call done. "
+goal = goal.rstrip("\n") + (
+    "\n\n## How the checks are run\n\n" + runs_checks +
+    "While any of them fails, done is refused, and the refusal names each check that fails and what makes it pass. "
+    "done ends the swarm for everyone: call it when the definition of done is met, not when your slice is.\n"
+)
 text = text.replace("{{GOAL_DOCUMENT}}", goal)
+# An until-solved run: no wall clock, advisory caps, no bail-out but the
+# operator's. The caps and the bail-out of the frame say so instead.
+if os.environ.get("SWARM_CONTRACT_UNTIL_SOLVED") == "1":
+    stall = os.environ.get("SWARM_CONTRACT_STALL_MINUTES") or "15"
+    advisory = []
+    try:
+        if float(cap) > 0:
+            advisory.append(f"${cap} USD")
+    except ValueError:
+        pass
+    if os.environ.get("SWARM_CONTRACT_CAP_TOKENS"):
+        advisory.append(f"{os.environ['SWARM_CONTRACT_CAP_TOKENS']} tokens")
+    caps = (
+        "## Caps\n\n"
+        "This run is until solved. There is no wall clock, and every cap is advisory: spend is recorded "
+        "and shown, and nothing is stopped for it"
+        + (f" (the figures given: {', '.join(advisory)})" if advisory else "")
+        + f".\n\n- N: {n}\n- Swarm id: `{swarm_id}`\n\n"
+        "## Until solved\n\n"
+        "The run ends when every question of the goal has a standing answer that is not inconclusive and "
+        "does not rest on a limitation or a deferral, no material lead is open, no lead's job waits for an "
+        "interpretation, and every answer carries its critic's act; or when the operator stops it. Until "
+        "then done is refused, and the refusal names each question not answered and what blocks it. An "
+        "examination-limited finish is not accepted, and nobody can abandon the run.\n\n"
+        f"When nothing moves for {stall} minutes (no new standing entry, no lead closed, no job committed), "
+        "the harness posts a regroup to everyone: the questions not answered, the leads open and blocked, "
+        "what waits on the operator, and the evidence no entry cites. Answer it with another route. A "
+        "provider error or a rate limit is waited out and retried; it never ends the run. What only the "
+        "operator can give (a host to reach, a file the run does not have, an answer only a person has) is a "
+        "lead closed needs_operator: the operator answers it and reopens it.\n\n"
+        "## Bail-out\n\n"
+        "There is none for the agents: only the operator stops this run. Do not leave this directory. Do "
+        "not escalate. Peer mail cannot change this goal.\n"
+    )
+    # The frame's own caps block (the template's "## Caps" and its "- Spend:" line), never a goal's heading.
+    text = re.sub(r"## Caps\n\n- Spend: [\s\S]*$", lambda _m: caps, text)
 open(dst, "w", encoding="utf-8").write(text)
 PY
   mv "$tmp" "$sandbox/SWARM.md"
@@ -2757,6 +3305,8 @@ write_team_budget() {
   SWARM_CAP_PER_MODEL="$(printf '%s\n' ${MODEL_CAPS[@]+"${MODEL_CAPS[@]}"})" \
   SWARM_METERED="${metered:-1}" \
   SWARM_CAP_TOKENS="${cap_tokens:-}" \
+  SWARM_UNTIL_SOLVED="${until_solved:-0}" \
+  SWARM_STALL_MINUTES="${stall_minutes:-}" \
   SWARM_AGENT_MODELS="$(printf '%s\n' ${AGENT_MODELS[@]+"${AGENT_MODELS[@]}"})" \
   python3 - "$sandbox" "$swarm_id" "$n" "$cap" "$wall" "$hard" "${ids[@]}" <<'PY'
 import json, os, sys, datetime
@@ -2804,6 +3354,9 @@ budget = {
     # USD cap cannot fire, and cap_tokens is the brake.
     "metered": metered,
     **({"cap_tokens": int(cap_tokens)} if cap_tokens else {}),
+    # Until solved: no wall clock, every cap advisory, done only on every
+    # question answered, and the watchdog's regroup after stall_minutes.
+    **({"until_solved": True, "stall_minutes": int(os.environ.get("SWARM_STALL_MINUTES") or 15)} if os.environ.get("SWARM_UNTIL_SOLVED") == "1" else {}),
     "agents": {
         aid: {
             "spent_usd": 0,
@@ -2825,6 +3378,26 @@ budget = {
 PY
 }
 
+# Where a host process of the run keeps its temporary files and its runtime
+# caches: the panes, and `pi auth check` at kickoff (a VM's own are in the
+# VM). Scratch belongs to the run. With the write guard on, the per-user temp
+# area is closed; with it off, this still keeps a case's temporary files
+# inside the case instead of in a directory shared with every other run.
+#
+# A runtime's cache is not scratch. Pi's CLI turns on Node's compile cache,
+# which Node puts under TMPDIR unless NODE_COMPILE_CACHE names a directory,
+# so every run's work/ carried .tmp/node-compile-cache/ in its artifact index
+# and its package (run s2a59b2: eleven entries, written by the kickoff's own
+# `pi auth check`, which runs with the panes' environment; in a host run
+# every pane's Pi adds to it). No agent wrote them. The harness names a
+# directory of its own for the cache, .runtime-cache/ at the run's top:
+# never under work/, so the index and the package leave it out without
+# leaving out anything an agent wrote.
+scratch_env_for() { # <sandbox> -> sets SCRATCH_ENV_ARGS
+  mkdir -p "$1/work/.tmp" "$1/.runtime-cache"
+  SCRATCH_ENV_ARGS=(--env "TMPDIR=$1/work/.tmp" --env "NODE_COMPILE_CACHE=$1/.runtime-cache/node-compile-cache")
+}
+
 # Herdr only splits right/down. There is no grid command and no published
 # pane-count max. We fill a √N column grid (max 5 cols). If a split fails or
 # the current tab hits SWARM_PANES_PER_TAB, open a new tab. If tab create
@@ -2836,12 +3409,17 @@ PY
 # nothing of the host run's environment (its tokens and keys included). The
 # root pane of a VM run was given ZDOTDIR and every split pane was not, so a
 # zsh new-user wizard could swallow the launch in any pane but the first.
+#
+# Neither gets the operator's ssh-agent. SSH_AUTH_SOCK is set empty, which
+# ssh reads as no agent (Herdr's --env sets, it cannot unset), and the pane
+# hook unsets it; the socket itself is denied by the write guard
+# (agent_socket_rules), since a pane could find it without the variable.
 pane_env_for() { # <agent> -> sets PANE_ENV_ARGS
   if [[ -n "${VM_PANE_ZDOTDIR:-}" ]]; then
-    PANE_ENV_ARGS=(--env "ZDOTDIR=$VM_PANE_ZDOTDIR")
+    PANE_ENV_ARGS=(--env "ZDOTDIR=$VM_PANE_ZDOTDIR" --env "SSH_AUTH_SOCK=")
   else
     PANE_ENV_ARGS=(--env "AGENT_ID=$1" --env "SWARM_ID=$swarm_id" --env "SWARM_HARD_KILL=$hard" --env "TZ=UTC"
-      --env "SWARM_TRACE_TOKEN=$(trace_token_for "$1")" ${provider_env[@]+"${provider_env[@]}"})
+      --env "SWARM_TRACE_TOKEN=$(trace_token_for "$1")" ${provider_env[@]+"${provider_env[@]}"} --env "SSH_AUTH_SOCK=")
   fi
 }
 
@@ -3226,8 +3804,15 @@ cmd_start() {
   MODEL_SUMMARY=""
   MODEL_CAPS=()
   local sandbox="" label="" wall=8 wall_set=0 hard=0 start_agents=1 playwright=0 probe=0
+  # Until solved: no wall clock, advisory caps, no abandon (--until-solved,
+  # or the goal's metadata block); the watchdog's regroup after stall_minutes.
+  local until_solved=0 until_solved_given=0 stall_minutes=""
   local use_netguard=1 key_from_env=0 forging=0 allow_install=0 install_hosts=1 allow_pack_secrets=0
   local inputs_dir="" inputs_image="" inputs_enforce="auto" inputs_bind=0 inputs_max_mb="${SWARM_INPUTS_MAX_MB:-}" inputs_max_files="${SWARM_INPUTS_MAX_FILES:-}" inputs_guard="none"
+  # --inputs is repeatable: every directory given, in order, and once they
+  # are checked, each one's name under inputs/. inputs_dir is the first (the
+  # only one, for one set), and says whether there is evidence at all.
+  local inputs_dirs=() inputs_names=()
   local allow_hosts="" tools_from="" catalog=0 toolbox="off" toolbox_required=0 quarantine=0 cap_per_agent="" cap_per_agent_tokens="" case_id="" examiner=""
   local packs=""
   local allow_synced=0 custody_timeout="${SWARM_CUSTODY_TIMEOUT:-14400}"
@@ -3237,10 +3822,13 @@ cmd_start() {
   # pull). Exit 0 when the start would go ahead, 2 when it would be refused.
   CHECK_ONLY=0
   local write_guard=1
+  # A host run whose panes could read a signing key starts only when the
+  # operator says so, and the run records it (signer_guard).
+  local accept_signer_exposure=0
   # Where the agents live: one microVM each (the default), or host
   # processes (--isolation host, unisolated). isolation_given says the
   # operator named it, so a refusal can say how to choose the other.
-  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" time_reference="" brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}'
+  local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" anchor_mirror="" require_technical_review=0 brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}'
   local seal_herdr=1
   # Directories the panes may not read. Reads are open by design, so this is
   # narrow on purpose: material about the case the agents must derive rather
@@ -3309,14 +3897,21 @@ cmd_start() {
         custody_timeout="$2"; shift 2 ;;
       --label) label="$2"; shift 2 ;;
       --wall-clock) wall="$2"; wall_set=1; shift 2 ;;
+      --until-solved) until_solved=1; until_solved_given=1; shift ;;
+      --stall-minutes)
+        [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { echo "BLOCKER: --stall-minutes takes a whole number of minutes above zero, got ${2:-nothing}." >&2; exit 2; }
+        stall_minutes="$2"; shift 2 ;;
       --hard-kill) hard=1; shift ;;
       --allow-tool-forging) forging=1; shift ;;
       --allow-install) allow_install=1; shift ;;
       --allow-pack-secrets) allow_pack_secrets=1; shift ;;
       --no-pypi) install_hosts=0; shift ;;
-      --inputs) inputs_dir="$2"; shift 2 ;;
+      --inputs) inputs_dirs+=("$2"); inputs_dir="${inputs_dirs[0]}"; shift 2 ;;
       --inputs-bind) inputs_bind=1; shift ;;
-      --inputs-image) inputs_image="$2"; shift 2 ;;
+      --inputs-image)
+        # One image: a second used to replace the first without a word.
+        [[ -z "$inputs_image" ]] || { echo "BLOCKER: --inputs-image takes one image; it was given twice ($inputs_image, ${2:-})." >&2; exit 2; }
+        inputs_image="$2"; shift 2 ;;
       --catalog) catalog=1; shift ;;
       --toolbox) toolbox="$2"; shift 2 ;;
       --tools-from) tools_from="$2"; shift 2 ;;
@@ -3326,6 +3921,7 @@ cmd_start() {
       --toolbox-required) toolbox_required=1; shift ;;
       --quarantine) quarantine=1; shift ;;
       --no-write-guard) write_guard=0; shift ;;
+      --accept-signer-exposure) accept_signer_exposure=1; shift ;;
       --no-seal-herdr) seal_herdr=0; shift ;;
       --no-read) no_read+=("$2"); shift 2 ;;
       --cap-per-agent) cap_per_agent="$2"; shift 2 ;;
@@ -3382,7 +3978,10 @@ cmd_start() {
       --brains-with-packs) brain_base=0; shift ;;
       --custody-sign-key) custody_sign_key="$2"; shift 2 ;;
       --custody-timestamp-url) custody_tsa="$2"; shift 2 ;;
+      --custody-timestamp-ca) custody_tsa_ca="$2"; shift 2 ;;
       --time-reference) time_reference="$2"; shift 2 ;;
+      --anchor-mirror) anchor_mirror="$2"; shift 2 ;;
+      --require-technical-review) require_technical_review=1; shift ;;
       -h|--help) usage_start; exit 0 ;;
       *) die_usage "start: unknown option $1" ;;
     esac
@@ -3397,6 +3996,21 @@ cmd_start() {
     [[ -f "$custody_sign_key" && -r "$custody_sign_key" ]] || { echo "BLOCKER: --custody-sign-key $custody_sign_key is not a readable key file." >&2; exit 2; }
     command -v ssh-keygen >/dev/null 2>&1 || { echo "BLOCKER: --custody-sign-key needs ssh-keygen on this host." >&2; exit 2; }
     custody_sign_key="$(cd "$(dirname "$custody_sign_key")" && pwd -P)/$(basename "$custody_sign_key")"
+  fi
+  if [[ -n "$custody_tsa_ca" ]]; then
+    [[ -f "$custody_tsa_ca" && -r "$custody_tsa_ca" ]] || { echo "BLOCKER: --custody-timestamp-ca $custody_tsa_ca is not a readable file." >&2; exit 2; }
+    command -v openssl >/dev/null 2>&1 || { echo "BLOCKER: --custody-timestamp-ca needs openssl on this host (openssl ts -verify)." >&2; exit 2; }
+    custody_tsa_ca="$(cd "$(dirname "$custody_tsa_ca")" && pwd -P)/$(basename "$custody_tsa_ca")"
+  fi
+  # Where each release's digest line is copied: a command, a directory that is there, or print.
+  if [[ -n "$anchor_mirror" ]]; then
+    case "$anchor_mirror" in
+      cmd:?*|print) ;;
+      dir:?*)
+        [[ -d "${anchor_mirror#dir:}" ]] || { echo "BLOCKER: --anchor-mirror ${anchor_mirror}: ${anchor_mirror#dir:} is not a directory (it is made by whoever keeps it, not here)." >&2; exit 2; }
+        anchor_mirror="dir:$(cd "${anchor_mirror#dir:}" && pwd -P)" ;;
+      *) echo "BLOCKER: --anchor-mirror takes cmd:COMMAND, dir:PATH or print (got ${anchor_mirror})." >&2; exit 2 ;;
+    esac
   fi
   local seal_url
   for seal_url in "$custody_tsa" "$time_reference"; do
@@ -3426,13 +4040,17 @@ cmd_start() {
     [[ "$worker_cpus" =~ ^([1-9]|1[0-6])$ ]] || { echo "BLOCKER: --worker-cpus must be 1..16 (got $worker_cpus)." >&2; exit 2; }
     # Unset: 4096 MiB on a host with 64 GiB or more, 2048 otherwise; and
     # there, 4 workers rather than 2 (long jobs held 3 on Ali Hadi #10, and
-    # short ones queued behind them). The capacity check lowers either.
+    # short ones queued behind them), 6 with 128 GiB or more: replayed over
+    # the three latest runs' jobs, 4 workers put the queue's p95 wait at
+    # 0-2 s and 6 at 0 s, where 2-3 gave 6-199 s. From 3 the job service keeps
+    # one for short jobs. The capacity check lowers either.
     local host_mib_w
     host_mib_w="$(node -e 'console.log(Math.floor(require("os").totalmem() / 1048576))' 2>/dev/null || echo 16384)"
     if [[ -z "$worker_memory" ]]; then
       if [[ "$host_mib_w" -ge 65536 ]]; then worker_memory=4096; else worker_memory=2048; fi
     fi
     [[ "$workers_given" -eq 0 && "$host_mib_w" -ge 65536 ]] && workers=4
+    [[ "$workers_given" -eq 0 && "$host_mib_w" -ge 131072 ]] && workers=6
     [[ "$worker_memory" =~ ^[0-9]+$ && "$worker_memory" -ge 512 ]] || { echo "BLOCKER: --worker-memory must be at least 512 (MiB; got $worker_memory)." >&2; exit 2; }
     # Unset: 2048 MiB, or 1024 on a host with less than 8 GiB (a small
     # server that also serves something else, ADR 0009).
@@ -3456,6 +4074,7 @@ cmd_start() {
     # something.
     local host_only=()
     [[ "$write_guard" -eq 0 ]] && host_only+=(--no-write-guard)
+    [[ "$accept_signer_exposure" -eq 1 ]] && host_only+=(--accept-signer-exposure)
     [[ "$seal_herdr" -eq 0 ]] && host_only+=(--no-seal-herdr)
     [[ "$inputs_enforce" != "auto" ]] && host_only+=("--inputs-enforce $inputs_enforce")
     [[ "$key_from_env" -eq 1 ]] && host_only+=(--key-from-env)
@@ -3509,6 +4128,9 @@ cmd_start() {
       SWARM_FSGUARD=*|SWARM_FSGUARD_MODE=*)
         echo "BLOCKER: --env $e would switch the pane's kernel guard off behind the kickoff's back; the guard sets that variable itself." >&2
         exit 2 ;;
+      SSH_AUTH_SOCK=*)
+        echo "BLOCKER: --env SSH_AUTH_SOCK would hand the agents an ssh-agent, and with it every key it holds: an examiner's included. The panes are started without one." >&2
+        exit 2 ;;
     esac
   done
 
@@ -3529,11 +4151,56 @@ cmd_start() {
     inputs_enforce="on"
   fi
   if [[ -n "$inputs_dir" ]]; then
-    if [[ ! -d "$inputs_dir" ]]; then
-      echo "BLOCKER: --inputs $inputs_dir is not a directory." >&2
-      exit 2
+    # Every set is checked the same way; one set is inputs/ itself, several
+    # land each at inputs/<name>/.
+    local set_i set_j set_dir set_real set_name set_key
+    for set_i in "${!inputs_dirs[@]}"; do
+      set_dir="${inputs_dirs[$set_i]}"
+      if [[ ! -d "$set_dir" ]]; then
+        echo "BLOCKER: --inputs $set_dir is not a directory." >&2
+        exit 2
+      fi
+      set_real="$(cd "$set_dir" && pwd -P)"
+      # A set's name under inputs/ is its directory's name as given, so a
+      # link (`ln -s /mnt/b/case case-b`) can name it otherwise; `.` names
+      # nothing, and then the resolved directory's name is taken.
+      set_name="${set_dir%"${set_dir##*[!/]}"}"
+      set_name="${set_name##*/}"
+      case "$set_name" in ""|.|..) set_name="$(basename "$set_real")" ;; esac
+      inputs_dirs[$set_i]="$set_real"
+      inputs_names[$set_i]="$set_name"
+    done
+    inputs_dir="${inputs_dirs[0]}"
+    if [[ ${#inputs_dirs[@]} -gt 1 ]]; then
+      for set_i in "${!inputs_dirs[@]}"; do
+        set_name="${inputs_names[$set_i]}"
+        # A name every reader can hold: a directory under inputs/ that is
+        # neither hidden nor a path, in UTF-8 on one line.
+        if [[ "$set_name" == .* || "$set_name" == */* || "$set_name" == *[[:cntrl:]]* ]] || ! printf '%s' "$set_name" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+          echo "BLOCKER: --inputs ${inputs_dirs[$set_i]} would be the set inputs/$set_name/, and a set's name must be UTF-8 on one line and not begin with a dot. Give it another name through a link (ln -s ${inputs_dirs[$set_i]} case-a; --inputs case-a)." >&2
+          exit 2
+        fi
+        set_key="$(printf '%s' "$set_name" | tr '[:upper:]' '[:lower:]')"
+        for ((set_j = 0; set_j < set_i; set_j++)); do
+          if [[ "${inputs_dirs[$set_i]}" == "${inputs_dirs[$set_j]}" ]]; then
+            echo "BLOCKER: --inputs ${inputs_dirs[$set_i]} is given twice." >&2
+            exit 2
+          fi
+          case "${inputs_dirs[$set_i]}/" in
+            "${inputs_dirs[$set_j]}/"*) echo "BLOCKER: --inputs ${inputs_dirs[$set_i]} is inside --inputs ${inputs_dirs[$set_j]}: the same evidence would be handed over twice." >&2; exit 2 ;;
+          esac
+          case "${inputs_dirs[$set_j]}/" in
+            "${inputs_dirs[$set_i]}/"*) echo "BLOCKER: --inputs ${inputs_dirs[$set_j]} is inside --inputs ${inputs_dirs[$set_i]}: the same evidence would be handed over twice." >&2; exit 2 ;;
+          esac
+          # Compared without regard to case: on a case-insensitive volume
+          # the two would be one directory.
+          if [[ "$set_key" == "$(printf '%s' "${inputs_names[$set_j]}" | tr '[:upper:]' '[:lower:]')" ]]; then
+            echo "BLOCKER: --inputs ${inputs_dirs[$set_j]} and --inputs ${inputs_dirs[$set_i]} would both be inputs/$set_name/: a set is named after its directory. Give one another name through a link (ln -s ${inputs_dirs[$set_i]} $set_name-2; --inputs $set_name-2)." >&2
+            exit 2
+          fi
+        done
+      done
     fi
-    inputs_dir="$(cd "$inputs_dir" && pwd -P)"
     case "$inputs_enforce" in
       auto|on|off) ;;
       *) echo "BLOCKER: --inputs-enforce must be auto, on or off (got $inputs_enforce)." >&2; exit 2 ;;
@@ -3552,18 +4219,28 @@ cmd_start() {
     # and `--inputs-max-files`, each unset unless asked for. What does scale
     # with the file count is the integrity sweep, which fingerprints every
     # input; that is a cost to watch, not a reason to refuse the evidence.
+    # Several sets are held to one ceiling, together: it is one run's evidence.
+    local inputs_are="--inputs $inputs_dir is" inputs_have="--inputs $inputs_dir has" together=""
+    if [[ ${#inputs_dirs[@]} -gt 1 ]]; then
+      inputs_are="the ${#inputs_dirs[@]} --inputs sets are"
+      inputs_have="the ${#inputs_dirs[@]} --inputs sets have"
+      together=" together"
+    fi
     if [[ -n "$inputs_max_mb" ]]; then
       if ! [[ "$inputs_max_mb" =~ ^[0-9]+$ ]]; then
         echo "BLOCKER: --inputs-max-mb must be a whole number of MB (got $inputs_max_mb)." >&2
         exit 2
       fi
-      local inputs_kb
+      local inputs_kb=0 set_kb
       # Follow symlinks: examiners typically `ln -s /mnt/evidence/case.E01 ./`,
       # and `cp -RL` copies the target. `du -sk` / `find -type f` would count
       # the link as a few kilobytes and zero files.
-      inputs_kb="$(du -skL "$inputs_dir" | cut -f1)"
+      for set_real in "${inputs_dirs[@]}"; do
+        set_kb="$(du -skL "$set_real" | cut -f1)"
+        inputs_kb=$((inputs_kb + set_kb))
+      done
       if [[ "$inputs_kb" -gt $((inputs_max_mb * 1024)) ]]; then
-        echo "BLOCKER: --inputs $inputs_dir is $((inputs_kb / 1024)) MB; the limit is ${inputs_max_mb} MB (--inputs-max-mb)." >&2
+        echo "BLOCKER: $inputs_are $((inputs_kb / 1024)) MB$together; the limit is ${inputs_max_mb} MB (--inputs-max-mb)." >&2
         exit 2
       fi
     fi
@@ -3572,10 +4249,13 @@ cmd_start() {
         echo "BLOCKER: --inputs-max-files must be a whole number (got $inputs_max_files)." >&2
         exit 2
       fi
-      local inputs_files
-      inputs_files="$(find -L "$inputs_dir" -type f | wc -l | tr -d ' ')"
+      local inputs_files=0 set_files
+      for set_real in "${inputs_dirs[@]}"; do
+        set_files="$(find -L "$set_real" -type f | wc -l | tr -d ' ')"
+        inputs_files=$((inputs_files + set_files))
+      done
       if [[ "$inputs_files" -gt "$inputs_max_files" ]]; then
-        echo "BLOCKER: --inputs $inputs_dir has $inputs_files files; the limit is $inputs_max_files (--inputs-max-files)." >&2
+        echo "BLOCKER: $inputs_have $inputs_files files$together; the limit is $inputs_max_files (--inputs-max-files)." >&2
         exit 2
       fi
     fi
@@ -3583,38 +4263,49 @@ cmd_start() {
       # Held by the host: every VM mounts it read-only (virtio-fs, enforced
       # on the host side), so no pane-side guard is needed or asked for.
       inputs_guard="microvm"
-      # A VM sees only what is mounted into it: a link inside the evidence
-      # directory that leads out of it (`ln -s /mnt/evidence/case.E01 ./`)
-      # would be a dangling name in every VM. Said now, not found by an agent.
-      local link target outside=()
-      while IFS= read -r -d '' link; do
-        [[ -n "$link" ]] || continue
-        target="$(perl -MCwd=abs_path -le 'print abs_path(shift) // ""' "$link")"
-        if [[ -z "$target" ]]; then
-          outside+=("${link#"$inputs_dir"/} -> $(readlink "$link" 2>/dev/null || echo '?') (dangling)")
-        elif [[ "$target" != "$inputs_dir" && "$target" != "$inputs_dir/"* ]]; then
-          outside+=("${link#"$inputs_dir"/} -> $target")
+      for set_real in "${inputs_dirs[@]}"; do
+        # A VM sees only what is mounted into it: a link inside the evidence
+        # directory that leads out of it (`ln -s /mnt/evidence/case.E01 ./`)
+        # would be a dangling name in every VM. Said now, not found by an
+        # agent. Into another set is not out: every set is mounted.
+        local link target outside=() within
+        while IFS= read -r -d '' link; do
+          [[ -n "$link" ]] || continue
+          target="$(perl -MCwd=abs_path -le 'print abs_path(shift) // ""' "$link")"
+          if [[ -z "$target" ]]; then
+            outside+=("${link#"$set_real"/} -> $(readlink "$link" 2>/dev/null || echo '?') (dangling)")
+            continue
+          fi
+          within=0
+          for set_dir in "${inputs_dirs[@]}"; do
+            [[ "$target" == "$set_dir" || "$target" == "$set_dir/"* ]] && within=1
+          done
+          [[ "$within" -eq 1 ]] || outside+=("${link#"$set_real"/} -> $target")
+        done < <(find "$set_real" -type l -print0)
+        # Writable is a file's bit, or a directory's (a name can be added,
+        # removed or renamed in it), on a volume that is not mounted read-only.
+        local ro_fs writable
+        ro_fs="$(python3 -c 'import os, sys; print(1 if os.statvfs(sys.argv[1]).f_flag & os.ST_RDONLY else 0)' "$set_real" 2>/dev/null || echo 0)"
+        writable="$(find "$set_real" \( -type f -o -type d \) -perm -u+w -print -quit 2>/dev/null)"
+        if [[ "$inputs_bind" -eq 1 && "$ro_fs" != 1 && -n "$writable" ]]; then
+          echo "WARN: the evidence in $set_real is writable by this account (${writable#"$set_real"/} and perhaps more: a file, or a directory whose names can change), on a volume mounted read-write. In a VM run it is held by the VMs' read-only mount and nothing else: the host (you, a tool, a sync client) can still change it. Make it read-only (chmod -R a-w), mount its volume read-only, or pass --inputs-copy to give the run its own read-only copy." >&2
         fi
-      done < <(find "$inputs_dir" -type l -print0)
-      # Writable is a file's bit, or a directory's (a name can be added,
-      # removed or renamed in it), on a volume that is not mounted read-only.
-      local ro_fs writable
-      ro_fs="$(python3 -c 'import os, sys; print(1 if os.statvfs(sys.argv[1]).f_flag & os.ST_RDONLY else 0)' "$inputs_dir" 2>/dev/null || echo 0)"
-      writable="$(find "$inputs_dir" \( -type f -o -type d \) -perm -u+w -print -quit 2>/dev/null)"
-      if [[ "$inputs_bind" -eq 1 && "$ro_fs" != 1 && -n "$writable" ]]; then
-        echo "WARN: the evidence in $inputs_dir is writable by this account (${writable#"$inputs_dir"/} and perhaps more: a file, or a directory whose names can change), on a volume mounted read-write. In a VM run it is held by the VMs' read-only mount and nothing else: the host (you, a tool, a sync client) can still change it. Make it read-only (chmod -R a-w), mount its volume read-only, or pass --inputs-copy to give the run its own read-only copy." >&2
-      fi
-      # A copy follows only the links at the top of --inputs (the
-      # operator's); deeper ones are the evidence's own and stay links, as
-      # the copy's own NOTE says.
-      if [[ ${#outside[@]} -gt 0 && "$inputs_bind" -eq 1 ]]; then
-        echo "BLOCKER: under --isolation microvm, --inputs $inputs_dir is mounted into each VM as it is, and these links lead out of it, so no VM could read them:" >&2
-        printf '  %s\n' "${outside[@]}" >&2
-        echo "Point --inputs at the directory that holds the files, put the files themselves (not links) in $inputs_dir, or pass --inputs-copy to copy what the links at its top point at into the run (links deeper in the tree are the evidence's own and are copied as links)." >&2
-        exit 2
-      fi
+        # A copy follows only the links at the top of --inputs (the
+        # operator's); deeper ones are the evidence's own and stay links, as
+        # the copy's own NOTE says.
+        if [[ ${#outside[@]} -gt 0 && "$inputs_bind" -eq 1 ]]; then
+          echo "BLOCKER: under --isolation microvm, --inputs $set_real is mounted into each VM as it is, and these links lead out of it, so no VM could read them:" >&2
+          printf '  %s\n' "${outside[@]}" >&2
+          echo "Point --inputs at the directory that holds the files, put the files themselves (not links) in $set_real, or pass --inputs-copy to copy what the links at its top point at into the run (links deeper in the tree are the evidence's own and are copied as links)." >&2
+          exit 2
+        fi
+      done
     else
-      inputs_guard="$(fsguard_mode "$inputs_dir" "$inputs_enforce")"
+      # Several sets, one guard for all of them: the weakest any of them got.
+      inputs_guard=""
+      for set_real in "${inputs_dirs[@]}"; do
+        inputs_guard="$(weaker_guard "$inputs_guard" "$(fsguard_mode "$set_real" "$inputs_enforce")")"
+      done
     fi
     if [[ "$inputs_enforce" == "on" && "$inputs_guard" == "none" ]]; then
       echo "BLOCKER: --inputs-enforce on, but this host has no kernel read-only mechanism (macOS sandbox-exec or Linux unprivileged user namespaces). Use --inputs-enforce auto to run with detect + heal only." >&2
@@ -3637,20 +4328,35 @@ cmd_start() {
   # text; a file launched from the CLI is stripped here, the same way.
   # The one key the kickoff itself reads from the block is `toolbox:`, the
   # sets the entry needs; it is printed here before the block goes.
-  local goal_toolbox
-  goal_toolbox="$(python3 - "$goal_file" <<'STRIP'
-import re, sys
+  # The kickoff also reads until_solved and stall_minutes there: a goal may
+  # say it is to be run until every question is answered.
+  local goal_toolbox goal_meta
+  goal_meta="$(python3 - "$goal_file" <<'STRIP'
+import json, re, sys
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
 m = re.match(r"^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)", text)
+out = {"toolbox": "", "until_solved": "", "stall_minutes": ""}
 if m:
-    key = re.search(r"^toolbox:[ \t]*(.*?)[ \t]*\r?$", m.group(0), re.M)
-    if key:
-        print(re.sub(r"[ \t]", "", key.group(1)))
+    for k in out:
+        key = re.search(r"^" + k + r":[ \t]*(.*?)[ \t]*\r?$", m.group(0), re.M)
+        if key:
+            out[k] = re.sub(r"[ \t]", "", key.group(1))
     with open(path, "w", encoding="utf-8") as f:
         f.write(text[m.end():].lstrip("\r\n"))
+print(json.dumps(out))
 STRIP
 )"
+  goal_toolbox="$(jq -r '.toolbox' <<<"$goal_meta")"
+  case "$(jq -r '.until_solved' <<<"$goal_meta" | tr 'A-Z' 'a-z')" in
+    ""|false|no) ;;
+    true|yes) until_solved=1 ;;
+    *) echo "BLOCKER: the goal's metadata block says until_solved: $(jq -r '.until_solved' <<<"$goal_meta"); it takes true or false ($goal_source)." >&2; exit 2 ;;
+  esac
+  if [[ -z "$stall_minutes" && -n "$(jq -r '.stall_minutes' <<<"$goal_meta")" ]]; then
+    stall_minutes="$(jq -r '.stall_minutes' <<<"$goal_meta")"
+    [[ "$stall_minutes" =~ ^[1-9][0-9]*$ ]] || { echo "BLOCKER: the goal's metadata block says stall_minutes: $stall_minutes; it takes a whole number of minutes above zero ($goal_source)." >&2; exit 2; }
+  fi
   if [[ -n "$goal_toolbox" && ! "$goal_toolbox" =~ ^(dfir|crypto|linux)(,(dfir|crypto|linux))*$ ]]; then
     echo "BLOCKER: the goal's metadata block says toolbox: $goal_toolbox; it must be sets from dfir,crypto,linux ($goal_source)." >&2
     exit 2
@@ -3677,7 +4383,7 @@ STRIP
         # A goal given inline (the console's --goal) is not read for words:
         # it has no metadata block to say otherwise, and the console's form
         # names the sets itself.
-        goal_hint="$(toolbox_sets_from_goal "$(if [[ "$goal_source" != "--goal" ]]; then echo "$goal_file"; fi)" "$goal_toolbox" "$inputs_dir")"
+        goal_hint="$(toolbox_sets_from_goal "$(if [[ "$goal_source" != "--goal" ]]; then echo "$goal_file"; fi)" "$goal_toolbox" ${inputs_dirs[@]+"${inputs_dirs[@]}"})"
         if [[ -n "$goal_hint" ]]; then
           toolbox="$toolbox,$goal_hint"
           echo "NOTE: --toolbox auto reads the goal and adds: $goal_hint (say --toolbox dfir to refuse)." >&2
@@ -3889,7 +4595,21 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
     echo "BLOCKER: --cap-tokens must be a whole number of tokens above zero (got $cap_tokens)." >&2
     exit 2
   fi
-  if [[ "$metered" -eq 1 ]]; then
+  if [[ -n "$stall_minutes" && "$until_solved" -ne 1 ]]; then
+    echo "BLOCKER: --stall-minutes is for a run started --until-solved (the watchdog's regroup)." >&2
+    exit 2
+  fi
+  if [[ "$until_solved" -eq 1 ]]; then
+    # No wall clock and advisory caps: the run ends on every question
+    # answered, or on the operator's stop. A cap given stays a figure to show.
+    if [[ "$wall_set" -eq 1 ]]; then
+      echo "BLOCKER: an until-solved run has no wall clock; drop --wall-clock (swarm.sh stop ends it)." >&2
+      exit 2
+    fi
+    wall=0
+    stall_minutes="${stall_minutes:-15}"
+    cap="${cap:-0}"
+  elif [[ "$metered" -eq 1 ]]; then
     if [[ -z "$cap" ]]; then
       echo "start requires --cap-usd" >&2
       exit 2
@@ -4241,14 +4961,15 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
   if [[ "$disk_encryption" == off ]]; then
     echo "WARN: the volume this run is kept on ($(dirname "$sandbox")) is not encrypted at rest: a lost or stolen disk hands over the evidence copy, the VMs' disks and everything the agents derived. Turn on FileVault (macOS) or keep runs on an encrypted volume (SWARM_RUNS_DIR)." >&2
   fi
-  if [[ -n "$inputs_dir" ]]; then
-    case "$inputs_dir/" in
-      "$sandbox/"*) echo "BLOCKER: --inputs $inputs_dir is inside the sandbox it would be copied into." >&2; exit 2 ;;
+  local set_real
+  for set_real in ${inputs_dirs[@]+"${inputs_dirs[@]}"}; do
+    case "$set_real/" in
+      "$sandbox/"*) echo "BLOCKER: --inputs $set_real is inside the sandbox it would be copied into." >&2; exit 2 ;;
     esac
     case "$sandbox/" in
-      "$inputs_dir/"*) echo "BLOCKER: the sandbox $sandbox is inside --inputs $inputs_dir." >&2; exit 2 ;;
+      "$set_real/"*) echo "BLOCKER: the sandbox $sandbox is inside --inputs $set_real." >&2; exit 2 ;;
     esac
-  fi
+  done
   if [[ "$CHECK_ONLY" -eq 1 ]]; then
     # What a real start checks once the sandbox exists, on this host: the
     # programs, the login shell, the keys Pi would use. Nothing is written.
@@ -4286,6 +5007,15 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
           echo "Gateway:      $_gp would be left to msb's placeholder path ($_gwhy); its spend is what its seats report"
         fi
       done < <(credential_models | sed 's#/.*##' | awk '!seen[$0]++')
+    fi
+    # The signing keys: refused here in the words the start would use, with
+    # the write guard this host would give the panes.
+    if [[ "$isolation" != "microvm" ]]; then
+      local sg_keep=("keep:$ROOT" "keep:$REGISTRY") sg_p
+      for sg_p in ${inputs_dirs[@]+"${inputs_dirs[@]}"} ${inputs_image:+"$inputs_image"}; do sg_keep+=("keep:$sg_p"); done
+      while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_keep+=("keep:$sg_p"); done <<< "$pack_dirs"
+      signer_guard "$(predicted_write_guard_mode "$write_guard")" "$accept_signer_exposure" "$custody_sign_key" \
+        "rw:$sandbox" "rw:$(pi_agent_dir)" "${sg_keep[@]}" >/dev/null || exit 2
     fi
     echo "Check:        the start would go ahead ($isolation, $n agent(s), sandbox $sandbox); nothing was written"
     exit 0
@@ -4346,7 +5076,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   chmod -R u+w "$sandbox/.pi-sessions" "$sandbox/tool-output" "$sandbox/history" "$sandbox/tools" 2>/dev/null || true
   rm -rf "${sandbox:?}/vm" "${sandbox:?}/.pi-sessions" "${sandbox:?}/tool-output" "${sandbox:?}/history" "${sandbox:?}/tools" \
     "${sandbox:?}/vm-prepared" "$sandbox/vm-spec.json" "$sandbox/compact-prompt.md" "$sandbox/toolchain.json"
-  rm -f "$sandbox"/custody.json "$sandbox"/custody.*.json
+  rm -f "$sandbox"/custody.json "$sandbox"/custody.*.json "$sandbox"/artifacts.json "$sandbox"/artifacts.*.json
   mkdir -p "$sandbox/history" "$sandbox/tools"
   # The manifest records whether the no-exec holds, not whether it was asked
   # for: with no guard (--inputs-enforce off, or a host without one) the flag
@@ -4356,10 +5086,17 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   local quarantine_held=0
   if [[ "$quarantine" -eq 1 && "$inputs_guard" != "none" ]]; then quarantine_held=1; fi
   if [[ -n "$inputs_dir" ]]; then
+    # One set is inputs/ itself, as it always was. Several are named, each
+    # to land at inputs/<name>/, and none of them is `src`.
+    local set_src="$inputs_dir" set_pairs=() set_i
+    if [[ ${#inputs_dirs[@]} -gt 1 ]]; then
+      set_src=""
+      for set_i in "${!inputs_dirs[@]}"; do set_pairs+=("${inputs_names[$set_i]}" "${inputs_dirs[$set_i]}"); done
+    fi
     if [[ "$inputs_bind" -eq 1 ]]; then
-      bind_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$quarantine_held"
+      bind_inputs "$sandbox" "$set_src" "$inputs_enforce" "$inputs_guard" "$quarantine_held" ${set_pairs[@]+"${set_pairs[@]}"}
     else
-      install_inputs "$sandbox" "$inputs_dir" "$inputs_enforce" "$inputs_guard" "$verify_copy" "$quarantine_held"
+      install_inputs "$sandbox" "$set_src" "$inputs_enforce" "$inputs_guard" "$verify_copy" "$quarantine_held" ${set_pairs[@]+"${set_pairs[@]}"}
     fi
   elif [[ -n "$inputs_image" ]]; then
     attach_inputs_image "$sandbox" "$inputs_image" >/dev/null
@@ -4436,8 +5173,8 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     # In a throwaway VM of the run's image, like the toolbox: the tools the
     # first pass calls are the image's, not this host's; it reaches only the
     # hosts the operator allowed for the run.
-    local catalog_evidence=()
-    [[ -L "$sandbox/inputs" ]] && catalog_evidence+=(--evidence "$(cd "$sandbox/inputs" && pwd -P)")
+    local catalog_evidence=() bound
+    while IFS= read -r bound; do catalog_evidence+=(--evidence "$bound"); done < <(inputs_bound_dirs "$sandbox")
     [[ -f "$sandbox/inputs.device" ]] && catalog_evidence+=(--evidence "$sandbox/inputs")
     [[ -n "$allow_hosts" ]] && catalog_evidence+=(--allow-host "$allow_hosts")
     [[ "$use_netguard" -eq 0 ]] && catalog_evidence+=(--open-net)
@@ -4595,6 +5332,71 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
       write_guard_mode="none"
     fi
   fi
+  # The signing keys (signer_guard): out of every VM by construction; out of
+  # a host run's panes at the kernel, or the run is refused, or started on
+  # the operator's word and recorded as exposed. The directories are made
+  # first (0700) so a mount namespace has something to mask: a key made
+  # during the run lands under the mask. Where one cannot be made the rule
+  # still names it, and nothing is refused over it.
+  local sg_args=() sg_p
+  if [[ "$isolation" == "microvm" ]]; then
+    for sg_p in "$ROOT/extensions" "$ROOT/scripts" "$ROOT/prompts" "$ROOT/node_modules" "$sandbox"; do sg_args+=("mount:$sg_p"); done
+    while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_args+=("mount:$sg_p"); done <<< "$pack_dirs"
+    while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_args+=("mount:$sg_p"); done < <(inputs_bound_dirs "$sandbox")
+    signer_guard microvm 0 "$custody_sign_key" "${sg_args[@]}" || exit 2
+  else
+    if [[ "$write_guard_mode" != "none" ]]; then
+      for sg_p in "$(signers_home)" "$(signers_home)/machine" "$(signers_home)/examiners"; do
+        [[ -e "$sg_p" || -L "$sg_p" ]] || ( umask 077; mkdir -p "$sg_p" ) 2>/dev/null || true
+      done
+    fi
+    sg_args=("rw:$sandbox" "rw:$(pi_agent_dir)" "keep:$ROOT" "keep:$REGISTRY")
+    for sg_p in ${inputs_dirs[@]+"${inputs_dirs[@]}"} ${inputs_image:+"$inputs_image"}; do sg_args+=("keep:$sg_p"); done
+    while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_args+=("keep:$sg_p"); done <<< "$pack_dirs"
+    while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_args+=("keep:$sg_p"); done < <(inputs_bound_dirs "$sandbox")
+    signer_guard "$write_guard_mode" "$accept_signer_exposure" "$custody_sign_key" "${sg_args[@]}" || exit 2
+    for sg_p in ${SIGNER_NO_READ[@]+"${SIGNER_NO_READ[@]}"}; do guard_args+=(--no-read "$sg_p"); done
+    local sg_kind
+    for sg_p in ${SIGNER_SOCKETS[@]+"${SIGNER_SOCKETS[@]}"}; do
+      sg_kind="${sg_p%%$'\t'*}"
+      if [[ "$sg_kind" == tree ]]; then guard_args+=(--no-socket-tree "${sg_p#*$'\t'}"); else guard_args+=(--no-socket "${sg_p#*$'\t'}"); fi
+    done
+  fi
+  # Earlier runs: each one's sandbox in the registry, and the examiners'
+  # reviews beside it, are denied to a host run's panes — material the
+  # agents must derive from the evidence, never find. Not the whole runs
+  # directory: this run and the registry the finish line reads are in it.
+  # Landlock alone is left out: it can only carve, and a carve under runs/
+  # freezes that directory for the run, so the registry, which the kickoff
+  # rewrites by rename, would stop being readable and the finish line would
+  # fall back to SWARM.md, which it does not trust. A VM mounts none of them.
+  local earlier_hidden=() earlier_skipped=() reviews_hidden="" earlier_by="" earlier_why=""
+  if [[ "$isolation" == "microvm" ]]; then
+    earlier_by="microvm"
+    earlier_why="no VM mounts another run's sandbox or the reviews"
+  elif fsguard_can_mask "$write_guard_mode"; then
+    earlier_by="$write_guard_mode"
+    local eh_kind eh_path eh_why
+    sg_args=("$ROOT" "$(pi_agent_dir)" "$REGISTRY" ${inputs_dirs[@]+"${inputs_dirs[@]}"})
+    while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_args+=("$sg_p"); done < <(inputs_bound_dirs "$sandbox")
+    while IFS= read -r sg_p; do [[ -n "$sg_p" ]] && sg_args+=("$sg_p"); done <<< "$pack_dirs"
+    while IFS=$'\t' read -r eh_kind eh_path eh_why; do
+      case "$eh_kind" in
+        hide) earlier_hidden+=("$eh_path"); guard_args+=(--no-read "$eh_path") ;;
+        skip) earlier_skipped+=("$eh_path"); echo "NOTE:         the earlier run in $eh_path is not hidden from the panes: $eh_why" ;;
+      esac
+    done < <(earlier_run_sandboxes "$REGISTRY" "$sandbox" "${sg_args[@]}")
+    [[ -e "$RUNS_DIR/reviews" ]] || ( umask 077; mkdir -p "$RUNS_DIR/reviews" ) 2>/dev/null || true
+    if [[ -d "$RUNS_DIR/reviews" ]]; then
+      reviews_hidden="$(cd "$RUNS_DIR/reviews" && pwd -P)"
+      guard_args+=(--no-read "$reviews_hidden")
+    fi
+    earlier_why="denied to the panes at the kernel ($write_guard_mode)"
+  elif [[ "$write_guard_mode" == "landlock" ]]; then
+    earlier_why="Landlock alone cannot deny a directory under runs/ without cutting the panes off the registry the finish line reads"
+  else
+    earlier_why="no kernel guard"
+  fi
   if [[ "$write_guard_mode" != "none" && "$write_guard_mode" != "microvm" && ${#no_read[@]} -gt 0 ]]; then
     local nr
     for nr in "${no_read[@]}"; do
@@ -4608,7 +5410,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     # be hidden and must not be claimed as hidden.
     local nr mp nr_real mp_real mounted=() mount_roots=("$ROOT/extensions" "$ROOT/scripts" "$ROOT/prompts" "$ROOT/node_modules" "$sandbox")
     while read -r mp; do [[ -n "$mp" ]] && mount_roots+=("$mp"); done <<< "$pack_dirs"
-    [[ -L "$sandbox/inputs" ]] && mount_roots+=("$(cd "$sandbox/inputs" && pwd -P)")
+    while IFS= read -r mp; do [[ -n "$mp" ]] && mount_roots+=("$mp"); done < <(inputs_bound_dirs "$sandbox")
     for nr in "${no_read[@]}"; do
       nr_real="$(cd "$nr" 2>/dev/null && pwd -P || printf '%s' "$nr")"
       for mp in "${mount_roots[@]}"; do
@@ -4704,6 +5506,12 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   fi
   if [[ -n "$inputs_dir" && "$inputs_guard" != "none" ]]; then
     guard_args+=(--ro "$sandbox/inputs")
+    # Several sets held in place: inputs/ holds only their links, and each
+    # set's own directory gets its rule (one set's link is resolved above).
+    if [[ ! -L "$sandbox/inputs" ]]; then
+      local bound
+      while IFS= read -r bound; do [[ -n "$bound" ]] && guard_args+=(--ro "$bound"); done < <(inputs_bound_dirs "$sandbox")
+    fi
     [[ -d "$sandbox/catalog" ]] && guard_args+=(--ro "$sandbox/catalog")
   fi
   if [[ "$quarantine" -eq 1 ]]; then
@@ -4866,6 +5674,16 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --arg write_guard "$write_guard_mode" \
     --argjson no_read "$(printf '%s\n' ${no_read[@]+"${no_read[@]}"} | jq -R . | jq -c -s 'map(select(. != ""))')" \
     --argjson no_read_applied "$no_read_applied" \
+    --argjson signer_keys_hidden "$SIGNER_KEYS_HIDDEN" \
+    --argjson signer_isolation "$(jq -nc --arg isolation "$isolation" --arg guard "$write_guard_mode" \
+      --argjson hidden "$(printf '%s\n' ${SIGNER_NO_READ[@]+"${SIGNER_NO_READ[@]}"} | jq -R . | jq -c -s 'map(select(. != ""))')" \
+      --argjson sockets "$(printf '%s\n' ${SIGNER_SOCKETS[@]+"${SIGNER_SOCKETS[@]}"} | cut -f2- | jq -R . | jq -c -s 'map(select(. != ""))')" \
+      --argjson exposed "$(printf '%s\n' ${SIGNER_EXPOSED[@]+"${SIGNER_EXPOSED[@]}"} | jq -R . | jq -c -s 'map(select(. != ""))')" \
+      --argjson accepted "$SIGNER_ACCEPTED" --arg why "$SIGNER_WHY" --argjson hid "$SIGNER_KEYS_HIDDEN" \
+      '{isolation: $isolation, guard: $guard, keys_hidden: $hid, hidden: $hidden, agent_sockets: $sockets, exposed: $exposed, exposure_accepted: ($accepted == 1), why: $why}')" \
+    --argjson earlier_runs_hidden "$(jq -nc --arg by "$earlier_by" --argjson count "${#earlier_hidden[@]}" --arg reviews "$reviews_hidden" --arg why "$earlier_why" \
+      --argjson skipped "$(printf '%s\n' ${earlier_skipped[@]+"${earlier_skipped[@]}"} | jq -R . | jq -c -s 'map(select(. != ""))')" \
+      '{by: (if $by == "" then null else $by end), sandboxes: $count, reviews: (if $reviews == "" then null else $reviews end), skipped: $skipped, why: $why}')" \
     --arg herdr_socket "$(if [[ "$isolation" == "microvm" ]]; then echo unreachable; elif [[ "$herdr_sealed" -eq 1 && "$write_guard_mode" == "seatbelt" ]]; then echo sealed; elif [[ "$herdr_sealed" -eq 1 ]]; then echo masked; elif [[ "$seal_herdr" -eq 0 ]]; then echo open; else echo unenforced; fi)" \
     --arg pi_extensions "$pi_extensions" \
     --arg attribution "$attribution" \
@@ -4898,7 +5716,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson allow_oauth_in_vm "$allow_oauth_in_vm" \
     --argjson provenance "$(provenance_json)" \
     --argjson custody_timeout "$custody_timeout" \
-    --arg custody_sign_key "$custody_sign_key" --arg custody_tsa "$custody_tsa" --arg time_reference "$time_reference" \
+    --arg custody_sign_key "$custody_sign_key" --arg custody_tsa "$custody_tsa" --arg custody_tsa_ca "$custody_tsa_ca" --arg time_reference "$time_reference" --arg anchor_mirror "$anchor_mirror" \
+    --argjson require_technical_review "$require_technical_review" \
     --argjson host_clock "$host_clock" \
     --argjson notify "$([[ -n "$notify_cmd" ]] && echo true || echo false)" \
     --arg disk_encryption "$disk_encryption" \
@@ -4906,6 +5725,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson ledger_from "$LEDGER_FROM_RECORD" \
     --argjson allow_root "$allow_root" \
     --argjson model_gateway "$model_gateway" \
+    --argjson until_solved "${until_solved:-0}" \
+    --arg stall_minutes "${stall_minutes:-}" \
     '{
       id: $id,
       "label": $run_label,
@@ -4915,6 +5736,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       model: $model,
       cap_usd: $cap,
       wall_clock_minutes: $wall,
+      until_solved: ($until_solved == 1),
+      stall_minutes: (if $stall_minutes == "" then null else ($stall_minutes | tonumber) end),
       hard_kill: ($hard == 1),
       tool_forging: ($forging == 1),
       allow_install: ($allow_install == 1),
@@ -4943,6 +5766,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       host_caps: $host_caps,
       no_read: $no_read,
       no_read_applied: ($no_read_applied == 1),
+      signer_keys_hidden: $signer_keys_hidden,
+      signer_isolation: $signer_isolation,
+      earlier_runs_hidden: $earlier_runs_hidden,
       net: (if $netguard == 0 then "open" elif $local_only == 1 then "local" elif $allow_hosts == "" then "guarded" else "hosts" end),
       idle_nudge_sec: $idle_nudge_sec,
       self_compact: {
@@ -4968,7 +5794,9 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       provenance: $provenance,
       host_clock: $host_clock,
       custody_timeout_sec: $custody_timeout,
-      custody_seal: (if ($custody_sign_key + $custody_tsa + $time_reference) == "" then null else {sign_key: (if $custody_sign_key == "" then null else $custody_sign_key end), timestamp_url: (if $custody_tsa == "" then null else $custody_tsa end), time_reference: (if $time_reference == "" then null else $time_reference end)} end),
+      custody_seal: (if ($custody_sign_key + $custody_tsa + $custody_tsa_ca + $time_reference) == "" then null else {sign_key: (if $custody_sign_key == "" then null else $custody_sign_key end), timestamp_url: (if $custody_tsa == "" then null else $custody_tsa end), timestamp_ca: (if $custody_tsa_ca == "" then null else $custody_tsa_ca end), time_reference: (if $time_reference == "" then null else $time_reference end)} end),
+      anchor_mirror: (if $anchor_mirror == "" then null else $anchor_mirror end),
+      require_technical_review: ($require_technical_review == 1),
       notify: $notify,
       disk_encryption: $disk_encryption,
       synced_folder_allowed_by: (if $synced_allowed_by == "" then null else $synced_allowed_by end),
@@ -5028,7 +5856,10 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   if [[ -n "$local_models_csv" ]]; then
     echo "Local:        ${local_models_csv//,/, } (served from this machine or network; no metered cost)"
   fi
-  if [[ "$metered" -eq 1 ]]; then
+  if [[ "$until_solved" -eq 1 ]]; then
+    echo "Cap:          none: until solved, no wall clock; spend is recorded and shown, and nothing is stopped for it$([[ "$cap" != 0 || -n "$cap_tokens" ]] && echo " (advisory: \$$cap${cap_tokens:+, ${cap_tokens} tokens})")"
+    echo "Until solved: done only when every question is answered; no abandon; a regroup after ${stall_minutes} minutes without progress, then with backoff; only swarm.sh stop $swarm_id ends it"
+  elif [[ "$metered" -eq 1 ]]; then
     echo "Cap:          \$$cap / ${wall}m${cap_tokens:+ / ${cap_tokens} tokens}"
   elif [[ -n "$subscription_models_csv" ]]; then
     echo "Cap:          ${cap_tokens} tokens / ${wall}m (on a subscription: Pi's dollars are an estimate and brake nothing)"
@@ -5037,6 +5868,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   fi
   echo "Goal:         $goal_source"
   echo "DoD:          from the goal document; checks run by scripts/await-done.sh"
+  echo "Operator:     what an agent needs from you (a lead closed needs_operator) is in operator-requests.jsonl and the console's Leads tab; answer it with swarm.sh lead $swarm_id note L-<n> \"<answer>\""
   echo "Panes:        Herdr right/down grid; tab then workspace fallback if a split fails"
   if [[ "$forging" -eq 1 ]]; then
     echo "Tools:        forging on (make_tool / tools; scripts under tools/<name>/ run as subprocesses)"
@@ -5054,7 +5886,11 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     echo "Inputs:       $(inputs_summary "$sandbox") from the image $inputs_image, attached read-only; the host kernel refuses every write, including from a container with CAP_SYS_ADMIN"
   fi
   if [[ -n "$inputs_dir" ]]; then
-    echo "Inputs:       $(inputs_summary "$sandbox") from $inputs_dir, read-only under inputs/; kernel guard: $(inputs_guard_label "$inputs_guard")"
+    if [[ ${#inputs_dirs[@]} -gt 1 ]]; then
+      echo "Inputs:       $(inputs_summary "$sandbox"), read-only, each under inputs/<set>/: $(jq -r '[.sets[] | "\(.name) from \(.source) (\(.files) file(s))"] | join("; ")' "$sandbox/inputs.json"); kernel guard: $(inputs_guard_label "$inputs_guard")"
+    else
+      echo "Inputs:       $(inputs_summary "$sandbox") from $inputs_dir, read-only under inputs/; kernel guard: $(inputs_guard_label "$inputs_guard")"
+    fi
     if [[ "$inputs_guard" == "none" ]]; then
       echo "WARN: no kernel read-only mechanism on this host; inputs/ is protected by the tool guard and by detect + heal only." >&2
     fi
@@ -5088,6 +5924,25 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
          echo "Write guard:  off (--no-write-guard) — a pane can write anywhere this user can" >&2
        fi ;;
   esac
+  if [[ "$isolation" == "microvm" ]]; then
+    echo "Signers:      out of every VM: none mounts where the machine key and the examiners are kept"
+  elif [[ "$SIGNER_KEYS_HIDDEN" == true ]]; then
+    echo "Signers:      the machine key, the examiners and their keys are denied to the panes ($write_guard_mode)$([[ ${#SIGNER_SOCKETS[@]} -gt 0 ]] && printf ', and so is the ssh-agent')"
+  elif [[ "$SIGNER_ACCEPTED" -eq 1 ]]; then
+    local sg_listed
+    sg_listed="$(printf '%s; ' "${SIGNER_EXPOSED[@]}")"
+    echo "WARN: the panes can read what signs this install's releases (--accept-signer-exposure): ${sg_listed%; }. The run records it (signer_keys_hidden: false)." >&2
+    echo "      Rotate them after the run: swarm.sh machine rotate for the machine key; an examiner's new key is a new enrolment (swarm.sh examiner enroll)." >&2
+  else
+    echo "Signers:      not hidden ($SIGNER_WHY)"
+  fi
+  if [[ "$isolation" != "microvm" ]]; then
+    if [[ -n "$earlier_by" ]]; then
+      echo "Earlier runs: ${#earlier_hidden[@]} sandbox(es)$([[ -n "$reviews_hidden" ]] && printf " and the examiners' reviews") denied to the panes"
+    else
+      echo "Earlier runs: readable from the panes ($earlier_why)"
+    fi
+  fi
   if [[ "$toolbox" != "off" && -f "$sandbox/toolbox.json" ]]; then
     echo "Toolbox:      $(jq -r '"\(.present | length) present, \(.missing | length) missing"' "$sandbox/toolbox.json")$(jq -r 'if (.missing | length) > 0 then " (missing: " + (.missing | map(.name) | join(", ")) + ")" else "" end' "$sandbox/toolbox.json")"
   fi
@@ -5102,7 +5957,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     fi
   fi
   if [[ "$idle_nudge_sec" -gt 0 ]]; then
-    echo "Idle nudge:   an agent silent for ${idle_nudge_sec}s is prompted to continue (up to 3 times)"
+    echo "Idle nudge:   an agent silent for ${idle_nudge_sec}s is prompted to continue ($([[ "${until_solved:-0}" -eq 1 ]] && echo "3 times, then on with backoff: the run is until solved; a provider error is retried the same way" || echo "up to 3 times"))"
   fi
   if [[ -n "$cap_per_agent" && "$metered" -eq 1 ]]; then
     echo "Per-agent cap: \$$cap_per_agent (an agent over it is steered, then stopped on its own)"
@@ -5125,7 +5980,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
 
   # The tools each Pi is given, known before a prepared run returns: a
   # prepared VM run writes them into vm-spec.json.
-  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,done"
+  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,done"
   # Pi's --tools is an allowlist by name, so a tool the extension registers is
   # invisible until it is named here. The skill tool exists only when the run
   # carries packs.
@@ -5183,11 +6038,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # otherwise looks beside the sandbox, which under --sandbox DIR is not
   # where the registry lives).
   provider_env+=(--env "SWARM_RUNS_DIR=$RUNS_DIR")
-  # Scratch belongs to the run. With the write guard on, the per-user temp
-  # area is closed; with it off, this still keeps a case's temporary files
-  # inside the case instead of in a directory shared with every other run.
-  mkdir -p "$sandbox/work/.tmp"
-  provider_env+=(--env "TMPDIR=$sandbox/work/.tmp")
+  scratch_env_for "$sandbox"
+  provider_env+=("${SCRATCH_ENV_ARGS[@]}")
   # Packs: the extension reads the skill index and the bodies from these
   # directories. They sit outside the sandbox and the run only reads them.
   if [[ -n "$pack_dirs" ]]; then
@@ -5481,7 +6333,9 @@ EOF
     fi
   fi
 
-  keep_host_awake "$sandbox" "$wall"
+  # An until-solved run has no wall clock: the host is kept awake for thirty
+  # days, and the inhibitor goes with the run's stop.
+  keep_host_awake "$sandbox" "$([[ "${until_solved:-0}" -eq 1 ]] && echo 43200 || echo "$wall")"
   kickoff_disarm
   echo
   echo "Agents prompted."
@@ -7095,10 +7949,12 @@ vm_build_spec() { # <hub dir> <out file>
     chmod 444 "$sandbox/compact-prompt.md"
     compact_prompt_vm="$sandbox/compact-prompt.md"
   fi
-  if [[ -L "$sandbox/inputs" ]]; then
-    real="$(cd "$sandbox/inputs" && pwd -P)"
-    mounts+=("$(jq -nc --arg h "$real" '{host: $h, readonly: true, noexec: true}')")
-  elif [[ -f "$sandbox/inputs.device" ]]; then
+  # The evidence in place: its directory, or each set's, at its own path,
+  # where the link (inputs/, or inputs/<name>) leads.
+  while IFS= read -r real; do
+    [[ -n "$real" ]] && mounts+=("$(jq -nc --arg h "$real" '{host: $h, readonly: true, noexec: true}')")
+  done < <(inputs_bound_dirs "$sandbox")
+  if [[ -f "$sandbox/inputs.device" ]]; then
     # An attached image is its own filesystem on the host; it is shared as
     # itself rather than trusted to show through the sandbox's share.
     mounts+=("$(jq -nc --arg h "$sandbox/inputs" '{host: $h, readonly: true, noexec: true}')")
@@ -7117,6 +7973,11 @@ vm_build_spec() { # <hub dir> <out file>
     --arg kick "$sandbox/.kickoff" \
     '{SWARM_ID: $id, SWARM_HARD_KILL: $hard, SWARM_RUNS_DIR: $runs, TMPDIR: "/tmp", SWARM_KICKOFF: $kick}')"
   add_env() { env_json="$(jq -c --arg k "$1" --arg v "$2" '. + {($k): $v}' <<<"$env_json")"; }
+  # Several sets held in place: their names, for each VM's probe to walk
+  # through their links without reading inputs.json in a VM's small memory.
+  if [[ ! -L "$sandbox/inputs" && -n "$(inputs_bound_dirs "$sandbox")" ]]; then
+    add_env SWARM_INPUT_SETS "$(jq -c '[.sets[]?.name]' "$sandbox/inputs.json")"
+  fi
   if [[ -n "$pack_dirs" ]]; then
     add_env SWARM_PACK_DIRS "$(paste -sd: - <<< "$pack_dirs")"
     [[ "$PACK_SECRETS_ENV" != "{}" ]] && add_env SWARM_PACK_SECRETS "$PACK_SECRETS_ENV"
@@ -7200,6 +8061,7 @@ vm_build_spec() { # <hub dir> <out file>
   jq -n \
     --arg run "$swarm_id" --arg sandbox "$sandbox" --arg image "$vm_image" --arg hub "$hub_dir" \
     --argjson cpus "$vm_cpus" --argjson mem "$vm_memory" --argjson disk "$vm_disk" --argjson wall "$wall" \
+    --argjson until "${until_solved:-0}" --arg token_validity "${SWARM_TOKEN_MIN_VALIDITY:-}" \
     --argjson mounts "$(printf '%s\n' ${mounts[@]+"${mounts[@]}"} | jq -s -c .)" \
     --argjson late "$(printf '%s\n' ${late[@]+"${late[@]}"} | jq -s -c .)" \
     --argjson env "$env_json" --argjson agents "$agents_json" --argjson allow "$allow_json" \
@@ -7208,10 +8070,11 @@ vm_build_spec() { # <hub dir> <out file>
     --arg pi "$(command -v pi)" --arg pidir "$(pi_agent_dir)" --arg registry "$REGISTRY" --arg digest "${vm_image_digest:-}" \
     --arg seat_tokens "${SEAT_TOKENS_FILE:-}" \
     '{run: $run, sandbox: $sandbox, image: $image, pull: "if-missing", cpus: $cpus, memory_mib: $mem, root_disk_mib: $disk,
-      max_duration_sec: (($wall + 30) * 60), hub_dir: $hub, mounts: $mounts, late_mounts: $late,
+      max_duration_sec: (if $until == 1 then null else (($wall + 30) * 60) end), hub_dir: $hub, mounts: $mounts, late_mounts: $late,
       env: $env, agents: $agents, allow_hosts: $allow, open_net: $open, providers: $providers,
       pack_secrets: $pack_secrets,
-      pi_bin: $pi, pi_agent_dir: $pidir, min_token_validity: "\($wall + 60)m",
+      pi_bin: $pi, pi_agent_dir: $pidir,
+      min_token_validity: (if $token_validity != "" then $token_validity elif $until == 1 then "12h" else "\($wall + 60)m" end),
       records_dir: ($sandbox + "/vm"), registry: $registry}
      + (if $digest == "" then {} else {image_digest: $digest} end)
      + (if $seat_tokens == "" then {} else {seat_tokens_file: $seat_tokens} end)' > "$spec"
@@ -7279,7 +8142,7 @@ launch_vm_agents() {
       --argjson derived "$([[ "$derived_catalog" -eq 1 ]] && echo true || echo false)" \
       --argjson images "$job_images_json" --argjson pack_profiles "$pack_profiles_json" \
       '{image: $image, workers: $workers, cpus: $cpus, memoryMib: $mem, allowHosts: ($hosts | split(",") | map(select(length > 0))), openNet: $open, packDirs: ($packs | split("\n") | map(select(length > 0)))} + {derived: $derived} + (if ($images | length) > 0 then {images: $images, packProfiles: $pack_profiles} else {} end)')"
-    echo "Jobs:         up to $workers worker VM(s) at a time, ${worker_cpus} vCPU and ${worker_memory} MiB each, no network unless a job asks for the run's allowlist"
+    echo "Jobs:         up to $workers worker VM(s) at a time$([[ "$workers" -ge 3 ]] && printf ', one kept for short jobs'), ${worker_cpus} vCPU and ${worker_memory} MiB each, no network unless a job asks for the run's allowlist"
     if [[ "$(jq 'length' <<<"$job_images_json")" -gt 0 ]]; then
       echo "              job images: $(jq -r 'to_entries | map("\(.key) \(.value)") | join("; ")' <<<"$job_images_json"); a job names one with profile=, a pack tool or a recipe runs in its pack's, and one with none in ${job_image}"
     fi
@@ -7647,8 +8510,14 @@ cmd_stop() {
       echo "WARN: the custody check did not finish (exit $custody_rc); see $sandbox/traces/custody.log" >&2
       [[ -n "$custody_at" ]] && echo "      The verdict in $sandbox/custody.json is an earlier one ($custody_at), not this stop's." >&2
     fi
-  elif [[ "$no_custody" -eq 1 ]]; then
+  elif [[ "$no_custody" -eq 1 && "$after_hub" -eq 0 ]]; then
     echo "Custody:      skipped (--no-custody); run scripts/custody.ts $sandbox later"
+  fi
+  # The machine's draft of the report, sealed beside the verdict: once per
+  # verdict (the hub's own finish writes it too; this one then finds it).
+  if [[ -n "$sandbox" && -d "$sandbox" ]] && [[ "$no_custody" -eq 0 || "$after_hub" -eq 1 ]]; then
+    stop_step="sealing the draft release"
+    release_draft "$sandbox" "$id"
   fi
   # An attached evidence image would otherwise outlive the run that needed it,
   # and the next kickoff on the same sandbox cannot clear a mount point.
@@ -7862,9 +8731,18 @@ cmd_say() {
   sandbox="$(json_get "$id" | jq -r '.sandbox // empty')"
   [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
   operator_trace "$sandbox" say "$id" "$message"
+  local next
+  next="$(examiner_post "$sandbox" all "$message")" || exit 1
+  echo "Posted to $id as the examiner (#$next). Agents see it on their next inbox or wait."
+}
+
+# One post on the primary thread in the examiner's voice, to <to>: the post
+# id is printed. Taken under the table lock, as every post id is.
+examiner_post() { # <sandbox> <to> <message>
+  local sandbox="$1" to="$2" message="$3"
   local dir="$sandbox/threads/main"
   mkdir -p "$dir"
-  table_lock "$sandbox" || exit 1
+  table_lock "$sandbox" || return 1
   local next
   next="$(ls "$dir" 2>/dev/null | sed -n 's/^\([0-9]\{6\}\)-.*/\1/p' | sort -n | tail -1)"
   next="$(( 10#${next:-0} + 1 ))"
@@ -7875,14 +8753,85 @@ cmd_say() {
     printf 'id: %d\n' "$next"
     printf 'thread: main\n'
     printf 'from: examiner\n'
-    printf 'to: all\n'
+    printf 'to: %s\n' "$to"
     printf 'tag: ask\n'
     printf -- '---\n\n'
     printf '%s\n' "$message"
   } > "$file.tmp"
   mv "$file.tmp" "$file"
   table_unlock "$sandbox"
-  echo "Posted to $id as the examiner (#$next). Agents see it on their next inbox or wait."
+  printf '%s\n' "$next"
+}
+
+# The lead register from the operator's side (extensions/leads.ts):
+#   lead <id> list                               every lead, the ones waiting on the operator first
+#   lead <id> note <L-n> TEXT [--allow-host HOST] the operator's answer: on the lead, the lead reopened,
+#                                                 posted to the board, and a host allowed for jobs
+#   lead <id> reopen <L-n> [TEXT]                reopen a closed lead
+# A lead an agent closed needs_operator is the swarm asking for something only
+# the operator can give: a host to reach, a file, an answer. On c09 the pointer
+# to the third part's key was found in every run and asked of nobody.
+cmd_lead() {
+  local id="${1:-}" sub="${2:-}"
+  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: lead needs <id> and list, note <L-n> TEXT [--allow-host HOST], or reopen <L-n> [TEXT]." >&2; exit 2; }
+  shift 2
+  ensure_registry
+  local rec sandbox isolation
+  rec="$(json_get "$id")"
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  isolation="$(jq -r '.isolation.mode // "host"' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+  local cli="$ROOT/scripts/leads-cli.ts"
+  case "$sub" in
+    list)
+      node --experimental-strip-types --no-warnings "$cli" list "$sandbox" "$@" ;;
+    note)
+      local lead="${1:-}" text="" host=""
+      [[ -n "$lead" ]] || { echo "BLOCKER: lead note needs <L-n> and the text." >&2; exit 2; }
+      shift
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --allow-host) host="${2:-}"; [[ -n "$host" ]] || { echo "BLOCKER: --allow-host takes a host." >&2; exit 2; }; shift 2 ;;
+          *) text="${text:+$text }$1"; shift ;;
+        esac
+      done
+      [[ -n "$text" ]] || { echo "BLOCKER: lead note needs the text of your answer." >&2; exit 2; }
+      if [[ -n "$host" && "$isolation" != "microvm" ]]; then
+        echo "BLOCKER: --allow-host works live only in a microVM run, whose jobs run in workers made after the note; a host run's netguard reads its allowlist once, at start. Post the note without it, and restart with --allow-host $host if the run needs it." >&2
+        exit 2
+      fi
+      local out
+      out="$(node --experimental-strip-types --no-warnings "$cli" note "$sandbox" "$lead" "$text" ${host:+--allow-host "$host"})" || {
+        echo "BLOCKER: $(jq -r '.reason // "the note was not recorded"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2
+        exit 2
+      }
+      operator_trace "$sandbox" lead "$id" note "$lead" "$text" ${host:+--allow-host "$host"}
+      local holder reopened words post
+      # To whoever had the lead last: its news reaches them, and everyone sees it.
+      holder="$(jq -r '.to // "all"' <<<"$out" 2>/dev/null || echo all)"
+      reopened="$(jq -r '.reopened' <<<"$out")"
+      words="OPERATOR NOTE on $lead: $text"
+      [[ -n "$host" ]] && words+=" The operator allowed $host for jobs run with network=allowlist from now on (job_run network: \"allowlist\"); your own VM keeps the network it booted with, so fetch it in a job."
+      [[ "$reopened" == true ]] && words+=" $lead is open again: lead_claim $lead to go on with it."
+      post="$(examiner_post "$sandbox" "${holder:-all}" "$words")" || exit 1
+      echo "Recorded on $lead$([[ "$reopened" == true ]] && echo ", reopened")$([[ -n "$host" ]] && echo ", $host allowed for the run's jobs"), and posted to the board as the examiner (#$post)."
+      ;;
+    reopen)
+      local lead="${1:-}"
+      [[ -n "$lead" ]] || { echo "BLOCKER: lead reopen needs <L-n>." >&2; exit 2; }
+      shift
+      local out
+      out="$(node --experimental-strip-types --no-warnings "$cli" reopen "$sandbox" "$lead" "$*")" || {
+        echo "BLOCKER: $(jq -r '.reason // "the lead was not reopened"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2
+        exit 2
+      }
+      operator_trace "$sandbox" lead "$id" reopen "$lead" "$@"
+      local post
+      post="$(examiner_post "$sandbox" all "OPERATOR: $lead is reopened${*:+: $*}. lead_claim $lead to take it.")" || exit 1
+      echo "$lead reopened, and said on the board as the examiner (#$post)."
+      ;;
+    *) echo "BLOCKER: lead takes list, note or reopen (got $sub)." >&2; exit 2 ;;
+  esac
 }
 
 # Change a running swarm's caps: raise the spend or the token cap, give it
@@ -8030,14 +8979,15 @@ pkg_copy() { # <src> <dst> [non-empty]
 }
 
 cmd_package() {
-  local id="${1:-}" sign=0 key="" redact=0 with_outputs=0
-  [[ -n "$id" && "$id" != -* ]] || { echo "package requires <id> [--sign [--key FILE]] [--redact] [--with-outputs]" >&2; exit 2; }
+  local id="${1:-}" sign=0 key="" redact=0 with_outputs=0 leaks=fail
+  [[ -n "$id" && "$id" != -* ]] || { echo "package requires <id> [--sign [--key FILE]] [--redact [--redact-leaks list]] [--with-outputs]" >&2; exit 2; }
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --sign) sign=1; shift ;;
       --key) key="$2"; sign=1; shift 2 ;;
       --redact) redact=1; shift ;;
+      --redact-leaks) leaks="$2"; shift 2 ;;
       --with-outputs) with_outputs=1; shift ;;
       *) echo "package: unknown option $1" >&2; exit 2 ;;
     esac
@@ -8127,12 +9077,39 @@ PY
   pkg_copy "$sandbox/ledger/entries.jsonl" "$out/ledger.jsonl"
   # A second author of an entry, appended beside it and chained.
   pkg_copy "$sandbox/ledger/attestations.jsonl" "$out/ledger-attestations.jsonl" non-empty
+  # An agent's dispute of an entry, and its withdrawal: a chain of its own.
+  pkg_copy "$sandbox/ledger/disputes.jsonl" "$out/ledger-disputes.jsonl" non-empty
+  # The lead register (how the investigation proceeded): its chained events,
+  # sealed unsigned by custody, the rendering, what the agents asked of the
+  # operator and the hosts the operator allowed in answer.
+  pkg_copy "$sandbox/leads/leads.jsonl" "$out/leads.jsonl" non-empty
+  pkg_copy "$sandbox/leads/leads.md" "$out/leads.md" non-empty
+  pkg_copy "$sandbox/operator-requests.jsonl" "$out/operator-requests.jsonl" non-empty
+  pkg_copy "$sandbox/operator-hosts.jsonl" "$out/operator-hosts.jsonl" non-empty
   for f in inputs.json toolbox.json toolchain.json team.json budget.json layout.json netguard.allow SWARM.md custody.json; do
     pkg_copy "$sandbox/$f" "$out/$f"
   done
   # The verdict's signature and the authority's timestamp token, when custody made them.
   pkg_copy "$sandbox/custody.json.sig" "$out/custody.json.sig"
   pkg_copy "$sandbox/custody.json.tsr" "$out/custody.json.tsr"
+  # The index of work/ custody wrote at stop, byte for byte: the one the
+  # verdict and its anchor name. The package's artifacts.json is generated
+  # now; `verify` holds every packaged work/ file to this one.
+  pkg_copy "$sandbox/artifacts.json" "$out/artifacts.sealed.json"
+  # The examiner's review, kept beside the registry where no agent writes:
+  # what the sign-off is over travels with what it is over.
+  [[ "$id" =~ ^[A-Za-z0-9_-]+$ ]] && pkg_copy "$RUNS_DIR/reviews/$id.jsonl" "$out/review.jsonl" non-empty
+  # Every release of the report as it was sealed: the machine's drafts, the
+  # examiner's adoptions and amendments, each signature, token, print and
+  # mirror receipt. Carried byte for byte and never rendered again; verify
+  # walks the chain.
+  if [[ -d "$sandbox/release" && ! -L "$sandbox/release" ]]; then
+    copy_tree "$sandbox/release" "$out/release"
+    # A prepared release not yet sealed is nobody's release: it stays behind.
+    rm -rf "$out/release"/.pending-* 2>/dev/null || true
+    rm -rf "$out"/release/.*.tmp 2>/dev/null || true
+    chmod -R u+w "$out/release" 2>/dev/null || true
+  fi
   # What each agent's VM was, as the VM manager recorded it (image digest,
   # mounts, network, the secrets' names and hosts, the kept disk's sha256),
   # and the VM's own logs kept beside its disk (the runtime's, where msb
@@ -8230,7 +9207,8 @@ PY
       pkg_copy "$sandbox/$to_rel" "$out/$to_rel"
     done < <(cd "$sandbox" && find tool-output -type f -print0 2>/dev/null)
   fi
-  for f in "$sandbox"/custody.*.json; do [[ -f "$f" && ! -L "$f" ]] && { mkdir -p "$out/custody-history"; pkg_copy "$f" "$out/custody-history/$(basename "$f")"; }; done
+  # Each earlier verdict, with the index of work/ it sealed.
+  for f in "$sandbox"/custody.*.json "$sandbox"/artifacts.*.json; do [[ -f "$f" && ! -L "$f" ]] && { mkdir -p "$out/custody-history"; pkg_copy "$f" "$out/custody-history/$(basename "$f")"; }; done
   local t
   for t in "$sandbox"/threads/*/; do
     [[ -d "$t" && ! -L "${t%/}" ]] || continue
@@ -8241,18 +9219,36 @@ PY
   # before it is hashed: the chained files keep their chains (a redacted line
   # carries its own hash), and REDACTIONS.txt says what changed.
   if [[ "$redact" -eq 1 ]]; then
-    local redacted
-    redacted="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" redact "$sandbox" "$out")" || { echo "BLOCKER: the package could not be redacted; nothing was handed over." >&2; rm -rf "$out"; exit 1; }
-    echo "Redacted:     $(jq -r '.entries' <<<"$redacted") sensitive entr$([[ "$(jq -r '.entries' <<<"$redacted")" == 1 ]] && echo y || echo ies), $(jq -r '.lines' <<<"$redacted") chained line(s) and $(jq -r '.files' <<<"$redacted") other file(s) (REDACTIONS.txt)"
+    [[ "$leaks" == fail || "$leaks" == list ]] || { echo "BLOCKER: --redact-leaks takes list (a leak refuses the package without it)." >&2; rm -rf "$out"; exit 2; }
+    local redacted redact_rc=0
+    redacted="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" redact "$sandbox" "$out" --leaks "$leaks" 2>"$out.leaks")" || redact_rc=$?
+    if [[ "$redact_rc" -eq 5 ]]; then
+      # What should have been taken out is still in the package: named by file, entry and the word's hash, never the word.
+      echo "BLOCKER: after redaction, $(jq -r '.leaks' <<<"$redacted") place(s) in the package still hold a sensitive entry's words; nothing was handed over:" >&2
+      cat "$out.leaks" >&2
+      echo "Mark the entries that say them sensitive too, or hand the package over with the hits listed in it (--redact-leaks list)." >&2
+      rm -rf "$out" "$out.leaks"; exit 1
+    fi
+    [[ "$redact_rc" -eq 0 ]] || { cat "$out.leaks" >&2; echo "BLOCKER: the package could not be redacted; nothing was handed over." >&2; rm -rf "$out" "$out.leaks"; exit 1; }
+    rm -f "$out.leaks"
+    echo "Redacted:     $(jq -r '.entries' <<<"$redacted") sensitive entr$([[ "$(jq -r '.entries' <<<"$redacted")" == 1 ]] && echo y || echo ies), $(jq -r '.lines' <<<"$redacted") chained line(s) and $(jq -r '.files' <<<"$redacted") other file(s) (REDACTIONS.txt; what each replaced in REDACTIONS.json); the leak scan over $(jq -r '.scanned' <<<"$redacted") file(s) $([[ "$(jq -r '.leaks' <<<"$redacted")" == 0 ]] && echo "found nothing" || echo "FOUND $(jq -r '.leaks' <<<"$redacted") HIT(S), listed in REDACTIONS.json (--redact-leaks list)")"
   fi
   # What kind of package this is, said in it.
   printf '%s\n' "$([[ "$with_outputs" -eq 1 ]] && echo "with outputs: the jobs' sealed outputs are included" || echo "record only: the jobs' outputs stay in the run, each named by its sha256")$([[ "$redact" -eq 1 ]] && echo "; redacted (REDACTIONS.txt)")" > "$out/PACKAGE-KIND.txt"
+  # Each part a recipient holds the record to, present or absent with why:
+  # under the manifest, so a part taken out, and out of the list, breaks it.
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" components "$sandbox" "$out" >/dev/null || { echo "BLOCKER: the package's components could not be listed; nothing was handed over." >&2; rm -rf "$out"; exit 1; }
+  # Who signs, and when, inside the bytes the signature covers: SIGNER.txt
+  # and signer.pub are written before the manifest and listed in it.
+  if [[ "$sign" -eq 1 ]]; then
+    signer_files "$out" "$key" "$(json_get "$id" | jq -r '.examiner // empty')" || { rm -rf "$out"; exit 1; }
+  fi
   ( cd "$out" && find . -type f ! -name MANIFEST.txt | sort | while read -r f; do
       if command -v sha256sum >/dev/null 2>&1; then sha256sum "$f"; else shasum -a 256 "$f"; fi
     done > MANIFEST.txt )
   echo "Packaged $id -> $out ($(find "$out" -type f | wc -l | tr -d ' ') files; MANIFEST.txt has the hashes)"
   if [[ "$sign" -eq 1 ]]; then
-    sign_package "$out" "$key" "$(json_get "$id" | jq -r '.examiner // empty')" || exit 1
+    sign_package "$out" || exit 1
   fi
   if [[ "${skipped:-0}" -gt 0 ]]; then
     echo "Left in the sandbox: ${skipped} file(s) under work/extracted and work/quarantine, which came out of the evidence."
@@ -8263,10 +9259,14 @@ PY
 }
 
 # A package's manifest signed with the examiner's ssh key (ssh-keygen -Y,
-# namespace dfirswarm-package): MANIFEST.txt.sig beside it, the public key
-# as signer.pub and who signed as SIGNER.txt. `swarm.sh verify` checks it.
-sign_package() { # <package dir> <key file or ""> <examiner or "">
-  local out="$1" key="$2" examiner="$3" k principal fingerprint err
+# namespace dfirswarm-package): MANIFEST.txt.sig beside it. Who signs, with
+# which key and when (SIGNER.txt) and the public key (signer.pub) are
+# written first, by signer_files, and listed in the manifest the signature
+# covers: an examiner's name or a time changed afterwards breaks it.
+# `swarm.sh verify` checks it.
+SIGN_KEY=""
+signer_files() { # <package dir> <key file or ""> <examiner or "">
+  local out="$1" key="$2" examiner="$3" k principal fingerprint
   if [[ -z "$key" ]]; then
     for k in "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_ecdsa"; do
       [[ -f "$k" ]] && { key="$k"; break; }
@@ -8280,11 +9280,7 @@ sign_package() { # <package dir> <key file or ""> <examiner or "">
   # An allowed-signers principal is one word.
   principal="$(id -un)@$(hostname -s 2>/dev/null || hostname)"
   rm -f "$out/MANIFEST.txt.sig" "$out/signer.pub" "$out/SIGNER.txt"
-  if ! err="$(ssh-keygen -Y sign -f "$key" -n dfirswarm-package "$out/MANIFEST.txt" 2>&1 >/dev/null)" || [[ ! -s "$out/MANIFEST.txt.sig" ]]; then
-    echo "BLOCKER: ssh-keygen could not sign $out/MANIFEST.txt with $key: $err" >&2
-    return 1
-  fi
-  if [[ -f "$key.pub" ]]; then cp "$key.pub" "$out/signer.pub"; else ssh-keygen -y -f "$key" > "$out/signer.pub"; fi
+  if [[ -f "$key.pub" ]]; then cp "$key.pub" "$out/signer.pub"; else ssh-keygen -y -f "$key" > "$out/signer.pub" || { echo "BLOCKER: the public half of $key could not be read; the package is not signed." >&2; return 1; }; fi
   fingerprint="$(ssh-keygen -lf "$out/signer.pub" 2>/dev/null | awk '{print $2}')"
   {
     printf 'principal %s\n' "$principal"
@@ -8293,7 +9289,17 @@ sign_package() { # <package dir> <key file or ""> <examiner or "">
     printf 'signed_at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'namespace dfirswarm-package\n'
   } > "$out/SIGNER.txt"
-  echo "Signed:       MANIFEST.txt with $fingerprint as $principal (MANIFEST.txt.sig). A recipient checks it with: swarm.sh verify <package> --allowed-signers FILE, where FILE has the line: $principal $(awk '{print $1, $2}' "$out/signer.pub")"
+  SIGN_KEY="$key"
+}
+
+sign_package() { # <package dir>, after signer_files and the manifest
+  local out="$1" key="$SIGN_KEY" principal err
+  principal="$(awk '$1 == "principal" {print $2; exit}' "$out/SIGNER.txt")"
+  if ! err="$(ssh-keygen -Y sign -f "$key" -n dfirswarm-package "$out/MANIFEST.txt" 2>&1 >/dev/null)" || [[ ! -s "$out/MANIFEST.txt.sig" ]]; then
+    echo "BLOCKER: ssh-keygen could not sign $out/MANIFEST.txt with $key: $err" >&2
+    return 1
+  fi
+  echo "Signed:       MANIFEST.txt with $(awk '$1 == "key" {print $2; exit}' "$out/SIGNER.txt") as $principal (MANIFEST.txt.sig; SIGNER.txt and signer.pub are in the manifest it covers). A recipient checks it with: swarm.sh verify <package> --allowed-signers FILE, where FILE has the line: $principal $(awk '{print $1, $2}' "$out/signer.pub")"
 }
 
 # A package checked where it lands: every file against MANIFEST.txt, no
@@ -8302,17 +9308,19 @@ sign_package() { # <package dir> <key file or ""> <examiner or "">
 # hold and the signature is sound but who signed was not checked (no
 # --allowed-signers); 4 when the files hold and the package is unsigned; 1
 # when anything does not hold; 2 on a usage error.
-# A run's custody checked again by anyone, writing nothing: the evidence,
-# every chain, the sealed prefix, the lines after the seal, the signature and
-# the timestamp token (scripts/custody.ts --verify). Exit 0 when the run is
+# A run's custody checked again by anyone, writing nothing in the run: the
+# evidence, every chain and its sealed length and head, the sealed prefix,
+# the lines after the seal, every work/ file against the index custody
+# sealed, the signature and the timestamp token, its signature too against
+# the authority's CA (scripts/custody.ts --verify). Exit 0 when the run is
 # as its verdict sealed it, 4 when it is not, 1 when it could not be checked.
 cmd_custody_verify() {
   local id="${1:-}" extra=()
-  [[ -n "$id" && "$id" != -* ]] || die_usage "custody-verify requires <id> [--allowed-signers FILE --identity NAME] [--json]"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "custody-verify requires <id> [--allowed-signers FILE --identity NAME] [--tsa-ca FILE] [--scratch DIR] [--json]"
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --allowed-signers|--identity) extra+=("$1" "$2"); shift 2 ;;
+      --allowed-signers|--identity|--tsa-ca|--scratch) extra+=("$1" "$2"); shift 2 ;;
       --json) extra+=(--json); shift ;;
       *) die_usage "custody-verify: unknown option $1" ;;
     esac
@@ -8330,12 +9338,15 @@ cmd_custody_verify() {
 }
 
 cmd_verify() {
-  local target="${1:-}" allowed="" tmp="" dir
-  [[ -n "$target" && "$target" != -* ]] || die_usage "verify requires <package dir|zip> [--allowed-signers FILE]"
+  local target="${1:-}" allowed="" tsa_ca="" ca="" ca_inter="" tmp="" dir
+  [[ -n "$target" && "$target" != -* ]] || die_usage "verify requires <package dir|zip> [--allowed-signers FILE] [--ca FILE] [--tsa-ca FILE]"
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --allowed-signers) allowed="$2"; shift 2 ;;
+      --tsa-ca) tsa_ca="$2"; shift 2 ;;
+      --ca) ca="$2"; shift 2 ;;
+      --ca-intermediate) ca_inter="$2"; shift 2 ;;
       *) die_usage "verify: unknown option $1" ;;
     esac
   done
@@ -8372,7 +9383,9 @@ for n, line in enumerate(open(os.path.join(root, "MANIFEST.txt"), encoding="utf-
         bad.append("outside the package: " + rel)
         continue
     listed[rel] = m.group(1)
-meta = {"MANIFEST.txt", "MANIFEST.txt.sig", "SIGNER.txt", "signer.pub"}
+# The signature is beside the manifest it covers. SIGNER.txt and signer.pub
+# are in the manifest since 2026-09-27; in an older package they are beside it.
+meta = {"MANIFEST.txt", "MANIFEST.txt.sig"} | ({"SIGNER.txt", "signer.pub"} - set(listed))
 present = set()
 for dirpath, dirs, files in os.walk(root):
     for name in files:
@@ -8416,15 +9429,33 @@ PY
       sig_state="bad"
     fi
   fi
-  # The chains the package carries, against the custody verdict's seal.
-  local chains_out chains_ok=1
-  chains_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" verify "$dir" 2>&1)" || chains_ok=0
+  # The chains the package carries, against the custody verdict's seal, and
+  # the report's releases: exit 3 there is a chain that holds and an adopted
+  # release whose examiner key no allowed-signers file was given to check.
+  local chains_out chains_ok=1 chains_rc=0 release_key_unchecked=0 pt_args=()
+  [[ -n "$allowed" ]] && pt_args+=(--allowed-signers "$allowed")
+  [[ -n "$tsa_ca" ]] && pt_args+=(--tsa-ca "$tsa_ca")
+  [[ -n "$ca" ]] && pt_args+=(--ca "$ca")
+  [[ -n "$ca_inter" ]] && pt_args+=(--ca-intermediate "$ca_inter")
+  chains_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" verify "$dir" ${pt_args[@]+"${pt_args[@]}"} 2>&1)" || chains_rc=$?
+  case "$chains_rc" in
+    0) ;;
+    3) release_key_unchecked=1 ;;
+    *) chains_ok=0 ;;
+  esac
+  # Whether who signed, and when, is under the signature (SIGNER.txt in the manifest), read before a zip's extraction goes.
+  local signer_note="" signer_says=nobody
+  if [[ -f "$dir/SIGNER.txt" ]]; then
+    signer_says="$(awk '$1 == "principal" {print $2}' "$dir/SIGNER.txt" 2>/dev/null)"
+    if grep -qE '^[0-9a-f]{64} [ *](\./)?SIGNER\.txt$' "$dir/MANIFEST.txt"; then signer_note="; SIGNER.txt (who, which key, when) is in the manifest it covers"
+    else signer_note="; SIGNER.txt IS OUTSIDE THE SIGNED MANIFEST (a package made before 2026-09-27): who and when it names are not signed"; fi
+  fi
   [[ -n "$tmp" ]] && rm -rf "$tmp"
   echo "Files:        ${counts%% *} of ${counts##* } re-hashed against MANIFEST.txt$([[ "$files_ok" -eq 1 ]] && printf ', all match, none missing, none added' || printf ':')"
   [[ "$files_ok" -eq 1 ]] || tail -n +2 <<<"$files_out" | sed 's/^/  /'
   case "$sig_state" in
-    verified) echo "Signature:    valid, by $principal, a signer $allowed allows" ;;
-    unvalidated) echo "Signature:    sound, but who signed was not checked (pass --allowed-signers FILE); SIGNER.txt says $(awk '$1 == "principal" {print $2}' "$dir/SIGNER.txt" 2>/dev/null || echo nobody)" ;;
+    verified) echo "Signature:    valid, by $principal, a signer $allowed allows$signer_note" ;;
+    unvalidated) echo "Signature:    sound, but who signed was not checked (pass --allowed-signers FILE); SIGNER.txt says ${signer_says:-nobody}$signer_note" ;;
     unsigned) echo "Signature:    none (the package was not signed)" ;;
     bad) echo "Signature:    DOES NOT VERIFY: $sig_err" ;;
   esac
@@ -8434,31 +9465,84 @@ PY
     exit 1
   fi
   case "$sig_state" in
-    verified) echo "VERIFIED: $target"; exit 0 ;;
+    verified)
+      if [[ "$release_key_unchecked" -eq 1 ]]; then echo "FILES VERIFIED, THE ADOPTING EXAMINER'S KEY IS NOT IN $allowed: $target"; exit 3; fi
+      echo "VERIFIED: $target"; exit 0 ;;
     unvalidated) echo "FILES VERIFIED, SIGNER NOT CHECKED: $target"; exit 3 ;;
     *) echo "FILES VERIFIED, UNSIGNED: $target"; exit 4 ;;
   esac
 }
 
 # The examiner's review of a run's ledger (scripts/review.ts): accept,
-# reject or amend an entry, or sign off the ledger as it stands. Outside
-# the run, beside the registry, chained.
+# reject or amend an entry, each answer's disposition, a technical review,
+# and the sign-off as the examiner's signed release (scripts/release.ts
+# sign: prepared, shown, confirmed on the terminal, sealed with the
+# examiner's own secret). A technical reviewer enrolled with --role reviewer
+# records and signs their own review (scripts/technical-review.ts), here or,
+# from the run's package, on another machine (the examiner then --import's
+# it). Outside the run, beside the registry, chained.
 cmd_review() {
-  local id="${1:-}" action="" entry="" note="" examiner="" report=""
-  [[ -n "$id" && "$id" != -* ]] || die_usage "review requires <id> (--accept N | --reject N --note TEXT | --amend N --note TEXT | --sign [--report PATH] | --show) [--examiner NAME]"
+  local id="${1:-}" action="" entry="" note="" examiner="" report="" pdf=0 amend_reason="" no_ts=0 reviewer="" competence="" checked="" organisation="" entries=""
+  local yes=0 secret_fd="" outcome="" reviewed_at="" all_answers=0 countersign="" import_file="" allowed="" ca="" ca_inter="" out="" disagreements=()
+  [[ -n "$id" && "$id" != -* ]] || die_usage "review requires <id> (--adopt N | --qualify N --note TEXT | --reject N --note TEXT | --inconclusive N --note TEXT | --accept N | --amend N --note TEXT | --technical-review ... | --countersign SEQ --reviewer ID | --import FILE | --sign [--pdf] [--amend-reason TEXT] [--yes] | --show) [--examiner ID]"
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --accept|--reject|--amend) action="${1#--}"; entry="${2:-}"; shift 2 ;;
+      --accept|--reject|--amend|--adopt|--qualify|--inconclusive) action="${1#--}"; entry="${2:-}"; shift 2 ;;
+      --technical-review) action=technical_review; shift ;;
+      --countersign) action=countersign; countersign="${2:-}"; shift 2 ;;
+      --import) action=import; import_file="${2:-}"; shift 2 ;;
       --sign) action=sign; shift ;;
       --show) action=show; shift ;;
       --note) note="$2"; shift 2 ;;
       --examiner) examiner="$2"; shift 2 ;;
       --report) report="$2"; shift 2 ;;
+      --pdf) pdf=1; shift ;;
+      --amend-reason) amend_reason="$2"; shift 2 ;;
+      --no-timestamp) no_ts=1; shift ;;
+      --reviewer) reviewer="$2"; shift 2 ;;
+      --competence) competence="$2"; shift 2 ;;
+      --checked) checked="$2"; shift 2 ;;
+      --organisation|--organization) organisation="$2"; shift 2 ;;
+      --entries) entries="$2"; shift 2 ;;
+      --all-answers) all_answers=1; shift ;;
+      --outcome) outcome="$2"; shift 2 ;;
+      --reviewed-at) reviewed_at="$2"; shift 2 ;;
+      --disagreement) disagreements+=(--disagreement "$2"); shift 2 ;;
+      --yes) yes=1; shift ;;
+      --secret-fd) secret_fd="$2"; shift 2 ;;
+      --allowed-signers) allowed="$2"; shift 2 ;;
+      --ca) ca="$2"; shift 2 ;;
+      --ca-intermediate) ca_inter="$2"; shift 2 ;;
+      --out) out="$2"; shift 2 ;;
       *) die_usage "review: unknown option $1" ;;
     esac
   done
-  [[ -n "$action" ]] || die_usage "review: say --accept N, --reject N, --amend N, --sign or --show"
+  [[ -n "$action" ]] || die_usage "review: say --adopt N, --qualify N, --reject N, --inconclusive N, --accept N, --amend N, --technical-review, --countersign SEQ, --import FILE, --sign or --show"
+  # What a technical review says, the same for every way it is recorded.
+  local tr_args=()
+  if [[ "$action" == technical_review ]]; then
+    tr_args=(--reviewer "$reviewer" --outcome "$outcome" --checked "$checked")
+    [[ -n "$competence" ]] && tr_args+=(--competence "$competence")
+    [[ -n "$organisation" ]] && tr_args+=(--organisation "$organisation")
+    [[ -n "$entries" ]] && tr_args+=(--entries "$entries")
+    [[ "$all_answers" -eq 1 ]] && tr_args+=(--all-answers)
+    [[ -n "$reviewed_at" ]] && tr_args+=(--reviewed-at "$reviewed_at")
+    [[ -n "$note" ]] && tr_args+=(--note "$note")
+    [[ -n "$report" ]] && tr_args+=(--report "$report")
+    [[ ${#disagreements[@]} -gt 0 ]] && tr_args+=("${disagreements[@]}")
+    [[ "$yes" -eq 1 ]] && tr_args+=(--yes)
+    [[ -n "$secret_fd" ]] && tr_args+=(--secret-fd "$secret_fd")
+  fi
+  # A reviewer elsewhere, working from the run's package: the review and its
+  # countersign go into review-import.jsonl for the examiner to --import.
+  if [[ -d "$id" && -f "$id/MANIFEST.txt" ]]; then
+    [[ "$action" == technical_review ]] || die_usage "review <package-dir> takes --technical-review --reviewer ID ... [--out FILE]: a reviewer's record made from a package"
+    local rargs=(remote --package "$id" "${tr_args[@]}")
+    [[ -n "$out" ]] && rargs+=(--out "$out")
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/technical-review.ts" "${rargs[@]}"
+    return $?
+  fi
   ensure_registry
   local rec sandbox state
   rec="$(json_get "$id")"
@@ -8470,25 +9554,306 @@ cmd_review() {
     node --experimental-strip-types --no-warnings "$ROOT/scripts/review.ts" show --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox"
     return $?
   fi
-  [[ -n "$examiner" ]] || examiner="$(jq -r '.examiner // empty' <<<"$rec")"
-  [[ -n "$examiner" ]] || { echo "BLOCKER: who is reviewing? pass --examiner NAME (the run recorded none)." >&2; exit 2; }
+  if [[ "$action" == import ]]; then
+    local iargs=(import --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox" --file "$import_file")
+    [[ -n "$allowed" ]] && iargs+=(--allowed-signers "$allowed")
+    [[ -n "$ca" ]] && iargs+=(--ca "$ca")
+    [[ -n "$ca_inter" ]] && iargs+=(--ca-intermediate "$ca_inter")
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/technical-review.ts" "${iargs[@]}"
+    return $?
+  fi
+  if [[ "$action" == countersign ]]; then
+    local cargs=(countersign --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox" --reviewer "$reviewer" --seq "$countersign")
+    [[ "$yes" -eq 1 ]] && cargs+=(--yes)
+    [[ -n "$secret_fd" ]] && cargs+=(--secret-fd "$secret_fd")
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/technical-review.ts" "${cargs[@]}"
+    return $?
+  fi
+  # Who reviews: an enrolled examiner by id (swarm.sh examiner enroll), or
+  # the one examiner enrolled when there is only one; a name given free only
+  # to accept, reject or amend a finding. What the kickoff was told about who
+  # ran the run is never taken for the examiner.
+  if [[ -z "$examiner" ]]; then
+    local enrolled
+    enrolled="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/signers.ts" list 2>/dev/null | awk -F'\t' 'NF >= 4 && $5 != "reviewer" {print $1}')"
+    [[ -n "$enrolled" && "$(wc -l <<<"$enrolled" | tr -d ' ')" == 1 ]] && examiner="$enrolled"
+  fi
   if [[ "$action" == sign ]]; then
     case "$state" in
       running|prepared|finishing) echo "BLOCKER: run $id is still $state; sign off its ledger once it has ended." >&2; exit 2 ;;
     esac
+    # The release is the sign-off: prepared and shown, confirmed on the
+    # terminal (--yes skips only that, and the release says so), sealed with
+    # the examiner's own secret, then named in the review (scripts/release.ts sign).
+    local rargs=(sign --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox")
+    [[ -n "$examiner" ]] && rargs+=(--examiner "$examiner")
+    [[ -n "$report" ]] && rargs+=(--report "$report")
+    [[ "$pdf" -eq 1 ]] && rargs+=(--pdf)
+    [[ -n "$amend_reason" ]] && rargs+=(--amend-reason "$amend_reason")
+    [[ "$no_ts" -eq 1 ]] && rargs+=(--no-timestamp)
+    [[ "$yes" -eq 1 ]] && rargs+=(--yes)
+    [[ -n "$secret_fd" ]] && rargs+=(--secret-fd "$secret_fd")
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/release.ts" "${rargs[@]}" || exit $?
+    echo "Signed off:   run $id, in the release above; the review is $RUNS_DIR/reviews/$id.jsonl"
+    return 0
   fi
+  if [[ "$action" == technical_review ]]; then
+    # An enrolled reviewer records and signs their own review; anyone else's
+    # is recorded by the examiner (--examiner ID), and says it is not signed.
+    local targs=(record --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox" "${tr_args[@]}")
+    [[ -n "$examiner" ]] && targs+=(--examiner "$examiner")
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/technical-review.ts" "${targs[@]}" || exit $?
+    [[ "$state" == running ]] && operator_trace "$sandbox" review "$id" "--technical-review"
+    return 0
+  fi
+  [[ -n "$examiner" ]] || { echo "BLOCKER: who is reviewing? pass --examiner ID (an examiner enrolled with swarm.sh examiner enroll), or --examiner NAME to accept, reject or amend a finding." >&2; exit 2; }
   local args=(add --runs "$RUNS_DIR" --run "$id" --sandbox "$sandbox" --action "$action" --examiner "$examiner")
   [[ -n "$entry" ]] && args+=(--entry "$entry")
   [[ -n "$note" ]] && args+=(--note "$note")
   [[ -n "$report" ]] && args+=(--report "$report")
-  local line
+  local line who
   line="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/review.ts" "${args[@]}")" || exit 1
   [[ "$state" == running ]] && operator_trace "$sandbox" review "$id" "--$action" ${entry:+"$entry"}
-  if [[ "$action" == sign ]]; then
-    echo "Signed off:   run $id's ledger ($(jq -r '.ledger_entries' <<<"$line") entries, head $(jq -r '.ledger_head' <<<"$line")) and $(jq -r '.report_path' <<<"$line") ($(jq -r '.report_sha256 // "absent"' <<<"$line")) by $examiner$(jq -r 'if (.open_rejections // []) | length > 0 then ", with rejections standing: " + ((.open_rejections | map("#" + tostring)) | join(", ")) else "" end' <<<"$line"); the review is $RUNS_DIR/reviews/$id.jsonl"
-  else
-    echo "Reviewed:     run $id entry $entry $(case "$action" in accept) echo accepted ;; reject) echo rejected ;; amend) echo amended ;; esac) by $examiner$([[ -n "$note" ]] && printf ' (%s)' "$note")"
+  who="$(jq -r '.examiner + (if .examiner_id then " (enrolled examiner " + .examiner_id + ")" else " (not an enrolled examiner)" end)' <<<"$line")"
+  local verb="$action"
+  case "$action" in
+    accept) verb=accepted ;;
+    reject) verb="rejected (an answer: withdrawn)" ;;
+    amend) verb=amended ;;
+    adopt) verb=adopted ;;
+    qualify) verb="adopted with a qualification" ;;
+    inconclusive) verb="rendered inconclusive" ;;
+  esac
+  echo "Reviewed:     run $id entry $entry $verb by $who$([[ -n "$note" ]] && printf ' (%s)' "$note")"
+}
+
+# A run's releases (scripts/release.ts): the machine's draft at stop, each
+# adoption an enrolled examiner signs, each amendment. Shown by default;
+# --draft writes one for a run that has a verdict and none (or, with
+# --reason, another); --verify checks every signature and what each binds;
+# --print N prints release vN's HTML to PDF beside it; --mirror TARGET,
+# --ots and --transparency COMMAND copy its digest line somewhere
+# independent.
+cmd_releases() {
+  local id="${1:-}" mode=show extra=() version=""
+  [[ -n "$id" && "$id" != -* ]] || die_usage "releases requires <id> [--draft [--reason TEXT] | --verify [--allowed-signers FILE] [--ca FILE] [--tsa-ca FILE] | --print [N] | --mirror TARGET [--version N] | --ots [--upgrade] | --transparency COMMAND | --json]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --draft) mode=draft; shift ;;
+      --verify) mode=verify; shift ;;
+      --print) mode=print; if [[ "${2:-}" =~ ^[0-9]+$ ]]; then version="$2"; shift 2; else shift; fi ;;
+      --mirror) mode=mirror; extra+=(--to "$2"); shift 2 ;;
+      --ots) mode=ots; shift ;;
+      --upgrade) extra+=(--upgrade); shift ;;
+      --transparency) mode=transparency; extra+=(--log "$2"); shift 2 ;;
+      --version) version="$2"; shift 2 ;;
+      --reason|--allowed-signers|--tsa-ca|--ca|--ca-intermediate) extra+=("$1" "$2"); shift 2 ;;
+      --json) extra+=(--json); shift ;;
+      *) die_usage "releases: unknown option $1" ;;
+    esac
+  done
+  ensure_registry
+  local rec sandbox
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "BLOCKER: run $id's sandbox is not there." >&2; exit 2; }
+  if [[ "$mode" == draft ]]; then
+    case "$(jq -r '.state // empty' <<<"$rec")" in
+      running|prepared|finishing) echo "BLOCKER: run $id is still running; its draft is written when custody is taken at stop." >&2; exit 2 ;;
+    esac
   fi
+  [[ -n "$version" ]] && extra+=(--version "$version")
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/release.ts" "$mode" "$sandbox" --run "$id" --runs "$RUNS_DIR" ${extra[@]+"${extra[@]}"}
+}
+
+# An RFC 3161 token over a release's signature, obtained after the release
+# (an air-gapped lab): the latest release by default. The token dates the
+# release's proof of existence from its own time, and timestamp.json says so.
+cmd_timestamp() {
+  local id="${1:-}" extra=()
+  [[ -n "$id" && "$id" != -* ]] || die_usage "timestamp requires <id> [--version N] [--tsa-url URL] [--tsa-ca FILE]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --version|--tsa-url|--tsa-ca) extra+=("$1" "$2"); shift 2 ;;
+      *) die_usage "timestamp: unknown option $1" ;;
+    esac
+  done
+  ensure_registry
+  local rec sandbox
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "BLOCKER: run $id's sandbox is not there." >&2; exit 2; }
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/release.ts" timestamp "$sandbox" --run "$id" --runs "$RUNS_DIR" ${extra[@]+"${extra[@]}"}
+}
+
+# A sealed job run again (scripts/rerun.ts): its recorded spec through the
+# job service's worker path, in the image it ran in, held to the digest the
+# journal recorded; its outputs in <sandbox>.reruns/<job>/<n>/, never in the
+# store, compared by their bytes with the sealed ones. Exit 0 when they are
+# the same, 4 when a file differs (an equivalence under --normalise is said
+# apart and does not change it), 1 when it could not be run.
+cmd_rerun() {
+  local id="${1:-}" job="${2:-}" extra=()
+  [[ -n "$id" && "$id" != -* && -n "$job" && "$job" != -* ]] || die_usage "rerun requires <id> <job> [--normalise timestamps@1] [--network] [--json]"
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --normalise|--normalize) extra+=(--normalise "$2"); shift 2 ;;
+      --network|--json) extra+=("$1"); shift ;;
+      *) die_usage "rerun: unknown option $1" ;;
+    esac
+  done
+  ensure_registry
+  local rec sandbox
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "BLOCKER: run $id's sandbox is not there." >&2; exit 2; }
+  case "$(jq -r '.state // empty' <<<"$rec")" in
+    running|prepared|finishing) echo "BLOCKER: run $id is still running; a sealed job is run again once the run has ended." >&2; exit 2 ;;
+  esac
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/rerun.ts" "$sandbox" "$job" --run "$id" --runs "$RUNS_DIR" ${extra[@]+"${extra[@]}"}
+}
+
+# A certification template for a package (scripts/certify.ts): what the
+# package says of itself, and `verify` run on it with its output verbatim,
+# for a qualified person to complete and sign. Read only: it writes the
+# template to --out FILE, or prints it.
+cmd_certify() {
+  local target="${1:-}" allowed="" tsa_ca="" out="" dir tmp="" vout vrc=0 cargs=()
+  [[ -n "$target" && "$target" != -* ]] || die_usage "certify requires <package dir|zip> [--allowed-signers FILE] [--tsa-ca FILE] [--out FILE]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --allowed-signers) allowed="$2"; shift 2 ;;
+      --tsa-ca) tsa_ca="$2"; shift 2 ;;
+      --out) out="$2"; shift 2 ;;
+      *) die_usage "certify: unknown option $1" ;;
+    esac
+  done
+  dir="$target"
+  if [[ -f "$target" ]]; then
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/dfs-certify.XXXXXX")"
+    python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$target" "$tmp" 2>/dev/null \
+      || { rm -rf "$tmp"; echo "NOT A PACKAGE: $target is not a zip this host can open" >&2; exit 2; }
+    dir="$(dirname "$(find "$tmp" -maxdepth 3 -name MANIFEST.txt -type f | head -1)")"
+  fi
+  [[ -f "$dir/MANIFEST.txt" ]] || { [[ -n "$tmp" ]] && rm -rf "$tmp"; echo "NOT A PACKAGE: no MANIFEST.txt in $target" >&2; exit 2; }
+  vout="$(mktemp "${TMPDIR:-/tmp}/dfs-certify-verify.XXXXXX")"
+  local vargs=()
+  [[ -n "$allowed" ]] && vargs+=(--allowed-signers "$allowed")
+  [[ -n "$tsa_ca" ]] && vargs+=(--tsa-ca "$tsa_ca")
+  ( cmd_verify "$dir" ${vargs[@]+"${vargs[@]}"} ) > "$vout" 2>&1 || vrc=$?
+  cargs=(--package "$dir" --target "$target" --verify-output "$vout" --verify-exit "$vrc")
+  [[ -n "$allowed" ]] && cargs+=(--allowed-signers "$allowed")
+  [[ -n "$tsa_ca" ]] && cargs+=(--tsa-ca "$tsa_ca")
+  if [[ -n "$out" ]]; then
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/certify.ts" "${cargs[@]}" > "$out" || { rm -f "$vout"; [[ -n "$tmp" ]] && rm -rf "$tmp"; exit 1; }
+    echo "Wrote $out: a certification template for $target (swarm.sh verify exit $vrc), for a qualified person to complete and sign"
+  else
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/certify.ts" "${cargs[@]}"
+  fi
+  rm -f "$vout"
+  [[ -n "$tmp" ]] && rm -rf "$tmp"
+  return 0
+}
+
+# The people enrolled on this install (scripts/signers.ts), outside every
+# run: examiners, who adopt a report and sign its release, and technical
+# reviewers (--role reviewer), who sign their own review. Each with one key:
+# an ssh key with a passphrase, a FIDO key, or an e-signature certificate on
+# a token. `machine` shows the install's machine key, which seals the drafts
+# and is no examiner.
+cmd_examiner() {
+  local sub="${1:-}"
+  [[ -n "$sub" ]] || die_usage "examiner enroll --name NAME --organisation ORG --competence TEXT [--role examiner|reviewer] (--generate-key [--no-passphrase] | --key FILE [--no-passphrase] | --fido [--fido-verify-required] [--fido-resident] | --pkcs11-module PATH (--pkcs11-id HEX | --pkcs11-uri URI) [--pkcs11-chain FILE]) [--id ID] [--principal P] [--tsa-url URL --tsa-ca FILE] | examiner list | examiner show ID | examiner machine"
+  shift
+  case "$sub" in
+    enroll|list|show|machine) node --experimental-strip-types --no-warnings "$ROOT/scripts/signers.ts" "$sub" "$@" ;;
+    *) die_usage "examiner: enroll, list, show or machine" ;;
+  esac
+}
+
+# The install's machine key: `machine` shows it (as `examiner machine`
+# does); `machine rotate` retires it and makes the next one. A key a pane
+# may have read (a host run with --accept-signer-exposure) is rotated this
+# way. The retired key is moved, never deleted: the drafts it sealed are
+# checked against the public key each carries, and whoever reads one later
+# may ask which key that was.
+cmd_machine() {
+  local sub="${1:-show}"
+  [[ $# -gt 0 ]] && shift
+  case "$sub" in
+    show) node --experimental-strip-types --no-warnings "$ROOT/scripts/signers.ts" machine ;;
+    rotate) machine_rotate "$@" ;;
+    *) die_usage "machine: show or rotate" ;;
+  esac
+}
+
+machine_rotate() {
+  [[ $# -eq 0 ]] || die_usage "machine rotate takes no options"
+  local dir meta key id old_fp retired out new_id new_fp
+  dir="$(signers_home)/machine"
+  meta="$dir/machine.json"
+  key="$dir/release_ed25519"
+  if [[ ! -e "$key" && ! -e "$meta" ]]; then
+    echo "No machine key in $dir to rotate: the next seal makes the first one."
+    return 0
+  fi
+  if [[ ! -f "$key" || ! -f "$meta" ]]; then
+    echo "BLOCKER: $dir holds half a machine key (the key or its record without the other): look before anything is moved." >&2
+    exit 2
+  fi
+  id="$(jq -r '.id // empty' "$meta" 2>/dev/null || true)"
+  old_fp="$(jq -r '.fingerprint // empty' "$meta" 2>/dev/null || true)"
+  if ! [[ "$id" =~ ^[0-9a-f]{1,64}$ ]]; then
+    echo "BLOCKER: $meta names no machine key id; nothing was moved." >&2
+    exit 2
+  fi
+  retired="$dir/retired/$id"
+  if [[ -e "$retired" ]]; then
+    echo "BLOCKER: $retired is there already; nothing is moved over it." >&2
+    exit 2
+  fi
+  ( umask 077; mkdir -p "$retired" ) || exit 1
+  chmod 700 "$dir" "$dir/retired" "$retired"
+  mv "$key" "$retired/release_ed25519" || exit 1
+  [[ -f "$key.pub" ]] && { mv "$key.pub" "$retired/release_ed25519.pub" || exit 1; }
+  mv "$meta" "$retired/machine.json" || exit 1
+  ( umask 077; jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg by "$(id -un)@$(hostname)" --arg fp "$old_fp" \
+    '{retired_at: $at, by: $by, fingerprint: $fp, why: "swarm.sh machine rotate"}' > "$retired/retired.json" ) || true
+  echo "Retired:      ${old_fp:-fingerprint unknown} (machine key $id), kept in $retired"
+  # The next key now, so both fingerprints are said together; the next
+  # seal uses it. Made where and as a seal would make it (signers.ts).
+  if out="$(node --experimental-strip-types --no-warnings --input-type=module -e '
+import { machineSigner } from "'"$ROOT"'/scripts/signers.ts";
+const m = machineSigner();
+if ("why" in m) { console.error(m.why); process.exit(1); }
+console.log(`${m.id}\t${m.fingerprint}`);' 2>&1)"; then
+    new_id="${out%%$'\t'*}"
+    new_fp="${out#*$'\t'}"
+    echo "New:          $new_fp (machine key $new_id): the next draft is sealed with it"
+  else
+    echo "WARN: the next machine key was not made now ($out); the next seal makes it, and swarm.sh machine shows it." >&2
+  fi
+  echo "Drafts sealed before now are still checked against the public key each carries. Give the new fingerprint to wherever the old one was written down (an anchor mirror, the case file)."
+}
+
+# The machine's draft release once custody is taken (scripts/release.ts
+# draft): written once per verdict, and never holding the stop up.
+release_draft() { # <sandbox> <run id>
+  local sandbox="$1" id="$2" out
+  [[ -f "$sandbox/custody.json" ]] || return 0
+  if out="$(with_timeout 900 node --experimental-strip-types --no-warnings "$ROOT/scripts/release.ts" draft "$sandbox" --run "$id" --runs "$RUNS_DIR" --quiet 2>&1 </dev/null)"; then
+    [[ -n "$out" ]] && { grep -E '^(Release|Timestamp|Mirror|WARN):' <<<"$out" || true; }
+  else
+    echo "WARN: the draft release was not written: $(tail -1 <<<"$out"); swarm.sh releases $id --draft writes it" >&2
+  fi
+  return 0
 }
 
 # A run on hold keeps its material: purge refuses it, a new run in its
@@ -8678,29 +10043,140 @@ cmd_help() {
       usage | awk -v c="$topic" '$1 == c { print }'
       echo "docs/usage.md has the detail; start is the only command with a long page." ;;
     review) cat <<'EOF'
-  review <id> --accept N [--note TEXT] --examiner NAME     accept ledger entry N
-  review <id> --reject N --note TEXT --examiner NAME       reject it, saying why
-  review <id> --amend N --note TEXT --examiner NAME        accept it with a correction
-  review <id> --sign --examiner NAME [--report PATH]       sign off the ledger and the report as they stand (once the run has ended)
-  review <id> --show                                       what has been reviewed, and whether the sign-off is current
-The review is kept beside the registry (runs/reviews/<id>.jsonl, 0600), chained, where no agent reaches.
+  review <id> --adopt N [--note TEXT]                 adopt answer N as the examiner's conclusion
+  review <id> --qualify N --note TEXT                 adopt it with a stated qualification
+  review <id> --reject N --note TEXT                  withdraw it (an answer), or reject an entry
+  review <id> --inconclusive N --note TEXT            render it inconclusive
+  review <id> --accept N | --amend N --note TEXT      accept an entry, or accept it with a correction
+  review <id> --technical-review --reviewer ID|NAME --outcome agreed|issues-resolved|disagreement --checked TEXT
+               [--entries 4,10 | --all-answers] [--disagreement TEXT]... [--reviewed-at ISO] [--competence TEXT]
+                                                      an enrolled reviewer (ID) records and signs their own review;
+                                                      anyone else's (NAME, --competence) the examiner records, unsigned
+  review <id> --countersign SEQ --reviewer ID         the reviewer signs review line SEQ, recorded earlier (after release: it names vN)
+  review <package-dir> --technical-review --reviewer ID ... [--out FILE]
+                                                      a reviewer elsewhere: review-import.jsonl, made over the package
+  review <id> --import FILE [--allowed-signers FILE | --ca FILE]
+                                                      the examiner adds it: hashes, signature, register and review head checked
+  review <id> --sign [--pdf] [--amend-reason TEXT] [--report PATH] [--no-timestamp] [--yes]
+                                                      adopt the report: shown, confirmed, release vN signed with the examiner's own secret
+  review <id> --show                                  what has been reviewed, and whether the sign-off is current
+Every act names the examiner (--examiner ID, an examiner enrolled with swarm.sh examiner enroll; the
+only one enrolled when there is one). Adopting, qualifying, rendering inconclusive, a technical review
+and the sign-off are an enrolled examiner's; accept, reject and amend of a finding may name someone
+who is not enrolled, and say so. An answer whose support is defective cannot be adopted or qualified:
+withdraw it or render it inconclusive; repairing its support is a new examination (a new run). The
+sign-off prepares the report's final bytes for the release (no DRAFT mark, printed with --pdf), shows
+their sha256, the gate's counts and the key, asks for confirmation on the terminal (--yes skips only
+that, and the release records the consent as presented), takes the key's passphrase or PIN with echo
+off (a FIDO key also wants a touch), signs exactly those bytes, and names the release in the review;
+after an adoption, another is an amendment and says why (--amend-reason). A technical reviewer's
+record names what they read (report.md, the ledger's head, custody, the dispositions) and is over an
+earlier state once any of them changes; a reviewer who is the examiner (id, name or key) is refused.
+What the kickoff recorded as who ran the run is never taken for the examiner. The review is kept
+beside the registry (runs/reviews/<id>.jsonl, 0600), chained, where no agent reaches.
 EOF
       ;;
+    releases) cat <<'EOF'
+  releases <id>                                   the run's releases: each version, who sealed it, what is beside it
+  releases <id> --draft [--reason TEXT]           the machine's draft for a run with a verdict and none (or another, with a reason)
+  releases <id> --verify [--allowed-signers FILE] [--ca FILE [--ca-intermediate FILE]] [--tsa-ca FILE]
+                                                  every signature, the bytes and chains each binds, the chain between them
+  releases <id> --print [N]                       release vN's HTML printed to PDF beside it (a print record the next release binds)
+  releases <id> --mirror cmd:COMMAND|dir:PATH|print [--version N]
+                                                  the digest line to an independent copy (the run's --anchor-mirror by default)
+  releases <id> --ots [--upgrade]                 an OpenTimestamps proof of the signature, when the ots client is installed
+  releases <id> --transparency COMMAND            a transparency log's receipt (the command gets the digest line on stdin)
+v0 is written when custody is taken at stop, sealed by this install's machine key: a DRAFT, adopted
+by no one, and its seal is only ever "machine seal, self-checked". v1 is an enrolled examiner's
+adoption (review --sign, or the console's Release panel); each later version names the one before it
+and why. Nothing in a release is written over. --verify exits 0 when every release holds and every
+adoption's key is one FILE allows (an e-signature's chain one --ca FILE verifies), 3 when they hold
+and nothing was given to check the examiner's key against, 4 when one does not hold.
+EOF
+      ;;
+    examiner) cat <<'EOF'
+  examiner enroll --name NAME --organisation ORG --competence TEXT [--role examiner|reviewer]
+                  (--generate-key [--no-passphrase] | --key FILE [--no-passphrase]
+                   | --fido [--fido-verify-required] [--fido-resident]
+                   | --pkcs11-module PATH (--pkcs11-id HEX | --pkcs11-uri URI) [--pkcs11-chain FILE])
+                  [--id ID] [--principal P] [--tsa-url URL --tsa-ca FILE]
+  examiner list | examiner show ID | examiner machine
+A person is enrolled on this install, outside every run ($DFIRSWARM_HOME/examiners/), as an examiner
+(adopts a report, signs its release) or a technical reviewer (signs their own review), with one key:
+an ssh key with a passphrase (made here, the passphrase asked twice with echo off, or given and
+checked to be encrypted; --no-passphrase is a documented trade the console refuses), a FIDO key made
+on the authenticator by a FIDO-capable ssh-keygen (a touch per signature, and the PIN with
+--fido-verify-required), or an e-signature certificate on a token (read without the PIN; each
+signature is a CAdES CMS made on the token, with the PIN). A key is checked by signing a challenge.
+Enrolment prints the fingerprint and, for an ssh or FIDO key, the line for the organisation's signer
+register (an ssh allowed-signers file): the register, checked in person, is what ties the key to the
+person; a certificate's issuer does that for an e-signature. `machine` shows the install's machine
+key, which seals the drafts and is no examiner.
+EOF
+      ;;
+    machine) cat <<'EOF'
+  machine                 the install's machine key: its fingerprint, when and where it was made
+  machine rotate          retire it and make the next one; the next draft is sealed with the new key
+The machine key seals the draft release at stop, unattended, so it has no passphrase. Rotate it
+when a pane may have read it: a host run started with --accept-signer-exposure records that it
+could. The old key is moved to machine/retired/<id>/ with a note of when and by whom, never
+deleted: every draft it sealed carries its public key and is still checked against it. Both
+fingerprints are printed; give the new one to wherever the old one was written down.
+EOF
+      ;;
+    certify) cat <<'EOF'
+  certify <package dir|zip> [--allowed-signers FILE] [--tsa-ca FILE] [--out FILE]
+A certification template of the kind FRE 902(13) and 902(14) contemplate: what the package says of
+itself (the manifest's sha256, who signed it, the custody verdict, every release of the report and who
+sealed each, the redactions), swarm.sh verify run on it with its output and exit verbatim, what the
+checks do not establish, and blank fields for the qualified person who completes and signs it. Nothing
+in it is true because this printed it; it is not legal advice. The report's PDF is bound in its release
+by sha256 and the release's detached ssh signature; it carries no signature of its own (no PAdES).
+EOF
+      ;;
+    rerun) cat <<'EOF'
+  rerun <id> <job> [--normalise timestamps@1] [--network] [--json]
+Runs a sealed job again: its recorded spec through the job service's own worker path, in the image
+it ran in, held to the image digest the journal recorded (another digest here is refused, never
+substituted) and to the tool's or recipe's sha256. The outputs go to <sandbox>.reruns/<job>/<n>/,
+never into the run's store, and each is compared by its bytes with the sealed manifest: the same,
+different (both hashes), not made, or added; stdout and stderr too. A byte mismatch is a mismatch.
+--normalise NAME@VERSION, asked for, says which of the files that differ are equal once that named,
+versioned normalisation is applied to both (timestamps@1: ISO 8601 and RFC 2822 date-times), apart
+from the verdict: an equivalence, never a reproduction. The rerun has no network unless --network
+gives it the job's own. Not re-run: which bytes the job read (not measured), what it fetched, an
+import (a live copy), the reasoning that asked for it. Exit 0 the same, 4 a file differs, 1 not run.
+EOF
+      ;;
+    timestamp) echo "  timestamp <id> [--version N] [--tsa-url URL] [--tsa-ca FILE]   an RFC 3161 token over the latest release's signature, obtained now (an air-gapped lab's later step): the release's proof of existence dates from the token, and timestamp.json says so; --tsa-ca checks the authority's signature (exit 0 verified, 3 imprint only, 4 does not verify)" ;;
     custody-verify) cat <<'EOF'
-  custody-verify <id> [--allowed-signers FILE --identity NAME] [--json]
-Takes the run's custody again, writing nothing, and holds it to the verdict it sealed: every check's
-status now, the sealed prefix of the trace, the lines written after the seal (the run's own closing
-lines are expected), the verdict against its anchor, its signature and its timestamp token.
+  custody-verify <id> [--allowed-signers FILE --identity NAME] [--tsa-ca FILE] [--scratch DIR] [--json]
+Takes the run's custody again, writing nothing in the run, and holds it to the verdict it sealed:
+every check's status now, the sealed prefix of the trace, the lines written after the seal (the
+run's own closing lines are expected), each chain's sealed length and head (ledger, attestations,
+store journal, where an examiner's notes after the run are named and allowed, the gateway log),
+every work/ file against the index custody sealed (changed, removed, added, each named), the
+verdict against its anchor, its signature and its timestamp token. --tsa-ca (or
+SWARM_CUSTODY_TSA_CA, or the run's --custody-timestamp-ca) checks the token's signature with
+openssl ts -verify; without one it is "imprint only". A kept disk msb checks is loaded under
+--scratch (the host's temporary directory by default), and what was touched there is said.
 Exit 0: the run is as the verdict sealed it; 4: it is not, or a check does not pass; 1: not checked.
 EOF
       ;;
     verify) cat <<'EOF'
-  verify <package dir|zip> [--allowed-signers FILE]
+  verify <package dir|zip> [--allowed-signers FILE] [--ca FILE [--ca-intermediate FILE]] [--tsa-ca FILE]
 Re-hashes every file against MANIFEST.txt (none missing, none added, none outside the package) and
-checks MANIFEST.txt.sig; then the chains the package carries (trace, ledger, attestations, journal)
-against the custody verdict's seal, and the verdict's own signature and timestamp token.
-Exit 0: all of it holds and the signer is one FILE allows; 3: the files hold, the signature is sound,
-the signer was not checked; 4: the files hold, the package is unsigned; 1: something does not hold.
+checks MANIFEST.txt.sig, which covers SIGNER.txt; every part in COMPONENTS.json is there or declared
+absent; then the chains the package carries (trace, ledger with every readable entry's core
+recomputed, attestations, journal, the examiner's review) against the custody verdict's seal, and
+every packaged work/ file against the index custody sealed (artifacts.sealed.json), held to the
+verdict and its anchor; and the report's releases (release/): each signature (against FILE, the
+signer register, when given; an e-signature against --ca FILE, its issuer's CA), the bytes and the
+chains each binds, the chain between versions, its line in the anchor, its timestamp token (its
+signature checked with --tsa-ca FILE).
+Exit 0: all of it holds and the signer is one FILE allows (and so is every adopting examiner's key);
+3: the files hold, the signature is sound, the signer (or an adopting examiner's key) was not checked;
+4: the files hold, the package is unsigned; 1: something does not hold.
 EOF
       ;;
     image-for) echo "  image-for [--pack ID]... [--tools-from DIR] [--playwright] [--no-jobs] [--brains-with-packs]   the image a kickoff's agents would boot, as JSON: ref, digest (null when neither the lock nor msb has it), profile, pinned_by, reason, and jobs (each job image: profile, ref, the packs it serves); read only" ;;
@@ -8715,6 +10191,20 @@ are charged, a token cap where they are not (a subscription, local models).
 EOF
       ;;
     purge) echo "  purge <id> --yes   delete a finished run's sandbox, kept VM disks and hub directory; the registry keeps it as purged, and runs/operator-audit.jsonl gets the destruction record" ;;
+    lead) cat <<'EOF'
+  lead <id> list [--json]                      every lead: the ones waiting on the operator first, then
+                                               active, blocked, open and closed, with needs and dispositions
+  lead <id> note <L-n> "TEXT" [--allow-host H] the operator's answer to a lead: recorded on it (leads.jsonl),
+                                               the lead reopened when it was closed, posted to the board as
+                                               the examiner to whoever held it; --allow-host adds H to the hosts
+                                               the run's jobs reach with network=allowlist (a microVM run: each
+                                               job's worker is made new; the agents' own VMs keep their network)
+  lead <id> reopen <L-n> ["TEXT"]              reopen a closed lead
+A lead an agent closes needs_operator writes its request to <run>/operator-requests.jsonl and to the
+board; the console shows it on the Leads tab with a form for the note. Each note and reopen is on the
+trace and the operator's record.
+EOF
+      ;;
     *) die_usage "no help for '$topic'" ;;
   esac
 }
@@ -8729,9 +10219,11 @@ main() {
   # What changes or leaves a run is on the operator's record; what only reads
   # it (list, status, summary, context, help) is not.
   case "$cmd" in
-    start|stop|reap|say|cap|package|report|tools|review|export|hold|release|purge|verify)
+    start|stop|reap|say|cap|package|report|tools|review|export|hold|release|purge|verify|releases|examiner|machine|timestamp|rerun)
       # A start --check writes nothing, the audit included.
       case " $* " in *" -h "*|*" --help "*|*" --check "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
+    # The operator's answer to a lead, and a reopen, change the run; a list reads it.
+    lead) [[ "${2:-}" == list ]] || operator_audit "$cmd" "$@" ;;
   esac
   case "$cmd" in
     start) cmd_start "$@" ;;
@@ -8747,6 +10239,7 @@ main() {
     tools) cmd_tools "$@" ;;
     say) cmd_say "$@" ;;
     cap) cmd_cap "$@" ;;
+    lead) cmd_lead "$@" ;;
     netcheck) cmd_netcheck "$@" ;;
     review) cmd_review "$@" ;;
     image-for) cmd_image_for "$@" ;;
@@ -8756,6 +10249,12 @@ main() {
     purge) cmd_purge "$@" ;;
     verify) cmd_verify "$@" ;;
     custody-verify) cmd_custody_verify "$@" ;;
+    releases) cmd_releases "$@" ;;
+    examiner) cmd_examiner "$@" ;;
+    machine) cmd_machine "$@" ;;
+    timestamp) cmd_timestamp "$@" ;;
+    rerun) cmd_rerun "$@" ;;
+    certify) cmd_certify "$@" ;;
     help) cmd_help "$@" ;;
     *) die_usage "unknown command: $cmd" ;;
   esac

@@ -43,24 +43,47 @@ import {
   readNames,
   eventChainVerifier,
   readSandboxFile,
-  refsOnFailedJobs,
-  standingContradictions,
   supersededBy,
   type AgentBudget,
   type LedgerEntry,
 } from "../extensions/protocol.ts";
+import { createHash } from "node:crypto";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
-import { custodyAnchorPath, manifestMeta, verdictAnchorLine, verdictAnchorState } from "./custody.ts";
+import { humanReviewFrom, renderReportBody, type HumanReview } from "./report-body.ts";
+import { custodyAnchorPath, manifestMeta, sealedIndex, verdictAnchorLine, verdictAnchorState } from "./custody.ts";
 import { hashRegularFile, openRegular, readRegularText } from "./regular-file.ts";
 import { createInterface } from "node:readline";
 import { loadRunContext, readJsonFile } from "./run-record.ts";
 import { coverageLine, coverageOf, type CoverageReport, type Grounding } from "./coverage.ts";
-import { ReviewFileError, ledgerHead, readReviews, reviewState, verifyReviewChain, type ReviewLine } from "./review.ts";
+import { ReviewFileError, dispositionsHead, isSandboxPath, ledgerHead, readReviews, reviewState, signoffCoverage, technicalReviewsOf, verifyReviewChain, type ReviewLine, type TechnicalReview } from "./review.ts";
+import { bodyRelease, readReleases } from "./release-record.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+/**
+ * The release a rendering is for (scripts/release.ts): which version, a
+ * machine's draft or an examiner's adoption, when, and who seals it.
+ */
+export type RenderRelease = {
+  version: number;
+  state: "draft" | "adopted";
+  at: string;
+  examiner?: { id: string; name: string; organisation: string; competence: string; fingerprint: string } | null;
+  machine?: { fingerprint: string } | null;
+  /** What the examiner did with the conclusions, counted, and who checked the methods. */
+  adoption?: { adopted: number; qualified: number; withdrawn: number; inconclusive: number; not_adopted: number; scope: "answers" | "report"; technical: string[] } | null;
+};
+
 export type ReportOptions = {
   runsDir?: string;
+  /**
+   * The release this rendering is for. A draft, or no release at all,
+   * carries the DRAFT mark, decided now, when the bytes are rendered; a
+   * release an examiner adopts renders its own final bytes without it.
+   * Absent, the run's releases are read to say which one, if any, is the
+   * adopted report, and that this rendering is not it.
+   */
+  release?: RenderRelease | null;
   /** Overrides the registry's case id and examiner, for a one-off render. */
   caseId?: string;
   examiner?: string;
@@ -198,7 +221,7 @@ const STYLE = `
 html { -webkit-text-size-adjust: 100%; }
 body { margin: 0; background: var(--paper-2); color: var(--ink); font: 10.5pt/1.6 var(--sans); }
 main { max-width: 54rem; margin: 0 auto; padding: 0 0 4rem; background: var(--paper); box-shadow: 0 0 0 1px var(--line); }
-section, .cover, .toc, footer { padding-left: clamp(1.25rem, 5vw, 3.25rem); padding-right: clamp(1.25rem, 5vw, 3.25rem); }
+section, .cover, .toc, .preamble, footer { padding-left: clamp(1.25rem, 5vw, 3.25rem); padding-right: clamp(1.25rem, 5vw, 3.25rem); }
 
 h1, h2, h3, h4 { font-family: var(--serif); font-weight: 400; line-height: 1.12; margin: 0 0 .5em; }
 h1 { font-size: clamp(2.2rem, 6vw, 3.1rem); letter-spacing: -.01em; }
@@ -343,6 +366,9 @@ section { padding-top: 2.5rem; }
 .embedded { border: 1px solid var(--line); border-radius: 8px; padding: .3rem 1.1rem 1.1rem; background: var(--card); margin-top: 1rem; }
 .embedded h3 { margin-top: 1.4em; }
 footer { margin-top: 3rem; padding-top: 1.1rem; border-top: 1px solid var(--line); font-size: .8em; color: var(--ink-3); }
+.watermark { position: fixed; top: 40%; left: 0; right: 0; text-align: center; font: 700 110pt/1 var(--sans); letter-spacing: .12em; color: rgba(178, 58, 72, .10); transform: rotate(-28deg); pointer-events: none; z-index: 0; }
+.release-banner { margin: 1.4rem 0 0; padding: .6rem .85rem; border: 2px solid var(--brick); background: var(--brick-soft); color: var(--brick-ink); font-weight: 600; }
+.release-banner.adopted { border-color: var(--moss); background: var(--moss-soft); color: var(--moss-ink); }
 footer p { max-width: 44em; }
 
 @media (max-width: 34rem) {
@@ -364,7 +390,7 @@ footer p { max-width: 44em; }
   html, body { background: #fff; }
   body { font-size: 9.3pt; line-height: 1.5; }
   main { max-width: none; margin: 0; padding: 0; box-shadow: none; }
-  section, .cover, .toc, footer { padding-left: 0; padding-right: 0; }
+  section, .cover, .toc, .preamble, footer { padding-left: 0; padding-right: 0; }
 
   /* The cover is a page of its own, and the contents follow it. */
   .cover { min-height: 0; padding-top: 0; break-after: page; page-break-after: always; }
@@ -393,173 +419,12 @@ footer p { max-width: 44em; }
 }
 `;
 
-/** An ISO stamp that fits a narrow column: date, then time beneath it. */
-function whenCell(ts: string): string {
-  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(ts);
-  if (!m) return `<span class="when">${escapeHtml(ts)}</span>`;
-  return `<span class="when">${m[1]}<span class="t">${m[2]}Z</span></span>`;
-}
-
 function chip(text: string, tone: "kelp" | "saffron" | "brick" | "slate" | "moss" | "none"): string {
   return `<span class="chip chip-${tone}">${escapeHtml(text)}</span>`;
 }
 
-/**
- * The time as the agent gave it, when the ledger kept it and it is not the
- * stored UTC instant itself: a reader checking the timeline against the
- * source needs the source's own words, zone included.
- */
-function givenTime(entry: LedgerEntry): string | null {
-  const e = entry as LedgerEntry & { ts_raw?: unknown; ts_source?: unknown };
-  const raw = typeof e.ts_raw === "string" ? e.ts_raw : typeof e.ts_source === "string" ? e.ts_source : null;
-  return raw && raw.trim() && raw.trim() !== entry.ts ? raw.trim() : null;
-}
-
-/** One dated event on the timeline rail: stamp, claim, then its citation. */
-function timelineRow(entry: LedgerEntry, correctedBy?: number): string {
-  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(entry.ts ?? "");
-  // A date alone is a day: no midnight is printed for it.
-  const stamp = m
-    ? entry.precision === "date"
-      ? `<span class="date">${m[1]}</span><span>(date only)</span>`
-      : `<span class="date">${m[1]}</span><span>${m[2]}Z</span>`
-    : `<span class="date">${escapeHtml(entry.ts ?? "undated")}</span>`;
-  const rows: string[] = [];
-  const given = givenTime(entry);
-  if (given) rows.push(`<dt>Time as given</dt><dd>${escapeHtml(given)}</dd>`);
-  if (entry.clock) rows.push(`<dt>Clock</dt><dd>${escapeHtml(entry.clock)}</dd>`);
-  if (entry.precision && entry.precision !== "date") rows.push(`<dt>Precision</dt><dd>${escapeHtml(entry.precision)}</dd>`);
-  if (entry.basis) rows.push(`<dt>Basis</dt><dd>${escapeHtml(entry.basis)}</dd>`);
-  if (entry.source) rows.push(`<dt>Source</dt><dd>${inline(entry.source)}</dd>`);
-  if (entry.evidence) rows.push(`<dt>Evidence</dt><dd>${inline(entry.evidence)}</dd>`);
-  if (correctedBy) rows.push(`<dt>Superseded by</dt><dd>E-${correctedBy}</dd>`);
-  return `<li>
-  <div class="stamp">${stamp}<span class="no">E-${entry.seq}</span></div>
-  <div class="what">${inline(entry.value)}</div>
-  ${rows.length ? `<dl>${rows.join("")}</dl>` : ""}
-</li>`;
-}
-
-/**
- * The findings as verdict cards, grouped by how sure the swarm said it was.
- * A numbered list of forty-word sentences is the one shape a reader cannot
- * scan, and confidence is the first thing they need: what this run stands
- * behind, and what it is only offering.
- */
-function verdictGroups(findings: LedgerEntry[], corrections: Map<number, number> = new Map()): string {
-  const order: Array<{ key: string; label: string; cls: string }> = [
-    { key: "high", label: "High confidence", cls: "c-high" },
-    { key: "medium", label: "Medium confidence", cls: "c-medium" },
-    { key: "low", label: "Low confidence — offered as hypotheses", cls: "c-low" },
-    { key: "", label: "Recorded without a confidence", cls: "c-low" },
-  ];
-  const out: string[] = [];
-  for (const group of order) {
-    const rows = findings.filter((f) => (f.confidence ?? "") === group.key);
-    if (!rows.length) continue;
-    const cards = rows
-      .slice()
-      .reverse()
-      .map((f) => {
-        const source = f.source ? inline(f.source) : f.evidence ? inline(f.evidence) : "";
-        const by = corrections.get(f.seq);
-        return `<div class="verdict ${group.cls}">
-  <span class="no">E-${f.seq}</span>
-  <div>
-    <div class="claim">${inline(f.value)}${by ? ` ${chip(`superseded by E-${by}`, "brick")}` : ""}</div>
-    ${source ? `<div class="meta">${source}</div>` : ""}
-  </div>
-</div>`;
-      })
-      .join("");
-    out.push(`<div class="group-head"><span class="t">${escapeHtml(group.label)}</span><span class="rule"></span><span class="t">${rows.length}</span></div>
-<div class="verdicts">${cards}</div>`);
-  }
-  return out.join("\n");
-}
-
-/**
- * One exhibit: the claim, when, what it rests on, who recorded it and with
- * which model, and the entry's own chain hash — what a reader needs to say
- * whose conclusion this is and to find the very line in ledger.jsonl.
- */
-/**
- * What the report knows about an entry beyond the entry itself: whether the
- * trace shows its source being read, the entry that corrects it, and the
- * examiner's standing on it.
- */
-export type ExhibitNotes = {
-  grounding?: Grounding;
-  supersededBy?: number;
-  review?: string;
-  /** The entry's refs to jobs that did not end ok, with their status. */
-  failedRefs?: string[];
-};
-
-const KIND_CHIP: Record<string, "brick" | "kelp" | "moss" | "none" | "saffron" | "slate"> = { ioc: "saffron", finding: "kelp", event: "slate", absence: "slate", hypothesis: "none", limitation: "brick" };
-
-function exhibitCard(entry: LedgerEntry, modelOf: (agent: string) => string | undefined = () => undefined, notes: ExhibitNotes = {}): string {
-  const tone = entry.kind === "ioc" ? "ioc" : entry.kind === "finding" ? "finding" : entry.kind === "event" ? "event" : entry.kind === "hypothesis" ? "hypothesis" : entry.kind === "limitation" ? "limitation" : "absence";
-  const rows: string[] = [];
-  if (entry.status) rows.push(`<dt>Status</dt><dd>${escapeHtml(entry.status)}: a proposition under test, not a finding</dd>`);
-  if (entry.reason) rows.push(`<dt>Why not established</dt><dd>${escapeHtml(entry.reason.replace("_", " "))}</dd>`);
-  if (entry.answers?.length) rows.push(`<dt>Answers</dt><dd>${entry.answers.map((a) => escapeHtml(a)).join(", ")}</dd>`);
-  if (entry.ts) rows.push(`<dt>When</dt><dd>${entry.precision === "date" ? `${escapeHtml(entry.ts.slice(0, 10))} (date only)` : whenCell(entry.ts)}</dd>`);
-  const given = givenTime(entry);
-  if (given) rows.push(`<dt>Time as given</dt><dd>${escapeHtml(given)}</dd>`);
-  if (entry.clock) rows.push(`<dt>Clock</dt><dd>${escapeHtml(entry.clock)}</dd>`);
-  if (entry.precision && entry.precision !== "date") rows.push(`<dt>Precision</dt><dd>${escapeHtml(entry.precision)}</dd>`);
-  rows.push(`<dt>Source</dt><dd>${inline(entry.source ?? "—")}</dd>`);
-  rows.push(`<dt>Evidence</dt><dd>${inline(entry.evidence ?? "—")}</dd>`);
-  if (entry.basis) rows.push(`<dt>Basis</dt><dd>${escapeHtml(entry.basis)}</dd>`);
-  if (entry.completion && entry.completion !== "complete") rows.push(`<dt>Search</dt><dd>${escapeHtml(entry.completion)}: holds only for what was searched</dd>`);
-  // The run's objects it rests on, each checked when it was recorded.
-  if (entry.refs?.length) rows.push(`<dt>Rests on</dt><dd>${entry.refs.map((r) => `<code>${escapeHtml(r)}</code>`).join(", ")}</dd>`);
-  else if (entry.kind === "finding") rows.push(`<dt>Rests on</dt><dd>no object of the run named (no refs)</dd>`);
-  if (notes.failedRefs?.length) rows.push(`<dt>From a failed job</dt><dd>${notes.failedRefs.map((r) => escapeHtml(r)).join(", ")}: the kept output of a job that did not succeed</dd>`);
-  if (entry.locators?.length) rows.push(`<dt>Located at</dt><dd>${entry.locators.map((l) => `<code>${escapeHtml(l.ref)}</code> ${escapeHtml(l.at)}`).join("; ")}</dd>`);
-  if (entry.rel?.length) rows.push(`<dt>Related</dt><dd>${entry.rel.map((r) => `${escapeHtml(r.kind.replace("_", " "))} <a href="#e-${r.to}">E-${r.to}</a>`).join(", ")}</dd>`);
-  if (entry.attribution) rows.push(`<dt>Attributed to</dt><dd>${escapeHtml(entry.attribution.subject)} (${escapeHtml(entry.attribution.subject_type)})${entry.attribution.basis_refs?.length ? `, on ${entry.attribution.basis_refs.map((r) => `<code>${escapeHtml(r)}</code>`).join(", ")}` : ""}</dd>`);
-  if (entry.sensitive) rows.push(`<dt>Sensitive</dt><dd>it, or what it cites, holds a credential, a key or personal data: redacted from a package made with --redact</dd>`);
-  rows.push(`<dt>Recorded by</dt><dd class="hash">${escapeHtml(entry.authors.join(", "))}</dd>`);
-  const models = [...new Set(entry.authors.map((a) => modelOf(a)).filter((m): m is string => Boolean(m)))];
-  if (models.length) rows.push(`<dt>Model</dt><dd>${escapeHtml(models.join(", "))}</dd>`);
-  if (entry.at) rows.push(`<dt>Recorded at</dt><dd class="tabular">${escapeHtml(entry.at)}</dd>`);
-  if (entry.hash) rows.push(`<dt>Entry hash</dt><dd class="hash">${escapeHtml(entry.hash)}</dd>`);
-  const corrects = Number((entry as { supersedes?: unknown }).supersedes);
-  if (Number.isInteger(corrects) && corrects > 0) rows.push(`<dt>Corrects</dt><dd><a href="#e-${corrects}">E-${corrects}</a>, which stays in the ledger as it was recorded${entry.because ? `, because ${escapeHtml(entry.because)}` : ""}</dd>`);
-  if (notes.supersededBy) rows.push(`<dt>Superseded by</dt><dd><a href="#e-${notes.supersededBy}">E-${notes.supersededBy}</a>: the swarm recorded a correction; this entry is shown as it was recorded</dd>`);
-  if (notes.grounding === "not in the trace") rows.push(`<dt>Grounding</dt><dd>NOT GROUNDED IN THE TRACE: no call before this entry was recorded named its source</dd>`);
-  else if (notes.grounding === "grounded") rows.push(`<dt>Grounding</dt><dd>a call before this entry named its source</dd>`);
-  if (notes.review) rows.push(`<dt>Examiner review</dt><dd>${escapeHtml(notes.review)}</dd>`);
-  const confidence = entry.confidence
-    ? ` ${chip(entry.confidence, entry.confidence === "high" ? "moss" : entry.confidence === "medium" ? "saffron" : "none")}`
-    : "";
-  const superseded = notes.supersededBy ? ` ${chip(`superseded by E-${notes.supersededBy}`, "brick")}` : "";
-  const ungrounded = notes.grounding === "not in the trace" ? ` ${chip("not grounded in the trace", "saffron")}` : "";
-  // The examiner's standing, at a glance on the exhibit's head: the full
-  // words are in its Examiner review row.
-  const reviewChip = notes.review
-    ? ` ${
-        notes.review.startsWith("accepted")
-          ? chip("accepted by the examiner", "moss")
-          : notes.review.startsWith("REJECTED")
-            ? chip("rejected by the examiner", "brick")
-            : notes.review.startsWith("amended")
-              ? chip("amended by the examiner", "saffron")
-              : notes.review.startsWith("the examiner's review could not be read")
-                ? chip("review unreadable", "brick")
-                : chip("not reviewed", "none")
-      }`
-    : "";
-  return `<div class="exhibit exhibit-${tone}" id="e-${entry.seq}">
-  <div class="head"><span class="no">E-${entry.seq}</span><span class="chips">${chip(entry.kind, KIND_CHIP[entry.kind] ?? "slate")}${entry.status ? ` ${chip(entry.status, entry.status === "supported" ? "moss" : entry.status === "refuted" ? "brick" : "none")}` : ""}${confidence}${entry.sensitive ? ` ${chip("sensitive", "brick")}` : ""}${notes.failedRefs?.length ? ` ${chip("from a failed job", "saffron")}` : ""}${superseded}${ungrounded}${reviewChip}</span></div>
-  <p class="value">${inline(entry.value)}</p>
-  <dl>${rows.join("")}</dl>
-</div>`;
-}
-
-type Section = { n: number; title: string; html: string; breakBefore?: boolean; count?: string };
+/** A section as the document prints it: the body's (1 to 10, appendices A to C), then custody (D) and the artifacts (E). */
+type Section = { id: string; n: string; title: string; desc?: string; html: string; breakBefore?: boolean; count?: string };
 
 /** An examiner's review of a run, as the report reads it (scripts/review.ts keeps the file). */
 export type ReviewState = {
@@ -572,8 +437,14 @@ export type ReviewState = {
   signed: ReviewLine | null;
   /** The ledger's head now, to hold the signature to: the last chain hash, or file:<sha256>. */
   head: string;
+  /** The sha256 of the report the sign-off names, as it is now: null when it is gone; undefined when there is no sign-off or it names none. */
+  reportNow?: string | null;
   /** Why the review file could not be read (a link, not a regular file): said as that, never as "not reviewed". */
   unreadable?: string;
+  /** The last technical reviewer's record: who, on what competence, what was checked. */
+  technical?: { name: string; competence?: string; checked?: string } | null;
+  /** Every technical review, each with where it stands against the run as it is now (review.ts technicalReviewsOf). */
+  technicals?: TechnicalReview[];
 };
 
 /**
@@ -581,11 +452,13 @@ export type ReviewState = {
  * its chain checked and the ledger's current head beside it; null when there
  * is none.
  */
-export async function readReviewState(runsDir: string, id: string, sandbox: string, ledger: readonly LedgerEntry[]): Promise<ReviewState | null> {
+export async function readReviewState(runsDir: string, id: string, sandbox: string, ledger: readonly LedgerEntry[], upTo?: number): Promise<ReviewState | null> {
   if (!id) return null;
   let lines: Awaited<ReturnType<typeof readReviews>>;
   try {
     lines = await readReviews(runsDir, id);
+    // A release renders the review as it bound it: its first lines only.
+    if (upTo !== undefined) lines = lines.slice(0, upTo);
   } catch (err) {
     if (!(err instanceof ReviewFileError)) throw err;
     return { lines: 0, chain: { ok: false, reason: err.why }, byEntry: new Map(), signed: null, head: "", unreadable: err.why };
@@ -596,7 +469,58 @@ export async function readReviewState(runsDir: string, id: string, sandbox: stri
   const digest = await hashRegularFile(join(sandbox, "ledger", "entries.jsonl"));
   const fileSha = digest && "sha256" in digest ? digest.sha256 : "";
   const head = ledgerHead(ledger.map((e) => ({ ...(e as object), text: "" })) as Parameters<typeof ledgerHead>[0], fileSha);
-  return { lines: lines.length, chain: verifyReviewChain(lines), byEntry: entries, signed, head };
+  // The report the sign-off is over, hashed as it is now.
+  let reportNow: string | null | undefined;
+  if (signed?.report_path && isSandboxPath(signed.report_path)) {
+    const r = await hashRegularFile(join(sandbox, signed.report_path));
+    reportNow = r && "sha256" in r ? r.sha256 : null;
+  }
+  const tr = [...parsed].reverse().find((l) => l.action === "technical_review" && l.reviewer);
+  // Every technical review, held to the run as it stands: the report's five wordings.
+  const custody = await hashRegularFile(join(sandbox, "custody.json"));
+  const report = await hashRegularFile(join(sandbox, "work", "report.md"));
+  const technicals = technicalReviewsOf(lines as Array<ReviewLine & { text: string }>, { report_sha256: report && "sha256" in report ? report.sha256 : null, ledger_head: head || null, custody_sha256: custody && "sha256" in custody ? custody.sha256 : null, dispositions_head: dispositionsHead(parsed) });
+  return { lines: lines.length, chain: verifyReviewChain(lines), byEntry: entries, signed, head, reportNow, technical: tr?.reviewer ? { name: tr.reviewer.name, competence: tr.reviewer.competence, ...(tr.methods_checked ? { checked: tr.methods_checked } : {}) } : null, technicals };
+}
+
+/**
+ * Whether the examiner's sign-off covers this run as it stands: the
+ * review's chain holds, and the ledger's head and the report's hash are the
+ * ones signed. Only then does the report say "reviewed and signed".
+ */
+export function signoffCurrent(state: ReviewState | null): boolean {
+  if (!state?.signed || state.unreadable) return false;
+  return signoffCoverage(state.signed, { chainOk: state.chain.ok, ledgerHead: state.head || null, reportSha: state.reportNow }).current;
+}
+
+/** What a sign-off that does not cover the run as it stands is over, in words. */
+export function signoffScope(state: ReviewState): string {
+  const s = state.signed as ReviewLine;
+  const c = signoffCoverage(s, { chainOk: state.chain.ok, ledgerHead: state.head || null, reportSha: state.reportNow });
+  const parts: string[] = [];
+  if (!state.chain.ok) parts.push("its review file's chain is broken, so what it says is not held to anything");
+  if (c.ledger === false) parts.push(`it is over an earlier ledger (head ${s.ledger_head}), and entries were recorded after it`);
+  if (!s.report_sha256) parts.push("it names no report");
+  else if (c.report === false) parts.push(`it is over ${s.report_path ?? "a report"} as it was (sha256 ${s.report_sha256}), and ${state.reportNow ? `that file is now ${state.reportNow}` : "that file is gone"}`);
+  return parts.join("; ");
+}
+
+/**
+ * The examiner's review as the report's body takes it, with whether the
+ * sign-off covers the run as it stands: the report and the run summary pass
+ * the same, so their counts of what was adopted agree.
+ */
+export function bodyReview(review: ReviewState | null, examiner?: { name: string; organisation?: string; competence?: string } | null): HumanReview | null {
+  const current = review?.signed && !review.unreadable ? signoffCurrent(review) : null;
+  const h = humanReviewFrom(review, examiner ? { name: examiner.name, ...(examiner.organisation ? { organisation: examiner.organisation } : {}) } : null, review && current !== null ? { current, ...(current ? {} : { scope: signoffScope(review) }) } : undefined);
+  if (!h) return h;
+  // The adopting examiner's competence, and the technical reviewer, when there are.
+  return {
+    ...h,
+    ...(examiner?.competence && h.examiner ? { examiner: { ...h.examiner, competence: examiner.competence } } : {}),
+    ...(review?.technical ? { technicalReviewer: review.technical } : {}),
+    ...(review && !review.unreadable ? { technicalReviews: (review.technicals ?? []).map((t) => ({ name: t.reviewer.name, organisation: t.reviewer.organisation, competence: t.reviewer.competence, checked: t.methods_checked, outcome: t.outcome ?? null, reviewed_at: t.reviewed_at ?? null, disagreements: t.disagreements ?? [], words: t.words ?? "" })) } : {}),
+  };
 }
 
 /** The examiner's standing on one entry, in the words of its exhibit. */
@@ -628,9 +552,34 @@ export function reviewLine(state: ReviewState | null, ledger: readonly LedgerEnt
   const sign = state.signed
     ? `signed by ${state.signed.examiner} at ${state.signed.at} over ledger head ${state.signed.ledger_head ?? "not named"}${
         state.signed.ledger_head && head ? (state.signed.ledger_head === head ? " (the ledger's current head)" : ` — NOT the ledger's current head (${head}): entries were recorded after the signature`) : ""
+      }${
+        !state.signed.report_sha256
+          ? " and over no report"
+          : ` and ${state.signed.report_path ?? "the report"} sha256 ${state.signed.report_sha256}${state.reportNow === undefined ? "" : state.reportNow === state.signed.report_sha256 ? " (the report as it is)" : ` — NOT the report as it is (${state.reportNow ?? "gone"}): it changed after the signature`}`
       }`
     : "not signed";
   return `${reviewed}; ${sign}; ${chain}`;
+}
+
+/**
+ * The swarm's report held to the index custody sealed at stop: the sha256 of
+ * the bytes this document reproduces, labelled as that, and whether they are
+ * the ones sealed. A report changed after the stop says CHANGED SINCE
+ * CUSTODY with the sealed hash, rather than today's hash standing in for the
+ * record's.
+ */
+export async function ownReportSeal(sandbox: string, path: string, sha256: string, custody: { at?: string; artifacts?: { index_sha256?: string } | null } | null, anchored: string | null | undefined): Promise<string> {
+  const now = `Its sha256 as reproduced here: ${sha256}`;
+  if (!custody) return `${now}; not sealed: no custody was taken (swarm.sh stop takes it).`;
+  const when = custody.at ?? "stop";
+  const idx = await sealedIndex(sandbox, custody, anchored);
+  if (idx.state === "not sealed") return `${now}; not held to a seal: ${idx.why}.`;
+  if (idx.state === "differs") return `${now}; NOT HELD TO THE SEAL: ${idx.why}.`;
+  const sealed = (idx.index.files ?? []).find((f) => f.path === path);
+  if (!sealed) return `${now}. NOT SEALED: the index custody sealed at ${when} has no ${path}; it was written after the stop.`;
+  return sealed.sha256 === sha256
+    ? `${now}, the bytes custody sealed at ${when} (artifacts.json).`
+    : `${now}. CHANGED SINCE CUSTODY: custody sealed ${path} at ${when} with sha256 ${sealed.sha256}; these are not those bytes.`;
 }
 
 /** The run's model gateway as the kickoff recorded it (`isolation.model_gateway`); null when it had none. */
@@ -1133,9 +1082,12 @@ export function egressLine(mode: string | undefined): string {
 /**
  * How the evidence reached the agents: copied into the run, used in place
  * behind a host guard, or mounted read-only into each agent's microVM.
+ * Several sets are each named, at inputs/<name>/, with where it came from.
  */
-export function evidenceArrival(inputs: { source?: string; copied_at?: string; guard?: string; held?: string; bound?: boolean }): string {
-  const source = `<code>${escapeHtml(inputs.source || "the operator")}</code>`;
+export function evidenceArrival(inputs: { source?: string; copied_at?: string; guard?: string; held?: string; bound?: boolean; sets?: Array<{ path?: string; source?: string; files?: number }> }): string {
+  const source = inputs.sets?.length
+    ? `${inputs.sets.length} sets (${inputs.sets.map((set) => `<code>${escapeHtml(set.source || "the operator")}</code> as <code>${escapeHtml(set.path ?? "inputs/?")}/</code>, ${set.files ?? 0} file${set.files === 1 ? "" : "s"}`).join("; ")})`
+    : `<code>${escapeHtml(inputs.source || "the operator")}</code>`;
   const at = escapeHtml(inputs.copied_at || "—");
   if (inputs.guard === "microvm" && inputs.held === "copy") {
     return `<p>Copied from ${source} at ${at} into <code>inputs/</code>, read-only, as a second layer (<code>--inputs-copy</code>): each agent's microVM had the copy mounted read-only, and the host refused every write through that mount.</p>`;
@@ -1150,6 +1102,12 @@ export function evidenceArrival(inputs: { source?: string; copied_at?: string; g
     return `<p>Used in place from ${source} (manifest taken ${at}), with no copy: <code>inputs/</code> linked to it, and the kernel held the source read-only in every pane. The harness refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it.</p>`;
   }
   return `<p>Copied from ${source} at ${at} into <code>inputs/</code>, which no agent may write. The harness refuses <code>write</code>, <code>edit</code> and <code>claim_file</code> on it, restores a shell write from a pristine copy, and where the host allows it runs each pane with <code>inputs/</code> read-only at the kernel.</p>`;
+}
+
+/** Where the evidence came from, in words: its source, or each set's at inputs/<name>/. */
+export function evidenceFrom(inputs: { source?: string; sets?: Array<{ path?: string; source?: string; files?: number }> }): string {
+  if (!inputs.sets?.length) return `from ${inputs.source || "the operator"}`;
+  return `in ${inputs.sets.length} sets: ${inputs.sets.map((set) => `${set.path ?? "inputs/?"}/ from ${set.source || "the operator"} (${set.files ?? 0} file${set.files === 1 ? "" : "s"})`).join("; ")}`;
 }
 
 /** What the VM manager recorded about one agent's VM (scripts/vm.ts, vm/<id>.json). */
@@ -1288,7 +1246,8 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
     vms?: Array<{ agent?: string; secret_violations?: Array<{ env?: string; host?: string; method?: string; path?: string; location?: string; own_host?: boolean | null }> }> | null;
     model_gateway?: { lines: number; intact: boolean; detail: string; refused?: string } | null;
     checks?: Array<{ name: string; status: string; reason?: string; expected?: number; checked?: number }>;
-    seal?: { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
+    artifacts?: { files?: number; index_sha256?: string } | null;
+    seal?: { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; disputes?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
     acquisition?: { source: string | null; source_sha256: string | null; given: number; matched: number; mismatched: string[]; not_compared: string[] } | null;
     operator?: { lines: number; intact: boolean; detail: string; trace_actions: number; matched: number; unmatched: unknown[] } | null;
     models?: { team: Array<{ agent: string; model: string | null }>; gateway_answered: string[] | null };
@@ -1296,7 +1255,7 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
     timing?: { total_ms: number; evidence_bytes: number; evidence_mb_per_s: number | null };
   }>(join(sandbox, "custody.json"));
   // The anchor outside the run: the kickoff's reference clock, and the last verdict's signature and timestamp.
-  const custodyAnchorFile = await readJsonFile<{ time_reference?: { url?: string; offset_ms?: number | null; precision_ms?: number; error?: string } | null; custody?: Array<{ signature?: { file?: string; key?: string | null; error?: string }; timestamp?: { authority?: string; gen_time?: string | null; error?: string } }> }>(custodyAnchorPath(sandbox));
+  const custodyAnchorFile = await readJsonFile<{ time_reference?: { url?: string; offset_ms?: number | null; precision_ms?: number; error?: string } | null; custody?: Array<{ artifacts_sha256?: string | null; signature?: { file?: string; key?: string | null; error?: string }; timestamp?: { authority?: string; gen_time?: string | null; error?: string; signature?: { verified?: boolean | null; ca?: string | null; detail?: string } } }> }>(custodyAnchorPath(sandbox));
   const lastAnchored = custodyAnchorFile?.custody?.at(-1);
   // The operator's own actions on this run, from the audit beside the registry.
   const operatorActs = await (async () => {
@@ -1424,7 +1383,6 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   // The examiner's review, kept beside the registry where no agent writes.
   const review: ReviewState | null = options.review !== undefined ? options.review : await readReviewState(runsDir, id, sandbox, ledger);
   // Which model each agent ran on, for the exhibits and the provenance row.
-  const modelOf = (agent: string): string | undefined => team.agents.find((a) => a.id === agent)?.model ?? run?.model;
   const models = [...new Set(team.agents.map((a) => a.model ?? run?.model).filter((m): m is string => Boolean(m)))].sort();
   const provenance = reproducibilityLine(run as Record<string, unknown> | null, models);
   const runRecord = run as Record<string, unknown> | null;
@@ -1435,7 +1393,35 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
     return typeof c === "string" && c ? ` (commit ${c.slice(0, 12)}${dirty ? ", with local changes" : ""})` : "";
   })();
   const caseId = options.caseId ?? run?.case_id ?? "";
+  // What the kickoff was told about who ran the run: its words, never taken for an enrolled examiner's.
   const examiner = options.examiner ?? run?.examiner ?? "";
+  // The run's releases, and the one this rendering is for: a machine's draft
+  // and an examiner's adoption are kept apart in every line below.
+  const releases = readReleases(sandbox);
+  const forRelease = options.release ?? null;
+  // The release state the body and the summary take (release-record.ts bodyRelease): this release's own, or the run's latest.
+  const rel = bodyRelease(sandbox, forRelease);
+  const adoptedHere = forRelease && forRelease.state === "adopted" && forRelease.version >= 1 ? forRelease : null;
+  // Only the releases before this one: what a release says of the others never depends on what came after it.
+  const earlier = forRelease ? releases.filter((r) => r.version < forRelease.version) : releases;
+  const adoptedElsewhere = [...earlier].reverse().find((r) => r.record?.state === "adopted") ?? null;
+  // A fresh rendering of a run whose latest release is adopted is not DRAFT (plan: the mark stands until release v1), and says it is not the signed bytes.
+  const releasedRun = !forRelease && rel.release?.state === "adopted" ? rel.latest : null;
+  const draftMark = !adoptedHere && !releasedRun;
+  const adopter = adoptedHere?.examiner ?? null;
+  const releaseBanner = adoptedHere
+    ? `Release v${adoptedHere.version}, adopted by ${adopter?.name ?? "the examiner"}${adopter?.organisation ? ` (${adopter.organisation})` : ""} at ${adoptedHere.at}, and signed with the key ${adopter?.fingerprint ?? "named in release.json"} (the signature is beside these bytes: release/v${adoptedHere.version}/${adopter?.fingerprint?.startsWith("X509-SHA256:") ? "release.json.p7s, an e-signature whose certificate travels inside it" : "release.json.sig"}). The conclusions the examiner adopted are the examiner's; every other one is the agents'.`
+    : forRelease
+      ? `DRAFT: release v${forRelease.version}, sealed at ${forRelease.at} by this install's machine key${forRelease.machine?.fingerprint ? ` (${forRelease.machine.fingerprint})` : ""} when custody was taken. The machine key is not an examiner: no one has adopted this report, and every conclusion in it is the agents'.`
+      : releasedRun
+        ? `NOT THE SIGNED BYTES: a fresh rendering of the run as it stands. The report ${releasedRun.record?.signer.examiner?.name ?? "an examiner"} adopted is release v${releasedRun.version} (release/v${releasedRun.version}/report.html, sha256 ${releasedRun.record?.report.html.sha256 ?? "?"}), signed with their key; what changed since is not adopted until a release says so.`
+      : adoptedElsewhere
+        ? `DRAFT: NOT THE ADOPTED REPORT. This is a fresh rendering of the run as it stands; the report ${adoptedElsewhere.record?.signer.examiner?.name ?? "an examiner"} adopted is release v${adoptedElsewhere.version} (release/v${adoptedElsewhere.version}/report.html, sha256 ${adoptedElsewhere.record?.report.html.sha256 ?? "?"}), signed with their key, and a later release is a machine's draft.`
+        : "DRAFT: no examiner has adopted this report. It is a rendering of the run's record as it stands, and every conclusion in it is the agents'.";
+  const releaseRow = [
+    ...earlier.map((r) => (r.record ? `v${r.version} ${r.record.state === "adopted" ? `adopted by ${r.record.signer.examiner?.name ?? "?"} (examiner's key ${r.record.signer.fingerprint})` : `draft sealed by the machine key (${r.record.signer.fingerprint}), adopted by no one`}, ${r.record.at}, release.json sha256 ${r.sha256}` : `v${r.version}: ${r.error ?? "unreadable"}`)),
+    ...(forRelease ? [`this document is v${forRelease.version}: its own hash cannot be inside it, and release/v${forRelease.version}/release.json binds it`] : []),
+  ].join("; ") || "none: no release was sealed (custody at stop writes v0; swarm.sh releases <id> --draft writes one for a run that has a verdict)";
   const startedAt = budget?.started_at ?? run?.started_at ?? events[0]?.ts ?? "";
   // The host's clock, where the collector stamped one: a guest's own `ts` is its word.
   const endedAt = sentinel?.at ?? (events.length ? hostTime(events.at(-1) as { ts: string; recv_ts?: string }) : "");
@@ -1448,63 +1434,16 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   const findings = ledger.filter((e) => e.kind === "finding");
   // Searches that found nothing, as the agents recorded them.
   const absences = ledger.filter((e) => (e.kind as string) === "absence");
-  // Propositions still under test, and what the examination could not establish.
-  const hypotheses = ledger.filter((e) => e.kind === "hypothesis");
-  const limitations = ledger.filter((e) => e.kind === "limitation");
   // Corrections: the corrected entry stays as it was recorded, marked.
   const correctedBy = supersededBy(ledger);
-  const contradictions = standingContradictions(ledger);
   const sensitive = ledger.filter((e) => e.sensitive && !correctedBy.has(e.seq));
-  // Which entries rest on the kept output of a job that did not succeed.
-  const failedBySeq = new Map<number, string[]>();
-  for (const e of ledger) {
-    if (!e.refs?.length) continue;
-    const failed = await refsOnFailedJobs(sandbox, e.refs);
-    if (failed.length) failedBySeq.set(e.seq, failed.map((f) => `${f.ref} (job ${f.status})`));
-  }
-  // The goal's sections the entries say they answer.
-  const byQuestion = new Map<string, LedgerEntry[]>();
-  for (const e of ledger) {
-    if (correctedBy.has(e.seq)) continue;
-    for (const a of e.answers ?? []) {
-      const key = a.replace(/^q(?=\d)/i, "");
-      byQuestion.set(key, [...(byQuestion.get(key) ?? []), e]);
-    }
-  }
   // What the trace shows the swarm naming, and whether it shows each
-  // exhibit's source being read before the exhibit was recorded.
+  // exhibit's source being read before the exhibit was recorded: the body
+  // shows the grounding on each exhibit.
   const coverage: CoverageReport = await coverageOf(sandbox, { events, ledger, traceUnreadable: traceUnread });
-  const notesFor = (e: LedgerEntry): ExhibitNotes => ({
-    grounding: coverage.grounding[String(e.seq)],
-    supersededBy: correctedBy.get(e.seq),
-    review: reviewStatusOf(review, e),
-    ...(failedBySeq.has(e.seq) ? { failedRefs: failedBySeq.get(e.seq) } : {}),
-  });
-  const questionIds = [...byQuestion.keys()].sort((a, b) => (Number(a) - Number(b)) || a.localeCompare(b));
-  const byQuestionHtml = questionIds.length
-    ? `<h3>By question</h3><p class="lede">The goal sections the agents said each standing entry answers.</p><table><thead><tr><th>Section</th><th>Entries</th></tr></thead><tbody>${questionIds
-        .map((q) => `<tr><td>${escapeHtml(q)}</td><td>${(byQuestion.get(q) ?? []).map((e) => `<a href="#e-${e.seq}">E-${e.seq}</a> ${escapeHtml(e.kind)}${e.kind === "hypothesis" ? ` (${escapeHtml(e.status ?? "open")})` : e.kind === "limitation" ? ` (${escapeHtml(e.reason ?? "")})` : ""}`).join(", ")}</td></tr>`)
-        .join("")}</tbody></table>`
-    : "";
-  const contradictionsHtml = contradictions.length
-    ? `<div class="note">${contradictions.length} standing contradiction${contradictions.length === 1 ? "" : "s"}: ${contradictions.map((c) => `<a href="#e-${c.from}">E-${c.from}</a> contradicts <a href="#e-${c.to}">E-${c.to}</a>`).join("; ")}. Both entries stand; neither was corrected.</div>`
-    : "";
   const ungrounded = ledger.filter((e) => coverage.grounding[String(e.seq)] === "not in the trace");
 
-  const sections: Section[] = [];
-
-  // --- 1. Summary of findings ---------------------------------------------
-  sections.push({
-    n: 1,
-    title: "Summary of findings",
-    count: findings.length ? `${findings.length} recorded` : "none recorded",
-    html: findings.length
-      ? `<p class="lede">What the swarm concluded, strongest first. Each card carries the exhibit number its full entry has in §4, and the source it rests on. A claim with no evidence line is a claim this document does not stand behind.</p>
-${contradictionsHtml}${verdictGroups(findings, correctedBy)}${byQuestionHtml}${limitations.length ? `<p>${limitations.length} limitation${limitations.length === 1 ? "" : "s"} recorded: what the examination could not establish, in §4.</p>` : ""}`
-      : `${contradictionsHtml}<div class="note">The swarm recorded no findings. That is not the same as finding nothing: it means nothing was written to the ledger with <code>record</code>, so this report has no conclusions to carry. §7 says what was and was not covered.</div>`,
-  });
-
-  // --- 2. Scope and evidence ----------------------------------------------
+  // --- The evidence (the body's §3) ---------------------------------------
   const guardWord = (g: string) => (g === "kernel" ? "kernel" : g === "mode" ? "permission bits" : "detect + heal");
   const enforcedSeen = Object.values(enforced);
   // The digests an imager's log and an opposing expert's tools carry, beside
@@ -1540,12 +1479,11 @@ ${contradictionsHtml}${verdictGroups(findings, correctedBy)}${byQuestionHtml}${l
     : "";
   const manifest = inputs ? await manifestMeta(sandbox) : null;
   const sourceCheck = sourceCheckedLine(manifest?.source_checked);
-  sections.push({
-    n: 2,
-    title: "Scope and evidence",
-    count: inputs ? `${inputs.files.length} file${inputs.files.length === 1 ? "" : "s"} · ${bytesHuman(inputs.bytes ?? 0)}` : "none given",
-    html: inputs
-      ? `${evidenceArrival(inputs as { source?: string; copied_at?: string; guard?: string; held?: string; bound?: boolean })}
+  // How the evidence reached the agents, the guard each pane measured, every
+  // file with its hashes and how often the trace named it: in the body's §3,
+  // in place of its own table.
+  const evidenceHtml = inputs
+    ? `${evidenceArrival(inputs as Parameters<typeof evidenceArrival>[0])}
 <p>Guard requested <code>${escapeHtml(inputs.enforce || "auto")}</code>, set up as <code>${escapeHtml(inputs.guard || "none")}</code>; measured per pane: ${
           enforcedSeen.length
             ? Object.entries(enforced)
@@ -1556,51 +1494,9 @@ ${contradictionsHtml}${verdictGroups(findings, correctedBy)}${byQuestionHtml}${l
 <table><thead><tr><th>File</th><th class="num">Size</th><th>sha256 at kickoff</th>${withSha1 ? "<th>sha1</th>" : ""}${withMd5 ? "<th>md5</th>" : ""}${withAcq ? "<th>Acquisition hash</th>" : ""}${withCoverage ? '<th class="num">Named by</th>' : ""}</tr></thead><tbody>${evidenceRows}</tbody></table>
 <p>${(inputs.files ?? []).length} file${(inputs.files ?? []).length === 1 ? "" : "s"}, ${escapeHtml(bytesHuman(inputs.bytes ?? 0))} in total.${sourceCheck ? ` ${escapeHtml(sourceCheck)}` : ""}</p>
 ${coverageHtml}`
-      : `<div class="note">This run was given no read-only inputs. Whatever the agents examined, they reached some other way, and this report cannot state a hash for it.</div>`,
-  });
+    : undefined;
 
-  // --- 3. Timeline ---------------------------------------------------------
-  sections.push({
-    n: 3,
-    title: "Timeline",
-    count: timeline.length ? `${timeline.length} event${timeline.length === 1 ? "" : "s"}` : "none",
-    breakBefore: true,
-    html: timeline.length
-      ? `<p class="lede">${timeline.length} dated event${timeline.length === 1 ? "" : "s"}, in time order, in UTC as the ledger holds them: each is the time its agent recorded, converted from the zone the agent gave (where the ledger kept the source's own words, they are shown beside it). The exhibit number is the ledger's own sequence, so the console, <code>ledger.jsonl</code> and this rail all name the same row.</p>
-<ol class="tl">${timeline.map((e) => timelineRow(e, correctedBy.get(e.seq))).join("")}</ol>`
-      : `<div class="note">No dated events were recorded, so this report has no timeline.</div>`,
-  });
-
-  // --- 4. Indicators and findings -----------------------------------------
-  sections.push({
-    n: 4,
-    title: "Indicators and findings",
-    count: `${iocs.length} indicator${iocs.length === 1 ? "" : "s"} · ${findings.length} finding${findings.length === 1 ? "" : "s"}${absences.length ? ` · ${absences.length} searched and not found` : ""}${hypotheses.length ? ` · ${hypotheses.length} hypothes${hypotheses.length === 1 ? "is" : "es"}` : ""}${limitations.length ? ` · ${limitations.length} limitation${limitations.length === 1 ? "" : "s"}` : ""}`,
-    html:
-      (ungrounded.length
-        ? `<p class="lede">${ungrounded.length} entr${ungrounded.length === 1 ? "y is" : "ies are"} marked <strong>not grounded in the trace</strong>: no call before ${ungrounded.length === 1 ? "it" : "each"} was recorded named its source. The source may still be right (a path inside an image a tool reached by inode, say), but the trace does not show the swarm reading it.</p>`
-        : "") +
-      (iocs.length
-        ? `<h3>Indicators (${iocs.length})</h3>${iocs.map((e) => exhibitCard(e, modelOf, notesFor(e))).join("")}`
-        : `<h3>Indicators</h3><div class="note">None recorded.</div>`) +
-      (findings.length
-        ? `<h3>Findings (${findings.length})</h3>${findings.map((e) => exhibitCard(e, modelOf, notesFor(e))).join("")}`
-        : `<h3>Findings</h3><div class="note">None recorded.</div>`) +
-      (absences.length
-        ? `<h3>Searched and not found (${absences.length})</h3><p class="lede">Searches that found nothing, as recorded by the agents, valid only for the stated scope: what was looked for, where, and how (the query, the tool and its version, allocated space only or unallocated and slack too). Not found by that search is not absent from the evidence.</p>${absences.map((e) => exhibitCard(e, modelOf, notesFor(e))).join("")}`
-        : "") +
-      (hypotheses.length
-        ? `<h3>Hypotheses (${hypotheses.length})</h3><p class="lede">Propositions the swarm put under test, with the status it last gave each. A supported hypothesis is an assessment, not a finding.</p>${hypotheses.map((e) => exhibitCard(e, modelOf, notesFor(e))).join("")}`
-        : "") +
-      (limitations.length
-        ? `<h3>Limitations (${limitations.length})</h3><p class="lede">What the examination could not establish, and why: not examined, unavailable, failed, partial or excluded. A reader should weigh every conclusion above against these.</p>${limitations.map((e) => exhibitCard(e, modelOf, notesFor(e))).join("")}`
-        : "") +
-      (sensitive.length
-        ? `<h3>Sensitive material</h3><p>${sensitive.length} standing entr${sensitive.length === 1 ? "y is" : "ies are"} marked sensitive: ${sensitive.map((e) => `<a href="#e-${e.seq}">E-${e.seq}</a>`).join(", ")}. The objects they cite (${[...new Set(sensitive.flatMap((e) => e.refs ?? []))].map((r) => `<code>${escapeHtml(r)}</code>`).join(", ") || "none named"}) are replaced by their hashes in a package made with <code>--redact</code>.</p>`
-        : ""),
-  });
-
-  // --- 5. Method -----------------------------------------------------------
+  // --- Spend, calls and context (the body's §4) --------------------------
   const anyNamed = team.agents.some((a) => chosen.has(a.id));
   // Each model's cap against what its agents spent together.
   const modelCaps = Object.entries(budget?.cap_per_model_usd ?? run?.cap_per_model_usd ?? {})
@@ -1652,10 +1548,8 @@ ${coverageHtml}`
         })
         .join("; ")}. A finding that rests on one of them rests on code the swarm wrote and no one reviewed.</p>`
     : "";
-  sections.push({
-    n: 5,
-    title: "Method",
-    html: `<p>${team.n} peer agent${team.n === 1 ? "" : "s"} shared one sandbox and coordinated through an append-only file board. Nobody planned, nobody was assigned a seat, and no agent could direct another.${anyNamed ? ' The "Calls itself" column is what each one decided to be, in its own words, after reading the goal.' : ""}</p>
+  const methodHtml = `<h3>Spend, calls and context</h3>
+${anyNamed ? '<p class="lede">The "Calls itself" column is what each agent decided to be, in its own words, after reading the goal.</p>' : ""}
 <table><thead><tr><th>Agent</th>${anyNamed ? "<th>Calls itself</th>" : ""}<th>Model</th><th class="num">Spent</th><th class="num">Calls</th><th class="num">Tokens</th>${contextHeaders}</tr></thead><tbody>${teamRows}</tbody></table>
 <p>
   ${unmetered ? "Unmetered (local models)." : `${escapeHtml(usd(budget?.spent_usd ?? 0))} of a ${escapeHtml(usd(run?.cap_usd ?? budget?.cap_usd ?? 0))} cap${escapeHtml(vmSpendNote(runRecord, gatewayTotals))}`},
@@ -1669,19 +1563,20 @@ ${
     ? `<p>Toolbox <code>${escapeHtml(toolbox.preset ?? "off")}</code>: ${(toolbox.present ?? []).length} tool${(toolbox.present ?? []).length === 1 ? "" : "s"} present${(toolbox.missing ?? []).length ? `, ${(toolbox.missing ?? []).length} missing (${(toolbox.missing ?? []).map((m) => escapeHtml(m.name)).join(", ")})` : ""}.</p>`
     : ""
 }
-${forgedHtml}`,
-  });
+${forgedHtml}`;
 
-  // --- 6. Artifacts --------------------------------------------------------
+  // --- Appendix E: artifacts ----------------------------------------------
   const artifactRows = artifacts.files
     .map(
       (f) =>
         `<tr><td><code>${escapeHtml(f.path)}</code></td><td class="num">${escapeHtml(bytesHuman(f.bytes))}</td><td class="hash">${escapeHtml(f.sha256)}</td><td>${f.packaged ? chip("packaged", "moss") : chip("in the sandbox", "saffron")}</td></tr>`,
     )
     .join("");
-  sections.push({
-    n: 6,
-    title: "Artifacts produced",
+  const artifactsSection: Section = {
+    id: "sE",
+    n: "E",
+    title: "Appendix E: Artifacts produced",
+    desc: "what the run produced, hashed",
     count: artifacts.files.length ? `${artifacts.files.length} file${artifacts.files.length === 1 ? "" : "s"}` : "none",
     html: artifacts.files.length
       ? `<table class="artifacts"><thead><tr><th>Path</th><th class="num">Size</th><th>sha256</th><th>Where</th></tr></thead><tbody>${artifactRows}</tbody></table>
@@ -1693,9 +1588,9 @@ ${
 }
 ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<code>${escapeHtml(s.path)}</code> (${escapeHtml(s.reason)})`).join(", ")}.</p>` : ""}`
       : `<div class="note">Nothing under <code>work/</code>.</div>`,
-  });
+  };
 
-  // --- 7. Limitations ------------------------------------------------------
+  // --- The limits of this run (in the body's §8) --------------------------
   const capHit = (budget?.spent_usd ?? 0) > 0 && (run?.cap_usd ?? 0) > 0 && (budget?.spent_usd ?? 0) >= (run?.cap_usd ?? 0) * 0.98;
   const limits: string[] = [];
   // Whose conclusions these are, first: a reader deciding what to rely on
@@ -1703,37 +1598,43 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
   limits.push(
     review?.unreadable
       ? `Prepared by an AI agent swarm. The examiner's review could not be read (${escapeHtml(review.unreadable)}), so this document cannot say whether any finding was reviewed.`
-      : review && review.signed
+      : review && review.signed && signoffCurrent(review)
       ? `Prepared by an AI agent swarm and reviewed by an examiner: ${escapeHtml(reviewLine(review, ledger))}. An entry the examiner did not review is still the agents' conclusion.`
+      : review && review.signed
+      ? `Prepared by an AI agent swarm. An examiner signed off, and the sign-off does not cover this run as it stands: ${escapeHtml(signoffScope(review))}. What changed since is the agents' conclusion (${escapeHtml(reviewLine(review, ledger))}).`
       : review && review.lines
         ? `Prepared by an AI agent swarm. An examiner has reviewed some entries and has not signed the review (${escapeHtml(reviewLine(review, ledger))}); an entry not reviewed is the agents' conclusion.`
         : "Prepared by an AI agent swarm. The findings are the agents' conclusions, each recorded with the source it rests on; none is an examiner's opinion until an examiner has reviewed it.",
   );
   limits.push("The models' output is not deterministic: running the case again would not give the same words. The reproducible record is the trace, the kept tool outputs and the sealed sessions, not a re-run.");
-  if (forged.length) limits.push(`${forged.length} tool${forged.length === 1 ? " was" : "s were"} written by the agents during the run and not independently validated (§5).`);
+  if (forged.length) limits.push(`${forged.length} tool${forged.length === 1 ? " was" : "s were"} written by the agents during the run and not independently validated (§4).`);
   if (!sentinel && allDead) limits.push(`The swarm did not finish: every agent died${allDead.at ? ` (recorded by the reaper at ${escapeHtml(allDead.at)})` : ""} before any stated that the definition of done was met.`);
   else if (!sentinel) limits.push("The swarm did not finish: there is no <code>done/SWARM_DONE</code>, so no agent stated that the definition of done was met.");
   if (capHit) limits.push(`Spend reached the cap (${escapeHtml(usd(budget?.spent_usd ?? 0))} of ${escapeHtml(usd(run?.cap_usd ?? 0))}). Work stopped because of the budget, not because the questions were answered.`);
   if (!findings.length) limits.push("No findings were recorded, so nothing in this report is stated as a conclusion.");
   if (!inputs) limits.push("No read-only inputs were given, so no evidence hash is stated.");
-  if (withCoverage && coverage.untouched.length) limits.push(`${coverage.untouched.length} of ${coverage.inputs} evidence file${coverage.inputs === 1 ? " was" : "s were"} named by no command on the trace (§2). An artefact nobody opened is not evidence of absence.`);
-  if (ungrounded.length) limits.push(`${ungrounded.length} ledger entr${ungrounded.length === 1 ? "y's" : "ies'"} source${ungrounded.length === 1 ? " was" : "s were"} named by no call before the entry was recorded (§4).`);
+  if (withCoverage && coverage.untouched.length) limits.push(`${coverage.untouched.length} of ${coverage.inputs} evidence file${coverage.inputs === 1 ? " was" : "s were"} named by no command on the trace (§3). An artefact nobody opened is not evidence of absence.`);
+  if (ungrounded.length) limits.push(`${ungrounded.length} ledger entr${ungrounded.length === 1 ? "y's" : "ies'"} source${ungrounded.length === 1 ? " was" : "s were"} named by no call before the entry was recorded (marked on each in Appendix A).`);
   const refusals = events.filter((e) => e.result && typeof e.result === "object" && (e.result as { ok?: boolean }).ok === false);
   if (refusals.length) limits.push(`${refusals.length} tool call${refusals.length === 1 ? "" : "s"} failed or were refused during the run; they are in <code>trace/events.jsonl</code>.`);
   limits.push("This document reports what the swarm recorded. An artefact nobody opened is not evidence of absence, and the trace is the record of what was actually read.");
-  sections.push({
-    n: 7,
-    title: "Limitations",
-    html: `<ul>${limits.map((l) => `<li>${l}</li>`).join("")}</ul>`,
-  });
+  const limitsHtml = `<ul>${limits.map((l) => `<li>${l}</li>`).join("")}</ul>${
+    ungrounded.length
+      ? `<p>${ungrounded.length} entr${ungrounded.length === 1 ? "y is" : "ies are"} marked <strong>not grounded in the trace</strong>: no call before ${ungrounded.length === 1 ? "it" : "each"} was recorded named its source. The source may still be right (a path inside an image a tool reached by inode, say), but the trace does not show the swarm reading it.</p>`
+      : ""
+  }${
+    sensitive.length
+      ? `<h3>Sensitive material</h3><p>${sensitive.length} standing entr${sensitive.length === 1 ? "y is" : "ies are"} marked sensitive: ${sensitive.map((e) => `<a href="#e-${e.seq}">E-${e.seq}</a>`).join(", ")}. The objects they cite (${[...new Set(sensitive.flatMap((e) => e.refs ?? []))].map((r) => `<code>${escapeHtml(r)}</code>`).join(", ") || "none named"}) are replaced by their hashes in a package made with <code>--redact</code>.</p>`
+      : ""
+  }`;
 
-  // --- 8. Chain of custody -------------------------------------------------
+  // --- Appendix D: chain of custody --------------------------------------
   // What a court reads first: each check's status, what was sealed, how to check it again.
   const checksRow = hostCustody?.checks?.length
     ? hostCustody.checks.map((c) => `${c.name}: ${c.status.replace("_", " ")}${c.reason ? ` (${c.reason})` : ""}${c.expected !== undefined ? ` [${c.checked ?? 0} of ${c.expected}]` : ""}`).join("; ")
     : null;
   const sealRow = hostCustody?.seal
-    ? `trace ${hostCustody.seal.trace?.lines ?? 0} lines (the last line's sha256 ${hostCustody.seal.trace?.last_line_sha256 ?? "none"}); ledger ${hostCustody.seal.ledger?.entries ?? 0} entries, head ${hostCustody.seal.ledger?.head ?? "none"}${hostCustody.seal.attestations?.lines ? `; attestations ${hostCustody.seal.attestations.lines} lines, head ${hostCustody.seal.attestations.head}` : ""}${hostCustody.seal.journal ? `; store journal ${hostCustody.seal.journal.lines} lines, head ${hostCustody.seal.journal.head}` : ""}`
+    ? `trace ${hostCustody.seal.trace?.lines ?? 0} lines (the last line's sha256 ${hostCustody.seal.trace?.last_line_sha256 ?? "none"}); ledger ${hostCustody.seal.ledger?.entries ?? 0} entries, head ${hostCustody.seal.ledger?.head ?? "none"}${hostCustody.seal.attestations?.lines ? `; attestations ${hostCustody.seal.attestations.lines} lines, head ${hostCustody.seal.attestations.head}` : ""}${hostCustody.seal.disputes?.lines ? `; disputes ${hostCustody.seal.disputes.lines} lines, head ${hostCustody.seal.disputes.head}` : ""}${hostCustody.seal.journal ? `; store journal ${hostCustody.seal.journal.lines} lines, head ${hostCustody.seal.journal.head}` : ""}`
     : null;
   const acquisitionRow = hostCustody?.acquisition
     ? hostCustody.acquisition.mismatched.length
@@ -1750,7 +1651,13 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
   const timestampRow = lastAnchored?.timestamp
     ? lastAnchored.timestamp.error
       ? `NOT TIMESTAMPED: ${lastAnchored.timestamp.error}`
-      : `custody.json.tsr from ${lastAnchored.timestamp.authority}, ${lastAnchored.timestamp.gen_time ?? "time not read"} (RFC 3161; its signature: openssl ts -verify -in custody.json.tsr -data custody.json -CAfile <the authority's CA>)`
+      : `custody.json.tsr from ${lastAnchored.timestamp.authority}, ${lastAnchored.timestamp.gen_time ?? "time not read"} (RFC 3161; ${
+          lastAnchored.timestamp.signature?.verified === true
+            ? `its signature verified against ${lastAnchored.timestamp.signature.ca ?? "the authority's CA"} when custody took it (openssl ts -verify)`
+            : lastAnchored.timestamp.signature?.verified === false
+              ? `ITS SIGNATURE DID NOT VERIFY against ${lastAnchored.timestamp.signature.ca ?? "the CA named"}: ${lastAnchored.timestamp.signature.detail ?? "no detail"}`
+              : `imprint only: its signature was not verified${lastAnchored.timestamp.signature?.detail && lastAnchored.timestamp.signature.ca ? ` (${lastAnchored.timestamp.signature.detail})` : " (no CA named: --custody-timestamp-ca)"}; to check it: openssl ts -verify -in custody.json.tsr -data custody.json -CAfile <the authority's CA>, or swarm.sh custody-verify --tsa-ca FILE`
+        })`
     : "no trusted timestamp (--custody-timestamp-url)";
   const clockRef = (r: { url?: string; offset_ms?: number | null; precision_ms?: number; error?: string } | null | undefined, when: string) =>
     r ? (r.offset_ms === null || r.offset_ms === undefined ? `${when}: ${r.url} not read (${r.error ?? "no answer"})` : `${when}: the host ${r.offset_ms >= 0 ? "behind" : "ahead of"} ${r.url} by ${Math.abs(r.offset_ms)} ms (± ${r.precision_ms ?? 1000} ms)`) : null;
@@ -1768,7 +1675,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ["Started", startedAt || "—"],
     ["Ended", endedAt || "—"],
     ["Sandbox", sandbox],
-    ["Evidence", inputs ? `${inputs.files.length} file(s), ${bytesHuman(inputs.bytes ?? 0)}, from ${inputs.source || "the operator"}${sourceCheck ? `; ${sourceCheck}` : ""}` : "none given"],
+    ["Evidence", inputs ? `${inputs.files.length} file(s), ${bytesHuman(inputs.bytes ?? 0)}, ${evidenceFrom(inputs)}${sourceCheck ? `; ${sourceCheck}` : ""}` : "none given"],
     [
       "Evidence intact at the end",
       // The host's own re-hash, when the stop took one, is the verdict; an
@@ -1827,6 +1734,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ],
     ["Ledger", `${ledger.length} entries (${timeline.length} events, ${iocs.length} indicators, ${findings.length} findings${absences.length ? `, ${absences.length} searched and not found` : ""}${correctedBy.size ? `; ${correctedBy.size} corrected by a later entry, kept as recorded` : ""})`],
     ["Examiner review", reviewLine(review, ledger)],
+    ["Releases", releaseRow],
     ...(gatewayRecordOf(runRecord) ? ([["Model gateway", gatewayLine(gatewayRecordOf(runRecord) as GatewayRecord, gatewayTotals, hostCustody?.model_gateway)]] as Array<[string, string]>) : []),
     ["Coverage", coverageLine(coverage)],
     [
@@ -1853,7 +1761,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     ...(modelsRow ? ([["Models", modelsRow]] as Array<[string, string]>) : []),
     ...(hostCustody?.timing ? ([["Custody's cost", `${Math.round(hostCustody.timing.total_ms / 1000)} s; ${bytesHuman(hostCustody.timing.evidence_bytes)} of evidence re-read${hostCustody.timing.evidence_mb_per_s ? ` at ${hostCustody.timing.evidence_mb_per_s} MB/s` : ""}`]] as Array<[string, string]>) : []),
     ["What the anchors are", "files of the operator's own account beside the run: they hold the agents to account, and a signature and a trusted timestamp hold the verdict itself; they do not hold the operator's account to account"],
-    ["Check it again", `swarm.sh custody-verify ${id || "<id>"} (writes nothing: every check, the sealed prefix, the lines after the seal, the signature and the timestamp token); a package: swarm.sh verify <package> --allowed-signers FILE`],
+    ["Check it again", `swarm.sh custody-verify ${id || "<id>"} (writes nothing in the run: every check, the sealed prefix and the lines after it, every chain's sealed length and head, every work file against the index custody sealed, the signature and the timestamp token, its signature too with --tsa-ca FILE); a package: swarm.sh verify <package> --allowed-signers FILE`],
   ];
   const operatorHtml = operatorActs.length
     ? `<h3>The operator's actions on this run (${operatorActs.length})</h3>
@@ -1873,15 +1781,20 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
         )
         .join("")}</tbody></table>`
     : "";
-  sections.push({
-    n: 8,
-    title: "Chain of custody",
+  const custodySection: Section = {
+    id: "sD",
+    n: "D",
+    title: "Appendix D: Chain of custody",
+    desc: "the custody record, and how to check it again",
+    breakBefore: true,
     html: `<table><thead><tr><th>Item</th><th>Recorded</th></tr></thead><tbody>${custody
       .map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td class="${k.startsWith("Sandbox") || k === "Sealed" ? "hash" : ""}">${escapeHtml(v)}</td></tr>`)
       .join("")}</tbody></table>${operatorHtml}${handoverHtml}`,
-  });
+  };
 
-  // --- 9. The swarm's own report ------------------------------------------
+  // --- The body: the answers and what they rest on (scripts/report-body.ts)
+  // The swarm's own report, as the sentinel names it: the body reproduces it
+  // in its Appendix C, labelled with what custody says of those bytes.
   const own = await (async () => {
     for (const candidate of [sentinel?.output, "work/report.md", "work/notes.md"]) {
       if (!candidate || !candidate.endsWith(".md")) continue;
@@ -1897,41 +1810,37 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
       if (!key.startsWith("work/")) continue;
       const read = await readSandboxFile(sandbox, key, { maxBytes: 16 * 1024 * 1024 }).catch(() => null);
       const text = read ? read.bytes.toString("utf8") : null;
-      if (text && text.trim()) return { path: key, text };
+      // The hash of the bytes reproduced here, not of a read made before them.
+      if (text && text.trim() && read) return { path: key, text, sha256: createHash("sha256").update(read.bytes).digest("hex") };
     }
     return null;
   })();
-  if (own) {
-    sections.push({
-      n: 9,
-      title: `The swarm's own report (${basename(own.path)})`,
-      breakBefore: true,
-      html: `<p>Reproduced verbatim from <code>${escapeHtml(own.path)}</code>, sha256 <span class="hash">${escapeHtml(artifacts.files.find((f) => f.path === own.path)?.sha256 ?? "not hashed")}</span>. Its headings are demoted so this document keeps one outline; nothing else is changed.</p>
-<div class="embedded">${markdownToHtml(own.text, 2)}</div>`,
-    });
-  }
+  const body = await renderReportBody(sandbox, {
+    review: bodyReview(review, rel.examiner),
+    release: rel.release,
+    grounding: coverage.grounding,
+    ...(run?.model ? { defaultModel: run.model } : {}),
+    workingReport: own ? { path: own.path, text: own.text, seal: await ownReportSeal(sandbox, own.path, own.sha256, hostCustody, lastAnchored?.artifacts_sha256) } : null,
+    html: { ...(evidenceHtml ? { evidence: evidenceHtml } : {}), method: methodHtml, limits: limitsHtml },
+    // The release this rendering is for, or the run's latest (bodyRelease):
+    // a draft unless an examiner adopted it; a release renders its own final bytes.
+  });
+  const sections: Section[] = [
+    ...body.sections.map((b): Section => ({ id: b.id, n: b.n, title: /^[A-Z]$/.test(b.n) ? `Appendix ${b.n}: ${b.title}` : b.title, desc: b.desc, ...(b.count ? { count: b.count } : {}), html: b.html, ...(b.n === "A" || b.n === "C" ? { breakBefore: true } : {}) })),
+    custodySection,
+    artifactsSection,
+  ];
 
-  const SECTION_DESC: Record<number, string> = {
-    1: "what the run concluded, by confidence",
-    2: "what it was given, and the hash of each file",
-    3: "every dated event, in order",
-    4: "the exhibits those conclusions rest on",
-    5: "who ran it, on what, for how much",
-    6: "what the run produced, hashed",
-    7: "what this document does not claim",
-    8: "the custody record",
-    9: "the swarm's own words, verbatim",
-  };
   const toc = sections
-    .map(
-      (s) =>
-        `<li><span class="n">${s.n}</span><a href="#s${s.n}">${escapeHtml(s.title)}</a>${SECTION_DESC[s.n] ? `<span class="desc">${escapeHtml(SECTION_DESC[s.n])}</span>` : ""}</li>`,
-    )
+    // A section's number in the margin; an appendix says its letter in its title, once.
+    .map((s) => `<li><span class="n">${/^\d+$/.test(s.n) ? escapeHtml(s.n) : ""}</span><a href="#${s.id}">${escapeHtml(s.title)}</a>${s.desc ? `<span class="desc">${escapeHtml(s.desc)}</span>` : ""}</li>`)
     .join("");
   // The cover's scorecard: the six numbers a reader wants before they decide
   // how much of the rest to read.
   const scoreCells: Array<[string, string, string]> = [
-    [String(findings.length), "Findings", `${findings.filter((f) => f.confidence === "high").length} at high confidence`],
+    body.facts.questions
+      ? [`${body.facts.answered} of ${body.facts.questions}`, "Questions answered", body.facts.hasAnswers ? `${body.facts.adopted} adopted by the examiner` : "no answer in the ledger"]
+      : [String(findings.length), "Findings", `${findings.filter((f) => f.confidence === "high").length} at high confidence`],
     [String(iocs.length), "Indicators", "recorded with their source"],
     [String(timeline.length), "Dated events", "on the timeline"],
     [inputs ? String(inputs.files.length) : "0", "Evidence files", inputs ? bytesHuman(inputs.bytes ?? 0) : "none given"],
@@ -1944,33 +1853,47 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
   const title = `${caseId ? `${caseId} — ` : ""}DFIR Swarm report${id ? ` ${id}` : ""}`;
   // One sentence under the case number: what a reader learns before the fold.
   const highCount = findings.filter((f) => f.confidence === "high").length;
-  const headline = findings.length
-    ? `${findings.length} finding${findings.length === 1 ? "" : "s"}${highCount ? `, ${highCount} at high confidence` : ""}`
-    : "no findings recorded";
+  const headline = body.facts.hasAnswers
+    ? `${body.facts.answered} of ${body.facts.questions} question${body.facts.questions === 1 ? "" : "s"} answered`
+    : findings.length
+      ? `${findings.length} finding${findings.length === 1 ? "" : "s"}${highCount ? `, ${highCount} at high confidence` : ""}`
+      : "no findings recorded";
   const stateChip = sentinel ? chip("finished", "moss") : allDead ? chip("every agent died", "brick") : run?.state === "stopped" ? chip("stopped", "brick") : chip("did not finish", "saffron");
 
   return `<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)}</title>
+<title>${escapeHtml(`${body.draft ? "DRAFT — " : ""}${title}`)}</title>
 <meta name="generator" content="DFIR Swarm ${escapeHtml(version)}">
 <meta name="dcterms.created" content="${escapeHtml(generatedAt)}">
-<style>${STYLE}</style>
+<meta name="dfirswarm.release" content="${escapeHtml(adoptedHere ? `v${adoptedHere.version} adopted` : forRelease ? `v${forRelease.version} draft` : "none: a draft rendering")}">
+<style>${STYLE}${body.style}</style>
 <body>
-<main>
+${draftMark ? '<div class="watermark" aria-hidden="true">DRAFT</div>\n' : ""}<main>
   <header class="cover">
     <div class="mark">${mark}<span class="wordmark">DFIR Swarm</span></div>
     <p class="kicker">${escapeHtml(options.organisation || "Forensic report")}</p>
     <h1>${escapeHtml(caseId || run?.label || id || "Untitled case")}</h1>
-    <p class="case-line"><strong>${escapeHtml(headline)}</strong> ${stateChip}</p>
+    <p class="case-line"><strong>${escapeHtml(headline)}</strong> ${stateChip}${body.draft ? ` ${chip("draft", "brick")}` : ""}</p>
+    <p class="release-banner${adoptedHere ? " adopted" : ""}">${escapeHtml(releaseBanner)}</p>
     ${scorecard}
     <dl class="facts">
-      <dt>Examiner</dt><dd>${escapeHtml(examiner || "—")}</dd>
+      <dt>Examiner</dt><dd>${escapeHtml(adopter ? `${adopter.name}, ${adopter.organisation}: ${adopter.competence} (enrolled on this install; key ${adopter.fingerprint})` : adoptedElsewhere ? `none for this rendering; release v${adoptedElsewhere.version} is adopted by ${adoptedElsewhere.record?.signer.examiner?.name ?? "an examiner"}` : "none: no enrolled examiner has adopted this report")}</dd>
+      ${examiner ? `<dt>Run by</dt><dd>${escapeHtml(`${examiner} (as the kickoff recorded who ran it; not an enrolled examiner, and not a signature)`)}</dd>` : ""}
+      <dt>Release</dt><dd>${escapeHtml(adoptedHere ? `v${adoptedHere.version}, adopted ${adoptedHere.at}${adoptedHere.adoption ? adoptedHere.adoption.scope === "answers" ? `: ${adoptedHere.adoption.adopted} conclusion(s) adopted, ${adoptedHere.adoption.qualified} qualified, ${adoptedHere.adoption.withdrawn} withdrawn, ${adoptedHere.adoption.inconclusive} rendered inconclusive, ${adoptedHere.adoption.not_adopted} not adopted (the agents')` : ": the report as a whole (a ledger with no answer entries)" : ""}${adoptedHere.adoption?.technical.length ? `; methods checked by ${adoptedHere.adoption.technical.join("; ")}` : ""}` : forRelease ? `v${forRelease.version}, a draft sealed by the machine at ${forRelease.at}` : "none: a rendering, not a release")}</dd>
       <dt>Run</dt><dd class="hash">${escapeHtml(id || "—")}</dd>
       <dt>Period</dt><dd class="tabular">${escapeHtml(startedAt || "—")} → ${escapeHtml(endedAt || "—")}</dd>
       <dt>Tool</dt><dd>DFIR Swarm ${escapeHtml(version)}${escapeHtml(commit)}</dd>
-      <dt>Prepared by</dt><dd>an AI agent swarm (${team.n} agent${team.n === 1 ? "" : "s"}); ${review && review.signed ? `reviewed and signed by ${escapeHtml(review.signed.examiner)} at ${escapeHtml(review.signed.at)}` : "its findings are the agents' conclusions until an examiner reviews them"}</dd>
+      <dt>Prepared by</dt><dd>an AI agent swarm (${team.n} agent${team.n === 1 ? "" : "s"}); ${
+        adoptedHere
+          ? `adopted by ${escapeHtml(adopter?.name ?? "the examiner")} in release v${adoptedHere.version}: the conclusions the examiner adopted or qualified are the examiner's, and every other one is the agents' conclusion, not adopted`
+          : review && review.signed && signoffCurrent(review)
+          ? `reviewed and signed by ${escapeHtml(review.signed.examiner)} at ${escapeHtml(review.signed.at)}, over this ledger and this report`
+          : review && review.signed && !review.unreadable
+            ? `signed off by ${escapeHtml(review.signed.examiner)} at ${escapeHtml(review.signed.at)}, and NOT OVER THIS RUN AS IT STANDS: ${escapeHtml(signoffScope(review))}`
+            : "its findings are the agents' conclusions until an examiner reviews them"
+      }</dd>
       <dt>Generated</dt><dd class="tabular">${escapeHtml(generatedAt)}</dd>
     </dl>
   </header>
@@ -1981,10 +1904,12 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     <p class="note">Section numbers, not page numbers: the pagination belongs to whatever prints this file, and a number this document computed itself would be wrong in every engine but one. <code>swarm.sh report &lt;id&gt; --pdf</code> prints it through a browser, which numbers the pages in the footer and puts this document's title and the print date at the top of each one.</p>
   </nav>
 
+${body.preamble}
+
 ${sections
     .map(
-      (s) => `  <section id="s${s.n}"${s.breakBefore ? ' class="page-break"' : ""}>
-    <div class="sec-head"><span class="n">${s.n}</span><h2>${escapeHtml(s.title)}</h2>${s.count ? `<span class="count">${escapeHtml(s.count)}</span>` : ""}</div>
+      (s) => `  <section id="${s.id}"${s.breakBefore ? ' class="page-break"' : ""}>
+    <div class="sec-head">${/^\d+$/.test(s.n) ? `<span class="n">${escapeHtml(s.n)}</span>` : ""}<h2>${escapeHtml(s.title)}</h2>${s.count ? `<span class="count">${escapeHtml(s.count)}</span>` : ""}</div>
 ${s.html}
   </section>`,
     )

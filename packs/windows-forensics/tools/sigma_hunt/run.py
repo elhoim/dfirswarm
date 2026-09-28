@@ -20,12 +20,20 @@ should not have to learn two formats — and because the thing that goes in the
 report is not the detection anyway. A rule firing is a hypothesis with a name.
 The evidence is the record it matched, which you then read with evtx_query and
 cite by its record id and channel.
+
+Nothing is cut. Every field of a matched record is kept, every rule that fired
+is counted, and the engine's own stdout and stderr are kept whole beside its
+result. Past `limit` the detections are a page, and all of them, normalised,
+are in detections.jsonl in out_dir; each file is named with its path, size and
+sha256.
 """
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 DEFAULT_TIMEOUT = 900
 LEVELS = ["informational", "low", "medium", "high", "critical"]
@@ -34,6 +42,40 @@ LEVELS = ["informational", "low", "medium", "high", "critical"]
 def fail(message, **extra):
     print(json.dumps({"error": message, **extra}))
     raise SystemExit(1)
+
+
+def resolve_output(out, what="output"):
+    """Where `out` really lands, as a path under the run directory; a place
+    outside it, the run directory itself, or anything under inputs/ is refused.
+
+    A string check is not enough: `work/../inputs/x`, an absolute path and a
+    symlink that points out all name a place the tool must not write, and none
+    of them starts with "inputs/". Resolving first and comparing directories
+    is what actually holds, and the read-only inputs are the one place
+    extracted bytes must never appear -- a later integrity check would report
+    the evidence as modified. In a job $OUT is inside the run directory.
+    """
+    root = Path.cwd().resolve()
+    dest = (root / out).resolve() if not Path(out).is_absolute() else Path(out).resolve()
+    if dest == root or root not in dest.parents:
+        fail("%s must stay inside the run directory" % what, **{what: str(out)})
+    inputs = root / "inputs"
+    if dest == inputs or inputs in dest.parents:
+        fail("%s cannot be under inputs/" % what, **{what: str(out)})
+    return str(dest.relative_to(root))
+
+
+def kept_file(path, text=None, rows=None):
+    """Write the whole of something to `path` (text, or rows as JSON Lines) and
+    name it: path, bytes, sha256, and rows when it holds rows."""
+    body = text if rows is None else "".join(json.dumps(r, ensure_ascii=False, default=str) + "\n" for r in rows)
+    data = body.encode("utf-8", "surrogateescape")
+    with open(path, "wb") as fh:
+        fh.write(data)
+    named = {"path": path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    if rows is not None:
+        named["rows"] = len(rows)
+    return named
 
 
 def rank(level):
@@ -61,7 +103,7 @@ def from_zircolite(path):
                 "channel": match.get("Channel"),
                 "computer": match.get("Computer"),
                 "record_id": match.get("EventRecordID"),
-                "detail": {k: v for k, v in list(match.items())[:12]},
+                "detail": match,
             })
     return out
 
@@ -102,6 +144,12 @@ def from_hayabusa(path):
     return out
 
 
+def _text(value):
+    if value is None:
+        return ""
+    return value.decode("utf-8", "surrogateescape") if isinstance(value, bytes) else value
+
+
 def main():
     try:
         args = json.load(sys.stdin)
@@ -117,6 +165,7 @@ def main():
     out_dir = args.get("out_dir")
     if not isinstance(out_dir, str) or not out_dir:
         fail("out_dir is required: a directory under work/ for the engine's own output")
+    out_dir = resolve_output(out_dir, "out_dir")
 
     min_level = str(args.get("min_level") or "medium").lower()
     if min_level not in LEVELS:
@@ -147,7 +196,7 @@ def main():
              note="Both are invoked as executables, so neither licence combines with this project's.")
 
     os.makedirs(out_dir, exist_ok=True)
-    result = os.path.join(out_dir, "%s.json" % engine)
+    result = resolve_output(os.path.join(out_dir, "%s.json" % engine), "out_dir")
 
     if engine == "zircolite":
         # No --noexternal: Zircolite 3 removed it (it reads EVTX through its
@@ -162,18 +211,26 @@ def main():
         if args.get("rules"):
             argv += ["-r", str(args["rules"])]
 
+    # The engine's own words, whole, beside its result: they used to be
+    # dropped when it succeeded and cut to their last few hundred characters
+    # when it did not.
+    stdout_path = resolve_output(os.path.join(out_dir, "%s.stdout" % engine), "out_dir")
+    stderr_path = resolve_output(os.path.join(out_dir, "%s.stderr" % engine), "out_dir")
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        fail("%s did not finish in time" % engine, after_seconds=timeout, command=" ".join(argv))
+        proc = subprocess.run(argv, capture_output=True, text=True, errors="surrogateescape", timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        said = {"stdout": kept_file(stdout_path, text=_text(exc.stdout)),
+                "stderr": kept_file(stderr_path, text=_text(exc.stderr))}
+        fail("%s did not finish in time" % engine, after_seconds=timeout, command=" ".join(argv), **said)
+    said = {"stdout": kept_file(stdout_path, text=proc.stdout or ""),
+            "stderr": kept_file(stderr_path, text=proc.stderr or "")}
 
     if not os.path.isfile(result):
         fail("%s wrote no result file" % engine, exit_code=proc.returncode,
-             command=" ".join(argv),
-             stderr=(proc.stderr or "").strip()[-800:],
-             stdout=(proc.stdout or "").strip()[-400:],
+             command=" ".join(argv), **said,
              note="Engine command lines change between versions; the exact invocation is above "
-                  "so it can be corrected by hand and re-run.")
+                  "so it can be corrected by hand and re-run. Its whole stdout and stderr are "
+                  "the files named here.")
 
     try:
         detections = from_zircolite(result) if engine == "zircolite" else from_hayabusa(result)
@@ -186,18 +243,26 @@ def main():
     by_rule = {}
     for d in kept:
         by_rule[d["rule"]] = by_rule.get(d["rule"], 0) + 1
+    all_detections = kept_file(resolve_output(os.path.join(out_dir, "detections.jsonl"), "out_dir"), rows=kept)
 
     print(json.dumps({
         "path": path,
         "engine": engine,
+        "exit_code": proc.returncode,
+        "command": " ".join(argv),
         "result_file": result,
         "detections": kept[:limit],
         "detection_count": len(kept),
         "returned": min(len(kept), limit),
+        "truncated": len(kept) > limit,
+        "all_detections": all_detections,
         "below_min_level": len(detections) - len(kept),
         "min_level": min_level,
         "rules_that_fired": sorted(({"rule": r, "count": c} for r, c in by_rule.items()),
-                                   key=lambda x: -x["count"])[:25],
+                                   key=lambda x: (-x["count"], str(x["rule"]))),
+        "rules_fired": len(by_rule),
+        "engine_stdout": said["stdout"],
+        "engine_stderr": said["stderr"],
         "note": "A rule firing is a hypothesis with a name, not a finding. Take its record id and "
                 "channel to evtx_query, read the record, and cite the record. Community rulesets "
                 "are tuned for live estates and produce false positives on a forensic image: an "

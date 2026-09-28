@@ -38,7 +38,10 @@ import { GoalPanel } from "./detail/goal-panel";
 import { PacksPanel } from "./detail/packs-panel";
 import { ToolsPanel } from "./detail/tools-panel";
 import { LedgerPanel } from "./detail/ledger-panel";
+import { ReleasePanel } from "./detail/release-panel";
+import { ReviewerPanel } from "./detail/reviewer-panel";
 import { JobsPanel } from "./detail/jobs-panel";
+import { LeadsPanel } from "./detail/leads-panel";
 import { RecordActions } from "./detail/record-actions";
 import { isolationChip } from "@/components/swarm-bits";
 
@@ -50,9 +53,9 @@ import { isolationChip } from "@/components/swarm-bits";
  */
 const TAB_GROUPS = [
   { label: "The run", tabs: ["story", "threads", "traces", "agents"] },
-  { label: "Evidence", tabs: ["files", "artifacts", "jobs", "ledger"] },
+  { label: "Evidence", tabs: ["leads", "files", "artifacts", "jobs", "ledger"] },
   { label: "The frame", tabs: ["goal", "packs", "tools", "claims", "budget"] },
-  { label: "Output", tabs: ["report", "custody"] },
+  { label: "Output", tabs: ["report", "release", "review", "custody"] },
 ] as const;
 const TABS = TAB_GROUPS.flatMap((g) => g.tabs);
 type Tab = (typeof TAB_GROUPS)[number]["tabs"][number];
@@ -63,6 +66,7 @@ const TAB_LABEL: Record<Tab, string> = {
   agents: "Agents",
   tools: "Tools",
   ledger: "Ledger",
+  leads: "Leads",
   claims: "Claims",
   budget: "Budget",
   files: "Files",
@@ -71,6 +75,8 @@ const TAB_LABEL: Record<Tab, string> = {
   goal: "Goal",
   packs: "Packs",
   report: "Report",
+  release: "Release",
+  review: "Technical review",
   custody: "Custody",
 };
 
@@ -314,6 +320,9 @@ export function SwarmDetailScreen() {
   const toolsVersion = useSwarmVersion(id, ["tools"]);
   const contractVersion = useSwarmVersion(id, ["contract"]);
   const storeVersion = useSwarmVersion(id, ["store"]);
+  // The register reads its own files, the ledger (a need on an entry, a
+  // closure resting on one) and the store (a lead's jobs).
+  const leadsVersion = useSwarmVersion(id, ["leads", "ledger", "store"]);
   const checksVersion = useSwarmVersion(id, CHECKS_CHANGE_KINDS);
   const loader = useCallback(() => api.swarm(id), [id]);
   const view = useResource(loader, version, [id]);
@@ -456,6 +465,23 @@ export function SwarmDetailScreen() {
                   <Chip tone="saffron">{d.layout.split_failures} pane split{d.layout.split_failures === 1 ? "" : "s"} fell back to a new tab</Chip>
                 </div>
               ) : null}
+              {/* What the swarm asked of the operator, above everything else the band says: it waits on a person. */}
+              {d.leads && d.leads.waiting_on_operator > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={() => setTab("leads")} title="Leads a swarm agent closed needs_operator: something only you can give">
+                    <Chip tone="brick" className="bg-brick text-white">
+                      {d.leads.waiting_on_operator} request{d.leads.waiting_on_operator === 1 ? "" : "s"} waiting on you
+                    </Chip>
+                  </button>
+                </div>
+              ) : null}
+              {d.until_solved ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span title="No wall clock, caps advisory, no abandon: it ends when every question is answered, or when you stop it">
+                    <Chip tone="saffron">until solved</Chip>
+                  </span>
+                </div>
+              ) : null}
               {d.custody?.verdict === "attention" ? (
                 <div className="flex flex-wrap items-center gap-2">
                   <button type="button" onClick={() => setTab("custody")} title={d.custody.problems.join("\n")}>
@@ -476,7 +502,7 @@ export function SwarmDetailScreen() {
           <div className="grid items-start gap-x-8 gap-y-5 lg:grid-cols-[minmax(0,560px)_minmax(0,1fr)]">
           <div className="grid gap-x-8 gap-y-4 sm:grid-cols-3">
           <Vital
-            label={unmetered ? "Tokens / cap" : "Spend / cap"}
+            label={d.until_solved ? (unmetered ? "Tokens / advisory cap" : "Spend / advisory cap") : unmetered ? "Tokens / cap" : "Spend / cap"}
             value={unmetered ? compact(b.tokens) : money(s.spent_usd, 2)}
             tail={
               unmetered
@@ -500,9 +526,9 @@ export function SwarmDetailScreen() {
             }
           />
           <Vital
-            label={reachedDone(s.phase) ? "Took" : "Wall clock"}
+            label={reachedDone(s.phase) ? "Took" : d.until_solved ? "Running" : "Wall clock"}
             value={mmss(elapsedLive)}
-            tail={wallMs ? `of ${mmss(wallMs)}` : undefined}
+            tail={d.until_solved ? "until solved: no wall clock" : wallMs ? `of ${mmss(wallMs)}` : undefined}
             tone={overWall ? "saffron" : undefined}
             meter={<Meter pct={wallPct} tone={overWall ? "saffron" : "band"} onDark label="elapsed against wall clock" />}
           />
@@ -562,6 +588,7 @@ export function SwarmDetailScreen() {
                       {t === "artifacts" && d.work.length ? d.work.length : ""}
                       {t === "tools" && d.tools.length ? d.tools.length : ""}
                       {t === "ledger" && d.ledger?.entries.length ? d.ledger.entries.length : ""}
+                      {t === "leads" && d.leads ? d.leads.open + d.leads.active + d.leads.blocked : ""}
                     </span>
                   </button>
                 ))}
@@ -629,7 +656,10 @@ export function SwarmDetailScreen() {
           {tab === "packs" ? <PacksPanel view={d} /> : null}
           {tab === "jobs" ? <JobsPanel view={d} selected={sub ? decodeURIComponent(sub) : null} onSelect={(j) => setSub("jobs", j)} version={storeVersion} /> : null}
           {tab === "ledger" ? <LedgerPanel view={d} /> : null}
+          {tab === "leads" ? <LeadsPanel view={d} version={leadsVersion} /> : null}
           {tab === "report" ? <ReportPanel view={d} /> : null}
+          {tab === "release" ? <ReleasePanel view={d} /> : null}
+          {tab === "review" ? <ReviewerPanel view={d} /> : null}
         </section>
 
         <aside className="flex flex-col gap-4">

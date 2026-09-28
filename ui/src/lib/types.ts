@@ -1,4 +1,5 @@
 /** Wire types. Mirrors scripts/ui/model.ts + extensions/*.ts; keep in sync by hand. */
+import type { ClaimSequence } from "./claim-sequences.ts";
 import type { VmTimeline } from "./vm-timeline.ts";
 
 /**
@@ -55,6 +56,8 @@ export type SwarmRow = {
   tools_forged: number;
   /** The evidence directory the run was given, or null: what a clean room is about. */
   inputs_source: string | null;
+  /** Every set's directory (one for a run of one set), or null. Absent from an older server. */
+  inputs_sources?: string[] | null;
   /** Where the agents ran; a record from before isolation was recorded is a host run. Absent from an older server. */
   isolation?: "microvm" | "host";
   /** The last custody verdict, or null before any stop or hub finish took one. */
@@ -260,6 +263,9 @@ export type BudgetRecord = {
   tokens: number;
   calls: number;
   wall_clock_minutes: number;
+  /** An until-solved run: no wall clock, every cap advisory. */
+  until_solved?: boolean;
+  stall_minutes?: number;
   started_at: string;
   source: string;
   hard_kill: boolean;
@@ -416,6 +422,10 @@ export type SwarmView = {
   agents: AgentRow[];
   locks: LockRecord[];
   claims: ClaimRow[];
+  /** Claim → work → release runs over the whole trace (`traces` is its tail); absent from an older server. */
+  claim_sequences?: ClaimSequence[];
+  /** Every reap over the whole trace; absent from an older server. */
+  reaps?: SwarmEvent[];
   sentinel: boolean;
   sentinel_info: SentinelInfo | null;
   traces: SwarmEvent[];
@@ -426,7 +436,7 @@ export type SwarmView = {
     tool_forging?: boolean;
     self_compact?: SelfCompactOptions;
     inbox_page_chars?: number;
-    inputs?: { source: string; files: number; bytes: number; enforce: string; guard: string } | null;
+    inputs?: { source: string; files: number; bytes: number; enforce: string; guard: string; sets?: Array<{ name: string; source: string; files: number; bytes: number }> } | null;
     isolation?: { mode?: string; image?: string; image_digest?: string | null; cpus?: number; memory_mib?: number; disk_mib?: number; snapshot?: boolean; oauth_allowed?: boolean; snapshot_dir?: string | null };
     provenance?: RunProvenance;
     host_clock?: HostClock;
@@ -461,6 +471,52 @@ export type SwarmView = {
   vm_timeline?: VmTimeline | null;
   /** What the last custody check found (custody.json); null before a stop or the hub's finish took one. */
   custody?: CustodyView | null;
+  /** The lead register in numbers; null when the run opened no lead. Absent from a server that predates it. */
+  leads?: LeadsBrief | null;
+  /** The run was started until solved: no wall clock, caps advisory, only the operator ends it. */
+  until_solved?: boolean;
+};
+
+/** Mirrors `LeadsBrief` in `scripts/ui/model.ts`. */
+export type LeadsBrief = { open: number; active: number; blocked: number; closed: number; waiting_on_operator: number; uncovered: number; chain_ok: boolean };
+
+/** A lead as the register shows it; mirrors `LeadView` in `extensions/leads.ts`. */
+export type LeadView = {
+  id: string;
+  title: string;
+  why: string;
+  origin: string;
+  status: "open" | "active" | "blocked" | "closed";
+  material: boolean;
+  holder: string | null;
+  generation: number;
+  needs: Array<{ need: string; met: boolean; why?: string }>;
+  answers: string[];
+  disposition?: "resolved" | "negative" | "duplicate" | "deferred" | "infeasible" | "needs_operator";
+  ref?: string;
+  closed_by?: string;
+  closed_at?: string;
+  close_why?: string;
+  opened_by: string;
+  opened_at: string;
+  held_since: string | null;
+  priority: number;
+  waiting_on_it: { leads: string[]; questions: string[] };
+  stale: { at: string; holder: string; generation: number; idle_seconds: number; last_activity: string | null } | null;
+  jobs: string[];
+  notes: Array<{ at: string; by: string; text: string; allow_host?: string }>;
+  reopened: Array<{ at: string; by: string; why: string; cause: string }>;
+};
+
+/** The Leads tab; mirrors `LeadsPanelView` in `scripts/ui/model.ts`. */
+export type LeadsPanelView = {
+  leads: LeadView[];
+  chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null; events: number };
+  waiting_on_operator: LeadView[];
+  requests: Array<Record<string, unknown>>;
+  hosts: string[];
+  coverage: { questions: string[]; existence: string[]; unanswered: string[]; uncovered: string[]; open_leads_for: Record<string, string[]> };
+  awaiting: Array<{ job: string; agent: string; lead: string | null; why: string; unread_bytes?: number; total_bytes?: number; next_offset?: number }>;
 };
 
 /** What produced the run, as the kickoff recorded it. */
@@ -618,9 +674,14 @@ export type InputFile = {
   link_b64?: string;
 };
 
+/** One of several evidence sets, at inputs/<name>/. */
+export type InputsSet = { name: string; path: string; source: string; files: number; bytes: number };
+
 /** The read-only inputs a swarm was given, with what the trace says about them. */
 export type InputsView = {
   source: string;
+  /** Several sets, each at inputs/<name>/; null (or absent, from an older server) for one. */
+  sets?: InputsSet[] | null;
   /** copy, bind (in place) or image; null on an older manifest. */
   held?: string | null;
   /** In a VM run the evidence is a read-only, no-exec mount in every VM. */
@@ -777,6 +838,8 @@ export type ChangeKind =
   | "contract"
   /** store/: the job service's journal and each job's sealed output. */
   | "store"
+  /** leads/: the lead register, and what the agents asked of the operator. */
+  | "leads"
   /** A live VM run's hub wrote its status: the seats' states moved. */
   | "hub"
   | "other";
@@ -910,17 +973,111 @@ export type Coverage = {
   grounding: Record<string, "grounded" | "not in the trace" | "not a path">;
 };
 
-export type ReviewAction = "accept" | "reject" | "amend" | "sign";
+/** Every act the review file holds (scripts/review.ts REVIEW_ACTIONS). */
+export type ReviewAction = "accept" | "reject" | "amend" | "sign" | "adopt" | "qualify" | "inconclusive" | "technical_review" | "countersign";
+/** The acts the ledger panel writes (the sign-off is the Release panel's). */
+export type EntryReviewAction = "accept" | "reject" | "amend";
 
 /** GET /api/swarms/:id/review: the examiner's decisions, kept outside the run and chained. */
 export type ReviewState = {
   present: boolean;
   /** Why the review file was not read (a link, a FIFO, a directory in its place), or null. */
   error?: string | null;
-  lines: Array<{ seq: number; at: string; examiner: string; os_user: string; host: string; action: ReviewAction; entry_seq: number | null; entry_hash: string | null; note: string | null; ledger_head: string | null; chained: boolean }>;
+  lines: Array<{ seq: number; at: string; examiner: string; os_user: string; host: string; action: ReviewAction; entry_seq: number | null; entry_hash: string | null; note: string | null; ledger_head: string | null; release: { version: number; sha256: string } | null; reviewer: string | null; outcome: string | null; over_seq: number | null; chained: boolean }>;
   chain: { intact: boolean; detail: string };
-  by_entry: Record<string, { action: Exclude<ReviewAction, "sign">; examiner: string; at: string; note: string | null; entry_hash: string | null }>;
+  by_entry: Record<string, { action: "accept" | "reject" | "amend" | "adopt" | "qualify" | "inconclusive"; examiner: string; at: string; note: string | null; entry_hash: string | null }>;
   signed: { examiner: string; at: string; ledger_head: string | null } | null;
+};
+
+/** A person enrolled on this install (GET /api/examiners): never a certificate's subject beyond its CN. */
+export type EnrolledPerson = {
+  id: string;
+  name: string;
+  organisation: string;
+  competence: string;
+  role: "examiner" | "reviewer";
+  principal: string;
+  key: {
+    kind: "ssh" | "fido" | "pkcs11";
+    fingerprint: string;
+    passphrase?: boolean | null;
+    agent?: boolean;
+    verify_required?: boolean;
+    resident?: boolean;
+    cn?: string | null;
+    issuer?: string;
+    not_before?: string;
+    not_after?: string;
+    qc_statement?: boolean;
+  };
+  words: string;
+  /** "ok", or why the console does not sign with this key. */
+  console: string;
+  locked_until: string | null;
+  enrolled_at: string;
+};
+
+/** Whether this console can sign, and why not. */
+export type SigningAvailability = { ok: boolean; why: string | null; host_run: string | null };
+
+export type ExaminersView = { people: EnrolledPerson[]; signing: SigningAvailability };
+
+/** One technical review, where it stands (the report's five wordings). */
+export type TechnicalReviewView = {
+  review_seq: number;
+  reviewer: { name: string; organisation: string | null; competence: string; id?: string | null; fingerprint?: string | null };
+  recorded_as: "examiner" | "reviewer";
+  outcome: string | null;
+  reviewed_at: string | null;
+  scope: string | null;
+  entries: Array<{ seq: number; hash: string | null }>;
+  disagreements: string[];
+  methods_checked: string;
+  status: "signed" | "recorded" | "countersigned-after-release" | "stale" | "bad-signature";
+  words: string;
+  countersign: { review_seq: number; fingerprint: string; kind: string; after_release: { version: number; sha256: string } | null } | null;
+};
+
+/** GET /api/runs/:id/release: the run's releases, how each was signed, verify without a register, the technical reviews. */
+export type ReleaseStateView = {
+  run: string;
+  state: string | null;
+  releases: Array<{
+    version: number;
+    error: string | null;
+    sha256: string | null;
+    state: "draft" | "adopted" | null;
+    at: string | null;
+    reason: string | null;
+    signer: { kind: "machine" | "examiner"; key_kind: string; fingerprint: string; name: string | null; organisation: string | null; cn: string | null } | null;
+    signing: { via: "console" | "cli"; consent: "confirmed" | "presented"; confirmed_at: string; shown_sha256: string } | null;
+    technical: Array<{ reviewer: string; outcome: string | null; words: string | null }>;
+  }>;
+  verify: { ok: boolean; lines: string[] } | null;
+  technical: TechnicalReviewView[];
+  reviewed_state: { report_sha256: string | null; ledger_head: string | null; custody_sha256: string | null; dispositions_head: string } | null;
+  review_lines: number;
+  policy: { require_technical_review: boolean; source: string | null };
+  host: { isolation: string | null; signer_keys_hidden: boolean | null; note: string };
+  outcomes: string[];
+  signing: SigningAvailability;
+};
+
+/** POST /api/runs/:id/release/prepare: what the examiner is asked to confirm. */
+export type PreparedRelease = {
+  nonce: string;
+  run: string;
+  version: number;
+  prepared_at: string;
+  expires_at: string;
+  report_url: string;
+  report: { html: { sha256: string; bytes: number }; markdown: { path: string; sha256: string } | null; pdf: { sha256: string } | null };
+  gate: { adopted: number; qualified: number; withdrawn: number; inconclusive: number; not_adopted: number; scope: "answers" | "report"; defects: number; open_rejections: number[] };
+  technical: Array<{ review_seq: number; reviewer: string; outcome: string | null; status: string; words: string }>;
+  policy: { require_technical_review: boolean; source: string | null; satisfied: boolean };
+  signer: { id: string; name: string; organisation: string; kind: "ssh" | "fido" | "pkcs11"; fingerprint: string; words: string; secret: "passphrase" | "fido-pin" | "pin" | null; touch: boolean };
+  statement: string;
+  reason: string;
 };
 
 /** What a job's sealed tree holds, as its job_committed line recorded it. */

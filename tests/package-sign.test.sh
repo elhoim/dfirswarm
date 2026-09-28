@@ -2,7 +2,9 @@
 # A package signed with the examiner's ssh key (swarm.sh package --sign) and
 # checked where it lands (swarm.sh verify): every file against MANIFEST.txt,
 # nothing missing or added, and the signature, with exit codes a script can
-# act on. No model, no Herdr, no VM; a key made for the test.
+# act on; who signed and when under the signature; the index custody sealed
+# carried, and every work/ file held to it. No model, no Herdr, no VM; a key
+# made for the test.
 set -euo pipefail
 unset SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 export SWARM_ISOLATION=host
@@ -97,5 +99,35 @@ out="$(HOME="$TMP/nohome" swarm package "$id" --sign)"; rc=$?
 set -e
 [[ $rc -ne 0 ]] && grep -q 'no key to sign the package with' <<<"$out" || fail "--sign with no key did not refuse (rc $rc): $out"
 pass "--sign with no key refuses"
+
+echo "# who signed and when are under the signature: SIGNER.txt and signer.pub are in the manifest"
+out="$(swarm package "$id" --sign --key "$TMP/key")" || fail "repackaging failed: $out"
+grep -qE '^[0-9a-f]{64}  \./SIGNER\.txt$' "$pkg/MANIFEST.txt" && grep -qE '^[0-9a-f]{64}  \./signer\.pub$' "$pkg/MANIFEST.txt" || fail "SIGNER.txt or signer.pub is not in the signed manifest: $(cat "$pkg/MANIFEST.txt")"
+grep -qE '^[0-9a-f]{64}  \./COMPONENTS\.json$' "$pkg/MANIFEST.txt" || fail "COMPONENTS.json is not in the manifest"
+verify "$pkg" --allowed-signers "$TMP/allowed"
+[[ $rc -eq 0 ]] && grep -q 'SIGNER.txt (who, which key, when) is in the manifest it covers' <<<"$out" || fail "the signer's place is not said (rc $rc): $out"
+chmod -R u+w "$pkg"
+sed -i.bak 's/^examiner .*/examiner Someone Else/' "$pkg/SIGNER.txt" && rm -f "$pkg/SIGNER.txt.bak"
+verify "$pkg" --allowed-signers "$TMP/allowed"
+[[ $rc -eq 1 ]] && grep -q 'changed: SIGNER.txt' <<<"$out" || fail "an examiner's name changed after signing was not caught (rc $rc): $out"
+pass "SIGNER.txt and signer.pub are in the manifest the signature covers: a name or a time changed afterwards is caught"
+
+echo "# the package carries the index custody sealed, and every work/ file is held to it"
+mkdir -p "$sb/work"
+printf '# Report\n\nNothing found.\n' > "$sb/work/report.md"
+node --experimental-strip-types --no-warnings "$ROOT/scripts/custody.ts" "$sb" --run "$id" --quiet --runs-dir "$SWARM_RUNS_DIR" >/dev/null 2>&1 || true
+[[ -s "$sb/artifacts.json" ]] || fail "custody wrote no index"
+out="$(swarm package "$id" --sign --key "$TMP/key")" || fail "packaging after custody failed: $out"
+cmp -s "$sb/artifacts.json" "$pkg/artifacts.sealed.json" || fail "the package's sealed index is not the one custody wrote"
+jq -e '.components[] | select(.path == "artifacts.sealed.json") | .present == true' "$pkg/COMPONENTS.json" >/dev/null || fail "COMPONENTS.json does not list the sealed index"
+verify "$pkg" --allowed-signers "$TMP/allowed"
+[[ $rc -eq 0 ]] && grep -q 'Work files:   every packaged work/ file is the one custody sealed: 1 as sealed' <<<"$out" || fail "a sealed package did not verify its work files (rc $rc): $out"
+# The report edited in the run after the stop, and the run packaged again: signed, and not as sealed.
+printf 'Added after the stop.\n' >> "$sb/work/report.md"
+out="$(swarm package "$id" --sign --key "$TMP/key")" || fail "repackaging failed: $out"
+verify "$pkg" --allowed-signers "$TMP/allowed"
+[[ $rc -eq 1 ]] && grep -q 'NOT AS SEALED: 1 CHANGED (work/report.md)' <<<"$out" || fail "a report edited after custody verified (rc $rc): $out"
+grep -q 'CHANGED SINCE CUSTODY' "$pkg/report.html" || fail "the packaged report does not say its own report changed since custody"
+pass "the sealed index travels with the package, and a work file changed after the stop fails verify, signed or not"
 
 echo "package-sign.test.sh: all checks passed"

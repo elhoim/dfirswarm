@@ -29,6 +29,6 @@
   "example": "{\"path\": \"inputs/signins.json\", \"out_file\": \"work/signins.jsonl\"}",
   "by": "maintainer",
   "at": "2026-09-22T22:00:00.000Z",
-  "version": 1,
-  "sha256": "b2be46e113e16da91c56e69ac35e285897b82ef4c32ec8fcc3ea45befddbfb1f"
+  "version": 2,
+  "sha256": "330f8b70cd231f9decc0125151d57ec75944a8b6a65865b73a8964c2d25d482d"
 }

@@ -8,7 +8,8 @@
 # contract has to tell the agents, the registry has to record it, a reused
 # sandbox has to lose the old inputs, and the refusals (missing dir, dir
 # inside the sandbox, too big, bad enforcement, enforcement the host cannot
-# give) have to be refusals.
+# give) have to be refusals. Several sets land each at inputs/<name>/, are
+# held by one rule each, share one ceiling, and may not clash.
 set -uo pipefail
 # This suite tests host runs, and a run is in microVMs unless it says
 # otherwise: it names host. An image, a lock file or another pack home
@@ -65,6 +66,71 @@ out="$(start --model solo/model --n 1 --cap-usd 1 --no-start \
   --goal-file "$ROOT/prompts/goals/hello.md" --label boundnoguard --inputs "$TMP/src" --inputs-bind --inputs-enforce off)"
 grep -q "BLOCKER: --inputs-bind needs a kernel guard" <<<"$out" || fail "a bind with no kernel guard should be refused: $out"
 pass "--inputs-bind without a kernel guard is refused (the source would be writable)"
+
+# --- several sets ------------------------------------------------------------------
+mkdir -p "$TMP/second/logs" "$TMP/a/case" "$TMP/b/case"
+printf 'second\n' > "$TMP/second/logs/app.log"
+printf 'a\n' > "$TMP/a/case/a.txt"
+printf 'b\n' > "$TMP/b/case/b.txt"
+src_real="$(cd "$TMP/src" && pwd -P)" second_real="$(cd "$TMP/second" && pwd -P)"
+out="$(start --model solo/model --n 2 --cap-usd 1 --no-start \
+  --goal-file "$ROOT/prompts/goals/hello.md" --label twosets --inputs "$TMP/src" --inputs "$TMP/second/")"
+sb="$(sandbox_of "$out")"
+[[ -n "$sb" && -d "$sb/inputs" && ! -L "$sb/inputs" ]] || fail "two sets should make inputs/ a directory: $out"
+[[ -f "$sb/inputs/src/readings.csv" && -f "$sb/inputs/src/sub/notes.md" && -f "$sb/inputs/second/logs/app.log" ]] || fail "each set should be at inputs/<name>/: $(find "$sb/inputs" | sort)"
+[[ -f "$sb/.inputs-pristine/second/logs/app.log" ]] || fail "the pristine clone does not hold the second set"
+has_write_bit "$sb/inputs/second/logs/app.log" && fail "the second set kept a write bit"
+[[ "$(jq -c '[.sets[] | {name, source, files}]' "$sb/inputs.json")" == "$(jq -nc --arg a "$src_real" --arg b "$second_real" '[{name: "src", source: $a, files: 3}, {name: "second", source: $b, files: 1}]')" ]] \
+  || fail "the manifest does not name both sets with their sources: $(jq -c .sets "$sb/inputs.json")"
+[[ "$(jq -r '.files | length' "$sb/inputs.json")" == "4" ]] || fail "the manifest does not list every set's files"
+[[ "$(jq -r '.. | objects | select(.["label"]? == "twosets") | .inputs | "\(.files) \(.sets | length)"' "$TMP/runs/registry.json")" == "4 2" ]] || fail "the registry does not record both sets"
+grep -q 'in 2 sets: `inputs/src/` from `'"$src_real"'` (3 file(s)); `inputs/second/` from `'"$second_real"'` (1 file(s))' "$sb/SWARM.md" || fail "the contract does not name both sets: $(grep -A2 '^## Inputs' "$sb/SWARM.md")"
+grep -q 'inputs/second/logs/app.log' "$sb/SWARM.md" || fail "the contract does not list the second set's files"
+grep -q "^Inputs:       4 file(s), [0-9]* KB in 2 sets, read-only, each under inputs/<set>/: src from $src_real (3 file(s)); second from $second_real (1 file(s))" <<<"$out" || fail "the kickoff line does not name both sets: $out"
+guard2="$(jq -r '.guard' "$sb/inputs.json")"
+if [[ "$guard2" != "none" ]]; then
+  grep -q -- "--ro $sb/inputs" "$sb/.zsh/.zshenv" || fail "the hook does not hold inputs/ read-only for two sets"
+fi
+pass "two --inputs land at inputs/src/ and inputs/second/, cloned, locked, and named in the manifest, the registry, the contract and the kickoff line"
+
+if [[ -n "$guard_now" && "$guard_now" != "none" ]]; then
+  out="$(start --model solo/model --n 1 --cap-usd 1 --no-start \
+    --goal-file "$ROOT/prompts/goals/hello.md" --label twobound --inputs "$TMP/src" --inputs "$TMP/second" --inputs-bind)"
+  sb="$(sandbox_of "$out")"
+  [[ -n "$sb" && -d "$sb/inputs" && ! -L "$sb/inputs" ]] || fail "two bound sets should make inputs/ a directory of links: $out"
+  [[ "$(readlink "$sb/inputs/src")" == "$src_real" && "$(readlink "$sb/inputs/second")" == "$second_real" ]] || fail "each set should be a link to its resolved source: $(ls -l "$sb/inputs")"
+  [[ ! -e "$sb/.inputs-pristine" ]] || fail "two bound sets have no pristine clone to make"
+  has_write_bit "$sb/inputs" && fail "the run's inputs/ holding the links should have no write bit"
+  [[ "$(jq -r '.held' "$sb/inputs.json") $(jq -r '[.files[].path] | sort | join(",")' "$sb/inputs.json")" == "bind inputs/second/logs/app.log,inputs/src/link.txt,inputs/src/readings.csv,inputs/src/sub/notes.md" ]] \
+    || fail "the manifest does not walk both bound sets through their links: $(jq -c '{held, files: [.files[].path]}' "$sb/inputs.json")"
+  for want in "--ro $sb/inputs" "--ro $src_real" "--ro $second_real"; do
+    grep -q -- "$want" "$sb/.zsh/.zshenv" || fail "the hook has no '$want': one rule per bound set"
+  done
+  grep -q 'each `inputs/<set>` a link to its source in place' "$sb/SWARM.md" || fail "the contract does not say the sets are bound"
+  has_write_bit "$TMP/second/logs/app.log" || fail "a bind must not strip the operator's write bits from a set"
+  pass "two bound sets are a link each under inputs/, walked through, and held by one --ro rule each ($guard_now)"
+fi
+
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --inputs "$TMP/src" --inputs "$TMP/src/")"
+grep -q "BLOCKER: --inputs $src_real is given twice" <<<"$out" || fail "the same set twice should be refused: $out"
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --inputs "$TMP/src" --inputs "$TMP/src/sub")"
+grep -q "BLOCKER: --inputs $src_real/sub is inside --inputs $src_real" <<<"$out" || fail "a set inside another should be refused: $out"
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --inputs "$TMP/a/case" --inputs "$TMP/b/case")"
+grep -q "would both be inputs/case/" <<<"$out" || fail "two sets of one name should be refused: $out"
+ln -s "$TMP/b/case" "$TMP/case-b"
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --label renamed --inputs "$TMP/a/case" --inputs "$TMP/case-b")"
+sb="$(sandbox_of "$out")"
+[[ -n "$sb" && -f "$sb/inputs/case/a.txt" && -f "$sb/inputs/case-b/b.txt" ]] || fail "a link should name its set: $out"
+mkdir -p "$TMP/c/.hidden"
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --inputs "$TMP/src" --inputs "$TMP/c/.hidden")"
+grep -q "must be UTF-8 on one line and not begin with a dot" <<<"$out" || fail "a hidden set name should be refused: $out"
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --inputs "$TMP/src" --inputs "$TMP/second" --inputs-max-files 3)"
+grep -q "BLOCKER: the 2 --inputs sets have 4 files together; the limit is 3" <<<"$out" || fail "the file cap should hold for the sets together: $out"
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --inputs "$TMP/src" --inputs "$TMP/second" --inputs-max-mb 0)"
+grep -q "BLOCKER: the 2 --inputs sets are [0-9]* MB together; the limit is 0 MB" <<<"$out" || fail "the size cap should hold for the sets together: $out"
+out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/prompts/goals/hello.md" --inputs-image "$TMP/x.dmg" --inputs-image "$TMP/y.dmg")"
+grep -q "BLOCKER: --inputs-image takes one image" <<<"$out" || fail "a second --inputs-image should be refused: $out"
+pass "a set given twice, a set inside another, two sets of one name, a hidden name and the caps together are refused; a link names a set; one image only"
 
 # --- the copy ------------------------------------------------------------------
 out="$(start --model solo/model --n 2 --cap-usd 1 --no-start \

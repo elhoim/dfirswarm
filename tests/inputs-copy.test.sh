@@ -8,7 +8,9 @@
 #   default each copied file's source is hashed again (--no-verify-copy:
 #   names, kinds and sizes only);
 # - every file carries SHA-256, SHA-1 and MD5 from one read;
-# - a name that is not UTF-8 is kept exactly (Linux; APFS refuses such names).
+# - a name that is not UTF-8 is kept exactly (Linux; APFS refuses such names);
+# - several sets land each at inputs/<name>/, each checked against its own
+#   source, copied or held in place, and the manifest says which is which.
 set -euo pipefail
 unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 
@@ -21,6 +23,7 @@ pass() { echo "ok - $*"; }
 
 fn() { sed -n "/^$1() {/,/^}/p" "$ROOT/scripts/swarm.sh"; }
 eval "$(fn copy_tree_as_is)"
+eval "$(fn copy_evidence_set)"
 eval "$(fn install_inputs)"
 eval "$(fn write_inputs_manifest)"
 type install_inputs >/dev/null 2>&1 || fail "install_inputs was not found in swarm.sh"
@@ -131,5 +134,62 @@ PY
   python3 -c 'import json,sys; json.loads(open(sys.argv[1], encoding="utf-8").read())' "$SB3/inputs.json" || fail "the manifest is not valid UTF-8 JSON"
   pass "a name and a link target that are not UTF-8 are kept as base64 beside a readable name"
 fi
+
+echo "# several sets, each at inputs/<name>/"
+mkdir -p "$TMP/alpha/sub" "$TMP/beta"
+printf 'alpha one\n' > "$TMP/alpha/one.txt"
+printf 'alpha two\n' > "$TMP/alpha/sub/two.txt"
+ln -s "$TMP/host/hosts" "$TMP/alpha/sub/hosts"
+printf 'beta\n' > "$TMP/beta/three.txt"
+# The operator's top-level link, in the second set: followed, as in one.
+ln -s "$TMP/case/disk.E01" "$TMP/beta/disk.E01"
+SB6="$TMP/sb6"
+mkdir -p "$SB6"
+out="$(install_inputs "$SB6" "" auto none 1 0 alpha "$TMP/alpha" beta "$TMP/beta" 2>&1)" || fail "the copy of two sets failed: $out"
+[[ -f "$SB6/inputs/alpha/one.txt" && -f "$SB6/inputs/alpha/sub/two.txt" && -f "$SB6/inputs/beta/three.txt" ]] || fail "a set is not at inputs/<name>/: $(find "$SB6/inputs" | sort)"
+[[ -L "$SB6/inputs/alpha/sub/hosts" ]] || fail "a link inside a set was followed"
+[[ -f "$SB6/inputs/beta/disk.E01" && ! -L "$SB6/inputs/beta/disk.E01" ]] || fail "the operator's top-level link in the second set was not followed"
+[[ -f "$SB6/.inputs-pristine/alpha/one.txt" && -f "$SB6/.inputs-pristine/beta/three.txt" ]] || fail "the pristine clone does not mirror the sets"
+[[ ! -e "$SB6/inputs/one.txt" ]] || fail "a set's file landed at the top of inputs/"
+python3 -c 'import os, sys; sys.exit(0 if os.stat(sys.argv[1]).st_mode & 0o222 else 1)' "$SB6/inputs/beta/three.txt" && fail "a set kept a write bit"
+[[ "$(jq -r '[.files[].path] | sort | join(",")' "$SB6/inputs.json")" == "inputs/alpha/one.txt,inputs/alpha/sub/hosts,inputs/alpha/sub/two.txt,inputs/beta/disk.E01,inputs/beta/three.txt" ]] || fail "the manifest does not list every set's names under inputs/<name>/: $(jq -c '[.files[].path]' "$SB6/inputs.json")"
+[[ "$(jq -c '[.sets[] | {name, path, source, files}]' "$SB6/inputs.json")" == "$(jq -nc --arg a "$TMP/alpha" --arg b "$TMP/beta" '[{name: "alpha", path: "inputs/alpha", source: $a, files: 3}, {name: "beta", path: "inputs/beta", source: $b, files: 2}]')" ]] || fail "the manifest's sets are not the two, in order: $(jq -c .sets "$SB6/inputs.json")"
+[[ "$(jq -r '[.sets[].bytes] | add == (input | .bytes)' "$SB6/inputs.json" "$SB6/inputs.json")" == "true" ]] || fail "the sets' bytes do not add up to the manifest's"
+[[ "$(jq -r '.source' "$SB6/inputs.json")" == "$TMP/alpha, $TMP/beta" ]] || fail "the manifest's source does not name both sets: $(jq -r .source "$SB6/inputs.json")"
+[[ "$(jq -c '.source_checked | {by, files, mismatches}' "$SB6/inputs.json")" == '{"by":"content","files":4,"mismatches":0}' ]] || fail "each set was not checked against its source by content: $(jq -c .source_checked "$SB6/inputs.json")"
+grep -q 'alpha/sub/hosts' <<<"$out" || fail "the NOTE does not name the link that leads out under its set: $out"
+pass "two sets are copied each to inputs/<name>/, cloned, locked, and listed with their sources"
+
+# One set writes the manifest it always did: no `sets`, paths under inputs/.
+[[ "$(jq 'has("sets")' "$SB/inputs.json")" == "false" ]] || fail "a one-set manifest grew a sets key"
+[[ "$(jq -r 'keys_unsorted | join(",")' "$SB5/inputs.json")" == "source,copied_at,files,bytes,enforce,guard,digests,quarantine,source_checked,held" ]] || fail "a one-set manifest changed shape: $(jq -r 'keys_unsorted | join(",")' "$SB5/inputs.json")"
+pass "one set's manifest keeps its shape"
+
+# A set whose copy differs from its source is named under its set.
+SB7="$TMP/sb7"
+mkdir -p "$SB7/inputs/alpha" "$SB7/inputs/beta"
+cp -R "$TMP/alpha/." "$SB7/inputs/alpha/"
+printf 'beta, but other\n' > "$SB7/inputs/beta/three.txt"
+set +e
+out="$(write_inputs_manifest "$SB7" "" auto none copy 1 0 alpha "$TMP/alpha" beta "$TMP/beta" 2>&1)"
+rc=$?
+set -e
+[[ $rc -eq 4 ]] || fail "a set whose copy differs from its source exited $rc, wanted 4: $out"
+grep -q 'not in the copy: beta/disk.E01' <<<"$out" || fail "the name missing from the second set is not said under it: $out"
+grep -q 'differs from its source.*beta/three.txt' <<<"$out" || fail "the other file is not said under its set: $out"
+grep -q 'alpha/' <<<"$(grep -v 'BLOCKER' <<<"$out" | grep -v 'A case-insensitive')" && fail "an intact set was named: $out"
+pass "each set's copy is checked against its own source, and a difference is named under its set"
+
+# Held in place: inputs/ is the run's own directory with a link per set.
+SB8="$TMP/sb8"
+mkdir -p "$SB8/inputs"
+ln -s "$TMP/alpha" "$SB8/inputs/alpha"
+ln -s "$TMP/beta" "$SB8/inputs/beta"
+out="$(write_inputs_manifest "$SB8" "" auto seatbelt bind 0 0 alpha "$TMP/alpha" beta "$TMP/beta" 2>&1)" || fail "the manifest of two sets held in place failed: $out"
+[[ "$(jq -r '[.files[].path] | sort | join(",")' "$SB8/inputs.json")" == "inputs/alpha/one.txt,inputs/alpha/sub/hosts,inputs/alpha/sub/two.txt,inputs/beta/disk.E01,inputs/beta/three.txt" ]] || fail "the sets held in place are not walked through their links: $(jq -c '[.files[].path]' "$SB8/inputs.json")"
+[[ "$(jq -r '.files[] | select(.path == "inputs/beta/disk.E01") | .link' "$SB8/inputs.json")" == "$TMP/case/disk.E01" ]] || fail "a link inside a set held in place is not recorded as a link"
+[[ "$(jq -r '.files[] | select(.path == "inputs/alpha/one.txt") | .mode' "$SB8/inputs.json")" =~ ^[0-7]{3}$ ]] || fail "a set held in place does not record how its files are held"
+[[ "$(jq -r '[.held, (.sets | length)] | join(" ")' "$SB8/inputs.json")" == "bind 2" ]] || fail "the manifest does not say bind with two sets"
+pass "two sets held in place are walked through their links, and each file's mode is recorded"
 
 echo "inputs-copy.test.sh: all checks passed"

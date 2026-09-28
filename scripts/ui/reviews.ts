@@ -9,9 +9,15 @@
  * one, never "not reviewed".
  */
 import { createHash } from "node:crypto";
-import { readReviews as readReviewLines, ReviewFileError, reviewsPath, verifyReviewChain } from "../review.ts";
+import { readReviews as readReviewLines, ReviewFileError, reviewsPath, verifyReviewChain, REVIEW_ACTIONS } from "../review.ts";
 
-export type ReviewAction = "accept" | "reject" | "amend" | "sign";
+/**
+ * Every act the review file holds: the entry reviews, each answer's
+ * disposition, a technical review and its countersign, and the sign-off. The
+ * console read only the first four once, and took every newer act for a
+ * break in the chain; the actions are now the writer's own list.
+ */
+export type ReviewAction = "accept" | "reject" | "amend" | "sign" | "adopt" | "qualify" | "inconclusive" | "technical_review" | "countersign";
 
 export type ReviewLine = {
   seq: number;
@@ -25,6 +31,11 @@ export type ReviewLine = {
   note: string | null;
   /** On a sign: the ledger head hash the examiner signed. */
   ledger_head: string | null;
+  /** On a sign: the release it names; on a technical review: the reviewer and the outcome; on a countersign: the record it signs. */
+  release: { version: number; sha256: string } | null;
+  reviewer: string | null;
+  outcome: string | null;
+  over_seq: number | null;
   /** Whether this line's `prev` is the sha256 of the line before it. */
   chained: boolean;
 };
@@ -37,12 +48,13 @@ export type ReviewState = {
   lines: ReviewLine[];
   chain: { intact: boolean; detail: string };
   /** The latest decision on each ledger entry, by its seq. */
-  by_entry: Record<string, { action: Exclude<ReviewAction, "sign">; examiner: string; at: string; note: string | null; entry_hash: string | null }>;
+  by_entry: Record<string, { action: "accept" | "reject" | "amend" | "adopt" | "qualify" | "inconclusive"; examiner: string; at: string; note: string | null; entry_hash: string | null }>;
   /** The latest signature over the ledger head, or null. */
   signed: { examiner: string; at: string; ledger_head: string | null } | null;
 };
 
-const ACTIONS = new Set(["accept", "reject", "amend", "sign"]);
+const ACTIONS = new Set<string>(REVIEW_ACTIONS);
+const ENTRY_ACTS = new Set(["accept", "reject", "amend", "adopt", "qualify", "inconclusive"]);
 
 export function reviewFile(runsDir: string, runId: string): string {
   return reviewsPath(runsDir, runId);
@@ -85,6 +97,10 @@ export function parseReviews(text: string): Omit<ReviewState, "present" | "error
       entry_hash: typeof rec.entry_hash === "string" ? rec.entry_hash : null,
       note: typeof rec.note === "string" && rec.note ? rec.note : null,
       ledger_head: typeof rec.ledger_head === "string" ? rec.ledger_head : null,
+      release: rec.release && typeof rec.release === "object" ? { version: Number((rec.release as { version?: unknown }).version), sha256: String((rec.release as { sha256?: unknown }).sha256 ?? "") } : null,
+      reviewer: rec.reviewer && typeof rec.reviewer === "object" ? String((rec.reviewer as { name?: unknown }).name ?? "?") : null,
+      outcome: typeof rec.outcome === "string" ? rec.outcome : null,
+      over_seq: typeof rec.over_seq === "number" ? rec.over_seq : null,
       chained,
     });
   }
@@ -92,7 +108,7 @@ export function parseReviews(text: string): Omit<ReviewState, "present" | "error
   let signed: ReviewState["signed"] = null;
   for (const l of lines) {
     if (l.action === "sign") signed = { examiner: l.examiner, at: l.at, ledger_head: l.ledger_head };
-    else if (l.entry_seq !== null) byEntry[String(l.entry_seq)] = { action: l.action, examiner: l.examiner, at: l.at, note: l.note, entry_hash: l.entry_hash };
+    else if (l.entry_seq !== null && ENTRY_ACTS.has(l.action)) byEntry[String(l.entry_seq)] = { action: l.action as ReviewState["by_entry"][string]["action"], examiner: l.examiner, at: l.at, note: l.note, entry_hash: l.entry_hash };
   }
   // The chain's verdict is the writer's own rule (scripts/review.ts: each
   // prev the hash of the line before, seq from 1 up by one), so the console

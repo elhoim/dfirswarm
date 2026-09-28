@@ -2589,6 +2589,59 @@ test("read-only inputs: a forged tool's write is a shell write", async () => {
   });
 });
 
+test("read-only inputs: several sets held in place are walked through their links, and a link that is no set is a name of its own", async () => {
+  await withSandbox(async (root) => {
+    const outside = await mkdtemp(join(tmpdir(), "dfirswarm-sets-"));
+    try {
+      await mkdir(join(outside, "a"), { recursive: true });
+      await mkdir(join(outside, "b", "sub"), { recursive: true });
+      await mkdir(join(outside, "c"), { recursive: true });
+      const files: Record<string, string> = { "a/x.txt": "alpha\n", "b/sub/y.txt": "beta\n" };
+      for (const [rel, text] of Object.entries(files)) {
+        await writeFile(join(outside, rel), text, "utf8");
+        await chmod(join(outside, rel), 0o444);
+      }
+      // inputs/ is the run's own directory, one link per set (swarm.sh bind_inputs).
+      await mkdir(join(root, INPUTS_DIR));
+      await symlink(join(outside, "a"), join(root, INPUTS_DIR, "a"));
+      await symlink(join(outside, "b"), join(root, INPUTS_DIR, "b"));
+      const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+      await writeFile(
+        join(root, INPUTS_MANIFEST),
+        JSON.stringify({
+          source: `${join(outside, "a")}, ${join(outside, "b")}`,
+          sets: [
+            { name: "a", path: "inputs/a", source: join(outside, "a"), files: 1, bytes: 6 },
+            { name: "b", path: "inputs/b", source: join(outside, "b"), files: 1, bytes: 5 },
+          ],
+          copied_at: new Date().toISOString(),
+          files: Object.entries(files).map(([rel, text]) => ({ path: `${INPUTS_DIR}/${rel}`, bytes: Buffer.byteLength(text), sha256: sha(text) })),
+          bytes: 11,
+          enforce: "auto",
+          guard: "seatbelt",
+          held: "bind",
+        }),
+      );
+      const manifest = await readInputsManifest(root);
+      assert.deepEqual(manifest?.sets?.map((set) => [set.name, set.path, set.files]), [["a", "inputs/a", 1], ["b", "inputs/b", 1]]);
+      assert.deepEqual(await listInputFiles(root), ["inputs/a/x.txt", "inputs/b/sub/y.txt"], "each set's names, through its link, and no link");
+      const check = await verifyInputs(root);
+      assert.ok(check?.ok, JSON.stringify(check));
+      assert.equal(check?.checked, 2);
+      const watched = await watchedPathHashes(root);
+      assert.ok(watched.hashes.has("inputs/b/sub/y.txt") && !watched.hashes.has("inputs/b"), "the watch fingerprints a set's files, not its link");
+      // Something planted in a set's own directory, and a link at the top that no set names.
+      await writeFile(join(outside, "b", "planted.txt"), "new\n");
+      await symlink(join(outside, "c"), join(root, INPUTS_DIR, "c"));
+      const after = await verifyInputs(root);
+      assert.deepEqual(after?.added.sort(), ["inputs/b/planted.txt", "inputs/c"]);
+      assert.equal(after?.content_ok, false);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
+
 test("read-only inputs: a swarm without inputs sees none of this", async () => {
   await withSandbox(async (root) => {
     assert.equal(await readInputsManifest(root), null);

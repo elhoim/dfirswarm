@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -20,20 +20,49 @@ const run = (passed: number, cmds: Array<[string, boolean]>) => ({
   checks: cmds.map(([cmd, ok]) => ({ cmd, ok })),
 });
 
-test("a finish line that fails refuses done and names the first check that fails", () => {
+test("a finish line that fails refuses done and names every check that fails, and what makes it pass", () => {
   const v = finishLineVerdict(run(1, [["test -f work/report.md", false], ["test -f work/timeline.md", false], ["true", true]]), false);
   assert.equal(v.proceed, false);
   if (!v.proceed) {
-    assert.equal(v.failing, "test -f work/report.md");
+    assert.equal(v.failing, "test -f work/report.md", "the record's one field is the first");
     assert.match(v.reason, /1 of 3 checks pass/);
+    assert.match(v.reason, /The harness ran the goal's checks when you called done/);
+    assert.match(v.reason, /^- `test -f work\/report\.md` fails\. Fix: make this command succeed when run from the run's directory$/m);
+    assert.match(v.reason, /^- `test -f work\/timeline\.md` fails\. Fix: /m, "the second failing check is named too");
+    assert.doesNotMatch(v.reason, /`true`/, "a passing check is not");
     assert.match(v.reason, /ends the whole swarm, not your slice/);
     assert.match(v.reason, /abandon: true/);
   }
 });
 
+test("what a check said about itself reaches the agent verbatim", () => {
+  // A gate run as a check (check-answers.ts names each defect and its fix)
+  // says what to do in its output, which the runner hands back as `out`; the
+  // refusal carries its words as they are, for every failing check.
+  const said = "DEFECT: question:3 has no answer. Fix: record kind=answer section=question:3\n  second line, kept";
+  const v = finishLineVerdict(
+    {
+      total: 3,
+      passed: 0,
+      checks: [
+        { cmd: "gate one", ok: false, out: `${said}\n` },
+        { cmd: "gate two", ok: false, fix: "the fix\n  as given" },
+        { cmd: "gate three", ok: false, out_bytes: 70000 },
+      ],
+    },
+    false,
+  );
+  assert.equal(v.proceed, false);
+  if (!v.proceed) {
+    assert.ok(v.reason.includes(`- \`gate one\` fails. It says:\n${said}\n`), v.reason);
+    assert.ok(v.reason.includes("- `gate two` fails. It says:\nthe fix\n  as given\n"), v.reason);
+    assert.ok(v.reason.includes("- `gate three` fails. It printed 70000 bytes; run it from the run's directory to read them.\n"), v.reason);
+  }
+});
+
 test("a finish line that passes lets done through, with nothing added to the reason", () => {
   const v = finishLineVerdict(run(2, [["true", true], ["true", true]]), false);
-  assert.deepEqual(v, { proceed: true });
+  assert.deepEqual(v, { proceed: true, outcome: "completed" });
 });
 
 test("abandon writes the sentinel anyway and says so", () => {
@@ -48,15 +77,47 @@ test("abandon writes the sentinel anyway and says so", () => {
 test("a check that timed out is reported as such, and still refuses", () => {
   const v = finishLineVerdict({ total: 1, passed: 0, checks: [{ cmd: "sleep 999", ok: false, timed_out: true }] }, false);
   assert.equal(v.proceed, false);
-  if (!v.proceed) assert.match(v.reason, /first that timed out/);
+  if (!v.proceed) assert.match(v.reason, /^- `sleep 999` timed out\. Fix: it has to finish within the check's time limit and succeed$/m);
 });
 
-test("a run whose checks cannot be run is not held hostage: done proceeds, and the note says why", () => {
-  assert.equal(finishLineVerdict(null, false).proceed, true);
+test("a run whose checks cannot be run is not held hostage, and is never a clean done: it ends as verification_unavailable", () => {
+  const none = finishLineVerdict(null, false);
+  assert.equal(none.proceed, true);
+  if (none.proceed) {
+    assert.equal(none.outcome, "verification_unavailable", "a runner that could not answer establishes nothing");
+    assert.equal(none.reasonPrefix, "VERIFICATION UNAVAILABLE: ", "the sentinel's reason says so");
+  }
   const v = finishLineVerdict({ total: 0, passed: 0, checks: [], error: "no registry" }, false);
   assert.equal(v.proceed, true);
-  if (v.proceed) assert.match(v.note ?? "", /no registry/);
-  assert.equal(finishLineVerdict(run(0, []), false).proceed, true, "a goal with no checks has nothing to fail");
+  if (v.proceed) {
+    assert.match(v.note ?? "", /no registry/);
+    assert.equal(v.outcome, "verification_unavailable");
+    assert.notEqual(v.outcome, "completed");
+  }
+  const gaveUp = finishLineVerdict(null, true);
+  assert.ok(gaveUp.proceed && gaveUp.outcome === "abandoned" && gaveUp.reasonPrefix === "ABANDONED: ", "an abandon with no runner is an abandon");
+  const empty = finishLineVerdict(run(0, []), false);
+  assert.ok(empty.proceed && empty.outcome === "completed", "a goal with no checks has nothing to fail");
+});
+
+test("the sentinel and the done file say how the run ended; a seat's own leave and an abandon say it their way", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fin-outcome-"));
+  try {
+    await initSandbox(dir, { swarmId: "t", agentIds: ["a0", "a1"], capUsd: 1, wallClockMinutes: 10 });
+    const r = await markDone({ sandboxRoot: dir, agentId: "a0" }, { reason: "VERIFICATION UNAVAILABLE: report written", outputFile: "work/report.md", outcome: "verification_unavailable" });
+    assert.equal(r.terminate, true);
+    if (r.terminate) assert.equal(r.outcome, "verification_unavailable");
+    const sentinel = await readFile(join(dir, SENTINEL_REL), "utf8");
+    assert.match(sentinel, /^outcome: verification_unavailable$/m);
+    assert.match(sentinel, /^reason: VERIFICATION UNAVAILABLE: report written$/m);
+    assert.match(await readFile(agentDonePath(dir, "a0"), "utf8"), /^outcome: verification_unavailable$/m);
+    // A seat leaving on its own cap writes no outcome: it ends nothing.
+    const seat = await markDone({ sandboxRoot: dir, agentId: "a1" }, { reason: "agent_cap", outputFile: "work/report.md", outcome: "completed" });
+    if (seat.terminate) assert.equal(seat.outcome, undefined);
+    assert.doesNotMatch(await readFile(agentDonePath(dir, "a1"), "utf8"), /^outcome:/m);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("the shared install area and the scratch dir are nobody's work product", () => {

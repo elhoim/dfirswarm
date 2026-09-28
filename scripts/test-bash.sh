@@ -24,6 +24,9 @@ unset SWARM_ISOLATION SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 SUITE_HOME="$(mktemp -d /tmp/dfh.XXXXXX)"
 trap 'rm -rf "$SUITE_HOME"' EXIT
 export MSB_HOME="$SUITE_HOME/msb-home" SWARM_HUBS_DIR="$SUITE_HOME/dfirswarm-hubs"
+# A stop seals a draft release with the install's machine key: the suites'
+# is made in their own home, never in the operator's.
+export SWARM_SIGNERS_HOME="$SUITE_HOME/dfirswarm-signers"
 mkdir -p "$MSB_HOME"
 # Every tests/*.test.sh, so adding a suite needs no edit here.
 ALL=()

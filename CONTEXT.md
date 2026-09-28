@@ -113,6 +113,27 @@ What the swarm was asked to produce, named by the goal.
 **Revision**:
 A content-addressed snapshot of a work path, taken around every write.
 
+### Leads
+
+**Lead**:
+A piece of material investigative work an agent found that has to be
+followed: a container to open, a key to find, an output to read to its end.
+Kept by the harness in the lead register (`leads/leads.jsonl`), opened,
+claimed and closed by the agents themselves; nobody assigns one.
+_Avoid_: task, ticket, assignment
+
+**Need**:
+What a lead cannot go on without: another lead's outcome, or a standing
+ledger entry. Never a job: a job's exit status settles nothing.
+
+**Disposition**:
+How a lead ended, and what that cites: resolved, negative, duplicate,
+deferred, infeasible, needs_operator.
+
+**Interpretation**:
+A ledger entry recorded with `interprets` naming a job: what its output
+shows. A citation alone is not one.
+
 ### Stopping
 
 **Sentinel**:
@@ -131,6 +152,12 @@ A tool an agent wrote with `make_tool`: a script under `tools/<name>/` with a
 manifest, run as a subprocess, registered in every agent's tool list. Only
 exists when the operator started the swarm with forging on.
 _Avoid_: plugin, extension (those are the harness's own), custom tool
+
+**Until solved**:
+A run with no wall clock and advisory caps, where `done` is refused until
+every question of the goal is answered and nobody but the operator can end it.
+When nothing moves the watchdog posts a **regroup**: what is open, blocked,
+waiting on the operator and uncited.
 
 **Steer**:
 A message the harness injects into an agent's turn, telling it to stop.

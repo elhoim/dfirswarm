@@ -20,7 +20,9 @@
  * parent (measured, spikes/microvm-smoke) — while a writable mount inside a
  * read-only one, unmounted, leaves the read-only floor. The board's files and
  * the shared part of `work/` are written by the hub (scripts/vm-hub.ts,
- * publish_file), which never opens a file under a seat's own directory.
+ * publish_file), which never opens a file under a seat's own directory. Over
+ * `traces/`, `tool-output/` and `.pi-sessions/` a read-only veil shows the
+ * seat none of its peers' records (SEAT_VEILS).
  *
  * **Structured, not parsed.** Mounts, network rules and secrets go through
  * the SDK's builders. `msb create --mount-dir` misparsed a long mount spec
@@ -52,14 +54,14 @@
  *
  * SWARM_MSB_BIN names another msb (tests stand one in).
  */
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { createReadStream, existsSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, constants as fsConstants, createReadStream, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { isIPv4, isIPv6 } from "node:net";
-import { availableParallelism, totalmem } from "node:os";
+import { availableParallelism, freemem, totalmem } from "node:os";
 import { chmod, mkdir, readFile, rename, rm, stat, utimes, writeFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { guestProviders, planGateway, type GatewayConfig } from "./model-gateway.ts";
 
@@ -91,7 +93,14 @@ export function registryLabel(registryPath: string): string {
 /** An OAuth credential in a guest never refreshes: its expiry is set past any run. */
 const GUEST_OAUTH_EXPIRES = Date.UTC(2099, 0, 1);
 
-export type Mount = { host: string; guest?: string; readonly?: boolean; noexec?: boolean };
+/**
+ * One share of a VM. `expect` is the host directory's device and inode as the
+ * hub saw it when it built a job's view: the binding is refused unless the
+ * directory is still that one, before the VM is made and again after, before
+ * anything runs. `view` marks a tree the hub built for one job: it may hold
+ * only directories and regular files, checked the same way.
+ */
+export type Mount = { host: string; guest?: string; readonly?: boolean; noexec?: boolean; expect?: { dev: number; ino: number }; view?: boolean };
 
 export type ProviderSpec = {
   provider: string;
@@ -637,16 +646,44 @@ out["peers_extracted_exec"] = mount_noexec(os.path.join(S, "work", "extracted", 
 out["peers_quarantine_exec"] = mount_noexec(os.path.join(S, "work", "quarantine", ".peer"))
 out["tool_output"] = can_write(os.path.join(S, "tool-output", A, ".vm-probe"))
 out["session"] = can_write(os.path.join(S, ".pi-sessions", A, ".vm-probe"))
+# What of the peers' records this seat can see: names under .pi-sessions/
+# and tool-output/ other than its own, and anything under traces/. The
+# kickoff makes every seat's directory and the trace before the VMs, so on
+# the floor they would all be listed.
+def peers_seen(rel, own=True):
+    try:
+        seen = [d for d in os.listdir(os.path.join(S, rel)) if not (own and d == A)]
+        return "hidden" if not seen else "visible:" + ",".join(sorted(seen))
+    except OSError as e:
+        return "error:" + errno.errorcode.get(e.errno, str(e.errno))
+out["peers_sessions"] = peers_seen(".pi-sessions")
+out["peers_tool_output"] = peers_seen("tool-output")
+out["trace"] = peers_seen("traces", own=False)
 inputs = os.path.join(S, "inputs")
 if os.path.exists(inputs):
-    out["inputs"] = can_write(os.path.join(os.path.realpath(inputs), ".vm-probe"))
+    top = os.path.realpath(inputs)
+    # Several sets held in place: inputs/ holds a link per set, each to its
+    # own mount, and the kickoff names them (SWARM_INPUT_SETS, from
+    # inputs.json, which is not read here: it can be hundreds of megabytes).
+    # Each is probed and walked; one set, or a copy, is inputs/ alone.
+    try:
+        listed = json.loads(os.environ.get("SWARM_INPUT_SETS") or "[]")
+    except ValueError:
+        listed = []
+    sets = [x for x in listed if isinstance(x, str) and x and "/" not in x and os.path.islink(os.path.join(top, x))] if isinstance(listed, list) else []
+    held = [os.path.realpath(os.path.join(top, name)) for name in sets]
+    answers = [can_write(os.path.join(r, ".vm-probe")) for r in [top] + held]
+    out["inputs"] = next((a for a in answers if a != "ro"), "ro")
     # Names, the way the manifest counts them: files, and links as links
-    # (never followed — a link loop would never end).
+    # (never followed — a link loop would never end), a set's link only
+    # where it leads.
     n = 0
-    for root, dirs, files in os.walk(os.path.realpath(inputs)):
-        n += len(files) + sum(1 for d in dirs if os.path.islink(os.path.join(root, d)))
+    for walked in [top] + held:
+        for root, dirs, files in os.walk(walked):
+            n += len(files) + sum(1 for d in dirs if os.path.islink(os.path.join(root, d)) and not (root == top and d in sets))
     out["inputs_files"] = n
-    out["inputs_exec"] = mount_noexec(os.path.join(os.path.realpath(inputs), ".probe"))
+    execs = [mount_noexec(os.path.join(r, ".probe")) for r in (held or [top])]
+    out["inputs_exec"] = next((e for e in execs if e != "noexec"), "noexec")
 else:
     out["inputs"] = "absent"
 # The model's hosts, reached the way Pi will: a TCP connection through the
@@ -820,6 +857,9 @@ export function probeChecks(probe: Record<string, unknown>, expectInputs: boolea
   if (probe.peers_quarantine_exec !== undefined) add("a peer's work/quarantine/ executes", "noexec", probe.peers_quarantine_exec, probe.peers_quarantine_exec === "noexec", "what a peer quarantined cannot run here", `a peer's work/quarantine/ can execute here (${String(probe.peers_quarantine_exec)})`);
   add("its tool-output/", "rw", probe.tool_output, probe.tool_output === "rw", "the seat's whole tool outputs are kept", `its tool-output/ is ${String(probe.tool_output)}, not writable`);
   add("its Pi session directory", "rw", probe.session, probe.session === "rw", "the seat's Pi sessions are kept", `its Pi session directory is ${String(probe.session)}, not writable`);
+  if (probe.peers_sessions !== undefined) add("a peer's Pi sessions", "hidden", probe.peers_sessions, probe.peers_sessions === "hidden", "the seat sees its own Pi session and no peer's", `a peer's Pi session is readable here (${String(probe.peers_sessions)})`);
+  if (probe.peers_tool_output !== undefined) add("a peer's tool-output/", "hidden", probe.peers_tool_output, probe.peers_tool_output === "hidden", "the seat sees its own kept outputs and no peer's", `a peer's tool-output/ is readable here (${String(probe.peers_tool_output)})`);
+  if (probe.trace !== undefined) add("the run's trace", "hidden", probe.trace, probe.trace === "hidden", "the seat does not read the trace, its peers' calls and reasoning; its own lines go to the hub", `the run's trace is readable here (${String(probe.trace)})`);
   if (expectInputs) {
     add("inputs/", "ro", probe.inputs, probe.inputs === "ro", "the evidence is read-only in the VM", `inputs/ is ${String(probe.inputs)}, not read-only`);
     if (probe.inputs_exec !== undefined) add("the evidence executes", "noexec", probe.inputs_exec, probe.inputs_exec === "noexec", "nothing in the evidence can run", `the evidence can execute in the VM (${String(probe.inputs_exec)})`);
@@ -861,6 +901,49 @@ export function probeTargets(providers: ProviderSpec[]): string[] {
   return [...out].sort();
 }
 
+/**
+ * The run's directories a seat's VM does not show whole. `.pi-sessions/` and
+ * `tool-output/` hold one directory per seat, each that seat's own record,
+ * and a VM shows its own seat's and no peer's: a Pi session transcript is its
+ * seat's private record (its system prompt, every message, its hand-off
+ * notes), and on run s306463 a seat grepped its peers' through the read-only
+ * floor for an answer; `tool-output/` holds each seat's whole tool outputs,
+ * its trace spill and its stopped summaries. `traces/` is shown empty: the
+ * trace carries every seat's calls, results, reasoning and hand-off notes,
+ * and a seat that is to re-derive a peer's finding from the sealed refs
+ * must not read how the peer got there. Nothing in a seat's VM reads any of
+ * them: its trace lines go to the hub, its spill to its own tool-output/,
+ * and the goal's checks, which read the trace, run on the host at `done`
+ * (board.ts runFinishLine). The host reads, seals and serves every one as
+ * before, and a job's worker, a VM of its own, still sees tool-output/.
+ */
+export const SEAT_VEILS = [
+  { dir: "traces", own: false },
+  { dir: "tool-output", own: true },
+  { dir: ".pi-sessions", own: true },
+] as const;
+export type SeatVeiledDir = (typeof SEAT_VEILS)[number]["dir"];
+
+/**
+ * What a seat's VM shows at one of SEAT_VEILS: a directory of the run's hub
+ * that holds, when the seat has a hole there, one empty directory, its
+ * mount point, and nothing else.
+ */
+export function seatVeil(spec: Pick<VmSpec, "hub_dir">, dir: SeatVeiledDir, agent: string): string {
+  return join(spec.hub_dir, "veils", agent, dir.replace(/^\./, ""));
+}
+
+/** Make a seat's veils before its VM mounts them: its own mount point where it has a hole, and nothing else. */
+export async function makeSeatVeils(spec: Pick<VmSpec, "hub_dir">, agent: string): Promise<string[]> {
+  const made: string[] = [];
+  for (const { dir, own } of SEAT_VEILS) {
+    const veil = seatVeil(spec, dir, agent);
+    await mkdir(own ? join(veil, agent) : veil, { recursive: true });
+    made.push(veil);
+  }
+  return made;
+}
+
 /** Every mount one agent's VM gets: the run's own, then this agent's writable holes. */
 export function mountsFor(spec: VmSpec, agent: string): Mount[] {
   const S = spec.sandbox;
@@ -873,6 +956,10 @@ export function mountsFor(spec: VmSpec, agent: string): Mount[] {
   // noexec — a peer's as well as one's own: the floor under it is not, and a
   // file a peer extracted and made executable would otherwise run here. (A
   // guest mount flag stops an accident, not a root that means to run it.)
+  // `traces/`, `tool-output/` and `.pi-sessions/` are covered the same way
+  // (SEAT_VEILS): the veil over each shows the seat its own hole, if it has
+  // one there, and nothing of a peer's (a guest root that unmounts a veil
+  // reads the floor under it, as with no-exec).
   return [
     { host: S, readonly: true },
     ...spec.mounts,
@@ -881,8 +968,10 @@ export function mountsFor(spec: VmSpec, agent: string): Mount[] {
     { host: join(S, "work", agent) },
     { host: join(S, "work", "extracted", agent), noexec: true },
     { host: join(S, "work", "quarantine", agent), noexec: true },
-    { host: join(S, "tool-output", agent) },
-    { host: join(S, ".pi-sessions", agent) },
+    ...SEAT_VEILS.flatMap(({ dir, own }): Mount[] => [
+      { host: seatVeil(spec, dir, agent), guest: join(S, dir), readonly: true },
+      ...(own ? [{ host: join(S, dir, agent) }] : []),
+    ]),
     ...(spec.late_mounts ?? []),
   ];
 }
@@ -1050,6 +1139,7 @@ async function createOne(
   const name = vmName(spec.run, agent.id);
   const mounts = mountsFor(spec, agent.id);
   for (const m of mounts) if (!m.readonly) await mkdir(m.host, { recursive: true });
+  await makeSeatVeils(spec, agent.id);
   // The shares every seat's corner sits in exist before they are mounted.
   for (const d of ["extracted", "quarantine"]) await mkdir(join(spec.sandbox, "work", d), { recursive: true });
   const plan = seatPlan(spec, agent, allSecrets, gateway);
@@ -2149,9 +2239,112 @@ async function runWorkerInChild(spec: WorkerSpec, hooks: { onCreated?: () => voi
   });
 }
 
+/**
+ * A worker's shares, checked before they are bound and held while the VM is
+ * made: what the check saw, and a descriptor on each directory so its inode
+ * cannot be freed and reused under the same number meanwhile.
+ */
+export type HeldMounts = { mounts: Array<{ mount: Mount; real: string; dev: number; ino: number; fd: number; tree?: string }>; release: () => void };
+
+/** An absolute path with no `.` or `..` part, and not the root: nothing that climbs or could be read two ways. */
+function plainAbsolute(p: string): boolean {
+  return p.startsWith("/") && posix.normalize(p) !== "/" && !p.includes("\0") && !p.split("/").some((s) => s === "." || s === "..");
+}
+
+/**
+ * A view's tree, by lstat: every name with its kind, device and inode, and a
+ * file's size and mtime, in order. Left out: a directory's own times (a mount
+ * on a directory in it is not a change) and a file's ctime (a sealed file
+ * linked into another job's view at the same moment changes its link count,
+ * not its bytes). A link or a special file refuses it.
+ */
+function viewFingerprint(root: string): string {
+  const h = createHash("sha256");
+  const visit = (dir: string, rel: string) => {
+    for (const name of readdirSync(dir).sort()) {
+      const p = join(dir, name);
+      const r = rel ? `${rel}/${name}` : name;
+      const st = lstatSync(p);
+      if (st.isSymbolicLink()) throw new Error(`the job's view holds a link at ${r}: refused`);
+      if (!st.isDirectory() && !st.isFile()) throw new Error(`the job's view holds a special file at ${r}: refused`);
+      h.update(st.isDirectory() ? `${r}\0d\0${st.dev}\0${st.ino}\n` : `${r}\0f\0${st.dev}\0${st.ino}\0${st.size}\0${st.mtimeMs}\n`);
+      if (st.isDirectory()) visit(p, r);
+    }
+  };
+  visit(root, "");
+  return h.digest("hex");
+}
+
+/**
+ * Check a worker's shares before they are bound: every host and guest path
+ * absolute and plain (no traversal), every host path a directory once
+ * resolved (msb binds directories), a share the hub built for the job still
+ * the directory it built (device and inode), a view holding nothing but
+ * directories and regular files. Each directory is opened and held. Throws
+ * with the reason.
+ */
+export function holdWorkerMounts(mounts: Mount[]): HeldMounts {
+  const held: HeldMounts["mounts"] = [];
+  const release = () => {
+    for (const h of held) {
+      try {
+        closeSync(h.fd);
+      } catch {
+        // closed already
+      }
+    }
+  };
+  try {
+    for (const m of mounts) {
+      const guest = m.guest ?? m.host;
+      if (!plainAbsolute(m.host)) throw new Error(`a share's host path is not plain and absolute: ${JSON.stringify(m.host)}`);
+      if (!plainAbsolute(guest)) throw new Error(`a share's guest path is not plain and absolute: ${JSON.stringify(guest)}`);
+      const real = realpathSync(m.host);
+      const st = lstatSync(real);
+      if (!st.isDirectory()) throw new Error(`${m.host} is not a directory`);
+      if (m.expect && (st.dev !== m.expect.dev || st.ino !== m.expect.ino)) throw new Error(`${m.host} is not the directory the hub built for the job (it was replaced): refused`);
+      const fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      const fst = fstatSync(fd);
+      if (fst.dev !== st.dev || fst.ino !== st.ino) {
+        closeSync(fd);
+        throw new Error(`${m.host} changed while it was checked: refused`);
+      }
+      held.push({ mount: m, real, dev: st.dev, ino: st.ino, fd, ...(m.view ? { tree: viewFingerprint(real) } : {}) });
+    }
+  } catch (err) {
+    release();
+    throw err;
+  }
+  return { mounts: held, release };
+}
+
+/**
+ * After the VM is made and before anything runs in it: every share still
+ * resolves where it did, to the same directory, and a view's tree is still
+ * what was checked. A substitution between the check and the binding is
+ * caught here, and nothing runs.
+ */
+export function recheckWorkerMounts(held: HeldMounts): string | null {
+  for (const h of held.mounts) {
+    try {
+      const real = realpathSync(h.mount.host);
+      const st = lstatSync(real);
+      const fst = fstatSync(h.fd);
+      if (real !== h.real || st.dev !== h.dev || st.ino !== h.ino || fst.dev !== h.dev || fst.ino !== h.ino) return `${h.mount.host} changed between its check and the VM's start`;
+      if (h.tree !== undefined && viewFingerprint(real) !== h.tree) return `the job's view under ${h.mount.host} changed between its check and the VM's start`;
+    } catch (err) {
+      return `${h.mount.host} could not be checked again: ${(err as Error).message}`;
+    }
+  }
+  return null;
+}
+
 async function runWorkerOnce(spec: WorkerSpec, hooks: { onCreated?: () => void }): Promise<WorkerRan> {
   let created = false;
+  let held: HeldMounts | null = null;
   try {
+    // The shares, checked and held before msb is asked to bind them.
+    held = holdWorkerMounts(spec.mounts);
     const M = await sdk();
     let builder = M.Sandbox.builder(spec.name)
       .image(spec.image)
@@ -2177,8 +2370,9 @@ async function runWorkerOnce(spec: WorkerSpec, hooks: { onCreated?: () => void }
       builder = builder.disableNetwork();
     }
     builder = builder.detached(true).workdir(spec.workdir).envs(spec.env);
-    for (const m of spec.mounts) {
-      const host = realpathSync(m.host);
+    for (const h of held.mounts) {
+      const m = h.mount;
+      const host = h.real;
       builder = builder.volume(m.guest ?? m.host, (v) => {
         let b = v.bind(host);
         if (m.readonly) b = b.readonly();
@@ -2189,11 +2383,16 @@ async function runWorkerOnce(spec: WorkerSpec, hooks: { onCreated?: () => void }
     const vm = await withTimeout(builder.create(), CREATE_TIMEOUT_MS, `the worker VM was not up within ${CREATE_TIMEOUT_MS / 1000} s`);
     created = true;
     hooks.onCreated?.();
+    // Bound: the same directories as checked, or nothing runs (the VM is removed by the caller).
+    const moved = recheckWorkerMounts(held);
+    if (moved) return { code: null, error: `not run: ${moved}`, phase: "exec" };
     const out = await vm.exec(spec.command[0], spec.command.slice(1));
     const digest = await imageDigest(spec.name);
     return { code: out.code, ...(digest ? { digest } : {}), phase: "exec" };
   } catch (err) {
     return { code: null, error: (err as Error).message, phase: created ? "exec" : "create" };
+  } finally {
+    held?.release();
   }
 }
 
@@ -2480,6 +2679,41 @@ export function capacityVerdict(n: number, cpusEach: number, memEach: number, ho
   if (cpus > host.cpus * 4) blockers.push(`${n} VMs of ${cpusEach} vCPU are ${cpus} vCPUs on ${host.cpus} cores: lower --vm-cpus or --n`);
   else if (cpus > host.cpus) warnings.push(`${cpus} vCPUs on ${host.cpus} cores: the agents' tools will share them`);
   return { blockers, warnings };
+}
+
+/**
+ * Memory this host could give a new VM now, in MiB, or null when it cannot
+ * be read: Linux's MemAvailable; on macOS the kernel's memory-status level
+ * (the free percentage memory_pressure prints) of the total, since what
+ * Node calls free there leaves out what the kernel would reclaim at once.
+ */
+export function hostAvailableMib(): number | null {
+  if (process.platform === "linux") {
+    try {
+      const m = /^MemAvailable:\s+(\d+) kB$/m.exec(readFileSync("/proc/meminfo", "utf8"));
+      if (m) return Math.floor(Number(m[1]) / 1024);
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === "darwin") {
+    const r = spawnSync("sysctl", ["-n", "kern.memorystatus_level"], { encoding: "utf8", timeout: 5000 });
+    const pct = Number(r.stdout.trim());
+    if (r.status === 0 && Number.isFinite(pct) && pct >= 0 && pct <= 100) return Math.floor((totalmem() / 1048576) * (pct / 100));
+    return null;
+  }
+  return Math.floor(freemem() / 1048576);
+}
+
+/**
+ * Whether one more worker of `memEach` MiB fits beside what this host runs
+ * now, keeping 15% of its memory free (the kickoff refuses to plan past 85%).
+ * Asked before each worker starts: several runs may share a host, and a run's
+ * workers were fitted only once, at its kickoff. Unreadable, it fits.
+ */
+export function roomForWorker(memEach: number, host: { mem_mib: number; available_mib: number | null } = { mem_mib: Math.floor(totalmem() / 1048576), available_mib: hostAvailableMib() }): { ok: boolean; available_mib: number | null; needed_mib: number } {
+  const needed = memEach + Math.ceil(host.mem_mib * 0.15);
+  return { ok: host.available_mib === null || host.available_mib >= needed, available_mib: host.available_mib, needed_mib: needed };
 }
 
 export async function probeHost(image?: string): Promise<{ ok: boolean; msb: string; version: string; reasons: string[]; image_present?: boolean; image_digest?: string | null; doctor_output?: string; host?: { mem_mib: number; cpus: number } }>{

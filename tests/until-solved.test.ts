@@ -1,0 +1,137 @@
+/**
+ * An until-solved run at the protocol level: every cap advisory and no wall
+ * clock (each pressure the brakes read says nothing is over), no abandon (a
+ * vote or not), and a finish line that takes only every question answered:
+ * an examination-limited finish, a finish line that could not be run and an
+ * abandon are all refused, each naming what is not answered and what blocks
+ * it. The model gateway refuses no call for a cap. The regroup lists what is
+ * open, blocked, waiting on the operator and uncited.
+ */
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
+import * as P from "../extensions/protocol.ts";
+import * as L from "../extensions/leads.ts";
+import { finishGate } from "../scripts/finish-gate.ts";
+import { refusalFor } from "../scripts/model-gateway.ts";
+
+const dirs: string[] = [];
+after(async () => {
+  for (const d of dirs) await rm(d, { recursive: true, force: true });
+});
+
+const F = { basis: "observed", confidence: "high", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
+const GOAL = ["## Goal", "", "g", "", "## Definition of done", "", "d", "", "## Checks", "", '- `node x "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,summary,narrative`', ""].join("\n");
+
+async function run(o: { until?: boolean } = {}) {
+  const base = await mkdtemp(join(tmpdir(), "until-"));
+  dirs.push(base);
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "u1", agentIds: ["a0", "a1", "a2"], capUsd: 5, wallClockMinutes: 30, goal: GOAL });
+  if (o.until !== false) {
+    const b = await P.readBudget(S);
+    await P.writeBudget(S, { ...b, until_solved: true, stall_minutes: 15, wall_clock_minutes: 0 });
+  }
+  return { S, a0: { sandboxRoot: S, agentId: "a0" }, a1: { sandboxRoot: S, agentId: "a1" } };
+}
+
+test("every brake reads an until-solved run's caps as advisory and its clock as absent", () => {
+  const over = P.normalizeBudget({ cap_usd: 1, spent_usd: 50, tokens: 9e9, cap_tokens: 1000, wall_clock_minutes: 1, started_at: new Date(Date.now() - 86_400_000).toISOString(), cap_per_agent_usd: 1, cap_per_agent_tokens: 10, cap_per_model_usd: { "m/x": 1 }, agents: { a0: { ...P.emptyAgentBudget(), spent_usd: 40, tokens: 9e9, model: "m/x" } } });
+  assert.equal(P.overCap(over).over, true, "the same numbers stop an ordinary run");
+  assert.equal(P.budgetPressure(over).reason, "cap");
+  const until = P.normalizeBudget({ ...over, until_solved: true, wall_clock_minutes: 0 });
+  assert.equal(until.wall_clock_minutes, 0, "an until-solved run's zero wall clock is kept, not read as unset");
+  assert.equal(until.until_solved, true);
+  assert.deepEqual(P.overCap(until), { over: false, by: null });
+  const pressure = P.budgetPressure(until);
+  assert.deepEqual([pressure.reason, pressure.over_budget, pressure.over_time], [null, false, false]);
+  assert.equal(P.agentPressure(until, "a0").over, false);
+  assert.equal(P.modelPressure(until, "m/x").over, false);
+  // An ordinary run's zero wall clock still reads as the default.
+  assert.equal(P.normalizeBudget({ ...over, wall_clock_minutes: 0 }).wall_clock_minutes, 15);
+});
+
+test("the model gateway refuses no call for a cap or a clock in an until-solved run, and still for the run's end", async () => {
+  const { S } = await run();
+  const b = await P.readBudget(S);
+  await P.writeBudget(S, { ...b, cap_usd: 1, started_at: new Date(Date.now() - 86_400_000).toISOString() });
+  const seat = { token: "t", model: "m/x", providers: [] } as never;
+  const state = { spent_usd: 500, seats: { a0: { spent_usd: 500, input: 1e9, output: 0, cache_read: 0, cache_write: 0, model: "m/x" } } } as never;
+  assert.equal(refusalFor(S, "a0", seat, state, Date.now(), 0), null);
+  await writeFile(join(S, P.SENTINEL_REL), "---\nby: x\n---\n");
+  assert.equal(refusalFor(S, "a0", seat, state, Date.now(), 0)?.code, "run_finished");
+});
+
+test("no abandon in an until-solved run: the verdict refuses it and markDone refuses it, a vote or not", async () => {
+  const { a0 } = await run();
+  const failing = { total: 1, passed: 0, checks: [{ cmd: "test -f work/report.md", ok: false }] };
+  const v = P.finishLineVerdict(failing, true, { untilSolved: true });
+  assert.equal(v.proceed, false);
+  if (!v.proceed) assert.match(v.reason, /only the operator|operator stops it/);
+  await assert.rejects(P.markDone(a0, { reason: `${P.ABANDON_PREFIX}the key is not in the image`, outputFile: "work/report.md" }), /until solved/);
+  assert.equal(await P.swarmDoneExists(a0.sandboxRoot), false);
+});
+
+test("the until-solved gate refuses an examination-limited finish, and names each question not answered and what blocks it", async () => {
+  const { S, a0, a1 } = await run();
+  // Question 1 answered; question 2 rests on a limitation, its lead closed needs_operator.
+  const f = await P.recordEntry(a0, { kind: "finding", ...F, value: "The volume holds the notes", source: "the volume", evidence: "listing", answers: ["1"] });
+  assert.ok(f.ok);
+  const lim = await P.recordEntry(a0, { kind: "limitation", value: "The third part's key is outside the image", source: "the plaintext", evidence: "the pointer", reason: "unavailable", answers: ["2"] });
+  assert.ok(lim.ok);
+  assert.equal((await L.openLead(a1, { title: "Follow the pointer outside the image", why: "question 2's key", answers: ["2"], take: true })).ok, true);
+  assert.equal((await L.closeLead(a1, "L-1", { disposition: "needs_operator", ref: "Allow the host the pointer names" })).ok, true);
+  // What the answers check said, as await-done hands it back.
+  const checks = { total: 1, passed: 1, checks: [{ cmd: "check-answers", ok: true, answers: { outcomes: { "question:1": "answered", "question:2": "limited", summary: "answered", narrative: "answered" }, named: [] } }] };
+  const gate = await finishGate(S, checks);
+  assert.equal(gate.until_solved, true);
+  assert.deepEqual(gate.defects, []);
+  assert.ok(gate.limited.some((l) => /question:2 is examination-limited/.test(l)), JSON.stringify(gate.limited));
+  assert.ok(gate.limited.some((l) => /L-1 was closed needs_operator/.test(l)));
+  const q2 = gate.questions.find((q) => q.id === "2")!;
+  assert.equal(q2.outcome, "limited");
+  assert.ok(q2.blocks.some((b) => /L-1 "Follow the pointer outside the image" was closed needs_operator: Allow the host the pointer names/.test(b)), JSON.stringify(q2.blocks));
+  const v = P.finishLineVerdict({ ...checks, gate }, false);
+  assert.equal(v.proceed, false, "examination-limited is not accepted");
+  if (!v.proceed) {
+    assert.match(v.reason, /ends only when every question is answered/);
+    assert.match(v.reason, /- question:2 is limited: .*L-1/);
+    assert.match(v.reason, /Only the operator can stop this run/);
+  }
+  // The same run, not until solved, ends examination-limited.
+  const ordinary = P.finishLineVerdict({ ...checks, gate: { ...gate, until_solved: false } }, false);
+  assert.ok(ordinary.proceed && ordinary.outcome === "examination_limited", JSON.stringify(ordinary));
+  // A finish line that could not be run is a refusal too, never an end.
+  const unavailable = P.finishLineVerdict(null, false, { untilSolved: true });
+  assert.equal(unavailable.proceed, false);
+  // Every question answered, nothing limited: it ends completed.
+  const done = P.finishLineVerdict({ ...checks, gate: { defects: [], limited: [], questions: [{ id: "1", outcome: "answered", blocks: [] }, { id: "2", outcome: "answered", blocks: [] }], until_solved: true } }, false);
+  assert.ok(done.proceed && done.outcome === "completed");
+});
+
+test("the regroup lists the questions not answered, the leads open and blocked, what waits on the operator and the evidence no entry cites", async () => {
+  const { S, a0, a1 } = await run();
+  await writeFile(join(S, "inputs.json"), JSON.stringify({ files: [{ path: "inputs/disk.E01", bytes: 10, sha256: "a".repeat(64) }, { path: "inputs/phone.tar", bytes: 20, sha256: "b".repeat(64) }] }));
+  await mkdir(join(S, "catalog", "gen", "g0002"), { recursive: true });
+  await writeFile(join(S, "catalog", "gen", "g0002", "generation.json"), JSON.stringify({ id: "g0002", target: { ref: "job:j000009/vault.img", name: "the decrypted vault" }, coverage: { covered: "its file list", members: 42 } }));
+  const f = await P.recordEntry(a0, { kind: "finding", ...F, value: "The phone holds the notes", source: "phone", evidence: "listing", refs: ["unresolved:the archive was listed by hand"], answers: ["1"] });
+  assert.ok(f.ok);
+  assert.equal((await L.openLead(a0, { title: "Find the key", why: "the vault", take: true })).ok, true);
+  assert.equal((await L.openLead(a1, { title: "Read the vault", why: "question 2", needs: ["L-1"], answers: ["2"], take: true })).ok, true);
+  assert.equal((await L.openLead(a1, { title: "Walk the second profile", why: "nobody has" })).ok, true);
+  assert.equal((await L.openLead(a1, { title: "The outside resource", why: "the pointer", take: true })).ok, true);
+  assert.equal((await L.closeLead(a1, "L-4", { disposition: "needs_operator", ref: "Allow the host the plaintext names" })).ok, true);
+  const snap = await L.leadsSnapshot(S);
+  const since = await L.lastProgress(S, snap, new Date(Date.now() - 3_600_000).toISOString());
+  assert.match(since.what, /L-4 closed needs_operator|E-1/);
+  const text = await L.regroupMessage(S, snap, { minutes: 20, since, count: 1, nextMinutes: 30 });
+  assert.match(text, /^REGROUP 1: nothing has moved for 20 minutes/);
+  assert.match(text, /Questions not answered \(2\):\n- question:1: no answer; no lead names it\n- question:2: no answer; L-2 blocked \(a1\) on L-1:resolved/);
+  assert.match(text, /Leads open, held by nobody \(1\):\n- L-3 "Walk the second profile"/);
+  assert.match(text, /Leads blocked \(1\):\n- L-2 "Read the vault" \(a1\) waiting on L-1:resolved: L-1 is held by a0/);
+  assert.match(text, /Waiting on the operator \(1\):\n- L-4 "The outside resource": Allow the host the plaintext names/);
+  assert.match(text, /Evidence no standing entry cites \(3\):\n- inputs\/disk\.E01 \(10 bytes\)\n- inputs\/phone\.tar \(20 bytes\)\n- catalogue g0002: the decrypted vault \(its file list, 42 listed\)/);
+  assert.match(text, /the next regroup comes in 30 minutes/);
+});

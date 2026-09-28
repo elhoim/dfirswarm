@@ -29,6 +29,6 @@
   "example": "{\"path\": \"work/extracted/Library/LaunchDaemons\", \"out_file\": \"work/plists.jsonl\"}",
   "by": "maintainer",
   "at": "2026-09-22T16:00:00.000Z",
-  "version": 1,
-  "sha256": "29ba21bfe9952f74b1d3f51e55f964974b84055f798fac116f9ad6a8b321100e"
+  "version": 2,
+  "sha256": "8b481aabef0d92e539e4fbd5b0e8a779ed02b26104c1d0d91ffc4d20f7673690"
 }

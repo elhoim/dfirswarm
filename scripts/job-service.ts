@@ -18,18 +18,59 @@
  * attempt's output is kept beside the second's.
  *
  * Who asked is recorded as the agent's id with the name and doing it had
- * given itself at that moment: context, never authority. What a worker could
- * reach (its mounts, its network) is recorded as the job's accessible scope,
- * beside the scope the agent declared; what it actually read is not measured
- * and is said to be unknown.
+ * given itself at that moment: context, never authority. A job that declares
+ * what it reads is given only that (job-scope.ts: a view the hub builds for
+ * it); one that declares nothing, or `all`, sees every object of the run, and
+ * the record says which. What a worker could reach (its mounts, its network)
+ * is recorded as the job's accessible scope, beside the scope the agent
+ * declared and what that expanded to; what it actually read within that is
+ * not measured and is said to be unknown.
+ *
+ * A brain's own output a finding cites (`tool:<seat>/<file>`, a whole output
+ * the harness kept; `trace:<sha256>`, one line of the trace) is sealed here:
+ * found on the trace (evidence-store.ts traceOrigin), snapshotted by the hub
+ * at an import job's start and held to the trace's digest there, sealed like
+ * any import, and published as `import:<id>/<file>` with its trace provenance.
  */
-import { existsSync, statfsSync } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import { Journal, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, type JournalLine } from "./evidence-store.ts";
+import { createHash } from "node:crypto";
+import { constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { chmod, copyFile, link, lstat, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { Journal, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, traceLineBytes, traceOrigin, type JournalLine, type TraceOrigin } from "./evidence-store.ts";
+import { chooseImage, readImageRecords, type ImageChoice, type ImageRecord } from "./image-choice.ts";
+import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolveScope, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
+import { CANARY_NAME, OBSERVE_GUEST, observedRun, observeWanted, readObservation } from "./job-observe.ts";
 import type { Mount, WorkerSpec } from "./vm.ts";
+import { operatorHostsSync } from "../extensions/leads.ts";
 
 export type JobKind = "tool" | "command" | "recipe" | "detect" | "import";
+
+/**
+ * A job an agent declares short: its own limit is at most this many seconds,
+ * and it is killed there (timeout(1) in its worker, the VM's own limit two
+ * minutes later), so the worker kept for short jobs cannot be held by a long
+ * job that claimed otherwise.
+ */
+export const SHORT_JOB_SECONDS = 120;
+
+/**
+ * From this many workers one is kept for short jobs. With two, keeping one
+ * halves what the longer ones have: replayed over the arrivals and run times
+ * of the three latest runs (s306463, s2a59b2, s6895a8), two workers with one
+ * kept put the longer jobs' p95 wait at 354-1951 s, against 71-210 s with
+ * none kept.
+ */
+export const SHORT_LANE_FROM_WORKERS = 3;
+
+/**
+ * The lane a job waits in. An agent's short job may take any free worker,
+ * the one kept for short jobs too, so a quick look never waits behind long
+ * parses; an agent's other jobs and the kickoff's recipes take the rest; the
+ * derived catalogue's work is the lowest lane (one at a time, only when no
+ * other job waits, within its budget). Neither the kickoff's recipes nor the
+ * derived catalogue ever take the worker kept for short jobs.
+ */
+export type Lane = "short" | "general" | "kickoff" | "derived";
 
 /** An import hashes its source before and after the copy up to this size; above it, size and mtime only. */
 export const IMPORT_HASH_BOUND = 2 * 1024 * 1024 * 1024;
@@ -38,11 +79,15 @@ export const IMPORT_HASH_BOUND = 2 * 1024 * 1024 * 1024;
  * What an import runs in its worker: each regular file under the source
  * copied into $OUT (links and special files named and left out), hashed
  * before and after the copy (up to the bound) and compared with the copy.
- * The source was live, and its producer was not stopped: the record says
- * so, and a file that changed while it was copied fails the import (exit 3).
+ * An import's scope is its source: what the worker copies is the snapshot
+ * the hub took of it at the job's start (cloned or copied from a descriptor,
+ * and hashed; job-scope.ts), not the live file, and the record says so. Its
+ * producer was not stopped. A file that changed while it was copied fails
+ * the import (exit 3).
  */
 const IMPORT_SCRIPT = `import hashlib, json, os, shutil, stat, sys
 S, rel, bound = sys.argv[1], sys.argv[2], int(sys.argv[3])
+mode = sys.argv[4] if len(sys.argv) > 4 else "live"
 out = os.environ["OUT"]
 src = os.path.join(S, rel)
 def sha(p):
@@ -79,7 +124,7 @@ if os.path.isdir(src) and not os.path.islink(src):
             one(p, os.path.join(top, os.path.relpath(p, src)))
 else:
     one(src, top)
-print(json.dumps({"import": rel, "copied_live": True, "producer_fenced": False, "files": rows, "changed_while_copied": changed}, indent=1))
+print(json.dumps({"import": rel, "copied_live": mode == "live", **({"copied_from": "the snapshot the hub took at the job's start (its sha256 in the job's scope manifest)"} if mode == "snapshot" else {}), "producer_fenced": False, "files": rows, "changed_while_copied": changed}, indent=1))
 sys.exit(3 if changed else 0)
 `;
 
@@ -98,8 +143,15 @@ export type JobSpec = {
   /** detect: only these (target index, recipe) pairs, when a derived pass names them; else every recipe of the trigger on every target. */
   pairs?: Array<{ t: number; recipe: string }>;
   trigger?: "kickoff" | "derived" | "request";
-  /** What the agent said the job reads: refs (input:…, job:…) or "all". */
+  /**
+   * What the agent said the job reads, as said: refs and run paths (input:…,
+   * job:…, work/…), ["all"], or nothing (left out: [] with scope default-all).
+   */
   inputs: string[];
+  /** declared (enforced), all (said) or default-all (nothing said; a job from before scopes). */
+  scope?: ScopeKind;
+  /** The hub's own seal of a brain-side output a record cited: set by sealCited, never by an agent. */
+  seal?: SealSpec;
   /** The agent's own scratch, read-only, when the job needs a file from it. */
   scratch?: boolean;
   /** import: the file or directory under work/ or tool-output/ to copy into the store as it is now. */
@@ -115,6 +167,12 @@ export type JobSpec = {
 };
 
 export type Requester = { agent: string; name?: string; doing?: string };
+
+/** A brain-side output being sealed: the ref, the trace line and digest it is held to, and where it came from. */
+export type SealSpec = { kind: "tool" | "trace"; ref: string; digest: string; line_sha256: string; path?: string; origin: TraceOrigin };
+
+/** What a job's scope was, on its record: which kind, and for a declared one what it resolved to and where the manifest is. */
+export type JobScope = { kind: ScopeKind; objects?: number; files?: number; bound?: number; manifest?: string; manifest_sha256?: string };
 
 export type JobState = "accepted" | "running" | "finished" | "fenced" | "committed" | "failed" | "cancelled";
 
@@ -136,6 +194,7 @@ export type JobRecord = {
   image_digest?: string;
   tool_sha256?: string;
   accessible?: Array<{ path: string; access: string }>;
+  scope?: JobScope;
   network?: string;
   outputs?: { manifest_sha256: string; files: number; bytes: number; rejected: number; path: string };
   generation?: string;
@@ -143,7 +202,15 @@ export type JobRecord = {
   dedup_of?: string;
   /** A recipe job's identity (recipe, its sha256, the image, the target): the same key is the same result. */
   dedup_key?: string;
+  /**
+   * A command's or a tool's identity for the merge that is only measured
+   * (shadowKey): the same spec, byte for byte, over the same inputs by
+   * digest. Never used to merge; a job_would_merge line says when it would.
+   */
+  shadow_key?: string;
   cancel_requested?: string;
+  lane?: Lane;
+  image_choice?: ImageChoice;
 };
 
 /**
@@ -204,6 +271,13 @@ export type JobServiceOptions = {
   derived?: boolean;
   derivedLimits?: Partial<DerivedLimits>;
   runWorker: (spec: WorkerSpec) => Promise<{ code: number | null; digest?: string; error?: string; fenced: boolean; fence_error?: string; boot_retry?: string; create_ms?: number }>;
+  /**
+   * Whether this host has room now for one more worker of this much memory:
+   * asked before each worker starts, since several runs may share a host and
+   * the kickoff fitted this run's workers only once. No room, the job waits
+   * (said on the journal), and is asked again. Absent, there is always room.
+   */
+  hostRoom?: (memoryMib: number) => Promise<{ ok: boolean; available_mib: number | null; needed_mib: number }>;
   destroyWorker: (name: string) => Promise<{ ok: boolean; error?: string }>;
   notify: (to: string, body: string) => Promise<void>;
   identity: (agent: string) => Promise<{ name?: string; doing?: string }>;
@@ -220,25 +294,49 @@ function canonical(v: unknown): string {
   return JSON.stringify(v);
 }
 
-/** Free megabytes on the file system holding `dir`, or its nearest parent that exists. */
-function freeMb(dir: string): number | null {
-  for (let d = resolve(dir); ; d = dirname(d)) {
-    try {
-      const s = statfsSync(d);
-      return Math.floor((Number(s.bavail) * Number(s.bsize)) / (1024 * 1024));
-    } catch {
-      if (d === dirname(d)) return null;
-    }
-  }
-}
-
 function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The directories of several evidence sets held in place, resolved: each
+ * set inputs.json names whose inputs/<name> is a link. Empty for one set
+ * (inputs/ is itself the link, or the copy) and for a copy of several. The
+ * manifest, which can be hundreds of megabytes, is read only when a link at
+ * the top of inputs/ may be a set.
+ */
+export function boundInputSets(S: string): string[] {
+  const top = join(S, "inputs");
+  try {
+    if (lstatSync(top).isSymbolicLink() || !readdirSync(top, { withFileTypes: true }).some((e) => e.isSymbolicLink())) return [];
+  } catch {
+    return [];
+  }
+  let sets: unknown;
+  try {
+    sets = (JSON.parse(readFileSync(join(S, "inputs.json"), "utf8")) as { sets?: unknown }).sets;
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const set of Array.isArray(sets) ? sets : []) {
+    const name = set && typeof set === "object" ? (set as { name?: unknown }).name : undefined;
+    if (typeof name !== "string" || !name || name.includes("/") || name === "." || name === "..") continue;
+    const link = join(S, "inputs", name);
+    try {
+      if (lstatSync(link).isSymbolicLink()) out.push(realpathSync(link));
+    } catch {
+      // A set whose link leads nowhere is not mounted; the job sees it missing.
+    }
+  }
+  return out;
 }
 
 export class JobService {
   readonly o: Required<Pick<JobServiceOptions, "perRequesterRunning" | "perRequesterQueued" | "minFreeMb" | "derived">> & JobServiceOptions;
   readonly S: string;
+  /** Several sets held in place: their directories, read once (the sets do not change during a run). */
+  private boundSets?: string[];
   journal!: Journal;
   readonly jobs = new Map<string, JobRecord>();
   private readonly queue: string[] = [];
@@ -248,8 +346,15 @@ export class JobService {
   /** Agents whose request was answered with another's job still under way: told too, once it is done (job → agent → end of its wait). */
   private readonly alsoTell = new Map<string, Map<string, number>>();
   private readonly waitingForSpace = new Set<string>();
+  /** Jobs waiting for room on the host, and since when. */
+  private readonly waitingForHost = new Map<string, number>();
   private rotation = 0;
   private stopping = false;
+  /** One pump at a time: a call while one runs asks it to go round again. */
+  private pumping = false;
+  private pumpAgain = false;
+  /** The run's job images as their own records have them, read once. */
+  private imageRecords: Promise<ImageRecord[]> | null = null;
   /** Jobs in a row that ran in no worker, and whether the agents were told. */
   private unrun = 0;
   private degraded = false;
@@ -319,10 +424,10 @@ export class JobService {
       const j = this.jobs.get(id);
       switch (l.type) {
         case "job_accepted":
-          this.jobs.set(id, { id, attempt: 1, spec: l.spec as JobSpec, requester: l.requester as Requester, state: "accepted", accepted_at: l.at, ...(l.dedup_key ? { dedup_key: String(l.dedup_key) } : {}) });
+          this.jobs.set(id, { id, attempt: 1, spec: l.spec as JobSpec, requester: l.requester as Requester, state: "accepted", accepted_at: l.at, ...(l.dedup_key ? { dedup_key: String(l.dedup_key) } : {}), ...(l.shadow_key ? { shadow_key: String(l.shadow_key) } : {}) });
           break;
         case "job_started":
-          if (j) Object.assign(j, { state: "running", attempt: Number(l.attempt), started_at: l.at, worker: l.worker, image: l.image, tool_sha256: l.tool_sha256, accessible: l.accessible, network: l.network, ...(l.cpus ? { worker_size: `${l.cpus} vCPU, ${l.memory_mib} MiB` } : {}) });
+          if (j) Object.assign(j, { state: "running", attempt: Number(l.attempt), started_at: l.at, worker: l.worker, image: l.image, tool_sha256: l.tool_sha256, accessible: l.accessible, network: l.network, ...(l.scope ? { scope: l.scope as JobScope } : {}), ...(l.cpus ? { worker_size: `${l.cpus} vCPU, ${l.memory_mib} MiB` } : {}), ...(l.lane ? { lane: l.lane as Lane } : {}), ...(l.image_choice ? { image_choice: l.image_choice as ImageChoice } : {}) });
           break;
         case "job_finished":
           if (j) Object.assign(j, { state: "finished", exit: l.exit as number | null, finished_at: l.at, status: l.status, reason: l.reason });
@@ -440,6 +545,7 @@ export class JobService {
       if (j.state === "committed" && j.spec.kind === "detect" && j.requester.agent === DERIVED && !this.derivedProcessed.has(j.id)) await this.fromDetect(j);
       if ((j.state === "failed" || j.state === "cancelled") && j.spec.kind === "detect" && j.requester.agent === DERIVED && !this.derivedProcessed.has(j.id)) await this.derivedReturn(j, []);
       if (this.o.derived && j.state === "committed" && (j.spec.kind === "tool" || j.spec.kind === "command" || j.spec.kind === "import") && !this.derivedOfferedJobs.has(j.id)) await this.offerFrom(j);
+      if (j.state === "committed" && j.spec.seal) await this.publishSeal(j);
       if (j.state === "committed" && j.spec.kind === "recipe" && !j.generation && j.status !== "cancelled") {
         await this.afterCommit(j);
       } else if ((j.state === "committed" || j.state === "failed") && (!this.delivered.has(j.id) || this.alsoTell.has(j.id))) {
@@ -563,9 +669,11 @@ export class JobService {
    * Accept a job, durably, or refuse it with the reason. The answer comes
    * once the acceptance is on disk; the work comes after.
    */
-  async submit(agent: string, raw: Partial<JobSpec>, o: { watch?: number } = {}): Promise<{ ok: true; job: JobRecord } | { ok: false; reason: string }> {
+  async submit(agent: string, raw: Partial<JobSpec>, o: { watch?: number; seal?: SealSpec } = {}): Promise<{ ok: true; job: JobRecord } | { ok: false; reason: string }> {
     if (this.stopping) return { ok: false, reason: "the run is stopping; no new jobs" };
-    const spec = await this.normalise(raw);
+    // A seal comes only from sealCited, never in what an agent sends.
+    const { seal: _seal, scope: _scope, ...asked } = raw;
+    const spec = await this.normalise(asked, o.seal);
     if ("reason" in spec) return { ok: false, reason: spec.reason };
     const queued = [...this.jobs.values()].filter((j) => j.requester.agent === agent && (j.state === "accepted" || j.state === "running"));
     if (agent !== "system" && agent !== DERIVED && queued.length >= this.o.perRequesterQueued) return { ok: false, reason: `you have ${queued.length} jobs queued or running, the most one agent may have; wait for one (job_status) or cancel one` };
@@ -586,9 +694,17 @@ export class JobService {
     }
     const requester = await this.requesterOf(agent);
     const id = this.nextId();
-    await this.journal.append({ type: "job_accepted", job: id, spec, requester, ...(key ? { dedup_key: key } : {}) });
+    // Merging a command or a tool with an earlier identical job is measured
+    // before it is done (joint review, 2026-09-27): the key is kept and a
+    // would-be merge is written to the journal; the job runs as asked.
+    const shadow = !key ? await this.shadowKey(spec).catch(() => undefined) : undefined;
+    await this.journal.append({ type: "job_accepted", job: id, spec, requester, ...(key ? { dedup_key: key } : {}), ...(shadow ? { shadow_key: shadow } : {}) });
     maybeCrash("job:accepted");
-    const job: JobRecord = { id, attempt: 1, spec, requester, state: "accepted", accepted_at: new Date().toISOString(), ...(key ? { dedup_key: key } : {}) };
+    const job: JobRecord = { id, attempt: 1, spec, requester, state: "accepted", accepted_at: new Date().toISOString(), ...(key ? { dedup_key: key } : {}), ...(shadow ? { shadow_key: shadow } : {}) };
+    if (shadow) {
+      const same = [...this.jobs.values()].find((j) => j.shadow_key === shadow && (j.state === "accepted" || j.state === "running" || j.state === "finished" || j.state === "fenced" || (j.state === "committed" && j.status === "ok")));
+      if (same) await this.journal.append({ type: "job_would_merge", job: id, same_as: same.id, same_state: same.state, by: requester, first_by: same.requester, shadow_key: shadow });
+    }
     this.jobs.set(id, job);
     // The agent waits for it in job_run from this moment: a job that is done
     // before its first status call is answered there, not posted as well.
@@ -600,26 +716,67 @@ export class JobService {
   }
 
   /**
-   * The image a job runs in: the profile it names; a pack tool's or a
-   * recipe's own pack's profile (a recipe may name one in recipe.json); else
-   * the run's worker image. Nothing here knows what a profile holds.
+   * The image a job runs in, and why: the profile it names; a pack tool's or
+   * a recipe's own pack's profile (a recipe may name one in recipe.json); for
+   * a command or an import that names none, the smallest job image whose own
+   * record holds every program it runs (scripts/image-choice.ts); else the
+   * run's worker image. Nothing here knows what a profile holds.
    */
-  async imageFor(spec: JobSpec): Promise<{ profile: string | null; ref: string }> {
+  async imageFor(spec: JobSpec): Promise<{ profile: string | null; ref: string; choice: ImageChoice }> {
     const images = this.o.images ?? {};
     const byProfile = (p: string | undefined | null) => (p && images[p] ? { profile: p, ref: images[p] } : null);
-    if (spec.profile) return byProfile(spec.profile) ?? { profile: null, ref: this.o.image };
+    const dflt = { profile: null, ref: this.o.image };
+    if (spec.profile) {
+      const hit = byProfile(spec.profile);
+      return hit ? { ...hit, choice: { how: "named", why: `the job named the profile ${spec.profile}` } } : { profile: null, ref: this.o.image, choice: { how: "default", why: "the run declared no job images" } };
+    }
     if (spec.kind === "tool" && spec.tool) {
       const man = await readFile(join(this.S, "tools", spec.tool, "manifest.json"), "utf8").then((t) => JSON.parse(t) as { pack?: string; profile?: string }).catch(() => null);
-      const hit = byProfile(man?.profile) ?? byProfile(man?.pack ? this.o.packProfiles?.[man.pack] : null);
-      if (hit) return hit;
+      const own = byProfile(man?.profile);
+      if (own) return { ...own, choice: { how: "pack", why: `the tool's manifest names the profile ${own.profile}` } };
+      const hit = byProfile(man?.pack ? this.o.packProfiles?.[man.pack] : null);
+      if (hit) return { ...hit, choice: { how: "pack", why: `the tool's pack ${man?.pack} runs in ${hit.profile}` } };
     }
     if (spec.kind === "recipe" && spec.recipe && !spec.recipe.startsWith("tool:")) {
       const r = await this.recipe(spec.recipe).catch(() => null);
       const declared = r ? await readFile(join(r.dir, "recipe.json"), "utf8").then((t) => (JSON.parse(t) as { profile?: string }).profile).catch(() => undefined) : undefined;
-      const hit = byProfile(declared) ?? byProfile(this.o.packProfiles?.[spec.recipe.split("/")[0]]);
-      if (hit) return hit;
+      const own = byProfile(declared);
+      if (own) return { ...own, choice: { how: "pack", why: `the recipe names the profile ${own.profile}` } };
+      const pack = spec.recipe.split("/")[0];
+      const hit = byProfile(this.o.packProfiles?.[pack]);
+      if (hit) return { ...hit, choice: { how: "pack", why: `the recipe's pack ${pack} runs in ${hit.profile}` } };
     }
-    return { profile: null, ref: this.o.image };
+    if (!Object.keys(images).length) return { ...dflt, choice: { how: "default", why: "the run declared no job images" } };
+    // What the job runs, as text: a command's own, an import's copy script.
+    const text = spec.kind === "command" ? (spec.command ?? "") : spec.kind === "import" ? "python3 /job/import.py" : null;
+    if (text === null) {
+      const why = spec.kind === "detect" ? "a detect pass asks the recipes of every pack" : spec.kind === "tool" ? "the tool's pack, if it has one, has no job image of its own" : spec.recipe?.startsWith("tool:") ? "a forged tool's recipe, of no pack" : "the recipe's pack has no job image of its own";
+      return { ...dflt, choice: { how: "default", why } };
+    }
+    this.imageRecords ??= readImageRecords(this.S, images);
+    return chooseImage(text, await this.imageRecords, dflt);
+  }
+
+  /**
+   * The key a merge of raw jobs would use, were it on: a command or a tool,
+   * reading a declared scope (never inputs=["all"], which reads live work/),
+   * every object of which is known by its digest now (an input, a job's
+   * output, a stored blob; a file of an agent's own is copied only when the
+   * job starts, so it is not), and the spec itself byte for byte. Undefined
+   * when the job would never be merged.
+   */
+  private async shadowKey(spec: JobSpec): Promise<string | undefined> {
+    if (spec.kind !== "command" && spec.kind !== "tool") return undefined;
+    if (spec.scope !== "declared" || spec.seal || spec.inputs.includes("all")) return undefined;
+    const r = await resolveScope(this.S, spec.inputs, { collections: this.collections(), targets: targetPaths(spec) });
+    if (!r.ok) return undefined;
+    const digests: Array<[string, string]> = [];
+    for (const o of r.objects) {
+      if (!o.sha256 || o.area === "work") return undefined;
+      digests.push([o.ref, o.sha256]);
+    }
+    digests.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+    return sha256Hex(canonical({ kind: spec.kind, command: spec.command ?? null, tool: spec.tool ?? null, args: spec.args ?? null, inputs: spec.inputs, timeout_seconds: spec.timeout_seconds, network: spec.network, profile: spec.profile ?? null, scratch: spec.scratch ?? false, digests }));
   }
 
   private async recipeKey(spec: JobSpec): Promise<string> {
@@ -640,12 +797,30 @@ export class JobService {
     return sha256Hex(canonical({ recipe: spec.recipe, sha: r?.sha256, image, target: hashes }));
   }
 
-  private async normalise(raw: Partial<JobSpec>): Promise<JobSpec | { reason: string }> {
+  /**
+   * A job as accepted, or refused with the reason. What it reads is kept as
+   * said (left out, all, or a list); a list is resolved here, and one entry
+   * that does not resolve refuses the job: a scope is never widened to fit.
+   */
+  private async normalise(raw: Partial<JobSpec>, seal?: SealSpec): Promise<JobSpec | { reason: string }> {
+    const spec = await this.normaliseKind(raw, seal);
+    if ("reason" in spec) return spec;
+    if (spec.scope === "declared" && !spec.seal) {
+      const r = await resolveScope(this.S, spec.inputs, { collections: this.collections(), targets: targetPaths(spec) });
+      if (!r.ok) return { reason: `${r.reason}. A job reads only what it declares: name the evidence as input:<path> (a directory as input:<dir>/), a job's output as job:<id>[/<path>], a file of yours as work/<you>/<file>, or inputs: ["all"] for everything` };
+    }
+    return spec;
+  }
+
+  private async normaliseKind(raw: Partial<JobSpec>, seal?: SealSpec): Promise<JobSpec | { reason: string }> {
     const kind = raw.kind;
     if (kind !== "tool" && kind !== "command" && kind !== "recipe" && kind !== "detect" && kind !== "import") return { reason: "a job is a tool, a command, a recipe, a detect pass or an import" };
     const timeout = Math.min(Math.max(Number(raw.timeout_seconds ?? 900) || 900, 10), TIMEOUT_MAX_SECONDS);
     const network = raw.network === "allowlist" ? "allowlist" : "off";
-    const inputs = Array.isArray(raw.inputs) ? raw.inputs.map(String).slice(0, 256) : ["all"];
+    // Left out, all, or a list: kept apart in the spec and on the journal.
+    const declared = declaredScope(raw.inputs);
+    if ("reason" in declared) return { reason: declared.reason };
+    const inputs = declared.inputs;
     // A job image by profile: one the run declared, a pack's id for its
     // pack's image (agents named packs as profiles on the first basic-flow
     // round), or refused with the images the run has and the packs in each.
@@ -658,7 +833,7 @@ export class JobService {
       const listing = have.map((p) => (packsOf(p).length ? `${p} (the packs ${packsOf(p).join(", ")})` : p)).join("; ");
       return { reason: have.length ? `no job image "${profile}" in this run: ${listing}; a pack's name also picks its image (or leave profile out for the run's worker image)` : `this run declared no job images: leave profile out (every job runs in ${this.o.image})` };
     }
-    const base = { kind, inputs, timeout_seconds: timeout, network, ...(raw.scratch ? { scratch: true } : {}), ...(raw.note ? { note: String(raw.note) } : {}), ...(raw.parent ? { parent: String(raw.parent) } : {}), ...(profile ? { profile } : {}) } as JobSpec;
+    const base = { kind, inputs, scope: declared.kind, timeout_seconds: timeout, network, ...(raw.scratch ? { scratch: true } : {}), ...(raw.note ? { note: String(raw.note) } : {}), ...(raw.parent ? { parent: String(raw.parent) } : {}), ...(profile ? { profile } : {}) } as JobSpec;
     if (kind === "tool") {
       const args = raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : {};
       const checked = await this.toolCheck(String(raw.tool ?? ""), args);
@@ -672,15 +847,23 @@ export class JobService {
       return { ...base, command };
     }
     if (kind === "import") {
+      if (seal) {
+        // The hub's own seal of a cited brain-side output: the kept file, or
+        // the trace line written into the job's view; a short job, no network.
+        const source = seal.kind === "tool" ? String(seal.path ?? "") : `traces/trace-${seal.line_sha256}.json`;
+        if (seal.kind === "tool" && !/^tool-output\/[a-z][a-z0-9_-]{0,31}\/./.test(source)) return { reason: `${seal.ref}: not a kept output under tool-output/<seat>/` };
+        return { ...base, kind: "import", source, inputs: seal.kind === "tool" ? [source] : [], scope: "declared", network: "off", timeout_seconds: SHORT_JOB_SECONDS, seal };
+      }
       // A file an agent made in its VM, sealed as it is now: work/ or
       // tool-output/ only, named from the run's directory, never out of it.
+      // Its scope is its source, snapshotted by the hub at the job's start.
       const source = String(raw.source ?? "").trim().replace(/^\.\//, "").replace(/\/+$/, "");
       if (!/^(work|tool-output)\/./.test(source) || source.split("/").includes("..") || source.includes("\0")) return { reason: "an import names a file or directory under work/ or tool-output/, from the run's directory" };
       const abs = join(this.S, source);
       const st = await lstat(abs).catch(() => null);
       if (!st) return { reason: `${source} does not exist` };
       if (!st.isFile() && !st.isDirectory()) return { reason: `${source} is not a regular file or a directory (a link is not followed)` };
-      return { ...base, kind: "import", source, inputs: [source], network: "off" };
+      return { ...base, kind: "import", source, inputs: [source], scope: "declared", network: "off" };
     }
     if (kind === "recipe") {
       const r = raw.recipe ? await this.recipe(String(raw.recipe)) : null;
@@ -705,15 +888,64 @@ export class JobService {
 
   // --- the queue ----------------------------------------------------------------------------
 
-  private runningFor(agent: string): number {
-    return [...this.jobs.values()].filter((j) => j.state === "running" && j.requester.agent === agent).length;
+  /** The lane a job waits in (see Lane). */
+  laneOf(job: JobRecord): Lane {
+    if (job.requester.agent === DERIVED) return "derived";
+    if (job.requester.agent === "system") return "kickoff";
+    return job.spec.timeout_seconds <= SHORT_JOB_SECONDS ? "short" : "general";
   }
 
-  /** Start what may start: the run's worker limit, each agent's own limit, taken in turn, and free disk. */
+  /** Workers kept for short jobs: one, from SHORT_LANE_FROM_WORKERS workers. */
+  shortSlots(): number {
+    return this.o.workers >= SHORT_LANE_FROM_WORKERS ? 1 : 0;
+  }
+
+  /**
+   * Whether a queued job may take a free worker now. Counted over the jobs
+   * the queue has handed a worker and that are not done (this.running), not
+   * over those whose job_started line is written: a job picked a moment ago
+   * is still "accepted" until then, and counting by state let the derived
+   * lane run two recipes at once past its ceiling (tests/derived-catalog's
+   * ceiling test, which timed out on a Linux runner) and let one agent take
+   * more workers than its own limit.
+   */
+  private startable(job: JobRecord): boolean {
+    const lane = this.laneOf(job);
+    const running = [...this.running.keys()].map((id) => this.jobs.get(id)).filter((j): j is JobRecord => Boolean(j));
+    const short = running.filter((j) => this.laneOf(j) === "short").length;
+    // The worker kept for short jobs is never a longer one's, even when idle.
+    if (lane !== "short" && running.length - short >= this.o.workers - this.shortSlots()) return false;
+    if (lane === "derived") return !running.some((j) => this.laneOf(j) === "derived");
+    if (lane === "kickoff") return true;
+    // Each agent so many at once in each lane: its own long parses do not hold back its quick look.
+    return running.filter((j) => j.requester.agent === job.requester.agent && (this.laneOf(j) === "short") === (lane === "short")).length < this.o.perRequesterRunning;
+  }
+
+  /**
+   * Start what may start: the run's worker limit, the worker kept for short
+   * jobs, each agent's own limit, agents taken in turn, free disk, and room
+   * on the host. One pump at a time: its checks and its start are one step.
+   */
   async pump(): Promise<void> {
     if (this.stopping) return;
+    if (this.pumping) {
+      this.pumpAgain = true;
+      return;
+    }
+    this.pumping = true;
+    try {
+      do {
+        this.pumpAgain = false;
+        await this.pumpOnce();
+      } while (this.pumpAgain && !this.stopping);
+    } finally {
+      this.pumping = false;
+    }
+  }
+
+  private async pumpOnce(): Promise<void> {
     await this.maybeDrainDerived();
-    while (this.running.size < this.o.workers && this.queue.length) {
+    while (!this.stopping && this.running.size < this.o.workers && this.queue.length) {
       const requesters = [...new Set(this.queue.map((id) => this.jobs.get(id)?.requester.agent ?? ""))];
       // The derived catalogue's work is the lowest lane: one at a time,
       // started only when no other job waits, and only within its budget.
@@ -721,9 +953,15 @@ export class JobService {
       let picked: string | undefined;
       for (let k = 0; k < requesters.length && !picked; k += 1) {
         const agent = requesters[(this.rotation + k) % requesters.length];
-        if (agent === DERIVED && (othersWaiting || this.runningFor(DERIVED) >= 1 || !(await this.derivedMayRun()))) continue;
-        if (agent !== "system" && agent !== DERIVED && this.runningFor(agent) >= this.o.perRequesterRunning) continue;
-        picked = this.queue.find((id) => this.jobs.get(id)?.requester.agent === agent);
+        // Its oldest job that may start: a short one is not held behind its own long one.
+        const next = this.queue.find((id) => {
+          const j = this.jobs.get(id);
+          return j !== undefined && j.requester.agent === agent && this.startable(j);
+        });
+        if (!next) continue;
+        if (agent === DERIVED && (othersWaiting || !(await this.derivedMayRun()))) continue;
+        // A cancel while the budget was read takes it out of the queue.
+        if (this.queue.includes(next)) picked = next;
       }
       if (!picked) return;
       this.rotation += 1;
@@ -736,6 +974,18 @@ export class JobService {
         return;
       }
       this.waitingForSpace.delete(picked);
+      if (this.o.hostRoom) {
+        const room = await this.o.hostRoom(this.o.workerMemoryMib).catch(() => null);
+        if (room && !room.ok) {
+          if (!this.waitingForHost.has(picked)) {
+            this.waitingForHost.set(picked, Date.now());
+            this.log(`${picked} waits: ${room.available_mib ?? "?"} MiB available on this host, ${room.needed_mib} MiB needed to start a worker beside what runs`);
+            await this.journal.append({ type: "job_waits_for_host", job: picked, available_mib: room.available_mib, needed_mib: room.needed_mib, worker_memory_mib: this.o.workerMemoryMib });
+          }
+          return;
+        }
+        if (!this.queue.includes(picked)) continue;
+      }
       this.queue.splice(this.queue.indexOf(picked), 1);
       const job = this.jobs.get(picked)!;
       const p = this.execute(job).catch((err: Error) => this.log(`${job.id}: ${err.message}`)).finally(() => {
@@ -753,29 +1003,91 @@ export class JobService {
     return { base, out: join(base, "out"), ctl: join(base, "job") };
   }
 
+  /** The input_collection lines of the store: each input's segment set, as the census recorded it. */
+  private collections(): string[][] {
+    return this.journal.of("input_collection").map((l) => [String(l.input), ...((l.members as string[] | undefined) ?? [])]);
+  }
+
   /**
-   * The worker's mounts: what its brain sees, read-only — the evidence,
-   * store/, catalog/, tools/, the packs, all of work/ (every agent's live
-   * scratch and the shared files; the extracted and quarantined corners
-   * no-exec) and tool-output/ — and its own $OUT, the one writable place,
-   * outside work/. Never the board, the inbox, the ledger, the sessions or
-   * the budget. Exactly this list is recorded as the job's accessible scope.
+   * What a job's worker is given. A declared scope: the view the hub builds
+   * for it (job-scope.ts) — only what it declared, at the paths its brain
+   * sees them — with the reviewed code (tools/, the packs), its own $OUT and
+   * the control directory. Otherwise the broad view jobs always had (below),
+   * recorded as such. Throws a ScopeError when a declared object cannot be
+   * given: the job then does not run.
    */
-  private mounts(job: JobRecord, st: { out: string; ctl: string }): { mounts: Mount[]; accessible: Array<{ path: string; access: string }> } {
+  private async placement(job: JobRecord, st: { base: string; out: string; ctl: string }, observe = false): Promise<{ mounts: Mount[]; accessible: Array<{ path: string; access: string }>; manifest: Record<string, unknown> | null; view: { objects: number; files: number; bound: number } | null }> {
+    const kind = scopeKindOf(job.spec);
+    const tail: Array<Mount & { note?: string }> = [];
+    for (const pack of this.o.packDirs) if (existsSync(pack)) tail.push({ host: pack, guest: pack, readonly: true });
+    tail.push({ host: st.out, guest: this.outPath(job), noexec: true });
+    tail.push({ host: st.ctl, guest: "/job", noexec: true });
+    const accessOf = (list: Array<Mount & { note?: string }>) => list.map((m) => ({ path: m.guest ?? m.host, access: `${m.readonly ? "read-only" : "read-write"}${m.noexec ? ", no-exec" : ""}${m.note ? `; ${m.note}` : ""}` }));
+    const strip = (list: Array<Mount & { note?: string }>) => list.map(({ note: _note, ...m }) => m);
+    if (kind !== "declared") {
+      const all = [...this.broadMounts(), ...tail];
+      return { mounts: strip(all), accessible: accessOf(all), manifest: null, view: null };
+    }
+    const resolved = await resolveScope(this.S, job.spec.inputs, { collections: this.collections(), targets: targetPaths(job.spec) });
+    if (!resolved.ok) throw new ScopeError(resolved.reason);
+    // A trace line being sealed is written into the view by the hub, from the chained trace.
+    const extra: Array<{ path: string; bytes: Buffer; ref: string }> = [];
+    if (job.spec.seal?.kind === "trace") {
+      const bytes = await traceLineBytes(this.S, job.spec.seal.line_sha256);
+      if (!bytes) throw new ScopeError(`${job.spec.seal.ref}: the trace no longer holds that line`);
+      extra.push({ path: job.spec.source ?? "", bytes, ref: job.spec.seal.ref });
+    }
+    // EXPERIMENTAL: a file the job's user reads before and after its command, which the collector must see.
+    if (observe) extra.push({ path: CANARY_NAME, bytes: Buffer.from(`${job.id}.${job.attempt}.${Math.random().toString(36).slice(2)}\n`), ref: "the observation's canary" });
+    const view = await buildView(resolved.objects, { S: this.S, root: join(st.base, VIEW_DIR), projected: join(storePaths(this.S).staging, PROJECTED_DIR), guestOut: this.outPath(job), minFreeMb: Math.floor(this.o.minFreeMb / 4), extra });
+    // A seal: what the job copies is what the trace recorded, or it does not run.
+    if (job.spec.seal) {
+      const e = view.entries.find((x) => x.path === job.spec.source);
+      if (!e || e.sha256 !== job.spec.seal.digest) throw new ScopeError(`${job.spec.seal.ref}: ${job.spec.source} reads as sha256 ${e?.sha256?.slice(0, 16) ?? "?"}…, not the ${job.spec.seal.digest.slice(0, 16)}… the trace recorded (line ${job.spec.seal.line_sha256.slice(0, 12)}…): it changed since, and what the trace saw is gone. Run the work again as a job (job_run) and cite job:<id>/<path>`);
+    }
+    const all = [...view.mounts, ...tail];
+    const files = view.entries.filter((e) => e.how !== "bound" && e.how !== "left out").length;
+    const bound = view.entries.filter((e) => e.how === "bound").length;
+    const manifest = {
+      v: 1,
+      job: job.id,
+      attempt: job.attempt,
+      kind,
+      declared: job.spec.inputs,
+      expanded: resolved.objects satisfies ScopeObject[],
+      accessible: view.entries satisfies ViewEntry[],
+      mounts: accessOf(all),
+      observed: "not observed: the reads within this scope are not recorded",
+    };
+    return { mounts: strip(all), accessible: accessOf(all), manifest, view: { objects: resolved.objects.length, files, bound } };
+  }
+
+  /**
+   * The broad view, for a job that declared nothing or `all`: what its brain
+   * sees, read-only — the evidence, store/, catalog/, tools/, all of work/
+   * (every agent's live scratch and the shared files; the extracted and
+   * quarantined corners no-exec) and tool-output/ — beside the packs and its
+   * own $OUT, the one writable place, outside work/. Never the board, the
+   * inbox, the ledger, the sessions or the budget.
+   */
+  private broadMounts(): Array<Mount & { note?: string }> {
     const S = this.S;
     const mounts: Array<Mount & { note?: string }> = [];
     const inputs = join(S, "inputs");
-    if (existsSync(inputs)) mounts.push({ host: inputs, guest: inputs, readonly: true, noexec: true });
+    if (existsSync(inputs)) {
+      mounts.push({ host: inputs, guest: inputs, readonly: true, noexec: true });
+      // Several sets held in place: inputs/ holds a link per set, and each
+      // set's directory is mounted at its own path, where its link leads, as
+      // in the agents' VMs.
+      this.boundSets ??= boundInputSets(S);
+      for (const dir of this.boundSets) mounts.push({ host: dir, guest: dir, readonly: true, noexec: true });
+    }
     for (const rel of ["store", "catalog", "tools", "tool-output"]) if (existsSync(join(S, rel))) mounts.push({ host: join(S, rel), guest: join(S, rel), readonly: true });
     if (existsSync(join(S, "work"))) {
       mounts.push({ host: join(S, "work"), guest: join(S, "work"), readonly: true, note: "every agent's live scratch and the shared files: they may change while the job runs" });
       for (const corner of ["extracted", "quarantine"]) if (existsSync(join(S, "work", corner))) mounts.push({ host: join(S, "work", corner), guest: join(S, "work", corner), readonly: true, noexec: true });
     }
-    for (const pack of this.o.packDirs) if (existsSync(pack)) mounts.push({ host: pack, guest: pack, readonly: true });
-    mounts.push({ host: st.out, guest: this.outPath(job), noexec: true });
-    mounts.push({ host: st.ctl, guest: "/job", noexec: true });
-    const accessible = mounts.map((m) => ({ path: m.guest ?? m.host, access: `${m.readonly ? "read-only" : "read-write"}${m.noexec ? ", no-exec" : ""}${m.note ? `; ${m.note}` : ""}` }));
-    return { mounts: mounts.map(({ note: _note, ...m }) => m), accessible };
+    return mounts;
   }
 
   /** Where a job writes, in its VM: its own directory in the run, outside work/ (which it sees read-only). */
@@ -783,7 +1095,7 @@ export class JobService {
     return join(this.S, ".jobs", job.id);
   }
 
-  private async script(job: JobRecord, ctl: string): Promise<{ lines: string[]; tool_sha256?: string }> {
+  private async script(job: JobRecord, ctl: string, observe: { mounts: string[]; canary: string } | null = null): Promise<{ lines: string[]; tool_sha256?: string }> {
     const q = shQuote;
     const out = this.outPath(job);
     const box = job.spec.timeout_seconds;
@@ -792,7 +1104,11 @@ export class JobService {
     // the job ran with beyond the image.
     const pip = job.spec.network === "allowlist" ? ["python3 -m pip list --format=freeze > /job/pip-before.txt 2>/dev/null || true"] : [];
     const pipAfter = job.spec.network === "allowlist" ? ["python3 -m pip list --format=freeze > /job/pip-after.txt 2>/dev/null || true"] : [];
-    const run = (cmd: string) => [...pip, `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log`, "echo $? > /job/exit", ...pipAfter];
+    // EXPERIMENTAL (SWARM_JOB_OBSERVE=fanotify-experimental, a declared scope only): the command as an unprivileged user, a collector watching the view's mounts.
+    const run = (cmd: string) =>
+      observe
+        ? [...pip, ...observedRun({ mounts: observe.mounts, canary: observe.canary, cmd: `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log` }), ...pipAfter]
+        : [...pip, `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log`, "echo $? > /job/exit", ...pipAfter];
     const head = ["#!/bin/bash", "set -u", `cd ${q(this.S)} 2>/dev/null || cd /`, `export OUT=${q(out)}`];
     if (job.spec.kind === "tool") {
       const checked = await this.toolCheck(job.spec.tool ?? "", job.spec.args ?? {});
@@ -810,7 +1126,7 @@ export class JobService {
     }
     if (job.spec.kind === "import") {
       await writeFile(join(ctl, "import.py"), IMPORT_SCRIPT);
-      return { lines: [...head, ...run(`python3 /job/import.py ${q(this.S)} ${q(job.spec.source ?? "")} ${IMPORT_HASH_BOUND}`)] };
+      return { lines: [...head, ...run(`python3 /job/import.py ${q(this.S)} ${q(job.spec.source ?? "")} ${IMPORT_HASH_BOUND} ${scopeKindOf(job.spec) === "declared" ? "snapshot" : "live"}`)] };
     }
     if (job.spec.kind === "recipe") {
       const r = await this.recipe(job.spec.recipe ?? "");
@@ -854,7 +1170,94 @@ export class JobService {
   private network(job: JobRecord): WorkerSpec["network"] {
     if (job.spec.network !== "allowlist") return { mode: "off" };
     if (this.o.openNet) return { mode: "public" };
-    return this.o.allowHosts.length ? { mode: "hosts", hosts: this.o.allowHosts } : { mode: "off" };
+    // The kickoff's allowlist, and every host the operator allowed since
+    // (swarm.sh lead <run> note L-n TEXT --allow-host HOST): an agent's own
+    // VM keeps the network it booted with, and a job's worker is made new,
+    // so this is where a host allowed while the run goes on is reached.
+    const hosts = [...new Set([...this.o.allowHosts, ...operatorHostsSync(this.S)])];
+    return hosts.length ? { mode: "hosts", hosts } : { mode: "off" };
+  }
+
+  /**
+   * The worker a job runs in, as a spec: its control scripts written under
+   * `base`, its mounts (the view of a declared scope, built at `base`/view,
+   * or the broad view), its image (the one it is recorded to have run in, or
+   * the one chosen for it now), its network and its limits. A function of
+   * the recorded job and a staging directory, so a rerun builds the same
+   * worker the job had: `base` must be outside every VM's reach, as the job
+   * service's own staging is. Throws a ScopeError when a declared object
+   * cannot be given.
+   */
+  async workerSpecFor(job: JobRecord, base: string = this.staging(job).base): Promise<WorkerPlan> {
+    const st = { base, out: join(base, "out"), ctl: join(base, "job") };
+    await mkdir(st.out, { recursive: true });
+    await mkdir(st.ctl, { recursive: true });
+    const observe = this.observing(job);
+    const placed = await this.placement(job, st, observe);
+    // Observed: the collector's script beside the job's, its own mount, and the view's evidence-bearing mounts to watch.
+    let watch: { mounts: string[]; canary: string } | null = null;
+    if (observe) {
+      await writeFile(join(st.ctl, "observe.py"), await readFile(new URL("./job-observe.py", import.meta.url)));
+      await mkdir(join(st.base, "observe"), { recursive: true, mode: 0o700 });
+      placed.mounts.push({ host: join(st.base, "observe"), guest: OBSERVE_GUEST, noexec: true });
+      placed.accessible.push({ path: OBSERVE_GUEST, access: "read-write, no-exec; the experimental collector's log, root's alone in the worker" });
+      watch = { mounts: placed.mounts.filter((m) => m.readonly && (m.guest ?? m.host).startsWith(this.S) && (m.view || m.expect)).map((m) => m.guest ?? m.host), canary: join(this.S, CANARY_NAME) };
+    }
+    const script = await this.script(job, st.ctl, watch);
+    await writeFile(join(st.ctl, "run.sh"), `${script.lines.join("\n")}\n`);
+    // A job that ran keeps its image (a retry, a rerun); a new one is placed by its spec.
+    const chosen = job.image ? { profile: null, ref: job.image, choice: job.image_choice ?? { how: "default" as const, why: "the image it is recorded to have run in" } } : await this.imageFor(job.spec);
+    const network = this.network(job);
+    const spec: WorkerSpec = {
+      name: `dfs-${this.o.run}-job-${job.id}-${job.attempt}`,
+      image: chosen.ref,
+      run: this.o.run,
+      job: job.id,
+      attempt: job.attempt,
+      ...(this.o.registry ? { registry: this.o.registry } : {}),
+      cpus: this.o.workerCpus,
+      memoryMib: this.o.workerMemoryMib,
+      maxDurationSec: job.spec.timeout_seconds + 120,
+      workdir: this.S,
+      mounts: placed.mounts,
+      env: { JOB_ID: job.id, OUT: this.outPath(job), AGENT_ID: job.requester.agent, SWARM_SANDBOX: this.S, TZ: "UTC", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", NO_COLOR: "1" },
+      network,
+      command: ["bash", "/job/run.sh"],
+    };
+    return { spec, accessible: placed.accessible, manifest: placed.manifest, view: placed.view, chosen, script };
+  }
+
+  /**
+   * Whether this job's reads are observed: EXPERIMENTAL and untested in a
+   * worker VM, off unless SWARM_JOB_OBSERVE=fanotify-experimental, and only
+   * over a declared scope (a detect pass runs its probes in its own loop).
+   */
+  private observing(job: JobRecord): boolean {
+    return observeWanted() && scopeKindOf(job.spec) === "declared" && job.spec.kind !== "detect";
+  }
+
+  /**
+   * EXPERIMENTAL: the collector's log read after the worker is gone, kept
+   * whole beside the job's record with what it says (complete, partial or
+   * unknown, and why), on the journal as job_observed. job_started keeps
+   * `observed: "unknown"`: this is a prototype's word, not custody's.
+   */
+  private async readObserved(job: JobRecord, base: string): Promise<void> {
+    const dir = join(base, "observe");
+    const text = await readFile(join(dir, "events.jsonl"), "utf8").catch(() => null);
+    const key = await readFile(join(dir, "key"), "utf8").catch(() => null);
+    // The declared scope as the view gave it (the job's scope manifest): every object, at its path in the worker.
+    const manifest = job.scope?.manifest ? await readFile(join(this.S, job.scope.manifest), "utf8").then((t) => JSON.parse(t) as { accessible?: Array<{ path: string; left_out?: string }> }).catch(() => null) : null;
+    const scope = (manifest?.accessible ?? []).filter((e) => !e.left_out).map((e) => join(this.S, e.path.replace(/\/$/, "")));
+    const seen = readObservation(text, key, { scope, canary: join(this.S, CANARY_NAME) });
+    const jobDir = join(storePaths(this.S).jobs, job.id);
+    const logRel = `store/jobs/${job.id}/observe.${job.attempt}.jsonl`;
+    const readRel = `store/jobs/${job.id}/observed.${job.attempt}.json`;
+    await mkdir(jobDir, { recursive: true });
+    if (text !== null) await writeFile(join(this.S, logRel), text, { mode: 0o444 });
+    const summary = `${JSON.stringify({ experimental: true, ...seen }, null, 2)}\n`;
+    await writeFile(join(this.S, readRel), summary, { mode: 0o444 });
+    await this.journal.append({ type: "job_observed", job: job.id, attempt: job.attempt, experimental: true, status: seen.status, reasons: seen.reasons, opened: seen.opened.length, escapes: seen.escapes.length, overflow: seen.overflow, ...(text !== null ? { log: logRel, log_sha256: sha256Hex(text) } : {}), read: readRel, read_sha256: sha256Hex(summary) });
   }
 
   private async execute(job: JobRecord): Promise<void> {
@@ -867,26 +1270,42 @@ export class JobService {
     }
     const st = this.staging(job);
     await rm(st.base, { recursive: true, force: true });
-    await mkdir(st.out, { recursive: true });
-    await mkdir(st.ctl, { recursive: true });
-    let script: { lines: string[]; tool_sha256?: string };
+    let plan: WorkerPlan;
     try {
-      script = await this.script(job, st.ctl);
+      plan = await this.workerSpecFor(job, st.base);
     } catch (err) {
-      await this.journal.append({ type: "job_failed", job: job.id, reason: (err as Error).message });
-      Object.assign(job, { state: "failed", status: "failed", reason: (err as Error).message });
+      // Not run: a script that cannot be written, or a declared object that cannot be given (the reason says which).
+      const reason = err instanceof ScopeError ? `not run: ${err.message}` : (err as Error).message;
+      await this.journal.append({ type: "job_failed", job: job.id, reason });
+      Object.assign(job, { state: "failed", status: "failed", reason });
       await this.project(job);
       await this.tell(job);
+      await rm(st.base, { recursive: true, force: true }).catch(() => undefined);
       return;
     }
-    await writeFile(join(st.ctl, "run.sh"), `${script.lines.join("\n")}\n`);
-    const { mounts, accessible } = this.mounts(job, st);
-    const chosen = await this.imageFor(job.spec);
-    const network = this.network(job);
-    const worker = `dfs-${this.o.run}-job-${job.id}-${job.attempt}`;
+    const { spec: workerSpec, accessible, chosen, script } = plan;
+    const worker = workerSpec.name;
+    const network = workerSpec.network;
     const netText = network.mode === "off" ? "none" : network.mode === "public" ? "every public host" : `the run's allowlist (${network.hosts.join(", ")})`;
-    await this.journal.append({ type: "job_started", job: job.id, attempt: job.attempt, worker, image: chosen.ref, ...(chosen.profile ? { profile: chosen.profile } : {}), ...(script.tool_sha256 ? { tool_sha256: script.tool_sha256 } : {}), declared: job.spec.inputs, accessible, observed: "unknown", network: netText, cpus: this.o.workerCpus, memory_mib: this.o.workerMemoryMib });
-    Object.assign(job, { state: "running", worker, worker_size: `${this.o.workerCpus} vCPU, ${this.o.workerMemoryMib} MiB`, started_at: new Date().toISOString(), image: chosen.ref, accessible, network: netText, ...(script.tool_sha256 ? { tool_sha256: script.tool_sha256 } : {}) });
+    // The declared scope's manifest beside the job's record, its sha256 on job_started.
+    const scope: JobScope = { kind: scopeKindOf(job.spec) };
+    if (plan.manifest) {
+      const rel = `store/jobs/${job.id}/scope.${job.attempt}.json`;
+      const text = scopeManifestText(plan.manifest);
+      await mkdir(join(this.S, "store", "jobs", job.id), { recursive: true });
+      await chmod(join(this.S, rel), 0o644).catch(() => undefined);
+      await writeFile(join(this.S, rel), text);
+      await chmod(join(this.S, rel), 0o444).catch(() => undefined);
+      Object.assign(scope, plan.view ?? {}, { manifest: rel, manifest_sha256: sha256Hex(text) });
+    }
+    // Which lane it took, how it came to its image, and how long it waited for room on the host.
+    const lane = this.laneOf(job);
+    const since = this.waitingForHost.get(job.id);
+    this.waitingForHost.delete(job.id);
+    const hostWait = since !== undefined ? { host_wait_ms: Date.now() - since } : {};
+    const imageChoice = Object.keys(this.o.images ?? {}).length ? { image_choice: chosen.choice } : {};
+    await this.journal.append({ type: "job_started", job: job.id, attempt: job.attempt, worker, image: chosen.ref, ...(chosen.profile ? { profile: chosen.profile } : {}), ...imageChoice, lane, ...hostWait, ...(script.tool_sha256 ? { tool_sha256: script.tool_sha256 } : {}), declared: job.spec.inputs, scope, accessible, observed: "unknown", network: netText, cpus: this.o.workerCpus, memory_mib: this.o.workerMemoryMib });
+    Object.assign(job, { state: "running", worker, worker_size: `${this.o.workerCpus} vCPU, ${this.o.workerMemoryMib} MiB`, started_at: new Date().toISOString(), image: chosen.ref, lane, ...imageChoice, accessible, scope, network: netText, ...(script.tool_sha256 ? { tool_sha256: script.tool_sha256 } : {}) });
     await this.project(job);
     maybeCrash("job:started");
     const started = Date.now();
@@ -894,22 +1313,7 @@ export class JobService {
     guard.unref?.();
     let result: Awaited<ReturnType<JobServiceOptions["runWorker"]>>;
     try {
-      result = await this.o.runWorker({
-        name: worker,
-        image: chosen.ref,
-        run: this.o.run,
-        job: job.id,
-        attempt: job.attempt,
-        ...(this.o.registry ? { registry: this.o.registry } : {}),
-        cpus: this.o.workerCpus,
-        memoryMib: this.o.workerMemoryMib,
-        maxDurationSec: job.spec.timeout_seconds + 120,
-        workdir: this.S,
-        mounts,
-        env: { JOB_ID: job.id, OUT: this.outPath(job), AGENT_ID: job.requester.agent, SWARM_SANDBOX: this.S, TZ: "UTC", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", NO_COLOR: "1" },
-        network,
-        command: ["bash", "/job/run.sh"],
-      });
+      result = await this.o.runWorker(workerSpec);
     } finally {
       clearInterval(guard);
     }
@@ -950,6 +1354,7 @@ export class JobService {
     }
     job.state = "fenced";
     maybeCrash("job:fenced");
+    if (this.observing(job)) await this.readObserved(job, st.base).catch((err: Error) => this.log(`${job.id}: its observation could not be read: ${err.message}`));
     await this.commit(job, { status, exit, reason });
   }
 
@@ -1080,9 +1485,108 @@ export class JobService {
       if (generation.status === "complete") await this.relateReadable(generation);
     }
     if (job.spec.kind === "detect") await this.fromDetect(job);
+    if (job.spec.seal) await this.publishSeal(job);
     if (this.o.derived && (job.spec.kind === "tool" || job.spec.kind === "command" || job.spec.kind === "import")) await this.offerFrom(job);
     await this.tell(job);
     void this.pump();
+  }
+
+  // --- a brain's own output, sealed when a record cites it ----------------------------------------
+
+  /** The import a tool:/trace: ref was sealed as, from the journal, the last one. */
+  private sealedRef(ref: string): { import: string; job: string } | null {
+    const l = this.journal.of("brain_output_sealed").filter((x) => x.ref === ref).at(-1);
+    return l ? { import: String(l.import), job: String(l.job) } : null;
+  }
+
+  /**
+   * Seal a brain-side output a record cites, and say which import to cite:
+   * `tool:<seat>/<file>` (a whole output kept under tool-output/<seat>/) or
+   * `trace:<sha256>` (one line of the trace). Found on the trace; a kept file
+   * is hashed now and refused at once when it no longer matches the digest the
+   * trace recorded. Then an import job (short, no network) whose view holds
+   * the hub's snapshot of it, checked against the digest again at its start,
+   * so what is sealed is what the trace saw, whatever the file does meanwhile;
+   * published as `import:<job>/<file>` with its trace provenance. The same ref
+   * is sealed once: a second record gets the same import, and one asked while
+   * the first seal runs waits for it. Waits up to `wait` seconds; past that
+   * the answer names the job, whose post says when it is done.
+   */
+  async sealCited(agent: string, ref: string, o: { wait?: number } = {}): Promise<{ ok: true; ref: string; import_ref: string; job: string } | { ok: false; reason: string }> {
+    const r = ref.trim();
+    const done = this.sealedRef(r);
+    if (done) return { ok: true, ref: r, import_ref: done.import, job: done.job };
+    const found = await traceOrigin(this.S, r);
+    if (!found.ok) return { ok: false, reason: found.reason };
+    const origin = found.origin;
+    if (origin.kind === "tool" && origin.path) {
+      const now = await hashNoFollow(join(this.S, origin.path));
+      const gone = "what the trace saw is gone: run the work again as a job (job_run) and cite job:<id>/<path>";
+      if ("reason" in now) return { ok: false, reason: `${r}: ${origin.path} ${now.reason}; ${gone}` };
+      if (now.sha256 !== origin.digest) return { ok: false, reason: `${r}: ${origin.path} reads now as sha256 ${now.sha256.slice(0, 16)}…, not the ${origin.digest.slice(0, 16)}… the trace recorded (line ${origin.line_sha256.slice(0, 12)}…): it changed since, and ${gone}` };
+    }
+    const failed = (j: JobRecord) => j.state === "failed" || j.state === "cancelled" || (j.state === "committed" && j.status !== "ok");
+    let job = [...this.jobs.values()].find((j) => j.spec.seal?.ref === r && j.spec.seal.digest === origin.digest && !failed(j));
+    if (!job) {
+      const seal: SealSpec = { kind: origin.kind, ref: r, digest: origin.digest, line_sha256: origin.line_sha256, ...(origin.path ? { path: origin.path } : {}), origin };
+      const sub = await this.submit(agent, { kind: "import", note: `the seal of ${r}, which a record cites` }, { seal, watch: Math.min(Math.max(o.wait ?? 45, 0), 120) });
+      if (!sub.ok) return sub;
+      job = sub.job;
+    }
+    const until = Date.now() + Math.min(Math.max(o.wait ?? 45, 0), 120) * 1000;
+    for (;;) {
+      const s = this.sealedRef(r);
+      if (s) return { ok: true, ref: r, import_ref: s.import, job: s.job };
+      const j = this.jobs.get(job.id) ?? job;
+      const refused = this.journal.of("brain_output_refused").find((l) => l.job === j.id);
+      if (refused) return { ok: false, reason: `${r} could not be sealed: ${String(refused.why)}` };
+      if (failed(j)) return { ok: false, reason: `${r} could not be sealed: job ${j.id} ${j.status ?? j.state}${j.reason ? ` (${j.reason})` : ""}` };
+      if (Date.now() >= until) return { ok: false, reason: `${r} is being sealed as job ${j.id} (${j.state === "accepted" ? "queued" : j.state}): record again once it is done (a post says so), and the record cites it as import:${j.id}/<name>` };
+      await new Promise((res) => setTimeout(res, 200));
+    }
+  }
+
+  /**
+   * A committed seal, published: store/imports/<job>/ holds the sealed file
+   * (a link to the store's bytes), the job's manifest (the same bytes) and
+   * import.json (the ref, the digest, the trace provenance, the mapping);
+   * then a brain_output_sealed line. The sealed file must be the digest the
+   * trace recorded, else a brain_output_refused line says why.
+   */
+  private async publishSeal(job: JobRecord): Promise<void> {
+    const seal = job.spec.seal;
+    if (!seal || job.state !== "committed" || job.status !== "ok") return;
+    if (this.journal.of("brain_output_sealed").some((l) => l.job === job.id) || this.journal.of("brain_output_refused").some((l) => l.job === job.id)) return;
+    await this.exclusive(async () => {
+      const P = storePaths(this.S);
+      const found = await readManifest(join(P.jobs, job.id, "manifest.json"));
+      const file = found?.manifest.files.find((f) => f.sha256 === seal.digest);
+      if (!found || !file) {
+        await this.journal.append({ type: "brain_output_refused", job: job.id, ref: seal.ref, why: `job ${job.id}'s sealed output holds no file of sha256 ${seal.digest.slice(0, 16)}…, the digest the trace recorded` });
+        return;
+      }
+      const dir = join(P.imports, job.id);
+      // A publication a crash left half done is made again from the store.
+      if (existsSync(dir)) {
+        for (const d of [dir, join(dir, "out")]) await chmod(d, 0o755).catch(() => undefined);
+        await rm(dir, { recursive: true, force: true });
+      }
+      await mkdir(join(dir, "out"), { recursive: true });
+      const name = Buffer.from(file.path_b64, "base64");
+      const from = Buffer.concat([Buffer.from(`${join(P.jobs, job.id, "out")}/`), name]);
+      const to = Buffer.concat([Buffer.from(`${join(dir, "out")}/`), name]);
+      await link(from, to).catch(async () => copyFile(from, to));
+      await copyFile(join(P.jobs, job.id, "manifest.json"), join(dir, "manifest.json"));
+      const importRef = `import:${job.id}/${file.path}`;
+      const record = { v: 1, ref: seal.ref, import: importRef, job: job.id, digest: seal.digest, bytes: file.bytes, trace_line: seal.line_sha256, trace: seal.origin, how: "the kept bytes, snapshotted by the hub at the import job's start and held there to the digest the trace recorded; sealed like any import" };
+      const text = `${JSON.stringify(record, null, 2)}\n`;
+      await writeFile(join(dir, "import.json"), text);
+      for (const f of ["manifest.json", "import.json"]) await chmod(join(dir, f), 0o444).catch(() => undefined);
+      await chmod(join(dir, "out"), 0o555).catch(() => undefined);
+      await chmod(dir, 0o555).catch(() => undefined);
+      const manifestSha = (await readManifest(join(dir, "manifest.json")))?.sha256 ?? "";
+      await this.journal.append({ type: "brain_output_sealed", job: job.id, ref: seal.ref, import: importRef, digest: seal.digest, trace_line: seal.line_sha256, seat: seal.origin.seat, tool: seal.origin.tool, manifest_sha256: manifestSha, import_json_sha256: sha256Hex(text) });
+    });
   }
 
   /** The agent at the root of a chain of jobs (a derived detect and recipe run as the harness), or null. */
@@ -1469,6 +1973,7 @@ export class JobService {
         await this.journal.append({ type: "job_cancel_requested", job: id, by: agent });
         if (job.state === "accepted") {
           this.queue.splice(this.queue.indexOf(id), 1);
+          this.waitingForHost.delete(id);
           await this.journal.append({ type: "job_cancelled", job: id, reason: `cancelled by ${agent} before it started` });
           Object.assign(job, { state: "cancelled", status: "cancelled" });
           await this.project(job);
@@ -1587,6 +2092,7 @@ export class JobService {
       }
     }
     await Promise.allSettled([...this.running.values()]);
+    await dropProjected(storePaths(this.S).staging);
   }
 
   /** Backstop: a worker that did not go when its job ended is asked to go again. */
@@ -1604,13 +2110,14 @@ export class JobService {
 
 /** One post, for the agent that asked. */
 export function describe(job: JobRecord): string {
-  const what = job.spec.kind === "tool" ? `tool ${job.spec.tool}` : job.spec.kind === "command" ? "command" : job.spec.kind === "recipe" ? `recipe ${job.spec.recipe}` : job.spec.kind === "import" ? `import of ${job.spec.source}, copied live from where it was` : "detect pass";
+  const what = job.spec.kind === "tool" ? `tool ${job.spec.tool}` : job.spec.kind === "command" ? "command" : job.spec.kind === "recipe" ? `recipe ${job.spec.recipe}` : job.spec.seal ? `the seal of ${job.spec.seal.ref}` : job.spec.kind === "import" ? `import of ${job.spec.source}${scopeKindOf(job.spec) === "declared" ? ", from the snapshot the hub took at its start" : ", copied live from where it was"}` : "detect pass";
   if (job.state === "failed") return `Job ${job.id} (${what}) was not run: ${job.reason}.`;
   if (job.state === "cancelled") return `Job ${job.id} (${what}) was cancelled${job.reason ? `: ${job.reason}` : ""}.`;
   const o = job.outputs;
   const files = o ? `${o.files} file(s), ${o.bytes} bytes in ${o.path}/${o.rejected ? ` (${o.rejected} link(s) or special file(s) left out, named in its manifest)` : ""}` : "no output";
   const head = job.status === "ok" ? "done" : `${job.status}${job.reason ? ` (${job.reason})` : ""}`;
-  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; cite its files as job:${job.id}/<path>.${job.generation ? ` Catalogued as ${job.generation}.` : ""}`;
+  const cite = job.spec.seal && job.status === "ok" ? `record again citing ${job.spec.seal.ref}: it resolves to import:${job.id}/<name>` : `cite its files as job:${job.id}/<path>`;
+  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}`;
 }
 
 
@@ -1631,6 +2138,14 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number } =
     requester: job.requester.agent,
     ...(job.exit !== undefined ? { exit: job.exit } : {}),
     ...(job.worker_size ? { worker: job.worker_size } : {}),
+    // Where it ran and why, and the lane it took: a job that names no profile is placed by the images' records.
+    ...(job.image ? { image: job.image } : {}),
+    ...(job.image_choice ? { image_why: job.image_choice.why } : {}),
+    ...(job.lane ? { lane: job.lane } : {}),
+    // What it could read: its declared scope (enforced; its manifest names every object), or every object of the run.
+    scope: job.scope?.kind ?? scopeKindOf(job.spec),
+    ...(scopeKindOf(job.spec) === "declared" ? { declared: job.spec.inputs } : {}),
+    ...(job.scope?.manifest ? { scope_manifest: job.scope.manifest } : {}),
     ...(job.generation ? { generation: job.generation, revision: job.revision } : {}),
   };
   if (job.state !== "committed" || !job.outputs) return view;
@@ -1660,6 +2175,46 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number } =
   }
   view.cite = `job:${job.id}/<path>`;
   return view;
+}
+
+/** What workerSpecFor gives: the worker's spec, what it could reach, a declared scope's manifest, and how the image was chosen. */
+export type WorkerPlan = {
+  spec: WorkerSpec;
+  accessible: Array<{ path: string; access: string }>;
+  manifest: Record<string, unknown> | null;
+  view: { objects: number; files: number; bound: number } | null;
+  chosen: { profile: string | null; ref: string; choice: ImageChoice };
+  script: { lines: string[]; tool_sha256?: string };
+};
+
+/** A recipe's or a detect pass's target paths: part of its scope, whatever it declared. */
+export function targetPaths(spec: Pick<JobSpec, "target" | "targets">): string[] {
+  return [...(spec.target?.paths ?? []), ...(spec.targets ?? []).flatMap((t) => t.paths ?? [])];
+}
+
+/** A file's sha256 read through a descriptor that does not follow a link; a link, a special file or nothing is said. */
+async function hashNoFollow(path: string): Promise<{ sha256: string } | { reason: string }> {
+  let fh;
+  try {
+    fh = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return { reason: code === "ENOENT" ? "is no longer there" : code === "ELOOP" ? "is a link now" : `cannot be read (${code ?? "error"})` };
+  }
+  try {
+    if (!(await fh.stat()).isFile()) return { reason: "is not a regular file" };
+    const h = createHash("sha256");
+    const buf = Buffer.alloc(1 << 20);
+    for (let pos = 0; ; ) {
+      const { bytesRead } = await fh.read(buf, 0, buf.length, pos);
+      if (!bytesRead) break;
+      h.update(buf.subarray(0, bytesRead));
+      pos += bytesRead;
+    }
+    return { sha256: h.digest("hex") };
+  } finally {
+    await fh.close();
+  }
 }
 
 /**

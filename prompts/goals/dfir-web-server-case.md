@@ -45,24 +45,41 @@ Bonus: what are the directories and files that have been added by the attacker(s
 
 ## How to divide the work
 
-Suggested seats (change it on the board if you see a better split): one
-agent owns the master timeline (`work/timeline.md`) and folds in what the
-others find; one triages the disk (partitions, filesystems, the file list,
-the bonus question); one does accounts and registry (SAM/SYSTEM/SECURITY,
-user creation, logons, event logs); one hunts leftovers (web roots, temp,
-prefetch, tasks, tools the attacker dropped); one covers installed software
-and its provenance; one does memory forensics (processes, injections,
-network connections, the shellcode); one is the critic and editor who
-checks every citation and assembles `work/report.md`.
+Nobody has been given a job. Read the goal and the board, see what your peers
+have taken, decide what you are going to do and say it with
+`name(name, doing)`. The case spans these areas, as suggestions for dividing
+it and not assignments: the master timeline (`work/timeline.md`), folding in
+what the others find; the disk (partitions, filesystems, the file list, the
+bonus question); accounts and registry (SAM/SYSTEM/SECURITY, user creation,
+logons, event logs); leftovers (web roots, temp, prefetch, tasks, tools the
+attacker dropped); installed software and its provenance; memory
+(processes, injections, network connections, the shellcode); and assembling
+`work/report.md` from the answers in the ledger.
+
+**Report author and critic.** Two of you take these roles early with
+`name(doing=…)`, and they are different agents. The report author writes the
+answers from the ledger, not from memory: compact first, read `ledger`, then
+one `record(kind=answer)` per question (`section=question:<n>`) and one each
+for `summary` and `narrative`, citing `E-<seq>` for every claim and stating
+the confidence and its reason, the contrary evidence, the limitations, what
+else could explain it and what would change the answer. When the ledger cannot
+answer, reopen the investigation and say so on the board. The critic
+re-derives each finding an answer rests on from its sealed refs and records
+`attest` (what was re-derived, what only read) or `dispute` (why), then does
+the same for every answer. The critic writes no answer; the author attests
+nothing of their own. The sign-off is these acts, not a post. Nothing else is
+assigned.
 
 ## Definition of done
 
 `work/report.md` exists, answers all eight questions and the bonus under
 headings `## 1.` … `## 8.` and `## Bonus`, every answer cites evidence, the
-critic has posted a sign-off on the board as a `result`
-post that starts a line with `SIGN-OFF:` and names what they verified,
-`work/timeline.md` holds the merged timeline as a table with at least 40
-dated rows, and `inputs/` is unchanged.
+ledger holds one `answer` entry per question (`question:1` to `question:8` and
+`question:bonus`) and one each for `summary` and `narrative`, with every
+defect the answers check names fixed or named by a limitation, and the critic,
+who wrote none of them, has recorded `attest` or `dispute` on each answer,
+saying what they verified, `work/timeline.md` holds the merged timeline as a
+table with at least 40 dated rows, and `inputs/` is unchanged.
 
 ## Checks
 
@@ -74,7 +91,7 @@ dated rows, and `inputs/` is unchanged.
 - `test -f work/timeline.md`
 - `test "$(grep -c '^| ' work/timeline.md)" -ge 40`
 - `test "$(find -H inputs -type f | wc -l | tr -d ' ')" -eq "$(jq '.files | length' inputs.json)"`
-- `awk 'FNR==1{r=0} /^tag: result$/{r=1} r&&/^\**SIGN-OFF/{m=1;exit} END{exit !m}' threads/main/*.md`
+- `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,7,8,bonus,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies
   the inputs, before it runs these checks. Nobody needs to forge a tool for

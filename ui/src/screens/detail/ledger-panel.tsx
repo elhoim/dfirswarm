@@ -11,8 +11,9 @@
  * quietly dropped the empty column would hide exactly the thing worth seeing.
  *
  * Around the entries, three things only a person or the trace can add:
- * - the examiner's review, per entry (accept, reject, amend with a note) and a
- *   signature over the ledger as it stands, kept outside the run and chained;
+ * - the examiner's review, per entry (accept, reject, amend with a note), kept
+ *   outside the run and chained; the sign-off is the examiner's release,
+ *   signed in the Release tab with the examiner's own secret, never here;
  * - whether the trace grounds an entry: a call before it named its source;
  * - a correction (`supersedes`): the older entry stays, marked, and links to
  *   the one that corrects it. Nothing is ever hidden.
@@ -27,6 +28,7 @@
  * in a screenshot taken over someone's shoulder.
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { BookOpenText } from "lucide-react";
 import { Chip } from "@/components/console";
 import { Pager, usePager } from "@/components/pager";
@@ -47,7 +49,7 @@ import { api } from "@/lib/api";
 import { useAgentColours } from "@/lib/agent-colour";
 import { useAgentNames } from "@/lib/hooks";
 import { useResource, useSwarmVersion } from "@/lib/live";
-import type { Coverage, LedgerEntry, ReviewAction, ReviewState, SwarmView } from "@/lib/types";
+import type { Coverage, EntryReviewAction, LedgerEntry, ReviewState, SwarmView } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type Kind = "all" | LedgerEntry["kind"];
@@ -66,7 +68,8 @@ const STATUS_TONE = { open: "neutral", supported: "moss", refuted: "brick" } as 
 /** "Q3" and "3" are the same section. */
 const sectionId = (a: string) => a.trim().replace(/^q(?=\d)/i, "");
 
-const REVIEW_TONE = { accept: "moss", reject: "brick", amend: "saffron" } as const;
+const REVIEW_TONE = { accept: "moss", reject: "brick", amend: "saffron", adopt: "moss", qualify: "saffron", inconclusive: "slate" } as const;
+const REVIEW_WORD = { accept: "accepted", reject: "rejected", amend: "amended", adopt: "adopted", qualify: "adopted with a qualification", inconclusive: "rendered inconclusive" } as const;
 const EXAMINER_KEY = "dfirswarm.examiner";
 
 function savedExaminer(): string {
@@ -122,13 +125,13 @@ export function LedgerPanel({ view }: { view: SwarmView }) {
   const [note, setNote] = useState("");
 
   const send = useCallback(
-    async (action: ReviewAction, seq?: number, text?: string) => {
+    async (action: EntryReviewAction, seq?: number, text?: string) => {
       setActionError(null);
       if (!examiner.trim()) {
-        setActionError("Name the examiner first: the review is signed with it.");
+        setActionError("Name the examiner first: each decision carries the name.");
         return;
       }
-      setPending(action === "sign" ? "sign" : `${action}:${seq}`);
+      setPending(`${action}:${seq}`);
       try {
         let job = await api.sendReview(id, { action, entry_seq: seq, note: text, examiner: examiner.trim() });
         // The write is a swarm.sh job; wait for it, then read the review again.
@@ -197,7 +200,7 @@ export function LedgerPanel({ view }: { view: SwarmView }) {
         out.push(
           <span key="r" title={r.note ?? undefined}>
             <Chip tone={REVIEW_TONE[r.action]}>
-              {r.action === "accept" ? "accepted" : r.action === "reject" ? "rejected" : "amended"} by {r.examiner}
+              {REVIEW_WORD[r.action]} by {r.examiner}
             </Chip>
           </span>,
         );
@@ -340,12 +343,12 @@ export function LedgerPanel({ view }: { view: SwarmView }) {
             aria-label="Examiner's name"
             className="h-[26px] min-w-[180px] rounded-[6px] border border-line bg-paper px-2 text-[12.5px]"
           />
-          <Button size="sm" variant="secondary" disabled={pending !== null} onClick={() => void send("sign")}>
-            {pending === "sign" ? "Signing…" : `Sign the ledger as it stands (${entries.length} entries)`}
+          <Button size="sm" variant="secondary" asChild>
+            <Link to={`/swarms/${encodeURIComponent(id)}/release`}>Adopt and sign in the Release tab</Link>
           </Button>
         </div>
         <p className="m-0 text-[11.5px] text-ink-3">
-          Each decision is one line in the run's review file, outside the run where no agent reaches it, written by <code>swarm.sh review</code> and chained to the line before. Accept, reject or amend each entry below; a signature records the ledger's head hash.
+          Each decision is one line in the run's review file, outside the run where no agent reaches it, written by <code>swarm.sh review</code> and chained to the line before. Accept, reject or amend each entry below; these lines are not signed one by one. The sign-off is the examiner's release: the Release tab shows the report it will be, and an enrolled examiner signs it there with their own key and secret.
         </p>
         {actionError ? <InlineNote tone="danger">{actionError}</InlineNote> : null}
       </section>

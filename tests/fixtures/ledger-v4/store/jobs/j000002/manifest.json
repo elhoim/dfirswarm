@@ -1,0 +1,1 @@
+{"v":1,"job":"j000002","attempt":1,"sealed_at":"2026-09-27T13:15:35.856Z","files":[{"path":"partial.txt","path_b64":"cGFydGlhbC50eHQ=","bytes":69,"sha256":"cc7790cad22d82876cea100c4dde2e896e71ede94b234814437717a5f365cabe","mode":"644"}],"dirs":[],"rejected":[],"totals":{"files":1,"bytes":69}}

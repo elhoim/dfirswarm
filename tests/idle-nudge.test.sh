@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # What must not go wrong: an agent with something to read is woken quickly, an
 # agent with an empty inbox is left alone until the long timer, the nudge says
-# what is waiting, and the budget is per silence rather than per run.
+# what is waiting, and the budget is per silence rather than per run. An agent
+# that only waits is nudged too, later and as a steer, unless a job of its own
+# is running; a seat whose compaction runs is not nudged, and one whose
+# compaction never ends is reported on the board.
 #
 # The numbers this encodes were measured over seven forensic runs: 34 agents
 # had to be woken, and in 32 of those a peer's post had landed a median of 26
@@ -113,6 +116,106 @@ run_once --news-sec 45 --idle-sec 180
 [[ "$(grep -c '^a00	' "$PROMPT_LOG")" -eq 1 ]] || fail "an agent that came back after an error is nudged normally"
 pass "an agent that works after a provider error is watched like any other"
 
+# --- an agent that only waits ------------------------------------------------
+# Run s6895a8: s6895a806 called nothing but wait and inbox for 33 minutes. Each
+# wait returned with a post and wrote a trace row, and Herdr and the hub saw it
+# working, so the watchdog never counted it idle.
+ago() { # <seconds> -> an ISO time that long ago
+  date -u -d "@$(( $(date +%s) - $1 ))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r $(( $(date +%s) - $1 )) +%Y-%m-%dT%H:%M:%SZ
+}
+row() { # <agent> <tool> <seconds ago> [args json]
+  local args='{}'
+  [[ $# -ge 4 ]] && args="$4"
+  printf '{"ts":"%s","recv_ts":"%s","agent":"%s","tool":"%s","args":%s,"result":{"ok":true}}\n' "$(ago "$3")" "$(ago "$3")" "$1" "$2" "$args"
+}
+WS="$TMP/waiting"
+mkdir -p "$WS"/{traces,done/agents,threads/main,inbox/w0,.pi-sessions/w0,locks,store/jobs}
+printf '{"swarm_id":"w","n":1,"agents":[{"id":"w0","role":"worker"}]}\n' > "$WS/team.json"
+printf '{"main": 0}\n' > "$WS/inbox/w0/cursors.json"
+{ row w0 post 700 '{"tag":"result"}'; row w0 wait 600; row w0 context 599; row w0 wait 300; row w0 inbox 200; row w0 wait 30; row w0 thinking 29; } > "$WS/traces/events.jsonl"
+: > "$WS/.pi-sessions/w0/session.jsonl"
+# The pane is in a wait: Herdr says working, as it did on s6895a8.
+cat > "$TMP/bin/herdr-working" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "agent get") printf '{"result":{"agent":{"agent_status":"working"}}}\n' ;;
+  "agent prompt") printf '%s\t%s\n' "$3" "$4" >> "$PROMPT_LOG" ;;
+  *) : ;;
+esac
+SH
+chmod +x "$TMP/bin/herdr-working"
+wait_once() { HERDR_BIN="$TMP/bin/herdr-working" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$WS" --once --idle-sec 180 "$@" >/dev/null 2>&1; }
+: > "$PROMPT_LOG"
+wait_once --wait-idle-sec 900
+[[ "$(grep -c '^w0	' "$PROMPT_LOG")" -eq 0 ]] || fail "an agent waiting for less than --wait-idle-sec was nudged"
+wait_once --wait-idle-sec 600
+grep '^w0	' "$PROMPT_LOG" | grep -q 'For 11 minutes you have called only wait and inbox' || fail "an agent that only waited past --wait-idle-sec was not nudged: $(cat "$PROMPT_LOG")"
+grep -q '"tool":"idle_nudge","args":{"agent":"w0","idle_seconds":7[0-9][0-9],"why":"waiting"}' "$WS/traces/events.jsonl" \
+  || fail "the nudge is not recorded as one for waiting: $(grep idle_nudge "$WS/traces/events.jsonl")"
+pass "an agent that has only waited since its last post is nudged past --wait-idle-sec, though its pane is working"
+
+# Waiting on its own job is what the job asked of it.
+: > "$PROMPT_LOG"
+: > "$WS/traces/idle-nudge.state"
+mkdir -p "$WS/store/jobs/j000001"
+printf '{"id":"j000001","requester":{"agent":"w0"},"state":"running"}\n' > "$WS/store/jobs/j000001/job.json"
+wait_once --wait-idle-sec 600
+[[ "$(grep -c '^w0	' "$PROMPT_LOG")" -eq 0 ]] || fail "an agent waiting on its own running job was nudged"
+printf '{"id":"j000001","requester":{"agent":"w0"},"state":"committed"}\n' > "$WS/store/jobs/j000001/job.json"
+wait_once --wait-idle-sec 600
+[[ "$(grep -c '^w0	' "$PROMPT_LOG")" -eq 1 ]] || fail "once the job was done the waiting agent was not nudged"
+pass "an agent waiting on a job of its own that is still running is left to wait"
+
+# Its last wait long past: it is in some other long call, not waiting.
+: > "$PROMPT_LOG"
+: > "$WS/traces/idle-nudge.state"
+{ row w0 post 1500 '{"tag":"result"}'; row w0 wait 1200; row w0 wait 600; } > "$WS/traces/events.jsonl"
+wait_once --wait-idle-sec 600
+[[ "$(grep -c '^w0	' "$PROMPT_LOG")" -eq 0 ]] || fail "an agent whose last wait was ten minutes ago was nudged as waiting"
+pass "an agent whose last wait is long past is not counted as waiting"
+
+# A prompt arriving is not the agent doing anything: the hub_prompt row is the
+# echo of the watchdog's own nudge (s6895a803's four nudges each reset its clock).
+: > "$PROMPT_LOG"
+: > "$WS/traces/idle-nudge.state"
+{ row w0 bash 400; row w0 hub_prompt 20 '{"kind":"idle_nudge"}'; } > "$WS/traces/events.jsonl"
+touch -t "$(date -v-400S +%Y%m%d%H%M.%S 2>/dev/null || date -d '400 seconds ago' +%Y%m%d%H%M.%S)" "$WS/.pi-sessions/w0/session.jsonl"
+HERDR_BIN="$TMP/bin/herdr" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$WS" --once --idle-sec 180 >/dev/null 2>&1
+grep '^w0	' "$PROMPT_LOG" | grep -q 'You ended your turn 6 minutes ago' || fail "the echo of a prompt counted as the agent's activity: $(cat "$PROMPT_LOG")"
+pass "the echo of a nudge (hub_prompt) does not count as the agent's activity"
+
+# --- a seat whose compaction runs ---------------------------------------------
+# Pi refuses every prompt while a hand-off's compaction runs. On s6895a8 the
+# watchdog spent three nudges on s6895a803 there, and when the compaction never
+# ended nobody was told the seat was gone.
+CS="$TMP/compacting"
+mkdir -p "$CS"/{traces,done/agents,threads/main,inbox/k0,.pi-sessions/k0,locks}
+printf '{"swarm_id":"k","n":1,"agents":[{"id":"k0","role":"worker"}]}\n' > "$CS/team.json"
+printf '{"main": 0}\n' > "$CS/inbox/k0/cursors.json"
+: > "$CS/.pi-sessions/k0/session.jsonl"
+touch -t "$(date -v-400S +%Y%m%d%H%M.%S 2>/dev/null || date -d '400 seconds ago' +%Y%m%d%H%M.%S)" "$CS/.pi-sessions/k0/session.jsonl"
+{ row k0 bash 420; row k0 compact_start 400 '{"trigger":"agent idle"}'; row k0 compact_failed 300 '{"stage":"summary","attempt":1}'; } > "$CS/traces/events.jsonl"
+comp_once() { HERDR_BIN="$TMP/bin/herdr" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$CS" --once --idle-sec 180 "$@" >/dev/null 2>&1; }
+: > "$PROMPT_LOG"
+comp_once --compact-stall-sec 1200
+[[ "$(grep -c '^k0	' "$PROMPT_LOG")" -eq 0 ]] || fail "a seat whose compaction runs was nudged"
+ls "$CS"/threads/main/*.md >/dev/null 2>&1 && fail "a compaction inside its bound was reported"
+pass "a seat whose compaction runs is not nudged (a failed summary attempt is not the compaction's end)"
+comp_once --compact-stall-sec 300
+post="$(cat "$CS"/threads/main/*.md 2>/dev/null || true)"
+grep -q "COMPACTION STALLED: k0's context compaction started 6 minutes ago and has not ended" <<<"$post" || fail "a compaction past its bound was not said on the board: $post"
+grep -q '^tag: hold' <<<"$post" || fail "the report is not a hold post: $post"
+grep -q '"tool":"compact_stalled","args":{"agent":"k0","by":"watchdog","limit_ms":300000},"result":{"ok":true,"open_seconds":' "$CS/traces/events.jsonl" \
+  || fail "the stalled compaction is not on the trace: $(grep compact_stalled "$CS/traces/events.jsonl")"
+comp_once --compact-stall-sec 300
+[[ "$(ls "$CS"/threads/main/*.md | wc -l | tr -d ' ')" == 1 ]] || fail "the stalled compaction was reported twice"
+[[ "$(grep -c '^k0	' "$PROMPT_LOG")" -eq 0 ]] || fail "a seat with a stalled compaction was nudged"
+pass "a compaction open past --compact-stall-sec is said once, on the board and the trace, and the seat is not nudged"
+row k0 compact_done 100 '{"reason":"manual","via":"self"}' >> "$CS/traces/events.jsonl"
+comp_once --compact-stall-sec 300
+[[ "$(grep -c '^k0	' "$PROMPT_LOG")" -eq 1 ]] || fail "a seat whose compaction ended is not watched again"
+pass "once the compaction ends the seat is watched like any other"
+
 # --- a local model's first turn ---------------------------------------------
 # The LM Studio seat on BelkaCTF #6 took about four minutes to answer its
 # first turn on a 10 KB contract and was nudged twice before it had emitted a
@@ -165,7 +268,7 @@ node -e '
 const net = require("node:net"); const fs = require("node:fs");
 const s = net.connect(process.argv[1]); let b = "";
 s.on("connect", () => s.write(JSON.stringify({ t: "hello" }) + "\n" + JSON.stringify({ t: "state", state: "idle" }) + "\n"));
-s.on("data", (d) => { b += d; let i; while ((i = b.indexOf("\n")) >= 0) { const m = JSON.parse(b.slice(0, i)); b = b.slice(i + 1); if (m.t === "prompt") fs.appendFileSync(process.argv[2], m.text + "\n"); } });
+s.on("data", (d) => { b += d; let i; while ((i = b.indexOf("\n")) >= 0) { const m = JSON.parse(b.slice(0, i)); b = b.slice(i + 1); if (m.t === "prompt") fs.appendFileSync(process.argv[2], JSON.stringify({ deliver: m.deliver ?? null, text: m.text }) + "\n"); } });
 ' "$HUB_DIR/v0.sock" "$TMP/vm-prompts.txt" &
 LINK_PID=$!
 # Until the hub has the link, not a fixed half second.
@@ -195,6 +298,19 @@ sleep 0.3
 [[ ! -s "$TMP/vm-prompts.txt" ]] || fail "a VM agent the hub says is working was nudged"
 [[ "$(cat "$VM_SB/traces/events.jsonl" "$VM_SB/traces/system-spill.jsonl" 2>/dev/null | grep -c '"tool":"idle_nudge"')" == "$nudges_before" ]] || fail "a nudge was recorded for the working agent"
 pass "an agent the hub says is working is left to work"
+
+# The same agent, waiting: the hub still says working, and the words go down
+# the link as a steer, since a waiting agent's turn does not end.
+{ row v0 post 700; row v0 wait 5; } >> "$VM_SB/traces/events.jsonl"
+: > "$TMP/vm-prompts.txt"
+: > "$VM_SB/traces/idle-nudge.state"
+HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HUB_STATUS="$TMP/working.json" \
+  bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$VM_SB" --once --news-sec 45 --idle-sec 180 --wait-idle-sec 600 >"$TMP/nudge3.log" 2>&1 \
+  || fail "the watchdog failed: $(cat "$TMP/nudge3.log")"
+for _ in $(seq 100); do [[ -s "$TMP/vm-prompts.txt" ]] && break; sleep 0.05; done
+jq -e 'select(.deliver == "steer" and (.text | startswith("For 11 minutes you have called only wait and inbox")))' "$TMP/vm-prompts.txt" >/dev/null 2>&1 \
+  || fail "a waiting VM agent was not steered through the hub: $(cat "$TMP/vm-prompts.txt" 2>/dev/null)"
+pass "an agent in a microVM that only waits is steered through the hub though the hub says it is working"
 
 # --- a hub that died is brought back by the watchdog, from what the hub kept ----
 kill "$HUB_PID" 2>/dev/null; wait "$HUB_PID" 2>/dev/null || true
@@ -285,5 +401,34 @@ printf '{"ts":"t1","agent":"a0","tool":"bash","args":{},"result":{"ok":true}}\n'
 ( source "$ROOT/scripts/lib/trace.sh"; trace_emit "$ROOT" "$PLAIN_SB" '{"ts":"t2","agent":"system","tool":"idle_nudge","args":{},"result":{"ok":true}}' )
 [[ "$(wc -l < "$PLAIN_SB/traces/events.jsonl" | tr -d ' ')" -eq 2 ]] || fail "an unchained trace no longer takes the fallback append"
 pass "an unchained trace with whole lines still takes the fallback append"
+
+# --- the lead register in the nudge -------------------------------------------
+# An idle agent is told what the register would have it take: the ready lead
+# it ranks first, and the questions nobody holds a lead for.
+LD="$TMP/leads"
+mkdir -p "$LD"/{traces,done/agents,threads/main,inbox/a00,inbox/a01,.pi-sessions/a00,.pi-sessions/a01,locks}
+cat > "$LD/team.json" <<'JSON'
+{"swarm_id": "t", "n": 2, "agents": [{"id": "a00", "role": "worker"}, {"id": "a01", "role": "worker"}]}
+JSON
+: > "$LD/traces/events.jsonl"
+printf '# Contract\n\n## Checks\n\n- `node x "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,summary,narrative`\n' > "$LD/SWARM.md"
+for id in a00 a01; do
+  : > "$LD/.pi-sessions/$id/session.jsonl"
+  touch -t "$(date -v-300S +%Y%m%d%H%M.%S 2>/dev/null || date -d '300 seconds ago' +%Y%m%d%H%M.%S)" "$LD/.pi-sessions/$id/session.jsonl"
+done
+node --experimental-strip-types --no-warnings -e '
+  const [leads, S] = process.argv.slice(1);
+  import(leads).then(async (L) => {
+    const r = await L.openLead({ sandboxRoot: S, agentId: "a01" }, { title: "Open the encrypted container", why: "question 2 rests on it", answers: ["2"] });
+    if (!r.ok) { console.error(r.reason); process.exit(1); }
+  });
+' "$ROOT/extensions/leads.ts" "$LD" || fail "could not open a lead"
+: > "$PROMPT_LOG"
+SWARM_RUNS_DIR="$TMP/no-registry" HERDR_BIN="$TMP/bin/herdr" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$LD" --once --idle-sec 180 >/dev/null 2>&1
+nudge="$(grep '^a00	' "$PROMPT_LOG" | tail -1)"
+[[ -n "$nudge" ]] || fail "the idle agent was not nudged"
+grep -q 'The ready lead the register ranks first is L-1 "Open the encrypted container"' <<<"$nudge" || fail "the nudge does not name the ready lead: $nudge"
+grep -q 'Questions nobody holds a lead for: question:1, question:2 (open: L-1)' <<<"$nudge" || fail "the nudge does not name the uncovered questions: $nudge"
+pass "an idle agent's nudge names the ready lead the register ranks first and the questions nobody holds"
 
 echo "idle-nudge.test.sh: all checks passed"

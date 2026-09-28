@@ -9,6 +9,8 @@ export SWARM_ISOLATION=host
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/notify-test.XXXXXX")"
+# A stop seals a draft release with the machine key: this suite's, in its own home.
+export SWARM_SIGNERS_HOME="$TMP/signers"
 trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

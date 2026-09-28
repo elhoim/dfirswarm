@@ -1,13 +1,39 @@
 #!/usr/bin/env node
 /**
- * A goal's check (ADR 0002): every named section of the report rests on the
- * ledger. A section's entries are those it cites (#<seq> or E-<seq>, a range
- * such as #72–#74 too) and those that name it in `answers`. It passes when
- * one of them, standing, is:
+ * A goal's check (ADR 0002): the questions rest on the ledger.
+ *
+ * Ledger mode (no --report; ledger version 4): each named section has its
+ * `answer` entry — `question:<id>` for each of the goal's questions, and
+ * `summary` and `narrative` when the goal names them — and the ledger gate
+ * (extensions/protocol.ts, ledgerGate) finds nothing left open: every answer
+ * still stands on what it cites (nothing it rests on superseded without its
+ * correction cited, disputed or resting on a failed job without the answer
+ * saying why, no answer it rests on fallen), a critic other than its author
+ * attested or disputed it, it is not disputed itself, and no contradiction
+ * stands that no answer weighs and no limitation names. A question's answer
+ * rests on a standing finding whose refs resolve now, bytes checked where the
+ * run sealed them (one of them an object of the run), a complete search where
+ * the question asks whether something exists, or a limitation
+ * (examination-limited). Each defect is printed with what fixes
+ * it; a defect a standing limitation names lets the run end and stays a
+ * defect (the release counts it). So the finish line refuses a done once,
+ * naming the fix, and the next done passes when each defect left is named.
+ * Tokens an answer asserts that no cited entry holds are counted, never
+ * failed: that is the release's to weigh.
+ *
+ * Report mode (--report, the check goals used before version 4): every
+ * named section of the report rests on the ledger. A section's entries are
+ * those it cites (#<seq> or E-<seq>, a range such as #72–#74 too) and those
+ * that name it in `answers`. It passes when one of them, standing, is:
  * - a finding with refs that all resolve, at least one of them an object of
  *   the run (unresolved:<why> alone names none): answered;
  * - a search that found nothing (absence), complete, with refs that resolve
- *   when it has any: answered, as not found;
+ *   when it has any: answered, as not found, when the question asks whether
+ *   something exists (the goal names those with --existence); for any other
+ *   question it documents the search and no more, and the section is
+ *   examination-limited. On the Belka run s306463 scoped negative searches
+ *   counted as answers and the check said 18 answered, 0 examination-limited,
+ *   while the critic's sign-off said several exact answers were unavailable;
  * - a limitation: the examination could not establish it, and says why:
  *   examination-limited, which a reader is told apart from answered.
  * A hypothesis never answers. A finding resting on the kept output of a job
@@ -16,18 +42,42 @@
  * whose chain is broken answers nothing.
  *
  * Nothing here knows a case: the goal names the sections, as its questions
- * are numbered. Run from the sandbox, as every check is:
+ * are numbered, or points at the brief that numbers them. Run from the
+ * sandbox, as every check is:
  *
  *   node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" \
- *     --report work/report.md --sections 1,2,3,4,5
+ *     --sections 1,2,3,summary,narrative
+ *   node … check-answers.ts --sections-in inputs/CASE.md --sections summary,narrative
+ *   node … check-answers.ts --report work/report.md --sections 1,2,3        (report mode)
+ *   node … check-answers.ts --sections 1,2,3,summary,narrative --existence 2
+ *     (question 2 asks whether something exists: a complete search that found
+ *     nothing answers it; for 1 and 3 it documents the search and no more)
  *
  * Exit 0 when every section does; 1 when one does not (each named, with what
- * it cited and why none of it counts); 2 on a usage error.
+ * it rests on, why none of it counts and what fixes it); 2 on a usage error.
  */
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { verifyLedgerChain } from "../extensions/protocol.ts";
+import {
+  answerSection,
+  attestationAct,
+  briefQuestions,
+  ledgerGate,
+  readAttestations,
+  readDisputes,
+  readLedger,
+  sectionAnswersId,
+  sectionKey,
+  supersededBy,
+  verifyAttestationChain,
+  verifyDisputeChain,
+  verifyLedgerChain,
+  LEDGER_ATTESTATIONS,
+  LEDGER_DISPUTES,
+  type LedgerDefect,
+  type LedgerEntry,
+} from "../extensions/protocol.ts";
 import { committedLogHashes, resolveRef } from "./evidence-store.ts";
 
 type Entry = { seq: number; kind: string; refs?: string[]; supersedes?: number; answers?: string[]; completion?: string; reason?: string; status?: string };
@@ -71,7 +121,20 @@ export function sections(report: string): Map<string, string> {
 
 export type SectionOutcome = "answered" | "limited" | "unanswered";
 
-export async function checkAnswers(sandbox: string, reportPath: string, wanted: string[]): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, SectionOutcome> }> {
+/** The prefix of the check's last line: its outcomes as JSON, for the finish line (scripts/finish-gate.ts). */
+export const ANSWERS_MARK = "CHECK_ANSWERS_JSON";
+
+/**
+ * Whether a section's question asks whether something exists: only then does
+ * a complete search that found nothing answer it. The goal says which, with
+ * --existence; nothing here reads a question's words to guess.
+ */
+export function asksExistence(existence: readonly string[], section: string): boolean {
+  const id = sectionId(section.startsWith("question:") ? section.slice("question:".length) : section);
+  return existence.some((x) => sectionId(x) === id);
+}
+
+export async function checkAnswers(sandbox: string, reportPath: string, wanted: string[], existence: readonly string[] = []): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, SectionOutcome> }> {
   const S = resolve(sandbox);
   const outcomes: Record<string, SectionOutcome> = {};
   const report = await readFile(join(S, reportPath), "utf8").catch(() => null);
@@ -149,6 +212,12 @@ export async function checkAnswers(sandbox: string, reportPath: string, wanted: 
         continue;
       }
       const onFailed = failed.length ? `; on the kept output of a job that did not succeed: ${failed.join(", ")}` : "";
+      if (e.kind === "absence" && !asksExistence(existence, n)) {
+        // A search documents what was searched; it answers only a question
+        // that asks whether the thing exists at all.
+        limited ??= `#${seq} (a search that found nothing${via}${onFailed}: it documents the search, and the question asks for more than whether something exists)`;
+        continue;
+      }
       answered = e.kind === "absence" ? `#${seq} (a search that found nothing${via}${onFailed})` : `#${seq} (a finding with refs${via}${onFailed})`;
       break;
     }
@@ -169,6 +238,154 @@ export async function checkAnswers(sandbox: string, reportPath: string, wanted: 
   return { ok, lines, outcomes };
 }
 
+// The questions a brief numbers (protocol.ts): the lead register reads them too.
+export { briefQuestions };
+
+export type LedgerOutcome = "answered" | "limited" | "inconclusive" | "unanswered";
+
+/** Each job's status from its job.json, read once. */
+async function jobStatuses(S: string, entries: LedgerEntry[]): Promise<Map<number, string[]>> {
+  const status = new Map<string, string | null>();
+  const out = new Map<number, string[]>();
+  for (const e of entries) {
+    for (const ref of e.refs ?? []) {
+      const m = /^job:([a-z0-9-]{1,64})(?:\/|$)/.exec(ref);
+      if (!m) continue;
+      if (!status.has(m[1])) {
+        const job = await readFile(join(S, "store", "jobs", m[1], "job.json"), "utf8").then((t) => JSON.parse(t) as { status?: string }).catch(() => null);
+        status.set(m[1], job?.status ?? null);
+      }
+      const st = status.get(m[1]);
+      if (st && st !== "ok" && !(e.qualifies ?? []).some((q) => q.ref === ref)) out.set(e.seq, [...(out.get(e.seq) ?? []), `${ref} (${st})`]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Ledger mode: each wanted section's answer, and the ledger gate over them.
+ * `wanted` takes goal question ids ("3", "Q3", "question:3") and summary and
+ * narrative.
+ */
+export async function checkLedgerAnswers(sandbox: string, wanted: string[], existence: readonly string[] = []): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, LedgerOutcome>; defects: LedgerDefect[] }> {
+  const S = resolve(sandbox);
+  const outcomes: Record<string, LedgerOutcome> = {};
+  const text = await readFile(join(S, "ledger", "entries.jsonl"), "utf8").catch(() => "");
+  const chain = verifyLedgerChain(text);
+  if (!chain.ok) return { ok: false, lines: [`the ledger's chain is broken at line ${chain.broken_at} (${chain.reason}): no answer can rest on it`], outcomes, defects: [] };
+  // The acts are chains of their own: a broken one cannot say who checked what.
+  for (const [rel, verify] of [[LEDGER_ATTESTATIONS, verifyAttestationChain], [LEDGER_DISPUTES, verifyDisputeChain]] as const) {
+    const t = await readFile(join(S, rel), "utf8").catch(() => "");
+    const v = verify(t);
+    if (!v.ok) return { ok: false, lines: [`${rel}'s chain is broken at line ${v.broken_at} (${v.reason}): the acts on the answers cannot be read`], outcomes, defects: [] };
+  }
+  const entries = await readLedger(S);
+  const attestations = await readAttestations(S);
+  const disputes = await readDisputes(S);
+  const sections: string[] = [];
+  for (const w of wanted) {
+    const sec = answerSection(w);
+    if (!sec.ok) return { ok: false, lines: [`--sections: ${sec.reason}`], outcomes, defects: [] };
+    if (!sections.includes(sec.section)) sections.push(sec.section);
+  }
+  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: await jobStatuses(S, entries) });
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
+  const logs = await committedLogHashes(S);
+  const defects = [...gate.defects];
+  const lines: string[] = [];
+  for (const section of sections) {
+    const a = gate.answers[section];
+    const id = sectionAnswersId(section);
+    if (!a) {
+      const named = limits.filter((l) => (l.answers ?? []).some((x) => sectionKey(x) === id));
+      outcomes[section] = named.length ? "limited" : "unanswered";
+      lines.push(`${section}: no answer${named.length ? `; examination-limited by ${named.map((l) => `#${l.seq} (${l.reason ?? "no reason"})`).join(", ")}` : ""}`);
+      continue;
+    }
+    const acts = [
+      ...attestations.filter((x) => attestationAct(x) === "attest" && x.target === a.hash && !a.authors.includes(x.by)).map((x) => `attested by ${x.by}`),
+      ...disputes.filter((d) => d.act === "dispute" && d.target === a.hash).map((d) => `disputed by ${d.by}`),
+    ];
+    const actsText = acts.length ? `; ${[...new Set(acts)].join(", ")}` : "";
+    if (!section.startsWith("question:")) {
+      outcomes[section] = "answered";
+      lines.push(`${section}: answered by #${a.seq}${actsText}`);
+      continue;
+    }
+    // What the question's answer stands on: an entry naming it whose refs resolve now.
+    const naming = [...(a.support ?? []), ...(a.limitations ?? [])]
+      .map((x) => bySeq.get(x.seq))
+      .filter((e): e is LedgerEntry => Boolean(e) && !replaced.has((e as LedgerEntry).seq) && ((e as LedgerEntry).answers ?? []).some((x) => sectionKey(x) === id));
+    const why: string[] = [];
+    let rests: string | null = null;
+    let limited: string | null = null;
+    for (const e of naming) {
+      if (e.kind === "limitation") {
+        limited ??= `#${e.seq} (a limitation: ${e.reason ?? "no reason"})`;
+        continue;
+      }
+      if (e.kind !== "finding" && e.kind !== "absence") continue;
+      if (e.kind === "absence" && e.completion && e.completion !== "complete") {
+        why.push(`#${e.seq} is a search that was ${e.completion}`);
+        continue;
+      }
+      if (e.kind === "finding" && !e.refs?.length) {
+        why.push(`#${e.seq} names no refs`);
+        continue;
+      }
+      const bad: string[] = [];
+      let objects = 0;
+      for (const r of e.refs ?? []) {
+        const got = await resolveRef(S, r, { verify: true, committedLogs: logs });
+        if (!got.ok) bad.push(r);
+        else if (got.kind !== "unresolved") objects += 1;
+      }
+      if (bad.length) {
+        why.push(`#${e.seq}'s refs ${bad.join(", ")} do not resolve`);
+        continue;
+      }
+      if (e.kind === "finding" && !objects) {
+        why.push(`#${e.seq} rests on unresolved: refs only`);
+        continue;
+      }
+      if (e.kind === "absence" && !asksExistence(existence, section)) {
+        limited ??= `#${e.seq} (a search that found nothing: it documents the search, and the question asks for more than whether something exists)`;
+        continue;
+      }
+      rests = `#${e.seq} (${e.kind === "absence" ? "a search that found nothing" : "a finding with refs"})`;
+      break;
+    }
+    if (rests && !a.inconclusive) {
+      outcomes[section] = "answered";
+      lines.push(`${section}: answered by #${a.seq}, resting on ${rests}${actsText}`);
+    } else if (rests || limited) {
+      outcomes[section] = a.inconclusive ? "inconclusive" : "limited";
+      lines.push(`${section}: ${a.inconclusive ? "inconclusive" : "examination-limited"}, #${a.seq} resting on ${rests ?? limited}${actsText}`);
+    } else {
+      outcomes[section] = "unanswered";
+      defects.push({
+        code: "answer_support",
+        section,
+        seqs: [a.seq],
+        what: `answer #${a.seq} (${section}) rests on no standing finding whose refs resolve, no complete search and no limitation that names ${section}${why.length ? ` (${why.join("; ")})` : ""}`,
+        fix: `record the finding again with refs that resolve (a correction, supersedes=<seq>) and the answer with supersedes=${a.seq} citing it, or record a limitation citing E-${a.seq}`,
+        named_by: limits.filter((l) => (l.rel ?? []).some((r) => r.to === a.seq) || new RegExp(`\\bE-${a.seq}\\b`).test(`${l.value}\n${l.source ?? ""}\n${l.evidence ?? ""}`)).map((l) => l.seq),
+      });
+      lines.push(`${section}: #${a.seq} stands on nothing a reader can check now${actsText}`);
+    }
+  }
+  const open = defects.filter((d) => !d.named_by.length);
+  for (const d of defects) lines.push(`${d.named_by.length ? `defect, named by ${d.named_by.map((n) => `#${n}`).join(", ")}` : "DEFECT"}: ${d.what}${d.named_by.length ? "" : `. Fix: ${d.fix}`}`);
+  const unsupported = Object.entries(gate.unsupported);
+  if (unsupported.length) lines.push(`tokens in no cited entry (counted, not failed; the release weighs them): ${unsupported.map(([seq, t]) => `#${seq}: ${t.join(", ")}`).join("; ")}`);
+  const count = (o: LedgerOutcome) => Object.values(outcomes).filter((x) => x === o).length;
+  lines.push(`sections: ${count("answered")} answered, ${count("limited")} examination-limited, ${count("inconclusive")} inconclusive, ${count("unanswered")} unanswered; ${defects.length} defect${defects.length === 1 ? "" : "s"}, ${defects.length - open.length} named by a limitation, ${open.length} open`);
+  if (open.length) lines.push("The run ends once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect, and the release counts it.");
+  return { ok: open.length === 0, lines, outcomes, defects };
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
   const opt = (name: string) => {
@@ -176,12 +393,34 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     return i >= 0 ? args[i + 1] : undefined;
   };
   const report = opt("--report");
+  const sandbox = opt("--sandbox") ?? process.cwd();
   const wanted = (opt("--sections") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-  if (!report || !wanted.length) {
-    process.stderr.write("usage: check-answers.ts --report <path> --sections 1,2,3 [--sandbox DIR]\n");
+  const existence = (opt("--existence") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const briefPath = opt("--sections-in");
+  if (briefPath) {
+    const brief = await readFile(join(resolve(sandbox), briefPath), "utf8").catch(() => null);
+    if (brief === null) {
+      process.stdout.write(`no ${briefPath}: the questions are counted there\n`);
+      process.exit(1);
+    }
+    const questions = briefQuestions(brief);
+    if (!questions.length) {
+      process.stdout.write(`${briefPath} numbers no question at the start of a line\n`);
+      process.exit(1);
+    }
+    wanted.unshift(...questions);
+  }
+  if (!wanted.length) {
+    process.stderr.write("usage: check-answers.ts [--report <path>] --sections 1,2,3[,summary,narrative] [--existence 2,…] [--sections-in inputs/CASE.md] [--sandbox DIR]\n");
     process.exit(2);
   }
-  const r = await checkAnswers(opt("--sandbox") ?? process.cwd(), report, wanted);
+  const r = report ? await checkAnswers(sandbox, report, wanted, existence) : await checkLedgerAnswers(sandbox, wanted, existence);
   process.stdout.write(`${r.lines.join("\n")}\n`);
+  // One machine line last, for the harness's finish line: each section's
+  // outcome and each defect a limitation names, so a run whose checks pass
+  // can still be told apart as examination-limited (await-done.sh hands it
+  // back with the check's row, passing or not).
+  const named = "defects" in r ? r.defects.filter((d) => d.named_by.length).map((d) => `${d.what} (named by ${d.named_by.map((n) => `#${n}`).join(", ")})`) : [];
+  process.stdout.write(`${ANSWERS_MARK} ${JSON.stringify({ outcomes: r.outcomes, named, existence, mode: report ? "report" : "ledger" })}\n`);
   process.exit(r.ok ? 0 : 1);
 }

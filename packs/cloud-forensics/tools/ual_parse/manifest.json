@@ -41,6 +41,6 @@
   "example": "{\"path\": \"inputs/ual.csv\", \"notable_only\": true, \"out_file\": \"work/ual.jsonl\"}",
   "by": "maintainer",
   "at": "2026-09-22T22:00:00.000Z",
-  "version": 1,
-  "sha256": "8f90c1723fce49b14c7ade9b4793b7c44afd2169bbd1c6550573e00bb646b6d0"
+  "version": 2,
+  "sha256": "3cccb1673993bdb18fb90b27cbdba1e0642c44f0e16624d4c47da8f8e895ff5d"
 }

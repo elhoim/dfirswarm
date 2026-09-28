@@ -30,5 +30,5 @@
     "coverage.json"
   ],
   "covers": "The adb-backup header and every member name, type, size and tar timestamp when encryption is none. It extracts nothing, does not bypass app backup exclusions, and cannot list an encrypted payload without its password.",
-  "sha256": "4013c833ab8fe1eba16742b0fd015fb4515b1b85a02de8795ab203d0d7375bfe"
+  "sha256": "e0e9a981196df93c7562c709f21b92b7af4dda01f5e0d849f5edfd02cf7b4ac2"
 }

@@ -203,7 +203,7 @@ export function HarnessPanel({ view, now, onShowTraces }: { view: SwarmView; now
           ) : null}
         </p>
       ) : null}
-      {s.phase === "running" && !steering ? <span className="text-[11.5px] text-ink-3">wall clock {shortDuration(s.wall_clock_minutes * 60_000)} · hard-kill {b.hard_kill ? "on" : "off"}</span> : null}
+      {s.phase === "running" && !steering ? <span className="text-[11.5px] text-ink-3">{view.until_solved ? "until solved: no wall clock" : s.wall_clock_minutes > 0 ? `wall clock ${shortDuration(s.wall_clock_minutes * 60_000)}` : "no wall clock"} · hard-kill {b.hard_kill ? "on" : "off"}</span> : null}
     </section>
   );
 }

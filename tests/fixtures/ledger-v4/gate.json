@@ -1,0 +1,44 @@
+{
+  "sections": [
+    "1",
+    "2",
+    "3",
+    "summary",
+    "narrative"
+  ],
+  "roles": {
+    "finders": [
+      "a0",
+      "a1"
+    ],
+    "author": "a3",
+    "critic": "a2"
+  },
+  "answers": {
+    "question:1": 14,
+    "question:2": 19,
+    "question:3": 16,
+    "summary": 17,
+    "narrative": 20
+  },
+  "defects": [
+    {
+      "code": "answer_support",
+      "section": "summary",
+      "seqs": [
+        17
+      ],
+      "what": "answer #17 (summary) no longer stands on its support: it rests on E-15, superseded by #19, and does not cite the correction",
+      "fix": "record the answer again with supersedes=17, citing what stands now (a correction, or qualifies [{ref: \"E-<seq>\", why}] for a disputed or failed-job entry), or record a limitation citing E-17 that says why it stands as it is",
+      "named_by": [
+        21
+      ]
+    }
+  ],
+  "open": [],
+  "unsupported": {
+    "16": [
+      "0123456789abcdef0123456789abcdef"
+    ]
+  }
+}

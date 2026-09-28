@@ -53,7 +53,8 @@ export function GoalPanel({ view, version }: { view: SwarmView; version: number 
   // kickoff, so this is safe to show.
   const registry = (view.registry ?? {}) as Record<string, unknown>;
   const command = typeof registry.command === "string" ? registry.command : "";
-  const inputsSource = view.inputs?.source ?? "";
+  // Several sets: each at inputs/<name>/, named with its source.
+  const inputsSource = view.inputs?.sets?.length ? view.inputs.sets.map((set) => `${set.path}/ ← ${set.source}`).join(" · ") : (view.inputs?.source ?? "");
 
   return (
     <div className="space-y-4">

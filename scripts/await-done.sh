@@ -190,12 +190,15 @@ sys.exit(0 if found else 3)
 
 # Run one check with stdin closed and a wall-clock limit. A check is a shell
 # command reading files agents wrote: it can block forever on a FIFO, and it
-# would otherwise eat the remaining checks off this loop's stdin.
+# would otherwise eat the remaining checks off this loop's stdin. With a
+# fourth argument its output goes to that file, for --checks-json to hand
+# back what a failing check said (a check such as check-answers.ts names the
+# fix there).
 run_one_check() {
-  local sandbox="$1" line="$2" limit="$3"
+  local sandbox="$1" line="$2" limit="$3" out="${4:-/dev/null}"
   # SWARM_HARNESS: where a check finds the harness's own check scripts
   # (scripts/check-answers.ts), whatever the sandbox.
-  ( cd "$sandbox" && export SWARM_HARNESS="$ROOT" && eval "$line" ) >/dev/null 2>&1 </dev/null &
+  ( cd "$sandbox" && export SWARM_HARNESS="$ROOT" && eval "$line" ) >"$out" 2>&1 </dev/null &
   local pid=$!
   local waited=0
   while kill -0 "$pid" 2>/dev/null; do
@@ -253,38 +256,82 @@ if [[ "$CHECKS_JSON" -eq 1 ]]; then
   [[ "$sentinel" == false && -f "$SANDBOX/done/ALL_AGENTS_DEAD" ]] && all_dead=true
   rows=""
   source_name=""
+  # Each check's output, kept only for the length of this call: a failing
+  # check's is handed back with its row.
+  outs="$(mktemp -d "${TMPDIR:-/tmp}/checks-json.XXXXXX")"
+  n=0
+  # A finish line that could not be read is not a finish line with nothing
+  # in it: said as an error, so done ends as verification_unavailable
+  # (finishLineVerdict), never as completed. A goal with no checks section
+  # is the goal's own choice and stays an empty list.
+  goal_error=""
   if load_goal; then
     source_name="$GOAL_SOURCE"
     checks="$(printf '%s\n' "$GOAL_TEXT" | extract_checks)" && rc=0 || rc=$?
+    # 3 is a goal with no checks; anything else, checks that could not be read.
+    [[ "$rc" -ne 0 && "$rc" -ne 3 ]] && goal_error="the checks could not be read out of the goal ($GOAL_SOURCE, exit $rc)"
     if [[ "$rc" -eq 0 ]]; then
       while IFS= read -r line; do
         [[ -z "$line" ]] && continue
+        n=$((n + 1))
         start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
-        out="$(run_one_check "$SANDBOX" "$line" "$CHECK_TIMEOUT")" && ok=1 || ok=0
+        out="$(run_one_check "$SANDBOX" "$line" "$CHECK_TIMEOUT" "$outs/$n")" && ok=1 || ok=0
         end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
         timed_out=0
         [[ "$out" == *"TIMED OUT"* ]] && timed_out=1
-        rows+="${ok}"$'\t'"$((end_ms - start_ms))"$'\t'"${timed_out}"$'\t'"${line}"$'\n'
+        rows+="${ok}"$'\t'"$((end_ms - start_ms))"$'\t'"${timed_out}"$'\t'"${n}"$'\t'"${line}"$'\n'
       done <<< "$checks"
     fi
+  else
+    goal_error="no goal document for this run: neither the registry nor the sandbox has one"
   fi
-  printf '%s' "$rows" | CHECKS_SENTINEL="$sentinel" CHECKS_ALL_DEAD="$all_dead" CHECKS_SOURCE="$source_name" python3 -c '
+  printf '%s' "$rows" | CHECKS_OUTS="$outs" CHECKS_SENTINEL="$sentinel" CHECKS_ALL_DEAD="$all_dead" CHECKS_SOURCE="$source_name" CHECKS_ERROR="$goal_error" python3 -c '
 import json, os, sys
+# A failing check says why in its output: handed back whole up to this many
+# bytes; past it only its size, since the check itself prints the whole when
+# it is run again. A passing check says nothing here.
+OUT_MAX = 65536
+# A check that reports its outcomes (check-answers.ts: each section answered,
+# examination-limited or unanswered) says so on a last line; that line is
+# handed back with the row, passing or not, for the finish line to tell a
+# limited run from a completed one.
+MARK = b"CHECK_ANSWERS_JSON "
 checks = []
 for raw in sys.stdin.read().splitlines():
     if not raw.strip():
         continue
-    ok, ms, timed_out, cmd = raw.split("\t", 3)
-    checks.append({"cmd": cmd, "ok": ok == "1", "ms": int(ms), "timed_out": timed_out == "1"})
-print(json.dumps({
+    ok, ms, timed_out, n, cmd = raw.split("\t", 4)
+    row = {"cmd": cmd, "ok": ok == "1", "ms": int(ms), "timed_out": timed_out == "1"}
+    try:
+        with open(os.path.join(os.environ["CHECKS_OUTS"], n), "rb") as f:
+            data = f.read()
+    except OSError:
+        data = b""
+    for line in data.splitlines():
+        if line.startswith(MARK):
+            try:
+                row["answers"] = json.loads(line[len(MARK):].decode("utf-8", "replace"))
+            except ValueError:
+                pass
+    if ok != "1":
+        if data.strip():
+            row["out_bytes"] = len(data)
+            if len(data) <= OUT_MAX:
+                row["out"] = data.decode("utf-8", "replace")
+    checks.append(row)
+out = {
     "sentinel": os.environ.get("CHECKS_SENTINEL") == "true",
     "all_agents_dead": os.environ.get("CHECKS_ALL_DEAD") == "true",
     "source": os.environ.get("CHECKS_SOURCE") or None,
     "total": len(checks),
     "passed": sum(1 for c in checks if c["ok"]),
     "checks": checks,
-}))
+}
+if os.environ.get("CHECKS_ERROR"):
+    out["error"] = os.environ["CHECKS_ERROR"]
+print(json.dumps(out))
 '
+  rm -rf "$outs"
   exit 0
 fi
 

@@ -30,6 +30,7 @@ import {
   attributionLine,
   egressLine,
   evidenceArrival,
+  evidenceFrom,
   herdrSocketLine,
   measuredGuardLine,
   vmRows,
@@ -57,7 +58,8 @@ async function sandbox(): Promise<string> {
     bytes: 16,
     enforce: "auto",
     guard: "microvm",
-    held: "bind",
+    // A copy: inputs/ is the run's own directory (held in place, it would be a link to /evidence).
+    held: "copy",
     files: [
       { path: "inputs/notes.txt", bytes: 6, sha256: sha("notes\n") },
       { path: "inputs/mail/a.bin", bytes: 10, sha256: sha("attachment") },
@@ -111,6 +113,50 @@ test("custody re-hashes the evidence in full and says what changed, went missing
   assert.deepEqual(evidence(c).missing, ["inputs/mail/a.bin"]);
   assert.deepEqual(evidence(c).added, ["inputs/planted.txt"]);
   assert.match(c.summary, /^EVIDENCE CHANGED: 1 changed, 1 missing, 1 added/);
+});
+
+test("several sets held in place: custody re-hashes each through its link, finds what appeared in one, and walks no link the manifest does not name as a set", async () => {
+  const root = await mkdtemp(join(tmpdir(), "custody-sets-"));
+  const outside = await mkdtemp(join(tmpdir(), "custody-sets-ev-"));
+  dirs.push(root, outside);
+  await mkdir(join(outside, "laptop", "users"), { recursive: true });
+  await mkdir(join(outside, "phone"), { recursive: true });
+  await mkdir(join(outside, "other"), { recursive: true });
+  await writeFile(join(outside, "laptop", "users", "ntuser.dat"), "hive");
+  await writeFile(join(outside, "phone", "sms.db"), "sqlite");
+  await symlink("users/ntuser.dat", join(outside, "laptop", "hive-link"));
+  // inputs/ is the run's own directory with a link per set (swarm.sh bind_inputs).
+  await mkdir(join(root, "inputs"));
+  await symlink(join(outside, "laptop"), join(root, "inputs", "laptop"));
+  await symlink(join(outside, "phone"), join(root, "inputs", "phone"));
+  await writeFile(join(root, "inputs.json"), JSON.stringify({
+    source: `${join(outside, "laptop")}, ${join(outside, "phone")}`,
+    sets: [
+      { name: "laptop", path: "inputs/laptop", source: join(outside, "laptop"), files: 2, bytes: 4 },
+      { name: "phone", path: "inputs/phone", source: join(outside, "phone"), files: 1, bytes: 6 },
+    ],
+    copied_at: "2026-09-27T00:00:00Z",
+    bytes: 10,
+    enforce: "auto",
+    guard: "microvm",
+    held: "bind",
+    files: [
+      { path: "inputs/laptop/hive-link", bytes: 0, sha256: sha("link:users/ntuser.dat"), link: "users/ntuser.dat" },
+      { path: "inputs/laptop/users/ntuser.dat", bytes: 4, sha256: sha("hive") },
+      { path: "inputs/phone/sms.db", bytes: 6, sha256: sha("sqlite") },
+    ],
+  }));
+  let c = await takeCustody(root);
+  assert.equal(evidence(c).unchanged, true, c.summary);
+  assert.deepEqual([evidence(c).checked?.files, evidence(c).checked?.links], [2, 1]);
+  assert.deepEqual(evidence(c).added, [], "a set's link is where the set is, not a name added to the evidence");
+  await writeFile(join(outside, "phone", "planted.db"), "new");
+  await writeFile(join(outside, "laptop", "users", "ntuser.dat"), "HIVE");
+  // A link at the top that the manifest does not name as a set is a name, and never walked.
+  await symlink(join(outside, "other"), join(root, "inputs", "other"));
+  c = await takeCustody(root);
+  assert.deepEqual(evidence(c).changed, ["inputs/laptop/users/ntuser.dat"]);
+  assert.deepEqual(evidence(c).added, ["inputs/other", "inputs/phone/planted.db"]);
 });
 
 test("the manifest is checked against the kickoff's anchor outside the run: a rewritten manifest is caught, a missing one is said", async () => {
@@ -274,6 +320,11 @@ test("the report's custody lines know a microVM run", () => {
   assert.match(evidenceArrival({ source: "/ev", guard: "microvm", held: "bind" }), /mounted read-only/);
   assert.match(evidenceArrival({ source: "/ev", guard: "seatbelt", held: "bind" }), /linked to it/);
   assert.match(evidenceArrival({ source: "/ev", guard: "seatbelt" }), /^<p>Copied from/);
+  // Several sets: each named at inputs/<name>/ with where it came from.
+  const sets = [{ path: "inputs/laptop", source: "/ev/laptop", files: 3 }, { path: "inputs/phone", source: "/ev/phone", files: 1 }];
+  assert.match(evidenceArrival({ source: "/ev/laptop, /ev/phone", guard: "microvm", held: "bind", sets }), /^<p>Used in place from 2 sets \(<code>\/ev\/laptop<\/code> as <code>inputs\/laptop\/<\/code>, 3 files; <code>\/ev\/phone<\/code> as <code>inputs\/phone\/<\/code>, 1 file\)/);
+  assert.equal(evidenceFrom({ source: "/ev/laptop, /ev/phone", sets }), "in 2 sets: inputs/laptop/ from /ev/laptop (3 files); inputs/phone/ from /ev/phone (1 file)");
+  assert.equal(evidenceFrom({ source: "/ev" }), "from /ev", "one set is said as it always was");
 });
 
 test("each agent's VM is a custody row: what it could write, reach and was given, and its disk", () => {
@@ -622,6 +673,30 @@ test("the ledger is held to the trace whatever the trace carries: a forged ledge
   c = await takeCustody(root);
   assert.equal(c.ledger?.intact, false, "an old-shaped entry after the first version 2 one was not written by the tool");
   assert.ok(c.ledger?.not_on_trace.includes(2), JSON.stringify(c.ledger));
+});
+
+test("a version 3 ledger is held to the trace too: an entry the trace never carried is named, however well it is chained", async () => {
+  const root = await sandbox();
+  await anchor(root, { isolation: "microvm" });
+  await mkdir(join(root, "ledger"), { recursive: true });
+  const v3 = (seq: number, value: string, prev: string): LedgerEntry => {
+    const e: LedgerEntry = { v: 3, seq, kind: "finding", value, source: "inputs/notes.txt", evidence: "line 1", confidence: "high", refs: ["input:inputs/notes.txt"], by: "a0", authors: ["a0"], at: `2026-09-27T00:00:0${seq}Z` };
+    e.prev = prev;
+    e.hash = ledgerHash(e, prev);
+    return e;
+  };
+  const e1 = v3(1, "recorded through the hub", "genesis");
+  const e2 = v3(2, "written into the file by hand", e1.hash as string);
+  await writeFile(join(root, "ledger", "entries.jsonl"), `${JSON.stringify(e1)}\n${JSON.stringify(e2)}\n`);
+  // The hub logged e1 only.
+  await writeFile(join(root, "traces", "events.jsonl"), `${JSON.stringify({ ts: "t", agent: "system", tool: "hub_call", args: { fn: "recordEntry", seat: "a0" }, result: { ok: true, hash: e1.hash }, sid: "hub", seq: 1 })}\n`);
+  const c = await takeCustody(root);
+  assert.equal(c.ledger?.detail, "2 of 2 entries chained", "its own chain holds");
+  assert.deepEqual(c.ledger?.not_on_trace, [2], JSON.stringify(c.ledger));
+  assert.equal(c.ledger?.intact, false);
+  assert.equal(c.checks.find((x) => x.name === "ledger")?.status, "failed");
+  assert.equal(c.checks.find((x) => x.name === "ledger")?.reason, "1 in the ledger and never on the trace (seq 2)", "the check says why, not only that the chain holds");
+  assert.match(c.summary, /in the ledger never on the trace \(seq 2\)/);
 });
 
 test("in a microVM run the ledger is held to the hub's lines, and a seat's lines and spill speak for that seat only", async () => {

@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import * as board from "../extensions/board.ts";
-import { agentDeadPath, appendEvent, diffWatchedPaths, TRANSFER_PART_BYTES, WIRE_LINE_MAX, WireLineTooLarge, watchWriteStall, emptyAgentBudget, initSandbox, postSender, readPost, SENTINEL_REL, watchedPathHashes } from "../extensions/protocol.ts";
+import { agentDeadPath, agentDonePath, appendEvent, claimName, createContext, diffWatchedPaths, finishLineVerdict, postMessage, runFinishLine, teamView, TRANSFER_PART_BYTES, WIRE_LINE_MAX, WireLineTooLarge, watchWriteStall, emptyAgentBudget, initSandbox, postSender, readPost, SENTINEL_REL, watchedPathHashes } from "../extensions/protocol.ts";
 import { boardTable, CollectorLink, historyQuotaBytes, Hub, isHubProcess, msbDbOutcomes, parseSeatTokens, seatTokenMatches, SocketPathTooLong, takeHubLock, updateRegistryState } from "../scripts/vm-hub.ts";
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -317,6 +317,26 @@ test("wait through the hub returns on a peer's post, and an aborted wait ends th
   }
 });
 
+test("wait through the hub keeps every_post: a seat following the whole board wakes on a post to a peer, and one that is not does not", async () => {
+  const { hub, sandbox } = await setup({ agents: ["a0", "a1", "a2"] });
+  const ctx = { sandboxRoot: sandbox, agentId: "a1" };
+  await asVm(hub.socketFor("a1"), () => board.readInbox(ctx));
+  // Following every post: a post addressed only to a2 wakes a1.
+  const following = asVm(hub.socketFor("a1"), () => board.waitForSwarmChange(ctx, { seconds: 20, everyPost: true }));
+  await new Promise((r) => setTimeout(r, 300));
+  await board.callBoard(hub.socketFor("a0"), "postMessage", [null, { tag: "ask", to: "a2", body: "for a2 only" }]);
+  const woke = await following;
+  assert.equal(woke.reason, "post", "every_post reached the hub: a post to a peer woke the seat");
+  await asVm(hub.socketFor("a1"), () => board.readInbox(ctx));
+  // Not following: the same kind of post passes it by, and the wait times out.
+  const plain = asVm(hub.socketFor("a1"), () => board.waitForSwarmChange(ctx, { seconds: 2 }));
+  await new Promise((r) => setTimeout(r, 300));
+  await board.callBoard(hub.socketFor("a0"), "postMessage", [null, { tag: "ask", to: "a2", body: "for a2 again" }]);
+  const slept = await plain;
+  assert.equal(slept.reason, "timeout");
+  assert.equal(slept.passed, 1, "the post to a2 was seen and passed by");
+});
+
 test("the backstop writes the sentinel past the wall clock and the grace period, and says so as the harness", async () => {
   const { hub, sandbox, lines } = await setup({ wall: 1 });
   const prompts: string[] = [];
@@ -549,6 +569,184 @@ test("the sentinel is written only when the operator's finish line passes on the
   await writeFile(join(sandbox, "work", "report.md"), "# report\n");
   const done = (await board.callBoard(hub.socketFor("a0"), "markDone", [null, { reason: "finished", outputFile: "work/report.md" }])) as { created_sentinel: boolean };
   assert.equal(done.created_sentinel, true, "with the check passing, the sentinel is written");
+});
+
+test("a finish line the host cannot read ends the run as verification_unavailable, whatever the seat said: never a clean done", async () => {
+  const { hub, sandbox, base } = await setup();
+  const was = process.env.SWARM_RUNS_DIR;
+  process.env.SWARM_RUNS_DIR = join(base, "no-registry-here");
+  cleanups.push(async () => {
+    if (was === undefined) delete process.env.SWARM_RUNS_DIR;
+    else process.env.SWARM_RUNS_DIR = was;
+  });
+  // No registry and no contract: there is no finish line to run.
+  await rm(join(sandbox, "SWARM.md"));
+  const done = (await board.callBoard(hub.socketFor("a0"), "markDone", [null, { reason: "finished", outputFile: "work/report.md", outcome: "completed" }])) as { created_sentinel: boolean; outcome?: string; reason: string };
+  assert.equal(done.created_sentinel, true, "an unreadable finish line does not hold the run hostage");
+  assert.equal(done.outcome, "verification_unavailable", "the seat's own word (completed) is not taken");
+  assert.match(done.reason, /^VERIFICATION UNAVAILABLE: finished$/);
+  const sentinel = await readFile(join(sandbox, SENTINEL_REL), "utf8");
+  assert.match(sentinel, /^outcome: verification_unavailable$/m);
+  assert.doesNotMatch(sentinel, /^outcome: completed$/m);
+});
+
+test("list_team shows what each peer is doing and found, from the board, the store and the ledger, the same on the host and through the hub", async () => {
+  // A seat's VM does not see the trace or its peers' records: this is how it
+  // sees them working instead. Built with no trace at all.
+  const { hub, sandbox } = await setup({ agents: ["a0", "a1", "a2"] });
+  await rm(join(sandbox, "traces", "events.jsonl"), { force: true });
+  await claimName(sandbox, "a1", "Disk Examiner", "the partition table and the file list");
+  await postMessage(createContext(sandbox, "a1"), { tag: "intro", body: "a1 here" });
+  await postMessage(createContext(sandbox, "a2"), { tag: "claim", body: "taking the registry" });
+  await new Promise((r) => setTimeout(r, 20));
+  await postMessage(createContext(sandbox, "a1"), { tag: "result", to: "a0", body: "the table is read" });
+  const job = (id: string, agent: string, state: string, spec: Record<string, unknown>) =>
+    mkdir(join(sandbox, "store", "jobs", id), { recursive: true }).then(() =>
+      writeFile(join(sandbox, "store", "jobs", id, "job.json"), JSON.stringify({ id, requester: { agent }, state, spec, accepted_at: "2026-09-27T10:00:00.000Z", ...(state === "running" ? { started_at: "2026-09-27T10:00:05.000Z" } : {}) })),
+    );
+  const command = "for x in a b c; do\n  icat -o 2048 inputs/disk.E01 \"$x\" > \"$OUT/$x\"\ndone";
+  await job("j000001", "a1", "running", { kind: "command", profile: "disk", command });
+  await job("j000002", "a1", "committed", { kind: "command", command: "true" });
+  await job("j000003", "a2", "accepted", { kind: "tool", tool: "regkv", args: { path: "store/jobs/j000009/out/SYSTEM" } });
+  const entry = (seq: number, by: string, kind: string, value: string, extra: Record<string, unknown> = {}) => JSON.stringify({ v: 3, seq, kind, value, by, authors: [by], at: "2026-09-27T10:01:00.000Z", ...extra });
+  await mkdir(join(sandbox, "ledger"), { recursive: true });
+  await writeFile(join(sandbox, "ledger", "entries.jsonl"), [
+    entry(1, "a1", "finding", "one"),
+    entry(2, "a1", "event", "two\nits second line"),
+    entry(3, "a2", "ioc", "a2's"),
+    entry(4, "a1", "finding", "three"),
+    entry(5, "a1", "finding", "four, which corrects two", { supersedes: 2 }),
+  ].join("\n") + "\n");
+  await writeFile(agentDonePath(sandbox, "a2"), "reason: finished\n");
+
+  const viaHub = (await asVm(hub.socketFor("a0"), () => board.teamView({ sandboxRoot: "/elsewhere", agentId: "a2" }, { pageChars: 0 }))) as Awaited<ReturnType<typeof teamView>>;
+  const onHost = await teamView(createContext(sandbox, "a0"), { pageChars: 0 });
+  assert.deepEqual(viaHub, onHost, "the same view on the host and through the hub, for the channel's own seat");
+  assert.deepEqual(viaHub.peers.map((p) => p.id), ["a1", "a2"], "every seat but the caller");
+  assert.equal(viaHub.n, 3);
+  const a1 = viaHub.peers[0]!;
+  assert.deepEqual([a1.name, a1.doing, a1.marker, a1.posts], ["Disk Examiner", "the partition table and the file list", null, 2]);
+  assert.deepEqual({ ...a1.last_post, at: undefined }, { id: 3, thread: "main", tag: "result", to: "a0", at: undefined }, "its latest post");
+  assert.ok(Date.parse(a1.last_post!.at) > 0, "with when it was posted");
+  assert.deepEqual(a1.open_jobs, [{ id: "j000001", kind: "command", profile: "disk", command, state: "running", since: "2026-09-27T10:00:05.000Z" }], "only what is not over, and the command whole");
+  assert.deepEqual(a1.ledger, {
+    total: 4,
+    last: [
+      { seq: 2, kind: "event", value_first_line: "two", superseded_by: 5 },
+      { seq: 4, kind: "finding", value_first_line: "three" },
+      { seq: 5, kind: "finding", value_first_line: "four, which corrects two" },
+    ],
+  });
+  const a2 = viaHub.peers[1]!;
+  assert.deepEqual([a2.name, a2.marker, a2.posts, a2.ledger.total], [null, "done", 1, 1]);
+  assert.deepEqual(a2.open_jobs, [{ id: "j000003", kind: "tool", profile: null, tool: "regkv", args: { path: "store/jobs/j000009/out/SYSTEM" }, state: "accepted", since: "2026-09-27T10:00:00.000Z" }]);
+  assert.equal(viaHub.remaining, 0);
+
+  // A page is whole peers: the first always, then as many as the bound holds.
+  const first = await asVm(hub.socketFor("a0"), () => board.teamView({ sandboxRoot: "/elsewhere", agentId: "a0" }, { pageChars: 10 }));
+  assert.deepEqual([first.peers.map((p) => p.id), first.remaining, first.next], [["a1"], 1, "a2"]);
+  assert.deepEqual(first.peers[0], a1, "nothing in a peer is cut to fit");
+  assert.match(first.note ?? "", /from: "a2"/);
+  const rest = await asVm(hub.socketFor("a0"), () => board.teamView({ sandboxRoot: "/elsewhere", agentId: "a0" }, { from: "a2", pageChars: 10 }));
+  assert.deepEqual([rest.peers.map((p) => p.id), rest.remaining, rest.next], [["a2"], 0, undefined]);
+});
+
+test("a seat's done gets the finish line from the hub, run on the host whole, and markDone takes that same run", async () => {
+  // A seat's VM does not see the trace, and the goals' checks read it: the
+  // run the seat's done is refused or let through on is the host's.
+  const { hub, sandbox, base, lines } = await setup();
+  const was = process.env.SWARM_RUNS_DIR;
+  process.env.SWARM_RUNS_DIR = join(base, "runs");
+  cleanups.push(async () => {
+    if (was === undefined) delete process.env.SWARM_RUNS_DIR;
+    else process.env.SWARM_RUNS_DIR = was;
+  });
+  await registryWithChecks(base, sandbox, [`grep -q '"tool":"inputs_check"' traces/events.jsonl`, "echo ran >> checks-ran.log; test -f work/report.md"]);
+  await writeFile(join(sandbox, "traces", "events.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), agent: "a1", tool: "inputs_check", args: {}, result: { ok: true } })}\n`);
+  const runs = async () => (await readFile(join(sandbox, "checks-ran.log"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).length;
+  // The seat names another directory as its run: the hub runs its own.
+  const viaHub = await asVm(hub.socketFor("a0"), () => board.runFinishLine("/the/vm/view"));
+  assert.ok(viaHub, "the hub answered");
+  assert.deepEqual([viaHub.total, viaHub.passed, viaHub.checks.map((c) => c.ok)], [2, 1, [true, false]], "the trace check passes where the trace is");
+  const onHost = await runFinishLine(sandbox);
+  assert.deepEqual({ ...viaHub, checks: viaHub.checks.map(({ ms: _ms, ...c }) => c) }, { ...onHost, checks: onHost!.checks.map(({ ms: _ms, ...c }) => c) }, "the run crosses whole, every field the runner gave");
+  const refusal = finishLineVerdict(viaHub, false);
+  assert.equal(refusal.proceed, false);
+  if (!refusal.proceed) assert.equal(refusal.reason, (finishLineVerdict(onHost, false) as { reason: string }).reason, "the refusal is the host's, word for word");
+  // Met: the seat's run passes, and markDone right after it runs nothing again.
+  await writeFile(join(sandbox, "work", "report.md"), "# report\n");
+  const before = await runs();
+  const passing = await asVm(hub.socketFor("a0"), () => board.runFinishLine("/the/vm/view"));
+  assert.equal(passing?.passed, 2);
+  const done = (await asVm(hub.socketFor("a0"), () => board.markDone({ sandboxRoot: "/the/vm/view", agentId: "a0" }, { reason: "finished", outputFile: "work/report.md" }))) as { created_sentinel: boolean };
+  assert.equal(done.created_sentinel, true);
+  assert.equal(await runs(), before + 1, "one done, one run of the operator's checks");
+  const audit = await until(() => lines.some((l) => (l as { args?: { fn?: string } }).args?.fn === "runFinishLine"), "the host's run is on the trace").then(() =>
+    lines.filter((l) => (l as { args?: { fn?: string } }).args?.fn === "runFinishLine") as Array<{ agent: string; result: { total: number; passed: number; failing?: string[] } }>,
+  );
+  assert.deepEqual(audit.map((l) => [l.result.total, l.result.passed, l.result.failing]), [
+    [2, 1, ["echo ran >> checks-ran.log; test -f work/report.md"]],
+    [2, 2, undefined],
+  ], "each host run of the checks is the harness's own line on the trace");
+});
+
+test("a passing finish line is reused by markDone only while the board, the ledger, the review and the leads stand as it was run against", async () => {
+  const { hub, sandbox, base } = await setup();
+  const was = process.env.SWARM_RUNS_DIR;
+  process.env.SWARM_RUNS_DIR = join(base, "runs");
+  cleanups.push(async () => {
+    if (was === undefined) delete process.env.SWARM_RUNS_DIR;
+    else process.env.SWARM_RUNS_DIR = was;
+  });
+  await registryWithChecks(base, sandbox, ["echo ran >> checks-ran.log; true"]);
+  const runs = async () => (await readFile(join(sandbox, "checks-ran.log"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).length;
+  // The seat's run passes; then a peer disputes something before the seat's
+  // markDone lands. The run no longer matches the state: it is run again.
+  assert.equal((await asVm(hub.socketFor("a0"), () => board.runFinishLine("/v")))?.passed, 1);
+  assert.equal(await runs(), 1);
+  await mkdir(join(sandbox, "ledger"), { recursive: true });
+  await writeFile(join(sandbox, "ledger", "disputes.jsonl"), `${JSON.stringify({ v: 1, act: "dispute", seq: 1, target: "x", by: "a1", at: new Date().toISOString(), why: "late" })}\n`);
+  const done = (await asVm(hub.socketFor("a0"), () => board.markDone({ sandboxRoot: "/v", agentId: "a0" }, { reason: "finished", outputFile: "work/report.md" }))) as { created_sentinel: boolean };
+  assert.equal(done.created_sentinel, true);
+  assert.equal(await runs(), 2, "the review moved after the seat's run: markDone ran the finish line again instead of reusing it");
+});
+
+test("the state revision moves with what a verdict rests on, and not with chatter", async () => {
+  const { sandbox } = await setup();
+  const { stateRevision, runFinishLineBound, FINISH_LINE_ATTEMPTS } = await import("../extensions/protocol.ts");
+  const rev = async () => (await stateRevision(sandbox)).revision;
+  const r0 = await rev();
+  await postMessage(createContext(sandbox, "a0"), { tag: "intro", body: "hello" } as never);
+  await postMessage(createContext(sandbox, "a0"), { tag: "claim", body: "taking the disk" } as never);
+  assert.equal(await rev(), r0, "an intro and a claim change no verdict");
+  await postMessage(createContext(sandbox, "a1"), { tag: "veto", body: "that answer is wrong" } as never);
+  const r1 = await rev();
+  assert.notEqual(r1, r0, "a veto does");
+  await mkdir(join(sandbox, "leads"), { recursive: true });
+  await writeFile(join(sandbox, "leads", "leads.jsonl"), '{"seq":1}\n');
+  const r2 = await rev();
+  assert.notEqual(r2, r1, "a lead does");
+  await mkdir(join(sandbox, "ledger"), { recursive: true });
+  await writeFile(join(sandbox, "ledger", "attestations.jsonl"), '{"v":1}\n');
+  assert.notEqual(await rev(), r2, "an attestation does");
+  // A run the state moves under is run again; one that never holds still is not settled.
+  let n = 0;
+  const moving = async (S: string) => {
+    n += 1;
+    await writeFile(join(S, "leads", "leads.jsonl"), `${"x".repeat(n)}\n`);
+    return { total: 1, passed: 1, checks: [{ cmd: "true", ok: true }] };
+  };
+  const never = await runFinishLineBound(sandbox, moving);
+  assert.deepEqual([never.settled, never.runs, n], [false, FINISH_LINE_ATTEMPTS, FINISH_LINE_ATTEMPTS]);
+  let m = 0;
+  const once = async (S: string) => {
+    m += 1;
+    if (m === 1) await writeFile(join(S, "leads", "leads.jsonl"), "moved once\n");
+    return { total: 1, passed: 1, checks: [{ cmd: "true", ok: true }] };
+  };
+  const settled = await runFinishLineBound(sandbox, once);
+  assert.deepEqual([settled.settled, settled.runs], [true, 2], "moved during the first run, held still during the second");
+  assert.equal(settled.revision, await rev(), "the verdict is bound to the revision it was run against");
 });
 
 test("a seat whose link went down mid-turn is 'gone', not 'working', so the watchdogs act on it", async () => {
@@ -2012,4 +2210,31 @@ test("a burst of large calls and large answers at once is taken in turn, and non
   await board.callBoard(seat, "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
   const diffs = await Promise.all(Array.from({ length: 12 }, () => board.callBoard(seat, "fileDiff", [sandbox, "work/shared.txt", 1, 2])));
   for (const d of diffs) assert.ok(JSON.stringify(d).includes("second 199"), "every large answer arrived whole");
+});
+
+test("the lead register goes through the hub as the channel's seat, and a wait held by the hub wakes on lead_ready", async () => {
+  const { hub, sandbox } = await setup();
+  // A seat that names another in its context still acts as itself.
+  const opened = (await asVm(hub.socketFor("a0"), () => board.leadOpen({ sandboxRoot: "/v", agentId: "a1" }, { title: "Read inside the vault", why: "q5", needs: [], take: true }))) as { ok: boolean; lead: { id: string; holder: string } };
+  assert.equal(opened.ok, true);
+  assert.equal(opened.lead.holder, "a0", "the holder is the channel's seat, not the one the call named");
+  const refused = (await asVm(hub.socketFor("a1"), () => board.leadClaim({ sandboxRoot: "/v", agentId: "a1" }, "L-1"))) as { ok: boolean; reason?: string };
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason ?? "", /held by a0/);
+  // a1 finds the key; a0's lead needs it.
+  const key = (await asVm(hub.socketFor("a1"), () => board.leadOpen({ sandboxRoot: "/v", agentId: "a1" }, { title: "Find the key", why: "the vault", take: true }))) as { lead: { id: string } };
+  const linked = (await asVm(hub.socketFor("a0"), () => board.leadLink({ sandboxRoot: "/v", agentId: "a0" }, "L-1", { add: [key.lead.id] }))) as { ok: boolean; lead: { status: string } };
+  assert.deepEqual([linked.ok, linked.lead.status], [true, "blocked"]);
+  await asVm(hub.socketFor("a0"), () => board.leadsDigest({ sandboxRoot: "/v", agentId: "a0" }, { mark: true }));
+  await asVm(hub.socketFor("a0"), () => board.readInbox({ sandboxRoot: "/v", agentId: "a0" }));
+  const waiting = asVm(hub.socketFor("a0"), () => board.waitForSwarmChange({ sandboxRoot: "/v", agentId: "a0" }, { seconds: 20 }));
+  await new Promise((r) => setTimeout(r, 300));
+  const f = (await board.callBoard(hub.socketFor("a1"), "recordEntry", [null, { kind: "finding", basis: "observed", confidence: "high", indicates: "It opens the vault.", confidence_why: "Read directly.", value: "The key is in a note", source: "notes", evidence: "row 3" }])) as { ok: boolean; entry: { seq: number } };
+  assert.equal(f.ok, true);
+  const closed = (await board.callBoard(hub.socketFor("a1"), "leadClose", [null, key.lead.id, { disposition: "resolved", ref: `E-${f.entry.seq}` }])) as { ok: boolean };
+  assert.equal(closed.ok, true);
+  const woke = await waiting;
+  assert.equal(woke.reason, "lead", JSON.stringify(woke));
+  assert.match(woke.detail, /lead_ready: every need of L-1/);
+  assert.ok(existsSync(join(sandbox, "leads", "leads.md")), "the hub renders the register");
 });

@@ -17,6 +17,6 @@
   "example": "{\"path\": \"work/extracted/invoice.docx\", \"extract_to\": \"work/docparts\"}",
   "by": "maintainer",
   "at": "2026-09-22T18:00:00.000Z",
-  "version": 1,
-  "sha256": "b7405dba140674f28375bf8d2f7dd303322c17b2585897f8e14da258749a4c33"
+  "version": 2,
+  "sha256": "6ac8072bd4c2745548b070dba0103d75b0a85fcf50336290ca9113dcd5d3fd6b"
 }

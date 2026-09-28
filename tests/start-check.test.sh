@@ -54,6 +54,27 @@ run "$TMP/runs-real2" --isolation host "${base[@]}" --no-start
 [[ $rc -eq 0 ]] || fail "the start the check passed was refused: $out"
 pass "a clean option set passes --check with exit 0 and nothing written, and the start then goes ahead"
 
+echo "# several evidence sets: two of one name are refused in the start's own words; two others pass"
+mkdir -p "$TMP/ev/a/case" "$TMP/ev/b/case" "$TMP/ev/phone"
+printf 'a\n' > "$TMP/ev/a/case/a.txt"
+printf 'b\n' > "$TMP/ev/b/case/b.txt"
+printf 'p\n' > "$TMP/ev/phone/p.txt"
+run "$TMP/runs-check" --check --isolation host "${base[@]}" --no-start --inputs "$TMP/ev/a/case" --inputs "$TMP/ev/b/case"
+check_out="$out" check_rc=$rc
+run "$TMP/runs-real3" --isolation host "${base[@]}" --no-start --inputs "$TMP/ev/a/case" --inputs "$TMP/ev/b/case"
+[[ $check_rc -eq 2 && $rc -eq 2 ]] || fail "two sets of one name: check exited $check_rc and the start $rc, wanted 2 and 2: $check_out"
+[[ "$check_out" == "$out" ]] || fail "the check does not say what the start says about two sets of one name:
+--- check
+$check_out
+--- start
+$out"
+grep -q 'would both be inputs/case/' <<<"$check_out" || fail "not the refusal of two sets of one name: $check_out"
+nothing_written "$TMP/runs-check" "a check refused for two sets of one name"
+run "$TMP/runs-check" --check --isolation host "${base[@]}" --no-start --inputs "$TMP/ev/a/case" --inputs "$TMP/ev/phone"
+[[ $rc -eq 0 ]] || fail "a check with two sets exited $rc: $out"
+nothing_written "$TMP/runs-check" "a clean check with two sets"
+pass "two sets of one name are refused by --check in the start's own words, exit 2, nothing written; two others pass"
+
 echo "# the checks a start makes once its sandbox exists run too: a missing program"
 bin="$TMP/bin"
 mkdir -p "$bin"
@@ -65,7 +86,7 @@ if PATH="$bin:/usr/bin:/bin" command -v herdr >/dev/null 2>&1; then
   echo "ok - skipped: herdr is in /usr/bin or /bin here"
 else
   set +e
-  out="$(PATH="$bin:/usr/bin:/bin" SWARM_RUNS_DIR="$TMP/runs-check" bash "$ROOT/scripts/swarm.sh" start --check --isolation host "${base[@]}" --no-write-guard 2>&1)"
+  out="$(PATH="$bin:/usr/bin:/bin" SWARM_RUNS_DIR="$TMP/runs-check" bash "$ROOT/scripts/swarm.sh" start --check --isolation host "${base[@]}" --no-write-guard --accept-signer-exposure 2>&1)"
   rc=$?
   set -e
   [[ $rc -eq 2 ]] && grep -q 'BLOCKER: missing herdr' <<<"$out" || fail "--check did not run the program check (rc $rc): $out"

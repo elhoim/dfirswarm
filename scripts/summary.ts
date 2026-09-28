@@ -32,9 +32,12 @@ import {
 } from "../extensions/protocol.ts";
 import { loadRunContext, readJsonFile } from "./run-record.ts";
 import { manifestMeta, verdictAnchorLine, verdictAnchorState } from "./custody.ts";
-import { gatewayRecordOf, heldRows, readReviewState, reviewLine, sourceCheckedLine, vmSpendNote, type GatewayTotals } from "./report.ts";
+import { bodyReview, gatewayRecordOf, heldRows, readReviewState, reviewLine, sourceCheckedLine, vmSpendNote, type GatewayTotals } from "./report.ts";
+import { reportBodyFacts, type BodyFacts } from "./report-body.ts";
+import { bodyRelease } from "./release-record.ts";
 import { coverageLine, coverageOf } from "./coverage.ts";
 import { readRegularText } from "./regular-file.ts";
+import { leadsSnapshot, rankedLeads } from "../extensions/leads.ts";
 
 type Marker = { id: string; marker: "done" | "dead" | "none"; reason: string; at: string };
 
@@ -79,6 +82,16 @@ function durationHuman(ms: number): string {
   if (h) return `${h}h ${m}m`;
   if (m) return `${m}m ${rest}s`;
   return `${rest}s`;
+}
+
+/** The answers in one line, in the words the report's cover and §1 use. */
+function answersLine(f: BodyFacts): string {
+  const release = f.draft ? "a draft: no release v1" : "released";
+  if (f.era === "predates") return `none in the ledger: the run predates structured answers (ledger version 4), so its answers are its working report's prose; ${release}`;
+  if (f.era === "empty") return `none: nothing was recorded in the ledger; ${release}`;
+  if (f.era === "no answers") return `none recorded${f.questions ? ` for ${f.questions} question${f.questions === 1 ? "" : "s"}` : ""}; ${release}`;
+  const signoff = f.signoff === "current" ? "signed off over this run" : f.signoff === "not current" ? "signed off, NOT over this run as it stands" : f.signoff === "unreadable" ? "the examiner's review could not be read" : "not signed off";
+  return `${f.answered} of ${f.questions} question${f.questions === 1 ? "" : "s"} answered, ${f.adopted} adopted by the examiner; ${signoff}; ${release}`;
 }
 
 function cell(text: unknown): string {
@@ -170,9 +183,11 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
 
   // --- header -------------------------------------------------------------
   lines.push(`# Run summary: ${id || "(no id)"}${label ? ` — ${label}` : ""}`, "");
-  lines.push(`- State: ${run?.state ?? "unknown (no registry entry)"} · sentinel ${sentinel ? "present" : "absent"}`);
+  lines.push(`- State: ${run?.state ?? "unknown (no registry entry)"} · sentinel ${sentinel ? "present" : "absent"}${sentinel?.outcome ? ` · outcome ${sentinel.outcome}` : ""}`);
+  if (budget?.until_solved) lines.push(`- Mode: until solved: no wall clock, every cap advisory (spend recorded, nothing stopped for it), no abandon, a regroup after ${budget.stall_minutes ?? 15} minutes without progress`);
   lines.push(`- Started: ${startedAt || "unknown"} · Duration: ${durationHuman(durationMs)}${endedAt ? ` (to ${sentinel ? "the sentinel" : "the last trace event"} at ${endedAt})` : ""}`);
-  if (run?.case_id || run?.examiner) lines.push(`- Case: ${run?.case_id || "—"} · Examiner: ${run?.examiner || "—"}`);
+  // What the kickoff was told about who ran the run: never the examiner who adopts a report (swarm.sh releases says who did).
+  if (run?.case_id || run?.examiner) lines.push(`- Case: ${run?.case_id || "—"} · Run by: ${run?.examiner ? `${run.examiner} (as the kickoff recorded it; not an enrolled examiner)` : "—"}`);
   // How the agents were held, and what the host could say once they were gone.
   const iso = (run as { isolation?: { mode?: string; image?: string; image_digest?: string } } | null)?.isolation;
   const gateway = gatewayRecordOf(run as Record<string, unknown> | null);
@@ -221,6 +236,12 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   // review file beside the registry.
   const review = await readReviewState(runsDir, id, sandbox, ledger);
   lines.push(`- Examiner review: ${reviewLine(review, ledger)}`);
+  // The answers as the report's cover counts them, from the same facts
+  // (scripts/report-body.ts) with the same review: the two never disagree.
+  // The release state, and the adopting examiner, read as the report reads them (release-record.ts bodyRelease): never the kickoff's examiner string.
+  const rel = bodyRelease(sandbox);
+  const facts = await reportBodyFacts(sandbox, { review: bodyReview(review, rel.examiner), release: rel.release, ...(run?.model ? { defaultModel: run.model } : {}) });
+  lines.push(`- Answers: ${answersLine(facts)}`);
   for (const [k, v] of heldRows(run as Record<string, unknown> | null)) lines.push(`- ${k}: ${v}`);
   const flags: string[] = [];
   if (run?.model) flags.push(`model ${run.model}`);
@@ -234,7 +255,7 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   // --- outcome ------------------------------------------------------------
   lines.push("## Outcome", "");
   if (sentinel) {
-    lines.push(`Sentinel \`${SENTINEL_REL}\` by **${sentinel.by ?? "?"}** at ${sentinel.at ?? "?"}: ${sentinel.reason ?? ""}${sentinel.output ? ` (output: \`${sentinel.output}\`)` : ""}`, "");
+    lines.push(`Sentinel \`${SENTINEL_REL}\` by **${sentinel.by ?? "?"}** at ${sentinel.at ?? "?"}: ${sentinel.reason ?? ""}${sentinel.output ? ` (output: \`${sentinel.output}\`)` : ""}${sentinel.outcome ? `. Outcome: **${sentinel.outcome}**` : ""}`, "");
   } else if (allDead) {
     lines.push(`No sentinel: every agent died (\`done/ALL_AGENTS_DEAD\`, ${allDead.reason ?? "all_agents_dead"}, at ${allDead.at ?? "?"}). The swarm stopped without meeting its definition of done.`, "");
   } else {
@@ -403,6 +424,16 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
     }
   }
 
+  // --- answers ------------------------------------------------------------
+  if (facts.questions) {
+    lines.push("## Answers", "", `${answersLine(facts)}. The report's §5 has each answer with what it rests on.`, "", "| Question | Status | Answer | Adopted |", "| --- | --- | --- | --- |");
+    for (const q of facts.questionStatus) {
+      lines.push(`| ${cell(q.label)} | ${cell(`${q.status}${q.confidence ? `, ${q.confidence} confidence` : ""}`)} | ${q.answer !== null ? `E-${q.answer}: ${cell(q.value)}` : "—"} | ${q.answer === null ? "—" : q.adopted ? "yes, by the examiner" : "no"} |`);
+    }
+    lines.push("");
+    if (facts.summary) lines.push(`Summary (E-${facts.summary.seq}${facts.summary.stands ? "" : ", no longer standing on its support"}): ${cell(facts.summary.value)}`, "");
+  }
+
   // --- ledger -------------------------------------------------------------
   lines.push("## Ledger", "");
   if (!ledger.length) {
@@ -427,6 +458,20 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
       for (const e of timeline) lines.push(`| ${e.ts ?? ""} | ${cell(e.value)} | ${cell(e.source ?? "")} | ${(e.authors ?? [e.by]).join(", ")} |`);
       lines.push("");
     }
+  }
+
+  // --- leads --------------------------------------------------------------
+  // The lead register: the work the swarm found to follow, who held it and
+  // how each piece ended. Every lead is listed; none is cut.
+  const leadsSnap = await leadsSnapshot(sandbox).catch(() => null);
+  if (leadsSnap && leadsSnap.state.events.length) {
+    const ranked = rankedLeads(leadsSnap);
+    const by = (st: string) => ranked.filter((x) => x.status === st).length;
+    lines.push("## Leads", "");
+    lines.push(`${ranked.length} lead${ranked.length === 1 ? "" : "s"} (\`leads/leads.md\`): ${by("open")} open, ${by("active")} active, ${by("blocked")} blocked, ${by("closed")} closed; chain ${leadsSnap.state.chain.ok ? `intact, ${leadsSnap.state.events.length} events` : `BROKEN at line ${leadsSnap.state.chain.broken_at} (${leadsSnap.state.chain.reason})`}.`, "");
+    lines.push("| Lead | Title | Status | Holder | Disposition | Rests on |", "| --- | --- | --- | --- | --- | --- |");
+    for (const x of ranked) lines.push(`| ${x.id} | ${cell(x.title)} | ${x.status}${x.material ? "" : " (not material)"} | ${x.holder ?? ""} | ${x.disposition ?? ""} | ${cell(x.ref ?? "")} |`);
+    lines.push("");
   }
 
   // --- work ---------------------------------------------------------------
@@ -483,11 +528,15 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   if (!inputs) {
     lines.push("No read-only inputs were given to this swarm.", "");
   } else {
+    // Several sets: each named at inputs/<name>/ with its source.
+    const from = inputs.sets?.length
+      ? `${inputs.sets.length} sets (${inputs.sets.map((set) => `\`${set.path}/\` from \`${set.source}\``).join(", ")})`
+      : `\`${inputs.source}\``;
     const arrived = (inputs as { held?: string }).held === "bind"
-      ? `used in place from \`${inputs.source}\` (no copy; ${inputs.guard === "microvm" ? "mounted read-only into every VM" : "kernel guard " + inputs.guard})`
+      ? `used in place from ${from} (no copy; ${inputs.guard === "microvm" ? "mounted read-only into every VM" : "kernel guard " + inputs.guard})`
       : (inputs as { held?: string }).held === "image"
-        ? `attached as a read-only image from \`${inputs.source}\``
-        : `copied from \`${inputs.source}\` ${inputs.copied_at || "at an unknown time"}`;
+        ? `attached as a read-only image from ${from}`
+        : `copied from ${from} ${inputs.copied_at || "at an unknown time"}`;
     lines.push(
       `Inputs ${arrived}: ${inputs.files.length} file${inputs.files.length === 1 ? "" : "s"}, ${bytesHuman(inputs.bytes)}; enforcement asked ${inputs.enforce}, kickoff guard ${inputs.guard}.`,
       "",

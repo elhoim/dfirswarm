@@ -79,6 +79,7 @@ import { connect, createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as P from "../extensions/protocol.ts";
+import * as L from "../extensions/leads.ts";
 import * as T from "../extensions/toolchain.ts";
 import { claimHolds, messageFor, resolvePeer } from "./nudge-broker.mjs";
 import { GATEWAY_STATE_REL } from "./model-gateway.ts";
@@ -86,7 +87,56 @@ import { JobService, jobView, type JobSpec } from "./job-service.ts";
 
 /** What a job tool is told in a run with no job service. */
 const NO_JOBS = "this run has no job service (a host run, or --no-jobs): run the work in your own shell";
-import { destroyWorker, runWorker } from "./vm.ts";
+
+/** How long a record waits for the seal of a brain-side output it cites (an import job on the short lane). */
+const SEAL_WAIT_SECONDS = 45;
+
+/**
+ * Every ref an entry or an act on the ledger carries, mapped: `refs`,
+ * `attribution.basis_refs`, each alternative's `test_refs`, each
+ * `qualifies[].ref` (a list given as text is split as the ledger splits it).
+ */
+function mapLedgerRefs(input: Record<string, unknown>, f: (ref: string) => string): Record<string, unknown> {
+  const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : typeof v === "string" ? v.split(/[\s,]+/) : null);
+  const mapped = (v: unknown) => {
+    const l = list(v);
+    return l ? [...new Set(l.map((r) => r.trim()).filter(Boolean).map(f))] : v;
+  };
+  const out: Record<string, unknown> = { ...input };
+  if (input.refs !== undefined) out.refs = mapped(input.refs);
+  if (isObject(input.attribution) && (input.attribution as Record<string, unknown>).basis_refs !== undefined) out.attribution = { ...(input.attribution as Record<string, unknown>), basis_refs: mapped((input.attribution as Record<string, unknown>).basis_refs) };
+  if (Array.isArray(input.alternatives)) out.alternatives = input.alternatives.map((x) => (isObject(x) && (x as Record<string, unknown>).test_refs !== undefined ? { ...(x as Record<string, unknown>), test_refs: mapped((x as Record<string, unknown>).test_refs) } : x));
+  if (Array.isArray(input.qualifies)) out.qualifies = input.qualifies.map((x) => (isObject(x) && typeof (x as Record<string, unknown>).ref === "string" ? { ...(x as Record<string, unknown>), ref: f(String((x as Record<string, unknown>).ref).trim()) } : x));
+  return out;
+}
+
+/**
+ * An entry, or an attest or dispute, with every tool: and trace: ref it
+ * carries sealed and replaced by the import it became (JobService.sealCited),
+ * and a note per seal. The first that cannot be sealed refuses it with the
+ * reason; without a job service there is nothing to seal with, and it is
+ * refused so.
+ */
+export async function sealCitedRefs(svc: JobService | undefined, who: string, input: Record<string, unknown>): Promise<{ ok: true; input: Record<string, unknown>; notes: string[] } | { ok: false; reason: string }> {
+  const cited = new Set<string>();
+  mapLedgerRefs(input, (r) => {
+    if (/^(tool|trace):/.test(r)) cited.add(r);
+    return r;
+  });
+  if (!cited.size) return { ok: true, input, notes: [] };
+  const first = [...cited][0];
+  if (!svc) return { ok: false, reason: `${first}: a brain's own output is sealed by the job service before a record cites it, and ${NO_JOBS}; run the work as a job and cite job:<id>/<path>` };
+  const notes: string[] = [];
+  const replaced = new Map<string, string>();
+  for (const ref of cited) {
+    const r = await svc.sealCited(who, ref, { wait: SEAL_WAIT_SECONDS });
+    if (!r.ok) return { ok: false, reason: r.reason };
+    replaced.set(ref, r.import_ref);
+    notes.push(`${ref} sealed as ${r.import_ref} (job ${r.job}), which it cites`);
+  }
+  return { ok: true, input: mapLedgerRefs(input, (r) => replaced.get(r) ?? r), notes };
+}
+import { destroyWorker, roomForWorker, runWorker } from "./vm.ts";
 
 /**
  * One line from a VM: a trace line keeps a tool's whole input and output
@@ -144,14 +194,29 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   threadOpen: { bucket: "post", capacity: 40, perSecond: 0.5 },
   claimName: { bucket: "post", capacity: 40, perSecond: 0.5 },
   recordEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  // The lead register grows as the ledger does: a burst, then a few a second.
+  leadOpen: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadClaim: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadRelease: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadClose: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadLink: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadInterpret: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  attestEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  disputeEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
   // Each done that would end the swarm runs the operator's finish line on
   // the host: a few in a row, then one a minute.
   markDone: { bucket: "done", capacity: 3, perSecond: 1 / 60 },
+  runFinishLine: { bucket: "finish_line", capacity: 3, perSecond: 1 / 60 },
   // A job is a VM: a burst, then one every few seconds; the queue's own
   // per-agent limits hold what is accepted.
   jobSubmit: { bucket: "job", capacity: 20, perSecond: 0.2 },
   catalogRequest: { bucket: "job", capacity: 20, perSecond: 0.2 },
 };
+/**
+ * How recent a finish-line run markDone takes as its own: the seat's `done`
+ * asked for it and calls markDone as soon as it passes.
+ */
+const FINISH_LINE_REUSE_MS = 30_000;
 /** A refusal repeated within this window is counted, not written again. */
 const REFUSAL_WINDOW_MS = 60_000;
 /** Request ids remembered, so a call sent again after a dropped link gets the first run's answer. */
@@ -186,7 +251,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "jobSubmit", "catalogRequest"]);
+const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -457,8 +522,26 @@ export function boardTable(hub: {
   };
   const as = (who: string): P.SwarmContext => ({ sandboxRoot: S, agentId: who });
   // One finish-line run on the host at a time: a done that arrives while
-  // one runs gets that run's answer.
-  let finishLine: Promise<Awaited<ReturnType<typeof P.runFinishLine>> | null> | null = null;
+  // one runs gets that run's answer. A seat's `done` asks for the run first
+  // (runFinishLine: its VM does not see the trace the checks read) and then
+  // calls markDone; markDone takes that same run when it met the finish line
+  // moments ago, so one done is one run of the operator's checks. Only the
+  // seat's own run, only a passing one, and only while the state it was run
+  // against still stands (P.stateRevision: the board, the ledger, the review
+  // and the leads); a run that refused, or one the state moved past, is run
+  // again. Each run carries the revision taken before it started.
+  type FinishLine = { run: Awaited<ReturnType<typeof P.runFinishLine>> | null; revision: string };
+  let finishLine: Promise<FinishLine> | null = null;
+  const askedBy = new Map<string, FinishLine & { at: number }>();
+  const revisionNow = async () => (await P.stateRevision(S).catch(() => ({ revision: "" }))).revision;
+  const sharedFinishLine = (): Promise<FinishLine> =>
+    (finishLine ??= (async () => {
+      const revision = await revisionNow();
+      const run = await P.runFinishLine(S).catch(() => null);
+      return { run, revision };
+    })().finally(() => {
+      finishLine = null;
+    }));
   type Call = (who: string, a: unknown[], signal: AbortSignal) => Promise<unknown>;
   const table: Record<string, Call> = {
     applySessionUsage: async (who, a) => {
@@ -543,26 +626,52 @@ export function boardTable(hub: {
     listForgedTools: () => P.listForgedTools(S),
     listLedger: (_who, a) => P.listLedger(S, (a[1] as { kind?: string; limit?: number }) ?? {}),
     listTeam: (who) => P.listTeam(as(who)),
+    teamView: (who, a) => {
+      const o = isObject(a[1]) ? a[1] : {};
+      return P.teamView(as(who), {
+        ...(typeof o.from === "string" ? { from: o.from } : {}),
+        ...(typeof o.pageChars === "number" && Number.isFinite(o.pageChars) ? { pageChars: o.pageChars } : {}),
+      });
+    },
     markDone: async (who, a) => {
       // The sentinel ends every seat, so the finish line is run here, on the
-      // host, by the harness, before it is written: what the agent's own
-      // extension ran inside its VM is that VM's word. An abandoned run says
+      // host, by the harness, before it is written: the run the seat's own
+      // done asked for moments ago (runFinishLine), when it met the finish
+      // line, or a new one; a seat's VM runs none of it. An abandoned run says
       // so in its reason and is not held to the checks, but one seat's
       // abandon ends it only with a second's or with nobody else working
       // (P.abandonGate); a seat leaving on its own cap writes no sentinel and
       // is not held to them either.
-      const args = (a[1] as { reason?: string; outputFile?: string; createSentinel?: boolean }) ?? {};
-      const reason = String(args.reason ?? "");
+      const { outcome: _saidOutcome, ...said } = (a[1] as { reason?: string; outputFile?: string; createSentinel?: boolean; outcome?: string }) ?? {};
+      const args: { reason?: string; outputFile?: string; createSentinel?: boolean; outcome?: P.FinishOutcome } = said;
+      let reason = String(args.reason ?? "");
       const endsSwarm = args.createSentinel !== false && reason !== "agent_cap" && !reason.startsWith(P.ABANDON_PREFIX);
+      const untilSolved = (await P.readBudget(S).catch(() => null))?.until_solved === true;
       if (endsSwarm && !(await P.swarmDoneExists(S))) {
-        finishLine ??= P.runFinishLine(S)
-          .catch(() => null)
-          .finally(() => {
-            finishLine = null;
-          });
-        const run = await finishLine;
-        const verdict = P.finishLineVerdict(run, false);
-        if (!verdict.proceed) throw new Error(`the harness re-ran the finish line on the host and it is not met: ${verdict.reason}`);
+        const mine = askedBy.get(who);
+        askedBy.delete(who);
+        const now = await revisionNow();
+        const recent = mine && Date.now() - mine.at <= FINISH_LINE_REUSE_MS && mine.revision === now && P.finishLineVerdict(mine.run, false, { untilSolved }).proceed ? mine : null;
+        // The revision is checked again just before the sentinel: a run the
+        // state moved under (a dispute, a new lead, an entry) is run again,
+        // a bounded number of times, and a state that never holds still is a
+        // refusal, not a sentinel written on a verdict it no longer matches.
+        let line: FinishLine = recent ?? (await sharedFinishLine());
+        let attempts = recent ? 0 : 1;
+        while ((await revisionNow()) !== line.revision) {
+          if (attempts >= P.FINISH_LINE_ATTEMPTS) throw new Error(P.FINISH_LINE_UNSETTLED);
+          line = await sharedFinishLine();
+          attempts += 1;
+        }
+        const run = line.run;
+        const verdict = P.finishLineVerdict(run, false, { untilSolved });
+        if (!verdict.proceed) throw new Error(`the harness ran the finish line on the host and it is not met: ${verdict.reason}`);
+        // How the run ended is the hub's to say, from its own run: a seat's
+        // word for it is dropped, and a finish line the host could not run
+        // is said in the sentinel's reason whatever the seat wrote there.
+        args.outcome = verdict.outcome;
+        if (verdict.outcome === "verification_unavailable" && !reason.startsWith(P.VERIFICATION_UNAVAILABLE_PREFIX)) reason = P.VERIFICATION_UNAVAILABLE_PREFIX + reason;
+        args.reason = reason;
       }
       // An abandon one seat asks for while others work is a vote: the seat
       // stays, and markDone says so.
@@ -571,6 +680,25 @@ export function boardTable(hub: {
       return done;
     },
     nameOf: (_who, a) => P.nameOf(S, String(a[1] ?? "")),
+    // The operator's finish line for a seat's `done`, answered whole (the
+    // refusal is made from it in the seat, as on the host).
+    runFinishLine: async (who) => {
+      const line = await sharedFinishLine();
+      askedBy.set(who, { ...line, at: Date.now() });
+      return line.run;
+    },
+    // The lead register (extensions/leads.ts): who acts is the channel's seat.
+    leadOpen: (who, a) => L.openLead(as(who), (isObject(a[1]) ? a[1] : {}) as L.LeadOpenInput),
+    leadClaim: (who, a) => L.claimLead(as(who), a[1]),
+    leadRelease: (who, a) => L.releaseLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { why?: string; generation?: number }),
+    leadClose: (who, a) => L.closeLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { disposition?: string; ref?: string; why?: string; generation?: number }),
+    leadLink: (who, a) => L.linkLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { add?: string[]; remove?: string[] }),
+    leadsView: (who, a) => {
+      const o = isObject(a[1]) ? a[1] : {};
+      return L.leadsView(as(who), { ...(typeof o.view === "string" ? { view: o.view } : {}), ...(typeof o.from === "string" ? { from: o.from } : {}), ...(typeof o.pageChars === "number" && Number.isFinite(o.pageChars) ? { pageChars: o.pageChars } : {}) });
+    },
+    leadsDigest: (who, a) => L.leadsDigest(as(who), { mark: isObject(a[1]) && a[1].mark === true }),
+    leadInterpret: (who, a) => L.recordInterpretations(S, who, Number(a[1]), Array.isArray(a[2]) ? (a[2] as L.InterpretInput[]) : []),
     postMessage: (who, a) => {
       // An agent's post is its own; `via` is the hub's to set.
       const { via: _via, ...args } = (a[1] as Record<string, unknown>) ?? {};
@@ -588,7 +716,31 @@ export function boardTable(hub: {
     readBudgetStatus: (who) => P.readBudgetStatus(as(who)),
     readInbox: (who, a) => P.readInbox(as(who), (a[1] as never) ?? {}),
     readNames: () => P.readNames(S),
-    recordEntry: (who, a) => P.recordEntry(as(who), a[1] as never),
+    recordEntry: async (who, a) => {
+      // A brain's own output the entry cites (tool:<seat>/<file>, trace:<sha256>)
+      // is sealed first, through the job service, and the entry cites the
+      // import it became: the ledger never rests on a file a seat can still write.
+      const input = isObject(a[1]) ? (a[1] as Record<string, unknown>) : {};
+      const sealed = await sealCitedRefs(hub.jobs?.(), who, input);
+      if (!sealed.ok) return { ok: false, reason: sealed.reason };
+      const res = await P.recordEntry(as(who), sealed.input as never);
+      // A correction may take the ground from under a closed lead: it reopens.
+      if (res.ok && res.entry.supersedes !== undefined) await L.reopenOnLedger(S).catch(() => undefined);
+      return res.ok && sealed.notes.length ? { ...res, note: [res.note, ...sealed.notes].filter(Boolean).join("; ") } : res;
+    },
+    // The acts on the ledger are the hub's to write, as its entries are.
+    // An attest's or a dispute's refs are sealed the same way.
+    attestEntry: async (who, a) => {
+      const sealed = await sealCitedRefs(hub.jobs?.(), who, isObject(a[1]) ? (a[1] as Record<string, unknown>) : {});
+      return sealed.ok ? P.attestEntry(as(who), sealed.input as never) : { ok: false, reason: sealed.reason };
+    },
+    disputeEntry: async (who, a) => {
+      const sealed = await sealCitedRefs(hub.jobs?.(), who, isObject(a[1]) ? (a[1] as Record<string, unknown>) : {});
+      if (!sealed.ok) return { ok: false, reason: sealed.reason };
+      const res = await P.disputeEntry(as(who), sealed.input as never);
+      if (res.ok) await L.reopenOnLedger(S).catch(() => undefined);
+      return res;
+    },
     recordFileVersion: async (who, a) => {
       const { key, owner } = await holeOf(String(a[1] ?? ""));
       if (owner && owner !== who) throw new Error(`${key} is ${owner}'s own directory; a seat records its own files`);
@@ -654,14 +806,21 @@ export function boardTable(hub: {
         ...(typeof raw.tool === "string" ? { tool: raw.tool } : {}),
         ...(isObject(raw.args) ? { args: raw.args as Record<string, unknown> } : {}),
         ...(typeof raw.command === "string" ? { command: raw.command } : {}),
-        inputs: Array.isArray(raw.inputs) && raw.inputs.length ? raw.inputs.map(String) : ["all"],
+        // As said: left out (every object, by default), ["all"], or a list, possibly empty (job-scope.ts).
+        ...(Array.isArray(raw.inputs) ? { inputs: raw.inputs.map(String) } : typeof raw.inputs === "string" ? { inputs: [raw.inputs] } : {}),
         timeout_seconds: typeof raw.timeout_seconds === "number" ? raw.timeout_seconds : 900,
         network: raw.network === "allowlist" ? "allowlist" : "off",
         ...(typeof raw.note === "string" ? { note: raw.note } : {}),
         ...(typeof raw.profile === "string" && raw.profile ? { profile: raw.profile } : {}),
       };
+      // A job run under a lead: the lead must be the seat's own, checked
+      // before the job is accepted, and the job goes on the lead's record.
+      const refusedLead = await L.jobLeadAllowed(S, who, raw.lead);
+      if (refusedLead) return { ok: false, reason: refusedLead };
       const r = await svc.submit(who, spec, { watch: typeof raw.wait === "number" ? raw.wait : 0 });
-      return r.ok ? { ok: true, job: await jobView(S, r.job) } : r;
+      if (!r.ok) return r;
+      const attached = r.job.requester.agent === who ? await L.attachJob(S, who, r.job.id, raw.lead).catch(() => null) : null;
+      return { ok: true, job: await jobView(S, r.job), ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}) };
     },
     jobStatus: async (who, a) => {
       const svc = hub.jobs?.();
@@ -692,10 +851,16 @@ export function boardTable(hub: {
     threadJoin: (who, a) => P.threadJoin(as(who), String(a[1] ?? "")),
     threadOpen: (who, a) => P.threadOpen(as(who), a[1] as never),
     updateToolchainRecord: (who, a) => T.updateToolchainRecord(S, isObject(a[1]) ? { agent: who, inventory: a[1] as never } : undefined),
-    // Only how long: how often the hub polls is the hub's (a guest's
-    // pollMs of 0 was a tight loop of readdir on the hub's one event loop).
-    waitForSwarmChange: (who, a, signal) =>
-      P.waitForSwarmChange(as(who), { seconds: Number((a[1] as { seconds?: unknown } | null)?.seconds) || undefined, signal }),
+    // How long, and whether every post wakes it (a critic's or an
+    // integrator's every_post: dropped here, a VM seat that asked to follow
+    // the whole board slept through every post addressed to a peer). How
+    // often the hub polls is the hub's (a guest's pollMs of 0 was a tight
+    // loop of readdir on the hub's one event loop).
+    waitForSwarmChange: (who, a, signal) => {
+      const o = isObject(a[1]) ? (a[1] as { seconds?: unknown; everyPost?: unknown }) : {};
+      // The lead register's news for this seat wakes its wait too (leads.ts).
+      return P.waitForSwarmChange(as(who), { seconds: Number(o.seconds) || undefined, signal, ...(o.everyPost === true ? { everyPost: true } : {}), extraWake: L.leadsWaitCheck(as(who)) });
+    },
   };
   return table;
 }
@@ -1025,6 +1190,7 @@ export class Hub {
       ...(jobs.derived ? { derived: true } : {}),
       runWorker,
       destroyWorker,
+      hostRoom: async (mib) => roomForWorker(mib),
       notify: async (to, body) => {
         await P.systemPost(S, { tag: "result", to, body });
       },
@@ -2248,6 +2414,23 @@ export class Hub {
       this.log(`custody: ${c.ok ? (c.adverse ? "done, with checks that did not pass" : "ok") : "failed"} ${c.out}`);
       await this.event("custody", { via: "hub" }, { ok: c.ok, ...(c.adverse ? { adverse: true } : {}), ...(c.ok ? {} : { error: c.out }) });
       this.copySpill();
+      // The machine's draft of the report, sealed beside the verdict
+      // (scripts/release.ts draft): here, so a run the hub ended has it
+      // without waiting for an operator's stop, which then finds it. Its
+      // record is the release and its line in the anchor, not the trace:
+      // nothing is added after custody's own closing lines.
+      const release = join(dirname(this.cfg.vmCli), "release.ts");
+      if (c.ok && existsSync(release)) {
+        const r = await new Promise<{ ok: boolean; out: string }>((done) => {
+          execFile(
+            process.execPath,
+            ["--experimental-strip-types", "--no-warnings", release, "draft", this.cfg.sandbox, "--run", this.cfg.run as string, ...(this.cfg.registry ? ["--runs", dirname(resolve(this.cfg.registry))] : []), "--quiet"],
+            { timeout: 15 * 60_000, maxBuffer: 16 * 1024 * 1024 },
+            (err, stdout, stderr) => done({ ok: !err, out: `${String(stdout).trim()} ${String(stderr).trim()}`.trim() }),
+          );
+        });
+        this.log(`release: ${r.ok ? "the draft is sealed" : "the draft was not written"} ${r.out}`);
+      }
     }
     this.finishDone = true;
     this.saveState();
@@ -2299,6 +2482,14 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
   switch (fn) {
     case "markDone":
       return { created_sentinel: result.created_sentinel === true, reason: result.reason, ...(result.terminate === false ? { refused: true, abandon: result.abandon } : {}) };
+    case "runFinishLine": {
+      // The host's own run of the operator's checks for a seat's done: the
+      // seat's finish_line line is its VM's word, this one is the harness's.
+      const failed = Array.isArray(result.checks) ? (result.checks as Array<{ cmd?: unknown; ok?: unknown }>).filter((c) => c.ok !== true).map((c) => String(c.cmd ?? "")) : [];
+      const gate = isObject(result.gate) ? result.gate : null;
+      const gateDefects = gate && Array.isArray(gate.defects) ? (gate.defects as Array<{ code?: unknown; lead?: unknown; job?: unknown }>).map((d) => [d.code, d.lead, d.job].filter(Boolean).join(" ")) : [];
+      return { total: result.total, passed: result.passed, ...(failed.length ? { failing: failed } : {}), ...(result.error ? { error: result.error } : {}), ...(gateDefects.length ? { gate_defects: gateDefects } : {}), ...(gate && Array.isArray(gate.limited) && gate.limited.length ? { limited: gate.limited } : {}), ...(gate?.error ? { gate_error: gate.error } : {}) };
+    }
     case "forgeTool":
       return { ok: result.ok, name: (result as { manifest?: { name?: string } }).manifest?.name ?? result.name };
     case "restoreFileVersion":
@@ -2315,6 +2506,24 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
       const entry = isObject(result.entry) ? result.entry : {};
       return { ok: result.ok, seq: entry.seq, merged: result.merged, ...(typeof entry.hash === "string" ? { hash: entry.hash } : {}) };
     }
+    case "attestEntry":
+    case "disputeEntry": {
+      // The act's line hash, on the harness's own line, as an entry's is.
+      const line = isObject(result.line) ? result.line : {};
+      return { ok: result.ok, seq: line.seq, act: line.act, appended: result.appended, ...(typeof line.hash === "string" ? { hash: line.hash } : {}), ...(typeof line.target === "string" ? { target: line.target } : {}) };
+    }
+    case "leadOpen":
+    case "leadClaim":
+    case "leadRelease":
+    case "leadClose":
+    case "leadLink": {
+      // The lead's id, state and holder as the call left them, on the
+      // harness's own line beside the register's chained event.
+      const lead = isObject(result.lead) ? result.lead : {};
+      return { ok: result.ok, lead: lead.id, status: lead.status, holder: lead.holder, generation: lead.generation, ...(lead.disposition ? { disposition: lead.disposition, ref: lead.ref } : {}), ...(result.reclaimed_from ? { reclaimed_from: result.reclaimed_from } : {}), ...(result.woke ? { woke: result.woke } : {}) };
+    }
+    case "leadInterpret":
+      return { ok: result.ok, interprets: result.interprets };
     default:
       return {};
   }

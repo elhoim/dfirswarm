@@ -13,6 +13,7 @@
  * a forensic citation is usually an inode, a record id or a registry key.
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -189,9 +190,9 @@ async function sandboxWithLedger(): Promise<string> {
     { kind: "event", ts: "2026-02-11T02:57:12Z", value: "First request from 203.0.113.24", source: "inputs/u_ex.log", evidence: "line 4418" },
     { kind: "event", ts: "2026-02-11T02:57:52Z", value: "upload.aspx written", source: "MFT", evidence: "inode 33194-128-4" },
     { kind: "ioc", value: "203.0.113.24", source: "inputs/u_ex.log", evidence: "40 requests", confidence: "high" },
-    { kind: "finding", value: "Entry was an unauthenticated upload", source: "work/notes.md", evidence: "no 4624 before 02:57:12", confidence: "medium" },
+    { kind: "finding", value: "Entry was an unauthenticated upload", source: "work/notes.md", evidence: "no 4624 before 02:57:12", confidence: "medium", basis: "observed", indicates: "The way in needed no logon.", confidence_why: "Two logs agree on the order." },
   ] as const) {
-    const r = await recordEntry(a, entry);
+    const r = await recordEntry(a, entry as never);
     if (!r.ok) throw new Error(r.reason);
   }
   await mkdir(join(root, "work"), { recursive: true });
@@ -224,18 +225,32 @@ test("the report is one self-contained file that cites the ledger's own sequence
     // this document all name the same row.
     assert.match(html, /E-1/);
     assert.match(html, /E-4/);
-    // The section head is a number beside the title, not "4." inside it.
-    assert.match(html, /<span class="n">4<\/span><h2>Indicators and findings<\/h2>/);
-    // The cover carries the numbers a reader needs before the fold.
+    // The section head is a number beside the title, not "5." inside it;
+    // the body's sections first, then custody and the artifacts as appendices.
+    assert.match(html, /<span class="n">5<\/span><h2>Answers<\/h2>/);
+    // An appendix says its letter once: in its title, in the contents and at its head.
+    assert.match(html, /<div class="sec-head"><h2>Appendix A: Exhibits<\/h2>/);
+    assert.match(html, /<div class="sec-head"><h2>Appendix D: Chain of custody<\/h2>/);
+    assert.match(html, /<li><span class="n"><\/span><a href="#sA">Appendix A: Exhibits<\/a>/);
+    assert.doesNotMatch(html, /<span class="n">[A-E]<\/span>/);
+    const order = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "sA", "sB", "sC", "sD", "sE"].map((id) => html.indexOf(`<section id="${id}"`));
+    assert.deepEqual([...order].sort((a, b) => a - b), order, "the sections in their order");
+    assert.ok(order.every((i) => i > 0), "every section present");
+    // The cover carries the numbers a reader needs before the fold, and says it is a draft.
     assert.match(html, /class="scorecard"/, "the cover has its scorecard");
+    assert.match(html, /<span class="chip chip-brick">draft<\/span>/);
+    assert.match(html, /<div class="draft-mark" aria-hidden="true">DRAFT<\/div>/);
     assert.match(html, /class="tl"/, "the timeline is a rail, not a five-column table");
-    assert.match(html, /class="verdict /, "the findings are verdict cards");
+    // A run whose ledger holds findings and no answers says so, and does not call itself old.
+    assert.match(html, /The swarm recorded no answers: the ledger holds what it found/);
+    assert.doesNotMatch(html, /predates structured answers/);
     assert.match(html, /203\.0\.113\.24/);
     assert.match(html, /inode 33194-128-4/);
 
     // The swarm's own report is reproduced, with its headings demoted so the
     // document keeps one outline.
-    assert.match(html, /The swarm's own report \(report\.md\)/);
+    assert.match(html, /<h2>Appendix C: The swarm's working report<\/h2>/);
+    assert.match(html, /The agents' working document\. <\/strong>Reproduced verbatim from <code>work\/report\.md<\/code>\./);
     assert.match(html, /<h4>1\. Entry<\/h4>/);
 
     // Two renders with the same `now` are byte-identical.
@@ -348,7 +363,7 @@ test("the report discloses the AI, names each exhibit's model and hash, lists fo
     assert.match(html, /Prepared by an AI agent swarm\. The findings are the agents' conclusions/);
     assert.match(html, /not deterministic/);
     assert.match(html, /<dt>Model<\/dt><dd>openai\/gpt-5\.4<\/dd>/);
-    assert.match(html, /<dt>Entry hash<\/dt><dd class="hash">[0-9a-f]{64}<\/dd>/);
+    assert.match(html, /<dt>Entry hash<\/dt><dd><code>[0-9a-f]{64}<\/code><\/dd>/);
     assert.match(html, /<code>evtx_grep<\/code> by sr00100 \(python3\), called 1 time, sha256 <span class="hash">e{64}<\/span>/);
     assert.match(html, /not independently validated/);
     // custody.json, then edited after the stop.
@@ -646,7 +661,7 @@ test("the report shows searches that found nothing, corrections, grounding, cove
     );
     for (const entry of [
       { kind: "absence", value: "No RDP logon (4624 type 10)", source: "inputs/Security.evtx", evidence: "evtx query event id 4624 LogonType 10, tool 1.5, allocated records only" },
-      { kind: "finding", value: "Entry was an authenticated upload", source: "work/notes.md", evidence: "a 4624 at 02:57:10", confidence: "medium", supersedes: 4 },
+      { kind: "finding", value: "Entry was an authenticated upload", source: "work/notes.md", evidence: "a 4624 at 02:57:10", confidence: "medium", basis: "observed", indicates: "The way in was a logon.", confidence_why: "A 4624 precedes the upload.", supersedes: 4 },
     ]) {
       const r = await recordEntry(a, entry as never);
       if (!r.ok) throw new Error(r.reason);
@@ -671,8 +686,8 @@ test("the report shows searches that found nothing, corrections, grounding, cove
     assert.match(html, /checked against its source at kickoff by content: 2 files hashed again from the source, 0 mismatches \(3 s\)/);
     assert.match(html, /id="e-3">[\s\S]*?<dt>Examiner review<\/dt><dd>accepted by H\. Examiner at /);
     assert.match(html, /id="e-4">[\s\S]*?<dt>Examiner review<\/dt><dd>REJECTED by H\. Examiner at [^:]+:\d\d:[^:]+: not supported by the logon record<\/dd>/);
-    assert.match(html, /<td>Examiner review<\/td><td class="">1 accepted, 1 rejected, 0 amended, 4 of 6 entries not reviewed; signed by H\. Examiner at \S+ over ledger head [0-9a-f]{64} \(the ledger's current head\); the review file's chain verifies<\/td>/);
-    assert.match(html, /<dt>Prepared by<\/dt><dd>an AI agent swarm \(2 agents\); reviewed and signed by H\. Examiner at /);
+    assert.match(html, /<td>Examiner review<\/td><td class="">1 accepted, 1 rejected, 0 amended, 4 of 6 entries not reviewed; signed by H\. Examiner at \S+ over ledger head [0-9a-f]{64} \(the ledger's current head\) and work\/report\.md sha256 [0-9a-f]{64} \(the report as it is\); the review file's chain verifies<\/td>/);
+    assert.match(html, /<dt>Prepared by<\/dt><dd>an AI agent swarm \(2 agents\); reviewed and signed by H\. Examiner at \S+, over this ledger and this report<\/dd>/);
     assert.match(html, /<td>Disk encryption<\/td><td class="">OFF where the run is kept/);
     assert.match(html, /<td>Legal hold<\/td><td class="">held: litigation, by counsel, at 2026-02-12T00:00:00Z<\/td>/);
     assert.match(html, /<td>Notify hook<\/td><td class="">set \(its command is not recorded\)<\/td>/);
@@ -682,6 +697,10 @@ test("the report shows searches that found nothing, corrections, grounding, cove
     if (!late.ok) throw new Error(late.reason);
     html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
     assert.match(html, /NOT the ledger's current head/);
+    // The cover no longer says reviewed and signed: it says what the sign-off is over.
+    assert.doesNotMatch(html, /reviewed and signed by/);
+    assert.match(html, /<dt>Prepared by<\/dt><dd>an AI agent swarm \(2 agents\); signed off by H\. Examiner at \S+, and NOT OVER THIS RUN AS IT STANDS: it is over an earlier ledger \(head [0-9a-f]{64}\), and entries were recorded after it<\/dd>/);
+    assert.match(html, /An examiner signed off, and the sign-off does not cover this run as it stands/);
     const summary = await summarize(root, { runsDir: runs });
     assert.match(summary, /^- Examiner review: 1 accepted, 1 rejected, 0 amended, 5 of 7 entries not reviewed; signed by H\. Examiner/m);
     assert.match(summary, /^- Disk encryption: OFF/m);
@@ -695,6 +714,54 @@ test("the report shows searches that found nothing, corrections, grounding, cove
     await writeFile(file, text.replace("not supported by the logon record", "supported after all"));
     html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
     assert.match(html, /the review file's chain is BROKEN/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(runs, { recursive: true, force: true });
+  }
+});
+
+test("a sign-off over a report that changed afterwards is not 'reviewed and signed', and one over no report is refused", async () => {
+  const root = await sandboxWithLedger();
+  const runs = await mkdtemp(join(tmpdir(), "report-runs-"));
+  try {
+    await writeFile(join(runs, "registry.json"), JSON.stringify({ runs: [{ id: "sr001", sandbox: root }] }));
+    const { appendReview } = await import("../scripts/review.ts");
+    // A report path that is not there: no sign-off over nothing.
+    await assert.rejects(appendReview(runs, "sr001", root, { action: "sign", examiner: "H. Examiner", report: "work/final.md" }), /there is no work\/final\.md in run sr001 to sign over/);
+    await assert.rejects(appendReview(runs, "sr001", root, { action: "sign", examiner: "H. Examiner", report: "../elsewhere.md" }), /not a path under the run/);
+    const signed = await appendReview(runs, "sr001", root, { action: "sign", examiner: "H. Examiner" });
+    let html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
+    assert.match(html, /reviewed and signed by H\. Examiner at \S+, over this ledger and this report/);
+    // The report edited after the sign-off: the ledger is current, the report is not.
+    await writeFile(join(root, "work", "report.md"), "## 1. Entry\n\nSomething else entirely.\n");
+    html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
+    assert.doesNotMatch(html, /reviewed and signed by/);
+    assert.match(html, new RegExp(`NOT OVER THIS RUN AS IT STANDS: it is over work/report\\.md as it was \\(sha256 ${signed.report_sha256}\\), and that file is now [0-9a-f]{64}`));
+    assert.match(html, /— NOT the report as it is \([0-9a-f]{64}\): it changed after the signature/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(runs, { recursive: true, force: true });
+  }
+});
+
+test("the swarm's own report is labelled with the hash of the bytes reproduced, and a report changed since custody says so with the sealed hash", async () => {
+  const root = await sandboxWithLedger();
+  const runs = await mkdtemp(join(tmpdir(), "report-runs-"));
+  try {
+    await writeFile(join(runs, "registry.json"), JSON.stringify({ runs: [{ id: "sr001", sandbox: root }] }));
+    const own = (html: string) => (/Reproduced verbatim from <code>work\/report\.md<\/code>\. ([^<]*) Its headings are demoted/.exec(html) ?? [])[1] ?? "";
+    // No custody yet: the hash is today's, and said to be unsealed.
+    const text = await readFile(join(root, "work", "report.md"));
+    const now = createHash("sha256").update(text).digest("hex");
+    let html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
+    assert.equal(own(html), `Its sha256 as reproduced here: ${now}; not sealed: no custody was taken (swarm.sh stop takes it).`);
+    const c = await takeCustody(root, { runsDir: runs });
+    html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
+    assert.equal(own(html), `Its sha256 as reproduced here: ${now}, the bytes custody sealed at ${c.at} (artifacts.json).`);
+    // Edited after the stop.
+    await writeFile(join(root, "work", "report.md"), `${text}Added after the stop.\n`);
+    html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
+    assert.match(own(html), new RegExp(`^Its sha256 as reproduced here: [0-9a-f]{64}\\. CHANGED SINCE CUSTODY: custody sealed work/report\\.md at ${c.at.replace(/\./g, "\\.")} with sha256 ${now}; these are not those bytes\\.$`));
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(runs, { recursive: true, force: true });
@@ -766,8 +833,8 @@ async function layoutSandbox(runs: string): Promise<string> {
   await writeFile(join(root, "work", "extracted", "sl00100", "a", "very", "deep", "folder", "carved-record-000123456.bin"), "y");
   const a = createContext(root, "sl00100");
   for (const entry of [
-    { kind: "finding", value: "v", source: "inputs/never-read/Security.evtx", evidence: "e", confidence: "high" },
-    { kind: "finding", value: "w", source: "inputs/never-read/Security.evtx", evidence: "e", confidence: "medium", supersedes: 1 },
+    { kind: "finding", value: "v", source: "inputs/never-read/Security.evtx", evidence: "e", confidence: "high", basis: "observed", indicates: "i", confidence_why: "c" },
+    { kind: "finding", value: "w", source: "inputs/never-read/Security.evtx", evidence: "e", confidence: "medium", basis: "observed", indicates: "i", confidence_why: "c", supersedes: 1 },
   ]) {
     const r = await recordEntry(a, entry as never);
     if (!r.ok) throw new Error(r.reason);
@@ -781,7 +848,8 @@ test("each exhibit shows the examiner's standing on it, reviewed or not, and an 
     const root = await layoutSandbox(runs);
     // No review at all: every exhibit says so, on its head and in its rows.
     let html = await renderReport(root, { runsDir: runs, now: "2026-02-12T09:00:00.000Z" });
-    assert.equal((html.match(/<span class="chip chip-none">not reviewed<\/span>/g) ?? []).length, 2);
+    const exhibits = (h: string) => h.slice(h.indexOf('<section id="sA"'), h.indexOf('<section id="sB"'));
+    assert.equal((exhibits(html).match(/<span class="chip chip-none">not independently reviewed<\/span>/g) ?? []).length, 2);
     assert.equal((html.match(/<dt>Examiner review<\/dt><dd>not reviewed by an examiner<\/dd>/g) ?? []).length, 2);
     // Reviewed: the chip carries the standing.
     const { appendReview } = await import("../scripts/review.ts");

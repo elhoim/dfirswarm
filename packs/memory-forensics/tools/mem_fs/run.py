@@ -31,9 +31,17 @@ def fail(message, **extra):
 
 
 def writable_mount(path):
-    """Resolve a mount below this agent's work/<id>/ directory."""
+    """Resolve a mount below this agent's work/<id>/ directory, or, in a job,
+    below its $OUT: the one place a worker may write. A pack tool the agent's
+    VM cannot run is run again as a job with work/<id>/x given as $OUT/x, and
+    a mount refused there was a rerun that could never mount anything. As in
+    mem_carve, resolving first (symlinks included) is what holds a path to
+    where it really lands."""
     root = Path.cwd().resolve()
     dest = (root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
+    job_out = Path(os.environ["OUT"]).resolve() if os.environ.get("JOB_ID") and os.environ.get("OUT") else None
+    if job_out is not None and job_out in dest.parents:
+        return dest
     if dest == root:
         fail("mount must be a child directory, not the run directory itself", mount=str(path))
     if root not in dest.parents:

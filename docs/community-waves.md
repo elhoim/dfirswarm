@@ -554,7 +554,7 @@ Stated here so that "we don't have it" reads as a decision:
 Not in these waves, and not because they are hard to build:
 
 - A keyed HMAC ledger chain and a `swarm verify` report.
-- A multi-template report library and digital signature.
+- A multi-template report library. (Release signing, which this list once named, is in the Community edition: see the examiner and release commands in docs/usage.md.)
 - A curated YARA rule set — the cost is maintenance, forever.
 - `$LogFile` and VSS parsing.
 - Identity, multi-tenancy and an audit trail.

@@ -28,6 +28,6 @@
   "example": "{\"path\": \"inputs/memory.raw\", \"mount\": \"work/<your id>/mem\"}",
   "by": "maintainer",
   "at": "2026-09-22T17:00:00.000Z",
-  "version": 1,
-  "sha256": "76a835988721aae84a4ddf35f066f2cea03ae361c33d55ec8bc1ccf8191986f0"
+  "version": 2,
+  "sha256": "62e8a31ca6947490160a2635fb97256752fbd6e31e4fa4ae4507d2712e64ef46"
 }

@@ -17,6 +17,9 @@ import { initSandbox, recordEntry } from "../extensions/protocol.ts";
 import { sealTree, storePaths } from "../scripts/evidence-store.ts";
 import { checkAnswers, citedSeqs } from "../scripts/check-answers.ts";
 
+/** What a finding carries from version 4 on: how it was seen, how sure and why, what it indicates. */
+const F = { basis: "observed", confidence: "medium", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
+
 const ROOT = join(import.meta.dirname, "..");
 
 async function run() {
@@ -28,12 +31,12 @@ async function run() {
   await writeFile(join(staging, "key.txt"), "1234\n");
   await sealTree(S, staging, join(storePaths(S).jobs, "j000001", "out"), "j000001", 1);
   const a0 = { sandboxRoot: S, agentId: "a0" };
-  await recordEntry(a0, { kind: "finding", value: "The key is 1234", source: "a job", evidence: "cat", refs: ["job:j000001/key.txt"] }); // #1
-  await recordEntry(a0, { kind: "finding", value: "The volume is BitLocker", source: "the image", evidence: "fsstat" }); // #2 (no refs)
+  await recordEntry(a0, { kind: "finding", ...F, value: "The key is 1234", source: "a job", evidence: "cat", refs: ["job:j000001/key.txt"] }); // #1
+  await recordEntry(a0, { kind: "finding", ...F, value: "The volume is BitLocker", source: "the image", evidence: "fsstat" }); // #2 (no refs)
   await recordEntry(a0, { kind: "absence", value: "a PGP private key", source: "inputs/disk.E01", evidence: "grep -a 'BEGIN PGP PRIVATE' over the whole image" }); // #3
   await recordEntry(a0, { kind: "event", ts: "2024-01-01T00:00:00Z", value: "logon", source: "Security.evtx", evidence: "4624" }); // #4
-  await recordEntry(a0, { kind: "finding", value: "The README was AES-encrypted", source: "a job", evidence: "header", refs: ["job:j000001/key.txt"] }); // #5
-  await recordEntry(a0, { kind: "finding", value: "The README was AES Crypt v2", source: "a job", evidence: "header", refs: ["input:disk.E01"], supersedes: 5 }); // #6
+  await recordEntry(a0, { kind: "finding", ...F, value: "The README was AES-encrypted", source: "a job", evidence: "header", refs: ["job:j000001/key.txt"] }); // #5
+  await recordEntry(a0, { kind: "finding", ...F, value: "The README was AES Crypt v2", source: "a job", evidence: "header", refs: ["input:disk.E01"], supersedes: 5 }); // #6
   return S;
 }
 
@@ -51,7 +54,8 @@ test("each section rests on a finding with refs or on an absence; one that does 
     "## 5. Reflection", "Nothing cited.", "",
     "## 6. The README, again", "AES Crypt v2 (#5–#6).", "",
   ].join("\n"));
-  const r = await checkAnswers(S, "work/report.md", ["1", "2", "3", "4", "5", "6", "7"]);
+  // Section 3 asks whether a PGP key exists at all: the goal says so with --existence.
+  const r = await checkAnswers(S, "work/report.md", ["1", "2", "3", "4", "5", "6", "7"], ["3"]);
   assert.equal(r.ok, false);
   assert.deepEqual(r.lines, [
     "section 1: rests on #1 (a finding with refs)",
@@ -63,7 +67,7 @@ test("each section rests on a finding with refs or on an absence; one that does 
     'section 7: no "## 7." heading in work/report.md',
     "sections: 3 answered, 0 examination-limited, 4 unanswered",
   ]);
-  assert.equal((await checkAnswers(S, "work/report.md", ["1", "3", "6"])).ok, true);
+  assert.equal((await checkAnswers(S, "work/report.md", ["1", "3", "6"], ["Q3"])).ok, true);
   // A ref that no longer resolves no longer counts.
   await rm(join(storePaths(S).jobs, "j000001", "manifest.json"));
   assert.match((await checkAnswers(S, "work/report.md", ["1"])).lines[0], /#1's refs job:j000001\/key\.txt do not resolve/);
@@ -77,8 +81,8 @@ test("an entry tagged for a section answers it; unresolved-only refs, a hypothes
   await writeFile(join(staging, "msgs.json"), "[]\n");
   await sealTree(S, staging, join(storePaths(S).jobs, "j000002", "out"), "j000002", 1);
   await writeFile(join(storePaths(S).jobs, "j000002", "job.json"), JSON.stringify({ id: "j000002", status: "failed" }));
-  await recordEntry(a0, { kind: "finding", value: "The buyer is named in a message", source: "a job", evidence: "jq", refs: ["job:j000002/msgs.json"], answers: ["Q7"] }); // #7
-  await recordEntry(a0, { kind: "finding", value: "The page was only on screen", source: "s", evidence: "e", refs: ["unresolved:seen in a screenshot"] }); // #8
+  await recordEntry(a0, { kind: "finding", ...F, value: "The buyer is named in a message", source: "a job", evidence: "jq", refs: ["job:j000002/msgs.json"], answers: ["Q7"], qualifies: [{ ref: "job:j000002/msgs.json", why: "the job failed after writing the whole message list" }] }); // #7
+  await recordEntry(a0, { kind: "finding", ...F, value: "The page was only on screen", source: "s", evidence: "e", refs: ["unresolved:seen in a screenshot"] }); // #8
   await recordEntry(a0, { kind: "hypothesis", value: "The key was typed by hand", source: "s", evidence: "e" }); // #9
   await recordEntry(a0, { kind: "absence", value: "no second wallet", source: "C:", evidence: "grep over allocated files", completion: "partial" }); // #10
   await recordEntry(a0, { kind: "limitation", value: "The second volume was not opened", source: "vault p2", evidence: "no key", reason: "unavailable", answers: ["11"] }); // #11
@@ -130,4 +134,28 @@ test("await-done.sh runs a goal line that calls it through SWARM_HARNESS", async
   await writeFile(join(S, "work", "report.md"), "## 1. The key\nBitLocker (#2).\n");
   const r2 = spawnSync("bash", [join(ROOT, "scripts", "await-done.sh"), "--sandbox", S, "--checks-json"], { encoding: "utf8", env: { ...process.env, SWARM_RUNS_DIR: join(S, "..", "no-registry") } });
   assert.equal((JSON.parse(r2.stdout.trim().split("\n").at(-1) ?? "{}") as { checks?: Array<{ ok: boolean }> }).checks?.[0].ok, false);
+});
+
+test("a search that found nothing answers only a question that asks whether something exists; any other section it rests on is examination-limited", async () => {
+  const S = await run();
+  await writeFile(join(S, "work", "report.md"), ["## 3. The PGP key", "Not found (E-3).", ""].join("\n"));
+  // Not an existence question: the search is documented, the question is not answered.
+  const limited = await checkAnswers(S, "work/report.md", ["3"]);
+  assert.equal(limited.ok, true, "a limited section does not fail the check: it is said apart");
+  assert.deepEqual(limited.outcomes, { "3": "limited" });
+  assert.match(limited.lines[0], /^section 3: examination-limited, rests on #3 \(a search that found nothing: it documents the search, and the question asks for more than whether something exists\)$/);
+  assert.equal(limited.lines.at(-1), "sections: 0 answered, 1 examination-limited, 0 unanswered");
+  // The goal says question 3 asks whether the key exists: then the search answers it.
+  const answered = await checkAnswers(S, "work/report.md", ["3"], ["3"]);
+  assert.deepEqual(answered.outcomes, { "3": "answered" });
+  // A finding cited beside the absence still answers the section.
+  const a0 = { sandboxRoot: S, agentId: "a0" };
+  await recordEntry(a0, { kind: "finding", ...F, value: "A key file sits in Downloads", source: "a job", evidence: "cat", refs: ["job:j000001/key.txt"] }); // #7
+  await writeFile(join(S, "work", "report.md"), ["## 3. The PGP key", "Not in the image at large (E-3), but in Downloads (#7).", ""].join("\n"));
+  assert.deepEqual((await checkAnswers(S, "work/report.md", ["3"])).outcomes, { "3": "answered" });
+  // The command line takes --existence.
+  const cli = (extra: string[]) => spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "check-answers.ts"), "--report", "work/report.md", "--sections", "3", ...extra], { cwd: S, encoding: "utf8" });
+  await writeFile(join(S, "work", "report.md"), ["## 3. The PGP key", "Not found (E-3).", ""].join("\n"));
+  assert.match(cli([]).stdout, /section 3: examination-limited/);
+  assert.match(cli(["--existence", "3"]).stdout, /section 3: rests on #3 \(a search that found nothing\)/);
 });

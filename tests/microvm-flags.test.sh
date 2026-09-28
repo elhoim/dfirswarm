@@ -272,6 +272,15 @@ sbx_mem="$(reg vm-mem '.sandbox')"
 grep -q '^## Job images' "$sbx_mem/SWARM.md" || fail "SWARM.md has no Job images section"
 grep -q 'job_run profile=<name>' "$sbx_mem/SWARM.md" || fail "SWARM.md does not say how to run in a job image"
 grep -q '`memory`: dfirswarm-memory:dev-'"$ARCH"' — the packs .*memory-forensics' "$sbx_mem/SWARM.md" || fail "SWARM.md does not map the pack to its image: $(grep -A8 '^## Job images' "$sbx_mem/SWARM.md")"
+grep -q 'A command that names no profile runs in the smallest of them whose own record (images/<name>/image.json) holds every program it runs' "$sbx_mem/SWARM.md" || fail "SWARM.md does not say where a job that names no profile runs: $(grep -A3 '^## Job images' "$sbx_mem/SWARM.md")"
+! grep -q 'kept for short jobs' "$sbx_mem/SWARM.md" || fail "one worker, and SWARM.md says one is kept for short jobs"
+# What a job reads: declared, and given nothing beside it; a kept output cited as tool:, sealed first.
+grep -q 'Declare what a job reads (`inputs`: `input:<path>`' "$sbx_mem/SWARM.md" || fail "SWARM.md does not tell the agents to declare what a job reads: $(grep -A6 '^## Tool jobs' "$sbx_mem/SWARM.md")"
+grep -q 'is cited as `tool:<you>/<file>`' "$sbx_mem/SWARM.md" || fail "SWARM.md does not say how a kept output is cited"
+# From three workers one is kept for short jobs, and the agents are told how to take it.
+out="$(start --isolation microvm --workers 3 --vm-memory 512 --worker-memory 512 --pack memory-forensics --label vm-lanes)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a microvm run with three workers exited $rc: $out"
+grep -q 'One of them is kept for short jobs: give a job that needs two minutes or less `timeout_seconds` of 120 or' "$(reg vm-lanes '.sandbox')/SWARM.md" || fail "SWARM.md does not tell the agents how to take the short-job worker"
 # --brains-with-packs: the agents boot the packs' image, as before.
 out="$(start --isolation microvm "${small[@]}" --brains-with-packs --pack memory-forensics --label vm-mem-brains)"; rc=$?
 [[ $rc -eq 0 ]] || fail "--brains-with-packs exited $rc: $out"
@@ -443,6 +452,48 @@ node --experimental-strip-types --no-warnings --input-type=module -e "
 " || fail "the agents' own inputs check calls unchanged evidence with links in it changed"
 (cd "$sbx" && python3 "$ROOT/packs/computer-forensics-base/tools/check_inputs/run.py" >/dev/null) || fail "the pack's check_inputs calls it changed"
 pass "links inside the evidence are recorded as links, and the manifest, the agents' check and check_inputs agree they are unchanged"
+
+# --- several sets, each used in place ------------------------------------------------
+mkdir -p "$TMP/sets/laptop/users" "$TMP/sets/phone"
+printf 'hive\n' > "$TMP/sets/laptop/users/ntuser.dat"
+printf 'sqlite\n' > "$TMP/sets/phone/sms.db"
+# A link from one set into another stays within the evidence: every set is mounted.
+ln -s "$TMP/sets/laptop/users/ntuser.dat" "$TMP/sets/phone/from-laptop"
+chmod -R a-w "$TMP/sets"
+out="$(start --isolation microvm --inputs "$TMP/sets/laptop" --inputs "$TMP/sets/phone" --label vm-sets)"; rc=$?
+[[ $rc -eq 0 ]] || fail "two sets under microvm exited $rc: $out"
+sbx="$(sandbox_of "$out")"
+laptop_real="$(cd "$TMP/sets/laptop" && pwd -P)" phone_real="$(cd "$TMP/sets/phone" && pwd -P)"
+[[ -d "$sbx/inputs" && ! -L "$sbx/inputs" && "$(readlink "$sbx/inputs/laptop")" == "$laptop_real" && "$(readlink "$sbx/inputs/phone")" == "$phone_real" ]] \
+  || fail "two sets in a VM run are not a link each under inputs/: $(ls -l "$sbx/inputs")"
+[[ ! -e "$sbx/.inputs-pristine" ]] || fail "two sets used in place made a pristine clone"
+for d in "$laptop_real" "$phone_real"; do
+  jq -e --arg d "$d" '.mounts | any(.host == $d and .readonly == true and .noexec == true)' "$sbx/vm-spec.json" >/dev/null \
+    || fail "the set $d is not mounted read-only and no-exec into every VM: $(jq -c '.mounts' "$sbx/vm-spec.json")"
+done
+[[ "$(jq -r '[.held, .guard, (.sets | map(.name) | join(","))] | join(" ")' "$sbx/inputs.json")" == "bind microvm laptop,phone" ]] \
+  || fail "the manifest does not say two sets used in place and held by the VMs: $(jq -c '{held, guard, sets}' "$sbx/inputs.json")"
+grep -q 'each mounted into your VM in place' "$sbx/SWARM.md" || fail "the contract does not say the sets are mounted in place"
+# Each VM's probe is told the sets' names, and never reads inputs.json for them; one set tells it nothing.
+[[ "$(jq -r '.env.SWARM_INPUT_SETS' "$sbx/vm-spec.json")" == '["laptop","phone"]' ]] || fail "the VMs are not told the sets: $(jq -c '.env.SWARM_INPUT_SETS' "$sbx/vm-spec.json")"
+jq -e '.env | has("SWARM_INPUT_SETS") | not' "$(reg vm-spec '.sandbox')/vm-spec.json" >/dev/null || fail "a run of one set tells its VMs about sets"
+grep -q 'kernel guard: microvm' <<<"$out" || fail "the kickoff does not say who holds the sets: $out"
+node --experimental-strip-types --no-warnings --input-type=module -e "
+  const P = await import('$ROOT/extensions/protocol.ts');
+  const c = await P.verifyInputs('$sbx');
+  if (!c.ok || c.checked !== 3) { console.error(JSON.stringify(c)); process.exit(1); }
+" || fail "the agents' own inputs check does not walk both sets through their links"
+(cd "$sbx" && python3 "$ROOT/packs/computer-forensics-base/tools/check_inputs/run.py" >/dev/null) || fail "the pack's check_inputs takes a set's link for an added name"
+# The files stay as the manifest found them (read-only) until every check has run.
+chmod -R u+w "$TMP/sets"
+# A link out of a set, and into no other, dangles in every VM: refused, naming its set.
+ln -s "$TMP/elsewhere/case.E01" "$TMP/sets/phone/out.E01"
+out="$(start --isolation microvm --inputs "$TMP/sets/laptop" --inputs "$TMP/sets/phone" --label vm-sets-out)"; rc=$?
+[[ $rc -eq 2 ]] || fail "a set with a link out of the evidence exited $rc under microvm, wanted 2: $out"
+grep -q "BLOCKER: under --isolation microvm, --inputs $phone_real is mounted into each VM as it is" <<<"$out" || fail "the refusal does not name the set: $out"
+grep -q 'from-laptop' <<<"$out" && fail "a link into another set was refused: $out"
+rm "$TMP/sets/phone/out.E01"
+pass "two sets in a VM run are a link each under inputs/, each mounted read-only and no-exec, walked by every check; a link out of a set is refused, one into another is not"
 
 chmod u+w "$TMP/ev-mixed/a.txt"
 out="$(start --isolation microvm --inputs "$TMP/ev-mixed" --label vm-writable)"

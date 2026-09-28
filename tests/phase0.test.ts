@@ -196,7 +196,7 @@ test("an event's time says its zone: a time without one is refused on every host
   }
 });
 
-test("the ledger chain: legacy entries before the chain pass, a version 1 entry appended after version 3 ones breaks it", async () => {
+test("the ledger chain: legacy entries before the chain pass, a version 1 entry appended after version 4 ones breaks it", async () => {
   const { ledgerHash, recordEntry, verifyLedgerChain } = await import("../extensions/protocol.ts");
   const root = await mkdtemp(join(tmpdir(), "phase0-chain-"));
   try {
@@ -220,7 +220,7 @@ test("the ledger chain: legacy entries before the chain pass, a version 1 entry 
     forged.hash = ledgerHash(forged as never, last.hash);
     const bad = verifyLedgerChain(`${text}${JSON.stringify(forged)}\n`);
     assert.equal(bad.ok, false);
-    assert.equal(bad.reason, "a version 1 entry after version 3 ones");
+    assert.equal(bad.reason, "a version 1 entry after version 4 ones");
     assert.equal(bad.broken_at, 5);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -356,12 +356,14 @@ test("a ledger entry is corrected by a later one that supersedes it: both stay, 
     await initSandbox(root, { reset: true, agentIds: ["a0", "a1"] });
     const a0 = { sandboxRoot: root, agentId: "a0" };
     const a1 = { sandboxRoot: root, agentId: "a1" };
-    const first = await recordEntry(a0, { kind: "finding", value: "The shell was uploaded through the contact form", source: "access.log", evidence: "POST /contact.php at 12:40" });
+    // What a finding carries from version 4 on: how it was seen, what it indicates, how sure and why.
+    const F = { basis: "observed", confidence: "medium", indicates: "The upload path is how the shell arrived.", confidence_why: "The server's own log, read directly." };
+    const first = await recordEntry(a0, { kind: "finding", value: "The shell was uploaded through the contact form", source: "access.log", evidence: "POST /contact.php at 12:40", ...F });
     assert.ok(first.ok);
     const before = ledgerCore((first as { entry: Parameters<typeof ledgerCore>[0] }).entry);
     assert.doesNotMatch(before, /supersedes/, "an entry that corrects nothing has the core it always had");
     // A peer corrects it; the seq may be written as #1.
-    const fix = await recordEntry(a1, { kind: "finding", value: "The shell was uploaded through the file manager, not the contact form", source: "access.log", evidence: "POST /filemanager/upload.php at 12:39", supersedes: "#1" });
+    const fix = await recordEntry(a1, { kind: "finding", value: "The shell was uploaded through the file manager, not the contact form", source: "access.log", evidence: "POST /filemanager/upload.php at 12:39", ...F, supersedes: "#1" });
     assert.ok(fix.ok, (fix as { reason?: string }).reason);
     assert.equal((fix as { entry: { supersedes?: number } }).entry.supersedes, 1);
     assert.match(ledgerCore((fix as { entry: Parameters<typeof ledgerCore>[0] }).entry), /"supersedes":1/, "the correction is in the chained core");
@@ -380,22 +382,22 @@ test("a ledger entry is corrected by a later one that supersedes it: both stay, 
     const listed = await listLedger(root, {});
     assert.equal((listed[0] as { superseded_by?: number }).superseded_by, 2);
     // What is refused, and why.
-    const unknown = await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", supersedes: 9 });
+    const unknown = await recordEntry(a0, { kind: "finding", value: "x", source: "s", evidence: "e", ...F, supersedes: 9 });
     assert.equal(unknown.ok, false);
     assert.match((unknown as { reason: string }).reason, /no entry #9/);
-    const self = await recordEntry(a0, { kind: "finding", value: "y", source: "s", evidence: "e", supersedes: 3 });
+    const self = await recordEntry(a0, { kind: "finding", value: "y", source: "s", evidence: "e", ...F, supersedes: 3 });
     assert.equal(self.ok, false, "the next seq is no entry yet: an entry cannot supersede itself");
-    const twice = await recordEntry(a0, { kind: "finding", value: "z", source: "s", evidence: "e", supersedes: 1 });
+    const twice = await recordEntry(a0, { kind: "finding", value: "z", source: "s", evidence: "e", ...F, supersedes: 1 });
     assert.equal(twice.ok, false);
     assert.match((twice as { reason: string }).reason, /already superseded by #2: correct #2 instead/);
-    const same = await recordEntry(a0, { kind: "finding", value: "The shell was uploaded through the file manager, not the contact form", source: "access.log", evidence: "POST /filemanager/upload.php at 12:39", supersedes: 2 });
+    const same = await recordEntry(a0, { kind: "finding", value: "The shell was uploaded through the file manager, not the contact form", source: "access.log", evidence: "POST /filemanager/upload.php at 12:39", ...F, supersedes: 2 });
     assert.equal(same.ok, false);
     assert.match((same as { reason: string }).reason, /word for word/);
     // The same sentence with another confidence is a correction (18 of 33 refusals on the recorded runs were this).
-    const surer = await recordEntry(a0, { kind: "finding", value: "The shell was uploaded through the file manager, not the contact form", source: "access.log", evidence: "POST /filemanager/upload.php at 12:39", confidence: "high", supersedes: 2, because: "the upload's own log line was found" });
+    const surer = await recordEntry(a0, { kind: "finding", value: "The shell was uploaded through the file manager, not the contact form", source: "access.log", evidence: "POST /filemanager/upload.php at 12:39", ...F, confidence: "high", supersedes: 2, because: "the upload's own log line was found" });
     assert.equal(surer.ok, true, (surer as { reason?: string }).reason);
     assert.equal((surer as { entry: { because?: string } }).entry.because, "the upload's own log line was found");
-    const bad = await recordEntry(a0, { kind: "finding", value: "w", source: "s", evidence: "e", supersedes: "first" });
+    const bad = await recordEntry(a0, { kind: "finding", value: "w", source: "s", evidence: "e", ...F, supersedes: "first" });
     assert.equal(bad.ok, false);
     assert.match((bad as { reason: string }).reason, /whole number/);
   } finally {

@@ -30,6 +30,8 @@ fail() { echo "not ok - $1" >&2; exit 1; }
 # version of this file canonicalised here and hid exactly that defect, so the
 # uncanonical path is the point.
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/herdr-seal.XXXXXX")"
+# A stop seals a draft release with the machine key: this suite's, in its own home.
+export SWARM_SIGNERS_HOME="$TMP/signers"
 REAL="$(cd "$TMP" && pwd -P)"
 # The VM hubs' directory is the test's own (the pane plans below name it),
 # never the operator's ~/.dfirswarm/hubs.
@@ -187,8 +189,24 @@ SB2="$(printf '%s\n' "$out" | sed -n 's/^SANDBOX=//p' | tail -1)"
 # The collector's own socket is masked on Linux whatever --no-seal-herdr says:
 # that deny is about attribution (the gate stands in front), not about Herdr.
 # So are the VM hubs' sockets (dfirswarm-hubs/): a host pane must never speak
-# as a VM run's agent, and that is not Herdr's either.
-if grep -E 'network-outbound|^no-socket' "$SB2/.fsguard/plan.txt" 2>/dev/null | grep -v 'collector\.sock' | grep -qv 'dfirswarm-hubs'; then
+# as a VM run's agent, and that is not Herdr's either. Nor is the ssh-agent's
+# (launchd's directory on macOS, or what SSH_AUTH_SOCK names): its keys sign
+# as the examiner.
+agent_socks="$(launchctl getenv SSH_AUTH_SOCK 2>/dev/null || true)"
+agent_socks+=$'\n'"${SSH_AUTH_SOCK:-}"
+not_herdr() {
+  local line s d
+  while IFS= read -r line; do
+    [[ "$line" == *collector.sock* || "$line" == *dfirswarm-hubs* ]] && continue
+    while IFS= read -r s; do
+      [[ -n "$s" ]] || continue
+      d="$(cd "$(dirname "$s")" 2>/dev/null && pwd -P)" || continue
+      [[ "$line" == *"$d"* ]] && continue 2
+    done <<< "$agent_socks"
+    printf '%s\n' "$line"
+  done
+}
+if grep -E 'network-outbound|^no-socket' "$SB2/.fsguard/plan.txt" 2>/dev/null | not_herdr | grep -q .; then
   fail "--no-seal-herdr still emitted a Herdr socket deny"
 fi
 [[ "$(jq -r '.runs[-1].herdr_socket' "$TMP/runs/registry.json")" == "open" ]] \

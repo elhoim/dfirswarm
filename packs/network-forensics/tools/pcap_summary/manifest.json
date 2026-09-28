@@ -37,6 +37,6 @@
   "example": "{\"path\": \"inputs/capture.pcap\", \"top\": 20, \"out_dir\": \"work/pcap-summary\", \"with_starts\": true}",
   "by": "maintainer",
   "at": "2026-09-22T19:00:00.000Z",
-  "version": 1,
-  "sha256": "6c91c7a4b91095ed4049aaf551a0b771a6a0b4906b198c6264d49295c6d43e4d"
+  "version": 2,
+  "sha256": "e8e6a66c6fa7c5657141d117d74b8bbf2fe7d0d13afc97a4a306260c4211f49b"
 }

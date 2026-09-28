@@ -69,6 +69,8 @@ APT_SOURCES = Path(os.environ.get("DFIRSWARM_APT_SOURCES_DIR", "/etc/apt/sources
 OS_RELEASE = Path(os.environ.get("DFIRSWARM_OS_RELEASE", "/etc/os-release"))
 # What a build leaves beside its program: whether it built, and from what.
 BUILT = ".dfirswarm-build.json"
+# The image's PATH, the venv first: where its programs are looked for.
+IMAGE_PATH = f"{VENV / 'bin'}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 os.environ.setdefault("DEBIAN_FRONTEND", "noninteractive")
 
 
@@ -718,12 +720,30 @@ def tools_md(record: dict, spec: dict | None) -> str:
     return "\n".join(lines)
 
 
+def on_path(path: str = IMAGE_PATH) -> list:
+    """Every program on the image's PATH, by where it is: a shell utility as
+    much as a pack's program. The job service picks the smallest image whose
+    record holds every program a job runs; `binaries` names only the packs'."""
+    found = []
+    for d in path.split(":"):
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for name in names:
+            p = os.path.join(d, name)
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                found.append(p)
+    return found
+
+
 def write_record(record: dict, head: str, spec: dict | None = None) -> None:
-    """image.json with the whole package inventory, the NOTICE, the SBOM, and
-    tools.md, the list an agent reads."""
+    """image.json with the whole package inventory, every program on PATH,
+    the NOTICE, the SBOM, and tools.md, the list an agent reads."""
     record["arch"] = arch()
     record["dpkg_all"] = dpkg_versions()
     record["pip"] = pip_versions()
+    record["on_path"] = on_path()
     record["sbom"] = str(SBOM)
     record["tools_md"] = str(TOOLS_MD)
     python_rows, npm_rows = python_packages(), npm_packages()
@@ -775,7 +795,7 @@ def profile_record(record: dict, spec: dict, downloads: dict, failed: dict) -> d
     """A profile image's record over the one its base wrote. An image is
     redistributable only when what it was built on is too: the base's own
     flags carry into every profile built on it."""
-    path = f"{VENV / 'bin'}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    path = IMAGE_PATH
     held = sorted(set(record.get("nonredistributable") or []) | set(spec.get("nonredistributable", [])))
     record.update({
         "profile": spec["profile"],

@@ -35,6 +35,8 @@ export type ChangeKind =
   | "contract"
   /** store/: the job service's journal and each job's sealed output. */
   | "store"
+  /** leads/: the lead register, and what the agents asked of the operator. */
+  | "leads"
   /** A live VM run's hub wrote its status (the seats' states): outside the runs directory, watched on its own. */
   | "hub"
   | "other"
@@ -102,6 +104,10 @@ function kindOf(second: string, third: string): ChangeKind {
       return "contract";
     case "store":
       return "store";
+    case "leads":
+    case "operator-requests.jsonl":
+    case "operator-hosts.jsonl":
+      return "leads";
     case ".pi-sessions":
     case ".pi":
       return "sessions";
@@ -110,6 +116,7 @@ function kindOf(second: string, third: string): ChangeKind {
     case ".fsguard":
     case ".zsh":
     case ".bash":
+    case ".runtime-cache":
     case "bin":
     case "package":
     case "netguard.pid":
