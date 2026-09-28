@@ -544,6 +544,7 @@ export async function showText(sandbox: string, id: string): Promise<string | nu
   for (const r of v.revisions) out.push(`    revision ${r.rev} (${Q.originWords(r.origin)}, ${r.at}): ${r.text}${r.why ? ` (why amended: ${r.why})` : ""}`);
   if (v.neutral) out.push(`    neutral formulation (${Q.originWords(v.neutral.origin)}): ${v.neutral.text}`);
   if (v.expects) out.push(`    expects: ${v.expects}`);
+  if (v.completeness) out.push(`    asks for a complete set (${v.completeness_by === "asker" ? "the asker says so" : "by its words"}): an established or partial answer rests on a coverage record naming the areas searched`);
   if (v.hints.length) out.push(`    hints: ${v.hints.map((h) => `${h.ref}${h.value ? ` (says: ${h.value})` : ""}`).join("; ")}`);
   if (v.attachments.length) out.push(`    attachments: ${v.attachments.join(", ")}`);
   if (v.suggested_to) out.push(`    suggested to: ${v.suggested_to}`);
@@ -616,6 +617,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(one("--neutral") !== undefined ? { neutral: one("--neutral") } : {}),
     ...(one("--materiality") !== undefined ? { materiality: one("--materiality") } : {}),
     ...(one("--expects") !== undefined ? { expects: one("--expects") } : {}),
+    // --completeness: the question asks for a complete set (every one, all, each); --no-completeness: it does not, whatever its words.
+    ...(flags.has("--completeness") ? { completeness: true } : flags.has("--no-completeness") ? { completeness: false } : {}),
     ...(opts.has("--hint") ? { hints: hintsFrom(rest) } : {}),
     ...(opts.has("--attach") ? { attachments: opts.get("--attach") } : {}),
     ...(one("--suggest") !== undefined ? { suggested_to: one("--suggest") } : {}),

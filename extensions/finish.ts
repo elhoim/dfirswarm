@@ -621,7 +621,7 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
   const disputes = await P.readDisputes(sandboxRoot).catch(() => [] as P.LedgerDispute[]);
   const barOf = (id: string) => {
     const q = s.questions?.bySection.get(P.sectionKey(id));
-    return { material: s.goal.questions.map(P.sectionKey).includes(P.sectionKey(id)) || !q || q.materiality === "material", existence: s.goal.existence.map(P.sectionKey).includes(P.sectionKey(id)) || q?.expects === "existence" };
+    return { material: s.goal.questions.map(P.sectionKey).includes(P.sectionKey(id)) || !q || q.materiality === "material", existence: s.goal.existence.map(P.sectionKey).includes(P.sectionKey(id)) || q?.expects === "existence", completeness: q?.completeness === true };
   };
   // The kept output of a cancelled or stopped job, cited with no word on how it is treated (docs/adr/0016): the answers check holds it, and so does readiness.
   // The producer of each citation (scripts/output-hygiene.ts producerIndex): a copy or a digest of a cancelled job's bytes keeps its partial status.

@@ -71,6 +71,7 @@ export function questionArgv(body: Record<string, unknown>): { sub: string; argv
       opt(argv, "--priority", text(body, "priority", 20));
       opt(argv, "--reason", text(body, "reason", 2000));
       opt(argv, "--expects", text(body, "expects", 20));
+      if (body.completeness === true) argv.push("--completeness");
       opt(argv, "--suggest", text(body, "suggested_to", 64));
       opt(argv, "--deadline", text(body, "deadline", 64));
       opt(argv, "--neutral", text(body, "neutral", 4000));
@@ -99,6 +100,8 @@ export function questionArgv(body: Record<string, unknown>): { sub: string; argv
       opt(argv, "--text", text(body, "text", 4000));
       opt(argv, "--why", text(body, "why", 2000));
       opt(argv, "--neutral", text(body, "neutral", 4000));
+      if (body.completeness === true) argv.push("--completeness");
+      else if (body.completeness === false) argv.push("--no-completeness");
       break;
     }
     case "priority":

@@ -59,6 +59,42 @@ export const COVERAGE_TEXT_MAX = 2000;
 export const MAX_ROUTES = 20;
 
 /**
+ * The areas a search over stored data can reach, which a coverage record
+ * for a completeness claim ("every file", "all connections") names one by
+ * one: live allocated data, deleted entries whose metadata survives,
+ * unallocated space, slack, and secondary sources (a copy, a backup, a
+ * snapshot, another log that records the same thing). Generic on purpose:
+ * no tool and no file system is named, and an area the evidence does not
+ * have is said not_applicable.
+ */
+export const COVERAGE_AREAS = ["allocated", "deleted", "unallocated", "slack", "secondary"] as const;
+export type CoverageArea = (typeof COVERAGE_AREAS)[number];
+export const COVERAGE_AREA_STATES = ["searched", "skipped", "not_applicable"] as const;
+export type CoverageAreaState = (typeof COVERAGE_AREA_STATES)[number];
+export type CoverageAreas = Record<CoverageArea, CoverageAreaState>;
+
+/** A coverage record's areas as given: every area named, each searched, skipped or not_applicable; a skipped one says why in skipped. */
+export function checkAreas(raw: unknown): { ok: true; areas: CoverageAreas } | { ok: false; reason: string } {
+  const shape = `areas is {${COVERAGE_AREAS.join(", ")}}, each ${COVERAGE_AREA_STATES.join(" | ")}: which parts of the stored data the search reached (live allocated data, deleted entries, unallocated space, slack, secondary sources such as copies, backups, snapshots or another log of the same thing)`;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, reason: shape };
+  const r = raw as Record<string, unknown>;
+  const extra = Object.keys(r).find((k) => !(COVERAGE_AREAS as readonly string[]).includes(k));
+  if (extra) return { ok: false, reason: `areas names ${JSON.stringify(extra)}, which is not an area: ${shape}` };
+  const out = {} as CoverageAreas;
+  for (const a of COVERAGE_AREAS) {
+    const v = String(r[a] ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+    if (!(COVERAGE_AREA_STATES as readonly string[]).includes(v)) return { ok: false, reason: `areas.${a} is ${COVERAGE_AREA_STATES.join(", ")}${r[a] === undefined ? " (every area is named)" : ` (got ${JSON.stringify(r[a])})`}: ${shape}` };
+    out[a] = v as CoverageAreaState;
+  }
+  return { ok: true, areas: out };
+}
+
+/** A coverage record's areas in words. */
+export function areasWords(a: CoverageAreas): string {
+  return COVERAGE_AREAS.map((k) => `${k} ${a[k].replace(/_/g, " ")}`).join(", ");
+}
+
+/**
  * The absolute forms of absence: an answer that says the event did not
  * happen, rather than that no evidence of it was found in a scope. Allowed
  * only on an existence question whose coverage record is complete and says

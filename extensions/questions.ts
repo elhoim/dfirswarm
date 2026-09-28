@@ -119,6 +119,21 @@ export function leadingForms(text: string): string[] {
   return LEADING_FORMS.filter((f) => f.re.test(text)).map((f) => f.phrase);
 }
 
+/**
+ * A completeness claim in a question's words: it asks for every one, all,
+ * each, or a complete list, set or inventory. Such a question's established
+ * or partial answer rests on a coverage record that says what was searched,
+ * area by area (negative-bar.ts COVERAGE_AREAS): the calibration run sabfd76
+ * answered "every file" and "every connection" established with no coverage
+ * at all. A small word rule, set at the question's opening and at each new
+ * revision of its text; the asker's own word (completeness true or false)
+ * overrides it. "At all" asks whether, not how many, and does not count.
+ */
+export const COMPLETENESS_WORDS = /\b(?:every|each)\b|(?<!\bat\s)\ball\b|\bcomplete\s+(?:list|set|inventory)\b/i;
+export function completenessWords(text: string): boolean {
+  return COMPLETENESS_WORDS.test(text);
+}
+
 /** Whole seconds from the environment, in milliseconds, or the default. */
 function envMs(name: string, dfltSec: number): number {
   const raw = process.env[name]?.trim();
@@ -195,6 +210,8 @@ export type QuestionAct = {
   priority?: Priority;
   reason?: string;
   expects?: Expects;
+  /** The asker's word on whether the question asks for a complete set; absent, its words decide (completenessWords). */
+  completeness?: boolean;
   hints?: QuestionHint[];
   attachments?: string[];
   suggested_to?: string;
@@ -292,6 +309,10 @@ export type Question = {
   priority: Priority;
   priority_reason: string | null;
   expects: Expects | null;
+  /** Whether it asks for a complete set ("every", "all", "each", a complete list): its established or partial answer rests on a coverage record naming the areas searched. */
+  completeness: boolean;
+  /** Who said so: the asker (the act's completeness), or its words (completenessWords); null when neither. */
+  completeness_by: "asker" | "words" | null;
   hints: QuestionHint[];
   attachments: string[];
   suggested_to: string | null;
@@ -517,7 +538,7 @@ export async function seedDrafts(sandboxRoot: string, goal?: L.GoalQuestions): P
         ...(String(n) !== section ? { section } : {}),
       },
       origin: { kind: "goal", via: "goal" },
-      decided: { scope: "in_scope", scope_why: "a question of the goal", section, leading_forms: leadingForms(text) },
+      decided: { scope: "in_scope", scope_why: "a question of the goal", section, leading_forms: leadingForms(text), ...(completenessWords(text) ? { completeness: true } : {}) },
     });
   }
   drafts.push({ at, by: "system", ev: "seed", source: doc?.source ?? null, questions: ids, objectives: objectives.map((o) => o.id) });
@@ -546,7 +567,7 @@ export async function seedRegister(sandboxRoot: string): Promise<{ seeded: boole
 
 function blankQuestion(e: QuestionEvent): Question {
   const act = e.act ?? {};
-  const d = (e.decided ?? {}) as { scope?: Scope; scope_why?: string; section?: string; leading_forms?: string[]; after_done?: boolean; review_query?: boolean; objective_created?: string };
+  const d = (e.decided ?? {}) as { scope?: Scope; scope_why?: string; section?: string; leading_forms?: string[]; after_done?: boolean; review_query?: boolean; objective_created?: string; completeness?: boolean };
   const n = Number(QUESTION_ID.exec(e.q ?? "")?.[1] ?? 0);
   const origin = e.origin ?? { kind: "goal" as const };
   return {
@@ -569,6 +590,8 @@ function blankQuestion(e: QuestionEvent): Question {
     priority: act.priority ?? "normal",
     priority_reason: act.priority === "urgent" ? (act.reason ?? null) : null,
     expects: act.expects ?? null,
+    completeness: typeof act.completeness === "boolean" ? act.completeness : d.completeness === true,
+    completeness_by: typeof act.completeness === "boolean" ? "asker" : d.completeness === true ? "words" : null,
     hints: act.hints ?? [],
     attachments: act.attachments ?? [],
     suggested_to: act.suggested_to ?? null,
@@ -628,6 +651,14 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
         if (act.neutral !== undefined) q.neutral = { text: act.neutral, at: e.at, origin: origin ?? q.origin, rev: q.rev };
         if (act.materiality) q.materiality = act.materiality;
         if (act.expects) q.expects = act.expects;
+        // The asker's word stands over the words; a new revision's words decide when the asker said nothing.
+        if (typeof act.completeness === "boolean") {
+          q.completeness = act.completeness;
+          q.completeness_by = "asker";
+        } else if (typeof d.completeness === "boolean" && q.completeness_by !== "asker") {
+          q.completeness = d.completeness;
+          q.completeness_by = d.completeness ? "words" : null;
+        }
         if (act.hints) q.hints = act.hints;
         if (act.attachments) q.attachments = act.attachments;
         if (act.deadline !== undefined) q.deadline = act.deadline || null;
@@ -831,6 +862,8 @@ export type QuestionView = {
   priority: Priority;
   priority_reason: string | null;
   expects: Expects | null;
+  completeness: boolean;
+  completeness_by: Question["completeness_by"];
   hints: QuestionHint[];
   attachments: string[];
   suggested_to: string | null;
@@ -945,6 +978,8 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
     priority: q.priority,
     priority_reason: q.priority_reason,
     expects: q.expects,
+    completeness: q.completeness,
+    completeness_by: q.completeness_by,
     hints: q.hints,
     attachments: q.attachments,
     suggested_to: q.suggested_to,
@@ -1145,6 +1180,8 @@ export type ActInput = {
   priority?: string;
   reason?: string;
   expects?: string;
+  /** true or false (yes, no): whether the question asks for a complete set; absent, its words decide. */
+  completeness?: boolean | string;
   hints?: unknown;
   attachments?: unknown;
   suggested_to?: string;
@@ -1189,6 +1226,16 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
     if (!Number.isInteger(n) || n < 1) return { ok: false, reason: `expected_rev is the revision you read, a whole number (got ${JSON.stringify(input.expected_rev)})` };
     return { ok: true, value: n };
   };
+  const completeness = ((): { ok: true; value?: boolean } | Fail => {
+    const v = input.completeness;
+    if (v === undefined || v === null || v === "") return { ok: true };
+    if (typeof v === "boolean") return { ok: true, value: v };
+    const t = String(v).trim().toLowerCase();
+    if (["true", "yes"].includes(t)) return { ok: true, value: true };
+    if (["false", "no"].includes(t)) return { ok: true, value: false };
+    return { ok: false, reason: `completeness is true or false: whether the question asks for a complete set (every one, all, each, a complete list) (got ${JSON.stringify(v)})` };
+  })();
+  if (!completeness.ok) return completeness;
   switch (ev) {
     case "open": {
       const text = bounded("text", input.text, QUESTION_TEXT_MAX, true);
@@ -1241,6 +1288,7 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
         priority: priority.value ?? "normal",
         ...(reason.value && priority.value === "urgent" ? { reason: reason.value } : {}),
         ...(expects.value ? { expects: expects.value } : {}),
+        ...(completeness.value !== undefined ? { completeness: completeness.value } : {}),
         ...(hints.hints.length ? { hints: hints.hints } : {}),
         ...(attachments.attachments.length ? { attachments: attachments.attachments } : {}),
         ...(suggested ? { suggested_to: suggested } : {}),
@@ -1282,13 +1330,14 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
         ...(neutral.value ? { neutral: neutral.value } : {}),
         ...(materiality.value ? { materiality: materiality.value } : {}),
         ...(expects.value ? { expects: expects.value } : {}),
+        ...(completeness.value !== undefined ? { completeness: completeness.value } : {}),
         ...(hints?.ok ? { hints: hints.hints } : {}),
         ...(attachments?.ok ? { attachments: attachments.attachments } : {}),
         ...(deadline !== undefined ? { deadline: deadline ? new Date(Date.parse(deadline)).toISOString() : "" } : {}),
         ...(suggested !== undefined ? { suggested_to: suggested } : {}),
       });
       const changes = Object.keys(act).filter((k) => k !== "expected_rev" && k !== "why");
-      if (!changes.length) return { ok: false, reason: "an amendment changes something: text (a new revision), neutral, materiality, expects, hints, attachments, deadline or suggested_to" };
+      if (!changes.length) return { ok: false, reason: "an amendment changes something: text (a new revision), neutral, materiality, expects, completeness, hints, attachments, deadline or suggested_to" };
       sensitive.push(["text", act.text], ["why", act.why], ["neutral", act.neutral], ...(hints?.ok ? hints.hints.map((h): [string, string | undefined] => ["a hint's value", h.value]) : []));
       break;
     }
@@ -1506,6 +1555,7 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
           scope_why: why,
           section: String(Number(id.slice(2))),
           leading_forms: lead,
+          ...(completenessWords(p.act.text ?? "") ? { completeness: true } : {}),
           ...(created ? { objective_created: created } : {}),
           ...(role === "reviewer" ? { review_query: true } : {}),
           ...(afterDone ? { after_done: true } : {}),
@@ -1530,7 +1580,7 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
       const afterDone = bump && !q!.after_done && (await P.swarmDoneExists(sandboxRoot));
       // The act exactly as it was said (and signed): whether it makes a new revision is the harness's, in decided.
       return {
-        append: [{ ...base, ev: "amend", q: q!.id, rev, act: p.act, decided: { ...(lead ? { leading_forms: lead } : {}), revision: bump, ...(afterDone ? { after_done: true } : {}) } }],
+        append: [{ ...base, ev: "amend", q: q!.id, rev, act: p.act, decided: { ...(lead ? { leading_forms: lead } : {}), ...(bump ? { completeness: completenessWords(p.act.text ?? "") } : {}), revision: bump, ...(afterDone ? { after_done: true } : {}) } }],
         result: { ok: true, q: q!.id, rev, ...(lead?.length ? { leading_forms: lead } : {}), ...(afterDone ? { after_done: true as const } : {}) },
       };
     }
@@ -1824,6 +1874,7 @@ export function questionPostBody(q: Question, qs: QuestionsSnapshot, o: { offerT
   if (q.objective) lines.push(`Objective: ${q.objective}${qs.state.objectives.get(q.objective) ? ` "${qs.state.objectives.get(q.objective)!.text}"` : ""}`);
   if (q.parent) lines.push(`Follows: ${q.parent}.`);
   if (q.expects) lines.push(`Expects: ${q.expects} (a hint to the examination, never a format demand).`);
+  if (q.completeness) lines.push(`It asks for a complete set: an established or partial answer rests on a coverage record for it that says what was searched and its areas (${NB.COVERAGE_AREAS.join(", ")}), each searched, skipped or not_applicable.`);
   if (q.hints.length) lines.push(`Hints (where to look, never what to find): ${q.hints.map((h) => `${h.ref}${h.value ? ` (says: ${h.value})` : ""}`).join("; ")}.${o.hypotheses.length ? ` A hint that says something is recorded as a hypothesis to test: ${o.hypotheses.map((n) => `E-${n}`).join(", ")}.` : ""}`);
   if (q.attachments.length) lines.push(`Attachments: ${q.attachments.join(", ")} (supplied material: it proves nothing by itself).`);
   if (q.deadline) lines.push(`Wanted by: ${q.deadline}.`);
@@ -2418,6 +2469,7 @@ function brief(v: QuestionView): Record<string, unknown> {
     ...(v.objective ? { objective: v.objective } : {}),
     ...(v.parent ? { parent: v.parent } : {}),
     ...(v.expects ? { expects: v.expects } : {}),
+    ...(v.completeness ? { completeness: true } : {}),
     ...(v.leading_forms.length ? { leading_forms: v.leading_forms } : {}),
     answer: v.answer ? `E-${v.answer.seq}${v.answer.stale ? ` (stale: answers revision ${v.answer.question_rev} of ${v.rev})` : ""}` : null,
     leads: v.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}`),
@@ -2527,6 +2579,7 @@ export function renderQuestionsMd(ctx: ViewContext): string {
         `materiality ${v.materiality}`,
         `priority ${v.priority}${v.priority_reason ? ` (${v.priority_reason})` : ""}`,
         v.expects ? `expects ${v.expects}` : null,
+        v.completeness ? `asks for a complete set (${v.completeness_by === "asker" ? "the asker says so" : "by its words"}): an established or partial answer rests on a coverage record naming the areas searched` : null,
         v.objective ? `objective ${v.objective}` : v.objective_text ? `would add the objective "${v.objective_text}"` : null,
         v.parent ? `follows ${v.parent}` : null,
         v.suggested_to ? `suggested to ${v.suggested_to}` : null,

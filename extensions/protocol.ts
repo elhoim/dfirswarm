@@ -7653,6 +7653,12 @@ export type LedgerEntry = {
   result_bound?: LedgerEdge[];
   /** A coverage record: whether the event would have left a trace in these sources, given collection and retention, and why. */
   detection_opportunity?: { trace_expected: NB.TraceExpected; why: string };
+  /** A coverage record: which areas of the stored data the search reached (negative-bar.ts COVERAGE_AREAS); a completeness claim rests on a record that names them. */
+  areas?: NB.CoverageAreas;
+  /** A coverage record behind a not-determinable answer: the acquisition ask (R-<n>) opened for the source the evidence does not hold. */
+  acquisition_ask?: string;
+  /** A coverage record behind a not-determinable answer: why no acquisition ask was opened (no source outside the evidence would settle it, say). */
+  acquisition_none_why?: string;
   /** A coverage record, written by the hub: whether the jobs behind it were given every object it names (negative-bar.ts). */
   coverage?: "complete" | "partial";
   coverage_detail?: { units: NB.CoverageUnit[]; jobs: string[]; why: string[] };
@@ -7770,6 +7776,9 @@ function coverageFields(e: LedgerEntry): Record<string, unknown> {
     ...(e.result_refs?.length ? { result_refs: e.result_refs } : {}),
     ...(e.result_bound?.length ? { result_bound: e.result_bound.map((x) => ({ seq: x.seq, hash: x.hash })) } : {}),
     ...(e.detection_opportunity ? { detection_opportunity: { trace_expected: e.detection_opportunity.trace_expected, why: e.detection_opportunity.why } } : {}),
+    ...(e.areas ? { areas: canonicalValue(e.areas) } : {}),
+    ...(e.acquisition_ask ? { acquisition_ask: e.acquisition_ask } : {}),
+    ...(e.acquisition_none_why ? { acquisition_none_why: e.acquisition_none_why } : {}),
     ...(e.coverage ? { coverage: e.coverage } : {}),
     ...(e.coverage_detail ? { coverage_detail: canonicalValue(e.coverage_detail) } : {}),
     ...(e.not_examined?.length ? { not_examined: e.not_examined.map((r) => ({ source: r.source, method: r.method, why: r.why })) } : {}),
@@ -7935,6 +7944,12 @@ export type LedgerInput = {
   failures?: string;
   result_refs?: string[] | string;
   detection_opportunity?: { trace_expected?: string; why?: string };
+  /** A coverage record: {allocated, deleted, unallocated, slack, secondary}, each searched, skipped or not_applicable. */
+  areas?: unknown;
+  /** A coverage record behind a not-determinable answer: the acquisition ask opened for the missing source (R-<n>). */
+  acquisition_ask?: string;
+  /** A coverage record behind a not-determinable answer: why no acquisition ask was opened. */
+  acquisition_none_why?: string;
 };
 
 function listOf(v: string[] | string | undefined): string[] {
@@ -8050,7 +8065,7 @@ async function ledgerV3Input(
 const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why", "asserts_absence", "question_rev", "material"] as const;
 const FINDING_ONLY_FIELDS = ["indicates", "alternatives", "alternatives_none_why", "significance"] as const;
 /** The fields only a coverage record takes. */
-const COVERAGE_ONLY_FIELDS = ["proposition", "inventory_rev", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures", "result_refs", "result_bound", "detection_opportunity"] as const;
+const COVERAGE_ONLY_FIELDS = ["proposition", "inventory_rev", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures", "result_refs", "result_bound", "detection_opportunity", "areas", "acquisition_ask", "acquisition_none_why"] as const;
 
 function given(v: unknown): boolean {
   if (v === undefined || v === null) return false;
@@ -10157,10 +10172,12 @@ async function registerSection(sandboxRoot: string, raw: string): Promise<string
  * What the negative bar needs to know of a question section: whether it is
  * material (the goal's always are; a register question says), whether it
  * asks whether something exists (the goal's --existence, or the register's
- * expects), its route plan (every route the leads under it planned), and the
- * jobs run under those leads. Read from the registers, never from words.
+ * expects), whether it asks for a complete set (the register's completeness:
+ * the asker's, or its words, "every", "all", "each", "complete list"), its
+ * route plan (every route the leads under it planned), and the jobs run under
+ * those leads. Read from the registers.
  */
-export async function questionBar(sandboxRoot: string, sectionId: string): Promise<{ material: boolean; existence: boolean; routes: NB.Route[]; jobs: string[]; question: string | null }> {
+export async function questionBar(sandboxRoot: string, sectionId: string): Promise<{ material: boolean; existence: boolean; completeness: boolean; routes: NB.Route[]; jobs: string[]; question: string | null }> {
   const L = await import("./leads.ts");
   const snap = await L.leadsSnapshot(sandboxRoot);
   const id = sectionKey(sectionId);
@@ -10175,7 +10192,7 @@ export async function questionBar(sandboxRoot: string, sectionId: string): Promi
     for (const r of l.routes ?? []) if (!routes.some((x) => x.source === r.source && x.method === r.method)) routes.push(r);
     for (const j of l.jobs) if (!jobs.includes(j)) jobs.push(j);
   }
-  return { material, existence, routes, jobs, question: q?.id ?? null };
+  return { material, existence, completeness: q?.completeness === true, routes, jobs, question: q?.id ?? null };
 }
 
 /**
@@ -10222,6 +10239,30 @@ async function recordCoverage(ctx: SwarmContext, input: LedgerInput): Promise<Le
   if (!(NB.TRACE_EXPECTED as readonly string[]).includes(expected)) return { ok: false, reason: "detection_opportunity is {trace_expected: yes | no | unknown, why}: would the event have left a trace in these sources, given what was collected and what they keep, and why" };
   const dWhy = text("detection_opportunity.why", d.why);
   if (!dWhy.ok) return dWhy;
+  // The areas the search reached, when it names them: a completeness claim
+  // ("every file", "all connections") rests on a record that does.
+  let areas: NB.CoverageAreas | undefined;
+  if (given(raw.areas)) {
+    const a = NB.checkAreas(raw.areas);
+    if (!a.ok) return a;
+    areas = a.areas;
+    if (Object.values(areas).includes("skipped") && /^none\b/i.test(skipped.value)) return { ok: false, reason: `areas says ${NB.COVERAGE_AREAS.filter((k) => areas![k] === "skipped").join(", ")} skipped, and skipped says none: say in skipped what was not searched and why` };
+  }
+  // The ask for a source the evidence does not hold, or why none was opened.
+  const askRaw = String(input.acquisition_ask ?? "").trim();
+  const noAsk = text("acquisition_none_why", input.acquisition_none_why, false);
+  if (!noAsk.ok) return noAsk;
+  if (askRaw && noAsk.value) return { ok: false, reason: "acquisition_ask names the ask opened, acquisition_none_why says why none was: give one" };
+  let acquisitionAsk: string | undefined;
+  if (askRaw) {
+    const m = /^R-?([1-9]\d{0,6})$/i.exec(askRaw);
+    if (!m) return { ok: false, reason: `acquisition_ask names an acquisition request, R-<n> (got ${JSON.stringify(askRaw)}): open one with lead_close needs_operator and ask {kind: acquisition, …}` };
+    acquisitionAsk = `R-${Number(m[1])}`;
+    const R = await import("./requests.ts");
+    const req = (await R.requestsSnapshot(ctx.sandboxRoot).catch(() => null))?.requests.get(acquisitionAsk) ?? null;
+    if (!req) return { ok: false, reason: `acquisition_ask ${acquisitionAsk} is not a request of this run: open it with lead_close needs_operator and ask {kind: acquisition, source, where, expected_value, urgency}` };
+    if (req.kind !== "acquisition") return { ok: false, reason: `acquisition_ask ${acquisitionAsk} is a ${req.kind} request, not an acquisition` };
+  }
   const source = boundedText("source", input.source, LEDGER_SOURCE_MAX_CHARS);
   if (!source.ok) return source;
   const evidence = boundedText("evidence", input.evidence, LEDGER_EVIDENCE_MAX_CHARS);
@@ -10322,6 +10363,9 @@ async function recordCoverage(ctx: SwarmContext, input: LedgerInput): Promise<Le
       // Its entries among its results, bound by the hash each has now.
       ...(results.some((x) => /^E-\d+$/.test(x)) ? { result_bound: results.filter((x) => /^E-\d+$/.test(x)).map((x) => { const e = bySeq.get(Number(x.slice(2))) as LedgerEntry; return { seq: e.seq, hash: e.hash ?? ledgerHash(e, "genesis") }; }) } : {}),
       detection_opportunity: { trace_expected: expected as NB.TraceExpected, why: dWhy.value },
+      ...(areas ? { areas } : {}),
+      ...(acquisitionAsk ? { acquisition_ask: acquisitionAsk } : {}),
+      ...(noAsk.value ? { acquisition_none_why: noAsk.value } : {}),
       coverage: cov.coverage,
       coverage_detail: { units: cov.units, jobs: cov.jobs, why: cov.why },
       ...(notExamined.length ? { not_examined: notExamined } : {}),
@@ -10333,6 +10377,9 @@ async function recordCoverage(ctx: SwarmContext, input: LedgerInput): Promise<Le
     notes.push(cov.coverage === "complete" ? "the hub finds the jobs behind it were given every object it names: coverage complete" : `the hub marks it coverage partial: ${cov.why.join("; ")}`);
     if (notExamined.length) notes.push(`planned routes not examined: ${notExamined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}`);
     if (bars.some((b) => b.material && !b.routes.length)) notes.push("a question it is for has no route plan: a negative on a material question closes against one (lead_link routes)");
+    const complete = bars.filter((b) => b.completeness).map((b) => b.question ?? "a question");
+    if (complete.length && !areas) notes.push(`${complete.join(", ")} ask${complete.length === 1 ? "s" : ""} for a complete set: an established or partial answer rests on a coverage record that names its areas {${NB.COVERAGE_AREAS.join(", ")}} (each searched, skipped or not_applicable, a skipped one said in skipped); this one names none, so it does not carry a completeness claim`);
+    if (areas) notes.push(`areas: ${NB.areasWords(areas)}`);
     notes.push("a material negative resting on it needs another seat's review: attest this record, or the answer, with review {detection, reproduced, other_route}");
     if (supersedes === undefined) {
       const same = entries.find((e) => !replaced.has(e.seq) && e.kind === "coverage" && ledgerContent(e) === ledgerContent(candidate));

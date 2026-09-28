@@ -9563,7 +9563,7 @@ cmd_lead() {
 # The question register from the operator's side (extensions/questions.ts):
 # what the examination is asked, by the goal, an agent or a person.
 #   question <id> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n]
-#                     [--materiality material|background] [--priority urgent --reason R] [--expects E]
+#                     [--materiality material|background] [--priority urgent --reason R] [--expects E] [--completeness]
 #                     [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO]
 #                     [--neutral T] [--submission TOKEN]
 #   question <id> list [--json] | show Q-n [--json] | verify [--allowed-signers FILE] [--ca FILE]
@@ -11444,12 +11444,15 @@ EOF
     question) cat <<'EOF'
   question <id> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n]
                     [--materiality material|background] [--priority urgent --reason R]
-                    [--expects existence|value|narrative|timeline|list] [--hint REF [--hint-value V]]...
-                    [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]
+                    [--expects existence|value|narrative|timeline|list] [--completeness]
+                    [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO]
+                    [--neutral T] [--submission TOKEN]
                                                a question for the running swarm (Q-n): recorded on the chain
                                                (questions/questions.jsonl), then posted from analyst:<you>,
                                                offered to the suggested seat for its first minute or to the
-                                               most suited idle seat, and ranked first in every agent's header
+                                               most suited idle seat, and ranked first in every agent's header;
+                                               --completeness: it asks for a complete set (its words "every",
+                                               "all", "each" say so too), answered only on coverage of the areas
   question <id> list [--json]                  every question: your triage and the clarifications waiting first
   question <id> show Q-n [--json]              one question whole: every revision, hints, clarifications, leads,
                                                offers, its answer, and each signed act checked

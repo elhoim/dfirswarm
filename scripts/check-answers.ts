@@ -287,7 +287,7 @@ function jobStatuses(status: Map<string, string | null>, entries: LedgerEntry[])
  * a question asks whether something exists when the goal's --existence
  * names it or the register's expects says so.
  */
-export async function sectionBars(S: string, existence: readonly string[] = []): Promise<(id: string) => { material: boolean; existence: boolean }> {
+export async function sectionBars(S: string, existence: readonly string[] = []): Promise<(id: string) => { material: boolean; existence: boolean; completeness: boolean }> {
   const Q = await import("../extensions/questions.ts").catch(() => null);
   const snap = Q ? await Q.questionsSnapshot(S).catch(() => null) : null;
   const goalIds = new Set((snap?.goal.questions ?? []).map((x) => sectionKey(x)));
@@ -298,6 +298,7 @@ export async function sectionBars(S: string, existence: readonly string[] = []):
     return {
       material: goalIds.has(key) || !q ? true : q.materiality === "material",
       existence: asksExistence(existence, key) || asksExistence(goalExistence, key) || q?.expects === "existence",
+      completeness: q?.completeness === true,
     };
   };
 }
