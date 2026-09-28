@@ -55,6 +55,7 @@ import {
   listForgedTools,
   negativeReview,
   openContradictions,
+  partialOutputCites,
   readAttestations,
   readDisputes,
   readInputsManifest,
@@ -506,7 +507,7 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   const sections = [...(asked.length ? asked : [...questions.values()]).map((q) => `question:${q.id}`), "summary", "narrative"];
   const problems = answerProblems(entries, disputes, unqualified);
   const bar = await sectionBars(sandbox).catch(() => (() => ({ material: true, existence: false })) as (id: string) => { material: boolean; existence: boolean });
-  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar }) : null;
+  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, (id) => jobs.get(id)?.status ?? null) }) : null;
 
   const text = async (rel: string) => (await readFile(join(sandbox, rel), "utf8").catch(() => ""));
   const ledgerChain = verifyLedgerChain(await text("ledger/entries.jsonl"));
@@ -2149,6 +2150,8 @@ function resolveWords(d: LedgerGate["defects"][number]): string {
       return `an agent other than its author re-deriving what the answer rests on from the sealed objects and recording that it holds, or why not. Even then no human has reviewed it.`;
     case "open_contradiction":
       return `the wrong one of the two entries corrected, or both weighed in an answer (one as contrary evidence), or a limitation naming both.`;
+    case "partial_output":
+      return `the entry recorded again saying how it treats the output of a job that was stopped before its end (what that part still shows, and why), or resting instead on a job that ran to its end. A limitation does not resolve it.`;
     default:
       return d.fix;
   }

@@ -66,6 +66,7 @@ import {
   briefQuestions,
   ledgerGate,
   negativeReview,
+  partialOutputCites,
   coverageProblems,
   forbiddenMaterialClasses,
   readAttestations,
@@ -249,17 +250,26 @@ export { briefQuestions };
 export type LedgerOutcome = "answered" | "limited" | "inconclusive" | "unanswered";
 
 /** Each job's status from its job.json, read once. */
-async function jobStatuses(S: string, entries: LedgerEntry[]): Promise<Map<number, string[]>> {
+/** Each job a ref of the ledger names, with its status as its record says (null when it has none). */
+async function jobStatusMap(S: string, entries: LedgerEntry[]): Promise<Map<string, string | null>> {
   const status = new Map<string, string | null>();
+  for (const e of entries) {
+    for (const ref of e.refs ?? []) {
+      const m = /^job:([a-z0-9-]{1,64})(?:\/|$)/.exec(ref);
+      if (!m || status.has(m[1])) continue;
+      const job = await readFile(join(S, "store", "jobs", m[1], "job.json"), "utf8").then((t) => JSON.parse(t) as { status?: string }).catch(() => null);
+      status.set(m[1], job?.status ?? null);
+    }
+  }
+  return status;
+}
+
+function jobStatuses(status: Map<string, string | null>, entries: LedgerEntry[]): Map<number, string[]> {
   const out = new Map<number, string[]>();
   for (const e of entries) {
     for (const ref of e.refs ?? []) {
       const m = /^job:([a-z0-9-]{1,64})(?:\/|$)/.exec(ref);
       if (!m) continue;
-      if (!status.has(m[1])) {
-        const job = await readFile(join(S, "store", "jobs", m[1], "job.json"), "utf8").then((t) => JSON.parse(t) as { status?: string }).catch(() => null);
-        status.set(m[1], job?.status ?? null);
-      }
       const st = status.get(m[1]);
       if (st && st !== "ok" && !(e.qualifies ?? []).some((q) => q.ref === ref)) out.set(e.seq, [...(out.get(e.seq) ?? []), `${ref} (${st})`]);
     }
@@ -345,7 +355,9 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
     lines.push(`${section}: not required: ${withdrawn[section]}`);
   }
   const bar = await sectionBars(S, existence);
-  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: await jobStatuses(S, entries), bar });
+  const statuses = await jobStatusMap(S, entries);
+  // The kept output of a cancelled or stopped job, cited with no word on how it is treated (docs/adr/0016).
+  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, (id) => statuses.get(id)) });
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
@@ -503,7 +515,7 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   }
   const count = (o: LedgerOutcome) => Object.values(outcomes).filter((x) => x === o).length;
   lines.push(`sections: ${count("answered")} answered, ${count("limited")} examination-limited, ${count("inconclusive")} inconclusive, ${count("unanswered")} unanswered; ${defects.length} defect${defects.length === 1 ? "" : "s"}, ${defects.length - open.length} named by a limitation, ${open.length} open`);
-  if (open.length) lines.push("The run ends once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect, and the release counts it. The negative bar's defects (coverage_missing, coverage_stale, negative_unreviewed, wording) and an answer resting on material the case policy forbids (material_use) are fixed, never named.");
+  if (open.length) lines.push("The run ends once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect, and the release counts it. The negative bar's defects (coverage_missing, coverage_stale, negative_unreviewed, wording), an answer resting on material the case policy forbids (material_use) and an entry citing a cancelled or stopped job's output with no word on it (partial_output) are fixed, never named.");
   return { ok: open.length === 0, lines, outcomes, results, defects, withdrawn, external: externalFlags };
 }
 

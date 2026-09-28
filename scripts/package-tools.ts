@@ -46,6 +46,7 @@ import { attestationHash, disputeHash, ledgerHash, readLedger, sensitiveTokens, 
 import { leadEventHash, type LeadEvent } from "../extensions/leads.ts";
 import { REVIEW_ACTIONS } from "./review.ts";
 import { packageLayout, verifyReleases } from "./release-record.ts";
+import { outputWords, sensitiveEntries, sensitiveIndex, withheldPaths } from "./output-hygiene.ts";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 const REDACTED = "[redacted: marked sensitive]";
@@ -81,7 +82,12 @@ function citedPaths(entries: LedgerEntry[]): Array<{ path: string; seq: number }
 /** What one redaction replaced: the sha256 of the original (never the original), why, and which entry's words it held. */
 export type Replaced = { what: "entry" | "line" | "file" | "field" | "text"; entry: number | null; sha256_of_original: string; line?: number; pointer?: string; count?: number; why: string };
 export type RedactionChange = { path: string; before_sha256: string; after_sha256: string; why: string; replaced: Replaced[] };
-export type LeakHit = { path: string; entry: number; token_sha256: string; as: string };
+/** A hit of the scan: the file, the ledger entry whose words it holds (0 for a sensitive output's own text, named in `output`), the word's sha256 and how it was found. */
+export type LeakHit = { path: string; entry: number; token_sha256: string; as: string; output?: string };
+/** A word the scan looks for: a sensitive entry's (protocol.ts sensitiveTokens), or a small sensitive output's whole text (`output`: job/path). */
+export type ScanToken = SensitiveToken & { output?: string };
+/** What a redacted package withheld whole, and why: never its bytes, always its sha256. */
+export type Withheld = { path: string; job: string | null; why: string; sha256_of_original: string; bytes: number };
 
 /** A sensitive entry's words as they may stand in a file: as written, JSON-escaped. */
 const forms = (t: string) => [...new Set([t, JSON.stringify(t).slice(1, -1)])];
@@ -97,7 +103,8 @@ function redactJsonValue(v: unknown, pointer: string, tokens: SensitiveToken[], 
   if (typeof v === "string") {
     const hit = tokens.find((t) => v.includes(t.token));
     if (!hit) return v;
-    replaced.push({ what: "field", entry: hit.seq, sha256_of_original: sha256(v), pointer, why: "a field holding a sensitive entry's words, replaced whole" });
+    const out = (hit as ScanToken).output;
+    replaced.push({ what: "field", entry: out ? null : hit.seq, sha256_of_original: sha256(v), pointer, why: out ? `a field holding the text of a sensitive output (${out}), replaced whole` : "a field holding a sensitive entry's words, replaced whole" });
     return REDACTED;
   }
   if (Array.isArray(v)) return v.map((x, i) => redactJsonValue(x, `${pointer}/${i}`, tokens, replaced));
@@ -112,7 +119,7 @@ function redactJsonValue(v: unknown, pointer: string, tokens: SensitiveToken[], 
  * UTF-16 bytes in any file (a PDF's compressed text is not read). A hit is
  * named by the file, the entry and the sha256 of the word, never the word.
  */
-export function leakScan(dir: string, tokens: SensitiveToken[]): { files: number; hits: LeakHit[] } {
+export function leakScan(dir: string, tokens: ScanToken[]): { files: number; hits: LeakHit[] } {
   const hits: LeakHit[] = [];
   let files = 0;
   const norm = (s: string) => s.replace(/\\"/g, '"').replace(/\\\//g, "/").replace(/\\\\/g, "\\").toLowerCase().replace(/\\/g, "/");
@@ -120,14 +127,14 @@ export function leakScan(dir: string, tokens: SensitiveToken[]): { files: number
   const maxLen = Math.max(0, ...wanted.map((w) => w.raw[1].length));
   for (const abs of walk(dir)) {
     const rel = relative(dir, abs).split("\\").join("/");
-    if (rel === "REDACTIONS.txt" || rel === "REDACTIONS.json" || rel.startsWith("MANIFEST.txt")) continue;
+    if (rel === "REDACTIONS.txt" || rel === "REDACTIONS.json" || rel === "HYGIENE.json" || rel.startsWith("MANIFEST.txt")) continue;
     files += 1;
     const size = lstatSync(abs).size;
     const seen = new Set<string>();
     const note = (w: (typeof wanted)[number], as: string) => {
       if (seen.has(`${w.token}\u0000${as}`)) return;
       seen.add(`${w.token}\u0000${as}`);
-      hits.push({ path: rel, entry: w.seq, token_sha256: sha256(w.token), as });
+      hits.push({ path: rel, entry: w.seq, token_sha256: sha256(w.token), as, ...(w.output ? { output: w.output } : {}) });
     };
     // Whole, when it can be held; in overlapping chunks when it cannot: nothing is left unread.
     const chunk = 32 * 1024 * 1024;
@@ -166,10 +173,18 @@ export function leakScan(dir: string, tokens: SensitiveToken[]): { files: number
  * every file is scanned for what should have been taken out: `leaks: fail`
  * (the default) refuses the package on a hit, `list` records the hits.
  */
-export async function redactPackage(sandbox: string, dir: string, opts: { leaks?: "fail" | "list" } = {}): Promise<{ entries: number; files: number; lines: number; leaks: LeakHit[]; scanned: number }> {
-  const entries = await readLedger(sandbox, { raw: true });
-  const tokens = sensitiveTokens(entries);
+export async function redactPackage(sandbox: string, dir: string, opts: { leaks?: "fail" | "list" } = {}): Promise<{ entries: number; files: number; lines: number; leaks: LeakHit[]; scanned: number; withheld: Withheld[] }> {
+  // An entry citing a sensitive output is sensitive whether or not it was
+  // recorded so (an entry from before the harness marked such entries):
+  // taken out the same way (docs/adr/0016).
+  const raw = await readLedger(sandbox, { raw: true });
+  const derived = await sensitiveEntries(sandbox, raw);
+  const entries = raw.map((e) => (derived.has(e.seq) && !e.sensitive ? { ...e, sensitive: true } : e));
+  const index = await sensitiveIndex(sandbox);
+  const words = await outputWords(sandbox);
+  const tokens: ScanToken[] = [...sensitiveTokens(entries), ...words.map((w) => ({ token: w.token, seq: 0, output: `job ${w.job}, ${w.path}` }))];
   const sensitiveSeqs = new Set(entries.filter((e) => e.sensitive).map((e) => e.seq));
+  const unmarked = raw.filter((e) => !e.sensitive && derived.has(e.seq)).map((e) => e.seq);
   const sensitiveHashes = new Set(entries.filter((e) => e.sensitive && e.hash).map((e) => e.hash as string));
   const changes: RedactionChange[] = [];
   let lines = 0;
@@ -211,7 +226,7 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
   };
   const byWords = (l: string) => {
     const t = holds(l);
-    return t ? { seq: t.seq, why: "holds a sensitive entry's words" } : null;
+    return t ? { seq: t.output ? null : t.seq, why: t.output ? `holds the text of a sensitive output (${t.output})` : "holds a sensitive entry's words" } : null;
   };
   // The ledger: a sensitive entry, and any entry that repeats one's words, keeps what chains it.
   chained(
@@ -252,15 +267,31 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
     chained("store/journal.jsonl", (_o, l) => byWords(l), (o, l) => ({ v: o.v, seq: o.seq, type: o.type, ...(o.job ? { job: o.job } : {}), redacted: true, line_sha256: sha256(l), prev: o.prev ?? null }), "line", "journal line(s) holding a sensitive entry's words replaced, keeping seq, prev and their own sha256");
     chained("review.jsonl", (_o, l) => byWords(l), (o, l) => ({ v: o.v, seq: o.seq, action: o.action, redacted: true, line_sha256: sha256(l), prev: o.prev ?? null }), "line", "review line(s) holding a sensitive entry's words replaced, keeping seq, action, prev and their own sha256");
   }
+  // A sensitive output, and its job's stdout and stderr, withheld whole
+  // (docs/adr/0016): the bytes are not read to decide what in them is
+  // secret. Named with the sha256 they had, so the owner of the run can match them.
+  const withheld: Withheld[] = [];
+  const patterns = withheldPaths(index);
+  if (patterns.length) {
+    for (const abs of walk(dir)) {
+      const rel = relative(dir, abs).split("\\").join("/");
+      const hit = patterns.find((p) => p.rel.test(rel));
+      if (!hit || handled.has(rel)) continue;
+      const before = readFileSync(abs);
+      handled.add(rel);
+      change(rel, before, `[withheld: a sensitive output (${hit.why}); its sha256 before it was withheld is ${sha256(before)}]\n`, `a sensitive output, withheld whole (${hit.why})`, [{ what: "file", entry: null, sha256_of_original: sha256(before), why: hit.why }]);
+      withheld.push({ path: rel, job: hit.job, why: hit.why, sha256_of_original: sha256(before), bytes: before.length });
+    }
+  }
   // A file a sensitive entry cites, whole.
   for (const c of citedPaths(entries)) {
-    if (!existsSync(join(dir, c.path))) continue;
+    if (!existsSync(join(dir, c.path)) || handled.has(c.path)) continue;
     const before = readFileSync(join(dir, c.path));
     handled.add(c.path);
     change(c.path, before, `${REDACTED}: cited by a sensitive ledger entry; its sha256 before redaction is ${sha256(before)}\n`, "cited by a sensitive entry, replaced whole", [{ what: "file", entry: c.seq, sha256_of_original: sha256(before), why: "cited by a sensitive entry" }]);
   }
   let files = 0;
-  if (sensitiveSeqs.size) {
+  if (sensitiveSeqs.size || tokens.length || withheld.length) {
     for (const abs of walk(dir)) {
       const rel = relative(dir, abs).split("\\").join("/");
       if (handled.has(rel) || sealedAsIs(rel)) continue;
@@ -268,6 +299,7 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
       // A PDF a release printed: words cannot be taken out of it, so it is withheld.
       if (/^release\/v\d+\/.+\.pdf$/.test(rel)) {
         change(rel, before, `[withheld: a PDF cannot be redacted by replacing words; the release names it by its sha256 before redaction, ${sha256(before)}]\n`, "a release's PDF, withheld", [{ what: "file", entry: null, sha256_of_original: sha256(before), why: "a PDF cannot be redacted word by word" }]);
+        withheld.push({ path: rel, job: null, why: "a release's PDF: words cannot be taken out of it", sha256_of_original: sha256(before), bytes: before.length });
         files += 1;
         continue;
       }
@@ -307,7 +339,7 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
             const count = t.split(f).length - 1;
             if (!count) continue;
             t = t.split(f).join(REDACTED);
-            replaced.push({ what: "text", entry: tok.seq, sha256_of_original: sha256(tok.token), count, why: "a sensitive entry's words" });
+            replaced.push({ what: "text", entry: tok.output ? null : tok.seq, sha256_of_original: sha256(tok.token), count, why: tok.output ? `the text of a sensitive output (${tok.output})` : "a sensitive entry's words" });
           }
         }
         after = t;
@@ -327,12 +359,17 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
       "Redactions",
       "==========",
       "",
-      `This package was made with --redact. ${sensitiveSeqs.size} ledger entr${sensitiveSeqs.size === 1 ? "y was" : "ies were"} marked sensitive (seq ${[...sensitiveSeqs].join(", ") || "none"}).`,
+      `This package was made with --redact. ${sensitiveSeqs.size} ledger entr${sensitiveSeqs.size === 1 ? "y was" : "ies were"} marked sensitive (seq ${[...sensitiveSeqs].join(", ") || "none"})${unmarked.length ? `, ${unmarked.length} of them because ${unmarked.length === 1 ? "it cites" : "they cite"} a sensitive output (seq ${unmarked.join(", ")})` : ""}.`,
+      `${index.jobs.size} job${index.jobs.size === 1 ? "'s" : "s'"} outputs were sensitive (${[...index.jobs.values()].map((j) => `${j.id}: ${j.sensitivity.why === "secret_output" ? "secret_output" : `derived from ${j.sensitivity.from.join(", ")}`}`).join("; ") || "none"}).`,
       "What they say, and the objects they cite, are not in it. A chained file keeps its chain: a redacted",
       "line carries the sha256 of the line it replaces, which the next line's prev names. Each change below",
       "is the file's sha256 before and after, so the owner of the original can match it; REDACTIONS.json",
-      "records what each replaced (the sha256 of the original, why, which entry) and the leak scan.",
+      "records what each replaced (the sha256 of the original, why, which entry), what was withheld whole",
+      "and the leak scan over every file of the package.",
       `Leak scan: ${scan.hits.length ? `${scan.hits.length} HIT(S) over ${scan.files} file(s), LISTED in REDACTIONS.json (made with --redact-leaks list)` : `nothing found over ${scan.files} file(s)`}.`,
+      "",
+      `Withheld whole: ${withheld.length ? "" : "nothing"}`,
+      ...withheld.map((w) => `${w.sha256_of_original}  ${String(w.bytes).padStart(12)}  ${w.path}  ${w.why}`),
       "",
       "sha256 before                                                    sha256 after                                                     path  why",
       ...changes.map((c) => `${c.before_sha256}  ${c.after_sha256}  ${c.path}  ${c.why}`),
@@ -345,8 +382,11 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
       {
         v: 1,
         note: "What this package's redaction replaced: each change with the sha256 of what it replaced (never the words), why, and which sensitive entry's words it held; then every file scanned for what should have been taken out. Under MANIFEST.txt and its signature.",
-        entries: entries.filter((e) => e.sensitive).map((e) => ({ seq: e.seq, kind: e.kind, hash: e.hash ?? null })),
+        entries: entries.filter((e) => e.sensitive).map((e) => ({ seq: e.seq, kind: e.kind, hash: e.hash ?? null, why: derived.get(e.seq) ?? "marked sensitive" })),
+        sensitive_outputs: [...index.jobs.values()].map((j) => ({ job: j.id, why: j.sensitivity.why, from: j.sensitivity.from, status: j.status, files: j.files.length, withheld: withheld.filter((w) => w.job === j.id).map((w) => w.path) })),
         words: tokens.length,
+        output_words: words.length,
+        withheld,
         changes,
         leak_scan: { mode, files: scan.files, hits: scan.hits },
       },
@@ -354,7 +394,45 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
       2,
     )}\n`,
   );
-  return { entries: sensitiveSeqs.size, files, lines, leaks: scan.hits, scanned: scan.files };
+  return { entries: sensitiveSeqs.size, files, lines, leaks: scan.hits, scanned: scan.files, withheld };
+}
+
+/**
+ * The hygiene of a package made without --redact (docs/adr/0016): what in it
+ * is sensitive, named, never taken out. Every sensitive ledger entry (marked,
+ * or citing a sensitive output) and every sensitive job output with whether
+ * the package carries it, then every file of the package scanned for the
+ * sensitive entries' words and the small sensitive outputs' text, each hit
+ * by file, entry or output, and the word's sha256. Written to HYGIENE.json,
+ * under the manifest. A package to hand over is made with --redact.
+ */
+export async function hygieneReport(sandbox: string, dir: string): Promise<{ entries: number; outputs: number; carried: string[]; hits: LeakHit[]; scanned: number }> {
+  const raw = await readLedger(sandbox, { raw: true });
+  const derived = await sensitiveEntries(sandbox, raw);
+  const entries = raw.map((e) => (derived.has(e.seq) && !e.sensitive ? { ...e, sensitive: true } : e));
+  const index = await sensitiveIndex(sandbox);
+  const words = await outputWords(sandbox);
+  const tokens: ScanToken[] = [...sensitiveTokens(entries), ...words.map((w) => ({ token: w.token, seq: 0, output: `job ${w.job}, ${w.path}` }))];
+  const patterns = withheldPaths(index);
+  const carried = patterns.length ? walk(dir).map((abs) => relative(dir, abs).split("\\").join("/")).filter((rel) => patterns.some((p) => p.rel.test(rel))).sort() : [];
+  const scan = tokens.length ? leakScan(dir, tokens) : { files: 0, hits: [] as LeakHit[] };
+  if (derived.size || index.jobs.size) {
+    writeFileSync(
+      join(dir, "HYGIENE.json"),
+      `${JSON.stringify(
+        {
+          v: 1,
+          note: "This package was made without --redact: what in it is sensitive is named here and left in. Every file was scanned for the sensitive entries' words and the text of the small sensitive outputs; a hit names the file, the entry or output, and the word's sha256, never the word. A package to hand over is made with --redact, which takes these out and withholds the sensitive outputs whole.",
+          entries: [...derived.entries()].map(([seq, why]) => ({ seq, why })),
+          sensitive_outputs: [...index.jobs.values()].map((j) => ({ job: j.id, why: j.sensitivity.why, from: j.sensitivity.from, status: j.status, files: j.files.length, carried: carried.filter((c) => c.startsWith(`store/jobs/${j.id}/`)) })),
+          scan: { files: scan.files, words: tokens.length, hits: scan.hits },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  }
+  return { entries: derived.size, outputs: index.jobs.size, carried, hits: scan.hits, scanned: scan.files };
 }
 
 // --- verify ------------------------------------------------------------------------------
@@ -907,7 +985,8 @@ export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
       const listed = new Set((r.changes ?? []).map((c) => c.path));
       const unrecorded = [...rows.keys()].filter((p) => !listed.has(p));
       const hits = r.leak_scan?.hits ?? [];
-      lineage = `; REDACTIONS.json records what ${(r.changes ?? []).reduce((n, c) => n + (c.replaced?.length ?? 0), 0)} redaction(s) replaced (the sha256 of each original, why, which entry)${unrecorded.length ? `, and NOT ${unrecorded.join(", ")}` : ""}; the leak scan after it ${hits.length ? `FOUND ${hits.length} HIT(S), LISTED: ${hits.map((h) => `${h.path} (entry ${h.entry})`).join(", ")}` : `found nothing over ${r.leak_scan?.files ?? "?"} file(s)`}`;
+      const withheld = (r as { withheld?: Array<{ path: string }> }).withheld ?? [];
+      lineage = `; REDACTIONS.json records what ${(r.changes ?? []).reduce((n, c) => n + (c.replaced?.length ?? 0), 0)} redaction(s) replaced (the sha256 of each original, why, which entry)${unrecorded.length ? `, and NOT ${unrecorded.join(", ")}` : ""}${withheld.length ? `; ${withheld.length} file(s) withheld whole, each named with its sha256 (${withheld.map((w) => w.path).join(", ")})` : ""}; the leak scan after it ${hits.length ? `FOUND ${hits.length} HIT(S), LISTED: ${hits.map((h) => `${h.path} (entry ${h.entry})`).join(", ")}` : `found nothing over ${r.leak_scan?.files ?? "?"} file(s)`}`;
       if (unrecorded.length) ok = false;
     } catch {
       lineage = "; no REDACTIONS.json (a package made before redactions were recorded): what each replaced is not said";
@@ -926,10 +1005,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       process.exit(2);
     }
     const r = await redactPackage(a, b, { leaks });
-    console.log(JSON.stringify({ entries: r.entries, files: r.files, lines: r.lines, scanned: r.scanned, leaks: r.leaks.length }));
+    console.log(JSON.stringify({ entries: r.entries, files: r.files, lines: r.lines, scanned: r.scanned, leaks: r.leaks.length, withheld: r.withheld.length }));
     // A word that should have been taken out and is still there: named by file, entry and the word's sha256, never the word.
-    for (const h of r.leaks) console.error(`  ${h.path}: entry ${h.entry}'s words (sha256 ${h.token_sha256.slice(0, 16)}…, as ${h.as})`);
+    for (const h of r.leaks) console.error(`  ${h.path}: ${h.output ? `the text of a sensitive output (${h.output})` : `entry ${h.entry}'s words`} (sha256 ${h.token_sha256.slice(0, 16)}…, as ${h.as})`);
     if (r.leaks.length && leaks === "fail") process.exit(5);
+  } else if (cmd === "hygiene" && a && b) {
+    const r = await hygieneReport(a, b);
+    console.log(JSON.stringify({ entries: r.entries, outputs: r.outputs, carried: r.carried.length, hits: r.hits.length, scanned: r.scanned }));
   } else if (cmd === "components" && a && b) {
     console.log(JSON.stringify(writeComponents(a, b)));
   } else if (cmd === "verify" && a) {
@@ -943,7 +1025,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const unchecked = rel.signatures.some((s) => s.adopted && s.state !== "verified");
     process.exit(!r.ok || !rel.ok ? 1 : unchecked && opt("--allowed-signers") ? 3 : 0);
   } else {
-    console.error("usage: package-tools.ts redact <sandbox> <package dir> | components <sandbox> <package dir> | verify <package dir>");
+    console.error("usage: package-tools.ts redact <sandbox> <package dir> | hygiene <sandbox> <package dir> | components <sandbox> <package dir> | verify <package dir>");
     process.exit(2);
   }
 }

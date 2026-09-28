@@ -838,6 +838,8 @@ export function boardTable(hub: {
         ...(typeof raw.note === "string" ? { note: raw.note } : {}),
         ...(typeof raw.profile === "string" && raw.profile ? { profile: raw.profile } : {}),
         ...(Array.isArray(raw.net_grants) && raw.net_grants.length ? { net_grants: raw.net_grants.map(String) } : {}),
+        // Every output sensitive at seal time (docs/adr/0016); anything but a boolean is refused by the service.
+        ...(raw.secret_output !== undefined ? { secret_output: raw.secret_output as boolean } : {}),
       };
       // A job run under a lead: the lead must be the seat's own, checked
       // before the job is accepted, and the job goes on the lead's record.

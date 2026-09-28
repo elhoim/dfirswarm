@@ -8511,6 +8511,17 @@ async function appendLedgerEntry(ctx: SwarmContext, held: { assertOwned(): Promi
     const use = await materialUseRefusal(ctx.sandboxRoot, entry as unknown as Record<string, unknown>);
     if (use) return { ok: false, reason: use };
   }
+  // An entry whose refs reach a sensitive output (a job run with
+  // secret_output, or one made from such an output) is recorded sensitive
+  // (docs/adr/0016): its words are held to the run's sensitivity from now on.
+  if (entry.refs?.length && !entry.sensitive) {
+    const { sensitiveRefs } = await import("../scripts/output-hygiene.ts");
+    const hits = await sensitiveRefs(ctx.sandboxRoot, entry.refs).catch(() => []);
+    if (hits.length) {
+      entry.sensitive = true;
+      notes.push(`recorded sensitive: it cites sensitive output (${hits.map((h) => `${h.ref}, job ${h.job}${h.why === "secret_output" ? " ran with secret_output" : ", made from a sensitive output"}`).join("; ")}); no name, doing label or question may carry what it says, and a redacted package takes its words out`);
+    }
+  }
   // Keys in a stable order: the core is computed from the fields, not the line.
   // Chained like the trace: each entry names the one before it.
   const previous = entries.at(-1);
@@ -10061,7 +10072,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
  * unsupported answer supported, and the release still counts it).
  */
 export type LedgerDefect = {
-  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use";
+  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use" | "partial_output";
   section?: string;
   seqs: number[];
   what: string;
@@ -10078,6 +10089,34 @@ export type LedgerGate = {
   /** Every standing answer's unsupported tokens, by seq (the release counts them). */
   unsupported: Record<number, string[]>;
 };
+
+/** The job statuses whose kept output is partial by an act, not by its own failure: cancelled by an agent or the harness, or stopped (docs/adr/0016). */
+export const PARTIAL_STATUSES: ReadonlySet<string> = new Set(["cancelled", "stopped"]);
+
+/**
+ * The standing entries that cite the kept output of a cancelled or stopped
+ * job without saying how they treat it (qualifies {ref, why}): by seq, each
+ * such ref with its job's status. A limitation says what could not be done
+ * and is its own disposition; so is a search recorded partial or failed, and
+ * a coverage record, whose coverage_actual, skipped and failures say it.
+ * Pure: `statusOf` reads a job's status.
+ */
+export function partialOutputCites(entries: LedgerEntry[], statusOf: (job: string) => string | null | undefined): Map<number, Array<{ ref: string; job: string; status: string }>> {
+  const replaced = supersededBy(entries);
+  const out = new Map<number, Array<{ ref: string; job: string; status: string }>>();
+  for (const e of entries) {
+    if (replaced.has(e.seq) || e.kind === "limitation" || e.kind === "coverage" || e.kind === "answer") continue;
+    if (e.kind === "absence" && e.completion && e.completion !== "complete") continue;
+    for (const ref of e.refs ?? []) {
+      const job = /^job:([a-z0-9-]{1,64})(?:\/|$)/.exec(ref)?.[1];
+      const status = job ? statusOf(job) : null;
+      if (!job || !status || !PARTIAL_STATUSES.has(status)) continue;
+      if ((e.qualifies ?? []).some((q) => q.ref === ref)) continue;
+      out.set(e.seq, [...(out.get(e.seq) ?? []), { ref, job, status }]);
+    }
+  }
+  return out;
+}
 
 /** Contradictions that stand and that nothing has weighed: no answer holds both with one as contrary evidence, no limitation names both. */
 export function openContradictions(entries: LedgerEntry[]): Array<{ from: number; to: number }> {
@@ -10104,7 +10143,7 @@ export function openContradictions(entries: LedgerEntry[]): Array<{ from: number
  * the contradictions left open. Pure over what was read: the caller reads
  * the files (and which entries rest on a failed job) and verifies the chains.
  */
-export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean } }): LedgerGate {
+export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>> }): LedgerGate {
   const { entries } = o;
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
@@ -10181,6 +10220,20 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
   }
   for (const c of openContradictions(entries)) {
     defects.push({ code: "open_contradiction", seqs: [c.from, c.to], what: `#${c.from} contradicts #${c.to} and both stand`, fix: `supersede the one that is wrong, weigh both in an answer (one as support, the other in contrary), or record a limitation citing E-${c.from} and E-${c.to}`, named_by: [] });
+  }
+  // The kept output of a job that was cancelled or stopped, cited later: the
+  // entry says how it treats what the job wrote before it was stopped, or it
+  // stands as a defect (docs/adr/0016). Fixed by the entry, never named.
+  for (const [seq, refs] of o.partial ?? []) {
+    const e = bySeq.get(seq);
+    if (!e || replaced.has(seq)) continue;
+    defects.push({
+      code: "partial_output",
+      seqs: [seq],
+      what: `#${seq} cites the kept output of ${refs.map((r) => `job ${r.job} (${r.status})`).filter((x, i, a) => a.indexOf(x) === i).join(", ")} (${refs.map((r) => r.ref).join(", ")}) and does not say how it treats a partial output`,
+      fix: `record it again with supersedes=${seq} and qualifies [{ref, why}] for each such ref (what the job wrote before it was stopped, and why that part still holds), or cite the output of a job that ran to its end`,
+      named_by: [],
+    });
   }
   return { answers, defects, open: defects.filter((d) => !d.named_by.length), unsupported };
 }

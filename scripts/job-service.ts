@@ -42,6 +42,7 @@ import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolve
 import { CANARY_NAME, OBSERVE_GUEST, observedRun, observeWanted, readObservation } from "./job-observe.ts";
 import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
+import { derivedFrom, derivedSensitivity, ownSensitivity, type Sensitivity } from "./output-hygiene.ts";
 
 export type JobKind = "tool" | "command" | "recipe" | "detect" | "import";
 
@@ -206,6 +207,12 @@ export type JobSpec = {
    * reaches the fetch service on the host and nothing else of it.
    */
   net_grants?: string[];
+  /**
+   * Every output this job seals is sensitive (docs/adr/0016): its result
+   * may hold a secret. Said by the agent; the harness never reads the bytes
+   * to decide.
+   */
+  secret_output?: boolean;
 };
 
 export type Requester = { agent: string; name?: string; doing?: string };
@@ -253,6 +260,8 @@ export type JobRecord = {
   cancel_requested?: string;
   lane?: Lane;
   image_choice?: ImageChoice;
+  /** Its outputs are sensitive, decided when they were sealed (output-hygiene.ts): run with secret_output, or made from a sensitive output. */
+  sensitive?: Sensitivity;
 };
 
 /**
@@ -486,7 +495,7 @@ export class JobService {
           if (j && l.fenced) j.state = "fenced";
           break;
         case "job_committed":
-          if (j) Object.assign(j, { state: "committed", status: l.status, outputs: l.outputs, image_digest: l.image_digest ?? j.image_digest });
+          if (j) Object.assign(j, { state: "committed", status: l.status, outputs: l.outputs, image_digest: l.image_digest ?? j.image_digest, ...(l.sensitive ? { sensitive: l.sensitive as Sensitivity } : {}) });
           if (j?.requester.agent === DERIVED && j.spec.kind === "recipe") this.derivedOutputBytes += Number((l.outputs as { bytes?: number } | undefined)?.bytes ?? 0);
           break;
         case "job_failed":
@@ -886,7 +895,8 @@ export class JobService {
     const grants = Array.isArray(raw.net_grants) ? [...new Set(raw.net_grants.map((g) => String(g).trim().toUpperCase()))].filter(Boolean) : [];
     if (grants.length && kind !== "command" && kind !== "tool") return { reason: "network grants go with a command or a tool job" };
     if (grants.some((g) => !/^N-[1-9]\d{0,6}$/.test(g)) || grants.length > 8) return { reason: "net_grants names up to 8 grants, N-<k>" };
-    const base = { kind, inputs, scope: declared.kind, timeout_seconds: timeout, network, ...(raw.scratch ? { scratch: true } : {}), ...(raw.note ? { note: String(raw.note) } : {}), ...(raw.parent ? { parent: String(raw.parent) } : {}), ...(profile ? { profile } : {}), ...(grants.length ? { net_grants: grants } : {}) } as JobSpec;
+    if (raw.secret_output !== undefined && typeof raw.secret_output !== "boolean") return { reason: "secret_output is true or false" };
+    const base = { kind, inputs, scope: declared.kind, timeout_seconds: timeout, network, ...(raw.scratch ? { scratch: true } : {}), ...(raw.note ? { note: String(raw.note) } : {}), ...(raw.parent ? { parent: String(raw.parent) } : {}), ...(profile ? { profile } : {}), ...(grants.length ? { net_grants: grants } : {}), ...(raw.secret_output === true ? { secret_output: true } : {}) } as JobSpec;
     if (kind === "tool") {
       const args = raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : {};
       const checked = await this.toolCheck(String(raw.tool ?? ""), args);
@@ -1499,13 +1509,47 @@ export class JobService {
     }
     maybeCrash("job:sealed");
     const outputs = { manifest_sha256: sealed.manifestSha256, files: sealed.manifest.totals.files, bytes: sealed.manifest.totals.bytes, rejected: sealed.manifest.rejected.length, path: `store/jobs/${job.id}/${where}` };
-    await this.journal.append({ type: "job_committed", job: job.id, attempt: job.attempt, status: r.status, exit: r.exit, ...(r.reason ? { reason: r.reason } : {}), outputs, logs, ...(job.image_digest ? { image_digest: job.image_digest } : {}) });
+    // Sensitive at seal time (docs/adr/0016): run with secret_output, or made from a sensitive output.
+    const sensitive = await this.sensitivityOf(job).catch((err: Error) => {
+      this.log(`${job.id}: its sensitivity could not be decided (${err.message}); sealed as sensitive`);
+      return { why: "derived" as const, from: [], note: `its sensitivity could not be decided when it was sealed (${err.message}): held sensitive` };
+    });
+    await this.journal.append({ type: "job_committed", job: job.id, attempt: job.attempt, status: r.status, exit: r.exit, ...(r.reason ? { reason: r.reason } : {}), outputs, logs, ...(job.image_digest ? { image_digest: job.image_digest } : {}), ...(sensitive ? { sensitive } : {}) });
     await rm(st.base, { recursive: true, force: true }).catch(() => undefined);
     if (where !== "out") return false;
-    Object.assign(job, { state: "committed", status: r.status, outputs });
+    Object.assign(job, { state: "committed", status: r.status, outputs, ...(sensitive ? { sensitive } : {}) });
     await this.project(job);
     maybeCrash("job:committed");
     return true;
+  }
+
+  /**
+   * Whether what a job sealed is sensitive (docs/adr/0016): it was run with
+   * secret_output, or it read a sensitive output. What it read is what it
+   * declared (resolved again now: a sealed output does not change), by path,
+   * by digest, or a catalogue generation a sensitive job made; a job that
+   * declared no scope could read everything, so it is held to what its
+   * command, arguments, source and targets name. Null when neither.
+   */
+  private async sensitivityOf(job: JobRecord): Promise<Sensitivity | null> {
+    const own = ownSensitivity(job.spec);
+    if (own) return own;
+    const sensitive = new Set([...this.jobs.values()].filter((j) => j.sensitive && j.id !== job.id).map((j) => j.id));
+    if (!sensitive.size) return null;
+    const digests = new Map<string, string>();
+    for (const id of sensitive) {
+      const m = await readManifest(join(storePaths(this.S).jobs, id, "manifest.json"));
+      for (const f of m?.manifest.files ?? []) if (!digests.has(f.sha256)) digests.set(f.sha256, id);
+    }
+    const generations = new Map<string, string | null>();
+    for (const l of this.journal.of("generation_committed")) generations.set(String(l.generation), typeof l.job === "string" ? l.job : null);
+    let objects: Array<{ path: string; sha256?: string }> | null = null;
+    if (scopeKindOf(job.spec) === "declared" && !job.spec.seal) {
+      const r = await resolveScope(this.S, job.spec.inputs, { collections: this.collections(), targets: targetPaths(job.spec) });
+      if (r.ok) objects = r.objects;
+    }
+    const text = [job.spec.command ?? "", job.spec.args ? JSON.stringify(job.spec.args) : "", job.spec.source ?? "", ...targetPaths(job.spec)].join("\n");
+    return derivedSensitivity(derivedFrom({ objects, text, sensitive, digestJob: (sha) => digests.get(sha) ?? null, generationJob: (gen) => generations.get(gen) ?? null }));
   }
 
   /**
@@ -2185,7 +2229,13 @@ export function describe(job: JobRecord): string {
   const files = o ? `${o.files} file(s), ${o.bytes} bytes in ${o.path}/${o.rejected ? ` (${o.rejected} link(s) or special file(s) left out, named in its manifest)` : ""}` : "no output";
   const head = job.status === "ok" ? "done" : `${job.status}${job.reason ? ` (${job.reason})` : ""}`;
   const cite = job.spec.seal && job.status === "ok" ? `record again citing ${job.spec.seal.ref}: it resolves to import:${job.id}/<name>` : `cite its files as job:${job.id}/<path>`;
-  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}`;
+  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}${job.sensitive ? ` ${sensitiveWords(job)}` : ""}`;
+}
+
+/** What a sensitive job's outputs mean for whoever uses them, in one sentence. */
+export function sensitiveWords(job: Pick<JobRecord, "id" | "sensitive">): string {
+  if (!job.sensitive) return "";
+  return `Its outputs are sensitive (${job.sensitive.why === "secret_output" ? "it ran with secret_output" : `made from the sensitive output of ${job.sensitive.from.join(", ")}`}): an entry citing them is recorded sensitive, a job reading them seals sensitive output too, and a redacted package withholds them. Say what they show without the value.`;
 }
 
 
@@ -2215,6 +2265,8 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number } =
     ...(scopeKindOf(job.spec) === "declared" ? { declared: job.spec.inputs } : {}),
     ...(job.scope?.manifest ? { scope_manifest: job.scope.manifest } : {}),
     ...(job.generation ? { generation: job.generation, revision: job.revision } : {}),
+    ...(job.spec.secret_output ? { secret_output: true } : {}),
+    ...(job.sensitive ? { sensitive: sensitiveWords(job) } : {}),
   };
   if (job.state !== "committed" || !job.outputs) return view;
   const dir = join(storePaths(S).jobs, job.id);
