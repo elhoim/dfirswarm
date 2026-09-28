@@ -25,6 +25,13 @@ All notable changes to this project. The format follows
   An offer's bookkeeping (made, delivered, declined, lapsed) does not move
   the revision, so a waiting seat's delivery never makes the coordinator's
   check run again; a closure offered to its closer to confirm does.
+  The sentinel is written in one transaction with the lease (the holder and
+  generation the coordinator's done began with) and what is late against
+  the report: a takeover or an objection made while the checks ran refuses
+  it. What landed against the report is an obligation until resolved,
+  through every later version of it. The revision counts what of each
+  job's stdout was handed over, and readiness is cached only for the
+  revision its own snapshot was read at.
 - **Reviews say how strongly they hold.** An attest of an answer to a
   question takes `strength` (established or best_candidate) and
   `answer_review`; a medium or low confidence, a part not established, or an

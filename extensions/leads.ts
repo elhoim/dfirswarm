@@ -2880,7 +2880,7 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   if (confirming.length) lines.push(`Closures to confirm or reopen (their entry was superseded; nothing re-points them): ${confirming.map((x) => `${x.id} closed ${x.disposition} on ${x.confirm!.ref_was}${x.confirm!.head ? `, now ${x.confirm!.head}` : ""} (${x.confirm!.to ?? "nobody"} confirms)`).join("; ")}.`);
   // The finish (A4): whether the registers say it is ready, who coordinates it, and what this seat does about it.
   const F = await import("./finish.ts");
-  const finish = await F.finishHeader(ctx.sandboxRoot, me, snap).catch(() => null);
+  const finish = await F.finishHeader(ctx.sandboxRoot, me).catch(() => null);
   if (finish) lines.push(finish);
   if (o.mark) {
     await writeTold(ctx.sandboxRoot, me, toldNow(me, snap, Object.keys(before.held)));

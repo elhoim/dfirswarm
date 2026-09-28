@@ -189,7 +189,7 @@ import {
 // The lead register's host-side pieces: a host run's wait checks it itself (a VM's hub does it there).
 import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
 // The finish's host-side pieces: one check result per revision, recorded where the finish line runs.
-import { checkAt, NOT_YOURS, recordCheck } from "./finish.ts";
+import { checkAt, LATE_PENDING, NOT_YOURS, recordCheck } from "./finish.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
 import { installChunkedEgress } from "./vm-egress.ts";
@@ -3716,8 +3716,11 @@ export default function (pi: ExtensionAPI) {
       // The finish is one seat's (A4, extensions/finish.ts). A seat leaving on
       // its own cap, an abandon vote, and every done once the sentinel exists
       // are not the finish.
+      // The lease this done began with: the sentinel is written only while it still holds (markDone, finishTransaction).
+      let finishLease: { holder: string; generation: number } | undefined;
       if (params.reason !== "agent_cap" && params.abandon !== true && !(await swarmDoneExists(toolCtx.cwd))) {
         const turn = await finishTurnFor(ctxFrom(toolCtx.cwd, agentId), { output_file: params.output_file }).catch(() => null);
+        if (turn?.mine) finishLease = { holder: turn.holder, generation: turn.generation };
         if (turn && !turn.mine) {
           // Quietly: no finish line, no board post, and not a refusal.
           const text = `Not yours: ${turn.holder} coordinates the finish (generation ${turn.generation}: ${turn.why}). The finish is ${turn.readiness.ready ? "ready by the registers" : `not ready: ${turn.readiness.items.join("; ")}`}. Your done does not end the run: post what your slice found, review the report (finish ack) if you can, or wait.`;
@@ -3818,9 +3821,16 @@ export default function (pi: ExtensionAPI) {
           outputFile: params.output_file,
           ...(outcome ? { outcome } : {}),
           ...(revision ? { revision } : {}),
+          ...(finishLease ? { finish: finishLease } : {}),
         });
       } catch (err) {
         const message = (err as Error).message;
+        // What landed against the report while the checks ran: refused in the sentinel's own transaction.
+        if (message.includes(LATE_PENDING)) {
+          const reason = message.slice(message.indexOf(LATE_PENDING));
+          await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason }).catch(() => undefined);
+          return { content: [{ type: "text" as const, text: reason }], details: { ok: false, reason }, isError: true };
+        }
         // The coordinator took the finish meanwhile: quietly, as any other seat's done is answered.
         if (message.includes(NOT_YOURS)) {
           await logEvent(toolCtx.cwd, agentId, "done_deferred", { output_file: params.output_file }, { ok: true, reason: message }).catch(() => undefined);

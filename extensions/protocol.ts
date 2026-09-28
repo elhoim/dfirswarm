@@ -1759,7 +1759,7 @@ async function nextPostId(sandboxRoot: string, thread: string): Promise<number> 
  * correction — and only posts by somebody other than the agent calling `done`,
  * because an agent quoting itself is not news.
  */
-async function outputWrittenAt(sandboxRoot: string, outputFile: string): Promise<number> {
+export async function outputWrittenAt(sandboxRoot: string, outputFile: string): Promise<number> {
   let pathKey: string;
   try {
     pathKey = claimKey(sandboxRoot, outputFile);
@@ -1784,9 +1784,12 @@ export async function correctionsAfter(
   sandboxRoot: string,
   outputFile: string,
   agentId: string,
+  since?: number,
 ): Promise<Array<{ id: number; from: string; tag: PostTag }>> {
   // A missing output is not "no corrections": it has never answered the board.
-  const writtenAt = await outputWrittenAt(sandboxRoot, outputFile);
+  // `since` (the finish's anchor, extensions/finish.ts) keeps what was late
+  // against an earlier version of the output late through the later ones.
+  const writtenAt = typeof since === "number" && Number.isFinite(since) ? since : await outputWrittenAt(sandboxRoot, outputFile);
   const dir = join(sandboxRoot, "threads", PRIMARY_THREAD);
   const files = await readdir(dir).catch(() => [] as string[]);
   const out: Array<{ id: number; from: string; tag: PostTag }> = [];
@@ -3030,7 +3033,7 @@ export function extractWritePath(input: Record<string, unknown> | undefined): st
 
 export async function markDone(
   ctx: SwarmContext,
-  args: { reason: string; outputFile: string; createSentinel?: boolean; outcome?: FinishOutcome; revision?: string },
+  args: { reason: string; outputFile: string; createSentinel?: boolean; outcome?: FinishOutcome; revision?: string; finish?: { holder: string; generation: number } },
 ): Promise<DoneResult | DoneRefused> {
   const reason = yamlOneLine(args.reason);
   const outputFile = yamlOneLine(args.outputFile);
@@ -3066,19 +3069,17 @@ export async function markDone(
   }
 
   // The finish is one seat's (A4, extensions/finish.ts): a done that would
-  // end the swarm from any other seat, while the coordinator can still take
-  // it, is not this seat's to make.
-  if (!seatOnly && !reason.startsWith(ABANDON_PREFIX) && !(await swarmDoneExists(ctx.sandboxRoot))) {
-    const may = await (await import("./finish.ts")).mayFinish(ctx.sandboxRoot, ctx.agentId);
-    if (!may.ok) throw new Error(may.reason);
-  }
+  // end the swarm is checked against the coordinator's lease (the holder and
+  // generation its done began with, `finish`) and what is late against the
+  // report, in the same transaction that writes this seat's marker and the
+  // sentinel (finishTransaction), never only before.
+  const ending = !seatOnly && !reason.startsWith(ABANDON_PREFIX) && !(await swarmDoneExists(ctx.sandboxRoot));
 
   const by = ctx.agentId;
   const stamp = new Date().toISOString();
   const agentFile = agentDonePath(ctx.sandboxRoot, ctx.agentId);
   const sentinel = sentinelPath(ctx.sandboxRoot);
 
-  await mkdir(dirname(agentFile), { recursive: true });
   // How the run ended, when the finish line said (FinishOutcome): an
   // abandon is abandoned whatever the caller passed.
   const outcome: FinishOutcome | undefined = reason.startsWith(ABANDON_PREFIX) ? "abandoned" : args.outcome && (FINISH_OUTCOMES as readonly string[]).includes(args.outcome) ? args.outcome : undefined;
@@ -3092,8 +3093,6 @@ ${outcomeLine}at: ${stamp}
 
 Worker ${by} is exiting.
 `;
-  await writeFile(agentFile, agentBody, "utf8");
-
   const sentinelText = `---
 by: ${by}
 output: ${outputFile}
@@ -3108,17 +3107,20 @@ Collective finished. Presence of this file is the clock. Call done and stop.
   // admitted or a lead opened after that line either moved the state, and the
   // done is refused to be run again, or finds the sentinel and is recorded as
   // a follow-up. Admission and a terminal done are never interleaved.
-  const created = seatOnly
-    ? false
-    : args.revision
-      ? await withNamedLock(ctx.sandboxRoot, REGISTER_LOCK, async () => {
-          if (!(await swarmDoneExists(ctx.sandboxRoot)) && (await stateRevision(ctx.sandboxRoot).catch(() => ({ revision: "" }))).revision !== args.revision) {
-            await rm(agentFile, { force: true }).catch(() => undefined);
-            throw new Error(FINISH_LINE_UNSETTLED);
-          }
-          return createSentinel(ctx.sandboxRoot, sentinelText);
-        })
-      : await createSentinel(ctx.sandboxRoot, sentinelText);
+  const writeDone = async (): Promise<boolean> => {
+    await mkdir(dirname(agentFile), { recursive: true });
+    await writeFile(agentFile, agentBody, "utf8");
+    if (seatOnly) return false;
+    if (!args.revision) return createSentinel(ctx.sandboxRoot, sentinelText);
+    return withNamedLock(ctx.sandboxRoot, REGISTER_LOCK, async () => {
+      if (!(await swarmDoneExists(ctx.sandboxRoot)) && (await stateRevision(ctx.sandboxRoot).catch(() => ({ revision: "" }))).revision !== args.revision) {
+        await rm(agentFile, { force: true }).catch(() => undefined);
+        throw new Error(FINISH_LINE_UNSETTLED);
+      }
+      return createSentinel(ctx.sandboxRoot, sentinelText);
+    });
+  };
+  const created = ending ? await (await import("./finish.ts")).finishTransaction(ctx.sandboxRoot, ctx.agentId, args.finish, writeDone) : await writeDone();
 
   await releaseAllOwned(ctx);
 

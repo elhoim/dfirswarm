@@ -417,8 +417,8 @@ Done
   done, dead, compacting or silent is taken over by the next seat's done.
 - The coordinator calls done when the header says ready. Every result or veto posted after the
   report, and every objection to it, is answered first with `finish` resolve (folded into the
-  report, or not_material, with why); reading it is not answering it, and a typed ack is not a
-  late post. The harness writes the sentinel; you do not write done/SWARM_DONE yourself. Before it
+  report, or not_material, with why); reading it is not answering it, publishing the report again
+  does not answer it either, and a typed ack is not a late post. The harness writes the sentinel; you do not write done/SWARM_DONE yourself. Before it
   does, it runs the goal's checks and its own gate once per state revision (a second done at the
   same revision gets the same answer): a material lead with no disposition, a closure awaiting
   confirmation, or a lead's job with no interpretation refuses `done` with what fixes each, and the

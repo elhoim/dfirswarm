@@ -108,7 +108,12 @@ have lost its provider.
    next seat's `done` takes the lease over at the next generation (and says
    so on the board). Any other seat's `done` returns "not yours", quietly: a
    `done_deferred` trace row, no board post, no finish line, not a refusal;
-   `markDone` refuses the sentinel from it too. An agent's own cap, an
+   `markDone` refuses the sentinel from it too. The sentinel is written in
+   one transaction under the finish register's lock, only while the seat
+   holds the lease at the holder and generation its `done` began with, and
+   the seat's own done marker is written inside it: a coordinator taken over
+   while its checks ran does not end the run, and nobody takes over once the
+   sentinel exists. An agent's own cap, an
    abandon vote and every done once the sentinel exists are not the finish.
 7. **A route lead stops holding the finish only when it no longer matters.**
    A material lead closed deferred, infeasible or `needs_operator` keeps its
@@ -133,19 +138,27 @@ have lost its provider.
    board's verdict posts, the ledger, its review, the leads, the questions,
    the report's digest (the lease's path), the shared deliverables at the top
    of `work/`, every job's state, the policy (the stop policy, the caps, a
-   pause, the contract) and the operator's decisions (requests, hosts
-   allowed); the sentinel is written only while it holds. A review's ack
+   pause, the contract), what of each job's stdout its requester was handed
+   (the bytes still unread: a page read after a check can add a defect, the
+   rest read can fix one) and the operator's decisions (requests, hosts
+   allowed); the sentinel is written only while it holds. Readiness is read
+   from its own snapshot between two readings of the revision that agree,
+   and cached only then. A review's ack
    does not move it, nor does an offer's bookkeeping (an offer made,
    delivered, declined, accepted or lapsed says who may take work first,
    never what the finish rests on, and idle seats write it all the time); a
    closure offered to its closer to confirm does, since it holds the finish.
 10. **The report is reviewed with typed acts.** `finish ack` (no_objection, or
     objection with why) records a review of the report's current digest and
-    is not a late post. A result or veto posted after the report was written,
-    and an objection to its current digest, hold the coordinator's `done`
-    until `finish resolve` answers it: folded (the report says it now, and
-    where) or not_material (and why). Reading it is not answering it. The
-    once-only "late posts" refusal addressed to every seat is gone.
+    is not a late post. A result or veto posted after the report was written
+    as the finish began, and an objection to any version of it, hold the
+    coordinator's `done` until `finish resolve` answers it: folded (the
+    report says it now, and where; bound to the digest it was folded into)
+    or not_material (and why). They are obligations: publishing the report
+    again answers none of them, and they are read again in the transaction
+    that writes the sentinel, so one acked while the checks ran holds it.
+    Reading it is not answering it. The once-only "late posts" refusal
+    addressed to every seat is gone.
 11. **A summary cites questions symbolically.** A summary or narrative that
     names `Q-<n>` binds each to its answer's fingerprint (the result, the
     question revision, the hashes of its support, contrary evidence and

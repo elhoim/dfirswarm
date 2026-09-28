@@ -41,10 +41,10 @@ function words(v: L.LeadView): string {
 }
 
 /** The finish as the operator reads it (extensions/finish.ts): readiness by the registers, the coordinator, the last check and what is late. Read only: nothing is posted from here. */
-export async function finishText(sandbox: string, snap?: L.LeadsSnapshot): Promise<string> {
+export async function finishText(sandbox: string): Promise<string> {
   if (await P.swarmDoneExists(sandbox)) return "Finish: the run is finished (done/SWARM_DONE).";
   const F = await import("../extensions/finish.ts");
-  const r = await F.readiness(sandbox, snap);
+  const r = await F.readiness(sandbox);
   const st = await F.readFinish(sandbox);
   const lines = [`Finish: ${r.ready ? "READY by the registers" : `not ready (${r.items.length})`}${st.lease ? `; ${st.lease.holder} coordinates it (generation ${st.lease.generation}: ${st.lease.why})` : "; nobody coordinates it yet: the first done takes it"}.`];
   for (const i of r.items) lines.push(`  holds it: ${i}`);
@@ -79,7 +79,7 @@ export async function listText(sandbox: string): Promise<string> {
   if (snap.goal.questions.length) lines.push("", `Questions: ${snap.goal.questions.length}; without an answer: ${cov.unanswered.map((q) => `question:${q}`).join(", ") || "none"}; of those, held by no lead: ${cov.uncovered.map((q) => `question:${q}`).join(", ") || "none"}.`);
   const parked = await L.parkedLeads(sandbox, snap).catch(() => [] as L.ParkedLead[]);
   if (parked.length) lines.push("", `Parked (held, no job and no act on it while the holder works elsewhere; offered to an idle seat): ${parked.map((p) => `${p.lead} (${p.holder}, ${Math.round(p.idle_ms / 60_000)} min)`).join("; ")}.`);
-  const finish = await finishText(sandbox, snap).catch((err: Error) => `Finish: could not be read (${err.message}).`);
+  const finish = await finishText(sandbox).catch((err: Error) => `Finish: could not be read (${err.message}).`);
   lines.push("", finish);
   return `${lines.join("\n")}\n`;
 }
@@ -195,7 +195,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       if (rest.includes("--json")) {
         const snap = await L.leadsSnapshot(sandbox);
         const F = await import("../extensions/finish.ts");
-        const r = await F.readiness(sandbox, snap).catch(() => null);
+        const r = await F.readiness(sandbox).catch(() => null);
         const lease = (await F.readFinish(sandbox).catch(() => null))?.lease ?? null;
         const parked = await L.parkedLeads(sandbox, snap).catch(() => [] as L.ParkedLead[]);
         process.stdout.write(`${JSON.stringify({ leads: L.rankedLeads(snap), chain: snap.state.chain, coverage: L.questionCoverage(snap), parked, finish: r ? { ready: r.ready, items: r.items, limited: r.limited, revision: r.revision, coordinator: lease } : null }, null, 2)}\n`);

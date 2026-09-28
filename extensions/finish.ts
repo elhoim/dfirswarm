@@ -71,10 +71,16 @@ export type FinishEvent = {
   why?: string;
   /** lease: the report the finish stands on (the path a done names). */
   report?: string;
+  /**
+   * lease: when the report was written as the finish began (ms since the
+   * epoch): a result or veto posted after it is late against the report, and
+   * stays so through every later version of it until a resolution answers it.
+   */
+  since?: number;
   /** ack: the report's digest the review is of, and its verdict. */
   digest?: string;
   verdict?: "no_objection" | "objection";
-  /** resolve: the late post (its id) or the objection (its ack's seq) it resolves, and how. */
+  /** resolve: the late post (its id) or the objection (its ack's seq) it resolves, and how; ack and resolve: the report's digest (a folded resolution names the version it was folded into). */
   post?: number;
   ack?: number;
   how?: "folded" | "not_material";
@@ -93,9 +99,9 @@ export type FinishEvent = {
 
 export type FinishState = {
   events: FinishEvent[];
-  lease: { holder: string; generation: number; at: string; why: string; report: string | null; from?: string } | null;
+  lease: { holder: string; generation: number; at: string; why: string; report: string | null; since: number | null; from?: string } | null;
   acks: Array<{ seq: number; at: string; by: string; digest: string; verdict: "no_objection" | "objection"; why: string }>;
-  resolutions: Array<{ seq: number; at: string; by: string; post?: number; ack?: number; how: "folded" | "not_material"; why: string }>;
+  resolutions: Array<{ seq: number; at: string; by: string; post?: number; ack?: number; how: "folded" | "not_material"; why: string; digest: string | null }>;
   readiness: { ready: boolean; revision: string; items: string[]; at: string } | null;
   checks: Array<{ seq: number; at: string; by: string; revision: string; proceed: boolean; outcome?: string; reason?: string; run?: unknown }>;
   chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null };
@@ -117,13 +123,17 @@ export async function readFinish(sandboxRoot: string): Promise<FinishState> {
   for (const e of events) {
     switch (e.ev) {
       case "lease":
-        if (e.holder) st.lease = { holder: e.holder, generation: e.generation ?? (st.lease?.generation ?? 0) + 1, at: e.at, why: e.why ?? "", report: e.report ?? st.lease?.report ?? null, ...(e.from ? { from: e.from } : {}) };
+        if (e.holder) {
+          // The earliest anchor a lease ever named stays: what was late against the report stays late.
+          const since = typeof e.since === "number" ? (typeof st.lease?.since === "number" ? Math.min(st.lease.since, e.since) : e.since) : (st.lease?.since ?? null);
+          st.lease = { holder: e.holder, generation: e.generation ?? (st.lease?.generation ?? 0) + 1, at: e.at, why: e.why ?? "", report: e.report ?? st.lease?.report ?? null, since, ...(e.from ? { from: e.from } : {}) };
+        }
         break;
       case "ack":
         if (e.digest && e.verdict) st.acks.push({ seq: e.seq, at: e.at, by: e.by, digest: e.digest, verdict: e.verdict, why: e.why ?? "" });
         break;
       case "resolve":
-        if (e.how) st.resolutions.push({ seq: e.seq, at: e.at, by: e.by, ...(e.post !== undefined ? { post: e.post } : {}), ...(e.ack !== undefined ? { ack: e.ack } : {}), how: e.how, why: e.why ?? "" });
+        if (e.how) st.resolutions.push({ seq: e.seq, at: e.at, by: e.by, ...(e.post !== undefined ? { post: e.post } : {}), ...(e.ack !== undefined ? { ack: e.ack } : {}), how: e.how, why: e.why ?? "", digest: e.digest ?? null });
         break;
       case "readiness":
         st.readiness = { ready: e.ready === true, revision: e.revision ?? "", items: e.items ?? [], at: e.at };
@@ -213,23 +223,31 @@ export async function finishTurn(ctx: P.SwarmContext, input: { output_file?: str
   return withFinish(ctx.sandboxRoot, async (held) => {
     const st = await readFinish(ctx.sandboxRoot);
     const lease = st.lease;
+    // Once the sentinel is written the finish is over: a done marker makes its
+    // coordinator unavailable, and nobody takes over what has ended.
+    if (await P.swarmDoneExists(ctx.sandboxRoot)) return { mine: false, holder: lease?.holder ?? "", generation: lease?.generation ?? 0, why: "the run is finished (done/SWARM_DONE)", report: lease?.report ?? report };
+    // When the report was written as the finish began: what is posted after it is late, whatever version follows.
+    const writtenAt = async (path: string | null) => (path ? (await P.outputWrittenAt(ctx.sandboxRoot, path)) || null : null);
     if (!lease) {
       const pub = publisher && publisher !== ctx.agentId ? await coordinatorAvailable(ctx.sandboxRoot, publisher, now) : null;
       const holder = pub?.available ? publisher! : ctx.agentId;
       const why = holder === publisher ? `${holder} published ${report} last` : publisher ? `${publisher}, who published ${report} last, is unavailable (${pub?.why}): the first seat to call done holds it` : "the first seat to call done holds it";
-      await appendFinish(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "lease", holder, generation: 1, why, ...(report ? { report } : {}) }], held);
+      const since = await writtenAt(report);
+      await appendFinish(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "lease", holder, generation: 1, why, ...(report ? { report } : {}), ...(since ? { since } : {}) }], held);
       return { mine: holder === ctx.agentId, holder, generation: 1, why, report };
     }
     if (lease.holder === ctx.agentId) {
-      // The coordinator's own done names the report: kept current on the lease.
-      if (report && report !== lease.report) await appendFinish(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "lease", holder: lease.holder, generation: lease.generation, why: `the report is ${report}`, report }], held);
+      // The coordinator's own done names the report: kept current on the lease, with its anchor once it exists.
+      const since = lease.since === null ? await writtenAt(report ?? lease.report) : null;
+      if ((report && report !== lease.report) || since) await appendFinish(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "lease", holder: lease.holder, generation: lease.generation, why: report && report !== lease.report ? `the report is ${report}` : lease.why, ...(report ? { report } : {}), ...(since ? { since } : {}) }], held);
       return { mine: true, holder: lease.holder, generation: lease.generation, why: lease.why, report: report ?? lease.report };
     }
     const avail = await coordinatorAvailable(ctx.sandboxRoot, lease.holder, now);
     if (avail.available) return { mine: false, holder: lease.holder, generation: lease.generation, why: lease.why, report: lease.report };
     const generation = lease.generation + 1;
     const why = `${lease.holder} is unavailable (${avail.why}): taken over by ${ctx.agentId}`;
-    await appendFinish(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "lease", holder: ctx.agentId, generation, from: lease.holder, why, ...(report ?? lease.report ? { report: report ?? lease.report! } : {}) }], held);
+    const since = lease.since ?? (await writtenAt(report ?? lease.report));
+    await appendFinish(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "lease", holder: ctx.agentId, generation, from: lease.holder, why, ...(report ?? lease.report ? { report: report ?? lease.report! } : {}), ...(since ? { since } : {}) }], held);
     return { mine: true, holder: ctx.agentId, generation, why, took_over: lease.holder, report: report ?? lease.report };
   });
 }
@@ -258,6 +276,45 @@ export async function mayFinish(sandboxRoot: string, agent: string, now = Date.n
   return { ok: false, holder: lease.holder, reason: `${NOT_YOURS}${lease.holder} coordinates the finish (generation ${lease.generation}); its done ends the run` };
 }
 
+/** How a sentinel held by what is late against the report is refused (finishTransaction). */
+export const LATE_PENDING = "late against the report: ";
+
+/** A late item in words. */
+export function lateWords(x: LateItem): string {
+  return x.kind === "post" ? `post #${x.id} (${x.tag}) by ${x.by}` : `objection ${x.id} by ${x.by}: ${x.why}`;
+}
+
+/**
+ * The finish's part of the one transaction that writes the sentinel (A4):
+ * `write` runs under the finish register's lock, so no lease is taken over
+ * and no objection is acked between the check and the sentinel, and only
+ * while (1) the seat holds the lease at the holder and generation its done
+ * began with (`expected`, carried through done; without it, any other
+ * holder that can still take the finish refuses it) and (2) nothing late
+ * against the report waits for a resolution. What the checks were run
+ * against is the caller's to hold (the state revision, under the
+ * registers' lock inside `write`). A seat's done marker is written inside
+ * `write` too: it makes the seat unavailable, and a takeover waits for the
+ * lock until the sentinel is written or the marker gone.
+ */
+export async function finishTransaction<T>(sandboxRoot: string, agent: string, expected: { holder: string; generation: number } | undefined, write: () => Promise<T>, now = Date.now()): Promise<T> {
+  return withFinish(sandboxRoot, async () => {
+    const lease = (await readFinish(sandboxRoot)).lease;
+    if (expected) {
+      if (!lease || expected.holder !== agent || lease.holder !== expected.holder || lease.generation !== expected.generation) {
+        throw new Error(`${NOT_YOURS}${lease ? `${lease.holder} holds it at generation ${lease.generation}` : "nobody holds it"}, not ${expected.holder} at generation ${expected.generation}, which this done began with: ${lease && lease.holder !== agent ? `${lease.holder}'s done ends the run` : "call done again"}`);
+      }
+    } else if (lease && lease.holder !== agent && (await coordinatorAvailable(sandboxRoot, lease.holder, now)).available) {
+      throw new Error(`${NOT_YOURS}${lease.holder} coordinates the finish (generation ${lease.generation}); its done ends the run`);
+    }
+    if (lease) {
+      const late = await lateItems(sandboxRoot, lease.holder, lease.report);
+      if (late.length) throw new Error(`${LATE_PENDING}${late.map(lateWords).join("; ")}. Each needs the coordinator's typed resolution (finish resolve: folded, saying where the report says it now, or not_material, with why) before the sentinel is written`);
+    }
+    return write();
+  });
+}
+
 /**
  * The parts of the state revision the finish adds (protocol.ts
  * stateRevision): the report's digest (the path the lease names), each
@@ -282,6 +339,20 @@ export async function finishParts(sandboxRoot: string): Promise<Record<string, s
   out.deliverables = P.sha256Hex(top.sort().join("\n"));
   const jobs = await L.readJobs(sandboxRoot).catch(() => [] as L.JobFacts[]);
   out.jobs = P.sha256Hex(jobs.map((j) => `${j.id}:${j.state}:${j.status ?? ""}`).join("\n"));
+  // What of each job's stdout its requester was handed (the journal's
+  // job_returned): the gate holds a job whose output was read only in part,
+  // so a page read after a check (a new unread-output defect), or the rest
+  // read after a refusal (its fix), moves the revision. Counted as the bytes
+  // still unread of the whole: the same page handed over again moves nothing.
+  const reads = await L.stdoutReads(sandboxRoot).catch(() => new Map<string, Map<string, Array<[number, number]>>>());
+  const delivered: string[] = [];
+  for (const j of jobs) {
+    const spans = reads.get(j.id)?.get(j.agent);
+    if (!spans?.length) continue;
+    const total = await stat(join(sandboxRoot, "store", "jobs", j.id, "stdout.log")).then((x) => x.size).catch(() => 0);
+    delivered.push(`${j.id}:${j.agent}:${L.unreadBytes(spans, total)}/${total}`);
+  }
+  out.delivery = P.sha256Hex(delivered.join("\n"));
   const b = await P.readBudget(sandboxRoot).catch(() => null);
   const policy: Record<string, unknown> = b ? { stop_policy: P.stopPolicyOf(b), until_solved: b.until_solved === true, paused: b.paused ?? null, cap_usd: b.cap_usd, cap_tokens: b.cap_tokens ?? null, wall_clock_minutes: b.wall_clock_minutes } : {};
   for (const rel of ["SWARM.md", "run.json", "policy.json"]) {
@@ -304,22 +375,26 @@ export type LateItem = { kind: "post" | "objection"; id: number; by: string; tag
 
 /**
  * What the coordinator must answer before its done goes on: each result or
- * veto another seat posted after the report was last written, and each
- * objection acked against the report's current digest, that no typed
- * resolution answers. A typed ack of no objection is none of these.
+ * veto another seat posted after the report was written as the finish began
+ * (the lease's `since`; the report's last write for a lease from before it),
+ * and each objection acked against any version of the report, that no typed
+ * resolution answers. They are obligations, kept through every later
+ * version of the report until a resolution names them (publishing the
+ * report again answers nothing by itself); an objector's own later ack
+ * answers its objection. A typed ack of no objection is none of these.
  */
 export async function lateItems(sandboxRoot: string, coordinator: string, report: string | null): Promise<LateItem[]> {
   if (!report) return [];
   const st = await readFinish(sandboxRoot);
-  const posts = await P.correctionsAfter(sandboxRoot, report, coordinator).catch(() => [] as Array<{ id: number; from: string; tag: P.PostTag }>);
+  const since = st.lease?.report === report && typeof st.lease.since === "number" ? st.lease.since : undefined;
+  const posts = await P.correctionsAfter(sandboxRoot, report, coordinator, since).catch(() => [] as Array<{ id: number; from: string; tag: P.PostTag }>);
   const out: LateItem[] = [];
   for (const p of posts) if (!st.resolutions.some((r) => r.post === p.id)) out.push({ kind: "post", id: p.id, by: p.from, tag: p.tag });
-  const digest = await reportDigest(sandboxRoot, report);
   for (const a of st.acks) {
-    if (a.verdict !== "objection" || a.digest !== digest || a.by === coordinator) continue;
+    if (a.verdict !== "objection") continue;
     if (st.resolutions.some((r) => r.ack === a.seq)) continue;
-    // A later ack by the same seat on the same digest answers its own objection.
-    if (st.acks.some((b) => b.by === a.by && b.digest === a.digest && b.seq > a.seq)) continue;
+    // A later ack by the same seat, of any version, answers its own objection.
+    if (st.acks.some((b) => b.by === a.by && b.seq > a.seq)) continue;
     out.push({ kind: "objection", id: a.seq, by: a.by, why: a.why });
   }
   return out;
@@ -366,7 +441,9 @@ export async function resolveLate(ctx: P.SwarmContext, input: { post?: unknown; 
     const open = await lateItems(ctx.sandboxRoot, ctx.agentId, st.lease.report);
     const hit = open.find((x) => (post !== undefined && x.kind === "post" && x.id === post) || (ack !== undefined && x.kind === "objection" && x.id === ack));
     if (!hit) return { ok: false as const, reason: `${post !== undefined ? `post #${post}` : `objection ${ack}`} is not open against the report (open: ${open.map((x) => (x.kind === "post" ? `post #${x.id}` : `objection ${x.id}`)).join(", ") || "none"})` };
-    const [e] = await appendFinish(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "resolve", ...(post !== undefined ? { post } : {}), ...(ack !== undefined ? { ack } : {}), how: how as "folded" | "not_material", why }], held);
+    // Bound to the version of the report it was made against: a folded item is in that one.
+    const digest = await reportDigest(ctx.sandboxRoot, st.lease.report);
+    const [e] = await appendFinish(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "resolve", ...(post !== undefined ? { post } : {}), ...(ack !== undefined ? { ack } : {}), how: how as "folded" | "not_material", why, ...(digest ? { digest } : {}) }], held);
     return { ok: true as const, seq: e.seq };
   });
 }
@@ -394,6 +471,9 @@ export type Readiness = { ready: boolean; revision: string; items: string[]; lim
 
 const readinessCache = new Map<string, Readiness>();
 
+/** How many times readiness reads the registers again when the state moved while it read them, before it answers uncached. */
+const READINESS_ATTEMPTS = 3;
+
 /**
  * Whether the registers say the finish line is met, at the revision it is
  * computed for: no material lead open (or waiting for a closure's
@@ -403,13 +483,31 @@ const readinessCache = new Map<string, Readiness>();
  * answer), and under the operator's stop policy no route limitation left.
  * What would still limit the run is listed apart. Cheap and generic: the
  * goal's own checks run only at the coordinator's done. One result per
- * revision, shared by every reader in this process.
+ * revision, shared by every reader in this process, and only for the
+ * revision its own snapshot was read at: the snapshot is read here, between
+ * two readings of the revision that agree (a caller's snapshot may be older
+ * than the revision, and a lead admitted between them would be cached as
+ * never there). A state that never holds still is answered, never cached.
  */
-export async function readiness(sandboxRoot: string, snap?: L.LeadsSnapshot): Promise<Readiness> {
-  const { revision } = await P.stateRevision(sandboxRoot);
-  const hit = readinessCache.get(`${sandboxRoot}\u0000${revision}`);
-  if (hit) return hit;
-  const s = snap ?? (await L.leadsSnapshot(sandboxRoot));
+export async function readiness(sandboxRoot: string): Promise<Readiness> {
+  let last: Readiness | null = null;
+  for (let i = 0; i < READINESS_ATTEMPTS; i++) {
+    const { revision } = await P.stateRevision(sandboxRoot);
+    const hit = readinessCache.get(`${sandboxRoot}\u0000${revision}`);
+    if (hit) return hit;
+    const out = await computeReadiness(sandboxRoot, await L.leadsSnapshot(sandboxRoot), revision);
+    if ((await P.stateRevision(sandboxRoot)).revision !== revision) {
+      last = out;
+      continue;
+    }
+    readinessCache.set(`${sandboxRoot}\u0000${revision}`, out);
+    if (readinessCache.size > 256) readinessCache.delete(readinessCache.keys().next().value!);
+    return out;
+  }
+  return last!;
+}
+
+async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revision: string): Promise<Readiness> {
   const items: string[] = [];
   const limited: string[] = [];
   const lead = await L.leadDefects(sandboxRoot, s);
@@ -461,11 +559,9 @@ export async function readiness(sandboxRoot: string, snap?: L.LeadsSnapshot): Pr
   const budget = await P.readBudget(sandboxRoot).catch(() => null);
   const operatorStop = P.stopPolicyOf(budget) === "operator";
   const blocking = operatorStop ? [...items, ...limited.filter((x) => !/accepted by the operator/.test(x))] : items;
-  const out: Readiness = { ready: !blocking.length, revision, items: blocking, limited };
-  readinessCache.set(`${sandboxRoot}\u0000${revision}`, out);
-  if (readinessCache.size > 256) readinessCache.delete(readinessCache.keys().next().value!);
-  return out;
+  return { ready: !blocking.length, revision, items: blocking, limited };
 }
+
 
 /**
  * Readiness posted once each time it turns (A4): ready, the coordinator is
@@ -493,9 +589,9 @@ export async function syncReadiness(sandboxRoot: string, r: Readiness): Promise<
 }
 
 /** The finish in the header (A4): readiness, the coordinator, and what this seat does about it. */
-export async function finishHeader(sandboxRoot: string, me: string, snap?: L.LeadsSnapshot): Promise<string | null> {
+export async function finishHeader(sandboxRoot: string, me: string): Promise<string | null> {
   if (await P.swarmDoneExists(sandboxRoot)) return null;
-  const r = await readiness(sandboxRoot, snap);
+  const r = await readiness(sandboxRoot);
   await syncReadiness(sandboxRoot, r).catch(() => false);
   const st = await readFinish(sandboxRoot);
   const lease = st.lease;

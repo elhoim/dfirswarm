@@ -673,9 +673,9 @@ export type FinishPanel = {
 };
 
 /** The finish as the console shows it: read only (the readiness post is the agents' headers' to make). */
-async function finishPanel(sandbox: string, snap: Awaited<ReturnType<typeof leadsSnapshot>>): Promise<FinishPanel | null> {
+async function finishPanel(sandbox: string): Promise<FinishPanel | null> {
   if (existsSync(join(sandbox, "done", "SWARM_DONE"))) return null;
-  const r = await readiness(sandbox, snap);
+  const r = await readiness(sandbox);
   const st = await readFinish(sandbox);
   const last = st.checks.at(-1);
   return {
@@ -711,7 +711,7 @@ export async function readLeads(sandbox: string): Promise<LeadsPanelView> {
     coverage: { questions: snap.goal.questions, existence: snap.goal.existence, ...cov },
     awaiting: await awaitingInterpretation(sandbox, snap.state, snap.jobs, snap.ledger),
     parked: await parkedLeads(sandbox, snap).catch(() => [] as ParkedLead[]),
-    finish: await finishPanel(sandbox, snap).catch(() => null),
+    finish: await finishPanel(sandbox).catch(() => null),
   };
 }
 
