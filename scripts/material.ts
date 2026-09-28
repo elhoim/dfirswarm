@@ -560,7 +560,7 @@ export async function applyAddition(sandbox: string, id: string, o: AdditionOpti
         reopened.length ? `Reopened: ${reopened.join(", ")}.` : "",
         arrival.recorded.length ? `Answers to ${arrival.recorded.join(", ")} recorded before it are stale until recorded again, and an acceptance made before it no longer stands.` : "",
         staleAnswers.length
-          ? `Now stale, whatever question the evidence was added for: ${staleAnswersWords(staleAnswers)}. Each is examined against import:${id} before it stands: a coverage record at the new revision (the new evidence among its objects, or why it cannot bear on the question) that another seat reviews, then the answer again citing it; or the answer again citing an entry that rests on the new evidence. Until then the finish line holds it (evidence_stale).`
+          ? `Now stale, whatever question the evidence was added for: ${staleAnswersWords(staleAnswers)}. Each is examined against import:${id} before it stands: a coverage record naming import:${id} among its objects (with what the search found there, or why it cannot bear on the question) that another seat reviews, then the answer again citing it; or the answer again citing an entry that rests on the new evidence and that another seat has attested. A review made before this evidence does not count for an answer recorded after it. Until then the finish line holds it (evidence_stale), unless the operator accepts the question's limits now.`
           : "",
         `It is on the ledger as E-${entry ?? "?"} (kind external, class acquired_evidence).`,
       ].filter(Boolean).join(" "),
