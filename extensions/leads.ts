@@ -738,7 +738,7 @@ export async function awaitingInterpretation(sandboxRoot: string, s: LeadsState,
 
 /** Rows a seat's harness writes without the seat doing anything, and its waiting: none of it works a lead. */
 const NOT_WORK = new Set([
-  "hub_prompt", "context", "thinking", "tool_loaded", "agent_start", "inputs_guard", "budget_precall_stop",
+  "hub_prompt", "context", "thinking", "tool_loaded", "agent_start", "inputs_guard", "budget_precall_stop", "pause_hold",
   "self_compact", "compact_config", "compact_notice", "compact_warning", "compact_forced", "compact_hold",
   "compact_note", "compact_start", "compact_done", "compact_failed", "compact_stalled", "wait", "inbox", "agent_error",
 ]);

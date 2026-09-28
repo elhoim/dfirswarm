@@ -936,6 +936,8 @@ export class Hub {
   private collector: CollectorLink;
   /** The swarm's stop clock, this process's own: no request can move it. */
   private stopSteer: { reason: P.StopReason; at: number } | null = null;
+  /** When the run was paused (budget.json paused.at), read on every tick; null while it runs. */
+  pausedAt: string | null = null;
   /** Per seat: when it was told it is over its own cap. */
   private seatSteer = new Map<string, number>();
   private doneSince = 0;
@@ -2015,6 +2017,10 @@ export class Hub {
    * idle. Queued, and delivered on the next hello, only when asked to be.
    */
   prompt(agent: string, text: string, options: { deliver?: "steer" | "followUp"; kind?: string; queue?: boolean } = {}): boolean {
+    // A paused run's seats are held idle: a prompt would start a turn whose
+    // model call the gateway then refuses. Only the words about the pause
+    // itself, and the operator's wake after an extension, go through.
+    if (this.pausedAt && !["stop_steer", "resume", "paused"].includes(options.kind ?? "")) return false;
     const link = this.links.get(agent);
     const message = { text, ...(options.deliver ? { deliver: options.deliver } : {}), ...(options.kind ? { kind: options.kind } : {}) };
     if (link && !link.destroyed) {
@@ -2189,6 +2195,8 @@ export class Hub {
       const budget = await P.readBudget(S).catch(() => null);
       if (!budget) return;
       await this.seatBackstop(budget, now);
+      // A paused run: no seat is prompted (prompt() holds them) until the operator extends it or stops it.
+      this.pausedAt = budget.paused?.at ?? null;
       const pressure = P.budgetPressure(budget, now);
       if (!pressure.reason) {
         if (this.stopSteer) {
@@ -2200,20 +2208,25 @@ export class Hub {
         }
         return;
       }
+      if (P.isPaused(budget)) return;
+      const policy = P.stopPolicyOf(budget);
       if (!this.stopSteer) {
         this.stopSteer = { reason: pressure.reason, at: now };
         this.saveState();
         await P.markStopSteer(S, pressure.reason).catch(() => undefined);
-        const text =
-          pressure.reason === "cap"
-            ? P.CAP_STEER
-            : `Swarm wall clock hit (${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes). Call done with reason cannot_complete and stop. Do not start new work.`;
+        // The words follow the stop policy: a pause is announced as a pause, a stop as a stop.
+        const text = P.capSteerText(budget, pressure);
         for (const agent of this.roster) this.prompt(agent, text, { deliver: "steer", kind: "stop_steer" });
-        await this.event(pressure.reason === "cap" ? "cap_steer" : "wall_steer", { via: "hub", reason: pressure.reason }, { ok: true });
+        await this.event(pressure.reason === "cap" ? "cap_steer" : "wall_steer", { via: "hub", reason: pressure.reason, policy }, { ok: true });
       }
       if (now - this.stopSteer.at < P.STOP_GRACE_MS) return;
-      const stop = await P.harnessStop(S, pressure.reason, `The hub stopped the swarm: ${pressure.reason} passed and the agents did not stop within the grace period.`, { verify: true });
-      if (stop.created) {
+      const acted = await P.capAct(S, pressure.reason, `The hub ${policy === "cap-pause" ? "paused" : "stopped"} the swarm: ${pressure.reason} passed and the grace period ended.`);
+      if (acted.kind === "paused" && acted.created) {
+        this.pausedAt = new Date(now).toISOString();
+        await this.event("run_paused", { via: "hub", reason: pressure.reason }, { ok: true });
+        this.notify("paused", { scope: "run", reason: pressure.reason, extend: "swarm.sh extend <run> --minutes N | --tokens N | --usd N", stop: "swarm.sh stop <run>" });
+        await P.systemPost(S, { tag: "stop", body: `The run is paused (${pressure.reason === "cap" ? "its cap" : "its wall clock"}): no model call goes out until the operator extends it (swarm.sh extend) or stops it (swarm.sh stop). What the run holds stays as it is.` }).catch(() => undefined);
+      } else if (acted.kind === "stopped" && acted.created) {
         await this.event("harness_stop", { via: "hub", reason: pressure.reason }, { created_sentinel: true });
         this.notify(pressure.reason === "wall_clock" ? "wall_clock" : "budget_cap", { scope: "run", reason: pressure.reason });
         await P.systemPost(S, { tag: "stop", body: `Harness wrote done/SWARM_DONE (reason ${pressure.reason}). Call done and stop.` }).catch(() => undefined);

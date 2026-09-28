@@ -567,6 +567,10 @@ type BudgetView = {
   wall_clock_minutes: number;
   started_at: string;
   until_solved: boolean;
+  /** The stop policy's pause in force (its time), and the wall clock across pauses and resumes. */
+  paused: string | null;
+  wall_used_ms: number;
+  wall_base_at: string;
 };
 
 function readBudgetView(sandbox: string): BudgetView | null {
@@ -580,7 +584,10 @@ function readBudgetView(sandbox: string): BudgetView | null {
       metered: raw.metered !== false,
       wall_clock_minutes: num(raw.wall_clock_minutes),
       started_at: typeof raw.started_at === "string" ? raw.started_at : "",
-      until_solved: raw.until_solved === true,
+      until_solved: raw.until_solved === true || raw.stop_policy === "operator",
+      paused: raw.paused && typeof raw.paused === "object" && typeof (raw.paused as { at?: unknown }).at === "string" ? (raw.paused as { at: string }).at : null,
+      wall_used_ms: num(raw.wall_used_ms),
+      wall_base_at: typeof raw.wall_base_at === "string" ? raw.wall_base_at : "",
     };
   } catch {
     return null;
@@ -613,12 +620,17 @@ export function refusalFor(
   }
   const b = readBudgetView(sandbox);
   if (!b) return null;
+  // A paused run (the stop policy): no call goes out until the operator
+  // extends it or stops it. The host holds this brake in a VM run.
+  if (b.paused) return { code: "run_paused", message: `the run is paused (since ${b.paused}): no model call goes out until the operator extends it (swarm.sh extend) or stops it` };
   // An until-solved run has no wall clock and advisory caps: a call is
   // refused only for the stops above, the run's end and a seat's own.
   if (b.until_solved) return null;
   if (b.wall_clock_minutes > 0 && b.started_at) {
-    const end = Date.parse(b.started_at) + b.wall_clock_minutes * 60_000;
-    if (Number.isFinite(end) && now >= end + graceMs) return { code: "wall_clock", message: `the run's wall clock (${b.wall_clock_minutes} min) and its grace have run out` };
+    // The wall clock across pauses and resumes, as protocol.ts wallElapsedMs counts it.
+    const base = Date.parse(b.wall_base_at || b.started_at);
+    const used = b.wall_used_ms + (Number.isFinite(base) ? Math.max(0, now - base) : 0);
+    if (used >= b.wall_clock_minutes * 60_000 + graceMs) return { code: "wall_clock", message: `the run's wall clock (${b.wall_clock_minutes} min) and its grace have run out` };
   }
   if (!b.metered) return null;
   const crossed = (state.crossed ??= {});

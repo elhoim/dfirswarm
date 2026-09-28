@@ -49,6 +49,10 @@ import {
   TOKEN_CAP_STEER,
   overCap,
   STOP_GRACE_MS,
+  capAct,
+  capSteerText,
+  isPaused,
+  stopPolicyOf,
   appendEvent,
   isBudgetUnreadable,
   reportBudgetUnreadable,
@@ -763,7 +767,10 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (await swarmDoneExists(cwd)) return;
-
+    // Paused already: the pause holds every model call (the context hook);
+    // nothing more to say until the operator extends or stops the run.
+    if (isPaused(budget)) return;
+    const policy = stopPolicyOf(budget);
     const capHit = pressure.reason === "cap";
     // A free team is braked by tokens; say so, or an agent reads "$0 spent"
     // next to "cap hit" and concludes the harness is confused.
@@ -771,9 +778,8 @@ export default function (pi: ExtensionAPI) {
     const capLine = byTokens
       ? `Token cap reached: ${budget.tokens.toLocaleString("en-US")} of ${Number(budget.cap_tokens).toLocaleString("en-US")} tokens.`
       : `Spend cap reached: $${budget.spent_usd} of $${budget.cap_usd}.`;
-    const message = capHit
-      ? (byTokens ? TOKEN_CAP_STEER : CAP_STEER)
-      : `Swarm wall clock hit (${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes). Call done with reason cannot_complete and stop. Do not start new work.`;
+    // The words follow the stop policy: a pause is announced as a pause, a stop as a stop.
+    const message = capSteerText(budget, pressure);
 
     // One clock for the whole swarm, so every agent measures the grace period
     // from the same instant and only one of them announces it.
@@ -785,35 +791,41 @@ export default function (pi: ExtensionAPI) {
         cwd,
         agentId,
         capHit ? "cap_steer" : "wall_steer",
-        { hard_kill: budget.hard_kill },
-        { reason: "cannot_complete", delivered },
+        { hard_kill: budget.hard_kill, policy },
+        { reason: policy === "cap-pause" ? "pause" : "cannot_complete", delivered },
       );
       if (marker.claimed) {
         await systemPost(cwd, {
           tag: "stop",
-          body: capHit
-            ? `${capLine} Finish what is in hand, then call done(reason=cannot_complete).`
-            : `Wall clock reached: ${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes. Finish what is in hand, then call done(reason=cannot_complete).`,
+          body:
+            policy === "cap-pause"
+              ? `${capHit ? capLine : `Wall clock reached: ${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes.`} The run pauses in ${Math.round(STOP_GRACE_MS / 60_000)} minutes for the operator to extend it or stop it: record what you hold now, and start nothing new.`
+              : capHit
+                ? `${capLine} Finish what is in hand, then call done(reason=cannot_complete).`
+                : `Wall clock reached: ${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes. Finish what is in hand, then call done(reason=cannot_complete).`,
         }).catch(() => undefined);
       }
-      if ((budget.hard_kill || process.env.SWARM_HARD_KILL === "1") && typeof ctx.shutdown === "function") {
+      // A hard kill ends the session at the steer; under a pause the pause holds the seat instead.
+      if (policy !== "cap-pause" && (budget.hard_kill || process.env.SWARM_HARD_KILL === "1") && typeof ctx.shutdown === "function") {
         stoppedByHarness = "hard_kill";
         ctx.shutdown();
       }
     }
 
     if (Date.now() - Date.parse(marker.at) < STOP_GRACE_MS) return;
-    const stop = await harnessStop(
-      cwd,
-      pressure.reason,
-      capHit
-        ? (byTokens
-            ? `Token cap ${Number(budget.cap_tokens).toLocaleString("en-US")} passed (${budget.tokens.toLocaleString("en-US")}) and agents did not stop within the grace period.`
-            : `Spend cap $${budget.cap_usd} passed ($${budget.spent_usd}) and agents did not stop within the grace period.`)
-        : `Wall clock ${budget.wall_clock_minutes} minutes passed and agents did not stop within the grace period.`,
-      { verify: true },
-    );
-    if (stop.created) {
+    const detail = capHit
+      ? byTokens
+        ? `Token cap ${Number(budget.cap_tokens).toLocaleString("en-US")} passed (${budget.tokens.toLocaleString("en-US")}) and the grace period ended.`
+        : `Spend cap $${budget.cap_usd} passed ($${budget.spent_usd}) and the grace period ended.`
+      : `Wall clock ${budget.wall_clock_minutes} minutes passed and the grace period ended.`;
+    const acted = await capAct(cwd, pressure.reason, detail);
+    if (acted.kind === "paused" && acted.created) {
+      await logEvent(cwd, agentId, "run_paused", { reason: pressure.reason }, { ok: true, via: "extension" });
+      await systemPost(cwd, {
+        tag: "stop",
+        body: `The run is paused (${pressure.reason === "cap" ? "its cap" : "its wall clock"}): no model call goes out until the operator extends it (swarm.sh extend) or stops it (swarm.sh stop). What the run holds stays as it is.`,
+      }).catch(() => undefined);
+    } else if (acted.kind === "stopped" && acted.created) {
       await logEvent(cwd, agentId, "harness_stop", { reason: pressure.reason }, { created_sentinel: true });
       await systemPost(cwd, {
         tag: "stop",
@@ -1243,6 +1255,10 @@ export default function (pi: ExtensionAPI) {
    * wall clock are the brakes the host holds.
    */
   let precallStopped = false;
+  /** The pause this seat last held a call for (its time), so the trace says it once per pause. */
+  let pauseHeld = "";
+  /** The turn in flight was ended by a pause: Pi files that abort as an error, and it is not the provider's. */
+  let pauseAborted = false;
   pi.on("context", async (_event, ctx) => {
     if (!agentId || precallStopped) return;
     // A VM whose hub is down has no budget or sentinel to read; the lost-hub
@@ -1253,6 +1269,21 @@ export default function (pi: ExtensionAPI) {
     // The short deadline: a dead link is replaced, not waited on for two minutes before every model call.
     const budget = await readBudgetLive(cwd).catch(() => null);
     if (budget) await enforceAllCaps(cwd, budget, ctx).catch(() => undefined);
+    // A paused run (the stop policy): this call does not go out. The turn
+    // ends here and the seat stays, idle, with everything it held; the
+    // operator's extension wakes it (the watchdog's prompt). In a VM this is
+    // advisory: the hub prompts no paused seat, and the model gateway
+    // refuses the call on the host.
+    const paused = budget?.paused;
+    if (paused && !stoppedByHarness && !(await swarmDoneExists(cwd).catch(() => false))) {
+      if (pauseHeld !== paused.at) {
+        pauseHeld = paused.at;
+        await logEvent(cwd, agentId, "pause_hold", { reason: paused.reason, since: paused.at }, { ok: true, brake: boardSocket() ? "advisory (in the VM; the hub and the model gateway hold the brake)" : "host" }).catch(() => undefined);
+      }
+      pauseAborted = true;
+      ctx.abort();
+      return;
+    }
     const sentinel = !stoppedByHarness && (await swarmDoneExists(cwd).catch(() => false));
     if (!stoppedByHarness && !sentinel) return;
     precallStopped = true;
@@ -1293,6 +1324,11 @@ export default function (pi: ExtensionAPI) {
     // The harness stopping this agent aborts its turn, and Pi files that abort as an
     // error. The stop is already in the trace under its own name; nothing to report.
     if (classifyTurnError(reason, stoppedByHarness, await swarmDoneExists(ctx.cwd)) === "harness") return;
+    // So does a pause: the call it held is on the trace as pause_hold.
+    if (pauseAborted) {
+      pauseAborted = false;
+      return;
+    }
     if (providerErrorTold === reason) return;
     providerErrorTold = reason;
     await logEvent(ctx.cwd, agentId, "agent_error", { model }, { ok: false, reason }).catch(() => undefined);

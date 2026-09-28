@@ -281,29 +281,37 @@ host_backstop() {
       const budget = await P.readBudget(S).catch(() => null);
       if (!budget) return;
       const pressure = P.budgetPressure(budget);
-      if (!pressure.reason) return;
+      if (!pressure.reason || P.isPaused(budget)) return;
       const mark = await P.markStopSteer(S, pressure.reason);
       if (mark.claimed) {
-        const text = pressure.reason === "cap" ? P.CAP_STEER : `Swarm wall clock hit (${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes). Call done with reason cannot_complete and stop. Do not start new work.`;
-        await P.systemPost(S, { tag: "stop", body: text }).catch(() => undefined);
+        // The words follow the stop policy: a pause is announced as a pause, a stop as a stop.
+        await P.systemPost(S, { tag: "stop", body: P.capSteerText(budget, pressure) }).catch(() => undefined);
         console.log(`steered ${pressure.reason}`);
       }
       if (Date.now() - Date.parse(mark.at) < P.STOP_GRACE_MS) return;
-      const stop = await P.harnessStop(S, pressure.reason, `The harness watchdog stopped the swarm: ${pressure.reason} passed and the agents did not stop within the grace period.`, { verify: true });
-      if (stop.created) console.log(`stopped ${pressure.reason}`);
+      const acted = await P.capAct(S, pressure.reason, `The harness watchdog ${P.stopPolicyOf(budget) === "cap-pause" ? "paused" : "stopped"} the swarm: ${pressure.reason} passed and the grace period ended.`);
+      if (acted.kind === "paused" && acted.created) {
+        await P.systemPost(S, { tag: "stop", body: `The run is paused (${pressure.reason === "cap" ? "its cap" : "its wall clock"}): no model call goes out until the operator extends it (swarm.sh extend) or stops it (swarm.sh stop). What the run holds stays as it is.` }).catch(() => undefined);
+        console.log(`paused ${pressure.reason}`);
+      }
+      if (acted.kind === "stopped" && acted.created) console.log(`stopped ${pressure.reason}`);
     }).catch(() => undefined);
   ' "$ROOT/extensions/protocol.ts" "$SANDBOX" 2>/dev/null || true)"
   local what reason ts line
   while read -r what reason; do
     [[ -n "$what" ]] || continue
     ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-    line="$(jq -cn --arg ts "$ts" --arg t "$(if [[ "$what" == stopped ]]; then echo harness_stop; elif [[ "$reason" == cap ]]; then echo cap_steer; else echo wall_steer; fi)" --arg r "$reason" \
+    line="$(jq -cn --arg ts "$ts" --arg t "$(if [[ "$what" == stopped ]]; then echo harness_stop; elif [[ "$what" == paused ]]; then echo run_paused; elif [[ "$reason" == cap ]]; then echo cap_steer; else echo wall_steer; fi)" --arg r "$reason" \
       '{ts: $ts, agent: "system", tool: $t, args: {via: "idle-nudge", reason: $r}, result: {ok: true}}')"
     trace_emit "$ROOT" "$SANDBOX" "$line"
     echo "idle-nudge: $what the swarm ($reason)" >&2
     # The operator's notify command, once, when the swarm's cap is reached.
     if [[ "$what" == steered && "$reason" == cap ]]; then
       bash "$ROOT/scripts/notify.sh" "$SANDBOX" budget_cap "$(jq -c '{spent_usd: (.spent_usd // null), cap_usd: (.cap_usd // null)}' "$SANDBOX/budget.json" 2>/dev/null || echo '{}')" >/dev/null 2>&1 </dev/null || true
+    fi
+    # And when the run is paused: the operator extends it or stops it.
+    if [[ "$what" == paused ]]; then
+      bash "$ROOT/scripts/notify.sh" "$SANDBOX" paused "$(jq -c --arg r "$reason" '{reason: $r, paused: (.paused // null), extend: "swarm.sh extend <run> --minutes N | --tokens N | --usd N", stop: "swarm.sh stop <run>"}' "$SANDBOX/budget.json" 2>/dev/null || echo '{}')" >/dev/null 2>&1 </dev/null || true
     fi
   done <<< "$said"
 }
@@ -361,6 +369,54 @@ regroup_check() {
   echo "idle-nudge: regroup $(jq -r '.count' <<<"$out") posted (#$(jq -r '.post' <<<"$out")); nothing had moved since $(jq -r '.since' <<<"$out")" >&2
 }
 
+# The stop policy (docs/adr/0013). A paused run's seats are held: none is
+# nudged, since a nudge would start a turn whose model call the pause
+# refuses. When the operator's extension lifts the pause, every live seat is
+# woken once, with the words that say so.
+paused_now() {
+  [[ "$(jq -r 'if (.paused | type) == "object" then "yes" else "no" end' "$SANDBOX/budget.json" 2>/dev/null)" == yes ]]
+}
+resume_wake() {
+  local mark="$SANDBOX/traces/idle-nudge.resumed" last seen id text ts line ok
+  last="$(jq -r '(.pauses // []) | last | .resumed_at // empty' "$SANDBOX/budget.json" 2>/dev/null || true)"
+  [[ -n "$last" ]] || return 0
+  seen="$(cat "$mark" 2>/dev/null || true)"
+  [[ "$last" != "$seen" ]] || return 0
+  printf '%s\n' "$last" > "$mark"
+  text="$(jq -r '(.pauses // []) | last | "The operator extended the run at \(.resumed_at) (\(.set // {} | to_entries | map("\(.key) \(.value)") | join(", "))): the pause for \(.reason) is lifted. Pick up where you were: read inbox, go on with what you hold, and record what you find."' "$SANDBOX/budget.json" 2>/dev/null || echo "The operator extended the run: the pause is lifted. Pick up where you were.")"
+  for id in $(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null); do
+    [[ -e "$SANDBOX/done/agents/$id.done" || -e "$SANDBOX/done/agents/$id.dead" ]] && continue
+    ok=false
+    if [[ -n "$HUB_ADMIN" ]]; then
+      node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_ADMIN" "$(jq -nc --arg a "$id" --arg t "$text" '{op: "prompt", agent: $a, text: $t, kind: "resume", deliver: "followUp"}')" >/dev/null 2>&1 && ok=true
+    else
+      "$HERDR" agent prompt "$id" "$text" >/dev/null 2>&1 && ok=true
+    fi
+    ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+    line="$(jq -cn --arg ts "$ts" --arg a "$id" --argjson ok "$ok" --arg at "$last" '{ts: $ts, agent: "system", tool: "resume_wake", args: {agent: $a, resumed_at: $at}, result: {ok: $ok}}')"
+    trace_emit "$ROOT" "$SANDBOX" "$line"
+  done
+  echo "idle-nudge: the pause was lifted at $last; the seats were woken" >&2
+}
+# Diminishing returns: when nothing has yielded (no new finding, question
+# disposition or coverage record) across a window of jobs or minutes, the
+# operator is asked, once per window, whether to stop (an operator request of
+# kind decision). Never an agent's vote; nothing is stopped here.
+yield_check() {
+  local mark="$SANDBOX/traces/idle-nudge.yield" last now out ts line
+  now="$(date +%s)"
+  last="$(cat "$mark" 2>/dev/null || echo 0)"
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  [[ $((now - last)) -ge 120 ]] || return 0
+  echo "$now" > "$mark"
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/stop-policy.ts" yield "$SANDBOX" 2>/dev/null || true)"
+  [[ "$(jq -r '.proposed // false' <<<"$out" 2>/dev/null)" == true ]] || return 0
+  ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  line="$(jq -cn --arg ts "$ts" --argjson r "$out" '{ts: $ts, agent: "system", tool: "stop_proposed", args: {since: $r.since, jobs: $r.jobs, minutes: $r.minutes}, result: {ok: true, request: $r.id}}')"
+  trace_emit "$ROOT" "$SANDBOX" "$line"
+  echo "idle-nudge: nothing has yielded since $(jq -r '.since' <<<"$out") ($(jq -r '.jobs' <<<"$out") jobs, $(jq -r '.minutes' <<<"$out") minutes): a stop is proposed to the operator ($(jq -r '.id' <<<"$out"))" >&2
+}
+
 # What the agents asked of the operator (a lead closed needs_operator, or a
 # clarification of a question: one line each in operator-requests.jsonl): the
 # operator's notify command runs
@@ -376,7 +432,7 @@ operator_requests_check() {
     [[ -n "$line" ]] || continue
     bash "$ROOT/scripts/notify.sh" "$SANDBOX" operator_request "$line" >/dev/null 2>&1 </dev/null || true
     # A lead closed needs_operator, or a clarification an agent asked of a question's asker (kind clarification).
-    echo "idle-nudge: an agent asks the operator: $(jq -r '"\(.lead // .q) \(if .kind == "clarification" then "clarification \(.id): " else "" end)\(.request)"' <<<"$line" 2>/dev/null). Answer: $(jq -r '.answer' <<<"$line" 2>/dev/null)" >&2
+    echo "idle-nudge: an agent asks the operator: $(jq -r '"\(.lead // .q // .id) \(if .kind == "clarification" then "clarification \(.id): " elif .kind == "decision" then "decision: " else "" end)\(.request)"' <<<"$line" 2>/dev/null). Answer: $(jq -r '.answer' <<<"$line" 2>/dev/null)" >&2
   done
   echo "$total" > "$mark"
 }
@@ -476,8 +532,17 @@ while :; do
   [[ -f "$SANDBOX/done/SWARM_DONE" || -f "$SANDBOX/done/ALL_AGENTS_DEAD" ]] && exit 0
   ensure_hub
   host_backstop
+  resume_wake
+  if paused_now; then
+    # Paused: the seats are held, nobody is nudged; the operator's requests are still said.
+    operator_requests_check
+    [[ "$ONCE" -eq 1 ]] && exit 0
+    sleep "$INTERVAL"
+    continue
+  fi
   coverage_hint
   regroup_check
+  yield_check
   operator_requests_check
   US=0
   until_solved && US=1

@@ -336,8 +336,60 @@ export type BudgetRecord = {
   until_solved?: boolean;
   /** Until solved: minutes without progress before the watchdog posts a regroup (default 15). */
   stall_minutes?: number;
+  /**
+   * What reaching a cap does (the stop policy, docs/adr/0013): cap-pause
+   * (the default) pauses the run for the operator to extend or stop it,
+   * cap-stop stops it (an unattended run), operator is --until-solved (no
+   * wall clock, caps advisory, only the operator ends it). Absent on a run
+   * from before the policy, which stopped at its caps (stopPolicyOf).
+   */
+  stop_policy?: StopPolicy;
+  /** The pause in force, when a cap paused the run: seats idle, no model call goes out, until the operator extends or stops it. */
+  paused?: PauseRecord;
+  /** Every pause that was lifted, in order, with who lifted it and what they gave. */
+  pauses?: PauseRecord[];
+  /**
+   * The wall clock across pauses and resumes: the minutes already used
+   * (wall_used_ms) and when the current stretch began (wall_base_at, the
+   * run's start when absent). A pause freezes it at the pause.
+   */
+  wall_used_ms?: number;
+  wall_base_at?: string;
+  /** Every resume of the run after a stop or a seal (swarm.sh resume), by whom and when. */
+  resumes?: Array<{ at: string; by: string; from: string }>;
   agents: Record<string, AgentBudget>;
 };
+
+/** What a cap does to the run: pause it (the default), stop it, or nothing (the operator's). */
+export const STOP_POLICIES = ["cap-pause", "cap-stop", "operator"] as const;
+export type StopPolicy = (typeof STOP_POLICIES)[number];
+export const DEFAULT_STOP_POLICY: StopPolicy = "cap-pause";
+/**
+ * The token cap a kickoff sets when none is given, on a team whose dollars
+ * are charged (a second brake beside the dollar cap; a team whose dollars
+ * are not names its own, since tokens are its only brake). A hundred
+ * million: the ten-agent BelkaCTF #6 run on a subscription used 277M, a
+ * small goal on two agents a few million.
+ */
+export const DEFAULT_CAP_TOKENS = 100_000_000;
+
+/** A pause: when, for which cap, in words; and once lifted, when, by whom, with what. */
+export type PauseRecord = { at: string; reason: StopReason; detail: string; resumed_at?: string; resumed_by?: string; set?: Partial<Record<CapField, number>> };
+
+/** The run's stop policy: its own, the operator's when it runs until solved, and cap-stop for a run from before the policy. */
+export function stopPolicyOf(b: { until_solved?: boolean; stop_policy?: string } | null | undefined): StopPolicy {
+  if (b?.until_solved === true || b?.stop_policy === "operator") return "operator";
+  if (b?.stop_policy === "cap-pause") return "cap-pause";
+  return "cap-stop";
+}
+
+/** How much wall clock the run has used: the stretches before, and the current one up to now, or up to the pause in force. */
+export function wallElapsedMs(b: Pick<BudgetRecord, "started_at" | "wall_used_ms" | "wall_base_at" | "paused">, now = Date.now()): number {
+  const base = Date.parse(b.wall_base_at ?? b.started_at);
+  const end = b.paused ? Date.parse(b.paused.at) : now;
+  const stretch = Number.isFinite(base) && Number.isFinite(end) ? Math.max(0, end - base) : 0;
+  return Math.max(0, Number(b.wall_used_ms) || 0) + stretch;
+}
 
 /** One change of the caps made while the run went on (setCaps). */
 export type CapChange = {
@@ -1255,6 +1307,13 @@ export function normalizeBudget(raw: Partial<BudgetRecord> | null | undefined): 
     ...(raw?.stop_reason ? { stop_reason: raw.stop_reason } : {}),
     ...(raw?.until_solved === true ? { until_solved: true } : {}),
     ...(Number(raw?.stall_minutes) > 0 ? { stall_minutes: Number(raw?.stall_minutes) } : {}),
+    // The stop policy and its pauses: kept by every fold, or a pause would lift itself on the next model call's usage.
+    ...((STOP_POLICIES as readonly string[]).includes(String(raw?.stop_policy)) ? { stop_policy: raw!.stop_policy as StopPolicy } : {}),
+    ...(raw?.paused && typeof raw.paused === "object" && typeof raw.paused.at === "string" ? { paused: raw.paused } : {}),
+    ...(Array.isArray(raw?.pauses) && raw.pauses.length ? { pauses: raw.pauses } : {}),
+    ...(Number(raw?.wall_used_ms) > 0 ? { wall_used_ms: Number(raw?.wall_used_ms) } : {}),
+    ...(typeof raw?.wall_base_at === "string" && raw.wall_base_at ? { wall_base_at: raw.wall_base_at } : {}),
+    ...(Array.isArray(raw?.resumes) && raw.resumes.length ? { resumes: raw.resumes } : {}),
     agents,
   };
 }
@@ -4572,8 +4631,8 @@ export type BudgetPressure = {
 
 /** Where the swarm stands against its two caps. Pure, so it is easy to test. */
 export function budgetPressure(budget: BudgetRecord, now = Date.now()): BudgetPressure {
-  const started = Date.parse(budget.started_at);
-  const elapsedMs = Number.isFinite(started) ? Math.max(0, now - started) : 0;
+  // The wall clock across pauses and resumes: a paused run's is frozen at its pause.
+  const elapsedMs = wallElapsedMs(budget, now);
   // An until-solved run has no wall clock, and its caps are advisory.
   const wallMs = budget.until_solved === true ? 0 : budget.wall_clock_minutes * 60_000;
   const overBudget = overCap(budget).over;
@@ -4601,7 +4660,7 @@ export async function setCaps(
   sandboxRoot: string,
   set: Partial<Record<CapField, number>>,
   by: string,
-): Promise<{ budget: BudgetRecord; before: Partial<Record<CapField, number | null>>; withdrawn: boolean }> {
+): Promise<{ budget: BudgetRecord; before: Partial<Record<CapField, number | null>>; withdrawn: boolean; resumed?: PauseRecord }> {
   const fields = Object.entries(set).filter(([k, v]) => (CAP_FIELDS as readonly string[]).includes(k) && v !== undefined) as Array<[CapField, number]>;
   if (!fields.length) throw new Error("no cap to set: give --usd, --tokens, --per-agent-usd, --per-agent-tokens or --wall-clock");
   for (const [k, v] of fields) {
@@ -4630,14 +4689,143 @@ export async function setCaps(
       delete budget.stop_reason;
       withdrawn = true;
     }
+    // A paused run whose caps now leave room goes on.
+    const resumed = liftPause(budget, by, Object.fromEntries(fields));
     budget.cap_changes = [
       ...(budget.cap_changes ?? []),
       { at: new Date().toISOString(), by, set: Object.fromEntries(fields), caps: capFingerprint(normalizeBudget(budget)) },
     ];
     await held.assertOwned();
     await writeBudget(sandboxRoot, budget);
-    return { budget: normalizeBudget(budget), before, withdrawn };
+    return { budget: normalizeBudget(budget), before, withdrawn, ...(resumed ? { resumed } : {}) };
   });
+}
+
+/**
+ * Lift the pause in force, when the run is no longer over a cap: the wall
+ * clock's stretch up to the pause is kept, a new one starts now, and the
+ * pause goes to the history with who lifted it and what they gave. The
+ * steer that announced it is withdrawn. Mutates `budget`; the caller holds
+ * the table lock and writes it.
+ */
+function liftPause(budget: BudgetRecord, by: string, set: Partial<Record<CapField, number>>, now = Date.now()): PauseRecord | null {
+  if (!budget.paused) return null;
+  const hypothetical = { ...budget, paused: undefined, wall_used_ms: wallElapsedMs(budget, now), wall_base_at: new Date(now).toISOString() } as BudgetRecord;
+  if (budgetPressure(hypothetical, now).reason) return null;
+  const done: PauseRecord = { ...budget.paused, resumed_at: new Date(now).toISOString(), resumed_by: by, set };
+  budget.wall_used_ms = hypothetical.wall_used_ms;
+  budget.wall_base_at = hypothetical.wall_base_at;
+  delete budget.paused;
+  budget.pauses = [...(budget.pauses ?? []), done];
+  budget.cap_steer_sent = false;
+  delete budget.stop_steer_at;
+  delete budget.stop_reason;
+  return done;
+}
+
+/**
+ * The operator's extension of a run (swarm.sh extend): more wall clock
+ * (minutes), more tokens, more dollars, each added to the cap it extends,
+ * under the table lock as every cap change is. A paused run whose caps then
+ * leave room goes on (the watchdog wakes its seats); one still over a cap is
+ * refused, saying which and by how much, and nothing is changed. A finished
+ * run is not brought back: that is resume.
+ */
+export async function extendRun(
+  sandboxRoot: string,
+  add: { minutes?: number; tokens?: number; usd?: number },
+  by: string,
+  now = Date.now(),
+): Promise<{ budget: BudgetRecord; set: Partial<Record<CapField, number>>; resumed: PauseRecord | null }> {
+  const given = Object.entries(add).filter(([, v]) => v !== undefined && v !== null) as Array<[keyof typeof add, number]>;
+  if (!given.length) throw new Error("nothing to extend by: give --minutes N, --tokens N or --usd N");
+  for (const [k, v] of given) if (!Number.isFinite(v) || v <= 0) throw new Error(`--${k} takes a number above zero (got ${v})`);
+  if (await swarmDoneExists(sandboxRoot)) throw new Error("the run is finished (done/SWARM_DONE exists): an extension does not bring it back; swarm.sh resume continues it");
+  return withTableLock(sandboxRoot, async (held) => {
+    const budget = await readBudget(sandboxRoot);
+    if (stopPolicyOf(budget) === "operator") throw new Error("this run's stop is the operator's (--stop operator): it has no wall clock and its caps are advisory, so there is nothing to extend; swarm.sh stop ends it");
+    const set: Partial<Record<CapField, number>> = {};
+    if (add.minutes) set.wall_clock_minutes = budget.wall_clock_minutes + add.minutes;
+    if (add.tokens) {
+      if (!(Number(budget.cap_tokens) > 0)) throw new Error("--tokens: this run has no token cap to extend (swarm.sh cap --tokens N sets one)");
+      set.cap_tokens = Math.max(Number(budget.cap_tokens), budget.tokens) + add.tokens;
+    }
+    if (add.usd) {
+      if (budget.metered === false) throw new Error("--usd: this team's dollars are not charged, so the dollar cap brakes nothing; extend --tokens instead");
+      set.cap_usd = Number((Math.max(budget.cap_usd, budget.spent_usd) + add.usd).toFixed(6));
+    }
+    for (const [k, v] of Object.entries(set) as Array<[CapField, number]>) (budget as Record<CapField, number | undefined>)[k] = v;
+    const resumed = liftPause(budget, by, set, now);
+    if (budget.paused) {
+      const hypothetical = { ...budget, paused: undefined, wall_used_ms: wallElapsedMs(budget, now), wall_base_at: new Date(now).toISOString() } as BudgetRecord;
+      const p = budgetPressure(hypothetical, now);
+      const over = p.reason === "wall_clock" ? `the wall clock (${Math.round(wallElapsedMs(budget, now) / 60_000)} of ${budget.wall_clock_minutes} minutes used)` : overCap(hypothetical).by === "tokens" ? `the token cap (${budget.tokens} of ${budget.cap_tokens})` : `the dollar cap ($${budget.spent_usd} of $${budget.cap_usd})`;
+      throw new Error(`the run would still be over ${over}: extend it by more, or by that cap too; nothing was changed`);
+    }
+    budget.cap_changes = [...(budget.cap_changes ?? []), { at: new Date(now).toISOString(), by, set, caps: capFingerprint(normalizeBudget(budget)) }];
+    await held.assertOwned();
+    await writeBudget(sandboxRoot, budget);
+    return { budget: normalizeBudget(budget), set, resumed };
+  });
+}
+
+/**
+ * Pause the run at a cap (the cap-pause policy): the seats finish their
+ * step and go idle, no model call goes out (the extension refuses it on the
+ * host, the model gateway in a VM, and neither the hub nor the watchdog
+ * prompts a paused seat), and what the run holds stays as it is. Re-checked
+ * under the lock, like the harness's stop. Idempotent.
+ */
+export async function pauseRun(sandboxRoot: string, reason: StopReason, detail: string, now = Date.now()): Promise<{ paused: boolean; at: string; already?: true; stale?: true }> {
+  return withTableLock(sandboxRoot, async (held) => {
+    if (await swarmDoneExists(sandboxRoot)) return { paused: false, at: new Date(now).toISOString(), stale: true as const };
+    const budget = await readBudget(sandboxRoot).catch(() => null);
+    if (!budget) return { paused: false, at: new Date(now).toISOString(), stale: true as const };
+    if (budget.paused) return { paused: false, at: budget.paused.at, already: true as const };
+    if (!budgetPressure(budget, now).reason) return { paused: false, at: new Date(now).toISOString(), stale: true as const };
+    budget.paused = { at: new Date(now).toISOString(), reason, detail };
+    await held.assertOwned();
+    await writeBudget(sandboxRoot, budget);
+    return { paused: true, at: budget.paused.at };
+  });
+}
+
+/** Whether the run is paused now. */
+export function isPaused(b: { paused?: unknown } | null | undefined): boolean {
+  return Boolean(b?.paused);
+}
+
+/** What the agents are told when a cap is reached, by the run's stop policy. */
+export function capSteerText(budget: BudgetRecord, pressure: BudgetPressure): string {
+  const byTokens = pressure.reason === "cap" && overCap(budget).by === "tokens";
+  const what = pressure.reason === "wall_clock" ? `wall clock (${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes)` : byTokens ? `token cap (${budget.tokens.toLocaleString("en-US")} of ${Number(budget.cap_tokens).toLocaleString("en-US")})` : `spend cap ($${budget.spent_usd} of $${budget.cap_usd})`;
+  if (stopPolicyOf(budget) === "cap-pause") {
+    return (
+      `The run's ${what} is reached: it pauses in ${Math.round(STOP_GRACE_MS / 60_000)} minutes, for the operator to extend it or stop it. ` +
+      "Record what you hold now: each finding, a limitation for what you could not finish, a coverage record for a search you finished; release the leads you will not finish, with why. " +
+      "Start nothing new, and do not call done unless the finish line is met. While the run is paused no model call goes out; the operator's extension wakes you where you were."
+    );
+  }
+  if (pressure.reason === "wall_clock") return `Swarm wall clock hit (${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes). Call done with reason cannot_complete and stop. Do not start new work.`;
+  return byTokens ? TOKEN_CAP_STEER : CAP_STEER;
+}
+
+/**
+ * What the harness does once a cap's grace period has passed, by the stop
+ * policy: pause the run (cap-pause) or write the sentinel as the harness,
+ * the run stopped (cap-stop). Under the operator's policy a cap is advisory
+ * and nothing is done. Both re-check the cap under the lock.
+ */
+export async function capAct(sandboxRoot: string, reason: StopReason, detail: string): Promise<{ kind: "paused" | "stopped" | "none"; created: boolean }> {
+  const budget = await readBudget(sandboxRoot).catch(() => null);
+  const policy = stopPolicyOf(budget);
+  if (policy === "operator") return { kind: "none", created: false };
+  if (policy === "cap-pause") {
+    const p = await pauseRun(sandboxRoot, reason, detail);
+    return { kind: "paused", created: p.paused };
+  }
+  const stop = await harnessStop(sandboxRoot, reason, detail, { verify: true });
+  return { kind: "stopped", created: stop.created };
 }
 
 /**
@@ -4743,12 +4931,14 @@ export async function harnessStop(
         return { created: false, sentinel, stale: true as const };
       }
     }
+    // A run the harness stopped at a cap is stopped, never completed.
     const created = await createSentinel(
       sandboxRoot,
       `---
 by: harness
 output: ""
 reason: ${reason}
+outcome: stopped
 at: ${new Date().toISOString()}
 ---
 
@@ -5591,6 +5781,10 @@ export const TOOL_RESERVED_NAMES = new Set([
   "lead_open", "lead_claim", "lead_release", "lead_close", "lead_link", "leads", "record_leads", "regroup", "operator_note",
   // The question register (extensions/questions.ts): its tools.
   "question_open", "questions", "question_ask",
+  // The stop policy (docs/adr/0013): a run paused at a cap, a seat's call held
+  // by the pause, the seats woken after an extension, a stop proposed to the
+  // operator, and a run resumed after a stop or a seal.
+  "run_paused", "pause_hold", "resume_wake", "stop_proposed", "run_resumed",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
@@ -9881,6 +10075,55 @@ export type FinishGateView = {
  */
 export const FINISH_OUTCOMES = ["completed", "examination_limited", "abandoned", "verification_unavailable"] as const;
 export type FinishOutcome = (typeof FINISH_OUTCOMES)[number];
+/**
+ * How a run stands or ended, beyond what a done can say: `paused` (a cap
+ * paused it; the operator extends or stops it) and `stopped` (the operator
+ * stopped it, or a cap did under cap-stop): never `completed`, whatever its
+ * answers say.
+ */
+export const RUN_OUTCOMES = ["completed", "examination_limited", "paused", "stopped", "abandoned", "verification_unavailable"] as const;
+export type RunOutcome = (typeof RUN_OUTCOMES)[number];
+/** The operator's stop of a run with no sentinel (swarm.sh stop): the outcome stopped, by whom, when, why. */
+export const STOPPED_REL = "done/STOPPED";
+
+/**
+ * How a run stands, from its own files: stopped (the operator's STOPPED, or
+ * the harness's sentinel at a cap), the outcome a done wrote in the
+ * sentinel, paused (a cap, the run not finished), or null while it runs.
+ */
+export async function runOutcome(sandboxRoot: string): Promise<{ outcome: RunOutcome | null; by: string | null; at: string | null; why: string | null }> {
+  const front = (text: string) => Object.fromEntries([...text.matchAll(/^([a-z_]+):[ \t]*(.*)$/gm)].map((m) => [m[1], m[2].trim()])) as Record<string, string>;
+  const stopped = await readFile(join(sandboxRoot, STOPPED_REL), "utf8").catch(() => null);
+  if (stopped !== null) {
+    try {
+      const j = JSON.parse(stopped) as { by?: string; at?: string; why?: string };
+      return { outcome: "stopped", by: j.by ?? null, at: j.at ?? null, why: j.why ?? null };
+    } catch {
+      return { outcome: "stopped", by: null, at: null, why: null };
+    }
+  }
+  const sentinel = await readFile(sentinelPath(sandboxRoot), "utf8").catch(() => null);
+  if (sentinel !== null) {
+    const f = front(sentinel);
+    const said = (RUN_OUTCOMES as readonly string[]).includes(f.outcome ?? "") ? (f.outcome as RunOutcome) : null;
+    const byCap = f.by === "harness" && (f.reason === "cap" || f.reason === "wall_clock");
+    return { outcome: byCap ? "stopped" : said, by: f.by ?? null, at: f.at ?? null, why: f.reason ?? null };
+  }
+  const budget = await readBudget(sandboxRoot).catch(() => null);
+  if (budget?.paused) return { outcome: "paused", by: "harness", at: budget.paused.at, why: budget.paused.detail };
+  return { outcome: null, by: null, at: null, why: null };
+}
+
+/** Record the operator's stop of a run that has no sentinel: done/STOPPED, once. */
+export async function markStopped(sandboxRoot: string, by: string, why: string): Promise<{ written: boolean }> {
+  if (await swarmDoneExists(sandboxRoot)) return { written: false };
+  const file = join(sandboxRoot, STOPPED_REL);
+  if (await lstat(file).then(() => true).catch(() => false)) return { written: false };
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, `${JSON.stringify({ outcome: "stopped", by, at: new Date().toISOString(), why })}\n`, { encoding: "utf8", flag: "wx" }).catch(() => undefined);
+  return { written: true };
+}
+
 /** The reason prefix of a done the harness could not check. */
 export const VERIFICATION_UNAVAILABLE_PREFIX = "VERIFICATION UNAVAILABLE: ";
 
