@@ -161,6 +161,33 @@ test("B16: the services a goal names are held to the policy and the adapter cata
   assert.deepEqual(goalServiceNotes("## Goal\nExamine the image in inputs/disk.E01 and write report.md.", policy({}), lists), [], "a file name is not a service");
 });
 
+test("B16: a goal's ordinary words name no service; its service names, adapter ids, hosts and URLs still do", () => {
+  const lists = { adapters: loadCatalogue().adapters, deny: loadDeny(), keys: new Set<string>() };
+  const notes = (goal: string, p = policy({})) => goalServiceNotes(`## Goal\n\n${goal}\n`, p, lists);
+  // The c10 goal's wording (before 2026-09-28: "the goal names search, a
+  // service the case policy's hard denials refuse", and hide … proxy).
+  const c10 = [
+    "What did the suspect search for, and how did he hide what he took?",
+    "Did he use a proxy to reach the site? Which map did he open, and what did he look up?",
+    "",
+    "1. Search his browser history for what he looked up.",
+    "2. Hide nothing from the report: say what was archived and what was translated.",
+  ].join("\n");
+  for (const p of [policy({}), policy({ network: "dynamic" }), policy({ network: "open" })]) assert.deepEqual(notes(c10, p), [], "ordinary words are not services");
+  // Written as a service's name, a host, a URL or an adapter's id, the same services are named.
+  const named = (goal: string) => notes(goal).map((n) => n.service);
+  assert.deepEqual(named("Was hide.me used?"), ["hide.me"], "the host of a denied service");
+  assert.deepEqual(named("He posted it on Medium and in his Discord server."), ["medium", "discord"], "a service's name written as a proper name");
+  assert.deepEqual(named("Search Google for the name."), ["google"], "a service's own name, whatever its case");
+  assert.deepEqual(named("look the place up in nominatim"), ["nominatim"]);
+  assert.deepEqual(named("Use rdap_domain for the sender's domain."), ["rdap_domain"]);
+  assert.deepEqual(named("Check the hash on virustotal."), ["virustotal"]);
+  assert.deepEqual(named("Read https://files.example-case.com/brief and google.com."), ["files.example-case.com", "google.com"]);
+  assert.deepEqual(named("the overpass near the bridge"), [], "an adapter's service name that is an ordinary word, written as one");
+  assert.deepEqual(named("run an Overpass query around the point"), ["overpass"]);
+  assert.deepEqual(named("what did he search for on search.brave.com"), ["search.brave.com"], "a subdomain's label is not a service's name; the host is");
+});
+
 // --- evidence added after the kickoff ---------------------------------------------------------------
 
 async function lateFile(base: string, name = "erp-payment-run-export.csv", body = "run,amount\n2026-06-16,48200.00\n") {

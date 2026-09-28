@@ -6,6 +6,38 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: `--stop operator` no longer forces answers; B16 warns on services, not on English words
+
+- **The operator's stop policy adds no stricter answer requirement.** Under
+  `--stop operator` (`--until-solved`) the finish line refused `done` while
+  any question was not answered or accepted, so a `not_determinable` that
+  had passed the negative bar (coverage record, detection opportunity, peer
+  review, route plan) could only end by the operator's acceptance, and the
+  contract told the agents "an examination-limited finish is not
+  accepted". Now every run ends on the same rule: every question in scope
+  with a disposition under the bar (established; partial; a bounded
+  negative or not determinable on a coverage record another seat reviewed;
+  a premise shown not to hold; out of scope; accepted; withdrawn). The
+  answers check names each section's disposition (`dispositions`), the
+  finish gate carries it on each question and names what else holds a run
+  under the policy (`holding`: a defect a limitation only names), and a
+  quick negative nobody attested holds its question. The run ends
+  `completed` when every question is established or settled by a bounded
+  negative that says the event did not happen under the stronger bar, and
+  `examination_limited` otherwise; a best candidate never satisfies (B2).
+  The kickoff line, SWARM.md's "Until solved" section, the refusal and the
+  worker prompt say the negative-bar path plainly: plan the routes, record
+  the coverage record, have another seat review it, answer
+  `not_determinable`.
+- **B16 matches services, not words.** The goal's service names came from
+  every label of every denied host, so "what did he search for" named
+  search.brave.com and "how did he hide" named hide.me. A bare name now
+  comes only from a host that is a service's own name (`google.*`,
+  `nominatim`, an adapter's id or service), never a subdomain's label, and
+  an ordinary English word among those (hide, archive, medium, proxy…) is
+  taken only written as a proper name inside a sentence; hosts, URLs and
+  adapter ids are matched as before.
+
 ### Added: work another seat did is named, and the process is measured from its registers
 
 - **`similar` at `job_run`.** A command or tool job with a declared scope

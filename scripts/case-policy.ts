@@ -571,6 +571,60 @@ const BARE_HOST = /(?<![@\w/.-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:c
 export type ServiceNote = { service: string; how: "adapter" | "denied" | "host"; adapter?: string; level: "ok" | "warn"; text: string };
 
 /**
+ * Ordinary English words that are also the bare name of a service the lists
+ * know (hide.me, archive.org, medium.com, the Overpass adapter…), and the
+ * words a goal asks with (search, look up, map, proxy): a goal uses them as
+ * verbs and nouns ("what did he search for", "how did he hide the files"),
+ * which names no service. Such a word names a service only written as a
+ * proper name inside a sentence ("his Discord messages", "posted on Medium");
+ * its host, a URL and an adapter's id name it always. Generic English, never
+ * words about a case.
+ */
+export const COMMON_WORDS: ReadonlySet<string> = new Set([
+  "search",
+  "hide",
+  "map",
+  "lookup",
+  "proxy",
+  "archive",
+  "translate",
+  "medium",
+  "notion",
+  "paste",
+  "pastes",
+  "defuse",
+  "discord",
+  "telegram",
+  "mastodon",
+  "threads",
+  "overpass",
+  "bing",
+  "brave",
+  "gist",
+  "raw",
+  "dev",
+  "ask",
+  "you",
+]);
+
+/**
+ * Whether `word` is written in `text` as a proper name: a whole word whose
+ * first letter is a capital, and not the first word of a sentence, a line
+ * or a list item (where any word is capitalised).
+ */
+function properName(text: string, word: string): boolean {
+  const re = new RegExp(`(?<![\\w.-])${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`, "gi");
+  for (const m of text.matchAll(re)) {
+    const at = m.index ?? 0;
+    if (!/^[A-Z]/.test(m[0])) continue;
+    const before = text.slice(0, at);
+    if (/(?:^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+|#+\s+|>\s+)?["'(`*_]*$|[.!?:]["')]*\s+["'(`*_]*$/.test(before)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
  * The services a goal names (hosts, in a URL or bare; an adapter's name or
  * host; a denied host's own name), each held to the case policy and the
  * adapter catalogue: whether this run can reach it, and how. Warnings only:
@@ -608,7 +662,8 @@ export function goalServiceNotes(
   // An adapter is named by its whole id (rdap_domain), its service's name
   // (the id's first part: rdap, virustotal, nvd; alone or inside another
   // tool's name such as virustotal_hash) or its host. An underscore
-  // separates words here, as it does in a tool's name.
+  // separates words here, as it does in a tool's name. A service's name that
+  // is an ordinary word (overpass) names it only as a proper name.
   const adapterWords = (a: (typeof adapters)[number]) => {
     const first = a.name.split("_")[0];
     const words = [a.name.toLowerCase(), a.host.toLowerCase()];
@@ -625,7 +680,8 @@ export function goalServiceNotes(
     if (a.key && !(lists.keys ?? new Set()).has(a.key.env)) return `${a.name} needs a host-managed key (${a.key.env}) that is not configured on this host`;
     return null;
   };
-  const names = (w: string) => new RegExp(`(?<![a-z0-9.-])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9-]|\\.[a-z])`, "i").test(lower);
+  const names = (w: string) =>
+    COMMON_WORDS.has(w.toLowerCase()) ? properName(text, w) : new RegExp(`(?<![a-z0-9.-])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9-]|\\.[a-z])`, "i").test(lower);
   // An adapter named by its whole id is said first, as itself (rdap_ip, not the first rdap adapter).
   const ordered = [...adapters.filter((a) => names(a.name)), ...adapters.filter((a) => !names(a.name))];
   for (const a of ordered) {
@@ -658,12 +714,18 @@ export function goalServiceNotes(
             : `the goal names ${host}, which no adapter of the catalogue reaches: a request for it is refused as uncertain, and only the operator can grant it`,
     });
   }
-  // A denied service named by its own name ("search Google for"): the deny list's labels.
+  // A denied service named by its own name ("search Google for"): the name of
+  // a host that is a service's own (google.*, bing.com), never a subdomain's
+  // label (search.brave.com names Brave's search, not "search"), and an
+  // ordinary word among those only written as a proper name.
   for (const [category, c] of Object.entries(lists.deny?.categories ?? {})) {
     for (const h of c.hosts) {
-      const label = h.replace(/\.\*$/, "").split(".")[0];
+      const parts = h.toLowerCase().split(".");
+      if (parts.length !== 2) continue;
+      const label = parts[0];
       if (label.length < 4 || said.has(label)) continue;
-      if (!new RegExp(`(?<![\\w.-])${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`, "i").test(lower)) continue;
+      const hit = COMMON_WORDS.has(label) ? properName(text, label) : new RegExp(`(?<![\\w.-])${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`, "i").test(lower);
+      if (!hit) continue;
       if ([...said].some((s) => s.startsWith(`${label}.`) || s.includes(`.${label}.`))) continue;
       said.add(label);
       out.push({ service: label, how: "denied", level: "warn", text: `the goal names ${label}, a service the case policy's hard denials refuse (${category}: ${c.why}): the swarm cannot use it` });

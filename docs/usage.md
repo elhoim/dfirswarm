@@ -287,7 +287,8 @@ A resume keeps the policy its kickoff recorded and prints a `NOTE` for each
 field its options would have changed. At kickoff the services the goal names
 (a URL, a host, an adapter's whole id such as `rdap_domain` or its service's
 name, alone or inside a tool's name such as `virustotal_hash`, a denied
-service by its own name) are held
+service by its own name: the name of a host that is the service's own, such as
+`google.*`, never a subdomain's label) are held
 to the policy and the adapter catalogue and printed as `WARN` lines: a
 closed network, a lookup the policy does not allow, an adapter whose key is
 not configured, a host no adapter reaches or the hard denials refuse. Nothing

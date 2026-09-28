@@ -217,6 +217,13 @@ policy" only where the policy says no more evidence comes.
    the policy does not allow, an adapter that needs a key not configured, a
    host no adapter reaches or the hard denials refuse, each is a warning.
    Nothing is refused: a goal may name a service the run is not to use.
+   A bare name counts only when it is a service's own (the name of a host
+   that is the service's, `google.*`, `bing.com`; an adapter's id or
+   service), never a subdomain's label (`search.brave.com` names no
+   "search"); and a service name that is an ordinary English word (hide,
+   archive, medium, proxy, overpass…) counts only written as a proper name
+   inside a sentence. The c10 goal's "what did he search for" and "how did
+   he hide" had warned; they are questions, not services (2026-09-28).
 
 ## Consequences
 
