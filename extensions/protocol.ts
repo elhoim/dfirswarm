@@ -8778,7 +8778,8 @@ export type AttestStrength = (typeof ATTEST_STRENGTHS)[number];
  * an answer established names at least one (the calibration run sabfd76: a
  * decoy adopted and attested established, "none the evidence allows").
  */
-export type AnswerReviewAlternative = { explanation: string; why: string };
+/** An alternative weighed: what else could explain the answer, why the evidence rules it out, and the entries that show it (E-<seq>). */
+export type AnswerReviewAlternative = { explanation: string; why: string; evidence?: string[] };
 export type AnswerReview = {
   reproduced: string;
   read: string;
@@ -8790,13 +8791,34 @@ export type AnswerReview = {
 export const ANSWER_REVIEW_MAX_PARTS = 20;
 export const ANSWER_REVIEW_MAX_ALTERNATIVES = 10;
 
-/** Whether a review names an alternative explanation it considered and why the evidence rules it out. */
-export function reviewNamesAlternative(r: AnswerReview | undefined | null): boolean {
-  return Boolean(r && Array.isArray(r.alternatives) && r.alternatives.some((a) => a.explanation && a.why));
+/** Words that say nothing was weighed: an alternative written so is none. */
+const PLACEHOLDER_WORDS: ReadonlySet<string> = new Set(["none", "na", "n a", "no alternative", "no alternatives", "nothing", "not applicable", "no other", "nothing else", "unknown", "tbd", "null", "nil", "no", "same", "see above", "none found", "no other explanation"]);
+
+/** Whether a text is a placeholder: empty once its punctuation goes, a stock "none", or shorter than a real explanation (under 8 letters or digits). */
+export function placeholderText(t: string | undefined | null): boolean {
+  const norm = String(t ?? "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return !norm || PLACEHOLDER_WORDS.has(norm) || norm.replace(/\s+/g, "").length < 8;
 }
 
-/** Why an established attest is recorded a best candidate when its review names no alternative. */
-export const NO_ALTERNATIVE_CAP = "the review names no alternative explanation it considered and why the evidence rules it out (answer_review.alternatives [{explanation, why}])";
+/**
+ * Whether an alternative counts as one weighed (structural, not a word list
+ * alone): it names the evidence that rules it out (at least one E-<seq>,
+ * which the attest checks against the ledger), its explanation and its why
+ * are neither empty nor a placeholder, and they are not the same words (the
+ * Fable review of batches 1-3: [{explanation: "none", why: "n/a"}] passed).
+ */
+export function alternativeCounts(a: AnswerReviewAlternative): boolean {
+  const same = (x: string, y: string) => x.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim() === y.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+  return (a.evidence ?? []).some((r) => /^E-\d+$/.test(r)) && !placeholderText(a.explanation) && !placeholderText(a.why) && !same(a.explanation, a.why);
+}
+
+/** Whether a review names an alternative explanation it weighed, why the evidence rules it out, and the entries that show it (alternativeCounts). */
+export function reviewNamesAlternative(r: AnswerReview | undefined | null): boolean {
+  return Boolean(r && Array.isArray(r.alternatives) && r.alternatives.some(alternativeCounts));
+}
+
+/** Why an established attest is recorded a best candidate when its review names no alternative that counts. */
+export const NO_ALTERNATIVE_CAP = "the review names no alternative explanation it weighed with the evidence that rules it out (answer_review.alternatives [{explanation, why, evidence: [E-<seq>]}], each a real explanation, not a placeholder)";
 
 /** An answer review as given: every field said, each bounded (refused past it, never cut). */
 export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerReview } | { ok: false; reason: string } {
@@ -8826,7 +8848,12 @@ export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerRevie
       if (!explanation.ok) return explanation;
       const why = text("alternatives[].why", o.why);
       if (!why.ok) return why;
-      list.push({ explanation: explanation.value, why: why.value });
+      // The entries that rule it out, by seq (the attest checks each is in the ledger).
+      const ev = (Array.isArray(o.evidence) ? o.evidence : o.evidence === undefined || o.evidence === null ? [] : String(o.evidence).split(/[\s,]+/)).map((v) => String(v).trim()).filter(Boolean).map((v) => (/^#\d+$/.test(v) ? `E-${v.slice(1)}` : /^e-\d+$/i.test(v) ? v.toUpperCase() : v));
+      const bad = ev.find((v) => !/^E-[1-9]\d{0,6}$/.test(v));
+      if (bad) return { ok: false, reason: `answer_review.alternatives[].evidence names entries as E-<seq> (got ${JSON.stringify(bad)}): the entries that rule the alternative out` };
+      if (ev.length > LEDGER_MAX_CITATIONS) return { ok: false, reason: `answer_review.alternatives[].evidence names more than ${LEDGER_MAX_CITATIONS} entries` };
+      list.push({ explanation: explanation.value, why: why.value, ...(ev.length ? { evidence: [...new Set(ev)] } : {}) });
     }
     alternatives = list;
   } else {
@@ -8855,7 +8882,7 @@ export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerRevie
 
 /** An answer review in words, for the ledger's rendering and the report. */
 export function answerReviewWords(r: AnswerReview): string {
-  const alternatives = Array.isArray(r.alternatives) ? `alternatives weighed: ${r.alternatives.map((a) => `${a.explanation} (ruled out: ${a.why})`).join("; ")}` : `alternatives still open: ${r.alternatives}`;
+  const alternatives = Array.isArray(r.alternatives) ? `alternatives weighed: ${r.alternatives.map((a) => `${a.explanation} (ruled out: ${a.why}${a.evidence?.length ? `; ${a.evidence.join(", ")}` : "; no entry named"})`).join("; ")}` : `alternatives still open: ${r.alternatives}`;
   return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.part} ${p.established ? "established" : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}`;
 }
 
@@ -9651,6 +9678,14 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     // established, or a route its would_change names that nothing took
     // allows only best_candidate, which does not satisfy the finish line.
     const questionAnswer = t.entry.kind === "answer" && Boolean(t.entry.section?.startsWith("question:")) && !isNegativeEntry(t.entry);
+    // The entries an alternative is ruled out by are in the ledger.
+    if (answerReview && Array.isArray(answerReview.alternatives)) {
+      const seqs = new Set(entries.map((e) => e.seq));
+      for (const a of answerReview.alternatives) {
+        const missing = (a.evidence ?? []).find((r) => !seqs.has(Number(r.slice(2))));
+        if (missing) return { ok: false, reason: `answer_review.alternatives[].evidence names ${missing}: there is no entry #${missing.slice(2)} in the ledger` };
+      }
+    }
     // An established review names the alternatives it weighed and why the
     // evidence rules each out; one that names none is recorded a best
     // candidate, and the reply says so (nothing is refused).

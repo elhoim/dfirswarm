@@ -293,6 +293,34 @@ test("an established attest names an alternative it weighed and why the evidence
   assert.equal(P.verifyAttestationChain(await readFile(join(S, P.LEDGER_ATTESTATIONS), "utf8")).ok, true);
 });
 
+test("an alternative counts only when it names the entries that rule it out and says something: filler is recorded a best candidate, an entry not in the ledger is refused (the Fable review, P2 4)", async () => {
+  const { S, a0, a1, a2, a3 } = await run();
+  const f = ok(await rec(a0, { kind: "finding", ...F, value: "alice logged on", source: "a log", evidence: "line 1", refs: ["job:j000001/hits.txt"], answers: ["1"] })).entry;
+  const g = ok(await rec(a0, { kind: "finding", ...F, value: "bob's session was closed at the time", source: "a log", evidence: "line 9", refs: ["job:j000001/hits.txt"], answers: ["1"] })).entry;
+  const ans = ok(await rec(a1, { kind: "answer", section: "question:1", value: "alice", reasoning: `E-${f.seq}`, ...HIGH, result: "established" })).entry;
+  const review = (alternatives: unknown) => ({ ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, alternatives } });
+  // An entry that is not in the ledger: refused, as any ref that does not resolve.
+  refused(await P.attestEntry(a2, { seq: ans.seq, how: "x", ...review([{ explanation: "another user at the same console", why: "the log shows bob logged off", evidence: ["E-999"] }]) }), /answer_review\.alternatives\[\]\.evidence names E-999: there is no entry #999 in the ledger/);
+  refused(await P.attestEntry(a2, { seq: ans.seq, how: "x", ...review([{ explanation: "another user at the same console", why: "the log shows bob logged off", evidence: ["job:j000001/hits.txt"] }]) }), /evidence names entries as E-<seq>/);
+  // Filler, or a real explanation with no entry: recorded a best candidate, with why.
+  for (const [what, alts] of [
+    ["the filler the review found", [{ explanation: "none", why: "n/a", evidence: [`E-${g.seq}`] }]],
+    ["no entry named", [{ explanation: "another user at the same console", why: "the log shows bob's session was closed then" }]],
+    ["the same words twice", [{ explanation: "another user at the console", why: "another user at the console", evidence: [`E-${g.seq}`] }]],
+  ] as const) {
+    assert.equal(P.reviewNamesAlternative({ ...ESTABLISHED.answer_review, alternatives: alts } as unknown as P.AnswerReview), false, what);
+  }
+  const filler = await attested(a2, { seq: ans.seq, how: "read the line again", ...review([{ explanation: "none", why: "n/a", evidence: [`E-${g.seq}`] }]) });
+  assert.equal(filler.line.strength, "best_candidate");
+  assert.deepEqual(filler.line.capped, [P.NO_ALTERNATIVE_CAP]);
+  assert.equal(P.recordedConfidence(ans, await P.readAttestations(S)).recorded, "medium");
+  // A real alternative, ruled out by an entry in the ledger: established, and the high kept.
+  const real = await attested(a3, { seq: ans.seq, how: "weighed bob against the log", ...review([{ explanation: "bob, who shared the console that morning", why: "his session was closed before the logon", evidence: [`E-${g.seq}`] }]) });
+  assert.equal(real.line.strength, "established");
+  assert.deepEqual(real.line.answer_review?.alternatives, [{ explanation: "bob, who shared the console that morning", why: "his session was closed before the logon", evidence: [`E-${g.seq}`] }]);
+  assert.equal(P.recordedConfidence(ans, await P.readAttestations(S)).recorded, "high");
+});
+
 // --- 4. the recorded confidence --------------------------------------------------------------------
 
 test("the run records a high confidence only on an established answer another seat attested established naming its alternatives; any other high is recorded medium, said in the reply, the report and the metrics", async () => {

@@ -290,9 +290,15 @@ evidence that settled it was added late. Five rules follow, each generic
   does not have is not_applicable.
 - **An established attest names an alternative.** An attest with strength
   established carries `answer_review.alternatives` as `[{explanation,
-  why}]`, at least one alternative explanation the reviewer weighed and why
-  the evidence rules it out; one without is recorded best_candidate, with
-  the reason in `capped`, and the reply says so. Nothing is refused, and the
+  why, evidence}]`, at least one alternative explanation the reviewer
+  weighed, why the evidence rules it out, and the entries that show it
+  (E-<seq>, each checked against the ledger). An alternative counts only
+  with an entry named, and with an explanation and a why that are neither
+  empty nor a placeholder nor the same words (`alternativeCounts`: a
+  structure first, a short stock list second; the Fable review of the
+  batches passed `[{explanation: "none", why: "n/a"}]`). One without an
+  alternative that counts is recorded best_candidate, with the reason in
+  `capped`, and the reply says so. Nothing is refused, and the
   seat may attest again once it has weighed one (a later established review
   by the same seat is recorded; any other repeat is not). A text
   `alternatives` is still read, as an older review's and a best candidate's.

@@ -437,9 +437,10 @@ Ledger (only when `record` is in your tool list)
   asks is established, the inference, the alternatives still open, and whether another source
   family was checked. Before you attest an answer established, weigh at least one alternative
   explanation (a decoy that looks like the answer, another actor, another mechanism, another time)
-  and say why the evidence rules it out: `answer_review.alternatives [{explanation, why}]`. An
-  established attest that names none is recorded best_candidate, and the reply says so; attest
-  again once you have weighed one. A medium or low confidence, a part not established, or a route its
+  and say why the evidence rules it out, naming the entries that show it:
+  `answer_review.alternatives [{explanation, why, evidence: ["E-<seq>"]}]`. An established attest
+  that names none, or only placeholders ("none", "n/a"), or no entry, is recorded best_candidate,
+  and the reply says so; attest again once you have weighed one. A medium or low confidence, a part not established, or a route its
   would_change names that nothing took allows only best_candidate, which does not satisfy the
   finish line: a best candidate you cannot break is still one. Say so, and open the lead for the
   route would_change names. A material negative (a bounded_negative or

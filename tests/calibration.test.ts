@@ -436,7 +436,7 @@ async function faithfulRun(truth: Truth, withLate: boolean): Promise<string> {
     lines.push(line);
     if (negative) attests.push(JSON.stringify({ v: 2, act: "attest", seq: answer, target: "h", by: "critic", at: "t", how: "re-derived" }));
     // An established answer attested established by another seat, naming the alternative it weighed: its high is recorded high.
-    if (expected.result === "established") attests.push(JSON.stringify({ v: 2, act: "attest", seq: answer, target: ledgerHash(JSON.parse(line) as LedgerEntry, "genesis"), by: "critic", at: "t", how: "re-derived", strength: "established", answer_review: { reproduced: "the finding", read: "nothing else", parts: [{ part: "all", established: true, why: "the finding" }], inference: "direct", alternatives: [{ explanation: "a decoy", why: "the finding rules it out" }], other_family: { checked: false, text: "one family" } } }));
+    if (expected.result === "established") attests.push(JSON.stringify({ v: 2, act: "attest", seq: answer, target: ledgerHash(JSON.parse(line) as LedgerEntry, "genesis"), by: "critic", at: "t", how: "re-derived", strength: "established", answer_review: { reproduced: "the finding", read: "nothing else", parts: [{ part: "all", established: true, why: "the finding" }], inference: "direct", alternatives: [{ explanation: "a decoy that looks like the answer", why: "the finding rules it out by its own record", evidence: [`E-${basis}`] }], other_family: { checked: false, text: "one family" } } }));
     // A faithful run asks for a missing question's evidence at the start, whether or not a late item brings it.
     if (q.kind === "missing") requests.push(JSON.stringify({ lead: `L-${q.id}`, questions: [q.id], request: "the evidence that would settle it" }));
   }

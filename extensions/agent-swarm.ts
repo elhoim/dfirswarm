@@ -3356,7 +3356,7 @@ export default function (pi: ExtensionAPI) {
       "A critic attests or disputes every answer before the run ends; the author of an entry never attests it.",
       "A negative (a coverage record, or an answer bounded_negative or not_determinable) is attested with review: say whether you challenged the detection assumptions, reproduced a decisive check and tried a materially different route, and what you did or why not.",
       "An answer to a question is attested with strength (established or best_candidate) and answer_review: what you reproduced and what you only read, each part the question asks and whether it is established, the inference, the alternatives you weighed, and whether another source family was checked. A best candidate you cannot break is still a best candidate: say so, and open the lead for the route would_change names.",
-      "Before you attest an answer established, name at least one alternative explanation you considered and why the evidence rules it out: answer_review.alternatives [{explanation, why}] (a decoy that looks like the answer, another actor, another mechanism, another time). An established attest that names none is recorded best_candidate, and the reply says so. Only an established answer attested so keeps a high confidence; any other high is recorded medium.",
+      "Before you attest an answer established, name at least one alternative explanation you weighed, why the evidence rules it out, and the entries that show it: answer_review.alternatives [{explanation, why, evidence: [E-<seq>]}] (a decoy that looks like the answer, another actor, another mechanism, another time). An established attest that names none, or only placeholders, is recorded best_candidate, and the reply says so. Only an established answer attested so keeps a high confidence; any other high is recorded medium.",
     ],
     parameters: Type.Object({
       seq: Type.Number({ description: "The entry's seq (standing, not your own)." }),
@@ -3385,8 +3385,8 @@ export default function (pi: ExtensionAPI) {
             read: Type.String({ description: "What you only read (a peer's entry, a summary) without re-deriving it" }),
             parts: Type.Array(Type.Object({ part: Type.String(), established: Type.Boolean(), why: Type.String() }), { description: "Each part the question asks, whether it is established, and why" }),
             inference: Type.String({ description: "The step that connects the observations to the answer" }),
-            alternatives: Type.Union([Type.Array(Type.Object({ explanation: Type.String(), why: Type.String() })), Type.String()], {
-              description: "Each alternative explanation you considered and why the evidence rules it out, [{explanation, why}]: at least one for strength established (without one the attest is recorded best_candidate). A text is read too: what the evidence still allows, for a best candidate.",
+            alternatives: Type.Union([Type.Array(Type.Object({ explanation: Type.String(), why: Type.String(), evidence: Type.Optional(Type.Array(Type.String())) })), Type.String()], {
+              description: "Each alternative explanation you weighed, why the evidence rules it out, and the entries that show it (evidence: [E-<seq>], each in the ledger): [{explanation, why, evidence}]. Strength established needs at least one that names its evidence and is a real explanation, not a placeholder (\"none\", \"n/a\"); without one the attest is recorded best_candidate. A text is read too: what the evidence still allows, for a best candidate.",
             }),
             other_family: Type.Object({ checked: Type.Boolean(), text: Type.String() }, { description: "Whether a materially different source family was checked, which, or why not" }),
           },
