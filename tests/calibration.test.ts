@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { citedSeqs, normaliseResult, parseTruth, questionKey, resultOf, scoreRun, scoreText, type Truth } from "../scripts/calibrate.ts";
 import { patternOf } from "../scripts/score.ts";
+import { ledgerHash, type LedgerEntry } from "../extensions/protocol.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const GEN = join(ROOT, "calibration", "generate.py");
@@ -284,8 +285,13 @@ test("the scorer reads today's ledger: misses, false negatives, forced answers, 
     assert.deepEqual([s.negatives.total, s.negatives.without_coverage, s.negatives.without_review, s.negatives.unsupported], [3, 1, 2, 2]);
     assert.deepEqual([s.acquisition.questions, s.acquisition.requested], [1, 1]);
     assert.equal(s.unanswered, 0);
-    assert.equal(s.calibration.overconfident, 1);
-    assert.equal(s.calibration.levels.high.n, 3);
+    // The recorded confidence (protocol.ts recordedConfidence): none of these answers states its result and none is attested established naming an alternative, so each stated high is recorded medium, and nothing is wrong at high.
+    assert.equal(s.calibration.overconfident, 0);
+    assert.equal(s.calibration.levels.high, undefined);
+    assert.equal(s.calibration.stated_high_lowered, 3);
+    assert.equal(q("3").answer?.stated_confidence, "high");
+    assert.equal(q("3").answer?.confidence, "medium");
+    assert.match(q("3").answer?.confidence_why ?? "", /high is kept only by an established answer/);
     assert.equal(r.ledger.coverage_model, "absence");
     assert.equal(r.ledger.entries, 10);
     assert.equal(r.ledger.chain_ok, true, "hand-written lines carry no hash, as a version 1 ledger's do");
@@ -423,8 +429,11 @@ async function faithfulRun(truth: Truth, withLate: boolean): Promise<string> {
     const negative = ["bounded_negative", "not_determinable", "premise_not_supported"].includes(expected.result);
     lines.push(E(basis, negative ? "coverage" : "finding", expected.summary ?? "", { proposition: q.text, coverage: "complete" }));
     const answer = ++seq;
-    lines.push(E(answer, "answer", expected.summary ?? "", { section: `question:${q.id}`, result: expected.result, confidence: "high", reasoning: `E-${basis}.`, by: "author", authors: ["author"] }));
+    const line = E(answer, "answer", expected.summary ?? "", { section: `question:${q.id}`, result: expected.result, confidence: "high", reasoning: `E-${basis}.`, by: "author", authors: ["author"] });
+    lines.push(line);
     if (negative) attests.push(JSON.stringify({ v: 2, act: "attest", seq: answer, target: "h", by: "critic", at: "t", how: "re-derived" }));
+    // An established answer attested established by another seat, naming the alternative it weighed: its high is recorded high.
+    if (expected.result === "established") attests.push(JSON.stringify({ v: 2, act: "attest", seq: answer, target: ledgerHash(JSON.parse(line) as LedgerEntry, "genesis"), by: "critic", at: "t", how: "re-derived", strength: "established", answer_review: { reproduced: "the finding", read: "nothing else", parts: [{ part: "all", established: true, why: "the finding" }], inference: "direct", alternatives: [{ explanation: "a decoy", why: "the finding rules it out" }], other_family: { checked: false, text: "one family" } } }));
     if (q.kind === "missing" && !late) requests.push(JSON.stringify({ lead: `L-${q.id}`, questions: [q.id], request: "the evidence that would settle it" }));
   }
   await writeFile(join(S, "ledger", "entries.jsonl"), `${lines.join("\n")}\n`);
@@ -456,7 +465,12 @@ test("a run that answers as the truth does scores clean, before and after the la
             assert.equal(s.acquisition.requested, s.acquisition.questions, where);
             assert.equal(r.late.every((l) => l.added === withLate), true, where);
             assert.ok(r.questions.filter((q) => q.scored).every((q) => q.correct), `${where}: ${JSON.stringify(r.questions.filter((q) => q.scored && !q.correct).map((q) => [q.id, q.verdict]))}`);
-            assert.equal(s.calibration.brier, 0.01, where);
+            // High is recorded only on the established answers (attested established, naming an alternative); every other stated high is recorded medium.
+            const answered = r.questions.filter((q) => q.scored && q.answer);
+            const est = answered.filter((q) => q.answer!.result === "established").length;
+            assert.equal(s.calibration.levels.high?.n ?? 0, est, where);
+            assert.equal(s.calibration.stated_high_lowered, answered.length - est, where);
+            assert.equal(s.calibration.brier, Math.round(((est * 0.01 + (answered.length - est) * 0.09) / answered.length) * 1000) / 1000, where);
           } finally {
             await rm(S, { recursive: true, force: true });
           }

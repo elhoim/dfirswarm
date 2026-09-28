@@ -8754,24 +8754,38 @@ export type AttestStrength = (typeof ATTEST_STRENGTHS)[number];
  * A review of an answer to a question (B2): what the reviewer reproduced
  * and what it only read, whether each part the question asks is
  * established, the inference that connects the observations to the answer,
- * the alternatives the evidence still allows, and whether another source
- * family was checked (or why not: never a compulsory box, but its absence
- * is said).
+ * the alternatives it weighed, and whether another source family was
+ * checked (or why not: never a compulsory box, but its absence is said).
+ * `alternatives` is each alternative explanation considered and why the
+ * evidence rules it out ([{explanation, why}]); a text is what an older
+ * review said, and what a best candidate may still say. A review that holds
+ * an answer established names at least one (the calibration run sabfd76: a
+ * decoy adopted and attested established, "none the evidence allows").
  */
+export type AnswerReviewAlternative = { explanation: string; why: string };
 export type AnswerReview = {
   reproduced: string;
   read: string;
   parts: Array<{ part: string; established: boolean; why: string }>;
   inference: string;
-  alternatives: string;
+  alternatives: string | AnswerReviewAlternative[];
   other_family: { checked: boolean; text: string };
 };
 export const ANSWER_REVIEW_MAX_PARTS = 20;
+export const ANSWER_REVIEW_MAX_ALTERNATIVES = 10;
+
+/** Whether a review names an alternative explanation it considered and why the evidence rules it out. */
+export function reviewNamesAlternative(r: AnswerReview | undefined | null): boolean {
+  return Boolean(r && Array.isArray(r.alternatives) && r.alternatives.some((a) => a.explanation && a.why));
+}
+
+/** Why an established attest is recorded a best candidate when its review names no alternative. */
+export const NO_ALTERNATIVE_CAP = "the review names no alternative explanation it considered and why the evidence rules it out (answer_review.alternatives [{explanation, why}])";
 
 /** An answer review as given: every field said, each bounded (refused past it, never cut). */
 export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerReview } | { ok: false; reason: string } {
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const shape = "answer_review is {reproduced, read, parts: [{part, established, why}], inference, alternatives, other_family: {checked, text}}";
+  const shape = "answer_review is {reproduced, read, parts: [{part, established, why}], inference, alternatives: [{explanation, why}], other_family: {checked, text}}";
   const text = (name: string, v: unknown): { ok: true; value: string } | { ok: false; reason: string } => {
     const t = String(v ?? "").trim();
     if (!t) return { ok: false, reason: `answer_review.${name} is required (${shape}): say it, or "none" and why` };
@@ -8784,8 +8798,26 @@ export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerRevie
   if (!read.ok) return read;
   const inference = text("inference", r.inference);
   if (!inference.ok) return inference;
-  const alternatives = text("alternatives", r.alternatives);
-  if (!alternatives.ok) return alternatives;
+  // Each alternative weighed, and why the evidence rules it out; a text is still read (an older review, a best candidate's "what else it allows").
+  let alternatives: AnswerReview["alternatives"];
+  if (Array.isArray(r.alternatives)) {
+    if (!r.alternatives.length) return { ok: false, reason: `answer_review.alternatives lists each alternative explanation you considered and why the evidence rules it out, [{explanation, why}], at least one; if you weighed none, say so in a text and attest best_candidate (${shape})` };
+    if (r.alternatives.length > ANSWER_REVIEW_MAX_ALTERNATIVES) return { ok: false, reason: `answer_review.alternatives lists at most ${ANSWER_REVIEW_MAX_ALTERNATIVES}: keep the ones a reader must weigh` };
+    const list: AnswerReviewAlternative[] = [];
+    for (const x of r.alternatives) {
+      const o = (x && typeof x === "object" ? x : {}) as Record<string, unknown>;
+      const explanation = text("alternatives[].explanation", o.explanation);
+      if (!explanation.ok) return explanation;
+      const why = text("alternatives[].why", o.why);
+      if (!why.ok) return why;
+      list.push({ explanation: explanation.value, why: why.value });
+    }
+    alternatives = list;
+  } else {
+    const t = text("alternatives", r.alternatives);
+    if (!t.ok) return t;
+    alternatives = t.value;
+  }
   if (!Array.isArray(r.parts) || !r.parts.length) return { ok: false, reason: `answer_review.parts names each part the question asks, [{part, established: true|false, why}], at least one (${shape})` };
   if (r.parts.length > ANSWER_REVIEW_MAX_PARTS) return { ok: false, reason: `answer_review.parts names at most ${ANSWER_REVIEW_MAX_PARTS} parts` };
   const parts: AnswerReview["parts"] = [];
@@ -8802,17 +8834,47 @@ export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerRevie
   if (!f || typeof f.checked !== "boolean") return { ok: false, reason: "answer_review.other_family is {checked: true|false, text}: whether a materially different source family was checked, and which, or why not" };
   const ft = text("other_family.text", f.text);
   if (!ft.ok) return ft;
-  return { ok: true, review: { reproduced: reproduced.value, read: read.value, parts, inference: inference.value, alternatives: alternatives.value, other_family: { checked: f.checked, text: ft.value } } };
+  return { ok: true, review: { reproduced: reproduced.value, read: read.value, parts, inference: inference.value, alternatives, other_family: { checked: f.checked, text: ft.value } } };
 }
 
 /** An answer review in words, for the ledger's rendering and the report. */
 export function answerReviewWords(r: AnswerReview): string {
-  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.part} ${p.established ? "established" : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; alternatives still open: ${r.alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}`;
+  const alternatives = Array.isArray(r.alternatives) ? `alternatives weighed: ${r.alternatives.map((a) => `${a.explanation} (ruled out: ${a.why})`).join("; ")}` : `alternatives still open: ${r.alternatives}`;
+  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.part} ${p.established ? "established" : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}`;
 }
 
 /** Whether an attestation holds its answer established: a best candidate does not; a line from before strengths reads as it always did. */
 export function attestEstablishes(a: LedgerAttestation): boolean {
   return a.strength !== "best_candidate";
+}
+
+/**
+ * The confidence the run records for an answer to a question, beside the
+ * one its author stated. High stands only on an established answer that
+ * another seat attested established, naming the alternatives it weighed
+ * and why the evidence rules each out (reviewNamesAlternative); any other
+ * high is recorded medium, and `why` says what it lacks. Medium and low
+ * stand as stated; nothing is refused. Derived where it is read (the report,
+ * the metrics, the calibration score), because the attest that keeps a high
+ * comes after the answer (the calibration run sabfd76: every answer high,
+ * four of them wrong).
+ */
+export type RecordedConfidence = { stated: (typeof LEDGER_CONFIDENCE)[number] | null; recorded: (typeof LEDGER_CONFIDENCE)[number] | null; why: string | null };
+export function recordedConfidence(answer: Pick<LedgerEntry, "kind" | "section" | "confidence" | "result" | "inconclusive" | "hash" | "by" | "authors">, attestations: LedgerAttestation[]): RecordedConfidence {
+  const stated = answer.confidence && (LEDGER_CONFIDENCE as readonly string[]).includes(answer.confidence) ? answer.confidence : null;
+  if (stated !== "high" || answer.kind !== "answer" || !answer.section?.startsWith("question:")) return { stated, recorded: stated, why: null };
+  const result = NB.answerResult(answer);
+  if (result !== "established") return { stated, recorded: "medium", why: `high is kept only by an established answer, and this one ${result ? `is ${NB.resultWords(result)}` : "states no result"}` };
+  const target = answer.hash ?? ledgerHash(answer as LedgerEntry, "genesis");
+  const authors = new Set([answer.by, ...(answer.authors ?? [])]);
+  const held = attestations.some((a) => attestationAct(a) === "attest" && a.target === target && !authors.has(a.by) && a.strength === "established" && reviewNamesAlternative(a.answer_review));
+  return held ? { stated, recorded: "high", why: null } : { stated, recorded: "medium", why: "high is kept only once another seat attests it established, naming the alternatives it weighed and why the evidence rules each out; none has" };
+}
+
+/** A recorded confidence in words: the recorded one, and the stated one when it differs, with why. */
+export function confidenceWords(c: RecordedConfidence): string {
+  if (!c.recorded) return "no confidence stated";
+  return c.recorded === c.stated ? c.recorded : `${c.recorded} (stated ${c.stated}; ${c.why})`;
 }
 
 /** The act of an attestation line: a version 1 line is a second author. */
@@ -9570,10 +9632,19 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     // established, or a route its would_change names that nothing took
     // allows only best_candidate, which does not satisfy the finish line.
     const questionAnswer = t.entry.kind === "answer" && Boolean(t.entry.section?.startsWith("question:")) && !isNegativeEntry(t.entry);
+    // An established review names the alternatives it weighed and why the
+    // evidence rules each out; one that names none is recorded a best
+    // candidate, and the reply says so (nothing is refused).
+    let recorded = strength;
+    const downgraded: string[] = [];
     if (questionAnswer) {
       if (!strength) return { ok: false, reason: `#${t.entry.seq} answers ${t.entry.section}: its attest says how strongly you hold it, strength established or best_candidate, with answer_review {reproduced, read, parts: [{part, established, why}], inference, alternatives, other_family: {checked, text}}` };
       if (!answerReview) return { ok: false, reason: `#${t.entry.seq} answers ${t.entry.section}: give answer_review {reproduced (what you re-derived yourself), read (what you only read), parts (each part the question asks, established or not, and why), inference (what connects the observations to the answer), alternatives (what the evidence still allows), other_family {checked, text} (whether another source family was checked, or why not)}` };
       if (strength === "established" && caps.length) return { ok: false, reason: `#${t.entry.seq} can be attested best_candidate only: ${caps.join("; ")}. Attest it best_candidate (it does not satisfy the finish line), or take the route and record what it shows` };
+      if (strength === "established" && !reviewNamesAlternative(answerReview)) {
+        recorded = "best_candidate";
+        downgraded.push(NO_ALTERNATIVE_CAP);
+      }
     } else if (answerReview) {
       return { ok: false, reason: `answer_review is for an answer to a question; #${t.entry.seq} is ${isNegativeEntry(t.entry) ? "a negative: its attest is a review {detection, reproduced, other_route}" : t.entry.kind === "answer" ? `the ${t.entry.section} (say in how what you re-derived)` : `a ${t.entry.kind}: say in how what you re-derived`}` };
     } else if (strength && !(t.entry.kind === "answer" && t.entry.section?.startsWith("question:"))) {
@@ -9620,16 +9691,22 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
       }
       if (deferral) return { ok: true as const, line: null, appended: false as const, note: deferral.why, deferred: deferral };
     }
-    const mine = attested.find((a) => attestationAct(a) === "attest" && a.target === target && a.by === ctx.agentId);
-    if (mine) return { ok: true, line: mine, appended: false, note: `you attested #${t.entry.seq} already` };
+    // Once per seat, except a review that now holds established what this
+    // seat's earlier one held a best candidate only (a route taken since,
+    // the alternatives weighed): the later line is its review now.
+    const mine = attested.filter((a) => attestationAct(a) === "attest" && a.target === target && a.by === ctx.agentId);
+    const upgrade = questionAnswer && recorded === "established" && mine.length > 0 && !mine.some(attestEstablishes);
+    if (mine.length && !upgrade) return { ok: true, line: mine.at(-1)!, appended: false, note: `you attested #${t.entry.seq} already` };
     await held.assertOwned();
-    const line = await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "attest", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), how: how.value, ...(refs.length ? { refs } : {}), ...(review ? { review } : {}), ...(strength ? { strength } : {}), ...(answerReview ? { answer_review: answerReview } : {}), ...(questionAnswer && caps.length ? { capped: caps } : {}), ...(secondWhy.value ? { second_review_why: secondWhy.value } : {}) });
+    const line = await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "attest", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), how: how.value, ...(refs.length ? { refs } : {}), ...(review ? { review } : {}), ...(recorded ? { strength: recorded } : {}), ...(answerReview ? { answer_review: answerReview } : {}), ...(questionAnswer && (caps.length || downgraded.length) ? { capped: [...caps, ...downgraded] } : {}), ...(secondWhy.value ? { second_review_why: secondWhy.value } : {}) });
     await renderLedger(ctx.sandboxRoot);
     const note = review
       ? `recorded as the review of a negative: ${NB.reviewWords(review)}`
-      : strength === "best_candidate"
-        ? `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${t.entry.section} is not established by it, and the finish line says so; the way out is the route that would settle it, or the operator's acceptance of its limits`
-        : undefined;
+      : downgraded.length
+        ? `you attested it established, and it is recorded as a best candidate: ${downgraded.join("; ")}. An established review names at least one alternative explanation you considered and why the evidence rules it out; attest again with answer_review.alternatives [{explanation, why}] once you have weighed one. Until then ${t.entry.section} is not established by it, and the finish line says so`
+        : recorded === "best_candidate"
+          ? `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${t.entry.section} is not established by it, and the finish line says so; the way out is the route that would settle it, or the operator's acceptance of its limits`
+          : undefined;
     if (review) for (const a of t.entry.kind === "answer" ? [t.entry] : negativesResting(t.entry, entries)) reviewed.push(`E-${a.seq}`);
     return { ok: true, line, appended: true, ...(note ? { note } : {}) };
   });
@@ -10697,6 +10774,10 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         const cov = standingCites.filter((e) => e.kind === "coverage");
         if (cov.some((c) => c.coverage === "partial")) notes.push(`its coverage record${cov.length > 1 ? "s are" : " is"} partial (${cov.filter((c) => c.coverage === "partial").map((c) => `E-${c.seq}`).join(", ")}): the report says what was not covered`);
         notes.push(`a material negative is reviewed by another seat before the run may end: an attest on this answer or on ${cov.map((c) => `E-${c.seq}`).join(", ")} with review {detection, reproduced, other_route}; until then it shows as negative (unreviewed)`);
+      }
+      // The confidence the run records: high only on an established answer another seat attested established, naming the alternatives it weighed.
+      if (question && confidence === "high") {
+        notes.push(resultText === "established" ? "confidence high is recorded as medium until another seat attests this answer established, naming the alternatives it weighed and why the evidence rules each out; the report and the metrics show the recorded confidence" : `confidence high is recorded as medium: high is kept only by an established answer, and this one is ${NB.resultWords(resultText)}; the report and the metrics show the recorded confidence`);
       }
       return appendLedgerEntry(ctx, held, entries, { ...candidate, ...(supersedes !== undefined ? { supersedes } : {}) }, notes);
     });

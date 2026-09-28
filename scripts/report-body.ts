@@ -73,6 +73,7 @@ import {
   attestEstablishes,
   citedForQuestion,
   negativeByResult,
+  recordedConfidence,
   type ForgedToolManifest,
   type InputsManifest,
   type LedgerAttestation,
@@ -82,6 +83,7 @@ import {
   type LedgerGate,
   type LedgerMethod,
   type NameRecord,
+  type RecordedConfidence,
 } from "../extensions/protocol.ts";
 import { escapeHtml, markdownToHtml } from "../ui/src/lib/markdown.ts";
 import { answerResult, resultWords, reviewWords as negativeReviewWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
@@ -869,6 +871,8 @@ type EntryState = {
   reviewUnreadable: string | undefined;
   /** The classes of material from outside the original evidence the entry rests on, when it rests on any (docs/adr/0014). */
   external: string[] | null;
+  /** Its confidence as stated and as the run records it (recordedConfidence: a high stands only on an established answer another seat attested established, naming the alternatives it weighed). */
+  confidence: RecordedConfidence;
 };
 
 function stateOf(e: LedgerEntry, run: Run, memo: Map<number, EntryState>): EntryState {
@@ -901,6 +905,7 @@ function stateOf(e: LedgerEntry, run: Run, memo: Map<number, EntryState>): Entry
     grounding: run.grounding[String(e.seq)],
     reviewUnreadable: run.review?.unreadable,
     external: run.contract.external?.entries.has(e.seq) ? (run.contract.external.classes.get(e.seq) ?? []) : null,
+    confidence: recordedConfidence(e, run.attestations),
   };
   memo.set(e.seq, s);
   return s;
@@ -925,7 +930,8 @@ function chipsOf(e: LedgerEntry, s: EntryState): Chip[] {
   if (e.kind === "hypothesis") out.push({ text: `${e.status ?? "open"}: not a finding`, tone: e.status === "refuted" ? "brick" : "none" });
   if (e.basis === "observed") out.push({ text: "observed", tone: "slate" });
   if (e.basis === "inferred") out.push({ text: "inferred", tone: "saffron" });
-  if (e.confidence) out.push({ text: `${e.confidence} confidence`, tone: e.confidence === "high" ? "moss" : e.confidence === "medium" ? "saffron" : "none" });
+  const conf = s.confidence.recorded;
+  if (conf) out.push({ text: `${conf} confidence${s.confidence.stated !== conf ? ` (stated ${s.confidence.stated})` : ""}`, tone: conf === "high" ? "moss" : conf === "medium" ? "saffron" : "none" });
   if (e.inconclusive) out.push({ text: "inconclusive", tone: "saffron" });
   if (interpretationMissing(e)) out.push({ text: "interpretation not recorded", tone: "none" });
   if (e.kind === "finding" || e.kind === "answer" || e.kind === "absence") {
@@ -2225,7 +2231,7 @@ function answerSteps(a: LedgerEntry, s: EntryState, run: Run, memo: Map<number, 
 
   // 3. Why this confidence.
   out.push({ k: "h", level: 4, text: STEPS[2] });
-  out.push({ k: "p", s: a.confidence ? [{ b: `Confidence ${a.confidence}. ` }, a.confidence_why ?? "The author gave no reason."] : ["The author gave no confidence."] });
+  out.push({ k: "p", s: s.confidence.recorded ? [{ b: `Confidence ${s.confidence.recorded}. ` }, ...(s.confidence.stated !== s.confidence.recorded ? [`Its author stated ${s.confidence.stated}; the run records ${s.confidence.recorded}: ${s.confidence.why}. `] : []), a.confidence_why ?? "The author gave no reason."] : ["The author gave no confidence."] });
   out.push({ k: "voice", voice: "computed", label: VOICE_LABEL.computed, s: [groupsSentence(s.groups)] });
   if (s.groups.length) out.push({ k: "list", items: groupItems(s.groups) });
   const rated = standing.filter((e) => e.confidence);
@@ -2417,7 +2423,7 @@ function conclusionsSection(run: Run, memo: Map<number, EntryState>): BodySectio
           ` (${e.kind === "answer" || e.kind === "absence" || e.kind === "limitation" ? basisWords(e, run) : `${KIND_LABEL[e.kind] ?? e.kind}, ${basisWords(e, run)}`})`,
         ]),
         basis.length ? "." : "no entry.",
-        a.confidence ? ` Confidence ${a.confidence}${a.confidence_why ? `: ${a.confidence_why}` : "."}` : "",
+        s.confidence.recorded ? ` Confidence ${s.confidence.recorded}${s.confidence.stated !== s.confidence.recorded ? ` (stated ${s.confidence.stated}; ${s.confidence.why})` : ""}${a.confidence_why ? `: ${a.confidence_why}` : "."}` : "",
       ],
     });
   }
@@ -2746,7 +2752,7 @@ function exhibitBox(e: LedgerEntry, run: Run, memo: Map<number, EntryState>): Bl
   if (e.indicates) rows.push({ label: "Interpretation", voice: "interpretation", s: [e.indicates] });
   else if (interpretationMissing(e)) rows.push({ label: "Interpretation", s: [{ chip: { text: "interpretation not recorded", tone: "none" } }, " this finding was recorded before findings said what they indicate"] });
   if (e.significance) rows.push({ label: "Significance", voice: "opinion", s: [e.significance] });
-  if (e.confidence) rows.push({ label: "Confidence", s: [`${e.confidence}${e.confidence_why ? `: ${e.confidence_why}` : ""}`] });
+  if (e.confidence) rows.push({ label: "Confidence", s: [`${s.confidence.recorded}${s.confidence.stated !== s.confidence.recorded ? ` (stated ${s.confidence.stated}; ${s.confidence.why})` : ""}${e.confidence_why ? `: ${e.confidence_why}` : ""}`] });
   for (const alt of e.alternatives ?? []) rows.push({ label: alt.status === "rejected" ? "Rejected" : "Still open", s: [`${alt.explanation}: ${alt.why}${alt.test_refs?.length ? ` (tested with ${alt.test_refs.join(", ")})` : ""}`] });
   if (e.alternatives_none_why) rows.push({ label: "No alternative", s: [e.alternatives_none_why] });
   if (e.status) rows.push({ label: "Status", s: [e.kind === "hypothesis" ? `${e.status}: a proposition under test, not a finding` : e.status] });
@@ -3158,7 +3164,7 @@ function factsOf(run: Run, memo: Map<number, EntryState>): BodyFacts {
   const questionStatus = run.questions.map((q) => {
     const st = questionStatus_(q, run, memo);
     const a = st.answer;
-    return { id: q.id, label: questionName(q), status: st.status.text, answer: a?.seq ?? null, confidence: a?.confidence ?? null, adopted: a ? adoptedBy(stateOf(a, run, memo)) : false, value: a?.value ?? null };
+    return { id: q.id, label: questionName(q), status: st.status.text, answer: a?.seq ?? null, confidence: a ? stateOf(a, run, memo).confidence.recorded : null, adopted: a ? adoptedBy(stateOf(a, run, memo)) : false, value: a?.value ?? null };
   });
   const summary = standingAnswer(run, "summary");
   const r = run.review;

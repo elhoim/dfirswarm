@@ -286,7 +286,8 @@ test("the Markdown carries the body: sections, answers, chips as code spans, exh
   assert.match(md, /`superseded by E-19`/);
   assert.match(md, /#### E-16 `answer`/);
   assert.match(md, /`0123456789abcdef0123456789abcdef`/);
-  assert.match(md, /- \*\*Confidence:\*\* high: Two independent authoritative records/);
+  // The run records the answer's confidence (recordedConfidence): stated high, it states no result, so medium, and the stated one beside it.
+  assert.match(md, /- \*\*Confidence:\*\* medium \(stated high; high is kept only by an established answer, and this one states no result\): Two independent authoritative records/);
   // Emphasis closes before its trailing space, or a renderer leaves the stars.
   assert.doesNotMatch(md, /\*\*[^*\n]*\s\*\*\S/);
   const c = md.slice(md.indexOf("\n## Appendix C: The swarm's working report"));
@@ -478,7 +479,8 @@ test("the caller's trace grounding reaches the exhibit; the cover's facts are co
   const body = await renderReportBody(FIXTURE, { grounding: { "5": "grounded", "6": "not in the trace" } });
   const { questionStatus, summary, ...counts } = body.facts;
   assert.deepEqual(counts, { questions: 3, answered: 3, hasAnswers: true, entries: 21, era: "answers", draft: true, adopted: 0, signoff: "none" });
-  assert.deepEqual(questionStatus.map((q) => [q.id, q.status, q.answer, q.confidence, q.adopted]), [["1", "answered", 14, "high", false], ["2", "answered", 19, "medium", false], ["3", "answered", 16, "medium", false]]);
+  // The recorded confidence: question 1's answer was stated high and states no result, so the run records medium.
+  assert.deepEqual(questionStatus.map((q) => [q.id, q.status, q.answer, q.confidence, q.adopted]), [["1", "answered", 14, "medium", false], ["2", "answered", 19, "medium", false], ["3", "answered", 16, "medium", false]]);
   assert.deepEqual(summary, { seq: 17, value: "An intruder uploaded a web shell, ran commands through it and archived the web root; no transfer out is recorded in the hour examined.", stands: false });
   assert.match(slice(body.html, "e-6", "e-7"), /chip-saffron">not grounded in the trace</);
   assert.match(slice(body.html, "e-6", "e-7"), /Grounding<\/dt><dd>NOT GROUNDED IN THE TRACE/);

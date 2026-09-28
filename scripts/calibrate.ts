@@ -35,8 +35,11 @@
  *   that would settle it;
  * - the late item: whether the run was given it (by digest), and whether the
  *   answer it settles moved;
- * - confidence calibration: accuracy per stated confidence and a Brier score
- *   (high 0.9, medium 0.7, low 0.4).
+ * - confidence calibration: accuracy per recorded confidence and a Brier score
+ *   (high 0.9, medium 0.7, low 0.4). The recorded confidence is the run's
+ *   (protocol.ts recordedConfidence: high only on an established answer
+ *   another seat attested established naming the alternatives it weighed);
+ *   the stated one is kept beside it.
  *
  * Exit 0 when scored; 2 on a usage error or a refusal.
  */
@@ -44,7 +47,7 @@ import { existsSync, statSync } from "node:fs";
 import { mkdir, readdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { verifyLedgerChain } from "../extensions/protocol.ts";
+import { type LedgerAttestation, type LedgerEntry, recordedConfidence, verifyLedgerChain } from "../extensions/protocol.ts";
 import { patternOf } from "./score.ts";
 
 export const TRUTH_FORMAT = "dfirswarm-calibration-truth/1";
@@ -86,7 +89,11 @@ export type AnswerView = {
   by: string;
   value: string;
   reasoning: string;
+  /** The confidence the run records (recordedConfidence), which the calibration scores. */
   confidence: string | null;
+  /** The confidence its author stated, and why the run records another when it does. */
+  stated_confidence: string | null;
+  confidence_why?: string;
   result: ResultClass;
   result_source: "field" | "register" | "structure" | "wording" | "default";
   cited: number[];
@@ -132,7 +139,8 @@ export type ScoreReport = {
     acquisition: { questions: number; requested: number; gap_named: number };
     late: { questions: number; reflected: number };
     unanswered: number;
-    calibration: { levels: Record<string, { n: number; correct: number }>; brier: number | null; overconfident: number };
+    /** By the recorded confidence; `stated_high_lowered`: answers stated high that the run records medium. */
+    calibration: { levels: Record<string, { n: number; correct: number }>; brier: number | null; overconfident: number; stated_high_lowered: number };
   };
   notes: string[];
 };
@@ -445,9 +453,11 @@ export async function scoreRun(runDirArg: string, truth: Truth, opts: { truthPat
       cited = seqs.map((n) => bySeq.get(n)).filter((x): x is Rec => Boolean(x));
       const r = resultOf(e, cited, register.get(q.id) ?? null);
       const conf = str(e.confidence).toLowerCase();
+      const stated = conf && conf in CONFIDENCE_P ? conf : null;
+      const rc = recordedConfidence({ ...(e as unknown as LedgerEntry), confidence: (stated ?? undefined) as LedgerEntry["confidence"], authors: Array.isArray(e.authors) ? (e.authors as string[]) : [str(e.by)] }, attests as unknown as LedgerAttestation[]);
       answer = {
         seq: e.seq as number, section: str(e.section), by: str(e.by), value: str(e.value), reasoning: str(e.reasoning),
-        confidence: conf && conf in CONFIDENCE_P ? conf : null, result: r.result, result_source: r.source, cited: seqs, entry: e,
+        confidence: rc.recorded, stated_confidence: stated, ...(rc.why ? { confidence_why: rc.why } : {}), result: r.result, result_source: r.source, cited: seqs, entry: e,
       };
     }
     const answerText = answer ? `${answer.value}\n${answer.reasoning}` : "";
@@ -565,7 +575,7 @@ export async function scoreRun(runDirArg: string, truth: Truth, opts: { truthPat
     acquisition: { questions: missingQs.length, requested: missingQs.filter((q) => q.acquisition!.requested).length, gap_named: missingQs.filter((q) => q.acquisition!.gap_named).length },
     late: { questions: lateQs.length, reflected: lateQs.filter((q) => q.correct).length },
     unanswered: scored.filter((q) => !q.answer).length,
-    calibration: { levels, brier: brierN ? Math.round((brierSum / brierN) * 1000) / 1000 : null, overconfident },
+    calibration: { levels, brier: brierN ? Math.round((brierSum / brierN) * 1000) / 1000 : null, overconfident, stated_high_lowered: scored.filter((q) => q.answer?.stated_confidence === "high" && q.answer.confidence !== "high").length },
   };
   return {
     format: "dfirswarm-calibration-score/1",
@@ -630,7 +640,7 @@ export function scoreText(r: ScoreReport, outPath?: string): string {
     `Acquisition:          ${s.acquisition.requested} of ${s.acquisition.questions} missing-evidence questions requested the evidence; ${s.acquisition.gap_named} named the gap`,
     `Late item:            ${s.late.questions ? `${s.late.reflected} of ${s.late.questions} questions it settles answered as it settles them` : "not added: those questions are scored as missing evidence"}`,
     `Unanswered:           ${s.unanswered}`,
-    `Confidence:           ${Object.entries(s.calibration.levels).map(([k, v]) => `${k} ${v.correct}/${v.n}`).join(", ") || "none stated"}; Brier ${s.calibration.brier ?? "-"}; ${s.calibration.overconfident} wrong at high confidence`,
+    `Confidence (recorded): ${Object.entries(s.calibration.levels).map(([k, v]) => `${k} ${v.correct}/${v.n}`).join(", ") || "none stated"}; Brier ${s.calibration.brier ?? "-"}; ${s.calibration.overconfident} wrong at high confidence; ${s.calibration.stated_high_lowered} stated high and recorded medium`,
   );
   if (r.inputs_match.run_files && r.inputs_match.matched < r.inputs_match.expected) lines.push(`Inputs:               ${r.inputs_match.matched} of the case's ${r.inputs_match.expected} files are in the run's manifest`);
   if (r.notes.length) lines.push("", ...r.notes.map((n) => `Note: ${n}`));

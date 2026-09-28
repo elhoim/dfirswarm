@@ -306,7 +306,8 @@ test("the summary and the report say the same of the answers: how many, adopted 
     assert.equal(facts.answered, 3);
     assert.equal(facts.adopted, 1);
     assert.match(text, /^- Answers: 3 of 3 questions answered, 1 adopted by the examiner; not signed off; a draft: no release v1$/m);
-    assert.match(text, /^\| Question 1 \| answered, high confidence \| E-14: The intruder uploaded shell\.php .* \| yes, by the examiner \|$/m);
+    // The confidence the run records: stated high on an answer that states no result, recorded medium.
+    assert.match(text, /^\| Question 1 \| answered, medium confidence \| E-14: The intruder uploaded shell\.php .* \| yes, by the examiner \|$/m);
     assert.match(text, /^\| Question 2 \| answered, medium confidence \| E-19: .* \| no \|$/m);
     assert.match(text, /^Summary \(E-17, no longer standing on its support\): /m);
     assert.match(html, /<div class="k">Questions answered<\/div><div class="v">3 of 3<\/div><div class="s">1 adopted by the examiner<\/div>/);

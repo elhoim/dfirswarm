@@ -401,7 +401,7 @@ test("the finish line: an in-scope arrival makes it not ready, a proposed one do
   assert.equal(ans.entry.section, `question:${q.slice(2)}`, "Q-n is question:n");
   const g2 = await gate();
   assert.deepEqual(g2.defects.map((d) => d.code), ["question_answer"], "a critic has not acted on it yet");
-  const att = await P.attestEntry(a1, { seq: ans.entry.seq, how: "re-read the finding it rests on", strength: "established", answer_review: { reproduced: "re-read the finding from its ref", read: "nothing else", parts: [{ part: "the route", established: true, why: "the finding shows it" }], inference: "the finding is the answer", alternatives: "none", other_family: { checked: false, text: "one family only in this fixture" } } } as never);
+  const att = await P.attestEntry(a1, { seq: ans.entry.seq, how: "re-read the finding it rests on", strength: "established", answer_review: { reproduced: "re-read the finding from its ref", read: "nothing else", parts: [{ part: "the route", established: true, why: "the finding shows it" }], inference: "the finding is the answer", alternatives: [{ explanation: "the archive was copied in from elsewhere", why: "the finding's record names the route" }], other_family: { checked: false, text: "one family only in this fixture" } } } as never);
   assert.ok((att as { ok: boolean }).ok, JSON.stringify(att));
   assert.deepEqual((await gate()).defects, []);
   // Amended after its answer: the answer is stale.
