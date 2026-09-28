@@ -332,7 +332,7 @@ export type Question = {
    * then (its E-<seq> and hash, or none), at the event `seq`. It stands while
    * all of that is still so and no evidence arrived for the question after it.
    */
-  accepted: { at: string; as: AcceptAs; why: string; rev: number; origin: QuestionOrigin; seq?: number; answer?: string | null; answer_hash?: string | null } | null;
+  accepted: { at: string; as: AcceptAs; why: string; rev: number; origin: QuestionOrigin; seq?: number; answer?: string | null; answer_hash?: string | null; ledger_seq?: number } | null;
   /**
    * Evidence that arrived for this question after the kickoff (swarm.sh
    * evidence add, docs/adr/0014): each arrival makes an answer recorded
@@ -726,6 +726,7 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
           seq: e.seq,
           ...("answer" in d ? { answer: (d.answer as string | null) ?? null } : {}),
           ...("answer_hash" in d ? { answer_hash: (d.answer_hash as string | null) ?? null } : {}),
+          ...(typeof d.ledger_seq === "number" ? { ledger_seq: d.ledger_seq } : {}),
         };
         q.last_seq = e.seq;
         break;
@@ -1444,6 +1445,8 @@ export type ActResult = {
   triaged?: string[];
   signed?: { seq: number };
   leading_forms?: string[];
+  /** An acceptance: what the finish line still holds on the question after it (the defects an acceptance never excuses), each in words; empty when nothing. */
+  still_held?: string[];
   /** What the act implies could not be made in its hold of the lock: made at the next act or header. */
   effects_pending?: string;
 };
@@ -1644,9 +1647,23 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
       if (v.answer?.negative && !v.answer.negative.reviewed && q!.materiality === "material") {
         return fail(`${q!.id}'s answer E-${v.answer.seq} is a negative (unreviewed): ${NB.resultWords(v.answer.result)}, and no other seat has reviewed it. An acceptance takes the examination's limits as they stand after review; it never stands in for one. It is accepted once a seat that recorded neither the answer nor its coverage record has attested it with review`);
       }
+      // Taken as the ledger stands now (its head): evidence added before
+      // this is excused by it, never evidence added after (acceptanceExcuses).
+      // The reply says what the finish line still holds on the question.
+      const ledgerSeq = vc.ledger.entries.reduce((m, e) => Math.max(m, e.seq), 0);
+      const SW = await import("./store-sweep.ts");
+      const gate = P.ledgerGate({
+        entries: vc.ledger.entries,
+        attestations: await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]),
+        disputes: vc.ledger.disputes ?? [],
+        sections: [`question:${q!.section}`],
+        bar: () => ({ material: q!.materiality === "material", existence: q!.expects === "existence", completeness: q!.completeness }),
+        sweeps: await SW.readSweeps(sandboxRoot).catch(() => []),
+      });
+      const stillHeld = gate.defects.filter((d) => d.section === `question:${q!.section}` && !P.acceptanceExcuses(d, ledgerSeq)).map((d) => `${d.code}: ${d.what}. Fix: ${d.fix}`);
       return {
-        append: [{ ...base, ev: "accept", q: q!.id, rev: q!.rev, act: p.act, decided: { rev: q!.rev, outcome: "examination_limited", ...(v.answer ? { answer: `E-${v.answer.seq}`, answer_hash: vc.ledger.bySeq.get(v.answer.seq)?.hash ?? null, ...(v.answer.result ? { result: v.answer.result } : {}) } : { answer: null, answer_hash: null }) } }],
-        result: { ok: true, q: q!.id, rev: q!.rev },
+        append: [{ ...base, ev: "accept", q: q!.id, rev: q!.rev, act: p.act, decided: { rev: q!.rev, outcome: "examination_limited", ledger_seq: ledgerSeq, ...(v.answer ? { answer: `E-${v.answer.seq}`, answer_hash: vc.ledger.bySeq.get(v.answer.seq)?.hash ?? null, ...(v.answer.result ? { result: v.answer.result } : {}) } : { answer: null, answer_hash: null }) } }],
+        result: { ok: true, q: q!.id, rev: q!.rev, still_held: stillHeld },
       };
     }
   }

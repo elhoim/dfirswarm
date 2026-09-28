@@ -41,7 +41,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as L from "../extensions/leads.ts";
 import * as Q from "../extensions/questions.ts";
-import type { FinishLineRun } from "../extensions/protocol.ts";
+import { ACCEPTANCE_NEVER_EXCUSES, type FinishLineRun } from "../extensions/protocol.ts";
 import { checkLedgerAnswers } from "./check-answers.ts";
 
 /**
@@ -219,10 +219,11 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
  * completeness claim with no coverage of its areas, a store sweep pending or
  * with hits outside its record, among them), and an answer resting on
  * material the case policy forbids: fixed, never named, and never excused
- * by an acceptance. A partial sweep is excused by one (sweep_partial is not
- * here).
+ * by an acceptance (protocol.ts ACCEPTANCE_NEVER_EXCUSES). A partial sweep is
+ * excused by one, and evidence added before the acceptance too
+ * (acceptanceExcuses); the answers check drops those before this reads it.
  */
-export const NEGATIVE_BAR_CODES: ReadonlySet<string> = new Set(["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "material_use", "evidence_stale", "completeness_uncovered", "sweep_pending", "sweep_hits"]);
+export const NEGATIVE_BAR_CODES: ReadonlySet<string> = ACCEPTANCE_NEVER_EXCUSES;
 
 /**
  * The quick negatives nobody else has attested (a lead closed negative

@@ -252,12 +252,22 @@ evidence that settled it was added late. Five rules follow, each generic
   search alone) whose coverage records were recorded before the addition's
   ledger entry, and those records, whether or not the operator named the
   question. The gate holds each (`evidence_stale`: "new evidence since its
-  coverage (ev-n); re-examine against it"). It clears when the answer cites
-  a coverage record for the question recorded after the addition (at the
-  new inventory revision) that another seat reviewed, or cites the new
-  evidence itself (the addition's entry, or an entry other than a coverage
-  record whose refs, results or jobs name its import: a coverage record
-  counts once it is reviewed). `evidence add` and its board post name the answers
+  coverage (ev-n); re-examine against it"). It clears only when the new
+  evidence was examined for the question and another seat reviewed that
+  examination: the answer cites a coverage record for the question recorded
+  after the addition's entry that names the import among its objects and
+  that another seat attested, or cites an entry other than a coverage
+  record that rests on the import (its refs, results or jobs name it) and
+  that another seat attested. A review made before the evidence came counts
+  for nothing on an answer recorded after it. The Fable review of the
+  batches found the first form of the rule cleared by one unreviewed line
+  and a re-record resting on the old review. The operator's lever is the
+  acceptance: one made after the addition's entry (it records the ledger's
+  head, `ledger_seq`) excuses `evidence_stale` on its question; one made
+  before does not, nor does it excuse evidence added after it, and the
+  acceptance's reply says what the finish line still holds on the question
+  (`still_held`: every defect an acceptance never excuses).
+  `evidence add` and its board post name the answers
   it stales. An established answer is not staled. The order is the
   ledger's (the addition's external entry against the records' seqs), not
   the inventory hash: a catalogue generation moves the hash too. In the

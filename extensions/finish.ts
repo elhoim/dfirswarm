@@ -631,9 +631,15 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
   const sweeps = await import("./store-sweep.ts").then((SW) => SW.readSweeps(sandboxRoot)).catch(() => []);
   const gate = P.ledgerGate({ entries: s.ledger.entries, attestations, disputes, sections, bar: barOf, partial, sweeps });
   const accepted = new Set<string>();
-  for (const q of s.questions?.state.questions.values() ?? []) if (q.accepted && (await import("./questions.ts")).acceptanceStands(q, s.ledger)) accepted.add(`question:${q.section}`);
+  const acceptedAt = new Map<string, number | null>();
+  for (const q of s.questions?.state.questions.values() ?? []) {
+    if (!q.accepted || !(await import("./questions.ts")).acceptanceStands(q, s.ledger)) continue;
+    accepted.add(`question:${q.section}`);
+    acceptedAt.set(`question:${q.section}`, q.accepted.ledger_seq ?? null);
+  }
   for (const d of gate.open) {
-    if (d.section && accepted.has(d.section) && !["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "evidence_stale", "completeness_uncovered", "sweep_pending", "sweep_hits"].includes(d.code)) continue;
+    // What an acceptance excuses (P.acceptanceExcuses): all but the negative bar's defects, a partial sweep, and evidence added before it.
+    if (d.section && accepted.has(d.section) && P.acceptanceExcuses(d, acceptedAt.get(d.section))) continue;
     items.push(d.what);
   }
   // Best candidates, stale answers, and what else would limit the run.

@@ -61,6 +61,7 @@ import { externalLineage } from "./net-broker.ts";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  acceptanceExcuses,
   answerSection,
   attestationAct,
   attestEstablishes,
@@ -386,14 +387,16 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
   const logs = await committedLogHashes(S);
-  // A partial store sweep holds a negative unless the operator accepted the question's limits (its acceptance standing).
-  const acceptedSections = new Set<string>();
+  // What the operator's standing acceptance of a question excuses on it
+  // (acceptanceExcuses): a partial store sweep, and evidence added before
+  // the acceptance. Every other defect of the negative bar still holds.
+  const acceptedAt = new Map<string, number | null>();
   if (register && Q) {
     const L = await import("../extensions/leads.ts");
     const view = L.ledgerView(entries, disputes);
-    for (const q of register.state.questions.values()) if (q.accepted && Q.acceptanceStands(q, view)) acceptedSections.add(`question:${q.section}`);
+    for (const q of register.state.questions.values()) if (q.accepted && Q.acceptanceStands(q, view)) acceptedAt.set(`question:${q.section}`, q.accepted.ledger_seq ?? null);
   }
-  const defects = gate.defects.filter((d) => !(d.code === "sweep_partial" && d.section && acceptedSections.has(d.section)));
+  const defects = gate.defects.filter((d) => !(d.section && acceptedAt.has(d.section) && (d.code === "sweep_partial" || d.code === "evidence_stale") && acceptanceExcuses(d, acceptedAt.get(d.section))));
   for (const section of sections) {
     const a = gate.answers[section];
     const id = sectionAnswersId(section);

@@ -46,7 +46,7 @@ const attested = async (c: { sandboxRoot: string; agentId: string }, input: P.Le
 
 // --- 1. new evidence stales what rests on older coverage ------------------------------------------
 
-test("new evidence stales every standing negative, not-determinable and partial answer whose coverage is older, named or not; an established answer is not; reviewed coverage at the new revision, or an answer citing the new evidence, clears it", async () => {
+test("new evidence stales every standing negative, not-determinable and partial answer whose coverage is older, named or not; an established answer is not; only the new evidence examined and reviewed by another seat clears it: a coverage record naming it, or an entry resting on it, attested", async () => {
   const { S, a0, a1, a2, a3 } = await run();
   await planned(a0, "2");
   await planned(a3, "4");
@@ -94,37 +94,84 @@ test("new evidence stales every standing negative, not-determinable and partial 
     assert.deepEqual(d[0].named_by, [], "fixed, never named");
     assert.equal(r.dispositions[s], undefined, `${s} has no disposition while it is stale`);
   }
-  assert.match(defectsOf(r, "question:2", "evidence_stale")[0].what, new RegExp(`Its coverage record E-${cov2.seq} is bound to an older inventory revision`));
+  assert.match(defectsOf(r, "question:2", "evidence_stale")[0].what, new RegExp(`Its coverage record E-${cov2.seq} was recorded before the addition's entry E-${entry}`));
+  assert.deepEqual(defectsOf(r, "question:2", "evidence_stale")[0].additions, [entry]);
   assert.match(defectsOf(r, "question:2", "evidence_stale")[0].fix, /examine import:ev-0001 for question:2: record kind=coverage with answers=\["2"\]/);
   assert.deepEqual(defectsOf(r, "question:1", "evidence_stale"), []);
   assert.equal(r.dispositions["question:1"], "established");
-  assert.ok(NEGATIVE_BAR_CODES.has("evidence_stale"), "the finish gate never excuses it, not even for an accepted question");
+  assert.ok(NEGATIVE_BAR_CODES.has("evidence_stale"), "an acceptance excuses it only when made after the evidence came (acceptanceExcuses; tested below)");
 
   // Recorded again without examining it: still stale.
   const ans5b = ok(await rec(a1, { kind: "answer", section: "question:5", value: "an administrator, still not named", reasoning: `E-${f5.seq}`, ...HIGH, result: "partial", supersedes: ans5.seq })).entry;
   r = await checkLedgerAnswers(S, sections, ["2"]);
   assert.equal(defectsOf(r, "question:5", "evidence_stale").length, 1, `E-${ans5b.seq} does not cite the new evidence or coverage at the new revision`);
 
-  // Question 2: a coverage record at the new revision, over the new evidence too; stale until another seat reviews it.
-  const cov2b = ok(await rec(a0, coverage("2", ["input:disk.E01", "import:ev-0001/proxy.csv"], [`E-${abs2.seq}`]))).entry;
-  const ans2b = ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk or in the proxy export", reasoning: `E-${cov2b.seq}`, ...A, result: "bounded_negative", supersedes: ans2.seq })).entry;
+  // Question 2: a coverage record after the addition that does not name the new evidence among its objects clears nothing.
+  const cov2n = ok(await rec(a0, coverage("2", ["input:disk.E01"], [`E-${abs2.seq}`], { coverage_actual: "every byte of the disk, searched again" }))).entry;
+  const ans2n = ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk", reasoning: `E-${cov2n.seq}`, ...A, result: "bounded_negative", supersedes: ans2.seq })).entry;
+  await attested(a2, { seq: cov2n.seq, how: "ran the search again over the disk", review: REVIEW });
   r = await checkLedgerAnswers(S, sections, ["2"]);
-  assert.match(defectsOf(r, "question:2", "evidence_stale")[0]?.what ?? "", new RegExp(`E-${cov2b.seq} at the new revision is not reviewed by another seat yet`));
-  await attested(a2, { seq: cov2b.seq, how: "ran the search again over the disk and the export", review: REVIEW });
+  assert.match(defectsOf(r, "question:2", "evidence_stale")[0]?.what ?? "", new RegExp(`E-${cov2n.seq}, recorded after it, does not name import:ev-0001 among its objects`));
+  // One naming it: stale until another seat reviews it.
+  const cov2b = ok(await rec(a0, coverage("2", ["input:disk.E01", "import:ev-0001/proxy.csv"], [`E-${abs2.seq}`]))).entry;
+  const ans2b = ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk or in the proxy export", reasoning: `E-${cov2b.seq}`, ...A, result: "bounded_negative", supersedes: ans2n.seq })).entry;
+  r = await checkLedgerAnswers(S, sections, ["2"]);
+  assert.match(defectsOf(r, "question:2", "evidence_stale")[0]?.what ?? "", new RegExp(`E-${cov2b.seq} examines it and no other seat has reviewed it yet`));
+  await attested(a2, { seq: cov2b.seq, how: "ran the search again over the disk and the export", review: REVIEW, second_review_why: "the export is new" });
   r = await checkLedgerAnswers(S, sections, ["2"]);
   assert.deepEqual(defectsOf(r, "question:2", "evidence_stale"), [], r.lines.join("\n"));
   assert.equal(r.dispositions["question:2"], "bounded_negative");
   assert.equal(P.evidenceStale(ans2b, await P.readLedger(S), await P.readAttestations(S)), null);
 
-  // Question 4: the answer again, citing an entry that rests on the new evidence.
+  // Question 4: the answer again, citing an entry that rests on the new evidence: a one-line finding nobody else looked at clears nothing (the Fable review).
   const f4 = ok(await rec(a3, { kind: "finding", ...F, value: "the export's first line is at 09:58", source: "the proxy export", evidence: "line 2", refs: ["import:ev-0001/proxy.csv"], answers: ["4"] })).entry;
-  ok(await rec(a1, { kind: "answer", section: "question:4", value: "No evidence of when it started was found in the log; the export begins after it", reasoning: `E-${cov4.seq} and E-${f4.seq}`, ...A, result: "not_determinable", supersedes: ans4.seq }));
+  const ans4b = ok(await rec(a1, { kind: "answer", section: "question:4", value: "No evidence of when it started was found in the log; the export begins after it", reasoning: `E-${cov4.seq} and E-${f4.seq}`, ...A, result: "not_determinable", supersedes: ans4.seq })).entry;
+  r = await checkLedgerAnswers(S, sections, ["2"]);
+  assert.match(defectsOf(r, "question:4", "evidence_stale")[0]?.what ?? "", new RegExp(`E-${f4.seq} examines it and no other seat has reviewed it yet`));
+  // Another seat attests the finding: the new evidence is examined and reviewed.
+  await attested(a2, { seq: f4.seq, how: "read the export's second line again from import:ev-0001/proxy.csv", refs: ["import:ev-0001/proxy.csv"] });
   r = await checkLedgerAnswers(S, sections, ["2"]);
   assert.deepEqual(defectsOf(r, "question:4", "evidence_stale"), [], r.lines.join("\n"));
-  assert.equal(r.dispositions["question:4"], "not_determinable");
+  // The review made before the evidence came counts for nothing on the answer recorded after it: reviewed again.
+  assert.deepEqual(defectsOf(r, "question:4", "negative_unreviewed").length, 1, "the old review of E-cov4 predates the addition");
+  await attested(a2, { seq: ans4b.seq, how: "read the log and the export again", review: REVIEW });
+  r = await checkLedgerAnswers(S, sections, ["2"]);
+  assert.equal(r.dispositions["question:4"], "not_determinable", r.lines.join("\n"));
   // Question 5 is still stale; nothing else is.
   assert.deepEqual(r.defects.filter((d) => d.code === "evidence_stale").map((d) => d.section), ["question:5"]);
   assert.equal(P.verifyLedgerChain(await readFile(join(S, P.LEDGER_ENTRIES), "utf8")).ok, true);
+});
+
+const OPERATOR: Q.Actor = { kind: "human", role: "operator", person: "ops@lab", enrolled: false, os_user: "ops", host: "lab", via: "cli", identity: "claimed" };
+
+test("the operator's lever on stale evidence: an acceptance made after the evidence came excuses evidence_stale on its question, one made before does not, and the reply says what the finish line still holds (the Fable review, P2 3a)", async () => {
+  const { S, a0, a1, a2 } = await run();
+  const lead = await planned(a0, "2");
+  const abs = ok(await rec(a0, { kind: "absence", value: "a remote tool", source: "the disk", evidence: "a search", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry;
+  assert.ok((await L.closeLead(a0, lead, { disposition: "negative", ref: `E-${abs.seq}` })).ok);
+  const cov = ok(await rec(a0, coverage("2", ["input:disk.E01"], [`E-${abs.seq}`]))).entry;
+  ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk", reasoning: `E-${cov.seq}`, ...A, result: "bounded_negative" }));
+  await attested(a2, { seq: cov.seq, how: "ran it again", review: REVIEW });
+  // An acceptance made before the evidence came: the evidence stales the answer, and the acceptance does not excuse it.
+  const early = okq(await Q.act(S, OPERATOR, "accept", { q: "Q-2", as: "bounded", why: "the disk is what the case holds", expected_rev: 1 }));
+  assert.deepEqual(early.still_held, [], "nothing else holds it");
+  const first = await admitMaterial(S, { mode: "evidence", path: await lateFile(S, "proxy.csv", "time,host\n09:58,ws\n"), why: "the proxy export", supplied_by: "t", via: "cli" });
+  assert.equal(first.ok, true, String(first.reason ?? ""));
+  let r = await checkLedgerAnswers(S, ["2"], ["2"]);
+  assert.equal(defectsOf(r, "question:2", "evidence_stale").length, 1, "an acceptance from before the evidence excuses nothing of it");
+  // Accepted again after it: excused, and the reply says nothing else holds.
+  const late = okq(await Q.act(S, OPERATOR, "accept", { q: "Q-2", as: "bounded", why: "the export does not bear on the disk's tools", expected_rev: 1 }));
+  assert.deepEqual(late.still_held, []);
+  r = await checkLedgerAnswers(S, ["2"], ["2"]);
+  assert.deepEqual(defectsOf(r, "question:2", "evidence_stale"), [], r.lines.join("\n"));
+  // Evidence added after the acceptance stales it again.
+  const second = await admitMaterial(S, { mode: "evidence", path: await lateFile(S, "dns.log", "09:58 ws query\n"), why: "the DNS log", supplied_by: "t", via: "cli" });
+  assert.equal(second.ok, true, String(second.reason ?? ""));
+  r = await checkLedgerAnswers(S, ["2"], ["2"]);
+  const d = defectsOf(r, "question:2", "evidence_stale");
+  assert.equal(d.length, 1);
+  assert.deepEqual(d[0].additions, [first.entry as number, second.entry as number]);
+  assert.match(d[0].fix, /Or the operator accepts the question's limits after the evidence came \(question accept\)/);
 });
 
 // --- 2. a completeness claim rests on coverage of its areas -------------------------------------
@@ -183,6 +230,12 @@ test("a question asking for every one, all or a complete list is a completeness 
   assert.deepEqual(d[0].named_by, []);
   assert.equal(r.dispositions["question:1"], undefined);
   assert.ok(NEGATIVE_BAR_CODES.has("completeness_uncovered"));
+  // The operator's acceptance is recorded, and its reply says what it does not excuse.
+  const q1lead = [...(await L.leadsSnapshot(S)).state.leads.values()].find((l) => l.answers.includes("1") && !l.closed)!;
+  assert.ok((await L.closeLead(a0, q1lead.id, { disposition: "resolved", ref: `E-${f1.seq}` })).ok);
+  const acc = okq(await Q.act(S, OPERATOR, "accept", { q: "Q-1", as: "bounded", why: "the listing is what the case holds", expected_rev: 1 }));
+  assert.equal(acc.still_held?.length, 1);
+  assert.match(acc.still_held![0], /^completeness_uncovered: answer #\d+ \(question:1\) is established on a question that asks for a complete set/);
 
   // A coverage record that names no areas does not carry the claim, and says so.
   const cov = ok(await rec(a0, coverage("1", ["input:disk.E01"], [`E-${f1.seq}`])));

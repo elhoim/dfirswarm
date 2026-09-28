@@ -9610,6 +9610,7 @@ cmd_question() {
         + (if (.triaged // []) | length > 0 then " In your triage now: \(.triaged | join(", "))." else "" end)
         + (if .signed then " Signed (event \(.signed.seq))." else "" end)
         + (if (.leading_forms // []) | length > 0 then " Leading form flagged for the critic: \(.leading_forms | join(", "))." else "" end)
+        + (if (.still_held // []) | length > 0 then " Accepted; the finish line still holds \(.q) on what an acceptance never excuses: \(.still_held | join(" | "))." elif .still_held then " Nothing else holds \(.q) at the finish line." else "" end)
         + ((.delivered // []) | if type == "array" and length > 0 then " Delivered: " + (map("\(.q) revision \(.rev)" + (if .post then " (post \(.post.thread)#\(.post.id))" else "" end) + (if .offer_to then ", offered to \(.offer_to)\(if .first then " first" else "" end)" else ", offered to the first idle seat" end)) | join("; ")) + "." else "" end)' <<<"$out"
       printf '%s\n' "$out"
       ;;

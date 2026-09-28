@@ -9803,7 +9803,12 @@ export function negativeReview(
 ): { reviewed: boolean; by: string[]; reviews: Array<{ by: string; seq: number; review: NB.NegativeReview }>; stale: Array<{ seq: number; problems: string[] }> } {
   const t = negativeReviewTargets(answer, entries, disputes);
   const targets = new Map<string, number>(t.targets.map((e): [string, number] => [e.hash ?? ledgerHash(e, "genesis"), e.seq]));
-  const reviews = attestations.filter((a) => attestationAct(a) === "attest" && a.review && a.target && targets.has(a.target) && !t.authors.has(a.by)).map((a) => ({ by: a.by, seq: targets.get(a.target!)!, review: a.review! }));
+  // A review made before evidence was added counts for nothing on an answer
+  // recorded after that evidence: it reviewed an examination that had not
+  // seen it (the Fable review of batches 1-3).
+  const added = evidenceAdditions(entries).filter((x) => x.seq < answer.seq).map((x) => Date.parse(x.at)).filter((n) => Number.isFinite(n));
+  const since = added.length ? Math.max(...added) : null;
+  const reviews = attestations.filter((a) => attestationAct(a) === "attest" && a.review && a.target && targets.has(a.target) && !t.authors.has(a.by) && (since === null || Date.parse(a.at) >= since)).map((a) => ({ by: a.by, seq: targets.get(a.target!)!, review: a.review! }));
   return { reviewed: reviews.length > 0, by: [...new Set(reviews.map((r) => r.by))], reviews, stale: t.stale };
 }
 
@@ -10926,6 +10931,8 @@ export type LedgerDefect = {
   what: string;
   fix: string;
   named_by: number[];
+  /** evidence_stale: the ledger seqs of the additions that stale the answer (acceptanceExcuses reads them). */
+  additions?: number[];
 };
 
 export type LedgerGate = {
@@ -10990,7 +10997,7 @@ export function openContradictions(entries: LedgerEntry[]): Array<{ from: number
 }
 
 /** Evidence added after the kickoff, as the ledger holds it (scripts/material.ts applyAddition): its external entry, its import, its inventory revision. */
-export type EvidenceAddition = { seq: number; import: string; inventory_rev: number | null };
+export type EvidenceAddition = { seq: number; import: string; inventory_rev: number | null; at: string };
 
 /** Each standing external entry of class acquired_evidence, in ledger order. */
 export function evidenceAdditions(entries: LedgerEntry[]): EvidenceAddition[] {
@@ -11000,7 +11007,7 @@ export function evidenceAdditions(entries: LedgerEntry[]): EvidenceAddition[] {
     if (e.kind !== "external" || e.source_class !== "acquired_evidence" || replaced.has(e.seq)) continue;
     const imp = typeof e.provenance?.import === "string" ? e.provenance.import : (/^import:([^/]+)/.exec((e.refs ?? [])[0] ?? "")?.[1] ?? "");
     if (!imp) continue;
-    out.push({ seq: e.seq, import: imp, inventory_rev: typeof e.provenance?.inventory_rev === "number" ? e.provenance.inventory_rev : null });
+    out.push({ seq: e.seq, import: imp, inventory_rev: typeof e.provenance?.inventory_rev === "number" ? e.provenance.inventory_rev : null, at: e.at });
   }
   return out;
 }
@@ -11020,18 +11027,20 @@ function namesImport(e: LedgerEntry, id: string): boolean {
  * came late, and its not-determinable answer stood). A standing answer to
  * a question whose result is bounded_negative, not_determinable or partial
  * (or a premise rejected on a search alone) is stale for each addition in
- * the ledger, whether or not the addition named the question, until it
- * cites a coverage record for the question made at the new revision (after
- * the addition) that another seat reviewed, or cites the new evidence itself
- * (the addition's entry, or an entry other than a coverage record whose
- * refs, results or jobs name its import). An answer recorded before the
- * addition can do neither; one
- * recorded again after it without either (on its old coverage, or on none)
- * is stale still. `coverage` lists the records it cites bound to an older
- * revision; `unreviewed` those at the new revision nobody else has reviewed
- * yet. Null when nothing stales it.
+ * the ledger, whether or not the addition named the question, until the new
+ * evidence was examined for it and another seat reviewed that examination:
+ * the answer cites a coverage record for the question recorded after the
+ * addition that names the import among its objects and that another seat
+ * attested (its review), or cites an entry other than a coverage record
+ * that rests on the import (its refs, results or jobs name it) and that
+ * another seat attested. A one-line finding nobody else looked at clears
+ * nothing (the Fable review of batches 1-3). `coverage` lists the records
+ * it cites recorded before the addition's entry; `unnamed` those recorded
+ * after it that do not name the import; `unreviewed` those that name it
+ * and entries resting on it that nobody else has attested yet. Null when
+ * nothing stales it.
  */
-export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attestations: LedgerAttestation[]): { additions: EvidenceAddition[]; coverage: number[]; unreviewed: number[] } | null {
+export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attestations: LedgerAttestation[]): { additions: EvidenceAddition[]; coverage: number[]; unnamed: number[]; unreviewed: number[] } | null {
   if (answer.kind !== "answer" || !answer.section?.startsWith("question:")) return null;
   const additions = evidenceAdditions(entries);
   if (!additions.length) return null;
@@ -11044,24 +11053,50 @@ export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attes
   if (!result || !(EVIDENCE_STALE_RESULTS.has(result) || negativeByResult(result, cited))) return null;
   const cov = cited.filter((c) => c.kind === "coverage");
   const citedAll = [...(answer.support ?? []), ...(answer.limitations ?? [])].map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => Boolean(e) && !replaced.has((e as LedgerEntry).seq));
-  const answerHash = answer.hash ?? ledgerHash(answer, "genesis");
-  const reviewed = (c: LedgerEntry): boolean => {
-    const authors = new Set([c.by, ...c.authors, answer.by, ...answer.authors]);
-    const targets = new Set([c.hash ?? ledgerHash(c, "genesis"), answerHash]);
-    return attestations.some((x) => attestationAct(x) === "attest" && x.target !== undefined && targets.has(x.target) && !authors.has(x.by));
+  // Attested by a seat that recorded neither it nor the answer.
+  const reviewed = (e: LedgerEntry): boolean => {
+    const authors = new Set([e.by, ...e.authors, answer.by, ...answer.authors]);
+    const h = e.hash ?? ledgerHash(e, "genesis");
+    return attestations.some((x) => attestationAct(x) === "attest" && x.target === h && !authors.has(x.by));
   };
+  const namesAmongObjects = (c: LedgerEntry, imp: string) => (c.refs ?? []).some((r) => r === `import:${imp}` || r.startsWith(`import:${imp}/`));
   const stale: EvidenceAddition[] = [];
   const older = new Set<number>();
+  const unnamed = new Set<number>();
   const unreviewed = new Set<number>();
   for (const x of additions) {
-    // A coverage record counts once another seat reviewed it, whatever it names.
-    if (answer.seq > x.seq && citedAll.some((e) => e.seq === x.seq || (e.kind !== "coverage" && namesImport(e, x.import)))) continue;
-    if (cov.some((c) => c.seq > x.seq && reviewed(c))) continue;
+    const covAfter = cov.filter((c) => c.seq > x.seq);
+    if (covAfter.some((c) => namesAmongObjects(c, x.import) && reviewed(c))) continue;
+    const resting = answer.seq > x.seq ? citedAll.filter((e) => e.kind !== "coverage" && e.seq !== x.seq && namesImport(e, x.import)) : [];
+    if (resting.some(reviewed)) continue;
     stale.push(x);
-    for (const c of cov) (c.seq > x.seq ? unreviewed : older).add(c.seq);
+    for (const c of cov) {
+      if (c.seq < x.seq) older.add(c.seq);
+      else if (!namesAmongObjects(c, x.import)) unnamed.add(c.seq);
+      else unreviewed.add(c.seq);
+    }
+    for (const e of resting) unreviewed.add(e.seq);
   }
-  return stale.length ? { additions: stale, coverage: [...older].sort((a, b) => a - b), unreviewed: [...unreviewed].sort((a, b) => a - b) } : null;
+  const sorted = (xs: Set<number>) => [...xs].sort((a, b) => a - b);
+  return stale.length ? { additions: stale, coverage: sorted(older), unnamed: sorted(unnamed), unreviewed: sorted(unreviewed) } : null;
 }
+
+/**
+ * The defects an operator's acceptance of a question excuses on it: a
+ * partial store sweep, and evidence_stale for evidence added at or before
+ * the ledger's head when the acceptance was made (`acceptedAt`, the
+ * acceptance's ledger_seq): the operator took the question's limits
+ * knowing that evidence. Evidence added after it, and every other defect of
+ * the negative bar (ACCEPTANCE_NEVER_EXCUSES), is not excused.
+ */
+export function acceptanceExcuses(d: Pick<LedgerDefect, "code" | "additions">, acceptedAt: number | null | undefined): boolean {
+  if (d.code === "sweep_partial") return true;
+  if (d.code === "evidence_stale") return typeof acceptedAt === "number" && (d.additions ?? []).length > 0 && (d.additions ?? []).every((n) => n <= acceptedAt);
+  return !ACCEPTANCE_NEVER_EXCUSES.has(d.code);
+}
+
+/** The defects an acceptance never excuses (but evidence_stale, as acceptanceExcuses says): the negative bar's, and material the case policy forbids. */
+export const ACCEPTANCE_NEVER_EXCUSES: ReadonlySet<string> = new Set(["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "material_use", "evidence_stale", "completeness_uncovered", "sweep_pending", "sweep_hits"]);
 
 /** Whether a coverage record says what a completeness claim needs: the areas it reached, each named. */
 export function coverageNamesAreas(c: LedgerEntry): boolean {
@@ -11189,12 +11224,15 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
       const st = evidenceStale(a, entries, o.attestations);
       if (st) {
         const imports = [...new Set(st.additions.map((x) => x.import))];
+        const first = st.additions[0]!;
+        const list = (xs: number[]) => xs.map((n) => `E-${n}`).join(", ");
         defects.push({
           code: "evidence_stale",
           section: sec.section,
-          seqs: [a.seq, ...st.coverage, ...st.unreviewed],
-          what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)}: new evidence since its coverage (${st.additions.map((x) => `${x.import}, E-${x.seq}${x.inventory_rev !== null ? `, inventory revision ${x.inventory_rev}` : ""}`).join("; ")}); re-examine against it${st.coverage.length ? `. Its coverage record${st.coverage.length === 1 ? "" : "s"} ${st.coverage.map((n) => `E-${n}`).join(", ")} ${st.coverage.length === 1 ? "is" : "are"} bound to an older inventory revision` : ""}${st.unreviewed.length ? `; ${st.unreviewed.map((n) => `E-${n}`).join(", ")} at the new revision ${st.unreviewed.length === 1 ? "is" : "are"} not reviewed by another seat yet` : ""}`,
-          fix: `examine ${imports.map((i) => `import:${i}`).join(", ")} for ${sec.section}: record kind=coverage with answers=["${id}"] over what the search covers now (the new evidence among its objects, or why it cannot bear on the question), have another seat review it (attest with review), and record the answer again with supersedes=${a.seq} citing it; or record the answer again citing an entry that rests on the new evidence (refs import:<id>/<file>)`,
+          seqs: [a.seq, ...st.coverage, ...st.unnamed, ...st.unreviewed],
+          additions: st.additions.map((x) => x.seq),
+          what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)}: new evidence since its coverage (${st.additions.map((x) => `${x.import}, E-${x.seq}${x.inventory_rev !== null ? `, inventory revision ${x.inventory_rev}` : ""}`).join("; ")}); re-examine against it${st.coverage.length ? `. Its coverage record${st.coverage.length === 1 ? "" : "s"} ${list(st.coverage)} ${st.coverage.length === 1 ? "was" : "were"} recorded before the addition's entry E-${first.seq}` : ""}${st.unnamed.length ? `; ${list(st.unnamed)}, recorded after it, ${st.unnamed.length === 1 ? "does" : "do"} not name ${imports.map((i) => `import:${i}`).join(", ")} among its objects` : ""}${st.unreviewed.length ? `; ${list(st.unreviewed)} ${st.unreviewed.length === 1 ? "examines" : "examine"} it and no other seat has reviewed ${st.unreviewed.length === 1 ? "it" : "them"} yet` : ""}`,
+          fix: `examine ${imports.map((i) => `import:${i}`).join(", ")} for ${sec.section}: record kind=coverage with answers=["${id}"] naming the import (or its files) among its objects, with what the search found there or why it cannot bear on the question; have another seat review it (attest it with review); and record the answer again with supersedes=${a.seq} citing it. An entry resting on the new evidence, cited by the answer, clears it too once another seat has attested it. Or the operator accepts the question's limits after the evidence came (question accept)`,
           named_by: [],
         });
       }
