@@ -89,6 +89,7 @@ import {
 import { answerResult, resultWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
 import { committedLogHashes, resolveRef } from "./evidence-store.ts";
 import { producerIndex } from "./output-hygiene.ts";
+import { LEDGER_SWEEPS, readSweeps, reconcileSweeps, verifySweepChain } from "../extensions/store-sweep.ts";
 
 type Entry = { seq: number; kind: string; refs?: string[]; supersedes?: number; answers?: string[]; completion?: string; reason?: string; status?: string };
 
@@ -349,14 +350,15 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const chain = verifyLedgerChain(text);
   if (!chain.ok) return { ok: false, lines: [`the ledger's chain is broken at line ${chain.broken_at} (${chain.reason}): no answer can rest on it`], outcomes, results, defects: [], withdrawn, external: {}, best_candidate: bestCandidate, dispositions, warnings: [] };
   // The acts are chains of their own: a broken one cannot say who checked what.
-  for (const [rel, verify] of [[LEDGER_ATTESTATIONS, verifyAttestationChain], [LEDGER_DISPUTES, verifyDisputeChain]] as const) {
+  for (const [rel, verify] of [[LEDGER_ATTESTATIONS, verifyAttestationChain], [LEDGER_DISPUTES, verifyDisputeChain], [LEDGER_SWEEPS, verifySweepChain]] as const) {
     const t = await readFile(join(S, rel), "utf8").catch(() => "");
     const v = verify(t);
-    if (!v.ok) return { ok: false, lines: [`${rel}'s chain is broken at line ${v.broken_at} (${v.reason}): the acts on the answers cannot be read`], outcomes, results, defects: [], withdrawn, external: {}, best_candidate: bestCandidate, dispositions, warnings: [] };
+    if (!v.ok) return { ok: false, lines: [`${rel}'s chain is broken at line ${v.broken_at} (${v.reason}): ${rel === LEDGER_SWEEPS ? "what the store sweeps found" : "the acts on the answers"} cannot be read`], outcomes, results, defects: [], withdrawn, external: {}, best_candidate: bestCandidate, dispositions, warnings: [] };
   }
   const entries = await readLedger(S);
   const attestations = await readAttestations(S);
   const disputes = await readDisputes(S);
+  const sweeps = await readSweeps(S);
   const sections: string[] = [];
   for (const w of wanted) {
     const sec = answerSection(w);
@@ -379,12 +381,19 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   // The kept output of a cancelled or stopped job, cited with no word on how
   // it is treated (docs/adr/0016), by whatever ref names those bytes.
   const { producerOf } = await producerIndex(S);
-  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf) });
+  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps });
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
   const logs = await committedLogHashes(S);
-  const defects = [...gate.defects];
+  // A partial store sweep holds a negative unless the operator accepted the question's limits (its acceptance standing).
+  const acceptedSections = new Set<string>();
+  if (register && Q) {
+    const L = await import("../extensions/leads.ts");
+    const view = L.ledgerView(entries, disputes);
+    for (const q of register.state.questions.values()) if (q.accepted && Q.acceptanceStands(q, view)) acceptedSections.add(`question:${q.section}`);
+  }
+  const defects = gate.defects.filter((d) => !(d.code === "sweep_partial" && d.section && acceptedSections.has(d.section)));
   for (const section of sections) {
     const a = gate.answers[section];
     const id = sectionAnswersId(section);
@@ -610,7 +619,7 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   }
   const count = (o: LedgerOutcome) => Object.values(outcomes).filter((x) => x === o).length;
   lines.push(`sections: ${count("answered")} answered, ${count("limited")} examination-limited, ${count("inconclusive")} inconclusive, ${count("unanswered")} unanswered; ${defects.length} defect${defects.length === 1 ? "" : "s"}, ${defects.length - open.length} named by a limitation, ${open.length} open`);
-  if (open.length) lines.push("This check passes once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect: the finish line holds done on it under every stop policy (a question ends on a disposition under the bar, never on a limitation that names it), and the release counts it. The negative bar's defects (coverage_missing, coverage_stale, negative_unreviewed, wording, evidence_stale, completeness_uncovered), an answer resting on material the case policy forbids (material_use) and an entry citing a cancelled or stopped job's output with no word on it (partial_output) are fixed, never named.");
+  if (open.length) lines.push("This check passes once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect: the finish line holds done on it under every stop policy (a question ends on a disposition under the bar, never on a limitation that names it), and the release counts it. The negative bar's defects (coverage_missing, coverage_stale, negative_unreviewed, wording, evidence_stale, completeness_uncovered, and the store sweep's sweep_pending, sweep_hits and sweep_partial), an answer resting on material the case policy forbids (material_use) and an entry citing a cancelled or stopped job's output with no word on it (partial_output) are fixed, never named.");
   return { ok: open.length === 0, lines, outcomes, results, defects, withdrawn, external: externalFlags, best_candidate: bestCandidate, dispositions, warnings };
 }
 
@@ -642,6 +651,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.stderr.write("usage: check-answers.ts [--report <path>] --sections 1,2,3[,summary,narrative] [--existence 2,…] [--sections-in inputs/CASE.md] [--sandbox DIR]\n");
     process.exit(2);
   }
+  // A store sweep lost with the process that began it is run here before the gate is read.
+  if (!report) await reconcileSweeps(resolve(sandbox)).catch(() => 0);
   const r = report ? await checkAnswers(sandbox, report, wanted, existence) : await checkLedgerAnswers(sandbox, wanted, existence);
   process.stdout.write(`${r.lines.join("\n")}\n`);
   // One machine line last, for the harness's finish line: each section's

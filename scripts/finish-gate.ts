@@ -98,6 +98,8 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
   const until = await untilSolved(sandbox);
   try {
     await L.reopenOnLedger(sandbox).catch(() => undefined);
+    // A store sweep lost with the process that began it is run before the gate is read (store-sweep.ts).
+    await import("../extensions/store-sweep.ts").then((SW) => SW.reconcileSweeps(sandbox)).catch(() => 0);
     const snap = await L.leadsSnapshot(sandbox);
     if (!snap.state.chain.ok) {
       return { defects: [], limited: [], questions: [], until_solved: until, error: `leads/leads.jsonl's chain is broken at line ${snap.state.chain.broken_at} (${snap.state.chain.reason}): the register cannot say what is open` };
@@ -213,12 +215,14 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
 }
 
 /**
- * The negative bar's defects (evidence added since a negative's coverage, and
- * a completeness claim with no coverage of its areas, among them), and an
- * answer resting on material the case policy forbids: fixed, never named,
- * and never excused by an acceptance.
+ * The negative bar's defects (evidence added since a negative's coverage, a
+ * completeness claim with no coverage of its areas, a store sweep pending or
+ * with hits outside its record, among them), and an answer resting on
+ * material the case policy forbids: fixed, never named, and never excused
+ * by an acceptance. A partial sweep is excused by one (sweep_partial is not
+ * here).
  */
-export const NEGATIVE_BAR_CODES: ReadonlySet<string> = new Set(["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "material_use", "evidence_stale", "completeness_uncovered"]);
+export const NEGATIVE_BAR_CODES: ReadonlySet<string> = new Set(["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "material_use", "evidence_stale", "completeness_uncovered", "sweep_pending", "sweep_hits"]);
 
 /**
  * The quick negatives nobody else has attested (a lead closed negative

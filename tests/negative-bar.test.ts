@@ -75,6 +75,7 @@ test("a coverage record says every field, is refused on another kind, and a mate
     ["refs", /refs is required on a coverage record/],
     ["answers", /answers is required on a coverage record/],
     ["detection_opportunity", /detection_opportunity is \{trace_expected: yes \| no \| unknown, why\}/],
+    ["looked_for_none_why", /looked_for is required on a coverage record: the literal strings a hit would contain/],
   ] as const) {
     const { [field]: _gone, ...rest } = full as Record<string, unknown>;
     refused(await rec(a0, rest), re);

@@ -86,6 +86,7 @@ import {
   type RecordedConfidence,
 } from "../extensions/protocol.ts";
 import { escapeHtml, markdownToHtml } from "../ui/src/lib/markdown.ts";
+import { readSweeps, sweepOf, sweepWords, type SweepRecord } from "../extensions/store-sweep.ts";
 import { answerResult, resultWords, reviewWords as negativeReviewWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
 import { sectionBars } from "./check-answers.ts";
 import { leadsSnapshot, rankedLeads, viewLead, type LeadEvent, type LeadView, type LeadsSnapshot } from "../extensions/leads.ts";
@@ -356,6 +357,8 @@ type Run = {
   attestations: LedgerAttestation[];
   disputes: LedgerDispute[];
   standingD: LedgerDispute[];
+  /** The store sweeps of the coverage records (ledger/sweeps.jsonl, extensions/store-sweep.ts). */
+  sweeps: SweepRecord[];
   jobs: Map<string, JobRecord>;
   generations: Map<string, string | null>;
   inputs: InputsManifest | null;
@@ -554,7 +557,8 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   const problems = answerProblems(entries, disputes, unqualified);
   const bar = await sectionBars(sandbox).catch(() => (() => ({ material: true, existence: false })) as (id: string) => { material: boolean; existence: boolean });
   const { producerOf } = await (await import("./output-hygiene.ts")).producerIndex(sandbox).catch(() => ({ producerOf: () => null as null }));
-  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf) }) : null;
+  const sweeps = await readSweeps(sandbox).catch(() => [] as SweepRecord[]);
+  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf), sweeps }) : null;
 
   const text = async (rel: string) => (await readFile(join(sandbox, rel), "utf8").catch(() => ""));
   const ledgerChain = verifyLedgerChain(await text("ledger/entries.jsonl"));
@@ -613,6 +617,7 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
     attestations,
     disputes,
     standingD: standingDisputes(disputes),
+    sweeps,
     jobs,
     generations,
     inputs,
@@ -2179,6 +2184,11 @@ function resultBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
         { label: "Alternatives open", s: [c.alternatives_open ?? ""] },
         { label: "Computed by the hub", s: [`coverage ${c.coverage ?? "not computed"}${c.coverage_detail?.why.length ? `: ${c.coverage_detail.why.join("; ")}` : ""}${c.coverage_detail?.jobs.length ? ` (jobs ${c.coverage_detail.jobs.join(", ")})` : ""}`] },
         ...(c.not_examined?.length ? [{ label: "Planned, not examined", s: [c.not_examined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")] }] : []),
+        ...(c.looked_for?.length
+          ? [{ label: "Looked for", s: [c.looked_for.map((t) => `"${t}"`).join(", ")] } as Row, { label: "Store sweep (by the hub)", s: [sweepWords(sweepOf({ hash: entryHash(c) }, run.sweeps), c)] } as Row]
+          : c.looked_for_none_why
+            ? [{ label: "Looked for", s: [`no literal form: ${c.looked_for_none_why}`] } as Row]
+            : []),
       ],
     });
   }
@@ -2540,6 +2550,27 @@ function limitsSection(run: Run, memo: Map<number, EntryState>): BodySection {
     }
   } else blocks.push({ k: "p", s: ["The swarm recorded none. That is not a statement that the examination had no limits."] });
 
+  // The store sweeps (extensions/store-sweep.ts): each negative checked against every output the run held.
+  const swept = run.entries.filter((e) => e.kind === "coverage" && e.looked_for?.length);
+  if (swept.length) {
+    const recs = swept.map((c) => ({ c, sw: sweepOf({ hash: entryHash(c) }, run.sweeps) }));
+    const withHits = recs.filter((x) => x.sw?.hits.length);
+    const released = withHits.filter((x) => {
+      const next = run.replaced.get(x.c.seq);
+      const n = next !== undefined ? run.bySeq.get(next) : undefined;
+      const sw = n ? sweepOf({ hash: entryHash(n) }, run.sweeps) : null;
+      return Boolean(sw && !sw.hits.length && !sw.unsearched.length);
+    });
+    blocks.push({ k: "h", level: 3, text: "Store sweeps" });
+    blocks.push({
+      k: "p",
+      s: [
+        `${plural(swept.length, "coverage record")} named what a hit would contain, and the hub searched every output the run held for it (job outputs and logs, imports, captures, the agents' kept tool outputs): ${recs.filter((x) => x.sw).length} swept, ${recs.filter((x) => !x.sw).length} pending, ${withHits.length} with hits in objects the record did not name, ${recs.filter((x) => x.sw?.unsearched.length).length} partial; ${released.length} of the records with hits were revised to name what the sweep found, and their sweep is clean.`,
+      ],
+    });
+    if (withHits.length) blocks.push({ k: "list", items: withHits.map((x): Span[] => [{ e: x.c.seq }, `: ${sweepWords(x.sw, x.c)}`, run.replaced.has(x.c.seq) ? " (revised)" : ""]) });
+  }
+
   blocks.push({ k: "h", level: 3, text: "Searched and not found" });
   const absences = run.entries.filter((e) => e.kind === "absence");
   blocks.push({ k: "p", s: ["Each is valid only for the stated scope: what was searched, where, and how. Not found by that search is not absent from the evidence."] });
@@ -2637,6 +2668,12 @@ function resolveWords(d: LedgerGate["defects"][number]): string {
       return `the entry recorded again saying how it treats the output of a job that was stopped before its end (what that part still shows, and why), or resting instead on a job that ran to its end. A limitation does not resolve it.`;
     case "evidence_stale":
       return `${where} examined against the evidence added after its search: a new search record that covers it (or says why it cannot bear on the question), checked by another agent, and the answer recorded again on it, or on what the new evidence shows. A limitation does not resolve it.`;
+    case "sweep_pending":
+      return `the hub's search of everything the run holds for what ${where}'s search looked for, run to its end. A limitation does not resolve it.`;
+    case "sweep_hits":
+      return `each object the store sweep found what was looked for in examined, and the search record for ${where} recorded again naming it with what it showed, or the answer revised on what those objects show. A limitation does not resolve it.`;
+    case "sweep_partial":
+      return `the store sweep run again within a larger budget over what it left unsearched, or the question's limits accepted by the operator.`;
     case "completeness_uncovered":
       return `a search record for ${where} that says what was searched and which parts of the stored data it reached (live, deleted, unallocated, slack, secondary copies), and the answer recorded again on it. A question that asks for every item is not answered by the items found alone.`;
     default:

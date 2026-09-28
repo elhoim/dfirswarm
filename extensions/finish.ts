@@ -628,11 +628,12 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
   const hygiene = await import("../scripts/output-hygiene.ts").catch(() => null);
   const { producerOf } = hygiene ? await hygiene.producerIndex(sandboxRoot).catch(() => ({ producerOf: (_ref: string) => null })) : { producerOf: (_ref: string) => null };
   const partial = P.partialOutputCites(s.ledger.entries, producerOf);
-  const gate = P.ledgerGate({ entries: s.ledger.entries, attestations, disputes, sections, bar: barOf, partial });
+  const sweeps = await import("./store-sweep.ts").then((SW) => SW.readSweeps(sandboxRoot)).catch(() => []);
+  const gate = P.ledgerGate({ entries: s.ledger.entries, attestations, disputes, sections, bar: barOf, partial, sweeps });
   const accepted = new Set<string>();
   for (const q of s.questions?.state.questions.values() ?? []) if (q.accepted && (await import("./questions.ts")).acceptanceStands(q, s.ledger)) accepted.add(`question:${q.section}`);
   for (const d of gate.open) {
-    if (d.section && accepted.has(d.section) && !["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "evidence_stale", "completeness_uncovered"].includes(d.code)) continue;
+    if (d.section && accepted.has(d.section) && !["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "evidence_stale", "completeness_uncovered", "sweep_pending", "sweep_hits"].includes(d.code)) continue;
     items.push(d.what);
   }
   // Best candidates, stale answers, and what else would limit the run.

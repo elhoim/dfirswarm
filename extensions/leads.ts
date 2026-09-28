@@ -40,6 +40,7 @@ import { dirname, join, resolve } from "node:path";
 import * as NB from "./negative-bar.ts";
 import * as O from "./offers.ts";
 import * as P from "./protocol.ts";
+import * as SW from "./store-sweep.ts";
 
 // --- the files --------------------------------------------------------------------------------
 
@@ -621,6 +622,8 @@ export type LedgerView = {
   disputed: Set<string>;
   /** The disputes read with it: a negative's review targets are read against them, as the gate reads them. */
   disputes?: P.LedgerDispute[];
+  /** The store sweeps read with it (store-sweep.ts): a negative's review offer says what they found. */
+  sweeps?: SW.SweepRecord[];
 };
 
 export function ledgerView(entries: P.LedgerEntry[], disputes: P.LedgerDispute[]): LedgerView {
@@ -1414,6 +1417,7 @@ export async function leadsSnapshot(sandboxRoot: string): Promise<LeadsSnapshot>
   const entries = await P.readLedger(sandboxRoot).catch(() => [] as P.LedgerEntry[]);
   const disputes = await P.readDisputes(sandboxRoot).catch(() => [] as P.LedgerDispute[]);
   const ledger = ledgerView(entries, disputes);
+  ledger.sweeps = await SW.readSweeps(sandboxRoot).catch(() => [] as SW.SweepRecord[]);
   const goal = await goalQuestions(sandboxRoot);
   const answered = new Set<string>();
   for (const e of entries) {
@@ -2773,7 +2777,20 @@ export function reviewOfferText(key: string, o: O.Offer, snap: LeadsSnapshot): s
     return `${key}${l ? ` ("${l.title}", closed ${l.closed?.disposition ?? "?"} on ${l.closed?.ref ?? "?"})` : ""} is offered to you for its route review, first claim ${until}: its questions are answered now. Take it with offer accept ${key} (${hold}), then say whether the route's limitation still matters with route_review(${key}, material, why); or offer decline ${key} with why. Other seats' reviews of it wait for yours.`;
   }
   const e = snap.ledger.bySeq.get(Number(key.slice(2)));
-  return `${key}${e ? ` (${e.section}, ${NB.resultWords(NB.answerResult(e) ?? "")})` : ""} is offered to you for its review, first claim ${until}. Take it with offer accept ${key} (${hold}), then ${negativeTargetWords(e, snap)} with review {detection, reproduced, other_route} (a negative's review, not answer_review); or offer decline ${key} with why. Other seats' reviews of it wait for yours.`;
+  return `${key}${e ? ` (${e.section}, ${NB.resultWords(NB.answerResult(e) ?? "")})` : ""} is offered to you for its review, first claim ${until}. Take it with offer accept ${key} (${hold}), then ${negativeTargetWords(e, snap)} with review {detection, reproduced, other_route} (a negative's review, not answer_review); or offer decline ${key} with why. Other seats' reviews of it wait for yours.${sweepReviewWords(e, snap)}`;
+}
+
+/**
+ * What a negative's review is asked of the whole store (store-sweep.ts):
+ * the sweeps of the coverage records it rests on, with their hits, and the
+ * ask to check the answer against everything the run holds, not only the
+ * coverage's sources; the review's other_route says what was done with it.
+ */
+function sweepReviewWords(e: P.LedgerEntry | undefined, snap: LeadsSnapshot): string {
+  if (!e) return "";
+  const cov = (e.support ?? []).map((x) => snap.ledger.bySeq.get(x.seq)).filter((c): c is P.LedgerEntry => c?.kind === "coverage" && !snap.ledger.replaced.has(c.seq));
+  const said = cov.map((c) => `E-${c.seq}: ${SW.sweepWords(SW.sweepOf(c, snap.ledger.sweeps ?? []), c)}`);
+  return ` Check the answer against everything the run holds, not only its coverage's sources${said.length ? `: ${said.join(" / ")}` : ""}; say in other_route what you did with the store sweep (each hit examined, or why it does not bear on the question).`;
 }
 
 /**

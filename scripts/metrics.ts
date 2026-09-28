@@ -44,6 +44,7 @@ import * as L from "../extensions/leads.ts";
 import * as Q from "../extensions/questions.ts";
 import * as R from "../extensions/requests.ts";
 import * as NB from "../extensions/negative-bar.ts";
+import * as SW from "../extensions/store-sweep.ts";
 import { readNetState, grantStatus } from "./net-grants.ts";
 import { storePaths } from "./evidence-store.ts";
 import { questionCost, roundParts } from "./question-cost.ts";
@@ -139,6 +140,25 @@ export type RunMetrics = {
    * alternatives it weighed), and each answer the run records lower, with
    * why. Words the harness writes, never the answer's own.
    */
+  /**
+   * The store sweeps (extensions/store-sweep.ts): the coverage records that
+   * named what a hit would contain, how their sweeps ended (pending: none
+   * recorded yet), the hit objects outside their records, the standing
+   * negatives in scope a sweep holds now (by code), and the records with
+   * hits that a revision naming what the sweep found released (its own
+   * sweep clean).
+   */
+  sweeps: {
+    recorded: boolean;
+    records: number;
+    pending: number;
+    clean: number;
+    with_hits: number;
+    partial: number;
+    hit_objects: number;
+    held: Array<{ section: string; id: string | null; answer: string; code: string; coverage: string }>;
+    released: number;
+  };
   confidence: {
     recorded: boolean;
     answers: number;
@@ -279,6 +299,7 @@ type Context = {
   entries: P.LedgerEntry[];
   attestations: P.LedgerAttestation[];
   disputes: P.LedgerDispute[];
+  sweeps: SW.SweepRecord[];
   replaced: Map<number, number>;
   leadEvents: L.LeadEvent[];
   leads: L.LeadsState;
@@ -294,6 +315,7 @@ async function readContext(S: string): Promise<Context> {
   const entries = await P.readLedger(S).catch(() => [] as P.LedgerEntry[]);
   const attestations = await P.readAttestations(S).catch(() => [] as P.LedgerAttestation[]);
   const disputes = await P.readDisputes(S).catch(() => [] as P.LedgerDispute[]);
+  const sweeps = await SW.readSweeps(S).catch(() => [] as SW.SweepRecord[]);
   const { events: leadEvents, text: leadText } = await L.readLeadEvents(S);
   const chain = L.verifyLeadChain(leadText);
   if (!chain.ok) notes.push(`the lead register's chain does not verify (${chain.reason} at line ${chain.broken_at}): read as written`);
@@ -317,7 +339,7 @@ async function readContext(S: string): Promise<Context> {
     questions: existsSync(join(S, Q.QUESTIONS_LOG)),
     network: existsSync(join(S, "network", "grants.jsonl")) || existsSync(join(S, "network", "fetches.jsonl")),
   };
-  return { S, entries, attestations, disputes, replaced: P.supersededBy(entries), leadEvents, leads, qs, journal, evidenceTimes, have, notes };
+  return { S, entries, attestations, disputes, sweeps, replaced: P.supersededBy(entries), leadEvents, leads, qs, journal, evidenceTimes, have, notes };
 }
 
 /**
@@ -378,6 +400,37 @@ function standingAnswers(c: Context): Map<string, P.LedgerEntry> {
 }
 
 // --- the metrics ---------------------------------------------------------------------------------
+
+function sweepsOf(c: Context, scope: RunMetrics["questions"]): RunMetrics["sweeps"] {
+  const live = new Set(scope.in_scope.map((q) => q.section));
+  const records = c.entries.filter((e) => e.kind === "coverage" && e.looked_for?.length);
+  const of = (e: P.LedgerEntry) => SW.sweepOf({ hash: e.hash ?? P.ledgerHash(e, "genesis") }, c.sweeps);
+  const states = records.map((e) => of(e));
+  const held: RunMetrics["sweeps"]["held"] = [];
+  for (const [section, e] of standingAnswers(c)) {
+    if (!live.has(section)) continue;
+    for (const h of P.sweepHolds(e, c.entries, c.sweeps, c.disputes, isMaterial(section, c))) held.push({ section, id: c.qs?.bySection.get(section)?.id ?? null, answer: `E-${e.seq}`, code: h.code, coverage: `E-${h.coverage.seq}` });
+  }
+  let released = 0;
+  for (const e of records) {
+    if (!of(e)?.hits.length) continue;
+    const next = c.replaced.get(e.seq);
+    const n = next !== undefined ? c.entries.find((x) => x.seq === next) : undefined;
+    const sw = n ? of(n) : null;
+    if (sw && !sw.hits.length && !sw.unsearched.length) released += 1;
+  }
+  return {
+    recorded: c.have.ledger,
+    records: records.length,
+    pending: states.filter((x) => !x).length,
+    clean: states.filter((x) => x?.state === "clean").length,
+    with_hits: states.filter((x) => x?.hits.length).length,
+    partial: states.filter((x) => x?.unsearched.length).length,
+    hit_objects: states.reduce((n, x) => n + (x?.hits.length ?? 0), 0),
+    held,
+    released,
+  };
+}
 
 function confidenceOf(c: Context, scope: RunMetrics["questions"]): RunMetrics["confidence"] {
   const live = new Set(scope.in_scope.map((q) => q.section));
@@ -874,6 +927,7 @@ export async function measureRun(runDirArg: string, o: { now?: number } = {}): P
     registers,
     questions: scope,
     ...nc,
+    sweeps: sweepsOf(c, scope),
     confidence: confidenceOf(c, scope),
     offers: off,
     done: doneCalls(events, c.have.trace && !unreadable),
@@ -1038,6 +1092,7 @@ export function metricsText(m: RunMetrics): string {
     ["Unreviewed negatives", neg.recorded ? `${neg.unreviewed_material.length} material (${list(neg.unreviewed_material.map((x) => `${qname(x)} ${x.answer}`))}), ${neg.unreviewed_background.length} background` : absent(LEDGER)],
     ["Coverage records", cov.recorded ? `${cov.records} standing: ${cov.complete} complete, ${cov.partial} partial, ${cov.not_computed} not computed, ${cov.stale.length} stale (a result no longer stands: ${list(cov.stale.map((x) => `${x.record} ${x.results.map((y) => `${y.result} ${y.code}`).join(" ")}`))}); ${cov.reviewed} reviewed by another seat as the gate counts it (${cov.reviewed_on_record} on the record, ${cov.reviewed_through_answer} through the negative answer resting on it)` : absent(LEDGER)],
     ["Negatives on partial coverage", cov.recorded ? `${cov.negatives_on_partial.length} (${list(cov.negatives_on_partial.map((x) => `${qname(x)} ${x.answer}`))}); ${cov.negatives_without_coverage.length} cite no coverage record` : absent(LEDGER)],
+    ["Store sweeps", m.sweeps.recorded ? `${m.sweeps.records} coverage record(s) named what a hit would contain: ${m.sweeps.clean} clean, ${m.sweeps.with_hits} with hits outside the record (${m.sweeps.hit_objects} hit(s)), ${m.sweeps.partial} partial, ${m.sweeps.pending} pending; ${m.sweeps.held.length} negative hold(s) now (${list(m.sweeps.held.map((x) => `${qname(x)} ${x.answer} ${x.code} on ${x.coverage}`))}); ${m.sweeps.released} record(s) with hits released by a revision whose sweep is clean` : absent(LEDGER)],
     ["Confidence", m.confidence.recorded ? `${m.confidence.answers} standing answer(s) in scope, recorded: high ${m.confidence.recorded_levels.high}, medium ${m.confidence.recorded_levels.medium}, low ${m.confidence.recorded_levels.low}, none ${m.confidence.recorded_levels.none}; stated high ${m.confidence.stated.high}; ${m.confidence.lowered.length} recorded lower than stated${m.confidence.lowered.length ? ` (${list(m.confidence.lowered.map((x) => `${qname(x)} ${x.answer}: ${x.why}`))})` : ""}` : absent(LEDGER)],
     ["Offers (leads)", o.recorded ? `${o.leads.made} made: ${o.leads.accepted} accepted, ${o.leads.declined} declined, ${o.leads.taken_by_another} taken by another seat, ${o.leads.lapsed} lapsed, ${o.leads.open} with no outcome` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Offers (questions)", o.recorded ? `${o.questions.made} made: ${o.questions.accepted} accepted, ${o.questions.declined} declined, ${o.questions.not_taken_up} not taken up` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],

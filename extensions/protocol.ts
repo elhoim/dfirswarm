@@ -44,6 +44,7 @@ import { basename, dirname, join, posix, relative, resolve, sep } from "node:pat
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import * as NB from "./negative-bar.ts";
+import type { SweepRecord } from "./store-sweep.ts";
 
 /**
  * Claims are short leases, renewed by re-claiming: make the edit, release,
@@ -7659,6 +7660,11 @@ export type LedgerEntry = {
   acquisition_ask?: string;
   /** A coverage record behind a not-determinable answer: why no acquisition ask was opened (no source outside the evidence would settle it, say). */
   acquisition_none_why?: string;
+  /** A coverage record: the literal strings a hit would contain were the answer in the evidence; the hub sweeps every output the run holds for them (store-sweep.ts). */
+  looked_for?: string[];
+  /** A coverage record, in place of looked_for: why no literal form exists. */
+  looked_for_none_why?: string;
+  /** An answer that moves its question from a positive result (established, partial) to a negative one: what undermines the earlier chain (entries E-<seq> or objects) and why. */
   /** A coverage record, written by the hub: whether the jobs behind it were given every object it names (negative-bar.ts). */
   coverage?: "complete" | "partial";
   coverage_detail?: { units: NB.CoverageUnit[]; jobs: string[]; why: string[] };
@@ -7779,6 +7785,8 @@ function coverageFields(e: LedgerEntry): Record<string, unknown> {
     ...(e.areas ? { areas: canonicalValue(e.areas) } : {}),
     ...(e.acquisition_ask ? { acquisition_ask: e.acquisition_ask } : {}),
     ...(e.acquisition_none_why ? { acquisition_none_why: e.acquisition_none_why } : {}),
+    ...(e.looked_for?.length ? { looked_for: e.looked_for } : {}),
+    ...(e.looked_for_none_why ? { looked_for_none_why: e.looked_for_none_why } : {}),
     ...(e.coverage ? { coverage: e.coverage } : {}),
     ...(e.coverage_detail ? { coverage_detail: canonicalValue(e.coverage_detail) } : {}),
     ...(e.not_examined?.length ? { not_examined: e.not_examined.map((r) => ({ source: r.source, method: r.method, why: r.why })) } : {}),
@@ -7950,6 +7958,11 @@ export type LedgerInput = {
   acquisition_ask?: string;
   /** A coverage record behind a not-determinable answer: why no acquisition ask was opened. */
   acquisition_none_why?: string;
+  /** A coverage record: the literal strings a hit would contain (names, identifiers, addresses, keywords), at least one. */
+  looked_for?: string[] | string;
+  /** A coverage record, in place of looked_for: why no literal form exists. */
+  looked_for_none_why?: string;
+  /** An answer from a positive result to a negative one: {evidence: [E-<seq> or refs], why}. */
 };
 
 function listOf(v: string[] | string | undefined): string[] {
@@ -8065,7 +8078,7 @@ async function ledgerV3Input(
 const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why", "asserts_absence", "question_rev", "material"] as const;
 const FINDING_ONLY_FIELDS = ["indicates", "alternatives", "alternatives_none_why", "significance"] as const;
 /** The fields only a coverage record takes. */
-const COVERAGE_ONLY_FIELDS = ["proposition", "inventory_rev", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures", "result_refs", "result_bound", "detection_opportunity", "areas", "acquisition_ask", "acquisition_none_why"] as const;
+const COVERAGE_ONLY_FIELDS = ["proposition", "inventory_rev", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures", "result_refs", "result_bound", "detection_opportunity", "areas", "acquisition_ask", "acquisition_none_why", "looked_for", "looked_for_none_why"] as const;
 
 function given(v: unknown): boolean {
   if (v === undefined || v === null) return false;
@@ -9061,10 +9074,13 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   if (coverages.length) {
     // What each negative was searched over, what the hub found the jobs were given, and who reviewed it.
     lines.push("", "## Coverage records", "");
+    const SW = await import("./store-sweep.ts");
+    const sweeps = await SW.readSweeps(sandboxRoot).catch(() => [] as SweepRecord[]);
     for (const e of coverages) {
       const neg = negativeReview(e, all, allAttestations);
+      const looked = e.looked_for?.length ? ` — looked for: ${e.looked_for.map((t) => `"${mdCell(t)}"`).join(", ")}; ${mdCell(SW.sweepWords(SW.sweepOf({ hash: e.hash ?? ledgerHash(e, "genesis") }, sweeps), e))}` : e.looked_for_none_why ? ` — no literal form to look for: ${e.looked_for_none_why}` : "";
       lines.push(
-        `- **#${e.seq}** for ${(e.answers ?? []).map((a) => `question:${a}`).join(", ")}: proposition: ${e.value}${mark(e)} — objects: ${(e.refs ?? []).map((r) => `\`${r}\``).join(", ")} — time range: ${e.time_range ?? ""} — method: ${e.search_method ?? ""} (settings: ${e.settings ?? ""}) — covered: ${e.coverage_actual ?? ""} — skipped: ${e.skipped ?? ""} — failures: ${e.failures ?? ""} — results: ${(e.result_refs ?? []).join(", ")} — alternatives: ${e.alternatives_open ?? ""} — detection opportunity: trace expected ${e.detection_opportunity?.trace_expected ?? "?"}, ${e.detection_opportunity?.why ?? ""} — inventory ${e.inventory_rev ?? "?"} — **coverage ${e.coverage ?? "not computed"}**${e.coverage_detail?.why.length ? ` (${e.coverage_detail.why.join("; ")})` : ""}${e.not_examined?.length ? ` — planned routes not examined: ${e.not_examined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}` : ""} — ${neg.reviewed ? `reviewed by ${neg.by.join(", ")}: ${neg.reviews.map((x) => NB.reviewWords(x.review)).join(" / ")}` : "**unreviewed**"} — by ${e.authors.join(", ")}`,
+        `- **#${e.seq}** for ${(e.answers ?? []).map((a) => `question:${a}`).join(", ")}: proposition: ${e.value}${mark(e)} — objects: ${(e.refs ?? []).map((r) => `\`${r}\``).join(", ")} — time range: ${e.time_range ?? ""} — method: ${e.search_method ?? ""} (settings: ${e.settings ?? ""}) — covered: ${e.coverage_actual ?? ""} — skipped: ${e.skipped ?? ""} — failures: ${e.failures ?? ""} — results: ${(e.result_refs ?? []).join(", ")} — alternatives: ${e.alternatives_open ?? ""} — detection opportunity: trace expected ${e.detection_opportunity?.trace_expected ?? "?"}, ${e.detection_opportunity?.why ?? ""} — inventory ${e.inventory_rev ?? "?"} — **coverage ${e.coverage ?? "not computed"}**${e.coverage_detail?.why.length ? ` (${e.coverage_detail.why.join("; ")})` : ""}${e.not_examined?.length ? ` — planned routes not examined: ${e.not_examined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}` : ""}${looked} — ${neg.reviewed ? `reviewed by ${neg.by.join(", ")}: ${neg.reviews.map((x) => NB.reviewWords(x.review)).join(" / ")}` : "**unreviewed**"} — by ${e.authors.join(", ")}`,
       );
     }
   }
@@ -10340,6 +10356,25 @@ async function recordCoverage(ctx: SwarmContext, input: LedgerInput): Promise<Le
     if (!req) return { ok: false, reason: `acquisition_ask ${acquisitionAsk} is not a request of this run: open it with lead_close needs_operator and ask {kind: acquisition, source, where, expected_value, urgency}` };
     if (req.kind !== "acquisition") return { ok: false, reason: `acquisition_ask ${acquisitionAsk} is a ${req.kind} request, not an acquisition` };
   }
+  // What a hit would contain, were the answer in the evidence: the hub
+  // sweeps every output the run holds for it (store-sweep.ts). Or why no
+  // literal form exists.
+  const SW = await import("./store-sweep.ts");
+  const lookedRaw = raw.looked_for;
+  const lookedList = (Array.isArray(lookedRaw) ? lookedRaw : given(lookedRaw) ? [lookedRaw] : []).map((t) => String(t ?? "").trim());
+  const lookedNone = text("looked_for_none_why", input.looked_for_none_why, false);
+  if (!lookedNone.ok) return lookedNone;
+  if (lookedList.length && lookedNone.value) return { ok: false, reason: "looked_for names the strings a hit would contain, looked_for_none_why says why there are none: give one" };
+  if (!lookedList.length && !lookedNone.value) {
+    return { ok: false, reason: `looked_for is required on a coverage record: the literal strings a hit would contain if the answer were in the evidence (names, identifiers, addresses, keywords), at least one, each ${SW.SWEEP_TERM_MIN} to ${SW.SWEEP_TERM_MAX} characters; the hub searches every output the run already holds for them (job outputs, imports, tool-output/), not only the objects named here. When no literal form exists, say why in looked_for_none_why` };
+  }
+  const lookedFor: string[] = [];
+  for (const t of lookedList) {
+    if (t.length < SW.SWEEP_TERM_MIN) return { ok: false, reason: `looked_for ${JSON.stringify(t)} is shorter than ${SW.SWEEP_TERM_MIN} characters: a string that short matches everything; name what a hit would contain` };
+    if (t.length > SW.SWEEP_TERM_MAX) return { ok: false, reason: `a looked_for string is over ${SW.SWEEP_TERM_MAX} characters: name the distinctive part a hit would contain; nothing is cut, so a longer one is refused` };
+    if (!lookedFor.some((x) => x.toLowerCase() === t.toLowerCase())) lookedFor.push(t);
+  }
+  if (lookedFor.length > SW.SWEEP_MAX_TERMS) return { ok: false, reason: `looked_for names more than ${SW.SWEEP_MAX_TERMS} strings: keep the ones a hit would contain` };
   const source = boundedText("source", input.source, LEDGER_SOURCE_MAX_CHARS);
   if (!source.ok) return source;
   const evidence = boundedText("evidence", input.evidence, LEDGER_EVIDENCE_MAX_CHARS);
@@ -10388,7 +10423,7 @@ async function recordCoverage(ctx: SwarmContext, input: LedgerInput): Promise<Le
   const L = await import("./leads.ts");
   const leads = await L.leadsSnapshot(ctx.sandboxRoot);
   const method2 = await ledgerMethods(ctx.sandboxRoot, objects);
-  return withTableLock(ctx.sandboxRoot, async (held) => {
+  const recorded = await withTableLock(ctx.sandboxRoot, async (held): Promise<LedgerResult> => {
     const entries = await readLedger(ctx.sandboxRoot);
     const bySeq = new Map(entries.map((e) => [e.seq, e]));
     const replaced = supersededBy(entries);
@@ -10443,6 +10478,8 @@ async function recordCoverage(ctx: SwarmContext, input: LedgerInput): Promise<Le
       ...(areas ? { areas } : {}),
       ...(acquisitionAsk ? { acquisition_ask: acquisitionAsk } : {}),
       ...(noAsk.value ? { acquisition_none_why: noAsk.value } : {}),
+      ...(lookedFor.length ? { looked_for: lookedFor } : {}),
+      ...(lookedNone.value ? { looked_for_none_why: lookedNone.value } : {}),
       coverage: cov.coverage,
       coverage_detail: { units: cov.units, jobs: cov.jobs, why: cov.why },
       ...(notExamined.length ? { not_examined: notExamined } : {}),
@@ -10464,6 +10501,15 @@ async function recordCoverage(ctx: SwarmContext, input: LedgerInput): Promise<Le
     }
     return appendLedgerEntry(ctx, held, entries, { ...candidate, ...(supersedes !== undefined ? { supersedes } : {}) }, notes);
   });
+  // The store sweep, begun now and recorded when it ends (ledger/sweeps.jsonl):
+  // the record stands at once, and a negative resting on it waits for the
+  // sweep as it waits for a review.
+  if (recorded.ok && !recorded.merged && recorded.entry.looked_for?.length) {
+    void SW.startSweep(ctx.sandboxRoot, recorded.entry);
+    const said = `the hub now searches every output the run holds (job outputs and logs, imports, captures, tool-output/) for ${recorded.entry.looked_for.map((t) => `"${t}"`).join(", ")}, in UTF-8 and UTF-16LE: a negative resting on this record waits for the sweep, and a hit in an object it does not name holds it until the record is revised to name that object (with what it showed) or the answer is revised`;
+    return { ...recorded, note: recorded.note ? `${recorded.note}; ${said}` : said };
+  }
+  return recorded;
 }
 
 /** Record an answer (recordEntry with kind=answer): its checks need the ledger, so they run under the lock. */
@@ -10808,7 +10854,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
  * the bar, never on a limitation that names it; the release counts it.
  */
 export type LedgerDefect = {
-  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use" | "partial_output" | "evidence_stale" | "completeness_uncovered";
+  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use" | "partial_output" | "evidence_stale" | "completeness_uncovered" | "sweep_pending" | "sweep_hits" | "sweep_partial";
   section?: string;
   seqs: number[];
   what: string;
@@ -10956,6 +11002,36 @@ export function coverageNamesAreas(c: LedgerEntry): boolean {
   return Boolean(c.areas && NB.COVERAGE_AREAS.every((a) => c.areas?.[a]));
 }
 
+/**
+ * What a negative's store sweeps hold (store-sweep.ts): each standing
+ * coverage record it cites for its question that names looked_for, whose
+ * sweep is pending (no line yet), found its strings in objects the record
+ * does not name (hits), or was left partial by its budget (unsearched).
+ * For a negative the bar holds, a partial answer on a material question,
+ * and an answer that says the event did not happen; empty for any other.
+ */
+export function sweepHolds(answer: LedgerEntry, entries: LedgerEntry[], sweeps: readonly SweepRecord[], disputes: LedgerDispute[] = [], material = true): Array<{ code: "sweep_pending" | "sweep_hits" | "sweep_partial"; coverage: LedgerEntry; sweep: SweepRecord | null }> {
+  if (answer.kind !== "answer" || !answer.section?.startsWith("question:")) return [];
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  const id = sectionAnswersId(answer.section);
+  const result = NB.answerResult(answer);
+  const cited = citedForQuestion(answer, bySeq, replaced, id);
+  if (!result || !(negativeByResult(result, cited) || (result === "partial" && material) || answer.asserts_absence === true)) return [];
+  const out: Array<{ code: "sweep_pending" | "sweep_hits" | "sweep_partial"; coverage: LedgerEntry; sweep: SweepRecord | null }> = [];
+  for (const c of cited) {
+    if (c.kind !== "coverage" || !c.looked_for?.length || coverageProblems(c, entries, disputes).length) continue;
+    const h = c.hash ?? ledgerHash(c, "genesis");
+    const sw = sweeps.filter((x) => x.target === h).at(-1) ?? null;
+    if (!sw) out.push({ code: "sweep_pending", coverage: c, sweep: null });
+    else {
+      if (sw.hits.length) out.push({ code: "sweep_hits", coverage: c, sweep: sw });
+      if (sw.unsearched.length) out.push({ code: "sweep_partial", coverage: c, sweep: sw });
+    }
+  }
+  return out;
+}
+
 /** A warning the gate says and does not hold on: shown with the answers check, counted in the finish line's note. */
 export type LedgerWarning = { code: "no_acquisition_ask"; section: string; seqs: number[]; what: string; fix: string };
 
@@ -10965,7 +11041,7 @@ export type LedgerWarning = { code: "no_acquisition_ask"; section: string; seqs:
  * the contradictions left open. Pure over what was read: the caller reads
  * the files (and which entries rest on a failed job) and verifies the chains.
  */
-export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>> }): LedgerGate {
+export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[] }): LedgerGate {
   const { entries } = o;
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
@@ -11072,6 +11148,40 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
           fix: `record kind=coverage with answers=["${id}"]: the objects searched, how, and areas {${NB.COVERAGE_AREAS.join(", ")}} (each searched, skipped or not_applicable; what was skipped, and why, in skipped), then record the answer again with supersedes=${a.seq} citing it`,
           named_by: [],
         });
+      }
+    }
+    // The store sweep (store-sweep.ts): a negative is checked against every
+    // output the run holds, not only its coverage's sources. Read only where
+    // the caller read the sweeps. Pending holds as an unreviewed negative
+    // does; a hit in an object the record does not name holds until the
+    // record is revised to name it, or the answer is; a partial sweep holds
+    // until the operator accepts the question's limits.
+    if (bar && result && o.sweeps) {
+      for (const hold of sweepHolds(a, entries, o.sweeps, o.disputes, bar.material)) {
+        const c = hold.coverage;
+        const sw = hold.sweep;
+        if (hold.code === "sweep_pending") {
+          defects.push({ code: "sweep_pending", section: sec.section, seqs: [a.seq, c.seq], what: `answer #${a.seq} (${sec.section}) rests on coverage record E-${c.seq}, whose store sweep for ${c.looked_for!.map((t) => `"${t}"`).join(", ")} has not finished (pending)`, fix: "wait for the sweep: the hub runs it when the record is written and records it in ledger/sweeps.jsonl (the finish line runs one lost with its process); then examine what it found", named_by: [] });
+        } else if (hold.code === "sweep_hits") {
+          const words = sw!.hits.map((h) => `"${h.term}" in ${h.ref}${h.also?.length ? ` (also ${h.also.join(", ")})` : ""} (${h.count} time${h.count === 1 ? "" : "s"}, first at byte ${h.first_offset}${h.encodings.includes("utf-16le") ? `, ${h.encodings.join(" and ")}` : ""})`);
+          defects.push({
+            code: "sweep_hits",
+            section: sec.section,
+            seqs: [a.seq, c.seq],
+            what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)}, and the store sweep for coverage record E-${c.seq} found what it looked for in objects the record does not name: ${words.join("; ")}`,
+            fix: `examine each object the sweep names: record the coverage again with supersedes=${c.seq} naming each in refs, with what it showed (coverage_actual, result_refs), and the answer again with supersedes=${a.seq} citing it; or record the answer again on what those objects show`,
+            named_by: [],
+          });
+        } else {
+          defects.push({
+            code: "sweep_partial",
+            section: sec.section,
+            seqs: [a.seq, c.seq],
+            what: `answer #${a.seq} (${sec.section}) rests on coverage record E-${c.seq}, whose store sweep is partial: ${sw!.searched.objects} object(s) searched, not searched: ${sw!.unsearched.map((u) => `${u.ref} (${u.why})`).join("; ")}`,
+            fix: `a partial sweep is not a clean one: record the coverage again with supersedes=${c.seq} (its sweep runs again; SWARM_SWEEP_MAX_BYTES and SWARM_SWEEP_MAX_SEC set its budget), or the operator accepts the question's limits`,
+            named_by: [],
+          });
+        }
       }
     }
     // A question not determinable for want of a source: its coverage names

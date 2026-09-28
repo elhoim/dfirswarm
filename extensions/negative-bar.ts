@@ -510,7 +510,7 @@ export type NegativeReview = { detection: ReviewCheck; reproduced: ReviewCheck; 
 export const REVIEW_CHECKS: ReadonlyArray<{ key: keyof NegativeReview; words: string }> = [
   { key: "detection", words: "challenged the detection assumptions (would the event have left a trace in these sources, given collection and retention)" },
   { key: "reproduced", words: "reproduced a decisive check" },
-  { key: "other_route", words: "tried a materially different route" },
+  { key: "other_route", words: "tried a materially different route (the store sweep's hits among them: the answer checked against everything the run holds, not only its coverage's sources)" },
 ];
 
 /** A review as given, checked: each check {done, text}, the text saying what was done, or why not. */

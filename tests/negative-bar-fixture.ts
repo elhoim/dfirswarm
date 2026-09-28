@@ -120,6 +120,8 @@ export const coverage = (q: string, refs: string[], results: string[], o: Record
   result_refs: results,
   alternatives: "the event may have left its trace only in memory, which the case does not hold",
   detection_opportunity: { trace_expected: "yes", why: "the event writes to the objects searched, and they keep it" },
+  // The store sweep's strings, or why there are none: a test that sweeps gives looked_for.
+  ...(o.looked_for === undefined ? { looked_for_none_why: "the fixture's event has no literal form a byte search could find" } : {}),
   ...o,
 });
 
