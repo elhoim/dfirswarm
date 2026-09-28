@@ -226,7 +226,7 @@ Each agent runs in its own microVM unless the run says `--isolation host`; the g
 | --- | --- |
 | From a clean machine to a first swarm and the console | [docs/quick-start.md](docs/quick-start.md) |
 | Every command, flag, env var, API route, and how to write a goal | [docs/usage.md](docs/usage.md) |
-| The examiner, the review, the releases, a rerun, the signed package, certification, export, hold and purge | [docs/usage.md](docs/usage.md#after-a-run-examiner-review-releases-timestamp-rerun-package---sign-verify-certify-export-hold-release-purge) |
+| The examiner, the review, the releases, a rerun, the signed package, certification, export, hold and purge | [docs/usage.md](docs/usage.md#after-a-run-examiner-machine-review-releases-timestamp-rerun-package---sign-verify-certify-export-hold-release-purge) |
 | Signing: ssh, FIDO and e-signature keys, the console, two-stage review, the hardware | [docs/usage.md](docs/usage.md#signing-the-keys-the-console-two-stages), [tests/hw/README.md](tests/hw/README.md) |
 | Agents in microVMs: the design, what holds, what does not | [docs/adr/0009-agents-live-in-microvms.md](docs/adr/0009-agents-live-in-microvms.md) |
 | Metering and stopping model calls on the host | [docs/model-gateway.md](docs/model-gateway.md) |
