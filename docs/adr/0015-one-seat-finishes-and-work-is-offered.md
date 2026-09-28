@@ -288,6 +288,35 @@ have lost its provider.
     answered quietly with who has it and records nothing; a second,
     independent review says why it adds something.
 
+17b. **A review offer is held for the review, names what the gate
+    counts, and is withdrawn once it is not needed** (the finished c10
+    pilot, s6be12f: of eleven negative-review offers one was taken up,
+    five declined and five had no outcome). A review's first claim was
+    the lead offer's minute from delivery, and accepting it recorded
+    nothing, so the offer passed to the next seat while the one that took
+    it was still reviewing: E-220's went from s01 to s05 to s04 within two
+    minutes, and s05's review of E-266 was deferred to the seat the offer
+    had moved to while three more seats declined in s05's favour. `offer
+    accept` on a review now takes it (`offer_take`): it holds for
+    `SWARM_REVIEW_HOLD_SEC` (600), and the seat declines it to pass it on.
+    The review its seat records takes up its own offer even after that
+    offer ran out, and another seat's standing offer of the item is
+    withdrawn (`offer_withdraw`). Before anything is offered the register
+    withdraws each standing offer whose item needs no review any more (the
+    answer superseded, as E-219 was seven seconds after its offer;
+    reviewed by any route the gate counts; a route reviewed) and records
+    as lapsed each that ran out. What is offered, and what the header's
+    negative bar lists, is what the finish gate holds: a negative by the
+    gate's own test (a premise rejected on a search alone is one), its
+    review counted where the gate counts it (the answer while every
+    coverage record it rests on stands, and each standing record), named
+    in the offer ("attest E-220 or its coverage record E-218 … not
+    answer_review": both reviewers of the pilot first sent the answer's
+    review shape); one resting only on records that no longer stand is not
+    offered, since no review of it would count. The metrics count a
+    coverage record reviewed as the gate does: on the record, or through
+    the negative answer resting on it.
+
 ### Runtime
 
 18. **Running-job visibility** (B11, `scripts/job-telemetry.ts`): three

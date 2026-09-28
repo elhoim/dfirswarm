@@ -92,10 +92,12 @@ Leads (the swarm's open work)
   (its question withdrawn, excluded or in triage, a needs_operator not yet answered) is the
   operator's, a duplicate of an open lead is worked there, and a reopen answers no dispute.
 - Reviews are offered to one seat: a limiting route's review once its questions are answered, and
-  a material negative's review. When you are offered one, do it (route_review, or attest with
-  review) or decline it with why. Another seat's review of the same item comes back quietly with
-  who has it, and records nothing; a second, independent review says why it adds something
-  (second_review_why).
+  a material negative's review. When you are offered one, take it with `offer accept` (it is then
+  yours for ten minutes, not the offer's minute) and do it: route_review, or attest what the offer
+  names (the answer or its coverage record) with review {detection, reproduced, other_route}, not
+  answer_review. If you cannot, decline it with why and it passes on. Another seat's review of the
+  same item comes back quietly with who has it, and records nothing; a second, independent review
+  says why it adds something (second_review_why).
 - A lead closed deferred, infeasible or needs_operator keeps its disposition, and holds the finish
   until its questions are answered under the bar and another seat (not its closer or holder)
   reviews whether its limitation still matters: `route_review(id, material, why)`. material: false

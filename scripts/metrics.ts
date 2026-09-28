@@ -114,7 +114,16 @@ export type RunMetrics = {
   coverage: {
     recorded: boolean;
     records: number;
+    /**
+     * Standing records whose results stand that the finish gate counts
+     * reviewed: an attest with its review on the record itself, or on a
+     * negative answer resting on it that the gate holds reviewed (the review
+     * of the negative is the review of its search; the c10 pilot's
+     * reviewers attested the answers, and the records read "0 reviewed").
+     */
     reviewed: number;
+    reviewed_on_record: number;
+    reviewed_through_answer: number;
     /** Standing records whose results still stand, by the hub's field; a stale record is counted apart, never as complete. */
     complete: number;
     partial: number;
@@ -128,8 +137,14 @@ export type RunMetrics = {
     recorded: boolean;
     leads: OfferCounts & { by_reason: Record<string, OfferCounts> };
     questions: { made: number; accepted: number; declined: number; not_taken_up: number };
-    /** Reviews offered to one seat (a limiting route's review, a material negative's review): taken up by the review, declined, lapsed, or still open. */
-    reviews: { made: number; accepted: number; declined: number; lapsed: number; open: number; by_reason: Record<string, number> };
+    /**
+     * Reviews offered to one seat (a limiting route's review, a material
+     * negative's review): taken up (the review its seat recorded), declined,
+     * withdrawn (reviewed by another route, or superseded), lapsed, or still
+     * open; and how many its seat took first (offer accept), whatever became
+     * of them.
+     */
+    reviews: { made: number; accepted: number; declined: number; withdrawn: number; lapsed: number; open: number; taken: number; by_reason: Record<string, number> };
     wakes_before_offers: { recorded: boolean; made: number; taken_by_woken: number; taken_by_another: number; not_taken: number };
   };
   done: {
@@ -389,6 +404,13 @@ function negativesAndCoverage(c: Context, scope: RunMetrics["questions"]): Pick<
   const records = c.entries.filter((e) => e.kind === "coverage" && !c.replaced.has(e.seq));
   const stale = records.map((x) => ({ record: `E-${x.seq}`, field: typeof x.coverage === "string" ? x.coverage : null, results: staleResults(c, x) })).filter((x) => x.results.length);
   const current = records.filter((x) => !stale.some((st) => st.record === `E-${x.seq}`));
+  // Reviewed as the gate counts it: on the record while its results stand, or through a negative answer resting on it that the gate holds reviewed.
+  const onRecord = new Set(current.filter((x) => P.negativeReview(x, c.entries, c.attestations, c.disputes).reviewed).map((x) => x.seq));
+  const throughAnswer = new Set<number>();
+  for (const x of current) {
+    if (onRecord.has(x.seq)) continue;
+    if (P.negativesResting(x, c.entries).some((a) => P.negativeReview(a, c.entries, c.attestations, c.disputes).reviewed)) throughAnswer.add(x.seq);
+  }
   return {
     negatives: {
       recorded: c.have.ledger,
@@ -402,7 +424,9 @@ function negativesAndCoverage(c: Context, scope: RunMetrics["questions"]): Pick<
     coverage: {
       recorded: c.have.ledger,
       records: records.length,
-      reviewed: records.filter((x) => P.negativeReview(x, c.entries, c.attestations, c.disputes).reviewed).length,
+      reviewed: onRecord.size + throughAnswer.size,
+      reviewed_on_record: onRecord.size,
+      reviewed_through_answer: throughAnswer.size,
       complete: current.filter((x) => x.coverage === "complete").length,
       partial: current.filter((x) => x.coverage === "partial").length,
       not_computed: current.filter((x) => x.coverage !== "complete" && x.coverage !== "partial").length,
@@ -427,16 +451,17 @@ function offers(c: Context): RunMetrics["offers"] {
   // Read by name: a register from before offers has none of these kinds, and one from after has more.
   const ev = c.leadEvents as unknown as Array<Rec & { seq: number; ev: string; lead?: string; to?: string; holder?: string; by: string }>;
   const recorded = ev.some((e) => e.ev.startsWith("offer"));
-  const reviews = { made: 0, accepted: 0, declined: 0, lapsed: 0, open: 0, by_reason: {} as Record<string, number> };
+  const reviews = { made: 0, accepted: 0, declined: 0, withdrawn: 0, lapsed: 0, open: 0, taken: 0, by_reason: {} as Record<string, number> };
   for (let i = 0; i < ev.length; i += 1) {
     const e = ev[i];
     if (e.ev !== "offer" && e.ev !== "wake") continue;
     // A review's offer is answered by what names it (the review that took it up, a decline, a lapse), never by a claim.
     if (e.ev === "offer" && (e.reason === "route_review" || e.reason === "negative_review")) {
       const after = ev.slice(i + 1).filter((x) => x.offer === e.seq);
-      const how = after.some((x) => x.ev === "offer_accept" || x.ev === "route_review") ? "accepted" : after.some((x) => x.ev === "offer_decline") ? "declined" : after.some((x) => x.ev === "offer_lapse") ? "lapsed" : "open";
+      const how = after.some((x) => x.ev === "offer_accept" || x.ev === "route_review") ? "accepted" : after.some((x) => x.ev === "offer_decline") ? "declined" : after.some((x) => x.ev === "offer_withdraw") ? "withdrawn" : after.some((x) => x.ev === "offer_lapse") ? "lapsed" : "open";
       reviews.made += 1;
       reviews[how] += 1;
+      if (after.some((x) => x.ev === "offer_take")) reviews.taken += 1;
       reviews.by_reason[str(e.reason)] = (reviews.by_reason[str(e.reason)] ?? 0) + 1;
       continue;
     }
@@ -968,11 +993,11 @@ export function metricsText(m: RunMetrics): string {
     ["Quick negatives", neg.quick.recorded ? `${neg.quick.count} of ${neg.quick.closes} negative closes${neg.quick.count ? `: ${neg.quick.items.map((x) => `${x.lead} (${x.held_seconds} s, ${x.jobs} job, ${x.objects} object)`).join(", ")}` : ""}` : absent(LEADS)],
     ["Negative answers", neg.recorded ? `${neg.answers} standing in scope; ${neg.reviewed} reviewed${neg.out_of_scope.length ? `; ${neg.out_of_scope.length} more on questions no longer in scope (${list(neg.out_of_scope.map((x) => `${qname(x)} ${x.answer}`))}), not counted` : ""}` : absent(LEDGER)],
     ["Unreviewed negatives", neg.recorded ? `${neg.unreviewed_material.length} material (${list(neg.unreviewed_material.map((x) => `${qname(x)} ${x.answer}`))}), ${neg.unreviewed_background.length} background` : absent(LEDGER)],
-    ["Coverage records", cov.recorded ? `${cov.records} standing: ${cov.complete} complete, ${cov.partial} partial, ${cov.not_computed} not computed, ${cov.stale.length} stale (a result no longer stands: ${list(cov.stale.map((x) => `${x.record} ${x.results.map((y) => `${y.result} ${y.code}`).join(" ")}`))}); ${cov.reviewed} reviewed by another seat` : absent(LEDGER)],
+    ["Coverage records", cov.recorded ? `${cov.records} standing: ${cov.complete} complete, ${cov.partial} partial, ${cov.not_computed} not computed, ${cov.stale.length} stale (a result no longer stands: ${list(cov.stale.map((x) => `${x.record} ${x.results.map((y) => `${y.result} ${y.code}`).join(" ")}`))}); ${cov.reviewed} reviewed by another seat as the gate counts it (${cov.reviewed_on_record} on the record, ${cov.reviewed_through_answer} through the negative answer resting on it)` : absent(LEDGER)],
     ["Negatives on partial coverage", cov.recorded ? `${cov.negatives_on_partial.length} (${list(cov.negatives_on_partial.map((x) => `${qname(x)} ${x.answer}`))}); ${cov.negatives_without_coverage.length} cite no coverage record` : absent(LEDGER)],
     ["Offers (leads)", o.recorded ? `${o.leads.made} made: ${o.leads.accepted} accepted, ${o.leads.declined} declined, ${o.leads.taken_by_another} taken by another seat, ${o.leads.lapsed} lapsed, ${o.leads.open} with no outcome` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Offers (questions)", o.recorded ? `${o.questions.made} made: ${o.questions.accepted} accepted, ${o.questions.declined} declined, ${o.questions.not_taken_up} not taken up` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
-    ["Offers (reviews)", o.recorded ? `${o.reviews.made} made (${Object.entries(o.reviews.by_reason).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}): ${o.reviews.accepted} taken up, ${o.reviews.declined} declined, ${o.reviews.lapsed} lapsed, ${o.reviews.open} with no outcome` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
+    ["Offers (reviews)", o.recorded ? `${o.reviews.made} made (${Object.entries(o.reviews.by_reason).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}): ${o.reviews.accepted} taken up, ${o.reviews.declined} declined, ${o.reviews.withdrawn} withdrawn (reviewed by another route, or superseded), ${o.reviews.lapsed} lapsed, ${o.reviews.open} with no outcome; ${o.reviews.taken} taken by their seat first (offer accept)` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Wakes (before offers)", o.wakes_before_offers.recorded ? `${o.wakes_before_offers.made}: ${o.wakes_before_offers.taken_by_woken} taken by the woken seat, ${o.wakes_before_offers.taken_by_another} by another, ${o.wakes_before_offers.not_taken} not taken` : absent(LEADS)],
     ["done calls", d.recorded ? `${d.calls}: ${d.accepted} accepted (${d.created_sentinel} wrote the sentinel), ${d.refused} refused by the seat's checks (${counts(d.refused_by)}), ${d.hub_refused} refused by the hub, ${d.not_yours} not the seat's finish` : absent("readable traces/events.jsonl")],
     ["Tail to the end", !t.end_at ? "not measured (the run has not ended)" : `${mins(t.minutes_from_ready)} from ready (${t.ready_source ?? "never ready"}); ${t.recorded ? `${mins(t.minutes_from_first_answers)} from the first answers, ${mins(t.minutes_from_final_answers)} from the final ones${t.unanswered.length ? `; unanswered: ${list(t.unanswered)}` : ""}` : `the answer tails ${absent(LEDGER)}`}`],

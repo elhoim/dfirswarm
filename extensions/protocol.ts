@@ -9590,12 +9590,12 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     // records nothing. A second, independent review says why it adds
     // something (second_review_why).
     if (negative && review && !secondWhy.value) {
-      const replaced = supersededBy(entries);
-      const answers = t.entry.kind === "answer" ? [t.entry] : entries.filter((e) => e.kind === "answer" && !replaced.has(e.seq) && isNegativeEntry(e) && (e.support ?? []).some((x) => x.seq === t.entry.seq));
+      const answers = t.entry.kind === "answer" ? [t.entry] : negativesResting(t.entry, entries);
       const L = await import("./leads.ts");
+      const disputes = await readDisputes(ctx.sandboxRoot);
       let deferral: import("./leads.ts").ReviewDeferral | null = null;
       for (const a of answers) {
-        const nr = negativeReview(a, entries, attested);
+        const nr = negativeReview(a, entries, attested, disputes);
         const d = await L.negativeReviewDeferral(ctx.sandboxRoot, `E-${a.seq}`, ctx.agentId, nr.reviewed ? nr.by : []);
         if (!d) {
           deferral = null;
@@ -9615,10 +9615,7 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
       : strength === "best_candidate"
         ? `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${t.entry.section} is not established by it, and the finish line says so; the way out is the route that would settle it, or the operator's acceptance of its limits`
         : undefined;
-    if (review) {
-      const replaced = supersededBy(entries);
-      for (const a of t.entry.kind === "answer" ? [t.entry] : entries.filter((e) => e.kind === "answer" && !replaced.has(e.seq) && isNegativeEntry(e) && (e.support ?? []).some((x) => x.seq === t.entry.seq))) reviewed.push(`E-${a.seq}`);
-    }
+    if (review) for (const a of t.entry.kind === "answer" ? [t.entry] : negativesResting(t.entry, entries)) reviewed.push(`E-${a.seq}`);
     return { ok: true, line, appended: true, ...(note ? { note } : {}) };
   });
   // Outside the ledger's lock (the registers' is taken after it, never inside): the review's offer, when it was this seat's, is taken up.
@@ -9693,15 +9690,47 @@ export function negativeReview(
   attestations: LedgerAttestation[],
   disputes: LedgerDispute[] = [],
 ): { reviewed: boolean; by: string[]; reviews: Array<{ by: string; seq: number; review: NB.NegativeReview }>; stale: Array<{ seq: number; problems: string[] }> } {
+  const t = negativeReviewTargets(answer, entries, disputes);
+  const targets = new Map<string, number>(t.targets.map((e): [string, number] => [e.hash ?? ledgerHash(e, "genesis"), e.seq]));
+  const reviews = attestations.filter((a) => attestationAct(a) === "attest" && a.review && a.target && targets.has(a.target) && !t.authors.has(a.by)).map((a) => ({ by: a.by, seq: targets.get(a.target!)!, review: a.review! }));
+  return { reviewed: reviews.length > 0, by: [...new Set(reviews.map((r) => r.by))], reviews, stale: t.stale };
+}
+
+/**
+ * Where a negative's review counts, as the finish gate reads it
+ * (negativeReview): the answer, unless a coverage record it rests on no
+ * longer stands, and each standing coverage record it rests on whose
+ * results still stand; who may not review it (whoever recorded the answer
+ * or one of those records); and the records that no longer stand. A
+ * review's offer names these, so the review it asks for is the one the
+ * gate counts (the c10 pilot's reviewers went to a coverage record, or to
+ * an answer already corrected). An answer resting only on records that no
+ * longer stand has no target: its coverage is recorded again first.
+ */
+export function negativeReviewTargets(answer: LedgerEntry, entries: LedgerEntry[], disputes: LedgerDispute[] = []): { targets: LedgerEntry[]; authors: Set<string>; stale: Array<{ seq: number; problems: string[] }> } {
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const cov = answer.kind === "coverage" ? [answer] : (answer.support ?? []).map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => e?.kind === "coverage" && !replaced.has(e.seq));
   const stale = cov.map((c) => ({ seq: c.seq, problems: coverageProblems(c, entries, disputes) })).filter((x) => x.problems.length);
   const standingCov = cov.filter((c) => !stale.some((x) => x.seq === c.seq));
   const authors = new Set([answer.by, ...answer.authors, ...cov.flatMap((c) => [c.by, ...c.authors])]);
-  const targets = new Map<string, number>([...(stale.length && answer.kind !== "coverage" ? [] : [[answer.hash ?? ledgerHash(answer, "genesis"), answer.seq] as [string, number]]), ...standingCov.map((c): [string, number] => [c.hash ?? ledgerHash(c, "genesis"), c.seq])]);
-  const reviews = attestations.filter((a) => attestationAct(a) === "attest" && a.review && a.target && targets.has(a.target) && !authors.has(a.by)).map((a) => ({ by: a.by, seq: targets.get(a.target!)!, review: a.review! }));
-  return { reviewed: reviews.length > 0, by: [...new Set(reviews.map((r) => r.by))], reviews, stale };
+  const targets = [...(stale.length && answer.kind !== "coverage" ? [] : [answer]), ...standingCov.filter((c) => c.seq !== answer.seq)];
+  return { targets, authors, stale };
+}
+
+/**
+ * The standing answers a coverage record's review is the review of: each
+ * that rests on it and is a negative by the finish gate's own test
+ * (negativeByResult: a bounded negative, not determinable, or a premise
+ * rejected on a search alone).
+ */
+export function negativesResting(cov: LedgerEntry, entries: LedgerEntry[]): LedgerEntry[] {
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  return entries.filter((e) => {
+    if (e.kind !== "answer" || replaced.has(e.seq) || !e.section?.startsWith("question:") || !(e.support ?? []).some((x) => x.seq === cov.seq)) return false;
+    return negativeByResult(NB.answerResult(e), citedForQuestion(e, bySeq, replaced, sectionKey(e.section.slice("question:".length))));
+  });
 }
 
 /**

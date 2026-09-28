@@ -8,6 +8,26 @@ All notable changes to this project. The format follows
 
 ### Fixed: what the first pilot on the new flow showed (c10, run s6be12f)
 
+- **A review offer is held for the review, and withdrawn when it is not
+  needed.** Of the finished pilot's eleven negative-review offers one was
+  taken up, five declined and five had no outcome. A review's first claim
+  was a lead offer's minute, and accepting it recorded nothing, so the
+  offer passed on while the seat that took it was still reviewing: E-220's
+  went from s01 to s05 to s04 in two minutes, and s05's review of E-266
+  was deferred to the seat the offer had moved to while three more seats
+  declined in its favour. `offer accept` on a review now holds it for ten
+  minutes (`SWARM_REVIEW_HOLD_SEC`); the review its seat records takes up
+  that seat's offer even after it ran out; an offer whose item needs no
+  review any more (the answer superseded, as E-219 was seven seconds after
+  its offer; reviewed by any route) is withdrawn, and one that ran out is
+  recorded lapsed. The offer names where the gate counts the review ("attest
+  E-220 or its coverage record E-218 … not answer_review"), and what is
+  offered is what the gate holds.
+- **The metrics count coverage reviews as the gate does.** "Coverage
+  records: 0 reviewed" beside "Negative answers: 2 reviewed": the reviewers
+  attested the answers, which the gate counts for the records they rest on.
+  A record now counts reviewed on itself or through the negative answer
+  resting on it, both given apart; review offers count withdrawn and taken.
 - **A summary's symbolic citation recorded before still stands.** Reading
   the finished pilot with the new code took down its summary and narrative:
   the answer fingerprint's fields had been reordered, and every recorded

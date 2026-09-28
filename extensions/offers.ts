@@ -41,6 +41,17 @@ export function offerMaxAgeMs(): number {
   return Math.max(offerTtlMs(), envMs("SWARM_OFFER_MAX_SEC", 300));
 }
 
+/**
+ * How long a review's offer stays its seat's once the seat took it (offer
+ * accept): a review takes minutes, not the first claim's seconds
+ * (SWARM_REVIEW_HOLD_SEC, 600). The c10 pilot's review offers ran out
+ * sixty seconds after delivery while the seat that took them worked, and
+ * went to the next seat, which did the same review again or declined it.
+ */
+export function reviewHoldMs(): number {
+  return Math.max(offerTtlMs(), envMs("SWARM_REVIEW_HOLD_SEC", 600));
+}
+
 /** What an offer is for: work nobody holds (wake), a hand-off, a parked lead, a reopen after the operator's note, a closure to confirm, a question, a limiting route's review, a material negative's review. */
 export const OFFER_REASONS = ["wake", "handoff", "parked", "reopen", "confirm", "question", "route_review", "negative_review"] as const;
 export type OfferReason = (typeof OFFER_REASONS)[number];
@@ -68,23 +79,31 @@ export type Offer = {
   basis?: string;
   /** A confirmation's batch: the correction chain's head it follows (one offer per seat and batch, confirmed at once). */
   batch?: string;
+  /** A review's offer its seat took (offer accept): its first claim holds until then, for the review itself (reviewHoldMs). */
+  held_until?: string | null;
+  /** Withdrawn by the register: what it offered needs nothing any more (reviewed by another route, superseded), and why. */
+  withdrawn?: { at: string; why: string } | null;
 };
 
-export type OfferState = "pending" | "live" | "accepted" | "declined" | "lapsed" | "invalidated";
+export type OfferState = "pending" | "live" | "accepted" | "declined" | "withdrawn" | "lapsed" | "invalidated";
 
 /**
  * Where an offer stands at `now`, against the revision of what it offers:
  * pending (made, not yet delivered: first claim is the seat's, until its age
  * bound), live (delivered: first claim until OFFER_TTL after delivery, and
- * never past the age bound), accepted, declined, lapsed, or invalidated (what
- * it offers changed since). `until` is when its first claim ends.
+ * never past the age bound; a review's offer its seat took holds until
+ * its hold ends), accepted, declined, withdrawn (what it offered needs
+ * nothing any more), lapsed, or invalidated (what it offers changed
+ * since). `until` is when its first claim ends.
  */
 export function offerStatus(o: Offer, now: number, rev: number): { state: OfferState; until: number } {
   const made = Date.parse(o.at);
   const bound = o.until && !o.seen_at ? Math.min(Date.parse(o.until), made + offerMaxAgeMs()) : made + offerMaxAgeMs();
-  const until = o.seen_at ? Math.min(Date.parse(o.seen_at) + offerTtlMs(), bound) : bound;
+  const first = o.seen_at ? Math.min(Date.parse(o.seen_at) + offerTtlMs(), bound) : bound;
+  const until = o.held_until ? Math.max(first, Date.parse(o.held_until)) : first;
   if (o.accepted) return { state: "accepted", until };
   if (o.declined) return { state: "declined", until };
+  if (o.withdrawn) return { state: "withdrawn", until };
   if (o.rev !== rev) return { state: "invalidated", until };
   if (o.lapsed_at || now >= until) return { state: "lapsed", until };
   return { state: o.seen_at ? "live" : "pending", until };
@@ -106,5 +125,6 @@ export function reservingOffer(offers: Offer[], now: number, rev: number): Offer
 export function untilWords(o: Offer, now: number, rev: number): string {
   const { state, until } = offerStatus(o, now, rev);
   const secs = Math.max(0, Math.round((until - now) / 1000));
+  if (o.held_until && state === "live") return `yours for ${secs} s more (until ${new Date(until).toISOString()})`;
   return state === "pending" ? `until it reaches ${o.to} and ${Math.round(offerTtlMs() / 1000)} s after, at most until ${new Date(until).toISOString()}` : `for ${secs} s more (until ${new Date(until).toISOString()})`;
 }

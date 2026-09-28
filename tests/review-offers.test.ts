@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import * as P from "../extensions/protocol.ts";
 import * as L from "../extensions/leads.ts";
+import * as O from "../extensions/offers.ts";
 import * as Q from "../extensions/questions.ts";
 import { A, coverage, F, ok, okq, rec, REVIEW, run } from "./negative-bar-fixture.ts";
 
@@ -253,4 +254,108 @@ test("a correction that changes no conclusion (only its refs or its wording) hol
   lv = (await L.leadsSnapshot(c.S)).state.leads.get(l.id)!;
   assert.ok(lv.confirm, "offered to its closer");
   assert.equal(lv.confirm?.head, `E-${f3.seq}`);
+});
+
+/** A bounded negative under question 2: a0 searched and recorded its coverage, a1 answered; its review is due. */
+async function negativeDue(c: Awaited<ReturnType<typeof run>>) {
+  for (const a of ["a0", "a1", "a2", "a3"]) await traceRow(c.S, a, "bash");
+  const opened = okq(await L.openLead(c.a0, { title: "Search for the remote tool", why: "q2", answers: ["2"], take: true, routes: [{ source: "input:disk.E01", method: "search the disk" }] }));
+  const absence = ok(await rec(c.a0, { kind: "absence", value: "a remote tool", source: "the disk", evidence: "a search", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry;
+  okq(await L.closeLead(c.a0, opened.lead.id, { disposition: "negative", ref: `E-${absence.seq}` }));
+  const cov = ok(await rec(c.a0, coverage("2", ["input:disk.E01"], [`E-${absence.seq}`]))).entry;
+  const ans = ok(await rec(c.a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk", reasoning: `E-${cov.seq}`, ...A, contrary_none_why: "nothing points to one", result: "bounded_negative" })).entry;
+  return { absence, cov, ans, key: `E-${ans.seq}` };
+}
+
+const seat = (c: Awaited<ReturnType<typeof run>>, id: string) => ({ sandboxRoot: c.S, agentId: id });
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+test("a review offer taken is held for the review, not the first claim's minute: it does not pass on while its seat reviews, another seat's review waits for it, and the offer names where the gate counts the review (the finished c10 pilot: E-220 went s01 → s05 → s04 in two minutes)", async () => {
+  await withEnv({ SWARM_OFFER_SEC: "1", SWARM_OFFER_MAX_SEC: "1", SWARM_REVIEW_HOLD_SEC: "600" }, async () => {
+    const c = await run();
+    const { cov, ans, key } = await negativeDue(c);
+    assert.equal(await L.offerReviews(c.S), 1);
+    const to = (await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)!.at(-1)!.to;
+    const other = to === "a2" ? "a3" : "a2";
+    // The offer says where the review counts, and in which shape.
+    const told = (await L.leadsDigest(seat(c, to), { mark: true })).notices.find((n) => n.kind === "review_offer");
+    assert.match(told?.text ?? "", new RegExp(`Take it with offer accept ${key} \\(it is then yours for 10 min\\), then attest E-${ans.seq} or its coverage record E-${cov.seq} with review \\{detection, reproduced, other_route\\} \\(a negative's review, not answer_review\\)`));
+    const took = (await L.answerOffer(seat(c, to), key, { action: "accept" })) as { ok: boolean; held_until?: string; note?: string };
+    assert.equal(took.ok, true);
+    assert.match(took.note ?? "", new RegExp(`${key}'s review is yours until .*: attest E-${ans.seq} or its coverage record E-${cov.seq} with review`));
+    // Past the first claim's second: still its seat's, nothing passed on.
+    await sleep(1_200);
+    assert.equal(await L.offerReviews(c.S), 0, "a review taken does not pass on while its seat reviews");
+    const standing = O.reservingOffer((await L.leadsSnapshot(c.S)).state.reviewOffers.get(key) ?? [], Date.now(), 1);
+    assert.equal(standing?.to, to);
+    // Another seat's review waits for it, saying who took it.
+    const quiet = await P.attestEntry(seat(c, other), { seq: ans.seq, how: "ran it again", review: REVIEW });
+    assert.equal((quiet as { appended?: boolean }).appended, false);
+    assert.match((quiet as { deferred?: { why: string } }).deferred?.why ?? "", new RegExp(`${key}'s review is taken by ${to}, who reviews it until`));
+    // Its seat records it on the answer: the offer is taken up.
+    const done = await P.attestEntry(seat(c, to), { seq: ans.seq, how: "ran the decisive query again", review: REVIEW });
+    assert.ok(done.ok && (done as { appended: boolean }).appended);
+    assert.ok((await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)!.at(-1)!.accepted);
+    // The metrics: taken first and taken up; the coverage record reviewed through the answer resting on it, as the gate counts it.
+    const { measureRun } = await import("../scripts/metrics.ts");
+    const m = await measureRun(c.S);
+    assert.deepEqual([m.offers.reviews.made, m.offers.reviews.accepted, m.offers.reviews.taken, m.offers.reviews.open], [1, 1, 1, 0]);
+    assert.equal(m.negatives.reviewed, 1);
+    assert.deepEqual([m.coverage.reviewed, m.coverage.reviewed_on_record, m.coverage.reviewed_through_answer], [1, 0, 1]);
+  });
+});
+
+test("a review recorded after its seat's offer ran out takes that offer up (the pilot's s05 on E-266: 'no outcome'); a lapse is recorded when the item is offered again", async () => {
+  await withEnv({ SWARM_OFFER_SEC: "1", SWARM_OFFER_MAX_SEC: "1", SWARM_REVIEW_HOLD_SEC: "1" }, async () => {
+    const c = await run();
+    const { ans, key } = await negativeDue(c);
+    assert.equal(await L.offerReviews(c.S), 1);
+    const first = (await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)!.at(-1)!;
+    okq((await L.answerOffer(seat(c, first.to), key, { action: "accept" })) as { ok: boolean });
+    // Its hold runs out while it reviews: the item goes to the next seat, and the lapse is on the register.
+    await sleep(1_200);
+    assert.equal(await L.offerReviews(c.S), 1);
+    const snap = await L.leadsSnapshot(c.S);
+    const offers = snap.state.reviewOffers.get(key)!;
+    assert.ok(offers[0]!.lapsed_at, "the lapse is recorded");
+    assert.match(snap.state.events.find((e) => e.ev === "offer_lapse" && e.offer === first.seq)?.why ?? "", /taken, and the review was not recorded before its hold ran out/);
+    const second = offers.at(-1)!;
+    assert.notEqual(second.to, first.to);
+    // The next seat declines in its favour; nobody else is eligible.
+    okq((await L.answerOffer(seat(c, second.to), key, { action: "decline", why: `${first.to} has the review ready` })) as { ok: boolean });
+    assert.equal(await L.offerReviews(c.S), 0);
+    // It records the review: its own offer, run out, is taken up.
+    const done = await P.attestEntry(seat(c, first.to), { seq: ans.seq, how: "ran the decisive query again", review: REVIEW });
+    assert.ok(done.ok && (done as { appended: boolean }).appended);
+    assert.ok((await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)![0]!.accepted, "the review its seat recorded takes its offer up");
+    const { measureRun } = await import("../scripts/metrics.ts");
+    const m = await measureRun(c.S);
+    assert.deepEqual([m.offers.reviews.made, m.offers.reviews.accepted, m.offers.reviews.declined, m.offers.reviews.open], [2, 1, 1, 0]);
+  });
+});
+
+test("a review offer whose item needs no review any more is withdrawn: its answer superseded (the pilot's E-219, corrected seven seconds after its offer), or reviewed by another route", async () => {
+  const c = await run();
+  const { cov, ans, key } = await negativeDue(c);
+  assert.equal(await L.offerReviews(c.S), 1);
+  const first = (await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)!.at(-1)!;
+  // The author corrects the answer: the offer of the old one is withdrawn, and the correction is offered.
+  const fixed = ok(await rec(c.a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found anywhere on the disk", reasoning: `E-${cov.seq}`, ...A, contrary_none_why: "nothing points to one", result: "bounded_negative", supersedes: ans.seq, because: "the scope is the whole disk" })).entry;
+  assert.equal(await L.offerReviews(c.S), 1);
+  let snap = await L.leadsSnapshot(c.S);
+  assert.match(snap.state.reviewOffers.get(key)!.at(-1)!.withdrawn?.why ?? "", new RegExp(`${key} was superseded by E-${fixed.seq}`));
+  assert.deepEqual(L.reviewOffersFor(first.to, snap).map((x) => x.key), [], "the seat holds no offer of the old answer");
+  const next = `E-${fixed.seq}`;
+  const offered = snap.state.reviewOffers.get(next)!.at(-1)!;
+  // Another seat reviews it by another route (its coverage record, an independent second review): the standing offer is withdrawn.
+  const by = ["a2", "a3"].find((x) => x !== offered.to)!;
+  const second = await P.attestEntry(seat(c, by), { seq: cov.seq, how: "searched the MFT's deleted records", review: REVIEW, second_review_why: "the MFT is a route the offered seat will not take" });
+  assert.ok(second.ok && (second as { appended: boolean }).appended);
+  snap = await L.leadsSnapshot(c.S);
+  const o = snap.state.reviewOffers.get(next)!.at(-1)!;
+  assert.match(o.withdrawn?.why ?? "", new RegExp(`${next} was reviewed by ${by}`));
+  assert.equal(O.reservingOffer(snap.state.reviewOffers.get(next)!, Date.now(), 1), null);
+  const { measureRun } = await import("../scripts/metrics.ts");
+  const m = await measureRun(c.S);
+  assert.deepEqual([m.offers.reviews.made, m.offers.reviews.withdrawn, m.offers.reviews.open], [2, 2, 0]);
 });

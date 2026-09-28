@@ -128,6 +128,10 @@ export type LeadEventKind =
   | "offer_lapse"
   // A review's offer taken up by the review it offered (an attest of a negative is on the ledger, not here).
   | "offer_accept"
+  // A review's offer its seat took (offer accept): held for the review until `until`.
+  | "offer_take"
+  // A review's offer the register withdrew: what it offered needs no review any more (reviewed by another route, superseded).
+  | "offer_withdraw"
   // The holder keeps a parked lead; a hand-off to another seat; a closure confirmed on the entry that stands now.
   | "keep"
   | "handoff"
@@ -216,6 +220,8 @@ export type LeadEvent = {
   offer?: number;
   /** A confirm offer: the standing head of the superseded closing entry. */
   head?: string;
+  /** A review's offer taken (offer_take): the seat holds it for the review until then. */
+  until?: string;
   /**
    * An open or a claim that overlaps a held lead's questions and is held all
    * the same: why (a second route, an independent verification), in
@@ -539,10 +545,14 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
       case "offer_seen":
       case "offer_decline":
       case "offer_lapse":
-      case "offer_accept": {
+      case "offer_accept":
+      case "offer_take":
+      case "offer_withdraw": {
         const o = typeof e.offer === "number" ? offerBySeq.get(e.offer) : undefined;
         if (!o) break;
-        if (e.ev === "offer_seen" && !o.seen_at) o.seen_at = e.at;
+        if ((e.ev === "offer_seen" || e.ev === "offer_take") && !o.seen_at) o.seen_at = e.at;
+        if (e.ev === "offer_take" && e.until && !o.held_until) o.held_until = e.until;
+        if (e.ev === "offer_withdraw" && !o.withdrawn) o.withdrawn = { at: e.at, why: e.why ?? "" };
         if (e.ev === "offer_decline" && !o.declined) o.declined = { at: e.at, why: e.why ?? "" };
         if (e.ev === "offer_lapse" && !o.lapsed_at) o.lapsed_at = e.at;
         if (e.ev === "offer_accept" && !o.accepted) o.accepted = { at: e.at };
@@ -609,6 +619,8 @@ export type LedgerView = {
   bySeq: Map<number, P.LedgerEntry>;
   replaced: Map<number, number>;
   disputed: Set<string>;
+  /** The disputes read with it: a negative's review targets are read against them, as the gate reads them. */
+  disputes?: P.LedgerDispute[];
 };
 
 export function ledgerView(entries: P.LedgerEntry[], disputes: P.LedgerDispute[]): LedgerView {
@@ -618,6 +630,7 @@ export function ledgerView(entries: P.LedgerEntry[], disputes: P.LedgerDispute[]
     replaced: P.supersededBy(entries),
     // A correction of a disputed entry is disputed too until the dispute is answered (B18).
     disputed: new Set(P.disputesInForce(entries, disputes).map((d) => d.target)),
+    disputes,
   };
 }
 
@@ -2482,10 +2495,14 @@ export async function routeReview(ctx: P.SwarmContext, rawId: unknown, input: { 
       if (!second.value) {
         const settled = settledRouteReviews(l, basis);
         if (settled.length) return { append: [], result: { ok: true as const, deferred: { item: l.id, by: [...new Set(settled.map((x) => x.by))], why: `${l.id}'s close (${l.closed.ref}) was reviewed already for its questions' answers as they stand (${settled.map((x) => `${x.by} at ${x.at}: ${x.material ? "still material" : "no longer material"}`).join("; ")}); nothing recorded. A second, independent review says why it adds something (second_review_why)` } } };
-        if (offer && offer.to !== ctx.agentId) return { append: [], result: { ok: true as const, deferred: { item: l.id, to: offer.to, until: new Date(O.offerStatus(offer, now, l.rev).until).toISOString(), why: `${l.id}'s route review is offered to ${offer.to} ${O.untilWords(offer, now, l.rev)}; nothing recorded. A second, independent review says why it adds something (second_review_why)` } } };
+        if (offer && offer.to !== ctx.agentId) return { append: [], result: { ok: true as const, deferred: { item: l.id, to: offer.to, until: new Date(O.offerStatus(offer, now, l.rev).until).toISOString(), why: `${l.id}'s route review is ${reviewHolderWords(offer, now, l.rev)}; nothing recorded. A second, independent review says why it adds something (second_review_why)` } } };
       }
-      const byOffer = offer && offer.to === ctx.agentId ? { offer: offer.seq } : {};
-      return { append: [{ by: ctx.agentId, ev: "route_review", lead: l.id, material_now: input.material as boolean, why: why.value, cycle: l.cycle, ref: l.closed.ref, basis, ...byOffer, ...(second.value ? { second_review_why: second.value } : {}) }], result: { ok: true as const } };
+      // The review takes up this seat's own offer of it, even one that ran out while it reviewed; another seat's standing offer is withdrawn.
+      const offers = snap.state.reviewOffers.get(l.id) ?? [];
+      const mine = [...offers].reverse().find((o) => o.to === ctx.agentId && !o.accepted && !o.declined && !o.withdrawn && o.rev === l.rev);
+      const byOffer = mine ? { offer: mine.seq } : {};
+      const withdrawn: LeadDraft[] = offers.filter((o) => o !== mine && O.reserving(o, now, l.rev)).map((o) => ({ by: "system", ev: "offer_withdraw", lead: l.id, offer: o.seq, to: o.to, why: `${l.id}'s route review was recorded by ${ctx.agentId}` }));
+      return { append: [{ by: ctx.agentId, ev: "route_review", lead: l.id, material_now: input.material as boolean, why: why.value, cycle: l.cycle, ref: l.closed.ref, basis, ...byOffer, ...(second.value ? { second_review_why: second.value } : {}) }, ...withdrawn], result: { ok: true as const } };
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
@@ -2540,15 +2557,60 @@ function settledRouteReviews(l: Lead, basis: string): Lead["route_reviews"] {
 /** A review item due now: a limiting lead's route review, or a material negative's review. */
 type ReviewItem = { key: string; reason: "route_review" | "negative_review"; questions: string[]; exclude: Set<string>; offered: Set<string>; draft: (to: string, now: number) => LeadDraft; words: string };
 
-/** The review items due in a snapshot (a limiting material lead whose questions are disposed and no review saw these answers; a material negative no seat has reviewed), with no offer holding them. */
-function reviewsDue(snap: LeadsSnapshot, attestations: P.LedgerAttestation[], now: number): ReviewItem[] {
+/**
+ * A material negative the finish gate holds unreviewed, as the gate reads
+ * it: a standing answer to a material question that is a negative by the
+ * gate's own test (P.negativeByResult: a bounded negative, not
+ * determinable, or a premise rejected on a search alone), that no review
+ * the gate counts has reviewed (P.negativeReview, against the disputes),
+ * with where a review of it counts (P.negativeReviewTargets: the answer,
+ * or a coverage record it rests on, whichever takes an attest with a
+ * review). One with no such target (its coverage no longer stands) is not
+ * reviewable yet: its coverage is recorded again first.
+ */
+export type NegativeDue = { answer: P.LedgerEntry; id: string; result: string; targets: P.LedgerEntry[]; exclude: Set<string> };
+
+export function negativesDue(snap: LeadsSnapshot, attestations: P.LedgerAttestation[]): NegativeDue[] {
+  const out: NegativeDue[] = [];
+  const { entries, bySeq, replaced } = snap.ledger;
+  const disputes = snap.ledger.disputes ?? [];
+  for (const a of entries) {
+    if (a.kind !== "answer" || replaced.has(a.seq) || !a.section?.startsWith("question:")) continue;
+    const res = NB.answerResult(a);
+    const id = P.sectionKey(a.section.slice("question:".length));
+    if (!res || !P.negativeByResult(res, P.citedForQuestion(a, bySeq, replaced, id))) continue;
+    const q = snap.questions?.bySection.get(id);
+    if (!(snap.goal.questions.includes(id) || !q || q.materiality === "material")) continue;
+    if (P.negativeReview(a, entries, attestations, disputes).reviewed) continue;
+    const t = P.negativeReviewTargets(a, entries, disputes);
+    const targets = t.targets.filter((e) => P.isNegativeEntry(e));
+    if (!targets.length) continue;
+    out.push({ answer: a, id, result: res, targets, exclude: t.authors });
+  }
+  return out;
+}
+
+/** Where a negative's review is recorded, in words: "attest E-220 or its coverage record E-218". */
+export function reviewTargetWords(targets: P.LedgerEntry[]): string {
+  const answer = targets.filter((e) => e.kind !== "coverage").map((e) => `E-${e.seq}`);
+  const cov = targets.filter((e) => e.kind === "coverage").map((e) => `E-${e.seq}`);
+  const records = cov.length ? `${answer.length ? "its " : ""}coverage record${cov.length === 1 ? "" : "s"} ${cov.join(", ")}` : "";
+  return `attest ${[answer.join(", "), records].filter(Boolean).join(" or ")}`;
+}
+
+/**
+ * The review items the registers hold due in a snapshot, offered or not:
+ * a limiting material lead whose questions are disposed and no review saw
+ * these answers, and a material negative the gate holds unreviewed
+ * (negativesDue).
+ */
+function reviewItems(snap: LeadsSnapshot, attestations: P.LedgerAttestation[]): ReviewItem[] {
   const out: ReviewItem[] = [];
   for (const l of snap.state.leads.values()) {
     if (!l.material || !l.closed || !LIMITING_DISPOSITIONS.has(l.closed.disposition)) continue;
     const { basis, disposed } = routeBasis(l, snap);
     if (!disposed || settledRouteReviews(l, basis).length) continue;
     const offers = snap.state.reviewOffers.get(l.id) ?? [];
-    if (O.reservingOffer(offers, now, l.rev)) continue;
     const exclude = new Set([l.closed.by, ...leadHolders(l, snap.state)]);
     const closed = l.closed;
     out.push({
@@ -2561,29 +2623,74 @@ function reviewsDue(snap: LeadsSnapshot, attestations: P.LedgerAttestation[], no
       words: `${l.id} "${l.title}", closed ${closed.disposition} (${closed.ref})`,
     });
   }
-  for (const a of snap.ledger.entries) {
-    if (a.kind !== "answer" || snap.ledger.replaced.has(a.seq) || !a.section?.startsWith("question:")) continue;
-    const res = NB.answerResult(a);
-    if (!res || !NB.NEGATIVE_RESULTS.has(res)) continue;
-    const id = P.sectionKey(a.section.slice("question:".length));
-    const q = snap.questions?.bySection.get(id);
-    if (!(snap.goal.questions.includes(id) || !q || q.materiality === "material")) continue;
-    if (P.negativeReview(a, snap.ledger.entries, attestations).reviewed) continue;
+  for (const n of negativesDue(snap, attestations)) {
+    const a = n.answer;
     const key = `E-${a.seq}`;
     const offers = snap.state.reviewOffers.get(key) ?? [];
-    if (O.reservingOffer(offers, now, 1)) continue;
-    const covAuthors = (a.support ?? []).map((x) => snap.ledger.bySeq.get(x.seq)).filter((e): e is P.LedgerEntry => e?.kind === "coverage").flatMap((e) => [e.by, ...e.authors]);
     out.push({
       key,
       reason: "negative_review",
-      questions: [id],
-      exclude: new Set([a.by, ...a.authors, ...covAuthors]),
+      questions: [n.id],
+      exclude: n.exclude,
       offered: new Set(offers.map((o) => o.to)),
-      draft: (to, at) => ({ by: "system", ev: "offer", entry: a.seq, to, reason: "negative_review", rev: 1, max_until: new Date(at + O.offerMaxAgeMs()).toISOString(), why: `E-${a.seq} (${a.section}, ${NB.resultWords(res)}) is a material negative no seat has reviewed` }),
-      words: `E-${a.seq} (${a.section}, ${NB.resultWords(res)})`,
+      draft: (to, at) => ({ by: "system", ev: "offer", entry: a.seq, to, reason: "negative_review", rev: 1, max_until: new Date(at + O.offerMaxAgeMs()).toISOString(), why: `E-${a.seq} (${a.section}, ${NB.resultWords(n.result)}) is a material negative no seat has reviewed: ${reviewTargetWords(n.targets)} with review {detection, reproduced, other_route}` }),
+      words: `E-${a.seq} (${a.section}, ${NB.resultWords(n.result)})`,
     });
   }
   return out;
+}
+
+/** The review items due and not held by an offer now. */
+function reviewsDue(snap: LeadsSnapshot, attestations: P.LedgerAttestation[], now: number): ReviewItem[] {
+  return reviewItems(snap, attestations).filter((item) => !O.reservingOffer(snap.state.reviewOffers.get(item.key) ?? [], now, reviewRev(item.key, snap.state)));
+}
+
+/** Why a review item needs no review any more: what the register says when it withdraws its offer. */
+function reviewSettledWhy(key: string, snap: LeadsSnapshot, attestations: P.LedgerAttestation[]): string {
+  if (key.startsWith("L-")) {
+    const l = snap.state.leads.get(key);
+    const r = l ? standingRouteReview(l) : null;
+    return r ? `${key}'s route review was recorded by ${r.by}` : `${key} no longer waits for a route review`;
+  }
+  const seq = Number(key.slice(2));
+  const by = snap.ledger.replaced.get(seq);
+  if (by !== undefined) return `${key} was superseded by E-${P.standingSeq(seq, snap.ledger.replaced)}: a review of it would count for nothing`;
+  const e = snap.ledger.bySeq.get(seq);
+  const r = e ? P.negativeReview(e, snap.ledger.entries, attestations, snap.ledger.disputes ?? []) : null;
+  if (r?.reviewed) return `${key} was reviewed by ${r.by.join(", ")}`;
+  return `${key} no longer waits for a review (not a material negative the gate holds now, or its coverage is to be recorded again)`;
+}
+
+/**
+ * The review offers the register settles before it offers anything: one
+ * whose item needs no review any more (reviewed by any route the gate
+ * counts, the answer superseded, the route reviewed) is withdrawn, so no
+ * seat is left holding a review nobody needs (the c10 pilot's offer of
+ * E-219, made seconds before E-220 corrected it, was declined as stale);
+ * one whose first claim or hold ran out is recorded lapsed, so the
+ * register says what became of it.
+ */
+function settleReviewOffers(snap: LeadsSnapshot, attestations: P.LedgerAttestation[], items: ReviewItem[], now: number): LeadDraft[] {
+  const due = new Set(items.map((i) => i.key));
+  const out: LeadDraft[] = [];
+  for (const [key, list] of snap.state.reviewOffers) {
+    const rev = reviewRev(key, snap.state);
+    const where = key.startsWith("L-") ? { lead: key } : { entry: Number(key.slice(2)) };
+    for (const o of list) {
+      if (o.accepted || o.declined || o.withdrawn || o.lapsed_at) continue;
+      const st = O.offerStatus(o, now, rev).state;
+      if ((st === "pending" || st === "live") && !due.has(key)) out.push({ by: "system", ev: "offer_withdraw", ...where, offer: o.seq, to: o.to, why: reviewSettledWhy(key, snap, attestations) });
+      else if (st === "lapsed") out.push({ by: "system", ev: "offer_lapse", ...where, offer: o.seq, to: o.to, why: o.held_until ? "taken, and the review was not recorded before its hold ran out" : "its first claim ran out" });
+    }
+  }
+  return out;
+}
+
+/** Whether the register has review offers to settle or items to offer: read outside the lock, so an idle round writes nothing. */
+function reviewWorkDue(snap: LeadsSnapshot, attestations: P.LedgerAttestation[], now: number): boolean {
+  const items = reviewItems(snap, attestations);
+  if (settleReviewOffers(snap, attestations, items, now).length) return true;
+  return items.some((item) => !O.reservingOffer(snap.state.reviewOffers.get(item.key) ?? [], now, reviewRev(item.key, snap.state)));
 }
 
 /**
@@ -2593,20 +2700,23 @@ function reviewsDue(snap: LeadsSnapshot, attestations: P.LedgerAttestation[], no
  * this item already; the relevant first (it held a lead under the item's
  * questions, then it recorded an entry answering them), then a waiting
  * seat, idle longest. Made under the registers' lock, one seat per item,
- * each seat counted busy once offered. Returns how many were made.
+ * each seat counted busy once offered. Offers whose item needs no review
+ * any more are withdrawn first, and those that ran out recorded lapsed
+ * (settleReviewOffers). Returns how many offers were made.
  */
 export async function offerReviews(sandboxRoot: string, now = Date.now()): Promise<number> {
   const outer = await leadsSnapshot(sandboxRoot);
   const attestations = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
-  if (!reviewsDue(outer, attestations, now).length) return 0;
+  if (!reviewWorkDue(outer, attestations, now)) return 0;
   const activity = await recentActivity(sandboxRoot, LEAD_COMPACTION_BOUND_MS, now).catch(() => new Map<string, { last: number; compacting: number | null }>());
   const ids = await P.teamIds(sandboxRoot).catch(() => [] as string[]);
-  const r = await transact<{ ok: true }>(sandboxRoot, async (snap) => {
+  const r = await transact<{ ok: true; offered: number }>(sandboxRoot, async (snap) => {
     const atts = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
+    const items = reviewItems(snap, atts);
+    const append: LeadDraft[] = settleReviewOffers(snap, atts, items, now);
     const due = reviewsDue(snap, atts, now);
-    if (!due.length) return { append: [], result: { ok: true as const } };
     const busy = await offeredSeats(sandboxRoot, snap.state, now, snap.questions);
-    const append: LeadDraft[] = [];
+    let offered = 0;
     for (const item of due) {
       const candidates: string[] = [];
       for (const a of ids) {
@@ -2618,10 +2728,11 @@ export async function offerReviews(sandboxRoot: string, now = Date.now()): Promi
       if (!pick) continue;
       busy.add(pick);
       append.push(item.draft(pick, now));
+      offered += 1;
     }
-    return { append, result: { ok: true as const } };
+    return { append, result: { ok: true as const, offered } };
   }).catch(() => null);
-  return r?.events.length ?? 0;
+  return r?.offered ?? 0;
 }
 
 /** The most relevant of the candidates for a review of work under these questions: held a lead under them, then recorded an entry answering them, then waiting, idle longest. */
@@ -2640,18 +2751,38 @@ async function rankReviewers(sandboxRoot: string, snap: LeadsSnapshot, candidate
   return scored[0]!.agent;
 }
 
+/** Where a negative's review is recorded now, in words, from a snapshot: its answer, or a coverage record it rests on (negativesDue's targets). */
+function negativeTargetWords(e: P.LedgerEntry | undefined, snap: LeadsSnapshot): string {
+  if (!e) return "attest it";
+  const targets = P.negativeReviewTargets(e, snap.ledger.entries, snap.ledger.disputes ?? []).targets.filter((x) => P.isNegativeEntry(x));
+  return targets.length ? reviewTargetWords(targets) : `attest E-${e.seq}`;
+}
+
+/** Who has a review now, for another seat: taken by its seat (and until when), or offered to it and for how long. */
+function reviewHolderWords(o: O.Offer, now: number, rev: number): string {
+  const until = new Date(O.offerStatus(o, now, rev).until).toISOString();
+  return o.held_until ? `taken by ${o.to}, who reviews it until ${until}` : `offered to ${o.to} ${O.untilWords(o, now, rev)}`;
+}
+
 /** What a review's offer asks, for the seat it is made to. */
 export function reviewOfferText(key: string, o: O.Offer, snap: LeadsSnapshot): string {
   const until = O.untilWords(o, snap.at, reviewRev(key, snap.state));
+  const hold = `it is then yours for ${Math.round(O.reviewHoldMs() / 60_000)} min`;
   if (o.reason === "route_review") {
     const l = snap.state.leads.get(key);
-    return `${key}${l ? ` ("${l.title}", closed ${l.closed?.disposition ?? "?"} on ${l.closed?.ref ?? "?"})` : ""} is offered to you for its route review, first claim ${until}: its questions are answered now; say whether the route's limitation still matters with route_review(${key}, material, why), or offer decline ${key} with why. Other seats' reviews of it wait for yours.`;
+    return `${key}${l ? ` ("${l.title}", closed ${l.closed?.disposition ?? "?"} on ${l.closed?.ref ?? "?"})` : ""} is offered to you for its route review, first claim ${until}: its questions are answered now. Take it with offer accept ${key} (${hold}), then say whether the route's limitation still matters with route_review(${key}, material, why); or offer decline ${key} with why. Other seats' reviews of it wait for yours.`;
   }
   const e = snap.ledger.bySeq.get(Number(key.slice(2)));
-  return `${key}${e ? ` (${e.section}, ${NB.resultWords(NB.answerResult(e) ?? "")})` : ""} is offered to you for its review, first claim ${until}: attest it (or its coverage record) with review {detection, reproduced, other_route}, or offer decline ${key} with why. Other seats' reviews of it wait for yours.`;
+  return `${key}${e ? ` (${e.section}, ${NB.resultWords(NB.answerResult(e) ?? "")})` : ""} is offered to you for its review, first claim ${until}. Take it with offer accept ${key} (${hold}), then ${negativeTargetWords(e, snap)} with review {detection, reproduced, other_route} (a negative's review, not answer_review); or offer decline ${key} with why. Other seats' reviews of it wait for yours.`;
 }
 
-/** Answer a review's offer: decline passes it on at once (with why); accept says you take it up (the review itself records it). */
+/**
+ * Answer a review's offer: decline passes it on at once (with why); accept
+ * takes it, and it stays this seat's for the review itself
+ * (O.reviewHoldMs), not the first claim's minute: the c10 pilot's review
+ * offers went to the next seat sixty seconds after delivery while the seat
+ * that took them was still reviewing. The review itself records the rest.
+ */
 export async function answerReviewOffer(ctx: P.SwarmContext, key: string, input: { action?: string; why?: string }, now = Date.now()): Promise<Record<string, unknown>> {
   const action = String(input.action ?? "").trim();
   if (action !== "accept" && action !== "decline") return { ok: false, reason: "action is accept or decline" };
@@ -2660,9 +2791,14 @@ export async function answerReviewOffer(ctx: P.SwarmContext, key: string, input:
   try {
     return await transact<Record<string, unknown>>(ctx.sandboxRoot, async (snap) => {
       const o = O.reservingOffer(snap.state.reviewOffers.get(key) ?? [], now, reviewRev(key, snap.state));
-      if (!o || o.to !== ctx.agentId) return { append: [], result: { ok: false, reason: `no review offer of ${key} stands for you${o ? ` (it is offered to ${o.to})` : ""}` } };
+      if (!o || o.to !== ctx.agentId) return { append: [], result: { ok: false, reason: `no review offer of ${key} stands for you${o ? ` (it is ${reviewHolderWords(o, now, reviewRev(key, snap.state))})` : ""}` } };
       const where = key.startsWith("L-") ? { lead: key } : { entry: Number(key.slice(2)) };
-      if (action === "accept") return { append: o.seen_at ? [] : [{ by: ctx.agentId, ev: "offer_seen", ...where, offer: o.seq }], result: { ok: true, id: key, action, note: o.reason === "route_review" ? `review it: route_review(${key}, material, why)` : `review it: attest ${key.slice(2)} (or its coverage record) with review {detection, reproduced, other_route}` } };
+      if (action === "accept") {
+        const until = o.held_until ?? new Date(now + O.reviewHoldMs()).toISOString();
+        const how = o.reason === "route_review" ? `route_review(${key}, material, why)` : `${negativeTargetWords(snap.ledger.bySeq.get(Number(key.slice(2))), snap)} with review {detection, reproduced, other_route} (a negative's review, not answer_review)`;
+        const note = `${key}'s review is yours until ${until}: ${how}. If you cannot, offer decline ${key} with why, and it passes on`;
+        return { append: o.held_until ? [] : [{ by: ctx.agentId, ev: "offer_take", ...where, offer: o.seq, until }], result: { ok: true, id: key, action, held_until: until, note } };
+      }
       return { append: [{ by: ctx.agentId, ev: "offer_decline", ...where, offer: o.seq, why: why.value }], result: { ok: true, id: key, action } };
     });
   } catch (err) {
@@ -2670,12 +2806,23 @@ export async function answerReviewOffer(ctx: P.SwarmContext, key: string, input:
   }
 }
 
-/** A negative's review recorded by the seat its offer was made to: the offer is taken up (called by the ledger after the attest, outside its lock). */
+/**
+ * A negative's review recorded (called by the ledger after the attest,
+ * outside its lock): the recording seat's own offer of it is taken up, even
+ * one whose first claim ran out while the seat reviewed (the c10 pilot's
+ * s05 recorded E-266's review after its offer had passed on: "no outcome"),
+ * and another seat's offer of it standing now is withdrawn, the item
+ * reviewed.
+ */
 export async function reviewOfferTaken(sandboxRoot: string, key: string, agent: string, now = Date.now()): Promise<void> {
   await transact<{ ok: true }>(sandboxRoot, async (snap) => {
-    const o = O.reservingOffer(snap.state.reviewOffers.get(key) ?? [], now, reviewRev(key, snap.state));
+    const offers = snap.state.reviewOffers.get(key) ?? [];
+    const rev = reviewRev(key, snap.state);
     const where = key.startsWith("L-") ? { lead: key } : { entry: Number(key.slice(2)) };
-    return { append: o && o.to === agent && !o.accepted ? [{ by: agent, ev: "offer_accept", ...where, offer: o.seq }] : [], result: { ok: true as const } };
+    const mine = [...offers].reverse().find((o) => o.to === agent && !o.accepted && !o.declined && !o.withdrawn && o.rev === rev);
+    const append: LeadDraft[] = mine ? [{ by: agent, ev: "offer_accept", ...where, offer: mine.seq }] : [];
+    for (const o of offers) if (o !== mine && O.reserving(o, now, rev)) append.push({ by: "system", ev: "offer_withdraw", ...where, offer: o.seq, to: o.to, why: `${key} was reviewed by ${agent}` });
+    return { append, result: { ok: true as const } };
   }).catch(() => undefined);
 }
 
@@ -2685,7 +2832,7 @@ export async function negativeReviewDeferral(sandboxRoot: string, key: string, a
   const { events } = await readLeadEvents(sandboxRoot);
   const s = foldLeads(events);
   const o = O.reservingOffer(s.reviewOffers.get(key) ?? [], now, 1);
-  if (o && o.to !== agent) return { item: key, to: o.to, until: new Date(O.offerStatus(o, now, 1).until).toISOString(), why: `${key}'s review is offered to ${o.to} ${O.untilWords(o, now, 1)}; nothing recorded. A second, independent review says why it adds something (second_review_why)` };
+  if (o && o.to !== agent) return { item: key, to: o.to, until: new Date(O.offerStatus(o, now, 1).until).toISOString(), why: `${key}'s review is ${reviewHolderWords(o, now, 1)}; nothing recorded. A second, independent review says why it adds something (second_review_why)` };
   return null;
 }
 
@@ -3409,19 +3556,25 @@ export async function negativeLines(sandboxRoot: string, snap: LeadsSnapshot): P
   const out: string[] = [];
   const attestations = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
   const unreviewed: string[] = [];
+  const disputes = snap.ledger.disputes ?? [];
   for (const a of snap.ledger.entries) {
     if (a.kind !== "answer" || snap.ledger.replaced.has(a.seq) || !a.section?.startsWith("question:")) continue;
     const r = NB.answerResult(a);
-    if (!r || !NB.NEGATIVE_RESULTS.has(r)) continue;
     const id = P.sectionKey(a.section.slice("question:".length));
+    // A negative by the gate's own test: a premise rejected on a search alone is one.
+    if (!r || !P.negativeByResult(r, P.citedForQuestion(a, snap.ledger.bySeq, snap.ledger.replaced, id))) continue;
     const q = snap.questions?.bySection.get(id);
     const material = snap.goal.questions.includes(id) || !q || q.materiality === "material";
     if (!material) continue;
-    const rev = P.negativeReview(a, snap.ledger.entries, attestations);
+    const rev = P.negativeReview(a, snap.ledger.entries, attestations, disputes);
     if (rev.reviewed) continue;
     const cov = (a.support ?? []).map((x) => snap.ledger.bySeq.get(x.seq)).filter((e): e is P.LedgerEntry => e?.kind === "coverage");
+    // Where its review counts, said when it is not simply the answer or any record it rests on.
+    const targets = P.negativeReviewTargets(a, snap.ledger.entries, disputes).targets.filter((e) => P.isNegativeEntry(e));
+    const plain = targets.length === 1 + cov.filter((c) => !snap.ledger.replaced.has(c.seq)).length && targets.some((e) => e.seq === a.seq);
+    const where = !targets.length ? "; no coverage record it rests on stands: it is recorded again before a review counts" : plain ? "" : `; its review counts only as: ${reviewTargetWords(targets)}`;
     const offered = O.reservingOffer(snap.state.reviewOffers.get(`E-${a.seq}`) ?? [], snap.at, 1);
-    unreviewed.push(`${a.section} (E-${a.seq} ${NB.resultWords(r)}, by ${a.authors.join(", ")}${cov.length ? `; coverage ${cov.map((c) => `E-${c.seq} ${c.coverage ?? "?"}`).join(", ")}` : "; no coverage record"}${offered ? `; its review is offered to ${offered.to}` : ""})`);
+    unreviewed.push(`${a.section} (E-${a.seq} ${NB.resultWords(r)}, by ${a.authors.join(", ")}${cov.length ? `; coverage ${cov.map((c) => `E-${c.seq} ${c.coverage ?? "?"}`).join(", ")}` : "; no coverage record"}${where}${offered ? `; its review is ${offered.held_until ? `taken by ${offered.to}` : `offered to ${offered.to}`}` : ""})`);
   }
   if (unreviewed.length) out.push(`Negatives awaiting review by another seat (the finish line waits for each; attest the answer or its coverage record with review {detection, reproduced, other_route}): ${unreviewed.join("; ")}.`);
   const quick: string[] = [];

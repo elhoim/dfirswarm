@@ -3642,7 +3642,7 @@ export default function (pi: ExtensionAPI) {
     name: "offer",
     label: "Answer an offer",
     description:
-      "Answer an offer made to you: a lead (L-<n>: woken for it, handed over, parked in a peer's hands, reopened for you) or a person's question (Q-<n>). accept takes a lead (the claim it reserves), or holds a question for you for another minute while you open its lead; decline, with why, passes it to the next seat at once. An offer you do not answer lapses a minute after it reached you.",
+      "Answer an offer made to you: a lead (L-<n>: woken for it, handed over, parked in a peer's hands, reopened for you), a person's question (Q-<n>), or a review (L-<n> for a route review, E-<seq> for a negative's review). accept takes a lead (the claim it reserves), holds a question for you for another minute while you open its lead, or takes a review: it is then yours for ten minutes while you do it (route_review, or attest what the offer names with review), and nobody else is offered it; decline, with why, passes it to the next seat at once. An offer you do not answer lapses a minute after it reached you.",
     promptSnippet: "Accept or decline an offer",
     parameters: Type.Object({
       id: Type.String({ description: "L-<n> (a lead, or its route review), Q-<n> (a question) or E-<seq> (a negative's review)" }),
