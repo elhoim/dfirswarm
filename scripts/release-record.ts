@@ -53,6 +53,9 @@ const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("he
 
 export type ChainHead = { lines: number; head: string | null };
 
+/** The ledger's chains a release binds by head and length. */
+type ChainKind = "ledger" | "attestations" | "disputes";
+
 export type ReleaseSigner = {
   kind: "machine" | "examiner";
   principal: string;
@@ -495,14 +498,14 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
   };
   const heldWord = (h: ReturnType<typeof held>) => (h === "matches" ? "as bound" : h === "redacted" ? "redacted from the bound bytes (REDACTIONS.txt)" : h === "withheld" ? "withheld from this package (REDACTIONS.txt names the bound sha256)" : h === "missing" ? "NOT THERE" : "NOT THE BOUND BYTES");
   let anchorReleases: Array<{ version?: number; sha256?: string }> | null = null;
-  // The resumes the anchor names: a release sealed before one binds a prefix of the chains, which the continuation appended to.
-  let anchorResumes: string[] = [];
+  // The resumes the anchor names, as written: each is weighed below against the chains before it relaxes anything.
+  let anchorResumes: unknown[] = [];
   const anchorText = readText(layout.anchor);
   if (anchorText) {
     try {
       const a = JSON.parse(anchorText) as { releases?: unknown; resumes?: unknown };
       anchorReleases = Array.isArray(a.releases) ? (a.releases as Array<{ version?: number; sha256?: string }>) : [];
-      anchorResumes = Array.isArray(a.resumes) ? (a.resumes as Array<{ at?: unknown }>).map((r) => String(r?.at ?? "")).filter(Boolean) : [];
+      anchorResumes = Array.isArray(a.resumes) ? a.resumes : [];
     } catch {
       anchorReleases = null;
     }
@@ -513,6 +516,55 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
   const ledgerNow = hashFieldHead(ledgerText);
   const attNow = hashFieldHead(attText);
   const dispNow = hashFieldHead(dispText);
+  /**
+   * The first n lines of a chain, verified with its own verifier (every
+   * line's hash recomputed from what it holds, and chained to the one
+   * before), and the head they end on. In a run only: a package's chains
+   * may carry redacted lines, which its own check (package-tools.ts) walks
+   * by the hashes they keep; there the stored hash fields are compared.
+   */
+  const P = layout.where === "run" ? await import("../extensions/protocol.ts") : null;
+  const texts: Record<ChainKind, string | null> = { ledger: ledgerText, attestations: attText, disputes: dispText };
+  const prefixOf = (kind: ChainKind, n: number): { ok: true; head: string | null } | { ok: false; why: string } => {
+    const text = texts[kind];
+    const lines = (text ?? "").split("\n").filter((l) => l.trim());
+    if (n > lines.length) return { ok: false, why: `it has ${lines.length} line(s), fewer than ${n}` };
+    if (n === 0) return { ok: true, head: null };
+    const first = `${lines.slice(0, n).join("\n")}\n`;
+    if (!P) return { ok: true, head: hashFieldAt(first, n) };
+    if (kind === "ledger") {
+      const v = P.verifyLedgerChain(first);
+      return v.ok ? { ok: true, head: v.hashes.at(-1) ?? null } : { ok: false, why: `its chain is broken at line ${v.broken_at} (${v.reason})` };
+    }
+    const v = kind === "attestations" ? P.verifyAttestationChain(first) : P.verifyDisputeChain(first);
+    return v.ok ? { ok: true, head: v.head } : { ok: false, why: `its chain is broken at line ${v.broken_at} (${v.reason})` };
+  };
+  /**
+   * The resumes that stand: each recorded with its segment and the heads of
+   * the chains as the resume found them, every one of those heads the one
+   * the verified chain holds at that length. A bare time, a boundary the
+   * chain does not hold, or a line of the anchor that says less, relaxes
+   * nothing.
+   */
+  const resumes = anchorResumes
+    .map((raw) => {
+      const r = (raw && typeof raw === "object" ? raw : {}) as { at?: unknown; segment?: unknown; heads?: Record<string, { lines?: unknown; head?: unknown } | undefined> };
+      const at = typeof r.at === "string" && Number.isFinite(Date.parse(r.at)) ? r.at : null;
+      if (!at || !Number.isInteger(r.segment) || Number(r.segment) < 1 || !r.heads || typeof r.heads !== "object") return null;
+      const heads: Partial<Record<ChainKind, ChainHead>> = {};
+      for (const kind of ["ledger", "attestations", "disputes"] as const) {
+        const h = r.heads[kind];
+        if (!h) continue;
+        const lines = Number(h.lines);
+        if (!Number.isInteger(lines) || lines < 0) return null;
+        const got = prefixOf(kind, lines);
+        if (!got.ok || got.head !== ((h.head as string | null | undefined) ?? null)) return null;
+        heads[kind] = { lines, head: got.head };
+      }
+      return heads.ledger ? { at, heads } : null;
+    })
+    .filter((x): x is { at: string; heads: Partial<Record<ChainKind, ChainHead>> } => x !== null);
+  const resumedAfter = (at: string) => resumes.some((r) => Date.parse(r.at) > Date.parse(at));
   // The registers custody seals by head and count, which a release binds through the verdict it binds.
   // In a run, each is verified whole as well (every event's hash over its
   // content); a package's may carry redacted events, which its own check
@@ -524,13 +576,20 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
     return { what, key, text, now: hashFieldHead(text), broken: v && !v.ok ? `broken at line ${v.broken_at} (${v.reason})` : null };
   });
   /**
-   * A chain bound as it is, or, when the anchor names a resume after the
-   * release, as a prefix: the head it bound still at its place. What the
-   * continuation appended is the next release's to bind.
+   * A chain bound as it is, or, when a resume that stands was recorded after
+   * the release at a boundary at or past what it binds, as a prefix. Either
+   * way the lines it binds are verified, never read by their hash fields.
+   * What the continuation appended is the next release's to bind.
    */
-  const asBound = (what: string, bound: ChainHead, now: ChainHead, text: string | null, at: string, bad: string[], parts: string[]) => {
-    if (bound.lines === now.lines && bound.head === now.head) return;
-    if (anchorResumes.some((r) => r > at) && now.lines > bound.lines && (bound.lines === 0 || hashFieldAt(text, bound.lines) === bound.head)) {
+  const asBound = (kind: ChainKind, what: string, bound: ChainHead, now: ChainHead, at: string, bad: string[], parts: string[]) => {
+    const got = prefixOf(kind, bound.lines);
+    if (!got.ok && bound.lines <= now.lines) {
+      bad.push(`${what} it binds does not verify: ${got.why}`);
+      return;
+    }
+    if (got.ok && got.head === bound.head && bound.lines === now.lines) return;
+    const resumed = resumes.some((r) => Date.parse(r.at) > Date.parse(at) && (r.heads[kind] ?? r.heads.ledger)!.lines >= bound.lines);
+    if (got.ok && got.head === bound.head && resumed && now.lines > bound.lines) {
       parts.push(`${what} it binds is a prefix of ${what} here (${bound.lines} of ${now.lines}): the run was resumed after it, and a later release binds the continuation`);
       return;
     }
@@ -604,7 +663,11 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
     }
     if (x.report?.markdown) {
       const md = held(x.report.markdown.path, x.report.markdown.sha256);
-      (md === "differs" ? bad : parts).push(`${x.report.markdown.path} ${md === "missing" ? "not here (left in the run)" : heldWord(md)}`);
+      // The run resumed after it and its continuation wrote its own report: the bytes this one binds were kept, by their digest.
+      const keptAt = `${RELEASE_DIR}/bound/${x.report.markdown.sha256}`;
+      if ((md === "differs" || md === "missing") && /^[0-9a-f]{64}$/.test(x.report.markdown.sha256) && resumedAfter(x.at) && held(keptAt, x.report.markdown.sha256) === "matches") {
+        parts.push(`${x.report.markdown.path} as bound, kept at ${keptAt} when the run was resumed (the continuation's report is the next release's)`);
+      } else (md === "differs" ? bad : parts).push(`${x.report.markdown.path} ${md === "missing" ? "not here (left in the run)" : heldWord(md)}`);
     }
     // The verdict and the index it names: the current ones, or ones custody kept aside.
     if (x.custody) {
@@ -651,9 +714,9 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
     // The chains custody sealed: as they are; the growing ones as prefixes.
     const c = x.chains;
     if (c) {
-      if (c.ledger) asBound("the ledger", { lines: c.ledger.entries, head: c.ledger.head }, ledgerNow, ledgerText, x.at, bad, parts);
-      if (c.attestations) asBound("the attestations", c.attestations, attNow, attText, x.at, bad, parts);
-      if (c.disputes) asBound("the disputes", c.disputes, dispNow, dispText, x.at, bad, parts);
+      if (c.ledger) asBound("ledger", "the ledger", { lines: c.ledger.entries, head: c.ledger.head }, ledgerNow, x.at, bad, parts);
+      if (c.attestations) asBound("attestations", "the attestations", c.attestations, attNow, x.at, bad, parts);
+      if (c.disputes) asBound("disputes", "the disputes", c.disputes, dispNow, x.at, bad, parts);
       if (c.trace?.lines) {
         const at = traceHashes[c.trace.lines - 1];
         const broke = prevChainBreak(traceText ?? "", c.trace.lines);

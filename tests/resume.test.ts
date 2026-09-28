@@ -12,50 +12,22 @@
  * change, not a prefix.
  */
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import * as P from "../extensions/protocol.ts";
 import * as Q from "../extensions/questions.ts";
 import { lastHandoff, prepareResume } from "../scripts/resume.ts";
 import { custodyAnchorPath, takeCustody, verifyCustody } from "../scripts/custody.ts";
-import { draftRelease, runContext, signRelease } from "../scripts/release.ts";
-import { runLayout, verifyReleases } from "../scripts/release-record.ts";
-import { appendReview, reviewsPath } from "../scripts/review.ts";
+import { draftRelease, signRelease } from "../scripts/release.ts";
+import { verifyReleases } from "../scripts/release-record.ts";
+import { appendReview } from "../scripts/review.ts";
 import { enrollExaminer } from "../scripts/signers.ts";
-import { cleanUp, stoppedRun, type StoppedRun } from "./release-fixture.ts";
+import { cleanUp, stoppedRun } from "./release-fixture.ts";
+import { asEnded, asTeam, continueWith, ctxOf, layout, quiet } from "./resume-fixture.ts";
 
 after(cleanUp);
-const quiet = () => undefined;
-const sha = (s: string) => createHash("sha256").update(s).digest("hex");
-const ctxOf = (r: StoppedRun) => runContext(r.root, { run: r.id, runsDir: r.runs });
-const layout = (r: StoppedRun) => runLayout(r.root, reviewsPath(r.runs, r.id), custodyAnchorPath(r.root));
-
-/** The team and the budget a real run has, for the fixture run; a sentinel, and the seats' done files. */
-async function asTeam(r: StoppedRun) {
-  await writeFile(join(r.root, "team.json"), JSON.stringify({ swarm_id: r.id, n: 2, agents: [{ id: "a0", role: "worker" }, { id: "a1", role: "worker" }] }));
-}
-async function asEnded(r: StoppedRun, o: { minutesAgo?: number; wall?: number } = {}) {
-  await asTeam(r);
-  const started = new Date(Date.now() - (o.minutesAgo ?? 20) * 60_000).toISOString();
-  await writeFile(join(r.root, "budget.json"), JSON.stringify(P.normalizeBudget({ cap_usd: 5, wall_clock_minutes: o.wall ?? 60, started_at: started, stop_policy: "cap-pause", agents: {} })));
-  await mkdir(join(r.root, "done", "agents"), { recursive: true });
-  await writeFile(join(r.root, P.SENTINEL_REL), `---\nby: a0\noutput: work/report.md\nreason: finished\noutcome: completed\nat: ${new Date(Date.now() - 60_000).toISOString()}\n---\n`);
-  await writeFile(join(r.root, "done", "agents", "a0.done"), "---\nby: a0\n---\n");
-}
-
-/** The continuation's work: one entry in the ledger, and its record line on the trace, chained as the fixture's are. */
-async function continueWith(r: StoppedRun, value: string) {
-  const res = await P.recordEntry({ sandboxRoot: r.root, agentId: "a1" }, { kind: "ioc", value, source: "the continuation", evidence: "read again after the resume" } as P.LedgerInput);
-  assert.ok(res.ok, (res as { reason?: string }).reason);
-  if (!res.ok) return;
-  const trace = (await readFile(join(r.root, P.EVENTS_REL), "utf8")).trimEnd().split("\n");
-  const line = JSON.stringify({ ts: new Date().toISOString(), agent: "a1", tool: "record", args: {}, result: { ok: true, seq: res.entry.seq, hash: res.entry.hash }, prev: sha(trace.at(-1)!) });
-  await appendFile(join(r.root, P.EVENTS_REL), `${line}\n`);
-}
-
 test("resume after a stop: the end moved aside whole, the wall clock counted on, a resume still over a cap refused with nothing changed", async () => {
   const r = await stoppedRun({ id: "sres1" });
   await asEnded(r, { minutesAgo: 90, wall: 30 });

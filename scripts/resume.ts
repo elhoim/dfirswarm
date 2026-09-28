@@ -147,8 +147,23 @@ export async function prepareResume(sandbox: string, o: { run: string; by: strin
   }
   next.resumes = [...(next.resumes ?? []), { at: new Date(now).toISOString(), by: o.by, from }];
   if (Object.keys(set).length) next.cap_changes = [...(next.cap_changes ?? []), { at: new Date(now).toISOString(), by: `${o.by} (resume)`, set, caps: P.capFingerprint(P.normalizeBudget(next)) }];
-  // What marked the end, moved whole.
   const k = await nextSegment(sandbox);
+  // The report bytes every release binds, kept by their digest before the
+  // continuation can write its own report: an earlier release verifies
+  // against them (content-addressed and read-only; a second resume keeps
+  // nothing twice).
+  const kept = await keepBoundBytes(sandbox);
+  // Anchored beside the run, outside it, first: the resume is on record, at
+  // the chains' heads as it found them, before anything of the run moves.
+  // An anchor that cannot be written refuses the resume with nothing changed.
+  const heads = await chainHeads(sandbox);
+  try {
+    anchorResume(sandbox, { at: new Date(now).toISOString(), by: o.by, from, segment: k, heads });
+  } catch (err) {
+    throw new Error(`the resume could not be anchored beside the run (${(err as Error).message}); nothing was changed`);
+  }
+  const anchored = custodyAnchorPath(sandbox);
+  // What marked the end, moved whole.
   const hist = join(sandbox, "done", "history", String(k));
   const moved: string[] = [];
   const move = async (from: string, to: string) => {
@@ -194,18 +209,41 @@ export async function prepareResume(sandbox: string, o: { run: string; by: strin
     await writeFile(file, body, "utf8");
     handoffs.push({ agent: a.id, kind: h.kind, ...(h.kind ? { chars: h.text.length, at: h.at } : {}), file: `inbox/${a.id}/resume.md`, sha256: sha256(body) });
   }
-  // Anchored beside the run, outside it: what an earlier seal is held to as a prefix.
-  const heads = await chainHeads(sandbox);
-  let anchored: string | null = null;
-  try {
-    anchorResume(sandbox, { at: new Date(now).toISOString(), by: o.by, from, segment: k, heads });
-    anchored = custodyAnchorPath(sandbox);
-  } catch (err) {
-    anchored = `not anchored: ${(err as Error).message}`;
-  }
   // The follow-ups recorded after the done (the question register's after_done) are the continuation's work: one event names them.
   const followUps = await Q.continueFollowUps(sandbox, { segment: k, by: o.by }).catch((err: Error) => `not taken up: ${err.message}`);
-  return { ok: true, run: o.run, from, segment: k, moved, wall_used_minutes: Math.round(used / 60_000), set, handoffs, anchored, heads, follow_ups: followUps };
+  return { ok: true, run: o.run, from, segment: k, moved, wall_used_minutes: Math.round(used / 60_000), set, handoffs, anchored, heads, kept, follow_ups: followUps };
+}
+
+/**
+ * Keep the report bytes each release binds (its record's report.markdown,
+ * the swarm's work/report.md as it was sealed) at release/bound/<sha256>,
+ * read-only, when the file still holds them. What was kept, by path.
+ */
+export async function keepBoundBytes(sandbox: string): Promise<string[]> {
+  const out: string[] = [];
+  const dir = join(sandbox, "release");
+  for (const v of (await readdir(dir).catch(() => [] as string[])).filter((n) => /^v\d+$/.test(n))) {
+    let rec: { report?: { markdown?: { path?: string; sha256?: string } | null } };
+    try {
+      rec = JSON.parse(await readFile(join(dir, v, "release.json"), "utf8"));
+    } catch {
+      continue;
+    }
+    const md = rec.report?.markdown;
+    if (!md?.path || !md.sha256 || !/^[0-9a-f]{64}$/.test(md.sha256)) continue;
+    const target = join(dir, "bound", md.sha256);
+    const rel = `release/bound/${md.sha256}`;
+    if (existsSync(target)) {
+      if (!out.includes(rel)) out.push(rel);
+      continue;
+    }
+    const bytes = await readFile(join(sandbox, md.path)).catch(() => null);
+    if (!bytes || sha256(bytes) !== md.sha256) continue;
+    await mkdir(join(dir, "bound"), { recursive: true });
+    await writeFile(target, bytes, { mode: 0o444, flag: "wx" });
+    out.push(rel);
+  }
+  return out;
 }
 
 /** The chains' lengths and heads as the resume found them: what the first segment's seals are prefixes of. */
