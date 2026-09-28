@@ -150,9 +150,12 @@ Leads (the swarm's open work)
   record it again. Whatever question it was added for, every standing bounded_negative,
   not_determinable or partial answer whose coverage was recorded before it is stale too (the
   board post and the finish line name each, `evidence_stale`): examine the new evidence for it,
-  record a coverage record at the new revision (the new evidence among its objects, or why it
-  cannot bear on the question) that another seat reviews, and record the answer again citing it,
-  or citing an entry that rests on the new evidence. An established answer is not staled.
+  record a coverage record that names the import among its objects (with what the search found
+  there, or why it cannot bear on the question), have another seat review it, and record the
+  answer again citing it; or cite an entry resting on the new evidence that another seat has
+  attested. A one-line finding nobody else looked at clears nothing, and a review made before the
+  evidence came does not count for the answer recorded after it. An established answer is not
+  staled. The operator may accept the question's limits after the evidence came instead.
 - A lead is one agent's at a time: one a peer holds is theirs, so post to them. A holder silent
   past the stale limit, with no job running and not compacting, shows as stale; the first claim
   marks it and tells the holder, and a claim after a short grace takes it over. A turn that ended
@@ -403,8 +406,8 @@ Ledger (only when `record` is in your tool list)
   `confidence` with `confidence_why`, `contrary` (the entries that say otherwise), `limitations`
   (the limitation entries that bound it), `alternatives_open` and `would_change`. The run records
   an answer's confidence high only when it is established and another seat attested it
-  established, naming the alternatives it weighed; any other high is recorded medium, and the
-  report and the metrics show the recorded one. For a person's
+  established, naming the alternatives it weighed with the entries that rule them out; any other
+  high is recorded medium, and the report and the metrics show the recorded one. For a person's
   question `contrary` or `contrary_none_why` is required, and `result: premise_not_supported` says
   the question's premise does not hold. An answer to a question of the register says which
   revision it answers (`question_rev`, as `questions` shows it); once the question has been

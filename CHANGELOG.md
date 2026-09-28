@@ -42,6 +42,36 @@ first calibration run").
   (`acquisition_none_why`); the answers check warns (`WARN:`, `warnings`)
   when it does neither, and holds nothing.
 
+### Fixed: what the Fable review of the fix batches found
+
+An independent review of the first three fix batches found four rules
+that held less than their words said and ten smaller gaps.
+
+- **A correction re-points a closure only when nothing but what it cites
+  changed.** For a finding, an event, a hypothesis or a search every field
+  but what it cites is its conclusion now (a time, what it indicates, a
+  status, a completion, an attribution, the value exactly); an answer
+  keeps its rule.
+- **A review by the seat offered it is recorded** after its offer ran out
+  and moved on, the other seat's offer withdrawn; the register accepts a
+  reviewer's own offer rather than withdrawing it "reviewed by" itself; a
+  taken review whose seat is done or dead lapses at once.
+- **Stale evidence clears only on a reviewed examination**: a coverage
+  record naming the import, or an entry resting on it, attested by another
+  seat; a review made before the evidence came does not count for an answer
+  recorded after it. The operator's acceptance made after the evidence came
+  excuses it, and its reply says what the finish line still holds.
+- **An alternative counts only with the entries that rule it out** and a
+  real explanation; filler records the attest a best candidate.
+- **The recorded confidence reads only answers recorded under its rule**
+  (`confidence_rule`): a finished run's highs read as declared, and say so.
+- A confirmation made again after a compaction keeps its batch, and a batch
+  confirms what stands after a second correction; an objection to another
+  file is a late item; a quiet refusal says "NOT RECORDED:" and its trace
+  row keeps the whole record; "at each", "each time" and a doubled space no
+  longer mark a completeness claim; a leading form wrapped in "I want you
+  to" or "the goal is to" is flagged.
+
 ### Fixed: what the round-13 scoring showed
 
 - **The store sweep: a negative is checked against everything the run
