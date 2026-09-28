@@ -115,7 +115,7 @@ export const NET_FETCH_EVENTS = ["net_fetch_started", "net_fetch_refused"] as co
 
 export type FetchCall = { grant?: unknown; method?: unknown; url?: unknown; body?: unknown };
 
-export type Hop = { url: string; address: string | null; status?: number; location?: string; followed?: boolean; refused?: string };
+export type Hop = { url: string; address: string | null; status?: number; location?: string; followed?: boolean; refused?: string; sent_at?: string };
 
 export type FetchAnswer = {
   ok: boolean;
@@ -183,7 +183,12 @@ export class FetchService {
   private readonly keys: Map<string, string>;
   private readonly inFlight = new Map<string, number>();
   private total = 0;
+  /** The latest slot reserved per host: the estimate a use is refused by when its wait would be too long. */
   private readonly lastAt = new Map<string, number>();
+  /** When the last request to each host actually left: the interval is held against this. */
+  private readonly sentAt = new Map<string, number>();
+  /** Each host's turn: the wait for its interval, and the send, taken one at a time. */
+  private readonly hostTurn = new Map<string, Promise<void>>();
   /** Attempts this process has under way (grant#n): never reconciled as orphans. */
   private readonly active = new Set<string>();
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
@@ -309,7 +314,7 @@ export class FetchService {
     // read the same last time), then waited for, or refused.
     if (g.rate?.min_interval_ms) {
       const now = this.now();
-      const slot = Math.max(now, (this.lastAt.get(g.host) ?? 0) + g.rate.min_interval_ms);
+      const slot = Math.max(now, (this.lastAt.get(g.host) ?? 0) + g.rate.min_interval_ms, (this.sentAt.get(g.host) ?? 0) + g.rate.min_interval_ms);
       const wait = slot - now;
       if (wait > this.limits.rate_wait_max_ms) return this.refuse(principal, g.id, "rate", `${g.host} is asked at most once every ${g.rate.min_interval_ms} ms; try again in ${Math.ceil(wait / 1000)} s`);
       this.lastAt.set(g.host, slot);
@@ -386,8 +391,13 @@ export class FetchService {
       }
       // IPv4 first, then the rest: the address checked is the address connected to.
       const address = [...addresses.filter((a) => isIP(a) === 4), ...addresses.filter((a) => isIP(a) === 6)][0];
-      const once = await this.once(g, u, address);
-      hops.push({ url, address, ...(once.status !== undefined ? { status: once.status } : {}), ...(once.location ? { location: once.location } : {}) });
+      const paced = await this.paced(g, host, () => this.once(g, u, address));
+      if ("stale" in paced) {
+        hops.push({ url, address, refused: paced.stale.code });
+        return { hops, complete: false, stopped: paced.stale.code, error: `${paced.stale.detail}, while it waited for the adapter's interval: nothing was sent` };
+      }
+      const once = await paced.result;
+      hops.push({ url, address, sent_at: new Date(paced.sentAt).toISOString(), ...(once.status !== undefined ? { status: once.status } : {}), ...(once.location ? { location: once.location } : {}) });
       const terminal = once.error || once.refused || once.oversize || once.stopped || once.complete !== true;
       if (terminal || once.status === undefined || !REDIRECT.has(once.status) || !once.location) {
         if (terminal && once.location) hops[hops.length - 1].followed = false;
@@ -401,6 +411,44 @@ export class FetchService {
       }
       hops[hops.length - 1].followed = true;
       url = next.url;
+    }
+  }
+
+  /**
+   * The adapter's interval, held against when the last request to the host
+   * actually left: under the host's turn (one at a time, in this process,
+   * which is the only one that fetches), the wait for what is left of the
+   * interval, the grant held to again after a wait, then the request started
+   * and its send time noted before the turn passes. A reservation made
+   * earlier only estimates the wait; this is what keeps the interval.
+   */
+  private async paced<T>(g: GrantRecord, host: string, send: () => Promise<T>): Promise<{ result: Promise<T>; sentAt: number } | { stale: { code: string; detail: string } }> {
+    const interval = g.rate?.min_interval_ms ?? 0;
+    // The host whose interval the grant carries; a referral hop to another host is its own.
+    if (!interval || host !== g.host.toLowerCase()) {
+      const sentAt = this.now();
+      return { result: send(), sentAt };
+    }
+    const before = this.hostTurn.get(host) ?? Promise.resolve();
+    let pass!: () => void;
+    const mine = new Promise<void>((r) => (pass = r));
+    const tail = before.then(() => mine);
+    this.hostTurn.set(host, tail);
+    await before;
+    try {
+      const wait = (this.sentAt.get(host) ?? 0) + interval - this.now();
+      if (wait > 0) {
+        await new Promise((r) => setTimeout(r, wait));
+        const stale = await this.invalid(g.id);
+        if (stale) return { stale };
+      }
+      const sentAt = this.now();
+      this.sentAt.set(host, sentAt);
+      // Started here, under the turn: the request is created and sent before the next one reads the time.
+      return { result: send(), sentAt };
+    } finally {
+      pass();
+      if (this.hostTurn.get(host) === tail) this.hostTurn.delete(host);
     }
   }
 

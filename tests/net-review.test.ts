@@ -262,7 +262,47 @@ test("8: concurrent requests cannot pass the grant quota, and concurrent fetches
   const both = await Promise.all([use(s, "seat:a1", { grant: g1 }), use(s, "seat:a1", { grant: g2 })]);
   assert.ok(both.every((b) => b.ok), JSON.stringify(both));
   assert.equal(at.length, 2);
-  assert.ok(Math.abs(at[1] - at[0]) >= 550, `two requests ${Math.abs(at[1] - at[0])} ms apart under a 600 ms interval`);
+  // When each request left, as the service records it: the interval is held
+  // exactly against the previous send. The server's own clock adds each
+  // connection's handshake, so it is held only to what cannot vary: the
+  // later request cannot arrive before it was sent.
+  const sent = both.map((b) => Date.parse(b.hops?.[0]?.sent_at ?? "")).sort((x, y) => x - y);
+  assert.ok(sent.every(Number.isFinite), `each hop records when it was sent: ${JSON.stringify(both.map((b) => b.hops))}`);
+  assert.ok(sent[1] - sent[0] >= 600, `two requests left ${sent[1] - sent[0]} ms apart under a 600 ms interval`);
+  assert.ok(Math.max(...at) - sent[0] >= 600, `the server saw the second request ${Math.max(...at) - sent[0]} ms after the first left`);
+});
+
+test("8b: the interval is held against when the previous request actually left, not when its slot was reserved", async (t) => {
+  if (await skipWithoutTls(t)) return;
+  const at: number[] = [];
+  const s = await setup({ route: () => (req, res) => { at.push(Date.now()); json({ ok: 1 })(req, res); } });
+  // The first request's name answers slowly: it leaves 400 ms after its slot.
+  let first = true;
+  const svc = new FetchService(s.config, {
+    quiet: true,
+    ca: (await testCert())!.cert,
+    resolve: async () => {
+      if (first) {
+        first = false;
+        await new Promise((r) => setTimeout(r, 400));
+      }
+      return ["127.0.0.1"];
+    },
+    addressAllowed: () => true,
+    connectPort: () => s.mock.port,
+  });
+  const g1 = await grant(s, { rate: { min_interval_ms: 600 } });
+  const g2 = await grant(s, { rate: { min_interval_ms: 600 } });
+  const one = svc.fetch("seat:a1", principalToken(s.config.secret, "seat:a1"), { grant: g1 });
+  await new Promise((r) => setTimeout(r, 20));
+  const two = svc.fetch("seat:a1", principalToken(s.config.secret, "seat:a1"), { grant: g2 });
+  const both = await Promise.all([one, two]);
+  assert.ok(both.every((b) => b.ok), JSON.stringify(both));
+  const sent = both.map((b) => Date.parse(b.hops?.[0]?.sent_at ?? ""));
+  assert.ok(sent.every(Number.isFinite), JSON.stringify(both.map((b) => b.hops)));
+  assert.ok(sent[1] - sent[0] >= 600, `the second request left ${sent[1] - sent[0]} ms after the first actually left, under a 600 ms interval`);
+  assert.equal(at.length, 2);
+  assert.ok(at[1] - sent[0] >= 600, `the server saw the second request ${at[1] - sent[0]} ms after the first left`);
 });
 
 // --- 9 -------------------------------------------------------------------------------------------
