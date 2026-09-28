@@ -6,6 +6,57 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: the question register, after an independent review
+
+- **The hub is the register's one writer.** While a run's hub is up, the
+  operator's acts (the CLI and the console, through `swarm.sh`) are handed
+  to its admin socket, which prepares each again from what was said, checks
+  its signature against that statement, commits and delivers it. With no
+  hub the CLI admits the act itself under the registers' lock; the
+  acknowledgement says which (`admitted_by`).
+- **A signature is carried by the act it signs.** A signed act and its
+  signature are one event, written whole or not at all; the act is kept
+  exactly as signed (a signed amendment that repeats the text no longer
+  invalidates itself). `verify` attributes a signature to the person the
+  signed act names, requires the key it carries to have the fingerprint the
+  act names and this install's enrolment of that person to hold it, fails on
+  `wrong-principal` as well as `bad`, and fails on any act that says it is
+  signed and carries none. `lead direct --sign` is refused: a directive is
+  not signed.
+- **An act's effects survive a crash.** What a withdrawal or a triage
+  decision implies on the lead register is reconciled from the chain under
+  the lock, in the act's own hold and at every later act and header. A lead
+  opened from a finding (`record(kind=finding, opens)`) counts as holding it:
+  a withdrawal sends it to triage. A board post or a hint's hypothesis that
+  failed leaves the revision pending, with no `deliver` event, and is tried
+  again; a delivery finds its post by an exact key in its front matter,
+  never by its words. Clarification requests and answers are derived from
+  the chain and published once, keyed by `C-n`.
+- **Answers are bound to a revision.** An answer to a register question
+  names the revision it answers (`question_rev`, in the ledger's hashed
+  core), checked under the registers' lock: a revision the question has
+  moved past is refused, and one is required once the question has been
+  amended. Staleness is by revision, not by time, and an unchanged answer is
+  reaffirmed for a new revision as a correction naming it.
+- **After the done.** Admitting a proposed question, or amending one into a
+  new revision, after the run's done is a follow-up, as a new question
+  already was; `resume` takes the follow-ups up as the continuation's work
+  (a `continue` event) and puts the reserved `run_resumed` line on the
+  trace. A withdrawn goal question is no longer required by the answers
+  check or the finish line (its outcome is `withdrawn`).
+- **One standing, whatever the name.** `question:N`, `N` and `QN` are held
+  to a question's scope and withdrawal as `Q-N` is. The first claim of a
+  directive under a person's question no lead has framed states the
+  proposition and its negation (`lead_claim`). A goal question is seeded
+  whole, through its later paragraphs and sub-questions.
+- **Release verification** holds the lead and question registers to the
+  heads the custody verdict it binds sealed: appended to is a prefix; cut,
+  deleted or rewritten fails.
+- **The console.** An amend or accept form keeps the revision it was
+  opened on until you refresh it; a proposed question is a full card, with
+  its clarifications to answer; the newest post is carried whole, clamped
+  on screen with the whole in its title.
+
 ### Added: results and the negative bar; caps pause the run; a run that ended can be resumed
 
 - **Results.** A question's answer carries `result`: `established`,
