@@ -32,7 +32,7 @@ after(async () => {
 });
 
 // Every name by itself: a TLS client takes no wildcard over a single-label suffix (*.test).
-const HOSTS = ["rdap.org", "rdap.verisign.com", "crt.sh", "nominatim.openstreetmap.org", "www.youtube.com", "stat.ripe.net", "hashlookup.circl.lu", "www.virustotal.com", "pastebin.com", "example.org", "*.example.org", ...["short", "evil", "elsewhere", "slow", "big", "chunked", "internal", "metadata", "v6", "ula", "mapped", "mixed", "rebind", "bit"].map((h) => `${h}.test`)];
+const HOSTS = ["rdap.org", "rdap.verisign.com", "crt.sh", "nominatim.openstreetmap.org", "www.youtube.com", "stat.ripe.net", "hashlookup.circl.lu", "www.virustotal.com", "pastebin.com", "example.org", "*.example.org", ...["short", "evil", "elsewhere", "slow", "big", "chunked", "internal", "metadata", "v6", "ula", "mapped", "mixed", "rebind", "bit", "late"].map((h) => `${h}.test`)];
 
 /** A self-signed certificate for the mock's names, made once; null where openssl is missing. */
 let certs: { key: string; cert: string } | null | undefined;

@@ -51,7 +51,7 @@
 import { spawn } from "node:child_process";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest, createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP, type Socket } from "node:net";
@@ -60,7 +60,7 @@ import type { TLSSocket } from "node:tls";
 import { fileURLToPath } from "node:url";
 import * as P from "../extensions/protocol.ts";
 import { loadCatalogue, publicAddress, type Catalogue } from "./net-adapters.ts";
-import { appendNetEvents, captureDir, captureRef, CAPTURES_REL, FETCH_LOCK, FETCH_LOG, grantStatus, leadOpen, rawDir, readNetState, type GrantRecord, type NetDraft } from "./net-grants.ts";
+import { appendNetEvents, captureDir, captureRef, CAPTURES_REL, FETCH_LOCK, FETCH_LOG, grantStatus, leadOpen, parseCaptureRef, rawDir, readNetState, type GrantRecord, type NetDraft } from "./net-grants.ts";
 import { denyCategory, loadDeny, type DenyList } from "./net-adapters.ts";
 
 export type FetchLimits = {
@@ -157,6 +157,8 @@ export type FetchOptions = {
 };
 
 const REDIRECT = new Set([301, 302, 303, 307, 308]);
+/** Why a grant no longer stands: said as itself, never as an audit failure. */
+const GRANT_REFUSALS = new Set(["expired", "revoked", "lead_closed", "no_grant", "grants_unreadable", "exhausted"]);
 
 function writeAtomic(path: string, text: string, mode = 0o644): void {
   const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
@@ -182,6 +184,9 @@ export class FetchService {
   private readonly inFlight = new Map<string, number>();
   private total = 0;
   private readonly lastAt = new Map<string, number>();
+  /** Attempts this process has under way (grant#n): never reconciled as orphans. */
+  private readonly active = new Set<string>();
+  private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private readonly refusalsThisMinute = new Map<string, { minute: number; count: number }>();
   private server: Server | null = null;
   port = 0;
@@ -282,17 +287,41 @@ export class FetchService {
     }
   }
 
+  /**
+   * Whether a grant still stands right now (its time, its revocation, its
+   * lead), read from the chain again: asked before the attempt is written,
+   * after every DNS answer, during the transfer, and before anything is
+   * published. A use count is not asked here: the use under way is counted.
+   */
+  private async invalid(id: string): Promise<{ code: string; detail: string } | null> {
+    const s = await readNetState(this.S);
+    if (!s.chain.ok) return { code: "grants_unreadable", detail: `network/grants.jsonl's chain is broken at line ${s.chain.broken_at}` };
+    const g = s.grants.get(id);
+    if (!g) return { code: "no_grant", detail: `${id} is not a grant of this run` };
+    const st = grantStatus({ ...g, max_requests: null }, s, this.now());
+    if (st.status === "revoked" || st.status === "expired") return { code: st.status, detail: `${id} is ${st.status}: ${st.why}` };
+    if (!(await leadOpen(this.S, g.lead))) return { code: "lead_closed", detail: `${id}'s lead ${g.lead} is closed` };
+    return null;
+  }
+
   private async use(principal: string, g: GrantRecord): Promise<FetchAnswer> {
-    // The adapter's rate, per host: wait a little, or refuse.
+    // The adapter's rate, per host: a slot reserved at once (no two fetches
+    // read the same last time), then waited for, or refused.
     if (g.rate?.min_interval_ms) {
-      const wait = (this.lastAt.get(g.host) ?? 0) + g.rate.min_interval_ms - this.now();
+      const now = this.now();
+      const slot = Math.max(now, (this.lastAt.get(g.host) ?? 0) + g.rate.min_interval_ms);
+      const wait = slot - now;
       if (wait > this.limits.rate_wait_max_ms) return this.refuse(principal, g.id, "rate", `${g.host} is asked at most once every ${g.rate.min_interval_ms} ms; try again in ${Math.ceil(wait / 1000)} s`);
+      this.lastAt.set(g.host, slot);
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
     }
-    // The attempt, counted and written before anything leaves, under the log's lock.
+    // The attempt, counted and written before anything leaves, under the
+    // log's lock, with the grant held to again there: a wait is no licence.
     let n = 0;
     try {
       await P.withNamedLock(this.S, FETCH_LOCK, async (held) => {
+        const stale = await this.invalid(g.id);
+        if (stale) throw Object.assign(new Error(stale.detail), { code: stale.code });
         const fresh = await readNetState(this.S);
         const uses = (fresh.fetches.get(g.id) ?? []).length;
         if (g.max_requests !== null && uses >= g.max_requests) throw Object.assign(new Error(`${g.id}'s ${g.max_requests} use${g.max_requests === 1 ? " is" : "s are"} taken`), { code: "exhausted" });
@@ -300,16 +329,33 @@ export class FetchService {
         await appendNetEvents(this.S, FETCH_LOG, [{ by: "fetch-service", ev: "attempt", grant: g.id, n, capture: captureRef(g.k, n), principal, method: g.method, url: g.url }], held);
       });
     } catch (err) {
-      const code = (err as { code?: string }).code === "exhausted" ? "exhausted" : "audit_unavailable";
-      return this.refuse(principal, g.id, code, code === "exhausted" ? (err as Error).message : `the fetch could not be recorded (${(err as Error).message}); nothing unrecorded is fetched`);
+      const code = (err as { code?: string }).code ?? "";
+      if (GRANT_REFUSALS.has(code)) return this.refuse(principal, g.id, code, (err as Error).message);
+      return this.refuse(principal, g.id, "audit_unavailable", `the fetch could not be recorded (${(err as Error).message}); nothing unrecorded is fetched`);
     }
-    this.lastAt.set(g.host, this.now());
-    const started = new Date(this.now()).toISOString();
-    const r = await this.carry(g);
-    return this.seal(principal, g, n, started, r);
+    const key = `${g.id}#${n}`;
+    this.active.add(key);
+    try {
+      const started = new Date(this.now()).toISOString();
+      const r = await this.carry(g);
+      // Held to once more before anything is published: an answer that came
+      // after the grant ended is kept, never delivered.
+      if (!r.stopped && !r.oversize && !r.refused) {
+        const stale = await this.invalid(g.id);
+        if (stale) Object.assign(r, { stopped: stale.code, complete: false, error: `${stale.detail}, before the answer was published` });
+      }
+      return await this.seal(principal, g, n, started, r);
+    } finally {
+      this.active.delete(key);
+    }
   }
 
-  /** The request, and the referral hops an adapter declares; each hop's address checked. */
+  /**
+   * The request, and the referral hops an adapter declares; each hop's
+   * address checked, and the grant held to after each DNS answer. Only a
+   * whole, in-limit redirect is ever followed: an oversize, broken or stopped
+   * answer ends the fetch where it is.
+   */
   private async carry(g: GrantRecord): Promise<Carried> {
     const hops: Hop[] = [];
     let url = g.url as string;
@@ -324,6 +370,11 @@ export class FetchService {
         hops.push({ url, address: null, refused: `dns: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}` });
         return { hops, error: `the name ${host} did not resolve (${(err as NodeJS.ErrnoException).code ?? (err as Error).message})` };
       }
+      const stale = await this.invalid(g.id);
+      if (stale) {
+        hops.push({ url, address: null, refused: stale.code });
+        return { hops, complete: false, stopped: stale.code, error: `${stale.detail}, before the connection: nothing was sent` };
+      }
       if (!addresses.length) {
         hops.push({ url, address: null, refused: "dns: no address" });
         return { hops, error: `the name ${host} resolved to no address` };
@@ -337,7 +388,11 @@ export class FetchService {
       const address = [...addresses.filter((a) => isIP(a) === 4), ...addresses.filter((a) => isIP(a) === 6)][0];
       const once = await this.once(g, u, address);
       hops.push({ url, address, ...(once.status !== undefined ? { status: once.status } : {}), ...(once.location ? { location: once.location } : {}) });
-      if (once.error || once.refused || once.status === undefined || !REDIRECT.has(once.status) || !once.location) return { ...once, hops };
+      const terminal = once.error || once.refused || once.oversize || once.stopped || once.complete !== true;
+      if (terminal || once.status === undefined || !REDIRECT.has(once.status) || !once.location) {
+        if (terminal && once.location) hops[hops.length - 1].followed = false;
+        return { ...once, hops, ...(terminal && once.location ? { not_followed: "the answer was not whole (oversize, broken off or stopped): nothing past it is followed" } : {}) };
+      }
       // A redirect: followed only to an adapter's declared referral host, asking the same thing.
       const next = this.referral(g, original, u, once.location);
       if (!next.ok || hop + 1 >= (g.redirects?.max ?? 0)) {
@@ -453,12 +508,10 @@ export class FetchService {
       }, this.limits.deadline_ms);
       // The grant, held to while the bytes come: revoked or expired, the transfer stops.
       const recheck = setInterval(() => {
-        void readNetState(this.S).then((s) => {
-          const now = s.grants.get(g.id);
-          const st = now ? grantStatus({ ...now, max_requests: null }, s, this.now()).status : "revoked";
-          if (st === "revoked" || st === "expired") {
+        void this.invalid(g.id).then((stale) => {
+          if (stale) {
             req.destroy();
-            finish({ body: Buffer.concat(chunks), complete: false, stopped: st, error: `${g.id} was ${st} during the transfer` });
+            finish({ body: Buffer.concat(chunks), complete: false, stopped: stale.code, error: `${stale.detail}, during the transfer` });
           }
         }).catch(() => undefined);
       }, this.limits.recheck_ms);
@@ -468,37 +521,53 @@ export class FetchService {
     });
   }
 
-  /** Seal what came as store/net/<k>/<n>/, write the result line, and answer. */
+  /**
+   * Seal what came. What is delivered, and the record of the request and the
+   * answer, are built in a staging directory beside the run and published as
+   * store/net/<k>/<n>/ only once the result line is written: a capture no
+   * seat can read until the log says what it is. Whatever was received and
+   * not delivered (a filtered adapter's whole response and its headers, a
+   * partial body, an answer withheld because its grant ended) is kept beside
+   * the run in <run>.netraw/<k>/<n>/, in no VM's reach, and the capture
+   * records each by its size and hash.
+   */
   private async seal(principal: string, g: GrantRecord, n: number, started: string, r: Carried): Promise<FetchAnswer> {
     const ref = captureRef(g.k, n);
     const dir = captureDir(this.S, g.k, n);
     const finishedAt = new Date(this.now()).toISOString();
-    mkdirSync(dir, { recursive: true });
-    const files: Array<{ name: string; bytes: Buffer }> = [];
     const whole = r.complete === true && !r.oversize && !r.refused && !r.stopped;
-    // A HEAD has no body; an oversize body was never kept; a transfer that
-    // broke off or was stopped keeps what came, as body.partial, and
-    // delivers none of it.
+    // A HEAD has no body; an oversize body was never kept.
     const body = g.method === "HEAD" || r.oversize || !r.body ? null : r.body;
-    const partial = body && !whole ? body : null;
-    // An adapter that delivers only some fields: those, as JSON; the whole response kept outside every VM.
+    const keepDir = join(rawDir(this.S), String(g.k), String(n));
+    const kept: Array<{ name: string; bytes: number; sha256: string; what: string }> = [];
+    const keep = (name: string, bytes: Buffer, what: string) => {
+      mkdirSync(keepDir, { recursive: true, mode: 0o700 });
+      writeFileSync(join(keepDir, name), bytes, { mode: 0o400 });
+      kept.push({ name, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), what });
+    };
     let delivered: Buffer | null = whole ? body : null;
-    let raw: { sha256: string; bytes: number; path: string } | null = null;
     let note: string | undefined;
-    if (delivered && g.response_fields?.length) {
-      const body = delivered;
-      const rawPath = join(rawDir(this.S), String(g.k), String(n), "body");
-      mkdirSync(dirname(rawPath), { recursive: true, mode: 0o700 });
-      writeFileSync(rawPath, body, { mode: 0o400 });
-      raw = { sha256: createHash("sha256").update(body).digest("hex"), bytes: body.length, path: rawPath };
-      try {
-        const parsed = JSON.parse(body.toString("utf8")) as Record<string, unknown>;
-        const kept = Object.fromEntries(g.response_fields.filter((f) => f in parsed).map((f) => [f, parsed[f]]));
-        delivered = Buffer.from(`${JSON.stringify(kept, null, 2)}\n`);
-        note = `only ${g.response_fields.join(", ")} delivered, as the adapter says; the whole response is kept outside the VMs (${raw.bytes} bytes, sha256 ${raw.sha256})`;
-      } catch {
-        delivered = null;
-        note = "the response is not JSON, so none of its fields could be delivered; it is kept whole outside the VMs";
+    if (body && !whole) keep(r.complete && r.stopped ? "body.withheld" : "body.partial", body, r.complete && r.stopped ? "the answer, withheld because its grant ended before it was published" : `the bytes received before the transfer ${r.stopped ? `was stopped (${r.stopped})` : "broke off"}`);
+    let headers = r.headers ?? [];
+    if (g.response_fields?.length) {
+      // An adapter that delivers only some fields delivers those, as JSON; the
+      // whole response and all its headers stay beside the run.
+      if (headers.length) {
+        keep("headers.json", Buffer.from(`${JSON.stringify(headers, null, 2)}\n`), "every header of the answer");
+        headers = headers.filter(([k]) => ["content-type", "content-length", "date"].includes(k.toLowerCase()));
+      }
+      if (delivered) {
+        const raw = delivered;
+        keep("body", raw, "the whole response");
+        try {
+          const parsed = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
+          const fields = Object.fromEntries(g.response_fields.filter((f) => f in parsed).map((f) => [f, parsed[f]]));
+          delivered = Buffer.from(`${JSON.stringify(fields, null, 2)}\n`);
+          note = `only ${g.response_fields.join(", ")} delivered, as the adapter says; the whole response is kept beside the run, outside the VMs (${raw.length} bytes, sha256 ${createHash("sha256").update(raw).digest("hex")})`;
+        } catch {
+          delivered = null;
+          note = "the response is not JSON, so none of its fields could be delivered; it is kept whole beside the run, outside the VMs";
+        }
       }
     }
     const exposed: Array<{ what: string; category: string }> = [];
@@ -513,36 +582,23 @@ export class FetchService {
       const cat = denyCategory(host, this.deny);
       if (cat) exposed.push({ what: `a redirect to ${h.location}`, category: cat.category });
     }
-    const request = {
-      capture: ref,
-      grant: g.id,
-      n,
-      principal,
-      adapter: g.adapter,
-      method: g.method,
-      url: g.url,
-      lead: g.lead,
-      sent_headers: r.sent ?? [],
-      address: r.address ?? null,
-      hops: r.hops,
-      ...(r.tls ? { tls: r.tls } : {}),
-      started_at: started,
-    };
+    const request = { capture: ref, grant: g.id, n, principal, adapter: g.adapter, method: g.method, url: g.url, lead: g.lead, sent_headers: r.sent ?? [], address: r.address ?? null, hops: r.hops, ...(r.tls ? { tls: r.tls } : {}), started_at: started };
     const response = {
       status: r.status ?? null,
-      headers: r.headers ?? [],
+      headers,
+      ...(g.response_fields?.length && (r.headers ?? []).length ? { headers_note: "only the content type, length and date; every header is kept beside the run" } : {}),
       finished_at: finishedAt,
-      complete: r.complete,
+      complete: whole,
       ...(r.error ? { error: r.error } : {}),
       ...(r.refused ? { refused: r.refused } : {}),
       ...(r.oversize ? { oversize: r.oversize, refused: { code: "oversize", detail: "the body is larger than the grant's limit: refused whole, never kept in part" } } : {}),
       ...(r.stopped ? { stopped: r.stopped } : {}),
       ...(r.location ? { location: r.location, followed: false, ...(r.not_followed ? { why_not_followed: r.not_followed } : {}) } : {}),
     };
+    const files: Array<{ name: string; bytes: Buffer }> = [];
     files.push({ name: "request.json", bytes: Buffer.from(`${JSON.stringify(request, null, 2)}\n`) });
     files.push({ name: "response.json", bytes: Buffer.from(`${JSON.stringify(response, null, 2)}\n`) });
     if (delivered) files.push({ name: "body", bytes: delivered });
-    if (partial) files.push({ name: "body.partial", bytes: partial });
     const sha = delivered ? createHash("sha256").update(delivered).digest("hex") : undefined;
     const capture = {
       ref,
@@ -556,10 +612,10 @@ export class FetchService {
       complete: whole,
       delivered: Boolean(delivered),
       bytes: delivered?.length ?? 0,
-      ...(partial ? { partial: { bytes: partial.length, sha256: createHash("sha256").update(partial).digest("hex"), why: r.stopped ? `stopped: ${r.stopped}` : r.error ?? "incomplete" } } : {}),
       ...(sha ? { sha256: sha } : {}),
-      ...(raw ? { raw } : {}),
+      ...(kept.length ? { kept: kept.map((x) => ({ ...x, where: `<run>.netraw/${g.k}/${n}/${x.name}` })) } : {}),
       ...(r.oversize ? { oversize: r.oversize } : {}),
+      ...(r.stopped ? { stopped: r.stopped } : {}),
       ...(r.error ? { error: r.error } : {}),
       ...(note ? { note } : {}),
       external: "external material: collected now from a third party; an examiner records what it establishes. Its hash proves these bytes, not their truth or their fit to the time of the events",
@@ -567,7 +623,6 @@ export class FetchService {
       finished_at: finishedAt,
     };
     files.push({ name: "capture.json", bytes: Buffer.from(`${JSON.stringify(capture, null, 2)}\n`) });
-    for (const f of files) writeFileSync(join(dir, f.name), f.bytes, { mode: 0o444 });
     const manifest = {
       v: 1,
       job: ref,
@@ -578,44 +633,71 @@ export class FetchService {
       rejected: [],
       totals: { files: files.length, bytes: files.reduce((a, f) => a + f.bytes.length, 0) },
     };
-    writeFileSync(join(dir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o444 });
-    try {
-      chmodSync(dir, 0o555);
-    } catch {
-      // the files are read-only; the directory's mode is a second fence
-    }
+    const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
+    const staging = join(rawDir(this.S), ".staging", `${g.k}-${n}-${randomBytes(4).toString("hex")}`);
+    mkdirSync(staging, { recursive: true, mode: 0o700 });
+    for (const f of files) writeFileSync(join(staging, f.name), f.bytes, { mode: 0o444 });
+    writeFileSync(join(staging, "manifest.json"), manifestText, { mode: 0o444 });
     const refused = r.refused ?? (r.oversize ? { code: "oversize", detail: `larger than the grant's ${g.max_bytes} bytes: refused whole` } : undefined);
-    await this.log([
-      {
-        by: "fetch-service",
-        ev: "result",
-        grant: g.id,
-        n,
-        capture: ref,
-        ...(r.status !== undefined ? { status: r.status } : {}),
-        ...(r.error ? { error: r.error } : {}),
-        ...(refused ? { refused } : {}),
-        bytes: delivered?.length ?? 0,
-        ...(sha ? { sha256: sha } : {}),
-        complete: capture.complete,
-        delivered: capture.delivered,
-        manifest_sha256: createHash("sha256").update(`${JSON.stringify(manifest, null, 2)}\n`).digest("hex"),
-        ...(exposed.length ? { exposed } : {}),
-      },
-    ]).catch((err: Error) => {
-      if (!this.o.quiet) process.stderr.write(`net-fetch: the result of ${ref} could not be written: ${err.message}\n`);
-    });
+    // The result line first, durably: without it nothing is published.
+    try {
+      await this.log([
+        {
+          by: "fetch-service",
+          ev: "result",
+          grant: g.id,
+          n,
+          capture: ref,
+          ...(r.status !== undefined ? { status: r.status } : {}),
+          ...(r.error ? { error: r.error } : {}),
+          ...(refused ? { refused } : {}),
+          ...(r.stopped ? { stopped: r.stopped } : {}),
+          bytes: delivered?.length ?? 0,
+          ...(sha ? { sha256: sha } : {}),
+          complete: whole,
+          delivered: Boolean(delivered),
+          published: true,
+          manifest_sha256: createHash("sha256").update(manifestText).digest("hex"),
+          ...(kept.length ? { kept: kept.map((x) => ({ name: x.name, bytes: x.bytes, sha256: x.sha256 })) } : {}),
+          ...(exposed.length ? { exposed } : {}),
+        },
+      ]);
+    } catch (err) {
+      // Not recorded, so not published: what came is kept beside the run, and the attempt waits for its outcome (reconcile).
+      mkdirSync(keepDir, { recursive: true, mode: 0o700 });
+      try {
+        renameSync(staging, join(keepDir, "unpublished"));
+      } catch {
+        // left in the staging directory, beside the run all the same
+      }
+      if (!this.o.quiet) process.stderr.write(`net-fetch: the result of ${ref} could not be written (${(err as Error).message}); nothing was published\n`);
+      return { ok: false, grant: g.id, capture: ref, n, delivered: false, complete: false, code: "audit_unavailable", detail: `the outcome of ${ref} could not be recorded (${(err as Error).message}): nothing was published or delivered, and the answer is kept beside the run` };
+    }
+    try {
+      mkdirSync(dirname(dir), { recursive: true });
+      try {
+        renameSync(staging, dir);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
+        cpSync(staging, dir, { recursive: true });
+        rmSync(staging, { recursive: true, force: true });
+      }
+      chmodSync(dir, 0o555);
+    } catch (err) {
+      if (!this.o.quiet) process.stderr.write(`net-fetch: ${ref} was recorded and could not be published: ${(err as Error).message}\n`);
+      return { ok: false, grant: g.id, capture: ref, n, delivered: false, complete: false, code: "publish_failed", detail: `${ref} was recorded and could not be published (${(err as Error).message}); custody names it missing` };
+    }
     const answer: FetchAnswer = {
-      ok: whole && (capture.delivered || g.method === "HEAD"),
+      ok: whole && (Boolean(delivered) || g.method === "HEAD"),
       grant: g.id,
       capture: ref,
       n,
       ...(r.status !== undefined ? { status: r.status } : {}),
-      headers: r.headers ?? [],
+      headers,
       bytes: delivered?.length ?? 0,
       ...(sha ? { sha256: sha } : {}),
-      complete: capture.complete,
-      delivered: capture.delivered,
+      complete: whole,
+      delivered: Boolean(delivered),
       ...(delivered ? { path: `${CAPTURES_REL}/${g.k}/${n}/body` } : {}),
       hops: r.hops,
       ...(r.location ? { location: new URL(r.location, r.hops.at(-1)?.url ?? (g.url as string)).href } : {}),
@@ -628,6 +710,43 @@ export class FetchService {
       answer.detail = note ?? "nothing was delivered";
     }
     return answer;
+  }
+
+  /**
+   * Give every attempt its outcome: an attempt line with no result (the
+   * service stopped mid-fetch, or its result line could not be written) gets
+   * one saying so, and that nothing of it was published. Run when the
+   * service starts, and then for attempts older than a fetch can take.
+   */
+  async reconcile(olderThanMs = 0): Promise<number> {
+    return P.withNamedLock(this.S, FETCH_LOCK, async (held) => {
+      const s = await readNetState(this.S);
+      if (!s.fetchChain.ok) return 0;
+      const drafts: NetDraft[] = [];
+      for (const list of s.fetches.values()) {
+        for (const f of list) {
+          if (f.result || this.active.has(`${f.grant}#${f.n}`)) continue;
+          if (this.now() - Date.parse(f.at) < olderThanMs) continue;
+          const c = parseCaptureRef(f.capture);
+          const unpublished = c ? join(rawDir(this.S), String(c.k), String(c.n), "unpublished") : null;
+          drafts.push({
+            by: "fetch-service",
+            ev: "result",
+            grant: f.grant,
+            n: f.n,
+            capture: f.capture,
+            error: "no outcome was recorded for this attempt (the fetch service stopped during it, or its result line could not be written); nothing of it was published or delivered",
+            complete: false,
+            delivered: false,
+            published: false,
+            reconciled: true,
+            ...(unpublished && existsSync(unpublished) ? { kept: [{ name: "unpublished", what: "the capture as it was built, beside the run" }] } : {}),
+          });
+        }
+      }
+      if (drafts.length) await appendNetEvents(this.S, FETCH_LOG, drafts, held);
+      return drafts.length;
+    });
   }
 
   // --- the server ------------------------------------------------------------------------------
@@ -679,7 +798,13 @@ export class FetchService {
     send(answer.code === "bad_token" ? 401 : answer.ok ? 200 : answer.capture ? 502 : 403, answer);
   }
 
-  listen(port = this.config.port ?? 0, host = this.config.host ?? "127.0.0.1"): Promise<number> {
+  async listen(port = this.config.port ?? 0, host = this.config.host ?? "127.0.0.1"): Promise<number> {
+    // Attempts a service before this one left without an outcome get theirs first.
+    await this.reconcile().catch((err: Error) => {
+      if (!this.o.quiet) process.stderr.write(`net-fetch: attempts could not be reconciled: ${err.message}\n`);
+    });
+    this.reconcileTimer = setInterval(() => void this.reconcile(this.limits.deadline_ms * 4 + 60_000).catch(() => undefined), 60_000);
+    this.reconcileTimer.unref?.();
     const server = createServer((req, res) => {
       this.handle(req, res).catch((err) => {
         if (!res.headersSent) {
@@ -712,6 +837,7 @@ export class FetchService {
   }
 
   close(): Promise<void> {
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer);
     return new Promise((done) => {
       if (!this.server) return done();
       this.server.close(() => done());

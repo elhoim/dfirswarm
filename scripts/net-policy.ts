@@ -179,6 +179,71 @@ function intIn(v: unknown, dflt: number, min: number, max: number, name: string)
 }
 
 /**
+ * What would leave the run, as its parts: each value, the URL, the host,
+ * and every path segment, query key and query value, each as sent and as a
+ * server would read it percent-decoded (twice, for a value encoded twice).
+ * A credential pattern or a sensitive value is looked for in all of them.
+ */
+export function outgoingComponents(raw: string[]): string[] {
+  const out = new Set<string>();
+  const decode = (v: string): string[] => {
+    const seen = [v];
+    let cur = v;
+    for (let i = 0; i < 2; i += 1) {
+      let next: string;
+      try {
+        next = decodeURIComponent(cur.replace(/\+/g, " "));
+      } catch {
+        break;
+      }
+      if (next === cur) break;
+      seen.push(next);
+      cur = next;
+    }
+    return seen;
+  };
+  for (const v of raw) {
+    for (const d of decode(v)) out.add(d);
+    let u: URL | null = null;
+    try {
+      u = /^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? new URL(v) : null;
+    } catch {
+      u = null;
+    }
+    if (!u) continue;
+    out.add(u.hostname);
+    for (const seg of u.pathname.split("/")) if (seg) for (const d of decode(seg)) out.add(d);
+    for (const kv of u.search.replace(/^\?/, "").split("&")) {
+      if (!kv) continue;
+      const eq = kv.indexOf("=");
+      for (const part of eq < 0 ? [kv] : [kv.slice(0, eq), kv.slice(eq + 1)]) for (const d of decode(part)) out.add(d);
+    }
+  }
+  return [...out];
+}
+
+/**
+ * The values a sensitive entry holds, as tokens: a password, an account, a
+ * host, a key, a hash, an address. A word of prose is not one: a token
+ * counts when it has a digit, a capital after its first letter, or a . _ @
+ * : / + = - inside it, or is sixteen characters or longer; and a whole entry
+ * with no space in it is a value itself. Lowercased, six characters at least.
+ */
+export function sensitiveValues(texts: string[]): string[] {
+  const out = new Set<string>();
+  for (const t of texts) {
+    const whole = t.trim();
+    if (whole && !/\s/.test(whole) && whole.length >= 4) out.add(whole.toLowerCase());
+    for (const raw of t.split(/[\s,;"'()<>[\]{}|`]+/)) {
+      const tok = raw.replace(/^[.:!?/=+-]+|[.:!?/=+-]+$/g, "");
+      if (tok.length < 6) continue;
+      if (/\d/.test(tok) || /[A-Z]/.test(tok.slice(1)) || /[._@:/+=-]/.test(tok) || tok.length >= 16) out.add(tok.toLowerCase());
+    }
+  }
+  return [...out];
+}
+
+/**
  * Decide one request. Every step runs in order; the first that refuses
  * decides. `env.override` (an operator's grant) waives the overridable
  * reasons, records them, and goes on.
@@ -377,10 +442,11 @@ export async function evaluate(input: NetRequestInput, principal: Principal, env
     if (d) return d;
   }
 
-  // 5. credentials and sensitive values, in what would leave.
+  // 5. credentials and sensitive values, in what would leave: every
+  // component as it is sent and as a server would decode it.
   {
     const r: Reason[] = [];
-    const outgoing = [...Object.values(n.params), ...(n.url ? [n.url] : []), ...(n.host && n.type === "socket" ? [n.host] : [])];
+    const outgoing = outgoingComponents([...Object.values(n.params), ...(n.url ? [n.url] : []), ...(n.host ? [n.host] : [])]);
     for (const v of outgoing) {
       const hit = credentialPattern(v);
       if (hit) {
@@ -392,14 +458,15 @@ export async function evaluate(input: NetRequestInput, principal: Principal, env
       const keys = credentialParams(built.path, env.deny);
       if (keys.length) r.push(reason(5, "credential_param", `the URL carries ${keys.join(", ")}, which names a credential or a session: never sent`, false));
     }
-    const sensitive = await env.sensitive();
-    for (const v of outgoing) {
-      if (v.length < 4) continue;
-      const lv = v.toLowerCase();
-      if (sensitive.some((s) => s.toLowerCase().includes(lv))) {
-        r.push(reason(5, "sensitive_value", "what would leave is part of an entry this run marked sensitive: never sent", false));
-        break;
-      }
+    // A value the run marked sensitive, anywhere inside what would leave;
+    // and what the agent gave, found inside a sensitive entry.
+    const texts = await env.sensitive();
+    const values = sensitiveValues(texts);
+    const lowered = outgoing.map((v) => v.toLowerCase());
+    const hit = values.find((sv) => lowered.some((o) => o.includes(sv)));
+    const given = Object.values(n.params).filter((v) => v.length >= 4).map((v) => v.toLowerCase());
+    if (hit || given.some((v) => texts.some((t) => t.toLowerCase().includes(v)))) {
+      r.push(reason(5, "sensitive_value", "what would leave holds a value this run marked sensitive, or is part of an entry it marked sensitive: never sent", false));
     }
     const d = await settle(r, host);
     if (d) return d;

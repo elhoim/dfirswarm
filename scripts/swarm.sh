@@ -4496,6 +4496,17 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
   if [[ -n "$pack_dirs" ]]; then
     pack_secrets_plan "$pack_dirs" "${isolation:-host}" "$allow_pack_secrets" "$local_only"
   fi
+  # The egress the run would really have, held to its case policy: not only
+  # --allow-host, but the package index --allow-install adds and a pack's
+  # secret hosts, each reached with no grant, no check and no capture.
+  local egress_out egress_install=""
+  [[ "$allow_install" -eq 1 && "$install_hosts" -eq 1 && "$local_only" -eq 0 ]] && egress_install="pypi.org,files.pythonhosted.org"
+  if ! egress_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/case-policy.ts" check-egress --policy-json "${CASE_POLICY_JSON:-null}" \
+      --allow-hosts "$allow_hosts" --install-hosts "$egress_install" --pack-hosts "$(jq -r '[.[]?.hosts[]?] | join(",")' <<<"$PACK_SECRETS_VM")")"; then
+    echo "BLOCKER: the run's direct egress does not fit its case policy:" >&2
+    jq -r '(.conflicts // [])[] | "  \(.)"' <<<"$egress_out" >&2 2>/dev/null || printf '%s\n' "$egress_out" >&2
+    exit 2
+  fi
   if [[ -n "$tools_from" && ! -d "$tools_from" ]]; then
     echo "BLOCKER: --tools-from $tools_from is not a directory." >&2
     exit 2
@@ -9279,6 +9290,18 @@ PY
       mkdir -p "$out/network/captures/$cap_rel"
       for f in "$cap_dir"*; do pkg_copy "$f" "$out/network/captures/$cap_rel$(basename "$f")"; done
     done
+    # What was received and not delivered to any seat (a filtered adapter's
+    # whole response and headers, a partial or withheld body, a capture whose
+    # outcome could not be recorded): kept beside the run, outside every VM,
+    # and handed over to the examiner here, each file as its capture's
+    # record hashed it.
+    local raw_dir raw_rel
+    for raw_dir in "$sandbox.netraw"/*/*/ "$sandbox.netraw"/*/*/unpublished/; do
+      [[ -d "$raw_dir" ]] || continue
+      raw_rel="${raw_dir#"$sandbox.netraw/"}"
+      mkdir -p "$out/network/raw/$raw_rel"
+      for f in "$raw_dir"*; do pkg_copy "$f" "$out/network/raw/$raw_rel$(basename "$f")"; done
+    done
   fi
   for f in inputs.json toolbox.json toolchain.json team.json budget.json layout.json netguard.allow SWARM.md custody.json; do
     pkg_copy "$sandbox/$f" "$out/$f"
@@ -10140,6 +10163,8 @@ cmd_purge() {
   fi
   hub="$(hub_dir_of "$sandbox" 2>/dev/null || true)"
   [[ -n "$hub" && -d "$hub" ]] && what+=("$hub")
+  # What the fetch service received and delivered to no seat, kept beside the run.
+  [[ -d "$sandbox.netraw" && ! -L "$sandbox.netraw" ]] && what+=("$sandbox.netraw")
   # In a --vm-snapshot-dir shared with other runs, only this run's disks.
   local agents=() a snap_files=()
   while IFS= read -r a; do [[ -n "$a" ]] && agents+=("$a"); done < <(jq -r '.agents[]? // empty' <<<"$rec")

@@ -131,10 +131,54 @@ function v4(ip: string): number[] {
 }
 
 /**
- * Whether an address is one the fetch service may connect to: public
- * unicast, never loopback, private, link-local (the cloud metadata address
- * with it), carrier-grade NAT, multicast, documentation, benchmarking or
- * reserved space, and never an IPv6 address that embeds one of those.
+ * An IPv6 address as its sixteen bytes, whatever its spelling (leading
+ * zeros, `::` anywhere, an embedded dotted IPv4 tail, a zone), or null.
+ * Classification reads these bytes, never the text: `64:ff9b::a00:1` and
+ * `0064:ff9b::a00:1` are one address.
+ */
+export function ipv6Bytes(ip: string): number[] | null {
+  let x = ip.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  const zone = x.indexOf("%");
+  if (zone >= 0) x = x.slice(0, zone);
+  if (isIP(x) !== 6) return null;
+  const groups = (part: string): number[] | null => {
+    if (!part) return [];
+    const out: number[] = [];
+    const items = part.split(":");
+    for (let i = 0; i < items.length; i += 1) {
+      const g = items[i];
+      if (i === items.length - 1 && g.includes(".")) {
+        if (isIP(g) !== 4) return null;
+        const [a, b, c, d] = v4(g);
+        out.push((a << 8) | b, (c << 8) | d);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+        out.push(Number.parseInt(g, 16));
+      }
+    }
+    return out;
+  };
+  const halves = x.split("::");
+  if (halves.length > 2) return null;
+  const head = groups(halves[0]);
+  const tail = halves.length === 2 ? groups(halves[1]) : [];
+  if (!head || !tail) return null;
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0 || head.length + fill + tail.length !== 8) return null;
+  const words = [...head, ...Array(fill).fill(0), ...tail];
+  return words.flatMap((w) => [(w >> 8) & 0xff, w & 0xff]);
+}
+
+/**
+ * Whether an address is one the fetch service may connect to, and a value
+ * that names the public internet: public unicast, never loopback, private,
+ * link-local (the cloud metadata address with it), carrier-grade NAT,
+ * multicast, documentation, benchmarking or reserved space. IPv6 is read by
+ * its bytes: only global unicast (2000::/3) is public, less the ranges in
+ * it that embed or stand for another address (6to4, Teredo and the rest of
+ * 2001::/23) or are documentation; every IPv4-mapped, -compatible or NAT64
+ * form (::ffff:0:0/96, ::/96, 64:ff9b::/96, 64:ff9b:1::/48) is outside
+ * 2000::/3 and so never public, whatever it embeds.
  */
 export function publicAddress(ip: string): boolean {
   const kind = isIP(ip);
@@ -153,21 +197,15 @@ export function publicAddress(ip: string): boolean {
     return true;
   }
   if (kind === 6) {
-    const x = ip.toLowerCase();
-    if (x === "::" || x === "::1") return false;
-    // An embedded IPv4 address (::ffff:10.0.0.1, ::10.0.0.1) is that address.
-    const tail = x.slice(x.lastIndexOf(":") + 1);
-    if (isIP(tail) === 4) return x.startsWith("::ffff:") ? publicAddress(tail) : false;
-    const first = Number.parseInt(x.split(":")[0] || "0", 16);
-    if ((first & 0xfe00) === 0xfc00) return false; // fc00::/7 unique local
-    if ((first & 0xffc0) === 0xfe80) return false; // fe80::/10 link-local
-    if ((first & 0xffc0) === 0xfec0) return false; // fec0::/10 site-local
-    if ((first & 0xff00) === 0xff00) return false; // multicast
-    if (x.startsWith("2001:db8:") || x.startsWith("2001:0db8:")) return false; // documentation
-    if (x.startsWith("64:ff9b:")) return false; // NAT64 carries an IPv4 address the check has not seen
-    if (x.startsWith("2002:")) return false; // 6to4 likewise
-    if (x.startsWith("2001:0:") || x.startsWith("2001:0000:")) return false; // Teredo
-    if (first === 0) return false; // ::/8 and the rest of the reserved space at the bottom
+    const b = ipv6Bytes(ip);
+    if (!b) return false;
+    if ((b[0] & 0xe0) !== 0x20) return false; // outside 2000::/3: loopback, unspecified, mapped, NAT64, ULA, link-local, multicast, reserved
+    const w0 = (b[0] << 8) | b[1];
+    const w1 = (b[2] << 8) | b[3];
+    if (w0 === 0x2002) return false; // 6to4 embeds an IPv4 address
+    if (w0 === 0x2001 && w1 < 0x0200) return false; // 2001::/23: Teredo, benchmarking, ORCHID and the other protocol assignments
+    if (w0 === 0x2001 && w1 === 0x0db8) return false; // documentation
+    if (w0 === 0x3fff && (w1 & 0xf000) === 0) return false; // 3fff::/20, documentation
     return true;
   }
   return false;

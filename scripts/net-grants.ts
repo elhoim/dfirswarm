@@ -27,7 +27,9 @@ import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeSync } f
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import * as L from "../extensions/leads.ts";
+import { operatorHostsSync } from "../extensions/leads.ts";
 import * as P from "../extensions/protocol.ts";
+import { parseAllowEntry } from "./vm.ts";
 
 export const NET_DIR = "network";
 export const GRANTS_LOG = "network/grants.jsonl";
@@ -182,7 +184,7 @@ export type FetchRecord = {
   method: string;
   url: string;
   at: string;
-  result?: { status?: number; error?: string; refused?: { code: string; detail: string }; bytes?: number; sha256?: string; complete: boolean; delivered: boolean; exposed?: Array<{ what: string; category: string }>; at: string };
+  result?: { status?: number; error?: string; refused?: { code: string; detail: string }; stopped?: string; bytes?: number; sha256?: string; complete: boolean; delivered: boolean; published: boolean; reconciled?: boolean; exposed?: Array<{ what: string; category: string }>; at: string };
 };
 
 export type NetState = {
@@ -287,7 +289,7 @@ export function foldNet(grantEvents: NetEvent[], fetchEvents: NetEvent[], chain:
       fetches.set(String(e.grant), list);
     } else if (e.ev === "result") {
       const f = (fetches.get(String(e.grant)) ?? []).find((x) => x.n === Number(e.n));
-      if (f) f.result = { ...(e.status !== undefined ? { status: Number(e.status) } : {}), ...(e.error ? { error: String(e.error) } : {}), ...(e.refused ? { refused: e.refused as { code: string; detail: string } } : {}), ...(e.bytes !== undefined ? { bytes: Number(e.bytes) } : {}), ...(e.sha256 ? { sha256: String(e.sha256) } : {}), complete: e.complete === true, delivered: e.delivered === true, ...(Array.isArray(e.exposed) ? { exposed: e.exposed as Array<{ what: string; category: string }> } : {}), at: e.at };
+      if (f) f.result = { ...(e.status !== undefined ? { status: Number(e.status) } : {}), ...(e.error ? { error: String(e.error) } : {}), ...(e.refused ? { refused: e.refused as { code: string; detail: string } } : {}), ...(e.bytes !== undefined ? { bytes: Number(e.bytes) } : {}), ...(e.sha256 ? { sha256: String(e.sha256) } : {}), complete: e.complete === true, delivered: e.delivered === true, published: e.published !== false, ...(e.stopped ? { stopped: String(e.stopped) } : {}), ...(e.reconciled ? { reconciled: true } : {}), ...(Array.isArray(e.exposed) ? { exposed: e.exposed as Array<{ what: string; category: string }> } : {}), at: e.at };
     } else if (e.ev === "refused") {
       refusals.push({ at: e.at, grant: (e.grant as string) ?? null, principal: String(e.principal ?? ""), code: String(e.code ?? ""), detail: String(e.detail ?? "") });
     }
@@ -333,26 +335,75 @@ export async function leadOpen(sandbox: string, lead: string | null): Promise<bo
 }
 
 /**
+ * One allowlist entry in one spelling: lowercase, no trailing dot, the port
+ * always named (`example.org:443`, `*.example.org:443`), so a host and its
+ * other spellings (`EXAMPLE.org`, `example.org:443`, `example.org.`) are one
+ * entry. Null for what is not an entry.
+ */
+export function canonicalAllowEntry(raw: string): string | null {
+  const text = raw.trim().toLowerCase().replace(/\.(?=:\d+$|$)/, "");
+  try {
+    const e = parseAllowEntry(text);
+    return `${e.kind === "suffix" ? `*${e.value}` : e.kind === "ip" && e.value.includes(":") ? `[${e.value}]` : e.value}:${e.port}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The socket grants in force for one requester's jobs (their hosts, as
  * allowlist entries): the operator's for every job ("jobs"), and those made
- * for a job of this requester; and the hosts whose socket grant was revoked.
- * A chain that does not verify gives nothing in force.
+ * for a job of this requester; and, canonical, every host a socket grant was
+ * ever made for and every one whose grant ended. A chain that does not
+ * verify gives nothing in force.
  */
-export function socketHostsInForce(sandbox: string, requester?: string, now = Date.now()): { hosts: string[]; revoked: Set<string> } {
+export function socketHostsInForce(sandbox: string, requester?: string, now = Date.now()): { hosts: string[]; revoked: Set<string>; governed: Set<string>; chain_ok: boolean } {
   const state = readNetStateSync(sandbox);
   const hosts: string[] = [];
   const revoked = new Set<string>();
-  if (!state.chain.ok) return { hosts, revoked };
+  const governed = new Set<string>();
+  if (!state.chain.ok) return { hosts, revoked, governed, chain_ok: false };
+  const live = new Set<string>();
   for (const g of state.grants.values()) {
     if (g.type !== "socket") continue;
-    if (requester !== undefined && g.principal !== "jobs" && g.principal !== `job-of:${requester}`) continue;
-    const entry = g.entry ?? (g.port === 443 ? g.host : `${g.host}:${g.port}`);
+    const entry = g.entry ?? `${g.host}:${g.port}`;
+    const canon = canonicalAllowEntry(entry) ?? entry;
+    governed.add(canon);
     const st = grantStatus(g, state, now).status;
-    if (st === "revoked" || st === "expired") revoked.add(entry);
-    else if (!hosts.includes(entry)) hosts.push(entry);
+    if (requester !== undefined && g.principal !== "jobs" && g.principal !== `job-of:${requester}`) continue;
+    if (st === "revoked" || st === "expired") revoked.add(canon);
+    else if (!live.has(canon)) {
+      live.add(canon);
+      hosts.push(entry);
+    }
   }
-  for (const h of hosts) revoked.delete(h);
-  return { hosts, revoked };
+  for (const h of live) revoked.delete(h);
+  return { hosts, revoked, governed, chain_ok: true };
+}
+
+/**
+ * The hosts a job's worker may reach with network=allowlist: the kickoff's
+ * allowlist, the socket grants in force for its requester, and an operator
+ * host line of the lead register only where no socket grant was ever made
+ * for that host in any spelling (a line from before grants): where one was,
+ * the grant decides. With a grants chain that does not verify, the kickoff's
+ * allowlist alone.
+ */
+export function jobNetworkHosts(sandbox: string, allowHosts: string[], requester: string, now = Date.now()): string[] {
+  const out = new Map<string, string>();
+  const add = (h: string) => {
+    const c = canonicalAllowEntry(h) ?? h;
+    if (!out.has(c)) out.set(c, h);
+  };
+  for (const h of allowHosts) add(h);
+  const sockets = socketHostsInForce(sandbox, requester, now);
+  if (!sockets.chain_ok) return [...out.values()];
+  for (const h of operatorHostsSync(sandbox)) {
+    const c = canonicalAllowEntry(h) ?? h;
+    if (!sockets.governed.has(c)) add(h);
+  }
+  for (const h of sockets.hosts) add(h);
+  return [...out.values()];
 }
 
 /** A capture's reference and where it is sealed. */
@@ -380,14 +431,25 @@ export function netLogsExist(sandbox: string): boolean {
 
 export type NetworkCheck = {
   grants: { lines: number; intact: boolean; detail: string };
-  fetches: { lines: number; intact: boolean; detail: string };
-  /** Each capture's files re-hashed against its manifest, and its manifest against the result line that sealed it. */
-  captures: { sealed: number; verified: number; mismatched: string[]; missing: string[] };
+  /** The fetch log; `unresolved` names each attempt with no outcome (custody fails until one is written). */
+  fetches: { lines: number; intact: boolean; detail: string; unresolved: string[] };
+  /**
+   * Each published capture's files re-hashed against its manifest, and its
+   * manifest against the result line that sealed it; what was kept beside
+   * the run (a filtered adapter's whole response, a partial or withheld
+   * body) against the hashes the result recorded. Captures whose outcome
+   * says they were not published are counted, not looked for.
+   */
+  captures: { sealed: number; verified: number; raw_verified: number; unpublished: number; mismatched: string[]; missing: string[] };
 };
 
+/** What each kept file beside the run is, in words. */
+const KEPT_WORDS: Record<string, string> = { body: "the whole response beside the run", "headers.json": "the whole headers beside the run", "body.partial": "the partial bytes beside the run", "body.withheld": "the withheld answer beside the run" };
+
 /**
- * Custody's look at the network records: both chains, and every capture
- * the fetch log says was sealed, re-hashed. Null for a run that made no
+ * Custody's look at the network records: both chains, every attempt given
+ * its outcome, every published capture re-hashed, and every file kept
+ * beside the run held to its recorded hash. Null for a run that made no
  * request. The seal is each chain's length and head, as custody holds the
  * lead register's.
  */
@@ -398,12 +460,20 @@ export async function checkNetwork(sandbox: string): Promise<{ check: NetworkChe
   const f = await readNetLog(S, FETCH_LOG);
   const gv = verifyNetChain(g.text);
   const fv = verifyNetChain(f.text);
-  const captures: NetworkCheck["captures"] = { sealed: 0, verified: 0, mismatched: [], missing: [] };
+  const captures: NetworkCheck["captures"] = { sealed: 0, verified: 0, raw_verified: 0, unpublished: 0, mismatched: [], missing: [] };
   const { createHash } = await import("node:crypto");
+  const sha = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
+  const outcome = new Set<string>();
+  for (const e of f.events) if (e.ev === "result" && typeof e.capture === "string") outcome.add(e.capture);
+  const unresolved = [...new Set(f.events.filter((e) => e.ev === "attempt" && typeof e.capture === "string" && !outcome.has(String(e.capture))).map((e) => String(e.capture)))];
   for (const e of f.events) {
     if (e.ev !== "result" || typeof e.capture !== "string") continue;
     const c = parseCaptureRef(e.capture);
     if (!c) continue;
+    if (e.published === false) {
+      captures.unpublished += 1;
+      continue;
+    }
     captures.sealed += 1;
     const dir = captureDir(S, c.k, c.n);
     const manifestText = await readFile(join(dir, "manifest.json"), "utf8").catch(() => null);
@@ -411,7 +481,7 @@ export async function checkNetwork(sandbox: string): Promise<{ check: NetworkChe
       captures.missing.push(`${e.capture} (no manifest)`);
       continue;
     }
-    if (typeof e.manifest_sha256 === "string" && createHash("sha256").update(manifestText).digest("hex") !== e.manifest_sha256) {
+    if (typeof e.manifest_sha256 === "string" && sha(manifestText) !== e.manifest_sha256) {
       captures.mismatched.push(`${e.capture}/manifest.json`);
       continue;
     }
@@ -423,7 +493,7 @@ export async function checkNetwork(sandbox: string): Promise<{ check: NetworkChe
         if (!bytes) {
           captures.missing.push(`${e.capture}/${file.path}`);
           ok = false;
-        } else if (createHash("sha256").update(bytes).digest("hex") !== file.sha256) {
+        } else if (sha(bytes) !== file.sha256) {
           captures.mismatched.push(`${e.capture}/${file.path}`);
           ok = false;
         }
@@ -433,7 +503,23 @@ export async function checkNetwork(sandbox: string): Promise<{ check: NetworkChe
       ok = false;
     }
     if (ok) captures.verified += 1;
+    // What was received and not delivered, beside the run.
+    const kept = Array.isArray(e.kept) ? (e.kept as Array<{ name: string; sha256?: string }>) : [];
+    let keptOk = kept.length > 0;
+    for (const k of kept) {
+      if (!k.sha256) continue;
+      const bytes = await readFile(join(rawDir(S), String(c.k), String(c.n), k.name)).catch(() => null);
+      const words = KEPT_WORDS[k.name] ?? `${k.name} beside the run`;
+      if (!bytes) {
+        captures.missing.push(`${e.capture} (${words})`);
+        keptOk = false;
+      } else if (sha(bytes) !== k.sha256) {
+        captures.mismatched.push(`${e.capture} (${words})`);
+        keptOk = false;
+      }
+    }
+    if (keptOk) captures.raw_verified += 1;
   }
   const said = (v: ReturnType<typeof verifyNetChain>, what: string) => ({ lines: v.total, intact: v.ok, detail: v.ok ? `${v.total} ${what}, chain intact` : `broken at line ${v.broken_at} (${v.reason})` });
-  return { check: { grants: said(gv, "events"), fetches: said(fv, "lines"), captures }, seal: { grants: { lines: gv.total, head: gv.head }, fetches: { lines: fv.total, head: fv.head } } };
+  return { check: { grants: said(gv, "events"), fetches: { ...said(fv, "lines"), unresolved }, captures }, seal: { grants: { lines: gv.total, head: gv.head }, fetches: { lines: fv.total, head: fv.head } } };
 }

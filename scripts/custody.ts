@@ -1998,7 +1998,8 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
   if (c.network) {
     const n = c.network;
     const bad = [...n.captures.mismatched, ...n.captures.missing];
-    parts.push(n.grants.intact && n.fetches.intact && !bad.length ? `network records: ${plural(n.grants.lines, "grant event")}, ${plural(n.fetches.lines, "fetch line")}, ${plural(n.captures.verified, "capture")} verified` : `NETWORK RECORDS DO NOT HOLD (${[...(n.grants.intact ? [] : [`grants: ${n.grants.detail}`]), ...(n.fetches.intact ? [] : [`fetches: ${n.fetches.detail}`]), ...(bad.length ? [`captures: ${bad.join(", ")}`] : [])].join("; ")})`);
+    const open = n.fetches.unresolved ?? [];
+    parts.push(n.grants.intact && n.fetches.intact && !bad.length && !open.length ? `network records: ${plural(n.grants.lines, "grant event")}, ${plural(n.fetches.lines, "fetch line")}, ${plural(n.captures.verified, "capture")} verified${n.captures.unpublished ? `, ${plural(n.captures.unpublished, "attempt")} recorded as not published` : ""}` : `NETWORK RECORDS DO NOT HOLD (${[...(n.grants.intact ? [] : [`grants: ${n.grants.detail}`]), ...(n.fetches.intact ? [] : [`fetches: ${n.fetches.detail}`]), ...(open.length ? [`attempts with no outcome: ${open.join(", ")}`] : []), ...(bad.length ? [`captures: ${bad.join(", ")}`] : [])].join("; ")})`);
   }
   if (c.operator && !c.operator.intact) parts.push(`OPERATOR AUDIT CHAIN BROKEN (${c.operator.detail})`);
   if (c.model_gateway) {

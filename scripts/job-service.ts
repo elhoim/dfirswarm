@@ -41,8 +41,7 @@ import { chooseImage, readImageRecords, type ImageChoice, type ImageRecord } fro
 import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolveScope, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
 import { CANARY_NAME, OBSERVE_GUEST, observedRun, observeWanted, readObservation } from "./job-observe.ts";
 import type { Mount, WorkerSpec } from "./vm.ts";
-import { operatorHostsSync } from "../extensions/leads.ts";
-import { socketHostsInForce } from "./net-grants.ts";
+import { jobNetworkHosts } from "./net-grants.ts";
 
 export type JobKind = "tool" | "command" | "recipe" | "detect" | "import";
 
@@ -1228,11 +1227,11 @@ export class JobService {
     // (swarm.sh lead <run> note L-n TEXT --allow-host HOST): an agent's own
     // VM keeps the network it booted with, and a job's worker is made new,
     // so this is where a host allowed while the run goes on is reached.
-    // The operator's socket grants (tier 2) for this job's requester, and
-    // none that was revoked: a host the operator took back is not given to a
-    // new worker, whether it came from a note or a grant.
-    const sockets = socketHostsInForce(this.S, job.requester.agent);
-    const hosts = [...new Set([...this.o.allowHosts, ...operatorHostsSync(this.S).filter((h) => !sockets.revoked.has(h)), ...sockets.hosts])];
+    // The operator's socket grants (tier 2) for this job's requester decide
+    // (net-grants.ts jobNetworkHosts): a host the operator took back is not
+    // given to a new worker in any spelling, and a note's host line counts
+    // only where no grant was ever made for that host.
+    const hosts = jobNetworkHosts(this.S, this.o.allowHosts, job.requester.agent);
     return hosts.length ? { mode: "hosts", hosts } : { mode: "off" };
   }
 

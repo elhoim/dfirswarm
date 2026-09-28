@@ -53,7 +53,64 @@ export function serviceFacts(sandbox: string): { port: number | null; keyed: str
 
 // --- what the engine reads on the host ------------------------------------------------------
 
-/** Each value's first ref whose bytes hold it: read on the host, streamed, case-insensitive for ASCII, UTF-8 and UTF-16LE. */
+/** A job's record as the hub projected it (store/jobs/<id>/job.json): read-only to every VM. */
+type JobFile = { id?: string; state?: string; status?: string; spec?: { kind?: string; command?: string; tool?: string; args?: unknown; inputs?: string[]; scope?: string; trigger?: string } };
+
+/** A declared input that reads a source of the run (the evidence, the catalogue, a capture, a job's output), never an agent's own files. */
+function sourceDeclaration(d: string): boolean {
+  const t = d.trim();
+  if (/^(input|member|net|job|sha256):/.test(t)) return true;
+  return /^(inputs|catalog)(\/|$)/.test(t) || /^store\/(net|jobs|blobs)\//.test(t);
+}
+
+/**
+ * What a cited object is worth as evidence of a value sent out: source bytes
+ * only. The evidence (`input:`), the catalogue (`member:`), a capture
+ * (`net:`) and the output of a job that is a derivation: a recipe, or a
+ * command or tool that declared the sources it read, whose own words (its
+ * command, its arguments) do not hold the value (a value its command wrote
+ * is authored, not derived). An agent's own file sealed (`import:`), a
+ * digest with no named origin, and a ledger entry's own words are not
+ * evidence: an entry counts through the objects it cites.
+ */
+async function evidenceSource(S: string, ref: string, values: string[]): Promise<{ ok: true; abs: string; excluded: Set<string> } | { ok: false; why: string }> {
+  const r = await resolveRef(S, ref).catch((err: Error) => ({ ok: false as const, ref, reason: err.message }));
+  if (!r.ok) return { ok: false, why: r.reason };
+  if (!r.path) return { ok: false, why: "it names no file" };
+  const excluded = new Set<string>();
+  if (r.kind === "import") return { ok: false, why: "an agent's own output, sealed: not a source of the run (cite what it was made from)" };
+  if (r.kind === "sha256" && !r.path.startsWith("inputs/")) return { ok: false, why: "a digest with no named origin: cite the input or the job output by its name, which says where the bytes came from" };
+  if (r.kind === "job") {
+    const id = /^job:([a-z0-9-]{1,64})/.exec(ref)?.[1] ?? "";
+    let job: JobFile | null = null;
+    try {
+      job = JSON.parse(await readFile(join(S, "store", "jobs", id, "job.json"), "utf8")) as JobFile;
+    } catch {
+      job = null;
+    }
+    if (!job?.spec) return { ok: false, why: `job ${id} has no record to say what it derived from` };
+    if (job.state !== "committed") return { ok: false, why: `job ${id} is ${job.state ?? "not committed"}` };
+    const kind = job.spec.kind ?? "";
+    if (kind === "import") return { ok: false, why: `job ${id} sealed an agent's own file: not a derivation from the evidence` };
+    if (kind === "command" || kind === "tool") {
+      const declared = job.spec.scope === "declared" ? job.spec.inputs ?? [] : [];
+      if (!declared.some(sourceDeclaration)) return { ok: false, why: `job ${id} declared no source it read (${job.spec.scope === "declared" ? "only an agent's own files" : "its inputs were left out or all"}): a job that declares the evidence it reads makes a derivation of it` };
+      const own = [job.spec.command ?? "", job.spec.tool ?? "", JSON.stringify(job.spec.args ?? {})].join("\n").toLowerCase();
+      for (const v of values) if (own.includes(v.toLowerCase())) excluded.add(v);
+    }
+  }
+  const abs = join(S, r.path.replace(/#\d+$/, ""));
+  const st = await stat(abs).catch(() => null);
+  if (!st?.isFile()) return { ok: false, why: "a directory or a whole output: cite the file that holds the value" };
+  return { ok: true, abs, excluded };
+}
+
+/**
+ * Each value's first cited source whose bytes hold it: read on the host,
+ * streamed, case-insensitive for ASCII, UTF-8 and UTF-16LE. Only source
+ * bytes count (evidenceSource): what an agent wrote, in a ledger entry's
+ * words or a job's command, never authorises what it would send.
+ */
 export async function evidenceCheck(sandbox: string, refs: string[], values: string[]): Promise<EvidenceCheck> {
   const S = resolve(sandbox);
   const found = new Map<string, string>();
@@ -64,12 +121,8 @@ export async function evidenceCheck(sandbox: string, refs: string[], values: str
     const lower = v.toLowerCase();
     return [Buffer.from(lower, "utf8").toString("latin1"), Buffer.from(lower, "utf16le").toString("latin1")];
   };
-  const scanText = (text: string, ref: string) => {
-    const hay = text.toLowerCase();
-    for (const v of wanted()) if (hay.includes(v.toLowerCase())) found.set(v, ref);
-  };
-  const scanFile = async (abs: string, ref: string) => {
-    const want = wanted();
+  const scanFile = async (abs: string, ref: string, excluded: Set<string>) => {
+    const want = wanted().filter((v) => !excluded.has(v));
     if (!want.length) return;
     const probes = want.map((v) => ({ v, n: needles(v) }));
     const overlap = Math.max(...probes.flatMap((p) => p.n.map((x) => x.length))) - 1;
@@ -95,16 +148,13 @@ export async function evidenceCheck(sandbox: string, refs: string[], values: str
         done();
       });
     });
+    for (const v of excluded) if (!found.has(v) && values.includes(v)) unreadable.push({ ref, why: `its job's own command or arguments name ${JSON.stringify(v)}: authored, not derived` });
   };
   const readObject = async (ref: string, via?: string) => {
-    const r = await resolveRef(S, ref).catch((err: Error) => ({ ok: false as const, ref, reason: err.message }));
     const name = via ? `${via} (through ${ref})` : ref;
-    if (!r.ok) return unreadable.push({ ref: name, why: r.reason });
-    if (!r.path) return unreadable.push({ ref: name, why: "it names no file" });
-    const abs = join(S, r.path);
-    const st = await stat(abs).catch(() => null);
-    if (!st?.isFile()) return unreadable.push({ ref: name, why: "a directory or a whole output: cite the file that holds the value" });
-    await scanFile(abs, name);
+    const src = await evidenceSource(S, ref, values);
+    if (!src.ok) return unreadable.push({ ref: name, why: src.why });
+    await scanFile(src.abs, name, src.excluded);
   };
   let ledger: P.LedgerEntry[] | null = null;
   for (const ref of refs) {
@@ -117,9 +167,10 @@ export async function evidenceCheck(sandbox: string, refs: string[], values: str
         unreadable.push({ ref, why: "no such entry" });
         continue;
       }
-      scanText([entry.value, entry.source ?? "", entry.evidence ?? "", ...(entry.locators ?? []).map((l) => `${l.ref} ${l.at}`)].join("\n"), ref);
-      // One step on: the objects the entry itself cites.
-      for (const sub of entry.refs ?? []) if (wanted().length && !sub.startsWith("unresolved:")) await readObject(sub, ref);
+      // Its words are an agent's; what it cites is what counts.
+      const cited = (entry.refs ?? []).filter((sub) => !sub.startsWith("unresolved:"));
+      if (!cited.length) unreadable.push({ ref, why: "an entry's own words are not evidence, and it cites no object of the run" });
+      for (const sub of cited) if (wanted().length) await readObject(sub, ref);
       continue;
     }
     await readObject(ref);
@@ -228,6 +279,21 @@ export async function requestAccess(sandbox: string, who: string, input: NetRequ
         input: { ...(norm ?? {}), purpose: decision.purpose, ...(typeof input.client_request_id === "string" ? { client_request_id: input.client_request_id } : {}) },
       },
     ];
+    // The quotas once more, under the lock that issues grants: a burst of
+    // requests evaluated at once cannot pass them together.
+    if (decision.decision === "granted" && decision.terms) {
+      const u = usageOf(state, principalText, who);
+      const over: Reason[] = [
+        ...(u.grants_in_force >= QUOTAS.grants_in_force ? [{ step: 8, rule: "quotas", code: "quota_grants_in_force", detail: `${u.grants_in_force} of your grants are in force (the limit is ${QUOTAS.grants_in_force}): use or let them lapse first`, overridable: false }] : []),
+        ...(u.requests_in_window >= QUOTAS.requests_in_window ? [{ step: 8, rule: "quotas", code: "quota_requests", detail: `${u.requests_in_window} requests from you in ${QUOTAS.window_minutes} minutes (the limit is ${QUOTAS.requests_in_window})`, overridable: false }] : []),
+        ...(u.run_grants >= QUOTAS.run_grants ? [{ step: 8, rule: "quotas", code: "quota_run", detail: `the run has made ${u.run_grants} grants (the limit is ${QUOTAS.run_grants})`, overridable: false }] : []),
+      ];
+      if (over.length) {
+        const id = `NR-${state.requests.size + 1}`;
+        await appendNetEvents(S, GRANTS_LOG, [drafts[0], { by: "policy", ev: "decide", request: id, decision: "denied", reasons: over, overridable: false }], held);
+        return { ok: false, decision: "denied", request: id, reasons: over, reason: reasonText(over), overridable: false, note: `${NOTE_DENIED} No operator item: a quota is not overridden by a grant.` };
+      }
+    }
     if (decision.decision === "granted" && decision.terms) {
       const k = state.grants.size + 1;
       const gid = `N-${k}`;
@@ -392,7 +458,7 @@ export async function recordCaptures(sandbox: string, only?: string): Promise<Ar
     if (!g) continue;
     for (const f of list) {
       if (only && f.capture !== only) continue;
-      if (!f.result) continue;
+      if (!f.result || !f.result.published) continue;
       // What a response exposed that the policy prohibits: recorded once. A
       // grant the operator made over a category denial exposed that
       // category by its own terms.
@@ -770,56 +836,118 @@ export function jobOfPrincipal(principal: string): string | null {
 }
 
 /**
- * External lineage: every capture, every job that read one (declared it in
- * its inputs, or fetched it under a grant), and every ledger entry that
- * cites any of them, transitively. What rests on external material stays
- * external through each derivation, and says so.
+ * External lineage: every capture, every job that could read one or its
+ * derivations, and every ledger entry that rests on any of them,
+ * transitively. What a job could read is taken from what it resolved (its
+ * scope manifest: each object's path and digest), never from how it spelled
+ * it: `store/net/1/1/body` is `net:1/1`, and a copy of a capture's bytes is
+ * that capture by its digest. A job whose scope was broad (inputs left out
+ * or all) could read every capture sealed before it started, and is marked
+ * so. A job that fetched under a grant is external by what it fetched.
  */
 export async function externalLineage(sandbox: string): Promise<{ captures: Set<string>; jobs: Map<string, string[]>; entries: Map<number, string[]> }> {
   const S = resolve(sandbox);
   const state = await readNetState(S);
   const captures = new Set<string>();
   const jobs = new Map<string, string[]>();
+  /** A digest of external bytes, and what it came from. */
+  const digests = new Map<string, string>();
+  const published: Array<{ ref: string; at: number }> = [];
+  const taint = (job: string, via: string[]) => {
+    if (!via.length) return false;
+    const was = jobs.get(job);
+    if (was) {
+      const more = via.filter((v) => !was.includes(v));
+      if (more.length) was.push(...more);
+      return false;
+    }
+    jobs.set(job, [...new Set(via)]);
+    return true;
+  };
+  const manifestDigests = async (path: string): Promise<string[]> => {
+    try {
+      const m = JSON.parse(await readFile(path, "utf8")) as { files?: Array<{ sha256?: string }> };
+      return (m.files ?? []).map((f) => String(f.sha256 ?? "")).filter((x) => /^[0-9a-f]{64}$/.test(x));
+    } catch {
+      return [];
+    }
+  };
   for (const list of state.fetches.values()) {
     for (const f of list) {
       captures.add(f.capture);
+      const c = parseCaptureRef(f.capture);
+      if (c && f.result?.published) {
+        published.push({ ref: f.capture, at: Date.parse(f.result.at) });
+        for (const d of await manifestDigests(join(captureDir(S, c.k, c.n), "manifest.json"))) if (!digests.has(d)) digests.set(d, f.capture);
+      }
       const j = jobOfPrincipal(f.principal);
-      if (j) jobs.set(j, [...(jobs.get(j) ?? []), f.capture]);
+      if (j) taint(j, [f.capture]);
     }
   }
-  // Jobs that declared a capture, or a tainted job's output, as an input (the journal's job_started).
+  /** What a path or a reference names, as the lineage reads it. */
+  const named = (x: string): string | null => {
+    const t = x.trim();
+    const net = /^(?:net:|store\/net\/)([1-9]\d*)\/([1-9]\d*)/.exec(t);
+    if (net) return `net:${net[1]}/${net[2]}`;
+    const job = /^(?:job:|store\/jobs\/)(j\d{6})/.exec(t);
+    if (job) return `job:${job[1]}`;
+    return null;
+  };
+  const viaOf = (paths: string[], shas: string[]): string[] => {
+    const via: string[] = [];
+    for (const p of paths) {
+      const n = named(p);
+      if (n?.startsWith("net:")) via.push(n);
+      else if (n?.startsWith("job:") && jobs.has(n.slice(4))) via.push(n);
+    }
+    for (const d of shas) if (digests.has(d)) via.push(`${digests.get(d)} (by its bytes)`);
+    return [...new Set(via)];
+  };
+  // Each job as the journal started it: its declaration, and its scope manifest when it had one.
   const journal = await readFile(join(S, "store", "journal.jsonl"), "utf8").catch(() => "");
-  const started: Array<{ job: string; declared: string[] }> = [];
+  const started: Array<{ job: string; at: number; broad: boolean; paths: string[]; shas: string[] }> = [];
   for (const line of journal.split("\n")) {
     if (!line.includes('"job_started"')) continue;
+    let l: { type?: string; job?: string; at?: string; declared?: unknown; scope?: { kind?: string; manifest?: string } };
     try {
-      const l = JSON.parse(line) as { type?: string; job?: string; declared?: unknown };
-      if (l.type === "job_started" && l.job && Array.isArray(l.declared)) started.push({ job: l.job, declared: l.declared.map(String) });
+      l = JSON.parse(line);
     } catch {
-      // a torn line is the store check's to name
+      continue;
     }
+    if (l.type !== "job_started" || !l.job) continue;
+    const declared = Array.isArray(l.declared) ? l.declared.map(String) : [];
+    const kind = l.scope?.kind ?? (declared.length ? "declared" : "default-all");
+    const paths = [...declared];
+    const shas: string[] = [];
+    if (kind === "declared" && l.scope?.manifest) {
+      try {
+        const m = JSON.parse(await readFile(join(S, l.scope.manifest), "utf8")) as { expanded?: Array<{ path?: string; sha256?: string }>; accessible?: Array<{ path?: string; sha256?: string }> };
+        for (const o of [...(m.expanded ?? []), ...(m.accessible ?? [])]) {
+          if (o.path) paths.push(o.path);
+          if (o.sha256) shas.push(o.sha256);
+        }
+      } catch {
+        // the declaration alone
+      }
+    }
+    for (const d of declared) {
+      const sh = /^sha256:([0-9a-f]{64})$/.exec(d.trim());
+      if (sh) shas.push(sh[1]);
+    }
+    started.push({ job: l.job, at: Date.parse(l.at ?? "") || 0, broad: kind !== "declared", paths, shas });
   }
-  const tainted = (ref: string): string | null => {
-    const r = ref.trim();
-    if (r.startsWith("net:")) {
-      const c = parseCaptureRef(r);
-      return c ? `net:${c.k}/${c.n}` : null;
-    }
-    const j = /^job:(j\d{6})/.exec(r);
-    return j && jobs.has(j[1]) ? `job:${j[1]}` : null;
-  };
   for (let changed = true; changed; ) {
     changed = false;
     for (const s of started) {
-      if (jobs.has(s.job)) continue;
-      const via = s.declared.map(tainted).filter((x): x is string => Boolean(x));
-      if (via.length) {
-        jobs.set(s.job, via);
+      const via = s.broad ? published.filter((c) => c.at <= s.at).map((c) => `${c.ref} (a broad scope over the store)`) : viaOf(s.paths, s.shas);
+      if (taint(s.job, via)) {
         changed = true;
+        for (const d of await manifestDigests(join(S, "store", "jobs", s.job, "manifest.json"))) if (!digests.has(d)) digests.set(d, `job:${s.job}`);
       }
     }
   }
   const ledger = await P.readLedger(S, { raw: true }).catch(() => [] as P.LedgerEntry[]);
+  const importDigests = new Map<string, string[]>();
   const entries = new Map<number, string[]>();
   for (let changed = true; changed; ) {
     changed = false;
@@ -828,8 +956,16 @@ export async function externalLineage(sandbox: string): Promise<{ captures: Set<
       const via: string[] = [];
       if (e.kind === "external") via.push(...(e.refs ?? []));
       for (const r of e.refs ?? []) {
-        const t = tainted(r);
-        if (t) via.push(r);
+        const n = named(r);
+        if (n?.startsWith("net:") || (n?.startsWith("job:") && jobs.has(n.slice(4)))) via.push(r);
+        const sh = /^sha256:([0-9a-f]{64})$/.exec(r.trim());
+        if (sh && digests.has(sh[1])) via.push(`${r} (${digests.get(sh[1])}, by its bytes)`);
+        const imp = /^import:([a-z0-9-]{1,64})/.exec(r.trim());
+        if (imp) {
+          if (!importDigests.has(imp[1])) importDigests.set(imp[1], await manifestDigests(join(S, "store", "imports", imp[1], "manifest.json")));
+          const hit = (importDigests.get(imp[1]) ?? []).find((d) => digests.has(d));
+          if (hit) via.push(`${r} (${digests.get(hit)}, by its bytes)`);
+        }
       }
       for (const edge of [...(e.support ?? []), ...(e.limitations ?? [])]) if (entries.has(edge.seq)) via.push(`E-${edge.seq}`);
       for (const rel of e.rel ?? []) if (rel.kind === "derived_from" && entries.has(rel.to)) via.push(`E-${rel.to}`);

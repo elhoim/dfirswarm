@@ -306,6 +306,8 @@ test("step 6: under ctf what leaves must be in the bytes the request cites, read
     await mkdir(join(dir, "out"), { recursive: true });
     await writeFile(join(dir, "out", "coords.txt"), bytes);
     await writeFile(join(dir, "manifest.json"), JSON.stringify({ v: 1, job: id, attempt: 1, sealed_at: "x", files: [{ path: "coords.txt", path_b64: Buffer.from("coords.txt").toString("base64"), bytes: bytes.length, sha256: P.sha256Hex(bytes), mode: "0444" }], dirs: [], rejected: [], totals: { files: 1, bytes: bytes.length } }));
+    // A derivation: a job that declared the evidence it read, whose command does not hold the values.
+    await writeFile(join(dir, "job.json"), JSON.stringify({ id, state: "committed", status: "ok", requester: { agent: "a1" }, spec: { kind: "command", command: "exiftool -n -GPSPosition inputs/photo.jpg > $OUT/coords.txt", inputs: ["input:photo.jpg"], scope: "declared" } }));
   }
   const found = await evidenceCheck(S, ["job:j000001/coords.txt"], ["55.7558", "37.6173", "12.3456"]);
   assert.equal(found.found.get("55.7558"), "job:j000001/coords.txt");

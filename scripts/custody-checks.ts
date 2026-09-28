@@ -194,7 +194,7 @@ type CustodyLike = {
   attestations?: { lines: number; intact: boolean; detail: string } | null;
   disputes?: { lines: number; intact: boolean; detail: string } | null;
   leads?: { lines: number; intact: boolean; detail: string } | null;
-  network?: { grants: { lines: number; intact: boolean; detail: string }; fetches: { lines: number; intact: boolean; detail: string }; captures: { sealed: number; verified: number; mismatched: string[]; missing: string[] } } | null;
+  network?: { grants: { lines: number; intact: boolean; detail: string }; fetches: { lines: number; intact: boolean; detail: string; unresolved?: string[] }; captures: { sealed: number; verified: number; mismatched: string[]; missing: string[] } } | null;
   model_gateway: { intact: boolean; detail: string; refused?: string } | null;
   vms: Array<{ snapshot: unknown; stopped: boolean; kept: string | null }> | null;
   artifacts: { files: number; skipped: number } | null;
@@ -268,7 +268,7 @@ export function checksOf(c: CustodyLike, errors: Record<string, string> = {}): C
   // The dynamic network's records (docs/adr/0011): both chains, and each sealed capture re-hashed.
   if (c.network) {
     const n = c.network;
-    const bad = [...(n.grants.intact ? [] : [`grants: ${n.grants.detail}`]), ...(n.fetches.intact ? [] : [`fetches: ${n.fetches.detail}`]), ...n.captures.mismatched.map((x) => `${x} differs from its seal`), ...n.captures.missing.map((x) => `${x} is missing`)];
+    const bad = [...(n.grants.intact ? [] : [`grants: ${n.grants.detail}`]), ...(n.fetches.intact ? [] : [`fetches: ${n.fetches.detail}`]), ...(n.fetches.unresolved ?? []).map((x) => `${x} was attempted and has no recorded outcome`), ...n.captures.mismatched.map((x) => `${x} differs from its seal`), ...n.captures.missing.map((x) => `${x} is missing`)];
     add("network records", bad.length ? "failed" : "passed", bad.length ? bad.join("; ") : undefined, { checked: n.grants.lines + n.fetches.lines + n.captures.sealed });
   }
   // The model gateway log.

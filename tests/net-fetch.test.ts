@@ -22,7 +22,7 @@ import * as L from "../extensions/leads.ts";
 import * as P from "../extensions/protocol.ts";
 import { publicAddress } from "../scripts/net-adapters.ts";
 import { checkJobGrants, bindJobGrants, externalLineage, fetchForSeat, operatorDeny, operatorGrant, operatorRevoke, operatorSocket, recordCaptures, requestAccess } from "../scripts/net-broker.ts";
-import { FETCH_LOG, GRANTS_LOG, readNetState } from "../scripts/net-grants.ts";
+import { FETCH_LOG, GRANTS_LOG, rawDir, readNetState } from "../scripts/net-grants.ts";
 import { grant, json, setup, skipWithoutTls, token, use } from "./net-mock.ts";
 
 test("a grant's exact request is made once, sealed as net:<k>/<n>, and recorded as external material", async (t) => {
@@ -256,7 +256,8 @@ test("expiry and revocation end access, a revocation during a transfer too", asy
   assert.equal(a.code, "revoked");
   const cap = JSON.parse(await readFile(join(s.S, "store", "net", String(Number(slow.slice(2))), "1", "capture.json"), "utf8"));
   assert.equal(cap.complete, false);
-  assert.match(cap.partial.why, /revoked/);
+  assert.equal(cap.stopped, "revoked");
+  assert.ok((cap.kept as Array<{ name: string }>).some((k) => k.name === "body.partial"), "what came before the stop is kept beside the run");
   assert.equal(existsSync(join(s.S, "store", "net", String(Number(slow.slice(2))), "1", "body")), false);
   // A lead that closes takes its grants with it.
   const lg = await grant(s, {});
@@ -450,8 +451,9 @@ test("an adapter that delivers one field delivers that field; the whole response
   const delivered = JSON.parse(await readFile(join(s.S, "store", "net", "1", "1", "body"), "utf8"));
   assert.deepEqual(delivered, { title: "A title" });
   const cap = JSON.parse(await readFile(join(s.S, "store", "net", "1", "1", "capture.json"), "utf8"));
-  assert.ok(cap.raw.path.startsWith(`${s.S}.netraw/`), "the whole response is outside the run's directory, which every VM mounts");
-  assert.match(await readFile(cap.raw.path, "utf8"), /author_name/);
+  const raw = (cap.kept as Array<{ name: string; where: string }>).find((k) => k.name === "body");
+  assert.equal(raw?.where, "<run>.netraw/1/1/body", "the whole response is outside the run's directory, which every VM mounts");
+  assert.match(await readFile(join(rawDir(s.S), "1", "1", "body"), "utf8"), /author_name/);
   for (const f of ["request.json", "response.json", "capture.json", "manifest.json"]) assert.doesNotMatch(await readFile(join(s.S, "store", "net", "1", "1", f), "utf8"), /author_name|iframe/);
 });
 
@@ -558,5 +560,5 @@ test("the operator's acts: one item per host and lead, a grant with a reason tha
   assert.equal((await operatorRevoke(s.S, wide.grant as string, "the tiles are no longer needed")).ok, true);
   const after = socketHostsInForce(s.S, "a1");
   assert.ok(!after.hosts.includes("*.tiles.example.org"));
-  assert.ok(after.revoked.has("*.tiles.example.org"), "the legacy operator-hosts entry of the same host is filtered too");
+  assert.ok(after.revoked.has("*.tiles.example.org:443"), "the revocation is held in one canonical spelling");
 });

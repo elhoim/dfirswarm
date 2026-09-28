@@ -28,6 +28,8 @@
  *   node --experimental-strip-types scripts/case-policy.ts resolve [--goal-file F]
  *        [--policy P] [--network M] [--lookups L] [--contact C] [--disclosure LIST]
  *        [--legacy-open] [--isolation microvm|host] [--allow-hosts LIST]
+ *   node --experimental-strip-types scripts/case-policy.ts check-egress --policy-json JSON
+ *        [--allow-hosts LIST] [--install-hosts LIST] [--pack-hosts LIST]
  *   node --experimental-strip-types scripts/case-policy.ts show <sandbox>
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -318,6 +320,26 @@ export function resolveCasePolicy(input: ResolveInput): Resolution {
   return { ok: true, policy, notes };
 }
 
+/**
+ * The run's whole direct egress, held to its case policy: not only
+ * `--allow-host`, but the package index `--allow-install` adds and the hosts
+ * a pack's bound secrets go to. Each is a host a seat or a job reaches with
+ * no grant, no disclosure check and no capture, so a policy that permits no
+ * socket allowance (ctf, internal, live_adversary) refuses every one, naming
+ * where it came from. The models' own hosts are the provider lane, not
+ * research traffic, and are not held here.
+ */
+export function egressConflicts(p: CasePolicy, o: { allowHosts?: string[]; installHosts?: string[]; packHosts?: string[] }): string[] {
+  if (p.sockets !== "none") return [];
+  const out: string[] = [];
+  const list = (xs?: string[]) => (xs ?? []).map((x) => x.trim()).filter(Boolean);
+  const said = `policy ${p.policy} permits no direct host (host and port, no method or path control, no content capture): every request of this case is mediated`;
+  if (list(o.allowHosts).length) out.push(`--allow-host ${list(o.allowHosts).join(",")}: ${said}`);
+  if (list(o.installHosts).length) out.push(`--allow-install would open ${list(o.installHosts).join(", ")} to every VM and job: ${said}; add --no-pypi to keep the install machinery without the index, or drop --allow-install`);
+  if (list(o.packHosts).length) out.push(`a pack's bound secrets would open ${[...new Set(list(o.packHosts))].join(", ")}: ${said}; run without --allow-pack-secrets`);
+  return out;
+}
+
 /** Where a run's case policy is recorded, and read on every network decision. */
 export const POLICY_REL = "network/policy.json";
 
@@ -376,6 +398,15 @@ async function main(argv: string[]): Promise<void> {
     });
     process.stdout.write(`${JSON.stringify(r.ok ? { ...r, lines: policyLines(r.policy) } : r)}\n`);
     process.exit(r.ok ? 0 : 1);
+  }
+  if (cmd === "check-egress") {
+    const raw = opt("--policy-json");
+    if (!raw) throw new Error("check-egress needs --policy-json");
+    const split = (v?: string) => (v ?? "").split(",").filter(Boolean);
+    const parsed = JSON.parse(raw) as CasePolicy | null;
+    const conflicts = !parsed ? [] : egressConflicts(parsed, { allowHosts: split(opt("--allow-hosts")), installHosts: split(opt("--install-hosts")), packHosts: split(opt("--pack-hosts")) });
+    process.stdout.write(`${JSON.stringify({ ok: !conflicts.length, conflicts })}\n`);
+    process.exit(conflicts.length ? 1 : 0);
   }
   if (cmd === "show") {
     const S = argv[1];

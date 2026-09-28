@@ -29,7 +29,13 @@ grep -q "nothing leaves the run" <<<"$out" || fail "$out"
 out="$(start --network dynamic --no-netguard --label both)" && fail "network dynamic with --no-netguard was accepted"
 grep -q -- "--no-netguard opens every public host" <<<"$out" || fail "$out"
 [[ -z "$(jq -r '.runs[]? | select(.label == "hostdyn" or .label == "ctfhost" or .label == "bad" or .label == "intl" or .label == "both") | .id' "$TMP/runs/registry.json" 2>/dev/null)" ]] || fail "a refused kickoff left a run in the registry"
-echo "ok - contradictory case policies are refused at kickoff, each with its reason"
+# The whole direct egress, not only --allow-host: the package index --allow-install adds.
+out="$(start --policy ctf --allow-install --label ctfinstall)" && fail "--allow-install under ctf opened the package index: $out"
+grep -q "allow-install would open pypi.org" <<<"$out" || fail "the refusal did not name the package index: $out"
+out="$(start --policy internal --allow-install --label intinstall)" && fail "--allow-install under internal was accepted"
+out="$(start --policy ctf --allow-install --no-pypi --label ctfnopypi)" || fail "--allow-install --no-pypi under ctf was refused: $out"
+out="$(start --policy standard --allow-install --label stdinstall)" || fail "--allow-install under standard was refused: $out"
+echo "ok - contradictory case policies are refused at kickoff, each with its reason, the package index --allow-install adds included"
 
 # A run that says nothing: standard, network closed, recorded three ways.
 out="$(start --label plain)"
@@ -92,3 +98,22 @@ grep -q 'net_request' "$sb4/SWARM.md" || fail "the contract of a dynamic run doe
 grep -q 'There is no search adapter' "$sb4/SWARM.md" || fail "the contract does not say there is no search"
 [[ "$(jq -r '.runs[] | select(.label == "vmdyn") | .case_policy.network' "$TMP/runs/registry.json")" == dynamic ]] || fail "the registry does not say dynamic"
 echo "ok - a prepared microVM run with network dynamic and policy ctf: the contract says how to ask, the record says the mode"
+
+# The package carries the network records, each capture, and what was kept
+# beside the run and delivered to no seat (a filtered adapter's whole response).
+out="$(start --label packnet)" || fail "kickoff failed: $out"
+sb5="$(sandbox_of "$out")"
+id5="$(jq -r '.runs[] | select(.label == "packnet") | .id' "$TMP/runs/registry.json")"
+mkdir -p "$sb5/store/net/1/1" "$sb5.netraw/1/1"
+printf '{"ev":"grant"}\n' > "$sb5/network/grants.jsonl"
+printf '{"ev":"attempt"}\n{"ev":"result"}\n' > "$sb5/network/fetches.jsonl"
+printf '{"title":"A title"}\n' > "$sb5/store/net/1/1/body"
+printf '{"ref":"net:1/1"}\n' > "$sb5/store/net/1/1/capture.json"
+printf '{"title":"A title","author_name":"someone"}\n' > "$sb5.netraw/1/1/body"
+out="$(swarm package "$id5")" || fail "package failed: $out"
+for f in network/policy.json network/grants.jsonl network/fetches.jsonl network/captures/1/1/body network/captures/1/1/capture.json network/raw/1/1/body; do
+  [[ -f "$sb5/package/$f" ]] || fail "the package lacks $f"
+done
+grep -q author_name "$sb5/package/network/raw/1/1/body" || fail "the kept whole response is not what was kept"
+grep -q 'network/raw/1/1/body' "$sb5/package/MANIFEST.txt" || fail "the manifest does not hash the kept response"
+echo "ok - the package carries the network records, the captures and the responses kept beside the run"
