@@ -12,6 +12,9 @@ All notable changes to this project. The format follows
   lead, question, network and request chains, their first sealed lines are
   now chained again with their own code; a sealed line rewritten with its
   hash fields kept no longer passes as a prefix.
+- **A leading form is an imperative at the start of a clause.** "Confirm
+  that…", "Show that…", "Prove…" at the start of the question or of a
+  sentence are flagged; "…if not, what shows that" is not.
 
 ### Fixed: `--stop operator` no longer forces answers; B16 warns on services, not on English words
 

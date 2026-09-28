@@ -99,14 +99,20 @@ export const QUESTION_MAX_ATTACHMENTS = 20;
  * Leading forms: a question worded as the conclusion it wants ("confirm
  * that…", "show that…", "prove…"). Flagged for the critic, who says which
  * contrary route was checked and whether the routes were steered; never a
- * refusal. The worker prompt carries the same list.
+ * refusal. The worker prompt carries the same list. Only the imperative
+ * counts: at the start of the question, of a sentence, of a line or of a
+ * clause after a semicolon or a colon (after an opening quote, and after
+ * "please" or "can you"). The same verb inside a question ("what shows
+ * that…", "which proves…", "did the log verify that…") asks, it does not
+ * lead.
  */
+const CLAUSE_START = String.raw`(?:^|[.!?;:]\s+|\n\s*)["'\u201c\u2018(\[]*(?:(?:please|kindly),?\s+|(?:can|could|would)\s+you\s+(?:please\s+)?)?`;
 export const LEADING_FORMS: ReadonlyArray<{ phrase: string; re: RegExp }> = [
-  { phrase: "confirm that", re: /\bconfirm(?:s|ing)? that\b/i },
-  { phrase: "show that", re: /\bshow(?:s|ing)? that\b/i },
-  { phrase: "prove", re: /\bprov(?:e|es|ing)\b/i },
-  { phrase: "demonstrate that", re: /\bdemonstrat(?:e|es|ing) that\b/i },
-  { phrase: "verify that", re: /\bverif(?:y|ies|ying) that\b/i },
+  { phrase: "confirm that", re: new RegExp(`${CLAUSE_START}confirm\\s+that\\b`, "i") },
+  { phrase: "show that", re: new RegExp(`${CLAUSE_START}show\\s+that\\b`, "i") },
+  { phrase: "prove", re: new RegExp(`${CLAUSE_START}prove\\b`, "i") },
+  { phrase: "demonstrate that", re: new RegExp(`${CLAUSE_START}demonstrate\\s+that\\b`, "i") },
+  { phrase: "verify that", re: new RegExp(`${CLAUSE_START}verify\\s+that\\b`, "i") },
 ];
 
 export function leadingForms(text: string): string[] {

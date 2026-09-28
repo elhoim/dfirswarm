@@ -466,6 +466,15 @@ test("hypothesis framing: the first agent lead under a person's question states 
   assert.match((await posts(S))[0]?.text ?? "", /Leading form \("confirm that"\)/);
   assert.deepEqual(Q.leadingForms("Show that X; prove it; demonstrate that Y; verify that Z"), ["show that", "prove", "demonstrate that", "verify that"]);
   assert.deepEqual(Q.leadingForms("Was the archive copied?"), []);
+  // Only the imperative at the start of the question or of a sentence (or a clause after ; or :), never a verb inside one.
+  assert.deepEqual(Q.leadingForms("Was the archive mailed, and if not, what shows that."), [], "the pilot's analyst question");
+  assert.deepEqual(Q.leadingForms("Which artefact shows that the stick was used? What proves it ran?"), []);
+  assert.deepEqual(Q.leadingForms("Did the log verify that the user signed in? It confirms that nothing else ran."), []);
+  assert.deepEqual(Q.leadingForms("The client says so. Confirm that the user copied it."), ["confirm that"]);
+  assert.deepEqual(Q.leadingForms("Please verify that Bob did it"), ["verify that"]);
+  assert.deepEqual(Q.leadingForms("Can you prove the stick was his?"), ["prove"]);
+  assert.deepEqual(Q.leadingForms("\"Show that it happened.\""), ["show that"]);
+  assert.deepEqual(Q.leadingForms("Where was it sent?\nDemonstrate that it left by mail."), ["demonstrate that"]);
   // The goal's own questions need no framing; a person's do, on the first agent lead.
   ok(await L.openLead(a0, { title: "Who made it", why: "q1", answers: ["1"], take: true }));
   refused(await L.openLead(a0, { title: "USB history", why: "the stick", answers: [q], take: true }), /first lead under it: it is a proposition to test/);

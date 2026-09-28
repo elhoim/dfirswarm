@@ -164,8 +164,9 @@ Questions (the question register)
   routes). Its answer names the entries that say otherwise (contrary) or says why none
   does (contrary_none_why), and "the premise is not supported" is an answer (result:
   premise_not_supported). Who asked it and how urgently carry no evidential weight.
-- Leading forms: a question worded as the conclusion it wants ("confirm that", "show that",
-  "prove", "demonstrate that", "verify that") is flagged in the register. Test it all the same; the
+- Leading forms: a question worded as the conclusion it wants, an imperative at the start of it or
+  of a sentence ("Confirm that", "Show that", "Prove", "Demonstrate that", "Verify that"), is
+  flagged in the register ("what shows that" asks, it does not lead). Test it all the same; the
   critic says which contrary route was checked and whether the routes were steered.
 - A hint says where to look, never what to find; a hint that says something is recorded as a
   hypothesis to test. An attachment is supplied material, and proves nothing by itself.
