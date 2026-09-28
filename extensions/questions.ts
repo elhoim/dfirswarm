@@ -287,7 +287,11 @@ export type Question = {
   /** A follow-up (after_done) the run took up when it was resumed: when, and in which segment. */
   continued: { at: string; segment: number | null; seq: number } | null;
   withdrawn: { at: string; why: string; origin: QuestionOrigin } | null;
-  accepted: { at: string; as: AcceptAs; why: string; rev: number; origin: QuestionOrigin } | null;
+  /**
+   * The operator's acceptance: of a revision, and of the answer that stood
+   * then (its E-<seq> and hash, or none). It stands while both are still so.
+   */
+  accepted: { at: string; as: AcceptAs; why: string; rev: number; origin: QuestionOrigin; answer?: string | null; answer_hash?: string | null } | null;
   /** The negative bar's disposition (a later phase writes `dispose`); null until one is recorded. */
   disposition: Record<string, unknown> | null;
   clarifications: Clarification[];
@@ -655,7 +659,15 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
         break;
       case "accept":
         if (!q || !act.as) break;
-        q.accepted = { at: e.at, as: act.as, why: act.why ?? "", rev: Number(d.rev ?? e.rev ?? q.rev), origin: origin ?? q.origin };
+        q.accepted = {
+          at: e.at,
+          as: act.as,
+          why: act.why ?? "",
+          rev: Number(d.rev ?? e.rev ?? q.rev),
+          origin: origin ?? q.origin,
+          ...("answer" in d ? { answer: (d.answer as string | null) ?? null } : {}),
+          ...("answer_hash" in d ? { answer_hash: (d.answer_hash as string | null) ?? null } : {}),
+        };
         q.last_seq = e.seq;
         break;
       case "sign": {
@@ -814,6 +826,22 @@ function standingAnswer(ledger: L.LedgerView, section: string): P.LedgerEntry | 
   return ledger.entries.find((e) => e.kind === "answer" && e.section === `question:${section}` && !ledger.replaced.has(e.seq)) ?? null;
 }
 
+/**
+ * Whether the operator's acceptance of a question still stands: it is of
+ * the question's current revision, and of the answer that stands now (the
+ * same entry, with the hash it had), or of none while none stands. An
+ * answer recorded, replaced or corrected since is not what was accepted,
+ * and is held to the bar again.
+ */
+export function acceptanceStands(q: Question, ledger: L.LedgerView): boolean {
+  if (!q.accepted || q.accepted.rev !== q.rev) return false;
+  if (q.accepted.answer === undefined) return true;
+  const a = standingAnswer(ledger, q.section);
+  if (!a) return q.accepted.answer === null;
+  if (q.accepted.answer !== `E-${a.seq}`) return false;
+  return q.accepted.answer_hash === undefined || q.accepted.answer_hash === null || q.accepted.answer_hash === (a.hash ?? null);
+}
+
 export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
   const leads = [...ctx.leads.leads.values()].filter((l) => l.answers.includes(q.section));
   const leadViews = leads.map((l) => {
@@ -875,7 +903,7 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
     leading_forms: q.leading_forms,
     after_done: q.after_done,
     withdrawn: q.withdrawn,
-    accepted: q.accepted ? { ...q.accepted, stands: q.accepted.rev === q.rev } : null,
+    accepted: q.accepted ? { ...q.accepted, stands: acceptanceStands(q, ctx.ledger) } : null,
     disposition: q.disposition,
     work,
     answer,
@@ -1515,7 +1543,7 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
         return fail(`${q!.id}'s answer E-${v.answer.seq} is a negative (unreviewed): ${NB.resultWords(v.answer.result)}, and no other seat has reviewed it. An acceptance takes the examination's limits as they stand after review; it never stands in for one. It is accepted once a seat that recorded neither the answer nor its coverage record has attested it with review`);
       }
       return {
-        append: [{ ...base, ev: "accept", q: q!.id, rev: q!.rev, act: p.act, decided: { rev: q!.rev, outcome: "examination_limited", ...(v.answer ? { answer: `E-${v.answer.seq}`, ...(v.answer.result ? { result: v.answer.result } : {}) } : { answer: null }) } }],
+        append: [{ ...base, ev: "accept", q: q!.id, rev: q!.rev, act: p.act, decided: { rev: q!.rev, outcome: "examination_limited", ...(v.answer ? { answer: `E-${v.answer.seq}`, answer_hash: vc.ledger.bySeq.get(v.answer.seq)?.hash ?? null, ...(v.answer.result ? { result: v.answer.result } : {}) } : { answer: null, answer_hash: null }) } }],
         result: { ok: true, q: q!.id, rev: q!.rev },
       };
     }

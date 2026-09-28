@@ -65,6 +65,7 @@ import {
   briefQuestions,
   ledgerGate,
   negativeReview,
+  coverageProblems,
   readAttestations,
   readDisputes,
   readLedger,
@@ -379,7 +380,12 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
         continue;
       }
       if (e.kind === "coverage") {
-        // The coverage the hub found; a complete one is preferred over a partial one.
+        // The coverage the hub found, while its results still stand; a complete one is preferred over a partial one.
+        const stale = coverageProblems(e, entries, disputes);
+        if (stale.length) {
+          why.push(`coverage record #${e.seq} no longer says what its search found (${stale.join("; ")})`);
+          continue;
+        }
         if (!coverage || (coverage.coverage !== "complete" && e.coverage === "complete")) coverage = e;
         continue;
       }
@@ -421,9 +427,12 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
     let said = "";
     if (result) {
       results[section] = result;
-      const review = NEGATIVE_RESULTS.has(result) ? negativeReview(a, entries, attestations) : null;
+      // A premise rejected on a search alone is a negative, held as one.
+      const premiseOnSearch = result === "premise_not_supported" && !restsOnFinding;
+      const review = NEGATIVE_RESULTS.has(result) || premiseOnSearch ? negativeReview(a, entries, attestations, disputes) : null;
       const reviewText = review ? (review.reviewed ? `, reviewed by ${review.by.join(", ")}` : ", negative (unreviewed)") : "";
-      if ((result === "established" || result === "premise_not_supported") && rests) [outcome, said] = ["answered", `answered by #${a.seq}, resting on ${rests}${result === "premise_not_supported" ? " (its premise is not supported)" : ""}`];
+      if (premiseOnSearch && (rests || covText)) [outcome, said] = ["limited", `examination-limited (a premise rejected on a search alone: no finding shows it false), #${a.seq} resting on ${covText ?? rests}${reviewText}`];
+      else if ((result === "established" || result === "premise_not_supported") && rests) [outcome, said] = ["answered", `answered by #${a.seq}, resting on ${rests}${result === "premise_not_supported" ? " (its premise is not supported)" : ""}`];
       else if (result === "bounded_negative" && (rests || covText)) {
         const settled = bar(id).existence && coverage?.coverage === "complete" && review?.reviewed === true;
         [outcome, said] = settled
@@ -456,7 +465,7 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   if (unsupported.length) lines.push(`tokens in no cited entry (counted, not failed; the release weighs them): ${unsupported.map(([seq, t]) => `#${seq}: ${t.join(", ")}`).join("; ")}`);
   const count = (o: LedgerOutcome) => Object.values(outcomes).filter((x) => x === o).length;
   lines.push(`sections: ${count("answered")} answered, ${count("limited")} examination-limited, ${count("inconclusive")} inconclusive, ${count("unanswered")} unanswered; ${defects.length} defect${defects.length === 1 ? "" : "s"}, ${defects.length - open.length} named by a limitation, ${open.length} open`);
-  if (open.length) lines.push("The run ends once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect, and the release counts it. The negative bar's defects (coverage_missing, negative_unreviewed, wording) are fixed, never named.");
+  if (open.length) lines.push("The run ends once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect, and the release counts it. The negative bar's defects (coverage_missing, coverage_stale, negative_unreviewed, wording) are fixed, never named.");
   return { ok: open.length === 0, lines, outcomes, results, defects, withdrawn };
 }
 
