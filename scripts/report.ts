@@ -1825,10 +1825,13 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     // The release this rendering is for, or the run's latest (bodyRelease):
     // a draft unless an examiner adopted it; a release renders its own final bytes.
   });
+  // The body's sections and its appendices A to C, then this report's D and E, then the body's later appendices (F: the registers), in their letters' order.
+  const bodySection = (b: (typeof body.sections)[number]): Section => ({ id: b.id, n: b.n, title: /^[A-Z]$/.test(b.n) ? `Appendix ${b.n}: ${b.title}` : b.title, desc: b.desc, ...(b.count ? { count: b.count } : {}), html: b.html, ...(b.n === "A" || b.n === "C" || b.n === "F" ? { breakBefore: true } : {}) });
   const sections: Section[] = [
-    ...body.sections.map((b): Section => ({ id: b.id, n: b.n, title: /^[A-Z]$/.test(b.n) ? `Appendix ${b.n}: ${b.title}` : b.title, desc: b.desc, ...(b.count ? { count: b.count } : {}), html: b.html, ...(b.n === "A" || b.n === "C" ? { breakBefore: true } : {}) })),
+    ...body.sections.filter((b) => !/^[F-Z]$/.test(b.n)).map(bodySection),
     custodySection,
     artifactsSection,
+    ...body.sections.filter((b) => /^[F-Z]$/.test(b.n)).map(bodySection),
   ];
 
   const toc = sections
