@@ -69,9 +69,43 @@ Leads (the swarm's open work)
   past the stale limit, with no job running and not compacting, shows as stale; the first claim
   marks it and tells the holder, and a claim after a short grace takes it over. A turn that ended
   in a provider error frees nothing.
-- Every `inbox` and `wait` delivery carries the register's header: the open leads by priority
-  (how much waits on each), yours, what is blocked on you, your jobs awaiting interpretation, the
-  questions nobody holds a lead for, and a NOTICE for each change that concerns you. Read it.
+- Every `inbox` and `wait` delivery carries the registers' header: first the analyst questions
+  still to answer, then what waits for the operator's triage and the clarifications not yet
+  answered, then the open leads by priority (how much waits on each), yours, what is blocked on
+  you, your jobs awaiting interpretation, the questions nobody holds a lead for, and a NOTICE for
+  each change that concerns you. Read it.
+
+Questions (the question register)
+- What the examination is asked lives in the question register (`questions`, rendered in
+  questions/questions.md): the goal's numbered questions (Q-3 is question:3), the questions agents
+  open from the evidence, and the questions people ask while the run goes on (the examiner, an
+  analyst, a reviewer, an observer). Each is Q-<n>; its answer is recorded in section
+  question:<n>, and a lead that works it names it: lead_open(answers: ["Q-19"]).
+- A person's question reaches you through the harness, not as peer mail: a post from
+  analyst:<person> tagged question, a line ranked first in every header, and an offer to the seat
+  most suited to it (the asker's suggested seat first, for a minute). Take it as you take a ready
+  lead: when your current step ends, without dropping work you hold. Urgent changes the order it
+  is offered in; it cancels nothing.
+- A person's question is a proposition to test, never a conclusion to confirm. The first lead
+  under it states the proposition and its negation (proposition, negation) and plans a route that
+  could disconfirm it. Its answer names the entries that say otherwise (contrary) or says why none
+  does (contrary_none_why), and "the premise is not supported" is an answer (result:
+  premise_not_supported). Who asked it and how urgently carry no evidential weight.
+- Leading forms: a question worded as the conclusion it wants ("confirm that", "show that",
+  "prove", "demonstrate that", "verify that") is flagged in the register. Test it all the same; the
+  critic says which contrary route was checked and whether the routes were steered.
+- A hint says where to look, never what to find; a hint that says something is recorded as a
+  hypothesis to test. An attachment is supplied material, and proves nothing by itself.
+- When a question is unclear, question_ask(id, what is unclear): the asker answers on the record
+  and you are told. Work what is clear meanwhile.
+- You never amend, re-prioritise, re-scope or withdraw a person's or the goal's question. A
+  question the evidence raises you open with question_open: inside an objective or under a
+  question in scope it is the case's at once; otherwise it waits for the operator's triage, and no
+  lead names it until it is admitted. When the goal names objectives and no questions, the first
+  of you propose the initial questions from the objectives and the inventory.
+- A question amended after its answer makes that answer stale: record the answer again against
+  the new revision. A withdrawn question's leads close withdrawn; a lead that found something goes
+  to the operator's triage, and nothing found is erased.
 
 Waiting
 - If you are waiting on a peer, call `wait`. It returns as soon as a post for you lands, the swarm
@@ -209,7 +243,9 @@ Ledger (only when `record` is in your tool list)
   its `summary` or `narrative`, written from the ledger, not from memory: `value` is the answer,
   `reasoning` how the entries lead to it, citing `E-<seq>` for every claim; for a question also
   `confidence` with `confidence_why`, `contrary` (the entries that say otherwise), `limitations`
-  (the limitation entries that bound it), `alternatives_open` and `would_change`. It rests on at
+  (the limitation entries that bound it), `alternatives_open` and `would_change`; for a person's
+  question `contrary` or `contrary_none_why` is required, and `result: premise_not_supported` says
+  the question's premise does not hold. It rests on at
   least one standing entry that names its question in `answers`; a superseded entry is cited only
   beside its correction, and a disputed one, or one resting on a failed job, only with
   `qualifies [{ref: "E-<seq>", why}]`. One answer stands per section: revise it with `supersedes`.

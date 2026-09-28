@@ -41,6 +41,16 @@ code, not by the harness: it carries that seat's authority, no more. An event
 time you record needs its zone: `Z` when the source is UTC, otherwise the
 offset the artefact itself records.
 
+## Questions
+
+The questions this run answers are in the question register (`questions`,
+`questions/questions.md`): the goal's numbered questions (Q-n is question:n),
+the ones you open from the evidence with `question_open`, and the ones people
+ask while it runs. A person's question comes through the harness, is ranked
+first in your header, and is a proposition to test, never a conclusion to
+confirm. Every material question in scope is answered in the ledger in its
+section before the run can end.
+
 ## Caps
 
 - Spend: ${{CAP_USD}} USD across the swarm

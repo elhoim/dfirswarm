@@ -10,6 +10,17 @@ the inputs before you finish. Write every post and file in English.
 Never change anything under `inputs/`. If you need a version of a file you
 can edit, copy it into `work/` first.
 
+## Objectives
+
+- O-1: Say what each file under `inputs/` contains, the numbers that matter in
+  it, and anything that looks wrong.
+
+The goal names this objective and no numbered questions: the first of you
+propose the questions it needs with `question_open` (objective `O-1`). A
+question the report needs answered is material, and is answered in the
+ledger in its section before the run ends; one that is only worth knowing is
+background.
+
 ## Definition of done
 
 `work/report.md` exists, names every file under `inputs/`, and a peer has
