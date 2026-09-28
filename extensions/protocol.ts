@@ -2036,8 +2036,8 @@ export async function listThreadNames(sandboxRoot: string): Promise<string[]> {
 
 export async function postMessage(
   ctx: SwarmContext,
-  args: { thread?: string; to?: string; tag: string; body: string; via?: string },
-): Promise<PostRecord> {
+  args: { thread?: string; to?: string; tag: string; body: string; via?: string; key?: string },
+): Promise<PostRecord & { existing?: true }> {
   if (!isPostTag(args.tag)) {
     throw new Error(`Unknown tag "${args.tag}". Use: ${POST_TAGS.filter((t) => t !== "question").join(", ")}`);
   }
@@ -2050,9 +2050,26 @@ export async function postMessage(
   const body = args.body.trim();
   if (!body) throw new Error("Post body is empty");
 
+  // A key is the harness's alone (a system post): a structured id in the
+  // front matter, where no body text can imitate it, by which a post already
+  // made is found again and not made twice (an addition replayed after a
+  // crash, a request's outcome published again).
+  const key = ctx.agentId === "system" && args.key ? yamlOneLine(args.key) : "";
+  if (key && !/^[A-Za-z0-9:._-]{1,200}$/.test(key)) throw new Error(`a system post's key is a structured id (got ${JSON.stringify(args.key)})`);
   return withTableLock(ctx.sandboxRoot, async () => {
     const dir = join(ctx.sandboxRoot, "threads", thread);
     await mkdir(dir, { recursive: true });
+    if (key) {
+      for (const n of (await readdir(dir).catch(() => [] as string[])).filter((x) => /^\d{6}-system\.md$/.test(x)).sort()) {
+        const t = await readFile(join(dir, n), "utf8").catch(() => null);
+        if (t === null) continue;
+        const { attrs } = parseFrontMatter(t);
+        if (attrs.key === key && attrs.from === "system") {
+          const post = await readPost(join(dir, n)).catch(() => null);
+          if (post) return { ...post, existing: true as const };
+        }
+      }
+    }
     await ensureThreadMember(ctx.sandboxRoot, thread, ctx.agentId);
     const id = await nextPostId(ctx.sandboxRoot, thread);
     const filename = `${String(id).padStart(6, "0")}-${ctx.agentId}.md`;
@@ -2065,7 +2082,7 @@ thread: ${thread}
 from: ${ctx.agentId}
 to: ${to}
 tag: ${tag}
-${name ? `name: ${name}\n` : ""}${via ? `via: ${via}\n` : ""}---
+${name ? `name: ${name}\n` : ""}${via ? `via: ${via}\n` : ""}${key ? `key: ${key}\n` : ""}---
 
 ${body}
 `;
@@ -2149,8 +2166,8 @@ ${body}
 /** Harness announcement on the board. Never joins a thread, never claims. */
 export async function systemPost(
   sandboxRoot: string,
-  args: { tag: string; body: string; thread?: string; to?: string; via?: string },
-): Promise<PostRecord> {
+  args: { tag: string; body: string; thread?: string; to?: string; via?: string; key?: string },
+): Promise<PostRecord & { existing?: true }> {
   return postMessage(systemContext(sandboxRoot), args);
 }
 

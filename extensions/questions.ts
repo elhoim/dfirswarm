@@ -2037,12 +2037,14 @@ export async function writeClarificationRequest(sandboxRoot: string, q: string, 
  * acceptance made before it no longer stands. Questions the register does
  * not know are returned apart, never guessed.
  */
-export async function recordEvidenceArrival(sandboxRoot: string, questions: string[], info: { import: string; request?: string | null; inventory_rev?: number | null; why?: string }): Promise<{ recorded: string[]; unknown: string[] }> {
+export async function recordEvidenceArrival(sandboxRoot: string, questions: string[], info: { import: string; request?: string | null; inventory_rev?: number | null; why?: string; ledger_seq?: number }): Promise<{ recorded: string[]; unknown: string[] }> {
   return L.withRegisters(sandboxRoot, async (held) => {
     await ensureSeededHeld(sandboxRoot, held);
     const snap = await questionsSnapshot(sandboxRoot);
-    const entries = await P.readLedger(sandboxRoot, { raw: true }).catch(() => [] as P.LedgerEntry[]);
-    const ledgerSeq = entries.at(-1)?.seq ?? 0;
+    // The ledger as it stood when the addition was committed (given by a
+    // replay after a crash), or as it stands now: the answers up to it were
+    // recorded without the new evidence.
+    const ledgerSeq = info.ledger_seq ?? ((await P.readLedger(sandboxRoot, { raw: true }).catch(() => [] as P.LedgerEntry[])).at(-1)?.seq ?? 0);
     const drafts: QuestionDraft[] = [];
     const recorded: string[] = [];
     const unknown: string[] = [];
@@ -2054,6 +2056,8 @@ export async function recordEvidenceArrival(sandboxRoot: string, questions: stri
       }
       if (recorded.includes(q.id)) continue;
       recorded.push(q.id);
+      // Once per import: a replay finds the arrival recorded and records it again nowhere.
+      if (q.evidence.some((x) => x.import === info.import)) continue;
       drafts.push({ by: "system", ev: "evidence", q: q.id, rev: q.rev, decided: { import: info.import, ...(info.request ? { request: info.request } : {}), ledger_seq: ledgerSeq, ...(info.inventory_rev !== undefined && info.inventory_rev !== null ? { inventory_rev: info.inventory_rev } : {}), ...(info.why ? { why: info.why } : {}) } });
     }
     if (drafts.length) {

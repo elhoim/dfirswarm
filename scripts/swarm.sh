@@ -8301,8 +8301,8 @@ write_case_policy() { # <sandbox>
     # The case contract in the agents' words (docs/adr/0014): evidence the run does not have, and material from outside it.
     case "$(jq -r '.more_evidence // "ask"' <<<"$CASE_POLICY_JSON")" in
       no) printf '\nEvidence the run does not have: this case admits none after its kickoff. An acquisition you ask for (lead_close needs_operator with ask: {kind: "acquisition", source, where, expected_value, urgency}) is answered at once, "no additional input under this case policy". That is a constraint of the case, never a finding that the source or the fact is absent: record the gap as a limitation (reason unavailable) naming the request (R-<n>), and answer on what the evidence holds.\n' ;;
-      yes) printf '\nEvidence the run does not have: ask for it as an acquisition (lead_close needs_operator with ask: {kind: "acquisition", source, where, expected_value, urgency, questions, owner, authority_needed}); this case policy authorises it and the operator collects it. Evidence that arrives is an inventory revision in the store (import:ev-<n>), announced on the board, and read through jobs (job_run inputs ["import:ev-<n>/<file>"]): your VM keeps the view of the run it booted with. It reopens the leads, answers and acceptances resting on the evidence as it was.\n' ;;
-      *) printf '\nEvidence the run does not have: ask for it as an acquisition (lead_close needs_operator with ask: {kind: "acquisition", source, where, expected_value, urgency, questions, owner, authority_needed}); the operator authorises or declines it. Evidence that arrives is an inventory revision in the store (import:ev-<n>), announced on the board, and read through jobs (job_run inputs ["import:ev-<n>/<file>"]): your VM keeps the view of the run it booted with. It reopens the leads, answers and acceptances resting on the evidence as it was. A declined or unavailable acquisition is a gap in the evidence, never a finding that the fact is absent.\n' ;;
+      yes) printf '\nEvidence the run does not have: ask for it as an acquisition (lead_close needs_operator with ask: {kind: "acquisition", source, where, expected_value, urgency, questions, owner, authority_needed}); this case policy authorises it and the operator collects it. Evidence that arrives is an inventory revision in the store (import:ev-<n>), announced on the board, and readable at once, read-only, at store/imports/ev-<n>/out/ (your VM mounts the run'"'"'s directory live) and in jobs (job_run inputs ["import:ev-<n>/<file>"]); cite it as import:ev-<n>/<file> however you read it. It reopens the leads, answers and acceptances resting on the evidence as it was.\n' ;;
+      *) printf '\nEvidence the run does not have: ask for it as an acquisition (lead_close needs_operator with ask: {kind: "acquisition", source, where, expected_value, urgency, questions, owner, authority_needed}); the operator authorises or declines it. Evidence that arrives is an inventory revision in the store (import:ev-<n>), announced on the board, and readable at once, read-only, at store/imports/ev-<n>/out/ (your VM mounts the run'"'"'s directory live) and in jobs (job_run inputs ["import:ev-<n>/<file>"]); cite it as import:ev-<n>/<file> however you read it. It reopens the leads, answers and acceptances resting on the evidence as it was. A declined or unavailable acquisition is a gap in the evidence, never a finding that the fact is absent.\n' ;;
     esac
     printf 'Material from outside the evidence (a capture, material the operator supplied, a question'"'"'s attachment, evidence added later) is on the ledger as kind external with its provenance: cite it by its ref, and say what it establishes; what rests on it is flagged, and a class the case policy says none for cannot be cited.\n'
     if [[ "$(jq -r '.network' <<<"$CASE_POLICY_JSON")" != "closed" && "${isolation:-microvm}" == "microvm" ]]; then
@@ -9621,8 +9621,9 @@ cmd_requests() {
 #   material <id> list [--json]
 # Evidence is an inventory revision: imported into the store as import:ev-<n>,
 # catalogued when the catalogue is on, read by jobs, and what rested on the
-# evidence as it was reopened. An agent's VM keeps the view of the run it
-# booted with: new evidence is read through jobs.
+# evidence as it was reopened. Every seat's VM mounts the run's directory
+# read-only and live: once sealed, an addition is readable there at once
+# (store/imports/<id>/out/), and through jobs; its class is its ledger entry's.
 cmd_evidence() { add_material evidence "$@"; }
 cmd_material() { add_material material "$@"; }
 add_material() { # <evidence|material> <id> <add|list> ...
@@ -9637,9 +9638,12 @@ add_material() { # <evidence|material> <id> <add|list> ...
   local cli="$ROOT/scripts/material.ts" out status=0 admission=()
   case "$sub" in
     list)
-      out="$(node --experimental-strip-types --no-warnings "$cli" list "$sandbox")"
+      # What a crash left committed and not applied is applied first: by the hub when it runs, else here.
+      while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
+      out="$(node --experimental-strip-types --no-warnings "$cli" list "$sandbox" ${admission[@]+"${admission[@]}"})"
       if [[ " $* " == *" --json "* ]]; then printf '%s\n' "$out"; return; fi
-      jq -r --arg m "$mode" '[.material[] | select((.mode // "") == $m)] | if length == 0 then "No \($m) was added to this run." else .[] | "\(.import) \(.class) at \(.at) by \(.supplied_by)\(if .request then " for \(.request)" else "" end)\(if .inventory_rev then ", inventory revision \(.inventory_rev)" else "" end): \(.why)\n    " + ([.files[] | "\(.path) (\(.bytes) bytes, sha256 \(.sha256))"] | join("\n    ")) end' <<<"$out"
+      jq -r '(.replayed // []) | if length > 0 then "Recorded now what followed from \(map(.import) | join(", ")), committed before and not applied." else empty end' <<<"$out"
+      jq -r --arg m "$mode" '[.material[] | select((.mode // "") == $m)] | if length == 0 then "No \($m) was added to this run." else .[] | "\(.import) \(.class) at \(.at) by \(.supplied_by)\(if .request then " for \(.request)" else "" end)\(if .inventory_rev then ", inventory revision \(.inventory_rev)" else "" end)\(if .applied == false then " [committed; what follows from it is not all recorded yet]" else "" end): \(.why)\n    " + ([.files[] | "\(.path) (\(.bytes) bytes, sha256 \(.sha256))"] | join("\n    ")) end' <<<"$out"
       ;;
     add)
       [[ -n "${1:-}" ]] || { echo "BLOCKER: $mode add needs the path of the file or directory." >&2; exit 2; }
@@ -9652,11 +9656,12 @@ add_material() { # <evidence|material> <id> <add|list> ...
       jq -r '
         "Added \(.import) (\(.class); \(.files | length) file(s), manifest sha256 \(.manifest_sha256)): sealed in store/imports/\(.import)/, on the store journal (line \(.journal_seq)) and the ledger (E-\(.entry // "pending")) as external material; use: \(.permitted_use)."
         + (if .inventory_rev then " Inventory revision \(.inventory_rev)." else "" end)
-        + (if .request then " \(.request.id): received and validated." else "" end)
+        + (if .request then " \(.request.id): " + (if .request.validated then "received and validated." elif .request.received then "received, not validated yet." else "not received yet." end) else "" end)
         + (if .reopened then " Reopened: \((.reopened.leads // []) | if length > 0 then join(", ") else "no lead" end); answers and acceptances of \((.reopened.questions // []) | if length > 0 then join(", ") else "no question" end) held again." else "" end)
         + (if (.reopened.unknown_questions // []) | length > 0 then " Not in the question register: \(.reopened.unknown_questions | join(", "))." else "" end)
         + (if .catalogue then (if (.catalogue | type) == "object" then " Catalogue: \((.catalogue.jobs // []) | length) detect job(s) queued." else " Catalogue: \(.catalogue)." end) else "" end)
-        + (if .mode == "evidence" then " The agents read it through jobs (import:\(.import)/<file>); their VMs keep the view they booted with." else "" end)' <<<"$out"
+        + (if .complete == false then " PENDING (committed; recorded at the next reconciliation, and the finish line waits for it): \((.pending // []) | join("; "))." else "" end)
+        + (" The agents can read it now, read-only, at store/imports/\(.import)/out/ (their VMs mount the run live), and in jobs as import:\(.import)/<file>.")' <<<"$out"
       printf '%s\n' "$out"
       ;;
     *) echo "BLOCKER: $mode takes add or list (got $sub)." >&2; exit 2 ;;
@@ -11421,8 +11426,9 @@ EOF
                                                   R-n, the acquisition received and validated; the closed leads,
                                                   answers and acceptances under its questions reopened
   evidence <id> list [--json]                     what was added, with its files and hashes
-Refused under more_evidence: no. An agent's VM keeps the view of the run it booted with: new evidence
-is read through jobs (job_run inputs ["import:ev-<n>/<file>"]). docs/adr/0014.
+Refused under more_evidence: no. Every seat's VM mounts the run's directory read-only and live: an
+addition is readable at store/imports/ev-<n>/out/ once sealed, and in jobs (job_run inputs
+["import:ev-<n>/<file>"]); its class and provenance are its ledger entry's. docs/adr/0014.
 EOF
       ;;
     material) cat <<'EOF'

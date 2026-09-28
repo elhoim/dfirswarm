@@ -86,8 +86,9 @@ Leads (the swarm's open work)
   answered at once, "no additional input under this case policy": a constraint of the case, never
   a finding that the source or the fact is absent. Record the gap as a limitation (reason
   unavailable) naming the request, and answer on what the evidence holds. Evidence that arrives
-  later is announced on the board as `import:ev-<n>`: read it through a job (your VM keeps the
-  view of the run it booted with), and hold what you concluded before it against it; the harness
+  later is announced on the board as `import:ev-<n>`: it is readable at once, read-only, at
+  `store/imports/ev-<n>/out/` (your VM mounts the run live) and in jobs; cite it as
+  `import:ev-<n>/<file>` however you read it, and hold what you concluded before it against it; the harness
   reopens the leads under its questions, and an answer recorded before it is stale until you
   record it again.
 - A lead is one agent's at a time: one a peer holds is theirs, so post to them. A holder silent

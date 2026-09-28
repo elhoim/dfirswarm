@@ -1280,7 +1280,7 @@ function evidenceSection(run: Run): BodySection {
   const supplied = run.contract.material.filter((m) => m.mode === "material");
   if (added.length) {
     blocks.push({ k: "h", level: 3, text: "Evidence added during the run" });
-    blocks.push({ k: "p", s: ["Each addition is an inventory revision: copied, held to the sha256 its source had, sealed in the store and recorded on the ledger as external material (acquired evidence). The agents' own VMs kept the view of the run they booted with; the addition was read through jobs."] });
+    blocks.push({ k: "p", s: ["Each addition is an inventory revision: copied, held to the sha256 its source had, sealed in the store and recorded on the ledger as external material (acquired evidence). Every seat's VM mounts the run's directory read-only and live, so each addition was readable there (store/imports/<id>/out/) as soon as it was sealed, as it was through jobs; a finding cites it as import:<id>/<file> however it was read, and what it is (its class, who supplied it, when) is its ledger entry's."] });
     blocks.push({
       k: "table",
       cls: "evidence",

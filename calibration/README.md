@@ -154,7 +154,8 @@ point if you are measuring whether a run reopens a settled answer. It is
 sealed in the store as an inventory revision, the acquisition is answered,
 and the leads, answers and acceptances of the questions it bears on are
 reopened ([ADR 0014](../docs/adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)).
-The agents' VM shares stay as booted; new evidence is read through jobs. The
+Every seat's VM mounts the run read-only and live, so an addition is readable
+at `store/imports/ev-<n>/out/` once sealed, and through jobs. The
 goals say `more_evidence: ask`, so the operator decides each acquisition; a
 run started with `--more-evidence no` refuses the item. A second set from the
 start (`--inputs <case>/inputs --inputs <case>/late`) is still read, for a run

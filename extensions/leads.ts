@@ -137,8 +137,10 @@ export type LeadEvent = {
   ask?: import("./requests.ts").AcquisitionAsk;
   add?: string[];
   remove?: string[];
-  /** A reopen's cause: superseded, disputed, operator, agent. */
+  /** A reopen's cause: superseded, disputed, operator, agent, evidence_added. */
   cause?: string;
+  /** A reopen for evidence added after the kickoff: the import it came as, so the reopen is made once. */
+  import?: string;
   job?: string;
   /** An interpretation: the ledger entry that is it, and that entry's kind. */
   entry?: number;
@@ -191,8 +193,8 @@ export type Lead = {
   generation: number;
   /** When the current holder took it. */
   held_since: string | null;
-  closed: { disposition: LeadDisposition; ref: string; by: string; at: string; why?: string } | null;
-  reopened: Array<{ at: string; by: string; why: string; cause: string }>;
+  closed: { disposition: LeadDisposition; ref: string; by: string; at: string; why?: string; seq?: number } | null;
+  reopened: Array<{ at: string; by: string; why: string; cause: string; import?: string }>;
   /** The newest stale mark on the current holder, until the holder acts on the lead or loses it. */
   stale: { at: string; holder: string; generation: number; idle_seconds: number; last_activity: string | null } | null;
   jobs: string[];
@@ -335,7 +337,7 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         break;
       case "close":
         if (!l || !e.disposition) break;
-        l.closed = { disposition: e.disposition, ref: e.ref ?? "", by: e.by, at: e.at, ...(e.why ? { why: e.why } : {}) };
+        l.closed = { disposition: e.disposition, ref: e.ref ?? "", by: e.by, at: e.at, ...(e.why ? { why: e.why } : {}), seq: e.seq };
         l.stale = null;
         if (e.not_examined?.length) l.not_examined = e.not_examined;
         else delete l.not_examined;
@@ -355,7 +357,7 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         l.held_since = null;
         l.stale = null;
         l.cycle += 1;
-        l.reopened.push({ at: e.at, by: e.by, why: e.why ?? "", cause: e.cause ?? "agent" });
+        l.reopened.push({ at: e.at, by: e.by, why: e.why ?? "", cause: e.cause ?? "agent", ...(e.import ? { import: e.import } : {}) });
         delete l.not_examined;
         delete l.quick_negative;
         l.last_seq = e.seq;
@@ -1615,21 +1617,25 @@ export async function linkLead(ctx: P.SwarmContext, rawId: unknown, input: { add
  * harness does it when the entry a lead was closed on is superseded or
  * disputed (reopenOnLedger), since the closure no longer stands.
  */
-export async function reopenLead(sandboxRoot: string, rawId: unknown, by: string, why: string, cause: string): Promise<LeadResult<{ lead: LeadView }>> {
+export async function reopenLead(sandboxRoot: string, rawId: unknown, by: string, why: string, cause: string, o: { import?: string; closedBy?: number } = {}): Promise<LeadResult<{ lead: LeadView; already?: boolean }>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
   const text = bounded("why", why, LEAD_WHY_MAX, true);
   if (!text.ok) return text;
   try {
-    const r = await transact<Fail | { ok: true }>(sandboxRoot, async (snap) => {
+    const r = await transact<Fail | { ok: true; already?: boolean }>(sandboxRoot, async (snap) => {
       const l = snap.state.leads.get(ref.id);
       if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
+      // Once per import: a lead reopened for it already (and perhaps closed again since, knowing it) is not reopened again.
+      if (o.import && l.reopened.some((x) => x.import === o.import)) return { append: [], result: { ok: true as const, already: true } };
       if (!l.closed) return { append: [], result: { ok: false as const, reason: `${l.id} is not closed` } };
-      return { append: [{ by, ev: "reopen", lead: l.id, why: text.value, cause }], result: { ok: true as const } };
+      // Only a close made before the addition: one made after it was made knowing it.
+      if (o.closedBy !== undefined && (l.closed.seq ?? 0) > o.closedBy) return { append: [], result: { ok: false as const, reason: `${l.id} was closed after the addition` } };
+      return { append: [{ by, ev: "reopen", lead: l.id, why: text.value, cause, ...(o.import ? { import: o.import } : {}) }], result: { ok: true as const } };
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(sandboxRoot);
-    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap) };
+    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap), ...(r.already ? { already: true } : {}) };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }

@@ -1088,6 +1088,33 @@ export class Hub {
     return next;
   }
 
+  /** How the hub commits an addition: its job service's journal (the journal's one writer) and catalogue, when it runs one. */
+  private additionOptions(): { journal?: import("./evidence-store.ts").Journal; catalogueOn?: boolean; catalogue?: (target: string, note: string) => Promise<{ ok: boolean; job?: string; reason?: string }> } {
+    const svc = this.jobService;
+    if (!svc) return {};
+    return {
+      journal: svc.journal,
+      catalogueOn: this.jobsDerived || existsSync(join(this.cfg.sandbox, "catalog")),
+      catalogue: async (target: string, note: string) => {
+        const r = await svc.catalogRequest("system", target, undefined, note);
+        return r.ok ? { ok: true, job: r.job.id } : { ok: false, reason: r.reason };
+      },
+    };
+  }
+
+  /**
+   * Additions committed and not applied (a process that died after the
+   * commit): what follows from each, applied now, once (scripts/material.ts
+   * reconcileAdditions). On every round, at start, and when the CLI asks.
+   */
+  private async reconcileAdditions(): Promise<unknown[]> {
+    const M = await import("./material.ts");
+    return M.reconcileAdditions(this.cfg.sandbox, this.additionOptions()).catch((err: Error) => {
+      this.log(`additions: ${err.message}`);
+      return [];
+    });
+  }
+
   /**
    * Evidence added while no hub ran, or before its catalogue could take it:
    * a detect pass over each file, once (the store journal's
@@ -1185,8 +1212,8 @@ export class Hub {
     }
     await this.listen(this.adminSocket(), (socket) => this.serveAdmin(socket));
     if (this.cfg.jobs && this.cfg.run) await this.startJobs(this.cfg.jobs, this.cfg.run);
-    // What a crash left committed and not yet delivered to the operator: now.
-    void this.fireRequests();
+    // What a crash left committed and not yet applied or delivered to the operator: now.
+    void this.reconcileAdditions().then(() => this.fireRequests());
     this.writeStatus();
     if (this.cfg.backstop !== false) {
       this.backstopTimer = setInterval(() => void this.backstop().catch(() => undefined), BACKSTOP_INTERVAL_MS);
@@ -2341,7 +2368,8 @@ export class Hub {
       await this.stop();
       process.exit(0);
     }
-    // The operator requests' round: what is committed and not yet written or delivered.
+    // Additions committed and not applied, then the operator requests' round: what is committed and not yet written or delivered.
+    await this.reconcileAdditions();
     await this.fireRequests();
     await this.catalogueAddedEvidence().catch((err: Error) => this.log(`catalogue of added evidence: ${err.message}`));
     // The dynamic network's round: grants whose lead closed or whose job

@@ -39,8 +39,11 @@ export type FinishGateQuestion = { id: string; outcome: string; blocks: string[]
 /** What the question register holds against a done. */
 export type QuestionDefect = { code: "open_question" | "question_answer" | "stale_answer"; question: string; what: string; fix: string };
 
+/** An addition committed whose effects (its ledger entry, its request, the leads and answers it reopens, its board post) are not all recorded yet. */
+export type AdditionDefect = { code: "addition_incomplete"; import: string; what: string; fix: string };
+
 export type FinishGate = {
-  defects: Array<L.LeadDefect | QuestionDefect>;
+  defects: Array<L.LeadDefect | QuestionDefect | AdditionDefect>;
   /** Why a run that meets its checks is examination-limited, each in words; empty when it answered everything. */
   limited: string[];
   /** Each goal question and how it stands, with what blocks the ones not answered. */
@@ -81,6 +84,16 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
     }
     const lead = await L.leadDefects(sandbox, snap);
     const defects: FinishGate["defects"] = [...lead.defects];
+    // Evidence or material committed whose effects are not all recorded: what it reopens may still look settled.
+    const { unappliedAdditions } = await import("./material.ts");
+    for (const a of await unappliedAdditions(sandbox)) {
+      defects.push({
+        code: "addition_incomplete",
+        import: a.import,
+        what: `import:${a.import} (${a.type === "evidence_added" ? "evidence" : "material"} added by ${a.by} at ${a.at}) is committed, and what follows from it is not all recorded yet: its ledger entry, its request's stages, the leads and answers it reopens, its board post`,
+        fix: "the hub records it at its next round; with no hub running, swarm.sh evidence <run> list records it",
+      });
+    }
     const limiting = lead.limiting;
     const limited: string[] = [];
     // What the answers check said about each section, passing or not.
