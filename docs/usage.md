@@ -20,6 +20,8 @@ scripts/swarm.sh start --model <provider/id> --cap-usd <n> --n <N>
     [--catalog] [--toolbox <sets>|auto|off] [--toolbox-required] [--quarantine]
     [--allow-host HOST]... [--provider-host P=HOST]... [--case-id ID] [--examiner NAME]
     [--probe-violation] [--no-netguard] [--open-net] [--net-allow] [--local-only] [--no-start]
+    [--network closed|dynamic|open] [--policy standard|live_adversary|internal|ctf]
+    [--lookups none|reference|evidence_linked|any] [--contact passive|active] [--disclosure CLASSES]
     [--key-from-env] [--env KEY=VALUE]...
     [--notify CMD] [--ledger-from RUN] [--no-verify-copy] [--allow-root] [--model-gateway] [--check]
 scripts/swarm.sh image-for [--pack ID]... [--tools-from DIR] [--playwright] [--no-jobs] [--brains-with-packs]
@@ -126,7 +128,10 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--idle-nudge-sec N` | no | 180 | The idle watchdog (`scripts/idle-nudge.sh`, started next to netguard): an agent with no tool call for N seconds and no marker is prompted through Herdr to continue its seat or call done, at most three times, each an `idle_nudge` event on the trace. An agent that has called only `wait` and `inbox` for 600 s (`SWARM_WAIT_IDLE_SEC`) is steered the same way, unless a job of its own is running. `0` turns it off. |
 | `--probe-violation` | no | off | Dev only. Starts one extra agent `<id>pv` (not in `team.json`) without `claim_file`, told to do both: a `write` (which the guard must block) and a shell write (which the harness must detect and announce). |
 | `--provider-host P=HOST` | no | — | The host provider `P` is called on, when the harness cannot know it: a gateway, a region, an account (repeatable). The harness knows a provider's host from `models.json` (its `baseUrl`, which Pi takes over its own for a built-in provider too), from its own table, and otherwise from Pi's model list, which names the host of every provider Pi ships (Groq, Mistral, Fireworks, …). Under `--isolation microvm` a provider with no known host is refused before anything is written, with or without `--no-netguard`: its key is bound to its hosts and swapped in nowhere else. Providers that sign each request with their secret on the client (`amazon-bedrock`, `google-vertex`) are refused under microvm, since the secret itself would have to be in the VM. On the host a provider with no known host is a warning. |
-| `--no-netguard` / `--open-net` | no | netguard on | Skip the netguard sidecar and PATH shim: open egress. Under `--isolation microvm` each VM may reach every public host, and its credentials still go only to their own hosts; recorded as `netguard_mode: "microvm-open"`, and the report's egress row says OPEN. |
+| `--no-netguard` / `--open-net` | no | netguard on | Skip the netguard sidecar and PATH shim: open egress. Under `--isolation microvm` each VM may reach every public host, and its credentials still go only to their own hosts; recorded as `netguard_mode: "microvm-open"`, and the report's egress row says OPEN. It is the network mode `open`, and contradicts `--network closed` or `dynamic`. |
+| `--network MODE` | no | `closed` | The run's network mode ([ADR 0011](adr/0011-a-dynamic-network-decided-by-rules-and-made-on-the-host.md)). `closed`: the models' hosts, the package index with `--allow-install`, `--allow-host`, and what the operator allows later with `lead note --allow-host` (a socket grant). `dynamic` (microVM runs): an agent asks for one bounded lookup with `net_request`; the hub decides it by rules under the case policy and records the decision; a fetch service on this host (`scripts/net-fetch.ts`, started with the hub and kept by its keeper) makes exactly the granted request and seals the answer as a capture (`store/net/<k>/<n>/`), recorded on the ledger as external material; the agents get `net_request`, `net_fetch` and `network`. Refused with `--isolation host`. `open`: every public host (`--no-netguard`), with the tools too. The goal's metadata block may say `network: MODE`. Recorded in `network/policy.json`, SWARM.md and the registry's `case_policy`. |
+| `--policy PRESET` | no | `standard` | The case policy: what the examination permits to leave the run and to reach outside it, whatever the mode. `standard`: hashes and public indicators, to approved passive adapters; active contact (an evidence URL's HEAD) is the operator's. `live_adversary`: stricter; nothing the evidence names is ever contacted, no socket grant. `internal`: nothing leaves (with `--network open` or any lookup it is refused). `ctf`: a published case; no search, no write-up site, only reference or evidence-linked adapters, and every value sent must be found in the evidence the request cites; no socket grant (so no `--allow-host`). The goal's metadata block may say `policy: PRESET`, and `legal:`, `provider_retention:`, `more_evidence:`, `material_use:` as text; a flag overrides the goal's value and the kickoff says so. A combination that contradicts its preset is refused before anything is written. |
+| `--lookups L`, `--contact C`, `--disclosure LIST` | no | the preset's | Override one field of the preset: what the hub grants by itself (`none`, `reference`, `evidence_linked`, `any`), whether what the evidence names may be contacted (`passive`, `active`), and which classes of case data may leave (`hash`, `public_indicator`, `coordinate`, `internal_name`, `personal`, `file_upload`, or `none`). |
 | `--local-only` | no | off | Every model on the team must be served from this machine or this network — a `models.json` `baseUrl` on loopback, a private range, link-local or `.local`, or Pi's built-in `llama.cpp` provider — and the netguard allowlist becomes those endpoints and nothing else (`netguard --only`): the eight cloud hosts of the default list drop out. Panes also get `PI_OFFLINE=1`, so Pi makes no catalog-refresh calls at startup. Refused with a cloud model on the team, with a cloud `--compact-model`, and with `--no-netguard`. Recorded as `net: "local"` in the registry. |
 | `--net-allow` | no | — | Alias of the default (kept for older scripts). |
 | `--no-start` | no | — | Prepare the sandbox, `SWARM.md`, `team.json`, `budget.json` and the registry entry, but start no Herdr/Pi. Used by the web API test and the UI's "Prepare only". Under `--isolation microvm` it boots no VM of any kind: the host is not probed and the image is not pulled, `--toolbox` and `--catalog` are not run, neither in a VM nor on the host (the kickoff says so), and `vm-spec.json` in the sandbox records what each VM would have been given. The checks that need no VM still run: the providers' hosts, the `--allow-host` entries, the capacity. |
@@ -235,13 +240,36 @@ Three decisions about a VM's network, said so nobody assumes otherwise:
 - **DNS.** msb's DNS rebinding protection is left at the SDK's default (on), and its strict mode is not enabled: a host-name rule admits the addresses that name resolves to, and msb does not require the connection's own TLS server name or HTTP `Host` to be that name. A local model reached by a host name that resolves to a private address may be refused by the rebinding protection (UNKNOWN, not measured); name it by address.
 - **No TLS-inspecting corporate proxy.** A network that reaches the internet only through a proxy that decrypts TLS is not supported in VM mode: the VMs do not trust the host's certificate store (msb's `trustHostCAs` is off), and no upstream proxy is configured for them.
 
+#### The dynamic network: `net`
+
+`swarm.sh net <run> list` prints the run's case policy, what waits on the
+operator (one item per host and lead, with the reasons it was refused and the
+command that answers it), every grant with its state and what is left of it,
+every request with its decision and machine-readable reasons, every capture,
+every use the fetch service refused, and contamination. `net <run> grant
+NR-<n> --why TEXT` grants a refused request: the same rules run with the
+overridable reasons waived and recorded (a login, an upload, a credential, a
+sensitive value, an internal case stay refused). `net <run> deny NI-<m>|NR-<n>
+--why TEXT` declines an item or a request: the avenue closes, the lead does
+not. `net <run> revoke N-<k> --why TEXT` ends a grant: its next use is
+refused, a transfer under way stops. `net <run> grant --socket HOST[:PORT]
+[--lead L-<n>] --why TEXT` makes a socket grant (tier 2) for the run's jobs run
+with `network=allowlist`: host and port only, no method or path control, no
+content capture; refused under `ctf`, `internal` and `live_adversary`. Every
+act is on the trace and the operator's record, and posted to the board to
+whoever asked. The console's **Network** tab shows the same and runs the same
+commands. A host-managed adapter key (VirusTotal: `DFIRSWARM_VT_API_KEY` in the
+shell that starts the run) is read by the fetch service alone and given to no
+VM; `network view=adapters` tells the agents whether it is configured.
+
 #### The lead register and until-solved runs
 
 `swarm.sh lead <run> list` prints every lead, the ones an agent closed
 `needs_operator` first with the request and the command that answers it;
 `lead <run> note L-n "TEXT" [--allow-host HOST]` answers one (recorded on the
 lead, the lead reopened, posted to the board as the examiner, and in a microVM
-run the host allowed for the run's jobs); `lead <run> reopen L-n` reopens a
+run the host allowed for the run's jobs, as a socket grant it names: host and
+port only, refused where the case policy permits none); `lead <run> reopen L-n` reopens a
 closed lead. Each is on the trace and the operator's record. The console's
 Leads tab does the same.
 

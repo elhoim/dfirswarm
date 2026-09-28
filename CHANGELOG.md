@@ -6,6 +6,36 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: a dynamic network, decided by rules and made on the host
+
+- **`--network closed|dynamic|open` and a case policy** (`--policy
+  standard|live_adversary|internal|ctf`, with `--lookups`, `--contact`,
+  `--disclosure` overrides, or the same keys in the goal's metadata block).
+  `closed` stays the default and changes nothing; a contradictory policy is
+  refused at kickoff. The policy is recorded in `network/policy.json`,
+  SWARM.md and the registry (`scripts/case-policy.ts`).
+- **`net_request`, `net_fetch`, `network`.** An agent asks for one bounded
+  lookup from the adapter catalogue (`network/adapters.json`: RDAP, crt.sh,
+  NVD, CISA KEV, CIRCL hashlookup, RIPEstat, Nominatim, Overpass, YouTube
+  oEmbed title, an evidence-linked HEAD, VirusTotal with a host-managed key).
+  The hub decides it in eight fixed steps with machine-readable reasons
+  (`scripts/net-policy.ts`); a refusal closes the avenue, never the lead,
+  and opens one operator item per host and lead. Grants are capabilities in
+  `network/grants.jsonl`.
+- **The fetch service** (`scripts/net-fetch.ts`) makes exactly a grant's
+  request: its own headers only, DNS once with every address checked
+  public, TLS against the name, no redirect beyond an adapter's referral
+  hosts, no CONNECT, the use logged before it leaves, an oversize body
+  refused whole. Jobs use it through `job_run net_grants`, on the one host
+  port their worker is booted with. Each answer is sealed as `net:<k>/<n>`
+  and recorded as a ledger entry of the new kind `external`
+  (`source_class: external_capture`); what derives from it stays external.
+- **Socket grants (tier 2)** say what they are; `lead note --allow-host`
+  makes one, and `--allow-host` names itself a static socket allowance.
+- **`swarm.sh net <run> list|grant|deny|revoke`** and the console's
+  **Network** tab; every act needs a reason. Custody seals both network
+  chains and re-hashes every capture. [ADR 0011](docs/adr/0011-a-dynamic-network-decided-by-rules-and-made-on-the-host.md).
+
 ### Added: the examiner signs with their own secret, from the command line or the console; three kinds of key; a technical reviewer signs their own record
 
 - **Three kinds of key, two roles.** `swarm.sh examiner enroll` records a

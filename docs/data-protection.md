@@ -28,6 +28,24 @@ establish, and nothing here settles it.
   is the same. The gateway writes no request or response body: its log
   (`traces/model-gateway.jsonl`) holds seats, models, statuses, token
   counts, costs and byte counts.
+- **With `--network dynamic`,** a lookup an agent asks for is sent by the
+  fetch service on the host to the adapter's service: rdap.org and the
+  registries it refers to, crt.sh, NVD, CISA, CIRCL, RIPEstat, Nominatim,
+  Overpass, YouTube's oEmbed, the host of an evidence URL for a HEAD, and
+  VirusTotal where the operator configured a key ([ADR
+  0011](adr/0011-a-dynamic-network-decided-by-rules-and-made-on-the-host.md)).
+  What leaves is the adapter's typed values (a domain, an address, a hash, a
+  coordinate, a place name) and nothing else of the case. Each adapter
+  declares the class of case data it carries, and the case policy says which
+  classes may leave: `standard` lets hashes and public indicators go to
+  passive reference services and nothing else, `internal` nothing at all,
+  and personal data or an internal name leaves under no preset unless the
+  operator's case policy says so. Even a hash or a coordinate tells a third
+  party what the case is interested in; the policy is where the operator
+  decides that. A value the run marked sensitive, and anything that looks
+  like a credential, never leaves. Every request, decision and answer is
+  kept in the run (`network/`, `store/net/`), so the record of a run says
+  what was sent where.
 - **The operator's `--notify` command** receives each event's details: the
   run id, states, counts, and on `evidence_changed` the names of the
   evidence files that changed, went missing or appeared. No evidence
@@ -103,6 +121,15 @@ says they may go, and warns about a run directory there for what the agents
 derive.
 
 ## What the operator decides
+
+- **The case policy** (`--policy`, or `policy:` in the goal's metadata
+  block): which classes of case data may leave the run and to what kind of
+  service, whether the subject's infrastructure may be contacted, and the
+  legal text the run records beside it (`legal:`, for instance "GDPR or
+  similar laws" and the scope of the authority the examination runs under)
+  and what the operator knows of the providers' retention
+  (`provider_retention:`). The harness records these and enforces the
+  network part; it does not decide what the law of a case requires.
 
 - **Whether the evidence may be processed this way at all**, and on what
   basis: who the controller is, and what the engagement or the law allows.
