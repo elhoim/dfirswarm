@@ -361,8 +361,9 @@ regroup_check() {
   echo "idle-nudge: regroup $(jq -r '.count' <<<"$out") posted (#$(jq -r '.post' <<<"$out")); nothing had moved since $(jq -r '.since' <<<"$out")" >&2
 }
 
-# What the agents asked of the operator (a lead closed needs_operator, one
-# line each in operator-requests.jsonl): the operator's notify command runs
+# What the agents asked of the operator (a lead closed needs_operator, or a
+# clarification of a question: one line each in operator-requests.jsonl): the
+# operator's notify command runs
 # once for each new one, with the command that answers it.
 operator_requests_check() {
   local file="$SANDBOX/operator-requests.jsonl" mark="$SANDBOX/traces/idle-nudge.requests" seen total line
@@ -374,7 +375,8 @@ operator_requests_check() {
   tail -n +"$((seen + 1))" "$file" | while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     bash "$ROOT/scripts/notify.sh" "$SANDBOX" operator_request "$line" >/dev/null 2>&1 </dev/null || true
-    echo "idle-nudge: an agent asks the operator: $(jq -r '"\(.lead) \(.request)"' <<<"$line" 2>/dev/null). Answer: $(jq -r '.answer' <<<"$line" 2>/dev/null)" >&2
+    # A lead closed needs_operator, or a clarification an agent asked of a question's asker (kind clarification).
+    echo "idle-nudge: an agent asks the operator: $(jq -r '"\(.lead // .q) \(if .kind == "clarification" then "clarification \(.id): " else "" end)\(.request)"' <<<"$line" 2>/dev/null). Answer: $(jq -r '.answer' <<<"$line" 2>/dev/null)" >&2
   done
   echo "$total" > "$mark"
 }

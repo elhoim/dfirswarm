@@ -107,7 +107,7 @@ Commands:
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   examiner machine review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run
-  say <id> "<msg>"   Post to a running swarm as the examiner; cap <id> its caps; lead <id> list|note its leads
+  say <id> "<msg>"   Post as the examiner; cap <id> its caps; lead <id> list|note its leads; question <id> add|list … asks it one
   stop <id>          Stop a run and record how it ended
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
@@ -4329,7 +4329,10 @@ cmd_start() {
   # The one key the kickoff itself reads from the block is `toolbox:`, the
   # sets the entry needs; it is printed here before the block goes.
   # The kickoff also reads until_solved and stall_minutes there: a goal may
-  # say it is to be run until every question is answered.
+  # say it is to be run until every question is answered. And objectives:
+  # a list the goal's `## Objectives` section carries from then on, where
+  # the question register reads them (a goal may name objectives and no
+  # questions: its first agents propose the questions).
   local goal_toolbox goal_meta
   goal_meta="$(python3 - "$goal_file" <<'STRIP'
 import json, re, sys
@@ -4342,8 +4345,19 @@ if m:
         key = re.search(r"^" + k + r":[ \t]*(.*?)[ \t]*\r?$", m.group(0), re.M)
         if key:
             out[k] = re.sub(r"[ \t]", "", key.group(1))
+    body = text[m.end():].lstrip("\r\n")
+    objectives = []
+    block = re.search(r"^objectives:[ \t]*(.*?)\r?\n((?:[ \t]+-[^\n]*\n?)*)", m.group(0), re.M)
+    if block:
+        if block.group(1).strip():
+            objectives.append(block.group(1).strip())
+        for item in re.findall(r"^[ \t]+-[ \t]*(.*?)[ \t]*\r?$", block.group(2), re.M):
+            if item.strip():
+                objectives.append(item.strip().strip("\"'"))
+    if objectives and not re.search(r"^#{2,3}[ \t]*Objectives[ \t]*$", body, re.M | re.I):
+        body = body.rstrip("\n") + "\n\n## Objectives\n\n" + "".join("- " + o + "\n" for o in objectives)
     with open(path, "w", encoding="utf-8") as f:
-        f.write(text[m.end():].lstrip("\r\n"))
+        f.write(body)
 print(json.dumps(out))
 STRIP
 )"
@@ -5810,6 +5824,10 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   # where no agent reaches it: custody compares the manifest against this,
   # so a manifest rewritten inside the run is caught rather than trusted.
   registry_upsert "$rec" || exit 1
+  # The question register opens with the goal's questions and objectives
+  # (extensions/questions.ts): Q-n is question:n from its first event.
+  SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" seed "$sandbox" >/dev/null 2>&1 \
+    || echo "WARN: the question register could not be seeded now; the first act on it seeds it from the goal." >&2
   # The operator's notify command, outside the run and 0600: a webhook's
   # URL is often its secret, and nothing an agent writes may name what the
   # host runs.
@@ -5869,6 +5887,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   echo "Goal:         $goal_source"
   echo "DoD:          from the goal document; checks run by scripts/await-done.sh"
   echo "Operator:     what an agent needs from you (a lead closed needs_operator) is in operator-requests.jsonl and the console's Leads tab; answer it with swarm.sh lead $swarm_id note L-<n> \"<answer>\""
+  echo "Questions:    the goal's are Q-n in questions/questions.md; ask the swarm one while it runs with swarm.sh question $swarm_id add --text \"<question>\" --why \"<why>\" [--as ID], or the console's Questions tab"
   echo "Panes:        Herdr right/down grid; tab then workspace fallback if a split fails"
   if [[ "$forging" -eq 1 ]]; then
     echo "Tools:        forging on (make_tool / tools; scripts under tools/<name>/ run as subprocesses)"
@@ -5980,7 +5999,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
 
   # The tools each Pi is given, known before a prepared run returns: a
   # prepared VM run writes them into vm-spec.json.
-  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,done"
+  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,question_open,questions,question_ask,done"
   # Pi's --tools is an allowlist by name, so a tool the extension registers is
   # invisible until it is named here. The skill tool exists only when the run
   # carries packs.
@@ -8768,12 +8787,14 @@ examiner_post() { # <sandbox> <to> <message>
 #   lead <id> note <L-n> TEXT [--allow-host HOST] the operator's answer: on the lead, the lead reopened,
 #                                                 posted to the board, and a host allowed for jobs
 #   lead <id> reopen <L-n> [TEXT]                reopen a closed lead
+#   lead <id> direct (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A
+#                                                 a directive: an unheld lead under a question, with its product
 # A lead an agent closed needs_operator is the swarm asking for something only
 # the operator can give: a host to reach, a file, an answer. On c09 the pointer
 # to the third part's key was found in every run and asked of nobody.
 cmd_lead() {
   local id="${1:-}" sub="${2:-}"
-  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: lead needs <id> and list, note <L-n> TEXT [--allow-host HOST], or reopen <L-n> [TEXT]." >&2; exit 2; }
+  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: lead needs <id> and list, note <L-n> TEXT [--allow-host HOST], reopen <L-n> [TEXT], or direct (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A." >&2; exit 2; }
   shift 2
   ensure_registry
   local rec sandbox isolation
@@ -8830,7 +8851,73 @@ cmd_lead() {
       post="$(examiner_post "$sandbox" all "OPERATOR: $lead is reopened${*:+: $*}. lead_claim $lead to take it.")" || exit 1
       echo "$lead reopened, and said on the board as the examiner (#$post)."
       ;;
-    *) echo "BLOCKER: lead takes list, note or reopen (got $sub)." >&2; exit 2 ;;
+    direct)
+      # A directive: an unheld lead under a question, with the product it is
+      # to make and what makes it acceptable (a held one would be an assignment).
+      local out status=0
+      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" direct "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" "$@")" || status=$?
+      [[ "$status" -eq 0 ]] || { echo "BLOCKER: $(jq -r '.reason // "the directive was not recorded"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2; exit 2; }
+      operator_trace "$sandbox" lead "$id" direct "$@"
+      echo "Directive $(jq -r '.lead' <<<"$out") opened under $(jq -r '.q' <<<"$out"), unheld$(jq -r 'if .woke then "; \(.woke) woken for it" else "" end' <<<"$out")."
+      printf '%s\n' "$out"
+      ;;
+    *) echo "BLOCKER: lead takes list, note, reopen or direct (got $sub)." >&2; exit 2 ;;
+  esac
+}
+
+# The question register from the operator's side (extensions/questions.ts):
+# what the examination is asked, by the goal, an agent or a person.
+#   question <id> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n]
+#                     [--materiality material|background] [--priority urgent --reason R] [--expects E]
+#                     [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO]
+#                     [--neutral T] [--submission TOKEN]
+#   question <id> list [--json] | show Q-n [--json] | verify [--allowed-signers FILE] [--ca FILE]
+#   question <id> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--materiality M] [--expects E] ...
+#   question <id> priority Q-n urgent|normal [--reason R]
+#   question <id> scope Q-n|L-n in_scope|excluded --why W
+#   question <id> withdraw Q-n --why W
+#   question <id> clarify-reply Q-n C-n TEXT
+#   question <id> accept Q-n --as bounded|not_determinable --why W --expect-rev N
+# Every act takes [--as ID] (an enrolled person, a claim) and [--sign] (signed
+# with that person's enrolled key; the secret on the terminal or --secret-fd N).
+# The act is acknowledged only once the chain holds it, and the outcome is a
+# second line on the operator's record, beside the attempt, naming the event.
+cmd_question() {
+  local id="${1:-}" sub="${2:-}"
+  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: question needs <id> and add, list, show, amend, priority, scope, withdraw, clarify-reply, accept or verify." >&2; exit 2; }
+  shift 2
+  ensure_registry
+  local rec sandbox
+  rec="$(json_get "$id")"
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+  local cli="$ROOT/scripts/questions-cli.ts"
+  case "$sub" in
+    list|show|verify)
+      SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" "$@" ;;
+    add|amend|priority|scope|withdraw|clarify-reply|accept)
+      local out status=0
+      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" "$@")" || status=$?
+      # The outcome beside the attempt main() recorded: the event that holds it, by seq and hash.
+      OPERATOR_AUDIT_DETAIL="$(jq -c '{question: {ok: (.ok != false), q: (.q // null), rev: (.rev // null), seq: (.seq // null), hash: (.hash // null), scope: (.scope // null), reason: (.reason // null)}}' <<<"$out" 2>/dev/null || echo null)" \
+        operator_audit question_outcome "$id" "$sub"
+      if [[ "$status" -ne 0 ]]; then
+        echo "BLOCKER: $(jq -r '.reason // "the act was not recorded"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2
+        exit 2
+      fi
+      operator_trace "$sandbox" question "$id" "$sub" "$@"
+      jq -r '
+        "Recorded \(.q // "the act")\(if .rev then " (revision \(.rev))" else "" end)\(if .duplicate then ": that submission was recorded already" else "" end)\(if .scope then ", \(.scope): \(.scope_why // "")" else "" end)\(if .after_done then ". The run had already finished: it is recorded as a follow-up, not work of this run" else "" end)."
+        + (if .objective_created then " New objective \(.objective_created)." else "" end)
+        + (if .clarify then " Clarification \(.clarify)." else "" end)
+        + (if (.closed_leads // []) | length > 0 then " Closed withdrawn: \(.closed_leads | join(", "))." else "" end)
+        + (if (.triaged // []) | length > 0 then " In your triage now: \(.triaged | join(", "))." else "" end)
+        + (if .signed then " Signed (event \(.signed.seq))." else "" end)
+        + (if (.leading_forms // []) | length > 0 then " Leading form flagged for the critic: \(.leading_forms | join(", "))." else "" end)
+        + ((.delivered // []) | if type == "array" and length > 0 then " Delivered: " + (map("\(.q) revision \(.rev)" + (if .post then " (post \(.post.thread)#\(.post.id))" else "" end) + (if .offer_to then ", offered to \(.offer_to)\(if .first then " first" else "" end)" else ", offered to the first idle seat" end)) | join("; ")) + "." else "" end)' <<<"$out"
+      printf '%s\n' "$out"
+      ;;
+    *) echo "BLOCKER: question takes add, list, show, amend, priority, scope, withdraw, clarify-reply, accept or verify (got $sub)." >&2; exit 2 ;;
   esac
 }
 
@@ -10191,6 +10278,44 @@ are charged, a token cap where they are not (a subscription, local models).
 EOF
       ;;
     purge) echo "  purge <id> --yes   delete a finished run's sandbox, kept VM disks and hub directory; the registry keeps it as purged, and runs/operator-audit.jsonl gets the destruction record" ;;
+    question) cat <<'EOF'
+  question <id> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n]
+                    [--materiality material|background] [--priority urgent --reason R]
+                    [--expects existence|value|narrative|timeline|list] [--hint REF [--hint-value V]]...
+                    [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]
+                                               a question for the running swarm (Q-n): recorded on the chain
+                                               (questions/questions.jsonl), then posted from analyst:<you>,
+                                               offered to the suggested seat for its first minute or to the
+                                               most suited idle seat, and ranked first in every agent's header
+  question <id> list [--json]                  every question: your triage and the clarifications waiting first
+  question <id> show Q-n [--json]              one question whole: every revision, hints, clarifications, leads,
+                                               offers, its answer, and each signed act checked
+  question <id> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [...]
+                                               a new verbatim revision (refused when N is not the current one);
+                                               an answer recorded before it is stale until recorded again
+  question <id> priority Q-n urgent|normal [--reason R]
+                                               urgent needs a reason; it orders the offers and tells the holders
+                                               under the same objective, and cancels nothing
+  question <id> scope Q-n|L-n in_scope|excluded --why W
+                                               admit or exclude a proposed question; keep or close a lead the
+                                               triage holds after a withdrawal
+  question <id> withdraw Q-n --why W           its leads close withdrawn; a lead holding a material finding goes
+                                               to your triage instead, and nothing found is erased
+  question <id> clarify-reply Q-n C-n TEXT     answer an agent's clarification: on the record, posted to it
+  question <id> accept Q-n --as bounded|not_determinable --why W --expect-rev N
+                                               accept a question's limits (refused while a lead on it is open);
+                                               the run ends examination-limited
+  question <id> verify [--allowed-signers FILE] [--ca FILE]
+                                               every signed act, its signature checked
+Every act takes --as ID (an enrolled person, a claim; on accept, a second --as) and --sign (signed with
+that person's enrolled key, namespace dfirswarm-question; the passphrase or PIN on the terminal, or
+--secret-fd N). Without --as the act is this OS account's on this host, not enrolled, with the
+operator's authority. An examiner's question is in scope by authority (--objective new expands the
+case); an analyst's inside an objective or under a question in scope, otherwise proposed; a reviewer's
+and an observer's are proposed. Each act is on the trace and on the operator's record twice: the
+attempt, and the outcome naming the event.
+EOF
+      ;;
     lead) cat <<'EOF'
   lead <id> list [--json]                      every lead: the ones waiting on the operator first, then
                                                active, blocked, open and closed, with needs and dispositions
@@ -10200,6 +10325,9 @@ EOF
                                                the run's jobs reach with network=allowlist (a microVM run: each
                                                job's worker is made new; the agents' own VMs keep their network)
   lead <id> reopen <L-n> ["TEXT"]              reopen a closed lead
+  lead <id> direct (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A
+                                               a directive: an unheld lead under a question, with what it is
+                                               to produce and what makes that acceptable (--as ID names you)
 A lead an agent closes needs_operator writes its request to <run>/operator-requests.jsonl and to the
 board; the console shows it on the Leads tab with a form for the note. Each note and reopen is on the
 trace and the operator's record.
@@ -10224,6 +10352,8 @@ main() {
       case " $* " in *" -h "*|*" --help "*|*" --check "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
     # The operator's answer to a lead, and a reopen, change the run; a list reads it.
     lead) [[ "${2:-}" == list ]] || operator_audit "$cmd" "$@" ;;
+    # A question act changes the run (its outcome is a second line, from cmd_question); list, show and verify read it.
+    question) [[ "${2:-}" == list || "${2:-}" == show || "${2:-}" == verify ]] || operator_audit "$cmd" "$@" ;;
   esac
   case "$cmd" in
     start) cmd_start "$@" ;;
@@ -10240,6 +10370,7 @@ main() {
     say) cmd_say "$@" ;;
     cap) cmd_cap "$@" ;;
     lead) cmd_lead "$@" ;;
+    question) cmd_question "$@" ;;
     netcheck) cmd_netcheck "$@" ;;
     review) cmd_review "$@" ;;
     image-for) cmd_image_for "$@" ;;
