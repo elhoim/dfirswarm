@@ -180,8 +180,14 @@ export type SwarmRow = SwarmSummary & {
   stop_reason: string | null;
   /** What the run does at a cap (docs/adr/0013): cap-pause, cap-stop, or operator (until solved). */
   stop_policy: "cap-pause" | "cap-stop" | "operator";
-  /** The pause in force: seats idle, no model call, until the operator extends or stops the run. */
-  paused: { at: string; reason: string; detail: string } | null;
+  /**
+   * The pause in force: seats idle, no model call. Its reason: cap or
+   * wall_clock (until the operator extends or stops the run),
+   * provider_limit (the model provider refused every seat; `until` is the
+   * end it named, and the harness tries again then or every half hour), or
+   * operator (swarm.sh pause, until swarm.sh unpause).
+   */
+  paused: { at: string; reason: string; detail: string; until?: string } | null;
   /** How the run stands: completed, examination_limited, paused, stopped, abandoned, verification_unavailable, or null while it runs. */
   outcome: string | null;
   /** How many times the run was resumed (swarm.sh resume). */
@@ -845,11 +851,13 @@ async function enrichSummary(
       stop_reason?: string;
       stop_policy?: string;
       until_solved?: boolean;
-      paused?: { at?: string; reason?: string; detail?: string };
+      paused?: { at?: string; reason?: string; detail?: string; until?: string };
       resumes?: unknown[];
     };
     stopPolicy = stopPolicyOf(budget);
-    if (budget.paused && typeof budget.paused === "object") paused = { at: String(budget.paused.at ?? ""), reason: String(budget.paused.reason ?? ""), detail: String(budget.paused.detail ?? "") };
+    if (budget.paused && typeof budget.paused === "object") {
+      paused = { at: String(budget.paused.at ?? ""), reason: String(budget.paused.reason ?? ""), detail: String(budget.paused.detail ?? ""), ...(typeof budget.paused.until === "string" ? { until: budget.paused.until } : {}) };
+    }
     if (Array.isArray(budget.resumes)) resumes = budget.resumes.length;
     if (!started && budget.started_at) started = budget.started_at;
     if (!wall && budget.wall_clock_minutes) wall = Number(budget.wall_clock_minutes) || 0;

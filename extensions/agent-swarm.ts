@@ -1250,8 +1250,16 @@ export default function (pi: ExtensionAPI) {
    * operator's checks from the registry, by scripts/await-done.sh. Null when
    * the runner itself could not answer; the verdict then proceeds unchecked.
    */
-  /** The provider error this session has already reported, so it says it once. */
+  /**
+   * The provider error this session last said on the board, so a seat that
+   * keeps failing on the same words says them once; and the failed message
+   * last put on the trace, so each failed turn is recorded once. Each one
+   * is recorded: a limit that persists across a retry is read off the
+   * trace (scripts/provider-limit.ts), and a retry that failed on the same
+   * words used to leave no row.
+   */
   let providerErrorTold = "";
+  let providerErrorEntry = "";
   /** Set when the harness itself stops this agent, so the abort that follows is not blamed on the provider. */
   let stoppedByHarness: string | null = null;
 
@@ -1332,10 +1340,11 @@ export default function (pi: ExtensionAPI) {
     if (!agentId) return;
     const entries = entriesFrom(ctx) ?? [];
     let last: Record<string, unknown> | undefined;
+    let lastEntry: Record<string, unknown> | undefined;
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i] as Record<string, unknown> | undefined;
       const message = entry?.message as Record<string, unknown> | undefined;
-      if (message && message.role === "assistant") { last = message; break; }
+      if (message && message.role === "assistant") { last = message; lastEntry = entry; break; }
     }
     if (!last || last.stopReason !== "error") return;
     // Whole: a provider's error text is the evidence of why a turn died.
@@ -1349,9 +1358,12 @@ export default function (pi: ExtensionAPI) {
       pauseAborted = false;
       return;
     }
+    const entryKey = String(lastEntry?.id ?? lastEntry?.timestamp ?? last.timestamp ?? reason);
+    if (providerErrorEntry === entryKey) return;
+    providerErrorEntry = entryKey;
+    await logEvent(ctx.cwd, agentId, "agent_error", { model }, { ok: false, reason }).catch(() => undefined);
     if (providerErrorTold === reason) return;
     providerErrorTold = reason;
-    await logEvent(ctx.cwd, agentId, "agent_error", { model }, { ok: false, reason }).catch(() => undefined);
     await systemPost(ctx.cwd, { tag: "veto", body: providerErrorPost(agentId, model, reason) }).catch(() => undefined);
   }
 

@@ -174,7 +174,15 @@ function ActionBar({ view }: { view: SwarmView }) {
     <div className="flex flex-col items-end gap-2">
       {paused ? (
         <InlineNote tone="warn">
-          Paused since {paused.at} at its {paused.reason === "wall_clock" ? "wall clock" : "cap"}: {paused.detail.replace(/\.?$/, ".")} Every seat is idle and no model call goes out. Extend it to go on, or stop it: the run never goes on by itself.
+          {paused.reason === "provider_limit" ? (
+            <>
+              Paused since {paused.at}: the model provider refused every live seat{paused.until ? `, and said its limit lifts at ${paused.until}` : ", and named no time its limit lifts"}. It said: {paused.detail.replace(/\.?$/, ".")} Every seat is idle and no model call goes out; the harness tries again {paused.until ? "then" : "every half hour"}, and pauses the run again if every seat is refused again. A long wait holds every VM: stop the run to free the machine, and continue it after the limit lifts.
+            </>
+          ) : paused.reason === "operator" ? (
+            <>Paused since {paused.at} by the operator: {paused.detail.replace(/\.?$/, ".")} Every seat is idle and no model call goes out until swarm.sh unpause lifts it.</>
+          ) : (
+            <>Paused since {paused.at} at its {paused.reason === "wall_clock" ? "wall clock" : "cap"}: {paused.detail.replace(/\.?$/, ".")} Every seat is idle and no model call goes out. Extend it to go on, or stop it: the run never goes on by itself.</>
+          )}
         </InlineNote>
       ) : null}
       <div className="flex flex-wrap justify-end gap-2">

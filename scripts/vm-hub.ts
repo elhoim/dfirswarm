@@ -2486,12 +2486,11 @@ export class Hub {
       const budget = await P.readBudget(S).catch(() => null);
       if (!budget) return;
       await this.seatBackstop(budget, now);
-      // A paused run: no seat is prompted (prompt() holds them) until the operator extends it or stops it.
+      // A paused run: no seat is prompted (prompt() holds them) until the pause's cause is gone or the operator stops it.
       this.pausedAt = budget.paused?.at ?? null;
-      // The operator is told of a pause once, whoever wrote it (claimPauseNotice: the watchdog may tell it first).
-      if (budget.paused && (await P.claimPauseNotice(S, budget.paused.at).catch(() => false))) {
-        this.notify("paused", { scope: "run", reason: budget.paused.reason, extend: "swarm.sh extend <run> --minutes N | --tokens N | --usd N", stop: "swarm.sh stop <run>" });
-      }
+      // The operator is told of a pause once, whoever wrote it (claimPauseNotice: the watchdog may tell it first);
+      // a spell of the provider's limit once, whatever the harness's tries within it.
+      if (budget.paused) await this.tellPause(budget.paused);
       const pressure = P.budgetPressure(budget, now);
       if (!pressure.reason) {
         if (this.stopSteer) {
@@ -2520,9 +2519,7 @@ export class Hub {
         this.pausedAt = new Date(now).toISOString();
         await this.event("run_paused", { via: "hub", reason: pressure.reason }, { ok: true });
         const paused = (await P.readBudget(S).catch(() => null))?.paused;
-        if (paused && (await P.claimPauseNotice(S, paused.at).catch(() => false))) {
-          this.notify("paused", { scope: "run", reason: pressure.reason, extend: "swarm.sh extend <run> --minutes N | --tokens N | --usd N", stop: "swarm.sh stop <run>" });
-        }
+        if (paused) await this.tellPause(paused);
         await P.systemPost(S, { tag: "stop", body: `The run is paused (${pressure.reason === "cap" ? "its cap" : "its wall clock"}): no model call goes out until the operator extends it (swarm.sh extend) or stops it (swarm.sh stop). What the run holds stays as it is.` }).catch(() => undefined);
       } else if (acted.kind === "stopped" && acted.created) {
         await this.event("harness_stop", { via: "hub", reason: pressure.reason }, { created_sentinel: true });
@@ -2554,6 +2551,13 @@ export class Hub {
     this.writeStatus();
     this.finishing = this.finishVms(allOut);
     await this.finishing;
+  }
+
+  /** Tell the operator of a pause, when this process claims its notice (the same words the watchdog would use: pauseNotice). */
+  private async tellPause(paused: P.PauseRecord): Promise<void> {
+    if (!(await P.claimPauseNotice(this.cfg.sandbox, P.pauseNoticeKey(paused)).catch(() => false))) return;
+    const notice = P.pauseNotice(paused);
+    if (notice) this.notify("paused", notice);
   }
 
   /**

@@ -567,8 +567,10 @@ type BudgetView = {
   wall_clock_minutes: number;
   started_at: string;
   until_solved: boolean;
-  /** The stop policy's pause in force (its time), and the wall clock across pauses and resumes. */
+  /** The pause in force (its time, why, and the end the provider named), and the wall clock across pauses and resumes. */
   paused: string | null;
+  paused_reason: string;
+  paused_until: string;
   wall_used_ms: number;
   wall_base_at: string;
 };
@@ -586,6 +588,8 @@ function readBudgetView(sandbox: string): BudgetView | null {
       started_at: typeof raw.started_at === "string" ? raw.started_at : "",
       until_solved: raw.until_solved === true || raw.stop_policy === "operator",
       paused: raw.paused && typeof raw.paused === "object" && typeof (raw.paused as { at?: unknown }).at === "string" ? (raw.paused as { at: string }).at : null,
+      paused_reason: raw.paused && typeof raw.paused === "object" ? String((raw.paused as { reason?: unknown }).reason ?? "") : "",
+      paused_until: raw.paused && typeof raw.paused === "object" && typeof (raw.paused as { until?: unknown }).until === "string" ? (raw.paused as { until: string }).until : "",
       wall_used_ms: num(raw.wall_used_ms),
       wall_base_at: typeof raw.wall_base_at === "string" ? raw.wall_base_at : "",
     };
@@ -620,9 +624,16 @@ export function refusalFor(
   }
   const b = readBudgetView(sandbox);
   if (!b) return null;
-  // A paused run (the stop policy): no call goes out until the operator
-  // extends it or stops it. The host holds this brake in a VM run.
-  if (b.paused) return { code: "run_paused", message: `the run is paused (since ${b.paused}): no model call goes out until the operator extends it (swarm.sh extend) or stops it` };
+  // A paused run: no call goes out until the pause's cause is gone (the
+  // operator's extension at a cap, the harness's try under the provider's
+  // limit, the operator's unpause) or the operator stops it. The host holds
+  // this brake in a VM run.
+  if (b.paused) {
+    const until = b.paused_until ? `, which the provider said lifts at ${b.paused_until}` : "";
+    if (b.paused_reason === "provider_limit") return { code: "run_paused", message: `the run is paused (since ${b.paused}) for the model provider's limit${until}: no model call goes out until the harness tries again, the operator lifts it (swarm.sh unpause) or stops it` };
+    if (b.paused_reason === "operator") return { code: "run_paused", message: `the run is paused (since ${b.paused}) by the operator: no model call goes out until the operator lifts it (swarm.sh unpause) or stops it` };
+    return { code: "run_paused", message: `the run is paused (since ${b.paused}): no model call goes out until the operator extends it (swarm.sh extend) or stops it` };
+  }
   // An until-solved run has no wall clock and advisory caps: a call is
   // refused only for the stops above, the run's end and a seat's own.
   if (b.until_solved) return null;
