@@ -237,6 +237,7 @@ Each agent runs in its own microVM unless the run says `--isolation host`; the g
 | What you see while it runs | [docs/observability.md](docs/observability.md), [docs/screenshots.md](docs/screenshots.md) |
 | Subscriptions, mixed-model teams, local models, the credential gate | [docs/credentials-and-teams.md](docs/credentials-and-teams.md) |
 | Agents writing their own tools | [docs/forged-tools.md](docs/forged-tools.md) |
+| Synthetic cases with a known truth: how often a run misses what is there, or answers what is not | [calibration/README.md](calibration/README.md), [docs/usage.md](docs/usage.md#calibration-calibrationgeneratepy-scriptscalibratets) |
 | Packs: skills, tools and method an operator imports | [docs/packs.md](docs/packs.md), [packs/](packs/) |
 | Files the swarm may read but never change | [docs/inputs.md](docs/inputs.md) |
 | Where a run sends the evidence's personal data, where it keeps it, and what the operator decides | [docs/data-protection.md](docs/data-protection.md) |
