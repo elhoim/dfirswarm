@@ -78,6 +78,8 @@ export type FinishGate = {
    * route's, and makes the end examination-limited.
    */
   holding?: string[];
+  /** What the answers check warns of and does not hold on (a not-determinable answer naming no acquisition ask, nor why none). */
+  warnings?: string[];
 };
 
 /** Whether the run's stop policy is the operator's (--stop operator, or its alias --until-solved). */
@@ -125,9 +127,10 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
     // Each section's disposition under the bar, as the answers check found it.
     const dispositions = new Map<string, string>();
     const holding: string[] = [];
+    const warnings: string[] = [];
     let sawAnswers = false;
     for (const c of run?.checks ?? []) {
-      const a = c.answers as { outcomes?: Record<string, string>; named?: string[]; best_candidate?: string[]; dispositions?: Record<string, string> } | undefined;
+      const a = c.answers as { outcomes?: Record<string, string>; named?: string[]; best_candidate?: string[]; dispositions?: Record<string, string>; warnings?: string[] } | undefined;
       if (!a) continue;
       sawAnswers = true;
       for (const [k, v] of Object.entries(a.outcomes ?? {})) {
@@ -140,6 +143,7 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
         limited.push(`a defect a limitation names: ${n}`);
         holding.push(`a defect a limitation names: ${n}`);
       }
+      for (const w of a.warnings ?? []) if (!warnings.includes(w)) warnings.push(w);
     }
     for (const [k, v] of outcomes) if (v !== "answered") limited.push(best.has(k) ? `${k} is a best candidate, not established (every review holds it so)` : `${k} is ${OUTCOME_WORDS[v] ?? v}`);
     // A quick negative nobody else has attested holds its questions: its
@@ -181,7 +185,7 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
       questions.push({ id, outcome, blocks, ...(disposition ? { disposition } : {}) });
     }
     const accepted: string[] = [];
-    const register = qs ? await registerGate(sandbox, snap, qs, defects, limited, questions, accepted, holding, quick) : undefined;
+    const register = qs ? await registerGate(sandbox, snap, qs, defects, limited, questions, accepted, holding, quick, warnings) : undefined;
     // A route lead (a material lead closed deferred, infeasible or
     // needs_operator) keeps its disposition in history and limits the run
     // until its questions are disposed under the bar and another seat holds
@@ -202,14 +206,19 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
       const verdict = lead ? L.routeLimitation(lead, disposed) : { limiting: true, why: "" };
       if (verdict.limiting) limited.push(`${l.lead} was closed ${l.disposition} (${l.ref})${verdict.why ? `: ${verdict.why}` : ""}`);
     }
-    return { defects, limited, questions, until_solved: until, holding, ...(register ? { register } : {}), ...(accepted.length ? { accepted } : {}) };
+    return { defects, limited, questions, until_solved: until, holding, ...(register ? { register } : {}), ...(accepted.length ? { accepted } : {}), ...(warnings.length ? { warnings } : {}) };
   } catch (err) {
     return { defects: [], limited: [], questions: [], until_solved: until, error: `the lead register could not be read: ${(err as Error).message}` };
   }
 }
 
-/** The negative bar's defects, and an answer resting on material the case policy forbids: fixed, never named, and never excused by an acceptance. */
-const NEGATIVE_BAR_CODES = new Set(["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "material_use"]);
+/**
+ * The negative bar's defects (evidence added since a negative's coverage, and
+ * a completeness claim with no coverage of its areas, among them), and an
+ * answer resting on material the case policy forbids: fixed, never named,
+ * and never excused by an acceptance.
+ */
+export const NEGATIVE_BAR_CODES: ReadonlySet<string> = new Set(["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "material_use", "evidence_stale", "completeness_uncovered"]);
 
 /**
  * The quick negatives nobody else has attested (a lead closed negative
@@ -261,6 +270,7 @@ async function registerGate(
   accepted: string[],
   holding: string[],
   quick: Map<string, string[]>,
+  warnings: string[] = [],
 ): Promise<NonNullable<FinishGate["register"]>> {
   const ctx: Q.ViewContext = { questions: qs, leads: snap.state, ledger: snap.ledger };
   const views = Q.questionViews(ctx);
@@ -315,6 +325,7 @@ async function registerGate(
   if (extra.length) {
     const sections = extra.map((q) => `question:${q.section}`);
     const r = await checkLedgerAnswers(sandbox, sections, extra.filter((q) => q.expects === "existence").map((q) => q.section));
+    for (const w of r.warnings) if (!warnings.includes(w)) warnings.push(w);
     for (const q of extra) {
       const key = `question:${q.section}`;
       const outcome = r.outcomes[key] ?? "unanswered";

@@ -2635,6 +2635,10 @@ function resolveWords(d: LedgerGate["defects"][number]): string {
       return `the wrong one of the two entries corrected, or both weighed in an answer (one as contrary evidence), or a limitation naming both.`;
     case "partial_output":
       return `the entry recorded again saying how it treats the output of a job that was stopped before its end (what that part still shows, and why), or resting instead on a job that ran to its end. A limitation does not resolve it.`;
+    case "evidence_stale":
+      return `${where} examined against the evidence added after its search: a new search record that covers it (or says why it cannot bear on the question), checked by another agent, and the answer recorded again on it, or on what the new evidence shows. A limitation does not resolve it.`;
+    case "completeness_uncovered":
+      return `a search record for ${where} that says what was searched and which parts of the stored data it reached (live, deleted, unallocated, slack, secondary copies), and the answer recorded again on it. A question that asks for every item is not answered by the items found alone.`;
     default:
       return d.fix;
   }

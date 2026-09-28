@@ -632,7 +632,7 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
   const accepted = new Set<string>();
   for (const q of s.questions?.state.questions.values() ?? []) if (q.accepted && (await import("./questions.ts")).acceptanceStands(q, s.ledger)) accepted.add(`question:${q.section}`);
   for (const d of gate.open) {
-    if (d.section && accepted.has(d.section) && !["coverage_missing", "coverage_stale", "negative_unreviewed", "wording"].includes(d.code)) continue;
+    if (d.section && accepted.has(d.section) && !["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "evidence_stale", "completeness_uncovered"].includes(d.code)) continue;
     items.push(d.what);
   }
   // Best candidates, stale answers, and what else would limit the run.

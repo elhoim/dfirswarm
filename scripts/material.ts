@@ -395,6 +395,33 @@ export async function admitMaterial(sandbox: string, req: MaterialRequest, o: Ad
   }
 }
 
+/**
+ * The standing answers an addition leaves stale (the ledger gate's
+ * evidenceStale, extensions/protocol.ts): every negative, not-determinable
+ * or partial answer whose coverage predates the evidence's ledger entry,
+ * whether or not the addition named its question. An established answer is
+ * not staled.
+ */
+export async function answersStaledBy(sandbox: string, entrySeq: number | null): Promise<Array<{ section: string; answer: number; result: string; coverage: number[] }>> {
+  if (entrySeq === null) return [];
+  const entries = await P.readLedger(sandbox).catch(() => [] as P.LedgerEntry[]);
+  const attestations = await P.readAttestations(sandbox).catch(() => [] as P.LedgerAttestation[]);
+  const replaced = P.supersededBy(entries);
+  const out: Array<{ section: string; answer: number; result: string; coverage: number[] }> = [];
+  for (const e of entries) {
+    if (e.kind !== "answer" || replaced.has(e.seq) || !e.section?.startsWith("question:")) continue;
+    const st = P.evidenceStale(e, entries, attestations);
+    if (!st || !st.additions.some((x) => x.seq === entrySeq)) continue;
+    out.push({ section: e.section, answer: e.seq, result: e.result ?? (e.inconclusive ? "not_determinable" : ""), coverage: st.coverage });
+  }
+  return out;
+}
+
+/** The stale answers in words, for the board post and the operator's reply. */
+export function staleAnswersWords(list: Array<{ section: string; answer: number; result: string; coverage: number[] }>): string {
+  return list.map((x) => `${x.section} (E-${x.answer}, ${x.result.replace(/_/g, " ") || "no result stated"}${x.coverage.length ? `; coverage ${x.coverage.map((n) => `E-${n}`).join(", ")}` : ""})`).join("; ");
+}
+
 /** Words that name the reason given whole, or where it is kept whole when it would not fit: never a part of it. */
 function withReason(head: string, why: string, max: number, id: string): string {
   const whole = `${head}: ${why}`;
@@ -504,6 +531,9 @@ export async function applyAddition(sandbox: string, id: string, o: AdditionOpti
       if (r.ok) reopened.push(l.id);
       else pending.push(`reopening ${l.id} (${r.reason})`);
     }
+    // Every standing negative, not-determinable or partial answer whose coverage predates it, whether or not a question was named: stale until examined against it (the gate's evidence_stale).
+    const staleAnswers = await answersStaledBy(S, entry);
+    out.stale_answers = staleAnswers;
     const arrival = rec.questions?.length ? await Q.recordEvidenceArrival(S, rec.questions, { import: `import:${id}`, request: rec.request ?? null, inventory_rev: inventoryRev, why, ...(rec.ledger_seq !== undefined ? { ledger_seq: rec.ledger_seq } : {}) }).catch((err: Error) => { pending.push(`the questions' arrivals (${err.message})`); return { recorded: [] as string[], unknown: [] as string[] }; }) : { recorded: [], unknown: [] };
     out.reopened = { leads: reopened, questions: arrival.recorded, ...(arrival.unknown.length ? { unknown_questions: arrival.unknown } : {}) };
     // Catalogued when the run's catalogue is on and a catalogue is at hand: a detect pass over each file, as the system's own, once.
@@ -529,6 +559,9 @@ export async function applyAddition(sandbox: string, id: string, o: AdditionOpti
         `It is readable now, read-only, at store/imports/${id}/out/ (every seat's VM mounts the run's directory live), and jobs read it as import:${id}/<file>. Cite it as import:${id}/<file> however you read it: its class and provenance are its ledger entry's, not the path you read it by.`,
         reopened.length ? `Reopened: ${reopened.join(", ")}.` : "",
         arrival.recorded.length ? `Answers to ${arrival.recorded.join(", ")} recorded before it are stale until recorded again, and an acceptance made before it no longer stands.` : "",
+        staleAnswers.length
+          ? `Now stale, whatever question the evidence was added for: ${staleAnswersWords(staleAnswers)}. Each is examined against import:${id} before it stands: a coverage record at the new revision (the new evidence among its objects, or why it cannot bear on the question) that another seat reviews, then the answer again citing it; or the answer again citing an entry that rests on the new evidence. Until then the finish line holds it (evidence_stale).`
+          : "",
         `It is on the ledger as E-${entry ?? "?"} (kind external, class acquired_evidence).`,
       ].filter(Boolean).join(" "),
     }).catch((err: Error) => pending.push(`the board post (${err.message})`));

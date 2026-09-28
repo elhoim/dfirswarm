@@ -10775,6 +10775,18 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         if (cov.some((c) => c.coverage === "partial")) notes.push(`its coverage record${cov.length > 1 ? "s are" : " is"} partial (${cov.filter((c) => c.coverage === "partial").map((c) => `E-${c.seq}`).join(", ")}): the report says what was not covered`);
         notes.push(`a material negative is reviewed by another seat before the run may end: an attest on this answer or on ${cov.map((c) => `E-${c.seq}`).join(", ")} with review {detection, reproduced, other_route}; until then it shows as negative (unreviewed)`);
       }
+      if (question) {
+        const qid = sectionAnswersId(sec.section);
+        const covFor = standingCites.filter((e) => e.kind === "coverage" && (e.answers ?? []).some((x) => sectionKey(x) === qid));
+        // A completeness claim rests on a coverage record that names what was searched, area by area.
+        if (bar?.completeness && (resultText === "established" || resultText === "partial") && !covFor.some((c) => c.areas)) {
+          notes.push(`${bar.question ?? sec.section} asks for a complete set ("every", "all", "each", a complete list): a ${NB.resultWords(resultText)} answer to it rests on a coverage record for it that says what was searched, over which objects, and its areas {${NB.COVERAGE_AREAS.join(", ")}} (each searched, skipped or not_applicable, what was skipped said in skipped). It cites none, so the finish line holds it (completeness_uncovered) until it does: record the coverage, then this answer again with supersedes=<this seq> citing it`);
+        }
+        // A question the evidence cannot settle for want of a source: the ask comes first.
+        if (resultText === "not_determinable" && !covFor.some((c) => c.acquisition_ask || c.acquisition_none_why)) {
+          notes.push("not determinable for want of a source the evidence does not hold? Ask for it first: lead_close needs_operator with ask {kind: acquisition, source, where, expected_value, urgency} opens R-<n>. The coverage record behind this answer names the ask (acquisition_ask: R-<n>) or says why none would settle it (acquisition_none_why); the finish line warns until it does");
+        }
+      }
       // The confidence the run records: high only on an established answer another seat attested established, naming the alternatives it weighed.
       if (question && confidence === "high") {
         notes.push(resultText === "established" ? "confidence high is recorded as medium until another seat attests this answer established, naming the alternatives it weighed and why the evidence rules each out; the report and the metrics show the recorded confidence" : `confidence high is recorded as medium: high is kept only by an established answer, and this one is ${NB.resultWords(resultText)}; the report and the metrics show the recorded confidence`);
@@ -10796,7 +10808,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
  * the bar, never on a limitation that names it; the release counts it.
  */
 export type LedgerDefect = {
-  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use" | "partial_output";
+  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use" | "partial_output" | "evidence_stale" | "completeness_uncovered";
   section?: string;
   seqs: number[];
   what: string;
@@ -10812,6 +10824,8 @@ export type LedgerGate = {
   open: LedgerDefect[];
   /** Every standing answer's unsupported tokens, by seq (the release counts them). */
   unsupported: Record<number, string[]>;
+  /** What the gate says and does not hold on (a not-determinable answer that names no acquisition ask, nor why none). */
+  warnings: LedgerWarning[];
 };
 
 /** The job statuses whose kept output is partial by an act, not by its own failure: cancelled by an agent or the harness, or stopped (docs/adr/0016). */
@@ -10863,13 +10877,95 @@ export function openContradictions(entries: LedgerEntry[]): Array<{ from: number
   });
 }
 
+/** Evidence added after the kickoff, as the ledger holds it (scripts/material.ts applyAddition): its external entry, its import, its inventory revision. */
+export type EvidenceAddition = { seq: number; import: string; inventory_rev: number | null };
+
+/** Each standing external entry of class acquired_evidence, in ledger order. */
+export function evidenceAdditions(entries: LedgerEntry[]): EvidenceAddition[] {
+  const replaced = supersededBy(entries);
+  const out: EvidenceAddition[] = [];
+  for (const e of entries) {
+    if (e.kind !== "external" || e.source_class !== "acquired_evidence" || replaced.has(e.seq)) continue;
+    const imp = typeof e.provenance?.import === "string" ? e.provenance.import : (/^import:([^/]+)/.exec((e.refs ?? [])[0] ?? "")?.[1] ?? "");
+    if (!imp) continue;
+    out.push({ seq: e.seq, import: imp, inventory_rev: typeof e.provenance?.inventory_rev === "number" ? e.provenance.inventory_rev : null });
+  }
+  return out;
+}
+
+/** The results evidence added later leaves stale until they are examined against it: a negative, a not determinable, a partial answer. An established answer is not. */
+export const EVIDENCE_STALE_RESULTS: ReadonlySet<string> = new Set(["bounded_negative", "not_determinable", "partial"]);
+
+/** Whether an entry rests on an import: its refs, its results or the declared scope of the jobs behind them name import:<id>. */
+function namesImport(e: LedgerEntry, id: string): boolean {
+  const re = new RegExp(`import:${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`);
+  return re.test(JSON.stringify([e.refs ?? [], e.result_refs ?? [], e.method ?? []]));
+}
+
+/**
+ * Whether evidence added after an answer's coverage leaves the answer
+ * stale (the calibration run sabfd76: the evidence that settled a question
+ * came late, and its not-determinable answer stood). A standing answer to
+ * a question whose result is bounded_negative, not_determinable or partial
+ * (or a premise rejected on a search alone) is stale for each addition in
+ * the ledger, whether or not the addition named the question, until it
+ * cites a coverage record for the question made at the new revision (after
+ * the addition) that another seat reviewed, or cites the new evidence itself
+ * (the addition's entry, or an entry other than a coverage record whose
+ * refs, results or jobs name its import). An answer recorded before the
+ * addition can do neither; one
+ * recorded again after it without either (on its old coverage, or on none)
+ * is stale still. `coverage` lists the records it cites bound to an older
+ * revision; `unreviewed` those at the new revision nobody else has reviewed
+ * yet. Null when nothing stales it.
+ */
+export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attestations: LedgerAttestation[]): { additions: EvidenceAddition[]; coverage: number[]; unreviewed: number[] } | null {
+  if (answer.kind !== "answer" || !answer.section?.startsWith("question:")) return null;
+  const additions = evidenceAdditions(entries);
+  if (!additions.length) return null;
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  if (replaced.has(answer.seq)) return null;
+  const id = sectionAnswersId(answer.section);
+  const result = NB.answerResult(answer);
+  const cited = citedForQuestion(answer, bySeq, replaced, id);
+  if (!result || !(EVIDENCE_STALE_RESULTS.has(result) || negativeByResult(result, cited))) return null;
+  const cov = cited.filter((c) => c.kind === "coverage");
+  const citedAll = [...(answer.support ?? []), ...(answer.limitations ?? [])].map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => Boolean(e) && !replaced.has((e as LedgerEntry).seq));
+  const answerHash = answer.hash ?? ledgerHash(answer, "genesis");
+  const reviewed = (c: LedgerEntry): boolean => {
+    const authors = new Set([c.by, ...c.authors, answer.by, ...answer.authors]);
+    const targets = new Set([c.hash ?? ledgerHash(c, "genesis"), answerHash]);
+    return attestations.some((x) => attestationAct(x) === "attest" && x.target !== undefined && targets.has(x.target) && !authors.has(x.by));
+  };
+  const stale: EvidenceAddition[] = [];
+  const older = new Set<number>();
+  const unreviewed = new Set<number>();
+  for (const x of additions) {
+    // A coverage record counts once another seat reviewed it, whatever it names.
+    if (answer.seq > x.seq && citedAll.some((e) => e.seq === x.seq || (e.kind !== "coverage" && namesImport(e, x.import)))) continue;
+    if (cov.some((c) => c.seq > x.seq && reviewed(c))) continue;
+    stale.push(x);
+    for (const c of cov) (c.seq > x.seq ? unreviewed : older).add(c.seq);
+  }
+  return stale.length ? { additions: stale, coverage: [...older].sort((a, b) => a - b), unreviewed: [...unreviewed].sort((a, b) => a - b) } : null;
+}
+
+/** Whether a coverage record says what a completeness claim needs: the areas it reached, each named. */
+export function coverageNamesAreas(c: LedgerEntry): boolean {
+  return Boolean(c.areas && NB.COVERAGE_AREAS.every((a) => c.areas?.[a]));
+}
+
+/** A warning the gate says and does not hold on: shown with the answers check, counted in the finish line's note. */
+export type LedgerWarning = { code: "no_acquisition_ask"; section: string; seqs: number[]; what: string; fix: string };
+
 /**
  * The ledger gate: each wanted section's answer (question:<id>, summary,
  * narrative), what keeps it from standing, whether a critic acted on it, and
  * the contradictions left open. Pure over what was read: the caller reads
  * the files (and which entries rest on a failed job) and verifies the chains.
  */
-export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>> }): LedgerGate {
+export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>> }): LedgerGate {
   const { entries } = o;
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
@@ -10879,6 +10975,7 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
   const defects: LedgerDefect[] = [];
   const answers: Record<string, LedgerEntry | null> = {};
   const unsupported: Record<number, string[]> = {};
+  const warnings: LedgerWarning[] = [];
   const namedFor = (seq: number) => limits.filter((l) => limitationCites(l).has(seq)).map((l) => l.seq);
   for (const raw of o.sections) {
     const sec = answerSection(raw);
@@ -10942,6 +11039,55 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
         defects.push({ code: "negative_unreviewed", section: sec.section, seqs: [a.seq, ...cov.map((c) => c.seq)], what: `answer #${a.seq} (${sec.section}) is a negative (unreviewed): ${what} on a material question, and no other seat has reviewed it`, fix: `a seat that recorded neither it nor its coverage record attests #${a.seq}${cov.length ? ` or ${cov.map((c) => `#${c.seq}`).join(", ")}` : ""} with review {detection, reproduced, other_route}: whether it challenged the detection assumptions, reproduced a decisive check, tried a materially different route, each with what it did or why not`, named_by: [] });
       }
     }
+    // Evidence added since the answer's coverage (whether or not the
+    // addition named the question): a negative, a not determinable or a
+    // partial answer is examined against it before it stands again. Fixed,
+    // never named.
+    if (bar && result) {
+      const st = evidenceStale(a, entries, o.attestations);
+      if (st) {
+        const imports = [...new Set(st.additions.map((x) => x.import))];
+        defects.push({
+          code: "evidence_stale",
+          section: sec.section,
+          seqs: [a.seq, ...st.coverage, ...st.unreviewed],
+          what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)}: new evidence since its coverage (${st.additions.map((x) => `${x.import}, E-${x.seq}${x.inventory_rev !== null ? `, inventory revision ${x.inventory_rev}` : ""}`).join("; ")}); re-examine against it${st.coverage.length ? `. Its coverage record${st.coverage.length === 1 ? "" : "s"} ${st.coverage.map((n) => `E-${n}`).join(", ")} ${st.coverage.length === 1 ? "is" : "are"} bound to an older inventory revision` : ""}${st.unreviewed.length ? `; ${st.unreviewed.map((n) => `E-${n}`).join(", ")} at the new revision ${st.unreviewed.length === 1 ? "is" : "are"} not reviewed by another seat yet` : ""}`,
+          fix: `examine ${imports.map((i) => `import:${i}`).join(", ")} for ${sec.section}: record kind=coverage with answers=["${id}"] over what the search covers now (the new evidence among its objects, or why it cannot bear on the question), have another seat review it (attest with review), and record the answer again with supersedes=${a.seq} citing it; or record the answer again citing an entry that rests on the new evidence (refs import:<id>/<file>)`,
+          named_by: [],
+        });
+      }
+    }
+    // A completeness claim ("every file", "all connections"): an established
+    // or partial answer rests on a coverage record for the question that
+    // says what was searched, area by area. Without one it holds the gate as
+    // an uncovered negative does. Fixed, never named.
+    if (bar && result && (result === "established" || result === "partial") && bar.completeness) {
+      const standingCov = cited.filter((c) => c.kind === "coverage" && !coverageProblems(c, entries, o.disputes).length);
+      if (!standingCov.some(coverageNamesAreas)) {
+        defects.push({
+          code: "completeness_uncovered",
+          section: sec.section,
+          seqs: [a.seq, ...standingCov.map((c) => c.seq)],
+          what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)} on a question that asks for a complete set, and ${standingCov.length ? `its coverage record${standingCov.length === 1 ? "" : "s"} ${standingCov.map((c) => `E-${c.seq}`).join(", ")} ${standingCov.length === 1 ? "does" : "do"} not say which areas the search reached` : "it rests on no standing coverage record that says what was searched"}`,
+          fix: `record kind=coverage with answers=["${id}"]: the objects searched, how, and areas {${NB.COVERAGE_AREAS.join(", ")}} (each searched, skipped or not_applicable; what was skipped, and why, in skipped), then record the answer again with supersedes=${a.seq} citing it`,
+          named_by: [],
+        });
+      }
+    }
+    // A question not determinable for want of a source: its coverage names
+    // the acquisition ask opened for it, or says why none was. A warning.
+    if (bar && result === "not_determinable") {
+      const covNow = cited.filter((c) => c.kind === "coverage");
+      if (!covNow.some((c) => c.acquisition_ask || c.acquisition_none_why)) {
+        warnings.push({
+          code: "no_acquisition_ask",
+          section: sec.section,
+          seqs: [a.seq, ...covNow.map((c) => c.seq)],
+          what: `answer #${a.seq} (${sec.section}) is not determinable, and ${covNow.length ? `its coverage record${covNow.length === 1 ? "" : "s"} ${covNow.map((c) => `E-${c.seq}`).join(", ")} name${covNow.length === 1 ? "s" : ""}` : "it rests on no coverage record that names"} no acquisition ask and no reason for none`,
+          fix: `when the question needs a source the evidence does not hold, open an acquisition ask (lead_close needs_operator with ask {kind: acquisition, source, where, expected_value, urgency}) and record the coverage again with acquisition_ask: "R-<n>"; otherwise say why none would settle it in acquisition_none_why`,
+        });
+      }
+    }
     if (bar && result) {
       const forms = NB.absoluteAbsenceForms(`${a.value}\n${a.reasoning ?? ""}`);
       const earned = a.asserts_absence === true && result === "bounded_negative" && bar.existence && cov.some((c) => c.coverage === "complete" && c.detection_opportunity?.trace_expected === "yes");
@@ -10971,7 +11117,7 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
       named_by: [],
     });
   }
-  return { answers, defects, open: defects.filter((d) => !d.named_by.length), unsupported };
+  return { answers, defects, open: defects.filter((d) => !d.named_by.length), unsupported, warnings };
 }
 
 /**
@@ -11249,6 +11395,8 @@ export type FinishGateView = {
   accepted?: string[];
   /** What holds a run under the operator's stop policy beside its questions: a defect a limitation only names. */
   holding?: string[];
+  /** What the answers check warns of and does not hold on (a not-determinable answer that names no acquisition ask): said in the verdict's note. */
+  warnings?: string[];
   error?: string;
 };
 
@@ -11343,7 +11491,7 @@ export const VERIFICATION_UNAVAILABLE_PREFIX = "VERIFICATION UNAVAILABLE: ";
 export const DISPOSITION_WORDS =
   "every question in scope has a disposition under the bar: established; partial; a bounded negative or not determinable, each resting on a coverage record another seat has reviewed; a premise shown not to hold; out of scope; accepted by the operator; or withdrawn";
 export const NEGATIVE_PATH_WORDS =
-  "When the evidence cannot answer a question, that is an answer too: plan its routes (lead_open or lead_link with routes), record a coverage record (kind=coverage: what was searched, over which objects, how, what was covered, skipped and failed, the results, what is still open, and whether the event would have left a trace), have another seat review it (attest with review {detection, reproduced, other_route}), then answer not_determinable, or bounded_negative when nothing was found in that scope";
+  "When the evidence cannot answer a question, that is an answer too: plan its routes (lead_open or lead_link with routes); when it needs a source the evidence does not hold, ask for it first (lead_close needs_operator with ask {kind: acquisition, source, where, expected_value, urgency}); record a coverage record (kind=coverage: what was searched, over which objects, how, what was covered, skipped and failed, the results, what is still open, whether the event would have left a trace, and the acquisition ask as acquisition_ask R-<n>, or why none in acquisition_none_why), have another seat review it (attest with review {detection, reproduced, other_route}), then answer not_determinable, or bounded_negative when nothing was found in that scope";
 
 /** The refusal of an abandon in an until-solved run: only the operator ends it. */
 export const UNTIL_SOLVED_NO_ABANDON =
@@ -11454,8 +11602,10 @@ export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean, o
         };
       }
     }
-    if (gate.limited.length) return { proceed: true, outcome: "examination_limited", note: `examination-limited: ${gate.limited.join("; ")}` };
-    return { proceed: true, outcome: "completed", ...(noChecks ? { note: noChecks } : {}) };
+    const warned = gate.warnings?.length ? `warnings (not held on): ${gate.warnings.join("; ")}` : "";
+    if (gate.limited.length) return { proceed: true, outcome: "examination_limited", note: [`examination-limited: ${gate.limited.join("; ")}`, warned].filter(Boolean).join("; ") };
+    const note = [noChecks, warned].filter(Boolean).join("; ");
+    return { proceed: true, outcome: "completed", ...(note ? { note } : {}) };
   }
   if (until && abandon) return { proceed: false, failing: "(until solved)", reason: UNTIL_SOLVED_NO_ABANDON };
   if (abandon) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `${run.passed} of ${run.total} checks pass; abandoned on purpose` };
