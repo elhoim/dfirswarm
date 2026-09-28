@@ -565,7 +565,10 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
     const q = s.questions?.bySection.get(P.sectionKey(id));
     return { material: s.goal.questions.map(P.sectionKey).includes(P.sectionKey(id)) || !q || q.materiality === "material", existence: s.goal.existence.map(P.sectionKey).includes(P.sectionKey(id)) || q?.expects === "existence" };
   };
-  const gate = P.ledgerGate({ entries: s.ledger.entries, attestations, disputes, sections, bar: barOf });
+  // The kept output of a cancelled or stopped job, cited with no word on how it is treated (docs/adr/0016): the answers check holds it, and so does readiness.
+  const statusOf = new Map(s.jobs.map((j) => [j.id, j.status ?? null]));
+  const partial = P.partialOutputCites(s.ledger.entries, (id) => statusOf.get(id));
+  const gate = P.ledgerGate({ entries: s.ledger.entries, attestations, disputes, sections, bar: barOf, partial });
   const accepted = new Set<string>();
   for (const q of s.questions?.state.questions.values() ?? []) if (q.accepted && (await import("./questions.ts")).acceptanceStands(q, s.ledger)) accepted.add(`question:${q.section}`);
   for (const d of gate.open) {

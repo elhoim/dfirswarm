@@ -1,6 +1,11 @@
 {
   "name": "recyclebin_i",
   "description": "Parse $Recycle.Bin $I metadata: original path, original size and deletion time, for one file or every $I under a directory.",
+  "use": {
+    "names": [
+      "$I*"
+    ]
+  },
   "params": {
     "path": {
       "type": "string",

@@ -106,7 +106,7 @@ Commands:
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   examiner machine review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
-  tools <id>         What the run forged; --save DIR keeps it for the next run
+  tools <id>         What the run forged; --save DIR keeps it for the next run; --candidates ranks the code agents wrote into jobs
   say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network
   stop <id>          Stop a run (stopped, never completed); resume <id> [--question TEXT] continues one that ended, on its own chains
   reap [id]          Stop agents that stalled
@@ -9957,11 +9957,15 @@ cmd_resume() {
 
 # The tools a run forged, copied out so the next swarm can start with them.
 cmd_tools() {
-  local id="${1:-}" dest=""
+  local id="${1:-}" dest="" candidates=0 cand_out="" min_lines="" cand_libs=()
   shift || true
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --save) dest="$2"; shift 2 ;;
+      --candidates) candidates=1; shift ;;
+      --out) cand_out="$2"; shift 2 ;;
+      --min-lines) min_lines="$2"; shift 2 ;;
+      --library) cand_libs+=(--library "$2"); shift 2 ;;
       *) echo "BLOCKER: unknown argument to tools: $1" >&2; exit 2 ;;
     esac
   done
@@ -9970,6 +9974,16 @@ cmd_tools() {
   local sandbox
   sandbox="$(json_get "$id" | jq -r '.sandbox // empty')"
   [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+  # Tool harvesting (docs/adr/0016): the code the agents wrote into command
+  # jobs, ranked by size and reuse, each script written whole beside the run
+  # for the maintainer to fold into the library.
+  if [[ "$candidates" -eq 1 ]]; then
+    [[ -z "$dest" ]] || { echo "BLOCKER: --candidates and --save are two commands; give one." >&2; exit 2; }
+    [[ -z "$min_lines" || "$min_lines" =~ ^[1-9][0-9]{0,4}$ ]] || { echo "BLOCKER: --min-lines takes a whole number." >&2; exit 2; }
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/tool-candidates.ts" "$sandbox" --run "$id" --out "${cand_out:-$sandbox.tool-candidates}" ${min_lines:+--min-lines "$min_lines"} ${cand_libs[@]+"${cand_libs[@]}"}
+    return $?
+  fi
+  [[ -z "$cand_out$min_lines" && ${#cand_libs[@]} -eq 0 ]] || { echo "BLOCKER: --out, --min-lines and --library go with --candidates." >&2; exit 2; }
   if [[ ! -d "$sandbox/tools" ]]; then
     echo "$id forged no tools."
     return 0
@@ -10362,7 +10376,15 @@ PY
     fi
     [[ "$redact_rc" -eq 0 ]] || { cat "$out.leaks" >&2; echo "BLOCKER: the package could not be redacted; nothing was handed over." >&2; rm -rf "$out" "$out.leaks"; exit 1; }
     rm -f "$out.leaks"
-    echo "Redacted:     $(jq -r '.entries' <<<"$redacted") sensitive entr$([[ "$(jq -r '.entries' <<<"$redacted")" == 1 ]] && echo y || echo ies), $(jq -r '.lines' <<<"$redacted") chained line(s) and $(jq -r '.files' <<<"$redacted") other file(s) (REDACTIONS.txt; what each replaced in REDACTIONS.json); the leak scan over $(jq -r '.scanned' <<<"$redacted") file(s) $([[ "$(jq -r '.leaks' <<<"$redacted")" == 0 ]] && echo "found nothing" || echo "FOUND $(jq -r '.leaks' <<<"$redacted") HIT(S), listed in REDACTIONS.json (--redact-leaks list)")"
+    echo "Redacted:     $(jq -r '.entries' <<<"$redacted") sensitive entr$([[ "$(jq -r '.entries' <<<"$redacted")" == 1 ]] && echo y || echo ies), $(jq -r '.lines' <<<"$redacted") chained line(s) and $(jq -r '.files' <<<"$redacted") other file(s) (REDACTIONS.txt; what each replaced in REDACTIONS.json); $(jq -r '.withheld // 0' <<<"$redacted") file(s) withheld whole, each named with its sha256; the leak scan over $(jq -r '.scanned' <<<"$redacted") file(s) $([[ "$(jq -r '.leaks' <<<"$redacted")" == 0 ]] && echo "found nothing" || echo "FOUND $(jq -r '.leaks' <<<"$redacted") HIT(S), listed in REDACTIONS.json (--redact-leaks list)")"
+  else
+    # Not redacted: what in it is sensitive is named (HYGIENE.json), never
+    # taken out, and every file is scanned for it (docs/adr/0016).
+    local hygiene
+    hygiene="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/package-tools.ts" hygiene "$sandbox" "$out" 2>/dev/null)" || hygiene=""
+    if [[ -n "$hygiene" && ( "$(jq -r '.entries' <<<"$hygiene")" != 0 || "$(jq -r '.outputs' <<<"$hygiene")" != 0 ) ]]; then
+      echo "Sensitive:    $(jq -r '.entries' <<<"$hygiene") sensitive ledger entr$([[ "$(jq -r '.entries' <<<"$hygiene")" == 1 ]] && echo y || echo ies), $(jq -r '.outputs' <<<"$hygiene") job(s) whose outputs are sensitive ($(jq -r '.carried' <<<"$hygiene") of their files in this package); the scan over $(jq -r '.scanned' <<<"$hygiene") file(s) found $(jq -r '.hits' <<<"$hygiene") place(s) holding their words (HYGIENE.json). This package is not redacted: hand it over with --redact."
+    fi
   fi
   # What kind of package this is, said in it.
   printf '%s\n' "$([[ "$with_outputs" -eq 1 ]] && echo "with outputs: the jobs' sealed outputs are included" || echo "record only: the jobs' outputs stay in the run, each named by its sha256")$([[ "$redact" -eq 1 ]] && echo "; redacted (REDACTIONS.txt)")" > "$out/PACKAGE-KIND.txt"
@@ -11172,7 +11194,7 @@ cmd_help() {
   case "$topic" in
     ""|help|--help|-h) usage ;;
     start) usage_start ;;
-    list|status|summary|report|package|tools|say|stop|reap|ui|netcheck)
+    list|status|summary|report|package|say|stop|reap|ui|netcheck)
       usage | awk -v c="$topic" '$1 == c { print }'
       echo "docs/usage.md has the detail; start is the only command with a long page." ;;
     metrics) cat <<'EOF'
@@ -11183,6 +11205,20 @@ cmd_help() {
   metrics --compare <id-A> <id-B> [--json] two runs of one goal side by side, question by question; a negative the
                                            other run established, and a shared negative on partial coverage, flagged
 Every metric's definition is in docs/usage.md (Metrics).
+EOF
+      ;;
+    tools) cat <<'EOF'
+  tools <id>                                  the tools the run forged (make_tool), by name, version and author
+  tools <id> --save DIR                       keep them in a library for the next run (--tools-from DIR), each with provenance.json
+  tools <id> --candidates [--out DIR] [--min-lines N] [--library DIR]...
+      The code the agents wrote into command jobs, as tool candidates for the library:
+      each heredoc, inline -c/-e script, the command itself and each script of their
+      own a job ran, of N lines or more (20). One text run by several jobs is one
+      candidate; ranked by lines times the jobs that ran it, each with its job ids,
+      seats, image profiles and lines, and the library tools that may already cover it
+      (named by the script, or reading what the jobs declared: the manifest's use).
+      Every candidate's script is written whole to DIR (default <sandbox>.tool-candidates/)
+      with candidates.json and README.txt. tool-library/README.md says how one is folded in.
 EOF
       ;;
     extend) cat <<'EOF'

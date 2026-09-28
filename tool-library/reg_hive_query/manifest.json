@@ -1,6 +1,25 @@
 {
   "name": "reg_hive_query",
   "description": "Query a Windows registry hive file (regipy) and return a key's values and subkey names as JSON.",
+  "use": {
+    "extensions": [
+      ".hve"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "72656766"
+      }
+    ],
+    "names": [
+      "NTUSER.DAT",
+      "UsrClass.dat",
+      "SAM",
+      "SYSTEM",
+      "SOFTWARE",
+      "SECURITY"
+    ]
+  },
   "params": {
     "hive": {
       "type": "string",

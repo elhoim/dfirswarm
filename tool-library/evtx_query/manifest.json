@@ -1,6 +1,17 @@
 {
   "name": "evtx_query",
   "description": "Parse an EVTX file and return filtered events with timestamp, event_id, channel, computer, record_id, and named data fields.",
+  "use": {
+    "extensions": [
+      ".evtx"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "456c6646696c6500"
+      }
+    ]
+  },
   "params": {
     "path": {
       "type": "string",

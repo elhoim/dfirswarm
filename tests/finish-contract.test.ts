@@ -7,9 +7,11 @@
  * a notifier's delivery bookkeeping does not. An addition committed and not
  * yet applied holds readiness, as the gate holds it (addition_incomplete),
  * and so does an answer recorded before new evidence for its question
- * arrived (stale by evidence, as the gate holds it).
+ * arrived (stale by evidence, as the gate holds it), and an entry citing a
+ * cancelled job's kept output with no word on it (partial_output, docs/adr/0016).
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,10 +19,15 @@ import { after, test } from "node:test";
 import * as F from "../extensions/finish.ts";
 import * as P from "../extensions/protocol.ts";
 import * as Q from "../extensions/questions.ts";
+import { sealTree, storePaths } from "../scripts/evidence-store.ts";
 
 const dirs: string[] = [];
 after(async () => {
-  for (const d of dirs) await rm(d, { recursive: true, force: true });
+  for (const d of dirs) {
+    // A sealed job output is read-only.
+    spawnSync("chmod", ["-R", "u+w", d]);
+    await rm(d, { recursive: true, force: true });
+  }
 });
 
 async function run(): Promise<string> {
@@ -100,4 +107,30 @@ test("an answer recorded before new evidence for its question arrived holds read
   const r = await F.readiness(S);
   assert.equal(stale(r), true, r.items.join("; "));
   assert.equal(r.ready, false);
+});
+
+test("a cancelled job's kept output cited with no word on it holds readiness as the answers check does, and the job's status is in the revision", async () => {
+  const base = await mkdtemp(join(tmpdir(), "finish-contract-"));
+  dirs.push(base);
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "fc3", agentIds: ["a1", "a2"], capUsd: 5, wallClockMinutes: 30 });
+  await writeFile(join(S, "inputs.json"), JSON.stringify({ files: [] }));
+  const staging = join(base, "staging");
+  await mkdir(staging, { recursive: true });
+  await writeFile(join(staging, "rows.csv"), "t,what\n1,first half\n");
+  await sealTree(S, staging, join(storePaths(S).jobs, "j000007", "out"), "j000007", 1);
+  // Still running when its first rows were cited (a record is terminal, and read once, only when committed).
+  const record = (state: string, status?: string) => writeFile(join(storePaths(S).jobs, "j000007", "job.json"), JSON.stringify({ id: "j000007", state, ...(status ? { status } : {}), spec: { kind: "command", command: "x", inputs: [] }, requester: { agent: "a1" } }));
+  await record("running");
+  const ev = await P.recordEntry({ sandboxRoot: S, agentId: "a1" }, { kind: "event", ts: "2026-01-01T10:00:00Z", value: "The first half of the rows starts here", source: "rows.csv", evidence: "the job's output", refs: ["job:j000007/rows.csv"] });
+  assert.ok(ev.ok, (ev as { reason?: string }).reason);
+  const seq = (ev as { entry: P.LedgerEntry }).entry.seq;
+  const cites = (r: F.Readiness) => r.items.some((x) => new RegExp(`#${seq} cites the kept output of job j000007 \\(cancelled\\)`).test(x));
+  const r0 = await rev(S);
+  assert.equal(cites(await F.readiness(S)), false, "a job still running holds nothing of this kind");
+  await record("committed", "cancelled");
+  assert.notEqual(await rev(S), r0, "the job's status is in the revision");
+  const held = await F.readiness(S);
+  assert.equal(cites(held), true, held.items.join("; "));
+  assert.equal(held.ready, false);
 });

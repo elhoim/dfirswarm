@@ -88,7 +88,7 @@ const STEPS = ["How it was obtained", "What it indicates", "Why this confidence"
 
 test("every section is there, in order, in the HTML and the Markdown", async () => {
   const body = await renderReportBody(FIXTURE);
-  const ids = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "sA", "sB", "sC"];
+  const ids = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "sA", "sB", "sC", "sF"];
   assert.deepEqual(body.sections.map((s) => s.id), ids);
   let at = -1;
   for (const id of ids) {
@@ -96,7 +96,7 @@ test("every section is there, in order, in the HTML and the Markdown", async () 
     assert.ok(i > at, `section ${id} out of order`);
     at = i;
   }
-  const titles = ["1. Summary for decision makers", "2. Request, scope and questions", "3. Evidence and its handling", "4. Method and roles", "5. Answers", "6. What happened", "7. Conclusions and opinions", "8. Limitations, negative findings and open questions", "9. Recommendations", "10. Review and adoption", "Appendix A: Exhibits", "Appendix B: Jobs and their method records", "Appendix C: The swarm's working report"];
+  const titles = ["1. Summary for decision makers", "2. Request, scope and questions", "3. Evidence and its handling", "4. Method and roles", "5. Answers", "6. What happened", "7. Conclusions and opinions", "8. Limitations, negative findings and open questions", "9. Recommendations", "10. Review and adoption", "Appendix A: Exhibits", "Appendix B: Jobs and their method records", "Appendix C: The swarm's working report", "Appendix F: The question and lead registers"];
   const md = await renderReportBodyMarkdown(FIXTURE);
   at = -1;
   for (const t of titles) {
@@ -106,7 +106,7 @@ test("every section is there, in order, in the HTML and the Markdown", async () 
   }
   // Every exhibit a section links to exists: no dangling E-<seq>.
   for (const m of body.html.matchAll(/href="#e-(\d+)"/g)) assert.ok(body.html.includes(`id="e-${m[1]}"`), `a link to E-${m[1]}, which has no exhibit`);
-  for (const m of body.html.matchAll(/href="#(q-[^"]+|job-[^"]+)"/g)) assert.ok(body.html.includes(`id="${m[1]}"`), `a link to #${m[1]}, which is not there`);
+  for (const m of body.html.matchAll(/href="#(q-[^"]+|qc-[^"]+|job-[^"]+|reg-[^"]+|chains|unresolved)"/g)) assert.ok(body.html.includes(`id="${m[1]}"`), `a link to #${m[1]}, which is not there`);
 });
 
 test("each answer block leads with the answer and runs its steps in the fixed order", async () => {

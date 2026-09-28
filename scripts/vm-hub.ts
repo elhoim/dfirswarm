@@ -91,8 +91,21 @@ import { JobService, jobView, type JobSpec } from "./job-service.ts";
 import { similarView } from "./job-reuse.ts";
 import { bindJobGrants, checkJobGrants, fetchForSeat, netTick, netViewFor, requestAccess } from "./net-broker.ts";
 import { readCasePolicy } from "./case-policy.ts";
+import { resolveScope, scopeKindOf } from "./job-scope.ts";
+import { commandNames, libraryHint } from "./library-hint.ts";
 
 /** What a job tool is told in a run with no job service. */
+/**
+ * The library hint for a command job at its admission: the tools of the
+ * run's library whose manifest `use` (or description) matches the files the
+ * job declared, the ones its command already runs left out (library-hint.ts).
+ */
+async function admissionHint(S: string, spec: JobSpec): Promise<Awaited<ReturnType<typeof libraryHint>>> {
+  const r = await resolveScope(S, spec.inputs, {});
+  if (!r.ok) return null;
+  return libraryHint(S, r.objects, { skip: (tool) => commandNames(spec.command ?? "", tool) });
+}
+
 const NO_JOBS = "this run has no job service (a host run, or --no-jobs): run the work in your own shell";
 
 /** How long a record waits for the seal of a brain-side output it cites (an import job on the short lane). */
@@ -863,6 +876,8 @@ export function boardTable(hub: {
         ...(typeof raw.profile === "string" && raw.profile ? { profile: raw.profile } : {}),
         ...(Array.isArray(raw.net_grants) && raw.net_grants.length ? { net_grants: raw.net_grants.map(String) } : {}),
         ...(raw.independent === true ? { independent: true } : {}),
+        // Every output sensitive at seal time (docs/adr/0016); anything but a boolean is refused by the service.
+        ...(raw.secret_output !== undefined ? { secret_output: raw.secret_output as boolean } : {}),
       };
       // A job run under a lead: the lead must be the seat's own, checked
       // before the job is accepted, and the job goes on the lead's record.
@@ -878,6 +893,9 @@ export function boardTable(hub: {
       const attached = r.job.requester.agent === who ? await L.attachJob(S, who, r.job.id, raw.lead).catch(() => null) : null;
       // The coverage hint at admission (A1): who else works these questions or these objects now.
       const coverage = r.job.requester.agent === who ? await L.jobAdmissionHint(S, who, attached?.ok ? attached.lead : raw.lead, r.job.spec.inputs ?? []).catch(() => null) : null;
+      // Library visibility (docs/adr/0016): a command job that declared what it
+      // reads is told which library tools say they read that kind of file. A hint.
+      const library = r.job.spec.kind === "command" && scopeKindOf(r.job.spec) === "declared" ? await admissionHint(S, r.job.spec).catch(() => null) : null;
       return {
         ok: true,
         job: await jobView(S, r.job),
@@ -885,6 +903,7 @@ export function boardTable(hub: {
         ...(coverage ? { coverage: { ...coverage, note: "a hint: another seat works the same questions or objects now; overlap is not identity, so read what they have (leads, list_team) before you duplicate it" } } : {}),
         // The reuse hint (ADR 0017): other seats' same operation over the same objects, under way or committed.
         ...similarView(r.job.id, r.similar ?? [], r.job.spec.independent === true),
+        ...(library ? { library } : {}),
       };
     },
     jobStatus: async (who, a) => {

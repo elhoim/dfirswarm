@@ -1,6 +1,11 @@
 {
   "name": "amcache_apps",
   "description": "Program execution from Amcache.hve: path, SHA-1, publisher and link date, from whichever of the Windows 7/8 and Windows 10 layouts the hive has.",
+  "use": {
+    "names": [
+      "Amcache.hve"
+    ]
+  },
   "params": {
     "hive": {
       "type": "string",

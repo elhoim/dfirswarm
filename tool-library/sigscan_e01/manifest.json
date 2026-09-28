@@ -1,6 +1,17 @@
 {
   "name": "sigscan_e01",
   "description": "Scan an E01/raw image for a byte signature via TSK img_cat (logical media, not the EWF wrapper). Returns offsets and context, the media size it used and any range it could not read.",
+  "use": {
+    "extensions": [
+      ".e01"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "455646090d0aff00"
+      }
+    ]
+  },
   "params": {
     "image": {
       "type": "string",

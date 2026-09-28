@@ -1,6 +1,17 @@
 {
   "name": "nested_vdi",
   "description": "Read a VirtualBox VDI that lies inside an E01 or raw image, in place: found by its NTFS data runs (a deleted one too) or at an offset, then through the VDI block map. info: header, block counts, guest partitions; ls: list a guest directory (paged); extract: one guest file to output; read: guest bytes. pyewf for E01, pytsk3 for ls/extract.",
+  "use": {
+    "extensions": [
+      ".vdi"
+    ],
+    "magic": [
+      {
+        "offset": 64,
+        "hex": "7f10dabe"
+      }
+    ]
+  },
   "params": {
     "action": {
       "type": "string",

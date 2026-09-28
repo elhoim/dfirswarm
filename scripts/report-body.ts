@@ -55,6 +55,7 @@ import {
   listForgedTools,
   negativeReview,
   openContradictions,
+  partialOutputCites,
   readAttestations,
   readDisputes,
   readInputsManifest,
@@ -69,6 +70,7 @@ import {
   verifyAttestationChain,
   verifyDisputeChain,
   verifyLedgerChain,
+  attestEstablishes,
   type ForgedToolManifest,
   type InputsManifest,
   type LedgerAttestation,
@@ -82,7 +84,10 @@ import {
 import { escapeHtml, markdownToHtml } from "../ui/src/lib/markdown.ts";
 import { answerResult, resultWords, reviewWords as negativeReviewWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
 import { sectionBars } from "./check-answers.ts";
-import { leadsSnapshot, rankedLeads, type LeadView } from "../extensions/leads.ts";
+import { leadsSnapshot, rankedLeads, viewLead, type LeadEvent, type LeadView, type LeadsSnapshot } from "../extensions/leads.ts";
+import { originWords, questionViews, type QuestionEvent, type QuestionView, type QuestionsSnapshot } from "../extensions/questions.ts";
+import { questionCost, tokensWords, type QuestionCost } from "./question-cost.ts";
+import { FINISH_LOG, readFinish, type FinishState } from "../extensions/finish.ts";
 
 // ---------------------------------------------------------------------------
 // Options
@@ -330,7 +335,8 @@ type CustodyView = {
   acquisition?: { source: string | null; given: number; matched: number; mismatched: string[]; not_compared: string[] } | null;
 };
 
-type Question = { id: string; text: string | null; fromGoal: boolean };
+/** A question of the report: its section key, its words, whether the goal asked it, and its register id when the register holds it. */
+type Question = { id: string; text: string | null; fromGoal: boolean; reg?: string };
 
 type Chain = { ok: boolean; total: number; broken_at: number | null; reason: string | null };
 
@@ -374,6 +380,20 @@ type Run = {
   derivedMethods: Map<number, LedgerMethod[]>;
   /** The lead register (extensions/leads.ts): every lead as it stands, and whether its chain holds; null when the run opened none. */
   leads: { views: LeadView[]; chain: { ok: boolean; broken_at: number | null; reason: string | null }; events: number } | null;
+  /** Every lead event, in order: the full register's appendix and the question chains read them. */
+  leadEvents: LeadEvent[];
+  /**
+   * The question register (extensions/questions.ts) as it stands: every
+   * question's view (origin, revisions, scope, clarifications, acceptance,
+   * leads), its events, and whether its chain holds; derived from the goal,
+   * without a write, for a run that never wrote it. Null when it could not be
+   * read.
+   */
+  register: { snap: QuestionsSnapshot; views: QuestionView[]; byId: Map<string, QuestionView>; bySection: Map<string, QuestionView>; events: QuestionEvent[]; persisted: number } | null;
+  /** What each question cost in tokens, apportioned by the leads held (scripts/question-cost.ts). */
+  cost: QuestionCost | null;
+  /** The finish register (leads/finish.jsonl, docs/adr/0015): the coordinator's lease, readiness, the checks, the report's review. Null for a run without one. */
+  finish: FinishState | null;
   /** What the negative bar holds each question to: material, and whether it asks whether something exists (the registers'). */
   bar: (id: string) => { material: boolean; existence: boolean };
   /**
@@ -496,17 +516,40 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   for (const q of opts.questions ?? goal?.questions ?? []) questions.set(sectionKey(q.id), { id: sectionKey(q.id), text: q.text, fromGoal: true });
   // A goal with a Recommendations section asks for them as it asks a question: answered as the section "recommendations".
   if (goal?.recommendations?.marker === "section") questions.set("recommendations", { id: "recommendations", text: "what the goal's Recommendations section asks (quoted in §9)", fromGoal: true });
+  // The question register, read with the leads (both derived without a write for a run that never wrote them).
+  const ls: LeadsSnapshot | null = await leadsSnapshot(sandbox).catch(() => null);
+  const register: Run["register"] = ls?.questions
+    ? (() => {
+        const views = questionViews({ questions: ls.questions, leads: ls.state, ledger: ls.ledger, attestations });
+        // The events on disk; any after them are the goal's seed, derived when this is read and never written (their times are the reading's).
+        const head = ls.questions.state.chain.head;
+        const persisted = head ? ls.questions.state.events.findIndex((e) => e.hash === head) + 1 : 0;
+        return { snap: ls.questions, views, byId: new Map(views.map((v) => [v.id, v])), bySection: new Map(views.map((v) => [sectionKey(v.section), v])), events: ls.questions.state.events, persisted };
+      })()
+    : null;
+  for (const [key, q] of questions) {
+    const v = register?.bySection.get(key);
+    if (v) questions.set(key, { ...q, reg: v.id });
+  }
+  // A person's or an agent's question in scope is the run's to answer, as the goal's are.
+  for (const v of register?.views ?? []) {
+    const key = sectionKey(v.section);
+    if (v.origin.kind === "goal" || v.scope !== "in_scope" || v.withdrawn || questions.has(key)) continue;
+    questions.set(key, { id: key, text: v.text, fromGoal: false, reg: v.id });
+  }
   for (const e of entries) {
     const ids = [...(e.kind === "answer" && e.section?.startsWith("question:") ? [sectionAnswersId(e.section)] : []), ...(e.answers ?? [])].map(sectionKey).filter(Boolean);
-    for (const id of ids) if (!questions.has(id)) questions.set(id, { id, text: null, fromGoal: false });
+    for (const id of ids) if (!questions.has(id)) questions.set(id, { id, text: register?.bySection.get(id)?.text ?? null, fromGoal: false, ...(register?.bySection.get(id) ? { reg: register.bySection.get(id)!.id } : {}) });
   }
   const hasAnswers = entries.some((e) => e.kind === "answer");
-  // The sections the gate holds the run to: the goal's questions when it numbers them, else every one named.
+  // The sections the gate holds the run to: the goal's questions when it numbers them, else every one named;
+  // and every material question the register holds in scope beyond the goal's (the finish line's, ADR 0011).
   const asked = [...questions.values()].filter((q) => q.fromGoal);
-  const sections = [...(asked.length ? asked : [...questions.values()]).map((q) => `question:${q.id}`), "summary", "narrative"];
+  const held = (register?.views ?? []).filter((v) => v.origin.kind !== "goal" && v.scope === "in_scope" && !v.withdrawn && !v.after_done && v.materiality === "material").map((v) => `question:${sectionKey(v.section)}`);
+  const sections = [...new Set([...(asked.length ? asked : [...questions.values()]).map((q) => `question:${q.id}`), ...(asked.length ? held : []), "summary", "narrative"])];
   const problems = answerProblems(entries, disputes, unqualified);
   const bar = await sectionBars(sandbox).catch(() => (() => ({ material: true, existence: false })) as (id: string) => { material: boolean; existence: boolean });
-  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar }) : null;
+  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, (id) => jobs.get(id)?.status ?? null) }) : null;
 
   const text = async (rel: string) => (await readFile(join(sandbox, rel), "utf8").catch(() => ""));
   const ledgerChain = verifyLedgerChain(await text("ledger/entries.jsonl"));
@@ -576,11 +619,14 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
     failed,
     derivedMethods,
     bar,
-    leads: await (async () => {
-      const snap = await leadsSnapshot(sandbox).catch(() => null);
-      return snap && snap.state.events.length ? { views: rankedLeads(snap), chain: snap.state.chain, events: snap.state.events.length } : null;
-    })(),
+    leads: ls && ls.state.events.length ? { views: rankedLeads(ls), chain: ls.state.chain, events: ls.state.events.length } : null,
+    leadEvents: ls?.state.events ?? [],
+    register,
+    cost: ls
+      ? await questionCost(sandbox, ls.state.events, (lead) => (ls.state.leads.get(lead)?.answers ?? []).map((a) => register?.bySection.get(sectionKey(a))?.id ?? `question:${sectionKey(a)}`)).catch(() => null)
+      : null,
     contract,
+    finish: (await stat(join(sandbox, FINISH_LOG)).catch(() => null)) ? await readFinish(sandbox).catch(() => null) : null,
   };
 }
 
@@ -1163,22 +1209,35 @@ function summarySection(run: Run, memo: Map<number, EntryState>): BodySection {
       ],
     });
   }
-  if (run.questions.length) {
+  const chains = chainQuestions(run);
+  if (chains.length) {
+    // One screen: each question's standing, who asked it, its answer by number, its leads, its acceptance and its cost; the words are in §2 and §5.
     blocks.push({ k: "h", level: 3, text: "Each question" });
     blocks.push({
       k: "table",
       cls: "status",
-      head: ["Question", "Status", "Answer"],
-      rows: run.questions.map((q) => {
-        const st = questionStatus_(q, run, memo);
-        const named = run.entries.filter((e) => !run.replaced.has(e.seq) && (e.answers ?? []).some((x) => sectionKey(x) === q.id));
+      head: ["Question", "Status", "Asked by", "Answer", "Leads", "Accepted", "Tokens"],
+      rows: chains.map((c): Span[][] => {
+        const st = chainStatus(c, run, memo);
+        const g = groupOf(c);
+        const state: Chip | null = g === "proposed" || g === "excluded" || g === "withdrawn" ? { text: g === "proposed" ? "proposed, not admitted" : g, tone: g === "withdrawn" ? "brick" : "saffron" } : null;
+        const leads = leadsFor(run, c.key);
+        const tally = new Map<string, number>();
+        for (const l of leads) tally.set(l.disposition ?? l.status, (tally.get(l.disposition ?? l.status) ?? 0) + 1);
+        const named = st.answer ? [] : run.entries.filter((e) => !run.replaced.has(e.seq) && (e.answers ?? []).some((x) => sectionKey(x) === c.key));
+        const ans = st.answer ? answerResult(st.answer) : null;
         return [
-          [{ a: `#${questionAnchor(q.id)}`, text: questionName(q) }],
-          [{ chip: st.status }, ...st.chips.flatMap((c): Span[] => [" ", { chip: c }])],
-          st.answer ? [st.answer.value, " (", { e: st.answer.seq }, ")"] : [named.length ? `${plural(named.length, "entry", "entries")} ${named.length === 1 ? "names" : "name"} this question: ` : "nothing in the ledger names this question", ...named.flatMap((e, i): Span[] => [...(i ? [", "] : []), { e: e.seq }])],
+          [c.q ? { a: `#${questionAnchor(c.q.id)}`, text: questionName(c.q) } : { a: `#${chainAnchor(chainName(c))}`, text: chainName(c) }],
+          [{ chip: state ?? st.status }, ...(c.v?.answer?.stale ? [" ", { chip: { text: "stale", tone: "brick" } } as Span] : [])],
+          [...(c.v ? [`${c.v.id} · `] : []), ...askerSpans(c.v, c.q)],
+          st.answer ? [{ e: st.answer.seq }, ` ${ans ? resultWords(ans) : st.answer.inconclusive ? "inconclusive" : "no result stated"}`] : named.length ? [`none; ${plural(named.length, "entry", "entries")}: `, ...named.flatMap((e, i): Span[] => [...(i ? [", " as Span] : []), { e: e.seq }])] : ["none"],
+          [leads.length ? `${leads.length}: ${[...tally].map(([k, n]) => `${n} ${k}`).join(", ")}` : "0"],
+          [c.v?.accepted ? `${c.v.accepted.as === "bounded" ? "bounded" : "not determinable"}${c.v.accepted.stands ? "" : " (lifted)"}` : "—"],
+          [run.cost && run.cost.source !== "none" ? `${(run.cost.shown.byQuestion.get(c.v?.id ?? `question:${c.key}`) ?? 0).toLocaleString("en-US")}${run.cost.source === "trace" ? " (est.)" : ""}` : "—"],
         ];
       }),
     });
+    blocks.push({ k: "p", s: ["Each question's chain (who asked it, every revision, the leads that worked it, the result, the acceptance and how the tokens are counted) is in ", { a: "#chains", text: "§2" }, "; each answer, with how it was reached, in §5; the whole register in Appendix F."] });
   }
   const narrative = standingAnswer(run, "narrative");
   if (narrative) blocks.push({ k: "p", s: ["What happened, in order, is in §6 (", { e: narrative.seq }, ")."] });
@@ -1226,7 +1285,7 @@ function tokensNote(a: LedgerEntry): Block {
   };
 }
 
-function requestSection(run: Run): BodySection {
+function requestSection(run: Run, memo: Map<number, EntryState>): BodySection {
   const blocks: Block[] = [];
   const g = run.goal;
   if (g) {
@@ -1247,7 +1306,410 @@ function requestSection(run: Run): BodySection {
     blocks.push({ k: "h", level: 3, text: "The limits the run worked within" });
     blocks.push({ k: "list", items: g.caps.map((c) => [c]) });
   }
-  return { id: "s2", n: "2", title: "Request, scope and questions", desc: "what was asked, and within what limits", blocks };
+  // Each question, from who asked it to what it cost (docs/adr/0016): before the evidence and the method, as the first layer; the whole register is Appendix F.
+  blocks.push(...chainBlocks(run, memo));
+  return { id: "s2", n: "2", title: "Request, scope and questions", desc: "what was asked, by whom, and how each question was examined", blocks };
+}
+
+// ---------------------------------------------------------------------------
+// The questions one by one (§2), and the whole register (Appendix F)
+// ---------------------------------------------------------------------------
+
+const chainAnchor = (id: string) => `qc-${id.replace(/[^A-Za-z0-9._-]/g, "_")}`;
+
+/** A question the chains show: its register view when the register holds it, and the report's own record of it when the report asks it. */
+type ChainQ = { key: string; q: Question | null; v: QuestionView | null };
+
+/** Every question, once: the register's (a person's first, then the goal's, then the agents'), then any the report asks that the register does not hold. */
+function chainQuestions(run: Run): ChainQ[] {
+  const out: ChainQ[] = [];
+  const seen = new Set<string>();
+  for (const v of run.register?.views ?? []) {
+    const key = sectionKey(v.section);
+    out.push({ key, q: run.questions.find((x) => x.id === key) ?? null, v });
+    seen.add(key);
+  }
+  for (const q of run.questions) if (!seen.has(q.id)) out.push({ key: q.id, q, v: null });
+  return out;
+}
+
+type ChainGroup = "original" | "asked" | "emergent" | "proposed" | "excluded" | "withdrawn";
+
+function groupOf(c: ChainQ): ChainGroup {
+  if (c.v?.withdrawn) return "withdrawn";
+  if (c.v?.scope === "excluded") return "excluded";
+  if (c.v?.scope === "proposed") return "proposed";
+  if (c.v ? c.v.origin.kind === "goal" : c.q?.fromGoal) return "original";
+  if (c.v && ["analyst", "reviewer", "observer"].includes(c.v.origin.kind)) return "asked";
+  return "emergent";
+}
+
+const chainName = (c: ChainQ) => c.v?.id ?? (c.q ? questionName(c.q) : c.key);
+
+/** Where a question stands, as §1 and §5 say it; a question the report does not ask is read from its section all the same. */
+function chainStatus(c: ChainQ, run: Run, memo: Map<number, EntryState>): { status: Chip; answer: LedgerEntry | null } {
+  const st = questionStatus_(c.q ?? { id: c.key, text: c.v?.text ?? null, fromGoal: false }, run, memo);
+  return { status: st.status, answer: st.answer };
+}
+
+/** The settled standings: an answer that answers the question, or says its premise is not supported. */
+const SETTLED = new Set(["answered", "premise not supported"]);
+
+/** Who asked, in a few words: the goal, an agent and the entry it came from, or a person with their role, claimed or signed. */
+function askerSpans(v: QuestionView | null, q: Question | null): Span[] {
+  if (!v) return [q?.fromGoal ? "the goal (the register holds no record of it)" : "a section the ledger names (the register holds no record of it)"];
+  const o = v.origin;
+  if (o.kind === "goal") return ["the goal"];
+  if (o.kind === "agent") {
+    const src = /^E-(\d+)$/.exec(o.source_entry ?? "")?.[1];
+    return [`agent ${o.agent ?? "?"}`, ...(src ? [", from ", { e: Number(src) } as Span] : o.source_entry ? [`, from ${o.source_entry}`] : [])];
+  }
+  return [originWords(o)];
+}
+
+/** Tokens given to a question, and its share of the run's. */
+function costWords(run: Run, c: ChainQ): string {
+  const cost = run.cost;
+  if (!cost || cost.source === "none") return "not known (no token record)";
+  const n = cost.shown.byQuestion.get(c.v?.id ?? `question:${c.key}`) ?? 0;
+  const pct = cost.shown.total ? ` (${((n / cost.shown.total) * 100).toFixed(1)}% of the run's ${tokensWords(cost.shown.total)})` : "";
+  return `${tokensWords(n)}${pct}${cost.source === "trace" ? ", estimated" : ""}`;
+}
+
+/** The leads that work a question: every lead naming its section. */
+function leadsFor(run: Run, key: string): LeadView[] {
+  return (run.leads?.views ?? []).filter((l) => l.answers.some((a) => sectionKey(a) === key)).sort((a, b) => a.opened_at.localeCompare(b.opened_at) || a.id.localeCompare(b.id));
+}
+
+/** Who held a lead, in order, from its events: each claim (or an open taken at once) with the seat and when. */
+function holdersOf(run: Run, lead: string): string[] {
+  return run.leadEvents.filter((e) => e.lead === lead && ((e.ev === "open" && e.holder) || e.ev === "claim")).map((e) => `${e.holder ?? e.by} from ${e.at}`);
+}
+
+/** Whether a drop or a deferral was reviewed: by an agent other than the one who closed it, attesting or disputing the entry it cites. */
+function dropReview(run: Run, x: LeadView): Span[] {
+  if (!x.disposition || !DROPS.has(x.disposition)) return [];
+  const m = x.ref ? /^E-(\d+)$/.exec(x.ref) : null;
+  if (!m) return [" Review: not reviewable by an attestation (", x.disposition === "duplicate" ? "a duplicate cites a lead" : "an operator request cites no entry", ")."];
+  const e = run.bySeq.get(Number(m[1]));
+  if (!e) return [" Review: the entry it cites is not in the ledger."];
+  const target = e.hash ?? ledgerHash(e, "genesis");
+  const att = run.attestations.filter((a) => attestationAct(a) === "attest" && a.target === target && a.by !== x.closed_by && !e.authors.includes(a.by)).map((a) => a.by);
+  const dis = run.disputes.filter((d) => d.act === "dispute" && d.target === target).map((d) => d.by);
+  if (!att.length && !dis.length) return [" Review: ", { b: "not reviewed" }, ": no agent other than the one who closed it attested or disputed what it cites."];
+  return [` Review: ${[att.length ? `attested by ${[...new Set(att)].join(", ")}` : "", dis.length ? `disputed by ${[...new Set(dis)].join(", ")}` : ""].filter(Boolean).join("; ")}.`];
+}
+
+/**
+ * What coordination did with a lead (docs/adr/0015), from its events: each
+ * offer (why it was made, to whom, and what became of it: accepted by the
+ * claim that names it, declined, lapsed, taken by another seat, or still
+ * open), each hand-off, and a parked lead taken over.
+ */
+export function leadCoordination(events: readonly LeadEvent[], lead: string): string[] {
+  const ev = events.filter((e) => e.lead === lead);
+  const out: string[] = [];
+  for (const [i, e] of ev.entries()) {
+    if (e.ev === "handoff") out.push(`handed off by ${e.by} at ${e.at}${e.to ? ` to ${e.to}` : ""}${e.why ? ` (${e.why})` : ""}`);
+    else if (e.ev === "claim" && e.cause === "parked") out.push(`taken over from ${e.from ?? "its holder"} by ${e.holder ?? e.by} at ${e.at}, parked (held with no act while its holder worked elsewhere)`);
+    else if ((e.ev as string) === "offer") {
+      let outcome = "still open when the run ended";
+      for (const x of ev.slice(i + 1)) {
+        if ((x.ev === "claim" || (x.ev as string) === "confirm") && x.offer === e.seq) outcome = `accepted by ${x.holder ?? x.by} at ${x.at}`;
+        else if ((x.ev as string) === "offer_decline" && x.offer === e.seq) outcome = `declined at ${x.at}${x.why ? ` (${x.why})` : ""}`;
+        else if ((x.ev as string) === "offer_lapse" && x.offer === e.seq) outcome = `lapsed at ${x.at}${x.why ? ` (${x.why})` : ""}`;
+        else if (x.ev === "claim") outcome = `taken by ${x.holder ?? x.by} at ${x.at}, not by the offer`;
+        else continue;
+        break;
+      }
+      out.push(`offered to ${e.to ?? "?"} at ${e.at} (${e.reason ?? "wake"}${e.from ? `, from ${e.from}` : ""}): ${outcome}`);
+    }
+  }
+  return out;
+}
+
+/** One lead, whole: what it was for, its plan, its jobs, how it ended and on what, whether that was reviewed, and what happened to it since. */
+function leadLineOf(run: Run, x: LeadView): Span[] {
+  const m = x.ref ? /^E-(\d+)$/.exec(x.ref) : null;
+  const ended: Span[] = x.disposition
+    ? [` Ended ${x.disposition}`, ...(x.closed_by ? [` (${x.closed_by})`] : []), ": ", ...(m ? [{ e: Number(m[1]) } as Span] : [x.ref ?? ""]), x.close_why ? ` (${x.close_why})` : "", "."]
+    : [` Not ended: ${x.status}${x.holder ? `, held by ${x.holder}` : ", held by nobody"}${x.needs.some((n) => !n.met) ? `, waiting on ${x.needs.filter((n) => !n.met).map((n) => n.need).join(", ")}` : ""}${x.material ? "" : " (not material)"}.`];
+  const reopened: Span[] = x.reopened.length ? [` Reopened ${plural(x.reopened.length, "time")}: ${x.reopened.map((r) => `${r.cause}, ${r.why}`).join("; ")}.`] : [];
+  const notes: Span[] = x.notes.length ? [` The operator: ${x.notes.map((n) => `${n.text}${n.allow_host ? ` (allowed ${n.allow_host})` : ""}`).join("; ")}.`] : [];
+  const routes: Span[] = x.routes?.length ? [` Routes planned: ${x.routes.map((r) => `${r.source} (${r.method})`).join("; ")}.`] : [];
+  const notExamined: Span[] = x.not_examined?.length ? [` Planned, not examined at its close: ${x.not_examined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}.`] : [];
+  const quick: Span[] = x.quick_negative ? [{ b: " Quick negative:" }, ` closed ${Math.round(x.quick_negative.held_ms / 1000)} s after it was taken, on ${plural(x.quick_negative.jobs, "job")} over ${plural(x.quick_negative.objects, "object")}; a cue for review, not a refusal.`] : [];
+  // The product contract a prerequisite delivers (A2), and what it delivered at its close.
+  const product: Span[] = x.product ? [` Product: ${x.product}${x.acceptance ? `; accepted when: ${x.acceptance}` : ""}${x.next_action ? `; next: ${x.next_action}` : ""}.`, ...(x.result_refs?.length ? [" Delivered: ", ...x.result_refs.flatMap((r, i): Span[] => [...(i ? [", "] : []), /^E-\d+$/.test(r) ? { e: Number(r.slice(2)) } : { code: r }]), "."] : [])] : [];
+  // A limiting close reviewed by another seat (B3/A4): whether the route it could not take still matters.
+  const reviews: Span[] = x.route_reviews?.length ? [` Route reviewed: ${x.route_reviews.map((r) => `by ${r.by} at ${r.at}, ${r.material ? "still material" : "no longer material"}: ${r.why}`).join("; ")}.`] : [];
+  const confirm: Span[] = [...(x.confirmed?.length ? [` Closure confirmed: ${x.confirmed.map((c) => `by ${c.by} at ${c.at} (from ${c.from} to ${c.to}): ${c.why}`).join("; ")}.`] : []), ...(x.confirm ? [{ b: " Closure waiting for its closer's confirmation" } as Span, `: it was closed on ${x.confirm.ref_was}, superseded since${x.confirm.head ? ` (the entry that stands: ${x.confirm.head})` : ""}.`] : [])];
+  const coordination = leadCoordination(run.leadEvents, x.id);
+  const coord: Span[] = coordination.length ? [` Coordination: ${coordination.join("; ")}.`] : [];
+  return [{ b: `${x.id} ` }, x.title, `: ${x.why}${/[.!?]$/.test(x.why) ? "" : "."}`, ...routes, ...product, ...(x.jobs.length ? [` Jobs: ${x.jobs.join(", ")}.`] : []), ...ended, ...notExamined, ...quick, ...dropReview(run, x), ...reviews, ...confirm, ...reopened, ...notes, ...coord];
+}
+
+/** The provenance of a question's attachment: the material it was sealed as, or the external entry that recorded it, or none named. */
+function attachmentSpans(run: Run, qid: string, ref: string): Span[] {
+  const imp = /^import:([a-z]+-\d+)/.exec(ref)?.[1];
+  const m = imp ? run.contract.material.find((x) => x.import === imp) : undefined;
+  if (m) {
+    const files = (m.files as Array<{ path: string; sha256: string }> | undefined) ?? [];
+    return [{ code: ref }, `: ${String(m.class ?? "material").replace(/_/g, " ")}, supplied by ${String(m.supplied_by ?? "?")} at ${String(m.at ?? "?")} from ${String(m.from ?? "?")}; permitted use ${String(m.permitted_use ?? "?")}; ${files.map((f) => `${f.path} sha256 ${f.sha256}`).join(", ") || "no file listed"}; why: ${String(m.why ?? "")}`];
+  }
+  const e = run.entries.find((x) => x.kind === "external" && (x.provenance as Record<string, unknown> | undefined)?.question === qid && x.value.includes(ref));
+  if (e?.provenance) return [{ code: ref }, `: recorded as external material (`, { e: e.seq }, `), supplied by ${e.provenance.supplied_by} at ${e.provenance.at} from ${e.provenance.from}${e.provenance.sha256 ? `, sha256 ${e.provenance.sha256}` : ""}; permitted use ${e.provenance.permitted_use}`];
+  return [{ code: ref }, ": an object of the run; no supplied material names it"];
+}
+
+/** One question's chain: who asked it and why, every revision, what came with it, the proposition tested, the leads, the result, the acceptance and the cost. */
+function chainBlock(c: ChainQ, run: Run, memo: Map<number, EntryState>, limits: LedgerEntry[]): Block {
+  const v = c.v;
+  const st = chainStatus(c, run, memo);
+  // A question not in the run's work (proposed, excluded, withdrawn) says where it stands; its answer's standing only when it has one.
+  const outside = ["proposed", "excluded", "withdrawn"].includes(groupOf(c));
+  const rows: Row[] = [];
+  rows.push({ label: "Asked by", s: askerSpans(v, c.q) });
+  // A goal question the register never wrote: derived from the goal as this is read, so it has no time of its own.
+  const derived = Boolean(v && run.register && v.revisions[0] && v.revisions[0].seq > run.register.persisted);
+  const when = (at: string) => (derived ? "the goal's (derived, never written)" : at);
+  if (v) {
+    rows.push({ label: "When", s: [derived ? "the goal's question: the register never wrote it, and it is read from the goal as this is rendered" : `${v.opened_at}${v.opened_by && v.opened_by !== "system" ? ` (recorded by ${v.opened_by})` : ""}`] });
+    rows.push({ label: "Why", s: [v.why || (v.origin.kind === "goal" ? "the goal asks it" : "not given")] });
+    const objective = v.objective ? run.register?.snap.state.objectives.get(v.objective) : null;
+    if (v.objective || v.parent) rows.push({ label: "Under", s: [[v.objective ? `objective ${v.objective}${objective?.text ? `: ${objective.text}` : ""}` : "", v.parent ? `question ${v.parent}` : ""].filter(Boolean).join("; ")] });
+    rows.push({ label: "Weight", s: [`${v.materiality}; priority ${v.priority}${v.priority_reason ? ` (${v.priority_reason})` : ""}${v.expects ? `; expects ${v.expects}` : ""}${v.deadline ? `; deadline ${v.deadline}` : ""}${v.suggested_to ? `; suggested to ${v.suggested_to}` : ""}`] });
+    for (const r of v.revisions) rows.push({ label: r === v.revisions[0] ? "Revisions" : "", s: [`r${r.rev}, ${when(r.at)}, by ${originWords(r.origin)}${r.why ? ` (${r.why})` : ""}: `, { b: r.text }] });
+    if (v.neutral) rows.push({ label: "Neutral formulation", s: [`${v.neutral.text} (by ${originWords(v.neutral.origin)} at ${v.neutral.at}, for r${v.neutral.rev})`] });
+    if (v.leading_forms.length) rows.push({ label: "Leading form", s: [`worded as a conclusion to reach (${v.leading_forms.join(", ")}): flagged for the critic, tested as a proposition`] });
+    for (const [i, s] of v.scope_history.entries()) {
+      const who = s.origin ? originWords(s.origin) : "";
+      rows.push({ label: i ? "" : "Scope", s: [`${s.scope.replace(/_/g, " ")} at ${i ? s.at : when(s.at)}${who && !s.why.includes(who) ? ` by ${who}` : ""}${s.why ? `: ${s.why}` : ""}`] });
+    }
+    const hypotheses = v.delivered.flatMap((d) => d.hypotheses);
+    for (const [i, h] of v.hints.entries()) rows.push({ label: i ? "" : "Hints", s: [{ code: h.ref }, h.value ? ` — says: ${h.value}` : "", ...(h.value && hypotheses.length ? [" (recorded as a hypothesis in the asker's name: ", ...hypotheses.flatMap((n, j): Span[] => [...(j ? [", "] : []), { e: n }]), ")"] : [])] });
+    for (const [i, a] of v.attachments.entries()) rows.push({ label: i ? "" : "Attachments", s: attachmentSpans(run, v.id, a) });
+    for (const [i, cl] of v.clarifications.entries()) rows.push({ label: i ? "" : "Clarifications", s: [`${cl.id}: ${cl.by} asked ${cl.to ? `${cl.to} ` : ""}at ${cl.at}: ${cl.what}. `, cl.answer ? `Answered by ${cl.answer.origin ? originWords(cl.answer.origin) : cl.answer.by} at ${cl.answer.at}: ${cl.answer.text}` : { b: "Not answered." }] });
+    if (v.signed.length) rows.push({ label: "Signed", s: [v.signed.map((x) => `event ${x.act_seq} by ${x.person} (key ${x.fingerprint})`).join("; ")] });
+    // Its offers to a seat (docs/adr/0015), as the register wrote them: when each reached its seat, and whether it was taken.
+    for (const [i, o] of v.offers.entries()) rows.push({ label: i ? "" : "Offered", s: [`to ${o.to} at ${o.at} for r${o.rev}${o.first ? " (the suggested seat first)" : ""}${o.why ? `, ${o.why}` : ""}: ${o.accepted ? `accepted at ${o.accepted.at}` : o.declined ? `declined at ${o.declined.at}${o.declined.why ? ` (${o.declined.why})` : ""}` : o.seen_at ? `seen at ${o.seen_at}, not taken up` : "not seen by its seat"}`] });
+    for (const [i, ev] of v.evidence.entries()) rows.push({ label: i ? "" : "Evidence added", s: [`import:${ev.import} at ${ev.at}${ev.request ? ` for ${ev.request}` : ""}${ev.inventory_rev !== null ? `, inventory revision ${ev.inventory_rev}` : ""}: what was concluded before it is recorded again`] });
+    if (v.withdrawn) rows.push({ label: "Withdrawn", s: [`by ${originWords(v.withdrawn.origin)} at ${v.withdrawn.at}: ${v.withdrawn.why}`] });
+    if (v.after_done) rows.push({ label: "After the done", s: ["asked after the run's done: a follow-up a resume takes up"] });
+  } else if (c.q?.text) rows.push({ label: "Question", s: [c.q.text] });
+  const leads = leadsFor(run, c.key);
+  // The proposition tested: the first lead under the question that stated one.
+  const framed = leads.find((l) => l.proposition);
+  rows.push({ label: "Proposition tested", s: framed ? [`${framed.proposition}; its negation: ${framed.negation ?? "not stated"} (${framed.id})`] : [v && ["analyst", "reviewer", "observer"].includes(v.origin.kind) ? "no lead stated one (a person's question is tested as a proposition and its negation)" : "none stated: the question was worked as asked"] });
+  const body: Block[] = [{ k: "rows", rows }];
+  // The leads: whole, except the negatives and the duplicates, counted here and listed whole in Appendix F.
+  const negatives = leads.filter((l) => l.disposition === "negative");
+  const duplicates = leads.filter((l) => l.disposition === "duplicate");
+  const shown = leads.filter((l) => l.disposition !== "negative" && l.disposition !== "duplicate");
+  body.push({ k: "p", s: [{ b: `Leads (${leads.length})` }] });
+  if (!leads.length) body.push({ k: "p", s: ["No lead names this question."] });
+  if (shown.length) body.push({ k: "list", items: shown.map((x) => [...leadLineOf(run, x), ...(holdersOf(run, x.id).length ? [` Held by ${holdersOf(run, x.id).join("; ")}.`] : [])]) });
+  if (negatives.length) {
+    const quick = negatives.filter((l) => l.quick_negative).length;
+    const unreviewed = negatives.filter((l) => dropReview(run, l).some((sp) => typeof sp === "object" && "b" in sp && sp.b === "not reviewed")).length;
+    body.push({ k: "p", s: [`${plural(negatives.length, "lead")} closed negative (${quick} quick, ${unreviewed} not reviewed by another agent): `, ...negatives.flatMap((l, i): Span[] => [...(i ? [", "] : []), { a: `#reg-${l.id}`, text: l.id }]), ", each whole in Appendix F."] });
+  }
+  if (duplicates.length) body.push({ k: "note", s: [`Duplicates: ${duplicates.map((l) => `${l.id} (of ${l.ref ?? "?"}${l.closed_by ? `, closed by ${l.closed_by}` : ""})`).join("; ")}. Listed whole in Appendix F.`] });
+  // Coverage records that name it: what a negative was searched over, as the hub found it, and who reviewed it.
+  const cov = run.entries.filter((e) => e.kind === "coverage" && !run.replaced.has(e.seq) && (e.answers ?? []).some((a) => sectionKey(a) === c.key));
+  if (cov.length) {
+    body.push({ k: "p", s: [{ b: "Coverage" }] });
+    body.push({ k: "list", items: cov.map((e): Span[] => {
+      const r = negativeReview(e, run.entries, run.attestations, run.disputes);
+      return [{ e: e.seq }, `: ${e.value}; over ${coverageScope(e) || "no object named"}; coverage ${e.coverage ?? "not computed"} (computed by the hub)${e.not_examined?.length ? `; ${plural(e.not_examined.length, "planned route")} not examined` : ""}; ${r.reviewed ? `reviewed by ${r.by.join(", ")}` : "not reviewed by another seat"}.`];
+    }) });
+  }
+  // The result, with what speaks against it.
+  body.push({ k: "p", s: [{ b: "Result" }] });
+  const a = st.answer;
+  if (!a) body.push({ k: "p", s: outside ? ["No answer: it was not the run's work."] : [{ chip: st.status }, " No standing answer."] });
+  else {
+    const result = answerResult(a);
+    const contrary = a.contrary ?? [];
+    body.push({
+      k: "p",
+      s: [
+        { chip: st.status },
+        ` ${result ? resultWords(result) : a.inconclusive ? "inconclusive" : "answered (recorded before results)"}: `,
+        { e: a.seq },
+        ...(c.q ? [" (", { a: `#${questionAnchor(c.q.id)}`, text: "§5" } as Span, ")"] : []),
+        ". ",
+        contrary.length ? "Contrary evidence: " : a.contrary_none_why ? `Nothing recorded against it, and why: ${a.contrary_none_why}` : "No contrary evidence recorded.",
+        ...contrary.flatMap((x, i): Span[] => [...(i ? [", "] : []), { e: x.seq }]),
+        contrary.length ? "." : "",
+        ...(v?.answer?.stale ? [" ", { b: `Stale: ${v.answer.stale_why === "evidence" ? "evidence arrived for the question after it was recorded" : `it answers r${v.answer.question_rev}, and the question stands at r${v.rev}`}.` } as Span] : []),
+      ],
+    });
+    // How strongly other seats hold it (B2): established, or a best candidate only, and what capped it.
+    const target = a.hash ?? ledgerHash(a, "genesis");
+    const reviews = run.attestations.filter((x) => attestationAct(x) === "attest" && x.target === target && !a.authors.includes(x.by));
+    if (reviews.length) {
+      const best = !reviews.some(attestEstablishes);
+      body.push({ k: "p", s: [{ b: "Reviewed" }, `: ${reviews.map((x) => `by ${x.by} at ${x.at}, ${x.strength === "best_candidate" ? "a best candidate" : "established"}${x.capped?.length ? ` (capped: ${x.capped.join("; ")})` : ""}`).join("; ")}.`, ...(best && !(answerResult(a) && NEGATIVE_RESULTS.has(answerResult(a)!)) ? [" ", { b: "A best candidate, not established: every review holds it so, and the run is examination-limited on it." } as Span] : [])] });
+    }
+  }
+  // The operator's acceptance of what is left.
+  if (v?.accepted) body.push({ k: "p", s: [{ b: "Accepted " }, `as ${v.accepted.as === "bounded" ? "a bounded examination" : "not determinable"} by ${originWords(v.accepted.origin)} at ${v.accepted.at} (r${v.accepted.rev}${v.accepted.answer ? `, the answer ${v.accepted.answer}` : ""}): ${v.accepted.why}. ${v.accepted.stands ? "It stands: the run is examination-limited, never completed on it." : "It no longer stands: the question, its answer or its evidence moved since."}`] });
+  // The gaps that bound it.
+  const gaps = gapsOf(run, limits).filter((g) => g.questions.some((x) => sectionKey(x) === c.key || x === v?.id));
+  if (gaps.length) {
+    body.push({ k: "p", s: [{ b: "Evidence gaps" }] });
+    body.push({ k: "list", items: gaps.map((g): Span[] => [`${g.cls}: ${g.what}. Record: ${g.record}. Consequence: ${g.consequence}.`]) });
+  }
+  body.push({ k: "p", s: [{ b: "Cost: " }, `${costWords(run, c)}${leads.length && run.cost && run.cost.source !== "none" ? `; by lead: ${leads.map((l) => `${l.id} ${tokensWords(run.cost?.shown.byLead.get(l.id) ?? 0)}`).join(", ")}` : ""}.`] });
+  const chips: Chip[] = [{ text: v ? v.origin.kind : c.q?.fromGoal ? "goal" : "section", tone: "slate" }, ...(v && v.scope !== "in_scope" ? [{ text: v.scope.replace(/_/g, " "), tone: "saffron" } as Chip] : []), ...(v?.withdrawn ? [{ text: "withdrawn", tone: "brick" } as Chip] : []), ...(outside && !st.answer ? [] : [st.status])];
+  return { k: "box", cls: "answer chain", id: chainAnchor(chainName(c)), level: 4, title: [{ plain: `${chainName(c)} · ` }, v?.text ?? c.q?.text ?? "(no words recorded)"], chips, body };
+}
+
+/** Why each group of questions matters to a reader, in one paragraph. */
+const GROUP_WHY: Record<ChainGroup, { title: string; why: string }> = {
+  original: { title: "Original questions (the goal's)", why: "What the goal asked. The report answers each or says why it cannot; the finish line held the run to them." },
+  asked: { title: "Asked during the run", why: "Questions a person put while the swarm worked, each on the record with who asked it (claimed or signed), every revision and clarification. A person's question is a proposition to test, never a conclusion to confirm; its authority carries no evidential weight." },
+  emergent: { title: "Emergent questions (found in the evidence)", why: "Questions an agent found in the evidence, each with the entry that raised it, in scope because it sits under an objective or a question in scope. They are where the examination went beyond what was asked." },
+  proposed: { title: "Proposed, not admitted", why: "Questions outside the declared objectives, waiting for the operator's triage: nobody examined them as the run's work. They may hold what the case needs; the report says nothing of their answers." },
+  excluded: { title: "Excluded", why: "Questions the operator or an examiner put out of scope, with why: set aside, not answered. A reader who needs one knows it was not examined." },
+  withdrawn: { title: "Withdrawn", why: "Questions their asker or the operator withdrew, with why. Their leads closed withdrawn; what they found stays in the ledger." },
+};
+
+/** §2's questions, one by one, grouped by where they came from and where they stand, then the ones left unresolved. */
+function chainBlocks(run: Run, memo: Map<number, EntryState>): Block[] {
+  const blocks: Block[] = [{ k: "h", level: 3, text: "How each question was examined", id: "chains" }];
+  const all = chainQuestions(run);
+  if (!all.length) {
+    blocks.push({ k: "p", s: ["No question was asked or named: there is nothing to follow from question to answer."] });
+    return blocks;
+  }
+  const reg = run.register;
+  const counts = new Map<string, number>();
+  for (const c of all) counts.set(c.v?.origin.kind ?? (c.q?.fromGoal ? "goal" : "section"), (counts.get(c.v?.origin.kind ?? (c.q?.fromGoal ? "goal" : "section")) ?? 0) + 1);
+  blocks.push({
+    k: "p",
+    s: [
+      `${plural(all.length, "question")}: ${[...counts].map(([k, n]) => `${n} ${k === "goal" ? "from the goal" : k === "agent" ? "from agents" : k === "section" ? "named only by the ledger" : `from ${k}s`}`).join(", ")}. `,
+      reg ? `The question register (questions/questions.jsonl, ${plural(reg.events.length, "event")}${reg.snap.seeded ? "" : ", the goal's seed read from the goal, never written"}; chain ${reg.snap.state.chain.ok ? "intact" : `BROKEN at line ${reg.snap.state.chain.broken_at}: ${reg.snap.state.chain.reason}`}) keeps each one's asker, revisions, scope and acts; every event is in Appendix F. ` : "The question register could not be read: each question is shown from the goal and the ledger alone. ",
+      "Each chain runs from who asked to what it cost: the asker, why, every verbatim revision, what came with it, the proposition tested, the leads that worked it (a negative lead counted here and listed whole in Appendix F), the result and what speaks against it, the operator's acceptance, the gaps that bound it, and its tokens.",
+    ],
+  });
+  blocks.push({ k: "p", s: [{ b: "How the cost is counted. " }, run.cost?.method ?? "No token record could be read.", ...(run.cost && run.cost.source !== "none" ? [` Of the run's ${tokensWords(run.cost.shown.total)}, ${tokensWords([...run.cost.shown.byQuestion.values()].reduce((x, y) => x + y, 0))} went to questions, ${tokensWords(run.cost.shown.noQuestion)} to leads that name no question, and ${tokensWords([...run.cost.shown.unheld.values()].reduce((x, y) => x + y, 0))} to calls made while the seat held no lead (${[...run.cost.shown.unheld].map(([seat, n]) => `${seat} ${tokensWords(n)}`).join(", ") || "none"}).`] : [])] });
+  const limits = run.entries.filter((e) => e.kind === "limitation" && !run.replaced.has(e.seq));
+  for (const g of ["original", "asked", "emergent", "proposed", "excluded", "withdrawn"] as ChainGroup[]) {
+    const list = all.filter((c) => groupOf(c) === g);
+    if (!list.length) continue;
+    blocks.push({ k: "h", level: 3, text: `${GROUP_WHY[g].title} (${list.length})` });
+    blocks.push({ k: "p", s: [GROUP_WHY[g].why] });
+    for (const c of list) blocks.push(chainBlock(c, run, memo, limits));
+  }
+  // What the examination leaves open: a question in scope with no answer that settles it.
+  const open = all.filter((c) => ["original", "asked", "emergent"].includes(groupOf(c))).map((c) => ({ c, st: chainStatus(c, run, memo) })).filter(({ c, st }) => !SETTLED.has(st.status.text) || c.v?.answer?.stale || c.v?.after_done);
+  blocks.push({ k: "h", level: 3, text: `Unresolved (${open.length})`, id: "unresolved" });
+  blocks.push({ k: "p", s: ["Questions in scope that no answer settles: none standing, one that is negative, not determinable, partial, disputed, unreviewed or stale, or one asked after the run's done. The report's conclusions do not cover them; each says what would."] });
+  if (open.length) {
+    blocks.push({
+      k: "list",
+      items: open.map(({ c, st }): Span[] => {
+        const would = st.answer?.would_change;
+        const limitsFor = limits.filter((l) => (l.answers ?? []).some((x) => sectionKey(x) === c.key));
+        return [
+          { a: `#${chainAnchor(chainName(c))}`, text: chainName(c) },
+          ": ",
+          { chip: st.status },
+          c.v?.answer?.stale ? " (stale)" : "",
+          c.v?.after_done ? " (asked after the run's done)" : "",
+          c.v?.accepted?.stands ? ` Accepted by the operator as ${c.v.accepted.as === "bounded" ? "a bounded examination" : "not determinable"}: the run is examination-limited on it.` : "",
+          " What would settle it: ",
+          would ? would : limitsFor.length ? `what the limitations recorded for it name (${limitsFor.map((l) => `E-${l.seq}`).join(", ")})` : "the record does not say.",
+        ];
+      }),
+    });
+  } else blocks.push({ k: "p", s: ["None: every question in scope has a standing answer that settles it."] });
+  return blocks;
+}
+
+/**
+ * Appendix F: the whole register, every event a reviewable one. Each
+ * question event (who, when, what, and the act whole) in the chain's order;
+ * each lead's events, and every close with who closed it, what it cites and
+ * whether another agent reviewed that; the negatives and the duplicates the
+ * body counts, whole.
+ */
+function registerSection(run: Run): BodySection {
+  const blocks: Block[] = [];
+  blocks.push({ k: "p", lede: true, s: ["The question and lead registers as the harness kept them, whole: every event with its seq, time and author, and every disposition with what it rests on and whether an agent other than the one who made it reviewed it. The body counts the negative and duplicate leads; they are here in full."] });
+  const reg = run.register;
+  blocks.push({ k: "h", level: 3, text: "The question register" });
+  if (!reg || !reg.events.length) blocks.push({ k: "p", s: ["No question event was recorded or derived."] });
+  else {
+    blocks.push({ k: "p", s: [`${plural(reg.events.length, "event")}${reg.snap.seeded ? "" : " (the goal's seed derived from the goal, not written: a run from before the register, or one nothing wrote to)"}; chain ${reg.snap.state.chain.ok ? `intact, head ${reg.snap.state.chain.head ?? "none"}` : `BROKEN at line ${reg.snap.state.chain.broken_at}: ${reg.snap.state.chain.reason}`}.`] });
+    blocks.push({
+      k: "table",
+      cls: "register",
+      head: ["Seq", "When", "Who", "Event", "What"],
+      rows: reg.events.map((e): Span[][] => [
+        [String(e.seq)],
+        [e.seq > reg.persisted ? "derived from the goal, not written" : e.at],
+        [e.origin ? originWords(e.origin) : e.by],
+        [`${e.ev}${e.q ? ` ${e.q}` : ""}${e.rev !== undefined ? ` r${e.rev}` : ""}`],
+        [{ code: JSON.stringify({ ...(e.act ? { act: e.act } : {}), ...(e.decided ? { decided: e.decided } : {}), ...Object.fromEntries(Object.entries(e).filter(([k]) => !["v", "seq", "at", "by", "ev", "q", "rev", "act", "decided", "origin", "prev", "hash"].includes(k))) }) }],
+      ]),
+    });
+  }
+  blocks.push({ k: "h", level: 3, text: "The lead register" });
+  const views = new Map((run.leads?.views ?? []).map((l) => [l.id, l]));
+  if (!run.leadEvents.length) blocks.push({ k: "p", s: ["No lead was opened."] });
+  else {
+    blocks.push({ k: "p", s: [`${plural(views.size, "lead")}, ${plural(run.leadEvents.length, "event")}; chain ${run.leads?.chain.ok ? "intact" : `BROKEN at line ${run.leads?.chain.broken_at}: ${run.leads?.chain.reason}`}.`] });
+    for (const id of [...views.keys()].sort((a, b) => Number(a.slice(2)) - Number(b.slice(2)))) {
+      const x = views.get(id) as LeadView;
+      const events = run.leadEvents.filter((e) => e.lead === id);
+      blocks.push({
+        k: "box",
+        cls: "exhibit lead",
+        id: `reg-${id}`,
+        level: 4,
+        title: [{ plain: `${id} · ` }, x.title],
+        chips: [{ text: x.disposition ?? x.status, tone: x.disposition === "negative" ? "saffron" : x.disposition ? "slate" : "moss" }, ...(x.quick_negative ? [{ text: "quick negative", tone: "saffron" } as Chip] : [])],
+        body: [
+          { k: "p", s: [...leadLineOf(run, x), ` For ${x.answers.length ? x.answers.join(", ") : "no question"}; opened by ${x.opened_by} at ${x.opened_at}${x.origin ? ` from ${x.origin}` : ""}.`, ...(x.proposition ? [` Proposition: ${x.proposition}; negation: ${x.negation ?? "not stated"}.`] : []), ...(x.product ? [` Product: ${x.product}; acceptance: ${x.acceptance ?? "not stated"}.`] : [])] },
+          { k: "list", items: events.map((e): Span[] => [`${e.seq} · ${e.at} · ${e.by} · ${e.ev}`, ...(e.holder ? [` holder ${e.holder}`] : []), ...(e.disposition ? [` ${e.disposition}`] : []), ...(e.ref ? [` on ${e.ref}`] : []), ...(e.why ? [`: ${e.why}`] : []), ...(e.job ? [` job ${e.job}`] : []), ...(e.entry !== undefined ? [" entry ", { e: e.entry } as Span] : []), ...(e.text ? [`: ${e.text}`] : []), ...(e.cause ? [` (${e.cause})`] : []), ...(e.routes?.length ? [` routes ${e.routes.map((r) => `${r.source} (${r.method})`).join("; ")}`] : []), ...(e.add?.length || e.remove?.length ? [` needs +${(e.add ?? []).join(",")} -${(e.remove ?? []).join(",")}`] : [])]) },
+        ],
+      });
+    }
+    const negatives = [...views.values()].filter((x) => x.disposition === "negative");
+    const duplicates = [...views.values()].filter((x) => x.disposition === "duplicate");
+    blocks.push({ k: "h", level: 3, text: `Negative leads (${negatives.length})` });
+    if (negatives.length) blocks.push({ k: "list", items: negatives.map((x) => leadLineOf(run, x)) });
+    else blocks.push({ k: "p", s: ["None."] });
+    blocks.push({ k: "h", level: 3, text: `Duplicate leads (${duplicates.length})` });
+    if (duplicates.length) blocks.push({ k: "list", items: duplicates.map((x) => leadLineOf(run, x)) });
+    else blocks.push({ k: "p", s: ["None."] });
+  }
+  // The finish (docs/adr/0015): who coordinated it, when the registers said it was ready, what each check said, and the report's review.
+  blocks.push({ k: "h", level: 3, text: "The finish" });
+  const fin = run.finish;
+  if (!fin || !fin.events.length) blocks.push({ k: "p", s: ["No finish register: a run from before one seat coordinated the finish, or one no seat called done in."] });
+  else {
+    blocks.push({ k: "p", s: [`${plural(fin.events.length, "event")} in leads/finish.jsonl; chain ${fin.chain.ok ? `intact, head ${fin.chain.head ?? "none"}` : `BROKEN at line ${fin.chain.broken_at}: ${fin.chain.reason}`}. ${fin.lease ? `The coordinator at the end: ${fin.lease.holder} (generation ${fin.lease.generation}, since ${fin.lease.at}${fin.lease.from ? `, taken over from ${fin.lease.from}` : ""}): ${fin.lease.why}${fin.lease.report ? `; the report it finished on: ${fin.lease.report}` : ""}.` : "No seat held the coordinator's lease."}`] });
+    blocks.push({
+      k: "list",
+      items: fin.events.map((e): Span[] => {
+        const x = e as unknown as Record<string, unknown>;
+        const what =
+          e.ev === "lease" ? `lease to ${String(x.holder)} (generation ${String(x.generation ?? "?")})${x.from ? ` from ${String(x.from)}` : ""}${x.why ? `: ${String(x.why)}` : ""}`
+          : e.ev === "readiness" ? `${x.ready ? "ready" : "not ready"} at revision ${String(x.revision ?? "").slice(0, 12)}${Array.isArray(x.items) && x.items.length ? `: ${(x.items as string[]).join("; ")}` : ""}`
+          : e.ev === "check" ? `the finish line at revision ${String(x.revision ?? "").slice(0, 12)}: ${x.proceed ? "proceed" : "refused"}${x.outcome ? ` (${String(x.outcome)})` : ""}${x.reason ? `: ${String(x.reason)}` : ""}`
+          : e.ev === "ack" ? `${x.verdict === "objection" ? "objection" : "no objection"} to the report ${String(x.digest ?? "").slice(0, 12)}${x.why ? `: ${String(x.why)}` : ""}`
+          : e.ev === "resolve" ? `resolved ${x.post !== undefined ? `post #${String(x.post)}` : `ack ${String(x.ack)}`} as ${String(x.how)}${x.why ? `: ${String(x.why)}` : ""}`
+          : JSON.stringify(Object.fromEntries(Object.entries(x).filter(([k]) => !["v", "seq", "at", "by", "ev", "prev", "hash", "run"].includes(k))));
+        return [`${e.seq} · ${e.at} · ${e.by} · ${e.ev}: ${what}`];
+      }),
+    });
+  }
+  return { id: "sF", n: "F", title: "The question and lead registers", desc: "every question and lead event, every disposition reviewable", count: `${plural(run.register?.events.length ?? 0, "question event")}, ${plural(run.leadEvents.length, "lead event")}`, blocks };
 }
 
 function evidenceSection(run: Run): BodySection {
@@ -1390,35 +1852,19 @@ function proceededBlocks(run: Run): Block[] {
       `${plural(leads.views.length, "lead")} in the register (`,
       { code: "leads/leads.md" },
       `, ${plural(leads.events, "event")}, chain ${leads.chain.ok ? "intact" : `BROKEN at line ${leads.chain.broken_at}: ${leads.chain.reason}`}). `,
-      "A lead is work an agent found had to be followed; the harness kept who held it and how it ended, and assigned none of it. Each finding is listed with the leads it opened, then how each ended and what that rests on.",
+      "A lead is work an agent found had to be followed; the harness kept who held it and how it ended, and assigned none of it. Each finding is listed with the leads it opened, then how each ended and what that rests on. A lead closed negative is counted here and listed whole in Appendix F, and so is a duplicate.",
     ],
   });
-  const reviewOf = (x: LeadView): Span[] => {
-    if (!x.disposition || !DROPS.has(x.disposition)) return [];
-    const m = x.ref ? /^E-(\d+)$/.exec(x.ref) : null;
-    if (!m) return [" Review: not reviewable by an attestation (", x.disposition === "duplicate" ? "a duplicate cites a lead" : "an operator request cites no entry", ")."];
-    const e = run.bySeq.get(Number(m[1]));
-    if (!e) return [" Review: the entry it cites is not in the ledger."];
-    const target = e.hash ?? ledgerHash(e, "genesis");
-    const att = run.attestations.filter((a) => attestationAct(a) === "attest" && a.target === target && a.by !== x.closed_by && !e.authors.includes(a.by)).map((a) => a.by);
-    const dis = run.disputes.filter((d) => d.act === "dispute" && d.target === target).map((d) => d.by);
-    if (!att.length && !dis.length) return [" Review: ", { b: "not reviewed" }, ": no agent other than the one who closed it attested or disputed what it cites."];
-    return [` Review: ${[att.length ? `attested by ${[...new Set(att)].join(", ")}` : "", dis.length ? `disputed by ${[...new Set(dis)].join(", ")}` : ""].filter(Boolean).join("; ")}.`];
-  };
-  const leadLine = (x: LeadView): Span[] => {
-    const m = x.ref ? /^E-(\d+)$/.exec(x.ref) : null;
-    const ended: Span[] = x.disposition
-      ? [` Ended ${x.disposition}`, ...(x.closed_by ? [` (${x.closed_by})`] : []), ": ", ...(m ? [{ e: Number(m[1]) } as Span] : [x.ref ?? ""]), x.close_why ? ` (${x.close_why})` : "", "."]
-      : [` Not ended: ${x.status}${x.holder ? `, held by ${x.holder}` : ", held by nobody"}${x.needs.some((n) => !n.met) ? `, waiting on ${x.needs.filter((n) => !n.met).map((n) => n.need).join(", ")}` : ""}${x.material ? "" : " (not material)"}.`];
-    const reopened: Span[] = x.reopened.length ? [` Reopened ${plural(x.reopened.length, "time")}: ${x.reopened.map((r) => `${r.cause}, ${r.why}`).join("; ")}.`] : [];
-    const notes: Span[] = x.notes.length ? [` The operator: ${x.notes.map((n) => `${n.text}${n.allow_host ? ` (allowed ${n.allow_host})` : ""}`).join("; ")}.`] : [];
-    // The route plan, what of it nobody examined at a negative close, and a close quick enough to be a cue for review.
-    const routes: Span[] = x.routes?.length ? [` Routes planned: ${x.routes.map((r) => `${r.source} (${r.method})`).join("; ")}.`] : [];
-    const notExamined: Span[] = x.not_examined?.length ? [` Planned, not examined at its close: ${x.not_examined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}.`] : [];
-    const quick: Span[] = x.quick_negative
-      ? [{ b: " Quick negative:" }, ` closed ${Math.round(x.quick_negative.held_ms / 1000)} s after it was taken, on ${plural(x.quick_negative.jobs, "job")} over ${plural(x.quick_negative.objects, "object")}; a cue for review, not a refusal.`]
-      : [];
-    return [{ b: `${x.id} ` }, x.title, `: ${x.why}${/[.!?]$/.test(x.why) ? "" : "."}`, ...routes, ...(x.jobs.length ? [` Jobs: ${x.jobs.join(", ")}.`] : []), ...ended, ...notExamined, ...quick, ...reviewOf(x), ...reopened, ...notes];
+  const reviewOf = (x: LeadView): Span[] => dropReview(run, x);
+  // The negatives and the duplicates are counted where they fall; Appendix F has each whole.
+  const folded = (x: LeadView) => x.disposition === "negative" || x.disposition === "duplicate";
+  const foldNote = (list: LeadView[]): Block[] => {
+    const neg = list.filter((x) => x.disposition === "negative");
+    const dup = list.filter((x) => x.disposition === "duplicate");
+    const out: Block[] = [];
+    if (neg.length) out.push({ k: "p", s: [`and ${plural(neg.length, "lead")} closed negative (${neg.filter((x) => x.quick_negative).length} quick): `, ...neg.flatMap((x, i): Span[] => [...(i ? [", "] : []), { a: `#reg-${x.id}`, text: x.id }]), ", in Appendix F."] });
+    if (dup.length) out.push({ k: "note", s: [`Duplicates: ${dup.map((x) => `${x.id} (of ${x.ref ?? "?"})`).join("; ")}; in Appendix F.`] });
+    return out;
   };
   // Grouped by where each lead came from: a finding first, in ledger order, then the leads an agent opened on its own.
   const byOrigin = new Map<string, LeadView[]>();
@@ -1430,13 +1876,16 @@ function proceededBlocks(run: Run): Block[] {
   for (const origin of fromEntries) {
     const seq = Number(origin.slice(2));
     const e = run.bySeq.get(seq);
+    const list = byOrigin.get(origin) ?? [];
     blocks.push({ k: "p", s: [{ e: seq }, e ? ` (${e.kind}): ${e.value}` : " (not in the ledger)", " opened:"] });
-    blocks.push({ k: "list", items: (byOrigin.get(origin) ?? []).map(leadLine) });
+    if (list.some((x) => !folded(x))) blocks.push({ k: "list", items: list.filter((x) => !folded(x)).map((x) => leadLineOf(run, x)) });
+    blocks.push(...foldNote(list));
   }
   const own = byOrigin.get("") ?? [];
   if (own.length) {
     blocks.push({ k: "p", s: [fromEntries.length ? "Opened by an agent, not from a recorded finding:" : "Every lead was opened by an agent, not from a recorded finding:"] });
-    blocks.push({ k: "list", items: own.map((x) => [...leadLine(x), ` (${x.origin})`]) });
+    if (own.some((x) => !folded(x))) blocks.push({ k: "list", items: own.filter((x) => !folded(x)).map((x) => [...leadLineOf(run, x), ` (${x.origin})`]) });
+    blocks.push(...foldNote(own));
   }
   const drops = leads.views.filter((x) => x.disposition && DROPS.has(x.disposition));
   const unreviewed = drops.filter((x) => reviewOf(x).some((sp) => typeof sp === "object" && "b" in sp && sp.b === "not reviewed"));
@@ -2149,6 +2598,8 @@ function resolveWords(d: LedgerGate["defects"][number]): string {
       return `an agent other than its author re-deriving what the answer rests on from the sealed objects and recording that it holds, or why not. Even then no human has reviewed it.`;
     case "open_contradiction":
       return `the wrong one of the two entries corrected, or both weighed in an answer (one as contrary evidence), or a limitation naming both.`;
+    case "partial_output":
+      return `the entry recorded again saying how it treats the output of a job that was stopped before its end (what that part still shows, and why), or resting instead on a job that ran to its end. A limitation does not resolve it.`;
     default:
       return d.fix;
   }
@@ -2394,7 +2845,7 @@ function buildSections(run: Run, memo = new Map<number, EntryState>()): { preamb
     preamble: legendBlocks(run),
     sections: [
       summarySection(run, memo),
-      requestSection(run),
+      requestSection(run, memo),
       evidenceSection(run),
       methodSection(run),
       answerSectionOf(run, memo),
@@ -2406,6 +2857,7 @@ function buildSections(run: Run, memo = new Map<number, EntryState>()): { preamb
       exhibitsSection(run, memo),
       jobsSection(run),
       workingSection(run),
+      registerSection(run),
     ],
   };
 }

@@ -127,8 +127,10 @@ have lost its provider.
    whether the finish is ready: no material lead open or waiting for a
    closure's confirmation, no lead's job uninterpreted, the ledger gate over
    every question in scope (and the summary and narrative the goal names)
-   holding nothing, no stale answer, no addition committed and not yet
-   applied; under the operator's stop policy also
+   holding nothing (an entry citing a cancelled or stopped job's kept output
+   with no word on it included, ADR 0016's partial_output), no stale answer,
+   no addition committed and not yet applied; under the operator's stop
+   policy also
    no best candidate and no route limitation. It is in every header, with the
    coordinator and what this seat does, and posted once each time it turns
    ready or back (`readiness` events). It is cheap and generic; the goal's

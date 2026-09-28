@@ -58,6 +58,17 @@ not installed" (or pytsk3, or pyewf) rather than failing on an import line.
 must be imported under such a guard, and every other one must be in
 `library-python.txt`.
 
+**A tool says what it reads.** A manifest's `use` names the files the tool
+is for: `extensions` (`.evtx`), `magic` (bytes at an offset, as hex) and
+`names` (a file's own name, `*` for any run of characters: `History`,
+`$I*`). When an agent's command job declares its inputs, the hub matches
+each one against every tool of the run and names the matches in the job's
+admission answer, as a hint (docs/adr/0016): in BelkaCTF #6 the mobile
+readers here went unused while the agents wrote their own parsers for the
+same databases. A manifest without `use` is matched by its description
+naming the file's extension as a word. Nothing is refused on it; the harness
+compares what the manifests wrote, and knows no format.
+
 **A page is not a cut.** The paged query tools (`amcache_apps`,
 `browser_history`, `catalog_grep`, `csearch`, `esedb_query`,
 `chunk_needles`, `evtx_filter`, `evtx_query`, `ftk_csv`,
@@ -157,6 +168,41 @@ script. "Written by" is the run.
   refused, blocks stored past the runs given are counted, and it lists
   (paged, recursive), extracts one file, or reads guest bytes, where the job
   only listed a root.
+
+## Harvesting candidates from a run
+
+After a run, the code the agents wrote into command jobs is the next
+library's raw material:
+
+```bash
+scripts/swarm.sh tools <id> --candidates [--out DIR] [--min-lines N] [--library DIR]
+```
+
+lists every heredoc, inline `-c`/`-e` script, command and script of the
+agents' own that a job ran, of `--min-lines` lines or more (20), one entry
+per text however many jobs ran it, ranked by lines times the jobs that ran
+it. Each says its job ids, seats, image profiles and lines, how often it was
+reused, and which tools here may already cover it: one whose name the
+script uses, or whose `use` matches what the jobs declared. Each script is
+written whole to DIR (`<sandbox>.tool-candidates/` unless `--out` names
+one), with `candidates.json` and `README.txt` beside them.
+
+### Folding a candidate
+
+A candidate becomes a library tool when it no longer knows the case it was
+written on:
+
+1. Take out what the case wrote into it: an image name, an offset, a
+   path, a person's name, the wording of the case's questions. Each
+   becomes a parameter with a default that works on any case, or goes.
+2. Give it a manifest: `description`, `params`, `runtime`, `entry`,
+   `requires` (the programs it runs), `optional_python` where it imports
+   what only some images carry, and `use` (what it reads).
+3. Keep nothing cut: a paged result keeps the whole under `tool-output/`
+   (`_output.py`), as the query tools here do.
+4. Add a test under `tests/` (`tests/tool-library-folded.test.ts` for the
+   folded ones), a row to the table above, and a line to "Folded from later
+   runs" naming the run, the job and the seat it came from.
 
 ## Candidates kept out of Community
 

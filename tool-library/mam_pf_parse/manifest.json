@@ -1,6 +1,17 @@
 {
   "name": "mam_pf_parse",
   "description": "Decompress a MAM-wrapped Windows prefetch file and return executable name, version, run count, and non-zero last-run timestamps for v26/v30 layouts.",
+  "use": {
+    "extensions": [
+      ".pf"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "4d414d04"
+      }
+    ]
+  },
   "params": {
     "path": {
       "type": "string",

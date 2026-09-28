@@ -42,6 +42,7 @@ import * as R from "../extensions/requests.ts";
 import * as NB from "../extensions/negative-bar.ts";
 import { readNetState, grantStatus } from "./net-grants.ts";
 import { storePaths } from "./evidence-store.ts";
+import { questionCost, roundParts } from "./question-cost.ts";
 
 type Rec = Record<string, unknown>;
 
@@ -168,7 +169,8 @@ export type RunMetrics = {
     discoverable: number;
   };
   cost: {
-    source: "model-gateway" | "pi-sessions" | null;
+    /** Where the calls were read (question-cost.ts): the gateway's log, the seats' Pi sessions, or each seat's total spread over its trace rows (an estimate). */
+    source: "model-gateway" | "pi-sessions" | "trace-estimate" | null;
     tokens: number;
     usd: number;
     per_question: Array<{ section: string; id: string | null; tokens: number; usd: number; leads: string[] }>;
@@ -567,119 +569,27 @@ function reversals(c: Context): RunMetrics["reversals"] {
   };
 }
 
-type Spend = { seat: string; at: number; tokens: number; usd: number };
-
-async function filesUnder(dir: string, depth = 5): Promise<string[]> {
-  if (depth < 0) return [];
-  const out: string[] = [];
-  for (const e of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
-    const p = join(dir, e.name);
-    if (e.isDirectory()) out.push(...(await filesUnder(p, depth - 1)));
-    else if (e.isFile() && e.name.endsWith(".jsonl")) out.push(p);
-  }
-  return out.sort();
-}
-
-/** Each seat's spend, call by call: the model gateway's log where the run has one, else the seats' Pi sessions. */
-async function spendSeries(S: string): Promise<{ source: RunMetrics["cost"]["source"]; rows: Spend[] }> {
-  const gateway = (await jsonl(join(S, "traces", "model-gateway.jsonl"))).filter((l) => l.seat && l.input !== undefined);
-  if (gateway.length) {
-    return {
-      source: "model-gateway",
-      rows: gateway.map((l) => ({ seat: str(l.seat), at: ms(l.at) ?? 0, tokens: num(l.input) + num(l.output) + num(l.cache_read) + num(l.cache_write), usd: num(l.cost_usd) })),
-    };
-  }
-  const rows: Spend[] = [];
-  for (const seat of await readdir(join(S, ".pi-sessions")).catch(() => [] as string[])) {
-    for (const f of await filesUnder(join(S, ".pi-sessions", seat))) {
-      for (const e of await jsonl(f)) {
-        const m = e.message as Rec | undefined;
-        const usage = (e.type === "message" && m && (m.role === "assistant" || m.role === "toolResult") ? m.usage : e.type === "compaction" || e.type === "branch_summary" ? e.usage : undefined) as Rec | undefined;
-        if (!usage) continue;
-        const cost = usage.cost && typeof usage.cost === "object" ? num((usage.cost as Rec).total) : 0;
-        rows.push({ seat, at: ms(e.timestamp) ?? 0, tokens: num(usage.input) + num(usage.output) + num(usage.cacheRead) + num(usage.cacheWrite), usd: cost });
-      }
-    }
-  }
-  return { source: rows.length ? "pi-sessions" : null, rows };
-}
-
-/** Who held which lead when: spells from a take to its end (a release, a close, a reopen, another's claim, a hand-off). */
-function heldSpells(events: L.LeadEvent[]): Array<{ seat: string; lead: string; from: number; to: number }> {
-  const open = new Map<string, { seat: string; from: number }>();
-  const out: Array<{ seat: string; lead: string; from: number; to: number }> = [];
-  const end = (lead: string, at: number) => {
-    const h = open.get(lead);
-    if (h) out.push({ seat: h.seat, lead, from: h.from, to: at });
-    open.delete(lead);
-  };
-  for (const e of events) {
-    const lead = str(e.lead);
-    const at = ms(e.at);
-    if (!lead || at === null) continue;
-    if (e.ev === "open" && e.holder) open.set(lead, { seat: e.holder, from: at });
-    else if (e.ev === "claim") {
-      const holder = str(e.holder ?? e.by);
-      if (open.get(lead)?.seat === holder) continue;
-      end(lead, at);
-      open.set(lead, { seat: holder, from: at });
-    } else if (e.ev === "release" || e.ev === "close" || e.ev === "reopen" || (e.ev as string) === "handoff") end(lead, at);
-  }
-  for (const [lead, h] of open) out.push({ seat: h.seat, lead, from: h.from, to: Number.POSITIVE_INFINITY });
-  return out;
-}
-
 /**
- * Tokens apportioned by lead: each call's tokens go to the leads its seat
- * held when it was made, in equal parts, and a lead's part to the questions
- * it answers, in equal parts. A call made while the seat held no lead is
- * counted as unheld; a lead that answers no question is counted apart.
+ * Tokens apportioned by lead (scripts/question-cost.ts, the report's own
+ * method): each call's tokens go to the leads its seat held when it was
+ * made, in equal parts, and a lead's part to the questions it answers, in
+ * equal parts. A call made while the seat held no lead is counted as
+ * unheld; a lead that answers no question is counted apart. Rounded so the
+ * parts still add up to the run's total.
  */
 async function cost(c: Context): Promise<RunMetrics["cost"]> {
-  const { source, rows } = await spendSeries(c.S);
-  const spells = heldSpells(c.leadEvents);
-  const perQ = new Map<string, { tokens: number; usd: number; leads: Set<string> }>();
-  const unheld = { tokens: 0, usd: 0 };
-  const noQ = { tokens: 0, usd: 0, leads: new Set<string>() };
-  let tokens = 0;
-  let usd = 0;
-  for (const r of rows) {
-    tokens += r.tokens;
-    usd += r.usd;
-    const held = [...new Set(spells.filter((s) => s.seat === r.seat && s.from <= r.at && r.at < s.to).map((s) => s.lead))];
-    if (!held.length) {
-      unheld.tokens += r.tokens;
-      unheld.usd += r.usd;
-      continue;
-    }
-    for (const lead of held) {
-      const t = r.tokens / held.length;
-      const u = r.usd / held.length;
-      const qs = [...new Set((c.leads.leads.get(lead)?.answers ?? []).map((a) => sectionOf(a, c.qs)))];
-      if (!qs.length) {
-        noQ.tokens += t;
-        noQ.usd += u;
-        noQ.leads.add(lead);
-        continue;
-      }
-      for (const q of qs) {
-        const acc = perQ.get(q) ?? { tokens: 0, usd: 0, leads: new Set<string>() };
-        acc.tokens += t / qs.length;
-        acc.usd += u / qs.length;
-        acc.leads.add(lead);
-        perQ.set(q, acc);
-      }
-    }
-  }
-  const round = (x: number) => Math.round(x);
-  const cents = (x: number) => Math.round(x * 10000) / 10000;
+  const qc = await questionCost(c.S, c.leadEvents, (lead) => [...new Set((c.leads.leads.get(lead)?.answers ?? []).map((a) => sectionOf(a, c.qs)))]);
+  const source: RunMetrics["cost"]["source"] = qc.source === "gateway" ? "model-gateway" : qc.source === "sessions" ? "pi-sessions" : qc.source === "trace" ? "trace-estimate" : null;
+  // The tokens exactly as the report shows them (qc.shown); the dollars rounded to 1/10000 the same way, so both add up.
+  const usd = roundParts<string>([...[...qc.byQuestionUsd].map(([k, v]) => [`q\u0000${k}`, v] as const), ["u", qc.unheldUsd] as const, ["n", qc.noQuestionUsd] as const], 0.0001);
+  const dollars = (x: number) => Number(x.toFixed(4));
   return {
     source,
-    tokens: round(tokens),
-    usd: cents(usd),
-    per_question: [...perQ.entries()].map(([section, v]) => ({ section, id: c.qs?.bySection.get(section)?.id ?? null, tokens: round(v.tokens), usd: cents(v.usd), leads: [...v.leads].sort() })).sort((a, b) => b.tokens - a.tokens || a.section.localeCompare(b.section)),
-    unheld: { tokens: round(unheld.tokens), usd: cents(unheld.usd) },
-    leads_without_question: { tokens: round(noQ.tokens), usd: cents(noQ.usd), leads: [...noQ.leads].sort() },
+    tokens: qc.shown.total,
+    usd: dollars([...usd.values()].reduce((a, b) => a + b, 0)),
+    per_question: [...qc.byQuestion.keys()].map((section) => ({ section, id: c.qs?.bySection.get(section)?.id ?? null, tokens: qc.shown.byQuestion.get(section) ?? 0, usd: usd.get(`q\u0000${section}`) ?? 0, leads: [...(qc.byQuestionLeads.get(section) ?? [])].sort() })).sort((a, b) => b.tokens - a.tokens || a.section.localeCompare(b.section)),
+    unheld: { tokens: [...qc.shown.unheld.values()].reduce((a, b) => a + b, 0), usd: usd.get("u") ?? 0 },
+    leads_without_question: { tokens: qc.shown.noQuestion, usd: usd.get("n") ?? 0, leads: [...qc.noQuestionLeads].sort() },
   };
 }
 
@@ -786,7 +696,7 @@ export async function measureRun(runDirArg: string): Promise<RunMetrics> {
     network: await network(S),
     notes: c.notes,
   };
-  if (!m.cost.source) m.notes.push("no per-call token record (no model gateway log, no Pi sessions): cost per question is not measured");
+  if (!m.cost.source) m.notes.push("no per-call token record (no model gateway log, no Pi sessions, and no seat total with calls on the trace): cost per question is not measured");
   return m;
 }
 
@@ -908,7 +818,7 @@ export function metricsText(m: RunMetrics): string {
     ["Acquisition", `${a.requests} request(s) (${counts(a.by_stage)}; ${a.declined_by_policy} declined by the case policy); ${a.gaps.length} gap(s)${a.questions_with_gap.length ? ` on ${list(a.questions_with_gap)}` : ""}; evidence added ${a.evidence_added} time(s), ${a.evidence_added_for_request} for a request`],
     ["Interpretations", `${i.total}: ${i.valid} valid, ${i.superseded} on a superseded entry, ${i.disputed} on a disputed one${i.missing ? `, ${i.missing} on no entry` : ""}; ${i.jobs_uninterpreted.length} of ${i.jobs_under_leads} lead jobs uninterpreted, ${i.jobs_without_valid.length} with no valid interpretation`],
     ["Reversals", `${r.result_changes.length + r.negative_reopens.length}: ${r.new_evidence} after new evidence, ${r.discoverable} discoverable in the original evidence (${r.result_changes.length} answer result changes, ${r.negative_reopens.length} negative leads reopened); ${r.corrections} corrections kept the result`],
-    ["Cost", m.cost.source ? `${m.cost.tokens} tokens, $${m.cost.usd} (from ${m.cost.source === "model-gateway" ? "the model gateway's log" : "the seats' Pi sessions"}); ${m.cost.unheld.tokens} spent holding no lead, ${m.cost.leads_without_question.tokens} on leads that answer no question` : "not measured"],
+    ["Cost", m.cost.source ? `${m.cost.tokens} tokens, $${m.cost.usd} (from ${m.cost.source === "model-gateway" ? "the model gateway's log" : m.cost.source === "pi-sessions" ? "the seats' Pi sessions" : "each seat's total spread over its calls on the trace, an estimate"}); ${m.cost.unheld.tokens} spent holding no lead, ${m.cost.leads_without_question.tokens} on leads that answer no question` : "not measured"],
     ["Duplicates", m.duplicates.recorded ? `${m.duplicates.jobs_with_similar.length} jobs with similar work by another seat (${m.duplicates.exact_repeats.length} exact repeats); ${m.duplicates.independent.length} independent reproductions; same_as ${m.duplicates.same_as.files} file(s), ${m.duplicates.same_as.bytes} bytes in ${m.duplicates.same_as.jobs.length} job(s), ${m.duplicates.same_as.whole.length} wholly; recipes merged ${m.duplicates.recipe_merged}` : `not recorded${m.duplicates.shadow_would_merge ? ` (the retired shadow merge said ${m.duplicates.shadow_would_merge})` : ""}`],
     ["Network", n.recorded ? `${n.requests} request(s): ${n.granted} granted, ${n.denied} denied (${counts(n.denied_by_code)}); ${n.operator_items} operator item(s), ${n.operator_items_open} open; ${n.grants} grant(s) (${counts(n.grants_by_status)}); ${n.fetches} fetch(es), ${n.captures} capture(s), ${n.fetch_refusals} refused by the fetch service${n.contamination ? `; contamination ${n.contamination}` : ""}` : "not used"],
   ];
