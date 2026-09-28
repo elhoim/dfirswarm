@@ -2149,6 +2149,35 @@ function anchorVerdict(anchorFile: string, verdict: Record<string, unknown>): vo
   writeFileNoFollowSync(dirname(anchorFile), basename(anchorFile), `${JSON.stringify({ ...anchor, custody: verdicts }, null, 2)}\n`, 0o444);
 }
 
+/**
+ * A resume of the run (scripts/resume.ts), added to the anchor outside the
+ * run beside the verdicts: when, by whom, from what, and the chains' heads
+ * it found. An earlier verdict and an earlier release are held to the run
+ * as prefixes once the anchor names a resume after them.
+ */
+export function anchorResume(sandboxInput: string, entry: Record<string, unknown>): void {
+  const anchorFile = custodyAnchorPath(resolve(sandboxInput));
+  let anchor: Record<string, unknown> = {};
+  try {
+    anchor = JSON.parse(readFileSync(anchorFile, "utf8"));
+  } catch {
+    throw new Error(`the custody anchor beside the run (${anchorFile}) cannot be read: the resume is not anchored`);
+  }
+  const resumes = Array.isArray(anchor.resumes) ? (anchor.resumes as unknown[]) : [];
+  resumes.push(entry);
+  writeFileNoFollowSync(dirname(anchorFile), basename(anchorFile), `${JSON.stringify({ ...anchor, resumes }, null, 2)}\n`, 0o444);
+}
+
+/** The resumes the anchor outside the run names, in order. */
+export function anchoredResumes(sandboxInput: string, anchorFile?: string | null): Array<{ at: string; by?: string; from?: string; segment?: number }> {
+  try {
+    const a = JSON.parse(readFileSync(anchorFile ?? custodyAnchorPath(resolve(sandboxInput)), "utf8")) as { resumes?: unknown };
+    return Array.isArray(a.resumes) ? (a.resumes as Array<{ at: string; by?: string; from?: string; segment?: number }>).filter((r) => typeof r?.at === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 export type VerdictAnchor =
   | { state: "matches"; at: string }
   | { state: "differs"; at: string | null; note: string }
@@ -2369,6 +2398,102 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
   return { drift, after, not_sealed: notSealed };
 }
 
+/** An earlier verdict the anchor names, held to the run as a prefix: every chain it sealed still begins with what it sealed. */
+export type EarlierSeal = { at: string | null; sha256: string | null; resumed_after: boolean; ok: boolean; held: string[]; broken: string[] };
+
+/** The lines of a JSONL text, and the `hash` each carries. */
+function lineHashField(text: string): string[] {
+  return text
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => {
+      try {
+        return String((JSON.parse(l) as { hash?: unknown }).hash ?? "");
+      } catch {
+        return "";
+      }
+    });
+}
+
+/**
+ * Whether every chain a verdict sealed is a prefix of the run now: the line
+ * it sealed as the last one is still at its place, with the hash it had.
+ * What the run appended after it (the continuation of a resumed run, the
+ * closing lines of a stop) is allowed; a line it sealed that changed or went
+ * is not. Pure over the texts read.
+ */
+export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: string; ledger: string; attestations: string; disputes: string; leads: string; questions: string; journal: string | null; gateway: string | null }): { ok: boolean; held: string[]; broken: string[] } {
+  const held: string[] = [];
+  const broken: string[] = [];
+  if (!sealed) return { ok: false, held, broken: ["the verdict seals no chain (a custody from before the seal)"] };
+  const at = (list: string[], n: number) => (n > 0 ? (list[n - 1] ?? null) : null);
+  const check = (what: string, n: number | undefined, head: string | null | undefined, list: string[]) => {
+    if (n === undefined) return;
+    if (n > list.length) broken.push(`${what}: it sealed ${n} line(s), and ${list.length} are here`);
+    else if ((at(list, n) ?? null) !== (head ?? null)) broken.push(`${what}: line ${n} is not the one it sealed`);
+    else held.push(`${what} (${n})`);
+  };
+  const traceLines = now.trace.split("\n").filter((l) => l.trim());
+  if (sealed.trace) {
+    const n = sealed.trace.lines;
+    const line = n > 0 ? traceLines[n - 1] : undefined;
+    if (n > traceLines.length) broken.push(`the trace: it sealed ${n} line(s), and ${traceLines.length} are here`);
+    else if (n > 0 && createHash("sha256").update(line ?? "").digest("hex") !== sealed.trace.last_line_sha256) broken.push(`the trace: line ${n} is not the one it sealed`);
+    else held.push(`the trace (${n})`);
+  }
+  if (sealed.ledger) check("the ledger", sealed.ledger.entries, sealed.ledger.head, verifyLedgerChain(now.ledger).hashes);
+  check("the attestations", sealed.attestations?.lines, sealed.attestations?.head, lineHashField(now.attestations));
+  check("the disputes", sealed.disputes?.lines, sealed.disputes?.head, lineHashField(now.disputes));
+  check("the lead register", sealed.leads?.lines, sealed.leads?.head, lineHashField(now.leads));
+  check("the question register", sealed.questions?.lines, sealed.questions?.head, lineHashField(now.questions));
+  if (sealed.journal) check("the store journal", sealed.journal.lines, sealed.journal.head, now.journal === null ? [] : verifyJournalText(now.journal).hashes);
+  if (sealed.model_gateway && now.gateway !== null) {
+    const lines = now.gateway.split("\n").filter((l) => l.trim());
+    const first = lines.slice(0, sealed.model_gateway.lines);
+    const sha = first.length ? createHash("sha256").update(`${first.join("\n")}\n`).digest("hex") : null;
+    if (first.length < sealed.model_gateway.lines) broken.push(`the model gateway log: it sealed ${sealed.model_gateway.lines} line(s), and ${lines.length} are here`);
+    else if (sealed.model_gateway.sha256 && sha !== sealed.model_gateway.sha256) broken.push("the model gateway log: its first lines are not the ones it sealed");
+    else held.push(`the model gateway log (${sealed.model_gateway.lines})`);
+  }
+  return { ok: broken.length === 0, held, broken };
+}
+
+/**
+ * Every verdict the anchor names before the current one, each held to the
+ * run as a prefix (sealPrefix), and whether a resume came after it: a run
+ * resumed after a seal still verifies against that seal for what it held.
+ */
+export async function earlierSeals(sandbox: string): Promise<EarlierSeal[]> {
+  let anchor: { custody?: Array<{ at?: string; sha256?: string; seal?: Partial<Seal> }>; resumes?: Array<{ at?: string }> } = {};
+  try {
+    anchor = JSON.parse(await readRegularTextOutside(await anchorPathFor(sandbox)));
+  } catch {
+    return [];
+  }
+  const verdicts = Array.isArray(anchor.custody) ? anchor.custody : [];
+  const resumes = Array.isArray(anchor.resumes) ? anchor.resumes : [];
+  const read = async (rel: string) => {
+    const r = await readRegularText(join(sandbox, rel), 1 << 30);
+    return "text" in r ? r.text : "";
+  };
+  const journal = await readRegularText(join(sandbox, "store", "journal.jsonl"), 1 << 30);
+  const gateway = await readRegularText(join(sandbox, GATEWAY_LOG), 1 << 30);
+  const now = {
+    trace: await read(join("traces", "events.jsonl")),
+    ledger: await read(join("ledger", "entries.jsonl")),
+    attestations: await read(join("ledger", "attestations.jsonl")),
+    disputes: await read(join("ledger", "disputes.jsonl")),
+    leads: await read(join("leads", "leads.jsonl")),
+    questions: await read(join("questions", "questions.jsonl")),
+    journal: "text" in journal ? journal.text : null,
+    gateway: "text" in gateway ? gateway.text : null,
+  };
+  return verdicts.slice(0, -1).map((v) => {
+    const p = sealPrefix(v.seal, now);
+    return { at: v.at ?? null, sha256: v.sha256 ?? null, resumed_after: resumes.some((r) => typeof r.at === "string" && typeof v.at === "string" && r.at > v.at), ok: p.ok, held: p.held, broken: p.broken };
+  });
+}
+
 export type TimestampCheck = { present: boolean; imprint: boolean | null; gen_time: string | null; signature: { verified: boolean | null; ca: string | null; detail: string } | null; note: string };
 
 export type VerifyReport = {
@@ -2388,6 +2513,8 @@ export type VerifyReport = {
   timestamp: TimestampCheck;
   /** What the check wrote outside the run, or found and left alone. */
   touched: string[];
+  /** Every earlier verdict the anchor names, held to the run as a prefix (a resumed run's first seal among them). */
+  earlier: EarlierSeal[];
   ok: boolean;
 };
 
@@ -2475,6 +2602,7 @@ export async function verifyCustody(sandboxInput: string, opts: { timeoutSec?: n
     signature: sig ? { present: true, ok: sig.ok, how: sig.how, detail: sig.detail } : { present: false, ok: null, how: "none", detail: "custody.json is not signed" },
     timestamp: ts,
     touched,
+    earlier: await earlierSeals(sandbox),
     ok: false,
   };
   // A token's signature fails the check when it does not verify, and when a CA was given and it could not be checked.
@@ -2489,7 +2617,8 @@ export async function verifyCustody(sandboxInput: string, opts: { timeoutSec?: n
     work.index !== "differs" &&
     !driftLine &&
     (sig ? sig.ok : true) &&
-    tsOk;
+    tsOk &&
+    report.earlier.every((e) => e.ok);
   return report;
 }
 
@@ -2553,7 +2682,8 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
           console.log(`Signature:    ${r.signature.present ? `${r.signature.ok ? "valid" : "NOT VALID"} (${r.signature.how})` : r.signature.detail}`);
           console.log(`Timestamp:    ${r.timestamp.present ? `${r.timestamp.gen_time ?? "time unread"}; ${r.timestamp.note}` : r.timestamp.note}`);
           if (r.touched.length) console.log(`Outside run:  ${r.touched.join("; ")}`);
-          console.log(r.ok ? "VERIFIED: the run is as the verdict sealed it." : "NOT VERIFIED: see above.");
+          for (const e of r.earlier) console.log(`Earlier seal: ${e.at ?? "?"} (${e.sha256 ?? "?"})${e.resumed_after ? ", before a resume" : ""}: ${e.ok ? `holds as a prefix: ${e.held.join(", ")}` : `DOES NOT HOLD AS A PREFIX: ${e.broken.join("; ")}`}`);
+          console.log(r.ok ? `VERIFIED: the run is as the verdict sealed it${r.earlier.length ? `, and ${r.earlier.length === 1 ? "the earlier seal holds" : `each of the ${r.earlier.length} earlier seals holds`} as a prefix` : ""}.` : "NOT VERIFIED: see above.");
         }
         process.exit(r.ok ? 0 : 4);
       })

@@ -79,7 +79,7 @@ test("the machine's draft binds the report, a rendering of it at the release's o
   assert.deepEqual(rec.chains.ledger_versions, [3, 4]);
   assert.equal(rec.versions.harness_commit_at_kickoff, "0123abcd");
   assert.match(rec.versions.renderer_sha256, /^[0-9a-f]{64}$/);
-  assert.match(rec.evidence_cutoff.note, /A new examination .* reopens the cutoff: it is a new run/);
+  assert.match(rec.evidence_cutoff.note, /Further examination reopens the cutoff: the run resumed \(swarm\.sh resume\).*or a new run/);
   // The rendering says DRAFT, and whose seal it is.
   const html = readFileSync(join(dir, "report.html"), "utf8");
   assert.match(html, /<div class="watermark" aria-hidden="true">DRAFT<\/div>/);

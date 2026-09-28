@@ -48,7 +48,7 @@ test("the support defects of the fixture's answers are the ledger gate's, with t
 test("an unsupported conclusion cannot be adopted or qualified; it is withdrawn or rendered inconclusive, and repairing it is a new examination", async () => {
   const r = await stoppedRun();
   const add = (input: Omit<Parameters<typeof appendReview>[3], "examiner"> & { examiner?: string }) => appendReview(r.runs, r.id, r.root, { ...ADA, ...input });
-  await assert.rejects(add({ action: "adopt", entry_seq: 16 }), /E-16 cannot be adopted: its support is not sound as it stands \(answer E-16 states a specific found in none of the entries it cites: 0123456789abcdef0123456789abcdef\)\. An unsupported conclusion is not waived: withdraw it \(--reject 16 --note\), or render it inconclusive \(--inconclusive 16 --note\)\. Repairing its support is further examination: a new run, whose evidence cutoff is reopened\./);
+  await assert.rejects(add({ action: "adopt", entry_seq: 16 }), /E-16 cannot be adopted: its support is not sound as it stands \(answer E-16 states a specific found in none of the entries it cites: 0123456789abcdef0123456789abcdef\)\. An unsupported conclusion is not waived: withdraw it \(--reject 16 --note\), or render it inconclusive \(--inconclusive 16 --note\)\. Repairing its support is further examination, whose evidence cutoff is reopened: the run resumed \(swarm\.sh resume\), or a new run\./);
   await assert.rejects(add({ action: "qualify", entry_seq: 17, note: "the wording holds for the correction" }), /E-17 cannot be qualified/);
   await assert.rejects(add({ action: "adopt", entry_seq: 15 }), /E-15 is superseded by E-19: the correction is what stands/);
   await assert.rejects(add({ action: "qualify", entry_seq: 19 }), /qualify needs a note/);

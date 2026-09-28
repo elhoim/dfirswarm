@@ -493,7 +493,7 @@ export async function appendReview(runsDir: string, runId: string, sandbox: stri
         const d = judged.defects.get(entry.seq as number) ?? [];
         if (d.length) {
           throw new Error(
-            `E-${entry.seq} cannot be ${input.action === "adopt" ? "adopted" : "qualified"}: its support is not sound as it stands (${d.map((x) => x.what).join("; ")}). An unsupported conclusion is not waived: withdraw it (--reject ${entry.seq} --note), or render it inconclusive (--inconclusive ${entry.seq} --note). Repairing its support is further examination: a new run, whose evidence cutoff is reopened.`,
+            `E-${entry.seq} cannot be ${input.action === "adopt" ? "adopted" : "qualified"}: its support is not sound as it stands (${d.map((x) => x.what).join("; ")}). An unsupported conclusion is not waived: withdraw it (--reject ${entry.seq} --note), or render it inconclusive (--inconclusive ${entry.seq} --note). Repairing its support is further examination, whose evidence cutoff is reopened: the run resumed (swarm.sh resume), or a new run.`,
           );
         }
       }

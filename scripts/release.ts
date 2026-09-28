@@ -36,7 +36,9 @@
  * Nothing in a release directory is written over. A release changes by a
  * new version, which names the one before it and why it was made; a new
  * examination (evidence examined again, or more of it) reopens the
- * evidence cutoff and is a new run, not an amendment.
+ * evidence cutoff: the run resumed (its continuation sealed anew, this
+ * release kept as a prefix, the continuation's answers adopted by a later
+ * version) or a new run, never an amendment.
  *
  *   node scripts/release.ts draft <sandbox> [--run ID] [--runs DIR] [--reason TEXT] [--quiet]
  *   node scripts/release.ts sign --runs DIR --run ID --sandbox DIR [--examiner ID] [--pdf] [--amend-reason TEXT] [--report PATH] [--no-timestamp] [--yes] [--secret-fd N]
@@ -97,7 +99,7 @@ const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("he
 
 /** What the evidence cutoff is, said in every release. */
 export const CUTOFF_NOTE =
-  "The examination covers the evidence as custody sealed it at this time. A release after it corrects or re-renders what this examination found, or records the examiner's adoption; it examines nothing again. A new examination (the same evidence examined again, or more of it) reopens the cutoff: it is a new run, with its own custody and its own releases, never an amendment of these.";
+  "The examination covers the evidence as custody sealed it at this time. A release after it corrects or re-renders what this examination found, or records the examiner's adoption; it examines nothing again. Further examination reopens the cutoff: the run resumed (swarm.sh resume), whose continuation is sealed anew and bound by a later release while this one stays valid for what it bound, a prefix of the same chains; or a new run, with its own custody and its own releases. Never an amendment of these.";
 
 type Registry = { runs?: Array<Record<string, unknown>> };
 
@@ -1149,7 +1151,7 @@ async function main(argv: string[]): Promise<number> {
       console.log(`Consent:      ${w.record.signing?.consent === "presented" ? "presented; its confirmation was skipped (--yes)" : "confirmed at the terminal"}: "${CONSENT_STATEMENT}", over report.html ${w.record.signing?.shown_sha256 ?? "?"}`);
       if (a) console.log(`Adoption:     ${a.scope === "answers" ? `${a.dispositions.filter((d) => d.kind === "answer").length} answer disposition(s); ${a.not_adopted.length} standing answer(s) not adopted, which the report shows as the agents' conclusions` : "the report as a whole: this ledger has no answer entries (recorded before ledger version 4)"}`);
       console.log(`Digest:       ${w.line}`);
-      console.log(`Cutoff:       the evidence as custody sealed it at ${w.record.evidence_cutoff.at ?? "?"}; a new examination is a new run.`);
+      console.log(`Cutoff:       the evidence as custody sealed it at ${w.record.evidence_cutoff.at ?? "?"}; further examination is the run resumed (a later release binds it) or a new run.`);
       return 0;
     }
     case "show": {

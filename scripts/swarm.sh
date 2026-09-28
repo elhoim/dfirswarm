@@ -109,6 +109,7 @@ Commands:
   tools <id>         What the run forged; --save DIR keeps it for the next run
   say <id> "<msg>"   Post as the examiner; cap <id> its caps; lead <id> list|note its leads; question <id> add|list … asks it one
   extend <id>        Give a paused (or running) run more: --minutes N, --tokens N, --usd N; the pause lifts
+  resume <id>        Continue a run that ended, the same run on the same chains: [--question TEXT] [--as ID] [--minutes N]
   stop <id>          Stop a run and record how it ended (stopped, never completed)
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
@@ -2739,6 +2740,12 @@ render_contract() {
   local goal_file="$6"
   shift 6
   local ids=("$@")
+  # A resumed run keeps the contract it was given: the same run, the same
+  # goal, and the SWARM.md a release bound. What the resume adds reaches the
+  # seats in their kickoff and through the registers.
+  if [[ -n "${RESUME_OF_FOR_CONTRACT:-}" && -f "$sandbox/SWARM.md" ]]; then
+    return 0
+  fi
   # On a mixed team each id is named with its model, because "who is running
   # what" is the one thing an agent cannot work out for itself and the only
   # basis on which it could sensibly hand a slice to a peer.
@@ -3855,6 +3862,9 @@ cmd_start() {
   # default) pauses the run for the operator; cap-stop stops it, for an
   # unattended run; operator is --until-solved.
   local stop_policy="" stop_given=0
+  # swarm.sh resume's own: the run this start continues, in its own sandbox,
+  # on its own chains (docs/adr/0013). Nothing of it is cleared.
+  local resume_of=""
   local use_netguard=1 key_from_env=0 forging=0 allow_install=0 install_hosts=1 allow_pack_secrets=0
   local inputs_dir="" inputs_image="" inputs_enforce="auto" inputs_bind=0 inputs_max_mb="${SWARM_INPUTS_MAX_MB:-}" inputs_max_files="${SWARM_INPUTS_MAX_FILES:-}" inputs_guard="none"
   # --inputs is repeatable: every directory given, in order, and once they
@@ -4008,6 +4018,7 @@ cmd_start() {
       --net-allow) use_netguard=1; shift ;;
       --no-netguard|--open-net) use_netguard=0; shift ;;
       --no-start) start_agents=0; shift ;;
+      --resume-of) resume_of="${2:-}"; shift 2 ;;
       --isolation) isolation="$2"; isolation_given=1; shift 2 ;;
       --image)
         # An OCI reference and nothing else: it reaches msb's argv and a pull.
@@ -4895,8 +4906,25 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
   fi
 
   ensure_registry
-  local swarm_id
-  swarm_id="$(alloc_prefix)"
+  local swarm_id resume_rec=""
+  if [[ -n "$resume_of" ]]; then
+    # The same run: its id, its sandbox and its label, whatever the options
+    # say; the same seats (a resume keeps the team).
+    resume_rec="$(json_get "$resume_of")"
+    [[ -n "$resume_rec" ]] || { echo "BLOCKER: --resume-of $resume_of: no such run in $REGISTRY." >&2; exit 2; }
+    swarm_id="$resume_of"
+    sandbox="$(jq -r '.sandbox // empty' <<<"$resume_rec")"
+    label="$(jq -r '.label // empty' <<<"$resume_rec")"
+    [[ -n "$sandbox" && -f "$sandbox/team.json" ]] || { echo "BLOCKER: --resume-of $resume_of: its sandbox or its team.json is not there." >&2; exit 2; }
+    local prev_n
+    prev_n="$(jq -r '.agents | length' "$sandbox/team.json")"
+    if [[ "$prev_n" != "$n" ]]; then
+      echo "BLOCKER: run $resume_of had $prev_n agent(s) and these options give $n: a resume continues the same seats (give --n $prev_n)." >&2
+      exit 2
+    fi
+  else
+    swarm_id="$(alloc_prefix)"
+  fi
   if [[ -z "$label" ]]; then
     label="swarm-${swarm_id}"
   fi
@@ -4947,14 +4975,16 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
     [[ -n "$h_id" && -d "$h_sb" ]] || continue
     if [[ "$(cd "$h_sb" && pwd -P)" == "$sandbox" ]]; then held_run="$h_id"; break; fi
   done < <(jq -r '.runs[]? | select((.hold | type) == "object") | [.id, .sandbox] | @tsv' "$REGISTRY" 2>/dev/null)
-  if [[ -n "$held_run" ]]; then
+  if [[ -n "$held_run" && "$held_run" != "$resume_of" ]]; then
     echo "BLOCKER: run $held_run in $sandbox is on hold ($(json_get "$held_run" | jq -r '.hold.reason // "no reason given"')); a new run there would clear its material. Use another --sandbox, or scripts/swarm.sh release $held_run first." >&2
     exit 2
   fi
   # An earlier run's ledger, brought in as hypotheses: read now, before a
   # reused sandbox (it may be that run's own) is cleared.
   local prior_tmp="" LEDGER_FROM_RECORD="null"
-  if [[ -n "$ledger_from" ]]; then
+  # A resumed run keeps the prior claims it was given (prior/ledger.md) and their record.
+  [[ -n "$resume_of" ]] && LEDGER_FROM_RECORD="$(jq -c '.ledger_from // null' <<<"$resume_rec")"
+  if [[ -n "$ledger_from" && -z "$resume_of" ]]; then
     local lf_rec lf_state lf_case lf_sandbox lf_out
     lf_rec="$(json_get "$ledger_from")"
     [[ -n "$lf_rec" ]] || { echo "BLOCKER: --ledger-from $ledger_from: no such run in $REGISTRY." >&2; exit 2; }
@@ -5122,6 +5152,19 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     "$sandbox/tools"
   local id
   kickoff_pre_arm "$sandbox"
+  if [[ -n "$resume_of" ]]; then
+    # A resume clears nothing the run holds: the board, the ledger and the
+    # registers, the trace and its anchor, work/, the sessions, the kept
+    # outputs, the history, the tools, the custody verdicts, the inputs, the
+    # catalogue and the store are the run's, and the continuation appends to
+    # them. What marked its end was moved aside by swarm.sh resume; the
+    # seats' cursors stay where they were, so a seat reads only what is new.
+    for id in "${agent_ids[@]}"; do mkdir -p "$sandbox/inbox/$id"; done
+    rm -f "$sandbox"/locks/*.json
+    stop_sandbox_daemons "$sandbox"
+    rm -rf "${sandbox:?}/vm-prepared" "$sandbox/vm-spec.json"
+    echo "Resume:       run $resume_of goes on in $sandbox, on its own chains (nothing cleared)"
+  else
   for id in "${agent_ids[@]}"; do
     mkdir -p "$sandbox/inbox/$id"
     printf '{}\n' > "$sandbox/inbox/$id/cursors.json"
@@ -5130,7 +5173,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   rm -f "$sandbox"/threads/main/*.md
   rm -f "$sandbox"/threads/main/meta.json
   rm -f "$sandbox"/locks/*.json
-  rm -f "$sandbox/done/SWARM_DONE" "$sandbox/done/ALL_AGENTS_DEAD"
+  rm -f "$sandbox/done/SWARM_DONE" "$sandbox/done/ALL_AGENTS_DEAD" "$sandbox/done/STOPPED"
   rm -f "$sandbox"/done/agents/*.done
   # Artifacts are whatever the goal names, so a stale one from a previous run
   # in this directory could satisfy the new goal's checks on its own.
@@ -5169,6 +5212,8 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   rm -rf "${sandbox:?}/vm" "${sandbox:?}/.pi-sessions" "${sandbox:?}/tool-output" "${sandbox:?}/history" "${sandbox:?}/tools" \
     "${sandbox:?}/vm-prepared" "$sandbox/vm-spec.json" "$sandbox/compact-prompt.md" "$sandbox/toolchain.json"
   rm -f "$sandbox"/custody.json "$sandbox"/custody.*.json "$sandbox"/artifacts.json "$sandbox"/artifacts.*.json
+  rm -rf "${sandbox:?}/done/history"
+  fi
   mkdir -p "$sandbox/history" "$sandbox/tools"
   # The manifest records whether the no-exec holds, not whether it was asked
   # for: with no guard (--inputs-enforce off, or a host without one) the flag
@@ -5177,7 +5222,11 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   # A VM run always holds it (each seat's holes are no-exec in its VM).
   local quarantine_held=0
   if [[ "$quarantine" -eq 1 && "$inputs_guard" != "none" ]]; then quarantine_held=1; fi
-  if [[ -n "$inputs_dir" ]]; then
+  if [[ -n "$resume_of" ]]; then
+    # The inputs the run was given are the ones it goes on with: installed,
+    # manifested and anchored when it started, never again.
+    [[ -f "$sandbox/inputs.json" ]] && echo "Inputs:       as the run was given them ($(jq -r '(.files // []) | length' "$sandbox/inputs.json") file(s), inputs.json unchanged)"
+  elif [[ -n "$inputs_dir" ]]; then
     # One set is inputs/ itself, as it always was. Several are named, each
     # to land at inputs/<name>/, and none of them is `src`.
     local set_src="$inputs_dir" set_pairs=() set_i
@@ -5200,7 +5249,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   # rather than trusted.
   # The imager's own numbers, when the operator gave them: held to what the
   # kickoff computed before anything is anchored, and refused on a mismatch.
-  if [[ -n "$inputs_hashes" ]]; then
+  if [[ -n "$inputs_hashes" && -z "$resume_of" ]]; then
     local acq_out
     if ! acq_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/custody-checks.ts" acquisition "$sandbox" "$inputs_hashes" 2>&1)"; then
       echo "BLOCKER: the evidence does not match the acquisition hashes in $inputs_hashes:" >&2
@@ -5209,7 +5258,8 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     fi
     echo "Acquisition:  $(jq -r '.matched' <<<"$acq_out") file digest(s) from $inputs_hashes match what the kickoff computed; custody compares them again"
   fi
-  write_custody_anchor "$sandbox" "$swarm_id" "$isolation" "$time_reference"
+  # The anchor the run started with stays: it names every verdict, release and resume since.
+  [[ -n "$resume_of" ]] || write_custody_anchor "$sandbox" "$swarm_id" "$isolation" "$time_reference"
   # Where the VMs' disks are kept: beside the run by default, or where the
   # operator says (a link beside the run names it, so every reader — stop,
   # custody, the package, reap — finds them where it always looks).
@@ -5232,7 +5282,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   chmod a-w "$(cd "$(dirname "$sandbox")" && pwd -P)/$(basename "$sandbox").custody-anchor.json" 2>/dev/null || true
   # Each job image's own list of programs, for agents whose VM is the base:
   # read from a throwaway VM of it, into images/<profile>/, read-only.
-  if [[ "$isolation" == "microvm" && "$start_agents" -eq 1 && "$(jq 'length' <<<"$job_images_json")" -gt 0 ]]; then
+  if [[ "$isolation" == "microvm" && "$start_agents" -eq 1 && "$(jq 'length' <<<"$job_images_json")" -gt 0 && ! ( -n "$resume_of" && -d "$sandbox/images" ) ]]; then
     local jp jref
     for jp in $(jq -r 'keys[]' <<<"$job_images_json"); do
       jref="$(jq -r --arg p "$jp" '.[$p]' <<<"$job_images_json")"
@@ -5246,7 +5296,10 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     done
     chmod -R a-w "$sandbox/images" 2>/dev/null || true
   fi
-  if [[ "$toolbox" != "off" && "$isolation" == "microvm" && "$start_agents" -eq 1 ]]; then
+  if [[ -n "$resume_of" ]]; then
+    # The toolbox, the catalogue and the store are the run's already.
+    [[ -f "$sandbox/toolbox.json" ]] && echo "Toolbox:      as checked when the run started (toolbox.json)"
+  elif [[ "$toolbox" != "off" && "$isolation" == "microvm" && "$start_agents" -eq 1 ]]; then
     # The same check, run in a throwaway VM of the run's image: the agents'
     # tools are the image's, and this host's are none of theirs.
     local toolbox_args=()
@@ -5261,7 +5314,9 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     [[ "$toolbox_required" -eq 1 ]] && toolbox_args+=(--required)
     bash "$ROOT/scripts/toolbox.sh" "$sandbox" "$toolbox" ${toolbox_args[@]+"${toolbox_args[@]}"} || exit $?
   fi
-  if [[ "$catalog" -eq 1 && "$isolation" == "microvm" && "$start_agents" -eq 1 ]]; then
+  if [[ -n "$resume_of" ]]; then
+    [[ -d "$sandbox/catalog" ]] && echo "Catalog:      the run's own, as it grew (catalog/)"
+  elif [[ "$catalog" -eq 1 && "$isolation" == "microvm" && "$start_agents" -eq 1 ]]; then
     # In a throwaway VM of the run's image, like the toolbox: the tools the
     # first pass calls are the image's, not this host's; it reaches only the
     # hosts the operator allowed for the run.
@@ -5299,7 +5354,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     while IFS= read -r hpd; do [[ -n "$hpd" ]] && host_recipes+=(--recipes-from "$hpd"); done <<<"$pack_dirs"
     bash "$ROOT/scripts/evidence-catalog.sh" "$sandbox" ${host_recipes[@]+"${host_recipes[@]}"} || exit $?
   fi
-  if [[ "$catalog" -eq 1 && -d "$sandbox/catalog" ]]; then
+  if [[ "$catalog" -eq 1 && -d "$sandbox/catalog" && -z "$resume_of" ]]; then
     # The catalog's parsers ran over hostile evidence: what they left that
     # is not a file or a directory (a link to a host file whose text would
     # be pasted into SWARM.md, a FIFO) is removed before anything reads it.
@@ -5319,10 +5374,10 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
       chmod -R a-w "$sandbox/catalog" 2>/dev/null || true
     fi
   fi
-  if [[ "$isolation" == "microvm" && "$jobs" -eq 1 && "$start_agents" -eq 1 ]]; then
+  if [[ "$isolation" == "microvm" && "$jobs" -eq 1 && "$start_agents" -eq 1 && ! ( -n "$resume_of" && -f "$sandbox/store/journal.jsonl" ) ]]; then
     # The evidence-work store and its journal, opened by the kickoff (the one
     # writer before the hub exists): the census, the inputs' segment sets,
-    # revision 0 of the catalogue.
+    # revision 0 of the catalogue. A resumed run's journal goes on as it is.
     node --experimental-strip-types --no-warnings "$ROOT/scripts/evidence-store.ts" init "$sandbox" >/dev/null || { echo "BLOCKER: the evidence-work store could not be opened in $sandbox/store" >&2; exit 1; }
   fi
   # The trace's own writer comes up before the guard hook, because the hook
@@ -5355,7 +5410,13 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     [[ "$isolation" == "microvm" ]] && attribution="channel"
     # The kickoff on the run's own record, as the operator's action; the
     # kickoff holds the harness's token, so this line is attributed.
-    SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" operator_trace "$sandbox" start ${start_args[@]+"${start_args[@]}"}
+    # A resume is the operator's resume on the record, with the words the
+    # operator's audit holds for it, not a start it never typed.
+    if [[ -n "$resume_of" ]]; then
+      SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" operator_trace "$sandbox" resume ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}
+    else
+      SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" operator_trace "$sandbox" start ${start_args[@]+"${start_args[@]}"}
+    fi
   elif [[ "$isolation" == "microvm" ]]; then
     # A pane on the host falls back to appending the file itself. A VM
     # cannot: traces/ is read-only in it, so every line of the run would go
@@ -5649,17 +5710,19 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     fi
   fi
 
-  if [[ -n "$pack_dirs" ]]; then
+  # A resumed run keeps its tools, its team and its budget (swarm.sh resume
+  # moved the wall clock on and extended the caps it was asked to).
+  if [[ -n "$pack_dirs" && -z "$resume_of" ]]; then
     local _pd
     while read -r _pd; do
       [[ -n "$_pd" && -d "$_pd/tools" ]] || continue
       install_tools_from "$sandbox" "$_pd/tools" "$(basename "$_pd")"
     done <<< "$pack_dirs"
   fi
-  if [[ -n "$tools_from" ]]; then
+  if [[ -n "$tools_from" && -z "$resume_of" ]]; then
     install_tools_from "$sandbox" "$tools_from"
   fi
-  write_team_budget "$sandbox" "$swarm_id" "$n" "$cap" "$wall" "$hard" "${agent_ids[@]}"
+  [[ -n "$resume_of" ]] || write_team_budget "$sandbox" "$swarm_id" "$n" "$cap" "$wall" "$hard" "${agent_ids[@]}"
   # The host's shared install area; a VM installs into its own disk.
   if [[ "$allow_install" -eq 1 && "$isolation" != "microvm" ]]; then
     mkdir -p "$sandbox/work/.toolchain"
@@ -5696,11 +5759,12 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   CASE_ID_FOR_CONTRACT="$case_id" EXAMINER_FOR_CONTRACT="$examiner" ALLOW_INSTALL_FOR_CONTRACT="$allow_install" INSTALL_HOSTS_FOR_CONTRACT="$install_hosts" \
     HOST_CAPS_FOR_CONTRACT="$host_caps_json" WRITE_GUARD_FOR_CONTRACT="$write_guard_mode" \
     ATTRIBUTION_FOR_CONTRACT="$attribution" ISOLATION_FOR_CONTRACT="$isolation" VM_HOSTS_FOR_CONTRACT="$vm_hosts" \
+    RESUME_OF_FOR_CONTRACT="$resume_of" \
     render_contract "$sandbox" "$swarm_id" "$n" "$cap" "$wall" "$goal_file" "${agent_ids[@]}"
   # An earlier run's claims, when --ledger-from asked for them: read-only in
   # the run (the VMs' floor is read-only; a host run's mode and write guard),
   # and never in this run's ledger.
-  if [[ -e "$sandbox/prior" ]]; then
+  if [[ -e "$sandbox/prior" && -z "$resume_of" ]]; then
     chmod -R u+w "$sandbox/prior" 2>/dev/null || true
     rm -rf "$sandbox/prior"
   fi
@@ -5900,10 +5964,26 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       started_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
       state: "prepared"
     }')"
+  # A resumed run is the same record: its start, its hold and what it was
+  # given stay; what this start set comes on top, with the resume beside it.
+  if [[ -n "$resume_of" ]]; then
+    rec="$(jq -c --argjson old "$resume_rec" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+      $old * . | .started_at = $old.started_at | .hold = $old.hold | .ledger_from = $old.ledger_from
+      | .resumes = (if $old.state == "prepared" and (($old.resumes // []) | length) > 0 then $old.resumes
+          else (($old.resumes // []) + [{at: $at, from: ($old.state // null)}]) end)
+      | .resumed_at = (if $old.state == "prepared" and (($old.resumes // []) | length) > 0 then $old.resumed_at else $at end)' <<<"$rec")"
+  fi
   # The kickoff's own record of what the run started with, outside the run
   # where no agent reaches it: custody compares the manifest against this,
   # so a manifest rewritten inside the run is caught rather than trusted.
   registry_upsert "$rec" || exit 1
+  # What the run was started with, whole, for swarm.sh resume: outside the
+  # run and 0600, since an --env value or the notify command may be a secret.
+  if [[ -z "$resume_of" ]]; then
+    ( umask 077; mkdir -p "$RUNS_DIR/resume" && chmod 700 "$RUNS_DIR/resume" && rm -f "$RUNS_DIR/resume/$swarm_id.argv.json" \
+      && node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)) + "\n")' -- ${start_args[@]+"${start_args[@]}"} > "$RUNS_DIR/resume/$swarm_id.argv.json" && chmod 600 "$RUNS_DIR/resume/$swarm_id.argv.json" ) \
+      || echo "WARN: the start options could not be kept in $RUNS_DIR/resume/; swarm.sh resume will need them after --." >&2
+  fi
   # The question register opens with the goal's questions and objectives
   # (extensions/questions.ts): Q-n is question:n from its first event.
   SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" seed "$sandbox" >/dev/null 2>&1 \
@@ -6295,6 +6375,25 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
 
   local kickoff
   kickoff="$(mktemp)"
+  if [[ -n "$resume_of" ]]; then
+    # The same seats, in fresh sessions: each starts from its own last
+    # hand-off (inbox/<its id>/resume.md, written by swarm.sh resume) and the
+    # registers as they stand, and redoes nothing the record holds.
+    cat > "$kickoff" <<EOF
+Swarm ${swarm_id} is resumed. The run ended (${RESUME_FROM:-it was stopped}) and the
+operator continued it: the same sandbox, the same ledger, registers and board,
+and you are the same seat as before, in a fresh session. Read, in this order:
+inbox/<your agent id>/resume.md (your last hand-off note or compaction summary
+before the end, whole: where you were), SWARM.md, then call inbox (the board
+since you last read it), questions (the register: a question asked for the
+continuation is there, a person's first), leads (view mine, then open) and
+ledger. Nothing recorded is gone, and nothing it holds is to be redone: go on
+from where the registers and your note say, and call name(name, doing) to say
+what you are taking on now. done/SWARM_DONE does not exist; the earlier end is
+kept under done/history/.${RESUME_QUESTIONS:+
+Asked for the continuation: ${RESUME_QUESTIONS}}
+EOF
+  else
   cat > "$kickoff" <<EOF
 Join swarm ${swarm_id}. Read SWARM.md and team.json, then call inbox: it gives
 you the board (threads/main is a directory of posts) and says whether the swarm
@@ -6304,6 +6403,7 @@ what your peers have taken, decide what you are going to do, and call
 name(name, doing) to say what to call you and what you are taking on. Then
 post it and start.
 EOF
+  fi
 
   local created root_pane workspace_id
   local split_failures=0 tab_count=1 extra_workspaces=0
@@ -9082,6 +9182,137 @@ cmd_extend() {
   echo "$body"
 }
 
+# Resume a run (docs/adr/0013): after a stop or a seal, the same run goes on,
+# in the same sandbox, on the same chains. swarm.sh resume moves what marked
+# the end aside (scripts/resume.ts), moves the wall clock on and extends the
+# caps it is asked to (refused, with nothing changed, if the run would still
+# be over one), gives each seat its last hand-off, anchors the resume beside
+# the run, admits the questions asked for the continuation as analyst
+# questions, and starts the same team again with the options the run was
+# started with (kept at kickoff, 0600, outside the run; or given after --).
+# At the next stop custody seals the continuation and a new draft release
+# binds it; every earlier seal still verifies, as a prefix.
+cmd_resume() {
+  # As the operator typed it: the run's trace names the resume with these.
+  RESUME_ARGS=("$@")
+  local id="${1:-}"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "resume requires <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--minutes N] [--tokens N] [--usd N] [--no-start] [-- START OPTIONS]"
+  shift
+  local questions=() qfile="" as="" why="" no_start=0 prep=() given=() sep=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --question) [[ -n "${2:-}" ]] || die_usage "--question takes the question's text"; questions+=("$2"); shift 2 ;;
+      --questions) qfile="${2:-}"; shift 2 ;;
+      --as) as="${2:-}"; shift 2 ;;
+      --why) why="${2:-}"; shift 2 ;;
+      --minutes|--tokens|--usd) [[ "${2:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die_usage "$1 takes a number"; prep+=("$1" "$2"); shift 2 ;;
+      --no-start) no_start=1; shift ;;
+      --) shift; given=("$@"); sep=1; break ;;
+      *) die_usage "resume: unknown option $1" ;;
+    esac
+  done
+  ensure_registry
+  local rec sandbox state
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  state="$(jq -r '.state // empty' <<<"$rec")"
+  # A resume prepared earlier with --no-start is started as it was prepared:
+  # its end is moved aside already, and a second prepare would record a
+  # second resume of a run that never went on.
+  local prepared_resume=0
+  [[ "$state" == prepared && "$(jq -r '(.resumes // []) | length' <<<"$rec")" -gt 0 ]] && prepared_resume=1
+  case "$state" in
+    prepared) [[ "$prepared_resume" -eq 1 ]] || { echo "BLOCKER: run $id is prepared and never started: there is nothing to continue. Start it anew." >&2; exit 2; } ;;
+    running|finishing|resuming) echo "BLOCKER: run $id is $state: a resume continues a run that has ended. A running or paused one is given more with swarm.sh extend $id." >&2; exit 2 ;;
+    purged) echo "BLOCKER: run $id was purged; there is nothing left to continue." >&2; exit 2 ;;
+  esac
+  if [[ "$prepared_resume" -eq 1 && ${#prep[@]} -gt 0 ]]; then
+    echo "BLOCKER: run $id's resume was prepared already (with --no-start): its caps are changed with swarm.sh caps $id, and it is started with swarm.sh resume $id alone." >&2
+    exit 2
+  fi
+  [[ -n "$sandbox" && -d "$sandbox" && -f "$sandbox/team.json" && -f "$sandbox/budget.json" ]] || { echo "BLOCKER: run $id's sandbox, team or budget is not there." >&2; exit 2; }
+  # The questions asked for the continuation: --question, and a file of them (one a line, or a JSON list).
+  if [[ -n "$qfile" ]]; then
+    [[ -f "$qfile" ]] || { echo "BLOCKER: --questions $qfile is not a file." >&2; exit 2; }
+    local q
+    while IFS= read -r q; do [[ -n "$q" ]] && questions+=("$q"); done < <(node -e '
+      const t = require("fs").readFileSync(process.argv[1], "utf8");
+      let list;
+      try { list = JSON.parse(t); } catch { list = null; }
+      if (!Array.isArray(list)) list = t.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+      for (const x of list) { const s = typeof x === "string" ? x : String(x?.text ?? ""); if (s.trim()) console.log(s.replace(/\n/g, " ").trim()); }
+    ' "$qfile")
+  fi
+  # The options it was started with: kept at kickoff, or given after --.
+  local start_argv=() a argv_file="$RUNS_DIR/resume/$id.argv.json"
+  if [[ "$sep" -eq 1 ]]; then
+    start_argv=(${given[@]+"${given[@]}"})
+  elif [[ -f "$argv_file" ]]; then
+    while IFS= read -r -d '' a; do start_argv+=("$a"); done < <(node -e 'for (const a of JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))) process.stdout.write(`${a}\0`)' "$argv_file")
+  else
+    echo "BLOCKER: run $id was started before its start options were kept for a resume. Give them after --: swarm.sh resume $id -- --model … --n … --cap-usd … (as it was started; swarm.sh status $id shows the command)." >&2
+    exit 2
+  fi
+  # A goal file that is gone since: the goal the registry kept stands in for
+  # it. A start's --no-start is the resume's to say, and a check is no resume.
+  local filtered=() i
+  for ((i = 0; i < ${#start_argv[@]}; i++)); do
+    a="${start_argv[$i]}"
+    case "$a" in
+      --no-start|--check) continue ;;
+      --goal-file)
+        if [[ ! -f "${start_argv[$((i + 1))]:-}" ]]; then
+          filtered+=(--goal "$(jq -r '.goal // empty' <<<"$rec")")
+          i=$((i + 1))
+          continue
+        fi ;;
+    esac
+    filtered+=("$a")
+  done
+  start_argv=(${filtered[@]+"${filtered[@]}"})
+  # The same seats, checked before anything moves: the start would refuse
+  # another number only after the resume was prepared.
+  local want_n="" have_n
+  for ((i = 0; i < ${#start_argv[@]}; i++)); do [[ "${start_argv[$i]}" == --n ]] && want_n="${start_argv[$((i + 1))]:-}"; done
+  have_n="$(jq -r '(.agents // []) | length' "$sandbox/team.json")"
+  if [[ -n "$want_n" && "$want_n" != "$have_n" ]]; then
+    echo "BLOCKER: run $id had $have_n agent(s) and these options give $want_n: a resume continues the same seats (give --n $have_n). Nothing was changed." >&2
+    exit 2
+  fi
+  local out who="${as:-operator}"
+  if [[ "$prepared_resume" -eq 1 ]]; then
+    echo "Resume:       run $id was prepared for its resume already (--no-start); it is started now"
+    RESUME_FROM="$(jq -r '(.resumes // []) | last | .from // "it was stopped"' <<<"$rec")"
+  else
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/resume.ts" prepare "$sandbox" --run "$id" --by "$who" ${prep[@]+"${prep[@]}"})" || {
+    echo "BLOCKER: $(jq -r '.reason // "the run could not be prepared for a resume"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2
+    exit 2
+  }
+  OPERATOR_AUDIT_DETAIL="$(jq -c '{resume: {from, segment, set, wall_used_minutes, anchored}}' <<<"$out" 2>/dev/null || echo null)" operator_audit resume_prepared "$id"
+  echo "Resume:       run $id, which $(jq -r '.from' <<<"$out"), goes on; segment $(jq -r '.segment' <<<"$out") (what marked its end is in done/history/$(jq -r '.segment' <<<"$out")/)"
+  echo "Wall clock:   $(jq -r '.wall_used_minutes' <<<"$out") minute(s) used before the stop$(jq -r 'if (.set | length) > 0 then "; extended: " + (.set | to_entries | map("\(.key) \(.value)") | join(", ")) else "" end' <<<"$out")"
+  jq -r '.handoffs[] | "Hand-off:     \(.agent) starts from \(if .kind then "its last \(.kind) (\(.chars) chars, \(.at))" else "the registers (it left no note)" end) in \(.file)"' <<<"$out"
+  echo "Anchored:     $(jq -r '.anchored' <<<"$out")"
+  # The questions asked for the continuation, admitted as analyst questions now that the run is no longer ended.
+  RESUME_FROM="$(jq -r '.from' <<<"$out")"
+  fi
+  RESUME_QUESTIONS=""
+  local q qout
+  for q in ${questions[@]+"${questions[@]}"}; do
+    if qout="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" add "$sandbox" --text "$q" --why "${why:-asked when the run was resumed}" ${as:+--as "$as"} --via "${SWARM_OPERATOR_VIA:-cli}")"; then
+      echo "Question:     $(jq -r '"\(.q) (\(.scope // "?")): \(.scope_why // "")"' <<<"$qout")"
+      RESUME_QUESTIONS="${RESUME_QUESTIONS}${RESUME_QUESTIONS:+; }$(jq -r '.q' <<<"$qout") \"$q\""
+    else
+      echo "WARN: the question \"$q\" was not admitted: $(jq -r '.reason // "refused"' <<<"$qout" 2>/dev/null || printf '%s' "$qout"). Add it with swarm.sh question $id add once the run is going." >&2
+    fi
+  done
+  export RESUME_FROM RESUME_QUESTIONS
+  local extra=(--resume-of "$id")
+  [[ "$no_start" -eq 1 ]] && extra+=(--no-start)
+  cmd_start ${start_argv[@]+"${start_argv[@]}"} "${extra[@]}"
+}
+
 # The tools a run forged, copied out so the next swarm can start with them.
 cmd_tools() {
   local id="${1:-}" dest=""
@@ -10209,7 +10440,7 @@ cmd_purge() {
   done
   [[ -L "$sandbox.vm-snapshots" ]] && rm -f "$sandbox.vm-snapshots"
   [[ -n "$snap_target" ]] && rmdir "$snap_target" 2>/dev/null || true
-  rm -f "$RUNS_DIR/notify/$id.cmd"
+  rm -f "$RUNS_DIR/notify/$id.cmd" "$RUNS_DIR/resume/$id.argv.json"
   local left=()
   for p in ${what[@]+"${what[@]}"}; do [[ -e "$p" ]] && left+=("$p"); done
   detail="$(jq -c --argjson left "$(printf '%s\n' ${left[@]+"${left[@]}"} | jq -R . | jq -s 'map(select(. != ""))')" '. + {not_deleted: $left}' <<<"$detail")"
@@ -10493,7 +10724,7 @@ main() {
   # What changes or leaves a run is on the operator's record; what only reads
   # it (list, status, summary, context, help) is not.
   case "$cmd" in
-    start|stop|reap|say|cap|extend|package|report|tools|review|export|hold|release|purge|verify|releases|examiner|machine|timestamp|rerun)
+    start|stop|reap|say|cap|extend|resume|package|report|tools|review|export|hold|release|purge|verify|releases|examiner|machine|timestamp|rerun)
       # A start --check writes nothing, the audit included.
       case " $* " in *" -h "*|*" --help "*|*" --check "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
     # The operator's answer to a lead, and a reopen, change the run; a list reads it.
@@ -10516,6 +10747,7 @@ main() {
     say) cmd_say "$@" ;;
     cap) cmd_cap "$@" ;;
     extend) cmd_extend "$@" ;;
+    resume) cmd_resume "$@" ;;
     lead) cmd_lead "$@" ;;
     question) cmd_question "$@" ;;
     netcheck) cmd_netcheck "$@" ;;

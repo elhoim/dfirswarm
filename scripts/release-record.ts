@@ -318,6 +318,19 @@ export function hashFieldHead(text: string | null): ChainHead {
   return { lines: lines.length, head };
 }
 
+/** The `hash` field of line `n` (1-based) of a hashed chain, or null: whether a bound head is still at its place. */
+export function hashFieldAt(text: string | null, n: number): string | null {
+  if (n <= 0) return null;
+  const line = (text ?? "").split("\n").filter((l) => l.trim())[n - 1];
+  if (line === undefined) return null;
+  try {
+    const h = (JSON.parse(line) as { hash?: unknown }).hash;
+    return typeof h === "string" ? h : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A prev-chained file's length and head: the last line's own hash (the trace, the journal, the review). */
 export function lineHead(text: string | null): ChainHead {
   const h = lineHashes(text ?? "");
@@ -473,18 +486,37 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
   };
   const heldWord = (h: ReturnType<typeof held>) => (h === "matches" ? "as bound" : h === "redacted" ? "redacted from the bound bytes (REDACTIONS.txt)" : h === "withheld" ? "withheld from this package (REDACTIONS.txt names the bound sha256)" : h === "missing" ? "NOT THERE" : "NOT THE BOUND BYTES");
   let anchorReleases: Array<{ version?: number; sha256?: string }> | null = null;
+  // The resumes the anchor names: a release sealed before one binds a prefix of the chains, which the continuation appended to.
+  let anchorResumes: string[] = [];
   const anchorText = readText(layout.anchor);
   if (anchorText) {
     try {
-      const a = JSON.parse(anchorText) as { releases?: unknown };
+      const a = JSON.parse(anchorText) as { releases?: unknown; resumes?: unknown };
       anchorReleases = Array.isArray(a.releases) ? (a.releases as Array<{ version?: number; sha256?: string }>) : [];
+      anchorResumes = Array.isArray(a.resumes) ? (a.resumes as Array<{ at?: unknown }>).map((r) => String(r?.at ?? "")).filter(Boolean) : [];
     } catch {
       anchorReleases = null;
     }
   }
-  const ledgerNow = hashFieldHead(readText(abs(layout.root, layout.ledger)));
-  const attNow = hashFieldHead(readText(abs(layout.root, layout.attestations)));
-  const dispNow = hashFieldHead(readText(abs(layout.root, layout.disputes)));
+  const ledgerText = readText(abs(layout.root, layout.ledger));
+  const attText = readText(abs(layout.root, layout.attestations));
+  const dispText = readText(abs(layout.root, layout.disputes));
+  const ledgerNow = hashFieldHead(ledgerText);
+  const attNow = hashFieldHead(attText);
+  const dispNow = hashFieldHead(dispText);
+  /**
+   * A chain bound as it is, or, when the anchor names a resume after the
+   * release, as a prefix: the head it bound still at its place. What the
+   * continuation appended is the next release's to bind.
+   */
+  const asBound = (what: string, bound: ChainHead, now: ChainHead, text: string | null, at: string, bad: string[], parts: string[]) => {
+    if (bound.lines === now.lines && bound.head === now.head) return;
+    if (anchorResumes.some((r) => r > at) && now.lines > bound.lines && (bound.lines === 0 || hashFieldAt(text, bound.lines) === bound.head)) {
+      parts.push(`${what} it binds is a prefix of ${what} here (${bound.lines} of ${now.lines}): the run was resumed after it, and a later release binds the continuation`);
+      return;
+    }
+    bad.push(`${what} here ${what === "the ledger" ? "is not the one" : "are not the ones"} it binds (${bound.lines} ${what === "the ledger" ? "entries" : "lines"}, head ${bound.head ?? "none"}; here ${now.lines}, head ${now.head ?? "none"})`);
+  };
   const traceText = readText(abs(layout.root, layout.trace));
   const traceHashes = lineHashes(traceText ?? "");
   const journalText = readText(abs(layout.root, layout.journal));
@@ -570,9 +602,9 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
     // The chains custody sealed: as they are; the growing ones as prefixes.
     const c = x.chains;
     if (c) {
-      if (c.ledger && (c.ledger.entries !== ledgerNow.lines || c.ledger.head !== ledgerNow.head)) bad.push(`the ledger is not the one it binds (${c.ledger.entries} entries, head ${c.ledger.head ?? "none"}; here ${ledgerNow.lines}, head ${ledgerNow.head ?? "none"})`);
-      if (c.attestations && (c.attestations.lines !== attNow.lines || c.attestations.head !== attNow.head)) bad.push(`the attestations are not the ones it binds (${c.attestations.lines} lines; here ${attNow.lines})`);
-      if (c.disputes && (c.disputes.lines !== dispNow.lines || c.disputes.head !== dispNow.head)) bad.push(`the disputes are not the ones it binds (${c.disputes.lines} lines; here ${dispNow.lines})`);
+      if (c.ledger) asBound("the ledger", { lines: c.ledger.entries, head: c.ledger.head }, ledgerNow, ledgerText, x.at, bad, parts);
+      if (c.attestations) asBound("the attestations", c.attestations, attNow, attText, x.at, bad, parts);
+      if (c.disputes) asBound("the disputes", c.disputes, dispNow, dispText, x.at, bad, parts);
       if (c.trace?.lines) {
         const at = traceHashes[c.trace.lines - 1];
         const broke = prevChainBreak(traceText ?? "", c.trace.lines);
