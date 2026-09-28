@@ -160,7 +160,8 @@ revision, and a directive is framed at its first claim (items 1, 5 to 10).
   material questions hold the finish line like a goal's.
 - A person's question is on the record whole, with its asker and its
   history, and the report and `release.json` can bind it (Phase 3 renders
-  it; the v1 signature binds the chain's head through custody).
+  it, [ADR 0016](0016-the-report-follows-each-question-and-the-outputs-carry-their-sensitivity.md);
+  the v1 signature binds the chain's head through custody).
 - The register's words are held to the run's sensitive values: a question
   may not carry a value a ledger entry marks sensitive. The case contract
   ([ADR 0014](0014-the-case-contract-says-what-comes-in-and-what-is-asked.md))

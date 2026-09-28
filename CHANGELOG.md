@@ -6,6 +6,47 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: the report follows each question; outputs carry their sensitivity; the code agents wrote is ranked for the library
+
+- **The report, question by question.** §1 is one screen of every question
+  (the goal's, the agents', a person's, and those proposed, excluded or
+  withdrawn): its standing, who asked it, its answer by number, its leads,
+  the operator's acceptance and its tokens. §2 follows each from who asked
+  it (the goal; an agent and the entry that raised it; a person with role,
+  claimed or signed) through every verbatim revision, the neutral wording,
+  hints, attachments with their provenance, clarifications, the proposition
+  its first lead tested, its leads, its coverage, its result and contrary
+  evidence, the acceptance, its evidence gaps and its cost; each group of
+  questions says why it matters, and the unresolved ones say what would
+  settle them. A negative lead is counted in the body; Appendix F holds
+  every question and lead event and every disposition with its review.
+- **Cost per question.** Each model call the gateway recorded goes to the
+  leads its seat held then, split evenly, and to their questions; a call
+  outside every hold goes to no question and is shown on its own line. A
+  host run's seats' totals are spread over their tool calls, an estimate.
+- **A release binds the question register.** `release.json.questions`: the
+  length and head custody sealed, the questions by origin, every person who
+  asked or acted (enrolled, claimed or signed), and what came after the
+  verdict; verification holds the chain to it. The operator requests' chain
+  is now held to its seal by custody-verify, an earlier verdict, a release
+  and a draft.
+- **Sensitive outputs.** `job_run(secret_output: true)` seals every output
+  sensitive; a job made from a sensitive output is sealed sensitive too, as
+  derived; an entry citing one is recorded sensitive. `package --redact`
+  withholds them and their logs whole, names each with its sha256, and scans
+  every file for the sensitive entries' words and a small output's own text;
+  a package without `--redact` names what in it is sensitive
+  (`HYGIENE.json`). An entry citing a cancelled or stopped job's output
+  without saying how it treats it is a `partial_output` defect.
+- **Tool harvesting and the library's hint.** `swarm.sh tools <id>
+  --candidates` ranks the code agents wrote into command jobs by lines times
+  reuse, with its jobs, seats, profiles and the library tools that may cover
+  it, and writes each script whole for the maintainer. A manifest's `use`
+  says what a tool reads; a command job that declares its inputs is told
+  which library tools read that kind of file.
+- ADR 0016; README, docs/usage.md, docs/protocol.md, tool-library/README.md
+  and the worker prompt say it.
+
 ### Added: the case contract: what may come in, what was asked of whom, and where the evidence ends
 
 - **The case policy, complete.** `--more-evidence no|ask|yes` says whether

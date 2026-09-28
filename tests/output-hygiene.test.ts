@@ -54,7 +54,8 @@ async function run() {
 }
 
 async function until(svc: JobService, id: string) {
-  for (let i = 0; i < 400; i += 1) {
+  // A minute: under a whole suite's load a worker stand-in can be slow to start.
+  for (let i = 0; i < 1200; i += 1) {
     const j = svc.jobs.get(id);
     if (j && ["committed", "failed", "cancelled"].includes(j.state)) return j;
     await new Promise((r) => setTimeout(r, 50));

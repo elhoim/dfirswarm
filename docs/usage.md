@@ -63,7 +63,7 @@ scripts/swarm.sh export <id> --format csv|timesketch [--out FILE]
 scripts/swarm.sh hold <id> [--reason TEXT]
 scripts/swarm.sh release <id>
 scripts/swarm.sh purge <id> [--yes]
-scripts/swarm.sh tools <id> [--save DIR]
+scripts/swarm.sh tools <id> [--save DIR | --candidates [--out DIR] [--min-lines N] [--library DIR]...]
 scripts/swarm.sh say <id> "<message>"
 scripts/swarm.sh ui [--port N] [--host H] [--no-build] [--inputs-root DIR]... [--allow-inputs-root-from-ui]
 scripts/swarm.sh reap [id] [--stall-sec N] [--stop]
@@ -182,11 +182,11 @@ Per-pane environment (a host run; a microVM run's pane gets only a quiet shell, 
 
 - `cap <id> [--usd N] [--tokens N] [--per-agent-usd N] [--per-agent-tokens N] [--wall-clock MIN]` changes a running swarm's caps. The change is made under the lock every fold of usage takes, kept in `budget.json` as `cap_changes` (with the caps it left, so the shell watch does not report it as an agent's write), put on the trace as the operator's, merged into the run record and said on the board; a swarm-wide stop the run is no longer over is withdrawn, and a seat's own cap steer lifts by itself on its next check. The run keeps its brake (a dollar cap above zero where dollars are charged, a token cap where they are not), and a finished run is not brought back.
 - `say <id> "<message>"` posts to a running swarm's board as the examiner: what an operator notices, or a tool that has just appeared on the host. Agents see it on their next `inbox` or `wait`.
-- `tools <id>` lists the tools a run forged, with author, version and runtime; `tools <id> --save DIR` copies them into a library for `--tools-from`.
+- `tools <id>` lists the tools a run forged, with author, version and runtime; `tools <id> --save DIR` copies them into a library for `--tools-from`. `tools <id> --candidates` ranks the code the agents wrote into command jobs as candidates for the library ([below](#the-report-the-outputs-and-the-code-left-behind)).
 - `summary <id>` prints a Markdown run summary from the sandbox's files (`scripts/summary.ts`): outcome and markers, the team with what each agent called itself and its spend, by agent and by model, activity counts from the trace (tool calls, implicit claims, violations, forge hints, nudges, per-agent cap events, forged tools, the commands typed most), the ledger, the work files, and the chain of custody (case id, examiner, input hashes, the inputs checks, the toolbox, the catalog).
 - `context <id>` prints the context history of every agent from the trace (`scripts/context-audit.ts`; `--json` for the same as data): per agent the model, the ceiling and the three lines it ran under, the turns, the peak, the lines it crossed, the holds, the hand-offs and Pi's own fallbacks with what each summary cost and which model wrote it, the largest climb in one turn, how many tool calls had more output than the model received (whole under `tool-output/`) and how many `inbox`/`wait` deliveries held posts back; then one sentence per thing the record says about the lines (a provider refusal, a hold at the compact line, a seat that handed off early, a run that never reached a line). A run with no `context` rows says it is not measured rather than guessing. The same record the console's Context chart draws.
-- `report <id>` writes `<sandbox>/package/report.html`: one self-contained document — cover (which says an AI agent swarm prepared it and that its findings are the agents' conclusions until an examiner reviews them), summary of findings, scope and evidence with a sha256 per file (and sha1 and md5 when the kickoff took them, with how the copy was checked against its source: by content, with the counts, or by names, kinds and sizes under `--no-verify-copy`), the timeline, indicators and findings as numbered exhibits taken from the ledger's own `seq`, the method, the artifacts with their hashes, the limitations (the tools the agents forged, not independently validated, among them), the chain of custody (whether `custody.json` matches the verdict anchored outside the run, operator actions on the trace, and any removed VM whose secrets msb's database may still hold), a reproducibility row from the run's `provenance` and `host_clock`, the examiner's review (each exhibit's standing, the counts, whether the review's chain verifies and whether the sign-off covers the ledger's current head), coverage and grounding (a "Named by" column, the evidence no command named, exhibits not grounded in the trace), corrections and absences marked, rows for disk encryption, a legal hold or a purge, a notify hook (never its command), a synced folder allowed by flag or marker, an earlier run's ledger handed in as hypotheses and a root start, the source of the spend figure (with `--model-gateway`, which providers were metered on the host), the files handed over with the report, and the swarm's own `work/report.md` reproduced verbatim. It fetches no stylesheet, script, font or image, so it reads the same on a machine with no network. `--pdf` prints it through Chrome, Chromium or Edge if one is installed (`SWARM_CHROME` names another); the browser numbers the pages, because `@page` margin boxes are unimplemented there and a number this document computed itself would be wrong in every other engine. `--lint` warns when a numbered section cites nothing checkable — a code span, an exhibit number, an inode, a record id or a registry key — and never fails. `--out PATH` writes somewhere else.
-- `package <id>` writes `<sandbox>/package/`: `report.html`, `summary.md`, `artifacts.json` (every file under `work/` with its sha256, including the extracted material the package deliberately leaves behind), everything the run wrote under `work/` whatever its extension, the run's `tools/` with their manifests, the ledger (`ledger.md`, `ledger.jsonl`), `inputs.json`, `toolbox.json`, `team.json`, `budget.json`, `layout.json`, `netguard.allow`, `SWARM.md`, the catalog index, the trace, one file per board thread, and `MANIFEST.txt` with a sha256 per file, `court-set.json` and this run's lines of `runs/operator-audit.jsonl`; with `--model-gateway`, the gateway's log. `--sign` signs the manifest (see "After a run" below). One walk of `work/` produces the report, the summary and `artifacts.json` together, so the hashes on the report's artifact table are the hashes in `artifacts.json`. What you hand over, with the hashes to prove it is what the swarm produced. `work/extracted/` and `work/quarantine/` stay in the sandbox — they came out of the evidence and may be live — and the command says how many files it left behind. `--redact` takes out what a sensitive ledger entry says and the files it cites before the manifest is made. A sensitive entry's words are every text field of it, whole when six characters or more (four with a digit in them, a PIN), and each identifier-like run inside one (a key, a token, an address, a path, an account). A redacted line of the trace, the ledger, its attestations and disputes, the store journal or the review keeps its own sha256 (a ledger entry its seq, kind, prev and hash; an attestation or a dispute of a sensitive entry its act, target, prev and hash; a journal line its seq and prev), so every chain still walks; a JSON file is redacted field by field and keeps its shape; other text files have the words replaced; a PDF a release printed is withheld; a release's signed record, a signature and a token are left as they are. `REDACTIONS.txt` lists each change with the sha256 before and after, and `REDACTIONS.json` what each replaced: the sha256 of the original (never the original), why, and which entry's words it held. Then every packaged file is scanned for each sensitive entry's words, normalised (case, path separators, JSON escapes) in text and as UTF-8 and UTF-16 bytes in any file: a hit refuses the package, naming the file, the entry and the word's sha256, never the word; `--redact-leaks list` hands it over with the hits listed in `REDACTIONS.json`, and `verify` says them. `--with-outputs` includes the jobs' sealed outputs, which a record-only package names by their hashes; `PACKAGE-KIND.txt` says which it is. A package carries the ledger's attestations and disputes (`ledger-disputes.jsonl`), every release of the report as it was sealed (`release/`, never rendered again), and the verdict's signature and timestamp token; `artifacts.sealed.json`, the index of `work/` custody wrote at stop byte for byte (the package's `artifacts.json` is generated when it is packaged); `review.jsonl`, the examiner's review; and `COMPONENTS.json`, which lists each part a recipient holds the record to (the verdict, its anchor, signature and token, the sealed index, the trace and its anchor, the ledger, its attestations, the journal and its anchor, the review) as present or absent with why. All three are under `MANIFEST.txt`.
+- `report <id>` writes `<sandbox>/package/report.html`: one self-contained document — cover (which says an AI agent swarm prepared it and that its findings are the agents' conclusions until an examiner reviews them), summary of findings, scope and evidence with a sha256 per file (and sha1 and md5 when the kickoff took them, with how the copy was checked against its source: by content, with the counts, or by names, kinds and sizes under `--no-verify-copy`), the timeline, indicators and findings as numbered exhibits taken from the ledger's own `seq`, the method, the artifacts with their hashes, the limitations (the tools the agents forged, not independently validated, among them), the chain of custody (whether `custody.json` matches the verdict anchored outside the run, operator actions on the trace, and any removed VM whose secrets msb's database may still hold), a reproducibility row from the run's `provenance` and `host_clock`, the examiner's review (each exhibit's standing, the counts, whether the review's chain verifies and whether the sign-off covers the ledger's current head), coverage and grounding (a "Named by" column, the evidence no command named, exhibits not grounded in the trace), corrections and absences marked, rows for disk encryption, a legal hold or a purge, a notify hook (never its command), a synced folder allowed by flag or marker, an earlier run's ledger handed in as hypotheses and a root start, the source of the spend figure (with `--model-gateway`, which providers were metered on the host), the files handed over with the report, and the swarm's own `work/report.md` reproduced verbatim. Its first section is one screen of every question, and its second follows each question from who asked it to what it cost; Appendix F holds the whole question and lead registers ([below](#the-report-the-outputs-and-the-code-left-behind)). It fetches no stylesheet, script, font or image, so it reads the same on a machine with no network. `--pdf` prints it through Chrome, Chromium or Edge if one is installed (`SWARM_CHROME` names another); the browser numbers the pages, because `@page` margin boxes are unimplemented there and a number this document computed itself would be wrong in every other engine. `--lint` warns when a numbered section cites nothing checkable — a code span, an exhibit number, an inode, a record id or a registry key — and never fails. `--out PATH` writes somewhere else.
+- `package <id>` writes `<sandbox>/package/`: `report.html`, `summary.md`, `artifacts.json` (every file under `work/` with its sha256, including the extracted material the package deliberately leaves behind), everything the run wrote under `work/` whatever its extension, the run's `tools/` with their manifests, the ledger (`ledger.md`, `ledger.jsonl`), `inputs.json`, `toolbox.json`, `team.json`, `budget.json`, `layout.json`, `netguard.allow`, `SWARM.md`, the catalog index, the trace, one file per board thread, and `MANIFEST.txt` with a sha256 per file, `court-set.json` and this run's lines of `runs/operator-audit.jsonl`; with `--model-gateway`, the gateway's log. `--sign` signs the manifest (see "After a run" below). One walk of `work/` produces the report, the summary and `artifacts.json` together, so the hashes on the report's artifact table are the hashes in `artifacts.json`. What you hand over, with the hashes to prove it is what the swarm produced. `work/extracted/` and `work/quarantine/` stay in the sandbox — they came out of the evidence and may be live — and the command says how many files it left behind. `--redact` takes out what a sensitive ledger entry says and the files it cites before the manifest is made. A sensitive entry's words are every text field of it, whole when six characters or more (four with a digit in them, a PIN), and each identifier-like run inside one (a key, a token, an address, a path, an account). A redacted line of the trace, the ledger, its attestations and disputes, the store journal or the review keeps its own sha256 (a ledger entry its seq, kind, prev and hash; an attestation or a dispute of a sensitive entry its act, target, prev and hash; a journal line its seq and prev), so every chain still walks; a JSON file is redacted field by field and keeps its shape; other text files have the words replaced; a PDF a release printed is withheld; a release's signed record, a signature and a token are left as they are. `REDACTIONS.txt` lists each change with the sha256 before and after, and `REDACTIONS.json` what each replaced: the sha256 of the original (never the original), why, and which entry's words it held. Then every packaged file is scanned for each sensitive entry's words, normalised (case, path separators, JSON escapes) in text and as UTF-8 and UTF-16 bytes in any file: a hit refuses the package, naming the file, the entry and the word's sha256, never the word; `--redact-leaks list` hands it over with the hits listed in `REDACTIONS.json`, and `verify` says them. A sensitive output (a job run with `secret_output`, or one made from such an output) is withheld whole under `--redact`, with its job's stdout and stderr: each file is replaced by a line naming its sha256 and why, listed under "Withheld whole" in `REDACTIONS.txt` and in `REDACTIONS.json` (`withheld`, `sensitive_outputs`); an entry citing a sensitive output is redacted as a sensitive one whether or not it was recorded so; and the scan looks for the whole text of each small sensitive output as well (at most 256 bytes, one line, shaped like a secret rather than a status word), which the redaction takes out where it stands. A package made without `--redact` takes nothing out: when the run has sensitive entries or outputs it writes `HYGIENE.json`, naming them, which sensitive files it carries and what the same scan found, and says to hand it over with `--redact`. `--with-outputs` includes the jobs' sealed outputs, which a record-only package names by their hashes; `PACKAGE-KIND.txt` says which it is. A package carries the ledger's attestations and disputes (`ledger-disputes.jsonl`), every release of the report as it was sealed (`release/`, never rendered again), and the verdict's signature and timestamp token; `artifacts.sealed.json`, the index of `work/` custody wrote at stop byte for byte (the package's `artifacts.json` is generated when it is packaged); `review.jsonl`, the examiner's review; and `COMPONENTS.json`, which lists each part a recipient holds the record to (the verdict, its anchor, signature and token, the sealed index, the trace and its anchor, the ledger, its attestations, the journal and its anchor, the review) as present or absent with why. All three are under `MANIFEST.txt`.
 
 #### After a run: `examiner`, `machine`, `review`, `releases`, `timestamp`, `rerun`, `package --sign`, `verify`, `certify`, `export`, `hold`, `release`, `purge`
 
@@ -517,6 +517,88 @@ on any act that says it is signed and carries no signature. A question
 withdrawn from the goal is no longer required by the answers check or the
 finish line; questions admitted or amended into new work after the run's
 done are follow-ups, which `resume` takes up as the continuation's work.
+
+#### The report, the outputs and the code left behind
+
+[ADR 0016](adr/0016-the-report-follows-each-question-and-the-outputs-carry-their-sensitivity.md).
+
+**The report follows each question.** The report's §1 is one screen: every
+question (the goal's, the agents', the ones a person asked, and those
+proposed, excluded or withdrawn), with its standing, who asked it, its answer
+by number, its leads by disposition, the operator's acceptance and its
+tokens. §2 then follows each question from who asked it to what it cost: the
+origin (the goal; an agent and the entry that raised it; a person, with name,
+role, and whether the act was claimed or signed), why, every verbatim revision
+and the neutral wording, hints, attachments with their provenance,
+clarifications, the proposition its first lead tested and its negation, its
+leads (a negative counted, a duplicate footnoted), the coverage that names
+it, the result with its contrary evidence, the acceptance, its evidence gaps
+and its cost; grouped as the goal's, asked during the run, emergent,
+proposed, excluded and withdrawn, each with why it matters, and then the
+questions in scope no answer settles. §5 keeps each answer's steps. Appendix F
+holds the whole register: every question and lead event, and every
+disposition with who made it, what it cites and whether another agent
+reviewed it; the negatives and duplicates the body counts are there in full.
+
+**Cost per question.** Each model call the model gateway recorded (input,
+output and cache tokens) is given to the leads its seat held when the call
+was made, split evenly among them, and each lead's share to the questions it
+names, split evenly; a call made while the seat held no lead goes to no
+question and is shown on its own line, so the figures add up to the run's
+total. A run without the gateway (a host run) spreads each seat's total over
+its tool calls on the trace, an estimate the report calls one. It is an
+attribution by holding, not a measure of what a question needed.
+
+**A release binds the register.** `release.json` carries `questions`: the
+length and head of `questions/questions.jsonl` as custody sealed them, the
+questions those events opened by origin, every person who asked or acted on
+one (enrolled, claimed or signed, with their questions), and the events
+recorded after the verdict (`post_seal`), which the next release binds.
+`releases <id> --verify` holds the chain to that head and recomputes the
+rest. Custody holds the operator requests' chain to its seal too:
+`custody-verify` names the operator's acts on requests after the stop as
+following the sealed line, and a sealed line changed as a drift.
+
+**Sensitive outputs.** `job_run(secret_output: true)` seals every output of
+the job sensitive (its `job_committed` line and `job.json` say so, with why);
+the harness never reads the bytes to decide. A job whose declared inputs reach
+one (its path, the digest of one of its files, a catalogue generation made
+from it), or, declaring nothing, whose command names the job, seals sensitive
+output too, derived from it. An entry citing a sensitive output (`job:`,
+`sha256:`, `member:`) is recorded sensitive, and the answer to `record` says
+so. The package side is above (`package --redact`); `export --redact` treats
+an unmarked entry citing one as sensitive.
+
+**A cancelled job's output.** An entry citing the kept output of a job that
+was cancelled or stopped must say in `qualifies` how it treats what the job
+wrote before it stopped; until a correction does, the answers check reports a
+`partial_output` defect, which no limitation names away. A limitation, a
+search recorded partial or failed, and a coverage record carry their own
+disposition.
+
+**Tool candidates.** `tools <id> --candidates [--out DIR] [--min-lines N]
+[--library DIR]...` takes the code out of every agent's command job (each
+heredoc, each inline `-c`/`-e` script, the command itself, each script of the
+agents' own under `work/` or `tool-output/` a job declared and ran), keeps
+those of N lines or more (20), counts the same text run by several jobs as one
+candidate, and ranks them by lines times jobs. Each line says its job ids,
+seats, image profiles, statuses and lines, how often it was reused, and the
+library tools that may already cover it (the script names one, or its
+manifest's `use` matches what the jobs declared; `--library` names the
+libraries, the repository's `tool-library/` by default, beside the run's
+`tools/`). Every script is written whole to DIR (default
+`<sandbox>.tool-candidates/`) with `candidates.json` and `README.txt`;
+[tool-library/README.md](../tool-library/README.md#folding-a-candidate) says
+how one is folded in.
+
+**The library's hint.** A tool's manifest may say what it reads in `use`:
+`extensions` (".evtx"), `magic` (`{offset, hex}`) and `names` (a file's own
+name, `*` for any run). When an agent's command job declares its inputs, the
+answer to `job_run` carries `library`: the run's tools that say they read
+those files (by extension, first bytes or name; a manifest without `use` by
+its description naming the extension as a word), each with what it matched.
+A hint only: the job runs as asked, and a tool its command already runs is
+not offered.
 
 ### `scripts/spawn.sh`
 

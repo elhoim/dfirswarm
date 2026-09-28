@@ -234,5 +234,6 @@ policy" only where the policy says no more evidence comes.
   is in the report's gaps with its consequence; it never becomes a negative.
 - Not decided here: amending the case policy while the run goes on (a new
   run, or a resume that keeps it), mounting new evidence into running VMs
-  (a job reads it), and the report's per-question chains (Phase 3), which
-  will carry each question's gaps and attachments with their provenance.
+  (a job reads it), and the report's per-question chains (Phase 3, [ADR
+  0016](0016-the-report-follows-each-question-and-the-outputs-carry-their-sensitivity.md)),
+  which carry each question's gaps and attachments with their provenance.

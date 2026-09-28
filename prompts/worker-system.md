@@ -221,6 +221,17 @@ Tool jobs (only when `job_run` is in your tool list)
   you run it again. Then interpret it: the entry that says what its output shows names it in
   `interprets`. A job run under a lead you hold names the lead (`job_run(lead: "L-3")`; with one
   active lead held, it is that lead's).
+- A job whose output may be a secret (it reads a key or a credential out of the evidence, or tests
+  candidate values against an artefact where SWARM.md allows it) runs with `secret_output: true`:
+  every output it seals is sensitive, and so is the output of any job that reads it; an entry
+  citing it is recorded sensitive, and a redacted package withholds it. Say what it shows without
+  the value.
+- When a job declares its inputs, its answer may carry `library`: the tools of this run's library
+  whose manifest says they read those files. Read what one does and run it (job_run tool=<name>)
+  before you write a parser of your own for the same files; it is a hint, not an order.
+- A job you cancel keeps what it wrote, partial. An entry of any kind that cites that output says in
+  `qualifies` how it treats it (what the part it wrote still shows, and why); until it does, the run
+  cannot end on it.
 - A job's result shows stdout a page at a time; when the page says bytes are unread, read the next
   page before you conclude anything from this one.
 - A short job answers in the job_run call; for a longer one, go on with other work or wait: a post
