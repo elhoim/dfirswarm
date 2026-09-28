@@ -5,12 +5,12 @@
  */
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question";
+export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "resume";
 export type JobStatus = "running" | "ok" | "failed";
 
 export type Job = {
@@ -26,6 +26,13 @@ export type Job = {
   swarm_id: string | null;
   /** An export's file, served once the job is done. */
   output_file?: string;
+  /**
+   * The job's whole output, kept on disk as it came (the console's own
+   * directory, 0600): stdout and stderr above carry at most the last
+   * OUTPUT_CAP of each, saying so and where the whole is, and
+   * GET /api/jobs/<id>/output?stream=stdout|stderr serves it whole.
+   */
+  output?: { stdout: { file: string; bytes: number }; stderr: { file: string; bytes: number } };
 };
 
 export type StopParams = { no_custody?: boolean; custody_timeout?: number };
@@ -298,6 +305,67 @@ export function readLocalProviders(agentDir = process.env.PI_CODING_AGENT_DIR ||
 
 export type ReapParams = { stall_sec?: number; stop?: boolean };
 
+/** More room for a going (or paused) run: swarm.sh extend. */
+export type ExtendParams = { minutes?: number; tokens?: number; usd?: number };
+
+/** "Continue this run": swarm.sh resume, with the questions asked for the continuation. */
+export type ResumeParams = ExtendParams & { questions?: string[]; why?: string; as?: string };
+
+export class RunRequestError extends Error {}
+
+function capNumbers(body: Record<string, unknown>): ExtendParams {
+  const out: ExtendParams = {};
+  for (const k of ["minutes", "tokens", "usd"] as const) {
+    const v = body[k];
+    if (v === undefined || v === null || v === "") continue;
+    const n = Number(v);
+    const whole = k !== "usd";
+    if (!Number.isFinite(n) || n <= 0 || (whole && !Number.isInteger(n))) throw new RunRequestError(`${k} is ${whole ? "a whole number" : "a number"} above zero`);
+    out[k] = n;
+  }
+  return out;
+}
+
+/** An Extend request as swarm.sh extend arguments: at least one of minutes, tokens, usd. */
+export function extendArgv(swarmId: string, body: Record<string, unknown>): string[] {
+  const c = capNumbers(body);
+  if (!Object.keys(c).length) throw new RunRequestError("give minutes, tokens or usd to add");
+  return ["extend", swarmId, ...(c.minutes ? ["--minutes", String(c.minutes)] : []), ...(c.tokens ? ["--tokens", String(c.tokens)] : []), ...(c.usd ? ["--usd", String(c.usd)] : [])];
+}
+
+/**
+ * A "Continue this run" request as swarm.sh resume arguments: the questions
+ * asked for the continuation (each one line, at most 4000 characters: a
+ * longer one is refused, never cut), why, more caps, and the console
+ * session's person as --as.
+ */
+export function resumeArgv(swarmId: string, body: Record<string, unknown>): string[] {
+  const argv = ["resume", swarmId];
+  const qs = body.questions === undefined || body.questions === null ? [] : body.questions;
+  if (!Array.isArray(qs)) throw new RunRequestError("questions is a list of questions");
+  if (qs.length > 20) throw new RunRequestError("at most 20 questions at a resume; more are asked on the Questions tab once the run goes on");
+  for (const q of qs) {
+    if (typeof q !== "string" || !q.trim()) throw new RunRequestError("a question is text");
+    const t = q.trim();
+    if (/[\r\n]/.test(t)) throw new RunRequestError("a question is one line");
+    if (t.length > 4000) throw new RunRequestError("a question is over 4000 characters: nothing is cut, so a longer one is refused");
+    argv.push("--question", t);
+  }
+  const why = typeof body.why === "string" ? body.why.trim() : "";
+  if (why.length > 2000 || /[\x00-\x1f\x7f]/.test(why)) throw new RunRequestError("why: one line, at most 2000 characters");
+  if (why) argv.push("--why", why);
+  const c = capNumbers(body);
+  if (c.minutes) argv.push("--minutes", String(c.minutes));
+  if (c.tokens) argv.push("--tokens", String(c.tokens));
+  if (c.usd) argv.push("--usd", String(c.usd));
+  const as = typeof body.as === "string" ? body.as.trim() : "";
+  if (as) {
+    if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(as)) throw new RunRequestError("as is an enrolled person's id");
+    argv.push("--as", as);
+  }
+  return argv;
+}
+
 /** An examiner's decision on one ledger entry. The sign-off is a release, signed from the Release panel (scripts/ui/signing.ts), never a job. */
 export type ReviewParams = { action: "accept" | "reject" | "amend"; entry_seq?: number; note?: string; examiner: string };
 
@@ -338,7 +406,8 @@ export const STATIC_MODELS = [
   "openrouter/z-ai/glm-5.3",
 ];
 
-const OUTPUT_CAP = 64 * 1024;
+/** How much of a job's output travels in the job list and the event stream; the whole is kept on disk (Job.output). */
+export const OUTPUT_CAP = 64 * 1024;
 
 /** Goal documents are whole markdown files now, not one-line descriptions. */
 export const GOAL_MAX_CHARS = 32_000;
@@ -944,6 +1013,7 @@ export type ActionRunnerOptions = {
 
 export class ActionRunner {
   private jobs = new Map<string, Job>();
+  private secrets = new Map<string, Pick<StartParams, "env" | "notify">>();
   private readonly swarmSh: string;
   private readonly opts: ActionRunnerOptions;
 
@@ -1124,6 +1194,31 @@ export class ActionRunner {
     return this.run("verify", ["verify", pkg], swarmId);
   }
 
+  /** More room for a going or paused run (swarm.sh extend): a paused run whose caps then leave room goes on. */
+  extend(swarmId: string, argv: string[]): Job {
+    return this.run("extend", argv, swarmId);
+  }
+
+  /** "Continue this run" (swarm.sh resume): the same run, in the same sandbox, on the same chains. */
+  resume(swarmId: string, argv: string[]): Job {
+    return this.run("resume", argv, swarmId);
+  }
+
+  /**
+   * A job's whole output, as it came, with the operator's own secrets taken
+   * out as they are from the job list; null when there is no such job or
+   * its output was never kept.
+   */
+  async output(id: string, stream: "stdout" | "stderr"): Promise<string | null> {
+    const job = this.jobs.get(id);
+    const file = job?.output?.[stream]?.file;
+    if (!job || !file) return null;
+    const text = await readFile(file, "utf8").catch(() => null);
+    if (text === null) return null;
+    const secrets = this.secrets.get(id);
+    return secrets ? scrubSecrets(text, secrets) : text;
+  }
+
   /** Delete a run's sandbox, disks and hub directory, keeping its record and a destruction record. swarm.sh refuses a running or held run. */
   purge(swarmId: string): Job {
     return this.run("purge", ["purge", swarmId, "--yes"], swarmId);
@@ -1152,10 +1247,29 @@ export class ActionRunner {
       swarm_id: swarmId,
     };
     this.jobs.set(job.id, job);
+    if (secrets) this.secrets.set(job.id, secrets);
     if (this.jobs.size > 50) {
       const oldest = this.list().at(-1);
-      if (oldest && oldest.status !== "running") this.jobs.delete(oldest.id);
+      if (oldest && oldest.status !== "running") {
+        this.jobs.delete(oldest.id);
+        this.secrets.delete(oldest.id);
+      }
     }
+    // The whole output, on disk as it comes: the job list carries the last
+    // OUTPUT_CAP of each stream, and says so and where the whole is.
+    const dir = join(this.opts.runsDir, "console-jobs");
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      for (const f of ["stdout", "stderr"] as const) {
+        const file = join(dir, `${job.id}.${f}.log`);
+        appendFileSync(file, "", { mode: 0o600 });
+        chmodSync(file, 0o600);
+      }
+      job.output = { stdout: { file: join(dir, `${job.id}.stdout.log`), bytes: 0 }, stderr: { file: join(dir, `${job.id}.stderr.log`), bytes: 0 } };
+    } catch {
+      // No directory of its own: the output is still shown, bounded, and says it was not kept.
+    }
+    const tail = { stdout: "", stderr: "" };
     const child = spawn("bash", [this.swarmSh, ...argv], {
       cwd: this.opts.root,
       // The operator's record says the console was the way in.
@@ -1163,8 +1277,25 @@ export class ActionRunner {
       stdio: ["ignore", "pipe", "pipe"],
     });
     const append = (field: "stdout" | "stderr", chunk: Buffer) => {
-      const text = job[field] + chunk.toString("utf8");
-      job[field] = (secrets ? scrubSecrets(text, secrets) : text).slice(-OUTPUT_CAP);
+      const kept = job.output?.[field];
+      if (kept) {
+        try {
+          appendFileSync(kept.file, chunk);
+          kept.bytes += chunk.length;
+        } catch {
+          delete job.output;
+        }
+      }
+      tail[field] = (tail[field] + chunk.toString("utf8")).slice(-OUTPUT_CAP);
+      const shown = secrets ? scrubSecrets(tail[field], secrets) : tail[field];
+      const whole = job.output?.[field];
+      const earlier = whole ? whole.bytes - Buffer.byteLength(tail[field], "utf8") : 0;
+      job[field] =
+        earlier > 0 && whole
+          ? `[${earlier} earlier byte(s) of ${whole.bytes} are not shown here; the whole ${field} is kept in ${whole.file} (GET /api/jobs/${job.id}/output?stream=${field})]\n${shown}`
+          : !whole && tail[field].length >= OUTPUT_CAP
+            ? `[only the last ${OUTPUT_CAP} characters are shown, and the whole ${field} could not be kept on disk]\n${shown}`
+            : shown;
       if (kind === "start" && !job.swarm_id) {
         const m = job.stdout.match(/Swarm id:\s+(\S+)/);
         if (m) job.swarm_id = m[1];
@@ -1174,7 +1305,7 @@ export class ActionRunner {
     child.stdout.on("data", (c: Buffer) => append("stdout", c));
     child.stderr.on("data", (c: Buffer) => append("stderr", c));
     child.on("error", (err) => {
-      job.stderr = `${job.stderr}\n${err.message}`.slice(-OUTPUT_CAP);
+      append("stderr", Buffer.from(`\n${err.message}`));
       job.status = "failed";
       job.exit_code = -1;
       job.finished_at = new Date().toISOString();

@@ -3451,3 +3451,97 @@ test("the Questions tab: the register over the API, an act run as swarm.sh quest
   assert.match(dj.stdout, new RegExp(`Directive L-\\d+ opened under ${ack.q}, unheld`));
   assert.equal((await post("/api/swarms/s7a1c/leads", { action: "direct", q: ack.q, title: "x", why: "y" })).status, 400, "a directive needs its product and acceptance");
 });
+
+test("the list says each run's stop policy, a pause in force, its outcome and how often it was resumed", async () => {
+  const { body } = await get<Array<Record<string, unknown>>>("/api/swarms");
+  for (const r of body) {
+    assert.ok(["cap-pause", "cap-stop", "operator"].includes(String(r.stop_policy)), `${String(r.id)}: ${String(r.stop_policy)}`);
+    assert.equal(typeof r.resumes, "number");
+    assert.ok(r.paused === null || typeof r.paused === "object");
+  }
+  const running = body.find((r) => r.id === "s7a1c");
+  assert.equal(running?.outcome, null, "a running run has no outcome yet");
+  assert.equal(running?.paused, null);
+});
+
+test("Extend and Continue this run reach swarm.sh extend and resume with the operator's words, checked for shape only", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "swarm-resume-ui-"));
+  const fake = join(dir, "fake-swarm.sh");
+  await writeFile(fake, '#!/usr/bin/env bash\necho "ARGC=$#"\n', "utf8");
+  const runner = new ActionRunner({ root: ROOT, runsDir: dir, swarmSh: fake });
+  const guarded = createUiApp({ root: ROOT, runsDir, distDir: join(runsDir, "no-dist"), token: "t0k", runner });
+  const { port } = await guarded.listen(0, "127.0.0.1");
+  const at = `http://127.0.0.1:${port}`;
+  const send = (sub: string, payload: unknown, token = "t0k") => fetch(`${at}/api/swarms/s0d4e/${sub}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(payload) });
+  try {
+    assert.equal((await send("extend", { minutes: 5 }, "wrong")).status, 401, "a mutation takes the console's token");
+    const e = (await (await send("extend", { minutes: 30, tokens: 2000000 })).json()) as { id: string; kind: string; argv: string[] };
+    assert.equal(e.kind, "extend");
+    assert.deepEqual(e.argv, ["extend", "s0d4e", "--minutes", "30", "--tokens", "2000000"]);
+    await waitJobAt(at, e.id);
+    assert.equal((await send("extend", {})).status, 400, "an extension adds something");
+    assert.equal((await send("extend", { minutes: -3 })).status, 400);
+    assert.equal((await send("extend", { tokens: 1.5 })).status, 400);
+    const long = `Was the host reached again after the first day, and from where? ${"and by whom ".repeat(200)}`.trim();
+    const r = (await (await send("resume", { questions: [long, "Which account did it use?"], why: "the client asked", minutes: 20 })).json()) as { id: string; kind: string; argv: string[] };
+    assert.equal(r.kind, "resume");
+    assert.deepEqual(r.argv, ["resume", "s0d4e", "--question", long, "--question", "Which account did it use?", "--why", "the client asked", "--minutes", "20"], "each question whole");
+    await waitJobAt(at, r.id);
+    const bare = (await (await send("resume", {})).json()) as { id: string; argv: string[] };
+    assert.deepEqual(bare.argv, ["resume", "s0d4e"], "a resume needs no question");
+    await waitJobAt(at, bare.id);
+    assert.equal((await send("resume", { questions: ["one\ntwo"] })).status, 400, "a question is one line");
+    assert.equal((await send("resume", { questions: ["x".repeat(4001)] })).status, 400, "a longer question is refused, never cut");
+    assert.equal((await send("resume", { questions: Array.from({ length: 21 }, (_x, i) => `Q ${i}?`) })).status, 400);
+    assert.equal((await send("resume", { as: "Not An Id" })).status, 400);
+  } finally {
+    await guarded.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a job's output is kept whole on disk: the job list carries its last part and says where the whole is, served whole with the secrets out", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "swarm-output-"));
+  const fake = join(dir, "fake-swarm.sh");
+  // 100,000 numbered lines on stdout, a value the operator gave on stderr.
+  await writeFile(fake, '#!/usr/bin/env bash\nseq 1 100000\necho "the value s3cr3t-value was refused" >&2\n', "utf8");
+  const runner = new ActionRunner({ root: ROOT, runsDir: dir, swarmSh: fake });
+  const guarded = createUiApp({ root: ROOT, runsDir, distDir: join(runsDir, "no-dist"), runner });
+  const { port } = await guarded.listen(0, "127.0.0.1");
+  const at = `http://127.0.0.1:${port}`;
+  try {
+    const ok = validateStart({ n: 2, cap_usd: 1, model: "x/y", env: ["EXTRA_TOKEN=s3cr3t-value"] });
+    assert.ok(ok.ok);
+    if (!ok.ok) return;
+    const job = runner.start(ok.params);
+    await waitJobAt(at, job.id);
+    const shown = runner.get(job.id)!;
+    const whole = Array.from({ length: 100000 }, (_x, i) => `${i + 1}\n`).join("");
+    assert.equal(shown.output?.stdout.bytes, Buffer.byteLength(whole));
+    assert.match(shown.stdout, /^\[\d+ earlier byte\(s\) of \d+ are not shown here; the whole stdout is kept in .*console-jobs\/start-[0-9a-f]+\.stdout\.log \(GET \/api\/jobs\/start-[0-9a-f]+\/output\?stream=stdout\)\]\n/);
+    assert.ok(shown.stdout.endsWith("99999\n100000\n"), "the last part is the end of it");
+    const res = await fetch(`${at}/api/jobs/${job.id}/output?stream=stdout`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /^text\/plain/);
+    assert.equal(await res.text(), whole, "the whole output, as it came");
+    const err = await (await fetch(`${at}/api/jobs/${job.id}/output?stream=stderr`)).text();
+    assert.equal(err, "the value … was refused\n", "the operator's secret is out of the whole too");
+    assert.doesNotMatch(shown.stderr, /s3cr3t-value/);
+    assert.equal((await readFile(shown.output!.stdout.file, "utf8")).length, whole.length, "kept on disk whole");
+    assert.equal(execFileSync("stat", [process.platform === "darwin" ? "-f" : "-c", process.platform === "darwin" ? "%Lp" : "%a", shown.output!.stdout.file], { encoding: "utf8" }).trim(), "600");
+    assert.equal((await fetch(`${at}/api/jobs/nope/output`)).status, 404);
+  } finally {
+    await guarded.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the jobs drawer shows every argument whole, quoted as a shell needs it", async () => {
+  const { jobCommandLine } = await import("../ui/src/lib/format.ts");
+  const goal = `Find how the intruder got in. ${"Read every log. ".repeat(40)}`.trim();
+  const line = jobCommandLine(["start", "--goal", goal, "--env", "KEY=…", "--label", "it's"]);
+  assert.ok(line.includes(`"${goal}"`), "a long argument is not cut");
+  assert.ok(!line.includes("…\""), "no ellipsis added");
+  assert.equal(jobCommandLine(["resume", "s1", "--question", 'Was "admin" used?']), 'swarm.sh resume s1 --question "Was \\"admin\\" used?"');
+  assert.equal(jobCommandLine(["stop", "s1", ""]), 'swarm.sh stop s1 ""');
+});

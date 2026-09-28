@@ -33,7 +33,7 @@ import {
   type SwarmDetail,
   type SwarmSummary,
 } from "../../extensions/observe.ts";
-import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
+import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, runOutcome, stopPolicyOf, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
 import { awaitingInterpretation, leadsSnapshot, OPERATOR_REQUESTS, operatorHosts, questionCoverage, rankedLeads, type AwaitingJob, type LeadView } from "../../extensions/leads.ts";
 import { HUMAN_ORIGINS, originWords, questionViews, viewContext, type QuestionView, type TriageItem } from "../../extensions/questions.ts";
 import { verifySignedActs, type SignedAct } from "../questions-cli.ts";
@@ -174,6 +174,14 @@ export type SwarmRow = SwarmSummary & {
   sentinel_by: string | null;
   /** budget.json stop_reason (cap / wall_clock), when the harness steered or stopped. */
   stop_reason: string | null;
+  /** What the run does at a cap (docs/adr/0013): cap-pause, cap-stop, or operator (until solved). */
+  stop_policy: "cap-pause" | "cap-stop" | "operator";
+  /** The pause in force: seats idle, no model call, until the operator extends or stops the run. */
+  paused: { at: string; reason: string; detail: string } | null;
+  /** How the run stands: completed, examination_limited, paused, stopped, abandoned, verification_unavailable, or null while it runs. */
+  outcome: string | null;
+  /** How many times the run was resumed (swarm.sh resume). */
+  resumes: number;
   /** How many tools the run forged (directories under tools/ with a manifest): what --tools-from can seed. */
   tools_forged: number;
   /** The inputs directory the run was given, from inputs.json, or null: what a clean room is about. */
@@ -786,6 +794,9 @@ async function enrichSummary(
   let metered = run?.metered !== false;
   let capTokens = Number(run?.cap_tokens) || 0;
   let stopReason: string | null = null;
+  let stopPolicy: SwarmRow["stop_policy"] = "cap-stop";
+  let paused: SwarmRow["paused"] = null;
+  let resumes = 0;
   try {
     const budget = JSON.parse(budgetRaw) as {
       started_at?: string;
@@ -793,7 +804,14 @@ async function enrichSummary(
       metered?: boolean;
       cap_tokens?: number;
       stop_reason?: string;
+      stop_policy?: string;
+      until_solved?: boolean;
+      paused?: { at?: string; reason?: string; detail?: string };
+      resumes?: unknown[];
     };
+    stopPolicy = stopPolicyOf(budget);
+    if (budget.paused && typeof budget.paused === "object") paused = { at: String(budget.paused.at ?? ""), reason: String(budget.paused.reason ?? ""), detail: String(budget.paused.detail ?? "") };
+    if (Array.isArray(budget.resumes)) resumes = budget.resumes.length;
     if (!started && budget.started_at) started = budget.started_at;
     if (!wall && budget.wall_clock_minutes) wall = Number(budget.wall_clock_minutes) || 0;
     if (budget.metered === false) metered = false;
@@ -867,6 +885,10 @@ async function enrichSummary(
     finishing,
     sentinel_by: sentinelBy,
     stop_reason: stopReason,
+    stop_policy: stopPolicy,
+    paused,
+    outcome: (await runOutcome(sandbox).catch(() => null))?.outcome ?? null,
+    resumes,
     tools_forged: toolsForged,
     inputs_source: inputsSource,
     inputs_sources: inputsSources,

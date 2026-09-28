@@ -52,6 +52,14 @@ export type SwarmRow = {
   sentinel_by: string | null;
   /** budget.json stop_reason (cap / wall_clock), when the harness steered or stopped. */
   stop_reason: string | null;
+  /** What the run does at a cap (docs/adr/0013). Absent from an older server. */
+  stop_policy?: "cap-pause" | "cap-stop" | "operator";
+  /** The pause in force: seats idle, no model call, until the operator extends or stops the run. */
+  paused?: { at: string; reason: string; detail: string } | null;
+  /** completed, examination_limited, paused, stopped, abandoned, verification_unavailable, or null while it runs. */
+  outcome?: string | null;
+  /** How many times the run was resumed (swarm.sh resume). */
+  resumes?: number;
   /** Tools the run forged and kept a manifest for: what a next swarm can start with. */
   tools_forged: number;
   /** The evidence directory the run was given, or null: what a clean room is about. */
@@ -870,7 +878,7 @@ export type TracePage = {
 
 export type Job = {
   id: string;
-  kind: "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review";
+  kind: "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "resume";
   argv: string[];
   status: "running" | "ok" | "failed";
   exit_code: number | null;
@@ -881,6 +889,8 @@ export type Job = {
   swarm_id: string | null;
   /** An export's file, downloadable from /api/jobs/:id/download once the job is done. */
   output_file?: string;
+  /** The whole output, kept on disk; stdout and stderr carry its last part and say so. Served whole at /api/jobs/:id/output?stream=… */
+  output?: { stdout: { file: string; bytes: number }; stderr: { file: string; bytes: number } };
 };
 
 export type LocalModel = { model: string; provider: string; base_url: string; has_key: boolean; metered: boolean };

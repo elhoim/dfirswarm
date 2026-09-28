@@ -5,7 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/states";
 import { api } from "@/lib/api";
-import { relTime } from "@/lib/format";
+import { jobCommandLine, relTime } from "@/lib/format";
 import { useLive } from "@/lib/live";
 import type { Job } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -18,11 +18,13 @@ export function JobStatusIcon({ job, className }: { job: Job; className?: string
 
 export function JobCard({ job, compact = false }: { job: Job; compact?: boolean }) {
   const out = [job.stdout, job.stderr ? `\n[stderr]\n${job.stderr}` : ""].join("").trim();
+  // A stream longer than the job list carries starts by saying so; the whole is a link away.
+  const whole = (["stdout", "stderr"] as const).filter((f) => job.output?.[f] && /^\[\d+ earlier byte\(s\) of \d+ are not shown here/.test(job[f]));
   return (
     <div className="card p-3">
       <div className="flex flex-wrap items-center gap-2">
         <JobStatusIcon job={job} />
-        <code className="text-[12px] text-ink">swarm.sh {job.argv.map((a) => (a.includes(" ") ? `"${a.replace(/"/g, '\\"').slice(0, 40)}${a.length > 40 ? "…" : ""}"` : a)).join(" ")}</code>
+        <code className="max-h-32 min-w-0 flex-1 basis-full overflow-auto whitespace-pre-wrap break-all text-[12px] text-ink sm:basis-auto">{jobCommandLine(job.argv)}</code>
         <span className="ml-auto text-[11px] text-ink-3 tabular">{relTime(job.started_at)}</span>
         {job.exit_code !== null ? <Badge variant={job.exit_code === 0 ? "moss" : "brick"}>exit {job.exit_code}</Badge> : <Badge variant="saffron">running</Badge>}
         {job.swarm_id ? (
@@ -33,6 +35,15 @@ export function JobCard({ job, compact = false }: { job: Job; compact?: boolean 
       </div>
       {out && !compact ? (
         <pre className="mt-2 max-h-56 overflow-auto rounded-md bg-ink px-3 py-2 text-[11.5px] leading-[1.5] text-paper/90 whitespace-pre-wrap break-words">{out}</pre>
+      ) : null}
+      {whole.length ? (
+        <div className="mt-1.5 flex flex-wrap gap-3 text-[12px]">
+          {whole.map((f) => (
+            <a key={f} href={api.jobOutputUrl(job.id, f)} target="_blank" rel="noreferrer" className="font-medium text-kelp-ink hover:underline">
+              the whole {f} ({job.output?.[f]?.bytes ?? 0} bytes) →
+            </a>
+          ))}
+        </div>
       ) : null}
     </div>
   );

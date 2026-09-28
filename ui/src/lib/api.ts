@@ -252,4 +252,10 @@ export const api = {
   checkStart: (payload: Record<string, unknown>) => postJson<StartCheck>("/api/start/check", payload),
   stop: (id: string, opts: { no_custody?: boolean; custody_timeout?: number } = {}) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/stop`, opts),
   reap: (id: string, payload: { stall_sec?: number; stop?: boolean }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/reap`, payload),
+  /** More room for a going or paused run: swarm.sh extend. */
+  extend: (id: string, payload: { minutes?: number; tokens?: number; usd?: number }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/extend`, payload),
+  /** "Continue this run": swarm.sh resume, with the questions asked for the continuation. */
+  resume: (id: string, payload: { questions?: string[]; why?: string; minutes?: number; tokens?: number; usd?: number; as?: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/resume`, payload),
+  /** A job's whole output, as plain text. */
+  jobOutputUrl: (id: string, stream: "stdout" | "stderr") => `/api/jobs/${encodeURIComponent(id)}/output?stream=${stream}`,
 };

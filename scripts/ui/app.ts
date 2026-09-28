@@ -22,7 +22,7 @@ import {
   restoreFileVersion,
 } from "../../extensions/protocol.ts";
 import { readHistory } from "../../extensions/observe.ts";
-import { ActionRunner, checkReadiness, listModels, listPacks, validateReview, validateStart, type ImagePreview, type ImagePreviewQuery, type Job, type ModelList, type ReadinessReport, type StartParams } from "./actions.ts";
+import { ActionRunner, checkReadiness, extendArgv, listModels, listPacks, resumeArgv, RunRequestError, validateReview, validateStart, type ImagePreview, type ImagePreviewQuery, type Job, type ModelList, type ReadinessReport, type StartParams } from "./actions.ts";
 import { checkVmReadiness, startFlags, type VmReadiness, type VmReadinessQuery } from "./vm-readiness.ts";
 import { coverageOf } from "../coverage.ts";
 import { deleteGoal, GoalError, listGoals, readGoal, saveGoal } from "./goals.ts";
@@ -763,6 +763,18 @@ export function createUiApp(options: UiAppOptions): UiApp {
       json(res, 200, job);
       return;
     }
+    // A job's whole output, as it came (the job list carries the last part
+    // of it and names this): plain text, never rendered.
+    const outputMatch = path.match(/^\/api\/jobs\/([^/]+)\/output$/);
+    if (outputMatch) {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      const stream = url.searchParams.get("stream") === "stderr" ? "stderr" : "stdout";
+      const text = await runner.output(outputMatch[1], stream);
+      if (text === null) throw new HttpError(404, "no job with that id, or its output was not kept");
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "content-security-policy": "sandbox; default-src 'none'", "x-content-type-options": "nosniff", "cache-control": "no-store" });
+      res.end(text);
+      return;
+    }
     // An export job's file, once it is done: the ledger as CSV or a
     // Timesketch import, written by swarm.sh into the console's own temp
     // directory, never a path a caller names.
@@ -1221,6 +1233,24 @@ export function createUiApp(options: UiAppOptions): UiApp {
         const timeout = body.custody_timeout === undefined || body.custody_timeout === null || body.custody_timeout === "" ? undefined : Number(body.custody_timeout);
         if (timeout !== undefined && (!Number.isInteger(timeout) || timeout < 1 || timeout > 7 * 24 * 3600)) throw new HttpError(400, "custody_timeout must be a whole number of seconds, 1 to 604800");
         json(res, 202, runner.stop(id, { no_custody: body.no_custody === true, custody_timeout: timeout }));
+        return;
+      }
+      // More room for a going or paused run (swarm.sh extend), and "Continue
+      // this run" for one that ended (swarm.sh resume): the CLI's own checks
+      // decide; the server checks the shape.
+      case "extend":
+      case "resume": {
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        const body = (await readBody(req)) as Record<string, unknown>;
+        let argv: string[];
+        try {
+          argv = sub === "extend" ? extendArgv(id, body) : resumeArgv(id, body);
+        } catch (err) {
+          if (err instanceof RunRequestError) throw new HttpError(400, err.message);
+          throw err;
+        }
+        json(res, 202, sub === "extend" ? runner.extend(id, argv) : runner.resume(id, argv));
         return;
       }
       case "reap": {

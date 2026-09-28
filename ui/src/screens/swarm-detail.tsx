@@ -1,10 +1,10 @@
 import { hubStateCounts } from "@/lib/seat-state";
 import { useCallback, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Archive, Skull, Square } from "lucide-react";
+import { ArrowLeft, Archive, FastForward, Play, Skull, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+import { Input, Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Chip, Meter, Vital, VitalsBand } from "@/components/console";
@@ -95,6 +95,15 @@ function ActionBar({ view }: { view: SwarmView }) {
   // swarm.sh stop's own custody options: skip the host's custody check, or bound it.
   const [noCustody, setNoCustody] = useState(false);
   const [custodyTimeout, setCustodyTimeout] = useState("");
+  // More room for a going or paused run (swarm.sh extend), and "Continue
+  // this run" for one that ended (swarm.sh resume).
+  const [extendOpen, setExtendOpen] = useState(false);
+  const [resumeOpen, setResumeOpen] = useState(false);
+  const [addMinutes, setAddMinutes] = useState("");
+  const [addTokens, setAddTokens] = useState("");
+  const [addUsd, setAddUsd] = useState("");
+  const [resumeQuestions, setResumeQuestions] = useState("");
+  const [resumeWhy, setResumeWhy] = useState("");
   const job = jobId ? live.jobs[jobId] ?? null : null;
   const id = view.summary.id;
   const state = view.summary.state;
@@ -121,6 +130,32 @@ function ActionBar({ view }: { view: SwarmView }) {
           ? "The hub is putting the VMs away; a stop now waits for it"
           : "swarm.sh stop";
 
+  const paused = view.summary.paused ?? null;
+  const canExtend = state === "running" && !reachedDone(view.summary.phase);
+  // A run that ended, by a stop or a finish, and was not purged: its chains go on.
+  const canResume = !canStop && state !== "purged" && state !== "resuming" && view.summary.phase !== "running";
+  const caps = () => ({
+    ...(addMinutes ? { minutes: Number(addMinutes) } : {}),
+    ...(addTokens ? { tokens: Number(addTokens) } : {}),
+    ...(addUsd ? { usd: Number(addUsd) } : {}),
+  });
+  const capFields = (
+    <div className="grid gap-3 sm:grid-cols-3">
+      <div className="space-y-1.5">
+        <Label htmlFor="add-minutes">Minutes to add</Label>
+        <Input id="add-minutes" inputMode="numeric" value={addMinutes} onChange={(e) => setAddMinutes(e.target.value.replace(/[^0-9]/g, ""))} className="tabular" />
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="add-tokens">Tokens to add</Label>
+        <Input id="add-tokens" inputMode="numeric" value={addTokens} onChange={(e) => setAddTokens(e.target.value.replace(/[^0-9]/g, ""))} className="tabular" />
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="add-usd">Dollars to add</Label>
+        <Input id="add-usd" inputMode="decimal" value={addUsd} onChange={(e) => setAddUsd(e.target.value.replace(/[^0-9.]/g, ""))} className="tabular" disabled={view.summary.metered === false} />
+      </div>
+    </div>
+  );
+
   async function run(fn: () => Promise<{ id: string }>) {
     setError(null);
     try {
@@ -133,7 +168,22 @@ function ActionBar({ view }: { view: SwarmView }) {
 
   return (
     <div className="flex flex-col items-end gap-2">
-      <div className="flex gap-2">
+      {paused ? (
+        <InlineNote tone="warn">
+          Paused since {paused.at} at its {paused.reason === "wall_clock" ? "wall clock" : "cap"}: {paused.detail.replace(/\.?$/, ".")} Every seat is idle and no model call goes out. Extend it to go on, or stop it: the run never goes on by itself.
+        </InlineNote>
+      ) : null}
+      <div className="flex flex-wrap justify-end gap-2">
+        {canExtend ? (
+          <Button variant="secondary" size="sm" className="h-9 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => setExtendOpen(true)} title="swarm.sh extend: more minutes, tokens or dollars">
+            <FastForward /> Extend
+          </Button>
+        ) : null}
+        {canResume ? (
+          <Button variant="secondary" size="sm" className="h-9 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => setResumeOpen(true)} title="swarm.sh resume: the same run goes on, on the same chains">
+            <Play /> Continue this run
+          </Button>
+        ) : null}
         {view.summary.phase === "running" && !reachedDone(view.summary.phase) ? (
           <Button variant="secondary" size="sm" className="h-9 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => setReapOpen(true)}>
             <Skull /> Reap stalled
@@ -253,6 +303,67 @@ function ActionBar({ view }: { view: SwarmView }) {
       </Dialog>
 
       <RecordActions view={view} open={recordOpen} onOpenChange={setRecordOpen} onJob={setJobId} />
+
+      <Dialog open={extendOpen} onOpenChange={setExtendOpen}>
+        <DialogContent>
+          <DialogTitle>Extend {view.summary.label}</DialogTitle>
+          <DialogDescription>
+            Runs <code>scripts/swarm.sh extend {id}</code>: adds to the run's caps. A paused run whose caps then leave room goes on, and every seat is woken where it was; one that would still be over a cap is refused, with nothing changed. On the board and the operator's record.
+          </DialogDescription>
+          <div className="mt-4">{capFields}</div>
+          <div className="mt-4 flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setExtendOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={!Object.keys(caps()).length}
+              onClick={() => {
+                setExtendOpen(false);
+                void run(() => api.extend(id, caps()));
+              }}
+            >
+              <FastForward /> Extend
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={resumeOpen} onOpenChange={setResumeOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogTitle>Continue {view.summary.label}</DialogTitle>
+          <DialogDescription>
+            Runs <code>scripts/swarm.sh resume {id}</code>: the same run goes on in the same sandbox, on the same ledger, registers and board. What marked its end is kept under <code>done/history/</code>; each seat starts from its last hand-off. The next stop seals the continuation as a new draft release; every earlier seal, and a signed release, stays valid for what it bound. A run that would still be over a cap is refused: add minutes or tokens here.
+          </DialogDescription>
+          <div className="mt-4 grid gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="resume-questions">Questions for the continuation (one a line; each is asked as an analyst's question)</Label>
+              <Textarea id="resume-questions" value={resumeQuestions} onChange={(e) => setResumeQuestions(e.target.value)} placeholder="Was the host reached again after the first day?" />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="resume-why">Why (optional)</Label>
+              <Input id="resume-why" value={resumeWhy} onChange={(e) => setResumeWhy(e.target.value)} placeholder="asked when the run was resumed" />
+            </div>
+            {capFields}
+          </div>
+          <div className="mt-4 flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setResumeOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                setResumeOpen(false);
+                const questions = resumeQuestions
+                  .split("\n")
+                  .map((l) => l.trim())
+                  .filter(Boolean);
+                void run(() => api.resume(id, { questions, ...(resumeWhy.trim() ? { why: resumeWhy.trim() } : {}), ...caps() }));
+              }}
+            >
+              <Play /> Continue this run
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={reapOpen} onOpenChange={setReapOpen}>
         <DialogContent>

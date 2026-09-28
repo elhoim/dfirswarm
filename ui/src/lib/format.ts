@@ -146,3 +146,14 @@ export function chars(text: string): string {
   return `${text.length.toLocaleString()} chars`;
 }
 
+
+/**
+ * A console job's command line as it ran, every argument whole (an --env
+ * value and the notify command are the only things the server leaves out,
+ * as secrets). A long one (a goal, a question) is shown whole and wraps:
+ * nothing is cut. An argument with a space or a quote is quoted as a shell
+ * would need it.
+ */
+export function jobCommandLine(argv: readonly string[]): string {
+  return `swarm.sh ${argv.map((a) => (a === "" || /[\s"'$`\\]/.test(a) ? `"${a.replace(/(["\\$`])/g, "\\$1")}"` : a)).join(" ")}`;
+}
