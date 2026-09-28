@@ -334,9 +334,9 @@ _Avoid_: plugin, extension (those are the harness's own), custom tool
 
 **Until solved**:
 The `operator` stop policy (`--until-solved` or `--stop operator`): a run with
-no wall clock and advisory caps, where `done` is refused until every question in
-scope has a disposition under the bar (as for any run: a reviewed not
-determinable is one), and nobody but the operator can end it otherwise.
+no wall clock and advisory caps, which ends as any run does (every question in
+scope with a disposition under the bar; a reviewed not determinable is one), and
+which nobody but the operator can end otherwise.
 When nothing moves the watchdog posts a **regroup**: what is open, blocked,
 waiting on the operator and uncited.
 

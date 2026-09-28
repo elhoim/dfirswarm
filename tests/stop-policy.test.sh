@@ -34,6 +34,10 @@ grep -q '(the default token cap)' <<<"$out" || fail "the kickoff does not say th
 grep -q '^## At a cap$' "$sb/SWARM.md" || fail "the contract does not say what a cap does"
 grep -q 'two minutes later the run pauses: no model call goes out' "$sb/SWARM.md" || fail "the contract does not say the pause"
 grep -q -- '- Tokens: 100000000 across the swarm' "$sb/SWARM.md" || fail "the contract does not name the token cap"
+# One rule for the end of a run, whatever the policy: the dispositions under the bar, and the way to not_determinable.
+grep -q 'The run ends, whatever its stop policy, when every question in scope has a' "$sb/SWARM.md" || fail "the contract does not say how a cap-pause run ends"
+grep -q '"looked, not found" is not an end' "$sb/SWARM.md" || fail "the contract does not refuse a limitation as an end"
+grep -q 'then answer not_determinable (or bounded_negative' "$sb/SWARM.md" || fail "the contract does not say the not_determinable path"
 out="$(kick --cap-usd 5 --cap-tokens 7000 --stop cap-stop --label p2)" || fail "--stop cap-stop was refused: $out"
 sb2="$(sandbox_of p2)"
 [[ "$(jq -r '.stop_policy' "$sb2/budget.json")" == cap-stop && "$(jq -r '.cap_tokens' "$sb2/budget.json")" == 7000 ]] || fail "--stop cap-stop or --cap-tokens not kept"

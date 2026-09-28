@@ -1,13 +1,16 @@
 /**
- * The operator's stop policy (--stop operator, its alias --until-solved) and
- * the negative bar (docs/adr/0013): the policy takes the caps and the wall
- * clock away and adds no stricter answer requirement. A run under it ends,
- * as any run does, when every question in scope has a disposition under the
- * bar. A not_determinable answer on a coverage record another seat reviewed
- * is one: the done proceeds, examination-limited. An unreviewed one, one
- * behind a quick negative nobody attested, one whose coverage no longer
- * stands, and a best candidate (B2) are none: the done is refused, with the
- * way to a disposition said.
+ * One rule for the end of a run, under every stop policy (docs/adr/0013,
+ * joint-r3 Phase 1a): done finishes a run only when every question in scope
+ * has a disposition under the bar. A not_determinable answer on a coverage
+ * record another seat reviewed is one: the done proceeds, examination-
+ * limited. An unreviewed one, one behind a quick negative nobody attested,
+ * one whose coverage no longer stands, a best candidate (B2) and a defect a
+ * limitation only names are none: the done is refused, with the way to a
+ * disposition said. The stop policy decides only who else ends the run:
+ * --stop operator (its alias --until-solved) takes the caps and the wall
+ * clock away and adds no stricter answer requirement; under cap-pause and
+ * cap-stop a cap pauses or stops the run whatever the questions' state, and
+ * that end is paused or stopped, never completed.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -150,7 +153,7 @@ test("under --stop operator, an unreviewed negative, a quick negative nobody att
   if (!f.verdict.proceed) assert.match(f.verdict.reason, /- question:1 is limited, with no disposition under the bar: its answer is a best candidate, not established/);
 });
 
-test("under --stop operator, a defect a limitation only names holds the done; the same run under a cap policy may end on it, examination-limited, as before", async () => {
+test("a defect a limitation only names holds the done under every stop policy: --stop operator, cap-pause and cap-stop alike", async () => {
   const r = await operatorRun();
   await answerOne(r);
   const lead = await planned(r.a0, "2");
@@ -166,8 +169,61 @@ test("under --stop operator, a defect a limitation only names holds the done; th
     assert.match(f.verdict.reason, /A defect is fixed, never only named:\n- a defect a limitation names: question:2 has no answer/);
     assert.match(f.verdict.reason, /When the evidence cannot answer a question, that is an answer too: plan its routes .* record a coverage record .* have another seat review it .* then answer not_determinable/);
   }
-  const b = await P.readBudget(r.S);
-  await P.writeBudget(r.S, { ...b, stop_policy: "cap-pause", until_solved: false });
+  // Cap-pause and cap-stop: the same refusal (before 2026-09-28 a cap policy ended examination-limited here).
+  for (const policy of ["cap-pause", "cap-stop"] as const) {
+    const b = await P.readBudget(r.S);
+    await P.writeBudget(r.S, { ...b, stop_policy: policy, until_solved: false, wall_clock_minutes: 60 });
+    f = await finish(r.S);
+    assert.equal(f.gate.until_solved, false);
+    assert.equal(f.verdict.proceed, false, `${policy}: a limitation that names the question is no disposition`);
+    if (!f.verdict.proceed) {
+      assert.equal(f.verdict.failing, "question:2");
+      assert.match(f.verdict.reason, /done finishes a run, whatever its stop policy, only when every question in scope has a disposition under the bar/);
+      assert.match(f.verdict.reason, /A cap pauses or stops the run whatever the questions' state/);
+      assert.match(f.verdict.reason, /then answer not_determinable/);
+    }
+  }
+});
+
+test("cap-pause: a reviewed not_determinable lets done proceed, examination-limited; an unreviewed one does not", async () => {
+  const r = await operatorRun({ until: false });
+  await P.writeBudget(r.S, { ...(await P.readBudget(r.S)), stop_policy: "cap-pause" });
+  await answerOne(r);
+  const q2 = await notDeterminable(r);
+  let f = await finish(r.S);
+  assert.equal(f.gate.until_solved, false);
+  assert.equal(f.verdict.proceed, false, "unreviewed: no disposition, under a cap policy too");
+  assert.ok((await P.attestEntry(r.a2, { seq: q2.cov.seq, how: "ran the search again from job:j000006", review: REVIEW })).ok);
   f = await finish(r.S);
   assert.equal(f.verdict.proceed && f.verdict.outcome, "examination_limited", JSON.stringify(f.verdict));
+});
+
+test("a cap pauses or stops the run, and the operator stops it, whatever the questions' state: paused or stopped, never completed", async () => {
+  // cap-pause: question 2 has no disposition, and the cap pauses the run all the same.
+  const paused = await operatorRun({ until: false });
+  await answerOne(paused);
+  await planned(paused.a0, "2");
+  const over = async (S: string, policy: "cap-pause" | "cap-stop") => {
+    const b = await P.readBudget(S);
+    await P.writeBudget(S, { ...b, stop_policy: policy, spent_usd: (b.cap_usd || 5) + 1, stop_steer_at: new Date(Date.now() - 5 * 60_000).toISOString(), stop_reason: "cap", cap_steer_sent: true });
+  };
+  await over(paused.S, "cap-pause");
+  assert.equal((await finish(paused.S)).verdict.proceed, false, "the done waits for question 2");
+  const p = await P.capAct(paused.S, "cap", "the cap passed and the grace period ended");
+  assert.deepEqual([p.kind, p.created], ["paused", true]);
+  assert.equal((await P.runOutcome(paused.S)).outcome, "paused");
+  // cap-stop: the harness writes the sentinel itself, as stopped.
+  const stopped = await operatorRun({ until: false });
+  await answerOne(stopped);
+  await planned(stopped.a0, "2");
+  await over(stopped.S, "cap-stop");
+  const s = await P.capAct(stopped.S, "cap", "the cap passed and the grace period ended");
+  assert.deepEqual([s.kind, s.created], ["stopped", true]);
+  assert.equal((await P.runOutcome(stopped.S)).outcome, "stopped", "a cap's end is stopped, never completed");
+  // The operator's stop, whatever the policy and the questions.
+  const operator = await operatorRun();
+  await answerOne(operator);
+  await planned(operator.a0, "2");
+  await P.markStopped(operator.S, "operator", "swarm.sh stop");
+  assert.equal((await P.runOutcome(operator.S)).outcome, "stopped");
 });

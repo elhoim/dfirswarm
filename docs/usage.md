@@ -393,11 +393,11 @@ operator`) runs until every question in scope has a disposition under the bar
 ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md)): established;
 partial; a bounded negative or not determinable, each on a coverage record
 another seat reviewed; a premise shown not to hold; out of scope; accepted by
-the operator; or withdrawn. It adds no stricter answer requirement than any run:
-a question the evidence cannot answer is answered `not_determinable` on its
-reviewed coverage record, and the run ends examination-limited. What it takes
-away is the caps and the clock: no wall clock, every cap advisory, no abandon,
-a defect a limitation only names holds it, and a regroup
+the operator; or withdrawn. That is the rule for every run, whatever its stop
+policy; this one adds no stricter answer requirement: a question the evidence
+cannot answer is answered `not_determinable` on its reviewed coverage record,
+and the run ends examination-limited. What it takes away is the caps and the
+clock: no wall clock, every cap advisory, no abandon, and a regroup
 post when nothing moves for N minutes (15): first a nudge to the holder of a
 lead a job still runs under, with what the job is doing, then everyone a window
 later. Only `swarm.sh stop` ends it. A goal can
@@ -433,6 +433,16 @@ each lead its standing offer, a closure waiting for its closer's confirmation,
 a second route with its reason and its product contract.
 
 #### The stop policy: `extend`, `stop`, `resume`
+
+`done` finishes a run, under every stop policy, only when every question in
+scope has a disposition under the bar ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md)):
+established; partial; a bounded negative or not determinable, each on a
+coverage record another seat reviewed; a premise shown not to hold; out of
+scope; accepted by the operator; or withdrawn. A limitation that only names a
+question is none, and neither is a best candidate or a quick negative nobody
+attested: the finish line refuses `done` on them and says the way to a
+disposition. The stop policy decides who else ends the run: a cap pauses or
+stops it and you stop it, whatever the questions' state.
 
 A run ends one of six ways (`runOutcome`, `stop-policy.ts outcome`):
 `completed` (every question established, or settled by a bounded negative that

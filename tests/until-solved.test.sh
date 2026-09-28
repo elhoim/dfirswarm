@@ -37,7 +37,7 @@ grep -q 'Wall clock:' "$sb/SWARM.md" && fail "the contract still names a wall cl
 grep -q 'nothing is stopped for it' "$sb/SWARM.md" || fail "the contract does not say the caps are advisory"
 # The contract says the negative bar's path to an end, and no longer that an examination-limited end is refused.
 grep -q 'it asks nothing more of an answer than any run does' "$sb/SWARM.md" || fail "the contract does not say the policy adds no answer requirement"
-grep -q 'then answer not_determinable (or bounded_negative when' "$sb/SWARM.md" || fail "the contract does not say the not_determinable path"
+grep -q 'then answer not_determinable (or bounded_negative' "$sb/SWARM.md" || fail "the contract does not say the not_determinable path"
 grep -q 'examination-limited, which is a proper end' "$sb/SWARM.md" || fail "the contract does not say examination-limited is an end"
 grep -q 'examination-limited finish is not accepted' "$sb/SWARM.md" && fail "the contract still refuses an examination-limited end"
 pass "--until-solved: no wall clock, no cap required, the mode in budget.json, the registry and the contract"

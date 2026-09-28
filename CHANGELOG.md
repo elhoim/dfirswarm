@@ -29,6 +29,15 @@ All notable changes to this project. The format follows
   worker prompt say the negative-bar path plainly: plan the routes, record
   the coverage record, have another seat review it, answer
   `not_determinable`.
+- **One rule for the end of a run, under every stop policy.** Under
+  cap-pause and cap-stop a limitation that merely named an unanswered
+  question let the agents finish, examination-limited, with no coverage
+  record and no review. Now `done` needs every question in scope disposed
+  under the bar whatever the policy; a cap still pauses or stops the run,
+  and the operator still stops it, whatever the questions' state (paused,
+  stopped; never completed), and an agent may still abandon outside the
+  operator's policy. The contract's Questions section states the rule and
+  the way to not_determinable for every run.
 - **B16 matches services, not words.** The goal's service names came from
   every label of every denied host, so "what did he search for" named
   search.brave.com and "how did he hide" named hide.me. A bare name now

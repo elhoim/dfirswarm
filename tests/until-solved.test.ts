@@ -104,9 +104,16 @@ test("the until-solved gate refuses a question with no disposition under the bar
     assert.match(v.reason, /- question:2 is limited, with no disposition under the bar: .*L-1/);
     assert.match(v.reason, /Only the operator can stop this run/);
   }
-  // The same run, not until solved, ends examination-limited.
+  // The same run under a cap policy is refused too: one rule under every
+  // stop policy (before 2026-09-28 it ended examination-limited on a
+  // question resting on a limitation). Only an abandon ends it there, which
+  // an until-solved run refuses.
   const ordinary = P.finishLineVerdict({ ...checks, gate: { ...gate, until_solved: false } }, false);
-  assert.ok(ordinary.proceed && ordinary.outcome === "examination_limited", JSON.stringify(ordinary));
+  assert.equal(ordinary.proceed, false, JSON.stringify(ordinary));
+  if (!ordinary.proceed) assert.match(ordinary.reason, /done finishes a run, whatever its stop policy, only when every question in scope has a disposition under the bar/);
+  const abandoned = P.finishLineVerdict({ ...checks, gate: { ...gate, until_solved: false } }, true);
+  assert.ok(abandoned.proceed && abandoned.outcome === "abandoned", JSON.stringify(abandoned));
+  assert.equal(P.finishLineVerdict({ ...checks, gate }, true).proceed, false, "no abandon under the operator's stop");
   // A finish line that could not be run is a refusal too, never an end.
   const unavailable = P.finishLineVerdict(null, false, { untilSolved: true });
   assert.equal(unavailable.proceed, false);

@@ -10447,10 +10447,11 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
 
 /**
  * A mechanical defect the finish line names before the run may end, with
- * what fixes it. `named_by` lists the standing limitations that name it:
- * the gate lets a run end once each defect is fixed or named, and a named
- * defect stays one (a limitation permits shutdown; it does not make an
- * unsupported answer supported, and the release still counts it).
+ * what fixes it. `named_by` lists the standing limitations that name it: the
+ * answers check passes once each defect is fixed or named, and a named
+ * defect stays one. The finish line holds done on it under every stop
+ * policy (finish-gate.ts holding): a question ends on a disposition under
+ * the bar, never on a limitation that names it; the release counts it.
  */
 export type LedgerDefect = {
   code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use" | "partial_output";
@@ -11055,8 +11056,8 @@ export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean, o
     };
   }
   if (run.total === 0 || run.passed >= run.total) {
-    // The goal's checks are met: an abandon asked for now is moot, as it
-    // always was; what the harness's gate says decides.
+    // The goal's checks are met: what the harness's gate says decides, and an
+    // abandon counts only while a question has no disposition under the bar.
     const noChecks = run.total === 0 ? "the goal has no checks" : undefined;
     const gate = run.gate;
     if (!gate) return { proceed: true, outcome: "completed", ...(noChecks ? { note: noChecks } : {}) };
@@ -11074,30 +11075,38 @@ export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean, o
           "A lead is disposed of with lead_close; a lead's job is interpreted by recording what its output shows with interprets naming it; a question in scope is answered in the ledger in its section. Then call done again.",
       };
     }
-    // Under the operator's stop policy (--stop operator, --until-solved) the
-    // run ends on what any run ends on: every question in scope with a
+    // One rule under every stop policy (docs/adr/0013, joint-r3 Phase 1a):
+    // done finishes a run only when every question in scope has a
     // disposition under the bar (answered; partial; a bounded negative or not
     // determinable on a coverage record another seat reviewed; a premise
     // shown not to hold; out of scope; accepted; withdrawn). What holds it: a
     // question with none (a best candidate, an unreviewed or stale negative,
     // an answer resting on a limitation, a quick negative nobody attested),
-    // and a defect a limitation only names. The policy takes the caps and the
-    // clock away; it adds no stricter answer requirement.
-    if (until) {
+    // and a defect a limitation only names: "looked, not found" is no end.
+    // The stop policy decides only who else ends the run: a cap pauses or
+    // stops it, and the operator stops it, whatever the questions' state
+    // (paused, stopped; never completed). Under --stop operator nothing else
+    // does, and nobody abandons.
+    {
       const acceptedIds = (gate.questions ?? []).filter((q) => q.outcome === "accepted").map((q) => q.id);
       const byOperator = (l: string) => (gate.accepted ?? []).includes(l) || acceptedIds.some((id) => l.startsWith(`question:${id} `));
       const open = (gate.questions ?? []).filter((q) => q.outcome !== "answered" && q.outcome !== "accepted" && q.outcome !== "withdrawn" && !q.disposition);
       // A gate from before dispositions says nothing of what holds beside its questions: every line an operator did not take holds.
       const holding = gate.holding ?? gate.limited.filter((l: string) => !byOperator(l) && !open.some((q) => l.startsWith(`question:${q.id} `)));
       if (open.length || holding.length) {
+        // Giving up is still a way out where the operator is not the only one who ends the run.
+        if (abandon && !until) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `the goal's checks pass, and ${open.length ? `${open.length} question(s) have no disposition under the bar` : "a defect a limitation only names stands"}; abandoned on purpose` };
         const qs = open.map((q) => `- question:${q.id} is ${q.outcome}, with no disposition under the bar: ${q.blocks.join("; ")}`).join("\n");
         return {
           proceed: false,
           failing: open[0] ? `question:${open[0].id}` : "(a defect a limitation names)",
           reason:
-            `This run's stop is the operator's (--stop operator): no caps, no wall clock, and it ends when ${DISPOSITION_WORDS}; with no material lead open and no defect. ` +
+            (until
+              ? `This run's stop is the operator's (--stop operator): no caps, no wall clock, and it ends when ${DISPOSITION_WORDS}; with no material lead open and no defect. `
+              : `done finishes a run, whatever its stop policy, only when ${DISPOSITION_WORDS}; with no material lead open and no defect. A cap pauses or stops the run whatever the questions' state, and the operator may stop it: that end is stopped, never completed. `) +
             `${open.length ? `No disposition yet:\n${qs}\n` : ""}${holding.length ? `A defect is fixed, never only named:\n${holding.map((l) => `- ${l}`).join("\n")}\n` : ""}` +
-            `${NEGATIVE_PATH_WORDS}. Otherwise take another route (lead_open), or close a lead needs_operator when only the operator can unblock it. Only the operator can stop this run.`,
+            `${NEGATIVE_PATH_WORDS}. Otherwise take another route (lead_open), or close a lead needs_operator when only the operator can unblock it. ` +
+            (until ? "Only the operator can stop this run." : "If the goal cannot be met at all, call done again with abandon: true and say why on the board."),
         };
       }
     }

@@ -5,9 +5,9 @@
  * whether material work is still open (a lead with no disposition, a lead's
  * job with no interpretation) and whether a run that meets its checks
  * answered every question or is examination-limited: a section the answers
- * check found limited or inconclusive, a defect a limitation names, a
- * material lead closed deferred, infeasible or needs_operator. A limitation
- * permits an end; it never reads as an answer.
+ * check found limited or inconclusive, a material lead closed deferred,
+ * infeasible or needs_operator, an acceptance. A limitation is never an
+ * answer, and a defect it only names holds the run (holding).
  *
  * The question register (extensions/questions.ts) is read in the same
  * snapshot: every question in scope beyond the goal's own (a person's, an
@@ -18,17 +18,19 @@
  * question's last amendment is stale, and an accepted question limits the
  * run instead of holding it.
  *
- * The rule is the same under every stop policy: a run ends when every
- * question in scope has a disposition under the bar (docs/adr/0013):
+ * The rule is the same under every stop policy (docs/adr/0013, joint-r3
+ * Phase 1a): done finishes a run only when every question in scope has a
+ * disposition under the bar:
  * established, partial, a bounded negative or not determinable resting on a
  * coverage record another seat reviewed, a premise shown not to hold, out of
  * scope, accepted by the operator, or withdrawn. Each question carries its
- * disposition here. Under the operator's stop policy (--stop operator, its
- * alias --until-solved, budget.json until_solved) nothing short of that
- * ends the run: a question with no disposition, a defect a limitation only
- * names, and a quick negative nobody has attested hold it, each named with
- * what blocks it. The policy takes away the caps and the wall clock; it adds
- * no stricter answer requirement.
+ * disposition here. A question with no disposition, a defect a limitation
+ * only names, and a quick negative nobody has attested hold done, each named
+ * with what blocks it. The stop policy decides only who else ends the run: a
+ * cap pauses or stops it and the operator stops it, whatever the questions'
+ * state (paused, stopped; never completed); under --stop operator (its alias
+ * --until-solved, budget.json until_solved) nothing else does and nobody
+ * abandons. It adds no stricter answer requirement.
  *
  * Read on the host, by the process that runs the finish line
  * (protocol.ts runFinishLine: the pane on a host run, the hub in a VM run),
@@ -70,10 +72,10 @@ export type FinishGate = {
   /** The lines of `limited` that are the operator's acceptances: a limit the operator took, which even a run under --stop operator may end on. */
   accepted?: string[];
   /**
-   * What holds a run under the operator's stop policy beside its questions:
-   * a defect a limitation only names (a defect is fixed, and a named one is
-   * no disposition). Every other line of `limited` is a disposition's, and
-   * makes the end examination-limited.
+   * What holds done beside the questions, under every stop policy: a defect
+   * a limitation only names (a defect is fixed, and a named one is no
+   * disposition). Every other line of `limited` is a disposition's, or a
+   * route's, and makes the end examination-limited.
    */
   holding?: string[];
 };

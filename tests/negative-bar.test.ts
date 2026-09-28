@@ -339,10 +339,15 @@ test("the operator's acceptance: refused while a route is open or a negative unr
   const gate = await finishGate(S, null);
   assert.ok(gate.limited.some((l) => /Q-2 was accepted as a bounded examination by tester@lab/.test(l)));
   assert.deepEqual(gate.questions.find((q) => q.id === "2")?.outcome, "accepted");
-  const verdict = P.finishLineVerdict({ total: 0, passed: 0, checks: [], source: "registry", gate }, false);
+  // The fixture's other goal questions are unanswered, and under one rule for
+  // every stop policy they would hold the done: the acceptance is weighed
+  // alone here, as the only question in scope.
+  const alone = { ...gate, questions: gate.questions.filter((q) => q.id === "2") };
+  assert.ok(!P.finishLineVerdict({ total: 0, passed: 0, checks: [], source: "registry", gate }, false).proceed, "an unanswered question holds the done, under a cap policy too");
+  const verdict = P.finishLineVerdict({ total: 0, passed: 0, checks: [], source: "registry", gate: alone }, false);
   assert.equal(verdict.proceed && verdict.outcome, "examination_limited");
   // Under the operator's stop policy an accepted question holds nothing; one left open does.
-  const until = P.finishLineVerdict({ total: 0, passed: 0, checks: [], source: "registry", gate: { ...gate, until_solved: true, questions: [...gate.questions, { id: "5", outcome: "unanswered", blocks: ["no standing answer entry"] }] } }, false);
+  const until = P.finishLineVerdict({ total: 0, passed: 0, checks: [], source: "registry", gate: { ...alone, until_solved: true, questions: [...alone.questions, { id: "5", outcome: "unanswered", blocks: ["no standing answer entry"] }] } }, false);
   assert.equal(until.proceed, false);
   assert.match((until as { reason: string }).reason, /question:5 is unanswered/);
   assert.doesNotMatch((until as { reason: string }).reason, /question:2 is/);

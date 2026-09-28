@@ -158,9 +158,12 @@ register ([ADR 0011](0011-questions-are-a-register-with-their-askers.md)).
 ## The end of a run, under every stop policy
 
 A generic DFIR platform must allow a question to have no answer: the
-pressure goes on coverage, never on answers. A run ends when every question
-in scope has a **disposition under the bar**, no material lead is open, no
-defect stands and the goal's checks are met. The dispositions are:
+pressure goes on coverage, never on answers. And "until examined, within
+budget" (joint-r3, Phase 1a): a quick "looked, not found" must not end a run.
+So there is one rule, under every stop policy: `done` finishes a run only when
+every question in scope has a **disposition under the bar**, no material
+lead is open, no defect stands (a defect a limitation only names included:
+a defect is fixed) and the goal's checks are met. The dispositions are:
 established; partial; `bounded_negative` resting on a coverage record
 another seat reviewed; `not_determinable` resting on one likewise; a
 premise shown not to hold, on a finding; out of scope; accepted by the
@@ -172,22 +175,33 @@ bounded negative that says the event did not happen under the stronger
 bar, and `examination_limited` when any is not determinable, partial,
 out of scope, a bounded negative short of that, or accepted.
 
-Under `--stop operator` (its alias `--until-solved`) nothing short of that
-ends the run but the operator: no abandon, and a defect a limitation only
-names holds it (a defect is fixed). The same rule, and no stricter one: a
-reviewed `not_determinable` ends it examination-limited. Until 2026-09-28
-the policy still carried an older rule ("every question answered, an
-examination-limited finish is not accepted"), which left the operator's
-acceptance as the only way to end a run on a question the evidence could
-not answer; the CTF pilot on the integrated branch showed it, and it was
-removed. The checks report the dispositions (`dispositions` in the answers
-check's machine line, `disposition` on each question of the finish gate),
-the kickoff and SWARM.md tell the agents the path to one when a question
-cannot be determined (plan the routes, record the coverage, have another
-seat review it, answer `not_determinable`), and the refusal names each
-question with none and what blocks it. Under the cap policies a limitation
-that names a defect still lets a run end examination-limited, as before; a
-cap ends such a run in any case.
+The stop policy decides only who else ends the run, and when a cap pauses or
+stops it. Under `cap-pause` and `cap-stop` a cap pauses or stops the run
+whatever the questions' state, and the operator may stop it; that end is
+`paused` or `stopped`, never `completed`, and an agent may still abandon
+(`abandoned`). Under `--stop operator` (its alias `--until-solved`) there is
+no cap and no wall clock, nobody abandons, and nothing but the finish or the
+operator ends the run; it adds no stricter answer requirement: a reviewed
+`not_determinable` ends it examination-limited, as it ends any run.
+
+Until 2026-09-28 the rule differed by policy. `--stop operator` still
+carried the ctf12 rule ("every question answered, an examination-limited
+finish is not accepted"), which left the operator's acceptance as the only
+way to end a run on a question the evidence could not answer (the CTF pilot
+on the integrated branch showed it). The cap policies went the other way: a
+limitation that merely named an unanswered question let the agents finish,
+examination-limited, with no coverage record and no review: the shallow
+negative this record exists to prevent. Both were replaced by the one rule.
+The checks report the dispositions (`dispositions` in the answers check's
+machine line, `disposition` on each question of the finish gate, `holding`
+for a defect a limitation only names); the contract's Questions section,
+the worker prompt and the refusal tell the agents the path to a
+disposition when a question cannot be determined (plan the routes, record
+the coverage, have another seat review it, answer `not_determinable`), and
+the refusal names each question with none and what blocks it. A goal whose
+answers check runs in report mode (`--report`, an older goal) reports no
+dispositions: its questions end answered, and otherwise the run ends by its
+stop policy.
 
 ## After review
 

@@ -49,8 +49,26 @@ The questions this run answers are in the question register (`questions`,
 the ones you open from the evidence with `question_open`, and the ones people
 ask while it runs. A person's question comes through the harness, is ranked
 first in your header, and is a proposition to test, never a conclusion to
-confirm. Every material question in scope is answered in the ledger in its
-section before the run can end.
+confirm.
+
+The run ends, whatever its stop policy, when every question in scope has a
+disposition under the bar, recorded in the ledger in its section: established;
+partial; a bounded negative or not determinable, each resting on a coverage
+record another seat has reviewed; a premise shown not to hold; out of scope;
+accepted by the operator; or withdrawn. A limitation that only names a
+question, a best candidate, and a quick negative nobody has attested are none:
+"looked, not found" is not an end. A question may have no answer the evidence
+can give, and that is an answer too. When you cannot determine it: plan its
+routes (lead_open or lead_link with routes), search them, record a coverage
+record (kind=coverage: the proposition, the objects searched, the time range,
+the method and settings, what was covered, skipped and failed, the results,
+what is still open, and whether the event would have left a trace in these
+sources), have another seat review it (attest with review {detection,
+reproduced, other_route}), then answer not_determinable (or bounded_negative
+when nothing was found in that scope), resting on the coverage record. The run
+then ends examination-limited, which is a proper end. A cap or the operator
+may end the run before that; such an end is stopped or paused, never
+completed.
 
 ## Caps
 
