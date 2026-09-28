@@ -265,7 +265,7 @@ test("material add and a question's attachment: external, operator supplied, wit
   const policyDoc = join(base, "policy.pdf");
   await writeFile(policyDoc, "%PDF-1.4 the payment policy\n");
   added_(await admitMaterial(S, { mode: "material", path: policyDoc, why: "the payment policy", cls: "case_material", supplied_by: "t", via: "cli" }));
-  refused(await P.recordEntry(a0, { kind: "finding", ...F, value: "The policy needs two approvals", source: "the policy", evidence: "page 1", refs: ["import:mat-0002/policy.pdf"] } as P.LedgerInput), /is case material, which case policy standard does not let a record cite \(material_use case_material=none\)/);
+  refused(await P.recordEntry(a0, { kind: "finding", ...F, value: "The policy needs two approvals", source: "the policy", evidence: "page 1", refs: ["import:mat-0002/policy.pdf"] } as P.LedgerInput), /rests on case material \(import:mat-0002\/policy\.pdf\), which case policy standard does not let a record cite or rest on \(material_use case_material=none\)/);
   // A question's attachment already in the run is recorded as supplied material, once; the original evidence is not.
   const r = await recordAttachments(S, "Q-1", ["import:mat-0001/memo.txt", "input:mail.mbox", "job:j000001/out.txt"], "ana");
   assert.equal(r[0].skipped, "recorded as external material already");

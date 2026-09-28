@@ -1865,7 +1865,7 @@ export async function claimName(
   // A name and what an agent says it is doing sit on every board, header
   // and report: neither may carry a value the run marks sensitive (B9),
   // whatever its origin, the goal's own words included.
-  const leak = await sensitiveRefusalOf(sandboxRoot, [["the name", String(rawName ?? "")], ["doing", doing ? String(doing) : ""]]);
+  const leak = await sensitiveRefusalOf(sandboxRoot, [["the name", String(rawName ?? "")], ["the name", name], ["doing", doing ? String(doing) : ""]]);
   if (leak) return { ok: false, error: `${leak}. Nothing was recorded.` };
   return withTableLock(sandboxRoot, async () => {
     const names = await readNames(sandboxRoot);
@@ -8367,8 +8367,6 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
     const checked = await checkRefs(ctx.sandboxRoot, refs);
     if (!checked.ok) return checked;
     for (const r of checked.resolved) if (r.kind === "job" && r.status && r.status !== "ok") failed.push({ ref: r.ref, status: r.status });
-    const use = await materialUseRefusal(ctx.sandboxRoot, refs);
-    if (use) return { ok: false, reason: use };
   }
   // A finding with no ref is taken, and told what would let a reader check
   // it: the ask rides in the answer, never as an error.
@@ -8488,6 +8486,14 @@ async function mergeSameContent(ctx: SwarmContext, held: { assertOwned(): Promis
 /** Chain and append one entry, and render ledger.md again. */
 async function appendLedgerEntry(ctx: SwarmContext, held: { assertOwned(): Promise<void> }, entries: LedgerEntry[], entry: LedgerEntry, notes: string[]): Promise<LedgerResult> {
   if (entries.length >= LEDGER_MAX_ENTRIES) return { ok: false, reason: `the ledger holds ${LEDGER_MAX_ENTRIES} entries already` };
+  // Every record an agent makes, of every kind, held to the case policy's
+  // material use on what it rests on, transitively: the one place every
+  // entry passes through. The harness's own external entries record the
+  // material; they do not rest on it.
+  if (entry.kind !== "external") {
+    const use = await materialUseRefusal(ctx.sandboxRoot, entry as unknown as Record<string, unknown>);
+    if (use) return { ok: false, reason: use };
+  }
   // Keys in a stable order: the core is computed from the fields, not the line.
   // Chained like the trace: each entry names the one before it.
   const previous = entries.at(-1);
@@ -8501,38 +8507,40 @@ async function appendLedgerEntry(ctx: SwarmContext, held: { assertOwned(): Promi
   return { ok: true, entry, merged: false, total: entries.length, ...(notes.length ? { note: notes.join("; ") } : {}) };
 }
 
-/**
- * The case policy's material use, held at the record (docs/adr/0014): a ref
- * to material whose class the policy says may not be used (`none`) is
- * refused, naming the class and the policy; `reference` and `evidence` are
- * taken, and what rests on them is flagged where the answers are weighed.
- * Read from network/policy.json and the ledger's external entries; a run
- * with neither refuses nothing.
- */
-export async function materialUseRefusal(sandboxRoot: string, refs: string[]): Promise<string | null> {
-  let use: Record<string, string> = {};
-  let preset = "standard";
+/** The classes of material the case policy says may not be used (material_use none), and the preset; null when none is forbidden. */
+export async function forbiddenMaterialClasses(sandboxRoot: string): Promise<{ classes: Set<string>; preset: string } | null> {
   try {
     const p = JSON.parse(await readFile(join(sandboxRoot, "network", "policy.json"), "utf8")) as { policy?: string; material_use?: unknown };
-    preset = String(p.policy ?? "standard");
-    if (p.material_use && typeof p.material_use === "object") use = Object.fromEntries(Object.entries(p.material_use as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
+    if (!p.material_use || typeof p.material_use !== "object") return null;
+    const none = Object.entries(p.material_use as Record<string, unknown>).filter(([, v]) => String(v) === "none").map(([k]) => k);
+    return none.length ? { classes: new Set(none), preset: String(p.policy ?? "standard") } : null;
   } catch {
     return null;
   }
-  if (!Object.values(use).includes("none")) return null;
-  const classOf = new Map<string, string>();
-  for (const e of await readLedger(sandboxRoot, { raw: true }).catch(() => [] as LedgerEntry[])) {
-    if (e.kind !== "external" || !e.source_class) continue;
-    for (const r of e.refs ?? []) {
-      const imp = /^import:([a-z0-9-]{1,64})/.exec(r.trim());
-      classOf.set(imp ? `import:${imp[1]}` : r.trim(), e.source_class);
-    }
-  }
-  for (const r of refs) {
-    const t = r.trim();
-    const key = /^import:([a-z0-9-]{1,64})/.exec(t) ? `import:${/^import:([a-z0-9-]{1,64})/.exec(t)![1]}` : /^net:\d+\/\d+/.exec(t) ? /^net:\d+\/\d+/.exec(t)![0] : t;
-    const cls = classOf.get(key) ?? (key.startsWith("net:") ? "external_capture" : undefined);
-    if (cls && use[cls] === "none") return `${t} is ${cls.replace(/_/g, " ")}, which case policy ${preset} does not let a record cite (material_use ${cls}=none): it is kept on the record, and the examination does not rest on it`;
+}
+
+/**
+ * The case policy's material use, held at the record (docs/adr/0014): a
+ * record that rests on material whose class the policy says may not be used
+ * (`none`) is refused, whatever it cites: the material's own ref, the same
+ * bytes by their digest (`sha256:`), a job's output made from it, a
+ * catalogue member of such a job, or an entry that rests on it (support,
+ * limitations, derived_from, a coverage record's results). The lineage is
+ * the external lineage's (scripts/net-broker.ts), read over what each ref
+ * resolves to, transitively; `reference` and `evidence` are taken, and what
+ * rests on them is flagged where the answers are weighed. A run whose policy
+ * forbids no class refuses nothing, and reads nothing.
+ */
+export async function materialUseRefusal(sandboxRoot: string, cand: string[] | (Partial<LedgerEntry> & Record<string, unknown>)): Promise<string | null> {
+  const forbidden = await forbiddenMaterialClasses(sandboxRoot);
+  if (!forbidden) return null;
+  const record = Array.isArray(cand) ? { refs: cand } : cand;
+  const { externalLineage } = await import("../scripts/net-broker.ts");
+  const lineage = await externalLineage(sandboxRoot);
+  for (const hit of await lineage.probe(record)) {
+    const cls = hit.classes.find((c) => forbidden.classes.has(c));
+    if (!cls) continue;
+    return `${hit.cite} rests on ${cls.replace(/_/g, " ")} (${hit.via.join(", ")}), which case policy ${forbidden.preset} does not let a record cite or rest on (material_use ${cls}=none): it is kept on the record, and the examination does not rest on it`;
   }
   return null;
 }
@@ -9224,6 +9232,8 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
   if (refs.length) {
     const checked = await checkRefs(ctx.sandboxRoot, refs);
     if (!checked.ok) return checked;
+    const use = await materialUseRefusal(ctx.sandboxRoot, refs);
+    if (use) return { ok: false, reason: use };
   }
   let review: NB.NegativeReview | null = null;
   if (input.review !== undefined && input.review !== null) {
@@ -9336,6 +9346,10 @@ export async function disputeEntry(ctx: SwarmContext, input: LedgerActInput): Pr
   if (refs.length) {
     const checked = await checkRefs(ctx.sandboxRoot, refs);
     if (!checked.ok) return checked;
+    if (!input.withdraw) {
+      const use = await materialUseRefusal(ctx.sandboxRoot, refs);
+      if (use) return { ok: false, reason: use };
+    }
   }
   return withTableLock(ctx.sandboxRoot, async (held) => {
     const entries = await readLedger(ctx.sandboxRoot);
@@ -9440,8 +9454,8 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
 /** The fields of an entry, of any version, that can hold what it says. */
 const ENTRY_TEXT_FIELDS = ["value", "evidence", "source", "indicates", "confidence_why", "reasoning", "would_change", "alternatives_open", "alternatives_none_why", "because", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures"] as const;
 
-/** One of a sensitive entry's words, with the entry it came from. */
-export type SensitiveToken = { token: string; seq: number };
+/** One of a sensitive entry's words, with the entry it came from; `exact` when it is a short field held whole, matched as a whole word. */
+export type SensitiveToken = { token: string; seq: number; exact?: boolean };
 
 /**
  * What a sensitive entry says, as the words redaction looks for: each text
@@ -9449,12 +9463,19 @@ export type SensitiveToken = { token: string; seq: number };
  * each identifier-like run inside one (eight characters or more with a
  * digit, an @, a dot, a slash, a backslash or a colon in it: a key, a
  * token, an address, a path, an account), longest first, each with the
- * entry it came from.
+ * entry it came from. With `short`, a field shorter than that (a name such
+ * as "Alice") is kept too, whole and marked `exact`: what a person marked
+ * sensitive stays so whatever its length, and it is matched as a whole word
+ * (B9), never inside another.
  */
-export function sensitiveTokens(entries: LedgerEntry[]): SensitiveToken[] {
+export function sensitiveTokens(entries: LedgerEntry[], o: { short?: boolean } = {}): SensitiveToken[] {
   const out = new Map<string, number>();
-  const add = (t: string, seq: number) => {
-    if (!out.has(t)) out.set(t, seq);
+  const exact = new Set<string>();
+  const add = (t: string, seq: number, isExact = false) => {
+    if (!out.has(t)) {
+      out.set(t, seq);
+      if (isExact) exact.add(t);
+    }
   };
   for (const e of entries) {
     if (!e.sensitive) continue;
@@ -9468,10 +9489,30 @@ export function sensitiveTokens(entries: LedgerEntry[]): SensitiveToken[] {
     for (const w of texts) {
       const whole = (w ?? "").trim();
       if (whole.length >= 6 || (whole.length >= 4 && /\d/.test(whole))) add(whole, e.seq);
+      else if (o.short && sensitiveFold(whole).length >= 2) add(whole, e.seq, true);
       for (const t of whole.match(/[^\s"'`,;()<>[\]{}]{8,}/g) ?? []) if (/[\d@./\\:]/.test(t)) add(t.replace(/[.:]+$/, ""), e.seq);
     }
   }
-  return [...out].map(([token, seq]) => ({ token, seq })).sort((a, b) => b.token.length - a.token.length || a.token.localeCompare(b.token));
+  return [...out].map(([token, seq]) => ({ token, seq, ...(exact.has(token) ? { exact: true } : {}) })).sort((a, b) => b.token.length - a.token.length || a.token.localeCompare(b.token));
+}
+
+/**
+ * A text as B9 compares it: Unicode folded to its compatibility form (NFKC:
+ * a full-width or composed letter is the letter), invisible format and
+ * default-ignorable characters removed, case folded, and the markup a name
+ * loses when it is tidied (backquote, asterisk, underscore, brackets)
+ * dropped and whitespace collapsed, so what is compared is what a board
+ * would show.
+ */
+export function sensitiveFold(text: string): string {
+  return String(text ?? "")
+    .normalize("NFKC")
+    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/[`*_\[\]]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /**
@@ -9484,14 +9525,29 @@ export function sensitiveTokens(entries: LedgerEntry[]): SensitiveToken[] {
  */
 export async function runSensitiveTokens(sandboxRoot: string): Promise<SensitiveToken[]> {
   const entries = await readLedger(sandboxRoot, { raw: true }).catch(() => [] as LedgerEntry[]);
-  return entries.some((e) => e.sensitive) ? sensitiveTokens(entries) : [];
+  return entries.some((e) => e.sensitive) ? sensitiveTokens(entries, { short: true }) : [];
 }
 
-/** The first sensitive value a text holds, compared without regard to case, or null. */
+/**
+ * The first sensitive value a text holds, or null: both folded the same way
+ * (sensitiveFold), a value held inside the text, and a short value held
+ * whole (`exact`) found only as a whole word.
+ */
 export function sensitiveHit(text: string, tokens: SensitiveToken[]): SensitiveToken | null {
   if (!text || !tokens.length) return null;
-  const lower = text.toLowerCase();
-  return tokens.find((t) => lower.includes(t.token.toLowerCase())) ?? null;
+  const folded = sensitiveFold(text);
+  const squeezed = folded.replace(/ /g, "");
+  for (const t of tokens) {
+    const f = sensitiveFold(t.token);
+    if (!f) continue;
+    if (t.exact) {
+      if (new RegExp(`(?<![\\p{L}\\p{N}])${f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}])`, "u").test(folded)) return t;
+      continue;
+    }
+    // A value is found as it would be read: inside the text, or with the spaces a line break or a tidy put in it taken out.
+    if (folded.includes(f) || (f.length >= 6 && squeezed.includes(f.replace(/ /g, "")))) return t;
+  }
+  return null;
 }
 
 /**
@@ -9988,7 +10044,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
  * unsupported answer supported, and the release still counts it).
  */
 export type LedgerDefect = {
-  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale";
+  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use";
   section?: string;
   seqs: number[];
   what: string;

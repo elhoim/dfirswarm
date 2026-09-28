@@ -67,6 +67,7 @@ import {
   ledgerGate,
   negativeReview,
   coverageProblems,
+  forbiddenMaterialClasses,
   readAttestations,
   readDisputes,
   readLedger,
@@ -463,17 +464,37 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
       lines.push(`${section}: #${a.seq} stands on nothing a reader can check now${actsText}`);
     }
   }
-  const open = defects.filter((d) => !d.named_by.length);
-  for (const d of defects) lines.push(`${d.named_by.length ? `defect, named by ${d.named_by.map((n) => `#${n}`).join(", ")}` : "DEFECT"}: ${d.what}${d.named_by.length ? "" : `. Fix: ${d.fix}`}`);
-  const unsupported = Object.entries(gate.unsupported);
-  if (unsupported.length) lines.push(`tokens in no cited entry (counted, not failed; the release weighs them): ${unsupported.map(([seq, t]) => `#${seq}: ${t.join(", ")}`).join("; ")}`);
   // What rests on external material (a capture the fetch service sealed,
   // evidence added after the kickoff, material the operator supplied, and
   // whatever was derived from them: docs/adr/0012, 0014): named with its
   // source classes, never failed. A capture's hash proves its bytes, not
   // their truth or their fit to the time of the events; supplied material
-  // proves nothing by itself; an examiner weighs each.
+  // proves nothing by itself; an examiner weighs each. The one exception is
+  // a class the case policy says no record may rest on (material_use none):
+  // an answer whose resolved lineage reaches one is a defect, whatever path
+  // (a digest, a job's output, a coverage record) carried it there.
   const lineage = await externalLineage(S).catch(() => null);
+  const forbidden = (await forbiddenMaterialClasses(S).catch(() => null))?.classes ?? new Set<string>();
+  if (lineage && forbidden.size) {
+    for (const section of sections) {
+      const a = gate.answers[section];
+      if (!a) continue;
+      const hit = (lineage.classes.get(a.seq) ?? []).filter((c) => forbidden.has(c));
+      if (!hit.length) continue;
+      defects.push({
+        code: "material_use",
+        section,
+        seqs: [a.seq],
+        what: `answer #${a.seq} (${section}) rests on ${hit.join(", ")} material (through ${(lineage.entries.get(a.seq) ?? []).join(", ") || "its lineage"}), which the case policy lets no record rest on (material_use ${hit.map((c) => `${c}=none`).join(", ")})`,
+        fix: `record the answer again (supersedes=${a.seq}) on findings that do not rest on that material, or record a limitation that says the question cannot be answered without it`,
+        named_by: [],
+      });
+    }
+  }
+  const open = defects.filter((d) => !d.named_by.length);
+  for (const d of defects) lines.push(`${d.named_by.length ? `defect, named by ${d.named_by.map((n) => `#${n}`).join(", ")}` : "DEFECT"}: ${d.what}${d.named_by.length ? "" : `. Fix: ${d.fix}`}`);
+  const unsupported = Object.entries(gate.unsupported);
+  if (unsupported.length) lines.push(`tokens in no cited entry (counted, not failed; the release weighs them): ${unsupported.map(([seq, t]) => `#${seq}: ${t.join(", ")}`).join("; ")}`);
   const externalFlags: Record<string, ExternalFlag> = {};
   if (lineage?.entries.size) {
     const external = entries.filter((e) => e.kind === "answer" && !replaced.has(e.seq) && e.section && sections.includes(e.section) && lineage.entries.has(e.seq));
@@ -482,7 +503,7 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   }
   const count = (o: LedgerOutcome) => Object.values(outcomes).filter((x) => x === o).length;
   lines.push(`sections: ${count("answered")} answered, ${count("limited")} examination-limited, ${count("inconclusive")} inconclusive, ${count("unanswered")} unanswered; ${defects.length} defect${defects.length === 1 ? "" : "s"}, ${defects.length - open.length} named by a limitation, ${open.length} open`);
-  if (open.length) lines.push("The run ends once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect, and the release counts it. The negative bar's defects (coverage_missing, coverage_stale, negative_unreviewed, wording) are fixed, never named.");
+  if (open.length) lines.push("The run ends once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect, and the release counts it. The negative bar's defects (coverage_missing, coverage_stale, negative_unreviewed, wording) and an answer resting on material the case policy forbids (material_use) are fixed, never named.");
   return { ok: open.length === 0, lines, outcomes, results, defects, withdrawn, external: externalFlags };
 }
 

@@ -136,8 +136,8 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
   }
 }
 
-/** The negative bar's defects: fixed, never named, and never excused by an acceptance. */
-const NEGATIVE_BAR_CODES = new Set(["coverage_missing", "coverage_stale", "negative_unreviewed", "wording"]);
+/** The negative bar's defects, and an answer resting on material the case policy forbids: fixed, never named, and never excused by an acceptance. */
+const NEGATIVE_BAR_CODES = new Set(["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "material_use"]);
 
 /** How a register question's blockers read: its leads, open or closed limiting. */
 function blocksOf(snap: L.LeadsSnapshot, section: string): string[] {

@@ -605,10 +605,14 @@ export function goalServiceNotes(
     for (const [category, c] of Object.entries(lists.deny?.categories ?? {})) if (c.hosts.some((h) => hostMatches(host, h))) return { category, why: c.why };
     return null;
   };
+  // An adapter is named by its whole id (rdap_domain), its service's name
+  // (the id's first part: rdap, virustotal, nvd; alone or inside another
+  // tool's name such as virustotal_hash) or its host. An underscore
+  // separates words here, as it does in a tool's name.
   const adapterWords = (a: (typeof adapters)[number]) => {
     const first = a.name.split("_")[0];
-    const words = [a.host.toLowerCase()];
-    if (first.length >= 4 && first !== "http") words.push(first);
+    const words = [a.name.toLowerCase(), a.host.toLowerCase()];
+    if (first.length >= 3 && first !== "http" && /^[a-z]+$/.test(first)) words.push(first);
     return words;
   };
   const allowedFor = (a: (typeof adapters)[number]): string | null => {
@@ -621,8 +625,11 @@ export function goalServiceNotes(
     if (a.key && !(lists.keys ?? new Set()).has(a.key.env)) return `${a.name} needs a host-managed key (${a.key.env}) that is not configured on this host`;
     return null;
   };
-  for (const a of adapters) {
-    const hit = adapterWords(a).find((w) => new RegExp(`(?<![\\w.-])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-]|\\.[a-z])`, "i").test(lower));
+  const names = (w: string) => new RegExp(`(?<![a-z0-9.-])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9-]|\\.[a-z])`, "i").test(lower);
+  // An adapter named by its whole id is said first, as itself (rdap_ip, not the first rdap adapter).
+  const ordered = [...adapters.filter((a) => names(a.name)), ...adapters.filter((a) => !names(a.name))];
+  for (const a of ordered) {
+    const hit = adapterWords(a).find(names);
     if (!hit || said.has(a.host)) continue;
     said.add(a.host);
     const why = allowedFor(a);

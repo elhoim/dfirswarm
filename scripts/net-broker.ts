@@ -860,7 +860,17 @@ export function jobOfPrincipal(principal: string): string | null {
  * every capture and every import sealed before it started, and is marked so.
  * A job that fetched under a grant is external by what it fetched.
  */
-export async function externalLineage(sandbox: string): Promise<{ captures: Set<string>; jobs: Map<string, string[]>; entries: Map<number, string[]>; classes: Map<number, string[]>; material: Map<string, string> }> {
+export type ExternalLineage = {
+  captures: Set<string>;
+  jobs: Map<string, string[]>;
+  entries: Map<number, string[]>;
+  classes: Map<number, string[]>;
+  material: Map<string, string>;
+  jobClasses: Map<string, string[]>;
+  probe: (cand: Partial<P.LedgerEntry> & Record<string, unknown>) => Promise<Array<{ cite: string; via: string[]; classes: string[] }>>;
+};
+
+export async function externalLineage(sandbox: string): Promise<ExternalLineage> {
   const S = resolve(sandbox);
   const state = await readNetState(S);
   const ledger = await P.readLedger(S, { raw: true }).catch(() => [] as P.LedgerEntry[]);
@@ -873,8 +883,12 @@ export async function externalLineage(sandbox: string): Promise<{ captures: Set<
   const material = new Map<string, string>();
   /** A digest of external bytes, and what it came from. */
   const digests = new Map<string, string>();
+  /** A store path an external object resolves to, and the object's key. */
+  const pathMaterial = new Map<string, string>();
   const published: Array<{ ref: string; at: number }> = [];
   const classOf = (via: string): string[] => {
+    const base = via.replace(/ \(.*$/, "").trim();
+    if (material.has(base)) return [material.get(base) as string];
     const src = /^(net:\d+\/\d+|import:[a-z0-9-]+)/.exec(via)?.[1];
     if (src && material.has(src)) return [material.get(src) as string];
     const job = /^job:(j\d{6})/.exec(via)?.[1];
@@ -918,20 +932,34 @@ export async function externalLineage(sandbox: string): Promise<{ captures: Set<
       if (j) taint(j, [f.capture]);
     }
   }
-  // Material recorded as external on the ledger (swarm.sh evidence add, material add, a question's attachment).
+  // Material recorded as external on the ledger (swarm.sh evidence add, material add, a question's attachment):
+  // indexed by the object it resolves to (an import, a job's file, a capture) and by its digest, whatever it is.
+  const fileKey = (ref: string): string => {
+    const t = ref.trim();
+    const m = /^(job|import):([a-z0-9-]{1,64})\/(?:out\/)?(.+)$/.exec(t);
+    return m ? `${m[1]}:${m[2]}/${m[3]}` : t;
+  };
   for (const e of ledger) {
     if (e.kind !== "external" || e.source_class === "external_capture") continue;
+    const cls = String(e.source_class ?? "operator_supplied");
     for (const r of e.refs ?? []) {
       const imp = /^import:([a-z0-9-]{1,64})/.exec(r.trim());
-      const key = imp ? `import:${imp[1]}` : r.trim();
-      if (!material.has(key)) material.set(key, String(e.source_class ?? "operator_supplied"));
+      const key = imp ? `import:${imp[1]}` : fileKey(r);
+      if (!material.has(key)) material.set(key, cls);
       if (imp) {
         published.push({ ref: key, at: Date.parse(String(e.provenance?.at ?? e.at)) || 0 });
         for (const d of await manifestDigests(join(S, "store", "imports", imp[1], "manifest.json"))) if (!digests.has(d)) digests.set(d, key);
-      } else {
-        const sh = /^sha256:([0-9a-f]{64})$/.exec(r.trim());
-        if (sh && !digests.has(sh[1])) digests.set(sh[1], key);
+        continue;
       }
+      const sh = /^sha256:([0-9a-f]{64})$/.exec(r.trim());
+      if (sh) {
+        if (!digests.has(sh[1])) digests.set(sh[1], key);
+        continue;
+      }
+      // A job's output, a capture's file, an input: by the bytes it resolves to.
+      const resolved = await resolveRef(S, r.trim()).catch(() => null);
+      if (resolved && resolved.ok && resolved.sha256 && !digests.has(resolved.sha256)) digests.set(resolved.sha256, key);
+      if (resolved && resolved.ok && resolved.path) pathMaterial.set(resolved.path, key);
     }
   }
   /** What a path or a reference names, as the lineage reads it. */
@@ -945,9 +973,18 @@ export async function externalLineage(sandbox: string): Promise<{ captures: Set<
     if (imp) return `import:${imp[1]}`;
     return null;
   };
+  /** A store path as the file-level key a job's attached output was recorded under. */
+  const pathKey = (p: string): string | null => {
+    const t = p.trim().replace(/^\.\//, "");
+    if (pathMaterial.has(t)) return pathMaterial.get(t) as string;
+    const m = /^store\/(jobs|imports)\/([a-z0-9-]{1,64})\/out\/(.+)$/.exec(t);
+    return m ? `${m[1] === "jobs" ? "job" : "import"}:${m[2]}/${m[3]}` : null;
+  };
   const viaOf = (paths: string[], shas: string[]): string[] => {
     const via: string[] = [];
     for (const p of paths) {
+      const pk = pathKey(p);
+      if (pk && material.has(pk)) via.push(pk);
       const n = named(p);
       if (n?.startsWith("net:") || (n?.startsWith("import:") && material.has(n))) via.push(n);
       else if (n?.startsWith("job:") && jobs.has(n.slice(4))) via.push(n);
@@ -999,43 +1036,103 @@ export async function externalLineage(sandbox: string): Promise<{ captures: Set<
     }
   }
   const importDigests = new Map<string, string[]>();
+  const generationJob = new Map<string, string | null>();
+  /** What one ref of a record rests on that is external: each source it reaches, by name, file or bytes. */
+  const refVia = async (r: string): Promise<string[]> => {
+    const via: string[] = [];
+    const t = r.trim();
+    const fk = fileKey(t);
+    if (material.has(fk)) via.push(fk);
+    const n = named(t);
+    if (n?.startsWith("net:") || (n?.startsWith("import:") && material.has(n)) || (n?.startsWith("job:") && jobs.has(n.slice(4)))) via.push(t);
+    const sh = /^sha256:([0-9a-f]{64})$/.exec(t);
+    if (sh && digests.has(sh[1])) via.push(`${t} (${digests.get(sh[1])}, by its bytes)`);
+    const imp = /^import:([a-z0-9-]{1,64})/.exec(t);
+    if (imp && !material.has(`import:${imp[1]}`)) {
+      if (!importDigests.has(imp[1])) importDigests.set(imp[1], await manifestDigests(join(S, "store", "imports", imp[1], "manifest.json")));
+      const hit = (importDigests.get(imp[1]) ?? []).find((d) => digests.has(d));
+      if (hit) via.push(`${t} (${digests.get(hit)}, by its bytes)`);
+    }
+    // A catalogue member is what its generation's job read.
+    const mem = /^member:([a-z0-9-]+)#\d+$/.exec(t);
+    if (mem) {
+      if (!generationJob.has(mem[1])) {
+        let job: string | null = null;
+        try {
+          job = String((JSON.parse(await readFile(join(S, "catalog", "gen", mem[1], "generation.json"), "utf8")) as { job?: string }).job ?? "") || null;
+        } catch {
+          job = null;
+        }
+        generationJob.set(mem[1], job);
+      }
+      const job = generationJob.get(mem[1]);
+      if (job && jobs.has(job)) via.push(`${t} (job:${job})`);
+    }
+    return via;
+  };
+  /** The classes a list of sources carries. */
+  const classesOfVia = (via: string[]): Set<string> => {
+    const cls = new Set<string>();
+    for (const v of via) {
+      const base = v.replace(/ \(.*$/, "").trim();
+      if (material.has(base)) cls.add(material.get(base) as string);
+      const inner = / \(([^,)]+)(?:, by its bytes)?\)$/.exec(v)?.[1];
+      if (inner && material.has(inner)) cls.add(material.get(inner) as string);
+      if (inner) for (const c of classOf(inner)) cls.add(c);
+      for (const c of classOf(v)) cls.add(c);
+    }
+    return cls;
+  };
+  /** Every ref a record carries: its objects, a coverage record's results, an attribution's basis, alternatives' tests, qualifications. */
+  const recordRefs = (e: Partial<P.LedgerEntry> & Record<string, unknown>): string[] => {
+    const out = [...(e.refs ?? [])];
+    for (const r of (e.result_refs as string[] | undefined) ?? []) if (!/^E-\d+$/.test(r)) out.push(r);
+    for (const r of e.attribution?.basis_refs ?? []) out.push(r);
+    for (const a of (e.alternatives as Array<{ test_refs?: string[] }> | undefined) ?? []) out.push(...(a.test_refs ?? []));
+    for (const q of (e.qualifies as Array<{ ref?: string }> | undefined) ?? []) if (q.ref) out.push(q.ref);
+    return out;
+  };
+  /** Every entry a record rests on: its support and limitations, what it derives from, a coverage record's result entries. */
+  const recordEdges = (e: Partial<P.LedgerEntry> & Record<string, unknown>): number[] => [
+    ...(e.support ?? []).map((x) => x.seq),
+    ...(e.limitations ?? []).map((x) => x.seq),
+    ...(e.rel ?? []).filter((x) => x.kind === "derived_from").map((x) => x.to),
+    ...((e.result_refs as string[] | undefined) ?? []).filter((r) => /^E-\d+$/.test(r)).map((r) => Number(r.slice(2))),
+  ];
   const entries = new Map<number, string[]>();
   for (let changed = true; changed; ) {
     changed = false;
     for (const e of ledger) {
       if (entries.has(e.seq)) continue;
       const via: string[] = [];
-      if (e.kind === "external") via.push(...(e.refs ?? []));
-      for (const r of e.refs ?? []) {
-        const n = named(r);
-        if (n?.startsWith("net:") || (n?.startsWith("import:") && material.has(n)) || (n?.startsWith("job:") && jobs.has(n.slice(4)))) via.push(r);
-        const sh = /^sha256:([0-9a-f]{64})$/.exec(r.trim());
-        if (sh && digests.has(sh[1])) via.push(`${r} (${digests.get(sh[1])}, by its bytes)`);
-        const imp = /^import:([a-z0-9-]{1,64})/.exec(r.trim());
-        if (imp && !material.has(`import:${imp[1]}`)) {
-          if (!importDigests.has(imp[1])) importDigests.set(imp[1], await manifestDigests(join(S, "store", "imports", imp[1], "manifest.json")));
-          const hit = (importDigests.get(imp[1]) ?? []).find((d) => digests.has(d));
-          if (hit) via.push(`${r} (${digests.get(hit)}, by its bytes)`);
-        }
-      }
-      for (const edge of [...(e.support ?? []), ...(e.limitations ?? [])]) if (entries.has(edge.seq)) via.push(`E-${edge.seq}`);
-      for (const rel of e.rel ?? []) if (rel.kind === "derived_from" && entries.has(rel.to)) via.push(`E-${rel.to}`);
+      if (e.kind === "external") via.push(...(e.refs ?? []).map((r) => (/^import:/.test(r.trim()) ? r : fileKey(r))));
+      for (const r of recordRefs(e as P.LedgerEntry & Record<string, unknown>)) via.push(...(await refVia(r)));
+      for (const seq of recordEdges(e as P.LedgerEntry & Record<string, unknown>)) if (entries.has(seq)) via.push(`E-${seq}`);
       if (via.length) {
         const uniq = [...new Set(via)];
         entries.set(e.seq, uniq);
-        const cls = new Set<string>(e.kind === "external" && e.source_class ? [e.source_class] : []);
-        for (const v of uniq) {
-          const src = named(v.replace(/ \(.*$/, ""));
-          if (src && material.has(src)) cls.add(material.get(src) as string);
-          const by = / \(([^,)]+)(?:, by its bytes)?\)$/.exec(v)?.[1];
-          if (by && material.has(by)) cls.add(material.get(by) as string);
-          for (const c of classOf(v)) cls.add(c);
-        }
+        const cls = classesOfVia(uniq);
+        if (e.kind === "external" && e.source_class) cls.add(e.source_class);
         entryClasses.set(e.seq, cls);
         changed = true;
       }
     }
   }
   const classes = new Map<number, string[]>([...entryClasses].map(([k, v]) => [k, [...v].sort()]));
-  return { captures, jobs, entries, classes, material };
+  /**
+   * A record not yet written, held to the same lineage: what each of its
+   * refs and each entry it rests on reaches, and the classes of each. The
+   * material-use check reads it before a record is appended.
+   */
+  const probe = async (cand: Partial<P.LedgerEntry> & Record<string, unknown>): Promise<Array<{ cite: string; via: string[]; classes: string[] }>> => {
+    const out: Array<{ cite: string; via: string[]; classes: string[] }> = [];
+    for (const r of recordRefs(cand)) {
+      const via = await refVia(r);
+      if (via.length) out.push({ cite: r, via, classes: [...classesOfVia(via)].sort() });
+    }
+    for (const seq of recordEdges(cand)) if (entries.has(seq)) out.push({ cite: `E-${seq}`, via: entries.get(seq) ?? [], classes: classes.get(seq) ?? [] });
+    return out;
+  };
+  const jobClassesOut = new Map<string, string[]>([...jobClasses].map(([k, v]) => [k, [...v].sort()]));
+  return { captures, jobs, entries, classes, material, jobClasses: jobClassesOut, probe };
 }
