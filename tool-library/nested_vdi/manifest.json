@@ -1,0 +1,81 @@
+{
+  "name": "nested_vdi",
+  "description": "Read a VirtualBox VDI that lies inside an E01 or raw image, in place: found by its NTFS data runs (a deleted one too) or at an offset, then through the VDI block map. info: header, block counts, guest partitions; ls: list a guest directory (paged); extract: one guest file to output; read: guest bytes. pyewf for E01, pytsk3 for ls/extract.",
+  "params": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "info",
+        "ls",
+        "extract",
+        "read"
+      ],
+      "description": "info (default), ls, extract or read"
+    },
+    "image": {
+      "type": "string",
+      "description": "The outer image: an E01 (its other segments found beside it) or a raw image",
+      "required": true
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Where the outer volume starts, in 512-byte sectors (default 0)"
+    },
+    "runs": {
+      "type": "array",
+      "description": "The VDI file's data runs in order, each [lcn, clusters] or {\"lcn\", \"clusters\"}, lcn null for a sparse run; omit when the VDI is contiguous"
+    },
+    "runs_file": {
+      "type": "string",
+      "description": "The runs from a file: JSON (a list, or an object with runs) or one \"lcn clusters\" pair per line (lcn sparse for a sparse run)"
+    },
+    "cluster_size": {
+      "type": "integer",
+      "description": "The outer volume's cluster size in bytes, for the runs (default 4096)"
+    },
+    "vdi_offset": {
+      "type": "integer",
+      "description": "Where the VDI header starts, in bytes into the file the runs give, or into the volume when there are none (default 0)"
+    },
+    "partition": {
+      "type": "integer",
+      "description": "The guest partition's start sector, as info lists it (default: the only file system)"
+    },
+    "path": {
+      "type": "string",
+      "description": "A path in the guest file system: the directory for ls (default /), the file for extract"
+    },
+    "inode": {
+      "type": "integer",
+      "description": "extract by inode (metadata address) instead of path"
+    },
+    "recursive": {
+      "type": "boolean",
+      "description": "ls every directory below path too"
+    },
+    "output": {
+      "type": "string",
+      "description": "Where extract (and read, over 4096 bytes) writes, under your work directory"
+    },
+    "at": {
+      "type": "integer",
+      "description": "read: the guest byte offset (default 0)"
+    },
+    "length": {
+      "type": "integer",
+      "description": "read: how many bytes"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "ls: entries in this page (default 500); every entry is kept in the file all_results names"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"action\": \"ls\", \"image\": \"inputs/disk.E01\", \"offset\": 2048, \"runs_file\": \"work/s01/vdi-runs.json\", \"path\": \"/\", \"recursive\": true}",
+  "by": "sae6e7d",
+  "at": "2026-09-28T07:48:41.000Z",
+  "version": 1,
+  "sha256": "3665e4c4aebb3eb0d69dae57310fba87c0a6cbfb33afbbb30903a8add0ea651f"
+}

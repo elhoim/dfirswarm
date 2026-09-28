@@ -1,0 +1,89 @@
+{
+  "name": "ledger_timeline",
+  "description": "Write a run's dated ledger entries as one timeline in time order (Markdown table, CSV or JSON Lines). Leaves out corrected entries, duplicates (rel duplicates) and seqs in exclude, counting each; kinds, since/until and match narrow it; a sensitive entry is withheld unless asked; redact withholds patterns. Marks corrections, attests and disputes.",
+  "params": {
+    "output": {
+      "type": "string",
+      "description": "File to write the timeline to, under your work directory (.md, .csv or .jsonl picks the format)",
+      "required": true
+    },
+    "ledger": {
+      "type": "string",
+      "description": "The ledger's entries (default ledger/entries.jsonl); attestations.jsonl and disputes.jsonl beside it are read too"
+    },
+    "format": {
+      "type": "string",
+      "enum": [
+        "markdown",
+        "csv",
+        "jsonl"
+      ],
+      "description": "Output format (default: from the output's extension, else markdown)"
+    },
+    "kinds": {
+      "type": "array",
+      "description": "Entry kinds to take (default [\"event\"]); an entry of another kind is taken only if it has a time"
+    },
+    "exclude": {
+      "type": "array",
+      "description": "Entry numbers to leave out (7, \"7\" or \"#7\"), e.g. one event mirrored by another"
+    },
+    "keep_duplicates": {
+      "type": "boolean",
+      "description": "Keep entries that say they duplicate another (rel duplicates); default false"
+    },
+    "include_superseded": {
+      "type": "boolean",
+      "description": "Keep corrected entries beside their corrections, marked; default false"
+    },
+    "since": {
+      "type": "string",
+      "description": "Earliest UTC time or date to keep (ISO 8601)"
+    },
+    "until": {
+      "type": "string",
+      "description": "Latest UTC time or date to keep, inclusive at the precision given (ISO 8601)"
+    },
+    "match": {
+      "type": "string",
+      "description": "Case-insensitive regex an entry's value, source, evidence or clock must match"
+    },
+    "sensitive": {
+      "type": "string",
+      "enum": [
+        "withhold",
+        "keep",
+        "drop"
+      ],
+      "description": "An entry marked sensitive: its words withheld and its number kept (default), shown, or left out"
+    },
+    "redact": {
+      "type": "array",
+      "description": "Regexes whose matches are replaced by [withheld] in every kept row"
+    },
+    "title": {
+      "type": "string",
+      "description": "The Markdown heading (default Timeline)"
+    },
+    "note": {
+      "type": "string",
+      "description": "A paragraph under the heading: scope, caveats, clocks"
+    },
+    "columns": {
+      "type": "array",
+      "description": "Columns in order, from time, event, kind, source, evidence, clock, precision, confidence, refs, by, entry (default time, event, clock, entry)"
+    },
+    "link": {
+      "type": "string",
+      "description": "Where each E-n links in Markdown (default: ledger.md beside the entries, relative to the output; empty for none)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "{\"output\": \"work/s01/timeline.md\", \"since\": \"2026-01-01\", \"exclude\": [12], \"columns\": [\"time\", \"event\", \"clock\", \"by\", \"entry\"]}",
+  "by": "se5fdcd",
+  "at": "2026-09-28T07:48:41.000Z",
+  "version": 3,
+  "sha256": "eaf2a2b51c825922340d76220625b894ebe80b2c7da6afdf7e31c3dbdbc39891"
+}
