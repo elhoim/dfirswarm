@@ -206,6 +206,46 @@ test("one check result per revision, and the revision moves with the report, a j
   assert.notEqual(await rev(), r3);
 });
 
+test("an offer made, delivered or declined does not move the revision the finish is checked at; a closure offered to its closer to confirm does", async () => {
+  const { S, a0, a1 } = await run(GOAL);
+  for (const a of ["a0", "a1"]) await traceRow(S, a, "bash");
+  const rev = async () => (await P.stateRevision(S)).revision;
+  // a1 waits: an unheld lead is offered to it in the open's own act.
+  const since = new Date(Date.now() - 5 * 60_000).toISOString();
+  await mkdir(join(S, "inbox", "a1"), { recursive: true });
+  await writeFile(join(S, "inbox", "a1", "waiting.json"), JSON.stringify({ since, started_at: since }));
+  const opened = await L.openLead(a0, { title: "Read the prefetch folder", why: "background", material: false });
+  assert.ok(opened.ok && opened.offered_to === "a1", JSON.stringify(opened));
+  const r0 = await rev();
+  const offer = (await L.leadsSnapshot(S)).state.leads.get("L-1")!.offers.at(-1)!;
+  await L.markOffersSeen(S, "a1", [{ lead: "L-1", offer: offer.seq }]);
+  assert.ok((await L.leadsSnapshot(S)).state.leads.get("L-1")!.offers.at(-1)!.seen_at, "delivered");
+  assert.equal(await rev(), r0, "a delivery is bookkeeping");
+  assert.ok((await L.answerLeadOffer(a1, "L-1", { action: "decline", why: "I hold the registry work" })).ok);
+  assert.equal(await rev(), r0, "a decline is bookkeeping");
+  await F.recordCheck(S, "a0", r0, { proceed: true, outcome: "completed" }, { total: 1, passed: 1, checks: [] });
+  assert.equal((await F.checkAt(S, await rev()))?.proceed, true, "the check at that revision still stands for the next done");
+  // A claim is not bookkeeping.
+  assert.ok((await L.claimLead(a0, "L-1")).ok);
+  assert.notEqual(await rev(), r0);
+  // A closure offered to its closer to confirm holds the finish, so it moves the revision.
+  const f = await P.recordEntry(a0, { kind: "finding", ...F4, value: "Nothing ran from the temp folder", source: "prefetch", evidence: "the listing" } as P.LedgerInput);
+  assert.ok(f.ok);
+  if (!f.ok) return;
+  assert.ok((await L.closeLead(a0, "L-1", { disposition: "resolved", ref: `E-${f.entry.seq}` })).ok);
+  const g = await P.recordEntry(a1, { kind: "finding", ...F4, value: "Nothing ran from the temp folder after ten", source: "prefetch", evidence: "the listing, sorted", supersedes: f.entry.seq, because: "the listing was unsorted" } as P.LedgerInput);
+  assert.ok(g.ok, (g as { reason?: string }).reason);
+  const before = await rev();
+  await L.reopenOnLedger(S);
+  assert.ok((await L.leadsSnapshot(S)).state.leads.get("L-1")!.confirm, "offered to its closer to confirm");
+  assert.notEqual(await rev(), before, "a closure to confirm moves it");
+  // The line test itself: only the registers' offer bookkeeping.
+  assert.equal(P.offerBookkeeping('{"v":1,"seq":4,"at":"x","by":"a1","ev":"offer_seen","lead":"L-1","offer":3}'), true);
+  assert.equal(P.offerBookkeeping('{"v":1,"seq":3,"at":"x","by":"system","ev":"offer","lead":"L-1","to":"a1","reason":"wake"}'), true);
+  assert.equal(P.offerBookkeeping('{"v":1,"seq":3,"at":"x","by":"system","ev":"offer","lead":"L-1","to":"a1","reason":"confirm"}'), false);
+  assert.equal(P.offerBookkeeping('{"v":1,"seq":5,"at":"x","by":"a1","ev":"open","lead":"L-2","title":"say \\"ev\\":\\"offer\\" here"}'), false);
+});
+
 test("a summary cites questions symbolically: a reworded correction of an answer keeps it standing; a changed support, or a question withdrawn, makes it be recorded again", async () => {
   const { S, a0, a1, a2 } = await run(GOAL);
   const f1 = await P.recordEntry(a0, { kind: "finding", ...F4, value: "Bob", source: "log", evidence: "line 1", refs: ["unresolved:fixture"], answers: ["1"] } as P.LedgerInput);

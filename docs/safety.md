@@ -267,9 +267,11 @@ back to a host run on its own.
     (below).
 
   The host resolves the credentials at kickoff, so a subscription token must
-  outlive the run (`--min-expiry` asks Pi for one that does). No VM can
-  refresh a token, so one revoked at the provider mid-run ends every seat
-  that uses it.
+  outlive the run (`--min-expiry` asks Pi for one that does) or be renewed on
+  the host: at half its validity the watchdog mints it again and msb rotates
+  it live in each seat's VM, never through the guest. No VM can refresh a
+  token, so one revoked at the provider mid-run ends every seat that uses
+  it.
   [ADR 0009](adr/0009-agents-live-in-microvms.md).
 - **What leaves with the package, and how a recipient checks it.**
   `swarm.sh package <id> --sign` signs the package's `MANIFEST.txt` with the

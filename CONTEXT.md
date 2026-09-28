@@ -141,8 +141,32 @@ claimed and closed by the agents themselves; nobody assigns one.
 _Avoid_: task, ticket, assignment
 
 **Need**:
-What a lead cannot go on without: another lead's outcome, or a standing
-ledger entry. Never a job: a job's exit status settles nothing.
+What a lead cannot go on without and has not come yet: another lead's
+outcome, or an entry that does not stand yet. Never an entry that already
+stands (that is where the lead comes from) and never a job: a job's exit
+status settles nothing. A need dropped is withdrawn with why, never met.
+
+**Offer**:
+First claim on a piece of work for one seat, for a minute from when it
+reached the seat: a lead nobody holds, a hand-off, a parked lead, a reopen
+after the operator's note, a closure to confirm, or a person's question.
+Accepted, declined, invalidated by a change to the work, or lapsed.
+_Avoid_: wake, assignment
+
+**Parked lead**:
+A lead held with no job and no act on it for ten minutes while its holder
+works elsewhere: shown to everyone and offered to an idle seat unless the
+holder acts on it.
+
+**Hand-off**:
+A holder letting a lead go to another seat with what it did and what comes
+next (`lead_handoff`): an offer to the seat named, or to the one idle
+longest.
+
+**Second route**:
+A lead held on a question another seat's lead already covers, because it
+says how its route differs (or that it verifies independently). Without
+that, such a lead opens unheld.
 
 **Disposition**:
 How a lead ended, and what that cites: resolved, negative, duplicate,
@@ -211,6 +235,18 @@ route. Until then the negative is unreviewed, and the run does not finish.
 The operator taking a question's limits as they stand (bounded, or not
 determinable) for one revision. It makes the run examination limited.
 
+**Best candidate**:
+An answer a review holds as what the evidence best supports, not shown to
+be the answer: a part not established, a medium or low confidence, or a
+route its `would_change` names that nothing took. Never counted as
+answered.
+
+**Route review**:
+Another seat's word on a lead closed deferred, infeasible or
+needs_operator, once its questions are disposed: whether the route it could
+not take still matters. Until then, or the operator's acceptance, it limits
+the finish.
+
 ### Stopping
 
 **Sentinel**:
@@ -219,6 +255,20 @@ clock; agreement on the board is not.
 
 **Done**:
 An agent's own exit: it records why, drops its claims, and its session ends.
+Ending the run is one seat's done, the coordinator's; any other seat's is
+answered "not yours" and changes nothing.
+
+**Coordinator**:
+The seat that holds the finish, by a lease with a generation: normally the
+one that published the report last. Another seat takes it over when it is
+done, dead, compacting or silent. It answers what landed late against the
+report with a typed resolution, and its done runs the checks.
+
+**Readiness**:
+Whether the registers say the finish could pass now (no material lead
+open, no job uninterpreted, every question in scope answered with nothing
+the ledger gate holds against it), shown in every header and posted when it
+turns. The goal's own checks run only at the coordinator's done.
 
 **Reap**:
 The harness marking a silent agent dead and dropping its claims. Not done —

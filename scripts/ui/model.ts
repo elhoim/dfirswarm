@@ -34,7 +34,8 @@ import {
   type SwarmSummary,
 } from "../../extensions/observe.ts";
 import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, runOutcome, stopPolicyOf, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
-import { awaitingInterpretation, leadsSnapshot, OPERATOR_REQUESTS, operatorHosts, questionCoverage, rankedLeads, type AwaitingJob, type LeadView } from "../../extensions/leads.ts";
+import { awaitingInterpretation, leadsSnapshot, OPERATOR_REQUESTS, operatorHosts, parkedLeads, questionCoverage, rankedLeads, type AwaitingJob, type LeadView, type ParkedLead } from "../../extensions/leads.ts";
+import { lateItems, readFinish, readiness, type LateItem } from "../../extensions/finish.ts";
 import { HUMAN_ORIGINS, originWords, questionViews, viewContext, type QuestionView, type TriageItem } from "../../extensions/questions.ts";
 import { verifySignedActs, type SignedAct } from "../questions-cli.ts";
 import { claimSequences, type ClaimSequence } from "../../ui/src/lib/claim-sequences.ts";
@@ -656,7 +657,36 @@ export type LeadsPanelView = {
   hosts: string[];
   coverage: { questions: string[]; existence: string[]; unanswered: string[]; uncovered: string[]; open_leads_for: Record<string, string[]> };
   awaiting: AwaitingJob[];
+  /** Held leads with nothing done on them while their holders work elsewhere, offered on (docs/adr/0015). */
+  parked: ParkedLead[];
+  /** The finish (extensions/finish.ts): readiness by the registers, the coordinator, the last check, what is late against the report; null once the run is finished. */
+  finish: FinishPanel | null;
 };
+
+export type FinishPanel = {
+  ready: boolean;
+  items: string[];
+  limited: string[];
+  coordinator: { holder: string; generation: number; why: string; report: string | null } | null;
+  last_check: { at: string; by: string; proceed: boolean; outcome: string | null; reason: string | null; current: boolean } | null;
+  late: LateItem[];
+};
+
+/** The finish as the console shows it: read only (the readiness post is the agents' headers' to make). */
+async function finishPanel(sandbox: string, snap: Awaited<ReturnType<typeof leadsSnapshot>>): Promise<FinishPanel | null> {
+  if (existsSync(join(sandbox, "done", "SWARM_DONE"))) return null;
+  const r = await readiness(sandbox, snap);
+  const st = await readFinish(sandbox);
+  const last = st.checks.at(-1);
+  return {
+    ready: r.ready,
+    items: r.items,
+    limited: r.limited,
+    coordinator: st.lease ? { holder: st.lease.holder, generation: st.lease.generation, why: st.lease.why, report: st.lease.report } : null,
+    last_check: last ? { at: last.at, by: last.by, proceed: last.proceed, outcome: last.outcome ?? null, reason: last.reason ?? null, current: last.revision === r.revision } : null,
+    late: st.lease ? await lateItems(sandbox, st.lease.holder, st.lease.report) : [],
+  };
+}
 
 /** The lead register as the console shows it (extensions/leads.ts), read from the files. */
 export async function readLeads(sandbox: string): Promise<LeadsPanelView> {
@@ -680,6 +710,8 @@ export async function readLeads(sandbox: string): Promise<LeadsPanelView> {
     hosts: await operatorHosts(sandbox),
     coverage: { questions: snap.goal.questions, existence: snap.goal.existence, ...cov },
     awaiting: await awaitingInterpretation(sandbox, snap.state, snap.jobs, snap.ledger),
+    parked: await parkedLeads(sandbox, snap).catch(() => [] as ParkedLead[]),
+    finish: await finishPanel(sandbox, snap).catch(() => null),
   };
 }
 

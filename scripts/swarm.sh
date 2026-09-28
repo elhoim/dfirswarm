@@ -3276,7 +3276,9 @@ else:
 goal = goal.rstrip("\n") + (
     "\n\n## How the checks are run\n\n" + runs_checks +
     "While any of them fails, done is refused, and the refusal names each check that fails and what makes it pass. "
-    "done ends the swarm for everyone: call it when the definition of done is met, not when your slice is.\n"
+    "done ends the swarm for everyone, and it is one seat's call: the seat that coordinates the finish (every header names it; "
+    "normally the one that published the report last). Any other seat's done is answered not yours and changes nothing: "
+    "when your slice ends, post it, review the report (finish ack) or say what is still open, and wait.\n"
 )
 text = text.replace("{{GOAL_DOCUMENT}}", goal)
 # An until-solved run: no wall clock, advisory caps, no bail-out but the
@@ -6487,9 +6489,12 @@ EOF
 Join swarm ${swarm_id}. Read SWARM.md and team.json, then call inbox: it gives
 you the board (threads/main is a directory of posts) and says whether the swarm
 is done (done/SWARM_DONE exists only then). If it is done, terminate.
-Otherwise: nobody has been given a job here. Read the goal, see on the board
-what your peers have taken, decide what you are going to do, and call
-name(name, doing) to say what to call you and what you are taking on. Then
+Otherwise: nobody has been given a job here. Read the goal, the registers'
+header inbox gives you (leads, questions) and the board for what your peers
+have taken, decide what you are going to do, and call name(name, doing) to say
+what to call you and what you are taking on. Your first name or lead may wait
+a few seconds for your turn; it comes back with what the seats before you
+took, so choose against that. Take a question nobody holds a lead for. Then
 post it and start.
 EOF
   fi
@@ -10861,10 +10866,13 @@ EOF
       ;;
     lead) cat <<'EOF'
   lead <id> list [--json]                      every lead: the ones waiting on the operator first, then
-                                               active, blocked, open and closed, with needs and dispositions
+                                               active, blocked, open and closed, with needs and dispositions,
+                                               the offer that holds each, the closures to confirm, the parked
+                                               leads, and the finish (ready or what holds it, who coordinates it)
   lead <id> note <L-n> "TEXT" [--allow-host H] the operator's answer to a lead: recorded on it (leads.jsonl),
-                                               the lead reopened when it was closed, posted to the board as
-                                               the examiner to whoever held it; --allow-host adds H to the hosts
+                                               the lead reopened when it was closed (and offered to whoever held
+                                               it first), posted to the board as the examiner to whoever held
+                                               it; --allow-host adds H to the hosts
                                                the run's jobs reach with network=allowlist (a microVM run: each
                                                job's worker is made new; the agents' own VMs keep their network)
   lead <id> reopen <L-n> ["TEXT"]              reopen a closed lead

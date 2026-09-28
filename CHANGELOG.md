@@ -6,6 +6,58 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: one seat finishes, work is offered, and a review says how strongly it holds (ADR 0015)
+
+- **One coordinator ends the run.** `leads/finish.jsonl` holds the finish's
+  lease (the report's last publisher, else the first seat to call done),
+  with a generation and a takeover when its holder is done, dead,
+  compacting or silent. Any other seat's `done` is answered "not yours",
+  quietly (`done_deferred`), and `markDone` refuses its sentinel. Readiness
+  from the registers is in every header and posted when it turns; one check
+  result stands per state revision, which now covers the report's digest,
+  the shared deliverables, the jobs, the policy and the operator's
+  decisions. The report is reviewed with typed acts (`finish ack`), and a
+  result, veto or objection that lands after it needs the coordinator's
+  typed resolution (`finish resolve`). A limiting route stops holding the
+  finish only when its questions are disposed and another seat's
+  `route_review` holds it no longer material, or the operator accepted them.
+  A summary cites questions as `Q-<n>`, bound to each answer's fingerprint.
+  An offer's bookkeeping (made, delivered, declined, lapsed) does not move
+  the revision, so a waiting seat's delivery never makes the coordinator's
+  check run again; a closure offered to its closer to confirm does.
+- **Reviews say how strongly they hold.** An attest of an answer to a
+  question takes `strength` (established or best_candidate) and
+  `answer_review`; a medium or low confidence, a part not established, or an
+  untaken route named in `would_change` allows only a best candidate, which
+  the answers check holds examination-limited. A dispute stays in force on
+  the correction of the entry it named until its disputer withdraws it. An
+  interpretation is bound to its entry. Agents reopen with `lead_reopen`,
+  within the operator's restrictions.
+- **Work is offered.** Wakes, hand-offs (`lead_handoff`), parked leads, a
+  reopen after the operator's note and a closure to confirm are offers: first
+  claim for a minute from delivery, bounded, accepted or declined (`offer`),
+  invalidated by a revision, restart-safe; a person's question's offers run
+  through the same machine. A superseded closure is offered to its closer to
+  confirm (`lead_confirm`) or reopen, never re-pointed. A take on questions
+  another seat covers is unheld unless it says it is a second route or a
+  verification; first choices are staggered at kickoff; names are stable and
+  labels follow the held lead. A standing entry is no need; a dropped need is
+  withdrawn with why; prerequisites open and link in one act, with a product
+  contract. The prompts, the library's leads paragraph and the three CTF goals
+  say so: a follow-up is opened unheld unless it is started next turn, and
+  ending the run is the coordinator's done.
+- **The operator sees it.** The console's Leads tab and `swarm.sh lead <run>
+  list` show the finish (ready by the registers or what holds it, the
+  coordinator, the last check, what is late against the report), the parked
+  leads, and on each lead its standing offer, a closure to confirm, a second
+  route and its product contract; `leads/leads.md` renders the same.
+- **The runtime.** A running job is seen by its outputs, its logs and its CPU
+  and I/O (msb's metrics, or the worker's heartbeat): "suspected stall" is
+  shown, never acted on. The regroup nudges a running job's holder first. A
+  program missing from a job's image is named with its profile in the job
+  record and the console. The seats' subscription tokens are renewed on the
+  host with msb's live secret update, verified against a running VM.
+
 ### Fixed: the question register, after an independent review
 
 - **The hub is the register's one writer.** While a run's hub is up, the

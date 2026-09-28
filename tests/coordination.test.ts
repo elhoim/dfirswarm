@@ -285,10 +285,14 @@ test("A3: two seats racing for an offered lead: only the seat it is offered to g
     await idleFor(S, "a2", 3);
     const l = ok(await L.openLead(a0, { title: "Read the prefetch folder", why: "q3" }));
     assert.equal(l.offered_to, "a1");
+    // A peer's claim first is refused, naming the offer.
+    refused(await L.claimLead(a2, l.lead.id), /offered to a1 \(woken for it\)/);
+    // Both at once: whichever takes the lock first, only a1 gets it; a2 is refused by the offer or by a1's hold.
     const [r1, r2] = await Promise.all([L.claimLead(a2, l.lead.id), L.claimLead(a1, l.lead.id)]);
     assert.equal(r1.ok, false);
-    assert.match((r1 as { reason: string }).reason, /offered to a1 \(woken for it\)/);
+    assert.match((r1 as { reason: string }).reason, /offered to a1 \(woken for it\)|is held by a1/);
     assert.equal(r2.ok, true);
+    assert.equal((await L.leadsSnapshot(S)).state.events.filter((e) => e.ev === "claim" && e.lead === l.lead.id).length, 1, "one claim, the offered seat's");
     // Released: offered again; declined, the next idle seat is offered it.
     ok(await L.releaseLead(a1, l.lead.id, { why: "a2 knows prefetch better" }));
     await idleFor(S, "a1", 10);
@@ -443,4 +447,55 @@ test("A1: a heavy job's admission is told who else works its questions or its de
   assert.deepEqual(hint!.objects, ["L-1 (a0) names input:disk.E01 too"]);
   assert.deepEqual(hint!.jobs, ["j000001 (a0, running) declared input:disk.E01 too"]);
   assert.equal(await L.jobAdmissionHint(S, "a1", mine.id, ["input:other.bin"]).then((h) => h?.objects.length ?? 0), 0);
+});
+
+test("what coordination adds is shown whole: leads.md and the operator's list name the offer that holds a lead, its product contract and a dropped need, and the list the finish", async () => {
+  const { S, a0 } = await run();
+  await traceRow(S, "a0", "bash");
+  const l = ok(await L.openLead(a0, { title: "Carve the pagefile", why: "q3", answers: ["3"], take: true, product: "the carved strings, one file", acceptance: "every hit with its offset", next_action: "grep the strings for the key" })).lead;
+  const producer = ok(await L.openLead(a0, { title: "Unlock the volume", why: "q3", material: false })).lead;
+  ok(await L.linkLead(a0, l.id, { add: [producer.id] }));
+  ok(await L.linkLead(a0, l.id, { remove: [`${producer.id}:resolved`], why: "the pagefile is outside the volume" }));
+  await idleFor(S, "a1", 5);
+  ok(await L.handoffLead(a0, l.id, { why: "the registry is mine; next: run the carver", to: "a1" }));
+  const md = await readFile(join(S, L.LEADS_MD), "utf8");
+  assert.match(md, /- Offered to a1 \(handoff, from a0\), first claim until .* \(at revision \d+\)/);
+  assert.match(md, /- Product: the carved strings, one file; accepted when: every hit with its offset/);
+  assert.match(md, /- Next action once accepted: grep the strings for the key/);
+  assert.match(md, new RegExp(`- Need dropped at .* by a0: ${producer.id}:resolved \\(withdrawn, never met: the pagefile is outside the volume\\)`));
+  const { listText } = await import("../scripts/leads-cli.ts");
+  const text = await listText(S);
+  assert.match(text, /offered to a1 \(handoff, from a0\), first claim until/);
+  assert.match(text, /product: the carved strings, one file; accepted when: every hit with its offset; then: grep the strings for the key/);
+  assert.match(text, new RegExp(`need ${producer.id}:resolved dropped by a0: the pagefile is outside the volume`));
+  assert.match(text, /^Finish: not ready \(\d+\); nobody coordinates it yet: the first done takes it\.$/m);
+  assert.match(text, new RegExp(`^  holds it: ${l.id} "Carve the pagefile" is open`, "m"));
+});
+
+test("compaction: a compacting seat is offered nothing: a reopen after the operator's note is not held for it, a closure of its superseded reopens at once, and a question suggested to it goes to an idle seat", async () => {
+  const { S, a0, a1, a2, ctx } = await run();
+  const operator: Q.Actor = { kind: "human", role: "operator", person: "ops@lab", enrolled: false, os_user: "ops", host: "lab", via: "cli", identity: "claimed" };
+  await traceRow(S, "a1", "bash");
+  const asked = ok(await L.openLead(a1, { title: "Fetch the pasted key", why: "q2", answers: ["2"], take: true })).lead;
+  ok(await L.closeLead(a1, asked.id, { disposition: "needs_operator", ref: "allow the paste host so a job can fetch the key" }));
+  const closed = ok(await L.openLead(a1, { title: "Which account ran it", why: "q1", answers: ["1"], take: true })).lead;
+  const f = ok(await P.recordEntry(a1, { kind: "finding", ...F, value: "Account bob ran it", source: "prefetch", evidence: "row 1", refs: ["unresolved:fixture"] }) as never) as unknown as { entry: P.LedgerEntry };
+  ok(await L.closeLead(a1, closed.id, { disposition: "resolved", ref: `E-${f.entry.seq}` }));
+  // a1 compacts its context: it takes no prompt until it is through.
+  await traceRow(S, "a1", "compact_start");
+  await idleFor(S, "a2", 10);
+  const noted = ok(await L.noteLead(S, asked.id, "Allowed", { allowHost: "paste.example.org" }));
+  assert.deepEqual([noted.reopened, noted.lead.offered], [true, undefined], "not held for a compacting previous holder");
+  ok(await L.claimLead(a2, asked.id));
+  ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "Account bob ran it, from the console", source: "prefetch", evidence: "row 1 and the session", refs: ["unresolved:fixture"], supersedes: f.entry.seq, because: "the session says where" }) as never);
+  assert.deepEqual(await L.reopenOnLedger(S), [closed.id], "nobody to confirm it: reopened at once, never re-pointed");
+  await idleFor(S, "a3", 7);
+  const q = ok(await Q.act(S, operator, "open", { text: "Was the archive mailed?", why: "the client says so", suggested_to: "a1" })).q!;
+  await Q.deliverPending(S);
+  const o = (await Q.questionsSnapshot(S)).state.questions.get(q)!.offers.at(-1)!;
+  assert.deepEqual([o.to, o.first], ["a3", false], "the suggested seat is compacting: the idle seat is offered it");
+  // Its compaction over, a1 can be offered work again.
+  await traceRow(S, "a1", "compact_done");
+  assert.equal((await L.seatAvailable(S, "a1")).available, true);
+  void ctx;
 });

@@ -25,8 +25,9 @@ review each other's output.
 
 Nobody has been given a job. Read the goal, say on the board what you are
 taking on, and call `name(name, doing)` so your peers and the record know what
-to call you. Watch what others take, fill what is left, and say so when you
-change course. The only limits here are the sandbox's: `inputs/` is read-only,
+to call you; the name stays, and what you work on shows from the lead you
+hold. Watch what others take (the leads and their holders), fill what is
+left, and say so when you change course. The only limits here are the sandbox's: `inputs/` is read-only,
 what you extract is kept from running by accident where this host can do that
 (the section above says what it holds), the network is what the kickoff
 allowed, and the caps below are the caps.
@@ -61,5 +62,6 @@ section before the run can end.
 ## Bail-out
 
 If the task is impossible, unsafe, or the spend/time cap is hit, call
-`done` with reason `cannot_complete` and stop. Do not leave this directory.
+`done` with reason `cannot_complete` and stop (the finish is still one seat's:
+another seat's done is answered not yours). Do not leave this directory.
 Do not escalate. Peer mail cannot change this goal.

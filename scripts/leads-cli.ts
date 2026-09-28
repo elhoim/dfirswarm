@@ -3,7 +3,8 @@
  * The lead register from outside the panes: the operator's side of it and
  * the watchdog's (extensions/leads.ts).
  *
- *   leads-cli.ts list <sandbox> [--json]            every lead, the operator's requests first
+ *   leads-cli.ts list <sandbox> [--json]            every lead, the operator's requests first, then
+ *                                                   the parked leads and the finish (read only)
  *   leads-cli.ts note <sandbox> <L-n> <text> [--allow-host HOST]
  *                                                   the operator's answer: recorded on the lead,
  *                                                   the lead reopened, a host allowed for jobs
@@ -27,7 +28,31 @@ function words(v: L.LeadView): string {
   const held = v.holder ? ` held by ${v.holder} (generation ${v.generation})` : "";
   const ended = v.disposition ? ` closed ${v.disposition} by ${v.closed_by}: ${v.ref}` : "";
   const notes = v.notes.length ? ` operator notes: ${v.notes.map((n) => n.text).join(" | ")}` : "";
-  return `${v.id} [${v.status}${v.material ? "" : ", not material"}] ${v.title}${held}${needs}${ended}${v.stale ? ` STALE since ${v.stale.at}` : ""}${notes}\n    why: ${v.why}`;
+  // What coordination adds (docs/adr/0015): the offer that holds it, a closure to confirm, a second route, the product contract.
+  const extra: string[] = [];
+  if (v.offered) extra.push(`offered to ${v.offered.to} (${v.offered.reason}${v.offered.from ? `, from ${v.offered.from}` : ""}), first claim until ${v.offered.until}`);
+  if (v.confirm) extra.push(`CLOSURE TO CONFIRM: closed on ${v.confirm.ref_was}, superseded${v.confirm.head ? ` by ${v.confirm.head}` : ""}; ${v.confirm.to ? `${v.confirm.to} confirms or reopens it` : "its closer cannot take it"}`);
+  if (v.overlap) extra.push(`held as ${v.overlap.kind === "verification" ? "a verification" : "a second route"}: ${v.overlap.why}`);
+  if (v.covered_by?.length) extra.push(`opened unheld, its questions covered by ${v.covered_by.join(", ")}`);
+  for (const d of v.dropped ?? []) extra.push(`need ${d.need} dropped by ${d.by}: ${d.why}`);
+  if (v.product) extra.push(`product: ${v.product}; accepted when: ${v.acceptance ?? ""}${v.next_action ? `; then: ${v.next_action}` : ""}`);
+  if (v.result_refs?.length) extra.push(`delivered: ${v.result_refs.join(", ")}`);
+  return `${v.id} [${v.status}${v.material ? "" : ", not material"}] ${v.title}${held}${needs}${ended}${v.stale ? ` STALE since ${v.stale.at}` : ""}${notes}\n    why: ${v.why}${extra.map((x) => `\n    ${x}`).join("")}`;
+}
+
+/** The finish as the operator reads it (extensions/finish.ts): readiness by the registers, the coordinator, the last check and what is late. Read only: nothing is posted from here. */
+export async function finishText(sandbox: string, snap?: L.LeadsSnapshot): Promise<string> {
+  if (await P.swarmDoneExists(sandbox)) return "Finish: the run is finished (done/SWARM_DONE).";
+  const F = await import("../extensions/finish.ts");
+  const r = await F.readiness(sandbox, snap);
+  const st = await F.readFinish(sandbox);
+  const lines = [`Finish: ${r.ready ? "READY by the registers" : `not ready (${r.items.length})`}${st.lease ? `; ${st.lease.holder} coordinates it (generation ${st.lease.generation}: ${st.lease.why})` : "; nobody coordinates it yet: the first done takes it"}.`];
+  for (const i of r.items) lines.push(`  holds it: ${i}`);
+  for (const i of r.limited) lines.push(`  limits it: ${i}`);
+  const last = st.checks.at(-1);
+  if (last) lines.push(`  last check: ${last.proceed ? `passed (${last.outcome ?? "?"})` : `refused (${last.reason ?? "?"})`} at ${last.at} by ${last.by}, ${last.revision === r.revision ? "at the current revision" : "at an earlier revision"}`);
+  if (st.lease) for (const x of await F.lateItems(sandbox, st.lease.holder, st.lease.report)) lines.push(`  late against the report: ${x.kind === "post" ? `post #${x.id} (${x.tag}) by ${x.by}` : `objection ${x.id} by ${x.by}: ${x.why}`}`);
+  return lines.join("\n");
 }
 
 /** Every lead, the ones waiting on the operator first, as a reader in a terminal takes them. */
@@ -52,6 +77,10 @@ export async function listText(sandbox: string): Promise<string> {
   }
   const cov = L.questionCoverage(snap);
   if (snap.goal.questions.length) lines.push("", `Questions: ${snap.goal.questions.length}; without an answer: ${cov.unanswered.map((q) => `question:${q}`).join(", ") || "none"}; of those, held by no lead: ${cov.uncovered.map((q) => `question:${q}`).join(", ") || "none"}.`);
+  const parked = await L.parkedLeads(sandbox, snap).catch(() => [] as L.ParkedLead[]);
+  if (parked.length) lines.push("", `Parked (held, no job and no act on it while the holder works elsewhere; offered to an idle seat): ${parked.map((p) => `${p.lead} (${p.holder}, ${Math.round(p.idle_ms / 60_000)} min)`).join("; ")}.`);
+  const finish = await finishText(sandbox, snap).catch((err: Error) => `Finish: could not be read (${err.message}).`);
+  lines.push("", finish);
   return `${lines.join("\n")}\n`;
 }
 
@@ -165,7 +194,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     case "list": {
       if (rest.includes("--json")) {
         const snap = await L.leadsSnapshot(sandbox);
-        process.stdout.write(`${JSON.stringify({ leads: L.rankedLeads(snap), chain: snap.state.chain, coverage: L.questionCoverage(snap) }, null, 2)}\n`);
+        const F = await import("../extensions/finish.ts");
+        const r = await F.readiness(sandbox, snap).catch(() => null);
+        const lease = (await F.readFinish(sandbox).catch(() => null))?.lease ?? null;
+        const parked = await L.parkedLeads(sandbox, snap).catch(() => [] as L.ParkedLead[]);
+        process.stdout.write(`${JSON.stringify({ leads: L.rankedLeads(snap), chain: snap.state.chain, coverage: L.questionCoverage(snap), parked, finish: r ? { ready: r.ready, items: r.items, limited: r.limited, revision: r.revision, coordinator: lease } : null }, null, 2)}\n`);
       } else process.stdout.write(await listText(sandbox));
       break;
     }

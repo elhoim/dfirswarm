@@ -10409,6 +10409,38 @@ export async function runFinishLine(sandbox: string): Promise<FinishLineRun | nu
 /** The record a finish line reads that is not the goal's own files: where each lives. */
 export const REVISION_FILES = { ledger: LEDGER_ENTRIES, attestations: "ledger/attestations.jsonl", disputes: "ledger/disputes.jsonl", leads: "leads/leads.jsonl", questions: "questions/questions.jsonl" } as const;
 
+/**
+ * Whether a line of the lead or the question register is an offer's
+ * bookkeeping (docs/adr/0015): an offer made, delivered, declined, accepted
+ * or lapsed, or a wake from before offers. Those say who may take a piece of
+ * work first, never what the finish rests on, and idle seats write them all
+ * the time: were they in the revision, a waiting seat's delivered offer would
+ * make the coordinator's finish line run again, and one check result per
+ * revision would not hold. A closure offered to its closer to confirm is not
+ * bookkeeping: until it is confirmed it holds the finish. The lines are the
+ * registers' own compact JSON, where `"ev":"…"` can only be the event's key
+ * (a quote inside a value is escaped).
+ */
+export function offerBookkeeping(line: string): boolean {
+  if (line.includes('"ev":"wake"')) return true;
+  if (!line.includes('"ev":"offer')) return false;
+  return !(line.includes('"ev":"offer"') && line.includes('"reason":"confirm"'));
+}
+
+/** A register's part of the revision: its bytes, less its offers' bookkeeping for the lead and question registers. */
+function revisionPart(name: string, bytes: Buffer): string {
+  if (name !== "leads" && name !== "questions") return `${bytes.length}:${sha256Hex(bytes)}`;
+  const kept = Buffer.from(
+    bytes
+      .toString("utf8")
+      .split("\n")
+      .filter((line) => !offerBookkeeping(line))
+      .join("\n"),
+    "utf8",
+  );
+  return `${kept.length}:${sha256Hex(kept)}`;
+}
+
 /** Tags of a post that can change a verdict: a result, a veto, a hold, a stop. */
 const VERDICT_TAGS = new Set<string>(["result", "veto", "hold", "stop"]);
 /** A post never changes once written, so its tag and sender are read once per process. */
@@ -10419,7 +10451,8 @@ const postTagCache = new Map<string, { tag: string; from: string }>();
  * thread, the newest agent post that can change a verdict: a result, a veto,
  * a hold or a stop; an intro or a claim cannot), the ledger (every byte: a
  * merge rewrites an entry's authors, and an author may not attest), the
- * review (the attestations and the disputes) and the leads. A finish line run
+ * review (the attestations and the disputes), the leads and the questions
+ * (less their offers' bookkeeping: offerBookkeeping). A finish line run
  * against one revision holds only while the revision does: on the VM hub a
  * passing run was reused for 30 s whatever had changed in between, and a
  * dispute recorded in that window did not stop the sentinel.
@@ -10458,7 +10491,7 @@ async function stateParts(sandboxRoot: string): Promise<Record<string, string>> 
   parts.board = JSON.stringify(board);
   for (const [name, rel] of Object.entries(REVISION_FILES)) {
     const bytes = await readFile(join(sandboxRoot, rel)).catch(() => null);
-    parts[name] = bytes ? `${bytes.length}:${sha256Hex(bytes)}` : "none";
+    parts[name] = bytes ? revisionPart(name, bytes) : "none";
   }
   return parts;
 }
