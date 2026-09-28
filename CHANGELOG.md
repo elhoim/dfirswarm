@@ -6,6 +6,42 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: what the first calibration run on the new flow showed (run sabfd76)
+
+Scored against a truth kept outside the repo, the run missed a third of the
+facts in deleted and unallocated space, answered "every file" and "every
+connection" established with no coverage, adopted a decoy at high
+confidence attested established, stated every answer high, answered a
+question that needed a missing source not determinable with no acquisition
+ask, and left a question not determinable after the evidence that settled
+it was added late. Five generic rules follow (docs/adr/0013, "After the
+first calibration run").
+
+- **New evidence stales what rests on older coverage.** An evidence
+  addition makes stale every standing bounded negative, not determinable
+  and partial answer whose coverage predates it, whatever question it was
+  added for; the gate holds each (`evidence_stale`) until a coverage record
+  at the new revision stands reviewed, or the answer cites the new evidence.
+  `evidence add` and its board post name them. An established answer is not
+  staled.
+- **A completeness claim rests on coverage of its areas.** A question that
+  asks for every one, all, each or a complete list is marked `completeness`
+  (by its words, or `question add --completeness`); its established or
+  partial answer rests on a coverage record naming the areas searched
+  (`areas`: allocated, deleted, unallocated, slack, secondary), or the gate
+  holds it (`completeness_uncovered`).
+- **An established attest names an alternative.** `answer_review.alternatives`
+  is `[{explanation, why}]`; an established attest that names none is
+  recorded best_candidate, and the reply says so.
+- **The run records the confidence.** High stands only on an established
+  answer another seat attested established naming its alternatives; any
+  other high is recorded medium, said in the reply and shown in the report,
+  the metrics (`confidence`) and the calibration score.
+- **A missing source is asked for.** A not determinable answer's coverage
+  names the acquisition ask (`acquisition_ask: R-<n>`) or why none
+  (`acquisition_none_why`); the answers check warns (`WARN:`, `warnings`)
+  when it does neither, and holds nothing.
+
 ### Fixed: what the first pilot on the new flow showed (c10, run s6be12f)
 
 - **A review offer is held for the review, and withdrawn when it is not

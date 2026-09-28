@@ -233,6 +233,77 @@ seventeen ways around it; each has a test that failed before its fix.
   denied to a host run's panes where the guard can. A resumed run's
   evidence image is attached again and held to its manifest.
 
+## After the first calibration run
+
+The first calibration case run on the new flow (a synthetic departure case
+with a truth file kept outside the repo) scored the swarm against what the
+evidence holds. It missed a third of the facts that sit in deleted and
+unallocated space; answered "every file" and "every connection" established
+with no coverage behind them; adopted a decoy at high confidence, attested
+established; stated every answer high (four of them wrong); answered a
+question that needed a source the evidence did not hold not_determinable,
+with no acquisition ask; and left a question not_determinable after the
+evidence that settled it was added late. Five rules follow, each generic
+(no tool, no file system, no case named) and each tested.
+
+- **New evidence stales what rests on older coverage.** An evidence
+  addition makes stale every standing `bounded_negative`,
+  `not_determinable` and `partial` answer (and a premise rejected on a
+  search alone) whose coverage records were recorded before the addition's
+  ledger entry, and those records, whether or not the operator named the
+  question. The gate holds each (`evidence_stale`: "new evidence since its
+  coverage (ev-n); re-examine against it"). It clears when the answer cites
+  a coverage record for the question recorded after the addition (at the
+  new inventory revision) that another seat reviewed, or cites the new
+  evidence itself (the addition's entry, or an entry other than a coverage
+  record whose refs, results or jobs name its import: a coverage record
+  counts once it is reviewed). `evidence add` and its board post name the answers
+  it stales. An established answer is not staled. The order is the
+  ledger's (the addition's external entry against the records' seqs), not
+  the inventory hash: a catalogue generation moves the hash too. In the
+  calibration run the answer that stayed wrong had been recorded again after
+  the addition, on reviewed coverage that named the new evidence, so this
+  rule would not have held it: it makes the re-examination of every other
+  negative explicit, and a re-examination that misreads the new evidence is
+  the review's to catch.
+- **A completeness claim rests on coverage of its areas.** A question whose
+  words ask for every one, all, each, or a complete list, set or inventory
+  is marked `completeness` in the register when it is opened (a small word
+  rule; "at all" does not count), and an asker sets it either way
+  (`question add --completeness`, `--no-completeness` on amend; an agent's
+  `question_open` takes `completeness`). An established or partial answer
+  to such a question rests on a standing coverage record for it that names
+  its `areas` {allocated, deleted, unallocated, slack, secondary}, each
+  searched, skipped or not_applicable, with what was skipped said in
+  `skipped`; without one the gate holds it as it holds an uncovered negative
+  (`completeness_uncovered`). The areas are generic: an area the evidence
+  does not have is not_applicable.
+- **An established attest names an alternative.** An attest with strength
+  established carries `answer_review.alternatives` as `[{explanation,
+  why}]`, at least one alternative explanation the reviewer weighed and why
+  the evidence rules it out; one without is recorded best_candidate, with
+  the reason in `capped`, and the reply says so. Nothing is refused, and the
+  seat may attest again once it has weighed one (a later established review
+  by the same seat is recorded; any other repeat is not). A text
+  `alternatives` is still read, as an older review's and a best candidate's.
+- **Confidence is recorded, not only stated.** An answer keeps confidence
+  high only when it is established and another seat attested it
+  established naming its alternatives; any other high is recorded medium,
+  and the reply to the answer says why. Nothing is refused, and the stated
+  confidence stays in the chained entry: the recorded one is derived where
+  it is read (`recordedConfidence`), because the attest that keeps a high
+  comes after the answer. The report, the metrics (`confidence`) and the
+  calibration score show the recorded confidence, the stated one beside it.
+- **A missing source is asked for.** When a question needs a source the
+  evidence does not hold, the agents open an acquisition ask
+  (`lead_close needs_operator` with `ask.kind: acquisition`) before
+  answering it not_determinable, and the coverage record behind the answer
+  names it (`acquisition_ask: R-<n>`) or says why none would settle it
+  (`acquisition_none_why`). The gate warns, and does not hold, when a
+  not_determinable answer's coverage does neither: the answers check prints
+  a `WARN:` line and its machine line carries `warnings`, which the finish
+  line's note repeats.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`

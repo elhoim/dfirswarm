@@ -138,12 +138,21 @@ Leads (the swarm's open work)
   (volatile: it may be lost). SWARM.md says what the case admits. Under "no more evidence" it is
   answered at once, "no additional input under this case policy": a constraint of the case, never
   a finding that the source or the fact is absent. Record the gap as a limitation (reason
-  unavailable) naming the request, and answer on what the evidence holds. Evidence that arrives
+  unavailable) naming the request, and answer on what the evidence holds. When a question needs a
+  source the evidence does not hold, open the ask before you answer it not_determinable: the
+  coverage record behind that answer names the ask (`acquisition_ask: "R-<n>"`) or says why none
+  would settle it (`acquisition_none_why`), and the finish line warns of one that does neither.
+  Evidence that arrives
   later is announced on the board as `import:ev-<n>`: it is readable at once, read-only, at
   `store/imports/ev-<n>/out/` (your VM mounts the run live) and in jobs; cite it as
   `import:ev-<n>/<file>` however you read it, and hold what you concluded before it against it; the harness
   reopens the leads under its questions, and an answer recorded before it is stale until you
-  record it again.
+  record it again. Whatever question it was added for, every standing bounded_negative,
+  not_determinable or partial answer whose coverage was recorded before it is stale too (the
+  board post and the finish line name each, `evidence_stale`): examine the new evidence for it,
+  record a coverage record at the new revision (the new evidence among its objects, or why it
+  cannot bear on the question) that another seat reviews, and record the answer again citing it,
+  or citing an entry that rests on the new evidence. An established answer is not staled.
 - A lead is one agent's at a time: one a peer holds is theirs, so post to them. A holder silent
   past the stale limit, with no job running and not compacting, shows as stale; the first claim
   marks it and tells the holder, and a claim after a short grace takes it over. A turn that ended
@@ -354,7 +363,15 @@ Ledger (only when `record` is in your tool list)
   `detection_opportunity` {trace_expected: yes|no|unknown, why}: would the event have left a trace
   in these sources, given what was collected and what they keep. The harness adds whether the jobs
   behind it were given every object it names (complete or partial): it counts objects, it never
-  judges relevance.
+  judges relevance. `areas` {allocated, deleted, unallocated, slack, secondary}, each searched,
+  skipped or not_applicable, says which parts of the stored data the search reached (live data,
+  deleted entries, unallocated space, slack, and secondary sources: copies, backups, snapshots,
+  another log of the same thing), with what was skipped and why in `skipped`. A question that asks
+  for a complete set ("every file", "all connections", "each account", a complete list; `questions`
+  shows it) is answered established or partial only on a coverage record for it that names its
+  areas: without one the finish line holds the answer (`completeness_uncovered`). Behind a
+  not_determinable, `acquisition_ask` (R-<n>) or `acquisition_none_why` says whether a source the
+  evidence does not hold was asked for.
 - `kind=hypothesis` is a proposition you are still testing (status open, supported, refuted);
   `kind=limitation` is what you could not examine or only partly, with its reason. Neither is a
   finding: a report weighs its conclusions against them.
@@ -376,7 +393,10 @@ Ledger (only when `record` is in your tool list)
   its `summary` or `narrative`, written from the ledger, not from memory: `value` is the answer,
   `reasoning` how the entries lead to it, citing `E-<seq>` for every claim; for a question also
   `confidence` with `confidence_why`, `contrary` (the entries that say otherwise), `limitations`
-  (the limitation entries that bound it), `alternatives_open` and `would_change`; for a person's
+  (the limitation entries that bound it), `alternatives_open` and `would_change`. The run records
+  an answer's confidence high only when it is established and another seat attested it
+  established, naming the alternatives it weighed; any other high is recorded medium, and the
+  report and the metrics show the recorded one. For a person's
   question `contrary` or `contrary_none_why` is required, and `result: premise_not_supported` says
   the question's premise does not hold. An answer to a question of the register says which
   revision it answers (`question_rev`, as `questions` shows it); once the question has been
@@ -403,7 +423,11 @@ Ledger (only when `record` is in your tool list)
   `answer_review`: established, or best_candidate (what the evidence best supports, not shown to be
   the answer), and part by part what you reproduced and only read, whether each part the question
   asks is established, the inference, the alternatives still open, and whether another source
-  family was checked. A medium or low confidence, a part not established, or a route its
+  family was checked. Before you attest an answer established, weigh at least one alternative
+  explanation (a decoy that looks like the answer, another actor, another mechanism, another time)
+  and say why the evidence rules it out: `answer_review.alternatives [{explanation, why}]`. An
+  established attest that names none is recorded best_candidate, and the reply says so; attest
+  again once you have weighed one. A medium or low confidence, a part not established, or a route its
   would_change names that nothing took allows only best_candidate, which does not satisfy the
   finish line: a best candidate you cannot break is still one. Say so, and open the lead for the
   route would_change names. A material negative (a bounded_negative or
