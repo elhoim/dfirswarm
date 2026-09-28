@@ -238,6 +238,8 @@ export type LeadEvent = {
   basis?: string;
   /** A second, independent route review: why it adds something to the one that stands. */
   second_review_why?: string;
+  /** A confirmation offer: the batch it belongs to (the correction chain's head, E-<seq>): one offer per seat and batch, confirmed at once. */
+  batch?: string;
   prev: string;
   hash: string;
 };
@@ -527,7 +529,7 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
           break;
         }
         if (!l) break;
-        const lo: O.Offer = { seq: e.seq, at: e.at, to: e.to, rev: e.rev ?? l.rev, reason, seen_at: null, declined: null, accepted: null, lapsed_at: null, ...(e.from ? { from: e.from } : {}) };
+        const lo: O.Offer = { seq: e.seq, at: e.at, to: e.to, rev: e.rev ?? l.rev, reason, seen_at: null, declined: null, accepted: null, lapsed_at: null, ...(e.from ? { from: e.from } : {}), ...(e.batch ? { batch: e.batch } : {}) };
         l.offers.push(lo);
         offerBySeq.set(e.seq, lo);
         wakes.set(`${l.id}#${e.cycle ?? l.cycle}`, e.to);
@@ -2918,14 +2920,29 @@ export async function reopenOnLedger(sandboxRoot: string, now = Date.now()): Pro
         append.push({ by: "system", ev: "reopen", lead: l.id, why: `${l.id} was closed ${l.closed!.disposition} on ${l.confirm.ref_was}, ${st.why}, and ${o?.declined ? `${o.to} declined to confirm it (${o.declined.why})` : gone ? `its closer can no longer confirm it (${gone})` : `its closer did not confirm it within its window`}`, cause: "superseded" });
         continue;
       }
+      // Superseded by a correction that changes no conclusion (its refs,
+      // its evidence or its words only: a citation or qualification
+      // refresh): the closure holds on the entry that stands, re-pointed and
+      // said so (the c10 pilot re-offered four to six confirmations for each
+      // such refresh near its finish). A change of value, result or kind
+      // can reverse what the closure rested on (Astra's objection to any
+      // re-point): that goes to confirm or reopen.
+      const headSeq = inner.ledger.replaced.has(Number(m[1])) ? P.standingSeq(Number(m[1]), inner.ledger.replaced) : null;
+      const was = inner.ledger.bySeq.get(Number(m[1]));
+      const now_ = headSeq !== null ? inner.ledger.bySeq.get(headSeq) : undefined;
+      if (superseded && was && now_ && entryStands(inner.ledger, headSeq!).ok && P.sameConclusion(was, now_)) {
+        append.push({ by: "system", ev: "confirm", lead: l.id, ref: `E-${headSeq}`, why: `repoint (conclusion unchanged): ${l.closed!.ref} was superseded by E-${headSeq}, which changes neither its value nor its result, only what it cites or how it says it; the closure rests on the entry that stands` });
+        continue;
+      }
       // Superseded: the closure may still hold on the correction, or not (a
       // correction by the same author can reverse the basis). Its closer is
       // offered to confirm it on what stands now or reopen it (lead_confirm,
-      // lead_reopen); nothing re-points it by itself (A3). Disputed, or with
+      // lead_reopen), one offer per seat and correction chain (its head,
+      // the batch); nothing re-points it by itself (A3). Disputed, or with
       // nobody to confirm it: reopened.
       if (superseded && (closers.get(l.closed!.by)?.state === "available" || heldFor(closers.get(l.closed!.by)))) {
-        const head = inner.ledger.replaced.has(Number(m[1])) ? `E-${P.standingSeq(Number(m[1]), inner.ledger.replaced)}` : null;
-        append.push(offerDraft(l.id, l.closed!.by, "confirm", l.rev, l.cycle, now, { ref: l.closed!.ref, ...(head ? { head } : {}), why: `${l.closed!.ref} was superseded${head ? ` by ${head}` : ""}: confirm the closure on what stands, or reopen it` }));
+        const head = headSeq !== null ? `E-${headSeq}` : null;
+        append.push(offerDraft(l.id, l.closed!.by, "confirm", l.rev, l.cycle, now, { ref: l.closed!.ref, ...(head ? { head, batch: head } : {}), why: `${l.closed!.ref} was superseded${head ? ` by ${head}` : ""}: confirm the closure on what stands, or reopen it` }));
         continue;
       }
       append.push({ by: "system", ev: "reopen", lead: l.id, why: `${l.id} was closed ${l.closed!.disposition} on ${l.closed!.ref}, and ${st.why}`, cause: superseded ? "superseded" : "disputed" });
@@ -2980,6 +2997,51 @@ export async function confirmLead(ctx: P.SwarmContext, rawId: unknown, input: { 
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
     return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap) };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/**
+ * Confirm every closure of this seat waiting in one batch (the correction
+ * chain's head, E-<seq>): each on the entry that stands (its head, or
+ * `ref`), with one why. The c10 pilot re-offered four to six confirmations
+ * for one revision near its finish, several to one seat: one act answers
+ * them. A closure whose offer ended or whose ref does not fit is skipped,
+ * with why.
+ */
+export async function confirmBatch(ctx: P.SwarmContext, rawBatch: unknown, input: { ref?: string; why?: string }, now = Date.now()): Promise<LeadResult<{ confirmed: string[]; skipped: Array<{ lead: string; why: string }> }>> {
+  const batch = String(rawBatch ?? "").trim().replace(/^e-/i, "E-");
+  if (!/^E-\d+$/.test(batch)) return { ok: false, reason: `a batch is named by the correction it follows, E-<seq> (got ${JSON.stringify(rawBatch)})` };
+  const why = bounded("why", input.why, LEAD_WHY_MAX, true);
+  if (!why.ok) return { ok: false, reason: `${why.reason}: why the closures still hold on the correction` };
+  try {
+    const r = await transact<Fail | { ok: true; confirmed: string[]; skipped: Array<{ lead: string; why: string }> }>(ctx.sandboxRoot, async (snap) => {
+      const append: LeadDraft[] = [];
+      const confirmed: string[] = [];
+      const skipped: Array<{ lead: string; why: string }> = [];
+      for (const l of snap.state.leads.values()) {
+        if (!l.closed || !l.confirm) continue;
+        const o = l.offers.find((x) => x.seq === l.confirm!.offer);
+        if (!o || o.batch !== batch || o.to !== ctx.agentId) continue;
+        if (!O.reserving(o, now, l.rev)) {
+          skipped.push({ lead: l.id, why: `its confirmation is no longer offered (${O.offerStatus(o, now, l.rev).state})` });
+          continue;
+        }
+        const target = String(input.ref ?? l.confirm.head ?? batch).trim();
+        const checked = checkRef(l.closed.disposition, target, l, snap);
+        if (!checked.ok) {
+          skipped.push({ lead: l.id, why: checked.reason });
+          continue;
+        }
+        append.push({ by: ctx.agentId, ev: "confirm", lead: l.id, ref: checked.ref, why: why.value, offer: o.seq, batch });
+        confirmed.push(l.id);
+      }
+      if (!confirmed.length && !skipped.length) return { append: [], result: { ok: false as const, reason: `no closure of yours waits for confirmation in batch ${batch}` } };
+      return { append, result: { ok: true as const, confirmed, skipped } };
+    });
+    if (!r.ok) return r;
+    return { ok: true, confirmed: r.confirmed, skipped: r.skipped };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
@@ -3166,6 +3228,8 @@ export type LeadNotice = {
   lead: string;
   /** An offer notice: the offer it delivers (its first claim counts from this delivery). */
   offer?: number;
+  /** A batch of confirmations delivered in one notice: every offer in it. */
+  batch?: Array<{ lead: string; offer: number }>;
   text: string;
   wakes: boolean;
 };
@@ -3209,11 +3273,22 @@ export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot): Le
       out.push({ kind: "dependency_changed", lead: id, text: `${id}, which your lead needs, is now ${cur.status}${cur.holder ? ` (held by ${cur.holder})` : ""}${cur.disposition ? `, closed ${cur.disposition}` : ""}`, wakes: false });
     }
   }
-  // Offers (A3): each once, while it still holds its lead.
+  // Offers (A3): each once, while it still holds its lead; the confirmations of one batch in one notice.
   const told = new Set(before.offers ?? []);
+  const batches = new Map<string, Array<{ lead: Lead; offer: O.Offer }>>();
   for (const { lead: l, offer: o } of offersFor(agent, snap)) {
+    if (o.reason === "confirm" && o.batch && o.to === agent) {
+      batches.set(o.batch, [...(batches.get(o.batch) ?? []), { lead: l, offer: o }]);
+      continue;
+    }
     if (told.has(o.seq)) continue;
     out.push({ kind: o.reason === "confirm" ? "confirm" : o.reason === "parked" && o.from === agent ? "parked" : "offer", lead: l.id, offer: o.seq, text: offerText(l, o, agent, snap), wakes: true });
+  }
+  for (const [batch, list] of batches) {
+    if (list.every((x) => told.has(x.offer.seq))) continue;
+    const until = O.untilWords(list[0]!.offer, snap.at, list[0]!.lead.rev);
+    const text = `The correction ${batch} supersedes what ${list.length === 1 ? "a closure" : `${list.length} closures`} of yours rested on: ${list.map((x) => `${x.lead.id} ("${x.lead.title}", closed ${x.lead.closed?.disposition ?? "?"} on ${x.lead.confirm?.ref_was ?? "?"})`).join("; ")}. Confirm ${list.length === 1 ? "it" : "them"} on what stands now in one act, lead_confirm(batch: "${batch}", why), or reopen the one that no longer holds (lead_reopen), ${until}. Unconfirmed, ${list.length === 1 ? "it reopens" : "they reopen"} by ${list.length === 1 ? "itself" : "themselves"}; nothing re-points a closure whose conclusion changed`;
+    out.push({ kind: "confirm", lead: list[0]!.lead.id, offer: list[0]!.offer.seq, batch: list.map((x) => ({ lead: x.lead.id, offer: x.offer.seq })), text, wakes: true });
   }
   // A review offered to this seat (a route review, a negative's review).
   for (const { key, offer: o } of reviewOffersFor(agent, snap)) {
@@ -3318,7 +3393,7 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
     await writeTold(ctx.sandboxRoot, me, toldNow(me, snap, Object.keys(before.held)));
     if (snap.questions) await Q.markTold(ctx.sandboxRoot, me, snap.questions);
     // What was delivered now: each offer's first claim counts from here.
-    await markOffersSeen(ctx.sandboxRoot, me, notices.filter((n) => n.offer !== undefined && n.kind !== "parked").map((n) => ({ lead: n.lead, offer: n.offer! })));
+    await markOffersSeen(ctx.sandboxRoot, me, notices.filter((n) => n.offer !== undefined && n.kind !== "parked").flatMap((n) => n.batch ?? [{ lead: n.lead, offer: n.offer! }]));
     if (qd) await Q.markQuestionOffersSeen(ctx.sandboxRoot, me, qd.notices.filter((n) => n.kind === "offer" && n.offer !== undefined).map((n) => ({ q: n.q, offer: n.offer! }))).catch(() => undefined);
   }
   return { text: lines.join("\n"), notices: [...notices, ...(qd?.notices ?? []).map((n) => ({ kind: `question_${n.kind}` as LeadNotice["kind"], lead: n.q, text: n.text, wakes: n.wakes }))], counts: { ...counts, ...(qd ? { questions: qd.counts } : {}) } };
@@ -3408,7 +3483,7 @@ export function leadsWaitCheck(ctx: P.SwarmContext): () => Promise<string | null
     const qWaking = snap.questions ? Q.questionNotices(ctx.agentId, await Q.readTold(ctx.sandboxRoot, ctx.agentId), { questions: snap.questions, leads: snap.state, ledger: snap.ledger }).filter((n) => n.wakes) : [];
     if (waking.length || qWaking.length) {
       // Delivered now: each offer's first claim counts from here (A3).
-      await markOffersSeen(ctx.sandboxRoot, ctx.agentId, waking.filter((n) => n.offer !== undefined && n.kind !== "parked").map((n) => ({ lead: n.lead, offer: n.offer! })));
+      await markOffersSeen(ctx.sandboxRoot, ctx.agentId, waking.filter((n) => n.offer !== undefined && n.kind !== "parked").flatMap((n) => n.batch ?? [{ lead: n.lead, offer: n.offer! }]));
       await Q.markQuestionOffersSeen(ctx.sandboxRoot, ctx.agentId, qWaking.filter((n) => n.kind === "offer" && n.offer !== undefined).map((n) => ({ q: n.q, offer: n.offer! }))).catch(() => undefined);
       return [...qWaking, ...waking].map((n) => n.text).join(" ");
     }

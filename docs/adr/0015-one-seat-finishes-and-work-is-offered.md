@@ -251,10 +251,19 @@ have lost its provider.
     under the registers' lock for each offer, and across a batch of
     deliveries). A person's question offered to a seat holds against every
     way of taking its work: an open with take, a claim, a reopen with take.
-17. **Confirm or reopen, never re-point** (A3). When a closed lead's entry is
-    superseded (not disputed) and its closer can take it, the closer is
-    offered to confirm the closure on what stands now (`lead_confirm`, by
-    revision, with the ref and why); declined or unconfirmed it reopens, and
+17. **Confirm or reopen; re-pointed only when the conclusion is unchanged**
+    (A3). When a closed lead's entry is superseded (not disputed) by a
+    correction that changes no conclusion (its kind, value, result and the
+    other fields the symbolic citation holds are as they were: only its
+    refs, evidence or reasoning changed), the closure is held on the entry
+    that stands and recorded `repoint (conclusion unchanged)`: Astra's
+    objection was to re-pointing when the basis can reverse, which a change
+    of conclusion is. Otherwise, when its closer can take it, the closer is
+    offered to confirm the closure on what stands now, one offer per seat
+    and correction chain (the batch, its head E-<seq>, confirmed in one
+    `lead_confirm`; the c10 pilot re-offered four to six confirmations for
+    one revision near its finish, several to one seat), or one lead by
+    revision, with the ref and why; declined or unconfirmed it reopens, and
     a dead or done closer's lead reopens at once, whether the closer was so
     before the offer or became so after it. A compacting closer is away, not
     gone: the confirmation waits for it, bounded (five minutes past the

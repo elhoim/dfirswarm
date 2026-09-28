@@ -80,10 +80,13 @@ Leads (the swarm's open work)
   with why (`offer decline`) so it passes to the next seat at once. Do not race for a lead offered to
   a peer, or for the work of a question offered to a peer: your claim is refused while the offer
   holds. You are offered one thing at a time.
-- When the entry you closed a lead on is corrected, nothing re-points the closure: you are offered
-  to confirm it on what stands now (`lead_confirm` with the lead's revision, the ref and why) or to
-  reopen it (`lead_reopen`). A correction can reverse what the closure rested on; unconfirmed, the
-  lead reopens by itself.
+- When the entry you closed a lead on is corrected and the correction changes what it concludes
+  (its value, its result, its kind), you are offered to confirm the closure on what stands now or to
+  reopen it (`lead_reopen`): one offer for every closure of yours on that correction, confirmed in
+  one act with `lead_confirm(batch: "E-<seq>", why)` (or one lead with id, its revision, the ref and
+  why). A correction can reverse what the closure rested on; unconfirmed, a lead reopens by itself.
+  A correction that only refreshes what an entry cites or how it says it is re-pointed for you, and
+  the register says so ("repoint (conclusion unchanged)").
 - A closed lead whose work is not done after all is reopened with `lead_reopen(id,
   expected_revision, why, take?)`, the revision you read. A lead the operator closed or restricted
   (its question withdrawn, excluded or in triage, a needs_operator not yet answered) is the

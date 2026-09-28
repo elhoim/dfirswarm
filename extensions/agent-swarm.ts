@@ -3622,17 +3622,18 @@ export default function (pi: ExtensionAPI) {
     name: "lead_confirm",
     label: "Confirm a closure",
     description:
-      "Confirm that a lead you closed still holds after the entry you closed it on was superseded: ref the entry that stands now (the correction, by default), with the lead's revision you read and why the closure still holds on it. You are offered this when it happens; unconfirmed within the offer, the lead reopens by itself. Nothing is re-pointed for you: a correction can reverse what the closure rested on. If it no longer holds, lead_reopen it.",
+      "Confirm that a lead you closed still holds after the entry you closed it on was superseded: ref the entry that stands now (the correction, by default), with the lead's revision you read and why the closure still holds on it. You are offered this when it happens, one offer for every closure of yours resting on one correction (its batch, E-<seq>): confirm them all in one act with batch, or one with id and expected_revision. Unconfirmed within the offer, a lead reopens by itself. A correction that only refreshes what an entry cites or how it words it, its conclusion unchanged, is re-pointed for you and said so; one that changes the value or the result can reverse what the closure rested on, and is yours to confirm. If it no longer holds, lead_reopen it.",
     promptSnippet: "Confirm a closure on the corrected entry",
     parameters: Type.Object({
-      id: Type.String({ description: "L-<n>" }),
-      expected_revision: Type.Integer({ description: "The lead's revision as you read it (rev)" }),
+      id: Type.Optional(Type.String({ description: "L-<n> (or give batch)" })),
+      expected_revision: Type.Optional(Type.Integer({ description: "With id: the lead's revision as you read it (rev)" })),
+      batch: Type.Optional(Type.String({ description: "The correction a batch of your closures follows (E-<seq>, the offer says it): every closure in it confirmed in one act" })),
       ref: Type.Optional(Type.String({ description: "The standing entry the closure rests on now (E-<seq>); the correction when left out" })),
       why: Type.String({ description: "Why the closure still holds on it" }),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const r = await leadConfirm(ctxFrom(toolCtx.cwd, agentId), params.id, { expected_revision: params.expected_revision, why: params.why, ...(params.ref ? { ref: params.ref } : {}) });
+      const r = await leadConfirm(ctxFrom(toolCtx.cwd, agentId), params.id, { expected_revision: params.expected_revision, why: params.why, ...(params.ref ? { ref: params.ref } : {}), ...(params.batch ? { batch: params.batch } : {}) });
       return leadAnswer(toolCtx.cwd, "lead_confirm", params as Record<string, unknown>, started, r as never);
     },
   });

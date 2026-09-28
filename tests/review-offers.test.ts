@@ -201,3 +201,56 @@ test("a confirmation waits while its closer compacts, bounded; the closer confir
   assert.deepEqual(await L.reopenOnLedger(c.S), [l.id]);
   void operator;
 });
+
+test("a correction under several closures of one seat is one confirmation offer: one notice, confirmed with one lead_confirm naming the batch (the c10 pilot's cascade)", async () => {
+  const c = await run();
+  await traceRow(c.S, "a1", "bash");
+  const f = ok(await rec(c.a1, { kind: "finding", ...F, value: "Account bob ran it", source: "prefetch", evidence: "row 1", refs: ["job:j000001/hits.txt"] })).entry;
+  const g = ok(await rec(c.a1, { kind: "finding", ...F, value: "It ran at ten", source: "prefetch", evidence: "row 2", refs: ["job:j000001/hits.txt"] })).entry;
+  const leads: string[] = [];
+  for (const [title, e] of [["Which account ran it", f], ["Who was at the console", f], ["Whose profile holds it", f], ["When did it run", g]] as const) {
+    const l = okq(await L.openLead(c.a1, { title, why: "q1", take: true })).lead;
+    okq(await L.closeLead(c.a1, l.id, { disposition: "resolved", ref: `E-${e.seq}` }));
+    leads.push(l.id);
+  }
+  // Both entries corrected, each changing what it concludes.
+  const f2 = ok(await rec(c.a0, { kind: "finding", ...F, value: "Account alice ran it", source: "prefetch", evidence: "row 1, the SID", refs: ["job:j000001/hits.txt"], supersedes: f.seq, because: "the SID is alice's" })).entry;
+  const g2 = ok(await rec(c.a0, { kind: "finding", ...F, value: "It ran at eleven", source: "prefetch", evidence: "row 2, UTC", refs: ["job:j000001/hits.txt"], supersedes: g.seq, because: "the clock was local" })).entry;
+  assert.deepEqual(await L.reopenOnLedger(c.S), []);
+  const snap = await L.leadsSnapshot(c.S);
+  const batches = new Set(leads.map((id) => snap.state.leads.get(id)!.offers.find((o) => o.reason === "confirm")?.batch));
+  assert.deepEqual([...batches].sort(), [`E-${f2.seq}`, `E-${g2.seq}`].sort(), "one batch per correction chain");
+  // One notice per batch, naming every closure in it.
+  const notices = (await L.leadsDigest(c.a1, { mark: true })).notices.filter((n) => n.kind === "confirm");
+  assert.equal(notices.length, 2, JSON.stringify(notices));
+  const big = notices.find((n) => n.text.includes(`E-${f2.seq}`))!;
+  for (const id of leads.slice(0, 3)) assert.match(big.text, new RegExp(`\\b${id}\\b`));
+  assert.match(big.text, new RegExp(`lead_confirm\\(batch: "E-${f2.seq}"`));
+  // One act confirms the batch.
+  const done = okq(await L.confirmBatch(c.a1, `E-${f2.seq}`, { why: "alice or bob, the closures hold: they asked which account, and the correction answers it" }));
+  assert.deepEqual(done.confirmed, leads.slice(0, 3));
+  const after = await L.leadsSnapshot(c.S);
+  for (const id of leads.slice(0, 3)) assert.deepEqual([after.state.leads.get(id)!.closed?.ref, after.state.leads.get(id)!.confirm], [`E-${f2.seq}`, null]);
+  assert.ok(after.state.leads.get(leads[3])!.confirm, "the other batch still waits");
+});
+
+test("a correction that changes no conclusion (only its refs or its wording) holds the closures on it automatically, recorded as a repoint; one that changes the value still asks its closer", async () => {
+  const c = await run();
+  await traceRow(c.S, "a1", "bash");
+  const f = ok(await rec(c.a1, { kind: "finding", ...F, value: "Account bob ran it", source: "prefetch", evidence: "row 1", refs: ["job:j000001/hits.txt"] })).entry;
+  const l = okq(await L.openLead(c.a1, { title: "Which account ran it", why: "q1", take: true })).lead;
+  okq(await L.closeLead(c.a1, l.id, { disposition: "resolved", ref: `E-${f.seq}` }));
+  // A citation refresh: another ref, other evidence words, the same value.
+  const f2 = ok(await rec(c.a0, { kind: "finding", ...F, value: "Account Bob ran it.", source: "prefetch", evidence: "row 1, and the job that parsed it", refs: ["job:j000001/hits.txt", "job:j000006/hits.txt"], supersedes: f.seq, because: "cite the parse too" })).entry;
+  assert.deepEqual(await L.reopenOnLedger(c.S), []);
+  let lv = (await L.leadsSnapshot(c.S)).state.leads.get(l.id)!;
+  assert.deepEqual([lv.closed?.ref, lv.confirm, lv.offers.filter((o) => o.reason === "confirm").length], [`E-${f2.seq}`, null, 0], "held on the standing entry, nobody asked");
+  assert.match(lv.confirmed?.at(-1)?.why ?? "", /^repoint \(conclusion unchanged\)/);
+  assert.equal(lv.confirmed?.at(-1)?.by, "system");
+  // A correction of the value: confirm or reopen, as ever.
+  const f3 = ok(await rec(c.a0, { kind: "finding", ...F, value: "Account alice ran it", source: "prefetch", evidence: "row 1, the SID", refs: ["job:j000001/hits.txt"], supersedes: f2.seq, because: "the SID is alice's" })).entry;
+  assert.deepEqual(await L.reopenOnLedger(c.S), []);
+  lv = (await L.leadsSnapshot(c.S)).state.leads.get(l.id)!;
+  assert.ok(lv.confirm, "offered to its closer");
+  assert.equal(lv.confirm?.head, `E-${f3.seq}`);
+});

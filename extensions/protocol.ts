@@ -9774,7 +9774,33 @@ async function unqualifiedFailedRefs(sandboxRoot: string, e: LedgerEntry): Promi
  */
 export function answerFingerprint(a: LedgerEntry): string {
   const hashes = (edges: LedgerEdge[] | undefined) => (edges ?? []).map((x) => x.hash).sort();
-  return sha256Hex(JSON.stringify({ result: NB.answerResult(a), question_rev: a.question_rev ?? 1, support: hashes(a.support), contrary: hashes(a.contrary), limitations: hashes(a.limitations), inconclusive: a.inconclusive === true, asserts_absence: a.asserts_absence === true }));
+  return sha256Hex(JSON.stringify({ ...conclusionFields(a), support: hashes(a.support), contrary: hashes(a.contrary), limitations: hashes(a.limitations) }));
+}
+
+/**
+ * The conclusion fields of an entry that a rewording or a citation refresh
+ * leaves alone: its result, the question revision it answers, whether it
+ * is inconclusive and whether it asserts an absence (answerFingerprint
+ * holds a summary's symbolic citation to these and to what the answer rests
+ * on). Its words are not among them.
+ */
+export function conclusionFields(e: LedgerEntry): { result: string | null; question_rev: number; inconclusive: boolean; asserts_absence: boolean } {
+  return { result: NB.answerResult(e) ?? null, question_rev: e.question_rev ?? 1, inconclusive: e.inconclusive === true, asserts_absence: e.asserts_absence === true };
+}
+
+/**
+ * Whether a correction leaves what an entry concludes as it was: the same
+ * kind, the same conclusion fields (conclusionFields), a limitation's same
+ * reason, and the same value up to case, spacing and closing punctuation.
+ * Only its refs, its evidence or its reasoning changed: a citation or
+ * qualification refresh, on which a closure still holds (leads.ts
+ * reopenOnLedger re-points it and says so). Any change of the value, the
+ * result or the kind is a change of conclusion, for the closer to confirm
+ * or reopen.
+ */
+export function sameConclusion(a: LedgerEntry, b: LedgerEntry): boolean {
+  const words = (v: unknown) => String(v ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim().replace(/[.;:!]+$/, "").trim();
+  return a.kind === b.kind && JSON.stringify(conclusionFields(a)) === JSON.stringify(conclusionFields(b)) && (a.reason ?? null) === (b.reason ?? null) && words(a.value) === words(b.value);
 }
 
 /** The questions a summary or a narrative names symbolically: Q-<n>, and question:<id>. */

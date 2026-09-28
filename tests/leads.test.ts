@@ -347,7 +347,8 @@ test("supersession offers the closer to confirm or reopen (never a re-point), an
   assert.deepEqual([l.confirm?.ref_was, l.confirm?.head], ["E-1", "E-2"]);
   assert.equal(L.needState("L-1", snap.state, snap.ledger).met, false, "a closure awaiting confirmation meets no need");
   const told = await L.leadsDigest(a1, { mark: false });
-  assert.ok(told.notices.some((n) => n.kind === "confirm" && n.lead === "L-1" && /confirm the closure on what stands now \(lead_confirm L-1/.test(n.text)), JSON.stringify(told.notices));
+  // One notice per correction (the c10 pilot's batches): it names the closure and the act that confirms the batch.
+  assert.ok(told.notices.some((n) => n.kind === "confirm" && n.lead === "L-1" && /L-1 \("Which container holds the originals"/.test(n.text) && /lead_confirm\(batch: "E-2", why\)/.test(n.text)), JSON.stringify(told.notices));
   // Unconfirmed within its window: reopened.
   assert.deepEqual(await L.reopenOnLedger(S, Date.now() + 10 * 60_000), ["L-1"]);
   snap = await L.leadsSnapshot(S);

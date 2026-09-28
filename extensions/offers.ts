@@ -66,6 +66,8 @@ export type Offer = {
   from?: string;
   /** A review's offer: the answers its item was offered for (a route review is bound to them). */
   basis?: string;
+  /** A confirmation's batch: the correction chain's head it follows (one offer per seat and batch, confirmed at once). */
+  batch?: string;
 };
 
 export type OfferState = "pending" | "live" | "accepted" | "declined" | "lapsed" | "invalidated";

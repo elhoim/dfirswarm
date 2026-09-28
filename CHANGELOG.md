@@ -8,6 +8,13 @@ All notable changes to this project. The format follows
 
 ### Fixed: what the first pilot on the new flow showed (c10, run s6be12f)
 
+- **Confirmations come in batches, and a refresh is re-pointed.** One
+  answer revision re-offered confirmation for four to six closures, several
+  to one seat. A seat is now offered one confirmation per correction chain,
+  confirmed with one `lead_confirm(batch)`; and a correction that changes
+  no conclusion (only its refs or its words) holds the closures on the
+  standing entry, recorded as `repoint (conclusion unchanged)`. A change of
+  value, result or kind still goes to confirm or reopen.
 - **The finish tail converges.** The resumed pilot sat in its finish tail
   for over ninety minutes: answers kept being revised, and each revision
   re-offered confirmations and made new late results. While a coordinator

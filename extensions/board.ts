@@ -422,7 +422,7 @@ export const leadReopen = remote("leadReopen", L.agentReopenLead);
 export const routeReview = remote("routeReview", L.routeReview);
 /** A hand-off, a closure confirmed, and the answer to an offer of a lead or a question (A2, A3). */
 export const leadHandoff = remote("leadHandoff", L.handoffLead);
-export const leadConfirm = remote("leadConfirm", (ctx: P.SwarmContext, id: unknown, input: { expected_revision?: unknown; ref?: string; why?: string }) => L.confirmLead(ctx, id, input ?? {}));
+export const leadConfirm = remote("leadConfirm", (ctx: P.SwarmContext, id: unknown, input: { expected_revision?: unknown; ref?: string; why?: string; batch?: string }) => (input?.batch ? L.confirmBatch(ctx, input.batch, input) : L.confirmLead(ctx, id, input ?? {})));
 export const offerAnswer = remote("offerAnswer", L.answerOffer);
 /** The finish (finish.ts): whose done it is, and the typed acts around the report. */
 export const finishTurnFor = remote("finishTurnFor", F.finishTurnFor);

@@ -750,7 +750,11 @@ export function boardTable(hub: {
     leadReopen: (who, a) => L.agentReopenLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; why?: string; take?: boolean }),
     routeReview: (who, a) => L.routeReview(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { material?: unknown; why?: string; second_review_why?: string }),
     leadHandoff: (who, a) => L.handoffLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { why?: string; to?: string; generation?: number }),
-    leadConfirm: (who, a) => L.confirmLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; ref?: string; why?: string }),
+    leadConfirm: (who, a) => {
+      const input = (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; ref?: string; why?: string; batch?: string };
+      // A batch of confirmations (one correction chain, one seat) is confirmed in one act.
+      return input.batch ? L.confirmBatch(as(who), input.batch, input) : L.confirmLead(as(who), a[1], input);
+    },
     offerAnswer: (who, a) => L.answerOffer(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { action?: string; why?: string }),
     finishTurnFor: (who, a) => F.finishTurnFor(as(who), (isObject(a[1]) ? a[1] : {}) as { output_file?: string }),
     finishAct: (who, a) => F.finishAct(as(who), (isObject(a[1]) ? a[1] : {}) as Parameters<typeof F.finishAct>[1]),
@@ -2847,7 +2851,7 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
       // The lead's id, state and holder as the call left them, on the
       // harness's own line beside the register's chained event.
       const lead = isObject(result.lead) ? result.lead : {};
-      return { ok: result.ok, lead: lead.id, status: lead.status, holder: lead.holder, generation: lead.generation, ...(lead.disposition ? { disposition: lead.disposition, ref: lead.ref } : {}), ...(result.reclaimed_from ? { reclaimed_from: result.reclaimed_from } : {}), ...(result.woke ? { woke: result.woke } : {}) };
+      return { ok: result.ok, lead: lead.id, status: lead.status, holder: lead.holder, generation: lead.generation, ...(lead.disposition ? { disposition: lead.disposition, ref: lead.ref } : {}), ...(result.reclaimed_from ? { reclaimed_from: result.reclaimed_from } : {}), ...(result.woke ? { woke: result.woke } : {}), ...(Array.isArray(result.confirmed) ? { confirmed: result.confirmed } : {}), ...(result.deferred ? { deferred: true } : {}) };
     }
     case "leadInterpret":
       return { ok: result.ok, interprets: result.interprets };
