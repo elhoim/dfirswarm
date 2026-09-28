@@ -32,11 +32,13 @@
  * written in), a manifest with `requires` and `use`, and a test.
  */
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { mkdir, open, readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { matchTool, type readToolManifests } from "./library-hint.ts";
+import { outputWords, sensitiveIndex } from "./output-hygiene.ts";
+import { readLedger, sensitiveTokens } from "../extensions/protocol.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const sha256 = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
@@ -125,6 +127,31 @@ export function piecesOf(command: string): Piece[] {
   return out;
 }
 
+/** Whether a command runs a file as code (an interpreter invokes it, or it is executed directly), not merely names or copies it. */
+export function runsAsCode(command: string, path: string): boolean {
+  const q = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // An interpreter immediately before the path, or the path run directly (./x, bash x, python3 x).
+  const interp = new RegExp(`\\b(?:python[0-9.]*|perl|ruby|node|bash|sh|zsh|dash|pwsh)\\s+(?:-[A-Za-z]+\\s+)*(?:\\./)?${q}(?![\\w./-])`);
+  const direct = new RegExp(`(?:^|[;&|]|&&|\\|\\||\\bexec\\s)\\s*(?:\\./)?${q}(?![\\w./-])`, "m");
+  return interp.test(command) || direct.test(command);
+}
+
+/** A file's bytes read without following a link (an agent may plant one where a script is expected); null when it is a link, gone, or not a regular file. */
+export async function readNoFollow(abs: string): Promise<Buffer | null> {
+  try {
+    const fh = await open(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const st = await fh.stat();
+      if (!st.isFile()) return null;
+      return await fh.readFile();
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
 type JobRecord = {
   id: string;
   spec?: { kind?: string; command?: string; inputs?: unknown; profile?: string };
@@ -153,9 +180,11 @@ export type Candidate = {
   score: number;
   source?: string;
   note?: string;
+  /** From a sensitive job, or holding a sensitive value: its script is withheld, never written (docs/adr/0016). */
+  sensitive?: boolean;
   /** Library tools the maintainer may already have for it, and why each is named. */
   library: Array<{ tool: string; where: string; why: string }>;
-  /** The file its script was written to, under the output directory. */
+  /** The file its script was written to, under the output directory; empty for a withheld candidate. */
   file: string;
   text: string;
 };
@@ -194,7 +223,18 @@ export async function harvest(sandbox: string, o: { minLines?: number; libraries
       // the journal's own check names it
     }
   }
-  const byText = new Map<string, { piece: Piece; text: string; uses: Use[]; inputs: Array<{ input: string; path: string }> }>();
+  // Output hygiene before anything is exported (docs/adr/0016): a candidate
+  // from a sensitive job, or one whose text holds a sensitive value (an
+  // entry's word, a sensitive output's text or its digest), is withheld.
+  const index = await sensitiveIndex(S);
+  const EMPTY = sha256(Buffer.alloc(0));
+  const sensitiveJobs = new Set(index.jobs.keys());
+  const sensitiveDigests = new Set([...index.content.keys()].filter((d) => d !== EMPTY));
+  const words = (await outputWords(S)).map((w) => w.token);
+  const ledgerWords = sensitiveTokens(await readLedger(S, { raw: true }).catch(() => [])).map((t) => t.token);
+  const secretWords = [...new Set([...words, ...ledgerWords])];
+  const holdsSecret = (text: string) => secretWords.some((w) => text.includes(w)) || sensitiveDigests.has(sha256(Buffer.from(text)));
+  const byText = new Map<string, { piece: Piece; text: string; uses: Use[]; inputs: Array<{ input: string; path: string }>; sensitive: boolean }>();
   let commandJobs = 0;
   let pieces = 0;
   for (const id of ids) {
@@ -203,17 +243,22 @@ export async function harvest(sandbox: string, o: { minLines?: number; libraries
     const seat = job.requester?.agent ?? "?";
     if (seat === "system" || seat === "derived") continue;
     commandJobs += 1;
+    const jobSensitive = sensitiveJobs.has(id);
     const use: Use = { job: id, seat, profile: job.spec.profile ?? profiles.get(id) ?? "the run's worker image", status: job.status ?? job.state ?? "unknown", at: job.accepted_at ?? "" };
     const found = piecesOf(job.spec.command);
-    // A script of the agent's own the job declared and ran: its bytes now, held to the snapshot's sha256 the job read.
+    // A script of the agent's own the job ran as code (not one it merely named
+    // or copied): read no-follow, held to the snapshot's sha256 the job read;
+    // a link, a changed file or a gone one is omitted, not exported.
     const scope = job.scope?.manifest ? await readJson<{ accessible?: Array<{ path?: string; sha256?: string; hashed?: string }>; expanded?: Array<{ ref?: string; path?: string; shape?: string }> }>(join(S, job.scope.manifest)) : null;
     for (const e of scope?.accessible ?? []) {
       const p = String(e.path ?? "");
-      if (!/^(work|tool-output)\/./.test(p) || !job.spec.command.includes(p)) continue;
-      const bytes = await readFile(join(S, p)).catch(() => null);
+      if (!/^(work|tool-output)\/./.test(p) || !runsAsCode(job.spec.command, p)) continue;
+      const bytes = await readNoFollow(join(S, p));
       if (!bytes || bytes.subarray(0, 8192).includes(0)) continue;
       const now = sha256(bytes);
-      found.push({ kind: "work file", lang: langOf(`> ${p}`, bytes.toString("utf8")), text: bytes.toString("utf8"), source: p, ...(e.sha256 && e.sha256 !== now ? { note: `${p} changed since job ${id} read it (the job read sha256 ${e.sha256}; this is ${now})` } : {}) });
+      // The exported bytes must be the ones the job read: a mismatch is omitted, not exported with a note.
+      if (e.sha256 && e.sha256 !== now) continue;
+      found.push({ kind: "work file", lang: langOf(`> ${p}`, bytes.toString("utf8")), text: bytes.toString("utf8"), source: p });
     }
     const inputs = (scope?.expanded ?? []).filter((x) => x.shape === "file" && typeof x.path === "string").map((x) => ({ input: String(x.ref ?? x.path), path: String(x.path) }));
     for (const p of found) {
@@ -222,7 +267,9 @@ export async function harvest(sandbox: string, o: { minLines?: number; libraries
       const text = normaliseScript(p.text);
       if (text.split("\n").length < minLines) continue;
       const key = sha256(text);
-      const slot = byText.get(key) ?? { piece: p, text, uses: [], inputs: [] };
+      const sensitive = jobSensitive || holdsSecret(p.text) || holdsSecret(text);
+      const slot = byText.get(key) ?? { piece: p, text, uses: [], inputs: [], sensitive: false };
+      slot.sensitive = slot.sensitive || sensitive;
       if (!slot.uses.some((u) => u.job === id)) slot.uses.push(use);
       for (const x of inputs) if (!slot.inputs.some((y) => y.path === x.path)) slot.inputs.push(x);
       byText.set(key, slot);
@@ -237,6 +284,8 @@ export async function harvest(sandbox: string, o: { minLines?: number; libraries
   const candidates = [...byText.entries()].map(([key, v]): Omit<Candidate, "n" | "file"> => {
     const lines = v.text.split("\n").length;
     const jobs = v.uses.sort((a, b) => a.at.localeCompare(b.at) || a.job.localeCompare(b.job));
+    // A sensitive candidate is named, never exported: no library tool is named for it (that would read its text), and its script is withheld.
+    if (v.sensitive) return { sha256: key, kind: v.piece.kind, lang: v.piece.lang, lines, bytes: Buffer.byteLength(v.text), jobs, reuse: jobs.length - 1, score: lines * jobs.length, ...(v.piece.source ? { source: v.piece.source } : {}), sensitive: true, note: "withheld: this candidate came from a sensitive job, or holds a value the run marks sensitive; its script is not exported", library: [], text: "" };
     const library: Candidate["library"] = [];
     for (const { where, m } of manifests) {
       const name = String(m.name ?? "");
@@ -257,7 +306,7 @@ export async function harvest(sandbox: string, o: { minLines?: number; libraries
     pieces,
     min_lines: minLines,
     libraries,
-    candidates: candidates.map((c, i) => ({ ...c, n: i + 1, file: `${String(i + 1).padStart(Math.max(2, width), "0")}-${c.lang}-${c.sha256.slice(0, 12)}.${EXT[c.lang]}` })),
+    candidates: candidates.map((c, i) => ({ ...c, n: i + 1, file: c.sensitive ? "" : `${String(i + 1).padStart(Math.max(2, width), "0")}-${c.lang}-${c.sha256.slice(0, 12)}.${EXT[c.lang]}` })),
   };
 }
 
@@ -274,11 +323,11 @@ async function readLibrary(dir: string): Promise<Awaited<ReturnType<typeof readT
 /** The candidates written for the maintainer: each script whole, one file each, and candidates.json and README.txt beside them. */
 export async function writeHarvest(h: Harvest, outDir: string, run: string): Promise<void> {
   await mkdir(outDir, { recursive: true });
-  for (const c of h.candidates) await writeFile(join(outDir, c.file), c.text.endsWith("\n") ? c.text : `${c.text}\n`);
+  for (const c of h.candidates) if (!c.sensitive && c.file) await writeFile(join(outDir, c.file), c.text.endsWith("\n") ? c.text : `${c.text}\n`);
   const { candidates, ...rest } = h;
   await writeFile(
     join(outDir, "candidates.json"),
-    `${JSON.stringify({ v: 1, run, ...rest, note: "Code the agents wrote into command jobs, as tool candidates for the library: each script whole in the file named, its sha256 over the text as counted (blank lines at its ends and trailing spaces dropped). jobs: every job that ran it; reuse: distinct jobs after the first; score: lines times jobs. library: tools that may already cover it, and why each is named: a pointer, never a verdict.", candidates: candidates.map(({ text: _t, ...c }) => c) }, null, 2)}\n`,
+    `${JSON.stringify({ v: 1, run, ...rest, note: "Code the agents wrote into command jobs, as tool candidates for the library: each script whole in the file named, its sha256 over the text as counted (blank lines at its ends and trailing spaces dropped). jobs: every job that ran it; reuse: distinct jobs after the first; score: lines times jobs. library: tools that may already cover it, and why each is named: a pointer, never a verdict. A candidate from a sensitive job, or holding a sensitive value, is named with sensitive: true and its script is withheld (docs/adr/0016).", candidates: candidates.map(({ text: _t, ...c }) => c) }, null, 2)}\n`,
   );
   await writeFile(
     join(outDir, "README.txt"),
@@ -292,7 +341,7 @@ export async function writeHarvest(h: Harvest, outDir: string, run: string): Pro
       "(no image, offset, name or wording of the case written in), give it a manifest with its params,",
       "`requires` (the programs it runs) and `use` (what it reads: extensions, magic bytes, names), and a test.",
       "",
-      ...h.candidates.map((c) => `${c.file}: ${c.lang} ${c.kind}, ${c.lines} lines, ${c.jobs.length} job(s) (${c.jobs.map((j) => `${j.job} by ${j.seat} in ${j.profile}`).join("; ")})${c.library.length ? `; library: ${c.library.map((l) => `${l.tool} (${l.why})`).join("; ")}` : "; no library tool matched"}`),
+      ...h.candidates.map((c) => c.sensitive ? `[withheld] ${c.lang} ${c.kind}, ${c.lines} lines, ${c.jobs.length} job(s) (${c.jobs.map((j) => `${j.job} by ${j.seat}`).join("; ")}): ${c.note}` : `${c.file}: ${c.lang} ${c.kind}, ${c.lines} lines, ${c.jobs.length} job(s) (${c.jobs.map((j) => `${j.job} by ${j.seat} in ${j.profile}`).join("; ")})${c.library.length ? `; library: ${c.library.map((l) => `${l.tool} (${l.why})`).join("; ")}` : "; no library tool matched"}`),
       "",
     ].join("\n"),
   );
@@ -302,8 +351,8 @@ export async function writeHarvest(h: Harvest, outDir: string, run: string): Pro
 export function harvestLines(h: Harvest, outDir: string | null): string[] {
   const out = [`${h.candidates.length} candidate(s): scripts of ${h.min_lines} lines or more in ${h.command_jobs} command job(s) of ${h.jobs} job(s), ranked by lines times jobs.`];
   for (const c of h.candidates) {
-    out.push(`${String(c.n).padStart(3)}. ${c.lang} ${c.kind}${c.source ? ` ${c.source}` : ""}, ${c.lines} lines, ${c.jobs.length} job(s)${c.reuse ? ` (reused ${c.reuse}×)` : ""}, score ${c.score}: ${c.jobs.map((j) => `${j.job} (${j.seat}, ${j.profile}, ${j.status})`).join(", ")}`);
-    out.push(`     library: ${c.library.length ? c.library.map((l) => `${l.tool} in ${l.where}: ${l.why}`).join("; ") : "no tool matched"}${c.note ? `; ${c.note}` : ""}`);
+    out.push(`${String(c.n).padStart(3)}. ${c.sensitive ? "[withheld] " : ""}${c.lang} ${c.kind}${c.source ? ` ${c.source}` : ""}, ${c.lines} lines, ${c.jobs.length} job(s)${c.reuse ? ` (reused ${c.reuse}×)` : ""}, score ${c.score}: ${c.jobs.map((j) => `${j.job} (${j.seat}, ${j.profile}, ${j.status})`).join(", ")}`);
+    out.push(c.sensitive ? `     ${c.note}` : `     library: ${c.library.length ? c.library.map((l) => `${l.tool} in ${l.where}: ${l.why}`).join("; ") : "no tool matched"}${c.note ? `; ${c.note}` : ""}`);
   }
   if (outDir) out.push(`Written to ${outDir}: each script whole (${h.candidates.map((c) => c.file).join(", ") || "none"}), candidates.json and README.txt.`);
   return out;

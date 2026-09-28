@@ -42,7 +42,7 @@ import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolve
 import { CANARY_NAME, OBSERVE_GUEST, observedRun, observeWanted, readObservation } from "./job-observe.ts";
 import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
-import { derivedFrom, derivedSensitivity, ownSensitivity, type Sensitivity } from "./output-hygiene.ts";
+import { derivedFrom, derivedSensitivity, ownSensitivity, sensitiveIndex, snapshotObjects, type Sensitivity } from "./output-hygiene.ts";
 
 export type JobKind = "tool" | "command" | "recipe" | "detect" | "import";
 
@@ -1534,22 +1534,23 @@ export class JobService {
   private async sensitivityOf(job: JobRecord): Promise<Sensitivity | null> {
     const own = ownSensitivity(job.spec);
     if (own) return own;
-    const sensitive = new Set([...this.jobs.values()].filter((j) => j.sensitive && j.id !== job.id).map((j) => j.id));
+    // Every job the run holds sensitive so far, from the journal (the record), by their outputs' and logs' digests.
+    const index = await sensitiveIndex(this.S);
+    const sensitive = new Set([...index.jobs.keys()].filter((id) => id !== job.id));
     if (!sensitive.size) return null;
-    const digests = new Map<string, string>();
-    for (const id of sensitive) {
-      const m = await readManifest(join(storePaths(this.S).jobs, id, "manifest.json"));
-      for (const f of m?.manifest.files ?? []) if (!digests.has(f.sha256)) digests.set(f.sha256, id);
-    }
-    const generations = new Map<string, string | null>();
-    for (const l of this.journal.of("generation_committed")) generations.set(String(l.generation), typeof l.job === "string" ? l.job : null);
-    let objects: Array<{ path: string; sha256?: string }> | null = null;
-    if (scopeKindOf(job.spec) === "declared" && !job.spec.seal) {
-      const r = await resolveScope(this.S, job.spec.inputs, { collections: this.collections(), targets: targetPaths(job.spec) });
-      if (r.ok) objects = r.objects;
-    }
+    // What the job actually read: its scope manifest's snapshot (each file's digest hashed at the job's start), not a scope resolved anew.
+    const objects = await snapshotObjects(this.S, job.scope?.manifest);
     const text = [job.spec.command ?? "", job.spec.args ? JSON.stringify(job.spec.args) : "", job.spec.source ?? "", ...targetPaths(job.spec)].join("\n");
-    return derivedSensitivity(derivedFrom({ objects, text, sensitive, digestJob: (sha) => digests.get(sha) ?? null, generationJob: (gen) => generations.get(gen) ?? null }));
+    return derivedSensitivity(
+      derivedFrom({
+        objects,
+        text,
+        sensitive,
+        contentJob: (sha) => (index.content.get(sha) === job.id ? null : index.content.get(sha) ?? null),
+        generationJob: (gen) => index.genJob.get(gen) ?? null,
+        aliasJob: (alias) => index.aliasJob.get(alias) ?? null,
+      }),
+    );
   }
 
   /**
@@ -1573,6 +1574,7 @@ export class JobService {
         ...(job.spec.experimental ? { experimental: true } : {}),
         ...(job.spec.parent ? { parent: job.spec.parent } : {}),
         ...(job.spec.alias ? { alias: job.spec.alias } : {}),
+        ...(job.sensitive ? { sensitive: true } : {}),
       }));
       Object.assign(job, { generation: generation.id, revision });
       await this.project(job);
@@ -1590,8 +1592,9 @@ export class JobService {
           await this.o.notify("all", `Catalogue revision ${revision}: ${what}, made by job ${job.spec.parent ?? "?"}${maker ? ` (${maker})` : ""} and catalogued on its own — complete. ${where}`).catch(() => undefined);
         } else if (maker) {
           const cov = generation.coverage as { errors?: unknown[]; limits_hit?: unknown[]; why?: string } | null;
-          const why = [...(cov?.errors ?? []), ...(cov?.limits_hit ?? []), ...(cov?.why ? [cov.why] : [])].map(String);
-          await this.o.notify(maker, `Catalogue revision ${revision}: ${what}, made by your job ${job.spec.parent}, is ${generation.status}${why.length ? `: ${why.join("; ")}` : ""}. ${where} When a readable form of it appears in a job's output, it is offered to the recipes again.`).catch(() => undefined);
+          // A sensitive generation's coverage detail may carry the secret: the notification says it is withheld, never the reasons.
+          const why = generation.sensitive ? [] : [...(cov?.errors ?? []), ...(cov?.limits_hit ?? []), ...(cov?.why ? [cov.why] : [])].map(String);
+          await this.o.notify(maker, `Catalogue revision ${revision}: ${what}, made by your job ${job.spec.parent}, is ${generation.status}${why.length ? `: ${why.join("; ")}` : generation.sensitive ? " (its coverage detail is withheld: a sensitive output)" : ""}. ${where} When a readable form of it appears in a job's output, it is offered to the recipes again.`).catch(() => undefined);
         }
       }
       if (generation.status === "complete") await this.relateReadable(generation);

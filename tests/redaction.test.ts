@@ -90,19 +90,24 @@ test("every redaction is recorded with the sha256 of what it replaced, why, and 
   assert.equal(job.spec.command, "[redacted: marked sensitive]");
   assert.equal(job.spec.kind, "command");
   const field = byPath.get("store/jobs/j000001/job.json")?.replaced[0];
-  assert.deepEqual([field?.what, field?.pointer, field?.entry, field?.sha256_of_original], ["field", "/spec/command", 4, sha(`keepass2john ${PATH}`)]);
+  assert.deepEqual([field?.what, field?.pointer, field?.entry], ["field", "/spec/command", 4]);
+  assert.match(String(field?.sha256_of_original), /^hidden-[0-9a-f]{24}$/, "a field's commitment is a keyed id, not a hash of a low-entropy value");
   // Text, word by word, each word recorded by its sha256 and how often.
   const board = byPath.get("board/main.md");
-  assert.ok(board?.replaced.some((x) => x.what === "text" && x.sha256_of_original === sha(PIN) && x.count === 1));
+  assert.ok(board?.replaced.some((x) => x.what === "text" && /^hidden-[0-9a-f]{24}$/.test(x.sha256_of_original) && x.count === 1), "a low-entropy word's commitment is a keyed id");
   assert.doesNotMatch(await readFile(join(pkg, "board", "main.md"), "utf8"), new RegExp(`${PIN}|${KEY}`));
   // A release's PDF cannot be redacted word by word: withheld. Its signed record is left as it was, and the scan names what it holds.
-  assert.match(await readFile(join(pkg, "release", "v1", "report.pdf"), "utf8"), /^\[withheld: a PDF cannot be redacted by replacing words; the release names it by its sha256 before redaction, [0-9a-f]{64}\]/);
+  assert.match(await readFile(join(pkg, "release", "v1", "report.pdf"), "utf8"), /^\[withheld: sensitive content \(a release's PDF[^)]*\); matched hidden-[0-9a-f]{24}\./);
   assert.doesNotMatch(await readFile(join(pkg, "release", "v1", "report.html"), "utf8"), new RegExp(KEY));
   assert.deepEqual(await readFile(join(pkg, "release", "v1", "release.json")), releaseBefore);
   assert.equal(rec.leak_scan.mode, "list");
   assert.deepEqual(rec.leak_scan.hits.map((h) => [h.path, h.entry]), [["release/v1/release.json", 3]]);
-  assert.equal(rec.leak_scan.hits[0].token_sha256, sha(PIN));
-  assert.doesNotMatch(JSON.stringify(rec), new RegExp(`${KEY}|${PIN}|vault\\.kdbx`), "the record names hashes, never the words");
+  assert.match(rec.leak_scan.hits[0].token_sha256, /^hidden-[0-9a-f]{24}$/, "a scan hit on a low-entropy value is a keyed id, not its hash");
+  assert.doesNotMatch(JSON.stringify(rec), new RegExp(`${KEY}|${PIN}|vault\\.kdbx`), "the record names keyed ids, never the words");
+  // The private sidecar, outside the package, carries the map and never a value.
+  const side = JSON.parse(await readFile(join(pkg, "..", `${pkg.slice(pkg.lastIndexOf("/") + 1)}.private.json`), "utf8"));
+  assert.ok(Object.keys(side.map).length >= 1);
+  assert.doesNotMatch(JSON.stringify(side), new RegExp(`${KEY}|${PIN}`), "the sidecar maps ids to a description, not to the value");
   // Verify: the chains walk, the lineage and the scan are said.
   const v = verifyPackage(pkg);
   assert.match(v.lines.join("\n"), /Disputes:     1 lines, chain intact, 1 redacted \(their hashes kept\)/);

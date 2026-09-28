@@ -545,7 +545,8 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   const sections = [...new Set([...(asked.length ? asked : [...questions.values()]).map((q) => `question:${q.id}`), ...(asked.length ? held : []), "summary", "narrative"])];
   const problems = answerProblems(entries, disputes, unqualified);
   const bar = await sectionBars(sandbox).catch(() => (() => ({ material: true, existence: false })) as (id: string) => { material: boolean; existence: boolean });
-  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, (id) => jobs.get(id)?.status ?? null) }) : null;
+  const { producerOf } = await (await import("./output-hygiene.ts")).producerIndex(sandbox).catch(() => ({ producerOf: () => null as null }));
+  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf) }) : null;
 
   const text = async (rel: string) => (await readFile(join(sandbox, rel), "utf8").catch(() => ""));
   const ledgerChain = verifyLedgerChain(await text("ledger/entries.jsonl"));

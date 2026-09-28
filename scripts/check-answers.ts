@@ -85,6 +85,7 @@ import {
 } from "../extensions/protocol.ts";
 import { answerResult, resultWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
 import { committedLogHashes, resolveRef } from "./evidence-store.ts";
+import { producerIndex } from "./output-hygiene.ts";
 
 type Entry = { seq: number; kind: string; refs?: string[]; supersedes?: number; answers?: string[]; completion?: string; reason?: string; status?: string };
 
@@ -356,8 +357,10 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   }
   const bar = await sectionBars(S, existence);
   const statuses = await jobStatusMap(S, entries);
-  // The kept output of a cancelled or stopped job, cited with no word on how it is treated (docs/adr/0016).
-  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, (id) => statuses.get(id)) });
+  // The kept output of a cancelled or stopped job, cited with no word on how
+  // it is treated (docs/adr/0016), by whatever ref names those bytes.
+  const { producerOf } = await producerIndex(S);
+  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf) });
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
