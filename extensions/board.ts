@@ -24,6 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
+import * as F from "./finish.ts";
 import * as L from "./leads.ts";
 import * as P from "./protocol.ts";
 import * as Q from "./questions.ts";
@@ -61,7 +62,7 @@ function refused(err: unknown): boolean {
 type Pending = { fn: string; socket: Socket; answered: () => void; resolve: (value: unknown) => void; reject: (err: Error) => void };
 
 /** Calls that change the board, sent once more with the same request id when a link drops. */
-const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "questionOpen", "questionAsk", "netRequest", "netFetch"]);
+const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "finishTurnFor", "finishAct", "questionOpen", "questionAsk", "netRequest", "netFetch"]);
 
 /** Timings a test shortens; the defaults are the run's. */
 export type HubClientTimings = { partTimeoutMs?: number; writeStallMs?: number };
@@ -348,6 +349,8 @@ export const REMOTE_FUNCTIONS = [
   "correctionsAfter",
   "disputeEntry",
   "fileDiff",
+  "finishAct",
+  "finishTurnFor",
   "forgeTool",
   "forgedToolSeal",
   "guardWrite",
@@ -356,10 +359,13 @@ export const REMOTE_FUNCTIONS = [
   "jobSubmit",
   "leadClaim",
   "leadClose",
+  "leadConfirm",
+  "leadHandoff",
   "leadInterpret",
   "leadLink",
   "leadOpen",
   "leadRelease",
+  "leadReopen",
   "leadsDigest",
   "leadsView",
   "listClaims",
@@ -374,6 +380,7 @@ export const REMOTE_FUNCTIONS = [
   "netFetch",
   "netRequest",
   "netView",
+  "offerAnswer",
   "postMessage",
   "publishFile",
   "questionAsk",
@@ -388,6 +395,7 @@ export const REMOTE_FUNCTIONS = [
   "releaseAllOwned",
   "releaseFile",
   "restoreFileVersion",
+  "routeReview",
   "swarmDoneExists",
   "systemPost",
   "threadJoin",
@@ -409,6 +417,16 @@ export const leadLink = remote("leadLink", L.linkLead);
 export const leadsView = remote("leadsView", L.leadsView);
 export const leadsDigest = remote("leadsDigest", L.leadsDigest);
 export const leadInterpret = remote("leadInterpret", (ctx: P.SwarmContext, entry: number, items: L.InterpretInput[]) => L.recordInterpretations(ctx.sandboxRoot, ctx.agentId, entry, items));
+/** An agent reopens a closed lead (B4), and another seat reviews a limiting route (B3). */
+export const leadReopen = remote("leadReopen", L.agentReopenLead);
+export const routeReview = remote("routeReview", L.routeReview);
+/** A hand-off, a closure confirmed, and the answer to an offer of a lead or a question (A2, A3). */
+export const leadHandoff = remote("leadHandoff", L.handoffLead);
+export const leadConfirm = remote("leadConfirm", (ctx: P.SwarmContext, id: unknown, input: { expected_revision?: unknown; ref?: string; why?: string }) => L.confirmLead(ctx, id, input ?? {}));
+export const offerAnswer = remote("offerAnswer", L.answerOffer);
+/** The finish (finish.ts): whose done it is, and the typed acts around the report. */
+export const finishTurnFor = remote("finishTurnFor", F.finishTurnFor);
+export const finishAct = remote("finishAct", F.finishAct);
 /**
  * The question register (questions.ts): an agent opens a question, reads the
  * register, and asks what is unclear. Who asks is the channel's seat; the

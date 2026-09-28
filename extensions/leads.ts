@@ -38,6 +38,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir, open, readdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import * as NB from "./negative-bar.ts";
+import * as O from "./offers.ts";
 import * as P from "./protocol.ts";
 
 // --- the files --------------------------------------------------------------------------------
@@ -106,7 +107,29 @@ export const LEAD_COMPACTION_BOUND_MS = 20 * 60_000;
 /** An idle seat is one that has waited at least this long, holding no active lead and no job. */
 export const IDLE_SEAT_MS = 60_000;
 
-export type LeadEventKind = "open" | "claim" | "release" | "close" | "link" | "reopen" | "stale" | "job" | "interpret" | "wake" | "note" | "route";
+export type LeadEventKind =
+  | "open"
+  | "claim"
+  | "release"
+  | "close"
+  | "link"
+  | "reopen"
+  | "stale"
+  | "job"
+  | "interpret"
+  | "wake"
+  | "note"
+  | "route"
+  | "route_review"
+  // Offers (extensions/offers.ts): made, delivered, declined, lapsed; accepted by the claim or confirm that names it.
+  | "offer"
+  | "offer_seen"
+  | "offer_decline"
+  | "offer_lapse"
+  // The holder keeps a parked lead; a hand-off to another seat; a closure confirmed on the entry that stands now.
+  | "keep"
+  | "handoff"
+  | "confirm";
 
 export type LeadEvent = {
   v: 1;
@@ -142,9 +165,10 @@ export type LeadEvent = {
   /** A reopen for evidence added after the kickoff: the import it came as, so the reopen is made once. */
   import?: string;
   job?: string;
-  /** An interpretation: the ledger entry that is it, and that entry's kind. */
+  /** An interpretation: the ledger entry that is it, that entry's kind, and its hash (the interpretation is bound to that entry, never to its seq alone). */
   entry?: number;
   kind?: string;
+  entry_hash?: string;
   /** An interpretation: how the rest of a job's output was read, or why it was not. */
   rest?: string;
   /** A wake: the seat woken, and which open spell of the lead it was for. */
@@ -174,9 +198,46 @@ export type LeadEvent = {
   not_examined?: Array<{ source: string; method: string; why: string }>;
   /** A close negative: held this long or less, one job, one object (a review cue, hub-computed). */
   quick_negative?: { held_ms: number; jobs: number; objects: number };
+  /**
+   * A route review (B3): another seat's word on a lead closed deferred,
+   * infeasible or needs_operator, whether the route's limitation is still
+   * material now that its questions are disposed; bound to the close it
+   * reviews (its open spell and its ref).
+   */
+  material_now?: boolean;
+  /** A reopen by an agent: the lead's revision the reopener read (lead_reopen's expected_revision). */
+  expected_revision?: number;
+  /** An offer: why it was made, the lead's revision it binds, its age bound; the offer an act answers (a claim, a confirm, a decline, a lapse). */
+  reason?: string;
+  rev?: number;
+  max_until?: string;
+  offer?: number;
+  /** A confirm offer: the standing head of the superseded closing entry. */
+  head?: string;
+  /**
+   * An open or a claim that overlaps a held lead's questions and is held all
+   * the same: why (a second route, an independent verification), in
+   * `why`-like words. Otherwise the open is unheld and names the holder.
+   */
+  overlap?: string;
+  overlap_why?: string;
+  /** An open that overlapped held leads' questions and was left unheld: the leads it overlapped. */
+  covered_by?: string[];
+  /** Coverage hints: the objects the work is over (overlap is not identity; these are never load-bearing). */
+  objects?: string[];
+  /** The product contract (A2): the immutable refs it starts from, the first act once its product is accepted. */
+  inputs?: string[];
+  next_action?: string;
+  /** A close: the delivered product, by ref (E-<seq> or an object of the run). */
+  result_refs?: string[];
+  /** An open made as a prerequisite of another lead, linked to it in the same act. */
+  consumer?: string;
   prev: string;
   hash: string;
 };
+
+/** A need dropped from a lead: withdrawn with a reason, never read as met. */
+export type DroppedNeed = { need: string; why: string; at: string; by: string };
 
 export type Lead = {
   id: string;
@@ -211,6 +272,25 @@ export type Lead = {
   /** When it closed negative: the planned routes nothing examined, and whether it was a quick negative. */
   not_examined?: Array<{ source: string; method: string; why: string }>;
   quick_negative?: { held_ms: number; jobs: number; objects: number };
+  /** Its revision: how many acts changed it (lead_reopen and lead_confirm name the one they read). */
+  rev: number;
+  /** Route reviews of its limiting closes, in order (B3). */
+  route_reviews: Array<{ at: string; by: string; material: boolean; why: string; cycle: number; ref: string }>;
+  /** Every offer of it, in order (extensions/offers.ts). */
+  offers: O.Offer[];
+  /** A closure whose entry was superseded, waiting for its closer to confirm it or reopen it (lead_confirm): never re-pointed by itself. */
+  confirm: { at: string; offer: number; ref_was: string; head: string | null } | null;
+  /** Needs dropped with a reason (withdrawn, never read as met). */
+  dropped: DroppedNeed[];
+  /** The product contract (A2). */
+  inputs?: string[];
+  next_action?: string;
+  result_refs?: string[];
+  objects?: string[];
+  overlap?: { kind: string; why: string; by: string };
+  covered_by?: string[];
+  /** A closure confirmed on the entry that stands after its first was superseded. */
+  confirmed?: Array<{ at: string; by: string; from: string; to: string; why: string }>;
 };
 
 export type LeadsState = {
@@ -218,8 +298,8 @@ export type LeadsState = {
   leads: Map<string, Lead>;
   /** The lead each job was run under. */
   jobLead: Map<string, string>;
-  /** Each job's interpretations, in order. */
-  interpretations: Map<string, Array<{ by: string; at: string; entry: number; kind: string; rest?: string }>>;
+  /** Each job's interpretations, in order, each bound to its entry's hash when the register recorded one. */
+  interpretations: Map<string, Array<{ by: string; at: string; entry: number; kind: string; rest?: string; hash?: string }>>;
   /** Wakes, by lead and open spell. */
   wakes: Map<string, string>;
   chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null };
@@ -273,6 +353,9 @@ export async function readLeadEvents(sandboxRoot: string): Promise<{ events: Lea
   return { events, text };
 }
 
+/** The events that change a lead (its revision): not a wake, a stale mark, an interpretation or an offer's delivery. */
+const REVISING: ReadonlySet<string> = new Set(["open", "claim", "release", "close", "link", "reopen", "route", "job", "note", "route_review", "keep", "confirm", "handoff"]);
+
 /** The register's state, folded from its events in order. */
 export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok: true, broken_at: null, reason: null, head: events.at(-1)?.hash ?? null }): LeadsState {
   const leads = new Map<string, Lead>();
@@ -310,6 +393,16 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
           ...(e.product ? { product: e.product } : {}),
           ...(e.acceptance ? { acceptance: e.acceptance } : {}),
           routes: [...(e.routes ?? [])],
+          rev: 1,
+          route_reviews: [],
+          offers: [],
+          confirm: null,
+          dropped: [],
+          ...(e.inputs?.length ? { inputs: [...e.inputs] } : {}),
+          ...(e.next_action ? { next_action: e.next_action } : {}),
+          ...(e.objects?.length ? { objects: [...e.objects] } : {}),
+          ...(e.overlap ? { overlap: { kind: e.overlap, why: e.overlap_why ?? "", by: e.by } } : {}),
+          ...(e.covered_by?.length ? { covered_by: [...e.covered_by] } : {}),
         });
         break;
       }
@@ -319,6 +412,11 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         l.generation = e.generation ?? l.generation + 1;
         l.held_since = e.at;
         l.stale = null;
+        if (typeof e.offer === "number") {
+          const o = l.offers.find((x) => x.seq === e.offer);
+          if (o && !o.accepted) o.accepted = { at: e.at };
+        }
+        if (e.overlap) l.overlap = { kind: e.overlap, why: e.overlap_why ?? "", by: e.by };
         // A directive framed by its first claim: the proposition it tests, from then on.
         if (e.proposition && !l.proposition) {
           l.proposition = e.proposition;
@@ -328,6 +426,7 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         l.last_seq = e.seq;
         break;
       case "release":
+      case "handoff":
         if (!l) break;
         l.holder = null;
         l.held_since = null;
@@ -339,6 +438,9 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         if (!l || !e.disposition) break;
         l.closed = { disposition: e.disposition, ref: e.ref ?? "", by: e.by, at: e.at, ...(e.why ? { why: e.why } : {}), seq: e.seq };
         l.stale = null;
+        l.confirm = null;
+        if (e.result_refs?.length) l.result_refs = [...e.result_refs];
+        else delete l.result_refs;
         if (e.not_examined?.length) l.not_examined = e.not_examined;
         else delete l.not_examined;
         if (e.quick_negative) l.quick_negative = e.quick_negative;
@@ -353,6 +455,7 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
       case "reopen":
         if (!l) break;
         l.closed = null;
+        l.confirm = null;
         l.holder = null;
         l.held_since = null;
         l.stale = null;
@@ -364,6 +467,7 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         break;
       case "link":
         if (!l) break;
+        for (const n of e.remove ?? []) if (l.needs.includes(n)) l.dropped.push({ need: n, why: e.why ?? "", at: e.at, by: e.by });
         l.needs = [...l.needs.filter((n) => !(e.remove ?? []).includes(n)), ...(e.add ?? []).filter((n) => !l.needs.includes(n))];
         l.last_seq = e.seq;
         break;
@@ -380,18 +484,61 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         break;
       case "interpret":
         if (!e.job || typeof e.entry !== "number") break;
-        interpretations.set(e.job, [...(interpretations.get(e.job) ?? []), { by: e.by, at: e.at, entry: e.entry, kind: e.kind ?? "", ...(e.rest ? { rest: e.rest } : {}) }]);
+        interpretations.set(e.job, [...(interpretations.get(e.job) ?? []), { by: e.by, at: e.at, entry: e.entry, kind: e.kind ?? "", ...(e.rest ? { rest: e.rest } : {}), ...(e.entry_hash ? { hash: e.entry_hash } : {}) }]);
         break;
       case "wake":
+        // A wake from before offers: read as an offer of the lead as it stood.
         if (!e.lead || !e.to) break;
         wakes.set(`${e.lead}#${e.cycle ?? 0}`, e.to);
+        if (l) l.offers.push({ seq: e.seq, at: e.at, to: e.to, rev: l.rev, reason: "wake", seen_at: null, declined: null, accepted: null, lapsed_at: null });
         break;
+      case "offer": {
+        if (!l || !e.to) break;
+        const reason = ((O.OFFER_REASONS as readonly string[]).includes(e.reason ?? "") ? e.reason : "wake") as O.OfferReason;
+        l.offers.push({ seq: e.seq, at: e.at, to: e.to, rev: e.rev ?? l.rev, reason, seen_at: null, declined: null, accepted: null, lapsed_at: null, ...(e.from ? { from: e.from } : {}) });
+        wakes.set(`${l.id}#${e.cycle ?? l.cycle}`, e.to);
+        if (reason === "confirm" && l.closed) l.confirm = { at: e.at, offer: e.seq, ref_was: e.ref ?? l.closed.ref, head: e.head ?? null };
+        break;
+      }
+      case "offer_seen":
+      case "offer_decline":
+      case "offer_lapse": {
+        const o = l?.offers.find((x) => x.seq === e.offer);
+        if (!o) break;
+        if (e.ev === "offer_seen" && !o.seen_at) o.seen_at = e.at;
+        if (e.ev === "offer_decline" && !o.declined) o.declined = { at: e.at, why: e.why ?? "" };
+        if (e.ev === "offer_lapse" && !o.lapsed_at) o.lapsed_at = e.at;
+        break;
+      }
+      case "keep":
+        if (!l) break;
+        l.stale = null;
+        l.last_seq = e.seq;
+        break;
+      case "confirm": {
+        if (!l || !l.closed || !e.ref) break;
+        const from = l.closed.ref;
+        l.closed = { ...l.closed, ref: e.ref };
+        l.confirmed = [...(l.confirmed ?? []), { at: e.at, by: e.by, from, to: e.ref, why: e.why ?? "" }];
+        const o = l.offers.find((x) => x.seq === e.offer);
+        if (o && !o.accepted) o.accepted = { at: e.at };
+        l.confirm = null;
+        l.last_seq = e.seq;
+        break;
+      }
       case "note":
         if (!l) break;
         l.notes.push({ at: e.at, by: e.by, text: e.text ?? "", ...(e.allow_host ? { allow_host: e.allow_host } : {}) });
         l.last_seq = e.seq;
         break;
+      case "route_review":
+        if (!l || typeof e.material_now !== "boolean") break;
+        l.route_reviews.push({ at: e.at, by: e.by, material: e.material_now, why: e.why ?? "", cycle: e.cycle ?? l.cycle, ref: e.ref ?? "" });
+        l.last_seq = e.seq;
+        break;
     }
+    // Its revision: every act that changes what the lead is or who has it.
+    if (l && e.ev !== "open" && REVISING.has(e.ev)) l.rev += 1;
   }
   return { events, leads, jobLead, interpretations, wakes, chain };
 }
@@ -427,7 +574,8 @@ export function ledgerView(entries: P.LedgerEntry[], disputes: P.LedgerDispute[]
     entries,
     bySeq: new Map(entries.map((e) => [e.seq, e])),
     replaced: P.supersededBy(entries),
-    disputed: new Set(P.standingDisputes(disputes).map((d) => d.target)),
+    // A correction of a disputed entry is disputed too until the dispute is answered (B18).
+    disputed: new Set(P.disputesInForce(entries, disputes).map((d) => d.target)),
   };
 }
 
@@ -447,16 +595,41 @@ export function needState(need: string, s: LeadsState, v: LedgerView): { met: bo
   if (!p.ok) return { met: false, why: p.reason, dead: true };
   if (p.entry !== undefined) {
     const st = entryStands(v, p.entry);
-    return st.ok ? { met: true } : { met: false, why: st.why, dead: v.bySeq.has(p.entry) };
+    // A superseded entry never stands again; a disputed one does once the dispute is withdrawn.
+    return st.ok ? { met: true } : { met: false, why: st.why, dead: v.bySeq.has(p.entry) && v.replaced.has(p.entry) };
   }
   const l = s.leads.get(p.lead!);
   if (!l) return { met: false, why: `${p.lead} does not exist`, dead: true };
   if (!l.closed) return { met: false, why: `${l.id} is ${l.holder ? `held by ${l.holder}` : "open, unheld"}` };
+  // A closure whose entry was superseded stands only once its closer confirms it on what stands now.
+  if (l.confirm) return { met: false, why: `${l.id} was closed ${l.closed.disposition} on ${l.confirm.ref_was}, since superseded: its closer confirms the closure or reopens it` };
   if (l.closed.disposition === p.disposition) return { met: true };
   return { met: false, why: `${l.id} was closed ${l.closed.disposition}${l.closed.ref ? ` (${l.closed.ref})` : ""}, not ${p.disposition}: revise the need (lead_link)`, dead: true };
 }
 
 export type LeadStatus = "open" | "active" | "blocked" | "closed";
+
+/**
+ * What a need came to (A2), never read from a removal: satisfied (met now),
+ * pending (not yet), failed (the producer ended otherwise, or cannot meet
+ * it), invalidated (it was met, and what met it no longer stands: the
+ * producer reopened, or its closure waits for confirmation). A need dropped
+ * with lead_link is withdrawn, with its reason, in the lead's `dropped`.
+ */
+export type NeedOutcome = "satisfied" | "pending" | "failed" | "invalidated";
+
+export function needOutcome(need: string, s: LeadsState, v: LedgerView): NeedOutcome {
+  const st = needState(need, s, v);
+  if (st.met) return "satisfied";
+  if (st.dead) return "failed";
+  const p = parseNeed(need);
+  if (p.ok && p.lead) {
+    const l = s.leads.get(p.lead);
+    const metOnce = s.events.some((e) => e.lead === p.lead && e.ev === "close" && e.disposition === p.disposition);
+    if (l && metOnce && (!l.closed || l.confirm)) return "invalidated";
+  }
+  return "pending";
+}
 
 export function leadStatus(l: Lead, s: LeadsState, v: LedgerView): LeadStatus {
   if (l.closed) return "closed";
@@ -717,7 +890,7 @@ export function unreadBytes(spans: Array<[number, number]> | undefined, total: n
   return Math.max(0, total - covered);
 }
 
-export type AwaitingJob = { job: string; agent: string; lead: string | null; why: string; unread_bytes?: number; total_bytes?: number; next_offset?: number };
+export type AwaitingJob = { job: string; agent: string; lead: string | null; why: string; unread_bytes?: number; total_bytes?: number; next_offset?: number; reinterpret?: true };
 
 /**
  * The jobs whose output waits for an interpretation: a command or tool job,
@@ -726,14 +899,25 @@ export type AwaitingJob = { job: string; agent: string; lead: string | null; why
  * how it was read or why not. A bare ledger citation does not count: an
  * interpretation is an entry recorded with `interprets` naming the job.
  */
-export async function awaitingInterpretation(sandboxRoot: string, s: LeadsState, jobs?: JobFacts[]): Promise<AwaitingJob[]> {
+export async function awaitingInterpretation(sandboxRoot: string, s: LeadsState, jobs?: JobFacts[], ledger?: LedgerView): Promise<AwaitingJob[]> {
   const all = jobs ?? (await readJobs(sandboxRoot));
   const reads = await stdoutReads(sandboxRoot);
   const out: AwaitingJob[] = [];
   for (const j of all) {
     if (!needsInterpretation(j) || !j.agent || j.agent === "system" || j.agent === "derived") continue;
     const lead = s.jobLead.get(j.id) ?? null;
-    const interps = s.interpretations.get(j.id) ?? [];
+    const recorded = s.interpretations.get(j.id) ?? [];
+    // An interpretation is bound to its entry (B13): it holds while that
+    // entry stands, as the entry it was recorded on. A correction carries it
+    // only when the correction interprets the job again; a superseded or
+    // disputed interpretation needs re-interpretation.
+    const valid = ledger ? recorded.filter((i) => interpretationStands(i, ledger).ok) : recorded;
+    if (recorded.length && !valid.length && ledger) {
+      const why = recorded.map((i) => { const st = interpretationStands(i, ledger); return `E-${i.entry}: ${st.ok ? "stands" : st.why}`; }).join("; ");
+      out.push({ job: j.id, agent: j.agent, lead, why: `its interpretation no longer stands (${why}): record what its output shows again, with interprets naming it (a correction that still holds says so by interpreting it too)`, reinterpret: true });
+      continue;
+    }
+    const interps = valid;
     const spans = reads.get(j.id)?.get(j.agent);
     let unread: { unread: number; total: number; next: number } | null = null;
     if (spans?.length) {
@@ -752,6 +936,16 @@ export async function awaitingInterpretation(sandboxRoot: string, s: LeadsState,
     }
   }
   return out;
+}
+
+/** Whether one interpretation of a job stands: its entry stands (not superseded, not disputed) and is the entry it was recorded on. */
+export function interpretationStands(i: { entry: number; hash?: string }, v: LedgerView): { ok: true } | { ok: false; why: string } {
+  const e = v.bySeq.get(i.entry);
+  if (!e) return { ok: false, why: `E-${i.entry} is not in the ledger` };
+  if (i.hash && (e.hash ?? P.ledgerHash(e, "genesis")) !== i.hash) return { ok: false, why: `E-${i.entry} is not the entry it was recorded on (another hash)` };
+  const st = entryStands(v, i.entry);
+  if (!st.ok) return { ok: false, why: `${st.why}, which does not interpret it` };
+  return { ok: true };
 }
 
 // --- liveness -----------------------------------------------------------------------------------
@@ -847,21 +1041,300 @@ export async function holderLiveness(sandboxRoot: string, holder: string, jobs: 
 
 // --- idle seats ---------------------------------------------------------------------------------
 
-/** When each seat began waiting, if it is waiting now (protocol.ts marks it). */
-export async function idleSeats(sandboxRoot: string, s: LeadsState, v: LedgerView, jobs: JobFacts[], now = Date.now()): Promise<Array<{ agent: string; since: number }>> {
+/**
+ * The seats something is offered to now, in either register (A3: one offer
+ * mechanism, one offer at a time per seat): a lead's offer that still
+ * reserves it, or a question's. `questions` is the question register's
+ * snapshot the caller read with `s` (under the registers' lock when it
+ * offers); left out, it is read here.
+ */
+export async function offeredSeats(sandboxRoot: string, s: LeadsState, now = Date.now(), questions?: import("./questions.ts").QuestionsSnapshot | null): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const l of s.leads.values()) for (const o of l.offers) if (O.reserving(o, now, l.rev)) out.add(o.to);
+  const Q = await import("./questions.ts");
+  const qs = questions !== undefined ? questions : await Q.questionsSnapshot(sandboxRoot).catch(() => null);
+  for (const q of qs?.state.questions.values() ?? []) {
+    const o = Q.reservingQuestionOffer(q, now);
+    if (o) out.add(o.to);
+  }
+  return out;
+}
+
+/** When each seat began waiting, if it is waiting now (protocol.ts marks it); a seat with an offer standing in either register is not idle for another. */
+export async function idleSeats(sandboxRoot: string, s: LeadsState, v: LedgerView, jobs: JobFacts[], now = Date.now(), questions?: import("./questions.ts").QuestionsSnapshot | null): Promise<Array<{ agent: string; since: number }>> {
   const ids = await P.teamIds(sandboxRoot).catch(() => [] as string[]);
+  const offered = await offeredSeats(sandboxRoot, s, now, questions);
   const out: Array<{ agent: string; since: number }> = [];
   for (const agent of ids) {
     if (existsSync(join(sandboxRoot, "done", "agents", `${agent}.done`)) || existsSync(join(sandboxRoot, "done", "agents", `${agent}.dead`))) continue;
     const mark = await P.readWaiting(sandboxRoot, agent);
     const since = P.waitingSince(mark, now);
     if (since === null || now - since < IDLE_SEAT_MS) continue;
-    const holds = [...s.leads.values()].some((l) => l.holder === agent && !l.closed);
+    // A seat whose held leads all wait on a need is idle for offers (A2):
+    // it keeps them, and takes other work meanwhile.
+    const holds = [...s.leads.values()].some((l) => l.holder === agent && !l.closed && leadStatus(l, s, v) !== "blocked");
     if (holds) continue;
     if (jobs.some((j) => j.agent === agent && jobOpen(j))) continue;
+    // One offer at a time, across both registers: a seat something is offered to now is not offered more.
+    if (offered.has(agent)) continue;
     out.push({ agent, since });
   }
   return out.sort((a, b) => a.since - b.since || a.agent.localeCompare(b.agent));
+}
+
+// --- coordination: availability, parked leads, coverage, first choices ------------------------
+
+/**
+ * Whether a seat can take work now: on the team, neither done nor marked
+ * dead, and not compacting its context (a compacting seat takes no prompt
+ * until it is through; offers, a confirmation and the finish coordinator
+ * skip it). `activity` is recentActivity's, read by the caller when it has
+ * it.
+ */
+export async function seatAvailable(sandboxRoot: string, agent: string, activity?: Map<string, { last: number; compacting: number | null }>, now = Date.now()): Promise<{ available: boolean; why: string }> {
+  if (!agent || agent === "system" || agent === "operator") return { available: false, why: `${agent || "nobody"} is not a seat` };
+  const ids = await P.teamIds(sandboxRoot).catch(() => [] as string[]);
+  if (!ids.includes(agent)) return { available: false, why: `${agent} is not on the team` };
+  for (const m of ["done", "dead"] as const) if (existsSync(join(sandboxRoot, "done", "agents", `${agent}.${m}`))) return { available: false, why: `${agent} is ${m === "done" ? "done" : "marked dead"}` };
+  const act = activity ?? (await recentActivity(sandboxRoot, LEAD_COMPACTION_BOUND_MS, now));
+  const row = act.get(agent);
+  if (row?.compacting && now - row.compacting < LEAD_COMPACTION_BOUND_MS) return { available: false, why: `${agent} is compacting its context` };
+  return { available: true, why: `${agent} can take it` };
+}
+
+/** How long a held lead may go with no job and no act on it while its holder works elsewhere before it shows as parked (SWARM_LEAD_PARK_SEC, 600). */
+export function parkMs(): number {
+  return envMs("SWARM_LEAD_PARK_SEC", 600);
+}
+
+/** When a lead was last worked: the newest act on it (a claim, a job, a link, a note, a keep), or an interpretation of one of its jobs. */
+export function lastLeadAct(l: Lead, s: LeadsState): number {
+  let last = 0;
+  for (const e of s.events) {
+    if ((e.lead === l.id && REVISING.has(e.ev)) || (e.ev === "interpret" && e.job && l.jobs.includes(e.job))) last = Math.max(last, Date.parse(e.at) || 0);
+  }
+  return last;
+}
+
+export type ParkedLead = { lead: string; holder: string; idle_ms: number; since: string; elsewhere: string };
+
+/**
+ * The positive evidence that a lead's holder works on something else since
+ * its last act on this lead: an act of its on another lead (an open, a
+ * claim, a job run under it, a link, a close, a keep, a hand-off), an
+ * interpretation of another lead's job, or a job of its running under
+ * another lead. Foreground work (reading, a shell) is no such evidence: a
+ * seat analysing its only lead's output for ten minutes is working it.
+ */
+function workElsewhere(l: Lead, holder: string, since: number, snap: LeadsSnapshot): string | null {
+  for (let i = snap.state.events.length - 1; i >= 0; i--) {
+    const e = snap.state.events[i]!;
+    const at = Date.parse(e.at);
+    if (!(at > since)) break;
+    const actor = e.ev === "claim" || e.ev === "open" ? (e.holder ?? e.by) : e.by;
+    if (actor !== holder) continue;
+    if (e.lead && e.lead !== l.id && REVISING.has(e.ev)) return `${holder} ${e.ev === "job" ? `ran ${e.job} under` : `acted on (${e.ev})`} ${e.lead} at ${e.at}`;
+    if (e.ev === "interpret" && e.job && !l.jobs.includes(e.job)) return `${holder} interpreted ${e.job} at ${e.at}`;
+  }
+  for (const j of snap.jobs) {
+    const under = snap.state.jobLead.get(j.id);
+    if (j.agent === holder && jobOpen(j) && under && under !== l.id) return `${holder}'s job ${j.id} runs under ${under}`;
+  }
+  return null;
+}
+
+/**
+ * The parked leads (A2): held and ready, no job of theirs running and no
+ * act on them for parkMs(), while their holder works elsewhere: it acted
+ * within the stale limit (so the stale rule does not reach them), and
+ * something positive shows the work is on another lead (workElsewhere).
+ * Shown in the header and offered to an idle seat unless the holder acts on
+ * them first (lead_claim of one's own lead keeps it). Replaces a count cap:
+ * on ctf12 two or more idle holds at an open were rare (4 of 105 in Belka),
+ * and the idle holds that mattered ran 40 to 74 minutes in the hands of
+ * seats busy elsewhere.
+ */
+export async function parkedLeads(sandboxRoot: string, snap: LeadsSnapshot, now = Date.now(), activity?: Map<string, { last: number; compacting: number | null }>): Promise<ParkedLead[]> {
+  const candidates = [...snap.state.leads.values()].filter((l) => l.holder && !l.closed && leadStatus(l, snap.state, snap.ledger) === "active" && now - lastLeadAct(l, snap.state) >= parkMs() && !snap.jobs.some((j) => snap.state.jobLead.get(j.id) === l.id && jobOpen(j)));
+  if (!candidates.length) return [];
+  const act = activity ?? (await recentActivity(sandboxRoot, Math.max(leadStaleMs(), LEAD_COMPACTION_BOUND_MS), now));
+  const out: ParkedLead[] = [];
+  for (const l of candidates) {
+    const row = act.get(l.holder!);
+    if (!row?.last || now - row.last >= leadStaleMs() || row.compacting) continue;
+    const last = lastLeadAct(l, snap.state);
+    const elsewhere = workElsewhere(l, l.holder!, last, snap);
+    if (!elsewhere) continue;
+    out.push({ lead: l.id, holder: l.holder!, idle_ms: now - last, since: new Date(last).toISOString(), elsewhere });
+  }
+  return out;
+}
+
+/** The leads a seat holds, open, for its label. */
+export function heldLeads(snap: LeadsSnapshot, agent: string): Array<{ id: string; title: string; status: string }> {
+  return [...snap.state.leads.values()].filter((l) => l.holder === agent && !l.closed).map((l) => ({ id: l.id, title: l.title, status: leadStatus(l, snap.state, snap.ledger) }));
+}
+
+/** A seat's visible label (A1): its stable name (or its id), and what it holds. */
+export function seatLabel(agent: string, name: string | null, holds: Array<{ id: string; title: string }>): string {
+  return `${name ? `${name} (${agent})` : agent}${holds.length ? ` on ${holds.map((h) => `${h.id} "${h.title}"`).join(", ")}` : ", holding no lead"}`;
+}
+
+/** What the register covers now, for a seat choosing: every held open lead with its holder and questions, and the questions no held lead covers. */
+export type CoverageView = { held: Array<{ lead: string; holder: string; title: string; answers: string[]; objects?: string[]; since: string | null }>; uncovered: string[] };
+
+export function coverageView(snap: LeadsSnapshot): CoverageView {
+  const held = [...snap.state.leads.values()]
+    .filter((l) => l.holder && !l.closed)
+    .map((l) => ({ lead: l.id, holder: l.holder!, title: l.title, answers: l.answers, ...(l.objects?.length ? { objects: l.objects } : {}), since: l.held_since }));
+  return { held, uncovered: questionCoverage(snap).uncovered };
+}
+
+/**
+ * The held open leads of other seats whose questions this work's questions
+ * meet (A1): the load-bearing coverage check, on `answers` only. Overlap is
+ * not identity: two routes to one question are legitimate when said so
+ * (overlap second_route or verification, with why).
+ */
+export function overlappingLeads(snap: LeadsSnapshot, answers: string[], agent: string, except?: string): Array<{ lead: string; holder: string; answers: string[]; since: string | null }> {
+  if (!answers.length) return [];
+  const keys = new Set(answers.map((a) => P.sectionKey(a)));
+  return [...snap.state.leads.values()]
+    .filter((l) => l.id !== except && l.holder && l.holder !== agent && !l.closed && l.answers.some((a) => keys.has(P.sectionKey(a))))
+    .map((l) => ({ lead: l.id, holder: l.holder!, answers: l.answers.filter((a) => keys.has(P.sectionKey(a))), since: l.held_since }));
+}
+
+/** Objects the work names that a held lead of another seat names too, or a running job of another seat declared: a hint, never a refusal. */
+export function objectHints(snap: LeadsSnapshot, objects: string[], agent: string, except?: string): string[] {
+  if (!objects.length) return [];
+  const want = new Set(objects);
+  const out: string[] = [];
+  for (const l of snap.state.leads.values()) {
+    if (l.id === except || !l.holder || l.holder === agent || l.closed) continue;
+    const both = (l.objects ?? []).filter((o) => want.has(o));
+    if (both.length) out.push(`${l.id} (${l.holder}) names ${both.join(", ")} too`);
+  }
+  return out;
+}
+
+/**
+ * The coverage hint at a heavy job's admission (A1): the held leads of
+ * other seats on the questions of the lead the job runs under, and those
+ * naming the objects it declared, and the other seats' open jobs over the
+ * same declared objects. A hint, never a refusal: a collision found after a
+ * large extraction starts is already late, so it is said before.
+ */
+export async function jobAdmissionHint(sandboxRoot: string, agent: string, lead: unknown, inputs: string[]): Promise<{ overlaps: Array<{ lead: string; holder: string; answers: string[]; since: string | null }>; objects: string[]; jobs: string[] } | null> {
+  const snap = await leadsSnapshot(sandboxRoot);
+  const ref = lead !== undefined && lead !== null && String(lead).trim() ? leadRef(lead) : null;
+  const l = ref?.ok ? snap.state.leads.get(ref.id) : [...snap.state.leads.values()].filter((x) => x.holder === agent && !x.closed).length === 1 ? [...snap.state.leads.values()].find((x) => x.holder === agent && !x.closed) : undefined;
+  const overlaps = l ? overlappingLeads(snap, l.answers, agent, l.id) : [];
+  const declared = inputs.filter((x) => x && x !== "all");
+  const objects = objectHints(snap, declared, agent, l?.id);
+  const jobs: string[] = [];
+  if (declared.length) {
+    for (const j of snap.jobs) {
+      if (j.agent === agent || !jobOpen(j)) continue;
+      const d = await NB.jobDeclared(sandboxRoot, j.id).catch(() => null);
+      const both = (d?.inputs ?? []).filter((x) => declared.includes(x));
+      if (both.length) jobs.push(`${j.id} (${j.agent}, ${j.state}) declared ${both.join(", ")} too`);
+    }
+  }
+  return overlaps.length || objects.length || jobs.length ? { overlaps, objects, jobs } : null;
+}
+
+/**
+ * A person's question this work serves that is offered to another seat now
+ * (A3): its first claim holds against every way of taking the work (an
+ * open with take, a claim, a reopen with take), not only the first.
+ */
+async function questionReservation(snap: LeadsSnapshot, answers: string[], agent: string, now: number): Promise<{ q: import("./questions.ts").Question; o: O.Offer } | null> {
+  if (!snap.questions || !answers.length || agent === "operator") return null;
+  const Q = await import("./questions.ts");
+  for (const sec of answers) {
+    const q = snap.questions.bySection.get(P.sectionKey(sec)) ?? snap.questions.bySection.get(sec);
+    if (!q) continue;
+    const o = Q.reservingQuestionOffer(q, now);
+    if (o && o.to !== agent) return { q, o };
+  }
+  return null;
+}
+
+export const OVERLAP_KINDS = ["second_route", "verification"] as const;
+
+/** The overlap an open or a claim says, when it says one: second_route or verification, with why. */
+function checkOverlap(kind: unknown, why: unknown): { ok: true; overlap: { kind: string; why: string } | null } | { ok: false; reason: string } {
+  const k = String(kind ?? "").trim();
+  if (!k) return { ok: true, overlap: null };
+  if (!(OVERLAP_KINDS as readonly string[]).includes(k)) return { ok: false, reason: `overlap is second_route or verification (got ${JSON.stringify(kind)})` };
+  const w = bounded("overlap_why", why, LEAD_WHY_MAX, true);
+  if (!w.ok) return { ok: false, reason: `${w.reason}: say how your route differs from the held lead's, or what you verify independently` };
+  return { ok: true, overlap: { kind: k, why: w.value } };
+}
+
+/** When each seat made its first choice: its first lead opened or claimed, or its first name. */
+async function firstChoices(sandboxRoot: string, s?: LeadsState): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const put = (agent: string, at: number) => {
+    if (!agent || !Number.isFinite(at)) return;
+    if (!out.has(agent) || at < out.get(agent)!) out.set(agent, at);
+  };
+  const state = s ?? foldLeads((await readLeadEvents(sandboxRoot)).events);
+  for (const e of state.events) {
+    if (e.ev === "open") put(e.by, Date.parse(e.at));
+    else if (e.ev === "claim") put(e.holder ?? e.by, Date.parse(e.at));
+  }
+  for (const n of await P.readNames(sandboxRoot).catch(() => [] as P.NameRecord[])) put(n.id, Date.parse(n.first_at ?? n.at));
+  return out;
+}
+
+export type FirstChoiceAdmission = { order: number; waited_ms: number; turn_at: string; coverage: CoverageView };
+
+/**
+ * Staggered first choices (A1). On ctf12 ten seats named themselves within
+ * eight seconds against an empty board and an empty register, and six took
+ * the same four questions. When the kickoff asks for it (budget.json
+ * coordination.first_choice_stagger_sec), a seat's first choice (its first
+ * lead opened or claimed, or its first name) waits for its turn in team
+ * order: until the seat before it has chosen, or first_choice_stagger_sec
+ * (20) after that seat's own turn, whichever is first; a seat marked done
+ * or dead is skipped, and no seat waits past first_choice_bound_sec (90)
+ * from the run's start. The admission carries the register's coverage as it
+ * stands then, so the choice is made against what the seats before it took.
+ * Null when there is nothing to wait for (no stagger, not a first choice,
+ * past the bound).
+ */
+export async function admitFirstChoice(sandboxRoot: string, agent: string, o: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {}): Promise<FirstChoiceAdmission | null> {
+  const now = o.now ?? Date.now;
+  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const budget = await P.readBudget(sandboxRoot).catch(() => null);
+  const step = Number(budget?.coordination?.first_choice_stagger_sec ?? 0) * 1000;
+  if (!budget || !(step > 0)) return null;
+  const bound = Number(budget.coordination?.first_choice_bound_sec ?? 90) * 1000;
+  const start = Date.parse(budget.started_at);
+  if (!Number.isFinite(start)) return null;
+  const ids = await P.teamIds(sandboxRoot).catch(() => [] as string[]);
+  const k = ids.indexOf(agent);
+  if (k < 0) return null;
+  if ((await firstChoices(sandboxRoot)).has(agent)) return null;
+  const began = now();
+  if (began >= start + bound) return null;
+  let turn = start;
+  for (;;) {
+    const firsts = await firstChoices(sandboxRoot);
+    turn = start;
+    for (let j = 0; j < k; j++) {
+      const peer = ids[j]!;
+      if (existsSync(join(sandboxRoot, "done", "agents", `${peer}.done`)) || existsSync(join(sandboxRoot, "done", "agents", `${peer}.dead`))) continue;
+      const chose = firsts.get(peer);
+      turn = chose !== undefined ? Math.min(Math.max(chose, turn), turn + step) : turn + step;
+    }
+    turn = Math.min(turn, start + bound);
+    const t = now();
+    if (t >= turn) break;
+    await sleep(Math.min(1000, turn - t));
+  }
+  return { order: k, waited_ms: Math.max(0, now() - began), turn_at: new Date(turn).toISOString(), coverage: coverageView(await leadsSnapshot(sandboxRoot)) };
 }
 
 // --- the snapshot -------------------------------------------------------------------------------
@@ -906,7 +1379,9 @@ export type LeadView = {
   material: boolean;
   holder: string | null;
   generation: number;
-  needs: Array<{ need: string; met: boolean; why?: string }>;
+  needs: Array<{ need: string; met: boolean; why?: string; outcome: NeedOutcome }>;
+  /** Needs dropped with a reason: withdrawn, never met. */
+  dropped?: DroppedNeed[];
   answers: string[];
   disposition?: LeadDisposition;
   ref?: string;
@@ -929,6 +1404,20 @@ export type LeadView = {
   routes: NB.Route[];
   not_examined?: Array<{ source: string; method: string; why: string }>;
   quick_negative?: { held_ms: number; jobs: number; objects: number };
+  /** Its revision: lead_reopen and lead_confirm name the one they read. */
+  rev: number;
+  route_reviews?: Lead["route_reviews"];
+  /** The offer that holds it for one seat now, and until when (extensions/offers.ts). */
+  offered?: { to: string; reason: O.OfferReason; until: string; state: O.OfferState; from?: string };
+  /** A closure waiting for its closer's confirmation: the entry it was closed on, superseded, and the one that stands now. */
+  confirm?: { ref_was: string; head: string | null; since: string; to: string | null };
+  confirmed?: Lead["confirmed"];
+  inputs?: string[];
+  next_action?: string;
+  result_refs?: string[];
+  objects?: string[];
+  overlap?: Lead["overlap"];
+  covered_by?: string[];
 };
 
 export function viewLead(l: Lead, snap: LeadsSnapshot): LeadView {
@@ -946,7 +1435,8 @@ export function viewLead(l: Lead, snap: LeadsSnapshot): LeadView {
     material: l.material,
     holder: l.holder,
     generation: l.generation,
-    needs: l.needs.map((n) => ({ need: n, ...needState(n, s, v) })).map(({ dead: _d, ...x }) => x),
+    needs: l.needs.map((n) => ({ need: n, ...needState(n, s, v), outcome: needOutcome(n, s, v) })).map(({ dead: _d, ...x }) => x),
+    ...(l.dropped.length ? { dropped: l.dropped } : {}),
     answers: l.answers,
     ...(l.closed ? { disposition: l.closed.disposition, ref: l.closed.ref, closed_by: l.closed.by, closed_at: l.closed.at, ...(l.closed.why ? { close_why: l.closed.why } : {}) } : {}),
     opened_by: l.opened_by,
@@ -965,6 +1455,22 @@ export function viewLead(l: Lead, snap: LeadsSnapshot): LeadView {
     routes: l.routes,
     ...(l.not_examined?.length ? { not_examined: l.not_examined } : {}),
     ...(l.quick_negative ? { quick_negative: l.quick_negative } : {}),
+    rev: l.rev,
+    ...(l.route_reviews.length ? { route_reviews: l.route_reviews } : {}),
+    ...(() => {
+      const o = O.reservingOffer(l.offers, snap.at, l.rev);
+      if (!o) return {};
+      const st = O.offerStatus(o, snap.at, l.rev);
+      return { offered: { to: o.to, reason: o.reason, until: new Date(st.until).toISOString(), state: st.state, ...(o.from ? { from: o.from } : {}) } };
+    })(),
+    ...(l.confirm ? { confirm: { ref_was: l.confirm.ref_was, head: l.confirm.head, since: l.confirm.at, to: l.offers.find((o) => o.seq === l.confirm!.offer)?.to ?? null } } : {}),
+    ...(l.confirmed?.length ? { confirmed: l.confirmed } : {}),
+    ...(l.inputs?.length ? { inputs: l.inputs } : {}),
+    ...(l.next_action ? { next_action: l.next_action } : {}),
+    ...(l.result_refs?.length ? { result_refs: l.result_refs } : {}),
+    ...(l.objects?.length ? { objects: l.objects } : {}),
+    ...(l.overlap ? { overlap: l.overlap } : {}),
+    ...(l.covered_by?.length ? { covered_by: l.covered_by } : {}),
   };
 }
 
@@ -1090,7 +1596,31 @@ export type LeadOpenInput = {
   acceptance?: string;
   /** The route plan: [{source, method}], the sources to examine and how, before the search (the negative bar). */
   routes?: unknown;
+  /** A held open that overlaps a held lead's questions on purpose: second_route or verification, with why (A1). */
+  overlap?: string;
+  overlap_why?: string;
+  /** Coverage hints: the objects the work is over (never load-bearing). */
+  objects?: string[] | string;
+  /** The product contract (A2): immutable refs it starts from, and the first act once its product is accepted. */
+  inputs?: string[] | string;
+  next_action?: string;
+  /** Open this as a prerequisite of another lead and link it there in the same act: the consumer's id (L-<n>). */
+  consumer?: string;
+  /** With consumer: the outcome the consumer needs of this lead (resolved, negative, …), resolved when left out. */
+  consumer_needs?: string;
 };
+
+/** A list of refs as given, each resolving to an object of the run or an entry (E-<seq>), at most LEAD_MAX_NEEDS. */
+async function checkRefList(sandboxRoot: string, name: string, raw: unknown): Promise<{ ok: true; refs: string[] } | { ok: false; reason: string }> {
+  const refs = listOf(raw);
+  if (refs.length > LEAD_MAX_NEEDS) return { ok: false, reason: `${name} names at most ${LEAD_MAX_NEEDS} refs` };
+  const objects = refs.filter((r) => !/^E-\d+$/i.test(r));
+  if (objects.length) {
+    const checked = await P.checkRefs(sandboxRoot, objects);
+    if (!checked.ok) return { ok: false, reason: `${name}: ${checked.reason}` };
+  }
+  return { ok: true, refs: refs.map((r) => (/^e-\d+$/i.test(r) ? r.toUpperCase() : r)) };
+}
 
 /** A route plan as given: [{source, method}], each said, at most NB.MAX_ROUTES. */
 export function checkRoutes(raw: unknown): { ok: true; routes: NB.Route[] } | { ok: false; reason: string } {
@@ -1126,6 +1656,9 @@ function checkNeeds(raw: unknown, s: LeadsState, v: LedgerView, self?: string): 
     if (!p.ok) return p;
     if (p.lead && !s.leads.has(p.lead)) return { ok: false, reason: `${p.lead} does not exist: open it first, or need an entry (E-<seq>)` };
     if (p.entry !== undefined && !v.bySeq.has(p.entry)) return { ok: false, reason: `E-${p.entry} is not in the ledger` };
+    // A need is what has not come yet (A2): an entry that stands is where
+    // the lead comes from, not what it waits for.
+    if (p.entry !== undefined && entryStands(v, p.entry).ok) return { ok: false, reason: `E-${p.entry} stands: it is not a need. Put it in why or origin (where this lead comes from); a need is what has not come yet: another lead's outcome (L-<n>, L-<n>:negative)` };
     if (self && wouldCycle(self, p.need, s)) return { ok: false, reason: `${self} needing ${p.need} closes a loop: ${p.lead} already needs ${self}, directly or through other leads` };
     if (!needs.includes(p.need)) needs.push(p.need);
   }
@@ -1205,7 +1738,14 @@ async function resolveAnswers(sandboxRoot: string, checked: { answers: string[];
  * step of its own work from under it). Without, it is open to everyone, and
  * when it is ready (no unmet need) the seat idle longest is woken for it.
  */
-export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promise<LeadResult<{ lead: LeadView; woke?: string; warning?: string }>> {
+/** An offer as the register writes it: to whom, why, the lead's revision and open spell it binds, and its age bound. */
+function offerDraft(lead: string, to: string, reason: O.OfferReason, rev: number, cycle: number, now: number, extra: Partial<LeadDraft> = {}): LeadDraft {
+  return { by: "system", ev: "offer", lead, to, reason, rev, cycle, max_until: new Date(now + O.offerMaxAgeMs()).toISOString(), ...extra };
+}
+
+export type OpenCoverage = { held: boolean; overlaps: Array<{ lead: string; holder: string; answers: string[]; since: string | null }>; objects: string[]; reserved?: string; why: string };
+
+export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promise<LeadResult<{ lead: LeadView; woke?: string; offered_to?: string; warning?: string; coverage?: OpenCoverage; admission?: FirstChoiceAdmission; consumer?: string }>> {
   const title = bounded("title", input.title, LEAD_TITLE_MAX, true);
   if (!title.ok) return title;
   const why = bounded("why", input.why, LEAD_WHY_MAX, true);
@@ -1227,8 +1767,25 @@ export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promi
   if (!acceptance.ok) return acceptance;
   const routes = checkRoutes(input.routes);
   if (!routes.ok) return routes;
+  const overlapSaid = checkOverlap(input.overlap, input.overlap_why);
+  if (!overlapSaid.ok) return overlapSaid;
+  const nextAction = bounded("next_action", input.next_action, LEAD_WHY_MAX, false);
+  if (!nextAction.ok) return nextAction;
+  const inputs = await checkRefList(ctx.sandboxRoot, "inputs", input.inputs);
+  if (!inputs.ok) return inputs;
+  const objects = listOf(input.objects);
+  if (objects.length > LEAD_MAX_NEEDS) return { ok: false, reason: `objects names at most ${LEAD_MAX_NEEDS} refs` };
+  let consumer: { id: string; need: string } | null = null;
+  if (input.consumer !== undefined && input.consumer !== null && String(input.consumer).trim()) {
+    const c = leadRef(input.consumer);
+    if (!c.ok) return c;
+    const disp = String(input.consumer_needs ?? "resolved").trim().toLowerCase() || "resolved";
+    consumer = { id: c.id, need: disp };
+  }
+  // A seat's first choice waits for its turn when the kickoff staggers them (A1).
+  const admission = ctx.agentId !== "operator" ? await admitFirstChoice(ctx.sandboxRoot, ctx.agentId).catch(() => null) : null;
   try {
-    const r = await transact<Fail | { ok: true; id: string; woke: string | undefined; warning?: string }>(ctx.sandboxRoot, async (snap) => {
+    const r = await transact<Fail | { ok: true; id: string; woke: string | undefined; warning?: string; coverage?: OpenCoverage }>(ctx.sandboxRoot, async (snap) => {
       const needs = checkNeeds(input.needs, snap.state, snap.ledger);
       if (!needs.ok) return { append: [], result: { ok: false as const, reason: needs.reason } };
       const answers = checked.registered.length || checked.answers.length ? await resolveAnswers(ctx.sandboxRoot, checked) : { ok: true as const, answers: [] as string[], human: [] as Array<{ id: string; section: string }> };
@@ -1271,14 +1828,51 @@ export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promi
         if (planless.length) warning = `no route plan under ${planless.map((q) => `question:${q}`).join(", ")}: list the sources you will examine and how, before the search (routes [{source, method}], here or with lead_link). A negative on a material question closes against the plan, and is refused without one`;
       }
       const id = `L-${snap.state.leads.size + 1}`;
-      const take = input.take === true;
+      // The consumer this opens a prerequisite for: linked in the same act (A2).
+      const cons = consumer ? snap.state.leads.get(consumer.id) : undefined;
+      let consumerNeed: string | null = null;
+      if (consumer) {
+        if (!cons) return { append: [], result: { ok: false as const, reason: `${consumer.id} does not exist: the consumer is a lead that will wait for this one` } };
+        if (cons.closed) return { append: [], result: { ok: false as const, reason: `${cons.id} is closed: a prerequisite is for work still to do` } };
+        if (cons.holder && cons.holder !== ctx.agentId) return { append: [], result: { ok: false as const, reason: `${cons.id} is held by ${cons.holder}; its needs are its holder's to revise` } };
+        const p = parseNeed(`${id}:${consumer.need}`);
+        if (!p.ok) return { append: [], result: { ok: false as const, reason: `consumer_needs: ${p.reason}` } };
+        if (cons.needs.length + 1 > LEAD_MAX_NEEDS) return { append: [], result: { ok: false as const, reason: `${cons.id} names ${LEAD_MAX_NEEDS} needs already` } };
+        // The whole graph as it would stand after this act, checked before
+        // either event is appended: the new lead with its needs, and the
+        // consumer needing it. A loop would leave both blocked for good.
+        const probe: LeadsState = { ...snap.state, leads: new Map(snap.state.leads) };
+        probe.leads.set(id, { id, needs: needs.needs } as Lead);
+        if (wouldCycle(cons.id, p.need, probe)) {
+          return { append: [], result: { ok: false as const, reason: `${cons.id} needing ${id} closes a loop: ${id} would need ${needs.needs.join(", ")}, which needs ${cons.id}, directly or through other leads. Open the prerequisite without that need, or without the consumer` } };
+        }
+        consumerNeed = p.need;
+      }
+      // The coverage check (A1): a take that meets a held lead's questions is
+      // opened unheld and names the holder, unless it says it is a second
+      // route or a verification; a person's question offered to another seat
+      // is theirs to take first. Objects are hints only.
+      const overlaps = overlappingLeads(snap, answers.answers, ctx.agentId);
+      const hints = objectHints(snap, objects, ctx.agentId);
+      const reservedFor = await questionReservation(snap, answers.answers, ctx.agentId, snap.at);
+      let take = input.take === true;
+      let coverage: OpenCoverage | undefined;
+      if (take && reservedFor?.o) {
+        take = false;
+        coverage = { held: false, overlaps, objects: hints, reserved: `${reservedFor.q.id} is offered to ${reservedFor.o.to} (${O.untilWords(reservedFor.o, snap.at, reservedFor.q.rev)})`, why: `${reservedFor.q.id} is offered to ${reservedFor.o.to} first: ${id} is open, unheld; post to ${reservedFor.o.to}, or claim it once the offer ends` };
+      } else if (take && overlaps.length && !overlapSaid.overlap && ctx.agentId !== "operator") {
+        take = false;
+        coverage = { held: false, overlaps, objects: hints, why: `${overlaps.map((o) => `question:${o.answers.join(", question:")} is covered by ${o.lead} (${o.holder}${o.since ? `, since ${o.since}` : ""})`).join("; ")}: ${id} is open, unheld, as a second route. Claim it only if your route differs, with overlap: second_route (or verification) and overlap_why saying how; or post to the holder` };
+      } else if (overlaps.length || hints.length) {
+        coverage = { held: take, overlaps, objects: hints, why: overlapSaid.overlap ? `held as ${overlapSaid.overlap.kind}: ${overlapSaid.overlap.why}` : "a hint: the objects meet a held lead's; overlap is not identity" };
+      }
       const open = {
         by: ctx.agentId,
         ev: "open" as const,
         lead: id,
         title: title.value,
         why: why.value,
-        origin: origin.value || `lead_open by ${ctx.agentId}`,
+        origin: origin.value || (cons ? `prerequisite of ${cons.id}` : `lead_open by ${ctx.agentId}`),
         needs: needs.needs,
         answers: answers.answers,
         material: input.material !== false,
@@ -1287,23 +1881,39 @@ export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promi
         ...(product.value ? { product: product.value } : {}),
         ...(acceptance.value ? { acceptance: acceptance.value } : {}),
         ...(routes.routes.length ? { routes: routes.routes } : {}),
+        ...(take && overlaps.length && overlapSaid.overlap ? { overlap: overlapSaid.overlap.kind, overlap_why: overlapSaid.overlap.why } : {}),
+        ...(!take && input.take === true && overlaps.length ? { covered_by: overlaps.map((o) => o.lead) } : {}),
+        ...(objects.length ? { objects } : {}),
+        ...(inputs.refs.length ? { inputs: inputs.refs } : {}),
+        ...(nextAction.value ? { next_action: nextAction.value } : {}),
+        ...(cons ? { consumer: cons.id } : {}),
       };
-      const append: Array<Omit<LeadEvent, "v" | "seq" | "at" | "prev" | "hash">> = [open];
-      // Ready and unheld: the seat idle longest is woken for it, once.
+      const append: LeadDraft[] = [open];
+      if (cons && consumerNeed) append.push({ by: ctx.agentId, ev: "link", lead: cons.id, add: [consumerNeed], why: `prerequisite ${id} opened for it` });
+      // Ready, unheld, and not a second route left for its opener: offered
+      // to the seat idle longest, which has first claim for a while (A3).
       let woke: string | undefined;
-      if (!take && !needs.needs.some((n) => !needState(n, snap.state, snap.ledger).met)) {
-        const idle = await idleSeats(ctx.sandboxRoot, snap.state, snap.ledger, snap.jobs);
+      if (!take && input.take !== true && !needs.needs.some((n) => !needState(n, snap.state, snap.ledger).met)) {
+        const idle = await idleSeats(ctx.sandboxRoot, snap.state, snap.ledger, snap.jobs, snap.at, snap.questions);
         const pick = idle.find((x) => x.agent !== ctx.agentId);
         if (pick) {
           woke = pick.agent;
-          append.push({ by: "system", ev: "wake", lead: id, to: pick.agent, cycle: 0 });
+          append.push(offerDraft(id, pick.agent, "wake", 1, 0, snap.at));
         }
       }
-      return { append, result: { ok: true as const, id, woke, ...(warning ? { warning } : {}) } };
+      return { append, result: { ok: true as const, id, woke, ...(warning ? { warning } : {}), ...(coverage ? { coverage } : {}) } };
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
-    return { ok: true, lead: viewLead(snap.state.leads.get(r.id)!, snap), ...(r.woke ? { woke: r.woke } : {}), ...(r.warning ? { warning: r.warning } : {}) };
+    return {
+      ok: true,
+      lead: viewLead(snap.state.leads.get(r.id)!, snap),
+      ...(r.woke ? { woke: r.woke, offered_to: r.woke } : {}),
+      ...(r.warning ? { warning: r.warning } : {}),
+      ...(r.coverage ? { coverage: r.coverage } : {}),
+      ...(admission ? { admission } : {}),
+      ...(consumer ? { consumer: consumer.id } : {}),
+    };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
@@ -1317,7 +1927,7 @@ function leadRef(raw: unknown): { ok: true; id: string } | { ok: false; reason: 
 }
 
 /** A claim's framing: what an unframed directive under a person's question is taken to test (the first agent to work it says). */
-export type LeadClaimInput = { proposition?: string; negation?: string; routes?: unknown };
+export type LeadClaimInput = { proposition?: string; negation?: string; routes?: unknown; overlap?: string; overlap_why?: string };
 
 /**
  * Claim a lead: atomically, with a new generation. A lead someone else holds
@@ -1332,9 +1942,13 @@ export type LeadClaimInput = { proposition?: string; negation?: string; routes?:
  * proposition and its negation, kept on the claim, as the first agent lead
  * under the question would have.
  */
-export async function claimLead(ctx: P.SwarmContext, rawId: unknown, input: LeadClaimInput = {}, now = Date.now()): Promise<LeadResult<{ lead: LeadView; reclaimed_from?: string; already?: true }>> {
+export async function claimLead(ctx: P.SwarmContext, rawId: unknown, input: LeadClaimInput = {}, now = Date.now()): Promise<LeadResult<{ lead: LeadView; reclaimed_from?: string; already?: true; kept?: true; coverage?: OpenCoverage; admission?: FirstChoiceAdmission }>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
+  const overlapSaid = checkOverlap(input?.overlap, input?.overlap_why);
+  if (!overlapSaid.ok) return overlapSaid;
+  const admission = ctx.agentId !== "operator" ? await admitFirstChoice(ctx.sandboxRoot, ctx.agentId).catch(() => null) : null;
+  if (admission) now = Math.max(now, Date.now());
   const proposition = bounded("proposition", input?.proposition, LEAD_WHY_MAX, false);
   if (!proposition.ok) return proposition;
   const negation = bounded("negation", input?.negation, LEAD_WHY_MAX, false);
@@ -1343,11 +1957,43 @@ export async function claimLead(ctx: P.SwarmContext, rawId: unknown, input: Lead
   const routes = checkRoutes(input?.routes);
   if (!routes.ok) return routes;
   try {
-    const r = await transact<Fail | { ok: true; already?: true; from?: string }>(ctx.sandboxRoot, async (snap) => {
+    const r = await transact<Fail | { ok: true; already?: true; kept?: true; from?: string; coverage?: OpenCoverage }>(ctx.sandboxRoot, async (snap) => {
       const l = snap.state.leads.get(ref.id);
       if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
-      if (l.closed) return { append: [], result: { ok: false as const, reason: `${l.id} is closed (${l.closed.disposition}${l.closed.ref ? `, ${l.closed.ref}` : ""}, by ${l.closed.by}); open a new lead for new work, or ask the operator to reopen it` } };
-      if (l.holder === ctx.agentId) return { append: [], result: { ok: true as const, already: true as const } };
+      if (l.closed) return { append: [], result: { ok: false as const, reason: `${l.id} is closed (${l.closed.disposition}${l.closed.ref ? `, ${l.closed.ref}` : ""}, by ${l.closed.by}); open a new lead for new work, or reopen it with lead_reopen (the revision you read, and why)` } };
+      const offer = O.reservingOffer(l.offers, now, l.rev);
+      if (l.holder === ctx.agentId) {
+        // The holder acts on a parked lead, or one offered away from it: it keeps it (A2), and the offer ends.
+        const parkedAway = offer?.reason === "parked" && offer.to !== ctx.agentId;
+        const parked = parkedAway || now - lastLeadAct(l, snap.state) >= parkMs();
+        if (parked) return { append: [{ by: ctx.agentId, ev: "keep", lead: l.id, generation: l.generation, why: parkedAway ? `kept by its holder before the offer to ${offer!.to} was taken` : "kept by its holder" }], result: { ok: true as const, kept: true as const } };
+        return { append: [], result: { ok: true as const, already: true as const } };
+      }
+      // An offer holds it for its seat (A3): nobody else claims it meanwhile.
+      if (offer && offer.to !== ctx.agentId) {
+        return { append: [], result: { ok: false as const, reason: `${l.id} is offered to ${offer.to} (${offer.reason === "parked" ? `parked in ${offer.from ?? l.holder}'s hands` : offer.reason === "handoff" ? `handed over by ${offer.from ?? "its holder"}` : offer.reason === "reopen" ? "reopened after the operator's note, to its previous holder first" : offer.reason === "confirm" ? "its closure to confirm" : "woken for it"}), who has first claim ${O.untilWords(offer, now, l.rev)}: claim it after that, or post to ${offer.to}` } };
+      }
+      const byOffer = offer && offer.to === ctx.agentId ? { offer: offer.seq } : {};
+      // A person's question this lead serves, offered to another seat: its first claim holds here too (A3).
+      if (!("offer" in byOffer)) {
+        const qres = await questionReservation(snap, l.answers, ctx.agentId, now);
+        if (qres) return { append: [], result: { ok: false as const, reason: `${l.id} serves ${qres.q.id}, which is offered to ${qres.o.to}, who has first claim on its work ${O.untilWords(qres.o, now, qres.q.rev)}: claim ${l.id} after that, or post to ${qres.o.to}` } };
+      }
+      // The coverage check (A1), at a claim too: another seat's held lead on
+      // the same questions leaves this one unheld unless the claim says it is
+      // a second route or a verification.
+      const overlaps = !l.holder ? overlappingLeads(snap, l.answers, ctx.agentId, l.id) : [];
+      if (overlaps.length && !overlapSaid.overlap) {
+        return {
+          append: [],
+          result: {
+            ok: false as const,
+            reason: `${overlaps.map((o) => `question:${o.answers.join(", question:")} is covered by ${o.lead} (${o.holder}${o.since ? `, since ${o.since}` : ""})`).join("; ")}: claim ${l.id} only as a second route or a verification, saying so (overlap: second_route or verification, overlap_why: how your route differs), or post to the holder`,
+          },
+        };
+      }
+      const overlapFields = overlaps.length && overlapSaid.overlap ? { overlap: overlapSaid.overlap.kind, overlap_why: overlapSaid.overlap.why } : {};
+      const coverage: OpenCoverage | undefined = overlaps.length ? { held: true, overlaps, objects: [], why: `held as ${overlapSaid.overlap!.kind}: ${overlapSaid.overlap!.why}` } : undefined;
       // An unframed directive under a person's question: framed by its first claim.
       const framing = await directiveFraming(ctx.sandboxRoot, l, snap);
       if (framing && !proposition.value) {
@@ -1356,7 +2002,11 @@ export async function claimLead(ctx: P.SwarmContext, rawId: unknown, input: Lead
       if (framing?.planless && !routes.routes.length) return { append: [], result: { ok: false as const, reason: `${framing.id} has no route plan yet: give routes [{source, method}] with the claim, one of them able to disconfirm the proposition` } };
       if (!framing && (proposition.value || routes.routes.length) && l.proposition) return { append: [], result: { ok: false as const, reason: `${l.id} is framed already (tests: ${l.proposition}); claim it without proposition, and add routes with lead_link` } };
       const frame = { ...(proposition.value ? { proposition: proposition.value, negation: negation.value } : {}), ...(routes.routes.length ? { routes: routes.routes } : {}) };
-      if (!l.holder) return { append: [{ by: ctx.agentId, ev: "claim", lead: l.id, holder: ctx.agentId, generation: l.generation + 1, ...frame }], result: { ok: true as const } };
+      if (!l.holder) return { append: [{ by: ctx.agentId, ev: "claim", lead: l.id, holder: ctx.agentId, generation: l.generation + 1, ...frame, ...byOffer, ...overlapFields }], result: { ok: true as const, ...(coverage ? { coverage } : {}) } };
+      // A parked lead offered to this seat: taken over without the stale grace, the holder having had its chance to act.
+      if (offer && offer.to === ctx.agentId && offer.reason === "parked") {
+        return { append: [{ by: ctx.agentId, ev: "claim", lead: l.id, holder: ctx.agentId, generation: l.generation + 1, from: l.holder, cause: "parked", ...frame, ...byOffer }], result: { ok: true as const, from: l.holder } };
+      }
       // Held by a peer: only a stale holder gives it up, and only after being marked.
       const lastAct = Math.max(0, ...snap.state.events.filter((e) => e.by === l.holder && e.ev !== "stale").map((e) => Date.parse(e.at)).filter(Number.isFinite));
       const live = await holderLiveness(ctx.sandboxRoot, l.holder, snap.jobs, undefined, now, lastAct);
@@ -1375,7 +2025,15 @@ export async function claimLead(ctx: P.SwarmContext, rawId: unknown, input: Lead
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
-    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap), ...("from" in r && r.from ? { reclaimed_from: r.from } : {}), ...("already" in r && r.already ? { already: true as const } : {}) };
+    return {
+      ok: true,
+      lead: viewLead(snap.state.leads.get(ref.id)!, snap),
+      ...("from" in r && r.from ? { reclaimed_from: r.from } : {}),
+      ...("already" in r && r.already ? { already: true as const } : {}),
+      ...("kept" in r && r.kept ? { kept: true as const } : {}),
+      ...("coverage" in r && r.coverage ? { coverage: r.coverage } : {}),
+      ...(admission ? { admission } : {}),
+    };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
@@ -1465,7 +2123,7 @@ function checkRef(disposition: LeadDisposition, raw: string, l: Lead, snap: Lead
  * with a durable id. A write that fails is not swallowed: the answer says the
  * request is pending, and the next reconciliation writes it.
  */
-export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown }): Promise<LeadResult<{ lead: LeadView; operator_request?: string; request?: { id: string; kind: string; state: string; stage: string | null; answer: string | null }; request_pending?: string }>> {
+export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown; result_refs?: string[] | string }): Promise<LeadResult<{ lead: LeadView; operator_request?: string; request?: { id: string; kind: string; state: string; stage: string | null; answer: string | null }; request_pending?: string }>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
   const disposition = String(input.disposition ?? "").trim().toLowerCase() as LeadDisposition;
@@ -1477,6 +2135,9 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
   if (!why.ok) return why;
   if (input.ask !== undefined && input.ask !== null && disposition !== "needs_operator") return { ok: false, reason: "ask goes with needs_operator: an acquisition is a request of the operator" };
   const R = await import("./requests.ts");
+  // The delivered product (A2): what a consumer reads, each ref checked.
+  const results = await checkRefList(ctx.sandboxRoot, "result_refs", input.result_refs);
+  if (!results.ok) return results;
   try {
     const r = await transact<Fail | { ok: true }>(ctx.sandboxRoot, async (snap) => {
       const l = snap.state.leads.get(ref.id);
@@ -1484,6 +2145,10 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
       if (l.closed) return { append: [], result: { ok: false as const, reason: `${l.id} is already closed (${l.closed.disposition}, by ${l.closed.by})` } };
       const asked = R.checkAsk(input.ask, l.answers.map((a) => (/^\d+$/.test(a) ? `Q-${a}` : a)));
       if (!asked.ok) return { append: [], result: { ok: false as const, reason: asked.reason } };
+      for (const e of results.refs.filter((x) => /^E-\d+$/.test(x))) {
+        const st = entryStands(snap.ledger, Number(e.slice(2)));
+        if (!st.ok) return { append: [], result: { ok: false as const, reason: `result_refs: ${st.why}: name what stands` } };
+      }
       if (l.holder) {
         const refused = holderOnly(l, ctx, input.generation, "close");
         if (refused) return { append: [], result: { ok: false as const, reason: refused } };
@@ -1496,7 +2161,7 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
       const negative = disposition === "negative" ? await negativeClose(ctx.sandboxRoot, l, snap) : null;
       if (negative && !negative.ok) return { append: [], result: { ok: false as const, reason: negative.reason } };
       const extra = negative?.ok ? { ...(negative.not_examined.length ? { not_examined: negative.not_examined } : {}), ...(negative.quick ? { quick_negative: negative.quick } : {}) } : {};
-      return { append: [{ by: ctx.agentId, ev: "close", lead: l.id, generation: l.generation, disposition, ref: checked.ref, ...(why.value ? { why: why.value } : {}), ...(asked.ask ? { ask: asked.ask } : {}), ...extra }], result: { ok: true as const } };
+      return { append: [{ by: ctx.agentId, ev: "close", lead: l.id, generation: l.generation, disposition, ref: checked.ref, ...(why.value ? { why: why.value } : {}), ...(asked.ask ? { ask: asked.ask } : {}), ...(results.refs.length ? { result_refs: results.refs } : {}), ...extra }], result: { ok: true as const } };
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
@@ -1574,11 +2239,15 @@ async function negativeClose(sandboxRoot: string, l: Lead, snap: LeadsSnapshot):
  * alternative stays open. The holder revises its own lead; an unheld one,
  * anyone. A loop is refused.
  */
-export async function linkLead(ctx: P.SwarmContext, rawId: unknown, input: { add?: string[] | string; remove?: string[] | string; routes?: unknown }): Promise<LeadResult<{ lead: LeadView }>> {
+export async function linkLead(ctx: P.SwarmContext, rawId: unknown, input: { add?: string[] | string; remove?: string[] | string; routes?: unknown; why?: string }): Promise<LeadResult<{ lead: LeadView }>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
   const routes = checkRoutes(input.routes);
   if (!routes.ok) return routes;
+  const why = bounded("why", input.why, LEAD_WHY_MAX, false);
+  if (!why.ok) return why;
+  // A need dropped is withdrawn, never met (A2): it says why.
+  if (listOf(input.remove).length && !why.value) return { ok: false, reason: "why is required with remove: a dropped need is recorded as withdrawn, with its reason, never as met (what will not come, and what the lead goes on without)" };
   try {
     const r = await transact<Fail | { ok: true }>(ctx.sandboxRoot, async (snap) => {
       const l = snap.state.leads.get(ref.id);
@@ -1600,7 +2269,7 @@ export async function linkLead(ctx: P.SwarmContext, rawId: unknown, input: { add
       if (l.needs.length - remove.length + fresh.length > LEAD_MAX_NEEDS) return { append: [], result: { ok: false as const, reason: `a lead names at most ${LEAD_MAX_NEEDS} needs` } };
       if (l.routes.length + newRoutes.length > NB.MAX_ROUTES) return { append: [], result: { ok: false as const, reason: `a lead plans at most ${NB.MAX_ROUTES} routes` } };
       const append: Array<Omit<LeadEvent, "v" | "seq" | "at" | "prev" | "hash">> = [];
-      if (fresh.length || remove.length) append.push({ by: ctx.agentId, ev: "link", lead: l.id, ...(fresh.length ? { add: fresh } : {}), ...(remove.length ? { remove } : {}) });
+      if (fresh.length || remove.length) append.push({ by: ctx.agentId, ev: "link", lead: l.id, ...(fresh.length ? { add: fresh } : {}), ...(remove.length ? { remove, why: why.value } : {}) });
       if (newRoutes.length) append.push({ by: ctx.agentId, ev: "route", lead: l.id, routes: newRoutes });
       return { append, result: { ok: true as const } };
     });
@@ -1641,6 +2310,161 @@ export async function reopenLead(sandboxRoot: string, rawId: unknown, by: string
   }
 }
 
+/** Who worked a lead last: its holder, or the seat that held it when it was closed or released. */
+export function previousHolder(l: Lead, s: LeadsState): string | null {
+  if (l.holder) return l.holder;
+  for (let i = s.events.length - 1; i >= 0; i--) {
+    const e = s.events[i]!;
+    if (e.lead !== l.id) continue;
+    if (e.ev === "claim") return e.holder ?? e.by;
+    if (e.ev === "open" && e.holder) return e.holder;
+  }
+  return l.closed && l.closed.by !== "operator" && l.closed.by !== "system" ? l.closed.by : null;
+}
+
+/**
+ * What keeps an agent from reopening a closed lead: the operator's
+ * restrictions (a lead the operator closed, one closed withdrawn with its
+ * question, one under a question withdrawn, excluded or waiting for triage,
+ * one in the operator's triage, one closed needs_operator the operator has
+ * not answered yet) and a duplicate of a lead that still carries the work.
+ * Null when it may be reopened.
+ */
+async function reopenRefusal(sandboxRoot: string, l: Lead, snap: LeadsSnapshot): Promise<string | null> {
+  if (!l.closed) return `${l.id} is not closed: claim it (lead_claim) to work it`;
+  if (l.closed.by === "operator") return `${l.id} was closed by the operator: only the operator reopens it (swarm.sh lead <run> reopen)`;
+  if (l.closed.disposition === "withdrawn") return `${l.id} was closed withdrawn with the question it served: a withdrawn question is the asker's, and only the operator brings it back`;
+  if (l.closed.disposition === "needs_operator") {
+    const answered = l.notes.some((n) => Date.parse(n.at) >= Date.parse(l.closed!.at));
+    if (!answered) return `${l.id} waits for the operator (${l.closed.ref}): the operator answers it and reopens it (swarm.sh lead <run> note); a reopen would not give what it asked for`;
+  }
+  if (l.closed.disposition === "duplicate") {
+    const other = snap.state.leads.get(l.closed.ref);
+    if (other && !other.closed) return `${l.id} is a duplicate of ${other.id}, which is still open${other.holder ? ` (held by ${other.holder})` : ""}: the work goes on there; claim ${other.id}, or post to its holder`;
+  }
+  const qs = snap.questions ?? (await import("./questions.ts").then((Q) => Q.questionsSnapshot(sandboxRoot)).catch(() => null));
+  for (const section of l.answers) {
+    const q = qs?.bySection.get(section);
+    if (!q) continue;
+    if (q.withdrawn) return `${l.id} serves ${q.id}, withdrawn by its asker: it is no lead's work`;
+    if (q.scope === "excluded") return `${l.id} serves ${q.id}, excluded from the case by the operator (${q.scope_why})`;
+    if (q.scope === "proposed") return `${l.id} serves ${q.id}, which waits for the operator's triage`;
+  }
+  if (qs?.state.triage.some((t) => t.lead === l.id && !t.resolved)) return `${l.id} is in the operator's triage: the operator decides whether it is the case's work`;
+  return null;
+}
+
+/**
+ * An agent reopens a closed lead (B4): with the revision it read, a reason,
+ * and optionally taking it in the same step. History is kept (a reopen
+ * event, cause agent); the previous holder and the leads that need it are
+ * told as on any reopen. It never overrides an operator's restriction
+ * (reopenRefusal) and never answers a dispute: a dispute in force stays in
+ * force, and the reopen says so.
+ */
+export async function agentReopenLead(ctx: P.SwarmContext, rawId: unknown, input: { expected_revision?: unknown; why?: string; take?: boolean }): Promise<LeadResult<{ lead: LeadView; disputes?: string[] }>> {
+  const ref = leadRef(rawId);
+  if (!ref.ok) return ref;
+  const why = bounded("why", input.why, LEAD_WHY_MAX, true);
+  if (!why.ok) return why;
+  if (input.take !== undefined && typeof input.take !== "boolean") return { ok: false, reason: "take is true or false" };
+  const expected = Number(input.expected_revision);
+  if (input.expected_revision === undefined || input.expected_revision === null || !Number.isInteger(expected) || expected < 1) return { ok: false, reason: "expected_revision is the lead's revision as you read it (leads L-<n> shows rev): a reopen names the state it saw" };
+  try {
+    const r = await transact<Fail | { ok: true; disputes: string[] }>(ctx.sandboxRoot, async (snap) => {
+      const l = snap.state.leads.get(ref.id);
+      if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
+      if (l.rev !== expected) return { append: [], result: { ok: false as const, reason: `${l.id} is at revision ${l.rev}, not ${expected}: it changed since you read it (${l.closed ? `closed ${l.closed.disposition} by ${l.closed.by}` : l.holder ? `held by ${l.holder}` : "open"}); read it again (leads ${l.id})` } };
+      const refused = await reopenRefusal(ctx.sandboxRoot, l, snap);
+      if (refused) return { append: [], result: { ok: false as const, reason: refused } };
+      // Taken in the same act: a person's question it serves, offered to another seat, is that seat's first (A3).
+      if (input.take === true) {
+        const qres = await questionReservation(snap, l.answers, ctx.agentId, Date.now());
+        if (qres) return { append: [], result: { ok: false as const, reason: `${l.id} serves ${qres.q.id}, which is offered to ${qres.o.to}, who has first claim on its work ${O.untilWords(qres.o, Date.now(), qres.q.rev)}: reopen it without take, or post to ${qres.o.to}` } };
+      }
+      // A reopen answers no dispute: the ones in force on what the lead cites, or on its questions' answers, stay.
+      const disputes = P.disputesInForce(snap.ledger.entries, await P.readDisputes(ctx.sandboxRoot).catch(() => [] as P.LedgerDispute[]));
+      const cited = new Set<string>();
+      const m = /^E-(\d+)$/.exec(l.closed!.ref);
+      if (m) {
+        const e = snap.ledger.bySeq.get(Number(m[1]));
+        if (e) cited.add(e.hash ?? P.ledgerHash(e, "genesis"));
+      }
+      for (const a of snap.ledger.entries) if (a.kind === "answer" && !snap.ledger.replaced.has(a.seq) && l.answers.some((x) => a.section === `question:${x}`)) cited.add(a.hash ?? P.ledgerHash(a, "genesis"));
+      const open = disputes.filter((d) => cited.has(d.target)).map((d) => `E-${snap.ledger.entries.find((e) => (e.hash ?? P.ledgerHash(e, "genesis")) === d.target)?.seq ?? "?"} disputed by ${P.disputeWords(d)}`);
+      const append: LeadDraft[] = [{ by: ctx.agentId, ev: "reopen", lead: l.id, why: why.value, cause: "agent", expected_revision: expected }];
+      if (input.take === true) append.push({ by: ctx.agentId, ev: "claim", lead: l.id, holder: ctx.agentId, generation: l.generation + 1 });
+      return { append, result: { ok: true as const, disputes: open } };
+    });
+    if (!r.ok) return r;
+    const snap = await leadsSnapshot(ctx.sandboxRoot);
+    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap), ...(r.disputes.length ? { disputes: r.disputes.map((d) => `${d}: a reopen does not answer it; it stays in force until the disputer withdraws it`) } : {}) };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/**
+ * Another seat's review of a limiting route (B3): a lead closed deferred,
+ * infeasible or needs_operator, and whether its limitation is still
+ * material now. A route lead stops holding the finish line only when its
+ * questions are disposed under the bar and such a review says its
+ * limitation is no longer material (or the operator accepted the
+ * questions): never by itself, and never vacuously for a lead that names
+ * no question. Bound to the close it reviews; a reopen or a new close
+ * needs a new review. The seat that closed it, or held it, does not review
+ * it.
+ */
+export async function routeReview(ctx: P.SwarmContext, rawId: unknown, input: { material?: unknown; why?: string }): Promise<LeadResult<{ lead: LeadView }>> {
+  const ref = leadRef(rawId);
+  if (!ref.ok) return ref;
+  if (typeof input.material !== "boolean") return { ok: false, reason: "material is true or false: whether the route's limitation still matters to what the case concludes" };
+  const why = bounded("why", input.why, LEAD_WHY_MAX, true);
+  if (!why.ok) return why;
+  try {
+    const r = await transact<Fail | { ok: true }>(ctx.sandboxRoot, async (snap) => {
+      const l = snap.state.leads.get(ref.id);
+      if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
+      if (!l.closed || !LIMITING_DISPOSITIONS.has(l.closed.disposition)) return { append: [], result: { ok: false as const, reason: `${l.id} is ${l.closed ? `closed ${l.closed.disposition}` : "not closed"}: a route review is of a lead closed deferred, infeasible or needs_operator` } };
+      const holders = new Set(snap.state.events.filter((e) => e.lead === l.id && (e.ev === "claim" || (e.ev === "open" && e.holder))).map((e) => e.holder ?? e.by));
+      if (l.closed.by === ctx.agentId || holders.has(ctx.agentId)) return { append: [], result: { ok: false as const, reason: `you ${l.closed.by === ctx.agentId ? "closed" : "held"} ${l.id}: its route is reviewed by another seat` } };
+      return { append: [{ by: ctx.agentId, ev: "route_review", lead: l.id, material_now: input.material as boolean, why: why.value, cycle: l.cycle, ref: l.closed.ref }], result: { ok: true as const } };
+    });
+    if (!r.ok) return r;
+    const snap = await leadsSnapshot(ctx.sandboxRoot);
+    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap) };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/** The standing route review of a lead's current close: the latest by another seat, for this open spell and this ref. */
+export function standingRouteReview(l: Lead): Lead["route_reviews"][number] | null {
+  if (!l.closed) return null;
+  const mine = l.route_reviews.filter((r) => r.cycle === l.cycle && r.ref === l.closed!.ref && r.by !== l.closed!.by);
+  return mine.at(-1) ?? null;
+}
+
+/**
+ * Whether a material lead closed deferred, infeasible or needs_operator
+ * still limits the run (A4, B3). It stops once every question it names is
+ * disposed under the bar (`disposed` says answered, or accepted by the
+ * operator) and either another seat's review holds its limitation no
+ * longer material, or the operator accepted every question it names (the
+ * acceptance is then the limit the run carries). A lead that names no
+ * question needs the review.
+ */
+export function routeLimitation(l: Lead, disposed: (section: string) => "answered" | "accepted" | null): { limiting: boolean; why: string } {
+  const review = standingRouteReview(l);
+  const states = l.answers.map((q) => ({ q, d: disposed(q) }));
+  const open = states.filter((x) => !x.d);
+  if (open.length) return { limiting: true, why: `its question${open.length === 1 ? "" : "s"} ${open.map((x) => `question:${x.q}`).join(", ")} ${open.length === 1 ? "is" : "are"} not disposed under the bar` };
+  if (states.length && states.every((x) => x.d === "accepted")) return { limiting: false, why: "the operator accepted the limits of every question it names" };
+  if (!review) return { limiting: true, why: states.length ? "its questions are disposed, and no other seat has reviewed whether its limitation is still material (route_review)" : "it names no question, and no other seat has reviewed whether its limitation is material (route_review)" };
+  if (review.material) return { limiting: true, why: `${review.by} holds its limitation still material: ${review.why}` };
+  return { limiting: false, why: `${review.by} holds its limitation no longer material: ${review.why}` };
+}
+
 /**
  * The operator's answer to a lead: recorded on it, and the lead reopened when
  * it was closed, so the work goes on with what the operator gave. A host the
@@ -1660,7 +2484,13 @@ export async function noteLead(sandboxRoot: string, rawId: unknown, text: string
       if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
       const append: Array<Omit<LeadEvent, "v" | "seq" | "at" | "prev" | "hash">> = [{ by: "operator", ev: "note", lead: l.id, text: note.value, ...(host ? { allow_host: host } : {}) }];
       const reopen = Boolean(l.closed) && o.reopen !== false;
-      if (reopen) append.push({ by: "operator", ev: "reopen", lead: l.id, why: `the operator answered: ${note.value}`, cause: "operator" });
+      if (reopen) {
+        append.push({ by: "operator", ev: "reopen", lead: l.id, why: `the operator answered: ${note.value}`, cause: "operator" });
+        // Offered to its previous holder first (A3): the seat with its context
+        // reclaimed it in seconds on ctf12 while an idle seat was woken for it.
+        const prev = previousHolder(l, snap.state);
+        if (prev && (await seatAvailable(sandboxRoot, prev)).available) append.push(offerDraft(l.id, prev, "reopen", l.rev + 2, l.cycle + 1, snap.at, { from: prev }));
+      }
       return { append, result: { ok: true as const, reopened: reopen } };
     });
     if (!r.ok) return r;
@@ -1771,7 +2601,7 @@ export async function recordInterpretations(sandboxRoot: string, agent: string, 
         if (!j) return { append: [], result: { ok: false as const, reason: `${x.job} is not a job of this run` } };
         if (j.state !== "committed") return { append: [], result: { ok: false as const, reason: `${x.job} is ${j.state}: interpret it once it is committed` } };
       }
-      return { append: list.map((x) => ({ by: agent, ev: "interpret" as const, job: x.job, entry: entrySeq, kind: e.kind, ...(x.rest ? { rest: x.rest } : {}) })), result: { ok: true as const } };
+      return { append: list.map((x) => ({ by: agent, ev: "interpret" as const, job: x.job, entry: entrySeq, kind: e.kind, entry_hash: e.hash ?? P.ledgerHash(e, "genesis"), ...(x.rest ? { rest: x.rest } : {}) })), result: { ok: true as const } };
     });
     return r.ok ? { ok: true, interprets: list.map((x) => x.job) } : r;
   } catch (err) {
@@ -1785,31 +2615,193 @@ export async function recordInterpretations(sandboxRoot: string, agent: string, 
  * the ledger, and before the gate and every header, so a crash between the
  * ledger's change and this cannot leave a closure standing on nothing.
  */
-export async function reopenOnLedger(sandboxRoot: string): Promise<string[]> {
+export async function reopenOnLedger(sandboxRoot: string, now = Date.now()): Promise<string[]> {
   const snap = await leadsSnapshot(sandboxRoot);
   const due = [...snap.state.leads.values()].filter((l) => {
     const m = l.closed ? /^E-(\d+)$/.exec(l.closed.ref) : null;
     return m ? !entryStands(snap.ledger, Number(m[1])).ok : false;
   });
   if (!due.length) return [];
+  // Who could confirm a superseded closure: its closer, available (not done, dead or compacting).
+  const activity = await recentActivity(sandboxRoot, LEAD_COMPACTION_BOUND_MS, now).catch(() => new Map<string, { last: number; compacting: number | null }>());
+  const closers = new Map<string, { available: boolean; why: string }>();
+  for (const l of due) if (l.closed && !closers.has(l.closed.by)) closers.set(l.closed.by, await seatAvailable(sandboxRoot, l.closed.by, activity, now));
   const r = await transact<{ ok: true }>(sandboxRoot, async (inner) => {
-    const append: Array<Omit<LeadEvent, "v" | "seq" | "at" | "prev" | "hash">> = [];
+    const append: LeadDraft[] = [];
     for (const l of inner.state.leads.values()) {
       const m = l.closed ? /^E-(\d+)$/.exec(l.closed.ref) : null;
       if (!m) continue;
       const st = entryStands(inner.ledger, Number(m[1]));
       if (st.ok) continue;
-      append.push({ by: "system", ev: "reopen", lead: l.id, why: `${l.id} was closed ${l.closed!.disposition} on ${l.closed!.ref}, and ${st.why}`, cause: /superseded/.test(st.why) ? "superseded" : "disputed" });
+      const superseded = /superseded/.test(st.why);
+      // A closure waiting for its closer's confirmation: while the offer
+      // holds, it waits; declined, lapsed or overtaken by a change to the
+      // lead, it reopens.
+      if (l.confirm) {
+        const o = l.offers.find((x) => x.seq === l.confirm!.offer);
+        // A closer that became unavailable after the offer (done, dead, compacting) cannot confirm it: reopened now, not after the window.
+        const closer = closers.get(l.closed!.by);
+        const gone = closer && !closer.available ? closer.why : null;
+        if (o && O.reserving(o, now, l.rev) && superseded && !gone) continue;
+        const lapsedNow = o && !o.lapsed_at && !o.declined && !o.accepted && (O.offerStatus(o, now, l.rev).state === "lapsed" || (gone && O.reserving(o, now, l.rev)));
+        if (o && lapsedNow) append.push({ by: "system", ev: "offer_lapse", lead: l.id, offer: o.seq, to: o.to, why: gone ? `its closer can no longer take it: ${gone}` : "not confirmed within its window" });
+        append.push({ by: "system", ev: "reopen", lead: l.id, why: `${l.id} was closed ${l.closed!.disposition} on ${l.confirm.ref_was}, ${st.why}, and ${o?.declined ? `${o.to} declined to confirm it (${o.declined.why})` : gone ? `its closer can no longer confirm it (${gone})` : `its closer did not confirm it within its window`}`, cause: "superseded" });
+        continue;
+      }
+      // Superseded: the closure may still hold on the correction, or not (a
+      // correction by the same author can reverse the basis). Its closer is
+      // offered to confirm it on what stands now or reopen it (lead_confirm,
+      // lead_reopen); nothing re-points it by itself (A3). Disputed, or with
+      // nobody to confirm it: reopened.
+      if (superseded && closers.get(l.closed!.by)?.available) {
+        const head = inner.ledger.replaced.has(Number(m[1])) ? `E-${P.standingSeq(Number(m[1]), inner.ledger.replaced)}` : null;
+        append.push(offerDraft(l.id, l.closed!.by, "confirm", l.rev, l.cycle, now, { ref: l.closed!.ref, ...(head ? { head } : {}), why: `${l.closed!.ref} was superseded${head ? ` by ${head}` : ""}: confirm the closure on what stands, or reopen it` }));
+        continue;
+      }
+      append.push({ by: "system", ev: "reopen", lead: l.id, why: `${l.id} was closed ${l.closed!.disposition} on ${l.closed!.ref}, and ${st.why}`, cause: superseded ? "superseded" : "disputed" });
     }
     return { append, result: { ok: true as const } };
   });
-  return r.events.map((e) => e.lead!).filter(Boolean);
+  return r.events.filter((e) => e.ev === "reopen").map((e) => e.lead!).filter(Boolean);
+}
+
+/**
+ * Confirm a closure whose entry was superseded (A3): the closer, offered it,
+ * says the closure still holds on what stands now (ref: the correction, by
+ * default, or another standing entry of the kind the disposition cites),
+ * with the lead's revision it read and why. Unconfirmed within the offer, it
+ * reopens (reopenOnLedger). Never automatic: a correction by the same author
+ * can reverse the basis.
+ */
+export async function confirmLead(ctx: P.SwarmContext, rawId: unknown, input: { expected_revision?: unknown; ref?: string; why?: string }, now = Date.now()): Promise<LeadResult<{ lead: LeadView }>> {
+  const ref = leadRef(rawId);
+  if (!ref.ok) return ref;
+  const why = bounded("why", input.why, LEAD_WHY_MAX, true);
+  if (!why.ok) return { ok: false, reason: `${why.reason}: why the closure still holds on the correction` };
+  const expected = Number(input.expected_revision);
+  if (!Number.isInteger(expected) || expected < 1) return { ok: false, reason: "expected_revision is the lead's revision as you read it (leads L-<n> shows rev)" };
+  try {
+    const r = await transact<Fail | { ok: true }>(ctx.sandboxRoot, async (snap) => {
+      const l = snap.state.leads.get(ref.id);
+      if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
+      if (!l.closed || !l.confirm) return { append: [], result: { ok: false as const, reason: `${l.id} has no closure waiting for confirmation${l.closed ? "" : ": it is open"}` } };
+      if (l.rev !== expected) return { append: [], result: { ok: false as const, reason: `${l.id} is at revision ${l.rev}, not ${expected}: read it again` } };
+      const o = l.offers.find((x) => x.seq === l.confirm!.offer);
+      if (!o || !O.reserving(o, now, l.rev)) return { append: [], result: { ok: false as const, reason: `the confirmation of ${l.id} is no longer offered (${o ? O.offerStatus(o, now, l.rev).state : "none"}): it reopens; reopen or claim it` } };
+      if (o.to !== ctx.agentId) return { append: [], result: { ok: false as const, reason: `${l.id}'s closure is ${o.to}'s to confirm (its closer)` } };
+      const target = String(input.ref ?? l.confirm.head ?? "").trim();
+      if (!target) return { append: [], result: { ok: false as const, reason: "ref is the standing entry the closure rests on now" } };
+      const checked = checkRef(l.closed.disposition, target, l, snap);
+      if (!checked.ok) return { append: [], result: { ok: false as const, reason: checked.reason } };
+      return { append: [{ by: ctx.agentId, ev: "confirm", lead: l.id, ref: checked.ref, why: why.value, offer: o.seq }], result: { ok: true as const } };
+    });
+    if (!r.ok) return r;
+    const snap = await leadsSnapshot(ctx.sandboxRoot);
+    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap) };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/**
+ * Hand a held lead to another seat (A2): the holder lets it go with why,
+ * and it is offered to the seat it names (available: not done, dead or
+ * compacting) or, when it names none, to the seat idle longest; with no
+ * seat to offer it to, it is open to everyone. Recorded as a hand-off, so
+ * hand-over is a native measure.
+ */
+export async function handoffLead(ctx: P.SwarmContext, rawId: unknown, input: { why?: string; to?: string; generation?: number }): Promise<LeadResult<{ lead: LeadView; offered_to?: string }>> {
+  const ref = leadRef(rawId);
+  if (!ref.ok) return ref;
+  const why = bounded("why", input.why, LEAD_WHY_MAX, true);
+  if (!why.ok) return { ok: false, reason: `${why.reason}: what you did on it, and what the next seat takes up` };
+  const to = String(input.to ?? "").trim();
+  if (to && to === ctx.agentId) return { ok: false, reason: "a hand-off is to another seat" };
+  const avail = to ? await seatAvailable(ctx.sandboxRoot, to) : null;
+  if (avail && !avail.available) return { ok: false, reason: `${avail.why}: hand it to another seat, or leave to out and the seat idle longest is offered it` };
+  try {
+    const r = await transact<Fail | { ok: true; offered: string | null }>(ctx.sandboxRoot, async (snap) => {
+      const l = snap.state.leads.get(ref.id);
+      if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
+      if (l.closed) return { append: [], result: { ok: false as const, reason: `${l.id} is closed; there is nothing to hand over` } };
+      const refused = holderOnly(l, ctx, input.generation, "hand over");
+      if (refused) return { append: [], result: { ok: false as const, reason: refused } };
+      let target: string | null = to || null;
+      if (!target) target = (await idleSeats(ctx.sandboxRoot, snap.state, snap.ledger, snap.jobs, snap.at, snap.questions)).find((x) => x.agent !== ctx.agentId)?.agent ?? null;
+      const append: LeadDraft[] = [{ by: ctx.agentId, ev: "handoff", lead: l.id, why: why.value, generation: l.generation, ...(target ? { to: target } : {}) }];
+      if (target) append.push(offerDraft(l.id, target, "handoff", l.rev + 1, l.cycle + 1, snap.at, { from: ctx.agentId }));
+      return { append, result: { ok: true as const, offered: target } };
+    });
+    if (!r.ok) return r;
+    const snap = await leadsSnapshot(ctx.sandboxRoot);
+    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap), ...(r.offered ? { offered_to: r.offered } : {}) };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/**
+ * Answer an offer of a lead (A3): accept takes it (the claim the offer
+ * reserves; a closure to confirm is confirmed with lead_confirm), decline
+ * passes it on at once, with why.
+ */
+export async function answerLeadOffer(ctx: P.SwarmContext, rawId: unknown, input: { action?: string; why?: string }, now = Date.now()): Promise<LeadResult<{ lead: LeadView; declined?: true; claimed?: true }>> {
+  const ref = leadRef(rawId);
+  if (!ref.ok) return ref;
+  const action = String(input.action ?? "").trim();
+  if (action !== "accept" && action !== "decline") return { ok: false, reason: "action is accept or decline" };
+  if (action === "accept") {
+    const snap = await leadsSnapshot(ctx.sandboxRoot);
+    const l = snap.state.leads.get(ref.id);
+    const o = l ? O.reservingOffer(l.offers, now, l.rev) : null;
+    if (!l || !o || o.to !== ctx.agentId) return { ok: false, reason: `no offer of ${ref.id} stands for you${o ? ` (it is offered to ${o.to})` : ""}` };
+    if (o.reason === "confirm") return { ok: false, reason: `${l.id}'s offer is its closure to confirm: lead_confirm ${l.id} (expected_revision ${l.rev}, ref, why), or lead_reopen it` };
+    const c = await claimLead(ctx, ref.id, {}, now);
+    return c.ok ? { ok: true, lead: c.lead, claimed: true } : c;
+  }
+  const why = bounded("why", input.why, LEAD_WHY_MAX, true);
+  if (!why.ok) return { ok: false, reason: `${why.reason}: why you do not take it (the next seat reads it)` };
+  try {
+    const r = await transact<Fail | { ok: true }>(ctx.sandboxRoot, async (snap) => {
+      const l = snap.state.leads.get(ref.id);
+      if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
+      const o = O.reservingOffer(l.offers, now, l.rev);
+      if (!o || o.to !== ctx.agentId) return { append: [], result: { ok: false as const, reason: `no offer of ${l.id} stands for you` } };
+      return { append: [{ by: ctx.agentId, ev: "offer_decline", lead: l.id, offer: o.seq, why: why.value }], result: { ok: true as const } };
+    });
+    if (!r.ok) return r;
+    const snap = await leadsSnapshot(ctx.sandboxRoot);
+    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap), declined: true };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/** An offer answered: a lead's (L-<n>) or a question's (Q-<n>), one mechanism (extensions/offers.ts). */
+export async function answerOffer(ctx: P.SwarmContext, subject: unknown, input: { action?: string; why?: string }): Promise<Record<string, unknown>> {
+  const id = String(subject ?? "").trim();
+  if (/^Q-\d+$/i.test(id)) return (await import("./questions.ts")).answerQuestionOffer(ctx, id, input ?? {});
+  if (/^L-\d+$/i.test(id)) return answerLeadOffer(ctx, id, input ?? {});
+  return { ok: false, reason: `an offer is of a lead (L-<n>) or a question (Q-<n>); got ${JSON.stringify(subject)}` };
+}
+
+/** Record that offers reached their seat (its wait or its header delivered them): an offer's first claim is counted from here. */
+export async function markOffersSeen(sandboxRoot: string, agent: string, seqs: Array<{ lead: string; offer: number }>): Promise<void> {
+  if (!seqs.length) return;
+  await transact<{ ok: true }>(sandboxRoot, async (snap) => {
+    const append: LeadDraft[] = [];
+    for (const x of seqs) {
+      const o = snap.state.leads.get(x.lead)?.offers.find((y) => y.seq === x.offer);
+      if (o && o.to === agent && !o.seen_at) append.push({ by: agent, ev: "offer_seen", lead: x.lead, offer: x.offer });
+    }
+    return { append, result: { ok: true as const } };
+  }).catch(() => undefined);
 }
 
 // --- what each agent is told ---------------------------------------------------------------------
 
 /** What an agent was last shown of the leads it holds and the ones they need (inbox/<id>/leads.json). */
-type Told = { seq: number; held: Record<string, { status: LeadStatus; unmet: string[]; dead: string[]; stale: boolean; closed?: string; notes: number }>; deps: Record<string, { status: LeadStatus; holder: string | null; disposition?: string }>; wakes: string[] };
+type Told = { seq: number; held: Record<string, { status: LeadStatus; unmet: string[]; dead: string[]; stale: boolean; closed?: string; notes: number }>; deps: Record<string, { status: LeadStatus; holder: string | null; disposition?: string }>; wakes: string[]; offers?: number[] };
 
 function toldPath(sandboxRoot: string, agent: string): string {
   return join(sandboxRoot, "inbox", agent, "leads.json");
@@ -1818,9 +2810,9 @@ function toldPath(sandboxRoot: string, agent: string): string {
 async function readTold(sandboxRoot: string, agent: string): Promise<Told> {
   try {
     const t = JSON.parse(await readFile(toldPath(sandboxRoot, agent), "utf8")) as Told;
-    return { seq: t.seq ?? 0, held: t.held ?? {}, deps: t.deps ?? {}, wakes: t.wakes ?? [] };
+    return { seq: t.seq ?? 0, held: t.held ?? {}, deps: t.deps ?? {}, wakes: t.wakes ?? [], offers: t.offers ?? [] };
   } catch {
-    return { seq: 0, held: {}, deps: {}, wakes: [] };
+    return { seq: 0, held: {}, deps: {}, wakes: [], offers: [] };
   }
 }
 
@@ -1841,13 +2833,46 @@ function toldNow(agent: string, snap: LeadsSnapshot, previouslyHeld: string[]): 
     }
   }
   const wakes = [...s.wakes.entries()].filter(([, to]) => to === agent).map(([k]) => k);
-  return { seq: s.events.length, held, deps, wakes };
+  return { seq: s.events.length, held, deps, wakes, offers: offersFor(agent, snap).map((x) => x.offer.seq) };
+}
+
+/** The offers that concern a seat now: made to it, or of a lead parked in its hands; each still holding its lead. */
+export function offersFor(agent: string, snap: LeadsSnapshot): Array<{ lead: Lead; offer: O.Offer }> {
+  const out: Array<{ lead: Lead; offer: O.Offer }> = [];
+  for (const l of snap.state.leads.values()) {
+    for (const o of l.offers) {
+      if (o.to !== agent && !(o.reason === "parked" && o.from === agent)) continue;
+      if (O.reserving(o, snap.at, l.rev)) out.push({ lead: l, offer: o });
+    }
+  }
+  return out;
+}
+
+/** What an offer says to the seat it concerns. */
+export function offerText(l: Lead, o: O.Offer, agent: string, snap: LeadsSnapshot): string {
+  const until = O.untilWords(o, snap.at, l.rev);
+  if (o.reason === "parked" && o.from === agent && o.to !== agent) return `${l.id} ("${l.title}") is parked in your hands (no job and no act on it for ${Math.round(parkMs() / 60_000)}+ min while you work elsewhere) and is offered to ${o.to}, who has first claim ${until}: act on it (lead_claim ${l.id} keeps it, or run its job), lead_handoff it, or let it go`;
+  const decline = `offer decline ${l.id} with why if you cannot take it`;
+  switch (o.reason) {
+    case "parked":
+      return `${l.id} ("${l.title}") is parked in ${o.from ?? l.holder}'s hands (no job and no act on it while they work elsewhere) and is offered to you, first claim ${until}: lead_claim ${l.id} takes it over unless ${o.from ?? l.holder} acts on it first; ${decline}`;
+    case "handoff":
+      return `${o.from ?? "its holder"} hands ${l.id} ("${l.title}") to you, first claim ${until}: ${l.why}${l.next_action ? ` Next action: ${l.next_action}.` : ""} lead_claim ${l.id} (or offer accept ${l.id}) to take it; ${decline}`;
+    case "reopen":
+      return `${l.id} ("${l.title}") was reopened after the operator's note and is offered to you first, its previous holder, ${until}: ${l.notes.at(-1)?.text ?? ""} lead_claim ${l.id} to go on; ${decline}`;
+    case "confirm":
+      return `${l.id} ("${l.title}") was closed ${l.closed?.disposition ?? "?"} on ${l.confirm?.ref_was ?? "?"}, since superseded${l.confirm?.head ? ` by ${l.confirm.head}` : ""}: confirm the closure on what stands now (lead_confirm ${l.id}, expected_revision ${l.rev}, ref, why) or reopen it (lead_reopen), ${until}. Unconfirmed, it reopens by itself; nothing re-points it`;
+    default:
+      return `${l.id} ("${l.title}") is open, ready and nobody holds it, and it is offered to you (idle), first claim ${until}: lead_claim ${l.id} to take it; ${decline}`;
+  }
 }
 
 export type LeadNotice = {
-  kind: "lead_ready" | "lead_blocked" | "need_dead" | "dependency_changed" | "stale_marked" | "reclaimed" | "reopened" | "operator_note" | "wake" | `question_${import("./questions.ts").QuestionNotice["kind"]}`;
+  kind: "lead_ready" | "lead_blocked" | "need_dead" | "dependency_changed" | "stale_marked" | "reclaimed" | "reopened" | "operator_note" | "wake" | "offer" | "confirm" | "parked" | `question_${import("./questions.ts").QuestionNotice["kind"]}`;
   /** The lead the notice is about, or the question (Q-<n>) for the register's. */
   lead: string;
+  /** An offer notice: the offer it delivers (its first claim counts from this delivery). */
+  offer?: number;
   text: string;
   wakes: boolean;
 };
@@ -1876,7 +2901,9 @@ export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot): Le
     if (cur.stale && !was.stale) out.push({ kind: "stale_marked", lead: id, text: `${id} is marked stale in your hands: a peer found you silent with no job running. Act on it (a post, a job, lead_release) or it will be taken over`, wakes: true });
     if (was.closed && !cur.closed) {
       const r = l.reopened.at(-1);
-      out.push({ kind: "reopened", lead: id, text: `${id} was reopened (${r?.cause ?? "?"}): ${r?.why ?? ""}. It is open again; claim it to go on`, wakes: true });
+      // Offered to it first, the offer says so (below).
+      const offered = l.offers.some((o) => o.to === agent && O.reserving(o, snap.at, l.rev));
+      if (!offered) out.push({ kind: "reopened", lead: id, text: `${id} was reopened (${r?.cause ?? "?"}): ${r?.why ?? ""}. It is open again; claim it to go on`, wakes: true });
     }
     if (cur.notes > was.notes) {
       for (const n of l.notes.slice(was.notes)) out.push({ kind: "operator_note", lead: id, text: `The operator on ${id}: ${n.text}${n.allow_host ? ` (allowed host for jobs with network=allowlist: ${n.allow_host})` : ""}`, wakes: true });
@@ -1889,11 +2916,11 @@ export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot): Le
       out.push({ kind: "dependency_changed", lead: id, text: `${id}, which your lead needs, is now ${cur.status}${cur.holder ? ` (held by ${cur.holder})` : ""}${cur.disposition ? `, closed ${cur.disposition}` : ""}`, wakes: false });
     }
   }
-  for (const w of now.wakes) {
-    if (before.wakes.includes(w)) continue;
-    const id = w.split("#")[0];
-    const l = s.leads.get(id);
-    if (l && !l.closed && !l.holder) out.push({ kind: "wake", lead: id, text: `${id} is open, ready and nobody holds it, and you have been idle: "${l.title}". lead_claim ${id} if you can take it`, wakes: true });
+  // Offers (A3): each once, while it still holds its lead.
+  const told = new Set(before.offers ?? []);
+  for (const { lead: l, offer: o } of offersFor(agent, snap)) {
+    if (told.has(o.seq)) continue;
+    out.push({ kind: o.reason === "confirm" ? "confirm" : o.reason === "parked" && o.from === agent ? "parked" : "offer", lead: l.id, offer: o.seq, text: offerText(l, o, agent, snap), wakes: true });
   }
   return out;
 }
@@ -1905,7 +2932,7 @@ export type LeadsDigest = {
 };
 
 function lineOf(x: LeadView): string {
-  return `${x.id} "${x.title}"${x.priority ? ` (priority ${x.priority})` : ""}`;
+  return `${x.id} "${x.title}"${x.priority ? ` (priority ${x.priority})` : ""}${x.offered ? ` (offered to ${x.offered.to} until ${x.offered.until})` : ""}${x.covered_by?.length ? ` (a second route beside ${x.covered_by.join(", ")})` : ""}`;
 }
 
 /**
@@ -1932,7 +2959,7 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   const open = ranked.filter((x) => x.status === "open");
   const mine = ranked.filter((x) => x.holder === me && x.status !== "closed");
   const blockedOnMe = ranked.filter((x) => x.status === "blocked" && x.holder !== me && x.needs.some((n) => !n.met && mine.some((m) => m.id === n.need.split(":")[0])));
-  const awaiting = (await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs)).filter((a) => a.agent === me);
+  const awaiting = (await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs, snap.ledger)).filter((a) => a.agent === me);
   const cov = questionCoverage(snap);
   const before = await readTold(ctx.sandboxRoot, me);
   const notices = noticesFor(me, before, snap);
@@ -1956,11 +2983,32 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   lines.push(`Open, unheld, by priority: ${open.length ? open.map(lineOf).join("; ") : "none"}.`);
   lines.push(`Yours: ${mine.length ? mine.map((x) => `${x.id} ${x.status}${x.status === "blocked" ? ` on ${x.needs.filter((n) => !n.met).map((n) => n.need).join(", ")}` : ""}${x.stale ? " (MARKED STALE: act on it)" : ""}`).join("; ") : "none"}.`);
   lines.push(`Blocked on you: ${blockedOnMe.length ? blockedOnMe.map((x) => `${x.id} (${x.holder ?? "unheld"}) needs ${x.needs.filter((n) => !n.met).map((n) => n.need).join(", ")}`).join("; ") : "none"}.`);
-  lines.push(`Awaiting your interpretation: ${awaiting.length ? awaiting.map((a) => `${a.job}${a.lead ? ` (${a.lead})` : ""}${a.unread_bytes ? `: ${a.unread_bytes} of ${a.total_bytes} stdout bytes unread, job_status offset ${a.next_offset}` : ""}`).join("; ") : "none"}.`);
+  lines.push(`Awaiting your interpretation: ${awaiting.length ? awaiting.map((a) => `${a.job}${a.lead ? ` (${a.lead})` : ""}${a.reinterpret ? `: its interpretation no longer stands, interpret it again (${a.why})` : ""}${a.unread_bytes ? `: ${a.unread_bytes} of ${a.total_bytes} stdout bytes unread, job_status offset ${a.next_offset}` : ""}`).join("; ") : "none"}.`);
   lines.push(`Questions nobody holds a lead for, with no answer yet: ${cov.uncovered.length ? cov.uncovered.map((q) => `question:${q}${cov.open_leads_for[q] ? ` (open: ${cov.open_leads_for[q].join(", ")})` : ""}`).join(", ") : "none"}.`);
+  // This seat's running jobs that look stuck (B11): all three signals still, not near their timeout. A hint, never a cancel.
+  const T = await import("../scripts/job-telemetry.ts");
+  const stuck: string[] = [];
+  for (const j of snap.jobs) {
+    if (j.agent !== me || j.state !== "running") continue;
+    const p = await T.jobProgressOnDisk(ctx.sandboxRoot, j.id).catch(() => null);
+    if (p?.state === "suspected_stall") stuck.push(T.progressWords(j.id, p));
+  }
+  if (stuck.length) lines.push(`Your running jobs that look stuck: ${stuck.join("; ")}.`);
+  // Parked leads (A2) and closures waiting for confirmation (A3): everyone sees them.
+  const parked = await parkedLeads(ctx.sandboxRoot, snap).catch(() => [] as ParkedLead[]);
+  if (parked.length) lines.push(`Parked (held, no job and no act on it for ${Math.round(parkMs() / 60_000)}+ min while the holder works elsewhere; offered to an idle seat unless the holder acts): ${parked.map((p) => `${p.lead} (${p.holder}, ${Math.round(p.idle_ms / 60_000)} min; ${p.elsewhere})`).join("; ")}.`);
+  const confirming = ranked.filter((x) => x.confirm);
+  if (confirming.length) lines.push(`Closures to confirm or reopen (their entry was superseded; nothing re-points them): ${confirming.map((x) => `${x.id} closed ${x.disposition} on ${x.confirm!.ref_was}${x.confirm!.head ? `, now ${x.confirm!.head}` : ""} (${x.confirm!.to ?? "nobody"} confirms)`).join("; ")}.`);
+  // The finish (A4): whether the registers say it is ready, who coordinates it, and what this seat does about it.
+  const F = await import("./finish.ts");
+  const finish = await F.finishHeader(ctx.sandboxRoot, me).catch(() => null);
+  if (finish) lines.push(finish);
   if (o.mark) {
     await writeTold(ctx.sandboxRoot, me, toldNow(me, snap, Object.keys(before.held)));
     if (snap.questions) await Q.markTold(ctx.sandboxRoot, me, snap.questions);
+    // What was delivered now: each offer's first claim counts from here.
+    await markOffersSeen(ctx.sandboxRoot, me, notices.filter((n) => n.offer !== undefined && n.kind !== "parked").map((n) => ({ lead: n.lead, offer: n.offer! })));
+    if (qd) await Q.markQuestionOffersSeen(ctx.sandboxRoot, me, qd.notices.filter((n) => n.kind === "offer" && n.offer !== undefined).map((n) => ({ q: n.q, offer: n.offer! }))).catch(() => undefined);
   }
   return { text: lines.join("\n"), notices: [...notices, ...(qd?.notices ?? []).map((n) => ({ kind: `question_${n.kind}` as LeadNotice["kind"], lead: n.q, text: n.text, wakes: n.wakes }))], counts: { ...counts, ...(qd ? { questions: qd.counts } : {}) } };
 }
@@ -2037,41 +3085,78 @@ export function leadsWaitCheck(ctx: P.SwarmContext): () => Promise<string | null
     const due = now - lastElection > 5_000;
     if (next === sig && !due) return null;
     sig = next;
+    // A confirmation window that lapsed reopens its lead here too, so a waiting seat sees it.
+    if (due) await reopenOnLedger(ctx.sandboxRoot, now).catch(() => undefined);
     const snap = await leadsSnapshot(ctx.sandboxRoot);
     const before = await readTold(ctx.sandboxRoot, ctx.agentId);
     const waking = noticesFor(ctx.agentId, before, snap).filter((n) => n.wakes);
     // The question register's news for this seat: an offer, a clarification answered, its question amended or withdrawn.
     const Q = await import("./questions.ts");
     const qWaking = snap.questions ? Q.questionNotices(ctx.agentId, await Q.readTold(ctx.sandboxRoot, ctx.agentId), { questions: snap.questions, leads: snap.state, ledger: snap.ledger }).filter((n) => n.wakes) : [];
-    if (waking.length || qWaking.length) return [...qWaking, ...waking].map((n) => n.text).join(" ");
+    if (waking.length || qWaking.length) {
+      // Delivered now: each offer's first claim counts from here (A3).
+      await markOffersSeen(ctx.sandboxRoot, ctx.agentId, waking.filter((n) => n.offer !== undefined && n.kind !== "parked").map((n) => ({ lead: n.lead, offer: n.offer! })));
+      await Q.markQuestionOffersSeen(ctx.sandboxRoot, ctx.agentId, qWaking.filter((n) => n.kind === "offer" && n.offer !== undefined).map((n) => ({ q: n.q, offer: n.offer! }))).catch(() => undefined);
+      return [...qWaking, ...waking].map((n) => n.text).join(" ");
+    }
     if (!due) return null;
     lastElection = now;
-    // A person's question nobody has taken, past its suggested seat's minute, goes to the most suited idle seat.
+    // A person's question nobody has taken, past its suggested seat's offer, goes to the most suited idle seat.
     await Q.deliverPending(ctx.sandboxRoot).catch(() => undefined);
     const offered = await Q.electQuestionOffer(ctx, now, snap.questions ? { questions: snap.questions, leads: snap.state, ledger: snap.ledger } : undefined).catch(() => null);
-    if (offered) return `${offered.id} is offered to you (you are idle and the most suited): "${offered.text}" (${Q.originWords(offered.origin)}). Take it with lead_open(answers: ["${offered.id}"], take: true, proposition, negation), or say on the board why not; nobody owns it.`;
-    const woke = await electWake(ctx, snap);
-    return woke ? `${woke} is open, ready and nobody holds it, and you have been idle: lead_claim ${woke} if you can take it (leads ${woke} for the whole of it).` : null;
+    if (offered) return `${offered.q.id} is offered to you (you are idle and the most suited), first claim ${O.untilWords(offered.offer, Date.now(), offered.q.rev)}: "${offered.q.text}" (${Q.originWords(offered.q.origin)}). Take it with lead_open(answers: ["${offered.q.id}"], take: true, proposition, negation), or offer decline ${offered.q.id} with why; nobody owns it.`;
+    const won = await electOffer(ctx, snap, now);
+    return won ? won.text : null;
   };
 }
 
-/** One wake per lead and open spell, to the seat idle longest: taken under the lock, so two waits never both take it. */
-async function electWake(ctx: P.SwarmContext, outer: LeadsSnapshot): Promise<string | null> {
-  const ready = [...outer.state.leads.values()].filter((l) => !l.closed && !l.holder && leadStatus(l, outer.state, outer.ledger) === "open" && !outer.state.wakes.has(`${l.id}#${l.cycle}`));
-  if (!ready.length) return null;
-  const idle = await idleSeats(ctx.sandboxRoot, outer.state, outer.ledger, outer.jobs);
-  if (idle[0]?.agent !== ctx.agentId) return null;
+/**
+ * The offers a waiting seat makes to itself (A3): a ready lead nobody holds
+ * and nothing is offered, or a parked lead (A2), goes to the idle seat that
+ * waited longest among those not yet offered it at this revision; that seat
+ * elects it for itself, under the lock, so two waits never both take it. A
+ * lead whose questions another held lead covers is left for its opener's
+ * second route, not offered. The offer is delivered as it is made.
+ */
+async function electOffer(ctx: P.SwarmContext, outer: LeadsSnapshot, now = Date.now()): Promise<{ lead: string; text: string } | null> {
+  const offeredHere = (l: Lead, agent: string) => l.offers.some((o) => o.to === agent && o.rev === l.rev);
+  const eligible = (snap: LeadsSnapshot, parked: Set<string>) =>
+    [...snap.state.leads.values()]
+      .filter((l) => !l.closed && !O.reservingOffer(l.offers, now, l.rev))
+      .filter((l) => (!l.holder && leadStatus(l, snap.state, snap.ledger) === "open" && !(l.covered_by?.length && overlappingLeads(snap, l.answers, "", l.id).length)) || parked.has(l.id));
+  const parkedOuter = new Set((await parkedLeads(ctx.sandboxRoot, outer, now).catch(() => [] as ParkedLead[])).map((p) => p.lead));
+  const candidates = eligible(outer, parkedOuter);
+  if (!candidates.length) return null;
+  const idle = await idleSeats(ctx.sandboxRoot, outer.state, outer.ledger, outer.jobs, now, outer.questions);
+  // Is this seat the one each candidate goes to? The first idle seat, in order, not yet offered it.
+  const mine = candidates.filter((l) => idle.find((x) => x.agent !== l.holder && !offeredHere(l, x.agent))?.agent === ctx.agentId);
+  if (!mine.length) return null;
   const r = await transact<{ ok: true; lead: string | null }>(ctx.sandboxRoot, async (snap) => {
-    const still = [...snap.state.leads.values()]
-      .filter((l) => !l.closed && !l.holder && leadStatus(l, snap.state, snap.ledger) === "open" && !snap.state.wakes.has(`${l.id}#${l.cycle}`))
-      .map((l) => viewLead(l, snap))
-      .sort((a, b) => b.priority - a.priority || a.opened_at.localeCompare(b.opened_at));
-    const pick = still[0];
+    // One offer at a time, across both registers, read again under the lock.
+    if ((await offeredSeats(ctx.sandboxRoot, snap.state, now, snap.questions)).has(ctx.agentId)) return { append: [], result: { ok: true as const, lead: null as string | null } };
+    const parked = new Set((await parkedLeads(ctx.sandboxRoot, snap, now).catch(() => [] as ParkedLead[])).map((p) => p.lead));
+    const still = eligible(snap, parked)
+      .filter((l) => mine.some((m) => m.id === l.id) && !offeredHere(l, ctx.agentId) && l.holder !== ctx.agentId)
+      .map((l) => ({ l, v: viewLead(l, snap) }))
+      // Work nobody holds first, by priority then age; parked leads after.
+      .sort((a, b) => Number(Boolean(a.l.holder)) - Number(Boolean(b.l.holder)) || b.v.priority - a.v.priority || a.v.opened_at.localeCompare(b.v.opened_at));
+    const pick = still[0]?.l;
     if (!pick) return { append: [], result: { ok: true as const, lead: null as string | null } };
-    const l = snap.state.leads.get(pick.id)!;
-    return { append: [{ by: "system", ev: "wake" as const, lead: l.id, to: ctx.agentId, cycle: l.cycle }], result: { ok: true as const, lead: l.id } };
+    const append: LeadDraft[] = [];
+    // A lapsed offer before it is written down, for the record.
+    for (const o of pick.offers) if (!o.lapsed_at && !o.accepted && !o.declined && o.rev === pick.rev && O.offerStatus(o, now, pick.rev).state === "lapsed") append.push({ by: "system", ev: "offer_lapse", lead: pick.id, offer: o.seq, to: o.to, why: "its first claim ran out" });
+    const reason: O.OfferReason = pick.holder ? "parked" : "wake";
+    append.push(offerDraft(pick.id, ctx.agentId, reason, pick.rev, pick.cycle, now, pick.holder ? { from: pick.holder } : {}));
+    return { append, result: { ok: true as const, lead: pick.id } };
   }).catch(() => null);
-  return r?.lead ?? null;
+  if (!r?.lead) return null;
+  // Delivered as it is made: the seat's wait returns it now.
+  const made = r.events.find((e) => e.ev === "offer");
+  if (made) await markOffersSeen(ctx.sandboxRoot, ctx.agentId, [{ lead: r.lead, offer: made.seq }]);
+  const snap = await leadsSnapshot(ctx.sandboxRoot);
+  const l = snap.state.leads.get(r.lead)!;
+  const o = l.offers.find((x) => x.seq === made?.seq);
+  return { lead: r.lead, text: o ? offerText(l, o, ctx.agentId, snap) : `${r.lead} is offered to you: lead_claim ${r.lead} to take it` };
 }
 
 // --- the views an agent asks for ----------------------------------------------------------------
@@ -2091,7 +3176,7 @@ export async function leadsView(ctx: P.SwarmContext, o: { view?: string; from?: 
     const l = snap.state.leads.get(one.id);
     if (!l) return { ok: false, reason: `${one.id} does not exist` };
     const history = snap.state.events.filter((e) => e.lead === one.id || (e.job && l.jobs.includes(e.job) && e.ev === "interpret")).map(({ prev: _p, hash: _h, v: _v, ...e }) => e);
-    const awaiting = (await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs)).filter((a) => a.lead === one.id);
+    const awaiting = (await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs, snap.ledger)).filter((a) => a.lead === one.id);
     return { ok: true, lead: viewLead(l, snap), history, awaiting_interpretation: awaiting };
   }
   if (!(LEADS_VIEWS as readonly string[]).includes(view)) return { ok: false, reason: `view is one of ${LEADS_VIEWS.join(", ")}, or a lead's id (L-3)` };
@@ -2100,7 +3185,7 @@ export async function leadsView(ctx: P.SwarmContext, o: { view?: string; from?: 
     return { ok: true, view, summary: digest.text, counts: digest.counts, chain: snap.state.chain.ok ? "intact" : `BROKEN at line ${snap.state.chain.broken_at} (${snap.state.chain.reason})` };
   }
   if (view === "jobs") {
-    const awaiting = await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs);
+    const awaiting = await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs, snap.ledger);
     return { ok: true, view, awaiting_interpretation: awaiting, note: "A job waits for an interpretation until an entry is recorded with interprets naming it (and, when its stdout was handed over in part, rest saying how the rest was read or why not). A lead's jobs hold the finish line; an agent's others are only shown." };
   }
   if (view === "questions") {
@@ -2156,6 +3241,16 @@ export async function leadDefects(sandboxRoot: string, snap?: LeadsSnapshot): Pr
   const s = snap ?? (await leadsSnapshot(sandboxRoot));
   const defects: LeadDefect[] = [];
   for (const l of s.state.leads.values()) {
+    // A closure whose entry was superseded stands only once its closer confirms it (A3).
+    if (l.material && l.closed && l.confirm) {
+      defects.push({
+        code: "open_lead",
+        lead: l.id,
+        what: `${l.id} "${l.title}" was closed ${l.closed.disposition} on ${l.confirm.ref_was}, since superseded${l.confirm.head ? ` by ${l.confirm.head}` : ""}: its closure waits for its closer's confirmation`,
+        fix: `its closer confirms it on what stands (lead_confirm ${l.id} with ref and why) or reopens it (lead_reopen); unconfirmed, it reopens by itself`,
+      });
+      continue;
+    }
     if (!l.material || l.closed) continue;
     const st = leadStatus(l, s.state, s.ledger);
     defects.push({
@@ -2165,7 +3260,7 @@ export async function leadDefects(sandboxRoot: string, snap?: LeadsSnapshot): Pr
       fix: `close it with lead_close ${l.id}: resolved citing the entry that settles it (E-<seq>), negative citing the absence, duplicate citing the lead it repeats, deferred or infeasible citing the limitation, or needs_operator saying what the operator must do`,
     });
   }
-  const awaiting = await awaitingInterpretation(sandboxRoot, s.state, s.jobs);
+  const awaiting = await awaitingInterpretation(sandboxRoot, s.state, s.jobs, s.ledger);
   for (const a of awaiting) {
     if (!a.lead) continue;
     const l = s.state.leads.get(a.lead);
@@ -2206,17 +3301,27 @@ export function renderLeadsMd(snap: LeadsSnapshot): string {
       lines.push(`- Why: ${x.why}`);
       lines.push(`- Origin: ${x.origin}; opened by ${x.opened_by} at ${x.opened_at}${x.material ? "" : "; not material"}`);
       if (x.holder) lines.push(`- Held by ${x.holder}, generation ${x.generation}, since ${x.held_since}${x.stale ? `; MARKED STALE at ${x.stale.at}` : ""}`);
-      if (x.needs.length) lines.push(`- Needs: ${x.needs.map((n) => `${n.need} (${n.met ? "met" : `unmet: ${n.why}`})`).join("; ")}`);
+      if (x.overlap) lines.push(`- Held as ${x.overlap.kind === "verification" ? "a verification" : "a second route"} by ${x.overlap.by}: ${x.overlap.why}`);
+      if (x.covered_by?.length) lines.push(`- Opened unheld: its questions were covered by ${x.covered_by.join(", ")}`);
+      if (x.offered) lines.push(`- Offered to ${x.offered.to} (${x.offered.reason}${x.offered.from ? `, from ${x.offered.from}` : ""}), first claim until ${x.offered.until} (at revision ${x.rev})`);
+      if (x.needs.length) lines.push(`- Needs: ${x.needs.map((n) => `${n.need} (${n.met ? "met" : `unmet: ${n.why}`}; ${n.outcome})`).join("; ")}`);
+      for (const d of x.dropped ?? []) lines.push(`- Need dropped at ${d.at} by ${d.by}: ${d.need} (withdrawn, never met: ${d.why})`);
       if (x.answers.length) lines.push(`- Answers: ${x.answers.map((a) => `question:${a}`).join(", ")}`);
       if (x.proposition) lines.push(`- Tests: ${x.proposition}; against: ${x.negation ?? ""}`);
-      if (x.product) lines.push(`- Directive's product: ${x.product}; accepted when: ${x.acceptance ?? ""}`);
+      if (x.product) lines.push(`- ${x.opened_by === "operator" ? "Directive's product" : "Product"}: ${x.product}; accepted when: ${x.acceptance ?? ""}`);
+      if (x.inputs?.length) lines.push(`- Starts from: ${x.inputs.join(", ")}`);
+      if (x.next_action) lines.push(`- Next action once accepted: ${x.next_action}`);
       if (x.routes.length) lines.push(`- Route plan: ${x.routes.map(NB.routeWords).join("; ")}`);
       if (x.priority) lines.push(`- Waiting on it: ${x.waiting_on_it.leads.length} lead(s)${x.waiting_on_it.leads.length ? ` (${x.waiting_on_it.leads.join(", ")})` : ""}, ${x.waiting_on_it.questions.length} unanswered question(s)${x.waiting_on_it.questions.length ? ` (${x.waiting_on_it.questions.map((q) => `question:${q}`).join(", ")})` : ""}`);
       if (x.jobs.length) lines.push(`- Jobs: ${x.jobs.join(", ")}`);
       if (x.disposition) lines.push(`- Closed ${x.disposition} by ${x.closed_by} at ${x.closed_at}: ${x.ref}${x.close_why ? ` (${x.close_why})` : ""}`);
+      if (x.result_refs?.length) lines.push(`- Delivered: ${x.result_refs.join(", ")}`);
+      if (x.confirm) lines.push(`- CLOSURE TO CONFIRM: closed on ${x.confirm.ref_was}, superseded since ${x.confirm.since}${x.confirm.head ? ` (now ${x.confirm.head})` : ""}; ${x.confirm.to ? `offered to ${x.confirm.to} to confirm or reopen` : "its closer cannot take it"}`);
+      for (const c of x.confirmed ?? []) lines.push(`- Closure confirmed at ${c.at} by ${c.by}: ${c.from} -> ${c.to} (${c.why})`);
       if (x.quick_negative) lines.push(`- Quick negative (a review cue): held ${Math.round(x.quick_negative.held_ms / 1000)} s, ${x.quick_negative.jobs} job(s), ${x.quick_negative.objects} object(s)`);
       if (x.not_examined?.length) lines.push(`- Planned routes not examined: ${x.not_examined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}`);
       for (const r of x.reopened) lines.push(`- Reopened at ${r.at} by ${r.by} (${r.cause}): ${r.why}`);
+      for (const r of x.route_reviews ?? []) lines.push(`- Route reviewed at ${r.at} by ${r.by}: limitation ${r.material ? "still material" : "no longer material"} (${r.why})`);
       for (const n of x.notes) lines.push(`- Operator note at ${n.at}: ${n.text}${n.allow_host ? ` (allowed host: ${n.allow_host})` : ""}`);
       lines.push("");
     }
@@ -2312,7 +3417,7 @@ export function questionStanding(snap: LeadsSnapshot): Array<{ id: string; why: 
 }
 
 /** The regroup post: what is open, what is blocked, what waits on the operator, and what nobody has cited. */
-export async function regroupMessage(sandboxRoot: string, snap: LeadsSnapshot, o: { minutes: number; since: { at: number; what: string }; count: number; nextMinutes: number }): Promise<string> {
+export async function regroupMessage(sandboxRoot: string, snap: LeadsSnapshot, o: { minutes: number; since: { at: number; what: string }; count: number; nextMinutes: number; running?: string[] }): Promise<string> {
   const ranked = rankedLeads(snap);
   const qs = questionStanding(snap);
   const open = ranked.filter((v) => v.status === "open");
@@ -2333,6 +3438,10 @@ export async function regroupMessage(sandboxRoot: string, snap: LeadsSnapshot, o
   lines.push("", `Waiting on the operator (${operator.length}):`);
   for (const v of operator) lines.push(`- ${v.id} "${v.title}": ${v.ref}`);
   if (!operator.length) lines.push("- none");
+  if (o.running?.length) {
+    lines.push("", `Jobs running under leads (${o.running.length}): each was nudged to its holder a window ago; a running job does not hold this off for ever:`);
+    for (const r of o.running) lines.push(`- ${r}`);
+  }
   lines.push("", `Evidence no standing entry cites (${uncited.length}):`);
   for (const u of uncited) lines.push(`- ${u}`);
   if (!uncited.length) lines.push("- none");

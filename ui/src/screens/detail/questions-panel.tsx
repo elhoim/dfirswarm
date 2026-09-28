@@ -224,7 +224,7 @@ function QuestionCard({ q, sigs, act, busy, children }: { q: QuestionView; sigs:
           )}
         </Row>
         {q.leads.length ? <Row label="Leads">{q.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}${l.disposition ? ` ${l.disposition}` : ""}`).join(", ")}</Row> : null}
-        {q.offers.length ? <Row label="Offered">{q.offers.map((o) => `${o.to}${o.first ? " first" : ""} at ${clock(o.at)}`).join(", ")}</Row> : null}
+        {q.offers.length ? <Row label="Offered">{q.offers.map((o) => `${o.to}${o.first ? " first" : ""} at ${clock(o.at)}${o.accepted ? " (accepted)" : o.declined ? ` (declined: ${o.declined.why})` : ""}`).join(", ")}</Row> : null}
         {q.accepted ? <Row label="Accepted">{`${q.accepted.as.replace("_", " ")} by ${q.accepted.origin.name ?? q.accepted.origin.person ?? "?"}${q.accepted.stands ? "" : " (no longer stands: amended since)"}: ${q.accepted.why}`}</Row> : null}
         {q.withdrawn ? <Row label="Withdrawn">{`${clock(q.withdrawn.at)} by ${q.withdrawn.origin.name ?? q.withdrawn.origin.person ?? "?"}: ${q.withdrawn.why}`}</Row> : null}
         {mySigs.map((s) => (

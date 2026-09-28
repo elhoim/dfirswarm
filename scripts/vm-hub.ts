@@ -81,6 +81,7 @@ import { connect, createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as P from "../extensions/protocol.ts";
+import * as F from "../extensions/finish.ts";
 import * as L from "../extensions/leads.ts";
 import * as Q from "../extensions/questions.ts";
 import * as T from "../extensions/toolchain.ts";
@@ -141,7 +142,7 @@ export async function sealCitedRefs(svc: JobService | undefined, who: string, in
   }
   return { ok: true, input: mapLedgerRefs(input, (r) => replaced.get(r) ?? r), notes };
 }
-import { destroyWorker, roomForWorker, runWorker } from "./vm.ts";
+import { destroyWorker, roomForWorker, runWorker, workerMetrics } from "./vm.ts";
 
 /**
  * One line from a VM: a trace line keeps a tool's whole input and output
@@ -206,6 +207,14 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   leadClose: { bucket: "ledger", capacity: 200, perSecond: 5 },
   leadLink: { bucket: "ledger", capacity: 200, perSecond: 5 },
   leadInterpret: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadReopen: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  routeReview: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadHandoff: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadConfirm: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  offerAnswer: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  // A done that is not the coordinator's is answered at once; the finish's acts are few.
+  finishTurnFor: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  finishAct: { bucket: "ledger", capacity: 200, perSecond: 5 },
   // The question register grows as the leads do.
   questionOpen: { bucket: "ledger", capacity: 200, perSecond: 5 },
   questionAsk: { bucket: "ledger", capacity: 200, perSecond: 5 },
@@ -264,7 +273,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "questionOpen", "questionAsk", "netRequest", "netFetch"]);
+const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "finishTurnFor", "finishAct", "questionOpen", "questionAsk", "netRequest", "netFetch"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -549,10 +558,17 @@ export function boardTable(hub: {
   let finishLine: Promise<FinishLine> | null = null;
   const askedBy = new Map<string, FinishLine & { at: number }>();
   const revisionNow = async () => (await P.stateRevision(S).catch(() => ({ revision: "" }))).revision;
+  // One check result per revision (A4): a run recorded against the
+  // revision that still holds is taken, not run again, by whichever seat asks.
   const sharedFinishLine = (): Promise<FinishLine> =>
     (finishLine ??= (async () => {
       const revision = await revisionNow();
+      const stored = await F.checkAt(S, revision).catch(() => null);
+      if (stored?.run) return { run: stored.run as FinishLine["run"], revision };
       const run = await P.runFinishLine(S).catch(() => null);
+      const untilSolved = (await P.readBudget(S).catch(() => null))?.until_solved === true;
+      const v = P.finishLineVerdict(run, false, { untilSolved });
+      if (run && !run.error) await F.recordCheck(S, "system", revision, v.proceed ? { proceed: true, outcome: v.outcome } : { proceed: false, reason: v.reason }, run).catch(() => undefined);
       return { run, revision };
     })().finally(() => {
       finishLine = null;
@@ -717,6 +733,13 @@ export function boardTable(hub: {
     },
     leadsDigest: (who, a) => L.leadsDigest(as(who), { mark: isObject(a[1]) && a[1].mark === true }),
     leadInterpret: (who, a) => L.recordInterpretations(S, who, Number(a[1]), Array.isArray(a[2]) ? (a[2] as L.InterpretInput[]) : []),
+    leadReopen: (who, a) => L.agentReopenLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; why?: string; take?: boolean }),
+    routeReview: (who, a) => L.routeReview(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { material?: unknown; why?: string }),
+    leadHandoff: (who, a) => L.handoffLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { why?: string; to?: string; generation?: number }),
+    leadConfirm: (who, a) => L.confirmLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; ref?: string; why?: string }),
+    offerAnswer: (who, a) => L.answerOffer(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { action?: string; why?: string }),
+    finishTurnFor: (who, a) => F.finishTurnFor(as(who), (isObject(a[1]) ? a[1] : {}) as { output_file?: string }),
+    finishAct: (who, a) => F.finishAct(as(who), (isObject(a[1]) ? a[1] : {}) as Parameters<typeof F.finishAct>[1]),
     // The question register (extensions/questions.ts): the seat is the channel's.
     questionOpen: (who, a) => Q.questionOpen(as(who), (isObject(a[1]) ? a[1] : {}) as Q.ActInput),
     questionAsk: (who, a) => Q.questionAsk(as(who), a[1], a[2]),
@@ -851,7 +874,9 @@ export function boardTable(hub: {
       const r = await svc.submit(who, spec, { watch: typeof raw.wait === "number" ? raw.wait : 0 });
       if (!r.ok) return r;
       const attached = r.job.requester.agent === who ? await L.attachJob(S, who, r.job.id, raw.lead).catch(() => null) : null;
-      return { ok: true, job: await jobView(S, r.job), ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}) };
+      // The coverage hint at admission (A1): who else works these questions or these objects now.
+      const coverage = r.job.requester.agent === who ? await L.jobAdmissionHint(S, who, attached?.ok ? attached.lead : raw.lead, r.job.spec.inputs ?? []).catch(() => null) : null;
+      return { ok: true, job: await jobView(S, r.job), ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}), ...(coverage ? { coverage: { ...coverage, note: "a hint: another seat works the same questions or objects now; overlap is not identity, so read what they have (leads, list_team) before you duplicate it" } } : {}) };
     },
     jobStatus: async (who, a) => {
       const svc = hub.jobs?.();
@@ -864,7 +889,7 @@ export function boardTable(hub: {
         ...(typeof raw.wait === "number" ? { wait: raw.wait } : {}),
       });
       if (!r.ok) return r;
-      return { ok: true, job: await jobView(S, r.job), ...(r.stdout ? { stdout: r.stdout } : {}) };
+      return { ok: true, job: await jobView(S, r.job), ...(r.stdout ? { stdout: r.stdout } : {}), ...(r.progress ? { progress: r.progress } : {}) };
     },
     catalogRequest: async (who, a) => {
       const svc = hub.jobs?.();
@@ -1324,6 +1349,8 @@ export class Hub {
       ...(jobs.derived ? { derived: true } : {}),
       runWorker,
       destroyWorker,
+      // A running worker's CPU and I/O for the job's progress (B11); its heartbeat when msb cannot say.
+      metrics: (worker) => workerMetrics(worker),
       hostRoom: async (mib) => roomForWorker(mib),
       notify: async (to, body) => {
         await P.systemPost(S, { tag: "result", to, body });
@@ -2777,7 +2804,11 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
     case "leadClaim":
     case "leadRelease":
     case "leadClose":
-    case "leadLink": {
+    case "leadLink":
+    case "leadReopen":
+    case "routeReview":
+    case "leadHandoff":
+    case "leadConfirm": {
       // The lead's id, state and holder as the call left them, on the
       // harness's own line beside the register's chained event.
       const lead = isObject(result.lead) ? result.lead : {};

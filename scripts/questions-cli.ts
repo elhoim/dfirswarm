@@ -549,7 +549,7 @@ export async function showText(sandbox: string, id: string): Promise<string | nu
   if (v.suggested_to) out.push(`    suggested to: ${v.suggested_to}`);
   if (v.deadline) out.push(`    wanted by: ${v.deadline}`);
   for (const c of v.clarifications) out.push(`    clarification ${c.id} from ${c.by}: ${c.what}${c.answer ? `\n      answered by ${Q.originWords(c.answer.origin)}: ${c.answer.text}` : "\n      not answered yet"}`);
-  for (const o of v.offers) out.push(`    offered to ${o.to} at ${o.at}${o.first ? ` first, until ${o.until}` : ""} (${o.why})`);
+  for (const o of v.offers) out.push(`    offered to ${o.to} at ${o.at}${o.first ? " first" : ""}${o.until ? `, until ${o.until}` : ""} (${o.why})${o.seen_at ? `; reached it at ${o.seen_at}` : ""}${o.accepted ? `; accepted at ${o.accepted.at}` : ""}${o.declined ? `; declined at ${o.declined.at}: ${o.declined.why}` : ""}`);
   for (const d of v.delivered) out.push(`    delivered revision ${d.rev} at ${d.at}${d.post ? ` (post ${d.post.thread}#${d.post.id})` : ""}${d.hypotheses.length ? `; hypotheses ${d.hypotheses.map((n) => `E-${n}`).join(", ")}` : ""}`);
   if (v.accepted) out.push(`    accepted as ${v.accepted.as} by ${Q.originWords(v.accepted.origin)} for revision ${v.accepted.rev}${v.accepted.stands ? "" : " (NO LONGER STANDS: amended, or new evidence arrived, since)"}: ${v.accepted.why}`);
   if (v.withdrawn) out.push(`    withdrawn by ${Q.originWords(v.withdrawn.origin)} at ${v.withdrawn.at}: ${v.withdrawn.why}`);

@@ -98,19 +98,21 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
     const limited: string[] = [];
     // What the answers check said about each section, passing or not.
     const outcomes = new Map<string, string>();
+    // The sections every review holds a best candidate only (B2).
+    const best = new Set<string>();
     let sawAnswers = false;
     for (const c of run?.checks ?? []) {
-      const a = c.answers as { outcomes?: Record<string, string>; named?: string[] } | undefined;
+      const a = c.answers as { outcomes?: Record<string, string>; named?: string[]; best_candidate?: string[] } | undefined;
       if (!a) continue;
       sawAnswers = true;
       for (const [k, v] of Object.entries(a.outcomes ?? {})) {
         const key = k.startsWith("question:") || k === "summary" || k === "narrative" ? k : `question:${k}`;
         outcomes.set(key, v);
       }
+      for (const b of a.best_candidate ?? []) best.add(b.startsWith("question:") ? b : `question:${b}`);
       for (const n of a.named ?? []) limited.push(`a defect a limitation names: ${n}`);
     }
-    for (const [k, v] of outcomes) if (v !== "answered") limited.push(`${k} is ${OUTCOME_WORDS[v] ?? v}`);
-    for (const l of limiting) limited.push(`${l.lead} was closed ${l.disposition} (${l.ref})`);
+    for (const [k, v] of outcomes) if (v !== "answered") limited.push(best.has(k) ? `${k} is a best candidate, not established (every review holds it so)` : `${k} is ${OUTCOME_WORDS[v] ?? v}`);
     // Each goal question, and what stands in its way.
     const questions: FinishGateQuestion[] = [];
     for (const id of snap.goal.questions) {
@@ -126,6 +128,7 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
       const outcome = said !== "answered" && reg && Q.acceptanceStands(reg, snap.ledger) ? "accepted" : said;
       const blocks: string[] = [];
       if (outcome !== "answered" && outcome !== "accepted") {
+        if (best.has(key)) blocks.push("its answer is a best candidate, not established: every review holds it so; take the route that would settle it, or the operator accepts its limits");
         for (const l of snap.state.leads.values()) {
           if (!l.answers.includes(id)) continue;
           const st = L.leadStatus(l, snap.state, snap.ledger);
@@ -143,6 +146,26 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
     }
     const accepted: string[] = [];
     const register = qs ? await registerGate(sandbox, snap, qs, defects, limited, questions, accepted) : undefined;
+    // A route lead (a material lead closed deferred, infeasible or
+    // needs_operator) keeps its disposition in history and limits the run
+    // until its questions are disposed under the bar and another seat holds
+    // its limitation no longer material, or the operator accepted them
+    // (L.routeLimitation): a failed route stays failed, and stops holding a
+    // question another route answered only when somebody says it no longer
+    // matters.
+    const disposed = (section: string): "answered" | "accepted" | null => {
+      const q = questions.find((x) => x.id === section);
+      if (q?.outcome === "answered") return "answered";
+      if (q?.outcome === "accepted") return "accepted";
+      const reg = qs?.bySection.get(section);
+      if (reg && Q.acceptanceStands(reg, snap.ledger)) return "accepted";
+      return null;
+    };
+    for (const l of limiting) {
+      const lead = snap.state.leads.get(l.lead);
+      const verdict = lead ? L.routeLimitation(lead, disposed) : { limiting: true, why: "" };
+      if (verdict.limiting) limited.push(`${l.lead} was closed ${l.disposition} (${l.ref})${verdict.why ? `: ${verdict.why}` : ""}`);
+    }
     return { defects, limited, questions, until_solved: until, ...(register ? { register } : {}), ...(accepted.length ? { accepted } : {}) };
   } catch (err) {
     return { defects: [], limited: [], questions: [], until_solved: until, error: `the lead register could not be read: ${(err as Error).message}` };
@@ -195,6 +218,18 @@ async function registerGate(sandbox: string, snap: L.LeadsSnapshot, qs: Q.Questi
       const line = `${v.id} was accepted as ${v.accepted.as === "bounded" ? "a bounded examination" : "not determinable"} by ${Q.originWords(v.accepted.origin)}: ${v.accepted.why}`;
       limited.push(line);
       accepted.push(line);
+    }
+  }
+  // A summary or a narrative that cites a question symbolically (A4) is
+  // revalidated when that question's scope changes: withdrawn, excluded or
+  // sent back to triage since, it is recorded again.
+  for (const e of snap.ledger.entries) {
+    if (e.kind !== "answer" || snap.ledger.replaced.has(e.seq) || !e.question_refs?.length) continue;
+    for (const r of e.question_refs) {
+      const q = qs.bySection.get(r.section.replace(/^question:/, ""));
+      if (!q) continue;
+      const gone = q.withdrawn ? `withdrawn by ${Q.originWords(q.withdrawn.origin)}` : q.scope !== "in_scope" ? `now ${q.scope}` : null;
+      if (gone) defects.push({ code: "question_answer", question: q.id, what: `the ${e.section} E-${e.seq} cites ${r.q} (${r.section}), ${gone} since`, fix: `record the ${e.section} again with supersedes=${e.seq}, without ${r.q} or saying what its change means for the conclusion` });
     }
   }
   const material = Q.registerQuestions(qs).filter((q) => q.materiality === "material");

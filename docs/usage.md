@@ -389,11 +389,39 @@ Leads tab does the same.
 `swarm.sh start --until-solved [--stall-minutes N]` (the same as `--stop
 operator`) runs until every question is answered, or accepted by the operator
 as far as it went: no wall clock, every cap advisory, no abandon, and a regroup
-post when nothing moves for N minutes (15). Only `swarm.sh stop` ends it. A goal can
+post when nothing moves for N minutes (15): first a nudge to the holder of a
+lead a job still runs under, with what the job is doing, then everyone a window
+later. Only `swarm.sh stop` ends it. A goal can
 ask for it in its metadata block (`until_solved: true`, `stall_minutes: N`).
 In a microVM run on a subscription (OAuth) provider, each VM's token is minted
-once, at its start, valid for at least 12 hours (`SWARM_TOKEN_MIN_VALIDITY`
-overrides it); a token that expires in a running VM is not refreshed there.
+at its start, valid for at least 12 hours (`SWARM_TOKEN_MIN_VALIDITY`
+overrides it), and renewed on the host at half that validity: the watchdog
+runs `scripts/vm.ts renew-secrets --spec <hub dir>/vm-spec.json --state <hub
+dir>/secret-renewal.json` every ten minutes, which mints fresh tokens from
+Pi's store and rotates each seat VM's secret in place with msb's live secret
+update (the guest keeps its placeholder; a VM whose rotation would not be live
+is left as it is and said on the trace, `secrets_renewed`).
+
+How the seats share the work and end it ([ADR 0015](adr/0015-one-seat-finishes-and-work-is-offered.md)):
+one seat coordinates the finish (normally the one that published the report
+last); every other seat's `done` is answered "not yours", and the agents'
+headers say whether the registers make the finish ready. `leads/finish.jsonl`
+records the coordinator, the report's reviews, the late items it resolved and
+the check result per state revision. Work nobody holds is offered to one idle
+seat at a time, for a minute from when the offer reaches it; a lead held with
+nothing done on it for ten minutes while its holder works on another lead is parked
+and offered too. First choices are staggered at the start of a run (20 s a
+seat, 90 s in all; `SWARM_FIRST_CHOICE_STAGGER_SEC=0` at kickoff turns it off,
+`SWARM_FIRST_CHOICE_BOUND_SEC` sets the bound). The timings are pilot
+settings: `SWARM_OFFER_SEC` (60), `SWARM_OFFER_MAX_SEC` (300),
+`SWARM_LEAD_PARK_SEC` (600) and `SWARM_JOB_STALL_SEC` (600, for a running
+job's "suspected stall", which is shown, never acted on). The console's Jobs
+tab names a job that needed a program its image does not hold, with the
+profile, for the images' upkeep. The Leads tab, and `swarm.sh lead <run> list`,
+show the finish (ready by the registers or what holds it, who coordinates it,
+the last check and what is late against the report), the parked leads, and on
+each lead its standing offer, a closure waiting for its closer's confirmation,
+a second route with its reason and its product contract.
 
 #### The stop policy: `extend`, `stop`, `resume`
 

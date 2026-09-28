@@ -157,7 +157,6 @@ import {
   disputeEntry,
   heldBy,
   claimName,
-  correctionsAfter,
   nameOf,
   readNames,
   updateToolchainRecord,
@@ -176,6 +175,13 @@ import {
   leadsView,
   leadsDigest,
   leadInterpret,
+  leadReopen,
+  routeReview,
+  leadHandoff,
+  leadConfirm,
+  offerAnswer,
+  finishTurnFor,
+  finishAct,
   questionOpen,
   questionAsk,
   questionsView,
@@ -185,6 +191,8 @@ import {
 } from "./board.ts";
 // The lead register's host-side pieces: a host run's wait checks it itself (a VM's hub does it there).
 import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
+// The finish's host-side pieces: one check result per revision, recorded where the finish line runs.
+import { checkAt, LATE_PENDING, NOT_YOURS, recordCheck } from "./finish.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
 import { installChunkedEgress } from "./vm-egress.ts";
@@ -249,6 +257,12 @@ export const SWARM_TOOLS = new Set([
   "lead_close",
   "lead_link",
   "leads",
+  "lead_reopen",
+  "route_review",
+  "lead_handoff",
+  "lead_confirm",
+  "offer",
+  "finish",
   "question_open",
   "questions",
   "question_ask",
@@ -1595,8 +1609,6 @@ export default function (pi: ExtensionAPI) {
    * harness could not snapshot is still a change worth naming once; naming it
    * on every call afterwards is noise the swarm pays to read.
    */
-  /** `done` says "there are newer corrections" once; the second call is the agent's answer. */
-  let doneRefusedOnce = false;
   const unrecordableReportedAt = new Map<string, number>();
   const UNRECORDABLE_QUIET_MS = 60_000;
   /** Metadata drift under inputs/, said once per path per quiet window. */
@@ -3082,11 +3094,11 @@ export default function (pi: ExtensionAPI) {
     name: "name",
     label: "Name",
     description:
-      "Say what to call you and what you are taking on. Nobody assigns work here: you read the goal, you see on the board what your peers have taken, you decide, and you say it with this. The name goes on every post you write and beside your id everywhere the run is read. Call it again whenever what you are doing changes. Two agents cannot answer to the same name.",
+      "Say what to call you and what you are taking on. Nobody assigns work here: you read the goal, you see on the board and in the lead register what your peers have taken, you decide, and you say it with this. The name goes on every post you write and beside your id everywhere the run is read, and it is stable once given: what you work on shows from the lead you hold (your label), and a later call updates only what you say you are doing. Two agents cannot answer to the same name. When the run staggers first choices, your first name or lead waits for your turn and comes back with what the seats before you took.",
     promptSnippet: "Name yourself for the work you are taking on",
     promptGuidelines: [
-      "Name yourself in your first turn, after reading the goal and the board, and say what you are taking on.",
-      "Rename yourself when your work changes; the old name is replaced and the board is told.",
+      "Name yourself in your first turn, after reading the goal, the board and the leads, and say what you are taking on.",
+      "Your name stays; when your work changes, say so in doing, and hold the lead for it: the label peers see follows the lead you hold.",
     ],
     parameters: Type.Object({
       name: Type.String({ description: "What to call you: a few words for the work you are taking on" }),
@@ -3106,7 +3118,9 @@ export default function (pi: ExtensionAPI) {
         body:
           result.previous && result.previous !== result.name
             ? `${agentId} is now "${result.name}" (was "${result.previous}")${params.doing ? `: ${params.doing}` : ""}`
-            : result.previous
+            : result.asked
+              ? `${agentId} ("${result.name}")${params.doing ? ` is now on: ${params.doing}` : " updated what it is doing"}`
+              : result.previous
               ? `${agentId} ("${result.name}")${params.doing ? ` is now on: ${params.doing}` : " updated what it is doing"}`
               : `${agentId} is "${result.name}"${params.doing ? `: ${params.doing}` : ""}`,
       }).catch(() => undefined);
@@ -3121,6 +3135,8 @@ export default function (pi: ExtensionAPI) {
       return okResult({
         ok: true,
         name: result.name,
+        ...(result.asked ? { kept: `your name stays "${result.name}" (asked: "${result.asked}"): what you work on shows from the lead you hold` } : {}),
+        ...(result.admission ? { admission: result.admission } : {}),
         ...(result.previous ? { previous: result.previous } : {}),
         peers: result.peers,
         ...(result.overlaps?.length
@@ -3231,7 +3247,7 @@ export default function (pi: ExtensionAPI) {
             negation: Type.Optional(Type.String()),
             routes: Type.Optional(Type.Array(Type.Object({ source: Type.String(), method: Type.String() }))),
           }),
-          { description: "The leads this entry opens: work it shows has to be followed, each {title, why, needs?, answers?, material?, take?, proposition?, negation?, routes?} as lead_open takes it (answers takes Q-19 as well as question:3); each lead's origin is this entry. take: true keeps the follow-up yours." },
+          { description: "The leads this entry opens: work it shows has to be followed, each {title, why, needs?, answers?, material?, take?, proposition?, negation?, routes?} as lead_open takes it (answers takes Q-19 as well as question:3); each lead's origin is this entry. Each is opened unheld, offered to an idle seat, unless take: true, which is for a follow-up you start in your next turn." },
         ),
       ),
       interprets: Type.Optional(
@@ -3305,6 +3321,7 @@ export default function (pi: ExtensionAPI) {
       "attest only what you re-derived from the sealed refs yourself, and say in how what you re-derived and what you only read.",
       "A critic attests or disputes every answer before the run ends; the author of an entry never attests it.",
       "A negative (a coverage record, or an answer bounded_negative or not_determinable) is attested with review: say whether you challenged the detection assumptions, reproduced a decisive check and tried a materially different route, and what you did or why not.",
+      "An answer to a question is attested with strength (established or best_candidate) and answer_review: what you reproduced and what you only read, each part the question asks and whether it is established, the inference, the alternatives still open, and whether another source family was checked. A best candidate you cannot break is still a best candidate: say so, and open the lead for the route would_change names.",
     ],
     parameters: Type.Object({
       seq: Type.Number({ description: "The entry's seq (standing, not your own)." }),
@@ -3320,10 +3337,28 @@ export default function (pi: ExtensionAPI) {
           { description: "Required when the entry is a negative (a coverage record, or an answer bounded_negative or not_determinable): whether you challenged the detection assumptions, reproduced a decisive check, tried a materially different route, each {done, text}: what you did, or why not. You recorded neither the answer nor its coverage record." },
         ),
       ),
+      strength: Type.Optional(
+        Type.Union([Type.Literal("established"), Type.Literal("best_candidate")], {
+          description: "Required on an answer to a question: established (the review shows the answer), or best_candidate (what the evidence best supports, not shown to be the answer; it does not satisfy the finish line). A medium or low confidence, a part you hold not established, or a route its would_change names that nothing took allows only best_candidate.",
+        }),
+      ),
+      answer_review: Type.Optional(
+        Type.Object(
+          {
+            reproduced: Type.String({ description: "What you re-derived yourself, from which sealed objects" }),
+            read: Type.String({ description: "What you only read (a peer's entry, a summary) without re-deriving it" }),
+            parts: Type.Array(Type.Object({ part: Type.String(), established: Type.Boolean(), why: Type.String() }), { description: "Each part the question asks, whether it is established, and why" }),
+            inference: Type.String({ description: "The step that connects the observations to the answer" }),
+            alternatives: Type.String({ description: "What the evidence still allows besides the answer, or none and why" }),
+            other_family: Type.Object({ checked: Type.Boolean(), text: Type.String() }, { description: "Whether a materially different source family was checked, which, or why not" }),
+          },
+          { description: "Required with strength on an answer to a question: the review part by part." },
+        ),
+      ),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const result = await attestEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, how: params.how, ...(params.refs?.length ? { refs: params.refs } : {}), ...(params.review ? { review: params.review } : {}) });
+      const result = await attestEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, how: params.how, ...(params.refs?.length ? { refs: params.refs } : {}), ...(params.review ? { review: params.review } : {}), ...(params.strength ? { strength: params.strength } : {}), ...(params.answer_review ? { answer_review: params.answer_review } : {}) });
       if (!result.ok) {
         await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
         return { content: [{ type: "text" as const, text: `attest refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
@@ -3375,11 +3410,11 @@ export default function (pi: ExtensionAPI) {
     name: "lead_open",
     label: "Open a lead",
     description:
-      "Put a piece of material investigative work in the swarm's lead register: something found that has to be followed (a container to open, a key to find, an output to read to its end, an artefact nobody has examined). title says what, why says why it matters and what it would settle. needs names what it cannot go on without: a lead with the outcome it must reach (L-3 is L-3 resolved; L-3:negative) or a standing ledger entry (E-12); never a job, whose exit status settles nothing. answers names the goal's questions it serves. take: true holds it for you in the same step, the natural next step of your own work; left out, it is open to everyone and the seat idle longest is woken for it. material: false for work the finish line may leave open (a nice-to-have). Returns its id (L-<n>).",
+      "Put a piece of material investigative work in the swarm's lead register: something found that has to be followed (a container to open, a key to find, an output to read to its end, an artefact nobody has examined). title says what, why says why it matters and what it would settle. needs names what it waits for: another lead's outcome (L-3 is L-3 resolved; L-3:negative), never an entry that already stands (that is where it comes from: say it in why or origin) and never a job, whose exit status settles nothing. answers names the questions it serves. take: true holds it for you in the same step, only when you start it in your next turn; left out, it is open to everyone and offered to the seat idle longest, which has first claim for a minute. A take whose questions another seat's held lead covers is opened unheld, naming the holder, unless you say it is a second route or a verification (overlap, overlap_why). consumer: L-<n> opens this as a prerequisite of that lead and links it there in one step. The product contract (product, acceptance, inputs, next_action) says what another seat must deliver and what it starts from. material: false for work the finish line may leave open. Returns its id (L-<n>).",
     promptSnippet: "Open a lead: work somebody has to follow",
     promptGuidelines: [
-      "Open or claim a lead before you start work a peer could also be doing; keep the follow-ups of your own finding with take: true.",
-      "Say in needs what a lead cannot go on without (a lead's outcome or an entry), so its holder is woken when it comes.",
+      "Open or claim a lead before you start work a peer could also be doing. Open a follow-up unheld unless you will start it in your next turn: a lead you hold and do not work is a lead nobody works.",
+      "Say in needs what a lead waits for (another lead's outcome), so its holder is woken when it comes; open the prerequisite for a peer with consumer, and say its product and acceptance.",
     ],
     parameters: Type.Object({
       title: Type.String({ description: "What has to be done, in one line" }),
@@ -3397,6 +3432,15 @@ export default function (pi: ExtensionAPI) {
             "The route plan, before the search: each source you will examine (input:<path>, member:<gen>#<n>, job:<id>/<path>, a path of the run, or words when it is not an object yet) and how. The first lead under a question gives it (under a person's question it is required, with a route that could disconfirm it); a negative on a material question closes against it, and a source in it nothing examined is named as not examined.",
         }),
       ),
+      overlap: Type.Optional(Type.Union([Type.Literal("second_route"), Type.Literal("verification")], { description: "With take: its questions are covered by another seat's held lead, and this is a second route or an independent verification on purpose" })),
+      overlap_why: Type.Optional(Type.String({ description: "With overlap: how your route differs, or what you verify independently" })),
+      objects: Type.Optional(Type.Array(Type.String(), { description: "The objects the work is over (input:<path>, job:<id>/<path>, …): a coverage hint to peers, never a claim on them" })),
+      product: Type.Optional(Type.String({ description: "What it is to deliver: the product a consumer needs" })),
+      acceptance: Type.Optional(Type.String({ description: "What makes the product usable: how its consumer will know it is" })),
+      inputs: Type.Optional(Type.Array(Type.String(), { description: "The refs it starts from (input:<path>, job:<id>/<path>, E-<seq>), each checked" })),
+      next_action: Type.Optional(Type.String({ description: "The first thing to do on it" })),
+      consumer: Type.Optional(Type.String({ description: "L-<n>: open this as a prerequisite of that lead (yours, or unheld) and link it there as a need in the same step" })),
+      consumer_needs: Type.Optional(Type.String({ description: "With consumer: the outcome it needs of this lead (resolved by default, or negative, deferred, infeasible)" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
@@ -3409,7 +3453,7 @@ export default function (pi: ExtensionAPI) {
     name: "lead_claim",
     label: "Claim a lead",
     description:
-      "Take a lead: atomically, with a new generation, so two agents never hold one. A lead a peer holds stays theirs until they release it or show as stale (silent past the stale limit, with no job running and no compaction under way): the first claim of a stale lead marks it and tells the holder, and a claim after the grace period takes it over. A turn that ended in an error frees nothing. A directive (the operator's lead, with a product) under a person's question nobody has framed yet is claimed with proposition and negation: the first agent work on a person's question tests it.",
+      "Take a lead: atomically, with a new generation, so two agents never hold one. A lead offered to a seat (woken for it, handed over, parked, reopened for its previous holder) is that seat's to claim first while the offer holds. A lead a peer holds stays theirs until they release it or show as stale (silent past the stale limit, with no job running and no compaction under way): the first claim of a stale lead marks it and tells the holder, and a claim after the grace period takes it over; a parked lead offered to you is taken over at once. Claiming a lead you hold keeps it when it shows as parked. A lead whose questions another seat's held lead covers is claimed only with overlap and overlap_why. A directive (the operator's lead, with a product) under a person's question nobody has framed yet is claimed with proposition and negation: the first agent work on a person's question tests it.",
     promptSnippet: "Take a lead from the register",
     promptGuidelines: ["When your slice ends, take the ready lead the register ranks first (leads) rather than inventing work."],
     parameters: Type.Object({
@@ -3417,10 +3461,12 @@ export default function (pi: ExtensionAPI) {
       proposition: Type.Optional(Type.String({ description: "A directive (the operator's lead) under a person's question no lead has framed yet: what your work on it tests. Required on its first claim, with negation." })),
       negation: Type.Optional(Type.String({ description: "With proposition: what would hold if it is false." })),
       routes: Type.Optional(Type.Array(Type.Object({ source: Type.String(), method: Type.String() }), { description: "With the framing, when the question has no route plan yet: the sources you will examine and how, one able to disconfirm the proposition." })),
+      overlap: Type.Optional(Type.Union([Type.Literal("second_route"), Type.Literal("verification")], { description: "Its questions are covered by another seat's held lead, and you take it as a second route or an independent verification on purpose" })),
+      overlap_why: Type.Optional(Type.String({ description: "With overlap: how your route differs, or what you verify independently" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const { id, ...frame } = params as { id: string; proposition?: string; negation?: string; routes?: unknown };
+      const { id, ...frame } = params as { id: string; proposition?: string; negation?: string; routes?: unknown; overlap?: string; overlap_why?: string };
       const r = await leadClaim(ctxFrom(toolCtx.cwd, agentId), id, frame);
       return leadAnswer(toolCtx.cwd, "lead_claim", params as Record<string, unknown>, started, r as never);
     },
@@ -3475,10 +3521,11 @@ export default function (pi: ExtensionAPI) {
           { description: "With needs_operator: an acquisition request for evidence the run does not have" },
         ),
       ),
+      result_refs: Type.Optional(Type.Array(Type.String(), { description: "The product it delivered, for its consumers: E-<seq> that stand, job:<id>/<path>, input:<path>" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const r = await leadClose(ctxFrom(toolCtx.cwd, agentId), params.id, { disposition: params.disposition, ref: params.ref, ...(params.why ? { why: params.why } : {}), ...(params.generation !== undefined ? { generation: params.generation } : {}), ...(params.ask ? { ask: params.ask } : {}) });
+      const r = await leadClose(ctxFrom(toolCtx.cwd, agentId), params.id, { disposition: params.disposition, ref: params.ref, ...(params.why ? { why: params.why } : {}), ...(params.generation !== undefined ? { generation: params.generation } : {}), ...(params.ask ? { ask: params.ask } : {}), ...(params.result_refs?.length ? { result_refs: params.result_refs } : {}) });
       if (r.ok && params.disposition === "needs_operator") {
         // The operator reads the board too: the request is said there once, by its id, with the command that answers it.
         const x = r as { operator_request?: string; request?: { id: string; kind: string; state: string; answer: string | null } };
@@ -3494,18 +3541,138 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "lead_link",
     label: "Revise a lead's needs",
-    description: "Revise what a lead waits for: add a need (L-<n>, L-<n>:<disposition>, E-<seq>) or remove one that will not come, so another route stays open; or add to its route plan (routes [{source, method}]). A loop of needs is refused. The holder revises its own lead; an unheld one, anyone.",
+    description: "Revise what a lead waits for: add a need (L-<n>, L-<n>:<disposition>) or remove one that will not come, with why (it is recorded as withdrawn, never as met), so another route stays open; or add to its route plan (routes [{source, method}]). A loop of needs is refused, and so is an entry that already stands. The holder revises its own lead; an unheld one, anyone.",
     promptSnippet: "Add or drop a lead's need, or plan a route",
     parameters: Type.Object({
       id: Type.String({ description: "L-<n>" }),
       add: Type.Optional(Type.Array(Type.String(), { description: "Needs to add" })),
       remove: Type.Optional(Type.Array(Type.String(), { description: "Needs to drop" })),
       routes: Type.Optional(Type.Array(Type.Object({ source: Type.String(), method: Type.String() }), { description: "Routes to add to the lead's plan: a source to examine and how" })),
+      why: Type.Optional(Type.String({ description: "Required with remove: why the need will not come, and what the lead goes on without (a dropped need is withdrawn, never met)" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const r = await leadLink(ctxFrom(toolCtx.cwd, agentId), params.id, { ...(params.add ? { add: params.add } : {}), ...(params.remove ? { remove: params.remove } : {}), ...(params.routes ? { routes: params.routes } : {}) });
+      const r = await leadLink(ctxFrom(toolCtx.cwd, agentId), params.id, { ...(params.add ? { add: params.add } : {}), ...(params.remove ? { remove: params.remove } : {}), ...(params.routes ? { routes: params.routes } : {}), ...(params.why ? { why: params.why } : {}) });
       return leadAnswer(toolCtx.cwd, "lead_link", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_reopen",
+    label: "Reopen a lead",
+    description:
+      "Reopen a closed lead when the work it stood for is not done after all: with the revision you read (leads L-<n> shows rev), why, and take: true to hold it at once. Its history is kept and whoever held it is told. A lead the operator closed or restricted (a withdrawn, excluded or triaged question, a needs_operator the operator has not answered) is the operator's to reopen, and a duplicate of a lead still open is worked there. A reopen answers no dispute: one in force stays in force until the disputer withdraws it.",
+    promptSnippet: "Reopen a closed lead, with why",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>" }),
+      expected_revision: Type.Integer({ description: "The lead's revision as you read it (rev)" }),
+      why: Type.String({ description: "Why the work is not done: what is new, what the close missed" }),
+      take: Type.Optional(Type.Boolean({ description: "Hold it yourself at once" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadReopen(ctxFrom(toolCtx.cwd, agentId), params.id, { expected_revision: params.expected_revision, why: params.why, ...(params.take !== undefined ? { take: params.take } : {}) });
+      return leadAnswer(toolCtx.cwd, "lead_reopen", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_handoff",
+    label: "Hand a lead over",
+    description:
+      "Hand a lead you hold to another seat: say what you did and what the next seat takes up (why); to names the seat (it must be able to take it: not done, dead or compacting), or leave it out and the seat idle longest is offered it. The seat offered it has first claim for a minute from when the offer reaches it; with nobody to offer it to, it is open to everyone. Recorded as a hand-off.",
+    promptSnippet: "Hand a lead to another seat",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>, held by you" }),
+      why: Type.String({ description: "What you did on it, and what the next seat takes up" }),
+      to: Type.Optional(Type.String({ description: "The seat to offer it to (its agent id); left out, the seat idle longest" })),
+      generation: Type.Optional(Type.Integer({ description: "The generation you hold it at" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadHandoff(ctxFrom(toolCtx.cwd, agentId), params.id, { why: params.why, ...(params.to ? { to: params.to } : {}), ...(params.generation !== undefined ? { generation: params.generation } : {}) });
+      return leadAnswer(toolCtx.cwd, "lead_handoff", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_confirm",
+    label: "Confirm a closure",
+    description:
+      "Confirm that a lead you closed still holds after the entry you closed it on was superseded: ref the entry that stands now (the correction, by default), with the lead's revision you read and why the closure still holds on it. You are offered this when it happens; unconfirmed within the offer, the lead reopens by itself. Nothing is re-pointed for you: a correction can reverse what the closure rested on. If it no longer holds, lead_reopen it.",
+    promptSnippet: "Confirm a closure on the corrected entry",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>" }),
+      expected_revision: Type.Integer({ description: "The lead's revision as you read it (rev)" }),
+      ref: Type.Optional(Type.String({ description: "The standing entry the closure rests on now (E-<seq>); the correction when left out" })),
+      why: Type.String({ description: "Why the closure still holds on it" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadConfirm(ctxFrom(toolCtx.cwd, agentId), params.id, { expected_revision: params.expected_revision, why: params.why, ...(params.ref ? { ref: params.ref } : {}) });
+      return leadAnswer(toolCtx.cwd, "lead_confirm", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "offer",
+    label: "Answer an offer",
+    description:
+      "Answer an offer made to you: a lead (L-<n>: woken for it, handed over, parked in a peer's hands, reopened for you) or a person's question (Q-<n>). accept takes a lead (the claim it reserves), or holds a question for you for another minute while you open its lead; decline, with why, passes it to the next seat at once. An offer you do not answer lapses a minute after it reached you.",
+    promptSnippet: "Accept or decline an offer",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n> or Q-<n>" }),
+      action: Type.Union([Type.Literal("accept"), Type.Literal("decline")]),
+      why: Type.Optional(Type.String({ description: "Required with decline: why you do not take it" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = (await offerAnswer(ctxFrom(toolCtx.cwd, agentId), params.id, { action: params.action, ...(params.why ? { why: params.why } : {}) })) as { ok: boolean; reason?: string } & Record<string, unknown>;
+      await logEvent(toolCtx.cwd, agentId, "offer", params as Record<string, unknown>, r.ok ? { ok: true, id: params.id, action: params.action } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+      if (!r.ok) return { content: [{ type: "text" as const, text: `offer refused: ${r.reason}` }], details: r, isError: true };
+      return okResult(r);
+    },
+  });
+
+  pi.registerTool({
+    name: "finish",
+    label: "The finish",
+    description:
+      "The run's finish, one seat's to call (the coordinator's, named in every header). status: where it stands (ready by the registers or what holds it, the coordinator, the last check at which revision, the report's reviews, what is late against it). ack (any other seat): your review of the report's current digest, verdict no_objection, or objection with why; an ack is not a late post, and an objection holds the finish until the coordinator resolves it. resolve (the coordinator): answer a result or veto posted after the report, or an objection, how: folded (the report says it now, and where) or not_material (with why it changes nothing the report concludes). Reading a late post is not answering it.",
+    promptSnippet: "See or act on the run's finish",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("status"), Type.Literal("ack"), Type.Literal("resolve")]),
+      digest: Type.Optional(Type.String({ description: "ack: the report's digest you read (its current one when left out)" })),
+      verdict: Type.Optional(Type.Union([Type.Literal("no_objection"), Type.Literal("objection")], { description: "ack: your verdict on the report" })),
+      why: Type.Optional(Type.String({ description: "ack objection: what does not hold; resolve: where it was folded, or why it is not material" })),
+      post: Type.Optional(Type.Union([Type.Number(), Type.String()], { description: "resolve: the late post's id (#123)" })),
+      ack: Type.Optional(Type.Number({ description: "resolve: the objection's ack seq" })),
+      how: Type.Optional(Type.Union([Type.Literal("folded"), Type.Literal("not_material")], { description: "resolve: folded into the report, or not material" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = (await finishAct(ctxFrom(toolCtx.cwd, agentId), params as never)) as { ok: boolean; reason?: string } & Record<string, unknown>;
+      await logEvent(toolCtx.cwd, agentId, "finish", params as Record<string, unknown>, r.ok ? { ok: true, action: params.action, ...(params.action === "status" ? { ready: r.ready } : {}), ...(typeof r.seq === "number" ? { seq: r.seq } : {}) } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+      if (!r.ok) return { content: [{ type: "text" as const, text: `finish refused: ${r.reason}` }], details: r, isError: true };
+      return okResult(r);
+    },
+  });
+
+  pi.registerTool({
+    name: "route_review",
+    label: "Review a limiting route",
+    description:
+      "Say whether a route that could not be taken still matters: a lead closed deferred, infeasible or needs_operator limits the run until its questions are answered under the bar and another seat (not its closer or holder) holds its limitation no longer material, or the operator accepts the questions' limits. material: false says the route's limitation no longer changes what the case concludes (say why: which answer settles its question without it); material: true says it still does. A failed route stays failed in the record either way.",
+    promptSnippet: "Review whether a limiting route still matters",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>, closed deferred, infeasible or needs_operator" }),
+      material: Type.Boolean({ description: "Whether its limitation still matters to what the case concludes" }),
+      why: Type.String({ description: "Why: the answer that settles its question without it, or what it could still change" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await routeReview(ctxFrom(toolCtx.cwd, agentId), params.id, { material: params.material, why: params.why });
+      return leadAnswer(toolCtx.cwd, "route_review", params as Record<string, unknown>, started, r as never);
     },
   });
 
@@ -3635,10 +3802,10 @@ export default function (pi: ExtensionAPI) {
     name: "done",
     label: "Done",
     description:
-      "Write done/agents/<id>.done, create done/SWARM_DONE if missing (idempotent), drop this worker's locks, and terminate the session. Before the sentinel the harness runs the goal's checks itself (in a microVM run on the host, where the trace they read is): while any fails, done is refused, and the refusal names each check that fails and what makes it pass.",
-    promptSnippet: "Stop this worker and signal the swarm sentinel",
+      "End the run: the coordinator's call. One seat coordinates the finish (normally the one that published the report last; the header names it, and a coordinator that is done, dead, compacting or silent is taken over by the next seat's done). Any other seat's done is answered \"not yours\" and changes nothing. The coordinator's done first needs every result or veto posted after the report, and every objection to it, answered with a typed resolution (finish resolve); then the harness runs the goal's checks and its own gate once per state revision (in a microVM run on the host): while any fails, done is refused with each check and its fix; when they pass it writes done/agents/<id>.done and done/SWARM_DONE while that revision still holds, drops this worker's locks and ends the session. Once done/SWARM_DONE exists every seat calls done and stops.",
+    promptSnippet: "End the run (the coordinator's call), or stop once the sentinel exists",
     promptGuidelines: [
-      "Use done when the definition of done is met and its checks pass, or when done/SWARM_DONE already exists. done ends the whole swarm, not your slice: a finished slice is posted to the board, not done. When the task is impossible or unsafe, call done with abandon: true and say why.",
+      "done is the coordinator's call, when the header says the finish is ready; a finished slice is posted to the board, never done. Once done/SWARM_DONE exists, call done and stop. When the task is impossible or unsafe, call done with abandon: true and say why (a vote while others work).",
     ],
     parameters: Type.Object({
       reason: Type.String({ description: "Why this worker is stopping" }),
@@ -3653,21 +3820,27 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
-      // A peer's correction that landed after the report was last written has
-      // not reached it. Say so once and let the agent decide: fold it in, or
-      // call done again and say on the board why it does not change anything.
-      if (!doneRefusedOnce && !(await swarmDoneExists(toolCtx.cwd))) {
-        const late = await correctionsAfter(toolCtx.cwd, params.output_file, agentId).catch(() => []);
-        if (late.length) {
-          doneRefusedOnce = true;
-          const who = late.map((p) => `#${p.id} by ${p.from}`).join(", ");
-          const reason = `${late.length} post(s) landed after \`${params.output_file}\` was last written: ${who}. Read them. Fold what belongs in, or call done again and say on the board why they do not change it.`;
-          await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason, late: late.length });
-          return {
-            content: [{ type: "text" as const, text: reason }],
-            details: { ok: false, reason, late },
-            isError: true,
-          };
+      // The finish is one seat's (A4, extensions/finish.ts). A seat leaving on
+      // its own cap, an abandon vote, and every done once the sentinel exists
+      // are not the finish.
+      // The lease this done began with: the sentinel is written only while it still holds (markDone, finishTransaction).
+      let finishLease: { holder: string; generation: number } | undefined;
+      if (params.reason !== "agent_cap" && params.abandon !== true && !(await swarmDoneExists(toolCtx.cwd))) {
+        const turn = await finishTurnFor(ctxFrom(toolCtx.cwd, agentId), { output_file: params.output_file }).catch(() => null);
+        if (turn?.mine) finishLease = { holder: turn.holder, generation: turn.generation };
+        if (turn && !turn.mine) {
+          // Quietly: no finish line, no board post, and not a refusal.
+          const text = `Not yours: ${turn.holder} coordinates the finish (generation ${turn.generation}: ${turn.why}). The finish is ${turn.readiness.ready ? "ready by the registers" : `not ready: ${turn.readiness.items.join("; ")}`}. Your done does not end the run: post what your slice found, review the report (finish ack) if you can, or wait.`;
+          await logEvent(toolCtx.cwd, agentId, "done_deferred", { output_file: params.output_file }, { ok: true, coordinator: turn.holder, generation: turn.generation, ready: turn.readiness.ready }).catch(() => undefined);
+          return okResult({ ok: true, finished: false, not_yours: true, coordinator: turn.holder, generation: turn.generation, readiness: turn.readiness, note: text });
+        }
+        if (turn?.took_over) await systemPost(toolCtx.cwd, { tag: "hold", via: agentId, body: `${agentId} coordinates the finish now (generation ${turn.generation}): ${turn.why}.` }).catch(() => undefined);
+        // What landed against the report since it was written: each answered with a typed resolution, never by reading it alone.
+        if (turn?.late.length) {
+          const each = turn.late.map((x) => (x.kind === "post" ? `- post #${x.id} (${x.tag}) by ${x.by}` : `- objection ${x.id} by ${x.by}: ${x.why}`)).join("\n");
+          const reason = `${turn.late.length} item(s) landed against \`${params.output_file}\` since it was written, each for your typed resolution before the finish:\n${each}\nFor each: fold it into the report and publish it again (then finish resolve with how: folded, saying where), or finish resolve with how: not_material and why it changes nothing the report concludes. Typed acks of no objection are not among them.`;
+          await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason, late: turn.late.length });
+          return { content: [{ type: "text" as const, text: reason }], details: { ok: false, reason, late: turn.late }, isError: true };
         }
       }
       // Put inputs/ right and vouch for it: anything a background process
@@ -3715,7 +3888,12 @@ export default function (pi: ExtensionAPI) {
         // An until-solved run ends only on every question answered; even a
         // finish line that could not be run is a refusal there.
         const untilSolved = (await readBudget(toolCtx.cwd).catch(() => null))?.until_solved === true;
-        const bound = onHost ? await runFinishLineBound(toolCtx.cwd, runFinishLine) : { run: await runFinishLine(toolCtx.cwd).catch(() => null), revision: "", settled: true, runs: 1 };
+        // One check result per revision (A4): a run recorded against the revision that still holds is taken, not run again.
+        const shared = async (S: string) => {
+          const c = await checkAt(S, (await stateRevision(S).catch(() => ({ revision: "" }))).revision).catch(() => null);
+          return c?.run ? (c.run as Awaited<ReturnType<typeof runFinishLine>>) : runFinishLine(S);
+        };
+        const bound = onHost ? await runFinishLineBound(toolCtx.cwd, shared) : { run: await runFinishLine(toolCtx.cwd).catch(() => null), revision: "", settled: true, runs: 1 };
         const unsettled = async () => {
           await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: FINISH_LINE_UNSETTLED, runs: bound.runs }).catch(() => undefined);
           return { content: [{ type: "text" as const, text: FINISH_LINE_UNSETTLED }], details: { ok: false, reason: FINISH_LINE_UNSETTLED }, isError: true };
@@ -3723,6 +3901,7 @@ export default function (pi: ExtensionAPI) {
         if (!bound.settled) return unsettled();
         const run = bound.run;
         const verdict = finishLineVerdict(run, params.abandon === true, { untilSolved });
+        if (onHost && bound.revision && run && !run.error && params.abandon !== true) await recordCheck(toolCtx.cwd, agentId, bound.revision, verdict.proceed ? { proceed: true, outcome: verdict.outcome } : { proceed: false, reason: verdict.reason }, run).catch(() => undefined);
         await logEvent(toolCtx.cwd, agentId, "finish_line", { abandon: params.abandon === true }, {
           ok: verdict.proceed,
           total: run?.total ?? 0,
@@ -3749,9 +3928,22 @@ export default function (pi: ExtensionAPI) {
           outputFile: params.output_file,
           ...(outcome ? { outcome } : {}),
           ...(revision ? { revision } : {}),
+          ...(finishLease ? { finish: finishLease } : {}),
         });
       } catch (err) {
-        if ((err as Error).message !== FINISH_LINE_UNSETTLED) throw err;
+        const message = (err as Error).message;
+        // What landed against the report while the checks ran: refused in the sentinel's own transaction.
+        if (message.includes(LATE_PENDING)) {
+          const reason = message.slice(message.indexOf(LATE_PENDING));
+          await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason }).catch(() => undefined);
+          return { content: [{ type: "text" as const, text: reason }], details: { ok: false, reason }, isError: true };
+        }
+        // The coordinator took the finish meanwhile: quietly, as any other seat's done is answered.
+        if (message.includes(NOT_YOURS)) {
+          await logEvent(toolCtx.cwd, agentId, "done_deferred", { output_file: params.output_file }, { ok: true, reason: message }).catch(() => undefined);
+          return okResult({ ok: true, finished: false, not_yours: true, note: message.slice(message.indexOf(NOT_YOURS)) });
+        }
+        if (message !== FINISH_LINE_UNSETTLED) throw err;
         await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: FINISH_LINE_UNSETTLED }).catch(() => undefined);
         return { content: [{ type: "text" as const, text: FINISH_LINE_UNSETTLED }], details: { ok: false, reason: FINISH_LINE_UNSETTLED }, isError: true };
       }

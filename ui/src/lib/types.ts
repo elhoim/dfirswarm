@@ -585,7 +585,7 @@ export type QuestionView = {
   leads: Array<{ id: string; status: string; holder: string | null; disposition?: string; opened_by: string }>;
   clarifications: Array<{ id: string; at: string; by: string; what: string; to: string; answer: { at: string; by: string; text: string; origin: QuestionOrigin | null } | null }>;
   pending_clarifications: string[];
-  offers: Array<{ at: string; to: string; rev: number; first: boolean; until: string | null; why: string; seq: number }>;
+  offers: Array<{ at: string; to: string; rev: number; first: boolean; until: string | null; why: string; seq: number; seen_at?: string | null; declined?: { at: string; why: string } | null; accepted?: { at: string } | null }>;
   delivered: Array<{ rev: number; at: string; post: { thread: string; id: number } | null; hypotheses: number[] }>;
   signed: Array<{ act_seq: number; sign_seq: number; person: string; fingerprint: string }>;
   opened_at: string;
@@ -639,7 +639,7 @@ export type LeadView = {
   material: boolean;
   holder: string | null;
   generation: number;
-  needs: Array<{ need: string; met: boolean; why?: string }>;
+  needs: Array<{ need: string; met: boolean; why?: string; outcome?: "satisfied" | "pending" | "failed" | "invalidated" }>;
   answers: string[];
   disposition?: "resolved" | "negative" | "duplicate" | "deferred" | "infeasible" | "needs_operator" | "withdrawn";
   ref?: string;
@@ -659,6 +659,31 @@ export type LeadView = {
   negation?: string;
   product?: string;
   acceptance?: string;
+  /** Its revision (lead_reopen and lead_confirm name it). */
+  rev?: number;
+  /** The offer that holds it for one seat now (docs/adr/0015). */
+  offered?: { to: string; reason: string; until: string; state: string; from?: string };
+  /** A closure whose entry was superseded, waiting for its closer to confirm it or reopen it. */
+  confirm?: { ref_was: string; head: string | null; since: string; to: string | null };
+  overlap?: { kind: string; why: string; by: string };
+  covered_by?: string[];
+  next_action?: string;
+  result_refs?: string[];
+  dropped?: Array<{ need: string; why: string; at: string; by: string }>;
+  route_reviews?: Array<{ at: string; by: string; material: boolean; why: string; cycle: number; ref: string }>;
+  inputs?: string[];
+  /** A closure confirmed on the entry that stands after its first was superseded. */
+  confirmed?: Array<{ at: string; by: string; from: string; to: string; why: string }>;
+};
+
+/** The finish on the Leads tab; mirrors `FinishPanel` in `scripts/ui/model.ts` (docs/adr/0015). */
+export type FinishPanel = {
+  ready: boolean;
+  items: string[];
+  limited: string[];
+  coordinator: { holder: string; generation: number; why: string; report: string | null } | null;
+  last_check: { at: string; by: string; proceed: boolean; outcome: string | null; reason: string | null; current: boolean } | null;
+  late: Array<{ kind: "post" | "objection"; id: number; by: string; tag?: string; why?: string }>;
 };
 
 /** The Leads tab; mirrors `LeadsPanelView` in `scripts/ui/model.ts`. */
@@ -669,7 +694,11 @@ export type LeadsPanelView = {
   requests: Array<Record<string, unknown>>;
   hosts: string[];
   coverage: { questions: string[]; existence: string[]; unanswered: string[]; uncovered: string[]; open_leads_for: Record<string, string[]> };
-  awaiting: Array<{ job: string; agent: string; lead: string | null; why: string; unread_bytes?: number; total_bytes?: number; next_offset?: number }>;
+  awaiting: Array<{ job: string; agent: string; lead: string | null; why: string; unread_bytes?: number; total_bytes?: number; next_offset?: number; reinterpret?: true }>;
+  /** Held leads with nothing done on them while their holders work elsewhere, offered on. */
+  parked?: Array<{ lead: string; holder: string; idle_ms: number; since: string; elsewhere?: string }>;
+  /** The finish: null once the run is finished. */
+  finish?: FinishPanel | null;
 };
 
 /** What produced the run, as the kickoff recorded it. */
@@ -1285,6 +1314,8 @@ export type StoreJobRow = {
   cancel_requested: string | null;
   parent: string | null;
   note: string | null;
+  /** A program its image did not hold (exit 127, or "command not found"): shown for the images' upkeep. */
+  program_missing?: { program: string | null; profile: string | null; image: string | null } | null;
 };
 
 /** GET /api/swarms/:id/jobs: a page of the run's tool jobs, totals over all of them, the run's own journal lines and custody's store line. */

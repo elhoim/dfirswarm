@@ -2054,6 +2054,100 @@ export type WorkerSpec = {
   command: string[];
 };
 
+/**
+ * A running worker's CPU time and disk I/O, from msb's metrics for its VM
+ * (job-telemetry.ts reads these beside the job's output directory and logs):
+ * null when msb cannot say, and the worker's own heartbeat is read instead.
+ */
+export async function workerMetrics(name: string, loader: () => Promise<SdkModule> = sdk): Promise<{ cpu_ns: number; io_bytes: number } | null> {
+  try {
+    const M = await loader();
+    const h = await M.Sandbox.get(name);
+    const m = await h.metrics();
+    const cpu = Number(m.vcpuTimeNs);
+    const io = Number(m.diskReadBytes) + Number(m.diskWriteBytes);
+    return Number.isFinite(cpu) && Number.isFinite(io) ? { cpu_ns: cpu, io_bytes: io } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A validity as the kickoff writes it ("12h", "90m", "45s"), in milliseconds; null when it is not one. */
+export function validityMs(text: string | undefined | null): number | null {
+  const m = /^(\d+)\s*([smhd])$/.exec(String(text ?? "").trim());
+  if (!m) return null;
+  return Number(m[1]) * { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] as "s" | "m" | "h" | "d"];
+}
+
+/** When the seats' tokens were last minted, and what each renewal did (the hub directory's secret-renewal.json). */
+export type RenewalState = { minted_at: string; renewals?: Array<{ at: string; rotated: number; unsupported: number; failed: number }> };
+
+export type SeatRenewal = { agent: string; vm: string; rotated: string[]; outcome: "rotated" | "unsupported" | "nothing" | "failed"; why?: string };
+
+/**
+ * Renew the seats' subscription tokens on the host before they expire
+ * (B10). A token is minted with min_token_validity (12 h for an operator-
+ * stopped run, the wall clock and an hour otherwise), and the guest holds
+ * only its placeholder; a run past that validity would lose its provider.
+ * At half the validity the host mints fresh tokens (Pi's own store, as at
+ * creation) and rotates each seat VM's secret in place with msb's
+ * Sandbox.modify: verified on msb 0.7.2 against a running VM, a rotated
+ * secret's disposition is "live" (no restart) and the guest keeps its
+ * placeholder, so nothing in the VM changes. Each seat is asked first with
+ * a dry run: only secrets the VM already holds are rotated (never added),
+ * and a seat whose rotation would not be live is left as it is and said
+ * (its token is still valid for the rest of the minted window). Values are
+ * never printed, logged or returned.
+ */
+export async function renewSeatSecrets(
+  spec: VmSpec,
+  o: { now?: number; state?: RenewalState | null; created_at?: number; force?: boolean; loader?: () => Promise<SdkModule>; mint?: (spec: VmSpec) => Promise<ResolvedSecret[]> } = {},
+): Promise<{ due: boolean; next_at: string; seats: SeatRenewal[] }> {
+  const now = o.now ?? Date.now();
+  const validity = validityMs(spec.min_token_validity || "2h") ?? 2 * 3_600_000;
+  const last = o.state?.minted_at ? Date.parse(o.state.minted_at) : (o.created_at ?? now);
+  const nextAt = last + Math.floor(validity / 2);
+  if (!o.force && now < nextAt) return { due: false, next_at: new Date(nextAt).toISOString(), seats: [] };
+  const all = await (o.mint ?? resolveSecrets)(spec);
+  const M = await (o.loader ?? sdk)();
+  const seats: SeatRenewal[] = [];
+  for (const agent of spec.agents) {
+    const name = vmName(spec.run, agent.id);
+    const providers = new Set(seatProviders(spec, agent).map((p) => p.provider));
+    // Subscription tokens expire; API keys do not, and are left as they are.
+    const mine = all.filter((sec) => sec.kind === "oauth" && !sec.envKey && providers.has(sec.provider));
+    if (!mine.length) {
+      seats.push({ agent: agent.id, vm: name, rotated: [], outcome: "nothing", why: "it holds no subscription token" });
+      continue;
+    }
+    try {
+      const h = await M.Sandbox.get(name);
+      const want = Object.fromEntries(mine.map((sec) => [secretEnvName(sec), { value: sec.value }]));
+      const dry = await h.modify({ secrets: want, dryRun: true });
+      const held = dry.changes.filter((c): c is Extract<typeof c, { kind: "secret" }> => c.kind === "secret" && c.change === "rotated");
+      if (!held.length) {
+        seats.push({ agent: agent.id, vm: name, rotated: [], outcome: "nothing", why: "its VM holds none of these secrets (a provider the model gateway fronts, or none)" });
+        continue;
+      }
+      const notLive = held.filter((c) => c.disposition !== "live");
+      if (notLive.length || dry.conflicts.length) {
+        seats.push({ agent: agent.id, vm: name, rotated: [], outcome: "unsupported", why: [...notLive.map((c) => `${c.name}: ${c.disposition}${c.reason ? ` (${c.reason})` : ""}`), ...dry.conflicts.map((c) => `${c.field}: ${c.message}`)].join("; ") });
+        continue;
+      }
+      const only = Object.fromEntries(held.map((c) => [c.name, want[c.name]!]));
+      const applied = await h.modify({ secrets: only, policy: "no_restart" });
+      if (!applied.applied) {
+        seats.push({ agent: agent.id, vm: name, rotated: [], outcome: "failed", why: `msb did not apply it (${applied.status})` });
+        continue;
+      }
+      seats.push({ agent: agent.id, vm: name, rotated: held.map((c) => c.name), outcome: "rotated" });
+    } catch (err) {
+      seats.push({ agent: agent.id, vm: name, rotated: [], outcome: "failed", why: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return { due: true, next_at: new Date(now + Math.floor(validity / 2)).toISOString(), seats };
+}
+
 export function workerName(run: string, job: string, attempt: number): string {
   return `dfs-${run}-job-${job}-${attempt}`;
 }
@@ -2860,6 +2954,26 @@ async function main(): Promise<void> {
       }
       console.log(JSON.stringify({ ok: result.failures.length === 0, vms: result.records.map((r) => ({ agent: r.agent, name: r.name, digest: r.image.manifest_digest })), failures: result.failures, warnings: result.warnings }));
       process.exit(result.failures.length ? 1 : 0);
+    }
+    case "renew-secrets": {
+      // The seats' subscription tokens, renewed on the host at half their
+      // validity (renewSeatSecrets). One JSON line out; never a value.
+      const file = opt("--spec");
+      const stateFile = opt("--state");
+      if (!file || !stateFile) throw new Error("renew-secrets needs --spec FILE --state FILE");
+      const spec = JSON.parse(await readFile(file, "utf8")) as VmSpec;
+      const state = await readFile(stateFile, "utf8").then((t) => JSON.parse(t) as RenewalState).catch(() => null);
+      const created = (await stat(file).catch(() => null))?.mtimeMs;
+      const r = await renewSeatSecrets(spec, { state, ...(created ? { created_at: created } : {}), force: rest.includes("--force") });
+      if (r.due) {
+        const at = new Date().toISOString();
+        const counts = { rotated: r.seats.filter((x) => x.outcome === "rotated").length, unsupported: r.seats.filter((x) => x.outcome === "unsupported").length, failed: r.seats.filter((x) => x.outcome === "failed").length };
+        // Minted again only when every seat that holds a token took the new one.
+        const next: RenewalState = { minted_at: counts.failed || counts.unsupported ? (state?.minted_at ?? new Date(created ?? Date.now()).toISOString()) : at, renewals: [...(state?.renewals ?? []), { at, ...counts }] };
+        await writeFile(stateFile, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+      }
+      console.log(JSON.stringify({ ok: !r.seats.some((x) => x.outcome === "failed"), ...r }));
+      process.exit(0);
     }
     case "finish": {
       const runId = opt("--run");

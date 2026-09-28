@@ -337,6 +337,12 @@ export type BudgetRecord = {
   /** Until solved: minutes without progress before the watchdog posts a regroup (default 15). */
   stall_minutes?: number;
   /**
+   * How the seats coordinate (docs/adr/0015), from the kickoff: the seconds
+   * each seat's first choice waits for the seat before it, and the bound
+   * over all of them (leads.ts admitFirstChoice). Absent: no stagger.
+   */
+  coordination?: { first_choice_stagger_sec?: number; first_choice_bound_sec?: number };
+  /**
    * What reaching a cap does (the stop policy, docs/adr/0013): cap-pause
    * (the default) pauses the run for the operator to extend or stop it,
    * cap-stop stops it (an unattended run), operator is --until-solved (no
@@ -1307,6 +1313,8 @@ export function normalizeBudget(raw: Partial<BudgetRecord> | null | undefined): 
     ...(raw?.stop_reason ? { stop_reason: raw.stop_reason } : {}),
     ...(raw?.until_solved === true ? { until_solved: true } : {}),
     ...(Number(raw?.stall_minutes) > 0 ? { stall_minutes: Number(raw?.stall_minutes) } : {}),
+    // How the seats coordinate: kept by every fold, as the stop policy is.
+    ...(raw?.coordination && typeof raw.coordination === "object" ? { coordination: { ...(Number(raw.coordination.first_choice_stagger_sec) > 0 ? { first_choice_stagger_sec: Number(raw.coordination.first_choice_stagger_sec) } : {}), ...(Number(raw.coordination.first_choice_bound_sec) > 0 ? { first_choice_bound_sec: Number(raw.coordination.first_choice_bound_sec) } : {}) } } : {}),
     // The stop policy and its pauses: kept by every fold, or a pause would lift itself on the next model call's usage.
     ...((STOP_POLICIES as readonly string[]).includes(String(raw?.stop_policy)) ? { stop_policy: raw!.stop_policy as StopPolicy } : {}),
     ...(raw?.paused && typeof raw.paused === "object" && typeof raw.paused.at === "string" ? { paused: raw.paused } : {}),
@@ -1751,7 +1759,7 @@ async function nextPostId(sandboxRoot: string, thread: string): Promise<number> 
  * correction — and only posts by somebody other than the agent calling `done`,
  * because an agent quoting itself is not news.
  */
-async function outputWrittenAt(sandboxRoot: string, outputFile: string): Promise<number> {
+export async function outputWrittenAt(sandboxRoot: string, outputFile: string): Promise<number> {
   let pathKey: string;
   try {
     pathKey = claimKey(sandboxRoot, outputFile);
@@ -1776,9 +1784,12 @@ export async function correctionsAfter(
   sandboxRoot: string,
   outputFile: string,
   agentId: string,
+  since?: number,
 ): Promise<Array<{ id: number; from: string; tag: PostTag }>> {
   // A missing output is not "no corrections": it has never answered the board.
-  const writtenAt = await outputWrittenAt(sandboxRoot, outputFile);
+  // `since` (the finish's anchor, extensions/finish.ts) keeps what was late
+  // against an earlier version of the output late through the later ones.
+  const writtenAt = typeof since === "number" && Number.isFinite(since) ? since : await outputWrittenAt(sandboxRoot, outputFile);
   const dir = join(sandboxRoot, "threads", PRIMARY_THREAD);
   const files = await readdir(dir).catch(() => [] as string[]);
   const out: Array<{ id: number; from: string; tag: PostTag }> = [];
@@ -1805,6 +1816,8 @@ export type NameRecord = {
   /** What it said it was taking on when it chose the name. */
   doing?: string;
   at: string;
+  /** When it first named itself: its first choice (A1), kept whatever it says since. */
+  first_at?: string;
 };
 
 export const NAMES_REL = "names.json";
@@ -1839,13 +1852,20 @@ export async function nameOf(sandboxRoot: string, agentId: string): Promise<stri
 
 /**
  * Take a name. Two agents may not answer to the same one, because the board
- * has to stay readable, and that is the only rule: an agent may rename itself
- * whenever what it is doing changes.
+ * has to stay readable. A seat's name is stable once given (A1): on ctf12
+ * Belka's seats renamed themselves 19 times in the first three minutes, and
+ * a rename was read as a claim on work. What a seat works on shows from the
+ * lead it holds (its label, leads.ts seatLabel); a later call updates what
+ * it says it is doing, and keeps the name.
  */
 export type NameResult =
   | {
       ok: true;
       name: string;
+      /** The name asked for, when the stable one was kept instead. */
+      asked?: string;
+      /** A first choice made in turn (leads.ts admitFirstChoice): the order, the wait and the register's coverage then. */
+      admission?: unknown;
       previous?: string;
       /** Everyone else who has said what they are doing. */
       peers: Array<{ id: string; name: string; doing?: string }>;
@@ -1860,15 +1880,20 @@ export async function claimName(
   rawName: string,
   doing?: string,
 ): Promise<NameResult> {
-  const name = tidyName(rawName);
-  if (!name) return { ok: false, error: "A name is one line of text; this one was empty." };
+  const asked = tidyName(rawName);
+  if (!asked) return { ok: false, error: "A name is one line of text; this one was empty." };
   // A name and what an agent says it is doing sit on every board, header
   // and report: neither may carry a value the run marks sensitive (B9),
   // whatever its origin, the goal's own words included.
-  const leak = await sensitiveRefusalOf(sandboxRoot, [["the name", String(rawName ?? "")], ["the name", name], ["doing", doing ? String(doing) : ""]]);
+  const leak = await sensitiveRefusalOf(sandboxRoot, [["the name", String(rawName ?? "")], ["the name", asked], ["doing", doing ? String(doing) : ""]]);
   if (leak) return { ok: false, error: `${leak}. Nothing was recorded.` };
+  // A seat's first choice waits for its turn when the kickoff staggers them (leads.ts).
+  const admission = await import("./leads.ts").then((L) => L.admitFirstChoice(sandboxRoot, agentId)).catch(() => null);
   return withTableLock(sandboxRoot, async () => {
     const names = await readNames(sandboxRoot);
+    const had = names.find((n) => n.id === agentId);
+    // Stable once given: a later call keeps the name and updates what the seat is doing.
+    const name = had?.name ?? asked;
     // "dump5 hunter" and "dump5-hunter" are one name to a reader, and two
     // agents took exactly that pair on the memory case. Compare what a reader
     // sees: letters and digits, nothing else.
@@ -1877,12 +1902,13 @@ export async function claimName(
     if (clash) {
       return { ok: false as const, error: `${clash.id} already answers to "${name}". Pick another.`, taken_by: clash.id };
     }
-    const previous = names.find((n) => n.id === agentId)?.name;
+    const previous = had?.name;
     const next = names.filter((n) => n.id !== agentId);
     // Whole: what an agent says it is doing is part of the record, and a
     // sentence cut at 280 characters read as one the agent never wrote.
     const doingText = doing ? String(doing).trim() : "";
-    const mine = { id: agentId, name, ...(doingText ? { doing: doingText } : {}), at: new Date().toISOString() };
+    const at = new Date().toISOString();
+    const mine = { id: agentId, name, ...(doingText ? { doing: doingText } : had?.doing ? { doing: had.doing } : {}), at, first_at: had?.first_at ?? had?.at ?? at };
     next.push(mine);
     next.sort((a, b) => a.id.localeCompare(b.id));
     await writeFile(join(sandboxRoot, NAMES_REL), `${JSON.stringify({ names: next }, null, 2)}\n`, "utf8");
@@ -1896,6 +1922,8 @@ export async function claimName(
     return {
       ok: true as const,
       name,
+      ...(had && key(asked) !== key(had.name) ? { asked } : {}),
+      ...(admission ? { admission } : {}),
       ...(previous ? { previous } : {}),
       peers: peers.map((n) => ({ id: n.id, name: n.name, ...(n.doing ? { doing: n.doing } : {}) })),
       ...(close.length
@@ -2392,6 +2420,10 @@ export type PeerView = {
   open_jobs: PeerJob[];
   /** How many ledger entries it recorded, and its last few: the whole of each is `ledger` by seq. */
   ledger: { total: number; last: Array<{ seq: number; kind: string; value_first_line: string; superseded_by?: number }> };
+  /** The leads it holds (A1): what it works on shows from these, not from its name. */
+  holds?: Array<{ id: string; title: string; status: string }>;
+  /** Its visible label: its stable name, and the leads it holds. */
+  label?: string;
 };
 
 export type TeamView = TeamRecord & {
@@ -2463,10 +2495,14 @@ export async function teamView(ctx: SwarmContext, opts: { from?: string; pageCha
   }
   const ledger = await readLedger(S);
   const replaced = supersededBy(ledger);
+  // What each seat works on, from the lead register (A1: the label follows the held lead, the name stays).
+  const L = await import("./leads.ts");
+  const leadSnap = await L.leadsSnapshot(S).catch(() => null);
   const peers: PeerView[] = [];
   for (const a of team.agents) {
     if (a.id === ctx.agentId) continue;
     const named = names.find((n) => n.id === a.id);
+    const holds = leadSnap ? L.heldLeads(leadSnap, a.id) : [];
     const post = latest.get(a.id);
     const record = post ? await readPost(post.file).catch(() => null) : null;
     const theirs = ledger.filter((e) => e.by === a.id);
@@ -2483,6 +2519,7 @@ export async function teamView(ctx: SwarmContext, opts: { from?: string; pageCha
       last_post: post && record ? { id: record.id, thread: record.thread, tag: record.tag, to: record.to, at: post.at.toISOString() } : null,
       posts: post?.count ?? 0,
       open_jobs: jobsByAgent.get(a.id) ?? [],
+      ...(leadSnap ? { holds, label: L.seatLabel(a.id, named?.name ?? null, holds) } : {}),
       ledger: {
         total: theirs.length,
         last: theirs.slice(-TEAM_VIEW_LEDGER_LAST).map((e) => ({
@@ -3018,7 +3055,7 @@ export function extractWritePath(input: Record<string, unknown> | undefined): st
 
 export async function markDone(
   ctx: SwarmContext,
-  args: { reason: string; outputFile: string; createSentinel?: boolean; outcome?: FinishOutcome; revision?: string },
+  args: { reason: string; outputFile: string; createSentinel?: boolean; outcome?: FinishOutcome; revision?: string; finish?: { holder: string; generation: number } },
 ): Promise<DoneResult | DoneRefused> {
   const reason = yamlOneLine(args.reason);
   const outputFile = yamlOneLine(args.outputFile);
@@ -3053,12 +3090,18 @@ export async function markDone(
     }
   }
 
+  // The finish is one seat's (A4, extensions/finish.ts): a done that would
+  // end the swarm is checked against the coordinator's lease (the holder and
+  // generation its done began with, `finish`) and what is late against the
+  // report, in the same transaction that writes this seat's marker and the
+  // sentinel (finishTransaction), never only before.
+  const ending = !seatOnly && !reason.startsWith(ABANDON_PREFIX) && !(await swarmDoneExists(ctx.sandboxRoot));
+
   const by = ctx.agentId;
   const stamp = new Date().toISOString();
   const agentFile = agentDonePath(ctx.sandboxRoot, ctx.agentId);
   const sentinel = sentinelPath(ctx.sandboxRoot);
 
-  await mkdir(dirname(agentFile), { recursive: true });
   // How the run ended, when the finish line said (FinishOutcome): an
   // abandon is abandoned whatever the caller passed.
   const outcome: FinishOutcome | undefined = reason.startsWith(ABANDON_PREFIX) ? "abandoned" : args.outcome && (FINISH_OUTCOMES as readonly string[]).includes(args.outcome) ? args.outcome : undefined;
@@ -3072,8 +3115,6 @@ ${outcomeLine}at: ${stamp}
 
 Worker ${by} is exiting.
 `;
-  await writeFile(agentFile, agentBody, "utf8");
-
   const sentinelText = `---
 by: ${by}
 output: ${outputFile}
@@ -3088,17 +3129,20 @@ Collective finished. Presence of this file is the clock. Call done and stop.
   // admitted or a lead opened after that line either moved the state, and the
   // done is refused to be run again, or finds the sentinel and is recorded as
   // a follow-up. Admission and a terminal done are never interleaved.
-  const created = seatOnly
-    ? false
-    : args.revision
-      ? await withNamedLock(ctx.sandboxRoot, REGISTER_LOCK, async () => {
-          if (!(await swarmDoneExists(ctx.sandboxRoot)) && (await stateRevision(ctx.sandboxRoot).catch(() => ({ revision: "" }))).revision !== args.revision) {
-            await rm(agentFile, { force: true }).catch(() => undefined);
-            throw new Error(FINISH_LINE_UNSETTLED);
-          }
-          return createSentinel(ctx.sandboxRoot, sentinelText);
-        })
-      : await createSentinel(ctx.sandboxRoot, sentinelText);
+  const writeDone = async (): Promise<boolean> => {
+    await mkdir(dirname(agentFile), { recursive: true });
+    await writeFile(agentFile, agentBody, "utf8");
+    if (seatOnly) return false;
+    if (!args.revision) return createSentinel(ctx.sandboxRoot, sentinelText);
+    return withNamedLock(ctx.sandboxRoot, REGISTER_LOCK, async () => {
+      if (!(await swarmDoneExists(ctx.sandboxRoot)) && (await stateRevision(ctx.sandboxRoot).catch(() => ({ revision: "" }))).revision !== args.revision) {
+        await rm(agentFile, { force: true }).catch(() => undefined);
+        throw new Error(FINISH_LINE_UNSETTLED);
+      }
+      return createSentinel(ctx.sandboxRoot, sentinelText);
+    });
+  };
+  const created = ending ? await (await import("./finish.ts")).finishTransaction(ctx.sandboxRoot, ctx.agentId, args.finish, writeDone) : await writeDone();
 
   await releaseAllOwned(ctx);
 
@@ -5816,6 +5860,11 @@ export const TOOL_RESERVED_NAMES = new Set([
   "lead_open", "lead_claim", "lead_release", "lead_close", "lead_link", "leads", "record_leads", "regroup", "operator_note",
   // The question register (extensions/questions.ts): its tools.
   "question_open", "questions", "question_ask",
+  // The coordination of the work and of the finish (docs/adr/0015): a lead
+  // reopened by an agent, a limiting route reviewed.
+  "lead_reopen", "route_review", "lead_handoff", "lead_confirm", "offer", "finish", "done_deferred",
+  // The runtime (docs/adr/0015): the seats' tokens renewed on the host.
+  "secrets_renewed",
   // The stop policy (docs/adr/0013): a run paused at a cap, a seat's call held
   // by the pause, the seats woken after an extension, a stop proposed to the
   // operator, and a run resumed after a stop or a seal.
@@ -7560,6 +7609,16 @@ export type LedgerEntry = {
   question_rev?: number;
   /** Version 4, an answer: it says the event did not happen, not only that no evidence of it was found; the negative bar says when it may. */
   asserts_absence?: boolean;
+  /**
+   * A summary's or a narrative's symbolic citations (A4): each question it
+   * cites as Q-<n>, the answer that stood then, and that answer's
+   * fingerprint (its result, the revision it answers, and the hashes of what
+   * it rests on, what says otherwise and what bounds it). A correction of
+   * the answer that keeps the fingerprint (a wording change) leaves the
+   * summary standing; one that changes its support, scope or contrary
+   * evidence makes it be recorded again.
+   */
+  question_refs?: Array<{ q: string; section: string; answer: number; fp: string }>;
   /** A coverage record: the inventory revision its search saw (negative-bar.ts inventoryRevision). */
   inventory_rev?: string;
   /** A coverage record: the time range the search covered, or why it has none. */
@@ -7670,6 +7729,7 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
     ...(e.result ? { result: e.result } : {}),
     ...(e.contrary_none_why ? { contrary_none_why: e.contrary_none_why } : {}),
     ...(e.question_rev !== undefined ? { question_rev: e.question_rev } : {}),
+    ...(e.question_refs?.length ? { question_refs: e.question_refs.map((r) => ({ q: r.q, section: r.section, answer: r.answer, fp: r.fp })) } : {}),
     ...(e.unsupported_tokens?.length ? { unsupported_tokens: e.unsupported_tokens } : {}),
     ...coverageFields(e),
     ...(e.source_class ? { source_class: e.source_class } : {}),
@@ -8627,9 +8687,89 @@ export type LedgerAttestation = {
    * route, each with what was done or why not. Inside the hashed record.
    */
   review?: NB.NegativeReview;
+  /**
+   * An attest of an answer to a question: whether the reviewer holds it
+   * established, or a best candidate (what the evidence best supports, not
+   * shown to be the answer). A best candidate does not satisfy the finish
+   * line. Absent on a line from before strengths (read as it always was).
+   */
+  strength?: AttestStrength;
+  /** An attest of an answer to a question: what the review of the answer found, part by part. */
+  answer_review?: AnswerReview;
+  /** Written by the hub: why only a best candidate could be attested (a medium or low confidence, a part not established, a route not taken). */
+  capped?: string[];
   prev?: string;
   hash?: string;
 };
+
+/** How strongly a review holds an answer: established, or a best candidate. */
+export const ATTEST_STRENGTHS = ["established", "best_candidate"] as const;
+export type AttestStrength = (typeof ATTEST_STRENGTHS)[number];
+
+/**
+ * A review of an answer to a question (B2): what the reviewer reproduced
+ * and what it only read, whether each part the question asks is
+ * established, the inference that connects the observations to the answer,
+ * the alternatives the evidence still allows, and whether another source
+ * family was checked (or why not: never a compulsory box, but its absence
+ * is said).
+ */
+export type AnswerReview = {
+  reproduced: string;
+  read: string;
+  parts: Array<{ part: string; established: boolean; why: string }>;
+  inference: string;
+  alternatives: string;
+  other_family: { checked: boolean; text: string };
+};
+export const ANSWER_REVIEW_MAX_PARTS = 20;
+
+/** An answer review as given: every field said, each bounded (refused past it, never cut). */
+export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerReview } | { ok: false; reason: string } {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const shape = "answer_review is {reproduced, read, parts: [{part, established, why}], inference, alternatives, other_family: {checked, text}}";
+  const text = (name: string, v: unknown): { ok: true; value: string } | { ok: false; reason: string } => {
+    const t = String(v ?? "").trim();
+    if (!t) return { ok: false, reason: `answer_review.${name} is required (${shape}): say it, or "none" and why` };
+    if (t.length > LEDGER_ACT_MAX_CHARS) return { ok: false, reason: `answer_review.${name} is over ${LEDGER_ACT_MAX_CHARS} characters: say it in fewer; nothing is cut, so a longer text is refused` };
+    return { ok: true, value: t };
+  };
+  const reproduced = text("reproduced", r.reproduced);
+  if (!reproduced.ok) return reproduced;
+  const read = text("read", r.read);
+  if (!read.ok) return read;
+  const inference = text("inference", r.inference);
+  if (!inference.ok) return inference;
+  const alternatives = text("alternatives", r.alternatives);
+  if (!alternatives.ok) return alternatives;
+  if (!Array.isArray(r.parts) || !r.parts.length) return { ok: false, reason: `answer_review.parts names each part the question asks, [{part, established: true|false, why}], at least one (${shape})` };
+  if (r.parts.length > ANSWER_REVIEW_MAX_PARTS) return { ok: false, reason: `answer_review.parts names at most ${ANSWER_REVIEW_MAX_PARTS} parts` };
+  const parts: AnswerReview["parts"] = [];
+  for (const p of r.parts) {
+    const o = (p && typeof p === "object" ? p : {}) as Record<string, unknown>;
+    const part = text("parts[].part", o.part);
+    if (!part.ok) return part;
+    if (typeof o.established !== "boolean") return { ok: false, reason: `answer_review.parts[].established is true or false: whether "${part.value}" is established` };
+    const why = text("parts[].why", o.why);
+    if (!why.ok) return why;
+    parts.push({ part: part.value, established: o.established, why: why.value });
+  }
+  const f = (r.other_family && typeof r.other_family === "object" ? r.other_family : null) as Record<string, unknown> | null;
+  if (!f || typeof f.checked !== "boolean") return { ok: false, reason: "answer_review.other_family is {checked: true|false, text}: whether a materially different source family was checked, and which, or why not" };
+  const ft = text("other_family.text", f.text);
+  if (!ft.ok) return ft;
+  return { ok: true, review: { reproduced: reproduced.value, read: read.value, parts, inference: inference.value, alternatives: alternatives.value, other_family: { checked: f.checked, text: ft.value } } };
+}
+
+/** An answer review in words, for the ledger's rendering and the report. */
+export function answerReviewWords(r: AnswerReview): string {
+  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.part} ${p.established ? "established" : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; alternatives still open: ${r.alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}`;
+}
+
+/** Whether an attestation holds its answer established: a best candidate does not; a line from before strengths reads as it always did. */
+export function attestEstablishes(a: LedgerAttestation): boolean {
+  return a.strength !== "best_candidate";
+}
 
 /** The act of an attestation line: a version 1 line is a second author. */
 export function attestationAct(a: LedgerAttestation): "same_content" | "attest" {
@@ -8639,7 +8779,7 @@ export function attestationAct(a: LedgerAttestation): "same_content" | "attest" 
 export function attestationHash(a: LedgerAttestation, prev: string): string {
   const core =
     a.v === 2
-      ? JSON.stringify({ v: 2, act: a.act, seq: a.seq, target: a.target, by: a.by, at: a.at, ...(a.how ? { how: a.how } : {}), ...(a.refs?.length ? { refs: a.refs } : {}), ...(a.review ? { review: canonicalValue(a.review) } : {}) })
+      ? JSON.stringify({ v: 2, act: a.act, seq: a.seq, target: a.target, by: a.by, at: a.at, ...(a.how ? { how: a.how } : {}), ...(a.refs?.length ? { refs: a.refs } : {}), ...(a.review ? { review: canonicalValue(a.review) } : {}), ...(a.strength ? { strength: a.strength } : {}), ...(a.answer_review ? { answer_review: canonicalValue(a.answer_review) } : {}), ...(a.capped?.length ? { capped: a.capped } : {}) })
       : JSON.stringify({ seq: a.seq, by: a.by, at: a.at });
   return createHash("sha256").update(`${prev}\n${core}`).digest("hex");
 }
@@ -8749,7 +8889,7 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   // Who re-derived an entry, and who disputes it: read beside the ledger, never written into it.
   const allAttestations = await readAttestations(sandboxRoot);
   const attests = allAttestations.filter((a) => attestationAct(a) === "attest");
-  const disputes = standingDisputes(await readDisputes(sandboxRoot));
+  const disputes = disputesInForce(all, await readDisputes(sandboxRoot));
   const problems = answers.length ? answerProblems(all, await readDisputes(sandboxRoot)) : new Map<number, string[]>();
   const lines: string[] = [
     "# Ledger",
@@ -8759,9 +8899,9 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   ];
   const acts = (e: LedgerEntry) => {
     const h = e.hash ?? ledgerHash(e, "genesis");
-    const by = attests.filter((a) => a.target === h).map((a) => a.by);
+    const by = attests.filter((a) => a.target === h).map((a) => `${a.by}${a.strength === "best_candidate" ? " (best candidate)" : ""}`);
     const against = disputes.filter((d) => d.target === h);
-    return `${by.length ? ` [attested by ${[...new Set(by)].join(", ")}]` : ""}${against.length ? ` **[disputed by ${against.map((d) => `${d.by}: ${mdCell(d.why)}`).join("; ")}]**` : ""}`;
+    return `${by.length ? ` [attested by ${[...new Set(by)].join(", ")}]` : ""}${against.length ? ` **[disputed by ${against.map((d) => `${d.by}: ${mdCell(d.why)}${d.inherited_from !== undefined ? ` (raised on #${d.inherited_from}, which it corrects; open until answered)` : ""}`).join("; ")}]**` : ""}`;
   };
   // A corrected entry stays where it was, marked; its correction says what it corrects.
   const mark = (e: LedgerEntry) =>
@@ -8894,12 +9034,12 @@ export async function listLedger(sandboxRoot: string, filter: { kind?: string; l
   const replaced = supersededBy(all);
   const attests = (await readAttestations(sandboxRoot)).filter((a) => attestationAct(a) === "attest");
   const allDisputes = await readDisputes(sandboxRoot);
-  const disputes = standingDisputes(allDisputes);
+  const disputes = disputesInForce(all, allDisputes);
   const problems = all.some((e) => e.kind === "answer") ? answerProblems(all, allDisputes) : new Map<number, string[]>();
   return picked.slice(-limit).map((e) => {
     const h = e.hash ?? ledgerHash(e, "genesis");
     const by = [...new Set(attests.filter((a) => a.target === h).map((a) => a.by))];
-    const against = disputes.filter((d) => d.target === h).map((d) => ({ by: d.by, why: d.why }));
+    const against = disputes.filter((d) => d.target === h).map((d) => ({ by: d.by, why: d.why, ...(d.inherited_from !== undefined ? { inherited_from: d.inherited_from } : {}) }));
     return {
       ...e,
       ...(replaced.has(e.seq) ? { superseded_by: replaced.get(e.seq) } : {}),
@@ -9208,9 +9348,45 @@ export function standingDisputes(disputes: LedgerDispute[]): LedgerDispute[] {
   return [...open.values()];
 }
 
+/** A dispute in force: one that stands, on the entry it names or, when that entry was corrected, on the correction that stands in its place (inherited_from names the entry it was raised on). */
+export type DisputeInForce = LedgerDispute & { inherited_from?: number };
+
+/**
+ * The disputes in force. A correction may fix a disputed entry, but the
+ * dispute stays open until it is answered: the disputer withdraws it once
+ * the correction answers what it said. Until then it stands on the
+ * correction that stands in the entry's place (on Belka two limitations
+ * were superseded over a standing objection, and the answer and summary
+ * that rested on them fell with nobody told why). Each standing dispute on
+ * the entry it names, and each whose entry was superseded again on the
+ * head of its chain of corrections, marked inherited_from.
+ */
+export function disputesInForce(entries: LedgerEntry[], disputes: LedgerDispute[]): DisputeInForce[] {
+  const standing = standingDisputes(disputes);
+  if (!standing.length) return [];
+  const replaced = supersededBy(entries);
+  if (!replaced.size) return standing;
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const byHash = new Map(entries.map((e) => [e.hash ?? ledgerHash(e, "genesis"), e]));
+  const out: DisputeInForce[] = [...standing];
+  for (const d of standing) {
+    const e = byHash.get(d.target);
+    if (!e || !replaced.has(e.seq)) continue;
+    const head = bySeq.get(standingSeq(e.seq, replaced));
+    if (!head || head.seq === e.seq) continue;
+    out.push({ ...d, target: head.hash ?? ledgerHash(head, "genesis"), inherited_from: e.seq });
+  }
+  return out;
+}
+
+/** A dispute in force, in words: who, why, and the entry it was raised on when it is inherited. */
+export function disputeWords(d: DisputeInForce): string {
+  return `${d.by} (${d.why})${d.inherited_from !== undefined ? ` raised on E-${d.inherited_from}, which it corrects, and not yet answered` : ""}`;
+}
+
 // --- attest and dispute ---------------------------------------------------------------------
 
-export type LedgerActInput = { seq?: number | string; how?: string; why?: string; refs?: string[] | string; withdraw?: boolean; review?: unknown };
+export type LedgerActInput = { seq?: number | string; how?: string; why?: string; refs?: string[] | string; withdraw?: boolean; review?: unknown; strength?: unknown; answer_review?: unknown };
 
 /** Whether an entry is a negative the review bar holds: a coverage record, or an answer bounded_negative or not_determinable. */
 export function isNegativeEntry(e: LedgerEntry): boolean {
@@ -9232,6 +9408,45 @@ function actTarget(entries: LedgerEntry[], raw: number | string | undefined, age
     return { ok: false, reason: act === "attest" ? `#${n} is yours (you recorded it, or the same words): an attestation is somebody else re-deriving it` : `#${n} is yours: correct it with record(supersedes=${n}) instead of disputing it` };
   }
   return { ok: true, entry };
+}
+
+/**
+ * Why a review can hold an answer to a question only as a best candidate
+ * (B2), each in words: its confidence is medium or low; the review says a
+ * part the question asks is not established; or its would_change names a
+ * route nothing took: a planned route of the question (lead_open routes)
+ * that no job under it examined, named by its source, or a lead (L-<n>)
+ * that is not closed resolved, negative or duplicate. Read from the
+ * registers and the refs; the answer's words are only searched for the
+ * route sources and lead ids themselves. Empty when nothing caps it.
+ */
+export async function strengthCaps(sandboxRoot: string, answer: LedgerEntry, review: AnswerReview | null): Promise<string[]> {
+  const out: string[] = [];
+  if (answer.confidence === "medium" || answer.confidence === "low") out.push(`its confidence is ${answer.confidence}`);
+  for (const p of review?.parts ?? []) if (!p.established) out.push(`the review holds "${p.part}" not established (${p.why})`);
+  const change = String(answer.would_change ?? "");
+  if (!change || !answer.section?.startsWith("question:")) return out;
+  const id = sectionAnswersId(answer.section);
+  const bar = await questionBar(sandboxRoot, id).catch(() => null);
+  const lower = change.toLowerCase();
+  for (const r of bar?.routes ?? []) {
+    const src = r.source.trim();
+    if (src.length < 3 || !lower.includes(src.toLowerCase())) continue;
+    const ex = await NB.routeExamined(sandboxRoot, r, { jobs: bar?.jobs ?? [], objects: [] }).catch(() => ({ examined: false, how: "it could not be checked" }));
+    if (!ex.examined) out.push(`would_change names ${src} (${r.method}), a planned route nothing examined (${ex.how})`);
+  }
+  const named = [...new Set([...change.matchAll(/\bL-([1-9]\d{0,5})\b/g)].map((m) => `L-${Number(m[1])}`))];
+  if (named.length) {
+    const L = await import("./leads.ts");
+    const snap = await L.leadsSnapshot(sandboxRoot).catch(() => null);
+    for (const lid of named) {
+      const l = snap?.state.leads.get(lid);
+      if (!l) continue;
+      if (l.closed && ["resolved", "negative", "duplicate"].includes(l.closed.disposition)) continue;
+      out.push(`would_change names ${lid}, a route not taken (${l.closed ? `closed ${l.closed.disposition}` : l.holder ? `held by ${l.holder}, open` : "open, unheld"})`);
+    }
+  }
+  return out;
 }
 
 /**
@@ -9258,11 +9473,41 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     if (!r.ok) return r;
     review = r.review;
   }
+  const strengthText = String(input.strength ?? "").trim().toLowerCase().replace(/-/g, "_");
+  if (strengthText && !(ATTEST_STRENGTHS as readonly string[]).includes(strengthText)) return { ok: false, reason: `strength is established or best_candidate (got ${JSON.stringify(input.strength)})` };
+  const strength = (strengthText || undefined) as AttestStrength | undefined;
+  let answerReview: AnswerReview | null = null;
+  if (input.answer_review !== undefined && input.answer_review !== null) {
+    const r = checkAnswerReview(input.answer_review);
+    if (!r.ok) return r;
+    answerReview = r.review;
+  }
+  // What caps a review at best_candidate is read before the lock: the route
+  // plan and the jobs under the question (the lead register), never the
+  // answer's words beyond the refs and lead ids its would_change names.
+  const pre = await readLedger(ctx.sandboxRoot);
+  const preTarget = actTarget(pre, input.seq, ctx.agentId, "attest");
+  const caps = preTarget.ok && preTarget.entry.kind === "answer" && preTarget.entry.section?.startsWith("question:") && !isNegativeEntry(preTarget.entry) ? await strengthCaps(ctx.sandboxRoot, preTarget.entry, answerReview) : [];
   return withTableLock(ctx.sandboxRoot, async (held) => {
     const entries = await readLedger(ctx.sandboxRoot);
     const t = actTarget(entries, input.seq, ctx.agentId, "attest");
     if (!t.ok) return t;
     const target = t.entry.hash ?? ledgerHash(t.entry, "genesis");
+    // An answer to a question is attested with how strongly the review holds
+    // it, and the review part by part (B2): a best candidate you cannot break
+    // is still a best candidate. A medium or low confidence, a part not
+    // established, or a route its would_change names that nothing took
+    // allows only best_candidate, which does not satisfy the finish line.
+    const questionAnswer = t.entry.kind === "answer" && Boolean(t.entry.section?.startsWith("question:")) && !isNegativeEntry(t.entry);
+    if (questionAnswer) {
+      if (!strength) return { ok: false, reason: `#${t.entry.seq} answers ${t.entry.section}: its attest says how strongly you hold it, strength established or best_candidate, with answer_review {reproduced, read, parts: [{part, established, why}], inference, alternatives, other_family: {checked, text}}` };
+      if (!answerReview) return { ok: false, reason: `#${t.entry.seq} answers ${t.entry.section}: give answer_review {reproduced (what you re-derived yourself), read (what you only read), parts (each part the question asks, established or not, and why), inference (what connects the observations to the answer), alternatives (what the evidence still allows), other_family {checked, text} (whether another source family was checked, or why not)}` };
+      if (strength === "established" && caps.length) return { ok: false, reason: `#${t.entry.seq} can be attested best_candidate only: ${caps.join("; ")}. Attest it best_candidate (it does not satisfy the finish line), or take the route and record what it shows` };
+    } else if (answerReview) {
+      return { ok: false, reason: `answer_review is for an answer to a question; #${t.entry.seq} is ${isNegativeEntry(t.entry) ? "a negative: its attest is a review {detection, reproduced, other_route}" : t.entry.kind === "answer" ? `the ${t.entry.section} (say in how what you re-derived)` : `a ${t.entry.kind}: say in how what you re-derived`}` };
+    } else if (strength && !(t.entry.kind === "answer" && t.entry.section?.startsWith("question:"))) {
+      return { ok: false, reason: `strength is for an answer to a question; #${t.entry.seq} is ${t.entry.kind === "answer" ? `the ${t.entry.section}` : `a ${t.entry.kind}`}` };
+    }
     // A negative is attested with its review: what was challenged, reproduced or tried, or why not.
     const negative = isNegativeEntry(t.entry);
     if (negative && !review) {
@@ -9278,16 +9523,22 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
       const covAuthors = (t.entry.support ?? []).map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => e?.kind === "coverage").flatMap((e) => e.authors);
       if (covAuthors.includes(ctx.agentId)) return { ok: false, reason: `you recorded the coverage record #${t.entry.seq} rests on: a review of a negative is another seat's` };
     }
-    if (standingDisputes(await readDisputes(ctx.sandboxRoot)).some((d) => d.target === target && d.by === ctx.agentId)) {
-      return { ok: false, reason: `you dispute #${t.entry.seq}: withdraw the dispute (dispute withdraw=true, with why) before attesting it` };
+    const mineAgainst = disputesInForce(entries, await readDisputes(ctx.sandboxRoot)).find((d) => d.target === target && d.by === ctx.agentId);
+    if (mineAgainst) {
+      return { ok: false, reason: mineAgainst.inherited_from !== undefined ? `you disputed #${mineAgainst.inherited_from}, which #${t.entry.seq} corrects, and the dispute stands on the correction until you answer it: withdraw it (dispute withdraw=true on #${t.entry.seq}, with why the correction answers it) before attesting` : `you dispute #${t.entry.seq}: withdraw the dispute (dispute withdraw=true, with why) before attesting it` };
     }
     const attested = await readAttestations(ctx.sandboxRoot);
     const mine = attested.find((a) => attestationAct(a) === "attest" && a.target === target && a.by === ctx.agentId);
     if (mine) return { ok: true, line: mine, appended: false, note: `you attested #${t.entry.seq} already` };
     await held.assertOwned();
-    const line = await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "attest", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), how: how.value, ...(refs.length ? { refs } : {}), ...(review ? { review } : {}) });
+    const line = await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "attest", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), how: how.value, ...(refs.length ? { refs } : {}), ...(review ? { review } : {}), ...(strength ? { strength } : {}), ...(answerReview ? { answer_review: answerReview } : {}), ...(questionAnswer && caps.length ? { capped: caps } : {}) });
     await renderLedger(ctx.sandboxRoot);
-    return { ok: true, line, appended: true, ...(review ? { note: `recorded as the review of a negative: ${NB.reviewWords(review)}` } : {}) };
+    const note = review
+      ? `recorded as the review of a negative: ${NB.reviewWords(review)}`
+      : strength === "best_candidate"
+        ? `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${t.entry.section} is not established by it, and the finish line says so; the way out is the route that would settle it, or the operator's acceptance of its limits`
+        : undefined;
+    return { ok: true, line, appended: true, ...(note ? { note } : {}) };
   });
 }
 
@@ -9302,7 +9553,7 @@ export function coverageProblems(c: LedgerEntry, entries: LedgerEntry[], dispute
   if (c.kind !== "coverage") return [];
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
-  const against = standingDisputes(disputes);
+  const against = disputesInForce(entries, disputes);
   const out: string[] = [];
   for (const r of c.result_refs ?? []) {
     const m = /^E-(\d+)$/.exec(r);
@@ -9318,7 +9569,7 @@ export function coverageProblems(c: LedgerEntry, entries: LedgerEntry[], dispute
     if (bound && bound.hash !== hash) out.push(`its result E-${seq} is not the entry it bound (the hash differs)`);
     if (replaced.has(seq)) out.push(`its result E-${seq} is superseded by #${standingSeq(seq, replaced)}`);
     const d = against.filter((x) => x.target === hash);
-    if (d.length) out.push(`its result E-${seq} is disputed by ${d.map((x) => `${x.by} (${x.why})`).join("; ")}`);
+    if (d.length) out.push(`its result E-${seq} is disputed by ${d.map(disputeWords).join("; ")}`);
   }
   return out;
 }
@@ -9374,10 +9625,14 @@ export async function disputeEntry(ctx: SwarmContext, input: LedgerActInput): Pr
     if (!t.ok) return t;
     const target = t.entry.hash ?? ledgerHash(t.entry, "genesis");
     const all = await readDisputes(ctx.sandboxRoot);
-    const standing = standingDisputes(all).find((d) => d.target === target && d.by === ctx.agentId);
+    // A dispute stands on the correction of the entry it named until the
+    // disputer answers it (B18): withdrawn by naming either entry.
+    const standing = disputesInForce(entries, all).find((d) => d.target === target && d.by === ctx.agentId);
     if (input.withdraw && !standing) return { ok: false, reason: `you have no standing dispute of #${t.entry.seq} to withdraw` };
-    if (!input.withdraw && standing) return { ok: true, line: standing, appended: false, note: `you dispute #${t.entry.seq} already: ${standing.why}` };
-    const d: LedgerDispute = { v: 1, act: input.withdraw ? "withdraw" : "dispute", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), why: why.value, ...(refs.length ? { refs } : {}) };
+    if (!input.withdraw && standing) return { ok: true, line: standing, appended: false, note: standing.inherited_from !== undefined ? `you disputed #${standing.inherited_from}, which #${t.entry.seq} corrects, and that dispute stands on it until you withdraw it: ${standing.why}` : `you dispute #${t.entry.seq} already: ${standing.why}` };
+    // A withdrawal names the dispute it ends: the entry that dispute was raised on.
+    const named = standing?.inherited_from !== undefined ? entries.find((e) => e.seq === standing.inherited_from) : undefined;
+    const d: LedgerDispute = { v: 1, act: input.withdraw ? "withdraw" : "dispute", seq: named ? named.seq : t.entry.seq, target: named ? (named.hash ?? ledgerHash(named, "genesis")) : target, by: ctx.agentId, at: new Date().toISOString(), why: why.value, ...(refs.length ? { refs } : {}) };
     const prev = all.at(-1)?.hash ?? "genesis";
     const line: LedgerDispute = { ...d, prev, hash: disputeHash(d, prev) };
     await held.assertOwned();
@@ -9407,18 +9662,38 @@ async function unqualifiedFailedRefs(sandboxRoot: string, e: LedgerEntry): Promi
 }
 
 /**
+ * What an answer concludes and rests on, as a summary's symbolic citation
+ * binds it (A4): its result, the question revision it answers, and the
+ * hashes of its support, its contrary evidence and its limitations. Its
+ * words are not in it: a correction that only rewords keeps it.
+ */
+export function answerFingerprint(a: LedgerEntry): string {
+  const hashes = (edges: LedgerEdge[] | undefined) => (edges ?? []).map((x) => x.hash).sort();
+  return sha256Hex(JSON.stringify({ result: NB.answerResult(a), question_rev: a.question_rev ?? 1, support: hashes(a.support), contrary: hashes(a.contrary), limitations: hashes(a.limitations), inconclusive: a.inconclusive === true, asserts_absence: a.asserts_absence === true }));
+}
+
+/** The questions a summary or a narrative names symbolically: Q-<n>, and question:<id>. */
+export function symbolicQuestions(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/\bQ-([1-9]\d{0,5})\b/g)) if (!out.includes(`Q-${Number(m[1])}`)) out.push(`Q-${Number(m[1])}`);
+  for (const m of text.matchAll(/\bquestion:([A-Za-z0-9._-]{1,16})\b/g)) if (!out.includes(`question:${m[1]}`)) out.push(`question:${m[1]}`);
+  return out;
+}
+
+/**
  * Why each standing answer no longer stands on its own support, transitively:
  * an entry it cites was superseded and its correction is not cited with it,
  * or was disputed (or rests on a failed job) and the answer does not qualify
  * it, or is an answer that itself no longer stands; or the cited hash is not
- * the entry's. `failed` names, by seq, the entries resting on a failed job's
+ * the entry's. Its contrary evidence is held to the same: corrected or
+ * disputed since it was weighed, the answer is weighed again. `failed` names, by seq, the entries resting on a failed job's
  * output that they do not qualify themselves.
  */
 export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[], failed: Map<number, string[]> = new Map()): Map<number, string[]> {
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
-  const disputed = new Map<string, LedgerDispute[]>();
-  for (const d of standingDisputes(disputes)) disputed.set(d.target, [...(disputed.get(d.target) ?? []), d]);
+  const disputed = new Map<string, DisputeInForce[]>();
+  for (const d of disputesInForce(entries, disputes)) disputed.set(d.target, [...(disputed.get(d.target) ?? []), d]);
   const memo = new Map<number, string[]>();
   const visiting = new Set<number>();
   const problemsOf = (a: LedgerEntry): string[] => {
@@ -9428,7 +9703,22 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
     visiting.add(a.seq);
     const out: string[] = [];
     const qualified = (seq: number) => (a.qualifies ?? []).some((q) => q.ref === `E-${seq}`);
-    const cited = new Set([...(a.support ?? []), ...(a.limitations ?? [])].map((x) => x.seq));
+    const cited = new Set([...(a.support ?? []), ...(a.contrary ?? []), ...(a.limitations ?? [])].map((x) => x.seq));
+    // A summary's symbolic citations (A4): each question's standing answer,
+    // held to the fingerprint it had when cited, never to its seq alone.
+    for (const r of a.question_refs ?? []) {
+      const now = entries.find((e) => e.kind === "answer" && e.section === r.section && !replaced.has(e.seq));
+      if (!now) {
+        out.push(`it cites ${r.q} (${r.section}), which has no standing answer now`);
+        continue;
+      }
+      if (answerFingerprint(now) !== r.fp) {
+        out.push(`it cites ${r.q} (${r.section}), whose answer changed its support, scope or contrary evidence since it was cited (E-${r.answer}${now.seq !== r.answer ? ` → E-${now.seq}` : ""})`);
+        continue;
+      }
+      const sub = problemsOf(now);
+      if (sub.length) out.push(`it cites ${r.q} (${r.section}), whose answer E-${now.seq} no longer stands on its own support`);
+    }
     for (const [edges, role] of [[a.support ?? [], "rests on"], [a.limitations ?? [], "is bounded by"]] as const) {
       for (const edge of edges) {
         const t = bySeq.get(edge.seq);
@@ -9446,7 +9736,7 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
           continue;
         }
         const against = disputed.get(edge.hash);
-        if (against?.length && !qualified(t.seq)) out.push(`it ${role} E-${t.seq}, disputed by ${against.map((d) => `${d.by} (${d.why})`).join("; ")}`);
+        if (against?.length && !qualified(t.seq)) out.push(`it ${role} E-${t.seq}, disputed by ${against.map(disputeWords).join("; ")}`);
         const bad = failed.get(t.seq);
         if (bad?.length && !qualified(t.seq)) out.push(`it ${role} E-${t.seq}, which rests on the kept output of a job that did not succeed (${bad.join(", ")}) and says nothing of it`);
         if (t.kind === "answer") {
@@ -9454,6 +9744,29 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
           if (sub.length) out.push(`it ${role} E-${t.seq}, an answer that no longer stands on its own support`);
         }
       }
+    }
+    // The contrary evidence it weighed (A4): the weighing was of the entry
+    // as it stood. Corrected since (and the correction not weighed with it)
+    // or disputed (and not qualified), what the answer concludes against it
+    // is to be weighed again; its fingerprint holds the hashes it cited, so
+    // only its current standing shows the change.
+    for (const edge of a.contrary ?? []) {
+      const t = bySeq.get(edge.seq);
+      if (!t) {
+        out.push(`it weighs E-${edge.seq} as contrary evidence, which is not in the ledger`);
+        continue;
+      }
+      if ((t.hash ?? ledgerHash(t, "genesis")) !== edge.hash) {
+        out.push(`it weighs E-${edge.seq} as contrary evidence by a hash that is not that entry's`);
+        continue;
+      }
+      if (replaced.has(t.seq)) {
+        const now = standingSeq(t.seq, replaced);
+        if (!cited.has(now)) out.push(`it weighs E-${t.seq} as contrary evidence, superseded by #${now}, and does not weigh the correction`);
+        continue;
+      }
+      const against = disputed.get(edge.hash);
+      if (against?.length && !qualified(t.seq)) out.push(`it weighs E-${t.seq} as contrary evidence, disputed by ${against.map(disputeWords).join("; ")}`);
     }
     visiting.delete(a.seq);
     memo.set(a.seq, out);
@@ -9889,6 +10202,16 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   if (!evidence.ok) return evidence;
   const cited = answerCitations(`${value}\n${reasoning.value}`);
   const support = cited.filter((n) => !contrary.seqs.includes(n) && !limits.seqs.includes(n));
+  // A summary or a narrative cites the questions it sums up symbolically
+  // (Q-<n>): bound to each answer's conclusion, not to its seq (A4).
+  const symbolic: Array<{ q: string; section: string }> = [];
+  if (!question) {
+    for (const name of symbolicQuestions(`${value}\n${reasoning.value}`)) {
+      const id = name.startsWith("question:") ? sectionKey(name.slice("question:".length)) : sectionKey(await registerSection(ctx.sandboxRoot, name));
+      if (!LEDGER_ANSWER_ID.test(id)) return { ok: false, reason: `${name} is not a question this run has (questions list names them)` };
+      if (!symbolic.some((x) => x.section === `question:${id}`)) symbolic.push({ q: name, section: `question:${id}` });
+    }
+  }
   if (support.length + contrary.seqs.length + limits.seqs.length > LEDGER_MAX_CITATIONS) return { ok: false, reason: `the answer cites more than ${LEDGER_MAX_CITATIONS} entries: cite the ones it rests on` };
   // The negative bar (extensions/negative-bar.ts): what the question is, as the registers say.
   const bar = question ? await questionBar(ctx.sandboxRoot, sec.id) : null;
@@ -9927,6 +10250,22 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         const already = replaced.get(supersedes);
         if (already !== undefined) return { ok: false, reason: `#${supersedes} is already superseded by #${already}: correct #${already} instead, so the corrections stay one line` };
       }
+      // A question's answer cited symbolically is not cited by seq as well:
+      // its correction would take the summary down with it.
+      for (let i = support.length - 1; i >= 0; i--) {
+        const e = bySeq.get(support[i]!);
+        if (e?.kind === "answer" && symbolic.some((x) => x.section === e.section)) support.splice(i, 1);
+      }
+      const questionRefs: NonNullable<LedgerEntry["question_refs"]> = [];
+      if (symbolic.length) {
+        const fallen = answerProblems(entries, disputes);
+        for (const x of symbolic) {
+          const a = entries.find((e) => e.kind === "answer" && e.section === x.section && !replaced.has(e.seq));
+          if (!a) return { ok: false, reason: `${x.q} (${x.section}) has no standing answer yet: a ${sec.section} cites an answer that stands` };
+          if (fallen.has(a.seq)) return { ok: false, reason: `${x.q}'s answer E-${a.seq} no longer stands on its own support (${(fallen.get(a.seq) as string[]).join("; ")}): it is to be recorded again first` };
+          questionRefs.push({ q: x.q, section: x.section, answer: a.seq, fp: answerFingerprint(a) });
+        }
+      }
       for (const n of [...support, ...contrary.seqs, ...limits.seqs]) {
         if (!bySeq.has(n)) return { ok: false, reason: `E-${n}: there is no entry #${n} in the ledger (list them with ledger)` };
         if (n === supersedes) return { ok: false, reason: `E-${n} is the answer this one replaces: an answer does not rest on the answer it corrects` };
@@ -9937,8 +10276,8 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         if (replaced.has(n)) return { ok: false, reason: `limitations names #${n}, superseded by #${standingSeq(n, replaced)}: name the limitation that stands` };
       }
       // Every claimed support is checked, not one matching citation.
-      const disputedBy = new Map<string, LedgerDispute[]>();
-      for (const d of standingDisputes(disputes)) disputedBy.set(d.target, [...(disputedBy.get(d.target) ?? []), d]);
+      const disputedBy = new Map<string, DisputeInForce[]>();
+      for (const d of disputesInForce(entries, disputes)) disputedBy.set(d.target, [...(disputedBy.get(d.target) ?? []), d]);
       const problems = answerProblems(entries, disputes);
       const needs = new Set<number>();
       for (const n of support) {
@@ -9956,7 +10295,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
             return {
               ok: false,
               reason: against?.length
-                ? `E-${n} is disputed by ${against.map((d) => `${d.by}: ${d.why}`).join("; ")}; cite its correction, drop it, or say in qualifies [{ref: "E-${n}", why}] why it still supports this answer`
+                ? `E-${n} is disputed by ${against.map((d) => `${d.by}: ${d.why}${d.inherited_from !== undefined ? ` (raised on E-${d.inherited_from}, which it corrects: the dispute is open until ${d.by} withdraws it)` : ""}`).join("; ")}; cite its correction, drop it, or say in qualifies [{ref: "E-${n}", why}] why it still supports this answer`
                 : `E-${n} rests on the kept output of a job that did not succeed (${failed.join(", ")}) and does not say why it still holds: say so in qualifies [{ref: "E-${n}", why}], or cite an entry resting on a job that worked`,
             };
           }
@@ -9994,11 +10333,11 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
           if (!bar?.existence) return { ok: false, reason: `asserts_absence says the event did not happen: only an answer to a question that asks whether something exists may say that (the goal's --existence, or the register's expects existence); ${sec.section} does not. Say "No evidence of … was found in …"` };
           if (!complete.length) return { ok: false, reason: `asserts_absence says the event did not happen: it rests on a coverage record the hub found complete and that says the event would have left a trace (detection_opportunity.trace_expected yes); ${coverage.length ? coverage.map((c) => `E-${c.seq} is coverage ${c.coverage ?? "unknown"}, trace expected ${c.detection_opportunity?.trace_expected ?? "?"}`).join("; ") : "it cites no coverage record"}. Say "No evidence of … was found in …" instead` };
         }
-      } else if (!standingCites.length) {
-        return { ok: false, reason: `a ${sec.section} cites at least one standing entry as E-<seq>` };
+      } else if (!standingCites.length && !questionRefs.length) {
+        return { ok: false, reason: `a ${sec.section} cites at least one standing entry as E-<seq>, or the questions it sums up as Q-<n>` };
       }
       const edge = (n: number): LedgerEdge => ({ seq: n, hash: hashOf(bySeq.get(n) as LedgerEntry) });
-      const citedEntries = [...support, ...contrary.seqs, ...limits.seqs].map((n) => bySeq.get(n) as LedgerEntry);
+      const citedEntries = [...support, ...contrary.seqs, ...limits.seqs, ...questionRefs.map((r) => r.answer)].map((n) => bySeq.get(n) as LedgerEntry);
       const tokens = unsupportedTokens(`${value}\n${reasoning.value}`, citedEntries, bySeq);
       const candidate: LedgerEntry = {
         v: LEDGER_VERSION,
@@ -10023,6 +10362,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         ...(resultText ? { result: resultText as LedgerEntry["result"] } : {}),
         ...(noneWhy.value ? { contrary_none_why: noneWhy.value } : {}),
         ...(questionRev !== undefined ? { question_rev: questionRev } : {}),
+        ...(questionRefs.length ? { question_refs: questionRefs } : {}),
         ...(input.asserts_absence === true ? { asserts_absence: true } : {}),
         ...(tokens.length ? { unsupported_tokens: tokens } : {}),
         by: ctx.agentId,
@@ -10110,7 +10450,7 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
   const problems = answerProblems(entries, o.disputes, o.failed);
-  const standingD = standingDisputes(o.disputes);
+  const standingD = disputesInForce(entries, o.disputes);
   const defects: LedgerDefect[] = [];
   const answers: Record<string, LedgerEntry | null> = {};
   const unsupported: Record<number, string[]> = {};
@@ -10140,7 +10480,17 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
     const target = a.hash ?? ledgerHash(a, "genesis");
     const against = standingD.filter((d) => d.target === target);
     if (against.length) {
-      defects.push({ code: "answer_disputed", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) is disputed by ${against.map((d) => `${d.by}: ${d.why}`).join("; ")}`, fix: `answer the dispute: record the answer again with supersedes=${a.seq}, or the disputer withdraws it (dispute withdraw=true, with why), or record a limitation citing E-${a.seq}`, named_by: namedFor(a.seq) });
+      const inherited = against.filter((d) => d.inherited_from !== undefined);
+      defects.push({
+        code: "answer_disputed",
+        section: sec.section,
+        seqs: [a.seq],
+        what: `answer #${a.seq} (${sec.section}) is disputed by ${against.map((d) => `${d.by}: ${d.why}${d.inherited_from !== undefined ? ` (raised on #${d.inherited_from}, which it corrects: a correction does not answer a dispute)` : ""}`).join("; ")}`,
+        fix: inherited.length
+          ? `the disputer reads the correction and withdraws the dispute when it answers it (dispute withdraw=true on #${a.seq}, with why), or disputes it again; or record a limitation citing E-${a.seq}`
+          : `answer the dispute: correct the answer (record it again with supersedes=${a.seq}) and have the disputer withdraw it (dispute withdraw=true, with why) once the correction answers it, or record a limitation citing E-${a.seq}`,
+        named_by: namedFor(a.seq),
+      });
     }
     // The negative bar, on an answer that states its result (one recorded
     // before results reads as it always did): a material negative rests on
@@ -10310,6 +10660,38 @@ export async function runFinishLine(sandbox: string): Promise<FinishLineRun | nu
 /** The record a finish line reads that is not the goal's own files: where each lives. */
 export const REVISION_FILES = { ledger: LEDGER_ENTRIES, attestations: "ledger/attestations.jsonl", disputes: "ledger/disputes.jsonl", leads: "leads/leads.jsonl", questions: "questions/questions.jsonl" } as const;
 
+/**
+ * Whether a line of the lead or the question register is an offer's
+ * bookkeeping (docs/adr/0015): an offer made, delivered, declined, accepted
+ * or lapsed, or a wake from before offers. Those say who may take a piece of
+ * work first, never what the finish rests on, and idle seats write them all
+ * the time: were they in the revision, a waiting seat's delivered offer would
+ * make the coordinator's finish line run again, and one check result per
+ * revision would not hold. A closure offered to its closer to confirm is not
+ * bookkeeping: until it is confirmed it holds the finish. The lines are the
+ * registers' own compact JSON, where `"ev":"…"` can only be the event's key
+ * (a quote inside a value is escaped).
+ */
+export function offerBookkeeping(line: string): boolean {
+  if (line.includes('"ev":"wake"')) return true;
+  if (!line.includes('"ev":"offer')) return false;
+  return !(line.includes('"ev":"offer"') && line.includes('"reason":"confirm"'));
+}
+
+/** A register's part of the revision: its bytes, less its offers' bookkeeping for the lead and question registers. */
+function revisionPart(name: string, bytes: Buffer): string {
+  if (name !== "leads" && name !== "questions") return `${bytes.length}:${sha256Hex(bytes)}`;
+  const kept = Buffer.from(
+    bytes
+      .toString("utf8")
+      .split("\n")
+      .filter((line) => !offerBookkeeping(line))
+      .join("\n"),
+    "utf8",
+  );
+  return `${kept.length}:${sha256Hex(kept)}`;
+}
+
 /** Tags of a post that can change a verdict: a result, a veto, a hold, a stop. */
 const VERDICT_TAGS = new Set<string>(["result", "veto", "hold", "stop"]);
 /** A post never changes once written, so its tag and sender are read once per process. */
@@ -10320,12 +10702,27 @@ const postTagCache = new Map<string, { tag: string; from: string }>();
  * thread, the newest agent post that can change a verdict: a result, a veto,
  * a hold or a stop; an intro or a claim cannot), the ledger (every byte: a
  * merge rewrites an entry's authors, and an author may not attest), the
- * review (the attestations and the disputes) and the leads. A finish line run
+ * review (the attestations and the disputes), the leads and the questions
+ * (less their offers' bookkeeping: offerBookkeeping). A finish line run
  * against one revision holds only while the revision does: on the VM hub a
  * passing run was reused for 30 s whatever had changed in between, and a
  * dispute recorded in that window did not stop the sentinel.
  */
 export async function stateRevision(sandboxRoot: string): Promise<{ revision: string; parts: Record<string, string> }> {
+  const parts = await stateParts(sandboxRoot);
+  // What the finish rests on beyond the registers (A4): the report the
+  // coordinator's done names (by its digest), every job's state, the run's
+  // policy (the case policy too), the operator's decisions (the requests'
+  // chain, less its delivery bookkeeping) and what was added after the
+  // kickoff (docs/adr/0014). A job committed, a report rewritten, a pause, a
+  // host allowed, a request answered or evidence added between the finish
+  // line and the sentinel moves the revision, and the done is run again.
+  const { finishParts } = await import("./finish.ts");
+  Object.assign(parts, await finishParts(sandboxRoot));
+  return { revision: sha256Hex(JSON.stringify(parts)), parts };
+}
+
+async function stateParts(sandboxRoot: string): Promise<Record<string, string>> {
   const parts: Record<string, string> = {};
   const board: Record<string, number> = {};
   for (const thread of await listThreadNames(sandboxRoot)) {
@@ -10346,9 +10743,9 @@ export async function stateRevision(sandboxRoot: string): Promise<{ revision: st
   parts.board = JSON.stringify(board);
   for (const [name, rel] of Object.entries(REVISION_FILES)) {
     const bytes = await readFile(join(sandboxRoot, rel)).catch(() => null);
-    parts[name] = bytes ? `${bytes.length}:${sha256Hex(bytes)}` : "none";
+    parts[name] = bytes ? revisionPart(name, bytes) : "none";
   }
-  return { revision: sha256Hex(JSON.stringify(parts)), parts };
+  return parts;
 }
 
 /** How many times a finish line is run again when the state moved under it, before done is refused. */
