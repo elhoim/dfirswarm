@@ -9,7 +9,8 @@
 # target, detached:
 #
 #   <run>.cmd      the operator's own command, run with one JSON line on its
-#                  stdin: {"event": "...", "run": "<id>", "at": "<UTC>", "detail": {...}}
+#                  stdin: {"event": "...", "run": "<id>", "at": "<UTC>",
+#                  "event_id": "n-...", "detail": {...identifiers only...}}
 #   <run>.targets  one typed target a line:
 #                    desktop:          a desktop notification (osascript on
 #                                      macOS, notify-send elsewhere)
@@ -17,10 +18,12 @@
 #                                      for a server of your own)
 #                    mailto:<address>  a mail through this host's mail or sendmail
 #
-# A typed target is told the event, the run and, for an operator request,
-# its ids (the request's R-n, its kind, the lead's or question's id), never
-# what was asked or found: it leaves the host. The command form gets the
-# same ids for an operator request, and the event's detail for the others.
+# Every target gets an identifier-only envelope: the event, the run, the
+# event's id and, of its details, identifiers, enumerations, numbers and the
+# counts of lists (an operator request's R-n and kind, the lead's or
+# question's id; an agent's id; how many evidence files changed), never what
+# was asked, found or printed: it leaves the host. The details themselves are
+# kept in the run, traces/notify-events.jsonl, under the event id.
 #
 # Events: finished, finish_failed, stop_incomplete, budget_cap, wall_clock,
 # paused (a cap-pause run held at a cap), extended (the operator gave it
@@ -71,13 +74,37 @@ fi
 [[ -n "$cmd" || ${#targets[@]} -gt 0 ]] || exit 0
 
 jq -e . >/dev/null 2>&1 <<<"$DETAIL" || DETAIL="$(jq -nc --arg d "$DETAIL" '{text: $d}')"
-# An operator request is told by its ids only, whoever it goes to: never
-# what was asked, which may be case content.
-if [[ "$EVENT" == operator_request ]]; then
-  DETAIL="$(jq -c '{request, kind, run, lead, question, id, item, questions, urgency, show} | with_entries(select(.value != null))' <<<"$DETAIL" 2>/dev/null || echo '{}')"
+at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Every event leaves the host as an identifier-only envelope, whoever it
+# goes to (docs/adr/0014): the event, the run, an event id, and of the
+# details only identifiers and enumerations (a request's R-n and kind, a
+# lead's or question's id, an agent's id, a state, a reason), numbers, and
+# for a list the count of what it named. What an evidence change named, a
+# failed finish's output, an operator request's words: case content, kept
+# here, in the run (traces/notify-events.jsonl), under the event id the
+# envelope carries. Nothing of it is in the line a command reads, in its
+# environment or in a typed target's message.
+event_id="n-$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || echo $$)"
+if [[ -d "$sandbox_real/traces" ]]; then
+  jq -nc --arg id "$event_id" --arg e "$EVENT" --arg r "$run" --arg at "$at" --argjson d "$DETAIL" \
+    '{id: $id, event: $e, run: $r, at: $at, detail: $d}' >> "$sandbox_real/traces/notify-events.jsonl" 2>/dev/null || true
 fi
-line="$(jq -nc --arg e "$EVENT" --arg r "$run" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson d "$DETAIL" \
-  '{event: $e, run: $r, at: $at, detail: $d}')" || exit 0
+ENVELOPE="$(jq -c '
+  def idlike: type == "string" and test("^[A-Za-z0-9_.:@-]{1,64}$");
+  ["request", "kind", "run", "lead", "question", "id", "item", "questions", "urgency", "agent", "scope", "reason", "state", "by", "event"] as $keys
+  | if type == "object" then . else {} end
+  | to_entries
+  | map(
+      if (.key | IN($keys[])) then
+        (if (.value | idlike) or (.value | type) == "number" or (.value | type) == "boolean" then .
+         elif (.value | type) == "array" and (.value | all(idlike)) then .
+         else empty end)
+      elif (.value | type) == "array" then {key: (.key + "_count"), value: (.value | length)}
+      elif (.value | type) == "number" or (.value | type) == "boolean" then .
+      else empty end)
+  | from_entries' <<<"$DETAIL" 2>/dev/null || echo '{}')"
+line="$(jq -nc --arg e "$EVENT" --arg r "$run" --arg at "$at" --arg id "$event_id" --argjson d "$ENVELOPE" \
+  '{event: $e, run: $r, at: $at, event_id: $id, detail: $d, details: "traces/notify-events.jsonl in the run, under event_id"}')" || exit 0
 # What a typed target is told: the event and the run, and an operator request's ids.
 words="$(jq -r --arg r "$run" '
   if .event == "operator_request" then
@@ -136,13 +163,16 @@ ntfy() { # <topic or https://host/topic>
   command -v curl >/dev/null 2>&1 || { echo "no curl on this host"; return 3; }
   curl -fsS -m "$LIMIT" -H "Title: $title" -d "$words" "$url"
 }
+# One mailbox, never an option: a leading "-" is refused, and the transport
+# is given the address after its option terminator.
+MAILBOX_RE='^[A-Za-z0-9_%+][A-Za-z0-9._%+-]{0,63}@[A-Za-z0-9]([A-Za-z0-9-]{0,62}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}[A-Za-z0-9])?)+$'
 mailto() { # <address>
   local to="$1"
-  [[ "$to" =~ ^[^[:space:]@]+@[^[:space:]@]+$ ]] || { echo "not a mail address: $to"; return 3; }
+  [[ "$to" =~ $MAILBOX_RE ]] || { echo "not one mail address: the notify target is refused"; return 3; }
   if command -v mail >/dev/null 2>&1; then
-    printf '%s\n' "$words" | mail -s "$title: $EVENT" "$to"
+    printf '%s\n' "$words" | mail -s "$title: $EVENT" -- "$to"
   elif command -v sendmail >/dev/null 2>&1; then
-    printf 'To: %s\nSubject: %s: %s\n\n%s\n' "$to" "$title" "$EVENT" "$words" | sendmail "$to"
+    printf 'To: %s\nSubject: %s: %s\n\n%s\n' "$to" "$title" "$EVENT" "$words" | sendmail -i -- "$to"
   else
     echo "no mail and no sendmail on this host"
     return 3
@@ -165,7 +195,7 @@ runner() {
 }
 if command -v setsid >/dev/null 2>&1; then
   export -f runner deliver run_command desktop ntfy mailto
-  export line cmd log EVENT LIMIT words title
+  export line cmd log EVENT LIMIT words title MAILBOX_RE
   export TARGETS_LINES="$(printf '%s\n' "${targets[@]+"${targets[@]}"}")"
   setsid bash -c 'targets=(); while IFS= read -r t; do [[ -n "$t" ]] && targets+=("$t"); done <<<"$TARGETS_LINES"; runner' </dev/null >/dev/null 2>&1 &
 else

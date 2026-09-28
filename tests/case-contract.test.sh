@@ -162,9 +162,10 @@ out="$(kick --more-evidence yes --label c2)" || fail "the second kickoff was ref
 id2="$(id_of c2)"; sb2="$(sandbox_of c2)"
 before="$(sha "$sb2/network/policy.json")"
 out="$(swarm stop "$id2")" || fail "stop failed: $out"
-# The kept options now say otherwise (as a goal edited since would).
+# The kept options now say otherwise (as a goal edited since would): the
+# file is {argv, dropped_env, notify}, the options under argv.
 argv="$TMP/runs/resume/$id2.argv.json"
-jq 'map(if . == "yes" then "no" else . end)' "$argv" > "$TMP/argv.json" && cat "$TMP/argv.json" > "$argv"
+jq '.argv |= map(if . == "yes" then "no" else . end)' "$argv" > "$TMP/argv.json" && cat "$TMP/argv.json" > "$argv"
 out="$(swarm resume "$id2" --no-start)" || fail "the resume was refused: $out"
 grep -q 'NOTE: the resumed run keeps the case policy its kickoff recorded; these options say otherwise: more_evidence: recorded "yes", these options "no"' <<<"$out" || fail "the resume did not say it keeps the recorded policy: $out"
 [[ "$(sha "$sb2/network/policy.json")" == "$before" ]] || fail "the resume rewrote network/policy.json"
@@ -172,6 +173,44 @@ grep -q 'NOTE: the resumed run keeps the case policy its kickoff recorded; these
 [[ "$(grep -c '^## Case policy and network' "$sb2/SWARM.md")" == 1 ]] || fail "the resume appended a second policy section"
 [[ "$(jq -r --arg id "$id2" '.runs[] | select(.id == $id) | .case_policy.more_evidence' "$TMP/runs/registry.json")" == yes ]] || fail "the registry took the resume's options over the recorded policy"
 pass "a resume keeps the recorded case policy: the file, its anchor, SWARM.md and the registry, and says what the options would have changed"
+
+echo "# a resume's own --no-netguard cannot open a run its recorded policy keeps closed (review 1)"
+out="$(kick --label c3)" || fail "the third kickoff was refused: $out"
+id3="$(id_of c3)"; sb3="$(sandbox_of c3)"
+[[ "$(jq -r --arg id "$id3" '.runs[] | select(.id == $id) | .netguard' "$TMP/runs/registry.json")" == true ]] || fail "a closed run is not guarded"
+out="$(swarm stop "$id3")" || fail "stop failed: $out"
+argv="$TMP/runs/resume/$id3.argv.json"
+jq '.argv += ["--no-netguard"]' "$argv" > "$TMP/argv3.json" && cat "$TMP/argv3.json" > "$argv"
+out="$(swarm resume "$id3" --no-start)" || fail "the resume was refused: $out"
+grep -q 'NOTE: --no-netguard is among the resumed run.s options, and its recorded case policy says network closed: the run.s egress stays guarded' <<<"$out" || fail "the resume did not say its egress stays guarded: $out"
+[[ "$(jq -r --arg id "$id3" '.runs[] | select(.id == $id) | .netguard' "$TMP/runs/registry.json")" == true ]] || fail "the resumed run's egress was opened under a closed policy: $(jq -c --arg id "$id3" '.runs[] | select(.id == $id) | {netguard, netguard_mode, case_policy: .case_policy.network}' "$TMP/runs/registry.json")"
+[[ "$(jq -r '.network' "$sb3/network/policy.json")" == closed ]] || fail "the recorded policy moved"
+# The generated specs are held to the policy: an open VM or job spec under a closed policy is refused.
+printf '{"open_net": true}\n' > "$TMP/spec.json"
+out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/case-policy.ts" check-spec --policy-json "$(cat "$sb3/network/policy.json")" --spec "$TMP/spec.json" 2>&1)" && fail "an open spec under a closed policy passed: $out"
+grep -q 'the VM spec says open_net true, and the case policy.s network is closed' <<<"$out" || fail "$out"
+out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/case-policy.ts" check-spec --policy-json "$(cat "$sb3/network/policy.json")" --spec "$TMP/spec.json" --jobs-json '{"openNet": true}' 2>&1)" && fail "open jobs passed"
+grep -q 'openNet true' <<<"$out" || fail "$out"
+printf '{"open_net": false}\n' > "$TMP/spec.json"
+node --experimental-strip-types --no-warnings "$ROOT/scripts/case-policy.ts" check-spec --policy-json "$(cat "$sb3/network/policy.json")" --spec "$TMP/spec.json" --jobs-json '{"openNet": false}' >/dev/null || fail "a closed spec under a closed policy was refused"
+grep -q 'check_spec_network "$spec"' "$ROOT/scripts/swarm.sh" && grep -q 'check_spec_network "$sandbox/vm-spec.json"' "$ROOT/scripts/swarm.sh" || fail "the kickoff does not hold its specs to the policy"
+pass "a resume derives its egress from the recorded policy, and the generated specs are held to it"
+
+echo "# mailto: one mailbox, never an option (review 15)"
+out="$(kick --notify 'mailto:-X/tmp/notify@example.org' --label c-bad5)" && fail "an option-shaped mailto was accepted: $out"
+grep -q 'takes one mail address (local@domain, not beginning with -)' <<<"$out" || fail "$out"
+out="$(kick --notify 'mailto:a@example.org,b@example.org' --label c-bad6)" && fail "two recipients were accepted: $out"
+: > "$TMP/mail.got"
+printf 'mailto:-X/tmp/notify@example.org\n' > "$TMP/runs/notify/$id.targets"
+PATH="$FAKE:$PATH" SWARM_NOTIFY_TIMEOUT=5 bash "$ROOT/scripts/notify.sh" "$sb" operator_request '{"request":"R-9","kind":"lead"}'
+sleep 2
+[[ ! -s "$TMP/mail.got" ]] || fail "an option-shaped recipient reached the mail program: $(cat "$TMP/mail.got")"
+grep -q 'not one mail address' "$sb/traces/notify.log" || fail "the refused target is not in the log"
+printf 'mailto:examiner@example.org\n' > "$TMP/runs/notify/$id.targets"
+PATH="$FAKE:$PATH" SWARM_NOTIFY_TIMEOUT=5 bash "$ROOT/scripts/notify.sh" "$sb" operator_request '{"request":"R-9","kind":"lead"}'
+for _ in $(seq 1 50); do [[ -s "$TMP/mail.got" ]] && break; sleep 0.1; done
+grep -q -- '-- examiner@example.org' "$TMP/mail.got" || fail "the mail program was not given the address after its option terminator: $(cat "$TMP/mail.got")"
+pass "a mailto target is one mailbox, refused when it begins with -, and given after --"
 
 echo "# help"
 swarm help requests | grep -q 'requests <id> authorise|collecting|unavailable R-n' || fail "help requests"

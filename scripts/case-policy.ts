@@ -468,6 +468,22 @@ export function egressConflicts(p: CasePolicy, o: { allowHosts?: string[]; insta
   return out;
 }
 
+/**
+ * The generated VM spec and the job service's settings, held to the policy
+ * they were made under: open egress (the spec's `open_net`, the jobs'
+ * `openNet`) exactly when the network is `open`. A resume keeps its recorded
+ * policy, and the start's own flags (`--no-netguard`) must not open what that
+ * policy keeps closed, nor the other way round.
+ */
+export function specConflicts(p: CasePolicy | null, spec: { open_net?: unknown } | null, jobs: { openNet?: unknown } | null): string[] {
+  if (!p) return [];
+  const open = p.network === "open";
+  const out: string[] = [];
+  if (spec && typeof spec.open_net === "boolean" && spec.open_net !== open) out.push(`the VM spec says open_net ${spec.open_net}, and the case policy's network is ${p.network}${open ? "" : ": every VM would reach every public host"}`);
+  if (jobs && typeof jobs.openNet === "boolean" && jobs.openNet !== open) out.push(`the job service's settings say openNet ${jobs.openNet}, and the case policy's network is ${p.network}${open ? "" : ": every job asking for network would reach every public host"}`);
+  return out;
+}
+
 /** Where a run's case policy is recorded, and read on every network decision. */
 export const POLICY_REL = "network/policy.json";
 
@@ -680,6 +696,17 @@ async function main(argv: string[]): Promise<void> {
     const split = (v?: string) => (v ?? "").split(",").filter(Boolean);
     const parsed = JSON.parse(raw) as CasePolicy | null;
     const conflicts = !parsed ? [] : egressConflicts(parsed, { allowHosts: split(opt("--allow-hosts")), installHosts: split(opt("--install-hosts")), packHosts: split(opt("--pack-hosts")) });
+    process.stdout.write(`${JSON.stringify({ ok: !conflicts.length, conflicts })}\n`);
+    process.exit(conflicts.length ? 1 : 0);
+  }
+  if (cmd === "check-spec") {
+    const raw = opt("--policy-json");
+    const specFile = opt("--spec");
+    const jobsRaw = opt("--jobs-json");
+    const parsed = raw ? (JSON.parse(raw) as CasePolicy | null) : null;
+    const spec = specFile && existsSync(specFile) ? (JSON.parse(readFileSync(specFile, "utf8")) as { open_net?: unknown }) : null;
+    const jobs = jobsRaw ? (JSON.parse(jobsRaw) as { openNet?: unknown }) : null;
+    const conflicts = specConflicts(parsed ? normalise(parsed) : null, spec, jobs);
     process.stdout.write(`${JSON.stringify({ ok: !conflicts.length, conflicts })}\n`);
     process.exit(conflicts.length ? 1 : 0);
   }

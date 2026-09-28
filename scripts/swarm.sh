@@ -226,11 +226,14 @@ The team
                       operator_request (fired by the hub when a request is
                       committed), evidence_changed, chain_broken, agent_dead,
                       collector_unreachable, hub_down. A command gets one JSON
-                      line on stdin ({event, run, at, detail}); every target
-                      gets 30 seconds. An operator request is told by its ids
-                      only (R-n, its kind, the lead or question), never what it
-                      asks. Kept outside the run (runs/notify/, 0600); the
-                      registry records only that there is one.
+                      line on stdin ({event, run, at, event_id, detail}), its
+                      detail identifiers, numbers and counts only (the whole
+                      is kept in the run, traces/notify-events.jsonl); every
+                      target gets 30 seconds. An operator request is told by
+                      its ids only (R-n, its kind, the lead or question), never
+                      what it asks. mailto: takes one mailbox. Kept outside the
+                      run (runs/notify/, 0600); the registry records only that
+                      there is one.
   --ledger-from RUN   Bring a finished earlier run's ledger in as hypotheses to
                       test: prior/ledger.md, read-only, never the new ledger.
                       With the earlier run's examiner reviews, only the entries
@@ -4063,7 +4066,8 @@ cmd_start() {
             [[ "${2#ntfy:}" =~ ^([A-Za-z0-9_-]{1,64}|https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9_-]{1,64})$ ]] || { echo "BLOCKER: --notify ntfy:<topic> takes a topic (letters, digits, _ and -) or https://host/topic." >&2; exit 2; }
             notify_targets+="${notify_targets:+$'\n'}$2" ;;
           mailto:*)
-            [[ "${2#mailto:}" =~ ^[^[:space:]@]+@[^[:space:]@]+$ ]] || { echo "BLOCKER: --notify mailto:<address> takes one mail address." >&2; exit 2; }
+            # One mailbox, never an option: the transport would read "-X…" as a flag.
+            [[ "${2#mailto:}" =~ ^[A-Za-z0-9_%+][A-Za-z0-9._%+-]{0,63}@[A-Za-z0-9]([A-Za-z0-9-]{0,62}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}[A-Za-z0-9])?)+$ ]] || { echo "BLOCKER: --notify mailto:<address> takes one mail address (local@domain, not beginning with -)." >&2; exit 2; }
             notify_targets+="${notify_targets:+$'\n'}$2" ;;
           *) notify_cmd="$2" ;;
         esac
@@ -4568,8 +4572,18 @@ cmd_start() {
   if svc_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/case-policy.ts" services --goal-file "$goal_file" --policy-json "$CASE_POLICY_JSON" 2>/dev/null)"; then
     jq -r '(.notes // [])[] | if .level == "warn" then "WARN: \(.text)" else "Service:      \(.text)" end' <<<"$svc_out" >&2
   fi
+  # The egress the run enforces follows the policy it runs under, in both
+  # directions: a resume keeps its recorded policy, so --no-netguard among
+  # its options cannot open a run whose policy is closed or dynamic, and a
+  # recorded open policy stays open. The generated VM and job specs are held
+  # to it again once they are written (check_spec_network).
   network_mode="$(jq -r '.network' <<<"$CASE_POLICY_JSON")"
-  [[ "$network_mode" == open ]] && use_netguard=0
+  if [[ "$network_mode" == open ]]; then
+    use_netguard=0
+  else
+    [[ "$use_netguard" -eq 0 && -n "$resume_of" ]] && echo "NOTE: --no-netguard is among the resumed run's options, and its recorded case policy says network $network_mode: the run's egress stays guarded" >&2
+    use_netguard=1
+  fi
   # --allow-host, said for what it is: neither mediated nor captured.
   if [[ -n "$allow_hosts" ]]; then
     echo "Allowlist:    --allow-host $allow_hosts is a static socket allowance for the whole run (tier 2): host and port only, no method or path control, no content capture"
@@ -6445,6 +6459,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       mkdir -p "$prepared/runs"
       jq -n --argjson r "$rec" '{runs: [$r]}' > "$prepared/runs/registry.json"
       vm_build_spec "$prepared" "$sandbox/vm-spec.json"
+      check_spec_network "$sandbox/vm-spec.json" || exit 1
       echo "VM spec:      $sandbox/vm-spec.json (what each VM would be given; no VM was made)"
     fi
     echo "Sandbox ready. Skipping Herdr/Pi start (--no-start)."
@@ -8467,6 +8482,19 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when a VM of the
 # secrets (never a value). Written by the kickoff for a start, and for a
 # --no-start into the run (`vm-spec.json`), so what the VMs would be given
 # can be read and tested without booting one. Reads cmd_start's variables.
+# The VM spec and the job service's settings, held to the case policy they
+# were made under: open egress (open_net, openNet) exactly when the policy's
+# network is open. A mismatch stops the start: the anchored policy would say
+# one thing and the VMs do another.
+check_spec_network() { # <vm spec file>
+  local out
+  if ! out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/case-policy.ts" check-spec --policy-json "${CASE_POLICY_JSON:-null}" --spec "$1" ${JOBS_JSON:+--jobs-json "$JOBS_JSON"} 2>&1)"; then
+    echo "BLOCKER: the generated VM or job spec does not match the case policy:" >&2
+    jq -r '(.conflicts // [])[] | "  \(.)"' <<<"$out" >&2 2>/dev/null || printf '%s\n' "$out" >&2
+    return 1
+  fi
+}
+
 vm_build_spec() { # <hub dir> <out file>
   local hub_dir="$1" spec="$2"
 
@@ -8717,6 +8745,12 @@ launch_vm_agents() {
   fi
   local spec="$hub_dir/vm-spec.json"
   vm_build_spec "$hub_dir" "$spec"
+  if ! check_spec_network "$spec"; then
+    stop_vm_run "$sandbox" "$swarm_id" 0
+    stop_sandbox_daemons "$sandbox" keep-record
+    registry_update_state "$swarm_id" "failed"
+    exit 1
+  fi
   if [[ "${model_gateway:-0}" -eq 1 ]] && ! start_model_gateway "$sandbox" "$hub_dir" "$spec"; then
     stop_vm_run "$sandbox" "$swarm_id" 0
     stop_sandbox_daemons "$sandbox" keep-record
