@@ -37,6 +37,8 @@ export type ChangeKind =
   | "store"
   /** leads/: the lead register, and what the agents asked of the operator. */
   | "leads"
+  /** questions/: the question register. */
+  | "questions"
   /** A live VM run's hub wrote its status (the seats' states): outside the runs directory, watched on its own. */
   | "hub"
   | "other"
@@ -108,6 +110,8 @@ function kindOf(second: string, third: string): ChangeKind {
     case "operator-requests.jsonl":
     case "operator-hosts.jsonl":
       return "leads";
+    case "questions":
+      return "questions";
     case ".pi-sessions":
     case ".pi":
       return "sessions";

@@ -5,12 +5,17 @@
  * answers it: a note (recorded on the lead, posted to the board, the lead
  * reopened) and, in a microVM run, a host the run's jobs may reach from now
  * on. The answer is run as `swarm.sh lead`, so it lands on the trace and the
- * operator's record like the CLI's. Every lead is listed whole; nothing is cut.
+ * operator's record like the CLI's. "Add directive" opens an unheld lead under
+ * a question (or under a question asked in the same act), with the product it
+ * is to make and what makes that product acceptable: a directive says what to
+ * look at, never who does it (a held one would be an assignment). Every lead
+ * is listed whole; nothing is cut.
  */
 import { useCallback, useState, type ReactNode } from "react";
-import { AlertTriangle, CircleDot, Hourglass, ListChecks, PlayCircle } from "lucide-react";
+import { AlertTriangle, CircleDot, Compass, Hourglass, ListChecks, PlayCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Input, Textarea } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Chip } from "@/components/console";
 import { JobCard } from "@/components/jobs-drawer";
@@ -65,6 +70,22 @@ function LeadCard({ lead, names }: { lead: LeadView; names: (id: string) => stri
           <>
             <dt className="text-ink-3">Questions</dt>
             <dd className="m-0">{lead.answers.map((a) => `question:${a}`).join(", ")}</dd>
+          </>
+        ) : null}
+        {lead.proposition ? (
+          <>
+            <dt className="text-ink-3">Tests</dt>
+            <dd className="m-0">
+              {lead.proposition}; <span className="text-ink-3">against:</span> {lead.negation}
+            </dd>
+          </>
+        ) : null}
+        {lead.product ? (
+          <>
+            <dt className="text-ink-3">Product</dt>
+            <dd className="m-0">
+              {lead.product}; <span className="text-ink-3">accepted when:</span> {lead.acceptance}
+            </dd>
           </>
         ) : null}
         {lead.jobs.length ? (
@@ -157,6 +178,77 @@ function OperatorRequest({ lead, runId, vmRun, onJob }: { lead: LeadView; runId:
   );
 }
 
+/** "Add directive": an unheld lead under a question, with its product and acceptance, run as swarm.sh lead direct. */
+function DirectiveForm({ runId, onJob }: { runId: string; onJob: (id: string) => void }) {
+  const loader = useCallback(() => api.questions(runId), [runId]);
+  const questions = useResource(loader, 0, [runId]);
+  const [q, setQ] = useState("");
+  const [newQuestion, setNewQuestion] = useState("");
+  const [newWhy, setNewWhy] = useState("");
+  const [title, setTitle] = useState("");
+  const [why, setWhy] = useState("");
+  const [product, setProduct] = useState("");
+  const [acceptance, setAcceptance] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const options = [
+    { value: "", label: "A new question", hint: "asked in the same act, as yourself" },
+    ...(questions.data?.questions ?? []).filter((x) => x.scope === "in_scope" && !x.withdrawn).map((x) => ({ value: x.id, label: x.id, hint: x.text })),
+  ];
+  let as = "";
+  try {
+    as = sessionStorage.getItem("dfirswarm.questions.as") ?? "";
+  } catch {
+    as = "";
+  }
+  async function submit() {
+    setError(null);
+    setBusy(true);
+    try {
+      const job = await api.leadDirect(runId, { ...(q ? { q } : { new_question: newQuestion, new_why: newWhy }), title, why, product, acceptance, ...(as ? { as } : {}) });
+      onJob(job.id);
+      setTitle("");
+      setWhy("");
+      setProduct("");
+      setAcceptance("");
+      setNewQuestion("");
+      setNewWhy("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : (err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  const ready = title.trim() && why.trim() && product.trim() && acceptance.trim() && (q || (newQuestion.trim() && newWhy.trim()));
+  return (
+    <details className="card px-3 py-2.5 text-[12.5px]">
+      <summary className="label-caps flex cursor-pointer items-center gap-1.5">
+        <Compass className="size-3.5" /> Add directive
+      </summary>
+      <div className="mt-2 grid gap-2">
+        <p className="m-0 text-[12px] text-ink-3">A directive says what to look at and what to produce; nobody is assigned it. It opens unheld under a question, and the seat idle longest is woken for it.</p>
+        <Select value={q} onChange={setQ} options={options} aria-label="Under the question" />
+        {!q ? (
+          <>
+            <Textarea value={newQuestion} onChange={(e) => setNewQuestion(e.target.value)} placeholder="the question it serves, whole" />
+            <Input value={newWhy} onChange={(e) => setNewWhy(e.target.value)} placeholder="why the case needs that question" />
+          </>
+        ) : null}
+        <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="what to look at (the lead's title)" />
+        <Input value={why} onChange={(e) => setWhy(e.target.value)} placeholder="why" />
+        <Input value={product} onChange={(e) => setProduct(e.target.value)} placeholder="the product: what it is to produce" />
+        <Input value={acceptance} onChange={(e) => setAcceptance(e.target.value)} placeholder="acceptance: what makes the product acceptable" />
+        <div>
+          <Button size="sm" disabled={busy || !ready} onClick={() => void submit()}>
+            Open the directive
+          </Button>
+        </div>
+        {error ? <InlineNote tone="danger">{error}</InlineNote> : null}
+      </div>
+    </details>
+  );
+}
+
 export function LeadsPanel({ view, version }: { view: SwarmView; version: number }) {
   const id = view.summary.id;
   const live = useLive();
@@ -201,6 +293,8 @@ export function LeadsPanel({ view, version }: { view: SwarmView; version: number
         {job ? <JobCard job={job} /> : null}
         {d.hosts.length ? <p className="m-0 text-[12px] text-ink-2">Hosts allowed for the run's jobs while it ran: {d.hosts.join(", ")}.</p> : null}
       </section>
+
+      <DirectiveForm runId={id} onJob={setJobId} />
 
       {d.coverage.questions.length ? (
         <section className="space-y-1">

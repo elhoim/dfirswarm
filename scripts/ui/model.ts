@@ -35,6 +35,8 @@ import {
 } from "../../extensions/observe.ts";
 import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
 import { awaitingInterpretation, leadsSnapshot, OPERATOR_REQUESTS, operatorHosts, questionCoverage, rankedLeads, type AwaitingJob, type LeadView } from "../../extensions/leads.ts";
+import { HUMAN_ORIGINS, originWords, questionViews, viewContext, type QuestionView, type TriageItem } from "../../extensions/questions.ts";
+import { verifySignedActs, type SignedAct } from "../questions-cli.ts";
 import { claimSequences, type ClaimSequence } from "../../ui/src/lib/claim-sequences.ts";
 import { isFailureEvent } from "../../ui/src/lib/event-taxonomy.ts";
 import { vmTimeline, type VmTimeline } from "../../ui/src/lib/vm-timeline.ts";
@@ -553,9 +555,85 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   custody: CustodyView | null;
   /** The lead register in brief, for the header: what waits on the operator above all. Null when the run opened no lead. */
   leads: LeadsBrief | null;
+  /** The question register in brief, for the header and the tab strip: what waits for the operator's triage and answers. */
+  questions: QuestionsBrief | null;
   /** Whether the run was started until solved: no wall clock, caps advisory, only the operator ends it. */
   until_solved: boolean;
 };
+
+/** The question register in numbers: in scope, asked by people, waiting for triage, clarifications not answered. */
+export type QuestionsBrief = { in_scope: number; persons: number; unanswered: number; proposed: number; triage: number; clarifications: number; chain_ok: boolean };
+
+/**
+ * The Questions tab (extensions/questions.ts): every question with who asked
+ * it (claimed or signed, each signature checked), its scope, work state,
+ * answer and leads; what waits for the operator's triage; the clarifications
+ * agents asked; and what the add form picks from: the objectives, the seats,
+ * and the budget left.
+ */
+export type QuestionsPanelView = {
+  questions: QuestionView[];
+  objectives: Array<{ id: string; text: string; why: string; added_by: string | null }>;
+  triage: TriageItem[];
+  chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null; events: number };
+  seeded: boolean;
+  signatures: SignedAct[];
+  seats: string[];
+  budget: { cap_usd: number; spent_usd: number; tokens: number; cap_tokens: number | null; until_solved: boolean } | null;
+};
+
+/** The question register as the console shows it, read from the files. */
+export async function readQuestions(sandbox: string): Promise<QuestionsPanelView> {
+  const ctx = await viewContext(sandbox);
+  const s = ctx.questions.state;
+  const budget = await readBudgetFile(sandbox);
+  const team = await readTeamIds(sandbox);
+  return {
+    questions: questionViews(ctx),
+    objectives: [...s.objectives.values()].map((o) => ({ id: o.id, text: o.text, why: o.why, added_by: o.origin && o.origin.kind !== "goal" ? originWords(o.origin) : null })),
+    triage: s.triage,
+    chain: { ...s.chain, events: s.events.length },
+    seeded: ctx.questions.seeded,
+    signatures: await verifySignedActs(sandbox).catch(() => []),
+    seats: team,
+    budget,
+  };
+}
+
+async function readBudgetFile(sandbox: string): Promise<QuestionsPanelView["budget"]> {
+  try {
+    const b = JSON.parse(await readFile(join(sandbox, "budget.json"), "utf8")) as { cap_usd?: number; spent_usd?: number; tokens?: number; cap_tokens?: number | null; until_solved?: boolean };
+    return { cap_usd: Number(b.cap_usd ?? 0), spent_usd: Number(b.spent_usd ?? 0), tokens: Number(b.tokens ?? 0), cap_tokens: b.cap_tokens ?? null, until_solved: b.until_solved === true };
+  } catch {
+    return null;
+  }
+}
+
+async function readTeamIds(sandbox: string): Promise<string[]> {
+  try {
+    const t = JSON.parse(await readFile(join(sandbox, "team.json"), "utf8")) as { agents?: Array<{ id?: string }> };
+    return (t.agents ?? []).map((a) => String(a.id ?? "")).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function questionsBrief(sandbox: string): Promise<QuestionsBrief | null> {
+  const ctx = await viewContext(sandbox).catch(() => null);
+  if (!ctx) return null;
+  const views = questionViews(ctx);
+  if (!views.length && !ctx.questions.state.objectives.size) return null;
+  const live = views.filter((v) => v.scope === "in_scope" && !v.withdrawn && !v.after_done);
+  return {
+    in_scope: live.length,
+    persons: live.filter((v) => HUMAN_ORIGINS.has(v.origin.kind)).length,
+    unanswered: live.filter((v) => !v.answer || v.answer.stale).length,
+    proposed: views.filter((v) => v.scope === "proposed" && !v.withdrawn).length,
+    triage: ctx.questions.state.triage.filter((t) => !t.resolved).length,
+    clarifications: views.reduce((n, v) => n + v.pending_clarifications.length, 0),
+    chain_ok: ctx.questions.state.chain.ok,
+  };
+}
 
 /** The register in numbers, for the header and the tab strip. */
 export type LeadsBrief = { open: number; active: number; blocked: number; closed: number; waiting_on_operator: number; uncovered: number; chain_ok: boolean };
@@ -1105,6 +1183,7 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     vm_timeline: vmTimeline({ started_at: summary.started_at || null, finished_at: summary.finished_at, now: Date.now(), vms, events: events.map((e) => ({ ...e, ts: hostTime(e) })) }),
     custody: await readCustody(sandbox),
     leads: await leadsBrief(sandbox),
+    questions: await questionsBrief(sandbox),
     until_solved: detail.budget.until_solved === true,
   };
 }

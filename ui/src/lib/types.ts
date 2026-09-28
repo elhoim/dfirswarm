@@ -9,7 +9,7 @@ import type { VmTimeline } from "./vm-timeline.ts";
  */
 export type SwarmPhase = "running" | "done" | "stopped" | "prepared" | "failed" | "finish_failed" | "stop_incomplete" | "unknown";
 export type AgentMarker = "done" | "dead" | "stalled" | "active";
-export type PostTag = "intro" | "ask" | "claim" | "result" | "hold" | "veto" | "stop";
+export type PostTag = "intro" | "ask" | "claim" | "result" | "hold" | "veto" | "stop" | "question";
 
 export type SwarmRow = {
   id: string;
@@ -473,8 +473,84 @@ export type SwarmView = {
   custody?: CustodyView | null;
   /** The lead register in numbers; null when the run opened no lead. Absent from a server that predates it. */
   leads?: LeadsBrief | null;
+  /** The question register in numbers; null when the run has no question and no objective. Absent from a server that predates it. */
+  questions?: QuestionsBrief | null;
   /** The run was started until solved: no wall clock, caps advisory, only the operator ends it. */
   until_solved?: boolean;
+};
+
+/** Mirrors `QuestionsBrief` in `scripts/ui/model.ts`. */
+export type QuestionsBrief = { in_scope: number; persons: number; unanswered: number; proposed: number; triage: number; clarifications: number; chain_ok: boolean };
+
+/** Who acted on a question; mirrors `QuestionOrigin` in `extensions/questions.ts`. */
+export type QuestionOrigin = {
+  kind: "goal" | "agent" | "analyst" | "reviewer" | "observer";
+  person?: string;
+  name?: string;
+  role?: "operator" | "examiner" | "analyst" | "reviewer" | "observer";
+  agent?: string;
+  os_user?: string;
+  host?: string;
+  via?: string;
+  enrolled?: boolean;
+  identity?: "claimed" | "signed";
+  fingerprint?: string;
+  source_entry?: string;
+};
+
+/** A question as the register shows it; mirrors `QuestionView` in `extensions/questions.ts`. */
+export type QuestionView = {
+  id: string;
+  section: string;
+  origin: QuestionOrigin;
+  author: string;
+  text: string;
+  rev: number;
+  revisions: Array<{ rev: number; text: string; at: string; by: string; origin: QuestionOrigin; why?: string; seq: number }>;
+  neutral: { text: string; at: string; origin: QuestionOrigin; rev: number } | null;
+  why: string;
+  objective: string | null;
+  objective_text: string | null;
+  parent: string | null;
+  materiality: "material" | "background";
+  priority: "normal" | "urgent";
+  priority_reason: string | null;
+  expects: string | null;
+  hints: Array<{ ref: string; value?: string }>;
+  attachments: string[];
+  suggested_to: string | null;
+  deadline: string | null;
+  scope: "in_scope" | "proposed" | "excluded";
+  scope_why: string;
+  scope_history: Array<{ at: string; scope: string; why: string; origin: QuestionOrigin | null }>;
+  review_query: boolean;
+  leading_forms: string[];
+  after_done: boolean;
+  withdrawn: { at: string; why: string; origin: QuestionOrigin } | null;
+  accepted: { at: string; as: string; why: string; rev: number; origin: QuestionOrigin; stands: boolean } | null;
+  disposition: Record<string, unknown> | null;
+  work: "admitted" | "working" | "clarification_needed" | "paused" | null;
+  answer: { seq: number; at: string; inconclusive: boolean; result?: string; stale: boolean } | null;
+  leads: Array<{ id: string; status: string; holder: string | null; disposition?: string; opened_by: string }>;
+  clarifications: Array<{ id: string; at: string; by: string; what: string; to: string; answer: { at: string; by: string; text: string; origin: QuestionOrigin | null } | null }>;
+  pending_clarifications: string[];
+  offers: Array<{ at: string; to: string; rev: number; first: boolean; until: string | null; why: string; seq: number }>;
+  delivered: Array<{ rev: number; at: string; post: { thread: string; id: number } | null; hypotheses: number[] }>;
+  signed: Array<{ act_seq: number; sign_seq: number; person: string; fingerprint: string }>;
+  opened_at: string;
+  opened_by: string;
+};
+
+/** The Questions tab; mirrors `QuestionsPanelView` in `scripts/ui/model.ts`. */
+export type QuestionsPanelView = {
+  questions: QuestionView[];
+  objectives: Array<{ id: string; text: string; why: string; added_by: string | null }>;
+  triage: Array<{ seq: number; at: string; q: string | null; lead: string | null; cause: string; entries: number[]; resolved: { at: string; decision: string; why: string; origin: QuestionOrigin | null } | null }>;
+  chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null; events: number };
+  seeded: boolean;
+  signatures: Array<{ q: string | null; act_seq: number; sign_seq: number; person: string; fingerprint: string; key_kind: string; state: string; detail: string }>;
+  seats: string[];
+  budget: { cap_usd: number; spent_usd: number; tokens: number; cap_tokens: number | null; until_solved: boolean } | null;
 };
 
 /** Mirrors `LeadsBrief` in `scripts/ui/model.ts`. */
@@ -492,7 +568,7 @@ export type LeadView = {
   generation: number;
   needs: Array<{ need: string; met: boolean; why?: string }>;
   answers: string[];
-  disposition?: "resolved" | "negative" | "duplicate" | "deferred" | "infeasible" | "needs_operator";
+  disposition?: "resolved" | "negative" | "duplicate" | "deferred" | "infeasible" | "needs_operator" | "withdrawn";
   ref?: string;
   closed_by?: string;
   closed_at?: string;
@@ -506,6 +582,10 @@ export type LeadView = {
   jobs: string[];
   notes: Array<{ at: string; by: string; text: string; allow_host?: string }>;
   reopened: Array<{ at: string; by: string; why: string; cause: string }>;
+  proposition?: string;
+  negation?: string;
+  product?: string;
+  acceptance?: string;
 };
 
 /** The Leads tab; mirrors `LeadsPanelView` in `scripts/ui/model.ts`. */
@@ -840,6 +920,8 @@ export type ChangeKind =
   | "store"
   /** leads/: the lead register, and what the agents asked of the operator. */
   | "leads"
+  /** questions/: the question register. */
+  | "questions"
   /** A live VM run's hub wrote its status: the seats' states moved. */
   | "hub"
   | "other";

@@ -13,7 +13,7 @@
 import type { PostTag, TimedPost } from "./types.ts";
 
 /** The protocol's vocabulary, in the order the board uses it. */
-export const TAGS: PostTag[] = ["intro", "ask", "claim", "result", "hold", "veto", "stop"];
+export const TAGS: PostTag[] = ["intro", "ask", "claim", "result", "hold", "veto", "stop", "question"];
 
 /** Where the board caught: somebody held, vetoed or called a stop. */
 export const FRICTION: PostTag[] = ["hold", "veto", "stop"];

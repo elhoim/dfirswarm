@@ -28,7 +28,8 @@ import { coverageOf } from "../coverage.ts";
 import { deleteGoal, GoalError, listGoals, readGoal, saveGoal } from "./goals.ts";
 import { listLibrary, readLibraryEntry } from "./library.ts";
 import { describeRoots, InputsError, listInputSets, parseInputsRoots, resolveInputImage, resolveInputSet, RootStore } from "./inputs.ts";
-import { countForgedTools, findRun, listSwarmRows, listWorkFiles, liveHubDirs, operatorAudit, queryTraces, readAllPosts, readLeads, readRunEvents, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
+import { countForgedTools, findRun, listSwarmRows, listWorkFiles, liveHubDirs, operatorAudit, queryTraces, readAllPosts, readLeads, readQuestions, readRunEvents, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
+import { directiveArgv, questionArgv, QuestionRequestError } from "./questions.ts";
 import { readReviews } from "./reviews.ts";
 import { createSigning, SigningError } from "./signing.ts";
 import { readStoreJob, readStoreJobLog, readStoreJobs, storeJobLogFile } from "./store-jobs.ts";
@@ -1246,8 +1247,20 @@ export function createUiApp(options: UiAppOptions): UiApp {
         if (method !== "POST") throw new HttpError(405, "method not allowed");
         requireToken(req, url);
         const body = (await readBody(req)) as { action?: unknown; lead?: unknown; text?: unknown; allow_host?: unknown };
+        // "Add directive": an unheld lead under a question, run as swarm.sh lead <id> direct.
+        if (body.action === "direct") {
+          let argv: string[];
+          try {
+            argv = directiveArgv(body as Record<string, unknown>);
+          } catch (err) {
+            if (err instanceof QuestionRequestError) throw new HttpError(400, err.message);
+            throw err;
+          }
+          json(res, 202, runner.direct(id, argv));
+          return;
+        }
         const action = body.action === "reopen" ? "reopen" : body.action === "note" ? "note" : null;
-        if (!action) throw new HttpError(400, "action is note or reopen");
+        if (!action) throw new HttpError(400, "action is note, reopen or direct");
         const lead = String(body.lead ?? "").trim().toUpperCase();
         if (!/^L-[1-9]\d{0,5}$/.test(lead)) throw new HttpError(400, "lead is L-<n>");
         const text = typeof body.text === "string" ? body.text.trim() : "";
@@ -1256,6 +1269,30 @@ export function createUiApp(options: UiAppOptions): UiApp {
         const host = typeof body.allow_host === "string" ? body.allow_host.trim() : "";
         if (host && !/^(\*\.)?[A-Za-z0-9.-]{1,253}(:\d{1,5})?$/.test(host)) throw new HttpError(400, "allow_host is a host name (example.org, *.example.org, example.org:8443)");
         json(res, 202, runner.lead(id, { action, lead, ...(text ? { text } : {}), ...(host ? { allowHost: host } : {}) }));
+        return;
+      }
+      /**
+       * The question register (extensions/questions.ts): every question with
+       * who asked it, its scope, work and answer, the triage and the
+       * clarifications. A POST is an act on it (add, amend, priority, scope,
+       * withdraw, clarify_reply, accept), run as swarm.sh question so it is
+       * checked, chained, acknowledged after the write and on the record.
+       */
+      case "questions": {
+        if (method === "GET") {
+          json(res, 200, await readQuestions(sandbox));
+          return;
+        }
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        let q: { sub: string; argv: string[] };
+        try {
+          q = questionArgv((await readBody(req)) as Record<string, unknown>);
+        } catch (err) {
+          if (err instanceof QuestionRequestError) throw new HttpError(400, err.message);
+          throw err;
+        }
+        json(res, 202, runner.question(id, q.sub, q.argv));
         return;
       }
       // Who did what to this run: its lines in runs/operator-audit.jsonl

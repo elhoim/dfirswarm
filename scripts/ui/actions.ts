@@ -10,7 +10,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead";
+export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question";
 export type JobStatus = "running" | "ok" | "failed";
 
 export type Job = {
@@ -1090,6 +1090,23 @@ export class ActionRunner {
   lead(swarmId: string, p: { action: "note" | "reopen"; lead: string; text?: string; allowHost?: string }): Job {
     const args = p.action === "note" ? ["lead", swarmId, "note", p.lead, p.text ?? "", ...(p.allowHost ? ["--allow-host", p.allowHost] : [])] : ["lead", swarmId, "reopen", p.lead, ...(p.text ? [p.text] : [])];
     return this.run("lead", args, swarmId);
+  }
+
+  /**
+   * A directive (swarm.sh lead <id> direct): an unheld lead under a question
+   * (or under one asked in the same act), with its product and acceptance.
+   */
+  direct(swarmId: string, argv: string[]): Job {
+    return this.run("lead", ["lead", swarmId, "direct", ...argv], swarmId);
+  }
+
+  /**
+   * An act on the question register (swarm.sh question <id> <sub> …): the
+   * CLI's own checks, the chain write, the acknowledgement after it, the
+   * delivery, the trace and the operator's record twice (attempt, outcome).
+   */
+  question(swarmId: string, sub: string, argv: string[]): Job {
+    return this.run("question", ["question", swarmId, sub, ...argv], swarmId);
   }
 
   /** The ledger as CSV or a Timesketch import, written to `out` (a file of the console's own). */

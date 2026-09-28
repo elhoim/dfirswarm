@@ -47,6 +47,7 @@ const TAG_TONE: Record<PostTag | "system", Tone> = {
   hold: "saffron",
   veto: "brick",
   stop: "brick",
+  question: "kelp",
   system: "brick",
 };
 

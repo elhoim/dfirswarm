@@ -3417,3 +3417,37 @@ test("the Leads tab: the register over the API, what waits on the operator in th
   assert.equal(l1.status, "open");
   assert.match(l1.notes[0].text, /Fetched it for you/);
 });
+
+test("the Questions tab: the register over the API, an act run as swarm.sh question and acknowledged after the chain write, and a directive on the Leads tab", async () => {
+  const registry = JSON.parse(await readFile(join(runsDir, "registry.json"), "utf8")) as { runs: Array<{ id: string; sandbox: string }> };
+  const S = registry.runs.find((r) => r.id === "s7a1c")!.sandbox;
+  assert.equal(classifyPath(runsDir, join(S, "questions", "questions.jsonl")).kind, "questions");
+  const before = await get<Record<string, any>>("/api/swarms/s7a1c/questions");
+  assert.equal(before.status, 200);
+  assert.equal(before.body.chain.ok, true);
+  assert.ok(Array.isArray(before.body.questions) && Array.isArray(before.body.seats));
+  assert.equal((await post("/api/swarms/s7a1c/questions", { action: "add", text: "Was the key reused?" })).status, 400, "a question needs why");
+  assert.equal((await post("/api/swarms/s7a1c/questions", { action: "drop", q: "Q-1" })).status, 400);
+  assert.equal((await post("/api/swarms/s7a1c/questions", { action: "scope", target: "Q-1; rm -rf", scope: "in_scope", why: "x" })).status, 400);
+  assert.equal((await post("/api/swarms/s7a1c/questions", { action: "add", text: "t", why: "w", as: "../../etc" })).status, 400, "as is an enrolled id");
+  const added = await post<{ id: string }>("/api/swarms/s7a1c/questions", { action: "add", text: "Was the key file reused on another host?", why: "the operator wants to know", materiality: "material", submission: "console-test-1" });
+  assert.equal(added.status, 202);
+  const job = await waitJob(added.body.id);
+  assert.equal(job.status, "ok", job.stderr);
+  assert.match(job.stdout, /Recorded Q-\d+ \(revision 1\), in_scope: by the operator's authority/);
+  const ack = JSON.parse(job.stdout.trim().split("\n").at(-1) ?? "{}") as { q?: string; seq?: number; hash?: string };
+  assert.ok(ack.q && ack.seq && ack.hash, "the acknowledgement names the chained event");
+  const after = await get<Record<string, any>>("/api/swarms/s7a1c/questions");
+  const q = after.body.questions.find((x: { id: string }) => x.id === ack.q);
+  assert.deepEqual([q.origin.kind, q.origin.role, q.origin.enrolled, q.origin.via, q.scope], ["analyst", "operator", false, "console", "in_scope"]);
+  const audit = (await readFile(join(runsDir, "operator-audit.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l) as { command: string; via: string; detail?: { question?: { q?: string; hash?: string } } });
+  const outcome = audit.find((l) => l.command === "question_outcome" && l.detail?.question?.q === ack.q);
+  assert.equal(outcome?.detail?.question?.hash, ack.hash, "the operator's record names the event the act became");
+  assert.equal(outcome?.via, "console");
+  const directive = await post<{ id: string }>("/api/swarms/s7a1c/leads", { action: "direct", q: ack.q, title: "List the hosts the key file reached", why: "reuse", product: "a table of hosts and times", acceptance: "every host in the logs is on it" });
+  assert.equal(directive.status, 202);
+  const dj = await waitJob(directive.body.id);
+  assert.equal(dj.status, "ok", dj.stderr);
+  assert.match(dj.stdout, new RegExp(`Directive L-\\d+ opened under ${ack.q}, unheld`));
+  assert.equal((await post("/api/swarms/s7a1c/leads", { action: "direct", q: ack.q, title: "x", why: "y" })).status, 400, "a directive needs its product and acceptance");
+});

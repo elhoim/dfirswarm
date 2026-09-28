@@ -42,6 +42,7 @@ import { ReleasePanel } from "./detail/release-panel";
 import { ReviewerPanel } from "./detail/reviewer-panel";
 import { JobsPanel } from "./detail/jobs-panel";
 import { LeadsPanel } from "./detail/leads-panel";
+import { QuestionsPanel } from "./detail/questions-panel";
 import { RecordActions } from "./detail/record-actions";
 import { isolationChip } from "@/components/swarm-bits";
 
@@ -53,7 +54,7 @@ import { isolationChip } from "@/components/swarm-bits";
  */
 const TAB_GROUPS = [
   { label: "The run", tabs: ["story", "threads", "traces", "agents"] },
-  { label: "Evidence", tabs: ["leads", "files", "artifacts", "jobs", "ledger"] },
+  { label: "Evidence", tabs: ["questions", "leads", "files", "artifacts", "jobs", "ledger"] },
   { label: "The frame", tabs: ["goal", "packs", "tools", "claims", "budget"] },
   { label: "Output", tabs: ["report", "release", "review", "custody"] },
 ] as const;
@@ -67,6 +68,7 @@ const TAB_LABEL: Record<Tab, string> = {
   tools: "Tools",
   ledger: "Ledger",
   leads: "Leads",
+  questions: "Questions",
   claims: "Claims",
   budget: "Budget",
   files: "Files",
@@ -322,7 +324,9 @@ export function SwarmDetailScreen() {
   const storeVersion = useSwarmVersion(id, ["store"]);
   // The register reads its own files, the ledger (a need on an entry, a
   // closure resting on one) and the store (a lead's jobs).
-  const leadsVersion = useSwarmVersion(id, ["leads", "ledger", "store"]);
+  const leadsVersion = useSwarmVersion(id, ["leads", "ledger", "store", "questions"]);
+  // The question register: its own chain, the ledger (answers) and the leads (the work on each).
+  const questionsVersion = useSwarmVersion(id, ["questions", "leads", "ledger"]);
   const checksVersion = useSwarmVersion(id, CHECKS_CHANGE_KINDS);
   const loader = useCallback(() => api.swarm(id), [id]);
   const view = useResource(loader, version, [id]);
@@ -475,6 +479,17 @@ export function SwarmDetailScreen() {
                   </button>
                 </div>
               ) : null}
+              {/* What the question register waits on the operator for: its triage and the agents' clarifications. */}
+              {d.questions && d.questions.triage + d.questions.proposed + d.questions.clarifications > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={() => setTab("questions")} title="Questions proposed or leads held for your triage, and clarifications an agent asked of the asker">
+                    <Chip tone="saffron">
+                      {d.questions.proposed + d.questions.triage} for your triage
+                      {d.questions.clarifications ? `, ${d.questions.clarifications} clarification${d.questions.clarifications === 1 ? "" : "s"} waiting` : ""}
+                    </Chip>
+                  </button>
+                </div>
+              ) : null}
               {d.until_solved ? (
                 <div className="flex flex-wrap items-center gap-2">
                   <span title="No wall clock, caps advisory, no abandon: it ends when every question is answered, or when you stop it">
@@ -589,6 +604,7 @@ export function SwarmDetailScreen() {
                       {t === "tools" && d.tools.length ? d.tools.length : ""}
                       {t === "ledger" && d.ledger?.entries.length ? d.ledger.entries.length : ""}
                       {t === "leads" && d.leads ? d.leads.open + d.leads.active + d.leads.blocked : ""}
+                      {t === "questions" && d.questions ? d.questions.unanswered : ""}
                     </span>
                   </button>
                 ))}
@@ -657,6 +673,7 @@ export function SwarmDetailScreen() {
           {tab === "jobs" ? <JobsPanel view={d} selected={sub ? decodeURIComponent(sub) : null} onSelect={(j) => setSub("jobs", j)} version={storeVersion} /> : null}
           {tab === "ledger" ? <LedgerPanel view={d} /> : null}
           {tab === "leads" ? <LeadsPanel view={d} version={leadsVersion} /> : null}
+          {tab === "questions" ? <QuestionsPanel view={d} version={questionsVersion} /> : null}
           {tab === "report" ? <ReportPanel view={d} /> : null}
           {tab === "release" ? <ReleasePanel view={d} /> : null}
           {tab === "review" ? <ReviewerPanel view={d} /> : null}
