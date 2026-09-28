@@ -134,3 +134,49 @@ test("a cancelled job's kept output cited with no word on it holds readiness as 
   assert.equal(cites(held), true, held.items.join("; "));
   assert.equal(held.ready, false);
 });
+
+test("a section whose answer rests on a cancelled job's output with no word on it (partial_output, its producer resolved) has no disposition under the bar", async () => {
+  const base = await mkdtemp(join(tmpdir(), "finish-contract-"));
+  dirs.push(base);
+  const S = join(base, "run");
+  const goal = ["## Goal", "", "Examine the rows.", "", "### Questions", "", "1. What do the rows say?", "", "## Definition of done", "", "d", "", "## Checks", "", '- `node x "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1`', ""].join("\n");
+  await P.initSandbox(S, { swarmId: "fc4", agentIds: ["a1", "a2"], capUsd: 5, wallClockMinutes: 30, goal });
+  await writeFile(join(S, "inputs.json"), JSON.stringify({ files: [] }));
+  const sealed = async (id: string, file: string, text: string, status: string) => {
+    const staging = join(base, `staging-${id}`);
+    await mkdir(staging, { recursive: true });
+    await writeFile(join(staging, file), text);
+    await sealTree(S, staging, join(storePaths(S).jobs, id, "out"), id, 1);
+    await writeFile(join(storePaths(S).jobs, id, "job.json"), JSON.stringify({ id, state: "committed", status, spec: { kind: "command", command: "x", inputs: [] }, requester: { agent: "a1" } }));
+  };
+  await sealed("j000001", "summary.txt", "the rows are a payment run\n", "ok");
+  await sealed("j000007", "rows.csv", "t,what\n1,first half\n", "cancelled");
+  const a1 = { sandboxRoot: S, agentId: "a1" };
+  const FIND = { basis: "observed", confidence: "high", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." };
+  const f = await P.recordEntry(a1, { kind: "finding", ...FIND, value: "The rows are a payment run", source: "summary.txt", evidence: "the job's output", refs: ["job:j000001/summary.txt"], answers: ["1"] } as P.LedgerInput);
+  assert.ok(f.ok, (f as { reason?: string }).reason);
+  const fseq = (f as { entry: P.LedgerEntry }).entry.seq;
+  // An event citing the cancelled job's output, with no word on how it treats it.
+  const ev = await P.recordEntry(a1, { kind: "event", ts: "2026-01-01T10:00:00Z", value: "The first half of the rows starts here", source: "rows.csv", evidence: "the job's output", refs: ["job:j000007/rows.csv"], answers: ["1"] } as P.LedgerInput);
+  assert.ok(ev.ok, (ev as { reason?: string }).reason);
+  const eseq = (ev as { entry: P.LedgerEntry }).entry.seq;
+  const ANSWER = { result: "established", confidence: "high", confidence_why: "The finding is read from the object.", alternatives_open: "none remains open", would_change: "a record that disagrees" };
+  // The answer rests on the finding alone; the event names the same question.
+  const a = await P.recordEntry({ sandboxRoot: S, agentId: "a2" }, { kind: "answer", section: "question:1", value: "A payment run", reasoning: `E-${fseq} shows it`, ...ANSWER } as unknown as P.LedgerInput);
+  assert.ok(a.ok, (a as { reason?: string }).reason);
+  // Another seat's review of the answer (its critic act), established.
+  const { ESTABLISHED } = await import("./negative-bar-fixture.ts");
+  const att = await P.attestEntry(a1, { seq: (a as { entry: P.LedgerEntry }).entry.seq, how: "re-derived it from the sealed ref", ...ESTABLISHED } as never);
+  assert.ok(att.ok, (att as { reason?: string }).reason);
+  const { checkLedgerAnswers } = await import("../scripts/check-answers.ts");
+  const held = await checkLedgerAnswers(S, ["1"]);
+  assert.deepEqual(held.defects.map((d) => d.code), ["partial_output"], "the only defect is the event's partial output, which names no section of its own");
+  assert.ok(held.defects.some((d) => d.code === "partial_output"), held.lines.join("\n"));
+  assert.equal(held.dispositions["question:1"], undefined, `held by partial_output: no disposition\n${held.lines.join("\n")}`);
+  // The event says how it treats the partial output: the section's disposition returns.
+  const fixed = await P.recordEntry(a1, { kind: "event", ts: "2026-01-01T10:00:00Z", value: "The first half of the rows starts here (from a job stopped half way)", source: "rows.csv", evidence: "the job's output", refs: ["job:j000007/rows.csv"], answers: ["1"], qualifies: [{ ref: "job:j000007/rows.csv", why: "the rows it wrote before it was stopped are whole lines" }], supersedes: eseq } as P.LedgerInput);
+  assert.ok(fixed.ok, (fixed as { reason?: string }).reason);
+  const clear = await checkLedgerAnswers(S, ["1"]);
+  assert.ok(!clear.defects.some((d) => d.code === "partial_output"), clear.lines.join("\n"));
+  assert.equal(clear.dispositions["question:1"], "established", clear.lines.join("\n"));
+});

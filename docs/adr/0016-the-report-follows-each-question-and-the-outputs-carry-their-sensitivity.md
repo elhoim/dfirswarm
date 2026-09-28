@@ -66,17 +66,19 @@ into the library after they are generalised.
    with how many were quick and how many nobody reviewed, linked by id; a
    duplicate is footnoted. **Appendix F** holds the whole register: every
    question event (seq, time, who, what, the act and the harness's decision
-   whole), every lead with every event, and every disposition with who made
-   it, what it cites and whether another agent attested or disputed that,
-   and the finish register of ADR 0015 (the coordinator's lease, each
-   readiness turn, each check, the report's acks and their resolutions).
-   With coordination (ADR 0015), §2 also says how strongly other seats hold
-   an answer (established, or a best candidate, with what capped it) and
-   where a person's question was offered; a lead says its offers and what
-   became of each, its hand-offs, a parked lead taken over, its product
-   contract, a closure confirmed and its route review.
-   The full report places F after its own D (custody) and E (artifacts).
-   Nothing is shortened anywhere: long content is in the appendix, whole.
+   whole), every lead with every event — including an event tied to no lead,
+   an interpretation of a job's output, under its own heading — rendered
+   whole as its fields' JSON, and every disposition with who made it, what it
+   cites and whether another agent attested or disputed that, and the finish
+   register of ADR 0015 (the coordinator's lease, each readiness turn, each
+   check, the report's acks and their resolutions). With coordination (ADR
+   0015), §2 also says how strongly other seats hold an answer (established,
+   or a best candidate, with what capped it) and where a person's question
+   was offered; a lead says its offers and what became of each, its
+   hand-offs, a parked lead taken over, its product contract, a closure
+   confirmed and its route review. The full report places F after its own D
+   (custody) and E (artifacts). Nothing is shortened anywhere: long content
+   is in the appendix, whole.
 3. **Cost is attributed by holding, and said to be.** A model call says
    nothing of the question it served. The report gives each call the
    gateway recorded (input, output and cache tokens) to the leads its seat
@@ -87,10 +89,14 @@ into the library after they are generalised.
    hand-off, close, reopen or another seat's claim. A run with no gateway
    reads each call from the seats' Pi sessions; one with neither spreads
    each seat's total over its tool calls on the trace and calls the result
-   an estimate. The report prints the method whole beside the figures, and
-   shows them rounded together (the largest remainder) so they still add up.
-   `swarm.sh metrics` (ADR 0017) reads the same computation
-   (`scripts/question-cost.ts`) and shows the same figures.
+   an estimate; a seat with a budget the trace cannot place (no rows for it)
+   keeps its tokens in an explicit unattributed bucket, never dropped, so the
+   total is still the whole budget. The report prints the method whole beside
+   the figures, and shows them rounded together (the largest remainder: the
+   questions, the unheld calls, the leads that name no question and the
+   no-trace bucket) so they sum to the displayed run total. `swarm.sh
+   metrics` (ADR 0017) reads the same computation (`scripts/question-cost.ts`,
+   one rounding, `roundParts`) and shows the same figures.
 4. **A release binds the register.** `release.json.questions` carries the
    length and head the custody verdict sealed, the questions those events
    opened by origin, every person who asked or acted (enrolled, claimed or
@@ -105,50 +111,72 @@ into the library after they are generalised.
    chain as a prefix; a release verifies it with the other registers; a
    draft or an adoption checks the network's chains and the requests as
    custody sealed them.
-6. **Sensitive outputs.** `job_run(secret_output: true)` marks every output
-   the job seals sensitive, on its `job_committed` line (the record) and its
-   `job.json`, without reading the bytes. A job whose declared scope reaches
-   a sensitive output (by its path, by the digest of one of its files, or a
-   catalogue generation a sensitive job made), or, with no scope declared,
-   whose command, arguments, source or targets name the sensitive job, is
-   sealed sensitive too, as derived, with the jobs it came from; derivation
-   carries through chains of jobs. An entry whose refs reach a sensitive
-   output (a job's file or log, a digest, a member of such a generation) is
-   recorded sensitive by the hub, and told so: from then on B9 holds names,
-   doing labels and questions to its words, and redaction takes them out.
-7. **The package scans the whole manifest and names what it withholds.**
-   `swarm.sh package --redact` withholds every sensitive output and its
-   job's stdout and stderr whole, each replaced by a line naming its
-   sha256 and why, lists them in REDACTIONS.txt and REDACTIONS.json with
-   the sensitive jobs and the entries treated as sensitive (marked, or
-   citing a sensitive output), and scans every file of the package, not only
-   the report, for the sensitive entries' words and for the whole text of
-   each small sensitive output (at most 256 bytes, one line, shaped like a
-   secret rather than a status word), which it also takes out where it
-   stands. A package made without `--redact` takes nothing out: it writes
-   HYGIENE.json naming the sensitive entries, the sensitive outputs and
-   which of their files it carries, with the same scan's hits, and says to
-   hand it over with `--redact`. The export's `--redact` treats an unmarked
-   entry citing a sensitive output as sensitive.
+6. **Sensitive outputs, derived from the executed snapshot.**
+   `job_run(secret_output: true)` marks every output the job seals sensitive,
+   on its `job_committed` line (the record) and its `job.json`, without
+   reading the bytes. A job's sensitivity is read from the snapshot its scope
+   manifest recorded — every accessible and expanded object's digest, hashed
+   at the job's start — so a job is derived when it executed against the bytes
+   of a sensitive output wherever they sat: a work copy the agent carved out,
+   a catalogue link or alias, an output cited by digest, a directory that
+   held one. With no scope declared, a job whose command, arguments, source
+   or targets name the sensitive job is derived too. Derivation carries
+   through chains of jobs and names the jobs it came from. An entry whose refs
+   reach a sensitive output (a job's file or log, a digest, a member of such a
+   generation) is recorded sensitive by the hub, and told so: from then on B9
+   holds names, doing labels and questions to its words, and redaction takes
+   them out. A generation of a sensitive output is sensitive at the source:
+   its coverage detail and file descriptions are withheld from the catalogue
+   projection, and the partial-generation notification says so without the
+   reasons.
+7. **The package holds sensitive content by its bytes and leaks no digest of
+   it.** `swarm.sh package --redact` withholds every file whose sha256 is a
+   sensitive job's — its outputs and its stdout and stderr — wherever it sits
+   in the package, not only the canonical store path, so a byte-identical copy
+   in `work/` or a catalogue link goes too. It scans every file of the
+   package, not only the report, for the sensitive entries' words, the whole
+   text of each small sensitive output (at most 256 bytes, one line, shaped
+   like a secret rather than a status word) and the sensitive outputs'
+   digests, and takes them out where they stand, and it scans filenames for a
+   secret an agent named an output after. What it withholds or matches is
+   named by a **keyed commitment** — an HMAC id under a per-package key — never
+   by an unsalted sha256, so a low-entropy value (a PIN, a dictionary word)
+   cannot be recovered from the record; the key, and each id's real digest,
+   path and word, live in a private sidecar written **outside** the handover,
+   which the run's owner keeps and a recipient never has. REDACTIONS.txt and
+   REDACTIONS.json list the changes, the withheld files and the scan's hits,
+   with sensitive paths behind ids too. A package made without `--redact`
+   takes nothing out: it writes HYGIENE.json naming the sensitive entries and
+   outputs and how many of their files it carries, with the same scan's hits
+   and the same keyed ids and sidecar, and says to hand it over with
+   `--redact`. The export's `--redact` treats an unmarked entry citing a
+   sensitive output as sensitive.
 8. **A cancelled job's output needs a disposition.** An entry that cites
    the kept output of a job that was cancelled or stopped, and does not say
    in `qualifies` how it treats what the job wrote before it was stopped, is
    a gate defect (`partial_output`), fixed by the entry (a correction with
    `qualifies`, or resting on a job that ran to its end), never named away
-   by a limitation. A limitation, a search recorded partial or failed, and a
-   coverage record (whose own fields say what was covered and what failed)
-   are their own disposition.
-9. **Tool harvesting.** `swarm.sh tools <run> --candidates` takes the code
-   out of every agent's command job: each heredoc, each inline `-c`/`-e`
-   script, the command itself, and each script of the agent's own the job
-   declared and ran (held to the snapshot's sha256 it read). A script of
-   `--min-lines` (20) or more is a candidate; the same text run by several
-   jobs is one candidate, its reuse the distinct jobs after the first;
-   candidates are ranked by lines times jobs. Each carries its job ids,
-   seats, image profiles, statuses and lines, and the library tools that
-   may already cover it (the script names one, or one's `use` matches what
-   the jobs declared). Every script is written whole beside the run with
-   `candidates.json` and a `README.txt`. Folding one into the library is the
+   by a limitation. The citation is resolved to the job that wrote the bytes,
+   so the same output cited by `sha256:`, or copied by a later job, is held
+   to the same disposition. A limitation, a search recorded partial or
+   failed, and a coverage record (whose own fields say what was covered and
+   what failed) are their own disposition.
+9. **Tool harvesting, after output hygiene.** `swarm.sh tools <run>
+   --candidates` takes the code out of every agent's command job: each
+   heredoc, each inline `-c`/`-e` script, the command itself, and each script
+   of the agent's own the job **ran as code** — an interpreter invoked it, not
+   merely named or copied it — read without following a link and only when its
+   bytes still match the snapshot digest the job read, else omitted. Output
+   hygiene runs before any script is exported: a candidate from a sensitive
+   job, or one whose text holds a sensitive value, is withheld and named, its
+   script never written. A script of `--min-lines` (20) or more is a
+   candidate; the same text run by several jobs is one candidate, its reuse
+   the distinct jobs after the first; candidates are ranked by lines times
+   jobs. Each carries its job ids, seats, image profiles, statuses and lines,
+   and the library tools that may already cover it (the script names one, or
+   one's `use` matches what the jobs declared). Every non-withheld script is
+   written whole beside the run with `candidates.json` and a `README.txt`.
+   Folding one into the library is the
    maintainer's work, described in tool-library/README.md.
 10. **Library visibility.** A tool's manifest may say what it reads in
     `use`: `extensions`, `magic` (bytes at an offset, as hex) and `names`
@@ -157,7 +185,10 @@ into the library after they are generalised.
     manifest without `use` by its description naming the extension as a
     word of its own) and puts the matches in the admission's answer, as a
     hint: never a refusal, and never a tool the command already runs. The
-    library's readers say what they read.
+    hint is bounded and must not hold a job: it parses the inputs manifest
+    once, cached against its size and time, reads a bounded number of file
+    heads, and gives what it has past a short deadline. The library's readers
+    say what they read.
 
 ## Consequences
 

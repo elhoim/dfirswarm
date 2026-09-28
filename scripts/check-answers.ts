@@ -88,6 +88,7 @@ import {
 } from "../extensions/protocol.ts";
 import { answerResult, resultWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
 import { committedLogHashes, resolveRef } from "./evidence-store.ts";
+import { producerIndex } from "./output-hygiene.ts";
 
 type Entry = { seq: number; kind: string; refs?: string[]; supersedes?: number; answers?: string[]; completion?: string; reason?: string; status?: string };
 
@@ -374,8 +375,10 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   }
   const bar = await sectionBars(S, existence);
   const statuses = await jobStatusMap(S, entries);
-  // The kept output of a cancelled or stopped job, cited with no word on how it is treated (docs/adr/0016).
-  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, (id) => statuses.get(id)) });
+  // The kept output of a cancelled or stopped job, cited with no word on how
+  // it is treated (docs/adr/0016), by whatever ref names those bytes.
+  const { producerOf } = await producerIndex(S);
+  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf) });
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
@@ -572,6 +575,25 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   }
   // A section a defect holds, named by a limitation or not, has no disposition under the bar.
   for (const d of defects) if (d.section) delete dispositions[d.section];
+  // A partial_output defect names the entry that cites a cancelled or stopped
+  // job's output (its producer resolved by producerIndex), not a section: every
+  // section that entry names, and every section whose standing answer rests on
+  // it (support, contrary, limitations), is held by it and loses its disposition.
+  const heldByPartial = new Set<string>();
+  for (const d of defects) {
+    if (d.code !== "partial_output") continue;
+    for (const seq of d.seqs) {
+      for (const x of bySeq.get(seq)?.answers ?? []) {
+        const k = x === "summary" || x === "narrative" ? x : `question:${sectionKey(x)}`;
+        heldByPartial.add(k);
+      }
+      for (const a of entries) {
+        if (a.kind !== "answer" || replaced.has(a.seq) || !a.section) continue;
+        if ([...(a.support ?? []), ...(a.contrary ?? []), ...(a.limitations ?? [])].some((x) => x.seq === seq)) heldByPartial.add(a.section);
+      }
+    }
+  }
+  for (const k of heldByPartial) delete dispositions[k];
   const open = defects.filter((d) => !d.named_by.length);
   for (const d of defects) lines.push(`${d.named_by.length ? `defect, named by ${d.named_by.map((n) => `#${n}`).join(", ")}` : "DEFECT"}: ${d.what}${d.named_by.length ? "" : `. Fix: ${d.fix}`}`);
   const unsupported = Object.entries(gate.unsupported);

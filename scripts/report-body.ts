@@ -551,7 +551,8 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   const sections = [...new Set([...(asked.length ? asked : [...questions.values()]).map((q) => `question:${q.id}`), ...(asked.length ? held : []), "summary", "narrative"])];
   const problems = answerProblems(entries, disputes, unqualified);
   const bar = await sectionBars(sandbox).catch(() => (() => ({ material: true, existence: false })) as (id: string) => { material: boolean; existence: boolean });
-  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, (id) => jobs.get(id)?.status ?? null) }) : null;
+  const { producerOf } = await (await import("./output-hygiene.ts")).producerIndex(sandbox).catch(() => ({ producerOf: () => null as null }));
+  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf) }) : null;
 
   const text = async (rel: string) => (await readFile(join(sandbox, rel), "utf8").catch(() => ""));
   const ledgerChain = verifyLedgerChain(await text("ledger/entries.jsonl"));
@@ -569,6 +570,9 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
     }
   })();
 
+  const cost = ls
+    ? await questionCost(sandbox, ls.state.events, (lead) => (ls.state.leads.get(lead)?.answers ?? []).map((a) => register?.bySection.get(sectionKey(a))?.id ?? `question:${sectionKey(a)}`)).catch(() => null)
+    : null;
   const caseId = /Case\s+`([^`]+)`/.exec(goal?.caseLine ?? "")?.[1] ?? "";
   const release = opts.release ?? null;
   // The case contract: external lineage, the operator requests, the material added, the policy's word on more evidence.
@@ -624,9 +628,7 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
     leads: ls && ls.state.events.length ? { views: rankedLeads(ls), chain: ls.state.chain, events: ls.state.events.length } : null,
     leadEvents: ls?.state.events ?? [],
     register,
-    cost: ls
-      ? await questionCost(sandbox, ls.state.events, (lead) => (ls.state.leads.get(lead)?.answers ?? []).map((a) => register?.bySection.get(sectionKey(a))?.id ?? `question:${sectionKey(a)}`)).catch(() => null)
-      : null,
+    cost,
     contract,
     finish: (await stat(join(sandbox, FINISH_LOG)).catch(() => null)) ? await readFinish(sandbox).catch(() => null) : null,
   };
@@ -1235,7 +1237,7 @@ function summarySection(run: Run, memo: Map<number, EntryState>): BodySection {
           st.answer ? [{ e: st.answer.seq }, ` ${ans ? resultWords(ans) : st.answer.inconclusive ? "inconclusive" : "no result stated"}`] : named.length ? [`none; ${plural(named.length, "entry", "entries")}: `, ...named.flatMap((e, i): Span[] => [...(i ? [", " as Span] : []), { e: e.seq }])] : ["none"],
           [leads.length ? `${leads.length}: ${[...tally].map(([k, n]) => `${n} ${k}`).join(", ")}` : "0"],
           [c.v?.accepted ? `${c.v.accepted.as === "bounded" ? "bounded" : "not determinable"}${c.v.accepted.stands ? "" : " (lifted)"}` : "—"],
-          [run.cost && run.cost.source !== "none" ? `${(run.cost.shown.byQuestion.get(c.v?.id ?? `question:${c.key}`) ?? 0).toLocaleString("en-US")}${run.cost.source === "trace" ? " (est.)" : ""}` : "—"],
+          [run.cost && run.cost.source !== "none" ? `${(run.cost.shown.byQuestion.get(costKey(c)) ?? 0).toLocaleString("en-US")}${run.cost.source === "trace" ? " (est.)" : ""}` : "—"],
         ];
       }),
     });
@@ -1369,11 +1371,14 @@ function askerSpans(v: QuestionView | null, q: Question | null): Span[] {
   return [originWords(o)];
 }
 
-/** Tokens given to a question, and its share of the run's. */
+/** The key each question is costed under (question-cost.ts's questionsOf): its register id, else its section. */
+const costKey = (c: ChainQ) => c.v?.id ?? `question:${c.key}`;
+
+/** Tokens given to a question, and its share of the run's, as whole numbers that conserve the total. */
 function costWords(run: Run, c: ChainQ): string {
   const cost = run.cost;
   if (!cost || cost.source === "none") return "not known (no token record)";
-  const n = cost.shown.byQuestion.get(c.v?.id ?? `question:${c.key}`) ?? 0;
+  const n = cost.shown.byQuestion.get(costKey(c)) ?? 0;
   const pct = cost.shown.total ? ` (${((n / cost.shown.total) * 100).toFixed(1)}% of the run's ${tokensWords(cost.shown.total)})` : "";
   return `${tokensWords(n)}${pct}${cost.source === "trace" ? ", estimated" : ""}`;
 }
@@ -1597,7 +1602,7 @@ function chainBlocks(run: Run, memo: Map<number, EntryState>): Block[] {
       "Each chain runs from who asked to what it cost: the asker, why, every verbatim revision, what came with it, the proposition tested, the leads that worked it (a negative lead counted here and listed whole in Appendix F), the result and what speaks against it, the operator's acceptance, the gaps that bound it, and its tokens.",
     ],
   });
-  blocks.push({ k: "p", s: [{ b: "How the cost is counted. " }, run.cost?.method ?? "No token record could be read.", ...(run.cost && run.cost.source !== "none" ? [` Of the run's ${tokensWords(run.cost.shown.total)}, ${tokensWords([...run.cost.shown.byQuestion.values()].reduce((x, y) => x + y, 0))} went to questions, ${tokensWords(run.cost.shown.noQuestion)} to leads that name no question, and ${tokensWords([...run.cost.shown.unheld.values()].reduce((x, y) => x + y, 0))} to calls made while the seat held no lead (${[...run.cost.shown.unheld].map(([seat, n]) => `${seat} ${tokensWords(n)}`).join(", ") || "none"}).`] : [])] });
+  blocks.push({ k: "p", s: [{ b: "How the cost is counted. " }, run.cost?.method ?? "No token record could be read.", ...(run.cost && run.cost.source !== "none" ? [` Of the run's ${tokensWords(run.cost.shown.total)}, ${tokensWords([...run.cost.shown.byQuestion.values()].reduce((x, y) => x + y, 0))} went to questions, ${tokensWords(run.cost.shown.noQuestion)} to leads that name no question, ${tokensWords([...run.cost.shown.unheld.values()].reduce((x, y) => x + y, 0))} to calls made while the seat held no lead (${[...run.cost.shown.unheld].map(([seat, n]) => `${seat} ${tokensWords(n)}`).join(", ") || "none"})${run.cost.shown.noTrace.size ? `, and ${tokensWords([...run.cost.shown.noTrace.values()].reduce((x, y) => x + y, 0))} a seat spent that the trace could not place (${[...run.cost.shown.noTrace].map(([seat, n]) => `${seat} ${tokensWords(n)}`).join(", ")})` : ""}.`] : [])] });
   const limits = run.entries.filter((e) => e.kind === "limitation" && !run.replaced.has(e.seq));
   for (const g of ["original", "asked", "emergent", "proposed", "excluded", "withdrawn"] as ChainGroup[]) {
     const list = all.filter((c) => groupOf(c) === g);
@@ -1639,6 +1644,14 @@ function chainBlocks(run: Run, memo: Map<number, EntryState>): Block[] {
  * whether another agent reviewed that; the negatives and the duplicates the
  * body counts, whole.
  */
+/** One lead-register event, whole and lossless: its heading, then every field it carries as its JSON, so nothing (an interpretation's `rest`, an acquisition `ask`) is dropped. */
+function eventSpans(e: LeadEvent): Span[] {
+  const { seq, at, by, ev, lead, prev: _p, hash: _h, ...fields } = e as LeadEvent & Record<string, unknown>;
+  const head = `${seq} · ${at} · ${by} · ${ev}${lead ? ` · ${lead}` : ""}`;
+  const rest = Object.keys(fields).length ? [" ", { code: JSON.stringify(fields) } as Span] : [];
+  return [head, ...rest];
+}
+
 function registerSection(run: Run): BodySection {
   const blocks: Block[] = [];
   blocks.push({ k: "p", lede: true, s: ["The question and lead registers as the harness kept them, whole: every event with its seq, time and author, and every disposition with what it rests on and whether an agent other than the one who made it reviewed it. The body counts the negative and duplicate leads; they are here in full."] });
@@ -1677,9 +1690,15 @@ function registerSection(run: Run): BodySection {
         chips: [{ text: x.disposition ?? x.status, tone: x.disposition === "negative" ? "saffron" : x.disposition ? "slate" : "moss" }, ...(x.quick_negative ? [{ text: "quick negative", tone: "saffron" } as Chip] : [])],
         body: [
           { k: "p", s: [...leadLineOf(run, x), ` For ${x.answers.length ? x.answers.join(", ") : "no question"}; opened by ${x.opened_by} at ${x.opened_at}${x.origin ? ` from ${x.origin}` : ""}.`, ...(x.proposition ? [` Proposition: ${x.proposition}; negation: ${x.negation ?? "not stated"}.`] : []), ...(x.product ? [` Product: ${x.product}; acceptance: ${x.acceptance ?? "not stated"}.`] : [])] },
-          { k: "list", items: events.map((e): Span[] => [`${e.seq} · ${e.at} · ${e.by} · ${e.ev}`, ...(e.holder ? [` holder ${e.holder}`] : []), ...(e.disposition ? [` ${e.disposition}`] : []), ...(e.ref ? [` on ${e.ref}`] : []), ...(e.why ? [`: ${e.why}`] : []), ...(e.job ? [` job ${e.job}`] : []), ...(e.entry !== undefined ? [" entry ", { e: e.entry } as Span] : []), ...(e.text ? [`: ${e.text}`] : []), ...(e.cause ? [` (${e.cause})`] : []), ...(e.routes?.length ? [` routes ${e.routes.map((r) => `${r.source} (${r.method})`).join("; ")}`] : []), ...(e.add?.length || e.remove?.length ? [` needs +${(e.add ?? []).join(",")} -${(e.remove ?? []).join(",")}`] : [])]) },
+          { k: "list", items: events.map(eventSpans) },
         ],
       });
+    }
+    // Events tied to no lead (an interpretation of a job's output, above all): they carry how the rest of the output was treated, and are lost if only per-lead events are shown.
+    const noLead = run.leadEvents.filter((e) => !e.lead);
+    if (noLead.length) {
+      blocks.push({ k: "h", level: 4, text: `Events not tied to a lead (${noLead.length})` });
+      blocks.push({ k: "list", items: noLead.map(eventSpans) });
     }
     const negatives = [...views.values()].filter((x) => x.disposition === "negative");
     const duplicates = [...views.values()].filter((x) => x.disposition === "duplicate");

@@ -198,6 +198,8 @@ export type RunMetrics = {
     per_question: Array<{ section: string; id: string | null; tokens: number; usd: number; leads: string[] }>;
     unheld: { tokens: number; usd: number };
     leads_without_question: { tokens: number; usd: number; leads: string[] };
+    /** A seat's budget the trace could not place (a host run's seat with no trace row): counted in the total, never dropped. */
+    no_trace: { tokens: number; seats: string[] };
   };
   duplicates: {
     recorded: boolean;
@@ -693,6 +695,7 @@ async function cost(c: Context): Promise<RunMetrics["cost"]> {
     per_question: [...qc.byQuestion.keys()].map((section) => ({ section, id: c.qs?.bySection.get(section)?.id ?? null, tokens: qc.shown.byQuestion.get(section) ?? 0, usd: usd.get(`q\u0000${section}`) ?? 0, leads: [...(qc.byQuestionLeads.get(section) ?? [])].sort() })).sort((a, b) => b.tokens - a.tokens || a.section.localeCompare(b.section)),
     unheld: { tokens: [...qc.shown.unheld.values()].reduce((a, b) => a + b, 0), usd: usd.get("u") ?? 0 },
     leads_without_question: { tokens: qc.shown.noQuestion, usd: usd.get("n") ?? 0, leads: [...qc.noQuestionLeads].sort() },
+    no_trace: { tokens: [...qc.shown.noTrace.values()].reduce((a, b) => a + b, 0), seats: [...qc.shown.noTrace.keys()].sort() },
   };
 }
 
@@ -955,7 +958,7 @@ export function metricsText(m: RunMetrics): string {
     ["Evidence added", a.evidence_recorded ? `${a.evidence_added} time(s), ${a.evidence_added_for_request} for a request` : absent("store/journal.jsonl")],
     ["Interpretations", i.recorded ? `${i.total}: ${i.valid} valid, ${i.superseded} on a superseded entry, ${i.disputed} on a disputed one${i.missing ? `, ${i.missing} on no entry` : ""}; ${i.jobs_uninterpreted.length} of ${i.jobs_under_leads} lead jobs uninterpreted, ${i.jobs_without_valid.length} with no valid interpretation` : absent(LEADS)],
     ["Reversals", r.recorded ? `${r.result_changes.length + r.negative_reopens.length}: ${r.new_evidence} after new evidence, ${r.discoverable} discoverable in the original evidence (${r.result_changes.length} answer result changes, ${r.leads_recorded ? `${r.negative_reopens.length} negative leads reopened` : `negative reopens ${absent(LEADS)}`}); ${r.corrections} corrections kept the result` : absent(LEDGER)],
-    ["Cost", m.cost.source ? `${m.cost.tokens} tokens, $${m.cost.usd} (from ${m.cost.source === "model-gateway" ? "the model gateway's log" : m.cost.source === "pi-sessions" ? "the seats' Pi sessions" : "each seat's total spread over its calls on the trace, an estimate"}); ${m.cost.unheld.tokens} spent holding no lead, ${m.cost.leads_without_question.tokens} on leads that answer no question` : "not measured (no per-call token record)"],
+    ["Cost", m.cost.source ? `${m.cost.tokens} tokens, $${m.cost.usd} (from ${m.cost.source === "model-gateway" ? "the model gateway's log" : m.cost.source === "pi-sessions" ? "the seats' Pi sessions" : "each seat's total spread over its calls on the trace, an estimate"}); ${m.cost.unheld.tokens} spent holding no lead, ${m.cost.leads_without_question.tokens} on leads that answer no question${m.cost.no_trace.tokens ? `, ${m.cost.no_trace.tokens} a seat spent that the trace could not place (${m.cost.no_trace.seats.join(", ")})` : ""}` : "not measured (no per-call token record)"],
     ["Duplicates", m.duplicates.recorded ? `${m.duplicates.jobs_with_similar.length} jobs with similar work by another seat (${m.duplicates.exact_repeats.length} exact repeats); ${m.duplicates.independent.length} independent reproductions; same_as ${m.duplicates.same_as.files} file(s), ${m.duplicates.same_as.bytes} bytes in ${m.duplicates.same_as.jobs.length} job(s), ${m.duplicates.same_as.whole.length} wholly; recipes merged ${m.duplicates.recipe_merged}` : `not recorded${m.duplicates.shadow_would_merge ? ` (the retired shadow merge said ${m.duplicates.shadow_would_merge})` : " (no reuse hints on the store's journal)"}`],
     ["Network", n.recorded ? `${n.requests} request(s): ${n.granted} granted, ${n.denied} denied (${counts(n.denied_by_code)}); ${n.operator_items} operator item(s), ${n.operator_items_open} open; ${n.grants} grant(s) (${counts(n.grants_by_status)}); ${n.fetches} fetch(es), ${n.captures} capture(s), ${n.fetch_refusals} refused by the fetch service${n.contamination ? `; contamination ${n.contamination}` : ""}` : "not used (no network/ records)"],
   ];

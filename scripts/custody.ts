@@ -2520,6 +2520,23 @@ export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: stri
     else if ((at(list, n) ?? null) !== (head ?? null)) broken.push(`${what}: line ${n} is not the one it sealed`);
     else held.push(`${what} (${n})`);
   };
+  // A register chained with the lead register's code (leads, questions, the
+  // network chains, the operator requests): the first n events' own chain is
+  // recomputed (every event's hash over its content), never read from the
+  // hash fields the lines carry, so a changed body with its hash left in
+  // place does not pass (docs/adr/0016).
+  const checkChain = (what: string, n: number | undefined, head: string | null | undefined, text: string) => {
+    if (n === undefined) return;
+    const lines = text.split("\n").filter((l) => l.trim());
+    if (n > lines.length) {
+      broken.push(`${what}: it sealed ${n} event(s), and ${lines.length} are here`);
+      return;
+    }
+    const v = n > 0 ? verifyLeadChain(`${lines.slice(0, n).join("\n")}\n`) : { ok: true, head: null as string | null };
+    if (!v.ok) broken.push(`${what}: its first ${n} event(s) do not chain (${(v as { reason?: string }).reason})`);
+    else if ((v.head ?? null) !== (head ?? null)) broken.push(`${what}: event ${n} is not the one it sealed`);
+    else held.push(`${what} (${n})`);
+  };
   const traceLines = now.trace.split("\n").filter((l) => l.trim());
   if (sealed.trace) {
     const n = sealed.trace.lines;
@@ -2531,11 +2548,11 @@ export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: stri
   if (sealed.ledger) check("the ledger", sealed.ledger.entries, sealed.ledger.head, verifyLedgerChain(now.ledger).hashes);
   check("the attestations", sealed.attestations?.lines, sealed.attestations?.head, lineHashField(now.attestations));
   check("the disputes", sealed.disputes?.lines, sealed.disputes?.head, lineHashField(now.disputes));
-  check("the lead register", sealed.leads?.lines, sealed.leads?.head, lineHashField(now.leads));
-  check("the question register", sealed.questions?.lines, sealed.questions?.head, lineHashField(now.questions));
-  check("the network grants", sealed.network?.grants.lines, sealed.network?.grants.head, lineHashField(now.grants));
-  check("the network fetches", sealed.network?.fetches.lines, sealed.network?.fetches.head, lineHashField(now.fetches));
-  if (now.requests !== undefined) check("the operator requests", sealed.requests?.lines, sealed.requests?.head, lineHashField(now.requests));
+  checkChain("the lead register", sealed.leads?.lines, sealed.leads?.head, now.leads);
+  checkChain("the question register", sealed.questions?.lines, sealed.questions?.head, now.questions);
+  checkChain("the network grants", sealed.network?.grants.lines, sealed.network?.grants.head, now.grants);
+  checkChain("the network fetches", sealed.network?.fetches.lines, sealed.network?.fetches.head, now.fetches);
+  if (now.requests !== undefined) checkChain("the operator requests", sealed.requests?.lines, sealed.requests?.head, now.requests ?? "");
   if (sealed.journal) check("the store journal", sealed.journal.lines, sealed.journal.head, now.journal === null ? [] : verifyJournalText(now.journal).hashes);
   if (sealed.model_gateway && now.gateway === null && sealed.model_gateway.lines > 0) {
     broken.push(`the model gateway log it sealed (${sealed.model_gateway.lines} lines) is not here`);

@@ -79,7 +79,7 @@ test("release.json binds the question register as custody sealed it, says what i
   await writeFile(join(r.root, "questions", "questions.jsonl"), `${text.split("\n").filter(Boolean).slice(0, -1).join("\n")}\n`);
   const cut = await verifyReleases(layout());
   assert.equal(cut.ok, false);
-  assert.match(cut.lines.join("\n"), /the question register here is not the one it binds/);
+  assert.match(cut.lines.join("\n"), /the question register here has \d+ events, fewer than the \d+ it binds/);
   await writeFile(join(r.root, "questions", "questions.jsonl"), text);
   assert.equal((await verifyReleases(layout())).ok, true);
 });
@@ -133,4 +133,11 @@ test("custody and releases hold the operator requests: the operator's acts after
   // An earlier verdict held as a prefix names the requests too.
   const p = sealPrefix(custody.seal, { trace: "", ledger: "", attestations: "", disputes: "", leads: "", questions: "", grants: "", fetches: "", requests: `${first.lines.join("\n")}\n${more.lines.join("\n")}\n`, journal: null, gateway: null });
   assert.ok(p.held.includes("the operator requests (2)"), JSON.stringify(p));
+  // Finding 10: a sealed request's body changed but its stored hash and prev
+  // fields left in place. A prefix check that recomputes the chain catches it;
+  // one that trusted the stored head would not.
+  const tampered = JSON.parse(first.lines[0]);
+  tampered.kind = "clarification";
+  const keptHashes = sealPrefix(custody.seal, { trace: "", ledger: "", attestations: "", disputes: "", leads: "", questions: "", grants: "", fetches: "", requests: `${JSON.stringify(tampered)}\n${first.lines[1]}\n`, journal: null, gateway: null });
+  assert.ok(keptHashes.broken.some((b) => /operator requests/.test(b)), JSON.stringify(keptHashes.broken));
 });

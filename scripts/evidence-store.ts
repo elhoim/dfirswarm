@@ -814,6 +814,8 @@ export type Generation = {
   /** What asked for it: the kickoff's plan, the derived catalogue, or an agent's catalog_request; and the status of the job that made its object. */
   trigger?: "kickoff" | "derived" | "request";
   parent_status?: string;
+  /** The recipe read a sensitive output: this generation's coverage detail is withheld, and its files are named by their digest (docs/adr/0016). */
+  sensitive?: boolean;
   /** What the harness did not read of the recipe's own record, and where the whole is. */
   notes?: string[];
   files: Array<{ path: string; what: string; rows: number | null; bytes: number }>;
@@ -858,7 +860,7 @@ export const RECIPE_RECORD_MAX_BYTES = 4 * 1024 * 1024;
 
 export async function publishGeneration(
   journal: Journal,
-  g: { job: string; recipe: string; recipe_sha256: string; target: Generation["target"]; experimental?: boolean; parent?: string; alias?: string; trigger?: Generation["trigger"]; parent_status?: string },
+  g: { job: string; recipe: string; recipe_sha256: string; target: Generation["target"]; experimental?: boolean; parent?: string; alias?: string; trigger?: Generation["trigger"]; parent_status?: string; sensitive?: boolean },
 ): Promise<{ generation: Generation; revision: number }> {
   const S = journal.sandbox;
   const P = storePaths(S);
@@ -892,6 +894,12 @@ export async function publishGeneration(
   } catch {
     coverage = null;
   }
+  // A generation of a sensitive output is sensitive too: the recipe read
+  // secret bytes, and its coverage's covered/not_covered, errors and
+  // explanations may carry them. The record keeps only the status and says
+  // the rest is withheld; its linked files carry the sensitive digests and
+  // are withheld from a package by those (docs/adr/0016).
+  if (g.sensitive && coverage) coverage = { status: coverage.status ?? "unknown", withheld: "this generation is of a sensitive output; its coverage detail is not recorded here" };
   const files: Generation["files"] = [];
   const index = await readRecord("index.tsv");
   for (const line of (index ?? "").split("\n")) {
@@ -905,7 +913,8 @@ export async function publishGeneration(
     const p = join(out, f);
     const st = await lstat(p).catch(() => null);
     if (!st?.isFile()) continue;
-    files.push({ path: `catalog/gen/${id}/${f}`, what: what.join("\t"), rows: await rowsOf(p), bytes: st.size });
+    // A sensitive generation's file descriptions can carry the secret; the bytes are named by their digest, withheld from a package.
+    files.push({ path: `catalog/gen/${id}/${f}`, what: g.sensitive ? "withheld: a sensitive output" : what.join("\t"), rows: g.sensitive ? null : await rowsOf(p), bytes: st.size });
   }
   let alias: string | undefined;
   if (g.alias && /^catalog\/[A-Za-z0-9._-]+$/.test(g.alias) && !existsSync(join(S, g.alias))) {
@@ -925,6 +934,7 @@ export async function publishGeneration(
     ...(alias ? { alias } : {}),
     ...(g.trigger ? { trigger: g.trigger } : {}),
     ...(g.parent_status ? { parent_status: g.parent_status } : {}),
+    ...(g.sensitive ? { sensitive: true } : {}),
     ...(notes.length ? { notes } : {}),
     files,
     at: new Date().toISOString(),

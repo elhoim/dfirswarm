@@ -814,17 +814,32 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
       const hit = candidates.find((c) => ["matches", "redacted"].includes(held(c, x.sealed_index?.sha256)));
       if (!hit) bad.push(`the sealed index of work/ it binds (${x.sealed_index.sha256}) is not here`);
     }
-    // The question register as the release says it bound it (docs/adr/0016): its head at its length, and what it says of them.
+    // The question register the release binds (docs/adr/0016), verified
+    // whether or not the custody verdict has a question seal: the prefix it
+    // binds is recomputed from the events, not read from their stored hash
+    // fields, so a change to a question's text or reason that leaves the
+    // hashes in place is caught; then what the release says of it (by_origin,
+    // analysts) is recomputed from the same events.
     if (x.questions) {
       const qText = readText(abs(layout.root, layout.questions)) ?? "";
       const qLines = qText.split("\n").filter((l) => l.trim());
-      const at = x.questions.lines ? hashFieldAt(qText, x.questions.lines) : null;
-      if (x.questions.lines > qLines.length || at !== x.questions.head) bad.push(`the question register here is not the one it binds (${x.questions.lines} events, head ${x.questions.head ?? "none"}; here ${qLines.length})`);
-      else if (layout.where === "run" && x.questions.lines) {
-        const events = qLines.slice(0, x.questions.lines).map((l) => JSON.parse(l) as Parameters<typeof questionsBinding>[0][number]);
-        const again = questionsBinding(events, { lines: x.questions.lines, head: x.questions.head });
-        if (JSON.stringify(again.by_origin) !== JSON.stringify(x.questions.by_origin) || JSON.stringify(again.analysts) !== JSON.stringify(x.questions.analysts)) bad.push("what it says of the question register (by_origin, analysts) is not what the events it binds say");
-        else parts.push(`binds the question register's first ${x.questions.lines} events (${Object.entries(x.questions.by_origin).map(([k, n]) => `${n} ${k}`).join(", ") || "no question opened"}${x.questions.analysts.length ? `; asked or acted on by ${x.questions.analysts.map((a) => `${a.person} (${a.identity})`).join(", ")}` : ""})`);
+      const verifyQ = layout.where === "run" ? (await import("../extensions/leads.ts")).verifyLeadChain : null;
+      if (x.questions.lines > qLines.length) bad.push(`the question register here has ${qLines.length} events, fewer than the ${x.questions.lines} it binds`);
+      else if (verifyQ) {
+        // Recompute the bound prefix's own chain (every event's hash over its content), never the stored hash fields.
+        const first = x.questions.lines ? `${qLines.slice(0, x.questions.lines).join("\n")}\n` : "";
+        const v = x.questions.lines ? verifyQ(first) : { ok: true, head: null as string | null };
+        if (!v.ok) bad.push(`the question register's chain here is broken at line ${(v as { broken_at?: number }).broken_at} (${(v as { reason?: string }).reason}): not the one it binds`);
+        else if ((v.head ?? null) !== x.questions.head) bad.push(`the question register here is not the one it binds (${x.questions.lines} events, head ${x.questions.head ?? "none"}; here ${v.head ?? "none"})`);
+        else {
+          const events = qLines.slice(0, x.questions.lines).map((l) => JSON.parse(l) as Parameters<typeof questionsBinding>[0][number]);
+          const again = questionsBinding(events, { lines: x.questions.lines, head: x.questions.head });
+          if (JSON.stringify(again.by_origin) !== JSON.stringify(x.questions.by_origin) || JSON.stringify(again.analysts) !== JSON.stringify(x.questions.analysts)) bad.push("what it says of the question register (by_origin, analysts) is not what the events it binds say");
+          else if (x.questions.lines) parts.push(`binds the question register's first ${x.questions.lines} events (${Object.entries(x.questions.by_origin).map(([k, n]) => `${n} ${k}`).join(", ") || "no question opened"}${x.questions.analysts.length ? `; asked or acted on by ${x.questions.analysts.map((a) => `${a.person} (${a.identity})`).join(", ")}` : ""})`);
+        }
+      } else if (x.questions.lines && hashFieldAt(qText, x.questions.lines) !== x.questions.head) {
+        // A package: its own check (package-tools.ts) recomputes the chain; here the stored head at the bound length.
+        bad.push(`the question register here is not the one it binds (${x.questions.lines} events; head differs)`);
       }
     }
     // The chains custody sealed: as they are; the growing ones as prefixes.

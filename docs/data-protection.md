@@ -108,9 +108,12 @@ models.
   over, and it carries evidence content too. `--sign` adds the examiner's
   signature and public key. `--redact` takes out what the sensitive entries
   say and withholds the outputs of jobs whose output is sensitive (run with
-  `secret_output`, or made from such an output) whole, naming each by its
-  sha256, then scans every file it hands over for what should not be there;
-  without `--redact`, `HYGIENE.json` names what in the package is sensitive.
+  `secret_output`, or made from such an output) whole, wherever their bytes
+  sit, naming each by a keyed id (never a hash a low-entropy value could be
+  brute-forced from; the key and the real digests are in a private sidecar
+  kept outside the hand-over), then scans every file it hands over — and the
+  filenames — for what should not be there; without `--redact`, `HYGIENE.json`
+  names what in the package is sensitive.
   What a package may carry under GDPR or similar laws is the operator's to
   decide; these are the means.
 - **Exports** (`swarm.sh export`, under `<sandbox>/exports/` by default):

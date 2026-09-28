@@ -12,8 +12,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { after, test } from "node:test";
 import * as P from "../extensions/protocol.ts";
 import { checkLedgerAnswers } from "../scripts/check-answers.ts";
@@ -115,7 +116,7 @@ test("identical bytes of a sensitive output are sensitive at commit, while the s
   inner.outputIndex = null;
   // Another job writes the same bytes from nothing it declared as sensitive (it made them itself).
   const again = await submitted(svc, "a2", { command: `printf '%s' '${VALUE}' > "$OUT/copy.txt"`, inputs: [] });
-  assert.deepEqual([again.sensitive?.why, again.sensitive?.from], ["derived", [secret.id]], "decided before job_committed, from the sensitive jobs' manifests, not from the index");
+  assert.deepEqual([again.sensitive?.why, again.sensitive?.from], ["derived", [secret.id]], "decided before job_committed, from the journal's sensitive jobs and their manifests, not from the same_as index");
   const journal = await readFile(storePaths(S).journal, "utf8");
   const committed = journal.split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.type === "job_committed" && l.job === again.id);
   assert.equal(committed.sensitive?.why, "derived", "the job_committed line says so");
@@ -123,13 +124,28 @@ test("identical bytes of a sensitive output are sensitive at commit, while the s
   await svc.stop("test over");
 });
 
+test("derived sensitivity follows the executed snapshot: a work copy by its digest, a catalogue alias, and through several jobs", async () => {
+  const { S, svc, base } = await run();
+  const secret = await submitted(svc, "a1", { command: `printf '%s' '${VALUE}' > "$OUT/value.txt"`, inputs: [], secret_output: true });
+  const digest = JSON.parse(await readFile(join(storePaths(S).jobs, secret.id, "manifest.json"), "utf8")).files[0].sha256;
+  // An agent copies the sensitive output into its own work directory, under a name that says nothing.
+  await mkdir(join(S, "work", "a1"), { recursive: true });
+  await writeFile(join(S, "work", "a1", "notes.bin"), VALUE);
+  const byWork = await submitted(svc, "a2", { command: `wc -c work/a1/notes.bin > "$OUT/n.txt"`, inputs: ["work/a1/notes.bin"] });
+  assert.deepEqual([byWork.sensitive?.why, byWork.sensitive?.from], ["derived", [secret.id]], "a job reading a work copy of the output, by its digest, is derived");
+  assert.equal((await sensitiveIndex(S)).content.get(digest), secret.id);
+  // A generation an alias points at: a job reading through the alias is derived.
+  await svc.stop("test over");
+});
+
 test("the derivation is by path, digest and generation for a declared scope, and by id for none; a small output is a scan word only when it is shaped like a secret", () => {
   const sensitive = new Set(["j000003"]);
-  const at = (objects: Array<{ path: string; sha256?: string }> | null, text = "") => derivedFrom({ objects, text, sensitive, digestJob: (s) => (s === "a".repeat(64) ? "j000003" : null), generationJob: (g) => (g === "g000002" ? "j000003" : null) });
+  const at = (objects: Array<{ path: string; sha256?: string }> | null, text = "") => derivedFrom({ objects, text, sensitive, contentJob: (s: string) => (s === "a".repeat(64) ? "j000003" : null), generationJob: (g: string) => (g === "g000002" ? "j000003" : null), aliasJob: (a: string) => (a === "vault" ? "j000003" : null) });
   assert.deepEqual(at([{ path: "store/jobs/j000003/out/x" }]), ["j000003"]);
   assert.deepEqual(at([{ path: `store/blobs/${"a".repeat(64)}` }]), ["j000003"]);
   assert.deepEqual(at([{ path: "inputs/disk.E01", sha256: "a".repeat(64) }]), ["j000003"], "the same bytes by digest, wherever they are");
   assert.deepEqual(at([{ path: "catalog/gen/g000002/members.tsv" }]), ["j000003"]);
+  assert.deepEqual(at([{ path: "catalog/vault/filelist.txt" }]), ["j000003"], "a catalogue alias resolves to its job");
   assert.deepEqual(at([{ path: "store/jobs/j000004/out/x" }]), []);
   assert.deepEqual(at(null, "python3 read.py store/jobs/j000003/out/key"), ["j000003"]);
   assert.deepEqual(at(null, "echo j0000031"), [], "an id inside a longer word is not the job");
@@ -171,7 +187,9 @@ test("a redacted package withholds sensitive outputs whole, names them, and scan
   const plain = await make("pkg-plain");
   const h = await hygieneReport(S, plain);
   assert.equal(h.outputs, 1);
-  assert.deepEqual(h.carried, [`store/jobs/${secret.id}/out/value.txt`, `store/jobs/${secret.id}/stdout.log`]);
+  assert.equal(h.carried, 2, "the sensitive output and its log are carried in this package");
+  const hygSidecar = JSON.parse(await readFile(join(plain, "..", `${basename(plain)}.private.json`), "utf8"));
+  assert.ok(Object.keys(hygSidecar.map).length >= 1, "the hygiene report keeps its keyed ids in a private sidecar outside the package");
   assert.ok(h.hits.some((x) => x.path === "board/main.md" && x.output), "the scan finds the output's text in a post");
   const hyg = JSON.parse(await readFile(join(plain, "HYGIENE.json"), "utf8"));
   assert.deepEqual(hyg.entries.map((e: { seq: number }) => e.seq), [1]);
@@ -180,7 +198,9 @@ test("a redacted package withholds sensitive outputs whole, names them, and scan
   const pkg = await make("pkg-redacted");
   const r = await redactPackage(S, pkg, { leaks: "list" });
   assert.deepEqual(r.withheld.map((w) => w.path).sort(), [`store/jobs/${secret.id}/out/value.txt`, `store/jobs/${secret.id}/stdout.log`]);
-  assert.match(await readFile(join(pkg, "store", "jobs", secret.id, "out", "value.txt"), "utf8"), /^\[withheld: a sensitive output \(job j\d+ ran with secret_output\); its sha256 before it was withheld is [0-9a-f]{64}\]/);
+  const stub = await readFile(join(pkg, "store", "jobs", secret.id, "out", "value.txt"), "utf8");
+  assert.match(stub, /^\[withheld: sensitive content \(bytes a sensitive job wrote \(job j\d+\)\); matched hidden-[0-9a-f]{24}\./, "the stub names a keyed id, not the digest");
+  assert.doesNotMatch(stub, /[0-9a-f]{64}/, "the stub publishes no digest a low-entropy value could be brute-forced from");
   assert.equal(await readFile(join(pkg, "store", "jobs", other.id, "out", "p.txt"), "utf8"), "nothing sensitive\n", "another job's output is kept");
   assert.doesNotMatch(await readFile(join(pkg, "board", "main.md"), "utf8"), new RegExp(VALUE), "the output's text is taken out of a post");
   assert.doesNotMatch(await readFile(join(pkg, "work", "notes.md"), "utf8"), new RegExp(VALUE));
@@ -191,12 +211,75 @@ test("a redacted package withholds sensitive outputs whole, names them, and scan
   assert.equal(red.entries[0].seq, 1);
   assert.match(red.entries[0].why, /cites sensitive output/);
   const txt = await readFile(join(pkg, "REDACTIONS.txt"), "utf8");
-  assert.match(txt, /Withheld whole: \n[0-9a-f]{64}\s+\d+\s+store\/jobs\/j\d+\/(out\/value\.txt|stdout\.log)/);
+  assert.match(txt, /Withheld whole: \nhidden-[0-9a-f]{24}\s+\d+\s+store\/jobs\/j\d+\/(out\/value\.txt|stdout\.log)/);
+  assert.doesNotMatch(txt.split("Withheld whole:")[1].split("sha256 before")[0], /[0-9a-f]{64}/, "the withheld list carries no digest, only keyed ids");
+  // The private sidecar, outside the package, maps the ids to the real digests.
+  const sidecar = JSON.parse(await readFile(join(pkg, "..", `${basename(pkg)}.private.json`), "utf8"));
+  const ids = r.withheld.map((w) => w.sha256_of_original);
+  for (const id of ids) assert.match(sidecar.map[id].sha256, /^[0-9a-f]{64}$/, "the sidecar has the real digest");
+  assert.ok(!existsSync(join(pkg, `${basename(pkg)}.private.json`)) && !existsSync(join(pkg, "..", `${basename(pkg)}.private.json`).replace(base, pkg)), "the sidecar is not inside the package");
   // A copy in a form the redaction cannot rewrite (a binary file) is a hit the scan names.
   const leaky = await make("pkg-leaky");
   await writeFile(join(leaky, "work", "blob.bin"), Buffer.concat([Buffer.alloc(16), Buffer.from(VALUE, "utf16le")]));
   const again = await redactPackage(S, leaky, { leaks: "list" });
   assert.ok(again.leaks.some((x) => x.path === "work/blob.bin" && x.output && x.as === "bytes"), JSON.stringify(again.leaks));
+});
+
+test("a byte-identical copy of a sensitive output, with no ledger entry and no scan word, is withheld by its digest; a secret-bearing filename is a keyed id or a scan hit", async () => {
+  const { S, svc, base } = await run();
+  // A multiline output over the scan-word bound: no ledger entry names it, and its text is no single secret-shaped word.
+  const big = Array.from({ length: 40 }, (_, i) => `line ${i}: TOKEN-${i}-value-of-some-length`).join("\n") + "\n";
+  const secret = await submitted(svc, "a1", { command: `cat > "$OUT/dump.txt" <<'EOF'\n${big}EOF`, inputs: [], secret_output: true });
+  const pkg = join(base, "pkg");
+  await mkdir(join(pkg, "store", "jobs", secret.id, "out"), { recursive: true });
+  for (const f of ["job.json", "manifest.json"]) await writeFile(join(pkg, "store", "jobs", secret.id, f), await readFile(join(storePaths(S).jobs, secret.id, f)));
+  const sealedBytes = await readFile(join(storePaths(S).jobs, secret.id, "out", "dump.txt"));
+  await writeFile(join(pkg, "store", "jobs", secret.id, "out", "dump.txt"), sealedBytes);
+  // A byte-identical copy far from the store, with no ledger entry at all.
+  await mkdir(join(pkg, "work", "a1"), { recursive: true });
+  await writeFile(join(pkg, "work", "a1", "carved.bin"), sealedBytes);
+  // A small secret output, and a retained, non-sensitive file named after its value.
+  const small = await submitted(svc, "a1", { command: `printf '%s' 'PINWORD-4821' > "$OUT/pin.txt"`, inputs: [], secret_output: true });
+  await mkdir(join(pkg, "store", "jobs", small.id, "out"), { recursive: true });
+  for (const f of ["job.json", "manifest.json"]) await writeFile(join(pkg, "store", "jobs", small.id, f), await readFile(join(storePaths(S).jobs, small.id, f)));
+  await writeFile(join(pkg, "store", "jobs", small.id, "out", "pin.txt"), await readFile(join(storePaths(S).jobs, small.id, "out", "pin.txt")));
+  await writeFile(join(pkg, "work", "a1", "notes-PINWORD-4821.txt"), "nothing in here\n");
+  await writeFile(join(pkg, "ledger.jsonl"), "");
+  const r = await redactPackage(S, pkg, { leaks: "list" });
+  assert.ok(r.withheld.some((w) => w.path === "work/a1/carved.bin"), "a byte-identical copy anywhere is withheld by its digest");
+  assert.doesNotMatch(await readFile(join(pkg, "work", "a1", "carved.bin"), "utf8"), /TOKEN-3-value/, "the copy's bytes are gone");
+  // The filename holding the value of a small sensitive output is a scan hit, its commitment a keyed id.
+  const fnHit = r.leaks.find((h) => h.as === "filename");
+  assert.ok(fnHit && fnHit.path.includes("notes-PINWORD"), JSON.stringify(r.leaks));
+  assert.match(fnHit!.token_sha256, /^hidden-/, "a filename hit on a low-entropy value is a keyed id, not a hash");
+  const red = JSON.parse(await readFile(join(pkg, "REDACTIONS.json"), "utf8"));
+  assert.doesNotMatch(JSON.stringify(red), /PINWORD-4821/, "no secret value is printed in the record");
+  await svc.stop("test over");
+});
+
+test("a sensitive generation's coverage is withheld from its catalogue projection at the source", async () => {
+  const base = await mkdtemp(join(tmpdir(), "hygiene-gen-"));
+  dirs.push(base);
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "sgen", agentIds: ["a1"] });
+  await writeFile(join(S, "inputs.json"), JSON.stringify({ files: [] }));
+  const { Journal, sealTree: seal, publishGeneration, storePaths: sp } = await import("../scripts/evidence-store.ts");
+  const journal = await Journal.open(S);
+  const staging = join(base, "gen-out");
+  await mkdir(staging, { recursive: true });
+  await writeFile(join(staging, "coverage.json"), JSON.stringify({ status: "partial", covered: "the vault at TOKEN-secret-value", not_covered: "the rest", errors: ["decrypt failed for TOKEN-secret-value"] }));
+  await writeFile(join(staging, "index.tsv"), "members.tsv\tthe members named TOKEN-secret-value\n");
+  await writeFile(join(staging, "members.tsv"), "1\tTOKEN-secret-value\n");
+  await seal(S, staging, join(sp(S).jobs, "j000009", "out"), "j000009", 1);
+  const g = await publishGeneration(journal, { job: "j000009", recipe: "r", recipe_sha256: "0".repeat(64), target: { name: "vault" }, sensitive: true });
+  const rec = JSON.parse(await readFile(join(sp(S).gen, g.generation.id, "generation.json"), "utf8"));
+  assert.equal(rec.sensitive, true);
+  assert.doesNotMatch(JSON.stringify(rec.coverage), /TOKEN-secret-value/, "the coverage detail is withheld from the record");
+  assert.doesNotMatch(JSON.stringify(rec.files), /TOKEN-secret-value/, "the file descriptions are withheld");
+  const revIdx = JSON.parse(await readFile(join(sp(S).revisions, String(g.revision), "index.json"), "utf8"));
+  assert.doesNotMatch(JSON.stringify(revIdx), /TOKEN-secret-value/, "the revision index carries no coverage detail of it");
+  const md = await readFile(join(sp(S).revisions, String(g.revision), "index.md"), "utf8");
+  assert.doesNotMatch(md, /TOKEN-secret-value/, "the revision markdown carries none either");
 });
 
 test("the export's redaction treats an unmarked entry citing a sensitive output as sensitive", async () => {
@@ -230,7 +313,7 @@ test("a cancelled job's kept output cited later is a defect until the citing ent
   assert.ok(ev.ok, (ev as { reason?: string }).reason);
   const seq = (ev as { entry: P.LedgerEntry }).entry.seq;
   // The gate, pure: the citing entry is the defect.
-  const partial = P.partialOutputCites(await P.readLedger(S), (id) => (id === "j000007" ? "cancelled" : "ok"));
+  const partial = P.partialOutputCites(await P.readLedger(S), (ref) => (/j000007/.test(ref) ? { job: "j000007", status: "cancelled" } : { job: "x", status: "ok" }));
   assert.deepEqual([...partial.keys()], [seq]);
   const check = await checkLedgerAnswers(S, ["summary"]);
   const d = check.defects.find((x) => x.code === "partial_output");
@@ -245,5 +328,22 @@ test("a cancelled job's kept output cited later is a defect until the citing ent
   assert.ok(fixed.ok, (fixed as { reason?: string }).reason);
   assert.ok(!(await checkLedgerAnswers(S, ["summary"])).defects.some((x) => x.code === "partial_output"), "the correction says how it treats it");
   // A search recorded partial is its own disposition.
-  assert.deepEqual([...P.partialOutputCites([{ v: 4, seq: 1, kind: "absence", value: "v", completion: "partial", refs: ["job:j000007/rows.csv"], by: "a", authors: ["a"], at: "t" } as P.LedgerEntry], () => "cancelled").keys()], []);
+  assert.deepEqual([...P.partialOutputCites([{ v: 4, seq: 1, kind: "absence", value: "v", completion: "partial", refs: ["job:j000007/rows.csv"], by: "a", authors: ["a"], at: "t" } as P.LedgerEntry], () => ({ job: "j000007", status: "cancelled" })).keys()], []);
+
+  // The same partial output cited by its bare digest is caught too.
+  const rowsSha = JSON.parse(await readFile(join(storePaths(S).jobs, "j000007", "manifest.json"), "utf8")).files[0].sha256;
+  const byDigest = await P.recordEntry(a1, { kind: "event", ts: "2026-01-01T11:00:00Z", value: "The rows, cited by their digest", source: "rows.csv", evidence: "the digest", refs: [`sha256:${rowsSha}`] });
+  assert.ok(byDigest.ok, (byDigest as { reason?: string }).reason);
+  assert.ok((await checkLedgerAnswers(S, ["summary"])).defects.some((x) => x.code === "partial_output" && x.seqs.includes((byDigest as { entry: P.LedgerEntry }).entry.seq)), "a sha256: citation of a partial output is a defect");
+
+  // A successful job that copies the cancelled output, cited: its bytes are the partial producer's, so it is a defect too.
+  const copyStaging = join(base, "staging-copy");
+  await mkdir(copyStaging, { recursive: true });
+  await writeFile(join(copyStaging, "rows.csv"), "t,what\n1,first half\n");
+  await sealTree(S, copyStaging, join(storePaths(S).jobs, "j000008", "out"), "j000008", 1);
+  await writeFile(join(storePaths(S).jobs, "j000008", "job.json"), JSON.stringify({ id: "j000008", state: "committed", status: "ok", spec: { kind: "command", command: "cp", inputs: ["job:j000007/rows.csv"] }, requester: { agent: "a1" } }));
+  const byCopy = await P.recordEntry(a1, { kind: "event", ts: "2026-01-01T12:00:00Z", value: "The rows, from the copy", source: "rows.csv", evidence: "the copy", refs: ["job:j000008/rows.csv"] });
+  assert.ok(byCopy.ok, (byCopy as { reason?: string }).reason);
+  const copyDefect = (await checkLedgerAnswers(S, ["summary"])).defects.find((x) => x.code === "partial_output" && x.seqs.includes((byCopy as { entry: P.LedgerEntry }).entry.seq));
+  assert.ok(copyDefect, "a finding on a successful copy of a cancelled job's output keeps the partial status");
 });

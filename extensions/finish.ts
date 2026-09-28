@@ -566,8 +566,10 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
     return { material: s.goal.questions.map(P.sectionKey).includes(P.sectionKey(id)) || !q || q.materiality === "material", existence: s.goal.existence.map(P.sectionKey).includes(P.sectionKey(id)) || q?.expects === "existence" };
   };
   // The kept output of a cancelled or stopped job, cited with no word on how it is treated (docs/adr/0016): the answers check holds it, and so does readiness.
-  const statusOf = new Map(s.jobs.map((j) => [j.id, j.status ?? null]));
-  const partial = P.partialOutputCites(s.ledger.entries, (id) => statusOf.get(id));
+  // The producer of each citation (scripts/output-hygiene.ts producerIndex): a copy or a digest of a cancelled job's bytes keeps its partial status.
+  const hygiene = await import("../scripts/output-hygiene.ts").catch(() => null);
+  const { producerOf } = hygiene ? await hygiene.producerIndex(sandboxRoot).catch(() => ({ producerOf: (_ref: string) => null })) : { producerOf: (_ref: string) => null };
+  const partial = P.partialOutputCites(s.ledger.entries, producerOf);
   const gate = P.ledgerGate({ entries: s.ledger.entries, attestations, disputes, sections, bar: barOf, partial });
   const accepted = new Set<string>();
   for (const q of s.questions?.state.questions.values() ?? []) if (q.accepted && (await import("./questions.ts")).acceptanceStands(q, s.ledger)) accepted.add(`question:${q.section}`);

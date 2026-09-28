@@ -17,7 +17,8 @@
  *   with its time);
  * - a run with neither has only each seat's total (budget.json); it is
  *   spread evenly over the seat's tool calls on the trace, which is an
- *   estimate and is called one;
+ *   estimate and is called one, and a seat with no trace row to spread it
+ *   over keeps its tokens in an explicit no-trace bucket, never dropped;
  * - a call is given to the leads its seat held at that moment (the lead
  *   register: from an open with a holder or a claim, to a release, a
  *   hand-off, a close, a reopen or another seat's claim; a seat claiming a
@@ -55,6 +56,8 @@ export type QuestionCost = {
   /** Calls made while the seat held no lead, by seat. */
   unheld: Map<string, number>;
   unheldUsd: number;
+  /** A seat's budget the trace could not place (no trace rows to spread it over): an explicit unattributed bucket, by seat. */
+  noTrace: Map<string, number>;
   /** Tokens given to leads that name no question, and those leads. */
   noQuestion: number;
   noQuestionUsd: number;
@@ -64,7 +67,7 @@ export type QuestionCost = {
    * still add up (roundParts): the questions, the leads that name none and
    * the unheld calls to the total; the leads to what the leads were given.
    */
-  shown: { total: number; byQuestion: Map<string, number>; byLead: Map<string, number>; unheld: Map<string, number>; noQuestion: number };
+  shown: { total: number; byQuestion: Map<string, number>; byLead: Map<string, number>; unheld: Map<string, number>; noTrace: Map<string, number>; noQuestion: number };
 };
 
 type Interval = { seat: string; from: number; to: number };
@@ -102,14 +105,14 @@ const HOW =
   "each call is given to the leads its seat held when it was made, split evenly among them, and each lead's share to the questions it names, split evenly. A call made while the seat held no lead is given to no question: it is the seat's reading, coordination and board work, on its own line. The figures are an attribution by holding, not a measure of what each question needed: a seat reasons about everything in its context at once. Shown rounded, the parts still add up to the run's total.";
 export const METHOD_GATEWAY = `Each model call the gateway recorded (its input, output and cache tokens, and its dollars): ${HOW}`;
 export const METHOD_SESSIONS = `This run has no gateway log: each model call is read from the seats' Pi sessions (each reply's and compaction's usage, with its time), and ${HOW}`;
-export const METHOD_TRACE = `This run has no gateway log and no Pi sessions: each seat's total tokens (budget.json) are spread evenly over its tool calls on the trace, an estimate, and ${HOW}`;
-export const METHOD_NONE = "No token record was found (no gateway log, no Pi sessions, and no seat total with calls on the trace): no cost can be given to a question.";
+export const METHOD_TRACE = `This run has no gateway log and no Pi sessions: each seat's total tokens (budget.json) are spread evenly over its tool calls on the trace, an estimate (a seat with no trace row keeps its tokens in a no-trace bucket, counted in the total), and ${HOW}`;
+export const METHOD_NONE = "No token record was found (no gateway log, no Pi sessions, and no seat total in budget.json): no cost can be given to a question.";
 
 /**
  * Apportion calls to leads and questions. Pure. `questionsOf` maps a lead to
  * the question keys it names (empty for none).
  */
-export function apportion(calls: readonly TokenCall[], intervals: Map<string, Interval[]>, questionsOf: (lead: string) => string[], source: CostSource): QuestionCost {
+export function apportion(calls: readonly TokenCall[], intervals: Map<string, Interval[]>, questionsOf: (lead: string) => string[], source: CostSource, noTrace: Map<string, number> = new Map()): QuestionCost {
   const byQuestion = new Map<string, number>();
   const byQuestionUsd = new Map<string, number>();
   const byQuestionLeads = new Map<string, Set<string>>();
@@ -119,7 +122,8 @@ export function apportion(calls: readonly TokenCall[], intervals: Map<string, In
   let unheldUsd = 0;
   let noQuestion = 0;
   let noQuestionUsd = 0;
-  let total = 0;
+  // A seat's budget the trace could not place is the run's too: counted in the total, in its own bucket.
+  let total = [...noTrace.values()].reduce((a, b) => a + b, 0);
   let totalUsd = 0;
   const add = (m: Map<string, number>, k: string, v: number) => m.set(k, (m.get(k) ?? 0) + v);
   const bySeat = new Map<string, Array<{ lead: string; from: number; to: number }>>();
@@ -153,11 +157,16 @@ export function apportion(calls: readonly TokenCall[], intervals: Map<string, In
     }
   }
   const method = source === "gateway" ? METHOD_GATEWAY : source === "sessions" ? METHOD_SESSIONS : source === "trace" ? METHOD_TRACE : METHOD_NONE;
-  // Shown in whole tokens, the parts rounded together so they still make the total.
-  const parts = roundParts<string>([...[...byQuestion].map(([k, v]) => [`q\u0000${k}`, v] as const), ...[...unheld].map(([k, v]) => [`u\u0000${k}`, v] as const), ["n", noQuestion] as const]);
+  // Shown in whole tokens, the parts rounded together so they still make the total (the no-trace bucket included).
+  const parts = roundParts<string>([
+    ...[...byQuestion].map(([k, v]) => [`q\u0000${k}`, v] as const),
+    ...[...unheld].map(([k, v]) => [`u\u0000${k}`, v] as const),
+    ...[...noTrace].map(([k, v]) => [`t\u0000${k}`, v] as const),
+    ["n", noQuestion] as const,
+  ]);
   const pick = (prefix: string) => new Map([...parts].filter(([k]) => k.startsWith(prefix)).map(([k, v]) => [k.slice(prefix.length), v]));
-  const shown = { total: [...parts.values()].reduce((a, b) => a + b, 0), byQuestion: pick("q\u0000"), byLead: roundParts<string>([...byLead]), unheld: pick("u\u0000"), noQuestion: parts.get("n") ?? 0 };
-  return { source, method, total, totalUsd, byQuestion, byQuestionUsd, byQuestionLeads, byLead, unheld, unheldUsd, noQuestion, noQuestionUsd, noQuestionLeads, shown };
+  const shown = { total: [...parts.values()].reduce((a, b) => a + b, 0), byQuestion: pick("q\u0000"), byLead: roundParts<string>([...byLead]), unheld: pick("u\u0000"), noTrace: pick("t\u0000"), noQuestion: parts.get("n") ?? 0 };
+  return { source, method, total, totalUsd, byQuestion, byQuestionUsd, byQuestionLeads, byLead, unheld, unheldUsd, noTrace, noQuestion, noQuestionUsd, noQuestionLeads, shown };
 }
 
 /**
@@ -262,25 +271,43 @@ export function traceCalls(traceText: string, totals: Record<string, number>): T
 }
 
 /** The run's calls and where they came from: the gateway, else the Pi sessions, else the seats' totals spread over the trace. */
-export async function runCalls(sandbox: string): Promise<{ source: CostSource; calls: TokenCall[] }> {
+export async function runCalls(sandbox: string): Promise<{ source: CostSource; calls: TokenCall[]; noTrace: Map<string, number> }> {
   const S = resolve(sandbox);
   const gateway = gatewayCalls(await readFile(join(S, "traces", "model-gateway.jsonl"), "utf8").catch(() => ""));
-  if (gateway.length) return { source: "gateway", calls: gateway };
+  if (gateway.length) return { source: "gateway", calls: gateway, noTrace: new Map() };
   const sessions = await sessionCalls(S);
-  if (sessions.length) return { source: "sessions", calls: sessions };
+  if (sessions.length) return { source: "sessions", calls: sessions, noTrace: new Map() };
   const budget = await readFile(join(S, "budget.json"), "utf8").then((t) => JSON.parse(t) as { agents?: Record<string, { tokens?: number }> }).catch(() => null);
   const totals = Object.fromEntries(Object.entries(budget?.agents ?? {}).map(([k, v]) => [k, Number(v?.tokens) || 0]).filter(([, v]) => (v as number) > 0));
   if (Object.keys(totals).length) {
     const calls = traceCalls(await readFile(join(S, "traces", "events.jsonl"), "utf8").catch(() => ""), totals as Record<string, number>);
-    if (calls.length) return { source: "trace", calls };
+    // A seat with a budget but no trace rows to spread it over: its tokens
+    // are the run's, and go in an explicit bucket, never dropped (docs/adr/0016).
+    const spread = new Map<string, number>();
+    for (const c of calls) spread.set(c.seat, (spread.get(c.seat) ?? 0) + c.tokens);
+    const noTrace = new Map<string, number>();
+    for (const [seat, tok] of Object.entries(totals as Record<string, number>)) {
+      const placed = spread.get(seat) ?? 0;
+      if (tok - placed > 0.5) noTrace.set(seat, tok - placed);
+    }
+    if (calls.length || noTrace.size) return { source: "trace", calls, noTrace };
   }
-  return { source: "none", calls: [] };
+  return { source: "none", calls: [], noTrace: new Map() };
 }
 
 /** The run's cost by question, apportioned by the leads held. */
 export async function questionCost(sandbox: string, events: readonly LeadEvent[], questionsOf: (lead: string) => string[]): Promise<QuestionCost> {
-  const { source, calls } = await runCalls(sandbox);
-  return apportion(calls, holdingIntervals(events), questionsOf, source);
+  const { source, calls, noTrace } = await runCalls(sandbox);
+  return apportion(calls, holdingIntervals(events), questionsOf, source, noTrace);
+}
+
+/**
+ * Whole shares of fractional values that sum to their rounded total (the
+ * largest-remainder method): roundParts, over a plain list. The displayed
+ * per-question figures then add up to the displayed run total (docs/adr/0016).
+ */
+export function conserveRound(values: number[]): number[] {
+  return [...roundParts(values.map((v, i) => [i, v] as const)).values()];
 }
 
 /** A token figure as a reader is shown it: a whole number with separators. */

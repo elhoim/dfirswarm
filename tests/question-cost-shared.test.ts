@@ -87,3 +87,25 @@ test("the report's cost and the metrics' are one computation: a hand-off ends a 
   assert.equal(Number((m.cost.per_question.reduce((a, q) => a + q.usd, 0) + m.cost.unheld.usd + m.cost.leads_without_question.usd).toFixed(4)), m.cost.usd, "and the dollars too");
   assert.equal(m.cost.usd, 0.013);
 });
+
+test("a host run's seat with a budget and no trace row: its tokens are in the no-trace bucket, in the report's total and in the metrics' parts", async () => {
+  const base = await mkdtemp(join(tmpdir(), "qcost-host-"));
+  dirs.push(base);
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "qc2", agentIds: ["a1", "a2"], capUsd: 5, wallClockMinutes: 30, goal: GOAL });
+  await mkdir(join(S, "traces"), { recursive: true });
+  const budget = JSON.parse(await (await import("node:fs/promises")).readFile(join(S, "budget.json"), "utf8"));
+  budget.agents = { ...(budget.agents ?? {}), a1: { ...(budget.agents?.a1 ?? {}), tokens: 1001 }, a2: { ...(budget.agents?.a2 ?? {}), tokens: 900 } };
+  await writeFile(join(S, "budget.json"), JSON.stringify(budget));
+  await writeFile(join(S, "traces", "events.jsonl"), [{ ts: "2026-01-01T00:00:01Z", agent: "a1" }, { ts: "2026-01-01T00:00:02Z", agent: "a1" }, { ts: "2026-01-01T00:00:03Z", agent: "a1" }].map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const report = await questionCost(S, [], () => []);
+  assert.equal(report.source, "trace");
+  assert.ok(Math.abs(report.total - 1901) < 1e-6, "exact until shown");
+  assert.equal(report.shown.total, 1901);
+  assert.deepEqual(Object.fromEntries(report.shown.noTrace), { a2: 900 });
+  const m = await measureRun(S);
+  assert.equal(m.cost.source, "trace-estimate");
+  assert.equal(m.cost.tokens, 1901);
+  assert.deepEqual(m.cost.no_trace, { tokens: 900, seats: ["a2"] });
+  assert.equal(m.cost.per_question.reduce((a, q) => a + q.tokens, 0) + m.cost.unheld.tokens + m.cost.leads_without_question.tokens + m.cost.no_trace.tokens, m.cost.tokens, "every part, the no-trace bucket too, adds up to the total");
+});

@@ -10478,23 +10478,25 @@ export const PARTIAL_STATUSES: ReadonlySet<string> = new Set(["cancelled", "stop
 /**
  * The standing entries that cite the kept output of a cancelled or stopped
  * job without saying how they treat it (qualifies {ref, why}): by seq, each
- * such ref with its job's status. A limitation says what could not be done
- * and is its own disposition; so is a search recorded partial or failed, and
- * a coverage record, whose coverage_actual, skipped and failures say it.
- * Pure: `statusOf` reads a job's status.
+ * such ref with the producing job and its status. A limitation says what
+ * could not be done and is its own disposition; so is a search recorded
+ * partial or failed, and a coverage record, whose coverage_actual, skipped
+ * and failures say it. Pure: `producerOf(ref)` resolves a citation to the
+ * job whose output it names and that job's status, following a digest or a
+ * copy to the job that wrote those bytes (scripts/output-hygiene.ts builds
+ * it from the store); a citation that names no job's output is null.
  */
-export function partialOutputCites(entries: LedgerEntry[], statusOf: (job: string) => string | null | undefined): Map<number, Array<{ ref: string; job: string; status: string }>> {
+export function partialOutputCites(entries: LedgerEntry[], producerOf: (ref: string) => { job: string; status: string } | null | undefined): Map<number, Array<{ ref: string; job: string; status: string }>> {
   const replaced = supersededBy(entries);
   const out = new Map<number, Array<{ ref: string; job: string; status: string }>>();
   for (const e of entries) {
     if (replaced.has(e.seq) || e.kind === "limitation" || e.kind === "coverage" || e.kind === "answer") continue;
     if (e.kind === "absence" && e.completion && e.completion !== "complete") continue;
     for (const ref of e.refs ?? []) {
-      const job = /^job:([a-z0-9-]{1,64})(?:\/|$)/.exec(ref)?.[1];
-      const status = job ? statusOf(job) : null;
-      if (!job || !status || !PARTIAL_STATUSES.has(status)) continue;
+      const p = producerOf(ref);
+      if (!p || !PARTIAL_STATUSES.has(p.status)) continue;
       if ((e.qualifies ?? []).some((q) => q.ref === ref)) continue;
-      out.set(e.seq, [...(out.get(e.seq) ?? []), { ref, job, status }]);
+      out.set(e.seq, [...(out.get(e.seq) ?? []), { ref, job: p.job, status: p.status }]);
     }
   }
   return out;
