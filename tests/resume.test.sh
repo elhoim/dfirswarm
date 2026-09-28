@@ -34,7 +34,7 @@ id="$(id_of r1)"; sb="$(sandbox_of r1)"
 argv="$TMP/runs/resume/$id.argv.json"
 [[ -f "$argv" ]] || fail "the start options were not kept"
 [[ "$(stat -f %Lp "$argv" 2>/dev/null || stat -c %a "$argv")" == 600 ]] || fail "the kept options are not 0600"
-jq -e 'index("--cap-usd") != null and index("--label") != null' "$argv" >/dev/null || fail "the kept options are not the kickoff's: $(cat "$argv")"
+jq -e '.argv | index("--cap-usd") != null and index("--label") != null' "$argv" >/dev/null || fail "the kept options are not the kickoff's: $(cat "$argv")"
 pass "the kickoff keeps its start options outside the run, 0600"
 
 echo "# refused while the run is going, or never started"
@@ -119,3 +119,34 @@ out="$(swarm resume "$id2" --no-start -- --model solo/model --n 3 --goal-file "$
 set -e
 [[ $rc -eq 2 ]] && grep -q 'a resume continues the same seats (give --n 2)' <<<"$out" || fail "a resume with other seats was not refused (rc $rc): $out"
 pass "a run with no kept options is resumed with them given after --, and with the same seats only"
+
+echo "# the start options kept for a resume hold no secret a pane could read"
+out="$(kick --cap-usd 5 --label r3 --no-write-guard --accept-signer-exposure --env CASE_HINT=s3cr3t-value-77 --notify "cat > /dev/null")" || fail "the unguarded kickoff was refused: $out"
+id3="$(id_of r3)"
+kept="$TMP/runs/resume/$id3.argv.json"
+if grep -q 's3cr3t-value-77' "$kept"; then fail "an --env value the panes could read was kept: $(cat "$kept")"; fi
+if grep -q 'cat > /dev/null' "$kept"; then fail "the notify command was kept with the start options: $(cat "$kept")"; fi
+jq -e '.dropped_env == ["CASE_HINT"] and .notify == true and (.argv | index("--env") == null)' "$kept" >/dev/null || fail "the kept options do not say what was left out: $(cat "$kept")"
+[[ -f "$TMP/runs/notify/$id3.cmd" ]] || fail "the notify command is not in its own store"
+set_state "$id3" running
+swarm stop "$id3" --no-custody >/dev/null || fail "the third run's stop failed"
+set +e
+out="$(swarm resume "$id3" --no-start)"; rc=$?
+set -e
+[[ $rc -eq 2 ]] && grep -q "started with --env CASE_HINT, whose value was not kept" <<<"$out" || fail "a resume without the value not kept was not refused (rc $rc): $out"
+[[ -f "$(sandbox_of r3)/done/STOPPED" ]] || fail "a refused resume moved the stop"
+out="$(swarm resume "$id3" --no-start --env CASE_HINT=s3cr3t-value-77)" || fail "a resume with the value given again was refused: $out"
+jq -e --arg id "$id3" '.runs[] | select(.id == $id) | .notify == true' "$TMP/runs/registry.json" >/dev/null || fail "the resumed run lost its notify command"
+if grep -q 's3cr3t-value-77' "$TMP/runs/operator-audit.jsonl"; then fail "the operator's record holds the --env value"; fi
+# Where the guard can deny the stores, they are denied, and the value is kept.
+out="$(kick --cap-usd 5 --label r4 --env CASE_HINT=s3cr3t-value-88)" || fail "the guarded kickoff was refused: $out"
+id4="$(id_of r4)"
+if [[ "$(jq -r --arg id "$id4" '.runs[] | select(.id == $id) | .earlier_runs_hidden.by // empty' "$TMP/runs/registry.json")" != "" ]]; then
+  jq -e --arg id "$id4" '.runs[] | select(.id == $id) | .earlier_runs_hidden.stores == ["resume", "notify"]' "$TMP/runs/registry.json" >/dev/null || fail "the stores are not recorded as denied to the panes"
+  plan="$(cat "$(sandbox_of r4)/.fsguard/plan.txt")"
+  grep -qxF "no-read: $(cd "$TMP/runs/resume" && pwd -P)" <<<"$plan" && grep -qxF "no-read: $(cd "$TMP/runs/notify" && pwd -P)" <<<"$plan" || fail "the pane plan does not deny the stores: $plan"
+  jq -e '.dropped_env == []' "$TMP/runs/resume/$id4.argv.json" >/dev/null && grep -q 's3cr3t-value-88' "$TMP/runs/resume/$id4.argv.json" || fail "a value no pane can read was not kept"
+else
+  jq -e '.dropped_env == ["CASE_HINT"]' "$TMP/runs/resume/$id4.argv.json" >/dev/null || fail "a value the panes could read was kept"
+fi
+pass "the kept start options hold no secret a pane could read: --env values given again, the notify command from its own store, the stores denied where the guard can"
