@@ -18,7 +18,7 @@ import * as L from "../extensions/leads.ts";
 import * as Q from "../extensions/questions.ts";
 import { renderReportBody, renderReportBodyMarkdown } from "../scripts/report-body.ts";
 import { recordAttachments } from "../scripts/questions-cli.ts";
-import { apportion, holdingIntervals } from "../scripts/question-cost.ts";
+import { apportion, conserveRound, holdingIntervals, questionCost } from "../scripts/question-cost.ts";
 import { A, F, GOAL, job, ok, okq, rec, sha, dirs } from "./negative-bar-fixture.ts";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -160,7 +160,7 @@ test("the report's first layer: one screen of every question, then each question
   assert.doesNotMatch(unresolved, /Q-8:|Q-10:|Q-11:/, "only questions in scope are unresolved");
 
   // How the cost is counted, and it adds up.
-  assert.match(s2, /\*\*How the cost is counted\.\*\* Each model call the gateway recorded .* Of the run's 2,000 tokens, 1,700 tokens went to questions, 0 tokens to leads that name no question, and 300 tokens to calls made while the seat held no lead \(a2 300 tokens\)/);
+  assert.match(s2, /\*\*How the cost is counted\.\*\* Each model call the gateway recorded .* Of the run's 2,000 tokens, 1,700 tokens went to questions, 0 tokens to leads that name no question, 300 tokens to calls made while the seat held no lead \(a2 300 tokens\)/);
 
   // §4 counts the negative and footnotes the duplicate; Appendix F has every event, every lead whole.
   const s4 = mdSlice(md, "### How the investigation proceeded");
@@ -180,6 +180,37 @@ test("the report's first layer: one screen of every question, then each question
   assert.equal((await renderReportBody(r.S)).html, html);
 });
 
+test("Appendix F renders every lead event losslessly: one with no lead (an interpretation) and a close's acquisition ask", async () => {
+  const base = await mkdtemp(join(tmpdir(), "appendixf-"));
+  dirs.push(base);
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "sapp", agentIds: ["a1"] });
+  await writeFile(join(S, "SWARM.md"), "# Goal\n\n### Questions\n\n1. What happened?\n");
+  await mkdir(join(S, "leads"), { recursive: true });
+  const raw = [
+    { v: 1, seq: 1, at: "2026-01-01T00:00:00Z", by: "a1", ev: "open", lead: "L-1", title: "Look", why: "w", answers: ["1"], material: true, holder: "a1" },
+    { v: 1, seq: 2, at: "2026-01-01T00:01:00Z", by: "a1", ev: "job", lead: "L-1", job: "j000001" },
+    // An interpretation: it names a job, not a lead, and says how the rest of the output was treated.
+    { v: 1, seq: 3, at: "2026-01-01T00:02:00Z", by: "a1", ev: "interpret", job: "j000001", entry: 4, kind: "finding", rest: "the remaining 900 rows were scanned and hold nothing of note" },
+    // A close that asks for evidence the run does not have (an acquisition ask).
+    { v: 1, seq: 4, at: "2026-01-01T00:03:00Z", by: "a1", ev: "close", lead: "L-1", disposition: "needs_operator", ref: "R-1", ask: { kind: "acquisition", source: "the firewall logs", where: "the SOC", expected_value: "the egress record", urgency: "high", questions: ["1"], owner: "the SOC", authority_needed: "a data request" } },
+  ];
+  let prev = "genesis";
+  const lines = raw.map((e) => {
+    const hash = L.leadEventHash(e as never, prev);
+    const line = JSON.stringify({ ...e, prev, hash });
+    prev = hash;
+    return line;
+  });
+  await writeFile(join(S, "leads", "leads.jsonl"), lines.join("\n") + "\n");
+  const md = await renderReportBodyMarkdown(S);
+  const f = mdSlice(md, "## Appendix F: The question and lead registers");
+  assert.match(f, /Events not tied to a lead \(1\)/, "an event with no lead has its own place");
+  assert.match(f, /the remaining 900 rows were scanned and hold nothing of note/, "the interpretation's `rest` is rendered, not dropped");
+  assert.match(f, /the firewall logs/, "a close's acquisition ask is rendered whole");
+  assert.match(f, /a data request/);
+});
+
 test("the cost apportioning: a call to the leads its seat held then, split evenly, and to their questions; calls outside a hold go to no question", () => {
   const t = (s: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, s)).toISOString();
   const ev = (seq: number, at: number, ev: string, lead: string, extra: Record<string, unknown> = {}) => ({ v: 1, seq, at: t(at), by: "a1", ev, lead, prev: "", hash: "", ...extra }) as unknown as L.LeadEvent;
@@ -193,4 +224,27 @@ test("the cost apportioning: a call to the leads its seat held then, split evenl
   assert.deepEqual(Object.fromEntries(cost.byQuestion), { "Q-1": 225, "Q-2": 75 });
   assert.deepEqual(Object.fromEntries(cost.unheld), { a1: 100 });
   assert.equal([...cost.byQuestion.values()].reduce((a, b) => a + b, 0) + cost.noQuestion + [...cost.unheld.values()].reduce((a, b) => a + b, 0), cost.total, "the figures add up to the total");
+});
+
+test("the host fallback keeps a seat's budget even when the trace has no row for it, in an explicit bucket", async () => {
+  const base = await mkdtemp(join(tmpdir(), "cost-host-"));
+  dirs.push(base);
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "shost", agentIds: ["a1", "a2"] });
+  // No gateway log; budget for two seats, trace rows for only one.
+  await mkdir(join(S, "traces"), { recursive: true });
+  await writeFile(join(S, "budget.json"), JSON.stringify({ agents: { a1: { tokens: 1000 }, a2: { tokens: 900 } } }));
+  await writeFile(join(S, "traces", "events.jsonl"), [{ ts: "2026-01-01T00:00:01Z", agent: "a1" }, { ts: "2026-01-01T00:00:02Z", agent: "a1" }].map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const cost = await questionCost(S, [], () => []);
+  assert.equal(cost.source, "trace");
+  assert.deepEqual(Object.fromEntries(cost.noTrace), { a2: 900 }, "a seat with a budget but no trace row is in the no-trace bucket, not dropped");
+  assert.equal(cost.total, 1900, "the run's total is the whole budget, not only the placed part");
+});
+
+test("conserveRound: whole shares sum to the whole of the total, a 1001 split as 501 and 500", () => {
+  assert.deepEqual(conserveRound([500.5, 500.5]), [501, 500]);
+  assert.deepEqual(conserveRound([1 / 3, 1 / 3, 1 / 3].map((x) => x * 100)), [34, 33, 33]);
+  const vals = [10.4, 10.4, 10.2];
+  const whole = conserveRound(vals);
+  assert.equal(whole.reduce((a, b) => a + b, 0), Math.round(vals.reduce((a, b) => a + b, 0)), "the shares conserve the rounded total");
 });

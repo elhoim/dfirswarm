@@ -42,6 +42,8 @@ export type QuestionCost = {
   byLead: Map<string, number>;
   /** Calls made while the seat held no lead, by seat. */
   unheld: Map<string, number>;
+  /** A seat's budget the trace could not place (no trace rows to spread it over): an explicit unattributed bucket, by seat. */
+  noTrace: Map<string, number>;
   /** Tokens given to leads that name no question. */
   noQuestion: number;
 };
@@ -83,12 +85,12 @@ export const METHOD_NONE = "No token record was found (no gateway log, and no se
  * Apportion calls to leads and questions. Pure. `questionsOf` maps a lead to
  * the question keys it names (empty for none).
  */
-export function apportion(calls: readonly TokenCall[], intervals: Map<string, Interval[]>, questionsOf: (lead: string) => string[], source: CostSource): QuestionCost {
+export function apportion(calls: readonly TokenCall[], intervals: Map<string, Interval[]>, questionsOf: (lead: string) => string[], source: CostSource, noTrace: Map<string, number> = new Map()): QuestionCost {
   const byQuestion = new Map<string, number>();
   const byLead = new Map<string, number>();
   const unheld = new Map<string, number>();
   let noQuestion = 0;
-  let total = 0;
+  let total = [...noTrace.values()].reduce((a, b) => a + b, 0);
   const bySeat = new Map<string, Array<{ lead: string; from: number; to: number }>>();
   for (const [lead, list] of intervals) for (const i of list) bySeat.set(i.seat, [...(bySeat.get(i.seat) ?? []), { lead, from: i.from, to: i.to }]);
   for (const c of calls) {
@@ -109,7 +111,7 @@ export function apportion(calls: readonly TokenCall[], intervals: Map<string, In
       for (const q of qs) byQuestion.set(q, (byQuestion.get(q) ?? 0) + share / qs.length);
     }
   }
-  return { source, method: source === "gateway" ? METHOD_GATEWAY : source === "trace" ? METHOD_TRACE : METHOD_NONE, total, byQuestion, byLead, unheld, noQuestion };
+  return { source, method: source === "gateway" ? METHOD_GATEWAY : source === "trace" ? METHOD_TRACE : METHOD_NONE, total, byQuestion, byLead, unheld, noTrace, noQuestion };
 }
 
 /** The gateway's calls: each billed line with its seat, time and tokens. */
@@ -161,15 +163,43 @@ export async function questionCost(sandbox: string, events: readonly LeadEvent[]
   const gateway = await readFile(join(S, "traces", "model-gateway.jsonl"), "utf8").catch(() => "");
   let calls = gatewayCalls(gateway);
   let source: CostSource = calls.length ? "gateway" : "none";
+  const noTrace = new Map<string, number>();
   if (!calls.length) {
     const budget = await readFile(join(S, "budget.json"), "utf8").then((t) => JSON.parse(t) as { agents?: Record<string, { tokens?: number }> }).catch(() => null);
     const totals = Object.fromEntries(Object.entries(budget?.agents ?? {}).map(([k, v]) => [k, Number(v?.tokens) || 0]).filter(([, v]) => (v as number) > 0));
     if (Object.keys(totals).length) {
       calls = traceCalls(await readFile(join(S, "traces", "events.jsonl"), "utf8").catch(() => ""), totals as Record<string, number>);
       if (calls.length) source = "trace";
+      // A seat with a budget but no trace rows to spread it over: its tokens
+      // are the run's, and go in an explicit bucket, never dropped (docs/adr/0016).
+      const spread = new Map<string, number>();
+      for (const c of calls) spread.set(c.seat, (spread.get(c.seat) ?? 0) + c.tokens);
+      for (const [seat, tok] of Object.entries(totals as Record<string, number>)) {
+        const placed = spread.get(seat) ?? 0;
+        if (tok - placed > 0.5) noTrace.set(seat, tok - placed);
+      }
+      if (noTrace.size && source === "none") source = "trace";
     }
   }
-  return apportion(calls, holdingIntervals(events), questionsOf, source);
+  return apportion(calls, holdingIntervals(events), questionsOf, source, noTrace);
+}
+
+/**
+ * Whole-token shares of a set of fractional values that sum to the same whole
+ * as their total: each floored, then the largest remainders get the leftover
+ * (the largest-remainder method). The displayed per-question figures then add
+ * up to the displayed run total (docs/adr/0016).
+ */
+export function conserveRound(values: number[]): number[] {
+  const floors = values.map((v) => Math.floor(v));
+  let left = Math.round(values.reduce((a, b) => a + b, 0)) - floors.reduce((a, b) => a + b, 0);
+  const order = values.map((v, i) => ({ i, frac: v - Math.floor(v) })).sort((a, b) => b.frac - a.frac);
+  for (const { i } of order) {
+    if (left <= 0) break;
+    floors[i] += 1;
+    left -= 1;
+  }
+  return floors;
 }
 
 /** A token figure as a reader is shown it: a whole number with separators. */

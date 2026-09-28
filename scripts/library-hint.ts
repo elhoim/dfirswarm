@@ -18,7 +18,7 @@
  * harness compares what the manifests wrote, as it does a recipe's
  * prefilter.
  */
-import { lstat, open, readdir, readFile, realpath } from "node:fs/promises";
+import { lstat, open, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
 /** What a tool's manifest says it reads. */
@@ -126,9 +126,29 @@ async function headOf(path: string, bytes: number): Promise<Buffer | null> {
 export type HintObject = { ref: string; path: string; area: string; shape: "file" | "dir" };
 
 /**
+ * inputs.json's file paths, parsed once and cached against its size and
+ * mtime, so a run of directory hints at admission does not re-read and
+ * re-parse a manifest that may be hundreds of megabytes (docs/adr/0016).
+ */
+let inputsPathsCache: { key: string; paths: string[] } | null = null;
+async function inputsPaths(S: string): Promise<string[]> {
+  const file = join(S, "inputs.json");
+  const st = await stat(file).catch(() => null);
+  const key = st ? `${file}:${st.size}:${st.mtimeMs}` : `${file}:none`;
+  if (inputsPathsCache?.key === key) return inputsPathsCache.paths;
+  const paths = await readFile(file, "utf8")
+    .then((t) => ((JSON.parse(t) as { files?: Array<{ path?: string; link?: string; special?: string }> }).files ?? []).filter((f) => typeof f.path === "string" && !f.link && !f.special).map((f) => String(f.path)))
+    .catch(() => []);
+  inputsPathsCache = { key, paths };
+  return paths;
+}
+
+/**
  * The files a job's declared objects hold, up to the bound: a file as it is;
- * a directory's files from the record that lists them (inputs.json, a job's
- * or an import's manifest), else as the directory holds them now.
+ * a directory's files from the record that lists them (inputs.json cached, a
+ * job's or an import's manifest), else as the directory holds them now. The
+ * hint reads a bounded head of at most HINT_FILES_MAX files; the total is the
+ * full count, so the job is told how much its objects hold.
  */
 async function filesOf(S: string, objects: HintObject[]): Promise<{ files: Array<{ input: string; path: string }>; total: number }> {
   const files: Array<{ input: string; path: string }> = [];
@@ -137,17 +157,14 @@ async function filesOf(S: string, objects: HintObject[]): Promise<{ files: Array
     total += 1;
     if (files.length < HINT_FILES_MAX) files.push({ input, path });
   };
-  let inputs: string[] | null = null;
   for (const o of objects) {
     if (o.shape === "file") {
       push(o.ref, o.path);
       continue;
     }
     if (o.area === "inputs") {
-      inputs ??= await readFile(join(S, "inputs.json"), "utf8")
-        .then((t) => ((JSON.parse(t) as { files?: Array<{ path?: string; link?: string; special?: string }> }).files ?? []).filter((f) => typeof f.path === "string" && !f.link && !f.special).map((f) => String(f.path)))
-        .catch(() => []);
-      for (const p of inputs.filter((x) => x.startsWith(`${o.path}/`) || o.path === "inputs")) push(`input:${p.replace(/^inputs\//, "")}`, p);
+      const inputs = await inputsPaths(S);
+      for (const p of inputs) if (p.startsWith(`${o.path}/`) || o.path === "inputs") push(`input:${p.replace(/^inputs\//, "")}`, p);
       continue;
     }
     const store = /^store\/(jobs|imports)\/([^/]+)\/out(?:\/(.*))?$/.exec(o.path);
@@ -163,21 +180,32 @@ async function filesOf(S: string, objects: HintObject[]): Promise<{ files: Array
   return { files, total };
 }
 
+/** How long the library hint may take before it gives what it has (a hint is not worth holding a job's admission). */
+export const HINT_DEADLINE_MS = 250;
+
+/** Forget the cached inputs.json (for a test that changes it in place). */
+export function forgetInputsPaths(): void {
+  inputsPathsCache = null;
+}
+
 /**
  * The hint for a job's declared objects: every tool of the run's library
  * that matches one of their files, with what it matched and how, or null
  * when none does. `skip` names tools the job already runs (its command
  * names them): they are not offered to it again.
  */
-export async function libraryHint(sandbox: string, objects: HintObject[], o: { skip?: (tool: string) => boolean } = {}): Promise<{ note: string; tools: LibraryHint[]; examined: number; of: number } | null> {
+export async function libraryHint(sandbox: string, objects: HintObject[], o: { skip?: (tool: string) => boolean; deadlineMs?: number } = {}): Promise<{ note: string; tools: LibraryHint[]; examined: number; of: number } | null> {
   const S = resolve(sandbox);
+  const deadline = Date.now() + (o.deadlineMs ?? HINT_DEADLINE_MS);
   const manifests = (await readToolManifests(S)).filter((m) => !o.skip?.(String(m.name)));
   if (!manifests.length || !objects.length) return null;
   const { files, total } = await filesOf(S, objects);
   const headBytes = Math.min(HINT_HEAD_MAX, Math.max(0, ...manifests.flatMap((m) => (m.use?.magic ?? []).map((g) => (Number(g.offset) || 0) + (hexBytes(String(g.hex ?? ""))?.length ?? 0)))));
   const tools: LibraryHint[] = [];
   const heads = new Map<string, Buffer | null>();
+  // The hint is worth having but not worth holding the job: past its deadline it gives what it has matched so far.
   for (const m of manifests) {
+    if (Date.now() > deadline) break;
     const matched: HintMatch[] = [];
     for (const f of files) {
       if (headBytes && m.use?.magic?.length && !heads.has(f.path)) heads.set(f.path, await headOf(join(S, f.path), headBytes));

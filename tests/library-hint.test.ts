@@ -123,3 +123,26 @@ test("the library's manifests say what they read, in a form the hint can use", (
   const evtx = JSON.parse(readFileSync(join(LIB, "evtx_query", "manifest.json"), "utf8"));
   assert.equal(matchTool(evtx, { input: "input:Security.evtx", path: "inputs/Security.evtx", head: null })[0]?.by, "extension");
 });
+
+test("the hint is bounded and reuses the cached manifest across admissions, and gives what it has past its deadline", async () => {
+  const S = join(mkdtempSync(join(tmpdir(), "libhint-big-")), "run");
+  for (const d of ["inputs/set", "tools"]) mkdirSync(join(S, d), { recursive: true });
+  // A large inputs manifest; the file bytes need not exist for the hint to enumerate its paths.
+  const files = Array.from({ length: 5000 }, (_, i) => ({ path: `inputs/set/f${i}.db`, bytes: 10, sha256: "0".repeat(64) }));
+  writeFileSync(join(S, "inputs.json"), JSON.stringify({ files }));
+  tool(S, "sqlite_reader", { description: "d", use: { extensions: [".db"] } });
+  const { forgetInputsPaths } = await import("../scripts/library-hint.ts");
+  forgetInputsPaths();
+  const objects = [{ ref: "input:set/", path: "inputs/set", area: "inputs" as const, shape: "dir" as const }];
+  const first = await libraryHint(S, objects);
+  assert.ok(first && first.tools[0].tool === "sqlite_reader");
+  assert.ok(first.examined <= 256, `the number of files examined is bounded: ${first.examined}`);
+  assert.equal(first.of, 5000, "the total is still reported");
+  // A second admission parses no manifest again (the cache is keyed by size and mtime): it is fast.
+  const t0 = Date.now();
+  for (let i = 0; i < 20; i += 1) await libraryHint(S, objects);
+  assert.ok(Date.now() - t0 < 2000, `repeated admissions reuse the cache: ${Date.now() - t0}ms for 20`);
+  // A deadline of zero gives what it has (here, nothing matched yet), never hangs.
+  const past = await libraryHint(S, objects, { deadlineMs: 0 });
+  assert.ok(past === null || past.tools.length === 0);
+});
