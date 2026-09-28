@@ -186,6 +186,21 @@ the planned routes nobody examined are listed as not examined.
 A lead closed negative after one job over one object within two minutes: a
 cue for review, not a refusal.
 
+**Similar job**:
+Another seat's job, under way or committed, running the same tool or the
+same leading command over at least one of the same objects by digest: named
+when a job is accepted, never merged with it.
+
+**Reproduction**:
+A job run with `independent: true`: another seat's work run again on
+purpose, as a check. Counted apart from duplicates.
+
+**Reversal**:
+A standing result that changed (an answer's `result`, or a negative lead
+reopened): after new evidence, or discoverable in the evidence the run
+always had. _Avoid_: correction (a correction that keeps the result is not a
+reversal).
+
 ### Questions
 
 **Question**:

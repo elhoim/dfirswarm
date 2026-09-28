@@ -2469,11 +2469,14 @@ export default function (pi: ExtensionAPI) {
       if (st?.ok) last = st;
     }
     const leadNote = underLead ? { lead: underLead, lead_note: `run under ${underLead}: record what its output shows with interprets: ["${id}"] before the run can end` } : {};
+    // Other seats' jobs over the same objects doing the same (docs/adr/0017), as the hub named them at acceptance.
+    const accepted = sub as Record<string, unknown>;
+    const reuse = Object.fromEntries(["similar", "similar_more", "similar_note"].filter((k) => accepted[k] !== undefined).map((k) => [k, accepted[k]]));
     if (jobDone(last.job?.state)) {
       const job = (last.job ?? {}) as Record<string, unknown>;
-      return { ok: job.state === "committed" && (job.status === undefined || job.status === "ok"), job: id, result: { ...job, ...(last.stdout ? stdoutWithNote(id, last.stdout) : {}), ...leadNote } };
+      return { ok: job.state === "committed" && (job.status === undefined || job.status === "ok"), job: id, result: { ...job, ...(last.stdout ? stdoutWithNote(id, last.stdout) : {}), ...leadNote, ...reuse } };
     }
-    return { ok: true, job: id, result: { job: id, state: last.job?.state, note: `still ${last.job?.state === "accepted" ? "queued" : "running"}; a post tagged result will say when it is done (your wait wakes on it)`, ...leadNote } };
+    return { ok: true, job: id, result: { job: id, state: last.job?.state, note: `still ${last.job?.state === "accepted" ? "queued" : "running"}; a post tagged result will say when it is done (your wait wakes on it)`, ...leadNote, ...reuse } };
   }
   pi.registerTool({
     name: "job_run",
@@ -2486,7 +2489,8 @@ export default function (pi: ExtensionAPI) {
       "Give command (bash, run from the run's directory; $OUT is also the OUT environment variable, for a script in another language or a quoted heredoc) or tool with args (a pack or forged tool; write {OUT}/<name> where it takes an output path), or import: a file or directory you made under work/ or tool-output/, sealed as it is now (the hub copies it at the job's start and hashes it; cite it as job:<id>/<name>). A whole output the harness kept under tool-output/ needs no import: cite it in a record as tool:<you>/<file>, and the record is sealed against the trace. " +
       "A short job answers here; a longer one returns its id, and a post tagged result wakes your wait when it is done: do not poll job_status. A failed or timed-out job keeps what it wrote. " +
       "Give a job that needs two minutes or less (a quick look with an image's programs) timeout_seconds of 120 or less: from three workers one is kept for such jobs, so it does not wait behind long parses (it is stopped at that limit; leave a long parse at the default). " +
-      "stdout comes back a page at a time; all of it is store/jobs/<id>/stdout.log.",
+      "stdout comes back a page at a time; all of it is store/jobs/<id>/stdout.log. " +
+      "When another seat's job, under way or done, runs the same tool or command over some of the same objects (declared in inputs, by digest), the answer names it in similar (its lead, state and outputs): read its outputs before relying on a second run; say independent: true when a second run is the point. A finished job's same_as names its files that are byte for byte an earlier job's output.",
     parameters: Type.Object({
       command: Type.Optional(Type.String({ description: "Bash, run from the run's directory; $OUT is the job's own directory" })),
       tool: Type.Optional(Type.String({ description: "A pack or forged tool's name, instead of a command" })),
@@ -2499,6 +2503,7 @@ export default function (pi: ExtensionAPI) {
       wait_seconds: Type.Optional(Type.Integer({ description: "How long to wait here for it (default 12, at most 100)" })),
       lead: Type.Optional(Type.String({ description: "The lead (L-<n>, one you hold) this job is run under; left out, the one active lead you hold, if you hold exactly one. A lead's jobs wait for an interpretation (record with interprets) before the run may end." })),
       net_grants: Type.Optional(Type.Array(Type.String(), { description: "Network grants (N-<k>) you asked for a job (net_request for: \"job\"): bound to this job, which makes each one's exact request with python3 /job/net_fetch.py N-<k> --out \"$OUT/<name>\"; its worker reaches the fetch service on the host and nothing else of it" })),
+      independent: Type.Optional(Type.Boolean({ description: "true: an intended reproduction of work another seat did (a second check), recorded as such; similar jobs are still named" })),
     }),
     async execute(_id, params, signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
@@ -2517,6 +2522,7 @@ export default function (pi: ExtensionAPI) {
         ...(params.profile ? { profile: params.profile } : {}),
         ...(params.lead ? { lead: params.lead } : {}),
         ...(params.net_grants?.length ? { net_grants: params.net_grants } : {}),
+        ...(params.independent === true ? { independent: true } : {}),
       };
       const wait = Math.min(Math.max(params.wait_seconds ?? 12, 0), 100);
       const res = await submitAndWait(toolCtx.cwd, spec, wait, signal as AbortSignal | undefined);
@@ -2526,7 +2532,7 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text" as const, text: refused.reason }], details: refused, isError: true };
       }
       const result = { ok: true, ...res.result };
-      await logEvent(toolCtx.cwd, agentId, "job_run", params, { ok: true, job: res.job, state: res.result.state, status: res.result.status, ...(res.result.lead ? { lead: res.result.lead } : {}) }, Date.now() - started);
+      await logEvent(toolCtx.cwd, agentId, "job_run", params, { ok: true, job: res.job, state: res.result.state, status: res.result.status, ...(res.result.lead ? { lead: res.result.lead } : {}), ...(Array.isArray(res.result.similar) ? { similar: (res.result.similar as Array<{ job?: unknown }>).map((x) => x.job) } : {}) }, Date.now() - started);
       return okResult(result);
     },
   });

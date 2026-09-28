@@ -88,6 +88,7 @@ import * as T from "../extensions/toolchain.ts";
 import { claimHolds, messageFor, resolvePeer } from "./nudge-broker.mjs";
 import { GATEWAY_STATE_REL } from "./model-gateway.ts";
 import { JobService, jobView, type JobSpec } from "./job-service.ts";
+import { similarView } from "./job-reuse.ts";
 import { bindJobGrants, checkJobGrants, fetchForSeat, netTick, netViewFor, requestAccess } from "./net-broker.ts";
 import { readCasePolicy } from "./case-policy.ts";
 
@@ -861,6 +862,7 @@ export function boardTable(hub: {
         ...(typeof raw.note === "string" ? { note: raw.note } : {}),
         ...(typeof raw.profile === "string" && raw.profile ? { profile: raw.profile } : {}),
         ...(Array.isArray(raw.net_grants) && raw.net_grants.length ? { net_grants: raw.net_grants.map(String) } : {}),
+        ...(raw.independent === true ? { independent: true } : {}),
       };
       // A job run under a lead: the lead must be the seat's own, checked
       // before the job is accepted, and the job goes on the lead's record.
@@ -876,7 +878,14 @@ export function boardTable(hub: {
       const attached = r.job.requester.agent === who ? await L.attachJob(S, who, r.job.id, raw.lead).catch(() => null) : null;
       // The coverage hint at admission (A1): who else works these questions or these objects now.
       const coverage = r.job.requester.agent === who ? await L.jobAdmissionHint(S, who, attached?.ok ? attached.lead : raw.lead, r.job.spec.inputs ?? []).catch(() => null) : null;
-      return { ok: true, job: await jobView(S, r.job), ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}), ...(coverage ? { coverage: { ...coverage, note: "a hint: another seat works the same questions or objects now; overlap is not identity, so read what they have (leads, list_team) before you duplicate it" } } : {}) };
+      return {
+        ok: true,
+        job: await jobView(S, r.job),
+        ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}),
+        ...(coverage ? { coverage: { ...coverage, note: "a hint: another seat works the same questions or objects now; overlap is not identity, so read what they have (leads, list_team) before you duplicate it" } } : {}),
+        // The reuse hint (ADR 0017): other seats' same operation over the same objects, under way or committed.
+        ...similarView(r.job.id, r.similar ?? [], r.job.spec.independent === true),
+      };
     },
     jobStatus: async (who, a) => {
       const svc = hub.jobs?.();
@@ -1362,6 +1371,11 @@ export class Hub {
       log: (line) => this.log(line),
       // A job's network grants, bound to it when its worker is made (net-broker.ts).
       netAccess: (job) => bindJobGrants(S, this.cfg.dir, job.id, job.requester.agent, job.spec.net_grants ?? []),
+      // The lead each job was run under, for the reuse hints (job-reuse.ts).
+      leadsOf: async (ids) => {
+        const jobLead = L.foldLeads((await L.readLeadEvents(S)).events).jobLead;
+        return new Map(ids.flatMap((id) => (jobLead.has(id) ? [[id, jobLead.get(id)!] as [string, string]] : [])));
+      },
     });
     try {
       await this.jobService.start();

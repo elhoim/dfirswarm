@@ -6,6 +6,36 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: work another seat did is named, and the process is measured from its registers
+
+- **`similar` at `job_run`.** A command or tool job with a declared scope
+  keeps `reuse: {op, objects}` on its `job_accepted` line: its tool or its
+  leading command word, and its objects by sha256 (a directory by its path).
+  Another seat's job under way or committed with the same tool or the same
+  word over at least one of the same objects is named in the answer, with
+  its lead, state, status and outputs, the same command or tool and
+  arguments first; the whole list is a `job_similar` line. The job runs as
+  asked.
+- **`same_as` at commit.** A committed job's non-empty file with an earlier
+  job's output's sha256 names that job and file (`job_same_as`, the job's
+  record and view, its post).
+- **`independent: true`** on `job_run` records an intended reproduction; the
+  similar jobs are still named.
+- **The shadow merge is retired.** The whole-spec key matched none of 393,
+  127 and 190 keyed jobs on the last CTF round; nothing writes
+  `job_would_merge` now, and old lines are ignored. Typed recipes are still
+  merged.
+- **`swarm.sh metrics <run> [--json]`** (`scripts/metrics.ts`): quick and
+  unreviewed negatives, coverage completeness, offers by outcome (wakes from
+  before offers apart), `done` calls and refusals, the tail from readiness,
+  from the first answers and from the final ones, acquisition gaps,
+  interpretations still valid, reversals by new evidence or discoverable,
+  tokens per question apportioned by lead, duplicates and reproductions, and
+  the network's requests, grants and captures; each a count of named
+  records, defined in `docs/usage.md`. `--compare <run-A> <run-B>` sets two
+  runs of one goal side by side and flags a negative the other established
+  and a shared negative on partial coverage. ADR 0017.
+
 ### Added: one seat finishes, work is offered, and a review says how strongly it holds (ADR 0015)
 
 - **One coordinator ends the run.** `leads/finish.jsonl` holds the finish's
